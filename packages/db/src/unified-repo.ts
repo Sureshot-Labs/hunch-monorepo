@@ -708,7 +708,6 @@ export async function upsertUnifiedEvents(
           or metrics_changed
           or metadata_changed
           or provenance_changed
-          or source_timestamp_changed
           as is_changed,
         case
           when inserted then 'inserted'
@@ -761,21 +760,6 @@ export async function upsertUnifiedEvents(
         created_at = excluded.created_at,
         updated_at = excluded.updated_at,
         updated_at_db = now()
-      where
-        (unified_events.title, unified_events.description, unified_events.category,
-         unified_events.status, unified_events.series_key, unified_events.series_title,
-         unified_events.duration_minutes,
-         unified_events.start_date, unified_events.end_date,
-         unified_events.volume_total, unified_events.volume_24h, unified_events.open_interest,
-         unified_events.liquidity, unified_events.metadata, unified_events.slug, unified_events.image, unified_events.icon,
-         unified_events.created_at, unified_events.updated_at)
-        is distinct from
-        (excluded.title, excluded.description, excluded.category,
-         excluded.status, excluded.series_key, excluded.series_title,
-         excluded.duration_minutes, excluded.start_date, excluded.end_date,
-         excluded.volume_total, excluded.volume_24h, excluded.open_interest,
-         excluded.liquidity, excluded.metadata, excluded.slug, excluded.image, excluded.icon,
-         excluded.created_at, excluded.updated_at)
       returning 1
     )
     select
@@ -1264,74 +1248,6 @@ export async function upsertUnifiedMarkets(
     from input
     where unified_markets.venue = input.venue
       and unified_markets.venue_market_id = input.venue_market_id
-      and (
-        unified_markets.event_id, unified_markets.title, unified_markets.description,
-        unified_markets.category, unified_markets.status, unified_markets.market_type,
-        unified_markets.duration_minutes,
-        unified_markets.open_time, unified_markets.close_time, unified_markets.expiration_time,
-        unified_markets.best_bid, unified_markets.best_ask, unified_markets.last_price,
-        unified_markets.volume_total, unified_markets.volume_24h, unified_markets.open_interest,
-        unified_markets.liquidity, unified_markets.metadata, unified_markets.outcomes, unified_markets.token_yes,
-        unified_markets.token_no, unified_markets.clob_token_ids, unified_markets.condition_id,
-        unified_markets.market_ledger, unified_markets.settlement_mint,
-        unified_markets.is_initialized, unified_markets.redemption_status,
-        unified_markets.resolved_outcome, unified_markets.resolved_outcome_pct,
-        unified_markets.slug, unified_markets.image, unified_markets.icon,
-        unified_markets.created_at, unified_markets.updated_at
-      ) is distinct from (
-        input.event_id, input.title, input.description,
-        input.category,
-        ${mergedMarketStatusSql("input")},
-        input.market_type,
-        input.duration_minutes,
-        input.open_time, input.close_time, input.expiration_time,
-        CASE
-          WHEN unified_markets.venue = 'limitless'
-            AND coalesce(input.metadata->>'tradeType', '') = 'amm'
-            AND input.best_bid IS NULL
-          THEN unified_markets.best_bid
-          ELSE input.best_bid
-        END,
-        CASE
-          WHEN unified_markets.venue = 'limitless'
-            AND coalesce(input.metadata->>'tradeType', '') = 'amm'
-            AND input.best_ask IS NULL
-          THEN unified_markets.best_ask
-          ELSE input.best_ask
-        END,
-        CASE
-          WHEN unified_markets.venue = 'limitless'
-            AND coalesce(input.metadata->>'tradeType', '') = 'amm'
-            AND input.last_price IS NULL
-          THEN unified_markets.last_price
-          ELSE input.last_price
-        END,
-        input.volume_total, input.volume_24h, input.open_interest,
-        input.liquidity, ${mergedMarketMetadataSql("input")}, input.outcomes,
-        CASE
-          WHEN unified_markets.venue = 'kalshi'
-            AND unified_markets.token_yes like 'sol:%'
-            AND input.token_yes like 'kalshi:%'
-          THEN unified_markets.token_yes
-          ELSE input.token_yes
-        END,
-        CASE
-          WHEN unified_markets.venue = 'kalshi'
-            AND unified_markets.token_no like 'sol:%'
-            AND input.token_no like 'kalshi:%'
-          THEN unified_markets.token_no
-          ELSE input.token_no
-        END,
-        input.clob_token_ids, input.condition_id,
-        COALESCE(input.market_ledger, unified_markets.market_ledger),
-        COALESCE(input.settlement_mint, unified_markets.settlement_mint),
-        COALESCE(input.is_initialized, unified_markets.is_initialized),
-        COALESCE(input.redemption_status, unified_markets.redemption_status),
-        COALESCE(input.resolved_outcome, unified_markets.resolved_outcome),
-        COALESCE(input.resolved_outcome_pct, unified_markets.resolved_outcome_pct),
-        input.slug, input.image, input.icon,
-        input.created_at, input.updated_at
-      )
   `;
 
   const batchSize = Math.max(1, Math.trunc(options.batchSize ?? 500));
@@ -1450,11 +1366,12 @@ async function filterChangedUnifiedMarketRows(
   }
 
   // Keep these reason partitions exhaustive and aligned with updateQuery's
-  // effective target values; the final UPDATE predicate still rechecks every
-  // candidate before writing.
-  const { rows: changedRows } = await pool.query<{
+  // effective target values. This is the single wide comparison pass; the
+  // subsequent UPDATE only joins the already-classified changed rows.
+  const { rows: evaluatedRows } = await pool.query<{
     id: string;
     exists_in_db: boolean;
+    is_changed: boolean;
     primary_reason: string;
   }>(
     `
@@ -1608,7 +1525,6 @@ async function filterChangedUnifiedMarketRows(
             or metadata_changed
             or tokens_changed
             or operational_changed
-            or source_timestamp_changed
             as is_changed,
           case
             when existing_id is null then 'inserted'
@@ -1627,14 +1543,15 @@ async function filterChangedUnifiedMarketRows(
       select
         id,
         existing_id is not null as exists_in_db,
+        is_changed,
         primary_reason
       from reasoned
-      where is_changed
       order by venue, venue_market_id, id
     `,
     [JSON.stringify(rows)],
   );
 
+  const changedRows = evaluatedRows.filter((row) => row.is_changed);
   const changedIds = new Set(changedRows.map((row) => row.id));
   const existingChangedIds = new Set(
     changedRows.filter((row) => row.exists_in_db).map((row) => row.id),
@@ -1643,12 +1560,7 @@ async function filterChangedUnifiedMarketRows(
     changedRows.filter((row) => !row.exists_in_db).map((row) => row.id),
   );
   const changeReasons = emptyChangeReasonTelemetry();
-  incrementChangeReason(
-    changeReasons.primary,
-    "unchanged",
-    rows.length - changedRows.length,
-  );
-  for (const row of changedRows) {
+  for (const row of evaluatedRows) {
     incrementChangeReason(changeReasons.primary, row.primary_reason);
   }
 

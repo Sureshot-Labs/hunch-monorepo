@@ -30,11 +30,16 @@ type UpsertStats = Pick<
   "changedRows" | "skippedRows" | "upsertedRows" | "changeReasons"
 >;
 
-function assertPrimaryReason(result: UpsertStats, reason: string): void {
-  const changed = reason === "unchanged" ? 0 : 1;
-  assert.equal(result.changedRows, changed);
-  assert.equal(result.skippedRows, 1 - changed);
-  assert.equal(result.upsertedRows, changed);
+function assertPrimaryReason(
+  result: UpsertStats,
+  reason: string,
+  expectedChanged = true,
+): void {
+  const changed = expectedChanged ? 1 : 0;
+  const details = JSON.stringify(result);
+  assert.equal(result.changedRows, changed, details);
+  assert.equal(result.skippedRows, 1 - changed, details);
+  assert.equal(result.upsertedRows, changed, details);
   assert.deepEqual(result.changeReasons.primary, { [reason]: 1 });
 }
 
@@ -80,6 +85,18 @@ async function main(): Promise<void> {
     updatedAt: initialTimestamp,
     sponsorName: "Initial sponsor",
     observationNoise: "stable",
+    series: [
+      {
+        slug: `telemetry-series-${suffix}`,
+        ticker: `telemetry-series-${suffix}`,
+        title: "Telemetry series",
+        updatedAt: initialTimestamp,
+        volume: 100,
+        volume24hr: 10,
+        liquidity: 50,
+        commentCount: 1,
+      },
+    ],
     markets: [],
   });
   let market = PolymarketMarket.parse({
@@ -115,6 +132,34 @@ async function main(): Promise<void> {
       [mapToUnifiedMarket(value, sourceEventId, event)],
       { filterUnchanged: true },
     );
+  const loadStoredState = async () => {
+    const { rows } = await pool.query<{
+      source_event_raw_hash: string;
+      source_event_updated_at: string | null;
+      source_event_updated_at_db: string;
+      source_market_raw_hash: string;
+      source_market_updated_at: string | null;
+      source_market_updated_at_db: string;
+      unified_event_updated_at: string | null;
+      unified_event_updated_at_db: string;
+      unified_market_updated_at: string | null;
+      unified_market_updated_at_db: string;
+    }>(
+      `select
+        (select md5(raw::text) from polymarket_events where id = $1) as source_event_raw_hash,
+        (select updated_at::text from polymarket_events where id = $1) as source_event_updated_at,
+        (select updated_at_db::text from polymarket_events where id = $1) as source_event_updated_at_db,
+        (select md5(raw::text) from polymarket_markets where id = $2) as source_market_raw_hash,
+        (select updated_at::text from polymarket_markets where id = $2) as source_market_updated_at,
+        (select updated_at_db::text from polymarket_markets where id = $2) as source_market_updated_at_db,
+        (select updated_at::text from unified_events where id = $3) as unified_event_updated_at,
+        (select updated_at_db::text from unified_events where id = $3) as unified_event_updated_at_db,
+        (select updated_at::text from unified_markets where id = $4) as unified_market_updated_at,
+        (select updated_at_db::text from unified_markets where id = $4) as unified_market_updated_at_db`,
+      [sourceEventId, sourceMarketId, unifiedEventId, unifiedMarketId],
+    );
+    return rows[0];
+  };
 
   try {
     assertPrimaryReason(await upsertSourceEvent(event), "inserted");
@@ -129,9 +174,11 @@ async function main(): Promise<void> {
       "inserted",
     );
 
-    assertPrimaryReason(await upsertSourceEvent(event), "unchanged");
-    assertPrimaryReason(await upsertUnifiedEvent(event), "unchanged");
-    assertPrimaryReason(await upsertSourceMarket(market), "unchanged");
+    const initialStoredState = await loadStoredState();
+
+    assertPrimaryReason(await upsertSourceEvent(event), "unchanged", false);
+    assertPrimaryReason(await upsertUnifiedEvent(event), "unchanged", false);
+    assertPrimaryReason(await upsertSourceMarket(market), "unchanged", false);
     const unchangedUnifiedMarket = await upsertUnifiedMarket(market);
     assertPrimaryReason(
       {
@@ -139,6 +186,7 @@ async function main(): Promise<void> {
         changeReasons: requireTelemetry(unchangedUnifiedMarket.changeReasons),
       },
       "unchanged",
+      false,
     );
 
     event = PolymarketEvent.parse({ ...event, updatedAt: laterTimestamp });
@@ -146,14 +194,17 @@ async function main(): Promise<void> {
     assertPrimaryReason(
       await upsertSourceEvent(event),
       "source_timestamp_only",
+      false,
     );
     assertPrimaryReason(
       await upsertUnifiedEvent(event),
       "source_timestamp_only",
+      false,
     );
     assertPrimaryReason(
       await upsertSourceMarket(market),
       "source_timestamp_only",
+      false,
     );
     const timestampUnifiedMarket = await upsertUnifiedMarket(market);
     assertPrimaryReason(
@@ -162,7 +213,46 @@ async function main(): Promise<void> {
         changeReasons: requireTelemetry(timestampUnifiedMarket.changeReasons),
       },
       "source_timestamp_only",
+      false,
     );
+    assert.deepEqual(await loadStoredState(), initialStoredState);
+
+    event = PolymarketEvent.parse({
+      ...event,
+      series: [
+        {
+          slug: `telemetry-series-${suffix}`,
+          ticker: `telemetry-series-${suffix}`,
+          title: "Telemetry series",
+          updatedAt: laterTimestamp,
+          volume: 200,
+          volume24hr: 20,
+          liquidity: 75,
+          commentCount: 2,
+        },
+      ],
+    });
+    market = PolymarketMarket.parse({
+      ...market,
+      observationNoise: "market-noise-before-metrics",
+    });
+    assertPrimaryReason(await upsertSourceEvent(event), "raw_only", false);
+    assertPrimaryReason(
+      await upsertUnifiedEvent(event),
+      "source_timestamp_only",
+      false,
+    );
+    assertPrimaryReason(await upsertSourceMarket(market), "raw_only", false);
+    const noiseUnifiedMarket = await upsertUnifiedMarket(market);
+    assertPrimaryReason(
+      {
+        ...noiseUnifiedMarket,
+        changeReasons: requireTelemetry(noiseUnifiedMarket.changeReasons),
+      },
+      "source_timestamp_only",
+      false,
+    );
+    assert.deepEqual(await loadStoredState(), initialStoredState);
 
     event = PolymarketEvent.parse({ ...event, volume: 101 });
     market = PolymarketMarket.parse({ ...market, bestBid: 0.38 });
@@ -177,6 +267,23 @@ async function main(): Promise<void> {
       },
       "metrics",
     );
+    const metricsStoredState = await loadStoredState();
+    assert.equal(
+      metricsStoredState?.source_event_raw_hash,
+      initialStoredState?.source_event_raw_hash,
+    );
+    assert.equal(
+      metricsStoredState?.source_market_raw_hash,
+      initialStoredState?.source_market_raw_hash,
+    );
+    assert.notEqual(
+      metricsStoredState?.source_event_updated_at_db,
+      initialStoredState?.source_event_updated_at_db,
+    );
+    assert.notEqual(
+      metricsStoredState?.source_market_updated_at_db,
+      initialStoredState?.source_market_updated_at_db,
+    );
 
     event = PolymarketEvent.parse({
       ...event,
@@ -185,6 +292,15 @@ async function main(): Promise<void> {
     market = PolymarketMarket.parse({ ...market, makerBaseFee: 1 });
     assertPrimaryReason(await upsertSourceEvent(event), "relevant_raw");
     assertPrimaryReason(await upsertSourceMarket(market), "relevant_raw");
+    const relevantRawStoredState = await loadStoredState();
+    assert.notEqual(
+      relevantRawStoredState?.source_event_raw_hash,
+      metricsStoredState?.source_event_raw_hash,
+    );
+    assert.notEqual(
+      relevantRawStoredState?.source_market_raw_hash,
+      metricsStoredState?.source_market_raw_hash,
+    );
 
     event = PolymarketEvent.parse({
       ...event,
@@ -194,8 +310,9 @@ async function main(): Promise<void> {
       ...market,
       observationNoise: "market-noise-changed",
     });
-    assertPrimaryReason(await upsertSourceEvent(event), "raw_only");
-    assertPrimaryReason(await upsertSourceMarket(market), "raw_only");
+    assertPrimaryReason(await upsertSourceEvent(event), "raw_only", false);
+    assertPrimaryReason(await upsertSourceMarket(market), "raw_only", false);
+    assert.deepEqual(await loadStoredState(), relevantRawStoredState);
 
     event = PolymarketEvent.parse({ ...event, title: "Updated event title" });
     market = PolymarketMarket.parse({
@@ -234,7 +351,7 @@ async function main(): Promise<void> {
       unified_market_count: 1,
     });
     console.log(
-      "ok - polymarket upsert telemetry preserves writes and classifies reasons",
+      "ok - polymarket upserts skip timestamp/raw noise and preserve raw on metrics",
     );
   } finally {
     await pool.query("delete from unified_markets where id = $1", [
