@@ -164,8 +164,10 @@ import {
   type PolymarketNoFillTerminalStatus,
   type PolymarketTerminalReconcileStatus,
   POLYMARKET_UNCONFIRMED_STATUS,
+  POLYMARKET_TRADING_PAUSED_CODE,
   canApplyPolymarketNoFillTerminalStatus,
   extractPolymarketImmediateFill,
+  isPolymarketTradingPausedResponse,
   isPolymarketUnconfirmedStatus,
   resolvePolymarketTerminalReconcileStatus,
   resolvePolymarketUnconfirmedReconcileDecision,
@@ -218,6 +220,8 @@ import type {
 
 const POLY_DECIMALS = 6;
 const POLYMARKET_CREDENTIALS_INVALID_CODE = "polymarket_credentials_invalid";
+const POLYMARKET_TRADING_PAUSED_MESSAGE =
+  "Polymarket trading is temporarily paused. No order was accepted. Try again later.";
 const POLYMARKET_UNCONFIRMED_LIMIT = 25;
 const POLYMARKET_CLOB_NOT_FOUND_NO_FILL_GRACE_MS = 10_000;
 const POLYMARKET_UNCONFIRMED_TRADE_SYNC_LOOKBACK_MS = 30_000;
@@ -7418,6 +7422,10 @@ export async function submitPolymarketClientSignedOrder(input: {
     }
 
     const upstreamMessage = extractPolymarketUpstreamMessage(upstream.payload);
+    const tradingPaused = isPolymarketTradingPausedResponse({
+      message: upstreamMessage,
+      status: upstream.status,
+    });
     input.log?.warn?.(
       {
         upstreamStatus: upstream.status,
@@ -7430,14 +7438,16 @@ export async function submitPolymarketClientSignedOrder(input: {
       },
       "Polymarket order placement upstream failed",
     );
-    const responseStatus =
-      upstream.status >= 500
+    const responseStatus = tradingPaused
+      ? 503
+      : upstream.status >= 500
         ? 502
         : upstream.status >= 400
           ? upstream.status
           : 400;
+    const definitiveRejection = tradingPaused || upstream.status < 500;
     if (fundingReservation && fundingTradeAttemptId) {
-      if (upstream.status >= 500) {
+      if (!definitiveRejection) {
         await recordFundingTradeAttemptOutcome(input.pool, {
           userId: input.userId,
           attemptId: fundingTradeAttemptId,
@@ -7452,9 +7462,19 @@ export async function submitPolymarketClientSignedOrder(input: {
           link: fundingReservation,
           tradeAttemptId: fundingTradeAttemptId,
           outcomeReason: "trade_rejected",
-          errorCode: "polymarket_trade_rejected",
+          errorCode: tradingPaused
+            ? POLYMARKET_TRADING_PAUSED_CODE
+            : "polymarket_trade_rejected",
           externalReference: orderHash,
-          broadcastMayHaveOccurred: true,
+          broadcastMayHaveOccurred: !tradingPaused,
+          ...(tradingPaused
+            ? {
+                handoffFailure: {
+                  code: POLYMARKET_TRADING_PAUSED_CODE,
+                  message: POLYMARKET_TRADING_PAUSED_MESSAGE,
+                },
+              }
+            : {}),
         });
       }
     }
@@ -7462,13 +7482,17 @@ export async function submitPolymarketClientSignedOrder(input: {
       directHandoffBinding &&
       directHandoffSubmission &&
       !fundingReservation &&
-      upstream.status < 500
+      definitiveRejection
     ) {
       await failTelegramAppHandoffV2DirectTradeSubmission(input.pool, {
         binding: directHandoffBinding,
         reason: {
-          code: "polymarket_trade_rejected",
-          message: `Polymarket rejected the sealed ${side === "SELL" ? "Sell" : "Buy"} before accepting it.`,
+          code: tradingPaused
+            ? POLYMARKET_TRADING_PAUSED_CODE
+            : "polymarket_trade_rejected",
+          message: tradingPaused
+            ? POLYMARKET_TRADING_PAUSED_MESSAGE
+            : `Polymarket rejected the sealed ${side === "SELL" ? "Sell" : "Buy"} before accepting it.`,
         },
         submission: directHandoffSubmission,
         userId: input.userId,
@@ -7478,14 +7502,22 @@ export async function submitPolymarketClientSignedOrder(input: {
       ok: false,
       statusCode: responseStatus,
       payload: {
-        error: "Polymarket order placement failed",
-        ...(isPolymarketDepositWalletRequiredMessage(upstreamMessage)
+        error: tradingPaused
+          ? POLYMARKET_TRADING_PAUSED_MESSAGE
+          : "Polymarket order placement failed",
+        ...(tradingPaused
           ? {
-              code: "polymarket_deposit_wallet_required",
-              message:
-                "This Polymarket wallet must trade through its deposit wallet. Configure the deposit wallet funder and retry.",
+              code: POLYMARKET_TRADING_PAUSED_CODE,
+              message: POLYMARKET_TRADING_PAUSED_MESSAGE,
+              retryable: true,
             }
-          : {}),
+          : isPolymarketDepositWalletRequiredMessage(upstreamMessage)
+            ? {
+                code: "polymarket_deposit_wallet_required",
+                message:
+                  "This Polymarket wallet must trade through its deposit wallet. Configure the deposit wallet funder and retry.",
+              }
+            : {}),
         status: upstream.status,
         payload: upstream.payload,
       },
