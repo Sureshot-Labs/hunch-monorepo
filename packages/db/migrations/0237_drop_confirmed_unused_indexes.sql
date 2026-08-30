@@ -58,7 +58,7 @@ DROP INDEX CONCURRENTLY IF EXISTS public.idx_unified_events_venue;
 -- indexes are deliberately retained.
 DROP INDEX CONCURRENTLY IF EXISTS public.idx_unified_markets_lower_venue_status_exp_close;
 
--- Token lookups are market/token scoped; venue-only and side-only scans were
+-- Token lookups are market/token scoped. Venue-only and side-only scans were
 -- absent from production statistics.
 DROP INDEX CONCURRENTLY IF EXISTS public.idx_unified_tokens_side;
 DROP INDEX CONCURRENTLY IF EXISTS public.idx_unified_tokens_venue;
