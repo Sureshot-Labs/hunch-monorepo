@@ -552,6 +552,17 @@ export interface UnifiedMarketRow {
   updated_at?: Date;
 }
 
+function shouldPreserveLimitlessAmmPrices(row: UnifiedMarketRow): boolean {
+  if (row.venue !== "limitless") return false;
+  const metadata = row.metadata;
+  return (
+    metadata !== null &&
+    typeof metadata === "object" &&
+    !Array.isArray(metadata) &&
+    (metadata as { tradeType?: unknown }).tradeType === "amm"
+  );
+}
+
 // Repository functions for unified tables
 export async function upsertUnifiedEvent(
   pool: Pool,
@@ -1250,6 +1261,51 @@ export async function upsertUnifiedMarkets(
       and unified_markets.venue_market_id = input.venue_market_id
   `;
 
+  const metricsUpdateQuery = `
+    with input as (
+      select *
+      from jsonb_to_recordset($1::jsonb) as x(
+        venue text,
+        venue_market_id text,
+        best_bid numeric,
+        best_ask numeric,
+        last_price numeric,
+        volume_total numeric,
+        volume_24h numeric,
+        open_interest numeric,
+        liquidity numeric,
+        updated_at timestamptz,
+        preserve_null_amm_prices boolean
+      )
+    )
+    update unified_markets
+    set
+      best_bid = case
+        when input.preserve_null_amm_prices and input.best_bid is null
+        then unified_markets.best_bid
+        else input.best_bid
+      end,
+      best_ask = case
+        when input.preserve_null_amm_prices and input.best_ask is null
+        then unified_markets.best_ask
+        else input.best_ask
+      end,
+      last_price = case
+        when input.preserve_null_amm_prices and input.last_price is null
+        then unified_markets.last_price
+        else input.last_price
+      end,
+      volume_total = input.volume_total,
+      volume_24h = input.volume_24h,
+      open_interest = input.open_interest,
+      liquidity = input.liquidity,
+      updated_at = input.updated_at,
+      updated_at_db = now()
+    from input
+    where unified_markets.venue = input.venue
+      and unified_markets.venue_market_id = input.venue_market_id
+  `;
+
   const batchSize = Math.max(1, Math.trunc(options.batchSize ?? 500));
   const batches = chunkArray(rows, batchSize);
   let changedRows = 0;
@@ -1266,7 +1322,8 @@ export async function upsertUnifiedMarkets(
       ? await filterChangedUnifiedMarketRows(pool, batch)
       : {
           changedRows: batch,
-          existingChangedRows: [],
+          existingMetricsOnlyRows: [],
+          existingWideRows: [],
           newRows: batch,
           changeReasons: undefined,
         };
@@ -1289,14 +1346,43 @@ export async function upsertUnifiedMarkets(
     );
     timings.loadTokenSourcesMs += Date.now() - loadTokenSourcesStartedAt;
     const upsertStartedAt = Date.now();
-    if (changedBatchResult.existingChangedRows.length > 0) {
+    if (changedBatchResult.existingMetricsOnlyRows.length > 0) {
+      const updateStartedAt = Date.now();
+      const metricsRows = changedBatchResult.existingMetricsOnlyRows.map(
+        (row) => ({
+          venue: row.venue,
+          venue_market_id: row.venue_market_id,
+          best_bid: row.best_bid,
+          best_ask: row.best_ask,
+          last_price: row.last_price,
+          volume_total: row.volume_total,
+          volume_24h: row.volume_24h,
+          open_interest: row.open_interest,
+          liquidity: row.liquidity,
+          updated_at: row.updated_at,
+          preserve_null_amm_prices: shouldPreserveLimitlessAmmPrices(row),
+        }),
+      );
+      await runWithPgWriteConflictRetry(
+        "updateUnifiedMarketMetrics",
+        metricsRows.length,
+        async () => {
+          const result = await pool.query(metricsUpdateQuery, [
+            JSON.stringify(metricsRows),
+          ]);
+          upsertedRows += result.rowCount ?? 0;
+        },
+      );
+      timings.updateMs += Date.now() - updateStartedAt;
+    }
+    if (changedBatchResult.existingWideRows.length > 0) {
       const updateStartedAt = Date.now();
       await runWithPgWriteConflictRetry(
         "updateUnifiedMarkets",
-        changedBatchResult.existingChangedRows.length,
+        changedBatchResult.existingWideRows.length,
         async () => {
           const result = await pool.query(updateQuery, [
-            JSON.stringify(changedBatchResult.existingChangedRows),
+            JSON.stringify(changedBatchResult.existingWideRows),
           ]);
           upsertedRows += result.rowCount ?? 0;
         },
@@ -1347,7 +1433,8 @@ export async function upsertUnifiedMarkets(
 
 type ChangedUnifiedMarketRows = {
   changedRows: UnifiedMarketRow[];
-  existingChangedRows: UnifiedMarketRow[];
+  existingMetricsOnlyRows: UnifiedMarketRow[];
+  existingWideRows: UnifiedMarketRow[];
   newRows: UnifiedMarketRow[];
   changeReasons?: ChangeReasonTelemetry;
 };
@@ -1359,7 +1446,8 @@ async function filterChangedUnifiedMarketRows(
   if (rows.length === 0) {
     return {
       changedRows: [],
-      existingChangedRows: [],
+      existingMetricsOnlyRows: [],
+      existingWideRows: [],
       newRows: [],
       changeReasons: emptyChangeReasonTelemetry(),
     };
@@ -1372,6 +1460,7 @@ async function filterChangedUnifiedMarketRows(
     id: string;
     exists_in_db: boolean;
     is_changed: boolean;
+    is_metrics_only: boolean;
     primary_reason: string;
   }>(
     `
@@ -1526,6 +1615,15 @@ async function filterChangedUnifiedMarketRows(
             or tokens_changed
             or operational_changed
             as is_changed,
+          existing_id is not null
+            and metrics_changed
+            and not event_context_changed
+            and not lifecycle_changed
+            and not presentation_changed
+            and not metadata_changed
+            and not tokens_changed
+            and not operational_changed
+            as is_metrics_only,
           case
             when existing_id is null then 'inserted'
             when event_context_changed then 'event_context'
@@ -1544,6 +1642,7 @@ async function filterChangedUnifiedMarketRows(
         id,
         existing_id is not null as exists_in_db,
         is_changed,
+        is_metrics_only,
         primary_reason
       from reasoned
       order by venue, venue_market_id, id
@@ -1553,8 +1652,13 @@ async function filterChangedUnifiedMarketRows(
 
   const changedRows = evaluatedRows.filter((row) => row.is_changed);
   const changedIds = new Set(changedRows.map((row) => row.id));
-  const existingChangedIds = new Set(
-    changedRows.filter((row) => row.exists_in_db).map((row) => row.id),
+  const existingMetricsOnlyIds = new Set(
+    changedRows.filter((row) => row.is_metrics_only).map((row) => row.id),
+  );
+  const existingWideIds = new Set(
+    changedRows
+      .filter((row) => row.exists_in_db && !row.is_metrics_only)
+      .map((row) => row.id),
   );
   const newChangedIds = new Set(
     changedRows.filter((row) => !row.exists_in_db).map((row) => row.id),
@@ -1566,7 +1670,10 @@ async function filterChangedUnifiedMarketRows(
 
   return {
     changedRows: rows.filter((row) => changedIds.has(row.id)),
-    existingChangedRows: rows.filter((row) => existingChangedIds.has(row.id)),
+    existingMetricsOnlyRows: rows.filter((row) =>
+      existingMetricsOnlyIds.has(row.id),
+    ),
+    existingWideRows: rows.filter((row) => existingWideIds.has(row.id)),
     newRows: rows.filter((row) => newChangedIds.has(row.id)),
     changeReasons,
   };

@@ -61,14 +61,39 @@ async function verifyDatabaseTarget(): Promise<void> {
   assert.equal(rows[0]?.current_database, expectedDatabase);
 }
 
+async function waitForBlockedBackend(
+  blockerPid: number,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const { rows } = await pool.query<{ blocked: boolean }>(
+      `select exists (
+        select 1
+        from pg_stat_activity waiting_backend
+        where waiting_backend.datname = current_database()
+          and waiting_backend.wait_event_type = 'Lock'
+          and $1 = any(pg_blocking_pids(waiting_backend.pid))
+      ) as blocked`,
+      [blockerPid],
+    );
+    if (rows[0]?.blocked) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("timed out waiting for the market upsert lock race");
+}
+
 async function main(): Promise<void> {
   await verifyDatabaseTarget();
 
   const suffix = `${Date.now()}-${process.pid}`;
   const sourceEventId = `telemetry-event-${suffix}`;
   const sourceMarketId = `telemetry-market-${suffix}`;
+  const secondSourceMarketId = `telemetry-market-second-${suffix}`;
+  const raceSourceMarketId = `telemetry-market-race-${suffix}`;
   const unifiedEventId = `polymarket:${sourceEventId}`;
   const unifiedMarketId = `polymarket:${sourceMarketId}`;
+  const limitlessMarketId = `limitless:telemetry-amm-${suffix}`;
   const initialTimestamp = "2026-08-30T00:00:00.000Z";
   const laterTimestamp = "2026-08-30T00:01:00.000Z";
 
@@ -138,24 +163,32 @@ async function main(): Promise<void> {
       source_event_updated_at: string | null;
       source_event_updated_at_db: string;
       source_market_raw_hash: string;
+      source_market_best_bid: string | null;
+      source_market_question: string;
       source_market_updated_at: string | null;
       source_market_updated_at_db: string;
       unified_event_updated_at: string | null;
       unified_event_updated_at_db: string;
       unified_market_updated_at: string | null;
       unified_market_updated_at_db: string;
+      unified_market_best_bid: string | null;
+      unified_market_title: string;
     }>(
       `select
         (select md5(raw::text) from polymarket_events where id = $1) as source_event_raw_hash,
         (select updated_at::text from polymarket_events where id = $1) as source_event_updated_at,
         (select updated_at_db::text from polymarket_events where id = $1) as source_event_updated_at_db,
         (select md5(raw::text) from polymarket_markets where id = $2) as source_market_raw_hash,
+        (select best_bid::text from polymarket_markets where id = $2) as source_market_best_bid,
+        (select question from polymarket_markets where id = $2) as source_market_question,
         (select updated_at::text from polymarket_markets where id = $2) as source_market_updated_at,
         (select updated_at_db::text from polymarket_markets where id = $2) as source_market_updated_at_db,
         (select updated_at::text from unified_events where id = $3) as unified_event_updated_at,
         (select updated_at_db::text from unified_events where id = $3) as unified_event_updated_at_db,
         (select updated_at::text from unified_markets where id = $4) as unified_market_updated_at,
-        (select updated_at_db::text from unified_markets where id = $4) as unified_market_updated_at_db`,
+        (select updated_at_db::text from unified_markets where id = $4) as unified_market_updated_at_db,
+        (select best_bid::text from unified_markets where id = $4) as unified_market_best_bid,
+        (select title from unified_markets where id = $4) as unified_market_title`,
       [sourceEventId, sourceMarketId, unifiedEventId, unifiedMarketId],
     );
     return rows[0];
@@ -268,6 +301,13 @@ async function main(): Promise<void> {
       "metrics",
     );
     const metricsStoredState = await loadStoredState();
+    assert.equal(metricsStoredState?.source_market_best_bid, "0.38");
+    assert.equal(
+      metricsStoredState?.source_market_question,
+      "Telemetry market?",
+    );
+    assert.equal(metricsStoredState?.unified_market_best_bid, "0.38");
+    assert.equal(metricsStoredState?.unified_market_title, "Telemetry market?");
     assert.equal(
       metricsStoredState?.source_event_raw_hash,
       initialStoredState?.source_event_raw_hash,
@@ -284,6 +324,67 @@ async function main(): Promise<void> {
       metricsStoredState?.source_market_updated_at_db,
       initialStoredState?.source_market_updated_at_db,
     );
+
+    const limitlessAmmMarket = {
+      id: limitlessMarketId,
+      venue: "limitless",
+      venue_market_id: `telemetry-amm-${suffix}`,
+      event_id: unifiedEventId,
+      title: "Telemetry AMM market",
+      status: "ACTIVE" as const,
+      market_type: "binary",
+      best_bid: 0.2,
+      best_ask: 0.3,
+      last_price: 0.25,
+      volume_total: 10,
+      metadata: { tradeType: "amm" },
+      updated_at: new Date(initialTimestamp),
+    };
+    await upsertUnifiedMarkets(pool, [limitlessAmmMarket], {
+      filterUnchanged: true,
+    });
+    const limitlessMetricsResult = await upsertUnifiedMarkets(
+      pool,
+      [
+        {
+          ...limitlessAmmMarket,
+          best_bid: undefined,
+          best_ask: undefined,
+          last_price: undefined,
+          volume_total: 11,
+          updated_at: new Date(laterTimestamp),
+        },
+      ],
+      { filterUnchanged: true },
+    );
+    assertPrimaryReason(
+      {
+        ...limitlessMetricsResult,
+        changeReasons: requireTelemetry(limitlessMetricsResult.changeReasons),
+      },
+      "metrics",
+    );
+    const { rows: limitlessRows } = await pool.query<{
+      best_ask: string | null;
+      best_bid: string | null;
+      last_price: string | null;
+      volume_total: string | null;
+    }>(
+      `select
+        best_bid::text as best_bid,
+        best_ask::text as best_ask,
+        last_price::text as last_price,
+        volume_total::text as volume_total
+      from unified_markets
+      where id = $1`,
+      [limitlessMarketId],
+    );
+    assert.deepEqual(limitlessRows[0], {
+      best_bid: "0.2",
+      best_ask: "0.3",
+      last_price: "0.25",
+      volume_total: "11",
+    });
 
     event = PolymarketEvent.parse({
       ...event,
@@ -318,6 +419,7 @@ async function main(): Promise<void> {
     market = PolymarketMarket.parse({
       ...market,
       question: "Updated telemetry market?",
+      bestAsk: 0.42,
     });
     assertPrimaryReason(await upsertSourceEvent(event), "structural");
     assertPrimaryReason(await upsertUnifiedEvent(event), "presentation");
@@ -330,6 +432,178 @@ async function main(): Promise<void> {
       },
       "presentation",
     );
+    const structuralStoredState = await loadStoredState();
+    assert.equal(
+      structuralStoredState?.source_market_question,
+      "Updated telemetry market?",
+    );
+    assert.equal(
+      structuralStoredState?.unified_market_title,
+      "Updated telemetry market?",
+    );
+
+    const mixedUnifiedResult = await upsertUnifiedMarkets(
+      pool,
+      [
+        mapToUnifiedMarket(
+          PolymarketMarket.parse({ ...market, bestBid: 0.37 }),
+          sourceEventId,
+          event,
+        ),
+        {
+          ...limitlessAmmMarket,
+          title: "Updated telemetry AMM market",
+          volume_total: 12,
+          updated_at: new Date(laterTimestamp),
+        },
+      ],
+      { filterUnchanged: true },
+    );
+    assert.equal(mixedUnifiedResult.changedRows, 2);
+    assert.equal(mixedUnifiedResult.upsertedRows, 2);
+    assert.deepEqual(
+      requireTelemetry(mixedUnifiedResult.changeReasons).primary,
+      {
+        metrics: 1,
+        presentation: 1,
+      },
+    );
+    const { rows: mixedUnifiedRows } = await pool.query<{
+      best_bid: string | null;
+      id: string;
+      title: string;
+      volume_total: string | null;
+    }>(
+      `select id, title, best_bid::text as best_bid,
+        volume_total::text as volume_total
+      from unified_markets
+      where id = any($1::text[])
+      order by id`,
+      [[unifiedMarketId, limitlessMarketId]],
+    );
+    assert.deepEqual(mixedUnifiedRows, [
+      {
+        id: limitlessMarketId,
+        title: "Updated telemetry AMM market",
+        best_bid: "0.2",
+        volume_total: "12",
+      },
+      {
+        id: unifiedMarketId,
+        title: "Updated telemetry market?",
+        best_bid: "0.37",
+        volume_total: "100",
+      },
+    ]);
+
+    const secondMarket = PolymarketMarket.parse({
+      ...market,
+      id: secondSourceMarketId,
+      question: "Second telemetry market?",
+      slug: `telemetry-market-second-${suffix}`,
+      clobTokenIds: [`yes-second-${suffix}`, `no-second-${suffix}`],
+    });
+    assertPrimaryReason(await upsertSourceMarket(secondMarket), "inserted");
+    market = PolymarketMarket.parse({ ...market, bestBid: 0.37 });
+    const secondStructuralMarket = PolymarketMarket.parse({
+      ...secondMarket,
+      question: "Updated second telemetry market?",
+    });
+    const mixedSourceResult = await upsertPolymarketMarkets([
+      mapPolymarketMarketRow(sourceEventId, market),
+      mapPolymarketMarketRow(sourceEventId, secondStructuralMarket),
+    ]);
+    assert.equal(mixedSourceResult.changedRows, 2);
+    assert.equal(mixedSourceResult.upsertedRows, 2);
+    assert.deepEqual(mixedSourceResult.changeReasons.primary, {
+      metrics: 1,
+      structural: 1,
+    });
+    const { rows: mixedSourceRows } = await pool.query<{
+      best_bid: string | null;
+      id: string;
+      question: string;
+    }>(
+      `select id, question, best_bid::text as best_bid
+      from polymarket_markets
+      where id = any($1::text[])
+      order by id`,
+      [[sourceMarketId, secondSourceMarketId]],
+    );
+    assert.deepEqual(mixedSourceRows, [
+      {
+        id: sourceMarketId,
+        question: "Updated telemetry market?",
+        best_bid: "0.37",
+      },
+      {
+        id: secondSourceMarketId,
+        question: "Updated second telemetry market?",
+        best_bid: "0.38",
+      },
+    ]);
+
+    const raceMarket = PolymarketMarket.parse({
+      ...market,
+      id: raceSourceMarketId,
+      question: "Retention race telemetry market?",
+      slug: `telemetry-market-race-${suffix}`,
+      clobTokenIds: [`yes-race-${suffix}`, `no-race-${suffix}`],
+    });
+    assertPrimaryReason(await upsertSourceMarket(raceMarket), "inserted");
+    const { rows: raceInitialRows } = await pool.query<{
+      raw_hash: string;
+    }>(
+      "select md5(raw::text) as raw_hash from polymarket_markets where id = $1",
+      [raceSourceMarketId],
+    );
+    const blocker = await pool.connect();
+    let racingUpsert: Promise<PolymarketUpsertStats> | undefined;
+    try {
+      await blocker.query("begin");
+      const { rows: blockerRows } = await blocker.query<{ pid: number }>(
+        "select pg_backend_pid() as pid",
+      );
+      const blockerRow = blockerRows[0];
+      assert.ok(blockerRow, "expected blocker backend pid");
+      await blocker.query(
+        "select id from polymarket_markets where id = $1 for update",
+        [raceSourceMarketId],
+      );
+      racingUpsert = upsertPolymarketMarkets([
+        mapPolymarketMarketRow(
+          sourceEventId,
+          PolymarketMarket.parse({ ...raceMarket, bestBid: 0.36 }),
+        ),
+      ]);
+      await waitForBlockedBackend(blockerRow.pid);
+      await blocker.query("delete from polymarket_markets where id = $1", [
+        raceSourceMarketId,
+      ]);
+      await blocker.query("commit");
+
+      const raceResult = await racingUpsert;
+      assertPrimaryReason(raceResult, "metrics");
+      const { rows: raceStoredRows } = await pool.query<{
+        best_bid: string | null;
+        raw_hash: string;
+      }>(
+        `select best_bid::text as best_bid, md5(raw::text) as raw_hash
+        from polymarket_markets
+        where id = $1`,
+        [raceSourceMarketId],
+      );
+      assert.deepEqual(raceStoredRows[0], {
+        best_bid: "0.36",
+        raw_hash: raceInitialRows[0]?.raw_hash,
+      });
+    } catch (error) {
+      await blocker.query("rollback").catch(() => undefined);
+      await racingUpsert?.catch(() => undefined);
+      throw error;
+    } finally {
+      blocker.release();
+    }
 
     const { rows } = await pool.query<{
       source_event_count: number;
@@ -355,6 +629,9 @@ async function main(): Promise<void> {
     );
   } finally {
     await pool.query("delete from unified_markets where id = $1", [
+      limitlessMarketId,
+    ]);
+    await pool.query("delete from unified_markets where id = $1", [
       unifiedMarketId,
     ]);
     await pool.query("delete from unified_events where id = $1", [
@@ -362,6 +639,12 @@ async function main(): Promise<void> {
     ]);
     await pool.query("delete from polymarket_markets where id = $1", [
       sourceMarketId,
+    ]);
+    await pool.query("delete from polymarket_markets where id = $1", [
+      secondSourceMarketId,
+    ]);
+    await pool.query("delete from polymarket_markets where id = $1", [
+      raceSourceMarketId,
     ]);
     await pool.query("delete from polymarket_events where id = $1", [
       sourceEventId,
