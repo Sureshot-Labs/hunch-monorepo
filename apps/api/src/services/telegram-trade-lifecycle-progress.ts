@@ -47,6 +47,11 @@ const TELEGRAM_TRADE_LIFECYCLE_LEGACY_STALE_SENDING_ERROR =
   "telegram_trade_lifecycle_stale_sending_retry";
 const TELEGRAM_TRADE_LIFECYCLE_HISTORICAL_SENT_RESTORED_ERROR =
   "telegram_trade_lifecycle_historical_sent_restored";
+const TELEGRAM_TRADE_LIFECYCLE_SOURCE_WATERMARK_RESULT_KEY =
+  "shortfallProgressSourceWatermark";
+// Bump with any persisted progress/rendering semantic change. The candidate
+// gate uses this value to reproject otherwise-settled historical cards once.
+const TELEGRAM_TRADE_LIFECYCLE_PROJECTION_VERSION = 6;
 // Preserve Telegram's retry_after. This cap only protects the PostgreSQL int
 // boundary; shortening a valid provider delay would retry inside the 429
 // window and consume the bounded edit attempts without a real delivery try.
@@ -119,10 +124,12 @@ type ProjectionCandidate = Readonly<{
   external_handoff_receipt_reason_code: string | null;
   error_message: string | null;
   funding_operation_id: string | null;
+  funding_source_updated_at_us: string;
   funding_destination_asset_id: string | null;
   funding_destination_decimals: string | null;
   funding_destination_raw: string | null;
   id: string;
+  intent_source_updated_at_us: string;
   market_title: string;
   operation_error_code: string | null;
   operation_status: string | null;
@@ -707,7 +714,7 @@ function directHandoffProgressFor(
     state,
     venueOrderId: candidate.venue_order_id,
     venue: candidate.venue,
-    version: 6,
+    version: TELEGRAM_TRADE_LIFECYCLE_PROJECTION_VERSION,
   };
 }
 
@@ -837,7 +844,7 @@ function liveProgressFor(
     state,
     venueOrderId: candidate.venue_order_id,
     venue: candidate.venue,
-    version: 6,
+    version: TELEGRAM_TRADE_LIFECYCLE_PROJECTION_VERSION,
   };
 }
 
@@ -926,7 +933,7 @@ async function listCandidates(
   limit: number,
 ): Promise<readonly ProjectionCandidate[]> {
   const { rows } = await client.query<ProjectionCandidate>({
-    name: "telegram-trade-lifecycle-candidates-v1",
+    name: "telegram-trade-lifecycle-candidates-v3",
     text: `select intent.id,
             intent.user_id,
             intent.telegram_user_id,
@@ -947,6 +954,15 @@ async function listCandidates(
             intent.error_code,
             intent.error_message,
             intent.result,
+            floor(
+              extract(epoch from intent.updated_at) * 1000000
+            )::bigint::text as intent_source_updated_at_us,
+            coalesce(
+              floor(
+                extract(epoch from funding_source.updated_at) * 1000000
+              )::bigint,
+              0
+            )::text as funding_source_updated_at_us,
             intent.submit_started_at,
             intent.funding_operation_id::text,
             (
@@ -1137,8 +1153,57 @@ async function listCandidates(
                   else continuation.error_code
                 end as error_code
        ) tracked_operation
+       left join lateral (
+         select greatest(
+                  operation.updated_at,
+                  continuation.updated_at,
+                  (
+                    select max(step.updated_at)
+                      from funding_operation_steps step
+                     where step.operation_id = tracked_operation.id
+                  ),
+                  (
+                    select max(attempt.updated_at)
+                      from funding_operation_step_attempts attempt
+                      join funding_operation_steps step
+                        on step.id = attempt.step_id
+                     where step.operation_id = tracked_operation.id
+                  ),
+                  (
+                    select max(receipt.updated_at)
+                      from funding_step_receipt_observations receipt
+                     where receipt.operation_id = tracked_operation.id
+                  )
+                ) as updated_at
+       ) funding_source on operation.id is not null
        left join unified_markets market
          on market.id = intent.market_id
+       cross join lateral (
+         select case
+                  when intent.result -> $4::text ->> 'intentUpdatedAtUs'
+                         ~ '^[0-9]{1,18}$'
+                    then (
+                      intent.result -> $4::text ->> 'intentUpdatedAtUs'
+                    )::bigint
+                  else null
+                end as intent_updated_at_us,
+                case
+                  when intent.result -> $4::text ->> 'fundingUpdatedAtUs'
+                         ~ '^[0-9]{1,18}$'
+                    then (
+                      intent.result -> $4::text ->> 'fundingUpdatedAtUs'
+                    )::bigint
+                  else null
+                end as funding_updated_at_us,
+                case
+                  when intent.result -> $4::text ->> 'projectionVersion'
+                         ~ '^[0-9]{1,9}$'
+                    then (
+                      intent.result -> $4::text ->> 'projectionVersion'
+                    )::integer
+                  else null
+                end as projection_version
+       ) projection_watermark
       where intent.status in (
               'external_handoff', 'funding', 'executing', 'submitted',
               'reconcile_required', 'failed', 'cancelled', 'filled'
@@ -1152,6 +1217,21 @@ async function listCandidates(
           )
         )
         and intent.result ->> $2::text is distinct from $3::text
+        and (
+          intent.result -> 'shortfallProgress' is null
+          or projection_watermark.projection_version is distinct from $5::integer
+          or projection_watermark.intent_updated_at_us is null
+          or projection_watermark.funding_updated_at_us is null
+          or floor(
+               extract(epoch from intent.updated_at) * 1000000
+             )::bigint > projection_watermark.intent_updated_at_us
+          or coalesce(
+               floor(
+                 extract(epoch from funding_source.updated_at) * 1000000
+               )::bigint,
+               0
+             ) > projection_watermark.funding_updated_at_us
+        )
         and not exists (
           select 1
             from telegram_bot_action_outbox active_delivery
@@ -1159,15 +1239,16 @@ async function listCandidates(
              and active_delivery.action = '${TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION}'
              and active_delivery.status = 'sending'
         )
-      -- Never let already-projected historical rows monopolize a bounded
-      -- worker batch. Unprojected cards go first; afterwards the newest intent
-      -- or funding transition wins, regardless of whether execution is server
-      -- or Mini App owned. This preserves one shared lifecycle for Buy/Sell.
+      -- Unprojected cards go first. Among cards whose source watermark changed,
+      -- the newest intent or funding transition wins; settled historical cards
+      -- no longer consume the bounded worker batch.
       order by (intent.result -> 'shortfallProgress' is not null),
                greatest(
                  intent.updated_at,
-                 coalesce(operation.updated_at, '-infinity'::timestamptz),
-                 coalesce(continuation.updated_at, '-infinity'::timestamptz)
+                 coalesce(
+                   funding_source.updated_at,
+                   '-infinity'::timestamptz
+                 )
                ) desc,
                intent.id
       limit $1
@@ -1176,6 +1257,8 @@ async function listCandidates(
       limit,
       TELEGRAM_TRADE_TERMINAL_DELIVERY_OWNER_RESULT_KEY,
       TELEGRAM_TRADE_GENERIC_NOTIFICATION_OWNER,
+      TELEGRAM_TRADE_LIFECYCLE_SOURCE_WATERMARK_RESULT_KEY,
+      TELEGRAM_TRADE_LIFECYCLE_PROJECTION_VERSION,
     ],
   });
   return rows;
@@ -1216,7 +1299,32 @@ export async function runTelegramTradeLifecycleProjectionBatchInTransaction(
     }
     const progress = progressFor(candidate);
     const existing = parseProgress(candidate.result.shortfallProgress);
-    if (sameProgress(existing, progress)) continue;
+    if (sameProgress(existing, progress)) {
+      // A source transition can be lifecycle-neutral (for example, support
+      // metadata or receipt evidence that leaves the rendered state intact).
+      // Advance only the exact source watermark observed by listCandidates;
+      // using wall-clock time here could hide a concurrent source update.
+      await client.query(
+        `update telegram_trade_intents
+            set result = result || jsonb_build_object(
+                  $2::text,
+                  jsonb_build_object(
+                    'intentUpdatedAtUs', $3::bigint,
+                    'fundingUpdatedAtUs', $4::bigint,
+                    'projectionVersion', $5::integer
+                  )
+                )
+          where id = $1::uuid`,
+        [
+          candidate.id,
+          TELEGRAM_TRADE_LIFECYCLE_SOURCE_WATERMARK_RESULT_KEY,
+          candidate.intent_source_updated_at_us,
+          candidate.funding_source_updated_at_us,
+          TELEGRAM_TRADE_LIFECYCLE_PROJECTION_VERSION,
+        ],
+      );
+      continue;
+    }
     const revision =
       typeof candidate.result.shortfallProgressRevision === "number" &&
       Number.isSafeInteger(candidate.result.shortfallProgressRevision)
@@ -1226,15 +1334,28 @@ export async function runTelegramTradeLifecycleProjectionBatchInTransaction(
       `update telegram_trade_intents
             set result = result || jsonb_build_object(
                   'shortfallProgress', $2::jsonb,
-                  'shortfallProgressRevision', $3::int
-                ),
-                updated_at = clock_timestamp()
+                  'shortfallProgressRevision', $3::int,
+                  $4::text,
+                  jsonb_build_object(
+                    'intentUpdatedAtUs', $5::bigint,
+                    'fundingUpdatedAtUs', $6::bigint,
+                    'projectionVersion', $7::integer
+                  )
+                )
           where id = $1::uuid
             and status in (
               'external_handoff', 'funding', 'executing', 'submitted',
               'reconcile_required', 'failed', 'cancelled', 'filled'
             )`,
-      [candidate.id, JSON.stringify(progress), revision],
+      [
+        candidate.id,
+        JSON.stringify(progress),
+        revision,
+        TELEGRAM_TRADE_LIFECYCLE_SOURCE_WATERMARK_RESULT_KEY,
+        candidate.intent_source_updated_at_us,
+        candidate.funding_source_updated_at_us,
+        TELEGRAM_TRADE_LIFECYCLE_PROJECTION_VERSION,
+      ],
     );
     if (updated.rowCount !== 1) continue;
     if (
@@ -1639,6 +1760,8 @@ function progressKeyboard(
 }
 
 export const telegramTradeLifecycleProgressTestHooks = {
+  listCandidateIds: async (client: PoolClient, limit = 100) =>
+    (await listCandidates(client, limit)).map((candidate) => candidate.id),
   markTelegramTradeLifecycleDelivered,
   progressKeyboard,
   progressText,

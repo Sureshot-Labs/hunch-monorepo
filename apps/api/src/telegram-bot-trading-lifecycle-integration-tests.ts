@@ -1253,17 +1253,52 @@ try {
   );
   const directLifecycleIntentId = directLifecycleIntent.rows[0]?.id;
   assert.ok(directLifecycleIntentId);
+  const directUpdatedAtBeforeProjection = (
+    await client.query<{ updated_at: string }>(
+      `select updated_at::text
+         from telegram_trade_intents
+        where id = $1::uuid`,
+      [directLifecycleIntentId],
+    )
+  ).rows[0]?.updated_at;
+  assert.ok(directUpdatedAtBeforeProjection);
 
   const awaitingClient =
     await runTelegramTradeLifecycleProjectionBatchInTransaction(client);
   assert.equal(awaitingClient.created, 1);
+  assert.equal(
+    (
+      await client.query<{ updated_at: string }>(
+        `select updated_at::text
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [directLifecycleIntentId],
+      )
+    ).rows[0]?.updated_at,
+    directUpdatedAtBeforeProjection,
+    "derived lifecycle projection must not advance the intent source timestamp",
+  );
+  assert.equal(
+    (
+      await telegramTradeLifecycleProgressTestHooks.listCandidateIds(client)
+    ).includes(directLifecycleIntentId),
+    false,
+    "an unchanged projected direct handoff is removed from the candidate loop",
+  );
   await client.query(
     `update telegram_trade_intents
         set status = 'executing',
-            submit_started_at = now(),
-            updated_at = now()
+            submit_started_at = clock_timestamp(),
+            updated_at = clock_timestamp()
       where id = $1::uuid`,
     [directLifecycleIntentId],
+  );
+  assert.equal(
+    (
+      await telegramTradeLifecycleProgressTestHooks.listCandidateIds(client)
+    ).includes(directLifecycleIntentId),
+    true,
+    "an intent transition newer than its projection watermark wakes the card",
   );
   const submittingDirect =
     await runTelegramTradeLifecycleProjectionBatchInTransaction(client);
@@ -1272,7 +1307,7 @@ try {
     `update telegram_trade_intents
         set status = 'filled',
             venue_order_id = 'direct-lifecycle-order',
-            updated_at = now()
+            updated_at = clock_timestamp()
       where id = $1::uuid`,
     [directLifecycleIntentId],
   );
@@ -1306,6 +1341,95 @@ try {
   const unchangedDirect =
     await runTelegramTradeLifecycleProjectionBatchInTransaction(client);
   assert.equal(unchangedDirect.created, 0);
+  const directRevisionBeforeWatermarkBackfill = Number(
+    (
+      await client.query<{ revision: string }>(
+        `update telegram_trade_intents
+            set result = result - 'shortfallProgressSourceWatermark'
+          where id = $1::uuid
+          returning result ->> 'shortfallProgressRevision' as revision`,
+        [directLifecycleIntentId],
+      )
+    ).rows[0]?.revision,
+  );
+  assert.equal(
+    (
+      await telegramTradeLifecycleProgressTestHooks.listCandidateIds(client)
+    ).includes(directLifecycleIntentId),
+    true,
+    "a legacy projection without a source watermark is selected once",
+  );
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+    limit: 100,
+  });
+  assert.equal(
+    Number(
+      (
+        await client.query<{ revision: string }>(
+          `select result ->> 'shortfallProgressRevision' as revision
+             from telegram_trade_intents
+            where id = $1::uuid`,
+          [directLifecycleIntentId],
+        )
+      ).rows[0]?.revision,
+    ),
+    directRevisionBeforeWatermarkBackfill,
+    "watermark backfill does not create a duplicate lifecycle revision",
+  );
+  assert.equal(
+    (
+      await telegramTradeLifecycleProgressTestHooks.listCandidateIds(client)
+    ).includes(directLifecycleIntentId),
+    false,
+    "the backfilled legacy projection stays out of later candidate batches",
+  );
+  await client.query(
+    `update telegram_trade_intents
+        set result = jsonb_set(
+              result,
+              '{shortfallProgressSourceWatermark,projectionVersion}',
+              '5'::jsonb
+            )
+      where id = $1::uuid`,
+    [directLifecycleIntentId],
+  );
+  assert.equal(
+    (
+      await telegramTradeLifecycleProgressTestHooks.listCandidateIds(client)
+    ).includes(directLifecycleIntentId),
+    true,
+    "a stale projector version invalidates the source watermark",
+  );
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+    limit: 100,
+  });
+  assert.deepEqual(
+    (
+      await client.query<{
+        projection_version: string;
+        revision: string;
+      }>(
+        `select result #>> '{shortfallProgressSourceWatermark,projectionVersion}'
+                  as projection_version,
+                result ->> 'shortfallProgressRevision' as revision
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [directLifecycleIntentId],
+      )
+    ).rows[0],
+    {
+      projection_version: "6",
+      revision: String(directRevisionBeforeWatermarkBackfill),
+    },
+    "projector invalidation refreshes only the watermark when rendering is unchanged",
+  );
+  assert.equal(
+    (
+      await telegramTradeLifecycleProgressTestHooks.listCandidateIds(client)
+    ).includes(directLifecycleIntentId),
+    false,
+    "the current projector version settles after one pass",
+  );
   const directLifecycleOutbox = await client.query<{
     revision: number;
     state: string;
@@ -2590,7 +2714,7 @@ try {
     `update telegram_trade_intents
         set status = 'submitted',
             venue_order_id = 'funded-submitting-order',
-            updated_at = now()
+            updated_at = clock_timestamp()
       where id = $1::uuid`,
     [fundedSubmittingIntentId],
   );
@@ -2829,6 +2953,8 @@ try {
       terminalFundingOperation.rows[0]?.id,
     ],
   );
+  const staleFundingIntentId = staleFundingIntent.rows[0]?.id;
+  assert.ok(staleFundingIntentId);
   const marketAfterTerminalFunding = await buildTelegramBotTradingMarketMessage(
     {
       appBaseUrl: "https://app.hunch.trade",
@@ -2866,7 +2992,7 @@ try {
     (
       await client.query<{ status: string }>(
         `select status from telegram_trade_intents where id = $1::uuid`,
-        [staleFundingIntent.rows[0]?.id],
+        [staleFundingIntentId],
       )
     ).rows[0]?.status,
     "failed",
@@ -2880,11 +3006,153 @@ try {
         `select result -> 'shortfallProgress' ->> 'state' as state
            from telegram_trade_intents
           where id = $1::uuid`,
-        [staleFundingIntent.rows[0]?.id],
+        [staleFundingIntentId],
       )
     ).rows[0]?.state,
     "stopped",
     "A terminal funded shortfall keeps the existing Funding stopped renderer",
+  );
+
+  const expectStaleFundingCandidate = async (
+    expected: boolean,
+    message: string,
+  ) => {
+    assert.equal(
+      (
+        await telegramTradeLifecycleProgressTestHooks.listCandidateIds(client)
+      ).includes(staleFundingIntentId),
+      expected,
+      message,
+    );
+  };
+  const settleStaleFundingProjection = async (message: string) => {
+    await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+      limit: 100,
+    });
+    await expectStaleFundingCandidate(false, message);
+  };
+
+  await expectStaleFundingCandidate(
+    false,
+    "an unchanged terminal funding projection is not polled again",
+  );
+
+  const lifecycleContinuationQuote = await client.query<{ id: string }>(
+    `insert into funding_quotes (
+       user_id, discovery_projection_id, selected_source_option_snapshot,
+       destination_option_snapshot, plan_snapshot, policy_version,
+       policy_revision, canonical_request_hash, plan_hash, consent_token_hash,
+       expires_at, consumed_at, created_at, updated_at
+     ) values (
+       $1, 'telegram-lifecycle-source-gate', '{}'::jsonb, '{}'::jsonb,
+       '{}'::jsonb, 1, 'telegram-lifecycle-source-gate', repeat('6', 64),
+       repeat('7', 64), repeat('8', 64), now() + interval '1 hour', now(),
+       clock_timestamp(), clock_timestamp()
+     ) returning id`,
+    [userId],
+  );
+  const lifecycleContinuation = await client.query<{ id: string }>(
+    `insert into funding_operations (
+       user_id, quote_id, purpose, status, progress_stage, experience_mode,
+       plan_kind, idempotency_key, commit_request_hash, plan_hash,
+       policy_version, policy_revision, destination_target_snapshot, market_id,
+       placement_snapshot, quote_snapshot, consent_snapshot,
+       original_subject_lookup_hmac, subject_lookup_key_version, expires_at,
+       completed_at, support_metadata, created_at, updated_at
+     ) values (
+       $1, $2, 'trade_shortfall', 'cancelled', 'terminal', 'instant',
+       'already_available', $3, repeat('9', 64), repeat('7', 64), 1,
+       'telegram-lifecycle-source-gate', '{}'::jsonb, $4, '{}'::jsonb,
+       '{}'::jsonb, '{}'::jsonb, repeat('a', 64), 1,
+       now() + interval '1 hour', now(),
+       jsonb_build_object(
+         'telegramTradeIntentId', $5::text,
+         'continuationOfOperationId', $6::text
+       ),
+       clock_timestamp(), clock_timestamp()
+     ) returning id`,
+    [
+      userId,
+      lifecycleContinuationQuote.rows[0]?.id,
+      `lifecycle-source-gate-continuation:${suffix}`,
+      marketId,
+      staleFundingIntentId,
+      terminalFundingOperation.rows[0]?.id,
+    ],
+  );
+  const lifecycleContinuationId = lifecycleContinuation.rows[0]?.id;
+  assert.ok(lifecycleContinuationId);
+  await expectStaleFundingCandidate(
+    true,
+    "a newly created continuation wakes the projected funding intent",
+  );
+  await settleStaleFundingProjection(
+    "the continuation watermark settles after one projection",
+  );
+
+  const lifecycleStep = await client.query<{ id: string }>(
+    `insert into funding_operation_steps (
+       operation_id, ordinal, step_kind, state, action_fingerprint,
+       executor_id, payer_requirement, normalized_action,
+       action_validation_result, created_at, updated_at
+     ) values (
+       $1::uuid, 0, 'server_action', 'planned', repeat('b', 64),
+       'telegram-lifecycle-source-gate', 'none', '{}'::jsonb, '{}'::jsonb,
+       clock_timestamp(), clock_timestamp()
+     ) returning id`,
+    [lifecycleContinuationId],
+  );
+  const lifecycleStepId = lifecycleStep.rows[0]?.id;
+  assert.ok(lifecycleStepId);
+  await expectStaleFundingCandidate(
+    true,
+    "a new operation step wakes the projected funding intent",
+  );
+  await settleStaleFundingProjection(
+    "the step watermark settles after one projection",
+  );
+
+  const lifecycleAttempt = await client.query<{ id: string }>(
+    `insert into funding_operation_step_attempts (
+       step_id, attempt_number, canonical_action_fingerprint, executor_id,
+       outcome, broadcast_may_have_occurred, reference_kind,
+       receipt_ref_ciphertext, receipt_ref_lookup_hmac, lookup_key_version,
+       started_at, finished_at, created_at, updated_at
+     ) values (
+       $1::uuid, 1, repeat('b', 64), 'telegram-lifecycle-source-gate',
+       'submitted', true, 'transaction', 'cipher:lifecycle-source-gate',
+       repeat('c', 64), 1, clock_timestamp(), clock_timestamp(),
+       clock_timestamp(), clock_timestamp()
+     ) returning id`,
+    [lifecycleStepId],
+  );
+  const lifecycleAttemptId = lifecycleAttempt.rows[0]?.id;
+  assert.ok(lifecycleAttemptId);
+  await expectStaleFundingCandidate(
+    true,
+    "a new operation attempt wakes the projected funding intent",
+  );
+  await settleStaleFundingProjection(
+    "the attempt watermark settles after one projection",
+  );
+
+  await client.query(
+    `insert into funding_step_receipt_observations (
+       operation_id, step_id, attempt_id, network_id, status, action_match,
+       canonical, evidence, first_seen_at, observed_at, created_at, updated_at
+     ) values (
+       $1::uuid, $2::uuid, $3::uuid, 'evm:137', 'pending', null, true,
+       '{"lifecycleSourceGate":true}'::jsonb, clock_timestamp(),
+       clock_timestamp(), clock_timestamp(), clock_timestamp()
+     )`,
+    [lifecycleContinuationId, lifecycleStepId, lifecycleAttemptId],
+  );
+  await expectStaleFundingCandidate(
+    true,
+    "a new receipt observation wakes the projected funding intent",
+  );
+  await settleStaleFundingProjection(
+    "the receipt watermark settles after one projection",
   );
 
   const cancellableFundingQuote = await client.query<{ id: string }>(
