@@ -1,4 +1,5 @@
 export type {
+  ChangeReasonTelemetry,
   UnifiedEventRow,
   UnifiedMarketRow,
   ResolvedTerminalTokenTop,
