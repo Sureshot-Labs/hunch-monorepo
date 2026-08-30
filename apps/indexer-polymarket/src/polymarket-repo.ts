@@ -57,14 +57,20 @@ function rawWithoutSourceTimestampSql(alias: string): string {
   return `(coalesce(${alias}.raw, '{}'::jsonb) - 'updatedAt' - 'updated_at')`;
 }
 
-// Raw fields that still feed normalized data, maintenance, or trading reads.
-// They must remain distinguishable from payload noise before raw writes can be
-// safely narrowed in a later optimization.
-function relevantEventRawSql(alias: string): string {
+// Only fields that are not already represented faithfully by source columns
+// and are still consumed by normalization, maintenance, or trading reads.
+// Gamma embeds volatile series metrics in every event. Comparing the complete
+// series object rewrites thousands of otherwise unchanged event rows whenever
+// series volume, liquidity, comments, or updatedAt changes.
+function eventRawBusinessProjectionSql(alias: string): string {
   return `jsonb_build_object(
     'category', ${alias}.raw->'category',
     'tags', ${alias}.raw->'tags',
-    'series', ${alias}.raw->'series',
+    'series', jsonb_build_object(
+      'slug', ${alias}.raw->'series'->0->'slug',
+      'ticker', ${alias}.raw->'series'->0->'ticker',
+      'title', ${alias}.raw->'series'->0->'title'
+    ),
     'seriesSlug', ${alias}.raw->'seriesSlug',
     'seriesTitle', ${alias}.raw->'seriesTitle',
     'series_slug', ${alias}.raw->'series_slug',
@@ -75,7 +81,7 @@ function relevantEventRawSql(alias: string): string {
   )`;
 }
 
-function relevantMarketRawSql(alias: string): string {
+function marketRawBusinessProjectionSql(alias: string): string {
   return `jsonb_build_object(
     'makerBaseFee', ${alias}.raw->'makerBaseFee',
     'takerBaseFee', ${alias}.raw->'takerBaseFee',
@@ -83,9 +89,6 @@ function relevantMarketRawSql(alias: string): string {
     'taker_fee_bps', ${alias}.raw->'taker_fee_bps',
     'negRiskMarketID', ${alias}.raw->'negRiskMarketID',
     'fee', ${alias}.raw->'fee',
-    'openInterest', ${alias}.raw->'openInterest',
-    'volumeAmm', ${alias}.raw->'volumeAmm',
-    'liquidityAmm', ${alias}.raw->'liquidityAmm',
     'ammType', ${alias}.raw->'ammType',
     'denominationToken', ${alias}.raw->'denominationToken',
     'lowerBound', ${alias}.raw->'lowerBound',
@@ -239,6 +242,7 @@ export async function upsertPolymarketEvents(
     classified as (
       select
         input.*,
+        existing.raw as existing_raw,
         existing.id is null as inserted,
         (existing.ticker, existing.slug, existing.title,
          existing.description, existing.resolution_source,
@@ -271,8 +275,8 @@ export async function upsertPolymarketEvents(
         existing.raw is distinct from input.raw as raw_changed,
         ${rawWithoutSourceTimestampSql("existing")} is distinct from
           ${rawWithoutSourceTimestampSql("input")} as raw_content_changed,
-        ${relevantEventRawSql("existing")} is distinct from
-          ${relevantEventRawSql("input")} as relevant_raw_changed
+        ${eventRawBusinessProjectionSql("existing")} is distinct from
+          ${eventRawBusinessProjectionSql("input")} as relevant_raw_changed
       from input
       left join polymarket_events existing on existing.id = input.id
     ),
@@ -282,8 +286,7 @@ export async function upsertPolymarketEvents(
         inserted
           or structural_changed
           or metrics_changed
-          or source_timestamp_changed
-          or raw_changed
+          or relevant_raw_changed
           as is_changed,
         case
           when inserted then 'inserted'
@@ -299,7 +302,13 @@ export async function upsertPolymarketEvents(
       from classified
     ),
     changed as (
-      select *
+      select
+        reasoned.*,
+        case
+          when inserted or structural_changed or relevant_raw_changed
+          then raw
+          else existing_raw
+        end as raw_to_store
       from reasoned
       where is_changed
     ),
@@ -318,7 +327,7 @@ export async function upsertPolymarketEvents(
         active, closed, archived, new, featured, restricted,
         liquidity, volume, open_interest, created_by, created_at, updated_at,
         competitive, volume24hr, volume1wk, volume1mo, volume1yr,
-        enable_order_book, liquidity_clob, neg_risk, comment_count, raw
+        enable_order_book, liquidity_clob, neg_risk, comment_count, raw_to_store
       from changed
       on conflict (id) do update set
         ticker=excluded.ticker,
@@ -355,32 +364,6 @@ export async function upsertPolymarketEvents(
         comment_count=excluded.comment_count,
         raw=excluded.raw,
         updated_at_db=now()
-      where
-        (polymarket_events.ticker, polymarket_events.slug, polymarket_events.title,
-         polymarket_events.description, polymarket_events.resolution_source,
-         polymarket_events.start_date, polymarket_events.creation_date,
-         polymarket_events.end_date, polymarket_events.category, polymarket_events.image,
-         polymarket_events.icon, polymarket_events.active, polymarket_events.closed,
-         polymarket_events.archived, polymarket_events.new, polymarket_events.featured,
-         polymarket_events.restricted, polymarket_events.liquidity, polymarket_events.volume,
-         polymarket_events.open_interest, polymarket_events.created_by, polymarket_events.created_at,
-         polymarket_events.updated_at, polymarket_events.competitive, polymarket_events.volume24hr,
-         polymarket_events.volume1wk, polymarket_events.volume1mo, polymarket_events.volume1yr,
-         polymarket_events.enable_order_book, polymarket_events.liquidity_clob, polymarket_events.neg_risk,
-         polymarket_events.comment_count, polymarket_events.raw)
-        is distinct from
-        (excluded.ticker, excluded.slug, excluded.title,
-         excluded.description, excluded.resolution_source,
-         excluded.start_date, excluded.creation_date,
-         excluded.end_date, excluded.category, excluded.image,
-         excluded.icon, excluded.active, excluded.closed,
-         excluded.archived, excluded.new, excluded.featured,
-         excluded.restricted, excluded.liquidity, excluded.volume,
-         excluded.open_interest, excluded.created_by, excluded.created_at,
-         excluded.updated_at, excluded.competitive, excluded.volume24hr,
-         excluded.volume1wk, excluded.volume1mo, excluded.volume1yr,
-         excluded.enable_order_book, excluded.liquidity_clob, excluded.neg_risk,
-         excluded.comment_count, excluded.raw)
       returning 1
     )
     select
@@ -730,6 +713,7 @@ export async function upsertPolymarketMarkets(
     classified as (
       select
         input.*,
+        existing.raw as existing_raw,
         existing.id is null as inserted,
         (existing.question, existing.condition_id, existing.slug,
          existing.resolution_source, existing.end_date, existing.category,
@@ -812,8 +796,8 @@ export async function upsertPolymarketMarkets(
         existing.raw is distinct from input.raw as raw_changed,
         ${rawWithoutSourceTimestampSql("existing")} is distinct from
           ${rawWithoutSourceTimestampSql("input")} as raw_content_changed,
-        ${relevantMarketRawSql("existing")} is distinct from
-          ${relevantMarketRawSql("input")} as relevant_raw_changed
+        ${marketRawBusinessProjectionSql("existing")} is distinct from
+          ${marketRawBusinessProjectionSql("input")} as relevant_raw_changed
       from input
       left join polymarket_markets existing on existing.id = input.id
     ),
@@ -823,8 +807,7 @@ export async function upsertPolymarketMarkets(
         inserted
           or structural_changed
           or metrics_changed
-          or source_timestamp_changed
-          or raw_changed
+          or relevant_raw_changed
           as is_changed,
         case
           when inserted then 'inserted'
@@ -840,7 +823,13 @@ export async function upsertPolymarketMarkets(
       from classified
     ),
     changed as (
-      select *
+      select
+        reasoned.*,
+        case
+          when inserted or structural_changed or relevant_raw_changed
+          then raw
+          else existing_raw
+        end as raw_to_store
       from reasoned
       where is_changed
     ),
@@ -875,7 +864,7 @@ export async function upsertPolymarketMarkets(
         one_week_price_change, one_month_price_change, last_trade_price, best_bid, best_ask,
         automatically_active, clear_book_on_start, series_color, show_gmp_series, show_gmp_outcome,
         manual_activation, neg_risk_other, uma_resolution_statuses, pending_deployment, deploying,
-        deploying_timestamp, rfq_enabled, holding_rewards_enabled, fees_enabled, raw
+        deploying_timestamp, rfq_enabled, holding_rewards_enabled, fees_enabled, raw_to_store
       from changed
       on conflict (id) do update set
         question=excluded.question,
@@ -965,62 +954,6 @@ export async function upsertPolymarketMarkets(
         fees_enabled=excluded.fees_enabled,
         raw=excluded.raw,
         updated_at_db=now()
-      where
-        (polymarket_markets.question, polymarket_markets.condition_id, polymarket_markets.slug,
-         polymarket_markets.resolution_source, polymarket_markets.end_date, polymarket_markets.category,
-         polymarket_markets.liquidity, polymarket_markets.start_date, polymarket_markets.image, polymarket_markets.icon,
-         polymarket_markets.description, polymarket_markets.outcomes, polymarket_markets.outcome_prices,
-         polymarket_markets.volume, polymarket_markets.active, polymarket_markets.closed,
-         polymarket_markets.market_maker_address, polymarket_markets.created_at, polymarket_markets.updated_at,
-         polymarket_markets.new, polymarket_markets.featured, polymarket_markets.submitted_by, polymarket_markets.archived,
-         polymarket_markets.resolved_by, polymarket_markets.restricted, polymarket_markets.group_item_title,
-         polymarket_markets.group_item_threshold, polymarket_markets.question_id, polymarket_markets.enable_order_book,
-         polymarket_markets.order_price_min_tick_size, polymarket_markets.order_min_size, polymarket_markets.volume_num,
-         polymarket_markets.liquidity_num, polymarket_markets.end_date_iso, polymarket_markets.start_date_iso,
-         polymarket_markets.has_reviewed_dates, polymarket_markets.volume24hr, polymarket_markets.volume1wk,
-         polymarket_markets.volume1mo, polymarket_markets.volume1yr, polymarket_markets.clob_token_ids, polymarket_markets.uma_bond,
-         polymarket_markets.uma_reward, polymarket_markets.volume24hr_clob, polymarket_markets.volume1wk_clob,
-         polymarket_markets.volume1mo_clob, polymarket_markets.volume1yr_clob, polymarket_markets.volume_clob,
-         polymarket_markets.liquidity_clob, polymarket_markets.custom_liveness, polymarket_markets.accepting_orders,
-         polymarket_markets.neg_risk, polymarket_markets.neg_risk_market_id, polymarket_markets.neg_risk_request_id, polymarket_markets.ready, polymarket_markets.funded,
-         polymarket_markets.accepting_orders_timestamp, polymarket_markets.cyom, polymarket_markets.competitive,
-         polymarket_markets.pager_duty_notification_enabled, polymarket_markets.approved, polymarket_markets.rewards_min_size,
-         polymarket_markets.rewards_max_spread, polymarket_markets.spread, polymarket_markets.one_day_price_change,
-         polymarket_markets.one_hour_price_change, polymarket_markets.one_week_price_change, polymarket_markets.one_month_price_change,
-         polymarket_markets.last_trade_price, polymarket_markets.best_bid, polymarket_markets.best_ask, polymarket_markets.automatically_active,
-         polymarket_markets.clear_book_on_start, polymarket_markets.series_color, polymarket_markets.show_gmp_series,
-         polymarket_markets.show_gmp_outcome, polymarket_markets.manual_activation, polymarket_markets.neg_risk_other,
-         polymarket_markets.uma_resolution_statuses, polymarket_markets.pending_deployment, polymarket_markets.deploying,
-         polymarket_markets.deploying_timestamp, polymarket_markets.rfq_enabled, polymarket_markets.holding_rewards_enabled,
-         polymarket_markets.fees_enabled, polymarket_markets.raw)
-        is distinct from
-        (excluded.question, excluded.condition_id, excluded.slug,
-         excluded.resolution_source, excluded.end_date, excluded.category,
-         excluded.liquidity, excluded.start_date, excluded.image, excluded.icon,
-         excluded.description, excluded.outcomes, excluded.outcome_prices,
-         excluded.volume, excluded.active, excluded.closed,
-         excluded.market_maker_address, excluded.created_at, excluded.updated_at,
-         excluded.new, excluded.featured, excluded.submitted_by, excluded.archived,
-         excluded.resolved_by, excluded.restricted, excluded.group_item_title,
-         excluded.group_item_threshold, excluded.question_id, excluded.enable_order_book,
-         excluded.order_price_min_tick_size, excluded.order_min_size, excluded.volume_num,
-         excluded.liquidity_num, excluded.end_date_iso, excluded.start_date_iso,
-         excluded.has_reviewed_dates, excluded.volume24hr, excluded.volume1wk,
-         excluded.volume1mo, excluded.volume1yr, excluded.clob_token_ids, excluded.uma_bond,
-         excluded.uma_reward, excluded.volume24hr_clob, excluded.volume1wk_clob,
-         excluded.volume1mo_clob, excluded.volume1yr_clob, excluded.volume_clob,
-         excluded.liquidity_clob, excluded.custom_liveness, excluded.accepting_orders,
-         excluded.neg_risk, excluded.neg_risk_market_id, excluded.neg_risk_request_id, excluded.ready, excluded.funded,
-         excluded.accepting_orders_timestamp, excluded.cyom, excluded.competitive,
-         excluded.pager_duty_notification_enabled, excluded.approved, excluded.rewards_min_size,
-         excluded.rewards_max_spread, excluded.spread, excluded.one_day_price_change,
-         excluded.one_hour_price_change, excluded.one_week_price_change, excluded.one_month_price_change,
-         excluded.last_trade_price, excluded.best_bid, excluded.best_ask, excluded.automatically_active,
-         excluded.clear_book_on_start, excluded.series_color, excluded.show_gmp_series,
-         excluded.show_gmp_outcome, excluded.manual_activation, excluded.neg_risk_other,
-         excluded.uma_resolution_statuses, excluded.pending_deployment, excluded.deploying,
-         excluded.deploying_timestamp, excluded.rfq_enabled, excluded.holding_rewards_enabled,
-         excluded.fees_enabled, excluded.raw)
       returning 1
     )
     select
