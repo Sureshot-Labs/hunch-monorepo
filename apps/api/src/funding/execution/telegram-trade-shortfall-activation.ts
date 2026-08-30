@@ -84,8 +84,9 @@ export async function activateStalledTelegramTradeShortfallInitialStepsInTransac
   input: Readonly<{ profileId: string; limit: number }>,
 ): Promise<number> {
   if (!isTelegramTradeShortfallServerProfile(input.profileId)) return 0;
-  const updated = await client.query<{ id: string }>(
-    `with candidates as (
+  const updated = await client.query<{ id: string }>({
+    name: "funding-shortfall-activate-stalled-roots-v1",
+    text: `with candidates as (
        select root_step.id
          from funding_operation_steps root_step
          join funding_operations operation_row
@@ -132,8 +133,8 @@ export async function activateStalledTelegramTradeShortfallInitialStepsInTransac
        from candidates
       where root_step.id = candidates.id
       returning root_step.id`,
-    [input.profileId, Math.max(1, Math.min(input.limit, 100))],
-  );
+    values: [input.profileId, Math.max(1, Math.min(input.limit, 100))],
+  });
   return updated.rowCount ?? 0;
 }
 

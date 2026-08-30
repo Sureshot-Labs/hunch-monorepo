@@ -172,9 +172,12 @@ export type FundingReconciliationJobResult =
       telegramTradeLifecycleProgress: null;
     }>;
 
+const fundingReconciliationReadyPools = new WeakSet<object>();
+
 export async function isFundingReconciliationSchemaReady(
   pool: Pick<Pool, "query">,
 ): Promise<boolean> {
+  if (fundingReconciliationReadyPools.has(pool)) return true;
   const { rows } = await pool.query<{ ready: boolean }>(
     `
       select
@@ -336,7 +339,9 @@ export async function isFundingReconciliationSchemaReady(
         as ready
     `,
   );
-  return rows[0]?.ready === true;
+  const ready = rows[0]?.ready === true;
+  if (ready) fundingReconciliationReadyPools.add(pool);
+  return ready;
 }
 
 export async function runFundingReconciliationJob(

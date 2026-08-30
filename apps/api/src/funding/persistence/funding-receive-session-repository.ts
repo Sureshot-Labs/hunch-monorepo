@@ -974,8 +974,9 @@ export async function claimObservableFundingReceiveSessions(
     minimumPollIntervalMs,
     Math.trunc(input.activeWindowMs ?? 15 * 60_000),
   );
-  const { rows } = await db.query<ReceiveSessionRow>(
-    `
+  const { rows } = await db.query<ReceiveSessionRow>({
+    name: "funding-receive-claim-observable-sessions-v1",
+    text: `
       with candidates as (
         select id
         from funding_receive_sessions
@@ -1036,7 +1037,7 @@ export async function claimObservableFundingReceiveSessions(
       from claimed
       order by coalesce(last_observed_at, opened_at) asc
     `,
-    [
+    values: [
       input.now,
       input.limit,
       minimumPollIntervalMs,
@@ -1044,7 +1045,7 @@ export async function claimObservableFundingReceiveSessions(
       closedPollIntervalMs,
       activeWindowMs,
     ],
-  );
+  });
   return rows.map(snapshot);
 }
 export async function listFundingReceiveReceiptsForUser(
@@ -1903,8 +1904,9 @@ export async function listFundingReceiveReceiptsForRouting(
   db: Pick<Pool, "query">,
   input: Readonly<{ limit: number; now?: Date }>,
 ): Promise<readonly FundingReceiveReceiptRoutingTarget[]> {
-  const { rows } = await db.query<ReceiveReceiptTargetRow>(
-    `
+  const { rows } = await db.query<ReceiveReceiptTargetRow>({
+    name: "funding-receive-list-routing-receipts-v1",
+    text: `
       select
         receipt.id,
         receipt.receive_session_id,
@@ -2109,8 +2111,8 @@ export async function listFundingReceiveReceiptsForRouting(
       order by receipt.created_at asc
       limit $1
     `,
-    [input.limit, input.now ?? new Date()],
-  );
+    values: [input.limit, input.now ?? new Date()],
+  });
   return rows.map(receiveReceiptRoutingTarget);
 }
 

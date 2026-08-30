@@ -423,6 +423,35 @@ const tests: readonly Test[] = [
       assert.match(ingestionSource, /"polling"/);
     },
   },
+  {
+    name: "empty Relay maintenance does not plan branch-specific queries",
+    run: () => {
+      const source = readFileSync(
+        new URL(
+          "../../execution/relay-evm-delegated-executor-profile.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const guardedBranches = [
+        ["approval", "approval"],
+        ["releasable", "releasable"],
+        ["strandedAllowance", "stranded"],
+        ["deposit", "deposit"],
+        ["cleanup", "cleanup"],
+      ] as const;
+      for (const [variableName, maintenanceKind] of guardedBranches) {
+        assert.match(
+          source,
+          new RegExp(
+            `const ${variableName} =\\s+maintenance\\?\\.kind === "${maintenanceKind}"\\s+\\? await client\\.query`,
+            "u",
+          ),
+        );
+      }
+      assert.match(source, /name: "funding-relay-observe-postcondition-v1"/u);
+    },
+  },
 ];
 
 for (const test of tests) {

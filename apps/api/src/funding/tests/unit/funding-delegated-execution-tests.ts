@@ -154,11 +154,13 @@ const fundInterface = new Interface(FUND_ABI);
 }
 
 {
+  let routingQueryName = "";
   let routingSql = "";
   await listFundingReceiveReceiptsForRouting(
     {
-      query: async (sql: string) => {
-        routingSql = sql;
+      query: async (query: string | { name?: string; text: string }) => {
+        routingSql = typeof query === "string" ? query : query.text;
+        routingQueryName = typeof query === "string" ? "" : (query.name ?? "");
         return { rowCount: 0, rows: [] };
       },
     } as never,
@@ -173,6 +175,11 @@ const fundInterface = new Interface(FUND_ABI);
     routingSql,
     /lower\(receipt\.asset_id\)/u,
     "routing must not case-fold malformed EVM or Solana identifiers",
+  );
+  assert.equal(
+    routingQueryName,
+    "funding-receive-list-routing-receipts-v1",
+    "the hot routing probe must reuse its PostgreSQL plan",
   );
 }
 

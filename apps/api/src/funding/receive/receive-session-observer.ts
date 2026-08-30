@@ -306,9 +306,12 @@ function observationTarget(
   };
 }
 
+const fundingReceiveSessionReadyPools = new WeakSet<object>();
+
 export async function isFundingReceiveSessionSchemaReady(
   db: Pick<Pool, "query">,
 ): Promise<boolean> {
+  if (fundingReceiveSessionReadyPools.has(db)) return true;
   const { rows } = await db.query<{ ready: boolean }>(
     `
       select
@@ -332,7 +335,9 @@ export async function isFundingReceiveSessionSchemaReady(
         as ready
     `,
   );
-  return rows[0]?.ready === true;
+  const ready = rows[0]?.ready === true;
+  if (ready) fundingReceiveSessionReadyPools.add(db);
+  return ready;
 }
 
 export type FundingReceiveSessionObservationResult = Readonly<{
