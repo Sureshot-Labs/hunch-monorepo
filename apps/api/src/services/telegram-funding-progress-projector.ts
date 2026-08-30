@@ -44,8 +44,9 @@ async function listProjectionCandidates(
     policyRevision: string;
   }>,
 ): Promise<CandidateRow[]> {
-  const { rows } = await pool.query<CandidateRow>(
-    `
+  const { rows } = await pool.query<CandidateRow>({
+    name: "telegram-funding-progress-candidates-v1",
+    text: `
       select
         context.id,
         context.user_id,
@@ -122,13 +123,13 @@ async function listProjectionCandidates(
       order by context.projection_checked_at asc nulls first, context.id asc
       limit $2
     `,
-    [
+    values: [
       input.now,
       input.limit,
       input.policyRevision,
       new Date(input.now.getTime() - CAPABILITY_RECHECK_MS),
     ],
-  );
+  });
   return rows;
 }
 

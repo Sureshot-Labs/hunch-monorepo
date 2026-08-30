@@ -501,8 +501,9 @@ async function observeRelayPostcondition(
     mutation_baseline_block: string | null;
     operation_id: string;
     wallet_address: string;
-  }>(
-    `with candidates as (
+  }>({
+    name: "funding-relay-observe-postcondition-v1",
+    text: `with candidates as (
        select 1 as priority,
               'approval'::text as maintenance_kind,
               approval_receipt.id::text as candidate_id,
@@ -786,8 +787,8 @@ async function observeRelayPostcondition(
        from candidates
       order by priority, observed_at
       limit 1`,
-    [profile.profileId, now, RELAY_CLEANUP_CANONICAL_WATCH_MS],
-  );
+    values: [profile.profileId, now, RELAY_CLEANUP_CANONICAL_WATCH_MS],
+  });
   const candidate = rows[0];
   if (!candidate) return undefined;
   const observed = await allowance({
@@ -1211,8 +1212,9 @@ async function reconcileRelayPostconditions(
     profile,
   });
   if (allowRetry)
-    await client.query(
-      `update funding_operation_steps step
+    await client.query({
+      name: "funding-relay-retry-failed-action-v1",
+      text: `update funding_operation_steps step
         set state = 'action_required', updated_at = $2
        from funding_operations operation
       where step.operation_id = operation.id
@@ -1270,11 +1272,12 @@ async function reconcileRelayPostconditions(
               )
             )
         )`,
-      [profile.profileId, now],
-    );
+      values: [profile.profileId, now],
+    });
   if (allowRetry)
-    await client.query(
-      `update funding_operation_steps step
+    await client.query({
+      name: "funding-relay-retry-reorged-cleanup-v1",
+      text: `update funding_operation_steps step
           set state = 'action_required', updated_at = $2
          from funding_operations operation
         where step.operation_id = operation.id
@@ -1311,17 +1314,19 @@ async function reconcileRelayPostconditions(
                and latest_receipt.reorged_at <=
                      $2::timestamptz - interval '15 minutes'
           )`,
-      [profile.profileId, now],
-    );
-  const approval = await client.query<{
-    approval_receipt_id: string;
-    approval_block: string;
-    deposit_step_id: string;
-    expected_raw: string;
-    operation_id: string;
-    wallet_address: string;
-  }>(
-    `select approval_receipt.id as approval_receipt_id,
+      values: [profile.profileId, now],
+    });
+  const approval =
+    maintenance?.kind === "approval"
+      ? await client.query<{
+          approval_receipt_id: string;
+          approval_block: string;
+          deposit_step_id: string;
+          expected_raw: string;
+          operation_id: string;
+          wallet_address: string;
+        }>(
+          `select approval_receipt.id as approval_receipt_id,
             approval_receipt.ledger_height as approval_block,
             deposit_step.id as deposit_step_id,
             operation.id as operation_id,
@@ -1360,12 +1365,9 @@ async function reconcileRelayPostconditions(
        order by approval_receipt.observed_at
        for update of approval_step, deposit_step, approval_receipt, operation, reservation
        limit 1`,
-    [
-      profile.profileId,
-      maintenance?.kind === "approval" ? maintenance.candidateId : null,
-      maintenance?.kind === "approval" ? maintenance.operationId : null,
-    ],
-  );
+          [profile.profileId, maintenance.candidateId, maintenance.operationId],
+        )
+      : { rows: [] };
   const approvalRow = approval.rows[0];
   if (
     approvalRow &&
@@ -1451,19 +1453,21 @@ async function reconcileRelayPostconditions(
     }
   }
 
-  const releasable = await client.query<{
-    approval_step_id: string;
-    operation_id: string;
-    operation_stage: "committed" | "source_action";
-    operation_status:
-      | "in_progress"
-      | "reconcile_required"
-      | "recovery_required";
-    operation_version: string | number;
-    reservation_id: string;
-    wallet_address: string;
-  }>(
-    `select operation.id as operation_id,
+  const releasable =
+    maintenance?.kind === "releasable"
+      ? await client.query<{
+          approval_step_id: string;
+          operation_id: string;
+          operation_stage: "committed" | "source_action";
+          operation_status:
+            | "in_progress"
+            | "reconcile_required"
+            | "recovery_required";
+          operation_version: string | number;
+          reservation_id: string;
+          wallet_address: string;
+        }>(
+          `select operation.id as operation_id,
             operation.status as operation_status,
             operation.progress_stage as operation_stage,
             operation.version as operation_version,
@@ -1521,12 +1525,9 @@ async function reconcileRelayPostconditions(
        order by operation.created_at
        for update of reservation, operation, approval_step skip locked
        limit 1`,
-    [
-      profile.profileId,
-      maintenance?.kind === "releasable" ? maintenance.candidateId : null,
-      maintenance?.kind === "releasable" ? maintenance.operationId : null,
-    ],
-  );
+          [profile.profileId, maintenance.candidateId, maintenance.operationId],
+        )
+      : { rows: [] };
   const releasableRow = releasable.rows[0];
   if (releasableRow && maintenance?.kind === "releasable") {
     const observed = maintenance.allowance;
@@ -1662,13 +1663,15 @@ async function reconcileRelayPostconditions(
     }
   }
 
-  const strandedAllowance = await client.query<{
-    approval_receipt_id: string;
-    deposit_attempt_count: string | number;
-    operation_id: string;
-    wallet_address: string;
-  }>(
-    `select approval_receipt.id as approval_receipt_id,
+  const strandedAllowance =
+    maintenance?.kind === "stranded"
+      ? await client.query<{
+          approval_receipt_id: string;
+          deposit_attempt_count: string | number;
+          operation_id: string;
+          wallet_address: string;
+        }>(
+          `select approval_receipt.id as approval_receipt_id,
             (select count(*)
                from funding_operation_step_attempts deposit_attempt
               where deposit_attempt.step_id = deposit_step.id
@@ -1736,11 +1739,9 @@ async function reconcileRelayPostconditions(
        order by operation.created_at
        for update of operation, deposit_step, reservation skip locked
        limit 1`,
-    [
-      profile.profileId,
-      maintenance?.kind === "stranded" ? maintenance.operationId : null,
-    ],
-  );
+          [profile.profileId, maintenance.operationId],
+        )
+      : { rows: [] };
   const strandedAllowanceRow = strandedAllowance.rows[0];
   if (strandedAllowanceRow && maintenance?.kind === "stranded") {
     const observed = maintenance.allowance;
@@ -1794,21 +1795,23 @@ async function reconcileRelayPostconditions(
     }
   }
 
-  const deposit = await client.query<{
-    deposit_block_hash: string;
-    deposit_receipt_id: string;
-    deposit_attempt_id: string;
-    deposit_block: string;
-    deposit_observed_at: Date;
-    event_index: string;
-    operation_id: string;
-    segment_id: string;
-    expected_raw: string;
-    tx_hash: string;
-    uses_preexisting_allowance: boolean;
-    wallet_address: string;
-  }>(
-    `select deposit_receipt.id as deposit_receipt_id,
+  const deposit =
+    maintenance?.kind === "deposit"
+      ? await client.query<{
+          deposit_block_hash: string;
+          deposit_receipt_id: string;
+          deposit_attempt_id: string;
+          deposit_block: string;
+          deposit_observed_at: Date;
+          event_index: string;
+          operation_id: string;
+          segment_id: string;
+          expected_raw: string;
+          tx_hash: string;
+          uses_preexisting_allowance: boolean;
+          wallet_address: string;
+        }>(
+          `select deposit_receipt.id as deposit_receipt_id,
             deposit_receipt.attempt_id as deposit_attempt_id,
             deposit_receipt.ledger_height as deposit_block,
             deposit_receipt.block_hash as deposit_block_hash,
@@ -1857,12 +1860,9 @@ async function reconcileRelayPostconditions(
        order by deposit_receipt.observed_at
        for update of deposit_step, deposit_receipt, operation
        limit 1`,
-    [
-      profile.profileId,
-      maintenance?.kind === "deposit" ? maintenance.candidateId : null,
-      maintenance?.kind === "deposit" ? maintenance.operationId : null,
-    ],
-  );
+          [profile.profileId, maintenance.candidateId, maintenance.operationId],
+        )
+      : { rows: [] };
   const depositRow = deposit.rows[0];
   if (
     depositRow &&
@@ -1970,39 +1970,41 @@ async function reconcileRelayPostconditions(
     );
   }
 
-  const cleanup = await client.query<{
-    cleanup_context: RelayCleanupContext;
-    cleanup_block: string;
-    cleanup_operation_id: string;
-    cleanup_operation_stage: "source_action";
-    cleanup_operation_status:
-      | "in_progress"
-      | "reconcile_required"
-      | "recovery_required";
-    cleanup_operation_version: string | number;
-    cleanup_receipt_finalized_at: Date;
-    cleanup_receipt_id: string;
-    cleanup_step_id: string;
-    deposit_receipt_id: string | null;
-    deposit_attempt_id: string | null;
-    deposit_event_index: string | null;
-    deposit_block: string | null;
-    deposit_block_hash: string | null;
-    deposit_observed_at: Date | null;
-    deposit_transaction_hash: string | null;
-    expected_raw: string;
-    parent_operation_id: string;
-    parent_operation_stage: "committed" | "source_action";
-    parent_operation_status:
-      | "in_progress"
-      | "reconcile_required"
-      | "recovery_required";
-    parent_operation_version: string | number;
-    reservation_id: string;
-    segment_id: string | null;
-    wallet_address: string;
-  }>(
-    `select cleanup_receipt.id as cleanup_receipt_id,
+  const cleanup =
+    maintenance?.kind === "cleanup"
+      ? await client.query<{
+          cleanup_context: RelayCleanupContext;
+          cleanup_block: string;
+          cleanup_operation_id: string;
+          cleanup_operation_stage: "source_action";
+          cleanup_operation_status:
+            | "in_progress"
+            | "reconcile_required"
+            | "recovery_required";
+          cleanup_operation_version: string | number;
+          cleanup_receipt_finalized_at: Date;
+          cleanup_receipt_id: string;
+          cleanup_step_id: string;
+          deposit_receipt_id: string | null;
+          deposit_attempt_id: string | null;
+          deposit_event_index: string | null;
+          deposit_block: string | null;
+          deposit_block_hash: string | null;
+          deposit_observed_at: Date | null;
+          deposit_transaction_hash: string | null;
+          expected_raw: string;
+          parent_operation_id: string;
+          parent_operation_stage: "committed" | "source_action";
+          parent_operation_status:
+            | "in_progress"
+            | "reconcile_required"
+            | "recovery_required";
+          parent_operation_version: string | number;
+          reservation_id: string;
+          segment_id: string | null;
+          wallet_address: string;
+        }>(
+          `select cleanup_receipt.id as cleanup_receipt_id,
             cleanup_receipt.ledger_height as cleanup_block,
             cleanup_operation.id as cleanup_operation_id,
             cleanup_operation.status as cleanup_operation_status,
@@ -2093,14 +2095,15 @@ async function reconcileRelayPostconditions(
        for update of reservation, cleanup_operation, cleanup_step,
                      cleanup_receipt, parent
        limit 1`,
-    [
-      profile.profileId,
-      maintenance?.kind === "cleanup" ? maintenance.candidateId : null,
-      maintenance?.kind === "cleanup" ? maintenance.operationId : null,
-      now,
-      RELAY_CLEANUP_CANONICAL_WATCH_MS,
-    ],
-  );
+          [
+            profile.profileId,
+            maintenance.candidateId,
+            maintenance.operationId,
+            now,
+            RELAY_CLEANUP_CANONICAL_WATCH_MS,
+          ],
+        )
+      : { rows: [] };
   const cleanupRow = cleanup.rows[0];
   if (
     cleanupRow &&
@@ -2339,8 +2342,9 @@ async function claimRelayCleanup(
     profile: RelayEvmFundingProfileSpec;
   }>,
 ): Promise<DelegatedFundingProfileClaim | null> {
-  const { rows } = await client.query<RelayClaimRow>(
-    `select cleanup_operation.id as operation_id,
+  const { rows } = await client.query<RelayClaimRow>({
+    name: "funding-relay-claim-cleanup-v1",
+    text: `select cleanup_operation.id as operation_id,
             cleanup_operation.user_id,
             cleanup_operation.policy_version,
             cleanup_operation.policy_revision,
@@ -2433,8 +2437,8 @@ async function claimRelayCleanup(
        for update of cleanup_operation, cleanup_step, reservation,
                      funding_authorization skip locked
        limit 1`,
-    [input.profile.profileId, input.now],
-  );
+    values: [input.profile.profileId, input.now],
+  });
   const row = rows[0];
   if (!row) return null;
   if (
@@ -2482,8 +2486,9 @@ async function expireRelayActionBeforeBroadcast(
     operation_version: string | number;
     reservation_id: string;
     user_id: string;
-  }>(
-    `select operation.id as operation_id,
+  }>({
+    name: "funding-relay-expire-unstarted-action-v1",
+    text: `select operation.id as operation_id,
             operation.user_id,
             operation.status as operation_status,
             operation.progress_stage as operation_stage,
@@ -2525,8 +2530,8 @@ async function expireRelayActionBeforeBroadcast(
        for update of reservation, funding_authorization, operation,
                      approval_step skip locked
        limit 1`,
-    [input.profile.profileId, input.now],
-  );
+    values: [input.profile.profileId, input.now],
+  });
   const row = rows[0];
   if (!row) return null;
   if (
@@ -2624,8 +2629,9 @@ async function releaseTerminalRelayPreDepositReservation(
     operation_id: string;
     reservation_id: string;
     user_id: string;
-  }>(
-    `select reservation.id::text as reservation_id,
+  }>({
+    name: "funding-relay-release-terminal-predeposit-v1",
+    text: `select reservation.id::text as reservation_id,
             reservation.funding_operation_id::text as operation_id,
             funding_authorization.id::text as authorization_id,
             operation_row.user_id::text as user_id
@@ -2656,8 +2662,8 @@ async function releaseTerminalRelayPreDepositReservation(
       for update of reservation, funding_authorization, operation_row, deposit_step
                     skip locked
       limit 1`,
-    [input.profile.profileId],
-  );
+    values: [input.profile.profileId],
+  });
   const row = rows[0];
   if (
     !row ||
@@ -2723,8 +2729,9 @@ async function claimRelay(
   if (!controlPlaneAllowed) {
     return claimRelayCleanup(client, input);
   }
-  const { rows } = await client.query<RelayClaimRow>(
-    `select operation.id as operation_id,
+  const { rows } = await client.query<RelayClaimRow>({
+    name: "funding-relay-claim-action-v1",
+    text: `select operation.id as operation_id,
             operation.user_id,
             operation.policy_version,
             operation.policy_revision,
@@ -2912,8 +2919,8 @@ async function claimRelay(
        order by operation.created_at, step.ordinal
        for update of operation, step, funding_authorization, reservation skip locked
        limit 1`,
-    [input.profile.profileId, input.now],
-  );
+    values: [input.profile.profileId, input.now],
+  });
   const row = rows[0];
   if (!row) return claimRelayCleanup(client, input);
   if (
@@ -2948,8 +2955,9 @@ async function recoverRelay(
       attempt_id: string;
       attempt_outcome: "started" | "ambiguous";
     }
-  >(
-    `select attempt.id as attempt_id,
+  >({
+    name: "funding-relay-recover-action-v1",
+    text: `select attempt.id as attempt_id,
             attempt.outcome as attempt_outcome,
             operation.id as operation_id,
             operation.user_id,
@@ -3062,12 +3070,12 @@ async function recoverRelay(
        order by attempt.updated_at, attempt.id
        for update of attempt, step, operation, reservation skip locked
        limit 1`,
-    [
+    values: [
       input.profile.profileId,
       input.recoverUnbroadcastRetryBefore,
       input.recoverProviderReplayBefore,
     ],
-  );
+  });
   const row = rows[0];
   if (!row) {
     const cleanup = await client.query<
@@ -3075,8 +3083,9 @@ async function recoverRelay(
         attempt_id: string;
         attempt_outcome: "started" | "ambiguous";
       }
-    >(
-      `select attempt.id as attempt_id,
+    >({
+      name: "funding-relay-recover-cleanup-v1",
+      text: `select attempt.id as attempt_id,
               attempt.outcome as attempt_outcome,
               cleanup_operation.id as operation_id,
               cleanup_operation.user_id,
@@ -3132,12 +3141,12 @@ async function recoverRelay(
          for update of attempt, cleanup_step, cleanup_operation,
                        reservation skip locked
          limit 1`,
-      [
+      values: [
         input.profile.profileId,
         input.recoverUnbroadcastRetryBefore,
         input.recoverProviderReplayBefore,
       ],
-    );
+    });
     const cleanupRow = cleanup.rows[0];
     if (!cleanupRow) return null;
     if (
@@ -3641,8 +3650,9 @@ async function allocateFinalizedRelaySourceDebitInTransaction(
       authorizationId: string;
       userId: string;
     }
-  >(
-    `select operation.id as "parentOperationId",
+  >({
+    name: "funding-relay-allocate-finalized-source-debit-v1",
+    text: `select operation.id as "parentOperationId",
             segment.id as "segmentId",
             deposit_receipt.id as "depositReceiptId",
             deposit_receipt.attempt_id as "depositAttemptId",
@@ -3693,8 +3703,8 @@ async function allocateFinalizedRelaySourceDebitInTransaction(
       for update of operation, deposit_step, deposit_receipt, reservation
       skip locked
       limit 1`,
-    [input.profile.profileId, input.operationId ?? null],
-  );
+    values: [input.profile.profileId, input.operationId ?? null],
+  });
   const evidence = rows[0];
   if (
     !evidence ||
@@ -3972,8 +3982,9 @@ async function terminalizeCompletedRelayCleanupParent(
     cleanup_operation_id: string;
     parent_operation_id: string;
     resolution_evidence: JsonRecord;
-  }>(
-    `select cleanup.id as cleanup_operation_id,
+  }>({
+    name: "funding-relay-terminalize-cleaned-parent-v1",
+    text: `select cleanup.id as cleanup_operation_id,
             parent.id as parent_operation_id,
             cleanup_step.action_validation_result ->> 'cleanupContext'
               as cleanup_context,
@@ -4003,8 +4014,8 @@ async function terminalizeCompletedRelayCleanupParent(
         and reservation.resolved_at is not null
       order by reservation.resolved_at, reservation.id
       limit 1`,
-    [profile.profileId],
-  );
+    values: [profile.profileId],
+  });
   const row = rows[0];
   if (!row) return;
   await terminalizeRelayParentAfterCleanup(client, {
@@ -4025,8 +4036,9 @@ async function releaseCompletedRelayCleanupParentBalanceReservations(
   now: Date,
   profile: RelayEvmFundingProfileSpec,
 ): Promise<void> {
-  const { rows } = await client.query<{ parent_operation_id: string }>(
-    `select distinct parent.id as parent_operation_id
+  const { rows } = await client.query<{ parent_operation_id: string }>({
+    name: "funding-relay-release-cleaned-parent-balance-v1",
+    text: `select distinct parent.id as parent_operation_id
        from telegram_funding_authorization_reservations reservation
        join funding_operations cleanup
          on cleanup.id = reservation.cleanup_operation_id
@@ -4051,8 +4063,8 @@ async function releaseCompletedRelayCleanupParentBalanceReservations(
       where reservation.status = 'cleaned'
       order by parent.id
       limit 1`,
-    [profile.profileId],
-  );
+    values: [profile.profileId],
+  });
   const parentOperationId = rows[0]?.parent_operation_id;
   if (!parentOperationId) return;
   await releaseRelayParentBalanceReservations(client, parentOperationId, now);

@@ -12,6 +12,7 @@ import { isFundingReconciliationSchemaReady } from "./funding/worker/funding-rec
 import { isTelegramFundingReceiveControllerCurrent } from "./funding/execution/telegram-funding-managed-wallet.js";
 import { parseTelegramRelayEvmAutomationPolicyV3 } from "./funding/execution/telegram-funding-automation-policy.js";
 import { resolveFundingReceiveSelectedTargetId } from "./funding/receive/receive-session-service.js";
+import { isFundingReceiveSessionSchemaReady } from "./funding/receive/receive-session-observer.js";
 import type {
   FundingQuoteSummary,
   FundingReceiveReceipt,
@@ -795,9 +796,11 @@ function successfulTelegramCounter() {
   };
 }
 
-assert.equal(
-  await isFundingReconciliationSchemaReady({
+{
+  let schemaQueries = 0;
+  const schemaDb = {
     query: async (sql: string) => {
+      schemaQueries += 1;
       assert.match(sql, /telegram_funding_sessions/);
       assert.match(sql, /telegram_funding_consents/);
       assert.match(sql, /telegram_funding_authorizations/);
@@ -814,10 +817,39 @@ assert.equal(
       assert.match(sql, /funding_qr/);
       return { rows: [{ ready: true }] };
     },
-  } as never),
-  true,
-  "the worker requires the Slice C migration marker while remaining independent from additive Buy-return columns",
-);
+  } as never;
+  assert.equal(
+    await isFundingReconciliationSchemaReady(schemaDb),
+    true,
+    "the worker requires the Slice C migration marker while remaining independent from additive Buy-return columns",
+  );
+  assert.equal(await isFundingReconciliationSchemaReady(schemaDb), true);
+  assert.equal(
+    schemaQueries,
+    1,
+    "a ready worker schema is stable until restart",
+  );
+}
+
+{
+  let schemaQueries = 0;
+  const schemaDb = {
+    query: async (sql: string) => {
+      schemaQueries += 1;
+      assert.match(sql, /funding_receive_sessions/);
+      assert.match(sql, /funding_receive_receipts/);
+      assert.match(sql, /funding_receive_canonical_events/);
+      return { rows: [{ ready: true }] };
+    },
+  } as never;
+  assert.equal(await isFundingReceiveSessionSchemaReady(schemaDb), true);
+  assert.equal(await isFundingReceiveSessionSchemaReady(schemaDb), true);
+  assert.equal(
+    schemaQueries,
+    1,
+    "a ready receive schema is stable until restart",
+  );
+}
 
 assert.equal(canonicalTelegramFundingBuySpend("1.000000"), "1");
 assert.equal(canonicalTelegramFundingBuySpend("1.250000"), "1.25");
@@ -3379,7 +3411,8 @@ assert.equal(
   let routingSql = "";
   await listFundingReceiveReceiptsForRouting(
     {
-      query: async (sql: string) => {
+      query: async (query: string | { text: string }) => {
+        const sql = typeof query === "string" ? query : query.text;
         routingSql = sql.replace(/\s+/gu, " ").toLowerCase();
         return { rows: [], rowCount: 0 };
       },

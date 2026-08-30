@@ -1086,8 +1086,9 @@ async function listDelegatedFundingProviderLookupClaims(
   }>,
 ): Promise<readonly DelegatedFundingProviderLookupRow[]> {
   if (input.profileIds.length === 0) return [];
-  const { rows } = await pool.query<DelegatedFundingProviderLookupRow>(
-    `
+  const { rows } = await pool.query<DelegatedFundingProviderLookupRow>({
+    name: "funding-delegated-provider-lookup-claims-v1",
+    text: `
       select
         attempt_row.id as attempt_id,
         attempt_row.receipt_ref_lookup_hmac
@@ -1122,8 +1123,8 @@ async function listDelegatedFundingProviderLookupClaims(
       order by attempt_row.finished_at, attempt_row.id
       limit $3
     `,
-    [input.profileIds, input.lookupDueBefore, input.limit],
-  );
+    values: [input.profileIds, input.lookupDueBefore, input.limit],
+  });
   return rows;
 }
 

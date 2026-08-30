@@ -925,8 +925,9 @@ async function listCandidates(
   client: PoolClient,
   limit: number,
 ): Promise<readonly ProjectionCandidate[]> {
-  const { rows } = await client.query<ProjectionCandidate>(
-    `select intent.id,
+  const { rows } = await client.query<ProjectionCandidate>({
+    name: "telegram-trade-lifecycle-candidates-v1",
+    text: `select intent.id,
             intent.user_id,
             intent.telegram_user_id,
             intent.chat_id,
@@ -1171,12 +1172,12 @@ async function listCandidates(
                intent.id
       limit $1
       for update of intent skip locked`,
-    [
+    values: [
       limit,
       TELEGRAM_TRADE_TERMINAL_DELIVERY_OWNER_RESULT_KEY,
       TELEGRAM_TRADE_GENERIC_NOTIFICATION_OWNER,
     ],
-  );
+  });
   return rows;
 }
 
