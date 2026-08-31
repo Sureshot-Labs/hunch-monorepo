@@ -8491,6 +8491,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(telegram.callbackAnswers[0]?.text ?? "", /not ready/);
       assert.equal(telegram.messages.length, 1);
       assert.match(telegram.messages[0]?.text ?? "", /Open Hunch/);
+      assert.deepEqual(
+        telegram.messages[0]?.reply_markup?.inline_keyboard
+          .flat()
+          .map((button) =>
+            "callback_data" in button
+              ? [button.text, button.callback_data]
+              : [button.text, null],
+          ),
+        [
+          [
+            "🎯 Open market",
+            "hbt:open_market:00000000-0000-4000-8000-000000000001",
+          ],
+          ["🏠 Home", "hm:v1:home"],
+        ],
+      );
     },
   },
   {
@@ -9282,6 +9298,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(updateStatuses[4]?.errorCode, "no_fill");
       assert.equal(telegram.callbackAnswers[0]?.text, "⚠️ No fill.");
       assert.match(telegram.messages[0]?.text ?? "", /No fill/);
+      assert.deepEqual(
+        telegram.messages[0]?.reply_markup?.inline_keyboard
+          .flat()
+          .map((button) =>
+            "callback_data" in button
+              ? [button.text, button.callback_data]
+              : [button.text, null],
+          ),
+        [
+          [
+            "🎯 Open market",
+            "hbt:open_market:00000000-0000-4000-8000-000000000001",
+          ],
+          ["🏠 Home", "hm:v1:home"],
+        ],
+      );
     },
   },
   {
