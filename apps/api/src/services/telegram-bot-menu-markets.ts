@@ -21,6 +21,7 @@ import {
 const SEARCH_KEY_PREFIX = "tg:signal_bot:v1:market_search";
 const SEARCH_TTL_SEC = 10 * 60;
 export const SIGNAL_BOT_MARKET_SEARCH_PAGE_SIZE = 5;
+const SIGNAL_BOT_MARKET_SEARCH_GRID_COLUMNS = 3;
 const SEARCH_SESSION_RESULT_LIMIT = 25;
 
 type SearchRedis = {
@@ -232,33 +233,36 @@ export function buildSignalBotMarketSearchScreen(input: {
       );
     }
   }
+  const resultButtonRows: SignalBotMarketSearchMessage["reply_markup"]["inline_keyboard"] =
+    [];
+  for (
+    let localIndex = 0;
+    localIndex < visibleResults.length;
+    localIndex += 1
+  ) {
+    const result = visibleResults[localIndex];
+    if (!result) continue;
+    const index = pageStart + localIndex;
+    const options = venueOptions(result);
+    const venueIcon =
+      options.length === 1
+        ? formatTelegramVenueButtonIcon(result.venue)
+        : undefined;
+    const rowIndex = Math.floor(
+      localIndex / SIGNAL_BOT_MARKET_SEARCH_GRID_COLUMNS,
+    );
+    const row = resultButtonRows[rowIndex] ?? [];
+    row.push({
+      callback_data: `${input.callbackPrefix}search:${input.sessionId}:${index}`,
+      ...(venueIcon ? { icon_custom_emoji_id: venueIcon } : {}),
+      text: `${venueIcon ? "" : "🌐 "}${index + 1}.`,
+    });
+    resultButtonRows[rowIndex] = row;
+  }
   return {
     reply_markup: {
       inline_keyboard: [
-        ...visibleResults.map((result, localIndex) => {
-          const index = pageStart + localIndex;
-          return [
-            {
-              callback_data: `${input.callbackPrefix}search:${input.sessionId}:${index}`,
-              ...(venueOptions(result).length === 1
-                ? {
-                    icon_custom_emoji_id: formatTelegramVenueButtonIcon(
-                      result.venue,
-                    ),
-                  }
-                : {}),
-              text: compactTelegramText(
-                `${venueOptions(result).length > 1 ? "🌐 " : ""}${index + 1}. ${
-                  buildTelegramMarketIdentity({
-                    eventTitle: result.eventTitle,
-                    marketTitle: result.marketTitle,
-                  }).buttonLabel
-                }${venueOptions(result).length > 1 ? ` · ${venueOptions(result).length} venues` : ""}`,
-                TELEGRAM_INLINE_BUTTON_GRAPHEME_LIMIT,
-              ),
-            },
-          ];
-        }),
+        ...resultButtonRows,
         ...(input.results.length > SIGNAL_BOT_MARKET_SEARCH_PAGE_SIZE
           ? [
               [
