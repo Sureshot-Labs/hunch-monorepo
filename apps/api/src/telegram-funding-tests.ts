@@ -4133,7 +4133,8 @@ for (const closedDestination of [
   );
   assert.match(qrCaption, /Polymarket funding QR/u);
   assert.match(qrCaption, /Minimum to add:\* \$0\\\.37/u);
-  assert.doesNotMatch(qrCaption, new RegExp(address, "u"));
+  assert.match(qrCaption, /Verified receive address/u);
+  assert.ok(qrCaption.includes("`" + address + "`"));
   assert.deepEqual(qrReplyMarkup, {
     inline_keyboard: [
       [
