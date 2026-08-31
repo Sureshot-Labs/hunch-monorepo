@@ -75,7 +75,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "search results preserve event question, outcome and venue presentation",
+    name: "search results preserve detail text and use compact numbered venue buttons",
     run: () => {
       const message = buildSignalBotMarketSearchScreen({
         callbackPrefix: "hm:v1:",
@@ -97,9 +97,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         new RegExp(TELEGRAM_CUSTOM_EMOJI.polymarket.id),
       );
       assert.doesNotMatch(message.text, /polymarket ·/);
-      assert.match(
-        message.reply_markup.inline_keyboard[0]?.[0]?.text ?? "",
-        /Elon Musk · 3rd richest person/,
+      assert.equal(message.reply_markup.inline_keyboard[0]?.[0]?.text, "1.");
+      assert.equal(
+        message.reply_markup.inline_keyboard[0]?.[0]?.icon_custom_emoji_id,
+        TELEGRAM_CUSTOM_EMOJI.polymarket.id,
       );
 
       const sameTitleMessage = buildSignalBotMarketSearchScreen({
@@ -138,6 +139,77 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(
         picker.reply_markup.inline_keyboard[1]?.[0]?.icon_custom_emoji_id,
         TELEGRAM_CUSTOM_EMOJI.limitless.id,
+      );
+    },
+  },
+  {
+    name: "search result buttons are arranged in a three-column grid",
+    run: () => {
+      const message = buildSignalBotMarketSearchScreen({
+        callbackPrefix: "hm:v1:",
+        query: "world cup",
+        results: Array.from({ length: 5 }, (_, index) => ({
+          ...sampleResult,
+          marketId: `market-${index + 1}`,
+          marketTitle: `Market ${index + 1}`,
+          venue: index === 1 ? "limitless" : "polymarket",
+        })),
+        sessionId: "123456789abc",
+      });
+
+      assert.deepEqual(
+        message.reply_markup.inline_keyboard.slice(0, 2).map((row) =>
+          row.map((button) => ({
+            icon: button.icon_custom_emoji_id,
+            text: button.text,
+          })),
+        ),
+        [
+          [
+            { icon: TELEGRAM_CUSTOM_EMOJI.polymarket.id, text: "1." },
+            { icon: TELEGRAM_CUSTOM_EMOJI.limitless.id, text: "2." },
+            { icon: TELEGRAM_CUSTOM_EMOJI.polymarket.id, text: "3." },
+          ],
+          [
+            { icon: TELEGRAM_CUSTOM_EMOJI.polymarket.id, text: "4." },
+            { icon: TELEGRAM_CUSTOM_EMOJI.polymarket.id, text: "5." },
+          ],
+        ],
+      );
+      assert.deepEqual(
+        message.reply_markup.inline_keyboard
+          .slice(0, 2)
+          .flat()
+          .map((button) => button.callback_data),
+        Array.from(
+          { length: 5 },
+          (_, index) => `hm:v1:search:123456789abc:${index}`,
+        ),
+      );
+    },
+  },
+  {
+    name: "multi-venue search results use a compact neutral icon",
+    run: () => {
+      const message = buildSignalBotMarketSearchScreen({
+        callbackPrefix: "hm:v1:",
+        query: "world cup",
+        results: [
+          {
+            ...sampleResult,
+            venueOptions: [
+              sampleResult,
+              { ...sampleResult, marketId: "limitless-1", venue: "limitless" },
+            ],
+          },
+        ],
+        sessionId: "123456789abc",
+      });
+
+      assert.equal(message.reply_markup.inline_keyboard[0]?.[0]?.text, "🌐 1.");
+      assert.equal(
+        message.reply_markup.inline_keyboard[0]?.[0]?.icon_custom_emoji_id,
+        undefined,
       );
     },
   },
@@ -605,7 +677,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         route: nextRoute,
         telegramUserId: 20,
       });
-      assert.match(rendered, /"text":"6\. Market 6/u);
+      assert.match(rendered, /"text":"6\."/u);
+      assert.match(rendered, /Market 6/u);
       assert.match(rendered, /Previous/u);
       assert.match(rendered, /Next/u);
       assert.equal(expired, 0);
