@@ -7,6 +7,7 @@ ARCHIVE="${ARCHIVE:-}"
 IMAGE_ARCHIVE="${IMAGE_ARCHIVE:-}"
 HUNCH_BACKEND_IMAGE="${HUNCH_BACKEND_IMAGE:-}"
 HUNCH_SOCIAL_MEDIA_WORKER_IMAGE="${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE:-}"
+REDIS_SAVE_POLICY="${REDIS_SAVE_POLICY:-300 1}"
 
 if [[ -z "${HUNCH_BACKEND_IMAGE}" ]]; then
   echo "HUNCH_BACKEND_IMAGE is required" >&2
@@ -79,8 +80,29 @@ export HUNCH_SOCIAL_MEDIA_WORKER_IMAGE
 # Start or retain infra and migrate before touching the live application
 # containers. If migration fails, the currently deployed API and workers stay
 # online on their existing image.
-"${compose[@]}" up -d postgres redis
-if ! "${compose[@]}" run --rm api \
+"${compose[@]}" up -d --no-recreate postgres redis
+redis_container_id="$("${compose[@]}" ps -q redis)"
+if [[ -z "${redis_container_id}" ]]; then
+  echo "Redis container is missing after startup." >&2
+  exit 1
+fi
+redis_ready=0
+for _ in {1..180}; do
+  if [[ "$(docker exec "${redis_container_id}" redis-cli --raw ping 2>/dev/null || true)" == "PONG" ]]; then
+    redis_ready=1
+    break
+  fi
+  sleep 2
+done
+if [[ "${redis_ready}" != "1" ]]; then
+  echo "Redis did not finish loading within 360 seconds." >&2
+  exit 1
+fi
+if [[ "$(docker exec "${redis_container_id}" redis-cli --raw config set save "${REDIS_SAVE_POLICY}")" != "OK" ]]; then
+  echo "Failed to apply Redis save policy: ${REDIS_SAVE_POLICY}" >&2
+  exit 1
+fi
+if ! "${compose[@]}" run --rm --no-deps api \
   node /app/packages/config/dist/run-with-secrets.js \
   /app/packages/db/dist/migrate.js; then
   echo "Migration failed; existing application containers were left running." >&2
