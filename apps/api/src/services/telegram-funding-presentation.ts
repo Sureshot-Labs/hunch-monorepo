@@ -469,6 +469,9 @@ export async function buildTelegramFundingQrPhoto(
           ]
         : []),
       escapeTelegramMarkdownV2("Scan to fill the verified receive address."),
+      "",
+      `📍 ${formatTelegramBoldMarkdownV2("Verified receive address")}`,
+      formatTelegramCodeMarkdownV2(projection.receiveAddress),
       formatTelegramFieldMarkdownV2(
         "Expires at",
         expiryLabel(projection.expiresAt),

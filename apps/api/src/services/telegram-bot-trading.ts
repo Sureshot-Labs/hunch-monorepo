@@ -446,6 +446,20 @@ function buildTelegramFundingBuyReturnOpenFailureMessage(input: {
   );
 }
 
+function withTelegramTradeErrorActions(input: {
+  intentId: string;
+  message: TelegramBotTradingMessage;
+}): TelegramBotTradingMessage {
+  const hasPrimaryAction = input.message.reply_markup?.inline_keyboard.some(
+    (row) => row.length > 0,
+  );
+  return withTelegramPrivateNavigation(input.message, {
+    marketCallbackData: hasPrimaryAction
+      ? undefined
+      : `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${input.intentId}`,
+  });
+}
+
 function formatTelegramVenueFieldMarkdownV2(venue: string): string {
   const emoji = telegramCustomEmojiMarkdownV2ForVenue(venue);
   return `${emoji ?? "🌐"} ${formatTelegramFieldMarkdownV2(
@@ -12739,18 +12753,23 @@ export async function handleTelegramBotTradingCallback(
       });
       await input.sendMessage({
         chat_id: chatId,
-        parse_mode: "MarkdownV2",
-        ...(openButton
-          ? { reply_markup: { inline_keyboard: [[openButton]] } }
-          : {}),
-        text: formatTelegramTradeLifecycleMessageMarkdownV2({
-          heading: "Direct bot trading is not ready.",
-          tone: "warn",
-          lines: [
-            tradeReadiness?.message ?? "Open Hunch to trade this market.",
-          ],
-          marketTitle: market.title,
-          venue: intent.venue,
+        ...withTelegramTradeErrorActions({
+          intentId: intent.id,
+          message: {
+            parse_mode: "MarkdownV2",
+            ...(openButton
+              ? { reply_markup: { inline_keyboard: [[openButton]] } }
+              : {}),
+            text: formatTelegramTradeLifecycleMessageMarkdownV2({
+              heading: "Direct bot trading is not ready.",
+              tone: "warn",
+              lines: [
+                tradeReadiness?.message ?? "Open Hunch to trade this market.",
+              ],
+              marketTitle: market.title,
+              venue: intent.venue,
+            }),
+          },
         }),
       });
     }
@@ -13231,13 +13250,18 @@ export async function handleTelegramBotTradingCallback(
       });
       await input.sendMessage({
         chat_id: chatId,
-        parse_mode: "MarkdownV2",
-        text: formatTelegramTradeLifecycleMessageMarkdownV2({
-          heading: "Unable to build a safe current quote.",
-          tone: "warn",
-          lines: ["Nothing was submitted. Send /market again."],
-          marketTitle: intent.market_title,
-          venue: intent.venue,
+        ...withTelegramTradeErrorActions({
+          intentId: intent.id,
+          message: {
+            parse_mode: "MarkdownV2",
+            text: formatTelegramTradeLifecycleMessageMarkdownV2({
+              heading: "Unable to build a safe current quote.",
+              tone: "warn",
+              lines: ["Nothing was submitted. Open the market again."],
+              marketTitle: intent.market_title,
+              venue: intent.venue,
+            }),
+          },
         }),
       });
       return true;
@@ -13268,19 +13292,24 @@ export async function handleTelegramBotTradingCallback(
       });
       await input.sendMessage({
         chat_id: chatId,
-        parse_mode: "MarkdownV2",
-        text: formatTelegramTradeLifecycleMessageMarkdownV2({
-          heading: venueMinimumBlocking
-            ? "Price moved."
-            : "Sell amount is too small.",
-          tone: "warn",
-          lines: [
-            sellProceedsBlocking
-              ? "The current Sell would return less than $0.01. Nothing was submitted."
-              : "Nothing was submitted. Send /market again.",
-          ],
-          marketTitle: intent.market_title,
-          venue: intent.venue,
+        ...withTelegramTradeErrorActions({
+          intentId: intent.id,
+          message: {
+            parse_mode: "MarkdownV2",
+            text: formatTelegramTradeLifecycleMessageMarkdownV2({
+              heading: venueMinimumBlocking
+                ? "Price moved."
+                : "Sell amount is too small.",
+              tone: "warn",
+              lines: [
+                sellProceedsBlocking
+                  ? "The current Sell would return less than $0.01. Nothing was submitted."
+                  : "Nothing was submitted. Open the market again.",
+              ],
+              marketTitle: intent.market_title,
+              venue: intent.venue,
+            }),
+          },
         }),
       });
       return true;
@@ -13302,17 +13331,22 @@ export async function handleTelegramBotTradingCallback(
       });
       await input.sendMessage({
         chat_id: chatId,
-        parse_mode: "MarkdownV2",
-        text: formatTelegramTradeLifecycleMessageMarkdownV2({
-          heading: "Trade not submitted.",
-          tone: "warn",
-          lines: [
-            action === "BUY"
-              ? `Maximum total spend ${formatUsd(previewMaxSpendUsd)} is no longer executable within your ${formatUsd(maxAmountUsd)} limit.`
-              : "The confirmed sell quote is no longer executable.",
-          ],
-          marketTitle: intent.market_title,
-          venue: intent.venue,
+        ...withTelegramTradeErrorActions({
+          intentId: intent.id,
+          message: {
+            parse_mode: "MarkdownV2",
+            text: formatTelegramTradeLifecycleMessageMarkdownV2({
+              heading: "Trade not submitted.",
+              tone: "warn",
+              lines: [
+                action === "BUY"
+                  ? `Maximum total spend ${formatUsd(previewMaxSpendUsd)} is no longer executable within your ${formatUsd(maxAmountUsd)} limit.`
+                  : "The confirmed sell quote is no longer executable.",
+              ],
+              marketTitle: intent.market_title,
+              venue: intent.venue,
+            }),
+          },
         }),
       });
       return true;
@@ -13351,16 +13385,21 @@ export async function handleTelegramBotTradingCallback(
         });
         await input.sendMessage({
           chat_id: chatId,
-          parse_mode: "MarkdownV2",
-          ...(openButton
-            ? { reply_markup: { inline_keyboard: [[openButton]] } }
-            : {}),
-          text: formatTelegramTradeLifecycleMessageMarkdownV2({
-            heading: "More spendable funds required.",
-            tone: "warn",
-            lines: ["Open Hunch to continue."],
-            marketTitle: market.title,
-            venue: intent.venue,
+          ...withTelegramTradeErrorActions({
+            intentId: intent.id,
+            message: {
+              parse_mode: "MarkdownV2",
+              ...(openButton
+                ? { reply_markup: { inline_keyboard: [[openButton]] } }
+                : {}),
+              text: formatTelegramTradeLifecycleMessageMarkdownV2({
+                heading: "More spendable funds required.",
+                tone: "warn",
+                lines: ["Open Hunch to continue."],
+                marketTitle: market.title,
+                venue: intent.venue,
+              }),
+            },
           }),
         });
         return true;
@@ -13746,16 +13785,21 @@ export async function handleTelegramBotTradingCallback(
         });
         await input.sendMessage({
           chat_id: chatId,
-          parse_mode: "MarkdownV2",
-          ...(openButton
-            ? { reply_markup: { inline_keyboard: [[openButton]] } }
-            : {}),
-          text: formatTelegramTradeLifecycleMessageMarkdownV2({
-            heading: "Trading setup needs attention.",
-            tone: "warn",
-            lines: [message],
-            marketTitle: intent.market_title,
-            venue: intent.venue,
+          ...withTelegramTradeErrorActions({
+            intentId: intent.id,
+            message: {
+              parse_mode: "MarkdownV2",
+              ...(openButton
+                ? { reply_markup: { inline_keyboard: [[openButton]] } }
+                : {}),
+              text: formatTelegramTradeLifecycleMessageMarkdownV2({
+                heading: "Trading setup needs attention.",
+                tone: "warn",
+                lines: [message],
+                marketTitle: intent.market_title,
+                venue: intent.venue,
+              }),
+            },
           }),
         });
         return true;
@@ -14171,7 +14215,7 @@ export async function handleTelegramBotTradingCallback(
             text: "🎯 Trade this market",
           }
         : null;
-    const filledKeyboard =
+    const resultKeyboard =
       resolution.intentStatus === "filled" && !postSubmitError
         ? {
             inline_keyboard: [
@@ -14180,11 +14224,20 @@ export async function handleTelegramBotTradingCallback(
               [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
             ],
           }
-        : undefined;
+        : resolution.intentStatus === "failed" ||
+            resolution.intentStatus === "cancelled"
+          ? marketNavigation
+          : postSubmitError
+            ? {
+                inline_keyboard: [
+                  [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+                ],
+              }
+            : undefined;
     await input.sendMessage({
       chat_id: chatId,
       parse_mode: "MarkdownV2",
-      ...(filledKeyboard ? { reply_markup: filledKeyboard } : {}),
+      ...(resultKeyboard ? { reply_markup: resultKeyboard } : {}),
       text: formatTelegramTradeLifecycleMessageMarkdownV2({
         heading: resolution.messageTitle,
         tone: postSubmitError
@@ -14413,24 +14466,29 @@ export async function handleTelegramBotTradingCallback(
     });
     await input.sendMessage({
       chat_id: chatId,
-      parse_mode: "MarkdownV2",
-      ...(openButton
-        ? { reply_markup: { inline_keyboard: [[openButton]] } }
-        : {}),
-      text: formatTelegramTradeLifecycleMessageMarkdownV2({
-        heading: definitiveSubmitRejection
-          ? "Trade rejected."
-          : "Trade failed.",
-        tone: "warn",
-        lines: [
-          definitiveSubmitRejection
-            ? "Nothing was submitted. Refresh the market card before trying again."
-            : normalized.code === "unsupported_capability"
-              ? "This venue is not executable from the bot yet. Open Hunch to trade."
-              : "Trade failed before a confirmed venue submission. Nothing is being retried automatically.",
-        ],
-        marketTitle: intent.market_title,
-        venue: intent.venue,
+      ...withTelegramTradeErrorActions({
+        intentId: intent.id,
+        message: {
+          parse_mode: "MarkdownV2",
+          ...(openButton
+            ? { reply_markup: { inline_keyboard: [[openButton]] } }
+            : {}),
+          text: formatTelegramTradeLifecycleMessageMarkdownV2({
+            heading: definitiveSubmitRejection
+              ? "Trade rejected."
+              : "Trade failed.",
+            tone: "warn",
+            lines: [
+              definitiveSubmitRejection
+                ? "Nothing was submitted. Refresh the market card before trying again."
+                : normalized.code === "unsupported_capability"
+                  ? "This venue is not executable from the bot yet. Open Hunch to trade."
+                  : "Trade failed before a confirmed venue submission. Nothing is being retried automatically.",
+            ],
+            marketTitle: intent.market_title,
+            venue: intent.venue,
+          }),
+        },
       }),
     });
   }
