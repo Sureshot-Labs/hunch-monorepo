@@ -53,7 +53,7 @@ export type PositionShareSourceRow = {
   event_end_time: Date | null;
 };
 
-const POSITION_MARKET_JOIN_SQL = `
+export const POSITION_MARKET_JOIN_SQL = `
   left join lateral (
     select
       token_market.market_id,
@@ -90,32 +90,38 @@ const POSITION_MARKET_JOIN_SQL = `
     on e.id = m.event_id
   left join lateral (
     select top.best_bid, top.best_ask
-    from unified_token_top_latest top
-    left join unified_market_tokens ymt
-      on ymt.token_id = top.token_id
-    where (
-        top.token_id = m.token_yes
-        or (
-          ymt.market_id = m.id
-          and ymt.outcome_side = 'YES'
-        )
-      )
-      and top.ts > now() - interval '7 days'
+    from (
+      select nullif(m.token_yes, '') as token_id, 0 as token_rank, null::timestamptz as updated_at
+      union all
+      select outcome_token.token_id, 1 as token_rank, outcome_token.updated_at
+      from unified_market_tokens outcome_token
+      where outcome_token.market_id = m.id
+        and outcome_token.outcome_side = 'YES'
+    ) candidate_token
+    join unified_token_top_latest top
+      on top.token_id = candidate_token.token_id
+     and top.ts > now() - interval '7 days'
+    order by candidate_token.token_rank asc,
+             candidate_token.updated_at desc nulls last,
+             candidate_token.token_id asc
     limit 1
   ) yes_top on true
   left join lateral (
     select top.best_bid, top.best_ask
-    from unified_token_top_latest top
-    left join unified_market_tokens nmt
-      on nmt.token_id = top.token_id
-    where (
-        top.token_id = m.token_no
-        or (
-          nmt.market_id = m.id
-          and nmt.outcome_side = 'NO'
-        )
-      )
-      and top.ts > now() - interval '7 days'
+    from (
+      select nullif(m.token_no, '') as token_id, 0 as token_rank, null::timestamptz as updated_at
+      union all
+      select outcome_token.token_id, 1 as token_rank, outcome_token.updated_at
+      from unified_market_tokens outcome_token
+      where outcome_token.market_id = m.id
+        and outcome_token.outcome_side = 'NO'
+    ) candidate_token
+    join unified_token_top_latest top
+      on top.token_id = candidate_token.token_id
+     and top.ts > now() - interval '7 days'
+    order by candidate_token.token_rank asc,
+             candidate_token.updated_at desc nulls last,
+             candidate_token.token_id asc
     limit 1
   ) no_top on true
   left join lateral (
@@ -262,7 +268,7 @@ export async function fetchShareSnapshot(
 }
 
 export async function fetchPositionShareSourceById(
-  pool: Pool,
+  pool: DbQuery,
   inputs: {
     userId: string;
     positionId: string;

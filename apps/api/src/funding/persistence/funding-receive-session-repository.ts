@@ -720,12 +720,31 @@ export async function createOrReuseFundingReceiveSession(
     await lockFundingReceiveSessionScope(client, input);
     const existing = await lockCurrentFundingReceiveSessions(client, {
       ...input,
-      includeRecovery: input.requireExactReceiveScope === true,
+      // Cross-channel safety always needs the full receipt/recovery horizon,
+      // even when a legacy same-channel caller retains its old replay rules.
+      includeRecovery: true,
       now: input.now,
     });
+    const protectedCrossChannelSession = existing.find(
+      (session) =>
+        session.owner_channel !== ownerChannel &&
+        receiveSessionIsCurrentForSelection(session, input.now, true) &&
+        receiveSessionHasCrossedMoneyBoundary(session, true),
+    );
+    if (protectedCrossChannelSession) {
+      throw new FundingReceiveSessionChannelConflictError();
+    }
     const preserveObservedMoneyBoundary =
       input.requireExactReceiveScope === true;
-    for (const staleSession of existing) {
+    const selectionCandidates = preserveObservedMoneyBoundary
+      ? existing
+      : existing.filter(
+          (session) =>
+            session.status === "open" ||
+            session.status === "processing" ||
+            session.status === "review_required",
+        );
+    for (const staleSession of selectionCandidates) {
       if (
         receiveSessionIsCurrentForSelection(
           staleSession,
@@ -748,19 +767,58 @@ export async function createOrReuseFundingReceiveSession(
         [staleSession.id, input.now],
       );
     }
-    const currentSessions = existing.filter((session) =>
+    const currentSessions = selectionCandidates.filter((session) =>
       receiveSessionIsCurrentForSelection(
         session,
         input.now,
         preserveObservedMoneyBoundary,
       ),
     );
+    const crossChannelSessions = currentSessions.filter(
+      (session) => session.owner_channel !== ownerChannel,
+    );
     if (
-      currentSessions.some((session) => session.owner_channel !== ownerChannel)
+      crossChannelSessions.some((session) =>
+        receiveSessionHasCrossedMoneyBoundary(session, true),
+      )
     ) {
       throw new FundingReceiveSessionChannelConflictError();
     }
-    const differentPostMoneySession = currentSessions.find(
+
+    // A fresh surface may supersede an unspent receive session from another
+    // channel. We close, rather than mutate or return, the old session so its
+    // opaque channel ownership is never disclosed. Cancelled sessions remain
+    // observable through observe_until, so a transfer sent to an already
+    // displayed address is still recovered and cannot be lost during handoff.
+    for (const supersededSession of crossChannelSessions) {
+      const cancelled = await client.query(
+        `
+          update funding_receive_sessions receive_session
+          set status = 'cancelled',
+              closed_at = $2,
+              updated_at = $2,
+              version = version + 1
+          where receive_session.id = $1
+            and receive_session.status = 'open'
+            and not exists (
+              select 1
+              from funding_receive_receipts receipt
+              where receipt.receive_session_id = receive_session.id
+            )
+        `,
+        [supersededSession.id, input.now],
+      );
+      if (cancelled.rowCount !== 1) {
+        // Receipt observation can race with a new open. Fail closed instead
+        // of replacing a session after money has become attributable to it.
+        throw new FundingReceiveSessionChannelConflictError();
+      }
+    }
+
+    const sameChannelSessions = currentSessions.filter(
+      (session) => session.owner_channel === ownerChannel,
+    );
+    const differentPostMoneySession = sameChannelSessions.find(
       (session) =>
         input.requireExactReceiveScope &&
         receiveSessionHasCrossedMoneyBoundary(session, true) &&
@@ -771,7 +829,7 @@ export async function createOrReuseFundingReceiveSession(
         differentPostMoneySession.id,
       );
     }
-    const current = currentSessions[0] ?? null;
+    const current = sameChannelSessions[0] ?? null;
     if (
       current &&
       current.owner_channel === ownerChannel &&

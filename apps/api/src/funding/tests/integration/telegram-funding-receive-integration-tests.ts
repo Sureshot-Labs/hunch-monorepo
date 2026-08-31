@@ -578,21 +578,27 @@ try {
     canonical.snapshot.observationVariants,
     "a newly verified cursor must not replace the frozen Telegram baseline",
   );
-  await assert.rejects(
-    createOrReuseFundingReceiveSession(pool, {
-      ...canonicalInput,
-      ownerChannel: "web",
-    }),
-    (error: unknown) =>
-      error instanceof Error &&
-      "code" in error &&
-      error.code === "receive_channel_conflict",
+  const supersedingWeb = await createOrReuseFundingReceiveSession(pool, {
+    ...canonicalInput,
+    ownerChannel: "web",
+    now: new Date(now.getTime() + 75),
+  });
+  assert.notEqual(
+    supersedingWeb.snapshot.session.receiveSessionId,
+    receiveSessionId,
+    "another channel must be able to supersede an unspent receive session",
   );
-  const unchangedOwner = await pool.query<{ owner_channel: string }>(
-    `select owner_channel from funding_receive_sessions where id = $1`,
+  const supersededOwner = await pool.query<{
+    owner_channel: string;
+    status: string;
+  }>(
+    `select owner_channel, status from funding_receive_sessions where id = $1`,
     [receiveSessionId],
   );
-  assert.equal(unchangedOwner.rows[0]?.owner_channel, "telegram");
+  assert.deepEqual(supersededOwner.rows[0], {
+    owner_channel: "telegram",
+    status: "cancelled",
+  });
   assert.equal(
     await cancelFundingReceiveSessionForUser(pool, {
       userId,
@@ -602,6 +608,22 @@ try {
     }),
     null,
     "a web cancel must not close a Telegram-owned session",
+  );
+  const closedSupersedingWeb = await cancelFundingReceiveSessionForUser(pool, {
+    userId,
+    receiveSessionId: supersedingWeb.snapshot.session.receiveSessionId,
+    ownerChannel: "web",
+    now: new Date(now.getTime() + 110),
+  });
+  assert.equal(closedSupersedingWeb?.session.status, "cancelled");
+  const resumedTelegram = await createOrReuseFundingReceiveSession(pool, {
+    ...canonicalInput,
+    now: new Date(now.getTime() + 120),
+  });
+  receiveSessionId = resumedTelegram.snapshot.session.receiveSessionId;
+  assert.notEqual(
+    receiveSessionId,
+    supersedingWeb.snapshot.session.receiveSessionId,
   );
   const isolatedWeb = await createOrReuseFundingReceiveSession(pool, {
     ...canonicalInput,

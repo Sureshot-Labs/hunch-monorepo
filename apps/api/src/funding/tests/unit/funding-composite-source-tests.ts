@@ -1088,6 +1088,57 @@ assert.equal(
   }),
   658_574n,
 );
+
+const floorRoundedRelaySource = partialSource({
+  id: "floor_rounded_relay",
+  location: sourceLocation(
+    "floor_rounded_relay",
+    "evm:8453",
+    "0x00000000000000000000000000000000000000b5",
+  ),
+  sourceRaw: "8202701",
+  expectedRaw: "8147457",
+  minimumRaw: "8065982",
+  feeUsd: "0.04",
+  payerRequirement: "user",
+});
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    candidates: [floorRoundedRelaySource],
+    destinationAsset: DESTINATION_ASSET,
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: "10",
+    maximumFeeBps: 2_000,
+    maximumSlippageBps: 100,
+    executionBoundary: "client_handoff",
+  }),
+  8_065_982n,
+);
+const belowFloorRelaySource = partialSource({
+  id: "below_floor_relay",
+  location: sourceLocation(
+    "below_floor_relay",
+    "evm:8453",
+    "0x00000000000000000000000000000000000000b6",
+  ),
+  sourceRaw: "8202701",
+  expectedRaw: "8147457",
+  minimumRaw: "8065981",
+  feeUsd: "0.04",
+  payerRequirement: "user",
+});
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    candidates: [belowFloorRelaySource],
+    destinationAsset: DESTINATION_ASSET,
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: "10",
+    maximumFeeBps: 2_000,
+    maximumSlippageBps: 100,
+    executionBoundary: "client_handoff",
+  }),
+  0n,
+);
 assert.equal(
   maximumInternalFundingDestinationRaw({
     candidates: overBoundCandidates,

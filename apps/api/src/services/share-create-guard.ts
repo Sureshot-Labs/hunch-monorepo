@@ -14,7 +14,8 @@ export type ShareCreateThrottleReason =
   | "hour_rate_limit"
   | "user_inflight"
   | "global_inflight"
-  | "guard_unavailable";
+  | "guard_unavailable"
+  | "request_timeout";
 
 type GuardBackend = "redis" | "local" | "blocked";
 
@@ -39,22 +40,46 @@ const SHARE_CREATE_BURST_WINDOW_MS = 60 * 1000;
 const SHARE_CREATE_HOURLY_MAX = 60;
 const SHARE_CREATE_HOURLY_WINDOW_MS = 60 * 60 * 1000;
 const SHARE_CREATE_SLOT_TTL_MS = 15 * 1000;
+export const SHARE_REDIS_OPERATION_TIMEOUT_MS = 250;
+export const TRADE_PNL_SHARE_REQUEST_TIMEOUT_MS = 2_500;
 const TRADE_SHARE_RECENT_CACHE_TTL_SEC = 120;
 const TRADE_SHARE_RECENT_CACHE_TTL_MS = TRADE_SHARE_RECENT_CACHE_TTL_SEC * 1000;
 
 const localRateBuckets = new Map<string, LocalRateBucket>();
 const localSlots = new Map<string, LocalSlot>();
 const localTradeShareCache = new Map<string, LocalCacheEntry>();
+const inflightTradeShareRequests = new Map<
+  string,
+  Promise<PublicShareResponse>
+>();
+
+const defaultShareGuardDependencies = {
+  acquireDistributedSlot,
+  checkRateLimit,
+  getRedisStatus,
+  releaseDistributedSlot,
+};
+let shareGuardDependencies = defaultShareGuardDependencies;
 
 export class ShareCreateGuardError extends Error {
-  readonly statusCode = 429;
+  readonly statusCode: 429 | 503;
 
   constructor(
     readonly reason: ShareCreateThrottleReason,
     readonly retryAfterSec: number,
   ) {
-    super("rate_limit_exceeded");
+    super(
+      reason === "request_timeout"
+        ? "share_creation_timeout"
+        : reason === "guard_unavailable"
+          ? "share_guard_unavailable"
+          : "rate_limit_exceeded",
+    );
     this.name = "ShareCreateGuardError";
+    this.statusCode =
+      reason === "guard_unavailable" || reason === "request_timeout"
+        ? 503
+        : 429;
   }
 }
 
@@ -62,8 +87,50 @@ function isProduction(): boolean {
   return env.nodeEnv === "production";
 }
 
+export async function settleShareDependency<T>(
+  task: Promise<T>,
+  timeoutMs: number,
+  fallback: T,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guardedTask = task.catch(() => fallback);
+  const deadline = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), timeoutMs);
+  });
+  try {
+    return await Promise.race([guardedTask, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+const SHARE_DEPENDENCY_UNAVAILABLE = Symbol("share_dependency_unavailable");
+
+export async function settleRequiredShareDependency<T>(
+  task: Promise<T>,
+  timeoutMs: number = SHARE_REDIS_OPERATION_TIMEOUT_MS,
+): Promise<T> {
+  const result = await settleShareDependency<T | symbol>(
+    task,
+    timeoutMs,
+    SHARE_DEPENDENCY_UNAVAILABLE,
+  );
+  if (result === SHARE_DEPENDENCY_UNAVAILABLE) {
+    throw new ShareCreateGuardError("guard_unavailable", 15);
+  }
+  return result as T;
+}
+
+async function boundedRedisStatus() {
+  return settleShareDependency(
+    shareGuardDependencies.getRedisStatus(),
+    SHARE_REDIS_OPERATION_TIMEOUT_MS,
+    { redis: null, status: "error" as const, error: "deadline_exceeded" },
+  );
+}
+
 async function resolveGuardBackend(): Promise<GuardBackend> {
-  const { redis } = await getRedisStatus();
+  const { redis } = await boundedRedisStatus();
   if (redis) return "redis";
   return isProduction() ? "blocked" : "local";
 }
@@ -147,9 +214,13 @@ async function checkGuardRateLimit(
   if (backend === "local")
     return checkLocalRateLimit(key, maxRequests, windowMs);
   if (backend === "redis") {
-    return checkRateLimit(key, maxRequests, windowMs, {
-      onError: "fail_closed",
-    });
+    return settleRequiredShareDependency(
+      shareGuardDependencies.checkRateLimit(key, maxRequests, windowMs, {
+        // A real false means the caller exhausted its quota. Redis failure is
+        // a retryable dependency outage and must not masquerade as HTTP 429.
+        onError: "throw",
+      }),
+    );
   }
   return false;
 }
@@ -163,9 +234,18 @@ async function acquireGuardSlot(
     return acquireLocalSlot(key, maxSlots, SHARE_CREATE_SLOT_TTL_MS);
   }
   if (backend === "redis") {
-    return acquireDistributedSlot(key, maxSlots, SHARE_CREATE_SLOT_TTL_MS, {
-      onError: "fail_closed",
-    });
+    return settleRequiredShareDependency(
+      shareGuardDependencies.acquireDistributedSlot(
+        key,
+        maxSlots,
+        SHARE_CREATE_SLOT_TTL_MS,
+        {
+          // Preserve the distinction between a full slot (429) and an
+          // unavailable guard backend (typed retryable 503).
+          onError: "throw",
+        },
+      ),
+    );
   }
   return false;
 }
@@ -179,7 +259,14 @@ async function releaseGuardSlot(
     return;
   }
   if (backend === "redis") {
-    await releaseDistributedSlot(key, SHARE_CREATE_SLOT_TTL_MS);
+    await settleShareDependency(
+      shareGuardDependencies.releaseDistributedSlot(
+        key,
+        SHARE_CREATE_SLOT_TTL_MS,
+      ),
+      SHARE_REDIS_OPERATION_TIMEOUT_MS,
+      undefined,
+    );
   }
 }
 
@@ -224,13 +311,15 @@ export async function getCachedTradePnlShare(inputs: {
   referralCode?: string | null;
 }): Promise<PublicShareResponse | null> {
   const key = tradeShareCacheKey(inputs);
-  const { redis } = await getRedisStatus();
+  const { redis } = await boundedRedisStatus();
   if (redis) {
-    try {
-      return parseCachedShare(await redis.get(key));
-    } catch {
-      return null;
-    }
+    return parseCachedShare(
+      await settleShareDependency(
+        redis.get(key),
+        SHARE_REDIS_OPERATION_TIMEOUT_MS,
+        null,
+      ),
+    );
   }
 
   if (isProduction()) return null;
@@ -249,15 +338,17 @@ export async function cacheTradePnlShare(
   share: PublicShareResponse,
 ): Promise<void> {
   const key = tradeShareCacheKey(inputs);
-  const { redis } = await getRedisStatus();
+  const { redis } = await boundedRedisStatus();
   if (redis) {
-    try {
-      await redis.set(key, JSON.stringify(share), {
-        EX: TRADE_SHARE_RECENT_CACHE_TTL_SEC,
-      });
-    } catch {
-      // Cache writes are best effort; the guard still protects creation.
-    }
+    await settleShareDependency(
+      redis
+        .set(key, JSON.stringify(share), {
+          EX: TRADE_SHARE_RECENT_CACHE_TTL_SEC,
+        })
+        .then(() => undefined),
+      SHARE_REDIS_OPERATION_TIMEOUT_MS,
+      undefined,
+    );
     return;
   }
 
@@ -269,6 +360,61 @@ export async function cacheTradePnlShare(
     value: share,
     expiresAt: nowMs + TRADE_SHARE_RECENT_CACHE_TTL_MS,
   });
+}
+
+export async function withTradePnlShareSingleflight(
+  inputs: {
+    userId: string;
+    positionId: string;
+    referralCode?: string | null;
+  },
+  fn: () => Promise<PublicShareResponse>,
+  deadlineAt: number = Date.now() + TRADE_PNL_SHARE_REQUEST_TIMEOUT_MS,
+): Promise<PublicShareResponse> {
+  const key = tradeShareCacheKey(inputs);
+  const existing = inflightTradeShareRequests.get(key);
+  if (existing) return settleTradeShareBeforeDeadline(existing, deadlineAt);
+
+  if (deadlineAt <= Date.now()) {
+    throw new ShareCreateGuardError("request_timeout", 5);
+  }
+
+  // The singleflight promise itself owns the deadline. If the underlying DB
+  // or cache work stops making progress, the entry is evicted when this
+  // bounded promise rejects, so later retries never inherit a permanently
+  // pending request.
+  const pending = settleTradeShareBeforeDeadline(
+    Promise.resolve().then(fn),
+    deadlineAt,
+  ).finally(() => {
+    if (inflightTradeShareRequests.get(key) === pending) {
+      inflightTradeShareRequests.delete(key);
+    }
+  });
+  inflightTradeShareRequests.set(key, pending);
+  return pending;
+}
+
+async function settleTradeShareBeforeDeadline<T>(
+  task: Promise<T>,
+  deadlineAt: number,
+): Promise<T> {
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) {
+    throw new ShareCreateGuardError("request_timeout", 5);
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new ShareCreateGuardError("request_timeout", 5)),
+      remainingMs,
+    );
+  });
+  try {
+    return await Promise.race([task, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export async function withShareCreateGuard<T>(
@@ -323,9 +469,9 @@ export async function withShareCreateGuard<T>(
 
     return await fn();
   } finally {
-    for (const key of releaseKeys.reverse()) {
-      await releaseGuardSlot(backend, key);
-    }
+    await Promise.all(
+      releaseKeys.reverse().map((key) => releaseGuardSlot(backend, key)),
+    );
   }
 }
 
@@ -333,4 +479,19 @@ export function resetShareCreateGuardForTests(): void {
   localRateBuckets.clear();
   localSlots.clear();
   localTradeShareCache.clear();
+  inflightTradeShareRequests.clear();
+  shareGuardDependencies = defaultShareGuardDependencies;
+}
+
+export function clearTradePnlShareSingleflightForTests(): void {
+  inflightTradeShareRequests.clear();
+}
+
+export function setShareCreateGuardDependenciesForTests(
+  overrides: Partial<typeof defaultShareGuardDependencies>,
+): void {
+  shareGuardDependencies = {
+    ...defaultShareGuardDependencies,
+    ...overrides,
+  };
 }

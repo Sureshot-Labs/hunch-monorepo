@@ -3490,6 +3490,23 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       status: "completed",
       stage: "terminal",
     });
+    const factsAfterCompletion = await loadFundingAccountValueFacts(
+      client as never,
+      userA,
+    );
+    assert.equal(
+      factsAfterCompletion.availability.find(
+        (row) =>
+          row.componentId === planA.operation.sourceSnapshot?.componentId,
+      ),
+      undefined,
+    );
+    assert.equal(
+      factsAfterCompletion.inTransit.some(
+        (row) => row.operationId === committedA.operation.id,
+      ),
+      false,
+    );
     const completedOperation = await fetchFundingOperationForUser(
       client as never,
       {

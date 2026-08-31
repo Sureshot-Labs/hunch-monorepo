@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { getRedisStatus } from "../redis.js";
 
-export type RateLimitErrorMode = "fail_open" | "fail_closed";
+export type RateLimitErrorMode = "fail_open" | "fail_closed" | "throw";
 
 type CheckRateLimitOptions = {
   onError?: RateLimitErrorMode;
@@ -100,7 +100,11 @@ function resolveOnErrorMode(
 }
 
 function allowOnError(options?: CheckRateLimitOptions): boolean {
-  return resolveOnErrorMode(options) === "fail_open";
+  const mode = resolveOnErrorMode(options);
+  if (mode === "throw") {
+    throw new Error("rate_limit_backend_unavailable");
+  }
+  return mode === "fail_open";
 }
 
 async function evalLuaNumber(

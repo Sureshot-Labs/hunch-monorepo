@@ -19,6 +19,7 @@ import {
   expireFundingReceiveSessions,
   fetchFundingReceiveReceiptForReview,
   fetchFundingReceiveSessionForUser,
+  FundingReceiveSessionChannelConflictError,
   FundingReceiveSessionExactScopeConflictError,
   FundingReceiveSessionOpenIdempotencyConflictError,
   insertFundingReceiveReceipt,
@@ -214,7 +215,75 @@ const userId = await insertUser();
 let mergeTargetId: string | null = null;
 let genericOptionUserId: string | null = null;
 let retainedSolUserId: string | null = null;
+let crossChannelUserId: string | null = null;
 try {
+  crossChannelUserId = await insertUser();
+  const telegramReceive = await createOrReuseFundingReceiveSession(pool, {
+    ...sessionInput(crossChannelUserId),
+    ownerChannel: "telegram",
+  });
+  const webReceive = await createOrReuseFundingReceiveSession(pool, {
+    ...sessionInput(crossChannelUserId),
+    ownerChannel: "web",
+    now: new Date(NOW.getTime() + 100),
+  });
+  assert.notEqual(
+    webReceive.snapshot.session.receiveSessionId,
+    telegramReceive.snapshot.session.receiveSessionId,
+    "a selected receive target without a receipt must not block another channel",
+  );
+  const supersededReceive = await fetchFundingReceiveSessionForUser(pool, {
+    userId: crossChannelUserId,
+    receiveSessionId: telegramReceive.snapshot.session.receiveSessionId,
+  });
+  assert.equal(supersededReceive?.session.status, "cancelled");
+  assert.equal(supersededReceive?.ownerChannel, "telegram");
+  const observableAfterHandoff = await claimObservableFundingReceiveSessions(
+    pool,
+    {
+      limit: 10,
+      minimumPollIntervalMs: 1_000,
+      inactivePollIntervalMs: 1_000,
+      closedPollIntervalMs: 1_000,
+      now: new Date(NOW.getTime() + 1_500),
+    },
+  );
+  assert.ok(
+    observableAfterHandoff.some(
+      (snapshot) =>
+        snapshot.session.receiveSessionId ===
+        telegramReceive.snapshot.session.receiveSessionId,
+    ),
+    "a superseded session must remain observable for a late transfer",
+  );
+
+  const receiveInput = sessionInput(crossChannelUserId);
+  await insertFundingReceiveReceipt(pool, {
+    receiveSessionId: webReceive.snapshot.session.receiveSessionId,
+    userId: crossChannelUserId,
+    variantId: receiveInput.observationVariants[0].variantId,
+    asset: receiveInput.destinationAsset,
+    destinationAddress: receiveInput.observationVariants[0].destinationAddress,
+    rawAmount: "1",
+    observationRevision: "cross_channel_observation_12345678",
+    observedAt: new Date(NOW.getTime() + 1_600),
+    status: "observed",
+    handling: "direct",
+    evidence: { test: "cross_channel_money_boundary" },
+    now: new Date(NOW.getTime() + 1_600),
+  });
+  await assert.rejects(
+    () =>
+      createOrReuseFundingReceiveSession(pool, {
+        ...receiveInput,
+        ownerChannel: "telegram",
+        now: new Date(NOW.getTime() + 2 * 86_400_000),
+      }),
+    (error: unknown) =>
+      error instanceof FundingReceiveSessionChannelConflictError,
+    "an observed receipt must retain channel ownership through observe_until, even after expires_at",
+  );
+
   retainedSolUserId = await insertUser();
   const retainedInput = retainedSolSessionInput(retainedSolUserId);
   const retainedSession = await createOrReuseFundingReceiveSession(
@@ -1175,6 +1244,19 @@ try {
       );
       await cleanup.query("delete from users where id = $1", [
         retainedSolUserId,
+      ]);
+    }
+    if (crossChannelUserId) {
+      await cleanup.query(
+        "delete from funding_receive_receipts where user_id = $1",
+        [crossChannelUserId],
+      );
+      await cleanup.query(
+        "delete from funding_receive_sessions where user_id = $1",
+        [crossChannelUserId],
+      );
+      await cleanup.query("delete from users where id = $1", [
+        crossChannelUserId,
       ]);
     }
     if (mergeTargetId) {

@@ -8,7 +8,11 @@ import { AuthService, resetAuthDbFeatureCachesForTests } from "./auth.js";
 import { buildApp } from "./app.js";
 import { pool } from "./db.js";
 import { env } from "./env.js";
-import { resetShareCreateGuardForTests } from "./services/share-create-guard.js";
+import {
+  clearTradePnlShareSingleflightForTests,
+  resetShareCreateGuardForTests,
+  setShareCreateGuardDependenciesForTests,
+} from "./services/share-create-guard.js";
 
 type TestContext = {
   userId: string;
@@ -410,6 +414,10 @@ async function cleanup(contexts: TestContext[], fixtures: MarketFixture[]) {
   }
   if (tokenIds.length) {
     await pool.query(
+      "delete from unified_token_top_latest where token_id = any($1::text[])",
+      [tokenIds],
+    );
+    await pool.query(
       "delete from unified_market_tokens where token_id = any($1::text[])",
       [tokenIds],
     );
@@ -443,6 +451,7 @@ async function main() {
   const previousRedisUrl = env.redisUrl;
   env.redisUrl = "";
   resetShareCreateGuardForTests();
+
   await ensureShareSnapshotsTableForTests();
   const app = await buildApp();
 
@@ -746,7 +755,48 @@ async function main() {
     }
   });
 
-  await test("trade share fanout is throttled without 500s", async () => {
+  await test("trade share falls back to canonical outcome token when market token is stale", async () => {
+    resetShareCreateGuardForTests();
+    const context = await createTestContext();
+    const fixture = await insertMarketFixture("trade-stale-market-token");
+    try {
+      await pool.query(
+        "update unified_markets set token_yes = $2 where id = $1",
+        [fixture.marketId, `stale-${crypto.randomUUID()}`],
+      );
+      await pool.query(
+        `
+          insert into unified_token_top_latest (
+            token_id, venue, ts, best_bid, best_ask, mid, spread
+          )
+          values ($1, 'limitless', now(), 0.59, 0.61, 0.60, 0.02)
+        `,
+        [fixture.yesTokenId],
+      );
+      const positionId = await insertPosition({
+        context,
+        tokenId: fixture.yesTokenId,
+        size: 10,
+        averagePrice: 0.5,
+        realizedPnl: 0,
+        unrealizedPnl: 1,
+      });
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/shares/trade-pnl",
+        headers: context.authHeaders,
+        payload: { source: "position", positionId },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal(response.json().currentPrice, "0.6");
+    } finally {
+      resetShareCreateGuardForTests();
+      await cleanup([context], [fixture]);
+    }
+  });
+
+  await test("identical concurrent trade shares reuse one snapshot", async () => {
     resetShareCreateGuardForTests();
     const context = await createTestContext();
     const fixture = await insertMarketFixture("trade-fanout");
@@ -774,16 +824,14 @@ async function main() {
         ),
       );
 
-      const statusCodes = responses.map((response) => response.statusCode);
-      assert.equal(statusCodes.includes(500), false);
-      assert.equal(statusCodes.includes(200), true);
-      assert.equal(statusCodes.includes(429), true);
-      for (const response of responses.filter(
-        (item) => item.statusCode === 429,
-      )) {
-        assert.equal(response.headers["retry-after"], "15");
-        assert.deepEqual(response.json(), { error: "rate_limit_exceeded" });
-      }
+      assert.equal(
+        responses.every((response) => response.statusCode === 200),
+        true,
+      );
+      assert.equal(
+        new Set(responses.map((response) => response.json().id)).size,
+        1,
+      );
 
       const inserted = await pool.query<{ count: string }>(
         `
@@ -797,6 +845,109 @@ async function main() {
       );
       assert.equal(inserted.rows[0]?.count, "1");
     } finally {
+      resetShareCreateGuardForTests();
+      await cleanup([context], [fixture]);
+    }
+  });
+
+  await test("cross-process follower reuses cache written before distributed slot release", async () => {
+    resetShareCreateGuardForTests();
+    const context = await createTestContext();
+    const fixture = await insertMarketFixture("trade-cross-process");
+    const sharedCache = new Map<string, string>();
+    const slots = new Map<string, number>();
+    let allowCacheWrite!: () => void;
+    let cacheWriteStarted!: () => void;
+    let followerRejectedBySlot!: () => void;
+    const allowCacheWritePromise = new Promise<void>((resolve) => {
+      allowCacheWrite = resolve;
+    });
+    const cacheWriteStartedPromise = new Promise<void>((resolve) => {
+      cacheWriteStarted = resolve;
+    });
+    const followerRejectedBySlotPromise = new Promise<void>((resolve) => {
+      followerRejectedBySlot = resolve;
+    });
+    const redis = {
+      get: async (key: string) => sharedCache.get(key) ?? null,
+      set: async (key: string, value: string) => {
+        cacheWriteStarted();
+        await allowCacheWritePromise;
+        sharedCache.set(key, value);
+        return "OK";
+      },
+    };
+
+    setShareCreateGuardDependenciesForTests({
+      getRedisStatus: async () => ({
+        redis: redis as never,
+        status: "ready",
+      }),
+      checkRateLimit: async () => true,
+      acquireDistributedSlot: async (key, maxSlots) => {
+        const current = slots.get(key) ?? 0;
+        if (current >= maxSlots) {
+          if (key.includes(`shares:create:user:${context.userId}`)) {
+            followerRejectedBySlot();
+          }
+          return false;
+        }
+        slots.set(key, current + 1);
+        return true;
+      },
+      releaseDistributedSlot: async (key) => {
+        const current = slots.get(key) ?? 0;
+        if (current <= 1) slots.delete(key);
+        else slots.set(key, current - 1);
+      },
+    });
+
+    try {
+      const positionId = await insertPosition({
+        context,
+        tokenId: fixture.yesTokenId,
+        size: 10,
+        averagePrice: 0.5,
+        realizedPnl: 1,
+        unrealizedPnl: 1,
+      });
+      const request = () =>
+        app.inject({
+          method: "POST",
+          url: "/shares/trade-pnl",
+          headers: context.authHeaders,
+          payload: { source: "position", positionId },
+        });
+
+      const leader = request();
+      await cacheWriteStartedPromise;
+      // Model another API process: it does not see this process's singleflight
+      // entry, but it does share the distributed guard and Redis cache.
+      clearTradePnlShareSingleflightForTests();
+      const follower = request();
+      await followerRejectedBySlotPromise;
+      allowCacheWrite();
+
+      const [leaderResponse, followerResponse] = await Promise.all([
+        leader,
+        follower,
+      ]);
+      assert.equal(leaderResponse.statusCode, 200, leaderResponse.body);
+      assert.equal(followerResponse.statusCode, 200, followerResponse.body);
+      assert.equal(leaderResponse.json().id, followerResponse.json().id);
+      const inserted = await pool.query<{ count: string }>(
+        `
+          select count(*)::text as count
+          from share_snapshots
+          where user_id = $1
+            and kind = 'trade_pnl'
+            and snapshot->>'positionId' = $2
+        `,
+        [context.userId, positionId],
+      );
+      assert.equal(inserted.rows[0]?.count, "1");
+    } finally {
+      allowCacheWrite();
       resetShareCreateGuardForTests();
       await cleanup([context], [fixture]);
     }
@@ -851,6 +1002,48 @@ async function main() {
       );
       assert.equal(inserted.rows[0]?.count, "1");
     } finally {
+      resetShareCreateGuardForTests();
+      await cleanup([context], [fixture]);
+    }
+  });
+
+  await test("trade share DB timeout returns retryable 503 before frontend timeout", async () => {
+    resetShareCreateGuardForTests();
+    const context = await createTestContext();
+    const fixture = await insertMarketFixture("trade-db-timeout");
+    const blocker = await pool.connect();
+    try {
+      const positionId = await insertPosition({
+        context,
+        tokenId: fixture.yesTokenId,
+        size: 10,
+        averagePrice: 0.5,
+        realizedPnl: 1,
+        unrealizedPnl: 1,
+      });
+      await blocker.query("begin");
+      await blocker.query("lock table positions in access exclusive mode");
+
+      const startedAt = Date.now();
+      const response = await app.inject({
+        method: "POST",
+        url: "/shares/trade-pnl",
+        headers: context.authHeaders,
+        payload: {
+          source: "position",
+          positionId,
+        },
+      });
+      const elapsedMs = Date.now() - startedAt;
+
+      assert.equal(response.statusCode, 503, response.body);
+      assert.equal(response.headers["retry-after"], "5");
+      assert.deepEqual(response.json(), { error: "share_creation_timeout" });
+      assert.ok(elapsedMs >= 800, `expected DB timeout, got ${elapsedMs}ms`);
+      assert.ok(elapsedMs < 2_500, `share route took ${elapsedMs}ms`);
+    } finally {
+      await blocker.query("rollback").catch(() => undefined);
+      blocker.release();
       resetShareCreateGuardForTests();
       await cleanup([context], [fixture]);
     }

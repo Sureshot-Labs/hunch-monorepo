@@ -1,6 +1,7 @@
 import type { DbQuery } from "../db.js";
 import { normalizeRewardsChainId } from "../lib/rewards-chain.js";
 import {
+  CANONICAL_POSITION_MARKET_JOIN_SQL,
   EFFECTIVE_PNL_SQL,
   POSITION_MARKET_JOIN_SQL,
   RESOLVED_MARKET_SQL,
@@ -2184,16 +2185,30 @@ function mapLeaderboardRow(
   };
 }
 
-function buildConnectedWalletScopeSql(userIdPlaceholder?: string): string {
+function buildConnectedWalletScopeSql(inputs: {
+  userIdPlaceholder?: string;
+  userScopeCteName?: string;
+}): string {
+  const { userIdPlaceholder, userScopeCteName } = inputs;
+  const userScopeFor = (alias: string): string =>
+    userScopeCteName
+      ? `${alias}.user_id in (select user_id from ${userScopeCteName})`
+      : "";
   const userWhere = userIdPlaceholder
     ? `where uw.user_id = ${userIdPlaceholder}`
-    : "";
+    : userScopeCteName
+      ? `where ${userScopeFor("uw")}`
+      : "";
   const userAnd = userIdPlaceholder
     ? `and uvc.user_id = ${userIdPlaceholder}`
-    : "";
+    : userScopeCteName
+      ? `and ${userScopeFor("uvc")}`
+      : "";
   const userAndOrders = userIdPlaceholder
     ? `and o.user_id = ${userIdPlaceholder}`
-    : "";
+    : userScopeCteName
+      ? `and ${userScopeFor("o")}`
+      : "";
 
   return `
     wallet_scope_candidates as (
@@ -2256,12 +2271,25 @@ function buildConnectedWalletScopeSql(userIdPlaceholder?: string): string {
   `;
 }
 
-function buildPnlCteSql(userIdPlaceholder?: string): string {
+function buildPnlCteSql(
+  inputs: {
+    positionMarketJoinSql?: string;
+    userIdPlaceholder?: string;
+    userScopeCteName?: string;
+  } = {},
+): string {
+  const {
+    positionMarketJoinSql = POSITION_MARKET_JOIN_SQL,
+    userIdPlaceholder,
+    userScopeCteName,
+  } = inputs;
   const userFilter = userIdPlaceholder
     ? `and p.user_id = ${userIdPlaceholder}`
-    : "";
+    : userScopeCteName
+      ? `and p.user_id in (select user_id from ${userScopeCteName})`
+      : "";
   return `
-    ${buildConnectedWalletScopeSql(userIdPlaceholder)},
+    ${buildConnectedWalletScopeSql({ userIdPlaceholder, userScopeCteName })},
     position_pnl as (
       select
         p.user_id,
@@ -2277,7 +2305,7 @@ function buildPnlCteSql(userIdPlaceholder?: string): string {
       join wallet_scope ws
         on ws.user_id = p.user_id
        and ws.wallet_address = p.wallet_address
-      ${POSITION_MARKET_JOIN_SQL}
+      ${positionMarketJoinSql}
       where p.position_scope = 'own'
         ${userFilter}
     ),
@@ -2372,7 +2400,9 @@ async function fetchPnlRank(
 ): Promise<number> {
   const { rows } = await pool.query<{ higher: string | null }>(
     `
-      with ${buildPnlCteSql()},
+      with ${buildPnlCteSql({
+        positionMarketJoinSql: CANONICAL_POSITION_MARKET_JOIN_SQL,
+      })},
       totals as (
         select
           user_id,
@@ -2406,7 +2436,9 @@ export async function fetchRewardsLeaderboardRows(
 
     const { rows } = await pool.query<RewardsLeaderboardRowDb>(
       `
-        with ${buildPnlCteSql()},
+        with ${buildPnlCteSql({
+          positionMarketJoinSql: CANONICAL_POSITION_MARKET_JOIN_SQL,
+        })},
         totals as (
           select user_id,
                  coalesce(sum(${buildVolumeContributionSql("ve", inputs.manualMode)}), 0)::numeric as volume_usd,
@@ -2485,7 +2517,6 @@ export async function fetchRewardsLeaderboardRows(
         ${whereClause}
         group by ve.user_id
       ),
-      ${buildPnlCteSql()},
       ranked as (
         select
           user_id,
@@ -2499,7 +2530,11 @@ export async function fetchRewardsLeaderboardRows(
         from ranked
         order by ${metricColumn} desc, user_id
         limit $${limitIdx} offset $${offsetIdx}
-      )
+      ),
+      ${buildPnlCteSql({
+        positionMarketJoinSql: CANONICAL_POSITION_MARKET_JOIN_SQL,
+        userScopeCteName: "page",
+      })}
       select
         r.user_id,
         r.rank,
@@ -2573,7 +2608,10 @@ export async function fetchRewardsLeaderboardMe(
         where ve.user_id = $1
         group by ve.user_id
       ),
-      ${buildPnlCteSql("$1")}
+      ${buildPnlCteSql({
+        positionMarketJoinSql: CANONICAL_POSITION_MARKET_JOIN_SQL,
+        userIdPlaceholder: "$1",
+      })}
       select
         u.id as user_id,
         0 as rank,

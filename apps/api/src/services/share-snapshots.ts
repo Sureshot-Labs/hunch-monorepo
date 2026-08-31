@@ -19,6 +19,7 @@ import {
   resolvePositionPnlScope,
 } from "../repos/positions-repo.js";
 import { normalizeReferralCode } from "./rewards.js";
+import { ShareCreateGuardError } from "./share-create-guard.js";
 
 const SHARE_ID_RANDOM_BYTES = 17;
 const SHARE_ID_BASE62 =
@@ -99,6 +100,15 @@ function randomBase62(length: number): string {
 
 function generateShareId(kind: ShareKind): string {
   return `${kind === "portfolio_pnl" ? "pnl" : "trade"}_${randomBase62(22)}`;
+}
+
+function isPostgresStatementTimeout(error: unknown): boolean {
+  return (
+    error != null &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "57014"
+  );
 }
 
 function parseNumber(value: unknown): number {
@@ -452,6 +462,47 @@ export async function createPortfolioPnlShare(
 
 export async function createTradePnlShare(
   pool: Pool,
+  inputs: {
+    userId: string;
+    positionId: string;
+    referralCode?: string | null;
+  },
+  options?: { statementTimeoutMs?: number | null },
+): Promise<PublicShareResponse> {
+  const statementTimeoutMs = options?.statementTimeoutMs ?? null;
+  if (statementTimeoutMs == null) {
+    return createTradePnlShareWithQuery(pool, inputs);
+  }
+  if (
+    !Number.isSafeInteger(statementTimeoutMs) ||
+    statementTimeoutMs <= 0 ||
+    statementTimeoutMs > 10_000
+  ) {
+    throw new Error("Invalid trade share statement timeout");
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("select set_config('statement_timeout', $1, true)", [
+      `${statementTimeoutMs}ms`,
+    ]);
+    const share = await createTradePnlShareWithQuery(client, inputs);
+    await client.query("commit");
+    return share;
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    if (isPostgresStatementTimeout(error)) {
+      throw new ShareCreateGuardError("request_timeout", 5);
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function createTradePnlShareWithQuery(
+  pool: DbQuery,
   inputs: {
     userId: string;
     positionId: string;

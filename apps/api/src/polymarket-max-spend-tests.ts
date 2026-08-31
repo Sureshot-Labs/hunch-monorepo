@@ -1,11 +1,13 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import type { Pool } from "@hunch/infra";
 import {
   calculatePolymarketQuote,
   calculatePolymarketSignedBuyRequiredSpendRaw,
   calculatePolymarketSignedFokBuyRequiredSpendRaw,
   findMaxPolymarketMarketBuyUsd,
+  findMaxPolymarketMarketBuyUsdDetailed,
   normalizeOrderTypeForClob,
   parsePolymarketPlatformFeeCurve,
   PolymarketQuoteError,
@@ -26,6 +28,24 @@ import {
   PolymarketFundingPlanError,
 } from "./services/polymarket-funding-router.js";
 import { polymarketMaxSpendBodySchema } from "./schemas/polymarket-private.js";
+import type { AccountValueReadModel } from "./account-value/runtime-service.js";
+import {
+  computePolymarketAccountMaxSpend,
+  externalWalletSourceLocationIds,
+} from "./services/polymarket-account-max-spend.js";
+import { DEFAULT_FUNDING_RUNTIME_POLICY } from "./funding/policies/funding-policy.js";
+import type {
+  AssetLocation,
+  AssetRef,
+  FundingDiscoveryRequest,
+  FundingSourceRef,
+  Money,
+  SourceOption,
+} from "./funding/domain/types.js";
+import type { FundingCommitPlan } from "./funding/persistence/funding-operation-repository.js";
+import type { FundingLiquidityPreview } from "./funding/planner/runtime-service.js";
+import type { PlannedSourceOption } from "./funding/planner/planning-types.js";
+import { env } from "./env.js";
 
 type TestCase = {
   name: string;
@@ -124,7 +144,337 @@ function noFeeNoMinContext(): PolymarketQuoteContext {
   });
 }
 
+function accountMaxRelaySource(input: {
+  destinationAsset: AssetRef;
+  destinationRaw: string;
+}): PlannedSourceOption {
+  const sourceLocation: AssetLocation = {
+    kind: "wallet",
+    locationId: "location_remaining_base_cash_12345678",
+    accountId: "account_after_completed_trade_12345678",
+    asset: {
+      networkId: "evm:8453",
+      assetId: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      decimals: 6,
+    },
+    details: {
+      address: "0x0000000000000000000000000000000000000044",
+      walletId: "wallet_embedded_base_12345678",
+    },
+  };
+  const source: FundingSourceRef = {
+    kind: "owned_location",
+    location: sourceLocation,
+  };
+  const sourceAmount: Money = {
+    asset: sourceLocation.asset,
+    raw: input.destinationRaw,
+  };
+  const destinationAmount: Money = {
+    asset: input.destinationAsset,
+    raw: input.destinationRaw,
+  };
+  const option: SourceOption = {
+    sourceOptionId: "source_remaining_base_cash_12345678",
+    kind: "wallet_asset",
+    safeLabel: "Remaining Base USDC",
+    source,
+    amountMode: "exact_input",
+    maximumSourceRaw: input.destinationRaw,
+    expectedDestination: destinationAmount,
+    minimumDestination: destinationAmount,
+    estimatedUsd: "4.43",
+    fees: [
+      {
+        kind: "relay_fee",
+        amount: { asset: sourceLocation.asset, raw: "10000" },
+        estimatedUsd: "0.01",
+      },
+    ],
+    eta: { minSeconds: 5, maxSeconds: 15 },
+    experienceMode: "inline_funding",
+    requiredActions: [
+      {
+        kind: "evm_transaction",
+        safeLabel: "Fund Polymarket",
+        actor: "user",
+        valueMoving: true,
+        sponsorship: "requested",
+      },
+    ],
+    expiresAt: "2026-09-01T12:00:00.000Z",
+    recommended: false,
+    selectable: true,
+    reasonCodes: [],
+  };
+  const plan: FundingCommitPlan = {
+    operation: {
+      purpose: "trade_shortfall",
+      initialState: { status: "in_progress", stage: "committed" },
+      experienceMode: "inline",
+      planKind: "wallet_route",
+      sourceSnapshot: option,
+      destinationTargetSnapshot: {
+        kind: "owned_location",
+        location: {
+          kind: "venue_account",
+          locationId: "location_polymarket_after_trade_12345678",
+          accountId: "account_after_completed_trade_12345678",
+          asset: input.destinationAsset,
+          details: { address: DEPOSIT, venueId: "polymarket" },
+        },
+      },
+      externalRecipientId: null,
+      venueId: "polymarket",
+      marketId: "polymarket:market-test",
+      marketContextSnapshot: null,
+      venueBindingSnapshot: {
+        venueBindingOptionId: "binding_option_after_trade_12345678",
+      },
+      walletExecutionSnapshot: {
+        walletId: "wallet_embedded_base_12345678",
+      },
+      placementSnapshot: { decision: "route" },
+      requestedSourceAmount: sourceAmount,
+      requestedDestinationAmount: destinationAmount,
+      supportMetadata: {
+        routeId: "route_remaining_base_cash_12345678",
+      },
+    },
+    segments: [
+      {
+        providerId: "relay",
+        adapterId: "relay_quote_v2",
+        adapterVersion: 1,
+        segmentKind: "cross_network_transfer",
+        status: "planned",
+        sourceSnapshot: source,
+        destinationTargetSnapshot: {
+          kind: "owned_location",
+          location: {
+            kind: "venue_account",
+            locationId: "location_polymarket_after_trade_12345678",
+            accountId: "account_after_completed_trade_12345678",
+            asset: input.destinationAsset,
+            details: { address: DEPOSIT, venueId: "polymarket" },
+          },
+        },
+        quotedInput: sourceAmount,
+        quotedExpectedOutput: destinationAmount,
+        quotedMinOutput: destinationAmount,
+        providerQuoteRefCiphertext: "ciphertext_remaining_base_cash_12345678",
+        providerQuoteRefLookupHmac:
+          "hmac_remaining_base_cash_12345678_abcdefghijklmnopqrstuvwxyz",
+        depositAddressCiphertext: null,
+        depositAddressLookupHmac: null,
+        lookupKeyVersion: 1,
+        refundLocationSnapshot: sourceLocation,
+        quoteExpiresAt: option.expiresAt,
+      },
+    ],
+    steps: [
+      {
+        ordinal: 0,
+        segmentOrdinal: 0,
+        stepKind: "transaction",
+        state: "action_required",
+        actionFingerprint: "fingerprint_remaining_base_cash_12345678",
+        executorId: "wallet_profile_evm_v1",
+        payerRequirement: "privy_sponsor",
+        dependsOnOrdinal: null,
+        normalizedAction: { kind: "evm_transaction" },
+        actionValidationResult: { validatorId: "exact_test_v1" },
+      },
+    ],
+    reservations: [
+      {
+        segmentOrdinal: 0,
+        componentId: "component_remaining_base_cash_12345678",
+        locationId: sourceLocation.locationId,
+        networkId: sourceLocation.asset.networkId,
+        assetId: sourceLocation.asset.assetId,
+        assetDecimals: sourceLocation.asset.decimals,
+        rawAmount: input.destinationRaw,
+        mode: "subtract_available",
+        expiresAt: option.expiresAt,
+      },
+    ],
+  };
+  return {
+    option,
+    commitPlan: plan,
+    routeId: "route_remaining_base_cash_12345678",
+    providerId: "relay",
+    compositeEligible: true,
+  };
+}
+
 const tests: TestCase[] = [
+  {
+    name: "account MAX remains executable after a completed trade with venue cash plus internal funding",
+    run: async () => {
+      const destinationAsset: AssetRef = {
+        networkId: "evm:137",
+        assetId: env.polymarketPusdAddress,
+        decimals: 6,
+      };
+      const routeSource = accountMaxRelaySource({
+        destinationAsset,
+        destinationRaw: "4430000",
+      });
+      const destinationLocation = {
+        kind: "venue_account" as const,
+        locationId: "location_polymarket_after_trade_12345678",
+        accountId: "account_after_completed_trade_12345678",
+        asset: destinationAsset,
+        details: { address: DEPOSIT, venueId: "polymarket" },
+      };
+      const preview = {
+        projection: {
+          completeness: "complete",
+          freshness: "fresh",
+          errors: [],
+          destinationOptionId: "destination_polymarket_after_trade_12345678",
+          venueId: "polymarket",
+          reasonCodes: [],
+        },
+        plannerSnapshot: {
+          destination: {
+            target: {
+              kind: "owned_location",
+              location: destinationLocation,
+            },
+            venueBinding: {
+              accountRef: DEPOSIT,
+            },
+            spendability: {
+              observedAmount: { asset: destinationAsset, raw: "430000" },
+              lockedRaw: "0",
+              reservedRaw: "0",
+              submittedDebitRaw: "0",
+              availableAmount: { asset: destinationAsset, raw: "430000" },
+            },
+          },
+          sources: [routeSource],
+        },
+      } as unknown as FundingLiquidityPreview;
+      const account = {
+        ownership: {
+          wallets: [
+            {
+              walletId: "wallet_controller_after_trade_12345678",
+              source: "embedded",
+              networkId: "evm:137",
+              address: SIGNER,
+              controllerWalletRef: "controller_after_trade_12345678",
+            },
+          ],
+        },
+        cashAvailability: { cashAvailableEstimatedUsd: "4.86" },
+        projection: { components: [] },
+        runtimePolicy: DEFAULT_FUNDING_RUNTIME_POLICY,
+      } as unknown as AccountValueReadModel;
+      const previewRequests: FundingDiscoveryRequest[] = [];
+      let quotedFundsRaw: bigint | null = null;
+      const result = await computePolymarketAccountMaxSpend({
+        funder: DEPOSIT,
+        funds: {
+          funderPusdRaw: 430_000n,
+          funderPusdAvailableRaw: 430_000n,
+          funderLockedRaw: 0n,
+          signerLockedRaw: 0n,
+          signerPusdTopUpRaw: 0n,
+          signerUsdceTopUpRaw: 0n,
+          usesSignerTopUp: false,
+        },
+        pool: {} as Pool,
+        signer: SIGNER,
+        slippageBps: 100,
+        tokenId: "token-yes",
+        userId: "account_after_completed_trade_12345678",
+        dependencies: {
+          buildAccountValueReadModel: async () => account,
+          fetchPolymarketMarketInfo: async () =>
+            ({
+              ...baseMarketInfo,
+              unified_market_id: "polymarket:market-test",
+            }) as never,
+          createFundingRuntime: () => ({
+            previewLiquidity: async (
+              _userId: string,
+              request: FundingDiscoveryRequest,
+            ) => {
+              previewRequests.push(request);
+              return preview;
+            },
+          }),
+          findMaxPolymarketMarketBuyUsdForFunds: async (_pool, input) => {
+            quotedFundsRaw = input.executableFundsRaw;
+            return findMaxPolymarketMarketBuyUsdDetailed({
+              context: quoteContext(),
+              tokenId: input.tokenId,
+              executableFundsRaw: input.executableFundsRaw,
+              slippageBps: input.slippageBps,
+              requireOrderbookDepth: true,
+            });
+          },
+        },
+      });
+
+      assert.equal(result.ok, true);
+      assert.equal(result.fundingScope, "account");
+      assert.equal(result.executableFundsRaw, "4860000");
+      assert.equal(quotedFundsRaw, 4_860_000n);
+      assert.equal(previewRequests.length, 2);
+      assert.equal(
+        previewRequests[1]?.serverAdditionalDestinationAmount?.raw,
+        (BigInt(String(result.totalRequiredUsdcRaw)) - 430_000n).toString(),
+      );
+      assert.ok(BigInt(String(result.maxAmountUsdRaw)) >= 2_500_000n);
+    },
+  },
+  {
+    name: "account MAX excludes connected external wallet source locations",
+    run: () => {
+      const account = {
+        ownership: {
+          wallets: [
+            { walletId: "wallet_external", source: "external" },
+            { walletId: "wallet_internal", source: "embedded" },
+          ],
+        },
+        projection: {
+          components: [
+            {
+              location: {
+                kind: "wallet",
+                locationId: "location_external",
+                details: { walletId: "wallet_external" },
+              },
+            },
+            {
+              location: {
+                kind: "wallet",
+                locationId: "location_internal",
+                details: { walletId: "wallet_internal" },
+              },
+            },
+            {
+              location: {
+                kind: "venue_account",
+                locationId: "location_external_venue",
+                details: { walletId: "wallet_external" },
+              },
+            },
+          ],
+        },
+      } as unknown as AccountValueReadModel;
+      assert.deepEqual(externalWalletSourceLocationIds(account), [
+        "location_external",
+        "location_external_venue",
+      ]);
+    },
+  },
   {
     name: "max-spend accepts the explicit account funding scope without changing legacy requests",
     run: () => {

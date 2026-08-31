@@ -12,8 +12,10 @@ import {
   cacheTradePnlShare,
   getCachedTradePnlShare,
   ShareCreateGuardError,
+  TRADE_PNL_SHARE_REQUEST_TIMEOUT_MS,
   type ShareCreateKind,
   withShareCreateGuard,
+  withTradePnlShareSingleflight,
 } from "../services/share-create-guard.js";
 import {
   createPortfolioPnlShare,
@@ -40,7 +42,7 @@ function sendShareCreateThrottle(
 ) {
   reply.header("Retry-After", String(error.retryAfterSec));
   reply.code(error.statusCode);
-  return reply.send({ error: "rate_limit_exceeded" });
+  return reply.send({ error: error.message });
 }
 
 export const sharesRoutes: FastifyPluginAsync = async (app) => {
@@ -147,35 +149,123 @@ export const sharesRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
 
+      const startedAt = Date.now();
+      const requestDeadlineAt = startedAt + TRADE_PNL_SHARE_REQUEST_TIMEOUT_MS;
+      let cacheLookupFinishedAt = startedAt;
+      let snapshotStartedAt: number | null = null;
+      let snapshotFinishedAt: number | null = null;
+      let cacheWriteStartedAt: number | null = null;
       try {
         const cachedShare = await getCachedTradePnlShare({
           userId: user.id,
           positionId: request.body.positionId,
           referralCode: request.body.referralCode,
         });
+        cacheLookupFinishedAt = Date.now();
         if (cachedShare) {
+          app.log.info(
+            {
+              cacheHit: true,
+              cacheLookupMs: cacheLookupFinishedAt - startedAt,
+              positionId: request.body.positionId,
+              totalMs: Date.now() - startedAt,
+              userId: user.id,
+            },
+            "Trade PnL share latency",
+          );
           reply.header("Content-Type", "application/json; charset=utf-8");
           return reply.send(cachedShare);
         }
 
-        const share = await withShareCreateGuard(
-          { userId: user.id, kind: "trade_pnl" },
-          () =>
-            createTradePnlShare(pool, {
-              userId: user.id,
-              positionId: request.body.positionId,
-              referralCode: request.body.referralCode,
-            }),
-        );
-        await cacheTradePnlShare(
+        const share = await withTradePnlShareSingleflight(
           {
             userId: user.id,
             positionId: request.body.positionId,
             referralCode: request.body.referralCode,
           },
-          share,
+          async () => {
+            const cacheInputs = {
+              userId: user.id,
+              positionId: request.body.positionId,
+              referralCode: request.body.referralCode,
+            };
+            // A follower may have observed a cache miss immediately before a
+            // leader completed and left process-local singleflight. Recheck
+            // inside the producer so that timing window cannot create a
+            // duplicate snapshot.
+            const racedCachedShare = await getCachedTradePnlShare(cacheInputs);
+            if (racedCachedShare) return racedCachedShare;
+
+            let created;
+            try {
+              created = await withShareCreateGuard(
+                { userId: user.id, kind: "trade_pnl" },
+                async () => {
+                  // The distributed slot is the cross-process creation
+                  // boundary. Recheck and populate the shared cache while the
+                  // slot is still held, so no peer can create a second row in
+                  // an unlock-before-cache-write window.
+                  const guardedCachedShare =
+                    await getCachedTradePnlShare(cacheInputs);
+                  if (guardedCachedShare) return guardedCachedShare;
+
+                  snapshotStartedAt = Date.now();
+                  const snapshot = await createTradePnlShare(
+                    pool,
+                    cacheInputs,
+                    {
+                      statementTimeoutMs: 900,
+                    },
+                  );
+                  snapshotFinishedAt = Date.now();
+                  cacheWriteStartedAt = Date.now();
+                  await cacheTradePnlShare(cacheInputs, snapshot);
+                  return snapshot;
+                },
+              );
+            } catch (error) {
+              if (
+                !(error instanceof ShareCreateGuardError) ||
+                error.reason !== "user_inflight"
+              ) {
+                throw error;
+              }
+              // Another API process may own this exact request. Its cache
+              // write happens before slot release; wait only within this
+              // request's absolute deadline and reuse the result when ready.
+              while (Date.now() < requestDeadlineAt) {
+                await new Promise((resolve) => setTimeout(resolve, 50));
+                const completedShare =
+                  await getCachedTradePnlShare(cacheInputs);
+                if (completedShare) return completedShare;
+              }
+              throw error;
+            }
+            return created;
+          },
+          requestDeadlineAt,
         );
 
+        const finishedAt = Date.now();
+        app.log.info(
+          {
+            cacheHit: false,
+            cacheLookupMs: cacheLookupFinishedAt - startedAt,
+            cacheWriteMs:
+              cacheWriteStartedAt == null
+                ? null
+                : finishedAt - cacheWriteStartedAt,
+            guardAndSnapshotMs: finishedAt - cacheLookupFinishedAt,
+            positionId: request.body.positionId,
+            snapshotMs:
+              snapshotStartedAt == null || snapshotFinishedAt == null
+                ? null
+                : snapshotFinishedAt - snapshotStartedAt,
+            totalMs: finishedAt - startedAt,
+            userId: user.id,
+          },
+          "Trade PnL share latency",
+        );
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(share);
       } catch (error) {
@@ -185,6 +275,16 @@ export const sharesRoutes: FastifyPluginAsync = async (app) => {
             kind: "trade_pnl",
             error,
           });
+          app.log.warn(
+            {
+              cacheLookupMs: cacheLookupFinishedAt - startedAt,
+              guardReason: error.reason,
+              positionId: request.body.positionId,
+              totalMs: Date.now() - startedAt,
+              userId: user.id,
+            },
+            "Trade PnL share failed with latency",
+          );
           return sendShareCreateThrottle(reply, error);
         }
         const statusCode = errorStatusCode(error);
@@ -194,6 +294,20 @@ export const sharesRoutes: FastifyPluginAsync = async (app) => {
             "Failed to create trade PnL share",
           );
         }
+        app.log.warn(
+          {
+            cacheLookupMs: cacheLookupFinishedAt - startedAt,
+            errorName: error instanceof Error ? error.name : "unknown",
+            positionId: request.body.positionId,
+            snapshotMs:
+              snapshotStartedAt == null || snapshotFinishedAt == null
+                ? null
+                : snapshotFinishedAt - snapshotStartedAt,
+            totalMs: Date.now() - startedAt,
+            userId: user.id,
+          },
+          "Trade PnL share failed with latency",
+        );
         reply.code(statusCode);
         return reply.send({
           error: errorMessage(error, "Failed to create trade PnL share"),

@@ -35,6 +35,7 @@ import {
   fetchAdminManualVolumeEvents,
   fetchReferralsForUser,
   fetchQualifiedReferralCount,
+  fetchRewardsLeaderboardRows,
   fetchUserTierPoints,
   fetchUserPoints,
   fetchUserVolume,
@@ -1115,6 +1116,8 @@ function randomEvmAddress(): string {
 
 async function createRewardsPnlFixture(inputs: {
   averagePrice: number | null;
+  canonicalMapping?: boolean;
+  legacyTokenMapping?: boolean;
   realizedPnl: number;
   resolvedOutcome?: "YES" | "NO" | null;
   side?: "YES" | "NO";
@@ -1264,13 +1267,36 @@ async function createRewardsPnlFixture(inputs: {
     ],
   );
 
-  await pool.query(
-    `
-      insert into unified_tokens(token_id, venue, market_id, side)
-      values ($1, 'limitless', $2, $3)
-    `,
-    [tokenId, marketId, side],
-  );
+  if (inputs.legacyTokenMapping !== false) {
+    await pool.query(
+      `
+        insert into unified_tokens(token_id, venue, market_id, side)
+        values ($1, 'limitless', $2, $3)
+      `,
+      [tokenId, marketId, side],
+    );
+  }
+
+  if (inputs.canonicalMapping !== false) {
+    await pool.query(
+      `
+        insert into unified_market_tokens(
+          market_id,
+          token_id,
+          venue,
+          outcome_side
+        )
+        values ($1, $2, 'limitless', $3)
+        on conflict (token_id) do update
+        set
+          market_id = excluded.market_id,
+          venue = excluded.venue,
+          outcome_side = excluded.outcome_side,
+          updated_at = now()
+      `,
+      [marketId, tokenId, side],
+    );
+  }
 
   if (inputs.topBid != null || inputs.topAsk != null) {
     await pool.query(
@@ -2391,6 +2417,26 @@ const tests: TestCase[] = [
         /sum\(ve\.points_awarded\).*as points/s,
       );
       assert.match(
+        capture.entriesSql ?? "",
+        /join unified_market_tokens umt_candidate/,
+      );
+      assert.match(
+        capture.entriesSql ?? "",
+        /p\.user_id in \(select user_id from page\)/,
+      );
+      assert.match(
+        capture.entriesSql ?? "",
+        /where canonical_market_token\.market_id is null/,
+      );
+      assert.match(
+        capture.entriesSql ?? "",
+        /join unified_tokens legacy_token/,
+      );
+      assert.ok(
+        (capture.entriesSql ?? "").indexOf("page as") <
+          (capture.entriesSql ?? "").indexOf("position_pnl as"),
+      );
+      assert.match(
         capture.meSql ?? "",
         /sum\(ve\.points_awarded\).*as points/s,
       );
@@ -2398,7 +2444,55 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "leaderboard pnl treats resolved winning unified_tokens position as realized",
+    name: "points leaderboard executes page-scoped pnl on PostgreSQL",
+    run: async () => {
+      const fixture = await createRewardsPnlFixture({
+        averagePrice: null,
+        realizedPnl: 1.5,
+        resolvedOutcome: null,
+        side: "YES",
+        size: 1,
+        unrealizedPnl: 0,
+      });
+      try {
+        await pool.query(
+          `
+            insert into volume_events (
+              user_id,
+              wallet_address,
+              venue,
+              source_type,
+              source_id,
+              notional_usd
+            )
+            values ($1, $2, 'limitless', 'execution', $3, 125)
+          `,
+          [
+            fixture.userId,
+            fixture.walletAddress,
+            `test:${crypto.randomUUID()}`,
+          ],
+        );
+
+        const rows = await fetchRewardsLeaderboardRows(pool, {
+          metric: "points",
+          startAt: null,
+          limit: 10,
+          offset: 0,
+          manualMode: "exclude_all",
+        });
+        const entry = rows.find((row) => row.userId === fixture.userId);
+
+        assert.ok(entry);
+        assertClose(entry.points, 125);
+        assertClose(entry.pnlUsd, 1.5);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+  },
+  {
+    name: "leaderboard pnl treats resolved winning canonical token position as realized",
     run: async () => {
       const fixture = await createRewardsPnlFixture({
         averagePrice: 0.4,
@@ -2420,10 +2514,57 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "leaderboard pnl treats resolved losing unified_tokens position as realized",
+    name: "leaderboard pnl treats resolved losing canonical token position as realized",
     run: async () => {
       const fixture = await createRewardsPnlFixture({
         averagePrice: 0.2,
+        realizedPnl: 0,
+        resolvedOutcome: "NO",
+        side: "YES",
+        size: 3,
+        unrealizedPnl: 99,
+      });
+      try {
+        const entry = await loadRewardsPnlEntry(fixture.userId);
+
+        assertClose(entry.pnlUsd, -0.6);
+        assertClose(entry.realizedPnlUsd, -0.6);
+        assertClose(entry.unrealizedPnlUsd, 0);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+  },
+  {
+    name: "leaderboard pnl falls back to legacy token mapping only without canonical mapping",
+    run: async () => {
+      const fixture = await createRewardsPnlFixture({
+        averagePrice: 0.4,
+        canonicalMapping: false,
+        realizedPnl: 0.25,
+        resolvedOutcome: "YES",
+        side: "YES",
+        size: 2,
+        unrealizedPnl: 99,
+      });
+      try {
+        const entry = await loadRewardsPnlEntry(fixture.userId);
+
+        assertClose(entry.pnlUsd, 1.45);
+        assertClose(entry.realizedPnlUsd, 1.45);
+        assertClose(entry.unrealizedPnlUsd, 0);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+  },
+  {
+    name: "leaderboard pnl falls back to market token columns when mapping tables miss",
+    run: async () => {
+      const fixture = await createRewardsPnlFixture({
+        averagePrice: 0.2,
+        canonicalMapping: false,
+        legacyTokenMapping: false,
         realizedPnl: 0,
         resolvedOutcome: "NO",
         side: "YES",

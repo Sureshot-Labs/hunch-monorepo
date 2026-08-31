@@ -23,9 +23,75 @@ type PolymarketDataTrade = {
   transactionHash?: string;
 };
 
+export const RECENT_TRADES_BY_TOKEN_SQL = `
+  with requested_tokens as (
+    select distinct requested_token.token_id
+    from unnest($1::text[]) as requested_token(token_id)
+  )
+  select
+    recent_trade.token_id,
+    recent_trade.venue,
+    recent_trade.ts,
+    recent_trade.price,
+    recent_trade.size,
+    recent_trade.side,
+    recent_trade.tx_hash
+  from requested_tokens
+  cross join lateral (
+    select token_trade.token_id,
+           token_trade.venue,
+           token_trade.ts,
+           token_trade.price,
+           token_trade.size,
+           token_trade.side,
+           token_trade.tx_hash
+    from unified_last_trade token_trade
+    where token_trade.token_id = requested_tokens.token_id
+    order by token_trade.ts desc
+    limit $4
+  ) recent_trade
+  order by recent_trade.ts desc
+  limit $2 offset $3
+`;
+
+export const COUNT_TRADES_BY_TOKEN_SQL = `
+  with requested_tokens as (
+    select distinct requested_token.token_id
+    from unnest($1::text[]) as requested_token(token_id)
+  )
+  select coalesce(sum(token_total.trade_count), 0)::text as total
+  from requested_tokens
+  cross join lateral (
+    select count(*)::bigint as trade_count
+    from unified_last_trade token_trade
+    where token_trade.token_id = requested_tokens.token_id
+  ) token_total
+`;
+
+export const MAX_TRADES_TOKEN_IDS = 200;
+export const MAX_TRADES_QUERY_WORK = 25_000;
+export const RESOLVE_TRADES_TOKEN_IDS_LIMIT = MAX_TRADES_TOKEN_IDS + 1;
+export const TRADES_DB_STATEMENT_TIMEOUT_MS = 1_500;
+
+export function tradesQueryWork(input: {
+  tokenCount: number;
+  limit: number;
+  offset: number;
+}): number {
+  return input.tokenCount * (input.limit + input.offset);
+}
+
+function isPostgresStatementTimeout(error: unknown): boolean {
+  return (
+    error != null &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "57014"
+  );
+}
+
 export const tradesRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
-  const MAX_TOKEN_IDS = 200;
   const POLY_TRADE_TIMEOUT_MS = 12_000;
 
   const isPolymarketId = (value: string | undefined): boolean =>
@@ -140,8 +206,9 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
           select token_id
           from unified_tokens
           where market_id = $1
+          limit $2
         `,
-        [marketId],
+        [marketId, RESOLVE_TRADES_TOKEN_IDS_LIMIT],
       );
       return rows.map((row) => row.token_id);
     }
@@ -154,8 +221,9 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
           join unified_markets m
             on m.id = ut.market_id
           where m.event_id = $1
+          limit $2
         `,
-        [eventId],
+        [eventId, RESOLVE_TRADES_TOKEN_IDS_LIMIT],
       );
       return rows.map((row) => row.token_id);
     }
@@ -187,7 +255,7 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
     {
       schema: { querystring: tradesQuerySchema },
     },
-    async (request) => {
+    async (request, reply) => {
       const query = request.query;
 
       if (isPolymarketId(query.eventId) || isPolymarketId(query.marketId)) {
@@ -227,17 +295,23 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
-      if (query.tokenIds && query.tokenIds.length > MAX_TOKEN_IDS) {
+      if (query.tokenIds && query.tokenIds.length > MAX_TRADES_TOKEN_IDS) {
         return {
           error: "tokenIds length exceeded",
-          message: `Max ${MAX_TOKEN_IDS} tokenIds allowed per request.`,
+          message: `Max ${MAX_TRADES_TOKEN_IDS} tokenIds allowed per request.`,
         };
       }
 
-      const tokenIds = query.tokenIds
-        ? await filterKnownTokenIds(query.tokenIds)
-        : ((await resolveTokenIdsForFilter(query.marketId, query.eventId)) ??
-          []);
+      const tokenIds = Array.from(
+        new Set(
+          query.tokenIds
+            ? await filterKnownTokenIds(query.tokenIds)
+            : ((await resolveTokenIdsForFilter(
+                query.marketId,
+                query.eventId,
+              )) ?? []),
+        ),
+      );
 
       if (tokenIds.length === 0) {
         return {
@@ -246,25 +320,65 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
         };
       }
 
-      const { rows } = await pool.query<TradeRow>(
-        `
-          select token_id, venue, ts, price, size, side, tx_hash
-          from unified_last_trade
-          where token_id = any($1::text[])
-          order by ts desc
-          limit $2 offset $3
-        `,
-        [tokenIds, query.limit, query.offset],
-      );
+      if (tokenIds.length > MAX_TRADES_TOKEN_IDS) {
+        return reply.code(422).send({
+          error: "resolved tokenIds length exceeded",
+          message: `The requested market scope resolves to more than ${MAX_TRADES_TOKEN_IDS} tokenIds.`,
+        });
+      }
 
-      const { rows: countRows } = await pool.query<{ total: string }>(
-        `
-          select count(*)::text as total
-          from unified_last_trade
-          where token_id = any($1::text[])
-        `,
-        [tokenIds],
-      );
+      const queryWork = tradesQueryWork({
+        tokenCount: tokenIds.length,
+        limit: query.limit,
+        offset: query.offset,
+      });
+      if (queryWork > MAX_TRADES_QUERY_WORK) {
+        return reply.code(422).send({
+          error: "trades query work exceeded",
+          message:
+            "This token and pagination combination is too broad. Request a smaller offset or narrower market scope.",
+        });
+      }
+
+      // Bound every index walk before the global merge. The previous
+      // token_id = any(...) + global ts DESC plan could scan the entire
+      // hypertable when the requested tokens had few recent trades.
+      const perTokenLimit = query.limit + query.offset;
+      let rows: TradeRow[];
+      let countRows: Array<{ total: string }>;
+      const client = await pool.connect();
+      try {
+        // Keep the established exact `pagination.total` contract, but never
+        // allow either Timescale read to become another hidden two-minute
+        // request. Both statements use token-local index plans; PostgreSQL
+        // cancels an unexpectedly expensive plan with a typed retryable 503.
+        await client.query("begin read only");
+        await client.query("select set_config('statement_timeout', $1, true)", [
+          `${TRADES_DB_STATEMENT_TIMEOUT_MS}ms`,
+        ]);
+        const recentResult = await client.query<TradeRow>(
+          RECENT_TRADES_BY_TOKEN_SQL,
+          [tokenIds, query.limit, query.offset, perTokenLimit],
+        );
+        const countResult = await client.query<{ total: string }>(
+          COUNT_TRADES_BY_TOKEN_SQL,
+          [tokenIds],
+        );
+        await client.query("commit");
+        rows = recentResult.rows;
+        countRows = countResult.rows;
+      } catch (error) {
+        await client.query("rollback").catch(() => undefined);
+        if (isPostgresStatementTimeout(error)) {
+          return reply.code(503).send({
+            error: "trades_query_timeout",
+            message: "Recent trades are temporarily unavailable. Try again.",
+          });
+        }
+        throw error;
+      } finally {
+        client.release();
+      }
 
       const total = Number(countRows[0]?.total ?? 0);
       const trades = rows.map((row) => ({

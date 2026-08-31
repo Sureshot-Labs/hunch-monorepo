@@ -1,3 +1,33 @@
+const POSITION_MARKET_CONTEXT_SQL = `
+  left join unified_markets m
+    on m.id = umt.market_id
+  left join unified_market_tokens market_token_yes
+    on market_token_yes.market_id = m.id
+   and market_token_yes.outcome_side = 'YES'
+  left join lateral (
+    select
+      case
+        when m.venue = 'polymarket' and m.clob_token_ids is not null
+          then (m.clob_token_ids::jsonb->>0)
+        else coalesce(m.token_yes, market_token_yes.token_id)
+      end as token_yes
+  ) market_tokens on true
+  left join lateral (
+    select best_bid, best_ask
+    from unified_token_top_latest
+    where token_id = market_tokens.token_yes
+      and ts > now() - interval '7 days'
+    limit 1
+  ) yes_top on true
+  left join lateral (
+    select best_bid, best_ask
+    from unified_token_top_latest
+    where token_id = p.token_id
+      and ts > now() - interval '7 days'
+    limit 1
+  ) selected_top on true
+`;
+
 export const POSITION_MARKET_JOIN_SQL = `
   left join lateral (
     select
@@ -103,33 +133,113 @@ export const POSITION_MARKET_JOIN_SQL = `
       token_market.market_id asc
     limit 1
   ) umt on true
-  left join unified_markets m
-    on m.id = umt.market_id
-  left join unified_market_tokens market_token_yes
-    on market_token_yes.market_id = m.id
-   and market_token_yes.outcome_side = 'YES'
+  ${POSITION_MARKET_CONTEXT_SQL}
+`;
+
+export const CANONICAL_POSITION_MARKET_JOIN_SQL = `
   left join lateral (
     select
-      case
-        when m.venue = 'polymarket' and m.clob_token_ids is not null
-          then (m.clob_token_ids::jsonb->>0)
-        else coalesce(m.token_yes, market_token_yes.token_id)
-      end as token_yes
-  ) market_tokens on true
-  left join lateral (
-    select best_bid, best_ask
-    from unified_token_top_latest
-    where token_id = market_tokens.token_yes
-      and ts > now() - interval '7 days'
+      umt_candidate.market_id,
+      upper(umt_candidate.outcome_side) as outcome_side
+    from (
+      select p.token_id as token_id, 0 as lookup_rank
+      union all
+      select substring(p.token_id from 11), 1
+      where p.venue = 'limitless'
+        and p.token_id like 'limitless:%'
+      union all
+      select 'limitless:' || p.token_id, 1
+      where p.venue = 'limitless'
+        and p.token_id not like '%:%'
+    ) token_lookup
+    join unified_market_tokens umt_candidate
+      on umt_candidate.token_id = token_lookup.token_id
+    where upper(umt_candidate.outcome_side) in ('YES', 'NO')
+    order by
+      token_lookup.lookup_rank asc,
+      case when umt_candidate.venue = p.venue then 0 else 1 end asc,
+      umt_candidate.updated_at desc nulls last,
+      umt_candidate.market_id asc
     limit 1
-  ) yes_top on true
+  ) canonical_market_token on true
   left join lateral (
-    select best_bid, best_ask
-    from unified_token_top_latest
-    where token_id = p.token_id
-      and ts > now() - interval '7 days'
+    with token_lookup as (
+      select p.token_id as token_id, 0 as lookup_rank
+      union all
+      select substring(p.token_id from 11), 1
+      where p.venue = 'limitless'
+        and p.token_id like 'limitless:%'
+      union all
+      select 'limitless:' || p.token_id, 1
+      where p.venue = 'limitless'
+        and p.token_id not like '%:%'
+    )
+    select
+      legacy_candidate.market_id,
+      legacy_candidate.outcome_side
+    from (
+      select
+        legacy_token.market_id,
+        upper(legacy_token.side) as outcome_side,
+        case when legacy_token.venue = p.venue then 0 else 1 end as venue_rank,
+        token_lookup.lookup_rank,
+        legacy_token.updated_at,
+        0 as source_rank
+      from token_lookup
+      join unified_tokens legacy_token
+        on legacy_token.token_id = token_lookup.token_id
+
+      union all
+
+      select
+        legacy_yes_market.id,
+        'YES',
+        case when legacy_yes_market.venue = p.venue then 0 else 1 end,
+        token_lookup.lookup_rank,
+        legacy_yes_market.updated_at,
+        1
+      from token_lookup
+      join unified_markets legacy_yes_market
+        on legacy_yes_market.token_yes = token_lookup.token_id
+
+      union all
+
+      select
+        legacy_no_market.id,
+        'NO',
+        case when legacy_no_market.venue = p.venue then 0 else 1 end,
+        token_lookup.lookup_rank,
+        legacy_no_market.updated_at,
+        1
+      from token_lookup
+      join unified_markets legacy_no_market
+        on legacy_no_market.token_no = token_lookup.token_id
+    ) legacy_candidate
+    -- Canonical mappings are the hot path. PostgreSQL turns this correlated
+    -- predicate into a one-time filter, so legacy indexes are touched only for
+    -- historical positions that have no unified_market_tokens row.
+    where canonical_market_token.market_id is null
+      and legacy_candidate.outcome_side in ('YES', 'NO')
+    order by
+      legacy_candidate.lookup_rank asc,
+      legacy_candidate.venue_rank asc,
+      legacy_candidate.updated_at desc nulls last,
+      legacy_candidate.source_rank asc,
+      legacy_candidate.market_id asc
     limit 1
-  ) selected_top on true
+  ) legacy_market_token on true
+  cross join lateral (
+    select
+      coalesce(
+        canonical_market_token.market_id,
+        legacy_market_token.market_id
+      ) as market_id,
+      coalesce(
+        canonical_market_token.outcome_side,
+        legacy_market_token.outcome_side
+      ) as outcome_side
+  ) umt
+  ${POSITION_MARKET_CONTEXT_SQL}
 `;
 
 export const RESOLVED_MARKET_SQL = `

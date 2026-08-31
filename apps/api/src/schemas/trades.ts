@@ -2,6 +2,8 @@ import { z } from "zod";
 import { env } from "../env.js";
 import { zCsvString } from "./common.js";
 
+export const MAX_TRADES_OFFSET = 10_000;
+
 export const tradesQuerySchema = z
   .object({
     eventId: z
@@ -22,7 +24,10 @@ export const tradesQuerySchema = z
       .number()
       .int()
       .catch(0)
-      .transform((n) => Math.max(n, 0)),
+      .transform((n) => Math.max(n, 0))
+      .refine((n) => n <= MAX_TRADES_OFFSET, {
+        message: `offset must not exceed ${MAX_TRADES_OFFSET}`,
+      }),
   })
   .refine((v) => Boolean(v.eventId || v.marketId || v.tokenIds?.length), {
     message: "eventId, marketId, or tokenIds is required",

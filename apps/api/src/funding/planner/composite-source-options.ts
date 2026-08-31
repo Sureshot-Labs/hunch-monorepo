@@ -376,11 +376,12 @@ function candidateFeeWithinLimits(input: {
     );
     const legMinimumRaw = rawAmount(item.leg.minimumDestination.raw);
     const legExpectedRaw = rawAmount(item.leg.expectedDestination.raw);
-    if (
-      legExpectedRaw < legMinimumRaw ||
-      legMinimumRaw * 10_000n <
-        legExpectedRaw * BigInt(10_000 - input.maximumSlippageBps)
-    ) {
+    // Relay freezes integer raw amounts. Its percentage floor is rounded down
+    // to the destination asset's smallest unit, so compare against that same
+    // floor instead of rejecting a valid quote by a fractional micro-unit.
+    const minimumAllowedRaw =
+      (legExpectedRaw * BigInt(10_000 - input.maximumSlippageBps)) / 10_000n;
+    if (legExpectedRaw < legMinimumRaw || legMinimumRaw < minimumAllowedRaw) {
       return null;
     }
     minimumRaw += legMinimumRaw;

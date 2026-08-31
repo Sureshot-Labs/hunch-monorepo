@@ -35,6 +35,23 @@ type PolymarketAccountMaxSpendLogger = Readonly<{
   warn?: (input: unknown, message?: string) => void;
 }>;
 
+export type PolymarketAccountMaxSpendDependencies = Readonly<{
+  buildAccountValueReadModel: typeof buildAccountValueReadModel;
+  createFundingRuntime: (
+    pool: Pool,
+  ) => Pick<FundingPlanningRuntime, "previewLiquidity">;
+  fetchPolymarketMarketInfo: typeof fetchPolymarketMarketInfo;
+  findMaxPolymarketMarketBuyUsdForFunds: typeof findMaxPolymarketMarketBuyUsdForFunds;
+}>;
+
+const defaultAccountMaxSpendDependencies: PolymarketAccountMaxSpendDependencies =
+  {
+    buildAccountValueReadModel,
+    createFundingRuntime: (pool) => new FundingPlanningRuntime(pool),
+    fetchPolymarketMarketInfo,
+    findMaxPolymarketMarketBuyUsdForFunds,
+  };
+
 type AccountMaxSpendUnavailableReason =
   | "balance_unavailable"
   | "no_executable_funds"
@@ -141,7 +158,14 @@ function directFunderAvailableRaw(input: {
   funder: string;
   funds: PolymarketAccountMaxSpendFunds;
   preview: Awaited<ReturnType<FundingPlanningRuntime["previewLiquidity"]>>;
-}): Readonly<{ availableRaw: bigint; locationId: string }> | null {
+}): Readonly<{
+  availableRaw: bigint;
+  locationId: string;
+  lockedRaw: bigint;
+  observedRaw: bigint;
+  reservedRaw: bigint;
+  submittedDebitRaw: bigint;
+}> | null {
   const destination = input.preview.plannerSnapshot.destination;
   if (
     !destination ||
@@ -163,16 +187,19 @@ function directFunderAvailableRaw(input: {
       frozenLockedRaw > input.funds.funderLockedRaw
         ? frozenLockedRaw
         : input.funds.funderLockedRaw;
-    const unavailableRaw =
-      openOrderLockedRaw +
-      BigInt(spendability.reservedRaw) +
-      BigInt(spendability.submittedDebitRaw);
+    const reservedRaw = BigInt(spendability.reservedRaw);
+    const submittedDebitRaw = BigInt(spendability.submittedDebitRaw);
+    const unavailableRaw = openOrderLockedRaw + reservedRaw + submittedDebitRaw;
     return {
       availableRaw:
         funderObservedRaw > unavailableRaw
           ? funderObservedRaw - unavailableRaw
           : 0n,
       locationId: destination.target.location.locationId,
+      lockedRaw: openOrderLockedRaw,
+      observedRaw: funderObservedRaw,
+      reservedRaw,
+      submittedDebitRaw,
     };
   } catch {
     return null;
@@ -192,7 +219,7 @@ function completeFreshProjection(
 }
 
 function maximumPreviewInternalFundingRaw(input: {
-  excludedSourceLocationId: string;
+  excludedSourceLocationIds: readonly string[];
   maximumFeeBps: number;
   maximumFeeUsd: string;
   maximumSlippageBps: number;
@@ -213,12 +240,29 @@ function maximumPreviewInternalFundingRaw(input: {
       // collateral. Excluding its frozen source location prevents a
       // Deposit Wallet -> controller -> Deposit Wallet loop from counting
       // the same pUSD a second time.
-      excludedSourceLocationIds: [input.excludedSourceLocationId],
+      excludedSourceLocationIds: input.excludedSourceLocationIds,
     });
   const automaticRaw = capacityFor("automatic");
   const clientRaw = capacityFor("client_handoff");
   if (automaticRaw == null || clientRaw == null) return null;
   return automaticRaw > clientRaw ? automaticRaw : clientRaw;
+}
+
+export function externalWalletSourceLocationIds(
+  account: AccountValueReadModel,
+): readonly string[] {
+  const externalWalletIds = new Set(
+    (account.ownership?.wallets ?? [])
+      .filter((profile) => profile.source === "external")
+      .map((profile) => profile.walletId),
+  );
+  if (externalWalletIds.size === 0) return [];
+  return account.projection.components.flatMap((component) => {
+    const walletId = component.location.details.walletId;
+    return typeof walletId === "string" && externalWalletIds.has(walletId)
+      ? [component.location.locationId]
+      : [];
+  });
 }
 
 /**
@@ -236,11 +280,21 @@ export async function computePolymarketAccountMaxSpend(input: {
   slippageBps: number | null;
   tokenId: string;
   userId: string;
+  dependencies?: Partial<PolymarketAccountMaxSpendDependencies>;
 }): Promise<Record<string, unknown>> {
   try {
+    const dependencies = {
+      ...defaultAccountMaxSpendDependencies,
+      ...input.dependencies,
+    };
     const [account, marketInfo] = await Promise.all([
-      buildAccountValueReadModel({ pool: input.pool, userId: input.userId }),
-      fetchPolymarketMarketInfo(input.pool, { tokenId: input.tokenId }),
+      dependencies.buildAccountValueReadModel({
+        pool: input.pool,
+        userId: input.userId,
+      }),
+      dependencies.fetchPolymarketMarketInfo(input.pool, {
+        tokenId: input.tokenId,
+      }),
     ]);
     const controllerWalletRef = accountControllerWalletRef(
       account,
@@ -255,7 +309,7 @@ export async function computePolymarketAccountMaxSpend(input: {
       );
     }
 
-    const runtime = new FundingPlanningRuntime(input.pool);
+    const runtime = dependencies.createFundingRuntime(input.pool);
     const provisionalDirectRaw = input.funds.funderPusdAvailableRaw;
     const probeRaw = accountCapacityProbeRaw(account, provisionalDirectRaw);
     const capacityPreview = await runtime.previewLiquidity(
@@ -294,14 +348,36 @@ export async function computePolymarketAccountMaxSpend(input: {
       maximumFeeUsd: null,
       maximumSlippageBps: input.slippageBps,
     });
+    const excludedSourceLocationIds = [
+      directFunder.locationId,
+      ...externalWalletSourceLocationIds(account),
+    ];
     const additionalCapacityRaw = maximumPreviewInternalFundingRaw({
-      excludedSourceLocationId: directFunder.locationId,
+      excludedSourceLocationIds,
       maximumFeeUsd: economics.maximumFeeUsd,
       maximumFeeBps: economics.maximumFeeBps,
       maximumSlippageBps: economics.maximumSlippageBps,
       preview: capacityPreview,
     });
     if (additionalCapacityRaw == null) {
+      input.log?.warn?.(
+        {
+          reason: "capacity_candidate_overflow",
+          userId: input.userId,
+          signer: input.signer,
+          tokenId: input.tokenId,
+          directAvailableRaw: directAvailableRaw.toString(),
+          destinationObservedRaw: directFunder.observedRaw.toString(),
+          destinationLockedRaw: directFunder.lockedRaw.toString(),
+          destinationReservedRaw: directFunder.reservedRaw.toString(),
+          destinationSubmittedDebitRaw:
+            directFunder.submittedDebitRaw.toString(),
+          excludedSourceLocationIds,
+          funderLockedRaw: input.funds.funderLockedRaw.toString(),
+          signerLockedRaw: input.funds.signerLockedRaw.toString(),
+        },
+        "Polymarket account-wide max funding capacity unavailable",
+      );
       return unavailable(
         "balance_unavailable",
         "Account-wide funding capacity is too complex to verify safely.",
@@ -309,23 +385,66 @@ export async function computePolymarketAccountMaxSpend(input: {
     }
     const executableFundsRaw = directAvailableRaw + additionalCapacityRaw;
     if (executableFundsRaw <= 0n) {
+      input.log?.warn?.(
+        {
+          reason: "no_executable_funds",
+          userId: input.userId,
+          signer: input.signer,
+          tokenId: input.tokenId,
+          directAvailableRaw: directAvailableRaw.toString(),
+          destinationObservedRaw: directFunder.observedRaw.toString(),
+          destinationLockedRaw: directFunder.lockedRaw.toString(),
+          destinationReservedRaw: directFunder.reservedRaw.toString(),
+          destinationSubmittedDebitRaw:
+            directFunder.submittedDebitRaw.toString(),
+          additionalCapacityRaw: additionalCapacityRaw.toString(),
+          excludedSourceLocationIds,
+          funderLockedRaw: input.funds.funderLockedRaw.toString(),
+          signerLockedRaw: input.funds.signerLockedRaw.toString(),
+        },
+        "Polymarket account-wide max has no executable funds",
+      );
       return unavailable(
         "no_executable_funds",
         "No account-wide Polymarket funding route is available.",
       );
     }
 
-    const maxSpend = await findMaxPolymarketMarketBuyUsdForFunds(input.pool, {
-      tokenId: input.tokenId,
-      executableFundsRaw,
-      slippageBps: input.slippageBps ?? undefined,
-      logWarn: ({ error, tokenId: warningTokenId, conditionId }) =>
-        input.log?.warn?.(
-          { error, tokenId: warningTokenId, conditionId },
-          "Failed to fetch Polymarket CLOB fee curve for account-wide max",
-        ),
-    });
+    const maxSpend = await dependencies.findMaxPolymarketMarketBuyUsdForFunds(
+      input.pool,
+      {
+        tokenId: input.tokenId,
+        executableFundsRaw,
+        slippageBps: input.slippageBps ?? undefined,
+        logWarn: ({ error, tokenId: warningTokenId, conditionId }) =>
+          input.log?.warn?.(
+            { error, tokenId: warningTokenId, conditionId },
+            "Failed to fetch Polymarket CLOB fee curve for account-wide max",
+          ),
+      },
+    );
     if (!maxSpend.ok) {
+      input.log?.warn?.(
+        {
+          reason: maxSpend.reason,
+          userId: input.userId,
+          signer: input.signer,
+          tokenId: input.tokenId,
+          executableFundsRaw: executableFundsRaw.toString(),
+          directAvailableRaw: directAvailableRaw.toString(),
+          destinationObservedRaw: directFunder.observedRaw.toString(),
+          destinationLockedRaw: directFunder.lockedRaw.toString(),
+          destinationReservedRaw: directFunder.reservedRaw.toString(),
+          destinationSubmittedDebitRaw:
+            directFunder.submittedDebitRaw.toString(),
+          additionalCapacityRaw: additionalCapacityRaw.toString(),
+          marketOrderMinSize: marketInfo?.order_min_size ?? null,
+          excludedSourceLocationIds,
+          funderLockedRaw: input.funds.funderLockedRaw.toString(),
+          signerLockedRaw: input.funds.signerLockedRaw.toString(),
+        },
+        "Polymarket account-wide max is not executable",
+      );
       return unavailable(
         maxSpend.reason,
         maxSpend.reason === "no_liquidity"
@@ -353,16 +472,42 @@ export async function computePolymarketAccountMaxSpend(input: {
         }),
         account,
       );
+      const exactCapacityRaw = maximumPreviewInternalFundingRaw({
+        excludedSourceLocationIds,
+        maximumFeeUsd: economics.maximumFeeUsd,
+        maximumFeeBps: economics.maximumFeeBps,
+        maximumSlippageBps: economics.maximumSlippageBps,
+        preview: exactPreview,
+      });
       if (
         !completeFreshProjection(exactPreview.projection) ||
-        (maximumPreviewInternalFundingRaw({
-          excludedSourceLocationId: directFunder.locationId,
-          maximumFeeUsd: economics.maximumFeeUsd,
-          maximumFeeBps: economics.maximumFeeBps,
-          maximumSlippageBps: economics.maximumSlippageBps,
-          preview: exactPreview,
-        }) ?? -1n) < additionalRequiredRaw
+        (exactCapacityRaw ?? -1n) < additionalRequiredRaw
       ) {
+        input.log?.warn?.(
+          {
+            reason: "exact_route_capacity_mismatch",
+            userId: input.userId,
+            signer: input.signer,
+            tokenId: input.tokenId,
+            executableFundsRaw: executableFundsRaw.toString(),
+            directAvailableRaw: directAvailableRaw.toString(),
+            destinationObservedRaw: directFunder.observedRaw.toString(),
+            destinationLockedRaw: directFunder.lockedRaw.toString(),
+            destinationReservedRaw: directFunder.reservedRaw.toString(),
+            destinationSubmittedDebitRaw:
+              directFunder.submittedDebitRaw.toString(),
+            additionalCapacityRaw: additionalCapacityRaw.toString(),
+            additionalRequiredRaw: additionalRequiredRaw.toString(),
+            exactCapacityRaw: exactCapacityRaw?.toString() ?? null,
+            exactCompleteness: exactPreview.projection.completeness,
+            exactFreshness: exactPreview.projection.freshness,
+            exactReasonCodes: exactPreview.projection.reasonCodes,
+            excludedSourceLocationIds,
+            funderLockedRaw: input.funds.funderLockedRaw.toString(),
+            signerLockedRaw: input.funds.signerLockedRaw.toString(),
+          },
+          "Polymarket account-wide max exact route verification failed",
+        );
         return unavailable(
           "balance_unavailable",
           "The exact account-wide funding route could not be verified.",
