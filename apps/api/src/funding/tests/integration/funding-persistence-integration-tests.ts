@@ -32,6 +32,7 @@ import {
   loadFundingAccountValueFacts,
 } from "../../../account-value/funding-movement-feed.js";
 import type { ValuedAssetComponent } from "../../domain/types.js";
+import type { PreparationResult } from "../../domain/contracts.js";
 import {
   assertFundingReservationReadyForTrade,
   consumeFundingReservationForLinkedConsumerInTransaction,
@@ -90,6 +91,8 @@ import {
 import { OwnedRouteDestinationObserver } from "../../reconciliation/owned-route-destination-observer.js";
 import { hashOpaqueToken } from "../../persistence/canonical.js";
 import { loadTelegramAppHandoffProjection } from "../../../services/telegram-bot-trading.js";
+import { FundingPlanningRuntime } from "../../planner/runtime-service.js";
+import { PreparationContractError } from "../../preparation/core-adapter.js";
 
 const ASSET = {
   networkId: "eip155:137",
@@ -488,6 +491,143 @@ async function testConcurrentPreparationRunReplay(): Promise<void> {
     [[first.runId, expiring.runId]],
   );
   await pool.query("delete from users where id = $1", [userId]);
+}
+
+async function testSubmittedPreparationRunSelfHealing(): Promise<void> {
+  const userId = await insertUser(pool);
+  const runIds: string[] = [];
+  let inspectionAvailable = true;
+  let inspectionStatus: PreparationResult["status"] = "ready";
+  const inspectionOptions: Array<Readonly<{ forceFresh?: boolean }>> = [];
+  const inspectionInputs: Array<
+    Readonly<{ controllerWalletRef?: string | null }>
+  > = [];
+  const runtime = new FundingPlanningRuntime(pool);
+  Object.defineProperty(runtime, "preparationRuntime", {
+    value: {
+      inspectBindingOption: async (
+        input: Readonly<{ controllerWalletRef?: string | null }>,
+        options: Readonly<{ forceFresh?: boolean }> = {},
+      ) => {
+        inspectionInputs.push(input);
+        inspectionOptions.push(options);
+        if (!inspectionAvailable) {
+          throw new PreparationContractError(
+            "preparation_unavailable",
+            "test RPC unavailable",
+          );
+        }
+        return { status: inspectionStatus } as PreparationResult;
+      },
+    },
+  });
+
+  const createSubmittedRun = async (
+    revision: string,
+    actionCount = 1,
+    includeController = true,
+  ) => {
+    const request = {
+      venueBindingOptionId: `binding:test:self-heal:${revision}`,
+      purpose: "buy" as const,
+      marketContextId: null,
+      marketClass: "clob",
+      positionActionRef: null,
+      controllerWalletRef: includeController ? userId : null,
+      expectedInspectionRevision: revision,
+    };
+    const created = await createOrReplayFundingPreparationRun(pool, {
+      userId,
+      request,
+      expiresAt: new Date(Date.now() + 60_000),
+      materialize: async (runId) => ({
+        controllerWalletRef: userId,
+        actions: Array.from({ length: actionCount }, (_, index) => ({
+          kind: "evm_transaction" as const,
+          actionId: `preparation_action_${runId}_${index}`,
+          networkId: "evm:8453",
+          senderWalletId: userId,
+          to: "0x0000000000000000000000000000000000000001",
+          data: "0x",
+          valueRaw: "0",
+          gasLimitRaw: null,
+        })),
+      }),
+    });
+    runIds.push(created.runId);
+    const action = created.actions[0];
+    assert.ok(action);
+    const submitted = await reportFundingPreparationAction(pool, {
+      userId,
+      runId: created.runId,
+      actionId: action.actionId,
+      report: {
+        outcome: "submitted",
+        transactionReference: `0x${hash(revision.slice(0, 1))}`,
+        networkFeeRaw: null,
+      },
+    });
+    return { request, run: submitted };
+  };
+
+  try {
+    const readable = await createSubmittedRun(hash("f"));
+    const recoveredRead = await runtime.preparationRun(
+      userId,
+      readable.run.runId,
+    );
+    assert.equal(recoveredRead?.status, "succeeded");
+    assert.equal(inspectionOptions.at(-1)?.forceFresh, true);
+
+    const replayable = await createSubmittedRun(hash("a"), 2);
+    inspectionAvailable = false;
+    const unavailableRead = await runtime.preparationRun(
+      userId,
+      replayable.run.runId,
+    );
+    assert.equal(unavailableRead?.status, "submitted");
+
+    inspectionAvailable = true;
+    inspectionStatus = "setup_required";
+    const recoveredReplay = await runtime.prepare(userId, replayable.request);
+    assert.equal(recoveredReplay.runId, replayable.run.runId);
+    assert.equal(recoveredReplay.status, "submitted");
+    assert.equal(recoveredReplay.replayed, true);
+    const actionCount = await pool.query<{ count: string }>(
+      `
+        select count(*)::text as count
+        from funding_preparation_action_attempts
+        where run_id = $1
+      `,
+      [replayable.run.runId],
+    );
+    assert.equal(actionCount.rows[0]?.count, "2");
+
+    inspectionStatus = "ready";
+    const recoveredLater = await runtime.preparationRun(
+      userId,
+      replayable.run.runId,
+    );
+    assert.equal(recoveredLater?.status, "succeeded");
+
+    const controllerless = await createSubmittedRun(hash("b"), 1, false);
+    const recoveredControllerless = await runtime.preparationRun(
+      userId,
+      controllerless.run.runId,
+    );
+    assert.equal(recoveredControllerless?.status, "succeeded");
+    assert.equal(inspectionInputs.at(-1)?.controllerWalletRef, userId);
+  } finally {
+    await pool.query(
+      "delete from funding_preparation_action_attempts where run_id = any($1::uuid[])",
+      [runIds],
+    );
+    await pool.query(
+      "delete from funding_preparation_runs where id = any($1::uuid[])",
+      [runIds],
+    );
+    await pool.query("delete from users where id = $1", [userId]);
+  }
 }
 
 async function testConcurrentCommitReplay(): Promise<void> {
@@ -5277,6 +5417,10 @@ async function testTelegramAppHandoffV2CommittedCancellationStopsLinkedBuy(): Pr
 await testConcurrentPreparationRunReplay();
 console.log(
   "[funding-persistence-integration-tests] ok concurrent preparation replay, report idempotency, and reconcile",
+);
+await testSubmittedPreparationRunSelfHealing();
+console.log(
+  "[funding-persistence-integration-tests] ok submitted preparation read and replay self-healing",
 );
 await testConcurrentCommitReplay();
 console.log(

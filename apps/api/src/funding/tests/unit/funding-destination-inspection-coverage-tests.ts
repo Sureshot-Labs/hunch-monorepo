@@ -103,9 +103,15 @@ await test("interactive destination inspection is bounded and reuses RPC evidenc
   assert.match(source, /destinationInspectionInflight/);
   assert.match(source, /destinationInspectionCache/);
   assert.match(source, /withinDestinationInspectionDeadline/);
-  assert.match(source, /bypassCodeCache: false/);
-  assert.match(source, /query: \{ funderAddress: funder, refresh: false \}/);
-  assert.doesNotMatch(source, /bypassCodeCache: true/);
+  assert.equal(
+    (source.match(/bypassCodeCache: input\.forceFresh === true/g) ?? []).length,
+    2,
+  );
+  assert.match(source, /refresh: input\.forceFresh === true/);
+  assert.match(
+    source,
+    /if \(input\.forceFresh\) \{\s*throw new PreparationContractError\(\s*"preparation_unavailable"/,
+  );
 });
 
 await test("Limitless preparation reads one exact onchain snapshot without the account route", () => {

@@ -74,6 +74,7 @@ function preparedDestination(
 ): PreparedRuntimeDestination {
   const preparation = {
     status: "ready",
+    expiresAt: new Date(NOW.getTime() + 45_000).toISOString(),
   } as unknown as PreparationResult;
   return {
     frozen: {
@@ -169,6 +170,35 @@ await test("explicit binding controller inspects exactly the selected wallet", a
     [SELECTED_WALLET_ID],
   );
   assert.equal(queries.length, 1);
+});
+
+await test("authoritative binding inspection bypasses reusable pre-action evidence", async () => {
+  const inspected: RuntimeVenueInspectionInput[] = [];
+  const queries: string[] = [];
+  const service = new WalletPreparationRuntimeService(
+    marketDb(queries),
+    () => NOW,
+    [driver(inspected)],
+    async () => wallets,
+  );
+  const request = {
+    accountId: ACCOUNT_ID,
+    purpose: "buy" as const,
+    marketContextId: market.id,
+    marketClass: null,
+    positionActionRef: null,
+    compatibleVenueBindingOptionIds: [SELECTED_BINDING_ID],
+    controllerWalletRef: SELECTED_WALLET_ID,
+    venueBindingOptionId: SELECTED_BINDING_ID,
+  };
+
+  await service.inspectBindingOption(request);
+  await service.inspectBindingOption(request);
+  assert.equal(inspected.length, 1);
+
+  await service.inspectBindingOption(request, { forceFresh: true });
+  assert.equal(inspected.length, 2);
+  assert.equal(inspected[1]?.forceFresh, true);
 });
 
 await test("one destination discovery resolves and shares one immutable market context", async () => {

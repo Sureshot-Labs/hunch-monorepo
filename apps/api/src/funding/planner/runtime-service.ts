@@ -61,6 +61,7 @@ import {
 } from "./market-context-revision.js";
 import { FundingPlannerError } from "./money.js";
 import { WalletPreparationRuntimeService } from "../preparation/runtime-service.js";
+import { PreparationContractError } from "../preparation/core-adapter.js";
 import { ProductionFundingSourcePlanner } from "./production-source-planner.js";
 import { PolymarketFundingSourceAdapter } from "../preparation/polymarket-funding-source-adapter.js";
 import { DirectIngressFundingSourceAdapter } from "./direct-ingress-source-adapter.js";
@@ -311,17 +312,21 @@ export class FundingPlanningRuntime {
       positionActionRef?: string | null;
       controllerWalletRef?: string | null;
     }>,
+    options: Readonly<{ forceFresh?: boolean }> = {},
   ): Promise<PreparationResult> {
-    return this.preparationRuntime.inspectBindingOption({
-      accountId: userId,
-      venueBindingOptionId: request.venueBindingOptionId,
-      purpose: request.purpose,
-      marketContextId: request.marketContextId,
-      marketClass: request.marketClass,
-      positionActionRef: request.positionActionRef ?? null,
-      compatibleVenueBindingOptionIds: [request.venueBindingOptionId],
-      controllerWalletRef: request.controllerWalletRef ?? null,
-    });
+    return this.preparationRuntime.inspectBindingOption(
+      {
+        accountId: userId,
+        venueBindingOptionId: request.venueBindingOptionId,
+        purpose: request.purpose,
+        marketContextId: request.marketContextId,
+        marketClass: request.marketClass,
+        positionActionRef: request.positionActionRef ?? null,
+        compatibleVenueBindingOptionIds: [request.venueBindingOptionId],
+        controllerWalletRef: request.controllerWalletRef ?? null,
+      },
+      options,
+    );
   }
 
   async prepare(
@@ -349,7 +354,7 @@ export class FundingPlanningRuntime {
       controllerWalletRef: request.controllerWalletRef ?? null,
       expectedInspectionRevision: request.expectedInspectionRevision,
     };
-    return createOrReplayFundingPreparationRun(this.db, {
+    const run = await createOrReplayFundingPreparationRun(this.db, {
       userId,
       request: snapshot,
       expiresAt: new Date(Date.now() + PREPARATION_RUN_TTL_MS),
@@ -367,10 +372,12 @@ export class FundingPlanningRuntime {
           expectedInspectionRevision: snapshot.expectedInspectionRevision,
         }),
     });
+    return run.replayed ? this.reconcilePendingPreparationRun(run) : run;
   }
 
-  preparationRun(userId: string, runId: string) {
-    return fetchFundingPreparationRun(this.db, { userId, runId });
+  async preparationRun(userId: string, runId: string) {
+    const run = await fetchFundingPreparationRun(this.db, { userId, runId });
+    return run ? this.reconcilePendingPreparationRun(run) : null;
   }
 
   reportPreparationAction(
@@ -397,12 +404,59 @@ export class FundingPlanningRuntime {
     if (!run || run.status === "succeeded" || run.status === "expired") {
       return run;
     }
-    const preparation = await this.inspectPreparation(userId, run.request);
-    return resolveFundingPreparationRun(this.db, {
-      userId,
-      runId,
+    return this.reconcilePreparationRunSnapshot(run);
+  }
+
+  private async reconcilePendingPreparationRun(
+    run: FundingPreparationRun,
+  ): Promise<FundingPreparationRun> {
+    if (run.status !== "submitted" && run.status !== "ambiguous") return run;
+
+    try {
+      return await this.reconcilePreparationRunSnapshot(run);
+    } catch (error) {
+      // Reads and idempotent prepare replays are recovery opportunities, not
+      // availability gates. If fresh venue evidence is temporarily unavailable,
+      // preserve the durable submitted state so a later request can retry it.
+      if (
+        error instanceof PreparationContractError &&
+        error.code === "preparation_unavailable"
+      ) {
+        return run;
+      }
+      throw error;
+    }
+  }
+
+  private async reconcilePreparationRunSnapshot(
+    run: FundingPreparationRun,
+  ): Promise<FundingPreparationRun> {
+    // A preparation inspection is reusable for discovery, but it is not valid
+    // reconciliation evidence after an action was broadcast. In particular,
+    // an approval can confirm while the pre-submit inspection remains cached.
+    // Re-read the authoritative venue/RPC state and resolve the existing run;
+    // never materialize or submit a replacement action from this path.
+    const preparation = await this.inspectPreparation(
+      run.userId,
+      {
+        ...run.request,
+        // Materialization resolves and persists the exact controller even when
+        // the original client request omitted the optional controller hint.
+        // Reconciliation must not broaden that durable selection to every
+        // wallet on the account.
+        controllerWalletRef:
+          run.controllerWalletRef ?? run.request.controllerWalletRef,
+      },
+      { forceFresh: true },
+    );
+    const resolved = await resolveFundingPreparationRun(this.db, {
+      userId: run.userId,
+      runId: run.runId,
       succeeded: preparation.status === "ready",
     });
+    return run.replayed && !resolved.replayed
+      ? { ...resolved, replayed: true }
+      : resolved;
   }
 
   liquidity(
