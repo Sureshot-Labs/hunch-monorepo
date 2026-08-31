@@ -205,6 +205,7 @@ async function ethRpcRequest<T>(inputs: {
   timeoutMs: number;
   method: string;
   params: unknown[];
+  inflightNamespace?: "fresh" | null;
 }): Promise<T> {
   const source = captureRpcDiagnosticSource();
   recordRpcLogicalCall({
@@ -220,7 +221,7 @@ async function ethRpcRequest<T>(inputs: {
     inputs.params,
   ]);
   return rpcReadCoordinator.singleFlight(
-    `evm:request:${key}`,
+    `evm:request:${inputs.inflightNamespace ?? "shared"}:${key}`,
     () => executeEthRpcRequest<T>({ ...inputs, source }),
     () =>
       recordRpcDedupHit({
@@ -289,6 +290,7 @@ export async function fetchEvmBlockNumber(inputs: {
         timeoutMs: inputs.timeoutMs,
         method: "eth_blockNumber",
         params: [],
+        inflightNamespace: inputs.bypassCache ? "fresh" : null,
       });
       return parseRpcQuantity(result, "block number");
     },
@@ -717,6 +719,7 @@ export async function fetchEvmCode(inputs: {
         timeoutMs: inputs.timeoutMs,
         method: "eth_getCode",
         params: [address, "latest"],
+        inflightNamespace: inputs.bypassCache ? "fresh" : null,
       }),
   );
 }
@@ -726,6 +729,7 @@ export async function fetchEvmCall(inputs: {
   timeoutMs: number;
   to: string;
   data: string;
+  bypassInflight?: boolean;
 }): Promise<string> {
   const to = ethers.getAddress(inputs.to);
   return ethRpcRequest<string>({
@@ -733,6 +737,7 @@ export async function fetchEvmCall(inputs: {
     timeoutMs: inputs.timeoutMs,
     method: "eth_call",
     params: [{ to, data: inputs.data }, "latest"],
+    inflightNamespace: inputs.bypassInflight ? "fresh" : null,
   });
 }
 
@@ -969,6 +974,7 @@ export async function fetchErc1155IsApprovedForAll(inputs: {
         timeoutMs: inputs.timeoutMs,
         method: "eth_call",
         params: [{ to: contractAddress, data }, "latest"],
+        inflightNamespace: inputs.bypassCache ? "fresh" : null,
       });
 
       const decoded = erc1155Iface.decodeFunctionResult(
@@ -989,6 +995,7 @@ export async function fetchEvmMulticall(inputs: {
   timeoutMs: number;
   multicallAddress: string;
   calls: Array<{ target: string; callData: string; allowFailure?: boolean }>;
+  bypassInflight?: boolean;
 }): Promise<Array<{ success: boolean; returnData: string }>> {
   if (inputs.calls.length === 0) return [];
 
@@ -1007,6 +1014,7 @@ export async function fetchEvmMulticall(inputs: {
     timeoutMs: inputs.timeoutMs,
     method: "eth_call",
     params: [{ to: multicallAddress, data }, "latest"],
+    inflightNamespace: inputs.bypassInflight ? "fresh" : null,
   });
 
   const decoded = multicallIface.decodeFunctionResult(

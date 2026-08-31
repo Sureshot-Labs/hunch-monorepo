@@ -2671,6 +2671,18 @@ try {
       marketId,
     ],
   );
+  await client.query(
+    `insert into funding_operation_steps (
+       operation_id, ordinal, step_kind, state, action_fingerprint,
+       executor_id, payer_requirement, normalized_action,
+       action_validation_result, created_at, updated_at
+     ) values (
+       $1::uuid, 0, 'transaction', 'succeeded', repeat('f', 64),
+       'telegram_relay_evm_funding_v1', 'privy_sponsor', '{}'::jsonb,
+       '{}'::jsonb, clock_timestamp(), clock_timestamp()
+     )`,
+    [terminalFundingOperation.rows[0]?.id],
+  );
   // A funding operation becomes terminal when its reservation is consumed.
   // The linked intent may already be submitting or reconciling a venue order;
   // that trade boundary must remain authoritative over the funding status.
@@ -3178,7 +3190,13 @@ try {
      ) values (
        $1, $2, 'trade_shortfall', 'ready', 'ready_for_consumer', 'instant',
        'already_available', $3, repeat('4', 64), repeat('2', 64), 1,
-       'telegram-cancellable-handoff', '{}'::jsonb, $4, '{}'::jsonb,
+       'telegram-cancellable-handoff', jsonb_build_object(
+         'kind', 'owned_location',
+         'location', jsonb_build_object(
+           'kind', 'venue_account',
+           'details', jsonb_build_object('venueId', 'polymarket')
+         )
+       ), $4, '{}'::jsonb,
        '{}'::jsonb, '{}'::jsonb, repeat('5', 64), 1,
        now() + interval '1 hour'
      ) returning id`,
@@ -3188,6 +3206,18 @@ try {
       `cancellable-handoff-funding:${suffix}`,
       marketId,
     ],
+  );
+  await client.query(
+    `insert into funding_operation_steps (
+       operation_id, ordinal, step_kind, state, action_fingerprint,
+       executor_id, payer_requirement, normalized_action,
+       action_validation_result, created_at, updated_at
+     ) values (
+       $1::uuid, 0, 'transaction', 'succeeded', repeat('6', 64),
+       'telegram_relay_evm_funding_v1', 'privy_sponsor', '{}'::jsonb,
+       '{}'::jsonb, clock_timestamp(), clock_timestamp()
+     )`,
+    [cancellableFundingOperation.rows[0]?.id],
   );
   const cancellableFundingReservation = await client.query<{ id: string }>(
     `insert into balance_reservations (
@@ -3238,6 +3268,21 @@ try {
   );
   const cancellableFundedIntentId = cancellableFundedIntent.rows[0]?.id;
   assert.ok(cancellableFundedIntentId);
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+    limit: 100,
+  });
+  assert.equal(
+    (
+      await client.query<{ state: string | null }>(
+        `select result -> 'shortfallProgress' ->> 'state' as state
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [cancellableFundedIntentId],
+      )
+    ).rows[0]?.state,
+    "ready",
+    "an exact Polymarket destination is consumer-ready without a Router continuation child",
+  );
   const cancelledFundedHandoff = await invokeIntentNavigation(
     cancellableFundedIntentId,
     "cancel",

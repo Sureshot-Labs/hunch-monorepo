@@ -207,6 +207,7 @@ export async function fetchLimitlessOnchainSnapshot(inputs: {
   ammAddress?: string | null;
   adapterAddress?: string | null;
   conditionalTokensAddress?: string | null;
+  forceFresh?: boolean;
 }): Promise<{
   usdcBalance: bigint;
   allowanceClob: bigint | null;
@@ -233,7 +234,8 @@ export async function fetchLimitlessOnchainSnapshot(inputs: {
     adapterAddress.toLowerCase(),
     conditionalTokensAddress.toLowerCase(),
   ].join("|");
-  const pending = limitlessSnapshotInflight.get(key);
+  const inflightKey = inputs.forceFresh ? `fresh:${key}` : key;
+  const pending = limitlessSnapshotInflight.get(inflightKey);
   if (pending) return pending;
 
   const promise = (async () => {
@@ -315,6 +317,7 @@ export async function fetchLimitlessOnchainSnapshot(inputs: {
         callData: entry.callData,
         allowFailure: true,
       })),
+      bypassInflight: inputs.forceFresh === true,
     });
 
     const decoded = entries.map((entry, index) => {
@@ -362,9 +365,9 @@ export async function fetchLimitlessOnchainSnapshot(inputs: {
       approvedAmm,
     };
   })().finally(() => {
-    limitlessSnapshotInflight.delete(key);
+    limitlessSnapshotInflight.delete(inflightKey);
   });
-  limitlessSnapshotInflight.set(key, promise);
+  limitlessSnapshotInflight.set(inflightKey, promise);
   return promise;
 }
 

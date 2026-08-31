@@ -91,6 +91,7 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
   feeCollectorAddress?: string | null;
   fundingRouterAddress?: string | null;
   extraConditionalOperatorAddresses?: string[];
+  forceFresh?: boolean;
 }): Promise<Snapshot> {
   const signer = ethers.getAddress(inputs.signer);
   const funder = ethers.getAddress(inputs.funder);
@@ -287,6 +288,7 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
       callData: entry.callData,
       allowFailure: true,
     })),
+    bypassInflight: inputs.forceFresh === true,
   });
 
   const decoded = entries.map((entry, index) => {

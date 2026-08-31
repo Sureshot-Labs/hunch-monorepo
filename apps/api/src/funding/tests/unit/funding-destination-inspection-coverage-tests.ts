@@ -102,10 +102,17 @@ await test("interactive destination inspection is bounded and reuses RPC evidenc
   assert.match(source, /DESTINATION_INSPECTION_REUSE_MS = 30_000/);
   assert.match(source, /destinationInspectionInflight/);
   assert.match(source, /destinationInspectionCache/);
+  assert.match(source, /destinationInspectionGeneration/);
   assert.match(source, /withinDestinationInspectionDeadline/);
-  assert.match(source, /bypassCodeCache: false/);
-  assert.match(source, /query: \{ funderAddress: funder, refresh: false \}/);
-  assert.doesNotMatch(source, /bypassCodeCache: true/);
+  assert.equal(
+    (source.match(/bypassCodeCache: input\.forceFresh === true/g) ?? []).length,
+    2,
+  );
+  assert.match(source, /refresh: input\.forceFresh === true/);
+  assert.match(
+    source,
+    /if \(input\.forceFresh\) \{\s*throw new PreparationContractError\(\s*"preparation_unavailable"/,
+  );
 });
 
 await test("Limitless preparation reads one exact onchain snapshot without the account route", () => {
@@ -122,6 +129,7 @@ await test("Limitless preparation reads one exact onchain snapshot without the a
     limitlessInspection,
     /conditionalTokensAddress:\s*fundingSidecarRuntimeConfig\.limitlessConditionalTokensAddress/,
   );
+  assert.match(limitlessInspection, /forceFresh: input\.forceFresh === true/);
   assert.doesNotMatch(limitlessInspection, /fetchLimitlessAccountRoute/);
   assert.equal(
     (limitlessInspection.match(/resolveLimitlessAuthContext/g) ?? []).length,

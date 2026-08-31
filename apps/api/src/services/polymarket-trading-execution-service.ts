@@ -4327,6 +4327,7 @@ export async function fetchPolymarketAccountRoute(input: {
           rpcUrl: env.polygonRpcUrl,
           timeoutMs: env.polygonRpcTimeoutMs,
           address: funder,
+          bypassCache: refresh,
         }),
         fetchPolymarketOnchainSnapshot({
           rpcUrl: env.polygonRpcUrl,
@@ -4340,6 +4341,7 @@ export async function fetchPolymarketAccountRoute(input: {
           negRiskCollateralAdapterAddress,
           feeCollectorAddress: null,
           fundingRouterAddress: env.polymarketFundingRouterAddress || null,
+          forceFresh: refresh,
         }),
       ]);
 

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type { Pool } from "@hunch/infra";
+import type { Pool, PoolClient } from "@hunch/infra";
 import type { DbQuery } from "../db.js";
 import {
   countReferralsForReferralCode,
@@ -467,7 +467,10 @@ export async function createTradePnlShare(
     positionId: string;
     referralCode?: string | null;
   },
-  options?: { statementTimeoutMs?: number | null },
+  options?: {
+    deadlineAt?: number | null;
+    statementTimeoutMs?: number | null;
+  },
 ): Promise<PublicShareResponse> {
   const statementTimeoutMs = options?.statementTimeoutMs ?? null;
   if (statementTimeoutMs == null) {
@@ -481,13 +484,30 @@ export async function createTradePnlShare(
     throw new Error("Invalid trade share statement timeout");
   }
 
-  const client = await pool.connect();
+  const deadlineAt = options?.deadlineAt ?? null;
+  const assertBeforeDeadline = () => {
+    if (deadlineAt != null && Date.now() >= deadlineAt) {
+      throw new ShareCreateGuardError("request_timeout", 5);
+    }
+  };
+  const client = await connectShareClientBeforeDeadline(pool, deadlineAt);
   try {
+    assertBeforeDeadline();
     await client.query("begin");
     await client.query("select set_config('statement_timeout', $1, true)", [
       `${statementTimeoutMs}ms`,
     ]);
-    const share = await createTradePnlShareWithQuery(client, inputs);
+    const deadlineQuery: DbQuery = {
+      query: async (...args: Parameters<PoolClient["query"]>) => {
+        assertBeforeDeadline();
+        return client.query(...args);
+      },
+    } as DbQuery;
+    const share = await createTradePnlShareWithQuery(deadlineQuery, inputs);
+    // A query may finish just after the HTTP deadline. Do not commit a
+    // snapshot after every waiter has already been told that creation timed
+    // out; rollback keeps retries idempotent across processes.
+    assertBeforeDeadline();
     await client.query("commit");
     return share;
   } catch (error) {
@@ -499,6 +519,40 @@ export async function createTradePnlShare(
   } finally {
     client.release();
   }
+}
+
+async function connectShareClientBeforeDeadline(
+  pool: Pool,
+  deadlineAt: number | null,
+): Promise<PoolClient> {
+  if (deadlineAt == null) return pool.connect();
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) {
+    throw new ShareCreateGuardError("request_timeout", 5);
+  }
+
+  return new Promise<PoolClient>((resolve, reject) => {
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      reject(new ShareCreateGuardError("request_timeout", 5));
+    }, remainingMs);
+    void pool.connect().then(
+      (client) => {
+        if (timedOut) {
+          client.release();
+          return;
+        }
+        clearTimeout(timer);
+        resolve(client);
+      },
+      (error) => {
+        if (timedOut) return;
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 async function createTradePnlShareWithQuery(

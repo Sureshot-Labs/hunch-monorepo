@@ -1080,6 +1080,10 @@ export async function claimObservableFundingReceiveSessions(
                      or last_observed_at < observation_requested_at
                    )
                  ) desc,
+                 -- Closed sessions remain eligible for late-transfer
+                 -- recovery, but churn between Web and Telegram must never
+                 -- consume the bounded claim window ahead of live deposits.
+                 (status in ('open', 'processing', 'review_required', 'recovery_required')) desc,
                  coalesce(last_observed_at, opened_at) asc
         for update skip locked
         limit $2

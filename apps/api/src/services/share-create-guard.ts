@@ -1,8 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { env } from "../env.js";
 import {
-  acquireDistributedSlot,
+  acquireDistributedLease,
   checkRateLimit,
-  releaseDistributedSlot,
+  releaseDistributedLease,
 } from "../lib/rate-limit.js";
 import { getRedisStatus } from "../redis.js";
 import type { PublicShareResponse } from "./share-snapshots.js";
@@ -54,10 +55,10 @@ const inflightTradeShareRequests = new Map<
 >();
 
 const defaultShareGuardDependencies = {
-  acquireDistributedSlot,
+  acquireDistributedLease,
   checkRateLimit,
   getRedisStatus,
-  releaseDistributedSlot,
+  releaseDistributedLease,
 };
 let shareGuardDependencies = defaultShareGuardDependencies;
 
@@ -225,49 +226,75 @@ async function checkGuardRateLimit(
   return false;
 }
 
+type AcquiredGuardSlot = Readonly<{
+  backend: "local" | "redis";
+  key: string;
+  ownerToken: string | null;
+}>;
+
 async function acquireGuardSlot(
   backend: GuardBackend,
   key: string,
   maxSlots: number,
-): Promise<boolean> {
+): Promise<AcquiredGuardSlot | null> {
   if (backend === "local") {
-    return acquireLocalSlot(key, maxSlots, SHARE_CREATE_SLOT_TTL_MS);
+    return acquireLocalSlot(key, maxSlots, SHARE_CREATE_SLOT_TTL_MS)
+      ? { backend: "local", key, ownerToken: null }
+      : null;
   }
   if (backend === "redis") {
-    return settleRequiredShareDependency(
-      shareGuardDependencies.acquireDistributedSlot(
-        key,
+    const ownerToken = randomUUID();
+    const requestDeadlineMs = Date.now() + SHARE_REDIS_OPERATION_TIMEOUT_MS;
+    const acquisition = shareGuardDependencies.acquireDistributedLease(
+      key,
+      {
         maxSlots,
-        SHARE_CREATE_SLOT_TTL_MS,
-        {
-          // Preserve the distinction between a full slot (429) and an
-          // unavailable guard backend (typed retryable 503).
-          onError: "throw",
-        },
-      ),
+        ownerToken,
+        requestDeadlineMs,
+        ttlMs: SHARE_CREATE_SLOT_TTL_MS,
+      },
+      {
+        // Preserve the distinction between a full slot (429) and an
+        // unavailable guard backend (typed retryable 503).
+        onError: "throw",
+      },
     );
+    try {
+      const acquired = await settleRequiredShareDependency(acquisition);
+      return acquired ? { backend: "redis", key, ownerToken } : null;
+    } catch (error) {
+      // Promise timeouts do not cancel a Redis command. Queue an exact-owner
+      // cleanup now and again after a late positive result. ZREM by token is
+      // idempotent and cannot release a newer request's lease.
+      void shareGuardDependencies
+        .releaseDistributedLease(key, ownerToken)
+        .catch(() => undefined);
+      void acquisition
+        .then((acquired) =>
+          acquired
+            ? shareGuardDependencies.releaseDistributedLease(key, ownerToken)
+            : undefined,
+        )
+        .catch(() => undefined);
+      throw error;
+    }
   }
-  return false;
+  return null;
 }
 
-async function releaseGuardSlot(
-  backend: GuardBackend,
-  key: string,
-): Promise<void> {
-  if (backend === "local") {
-    releaseLocalSlot(key, SHARE_CREATE_SLOT_TTL_MS);
+async function releaseGuardSlot(slot: AcquiredGuardSlot): Promise<void> {
+  if (slot.backend === "local") {
+    releaseLocalSlot(slot.key, SHARE_CREATE_SLOT_TTL_MS);
     return;
   }
-  if (backend === "redis") {
-    await settleShareDependency(
-      shareGuardDependencies.releaseDistributedSlot(
-        key,
-        SHARE_CREATE_SLOT_TTL_MS,
-      ),
-      SHARE_REDIS_OPERATION_TIMEOUT_MS,
-      undefined,
-    );
-  }
+  await settleShareDependency(
+    shareGuardDependencies.releaseDistributedLease(
+      slot.key,
+      slot.ownerToken ?? "",
+    ),
+    SHARE_REDIS_OPERATION_TIMEOUT_MS,
+    undefined,
+  );
 }
 
 function normalizeReferralCacheKey(
@@ -379,20 +406,17 @@ export async function withTradePnlShareSingleflight(
     throw new ShareCreateGuardError("request_timeout", 5);
   }
 
-  // The singleflight promise itself owns the deadline. If the underlying DB
-  // or cache work stops making progress, the entry is evicted when this
-  // bounded promise rejects, so later retries never inherit a permanently
-  // pending request.
-  const pending = settleTradeShareBeforeDeadline(
-    Promise.resolve().then(fn),
-    deadlineAt,
-  ).finally(() => {
-    if (inflightTradeShareRequests.get(key) === pending) {
+  // Keep the real producer in the map until it settles. Each HTTP waiter owns
+  // its deadline separately; timing out one waiter must not forget a producer
+  // that can still commit/cache a snapshot and let a retry create a duplicate.
+  const producer = Promise.resolve().then(fn);
+  const trackedProducer = producer.finally(() => {
+    if (inflightTradeShareRequests.get(key) === trackedProducer) {
       inflightTradeShareRequests.delete(key);
     }
   });
-  inflightTradeShareRequests.set(key, pending);
-  return pending;
+  inflightTradeShareRequests.set(key, trackedProducer);
+  return settleTradeShareBeforeDeadline(trackedProducer, deadlineAt);
 }
 
 async function settleTradeShareBeforeDeadline<T>(
@@ -428,24 +452,20 @@ export async function withShareCreateGuard<T>(
 
   const userSlotKey = `shares:create:user:${inputs.userId}`;
   const globalSlotKey = "shares:create:global";
-  const releaseKeys: string[] = [];
+  const acquiredSlots: AcquiredGuardSlot[] = [];
 
   try {
-    const userSlotAcquired = await acquireGuardSlot(backend, userSlotKey, 1);
-    if (!userSlotAcquired) {
+    const userSlot = await acquireGuardSlot(backend, userSlotKey, 1);
+    if (!userSlot) {
       throw new ShareCreateGuardError("user_inflight", 15);
     }
-    releaseKeys.push(userSlotKey);
+    acquiredSlots.push(userSlot);
 
-    const globalSlotAcquired = await acquireGuardSlot(
-      backend,
-      globalSlotKey,
-      4,
-    );
-    if (!globalSlotAcquired) {
+    const globalSlot = await acquireGuardSlot(backend, globalSlotKey, 4);
+    if (!globalSlot) {
       throw new ShareCreateGuardError("global_inflight", 15);
     }
-    releaseKeys.push(globalSlotKey);
+    acquiredSlots.push(globalSlot);
 
     const burstAllowed = await checkGuardRateLimit(
       backend,
@@ -470,7 +490,7 @@ export async function withShareCreateGuard<T>(
     return await fn();
   } finally {
     await Promise.all(
-      releaseKeys.reverse().map((key) => releaseGuardSlot(backend, key)),
+      acquiredSlots.reverse().map((slot) => releaseGuardSlot(slot)),
     );
   }
 }

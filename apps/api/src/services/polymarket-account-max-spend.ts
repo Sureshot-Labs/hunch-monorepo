@@ -258,7 +258,12 @@ export function externalWalletSourceLocationIds(
   );
   if (externalWalletIds.size === 0) return [];
   return account.projection.components.flatMap((component) => {
-    const walletId = component.location.details.walletId;
+    const walletId =
+      component.location.kind === "wallet"
+        ? component.location.details.walletId
+        : component.location.kind === "venue_account"
+          ? component.location.details.controllerWalletId
+          : null;
     return typeof walletId === "string" && externalWalletIds.has(walletId)
       ? [component.location.locationId]
       : [];

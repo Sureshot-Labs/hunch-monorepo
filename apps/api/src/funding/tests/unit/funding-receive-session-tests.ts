@@ -1273,8 +1273,43 @@ assert.deepEqual(
     newerCursorSession,
     olderCursorSession,
   ]).map((candidate) => candidate.candidateId),
-  ["older-cursor", "newer-cursor"],
-  "the older stream cursor must scan first so an event at block 101 cannot be skipped",
+  ["newer-cursor", "older-cursor"],
+  "active deposits must retain the bounded polling budget before closed recovery streams",
+);
+
+const cancelledChurn = Array.from({ length: 300 }, (_, index) => ({
+  ...olderCursorSession,
+  candidateId: `cancelled-churn-${index}`,
+  session: {
+    ...olderCursorSession.session,
+    receiveSessionId: `receive_session_cancelled_${String(index).padStart(4, "0")}`,
+    status: "cancelled" as const,
+  },
+}));
+assert.equal(
+  selectFundingReceiveSessionsForPolling([
+    ...cancelledChurn,
+    newerCursorSession,
+  ])[0]?.candidateId,
+  "newer-cursor",
+  "cross-channel churn cannot displace a live receive session",
+);
+const recoverySession = {
+  ...newerCursorSession,
+  candidateId: "recovery-session",
+  session: {
+    ...newerCursorSession.session,
+    receiveSessionId: "receive_session_recovery_priority_12345678",
+    status: "recovery_required" as const,
+  },
+};
+assert.equal(
+  selectFundingReceiveSessionsForPolling([
+    ...cancelledChurn,
+    recoverySession,
+  ])[0]?.candidateId,
+  "recovery-session",
+  "cancelled churn cannot displace a live recovery session after SQL claim",
 );
 
 function allocationStartVariant(variantId: string, eventCursorBlock: string) {

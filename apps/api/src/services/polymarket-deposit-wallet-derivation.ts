@@ -128,6 +128,7 @@ export async function inspectPolymarketDepositWallet(input: {
   owner: string;
   rpcUrl: string;
   timeoutMs: number;
+  bypassCodeCache?: boolean;
   factory?: string;
   implementation?: string;
 }): Promise<PolymarketDepositWalletDerivation> {
@@ -150,6 +151,7 @@ export async function inspectPolymarketDepositWallet(input: {
         timeoutMs: input.timeoutMs,
         to: factory,
         data: FACTORY_BEACON_SELECTOR,
+        bypassInflight: input.bypassCodeCache === true,
       }),
     );
   } catch (error) {
@@ -166,6 +168,7 @@ export async function inspectPolymarketDepositWallet(input: {
     rpcUrl: input.rpcUrl,
     timeoutMs: input.timeoutMs,
     address: uupsAddress,
+    bypassCache: input.bypassCodeCache,
   });
   const uupsDeployed = uupsCode !== "0x" && uupsCode !== "0x0";
   if (beacon === ZERO_ADDRESS || uupsDeployed) {
@@ -187,6 +190,7 @@ export async function inspectPolymarketDepositWallet(input: {
     rpcUrl: input.rpcUrl,
     timeoutMs: input.timeoutMs,
     address: beaconAddress,
+    bypassCache: input.bypassCodeCache,
   });
   return {
     address: beaconAddress,

@@ -75,6 +75,66 @@ try {
     "fresh-1",
   );
 
+  const raceCoordinator = new RpcReadCoordinator(8);
+  let resolveNormal!: (value: string) => void;
+  let resolveFresh!: (value: string) => void;
+  const normal = raceCoordinator.memo(
+    "balance:wallet",
+    { ttlMs: 30_000 },
+    () =>
+      new Promise<string>((resolve) => {
+        resolveNormal = resolve;
+      }),
+  );
+  const fresh = raceCoordinator.memo(
+    "balance:wallet",
+    { ttlMs: 30_000, bypass: true },
+    () =>
+      new Promise<string>((resolve) => {
+        resolveFresh = resolve;
+      }),
+  );
+  resolveFresh("post-broadcast");
+  assert.equal(await fresh, "post-broadcast");
+  resolveNormal("pre-broadcast");
+  assert.equal(await normal, "pre-broadcast");
+  let cachedLoaderCalls = 0;
+  assert.equal(
+    await raceCoordinator.memo(
+      "balance:wallet",
+      { ttlMs: 30_000 },
+      async () => {
+        cachedLoaderCalls += 1;
+        return "unexpected";
+      },
+    ),
+    "post-broadcast",
+  );
+  assert.equal(cachedLoaderCalls, 0);
+
+  let releaseAuthoritative!: (value: string) => void;
+  const authoritative = raceCoordinator.memo(
+    "allowance:wallet",
+    { ttlMs: 30_000, bypass: true },
+    () =>
+      new Promise<string>((resolve) => {
+        releaseAuthoritative = resolve;
+      }),
+  );
+  let followerLoaderCalls = 0;
+  const follower = raceCoordinator.memo(
+    "allowance:wallet",
+    { ttlMs: 30_000 },
+    async () => {
+      followerLoaderCalls += 1;
+      return "stale";
+    },
+  );
+  releaseAuthoritative("authoritative");
+  assert.equal(await authoritative, "authoritative");
+  assert.equal(await follower, "authoritative");
+  assert.equal(followerLoaderCalls, 0);
+
   let nullLoads = 0;
   const loadNull = () =>
     coordinator.memo("pending-null", { ttlMs: 100 }, async () => {

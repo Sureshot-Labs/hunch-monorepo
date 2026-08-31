@@ -140,6 +140,8 @@ export type RuntimeVenueInspectionInput = Readonly<{
   marketContextId: string | null;
   marketClass: string | null;
   positionActionRef: string | null;
+  /** Bypass reusable venue/account snapshots for post-broadcast reconciliation. */
+  forceFresh?: boolean;
   /** Exact canonical position owner for owner-bound actions such as redeem. */
   requiredOwnerAccountRef?: string;
   resolvedMarketContext?: RuntimeMarketContext;
@@ -1044,6 +1046,8 @@ export class WalletPreparationRuntimeService {
     string,
     Promise<PreparedRuntimeDestination>
   >();
+  private readonly destinationInspectionGeneration = new Map<string, number>();
+  private destinationInspectionGenerationSequence = 0;
   private readonly destinationInspectionCache = new Map<
     string,
     Readonly<{
@@ -1134,6 +1138,7 @@ export class WalletPreparationRuntimeService {
     request: DestinationOptionsInput;
     canonicalMarketContextId: string | null;
     resolvedMarketContext?: RuntimeMarketContext;
+    forceFresh?: boolean;
   }): Promise<PreparedRuntimeDestination> {
     const key = JSON.stringify({
       accountId: input.request.accountId,
@@ -1145,14 +1150,24 @@ export class WalletPreparationRuntimeService {
       marketClass: input.request.marketClass,
       positionActionRef: input.request.positionActionRef ?? null,
     });
+    const inflightKey = input.forceFresh ? `fresh:${key}` : key;
     const now = this.clock().getTime();
-    const cached = this.destinationInspectionCache.get(key);
-    if (cached && cached.reusableUntil > now) {
-      return Promise.resolve(cached.value);
+    if (!input.forceFresh) {
+      const authoritativePending = this.destinationInspectionInflight.get(
+        `fresh:${key}`,
+      );
+      if (authoritativePending) return authoritativePending;
+      const cached = this.destinationInspectionCache.get(key);
+      if (cached && cached.reusableUntil > now) {
+        return Promise.resolve(cached.value);
+      }
+      if (cached) this.destinationInspectionCache.delete(key);
     }
-    if (cached) this.destinationInspectionCache.delete(key);
-    const pending = this.destinationInspectionInflight.get(key);
+    const pending = this.destinationInspectionInflight.get(inflightKey);
     if (pending) return pending;
+
+    const generation = ++this.destinationInspectionGenerationSequence;
+    this.destinationInspectionGeneration.set(key, generation);
 
     const inspection = input.driver
       .inspect({
@@ -1163,6 +1178,7 @@ export class WalletPreparationRuntimeService {
         marketClass: input.request.marketClass,
         positionActionRef: input.request.positionActionRef ?? null,
         resolvedMarketContext: input.resolvedMarketContext,
+        forceFresh: input.forceFresh,
       })
       .then((value) => {
         const completedAt = this.clock().getTime();
@@ -1173,15 +1189,21 @@ export class WalletPreparationRuntimeService {
           completedAt + DESTINATION_INSPECTION_REUSE_MS,
           evidenceExpiresAt,
         );
-        if (reusableUntil > completedAt) {
+        if (
+          reusableUntil > completedAt &&
+          this.destinationInspectionGeneration.get(key) === generation
+        ) {
           this.destinationInspectionCache.set(key, { value, reusableUntil });
         }
         return value;
       })
       .finally(() => {
-        this.destinationInspectionInflight.delete(key);
+        this.destinationInspectionInflight.delete(inflightKey);
+        if (this.destinationInspectionGeneration.get(key) === generation) {
+          this.destinationInspectionGeneration.delete(key);
+        }
       });
-    this.destinationInspectionInflight.set(key, inspection);
+    this.destinationInspectionInflight.set(inflightKey, inspection);
     return inspection;
   }
 
@@ -1211,8 +1233,15 @@ export class WalletPreparationRuntimeService {
           owner: input.wallet.walletAddress,
           rpcUrl: fundingSidecarRuntimeConfig.polygonRpcUrl,
           timeoutMs: fundingSidecarRuntimeConfig.polygonRpcTimeoutMs,
+          bypassCodeCache: input.forceFresh === true,
         });
       } catch {
+        if (input.forceFresh) {
+          throw new PreparationContractError(
+            "preparation_unavailable",
+            "Polymarket Deposit Wallet could not be inspected with fresh RPC evidence",
+          );
+        }
         deposit = null;
       }
     }
@@ -1245,13 +1274,16 @@ export class WalletPreparationRuntimeService {
       signer: input.wallet.walletAddress,
       storedFunder: funder,
       includeMagicProxy: true,
-      bypassCodeCache: false,
+      bypassCodeCache: input.forceFresh === true,
     }).catch(() => null);
     const accountResultPromise = fetchPolymarketAccountRoute({
       credentialsInfo: credentials,
       userId: input.accountId,
       signer: input.wallet.walletAddress,
-      query: { funderAddress: funder, refresh: false },
+      query: {
+        funderAddress: funder,
+        refresh: input.forceFresh === true,
+      },
     });
     const liveCollateralLocksPromise = storedL2Credentials
       ? fetchPolymarketMaxSpendLiveOpenOrderLocks({
@@ -1547,6 +1579,7 @@ export class WalletPreparationRuntimeService {
       ammAddress: marketContext.ammAddress,
       conditionalTokensAddress:
         fundingSidecarRuntimeConfig.limitlessConditionalTokensAddress,
+      forceFresh: input.forceFresh === true,
     }).catch(() => null);
     const venueLockedCollateralPromise = effectiveMarketClass?.startsWith(
       "clob",
@@ -1726,6 +1759,7 @@ export class WalletPreparationRuntimeService {
     input: DestinationOptionsInput,
     resolvedMarket: ApiTradeMarket | null = null,
     allowPartialVenueCoverage = false,
+    forceFresh = false,
   ): Promise<readonly PreparedRuntimeDestination[]> {
     const wallets = (await this.loadWallets(input.accountId)).filter(
       (wallet) =>
@@ -1788,6 +1822,7 @@ export class WalletPreparationRuntimeService {
             request: input,
             canonicalMarketContextId: targetMarket?.id ?? null,
             resolvedMarketContext,
+            forceFresh,
           }),
         ),
       ),
@@ -1893,8 +1928,14 @@ export class WalletPreparationRuntimeService {
 
   async inspectBindingOption(
     input: DestinationOptionsInput & Readonly<{ venueBindingOptionId: string }>,
+    options: Readonly<{ forceFresh?: boolean }> = {},
   ): Promise<PreparationResult> {
-    const candidates = await this.preparedDestinations(input);
+    const candidates = await this.preparedDestinations(
+      input,
+      null,
+      false,
+      options.forceFresh === true,
+    );
     const candidate = candidates.find(
       (entry) =>
         entry.frozen.bindingOption.venueBindingOptionId ===

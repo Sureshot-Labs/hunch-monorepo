@@ -933,7 +933,7 @@ async function listCandidates(
   limit: number,
 ): Promise<readonly ProjectionCandidate[]> {
   const { rows } = await client.query<ProjectionCandidate>({
-    name: "telegram-trade-lifecycle-candidates-v3",
+    name: "telegram-trade-lifecycle-candidates-v4",
     text: `select intent.id,
             intent.user_id,
             intent.telegram_user_id,
@@ -1127,7 +1127,10 @@ async function listCandidates(
        left join lateral (
          select continuation.*
            from funding_operations continuation
-          where continuation.user_id = operation.user_id
+          where (
+            ${telegramPolymarketRootRequiresRouterContinuationSql("operation")}
+          )
+            and continuation.user_id = operation.user_id
             and continuation.support_metadata ->> 'telegramTradeIntentId' = intent.id::text
             and continuation.support_metadata ->> 'continuationOfOperationId' = operation.id::text
           order by continuation.created_at desc, continuation.id desc

@@ -11,7 +11,7 @@ import {
   TRADES_DB_STATEMENT_TIMEOUT_MS,
   tradesQueryWork,
 } from "./routes/trades.js";
-import { MAX_TRADES_OFFSET, tradesQuerySchema } from "./schemas/trades.js";
+import { tradesQuerySchema } from "./schemas/trades.js";
 
 assert.match(RECENT_TRADES_BY_TOKEN_SQL, /cross join lateral/iu);
 assert.match(
@@ -40,16 +40,8 @@ assert.ok(
   }) > MAX_TRADES_QUERY_WORK,
 );
 assert.equal(
-  tradesQuerySchema.parse({ tokenIds: "token_a", offset: MAX_TRADES_OFFSET })
-    .offset,
-  MAX_TRADES_OFFSET,
-);
-assert.equal(
-  tradesQuerySchema.safeParse({
-    tokenIds: "token_a",
-    offset: MAX_TRADES_OFFSET + 1,
-  }).success,
-  false,
+  tradesQuerySchema.parse({ tokenIds: "token_a", offset: 10_001 }).offset,
+  10_001,
 );
 
 console.log(
