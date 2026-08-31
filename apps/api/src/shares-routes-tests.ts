@@ -855,7 +855,7 @@ async function main() {
     const context = await createTestContext();
     const fixture = await insertMarketFixture("trade-cross-process");
     const sharedCache = new Map<string, string>();
-    const slots = new Map<string, number>();
+    const slots = new Map<string, Set<string>>();
     let allowCacheWrite!: () => void;
     let cacheWriteStarted!: () => void;
     let followerRejectedBySlot!: () => void;
@@ -884,21 +884,23 @@ async function main() {
         status: "ready",
       }),
       checkRateLimit: async () => true,
-      acquireDistributedSlot: async (key, maxSlots) => {
-        const current = slots.get(key) ?? 0;
-        if (current >= maxSlots) {
+      acquireDistributedLease: async (key, inputs) => {
+        const current = slots.get(key) ?? new Set<string>();
+        if (current.size >= inputs.maxSlots) {
           if (key.includes(`shares:create:user:${context.userId}`)) {
             followerRejectedBySlot();
           }
           return false;
         }
-        slots.set(key, current + 1);
+        current.add(inputs.ownerToken);
+        slots.set(key, current);
         return true;
       },
-      releaseDistributedSlot: async (key) => {
-        const current = slots.get(key) ?? 0;
-        if (current <= 1) slots.delete(key);
-        else slots.set(key, current - 1);
+      releaseDistributedLease: async (key, ownerToken) => {
+        const current = slots.get(key);
+        if (!current) return;
+        current.delete(ownerToken);
+        if (current.size === 0) slots.delete(key);
       },
     });
 
@@ -1041,6 +1043,21 @@ async function main() {
       assert.deepEqual(response.json(), { error: "share_creation_timeout" });
       assert.ok(elapsedMs >= 800, `expected DB timeout, got ${elapsedMs}ms`);
       assert.ok(elapsedMs < 2_500, `share route took ${elapsedMs}ms`);
+      const inserted = await pool.query<{ count: string }>(
+        `
+          select count(*)::text as count
+          from share_snapshots
+          where user_id = $1
+            and kind = 'trade_pnl'
+            and snapshot->>'positionId' = $2
+        `,
+        [context.userId, positionId],
+      );
+      assert.equal(
+        inserted.rows[0]?.count,
+        "0",
+        "a PostgreSQL statement timeout must roll back its snapshot",
+      );
     } finally {
       await blocker.query("rollback").catch(() => undefined);
       blocker.release();

@@ -498,11 +498,15 @@ async function testSubmittedPreparationRunSelfHealing(): Promise<void> {
   const runIds: string[] = [];
   let inspectionAvailable = true;
   let inspectionStatus: PreparationResult["status"] = "ready";
+  let inspectionError: PreparationContractError | null = null;
+  let inspectionNeverSettles = false;
   const inspectionOptions: Array<Readonly<{ forceFresh?: boolean }>> = [];
   const inspectionInputs: Array<
     Readonly<{ controllerWalletRef?: string | null }>
   > = [];
-  const runtime = new FundingPlanningRuntime(pool);
+  const runtime = new FundingPlanningRuntime(pool, {
+    opportunisticPreparationReconcileTimeoutMs: 30,
+  });
   Object.defineProperty(runtime, "preparationRuntime", {
     value: {
       inspectBindingOption: async (
@@ -511,6 +515,10 @@ async function testSubmittedPreparationRunSelfHealing(): Promise<void> {
       ) => {
         inspectionInputs.push(input);
         inspectionOptions.push(options);
+        if (inspectionNeverSettles) {
+          return new Promise<PreparationResult>(() => undefined);
+        }
+        if (inspectionError) throw inspectionError;
         if (!inspectionAvailable) {
           throw new PreparationContractError(
             "preparation_unavailable",
@@ -588,6 +596,29 @@ async function testSubmittedPreparationRunSelfHealing(): Promise<void> {
     assert.equal(unavailableRead?.status, "submitted");
 
     inspectionAvailable = true;
+    inspectionNeverSettles = true;
+    const stalled = await createSubmittedRun(hash("c"));
+    const stalledStartedAt = Date.now();
+    const stalledRead = await runtime.preparationRun(userId, stalled.run.runId);
+    assert.equal(stalledRead?.status, "submitted");
+    assert.ok(Date.now() - stalledStartedAt < 500);
+    inspectionNeverSettles = false;
+
+    const rebound = await createSubmittedRun(hash("d"));
+    inspectionError = new PreparationContractError(
+      "binding_mismatch",
+      "binding disappeared after broadcast",
+    );
+    const reboundRead = await runtime.preparationRun(userId, rebound.run.runId);
+    assert.equal(reboundRead?.status, "submitted");
+    await assert.rejects(
+      runtime.reconcilePreparationRun(userId, rebound.run.runId),
+      (error: unknown) =>
+        error instanceof PreparationContractError &&
+        error.code === "binding_mismatch",
+    );
+    inspectionError = null;
+
     inspectionStatus = "setup_required";
     const recoveredReplay = await runtime.prepare(userId, replayable.request);
     assert.equal(recoveredReplay.runId, replayable.run.runId);

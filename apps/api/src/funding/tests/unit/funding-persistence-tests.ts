@@ -210,6 +210,10 @@ const tests: readonly Test[] = [
         claim,
         /order by \([\s\S]*last_observed_at < observation_requested_at[\s\S]*\) desc/i,
       );
+      assert.match(
+        claim,
+        /status in \('open', 'processing', 'review_required', 'recovery_required'\)\) desc,[\s\S]*coalesce\(last_observed_at, opened_at\) asc/i,
+      );
       assert.match(claim, /set last_observed_at = \$1/i);
       assert.match(
         source,

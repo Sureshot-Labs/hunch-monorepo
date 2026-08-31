@@ -151,6 +151,7 @@ export async function inspectPolymarketDepositWallet(input: {
         timeoutMs: input.timeoutMs,
         to: factory,
         data: FACTORY_BEACON_SELECTOR,
+        bypassInflight: input.bypassCodeCache === true,
       }),
     );
   } catch (error) {

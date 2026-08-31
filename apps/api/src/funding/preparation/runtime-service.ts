@@ -1046,6 +1046,8 @@ export class WalletPreparationRuntimeService {
     string,
     Promise<PreparedRuntimeDestination>
   >();
+  private readonly destinationInspectionGeneration = new Map<string, number>();
+  private destinationInspectionGenerationSequence = 0;
   private readonly destinationInspectionCache = new Map<
     string,
     Readonly<{
@@ -1151,6 +1153,10 @@ export class WalletPreparationRuntimeService {
     const inflightKey = input.forceFresh ? `fresh:${key}` : key;
     const now = this.clock().getTime();
     if (!input.forceFresh) {
+      const authoritativePending = this.destinationInspectionInflight.get(
+        `fresh:${key}`,
+      );
+      if (authoritativePending) return authoritativePending;
       const cached = this.destinationInspectionCache.get(key);
       if (cached && cached.reusableUntil > now) {
         return Promise.resolve(cached.value);
@@ -1159,6 +1165,9 @@ export class WalletPreparationRuntimeService {
     }
     const pending = this.destinationInspectionInflight.get(inflightKey);
     if (pending) return pending;
+
+    const generation = ++this.destinationInspectionGenerationSequence;
+    this.destinationInspectionGeneration.set(key, generation);
 
     const inspection = input.driver
       .inspect({
@@ -1180,13 +1189,19 @@ export class WalletPreparationRuntimeService {
           completedAt + DESTINATION_INSPECTION_REUSE_MS,
           evidenceExpiresAt,
         );
-        if (reusableUntil > completedAt) {
+        if (
+          reusableUntil > completedAt &&
+          this.destinationInspectionGeneration.get(key) === generation
+        ) {
           this.destinationInspectionCache.set(key, { value, reusableUntil });
         }
         return value;
       })
       .finally(() => {
         this.destinationInspectionInflight.delete(inflightKey);
+        if (this.destinationInspectionGeneration.get(key) === generation) {
+          this.destinationInspectionGeneration.delete(key);
+        }
       });
     this.destinationInspectionInflight.set(inflightKey, inspection);
     return inspection;
@@ -1564,6 +1579,7 @@ export class WalletPreparationRuntimeService {
       ammAddress: marketContext.ammAddress,
       conditionalTokensAddress:
         fundingSidecarRuntimeConfig.limitlessConditionalTokensAddress,
+      forceFresh: input.forceFresh === true,
     }).catch(() => null);
     const venueLockedCollateralPromise = effectiveMarketClass?.startsWith(
       "clob",

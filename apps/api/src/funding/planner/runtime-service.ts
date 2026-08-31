@@ -85,6 +85,7 @@ import type {
 } from "./planning-types.js";
 
 const PREPARATION_RUN_TTL_MS = 15 * 60_000;
+export const OPPORTUNISTIC_PREPARATION_RECONCILE_TIMEOUT_MS = 2_500;
 
 function productionFundingSourceAdapters(
   account: AccountValueReadModel,
@@ -199,11 +200,21 @@ export class FundingPlanningRuntime {
   private readonly withdrawalRuntime: WithdrawalDestinationRuntime;
   private readonly liquiditySingleflight = new FundingLiquiditySingleflight();
 
-  constructor(private readonly db: Pool) {
+  private readonly opportunisticPreparationReconcileTimeoutMs: number;
+
+  constructor(
+    private readonly db: Pool,
+    options: Readonly<{
+      opportunisticPreparationReconcileTimeoutMs?: number;
+    }> = {},
+  ) {
     this.planningStore = new PostgresFundingPlanningStore(db);
     this.preparationRuntime = new WalletPreparationRuntimeService(db);
     this.actionRuntime = new FundingOperationActionRuntime(db);
     this.withdrawalRuntime = new WithdrawalDestinationRuntime(db);
+    this.opportunisticPreparationReconcileTimeoutMs =
+      options.opportunisticPreparationReconcileTimeoutMs ??
+      OPPORTUNISTIC_PREPARATION_RECONCILE_TIMEOUT_MS;
   }
 
   registerWithdrawalDestination(
@@ -412,19 +423,30 @@ export class FundingPlanningRuntime {
   ): Promise<FundingPreparationRun> {
     if (run.status !== "submitted" && run.status !== "ambiguous") return run;
 
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      return await this.reconcilePreparationRunSnapshot(run);
+      const durableFallback = new Promise<FundingPreparationRun>((resolve) => {
+        timer = setTimeout(
+          () => resolve(run),
+          this.opportunisticPreparationReconcileTimeoutMs,
+        );
+      });
+      return await Promise.race([
+        this.reconcilePreparationRunSnapshot(run),
+        durableFallback,
+      ]);
     } catch (error) {
       // Reads and idempotent prepare replays are recovery opportunities, not
-      // availability gates. If fresh venue evidence is temporarily unavailable,
-      // preserve the durable submitted state so a later request can retry it.
-      if (
-        error instanceof PreparationContractError &&
-        error.code === "preparation_unavailable"
-      ) {
+      // availability or authority gates. Once an action crossed the broadcast
+      // boundary, a removed wallet/binding must not make its durable status
+      // disappear behind a 404. Explicit reconcile still surfaces contract
+      // errors; opportunistic reads preserve the run for a later retry.
+      if (error instanceof PreparationContractError) {
         return run;
       }
       throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 

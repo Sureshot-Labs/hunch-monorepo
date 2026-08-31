@@ -112,12 +112,12 @@ try {
   assert.ok(Date.now() - slotStartedAt < 750);
 
   setShareCreateGuardDependenciesForTests({
-    acquireDistributedSlot: async () => true,
+    acquireDistributedLease: async () => true,
     getRedisStatus: async () => ({
       redis: slowRedis as never,
       status: "ready" as const,
     }),
-    releaseDistributedSlot: async () => undefined,
+    releaseDistributedLease: async () => undefined,
   });
   const rateStartedAt = Date.now();
   await expectGuardUnavailable(
@@ -129,7 +129,7 @@ try {
   assert.ok(Date.now() - rateStartedAt < 750);
 
   setShareCreateGuardDependenciesForTests({
-    acquireDistributedSlot: async () => false,
+    acquireDistributedLease: async () => false,
     getRedisStatus: async () => ({
       redis: slowRedis as never,
       status: "ready" as const,
@@ -147,6 +147,35 @@ try {
       return true;
     },
   );
+
+  let resolveLateAcquire!: (value: boolean) => void;
+  const releasedOwners: string[] = [];
+  setShareCreateGuardDependenciesForTests({
+    acquireDistributedLease: async () =>
+      new Promise<boolean>((resolve) => {
+        resolveLateAcquire = resolve;
+      }),
+    getRedisStatus: async () => ({
+      redis: slowRedis as never,
+      status: "ready" as const,
+    }),
+    releaseDistributedLease: async (_key, ownerToken) => {
+      releasedOwners.push(ownerToken);
+    },
+  });
+  await expectGuardUnavailable(
+    withShareCreateGuard(
+      { userId: "user_late_slot_12345678", kind: "trade_pnl" },
+      async () => "unreachable",
+    ),
+  );
+  resolveLateAcquire(true);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.ok(
+    releasedOwners.length >= 2,
+    "cleanup must run both at timeout and after a late successful acquire",
+  );
+  assert.equal(new Set(releasedOwners).size, 1);
 } finally {
   env.nodeEnv = previousNodeEnv;
   env.redisUrl = previousRedisUrl;
@@ -178,13 +207,33 @@ assert.equal(createCount, 1);
 assert.equal(new Set(shares.map((share) => share.id)).size, 1);
 
 resetShareCreateGuardForTests();
-const stuckInputs = {
+const delayedInputs = {
   userId: "user_stuck_share_guard_12345678",
   positionId: "position_stuck_share_guard_12345678",
 };
+let finishDelayedProducer!: (share: {
+  id: string;
+  kind: "trade_pnl";
+  createdAt: string;
+}) => void;
+let delayedCreateCount = 0;
+const delayedProducer = () => {
+  delayedCreateCount += 1;
+  return new Promise<{
+    id: string;
+    kind: "trade_pnl";
+    createdAt: string;
+  }>((resolve) => {
+    finishDelayedProducer = resolve;
+  });
+};
 const stuckStartedAt = Date.now();
 await assert.rejects(
-  withTradePnlShareSingleflight(stuckInputs, () => never(), Date.now() + 25),
+  withTradePnlShareSingleflight(
+    delayedInputs,
+    delayedProducer,
+    Date.now() + 25,
+  ),
   (error: unknown) => {
     assert.ok(error instanceof ShareCreateGuardError);
     assert.equal(error.reason, "request_timeout");
@@ -195,11 +244,11 @@ await assert.rejects(
 );
 assert.ok(Date.now() - stuckStartedAt < 250);
 
-// A timed-out producer must be removed from singleflight immediately. The
-// retry below must execute its own producer instead of inheriting `never()`.
+// A timed-out waiter must leave the real producer in singleflight. The retry
+// joins it and reuses the same snapshot instead of starting duplicate work.
 let retryCreateCount = 0;
-const retry = await withTradePnlShareSingleflight(
-  stuckInputs,
+const retryPromise = withTradePnlShareSingleflight(
+  delayedInputs,
   async () => {
     retryCreateCount += 1;
     return {
@@ -210,8 +259,15 @@ const retry = await withTradePnlShareSingleflight(
   },
   Date.now() + 250,
 );
-assert.equal(retryCreateCount, 1);
-assert.equal(retry.id, "trade_share_retry_after_timeout_12345678");
+finishDelayedProducer({
+  id: "trade_share_original_after_timeout_12345678",
+  kind: "trade_pnl",
+  createdAt: new Date(0).toISOString(),
+});
+const retry = await retryPromise;
+assert.equal(delayedCreateCount, 1);
+assert.equal(retryCreateCount, 0);
+assert.equal(retry.id, "trade_share_original_after_timeout_12345678");
 
 console.log(
   "[share-create-guard-tests] ok dependency deadlines, bounded singleflight, and retry after timeout",

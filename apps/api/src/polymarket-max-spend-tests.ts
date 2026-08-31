@@ -463,7 +463,7 @@ const tests: TestCase[] = [
               location: {
                 kind: "venue_account",
                 locationId: "location_external_venue",
-                details: { walletId: "wallet_external" },
+                details: { controllerWalletId: "wallet_external" },
               },
             },
           ],

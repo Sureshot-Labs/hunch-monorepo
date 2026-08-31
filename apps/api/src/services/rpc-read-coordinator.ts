@@ -12,6 +12,8 @@ export type RpcMemoOptions<T> = Readonly<{
 export class RpcReadCoordinator {
   private readonly cached = new Map<string, CachedRead>();
   private readonly inflight = new Map<string, Promise<unknown>>();
+  private readonly latestGeneration = new Map<string, number>();
+  private generationSequence = 0;
 
   constructor(private readonly maxEntries: number) {
     if (!Number.isSafeInteger(maxEntries) || maxEntries <= 0) {
@@ -43,12 +45,16 @@ export class RpcReadCoordinator {
   ): Promise<T> {
     if (options.ttlMs <= 0) return loader();
     if (options.bypass) {
-      return this.singleFlight(`memo:${key}`, async () => {
-        const value = await loader();
-        this.storeIfCacheable(key, value, options);
-        return value;
+      return this.singleFlight(`memo:fresh:${key}`, async () => {
+        const generation = this.beginGeneration(key);
+        return this.loadAndStoreLatest(key, generation, options, loader);
       });
     }
+
+    const authoritativeInflight = this.inflight.get(`memo:fresh:${key}`) as
+      | Promise<T>
+      | undefined;
+    if (authoritativeInflight) return authoritativeInflight;
 
     const cached = this.read<T>(key);
     if (cached.found) {
@@ -56,10 +62,43 @@ export class RpcReadCoordinator {
     }
 
     return this.singleFlight(`memo:${key}`, async () => {
-      const value = await loader();
-      this.storeIfCacheable(key, value, options);
-      return value;
+      const generation = this.beginGeneration(key);
+      return this.loadAndStoreLatest(key, generation, options, loader);
     });
+  }
+
+  private beginGeneration(key: string): number {
+    const generation = ++this.generationSequence;
+    this.latestGeneration.set(key, generation);
+    return generation;
+  }
+
+  private storeIfLatest<T>(
+    key: string,
+    generation: number,
+    value: T,
+    options: RpcMemoOptions<T>,
+  ): void {
+    if (this.latestGeneration.get(key) !== generation) return;
+    this.latestGeneration.delete(key);
+    this.storeIfCacheable(key, value, options);
+  }
+
+  private async loadAndStoreLatest<T>(
+    key: string,
+    generation: number,
+    options: RpcMemoOptions<T>,
+    loader: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      const value = await loader();
+      this.storeIfLatest(key, generation, value, options);
+      return value;
+    } finally {
+      if (this.latestGeneration.get(key) === generation) {
+        this.latestGeneration.delete(key);
+      }
+    }
   }
 
   private read<T>(

@@ -214,6 +214,7 @@ export const sharesRoutes: FastifyPluginAsync = async (app) => {
                     pool,
                     cacheInputs,
                     {
+                      deadlineAt: requestDeadlineAt,
                       statementTimeoutMs: 900,
                     },
                   );

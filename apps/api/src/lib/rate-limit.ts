@@ -83,6 +83,62 @@ redis.call('PEXPIRE', key, ttl_ms)
 return current
 `;
 
+// Share creation needs ownership-aware leases rather than an anonymous
+// counter. A timed-out Redis command may still complete later; storing the
+// owner token makes a delayed cleanup incapable of releasing somebody else's
+// slot. The command also rejects work that only reaches Redis after the
+// caller's acquisition deadline.
+const LEASE_ACQUIRE_SCRIPT = `
+local key = KEYS[1]
+local owner_token = ARGV[1]
+local max_slots = tonumber(ARGV[2])
+local ttl_ms = tonumber(ARGV[3])
+local request_deadline_ms = tonumber(ARGV[4])
+
+if (not owner_token) or owner_token == '' or (not max_slots) or
+   (not ttl_ms) or (not request_deadline_ms) or
+   max_slots <= 0 or ttl_ms <= 0 then
+  return -1
+end
+
+local redis_time = redis.call('TIME')
+local now_ms = (tonumber(redis_time[1]) * 1000) +
+  math.floor(tonumber(redis_time[2]) / 1000)
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now_ms)
+
+if now_ms > request_deadline_ms then
+  return -2
+end
+
+if redis.call('ZSCORE', key, owner_token) then
+  redis.call('ZADD', key, now_ms + ttl_ms, owner_token)
+  redis.call('PEXPIRE', key, ttl_ms)
+  return 1
+end
+
+if tonumber(redis.call('ZCARD', key)) >= max_slots then
+  return 0
+end
+
+redis.call('ZADD', key, now_ms + ttl_ms, owner_token)
+redis.call('PEXPIRE', key, ttl_ms)
+return 1
+`;
+
+const LEASE_RELEASE_SCRIPT = `
+local key = KEYS[1]
+local owner_token = ARGV[1]
+if (not owner_token) or owner_token == '' then
+  return -1
+end
+
+local removed = redis.call('ZREM', key, owner_token)
+if tonumber(redis.call('ZCARD', key)) == 0 then
+  redis.call('DEL', key)
+end
+return removed
+`;
+
 function normalizeKey(input: string): string {
   const trimmed = input.trim();
   return trimmed.length ? trimmed : "unknown";
@@ -181,4 +237,42 @@ export async function releaseDistributedSlot(
   const normalizedKey = normalizeKey(key);
   const redisKey = `slot:v1:${compactKey(normalizedKey)}`;
   await evalLuaNumber(COUNTER_RELEASE_SCRIPT, redisKey, [String(ttlMs)]);
+}
+
+export async function acquireDistributedLease(
+  key: string,
+  inputs: Readonly<{
+    maxSlots: number;
+    ownerToken: string;
+    requestDeadlineMs: number;
+    ttlMs: number;
+  }>,
+  options: CheckRateLimitOptions = {},
+): Promise<boolean> {
+  const normalizedKey = normalizeKey(key);
+  const ownerToken = inputs.ownerToken.trim();
+  if (!ownerToken) throw new Error("distributed lease owner is required");
+  const redisKey = `slot:v2:${compactKey(normalizedKey)}`;
+  const reply = await evalLuaNumber(LEASE_ACQUIRE_SCRIPT, redisKey, [
+    ownerToken,
+    String(inputs.maxSlots),
+    String(inputs.ttlMs),
+    String(inputs.requestDeadlineMs),
+  ]);
+  // -2 means the command reached Redis after the caller stopped waiting. It
+  // did not acquire anything and is a normal negative result, not an outage.
+  if (reply === -2) return false;
+  if (reply == null || reply < 0) return allowOnError(options);
+  return reply === 1;
+}
+
+export async function releaseDistributedLease(
+  key: string,
+  ownerToken: string,
+): Promise<void> {
+  const normalizedKey = normalizeKey(key);
+  const normalizedOwner = ownerToken.trim();
+  if (!normalizedOwner) return;
+  const redisKey = `slot:v2:${compactKey(normalizedKey)}`;
+  await evalLuaNumber(LEASE_RELEASE_SCRIPT, redisKey, [normalizedOwner]);
 }

@@ -201,6 +201,73 @@ await test("authoritative binding inspection bypasses reusable pre-action eviden
   assert.equal(inspected[1]?.forceFresh, true);
 });
 
+await test("older normal inspection cannot overwrite newer forceFresh evidence", async () => {
+  const inspected: RuntimeVenueInspectionInput[] = [];
+  const queries: string[] = [];
+  let resolveNormal!: (value: PreparedRuntimeDestination) => void;
+  let resolveFresh!: (value: PreparedRuntimeDestination) => void;
+  const service = new WalletPreparationRuntimeService(
+    marketDb(queries),
+    () => NOW,
+    [
+      venueDriver({
+        inspected,
+        venueId: "polymarket",
+        inspect: (inspection) =>
+          new Promise<PreparedRuntimeDestination>((resolve) => {
+            if (inspection.forceFresh) resolveFresh = resolve;
+            else resolveNormal = resolve;
+          }),
+      }),
+    ],
+    async () => wallets,
+  );
+  const request = {
+    accountId: ACCOUNT_ID,
+    purpose: "buy" as const,
+    marketContextId: market.id,
+    marketClass: null,
+    positionActionRef: null,
+    compatibleVenueBindingOptionIds: [SELECTED_BINDING_ID],
+    controllerWalletRef: SELECTED_WALLET_ID,
+    venueBindingOptionId: SELECTED_BINDING_ID,
+  };
+
+  const normal = service.inspectBindingOption(request);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const fresh = service.inspectBindingOption(request, { forceFresh: true });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const postBroadcastFollower = service.inspectBindingOption(request);
+
+  const freshInspection = inspected.find((entry) => entry.forceFresh === true);
+  assert.ok(freshInspection);
+  const freshDestination = preparedDestination(freshInspection);
+  resolveFresh(freshDestination);
+  assert.equal((await fresh).status, "ready");
+  assert.equal((await postBroadcastFollower).status, "ready");
+
+  const normalInspection = inspected.find((entry) => entry.forceFresh !== true);
+  assert.ok(normalInspection);
+  const normalDestination = preparedDestination(normalInspection);
+  const stalePreparation = {
+    ...normalDestination.frozen.preparation,
+    status: "setup_required",
+  } as PreparationResult;
+  const staleDestination = {
+    ...normalDestination,
+    frozen: {
+      ...normalDestination.frozen,
+      preparation: stalePreparation,
+    },
+  } as PreparedRuntimeDestination;
+  resolveNormal(staleDestination);
+  assert.equal((await normal).status, "setup_required");
+
+  const cached = await service.inspectBindingOption(request);
+  assert.equal(cached.status, "ready");
+  assert.equal(inspected.length, 2);
+});
+
 await test("one destination discovery resolves and shares one immutable market context", async () => {
   const inspected: RuntimeVenueInspectionInput[] = [];
   const queries: string[] = [];

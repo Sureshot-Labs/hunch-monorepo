@@ -362,7 +362,8 @@ function sessionPollingPriority(
 ): number {
   return snapshot.session.status === "open" ||
     snapshot.session.status === "processing" ||
-    snapshot.session.status === "review_required"
+    snapshot.session.status === "review_required" ||
+    snapshot.session.status === "recovery_required"
     ? 0
     : 1;
 }
@@ -396,6 +397,13 @@ export function selectFundingReceiveSessionsForPolling<
     }
   });
   valid.sort((left, right) => {
+    // Active funding always owns the bounded polling budget. Closed sessions
+    // are retained for late-transfer recovery, but an account repeatedly
+    // switching channels cannot starve fresh deposits globally.
+    const priority =
+      sessionPollingPriority(left.snapshot) -
+      sessionPollingPriority(right.snapshot);
+    if (priority !== 0) return priority;
     if (left.cursor != null && right.cursor != null) {
       if (left.cursor < right.cursor) return -1;
       if (left.cursor > right.cursor) return 1;
@@ -404,10 +412,6 @@ export function selectFundingReceiveSessionsForPolling<
     } else if (right.cursor != null) {
       return 1;
     }
-    const priority =
-      sessionPollingPriority(left.snapshot) -
-      sessionPollingPriority(right.snapshot);
-    if (priority !== 0) return priority;
     const openedAt =
       Date.parse(right.snapshot.session.openedAt) -
       Date.parse(left.snapshot.session.openedAt);

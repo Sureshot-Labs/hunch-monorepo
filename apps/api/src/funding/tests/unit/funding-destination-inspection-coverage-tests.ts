@@ -102,6 +102,7 @@ await test("interactive destination inspection is bounded and reuses RPC evidenc
   assert.match(source, /DESTINATION_INSPECTION_REUSE_MS = 30_000/);
   assert.match(source, /destinationInspectionInflight/);
   assert.match(source, /destinationInspectionCache/);
+  assert.match(source, /destinationInspectionGeneration/);
   assert.match(source, /withinDestinationInspectionDeadline/);
   assert.equal(
     (source.match(/bypassCodeCache: input\.forceFresh === true/g) ?? []).length,
@@ -128,6 +129,7 @@ await test("Limitless preparation reads one exact onchain snapshot without the a
     limitlessInspection,
     /conditionalTokensAddress:\s*fundingSidecarRuntimeConfig\.limitlessConditionalTokensAddress/,
   );
+  assert.match(limitlessInspection, /forceFresh: input\.forceFresh === true/);
   assert.doesNotMatch(limitlessInspection, /fetchLimitlessAccountRoute/);
   assert.equal(
     (limitlessInspection.match(/resolveLimitlessAuthContext/g) ?? []).length,

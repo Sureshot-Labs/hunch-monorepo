@@ -130,6 +130,7 @@ async function inspectSafe(inputs: {
   rpcUrl: string;
   timeoutMs: number;
   address: string;
+  bypassInflight?: boolean;
 }): Promise<{ safe: boolean; owners?: string[]; threshold?: number }> {
   try {
     const ownersData = SAFE_READ_IFACE.encodeFunctionData("getOwners");
@@ -138,6 +139,7 @@ async function inspectSafe(inputs: {
       timeoutMs: inputs.timeoutMs,
       to: inputs.address,
       data: ownersData,
+      bypassInflight: inputs.bypassInflight,
     });
     const ownersDecoded = SAFE_READ_IFACE.decodeFunctionResult(
       "getOwners",
@@ -156,6 +158,7 @@ async function inspectSafe(inputs: {
       timeoutMs: inputs.timeoutMs,
       to: inputs.address,
       data: thresholdData,
+      bypassInflight: inputs.bypassInflight,
     });
     const thresholdDecoded = SAFE_READ_IFACE.decodeFunctionResult(
       "getThreshold",
@@ -195,6 +198,7 @@ async function inspectSafeStrict(inputs: {
   rpcUrl: string;
   timeoutMs: number;
   address: string;
+  bypassInflight?: boolean;
 }): Promise<SafeWalletInspection> {
   try {
     const ownersData = SAFE_READ_IFACE.encodeFunctionData("getOwners");
@@ -203,6 +207,7 @@ async function inspectSafeStrict(inputs: {
       timeoutMs: inputs.timeoutMs,
       to: inputs.address,
       data: ownersData,
+      bypassInflight: inputs.bypassInflight,
     });
     const ownersDecoded = SAFE_READ_IFACE.decodeFunctionResult(
       "getOwners",
@@ -221,6 +226,7 @@ async function inspectSafeStrict(inputs: {
       timeoutMs: inputs.timeoutMs,
       to: inputs.address,
       data: thresholdData,
+      bypassInflight: inputs.bypassInflight,
     });
     const thresholdDecoded = SAFE_READ_IFACE.decodeFunctionResult(
       "getThreshold",
@@ -296,6 +302,7 @@ async function inspectCandidate(inputs: {
       rpcUrl: inputs.rpcUrl,
       timeoutMs: inputs.timeoutMs,
       address: inputs.funder,
+      bypassInflight: inputs.bypassCodeCache,
     });
 
     return {
