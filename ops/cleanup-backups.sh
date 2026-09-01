@@ -61,11 +61,32 @@ if [[ ! -d "${TARGET_DIR}" ]]; then
   exit 1
 fi
 
+if [[ "${TARGET_DIR}" != /* ]]; then
+  echo "--dir must be an absolute path" >&2
+  exit 1
+fi
+
+TARGET_DIR="$(cd -- "${TARGET_DIR}" && pwd -P)"
+if [[ "${TARGET_DIR}" == "/" ]]; then
+  echo "Refusing to use the filesystem root as the backup directory" >&2
+  exit 1
+fi
+
 patterns=("hunch-monorepo.prev." "hunch-app.prev.")
 
 for prefix in "${patterns[@]}"; do
-  # shellcheck disable=SC2086
-  mapfile -t dirs < <(ls -dt "${TARGET_DIR}/${prefix}"* 2>/dev/null || true)
+  dirs=()
+  while IFS= read -r backup_dir; do
+    backup_name="${backup_dir##*/}"
+    if [[ "${backup_name}" =~ ^${prefix//./\\.}[0-9]+$ ]]; then
+      dirs+=("${backup_dir}")
+    fi
+  done < <(
+    find "${TARGET_DIR}" -mindepth 1 -maxdepth 1 -type d \
+      -name "${prefix}[0-9]*" -print \
+      | sort -r
+  )
+
   if [[ ${#dirs[@]} -le ${KEEP} ]]; then
     continue
   fi
