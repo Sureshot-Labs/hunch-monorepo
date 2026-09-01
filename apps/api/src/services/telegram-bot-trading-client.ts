@@ -157,7 +157,7 @@ export type TelegramBotTradingInternalApiClient = {
     requestObservation?: boolean;
     telegramMessageId?: number | null;
     telegramUserId: string | number;
-    view?: "address" | "delivery" | "progress";
+    view?: "address" | "delivery" | "progress" | "targets";
   }) => Promise<TelegramFundingClientMessage>;
   selectFundingTarget: (input: {
     chatId: string | number;

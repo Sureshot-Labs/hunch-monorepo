@@ -1983,7 +1983,7 @@ export class TelegramFundingService {
       contextId: string;
       deliveryProjection?: unknown;
       requestObservation?: boolean;
-      view?: "address" | "delivery" | "progress";
+      view?: "address" | "delivery" | "progress" | "targets";
     },
     now = new Date(),
     decorateProgress?: TelegramFundingProgressDecorator,
@@ -2091,6 +2091,16 @@ export class TelegramFundingService {
       origin: owned.context.origin,
       continuationMode: activeBuyReturn?.continuationMode ?? null,
     });
+    const availableTargets = liveCapabilities.flatMap((candidate) =>
+      candidate.authorization ||
+      candidate.target.automaticSourceAsset === null ||
+      (retainedSourceReceiveAllowed &&
+        isTelegramSolanaRetainedFundingRouteKey(
+          candidate.target.presentation.routeKey,
+        ))
+        ? [candidate.target]
+        : [],
+    );
     const liveCapability =
       owned.consent && consentRoute
         ? await this.resolveTargetCapability({
@@ -2165,6 +2175,33 @@ export class TelegramFundingService {
         contextId: owned.context.id,
       });
     }
+    if (
+      input.view === "targets" &&
+      owned.receive.session.status === "open" &&
+      owned.receive.receipts.length === 0 &&
+      addressDisclosureOpen
+    ) {
+      const message = buildTelegramFundingTargetMessageForSession({
+        contextId: owned.context.id,
+        expiresAt: owned.context.expiresAt,
+        session: owned.receive.session,
+        automaticConversionEnabled: liveCapabilities.some(
+          (candidate) => candidate.authorization != null,
+        ),
+        targets: availableTargets,
+      });
+      return decorateProgress
+        ? decorateProgress({
+            consent: owned.consent,
+            context: owned.context,
+            message,
+            now,
+            presentationMode,
+            progress: null,
+            session: owned.receive.session,
+          })
+        : message;
+    }
     if (progress) {
       const decorated = await presentFrozenProgress(progress, presentationMode);
       return progress.receiveAddress !== null
@@ -2188,16 +2225,7 @@ export class TelegramFundingService {
       automaticConversionEnabled: liveCapabilities.some(
         (candidate) => candidate.authorization != null,
       ),
-      targets: liveCapabilities.flatMap((candidate) =>
-        candidate.authorization ||
-        candidate.target.automaticSourceAsset === null ||
-        (retainedSourceReceiveAllowed &&
-          isTelegramSolanaRetainedFundingRouteKey(
-            candidate.target.presentation.routeKey,
-          ))
-          ? [candidate.target]
-          : [],
-      ),
+      targets: availableTargets,
     });
     return decorateProgress
       ? decorateProgress({

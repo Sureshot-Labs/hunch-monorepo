@@ -255,7 +255,7 @@ const internalFundingSessionBodySchema = internalFundingIdentitySchema
     deliveryProjection: z.unknown().optional(),
     requestObservation: z.boolean().optional(),
     telegramMessageId: z.number().int().positive().nullable().optional(),
-    view: z.enum(["address", "delivery", "progress"]).optional(),
+    view: z.enum(["address", "delivery", "progress", "targets"]).optional(),
   })
   .strict()
   .superRefine((body, context) => {

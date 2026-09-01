@@ -561,13 +561,21 @@ function fundingProgressReplyMarkup(
           }),
           text: "⬅️ Back to market",
         }
-      : {
-          callback_data: telegramFundingCallbackData({
-            contextId: projection.fundingContextId,
-            kind: "cancel",
-          }),
-          text: "Cancel",
-        };
+      : !moneyReceived
+        ? {
+            callback_data: telegramFundingCallbackData({
+              contextId: projection.fundingContextId,
+              kind: "targets",
+            }),
+            text: "⬅️ Back",
+          }
+        : {
+            callback_data: telegramFundingCallbackData({
+              contextId: projection.fundingContextId,
+              kind: "cancel",
+            }),
+            text: "Cancel",
+          };
   return {
     inline_keyboard: [
       ...(projection.receiveAddress

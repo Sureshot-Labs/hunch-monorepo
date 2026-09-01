@@ -1763,7 +1763,7 @@ assert.deepEqual(
     choiceToken: "p",
   },
 );
-for (const kind of ["refresh", "cancel", "qr", "hide_qr"] as const) {
+for (const kind of ["refresh", "cancel", "qr", "hide_qr", "targets"] as const) {
   const callback = telegramFundingCallbackData({ contextId, kind });
   assert.ok(Buffer.byteLength(callback, "utf8") <= 64);
   assert.deepEqual(parseTelegramFundingCallbackRoute(callback.slice(6)), {
@@ -2379,6 +2379,18 @@ assert.equal(
         "copy_text" in button && button.copy_text.text === solanaAddress,
     ),
   true,
+);
+assert.equal(
+  waitingForSolanaRetainedMessage.reply_markup?.inline_keyboard
+    .flat()
+    .some(
+      (button) =>
+        "callback_data" in button &&
+        button.callback_data === `hm:v1:fund:targets:${contextId}` &&
+        button.text === "⬅️ Back",
+    ),
+  true,
+  "an unfunded route must let the user return to cryptocurrency selection",
 );
 assert.equal(
   waitingForSolanaRetainedMessage.reply_markup?.inline_keyboard
@@ -3444,6 +3456,38 @@ assert.equal(
     /consent\.revision = telegram_context\.active_consent_revision/u,
     "a later active consent must never retroactively authorize an old transfer",
   );
+}
+
+{
+  let requestedAction = "";
+  let requestedContext = "";
+  let requestedView = "";
+  const handled = await handleSignalBotInteractiveMenuCallback({
+    callbackPrefix: "hm:v1:",
+    chatId: "42",
+    idempotencyKey: "callback-targets-1",
+    loadFunding: async (input) => {
+      requestedAction = input.action;
+      requestedContext = input.contextId ?? "";
+      requestedView = input.view ?? "";
+      return buildTelegramFundingTargetMessage({
+        automaticConversion: false,
+        contextId,
+        expiresAt,
+        presentation: telegramPolygonFundingPresentation("pusd_direct"),
+      });
+    },
+    messageId: 100,
+    redis: { get: async () => null },
+    render: async () => undefined,
+    renderExpiredSearch: async () => undefined,
+    route: { contextId, kind: "targets" },
+    telegramUserId: 42,
+  });
+  assert.equal(handled, true);
+  assert.equal(requestedAction, "session");
+  assert.equal(requestedContext, contextId);
+  assert.equal(requestedView, "targets");
 }
 
 {
