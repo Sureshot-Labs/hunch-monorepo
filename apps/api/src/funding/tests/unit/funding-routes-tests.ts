@@ -102,6 +102,54 @@ function liquidity(): IntentLiquidityProjection {
   };
 }
 
+function liquidityWithQuoteAmountBinding(): IntentLiquidityProjection {
+  const requestedDestinationAmount = { asset: ASSET, raw: "1000000" };
+  return {
+    ...liquidity(),
+    convertibleRaw: "1000000",
+    convertibleUsd: "1",
+    mode: "inline_funding",
+    sourceOptions: [
+      {
+        sourceOptionId: "source_wallet_quote_binding_12345678",
+        kind: "wallet_asset",
+        safeLabel: "Polygon wallet",
+        source: {
+          kind: "owned_location",
+          location: {
+            kind: "wallet",
+            locationId: "location_wallet_quote_binding_12345678",
+            accountId: USER_ID,
+            asset: ASSET,
+            details: {
+              walletId: "wallet_quote_binding_12345678",
+              address: "0x0000000000000000000000000000000000000002",
+            },
+          },
+        },
+        amountMode: "exact_output",
+        quoteAmountBinding: {
+          confirmedSourceAmount: null,
+          requestedDestinationAmount,
+        },
+        maximumSourceRaw: "1100000",
+        expectedDestination: requestedDestinationAmount,
+        minimumDestination: requestedDestinationAmount,
+        estimatedUsd: "1",
+        fees: [],
+        eta: { minSeconds: 5, maxSeconds: 20 },
+        experienceMode: "inline_funding",
+        requiredActions: [],
+        expiresAt: "2026-07-24T12:01:00.000Z",
+        recommended: true,
+        selectable: true,
+        reasonCodes: [],
+      },
+    ],
+    reasonCodes: [],
+  };
+}
+
 function preparation(): PreparationResult {
   return {
     status: "ready",
@@ -1280,6 +1328,41 @@ await test("liquidity rejects provider and raw destination authority fields", as
     });
     assert.equal(response.statusCode, 400);
     assert.equal(calls, 0);
+  } finally {
+    await app.close();
+  }
+});
+
+await test("liquidity response preserves the frozen quote amount binding", async () => {
+  const app = await buildApp({
+    liquidity: async () => liquidityWithQuoteAmountBinding(),
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/liquidity",
+      payload: {
+        purpose: "add_funds",
+        requestedDestinationAmount: { asset: ASSET, raw: "1000000" },
+        confirmedSourceAmount: null,
+        marketContextId: null,
+        destinationOptionId: "destination_poly_12345678",
+        withdrawalRecipientId: null,
+        venueBindingOptionId: null,
+        maxFeeUsd: null,
+        maxSlippageBps: null,
+        deadline: null,
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(
+      response.json().liquidity.sourceOptions[0].quoteAmountBinding,
+      {
+        confirmedSourceAmount: null,
+        requestedDestinationAmount: { asset: ASSET, raw: "1000000" },
+      },
+    );
   } finally {
     await app.close();
   }

@@ -385,6 +385,11 @@ export type SourceOptionLeg = Readonly<{
   requiredActions: readonly ActionSummary[];
 }>;
 
+export type FundingQuoteAmountBinding = Readonly<{
+  confirmedSourceAmount: Money | null;
+  requestedDestinationAmount: Money | null;
+}>;
+
 export type SourceOption = Readonly<{
   sourceOptionId: string;
   kind:
@@ -400,6 +405,12 @@ export type SourceOption = Readonly<{
   ingress?: ExternalIngressInstruction;
   sourceLegs?: readonly SourceOptionLeg[];
   amountMode: "exact_input" | "exact_output" | "variable_external";
+  /**
+   * Exact client-visible amounts accepted by the quote boundary for this
+   * immutable source plan. Clients must replay this binding verbatim instead
+   * of reconstructing it from account balances or aggregate trade amounts.
+   */
+  quoteAmountBinding?: FundingQuoteAmountBinding;
   /**
    * Exact source amount in the provider quote behind this option. It is
    * distinct from `maximumSourceRaw`, which describes the wallet's available
@@ -479,9 +490,8 @@ export type FundingDiscoveryRequest = FundingIntent;
 export type FundingQuoteRequest = Readonly<{
   liquidityProjectionId: string;
   selectedSourceOptionId: string;
-  confirmedSourceAmount: Money | null;
-  requestedDestinationAmount: Money | null;
-}>;
+}> &
+  FundingQuoteAmountBinding;
 
 export type FundingCommitRequest = Readonly<{
   quoteId: string;

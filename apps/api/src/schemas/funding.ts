@@ -469,6 +469,19 @@ export const sourceOptionSchema = z
     ingress: externalIngressInstructionSchema.optional(),
     sourceLegs: z.array(sourceOptionLegSchema).min(2).max(16).optional(),
     amountMode: z.enum(["exact_input", "exact_output", "variable_external"]),
+    quoteAmountBinding: z
+      .object({
+        confirmedSourceAmount: moneySchema.nullable(),
+        requestedDestinationAmount: moneySchema.nullable(),
+      })
+      .strict()
+      .refine(
+        (binding) =>
+          binding.confirmedSourceAmount !== null ||
+          binding.requestedDestinationAmount !== null,
+        "quote amount binding must include an exact source or destination amount",
+      )
+      .optional(),
     quotedSourceAmount: moneySchema.nullable().optional(),
     maximumSourceRaw: rawAmountSchema.nullable(),
     expectedDestination: moneySchema.nullable(),

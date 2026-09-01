@@ -8,7 +8,6 @@ import type {
   Money,
   SourceOption,
 } from "../domain/types.js";
-import { parseMoneyJson } from "../domain/money-json.js";
 import {
   FUNDING_TTL,
   type FundingRuntimePolicy,
@@ -30,6 +29,7 @@ import {
 } from "../persistence/canonical.js";
 import type { FundingPlanningStore } from "./planning-types.js";
 import { FundingPlannerError, assertSameAsset } from "./money.js";
+import { fundingQuoteAmountBindingForCommitPlan } from "./quote-amount-binding.js";
 
 function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
   return value as Readonly<Record<string, JsonValue>>;
@@ -254,12 +254,9 @@ export class FundingQuoteService {
         externalRecipientId,
       );
     }
-    const plannedSource = parseMoneyJson(
-      storedPlan.operation.requestedSourceAmount,
-    );
-    const plannedDestination = parseMoneyJson(
-      storedPlan.operation.requestedDestinationAmount,
-    );
+    const plannedBinding = fundingQuoteAmountBindingForCommitPlan(storedPlan);
+    const plannedSource = plannedBinding.confirmedSourceAmount;
+    const plannedDestination = plannedBinding.requestedDestinationAmount;
     const sourceMatches = sameMoney(
       input.request.confirmedSourceAmount,
       plannedSource,
