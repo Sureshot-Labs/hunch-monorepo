@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 
 import type { DbQuery } from "./db.js";
 import { env } from "./env.js";
+import { nativeSolDepositNotificationDedupeKey } from "./funding/receive/receive-deposit-notification.js";
 import { handlePrivyDepositWebhook } from "./services/deposit-events.js";
 
 type TestCase = {
@@ -64,6 +65,7 @@ type MockDbOptions = {
   retainedFundingContextId?: string | null;
   retainedFundingContinuationMode?: "app_handoff" | "bot_submit";
   retainedFundingConsentAssetId?: string | null;
+  retainedFundingHasReadyReceipt?: boolean;
   retainedFundingTransactionHash?: string | null;
   retainedFundingVariantConsented?: boolean;
 };
@@ -227,18 +229,25 @@ function createMockDb(options: MockDbOptions): MockDb {
         options.retainedFundingTransactionHash === undefined
           ? params?.[3]
           : options.retainedFundingTransactionHash;
+      const exactMatch = retainedTransactionHash === params?.[3];
+      const hasReadyReceipt =
+        options.retainedFundingHasReadyReceipt ??
+        Boolean(options.retainedFundingContextId);
       const eligible =
         options.retainedFundingContinuationMode !== "bot_submit" &&
         selectedAssetId != null &&
         selectedAssetId === params?.[1] &&
-        retainedTransactionHash === params?.[3] &&
         options.retainedFundingVariantConsented !== false;
       return {
         rows:
-          options.retainedFundingContextId && eligible
+          options.retainedFundingContextId &&
+          eligible &&
+          (exactMatch || !hasReadyReceipt)
             ? ([
                 {
                   fundingContextId: options.retainedFundingContextId,
+                  exactMatch,
+                  hasReadyReceipt,
                 },
               ] as unknown as T[])
             : [],
@@ -611,6 +620,46 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "an early Privy SOL webhook is owned by the pending Telegram Buy lifecycle",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const solanaWallet = "F7RnPp1GebLJkGspGCct38QqyRVxgoYWpkzUSXUDaYay";
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: solanaWallet,
+            walletType: "solana",
+          },
+          retainedFundingContextId: "pending-retained-funding-context",
+          retainedFundingHasReadyReceipt: false,
+          retainedFundingTransactionHash: null,
+        });
+
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          asset: { type: "native-token" },
+          amount: "52000000",
+          caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          idempotency_key: "deposit-key-early-retained-sol",
+          recipient: solanaWallet,
+          sender: "solana-external-sender",
+          transaction_hash: "early-retained-sol-transaction",
+        });
+
+        assert.equal(result.status, "ignored_funding");
+        assert.deepEqual(db.notificationInserts, []);
+        const retainedMatchQuery = db.calls.find(({ sql }) =>
+          /from telegram_funding_sessions funding_context/iu.test(sql),
+        );
+        assert.ok(retainedMatchQuery);
+        assert.match(
+          retainedMatchQuery.sql,
+          /or not receipt_state\."hasReadyReceipt"/u,
+        );
+      });
+    },
+  },
+  {
     name: "a later native SOL deposit to the same wallet is not swallowed by an old retained session",
     run: async () => {
       await withRedisDisabled(async () => {
@@ -636,6 +685,57 @@ const tests: TestCase[] = [
         });
         assert.equal(result.status, "notified");
         assert.equal(db.notificationInserts[0]?.type, "deposit_received");
+        assert.equal(
+          db.notificationInserts[0]?.dedupeKey,
+          nativeSolDepositNotificationDedupeKey({
+            networkId: "solana:mainnet",
+            walletAddress: solanaWallet,
+            amountRaw: "1000000",
+            txHash: "later-unrelated-sol-transaction",
+          }),
+        );
+      });
+    },
+  },
+  {
+    name: "a canonical native SOL notification deduplicates a later Privy webhook",
+    run: async () => {
+      await withRedisDisabled(async () => {
+        const solanaWallet = "F7RnPp1GebLJkGspGCct38QqyRVxgoYWpkzUSXUDaYay";
+        const transactionHash = "canonical-sol-transaction";
+        const expectedDedupeKey = nativeSolDepositNotificationDedupeKey({
+          networkId: "solana:mainnet",
+          walletAddress: solanaWallet,
+          amountRaw: "30000000",
+          txHash: transactionHash,
+        });
+        const db = createMockDb({
+          wallet: {
+            userId: "user-1",
+            walletAddress: solanaWallet,
+            walletType: "solana",
+          },
+          existingNotificationId: "canonical-deposit-notification",
+        });
+        const result = await handlePrivyDepositWebhook(db, {
+          ...basePayload,
+          asset: { type: "native-token" },
+          amount: "30000000",
+          caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+          idempotency_key: "deposit-key-canonical-sol",
+          recipient: solanaWallet,
+          sender: "solana-external-sender",
+          transaction_hash: transactionHash,
+        });
+
+        assert.equal(result.status, "notified");
+        assert.equal(result.notified, true);
+        assert.deepEqual(db.notificationInserts, []);
+        const lookup = db.calls.find(({ sql }) =>
+          /from notifications/iu.test(sql),
+        );
+        assert.equal(lookup?.params?.[1], expectedDedupeKey);
+        assert.equal(db.depositUpdates.at(-1)?.status, "notified");
       });
     },
   },

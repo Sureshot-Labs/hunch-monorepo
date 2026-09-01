@@ -43,6 +43,7 @@ import {
   fundingReceiveVariantHandling,
   isDirectReceiveCompletionKind,
 } from "../planner/receive-targets.js";
+import { recordCanonicalReceiveDepositNotification } from "./receive-deposit-notification.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -1006,6 +1007,15 @@ export class FundingReceiveSessionObserver {
             "canonical receive event allocation changed during receipt commit",
           );
         }
+        await recordCanonicalReceiveDepositNotification(client, {
+          receiveSessionId: snapshot.session.receiveSessionId,
+          userId: snapshot.userId,
+          ownerChannel: snapshot.ownerChannel,
+          variant: event.variant,
+          event,
+          canonicalEventId: allocation.eventId,
+          now,
+        });
         recoveryRequired ||=
           handoffRecoveryRequired ||
           disposition.sessionStatus === "recovery_required";

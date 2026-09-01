@@ -6,6 +6,7 @@ import {
   buildDepositNotification,
   createNotificationSafe,
 } from "./notifications.js";
+import { nativeSolDepositNotificationDedupeKey } from "../funding/receive/receive-deposit-notification.js";
 import { canonicalizeBridgeOrderStatus } from "./bridge-status.js";
 import {
   RELAY_SOLVER,
@@ -74,6 +75,8 @@ type RelayFundingOutputMatch = {
 
 type TelegramRetainedFundingMatch = {
   fundingContextId: string;
+  exactMatch: boolean;
+  hasReadyReceipt: boolean;
 };
 
 type PolymarketFunderMovementMatch = {
@@ -608,7 +611,10 @@ async function findTelegramRetainedFundingInput(
   }
   const { rows } = await db.query<TelegramRetainedFundingMatch>(
     `
-      select funding_context.id as "fundingContextId"
+      select
+        funding_context.id as "fundingContextId",
+        receipt_state."exactMatch",
+        receipt_state."hasReadyReceipt"
       from telegram_funding_sessions funding_context
       join telegram_funding_buy_return_revisions buy_return
         on buy_return.telegram_funding_session_id = funding_context.id
@@ -623,18 +629,24 @@ async function findTelegramRetainedFundingInput(
       join funding_receive_sessions receive_session
         on receive_session.id = funding_context.receive_session_id
        and receive_session.user_id = funding_context.user_id
-      join funding_receive_receipts receive_receipt
-        on receive_receipt.receive_session_id = receive_session.id
-       and receive_receipt.user_id = funding_context.user_id
-       and receive_receipt.variant_id =
-         any(funding_consent.consented_variant_ids)
-       and receive_receipt.status = 'ready'
-       and receive_receipt.handling = 'direct'
-       and receive_receipt.network_id = 'solana:mainnet'
-       and receive_receipt.asset_id = $2::text
-       and receive_receipt.asset_decimals = 9
-       and receive_receipt.destination_address = $3::text
-       and receive_receipt.evidence ->> 'transactionHash' = $4::text
+      cross join lateral (
+        select
+          coalesce(bool_or(
+            receive_receipt.evidence ->> 'transactionHash' = $4::text
+          ), false) as "exactMatch",
+          count(*) > 0 as "hasReadyReceipt"
+        from funding_receive_receipts receive_receipt
+        where receive_receipt.receive_session_id = receive_session.id
+          and receive_receipt.user_id = funding_context.user_id
+          and receive_receipt.variant_id =
+            any(funding_consent.consented_variant_ids)
+          and receive_receipt.status = 'ready'
+          and receive_receipt.handling = 'direct'
+          and receive_receipt.network_id = 'solana:mainnet'
+          and receive_receipt.asset_id = $2::text
+          and receive_receipt.asset_decimals = 9
+          and receive_receipt.destination_address = $3::text
+      ) receipt_state
       cross join lateral jsonb_array_elements(
         receive_session.observation_variants
       ) receive_variant
@@ -655,8 +667,15 @@ async function findTelegramRetainedFundingInput(
         and receive_variant ->> 'variantId' =
           any(funding_consent.consented_variant_ids)
         and receive_variant ->> 'destinationAddress' = $3::text
-      order by funding_context.created_at desc, funding_context.id
-      limit 2
+        and (
+          receipt_state."exactMatch"
+          or not receipt_state."hasReadyReceipt"
+        )
+      order by
+        receipt_state."exactMatch" desc,
+        funding_context.created_at desc,
+        funding_context.id
+      limit 3
     `,
     [
       input.userId,
@@ -665,7 +684,11 @@ async function findTelegramRetainedFundingInput(
       input.event.transaction_hash.trim(),
     ],
   );
-  return rows.length === 1 ? (rows[0] ?? null) : null;
+  const exactMatches = rows.filter((row) => row.exactMatch);
+  if (exactMatches.length === 1) return exactMatches[0] ?? null;
+  if (exactMatches.length > 1) return null;
+  const pendingMatches = rows.filter((row) => !row.hasReadyReceipt);
+  return pendingMatches.length === 1 ? (pendingMatches[0] ?? null) : null;
 }
 
 async function findBridgeOrderByTxHash(
@@ -1453,6 +1476,15 @@ export async function handlePrivyDepositWebhook(
     amountRaw: event.amount,
     txHash: event.transaction_hash ?? null,
     idempotencyKey: event.idempotency_key,
+    dedupeKey:
+      event.asset.type === "native-token" && event.transaction_hash
+        ? nativeSolDepositNotificationDedupeKey({
+            networkId: resolveFundingNetworkId(event.caip2) ?? "",
+            walletAddress: wallet.wallet_address,
+            amountRaw: event.amount,
+            txHash: event.transaction_hash,
+          })
+        : null,
   });
   const notification = await createNotificationSafe(
     db,
