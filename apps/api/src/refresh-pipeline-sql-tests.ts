@@ -29,6 +29,13 @@ const marketEventChange24Migration = readFileSync(
   ),
   "utf8",
 );
+const polymarketChange24TriggerMigration = readFileSync(
+  new URL(
+    "../../../packages/db/migrations/0242_change24_polymarket_statement_trigger.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
 
 // No-transaction migrations are split on semicolons by the repository
 // migrator, including semicolons inside line comments.
@@ -165,5 +172,27 @@ assert.match(
   marketEventChange24Migration,
   /refresh_unified_market_event_change_24h_full_job'[\s\S]*interval '1 hour'/i,
 );
+
+assert.match(
+  polymarketChange24TriggerMigration,
+  /after insert on polymarket_markets\s+referencing new table[\s\S]*for each statement/i,
+);
+assert.match(
+  polymarketChange24TriggerMigration,
+  /after update on polymarket_markets\s+referencing\s+old table[\s\S]*new table[\s\S]*for each statement/i,
+);
+assert.match(
+  polymarketChange24TriggerMigration,
+  /changed_source_market_ids as materialized[\s\S]*except[\s\S]*union[\s\S]*except/i,
+);
+assert.match(
+  polymarketChange24TriggerMigration,
+  /venue_market_id = source_market\.id[\s\S]*limit 1/i,
+);
+assert.doesNotMatch(
+  polymarketChange24TriggerMigration,
+  /venue_market_id\s*=\s*any/i,
+);
+assert.doesNotMatch(polymarketChange24TriggerMigration, /for each row/i);
 
 console.log("refresh pipeline SQL tests passed");
