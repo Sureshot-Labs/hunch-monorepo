@@ -2248,6 +2248,74 @@ async function main() {
         2,
       );
 
+      const graphParityQuery =
+        `category=${encodeURIComponent(category)}` +
+        "&marketStatus=ACTIVE&acceptingOrders=true" +
+        "&walletActiveWithinHours=24&minWalletExposureUsd=100" +
+        "&minPositionUsd=100&minWallets=1" +
+        "&contestedMinMinoritySideUsd=100" +
+        "&contestedMinMinoritySideShare=0.05" +
+        "&contestedMinSideWallets=1&contestedMaxLargestHolderPct=0.9" +
+        "&minContestedMarketCount=1&sort=event_disagreement_score" +
+        "&includeHolders=true&holdersLimit=2" +
+        "&includePositionPnl=true&limit=5&offset=0";
+      const graphRankFirstResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positioning/events?${graphParityQuery}&shape=table`,
+      });
+      const graphExactResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positioning/events?${graphParityQuery}&shape=both`,
+      });
+      assert.equal(graphRankFirstResponse.statusCode, 200);
+      assert.equal(graphExactResponse.statusCode, 200);
+      const graphRankFirstBody = graphRankFirstResponse.json() as {
+        hasMore: boolean;
+        items: unknown[];
+        totals: unknown;
+      };
+      const graphExactBody = graphExactResponse.json() as {
+        hasMore: boolean;
+        items: unknown[];
+        totals: unknown;
+      };
+      assert.deepEqual(graphRankFirstBody.items, graphExactBody.items);
+      assert.deepEqual(graphRankFirstBody.totals, graphExactBody.totals);
+      assert.equal(graphRankFirstBody.hasMore, graphExactBody.hasMore);
+
+      const graphRankFirstOffsetResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positioning/events?${graphParityQuery.replace("limit=5&offset=0", "limit=1&offset=1")}&shape=table`,
+      });
+      const graphExactOffsetResponse = await app.inject({
+        method: "GET",
+        url: `/wallets/positioning/events?${graphParityQuery.replace("limit=5&offset=0", "limit=1&offset=1")}&shape=both`,
+      });
+      assert.equal(graphRankFirstOffsetResponse.statusCode, 200);
+      assert.equal(graphExactOffsetResponse.statusCode, 200);
+      const graphRankFirstOffsetBody = graphRankFirstOffsetResponse.json() as {
+        hasMore: boolean;
+        items: unknown[];
+        totals: unknown;
+      };
+      const graphExactOffsetBody = graphExactOffsetResponse.json() as {
+        hasMore: boolean;
+        items: unknown[];
+        totals: unknown;
+      };
+      assert.deepEqual(
+        graphRankFirstOffsetBody.items,
+        graphExactOffsetBody.items,
+      );
+      assert.deepEqual(
+        graphRankFirstOffsetBody.totals,
+        graphExactOffsetBody.totals,
+      );
+      assert.equal(
+        graphRankFirstOffsetBody.hasMore,
+        graphExactOffsetBody.hasMore,
+      );
+
       const positionResponse = await app.inject({
         method: "GET",
         url: `/wallets/positions?walletId=${labeledWalletId}&marketId=${encodeURIComponent(matching.marketId)}&eventId=${encodeURIComponent(matching.eventId)}&category=${encodeURIComponent(category)}&outcomeSide=YES&marketStatus=OPEN&acceptingOrders=true&minSizeUsd=100&limit=10&offset=0`,

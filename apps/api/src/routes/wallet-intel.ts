@@ -2234,6 +2234,29 @@ function isEventPositioningSort(sort: WalletPositioningQuery["sort"]) {
   ].includes(sort);
 }
 
+function supportsPositioningEventRankFirst(input: {
+  query: WalletPositioningQuery;
+  rollup: "events" | "markets" | "event-detail" | "market-detail";
+}): boolean {
+  const { query } = input;
+  return (
+    input.rollup === "events" &&
+    query.shape === "table" &&
+    query.sort === "event_disagreement_score" &&
+    !query.q &&
+    query.minYesPositionUsd == null &&
+    query.minNoPositionUsd == null &&
+    query.minMinoritySideUsd == null &&
+    query.minMinoritySideShare == null &&
+    query.minYesWallets == null &&
+    query.minNoWallets == null &&
+    query.minAbsImbalancePct == null &&
+    query.maxAbsImbalancePct == null &&
+    query.maxLargestHolderPct == null &&
+    query.minBalancedDisagreementScore == null
+  );
+}
+
 function compareNullableNumberDesc(
   a: number | null | undefined,
   b: number | null | undefined,
@@ -2736,8 +2759,8 @@ async function loadTrackedWalletPositioning(input: {
   }
   const searchMembershipSql = searchFilter.hasSearch ? "1" : "0";
 
-  const positioningSql = `
-      with ${searchFilter.searchCte ? `${searchFilter.searchCte},` : ""}
+  const positioningBaseCtesSql = `
+      ${searchFilter.searchCte ? `${searchFilter.searchCte},` : ""}
       candidate_wallets as materialized (
         select
           w.id as wallet_id,
@@ -2833,6 +2856,281 @@ async function loadTrackedWalletPositioning(input: {
          and ws.snapshot_at = ls.snapshot_at
         where ${latestPositionClauses.join(" and ")}
       )
+    `;
+
+  let eventPageSelection: {
+    eventIds: string[];
+    hasMore: boolean;
+    totalEvents: number;
+    totalMarkets: number;
+    totalPositions: number;
+  } | null = null;
+  if (supportsPositioningEventRankFirst(input)) {
+    const rankParams = params.slice();
+    const addRankParam = (value: PgParams[number]) => {
+      rankParams.push(value);
+      return `$${rankParams.length}`;
+    };
+    const effectiveMinWalletsParam = addRankParam(query.minWallets ?? 2);
+    const contestedMinMinoritySideUsdParam = addRankParam(
+      query.contestedMinMinoritySideUsd,
+    );
+    const contestedMinMinoritySideShareParam = addRankParam(
+      query.contestedMinMinoritySideShare,
+    );
+    const contestedMinSideWalletsParam = addRankParam(
+      query.contestedMinSideWallets,
+    );
+    const contestedMaxLargestHolderPctParam = addRankParam(
+      query.contestedMaxLargestHolderPct,
+    );
+    const eventFilterClauses: string[] = [];
+    if (query.eventShape === "single_market") {
+      eventFilterClauses.push("event_rollup.market_count = 1");
+    } else if (query.eventShape === "multi_market") {
+      eventFilterClauses.push("event_rollup.market_count > 1");
+    }
+    if (query.minContestedMarketCount != null) {
+      eventFilterClauses.push(
+        `event_rollup.contested_market_count >= ${addRankParam(query.minContestedMarketCount)}::integer`,
+      );
+    }
+    if (query.minEventDisagreementScore != null) {
+      eventFilterClauses.push(
+        `event_rollup.event_disagreement_score >= ${addRankParam(query.minEventDisagreementScore)}::numeric`,
+      );
+    }
+    if (query.minCrossMarketWallets != null) {
+      eventFilterClauses.push(
+        `event_rollup.cross_market_wallet_count >= ${addRankParam(query.minCrossMarketWallets)}::integer`,
+      );
+    }
+    const pageLimitParam = addRankParam(query.limit);
+    const pageOffsetParam = addRankParam(query.offset);
+    const eventRankSql = `
+      with ${positioningBaseCtesSql},
+      eligible_positions as materialized (
+        select
+          latest_positions.wallet_id,
+          latest_positions.market_id,
+          latest_positions.outcome_side,
+          latest_positions.position_usd,
+          latest_positions.snapshot_at,
+          unified_market.event_id
+        from latest_positions
+        join unified_markets unified_market
+          on unified_market.id = latest_positions.market_id
+        left join unified_events unified_event
+          on unified_event.id = unified_market.event_id
+        left join hidden_positions hidden_position
+          on hidden_position.venue = latest_positions.venue
+         and hidden_position.token_id = latest_positions.metadata->>'tokenId'
+         and (
+           (
+             latest_positions.chain = 'solana'
+             and hidden_position.wallet_address = latest_positions.address
+           )
+           or (
+             latest_positions.chain <> 'solana'
+             and lower(hidden_position.wallet_address) = lower(latest_positions.address)
+           )
+         )
+        where ${marketClauses
+          .join(" and ")
+          .replaceAll("um.", "unified_market.")
+          .replaceAll("ue.", "unified_event.")
+          .replaceAll("hp.", "hidden_position.")}
+      ),
+      market_rollup as materialized (
+        select
+          eligible_position.event_id,
+          eligible_position.market_id,
+          count(distinct eligible_position.wallet_id)::integer as wallet_count,
+          sum(eligible_position.position_usd) as tracked_position_usd,
+          max(eligible_position.position_usd) as largest_holder_usd,
+          sum(eligible_position.position_usd) filter (
+            where eligible_position.outcome_side = 'YES'
+          ) as yes_position_usd,
+          sum(eligible_position.position_usd) filter (
+            where eligible_position.outcome_side = 'NO'
+          ) as no_position_usd,
+          count(distinct eligible_position.wallet_id) filter (
+            where eligible_position.outcome_side = 'YES'
+          )::integer as yes_wallet_count,
+          count(distinct eligible_position.wallet_id) filter (
+            where eligible_position.outcome_side = 'NO'
+          )::integer as no_wallet_count,
+          max(eligible_position.snapshot_at) as newest_snapshot_at
+        from eligible_positions eligible_position
+        group by eligible_position.event_id, eligible_position.market_id
+        having count(distinct eligible_position.wallet_id)
+          >= ${effectiveMinWalletsParam}::integer
+      ),
+      market_metrics as materialized (
+        select
+          market_rollup.*,
+          least(
+            coalesce(market_rollup.yes_position_usd, 0),
+            coalesce(market_rollup.no_position_usd, 0)
+          ) as minority_side_usd,
+          least(
+            coalesce(market_rollup.yes_position_usd, 0),
+            coalesce(market_rollup.no_position_usd, 0)
+          ) / nullif(market_rollup.tracked_position_usd, 0)
+            as minority_side_share,
+          market_rollup.largest_holder_usd
+            / nullif(market_rollup.tracked_position_usd, 0)
+            as largest_holder_pct
+        from market_rollup
+      ),
+      market_scored as materialized (
+        select
+          market_metrics.*,
+          sqrt(
+            greatest(coalesce(market_metrics.yes_position_usd, 0), 0)
+            * greatest(coalesce(market_metrics.no_position_usd, 0), 0)
+          )
+          * coalesce(market_metrics.minority_side_share, 0)
+          * greatest(0, 1 - coalesce(market_metrics.largest_holder_pct, 1))
+            as balanced_disagreement_score,
+          (
+            market_metrics.minority_side_usd
+              >= ${contestedMinMinoritySideUsdParam}::numeric
+            and coalesce(market_metrics.minority_side_share, 0)
+              >= ${contestedMinMinoritySideShareParam}::numeric
+            and market_metrics.yes_wallet_count
+              >= ${contestedMinSideWalletsParam}::integer
+            and market_metrics.no_wallet_count
+              >= ${contestedMinSideWalletsParam}::integer
+            and coalesce(market_metrics.largest_holder_pct, 1)
+              <= ${contestedMaxLargestHolderPctParam}::numeric
+          ) as is_contested
+        from market_metrics
+      ),
+      eligible_event_positions as materialized (
+        select eligible_position.*
+        from eligible_positions eligible_position
+        join market_scored
+          on market_scored.market_id = eligible_position.market_id
+        where market_scored.event_id is not null
+      ),
+      event_wallet_rollup as materialized (
+        select
+          eligible_event_position.event_id,
+          eligible_event_position.wallet_id,
+          count(distinct eligible_event_position.market_id)::integer
+            as market_count
+        from eligible_event_positions eligible_event_position
+        group by
+          eligible_event_position.event_id,
+          eligible_event_position.wallet_id
+      ),
+      event_wallet_stats as materialized (
+        select
+          event_wallet_rollup.event_id,
+          count(*)::integer as wallet_count,
+          count(*) filter (
+            where event_wallet_rollup.market_count >= 2
+          )::integer as cross_market_wallet_count
+        from event_wallet_rollup
+        group by event_wallet_rollup.event_id
+      ),
+      event_rollup as materialized (
+        select
+          market_scored.event_id,
+          count(*)::integer as market_count,
+          event_wallet_stats.wallet_count,
+          event_wallet_stats.cross_market_wallet_count,
+          sum(market_scored.tracked_position_usd) as tracked_position_usd,
+          max(market_scored.tracked_position_usd) as largest_market_usd,
+          count(*) filter (
+            where market_scored.is_contested
+          )::integer as contested_market_count,
+          coalesce(
+            sum(market_scored.balanced_disagreement_score) filter (
+              where market_scored.is_contested
+            ),
+            0
+          ) as event_disagreement_score,
+          max(market_scored.minority_side_usd) filter (
+            where market_scored.is_contested
+          ) as top_market_minority_side_usd,
+          max(market_scored.newest_snapshot_at) as newest_snapshot_at
+        from market_scored
+        join event_wallet_stats
+          on event_wallet_stats.event_id = market_scored.event_id
+        where market_scored.event_id is not null
+        group by
+          market_scored.event_id,
+          event_wallet_stats.wallet_count,
+          event_wallet_stats.cross_market_wallet_count
+      ),
+      filtered_events as materialized (
+        select event_rollup.*
+        from event_rollup
+        ${eventFilterClauses.length > 0 ? `where ${eventFilterClauses.join(" and ")}` : ""}
+      ),
+      page_candidates as (
+        select
+          filtered_event.event_id,
+          filtered_event.event_disagreement_score,
+          filtered_event.tracked_position_usd,
+          filtered_event.market_count,
+          row_number() over (
+            order by
+              filtered_event.event_disagreement_score desc,
+              filtered_event.tracked_position_usd desc,
+              filtered_event.market_count desc,
+              filtered_event.event_id
+          ) as page_order
+        from filtered_events filtered_event
+        order by
+          filtered_event.event_disagreement_score desc,
+          filtered_event.tracked_position_usd desc,
+          filtered_event.market_count desc,
+          filtered_event.event_id
+        limit (${pageLimitParam}::integer + 1)
+        offset ${pageOffsetParam}::integer
+      )
+      select
+        coalesce(
+          array_agg(page_candidate.event_id order by page_candidate.page_order)
+            filter (where page_candidate.page_order <= ${pageOffsetParam}::integer + ${pageLimitParam}::integer),
+          array[]::text[]
+        ) as event_ids,
+        count(*) > ${pageLimitParam}::integer as has_more,
+        (select count(*)::integer from filtered_events) as total_events,
+        (select count(*)::integer from market_scored) as total_markets,
+        (select count(*)::integer from eligible_positions) as total_positions
+      from page_candidates page_candidate
+    `;
+    assertSqlParamPlaceholders(
+      eventRankSql,
+      rankParams,
+      "loadTrackedWalletPositioning.eventRankFirst",
+    );
+    const rankResult = await client.query<{
+      event_ids: string[];
+      has_more: boolean;
+      total_events: number;
+      total_markets: number;
+      total_positions: number;
+    }>(eventRankSql, rankParams);
+    const rankRow = rankResult.rows[0];
+    eventPageSelection = {
+      eventIds: rankRow?.event_ids ?? [],
+      hasMore: rankRow?.has_more ?? false,
+      totalEvents: rankRow?.total_events ?? 0,
+      totalMarkets: rankRow?.total_markets ?? 0,
+      totalPositions: rankRow?.total_positions ?? 0,
+    };
+  }
+
+  const selectedEventIdsParam = eventPageSelection
+    ? addParam(eventPageSelection.eventIds)
+    : null;
+  const positioningSql = `
+      with ${positioningBaseCtesSql}
       select
         lp.wallet_id,
 	        lp.address,
@@ -2920,16 +3218,17 @@ async function loadTrackedWalletPositioning(input: {
          or (lp.chain <> 'solana' and lower(hp.wallet_address) = lower(lp.address))
        )
       where ${marketClauses.join(" and ")}
+        ${selectedEventIdsParam ? `and um.event_id = any(${selectedEventIdsParam}::text[])` : ""}
     `;
   assertSqlParamPlaceholders(
     positioningSql,
     params,
     "loadTrackedWalletPositioning",
   );
-  const { rows } = await client.query<WalletPositioningRow>(
-    positioningSql,
-    params,
-  );
+  const rows =
+    eventPageSelection && eventPageSelection.eventIds.length === 0
+      ? []
+      : (await client.query<WalletPositioningRow>(positioningSql, params)).rows;
 
   const marketBuilders = new Map<
     string,
@@ -3565,9 +3864,18 @@ async function loadTrackedWalletPositioning(input: {
     searchTierByEventId,
   );
 
+  const sortedEventById = eventPageSelection
+    ? new Map(sortedEvents.map((eventItem) => [eventItem.eventId, eventItem]))
+    : null;
   const page =
     input.rollup === "events"
-      ? sortedEvents.slice(query.offset, query.offset + query.limit)
+      ? eventPageSelection
+        ? eventPageSelection.eventIds
+            .map((eventId) => sortedEventById?.get(eventId))
+            .filter((eventItem): eventItem is PositioningEventAggregate =>
+              Boolean(eventItem),
+            )
+        : sortedEvents.slice(query.offset, query.offset + query.limit)
       : sortedMarkets.slice(query.offset, query.offset + query.limit);
   const selectedMarkets =
     input.rollup === "events"
@@ -3630,19 +3938,26 @@ async function loadTrackedWalletPositioning(input: {
       includePositionPnl: query.includePositionPnl,
     },
     totals: {
-      markets:
-        input.rollup === "events" || input.rollup === "event-detail"
+      markets: eventPageSelection
+        ? eventPageSelection.totalMarkets
+        : input.rollup === "events" || input.rollup === "event-detail"
           ? walletFilteredMarkets.length
           : marketFilteredMarkets.length,
-      events: sortedEvents.length,
-      positions: rows.length,
+      events: eventPageSelection
+        ? eventPageSelection.totalEvents
+        : sortedEvents.length,
+      positions: eventPageSelection
+        ? eventPageSelection.totalPositions
+        : rows.length,
     },
     items: page,
     event:
       input.rollup === "event-detail" ? (sortedEvents[0] ?? null) : undefined,
     hasMore:
       input.rollup === "events"
-        ? query.offset + query.limit < sortedEvents.length
+        ? eventPageSelection
+          ? eventPageSelection.hasMore
+          : query.offset + query.limit < sortedEvents.length
         : query.offset + query.limit < sortedMarkets.length,
     tree: includeTree
       ? {
@@ -4973,6 +5288,7 @@ async function withWalletIntelQuerySettings<T>(
     workMem?: string | null;
     disableJit?: boolean;
     statementTimeoutMs?: number | null;
+    repeatableReadOnly?: boolean;
   },
   task: () => Promise<T>,
 ): Promise<T> {
@@ -4984,7 +5300,11 @@ async function withWalletIntelQuerySettings<T>(
     return task();
   }
 
-  await client.query("BEGIN");
+  await client.query(
+    options.repeatableReadOnly
+      ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
+      : "BEGIN",
+  );
   try {
     if (disableJit) {
       await client.query("SET LOCAL jit = off");
@@ -7101,6 +7421,93 @@ async function loadWhaleTopMarkets(
       with wallet_set as (
         select unnest($1::uuid[]) as wallet_id
       ),
+      latest_snapshots as materialized (
+        select
+          snapshot_rows.wallet_id,
+          snapshot_rows.venue,
+          max(snapshot_rows.snapshot_at) as snapshot_at
+        from wallet_position_snapshots snapshot_rows
+        join wallet_set
+          on wallet_set.wallet_id = snapshot_rows.wallet_id
+        group by snapshot_rows.wallet_id, snapshot_rows.venue
+      ),
+      latest_position_rows as materialized (
+        select distinct on (
+          snapshot_rows.wallet_id,
+          snapshot_rows.venue,
+          snapshot_rows.market_id,
+          snapshot_rows.outcome_side
+        )
+          snapshot_rows.wallet_id,
+          snapshot_rows.venue,
+          snapshot_rows.market_id,
+          snapshot_rows.outcome_side,
+          snapshot_rows.shares,
+          snapshot_rows.size_usd,
+          snapshot_rows.price
+        from latest_snapshots
+        join wallet_position_snapshots snapshot_rows
+          on snapshot_rows.wallet_id = latest_snapshots.wallet_id
+         and snapshot_rows.venue = latest_snapshots.venue
+         and snapshot_rows.snapshot_at = latest_snapshots.snapshot_at
+        where snapshot_rows.shares > 0
+        order by
+          snapshot_rows.wallet_id,
+          snapshot_rows.venue,
+          snapshot_rows.market_id,
+          snapshot_rows.outcome_side,
+          snapshot_rows.size_usd desc nulls last,
+          snapshot_rows.shares desc
+      ),
+      current_positions as materialized (
+        select
+          latest_position_rows.wallet_id,
+          latest_position_rows.venue,
+          latest_position_rows.market_id,
+          case
+            when bool_or(latest_position_rows.outcome_side = 'YES')
+             and bool_or(latest_position_rows.outcome_side = 'NO')
+              then 'BOTH'
+            when bool_or(latest_position_rows.outcome_side = 'YES')
+              then 'YES'
+            when bool_or(latest_position_rows.outcome_side = 'NO')
+              then 'NO'
+            else null
+          end as outcome_side,
+          bool_or(latest_position_rows.outcome_side = 'YES') as has_yes_position,
+          bool_or(latest_position_rows.outcome_side = 'NO') as has_no_position,
+          sum(latest_position_rows.shares) as shares,
+          sum(latest_position_rows.size_usd) as size_usd,
+          case
+            when bool_or(latest_position_rows.outcome_side = 'YES')
+             and bool_or(latest_position_rows.outcome_side = 'NO')
+              then null
+            else max(latest_position_rows.price)
+          end as price,
+          sum(latest_position_rows.shares) filter (
+            where latest_position_rows.outcome_side = 'YES'
+          ) as yes_shares,
+          sum(latest_position_rows.size_usd) filter (
+            where latest_position_rows.outcome_side = 'YES'
+          ) as yes_size_usd,
+          max(latest_position_rows.price) filter (
+            where latest_position_rows.outcome_side = 'YES'
+          ) as yes_price,
+          sum(latest_position_rows.shares) filter (
+            where latest_position_rows.outcome_side = 'NO'
+          ) as no_shares,
+          sum(latest_position_rows.size_usd) filter (
+            where latest_position_rows.outcome_side = 'NO'
+          ) as no_size_usd,
+          max(latest_position_rows.price) filter (
+            where latest_position_rows.outcome_side = 'NO'
+          ) as no_price
+        from latest_position_rows
+        group by
+          latest_position_rows.wallet_id,
+          latest_position_rows.venue,
+          latest_position_rows.market_id
+      ),
       recent_markets as (
         select
           wah.wallet_id,
@@ -7126,13 +7533,37 @@ async function loadWhaleTopMarkets(
           um.status as market_status,
           um.close_time,
           um.expiration_time,
-          um.resolved_outcome
+          um.resolved_outcome,
+          current_positions.outcome_side as position_side,
+          current_positions.has_yes_position,
+          current_positions.has_no_position,
+          current_positions.shares as position_shares,
+          current_positions.size_usd as position_value_usd,
+          current_positions.price as position_price,
+          current_positions.yes_shares as yes_position_shares,
+          current_positions.yes_size_usd as yes_position_value_usd,
+          current_positions.yes_price as yes_position_price,
+          current_positions.no_shares as no_position_shares,
+          current_positions.no_size_usd as no_position_value_usd,
+          current_positions.no_price as no_position_price
         from wallet_activity_hourly wah
-        join wallet_set ws on ws.wallet_id = wah.wallet_id
+        join current_positions
+          on current_positions.wallet_id = wah.wallet_id
+         and current_positions.venue = wah.venue
+         and current_positions.market_id = wah.market_id
         left join unified_markets um on um.id = wah.market_id
         left join unified_events ue on ue.id = um.event_id
         where wah.activity_type in ('delta', 'trade', 'holder')
           and wah.hour_bucket >= now() - ($3::text || ' days')::interval
+          and um.resolved_outcome is null
+          and (
+            um.status is null
+            or um.status not in ('CLOSED', 'SETTLED', 'ARCHIVED')
+          )
+          and (
+            coalesce(um.close_time, um.expiration_time) is null
+            or coalesce(um.close_time, um.expiration_time) >= now()
+          )
         group by
           wah.wallet_id,
           wah.market_id,
@@ -7147,93 +7578,31 @@ async function loadWhaleTopMarkets(
           um.status,
           um.close_time,
           um.expiration_time,
-          um.resolved_outcome
+          um.resolved_outcome,
+          current_positions.outcome_side,
+          current_positions.has_yes_position,
+          current_positions.has_no_position,
+          current_positions.shares,
+          current_positions.size_usd,
+          current_positions.price,
+          current_positions.yes_shares,
+          current_positions.yes_size_usd,
+          current_positions.yes_price,
+          current_positions.no_shares,
+          current_positions.no_size_usd,
+          current_positions.no_price
       ),
       ranked as (
         select
           recent_markets.*,
-          pos.outcome_side as position_side,
-          pos.has_yes_position,
-          pos.has_no_position,
-          pos.shares as position_shares,
-          pos.size_usd as position_value_usd,
-          pos.price as position_price,
-          pos.yes_shares as yes_position_shares,
-          pos.yes_size_usd as yes_position_value_usd,
-          pos.yes_price as yes_position_price,
-          pos.no_shares as no_position_shares,
-          pos.no_size_usd as no_position_value_usd,
-          pos.no_price as no_position_price,
           row_number() over (
             partition by recent_markets.wallet_id
             order by recent_markets.volume_usd desc nulls last,
                      recent_markets.activity_count desc,
-                     recent_markets.last_activity_at desc
+                     recent_markets.last_activity_at desc,
+                     recent_markets.market_id
           ) as rn
         from recent_markets
-        left join lateral (
-          with latest_positions as (
-            select distinct on (ws.outcome_side)
-              ws.outcome_side,
-              ws.shares,
-              ws.size_usd,
-              ws.price
-            from wallet_position_snapshots ws
-            where ws.wallet_id = recent_markets.wallet_id
-              and ws.venue = recent_markets.venue
-              and ws.market_id = recent_markets.market_id
-              and ws.snapshot_at = (
-                select max(ws_latest.snapshot_at)
-                from wallet_position_snapshots ws_latest
-                where ws_latest.wallet_id = recent_markets.wallet_id
-                  and ws_latest.venue = recent_markets.venue
-              )
-              and ws.shares > 0
-            order by
-              ws.outcome_side,
-              ws.snapshot_at desc,
-              ws.size_usd desc nulls last,
-              ws.shares desc
-          )
-          select
-            case
-              when bool_or(lp.outcome_side = 'YES')
-               and bool_or(lp.outcome_side = 'NO')
-                then 'BOTH'
-              when bool_or(lp.outcome_side = 'YES')
-                then 'YES'
-              when bool_or(lp.outcome_side = 'NO')
-                then 'NO'
-              else null
-            end as outcome_side,
-            bool_or(lp.outcome_side = 'YES') as has_yes_position,
-            bool_or(lp.outcome_side = 'NO') as has_no_position,
-            sum(lp.shares) as shares,
-            sum(lp.size_usd) as size_usd,
-            case
-              when bool_or(lp.outcome_side = 'YES')
-               and bool_or(lp.outcome_side = 'NO')
-                then null
-              else max(lp.price)
-            end as price,
-            sum(case when lp.outcome_side = 'YES' then lp.shares else 0 end) as yes_shares,
-            sum(case when lp.outcome_side = 'YES' then lp.size_usd else 0 end) as yes_size_usd,
-            max(case when lp.outcome_side = 'YES' then lp.price end) as yes_price,
-            sum(case when lp.outcome_side = 'NO' then lp.shares else 0 end) as no_shares,
-            sum(case when lp.outcome_side = 'NO' then lp.size_usd else 0 end) as no_size_usd,
-            max(case when lp.outcome_side = 'NO' then lp.price end) as no_price
-          from latest_positions lp
-        ) pos on true
-        where (coalesce(pos.has_yes_position, false) or coalesce(pos.has_no_position, false))
-          and recent_markets.resolved_outcome is null
-          and (
-            recent_markets.market_status is null
-            or recent_markets.market_status not in ('CLOSED', 'SETTLED', 'ARCHIVED')
-          )
-          and (
-            coalesce(recent_markets.close_time, recent_markets.expiration_time) is null
-            or coalesce(recent_markets.close_time, recent_markets.expiration_time) >= now()
-          )
       )
       select
         ranked.wallet_id,
@@ -11251,7 +11620,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
       try {
         const result = await withWalletIntelQuerySettings(
           client,
-          { workMem: "32MB" },
+          { workMem: "32MB", repeatableReadOnly: true },
           () =>
             loadTrackedWalletPositioning({
               client,

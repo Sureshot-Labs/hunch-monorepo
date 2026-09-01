@@ -6,6 +6,10 @@ import { createRedisClient, ensureRedis } from "@hunch/infra";
 import { z } from "zod";
 import { pool } from "./db.js";
 import { env } from "./env.js";
+import {
+  getMapSearchFailureReason,
+  restoreMapSearchValues,
+} from "./ai-map-search-result.js";
 import { runMapSearch } from "./lib/map-news/map-search-core.js";
 import { marketMapActiveKey } from "./services/market-map.js";
 import { resolveMapSearchPolicy } from "./services/runtime-policies.js";
@@ -77,6 +81,16 @@ const searchReportSchema = z
         providerReportedCostCalls: z.coerce.number().finite().optional(),
       })
       .partial()
+      .optional(),
+    callsCompact: z
+      .array(
+        z
+          .object({
+            statusCode: z.coerce.number().int().nullable().optional(),
+            budgetStop: z.string().nullable().optional(),
+          })
+          .passthrough(),
+      )
       .optional(),
   })
   .passthrough();
@@ -933,6 +947,14 @@ async function main() {
     }
 
     try {
+      const priorArtifact = await redis.get(
+        artifactKey(activeMapRunIdForSignal),
+      );
+      const priorLatestMapRunId = await redis.get(LATEST_KEY);
+      const priorLatestSearch = await redis.get(
+        latestSearchForMapRunKey(activeMapRunIdForSignal),
+      );
+
       await runMapSearch(searchArgs, {
         commandName: "ai:map-search:run",
         scriptTag: "ai-map-search-runner",
@@ -941,6 +963,25 @@ async function main() {
 
       const outputRaw = await readFile(outPath, "utf8");
       const report = extractSearchReport(outputRaw);
+      const failureReason = getMapSearchFailureReason(report);
+      if (failureReason) {
+        await restoreMapSearchValues({
+          store: redis,
+          ttlSec: config.artifactTtlSec,
+          values: [
+            {
+              key: artifactKey(activeMapRunIdForSignal),
+              value: priorArtifact,
+            },
+            { key: LATEST_KEY, value: priorLatestMapRunId },
+            {
+              key: latestSearchForMapRunKey(activeMapRunIdForSignal),
+              value: priorLatestSearch,
+            },
+          ],
+        });
+        throw new Error(`map_search_failed:${failureReason}`);
+      }
       const mapRunId = report.run?.runId?.trim() || activeMapRunIdForSignal;
       const callsExecuted = Math.trunc(toNumber(report.totals?.callsExecuted));
       const evidenceTotal = Math.trunc(toNumber(report.totals?.evidenceTotal));
