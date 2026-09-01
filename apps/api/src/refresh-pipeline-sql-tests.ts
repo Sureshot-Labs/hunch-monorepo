@@ -22,6 +22,13 @@ const activityMigration = readFileSync(
   ),
   "utf8",
 );
+const marketEventChange24Migration = readFileSync(
+  new URL(
+    "../../../packages/db/migrations/0241_incremental_market_event_change_24h.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
 
 // No-transaction migrations are split on semicolons by the repository
 // migrator, including semicolons inside line comments.
@@ -81,6 +88,82 @@ assert.ok(incrementalJobSection);
 assert.doesNotMatch(
   incrementalJobSection,
   /refresh_unified_event_activity_snapshots_1h/i,
+);
+
+assert.match(
+  marketEventChange24Migration,
+  /create table if not exists unified_change24_dirty_markets/i,
+);
+assert.match(
+  marketEventChange24Migration,
+  /create table if not exists unified_change24_dirty_events/i,
+);
+assert.match(
+  marketEventChange24Migration,
+  /after insert on unified_market_tokens\s+referencing new table/i,
+);
+assert.match(
+  marketEventChange24Migration,
+  /after update on unified_token_change_24h\s+referencing\s+old table[\s\S]*new table/i,
+);
+assert.match(
+  marketEventChange24Migration,
+  /v_previous_cutoff - interval '5 minutes'/i,
+);
+assert.match(
+  marketEventChange24Migration,
+  /v_scan_until - interval '2 hours'/i,
+);
+assert.match(
+  marketEventChange24Migration,
+  /book_top\.ts > v_scan_from[\s\S]*book_top\.ts <= v_scan_until/i,
+);
+
+const marketEventIncrementalSection = marketEventChange24Migration.match(
+  /create or replace function refresh_unified_market_event_change_24h_incremental\(\)[\s\S]*?create or replace function refresh_unified_market_change_24h_full\(\)/i,
+)?.[0];
+assert.ok(marketEventIncrementalSection);
+
+const marketClaimIndex = marketEventIncrementalSection.indexOf(
+  "DELETE FROM unified_change24_dirty_markets",
+);
+const marketWriteIndex = marketEventIncrementalSection.indexOf(
+  "DELETE FROM unified_market_change_24h",
+);
+const eventClaimIndex = marketEventIncrementalSection.indexOf(
+  "DELETE FROM unified_change24_dirty_events",
+);
+const eventWriteIndex = marketEventIncrementalSection.indexOf(
+  "DELETE FROM unified_event_change_24h",
+);
+const cutoffUpdateIndex = marketEventIncrementalSection.indexOf(
+  "UPDATE unified_refresh_pipeline_state",
+);
+assert.ok(marketClaimIndex >= 0);
+assert.ok(marketClaimIndex < marketWriteIndex);
+assert.ok(marketWriteIndex < eventClaimIndex);
+assert.ok(eventClaimIndex < eventWriteIndex);
+assert.ok(eventWriteIndex < cutoffUpdateIndex);
+
+assert.match(
+  marketEventChange24Migration,
+  /refresh_unified_market_change_24h_job[\s\S]*refresh_unified_market_event_change_24h_incremental/i,
+);
+assert.match(
+  marketEventChange24Migration,
+  /refresh_unified_market_event_change_24h_full_job[\s\S]*refresh_unified_market_change_24h_full\(\)[\s\S]*refresh_unified_event_change_24h_full\(\)/i,
+);
+assert.match(
+  marketEventChange24Migration,
+  /full safety rebuild market_upserts=% market_row_delta=% event_upserts=% event_row_delta=%/i,
+);
+assert.match(
+  marketEventChange24Migration,
+  /proc_name = 'refresh_unified_event_change_24h_job'[\s\S]*delete_job/i,
+);
+assert.match(
+  marketEventChange24Migration,
+  /refresh_unified_market_event_change_24h_full_job'[\s\S]*interval '1 hour'/i,
 );
 
 console.log("refresh pipeline SQL tests passed");

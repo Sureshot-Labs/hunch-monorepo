@@ -60,6 +60,7 @@ import {
   classifyFundingQuoteConsent,
   FundingQuoteService,
 } from "../../planner/quote-service.js";
+import { fundingQuoteAmountBindingForCommitPlan } from "../../planner/quote-amount-binding.js";
 import { FundingOperationService } from "../../planner/operation-service.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
 import {
@@ -2939,6 +2940,10 @@ await test("planner preserves Add Funds exact amount and trade shortfall", async
   assert.equal(add.convertibleRaw, "100000000");
   assert.equal(add.convertibleUsd, "100");
   assert.equal(add.sourceOptions[0]?.minimumDestination?.raw, "100000000");
+  assert.deepEqual(add.sourceOptions[0]?.quoteAmountBinding, {
+    confirmedSourceAmount: { asset: POLYGON_PUSD, raw: "100000000" },
+    requestedDestinationAmount: { asset: POLYGON_PUSD, raw: "100000000" },
+  });
 
   const trade = await run(
     intent("trade_shortfall", "5000000", {
@@ -2958,6 +2963,10 @@ await test("planner preserves Add Funds exact amount and trade shortfall", async
   assert.equal(trade.convertibleRaw, "3000000");
   assert.equal(trade.convertibleUsd, "3");
   assert.equal(trade.sourceOptions[0]?.minimumDestination?.raw, "3000000");
+  assert.deepEqual(trade.sourceOptions[0]?.quoteAmountBinding, {
+    confirmedSourceAmount: { asset: POLYGON_PUSD, raw: "3000000" },
+    requestedDestinationAmount: { asset: POLYGON_PUSD, raw: "3000000" },
+  });
   assert.equal(
     store.rows.get(trade.liquidityProjectionId)?.plannerSnapshot.marketContext
       ?.requestedCollateralRaw,
@@ -3812,6 +3821,8 @@ await test("quote preserves a frozen composite preparation binding without repla
       },
     ],
   };
+  const compositeQuoteBinding =
+    fundingQuoteAmountBindingForCommitPlan(compositePlan);
   const projection = {
     ...liquidityProjectionFixture(),
     liquidityProjectionId: "projection_composite_quote_12345678",
@@ -3824,9 +3835,23 @@ await test("quote preserves a frozen composite preparation binding without repla
     shortfallUsd: "4.227649",
     convertibleUsd: "4.227649",
     mode: "prepare_first" as const,
-    sourceOptions: [compositeOption],
+    sourceOptions: [
+      {
+        ...compositeOption,
+        quoteAmountBinding: compositeQuoteBinding,
+      },
+    ],
     destinationOptions: [exactDestination.option],
   };
+  assert.deepEqual(compositeQuoteBinding, {
+    confirmedSourceAmount: null,
+    requestedDestinationAmount: {
+      asset: POLYGON_PUSD,
+      raw: "4227649",
+    },
+  });
+  const publishedQuoteBinding = projection.sourceOptions[0]?.quoteAmountBinding;
+  assert.ok(publishedQuoteBinding);
   await store.create({
     userId: USER_ID,
     request,
@@ -3890,11 +3915,7 @@ await test("quote preserves a frozen composite preparation binding without repla
     request: {
       liquidityProjectionId: projection.liquidityProjectionId,
       selectedSourceOptionId: compositeOption.sourceOptionId,
-      confirmedSourceAmount: null,
-      requestedDestinationAmount: {
-        asset: POLYGON_PUSD,
-        raw: "4227649",
-      },
+      ...publishedQuoteBinding,
     },
     policy,
     policyRevision: "policy_revision_12345678",

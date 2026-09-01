@@ -47,6 +47,7 @@ import {
   type FundingPlanningStore,
   type PlannedSourceOption,
 } from "./planning-types.js";
+import { fundingQuoteAmountBindingForCommitPlan } from "./quote-amount-binding.js";
 import { POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
 import { DIRECT_WITHDRAWAL_PROVIDER_ID } from "../execution/direct-withdrawal-transfer.js";
 import {
@@ -118,6 +119,23 @@ async function discoverFundingSources(
     dependencies.listSourceBlockers?.(input) ?? Promise.resolve([]),
   ]);
   return { sources, reasonCodes };
+}
+
+function publicSourceOption(
+  source: PlannedSourceOption,
+  recommendedSourceOptionId: string | null,
+): SourceOption {
+  return {
+    ...source.option,
+    ...(source.option.selectable
+      ? {
+          quoteAmountBinding: fundingQuoteAmountBindingForCommitPlan(
+            source.commitPlan,
+          ),
+        }
+      : {}),
+    recommended: source.option.sourceOptionId === recommendedSourceOptionId,
+  };
 }
 
 function preparationPurpose(
@@ -1051,11 +1069,9 @@ export class FundingPlanner {
       input.request.purpose,
     );
     const recommended = recommendedSource(sources);
-    const sourceOptions = sources.map((source) => ({
-      ...source.option,
-      recommended:
-        recommended?.option.sourceOptionId === source.option.sourceOptionId,
-    }));
+    const sourceOptions = sources.map((source) =>
+      publicSourceOption(source, recommended?.option.sourceOptionId ?? null),
+    );
     const applicableSourceBlockers = applicableSourceBlockingReasons(
       sources,
       sourceDiscovery.reasonCodes,
@@ -1307,11 +1323,9 @@ export class FundingPlanner {
       input.request.purpose,
     );
     const recommended = recommendedSource(sources);
-    const sourceOptions = sources.map((source) => ({
-      ...source.option,
-      recommended:
-        source.option.sourceOptionId === recommended?.option.sourceOptionId,
-    }));
+    const sourceOptions = sources.map((source) =>
+      publicSourceOption(source, recommended?.option.sourceOptionId ?? null),
+    );
     const expiresAt = new Date(
       Math.min(
         now.getTime() + withdrawalPolicy.ttl.quoteMs,
