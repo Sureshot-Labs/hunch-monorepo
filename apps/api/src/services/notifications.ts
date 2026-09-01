@@ -581,6 +581,7 @@ export function buildDepositNotification(input: {
   amountRaw: string;
   txHash?: string | null;
   idempotencyKey: string;
+  dedupeKey?: string | null;
 }): NotificationInput {
   const asset = formatDepositAsset(input.asset, input.caip2);
   const chain = formatDepositChain(input.caip2);
@@ -596,7 +597,8 @@ export function buildDepositNotification(input: {
   const body = chain
     ? `${assetLabel} deposit received on ${chain}`
     : `${assetLabel} deposit received`;
-  const dedupeKey = `deposit:${input.source}:${input.idempotencyKey}`;
+  const dedupeKey =
+    input.dedupeKey ?? `deposit:${input.source}:${input.idempotencyKey}`;
 
   return {
     userId: input.userId,
