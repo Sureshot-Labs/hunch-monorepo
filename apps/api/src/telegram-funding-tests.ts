@@ -268,13 +268,21 @@ const supersedeInput = {
     /active_receipt\.status in \('observed', 'routing'\)/u,
   );
   const receiveRetirement =
-    fake.statements.find((sql) =>
-      sql.startsWith("update funding_receive_sessions"),
-    ) ?? "";
+    fake.statements.find((sql) => sql.includes("receipt.status <> 'ready'")) ??
+    "";
   assert.match(
     receiveRetirement,
     /receipt\.status <> 'ready'/u,
     "settled receipts do not make a displayed Telegram address permanent",
+  );
+  const terminalLeaseRepair =
+    fake.statements.find((sql) =>
+      sql.includes("funding_context.latest_terminal_projection is not null"),
+    ) ?? "";
+  assert.match(
+    terminalLeaseRepair,
+    /receipt\.status in \('observed', 'routing'\)/u,
+    "a terminal card releases only a receipt-free address lease",
   );
   assert.doesNotMatch(
     fake.statements.find((sql) =>
@@ -301,8 +309,9 @@ const supersedeInput = {
     "a delayed older card must not supersede the newer active message",
   );
   assert.equal(
-    fake.statements.some((sql) => sql.startsWith("update funding_receive")),
+    fake.statements.some((sql) => sql.includes("receipt.status <> 'ready'")),
     false,
+    "an older message cannot retire a nonterminal receive session",
   );
 }
 
@@ -383,7 +392,7 @@ const supersedeInput = {
     "Buy attachment must preserve the earlier funding card as message owner",
   );
   assert.equal(
-    fake.statements.some((sql) => sql.startsWith("update funding_receive")),
+    fake.statements.some((sql) => sql.includes("receipt.status <> 'ready'")),
     false,
     "Buy attachment must not cancel or replace the active receive session",
   );

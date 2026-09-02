@@ -2146,6 +2146,314 @@ try {
     switchCleanup.release();
   }
 
+  // BOT9 production repair: an older projector could terminalize a Telegram
+  // card as unavailable while leaving its receipt-free receive session open.
+  // A fresh callback must retire that orphaned address lease and create a new
+  // context instead of rediscovering the terminal card forever.
+  const poisonedDestinationOptionId = `poisoned-destination-${suffix}`;
+  const poisonedBindingOptionId = `poisoned-binding-${suffix}`;
+  const poisonedInput = {
+    ...canonicalInput,
+    destinationOptionId: poisonedDestinationOptionId,
+    venueBindingOptionId: poisonedBindingOptionId,
+    venueBindingSnapshot: { bindingId: poisonedBindingOptionId },
+    methods: canonicalInput.methods.map((method) => ({
+      ...method,
+      ingress: {
+        ...method.ingress,
+        destinationOptionId: poisonedDestinationOptionId,
+      },
+    })),
+    policyRevision: `poisoned-policy-${suffix}`,
+    ownershipRevision: `poisoned-owner-${suffix}`,
+    now: new Date(now.getTime() + 1_018),
+  };
+  const poisonedReceive = await createOrReuseFundingReceiveSession(
+    pool,
+    poisonedInput,
+  );
+  const poisonedContext = await createOrReuseTelegramFundingSession(pool, {
+    userId,
+    telegramAccountId,
+    telegramUserId,
+    chatId: telegramUserId,
+    telegramMessageId: 3345,
+    receiveSessionId: poisonedReceive.snapshot.session.receiveSessionId,
+    idempotencyKey: `poisoned-open-${suffix}`,
+    expiresAt: new Date(poisonedReceive.snapshot.session.expiresAt),
+    now: new Date(now.getTime() + 1_019),
+  });
+  const unavailableProjection = {
+    fundingContextId: poisonedContext.context.id,
+    state: "unavailable",
+    terminal: true,
+    version: 1,
+  };
+  await pool.query(
+    `update telegram_funding_sessions
+        set progress_revision = 1,
+            progress_fingerprint = $2,
+            latest_progress_projection = $3::jsonb,
+            latest_terminal_revision = 1,
+            latest_terminal_projection = $3::jsonb,
+            updated_at = $4
+      where id = $1`,
+    [
+      poisonedContext.context.id,
+      hash("poisoned-terminal-projection"),
+      JSON.stringify(unavailableProjection),
+      new Date(now.getTime() + 1_020),
+    ],
+  );
+  let replacementContextId: string | null = null;
+  const replacementReceive = await createOrReuseFundingReceiveSession(
+    pool,
+    {
+      ...poisonedInput,
+      expiresAt: new Date(now.getTime() + 86_402_000),
+      observeUntil: new Date(now.getTime() + 8 * 86_400_000 + 2_000),
+      now: new Date(now.getTime() + 2_000),
+    },
+    async (client, persisted) => {
+      const replacement =
+        await createOrReuseTelegramFundingSessionInTransaction(client, {
+          userId,
+          telegramAccountId,
+          telegramUserId,
+          chatId: telegramUserId,
+          telegramMessageId: 3346,
+          receiveSessionId: persisted.snapshot.session.receiveSessionId,
+          idempotencyKey: `poisoned-replacement-${suffix}`,
+          expiresAt: new Date(persisted.snapshot.session.expiresAt),
+          now: new Date(now.getTime() + 2_000),
+        });
+      replacementContextId = replacement.context.id;
+    },
+    async (client) => {
+      assert.equal(
+        await prepareTelegramFundingSessionOpenInTransaction(client, {
+          userId,
+          telegramAccountId,
+          telegramUserId,
+          chatId: telegramUserId,
+          telegramMessageId: 3346,
+          venueId: "polymarket",
+          controllerWalletId,
+          destinationOptionId: poisonedDestinationOptionId,
+          venueBindingOptionId: poisonedBindingOptionId,
+          now: new Date(now.getTime() + 2_000),
+        }),
+        null,
+      );
+    },
+  );
+  assert.notEqual(
+    replacementReceive.snapshot.session.receiveSessionId,
+    poisonedReceive.snapshot.session.receiveSessionId,
+    "a fresh callback must not reuse the receive session behind a terminal card",
+  );
+  assert.ok(replacementContextId);
+  assert.notEqual(replacementContextId, poisonedContext.context.id);
+  const repairedPoisonedState = await pool.query<{
+    closed_at: Date | null;
+    status: string;
+  }>(
+    `select status, closed_at
+       from funding_receive_sessions
+      where id = $1`,
+    [poisonedReceive.snapshot.session.receiveSessionId],
+  );
+  assert.equal(repairedPoisonedState.rows[0]?.status, "expired");
+  assert.ok(repairedPoisonedState.rows[0]?.closed_at);
+  const poisonedCleanup = await pool.connect();
+  try {
+    await poisonedCleanup.query("begin");
+    await poisonedCleanup.query("set local session_replication_role = replica");
+    await poisonedCleanup.query(
+      `delete from telegram_funding_mutations
+       where funding_context_id in ($1::uuid, $2::uuid)`,
+      [poisonedContext.context.id, replacementContextId],
+    );
+    await poisonedCleanup.query(
+      `delete from telegram_funding_sessions
+       where id in ($1::uuid, $2::uuid)`,
+      [poisonedContext.context.id, replacementContextId],
+    );
+    await poisonedCleanup.query(
+      `delete from funding_receive_sessions
+       where id in ($1::uuid, $2::uuid)`,
+      [
+        poisonedReceive.snapshot.session.receiveSessionId,
+        replacementReceive.snapshot.session.receiveSessionId,
+      ],
+    );
+    await poisonedCleanup.query("commit");
+  } catch (error) {
+    await poisonedCleanup.query("rollback");
+    throw error;
+  } finally {
+    poisonedCleanup.release();
+  }
+
+  const protectedTerminalDestinationOptionId = `protected-terminal-destination-${suffix}`;
+  const protectedTerminalBindingOptionId = `protected-terminal-binding-${suffix}`;
+  const protectedTerminalVariantId = `protected-terminal-variant-${suffix}`;
+  const protectedTerminalInput = {
+    ...canonicalInput,
+    destinationOptionId: protectedTerminalDestinationOptionId,
+    venueBindingOptionId: protectedTerminalBindingOptionId,
+    venueBindingSnapshot: { bindingId: protectedTerminalBindingOptionId },
+    methods: canonicalInput.methods.map((method) => ({
+      ...method,
+      ingress: {
+        ...method.ingress,
+        destinationOptionId: protectedTerminalDestinationOptionId,
+      },
+    })),
+    observationVariants: canonicalInput.observationVariants.map(
+      (variant, index) => ({
+        ...variant,
+        variantId:
+          index === 0
+            ? protectedTerminalVariantId
+            : `protected-terminal-variant-${index}-${suffix}`,
+      }),
+    ),
+    policyRevision: `protected-terminal-policy-${suffix}`,
+    ownershipRevision: `protected-terminal-owner-${suffix}`,
+    now: new Date(now.getTime() + 2_010),
+  };
+  const protectedTerminalReceive = await createOrReuseFundingReceiveSession(
+    pool,
+    protectedTerminalInput,
+  );
+  const protectedTerminalContext = await createOrReuseTelegramFundingSession(
+    pool,
+    {
+      userId,
+      telegramAccountId,
+      telegramUserId,
+      chatId: telegramUserId,
+      telegramMessageId: 3350,
+      receiveSessionId:
+        protectedTerminalReceive.snapshot.session.receiveSessionId,
+      idempotencyKey: `protected-terminal-open-${suffix}`,
+      expiresAt: new Date(protectedTerminalReceive.snapshot.session.expiresAt),
+      now: new Date(now.getTime() + 2_011),
+    },
+  );
+  const protectedUnavailableProjection = {
+    fundingContextId: protectedTerminalContext.context.id,
+    state: "unavailable",
+    terminal: true,
+    version: 1,
+  };
+  await pool.query(
+    `update telegram_funding_sessions
+        set progress_revision = 1,
+            progress_fingerprint = $2,
+            latest_progress_projection = $3::jsonb,
+            latest_terminal_revision = 1,
+            latest_terminal_projection = $3::jsonb,
+            updated_at = $4
+      where id = $1`,
+    [
+      protectedTerminalContext.context.id,
+      hash("protected-terminal-projection"),
+      JSON.stringify(protectedUnavailableProjection),
+      new Date(now.getTime() + 2_012),
+    ],
+  );
+  await insertFundingReceiveReceipt(pool, {
+    receiveSessionId:
+      protectedTerminalReceive.snapshot.session.receiveSessionId,
+    userId,
+    variantId: protectedTerminalVariantId,
+    asset: pUsd,
+    destinationAddress,
+    rawAmount: "1000000",
+    observationRevision: `protected-terminal-observation-${suffix}`,
+    canonicalEvent: {
+      transactionHash: `0x${hash("protected-terminal-tx")}`,
+      eventIndex: "0",
+      ledgerHeight: "3350",
+      blockHash: `0x${hash("protected-terminal-block")}`,
+      sourceAddress: "0x4444444444444444444444444444444444444444",
+    },
+    observedAt: new Date(now.getTime() + 2_013),
+    status: "observed",
+    handling: "direct",
+    evidence: { test: "terminal_in_flight_lease_guard" },
+    now: new Date(now.getTime() + 2_013),
+  });
+  const protectedTerminalClient = await pool.connect();
+  try {
+    await protectedTerminalClient.query("begin");
+    assert.equal(
+      await prepareTelegramFundingSessionOpenInTransaction(
+        protectedTerminalClient,
+        {
+          userId,
+          telegramAccountId,
+          telegramUserId,
+          chatId: telegramUserId,
+          telegramMessageId: 3351,
+          venueId: "polymarket",
+          controllerWalletId,
+          destinationOptionId: protectedTerminalDestinationOptionId,
+          venueBindingOptionId: protectedTerminalBindingOptionId,
+          now: new Date(now.getTime() + 2_014),
+        },
+      ),
+      null,
+    );
+    const protectedReceiveState = await protectedTerminalClient.query<{
+      closed_at: Date | null;
+      status: string;
+    }>(
+      `select status, closed_at
+         from funding_receive_sessions
+        where id = $1`,
+      [protectedTerminalReceive.snapshot.session.receiveSessionId],
+    );
+    assert.deepEqual(
+      protectedReceiveState.rows[0],
+      { closed_at: null, status: "open" },
+      "a terminal presentation must not release a receive lease while money is observed/routing",
+    );
+    await protectedTerminalClient.query("rollback");
+  } catch (error) {
+    await protectedTerminalClient.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    protectedTerminalClient.release();
+  }
+  const protectedTerminalCleanup = await pool.connect();
+  try {
+    await protectedTerminalCleanup.query("begin");
+    await protectedTerminalCleanup.query(
+      "set local session_replication_role = replica",
+    );
+    await protectedTerminalCleanup.query(
+      "delete from funding_receive_receipts where receive_session_id = $1",
+      [protectedTerminalReceive.snapshot.session.receiveSessionId],
+    );
+    await protectedTerminalCleanup.query(
+      "delete from telegram_funding_sessions where id = $1",
+      [protectedTerminalContext.context.id],
+    );
+    await protectedTerminalCleanup.query(
+      "delete from funding_receive_sessions where id = $1",
+      [protectedTerminalReceive.snapshot.session.receiveSessionId],
+    );
+    await protectedTerminalCleanup.query("commit");
+  } catch (error) {
+    await protectedTerminalCleanup.query("rollback");
+    throw error;
+  } finally {
+    protectedTerminalCleanup.release();
+  }
+
   const buyAttachmentClient = await pool.connect();
   try {
     await buyAttachmentClient.query("begin");

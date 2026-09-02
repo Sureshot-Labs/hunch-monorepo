@@ -1052,6 +1052,68 @@ async function activeTelegramFundingHasLiveRouting(
   return rows[0]?.live_routing === true;
 }
 
+async function releaseTerminalTelegramReceiveLease(
+  client: Pick<PoolClient, "query">,
+  input: ActiveTelegramFundingOpenScope &
+    Readonly<{
+      destinationOptionId: string;
+      venueBindingOptionId: string;
+    }>,
+): Promise<void> {
+  // A terminal Telegram card cannot remain the owner of a reusable receive
+  // address. Older projector versions could terminalize the card while leaving
+  // its receipt-free receive session open. Without repairing that split state,
+  // the receive repository reuses the old session and the Telegram layer finds
+  // the old card again, producing an endless "Deposit already active" loop.
+  //
+  // Keep money-bearing sessions untouched: observed/routing receipts still own
+  // the receive lease and must be resumed instead of superseded. Expiring only
+  // the address lease preserves late-receipt observation through observe_until.
+  await client.query(
+    `
+      update funding_receive_sessions receive_session
+      set status = 'expired',
+          closed_at = $7,
+          updated_at = $7,
+          version = version + 1
+      where receive_session.user_id = $1::uuid
+        and receive_session.owner_channel = 'telegram'
+        and receive_session.venue_id = $4
+        and receive_session.destination_option_id = $5
+        and receive_session.venue_binding_option_id = $6
+        and receive_session.status = 'open'
+        and exists (
+          select 1
+          from telegram_funding_sessions funding_context
+          where funding_context.receive_session_id = receive_session.id
+            and funding_context.user_id = $1::uuid
+            and funding_context.telegram_user_id = $2
+            and funding_context.chat_id = $3
+            and funding_context.receive_owner_channel = 'telegram'
+            and (
+              funding_context.cancelled_at is not null
+              or funding_context.latest_terminal_projection is not null
+            )
+        )
+        and not exists (
+          select 1
+          from funding_receive_receipts receipt
+          where receipt.receive_session_id = receive_session.id
+            and receipt.status in ('observed', 'routing')
+        )
+    `,
+    [
+      input.userId,
+      input.telegramUserId,
+      input.chatId,
+      input.venueId,
+      input.destinationOptionId,
+      input.venueBindingOptionId,
+      input.now,
+    ],
+  );
+}
+
 export async function prepareTelegramFundingSessionOpenInTransaction(
   client: PoolClient,
   input: ActiveTelegramFundingOpenScope &
@@ -1087,6 +1149,7 @@ export async function prepareTelegramFundingSessionOpenInTransaction(
       );
     }
   }
+  await releaseTerminalTelegramReceiveLease(client, input);
   const active = await lockActiveTelegramFundingOpenContext(client, input);
   if (!active) return null;
   if (
