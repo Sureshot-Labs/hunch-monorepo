@@ -318,6 +318,19 @@ try {
   assert.deepEqual(retainedPersistence.rows[0], {
     receipt_matches: true,
   });
+  const retainedTelegramSession = await createOrReuseFundingReceiveSession(
+    pool,
+    {
+      ...retainedInput,
+      ownerChannel: "telegram",
+      now: new Date(NOW.getTime() + 2_000),
+    },
+  );
+  assert.notEqual(
+    retainedTelegramSession.snapshot.session.receiveSessionId,
+    retainedSession.snapshot.session.receiveSessionId,
+    "a settled receipt must not retain an exclusive receive channel lease",
+  );
 
   genericOptionUserId = await insertUser();
   const genericInput = sessionInput(genericOptionUserId);
@@ -401,8 +414,36 @@ try {
     variantId: "ingress_variant_generic_alternate_12345678",
     asset: alternateAsset,
   } as const;
+  await insertFundingReceiveReceipt(pool, {
+    receiveSessionId: firstGeneric.snapshot.session.receiveSessionId,
+    userId: genericOptionUserId,
+    variantId: originalVariant.variantId,
+    asset: genericInput.destinationAsset,
+    destinationAddress: originalTarget.destinationAddress,
+    rawAmount: "1",
+    observationRevision: "generic_ready_observation_12345678",
+    observedAt: new Date(NOW.getTime() + 500),
+    status: "ready",
+    handling: "direct",
+    evidence: { test: "generic_ready_scope_replacement" },
+    now: new Date(NOW.getTime() + 500),
+  });
+  const settledSessionClosedAt = new Date(NOW.getTime() + 600);
+  await pool.query(
+    `
+      update funding_receive_sessions
+      set status = 'expired',
+          closed_at = $2,
+          expires_at = $2,
+          updated_at = $2,
+          version = version + 1
+      where id = $1
+    `,
+    [firstGeneric.snapshot.session.receiveSessionId, settledSessionClosedAt],
+  );
   const alternateGeneric = await createOrReuseFundingReceiveSession(pool, {
     ...genericInput,
+    now: settledSessionClosedAt,
     receiveTargets: [alternateTarget],
     observationVariants: [alternateVariant],
     selectedReceiveTargetId: alternateTarget.receiveTargetId,
@@ -416,7 +457,7 @@ try {
   assert.notEqual(
     alternateGeneric.snapshot.session.receiveSessionId,
     firstGeneric.snapshot.session.receiveSessionId,
-    "a pre-receipt change of exact asset scope supersedes the unspent session",
+    "an expired session with a settled receipt must not block a new exact asset scope",
   );
   assert.equal(
     await updateFundingReceiveSessionObservation(pool, {

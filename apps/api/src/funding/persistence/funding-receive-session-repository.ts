@@ -330,19 +330,20 @@ type FundingReceiveOpenIdempotencySessionRow = ReceiveSessionRow &
   }>;
 
 /**
- * A receive session can be presentation-expired while an observed receipt is
- * still inside its observer grace window. This extra fact is selection-only:
+ * A receive session can be presentation-expired while an unresolved receipt
+ * is still inside its observer grace window. This extra fact is selection-only:
  * it keeps a second token choice from concealing money that is still being
- * reconciled, without changing the established expiry/observer lifecycle.
+ * reconciled, without turning a settled receipt into a 7-day deposit lock.
+ * Closed sessions remain observable independently of this selection guard.
  */
 type FundingReceiveSelectionSessionRow = ReceiveSessionRow &
   Readonly<{
-    selection_has_observed_receipt: boolean;
+    selection_has_unresolved_receipt: boolean;
   }>;
 
 type FundingReceiveSelectionState = Pick<
   FundingReceiveSelectionSessionRow,
-  "status" | "expires_at" | "observe_until" | "selection_has_observed_receipt"
+  "status" | "expires_at" | "observe_until" | "selection_has_unresolved_receipt"
 >;
 
 function assertFundingReceiveOpenIdempotency(
@@ -469,15 +470,15 @@ async function attachFundingReceiveOpenIdempotency(
 function receiveSessionHasCrossedMoneyBoundary(
   session: Pick<
     FundingReceiveSelectionState,
-    "status" | "selection_has_observed_receipt"
+    "status" | "selection_has_unresolved_receipt"
   >,
-  includeObservedReceipt: boolean,
+  includeUnresolvedReceipt: boolean,
 ): boolean {
   return (
     session.status === "processing" ||
     session.status === "review_required" ||
     session.status === "recovery_required" ||
-    (includeObservedReceipt && session.selection_has_observed_receipt)
+    (includeUnresolvedReceipt && session.selection_has_unresolved_receipt)
   );
 }
 
@@ -528,7 +529,13 @@ async function lockCurrentFundingReceiveSessions(
                select 1
                from funding_receive_receipts receipt
                where receipt.receive_session_id = funding_receive_sessions.id
-             ) as selection_has_observed_receipt
+                 and receipt.status in (
+                   'observed',
+                   'routing',
+                   'review_required',
+                   'recovery_required'
+                 )
+             ) as selection_has_unresolved_receipt
       from funding_receive_sessions
       where user_id = $1
         and destination_option_id = $2
@@ -543,6 +550,12 @@ async function lockCurrentFundingReceiveSessions(
               select 1
               from funding_receive_receipts receipt
               where receipt.receive_session_id = funding_receive_sessions.id
+                and receipt.status in (
+                  'observed',
+                  'routing',
+                  'review_required',
+                  'recovery_required'
+                )
             )
           )
         )
@@ -804,13 +817,19 @@ export async function createOrReuseFundingReceiveSession(
               select 1
               from funding_receive_receipts receipt
               where receipt.receive_session_id = receive_session.id
+                and receipt.status in (
+                  'observed',
+                  'routing',
+                  'review_required',
+                  'recovery_required'
+                )
             )
         `,
         [supersededSession.id, input.now],
       );
       if (cancelled.rowCount !== 1) {
-        // Receipt observation can race with a new open. Fail closed instead
-        // of replacing a session after money has become attributable to it.
+        // An unresolved receipt can race with a new open. Fail closed instead
+        // of replacing a session while money is still being handled.
         throw new FundingReceiveSessionChannelConflictError();
       }
     }
