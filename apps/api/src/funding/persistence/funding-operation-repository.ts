@@ -2174,6 +2174,7 @@ export async function wakeFundingReconciliationInTransaction(
 export async function claimFundingReconciliationJobsInTransaction(
   client: Pick<PoolClient, "query">,
   input: Readonly<{
+    excludeOperationIds?: readonly string[];
     leaseOwner: string;
     limit: number;
     leaseSeconds: number;
@@ -2189,10 +2190,10 @@ export async function claimFundingReconciliationJobsInTransaction(
         select id
         from funding_reconciliation_jobs
         where (
-          status = 'scheduled' and due_at <= $1
-        ) or (
-          status = 'leased' and lease_until <= $1
+          (status = 'scheduled' and due_at <= $1)
+          or (status = 'leased' and lease_until <= $1)
         )
+          and operation_id <> all($5::uuid[])
         order by priority desc, due_at asc, id asc
         for update skip locked
         limit $2
@@ -2214,7 +2215,13 @@ export async function claimFundingReconciliationJobsInTransaction(
         job.lease_until,
         job.attempt_count
     `,
-    [now, limit, input.leaseOwner, leaseSeconds],
+    [
+      now,
+      limit,
+      input.leaseOwner,
+      leaseSeconds,
+      input.excludeOperationIds ?? [],
+    ],
   );
   return rows.map(mapLease);
 }

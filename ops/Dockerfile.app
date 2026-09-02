@@ -1,4 +1,4 @@
-ARG BUN_VERSION=1.3.14
+ARG BUN_VERSION=1.4.0
 
 FROM node:24-bookworm-slim AS builder
 
@@ -39,7 +39,7 @@ FROM oven/bun:${BUN_VERSION} AS bun-runtime
 
 FROM node:24-bookworm-slim AS runtime-base
 
-ARG BUN_VERSION=1.3.14
+ARG BUN_VERSION
 WORKDIR /app
 ENV NODE_ENV=production
 

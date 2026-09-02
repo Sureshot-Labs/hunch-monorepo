@@ -9,6 +9,7 @@ import { ethers } from "ethers";
 
 import "../../../integration-test-database-guard.js";
 import { pool } from "../../../db.js";
+import { POLYMARKET_HANDOFF_CHAIN_ATTRIBUTION_WINDOW_MS } from "../../execution/polymarket-deposit-wallet-handoff.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
 import {
   fetchFundingOperationStepForUser,
@@ -73,6 +74,11 @@ try {
   await client.query("begin");
   const userId = await insertUser(client, "owner");
   const otherUserId = await insertUser(client, "other");
+  const identityUserId = await insertUser(client, "identity-fence");
+  const expiredIdentityUserId = await insertUser(
+    client,
+    "expired-identity-fence",
+  );
   const sourceLocation = {
     kind: "wallet",
     locationId: opaque("location"),
@@ -828,11 +834,14 @@ try {
       })),
     };
   };
-  const commitIncidentPlan = async (label: string) => {
+  const commitIncidentPlan = async (
+    label: string,
+    operationUserId = userId,
+  ) => {
     const incident = incidentPlan(label);
     const incidentConsent = opaque("consent");
     const incidentQuote = await createFundingQuoteInTransaction(client, {
-      userId,
+      userId: operationUserId,
       discoveryProjectionId: opaque("projection"),
       selectedSourceOptionSnapshot: incident.operation.sourceSnapshot ?? {},
       marketContextSnapshot: null,
@@ -846,7 +855,7 @@ try {
       expiresAt: new Date(Date.now() + 60_000),
     });
     const incidentCommit = await commitFundingOperationInTransaction(client, {
-      userId,
+      userId: operationUserId,
       quoteId: incidentQuote.id,
       consentToken: incidentConsent,
       idempotencyKey: opaque("idempotency"),
@@ -872,6 +881,482 @@ try {
     assert.ok(second);
     return { operation: incidentCommit.operation, first, second };
   };
+
+  const revertedHandoff = await commitIncidentPlan(
+    "handoff-revert-progression",
+  );
+  const revertedHandoffAttempt =
+    await startFundingStepAttemptForUserInTransaction(client, {
+      userId,
+      operationId: revertedHandoff.operation.id,
+      stepId: revertedHandoff.first.id,
+      canonicalActionFingerprint: revertedHandoff.first.action_fingerprint,
+      executorId: revertedHandoff.first.executor_id,
+    });
+  await finishFundingStepAttemptForUserInTransaction(client, {
+    userId,
+    operationId: revertedHandoff.operation.id,
+    stepId: revertedHandoff.first.id,
+    attemptId: revertedHandoffAttempt.attempt.id,
+    outcome: "submitted",
+    broadcastMayHaveOccurred: true,
+    referenceKind: "external_handoff",
+    receiptRefCiphertext: "ciphertext:handoff-revert-progression",
+    receiptRefLookupHmac: hash("handoff-revert-progression"),
+    lookupKeyVersion: 1,
+    actualCosts: {},
+  });
+  const confirmedRevertedHandoff =
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: revertedHandoff.operation.id,
+      stepId: revertedHandoff.first.id,
+      attemptId: revertedHandoffAttempt.attempt.id,
+      networkId: ASSET.networkId,
+      receipt: {
+        status: "confirmed",
+        actionMatch: true,
+        ledgerHeight: "995",
+        blockHash: `0x${"21".repeat(32)}`,
+        canonical: true,
+        failureCode: "transaction_reverted",
+        evidence: {
+          confirmationPolicy: 12,
+          confirmations: 1,
+          failureFinalized: false,
+          transactionHash: `0x${"20".repeat(32)}`,
+          transactionHashSource: "provider",
+        },
+      },
+    });
+  assert.equal(
+    confirmedRevertedHandoff.status,
+    "confirmed",
+    "a not-yet-final reverted handoff must remain under canonical failure watch",
+  );
+  const finalizedRevertedHandoff =
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: revertedHandoff.operation.id,
+      stepId: revertedHandoff.first.id,
+      attemptId: revertedHandoffAttempt.attempt.id,
+      networkId: ASSET.networkId,
+      receipt: {
+        ...confirmedRevertedHandoff,
+        status: "failed",
+        evidence: {
+          ...confirmedRevertedHandoff.evidence,
+          confirmations: 12,
+          failureFinalized: true,
+        },
+      },
+    });
+  assert.equal(finalizedRevertedHandoff.status, "failed");
+  const revertedHandoffStep = await client.query<{ state: string }>(
+    `select state
+       from funding_operation_steps
+      where id = $1`,
+    [revertedHandoff.first.id],
+  );
+  assert.equal(
+    revertedHandoffStep.rows[0]?.state,
+    "action_required",
+    "only a 12-confirmation canonical failure may authorize another handoff attempt",
+  );
+
+  const expiredIdentityAttemptStartedAt = new Date(
+    Date.now() - POLYMARKET_HANDOFF_CHAIN_ATTRIBUTION_WINDOW_MS - 5_000,
+  );
+  const freshIdentityAttemptStartedAt = new Date();
+  const expiredIdentity = await commitIncidentPlan(
+    "chain-identity-expired",
+    expiredIdentityUserId,
+  );
+  const expiredAttempt = await startFundingStepAttemptForUserInTransaction(
+    client,
+    {
+      userId: expiredIdentityUserId,
+      operationId: expiredIdentity.operation.id,
+      stepId: expiredIdentity.first.id,
+      canonicalActionFingerprint: expiredIdentity.first.action_fingerprint,
+      executorId: expiredIdentity.first.executor_id,
+      now: expiredIdentityAttemptStartedAt,
+    },
+  );
+  await finishFundingStepAttemptForUserInTransaction(client, {
+    userId: expiredIdentityUserId,
+    operationId: expiredIdentity.operation.id,
+    stepId: expiredIdentity.first.id,
+    attemptId: expiredAttempt.attempt.id,
+    outcome: "submitted",
+    broadcastMayHaveOccurred: true,
+    referenceKind: "external_handoff",
+    receiptRefCiphertext: "ciphertext:chain-identity-expired",
+    receiptRefLookupHmac: hash("chain-identity-expired"),
+    lookupKeyVersion: 1,
+    actualCosts: {},
+  });
+  const freshIdentity = await commitIncidentPlan(
+    "chain-identity-fresh",
+    expiredIdentityUserId,
+  );
+  const freshAttempt = await startFundingStepAttemptForUserInTransaction(
+    client,
+    {
+      userId: expiredIdentityUserId,
+      operationId: freshIdentity.operation.id,
+      stepId: freshIdentity.first.id,
+      canonicalActionFingerprint: freshIdentity.first.action_fingerprint,
+      executorId: freshIdentity.first.executor_id,
+      now: freshIdentityAttemptStartedAt,
+    },
+  );
+  await finishFundingStepAttemptForUserInTransaction(client, {
+    userId: expiredIdentityUserId,
+    operationId: freshIdentity.operation.id,
+    stepId: freshIdentity.first.id,
+    attemptId: freshAttempt.attempt.id,
+    outcome: "submitted",
+    broadcastMayHaveOccurred: true,
+    referenceKind: "external_handoff",
+    receiptRefCiphertext: "ciphertext:chain-identity-fresh",
+    receiptRefLookupHmac: hash("chain-identity-fresh"),
+    lookupKeyVersion: 1,
+    actualCosts: {},
+  });
+  const freshPhysicalTransactionHash = `0x${"12".repeat(32)}`;
+  const freshPhysicalReceipt =
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: freshIdentity.operation.id,
+      stepId: freshIdentity.first.id,
+      attemptId: freshAttempt.attempt.id,
+      networkId: ASSET.networkId,
+      receipt: {
+        status: "finalized",
+        actionMatch: true,
+        ledgerHeight: "1000",
+        blockHash: `0x${"13".repeat(32)}`,
+        canonical: true,
+        failureCode: null,
+        evidence: {
+          transactionHash: freshPhysicalTransactionHash,
+          transactionHashSource: "chain_scan",
+          chainTransactionBlockTimestampMs:
+            (Math.floor(freshIdentityAttemptStartedAt.getTime() / 1_000) + 2) *
+            1_000,
+          handoffEventIndex: "2",
+        },
+      },
+    });
+  assert.equal(
+    freshPhysicalReceipt.status,
+    "finalized",
+    "an unresolved historical attempt outside the immutable attribution window must not fence a fresh chain-only transfer forever",
+  );
+
+  const chainIdentityFirst = await commitIncidentPlan(
+    "chain-identity-first",
+    identityUserId,
+  );
+  const chainIdentitySecond = await commitIncidentPlan(
+    "chain-identity-second",
+    identityUserId,
+  );
+  const identityStartedAt = new Date();
+  const firstIdentityAttempt =
+    await startFundingStepAttemptForUserInTransaction(client, {
+      userId: identityUserId,
+      operationId: chainIdentityFirst.operation.id,
+      stepId: chainIdentityFirst.first.id,
+      canonicalActionFingerprint: chainIdentityFirst.first.action_fingerprint,
+      executorId: chainIdentityFirst.first.executor_id,
+      now: identityStartedAt,
+    });
+  const secondIdentityAttempt =
+    await startFundingStepAttemptForUserInTransaction(client, {
+      userId: identityUserId,
+      operationId: chainIdentitySecond.operation.id,
+      stepId: chainIdentitySecond.first.id,
+      canonicalActionFingerprint: chainIdentitySecond.first.action_fingerprint,
+      executorId: chainIdentitySecond.first.executor_id,
+      now: identityStartedAt,
+    });
+  await finishFundingStepAttemptForUserInTransaction(client, {
+    userId: identityUserId,
+    operationId: chainIdentitySecond.operation.id,
+    stepId: chainIdentitySecond.first.id,
+    attemptId: secondIdentityAttempt.attempt.id,
+    outcome: "submitted",
+    broadcastMayHaveOccurred: true,
+    referenceKind: "external_handoff",
+    receiptRefCiphertext: "ciphertext:chain-identity-second",
+    receiptRefLookupHmac: hash("chain-identity-second"),
+    lookupKeyVersion: 1,
+    actualCosts: {},
+  });
+  const physicalTransactionHash = `0x${"34".repeat(32)}`;
+  const physicalEventIndex = "7";
+  const physicalBlockTimestampMs =
+    (Math.floor(identityStartedAt.getTime() / 1_000) + 2) * 1_000;
+  const chainScannedReceipt = {
+    status: "finalized" as const,
+    actionMatch: true,
+    ledgerHeight: "1001",
+    blockHash: `0x${"56".repeat(32)}`,
+    canonical: true,
+    failureCode: null,
+    evidence: {
+      transactionHash: physicalTransactionHash,
+      transactionHashSource: "chain_scan",
+      chainTransactionBlockTimestampMs: physicalBlockTimestampMs,
+      handoffEventIndex: physicalEventIndex,
+    },
+  };
+  const secondAmbiguousReceipt =
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: chainIdentitySecond.operation.id,
+      stepId: chainIdentitySecond.first.id,
+      attemptId: secondIdentityAttempt.attempt.id,
+      networkId: ASSET.networkId,
+      receipt: chainScannedReceipt,
+    });
+  assert.equal(secondAmbiguousReceipt.status, "pending");
+  assert.equal(secondAmbiguousReceipt.failureCode, null);
+  assert.equal(
+    secondAmbiguousReceipt.evidence.externalHandoffCandidateAmbiguous,
+    true,
+  );
+  assert.equal(
+    secondAmbiguousReceipt.evidence.competingOperationId,
+    chainIdentityFirst.operation.id,
+    "an attempt still in the broadcast/report gap must fence an indistinguishable chain-only match",
+  );
+
+  await finishFundingStepAttemptForUserInTransaction(client, {
+    userId: identityUserId,
+    operationId: chainIdentityFirst.operation.id,
+    stepId: chainIdentityFirst.first.id,
+    attemptId: firstIdentityAttempt.attempt.id,
+    outcome: "ambiguous",
+    broadcastMayHaveOccurred: true,
+    referenceKind: "external_handoff",
+    receiptRefCiphertext: "ciphertext:chain-identity-first",
+    receiptRefLookupHmac: hash("chain-identity-first"),
+    lookupKeyVersion: 1,
+    actualCosts: {},
+  });
+  const firstAmbiguousReceipt =
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: chainIdentityFirst.operation.id,
+      stepId: chainIdentityFirst.first.id,
+      attemptId: firstIdentityAttempt.attempt.id,
+      networkId: ASSET.networkId,
+      receipt: chainScannedReceipt,
+    });
+  assert.equal(firstAmbiguousReceipt.status, "pending");
+  assert.equal(firstAmbiguousReceipt.failureCode, null);
+  assert.equal(
+    firstAmbiguousReceipt.evidence.externalHandoffCandidateAmbiguous,
+    true,
+  );
+
+  const chainIdentityFailure = await commitIncidentPlan(
+    "chain-identity-provider-failure",
+    identityUserId,
+  );
+  const failureIdentityAttempt =
+    await startFundingStepAttemptForUserInTransaction(client, {
+      userId: identityUserId,
+      operationId: chainIdentityFailure.operation.id,
+      stepId: chainIdentityFailure.first.id,
+      canonicalActionFingerprint: chainIdentityFailure.first.action_fingerprint,
+      executorId: chainIdentityFailure.first.executor_id,
+      now: identityStartedAt,
+    });
+  await finishFundingStepAttemptForUserInTransaction(client, {
+    userId: identityUserId,
+    operationId: chainIdentityFailure.operation.id,
+    stepId: chainIdentityFailure.first.id,
+    attemptId: failureIdentityAttempt.attempt.id,
+    outcome: "submitted",
+    broadcastMayHaveOccurred: true,
+    referenceKind: "external_handoff",
+    receiptRefCiphertext: "ciphertext:chain-identity-provider-failure",
+    receiptRefLookupHmac: hash("chain-identity-provider-failure"),
+    lookupKeyVersion: 1,
+    actualCosts: {},
+  });
+  const provisionalFailureReceipt =
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: chainIdentityFailure.operation.id,
+      stepId: chainIdentityFailure.first.id,
+      attemptId: failureIdentityAttempt.attempt.id,
+      networkId: ASSET.networkId,
+      receipt: chainScannedReceipt,
+    });
+  assert.equal(provisionalFailureReceipt.status, "pending");
+  assert.equal(provisionalFailureReceipt.failureCode, null);
+  const authoritativeProviderFailure =
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: chainIdentityFailure.operation.id,
+      stepId: chainIdentityFailure.first.id,
+      attemptId: failureIdentityAttempt.attempt.id,
+      networkId: ASSET.networkId,
+      receipt: {
+        status: "failed",
+        actionMatch: true,
+        ledgerHeight: null,
+        blockHash: null,
+        canonical: true,
+        failureCode: "polymarket_relayer_transaction_failed",
+        evidence: {
+          failureFinalized: true,
+          providerReferenceMatches: true,
+          relayerState: "STATE_FAILED",
+        },
+      },
+    });
+  assert.equal(authoritativeProviderFailure.status, "failed");
+  const retryableProviderFailureStep = await client.query<{ state: string }>(
+    `select state
+       from funding_operation_steps
+      where id = $1`,
+    [chainIdentityFailure.first.id],
+  );
+  assert.equal(
+    retryableProviderFailureStep.rows[0]?.state,
+    "action_required",
+    "an authoritative provider failure must release a provisional chain-scan ambiguity",
+  );
+  const invalidatedProviderFailure =
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: chainIdentityFailure.operation.id,
+      stepId: chainIdentityFailure.first.id,
+      attemptId: failureIdentityAttempt.attempt.id,
+      networkId: ASSET.networkId,
+      receipt: {
+        status: "reorged",
+        actionMatch: true,
+        ledgerHeight: null,
+        blockHash: null,
+        canonical: false,
+        failureCode: "polymarket_relayer_terminal_failure_invalidated",
+        evidence: {
+          transactionHash: `0x${"78".repeat(32)}`,
+          transactionHashSource: "provider",
+          previousFailureCode: "polymarket_relayer_transaction_failed",
+        },
+      },
+    });
+  assert.equal(invalidatedProviderFailure.status, "reorged");
+  const invalidatedProviderFailureStep = await client.query<{
+    state: string;
+  }>(
+    `select state
+       from funding_operation_steps
+      where id = $1`,
+    [chainIdentityFailure.first.id],
+  );
+  assert.equal(
+    invalidatedProviderFailureStep.rows[0]?.state,
+    "recovery_required",
+    "a late exact provider hash must revoke a prior retry authorization durably",
+  );
+  const repeatedInvalidatedProviderFailure =
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: chainIdentityFailure.operation.id,
+      stepId: chainIdentityFailure.first.id,
+      attemptId: failureIdentityAttempt.attempt.id,
+      networkId: ASSET.networkId,
+      receipt: {
+        ...invalidatedProviderFailure,
+        evidence: { ...invalidatedProviderFailure.evidence },
+      },
+    });
+  assert.equal(
+    repeatedInvalidatedProviderFailure.status,
+    "reorged",
+    "repeated reorg evidence must be an idempotent read",
+  );
+
+  const providerBoundReceipt = {
+    ...chainScannedReceipt,
+    evidence: {
+      ...chainScannedReceipt.evidence,
+      transactionHashSource: "provider",
+    },
+  };
+  const providerResolvedFirst =
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: chainIdentityFirst.operation.id,
+      stepId: chainIdentityFirst.first.id,
+      attemptId: firstIdentityAttempt.attempt.id,
+      networkId: ASSET.networkId,
+      receipt: providerBoundReceipt,
+    });
+  assert.equal(providerResolvedFirst.status, "finalized");
+  const duplicateProviderReceipt =
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: chainIdentitySecond.operation.id,
+      stepId: chainIdentitySecond.first.id,
+      attemptId: secondIdentityAttempt.attempt.id,
+      networkId: ASSET.networkId,
+      receipt: providerBoundReceipt,
+    });
+  assert.equal(duplicateProviderReceipt.status, "mismatch");
+  assert.equal(
+    duplicateProviderReceipt.failureCode,
+    "external_handoff_transfer_already_allocated",
+  );
+  assert.equal(
+    duplicateProviderReceipt.evidence.conflictingOperationId,
+    chainIdentityFirst.operation.id,
+    "one exact on-chain Transfer event must never finalize two funding operations",
+  );
+  const repeatedDuplicateProviderReceipt =
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: chainIdentitySecond.operation.id,
+      stepId: chainIdentitySecond.first.id,
+      attemptId: secondIdentityAttempt.attempt.id,
+      networkId: ASSET.networkId,
+      receipt: providerBoundReceipt,
+    });
+  assert.equal(
+    repeatedDuplicateProviderReceipt.status,
+    "mismatch",
+    "repeated physical-identity conflict polling must be an idempotent read",
+  );
+  const reboundFinalizedReceipt =
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: chainIdentityFirst.operation.id,
+      stepId: chainIdentityFirst.first.id,
+      attemptId: firstIdentityAttempt.attempt.id,
+      networkId: ASSET.networkId,
+      receipt: {
+        status: "reorged",
+        actionMatch: true,
+        ledgerHeight: providerResolvedFirst.ledgerHeight,
+        blockHash: providerResolvedFirst.blockHash,
+        canonical: false,
+        failureCode: "polymarket_relayer_transaction_hash_changed",
+        evidence: {
+          previousTransactionHash: physicalTransactionHash,
+          transactionHash: `0x${"79".repeat(32)}`,
+          transactionHashSource: "provider",
+        },
+      },
+    });
+  assert.equal(reboundFinalizedReceipt.status, "reorged");
+  assert.equal(reboundFinalizedReceipt.actionMatch, true);
+  const reboundFinalizedStep = await client.query<{ state: string }>(
+    `select state
+       from funding_operation_steps
+      where id = $1`,
+    [chainIdentityFirst.first.id],
+  );
+  assert.equal(
+    reboundFinalizedStep.rows[0]?.state,
+    "recovery_required",
+    "a provider replacement after finalized evidence must persist as recovery instead of violating receipt constraints",
+  );
 
   const stoppedSiblingIncident = await commitIncidentPlan("stopped-sibling");
   const stoppedAttempt = await startFundingStepAttemptForUserInTransaction(
@@ -1014,7 +1499,11 @@ try {
     blockHash: `0x${"ef".repeat(32)}`,
     canonical: true,
     failureCode: null,
-    evidence: { transactionHash: `0x${"ab".repeat(32)}` },
+    evidence: {
+      transactionHash: `0x${"ab".repeat(32)}`,
+      transactionHashSource: "provider",
+      handoffEventIndex: "0",
+    },
   };
   await applyFundingStepReceiptEvidenceInTransaction(client, {
     operationId: terminalReceiptIncident.operation.id,

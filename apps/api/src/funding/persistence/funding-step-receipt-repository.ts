@@ -7,6 +7,7 @@ import {
   withRelayClientSourceDebitPostcondition,
 } from "../execution/relay-client-source-debit.js";
 import { directWithdrawalActionValidation } from "../execution/direct-withdrawal-transfer.js";
+import { POLYMARKET_HANDOFF_CHAIN_ATTRIBUTION_WINDOW_MS } from "../execution/polymarket-deposit-wallet-handoff.js";
 
 import { isReceiptBearingFundingActionKind } from "../domain/action-kinds.js";
 import { isRawAmount } from "../domain/raw-amount.js";
@@ -34,6 +35,7 @@ export type FundingStepReceiptTarget = Readonly<{
   stepId: string;
   segmentId: string | null;
   attemptId: string;
+  attemptStartedAt: Date;
   stepKind: "transaction" | "external_handoff" | "venue_preparation";
   payerRequirement:
     | "none"
@@ -147,6 +149,7 @@ export async function listFundingStepReceiptTargets(
     step_id: string;
     segment_id: string | null;
     attempt_id: string;
+    attempt_started_at: Date;
     step_kind: FundingStepReceiptTarget["stepKind"];
     executor_id: string;
     payer_requirement: FundingStepReceiptTarget["payerRequirement"];
@@ -180,6 +183,7 @@ export async function listFundingStepReceiptTargets(
         step.id as step_id,
         step.segment_id,
         attempt.id as attempt_id,
+        attempt.started_at as attempt_started_at,
         step.step_kind,
         step.executor_id,
         step.payer_requirement,
@@ -269,8 +273,7 @@ export async function listFundingStepReceiptTargets(
           -- reorg watch. Keep polling it regardless of the re-armed step state
           -- until that fence expires.
           or (
-            step.executor_id = 'telegram_relay_evm_funding_v1'
-            and receipt.status = 'failed'
+            receipt.status = 'failed'
             and receipt.canonical
             and receipt.evidence ->> 'failureFinalized' = 'true'
             and receipt.finalized_at >= $2::timestamptz - interval '15 minutes'
@@ -343,6 +346,7 @@ export async function listFundingStepReceiptTargets(
       stepId: row.step_id,
       segmentId: row.segment_id,
       attemptId: row.attempt_id,
+      attemptStartedAt: row.attempt_started_at,
       stepKind: row.step_kind,
       payerRequirement: row.payer_requirement,
       stepState: row.step_state,
@@ -380,7 +384,14 @@ export function shouldIgnoreFundingStepReceiptUpdate(
   previous: FundingStepReceiptStatus,
   incoming: FundingStepReceiptEvidence,
 ): boolean {
-  if (previous === incoming.status) return false;
+  // Failed, mismatched, and reorged evidence is immutable in PostgreSQL except
+  // for the explicitly allowed correction/reorg transitions below. Treat an
+  // identical terminal poll as an idempotent read. A successful finalized
+  // receipt is intentionally refreshable so confirmation/provider metadata can
+  // advance while its original finalized_at watch origin stays fixed.
+  if (previous === incoming.status) {
+    return ["failed", "mismatch", "reorged"].includes(previous);
+  }
   if (
     previous === "mismatch" &&
     incoming.status === "finalized" &&
@@ -437,12 +448,14 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
   const operationResult = await client.query<{
     operation_progress_stage: FundingOperationRow["progressStage"];
     operation_status: FundingOperationRow["status"];
+    operation_user_id: string;
     operation_version: string | number;
     requested_source_amount: JsonRecord | null;
     operation_support_metadata: JsonRecord;
   }>(
     `
-      select requested_source_amount,
+      select user_id as operation_user_id,
+             requested_source_amount,
              support_metadata as operation_support_metadata,
              progress_stage as operation_progress_stage,
              status as operation_status,
@@ -489,22 +502,244 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
       "funding step receipt target no longer exists",
     );
   }
-  const attemptResult = await client.query<{ id: string }>(
+  const attemptResult = await client.query<{
+    id: string;
+    is_latest_attempt: boolean;
+  }>(
     `
-      select id
-      from funding_operation_step_attempts
-      where step_id = $1
-        and id = $2
-        and broadcast_may_have_occurred
-      for update
+      select current_attempt.id,
+             not exists (
+               select 1
+               from funding_operation_step_attempts newer_attempt
+               where newer_attempt.step_id = current_attempt.step_id
+                 and newer_attempt.attempt_number >
+                       current_attempt.attempt_number
+             ) as is_latest_attempt
+      from funding_operation_step_attempts current_attempt
+      where current_attempt.step_id = $1
+        and current_attempt.id = $2
+        and current_attempt.broadcast_may_have_occurred
+      for update of current_attempt
     `,
     [input.stepId, input.attemptId],
   );
-  if (!attemptResult.rows[0]) {
+  const scopedAttempt = attemptResult.rows[0];
+  if (!scopedAttempt) {
     throw new FundingPersistenceError(
       "operation_not_found",
       "funding step receipt target no longer exists",
     );
+  }
+
+  let incomingReceipt = input.receipt;
+  if (
+    scoped.step_kind === "external_handoff" &&
+    (incomingReceipt.status === "confirmed" ||
+      incomingReceipt.status === "finalized") &&
+    incomingReceipt.actionMatch === true &&
+    incomingReceipt.canonical &&
+    incomingReceipt.failureCode === null
+  ) {
+    const transactionHash = incomingReceipt.evidence.transactionHash;
+    const handoffEventIndex = incomingReceipt.evidence.handoffEventIndex;
+    if (
+      typeof transactionHash !== "string" ||
+      !/^0x[0-9a-fA-F]{64}$/u.test(transactionHash) ||
+      typeof handoffEventIndex !== "string" ||
+      !isRawAmount(handoffEventIndex)
+    ) {
+      incomingReceipt = {
+        status: "mismatch",
+        actionMatch: false,
+        ledgerHeight: incomingReceipt.ledgerHeight,
+        blockHash: incomingReceipt.blockHash,
+        canonical: true,
+        failureCode: "external_handoff_physical_identity_missing",
+        evidence: {
+          handoffPhysicalIdentityValid: false,
+        },
+      };
+    } else {
+      const canonicalTransactionHash = transactionHash.toLowerCase();
+      // Receipt inspection can discover a hash without the provider. Serialize
+      // the physical Transfer identity before accepting it so two overlapping
+      // same-amount operations can never consume the same on-chain event.
+      await client.query(
+        `
+          select pg_advisory_xact_lock(
+            hashtextextended($1::text, 0)
+          )
+        `,
+        [
+          [input.networkId, canonicalTransactionHash, handoffEventIndex].join(
+            ":",
+          ),
+        ],
+      );
+      const transactionHashSource =
+        incomingReceipt.evidence.transactionHashSource;
+      const chainTransactionBlockTimestampMs =
+        incomingReceipt.evidence.chainTransactionBlockTimestampMs;
+      const ambiguousCandidate =
+        transactionHashSource === "chain_scan" &&
+        typeof chainTransactionBlockTimestampMs === "number" &&
+        Number.isSafeInteger(chainTransactionBlockTimestampMs)
+          ? await client.query<{ operation_id: string }>(
+              `
+                select other_operation.id as operation_id
+                from funding_operation_step_attempts other_attempt
+                join funding_operation_steps other_step
+                  on other_step.id = other_attempt.step_id
+                join funding_operations other_operation
+                  on other_operation.id = other_step.operation_id
+                left join funding_step_receipt_observations other_receipt
+                  on other_receipt.attempt_id = other_attempt.id
+                where other_attempt.id <> $1
+                  and other_operation.user_id = $2
+                  and other_step.step_kind = 'external_handoff'
+                  and other_step.normalized_action ->> 'kind' =
+                        'external_handoff'
+                  and other_step.normalized_action ->> 'handoffKind' =
+                        'polymarket_deposit_wallet_transfer'
+                  and (
+                    (
+                      other_attempt.outcome = 'started'
+                      and other_operation.status not in (
+                        'completed', 'refunded', 'failed', 'cancelled'
+                      )
+                    )
+                    or (
+                      other_attempt.outcome in ('submitted', 'ambiguous')
+                      and other_attempt.broadcast_may_have_occurred
+                    )
+                  )
+                  and funding_account_identifier_equal(
+                        $3,
+                        other_step.action_validation_result ->> 'tokenAddress',
+                        $4
+                      )
+                  and funding_account_identifier_equal(
+                        $3,
+                        other_step.action_validation_result ->> 'funderAddress',
+                        $5
+                      )
+                  and funding_account_identifier_equal(
+                        $3,
+                        other_step.action_validation_result ->> 'recipientAddress',
+                        $6
+                      )
+                  and other_step.action_validation_result ->> 'amountRaw' = $7
+                  and to_timestamp($8::double precision / 1000.0) >=
+                        date_trunc('second', other_attempt.started_at) +
+                        interval '1 second'
+                  and to_timestamp($8::double precision / 1000.0) <=
+                        other_attempt.started_at +
+                        $10::double precision * interval '1 millisecond'
+                  and (
+                    other_receipt.attempt_id is null
+                    or other_receipt.status in ('pending', 'confirmed')
+                    or (
+                      other_receipt.status = 'mismatch'
+                      and coalesce(
+                            lower(
+                              other_receipt.evidence ->>
+                                'ambiguousTransactionHash'
+                            ),
+                            lower(
+                              other_receipt.evidence ->>
+                                'unboundChainTransactionHash'
+                            )
+                          ) = $9
+                    )
+                  )
+                  and coalesce(
+                        lower(other_receipt.evidence ->> 'transactionHash'),
+                        lower(
+                          other_receipt.evidence ->> 'ambiguousTransactionHash'
+                        ),
+                        lower(
+                          other_receipt.evidence ->> 'unboundChainTransactionHash'
+                        ),
+                        $9
+                      ) = $9
+                limit 1
+              `,
+              [
+                input.attemptId,
+                scopedOperation.operation_user_id,
+                input.networkId,
+                scoped.action_validation_result.tokenAddress ?? null,
+                scoped.action_validation_result.funderAddress ?? null,
+                scoped.action_validation_result.recipientAddress ?? null,
+                scoped.action_validation_result.amountRaw ?? null,
+                chainTransactionBlockTimestampMs,
+                canonicalTransactionHash,
+                POLYMARKET_HANDOFF_CHAIN_ATTRIBUTION_WINDOW_MS,
+              ],
+            )
+          : null;
+      if (ambiguousCandidate?.rows[0]) {
+        incomingReceipt = {
+          status: "pending",
+          actionMatch: null,
+          ledgerHeight: incomingReceipt.ledgerHeight,
+          blockHash: incomingReceipt.blockHash,
+          canonical: true,
+          failureCode: null,
+          evidence: {
+            ...incomingReceipt.evidence,
+            transactionHash: null,
+            ambiguousTransactionHash: canonicalTransactionHash,
+            chainTransactionBlockTimestampMs,
+            competingOperationId: ambiguousCandidate.rows[0].operation_id,
+            externalHandoffCandidateAmbiguous: true,
+            handoffEventIndex,
+            transactionHashSource: "chain_scan",
+          },
+        };
+      }
+      const conflictingReceipt =
+        incomingReceipt.status === "mismatch"
+          ? null
+          : await client.query<{ operation_id: string }>(
+              `
+          select receipt.operation_id
+          from funding_step_receipt_observations receipt
+          join funding_operation_steps receipt_step
+            on receipt_step.id = receipt.step_id
+          where receipt.network_id = $1
+            and lower(receipt.evidence ->> 'transactionHash') = $2
+            and receipt.evidence ->> 'handoffEventIndex' = $3
+            and receipt.attempt_id <> $4
+            and receipt_step.step_kind = 'external_handoff'
+            and receipt.status in ('confirmed', 'finalized')
+            and receipt.action_match
+            and receipt.canonical
+          limit 1
+        `,
+              [
+                input.networkId,
+                canonicalTransactionHash,
+                handoffEventIndex,
+                input.attemptId,
+              ],
+            );
+      if (conflictingReceipt?.rows[0]) {
+        incomingReceipt = {
+          status: "mismatch",
+          actionMatch: false,
+          ledgerHeight: incomingReceipt.ledgerHeight,
+          blockHash: incomingReceipt.blockHash,
+          canonical: true,
+          failureCode: "external_handoff_transfer_already_allocated",
+          evidence: {
+            conflictingOperationId: conflictingReceipt.rows[0].operation_id,
+            handoffEventIndex,
+            handoffPhysicalIdentityConflict: true,
+          },
+        };
+      }
+    }
   }
 
   const existing = await client.query<ReceiptDbRow>(
@@ -519,18 +754,18 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
   const previous = existing.rows[0];
   if (
     previous &&
-    shouldIgnoreFundingStepReceiptUpdate(previous.status, input.receipt)
+    shouldIgnoreFundingStepReceiptUpdate(previous.status, incomingReceipt)
   ) {
     return mapReceipt(previous);
   }
 
   const incomingIsFinal =
-    input.receipt.status === "finalized" ||
-    (input.receipt.status === "failed" &&
-      input.receipt.canonical &&
-      input.receipt.evidence.failureFinalized === true);
+    incomingReceipt.status === "finalized" ||
+    (incomingReceipt.status === "failed" &&
+      incomingReceipt.canonical &&
+      incomingReceipt.evidence.failureFinalized === true);
   const finalizedAt = incomingIsFinal ? (previous?.finalized_at ?? now) : null;
-  const reorgedAt = input.receipt.status === "reorged" ? now : null;
+  const reorgedAt = incomingReceipt.status === "reorged" ? now : null;
   const stored = await client.query<ReceiptDbRow>(
     `
       insert into funding_step_receipt_observations (
@@ -576,13 +811,13 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
       input.stepId,
       input.attemptId,
       input.networkId,
-      input.receipt.status,
-      input.receipt.actionMatch,
-      input.receipt.ledgerHeight,
-      input.receipt.blockHash,
-      input.receipt.canonical,
-      input.receipt.failureCode,
-      input.receipt.evidence,
+      incomingReceipt.status,
+      incomingReceipt.actionMatch,
+      incomingReceipt.ledgerHeight,
+      incomingReceipt.blockHash,
+      incomingReceipt.canonical,
+      incomingReceipt.failureCode,
+      incomingReceipt.evidence,
       now,
       finalizedAt,
       reorgedAt,
@@ -744,7 +979,7 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     }
   }
 
-  if (input.receipt.status === "reorged") {
+  if (incomingReceipt.status === "reorged") {
     await client.query(
       `
         update funding_observations
@@ -772,11 +1007,18 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     );
   }
 
-  const nextStepState = fundingStepStateForReceipt(
-    input.receipt.status,
-    scoped.step_state,
-    scoped.step_kind,
-  );
+  // Older finalized failures stay under canonical reorg watch, but only the
+  // latest attempt may re-arm the global step. Otherwise polling attempt N
+  // after attempt N+1 was submitted could reopen the action and authorize a
+  // third broadcast. A reorg remains operation-wide safety evidence.
+  const nextStepState =
+    scopedAttempt.is_latest_attempt || incomingReceipt.status === "reorged"
+      ? fundingStepStateForReceipt(
+          incomingReceipt.status,
+          scoped.step_state,
+          scoped.step_kind,
+        )
+      : scoped.step_state;
   if (nextStepState !== scoped.step_state) {
     const updated = await client.query(
       `
@@ -798,7 +1040,7 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     if (
       nextStepState === "succeeded" &&
       scoped.step_kind === "transaction" &&
-      input.receipt.status === "finalized"
+      incomingReceipt.status === "finalized"
     ) {
       await activateTelegramTradeShortfallRouterDependentFundInTransaction(
         client,

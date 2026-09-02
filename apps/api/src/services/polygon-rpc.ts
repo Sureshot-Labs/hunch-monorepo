@@ -91,12 +91,16 @@ const BLOCK_NUMBER_CACHE_TTL_MS = 1_000;
 async function executeEthRpcRequest<T>(inputs: {
   rpcUrl: string;
   timeoutMs: number;
+  maxAttempts?: number;
   method: string;
   params: unknown[];
   source: string;
 }): Promise<T> {
   let lastError: unknown = null;
-  const maxAttempts = Math.max(1, walletIntelRetryConfig.maxAttempts);
+  const maxAttempts = Math.max(
+    1,
+    inputs.maxAttempts ?? walletIntelRetryConfig.maxAttempts,
+  );
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const controller = new AbortController();
@@ -203,6 +207,7 @@ async function executeEthRpcRequest<T>(inputs: {
 async function ethRpcRequest<T>(inputs: {
   rpcUrl: string;
   timeoutMs: number;
+  maxAttempts?: number;
   method: string;
   params: unknown[];
   inflightNamespace?: "fresh" | null;
@@ -217,6 +222,7 @@ async function ethRpcRequest<T>(inputs: {
   const key = JSON.stringify([
     inputs.rpcUrl,
     inputs.timeoutMs,
+    inputs.maxAttempts ?? null,
     inputs.method,
     inputs.params,
   ]);
@@ -276,6 +282,7 @@ function addressTopic(address: string): string {
 export async function fetchEvmBlockNumber(inputs: {
   rpcUrl: string;
   timeoutMs: number;
+  maxAttempts?: number;
   bypassCache?: boolean;
 }): Promise<bigint> {
   return rpcReadCoordinator.memo(
@@ -288,6 +295,7 @@ export async function fetchEvmBlockNumber(inputs: {
       const result = await ethRpcRequest<string>({
         rpcUrl: inputs.rpcUrl,
         timeoutMs: inputs.timeoutMs,
+        maxAttempts: inputs.maxAttempts,
         method: "eth_blockNumber",
         params: [],
         inflightNamespace: inputs.bypassCache ? "fresh" : null,
@@ -328,6 +336,7 @@ function safeRpcBlockNumber(value: string, field: string): number {
 export async function fetchEvmTransactionByHash(inputs: {
   rpcUrl: string;
   timeoutMs: number;
+  maxAttempts?: number;
   transactionHash: string;
 }): Promise<EvmRpcTransactionByHash | null> {
   if (!/^0x[0-9a-fA-F]{64}$/u.test(inputs.transactionHash)) {
@@ -336,6 +345,7 @@ export async function fetchEvmTransactionByHash(inputs: {
   const result = await ethRpcRequest<unknown | null>({
     rpcUrl: inputs.rpcUrl,
     timeoutMs: inputs.timeoutMs,
+    maxAttempts: inputs.maxAttempts,
     method: "eth_getTransactionByHash",
     params: [inputs.transactionHash],
   });
@@ -369,6 +379,7 @@ export async function fetchEvmTransactionByHash(inputs: {
 export async function fetchEvmTransactionReceipt(inputs: {
   rpcUrl: string;
   timeoutMs: number;
+  maxAttempts?: number;
   transactionHash: string;
 }): Promise<EvmRpcTransactionReceipt | null> {
   if (!/^0x[0-9a-fA-F]{64}$/u.test(inputs.transactionHash)) {
@@ -377,6 +388,7 @@ export async function fetchEvmTransactionReceipt(inputs: {
   const result = await ethRpcRequest<unknown | null>({
     rpcUrl: inputs.rpcUrl,
     timeoutMs: inputs.timeoutMs,
+    maxAttempts: inputs.maxAttempts,
     method: "eth_getTransactionReceipt",
     params: [inputs.transactionHash],
   });
@@ -431,6 +443,7 @@ export async function fetchEvmTransactionReceipt(inputs: {
 export async function fetchEvmBlockHash(inputs: {
   rpcUrl: string;
   timeoutMs: number;
+  maxAttempts?: number;
   blockNumber: number;
 }): Promise<string | null> {
   if (!Number.isSafeInteger(inputs.blockNumber) || inputs.blockNumber < 0) {
@@ -439,6 +452,7 @@ export async function fetchEvmBlockHash(inputs: {
   const result = await ethRpcRequest<unknown | null>({
     rpcUrl: inputs.rpcUrl,
     timeoutMs: inputs.timeoutMs,
+    maxAttempts: inputs.maxAttempts,
     method: "eth_getBlockByNumber",
     params: [rpcQuantity(BigInt(inputs.blockNumber)), false],
   });
@@ -449,9 +463,33 @@ export async function fetchEvmBlockHash(inputs: {
   return result.hash;
 }
 
+export async function fetchEvmBlockTimestamp(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  maxAttempts?: number;
+  blockNumber: bigint;
+}): Promise<bigint | null> {
+  if (inputs.blockNumber < 0n) {
+    throw new Error("EVM RPC block number is invalid");
+  }
+  const result = await ethRpcRequest<unknown | null>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    maxAttempts: inputs.maxAttempts,
+    method: "eth_getBlockByNumber",
+    params: [rpcQuantity(inputs.blockNumber), false],
+  });
+  if (result == null) return null;
+  if (!isRecord(result) || typeof result.timestamp !== "string") {
+    throw new Error("EVM RPC block timestamp response is invalid");
+  }
+  return parseRpcQuantity(result.timestamp, "block timestamp");
+}
+
 export async function fetchErc20TransferLogs(inputs: {
   rpcUrl: string;
   timeoutMs: number;
+  maxAttempts?: number;
   contractAddress: string;
   recipientAddress: string;
   fromBlock: bigint;
@@ -463,6 +501,7 @@ export async function fetchErc20TransferLogs(inputs: {
   const logs = await ethRpcRequest<readonly EvmRpcLog[]>({
     rpcUrl: inputs.rpcUrl,
     timeoutMs: inputs.timeoutMs,
+    maxAttempts: inputs.maxAttempts,
     method: "eth_getLogs",
     params: [
       {

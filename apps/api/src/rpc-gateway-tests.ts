@@ -7,6 +7,7 @@ import {
   fetchEvmBalance,
   fetchEvmBlockNumber,
   fetchEvmBlockHash,
+  fetchEvmBlockTimestamp,
   fetchEvmTransactionByHash,
   fetchEvmTransactionReceipt,
 } from "./services/polygon-rpc.js";
@@ -29,9 +30,12 @@ const solanaKeyA = "11111111111111111111111111111111";
 const solanaKeyB = "SysvarRent111111111111111111111111111111111";
 const attemptsByMethod = new Map<string, number>();
 let finalizedSlot = 123;
+let defaultSolanaFallbackCalls = 0;
+let boundedSolanaFallbackCalls = 0;
 
 try {
   globalThis.fetch = async (_input, init) => {
+    const requestUrl = String(_input);
     const request = JSON.parse(String(init?.body)) as {
       id: number;
       method: string;
@@ -40,6 +44,26 @@ try {
       request.method,
       (attemptsByMethod.get(request.method) ?? 0) + 1,
     );
+    if (requestUrl.includes("solana-primary-timeout")) {
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () =>
+            setTimeout(
+              () =>
+                reject(new DOMException("RPC attempt timed out", "AbortError")),
+              2,
+            ),
+          { once: true },
+        );
+      });
+    }
+    if (requestUrl.includes("solana-default-fallback")) {
+      defaultSolanaFallbackCalls += 1;
+    }
+    if (requestUrl.includes("solana-bounded-fallback")) {
+      boundedSolanaFallbackCalls += 1;
+    }
     let result: unknown;
     if (request.method === "eth_getTransactionByHash") {
       result = {
@@ -64,7 +88,7 @@ try {
         ],
       };
     } else if (request.method === "eth_getBlockByNumber") {
-      result = { hash: `0x${"44".repeat(32)}` };
+      result = { hash: `0x${"44".repeat(32)}`, timestamp: "0x64" };
     } else if (request.method === "eth_blockNumber") {
       result = "0x64";
     } else if (request.method === "eth_getBalance") {
@@ -138,6 +162,14 @@ try {
     }),
     `0x${"44".repeat(32)}`,
   );
+  assert.equal(
+    await fetchEvmBlockTimestamp({
+      rpcUrl: "https://rpc.test/evm",
+      timeoutMs: 1_000,
+      blockNumber: 16n,
+    }),
+    100n,
+  );
 
   assert.deepEqual(
     await fetchSolanaSignatureReceiptStatus({
@@ -146,6 +178,57 @@ try {
       timeoutMs: 1_000,
     }),
     { confirmationStatus: "processed", failed: false },
+  );
+  assert.deepEqual(
+    await fetchSolanaSignatureReceiptStatus({
+      rpcUrls: [
+        "https://rpc.test/solana-primary-timeout-default",
+        "https://rpc.test/solana-default-fallback",
+      ],
+      signature: bs58.encode(Uint8Array.from({ length: 64 }, () => 8)),
+      timeoutMs: 5,
+      maxAttempts: 1,
+    }),
+    { confirmationStatus: "processed", failed: false },
+    "default Solana RPC semantics must still try a fallback after the primary endpoint times out",
+  );
+  assert.equal(defaultSolanaFallbackCalls, 1);
+  assert.deepEqual(
+    await fetchSolanaSignatureReceiptStatus({
+      rpcUrls: [
+        "https://rpc.test/solana-primary-timeout-bounded",
+        "https://rpc.test/solana-bounded-fallback",
+      ],
+      signature: bs58.encode(Uint8Array.from({ length: 64 }, () => 9)),
+      timeoutMs: 40,
+      totalTimeoutMs: 100,
+      maxAttempts: 1,
+    }),
+    { confirmationStatus: "processed", failed: false },
+    "bounded receipt polling must preserve time for a healthy fallback endpoint",
+  );
+  assert.equal(
+    boundedSolanaFallbackCalls,
+    1,
+    "receipt polling's opt-in total deadline must not let the primary endpoint consume the fallback budget",
+  );
+  const allHungStartedAt = performance.now();
+  await assert.rejects(
+    fetchSolanaSignatureReceiptStatus({
+      rpcUrls: [
+        "https://rpc.test/solana-primary-timeout-bounded-all-a",
+        "https://rpc.test/solana-primary-timeout-bounded-all-b",
+      ],
+      signature: bs58.encode(Uint8Array.from({ length: 64 }, () => 10)),
+      timeoutMs: 100,
+      totalTimeoutMs: 50,
+      maxAttempts: 1,
+    }),
+    (error: unknown) => error instanceof Error && error.name === "AbortError",
+  );
+  assert.ok(
+    performance.now() - allHungStartedAt < 250,
+    "all hung Solana endpoints must remain bounded by the shared receipt deadline",
   );
   const solanaTransaction = await fetchSolanaReceiptTransaction({
     rpcUrls: ["https://rpc.test/solana"],

@@ -113,17 +113,46 @@ const SOLANA_SINGLE_FLIGHT_READ_METHODS = new Set([
 async function executeSolanaRpcRequest<T>(inputs: {
   rpcUrls: string[];
   timeoutMs: number;
+  maxAttempts?: number;
+  totalTimeoutMs?: number;
   method: string;
   params: unknown[];
   source: string;
 }): Promise<T> {
   let lastError: unknown = null;
-  const maxAttempts = Math.max(1, walletIntelRetryConfig.maxAttempts);
+  const maxAttempts = Math.max(
+    1,
+    inputs.maxAttempts ?? walletIntelRetryConfig.maxAttempts,
+  );
+  const requestDeadline =
+    inputs.totalTimeoutMs === undefined
+      ? null
+      : performance.now() + Math.max(1, inputs.totalTimeoutMs);
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    for (const rpcUrl of inputs.rpcUrls) {
+    for (const [rpcIndex, rpcUrl] of inputs.rpcUrls.entries()) {
+      const remainingTotalTimeoutMs =
+        requestDeadline === null
+          ? null
+          : Math.ceil(requestDeadline - performance.now());
+      if (remainingTotalTimeoutMs !== null && remainingTotalTimeoutMs <= 0) {
+        throw lastError ?? new Error("Solana RPC request deadline exceeded");
+      }
+      const attemptTimeoutMs =
+        remainingTotalTimeoutMs === null
+          ? inputs.timeoutMs
+          : Math.min(
+              inputs.timeoutMs,
+              Math.max(
+                1,
+                Math.floor(
+                  remainingTotalTimeoutMs /
+                    Math.max(1, inputs.rpcUrls.length - rpcIndex),
+                ),
+              ),
+            );
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), inputs.timeoutMs);
+      const timeout = setTimeout(() => controller.abort(), attemptTimeoutMs);
       const startedAt = performance.now();
       let attemptRecorded = false;
       const recordAttempt = (outcome: RpcDiagnosticOutcome) => {
@@ -209,10 +238,17 @@ async function executeSolanaRpcRequest<T>(inputs: {
     }
 
     const retryable = isRpcRateLimit(lastError) || isAbortError(lastError);
-    if (retryable && attempt < maxAttempts - 1) {
+    if (
+      retryable &&
+      attempt < maxAttempts - 1 &&
+      (requestDeadline === null || performance.now() < requestDeadline)
+    ) {
       const backoffMs = Math.min(
         walletIntelRetryConfig.baseBackoffMs * Math.max(1, 2 ** attempt),
         walletIntelRetryConfig.maxBackoffMs,
+        requestDeadline === null
+          ? walletIntelRetryConfig.maxBackoffMs
+          : Math.max(0, requestDeadline - performance.now()),
       );
       await sleep(backoffMs);
       continue;
@@ -226,6 +262,8 @@ async function executeSolanaRpcRequest<T>(inputs: {
 async function solanaRpcRequest<T>(inputs: {
   rpcUrls: string[];
   timeoutMs: number;
+  maxAttempts?: number;
+  totalTimeoutMs?: number;
   method: string;
   params: unknown[];
 }): Promise<T> {
@@ -241,6 +279,8 @@ async function solanaRpcRequest<T>(inputs: {
     return executeSolanaRpcRequest<T>({
       rpcUrls: inputs.rpcUrls,
       timeoutMs: inputs.timeoutMs,
+      maxAttempts: inputs.maxAttempts,
+      totalTimeoutMs: inputs.totalTimeoutMs,
       method: inputs.method,
       params: inputs.params,
       source,
@@ -249,6 +289,8 @@ async function solanaRpcRequest<T>(inputs: {
   const key = JSON.stringify([
     inputs.rpcUrls,
     inputs.timeoutMs,
+    inputs.maxAttempts ?? null,
+    inputs.totalTimeoutMs ?? null,
     inputs.method,
     inputs.params,
   ]);
@@ -459,6 +501,8 @@ export async function fetchSolanaSignatureReceiptStatus(inputs: {
   rpcUrls: string[];
   signature: string;
   timeoutMs: number;
+  maxAttempts?: number;
+  totalTimeoutMs?: number;
 }): Promise<SolanaSignatureReceiptStatus | null> {
   const result = await solanaRpcRequest<{
     value?: Array<{
@@ -468,6 +512,8 @@ export async function fetchSolanaSignatureReceiptStatus(inputs: {
   }>({
     rpcUrls: inputs.rpcUrls,
     timeoutMs: inputs.timeoutMs,
+    maxAttempts: inputs.maxAttempts,
+    totalTimeoutMs: inputs.totalTimeoutMs,
     method: "getSignatureStatuses",
     params: [[inputs.signature], { searchTransactionHistory: true }],
   });
@@ -495,11 +541,15 @@ export async function fetchSolanaReceiptTransaction(inputs: {
   rpcUrls: string[];
   signature: string;
   timeoutMs: number;
+  maxAttempts?: number;
+  totalTimeoutMs?: number;
   commitment: "confirmed" | "finalized";
 }): Promise<SolanaReceiptTransaction | null> {
   const result = await solanaRpcRequest<unknown | null>({
     rpcUrls: inputs.rpcUrls,
     timeoutMs: inputs.timeoutMs,
+    maxAttempts: inputs.maxAttempts,
+    totalTimeoutMs: inputs.totalTimeoutMs,
     method: "getTransaction",
     params: [
       inputs.signature,

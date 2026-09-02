@@ -39,6 +39,7 @@ import {
   fetchFundingWithdrawalDestinationForUser,
   finishFundingRouteObservationInTransaction,
   finishFundingStepAttemptInTransaction,
+  finishFundingStepAttemptForUserInTransaction,
   releaseFundingReservationForAbandonedTradeInTransaction,
   registerFundingWithdrawalDestination,
   registerFundingWithdrawalDestinationInTransaction,
@@ -47,6 +48,8 @@ import {
   startFundingStepAttemptInTransaction,
   upsertFundingProviderRequestInTransaction,
 } from "../../persistence/funding-evidence-repository.js";
+import { polymarketRelayerTransactionReference } from "../../execution/polymarket-deposit-wallet-handoff.js";
+import { inspectEvmTarget } from "../../execution/step-receipt-reconciler.js";
 import {
   advanceFundingObservationFinalityInTransaction,
   allocateFundingObservationInTransaction,
@@ -87,7 +90,10 @@ import {
 } from "../../persistence/funding-preparation-run-repository.js";
 import { ingestFundingObservationInTransaction } from "../../reconciliation/funding-observation-ingestion.js";
 import {
+  FUNDING_RECEIPT_REORG_UNRESOLVED_ERROR_CODE,
   FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
+  fundingReconciliationPollDelayMs,
+  fundingReconciliationWaitState,
   reduceFundingOperationInTransaction,
   runFundingReconciliationBatch,
 } from "../../reconciliation/funding-reducer.js";
@@ -317,6 +323,11 @@ async function cleanupCommittedOperation(
   try {
     await client.query("begin");
     if (operationId) {
+      // Receipt observations are deliberately immutable in production. This
+      // transaction is disposable-test cleanup only; disabling user triggers
+      // locally lets the fixture remove its own evidence without weakening the
+      // production guard.
+      await client.query("set local session_replication_role = replica");
       await client.query(
         "delete from funding_reconciliation_jobs where operation_id = $1",
         [operationId],
@@ -327,6 +338,19 @@ async function cleanupCommittedOperation(
       );
       await client.query(
         "delete from balance_reservations where operation_id = $1",
+        [operationId],
+      );
+      await client.query(
+        "delete from funding_step_receipt_observations where operation_id = $1",
+        [operationId],
+      );
+      await client.query(
+        `
+          delete from funding_operation_step_attempts attempt
+          using funding_operation_steps step
+          where attempt.step_id = step.id
+            and step.operation_id = $1
+        `,
         [operationId],
       );
       await client.query(
@@ -979,6 +1003,942 @@ async function testPollingFailureHonorsTerminalTimeout(): Promise<void> {
     });
   } finally {
     await cleanupCommittedOperation(operationId, quote.id, userId);
+  }
+}
+
+async function testRecentBroadcastRecoveryUsesActiveReceiptCadence(): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const userId = await insertUser(client);
+    const plan = buildPlan();
+    const consentToken = opaque("broadcast-recovery-consent");
+    const quote = await createFundingQuoteInTransaction(
+      client,
+      quoteInput(userId, plan, consentToken),
+    );
+    const committed = await commitFundingOperationInTransaction(
+      client,
+      commitInput(userId, quote.id, consentToken, plan),
+    );
+    const operationId = committed.operation.id;
+    const stepResult = await client.query<{ id: string }>(
+      `select id
+         from funding_operation_steps
+        where operation_id = $1
+          and ordinal = 0`,
+      [operationId],
+    );
+    const stepId = stepResult.rows[0]?.id;
+    assert.ok(stepId);
+    const attempt = await startFundingStepAttemptInTransaction(client, {
+      operationId,
+      stepId,
+      canonicalActionFingerprint: hash("b"),
+      executorId: "synthetic-executor",
+    });
+    await finishFundingStepAttemptInTransaction(client, {
+      attemptId: attempt.id,
+      outcome: "ambiguous",
+      broadcastMayHaveOccurred: true,
+      referenceKind: "transaction",
+      receiptRefCiphertext: "ciphertext:recent-broadcast",
+      receiptRefLookupHmac: hash("9"),
+      lookupKeyVersion: 1,
+      actualCosts: {},
+    });
+    await client.query(
+      `update funding_operation_steps set state = 'submitted' where id = $1`,
+      [stepId],
+    );
+    await client.query(
+      `update funding_operation_steps
+          set state = 'reconcile_required'
+        where id = $1`,
+      [stepId],
+    );
+    await client.query(
+      `update funding_operation_steps
+          set state = 'recovery_required'
+        where id = $1`,
+      [stepId],
+    );
+    const waitState = await fundingReconciliationWaitState(
+      client,
+      operationId,
+      90_000,
+    );
+    assert.equal(
+      waitState.broadcastEvidenceActiveUntil?.getTime(),
+      attempt.startedAt.getTime() + 90_000,
+      "the persisted unresolved broadcast must define a bounded evidence window",
+    );
+    assert.equal(
+      fundingReconciliationPollDelayMs(
+        { status: "recovery_required", stage: "source_action" },
+        {
+          activePollDelayMs: 2_000,
+          broadcastEvidenceActiveUntil: waitState.broadcastEvidenceActiveUntil,
+          idlePollDelayMs: 15_000,
+          now: new Date(attempt.startedAt.getTime() + 10_000),
+          recoveryMode: "automatic_evidence",
+          recoveryPollDelayMs: 60_000,
+        },
+      ),
+      2_000,
+    );
+    await client.query("rollback");
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function testLateCanonicalFailureRearmsRetryAndKeepsReorgWatch(): Promise<void> {
+  const userId = await insertUser(pool);
+  const plan = buildPlan();
+  const consentToken = opaque("late-failure-retry-consent");
+  const quote = await createFundingQuote(
+    pool,
+    quoteInput(userId, plan, consentToken),
+  );
+  let operationId: string | null = null;
+  try {
+    const committed = await commitFundingOperation(
+      pool,
+      commitInput(userId, quote.id, consentToken, plan),
+    );
+    operationId = committed.operation.id;
+    const stepResult = await pool.query<{
+      action_fingerprint: string;
+      executor_id: string;
+      id: string;
+    }>(
+      `select id, action_fingerprint, executor_id
+         from funding_operation_steps
+        where operation_id = $1::uuid and ordinal = 0`,
+      [operationId],
+    );
+    const step = stepResult.rows[0];
+    assert.ok(step);
+    const failedAt = new Date();
+    const attemptClient = await pool.connect();
+    let attemptId: string;
+    try {
+      await attemptClient.query("begin");
+      const attempt = await startFundingStepAttemptInTransaction(
+        attemptClient,
+        {
+          operationId,
+          stepId: step.id,
+          canonicalActionFingerprint: step.action_fingerprint,
+          executorId: step.executor_id,
+          now: new Date(failedAt.getTime() - 5_000),
+        },
+      );
+      attemptId = attempt.id;
+      await finishFundingStepAttemptInTransaction(attemptClient, {
+        attemptId,
+        outcome: "submitted",
+        broadcastMayHaveOccurred: true,
+        referenceKind: "transaction",
+        receiptRefCiphertext: "ciphertext:late-finalized-failure",
+        receiptRefLookupHmac: hash("8"),
+        lookupKeyVersion: 1,
+        actualCosts: {},
+        now: new Date(failedAt.getTime() - 4_000),
+      });
+      await attemptClient.query(
+        `update funding_operation_steps
+            set state = 'submitted', updated_at = $2::timestamptz
+          where id = $1::uuid`,
+        [step.id, new Date(failedAt.getTime() - 4_000)],
+      );
+      await attemptClient.query("commit");
+    } catch (error) {
+      await attemptClient.query("rollback");
+      throw error;
+    } finally {
+      attemptClient.release();
+    }
+
+    const sourceActionOperation = await transitionFundingOperation(pool, {
+      operationId,
+      scope: { kind: "worker" },
+      expectedVersion: committed.operation.version,
+      expectedState: { status: "in_progress", stage: "committed" },
+      nextState: { status: "in_progress", stage: "source_action" },
+      now: new Date(failedAt.getTime() - 3_000),
+    });
+    await transitionFundingOperation(pool, {
+      operationId,
+      scope: { kind: "worker" },
+      expectedVersion: sourceActionOperation.version,
+      expectedState: { status: "in_progress", stage: "source_action" },
+      nextState: { status: "recovery_required", stage: "source_action" },
+      errorCode: FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
+      recoveryMode: "automatic_evidence",
+      now: new Date(failedAt.getTime() - 2_000),
+    });
+    await pool.query(
+      `update funding_operation_steps
+          set state = 'recovery_required', updated_at = $2::timestamptz
+        where id = $1::uuid and state = 'submitted'`,
+      [step.id, new Date(failedAt.getTime() - 2_000)],
+    );
+
+    const failedReceipt = await applyFundingStepReceiptEvidenceInTransaction(
+      pool,
+      {
+        operationId,
+        stepId: step.id,
+        attemptId,
+        networkId: ASSET.networkId,
+        receipt: {
+          status: "failed",
+          actionMatch: true,
+          ledgerHeight: "700",
+          blockHash: `0x${"31".repeat(32)}`,
+          canonical: true,
+          failureCode: "polymarket_relayer_transaction_failed",
+          evidence: { confirmations: 12, failureFinalized: true },
+        },
+        now: failedAt,
+      },
+    );
+    assert.equal(failedReceipt.status, "failed");
+    const reduction = await pool.connect().then(async (client) => {
+      try {
+        await client.query("begin");
+        const result = await reduceFundingOperationInTransaction(client, {
+          operationId: committed.operation.id,
+          now: failedAt,
+        });
+        await client.query("commit");
+        return result;
+      } catch (error) {
+        await client.query("rollback");
+        throw error;
+      } finally {
+        client.release();
+      }
+    });
+    assert.deepEqual(reduction.finalState, {
+      status: "in_progress",
+      stage: "source_action",
+    });
+    const resumed = await pool.query<{
+      error_code: string | null;
+      recovery_mode: string | null;
+      step_state: string;
+    }>(
+      `select operation.error_code,
+              operation.recovery_mode,
+              step.state as step_state
+         from funding_operations operation
+         join funding_operation_steps step on step.operation_id = operation.id
+        where operation.id = $1::uuid and step.id = $2::uuid`,
+      [operationId, step.id],
+    );
+    assert.deepEqual(resumed.rows[0], {
+      error_code: null,
+      recovery_mode: null,
+      step_state: "action_required",
+    });
+
+    const outageAt = new Date(failedAt.getTime() + 250);
+    await pool.query(
+      `update funding_reconciliation_jobs
+          set due_at = $2::timestamptz,
+              status = 'scheduled',
+              priority = 10000,
+              lease_owner = null,
+              lease_token = null,
+              lease_until = null
+        where operation_id = $1::uuid`,
+      [operationId, outageAt],
+    );
+    const outageBatch = await runFundingReconciliationBatch(pool, {
+      workerId: opaque("failed-receipt-provider-outage-worker"),
+      limit: 1,
+      now: outageAt,
+      receiptPoll: async () => {
+        throw new Error(
+          "Polymarket relayer lookup is unavailable during hashless failure verification",
+        );
+      },
+    });
+    assert.deepEqual(
+      {
+        claimed: outageBatch.claimed,
+        completed: outageBatch.completed,
+        deadLettered: outageBatch.deadLettered,
+        requeued: outageBatch.requeued,
+      },
+      { claimed: 1, completed: 0, deadLettered: 0, requeued: 1 },
+      "a provider outage during a recent failed-receipt watch must requeue the job instead of consuming the watch",
+    );
+    const outageJob = await pool.query<{
+      last_error_code: string | null;
+      status: string;
+    }>(
+      `select status, last_error_code
+         from funding_reconciliation_jobs
+        where operation_id = $1::uuid`,
+      [operationId],
+    );
+    assert.deepEqual(outageJob.rows[0], {
+      status: "scheduled",
+      last_error_code: "terminal_relay_receipt_verification_unavailable",
+    });
+    const stateAfterProviderOutage = await pool.query<{
+      operation_status: string;
+      receipt_status: string;
+      step_state: string;
+    }>(
+      `select operation.status as operation_status,
+              step.state as step_state,
+              receipt.status as receipt_status
+         from funding_operations operation
+         join funding_operation_steps step on step.operation_id = operation.id
+         join funding_step_receipt_observations receipt
+           on receipt.step_id = step.id
+        where operation.id = $1::uuid and step.id = $2::uuid`,
+      [operationId, step.id],
+    );
+    assert.deepEqual(stateAfterProviderOutage.rows[0], {
+      operation_status: "in_progress",
+      step_state: "action_required",
+      receipt_status: "failed",
+    });
+
+    const providerConflictProbe = await pool.connect();
+    try {
+      await providerConflictProbe.query("begin");
+      const candidateTransactionHashA = `0x${"32".repeat(32)}`;
+      const candidateTransactionHashB = `0x${"33".repeat(32)}`;
+      const exactHashConflict = await inspectEvmTarget(
+        {
+          operationId,
+          stepId: step.id,
+          segmentId: null,
+          attemptId,
+          attemptStartedAt: new Date(failedAt.getTime() - 5_000),
+          stepKind: "external_handoff",
+          payerRequirement: "user",
+          stepState: "action_required",
+          networkId: "evm:137",
+          action: {
+            kind: "external_handoff",
+            actionId: "action_late_hash_conflict",
+            networkId: "evm:137",
+            actorWalletId: "wallet_late_hash_conflict",
+            handoffKind: "polymarket_deposit_wallet_transfer",
+            payload: {},
+          },
+          actionValidationResult: {},
+          receiptRefCiphertext: "ciphertext:late-hash-conflict",
+          receiptRefLookupHmac: hash("7"),
+          lookupKeyVersion: 1,
+          previousReceipt: failedReceipt,
+        },
+        polymarketRelayerTransactionReference("relayer_late_hash_conflict"),
+        undefined,
+        {
+          findTransactionScan: async () => ({
+            attributionComplete: true,
+            attributionEndBlock: 701n,
+            attributionEndBlockHash: `0x${"34".repeat(32)}`,
+            attributionFenceChanged: false,
+            attributionWindowClosed: true,
+            candidateTransactions: {
+              [candidateTransactionHashA]: failedAt.getTime(),
+              [candidateTransactionHashB]: failedAt.getTime() + 1,
+            },
+            caughtUp: true,
+            historyCovered: true,
+            lastScannedFromBlock: 700n,
+            lastScannedToBlock: 701n,
+            match: null,
+            newestScannedBlock: 701n,
+            oldestScannedBlock: 700n,
+            sweepTargetBlock: 701n,
+          }),
+          resolveReference: async () => {
+            throw new Error("Polymarket relayer unavailable");
+          },
+        },
+      );
+      assert.deepEqual(
+        {
+          status: exactHashConflict.status,
+          failureCode: exactHashConflict.failureCode,
+          invalidatingReceiptStatus:
+            exactHashConflict.evidence.invalidatingReceiptStatus,
+          invalidatingReceiptFailureCode:
+            exactHashConflict.evidence.invalidatingReceiptFailureCode,
+          candidateCount: Object.keys(
+            (exactHashConflict.evidence
+              .polymarketHandoffCandidateTransactions ?? {}) as object,
+          ).length,
+        },
+        {
+          status: "reorged",
+          failureCode: "polymarket_handoff_failure_evidence_invalidated",
+          invalidatingReceiptStatus: "mismatch",
+          invalidatingReceiptFailureCode:
+            "polymarket_handoff_chain_candidate_ambiguity",
+          candidateCount: 2,
+        },
+      );
+      const invalidatedFailure = await applyFundingStepReceiptEvidenceInTransaction(
+          providerConflictProbe,
+          {
+            operationId,
+            stepId: step.id,
+            attemptId,
+            networkId: ASSET.networkId,
+            receipt: exactHashConflict,
+            now: new Date(failedAt.getTime() + 300),
+          },
+        );
+      assert.equal(invalidatedFailure.status, "reorged");
+      const conflictReduction = await reduceFundingOperationInTransaction(
+        providerConflictProbe,
+        {
+          operationId,
+          now: new Date(failedAt.getTime() + 301),
+        },
+      );
+      assert.deepEqual(conflictReduction.finalState, {
+        status: "recovery_required",
+        stage: "source_action",
+      });
+      const conflictState = await providerConflictProbe.query<{
+        recovery_mode: string | null;
+        step_state: string;
+      }>(
+        `select operation.recovery_mode, step.state as step_state
+           from funding_operations operation
+           join funding_operation_steps step on step.operation_id = operation.id
+          where operation.id = $1::uuid and step.id = $2::uuid`,
+        [operationId, step.id],
+      );
+      assert.deepEqual(conflictState.rows[0], {
+        recovery_mode: "automatic_evidence",
+        step_state: "recovery_required",
+      });
+      await providerConflictProbe.query("rollback");
+    } catch (error) {
+      await providerConflictProbe.query("rollback");
+      throw error;
+    } finally {
+      providerConflictProbe.release();
+    }
+
+    const retryProbe = await pool.connect();
+    try {
+      await retryProbe.query("begin");
+      const retry = await startFundingStepAttemptInTransaction(retryProbe, {
+        operationId,
+        stepId: step.id,
+        canonicalActionFingerprint: step.action_fingerprint,
+        executorId: step.executor_id,
+        now: new Date(failedAt.getTime() + 500),
+      });
+      assert.equal(retry.attemptNumber, 2);
+      await retryProbe.query("rollback");
+    } catch (error) {
+      await retryProbe.query("rollback");
+      throw error;
+    } finally {
+      retryProbe.release();
+    }
+
+    const expiresAt = new Date(failedAt.getTime() + 1_000);
+    await pool.query(
+      `update funding_operation_steps
+          set action_expires_at = $2::timestamptz
+        where id = $1::uuid`,
+      [step.id, expiresAt],
+    );
+    await pool.query(
+      `update funding_reconciliation_jobs
+          set due_at = $2::timestamptz,
+              status = 'scheduled',
+              priority = 10000,
+              lease_owner = null,
+              lease_token = null,
+              lease_until = null
+        where operation_id = $1::uuid`,
+      [operationId, expiresAt],
+    );
+    const polls: string[] = [];
+    const batch = await runFundingReconciliationBatch(pool, {
+      workerId: opaque("failed-receipt-expiry-watch-worker"),
+      limit: 1,
+      now: expiresAt,
+      receiptPoll: async () => {
+        polls.push("receipt");
+        return { receiptsPolled: 1 };
+      },
+      postconditionPoll: async () => {
+        polls.push("postcondition");
+        return { postconditionsPolled: 0 };
+      },
+      destinationPoll: async () => {
+        polls.push("destination");
+        return { destinationsPolled: 0, destinationSatisfied: false };
+      },
+      providerPoll: async () => {
+        polls.push("provider");
+        return { requestsPolled: 0 };
+      },
+    });
+    assert.deepEqual(
+      {
+        claimed: batch.claimed,
+        completed: batch.completed,
+        requeued: batch.requeued,
+        polls: new Set(polls),
+      },
+      {
+        claimed: 1,
+        completed: 0,
+        requeued: 1,
+        polls: new Set(["receipt", "postcondition", "destination"]),
+      },
+    );
+    const expired = await pool.query<{
+      job_status: string;
+      reservation_state: string;
+      status: string;
+    }>(
+      `select operation.status,
+              job.status as job_status,
+              reservation.state as reservation_state
+         from funding_operations operation
+         join funding_reconciliation_jobs job on job.operation_id = operation.id
+         join balance_reservations reservation
+           on reservation.operation_id = operation.id
+        where operation.id = $1::uuid`,
+      [operationId],
+    );
+    assert.deepEqual(expired.rows[0], {
+      status: "cancelled",
+      job_status: "scheduled",
+      reservation_state: "released",
+    });
+  } finally {
+    await cleanupCommittedOperation(operationId, quote.id, userId);
+  }
+}
+
+async function testUnresolvedExternalHandoffReorgBecomesManualReview(): Promise<void> {
+  const userId = await insertUser(pool);
+  const basePlan = buildPlan();
+  const baseStep = basePlan.steps[0];
+  assert.ok(baseStep);
+  const plan: FundingCommitPlan = {
+    ...basePlan,
+    steps: [
+      {
+        ...baseStep,
+        stepKind: "external_handoff",
+        executorId: "polymarket_deposit_wallet_relayer_v1",
+      },
+    ],
+  };
+  const consentToken = opaque("external-handoff-reorg-consent");
+  const quote = await createFundingQuote(
+    pool,
+    quoteInput(userId, plan, consentToken),
+  );
+  let operationId: string | null = null;
+  try {
+    const committed = await commitFundingOperation(
+      pool,
+      commitInput(userId, quote.id, consentToken, plan),
+    );
+    operationId = committed.operation.id;
+    const client = await pool.connect();
+    const reorgedAt = new Date();
+    try {
+      await client.query("begin");
+      const step = await client.query<{
+        action_fingerprint: string;
+        executor_id: string;
+        id: string;
+      }>(
+        `select id, action_fingerprint, executor_id
+           from funding_operation_steps
+          where operation_id = $1::uuid and ordinal = 0`,
+        [operationId],
+      );
+      const stepRow = step.rows[0];
+      assert.ok(stepRow);
+      const attempt = await startFundingStepAttemptInTransaction(client, {
+        operationId,
+        stepId: stepRow.id,
+        canonicalActionFingerprint: stepRow.action_fingerprint,
+        executorId: stepRow.executor_id,
+        now: new Date(reorgedAt.getTime() - 2_000),
+      });
+      await finishFundingStepAttemptForUserInTransaction(client, {
+        userId,
+        operationId,
+        stepId: stepRow.id,
+        attemptId: attempt.id,
+        outcome: "submitted",
+        broadcastMayHaveOccurred: true,
+        referenceKind: "external_handoff",
+        receiptRefCiphertext: "ciphertext:external-handoff-reorg",
+        receiptRefLookupHmac: hash("9"),
+        lookupKeyVersion: 1,
+        actualCosts: {},
+        now: new Date(reorgedAt.getTime() - 1_000),
+      });
+      const finalized = {
+        status: "finalized" as const,
+        actionMatch: true,
+        ledgerHeight: "12345",
+        blockHash: `0x${"61".repeat(32)}`,
+        canonical: true,
+        failureCode: null,
+        evidence: {
+          handoffEventIndex: "0",
+          transactionHash: `0x${"62".repeat(32)}`,
+        },
+      };
+      await applyFundingStepReceiptEvidenceInTransaction(client, {
+        operationId,
+        stepId: stepRow.id,
+        attemptId: attempt.id,
+        networkId: "evm:137",
+        receipt: finalized,
+        now: new Date(reorgedAt.getTime() - 500),
+      });
+      await applyFundingStepReceiptEvidenceInTransaction(client, {
+        operationId,
+        stepId: stepRow.id,
+        attemptId: attempt.id,
+        networkId: "evm:137",
+        receipt: {
+          ...finalized,
+          status: "reorged",
+          canonical: false,
+          failureCode: "receipt_block_not_canonical",
+        },
+        now: reorgedAt,
+      });
+      await client.query(
+        `update funding_operations
+            set status = 'recovery_required',
+                progress_stage = 'source_action',
+                recovery_mode = 'automatic_evidence',
+                error_code = 'receipt_block_not_canonical',
+                version = version + 1,
+                updated_at = $2::timestamptz
+          where id = $1::uuid`,
+        [operationId, reorgedAt],
+      );
+      await client.query(
+        `update funding_reconciliation_jobs
+            set status = 'scheduled',
+                due_at = $2::timestamptz,
+                priority = 10000,
+                lease_owner = null,
+                lease_token = null,
+                lease_until = null
+          where operation_id = $1::uuid`,
+        [operationId, new Date(reorgedAt.getTime() + 15 * 60_000)],
+      );
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    const incidentAt = new Date(reorgedAt.getTime() + 15 * 60_000);
+    const result = await runFundingReconciliationBatch(pool, {
+      workerId: opaque("external-handoff-reorg-worker"),
+      limit: 1,
+      now: incidentAt,
+      receiptPoll: async () => ({ receiptsPolled: 1 }),
+      destinationPoll: async () => ({
+        destinationsPolled: 1,
+        destinationSatisfied: false,
+      }),
+    });
+    assert.deepEqual(
+      {
+        claimed: result.claimed,
+        deadLettered: result.deadLettered,
+        requeued: result.requeued,
+      },
+      { claimed: 1, deadLettered: 1, requeued: 0 },
+    );
+    const state = await pool.query<{
+      error_code: string | null;
+      job_error_code: string | null;
+      job_status: string;
+      recovery_mode: string | null;
+      status: string;
+    }>(
+      `select operation.status,
+              operation.recovery_mode,
+              operation.error_code,
+              job.status as job_status,
+              job.last_error_code as job_error_code
+         from funding_operations operation
+         join funding_reconciliation_jobs job
+           on job.operation_id = operation.id
+        where operation.id = $1::uuid`,
+      [operationId],
+    );
+    assert.deepEqual(state.rows[0], {
+      status: "recovery_required",
+      recovery_mode: "manual_review",
+      error_code: FUNDING_RECEIPT_REORG_UNRESOLVED_ERROR_CODE,
+      job_status: "dead_letter",
+      job_error_code: FUNDING_RECEIPT_REORG_UNRESOLVED_ERROR_CODE,
+    });
+  } finally {
+    await cleanupCommittedOperation(operationId, quote.id, userId);
+  }
+}
+
+async function testReconciliationBatchClaimsOnlyRunnableWave(): Promise<void> {
+  const fixtures: Array<{
+    operationId: string;
+    quoteId: string;
+    userId: string;
+  }> = [];
+  const now = new Date();
+  try {
+    for (let index = 0; index < 3; index += 1) {
+      const userId = await insertUser(pool);
+      const plan = buildPlan();
+      const consentToken = opaque(`wave-consent-${index}`);
+      const quote = await createFundingQuote(
+        pool,
+        quoteInput(userId, plan, consentToken),
+      );
+      const committed = await commitFundingOperation(
+        pool,
+        commitInput(userId, quote.id, consentToken, plan),
+      );
+      fixtures.push({
+        operationId: committed.operation.id,
+        quoteId: quote.id,
+        userId,
+      });
+      await pool.query(
+        `update funding_operation_steps
+            set state = 'submitted', updated_at = $2::timestamptz
+          where operation_id = $1::uuid`,
+        [committed.operation.id, now],
+      );
+      await pool.query(
+        `update funding_reconciliation_jobs
+            set status = 'scheduled',
+                due_at = $2::timestamptz,
+                priority = 9000,
+                lease_owner = null,
+                lease_token = null,
+                lease_until = null
+          where operation_id = $1::uuid`,
+        [committed.operation.id, now],
+      );
+    }
+
+    let releaseFirstWave: (() => void) | null = null;
+    const firstWaveReady = new Promise<void>((resolve) => {
+      releaseFirstWave = resolve;
+    });
+    let started = 0;
+    let active = 0;
+    let peak = 0;
+    const result = await runFundingReconciliationBatch(pool, {
+      workerId: opaque("wave-worker"),
+      concurrency: 2,
+      limit: 3,
+      now,
+      pollDelayMs: 0,
+      destinationPoll: async () => {
+        started += 1;
+        active += 1;
+        peak = Math.max(peak, active);
+        if (started === 2) releaseFirstWave?.();
+        if (started <= 2) await firstWaveReady;
+        active -= 1;
+        return { destinationsPolled: 1, destinationSatisfied: false };
+      },
+    });
+    assert.equal(peak, 2, "only one bounded claim wave may run concurrently");
+    assert.equal(result.claimed, 3);
+    assert.equal(new Set(result.operationIds).size, 3);
+    assert.deepEqual(
+      new Set(result.operationIds),
+      new Set(fixtures.map((fixture) => fixture.operationId)),
+      "a job requeued by an earlier wave must not be reclaimed in the same batch",
+    );
+  } finally {
+    for (const fixture of fixtures.reverse()) {
+      await cleanupCommittedOperation(
+        fixture.operationId,
+        fixture.quoteId,
+        fixture.userId,
+      );
+    }
+  }
+}
+
+async function testOlderFailedAttemptCannotRearmNewerBroadcast(): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const userId = await insertUser(client);
+    const plan = buildPlan();
+    const consentToken = opaque("old-attempt-receipt-consent");
+    const quote = await createFundingQuoteInTransaction(
+      client,
+      quoteInput(userId, plan, consentToken),
+    );
+    const committed = await commitFundingOperationInTransaction(
+      client,
+      commitInput(userId, quote.id, consentToken, plan),
+    );
+    const operationId = committed.operation.id;
+    const stepResult = await client.query<{ id: string }>(
+      `select id
+         from funding_operation_steps
+        where operation_id = $1
+          and ordinal = 0`,
+      [operationId],
+    );
+    const stepId = stepResult.rows[0]?.id;
+    assert.ok(stepId);
+
+    const firstAttempt = await startFundingStepAttemptInTransaction(client, {
+      operationId,
+      stepId,
+      canonicalActionFingerprint: hash("b"),
+      executorId: "synthetic-executor",
+    });
+    await finishFundingStepAttemptInTransaction(client, {
+      attemptId: firstAttempt.id,
+      outcome: "submitted",
+      broadcastMayHaveOccurred: true,
+      referenceKind: "transaction",
+      receiptRefCiphertext: "ciphertext:first-broadcast",
+      receiptRefLookupHmac: hash("7"),
+      lookupKeyVersion: 1,
+      actualCosts: {},
+    });
+    await client.query(
+      `update funding_operation_steps
+          set state = 'submitted'
+        where id = $1`,
+      [stepId],
+    );
+    const finalizedFailure = {
+      status: "failed" as const,
+      actionMatch: true,
+      ledgerHeight: "100",
+      blockHash: `0x${"12".repeat(32)}`,
+      canonical: true,
+      failureCode: "transaction_reverted",
+      evidence: { confirmations: 12, failureFinalized: true },
+    };
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId,
+      stepId,
+      attemptId: firstAttempt.id,
+      networkId: ASSET.networkId,
+      receipt: finalizedFailure,
+    });
+    const retryableStep = await client.query<{ state: string }>(
+      `select state from funding_operation_steps where id = $1`,
+      [stepId],
+    );
+    assert.equal(retryableStep.rows[0]?.state, "action_required");
+
+    const secondAttempt = await startFundingStepAttemptInTransaction(client, {
+      operationId,
+      stepId,
+      canonicalActionFingerprint: hash("b"),
+      executorId: "synthetic-executor",
+    });
+    await finishFundingStepAttemptInTransaction(client, {
+      attemptId: secondAttempt.id,
+      outcome: "submitted",
+      broadcastMayHaveOccurred: true,
+      referenceKind: "transaction",
+      receiptRefCiphertext: "ciphertext:second-broadcast",
+      receiptRefLookupHmac: hash("8"),
+      lookupKeyVersion: 1,
+      actualCosts: {},
+    });
+    await client.query(
+      `update funding_operation_steps
+          set state = 'submitted'
+        where id = $1
+          and state = 'action_required'`,
+      [stepId],
+    );
+
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId,
+      stepId,
+      attemptId: firstAttempt.id,
+      networkId: ASSET.networkId,
+      receipt: finalizedFailure,
+    });
+    const afterStaleFailure = await client.query<{ state: string }>(
+      `select state from funding_operation_steps where id = $1`,
+      [stepId],
+    );
+    assert.equal(
+      afterStaleFailure.rows[0]?.state,
+      "submitted",
+      "a canonical failure from attempt N must not authorize attempt N+2 after attempt N+1 already broadcast",
+    );
+
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId,
+      stepId,
+      attemptId: firstAttempt.id,
+      networkId: ASSET.networkId,
+      receipt: {
+        status: "reorged",
+        actionMatch: true,
+        ledgerHeight: "100",
+        blockHash: `0x${"12".repeat(32)}`,
+        canonical: false,
+        failureCode: "canonical_block_hash_mismatch",
+        evidence: { confirmations: 12, failureFinalized: true },
+      },
+    });
+    const afterFailureReorg = await client.query<{ state: string }>(
+      `select state from funding_operation_steps where id = $1`,
+      [stepId],
+    );
+    assert.equal(
+      afterFailureReorg.rows[0]?.state,
+      "recovery_required",
+      "a reorg of an older failure is operation-wide uncertainty and must stop a newer broadcast",
+    );
+    await client.query("rollback");
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
   }
 }
 
@@ -5985,6 +6945,26 @@ console.log(
 await testPollingFailureHonorsTerminalTimeout();
 console.log(
   "[funding-persistence-integration-tests] ok polling failure honors terminal timeout",
+);
+await testRecentBroadcastRecoveryUsesActiveReceiptCadence();
+console.log(
+  "[funding-persistence-integration-tests] ok recent Base, Polygon, and Solana broadcasts retain a bounded active receipt cadence during automatic recovery",
+);
+await testLateCanonicalFailureRearmsRetryAndKeepsReorgWatch();
+console.log(
+  "[funding-persistence-integration-tests] ok late canonical failure exits automatic recovery, re-arms only the retry, and remains reorg-watched through action expiry",
+);
+await testUnresolvedExternalHandoffReorgBecomesManualReview();
+console.log(
+  "[funding-persistence-integration-tests] ok unresolved external-handoff receipt reorg becomes bounded manual review",
+);
+await testReconciliationBatchClaimsOnlyRunnableWave();
+console.log(
+  "[funding-persistence-integration-tests] ok reconciliation batch claims bounded concurrent waves without reclaiming its own requeues",
+);
+await testOlderFailedAttemptCannotRearmNewerBroadcast();
+console.log(
+  "[funding-persistence-integration-tests] ok an older failed attempt cannot rearm a newer broadcast, while a reorg still stops it",
 );
 await testOwnedRouteCompetitionQueryParses();
 console.log(

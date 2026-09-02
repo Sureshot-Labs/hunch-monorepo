@@ -1,17 +1,24 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import bs58 from "bs58";
 import { ethers } from "ethers";
 
 import {
   bindPolymarketRelayerTransactionHash,
   EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS,
+  EVM_FUNDING_FAILURE_FINALITY_CONFIRMATIONS,
   FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS,
   evmFundingActionFinalityConfirmations,
   evaluateEvmActionReceipt,
   evaluatePolymarketDepositWalletHandoffReceipt,
   evaluateSvmActionReceipt,
+  findRecentPolymarketHandoffTransactionHash,
+  findRecentPolymarketHandoffTransactionScan,
   FundingStepReceiptReconciliationDriver,
+  inspectEvmTarget,
+  inspectSvmTarget,
+  reconcilePolymarketHandoffTerminalProviderEvidence,
   resolvePolymarketRelayerFundingReference,
 } from "../../execution/step-receipt-reconciler.js";
 import {
@@ -87,6 +94,35 @@ assert.equal(
     previous: null,
   }).status,
   "finalized",
+);
+const evmReceiptWithoutCanonicalBlock = evaluateEvmActionReceipt({
+  action: evmAction,
+  expectedSignerAddress: evmTransaction.from,
+  transaction: evmTransaction,
+  receipt: { ...evmReceipt, canonicalBlockHash: null },
+  previous: null,
+});
+assert.equal(evmReceiptWithoutCanonicalBlock.status, "pending");
+assert.equal(evmReceiptWithoutCanonicalBlock.failureCode, null);
+assert.equal(
+  evmReceiptWithoutCanonicalBlock.evidence.canonicalBlockObserved,
+  false,
+);
+assert.equal(
+  evaluateEvmActionReceipt({
+    action: evmAction,
+    expectedSignerAddress: evmTransaction.from,
+    transaction: evmTransaction,
+    receipt: {
+      ...evmReceipt,
+      canonicalBlockHash: null,
+      succeeded: false,
+      confirmations: EVM_FUNDING_FAILURE_FINALITY_CONFIRMATIONS,
+    },
+    previous: null,
+  }).status,
+  "pending",
+  "a receipt without a canonical block lookup cannot finalize success or authorize a retry",
 );
 
 assert.equal(
@@ -223,7 +259,7 @@ assert.equal(
     receipt: {
       ...evmReceipt,
       succeeded: false,
-      confirmations: FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS - 1,
+      confirmations: EVM_FUNDING_FAILURE_FINALITY_CONFIRMATIONS - 1,
     },
     previous: null,
   }).status,
@@ -236,7 +272,7 @@ const finalizedFailure = evaluateEvmActionReceipt({
   receipt: {
     ...evmReceipt,
     succeeded: false,
-    confirmations: FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS,
+    confirmations: EVM_FUNDING_FAILURE_FINALITY_CONFIRMATIONS,
   },
   previous: null,
 });
@@ -260,17 +296,39 @@ const finalizedFailureObservation: FundingStepReceiptObservation = {
   finalizedAt: new Date(0),
   reorgedAt: null,
 };
-const reorgedFinalizedFailure = evaluateEvmActionReceipt({
-  action: evmAction,
-  expectedSignerAddress: evmTransaction.from,
-  transaction: evmTransaction,
-  receipt: null,
-  previous: finalizedFailureObservation,
-});
-assert.equal(reorgedFinalizedFailure.status, "reorged");
-assert.equal(
-  shouldIgnoreFundingStepReceiptUpdate("failed", reorgedFinalizedFailure),
-  false,
+assert.throws(
+  () =>
+    evaluateEvmActionReceipt({
+      action: evmAction,
+      expectedSignerAddress: evmTransaction.from,
+      transaction: evmTransaction,
+      receipt: null,
+      previous: finalizedFailureObservation,
+    }),
+  /EVM receipt lookup is unavailable during terminal receipt verification/u,
+);
+assert.throws(
+  () =>
+    evaluateEvmActionReceipt({
+      action: evmAction,
+      expectedSignerAddress: evmTransaction.from,
+      transaction: null,
+      receipt: null,
+      previous: finalizedFailureObservation,
+    }),
+  /EVM transaction lookup is unavailable during terminal receipt verification/u,
+);
+assert.throws(
+  () =>
+    evaluateEvmActionReceipt({
+      action: evmAction,
+      expectedSignerAddress: evmTransaction.from,
+      transaction: evmTransaction,
+      receipt: { ...evmReceipt, canonicalBlockHash: null },
+      previous: finalizedFailureObservation,
+    }),
+  /canonical EVM block is unavailable during terminal receipt verification/u,
+  "an unavailable canonical block lookup must keep terminal reorg verification open",
 );
 assert.equal(
   evaluateEvmActionReceipt({
@@ -465,6 +523,11 @@ assert.match(
   receiptTargetQuery,
   /receipt\.finalized_at >= \$2::timestamptz - interval '15 minutes'/u,
 );
+assert.match(
+  receiptTargetQuery,
+  /or \(\s*receipt\.status = 'failed'/u,
+  "failed receipt reorg watch must cover Base, Polygon, and Solana executors",
+);
 const batchExecutionCalldata = ethers.AbiCoder.defaultAbiCoder().encode(
   ["tuple(address target,uint256 value,bytes callData)[]"],
   [
@@ -640,7 +703,7 @@ assert.equal(
     transaction: sponsoredTransaction,
     receipt: {
       ...failedSponsoredReceipt,
-      confirmations: FAST_EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS - 1,
+      confirmations: EVM_FUNDING_FAILURE_FINALITY_CONFIRMATIONS - 1,
     },
     previous: null,
     executionEnvelope: "privy_erc4337",
@@ -800,6 +863,34 @@ assert.deepEqual(
   ),
   { kind: "transaction", reference: resolvedRelayerHash },
 );
+assert.deepEqual(
+  await resolvePolymarketRelayerFundingReference(
+    relayerReference,
+    async () => ({
+      transactionID: "relayer_tx_12345678",
+      transactionHash: resolvedRelayerHash,
+      state: "STATE_FAILED",
+    }),
+  ),
+  { kind: "transaction", reference: resolvedRelayerHash },
+  "an exact provider transaction hash must be inspected even when the provider also reports a terminal state",
+);
+const malformedTerminalHash = await resolvePolymarketRelayerFundingReference(
+  relayerReference,
+  async () => ({
+    transactionID: "relayer_tx_12345678",
+    transactionHash: "0x1234",
+    state: "STATE_FAILED",
+  }),
+);
+assert.equal(malformedTerminalHash.kind, "evidence");
+assert.equal(
+  malformedTerminalHash.kind === "evidence"
+    ? malformedTerminalHash.evidence.status
+    : null,
+  "mismatch",
+  "a malformed provider hash must fail closed instead of falling through to hashless retry authorization",
+);
 assert.equal(
   (
     await resolvePolymarketRelayerFundingReference(
@@ -824,6 +915,641 @@ assert.equal(
   ).kind,
   "evidence",
 );
+const handoffAttemptStartedAt = new Date("2026-07-31T10:00:00.500Z");
+const recentHandoffHash = `0x${"de".repeat(32)}`;
+const exactHandoffTransfer = {
+  transactionHash: recentHandoffHash,
+  logIndex: 0,
+  blockNumber: 1_000n,
+  blockHash: `0x${"11".repeat(32)}`,
+  fromAddress: handoffFunder,
+  toAddress: handoffRecipient,
+  rawAmount: handoffAmount,
+};
+const handoffScanInput = {
+  action: handoffAction,
+  actionValidationResult: handoffValidation,
+  attemptStartedAt: handoffAttemptStartedAt,
+  rpcUrl: "https://polygon-rpc.invalid",
+  timeoutMs: 1_000,
+};
+assert.equal(
+  await findRecentPolymarketHandoffTransactionHash(handoffScanInput, {
+    fetchBlockNumber: async (input) => {
+      assert.equal(input.bypassCache, true);
+      return 1_000n;
+    },
+    fetchTransferLogs: async (input) => {
+      assert.equal(input.fromBlock, 937n);
+      assert.equal(input.toBlock, 1_000n);
+      assert.equal(input.maxAttempts, 1);
+      return [exactHandoffTransfer];
+    },
+    fetchBlockTimestamp: async (input) =>
+      BigInt(
+        Math.floor(handoffAttemptStartedAt.getTime() / 1_000) +
+          (input.blockNumber === 1_000n ? 2 : -60),
+      ),
+  }),
+  recentHandoffHash,
+  "an exact transfer mined during this attempt is a usable RPC-discovered reference",
+);
+const timestampGapTransfer = {
+  ...exactHandoffTransfer,
+  blockNumber: 999n,
+};
+await assert.rejects(
+  findRecentPolymarketHandoffTransactionScan(
+    {
+      ...handoffScanInput,
+      rpcUrl: "https://polygon-timestamp-gap-rpc.invalid",
+    },
+    {
+      fetchBlockNumber: async () => 1_000n,
+      fetchTransferLogs: async () => [timestampGapTransfer],
+      fetchBlockTimestamp: async (input) => {
+        const startedAtSeconds = Math.floor(
+          handoffAttemptStartedAt.getTime() / 1_000,
+        );
+        if (input.blockNumber === 1_000n) {
+          return BigInt(startedAtSeconds + 100);
+        }
+        if (input.blockNumber === 999n) return null;
+        return BigInt(startedAtSeconds - 60);
+      },
+    },
+  ),
+  /Polymarket handoff transfer block timestamp is unavailable/u,
+  "an exact transfer with an unavailable timestamp must not be dropped from a completed scan",
+);
+const timestampRecoveredScan = await findRecentPolymarketHandoffTransactionScan(
+  {
+    ...handoffScanInput,
+    rpcUrl: "https://polygon-timestamp-recovered-rpc.invalid",
+  },
+  {
+    fetchBlockNumber: async () => 1_000n,
+    fetchTransferLogs: async () => [timestampGapTransfer],
+    fetchBlockTimestamp: async (input) => {
+      const startedAtSeconds = Math.floor(
+        handoffAttemptStartedAt.getTime() / 1_000,
+      );
+      if (input.blockNumber === 1_000n) {
+        return BigInt(startedAtSeconds + 100);
+      }
+      if (input.blockNumber === 999n) {
+        return BigInt(startedAtSeconds + 2);
+      }
+      return BigInt(startedAtSeconds - 60);
+    },
+  },
+);
+assert.equal(timestampRecoveredScan?.match?.transactionHash, recentHandoffHash);
+assert.notEqual(
+  reconcilePolymarketHandoffTerminalProviderEvidence({
+    chainScan: timestampRecoveredScan,
+    providerEvidence: {
+      status: "failed",
+      actionMatch: true,
+      ledgerHeight: null,
+      blockHash: null,
+      canonical: true,
+      failureCode: "polymarket_relayer_transaction_failed",
+      evidence: { failureFinalized: true },
+    },
+  })?.status,
+  "failed",
+  "a recovered exact transfer must prevent provider failure from authorizing a duplicate broadcast",
+);
+assert.equal(
+  await findRecentPolymarketHandoffTransactionHash(handoffScanInput, {
+    fetchBlockNumber: async () => 1_000n,
+    fetchTransferLogs: async () => [exactHandoffTransfer],
+    fetchBlockTimestamp: async (input) =>
+      BigInt(
+        Math.floor(handoffAttemptStartedAt.getTime() / 1_000) +
+          (input.blockNumber === 1_000n ? 100 : -60),
+      ),
+  }),
+  null,
+  "an old identical transfer must not be rebound to a new attempt",
+);
+assert.equal(
+  await findRecentPolymarketHandoffTransactionHash(handoffScanInput, {
+    fetchBlockNumber: async () => 1_000n,
+    fetchTransferLogs: async () => [exactHandoffTransfer],
+    fetchBlockTimestamp: async () =>
+      BigInt(Math.floor(handoffAttemptStartedAt.getTime() / 1_000)),
+  }),
+  null,
+  "a same-second block that can predate the attempt must fail closed",
+);
+assert.equal(
+  await findRecentPolymarketHandoffTransactionHash(handoffScanInput, {
+    fetchBlockNumber: async () => 1_000n,
+    fetchTransferLogs: async () => [
+      exactHandoffTransfer,
+      {
+        ...exactHandoffTransfer,
+        transactionHash: `0x${"ef".repeat(32)}`,
+        logIndex: 1,
+      },
+    ],
+    fetchBlockTimestamp: async (input) =>
+      BigInt(
+        Math.floor(handoffAttemptStartedAt.getTime() / 1_000) +
+          (input.blockNumber === 1_000n ? 2 : -60),
+      ),
+  }),
+  null,
+  "multiple exact recent transactions are ambiguous and must fail closed",
+);
+let adaptiveScanCalls = 0;
+assert.equal(
+  await findRecentPolymarketHandoffTransactionHash(handoffScanInput, {
+    fetchBlockNumber: async () => 1_000n,
+    fetchTransferLogs: async (input) => {
+      adaptiveScanCalls += 1;
+      if (adaptiveScanCalls === 1) {
+        throw new Error("eth_getLogs supports up to a 10 block range");
+      }
+      assert.ok(input.toBlock - input.fromBlock < 10n);
+      return input.toBlock === 1_000n ? [exactHandoffTransfer] : [];
+    },
+    fetchBlockTimestamp: async (input) =>
+      BigInt(
+        Math.floor(handoffAttemptStartedAt.getTime() / 1_000) +
+          (input.blockNumber === 1_000n ? 2 : -60),
+      ),
+  }),
+  recentHandoffHash,
+  "provider block-range limits must not disable independent RPC recovery",
+);
+assert.equal(adaptiveScanCalls, 4);
+const changingRangeRpcUrl = "https://polygon-changing-range-rpc.invalid";
+let initialRangeLearningCalls = 0;
+await findRecentPolymarketHandoffTransactionScan(
+  { ...handoffScanInput, rpcUrl: changingRangeRpcUrl },
+  {
+    fetchBlockNumber: async () => 1_000n,
+    fetchTransferLogs: async (input) => {
+      initialRangeLearningCalls += 1;
+      if (initialRangeLearningCalls === 1) {
+        throw new Error("eth_getLogs supports up to a 10 block range");
+      }
+      assert.ok(input.toBlock - input.fromBlock < 10n);
+      return [];
+    },
+    fetchBlockTimestamp: async (input) =>
+      BigInt(
+        Math.floor(handoffAttemptStartedAt.getTime() / 1_000) +
+          (input.blockNumber === 1_000n ? 100 : -60),
+      ),
+  },
+);
+assert.equal(initialRangeLearningCalls, 4);
+let reducedRangeCalls = 0;
+assert.equal(
+  (
+    await findRecentPolymarketHandoffTransactionScan(
+      { ...handoffScanInput, rpcUrl: changingRangeRpcUrl },
+      {
+        fetchBlockNumber: async () => 1_000n,
+        fetchTransferLogs: async (input) => {
+          reducedRangeCalls += 1;
+          if (input.toBlock - input.fromBlock >= 3n) {
+            throw new Error("eth_getLogs supports up to a 3 block range");
+          }
+          return input.toBlock === 1_000n ? [exactHandoffTransfer] : [];
+        },
+        fetchBlockTimestamp: async (input) =>
+          BigInt(
+            Math.floor(handoffAttemptStartedAt.getTime() / 1_000) +
+              (input.blockNumber === 1_000n ? 2 : -60),
+          ),
+      },
+    )
+  )?.match?.transactionHash,
+  recentHandoffHash,
+  "a learned provider range cap must shrink when the provider lowers it",
+);
+assert.equal(
+  reducedRangeCalls,
+  6,
+  "a lower learned cap gets one old-cap wave and one bounded retry wave",
+);
+let sameCapFailureCalls = 0;
+await assert.rejects(
+  findRecentPolymarketHandoffTransactionScan(
+    { ...handoffScanInput, rpcUrl: changingRangeRpcUrl },
+    {
+      fetchBlockNumber: async () => 1_000n,
+      fetchTransferLogs: async () => {
+        sameCapFailureCalls += 1;
+        throw new Error("eth_getLogs supports up to a 3 block range");
+      },
+      fetchBlockTimestamp: async (input) =>
+        BigInt(
+          Math.floor(handoffAttemptStartedAt.getTime() / 1_000) +
+            (input.blockNumber === 1_000n ? 100 : -60),
+        ),
+    },
+  ),
+  /up to a 3 block range/u,
+  "the same learned cap must not create a retry loop",
+);
+assert.equal(sameCapFailureCalls, 3);
+let ordinaryRangeFailureCalls = 0;
+await assert.rejects(
+  findRecentPolymarketHandoffTransactionScan(
+    { ...handoffScanInput, rpcUrl: changingRangeRpcUrl },
+    {
+      fetchBlockNumber: async () => 1_000n,
+      fetchTransferLogs: async () => {
+        ordinaryRangeFailureCalls += 1;
+        throw new Error("simulated ordinary getLogs failure");
+      },
+      fetchBlockTimestamp: async (input) =>
+        BigInt(
+          Math.floor(handoffAttemptStartedAt.getTime() / 1_000) +
+            (input.blockNumber === 1_000n ? 100 : -60),
+        ),
+    },
+  ),
+  /simulated ordinary getLogs failure/u,
+  "ordinary RPC failures must propagate without a cap retry",
+);
+assert.equal(ordinaryRangeFailureCalls, 3);
+let singleBlockRangeCalls = 0;
+let movingTipReads = 0;
+const singleBlockScanner = {
+  fetchBlockHash: async () => `0x${"91".repeat(32)}`,
+  fetchBlockNumber: async () => {
+    const blockNumber = 1_000n + BigInt(movingTipReads * 4);
+    movingTipReads += 1;
+    return blockNumber;
+  },
+  fetchTransferLogs: async (input: { fromBlock: bigint; toBlock: bigint }) => {
+    singleBlockRangeCalls += 1;
+    if (singleBlockRangeCalls === 1) {
+      throw new Error("eth_getLogs supports up to a 1 block range");
+    }
+    return input.fromBlock <= 990n && input.toBlock >= 990n
+      ? [{ ...exactHandoffTransfer, blockNumber: 990n }]
+      : [];
+  },
+  fetchBlockTimestamp: async (input: { blockNumber: bigint }) => {
+    const startedAtSeconds = Math.floor(
+      handoffAttemptStartedAt.getTime() / 1_000,
+    );
+    if (input.blockNumber === 1_000n) return BigInt(startedAtSeconds + 100);
+    if (input.blockNumber === 990n) return BigInt(startedAtSeconds + 2);
+    if (input.blockNumber <= 989n) return BigInt(startedAtSeconds - 10);
+    return BigInt(startedAtSeconds + 10);
+  },
+};
+let previousScanEvidence: Parameters<
+  typeof findRecentPolymarketHandoffTransactionScan
+>[0]["previousEvidence"] = null;
+let cursorMatch: string | null = null;
+for (let scanNumber = 0; scanNumber < 4; scanNumber += 1) {
+  const scan = await findRecentPolymarketHandoffTransactionScan(
+    {
+      ...handoffScanInput,
+      rpcUrl: "https://polygon-cursor-rpc.invalid",
+      previousEvidence: previousScanEvidence,
+    },
+    singleBlockScanner,
+  );
+  assert.ok(scan);
+  previousScanEvidence = {
+    polymarketHandoffAttributionComplete: scan.attributionComplete,
+    polymarketHandoffAttributionEndBlock:
+      scan.attributionEndBlock?.toString() ?? null,
+    polymarketHandoffAttributionEndBlockHash: scan.attributionEndBlockHash,
+    polymarketHandoffAttributionFenceChanged: scan.attributionFenceChanged,
+    polymarketHandoffAttributionWindowClosed: scan.attributionWindowClosed,
+    polymarketHandoffCandidateTransactions: scan.candidateTransactions,
+    polymarketHandoffScanCaughtUp: scan.caughtUp,
+    polymarketHandoffScanHistoryCovered: scan.historyCovered,
+    polymarketHandoffScanNewestBlock: scan.newestScannedBlock.toString(),
+    polymarketHandoffScanOldestBlock: scan.oldestScannedBlock.toString(),
+    polymarketHandoffScanSweepTargetBlock: scan.sweepTargetBlock.toString(),
+  };
+  cursorMatch = scan.match?.transactionHash ?? null;
+}
+assert.equal(
+  cursorMatch,
+  recentHandoffHash,
+  "a one-block provider cap must finish a frozen sweep despite a faster-moving chain tip",
+);
+assert.equal(singleBlockRangeCalls, 13);
+let movingZeroRangeCalls = 0;
+let movingZeroTipReads = 0;
+const movingZeroScanner = {
+  fetchBlockHash: async () => `0x${"92".repeat(32)}`,
+  fetchBlockNumber: async () => {
+    const blockNumber = 1_000n + BigInt(movingZeroTipReads * 4);
+    movingZeroTipReads += 1;
+    return blockNumber;
+  },
+  fetchTransferLogs: async () => {
+    movingZeroRangeCalls += 1;
+    if (movingZeroRangeCalls === 1) {
+      throw new Error("eth_getLogs supports up to a 1 block range");
+    }
+    return [];
+  },
+  fetchBlockTimestamp: async (input: { blockNumber: bigint }) => {
+    const startedAtSeconds = Math.floor(
+      handoffAttemptStartedAt.getTime() / 1_000,
+    );
+    if (input.blockNumber >= 1_000n) return BigInt(startedAtSeconds + 100);
+    if (input.blockNumber <= 989n) return BigInt(startedAtSeconds - 10);
+    return BigInt(startedAtSeconds + 10);
+  },
+};
+let movingZeroEvidence: Parameters<
+  typeof findRecentPolymarketHandoffTransactionScan
+>[0]["previousEvidence"] = null;
+let movingZeroFinalScan = null as Awaited<
+  ReturnType<typeof findRecentPolymarketHandoffTransactionScan>
+>;
+for (let scanNumber = 0; scanNumber < 4; scanNumber += 1) {
+  movingZeroFinalScan = await findRecentPolymarketHandoffTransactionScan(
+    {
+      ...handoffScanInput,
+      rpcUrl: "https://polygon-moving-zero-rpc.invalid",
+      previousEvidence: movingZeroEvidence,
+    },
+    movingZeroScanner,
+  );
+  assert.ok(movingZeroFinalScan);
+  movingZeroEvidence = {
+    polymarketHandoffAttributionComplete:
+      movingZeroFinalScan.attributionComplete,
+    polymarketHandoffAttributionEndBlock:
+      movingZeroFinalScan.attributionEndBlock?.toString() ?? null,
+    polymarketHandoffAttributionEndBlockHash:
+      movingZeroFinalScan.attributionEndBlockHash,
+    polymarketHandoffAttributionFenceChanged:
+      movingZeroFinalScan.attributionFenceChanged,
+    polymarketHandoffAttributionWindowClosed:
+      movingZeroFinalScan.attributionWindowClosed,
+    polymarketHandoffCandidateTransactions:
+      movingZeroFinalScan.candidateTransactions,
+    polymarketHandoffScanCaughtUp: movingZeroFinalScan.caughtUp,
+    polymarketHandoffScanHistoryCovered: movingZeroFinalScan.historyCovered,
+    polymarketHandoffScanNewestBlock:
+      movingZeroFinalScan.newestScannedBlock.toString(),
+    polymarketHandoffScanOldestBlock:
+      movingZeroFinalScan.oldestScannedBlock.toString(),
+    polymarketHandoffScanSweepTargetBlock:
+      movingZeroFinalScan.sweepTargetBlock.toString(),
+  };
+}
+assert.ok(movingZeroFinalScan);
+assert.equal(movingZeroFinalScan.attributionEndBlock, 1_000n);
+assert.equal(
+  movingZeroFinalScan.attributionComplete,
+  true,
+  "a frozen attribution end must let a zero-candidate scan converge while the live chain advances faster than an RPC-capped sweep",
+);
+let multiChunkCalls = 0;
+const olderDuplicateHash = `0x${"ef".repeat(32)}`;
+const multiChunkScanner = {
+  ...singleBlockScanner,
+  fetchBlockNumber: async () => 1_000n,
+  fetchTransferLogs: async (input: { fromBlock: bigint; toBlock: bigint }) => {
+    multiChunkCalls += 1;
+    if (multiChunkCalls === 1) {
+      throw new Error("eth_getLogs supports up to a 1 block range");
+    }
+    const logs = [];
+    if (input.fromBlock <= 999n && input.toBlock >= 999n) {
+      logs.push({ ...exactHandoffTransfer, blockNumber: 999n });
+    }
+    if (input.fromBlock <= 990n && input.toBlock >= 990n) {
+      logs.push({
+        ...exactHandoffTransfer,
+        blockNumber: 990n,
+        transactionHash: olderDuplicateHash,
+      });
+    }
+    return logs;
+  },
+};
+let multiChunkEvidence: Parameters<
+  typeof findRecentPolymarketHandoffTransactionScan
+>[0]["previousEvidence"] = null;
+let multiChunkFinalScan = null as Awaited<
+  ReturnType<typeof findRecentPolymarketHandoffTransactionScan>
+>;
+for (let scanNumber = 0; scanNumber < 4; scanNumber += 1) {
+  multiChunkFinalScan = await findRecentPolymarketHandoffTransactionScan(
+    {
+      ...handoffScanInput,
+      rpcUrl: "https://polygon-multi-candidate-rpc.invalid",
+      previousEvidence: multiChunkEvidence,
+    },
+    multiChunkScanner,
+  );
+  assert.ok(multiChunkFinalScan);
+  multiChunkEvidence = {
+    polymarketHandoffAttributionComplete:
+      multiChunkFinalScan.attributionComplete,
+    polymarketHandoffAttributionEndBlock:
+      multiChunkFinalScan.attributionEndBlock?.toString() ?? null,
+    polymarketHandoffAttributionEndBlockHash:
+      multiChunkFinalScan.attributionEndBlockHash,
+    polymarketHandoffAttributionFenceChanged:
+      multiChunkFinalScan.attributionFenceChanged,
+    polymarketHandoffAttributionWindowClosed:
+      multiChunkFinalScan.attributionWindowClosed,
+    polymarketHandoffCandidateTransactions:
+      multiChunkFinalScan.candidateTransactions,
+    polymarketHandoffScanCaughtUp: multiChunkFinalScan.caughtUp,
+    polymarketHandoffScanHistoryCovered: multiChunkFinalScan.historyCovered,
+    polymarketHandoffScanNewestBlock:
+      multiChunkFinalScan.newestScannedBlock.toString(),
+    polymarketHandoffScanOldestBlock:
+      multiChunkFinalScan.oldestScannedBlock.toString(),
+    polymarketHandoffScanSweepTargetBlock:
+      multiChunkFinalScan.sweepTargetBlock.toString(),
+  };
+}
+assert.ok(multiChunkFinalScan);
+assert.equal(multiChunkFinalScan.caughtUp, true);
+assert.equal(Object.keys(multiChunkFinalScan.candidateTransactions).length, 2);
+assert.equal(
+  multiChunkFinalScan.match,
+  null,
+  "candidate uniqueness must be decided only after the complete persisted scan, not per chunk",
+);
+const terminalProviderFailureEvidence: FundingStepReceiptEvidence = {
+  status: "failed",
+  actionMatch: true,
+  ledgerHeight: null,
+  blockHash: null,
+  canonical: true,
+  failureCode: "polymarket_relayer_transaction_failed",
+  evidence: {
+    failureFinalized: true,
+    providerReferenceMatches: true,
+    relayerState: "STATE_FAILED",
+  },
+};
+const openWindowZeroCandidateScan =
+  await findRecentPolymarketHandoffTransactionScan(
+    {
+      ...handoffScanInput,
+      rpcUrl: "https://polygon-open-zero-scan-rpc.invalid",
+    },
+    {
+      fetchBlockNumber: async () => 1_000n,
+      fetchTransferLogs: async () => [],
+      fetchBlockTimestamp: async (input) =>
+        BigInt(
+          Math.floor(handoffAttemptStartedAt.getTime() / 1_000) +
+            (input.blockNumber === 1_000n ? 2 : -60),
+        ),
+    },
+  );
+assert.ok(openWindowZeroCandidateScan);
+assert.equal(openWindowZeroCandidateScan.attributionComplete, false);
+assert.equal(openWindowZeroCandidateScan.attributionEndBlock, null);
+assert.equal(
+  reconcilePolymarketHandoffTerminalProviderEvidence({
+    chainScan: openWindowZeroCandidateScan,
+    providerEvidence: terminalProviderFailureEvidence,
+  })?.status,
+  "pending",
+  "provider failure cannot authorize a retry while a chain transfer may still land inside the attribution window",
+);
+const zeroCandidateScan = await findRecentPolymarketHandoffTransactionScan(
+  { ...handoffScanInput, rpcUrl: "https://polygon-zero-scan-rpc.invalid" },
+  {
+    fetchBlockHash: async () => `0x${"93".repeat(32)}`,
+    fetchBlockNumber: async () => 1_000n,
+    fetchTransferLogs: async () => [],
+    fetchBlockTimestamp: async (input) =>
+      BigInt(
+        Math.floor(handoffAttemptStartedAt.getTime() / 1_000) +
+          (input.blockNumber === 1_000n ? 100 : -60),
+      ),
+  },
+);
+assert.ok(zeroCandidateScan);
+assert.equal(zeroCandidateScan.caughtUp, true);
+let reorgedFenceLogScans = 0;
+const reorgedZeroCandidateFence =
+  await findRecentPolymarketHandoffTransactionScan(
+    {
+      ...handoffScanInput,
+      rpcUrl: "https://polygon-zero-scan-rpc.invalid",
+      previousEvidence: {
+        polymarketHandoffAttributionComplete:
+          zeroCandidateScan.attributionComplete,
+        polymarketHandoffAttributionEndBlock:
+          zeroCandidateScan.attributionEndBlock?.toString() ?? null,
+        polymarketHandoffAttributionEndBlockHash:
+          zeroCandidateScan.attributionEndBlockHash,
+        polymarketHandoffAttributionFenceChanged:
+          zeroCandidateScan.attributionFenceChanged,
+        polymarketHandoffAttributionWindowClosed:
+          zeroCandidateScan.attributionWindowClosed,
+        polymarketHandoffCandidateTransactions:
+          zeroCandidateScan.candidateTransactions,
+        polymarketHandoffScanCaughtUp: zeroCandidateScan.caughtUp,
+        polymarketHandoffScanHistoryCovered: zeroCandidateScan.historyCovered,
+        polymarketHandoffScanNewestBlock:
+          zeroCandidateScan.newestScannedBlock.toString(),
+        polymarketHandoffScanOldestBlock:
+          zeroCandidateScan.oldestScannedBlock.toString(),
+        polymarketHandoffScanSweepTargetBlock:
+          zeroCandidateScan.sweepTargetBlock.toString(),
+      },
+    },
+    {
+      fetchBlockHash: async () => `0x${"94".repeat(32)}`,
+      fetchBlockNumber: async () => 1_000n,
+      fetchTransferLogs: async () => {
+        reorgedFenceLogScans += 1;
+        return [exactHandoffTransfer];
+      },
+      fetchBlockTimestamp: async (input) =>
+        BigInt(
+          Math.floor(handoffAttemptStartedAt.getTime() / 1_000) +
+            (input.blockNumber === 1_000n ? 100 : -60),
+        ),
+    },
+  );
+assert.ok(reorgedZeroCandidateFence);
+assert.equal(reorgedZeroCandidateFence.attributionFenceChanged, true);
+assert.equal(reorgedZeroCandidateFence.attributionComplete, false);
+assert.equal(reorgedFenceLogScans, 0);
+const invalidatedAbsenceProof =
+  reconcilePolymarketHandoffTerminalProviderEvidence({
+    chainScan: reorgedZeroCandidateFence,
+    providerEvidence: terminalProviderFailureEvidence,
+  });
+assert.equal(invalidatedAbsenceProof?.status, "reorged");
+assert.equal(
+  invalidatedAbsenceProof?.failureCode,
+  "polymarket_handoff_attribution_fence_changed",
+);
+assert.equal(invalidatedAbsenceProof?.evidence.chainAbsenceProven, false);
+assert.deepEqual(
+  reconcilePolymarketHandoffTerminalProviderEvidence({
+    chainScan: zeroCandidateScan,
+    providerEvidence: terminalProviderFailureEvidence,
+  }),
+  {
+    ...terminalProviderFailureEvidence,
+    evidence: {
+      ...terminalProviderFailureEvidence.evidence,
+      polymarketHandoffAttributionComplete: true,
+      polymarketHandoffAttributionEndBlock: "1000",
+      polymarketHandoffAttributionEndBlockHash: `0x${"93".repeat(32)}`,
+      polymarketHandoffAttributionFenceChanged: false,
+      polymarketHandoffAttributionWindowClosed: true,
+      polymarketHandoffCandidateTransactions: {},
+      polymarketHandoffScanCaughtUp: true,
+      polymarketHandoffScanHistoryCovered: true,
+      polymarketHandoffScanLastFromBlock: "937",
+      polymarketHandoffScanLastToBlock: "1000",
+      polymarketHandoffScanNewestBlock: "1000",
+      polymarketHandoffScanOldestBlock: "937",
+      polymarketHandoffScanSweepTargetBlock: "1000",
+      chainAbsenceProven: true,
+    },
+  },
+  "provider failure may authorize retry only after an exact completed zero-candidate scan",
+);
+const incompleteFailureEvidence =
+  reconcilePolymarketHandoffTerminalProviderEvidence({
+    chainScan: {
+      ...zeroCandidateScan,
+      attributionComplete: false,
+      caughtUp: false,
+    },
+    providerEvidence: terminalProviderFailureEvidence,
+  });
+assert.equal(incompleteFailureEvidence?.status, "pending");
+assert.equal(
+  incompleteFailureEvidence?.evidence.providerTerminalFailurePendingChainScan,
+  true,
+);
+const conflictingFailureEvidence =
+  reconcilePolymarketHandoffTerminalProviderEvidence({
+    chainScan: multiChunkFinalScan,
+    providerEvidence: terminalProviderFailureEvidence,
+  });
+assert.equal(conflictingFailureEvidence?.status, "mismatch");
+assert.equal(
+  conflictingFailureEvidence?.failureCode,
+  "polymarket_handoff_provider_chain_conflict",
+);
 const transferEvent = transferInterface.getEvent("Transfer");
 if (!transferEvent) throw new Error("Transfer event ABI is unavailable");
 const exactTransferLog = transferInterface.encodeEventLog(transferEvent, [
@@ -843,10 +1569,37 @@ const handoffReceipt = {
     {
       address: handoffToken,
       data: exactTransferLog.data,
+      logIndex: 3,
       topics: exactTransferLog.topics,
     },
   ],
 };
+assert.equal(
+  evaluatePolymarketDepositWalletHandoffReceipt({
+    action: handoffAction,
+    actionValidationResult: handoffValidation,
+    transaction: handoffTransaction,
+    receipt: { ...handoffReceipt, canonicalBlockHash: null },
+    previous: null,
+  }).status,
+  "pending",
+);
+assert.equal(
+  evaluatePolymarketDepositWalletHandoffReceipt({
+    action: handoffAction,
+    actionValidationResult: handoffValidation,
+    transaction: handoffTransaction,
+    receipt: {
+      ...handoffReceipt,
+      canonicalBlockHash: null,
+      succeeded: false,
+      confirmations: EVM_FUNDING_FAILURE_FINALITY_CONFIRMATIONS,
+    },
+    previous: null,
+  }).status,
+  "pending",
+  "a handoff receipt cannot finalize or authorize a retry without canonical block evidence",
+);
 assert.equal(
   evaluatePolymarketDepositWalletHandoffReceipt({
     action: handoffAction,
@@ -870,6 +1623,34 @@ assert.equal(
   }).status,
   "confirmed",
 );
+const confirmedHandoffFailure = evaluatePolymarketDepositWalletHandoffReceipt({
+  action: handoffAction,
+  actionValidationResult: handoffValidation,
+  transaction: handoffTransaction,
+  receipt: {
+    ...handoffReceipt,
+    succeeded: false,
+    confirmations: EVM_FUNDING_FAILURE_FINALITY_CONFIRMATIONS - 1,
+  },
+  previous: null,
+});
+assert.equal(confirmedHandoffFailure.status, "confirmed");
+assert.equal(confirmedHandoffFailure.actionMatch, true);
+assert.equal(confirmedHandoffFailure.evidence.failureFinalized, false);
+const finalizedHandoffFailure = evaluatePolymarketDepositWalletHandoffReceipt({
+  action: handoffAction,
+  actionValidationResult: handoffValidation,
+  transaction: handoffTransaction,
+  receipt: {
+    ...handoffReceipt,
+    succeeded: false,
+    confirmations: EVM_FUNDING_FAILURE_FINALITY_CONFIRMATIONS,
+  },
+  previous: null,
+});
+assert.equal(finalizedHandoffFailure.status, "failed");
+assert.equal(finalizedHandoffFailure.actionMatch, true);
+assert.equal(finalizedHandoffFailure.evidence.failureFinalized, true);
 const finalizedHandoffObservation: FundingStepReceiptObservation = {
   operationId: "00000000-0000-4000-8000-000000000101",
   stepId: "00000000-0000-4000-8000-000000000102",
@@ -887,6 +1668,227 @@ const finalizedHandoffObservation: FundingStepReceiptObservation = {
   finalizedAt: new Date("2026-07-31T10:00:01.000Z"),
   reorgedAt: null,
 };
+const hashlessFailedHandoffObservation: FundingStepReceiptObservation = {
+  ...finalizedHandoffObservation,
+  status: "failed",
+  ledgerHeight: "1000",
+  blockHash: `0x${"93".repeat(32)}`,
+  failureCode: "polymarket_relayer_transaction_failed",
+  evidence: {
+    failureFinalized: true,
+    chainAbsenceProven: true,
+    polymarketHandoffAttributionComplete: true,
+    polymarketHandoffAttributionEndBlock: "1000",
+    polymarketHandoffAttributionEndBlockHash: `0x${"93".repeat(32)}`,
+  },
+};
+const hashlessFailedHandoffTarget: FundingStepReceiptTarget = {
+  operationId: hashlessFailedHandoffObservation.operationId,
+  stepId: hashlessFailedHandoffObservation.stepId,
+  segmentId: null,
+  attemptId: hashlessFailedHandoffObservation.attemptId,
+  attemptStartedAt: handoffAttemptStartedAt,
+  stepKind: "external_handoff",
+  payerRequirement: "user",
+  stepState: "action_required",
+  networkId: handoffAction.networkId,
+  action: handoffAction,
+  actionValidationResult: handoffValidation,
+  receiptRefCiphertext: "encrypted:hashless-handoff",
+  receiptRefLookupHmac: "fingerprint:hashless-handoff",
+  lookupKeyVersion: 1,
+  previousReceipt: hashlessFailedHandoffObservation,
+};
+await assert.rejects(
+  inspectEvmTarget(hashlessFailedHandoffTarget, relayerReference, undefined, {
+    findTransactionScan: async () => {
+      throw new Error("Polygon RPC unavailable");
+    },
+    resolveReference: async () => ({
+      kind: "evidence" as const,
+      evidence: terminalProviderFailureEvidence,
+    }),
+  }),
+  /chain scan is unavailable during hashless failure verification/u,
+  "a Polygon outage must not consume a hashless failed-receipt reorg watch while provider failure remains unchanged",
+);
+await assert.rejects(
+  inspectEvmTarget(hashlessFailedHandoffTarget, relayerReference, undefined, {
+    findTransactionScan: async () => zeroCandidateScan,
+    resolveReference: async () => {
+      throw new Error("Polymarket relayer unavailable");
+    },
+  }),
+  /relayer lookup is unavailable during hashless failure verification/u,
+  "a provider outage with an unchanged zero-transfer proof must retry without replacing the stored failure",
+);
+const multiCandidateDuringProviderOutage = await inspectEvmTarget(
+  hashlessFailedHandoffTarget,
+  relayerReference,
+  undefined,
+  {
+    findTransactionScan: async () => multiChunkFinalScan,
+    resolveReference: async () => {
+      throw new Error("Polymarket relayer unavailable");
+    },
+  },
+);
+assert.deepEqual(
+  {
+    status: multiCandidateDuringProviderOutage.status,
+    failureCode: multiCandidateDuringProviderOutage.failureCode,
+    invalidatingReceiptStatus:
+      multiCandidateDuringProviderOutage.evidence.invalidatingReceiptStatus,
+    invalidatingReceiptFailureCode:
+      multiCandidateDuringProviderOutage.evidence.invalidatingReceiptFailureCode,
+    candidateCount: Object.keys(
+      (multiCandidateDuringProviderOutage.evidence
+        .polymarketHandoffCandidateTransactions ?? {}) as object,
+    ).length,
+  },
+  {
+    status: "reorged",
+    failureCode: "polymarket_handoff_failure_evidence_invalidated",
+    invalidatingReceiptStatus: "mismatch",
+    invalidatingReceiptFailureCode:
+      "polymarket_handoff_chain_candidate_ambiguity",
+    candidateCount: 2,
+  },
+  "multiple exact chain candidates must revoke retry even while the provider is unavailable",
+);
+const invalidatedHashlessFailure = await inspectEvmTarget(
+  hashlessFailedHandoffTarget,
+  relayerReference,
+  undefined,
+  {
+    findTransactionScan: async () => {
+      throw new Error("Polygon RPC unavailable");
+    },
+    resolveReference: async () => ({
+      kind: "evidence" as const,
+      evidence: {
+        status: "mismatch" as const,
+        actionMatch: false,
+        ledgerHeight: null,
+        blockHash: null,
+        canonical: true,
+        failureCode: "polymarket_relayer_reference_mismatch",
+        evidence: { providerReferenceMatches: false },
+      },
+    }),
+  },
+);
+assert.deepEqual(
+  {
+    status: invalidatedHashlessFailure.status,
+    canonical: invalidatedHashlessFailure.canonical,
+    failureCode: invalidatedHashlessFailure.failureCode,
+  },
+  {
+    status: "reorged",
+    canonical: false,
+    failureCode: "polymarket_handoff_failure_evidence_invalidated",
+  },
+  "a later provider identity conflict must revoke retry authorization from a stored hashless failure",
+);
+const conflictingProviderHash = `0x${"94".repeat(32)}`;
+const chainProviderHashConflict = await inspectEvmTarget(
+  hashlessFailedHandoffTarget,
+  relayerReference,
+  undefined,
+  {
+    findTransactionScan: async () => timestampRecoveredScan,
+    resolveReference: async () => ({
+      kind: "transaction" as const,
+      reference: conflictingProviderHash,
+    }),
+  },
+);
+assert.deepEqual(
+  {
+    status: chainProviderHashConflict.status,
+    failureCode: chainProviderHashConflict.failureCode,
+    invalidatingReceiptStatus:
+      chainProviderHashConflict.evidence.invalidatingReceiptStatus,
+    chainTransactionHash:
+      chainProviderHashConflict.evidence.chainTransactionHash,
+    providerTransactionHash:
+      chainProviderHashConflict.evidence.providerTransactionHash,
+  },
+  {
+    status: "reorged",
+    failureCode: "polymarket_handoff_failure_evidence_invalidated",
+    invalidatingReceiptStatus: "mismatch",
+    chainTransactionHash: recentHandoffHash,
+    providerTransactionHash: conflictingProviderHash,
+  },
+  "conflicting exact chain/provider hashes must revoke a retry authorized by a hashless failure",
+);
+const providerFailureAfterChainCandidate = await inspectEvmTarget(
+  hashlessFailedHandoffTarget,
+  relayerReference,
+  undefined,
+  {
+    findTransactionScan: async () => timestampRecoveredScan,
+    resolveReference: async () => ({
+      kind: "evidence" as const,
+      evidence: terminalProviderFailureEvidence,
+    }),
+  },
+);
+assert.deepEqual(
+  {
+    status: providerFailureAfterChainCandidate.status,
+    failureCode: providerFailureAfterChainCandidate.failureCode,
+    invalidatingReceiptStatus:
+      providerFailureAfterChainCandidate.evidence.invalidatingReceiptStatus,
+    invalidatingReceiptFailureCode:
+      providerFailureAfterChainCandidate.evidence.invalidatingReceiptFailureCode,
+    unboundChainTransactionHash:
+      providerFailureAfterChainCandidate.evidence.unboundChainTransactionHash,
+  },
+  {
+    status: "reorged",
+    failureCode: "polymarket_handoff_failure_evidence_invalidated",
+    invalidatingReceiptStatus: "mismatch",
+    invalidatingReceiptFailureCode:
+      "polymarket_handoff_provider_chain_conflict",
+    unboundChainTransactionHash: recentHandoffHash,
+  },
+  "a chain candidate appearing after provider failure must revoke the hashless retry authorization",
+);
+const replacementHandoffBlockHash = `0x${"bc".repeat(32)}`;
+const reorgedIntoFailedHandoff = evaluatePolymarketDepositWalletHandoffReceipt({
+  action: handoffAction,
+  actionValidationResult: handoffValidation,
+  transaction: handoffTransaction,
+  receipt: {
+    ...handoffReceipt,
+    blockHash: replacementHandoffBlockHash,
+    canonicalBlockHash: replacementHandoffBlockHash,
+    succeeded: false,
+    confirmations: EVM_FUNDING_FAILURE_FINALITY_CONFIRMATIONS,
+  },
+  previous: finalizedHandoffObservation,
+});
+assert.equal(reorgedIntoFailedHandoff.status, "reorged");
+assert.equal(
+  reorgedIntoFailedHandoff.failureCode,
+  "finalized_receipt_block_changed",
+  "a finalized handoff remapped into a reverted canonical block must invalidate the old success before failure handling",
+);
+assert.throws(
+  () =>
+    evaluatePolymarketDepositWalletHandoffReceipt({
+      action: handoffAction,
+      actionValidationResult: handoffValidation,
+      transaction: handoffTransaction,
+      receipt: { ...handoffReceipt, canonicalBlockHash: null },
+      previous: finalizedHandoffObservation,
+    }),
+  /canonical Polymarket handoff block is unavailable during terminal receipt verification/u,
+  "handoff reorg verification must remain open when the canonical block lookup is unavailable",
+);
 const boundHandoffReceipt = bindPolymarketRelayerTransactionHash({
   evaluated: evaluatePolymarketDepositWalletHandoffReceipt({
     action: handoffAction,
@@ -899,6 +1901,75 @@ const boundHandoffReceipt = bindPolymarketRelayerTransactionHash({
   transactionHash: resolvedRelayerHash.toUpperCase().replace("0X", "0x"),
 });
 assert.equal(boundHandoffReceipt.evidence.transactionHash, resolvedRelayerHash);
+const lateHashAfterProviderFailure = bindPolymarketRelayerTransactionHash({
+  evaluated: {
+    status: "pending",
+    actionMatch: null,
+    ledgerHeight: null,
+    blockHash: null,
+    canonical: true,
+    failureCode: null,
+    evidence: { transactionObserved: false },
+  },
+  previous: {
+    ...finalizedHandoffObservation,
+    status: "failed",
+    failureCode: "polymarket_relayer_transaction_failed",
+    evidence: {
+      failureFinalized: true,
+      providerReferenceMatches: true,
+    },
+  },
+  transactionHash: resolvedRelayerHash,
+  transactionHashSource: "provider",
+});
+assert.equal(lateHashAfterProviderFailure.status, "reorged");
+assert.equal(lateHashAfterProviderFailure.actionMatch, true);
+assert.equal(lateHashAfterProviderFailure.canonical, false);
+assert.equal(
+  lateHashAfterProviderFailure.failureCode,
+  "polymarket_relayer_terminal_failure_invalidated",
+  "a late exact provider hash must revoke retry authorization before its transaction can race a duplicate",
+);
+assert.equal(
+  lateHashAfterProviderFailure.evidence.transactionHash,
+  resolvedRelayerHash,
+);
+const mismatchedLateHashAfterProviderFailure =
+  bindPolymarketRelayerTransactionHash({
+    evaluated: evaluatePolymarketDepositWalletHandoffReceipt({
+      action: handoffAction,
+      actionValidationResult: handoffValidation,
+      transaction: handoffTransaction,
+      receipt: { ...handoffReceipt, logs: [] },
+      previous: null,
+    }),
+    previous: {
+      ...hashlessFailedHandoffObservation,
+      failureCode: "polymarket_relayer_transaction_failed",
+    },
+    transactionHash: resolvedRelayerHash,
+    transactionHashSource: "provider",
+  });
+assert.deepEqual(
+  {
+    status: mismatchedLateHashAfterProviderFailure.status,
+    canonical: mismatchedLateHashAfterProviderFailure.canonical,
+    failureCode: mismatchedLateHashAfterProviderFailure.failureCode,
+    evaluatedStatus:
+      mismatchedLateHashAfterProviderFailure.evidence.evaluatedStatus,
+    evaluatedFailureCode:
+      mismatchedLateHashAfterProviderFailure.evidence.evaluatedFailureCode,
+  },
+  {
+    status: "reorged",
+    canonical: false,
+    failureCode: "polymarket_relayer_terminal_failure_invalidated",
+    evaluatedStatus: "mismatch",
+    evaluatedFailureCode: "polymarket_handoff_transfer_mismatch",
+  },
+  "a late exact provider hash with conflicting transfer evidence must revoke the earlier hashless retry authorization",
+);
 const remappedHandoffReceipt = bindPolymarketRelayerTransactionHash({
   evaluated: boundHandoffReceipt,
   previous: {
@@ -908,7 +1979,7 @@ const remappedHandoffReceipt = bindPolymarketRelayerTransactionHash({
   transactionHash: `0x${"ef".repeat(32)}`,
 });
 assert.equal(remappedHandoffReceipt.status, "reorged");
-assert.equal(remappedHandoffReceipt.actionMatch, false);
+assert.equal(remappedHandoffReceipt.actionMatch, true);
 assert.equal(
   remappedHandoffReceipt.failureCode,
   "polymarket_relayer_transaction_hash_changed",
@@ -927,26 +1998,27 @@ assert.equal(
   repeatedRemapReceipt.failureCode,
   "polymarket_relayer_transaction_hash_changed",
 );
-assert.deepEqual(
-  evaluatePolymarketDepositWalletHandoffReceipt({
-    action: handoffAction,
-    actionValidationResult: handoffValidation,
-    transaction: handoffTransaction,
-    receipt: null,
-    previous: finalizedHandoffObservation,
-  }),
-  {
-    status: "reorged",
-    actionMatch: true,
-    ledgerHeight: handoffReceipt.blockNumber.toString(),
-    blockHash: handoffReceipt.blockHash,
-    canonical: false,
-    failureCode: "finalized_receipt_disappeared",
-    evidence: {
-      transactionObserved: true,
-      receiptObserved: false,
-    },
-  },
+assert.throws(
+  () =>
+    evaluatePolymarketDepositWalletHandoffReceipt({
+      action: handoffAction,
+      actionValidationResult: handoffValidation,
+      transaction: handoffTransaction,
+      receipt: null,
+      previous: finalizedHandoffObservation,
+    }),
+  /Polymarket handoff receipt lookup is unavailable during terminal receipt verification/u,
+);
+assert.throws(
+  () =>
+    evaluatePolymarketDepositWalletHandoffReceipt({
+      action: handoffAction,
+      actionValidationResult: handoffValidation,
+      transaction: null,
+      receipt: null,
+      previous: finalizedHandoffObservation,
+    }),
+  /Polymarket handoff transaction lookup is unavailable during terminal receipt verification/u,
 );
 const extraTransferLog = transferInterface.encodeEventLog(transferEvent, [
   handoffFunder,
@@ -1031,6 +2103,99 @@ assert.equal(
   }).status,
   "mismatch",
 );
+const confirmedSvmFailure = evaluateSvmActionReceipt({
+  action: svmAction,
+  expectedSignerAddress: svmSigner,
+  transaction: {
+    ...svmTransaction,
+    confirmationStatus: "confirmed",
+    failed: true,
+  },
+  previous: null,
+});
+assert.equal(confirmedSvmFailure.status, "confirmed");
+assert.equal(confirmedSvmFailure.evidence.failureFinalized, false);
+const finalizedSvmFailure = evaluateSvmActionReceipt({
+  action: svmAction,
+  expectedSignerAddress: svmSigner,
+  transaction: { ...svmTransaction, failed: true },
+  previous: null,
+});
+assert.equal(finalizedSvmFailure.status, "failed");
+assert.equal(finalizedSvmFailure.evidence.failureFinalized, true);
+const svmReference = bs58.encode(new Uint8Array(64).fill(7));
+const finalizedSvmObservation: FundingStepReceiptObservation = {
+  operationId: "00000000-0000-4000-8000-000000000121",
+  stepId: "00000000-0000-4000-8000-000000000122",
+  attemptId: "00000000-0000-4000-8000-000000000123",
+  networkId: svmAction.networkId,
+  status: "finalized",
+  actionMatch: true,
+  ledgerHeight: svmTransaction.slot.toString(),
+  blockHash: null,
+  canonical: true,
+  failureCode: null,
+  evidence: { transactionSignature: svmReference },
+  firstSeenAt: new Date(0),
+  observedAt: new Date(0),
+  finalizedAt: new Date(0),
+  reorgedAt: null,
+};
+assert.throws(
+  () =>
+    evaluateSvmActionReceipt({
+      action: svmAction,
+      expectedSignerAddress: svmSigner,
+      transaction: null,
+      previous: finalizedSvmObservation,
+    }),
+  /Solana receipt lookup is unavailable during terminal receipt verification/u,
+);
+const svmTarget: FundingStepReceiptTarget = {
+  operationId: finalizedSvmObservation.operationId,
+  stepId: finalizedSvmObservation.stepId,
+  segmentId: "00000000-0000-4000-8000-000000000124",
+  attemptId: finalizedSvmObservation.attemptId,
+  attemptStartedAt: new Date("2026-07-24T09:59:59.000Z"),
+  stepKind: "transaction",
+  payerRequirement: "user",
+  stepState: "succeeded",
+  networkId: svmAction.networkId,
+  action: svmAction,
+  actionValidationResult: { signerAddress: svmSigner },
+  receiptRefCiphertext: `encrypted:${svmReference}`,
+  receiptRefLookupHmac: `fingerprint:${svmReference}`,
+  lookupKeyVersion: 1,
+  previousReceipt: finalizedSvmObservation,
+};
+let svmTransactionLookupCount = 0;
+await assert.rejects(
+  inspectSvmTarget(svmTarget, svmReference, {
+    fetchSignatureStatus: async () => null,
+    fetchTransaction: async () => {
+      svmTransactionLookupCount += 1;
+      return null;
+    },
+  }),
+  /Solana receipt lookup is unavailable during terminal receipt verification/u,
+  "a nullable signature-status read is not positive reorg evidence",
+);
+assert.equal(svmTransactionLookupCount, 0);
+await assert.rejects(
+  inspectSvmTarget(svmTarget, svmReference, {
+    fetchSignatureStatus: async () => ({
+      confirmationStatus: "finalized",
+      failed: false,
+    }),
+    fetchTransaction: async () => {
+      svmTransactionLookupCount += 1;
+      return null;
+    },
+  }),
+  /Solana receipt lookup is unavailable during terminal receipt verification/u,
+  "a nullable transaction-detail read is not positive reorg evidence",
+);
+assert.equal(svmTransactionLookupCount, 1);
 
 const reference = `0x${"12".repeat(32)}`;
 const target: FundingStepReceiptTarget = {
@@ -1038,6 +2203,7 @@ const target: FundingStepReceiptTarget = {
   stepId: "00000000-0000-4000-8000-000000000002",
   segmentId: "00000000-0000-4000-8000-000000000003",
   attemptId: "00000000-0000-4000-8000-000000000004",
+  attemptStartedAt: new Date("2026-07-24T09:59:59.000Z"),
   stepKind: "transaction",
   payerRequirement: "user",
   stepState: "submitted",
@@ -1218,6 +2384,34 @@ assert.equal(
   shouldIgnoreFundingStepReceiptUpdate("failed", correctedFinalizedReceipt),
   true,
 );
+assert.equal(
+  shouldIgnoreFundingStepReceiptUpdate("failed", {
+    status: "failed",
+    actionMatch: true,
+    ledgerHeight: "10",
+    blockHash: evmReceipt.blockHash,
+    canonical: true,
+    failureCode: "transaction_reverted",
+    evidence: { failureFinalized: true },
+  }),
+  true,
+  "repeated finalized failure polling must be idempotent",
+);
+for (const terminalStatus of ["mismatch", "reorged"] as const) {
+  assert.equal(
+    shouldIgnoreFundingStepReceiptUpdate(terminalStatus, {
+      status: terminalStatus,
+      actionMatch: false,
+      ledgerHeight: "10",
+      blockHash: evmReceipt.blockHash,
+      canonical: terminalStatus !== "reorged",
+      failureCode: `test_${terminalStatus}`,
+      evidence: {},
+    }),
+    true,
+    `repeated ${terminalStatus} polling must be an idempotent read`,
+  );
+}
 assert.equal(
   fundingStepStateForReceipt("finalized", "succeeded", "venue_preparation"),
   "succeeded",

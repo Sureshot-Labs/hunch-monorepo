@@ -164,6 +164,40 @@ await pollFundingReconciliationEvidence({
   },
 });
 assert.deepEqual(actionWaitCalls, []);
+
+const failedReceiptWatchCalls: string[] = [];
+await pollFundingReconciliationEvidence({
+  operationId: "00000000-0000-4000-8000-000000000012",
+  state: { status: "in_progress", stage: "source_action" },
+  awaitingUnbroadcastActionReport: true,
+  recentFailedReceiptWatch: true,
+  now: new Date("2026-07-29T13:24:01.750Z"),
+  receiptPoll: async () => {
+    failedReceiptWatchCalls.push("receipt");
+    return { receiptsPolled: 1 };
+  },
+  postconditionPoll: async () => {
+    failedReceiptWatchCalls.push("postcondition");
+    return { postconditionsPolled: 0 };
+  },
+  destinationPoll: async () => {
+    failedReceiptWatchCalls.push("destination");
+    return { destinationsPolled: 0, destinationSatisfied: false };
+  },
+  providerPoll: async () => {
+    failedReceiptWatchCalls.push("provider");
+    return { requestsPolled: 0 };
+  },
+});
+assert.equal(
+  failedReceiptWatchCalls[0],
+  "receipt",
+  "a recent canonical failure must remain under receipt polling even while the retry action is awaiting a report",
+);
+assert.deepEqual(
+  new Set(failedReceiptWatchCalls.slice(1)),
+  new Set(["postcondition", "destination", "provider"]),
+);
 assert.equal(
   fundingReconciliationPollDelayMs(
     { status: "in_progress", stage: "source_action" },
@@ -245,6 +279,55 @@ assert.equal(
     },
   ),
   60_000,
+);
+const broadcastAttemptStartedAt = new Date("2026-07-29T13:24:00.000Z");
+const broadcastEvidenceActiveUntil = new Date(
+  broadcastAttemptStartedAt.getTime() + 90_000,
+);
+assert.equal(
+  fundingReconciliationPollDelayMs(
+    { status: "recovery_required", stage: "source_action" },
+    {
+      activePollDelayMs: 2_000,
+      broadcastEvidenceActiveUntil,
+      idlePollDelayMs: 15_000,
+      now: new Date("2026-07-29T13:24:30.000Z"),
+      recoveryMode: "automatic_evidence",
+      recoveryPollDelayMs: 60_000,
+    },
+  ),
+  2_000,
+  "a recent Base, Polygon, or Solana broadcast must keep using active RPC polling while automatic evidence can still arrive",
+);
+assert.equal(
+  fundingReconciliationPollDelayMs(
+    { status: "recovery_required", stage: "source_action" },
+    {
+      activePollDelayMs: 2_000,
+      broadcastEvidenceActiveUntil,
+      idlePollDelayMs: 15_000,
+      now: broadcastEvidenceActiveUntil,
+      recoveryMode: "automatic_evidence",
+      recoveryPollDelayMs: 60_000,
+    },
+  ),
+  60_000,
+  "the bounded active receipt window must fall back to the recovery cadence at its deadline",
+);
+assert.equal(
+  fundingReconciliationPollDelayMs(
+    { status: "recovery_required", stage: "source_action" },
+    {
+      activePollDelayMs: 2_000,
+      broadcastEvidenceActiveUntil,
+      idlePollDelayMs: 15_000,
+      now: new Date("2026-07-29T13:24:30.000Z"),
+      recoveryMode: "manual_review",
+      recoveryPollDelayMs: 60_000,
+    },
+  ),
+  60_000,
+  "manual recovery must never be converted into an automatic hot poll",
 );
 
 assert.equal(
@@ -336,5 +419,5 @@ assert.equal(
 );
 
 console.log(
-  "[funding-reconciliation-evidence-tests] action waits skip external polling, terminal refunds keep receipt and provider refreshes best-effort so their failures cannot block replacement scans, owned destination evidence bypasses slow provider status, automatic recovery requeues at its dedicated interval, and manual recovery has no provider loop",
+  "[funding-reconciliation-evidence-tests] action waits skip external polling, terminal refunds keep receipt and provider refreshes best-effort so their failures cannot block replacement scans, owned destination evidence bypasses slow provider status, recent automatic-recovery broadcasts keep a bounded active RPC cadence, and manual recovery has no hot loop",
 );

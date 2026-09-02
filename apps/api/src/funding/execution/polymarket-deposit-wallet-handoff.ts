@@ -12,6 +12,11 @@ const POLYMARKET_RELAYER_TRANSACTION_REFERENCE_PREFIX =
   "polymarket-relayer:v1:";
 const POLYMARKET_RELAYER_TRANSACTION_ID_PATTERN = /^[A-Za-z0-9_-]{8,160}$/u;
 
+// The relayer may accept a request before exposing its transaction hash. A
+// chain-only Transfer can be attributed to that request only inside this
+// immutable window; later exact provider evidence remains authoritative.
+export const POLYMARKET_HANDOFF_CHAIN_ATTRIBUTION_WINDOW_MS = 90_000;
+
 export type PolymarketDepositWalletHandoffExpectation = Readonly<{
   tokenAddress: string;
   funderAddress: string;

@@ -7752,9 +7752,7 @@ try {
     workerId: opaque("terminal-relay-receipt-incident-worker"),
     limit: 1,
     now: terminalReceiptIncidentAt,
-    receiptPoll: async () => {
-      throw new Error("reorg receipt RPC remains unavailable");
-    },
+    receiptPoll: async () => ({ receiptsPolled: 1 }),
     destinationPoll: async () => {
       terminalReceiptDestinationScans += 1;
       return { destinationsPolled: 1, destinationSatisfied: false };
@@ -7767,9 +7765,11 @@ try {
     job_error_code: string | null;
     job_error_summary: string | null;
     job_status: string;
+    operation_recovery_mode: string | null;
     operation_status: string;
   }>(
     `select operation.status as operation_status,
+            operation.recovery_mode as operation_recovery_mode,
             job.status as job_status,
             job.last_error_code as job_error_code,
             job.last_error_summary as job_error_summary
@@ -7799,11 +7799,12 @@ try {
   );
   assert.deepEqual(terminalReceiptIncidentState.rows, [
     {
-      job_error_code: "terminal_relay_evidence_reorg_unresolved",
+      job_error_code: "funding_receipt_reorg_unresolved",
       job_error_summary:
-        "terminal action receipt reorg remained unresolved after its canonical watch window",
+        "funding action receipt reorg remained unresolved after its canonical watch window",
       job_status: "dead_letter",
-      operation_status: "refunded",
+      operation_recovery_mode: "manual_review",
+      operation_status: "recovery_required",
     },
   ]);
 
