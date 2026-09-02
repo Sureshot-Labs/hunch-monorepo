@@ -53,7 +53,13 @@ echo "Timing: Docker build completed in $((build_finished_at - build_started_at)
 
 echo "Saving image to ${IMAGE_ARCHIVE_PATH}"
 export_started_at="$(date +%s)"
-docker save "${HUNCH_BACKEND_IMAGE}" "${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE}" | gzip > "${IMAGE_ARCHIVE_PATH}"
+compressor=(gzip -6)
+if command -v pigz >/dev/null 2>&1; then
+  compressor=(pigz -6)
+fi
+echo "Compressing image archive with ${compressor[0]}"
+docker save "${HUNCH_BACKEND_IMAGE}" "${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE}" | "${compressor[@]}" > "${IMAGE_ARCHIVE_PATH}"
+gzip -t "${IMAGE_ARCHIVE_PATH}"
 export_finished_at="$(date +%s)"
 image_archive_size="$(du -h "${IMAGE_ARCHIVE_PATH}" | awk '{print $1}')"
 echo "Timing: image export/compression completed in $((export_finished_at - export_started_at))s"

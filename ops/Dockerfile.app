@@ -31,14 +31,7 @@ COPY apps apps
 COPY packages packages
 COPY ops ops
 
-RUN pnpm --filter @hunch/config build \
-  && pnpm --filter api... build \
-  && pnpm --filter ai-worker... build \
-  && pnpm --filter finance-worker... build \
-  && pnpm --filter indexer-dflow... build \
-  && pnpm --filter indexer-kalshi... build \
-  && pnpm --filter indexer-limitless... build \
-  && pnpm --filter indexer-polymarket... build
+RUN pnpm build
 
 # Bun is a single executable. Use the official image as the binary source
 # instead of running the installer script inside the production runtime image.
