@@ -945,10 +945,21 @@ type ActiveTelegramFundingOpenScope = Readonly<{
 async function lockActiveTelegramFundingOpenContext(
   client: Pick<PoolClient, "query">,
   input: ActiveTelegramFundingOpenScope,
-): Promise<TelegramFundingSessionRow | null> {
-  const { rows } = await client.query<TelegramFundingSessionRow>(
+): Promise<
+  | (TelegramFundingSessionRow & Readonly<{ has_in_flight_receipt: boolean }>)
+  | null
+> {
+  const { rows } = await client.query<
+    TelegramFundingSessionRow & Readonly<{ has_in_flight_receipt: boolean }>
+  >(
     `
-      select ${qualifiedSessionColumns("context")}
+      select ${qualifiedSessionColumns("context")},
+             exists (
+               select 1
+               from funding_receive_receipts priority_receipt
+               where priority_receipt.receive_session_id = receive.id
+                 and priority_receipt.status in ('observed', 'routing')
+             ) as has_in_flight_receipt
       from telegram_funding_sessions context
       join funding_receive_sessions receive
         on receive.id = context.receive_session_id
@@ -960,7 +971,6 @@ async function lockActiveTelegramFundingOpenContext(
         and context.receive_owner_channel = 'telegram'
         and context.cancelled_at is null
         and context.latest_terminal_projection is null
-        and context.expires_at > $4
         and receive.owner_channel = 'telegram'
         and receive.venue_id = $5
         and (
@@ -969,14 +979,26 @@ async function lockActiveTelegramFundingOpenContext(
                '{location,details,controllerWalletId}' = $6
         )
         and ($7::text is null or receive.venue_binding_option_id = $7)
-        and receive.status in (
-          'open',
-          'processing',
-          'review_required',
-          'recovery_required'
+        and (
+          (
+            context.expires_at > $4
+            and
+            receive.status = 'open'
+            and receive.expires_at > $4
+          )
+          or (
+            receive.observe_until > $4
+            and exists (
+              select 1
+              from funding_receive_receipts active_receipt
+              where active_receipt.receive_session_id = receive.id
+                and active_receipt.status in ('observed', 'routing')
+            )
+          )
         )
-        and receive.expires_at > $4
-      order by context.created_at desc, context.id desc
+      order by has_in_flight_receipt desc,
+               context.created_at desc,
+               context.id desc
       for update of context, receive
       limit 2
     `,
@@ -990,12 +1012,16 @@ async function lockActiveTelegramFundingOpenContext(
       input.venueBindingOptionId ?? null,
     ],
   );
-  if (rows.length > 1) {
+  const inFlight = rows.filter((row) => row.has_in_flight_receipt);
+  if (inFlight.length > 1 || (inFlight.length === 0 && rows.length > 1)) {
     throw new TelegramFundingPersistenceError(
       "telegram_funding_active_context_ambiguous",
     );
   }
-  return rows[0] ?? null;
+  // A resumed receipt may start routing after a fresh address was opened.
+  // The money-bearing workflow is authoritative; an address with no observed
+  // funds must not make that durable workflow ambiguous or hide it.
+  return inFlight[0] ?? rows[0] ?? null;
 }
 
 async function activeTelegramFundingHasLiveRouting(
@@ -1095,9 +1121,7 @@ export async function prepareTelegramFundingSessionOpenInTransaction(
               version = version + 1
         where receive_session.id = $1::uuid
           and receive_session.owner_channel = 'telegram'
-          and receive_session.status in (
-            'open', 'processing', 'review_required'
-          )
+          and receive_session.status = 'open'
         returning receive_session.id`,
       [active.receive_session_id, input.now],
     );
@@ -1120,14 +1144,6 @@ export async function prepareTelegramFundingSessionOpenInTransaction(
       "telegram_funding_session_active_elsewhere",
     );
   }
-  if (
-    active.active_consent_revision !== null ||
-    active.address_disclosure_attempt_revision > 0
-  ) {
-    throw new TelegramFundingPersistenceError(
-      "telegram_funding_session_active_elsewhere",
-    );
-  }
   const closed = await client.query<{ id: string }>(
     `
       update funding_receive_sessions receive
@@ -1142,6 +1158,7 @@ export async function prepareTelegramFundingSessionOpenInTransaction(
           select 1
           from funding_receive_receipts receipt
           where receipt.receive_session_id = receive.id
+            and receipt.status <> 'ready'
         )
       returning receive.id
     `,
@@ -1284,6 +1301,7 @@ export async function reuseActiveTelegramFundingSession(
     controllerWalletId?: string;
     venueBindingOptionId?: string;
     presentAcrossMessages?: boolean;
+    presentInFlightAcrossMessages?: boolean;
     idempotencyKey: string;
     requestFingerprint: string;
     now: Date;
@@ -1320,7 +1338,12 @@ export async function reuseActiveTelegramFundingSession(
       // A Telegram message owns its context: reusing another message makes
       // the new button look inert. The final open transaction owns the
       // supersede decision so two messages cannot both pass this preflight.
-      if (!input.presentAcrossMessages) return null;
+      if (
+        !input.presentAcrossMessages &&
+        !(input.presentInFlightAcrossMessages && active.has_in_flight_receipt)
+      ) {
+        return null;
+      }
       await recordTelegramFundingOpenMutation(client, {
         contextId: active.id,
         idempotencyKey: input.idempotencyKey,
@@ -1991,6 +2014,7 @@ export async function cancelTelegramFundingSessionContext(
             select 1
             from funding_receive_receipts receipt
             where receipt.receive_session_id = $4::uuid
+              and receipt.status <> 'ready'
           )
         returning ${sessionColumns}
       `,
@@ -2039,6 +2063,7 @@ export async function cancelTelegramFundingSessionContext(
             select 1
             from funding_receive_receipts receipt
             where receipt.receive_session_id = receive.id
+              and receipt.status <> 'ready'
           )
       `,
       [contextRow.receive_session_id, input.now],

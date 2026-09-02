@@ -12,6 +12,7 @@ import { pool } from "../../../db.js";
 import type { JsonObject } from "../../domain/types.js";
 import type { FundingPolymarketHandoffCandidate } from "../../persistence/funding-evidence-repository.js";
 import {
+  claimFundingReceiveCanonicalEventAllocation,
   claimObservableFundingReceiveSessions,
   createOrReuseFundingReceiveSession,
   fetchFundingReceiveSessionForUser,
@@ -41,6 +42,11 @@ const AMOUNT_RAW = "8736244";
 const TRANSACTION_HASH = `0x${crypto.randomBytes(32).toString("hex")}`;
 const ERROR_TRANSACTION_HASH = `0x${crypto.randomBytes(32).toString("hex")}`;
 const AMBIGUOUS_TRANSACTION_HASH = `0x${crypto.randomBytes(32).toString("hex")}`;
+const HISTORICAL_INTERNAL_TRANSACTION_HASHES = Array.from(
+  { length: 25 },
+  () => `0x${crypto.randomBytes(32).toString("hex")}`,
+);
+const HISTORICAL_EXTERNAL_TRANSACTION_HASH = `0x${crypto.randomBytes(32).toString("hex")}`;
 const LOOKUP_HMAC = crypto
   .createHash("sha256")
   .update("internal-handoff-reference")
@@ -436,6 +442,146 @@ try {
     "a DB classification failure must roll back the cursor update",
   );
 
+  // Historical canonical events can be quarantined before an eligible
+  // receive session exists. Prove that a full page of later-recognized Hunch
+  // handoffs is retired from that retry page, allowing the external deposit
+  // immediately behind it to progress on the next bounded poll.
+  await pool.query(
+    `update funding_receive_sessions
+        set observe_until = $2,
+            expires_at = least(
+              expires_at,
+              $2::timestamptz - interval '1 millisecond'
+            ),
+            updated_at = $2
+      where user_id = any($1::uuid[])`,
+    [userIds, new Date(NOW.getTime() + 29_000)],
+  );
+  const historicalBacklogUserId = await insertUser("historical-backlog");
+  userIds.push(historicalBacklogUserId);
+  const historicalBacklogInput = sessionInput(
+    historicalBacklogUserId,
+    "historical-backlog",
+  );
+  const historicalBacklogVariant = parseDirectIngressObservationVariant(
+    historicalBacklogInput.observationVariants[0],
+  );
+  const historicalHashes = [
+    ...HISTORICAL_INTERNAL_TRANSACTION_HASHES,
+    HISTORICAL_EXTERNAL_TRANSACTION_HASH,
+  ];
+  const quarantineClient = await pool.connect();
+  try {
+    await quarantineClient.query("begin");
+    for (const [eventIndex, transactionHash] of historicalHashes.entries()) {
+      const quarantined = await claimFundingReceiveCanonicalEventAllocation(
+        quarantineClient,
+        {
+          networkId: historicalBacklogVariant.networkId,
+          asset: historicalBacklogVariant.asset,
+          destinationAddress: historicalBacklogVariant.destinationAddress,
+          sourceAddress: FUNDER,
+          rawAmount: AMOUNT_RAW,
+          transactionHash,
+          eventIndex: "2",
+          ledgerHeight: String(101 + eventIndex),
+          blockHash: `0x${crypto.randomBytes(32).toString("hex")}`,
+          observedAt: new Date(NOW.getTime() + 30_000 + eventIndex),
+          now: new Date(NOW.getTime() + 30_000 + eventIndex),
+        },
+      );
+      assert.equal(quarantined.status, "recovery_required");
+      assert.equal(
+        quarantined.errorCode,
+        "receive_session_allocation_unavailable",
+      );
+    }
+    await quarantineClient.query("commit");
+  } catch (error) {
+    await quarantineClient.query("rollback");
+    throw error;
+  } finally {
+    quarantineClient.release();
+  }
+  const historicalBacklogSession = await createOrReuseFundingReceiveSession(
+    pool,
+    {
+      ...historicalBacklogInput,
+      now: new Date(NOW.getTime() + 31_000),
+      expiresAt: new Date(NOW.getTime() + 86_431_000),
+      observeUntil: new Date(NOW.getTime() + 8 * 86_400_000 + 31_000),
+    },
+  );
+  const historicalHandoffCandidates =
+    HISTORICAL_INTERNAL_TRANSACTION_HASHES.map(
+      (transactionHash, candidateIndex): FundingPolymarketHandoffCandidate => ({
+        ...candidate,
+        attemptId: opaque(`historical_attempt_${candidateIndex}`),
+        resolvedTransactionHash: transactionHash,
+      }),
+    );
+  const historicalObserver = new FundingReceiveSessionObserver({
+    transactionReferenceCodec: {
+      keyVersion: 1,
+      fingerprint: () => LOOKUP_HMAC,
+      decrypt: () => HISTORICAL_EXTERNAL_TRANSACTION_HASH,
+    },
+    scanCanonicalEvents: async (variants) => ({
+      events: [],
+      variants,
+      cursorAdvanced: false,
+    }),
+    listPotentialPolymarketHandoffs: async (_client, lookup) =>
+      lookup.userId === historicalBacklogUserId
+        ? historicalHandoffCandidates
+        : [],
+  });
+  const historicalInternalPoll = await historicalObserver.pollBatch(pool, {
+    limit: 1,
+    minimumPollIntervalMs: 1_000,
+    now: new Date(NOW.getTime() + 32_000),
+  });
+  assert.equal(historicalInternalPoll.receiptsRecorded, 0);
+  const { rows: historicalInternalRows } = await pool.query<{
+    allocation_error_code: string;
+    total: string;
+  }>(
+    `select allocation_error_code, count(*)::text as total
+       from funding_receive_canonical_events
+      where tx_hash = any($1::text[])
+      group by allocation_error_code`,
+    [HISTORICAL_INTERNAL_TRANSACTION_HASHES],
+  );
+  assert.deepEqual(historicalInternalRows, [
+    { allocation_error_code: "internal_handoff_suppressed", total: "25" },
+  ]);
+  const historicalExternalPoll = await historicalObserver.pollBatch(pool, {
+    limit: 1,
+    minimumPollIntervalMs: 1_000,
+    now: new Date(NOW.getTime() + 34_000),
+  });
+  assert.equal(
+    historicalExternalPoll.receiptsRecorded,
+    1,
+    "internal handoffs must not permanently hide the next external deposit behind the bounded recovery page",
+  );
+  const { rows: historicalExternalRows } = await pool.query<{
+    allocated_receive_session_id: string | null;
+    allocation_status: string;
+  }>(
+    `select allocation_status, allocated_receive_session_id
+       from funding_receive_canonical_events
+      where network_id = $1
+        and tx_hash = $2
+        and event_index = '2'`,
+    [historicalBacklogVariant.networkId, HISTORICAL_EXTERNAL_TRANSACTION_HASH],
+  );
+  assert.deepEqual(historicalExternalRows[0], {
+    allocated_receive_session_id:
+      historicalBacklogSession.snapshot.session.receiveSessionId,
+    allocation_status: "allocated",
+  });
+
   const wakeUserId = await insertUser("interactive-wake");
   userIds.push(wakeUserId);
   const wakeInput = sessionInput(wakeUserId, "interactive-wake");
@@ -602,7 +748,19 @@ try {
     );
     await cleanup.query(
       "delete from funding_receive_canonical_events where tx_hash = any($1::text[])",
-      [[TRANSACTION_HASH, ERROR_TRANSACTION_HASH, AMBIGUOUS_TRANSACTION_HASH]],
+      [
+        [
+          TRANSACTION_HASH,
+          ERROR_TRANSACTION_HASH,
+          AMBIGUOUS_TRANSACTION_HASH,
+          ...HISTORICAL_INTERNAL_TRANSACTION_HASHES,
+          HISTORICAL_EXTERNAL_TRANSACTION_HASH,
+        ],
+      ],
+    );
+    await cleanup.query(
+      "delete from notifications where user_id = any($1::uuid[])",
+      [userIds],
     );
     await cleanup.query(
       "delete from funding_receive_sessions where user_id = any($1::uuid[])",

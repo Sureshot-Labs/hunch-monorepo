@@ -192,27 +192,24 @@ const tests: readonly Test[] = [
       );
       assert.ok(start >= 0 && end > start);
       const claim = source.slice(start, end);
-      assert.match(claim, /for update skip locked/i);
+      assert.match(claim, /for update of receive_session skip locked/i);
       assert.match(
         claim,
         /coalesce\(last_observed_at, opened_at\)[\s\S]*interval '1 millisecond'/i,
       );
       assert.match(
         claim,
-        /status in \('expired', 'cancelled'\) then \$5::bigint/i,
+        /status in \('completed', 'expired', 'cancelled'\) then \$5::bigint/i,
       );
       assert.match(
         claim,
         /coalesce\(observation_requested_at, opened_at\)[\s\S]*\$6::bigint[\s\S]*then \$4::bigint/i,
       );
       assert.match(claim, /last_observed_at < observation_requested_at/i);
+      assert.match(claim, /as next_poll_at/i);
       assert.match(
         claim,
-        /order by \([\s\S]*last_observed_at < observation_requested_at[\s\S]*\) desc/i,
-      );
-      assert.match(
-        claim,
-        /status in \('open', 'processing', 'review_required', 'recovery_required'\)\) desc,[\s\S]*coalesce\(last_observed_at, opened_at\) asc/i,
+        /order by eligible_session\.next_poll_at asc,[\s\S]*eligible_session\.request_priority asc/i,
       );
       assert.match(claim, /set last_observed_at = \$1/i);
       assert.match(

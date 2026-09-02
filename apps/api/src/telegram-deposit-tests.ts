@@ -429,24 +429,68 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         /Active Deposit/u,
       );
 
-      const menuWithReceivedActive = await buildTelegramDepositMessage({
+      let activeDepositLookupSql = "";
+      const menuWithReadyOnlyActive = await buildTelegramDepositMessage({
+        dependencies: { allowedVenues: ["polymarket", "limitless"] },
+        pool: {
+          query: async (sql: string) => {
+            if (sql.includes("telegram_funding_sessions")) {
+              activeDepositLookupSql = sql;
+              return {
+                rows: [
+                  {
+                    has_uncancellable_workflow: false,
+                    venue_id: "polymarket",
+                  },
+                ],
+              };
+            }
+            return { rows: [] };
+          },
+        } as never,
+        telegramUserId: 20,
+      });
+      assert.match(
+        JSON.stringify(menuWithReadyOnlyActive.reply_markup),
+        /Active Deposit/u,
+      );
+      assert.match(
+        JSON.stringify(menuWithReadyOnlyActive.reply_markup),
+        /deposit_cancel_active/u,
+        "a settled ready-only receipt must not hide the safe Cancel action",
+      );
+      assert.equal(
+        [
+          ...activeDepositLookupSql.matchAll(
+            /status in \('observed', 'routing'\)/gu,
+          ),
+        ].length,
+        2,
+        "both the menu priority and late-observation branch must use the same money-in-flight receipt states",
+      );
+      assert.doesNotMatch(activeDepositLookupSql, /review_required/u);
+      assert.match(activeDepositLookupSql, /observe_until > now\(\)/u);
+
+      const menuWithUnresolvedReceipt = await buildTelegramDepositMessage({
         dependencies: { allowedVenues: ["polymarket", "limitless"] },
         pool: {
           query: async (sql: string) => ({
             rows: sql.includes("telegram_funding_sessions")
-              ? [{ has_received: true, venue_id: "polymarket" }]
+              ? [
+                  {
+                    has_uncancellable_workflow: true,
+                    venue_id: "polymarket",
+                  },
+                ]
               : [],
           }),
         } as never,
         telegramUserId: 20,
       });
-      assert.match(
-        JSON.stringify(menuWithReceivedActive.reply_markup),
-        /Active Deposit/u,
-      );
       assert.doesNotMatch(
-        JSON.stringify(menuWithReceivedActive.reply_markup),
+        JSON.stringify(menuWithUnresolvedReceipt.reply_markup),
         /deposit_cancel_active/u,
+        "an unresolved receipt must keep Cancel hidden while money is handled",
       );
 
       const justDeposit = await buildTelegramDepositMessage({

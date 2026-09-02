@@ -13,8 +13,11 @@ import {
 } from "../../../admin-merge-user-core.js";
 import { AuthService } from "../../../auth.js";
 import { pool } from "../../../db.js";
+import { fetchUserFinancialLifecycleSummary } from "../../../services/user-financial-lifecycle.js";
 import {
+  claimFundingReceiveCanonicalEventAllocation,
   claimObservableFundingReceiveSessions,
+  cancelFundingReceiveSessionForUser,
   createOrReuseFundingReceiveSession,
   expireFundingReceiveSessions,
   fetchFundingReceiveReceiptForReview,
@@ -25,11 +28,13 @@ import {
   insertFundingReceiveReceipt,
   listFundingReceiveReceiptsForRouting,
   listFundingReceiveReceiptsForUser,
+  lockFundingReceiveSessionScope,
   recordFundingReceiveReceiptRoutingDisposition,
   replayFundingReceiveSessionOpenIdempotency,
   settleFundingReceiveReceiptRouting,
   updateFundingReceiveSessionObservation,
 } from "../../persistence/funding-receive-session-repository.js";
+import { FundingReceiveSessionObserver } from "../../receive/receive-session-observer.js";
 
 const NOW = new Date();
 const DESTINATION_OPTION_ID = "destination_receive_persistence_12345678";
@@ -215,7 +220,16 @@ const userId = await insertUser();
 let mergeTargetId: string | null = null;
 let genericOptionUserId: string | null = null;
 let retainedSolUserId: string | null = null;
+let historicalSolUserId: string | null = null;
+let historicalSolTransactionHash: string | null = null;
 let crossChannelUserId: string | null = null;
+let reviewReleaseUserId: string | null = null;
+let recoveryReleaseUserId: string | null = null;
+let pollingFairnessUserId: string | null = null;
+let sameChannelLeaseUserId: string | null = null;
+let completedLifecycleUserId: string | null = null;
+let expiredReviewSelectionUserId: string | null = null;
+let lateClosedReleaseUserId: string | null = null;
 try {
   crossChannelUserId = await insertUser();
   const telegramReceive = await createOrReuseFundingReceiveSession(pool, {
@@ -318,6 +332,197 @@ try {
   assert.deepEqual(retainedPersistence.rows[0], {
     receipt_matches: true,
   });
+
+  // A scanner cursor is already past a canonical event once it has been
+  // quarantined. Opening an eligible session later must recover that durable
+  // event without depending on the chain RPC to emit it a second time.
+  historicalSolUserId = await insertUser();
+  historicalSolTransactionHash = uniqueHash("historical-native-sol-deposit");
+  const historicalInputBase = retainedSolSessionInput(historicalSolUserId);
+  const historicalVariant = {
+    ...historicalInputBase.observationVariants[0],
+    observation: {
+      ...historicalInputBase.observationVariants[0].observation,
+      payload: {
+        ...historicalInputBase.observationVariants[0].observation.payload,
+        eventCursorSlot: "100",
+        eventIdentity: "solana_transfer_v1",
+      },
+    },
+  } as const;
+  const historicalAllocationClient = await pool.connect();
+  try {
+    await historicalAllocationClient.query("begin");
+    const quarantined = await claimFundingReceiveCanonicalEventAllocation(
+      historicalAllocationClient,
+      {
+        networkId: historicalVariant.networkId,
+        asset: historicalVariant.asset,
+        destinationAddress: historicalVariant.destinationAddress,
+        sourceAddress: "7YttLkHDoNj9wyDur4QmK5KdHDAtSdB7TGjEHJx6Ms7D",
+        rawAmount: "30000000",
+        transactionHash: historicalSolTransactionHash,
+        eventIndex: "0",
+        ledgerHeight: "102",
+        blockHash: uniqueHash("historical-native-sol-block"),
+        observedAt: new Date(NOW.getTime() + 1_500),
+        now: new Date(NOW.getTime() + 1_500),
+      },
+    );
+    assert.equal(quarantined.status, "recovery_required");
+    assert.equal(
+      quarantined.errorCode,
+      "receive_session_allocation_unavailable",
+    );
+    await historicalAllocationClient.query("commit");
+  } catch (error) {
+    await historicalAllocationClient.query("rollback");
+    throw error;
+  } finally {
+    historicalAllocationClient.release();
+  }
+  const historicalOldSession = await createOrReuseFundingReceiveSession(pool, {
+    ...historicalInputBase,
+    destinationOptionId: `destination_historical_sol_old_${RUN_ID}`,
+    venueBindingOptionId: `binding_historical_sol_old_${RUN_ID}`,
+    observationVariants: [historicalVariant],
+    now: new Date(NOW.getTime() + 1_800),
+  });
+  const historicalFreshVariant = {
+    ...historicalVariant,
+    observation: {
+      ...historicalVariant.observation,
+      payload: {
+        ...historicalVariant.observation.payload,
+        eventCursorSlot: "101",
+      },
+    },
+  } as const;
+  const historicalSession = await createOrReuseFundingReceiveSession(pool, {
+    ...historicalInputBase,
+    destinationOptionId: `destination_historical_sol_fresh_${RUN_ID}`,
+    venueBindingOptionId: `binding_historical_sol_fresh_${RUN_ID}`,
+    observationVariants: [historicalFreshVariant],
+    now: new Date(NOW.getTime() + 2_000),
+  });
+  const recoveryObserver = new FundingReceiveSessionObserver({
+    scanCanonicalEvents: async (variants) => ({
+      events: [],
+      variants,
+      cursorAdvanced: false,
+    }),
+    listPotentialPolymarketHandoffs: async () => [],
+  });
+  const oldPollAt = new Date(NOW.getTime() + 2_500);
+  await pool.query(
+    `update funding_receive_sessions
+        set observation_requested_at = case
+              when id = $1::uuid then $3::timestamptz
+              else null
+            end,
+            last_observed_at = case
+              when id = $1::uuid then $3::timestamptz - interval '1 day'
+              else $3::timestamptz
+            end
+      where id = any($2::uuid[])`,
+    [
+      historicalOldSession.snapshot.session.receiveSessionId,
+      [
+        historicalOldSession.snapshot.session.receiveSessionId,
+        historicalSession.snapshot.session.receiveSessionId,
+      ],
+      oldPollAt,
+    ],
+  );
+  const oldPoll = await recoveryObserver.pollBatch(pool, {
+    limit: 1,
+    minimumPollIntervalMs: 0,
+    now: oldPollAt,
+  });
+  assert.equal(oldPoll.retryableErrors, 0);
+  const { rows: afterNonTargetRows } = await pool.query<{
+    allocation_status: string;
+    old_status: string;
+    receipts: string;
+  }>(
+    `select canonical_event.allocation_status,
+            old_session.status as old_status,
+            (
+              select count(*)::text
+              from funding_receive_receipts receipt
+              where receipt.receive_session_id = old_session.id
+            ) as receipts
+       from funding_receive_canonical_events canonical_event
+       cross join funding_receive_sessions old_session
+      where canonical_event.tx_hash = $1
+        and old_session.id = $2::uuid`,
+    [
+      historicalSolTransactionHash,
+      historicalOldSession.snapshot.session.receiveSessionId,
+    ],
+  );
+  assert.deepEqual(afterNonTargetRows[0], {
+    allocation_status: "recovery_required",
+    old_status: "open",
+    receipts: "0",
+  });
+  const freshPollAt = new Date(NOW.getTime() + 3_600);
+  await pool.query(
+    `update funding_receive_sessions
+        set observation_requested_at = $2,
+            last_observed_at = $2::timestamptz - interval '2 days'
+      where id = $1::uuid`,
+    [historicalSession.snapshot.session.receiveSessionId, freshPollAt],
+  );
+  const recoveredPoll = await recoveryObserver.pollBatch(pool, {
+    limit: 1,
+    minimumPollIntervalMs: 0,
+    now: freshPollAt,
+  });
+  assert.equal(recoveredPoll.retryableErrors, 0);
+  const { rows: historicalRows } = await pool.query<{
+    allocation_status: string;
+    notification_count: string;
+    receipt_status: string;
+  }>(
+    `
+      select canonical_event.allocation_status,
+             receipt.status as receipt_status,
+             (
+               select count(*)::text
+               from notifications notification_row
+               where notification_row.user_id = $2::uuid
+                 and notification_row.type = 'deposit_received'
+                 and notification_row.data->>'txHash' = $3
+             ) as notification_count
+      from funding_receive_canonical_events canonical_event
+      join funding_receive_receipts receipt
+        on receipt.id = canonical_event.allocated_receipt_id
+      where canonical_event.tx_hash = $3
+        and receipt.receive_session_id = $1::uuid
+    `,
+    [
+      historicalSession.snapshot.session.receiveSessionId,
+      historicalSolUserId,
+      historicalSolTransactionHash,
+    ],
+  );
+  assert.deepEqual(historicalRows[0], {
+    allocation_status: "allocated",
+    receipt_status: "ready",
+    notification_count: "1",
+  });
+  await pool.query(
+    `update funding_receive_sessions
+        set status = 'processing',
+            updated_at = $2,
+            version = version + 1
+      where id = $1`,
+    [
+      retainedSession.snapshot.session.receiveSessionId,
+      new Date(NOW.getTime() + 1_900),
+    ],
+  );
   const retainedTelegramSession = await createOrReuseFundingReceiveSession(
     pool,
     {
@@ -330,6 +535,777 @@ try {
     retainedTelegramSession.snapshot.session.receiveSessionId,
     retainedSession.snapshot.session.receiveSessionId,
     "a settled receipt must not retain an exclusive receive channel lease",
+  );
+
+  reviewReleaseUserId = await insertUser();
+  const reviewReleaseInput = {
+    ...sessionInput(reviewReleaseUserId),
+    requireExactReceiveScope: true,
+  } as const;
+  const reviewReleaseSession = await createOrReuseFundingReceiveSession(pool, {
+    ...reviewReleaseInput,
+    ownerChannel: "web",
+  });
+  const reviewReleaseReceipt = await insertFundingReceiveReceipt(pool, {
+    receiveSessionId: reviewReleaseSession.snapshot.session.receiveSessionId,
+    userId: reviewReleaseUserId,
+    variantId: reviewReleaseInput.observationVariants[0].variantId,
+    asset: reviewReleaseInput.destinationAsset,
+    destinationAddress:
+      reviewReleaseInput.observationVariants[0].destinationAddress,
+    rawAmount: "1000000",
+    observationRevision: "review_release_observation_12345678",
+    observedAt: new Date(NOW.getTime() + 2_100),
+    status: "review_required",
+    handling: "review_required",
+    evidence: {
+      reviewContinuation: {
+        version: 1,
+        kind: "convert",
+        label: "Convert",
+        confirmation: "fresh_quote",
+      },
+      reviewQuotePlan: {
+        version: 1,
+        confirmedSourceAmount: null,
+        requestedDestinationAmount: {
+          asset: reviewReleaseInput.destinationAsset,
+          raw: "1000000",
+        },
+        venuePreparation: false,
+      },
+    },
+    now: new Date(NOW.getTime() + 2_100),
+  });
+  assert.equal(
+    await updateFundingReceiveSessionObservation(pool, {
+      receiveSessionId: reviewReleaseSession.snapshot.session.receiveSessionId,
+      expectedVersion: reviewReleaseSession.snapshot.session.version,
+      observationVariants: reviewReleaseInput.observationVariants,
+      status: "review_required",
+      lastObservedAt: new Date(NOW.getTime() + 2_100),
+      now: new Date(NOW.getTime() + 2_100),
+    }),
+    true,
+  );
+  const afterReviewSession = await createOrReuseFundingReceiveSession(pool, {
+    ...reviewReleaseInput,
+    ownerChannel: "telegram",
+    now: new Date(NOW.getTime() + 2_200),
+  });
+  assert.notEqual(
+    afterReviewSession.snapshot.session.receiveSessionId,
+    reviewReleaseSession.snapshot.session.receiveSessionId,
+    "a review-required receipt must remain resumable without owning the receive selection",
+  );
+  assert.ok(
+    await fetchFundingReceiveReceiptForReview(pool, {
+      userId: reviewReleaseUserId,
+      ownerChannel: "web",
+      receiveSessionId: reviewReleaseSession.snapshot.session.receiveSessionId,
+      receiptId: reviewReleaseReceipt.receipt.receiptId,
+    }),
+    "opening a fresh deposit must not hide the older review receipt",
+  );
+  await pool.query(
+    `update funding_receive_receipts
+        set status = 'routing', updated_at = $2
+      where id = $1`,
+    [reviewReleaseReceipt.receipt.receiptId, new Date(NOW.getTime() + 2_220)],
+  );
+  await pool.query(
+    `update funding_receive_sessions
+        set status = 'processing', version = version + 1, updated_at = $2
+      where id = $1`,
+    [
+      reviewReleaseSession.snapshot.session.receiveSessionId,
+      new Date(NOW.getTime() + 2_220),
+    ],
+  );
+  assert.equal(
+    await settleFundingReceiveReceiptRouting(pool, {
+      receiptId: reviewReleaseReceipt.receipt.receiptId,
+      receiveSessionId: reviewReleaseSession.snapshot.session.receiveSessionId,
+      userId: reviewReleaseUserId,
+      status: "ready",
+      now: new Date(NOW.getTime() + 2_230),
+    }),
+    true,
+    "an older review receipt must still settle after a fresh session opens",
+  );
+  const [settledOldReview, stillOpenFreshSession] = await Promise.all([
+    fetchFundingReceiveSessionForUser(pool, {
+      userId: reviewReleaseUserId,
+      receiveSessionId: reviewReleaseSession.snapshot.session.receiveSessionId,
+    }),
+    fetchFundingReceiveSessionForUser(pool, {
+      userId: reviewReleaseUserId,
+      receiveSessionId: afterReviewSession.snapshot.session.receiveSessionId,
+    }),
+  ]);
+  assert.equal(
+    settledOldReview?.session.status,
+    "completed",
+    "settled old work must close instead of reclaiming the fresh open slot",
+  );
+  assert.equal(stillOpenFreshSession?.session.status, "open");
+  const completedObservationClient = await pool.connect();
+  try {
+    await completedObservationClient.query("begin");
+    await completedObservationClient.query(
+      `update funding_receive_sessions
+          set last_observed_at = $2
+        where id = $1`,
+      [
+        reviewReleaseSession.snapshot.session.receiveSessionId,
+        new Date(NOW.getTime() - 10 * 60_000),
+      ],
+    );
+    const completedCandidates = await claimObservableFundingReceiveSessions(
+      completedObservationClient,
+      {
+        limit: 1_000,
+        minimumPollIntervalMs: 1_000,
+        inactivePollIntervalMs: 1_000,
+        closedPollIntervalMs: 1_000,
+        now: new Date(NOW.getTime() + 2_240),
+      },
+    );
+    assert.equal(
+      completedCandidates.some(
+        (candidate) =>
+          candidate.session.receiveSessionId ===
+          reviewReleaseSession.snapshot.session.receiveSessionId,
+      ),
+      true,
+      "completed sessions remain observable for late deposits without owning the live slot",
+    );
+  } finally {
+    await completedObservationClient.query("rollback");
+    completedObservationClient.release();
+  }
+  completedLifecycleUserId = await insertUser();
+  const completedLifecycleInput = sessionInput(completedLifecycleUserId);
+  const completedLifecycleSession = await createOrReuseFundingReceiveSession(
+    pool,
+    completedLifecycleInput,
+  );
+  await insertFundingReceiveReceipt(pool, {
+    receiveSessionId:
+      completedLifecycleSession.snapshot.session.receiveSessionId,
+    userId: completedLifecycleUserId,
+    variantId: completedLifecycleInput.observationVariants[0].variantId,
+    asset: completedLifecycleInput.observationVariants[0].asset,
+    destinationAddress:
+      completedLifecycleInput.observationVariants[0].destinationAddress,
+    rawAmount: "1",
+    observationRevision: "completed_lifecycle_receipt_12345678",
+    observedAt: new Date(NOW.getTime() + 2_245),
+    status: "ready",
+    handling: "direct",
+    evidence: { test: "completed_lifecycle" },
+    now: new Date(NOW.getTime() + 2_245),
+  });
+  await pool.query(
+    `update funding_receive_sessions
+        set status = 'completed',
+            closed_at = $2,
+            updated_at = $2,
+            version = version + 1
+      where id = $1`,
+    [
+      completedLifecycleSession.snapshot.session.receiveSessionId,
+      new Date(NOW.getTime() + 2_246),
+    ],
+  );
+  const completedLifecycle = await fetchUserFinancialLifecycleSummary(pool, [
+    completedLifecycleUserId,
+  ]);
+  assert.ok(
+    completedLifecycle.activeReasons.includes("active_receive_session"),
+    "a completed receive address remains lifecycle-protected through its late-observation window",
+  );
+  await insertFundingReceiveReceipt(pool, {
+    receiveSessionId: afterReviewSession.snapshot.session.receiveSessionId,
+    userId: reviewReleaseUserId,
+    variantId: reviewReleaseInput.observationVariants[0].variantId,
+    asset: reviewReleaseInput.destinationAsset,
+    destinationAddress:
+      reviewReleaseInput.observationVariants[0].destinationAddress,
+    rawAmount: "1000000",
+    observationRevision: "settled_cancel_observation_12345678",
+    observedAt: new Date(NOW.getTime() + 2_250),
+    status: "ready",
+    handling: "direct",
+    evidence: { test: "settled_session_cancel" },
+    now: new Date(NOW.getTime() + 2_250),
+  });
+  const freshAfterSettled = await createOrReuseFundingReceiveSession(pool, {
+    ...reviewReleaseInput,
+    ownerChannel: "telegram",
+    now: new Date(NOW.getTime() + 2_255),
+  });
+  assert.notEqual(
+    freshAfterSettled.snapshot.session.receiveSessionId,
+    afterReviewSession.snapshot.session.receiveSessionId,
+    "a new same-channel Deposit must replace a ready-only session",
+  );
+  const cancelledSettledSession = await cancelFundingReceiveSessionForUser(
+    pool,
+    {
+      userId: reviewReleaseUserId,
+      ownerChannel: "telegram",
+      receiveSessionId: freshAfterSettled.snapshot.session.receiveSessionId,
+      now: new Date(NOW.getTime() + 2_260),
+    },
+  );
+  assert.equal(
+    cancelledSettledSession?.session.status,
+    "cancelled",
+    "the replacement session must remain cancellable before a transfer",
+  );
+  recoveryReleaseUserId = await insertUser();
+  const recoveryBaseInput = sessionInput(recoveryReleaseUserId);
+  const recoveryVariant = {
+    ...recoveryBaseInput.observationVariants[0],
+    observation: {
+      ...recoveryBaseInput.observationVariants[0].observation,
+      payload: {
+        ...recoveryBaseInput.observationVariants[0].observation.payload,
+        eventCursorBlock: "100",
+        eventIdentity: "evm_erc20_transfer_v1",
+      },
+    },
+  } as const;
+  const recoveryReleaseInput = {
+    ...recoveryBaseInput,
+    observationVariants: [recoveryVariant],
+    requireExactReceiveScope: true,
+  } as const;
+  const recoveryReleaseSession = await createOrReuseFundingReceiveSession(
+    pool,
+    { ...recoveryReleaseInput, ownerChannel: "web" },
+  );
+  await insertFundingReceiveReceipt(pool, {
+    receiveSessionId: recoveryReleaseSession.snapshot.session.receiveSessionId,
+    userId: recoveryReleaseUserId,
+    variantId: recoveryVariant.variantId,
+    asset: recoveryVariant.asset,
+    destinationAddress: recoveryVariant.destinationAddress,
+    rawAmount: "1",
+    observationRevision: "recovery_release_observation_12345678",
+    observedAt: new Date(NOW.getTime() + 2_300),
+    status: "recovery_required",
+    handling: "automatic_conversion",
+    evidence: { test: "recovery_selection_release" },
+    now: new Date(NOW.getTime() + 2_300),
+  });
+  assert.equal(
+    await updateFundingReceiveSessionObservation(pool, {
+      receiveSessionId:
+        recoveryReleaseSession.snapshot.session.receiveSessionId,
+      expectedVersion: recoveryReleaseSession.snapshot.session.version,
+      observationVariants: [recoveryVariant],
+      status: "recovery_required",
+      lastObservedAt: new Date(NOW.getTime() + 2_300),
+      now: new Date(NOW.getTime() + 2_300),
+    }),
+    true,
+  );
+  const pausedRecoveryAllocationClient = await pool.connect();
+  try {
+    await pausedRecoveryAllocationClient.query("begin");
+    const pausedAllocation = await claimFundingReceiveCanonicalEventAllocation(
+      pausedRecoveryAllocationClient,
+      {
+        networkId: recoveryVariant.networkId,
+        asset: recoveryVariant.asset,
+        destinationAddress: recoveryVariant.destinationAddress,
+        sourceAddress: "0x1111111111111111111111111111111111111111",
+        rawAmount: "1000000",
+        transactionHash: uniqueHash("deposit-while-recovery-paused"),
+        eventIndex: "0",
+        ledgerHeight: "101",
+        blockHash: uniqueHash("deposit-while-recovery-paused-block"),
+        observedAt: new Date(NOW.getTime() + 2_350),
+        now: new Date(NOW.getTime() + 2_350),
+      },
+    );
+    assert.equal(pausedAllocation.status, "pending");
+    assert.equal(
+      pausedAllocation.targetReceiveSessionId,
+      recoveryReleaseSession.snapshot.session.receiveSessionId,
+      "a transfer sent to a paused recovery address must still bind to its owner instead of being quarantined",
+    );
+  } finally {
+    await pausedRecoveryAllocationClient.query("rollback");
+    pausedRecoveryAllocationClient.release();
+  }
+  const freshRecoveryVariant = {
+    ...recoveryVariant,
+    observation: {
+      ...recoveryVariant.observation,
+      payload: {
+        ...recoveryVariant.observation.payload,
+        eventCursorBlock: "101",
+      },
+    },
+  } as const;
+  const afterRecoverySession = await createOrReuseFundingReceiveSession(pool, {
+    ...recoveryReleaseInput,
+    observationVariants: [freshRecoveryVariant],
+    ownerChannel: "telegram",
+    now: new Date(NOW.getTime() + 2_400),
+  });
+  assert.notEqual(
+    afterRecoverySession.snapshot.session.receiveSessionId,
+    recoveryReleaseSession.snapshot.session.receiveSessionId,
+    "a recovery-required receipt must not block a fresh deposit session",
+  );
+  const recoveryStillVisible = await fetchFundingReceiveSessionForUser(pool, {
+    userId: recoveryReleaseUserId,
+    receiveSessionId: recoveryReleaseSession.snapshot.session.receiveSessionId,
+  });
+  assert.equal(recoveryStillVisible?.session.status, "recovery_required");
+  assert.ok(
+    recoveryStillVisible?.session.closedAt,
+    "opening a successor must durably mark the paused predecessor as released",
+  );
+  const allocationClient = await pool.connect();
+  try {
+    await allocationClient.query("begin");
+    const freshAllocation = await claimFundingReceiveCanonicalEventAllocation(
+      allocationClient,
+      {
+        networkId: recoveryVariant.networkId,
+        asset: recoveryVariant.asset,
+        destinationAddress: recoveryVariant.destinationAddress,
+        sourceAddress: "0x1111111111111111111111111111111111111111",
+        rawAmount: "2000000",
+        transactionHash: uniqueHash("post-recovery-fresh-deposit"),
+        eventIndex: "0",
+        ledgerHeight: "102",
+        blockHash: uniqueHash("post-recovery-fresh-block"),
+        observedAt: new Date(NOW.getTime() + 2_500),
+        now: new Date(NOW.getTime() + 2_500),
+      },
+    );
+    assert.equal(
+      freshAllocation.targetReceiveSessionId,
+      afterRecoverySession.snapshot.session.receiveSessionId,
+      "a later deposit must bind to the fresh session, not the paused recovery",
+    );
+  } finally {
+    await allocationClient.query("rollback");
+    allocationClient.release();
+  }
+
+  assert.equal(
+    (
+      await cancelFundingReceiveSessionForUser(pool, {
+        userId: recoveryReleaseUserId,
+        ownerChannel: "telegram",
+        receiveSessionId:
+          afterRecoverySession.snapshot.session.receiveSessionId,
+        now: new Date(NOW.getTime() + 2_550),
+      })
+    )?.session.status,
+    "cancelled",
+  );
+  await pool.query(
+    `update funding_receive_sessions successor_session
+        set created_at = predecessor_session.created_at - interval '1 second'
+       from funding_receive_sessions predecessor_session
+      where successor_session.id = $1
+        and predecessor_session.id = $2`,
+    [
+      afterRecoverySession.snapshot.session.receiveSessionId,
+      recoveryReleaseSession.snapshot.session.receiveSessionId,
+    ],
+  );
+  const recoveryReleaseReceipt = await pool.query<{ id: string }>(
+    `update funding_receive_receipts
+        set status = 'routing', updated_at = $2
+      where receive_session_id = $1
+        and status = 'recovery_required'
+      returning id`,
+    [
+      recoveryReleaseSession.snapshot.session.receiveSessionId,
+      new Date(NOW.getTime() + 2_560),
+    ],
+  );
+  const recoveryReleaseReceiptId = recoveryReleaseReceipt.rows[0]?.id;
+  assert.ok(recoveryReleaseReceiptId);
+  await pool.query(
+    `update funding_receive_sessions
+        set status = 'processing', updated_at = $2, version = version + 1
+      where id = $1`,
+    [
+      recoveryReleaseSession.snapshot.session.receiveSessionId,
+      new Date(NOW.getTime() + 2_560),
+    ],
+  );
+  assert.equal(
+    await settleFundingReceiveReceiptRouting(pool, {
+      receiptId: recoveryReleaseReceiptId,
+      receiveSessionId:
+        recoveryReleaseSession.snapshot.session.receiveSessionId,
+      userId: recoveryReleaseUserId,
+      status: "ready",
+      now: new Date(NOW.getTime() + 2_570),
+    }),
+    true,
+  );
+  assert.equal(
+    (
+      await fetchFundingReceiveSessionForUser(pool, {
+        userId: recoveryReleaseUserId,
+        receiveSessionId:
+          recoveryReleaseSession.snapshot.session.receiveSessionId,
+      })
+    )?.session.status,
+    "completed",
+    "old recovery work must not resurrect after its newer session has already been cancelled",
+  );
+
+  lateClosedReleaseUserId = await insertUser();
+  const lateClosedInput = {
+    ...sessionInput(lateClosedReleaseUserId),
+    requireExactReceiveScope: true,
+  } as const;
+  const lateClosedSession = await createOrReuseFundingReceiveSession(
+    pool,
+    lateClosedInput,
+  );
+  const lateClosedReceipt = await insertFundingReceiveReceipt(pool, {
+    receiveSessionId: lateClosedSession.snapshot.session.receiveSessionId,
+    userId: lateClosedReleaseUserId,
+    variantId: lateClosedInput.observationVariants[0].variantId,
+    asset: lateClosedInput.destinationAsset,
+    destinationAddress:
+      lateClosedInput.observationVariants[0].destinationAddress,
+    rawAmount: "1",
+    observationRevision: "late_closed_routing_receipt_12345678",
+    observedAt: new Date(NOW.getTime() + 2_580),
+    status: "routing",
+    handling: "automatic_conversion",
+    evidence: { lateReceipt: true, test: "late_closed_release" },
+    now: new Date(NOW.getTime() + 2_580),
+  });
+  await pool.query(
+    `update funding_receive_sessions
+        set status = 'recovery_required',
+            closed_at = null,
+            updated_at = $2,
+            version = version + 1
+      where id = $1`,
+    [
+      lateClosedSession.snapshot.session.receiveSessionId,
+      new Date(NOW.getTime() + 2_580),
+    ],
+  );
+  assert.equal(
+    await settleFundingReceiveReceiptRouting(pool, {
+      receiptId: lateClosedReceipt.receipt.receiptId,
+      receiveSessionId: lateClosedSession.snapshot.session.receiveSessionId,
+      userId: lateClosedReleaseUserId,
+      status: "ready",
+      now: new Date(NOW.getTime() + 2_590),
+    }),
+    true,
+  );
+  assert.equal(
+    (
+      await fetchFundingReceiveSessionForUser(pool, {
+        userId: lateClosedReleaseUserId,
+        receiveSessionId: lateClosedSession.snapshot.session.receiveSessionId,
+      })
+    )?.session.status,
+    "completed",
+    "legacy late-receipt evidence must prevent a formerly closed address from reopening even when closed_at was lost",
+  );
+
+  sameChannelLeaseUserId = await insertUser();
+  const sameChannelLeaseInput = sessionInput(sameChannelLeaseUserId);
+  const sameChannelLeaseSession = await createOrReuseFundingReceiveSession(
+    pool,
+    sameChannelLeaseInput,
+  );
+  await insertFundingReceiveReceipt(pool, {
+    receiveSessionId: sameChannelLeaseSession.snapshot.session.receiveSessionId,
+    userId: sameChannelLeaseUserId,
+    variantId: sameChannelLeaseInput.observationVariants[0].variantId,
+    asset: sameChannelLeaseInput.observationVariants[0].asset,
+    destinationAddress:
+      sameChannelLeaseInput.observationVariants[0].destinationAddress,
+    rawAmount: "1",
+    observationRevision: "same_channel_recovery_receipt_12345678",
+    observedAt: new Date(NOW.getTime() + 2_510),
+    status: "recovery_required",
+    handling: "automatic_conversion",
+    evidence: { test: "same_channel_mixed_receipts" },
+    now: new Date(NOW.getTime() + 2_510),
+  });
+  await insertFundingReceiveReceipt(pool, {
+    receiveSessionId: sameChannelLeaseSession.snapshot.session.receiveSessionId,
+    userId: sameChannelLeaseUserId,
+    variantId: sameChannelLeaseInput.observationVariants[0].variantId,
+    asset: sameChannelLeaseInput.observationVariants[0].asset,
+    destinationAddress:
+      sameChannelLeaseInput.observationVariants[0].destinationAddress,
+    rawAmount: "2",
+    observationRevision: "same_channel_routing_receipt_12345678",
+    observedAt: new Date(NOW.getTime() + 2_520),
+    status: "routing",
+    handling: "automatic_conversion",
+    evidence: { test: "same_channel_mixed_receipts" },
+    now: new Date(NOW.getTime() + 2_520),
+  });
+  await pool.query(
+    `update funding_receive_sessions
+        set status = 'recovery_required',
+            updated_at = $2,
+            version = version + 1
+      where id = $1`,
+    [
+      sameChannelLeaseSession.snapshot.session.receiveSessionId,
+      new Date(NOW.getTime() + 2_530),
+    ],
+  );
+  const replayedMixedRecovery = await createOrReuseFundingReceiveSession(pool, {
+    ...sameChannelLeaseInput,
+    policyRevision: "same_channel_changed_policy_12345678",
+    now: new Date(NOW.getTime() + 2_540),
+  });
+  assert.equal(replayedMixedRecovery.replayed, true);
+  assert.equal(
+    replayedMixedRecovery.snapshot.session.receiveSessionId,
+    sameChannelLeaseSession.snapshot.session.receiveSessionId,
+    "a same-channel legacy open must not bypass a routing receipt hidden by aggregate recovery",
+  );
+  await pool.query(
+    `update funding_receive_sessions
+        set status = 'expired',
+            closed_at = $2,
+            updated_at = $2,
+            version = version + 1
+      where id = $1`,
+    [
+      sameChannelLeaseSession.snapshot.session.receiveSessionId,
+      new Date(NOW.getTime() + 2_550),
+    ],
+  );
+  const replayedClosedRouting = await createOrReuseFundingReceiveSession(pool, {
+    ...sameChannelLeaseInput,
+    policyRevision: "same_channel_closed_policy_12345678",
+    now: new Date(NOW.getTime() + 2_560),
+  });
+  assert.equal(replayedClosedRouting.replayed, true);
+  assert.equal(
+    replayedClosedRouting.snapshot.session.receiveSessionId,
+    sameChannelLeaseSession.snapshot.session.receiveSessionId,
+    "a closed session keeps the same-channel selection lease while its receipt is routing",
+  );
+
+  expiredReviewSelectionUserId = await insertUser();
+  const expiredReviewInput = sessionInput(expiredReviewSelectionUserId);
+  const expiredReviewSession = await createOrReuseFundingReceiveSession(pool, {
+    ...expiredReviewInput,
+    requireExactReceiveScope: true,
+  });
+  await insertFundingReceiveReceipt(pool, {
+    receiveSessionId: expiredReviewSession.snapshot.session.receiveSessionId,
+    userId: expiredReviewSelectionUserId,
+    variantId: expiredReviewInput.observationVariants[0].variantId,
+    asset: expiredReviewInput.observationVariants[0].asset,
+    destinationAddress:
+      expiredReviewInput.observationVariants[0].destinationAddress,
+    rawAmount: "3000000",
+    observationRevision: "expired_review_selection_12345678",
+    observedAt: new Date(NOW.getTime() + 2_570),
+    status: "review_required",
+    handling: "review_required",
+    evidence: {
+      reviewContinuation: {
+        version: 1,
+        kind: "convert",
+        label: "Convert",
+        confirmation: "fresh_quote",
+      },
+      reviewQuotePlan: {
+        version: 1,
+        confirmedSourceAmount: null,
+        requestedDestinationAmount: {
+          asset: expiredReviewInput.destinationAsset,
+          raw: "3000000",
+        },
+        venuePreparation: false,
+      },
+    },
+    now: new Date(NOW.getTime() + 2_570),
+  });
+  await pool.query(
+    `update funding_receive_sessions
+        set status = 'expired',
+            closed_at = $2,
+            expires_at = $2,
+            updated_at = $2,
+            version = version + 1
+      where id = $1`,
+    [
+      expiredReviewSession.snapshot.session.receiveSessionId,
+      new Date(NOW.getTime() + 2_580),
+    ],
+  );
+  const expiredReviewOriginalTarget = expiredReviewInput.receiveTargets[0];
+  const expiredReviewOriginalVariant =
+    expiredReviewInput.observationVariants[0];
+  const expiredReviewAlternateAsset = {
+    ...expiredReviewOriginalVariant.asset,
+    assetId: "0x9876987698769876987698769876987698769876",
+  } as const;
+  const expiredReviewAlternateTarget = {
+    ...expiredReviewOriginalTarget,
+    receiveTargetId: "receive_target_after_expired_review_12345678",
+    acceptedAssets: [
+      { asset: expiredReviewAlternateAsset, handling: "direct" as const },
+    ],
+  } as const;
+  const expiredReviewAlternateVariant = {
+    ...expiredReviewOriginalVariant,
+    variantId: "variant_after_expired_review_12345678",
+    asset: expiredReviewAlternateAsset,
+  } as const;
+  const afterExpiredReview = await createOrReuseFundingReceiveSession(pool, {
+    ...expiredReviewInput,
+    receiveTargets: [expiredReviewAlternateTarget],
+    observationVariants: [expiredReviewAlternateVariant],
+    selectedReceiveTargetId: expiredReviewAlternateTarget.receiveTargetId,
+    requireExactReceiveScope: true,
+    now: new Date(NOW.getTime() + 2_590),
+  });
+  assert.equal(afterExpiredReview.replayed, false);
+  assert.notEqual(
+    afterExpiredReview.snapshot.session.receiveSessionId,
+    expiredReviewSession.snapshot.session.receiveSessionId,
+    "an expired review-required receipt remains resumable by id but cannot cause receive_session_selection_conflict for Start new deposit",
+  );
+
+  pollingFairnessUserId = await insertUser();
+  const pollingSessions: Array<{
+    receiveSessionId: string;
+    status: "open" | "recovery_required" | "cancelled";
+  }> = [];
+  for (const [status, count] of [
+    ["open", 1],
+    ["recovery_required", 1],
+    ["cancelled", 1],
+  ] as const) {
+    for (let index = 0; index < count; index += 1) {
+      const suffix = `${status}_${index}`;
+      const pollingSession = await createOrReuseFundingReceiveSession(pool, {
+        ...sessionInput(pollingFairnessUserId),
+        destinationOptionId: `destination_polling_${suffix}_${RUN_ID}`,
+        venueBindingOptionId: `binding_polling_${suffix}_${RUN_ID}`,
+        ownerChannel: "web",
+      });
+      const receiveSessionId = pollingSession.snapshot.session.receiveSessionId;
+      await pool.query(
+        `update funding_receive_sessions
+            set status = $2,
+                closed_at = case
+                  when $2 = 'cancelled' then $3::timestamptz
+                  else null
+                end,
+                last_observed_at = $4,
+                observation_requested_at = $3,
+                updated_at = $3,
+                version = version + 1
+          where id = $1`,
+        [
+          receiveSessionId,
+          status,
+          new Date(NOW.getTime() + 2_600),
+          new Date(NOW.getTime() - 24 * 60 * 60_000),
+        ],
+      );
+      pollingSessions.push({ receiveSessionId, status });
+    }
+  }
+  const pollingStatusById = new Map(
+    pollingSessions.map((entry) => [entry.receiveSessionId, entry.status]),
+  );
+  const fairClaimStatuses: string[] = [];
+  for (let claimIndex = 0; claimIndex < 20; claimIndex += 1) {
+    const fairClaim = await claimObservableFundingReceiveSessions(pool, {
+      limit: 1,
+      minimumPollIntervalMs: 1_000,
+      inactivePollIntervalMs: 1_000,
+      closedPollIntervalMs: 1_000,
+      now: new Date(NOW.getTime() + 2_700),
+    });
+    const status = fairClaim[0]
+      ? pollingStatusById.get(fairClaim[0].session.receiveSessionId)
+      : null;
+    if (status) fairClaimStatuses.push(status);
+    if (new Set(fairClaimStatuses).size === 3) break;
+  }
+  assert.deepEqual(
+    [...new Set(fairClaimStatuses)],
+    ["open", "recovery_required", "cancelled"],
+    "deadline scheduling must make every observer class progress within a bounded number of limit=1 claims",
+  );
+
+  const continuouslyWokenSession = await createOrReuseFundingReceiveSession(
+    pool,
+    {
+      ...sessionInput(pollingFairnessUserId),
+      destinationOptionId: `destination_continuous_wake_${RUN_ID}`,
+      venueBindingOptionId: `binding_continuous_wake_${RUN_ID}`,
+      ownerChannel: "web",
+      now: new Date(NOW.getTime() + 2_790),
+    },
+  );
+  const overdueClosedSession = await createOrReuseFundingReceiveSession(pool, {
+    ...sessionInput(pollingFairnessUserId),
+    destinationOptionId: `destination_overdue_closed_${RUN_ID}`,
+    venueBindingOptionId: `binding_overdue_closed_${RUN_ID}`,
+    ownerChannel: "web",
+    now: new Date(NOW.getTime() + 2_780),
+  });
+  await pool.query(
+    `update funding_receive_sessions
+        set status = 'cancelled',
+            closed_at = $2,
+            last_observed_at = $3,
+            observation_requested_at = null,
+            updated_at = $2,
+            version = version + 1
+      where id = $1`,
+    [
+      overdueClosedSession.snapshot.session.receiveSessionId,
+      new Date(NOW.getTime() + 2_795),
+      new Date(NOW.getTime() - 24 * 60 * 60_000),
+    ],
+  );
+  const wakeCannotStarveOverdue = await claimObservableFundingReceiveSessions(
+    pool,
+    {
+      limit: 1,
+      minimumPollIntervalMs: 1_000,
+      inactivePollIntervalMs: 1_000,
+      closedPollIntervalMs: 1_000,
+      now: new Date(NOW.getTime() + 2_800),
+    },
+  );
+  assert.equal(
+    wakeCannotStarveOverdue[0]?.session.receiveSessionId,
+    overdueClosedSession.snapshot.session.receiveSessionId,
+    "a continuously eligible fresh wake must not starve an older overdue late-observation session at limit=1",
+  );
+  assert.notEqual(
+    wakeCannotStarveOverdue[0]?.session.receiveSessionId,
+    continuouslyWokenSession.snapshot.session.receiveSessionId,
   );
 
   genericOptionUserId = await insertUser();
@@ -383,6 +1359,67 @@ try {
     firstGeneric.snapshot.session.receiveSessionId,
     "an exact option with a new caller key must record that key on the same session",
   );
+
+  // Reproduce the former replay/fresh-open deadlock deterministically. The
+  // fresh path owns the scope first; an idempotency replay must wait for that
+  // scope without holding the old receive-session row lock.
+  const scopeOwner = await pool.connect();
+  let blockedReplay: ReturnType<
+    typeof replayFundingReceiveSessionOpenIdempotency
+  > | null = null;
+  try {
+    await scopeOwner.query("begin");
+    await lockFundingReceiveSessionScope(scopeOwner, genericInput);
+    blockedReplay = replayFundingReceiveSessionOpenIdempotency(pool, {
+      userId: genericOptionUserId,
+      ownerChannel: "web",
+      idempotencyKey: genericOpen.openIdempotency.key,
+      requestFingerprint: genericOpen.openIdempotency.requestFingerprint,
+      now: NOW,
+    });
+    let replayIsWaitingForScope = false;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const { rows } = await pool.query<{ waiting: boolean }>(
+        `select exists (
+           select 1
+           from pg_locks lock_row
+           join pg_stat_activity activity
+             on activity.pid = lock_row.pid
+          where lock_row.locktype = 'advisory'
+            and not lock_row.granted
+            and activity.datname = current_database()
+         ) as waiting`,
+      );
+      if (rows[0]?.waiting) {
+        replayIsWaitingForScope = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(
+      replayIsWaitingForScope,
+      true,
+      "the replay must reach the shared scope lock before the row-lock assertion",
+    );
+    await scopeOwner.query("set local lock_timeout = '500ms'");
+    await scopeOwner.query(
+      `select id
+         from funding_receive_sessions
+        where id = $1::uuid
+        for update`,
+      [firstGeneric.snapshot.session.receiveSessionId],
+    );
+    await scopeOwner.query("commit");
+    const replayAfterScope = await blockedReplay;
+    assert.equal(
+      replayAfterScope?.snapshot.session.receiveSessionId,
+      firstGeneric.snapshot.session.receiveSessionId,
+    );
+  } finally {
+    await scopeOwner.query("rollback").catch(() => undefined);
+    scopeOwner.release();
+    await blockedReplay?.catch(() => undefined);
+  }
   await assert.rejects(
     () =>
       createOrReuseFundingReceiveSession(pool, {
@@ -464,8 +1501,8 @@ try {
       receiveSessionId: alternateGeneric.snapshot.session.receiveSessionId,
       expectedVersion: alternateGeneric.snapshot.session.version,
       observationVariants: [alternateVariant],
-      // Recovery remains a post-money state for generic exact selections:
-      // another asset must not replace it or make an old opaque retry lie.
+      // The observed receipt, not aggregate recovery by itself, keeps this
+      // generic exact selection bound while money is still in flight.
       status: "recovery_required",
       lastObservedAt: new Date(NOW.getTime() + 1_000),
       now: new Date(NOW.getTime() + 1_000),
@@ -683,8 +1720,8 @@ try {
   );
   assert.equal(
     legacyAfterOpenReceipt.replayed,
-    false,
-    "a legacy open session with a receipt still requires matching revisions",
+    true,
+    "an observed receipt retains the same in-flight session even if its aggregate status update is delayed",
   );
 
   const replacement = await createOrReuseFundingReceiveSession(pool, {
@@ -1287,6 +2324,26 @@ try {
         retainedSolUserId,
       ]);
     }
+    if (historicalSolUserId) {
+      await cleanup.query("delete from notifications where user_id = $1", [
+        historicalSolUserId,
+      ]);
+      await cleanup.query(
+        "delete from funding_receive_canonical_events where tx_hash = $1",
+        [historicalSolTransactionHash],
+      );
+      await cleanup.query(
+        "delete from funding_receive_receipts where user_id = $1",
+        [historicalSolUserId],
+      );
+      await cleanup.query(
+        "delete from funding_receive_sessions where user_id = $1",
+        [historicalSolUserId],
+      );
+      await cleanup.query("delete from users where id = $1", [
+        historicalSolUserId,
+      ]);
+    }
     if (crossChannelUserId) {
       await cleanup.query(
         "delete from funding_receive_receipts where user_id = $1",
@@ -1298,6 +2355,93 @@ try {
       );
       await cleanup.query("delete from users where id = $1", [
         crossChannelUserId,
+      ]);
+    }
+    if (reviewReleaseUserId) {
+      await cleanup.query(
+        "delete from funding_receive_receipts where user_id = $1",
+        [reviewReleaseUserId],
+      );
+      await cleanup.query(
+        "delete from funding_receive_sessions where user_id = $1",
+        [reviewReleaseUserId],
+      );
+      await cleanup.query("delete from users where id = $1", [
+        reviewReleaseUserId,
+      ]);
+    }
+    if (recoveryReleaseUserId) {
+      await cleanup.query(
+        "delete from funding_receive_receipts where user_id = $1",
+        [recoveryReleaseUserId],
+      );
+      await cleanup.query(
+        "delete from funding_receive_sessions where user_id = $1",
+        [recoveryReleaseUserId],
+      );
+      await cleanup.query("delete from users where id = $1", [
+        recoveryReleaseUserId,
+      ]);
+    }
+    if (lateClosedReleaseUserId) {
+      await cleanup.query(
+        "delete from funding_receive_receipts where user_id = $1",
+        [lateClosedReleaseUserId],
+      );
+      await cleanup.query(
+        "delete from funding_receive_sessions where user_id = $1",
+        [lateClosedReleaseUserId],
+      );
+      await cleanup.query("delete from users where id = $1", [
+        lateClosedReleaseUserId,
+      ]);
+    }
+    if (pollingFairnessUserId) {
+      await cleanup.query(
+        "delete from funding_receive_sessions where user_id = $1",
+        [pollingFairnessUserId],
+      );
+      await cleanup.query("delete from users where id = $1", [
+        pollingFairnessUserId,
+      ]);
+    }
+    if (sameChannelLeaseUserId) {
+      await cleanup.query(
+        "delete from funding_receive_receipts where user_id = $1",
+        [sameChannelLeaseUserId],
+      );
+      await cleanup.query(
+        "delete from funding_receive_sessions where user_id = $1",
+        [sameChannelLeaseUserId],
+      );
+      await cleanup.query("delete from users where id = $1", [
+        sameChannelLeaseUserId,
+      ]);
+    }
+    if (completedLifecycleUserId) {
+      await cleanup.query(
+        "delete from funding_receive_receipts where user_id = $1",
+        [completedLifecycleUserId],
+      );
+      await cleanup.query(
+        "delete from funding_receive_sessions where user_id = $1",
+        [completedLifecycleUserId],
+      );
+      await cleanup.query("delete from users where id = $1", [
+        completedLifecycleUserId,
+      ]);
+    }
+    if (expiredReviewSelectionUserId) {
+      await cleanup.query(
+        "delete from funding_receive_receipts where user_id = $1",
+        [expiredReviewSelectionUserId],
+      );
+      await cleanup.query(
+        "delete from funding_receive_sessions where user_id = $1",
+        [expiredReviewSelectionUserId],
+      );
+      await cleanup.query("delete from users where id = $1", [
+        expiredReviewSelectionUserId,
       ]);
     }
     if (mergeTargetId) {

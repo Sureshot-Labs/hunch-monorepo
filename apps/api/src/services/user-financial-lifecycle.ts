@@ -153,7 +153,7 @@ export async function fetchUserFinancialLifecycleSummary(
                 'recovery_required'
               )
               or (
-                session.status in ('expired', 'cancelled')
+                session.status in ('completed', 'expired', 'cancelled')
                 and session.observe_until > now()
               )
             )
@@ -173,7 +173,7 @@ export async function fetchUserFinancialLifecycleSummary(
                 'recovery_required'
               )
               or (
-                session.status in ('expired', 'cancelled')
+                session.status in ('completed', 'expired', 'cancelled')
                 and session.observe_until > now()
               )
             )

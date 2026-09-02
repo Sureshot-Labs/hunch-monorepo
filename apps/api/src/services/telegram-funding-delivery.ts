@@ -540,9 +540,12 @@ async function loadCurrentDestination(
   );
   if (
     retainedTerminal.kind === "invalid" ||
-    (retainedTerminal.kind === "absent" && projection.terminal) ||
+    (retainedTerminal.kind === "absent" &&
+      projection.terminal &&
+      !deletesQrPhoto) ||
     (retainedTerminal.kind === "valid" &&
-      !canonicalJsonEqual(retainedTerminal.projection, projection))
+      !canonicalJsonEqual(retainedTerminal.projection, projection) &&
+      !deletesQrPhoto)
   ) {
     return null;
   }

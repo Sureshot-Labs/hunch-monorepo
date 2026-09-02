@@ -259,6 +259,23 @@ const supersedeInput = {
     fake.statements.some((sql) => sql.startsWith("update funding_receive")),
     true,
   );
+  const activeLookup =
+    fake.statements.find((sql) =>
+      sql.includes("from telegram_funding_sessions context"),
+    ) ?? "";
+  assert.match(
+    activeLookup,
+    /active_receipt\.status in \('observed', 'routing'\)/u,
+  );
+  const receiveRetirement =
+    fake.statements.find((sql) =>
+      sql.startsWith("update funding_receive_sessions"),
+    ) ?? "";
+  assert.match(
+    receiveRetirement,
+    /receipt\.status <> 'ready'/u,
+    "settled receipts do not make a displayed Telegram address permanent",
+  );
   assert.doesNotMatch(
     fake.statements.find((sql) =>
       sql.includes("from telegram_funding_sessions context"),
@@ -308,20 +325,22 @@ const supersedeInput = {
 {
   const fake = supersedeSessionPool(true, 1);
   const client = await fake.pool.connect();
-  await assert.rejects(
-    prepareTelegramFundingSessionOpenInTransaction(client as never, {
+  const superseded = await prepareTelegramFundingSessionOpenInTransaction(
+    client as never,
+    {
       ...supersedeInput,
       destinationOptionId: "polymarket-deposit",
       venueBindingOptionId: "polymarket-wallet",
-    }),
-    (error: unknown) =>
-      error instanceof TelegramFundingPersistenceError &&
-      error.code === "telegram_funding_session_active_elsewhere",
-    "a consented address remains active until its receive lifecycle ends",
+    },
+  );
+  assert.equal(
+    superseded?.id,
+    contextId,
+    "displaying or consenting to an address does not lock a newer Deposit message before funds are observed",
   );
   assert.equal(
     fake.statements.some((sql) => sql.startsWith("update funding_receive")),
-    false,
+    true,
   );
 }
 

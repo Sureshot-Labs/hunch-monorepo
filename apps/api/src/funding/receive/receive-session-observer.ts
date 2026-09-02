@@ -4,7 +4,6 @@ import { sameAccountAddress } from "../domain/asset-identity.js";
 import { normalizedActionSchema } from "../domain/schemas.js";
 import type {
   FundingReceiveReceipt,
-  FundingReceiveSessionStatus,
   JsonValue,
   NormalizedAction,
 } from "../domain/types.js";
@@ -25,12 +24,16 @@ import {
 import {
   claimFundingReceiveCanonicalEventAllocation,
   claimObservableFundingReceiveSessions,
-  derivePersistedFundingReceiveSessionStatus,
+  deriveEffectiveFundingReceiveSessionStatus,
   finalizeFundingReceiveCanonicalEventAllocation,
   insertFundingReceiveReceipt,
+  listRecoverableFundingReceiveCanonicalEvents,
+  lockFundingReceiveSessionScope,
+  suppressRecoverableFundingReceiveCanonicalInternalEvent,
   expireFundingReceiveSessions,
   updateClosedFundingReceiveSessionObservation,
   updateFundingReceiveSessionObservation,
+  type RecoverableFundingReceiveCanonicalEvent,
   type FundingReceiveSessionSnapshot,
 } from "../persistence/funding-receive-session-repository.js";
 import {
@@ -76,6 +79,44 @@ function deduplicateCanonicalEvents(
     if (!unique.has(identity)) unique.set(identity, event);
   }
   return [...unique.values()];
+}
+
+function recoveredCanonicalEvent(
+  variants: readonly DirectIngressObservationVariant[],
+  recovered: RecoverableFundingReceiveCanonicalEvent,
+): FundingReceiveCanonicalEvent | null {
+  const variant = variants.find(
+    (candidate) => candidate.variantId === recovered.variantId,
+  );
+  if (
+    !variant ||
+    recovered.sourceAddress == null ||
+    variant.networkId !== recovered.networkId ||
+    variant.asset.decimals !== recovered.asset.decimals ||
+    !sameAccountAddress(
+      variant.networkId,
+      variant.asset.assetId,
+      recovered.asset.assetId,
+    ) ||
+    !sameAccountAddress(
+      variant.networkId,
+      variant.destinationAddress,
+      recovered.destinationAddress,
+    )
+  ) {
+    return null;
+  }
+  return {
+    variant,
+    transactionHash: recovered.transactionHash,
+    eventIndex: recovered.eventIndex,
+    blockNumber: recovered.ledgerHeight,
+    blockHash: recovered.blockHash,
+    sourceAddress: recovered.sourceAddress,
+    destinationAddress: recovered.destinationAddress,
+    rawAmount: recovered.rawAmount,
+    observedAt: recovered.observedAt.toISOString(),
+  };
 }
 
 function handoffSnapshotMatchesCanonicalEvent(
@@ -348,82 +389,6 @@ export type FundingReceiveSessionObservationResult = Readonly<{
   retryableErrors: number;
 }>;
 
-type FundingReceivePollingCandidate = Readonly<{
-  userId: string;
-  session: Readonly<{
-    receiveSessionId: string;
-    status: FundingReceiveSessionStatus;
-    openedAt: string;
-  }>;
-  observationVariants: readonly JsonRecord[];
-}>;
-
-function sessionPollingPriority(
-  snapshot: FundingReceivePollingCandidate,
-): number {
-  return snapshot.session.status === "open" ||
-    snapshot.session.status === "processing" ||
-    snapshot.session.status === "review_required" ||
-    snapshot.session.status === "recovery_required"
-    ? 0
-    : 1;
-}
-
-function canonicalCursor(
-  variants: readonly DirectIngressObservationVariant[],
-): bigint | null {
-  const cursors = variants.flatMap((variant) => {
-    const raw =
-      variant.observation.payload.eventCursorBlock ??
-      variant.observation.payload.eventCursorSlot;
-    return typeof raw === "string" && /^[0-9]+$/.test(raw) ? [BigInt(raw)] : [];
-  });
-  if (cursors.length === 0) return null;
-  return cursors.reduce((minimum, cursor) =>
-    cursor < minimum ? cursor : minimum,
-  );
-}
-
-export function selectFundingReceiveSessionsForPolling<
-  T extends FundingReceivePollingCandidate,
->(snapshots: readonly T[]): readonly T[] {
-  const valid = snapshots.flatMap((snapshot) => {
-    try {
-      const variants = snapshot.observationVariants.map(
-        parseDirectIngressObservationVariant,
-      );
-      return [{ snapshot, cursor: canonicalCursor(variants) }];
-    } catch {
-      return [];
-    }
-  });
-  valid.sort((left, right) => {
-    // Active funding always owns the bounded polling budget. Closed sessions
-    // are retained for late-transfer recovery, but an account repeatedly
-    // switching channels cannot starve fresh deposits globally.
-    const priority =
-      sessionPollingPriority(left.snapshot) -
-      sessionPollingPriority(right.snapshot);
-    if (priority !== 0) return priority;
-    if (left.cursor != null && right.cursor != null) {
-      if (left.cursor < right.cursor) return -1;
-      if (left.cursor > right.cursor) return 1;
-    } else if (left.cursor != null) {
-      return -1;
-    } else if (right.cursor != null) {
-      return 1;
-    }
-    const openedAt =
-      Date.parse(right.snapshot.session.openedAt) -
-      Date.parse(left.snapshot.session.openedAt);
-    if (openedAt !== 0) return openedAt;
-    return left.snapshot.session.receiveSessionId.localeCompare(
-      right.snapshot.session.receiveSessionId,
-    );
-  });
-  return valid.map((entry) => entry.snapshot);
-}
-
 function hasValidObservationVariants(
   snapshot: FundingReceiveSessionSnapshot,
 ): boolean {
@@ -436,14 +401,22 @@ function hasValidObservationVariants(
   }
 }
 
+function isLateObservableReceiveSession(
+  snapshot: FundingReceiveSessionSnapshot,
+): boolean {
+  return (
+    snapshot.session.status === "completed" ||
+    snapshot.session.status === "expired" ||
+    snapshot.session.status === "cancelled"
+  );
+}
+
 async function quarantineInvalidObservationVariants(
   pool: Pool,
   snapshot: FundingReceiveSessionSnapshot,
   now: Date,
 ): Promise<boolean> {
-  const closed =
-    snapshot.session.status === "expired" ||
-    snapshot.session.status === "cancelled";
+  const closed = isLateObservableReceiveSession(snapshot);
   if (closed) {
     return updateClosedFundingReceiveSessionObservation(pool, {
       receiveSessionId: snapshot.session.receiveSessionId,
@@ -487,7 +460,9 @@ export function fundingReceiveObservationDisposition(
   late: boolean;
 }> {
   const late =
-    input.sessionStatus === "expired" || input.sessionStatus === "cancelled";
+    input.sessionStatus === "completed" ||
+    input.sessionStatus === "expired" ||
+    input.sessionStatus === "cancelled";
   const direct = isDirectReceiveCompletionKind(input.completion.kind);
   const reviewRequired = input.handling === "review_required";
   if (late && !direct) {
@@ -606,7 +581,10 @@ export class FundingReceiveSessionObserver {
     const observableSessions = await claimObservableFundingReceiveSessions(
       pool,
       {
-        limit: Math.min(1_000, batchLimit * 8),
+        // Claim only work this poll will actually execute. Claiming an
+        // oversized set advances last_observed_at for rows that are later
+        // sliced away and can indefinitely postpone their real scan.
+        limit: batchLimit,
         minimumPollIntervalMs: input.minimumPollIntervalMs ?? 10_000,
         inactivePollIntervalMs: 60_000,
         closedPollIntervalMs: 300_000,
@@ -632,9 +610,7 @@ export class FundingReceiveSessionObserver {
         retryableErrors += 1;
       }
     }
-    const sessions = selectFundingReceiveSessionsForPolling(
-      validSessions,
-    ).slice(0, batchLimit);
+    const sessions = validSessions;
     let batchScans: Awaited<
       ReturnType<typeof scanCanonicalFundingReceiveEventsBatch>
     > | null = null;
@@ -742,9 +718,7 @@ export class FundingReceiveSessionObserver {
         return { receiptsRecorded: 0, recoveryRequired: false };
       }
       await tx(pool, async (client) => {
-        const closed =
-          snapshot.session.status === "expired" ||
-          snapshot.session.status === "cancelled";
+        const closed = isLateObservableReceiveSession(snapshot);
         const activeStatus =
           snapshot.session.status === "open" ||
           snapshot.session.status === "processing" ||
@@ -780,9 +754,7 @@ export class FundingReceiveSessionObserver {
     }
     if (selection.kind === "ambiguous") {
       await tx(pool, async (client) => {
-        const late =
-          snapshot.session.status === "expired" ||
-          snapshot.session.status === "cancelled";
+        const late = isLateObservableReceiveSession(snapshot);
         const updated = late
           ? await updateClosedFundingReceiveSessionObservation(client, {
               receiveSessionId: snapshot.session.receiveSessionId,
@@ -885,13 +857,39 @@ export class FundingReceiveSessionObserver {
   ): Promise<
     Readonly<{ receiptsRecorded: number; recoveryRequired: boolean }>
   > {
-    if (!cursorAdvanced && events.length === 0) {
-      return { receiptsRecorded: 0, recoveryRequired: false };
-    }
     return tx(pool, async (client) => {
+      // Session opens take this scope lock before touching receive rows. Keep
+      // the same global order here before canonical allocation locks candidate
+      // sessions, otherwise observer-vs-open can deadlock.
+      await lockFundingReceiveSessionScope(client, {
+        userId: snapshot.userId,
+        destinationOptionId: snapshot.session.destinationOptionId,
+        venueBindingOptionId: snapshot.session.venueBindingOptionId,
+      });
       let receiptsRecorded = 0;
       let recoveryRequired = false;
-      const uniqueEvents = deduplicateCanonicalEvents(events);
+      let eventBelongsToSession = false;
+      const recovered = await listRecoverableFundingReceiveCanonicalEvents(
+        client,
+        {
+          receiveSessionId: snapshot.session.receiveSessionId,
+          now,
+        },
+      );
+      const recoveredEvents = recovered.flatMap((entry) => {
+        const event = recoveredCanonicalEvent(variants, entry);
+        return event ? [event] : [];
+      });
+      const recoveredEventIdentities = new Set(
+        recoveredEvents.map(canonicalEventIdentity),
+      );
+      const uniqueEvents = deduplicateCanonicalEvents([
+        ...recoveredEvents,
+        ...events,
+      ]);
+      if (!cursorAdvanced && uniqueEvents.length === 0) {
+        return { receiptsRecorded: 0, recoveryRequired: false };
+      }
       const handoffClassifications = await this.handoffClassifications(
         client,
         snapshot,
@@ -902,6 +900,17 @@ export class FundingReceiveSessionObserver {
           canonicalEventIdentity(event),
         );
         if (handoffClassification?.kind === "internal") {
+          if (recoveredEventIdentities.has(canonicalEventIdentity(event))) {
+            await suppressRecoverableFundingReceiveCanonicalInternalEvent(
+              client,
+              {
+                networkId: event.variant.networkId,
+                transactionHash: event.transactionHash,
+                eventIndex: event.eventIndex,
+                now,
+              },
+            );
+          }
           continue;
         }
         const allocation = await claimFundingReceiveCanonicalEventAllocation(
@@ -918,19 +927,25 @@ export class FundingReceiveSessionObserver {
             blockHash: event.blockHash,
             observedAt: new Date(event.observedAt),
             now,
+            expectedReceiveSessionId: snapshot.session.receiveSessionId,
           },
         );
-        if (allocation.status === "recovery_required") {
-          recoveryRequired = true;
-          continue;
-        }
         if (
-          allocation.status === "allocated" ||
+          allocation.targetReceiveSessionId != null &&
           allocation.targetReceiveSessionId !==
             snapshot.session.receiveSessionId
         ) {
           continue;
         }
+        if (allocation.status === "recovery_required") {
+          eventBelongsToSession = true;
+          recoveryRequired = true;
+          continue;
+        }
+        if (allocation.status === "allocated") {
+          continue;
+        }
+        eventBelongsToSession = true;
         const handling = fundingReceiveVariantHandling(event.variant);
         const disposition = fundingReceiveObservationDisposition({
           sessionStatus: snapshot.session.status,
@@ -1020,10 +1035,21 @@ export class FundingReceiveSessionObserver {
           handoffRecoveryRequired ||
           disposition.sessionStatus === "recovery_required";
       }
-      const closed =
-        snapshot.session.status === "expired" ||
-        snapshot.session.status === "cancelled";
+      if (!cursorAdvanced && !eventBelongsToSession) {
+        return { receiptsRecorded: 0, recoveryRequired: false };
+      }
+      const closed = isLateObservableReceiveSession(snapshot);
       const nextVariants = variants.map(jsonRecord);
+      const effectiveActiveStatus =
+        closed || recoveryRequired
+          ? null
+          : await deriveEffectiveFundingReceiveSessionStatus(client, {
+              receiveSessionId: snapshot.session.receiveSessionId,
+              userId: snapshot.userId,
+            });
+      if (!closed && !recoveryRequired && effectiveActiveStatus === null) {
+        throw new Error("receive session disappeared while deriving status");
+      }
       const updated = closed
         ? await updateClosedFundingReceiveSessionObservation(client, {
             receiveSessionId: snapshot.session.receiveSessionId,
@@ -1039,10 +1065,7 @@ export class FundingReceiveSessionObserver {
             observationVariants: nextVariants,
             status: recoveryRequired
               ? "recovery_required"
-              : await derivePersistedFundingReceiveSessionStatus(client, {
-                  receiveSessionId: snapshot.session.receiveSessionId,
-                  userId: snapshot.userId,
-                }),
+              : (effectiveActiveStatus ?? "recovery_required"),
             lastObservedAt: now,
             now,
           });

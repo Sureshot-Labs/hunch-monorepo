@@ -771,6 +771,7 @@ export class TelegramFundingService {
            select 1
            from funding_receive_receipts receipt
            where receipt.receive_session_id = $1::uuid
+             and receipt.status <> 'ready'
          ) as can_cancel`,
         [input.context.receiveSessionId],
       );
@@ -1214,9 +1215,13 @@ export class TelegramFundingService {
         chatId: identity.chatId,
         telegramMessageId: input.telegramMessageId,
         venueId: input.venue,
-        presentAcrossMessages: true,
         controllerWalletId: controllerWalletId ?? undefined,
         venueBindingOptionId: destination?.venueBindingOptionId,
+        // Money already observed for an expired Telegram presentation still
+        // belongs to its durable workflow. A new bot message must resume that
+        // workflow; address-only contexts remain message-local and reusable
+        // only through their original presentation.
+        presentInFlightAcrossMessages: true,
         idempotencyKey,
         requestFingerprint,
         now,

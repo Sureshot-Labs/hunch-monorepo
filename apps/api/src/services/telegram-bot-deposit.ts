@@ -97,7 +97,7 @@ async function resolveActiveTelegramDeposit(input: {
 }): Promise<ActiveTelegramDeposit | null> {
   if (input.telegramUserId == null) return null;
   const result = await input.db.query<{
-    has_received: boolean;
+    has_uncancellable_workflow: boolean;
     venue_id: string;
   }>(
     `
@@ -107,7 +107,8 @@ async function resolveActiveTelegramDeposit(input: {
           select 1
           from funding_receive_receipts receive_receipt
           where receive_receipt.receive_session_id = receive_session.id
-        ) as has_received
+            and receive_receipt.status in ('observed', 'routing')
+        ) as has_uncancellable_workflow
       from user_telegram_accounts telegram_account
       join telegram_funding_sessions funding_context
         on funding_context.user_id = telegram_account.user_id
@@ -120,16 +121,27 @@ async function resolveActiveTelegramDeposit(input: {
       where telegram_account.telegram_user_id = $1
         and funding_context.cancelled_at is null
         and funding_context.latest_terminal_projection is null
-        and funding_context.expires_at > now()
-        and receive_session.status in (
-          'open',
-          'processing',
-          'review_required',
-          'recovery_required'
+        and (
+          (
+            funding_context.expires_at > now()
+            and
+            receive_session.status = 'open'
+            and receive_session.expires_at > now()
+          )
+          or (
+            receive_session.observe_until > now()
+            and exists (
+              select 1
+              from funding_receive_receipts active_receipt
+              where active_receipt.receive_session_id = receive_session.id
+                and active_receipt.status in ('observed', 'routing')
+            )
+          )
         )
-        and receive_session.expires_at > now()
         and receive_session.venue_id in ('polymarket', 'limitless')
-      order by funding_context.created_at desc, funding_context.id desc
+      order by has_uncancellable_workflow desc,
+               funding_context.created_at desc,
+               funding_context.id desc
       limit 1
     `,
     [String(input.telegramUserId)],
@@ -137,7 +149,7 @@ async function resolveActiveTelegramDeposit(input: {
   const activeDeposit = result.rows[0];
   const venue = activeDeposit?.venue_id;
   return venue === "polymarket" || venue === "limitless"
-    ? { canCancel: activeDeposit.has_received !== true, venue }
+    ? { canCancel: activeDeposit.has_uncancellable_workflow !== true, venue }
     : null;
 }
 

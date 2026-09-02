@@ -141,11 +141,18 @@ async function projectCandidate(
 ): Promise<"created" | "skipped"> {
   return tx(pool, async (client) => {
     await lockTelegramFundingLinkLifecycle(client, candidate.user_id);
-    const locked = await client.query<{ id: string }>(
-      `select id from telegram_funding_sessions where id = $1 for update`,
+    const locked = await client.query<{
+      id: string;
+      projected_consent_revision: number;
+    }>(
+      `select id, projected_consent_revision
+         from telegram_funding_sessions
+        where id = $1
+        for update`,
       [candidate.id],
     );
-    if (!locked.rows[0]) return "skipped";
+    const lockedContext = locked.rows[0];
+    if (!lockedContext) return "skipped";
     const context = await fetchTelegramFundingSessionContext(client, {
       contextId: candidate.id,
       userId: candidate.user_id,
@@ -165,21 +172,69 @@ async function projectCandidate(
     const consentRoute = consent
       ? resolveTelegramFundingConsentRoute(consent)
       : null;
+    const receipts = await listFundingReceiveReceiptsForUser(client, {
+      userId: context.userId,
+      receiveSessionId: context.receiveSessionId,
+    });
+    const afterBroadcastBoundaryReceiptIds =
+      await listFundingReceiveRoutingReceiptIdsAfterBroadcastBoundary(client, {
+        userId: context.userId,
+        receiveSessionId: context.receiveSessionId,
+      });
+    const capability =
+      consent?.automationEnabled && context.telegramAccountId
+        ? await resolveTelegramFundingConsentCapability(client, {
+            consent,
+            userId: context.userId,
+            telegramAccountId: context.telegramAccountId,
+            telegramUserId: context.telegramUserId,
+            destinationOptionId: receive.session.destinationOptionId,
+            venueBindingOptionId: receive.session.venueBindingOptionId,
+            now,
+          })
+        : null;
+    const currentConsentProjection = projectTelegramFundingProgress({
+      afterBroadcastBoundaryReceiptIds,
+      automaticConversionAvailable: capability?.decision.kind === "allowed",
+      automaticConversionMode: capability
+        ? capability.decision.kind === "allowed"
+          ? "available"
+          : capability.decision.kind === "soft_paused"
+            ? "soft_paused"
+            : "hard_invalid"
+        : consent?.automationEnabled
+          ? "hard_invalid"
+          : undefined,
+      consent,
+      context,
+      receipts,
+      session: receive.session,
+      now,
+    });
+    const consentSelectionChanged =
+      context.activeConsentRevision != null &&
+      context.activeConsentRevision !==
+        lockedContext.projected_consent_revision;
+    // Validate the active consent's target, not the last rendered card. A
+    // legitimate SOL -> pUSD (or reverse) selection changes the address on
+    // purpose; validating the old card against the new consent would falsely
+    // terminalize the whole context as "SOL unavailable".
+    const projectionTarget = currentConsentProjection ?? latestProjection;
     const disclosureTargetIsCurrent =
       context.telegramAccountId != null &&
       (await isTelegramFundingReceiveDisclosureTargetCurrent(client, {
-        expectedReceiveAddress: latestProjection?.receiveAddress ?? null,
+        expectedReceiveAddress: projectionTarget?.receiveAddress ?? null,
         fundingContextId: context.id,
         receiveSessionId: context.receiveSessionId,
         retainedSolanaTarget:
-          (latestProjection != null &&
-            isTelegramSolanaRetainedFundingRouteKey(
-              latestProjection.presentation.routeKey,
-            )) ||
-          (consentRoute != null &&
-            isTelegramSolanaRetainedFundingRouteKey(
-              consentRoute.presentation.routeKey,
-            )),
+          projectionTarget != null
+            ? isTelegramSolanaRetainedFundingRouteKey(
+                projectionTarget.presentation.routeKey,
+              )
+            : consentRoute != null &&
+              isTelegramSolanaRetainedFundingRouteKey(
+                consentRoute.presentation.routeKey,
+              ),
         telegramAccountId: context.telegramAccountId,
         telegramUserId: context.telegramUserId,
         userId: context.userId,
@@ -190,22 +245,62 @@ async function projectCandidate(
     );
     const redactionPresentation =
       latestProjection?.presentation ?? consentRoute?.presentation ?? null;
-    const qrPhoto = await client.query<{ exists: boolean }>(
+    const qrPhoto = await client.query<{
+      delete_obligation: boolean;
+      exists: boolean;
+      target_changed: boolean;
+    }>(
       `
-        select exists (
-          select 1
-          from telegram_bot_action_outbox
-          where funding_session_id = $1
-            and action = 'funding_qr'
-            and telegram_message_id is not null
-            and telegram_message_id is distinct from $2::bigint
-            and payload->>'terminal' <> 'true'
-        ) as exists
+        select
+          exists (
+            select 1
+            from telegram_bot_action_outbox qr_outbox
+            where qr_outbox.funding_session_id = $1
+              and qr_outbox.action = 'funding_qr'
+              and qr_outbox.telegram_message_id is not null
+              and qr_outbox.telegram_message_id is distinct from $2::bigint
+              and (
+                qr_outbox.payload->>'terminal' <> 'true'
+                or qr_outbox.status <> 'sent'
+              )
+          ) as exists,
+          exists (
+            select 1
+            from telegram_bot_action_outbox qr_outbox
+            where qr_outbox.funding_session_id = $1
+              and qr_outbox.action = 'funding_qr'
+              and qr_outbox.telegram_message_id is not null
+              and qr_outbox.telegram_message_id is distinct from $2::bigint
+              and qr_outbox.payload->>'terminal' = 'true'
+              and qr_outbox.status <> 'sent'
+          ) as delete_obligation,
+          exists (
+            select 1
+            from telegram_bot_action_outbox qr_outbox
+            where qr_outbox.funding_session_id = $1
+              and qr_outbox.action = 'funding_qr'
+              and qr_outbox.telegram_message_id is not null
+              and qr_outbox.telegram_message_id is distinct from $2::bigint
+              and qr_outbox.payload->>'terminal' <> 'true'
+              and (
+                qr_outbox.payload->>'receiveAddress' is distinct from $3::text
+                or qr_outbox.payload #>> '{presentation,routeKey}'
+                     is distinct from $4::text
+              )
+          ) as target_changed
       `,
-      [context.id, context.telegramMessageId],
+      [
+        context.id,
+        context.telegramMessageId,
+        currentConsentProjection?.receiveAddress ?? null,
+        currentConsentProjection?.presentation.routeKey ?? null,
+      ],
     );
     const shouldDeleteQrPhoto =
-      !disclosureTargetIsCurrent && qrPhoto.rows[0]?.exists === true;
+      qrPhoto.rows[0]?.exists === true &&
+      (!disclosureTargetIsCurrent ||
+        qrPhoto.rows[0]?.delete_obligation === true ||
+        (consentSelectionChanged && qrPhoto.rows[0]?.target_changed === true));
     const shouldRedactDeliveredAddress =
       !disclosureTargetIsCurrent &&
       context.addressDisclosureAttemptRevision >
@@ -246,52 +341,12 @@ async function projectCandidate(
     }
     let projection =
       (shouldRedactDeliveredAddress || shouldDeleteQrPhoto) &&
+      !disclosureTargetIsCurrent &&
       redactionPresentation
         ? projectTelegramFundingUnavailable(context, redactionPresentation)
         : null;
     if (disclosureTargetIsCurrent) {
-      const receipts = await listFundingReceiveReceiptsForUser(client, {
-        userId: context.userId,
-        receiveSessionId: context.receiveSessionId,
-      });
-      const afterBroadcastBoundaryReceiptIds =
-        await listFundingReceiveRoutingReceiptIdsAfterBroadcastBoundary(
-          client,
-          {
-            userId: context.userId,
-            receiveSessionId: context.receiveSessionId,
-          },
-        );
-      const capability =
-        consent?.automationEnabled && context.telegramAccountId
-          ? await resolveTelegramFundingConsentCapability(client, {
-              consent,
-              userId: context.userId,
-              telegramAccountId: context.telegramAccountId,
-              telegramUserId: context.telegramUserId,
-              destinationOptionId: receive.session.destinationOptionId,
-              venueBindingOptionId: receive.session.venueBindingOptionId,
-              now,
-            })
-          : null;
-      projection = projectTelegramFundingProgress({
-        afterBroadcastBoundaryReceiptIds,
-        automaticConversionAvailable: capability?.decision.kind === "allowed",
-        automaticConversionMode: capability
-          ? capability.decision.kind === "allowed"
-            ? "available"
-            : capability.decision.kind === "soft_paused"
-              ? "soft_paused"
-              : "hard_invalid"
-          : consent?.automationEnabled
-            ? "hard_invalid"
-            : undefined,
-        consent,
-        context,
-        receipts,
-        session: receive.session,
-        now,
-      });
+      projection = currentConsentProjection;
     }
     // Terminality is absorbing for one funding context. A restored controller
     // or policy must open a fresh context instead of reviving an address whose
@@ -425,7 +480,13 @@ async function projectCandidate(
       `,
       [context.id, revision],
     );
-    if (shouldDeleteTelegramFundingQr(projection)) {
+    const qrDeletionProjection =
+      shouldDeleteQrPhoto && redactionPresentation
+        ? projectTelegramFundingUnavailable(context, redactionPresentation)
+        : projection && shouldDeleteTelegramFundingQr(projection)
+          ? projection
+          : null;
+    if (qrDeletionProjection) {
       await client.query(
         `
           update telegram_bot_action_outbox
@@ -448,7 +509,7 @@ async function projectCandidate(
         [
           context.id,
           revision,
-          JSON.stringify(projection),
+          JSON.stringify(qrDeletionProjection),
           context.telegramMessageId,
         ],
       );

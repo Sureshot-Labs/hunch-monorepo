@@ -57,7 +57,6 @@ import {
   advanceFundingReceiveObservationBaselines,
   classifyPolymarketHandoffEvents,
   fundingReceiveObservationDisposition,
-  selectFundingReceiveSessionsForPolling,
   selectFundingReceiveSessionObservation,
 } from "../../receive/receive-session-observer.js";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
@@ -960,6 +959,18 @@ assert.deepEqual(
 );
 assert.deepEqual(
   fundingReceiveObservationDisposition({
+    sessionStatus: "completed",
+    completion: direct.completion,
+  }),
+  {
+    receiptStatus: "ready",
+    sessionStatus: "open",
+    late: true,
+  },
+  "a direct late deposit remains usable after an older released session completes",
+);
+assert.deepEqual(
+  fundingReceiveObservationDisposition({
     sessionStatus: "cancelled",
     completion: convertible.completion,
   }),
@@ -968,6 +979,18 @@ assert.deepEqual(
     sessionStatus: "recovery_required",
     late: true,
   },
+);
+assert.deepEqual(
+  fundingReceiveObservationDisposition({
+    sessionStatus: "completed",
+    completion: convertible.completion,
+  }),
+  {
+    receiptStatus: "recovery_required",
+    sessionStatus: "recovery_required",
+    late: true,
+  },
+  "a routed late deposit cannot execute against the completed session's stale plan",
 );
 assert.equal(targets[1]?.networkId, "solana:mainnet");
 assert.equal(targets[1]?.acceptedAssets[0]?.handling, "automatic_conversion");
@@ -1131,185 +1154,6 @@ assert.equal(
     "all_changed",
   )?.[0]?.baselineRaw,
   "500",
-);
-
-const overlappingOlder = {
-  candidateId: "older",
-  userId: "user_receive_overlap_12345678",
-  session: {
-    receiveSessionId: "receive_session_older_12345678",
-    status: "expired" as const,
-    openedAt: "2026-07-27T10:00:00.000Z",
-  },
-  observationVariants: [variant("ingress_variant_overlap_old_12345678", "0")],
-};
-const overlappingActive = {
-  candidateId: "active",
-  userId: "user_receive_overlap_12345678",
-  session: {
-    receiveSessionId: "receive_session_active_12345678",
-    status: "open" as const,
-    openedAt: "2026-07-27T11:00:00.000Z",
-  },
-  observationVariants: [variant("ingress_variant_overlap_new_12345678", "0")],
-};
-const separateStream = {
-  candidateId: "separate",
-  userId: "user_receive_overlap_12345678",
-  session: {
-    receiveSessionId: "receive_session_separate_12345678",
-    status: "expired" as const,
-    openedAt: "2026-07-27T09:00:00.000Z",
-  },
-  observationVariants: [
-    {
-      ...variant("ingress_variant_separate_12345678", "0"),
-      asset: {
-        ...ASSET,
-        assetId: "0x0000000000000000000000000000000000000009",
-      },
-    },
-  ],
-};
-const otherUserSameStream = {
-  ...overlappingOlder,
-  candidateId: "other-user",
-  userId: "user_receive_overlap_other_12345678",
-  session: {
-    ...overlappingOlder.session,
-    receiveSessionId: "receive_session_other_user_12345678",
-  },
-};
-assert.deepEqual(
-  selectFundingReceiveSessionsForPolling([
-    overlappingOlder,
-    separateStream,
-    overlappingActive,
-    otherUserSameStream,
-  ]).map((candidate) => candidate.candidateId),
-  ["active", "older", "other-user", "separate"],
-);
-const sameTimeLargerId = {
-  ...overlappingActive,
-  candidateId: "same-time-z",
-  session: {
-    ...overlappingActive.session,
-    receiveSessionId: "receive_session_z_12345678",
-  },
-};
-const sameTimeSmallerId = {
-  ...overlappingActive,
-  candidateId: "same-time-a",
-  session: {
-    ...overlappingActive.session,
-    receiveSessionId: "receive_session_a_12345678",
-  },
-};
-assert.deepEqual(
-  selectFundingReceiveSessionsForPolling([
-    sameTimeLargerId,
-    sameTimeSmallerId,
-  ]).map((candidate) => candidate.candidateId),
-  ["same-time-a", "same-time-z"],
-);
-const invalidPersistedSession = {
-  ...overlappingActive,
-  candidateId: "invalid-persisted",
-  session: {
-    ...overlappingActive.session,
-    receiveSessionId: "receive_session_invalid_persisted_12345678",
-  },
-  observationVariants: [
-    {
-      variantId: "ingress_variant_invalid_persisted_12345678",
-      networkId: "evm:137",
-    },
-  ],
-};
-assert.deepEqual(
-  selectFundingReceiveSessionsForPolling([
-    invalidPersistedSession,
-    separateStream,
-  ]).map((candidate) => candidate.candidateId),
-  ["separate"],
-);
-
-const olderCursorSession = {
-  ...overlappingOlder,
-  candidateId: "older-cursor",
-  observationVariants: [
-    {
-      ...overlappingOlder.observationVariants[0],
-      observation: {
-        ...overlappingOlder.observationVariants[0]?.observation,
-        payload: {
-          ...overlappingOlder.observationVariants[0]?.observation?.payload,
-          eventCursorBlock: "100",
-          eventIdentity: "evm_erc20_transfer_v1",
-        },
-      },
-    },
-  ],
-};
-const newerCursorSession = {
-  ...overlappingActive,
-  candidateId: "newer-cursor",
-  observationVariants: [
-    {
-      ...overlappingActive.observationVariants[0],
-      observation: {
-        ...overlappingActive.observationVariants[0]?.observation,
-        payload: {
-          ...overlappingActive.observationVariants[0]?.observation?.payload,
-          eventCursorBlock: "102",
-          eventIdentity: "evm_erc20_transfer_v1",
-        },
-      },
-    },
-  ],
-};
-assert.deepEqual(
-  selectFundingReceiveSessionsForPolling([
-    newerCursorSession,
-    olderCursorSession,
-  ]).map((candidate) => candidate.candidateId),
-  ["newer-cursor", "older-cursor"],
-  "active deposits must retain the bounded polling budget before closed recovery streams",
-);
-
-const cancelledChurn = Array.from({ length: 300 }, (_, index) => ({
-  ...olderCursorSession,
-  candidateId: `cancelled-churn-${index}`,
-  session: {
-    ...olderCursorSession.session,
-    receiveSessionId: `receive_session_cancelled_${String(index).padStart(4, "0")}`,
-    status: "cancelled" as const,
-  },
-}));
-assert.equal(
-  selectFundingReceiveSessionsForPolling([
-    ...cancelledChurn,
-    newerCursorSession,
-  ])[0]?.candidateId,
-  "newer-cursor",
-  "cross-channel churn cannot displace a live receive session",
-);
-const recoverySession = {
-  ...newerCursorSession,
-  candidateId: "recovery-session",
-  session: {
-    ...newerCursorSession.session,
-    receiveSessionId: "receive_session_recovery_priority_12345678",
-    status: "recovery_required" as const,
-  },
-};
-assert.equal(
-  selectFundingReceiveSessionsForPolling([
-    ...cancelledChurn,
-    recoverySession,
-  ])[0]?.candidateId,
-  "recovery-session",
-  "cancelled churn cannot displace a live recovery session after SQL claim",
 );
 
 function allocationStartVariant(variantId: string, eventCursorBlock: string) {

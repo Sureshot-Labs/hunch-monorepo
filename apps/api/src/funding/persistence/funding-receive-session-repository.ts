@@ -234,6 +234,82 @@ export async function derivePersistedFundingReceiveSessionStatus(
   return deriveActiveFundingReceiveSessionStatus(rows.map((row) => row.status));
 }
 
+export async function deriveEffectiveFundingReceiveSessionStatus(
+  db: Pick<PoolClient, "query">,
+  input: Readonly<{
+    receiveSessionId: string;
+    userId: string;
+  }>,
+): Promise<ActiveReceiveSessionStatus | "completed" | null> {
+  const scope = await db.query<{
+    destination_option_id: string;
+    venue_binding_option_id: string;
+  }>(
+    `
+      select destination_option_id, venue_binding_option_id
+      from funding_receive_sessions
+      where id = $1
+        and user_id = $2
+      limit 1
+    `,
+    [input.receiveSessionId, input.userId],
+  );
+  const sessionScope = scope.rows[0];
+  if (!sessionScope) return null;
+  await lockFundingReceiveSessionScope(db, {
+    userId: input.userId,
+    destinationOptionId: sessionScope.destination_option_id,
+    venueBindingOptionId: sessionScope.venue_binding_option_id,
+  });
+  const derivedStatus = await derivePersistedFundingReceiveSessionStatus(
+    db,
+    input,
+  );
+  if (derivedStatus !== "open") return derivedStatus;
+  const releaseFacts = await db.query<{
+    late_receipt_present: boolean;
+    successor_present: boolean;
+    was_closed: boolean;
+  }>(
+    `
+      select
+        receive_session.closed_at is not null as was_closed,
+        exists (
+          select 1
+          from funding_receive_sessions successor_session
+          where successor_session.user_id = receive_session.user_id
+            and successor_session.destination_option_id =
+                  receive_session.destination_option_id
+            and successor_session.venue_binding_option_id =
+                  receive_session.venue_binding_option_id
+            and successor_session.id <> receive_session.id
+            and successor_session.created_at > receive_session.created_at
+        ) as successor_present,
+        exists (
+          select 1
+          from funding_receive_receipts receive_receipt
+          where receive_receipt.receive_session_id = receive_session.id
+            and receive_receipt.evidence ->> 'lateReceipt' = 'true'
+        ) as late_receipt_present
+      from funding_receive_sessions receive_session
+      where receive_session.id = $1
+        and receive_session.user_id = $2
+      limit 1
+    `,
+    [input.receiveSessionId, input.userId],
+  );
+  const release = releaseFacts.rows[0];
+  if (!release) return null;
+  // Ready receipts normally leave a still-valid address reusable. Once the
+  // address was closed, received a late transfer, or was superseded, settling
+  // its durable work must never make that old address active again.
+  return release.was_closed ||
+    release.late_receipt_present ||
+    release.successor_present
+    ? "completed"
+    : "open";
+}
+
 async function refreshFundingReceiveSessionStatus(
   db: Pick<PoolClient, "query">,
   input: Readonly<{
@@ -242,11 +318,16 @@ async function refreshFundingReceiveSessionStatus(
     now: Date;
   }>,
 ): Promise<void> {
-  const status = await derivePersistedFundingReceiveSessionStatus(db, input);
+  const status = await deriveEffectiveFundingReceiveSessionStatus(db, input);
+  if (!status) return;
   await db.query(
     `
       update funding_receive_sessions
       set status = $3,
+          closed_at = case
+            when $3 = 'completed' then coalesce(closed_at, $4::timestamptz)
+            else closed_at
+          end,
           version = version + 1,
           updated_at = $4
       where id = $1
@@ -330,20 +411,21 @@ type FundingReceiveOpenIdempotencySessionRow = ReceiveSessionRow &
   }>;
 
 /**
- * A receive session can be presentation-expired while an unresolved receipt
- * is still inside its observer grace window. This extra fact is selection-only:
- * it keeps a second token choice from concealing money that is still being
- * reconciled, without turning a settled receipt into a 7-day deposit lock.
- * Closed sessions remain observable independently of this selection guard.
+ * A receive session can be presentation-expired while an in-flight receipt is
+ * still inside its observer grace window. This extra fact is selection-only:
+ * it keeps a second token choice from concealing a receipt that is actively
+ * being routed, without letting a review/recovery pause monopolize the deposit
+ * destination. Closed sessions remain observable independently of this lease.
  */
 type FundingReceiveSelectionSessionRow = ReceiveSessionRow &
   Readonly<{
-    selection_has_unresolved_receipt: boolean;
+    selection_has_any_receipt: boolean;
+    selection_has_in_flight_receipt: boolean;
   }>;
 
 type FundingReceiveSelectionState = Pick<
   FundingReceiveSelectionSessionRow,
-  "status" | "expires_at" | "observe_until" | "selection_has_unresolved_receipt"
+  "status" | "expires_at" | "observe_until" | "selection_has_in_flight_receipt"
 >;
 
 function assertFundingReceiveOpenIdempotency(
@@ -467,30 +549,22 @@ async function attachFundingReceiveOpenIdempotency(
   }
 }
 
-function receiveSessionHasCrossedMoneyBoundary(
+function receiveSessionOwnsInFlightSelectionLease(
   session: Pick<
     FundingReceiveSelectionState,
-    "status" | "selection_has_unresolved_receipt"
+    "status" | "selection_has_in_flight_receipt"
   >,
-  includeUnresolvedReceipt: boolean,
 ): boolean {
-  return (
-    session.status === "processing" ||
-    session.status === "review_required" ||
-    session.status === "recovery_required" ||
-    (includeUnresolvedReceipt && session.selection_has_unresolved_receipt)
-  );
+  return session.selection_has_in_flight_receipt;
 }
 
 function receiveSessionIsCurrentForSelection(
   session: FundingReceiveSelectionState,
   now: Date,
-  preserveObservedMoneyBoundary: boolean,
 ): boolean {
-  return preserveObservedMoneyBoundary &&
-    receiveSessionHasCrossedMoneyBoundary(session, true)
+  return receiveSessionOwnsInFlightSelectionLease(session)
     ? session.observe_until > now
-    : session.expires_at > now;
+    : session.status === "open" && session.expires_at > now;
 }
 
 function matchesExactReceiveScope(
@@ -514,11 +588,10 @@ async function lockCurrentFundingReceiveSessions(
     destinationOptionId: string;
     venueBindingOptionId: string;
     /**
-     * Generic token-first opens must see recovery sessions so a different
-     * selected asset cannot silently replace an unresolved money path. Legacy
-     * destination-scoped opens retain their historical recovery behaviour.
+     * Read paused states as well because a session-level review/recovery status
+     * can coexist with another receipt that is still observed or routing.
      */
-    includeRecovery: boolean;
+    includePausedStates: boolean;
     now: Date;
   }>,
 ): Promise<readonly FundingReceiveSelectionSessionRow[]> {
@@ -529,13 +602,13 @@ async function lockCurrentFundingReceiveSessions(
                select 1
                from funding_receive_receipts receipt
                where receipt.receive_session_id = funding_receive_sessions.id
-                 and receipt.status in (
-                   'observed',
-                   'routing',
-                   'review_required',
-                   'recovery_required'
-                 )
-             ) as selection_has_unresolved_receipt
+             ) as selection_has_any_receipt,
+             exists (
+               select 1
+               from funding_receive_receipts receipt
+               where receipt.receive_session_id = funding_receive_sessions.id
+                 and receipt.status in ('observed', 'routing')
+             ) as selection_has_in_flight_receipt
       from funding_receive_sessions
       where user_id = $1
         and destination_option_id = $2
@@ -544,18 +617,13 @@ async function lockCurrentFundingReceiveSessions(
           status = any($4::text[])
           or (
             $5::boolean
-            and status in ('expired', 'cancelled')
+            and status in ('completed', 'expired', 'cancelled')
             and observe_until > $6
             and exists (
               select 1
               from funding_receive_receipts receipt
               where receipt.receive_session_id = funding_receive_sessions.id
-                and receipt.status in (
-                  'observed',
-                  'routing',
-                  'review_required',
-                  'recovery_required'
-                )
+                and receipt.status in ('observed', 'routing')
             )
           )
         )
@@ -566,10 +634,10 @@ async function lockCurrentFundingReceiveSessions(
       input.userId,
       input.destinationOptionId,
       input.venueBindingOptionId,
-      input.includeRecovery
+      input.includePausedStates
         ? ["open", "processing", "review_required", "recovery_required"]
         : ["open", "processing", "review_required"],
-      input.includeRecovery,
+      input.includePausedStates,
       input.now,
     ],
   );
@@ -582,7 +650,7 @@ function assertReplayDoesNotConflictWithCurrentSelection(
   now: Date,
 ): void {
   const currentSessions = current.filter((session) =>
-    receiveSessionIsCurrentForSelection(session, now, true),
+    receiveSessionIsCurrentForSelection(session, now),
   );
   if (
     currentSessions.some(
@@ -594,7 +662,7 @@ function assertReplayDoesNotConflictWithCurrentSelection(
   const differentPostMoneySession = currentSessions.find(
     (session) =>
       session.id !== replay.id &&
-      receiveSessionHasCrossedMoneyBoundary(session, true) &&
+      receiveSessionOwnsInFlightSelectionLease(session) &&
       !matchesExactReceiveScope(session, {
         selectedReceiveTargetId: replay.selected_receive_target_id,
         receiveTargets: replay.receive_targets,
@@ -618,23 +686,35 @@ async function replayLockedFundingReceiveOpenIdempotency(
   }>,
 ): Promise<FundingReceiveSessionPersistenceResult | null> {
   await lockFundingReceiveOpenIdempotency(client, input);
+  // Discover the immutable scope before taking any session row lock. Every
+  // open path then takes locks in the same order: idempotency -> scope -> row.
+  // Locking the replay row before the scope would deadlock against a fresh
+  // open that already owns the scope and is about to inspect that same row.
+  const discovered = await findFundingReceiveOpenIdempotency(client, {
+    userId: input.userId,
+    ownerChannel: input.ownerChannel,
+    idempotency: input.idempotency,
+  });
+  if (!discovered) return null;
+  await lockFundingReceiveSessionScope(client, {
+    userId: discovered.user_id,
+    destinationOptionId: discovered.destination_option_id,
+    venueBindingOptionId: discovered.venue_binding_option_id,
+  });
   const replay = await findFundingReceiveOpenIdempotency(client, {
     userId: input.userId,
     ownerChannel: input.ownerChannel,
     idempotency: input.idempotency,
     lock: true,
   });
-  if (!replay) return null;
-  await lockFundingReceiveSessionScope(client, {
-    userId: replay.user_id,
-    destinationOptionId: replay.destination_option_id,
-    venueBindingOptionId: replay.venue_binding_option_id,
-  });
+  if (!replay || replay.id !== discovered.id) {
+    throw new FundingReceiveSessionOpenIdempotencyConflictError();
+  }
   const current = await lockCurrentFundingReceiveSessions(client, {
     userId: replay.user_id,
     destinationOptionId: replay.destination_option_id,
     venueBindingOptionId: replay.venue_binding_option_id,
-    includeRecovery: true,
+    includePausedStates: true,
     now: input.now,
   });
   assertReplayDoesNotConflictWithCurrentSelection(replay, current, input.now);
@@ -733,37 +813,40 @@ export async function createOrReuseFundingReceiveSession(
     await lockFundingReceiveSessionScope(client, input);
     const existing = await lockCurrentFundingReceiveSessions(client, {
       ...input,
-      // Cross-channel safety always needs the full receipt/recovery horizon,
-      // even when a legacy same-channel caller retains its old replay rules.
-      includeRecovery: true,
+      // Session status is only an aggregate. Read paused sessions as well so
+      // any coexisting observed/routing receipt still retains its exact lease.
+      includePausedStates: true,
       now: input.now,
     });
     const protectedCrossChannelSession = existing.find(
       (session) =>
         session.owner_channel !== ownerChannel &&
-        receiveSessionIsCurrentForSelection(session, input.now, true) &&
-        receiveSessionHasCrossedMoneyBoundary(session, true),
+        receiveSessionIsCurrentForSelection(session, input.now) &&
+        receiveSessionOwnsInFlightSelectionLease(session),
     );
     if (protectedCrossChannelSession) {
       throw new FundingReceiveSessionChannelConflictError();
     }
-    const preserveObservedMoneyBoundary =
-      input.requireExactReceiveScope === true;
-    const selectionCandidates = preserveObservedMoneyBoundary
+    const exactSelection = input.requireExactReceiveScope === true;
+    const selectionCandidates = exactSelection
       ? existing
       : existing.filter(
           (session) =>
+            session.selection_has_in_flight_receipt ||
             session.status === "open" ||
             session.status === "processing" ||
             session.status === "review_required",
         );
     for (const staleSession of selectionCandidates) {
+      if (receiveSessionIsCurrentForSelection(staleSession, input.now)) {
+        continue;
+      }
+      // Review/recovery is durable work attached to the original receipt, not
+      // an active receive-address lease. Keep it resumable by id while a fresh
+      // deposit session is opened alongside it.
       if (
-        receiveSessionIsCurrentForSelection(
-          staleSession,
-          input.now,
-          preserveObservedMoneyBoundary,
-        )
+        staleSession.status === "review_required" ||
+        staleSession.status === "recovery_required"
       ) {
         continue;
       }
@@ -775,24 +858,20 @@ export async function createOrReuseFundingReceiveSession(
               updated_at = $2,
               version = version + 1
           where id = $1
-            and status in ('open', 'processing', 'review_required', 'recovery_required')
+            and status in ('open', 'processing')
         `,
         [staleSession.id, input.now],
       );
     }
     const currentSessions = selectionCandidates.filter((session) =>
-      receiveSessionIsCurrentForSelection(
-        session,
-        input.now,
-        preserveObservedMoneyBoundary,
-      ),
+      receiveSessionIsCurrentForSelection(session, input.now),
     );
     const crossChannelSessions = currentSessions.filter(
       (session) => session.owner_channel !== ownerChannel,
     );
     if (
       crossChannelSessions.some((session) =>
-        receiveSessionHasCrossedMoneyBoundary(session, true),
+        receiveSessionOwnsInFlightSelectionLease(session),
       )
     ) {
       throw new FundingReceiveSessionChannelConflictError();
@@ -817,12 +896,7 @@ export async function createOrReuseFundingReceiveSession(
               select 1
               from funding_receive_receipts receipt
               where receipt.receive_session_id = receive_session.id
-                and receipt.status in (
-                  'observed',
-                  'routing',
-                  'review_required',
-                  'recovery_required'
-                )
+                and receipt.status in ('observed', 'routing')
             )
         `,
         [supersededSession.id, input.now],
@@ -840,7 +914,7 @@ export async function createOrReuseFundingReceiveSession(
     const differentPostMoneySession = sameChannelSessions.find(
       (session) =>
         input.requireExactReceiveScope &&
-        receiveSessionHasCrossedMoneyBoundary(session, true) &&
+        receiveSessionOwnsInFlightSelectionLease(session) &&
         !matchesExactReceiveScope(session, input),
     );
     if (differentPostMoneySession) {
@@ -848,17 +922,22 @@ export async function createOrReuseFundingReceiveSession(
         differentPostMoneySession.id,
       );
     }
-    const current = sameChannelSessions[0] ?? null;
+    // Aggregate session status is intentionally allowed to be review/recovery
+    // while another receipt from the same session is still observed/routing.
+    // The money-bearing workflow owns the selection lease even if a newer,
+    // address-only session is also present after an earlier rollout.
+    const current =
+      sameChannelSessions.find(receiveSessionOwnsInFlightSelectionLease) ??
+      sameChannelSessions[0] ??
+      null;
     if (
       current &&
       current.owner_channel === ownerChannel &&
-      (ownerChannel === "telegram" ||
-        receiveSessionHasCrossedMoneyBoundary(
-          current,
-          preserveObservedMoneyBoundary,
-        ) ||
-        (current.policy_revision === input.policyRevision &&
-          current.ownership_revision === input.ownershipRevision)) &&
+      (receiveSessionOwnsInFlightSelectionLease(current) ||
+        (!current.selection_has_any_receipt &&
+          (ownerChannel === "telegram" ||
+            (current.policy_revision === input.policyRevision &&
+              current.ownership_revision === input.ownershipRevision)))) &&
       matchesExactReceiveScope(current, input)
     ) {
       if (openIdempotency) {
@@ -883,6 +962,34 @@ export async function createOrReuseFundingReceiveSession(
           where id = $1
         `,
         [current.id, input.now],
+      );
+    }
+    const releasedPausedSessionIds = existing
+      .filter(
+        (session) =>
+          (session.status === "review_required" ||
+            session.status === "recovery_required") &&
+          !receiveSessionOwnsInFlightSelectionLease(session) &&
+          session.closed_at === null,
+      )
+      .map((session) => session.id);
+    if (releasedPausedSessionIds.length > 0) {
+      // `created_at` is transaction-start time, so it cannot by itself prove
+      // which concurrent open became the logical successor. Persist the
+      // release on the paused predecessor while this scope lock is held. Its
+      // review/recovery remains addressable by id, but later settlement cannot
+      // resurrect the old receive address after the successor is cancelled.
+      await client.query(
+        `
+          update funding_receive_sessions
+          set closed_at = $2,
+              updated_at = $2,
+              version = version + 1
+          where id = any($1::uuid[])
+            and status in ('review_required', 'recovery_required')
+            and closed_at is null
+        `,
+        [releasedPausedSessionIds, input.now],
       );
     }
     const inserted = await client.query<ReceiveSessionRow>(
@@ -1052,64 +1159,86 @@ export async function claimObservableFundingReceiveSessions(
     Math.trunc(input.activeWindowMs ?? 15 * 60_000),
   );
   const { rows } = await db.query<ReceiveSessionRow>({
-    name: "funding-receive-claim-observable-sessions-v1",
+    name: "funding-receive-claim-observable-sessions-v2",
     text: `
-      with candidates as (
-        select id
-        from funding_receive_sessions
-        where (
-            (
-              status in ('open', 'processing', 'review_required')
-              and expires_at > $1
-            )
-            or (
-              status = 'recovery_required'
-              and observe_until > $1
-            )
-            or (
-              status in ('expired', 'cancelled')
-              and observe_until > $1
-            )
-          )
-          and (
-            (
-              status in ('open', 'processing', 'review_required', 'recovery_required')
+      with observable_sessions as (
+        select
+          id,
+          case
+            when status in ('open', 'processing') then 0
+            when status in ('review_required', 'recovery_required') then 1
+            else 2
+          end as polling_class,
+          case
+            when status in (
+                   'open', 'processing', 'review_required', 'recovery_required'
+                 )
               and observation_requested_at is not null
               and (
                 last_observed_at is null
                 or last_observed_at < observation_requested_at
               )
+              then 0
+            else 1
+          end as request_priority,
+          coalesce(last_observed_at, opened_at) as polling_age,
+          case
+            when status in ('completed', 'expired', 'cancelled') then $5::bigint
+            when coalesce(observation_requested_at, opened_at)
+                   <= $1::timestamptz
+                        - ($6::bigint * interval '1 millisecond')
+              then $4::bigint
+            else $3::bigint
+          end as poll_interval_ms
+        from funding_receive_sessions
+        where (
+            (
+              status in ('open', 'processing', 'review_required')
+              and expires_at > $1::timestamptz
             )
-            or coalesce(last_observed_at, opened_at)
-              <= $1 - (
-                case
-                  when status in ('expired', 'cancelled') then $5::bigint
-                  when coalesce(observation_requested_at, opened_at)
-                         <= $1 - ($6::bigint * interval '1 millisecond')
-                    then $4::bigint
-                  else $3::bigint
-                end * interval '1 millisecond'
-              )
+            or (
+              status = 'recovery_required'
+              and observe_until > $1::timestamptz
+            )
+            or (
+              status in ('completed', 'expired', 'cancelled')
+              and observe_until > $1::timestamptz
+            )
           )
-        order by (
-                   status in ('open', 'processing', 'review_required', 'recovery_required')
-                   and observation_requested_at is not null
-                   and (
-                     last_observed_at is null
-                     or last_observed_at < observation_requested_at
-                   )
-                 ) desc,
-                 -- Closed sessions remain eligible for late-transfer
-                 -- recovery, but churn between Web and Telegram must never
-                 -- consume the bounded claim window ahead of live deposits.
-                 (status in ('open', 'processing', 'review_required', 'recovery_required')) desc,
-                 coalesce(last_observed_at, opened_at) asc
-        for update skip locked
-        limit $2
+      ),
+      eligible_sessions as (
+        select
+          id,
+          polling_class,
+          request_priority,
+          polling_age + (poll_interval_ms * interval '1 millisecond')
+            as next_poll_at
+        from observable_sessions
+        where (
+            request_priority = 0
+            or polling_age
+              <= $1::timestamptz
+                   - (poll_interval_ms * interval '1 millisecond')
+          )
+      ),
+      candidates as (
+        select receive_session.id
+        from eligible_sessions eligible_session
+        join funding_receive_sessions receive_session
+          on receive_session.id = eligible_session.id
+        -- Earliest deadline first preserves the configured hot/inactive/late
+        -- cadences and guarantees progress for every class even when a worker
+        -- is deliberately run with a one-row batch.
+        order by eligible_session.next_poll_at asc,
+                 eligible_session.request_priority asc,
+                 eligible_session.polling_class asc,
+                 receive_session.id asc
+        for update of receive_session skip locked
+        limit $2::integer
       ),
       claimed as (
         update funding_receive_sessions session
-        set last_observed_at = $1
+        set last_observed_at = $1::timestamptz
         from candidates
         where session.id = candidates.id
         returning session.*
@@ -1220,6 +1349,7 @@ export async function cancelFundingReceiveSessionForUser(
           select 1
           from funding_receive_receipts receipt
           where receipt.receive_session_id = funding_receive_sessions.id
+            and receipt.status <> 'ready'
         )
       returning ${sessionColumns}
     `,
@@ -1254,6 +1384,161 @@ export type FundingReceiveCanonicalEventAllocation = Readonly<{
   allocatedReceiptId: string | null;
   errorCode: string | null;
 }>;
+
+export type RecoverableFundingReceiveCanonicalEvent = Readonly<{
+  variantId: string;
+  networkId: string;
+  asset: AssetRef;
+  destinationAddress: string;
+  sourceAddress: string | null;
+  rawAmount: string;
+  transactionHash: string;
+  eventIndex: string;
+  ledgerHeight: string;
+  blockHash: string;
+  observedAt: Date;
+}>;
+
+/**
+ * Returns a bounded backlog of canonical transfers which arrived before an
+ * eligible receive session was visible. The chain scanner may already have
+ * advanced past these immutable events, so normal rescanning cannot recover
+ * them. Only the narrow, ownership-unavailable quarantine is retryable;
+ * ambiguous-owner events remain fail-closed for manual recovery.
+ */
+export async function listRecoverableFundingReceiveCanonicalEvents(
+  db: Pick<PoolClient, "query">,
+  input: Readonly<{
+    receiveSessionId: string;
+    now: Date;
+    limit?: number;
+  }>,
+): Promise<readonly RecoverableFundingReceiveCanonicalEvent[]> {
+  const limit = Math.max(1, Math.min(input.limit ?? 25, 100));
+  const { rows } = await db.query<{
+    variant_id: string;
+    network_id: string;
+    asset_id: string;
+    asset_decimals: number;
+    destination_address: string;
+    source_address: string | null;
+    raw_amount: string;
+    tx_hash: string;
+    event_index: string;
+    ledger_height: string;
+    block_hash: string;
+    observed_at: Date;
+  }>(
+    `
+      select matched_variant.variant_id,
+             canonical_event.network_id,
+             canonical_event.asset_id,
+             canonical_event.asset_decimals,
+             canonical_event.destination_address,
+             canonical_event.source_address,
+             canonical_event.raw_amount::text,
+             canonical_event.tx_hash,
+             canonical_event.event_index,
+             canonical_event.ledger_height::text,
+             canonical_event.block_hash,
+             canonical_event.observed_at
+      from funding_receive_sessions receive_session
+      join funding_receive_canonical_events canonical_event
+        on canonical_event.allocation_status = 'recovery_required'
+       and canonical_event.allocation_error_code =
+             'receive_session_allocation_unavailable'
+      cross join lateral (
+        select start_variant->>'variantId' as variant_id
+        from jsonb_array_elements(
+          receive_session.observation_start_variants
+        ) start_variant
+        where start_variant->>'networkId' = canonical_event.network_id
+          and start_variant->'asset'->>'decimals' =
+                canonical_event.asset_decimals::text
+          and funding_account_identifier_equal(
+                canonical_event.network_id,
+                start_variant->'asset'->>'assetId',
+                canonical_event.asset_id
+              )
+          and funding_account_identifier_equal(
+                canonical_event.network_id,
+                start_variant->>'destinationAddress',
+                canonical_event.destination_address
+              )
+          and case
+                when coalesce(
+                       start_variant->'observation'->'payload'->>
+                         'eventCursorBlock',
+                       start_variant->'observation'->'payload'->>
+                         'eventCursorSlot'
+                     ) ~ '^[0-9]+$'
+                  then coalesce(
+                         start_variant->'observation'->'payload'->>
+                           'eventCursorBlock',
+                         start_variant->'observation'->'payload'->>
+                           'eventCursorSlot'
+                       )::numeric
+                else null
+              end < canonical_event.ledger_height
+        order by start_variant->>'variantId'
+        limit 1
+      ) matched_variant
+      where receive_session.id = $1::uuid
+        and receive_session.observe_until > $2
+      order by canonical_event.first_observed_at, canonical_event.id
+      limit $3
+    `,
+    [input.receiveSessionId, input.now, limit],
+  );
+  return rows.map((row) => ({
+    variantId: row.variant_id,
+    networkId: row.network_id,
+    asset: {
+      networkId: row.network_id,
+      assetId: row.asset_id,
+      decimals: row.asset_decimals,
+    },
+    destinationAddress: row.destination_address,
+    sourceAddress: row.source_address,
+    rawAmount: row.raw_amount,
+    transactionHash: row.tx_hash,
+    eventIndex: row.event_index,
+    ledgerHeight: row.ledger_height,
+    blockHash: row.block_hash,
+    observedAt: row.observed_at,
+  }));
+}
+
+/**
+ * A historical event can enter the retry backlog before the matching Hunch
+ * handoff evidence becomes visible. Once that event is proven internal, keep
+ * the immutable evidence for audit but remove it from external-deposit retry.
+ */
+export async function suppressRecoverableFundingReceiveCanonicalInternalEvent(
+  db: Pick<PoolClient, "query">,
+  input: Readonly<{
+    networkId: string;
+    transactionHash: string;
+    eventIndex: string;
+    now: Date;
+  }>,
+): Promise<boolean> {
+  const result = await db.query(
+    `
+      update funding_receive_canonical_events
+      set allocation_error_code = 'internal_handoff_suppressed',
+          last_observed_at = greatest(last_observed_at, $4)
+      where network_id = $1
+        and tx_hash = $2
+        and event_index = $3
+        and allocation_status = 'recovery_required'
+        and allocation_error_code =
+              'receive_session_allocation_unavailable'
+    `,
+    [input.networkId, input.transactionHash, input.eventIndex, input.now],
+  );
+  return result.rowCount === 1;
+}
 
 function sameCanonicalReceiveValue(
   networkId: string,
@@ -1443,6 +1728,8 @@ export async function claimFundingReceiveCanonicalEventAllocation(
     blockHash: string;
     observedAt: Date;
     now: Date;
+    /** The observer session attempting to consume a quarantined event. */
+    expectedReceiveSessionId?: string;
   }>,
 ): Promise<FundingReceiveCanonicalEventAllocation> {
   const event = await client.query<FundingReceiveCanonicalEventAllocationRow>(
@@ -1508,7 +1795,10 @@ export async function claimFundingReceiveCanonicalEventAllocation(
   if (!row || !sameCanonicalEventIdentity(row, input)) {
     throw new Error("canonical receive event identity collision");
   }
-  if (row.allocation_status !== "pending") {
+  const retryUnavailableAllocation =
+    row.allocation_status === "recovery_required" &&
+    row.allocation_error_code === "receive_session_allocation_unavailable";
+  if (row.allocation_status !== "pending" && !retryUnavailableAllocation) {
     return {
       eventId: row.id,
       status: row.allocation_status,
@@ -1527,6 +1817,8 @@ export async function claimFundingReceiveCanonicalEventAllocation(
           'open',
           'processing',
           'review_required',
+          'recovery_required',
+          'completed',
           'expired',
           'cancelled'
         )
@@ -1545,6 +1837,7 @@ export async function claimFundingReceiveCanonicalEventAllocation(
               $4
             )
         )
+      order by id
       for update
     `,
     [input.now, input.networkId, input.asset.assetId, input.destinationAddress],
@@ -1569,7 +1862,14 @@ export async function claimFundingReceiveCanonicalEventAllocation(
             allocation_error_code = $2,
             last_observed_at = $3
         where id = $1
-          and allocation_status = 'pending'
+          and (
+            allocation_status = 'pending'
+            or (
+              allocation_status = 'recovery_required'
+              and allocation_error_code =
+                    'receive_session_allocation_unavailable'
+            )
+          )
       `,
       [row.id, selection.errorCode, input.now],
     );
@@ -1580,6 +1880,39 @@ export async function claimFundingReceiveCanonicalEventAllocation(
       allocatedReceiptId: null,
       errorCode: selection.errorCode,
     };
+  }
+  if (
+    retryUnavailableAllocation &&
+    selection.targetReceiveSessionId !== input.expectedReceiveSessionId
+  ) {
+    // More than one historical session can match the same physical address.
+    // Keep the event in the bounded retry backlog until the canonical target
+    // itself polls; a non-target must never turn it into orphaned `pending`.
+    return {
+      eventId: row.id,
+      status: "recovery_required",
+      targetReceiveSessionId: selection.targetReceiveSessionId,
+      allocatedReceiptId: null,
+      errorCode: row.allocation_error_code,
+    };
+  }
+  if (retryUnavailableAllocation) {
+    const retried = await client.query(
+      `
+        update funding_receive_canonical_events
+        set allocation_status = 'pending',
+            allocation_error_code = null,
+            last_observed_at = $2
+        where id = $1
+          and allocation_status = 'recovery_required'
+          and allocation_error_code =
+                'receive_session_allocation_unavailable'
+      `,
+      [row.id, input.now],
+    );
+    if (retried.rowCount !== 1) {
+      throw new Error("canonical receive event retry state changed");
+    }
   }
   return {
     eventId: row.id,
@@ -1798,7 +2131,12 @@ export async function updateFundingReceiveSessionObservation(
     receiveSessionId: string;
     expectedVersion: number;
     observationVariants: readonly JsonRecord[];
-    status: "open" | "processing" | "review_required" | "recovery_required";
+    status:
+      | "open"
+      | "processing"
+      | "review_required"
+      | "recovery_required"
+      | "completed";
     lastObservedAt: Date;
     now: Date;
   }>,
@@ -1808,6 +2146,10 @@ export async function updateFundingReceiveSessionObservation(
       update funding_receive_sessions
       set observation_variants = $3::jsonb,
           status = $4,
+          closed_at = case
+            when $4 = 'completed' then coalesce(closed_at, $6)
+            else closed_at
+          end,
           last_observed_at = $5,
           version = version + case
             when observation_variants is distinct from $3::jsonb
@@ -1848,7 +2190,6 @@ export async function updateClosedFundingReceiveSessionObservation(
       update funding_receive_sessions
       set observation_variants = $3::jsonb,
           status = case when $5 then 'recovery_required' else status end,
-          closed_at = case when $5 then null else closed_at end,
           last_observed_at = $4,
           version = version + case
             when observation_variants is distinct from $3::jsonb
@@ -1859,7 +2200,7 @@ export async function updateClosedFundingReceiveSessionObservation(
           updated_at = $6
       where id = $1
         and version = $2
-        and status in ('expired', 'cancelled')
+        and status in ('completed', 'expired', 'cancelled')
         and observe_until > $6
     `,
     [
