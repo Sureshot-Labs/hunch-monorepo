@@ -82,6 +82,7 @@ export type TelegramFundingCallbackRoute =
   | Readonly<{ contextId: string; kind: "hide_qr" }>
   | Readonly<{ contextId: string; kind: "qr" }>
   | Readonly<{ contextId: string; kind: "refresh" }>
+  | Readonly<{ contextId: string; kind: "targets" }>
   | Readonly<{ receiptId: string; kind: "review_conversion" }>
   | Readonly<{ consentToken: string; kind: "confirm_conversion" }>
   | Readonly<{ continuationToken: string; kind: "review_buy" }>
@@ -133,7 +134,10 @@ export function parseTelegramFundingCallbackRoute(
     };
   }
   const action = route.match(
-    new RegExp(`^fund:(refresh|cancel|market|qr|hide|convert):${UUID}$`, "i"),
+    new RegExp(
+      `^fund:(refresh|cancel|market|qr|hide|targets|convert):${UUID}$`,
+      "i",
+    ),
   );
   if (!action) return null;
   return action[1] === "convert"
@@ -143,7 +147,7 @@ export function parseTelegramFundingCallbackRoute(
       : action[1] === "hide"
         ? { kind: "hide_qr", contextId: action[2] ?? "" }
         : {
-            kind: action[1] as "refresh" | "cancel" | "qr",
+            kind: action[1] as "refresh" | "cancel" | "qr" | "targets",
             contextId: action[2] ?? "",
           };
 }

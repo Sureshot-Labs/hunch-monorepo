@@ -208,7 +208,9 @@ export function signalBotFundingMenuAction(
                 ? "cancel_active"
                 : route.kind === "cancel"
                   ? "cancel"
-                  : route.kind === "refresh" || route.kind === "qr"
+                  : route.kind === "refresh" ||
+                      route.kind === "qr" ||
+                      route.kind === "targets"
                     ? "session"
                     : route.kind === "deposit_route"
                       ? "open_route"
@@ -273,7 +275,7 @@ export type SignalBotInteractiveMenuLoaders = {
     telegramMessageId: number | null;
     telegramUserId: number;
     venue?: "limitless" | "polymarket";
-    view?: "address" | "progress";
+    view?: "address" | "progress" | "targets";
   }) => Promise<MenuMessage & { qrText?: string }>;
 };
 
@@ -508,7 +510,8 @@ async function deliverSignalBotInteractiveMenuCallback(
                         : route.kind === "back_to_market" ||
                             route.kind === "cancel" ||
                             route.kind === "refresh" ||
-                            route.kind === "qr"
+                            route.kind === "qr" ||
+                            route.kind === "targets"
                           ? { contextId: route.contextId }
                           : {}),
             idempotencyKey:
@@ -520,6 +523,7 @@ async function deliverSignalBotInteractiveMenuCallback(
               ? { venue: depositVenue }
               : {}),
             ...(route.kind === "qr" ? { view: "address" as const } : {}),
+            ...(route.kind === "targets" ? { view: "targets" as const } : {}),
             ...(route.kind === "refresh" ? { requestObservation: true } : {}),
           })
         : {
