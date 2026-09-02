@@ -1,19 +1,19 @@
-import { isRecord } from "../lib/type-guards.js";
 import {
-  extractLimitlessMessage,
-  limitlessRequest,
-} from "./limitless-client.js";
+  interpretLimitlessExactClientOrderStatus,
+  limitlessStatusResults,
+  type LimitlessExactClientOrderStatus,
+  type LimitlessOrderStatusItem,
+} from "./limitless-order-status-parser.js";
+
+export {
+  interpretLimitlessExactClientOrderStatus,
+  interpretLimitlessExactClientOrderStatuses,
+  isLimitlessExactStatusAbsenceMature,
+  type LimitlessExactClientOrderStatus,
+  type LimitlessOrderStatusItem,
+} from "./limitless-order-status-parser.js";
 
 const LIMITLESS_STATUS_BATCH_MAX_ITEMS = 50;
-
-export type LimitlessOrderStatusItem = Readonly<{
-  clientOrderId?: string | null;
-  /** Lookup key retained for existing status consumers. */
-  orderId: string;
-  /** Provider order id; null only when the provider returned a malformed hit. */
-  providerOrderId?: string | null;
-  payload: Record<string, unknown>;
-}>;
 
 export type LimitlessOrderStatusLookup = Readonly<{
   clientOrderId?: string | null;
@@ -24,10 +24,28 @@ function textOrNull(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function statusResults(payload: unknown): Record<string, unknown>[] {
-  return isRecord(payload) && Array.isArray(payload.results)
-    ? payload.results.filter(isRecord)
-    : [];
+export async function fetchLimitlessExactClientOrderStatus(
+  clientOrderId: string,
+): Promise<LimitlessExactClientOrderStatus> {
+  const { extractLimitlessMessage, limitlessRequest } =
+    await import("./limitless-client.js");
+  const normalized = clientOrderId.trim();
+  if (!normalized) return { kind: "unknown", reason: "malformed" };
+  const upstream = await limitlessRequest({
+    auth: "partner_hmac",
+    body: { items: [{ clientOrderId: normalized }] },
+    method: "POST",
+    requestPath: "/orders/status/batch",
+  });
+  if (!upstream.ok) {
+    const message = extractLimitlessMessage(upstream.payload);
+    throw new Error(
+      message
+        ? `Limitless exact order status failed (${upstream.status}): ${message}`
+        : `Limitless exact order status failed (${upstream.status}).`,
+    );
+  }
+  return interpretLimitlessExactClientOrderStatus(upstream.payload, normalized);
 }
 
 /**
@@ -38,6 +56,8 @@ function statusResults(payload: unknown): Record<string, unknown>[] {
 export async function fetchLimitlessOrderStatusBatch(
   lookups: readonly LimitlessOrderStatusLookup[],
 ): Promise<Map<string, LimitlessOrderStatusItem>> {
+  const { extractLimitlessMessage, limitlessRequest } =
+    await import("./limitless-client.js");
   const items = lookups.flatMap((lookup) => {
     const orderId = lookup.orderId?.trim();
     const clientOrderId = lookup.clientOrderId?.trim();
@@ -70,7 +90,7 @@ export async function fetchLimitlessOrderStatusBatch(
           : `Limitless order status batch failed (${upstream.status}).`,
       );
     }
-    for (const result of statusResults(upstream.payload)) {
+    for (const result of limitlessStatusResults(upstream.payload)) {
       if (result.status !== "found") continue;
       const clientOrderId = textOrNull(result.clientOrderId);
       const providerOrderId = textOrNull(result.orderId);

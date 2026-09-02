@@ -23,6 +23,13 @@ type FundingReconciliationOptions = {
     apiKey: string;
     timeoutMs?: number;
   }>;
+  limitless?: Readonly<{
+    apiBase: string;
+    apiVersion?: string;
+    hmacSecret: string;
+    hmacTokenId: string;
+    timeoutMs?: number;
+  }>;
   delegatedExecution?: Readonly<{
     configuration: Readonly<{
       enabled: boolean;
@@ -73,6 +80,13 @@ type FundingReconciliationResult = {
     definitivelyFailed: number;
     operationIds: readonly string[];
   }> | null;
+  limitlessTradeReconciliation?: Readonly<{
+    claimed: number;
+    found: number;
+    provenAbsent: number;
+    requeued: number;
+    failed: number;
+  }> | null;
   telegramFundingProgress?: Readonly<{
     candidates: number;
     created: number;
@@ -109,6 +123,30 @@ export function relayFundingWorkerConfig(
     apiKey: input.relayApiKey,
     ...(input.relayRequestTimeoutMs
       ? { timeoutMs: input.relayRequestTimeoutMs }
+      : {}),
+  };
+}
+
+export function limitlessFundingWorkerConfig(
+  input: Pick<
+    typeof env,
+    | "limitlessApiBase"
+    | "limitlessApiVersion"
+    | "limitlessApiTimeoutMs"
+    | "limitlessHmacTokenId"
+    | "limitlessHmacSecret"
+  >,
+): FundingReconciliationOptions["limitless"] {
+  if (!input.limitlessHmacTokenId || !input.limitlessHmacSecret) {
+    return undefined;
+  }
+  return {
+    apiBase: input.limitlessApiBase,
+    apiVersion: input.limitlessApiVersion,
+    hmacTokenId: input.limitlessHmacTokenId,
+    hmacSecret: input.limitlessHmacSecret,
+    ...(input.limitlessApiTimeoutMs
+      ? { timeoutMs: input.limitlessApiTimeoutMs }
       : {}),
   };
 }
@@ -224,6 +262,7 @@ export function fundingWorkerId(): string {
 export async function runFundingReconciliationJob(): Promise<FundingReconciliationResult> {
   const module = await getFundingWorkerModule();
   const relay = relayFundingWorkerConfig(env);
+  const limitless = limitlessFundingWorkerConfig(env);
   const referenceProtection = fundingReferenceProtectionConfig(env);
   const delegatedExecution = delegatedFundingWorkerConfig(env);
   return module.runFundingReconciliationJob(getFundingPool(), {
@@ -239,6 +278,7 @@ export async function runFundingReconciliationJob(): Promise<FundingReconciliati
     terminalTimeoutMs: env.fundingReconciliationTerminalTimeoutSec * 1_000,
     ...(referenceProtection ? { referenceProtection } : {}),
     ...(relay ? { relay } : {}),
+    ...(limitless ? { limitless } : {}),
     ...(delegatedExecution ? { delegatedExecution } : {}),
   });
 }

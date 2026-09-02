@@ -20,7 +20,10 @@ import {
   SPL_TOKEN_PROGRAM,
   validateRelaySolanaDirectQuote,
 } from "./solana-rehearsal.js";
-import { RelayWalletQuoteAdapter } from "./wallet-adapter.js";
+import {
+  RelayQuoteEconomicsError,
+  RelayWalletQuoteAdapter,
+} from "./wallet-adapter.js";
 
 const USER = "9HXGB1nMpw4vhMUCZC5JLfpZt6RXZoaf2HptmormMReH";
 const RECIPIENT = "0x2222222222222222222222222222222222222222";
@@ -435,6 +438,33 @@ for (const routeId of routeIds) {
   if (normalized.actions[0]?.kind === "svm_transaction") {
     assert.equal(normalized.actions[0].instructions.length, 1, routeId);
     assert.equal(normalized.actions[0].addressLookupTables.length, 1, routeId);
+  }
+  if (sourceCurrency === SOLANA_NATIVE) {
+    await assert.rejects(
+      () =>
+        new RelayWalletQuoteAdapter(client).quote({
+          route,
+          source,
+          destination,
+          sourceAmount: {
+            asset: route.source,
+            raw: (sourceRaw - 1n).toString(),
+          },
+          minimumOutput: { asset: route.destination, raw: "1000000" },
+          userAddress: USER,
+          recipientAddress: RECIPIENT,
+          senderWalletId: "wallet-direct-svm",
+          quoteCorrelationId: `quote-source-cap-${routeId}`,
+          deadline: new Date(Date.now() + 60_000),
+          maximumSlippageBps: 100,
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof RelayQuoteEconomicsError);
+        assert.equal(error.reason, "source_cap_exceeded");
+        return true;
+      },
+      routeId,
+    );
   }
 }
 

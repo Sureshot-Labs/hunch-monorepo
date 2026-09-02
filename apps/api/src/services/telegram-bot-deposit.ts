@@ -274,7 +274,7 @@ function buildJustDepositMenu(input: {
               [
                 {
                   callback_data: `hm:v1:deposit_route:${input.solReceiveChoiceToken}`,
-                  text: "SOL · Solana",
+                  text: "Receive SOL in Hunch",
                 },
               ],
             ]
@@ -293,7 +293,7 @@ function buildJustDepositMenu(input: {
       "",
       formatTelegramCalloutMarkdownV2({
         bodyMarkdownV2: escapeTelegramMarkdownV2(
-          "Choose the network and asset you already have. Hunch will deposit it directly or automatically prepare the venue asset.",
+          "Choose the network and asset you already have. Venue routes prepare venue collateral; Receive SOL keeps SOL in your Hunch balance.",
         ),
         icon: "💳",
         title: "Any / Just Deposit",
@@ -303,7 +303,7 @@ function buildJustDepositMenu(input: {
       `${telegramCustomEmojiMarkdownV2ForNetwork("Base")} ${formatTelegramFieldMarkdownV2("Base", "USDC direct to Limitless")}`,
       ...(input.solReceiveChoiceToken
         ? [
-            `${telegramCustomEmojiMarkdownV2ForNetwork("Solana")} ${formatTelegramFieldMarkdownV2("Solana", "SOL kept in your managed wallet")}`,
+            `${telegramCustomEmojiMarkdownV2ForNetwork("Solana")} ${formatTelegramFieldMarkdownV2("Receive SOL", "Kept as SOL in Hunch · does not fund a venue")}`,
           ]
         : []),
       "",

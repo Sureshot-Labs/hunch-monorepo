@@ -1161,6 +1161,50 @@ async function polymarketRouterPreBroadcastDecisionInTransaction(
           kind: "soft_paused",
           reasonCode: "delegated_profile_unavailable",
         };
+  const operationLock = await client.query(
+    `select id
+       from funding_operations
+      where id = $1
+        and user_id = $2
+      for update`,
+    [input.claim.operationId, input.claim.userId],
+  );
+  if (operationLock.rowCount !== 1) {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "delegated_action_invalid",
+    };
+  }
+  const stepLock = await client.query(
+    `select id
+       from funding_operation_steps
+      where id = $1
+        and operation_id = $2
+        and executor_id = $3
+      for update`,
+    [input.claim.stepId, input.claim.operationId, input.claim.profileId],
+  );
+  if (stepLock.rowCount !== 1) {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "delegated_action_invalid",
+    };
+  }
+  const attemptLock = await client.query(
+    `select id
+       from funding_operation_step_attempts
+      where id = $1
+        and step_id = $2
+        and executor_id = $3
+      for update`,
+    [input.claim.attemptId, input.claim.stepId, input.claim.profileId],
+  );
+  if (attemptLock.rowCount !== 1) {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "delegated_action_invalid",
+    };
+  }
   const scope = await client.query<{
     action_fingerprint: string;
     normalized_action: JsonRecord;
@@ -1230,7 +1274,6 @@ async function polymarketRouterPreBroadcastDecisionInTransaction(
                      'trade_shortfall_intent'
           )
         )
-      for update of operation, step, attempt
     `,
     [
       input.claim.operationId,

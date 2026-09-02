@@ -71,8 +71,11 @@ import {
 import { applyFundingStepReceiptEvidenceInTransaction } from "../../persistence/funding-step-receipt-repository.js";
 import {
   claimFundingTradeAttemptInTransaction,
+  claimLimitlessTradeAttemptForReconciliation,
   FundingTradeAttemptError,
   markFundingTradeAttemptSubmissionStartedInTransaction,
+  proveAmbiguousLimitlessTradeAttemptAbsentInTransaction,
+  proveAmbiguousLimitlessTerminalRejectionInTransaction,
   recordFundingTradeAttemptOutcomeInTransaction,
 } from "../../persistence/funding-trade-attempt-repository.js";
 import { buildFundingTradeConsumerIntent } from "../../persistence/funding-trade-consumer-intent.js";
@@ -885,6 +888,7 @@ async function testPollingFailureHonorsTerminalTimeout(): Promise<void> {
         update funding_reconciliation_jobs
         set due_at = $2::timestamptz,
             status = 'scheduled',
+            priority = 10000,
             lease_owner = null,
             lease_token = null,
             lease_until = null
@@ -1722,6 +1726,7 @@ async function testActionWaitUsesIdleReconciliationWithoutExternalPolling(): Pro
         update funding_reconciliation_jobs
         set due_at = $2,
             status = 'scheduled',
+            priority = 10000,
             attempt_count = 99,
             lease_owner = null,
             lease_token = null,
@@ -1959,6 +1964,7 @@ async function testExpiredUnbroadcastActionWaitCancelsSafely(): Promise<void> {
         update funding_reconciliation_jobs
         set due_at = $2,
             status = 'scheduled',
+            priority = 10000,
             lease_owner = null,
             lease_token = null,
             lease_until = null
@@ -3092,6 +3098,27 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       }),
       "invalid_state_transition",
     );
+    await client.query(
+      `update funding_operation_steps
+          set state = 'submitted'
+        where id = $1 and operation_id = $2 and state = 'planned'`,
+      [stepId, committedA.operation.id],
+    );
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: committedA.operation.id,
+      stepId,
+      attemptId: ambiguous.id,
+      networkId: ASSET.networkId,
+      receipt: {
+        status: "finalized",
+        actionMatch: true,
+        ledgerHeight: "100",
+        blockHash: hash("ambiguous-attempt-finalized-block"),
+        canonical: true,
+        failureCode: null,
+        evidence: { transactionHash: opaque("ambiguous-attempt-tx") },
+      },
+    });
 
     const succeededStepResult = await client.query<{ id: string }>(
       `
@@ -3782,10 +3809,10 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     const reorgResult = await reduceFundingOperationInTransaction(client, {
       operationId: committedA.operation.id,
     });
-    assert.equal(reorgResult.reorgBlockedByTerminalState, true);
+    assert.equal(reorgResult.reorgBlockedByTerminalState, false);
     assert.deepEqual(reorgResult.finalState, {
-      status: "completed",
-      stage: "terminal",
+      status: "recovery_required",
+      stage: "source_action",
     });
 
     const refundSegment = await client.query<{ id: string }>(
@@ -4180,6 +4207,28 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       reclaimedTradeClaim.attempt.claimToken,
       tradeClaim.attempt.claimToken,
     );
+    const fundingResolvedAfterExpiry = new Date(
+      reservationBRow.expires_at.getTime() + 1_000,
+    );
+    await client.query("savepoint expired_prebroadcast_claim");
+    const expiredPrebroadcastClaim = await reduceFundingOperationInTransaction(
+      client,
+      {
+        operationId: committedB.operation.id,
+        now: fundingResolvedAfterExpiry,
+      },
+    );
+    assert.deepEqual(expiredPrebroadcastClaim.finalState, {
+      status: "completed",
+      stage: "terminal",
+    });
+    const releasedPrebroadcastReservation = await client.query<{
+      state: string;
+    }>("select state from balance_reservations where id = $1", [
+      reservationBId,
+    ]);
+    assert.equal(releasedPrebroadcastReservation.rows[0]?.state, "released");
+    await client.query("rollback to savepoint expired_prebroadcast_claim");
     const startedTrade =
       await markFundingTradeAttemptSubmissionStartedInTransaction(client, {
         userId: userB,
@@ -4189,6 +4238,66 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
         claimToken: reclaimedTradeClaim.attempt.claimToken,
       });
     assert.equal(startedTrade.state, "submission_started");
+    await client.query("savepoint ambiguous_attempt_survives_expiry");
+    await recordFundingTradeAttemptOutcomeInTransaction(client, {
+      userId: userB,
+      attemptId: tradeClaim.attempt.id,
+      outcome: "ambiguous",
+      externalReference: tradeExecutionReference,
+      errorCode: "provider_response_unknown",
+      broadcastMayHaveOccurred: true,
+    });
+    const retainedAfterExpiry = await reduceFundingOperationInTransaction(
+      client,
+      {
+        operationId: committedB.operation.id,
+        now: fundingResolvedAfterExpiry,
+      },
+    );
+    assert.deepEqual(retainedAfterExpiry.finalState, {
+      status: "ready",
+      stage: "ready_for_consumer",
+    });
+    const activeAfterExpiry = await client.query<{ state: string }>(
+      "select state from balance_reservations where id = $1",
+      [reservationBId],
+    );
+    assert.equal(activeAfterExpiry.rows[0]?.state, "active");
+    const lateExecution = await storeExecutionInTransaction(client, {
+      userId: userB,
+      walletAddress: "0x00000000000000000000000000000000000000b1",
+      venue: "polymarket",
+      unifiedMarketId: marketId,
+      side: "BUY",
+      status: "confirmed",
+      txSignature: tradeExecutionReference,
+      fundingReservation: {
+        operationId: committedB.operation.id,
+        reservationId: reservationBId,
+      },
+      fundingTradeAttemptId: tradeClaim.attempt.id,
+      fundingResolvedAt: fundingResolvedAfterExpiry,
+    });
+    assert.equal(lateExecution.funding_operation_id, committedB.operation.id);
+    const consumedAfterLateEvidence = await client.query<{
+      operation_status: string;
+      reservation_state: string;
+    }>(
+      `select operation.status as operation_status,
+              reservation.state as reservation_state
+         from funding_operations operation
+         join balance_reservations reservation
+           on reservation.operation_id = operation.id
+        where reservation.id = $1`,
+      [reservationBId],
+    );
+    assert.deepEqual(consumedAfterLateEvidence.rows[0], {
+      operation_status: "completed",
+      reservation_state: "consumed",
+    });
+    await client.query(
+      "rollback to savepoint ambiguous_attempt_survives_expiry",
+    );
     await client.query("savepoint terminal_no_fill_order");
     await storeOrderInTransaction(client, {
       userId: userB,
@@ -4267,9 +4376,6 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
         outcomeReason: "concurrent_cancel",
       }),
       "trade_submission_reconciling",
-    );
-    const fundingResolvedAfterExpiry = new Date(
-      reservationBRow.expires_at.getTime() + 1_000,
     );
     await client.query("savepoint funded_handoff_immediate_fill");
     const fundedOrder = await storeOrderInTransaction(client, {
@@ -4414,9 +4520,9 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       `
         update funding_reconciliation_jobs
         set due_at = now() + interval '1 day'
-        where operation_id = any($1::uuid[])
+        where operation_id <> $1::uuid
       `,
-      [[committedA.operation.id, refundOperation.operation.id]],
+      [committedB.operation.id],
     );
     const leaseNow = new Date();
     const workerA = await claimFundingReconciliationJobsInTransaction(client, {
@@ -4428,7 +4534,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     assert.equal(
       workerA.length,
       1,
-      "funding persistence lease contract requires an exclusive migrated test database with no finance worker",
+      "the lease assertion must only expose this fixture's reconciliation job",
     );
     assert.equal(workerA[0]?.operationId, committedB.operation.id);
     const blockedWorker = await claimFundingReconciliationJobsInTransaction(
@@ -4739,6 +4845,409 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
   } finally {
     await client.query("rollback");
     client.release();
+  }
+}
+
+async function testFundedTradeTerminalLockRace(): Promise<void> {
+  const setup = await pool.connect();
+  let userId = "";
+  let operationId = "";
+  let reservationId = "";
+  let attemptId = "";
+  let attemptClaimToken = "";
+  let attemptClaimLeaseUntil = new Date(0);
+  let intentId = "";
+  let orderId = "";
+  const clientOrderId = opaque("limitless-client-order");
+  try {
+    await setup.query("begin");
+    userId = await insertUser(setup);
+    const eventId = opaque("limitless-lock-event");
+    const venueMarketId = opaque("limitless-lock-market");
+    const marketId = `limitless:${venueMarketId}`;
+    const rawTokenId = "123456789012345678901234567890123456789";
+    const tokenId = `limitless:${rawTokenId}`;
+    await setup.query(
+      `insert into unified_events (
+         id, venue, venue_event_id, title, status, end_date
+       ) values ($1, 'limitless', $2, 'Limitless lock event', 'ACTIVE',
+                 now() + interval '1 day')`,
+      [eventId, opaque("venue-event")],
+    );
+    await setup.query(
+      `insert into unified_markets (
+         id, venue, venue_market_id, event_id, title, status, market_type
+       ) values ($1, 'limitless', $2, $3, 'Limitless lock market',
+                 'ACTIVE', 'binary')`,
+      [marketId, venueMarketId, eventId],
+    );
+    await setup.query(
+      `insert into unified_tokens (token_id, venue, market_id, side)
+       values ($1, 'limitless', $2, 'YES')`,
+      [tokenId, marketId],
+    );
+    const basePlan = buildPlan({
+      purpose: "trade_shortfall",
+      venueId: "limitless",
+      marketId,
+      requestedCollateralRaw: "1000000",
+    });
+    const plan: FundingCommitPlan = {
+      ...basePlan,
+      operation: {
+        ...basePlan.operation,
+        marketContextSnapshot: {
+          marketContextId: rawTokenId,
+          marketId,
+          venueId: "limitless",
+          side: "BUY",
+          collateralAsset: ASSET,
+          requestedCollateralRaw: "1000000",
+        },
+      },
+    };
+    const consentToken = opaque("consent");
+    const quote = await createFundingQuoteInTransaction(
+      setup,
+      quoteInput(userId, plan, consentToken),
+    );
+    const committed = await commitFundingOperationInTransaction(
+      setup,
+      commitInput(userId, quote.id, consentToken, plan),
+    );
+    operationId = committed.operation.id;
+    const segment = await setup.query<{ id: string }>(
+      `select id from funding_operation_segments
+        where operation_id = $1 order by ordinal limit 1`,
+      [operationId],
+    );
+    await ingestFundingObservationInTransaction(setup, {
+      discoverySource: "venue_api",
+      observation: {
+        operationId,
+        segmentId: segment.rows[0]?.id ?? null,
+        kind: "destination_credit",
+        networkId: ASSET.networkId,
+        assetId: ASSET.assetId,
+        assetDecimals: ASSET.decimals,
+        txHash: opaque("destination-tx"),
+        eventIndex: "0",
+        fromAddress: "0xrouter",
+        toAddress: "0xvenue",
+        rawAmount: "990000",
+        observedAt: new Date(),
+        ledgerHeight: "1",
+        blockHash: opaque("block"),
+        finalityStatus: "finalized",
+        finalizedAt: new Date(),
+      },
+    });
+    await reduceFundingOperationInTransaction(setup, { operationId });
+    const reservation = await setup.query<{ id: string }>(
+      `select id from balance_reservations
+        where operation_id = $1 and mode = 'settled_for_consumer'`,
+      [operationId],
+    );
+    reservationId = reservation.rows[0]?.id ?? "";
+    assert.ok(reservationId);
+    const intent = await setup.query<{ id: string }>(
+      `insert into telegram_trade_intents (
+         telegram_user_id, user_id, action, venue, market_id, side,
+         amount_usd, status, expires_at, idempotency_key,
+         funding_operation_id, funding_reservation_id
+       ) values ($1, $2, 'buy', 'limitless', $3, 'YES', 1,
+                 'executing', now() + interval '30 minutes', $4, $5, $6)
+       returning id`,
+      [
+        opaque("telegram-user"),
+        userId,
+        marketId,
+        opaque("intent"),
+        operationId,
+        reservationId,
+      ],
+    );
+    intentId = intent.rows[0]?.id ?? "";
+    const consumerIntent = buildFundingTradeConsumerIntent({
+      venueId: "limitless",
+      marketId,
+      marketContextId: rawTokenId,
+      spend: { asset: ASSET, raw: "1000000" },
+    });
+    const claim = await claimFundingTradeAttemptInTransaction(setup, {
+      userId,
+      operationId,
+      reservationId,
+      venueId: "limitless",
+      marketId,
+      executionPath: "limitless_clob",
+      idempotencyKey: opaque("trade-attempt"),
+      canonicalFingerprint: hash("f"),
+      consumerIntent,
+      externalReference: clientOrderId,
+    });
+    attemptId = claim.attempt.id;
+    attemptClaimToken = claim.attempt.claimToken;
+    attemptClaimLeaseUntil = claim.attempt.claimLeaseUntil;
+    await markFundingTradeAttemptSubmissionStartedInTransaction(setup, {
+      userId,
+      operationId,
+      reservationId,
+      attemptId,
+      claimToken: claim.attempt.claimToken,
+    });
+    const order = await setup.query<{ id: string }>(
+      `insert into orders (
+         user_id, wallet_address, venue, venue_order_id, token_id, side,
+         order_type, price, size, status, filled_size, error_message, raw_error,
+         funding_operation_id, funding_reservation_id
+       ) values ($1, $2, 'limitless', $3, $4, 'BUY', 'FOK', null, null,
+                 'submitted', 0, null, null, $5, $6)
+       returning id`,
+      [
+        userId,
+        "0x00000000000000000000000000000000000000b1",
+        clientOrderId,
+        tokenId,
+        operationId,
+        reservationId,
+      ],
+    );
+    orderId = order.rows[0]?.id ?? "";
+    assert.ok(intentId && attemptId && orderId);
+    await setup.query("commit");
+  } finally {
+    await setup.query("rollback").catch(() => undefined);
+    setup.release();
+  }
+
+  const takeoverNow = new Date(attemptClaimLeaseUntil.getTime() + 1);
+  const crashTakeover = await claimLimitlessTradeAttemptForReconciliation(
+    pool,
+    {
+      attemptId,
+      leaseSeconds: 30,
+      now: takeoverNow,
+      userId,
+    },
+  );
+  assert.ok(crashTakeover);
+  assert.notEqual(crashTakeover.claimToken, attemptClaimToken);
+  assert.equal(crashTakeover.state, "ambiguous");
+  assert.equal(crashTakeover.resolvedAt?.getTime(), takeoverNow.getTime());
+
+  const immediateAbsenceClient = await pool.connect();
+  try {
+    await immediateAbsenceClient.query("begin");
+    await assert.rejects(
+      () =>
+        proveAmbiguousLimitlessTradeAttemptAbsentInTransaction(
+          immediateAbsenceClient,
+          {
+            attemptId,
+            clientOrderId,
+            expectedClaimToken: crashTakeover.claimToken,
+            minimumAgeMs: 5 * 60_000,
+            userId,
+            now: new Date(takeoverNow.getTime() + 1),
+          },
+        ),
+      (error: unknown) =>
+        error instanceof FundingTradeAttemptError &&
+        error.code === "invalid_state",
+    );
+  } finally {
+    await immediateAbsenceClient.query("rollback").catch(() => undefined);
+    immediateAbsenceClient.release();
+  }
+
+  const matureNow = new Date(takeoverNow.getTime() + 5 * 60_000);
+  const matureTakeover = await claimLimitlessTradeAttemptForReconciliation(
+    pool,
+    {
+      attemptId,
+      leaseSeconds: 30,
+      now: matureNow,
+      userId,
+    },
+  );
+  assert.ok(matureTakeover);
+  assert.notEqual(matureTakeover.claimToken, crashTakeover.claimToken);
+  assert.equal(matureTakeover.resolvedAt?.getTime(), takeoverNow.getTime());
+
+  for (const terminalStatus of ["rejected", "cancelled"] as const) {
+    const terminalClient = await pool.connect();
+    try {
+      await terminalClient.query("begin");
+      await proveAmbiguousLimitlessTerminalRejectionInTransaction(
+        terminalClient,
+        {
+          attemptId,
+          clientOrderId,
+          errorCode: `limitless_exact_status_${terminalStatus}`,
+          expectedClaimToken: matureTakeover.claimToken,
+          userId,
+          now: matureNow,
+        },
+      );
+      await releaseFundingReservationForAbandonedTradeInTransaction(
+        terminalClient,
+        {
+          userId,
+          link: { operationId, reservationId },
+          outcomeReason: "trade_rejected",
+          now: matureNow,
+        },
+      );
+      const terminalOutcome = await terminalClient.query<{
+        attempt_state: string;
+        reservation_state: string;
+      }>(
+        `select trade_attempt.state as attempt_state,
+                reservation.state as reservation_state
+           from funding_trade_attempts trade_attempt
+           join balance_reservations reservation
+             on reservation.id = trade_attempt.reservation_id
+          where trade_attempt.id = $1`,
+        [attemptId],
+      );
+      assert.deepEqual(terminalOutcome.rows[0], {
+        attempt_state: "definitive_failure",
+        reservation_state: "released",
+      });
+    } finally {
+      await terminalClient.query("rollback").catch(() => undefined);
+      terminalClient.release();
+    }
+  }
+
+  const matureAbsenceClient = await pool.connect();
+  try {
+    await matureAbsenceClient.query("begin");
+    await proveAmbiguousLimitlessTradeAttemptAbsentInTransaction(
+      matureAbsenceClient,
+      {
+        attemptId,
+        clientOrderId,
+        expectedClaimToken: matureTakeover.claimToken,
+        minimumAgeMs: 5 * 60_000,
+        userId,
+        now: matureNow,
+      },
+    );
+    await releaseFundingReservationForAbandonedTradeInTransaction(
+      matureAbsenceClient,
+      {
+        userId,
+        link: { operationId, reservationId },
+        outcomeReason: "trade_not_accepted",
+        now: matureNow,
+      },
+    );
+    const terminalInsideProof = await matureAbsenceClient.query<{
+      attempt_state: string;
+      reservation_state: string;
+    }>(
+      `select trade_attempt.state as attempt_state,
+              reservation.state as reservation_state
+         from funding_trade_attempts trade_attempt
+         join balance_reservations reservation
+           on reservation.id = trade_attempt.reservation_id
+        where trade_attempt.id = $1`,
+      [attemptId],
+    );
+    assert.deepEqual(terminalInsideProof.rows[0], {
+      attempt_state: "definitive_failure",
+      reservation_state: "released",
+    });
+  } finally {
+    // Keep the mature lease for the takeover race below while proving that a
+    // mature exact absence would release atomically.
+    await matureAbsenceClient.query("rollback").catch(() => undefined);
+    matureAbsenceClient.release();
+  }
+
+  const consumerClient = await pool.connect();
+  const proofClient = await pool.connect();
+  try {
+    await consumerClient.query("begin");
+    await proofClient.query("begin");
+    await consumerClient.query("set local lock_timeout = '5s'");
+    await proofClient.query("set local lock_timeout = '5s'");
+    const proof = (async () => {
+      try {
+        await proveAmbiguousLimitlessTradeAttemptAbsentInTransaction(
+          proofClient,
+          {
+            attemptId,
+            clientOrderId,
+            expectedClaimToken: attemptClaimToken,
+            minimumAgeMs: 1,
+            userId,
+            now: new Date(matureNow.getTime() + 1),
+          },
+        );
+        await releaseFundingReservationForAbandonedTradeInTransaction(
+          proofClient,
+          {
+            userId,
+            link: { operationId, reservationId },
+            outcomeReason: "trade_not_accepted",
+            now: new Date(matureNow.getTime() + 1),
+          },
+        );
+        await proofClient.query("commit");
+      } catch (error) {
+        await proofClient.query("rollback");
+        throw error;
+      }
+    })();
+    const consume = (async () => {
+      await consumeFundingReservationForLinkedConsumerInTransaction(
+        consumerClient,
+        {
+          userId,
+          reservationId,
+          tradeAttemptId: attemptId,
+          tradeAttemptReconciliationClaimToken: matureTakeover.claimToken,
+          consumer: { kind: "web_order", orderId },
+          outcomeReason: "trade_order_recorded",
+          now: new Date(matureNow.getTime() + 1),
+        },
+      );
+      await consumerClient.query("commit");
+    })();
+    const [proofResult, consumeResult] = await Promise.allSettled([
+      proof,
+      consume,
+    ]);
+    assert.equal(proofResult.status, "rejected");
+    if (proofResult.status === "rejected") {
+      assert.ok(proofResult.reason instanceof FundingTradeAttemptError);
+      assert.equal(proofResult.reason.code, "invalid_state");
+    }
+    assert.equal(consumeResult.status, "fulfilled");
+    const outcome = await pool.query<{
+      attempt_state: string;
+      reservation_state: string;
+    }>(
+      `select trade_attempt.state as attempt_state,
+              reservation.state as reservation_state
+         from funding_trade_attempts trade_attempt
+         join balance_reservations reservation
+           on reservation.id = trade_attempt.reservation_id
+        where trade_attempt.id = $1`,
+      [attemptId],
+    );
+    assert.deepEqual(outcome.rows[0], {
+      attempt_state: "accepted",
+      reservation_state: "consumed",
+    });
+  } finally {
+    await consumerClient.query("rollback").catch(() => undefined);
+    await proofClient.query("rollback").catch(() => undefined);
+    consumerClient.release();
+    proofClient.release();
   }
 }
 
@@ -5520,6 +6029,10 @@ console.log(
 await testTransactionalPersistenceContracts();
 console.log(
   "[funding-persistence-integration-tests] ok ownership, evidence, accounting, reducer, and leases",
+);
+await testFundedTradeTerminalLockRace();
+console.log(
+  "[funding-persistence-integration-tests] ok funded trade consume versus absence-proof race has one authoritative outcome",
 );
 await testTelegramAppHandoffV2DirectTradeBinding();
 console.log(

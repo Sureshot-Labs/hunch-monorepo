@@ -2,7 +2,12 @@ import type { Pool } from "@hunch/infra";
 import { ZeroAddress } from "ethers";
 
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
-import { scaleUnsignedDecimalByRawRatio } from "../../account-value/decimal.js";
+import {
+  compareUnsignedDecimals,
+  formatUnsignedDecimal,
+  multiplyUnsignedDecimals,
+  scaleUnsignedDecimalByRawRatio,
+} from "../../account-value/decimal.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
 import { createRelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
 import {
@@ -356,6 +361,61 @@ function rescaleStableRaw(
   return ((source + divisor - 1n) / divisor).toString();
 }
 
+type SourceQuoteSizing = Readonly<{
+  raw: string;
+  minimumDestinationRaw: string;
+  quoteModeOverride?: "exact_input";
+}>;
+
+function balanceCappedExactInputSizing(
+  spendableRaw: bigint,
+  canCoverRequiredOutput: boolean,
+): SourceQuoteSizing | null {
+  return canCoverRequiredOutput
+    ? null
+    : {
+        raw: spendableRaw.toString(),
+        minimumDestinationRaw: "1",
+        quoteModeOverride: "exact_input",
+      };
+}
+
+type NativeSolCoverage = "covers" | "insufficient" | "unknown";
+
+function nativeSolCoverageForRequiredOutput(input: {
+  component: AccountValueReadModel["projection"]["components"][number];
+  spendableRaw: bigint;
+  requiredAmount: Money;
+  maximumSlippageBps: number;
+}): NativeSolCoverage {
+  if (
+    input.component.valuationEligibility !== "included" ||
+    input.component.reasonCodes.includes("trusted_price_stale") ||
+    !input.component.estimatedUsd ||
+    BigInt(input.component.amount.raw) <= 0n
+  ) {
+    return "unknown";
+  }
+  const spendableEstimatedUsd = scaleUnsignedDecimalByRawRatio({
+    value: input.component.estimatedUsd.value,
+    numeratorRaw: input.spendableRaw.toString(),
+    denominatorRaw: input.component.amount.raw,
+  });
+  const requiredEstimatedUsd = formatUnsignedDecimal(
+    BigInt(input.requiredAmount.raw),
+    input.requiredAmount.asset.decimals,
+  );
+  return compareUnsignedDecimals(
+    multiplyUnsignedDecimals(
+      spendableEstimatedUsd,
+      (10_000 - input.maximumSlippageBps).toString(),
+    ),
+    multiplyUnsignedDecimals(requiredEstimatedUsd, "10000"),
+  ) > 0
+    ? "covers"
+    : "insufficient";
+}
+
 function destinationAddress(destination: ResolvedRouteDestination): string {
   const address =
     destination.target.kind === "owned_location"
@@ -422,6 +482,7 @@ function sourceFactsForComponent(input: {
       let raw: string;
       let minimumDestinationRaw: string;
       let quoteModeOverride: RelayEligibleSourceFact["quoteModeOverride"];
+      let exactInputFallbackOnSourceCap = false;
       const confirmedSourceRaw =
         input.confirmedSourceAmount &&
         sameAsset(
@@ -451,8 +512,26 @@ function sourceFactsForComponent(input: {
         minimumDestinationRaw = "1";
         quoteModeOverride = "exact_input";
       } else if (nativeSolSource) {
-        raw = spendableRaw.toString();
-        minimumDestinationRaw = input.requiredAmount.raw;
+        const coverage = nativeSolCoverageForRequiredOutput({
+          component: input.component,
+          spendableRaw,
+          requiredAmount: input.requiredAmount,
+          maximumSlippageBps: input.maximumSlippageBps,
+        });
+        // Exact-input of the full spendable SOL is safe immediately only when
+        // a fresh, trusted valuation proves that this source cannot cover the
+        // residual. Otherwise ask Relay for exact-output first. If Relay proves
+        // that the source cap cannot cover it, the planner may make one bounded
+        // exact-input retry and will publish it only as a partial contribution.
+        const sizing =
+          coverage === "insufficient"
+            ? balanceCappedExactInputSizing(spendableRaw, false)
+            : null;
+        exactInputFallbackOnSourceCap = coverage !== "insufficient";
+        ({ raw, minimumDestinationRaw, quoteModeOverride } = sizing ?? {
+          raw: spendableRaw.toString(),
+          minimumDestinationRaw: input.requiredAmount.raw,
+        });
       } else {
         const requiredSourceRaw = rescaleStableRaw(
           input.requiredAmount.raw,
@@ -465,19 +544,19 @@ function sourceFactsForComponent(input: {
             BigInt(slippageDenominator) -
             1n) /
           BigInt(slippageDenominator);
-        const balanceCapped = spendableRaw <= sourceRawWithSlippage;
-        raw = balanceCapped
-          ? spendableRaw.toString()
-          : sourceRawWithSlippage.toString();
-        if (balanceCapped) {
+        const sizing = balanceCappedExactInputSizing(
+          spendableRaw,
+          spendableRaw > sourceRawWithSlippage,
+        );
+        if (sizing) {
           // A capped wallet cannot authorize the full expected-output debit.
           // Quote its exact available input instead, then let Relay's validated
           // minimum output become a partial contribution for the existing
           // composite planner. The public fee/slippage checks still decide
           // whether that contribution is economically usable.
-          minimumDestinationRaw = "1";
-          quoteModeOverride = "exact_input";
+          ({ raw, minimumDestinationRaw, quoteModeOverride } = sizing);
         } else {
+          raw = sourceRawWithSlippage.toString();
           const grossDestinationRaw = rescaleStableRaw(
             raw,
             input.requiredAmount.asset.decimals,
@@ -526,6 +605,9 @@ function sourceFactsForComponent(input: {
           raw: minimumDestinationRaw,
         },
         ...(quoteModeOverride ? { quoteModeOverride } : {}),
+        ...(exactInputFallbackOnSourceCap
+          ? { exactInputFallbackOnSourceCap: true }
+          : {}),
         maximumSourceRaw: spendableRaw.toString(),
         maximumSlippageBps: input.maximumSlippageBps,
         estimatedUsd,
@@ -1214,6 +1296,11 @@ export class ProductionFundingSourcePlanner {
         return {
           kind: "rejected",
           reasonCode: "provider_quote_economics_rejected",
+          ...(error.reason === "source_cap_exceeded" &&
+          input.source.exactInputFallbackOnSourceCap === true &&
+          input.source.quoteModeOverride !== "exact_input"
+            ? { retryAsExactInput: "source_cap_exceeded" as const }
+            : {}),
         };
       }
       throw error;

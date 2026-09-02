@@ -8,8 +8,15 @@ import {
   fetchEmbeddedEthereumTransactionReceipt,
 } from "./embedded-ethereum.js";
 import { resolveKalshiExecutionSettlementStatus } from "./kalshi-executions.js";
-import { fetchLimitlessOrderStatusByClientOrderIds } from "./limitless-order-status.js";
-import { parseLimitlessOrderResult } from "./limitless-order-result.js";
+import { fetchLimitlessExactClientOrderStatus } from "./limitless-order-status.js";
+import {
+  deterministicLimitlessClientOrderId,
+  deterministicLimitlessDirectHandoffClientOrderId,
+} from "./limitless-order-identity.js";
+import {
+  isLimitlessTerminalRejectedStatus,
+  parseLimitlessOrderResult,
+} from "./limitless-order-result.js";
 import { LIMITLESS_CLOB_CHAIN_ID } from "./limitless-trading-service.js";
 import { inspectPolymarketSubmittedOrder } from "./polymarket-trading-execution-service.js";
 import {
@@ -32,6 +39,7 @@ import type {
 } from "./trading-types.js";
 
 const FUNDING_REFERENCE_NOT_FOUND_GRACE_MS = 10 * 60 * 1_000;
+export const LIMITLESS_DIRECT_NOT_FOUND_GRACE_MS = 5 * 60 * 1_000;
 
 export function resolveMissingFundingReferenceState(
   recordedAt: Date | null,
@@ -56,12 +64,16 @@ type VenueReconcileIntentRow = {
   event_id: string | null;
   side: "NO" | "YES" | null;
   amount_usd: string | null;
+  error_code: string | null;
+  idempotency_key: string;
   shares_raw: string | null;
   status: string;
+  submit_started_at: Date | null;
   prepared_snapshot: Record<string, unknown> | null;
   quote_snapshot: Record<string, unknown> | null;
   result: Record<string, unknown> | null;
   order_id: string | null;
+  execution_id: string | null;
   venue_order_id: string | null;
   tx_signature: string | null;
   funding_operation_id: string | null;
@@ -115,6 +127,22 @@ const RECONCILE_LOCK_KEY = "telegram-bot-trading:venue-reconcile:v1";
 
 function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function sealedDirectHandoffId(
+  row: Pick<VenueReconcileIntentRow, "prepared_snapshot" | "result">,
+): string | null {
+  const directClaim = isRecord(row.result?.appHandoffDirectTradeClaim)
+    ? row.result.appHandoffDirectTradeClaim
+    : null;
+  const handoffId = readString(directClaim?.handoffId);
+  return directClaim?.version === 2 &&
+    handoffId &&
+    typeof directClaim.planFingerprint === "string" &&
+    row.prepared_snapshot?.authorizationMode === "client_signed" &&
+    row.prepared_snapshot.preparedId === `handoff-v2:${handoffId}`
+    ? handoffId
+    : null;
 }
 
 function readFiniteNumber(value: unknown): number | null {
@@ -441,21 +469,37 @@ async function inspectVenueSubmit(
     const tradeType = readString(keys?.tradeType);
     const clientOrderId = readString(keys?.clientOrderId);
     if (tradeType === "clob" && clientOrderId) {
-      const status = await fetchLimitlessOrderStatusByClientOrderIds([
-        clientOrderId,
-      ]);
-      const matched = status.get(clientOrderId);
-      if (!matched?.providerOrderId) {
+      const preparedIdempotencyKey = readString(keys?.idempotencyKey);
+      const directHandoffId = sealedDirectHandoffId(row);
+      const expectedClientOrderId = directHandoffId
+        ? deterministicLimitlessDirectHandoffClientOrderId(directHandoffId)
+        : deterministicLimitlessClientOrderId(row.idempotency_key);
+      if (
+        (!directHandoffId && preparedIdempotencyKey !== row.idempotency_key) ||
+        (directHandoffId &&
+          preparedIdempotencyKey !== null &&
+          preparedIdempotencyKey !== row.idempotency_key) ||
+        clientOrderId !== expectedClientOrderId
+      ) {
+        return {
+          state: "limitless_clob_identity_invalid",
+          submitResult: null,
+        };
+      }
+      const exactStatus =
+        await fetchLimitlessExactClientOrderStatus(clientOrderId);
+      if (exactStatus.kind === "not_found") {
+        return { state: "limitless_clob_not_found", submitResult: null };
+      }
+      if (exactStatus.kind !== "found") {
         return { state: "limitless_clob_status_pending", submitResult: null };
       }
+      const matched = exactStatus.item;
       const parsed = parseLimitlessOrderResult(matched.payload);
       const venueOrderId = parsed.venueOrderId ?? matched.providerOrderId;
-      const explicitTerminalFailure = [
-        "cancelled",
-        "expired",
-        "failed",
-        "rejected",
-      ].includes(parsed.status ?? "");
+      const explicitTerminalFailure = isLimitlessTerminalRejectedStatus(
+        parsed.status,
+      );
       return {
         state: parsed.terminalFill
           ? "limitless_clob_filled"
@@ -708,6 +752,134 @@ function isDefinitiveRejectedNotFound(
   );
 }
 
+export function resolveLimitlessDirectNotFoundState(
+  row: Pick<
+    VenueReconcileIntentRow,
+    | "error_code"
+    | "execution_id"
+    | "funding_operation_id"
+    | "funding_reservation_id"
+    | "idempotency_key"
+    | "order_id"
+    | "prepared_snapshot"
+    | "result"
+    | "status"
+    | "submit_started_at"
+    | "tx_signature"
+    | "venue"
+    | "venue_order_id"
+  >,
+  venueState: string,
+  now = new Date(),
+): "definitive_failure" | "pending" {
+  const keys = preparedKeys(row.prepared_snapshot);
+  const idempotencyKey = readString(keys?.idempotencyKey);
+  const clientOrderId = readString(keys?.clientOrderId);
+  const directHandoffId = sealedDirectHandoffId(row);
+  const expectedClientOrderId = directHandoffId
+    ? deterministicLimitlessDirectHandoffClientOrderId(directHandoffId)
+    : idempotencyKey
+      ? deterministicLimitlessClientOrderId(idempotencyKey)
+      : null;
+  const submitStartedAt = row.submit_started_at;
+  const isSealedDirectExecuting =
+    row.status === "executing" && directHandoffId !== null;
+  const isUnknownSubmit =
+    (row.status === "reconcile_required" &&
+      row.error_code === "submit_state_unknown") ||
+    isSealedDirectExecuting;
+  return row.venue === "limitless" &&
+    isUnknownSubmit &&
+    venueState === "limitless_clob_not_found" &&
+    row.funding_operation_id === null &&
+    row.funding_reservation_id === null &&
+    row.order_id === null &&
+    row.execution_id === null &&
+    row.venue_order_id === null &&
+    row.tx_signature === null &&
+    readString(keys?.tradeType) === "clob" &&
+    (directHandoffId !== null
+      ? idempotencyKey === null || idempotencyKey === row.idempotency_key
+      : idempotencyKey === row.idempotency_key) &&
+    clientOrderId !== null &&
+    clientOrderId === expectedClientOrderId &&
+    submitStartedAt instanceof Date &&
+    Number.isFinite(submitStartedAt.getTime()) &&
+    now.getTime() - submitStartedAt.getTime() >=
+      LIMITLESS_DIRECT_NOT_FOUND_GRACE_MS
+    ? "definitive_failure"
+    : "pending";
+}
+
+async function finalizeLimitlessDirectNotFound(input: {
+  clientOrderId: string;
+  db: DbQuery;
+  idempotencyKey: string;
+  intentId: string;
+  now: Date;
+}): Promise<boolean> {
+  const result = await input.db.query(
+    `update telegram_trade_intents
+        set status = 'failed',
+            error_code = 'limitless_exact_status_not_found',
+            error_message = 'Limitless did not accept the prior order. A fresh retry is safe.',
+            result = coalesce(result, '{}'::jsonb) || $5::jsonb,
+            updated_at = clock_timestamp()
+      where id = $1
+        and venue = 'limitless'
+        and idempotency_key = $2
+        and (
+          (status = 'reconcile_required' and error_code = 'submit_state_unknown')
+          or (
+            status = 'executing'
+            and result->'appHandoffDirectTradeClaim'->>'version' = '2'
+            and result->'appHandoffDirectTradeClaim'->>'handoffId' is not null
+            and result->'appHandoffDirectTradeClaim'->>'planFingerprint' is not null
+            and prepared_snapshot->>'authorizationMode' = 'client_signed'
+            and prepared_snapshot->>'preparedId' = concat(
+              'handoff-v2:',
+              result->'appHandoffDirectTradeClaim'->>'handoffId'
+            )
+          )
+        )
+        and submit_started_at is not null
+        and submit_started_at <= $3::timestamptz
+        and prepared_snapshot->'reconcileKeys'->>'clientOrderId' = $4
+        and (
+          prepared_snapshot->'reconcileKeys'->>'idempotencyKey' = $2
+          or (
+            prepared_snapshot->'reconcileKeys'->>'idempotencyKey' is null
+            and result->'appHandoffDirectTradeClaim'->>'version' = '2'
+            and $4 = concat(
+              'hunch-th2-',
+              result->'appHandoffDirectTradeClaim'->>'handoffId'
+            )
+          )
+        )
+        and prepared_snapshot->'reconcileKeys'->>'tradeType' = 'clob'
+        and funding_operation_id is null
+        and funding_reservation_id is null
+        and order_id is null
+        and execution_id is null
+        and venue_order_id is null
+        and tx_signature is null`,
+    [
+      input.intentId,
+      input.idempotencyKey,
+      new Date(input.now.getTime() - LIMITLESS_DIRECT_NOT_FOUND_GRACE_MS),
+      input.clientOrderId,
+      JSON.stringify({
+        venueReconcile: {
+          checkedAt: input.now.toISOString(),
+          state: "limitless_clob_not_found",
+          terminal: true,
+        },
+      }),
+    ],
+  );
+  return (result.rowCount ?? 0) === 1;
+}
+
 async function finalizeDefinitiveRejectedIntent(input: {
   db: DbQuery;
   intentId: string;
@@ -852,12 +1024,16 @@ async function loadCandidates(
        ti.event_id,
        ti.side,
        ti.amount_usd,
+       ti.error_code,
+       ti.idempotency_key,
        ti.shares_raw,
        ti.status,
+       ti.submit_started_at,
        ti.prepared_snapshot,
        ti.quote_snapshot,
        ti.result,
        ti.order_id,
+       ti.execution_id,
        ti.venue_order_id,
        ti.tx_signature,
        ti.funding_operation_id,
@@ -996,6 +1172,34 @@ export async function reconcileTelegramVenueIntents(
       }
       const submitResult = inspection.submitResult;
       if (!submitResult) {
+        const reconcileNow = new Date();
+        if (
+          resolveLimitlessDirectNotFoundState(
+            row,
+            inspection.state,
+            reconcileNow,
+          ) === "definitive_failure"
+        ) {
+          if (summary.dryRun) {
+            item.result = "failed";
+            summary.failedVerified += 1;
+            summary.items.push(item);
+          } else {
+            const keys = preparedKeys(row.prepared_snapshot);
+            const finalized = await finalizeLimitlessDirectNotFound({
+              clientOrderId: readString(keys?.clientOrderId) as string,
+              db: client,
+              idempotencyKey: row.idempotency_key,
+              intentId: row.id,
+              now: reconcileNow,
+            });
+            item.result = finalized ? "failed" : "pending";
+            if (finalized) summary.failedVerified += 1;
+            else summary.pending += 1;
+            summary.items.push(item);
+          }
+          continue;
+        }
         if (
           inspection.state === "funding_confirmed" ||
           inspection.state === "funding_not_found" ||

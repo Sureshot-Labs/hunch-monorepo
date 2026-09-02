@@ -174,6 +174,328 @@ const tests: readonly Test[] = [
     },
   },
   {
+    name: "action start takes a fresh snapshot after the operation lock before inspecting sibling stop states",
+    run: () => {
+      const source = readFileSync(
+        new URL(
+          "../../persistence/funding-evidence-repository.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const start = source.slice(
+        source.indexOf(
+          "export async function startFundingStepAttemptForUserInTransaction",
+        ),
+        source.indexOf("export async function startFundingStepAttemptForUser("),
+      );
+      const operationLock = start.indexOf("from funding_operations");
+      const siblingRead = start.indexOf("from funding_operation_steps step");
+      assert.ok(operationLock >= 0 && siblingRead > operationLock);
+      assert.match(
+        start.slice(0, siblingRead),
+        /from funding_operations[\s\S]*for update/u,
+      );
+      assert.match(
+        start,
+        /sibling_step\.state in \([\s\S]*'failed'[\s\S]*'cancelled'[\s\S]*'reconcile_required'[\s\S]*'recovery_required'/u,
+      );
+      assert.match(start, /if \(row\.sibling_stop_state\)/u);
+    },
+  },
+  {
+    name: "attempt mutation paths lock operation then step then attempt with fresh statements",
+    run: () => {
+      const evidence = readFileSync(
+        new URL(
+          "../../persistence/funding-evidence-repository.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const receipt = readFileSync(
+        new URL(
+          "../../persistence/funding-step-receipt-repository.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const delegatedExecutor = readFileSync(
+        new URL(
+          "../../execution/delegated-funding-executor.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const relayExecutor = readFileSync(
+        new URL(
+          "../../execution/relay-evm-delegated-executor-profile.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const slices = [
+        evidence.slice(
+          evidence.indexOf(
+            "export async function finishFundingStepAttemptForUserInTransaction",
+          ),
+          evidence.indexOf(
+            "export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransaction",
+          ),
+        ),
+        evidence.slice(
+          evidence.indexOf(
+            "export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransaction",
+          ),
+          evidence.indexOf(
+            "export async function finishFundingStepAttemptForUser(",
+          ),
+        ),
+        receipt.slice(
+          receipt.indexOf(
+            "export async function applyFundingStepReceiptEvidenceInTransaction",
+          ),
+          receipt.indexOf(
+            "export async function applyFundingStepReceiptEvidence(",
+          ),
+        ),
+        delegatedExecutor.slice(
+          delegatedExecutor.indexOf(
+            "async function polymarketRouterPreBroadcastDecisionInTransaction",
+          ),
+          delegatedExecutor.indexOf(
+            "export function createPolymarketRouterDelegatedFundingProfile",
+            delegatedExecutor.indexOf(
+              "async function polymarketRouterPreBroadcastDecisionInTransaction",
+            ),
+          ),
+        ),
+        relayExecutor.slice(
+          relayExecutor.indexOf("async function preBroadcastRelay"),
+          relayExecutor.indexOf(
+            "async function allocateFinalizedRelaySourceDebitInTransaction",
+          ),
+        ),
+      ];
+      for (const mutationPath of slices) {
+        const operationLock = mutationPath.indexOf("from funding_operations");
+        const stepLock = mutationPath.indexOf("from funding_operation_steps");
+        const attemptLock = mutationPath.indexOf(
+          "from funding_operation_step_attempts",
+        );
+        assert.ok(
+          operationLock >= 0 &&
+            stepLock > operationLock &&
+            attemptLock > stepLock,
+        );
+        assert.doesNotMatch(
+          mutationPath,
+          /for update of operation, step, attempt/u,
+        );
+      }
+    },
+  },
+  {
+    name: "Relay source-debit allocation acquires the allowance lane before canonical funding row locks",
+    run: () => {
+      const source = readFileSync(
+        new URL(
+          "../../execution/relay-evm-delegated-executor-profile.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const allocator = source.slice(
+        source.indexOf(
+          "async function allocateFinalizedRelaySourceDebitInTransaction",
+        ),
+        source.indexOf(
+          "export async function recordFinalizedRelaySourceDebitForOperation",
+        ),
+      );
+      const discovery = allocator.indexOf("const candidates");
+      const laneLock = allocator.indexOf(
+        "tryLockFundingAuthorizationReservationScope",
+      );
+      const operationLock = allocator.indexOf(
+        "from funding_operations",
+        laneLock,
+      );
+      const stepLock = allocator.indexOf(
+        "from funding_operation_steps",
+        operationLock,
+      );
+      const receiptLock = allocator.indexOf(
+        "from funding_step_receipt_observations",
+        stepLock,
+      );
+      const reservationLock = allocator.indexOf(
+        "from telegram_funding_authorization_reservations",
+        receiptLock,
+      );
+      assert.ok(
+        discovery >= 0 &&
+          laneLock > discovery &&
+          operationLock > laneLock &&
+          stepLock > operationLock &&
+          receiptLock > stepLock &&
+          reservationLock > receiptLock,
+      );
+      assert.doesNotMatch(allocator.slice(discovery, laneLock), /for update/u);
+      assert.doesNotMatch(
+        allocator,
+        /for update of operation, deposit_step, deposit_receipt, reservation/u,
+      );
+    },
+  },
+  {
+    name: "reducer clears unresolved attempt fencing only for canonical finalized success or failure",
+    run: () => {
+      const source = readFileSync(
+        new URL("../../reconciliation/funding-reducer.ts", import.meta.url),
+        "utf8",
+      );
+      const startedAttemptAlias = source.indexOf("as has_started_attempt");
+      const startedAttemptTable = source.indexOf(
+        "from funding_operation_step_attempts started_attempt",
+      );
+      const attemptFacts = source.slice(
+        source.lastIndexOf("exists (", startedAttemptTable),
+        source.indexOf(
+          "from funding_operation_steps step",
+          startedAttemptAlias,
+        ),
+      );
+      assert.equal(attemptFacts.match(/and not exists \(/gu)?.length, 2);
+      assert.match(
+        attemptFacts,
+        /receipt\.status = 'finalized'[\s\S]*receipt\.canonical[\s\S]*receipt\.action_match/u,
+      );
+      assert.match(
+        attemptFacts,
+        /receipt\.status = 'failed'[\s\S]*receipt\.canonical[\s\S]*failureFinalized/u,
+      );
+      assert.doesNotMatch(
+        attemptFacts,
+        /receipt\.status not in \('finalized', 'failed'\)/u,
+      );
+    },
+  },
+  {
+    name: "consumer reservation expiry uses intent-operation-reservation order and preserves broadcast-capable trade attempts",
+    run: () => {
+      const source = readFileSync(
+        new URL("../../reconciliation/funding-reducer.ts", import.meta.url),
+        "utf8",
+      );
+      const preflight = source.slice(
+        source.indexOf(
+          "async function preflightSettledConsumerReservationExpiry",
+        ),
+        source.indexOf("async function reconcileBoundStepsForSegment"),
+      );
+      const intentLock = preflight.indexOf(
+        "from telegram_trade_intents intent",
+      );
+      const operationLock = preflight.indexOf(
+        "fetchFundingOperationForWorkerInTransaction",
+      );
+      const reservationLock = preflight.indexOf(
+        "expireSettledConsumerReservation(client",
+      );
+      assert.ok(
+        intentLock >= 0 &&
+          operationLock > intentLock &&
+          reservationLock > operationLock,
+      );
+      const expiryQueries = source.slice(
+        source.indexOf("async function expireSettledConsumerReservation"),
+        source.indexOf("async function reconcileBoundStepsForSegment"),
+      );
+      assert.match(
+        expiryQueries,
+        /trade_attempt\.state in \('submission_started', 'ambiguous'\)[\s\S]*or trade_attempt\.broadcast_may_have_occurred/u,
+      );
+    },
+  },
+  {
+    name: "cancellation and implicit order recovery acquire canonical funding locks before mutation locks",
+    run: () => {
+      const cancellation = readFileSync(
+        new URL(
+          "../../reconciliation/funding-operation-cancellation.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const cancelPath = cancellation.slice(
+        cancellation.indexOf(
+          "export async function cancelFundingOperationForUser",
+        ),
+      );
+      const unlockedScope = cancelPath.indexOf(
+        "fetchFundingOperationForUser(client, input)",
+      );
+      const intentLock = cancelPath.indexOf(
+        "from telegram_trade_intents intent",
+      );
+      const operationLock = cancelPath.indexOf("from funding_operations");
+      const stepLock = cancelPath.indexOf("from funding_operation_steps");
+      assert.ok(
+        unlockedScope >= 0 &&
+          intentLock > unlockedScope &&
+          operationLock > intentLock &&
+          stepLock > operationLock,
+      );
+
+      const attempts = readFileSync(
+        new URL(
+          "../../persistence/funding-trade-attempt-repository.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const recovery = attempts.slice(
+        attempts.indexOf(
+          "export async function recoverFundingTradeAttemptForOrderInTransaction",
+        ),
+      );
+      const recoveryIntent = recovery.indexOf(
+        "from telegram_trade_intents intent",
+      );
+      const recoveryOperation = recovery.indexOf("from funding_operations");
+      const recoveryReservation = recovery.indexOf("from balance_reservations");
+      const recoveryAttempt = recovery.indexOf(
+        "from funding_trade_attempts attempt",
+        recoveryOperation,
+      );
+      assert.ok(
+        recoveryIntent >= 0 &&
+          recoveryOperation > recoveryIntent &&
+          recoveryReservation > recoveryOperation &&
+          recoveryAttempt > recoveryReservation,
+      );
+      assert.doesNotMatch(recovery, /for update of reservation, attempt/u);
+
+      const orders = readFileSync(
+        new URL("../../../repos/orders-repo.ts", import.meta.url),
+        "utf8",
+      );
+      const storeOrder = orders.slice(
+        orders.indexOf("export async function storeOrderInTransaction"),
+        orders.indexOf("export async function storeOrder("),
+      );
+      assert.ok(
+        storeOrder.indexOf("pg_advisory_xact_lock") <
+          storeOrder.indexOf("recoverFundingTradeAttemptForOrderInTransaction"),
+      );
+      assert.ok(
+        storeOrder.indexOf("recoverFundingTradeAttemptForOrderInTransaction") <
+          storeOrder.indexOf("FOR UPDATE"),
+      );
+    },
+  },
+  {
     name: "receive-session polling is durably throttled and claimed across workers",
     run: () => {
       const source = readFileSync(
@@ -307,6 +629,108 @@ const tests: readonly Test[] = [
       assert.doesNotMatch(
         source,
         /claim_lease_until = \$2 \+ interval '15 seconds'/i,
+      );
+    },
+  },
+  {
+    name: "funded trade terminal paths share intent operation reservation attempt lock order",
+    run: () => {
+      const attemptSource = readFileSync(
+        new URL(
+          "../../persistence/funding-trade-attempt-repository.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const lockStart = attemptSource.indexOf(
+        "async function lockFundingOperationForAttempt",
+      );
+      const lockEnd = attemptSource.indexOf(
+        "export async function claimFundingTradeAttemptInTransaction",
+        lockStart,
+      );
+      const lockSource = attemptSource.slice(lockStart, lockEnd);
+      const intentLock = lockSource.indexOf("from telegram_trade_intents");
+      const operationLock = lockSource.indexOf("from funding_operations");
+      const reservationLock = lockSource.indexOf("from balance_reservations");
+      assert.ok(intentLock >= 0);
+      assert.ok(intentLock < operationLock);
+      assert.ok(operationLock < reservationLock);
+
+      const evidenceSource = readFileSync(
+        new URL(
+          "../../persistence/funding-evidence-repository.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const consumeStart = evidenceSource.indexOf(
+        "export async function consumeFundingReservationForLinkedConsumerInTransaction",
+      );
+      const consumeEnd = evidenceSource.indexOf(
+        "export async function consumeFundingReservationForLinkedConsumer(",
+        consumeStart,
+      );
+      const consumeSource = evidenceSource.slice(consumeStart, consumeEnd);
+      const consumeIntent = consumeSource.indexOf(
+        "from telegram_trade_intents",
+      );
+      const consumeOperation = consumeSource.indexOf("from funding_operations");
+      const consumeReservation = consumeSource.indexOf(
+        "const lockedReservation",
+      );
+      const consumeAttempt = consumeSource.indexOf(
+        "acceptFundingTradeAttemptInTransaction",
+      );
+      assert.ok(consumeIntent >= 0);
+      assert.ok(consumeIntent < consumeOperation);
+      assert.ok(consumeOperation < consumeReservation);
+      assert.ok(consumeReservation < consumeAttempt);
+    },
+  },
+  {
+    name: "Limitless ambiguity reconciliation is leased and status-only",
+    run: () => {
+      const source = readFileSync(
+        new URL(
+          "../../reconciliation/limitless-trade-attempt-reconciler.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const attemptRepositorySource = readFileSync(
+        new URL(
+          "../../persistence/funding-trade-attempt-repository.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      assert.match(
+        source,
+        /claimAmbiguousLimitlessTradeAttemptsForReconciliation/,
+      );
+      assert.match(source, /\/orders\/status\/batch/);
+      assert.doesNotMatch(source, /requestPath:\s*["']\/orders["']/);
+      assert.match(
+        source,
+        /releaseFundingReservationForProvenAbsentLimitlessTrade/,
+      );
+      assert.match(source, /storeOrder/);
+      assert.match(
+        attemptRepositorySource,
+        /state in \('submission_started', 'ambiguous'\)/,
+      );
+      assert.match(
+        attemptRepositorySource,
+        /resolved_at = coalesce\(resolved_at, \$3\)/,
+      );
+      assert.match(
+        attemptRepositorySource,
+        /claim_token = \$4::uuid[\s\S]*claim_lease_until > clock_timestamp\(\)/,
+      );
+      assert.match(
+        attemptRepositorySource,
+        /expectedReconciliationClaimToken[\s\S]*claim_lease_until > clock_timestamp\(\)/,
       );
     },
   },

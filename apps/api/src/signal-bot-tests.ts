@@ -74,9 +74,15 @@ import {
   telegramBotTradingTestHooks,
 } from "./services/telegram-bot-trading.js";
 import {
+  LIMITLESS_DIRECT_NOT_FOUND_GRACE_MS,
   reconcileTelegramVenueIntents,
+  resolveLimitlessDirectNotFoundState,
   resolveMissingFundingReferenceState,
 } from "./services/telegram-bot-trading-venue-reconcile.js";
+import {
+  deterministicLimitlessClientOrderId,
+  deterministicLimitlessDirectHandoffClientOrderId,
+} from "./services/limitless-order-identity.js";
 import {
   isTelegramBotTradingReconciliationEnabled,
   reconcileTelegramBotTradingStatus,
@@ -1766,6 +1772,142 @@ function decodeStartAppPayload(startParam: string): string {
 }
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "Limitless direct not-found uses immutable submit start and exact deterministic id",
+    run: () => {
+      const idempotencyKey = "telegram-bot:direct-limitless-intent";
+      const clientOrderId = deterministicLimitlessClientOrderId(idempotencyKey);
+      const submitStartedAt = new Date("2026-08-01T12:00:00.000Z");
+      const row = {
+        error_code: "submit_state_unknown",
+        execution_id: null,
+        funding_operation_id: null,
+        funding_reservation_id: null,
+        idempotency_key: idempotencyKey,
+        order_id: null,
+        prepared_snapshot: {
+          reconcileKeys: {
+            clientOrderId,
+            idempotencyKey,
+            tradeType: "clob",
+          },
+        },
+        result: null,
+        status: "reconcile_required",
+        submit_started_at: submitStartedAt,
+        tx_signature: null,
+        venue: "limitless" as const,
+        venue_order_id: null,
+      };
+      assert.equal(
+        resolveLimitlessDirectNotFoundState(
+          row,
+          "limitless_clob_not_found",
+          new Date(
+            submitStartedAt.getTime() + LIMITLESS_DIRECT_NOT_FOUND_GRACE_MS - 1,
+          ),
+        ),
+        "pending",
+      );
+      const sealedExecutingRow = {
+        ...row,
+        error_code: null,
+        status: "executing",
+        prepared_snapshot: {
+          authorizationMode: "client_signed",
+          preparedId: "handoff-v2:00000000-0000-4000-8000-000000000099",
+          reconcileKeys: {
+            clientOrderId: deterministicLimitlessDirectHandoffClientOrderId(
+              "00000000-0000-4000-8000-000000000099",
+            ),
+            idempotencyKey,
+            tradeType: "clob",
+          },
+        },
+        result: {
+          appHandoffDirectTradeClaim: {
+            handoffId: "00000000-0000-4000-8000-000000000099",
+            planFingerprint: "a".repeat(64),
+            version: 2,
+          },
+        },
+      };
+      assert.equal(
+        resolveLimitlessDirectNotFoundState(
+          sealedExecutingRow,
+          "limitless_clob_not_found",
+          new Date(
+            submitStartedAt.getTime() + LIMITLESS_DIRECT_NOT_FOUND_GRACE_MS,
+          ),
+        ),
+        "definitive_failure",
+      );
+      assert.equal(
+        resolveLimitlessDirectNotFoundState(
+          {
+            ...sealedExecutingRow,
+            result: {
+              appHandoffDirectTradeClaim: {
+                ...sealedExecutingRow.result.appHandoffDirectTradeClaim,
+                handoffId: "00000000-0000-4000-8000-000000000098",
+              },
+            },
+          },
+          "limitless_clob_not_found",
+          new Date(submitStartedAt.getTime() + 10 * 60_000),
+        ),
+        "pending",
+        "the sealed handoff marker must match the immutable prepared id",
+      );
+      assert.equal(
+        resolveLimitlessDirectNotFoundState(
+          row,
+          "limitless_clob_not_found",
+          new Date(
+            submitStartedAt.getTime() + LIMITLESS_DIRECT_NOT_FOUND_GRACE_MS,
+          ),
+        ),
+        "definitive_failure",
+      );
+      assert.equal(
+        resolveLimitlessDirectNotFoundState(
+          row,
+          "limitless_clob_open",
+          new Date(submitStartedAt.getTime() + 10 * 60_000),
+        ),
+        "pending",
+        "a found result must stay on the existing persistence path",
+      );
+      assert.equal(
+        resolveLimitlessDirectNotFoundState(
+          {
+            ...row,
+            funding_operation_id: "00000000-0000-0000-0000-000000000001",
+          },
+          "limitless_clob_not_found",
+          new Date(submitStartedAt.getTime() + 10 * 60_000),
+        ),
+        "pending",
+      );
+      assert.equal(
+        resolveLimitlessDirectNotFoundState(
+          {
+            ...row,
+            prepared_snapshot: {
+              reconcileKeys: {
+                clientOrderId: "hunch-wrong-client-order-id",
+                idempotencyKey,
+                tradeType: "clob",
+              },
+            },
+          },
+          "limitless_clob_not_found",
+          new Date(submitStartedAt.getTime() + 10 * 60_000),
+        ),
+        "pending",
+      );
+    },
+  },
   {
     name: "Telegram funding reference becomes retryable only after the grace period",
     run: () => {
@@ -6434,6 +6576,118 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           sql.includes("error_code = 'venue_submit_rejected'"),
         ),
         false,
+      );
+    },
+  },
+  {
+    name: "direct Limitless exact absence fails only after the immutable submit fence",
+    run: async () => {
+      const idempotencyKey = "telegram:limitless:exact-absence";
+      const clientOrderId = deterministicLimitlessDirectHandoffClientOrderId(
+        "00000000-0000-4000-8000-000000000013",
+      );
+      const runAtAge = async (ageMs: number) => {
+        const statements: string[] = [];
+        const candidate = {
+          action: "buy",
+          id: "00000000-0000-4000-8000-000000000011",
+          telegram_user_id: "999",
+          user_id: "00000000-0000-4000-8000-000000000012",
+          authorization_id: "authorization-1",
+          venue: "limitless",
+          market_id: "limitless:market-1",
+          event_id: "event-1",
+          side: "YES",
+          amount_usd: "1",
+          error_code: null,
+          idempotency_key: idempotencyKey,
+          status: "executing",
+          submit_started_at: new Date(Date.now() - ageMs),
+          prepared_snapshot: {
+            authorizationMode: "client_signed",
+            preparedId: "handoff-v2:00000000-0000-4000-8000-000000000013",
+            reconcileKeys: {
+              clientOrderId,
+              idempotencyKey,
+              tradeType: "clob",
+            },
+          },
+          quote_snapshot: {},
+          result: {
+            appHandoffDirectTradeClaim: {
+              handoffId: "00000000-0000-4000-8000-000000000013",
+              planFingerprint: "b".repeat(64),
+              version: 2,
+            },
+          },
+          order_id: null,
+          execution_id: null,
+          venue_order_id: null,
+          tx_signature: null,
+          funding_operation_id: null,
+          funding_reservation_id: null,
+          updated_at: new Date(),
+        };
+        const db = {
+          query: async () => ({ rows: [{ ready: true }] }),
+          connect: async () => ({
+            query: async (sql: string) => {
+              statements.push(sql);
+              if (sql.includes("pg_try_advisory_xact_lock")) {
+                return { rows: [{ locked: true }] };
+              }
+              if (sql.includes("FROM telegram_trade_intents ti")) {
+                return { rows: [candidate] };
+              }
+              return { rowCount: 1, rows: [] };
+            },
+            release: () => undefined,
+          }),
+        };
+        const result = await reconcileTelegramVenueIntents(
+          db as never,
+          {} as never,
+          { dryRun: false },
+          {
+            inspectVenueSubmit: async () => ({
+              state: "limitless_clob_not_found",
+              submitResult: null,
+            }),
+          } as never,
+        );
+        return { result, statements };
+      };
+
+      const beforeFence = await runAtAge(
+        LIMITLESS_DIRECT_NOT_FOUND_GRACE_MS - 1_000,
+      );
+      assert.equal(beforeFence.result.pending, 1);
+      assert.equal(beforeFence.result.failedVerified, 0);
+      assert.equal(
+        beforeFence.statements.some((sql) =>
+          sql.includes("limitless_exact_status_not_found"),
+        ),
+        false,
+      );
+
+      const afterFence = await runAtAge(
+        LIMITLESS_DIRECT_NOT_FOUND_GRACE_MS + 1_000,
+      );
+      assert.equal(afterFence.result.pending, 0);
+      assert.equal(afterFence.result.failedVerified, 1);
+      const terminal = afterFence.statements.find((sql) =>
+        sql.includes("limitless_exact_status_not_found"),
+      );
+      assert.ok(terminal);
+      assert.match(terminal, /submit_started_at <= \$3::timestamptz/);
+      assert.match(terminal, /funding_operation_id is null/i);
+      assert.match(
+        terminal,
+        /prepared_snapshot->'reconcileKeys'->>'idempotencyKey' = \$2/,
+      );
+      assert.match(
+        terminal,
+        /prepared_snapshot->'reconcileKeys'->>'clientOrderId' = \$4/,
       );
     },
   },

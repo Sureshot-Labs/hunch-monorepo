@@ -142,6 +142,7 @@ type LockedDirectTrade = Readonly<{
   fundingReservationId: string | null;
   handoffId: string;
   intentId: string;
+  intentIdempotencyKey: string;
   intentAction: string;
   intentPreparedSnapshot: unknown;
   intentResult: unknown;
@@ -555,6 +556,7 @@ async function lockDirectTrade(
     funding_reservation_id: string | null;
     handoff_id: string;
     intent_id: string;
+    intent_idempotency_key: string;
     intent_action: string;
     intent_prepared_snapshot: unknown;
     intent_result: unknown;
@@ -568,6 +570,7 @@ async function lockDirectTrade(
             handoff_row.authority_fingerprint,
             handoff_row.policy_revision,
             intent.id::text as intent_id,
+            intent.idempotency_key as intent_idempotency_key,
             intent.action as intent_action,
             intent.prepared_snapshot as intent_prepared_snapshot,
             intent.result as intent_result,
@@ -596,6 +599,7 @@ async function lockDirectTrade(
     fundingReservationId: row.funding_reservation_id,
     handoffId: row.handoff_id,
     intentId: row.intent_id,
+    intentIdempotencyKey: row.intent_idempotency_key,
     intentAction: row.intent_action,
     intentPreparedSnapshot: row.intent_prepared_snapshot,
     intentResult: row.intent_result,
@@ -765,7 +769,10 @@ export async function claimTelegramAppHandoffV2DirectTradeSubmissionInTransactio
       locked.intentId,
       locked.handoffId,
       input.binding.planFingerprint.trim().toLowerCase(),
-      JSON.stringify(input.reconcileKeys),
+      JSON.stringify({
+        ...input.reconcileKeys,
+        idempotencyKey: locked.intentIdempotencyKey,
+      }),
       JSON.stringify(input.recoveryPayload),
     ],
   );

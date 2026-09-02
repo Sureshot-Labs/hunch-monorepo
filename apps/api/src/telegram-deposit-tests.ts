@@ -498,7 +498,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         venue: "any",
       });
       assert.match(justDeposit.text, /Any \/ Just Deposit/u);
-      assert.match(justDeposit.text, /automatically prepare/u);
+      assert.match(justDeposit.text, /Receive SOL keeps SOL/u);
       assert.match(JSON.stringify(justDeposit.reply_markup), /pUSD · Polygon/u);
       assert.match(
         JSON.stringify(justDeposit.reply_markup),

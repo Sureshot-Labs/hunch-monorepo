@@ -138,6 +138,17 @@ export function isLimitlessUnmatchedStatus(value: unknown): boolean {
   return status === "unmatched" || status === "no_fill";
 }
 
+export function isLimitlessTerminalRejectedStatus(value: unknown): boolean {
+  const status = normalizeStatus(value);
+  return (
+    status === "rejected" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "canceled" ||
+    status === "expired"
+  );
+}
+
 export function isLimitlessFokUnmatchedMessage(
   message: string | null | undefined,
 ): boolean {

@@ -147,6 +147,15 @@ export const env = {
     "RELAY_REQUEST_TIMEOUT_MS",
     10_000,
   ),
+  limitlessApiBase:
+    readEnv("LIMITLESS_API_BASE") ?? "https://api.limitless.exchange",
+  limitlessApiVersion: readEnv("LIMITLESS_API_VERSION") ?? "v1",
+  limitlessApiTimeoutMs: parseOptionalPositiveInt(
+    "LIMITLESS_API_TIMEOUT_MS",
+    15_000,
+  ),
+  limitlessHmacTokenId: readEnv("LIMITLESS_HMAC_TOKEN_ID"),
+  limitlessHmacSecret: readEnv("LIMITLESS_HMAC_SECRET"),
   credentialsEncryptionKey: readEnv("CREDENTIALS_ENCRYPTION_KEY"),
   fundingReferenceLookupHmacKey: readEnv("FUNDING_REFERENCE_LOOKUP_HMAC_KEY"),
   fundingReferenceLookupKeyVersion: parseFundingReferenceLookupKeyVersion(

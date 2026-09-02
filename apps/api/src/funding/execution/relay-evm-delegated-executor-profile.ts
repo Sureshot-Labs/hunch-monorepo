@@ -3323,9 +3323,79 @@ async function preBroadcastRelay(
       }
     );
   }
+  const operationLock = await client.query(
+    `select id
+       from funding_operations
+      where id = $1::uuid
+        and user_id = $2::uuid
+      for update`,
+    [input.claim.operationId, input.claim.userId],
+  );
+  if (operationLock.rowCount !== 1) {
+    return {
+      kind: "hard_invalid" as const,
+      reasonCode: "delegated_action_invalid" as const,
+    };
+  }
+  const stepLock = await client.query(
+    `select id
+       from funding_operation_steps
+      where id = $1::uuid
+        and operation_id = $2::uuid
+        and executor_id = $3
+      for update`,
+    [input.claim.stepId, input.claim.operationId, input.profile.profileId],
+  );
+  if (stepLock.rowCount !== 1) {
+    return {
+      kind: "hard_invalid" as const,
+      reasonCode: "delegated_action_invalid" as const,
+    };
+  }
+  const attemptLock = await client.query(
+    `select id
+       from funding_operation_step_attempts
+      where id = $1::uuid
+        and step_id = $2::uuid
+        and executor_id = $3
+      for update`,
+    [input.claim.attemptId, input.claim.stepId, input.profile.profileId],
+  );
+  if (attemptLock.rowCount !== 1) {
+    return {
+      kind: "hard_invalid" as const,
+      reasonCode: "delegated_action_invalid" as const,
+    };
+  }
   const usesPreexistingAllowance =
     validated.kind === "deposit" &&
     input.claim.actionValidationResult.relayAllowanceMode === "preexisting";
+  const reservationLock = await client.query(
+    `select id
+       from telegram_funding_authorization_reservations
+      where authorization_id = $1::uuid
+        and (
+          ($2::boolean = false and funding_operation_id = $3::uuid)
+          or ($2::boolean = true and cleanup_operation_id = $3::uuid)
+        )
+        and status = case
+              when $2::boolean then 'cleanup_required'
+              else 'reserved'
+            end
+      for update`,
+    [
+      input.claim.authorizationId,
+      validated.kind === "cleanup",
+      input.claim.operationId,
+    ],
+  );
+  if (reservationLock.rowCount !== 1) {
+    return {
+      kind: "hard_invalid" as const,
+      reasonCode: "delegated_action_invalid" as const,
+      diagnosticCode: "reservation_lane_missing" as const,
+    };
+  }
   let dependencyApprovalLocked =
     validated.kind !== "deposit" || usesPreexistingAllowance;
   let dependencyApprovalTransactionHash: string | null = null;
@@ -3474,7 +3544,7 @@ async function preBroadcastRelay(
            )
          )
          and ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
-       for update of operation, step, attempt, reservation`,
+      `,
     [
       input.claim.operationId,
       input.claim.stepId,
@@ -3645,26 +3715,21 @@ async function allocateFinalizedRelaySourceDebitInTransaction(
     profile: RelayEvmFundingProfileSpec;
   }>,
 ): Promise<boolean> {
-  const { rows } = await client.query<
-    RelayPostDepositEvidence & {
-      authorizationId: string;
-      userId: string;
-    }
-  >({
+  const candidates = await client.query<{
+    authorizationId: string;
+    depositReceiptId: string;
+    depositStepId: string;
+    parentOperationId: string;
+    reservationId: string;
+    segmentId: string;
+    userId: string;
+  }>({
     name: "funding-relay-allocate-finalized-source-debit-v1",
     text: `select operation.id as "parentOperationId",
             segment.id as "segmentId",
+            deposit_step.id as "depositStepId",
             deposit_receipt.id as "depositReceiptId",
-            deposit_receipt.attempt_id as "depositAttemptId",
-            deposit_receipt.evidence ->> 'transactionHash'
-              as "depositTransactionHash",
-            deposit_receipt.evidence ->> 'sourceDebitEventIndex'
-              as "depositEventIndex",
-            deposit_receipt.observed_at as "depositObservedAt",
-            deposit_receipt.ledger_height as "depositBlock",
-            deposit_receipt.block_hash as "depositBlockHash",
-            reservation.source_raw::text as "expectedRaw",
-            funding_authorization.wallet_address as "walletAddress",
+            reservation.id as "reservationId",
             funding_authorization.id::text as "authorizationId",
             funding_authorization.user_id::text as "userId"
        from funding_operation_steps deposit_step
@@ -3700,21 +3765,134 @@ async function allocateFinalizedRelaySourceDebitInTransaction(
              and source_debit.finality_status = 'finalized'
         )
       order by deposit_receipt.observed_at
-      for update of operation, deposit_step, deposit_receipt, reservation
-      skip locked
       limit 1`,
     values: [input.profile.profileId, input.operationId ?? null],
   });
-  const evidence = rows[0];
+  const candidate = candidates.rows[0];
   if (
-    !evidence ||
-    !(await lockFundingAuthorizationReservationScope(client, {
-      authorizationId: evidence.authorizationId,
-      userId: evidence.userId,
+    !candidate ||
+    !(await tryLockFundingAuthorizationReservationScope(client, {
+      authorizationId: candidate.authorizationId,
+      userId: candidate.userId,
     }))
   ) {
     return false;
   }
+  // preBroadcastRelay owns the allowance lane before touching operation rows.
+  // Follow that same total order, then lock each mutable funding row with a
+  // fresh statement and revalidate the unlocked discovery candidate.
+  const operation = await client.query<{ funding_authorization_id: string }>(
+    `select support_metadata ->> 'fundingAuthorizationId'
+              as funding_authorization_id
+       from funding_operations
+      where id = $1::uuid and user_id = $2::uuid
+      for update`,
+    [candidate.parentOperationId, candidate.userId],
+  );
+  if (
+    operation.rows[0]?.funding_authorization_id !== candidate.authorizationId
+  ) {
+    return false;
+  }
+  const step = await client.query(
+    `select id
+       from funding_operation_steps
+      where id = $1::uuid
+        and operation_id = $2::uuid
+        and executor_id = $3
+        and state = 'succeeded'
+      for update`,
+    [
+      candidate.depositStepId,
+      candidate.parentOperationId,
+      input.profile.profileId,
+    ],
+  );
+  if (step.rowCount !== 1) return false;
+  const receipt = await client.query<{
+    depositAttemptId: string;
+    depositBlock: string;
+    depositBlockHash: string;
+    depositEventIndex: string;
+    depositObservedAt: Date;
+    depositTransactionHash: string;
+    expectedRaw: string;
+  }>(
+    `select attempt_id as "depositAttemptId",
+            ledger_height as "depositBlock",
+            block_hash as "depositBlockHash",
+            observed_at as "depositObservedAt",
+            evidence ->> 'transactionHash' as "depositTransactionHash",
+            evidence ->> 'sourceDebitEventIndex' as "depositEventIndex",
+            evidence ->> 'attributedSourceRaw' as "expectedRaw"
+       from funding_step_receipt_observations
+      where id = $1::uuid
+        and step_id = $2::uuid
+        and status = 'finalized'
+        and action_match
+        and canonical
+        and evidence ->> 'singleOperationBundle' = 'true'
+        and block_hash is not null
+        and evidence ->> 'sourceDebitEventIndex' is not null
+        and evidence ->> 'transactionHash' is not null
+      for update`,
+    [candidate.depositReceiptId, candidate.depositStepId],
+  );
+  const receiptEvidence = receipt.rows[0];
+  if (!receiptEvidence) return false;
+  const reservation = await client.query<{
+    expectedRaw: string;
+    walletAddress: string;
+  }>(
+    `select reservation.source_raw::text as "expectedRaw",
+            funding_authorization.wallet_address as "walletAddress"
+       from telegram_funding_authorization_reservations reservation
+       join telegram_funding_authorizations funding_authorization
+         on funding_authorization.id = reservation.authorization_id
+      where reservation.id = $1::uuid
+        and reservation.funding_operation_id = $2::uuid
+        and reservation.authorization_id = $3::uuid
+        and reservation.status = 'reserved'
+        and funding_authorization.user_id = $4::uuid
+      for update of reservation`,
+    [
+      candidate.reservationId,
+      candidate.parentOperationId,
+      candidate.authorizationId,
+      candidate.userId,
+    ],
+  );
+  const reservationEvidence = reservation.rows[0];
+  if (
+    !reservationEvidence ||
+    reservationEvidence.expectedRaw !== receiptEvidence.expectedRaw
+  ) {
+    return false;
+  }
+  const revalidated = await client.query(
+    `select segment.id
+       from funding_operation_segments segment
+      where segment.id = $1::uuid
+        and segment.operation_id = $2::uuid
+        and segment.ordinal = 0
+        and not exists (
+          select 1
+            from funding_observations source_debit
+           where source_debit.operation_id = $2::uuid
+             and source_debit.kind = 'source_debit'
+             and source_debit.canonical
+             and source_debit.finality_status = 'finalized'
+        )`,
+    [candidate.segmentId, candidate.parentOperationId],
+  );
+  if (revalidated.rowCount !== 1) return false;
+  const evidence: RelayPostDepositEvidence = {
+    parentOperationId: candidate.parentOperationId,
+    segmentId: candidate.segmentId,
+    depositReceiptId: candidate.depositReceiptId,
+    ...receiptEvidence,
+    ...reservationEvidence,
+  };
   await allocateFundingObservationInTransaction(client, {
     operationId: evidence.parentOperationId,
     segmentId: evidence.segmentId,

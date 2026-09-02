@@ -204,10 +204,24 @@ const fundInterface = new Interface(FUND_ABI);
   assert.equal(linked, true);
   assert.match(queries[0]?.sql ?? "", /review_quote_id = \$4/u);
   assert.match(queries[0]?.sql ?? "", /child_funding_operation_id = \$5/u);
-  assert.equal(
-    queries.length,
-    3,
-    "receipt link, status derivation, and session refresh share one client",
+  assert.ok(
+    queries.some(({ sql }) => /select destination_option_id/u.test(sql)),
+    "session refresh must resolve the exact receive scope",
+  );
+  assert.ok(
+    queries.some(({ sql }) => /pg_advisory_xact_lock/u.test(sql)),
+    "session refresh must serialize the receive scope on the supplied client",
+  );
+  assert.ok(
+    queries.some(({ sql }) =>
+      /select status\s+from funding_receive_receipts/u.test(sql),
+    ),
+    "session refresh must derive status from durable receipts",
+  );
+  assert.match(
+    queries.at(-1)?.sql ?? "",
+    /update funding_receive_sessions/u,
+    "receipt link and the final session refresh must use the supplied client",
   );
 }
 

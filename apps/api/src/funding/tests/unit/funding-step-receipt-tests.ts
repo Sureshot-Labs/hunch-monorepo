@@ -452,6 +452,15 @@ assert.equal(batchReceiptTarget?.action.kind, "evm_transaction_batch");
 assert.equal(batchReceiptTarget?.stepState, "succeeded");
 assert.equal(batchReceiptTarget?.previousReceipt?.status, "confirmed");
 assert.match(receiptTargetQuery, /or step\.state = 'succeeded'/u);
+assert.doesNotMatch(
+  receiptTargetQuery,
+  /attempt\.outcome in \('submitted', 'ambiguous'\)/u,
+  "receipt polling must include legacy attempts whose broadcast flag and reference survived an inconsistent outcome",
+);
+assert.match(
+  receiptTargetQuery,
+  /operation\.status in \('completed', 'refunded', 'failed', 'cancelled'\)[\s\S]*attempt\.broadcast_may_have_occurred/u,
+);
 assert.match(
   receiptTargetQuery,
   /receipt\.finalized_at >= \$2::timestamptz - interval '15 minutes'/u,

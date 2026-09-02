@@ -19,6 +19,7 @@ import {
 import {
   commitFundingOperationInTransaction,
   createFundingQuoteInTransaction,
+  fetchFundingOperationForUser,
   FUNDING_OPERATION_RECONCILIATION_TTL_MS,
   FundingPersistenceError,
   type FundingCommitPlan,
@@ -794,6 +795,269 @@ try {
   assert.ok(stepId);
   assert.ok(independentStepId);
 
+  const incidentPlan = (label: string): FundingCommitPlan => {
+    const firstIncidentAction = { ...action, actionId: opaque("action") };
+    const secondIncidentAction = {
+      ...secondAction,
+      actionId: opaque("action"),
+    };
+    return {
+      ...plan,
+      operation: {
+        ...plan.operation,
+        supportMetadata: { test: true, incident: label },
+      },
+      segments: plan.segments.map((segment, index) => ({
+        ...segment,
+        providerQuoteRefCiphertext: `ciphertext:${label}:${index}`,
+        providerQuoteRefLookupHmac: hash(`${label}:${index}`),
+      })),
+      steps: plan.steps.map((operationStep, index) => {
+        const incidentAction =
+          index === 0 ? firstIncidentAction : secondIncidentAction;
+        return {
+          ...operationStep,
+          actionFingerprint: canonicalJsonHash(incidentAction),
+          normalizedAction: incidentAction,
+        };
+      }),
+      reservations: plan.reservations.map((reservation) => ({
+        ...reservation,
+        componentId: opaque("component"),
+        locationId: opaque("location"),
+      })),
+    };
+  };
+  const commitIncidentPlan = async (label: string) => {
+    const incident = incidentPlan(label);
+    const incidentConsent = opaque("consent");
+    const incidentQuote = await createFundingQuoteInTransaction(client, {
+      userId,
+      discoveryProjectionId: opaque("projection"),
+      selectedSourceOptionSnapshot: incident.operation.sourceSnapshot ?? {},
+      marketContextSnapshot: null,
+      destinationOptionSnapshot: incident.operation.destinationTargetSnapshot,
+      venueBindingSnapshot: null,
+      planSnapshot: incident,
+      policyVersion: 1,
+      policyRevision: "policy_revision_wp6_action",
+      canonicalRequest: { source: incident.operation.sourceSnapshot },
+      consentToken: incidentConsent,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const incidentCommit = await commitFundingOperationInTransaction(client, {
+      userId,
+      quoteId: incidentQuote.id,
+      consentToken: incidentConsent,
+      idempotencyKey: opaque("idempotency"),
+      plan: incident,
+      subjectLookupHmac: hash(`${label}:user`),
+      subjectLookupKeyVersion: 1,
+    });
+    const incidentSteps = await client.query<{
+      action_fingerprint: string;
+      executor_id: string;
+      id: string;
+      ordinal: number;
+    }>(
+      `select id, ordinal, action_fingerprint, executor_id
+         from funding_operation_steps
+        where operation_id = $1
+        order by ordinal`,
+      [incidentCommit.operation.id],
+    );
+    const first = incidentSteps.rows[0];
+    const second = incidentSteps.rows[1];
+    assert.ok(first);
+    assert.ok(second);
+    return { operation: incidentCommit.operation, first, second };
+  };
+
+  const stoppedSiblingIncident = await commitIncidentPlan("stopped-sibling");
+  const stoppedAttempt = await startFundingStepAttemptForUserInTransaction(
+    client,
+    {
+      userId,
+      operationId: stoppedSiblingIncident.operation.id,
+      stepId: stoppedSiblingIncident.first.id,
+      canonicalActionFingerprint:
+        stoppedSiblingIncident.first.action_fingerprint,
+      executorId: stoppedSiblingIncident.first.executor_id,
+    },
+  );
+  await finishFundingStepAttemptForUserInTransaction(client, {
+    userId,
+    operationId: stoppedSiblingIncident.operation.id,
+    stepId: stoppedSiblingIncident.first.id,
+    attemptId: stoppedAttempt.attempt.id,
+    outcome: "failed",
+    broadcastMayHaveOccurred: false,
+    referenceKind: null,
+    receiptRefCiphertext: null,
+    receiptRefLookupHmac: null,
+    lookupKeyVersion: null,
+    actualCosts: { reasonCode: "client_execution_failed" },
+  });
+  await expectFundingError(
+    startFundingStepAttemptForUserInTransaction(client, {
+      userId,
+      operationId: stoppedSiblingIncident.operation.id,
+      stepId: stoppedSiblingIncident.second.id,
+      canonicalActionFingerprint:
+        stoppedSiblingIncident.second.action_fingerprint,
+      executorId: stoppedSiblingIncident.second.executor_id,
+    }),
+    "invalid_state_transition",
+  );
+
+  const lateEvidenceIncident = await commitIncidentPlan("late-evidence");
+  const lateFirstAttempt = await startFundingStepAttemptForUserInTransaction(
+    client,
+    {
+      userId,
+      operationId: lateEvidenceIncident.operation.id,
+      stepId: lateEvidenceIncident.first.id,
+      canonicalActionFingerprint: lateEvidenceIncident.first.action_fingerprint,
+      executorId: lateEvidenceIncident.first.executor_id,
+    },
+  );
+  const lateSecondAttempt = await startFundingStepAttemptForUserInTransaction(
+    client,
+    {
+      userId,
+      operationId: lateEvidenceIncident.operation.id,
+      stepId: lateEvidenceIncident.second.id,
+      canonicalActionFingerprint:
+        lateEvidenceIncident.second.action_fingerprint,
+      executorId: lateEvidenceIncident.second.executor_id,
+    },
+  );
+  await finishFundingStepAttemptForUserInTransaction(client, {
+    userId,
+    operationId: lateEvidenceIncident.operation.id,
+    stepId: lateEvidenceIncident.first.id,
+    attemptId: lateFirstAttempt.attempt.id,
+    outcome: "failed",
+    broadcastMayHaveOccurred: false,
+    referenceKind: null,
+    receiptRefCiphertext: null,
+    receiptRefLookupHmac: null,
+    lookupKeyVersion: null,
+    actualCosts: { reasonCode: "client_execution_failed" },
+  });
+  await client.query(
+    `update funding_operations
+        set status = 'failed', progress_stage = 'terminal',
+            completed_at = clock_timestamp(), version = version + 1
+      where id = $1`,
+    [lateEvidenceIncident.operation.id],
+  );
+  await finishFundingStepAttemptForUserInTransaction(client, {
+    userId,
+    operationId: lateEvidenceIncident.operation.id,
+    stepId: lateEvidenceIncident.second.id,
+    attemptId: lateSecondAttempt.attempt.id,
+    outcome: "submitted",
+    broadcastMayHaveOccurred: true,
+    referenceKind: "transaction",
+    receiptRefCiphertext: "ciphertext:late-evidence-transaction",
+    receiptRefLookupHmac: hash("late-evidence-transaction"),
+    lookupKeyVersion: 1,
+    actualCosts: { networkFeeRaw: "21000" },
+  });
+  const recoveredLateEvidence = await fetchFundingOperationForUser(client, {
+    userId,
+    operationId: lateEvidenceIncident.operation.id,
+  });
+  assert.equal(recoveredLateEvidence?.status, "recovery_required");
+  assert.equal(recoveredLateEvidence?.recoveryMode, "automatic_evidence");
+  assert.equal(
+    recoveredLateEvidence?.errorCode,
+    "late_broadcast_after_terminal_operation",
+  );
+
+  const terminalReceiptIncident = await commitIncidentPlan("terminal-receipt");
+  const terminalReceiptAttempt =
+    await startFundingStepAttemptForUserInTransaction(client, {
+      userId,
+      operationId: terminalReceiptIncident.operation.id,
+      stepId: terminalReceiptIncident.first.id,
+      canonicalActionFingerprint:
+        terminalReceiptIncident.first.action_fingerprint,
+      executorId: terminalReceiptIncident.first.executor_id,
+    });
+  await finishFundingStepAttemptForUserInTransaction(client, {
+    userId,
+    operationId: terminalReceiptIncident.operation.id,
+    stepId: terminalReceiptIncident.first.id,
+    attemptId: terminalReceiptAttempt.attempt.id,
+    outcome: "submitted",
+    broadcastMayHaveOccurred: true,
+    referenceKind: "transaction",
+    receiptRefCiphertext: "ciphertext:first-finalized-after-terminal",
+    receiptRefLookupHmac: hash("first-finalized-after-terminal"),
+    lookupKeyVersion: 1,
+    actualCosts: { networkFeeRaw: "21000" },
+  });
+  await client.query(
+    `update funding_operations
+        set status = 'failed', progress_stage = 'terminal',
+            recovery_mode = null,
+            completed_at = clock_timestamp(), version = version + 1
+      where id = $1`,
+    [terminalReceiptIncident.operation.id],
+  );
+  const firstFinalReceipt = {
+    status: "finalized" as const,
+    actionMatch: true,
+    ledgerHeight: "991",
+    blockHash: `0x${"ef".repeat(32)}`,
+    canonical: true,
+    failureCode: null,
+    evidence: { transactionHash: `0x${"ab".repeat(32)}` },
+  };
+  await applyFundingStepReceiptEvidenceInTransaction(client, {
+    operationId: terminalReceiptIncident.operation.id,
+    stepId: terminalReceiptIncident.first.id,
+    attemptId: terminalReceiptAttempt.attempt.id,
+    networkId: ASSET.networkId,
+    receipt: firstFinalReceipt,
+  });
+  const reopenedFirstFinal = await fetchFundingOperationForUser(client, {
+    userId,
+    operationId: terminalReceiptIncident.operation.id,
+  });
+  assert.equal(reopenedFirstFinal?.status, "recovery_required");
+  assert.equal(reopenedFirstFinal?.recoveryMode, "automatic_evidence");
+  assert.equal(
+    reopenedFirstFinal?.errorCode,
+    "late_finalized_receipt_after_terminal_operation",
+  );
+  await client.query(
+    `update funding_operations
+        set status = 'failed', progress_stage = 'terminal',
+            recovery_mode = null,
+            completed_at = clock_timestamp(), version = version + 1
+      where id = $1`,
+    [terminalReceiptIncident.operation.id],
+  );
+  await applyFundingStepReceiptEvidenceInTransaction(client, {
+    operationId: terminalReceiptIncident.operation.id,
+    stepId: terminalReceiptIncident.first.id,
+    attemptId: terminalReceiptAttempt.attempt.id,
+    networkId: ASSET.networkId,
+    receipt: firstFinalReceipt,
+  });
+  const repeatedFinalReceipt = await fetchFundingOperationForUser(client, {
+    userId,
+    operationId: terminalReceiptIncident.operation.id,
+  });
+  assert.equal(
+    repeatedFinalReceipt?.status,
+    "failed",
+    "repeated canonical finalized polling must not reopen a terminal operation",
+  );
+
   await expectFundingError(
     startFundingStepAttemptForUserInTransaction(client, {
       userId: otherUserId,
@@ -876,9 +1140,11 @@ try {
       currentLookupKeyVersion: 1,
       events: [canonicalHandoffEvent],
     });
-  assert.equal(startedHandoffs.length, 1);
-  assert.equal(startedHandoffs[0]?.attemptId, started.attempt.id);
-  assert.equal(startedHandoffs[0]?.attemptOutcome, "started");
+  const currentStartedHandoffs = startedHandoffs.filter(
+    (candidate) => candidate.attemptId === started.attempt.id,
+  );
+  assert.equal(currentStartedHandoffs.length, 1);
+  assert.equal(currentStartedHandoffs[0]?.attemptOutcome, "started");
 
   await expectFundingError(
     startFundingStepAttemptForUserInTransaction(client, {
@@ -958,9 +1224,11 @@ try {
       currentLookupKeyVersion: 1,
       events: [canonicalHandoffEvent],
     });
-  assert.equal(matchingHandoffs.length, 1);
-  assert.equal(matchingHandoffs[0]?.attemptId, started.attempt.id);
-  assert.equal(matchingHandoffs[0]?.referenceKind, "external_handoff");
+  const matchingHandoff = matchingHandoffs.find(
+    (candidate) => candidate.attemptId === started.attempt.id,
+  );
+  assert.ok(matchingHandoff);
+  assert.equal(matchingHandoff.referenceKind, "external_handoff");
   const resolvedHandoffTransactionHash = `0x${"ab".repeat(32)}`;
   await applyFundingStepReceiptEvidenceInTransaction(client, {
     operationId: committed.operation.id,
@@ -983,8 +1251,11 @@ try {
       currentLookupKeyVersion: 1,
       events: [canonicalHandoffEvent],
     });
+  const resolvedHandoff = resolvedHandoffs.find(
+    (candidate) => candidate.attemptId === started.attempt.id,
+  );
   assert.equal(
-    resolvedHandoffs[0]?.resolvedTransactionHash,
+    resolvedHandoff?.resolvedTransactionHash,
     resolvedHandoffTransactionHash,
     "the resolved relayer transaction hash must become durable receive-session correlation evidence",
   );
@@ -1004,15 +1275,17 @@ try {
     0,
     "transaction lineage must remain scoped to the authenticated user",
   );
+  const oldKeyHandoffs =
+    await listPotentialPolymarketHandoffsForCanonicalEvents(client, {
+      userId,
+      currentLookupKeyVersion: 2,
+      events: [{ ...canonicalHandoffEvent, rawAmount: "1" }],
+    });
   assert.equal(
-    (
-      await listPotentialPolymarketHandoffsForCanonicalEvents(client, {
-        userId,
-        currentLookupKeyVersion: 2,
-        events: [{ ...canonicalHandoffEvent, rawAmount: "1" }],
-      })
-    ).length,
-    1,
+    oldKeyHandoffs.some(
+      (candidate) => candidate.attemptId === started.attempt.id,
+    ),
+    true,
     "a reported old-key reference must remain available for decrypt-and-compare even when the envelope mismatches",
   );
 

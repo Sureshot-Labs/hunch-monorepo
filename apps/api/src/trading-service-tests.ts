@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import type { Pool } from "@hunch/infra";
 import { ethers } from "ethers";
+import { env } from "./env.js";
 
 import {
   fetchErc20TransferLogs,
@@ -62,6 +63,25 @@ import {
   limitlessTradingExecutionTestHooks,
 } from "./services/limitless-trading-execution-service.js";
 import { fetchLimitlessAmmQuote } from "./services/limitless-onchain.js";
+import {
+  classifyLimitlessOrderRejection,
+  parseLimitlessOrderRejection,
+} from "./services/limitless-order-rejection.js";
+import {
+  isLimitlessTerminalRejectedStatus,
+  parseLimitlessOrderResult,
+} from "./services/limitless-order-result.js";
+import {
+  fetchLimitlessExactClientOrderStatus,
+  interpretLimitlessExactClientOrderStatus,
+  interpretLimitlessExactClientOrderStatuses,
+  isLimitlessExactStatusAbsenceMature,
+} from "./services/limitless-order-status.js";
+import {
+  buildLimitlessReconciledOrderStoreInput,
+  createLimitlessExactStatusLookup,
+  resolveLimitlessReconciledSigner,
+} from "./funding/reconciliation/limitless-trade-attempt-reconciler.js";
 import { polymarketTradingExecutionTestHooks } from "./services/polymarket-trading-execution-service.js";
 import {
   computePolymarketClobOpenPositionLocks,
@@ -619,6 +639,479 @@ function sourceSlice(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "Limitless rejection parsing is nested, bounded, and sanitized",
+    run: () => {
+      const evidence = parseLimitlessOrderRejection({
+        status: 400,
+        payload: {
+          data: {
+            errors: [
+              { detail: "Balance is still syncing with the indexer" },
+              { message: "second provider detail" },
+            ],
+          },
+          errorCode: "BALANCE_PENDING",
+          authorization: {
+            code: "LEAKED_AUTH_CODE",
+            message: "Bearer do-not-store",
+          },
+          signature: {
+            errors: [{ message: "0xsecret-signature" }],
+          },
+          token: {
+            code: "LEAKED_TOKEN_CODE",
+            message: "do-not-store-token",
+          },
+        },
+      });
+      assert.deepEqual(evidence.messages, [
+        "Balance is still syncing with the indexer",
+        "second provider detail",
+      ]);
+      assert.equal(evidence.providerCode, "BALANCE_PENDING");
+      assert.equal(
+        (evidence.payload as Record<string, unknown>).authorization,
+        "[redacted]",
+      );
+      assert.equal(
+        (evidence.payload as Record<string, unknown>).signature,
+        "[redacted]",
+      );
+      assert.equal(
+        (evidence.payload as Record<string, unknown>).token,
+        "[redacted]",
+      );
+      assert.doesNotMatch(
+        JSON.stringify(evidence),
+        /LEAKED_|do-not-store|0xsecret/,
+      );
+      const embeddedCredentials = parseLimitlessOrderRejection({
+        status: 400,
+        payload: {
+          message:
+            "Authorization: Bearer abc.def.ghi signature=0xfeed token=super-secret",
+        },
+      });
+      assert.doesNotMatch(
+        JSON.stringify(embeddedCredentials),
+        /abc\.def\.ghi|0xfeed|super-secret/,
+      );
+      assert.equal(evidence.digest.length, 64);
+      const differentSecrets = parseLimitlessOrderRejection({
+        status: 400,
+        payload: {
+          data: {
+            errors: [
+              { detail: "Balance is still syncing with the indexer" },
+              { message: "second provider detail" },
+            ],
+          },
+          errorCode: "BALANCE_PENDING",
+          authorization: { message: "different bearer" },
+          signature: { message: "different signature" },
+          token: { message: "different token" },
+        },
+      });
+      assert.equal(differentSecrets.digest, evidence.digest);
+
+      assert.deepEqual(
+        parseLimitlessOrderRejection({
+          status: 400,
+          payload: ["first array error", "second array error"],
+        }).messages,
+        ["first array error", "second array error"],
+      );
+
+      const oversized = parseLimitlessOrderRejection({
+        status: 400,
+        payload: {
+          errors: Array.from({ length: 8 }, (_, index) => ({
+            message: `${index}-${"x".repeat(2_000)}`,
+          })),
+        },
+      });
+      assert.equal(oversized.truncated, true);
+      assert.ok(Buffer.byteLength(JSON.stringify(oversized), "utf8") <= 4_096);
+    },
+  },
+  {
+    name: "Limitless funded and direct rejection decisions reconcile ambiguity without resubmitting",
+    run: () => {
+      const classify = (
+        status: number | null,
+        payload: unknown,
+        orderType: "FOK" | "GTC" = "FOK",
+      ) =>
+        classifyLimitlessOrderRejection({
+          evidence: parseLimitlessOrderRejection({ status, payload }),
+          orderType,
+        });
+
+      for (const status of [408, 409, 425, 429, 500, 503]) {
+        const result = classify(status, { error: "opaque provider response" });
+        assert.equal(result.disposition, "ambiguous");
+        assert.equal(result.releaseFundingReservation, false);
+        assert.equal(result.failDirectHandoff, false);
+        assert.equal(result.requiresStatusReconciliation, true);
+        assert.equal(result.mayRetrySubmission, false);
+      }
+
+      const lostAcceptedResponse = classify(null, {
+        error: "connection closed before response",
+      });
+      assert.equal(lostAcceptedResponse.kind, "network_or_lost_response");
+      assert.equal(lostAcceptedResponse.requiresStatusReconciliation, true);
+      assert.equal(lostAcceptedResponse.mayRetrySubmission, false);
+
+      const unrecognized400 = classify(400, {
+        errors: [{ message: "provider rejected request 72" }],
+      });
+      assert.equal(unrecognized400.kind, "opaque_response");
+      assert.equal(unrecognized400.releaseFundingReservation, false);
+
+      const balancePending = classify(400, {
+        response: {
+          errors: [{ detail: "Balance is not yet indexed" }],
+        },
+      });
+      assert.equal(balancePending.kind, "transient_balance_or_indexing");
+      assert.equal(balancePending.retryableAfterReconciliation, true);
+      assert.equal(balancePending.mayRetrySubmission, false);
+
+      for (const [status, payload, expectedKind] of [
+        [401, null, "authentication"],
+        [400, { error: { message: "Invalid signature" } }, "signature"],
+        [422, { errors: [] }, "validation"],
+        [
+          400,
+          { errors: [{ message: "makerAmount must be positive" }] },
+          "validation",
+        ],
+      ] as const) {
+        const result = classify(status, payload);
+        assert.equal(result.kind, expectedKind);
+        assert.equal(result.disposition, "definitive_failure");
+        assert.equal(result.releaseFundingReservation, true);
+        assert.equal(result.failDirectHandoff, true);
+      }
+
+      const noFill = classify(400, {
+        error: [{ reason: "No immediate match was available" }],
+      });
+      assert.equal(noFill.disposition, "fok_no_fill");
+      assert.equal(noFill.releaseFundingReservation, true);
+      assert.equal(noFill.mayRetrySubmission, false);
+      for (const status of [null, 401, 403, 409, 429, 500]) {
+        const ambiguousNoFill = classify(status, {
+          error: "No immediate match was available",
+        });
+        if (status === 401 || status === 403) {
+          assert.equal(ambiguousNoFill.disposition, "definitive_failure");
+          assert.equal(ambiguousNoFill.kind, "authentication");
+        } else {
+          assert.equal(ambiguousNoFill.disposition, "ambiguous");
+          assert.equal(ambiguousNoFill.releaseFundingReservation, false);
+        }
+      }
+    },
+  },
+  {
+    name: "Limitless exact client order reconciliation requires authoritative aged absence",
+    run: async () => {
+      const clientOrderId = "hunch-existing-client-order";
+      const found = interpretLimitlessExactClientOrderStatus(
+        {
+          results: [
+            {
+              status: "found",
+              clientOrderId,
+              orderId: "provider-order-1",
+              data: { order: { status: "open" } },
+            },
+          ],
+        },
+        clientOrderId,
+      );
+      assert.equal(found.kind, "found");
+      if (found.kind === "found") {
+        assert.equal(found.item.providerOrderId, "provider-order-1");
+      }
+      assert.deepEqual(
+        interpretLimitlessExactClientOrderStatus(
+          { results: [{ status: "not_found", clientOrderId }] },
+          clientOrderId,
+        ),
+        { kind: "not_found" },
+      );
+      const batch = interpretLimitlessExactClientOrderStatuses(
+        {
+          results: [
+            { status: "found", clientOrderId, orderId: "provider-order-1" },
+            { status: "not_found", clientOrderId: "second-client-order" },
+          ],
+        },
+        [clientOrderId, "second-client-order", "missing-client-order"],
+      );
+      assert.equal(batch.get(clientOrderId)?.kind, "found");
+      assert.equal(batch.get("second-client-order")?.kind, "not_found");
+      assert.equal(batch.get("missing-client-order")?.kind, "unknown");
+      for (const malformed of [
+        null,
+        { results: [] },
+        { results: [{ status: "not_found", clientOrderId: "other" }] },
+        { results: [{ status: "found", clientOrderId }] },
+        {
+          results: [
+            { status: "not_found", clientOrderId },
+            { status: "not_found", clientOrderId },
+          ],
+        },
+      ]) {
+        assert.equal(
+          interpretLimitlessExactClientOrderStatus(malformed, clientOrderId)
+            .kind,
+          "unknown",
+        );
+      }
+
+      const oldClaimedAt = new Date("2026-01-01T00:00:00.000Z");
+      const freshAmbiguousAt = new Date("2026-01-01T01:00:00.000Z");
+      assert.equal(
+        isLimitlessExactStatusAbsenceMature({
+          ambiguousAt: freshAmbiguousAt,
+          minimumAgeMs: 300_000,
+          now: new Date("2026-01-01T01:04:59.999Z"),
+        }),
+        false,
+        `old claim ${oldClaimedAt.toISOString()} must not age a fresh ambiguity`,
+      );
+      assert.equal(
+        isLimitlessExactStatusAbsenceMature({
+          ambiguousAt: freshAmbiguousAt,
+          minimumAgeMs: 300_000,
+          now: new Date("2026-01-01T01:05:00.000Z"),
+        }),
+        true,
+      );
+      assert.equal(
+        isLimitlessExactStatusAbsenceMature({
+          ambiguousAt: null,
+          minimumAgeMs: 300_000,
+          now: new Date("2026-01-02T00:00:00.000Z"),
+        }),
+        false,
+      );
+
+      const originalFetch = globalThis.fetch;
+      const originalBase = env.limitlessApiBase;
+      const originalTokenId = env.limitlessHmacTokenId;
+      const originalSecret = env.limitlessHmacSecret;
+      env.limitlessApiBase = "https://limitless.test";
+      env.limitlessHmacTokenId = "test-token";
+      env.limitlessHmacSecret = Buffer.from("test-secret").toString("base64");
+      globalThis.fetch = (async () =>
+        new Response(JSON.stringify({ error: "temporarily unavailable" }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        })) as typeof fetch;
+      try {
+        await assert.rejects(
+          () => fetchLimitlessExactClientOrderStatus(clientOrderId),
+          /exact order status failed \(503\)/,
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.limitlessApiBase = originalBase;
+        env.limitlessHmacTokenId = originalTokenId;
+        env.limitlessHmacSecret = originalSecret;
+      }
+
+      const requests: Array<{ body: string; url: string }> = [];
+      const lookup = createLimitlessExactStatusLookup(
+        {
+          apiBase: "https://limitless.worker.test/",
+          apiVersion: "v1",
+          hmacSecret: Buffer.from("worker-secret").toString("base64"),
+          hmacTokenId: "worker-token",
+        },
+        (async (url, init) => {
+          requests.push({ body: String(init?.body), url: String(url) });
+          return new Response(
+            JSON.stringify({
+              results: [
+                { status: "not_found", clientOrderId },
+                {
+                  status: "found",
+                  clientOrderId: "second-client-order",
+                  orderId: "provider-order-2",
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+      );
+      const workerStatuses = await lookup([
+        clientOrderId,
+        "second-client-order",
+      ]);
+      assert.equal(requests.length, 1);
+      assert.equal(
+        requests[0]?.url,
+        "https://limitless.worker.test/orders/status/batch",
+      );
+      assert.doesNotMatch(requests[0]?.url ?? "", /\/orders$/u);
+      assert.equal(workerStatuses.get(clientOrderId)?.kind, "not_found");
+      assert.equal(workerStatuses.get("second-client-order")?.kind, "found");
+    },
+  },
+  {
+    name: "Limitless funded reconciliation never guesses a current primary wallet",
+    run: () => {
+      const primaryWallet = "0x0000000000000000000000000000000000000001";
+      const actualSigner = "0x0000000000000000000000000000000000000002";
+      assert.notEqual(primaryWallet, actualSigner);
+      assert.equal(
+        resolveLimitlessReconciledSigner({
+          status: "found",
+          data: { order: { status: "open" } },
+        }),
+        null,
+        "a found historical row without its immutable signer must requeue",
+      );
+      assert.equal(
+        resolveLimitlessReconciledSigner({
+          status: "found",
+          data: { order: { order: { maker: actualSigner } } },
+        }),
+        actualSigner,
+      );
+      const attempt = {
+        claimToken: "00000000-0000-4000-8000-000000000003",
+        consumerIntent: {
+          venueId: "limitless",
+          marketId: "limitless:market",
+          marketContextId: "123456789",
+          side: "BUY" as const,
+          spend: {
+            asset: {
+              networkId: "eip155:8453",
+              assetId:
+                "eip155:8453/erc20:0x0000000000000000000000000000000000000004",
+              decimals: 6,
+            },
+            raw: "1000000",
+          },
+          fingerprint: "funding_trade_intent_test",
+        },
+        id: "00000000-0000-4000-8000-000000000005",
+        operationId: "00000000-0000-4000-8000-000000000006",
+        reservationId: "00000000-0000-4000-8000-000000000007",
+        userId: "00000000-0000-4000-8000-000000000008",
+      };
+      const statusWithoutMaker = {
+        kind: "found" as const,
+        item: {
+          clientOrderId: "hunch-client-order",
+          orderId: "provider-order",
+          providerOrderId: "provider-order",
+          payload: { status: "found", data: { order: { status: "open" } } },
+        },
+      };
+      assert.equal(
+        buildLimitlessReconciledOrderStoreInput(
+          attempt,
+          statusWithoutMaker,
+          new Date("2026-09-02T00:00:00.000Z"),
+        ),
+        null,
+        "a provider hit without exact signer evidence cannot be consumed",
+      );
+      const storeInput = buildLimitlessReconciledOrderStoreInput(
+        attempt,
+        {
+          ...statusWithoutMaker,
+          item: {
+            ...statusWithoutMaker.item,
+            payload: {
+              status: "found",
+              data: { order: { status: "open", maker: actualSigner } },
+            },
+          },
+        },
+        new Date("2026-09-02T00:00:00.000Z"),
+      );
+      assert.equal(storeInput?.walletAddress, actualSigner);
+      assert.notEqual(storeInput?.walletAddress, primaryWallet);
+      assert.equal(storeInput?.fundingTradeAttemptId, attempt.id);
+      for (const status of [
+        "rejected",
+        "failed",
+        "cancelled",
+        "canceled",
+        "expired",
+      ]) {
+        assert.equal(isLimitlessTerminalRejectedStatus(status), true);
+        assert.equal(
+          buildLimitlessReconciledOrderStoreInput(
+            attempt,
+            {
+              ...statusWithoutMaker,
+              item: {
+                ...statusWithoutMaker.item,
+                payload: {
+                  data: {
+                    order: {
+                      order: { maker: actualSigner, status },
+                    },
+                  },
+                },
+              },
+            },
+            new Date("2026-09-02T00:00:00.000Z"),
+          ),
+          null,
+          `${status} exact status must not build an accepted order`,
+        );
+      }
+      assert.equal(
+        parseLimitlessOrderResult({ order: { status: "filled" } }).terminalFill,
+        true,
+      );
+      const executionSource = readFileSync(
+        resolve(apiSrcDir, "services/limitless-trading-execution-service.ts"),
+        "utf8",
+      );
+      const parsedResultAt = executionSource.indexOf(
+        "const parsedResult = parseLimitlessOrderResult(upstream.payload)",
+      );
+      const terminalResultAt = executionSource.indexOf(
+        "isLimitlessTerminalRejectedStatus(parsedResult.status)",
+        parsedResultAt,
+      );
+      const acceptedStoreAt = executionSource.indexOf(
+        "const stored = await storeOrder",
+        terminalResultAt,
+      );
+      assert.ok(parsedResultAt >= 0);
+      assert.ok(terminalResultAt > parsedResultAt);
+      assert.ok(acceptedStoreAt > terminalResultAt);
+      assert.match(
+        executionSource.slice(terminalResultAt, acceptedStoreAt),
+        /code: "limitless_submit_not_accepted_retryable"/,
+      );
+      const source = readFileSync(
+        resolve(
+          apiSrcDir,
+          "funding/reconciliation/limitless-trade-attempt-reconciler.ts",
+        ),
+        "utf8",
+      );
+      assert.doesNotMatch(source, /from user_wallets/i);
+      assert.match(source, /if \(!walletAddress\) return null/);
+    },
+  },
   {
     name: "EVM block head reads are shared across one worker scan wave",
     run: async () => {
@@ -3351,6 +3844,15 @@ const tests: TestCase[] = [
         "export async function syncLimitlessOrderHistoryRoute(",
       );
       assert.match(limitlessRestSubmitBlock, /submitLimitlessClobOrderToVenue/);
+      assert.equal(
+        (
+          limitlessRestSubmitBlock.match(
+            /await submitLimitlessClobOrderToVenue\(/g,
+          ) ?? []
+        ).length,
+        1,
+        "a lost Limitless response must not submit the signed order twice",
+      );
       assert.match(limitlessRestSubmitBlock, /resolveLimitlessRouteAuth/);
       assert.match(
         limitlessRestSubmitBlock,
@@ -3390,6 +3892,43 @@ const tests: TestCase[] = [
       );
       assert.match(limitlessRestSubmitBlock, /extractLimitlessSubmittedOrder/);
       assert.match(limitlessBotSubmitBlock, /extractLimitlessSubmittedOrder/);
+      assert.match(limitlessRestSubmitBlock, /classifyLimitlessOrderRejection/);
+      assert.match(limitlessRestSubmitBlock, /operationSupportMetadataPatch/);
+      assert.match(
+        limitlessRestSubmitBlock,
+        /externalReference: clientOrderId/,
+        "lost responses must retain the deterministic status-lookup key",
+      );
+      assert.match(
+        limitlessRestSubmitBlock,
+        /fetchLimitlessExactClientOrderStatus\(\s*exactClientOrderId/,
+      );
+      assert.match(
+        limitlessRestSubmitBlock,
+        /reconciledUpstreamPayload = exactStatus\.item\.payload/,
+        "a found duplicate must re-enter the existing success path",
+      );
+      assert.match(
+        limitlessRestSubmitBlock,
+        /releaseFundingReservationForProvenAbsentLimitlessTrade/,
+      );
+      assert.match(
+        limitlessRestSubmitBlock,
+        /decision\.disposition === "definitive_failure" && upstreamMessage/,
+        "ambiguous provider text must remain internal",
+      );
+      assert.match(
+        limitlessRestSubmitBlock,
+        /decision\.disposition === "ambiguous"/,
+      );
+      assert.doesNotMatch(
+        limitlessRestSubmitBlock,
+        /if \(upstream\.status >= 500\)/,
+      );
+      assert.match(
+        limitlessBotSubmitBlock,
+        /decision\.disposition === "definitive_failure" \? 400 : 502/,
+      );
     },
   },
   {

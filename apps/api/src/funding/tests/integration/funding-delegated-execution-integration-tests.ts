@@ -3290,9 +3290,9 @@ try {
     [crashRecovery.operationId],
   );
   assert.deepEqual(providerRecoveryState.rows[0], {
-    status: "reconcile_required",
+    status: "recovery_required",
     error_code: null,
-    recovery_mode: null,
+    recovery_mode: "automatic_evidence",
     active_since: null,
   });
   await pool.query(
@@ -3383,10 +3383,10 @@ try {
     [crashRecovery.operationId],
   );
   assert.deepEqual(freshReconciliationWindow.rows[0], {
-    status: "reconcile_required",
+    status: "recovery_required",
     error_code: null,
-    recovery_mode: null,
-    active_since: postRecoveryReconciliationNow.toISOString(),
+    recovery_mode: "automatic_evidence",
+    active_since: null,
   });
   const recoveredAttempts = await pool.query<{
     count: string;
@@ -3863,7 +3863,7 @@ try {
      group by operation.status`,
     [policyBlocked.operationId],
   );
-  assert.equal(policyBlockedState.rows[0]?.status, "in_progress");
+  assert.equal(policyBlockedState.rows[0]?.status, "recovery_required");
   assert.equal(policyBlockedState.rows[0]?.attempts, "1");
   await publishFundingPolicy(false);
   let resumedAfterPolicyCalls = 0;
@@ -3964,7 +3964,7 @@ try {
   assert.deepEqual(pausedBeforeClaimState.rows[0], {
     attempts: "1",
     outcome: "started",
-    status: "in_progress",
+    status: "recovery_required",
   });
   await pool.query(
     `update telegram_bot_trading_preferences
@@ -6287,6 +6287,43 @@ try {
     ledgerHeight: postDepositResidual.blockNumber,
     transactionHash: postDepositTransactionHash,
   });
+  const preBroadcastLaneClient = await pool.connect();
+  try {
+    await preBroadcastLaneClient.query("begin");
+    await preBroadcastLaneClient.query("set local lock_timeout = '5s'");
+    assert.equal(
+      await lockFundingAuthorizationReservationScope(preBroadcastLaneClient, {
+        authorizationId: postDepositAlreadyZeroRelay.authorizationId,
+        userId: postDepositAlreadyZeroRelay.base.userId,
+      }),
+      true,
+    );
+    assert.equal(
+      await recordFinalizedRelaySourceDebitForOperation(pool, {
+        now: new Date(now.getTime() + 3),
+        operationId: postDepositAlreadyZeroRelay.operationId,
+        profile: relayEvmProfile,
+      }),
+      false,
+      "a source-debit allocator must yield before funding locks when a pre-broadcast owner holds the allowance lane",
+    );
+    const preBroadcastOperationLock = await preBroadcastLaneClient.query(
+      `select id
+         from funding_operations
+        where id = $1::uuid
+        for update nowait`,
+      [postDepositAlreadyZeroRelay.operationId],
+    );
+    assert.equal(
+      preBroadcastOperationLock.rowCount,
+      1,
+      "the yielding allocator must not retain the operation lock while the lane owner advances",
+    );
+    await preBroadcastLaneClient.query("commit");
+  } finally {
+    await preBroadcastLaneClient.query("rollback").catch(() => undefined);
+    preBroadcastLaneClient.release();
+  }
   assert.equal(
     await recordFinalizedRelaySourceDebitForOperation(pool, {
       now: new Date(now.getTime() + 3),
@@ -7227,6 +7264,61 @@ try {
     refundsPolled: 1,
     refundSatisfied: false,
   });
+  const replacementRecheckAt = new Date(refundReorgAt.getTime() + 500);
+  await tx(pool, (client) =>
+    wakeFundingReconciliationInTransaction(client, {
+      operationId: replacementRefundRelay.operationId,
+      dueAt: replacementRecheckAt,
+      priority: 2500,
+    }),
+  );
+  const missingReplacementPass = await runFundingReconciliationBatch(pool, {
+    workerId: opaque("replacement-refund-missing-first-pass"),
+    limit: 1,
+    now: replacementRecheckAt,
+    destinationPoll: async (operationId, observedAt) => {
+      const observed = await replacementRefundObserver.pollOperation(
+        pool,
+        operationId,
+        observedAt,
+      );
+      return {
+        destinationsPolled: observed.refundsPolled,
+        destinationSatisfied: observed.refundSatisfied,
+      };
+    },
+  });
+  assert.deepEqual(missingReplacementPass.operationIds, [
+    replacementRefundRelay.operationId,
+  ]);
+  assert.deepEqual(
+    {
+      claimed: missingReplacementPass.claimed,
+      completed: missingReplacementPass.completed,
+      deadLettered: missingReplacementPass.deadLettered,
+      requeued: missingReplacementPass.requeued,
+    },
+    { claimed: 1, completed: 0, deadLettered: 0, requeued: 1 },
+    "a missing replacement must keep the terminal refund observable until the bounded watch ends",
+  );
+  const missingReplacementState = await pool.query<{
+    operation_status: string;
+    reservation_status: string;
+  }>(
+    `select operation.status as operation_status,
+            reservation.status as reservation_status
+       from funding_operations operation
+       join telegram_funding_authorization_reservations reservation
+         on reservation.funding_operation_id = operation.id
+      where operation.id = $1::uuid`,
+    [replacementRefundRelay.operationId],
+  );
+  assert.deepEqual(missingReplacementState.rows, [
+    {
+      operation_status: "refunded",
+      reservation_status: "refunded",
+    },
+  ]);
   await pool.query(
     `update funding_operation_segments
         set support_metadata = support_metadata || jsonb_build_object(

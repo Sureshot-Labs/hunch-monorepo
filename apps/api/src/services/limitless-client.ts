@@ -1,10 +1,10 @@
-import { createHmac } from "node:crypto";
 import { env } from "../env.js";
-import { isRecord } from "../lib/type-guards.js";
 import {
   fetchWithWalletIntelRetry,
   type WalletIntelRetryTelemetry,
 } from "./wallet-intel-retry.js";
+import { extractParsedLimitlessMessage } from "./limitless-order-rejection.js";
+import { buildLimitlessPartnerHmacHeaders } from "./limitless-partner-auth.js";
 
 type LimitlessResult =
   | { ok: true; payload: unknown }
@@ -33,64 +33,11 @@ async function readJsonOrText(res: Response): Promise<unknown> {
 }
 
 export function extractLimitlessMessage(payload: unknown): string | null {
-  if (typeof payload === "string" && payload.trim().length) {
-    return payload.trim();
-  }
-  if (isRecord(payload)) {
-    const rawMessage =
-      typeof payload.message === "string"
-        ? payload.message
-        : typeof payload.error === "string"
-          ? payload.error
-          : null;
-    if (!rawMessage) return null;
-    const message = rawMessage.trim();
-    return message.length ? message : null;
-  }
-  return null;
+  return extractParsedLimitlessMessage(payload);
 }
 
 export function isLimitlessPartnerHmacConfigured(): boolean {
   return Boolean(env.limitlessHmacTokenId && env.limitlessHmacSecret);
-}
-
-function buildLimitlessCanonicalMessage(inputs: {
-  timestamp: string;
-  method: "GET" | "POST" | "DELETE";
-  requestPath: string;
-  bodyString?: string;
-}): string {
-  return `${inputs.timestamp}\n${inputs.method}\n${inputs.requestPath}\n${inputs.bodyString ?? ""}`;
-}
-
-function buildLimitlessPartnerHmacHeaders(inputs: {
-  method: "GET" | "POST" | "DELETE";
-  requestPath: string;
-  bodyString?: string;
-}): Record<string, string> {
-  if (!isLimitlessPartnerHmacConfigured()) {
-    throw new Error("Limitless partner HMAC is not configured.");
-  }
-
-  const timestamp = new Date().toISOString();
-  const message = buildLimitlessCanonicalMessage({
-    timestamp,
-    method: inputs.method,
-    requestPath: inputs.requestPath,
-    bodyString: inputs.bodyString,
-  });
-  const signature = createHmac(
-    "sha256",
-    Buffer.from(env.limitlessHmacSecret, "base64"),
-  )
-    .update(message)
-    .digest("base64");
-
-  return {
-    "lmts-api-key": env.limitlessHmacTokenId,
-    "lmts-timestamp": timestamp,
-    "lmts-signature": signature,
-  };
 }
 
 export async function limitlessRequest(inputs: {
@@ -133,6 +80,8 @@ export async function limitlessRequest(inputs: {
       };
     }
     const authHeaders = buildLimitlessPartnerHmacHeaders({
+      hmacSecret: env.limitlessHmacSecret,
+      hmacTokenId: env.limitlessHmacTokenId,
       method: inputs.method,
       requestPath,
       bodyString,

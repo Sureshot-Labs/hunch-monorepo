@@ -51,8 +51,8 @@ function defineTransitions<
 
 /**
  * This is the single operation transition map. A state absent from this map is
- * invalid. Terminal states are intentionally leaf nodes; idempotent replays of
- * the exact same state are accepted by canTransitionFundingOperation.
+ * invalid. A terminal state may be reopened only by the evidence path when an
+ * unresolved in-flight action or canonicality change is discovered late.
  */
 export const FUNDING_OPERATION_TRANSITIONS = defineTransitions({
   "awaiting_user:committed": [
@@ -214,10 +214,10 @@ export const FUNDING_OPERATION_TRANSITIONS = defineTransitions({
     "refunded:terminal",
     "failed:terminal",
   ],
-  "completed:terminal": [],
-  "refunded:terminal": [],
-  "failed:terminal": [],
-  "cancelled:terminal": [],
+  "completed:terminal": ["recovery_required:source_action"],
+  "refunded:terminal": ["recovery_required:source_action"],
+  "failed:terminal": ["recovery_required:source_action"],
+  "cancelled:terminal": ["recovery_required:source_action"],
 } as const);
 
 const validFundingStates = new Set<FundingStateKey>(

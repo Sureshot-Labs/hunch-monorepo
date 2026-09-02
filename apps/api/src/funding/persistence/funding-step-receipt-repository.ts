@@ -15,6 +15,8 @@ import { moneySchema, normalizedActionSchema } from "../domain/schemas.js";
 import {
   allocateFundingObservationInTransaction,
   FundingPersistenceError,
+  transitionFundingOperationInTransaction,
+  type FundingOperationRow,
 } from "./funding-operation-repository.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
@@ -40,10 +42,14 @@ export type FundingStepReceiptTarget = Readonly<{
     | "privy_sponsor"
     | "hunch_sponsor";
   stepState:
+    | "planned"
+    | "action_required"
     | "submitted"
     | "succeeded"
     | "reconcile_required"
-    | "recovery_required";
+    | "recovery_required"
+    | "failed"
+    | "cancelled";
   networkId: string;
   action: NormalizedAction;
   actionValidationResult: JsonRecord;
@@ -222,7 +228,6 @@ export async function listFundingStepReceiptTargets(
       from funding_operation_steps step
       join funding_operation_step_attempts attempt
         on attempt.step_id = step.id
-       and attempt.outcome in ('submitted', 'ambiguous')
        and attempt.broadcast_may_have_occurred
        and attempt.reference_kind <> 'provider_receipt'
        and attempt.receipt_ref_ciphertext is not null
@@ -236,14 +241,17 @@ export async function listFundingStepReceiptTargets(
         and (
           operation.status not in ('completed', 'refunded', 'failed', 'cancelled')
           or (
-            (
-              step.executor_id = 'telegram_relay_evm_funding_v1'
-              or operation.support_metadata ->> 'withdrawalExecutionKind' =
-                   'exact_same_asset_transfer'
+            attempt.broadcast_may_have_occurred
+            and (
+              receipt.attempt_id is null
+              or receipt.status in ('pending', 'confirmed', 'mismatch', 'reorged')
+              or (
+                receipt.status in ('finalized', 'failed')
+                and receipt.canonical
+                and receipt.finalized_at >=
+                      $2::timestamptz - interval '15 minutes'
+              )
             )
-            and receipt.status in ('finalized', 'failed')
-            and receipt.canonical
-            and receipt.finalized_at >= $2::timestamptz - interval '15 minutes'
           )
         )
         and (
@@ -266,6 +274,13 @@ export async function listFundingStepReceiptTargets(
             and receipt.canonical
             and receipt.evidence ->> 'failureFinalized' = 'true'
             and receipt.finalized_at >= $2::timestamptz - interval '15 minutes'
+          )
+          -- Legacy incidents may have terminalized the operation or step
+          -- while a sibling's durable attempt still carries a transaction.
+          -- Keep that exact reference observable instead of orphaning it.
+          or (
+            operation.status in ('completed', 'refunded', 'failed', 'cancelled')
+            and attempt.broadcast_may_have_occurred
           )
         )
       order by step.ordinal, attempt.attempt_number
@@ -385,6 +400,10 @@ export function fundingStepStateForReceipt(
   current: FundingStepReceiptTarget["stepState"],
   stepKind: FundingStepReceiptTarget["stepKind"],
 ): ReceiptManagedStepState {
+  // Legacy inconsistent rows can carry a real broadcast reference after the
+  // step was stopped. Receipt evidence is still persisted and reduced at the
+  // operation level, but the immutable step state cannot be resurrected.
+  if (current === "failed" || current === "cancelled") return current;
   if (receipt === "finalized") {
     if (stepKind === "venue_preparation") {
       // A finalized receipt only advances preparation into postcondition
@@ -415,15 +434,39 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
   }>,
 ): Promise<FundingStepReceiptObservation> {
   const now = input.now ?? new Date();
-  const scope = await client.query<{
+  const operationResult = await client.query<{
+    operation_progress_stage: FundingOperationRow["progressStage"];
+    operation_status: FundingOperationRow["status"];
+    operation_version: string | number;
+    requested_source_amount: JsonRecord | null;
+    operation_support_metadata: JsonRecord;
+  }>(
+    `
+      select requested_source_amount,
+             support_metadata as operation_support_metadata,
+             progress_stage as operation_progress_stage,
+             status as operation_status,
+             version as operation_version
+      from funding_operations
+      where id = $1
+      for update
+    `,
+    [input.operationId],
+  );
+  const scopedOperation = operationResult.rows[0];
+  if (!scopedOperation) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "funding step receipt target no longer exists",
+    );
+  }
+  const stepResult = await client.query<{
     step_state: FundingStepReceiptTarget["stepState"];
     step_kind: FundingStepReceiptTarget["stepKind"];
     executor_id: string;
     segment_id: string | null;
     normalized_action: JsonRecord;
     action_validation_result: JsonRecord;
-    requested_source_amount: JsonRecord | null;
-    operation_support_metadata: JsonRecord;
   }>(
     `
       select step.state as step_state,
@@ -431,25 +474,33 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
              step.executor_id,
              step.segment_id,
              step.normalized_action,
-             step.action_validation_result,
-             operation.requested_source_amount,
-             operation.support_metadata as operation_support_metadata
+             step.action_validation_result
       from funding_operation_steps step
-      join funding_operation_step_attempts attempt
-        on attempt.step_id = step.id
-      join funding_operations operation
-        on operation.id = step.operation_id
       where step.operation_id = $1
         and step.id = $2
-        and attempt.id = $3
-        and attempt.outcome in ('submitted', 'ambiguous')
-        and attempt.broadcast_may_have_occurred
-      for update of step, attempt
+      for update of step
     `,
-    [input.operationId, input.stepId, input.attemptId],
+    [input.operationId, input.stepId],
   );
-  const scoped = scope.rows[0];
+  const scoped = stepResult.rows[0];
   if (!scoped) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "funding step receipt target no longer exists",
+    );
+  }
+  const attemptResult = await client.query<{ id: string }>(
+    `
+      select id
+      from funding_operation_step_attempts
+      where step_id = $1
+        and id = $2
+        and broadcast_may_have_occurred
+      for update
+    `,
+    [input.stepId, input.attemptId],
+  );
+  if (!attemptResult.rows[0]) {
     throw new FundingPersistenceError(
       "operation_not_found",
       "funding step receipt target no longer exists",
@@ -540,6 +591,36 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
   const row = stored.rows[0];
   if (!row) throw new Error("funding step receipt upsert returned no row");
 
+  const previousWasCanonicalFinalSuccess =
+    previous?.status === "finalized" &&
+    previous.action_match === true &&
+    previous.canonical;
+  const firstCanonicalFinalSuccess =
+    row.status === "finalized" &&
+    row.action_match === true &&
+    row.canonical &&
+    !previousWasCanonicalFinalSuccess;
+  if (
+    firstCanonicalFinalSuccess &&
+    ["completed", "refunded", "failed", "cancelled"].includes(
+      scopedOperation.operation_status,
+    )
+  ) {
+    await transitionFundingOperationInTransaction(client, {
+      operationId: input.operationId,
+      scope: { kind: "worker" },
+      expectedVersion: Number(scopedOperation.operation_version),
+      expectedState: {
+        status: scopedOperation.operation_status,
+        stage: scopedOperation.operation_progress_stage,
+      },
+      nextState: { status: "recovery_required", stage: "source_action" },
+      errorCode: "late_finalized_receipt_after_terminal_operation",
+      recoveryMode: "automatic_evidence",
+      now,
+    });
+  }
+
   if (
     scoped.executor_id === "wallet_profile_evm_v1" &&
     row.status === "finalized" &&
@@ -549,14 +630,17 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     const action = normalizedActionSchema.parse(
       scoped.normalized_action,
     ) as unknown as NormalizedAction;
-    const sourceAmount = moneySchema.safeParse(scoped.requested_source_amount);
+    const sourceAmount = moneySchema.safeParse(
+      scopedOperation.requested_source_amount,
+    );
     const actionValidationResult = sourceAmount.success
       ? withRelayClientSourceDebitPostcondition({
           action,
           actionValidationResult: scoped.action_validation_result,
           routeId:
-            typeof scoped.operation_support_metadata.routeId === "string"
-              ? scoped.operation_support_metadata.routeId
+            typeof scopedOperation.operation_support_metadata.routeId ===
+            "string"
+              ? scopedOperation.operation_support_metadata.routeId
               : null,
           sourceAmount: sourceAmount.data,
         })

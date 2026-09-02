@@ -100,6 +100,8 @@ const step = (
   state,
   executor_id: "wallet_profile_evm_v1",
   action_validation_result: {},
+  has_started_attempt: false,
+  broadcast_unresolved: false,
 });
 const destinationObservation = (
   segmentId: string | null,
@@ -271,6 +273,72 @@ assert.deepEqual(
   { status: "recovery_required", stage: "routing" },
 );
 assert.deepEqual(
+  deriveTargetState(operation, [], segments, [
+    step("00000000-0000-4000-8000-000000000061", segments[0].id, "failed"),
+    {
+      ...step(
+        "00000000-0000-4000-8000-000000000062",
+        segments[1].id,
+        "action_required",
+      ),
+      has_started_attempt: true,
+    },
+  ]).target,
+  { status: "recovery_required", stage: "source_action" },
+  "a failed sibling cannot terminalize while another action attempt is still running",
+);
+assert.deepEqual(
+  deriveTargetState(
+    {
+      ...operation,
+      status: "failed",
+      progressStage: "terminal",
+      completedAt: new Date("2026-07-24T10:02:00.000Z"),
+    },
+    [],
+    segments,
+    [
+      step("00000000-0000-4000-8000-000000000063", segments[0].id, "failed"),
+      {
+        ...step(
+          "00000000-0000-4000-8000-000000000064",
+          segments[1].id,
+          "submitted",
+        ),
+        broadcast_unresolved: true,
+      },
+    ],
+  ).target,
+  { status: "recovery_required", stage: "source_action" },
+  "late submitted evidence reopens a legacy terminal failure into recovery",
+);
+for (const terminalStatus of ["completed", "refunded"] as const) {
+  assert.deepEqual(
+    deriveTargetState(
+      {
+        ...operation,
+        status: terminalStatus,
+        progressStage: "terminal",
+        completedAt: new Date("2026-07-24T10:02:00.000Z"),
+      },
+      [legOne, legTwo],
+      segments.map((segment) => ({ ...segment, status: "succeeded" as const })),
+      [
+        {
+          ...step(
+            "00000000-0000-4000-8000-000000000065",
+            segments[0].id,
+            "submitted",
+          ),
+          broadcast_unresolved: true,
+        },
+      ],
+    ).target,
+    { status: "recovery_required", stage: "source_action" },
+    `unresolved broadcast evidence fences legacy ${terminalStatus} into recovery`,
+  );
+}
+assert.deepEqual(
   deriveTargetState(
     {
       ...operation,
@@ -350,6 +418,81 @@ assert.deepEqual(
   ).target,
   { status: "ready", stage: "ready_for_consumer" },
   "a client-signed atomic approve/deposit Relay step is not gated by delegated allowance shape",
+);
+
+const refundedCompositeOperation = {
+  ...operation,
+  status: "refunded",
+  progressStage: "terminal",
+  completedAt: new Date("2026-07-24T10:02:00.000Z"),
+} satisfies FundingOperationRow;
+const refundReorgAt = new Date("2026-07-24T10:03:00.000Z");
+const refundA = {
+  ...destinationObservation(segments[0].id, "1000000", "71", "refund_credit"),
+  finalityStatus: "reorged" as const,
+  canonical: false,
+  reorgedAt: refundReorgAt,
+};
+const refundB = destinationObservation(
+  segments[1].id,
+  "1000000",
+  "72",
+  "refund_credit",
+);
+const refundedSegments = segments.map((segment) => ({
+  ...segment,
+  status: "refunded" as const,
+}));
+const refundedSteps = segments.map((segment, index) =>
+  step(
+    `00000000-0000-4000-8000-${String(73 + index).padStart(12, "0")}`,
+    segment.id,
+    "succeeded",
+  ),
+);
+const siblingRefundCannotMaskReorg = deriveTargetState(
+  refundedCompositeOperation,
+  [refundA, refundB],
+  refundedSegments,
+  refundedSteps,
+);
+assert.equal(siblingRefundCannotMaskReorg.reorgBlockedByTerminalState, true);
+assert.deepEqual(siblingRefundCannotMaskReorg.target, {
+  status: "refunded",
+  stage: "terminal",
+});
+
+const replacementA = {
+  ...destinationObservation(segments[0].id, "1000000", "75", "refund_credit"),
+  observedAt: new Date(refundReorgAt.getTime() + 1_000),
+  finalizedAt: new Date(refundReorgAt.getTime() + 1_000),
+  metadata: { replacementForRefundObservationId: refundA.id },
+};
+assert.equal(
+  deriveTargetState(
+    refundedCompositeOperation,
+    [refundA, refundB, replacementA],
+    refundedSegments,
+    refundedSteps,
+  ).reorgBlockedByTerminalState,
+  false,
+  "only the exact same-segment refund successor may clear a terminal reorg",
+);
+
+const wrongAmountReplacementA = {
+  ...replacementA,
+  id: "00000000-0000-4000-8000-000000000076",
+  rawAmount: "999999",
+};
+assert.equal(
+  deriveTargetState(
+    refundedCompositeOperation,
+    [refundA, refundB, wrongAmountReplacementA],
+    refundedSegments,
+    refundedSteps,
+  ).reorgBlockedByTerminalState,
+  true,
+  "a replacement pointer with a different economic identity cannot clear the refund reorg",
 );
 
 console.log(

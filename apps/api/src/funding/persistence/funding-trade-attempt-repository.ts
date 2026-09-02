@@ -1,4 +1,5 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import type { JsonValue } from "../domain/types.js";
 import {
   sameFundingTradeConsumerIntent,
   storedFundingTradeConsumerIntentFromRow,
@@ -309,6 +310,67 @@ async function fetchAttemptForUpdate(
   return mapAttempt(row);
 }
 
+async function lockFundingOperationForAttempt(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{ attemptId: string; userId: string }>,
+): Promise<string> {
+  const identity = await client.query<{
+    operation_id: string;
+    reservation_id: string;
+  }>(
+    `select operation_id, reservation_id
+       from funding_trade_attempts
+      where id = $1 and user_id = $2`,
+    [input.attemptId, input.userId],
+  );
+  const operationId = identity.rows[0]?.operation_id;
+  const reservationId = identity.rows[0]?.reservation_id;
+  if (!operationId || !reservationId) {
+    throw new FundingTradeAttemptError(
+      "attempt_not_found",
+      "funding trade attempt was not found",
+    );
+  }
+  // A sealed funded handoff claims intent -> operation. Outcome paths use the
+  // same order so a concurrent retry cannot deadlock terminalization.
+  await client.query(
+    `select intent.id
+       from telegram_trade_intents intent
+      where intent.user_id = $1
+        and intent.funding_operation_id = $2
+      order by intent.id
+      for update`,
+    [input.userId, operationId],
+  );
+  const locked = await client.query<{ id: string }>(
+    `select id
+       from funding_operations
+      where id = $1 and user_id = $2
+      for update`,
+    [operationId, input.userId],
+  );
+  if (!locked.rows[0]) {
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "funding operation disappeared before trade outcome recording",
+    );
+  }
+  const reservation = await client.query<{ id: string }>(
+    `select id
+       from balance_reservations
+      where id = $1 and operation_id = $2 and user_id = $3
+      for update`,
+    [reservationId, operationId, input.userId],
+  );
+  if (!reservation.rows[0]) {
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "funding reservation disappeared before trade outcome recording",
+    );
+  }
+  return operationId;
+}
+
 export async function claimFundingTradeAttemptInTransaction(
   client: Pick<PoolClient, "query">,
   input: Readonly<{
@@ -599,9 +661,26 @@ export async function recordFundingTradeAttemptOutcomeInTransaction(
     externalReference?: string | null;
     errorCode?: string | null;
     broadcastMayHaveOccurred: boolean;
+    operationSupportMetadataPatch?: Readonly<Record<string, JsonValue>>;
     now?: Date;
   }>,
 ): Promise<FundingTradeAttempt> {
+  const appendOperationEvidence = async (operationId: string) => {
+    if (input.operationSupportMetadataPatch === undefined) return;
+    const result = await client.query(
+      `update funding_operations
+          set support_metadata = support_metadata || $3::jsonb
+        where id = $1 and user_id = $2`,
+      [operationId, input.userId, input.operationSupportMetadataPatch],
+    );
+    if (result.rowCount !== 1) {
+      throw new FundingTradeAttemptError(
+        "invalid_state",
+        "funding operation disappeared while recording trade evidence",
+      );
+    }
+  };
+  await lockFundingOperationForAttempt(client, input);
   const attempt = await fetchAttemptForUpdate(client, input);
   if (attempt.state === input.outcome) {
     if (input.externalReference?.trim() && attempt.externalReference === null) {
@@ -624,8 +703,13 @@ export async function recordFundingTradeAttemptOutcomeInTransaction(
         ],
       );
       const enrichedRow = enriched.rows[0];
-      if (enrichedRow) return mapAttempt(enrichedRow);
+      if (enrichedRow) {
+        const enrichedAttempt = mapAttempt(enrichedRow);
+        await appendOperationEvidence(enrichedAttempt.operationId);
+        return enrichedAttempt;
+      }
     }
+    await appendOperationEvidence(attempt.operationId);
     return attempt;
   }
   if (attempt.state !== "claimed" && attempt.state !== "submission_started") {
@@ -677,7 +761,9 @@ export async function recordFundingTradeAttemptOutcomeInTransaction(
       "funding trade attempt is not awaiting an outcome",
     );
   }
-  return mapAttempt(row);
+  const recordedAttempt = mapAttempt(row);
+  await appendOperationEvidence(recordedAttempt.operationId);
+  return recordedAttempt;
 }
 
 export async function recordFundingTradeAttemptOutcome(
@@ -689,6 +775,298 @@ export async function recordFundingTradeAttemptOutcome(
   );
 }
 
+/**
+ * Lease ambiguous Limitless CLOB attempts for exact-key reconciliation. The
+ * initial candidate read is deliberately unlocked; each candidate is then
+ * rechecked while holding the canonical intent -> operation -> reservation ->
+ * attempt lock chain. Provider I/O must happen only after these transactions
+ * have committed.
+ */
+export async function claimAmbiguousLimitlessTradeAttemptsForReconciliation(
+  pool: Pool,
+  input: Readonly<{
+    batchSize: number;
+    leaseSeconds: number;
+    now?: Date;
+  }>,
+): Promise<readonly FundingTradeAttempt[]> {
+  const now = input.now ?? new Date();
+  const batchSize = Math.max(1, Math.min(50, Math.trunc(input.batchSize)));
+  const leaseSeconds = Math.max(
+    5,
+    Math.min(300, Math.trunc(input.leaseSeconds)),
+  );
+  const candidates = await pool.query<{ id: string; user_id: string }>(
+    `select id, user_id
+       from funding_trade_attempts
+      where execution_path = 'limitless_clob'
+        and state in ('submission_started', 'ambiguous')
+        and broadcast_may_have_occurred = true
+        and external_reference is not null
+        and (state = 'submission_started' or resolved_at is not null)
+        and claim_lease_until <= $1
+      order by resolved_at, id
+      limit $2`,
+    [now, batchSize],
+  );
+  const claimed: FundingTradeAttempt[] = [];
+  for (const candidate of candidates.rows) {
+    const attempt = await claimLimitlessTradeAttemptForReconciliation(pool, {
+      attemptId: candidate.id,
+      userId: candidate.user_id,
+      leaseSeconds,
+      now,
+    }).catch(() => null);
+    if (attempt) claimed.push(attempt);
+  }
+  return claimed;
+}
+
+export async function claimLimitlessTradeAttemptForReconciliation(
+  pool: Pool,
+  input: Readonly<{
+    attemptId: string;
+    leaseSeconds: number;
+    now?: Date;
+    userId: string;
+  }>,
+): Promise<FundingTradeAttempt | null> {
+  const now = input.now ?? new Date();
+  const leaseSeconds = Math.max(
+    5,
+    Math.min(300, Math.trunc(input.leaseSeconds)),
+  );
+  return tx(pool, async (client) => {
+    await lockFundingOperationForAttempt(client, input);
+    const current = await fetchAttemptForUpdate(client, input);
+    if (
+      current.executionPath !== "limitless_clob" ||
+      !["submission_started", "ambiguous"].includes(current.state) ||
+      !current.broadcastMayHaveOccurred ||
+      !current.externalReference ||
+      (current.state === "ambiguous" && current.resolvedAt === null) ||
+      current.claimLeaseUntil.getTime() > now.getTime()
+    ) {
+      return null;
+    }
+    const leased = await client.query<FundingTradeAttemptRow>(
+      `update funding_trade_attempts
+          set state = 'ambiguous',
+              claim_token = gen_random_uuid(),
+              claim_lease_until = $3::timestamptz
+                                + ($4::int * interval '1 second'),
+              resolved_at = coalesce(resolved_at, $3),
+              error_code = case
+                when state = 'submission_started'
+                  then 'limitless_exact_status_reconciliation_started'
+                else error_code
+              end,
+              updated_at = $3
+        where id = $1
+          and user_id = $2
+          and state in ('submission_started', 'ambiguous')
+          and claim_lease_until <= $3
+        returning ${ATTEMPT_COLUMNS}`,
+      [input.attemptId, input.userId, now, leaseSeconds],
+    );
+    return leased.rows[0] ? mapAttempt(leased.rows[0]) : null;
+  });
+}
+
+/**
+ * Resolve only a Limitless CLOB ambiguity for which the venue's exact
+ * clientOrderId lookup authoritatively returned not_found after an age fence.
+ * Generic outcome recording intentionally cannot move ambiguous attempts to a
+ * terminal state.
+ */
+export async function proveAmbiguousLimitlessTradeAttemptAbsentInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    attemptId: string;
+    clientOrderId: string;
+    expectedClaimToken: string;
+    minimumAgeMs: number;
+    now?: Date;
+    operationSupportMetadataPatch?: Readonly<Record<string, JsonValue>>;
+    userId: string;
+  }>,
+): Promise<FundingTradeAttempt> {
+  const now = input.now ?? new Date();
+  const operationId = await lockFundingOperationForAttempt(client, input);
+  const attempt = await fetchAttemptForUpdate(client, input);
+  if (
+    attempt.operationId !== operationId ||
+    attempt.executionPath !== "limitless_clob" ||
+    attempt.state !== "ambiguous" ||
+    attempt.externalReference !== input.clientOrderId.trim() ||
+    attempt.claimToken !== input.expectedClaimToken ||
+    attempt.claimLeaseUntil.getTime() <= now.getTime() ||
+    attempt.resolvedAt === null ||
+    !Number.isSafeInteger(input.minimumAgeMs) ||
+    input.minimumAgeMs <= 0 ||
+    now.getTime() - attempt.resolvedAt.getTime() < input.minimumAgeMs
+  ) {
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "Limitless absence proof does not match an aged ambiguous trade attempt",
+    );
+  }
+  const resolved = await client.query<FundingTradeAttemptRow>(
+    `update funding_trade_attempts
+        set state = 'definitive_failure',
+            error_code = 'limitless_exact_status_not_found',
+            resolved_at = $3,
+            updated_at = $3
+      where id = $1
+        and user_id = $2
+        and state = 'ambiguous'
+        and claim_token = $4::uuid
+        and claim_lease_until > clock_timestamp()
+      returning ${ATTEMPT_COLUMNS}`,
+    [input.attemptId, input.userId, now, input.expectedClaimToken],
+  );
+  const row = resolved.rows[0];
+  if (!row) {
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "Limitless ambiguous trade attempt changed before absence resolution",
+    );
+  }
+  if (input.operationSupportMetadataPatch !== undefined) {
+    const evidence = await client.query(
+      `update funding_operations
+          set support_metadata = support_metadata || $3::jsonb
+        where id = $1 and user_id = $2`,
+      [operationId, input.userId, input.operationSupportMetadataPatch],
+    );
+    if (evidence.rowCount !== 1) {
+      throw new FundingTradeAttemptError(
+        "invalid_state",
+        "funding operation disappeared while recording absence proof",
+      );
+    }
+  }
+  return mapAttempt(row);
+}
+
+export async function proveAmbiguousLimitlessFokNoFillInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    attemptId: string;
+    clientOrderId: string;
+    expectedClaimToken: string;
+    now?: Date;
+    userId: string;
+  }>,
+): Promise<FundingTradeAttempt> {
+  const now = input.now ?? new Date();
+  const operationId = await lockFundingOperationForAttempt(client, input);
+  const attempt = await fetchAttemptForUpdate(client, input);
+  if (
+    attempt.operationId !== operationId ||
+    attempt.executionPath !== "limitless_clob" ||
+    attempt.state !== "ambiguous" ||
+    attempt.externalReference !== input.clientOrderId.trim() ||
+    attempt.claimToken !== input.expectedClaimToken ||
+    attempt.claimLeaseUntil.getTime() <= now.getTime()
+  ) {
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "Limitless no-fill proof does not match an ambiguous trade attempt",
+    );
+  }
+  const resolved = await client.query<FundingTradeAttemptRow>(
+    `update funding_trade_attempts
+        set state = 'definitive_failure',
+            error_code = 'trade_no_fill',
+            resolved_at = $3,
+            updated_at = $3
+      where id = $1
+        and user_id = $2
+        and state = 'ambiguous'
+        and claim_token = $4::uuid
+        and claim_lease_until > clock_timestamp()
+      returning ${ATTEMPT_COLUMNS}`,
+    [input.attemptId, input.userId, now, input.expectedClaimToken],
+  );
+  const row = resolved.rows[0];
+  if (!row) {
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "Limitless ambiguous trade attempt changed before no-fill resolution",
+    );
+  }
+  return mapAttempt(row);
+}
+
+export async function proveAmbiguousLimitlessTerminalRejectionInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    attemptId: string;
+    clientOrderId: string;
+    errorCode: string;
+    expectedClaimToken: string;
+    now?: Date;
+    userId: string;
+  }>,
+): Promise<FundingTradeAttempt> {
+  const now = input.now ?? new Date();
+  const normalizedErrorCode = input.errorCode.trim();
+  if (
+    !/^limitless_exact_status_(?:rejected|failed|cancelled|canceled|expired)$/u.test(
+      normalizedErrorCode,
+    )
+  ) {
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "Limitless terminal rejection proof has an invalid status",
+    );
+  }
+  const operationId = await lockFundingOperationForAttempt(client, input);
+  const attempt = await fetchAttemptForUpdate(client, input);
+  if (
+    attempt.operationId !== operationId ||
+    attempt.executionPath !== "limitless_clob" ||
+    attempt.state !== "ambiguous" ||
+    attempt.externalReference !== input.clientOrderId.trim() ||
+    attempt.claimToken !== input.expectedClaimToken ||
+    attempt.claimLeaseUntil.getTime() <= now.getTime()
+  ) {
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "Limitless terminal rejection does not match a leased ambiguous trade attempt",
+    );
+  }
+  const resolved = await client.query<FundingTradeAttemptRow>(
+    `update funding_trade_attempts
+        set state = 'definitive_failure',
+            error_code = $3,
+            resolved_at = $4,
+            updated_at = $4
+      where id = $1
+        and user_id = $2
+        and state = 'ambiguous'
+        and claim_token = $5::uuid
+        and claim_lease_until > clock_timestamp()
+      returning ${ATTEMPT_COLUMNS}`,
+    [
+      input.attemptId,
+      input.userId,
+      normalizedErrorCode,
+      now,
+      input.expectedClaimToken,
+    ],
+  );
+  const row = resolved.rows[0];
+  if (!row) {
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "Limitless ambiguous trade attempt changed before terminal rejection resolution",
+    );
+  }
+  return mapAttempt(row);
+}
+
 export async function acceptFundingTradeAttemptInTransaction(
   client: Pick<PoolClient, "query">,
   input: Readonly<{
@@ -696,6 +1074,7 @@ export async function acceptFundingTradeAttemptInTransaction(
     operationId: string;
     reservationId: string;
     attemptId?: string | null;
+    expectedReconciliationClaimToken?: string | null;
     externalReference: string;
     consumerKind: "web_order" | "execution" | "telegram_trade_intent";
     consumerRef: string;
@@ -710,6 +1089,10 @@ export async function acceptFundingTradeAttemptInTransaction(
         and operation_id = $2
         and reservation_id = $3
         and ($4::uuid is null or id = $4)
+        and (
+          $5::uuid is null
+          or (claim_token = $5::uuid and claim_lease_until > clock_timestamp())
+        )
         and state in (
           'claimed',
           'submission_started',
@@ -725,6 +1108,7 @@ export async function acceptFundingTradeAttemptInTransaction(
       input.operationId,
       input.reservationId,
       input.attemptId ?? null,
+      input.expectedReconciliationClaimToken ?? null,
     ],
   );
   const row = result.rows[0];
@@ -763,6 +1147,10 @@ export async function acceptFundingTradeAttemptInTransaction(
         and user_id = $2
         and reservation_id = $3
         and state in ('claimed', 'submission_started', 'ambiguous')
+        and (
+          $8::uuid is null
+          or (claim_token = $8::uuid and claim_lease_until > clock_timestamp())
+        )
       returning ${ATTEMPT_COLUMNS}
     `,
     [
@@ -773,6 +1161,7 @@ export async function acceptFundingTradeAttemptInTransaction(
       input.consumerKind,
       input.consumerRef,
       input.now ?? new Date(),
+      input.expectedReconciliationClaimToken ?? null,
     ],
   );
   const acceptedRow = accepted.rows[0];
@@ -876,40 +1265,79 @@ export async function recoverFundingTradeAttemptForOrderInTransaction(
   const candidate = candidates.rows[0];
   if (!candidate) return null;
   await client.query(
-    `
-      select id
-      from funding_operations
-      where id = $1 and user_id = $2
-      for update
-    `,
+    `select intent.id
+       from telegram_trade_intents intent
+      where intent.user_id = $1
+        and intent.funding_operation_id = $2
+      order by intent.id
+      for update`,
+    [input.userId, candidate.operation_id],
+  );
+  const operation = await client.query<{ id: string }>(
+    `select id
+       from funding_operations
+      where id = $1
+        and user_id = $2
+        and status = 'ready'
+        and progress_stage = 'ready_for_consumer'
+      for update`,
     [candidate.operation_id, input.userId],
   );
-  const locked = await client.query<{ id: string }>(
-    `
-      select attempt.id
-      from funding_trade_attempts attempt
-      join balance_reservations reservation
-        on reservation.id = attempt.reservation_id
-       and reservation.operation_id = attempt.operation_id
-       and reservation.user_id = attempt.user_id
-      join funding_operations operation
-        on operation.id = attempt.operation_id
-       and operation.user_id = attempt.user_id
+  if (!operation.rows[0]) return null;
+  const reservation = await client.query<{ id: string }>(
+    `select id
+       from balance_reservations
+      where id = $1
+        and operation_id = $2
+        and user_id = $3
+        and state = 'active'
+      for update`,
+    [candidate.reservation_id, candidate.operation_id, input.userId],
+  );
+  if (!reservation.rows[0]) return null;
+  const attempt = await client.query<{ id: string }>(
+    `select attempt.id
+       from funding_trade_attempts attempt
       where attempt.id = $1
         and attempt.user_id = $2
+        and attempt.operation_id = $3
+        and attempt.reservation_id = $4
+        and attempt.venue_id = $5
         and attempt.state in (
           'claimed',
           'submission_started',
           'ambiguous'
         )
-        and reservation.state = 'active'
-        and operation.status = 'ready'
-        and operation.progress_stage = 'ready_for_consumer'
-      for update of reservation, attempt
+        and exists (
+          select 1
+          from unified_tokens token
+          where token.market_id = attempt.market_id
+            and token.venue = attempt.venue_id
+            and token.token_id = $6
+        )
+        and (
+          attempt.external_reference = any($7::text[])
+          or (
+            attempt.execution_path = 'polymarket_clob'
+            and attempt.idempotency_key = any(
+              select 'polymarket-clob:' || reference
+              from unnest($7::text[]) as reference
+            )
+          )
+        )
+      for update
     `,
-    [candidate.id, input.userId],
+    [
+      candidate.id,
+      input.userId,
+      candidate.operation_id,
+      candidate.reservation_id,
+      input.venueId,
+      input.tokenId,
+      references,
+    ],
   );
-  if (!locked.rows[0]) return null;
+  if (!attempt.rows[0]) return null;
   return {
     attemptId: candidate.id,
     operationId: candidate.operation_id,

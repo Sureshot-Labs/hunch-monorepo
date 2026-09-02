@@ -1772,7 +1772,7 @@ await test("operation reads expose safe resumable state, not internal snapshots"
         state: "action_required",
         dependsOnStepId: null,
         dependencyState: null,
-        actionable: true,
+        actionable: false,
       },
     ]);
     assert.equal("normalizedAction" in body.steps[0], false);
@@ -1827,6 +1827,50 @@ await test("operation reads hide dormant ingress completion until funds select i
       response.json().steps.map((step: { stepId: string }) => step.stepId),
       ["step_id_12345678"],
     );
+  } finally {
+    await app.close();
+  }
+});
+
+await test("operation presentation stops sibling actions after a failed step", async () => {
+  const app = await buildApp({
+    operationSteps: async () => [
+      { ...operationSteps()[0], state: "failed" },
+      {
+        ...operationSteps()[0],
+        id: "step_sibling_12345678",
+        ordinal: 1,
+      },
+    ],
+  });
+  try {
+    const response = await app.inject({
+      method: "GET",
+      url: "/funding/operations/operation_id_12345678",
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(
+      response
+        .json()
+        .steps.map((step: { actionable: boolean }) => step.actionable),
+      [false, false],
+    );
+  } finally {
+    await app.close();
+  }
+});
+
+await test("terminal operation presentation hides stale actions", async () => {
+  const app = await buildApp({
+    operation: async () => ({ ...operation(), status: "completed" }),
+  });
+  try {
+    const response = await app.inject({
+      method: "GET",
+      url: "/funding/operations/operation_id_12345678",
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().steps[0].actionable, false);
   } finally {
     await app.close();
   }

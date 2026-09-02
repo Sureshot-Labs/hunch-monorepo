@@ -70,6 +70,14 @@ export type RelayWalletQuoteInput = Readonly<{
 
 export class RelayQuoteEconomicsError extends Error {
   readonly code = "relay_quote_economics_rejected";
+
+  constructor(
+    readonly reason: "source_cap_exceeded" | "minimum_floor",
+    message: string,
+  ) {
+    super(message);
+    this.name = "RelayQuoteEconomicsError";
+  }
 }
 
 export class RelayQuoteValidationError extends Error {
@@ -309,12 +317,16 @@ export class RelayWalletQuoteAdapter {
           user: userAddress,
         });
       } catch (error) {
-        if (
-          error instanceof Error &&
-          (error.message.includes("authorized cap") ||
-            error.message.includes("authorized floor"))
-        ) {
-          throw new RelayQuoteEconomicsError(error.message);
+        if (error instanceof Error) {
+          if (error.message.includes("authorized cap")) {
+            throw new RelayQuoteEconomicsError(
+              "source_cap_exceeded",
+              error.message,
+            );
+          }
+          if (error.message.includes("authorized floor")) {
+            throw new RelayQuoteEconomicsError("minimum_floor", error.message);
+          }
         }
         throw relayQuoteValidationError(error);
       }
@@ -367,12 +379,16 @@ export class RelayWalletQuoteAdapter {
           user: userAddress,
         });
       } catch (error) {
-        if (
-          error instanceof Error &&
-          (error.message.includes("authorized source cap") ||
-            error.message.includes("authorized floor"))
-        ) {
-          throw new RelayQuoteEconomicsError(error.message);
+        if (error instanceof Error) {
+          if (error.message.includes("authorized source cap")) {
+            throw new RelayQuoteEconomicsError(
+              "source_cap_exceeded",
+              error.message,
+            );
+          }
+          if (error.message.includes("authorized floor")) {
+            throw new RelayQuoteEconomicsError("minimum_floor", error.message);
+          }
         }
         throw relayQuoteValidationError(error);
       }

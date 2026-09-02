@@ -389,7 +389,20 @@ function publicConsumerReservation(
     : null;
 }
 
-function publicOperationStep(step: FundingOperationStep) {
+const OPERATION_ACTION_STOP_STATES = new Set([
+  "ready",
+  "reconcile_required",
+  "recovery_required",
+  "completed",
+  "refunded",
+  "failed",
+  "cancelled",
+]);
+
+function publicOperationStep(
+  step: FundingOperationStep,
+  operationActionable: boolean,
+) {
   return {
     stepId: step.id,
     ordinal: step.ordinal,
@@ -398,12 +411,19 @@ function publicOperationStep(step: FundingOperationStep) {
     dependsOnStepId: step.dependsOnStepId,
     dependencyState: step.dependencyState,
     actionable:
+      operationActionable &&
       step.state === "action_required" &&
       (step.dependsOnStepId === null || step.dependencyState === "succeeded"),
   };
 }
 
-function publicOperationSteps(steps: readonly FundingOperationStep[]) {
+function publicOperationSteps(
+  operation: FundingOperationRow,
+  steps: readonly FundingOperationStep[],
+) {
+  const operationActionable =
+    !OPERATION_ACTION_STOP_STATES.has(operation.status) &&
+    !steps.some((step) => OPERATION_ACTION_STOP_STATES.has(step.state));
   return steps
     .filter(
       (step) =>
@@ -412,7 +432,7 @@ function publicOperationSteps(steps: readonly FundingOperationStep[]) {
           step.actionValidationResult.activation === "after_verified_ingress"
         ),
     )
-    .map(publicOperationStep);
+    .map((step) => publicOperationStep(step, operationActionable));
 }
 
 function errorStatus(error: unknown): number {
@@ -914,6 +934,7 @@ export function registerFundingRoutes(
             ok: true,
             operation: publicOperation(committed.operation),
             steps: publicOperationSteps(
+              committed.operation,
               await dependencies.operationSteps(userId, committed.operation.id),
             ),
             ingress: publicIngress(committed.operation),
@@ -1321,6 +1342,7 @@ export function registerFundingRoutes(
             ok: true,
             operation: publicOperation(committed.operation),
             steps: publicOperationSteps(
+              committed.operation,
               await dependencies.operationSteps(userId, committed.operation.id),
             ),
             ingress: publicIngress(committed.operation),
@@ -1358,6 +1380,7 @@ export function registerFundingRoutes(
             ok: true,
             operation: publicOperation(operation),
             steps: publicOperationSteps(
+              operation,
               await dependencies.operationSteps(userId, operation.id),
             ),
             ingress: publicIngress(operation),
@@ -1400,6 +1423,7 @@ export function registerFundingRoutes(
             ok: true,
             operation: publicOperation(operation),
             steps: publicOperationSteps(
+              operation,
               await dependencies.operationSteps(userId, operation.id),
             ),
             ingress: publicIngress(operation),

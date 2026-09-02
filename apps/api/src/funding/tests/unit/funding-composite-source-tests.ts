@@ -852,6 +852,83 @@ assert.deepEqual(
   "two bounded wallet contributions must remain executable as one client handoff",
 );
 
+const incidentPreparation = {
+  ...preparation,
+  option: {
+    ...preparation.option,
+    sourceOptionId: "source_incident_preparation_12345678",
+    expectedDestination: money(DESTINATION_ASSET, "4017453"),
+    minimumDestination: money(DESTINATION_ASSET, "4017453"),
+  },
+};
+const incidentBase = partialSource({
+  id: "incident_base",
+  location: sourceLocation(
+    "incident_base",
+    "evm:8453",
+    "0x00000000000000000000000000000000000000b6",
+  ),
+  sourceRaw: "2238764",
+  expectedRaw: "2220000",
+  minimumRaw: "2200000",
+  feeUsd: "0.038764",
+});
+const incidentNative = partialSource({
+  id: "incident_native",
+  location: sourceLocation(
+    "incident_native",
+    "solana:mainnet",
+    "So11111111111111111111111111111111111111116",
+  ),
+  sourceRaw: "10080342",
+  expectedRaw: "800000",
+  minimumRaw: "790000",
+  feeUsd: "0.01",
+});
+const incidentComposite = buildCompositeSourceOption({
+  candidates: [incidentPreparation, incidentBase, incidentNative],
+  requiredDestination: money(DESTINATION_ASSET, "7000000"),
+  destinationUnitPriceUsd: "1",
+  maximumFeeUsd: "1",
+  maximumFeeBps: 2_000,
+  executionBoundary: "client_handoff",
+});
+assert.ok(incidentComposite);
+assert.deepEqual(
+  incidentComposite.option.sourceLegs?.map((leg) => leg.source.kind),
+  ["venue_preparation", "owned_location", "owned_location"],
+);
+assert.equal(incidentComposite.option.minimumDestination?.raw, "7007453");
+
+const incidentNativeInsufficientAfterFees = partialSource({
+  id: "incident_native_insufficient",
+  location: sourceLocation(
+    "incident_native_insufficient",
+    "solana:mainnet",
+    "So11111111111111111111111111111111111111117",
+  ),
+  sourceRaw: "10080342",
+  expectedRaw: "790000",
+  minimumRaw: "782546",
+  feeUsd: "0.017454",
+});
+assert.equal(
+  buildCompositeSourceOption({
+    candidates: [
+      incidentPreparation,
+      incidentBase,
+      incidentNativeInsufficientAfterFees,
+    ],
+    requiredDestination: money(DESTINATION_ASSET, "7000000"),
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: "1",
+    maximumFeeBps: 2_000,
+    executionBoundary: "client_handoff",
+  }),
+  null,
+  "validated post-fee minimums below $7 must not produce an executable composite",
+);
+
 const insufficientResidualRelay = partialSource({
   id: "insufficient_residual",
   location: sourceLocation(

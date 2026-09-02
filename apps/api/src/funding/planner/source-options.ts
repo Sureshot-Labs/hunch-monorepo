@@ -108,6 +108,7 @@ export type RelayEligibleSourceFact = Readonly<{
   quoteInputAmount: Money;
   quoteMinimumOutput?: Money;
   quoteModeOverride?: "exact_input";
+  exactInputFallbackOnSourceCap?: boolean;
   maximumSourceRaw: string;
   maximumSlippageBps: number;
   estimatedUsd: string | null;
@@ -146,6 +147,7 @@ export type RelayPlanningQuoteRejectionReason = Extract<
 export type RelayPlanningQuoteRejection = Readonly<{
   kind: "rejected";
   reasonCode: RelayPlanningQuoteRejectionReason;
+  retryAsExactInput?: "source_cap_exceeded";
 }>;
 
 export type RelayPlanningQuoteResult =
@@ -657,7 +659,7 @@ export class RelayFirstSourcePlanner {
           }
           const route = routes[0];
           if (!route) return { kind: "deterministic_ineligible" };
-          const quoteCorrelationId = stableOpaqueId(
+          let quoteCorrelationId = stableOpaqueId(
             "funding_quote",
             [
               input.accountId,
@@ -670,54 +672,114 @@ export class RelayFirstSourcePlanner {
               input.now.toISOString(),
             ].join("|"),
           );
-          const remainingPlannerMs =
-            this.totalPlannerTimeoutMs -
-            (this.monotonicNow() - planningStartedAt);
-          if (remainingPlannerMs <= 0) {
-            return { kind: "transient_unknown" };
-          }
-          let plannedQuote: RelayPlanningQuoteResult;
-          try {
-            plannedQuote = await this.quoteRelayWithinBudget(
-              {
-                route,
-                source,
-                destination: input.destination,
-                sourceAmount: source.quoteInputAmount,
-                minimumOutput:
-                  source.quoteMinimumOutput ?? input.requiredAmount,
-                quoteCorrelationId,
-                deadline,
-                ...(serverExecutionWindow
-                  ? {
-                      maximumQuoteTtlMs:
-                        serverExecutionWindow.maximumQuoteTtlMs,
-                    }
-                  : {}),
-                policyRevision: input.policyRevision,
-                ...(input.request.serverExecutionProfileId
-                  ? {
-                      serverExecutionProfileId:
-                        input.request.serverExecutionProfileId,
-                    }
-                  : {}),
-                ...(input.request.relayPersistentApprovalCapRaw
-                  ? {
-                      persistentApprovalCapRaw:
-                        input.request.relayPersistentApprovalCapRaw,
-                    }
-                  : {}),
-              },
-              Math.min(this.relayQuoteTimeoutMs, remainingPlannerMs),
-            );
-          } catch (error) {
-            if (
-              error instanceof FundingPlannerError &&
-              error.code === "provider_unavailable"
-            ) {
-              return { kind: "transient_unknown" };
+          const requestQuote = async (
+            candidateSource: RelayEligibleSourceFact,
+            correlationId: string,
+          ) => {
+            const remainingPlannerMs =
+              this.totalPlannerTimeoutMs -
+              (this.monotonicNow() - planningStartedAt);
+            if (remainingPlannerMs <= 0) {
+              return { kind: "transient_unknown" as const };
             }
-            throw error;
+            try {
+              return {
+                kind: "quoted" as const,
+                quote: await this.quoteRelayWithinBudget(
+                  {
+                    route,
+                    source: candidateSource,
+                    destination: input.destination,
+                    sourceAmount: candidateSource.quoteInputAmount,
+                    minimumOutput:
+                      candidateSource.quoteMinimumOutput ??
+                      input.requiredAmount,
+                    quoteCorrelationId: correlationId,
+                    deadline,
+                    ...(serverExecutionWindow
+                      ? {
+                          maximumQuoteTtlMs:
+                            serverExecutionWindow.maximumQuoteTtlMs,
+                        }
+                      : {}),
+                    policyRevision: input.policyRevision,
+                    ...(input.request.serverExecutionProfileId
+                      ? {
+                          serverExecutionProfileId:
+                            input.request.serverExecutionProfileId,
+                        }
+                      : {}),
+                    ...(input.request.relayPersistentApprovalCapRaw
+                      ? {
+                          persistentApprovalCapRaw:
+                            input.request.relayPersistentApprovalCapRaw,
+                        }
+                      : {}),
+                  },
+                  Math.min(this.relayQuoteTimeoutMs, remainingPlannerMs),
+                ),
+              };
+            } catch (error) {
+              if (
+                error instanceof FundingPlannerError &&
+                error.code === "provider_unavailable"
+              ) {
+                return { kind: "transient_unknown" as const };
+              }
+              throw error;
+            }
+          };
+          let sourceForQuote = source;
+          let requestedQuote = await requestQuote(
+            sourceForQuote,
+            quoteCorrelationId,
+          );
+          if (requestedQuote.kind === "transient_unknown") {
+            return requestedQuote;
+          }
+          let plannedQuote: RelayPlanningQuoteResult = requestedQuote.quote;
+          if (
+            plannedQuote &&
+            isRelayPlanningQuoteRejection(plannedQuote) &&
+            plannedQuote.retryAsExactInput === "source_cap_exceeded" &&
+            source.exactInputFallbackOnSourceCap === true &&
+            source.quoteModeOverride !== "exact_input"
+          ) {
+            sourceForQuote = {
+              ...source,
+              quoteInputAmount: {
+                ...source.quoteInputAmount,
+                raw: source.maximumSourceRaw,
+              },
+              quoteMinimumOutput: {
+                asset: input.requiredAmount.asset,
+                raw: "1",
+              },
+              quoteModeOverride: "exact_input",
+              exactInputFallbackOnSourceCap: false,
+            };
+            quoteCorrelationId = stableOpaqueId(
+              "funding_quote",
+              [
+                input.accountId,
+                input.policyRevision,
+                input.destination.destinationId,
+                source.componentId,
+                route.routeId,
+                source.maximumSourceRaw,
+                input.requiredAmount.raw,
+                "source-cap-exact-input-fallback",
+                input.now.toISOString(),
+              ].join("|"),
+            );
+            requestedQuote = await requestQuote(
+              sourceForQuote,
+              quoteCorrelationId,
+            );
+            if (requestedQuote.kind === "transient_unknown") {
+              return requestedQuote;
+            }
+            plannedQuote = requestedQuote.quote;
           }
           if (!plannedQuote) {
             return {
@@ -734,11 +796,23 @@ export class RelayFirstSourcePlanner {
           assertRelayPlanningQuote({
             quote: plannedQuote,
             route,
-            source,
+            source: sourceForQuote,
             destination: input.destination,
             deadline,
             now: input.now,
           });
+          if (
+            sourceForQuote.quoteModeOverride === "exact_input" &&
+            source.exactInputFallbackOnSourceCap === true &&
+            (plannedQuote.candidate.amountMode !== "exact_input" ||
+              rawAmount(plannedQuote.candidate.minimumOutput.raw) >=
+                rawAmount(input.requiredAmount.raw))
+          ) {
+            return {
+              kind: "definitive_no_candidate",
+              reasonCode: "provider_quote_economics_rejected",
+            };
+          }
           if (
             serverExecutionWindow &&
             Date.parse(plannedQuote.candidate.expiresAt) - input.now.getTime() <
@@ -760,8 +834,8 @@ export class RelayFirstSourcePlanner {
                 plannedQuote.candidate.expiresAt,
               ].join("|"),
             ),
-            safeLabel: source.safeLabel,
-            maximumSourceRaw: source.maximumSourceRaw,
+            safeLabel: sourceForQuote.safeLabel,
+            maximumSourceRaw: sourceForQuote.maximumSourceRaw,
             quotedSourceAmount: plannedQuote.sourceAmount,
             estimatedUsd: plannedQuote.sourceEstimatedUsd,
             quote: plannedQuote.candidate,
@@ -780,7 +854,7 @@ export class RelayFirstSourcePlanner {
             maximumSlippageBps: limits.maximumSlippageBps,
             minimumDestinationEstimatedUsd:
               plannedQuote.minimumDestinationEstimatedUsd,
-            recommended: source.suggestionPreferred,
+            recommended: sourceForQuote.suggestionPreferred,
           });
           if (
             plannedQuote.commitPlan.steps.some(
@@ -796,7 +870,7 @@ export class RelayFirstSourcePlanner {
               })),
             };
           }
-          if (source.preRouteHandoff) {
+          if (sourceForQuote.preRouteHandoff) {
             option = {
               ...option,
               requiredActions: [
@@ -842,7 +916,7 @@ export class RelayFirstSourcePlanner {
             },
             segments: plannedQuote.commitPlan.segments.map((segment) => ({
               ...segment,
-              sourceSnapshot: jsonRecord(source.source),
+              sourceSnapshot: jsonRecord(sourceForQuote.source),
               destinationTargetSnapshot: jsonRecord(input.destination.target),
               quotedInput: jsonRecord(plannedQuote.sourceAmount),
               quotedExpectedOutput: jsonRecord(

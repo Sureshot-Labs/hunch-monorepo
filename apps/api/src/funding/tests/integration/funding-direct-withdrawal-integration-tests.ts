@@ -31,6 +31,7 @@ import {
 import {
   commitFundingOperationInTransaction,
   createFundingQuoteInTransaction,
+  fetchFundingOperationForUser,
   type FundingCommitPlan,
 } from "../../persistence/funding-operation-repository.js";
 import {
@@ -73,6 +74,7 @@ try {
       executorId: "wallet_profile_evm_v1" | "wallet_profile_svm_v1";
       receipt: FundingStepReceiptEvidence;
       expectedDestinationAddress: string;
+      legacyTerminalStatus: "completed" | "failed";
     }>,
   ): Promise<void> {
     const recipientFingerprint = hash(input.recipientAddress);
@@ -255,6 +257,13 @@ try {
       lookupKeyVersion: 1,
       actualCosts: {},
     });
+    await client.query(
+      `update funding_operations
+          set status = $2, progress_stage = 'terminal',
+              completed_at = clock_timestamp(), version = version + 1
+        where id = $1`,
+      [committed.operation.id, input.legacyTerminalStatus],
+    );
     await applyFundingStepReceiptEvidenceInTransaction(client, {
       operationId: committed.operation.id,
       stepId,
@@ -262,6 +271,12 @@ try {
       networkId: input.amount.asset.networkId,
       receipt: input.receipt,
     });
+    const reopened = await fetchFundingOperationForUser(client, {
+      userId,
+      operationId: committed.operation.id,
+    });
+    assert.equal(reopened?.status, "recovery_required");
+    assert.equal(reopened?.recoveryMode, "automatic_evidence");
     const observation = await client.query<{
       kind: string;
       segment_id: string | null;
@@ -322,7 +337,11 @@ try {
     const reorgedReduction = await reduceFundingOperationInTransaction(client, {
       operationId: committed.operation.id,
     });
-    assert.equal(reorgedReduction.reorgBlockedByTerminalState, true);
+    assert.equal(reorgedReduction.reorgBlockedByTerminalState, false);
+    assert.deepEqual(reorgedReduction.finalState, {
+      status: "recovery_required",
+      stage: "source_action",
+    });
   }
 
   const evmAmount = {
@@ -373,6 +392,7 @@ try {
       },
     },
     expectedDestinationAddress: evmRecipient.toLowerCase(),
+    legacyTerminalStatus: "failed",
   });
 
   const solAmount = {
@@ -420,6 +440,7 @@ try {
       evidence: { transactionSignature: solSignature },
     },
     expectedDestinationAddress: solRecipient,
+    legacyTerminalStatus: "completed",
   });
 
   console.log(

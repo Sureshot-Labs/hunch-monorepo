@@ -1050,26 +1050,32 @@ assert.equal(excludedByPreference.length, 0);
     location,
     amount: { asset: SOLANA_NATIVE, raw: "20000000" },
     category: "cash",
-    estimatedUsd: null,
-    valuationEligibility: "unpriced",
-    executionEligibility: "unknown",
-    reasonCodes: ["trusted_price_unavailable"],
+    estimatedUsd: {
+      value: "4",
+      asOf: NOW,
+      priceSource: "test_sol_price",
+      confidence: "high",
+      policyId: "test_sol_price",
+    },
+    valuationEligibility: "included",
+    executionEligibility: "eligible",
+    reasonCodes: [],
   } as const;
   const nativeAccount = {
     ...base,
     projection: { ...base.projection, components: [nativeComponent] },
     cashAvailability: {
       ...base.cashAvailability,
-      freshness: "stale",
+      freshness: "fresh",
       components: [
         {
           ...base.cashAvailability.components[0],
           componentId: nativeComponent.componentId,
           amount: nativeComponent.amount,
           availableRaw: "20000000",
-          availableEstimatedUsd: null,
-          freshness: "stale",
-          reasonCodes: ["trusted_price_unavailable"],
+          availableEstimatedUsd: "4",
+          freshness: "fresh",
+          reasonCodes: [],
         },
       ],
     },
@@ -1102,9 +1108,154 @@ assert.equal(excludedByPreference.length, 0);
     (20_000_000n - SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS).toString(),
   );
   assert.equal(nativeFacts[0]?.quoteMinimumOutput?.raw, "1000000");
+  assert.equal(nativeFacts[0]?.quoteModeOverride, undefined);
+  assert.equal(nativeFacts[0]?.exactInputFallbackOnSourceCap, true);
   assert.equal(nativeFacts[0]?.maximumSourceRaw, "17000000");
   assert.equal(nativeFacts[0]?.safeLabel, "SOL on Solana");
   assert.equal(nativeFacts[0]?.nativeGasReady, true);
+
+  const incidentNativeComponent = {
+    ...nativeComponent,
+    amount: { asset: SOLANA_NATIVE, raw: "13080342" },
+    estimatedUsd: {
+      ...nativeComponent.estimatedUsd,
+      value: "1.65",
+    },
+  };
+  const incidentNativeAccount = {
+    ...nativeAccount,
+    projection: {
+      ...nativeAccount.projection,
+      components: [incidentNativeComponent],
+    },
+    cashAvailability: {
+      ...nativeAccount.cashAvailability,
+      components: [
+        {
+          ...nativeAccount.cashAvailability.components[0],
+          componentId: incidentNativeComponent.componentId,
+          amount: incidentNativeComponent.amount,
+          availableRaw: incidentNativeComponent.amount.raw,
+          availableEstimatedUsd: "1.65",
+        },
+      ],
+    },
+  } as AccountValueReadModel;
+  const incidentNativeFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: incidentNativeAccount,
+    policy: nativePolicy,
+    // $7 request less the incident's $4.017453 direct pUSD balance.
+    requiredAmount: { asset: POLYGON_PUSD, raw: "2982547" },
+  });
+  assert.equal(incidentNativeFacts.length, 1);
+  assert.equal(incidentNativeFacts[0]?.quoteInputAmount.raw, "10080342");
+  assert.equal(incidentNativeFacts[0]?.quoteMinimumOutput?.raw, "1");
+  assert.equal(incidentNativeFacts[0]?.quoteModeOverride, "exact_input");
+  assert.equal(
+    incidentNativeFacts[0]?.exactInputFallbackOnSourceCap,
+    undefined,
+  );
+
+  const staleOvervaluedNativeAccount = {
+    ...nativeAccount,
+    projection: {
+      ...nativeAccount.projection,
+      components: [
+        {
+          ...nativeComponent,
+          estimatedUsd: {
+            ...nativeComponent.estimatedUsd,
+            value: "1000",
+          },
+          valuationEligibility: "excluded" as const,
+          reasonCodes: ["trusted_price_stale" as const],
+        },
+      ],
+    },
+  } as AccountValueReadModel;
+  const staleOvervaluedNativeFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: staleOvervaluedNativeAccount,
+    policy: nativePolicy,
+    requiredAmount: { asset: POLYGON_PUSD, raw: "1000000" },
+  });
+  assert.equal(staleOvervaluedNativeFacts.length, 1);
+  assert.equal(staleOvervaluedNativeFacts[0]?.quoteInputAmount.raw, "17000000");
+  assert.equal(
+    staleOvervaluedNativeFacts[0]?.quoteMinimumOutput?.raw,
+    "1000000",
+  );
+  assert.equal(staleOvervaluedNativeFacts[0]?.quoteModeOverride, undefined);
+  assert.equal(
+    staleOvervaluedNativeFacts[0]?.exactInputFallbackOnSourceCap,
+    true,
+  );
+
+  const unpricedNativeAccount = {
+    ...staleOvervaluedNativeAccount,
+    projection: {
+      ...staleOvervaluedNativeAccount.projection,
+      components: [
+        {
+          ...nativeComponent,
+          estimatedUsd: null,
+          valuationEligibility: "unpriced" as const,
+          reasonCodes: ["trusted_price_unavailable" as const],
+        },
+      ],
+    },
+  } as AccountValueReadModel;
+  const unpricedNativeFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: unpricedNativeAccount,
+    policy: nativePolicy,
+    requiredAmount: { asset: POLYGON_PUSD, raw: "1000000" },
+  });
+  assert.equal(unpricedNativeFacts.length, 1);
+  assert.equal(unpricedNativeFacts[0]?.quoteInputAmount.raw, "17000000");
+  assert.equal(unpricedNativeFacts[0]?.quoteMinimumOutput?.raw, "1000000");
+  assert.equal(unpricedNativeFacts[0]?.quoteModeOverride, undefined);
+  assert.equal(unpricedNativeFacts[0]?.exactInputFallbackOnSourceCap, true);
+
+  const reserveOnlyNativeAccount = {
+    ...incidentNativeAccount,
+    projection: {
+      ...incidentNativeAccount.projection,
+      components: [
+        {
+          ...incidentNativeComponent,
+          amount: {
+            asset: SOLANA_NATIVE,
+            raw: SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS.toString(),
+          },
+        },
+      ],
+    },
+    cashAvailability: {
+      ...incidentNativeAccount.cashAvailability,
+      components: incidentNativeAccount.cashAvailability.components.map(
+        (component) => ({
+          ...component,
+          amount: {
+            asset: SOLANA_NATIVE,
+            raw: SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS.toString(),
+          },
+          availableRaw: SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS.toString(),
+        }),
+      ),
+    },
+  } as AccountValueReadModel;
+  assert.equal(
+    deriveProductionRelayEligibleSourceFacts({
+      accountId: ACCOUNT_ID,
+      account: reserveOnlyNativeAccount,
+      policy: nativePolicy,
+      requiredAmount: { asset: POLYGON_PUSD, raw: "1" },
+    }).length,
+    0,
+    "SOL reserved for execution fees must not be exposed as funding capacity",
+  );
 
   const nativeCapacityFacts = deriveProductionRelayEligibleSourceFacts({
     accountId: ACCOUNT_ID,

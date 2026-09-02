@@ -16,6 +16,7 @@ import {
 import {
   delegatedFundingWorkerConfig,
   fundingReferenceProtectionConfig,
+  limitlessFundingWorkerConfig,
   resetFundingWorkerModuleLoaderForTests,
   relayFundingWorkerConfig,
   runFundingReconciliationJob,
@@ -124,6 +125,39 @@ const tests: TestCase[] = [
       for (const invalid of ["0", "-1", "1.5", "not-a-version"]) {
         assert.throws(() => parseFundingReferenceLookupKeyVersion(invalid));
       }
+    },
+  },
+  {
+    name: "Limitless funding reconciliation is optional and sidecar configured",
+    run: () => {
+      const complete = buildTestEnv({
+        limitlessApiBase: "https://limitless.test",
+        limitlessApiTimeoutMs: 2_500,
+        limitlessApiVersion: "v1",
+        limitlessHmacSecret: "encoded-secret",
+        limitlessHmacTokenId: "token-id",
+      });
+      assert.deepEqual(limitlessFundingWorkerConfig(complete), {
+        apiBase: "https://limitless.test",
+        apiVersion: "v1",
+        hmacSecret: "encoded-secret",
+        hmacTokenId: "token-id",
+        timeoutMs: 2_500,
+      });
+      assert.equal(
+        limitlessFundingWorkerConfig({
+          ...complete,
+          limitlessHmacSecret: undefined,
+        }),
+        undefined,
+      );
+      assert.equal(
+        limitlessFundingWorkerConfig({
+          ...complete,
+          limitlessHmacTokenId: undefined,
+        }),
+        undefined,
+      );
     },
   },
   {

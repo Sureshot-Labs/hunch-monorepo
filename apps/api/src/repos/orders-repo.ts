@@ -308,6 +308,7 @@ export type StoreOrderInput = {
     reservationId: string;
   }> | null;
   fundingTradeAttemptId?: string | null;
+  fundingTradeReconciliationClaimToken?: string | null;
   /**
    * A direct v2 Mini App trade has no FundingOperation. Its sealed Telegram
    * handoff is instead linked atomically when this ordinary order is stored.
@@ -336,6 +337,7 @@ export async function storeOrderInTransaction(
   );
   let resolvedFundingReservation = inputs.fundingReservation ?? null;
   let resolvedFundingTradeAttemptId = inputs.fundingTradeAttemptId ?? null;
+  let implicitlyRecoveredFunding = false;
   const directHandoffTrade = inputs.telegramAppHandoffV2DirectTrade ?? null;
   if (directHandoffTrade && resolvedFundingReservation) {
     throw new Error(
@@ -351,10 +353,59 @@ export async function storeOrderInTransaction(
       "A direct Telegram handoff order side does not match its sealed action",
     );
   }
+  // Every writer for this exact venue order serializes before taking funding
+  // locks. The order row itself is locked only after an implicit funding scope
+  // has acquired intent -> operation -> reservation -> attempt.
   await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [
     `orders:${inputs.userId}:${inputs.venue}:${inputs.venueOrderId}`,
   ]);
-
+  const existingOrderPreflight = await client.query<{ status: string }>(
+    `select status
+       from orders
+      where venue = $1 and venue_order_id = $2 and user_id = $3
+      order by
+        (price is not null)::int desc,
+        (size is not null)::int desc,
+        (order_payload is not null)::int desc,
+        posted_at desc nulls last,
+        id desc
+      limit 1`,
+    [inputs.venue, inputs.venueOrderId, inputs.userId],
+  );
+  const preflightOutcome = persistedTradeTerminalOutcome(
+    "web_order",
+    existingOrderPreflight.rows[0]?.status ?? inputs.status,
+  );
+  if (
+    !resolvedFundingReservation &&
+    !resolvedFundingTradeAttemptId &&
+    !directHandoffTrade &&
+    (preflightOutcome == null || preflightOutcome === "filled") &&
+    inputs.side === "BUY" &&
+    inputs.tokenId
+  ) {
+    const recovered = await recoverFundingTradeAttemptForOrderInTransaction(
+      client,
+      {
+        userId: inputs.userId,
+        venueId: inputs.venue,
+        tokenId: inputs.tokenId,
+        externalReferences: [
+          inputs.orderHash ?? "",
+          inputs.venueOrderId,
+          ...collectPayloadClientOrderIds(inputs.orderPayload),
+        ],
+      },
+    );
+    if (recovered) {
+      resolvedFundingReservation = {
+        operationId: recovered.operationId,
+        reservationId: recovered.reservationId,
+      };
+      resolvedFundingTradeAttemptId = recovered.attemptId;
+      implicitlyRecoveredFunding = true;
+    }
+  }
   const existingOrder = await client.query<{
     id: string;
     wallet_address: string | null;
@@ -395,34 +446,9 @@ export async function storeOrderInTransaction(
   // already terminal no-fill/failed in the database.
   const canRecoverFundingTradeAttempt =
     persistedOutcome == null || persistedOutcome === "filled";
-  if (
-    !resolvedFundingReservation &&
-    !resolvedFundingTradeAttemptId &&
-    !directHandoffTrade &&
-    canRecoverFundingTradeAttempt &&
-    inputs.side === "BUY" &&
-    inputs.tokenId
-  ) {
-    const recovered = await recoverFundingTradeAttemptForOrderInTransaction(
-      client,
-      {
-        userId: inputs.userId,
-        venueId: inputs.venue,
-        tokenId: inputs.tokenId,
-        externalReferences: [
-          inputs.orderHash ?? "",
-          inputs.venueOrderId,
-          ...collectPayloadClientOrderIds(inputs.orderPayload),
-        ],
-      },
-    );
-    if (recovered) {
-      resolvedFundingReservation = {
-        operationId: recovered.operationId,
-        reservationId: recovered.reservationId,
-      };
-      resolvedFundingTradeAttemptId = recovered.attemptId;
-    }
+  if (implicitlyRecoveredFunding && !canRecoverFundingTradeAttempt) {
+    resolvedFundingReservation = null;
+    resolvedFundingTradeAttemptId = null;
   }
 
   if (existing) {
@@ -509,6 +535,8 @@ export async function storeOrderInTransaction(
         userId: inputs.userId,
         reservationId: funding.reservationId,
         tradeAttemptId: resolvedFundingTradeAttemptId,
+        tradeAttemptReconciliationClaimToken:
+          inputs.fundingTradeReconciliationClaimToken,
         consumer: { kind: "web_order", orderId: existing.id },
         outcomeReason: "trade_order_recorded",
       });
@@ -591,6 +619,8 @@ export async function storeOrderInTransaction(
       userId: inputs.userId,
       reservationId: resolvedFundingReservation.reservationId,
       tradeAttemptId: resolvedFundingTradeAttemptId,
+      tradeAttemptReconciliationClaimToken:
+        inputs.fundingTradeReconciliationClaimToken,
       consumer: { kind: "web_order", orderId: inserted.id },
       outcomeReason: "trade_order_recorded",
     });

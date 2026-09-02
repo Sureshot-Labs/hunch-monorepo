@@ -5,6 +5,7 @@ import {
   parseUnsignedDecimal,
 } from "../account-value/decimal.js";
 import type {
+  AssetRef,
   FundingDestinationOption,
   FundingReceiveSession,
   JsonValue,
@@ -471,6 +472,44 @@ function canSelectRetainedSourceReceive(
   return (
     input.origin === "generic_add_funds" ||
     input.continuationMode === "app_handoff"
+  );
+}
+
+/**
+ * Retained SOL is account value, not venue collateral. It may be selected by
+ * the explicit generic Receive-SOL route, but an ordinary venue Add-funds
+ * picker must not present it as if receiving SOL made that venue ready.
+ *
+ * The app-handoff Buy flow is the one default picker where retained SOL is
+ * honest: the later client review seals the actual conversion before value
+ * moves.
+ */
+function canListTelegramRetainedSourceReceive(
+  input: Readonly<{
+    origin: "buy_return_context" | "generic_add_funds";
+    continuationMode: "app_handoff" | "bot_submit" | null;
+  }>,
+): boolean {
+  return (
+    input.origin === "buy_return_context" &&
+    input.continuationMode === "app_handoff"
+  );
+}
+
+export function canListTelegramFundingTarget(
+  input: Readonly<{
+    authorizationAvailable: boolean;
+    automaticSourceAsset: AssetRef | null;
+    routeKey: string;
+    origin: "buy_return_context" | "generic_add_funds";
+    continuationMode: "app_handoff" | "bot_submit" | null;
+  }>,
+): boolean {
+  return (
+    input.authorizationAvailable ||
+    input.automaticSourceAsset === null ||
+    (isTelegramSolanaRetainedFundingRouteKey(input.routeKey) &&
+      canListTelegramRetainedSourceReceive(input))
   );
 }
 
@@ -2092,17 +2131,14 @@ export class TelegramFundingService {
       owned.context.origin === "buy_return_context"
         ? await fetchActiveTelegramFundingBuyReturn(this.pool, owned.context.id)
         : null;
-    const retainedSourceReceiveAllowed = canSelectRetainedSourceReceive({
-      origin: owned.context.origin,
-      continuationMode: activeBuyReturn?.continuationMode ?? null,
-    });
     const availableTargets = liveCapabilities.flatMap((candidate) =>
-      candidate.authorization ||
-      candidate.target.automaticSourceAsset === null ||
-      (retainedSourceReceiveAllowed &&
-        isTelegramSolanaRetainedFundingRouteKey(
-          candidate.target.presentation.routeKey,
-        ))
+      canListTelegramFundingTarget({
+        authorizationAvailable: candidate.authorization != null,
+        automaticSourceAsset: candidate.target.automaticSourceAsset,
+        routeKey: candidate.target.presentation.routeKey,
+        origin: owned.context.origin,
+        continuationMode: activeBuyReturn?.continuationMode ?? null,
+      })
         ? [candidate.target]
         : [],
     );

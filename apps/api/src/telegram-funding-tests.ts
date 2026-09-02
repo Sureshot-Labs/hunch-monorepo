@@ -72,6 +72,7 @@ import {
 import {
   buildTelegramFundingBuyReturnRequestFingerprint,
   buildTelegramFundingTargetMessageForSession,
+  canListTelegramFundingTarget,
   canAttachTelegramFundingBuyReturn,
   canDiscloseTelegramFundingAddress,
   canonicalTelegramFundingBuySpend,
@@ -754,6 +755,51 @@ const sol = {
   assetId: RELAY_PINNED_ASSETS.solanaNative,
   decimals: 9,
 } as const;
+
+assert.equal(
+  canListTelegramFundingTarget({
+    authorizationAvailable: false,
+    automaticSourceAsset: sol,
+    routeKey: "polymarket_solana_sol_retained_v1",
+    origin: "generic_add_funds",
+    continuationMode: null,
+  }),
+  false,
+  "ordinary venue Add funds must not list retained SOL as venue funding",
+);
+assert.equal(
+  canListTelegramFundingTarget({
+    authorizationAvailable: false,
+    automaticSourceAsset: sol,
+    routeKey: "polymarket_solana_sol_retained_v1",
+    origin: "buy_return_context",
+    continuationMode: "bot_submit",
+  }),
+  false,
+  "unattended bot submission must not treat retained SOL as venue funding",
+);
+assert.equal(
+  canListTelegramFundingTarget({
+    authorizationAvailable: false,
+    automaticSourceAsset: sol,
+    routeKey: "polymarket_solana_sol_retained_v1",
+    origin: "buy_return_context",
+    continuationMode: "app_handoff",
+  }),
+  true,
+  "the reviewed app-handoff Buy may offer retained SOL as a later funding source",
+);
+assert.equal(
+  canListTelegramFundingTarget({
+    authorizationAvailable: false,
+    automaticSourceAsset: null,
+    routeKey: "polymarket_polygon_pusd_direct_v1",
+    origin: "generic_add_funds",
+    continuationMode: null,
+  }),
+  true,
+  "direct venue collateral remains listed for ordinary Add funds",
+);
 const address = "0x1111111111111111111111111111111111111111";
 const solanaAddress = "9xQeWvG816bUx9EPjHmaT23yvVMX2wQ3a4K8Z2ZXyvN8";
 const expiresAt = "2026-08-06T12:00:00.000Z";

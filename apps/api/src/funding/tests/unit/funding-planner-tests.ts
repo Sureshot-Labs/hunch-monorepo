@@ -1678,6 +1678,120 @@ await test("Relay-first source planner asks only one exact Relay route", async (
     ],
   });
 
+  const marginalNativeFallbackPlanner = (fallbackMinimumRaw: string) => {
+    const attempts: string[] = [];
+    return {
+      attempts,
+      planner: new RelayFirstSourcePlanner({
+        listEligibleSources: async () => [
+          {
+            componentId: "component_marginal_native_12345678",
+            sourceLocationPatternId: "wallet_polygon",
+            safeLabel: "Marginal native source",
+            source: exactSource,
+            quoteInputAmount: { asset: POLYGON_PUSD, raw: "1100000" },
+            quoteMinimumOutput: { asset: POLYGON_PUSD, raw: "1000000" },
+            exactInputFallbackOnSourceCap: true,
+            maximumSourceRaw: "1100000",
+            maximumSlippageBps: 100,
+            estimatedUsd: "1.1",
+            transferable: true,
+            riskEligible: true,
+            walletExecutionReady: true,
+            nativeGasReady: true,
+            freshness: "fresh",
+          },
+        ],
+        quoteRelay: async ({ source, sourceAmount, minimumOutput }) => {
+          attempts.push(source.quoteModeOverride ?? "expected_output");
+          if (source.quoteModeOverride !== "exact_input") {
+            return {
+              kind: "rejected",
+              reasonCode: "provider_quote_economics_rejected",
+              retryAsExactInput: "source_cap_exceeded",
+            };
+          }
+          assert.equal(sourceAmount.raw, source.maximumSourceRaw);
+          assert.equal(minimumOutput.raw, "1");
+          const expectedOutputRaw = (
+            BigInt(fallbackMinimumRaw) + 5_000n
+          ).toString();
+          return {
+            sourceAmount,
+            sourceEstimatedUsd: "1.1",
+            candidate: {
+              providerId: "relay",
+              adapterVersion: 1,
+              capability: "same_network_swap",
+              amountMode: "exact_input",
+              source: exactSource,
+              destination: exactDestination.target,
+              expectedOutput: {
+                asset: POLYGON_PUSD,
+                raw: expectedOutputRaw,
+              },
+              minimumOutput: {
+                asset: POLYGON_PUSD,
+                raw: fallbackMinimumRaw,
+              },
+              fees: [],
+              eta: { minSeconds: 5, maxSeconds: 15 },
+              expiresAt: "2026-07-24T12:00:30.000Z",
+              actionKinds: ["evm_transaction"],
+              refundSemantics: "owned_refund",
+              opaqueQuoteRef: `opaque_marginal_${fallbackMinimumRaw}`,
+            },
+            feeUsd: [],
+            minimumDestinationEstimatedUsd:
+              fallbackMinimumRaw === "990000" ? "0.99" : "1",
+            executionPlan: {
+              kind: "wallet_route",
+              segments: [
+                {
+                  segmentId: `segment_marginal_${fallbackMinimumRaw}`,
+                  providerId: "relay",
+                  adapterId: "relay_quote_v2",
+                  adapterVersion: 1,
+                  source: exactSource,
+                  destination: exactDestination.target,
+                  amountMode: "exact_input",
+                },
+              ],
+            },
+            commitPlan: commitPlan(sourceAmount.raw),
+          };
+        },
+        observeRoute: async () => null,
+      }),
+    };
+  };
+  const marginalPartial = marginalNativeFallbackPlanner("990000");
+  const marginalPartialResult =
+    await marginalPartial.planner.discover(plannerInput);
+  assert.deepEqual(marginalPartial.attempts, [
+    "expected_output",
+    "exact_input",
+  ]);
+  assert.equal(marginalPartialResult.sources.length, 1);
+  assert.equal(
+    marginalPartialResult.sources[0]?.option.amountMode,
+    "exact_input",
+  );
+  assert.equal(
+    marginalPartialResult.sources[0]?.option.minimumDestination?.raw,
+    "990000",
+  );
+
+  const marginalFullWallet = marginalNativeFallbackPlanner("1000000");
+  assert.deepEqual(await marginalFullWallet.planner.discover(plannerInput), {
+    sources: [],
+    reasonCodes: ["provider_quote_economics_rejected"],
+  });
+  assert.deepEqual(marginalFullWallet.attempts, [
+    "expected_output",
+    "exact_input",
+  ]);
+
   let activeQuotes = 0;
   let maximumConcurrentQuotes = 0;
   let parallelQuoteCalls = 0;

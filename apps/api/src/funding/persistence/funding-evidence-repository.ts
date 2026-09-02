@@ -14,6 +14,9 @@ import {
 import {
   acceptFundingTradeAttemptInTransaction,
   hasUnresolvedFundingTradeAttemptInTransaction,
+  proveAmbiguousLimitlessFokNoFillInTransaction,
+  proveAmbiguousLimitlessTerminalRejectionInTransaction,
+  proveAmbiguousLimitlessTradeAttemptAbsentInTransaction,
   recordFundingTradeAttemptOutcomeInTransaction,
   type FundingTradeAttempt,
 } from "./funding-trade-attempt-repository.js";
@@ -770,30 +773,58 @@ export async function startFundingStepAttemptForUserInTransaction(
     step: FundingOperationStep;
   }>
 > {
+  // Lock the operation in its own statement. Under READ COMMITTED a statement
+  // that starts while a sibling report holds this lock can retain its older
+  // snapshot after waiting. The following statement therefore observes the
+  // sibling report that just committed before deciding whether another action
+  // may start.
+  const operationResult = await client.query<{
+    policy_revision: string;
+    policy_version: string | number;
+    status: FundingOperationRow["status"];
+  }>(
+    `
+      select status, policy_revision, policy_version
+      from funding_operations
+      where user_id = $1 and id = $2
+      for update
+    `,
+    [input.userId, input.operationId],
+  );
+  const operation = operationResult.rows[0];
+  if (!operation) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "funding operation step was not found for authenticated user",
+    );
+  }
   const { rows } = await client.query<
-    FundingOperationStepDbRow & {
-      operation_policy_revision: string;
-      operation_policy_version: string | number;
-      operation_status: string;
-    }
+    FundingOperationStepDbRow & { sibling_stop_state: boolean }
   >(
     `
         select
           ${operationStepColumns},
-          operation.status as operation_status,
-          operation.policy_revision as operation_policy_revision,
-          operation.policy_version as operation_policy_version
+          exists (
+            select 1
+            from funding_operation_steps sibling_step
+            where sibling_step.operation_id = step.operation_id
+              and sibling_step.id <> step.id
+              and sibling_step.state in (
+                'failed',
+                'cancelled',
+                'reconcile_required',
+                'recovery_required'
+              )
+          ) as sibling_stop_state
         from funding_operation_steps step
-        join funding_operations operation on operation.id = step.operation_id
         left join funding_operation_steps dependency
           on dependency.id = step.depends_on_step_id
          and dependency.operation_id = step.operation_id
-        where operation.user_id = $1
-          and operation.id = $2
-          and step.id = $3
-        for update of operation, step
+        where step.operation_id = $1
+          and step.id = $2
+        for update of step
     `,
-    [input.userId, input.operationId, input.stepId],
+    [input.operationId, input.stepId],
   );
   const row = rows[0];
   if (!row) {
@@ -815,8 +846,8 @@ export async function startFundingStepAttemptForUserInTransaction(
   }
   if (
     input.expectedPolicy &&
-    (row.operation_policy_revision !== input.expectedPolicy.revision ||
-      Number(row.operation_policy_version) !== input.expectedPolicy.version)
+    (operation.policy_revision !== input.expectedPolicy.revision ||
+      Number(operation.policy_version) !== input.expectedPolicy.version)
   ) {
     throw new FundingPersistenceError(
       "quote_invalidated",
@@ -835,19 +866,31 @@ export async function startFundingStepAttemptForUserInTransaction(
     );
   }
   if (
-    ["completed", "refunded", "failed", "cancelled"].includes(
-      row.operation_status,
-    )
+    [
+      "ready",
+      "reconcile_required",
+      "recovery_required",
+      "completed",
+      "refunded",
+      "failed",
+      "cancelled",
+    ].includes(operation.status)
   ) {
     throw new FundingPersistenceError(
       "invalid_state_transition",
-      "terminal funding operation cannot start an action",
+      "stopped funding operation cannot start an action",
     );
   }
   if (row.state !== "planned" && row.state !== "action_required") {
     throw new FundingPersistenceError(
       "invalid_state_transition",
       "funding operation step is not awaiting an action",
+    );
+  }
+  if (row.sibling_stop_state) {
+    throw new FundingPersistenceError(
+      "invalid_state_transition",
+      "a stopped or uncertain sibling prevents another funding action from starting",
     );
   }
   if (row.depends_on_step_id && row.dependency_state !== "succeeded") {
@@ -1004,24 +1047,43 @@ export async function finishFundingStepAttemptForUserInTransaction(
     stepState: "submitted" | "reconcile_required" | "failed" | "cancelled";
   }>
 > {
-  const scope = await client.query<{
-    attempt_id: string;
+  const operationResult = await client.query<{
+    operation_progress_stage: FundingOperationRow["progressStage"];
+    operation_recovery_mode: FundingOperationRow["recoveryMode"];
+    operation_status: FundingOperationRow["status"];
+    operation_version: string | number;
+  }>(
+    `
+      select progress_stage as operation_progress_stage,
+             recovery_mode as operation_recovery_mode,
+             status as operation_status,
+             version as operation_version
+      from funding_operations
+      where user_id = $1 and id = $2
+      for update
+    `,
+    [input.userId, input.operationId],
+  );
+  const scopedOperation = operationResult.rows[0];
+  if (!scopedOperation) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "funding action attempt was not found for authenticated user",
+    );
+  }
+  const stepResult = await client.query<{
     step_state: FundingOperationStepState;
   }>(
     `
-        select attempt.id as attempt_id, step.state as step_state
-        from funding_operation_step_attempts attempt
-        join funding_operation_steps step on step.id = attempt.step_id
-        join funding_operations operation on operation.id = step.operation_id
-        where operation.user_id = $1
-          and operation.id = $2
-          and step.id = $3
-          and attempt.id = $4
-        for update of operation, step, attempt
+      select state as step_state
+      from funding_operation_steps
+      where operation_id = $1 and id = $2
+      for update
     `,
-    [input.userId, input.operationId, input.stepId, input.attemptId],
+    [input.operationId, input.stepId],
   );
-  if (!scope.rows[0]) {
+  const scopedStep = stepResult.rows[0];
+  if (!scopedStep) {
     throw new FundingPersistenceError(
       "operation_not_found",
       "funding action attempt was not found for authenticated user",
@@ -1031,9 +1093,10 @@ export async function finishFundingStepAttemptForUserInTransaction(
     `
       select ${attemptColumns}
       from funding_operation_step_attempts
-      where id = $1
+      where step_id = $1 and id = $2
+      for update
     `,
-    [input.attemptId],
+    [input.stepId, input.attemptId],
   );
   const priorAttemptRow = priorAttemptResult.rows[0];
   if (!priorAttemptRow) {
@@ -1056,8 +1119,8 @@ export async function finishFundingStepAttemptForUserInTransaction(
     };
   }
   if (
-    scope.rows[0].step_state !== "planned" &&
-    scope.rows[0].step_state !== "action_required"
+    scopedStep.step_state !== "planned" &&
+    scopedStep.step_state !== "action_required"
   ) {
     throw new FundingPersistenceError(
       "invalid_state_transition",
@@ -1086,6 +1149,32 @@ export async function finishFundingStepAttemptForUserInTransaction(
     operationId: input.operationId,
     dueAt: input.now ?? new Date(),
   });
+  if (
+    input.broadcastMayHaveOccurred &&
+    (scopedOperation.operation_status === "failed" ||
+      scopedOperation.operation_status === "cancelled")
+  ) {
+    await transitionFundingOperationInTransaction(client, {
+      operationId: input.operationId,
+      scope: { kind: "worker" },
+      expectedVersion: Number(scopedOperation.operation_version),
+      expectedState: {
+        status: scopedOperation.operation_status,
+        stage: scopedOperation.operation_progress_stage,
+      },
+      nextState: { status: "recovery_required", stage: "source_action" },
+      recoveryMode:
+        input.receiptRefLookupHmac === null
+          ? "manual_review"
+          : "automatic_evidence",
+      errorCode: "late_broadcast_after_terminal_operation",
+      supportMetadataPatch: {
+        lateBroadcastAttemptId: input.attemptId,
+        lateBroadcastObservedAt: (input.now ?? new Date()).toISOString(),
+      },
+      now: input.now,
+    });
+  }
   return { attempt, stepState };
 }
 
@@ -1117,42 +1206,56 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
     stepState: FundingOperationStepState;
   }>
 > {
-  const scope = await client.query<{
+  const operationResult = await client.query<{
     operation_progress_stage: FundingOperationRow["progressStage"];
     operation_recovery_mode: FundingOperationRow["recoveryMode"];
     operation_status: FundingOperationRow["status"];
     operation_support_metadata: JsonRecord;
     operation_version: string | number;
+  }>(
+    `
+      select status as operation_status,
+             progress_stage as operation_progress_stage,
+             recovery_mode as operation_recovery_mode,
+             support_metadata as operation_support_metadata,
+             version as operation_version
+      from funding_operations
+      where user_id = $1 and id = $2
+      for update
+    `,
+    [input.userId, input.operationId],
+  );
+  const scopedOperation = operationResult.rows[0];
+  if (!scopedOperation) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "delegated funding attempt was not found for authenticated user",
+    );
+  }
+  const stepResult = await client.query<{
     step_state: FundingOperationStepState;
   }>(
     `
-      select step.state as step_state,
-             operation.status as operation_status,
-             operation.progress_stage as operation_progress_stage,
-             operation.recovery_mode as operation_recovery_mode,
-             operation.support_metadata as operation_support_metadata,
-             operation.version as operation_version
-      from funding_operation_step_attempts attempt
-      join funding_operation_steps step on step.id = attempt.step_id
-      join funding_operations operation on operation.id = step.operation_id
-      where operation.user_id = $1
-        and operation.id = $2
-        and step.id = $3
-        and attempt.id = $4
-      for update of operation, step, attempt
+      select state as step_state
+      from funding_operation_steps
+      where operation_id = $1 and id = $2
+      for update
     `,
-    [input.userId, input.operationId, input.stepId, input.attemptId],
+    [input.operationId, input.stepId],
   );
-  const scoped = scope.rows[0];
-  if (!scoped) {
+  const scopedStep = stepResult.rows[0];
+  if (!scopedStep) {
     throw new FundingPersistenceError(
       "operation_not_found",
       "delegated funding attempt was not found for authenticated user",
     );
   }
   const priorResult = await client.query<FundingStepAttemptDbRow>(
-    `select ${attemptColumns} from funding_operation_step_attempts where id = $1`,
-    [input.attemptId],
+    `select ${attemptColumns}
+       from funding_operation_step_attempts
+      where step_id = $1 and id = $2
+      for update`,
+    [input.stepId, input.attemptId],
   );
   const priorRow = priorResult.rows[0];
   if (!priorRow) {
@@ -1169,7 +1272,7 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
       prior.receiptRefLookupHmac === input.resolution.receiptRefLookupHmac &&
       prior.lookupKeyVersion === input.resolution.lookupKeyVersion
     ) {
-      return { attempt: prior, stepState: scoped.step_state };
+      return { attempt: prior, stepState: scopedStep.step_state };
     }
   } else if (
     prior.outcome === "failed" &&
@@ -1182,7 +1285,7 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
     prior.referenceKind !== "provider_receipt" ||
     prior.receiptRefLookupHmac !== input.providerReferenceLookupHmac ||
     prior.lookupKeyVersion === null ||
-    !["reconcile_required", "recovery_required"].includes(scoped.step_state)
+    !["reconcile_required", "recovery_required"].includes(scopedStep.step_state)
   ) {
     throw new FundingPersistenceError(
       "invalid_state_transition",
@@ -1248,7 +1351,7 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
   }
   const stepState =
     input.resolution.kind === "transaction"
-      ? scoped.step_state
+      ? scopedStep.step_state
       : input.retryableDefinitiveFailure
         ? "action_required"
         : "failed";
@@ -1270,24 +1373,25 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
   }
   const strandedProviderFailure =
     input.resolution.kind === "definitive_failure" &&
-    scoped.operation_status === "recovery_required" &&
-    scoped.operation_recovery_mode === "automatic_evidence";
+    scopedOperation.operation_status === "recovery_required" &&
+    scopedOperation.operation_recovery_mode === "automatic_evidence";
   const hasGenericWindow =
-    scoped.operation_support_metadata.reconciliationActiveSince != null ||
-    scoped.operation_support_metadata.reconciliationActiveAttemptBaseline !=
-      null;
+    scopedOperation.operation_support_metadata.reconciliationActiveSince !=
+      null ||
+    scopedOperation.operation_support_metadata
+      .reconciliationActiveAttemptBaseline != null;
   if (hasGenericWindow || strandedProviderFailure) {
     // Provider recovery and generic reconciliation own different clocks. At
     // their handoff, discard the old window; a proven failure also ends the
     // automatic loop because no recovery selector can claim a failed step.
     const state = {
-      status: scoped.operation_status,
-      stage: scoped.operation_progress_stage,
+      status: scopedOperation.operation_status,
+      stage: scopedOperation.operation_progress_stage,
     } as const;
     await transitionFundingOperationInTransaction(client, {
       operationId: input.operationId,
       scope: { kind: "worker" },
-      expectedVersion: Number(scoped.operation_version),
+      expectedVersion: Number(scopedOperation.operation_version),
       expectedState: state,
       nextState: state,
       ...(strandedProviderFailure
@@ -1753,13 +1857,65 @@ export async function consumeFundingReservationForLinkedConsumerInTransaction(
     userId: string;
     reservationId: string;
     tradeAttemptId?: string | null;
+    tradeAttemptReconciliationClaimToken?: string | null;
     consumer: FundingReservationConsumer;
     outcomeReason: string;
     now?: Date;
   }>,
 ) {
+  const identity = await client.query<{ operation_id: string }>(
+    `select operation_id
+       from balance_reservations
+      where id = $1 and user_id = $2`,
+    [input.reservationId, input.userId],
+  );
+  const expectedOperationId = identity.rows[0]?.operation_id;
+  if (!expectedOperationId) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "settled funding reservation is not linked to authenticated user",
+    );
+  }
+  await client.query(
+    `select intent.id
+       from telegram_trade_intents intent
+      where intent.user_id = $1
+        and intent.funding_operation_id = $2
+      order by intent.id
+      for update`,
+    [input.userId, expectedOperationId],
+  );
+  const lockedOperation = await client.query<{ id: string }>(
+    `select id
+       from funding_operations
+      where id = $1 and user_id = $2
+      for update`,
+    [expectedOperationId, input.userId],
+  );
+  if (!lockedOperation.rows[0]) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "funding operation is not available for trade consumption",
+    );
+  }
+  const lockedReservation = await client.query<{ id: string }>(
+    `select id
+       from balance_reservations
+      where id = $1
+        and operation_id = $2
+        and user_id = $3
+      for update`,
+    [input.reservationId, expectedOperationId, input.userId],
+  );
+  if (!lockedReservation.rows[0]) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "funding reservation disappeared before trade consumption",
+    );
+  }
   const scope = await loadFundingTradeReservationScope(client, {
     userId: input.userId,
+    operationId: expectedOperationId,
     reservationId: input.reservationId,
   });
   const operationId = scope.operation_id;
@@ -1890,6 +2046,8 @@ export async function consumeFundingReservationForLinkedConsumerInTransaction(
     operationId,
     reservationId: input.reservationId,
     attemptId: input.tradeAttemptId,
+    expectedReconciliationClaimToken:
+      input.tradeAttemptReconciliationClaimToken,
     externalReference,
     consumerKind: consumerKind as
       | "web_order"
@@ -1952,6 +2110,15 @@ export async function releaseFundingReservationForAbandonedTradeInTransaction(
     now?: Date;
   }>,
 ): Promise<void> {
+  await client.query(
+    `select intent.id
+       from telegram_trade_intents intent
+      where intent.user_id = $1
+        and intent.funding_operation_id = $2
+      order by intent.id
+      for update`,
+    [input.userId, input.link.operationId],
+  );
   await client.query(
     `
       select id
@@ -2093,6 +2260,7 @@ export async function releaseFundingReservationForDefinitiveTradeFailure(
     errorCode?: string | null;
     externalReference?: string | null;
     broadcastMayHaveOccurred: boolean;
+    operationSupportMetadataPatch?: JsonRecord;
     /** Preserve a precise sealed-handoff terminal reason when one is known. */
     handoffFailure?: Readonly<{ code: string; message: string }>;
     now?: Date;
@@ -2106,6 +2274,7 @@ export async function releaseFundingReservationForDefinitiveTradeFailure(
       externalReference: input.externalReference,
       errorCode: input.errorCode,
       broadcastMayHaveOccurred: input.broadcastMayHaveOccurred,
+      operationSupportMetadataPatch: input.operationSupportMetadataPatch,
       now: input.now,
     });
     await releaseFundingReservationForAbandonedTradeInTransaction(client, {
@@ -2115,6 +2284,110 @@ export async function releaseFundingReservationForDefinitiveTradeFailure(
       handoffFailure: input.handoffFailure ?? {
         code: input.errorCode?.trim() || "funding_trade_failed",
         message: "Funding could not complete before the Buy was submitted.",
+      },
+      now: input.now,
+    });
+  });
+}
+
+export async function releaseFundingReservationForProvenAbsentLimitlessTrade(
+  pool: Pool,
+  input: Readonly<{
+    clientOrderId: string;
+    expectedClaimToken: string;
+    link: FundingTradeReservationLink;
+    minimumAgeMs: number;
+    now?: Date;
+    operationSupportMetadataPatch?: JsonRecord;
+    tradeAttemptId: string;
+    userId: string;
+  }>,
+): Promise<void> {
+  await tx(pool, async (client) => {
+    await proveAmbiguousLimitlessTradeAttemptAbsentInTransaction(client, {
+      attemptId: input.tradeAttemptId,
+      clientOrderId: input.clientOrderId,
+      expectedClaimToken: input.expectedClaimToken,
+      minimumAgeMs: input.minimumAgeMs,
+      now: input.now,
+      operationSupportMetadataPatch: input.operationSupportMetadataPatch,
+      userId: input.userId,
+    });
+    await releaseFundingReservationForAbandonedTradeInTransaction(client, {
+      handoffFailure: {
+        code: "limitless_exact_status_not_found",
+        message:
+          "Limitless did not accept the prior order. The funded balance is available to try again.",
+      },
+      userId: input.userId,
+      link: input.link,
+      outcomeReason: "trade_not_accepted",
+      now: input.now,
+    });
+  });
+}
+
+export async function releaseFundingReservationForProvenLimitlessFokNoFill(
+  pool: Pool,
+  input: Readonly<{
+    clientOrderId: string;
+    expectedClaimToken: string;
+    link: FundingTradeReservationLink;
+    now?: Date;
+    tradeAttemptId: string;
+    userId: string;
+  }>,
+): Promise<void> {
+  await tx(pool, async (client) => {
+    await proveAmbiguousLimitlessFokNoFillInTransaction(client, {
+      attemptId: input.tradeAttemptId,
+      clientOrderId: input.clientOrderId,
+      expectedClaimToken: input.expectedClaimToken,
+      now: input.now,
+      userId: input.userId,
+    });
+    await releaseFundingReservationForAbandonedTradeInTransaction(client, {
+      userId: input.userId,
+      link: input.link,
+      outcomeReason: "trade_no_fill",
+      handoffFailure: {
+        code: "trade_no_fill",
+        message: "Limitless could not fill the funded Buy. Nothing was bought.",
+      },
+      now: input.now,
+    });
+  });
+}
+
+export async function releaseFundingReservationForProvenLimitlessTerminalRejection(
+  pool: Pool,
+  input: Readonly<{
+    clientOrderId: string;
+    errorCode: string;
+    expectedClaimToken: string;
+    link: FundingTradeReservationLink;
+    now?: Date;
+    tradeAttemptId: string;
+    userId: string;
+  }>,
+): Promise<void> {
+  await tx(pool, async (client) => {
+    await proveAmbiguousLimitlessTerminalRejectionInTransaction(client, {
+      attemptId: input.tradeAttemptId,
+      clientOrderId: input.clientOrderId,
+      errorCode: input.errorCode,
+      expectedClaimToken: input.expectedClaimToken,
+      now: input.now,
+      userId: input.userId,
+    });
+    await releaseFundingReservationForAbandonedTradeInTransaction(client, {
+      userId: input.userId,
+      link: input.link,
+      outcomeReason: "trade_rejected",
+      handoffFailure: {
+        code: input.errorCode,
+        message:
+          "Limitless conclusively reported that the prior order was not accepted.",
       },
       now: input.now,
     });

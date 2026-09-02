@@ -73,6 +73,25 @@ export async function cancelFundingOperationForUser(
   }>,
 ): Promise<FundingOperationRow> {
   return tx(pool, async (client) => {
+    const candidate = await fetchFundingOperationForUser(client, input);
+    if (!candidate) {
+      throw new FundingPersistenceError(
+        "operation_not_found",
+        "funding operation was not found for authenticated user",
+      );
+    }
+    // The unlocked owner-scoped read resolves the cancellation target. Lock
+    // linked intents first to match the sealed handoff claim, then lock and
+    // revalidate the operation before touching steps or reservations.
+    await client.query(
+      `select intent.id
+         from telegram_trade_intents intent
+        where intent.user_id = $1
+          and intent.funding_operation_id = $2
+        order by intent.id
+        for update`,
+      [input.userId, input.operationId],
+    );
     await client.query(
       `
         select id

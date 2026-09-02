@@ -7,10 +7,14 @@ import { env } from "../env.js";
 import {
   assertFundingReservationReadyForTrade,
   releaseFundingReservationForDefinitiveTradeFailure,
+  releaseFundingReservationForProvenAbsentLimitlessTrade,
+  releaseFundingReservationForProvenLimitlessFokNoFill,
+  releaseFundingReservationForProvenLimitlessTerminalRejection,
 } from "../funding/persistence/funding-evidence-repository.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { buildFundingTradeConsumerIntent } from "../funding/persistence/funding-trade-consumer-intent.js";
 import {
+  claimLimitlessTradeAttemptForReconciliation,
   markFundingTradeAttemptSubmissionStarted,
   recordFundingTradeAttemptOutcome,
 } from "../funding/persistence/funding-trade-attempt-repository.js";
@@ -67,6 +71,10 @@ import {
 } from "./polygon-rpc.js";
 import { fetchLimitlessOnchainSnapshot } from "./limitless-onchain.js";
 import { isLimitlessAmmMarketMetadata } from "./limitless-market-mode.js";
+import {
+  deterministicLimitlessClientOrderId,
+  deterministicLimitlessDirectHandoffClientOrderId,
+} from "./limitless-order-identity.js";
 import { buildLimitlessRedemptionPlan } from "./limitless-redemption-plan.js";
 import { fetchConditionalTokensPayouts } from "./limitless-redemption.js";
 import { recomputePositionMetricsForWallet } from "./positions-metrics.js";
@@ -120,14 +128,25 @@ import {
   limitlessRequest,
 } from "./limitless-client.js";
 import {
+  classifyLimitlessOrderRejection,
+  parseLimitlessOrderRejection,
+  type LimitlessOrderRejectionDecision,
+  type LimitlessOrderRejectionEvidence,
+} from "./limitless-order-rejection.js";
+import {
   isLimitlessClobDefinitiveNoFill,
   quoteLimitlessClobMarket,
 } from "./limitless-clob-quote.js";
 import {
   extractLimitlessExecutionFill,
   isLimitlessFokUnmatchedMessage,
+  isLimitlessTerminalRejectedStatus,
   parseLimitlessOrderResult,
 } from "./limitless-order-result.js";
+import {
+  fetchLimitlessExactClientOrderStatus,
+  isLimitlessExactStatusAbsenceMature,
+} from "./limitless-order-status.js";
 import {
   deriveLimitlessSignedOrderSize,
   normalizeLimitlessMaybeRawAmount,
@@ -160,6 +179,7 @@ const LIMITLESS_FOK_UNMATCHED_MESSAGE =
   "Order was not filled because no immediate match was available. Nothing was bought or sold. Try again or place a limit order.";
 const LIMITLESS_AMM_DEFAULT_SLIPPAGE_BPS = 30;
 const LIMITLESS_AMM_RECEIPT_WAIT_MS = 90_000;
+const LIMITLESS_EXACT_STATUS_ABSENCE_MIN_AGE_MS = 5 * 60_000;
 const LIMITLESS_CONNECT_LOCK_PREFIX = "lock:limitless:connect:";
 const LIMITLESS_CONNECT_STORED_PROFILE_POLL_DELAYS_MS = [
   100, 250, 500, 1_000,
@@ -449,16 +469,6 @@ function mapLimitlessUpstreamStatus(status: number): number {
   if (status === 401 || status === 403) return 400;
   if (status >= 400 && status < 500) return status;
   return 502;
-}
-
-/**
- * These are the only client responses that prove the CLOB rejected the order
- * before it could create one. Timeout, conflict and throttling responses can
- * all be returned after a proxy/venue boundary and must remain reconcilable by
- * the deterministic client order ID.
- */
-function isLimitlessClobDefinitiveClientRejection(status: number): boolean {
-  return status >= 400 && status < 500 && ![408, 409, 429].includes(status);
 }
 
 function buildLimitlessOnBehalfHeaders(
@@ -1091,6 +1101,33 @@ function stringifyLimitlessRawError(payload: unknown): string | null {
   } catch {
     return null;
   }
+}
+
+function buildLimitlessTradeSubmissionEvidencePatch(input: {
+  clientOrderId: string;
+  decision: LimitlessOrderRejectionDecision;
+  evidence: LimitlessOrderRejectionEvidence;
+}) {
+  return {
+    limitlessTradeSubmissionEvidence: {
+      version: 1,
+      recordedAt: new Date().toISOString(),
+      clientOrderId: input.clientOrderId,
+      disposition: input.decision.disposition,
+      kind: input.decision.kind,
+      errorCode: input.decision.errorCode,
+      mayRetrySubmission: input.decision.mayRetrySubmission,
+      retryableAfterReconciliation: input.decision.retryableAfterReconciliation,
+      response: {
+        status: input.evidence.status,
+        providerCode: input.evidence.providerCode,
+        messages: input.evidence.messages,
+        payload: input.evidence.payload,
+        digest: input.evidence.digest,
+        truncated: input.evidence.truncated,
+      },
+    },
+  } as const;
 }
 
 function normalizeLimitlessPrice(value: number | null): number | null {
@@ -3219,19 +3256,32 @@ async function finalizeLimitlessFokNoFill(
     directHandoffSubmission: TelegramAppHandoffV2DirectTradeSubmission | null;
     fundingReservation: TradeIntent["fundingReservation"] | null;
     fundingTradeAttemptId: string | null;
+    fundingTradeReconciliationClaimToken: string | null;
+    reconciledExactStatus: boolean;
   },
 ): Promise<Extract<LimitlessClientSignedOrderResult, { ok: true }>["payload"]> {
   const noFill = await recordLimitlessFokNoFill(input);
   if (input.fundingReservation && input.fundingTradeAttemptId) {
-    await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
-      userId: input.userId,
-      link: input.fundingReservation,
-      tradeAttemptId: input.fundingTradeAttemptId,
-      outcomeReason: "trade_no_fill",
-      errorCode: "trade_no_fill",
-      externalReference: input.venueOrderId ?? input.clientOrderId,
-      broadcastMayHaveOccurred: true,
-    });
+    if (input.reconciledExactStatus) {
+      await releaseFundingReservationForProvenLimitlessFokNoFill(input.pool, {
+        clientOrderId: input.clientOrderId,
+        expectedClaimToken:
+          input.fundingTradeReconciliationClaimToken as string,
+        link: input.fundingReservation,
+        tradeAttemptId: input.fundingTradeAttemptId,
+        userId: input.userId,
+      });
+    } else {
+      await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
+        userId: input.userId,
+        link: input.fundingReservation,
+        tradeAttemptId: input.fundingTradeAttemptId,
+        outcomeReason: "trade_no_fill",
+        errorCode: "trade_no_fill",
+        externalReference: input.venueOrderId ?? input.clientOrderId,
+        broadcastMayHaveOccurred: true,
+      });
+    }
   }
   if (
     input.directHandoffBinding &&
@@ -3747,10 +3797,12 @@ export async function submitLimitlessClientSignedOrder(input: {
   }
   // The generic v2 funding continuation is single-flight. Reuse its provider
   // id across two browser tabs instead of duplicating its final venue trade.
-  const clientOrderId = directHandoffBinding
-    ? `hunch-th2-${directHandoffBinding.handoffId}`
+  let clientOrderId = directHandoffBinding
+    ? deterministicLimitlessDirectHandoffClientOrderId(
+        directHandoffBinding.handoffId,
+      )
     : `hunch-${crypto.randomUUID()}`;
-  const orderPayload = {
+  let orderPayload = {
     order: orderForUpstream,
     orderType: input.body.orderType,
     ...(input.body.postOnly === true ? { postOnly: true } : {}),
@@ -4052,21 +4104,147 @@ export async function submitLimitlessClientSignedOrder(input: {
 
   let fundingTradeAttemptId: string | null = null;
   let fundingTradeClaimToken: string | null = null;
+  let fundingTradeReconciliationClaimToken: string | null = null;
+  let reconciledUpstreamPayload: unknown | undefined;
+  let reconciledExactStatus = false;
   if (fundingReservation) {
     try {
       const claim = await claimCurrentFundingTradeAttempt();
       if (!claim.claimed) {
-        return {
-          ok: false,
-          statusCode: 409,
-          payload: {
-            error:
-              "This funding reservation already has a trade attempt that must reconcile.",
+        const exactClientOrderId = claim.attempt.externalReference?.trim();
+        if (
+          !exactClientOrderId ||
+          !["submission_started", "ambiguous"].includes(claim.attempt.state)
+        ) {
+          return {
+            ok: false,
+            statusCode: 409,
+            payload: {
+              code: "limitless_submit_reconciling",
+              error:
+                "This funding reservation already has a trade attempt that must reconcile.",
+            },
+          };
+        }
+        const leasedAttempt = await claimLimitlessTradeAttemptForReconciliation(
+          input.pool,
+          {
+            attemptId: claim.attempt.id,
+            leaseSeconds: 30,
+            userId: input.userId,
           },
-        };
+        );
+        if (!leasedAttempt) {
+          return {
+            ok: false,
+            statusCode: 409,
+            payload: {
+              code: "limitless_submit_reconciling",
+              error: "Limitless order status is being reconciled.",
+            },
+          };
+        }
+        let exactStatus: Awaited<
+          ReturnType<typeof fetchLimitlessExactClientOrderStatus>
+        >;
+        try {
+          exactStatus =
+            await fetchLimitlessExactClientOrderStatus(exactClientOrderId);
+        } catch (error) {
+          input.log?.warn?.(
+            {
+              clientOrderId: exactClientOrderId,
+              errorName: error instanceof Error ? error.name : "UnknownError",
+              tradeAttemptId: leasedAttempt.id,
+              userId: input.userId,
+            },
+            "Limitless exact order reconciliation lookup failed",
+          );
+          return {
+            ok: false,
+            statusCode: 409,
+            payload: {
+              code: "limitless_submit_reconciling",
+              error: "Limitless order status is being reconciled.",
+            },
+          };
+        }
+        if (exactStatus.kind === "unknown") {
+          input.log?.warn?.(
+            {
+              clientOrderId: exactClientOrderId,
+              reason: exactStatus.reason,
+              tradeAttemptId: leasedAttempt.id,
+              userId: input.userId,
+            },
+            "Limitless exact order reconciliation response was not authoritative",
+          );
+          return {
+            ok: false,
+            statusCode: 409,
+            payload: {
+              code: "limitless_submit_reconciling",
+              error: "Limitless order status is being reconciled.",
+            },
+          };
+        }
+        if (exactStatus.kind === "not_found") {
+          if (
+            !isLimitlessExactStatusAbsenceMature({
+              ambiguousAt: leasedAttempt.resolvedAt,
+              minimumAgeMs: LIMITLESS_EXACT_STATUS_ABSENCE_MIN_AGE_MS,
+              now: new Date(),
+            })
+          ) {
+            return {
+              ok: false,
+              statusCode: 409,
+              payload: {
+                code: "limitless_submit_reconciling",
+                error: "Limitless order status is being reconciled.",
+              },
+            };
+          }
+          await releaseFundingReservationForProvenAbsentLimitlessTrade(
+            input.pool,
+            {
+              clientOrderId: exactClientOrderId,
+              expectedClaimToken: leasedAttempt.claimToken,
+              link: fundingReservation,
+              minimumAgeMs: LIMITLESS_EXACT_STATUS_ABSENCE_MIN_AGE_MS,
+              operationSupportMetadataPatch: {
+                limitlessTradeAbsenceProof: {
+                  version: 1,
+                  checkedAt: new Date().toISOString(),
+                  clientOrderId: exactClientOrderId,
+                  minimumAgeMs: LIMITLESS_EXACT_STATUS_ABSENCE_MIN_AGE_MS,
+                  providerStatus: "not_found",
+                },
+              },
+              tradeAttemptId: leasedAttempt.id,
+              userId: input.userId,
+            },
+          );
+          return {
+            ok: false,
+            statusCode: 409,
+            payload: {
+              code: "limitless_submit_not_accepted_retryable",
+              error:
+                "Limitless did not accept the prior order. The funded balance is available to try again.",
+            },
+          };
+        }
+        clientOrderId = exactClientOrderId;
+        orderPayload = { ...orderPayload, clientOrderId };
+        fundingTradeAttemptId = leasedAttempt.id;
+        fundingTradeReconciliationClaimToken = leasedAttempt.claimToken;
+        reconciledUpstreamPayload = exactStatus.item.payload;
+        reconciledExactStatus = true;
+      } else {
+        fundingTradeAttemptId = claim.attempt.id;
+        fundingTradeClaimToken = claim.attempt.claimToken;
       }
-      fundingTradeAttemptId = claim.attempt.id;
-      fundingTradeClaimToken = claim.attempt.claimToken;
     } catch (error) {
       return {
         ok: false,
@@ -4104,6 +4282,8 @@ export async function submitLimitlessClientSignedOrder(input: {
       directHandoffSubmission,
       fundingReservation,
       fundingTradeAttemptId,
+      fundingTradeReconciliationClaimToken,
+      reconciledExactStatus,
       orderPayload,
       pool: input.pool,
       price,
@@ -4118,32 +4298,85 @@ export async function submitLimitlessClientSignedOrder(input: {
 
   let upstream: Awaited<ReturnType<typeof submitLimitlessClobOrderToVenue>>;
   try {
-    upstream = await submitLimitlessClobOrderToVenue({
-      body: orderPayload,
-      requestAuth,
-    });
+    upstream =
+      reconciledUpstreamPayload !== undefined
+        ? { ok: true, payload: reconciledUpstreamPayload }
+        : await submitLimitlessClobOrderToVenue({
+            body: orderPayload,
+            requestAuth,
+          });
   } catch (error) {
+    const evidence = parseLimitlessOrderRejection({
+      status: null,
+      payload: {
+        error: "Limitless request failed without a response",
+        name: error instanceof Error ? error.name : "UnknownError",
+      },
+    });
+    const decision = classifyLimitlessOrderRejection({
+      evidence,
+      orderType: input.body.orderType,
+    });
+    const operationSupportMetadataPatch =
+      buildLimitlessTradeSubmissionEvidencePatch({
+        clientOrderId,
+        decision,
+        evidence,
+      });
     if (fundingTradeAttemptId) {
       await recordFundingTradeAttemptOutcome(input.pool, {
         userId: input.userId,
         attemptId: fundingTradeAttemptId,
         outcome: "ambiguous",
         externalReference: clientOrderId,
-        errorCode: "limitless_submit_state_unknown",
+        errorCode: decision.errorCode,
         broadcastMayHaveOccurred: true,
+        operationSupportMetadataPatch,
       });
     }
+    input.log?.warn?.(
+      {
+        clientOrderId,
+        decision,
+        evidence,
+        funded: Boolean(fundingReservation),
+        userId: input.userId,
+      },
+      "Limitless order response was lost; submission remains reconciling",
+    );
     // The provider may have accepted a request whose response was lost. Leave
     // a direct handoff executing for reconciliation; never reopen this trade.
     throw error;
   }
 
   if (!upstream.ok) {
-    const upstreamMessage = extractLimitlessMessage(upstream.payload);
-    if (
-      input.body.orderType === "FOK" &&
-      isLimitlessFokUnmatchedMessage(upstreamMessage)
-    ) {
+    const evidence = parseLimitlessOrderRejection({
+      status: upstream.status,
+      payload: upstream.payload,
+    });
+    const upstreamMessage = evidence.messages[0] ?? null;
+    const decision = classifyLimitlessOrderRejection({
+      evidence,
+      explicitFokNoFill: isLimitlessFokUnmatchedMessage(upstreamMessage),
+      orderType: input.body.orderType,
+    });
+    const operationSupportMetadataPatch =
+      buildLimitlessTradeSubmissionEvidencePatch({
+        clientOrderId,
+        decision,
+        evidence,
+      });
+    input.log?.warn?.(
+      {
+        clientOrderId,
+        decision,
+        evidence,
+        funded: Boolean(fundingReservation),
+        userId: input.userId,
+      },
+      "Limitless order submission was rejected or requires reconciliation",
+    );
+    if (decision.disposition === "fok_no_fill") {
       const venueOrderId = extractLimitlessOrderIdFromMessage(upstreamMessage);
       const noFill = await finalizeCurrentFokNoFill(
         upstream.payload,
@@ -4155,14 +4388,15 @@ export async function submitLimitlessClientSignedOrder(input: {
       };
     }
     if (fundingReservation && fundingTradeAttemptId) {
-      if (upstream.status >= 500) {
+      if (decision.disposition === "ambiguous") {
         await recordFundingTradeAttemptOutcome(input.pool, {
           userId: input.userId,
           attemptId: fundingTradeAttemptId,
           outcome: "ambiguous",
           externalReference: clientOrderId,
-          errorCode: "limitless_submit_state_unknown",
+          errorCode: decision.errorCode,
           broadcastMayHaveOccurred: true,
+          operationSupportMetadataPatch,
         });
       } else {
         await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
@@ -4170,9 +4404,16 @@ export async function submitLimitlessClientSignedOrder(input: {
           link: fundingReservation,
           tradeAttemptId: fundingTradeAttemptId,
           outcomeReason: "trade_rejected",
-          errorCode: "limitless_trade_rejected",
+          errorCode: decision.errorCode,
           externalReference: clientOrderId,
           broadcastMayHaveOccurred: true,
+          operationSupportMetadataPatch,
+          handoffFailure: {
+            code: decision.errorCode,
+            message:
+              upstreamMessage ??
+              `Limitless rejected the sealed ${side === "SELL" ? "Sell" : "Buy"} before accepting it.`,
+          },
         });
       }
     }
@@ -4180,13 +4421,13 @@ export async function submitLimitlessClientSignedOrder(input: {
       directHandoffBinding &&
       directHandoffSubmission &&
       !fundingReservation &&
-      isLimitlessClobDefinitiveClientRejection(upstream.status)
+      decision.failDirectHandoff
     ) {
       try {
         await failTelegramAppHandoffV2DirectTradeSubmission(input.pool, {
           binding: directHandoffBinding,
           reason: {
-            code: "limitless_trade_rejected",
+            code: decision.errorCode,
             message:
               upstreamMessage ??
               `Limitless rejected the sealed ${side === "SELL" ? "Sell" : "Buy"} before accepting it.`,
@@ -4199,6 +4440,14 @@ export async function submitLimitlessClientSignedOrder(input: {
           { error, clientOrderId, userId: input.userId },
           "Limitless direct rejection remains reconciling",
         );
+        return {
+          ok: false,
+          statusCode: 409,
+          payload: {
+            code: "limitless_submit_reconciling",
+            error: "Limitless order status is being reconciled",
+          },
+        };
       }
     }
     // A timeout, conflict, throttle, 5xx, or a failed terminal write is not
@@ -4206,12 +4455,24 @@ export async function submitLimitlessClientSignedOrder(input: {
     // handoffs remain executing until the exact clientOrderId has a result.
     return {
       ok: false,
-      statusCode: mapLimitlessUpstreamStatus(upstream.status),
+      statusCode:
+        decision.disposition === "ambiguous"
+          ? 409
+          : mapLimitlessUpstreamStatus(upstream.status),
       payload: {
-        error: "Limitless order placement failed",
-        ...(upstreamMessage ? { message: upstreamMessage } : {}),
+        code:
+          decision.disposition === "ambiguous"
+            ? "limitless_submit_reconciling"
+            : decision.errorCode,
+        error:
+          decision.disposition === "ambiguous"
+            ? "Limitless order status is being reconciled"
+            : "Limitless order placement failed",
+        ...(decision.disposition === "definitive_failure" && upstreamMessage
+          ? { message: upstreamMessage }
+          : {}),
         status: upstream.status,
-        payload: upstream.payload,
+        payload: evidence.payload,
       },
     };
   }
@@ -4219,6 +4480,75 @@ export async function submitLimitlessClientSignedOrder(input: {
   const submittedOrder = extractLimitlessSubmittedOrder(upstream.payload);
   const venueOrderId = submittedOrder.venueOrderId;
   const parsedResult = parseLimitlessOrderResult(upstream.payload);
+
+  if (isLimitlessTerminalRejectedStatus(parsedResult.status)) {
+    const errorCode = `limitless_exact_status_${parsedResult.status}`;
+    try {
+      if (fundingReservation && fundingTradeAttemptId) {
+        if (reconciledExactStatus) {
+          await releaseFundingReservationForProvenLimitlessTerminalRejection(
+            input.pool,
+            {
+              clientOrderId,
+              errorCode,
+              expectedClaimToken:
+                fundingTradeReconciliationClaimToken as string,
+              link: fundingReservation,
+              tradeAttemptId: fundingTradeAttemptId,
+              userId: input.userId,
+            },
+          );
+        } else {
+          await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
+            userId: input.userId,
+            link: fundingReservation,
+            tradeAttemptId: fundingTradeAttemptId,
+            outcomeReason: "trade_rejected",
+            errorCode,
+            externalReference: venueOrderId ?? clientOrderId,
+            broadcastMayHaveOccurred: true,
+          });
+        }
+      }
+      if (
+        directHandoffBinding &&
+        directHandoffSubmission &&
+        !fundingReservation
+      ) {
+        await failTelegramAppHandoffV2DirectTradeSubmission(input.pool, {
+          binding: directHandoffBinding,
+          reason: {
+            code: errorCode,
+            message:
+              "Limitless conclusively reported that the order was not accepted.",
+          },
+          submission: directHandoffSubmission,
+          userId: input.userId,
+        });
+      }
+    } catch (error) {
+      input.log?.warn?.(
+        { error, clientOrderId, userId: input.userId },
+        "Limitless terminal order result remains reconciling",
+      );
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          code: "limitless_submit_reconciling",
+          error: "Limitless order status is being reconciled",
+        },
+      };
+    }
+    return {
+      ok: false,
+      statusCode: 409,
+      payload: {
+        code: "limitless_submit_not_accepted_retryable",
+        error: "Limitless did not accept the order.",
+      },
+    };
+  }
 
   if (input.body.orderType === "FOK" && parsedResult.explicitNoFill) {
     const noFill = await finalizeCurrentFokNoFill(
@@ -4295,6 +4625,7 @@ export async function submitLimitlessClientSignedOrder(input: {
     orderHash: parsedResult.txHash,
     fundingReservation,
     fundingTradeAttemptId,
+    fundingTradeReconciliationClaimToken,
     telegramAppHandoffV2DirectTrade:
       directHandoffBinding && directHandoffSubmission && !fundingReservation
         ? { ...directHandoffBinding, ...directHandoffSubmission }
@@ -6149,14 +6480,6 @@ function digestPreparedPayload(value: unknown): string {
     .digest("hex");
 }
 
-function deterministicLimitlessClientOrderId(intent: TradeIntent): string {
-  return `hunch-${crypto
-    .createHash("sha256")
-    .update(intent.idempotencyKey)
-    .digest("hex")
-    .slice(0, 32)}`;
-}
-
 async function fetchLimitlessExchangeAddress(input: {
   marketSlug: string;
   requestAuth: Record<string, unknown>;
@@ -6438,7 +6761,9 @@ async function prepareTrade(
     },
   });
   const size = input.quote?.estimatedShares ?? amountUsd(intent) / price;
-  const clientOrderId = deterministicLimitlessClientOrderId(intent);
+  const clientOrderId = deterministicLimitlessClientOrderId(
+    intent.idempotencyKey,
+  );
 
   return {
     preparedId: crypto.randomUUID(),
@@ -6675,8 +7000,17 @@ async function submitPreparedTrade(
     },
   });
   if (!upstream.ok) {
-    const message = extractLimitlessMessage(upstream.payload);
-    if (isLimitlessFokUnmatchedMessage(message)) {
+    const evidence = parseLimitlessOrderRejection({
+      status: upstream.status,
+      payload: upstream.payload,
+    });
+    const message = evidence.messages[0] ?? null;
+    const decision = classifyLimitlessOrderRejection({
+      evidence,
+      explicitFokNoFill: isLimitlessFokUnmatchedMessage(message),
+      orderType: payload.orderType,
+    });
+    if (decision.disposition === "fok_no_fill") {
       return {
         venue: "limitless",
         status: "no_fill",
@@ -6694,9 +7028,15 @@ async function submitPreparedTrade(
       };
     }
     throw tradingError({
-      code: "trade_submission_failed",
+      code:
+        decision.disposition === "definitive_failure"
+          ? "trade_submission_failed"
+          : "limitless_submit_reconciling",
       message: message ?? "Limitless order placement failed.",
-      statusCode: upstream.status >= 500 ? 502 : upstream.status,
+      // The Telegram execution boundary only terminalizes explicit status-400
+      // rejections. Ambiguous responses use 502 so the deterministic
+      // clientOrderId is looked up instead of submitted a second time.
+      statusCode: decision.disposition === "definitive_failure" ? 400 : 502,
       venue: "limitless",
     });
   }

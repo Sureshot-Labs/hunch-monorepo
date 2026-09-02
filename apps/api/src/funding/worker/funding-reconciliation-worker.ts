@@ -22,6 +22,10 @@ import { DirectIngressDestinationObserver } from "../reconciliation/direct-ingre
 import { OwnedRouteDestinationObserver } from "../reconciliation/owned-route-destination-observer.js";
 import { RelayOwnedRefundObserver } from "../reconciliation/relay-owned-refund-observer.js";
 import { runTelegramRouterContinuation } from "../reconciliation/telegram-router-continuation.js";
+import {
+  runLimitlessTradeAttemptReconciliationBatch,
+  type LimitlessFundingReconciliationConfig,
+} from "../reconciliation/limitless-trade-attempt-reconciler.js";
 import { FundingReceiveSessionObserver } from "../receive/receive-session-observer.js";
 import {
   FundingReceiveReceiptRouter,
@@ -126,6 +130,7 @@ export type FundingReconciliationJobOptions =
     Readonly<{
       referenceProtection?: FundingReferenceProtectionConfig;
       relay?: RelayFundingWorkerConfig;
+      limitless?: LimitlessFundingReconciliationConfig;
       receivePollDelayMs?: number;
       delegatedExecution?: Readonly<{
         configuration: PolymarketRouterExecutionConfiguration;
@@ -149,6 +154,9 @@ export type FundingReconciliationJobResult =
         delegatedFundingExecution: Awaited<
           ReturnType<DelegatedFundingExecutor["runBatch"]>
         > | null;
+        limitlessTradeReconciliation: Awaited<
+          ReturnType<typeof runLimitlessTradeAttemptReconciliationBatch>
+        > | null;
         telegramFundingProgress: Awaited<
           ReturnType<typeof runTelegramFundingProgressProjectionBatch>
         >;
@@ -168,6 +176,7 @@ export type FundingReconciliationJobResult =
       receiveObservation: null;
       receiveRouting: null;
       delegatedFundingExecution: null;
+      limitlessTradeReconciliation: null;
       telegramFundingProgress: null;
       telegramTradeLifecycleProgress: null;
     }>;
@@ -361,6 +370,7 @@ export async function runFundingReconciliationJob(
       receiveObservation: null,
       receiveRouting: null,
       delegatedFundingExecution: null,
+      limitlessTradeReconciliation: null,
       telegramFundingProgress: null,
       telegramTradeLifecycleProgress: null,
     };
@@ -601,6 +611,14 @@ export async function runFundingReconciliationJob(
         delegatedDriver.inspectWalletProfileForProfile(input),
     });
   }
+  const limitlessTradeReconciliation = options.limitless
+    ? await runLimitlessTradeAttemptReconciliationBatch(pool, {
+        batchSize: options.limit ?? 25,
+        config: options.limitless,
+        leaseSeconds: options.leaseSeconds ?? 30,
+        now: options.now,
+      })
+    : null;
   const finalTelegramFundingProgress =
     await runTelegramFundingProgressProjectionBatch(pool, {
       limit: options.limit ?? 25,
@@ -628,6 +646,7 @@ export async function runFundingReconciliationJob(
   return {
     ...result,
     ...receiveResult,
+    limitlessTradeReconciliation,
     telegramFundingProgress,
     telegramTradeLifecycleProgress,
   };
