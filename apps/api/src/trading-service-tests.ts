@@ -82,7 +82,10 @@ import {
   createLimitlessExactStatusLookup,
   resolveLimitlessReconciledSigner,
 } from "./funding/reconciliation/limitless-trade-attempt-reconciler.js";
-import { polymarketTradingExecutionTestHooks } from "./services/polymarket-trading-execution-service.js";
+import {
+  fetchPolymarketAccountRoute,
+  polymarketTradingExecutionTestHooks,
+} from "./services/polymarket-trading-execution-service.js";
 import {
   computePolymarketClobOpenPositionLocks,
   polymarketPositionLockKey,
@@ -639,6 +642,36 @@ function sourceSlice(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "Polymarket account contains concurrent RPC failures",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async () =>
+        new Response("forbidden", {
+          status: 403,
+          statusText: "Forbidden",
+        });
+
+      try {
+        const request = {
+          credentialsInfo: null,
+          query: { refresh: false },
+          signer: "0x0000000000000000000000000000000000000001",
+          userId: "rpc-403-concurrency-regression",
+        } as const;
+        const results = await Promise.all(
+          Array.from({ length: 5 }, () => fetchPolymarketAccountRoute(request)),
+        );
+
+        for (const result of results) {
+          assert.equal(result.ok, false);
+          if (!result.ok) assert.equal(result.statusCode, 502);
+        }
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
   {
     name: "Limitless rejection parsing is nested, bounded, and sanitized",
     run: () => {

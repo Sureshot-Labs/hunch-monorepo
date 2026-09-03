@@ -4301,18 +4301,18 @@ export async function fetchPolymarketAccountRoute(input: {
     funderUpdatedAt: funderUpdatedAtValue,
   });
 
-  if (cacheEnabled) {
-    const cached = readPolymarketAccountCache(cacheKey);
-    if (cached) {
-      return { ok: true, payload: cached };
-    }
-    const inflight = polymarketAccountInflight.get(cacheKey);
-    if (inflight) {
-      return { ok: true, payload: await inflight };
-    }
-  }
-
   try {
+    if (cacheEnabled) {
+      const cached = readPolymarketAccountCache(cacheKey);
+      if (cached) {
+        return { ok: true, payload: cached };
+      }
+      const inflight = polymarketAccountInflight.get(cacheKey);
+      if (inflight) {
+        return { ok: true, payload: await inflight };
+      }
+    }
+
     const negRiskAdapterAddress =
       env.polymarketNegRiskAdapterAddress?.trim() || "";
     const ctfCollateralAdapterAddress =
