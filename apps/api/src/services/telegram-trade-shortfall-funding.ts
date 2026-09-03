@@ -19,6 +19,7 @@ import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
 import {
   buildTelegramAppHandoffV2Plan,
   resolveTelegramAppHandoffFundingCapability,
+  selectTelegramAppHandoffFundingOption,
   type TelegramAppHandoffV2Plan,
 } from "./telegram-app-handoff-v2.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
@@ -574,6 +575,20 @@ export function selectedTelegramTradeShortfallFundingRaw(
   return minimumDestination.raw;
 }
 
+export function selectedTelegramMiniAppTradeShortfallFundingRaw(
+  input: Readonly<{
+    collateralAsset: AssetRef;
+    requestedCollateralRaw: string;
+    shortfallRaw: string;
+    options: readonly SourceOption[];
+  }>,
+): string | null {
+  const option = selectTelegramAppHandoffFundingOption(input.options);
+  return option
+    ? selectedTelegramTradeShortfallFundingRaw({ ...input, option })
+    : null;
+}
+
 /**
  * The delegated replan may intentionally fund more than the economic gap to
  * satisfy a route floor. The destination balance is stable when that gap is
@@ -734,9 +749,20 @@ export class TelegramTradeShortfallFundingService {
     if (!isPositiveRawAmount(observed.shortfallRaw)) {
       return { kind: "destination_ready" };
     }
+    const fundingDestinationRaw =
+      selectedTelegramMiniAppTradeShortfallFundingRaw({
+        collateralAsset: observed.collateralAsset,
+        requestedCollateralRaw: observed.requestedCollateralRaw,
+        shortfallRaw: observed.shortfallRaw,
+        options: observed.sourceOptions,
+      });
     const exactInput: TelegramTradeShortfallIdentity = {
       ...input,
-      additionalFundingRaw: observed.shortfallRaw,
+      // Relay and other providers can have an executable destination floor.
+      // Seal that already-observed floor instead of forcing a tiny exact
+      // transfer whose fixed fee would make the same owned route unavailable.
+      // Any residual remains ordinary destination collateral for this wallet.
+      additionalFundingRaw: fundingDestinationRaw ?? observed.shortfallRaw,
       additionalFundingUsd: undefined,
     };
     const discoveryRequest = buildTelegramTradeShortfallRequest(exactInput);

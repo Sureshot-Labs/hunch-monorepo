@@ -21,6 +21,7 @@ import {
   isTelegramTradeShortfallBalanceStable,
   resolveTelegramTradeShortfallCommitAmounts,
   resolveTelegramTradeShortfallExecutionProfile,
+  selectedTelegramMiniAppTradeShortfallFundingRaw,
   selectedTelegramTradeShortfallFundingRaw,
   selectTelegramTradeShortfallAutomatedOption,
   telegramTradeShortfallExecutionProfiles,
@@ -78,6 +79,58 @@ const polygonUsdce: AssetRef = {
   assetId: POLYGON_USDCE_LEGACY,
   decimals: 6,
 };
+
+const tinyShortfallClientOption: SourceOption = {
+  sourceOptionId: "source_tiny_shortfall_fixture_12345678",
+  kind: "wallet_asset",
+  safeLabel: "Polygon pUSD wallet",
+  source: {
+    kind: "owned_location",
+    location: {
+      locationId: "location_tiny_shortfall_fixture_12345678",
+      accountId: "account_tiny_shortfall_fixture_12345678",
+      kind: "wallet",
+      asset: polygonPusd,
+      details: {
+        address: "0x0000000000000000000000000000000000000001",
+        walletId: "wallet_tiny_shortfall_fixture_12345678",
+      },
+    },
+  },
+  amountMode: "exact_output",
+  maximumSourceRaw: "1139730",
+  quotedSourceAmount: { asset: polygonPusd, raw: "534528" },
+  expectedDestination: { asset: baseUsdc, raw: "505051" },
+  minimumDestination: { asset: baseUsdc, raw: "500000" },
+  estimatedUsd: "0.534448",
+  fees: [],
+  eta: { minSeconds: 2, maxSeconds: 6 },
+  experienceMode: "prepare_first",
+  requiredActions: [
+    {
+      kind: "evm_transaction",
+      actor: "user",
+      safeLabel: "Confirm wallet transaction",
+      sponsorship: "requested",
+      valueMoving: true,
+    },
+  ],
+  expiresAt: "2026-09-03T02:40:33.427Z",
+  recommended: true,
+  selectable: true,
+  reasonCodes: [],
+};
+
+assert.equal(
+  selectedTelegramMiniAppTradeShortfallFundingRaw({
+    collateralAsset: baseUsdc,
+    requestedCollateralRaw: "2000000",
+    shortfallRaw: "28926",
+    options: [tinyShortfallClientOption],
+  }),
+  "500000",
+  "a Mini App route must preserve the provider floor instead of re-quoting an uneconomic tiny shortfall",
+);
 
 assert.equal(
   selectedTelegramTradeShortfallFundingRaw({

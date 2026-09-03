@@ -502,6 +502,20 @@ function isSealableClientFundingOption(option: SourceOption): boolean {
   );
 }
 
+/**
+ * Select the same preferred owned source that the v2 capability check can
+ * actually seal. Callers may use its provider floor when an exact tiny
+ * shortfall would be uneconomic, without widening the set of client actions.
+ */
+export function selectTelegramAppHandoffFundingOption(
+  options: readonly SourceOption[],
+): SourceOption | null {
+  const sealable = options.filter(
+    (option) => option.selectable && isSealableClientFundingOption(option),
+  );
+  return sealable.find((option) => option.recommended) ?? sealable[0] ?? null;
+}
+
 function maximumSealedFundingFeeUsd(
   options: readonly SourceOption[],
   maximumSlippageBps: number,
@@ -568,7 +582,7 @@ export function resolveTelegramAppHandoffFundingCapability(input: {
   const options = input.projection.sourceOptions.filter(
     (option) => option.selectable,
   );
-  if (options.some(isSealableClientFundingOption)) {
+  if (selectTelegramAppHandoffFundingOption(options)) {
     return {
       kind: "web_funding_plan",
       requiredContractVersion:
