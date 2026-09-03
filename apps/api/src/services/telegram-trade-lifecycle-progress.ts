@@ -51,7 +51,7 @@ const TELEGRAM_TRADE_LIFECYCLE_SOURCE_WATERMARK_RESULT_KEY =
   "shortfallProgressSourceWatermark";
 // Bump with any persisted progress/rendering semantic change. The candidate
 // gate uses this value to reproject otherwise-settled historical cards once.
-const TELEGRAM_TRADE_LIFECYCLE_PROJECTION_VERSION = 6;
+const TELEGRAM_TRADE_LIFECYCLE_PROJECTION_VERSION = 7;
 // Preserve Telegram's retry_after. This cap only protects the PostgreSQL int
 // boundary; shortening a valid provider delay would retry inside the 429
 // window and consume the bounded edit attempts without a real delivery try.
@@ -108,7 +108,7 @@ type TelegramTradeLifecycleProgress = Readonly<{
   state: TelegramTradeLifecycleState;
   venueOrderId: string | null;
   venue: string;
-  version: 1 | 2 | 3 | 4 | 5 | 6;
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
 }>;
 
 type ProjectionCandidate = Readonly<{
@@ -183,7 +183,8 @@ function parseProgress(value: unknown): TelegramTradeLifecycleProgress | null {
       value.version !== 3 &&
       value.version !== 4 &&
       value.version !== 5 &&
-      value.version !== 6)
+      value.version !== 6 &&
+      value.version !== 7)
   ) {
     return null;
   }
@@ -1280,6 +1281,30 @@ export async function runTelegramTradeLifecycleProjectionBatchInTransaction(
   const candidates = await listCandidates(client, limit);
   let created = 0;
   for (const candidate of candidates) {
+    // `recovery_required` has no user action that can safely resume a linked
+    // Buy. Keep reconciling the already-started funding operation, but revoke
+    // the unsubmitted trade consent so it cannot block or later surprise the
+    // user with a venue order.
+    if (
+      candidate.action === "buy" &&
+      candidate.status === "funding" &&
+      candidate.submit_started_at == null &&
+      candidate.operation_status === "recovery_required" &&
+      !candidate.has_automatic_provider_reference_wait
+    ) {
+      await client.query(
+        `update telegram_trade_intents
+            set status = 'cancelled',
+                error_code = 'funding_recovery_detached',
+                error_message = 'Funding needs reconciliation; the Buy was cancelled before venue submission.',
+                updated_at = clock_timestamp()
+          where id = $1::uuid
+            and status = 'funding'
+            and submit_started_at is null`,
+        [candidate.id],
+      );
+      continue;
+    }
     // A cancelled Buy must never consume funded venue cash. Once the route
     // is ready, release just its consumer reservation; the transfer itself
     // is already final and is not cancelled or moved again.

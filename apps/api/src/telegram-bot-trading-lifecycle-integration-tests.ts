@@ -1418,7 +1418,7 @@ try {
       )
     ).rows[0],
     {
-      projection_version: "6",
+      projection_version: "7",
       revision: String(directRevisionBeforeWatermarkBackfill),
     },
     "projector invalidation refreshes only the watermark when rendering is unchanged",
@@ -3313,6 +3313,103 @@ try {
     ).rows[0]?.state,
     "released",
     "Cancel Buy releases the ready consumer reservation while leaving settled venue cash untouched",
+  );
+
+  await client.query(
+    `update funding_operations
+        set status = 'recovery_required',
+            progress_stage = 'source_action',
+            error_code = 'reconciliation_evidence_timeout',
+            recovery_mode = 'automatic_evidence',
+            completed_at = null,
+            version = version + 1,
+            updated_at = clock_timestamp()
+      where id = $1::uuid`,
+    [cancellableFundingOperation.rows[0]?.id],
+  );
+  const recoveryFundingIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, event_id, side,
+       amount_usd, status, expires_at, idempotency_key, delivery_mode,
+       funding_operation_id
+     ) values (
+       $1, $2, $3, $1, '702', 'buy', 'polymarket', $4, $5, 'YES',
+       1, 'funding', now() + interval '1 hour', $6, 'app_handoff', $7::uuid
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      eventId,
+      `recovery-funding-intent:${suffix}`,
+      cancellableFundingOperation.rows[0]?.id,
+    ],
+  );
+  const recoveryFundingIntentId = recoveryFundingIntent.rows[0]?.id;
+  assert.ok(recoveryFundingIntentId);
+  const staleRecoveryCancellation = await invokeIntentNavigation(
+    recoveryFundingIntentId,
+    "cancel",
+    701,
+  );
+  assert.match(
+    staleRecoveryCancellation.answers[0]?.text ?? "",
+    /Buy cancelled.*Funding will settle safely/u,
+    "an earlier card for the exact owned intent may safely cancel the Buy",
+  );
+  assert.deepEqual(
+    (
+      await client.query<{ intent_status: string; operation_status: string }>(
+        `select intent.status as intent_status,
+                operation.status as operation_status
+           from telegram_trade_intents intent
+           join funding_operations operation
+             on operation.id = intent.funding_operation_id
+          where intent.id = $1::uuid`,
+        [recoveryFundingIntentId],
+      )
+    ).rows[0],
+    { intent_status: "cancelled", operation_status: "recovery_required" },
+    "Cancel Buy detaches the trade while preserving funding reconciliation",
+  );
+  const autoDetachedRecoveryIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, event_id, side,
+       amount_usd, status, expires_at, idempotency_key, delivery_mode,
+       funding_operation_id
+     ) values (
+       $1, $2, $3, $1, '703', 'buy', 'polymarket', $4, $5, 'YES',
+       1, 'funding', now() + interval '1 hour', $6, 'app_handoff', $7::uuid
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      eventId,
+      `auto-detached-recovery-intent:${suffix}`,
+      cancellableFundingOperation.rows[0]?.id,
+    ],
+  );
+  const autoDetachedRecoveryIntentId = autoDetachedRecoveryIntent.rows[0]?.id;
+  assert.ok(autoDetachedRecoveryIntentId);
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+    limit: 100,
+  });
+  assert.deepEqual(
+    (
+      await client.query<{ error_code: string | null; status: string }>(
+        `select status, error_code
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [autoDetachedRecoveryIntentId],
+      )
+    ).rows[0],
+    { error_code: "funding_recovery_detached", status: "cancelled" },
+    "a recovery-required route automatically revokes an unsubmitted Buy",
   );
 
   const actionRows = await client.query<{ action: string }>(

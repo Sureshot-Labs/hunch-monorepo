@@ -12117,6 +12117,7 @@ export async function handleTelegramBotTradingCallback(
   }
   const chatId = messageChat.id;
   const sourceMessageId = input.callbackQuery.message?.message_id ?? null;
+  const isIntentCancellation = parsed.type === "cancel";
   const lifecycleDeliveryEligible = isTelegramTradeLifecycleDeliveryEligible({
     chatId: intent.chat_id,
     deliveryMode: intent.delivery_mode,
@@ -12128,7 +12129,8 @@ export async function handleTelegramBotTradingCallback(
     sourceMessageId != null &&
     intent.telegram_message_id != null &&
     String(sourceMessageId) !== intent.telegram_message_id &&
-    lifecycleDeliveryEligible
+    lifecycleDeliveryEligible &&
+    !isIntentCancellation
   ) {
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
@@ -12216,7 +12218,7 @@ export async function handleTelegramBotTradingCallback(
     });
     return true;
   }
-  if (sourceMessageId != null) {
+  if (sourceMessageId != null && !isIntentCancellation) {
     const rebound = await input.db.query(
       `UPDATE telegram_trade_intents
           SET telegram_message_id = $2,
@@ -12990,6 +12992,22 @@ export async function handleTelegramBotTradingCallback(
         funding?.operation_status !== "recovery_required" &&
         funding?.operation_status !== "reconcile_required" &&
         funding?.has_broadcast_boundary !== true;
+      const canCancelBuy =
+        !terminalFunding &&
+        intent.action === "buy" &&
+        intent.status === "funding" &&
+        intent.submit_started_at == null;
+      const cancelButton = canCancelPreparation
+        ? {
+            callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${intent.id}`,
+            text: "❌ Cancel preparation",
+          }
+        : canCancelBuy
+          ? {
+              callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${intent.id}`,
+              text: "❌ Cancel Buy",
+            }
+          : null;
       const progressRows = terminalFunding
         ? [
             ...telegramTradingButtonRows(openMarketButton),
@@ -12997,16 +13015,7 @@ export async function handleTelegramBotTradingCallback(
           ]
         : [
             [retryButton],
-            ...(canCancelPreparation
-              ? [
-                  [
-                    {
-                      callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${intent.id}`,
-                      text: "❌ Cancel preparation",
-                    },
-                  ],
-                ]
-              : []),
+            ...(cancelButton ? [[cancelButton]] : []),
             [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
           ];
       await input.sendMessage({
