@@ -31,6 +31,7 @@ import {
 } from "../funding/planner/runtime-service.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { fetchFundingConsumerReservationForUser } from "../funding/persistence/funding-evidence-repository.js";
+import { fundingEconomicSourceReservations } from "../funding/persistence/funding-operation-repository.js";
 import type { TelegramAppHandoffV2ScopeAssertion } from "../repos/telegram-app-handoff-v2-direct-trade-repository.js";
 import {
   commitTelegramAppHandoffWithExecution,
@@ -1116,10 +1117,16 @@ function preparedPlanWithinSourceScope(
   }>,
 ): boolean {
   const reservations = input.prepared.operation.quote.planSnapshot.reservations;
-  const debits = reservations.filter(
+  const subtractReservations = reservations.filter(
     (reservation) => reservation.mode === "subtract_available",
   );
-  if (debits.length === 0) {
+  const economicDebits =
+    fundingEconomicSourceReservations(subtractReservations);
+  if (economicDebits.length === 0) {
+    // Future-credit fences protect funds expected from an earlier action, but
+    // they do not authorize a source debit. A plan containing only fences is
+    // therefore not the reservation-free external-handoff shape below.
+    if (subtractReservations.length > 0) return false;
     const operation = input.prepared.operation.quote.planSnapshot.operation;
     const requested = operation.requestedSourceAmount;
     const requestedAsset =
@@ -1147,7 +1154,7 @@ function preparedPlanWithinSourceScope(
   if (!ownedSources || ownedSources.length === 0) return false;
   const totals = new Map<string, bigint>();
   const maximums = new Map<string, bigint>();
-  for (const debit of debits) {
+  for (const { reservation: debit, rawAmount: economicRaw } of economicDebits) {
     const asset = {
       assetId: debit.assetId,
       decimals: debit.assetDecimals,
@@ -1186,7 +1193,7 @@ function preparedPlanWithinSourceScope(
       return candidate > maximum ? candidate : maximum;
     }, 0n);
     const key = preparedOwnedSourceKey(asset, reservationLocationIds[0]);
-    totals.set(key, (totals.get(key) ?? 0n) + rawAmount(debit.rawAmount));
+    totals.set(key, (totals.get(key) ?? 0n) + rawAmount(economicRaw));
     maximums.set(key, maximumRaw);
   }
   return [...totals.entries()].every(

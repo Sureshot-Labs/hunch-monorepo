@@ -528,6 +528,83 @@ assert.deepEqual(
   ["wallet-polygon-controller-pusd", "polymarket-deposit-wallet-usdce"],
   "the Mini App seal binds both controller and Deposit Wallet debits",
 );
+async function materializeDepositWalletPreparation(
+  depositWalletDebitRaw: string,
+): Promise<void> {
+  await prepareTelegramAppHandoffV2Funding({
+    handoffId: "00000000-0000-4000-8000-000000000022",
+    planSnapshot: sealedDepositWalletUsdcePreparation,
+    runtime: {
+      currentPolicyRevision: async () => "funding-policy-1",
+      liquidity: async () => projection([depositWalletUsdcePreparation]),
+      quoteForCommitScope: async () =>
+        ({ consentToken: "consent-token", quoteId: "quote-id" }) as never,
+      prepareCommit: async () =>
+        ({
+          operation: {
+            quote: {
+              selectedSourceOptionSnapshot: depositWalletUsdcePreparation,
+              planSnapshot: {
+                operation: {
+                  destinationTargetSnapshot: {
+                    kind: "owned_location",
+                    location: {
+                      asset: POLYGON_PUSD,
+                      details: { controllerWalletId: "wallet-polygon" },
+                    },
+                  },
+                  planKind: "venue_preparation",
+                  supportMetadata: {
+                    venueBindingOptionId: "polymarket-binding-option",
+                  },
+                  venueBindingSnapshot: {
+                    bindingId: "polymarket-binding",
+                  },
+                  venueId: "polymarket",
+                },
+                reservations: [
+                  {
+                    assetDecimals: POLYGON_PUSD.decimals,
+                    assetId: POLYGON_PUSD.assetId,
+                    locationId: "wallet-polygon-controller-pusd",
+                    mode: "subtract_available",
+                    networkId: POLYGON_PUSD.networkId,
+                    rawAmount: "400000",
+                  },
+                  {
+                    assetDecimals: 6,
+                    assetId: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+                    locationId: "polymarket-deposit-wallet-usdce",
+                    mode: "subtract_available",
+                    networkId: "evm:137",
+                    rawAmount: depositWalletDebitRaw,
+                  },
+                  {
+                    assetDecimals: 6,
+                    assetId: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+                    economicRole: "future_credit_fence",
+                    locationId: "wallet-polygon-controller-usdce",
+                    mode: "subtract_available",
+                    networkId: "evm:137",
+                    rawAmount: depositWalletDebitRaw,
+                  },
+                ],
+                steps: [],
+              },
+            },
+          },
+        }) as never,
+    } as unknown as FundingPlanningRuntime,
+    tradeIntentId: "00000000-0000-4000-8000-000000000023",
+    userId: "00000000-0000-4000-8000-000000000001",
+  });
+}
+await materializeDepositWalletPreparation("600000");
+await assert.rejects(
+  materializeDepositWalletPreparation("600001"),
+  /fresh funding plan exceeds the sealed source scope/u,
+  "a future-credit fence is not a second debit, but the physical Deposit Wallet debit remains capped",
+);
 const sealedScopedComposite = buildTelegramAppHandoffV2Plan({
   discoveryRequest: request,
   fundingPolicyRevision: "funding-policy-1",
