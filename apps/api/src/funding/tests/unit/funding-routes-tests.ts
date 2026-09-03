@@ -1860,6 +1860,48 @@ await test("operation presentation stops sibling actions after a failed step", a
   }
 });
 
+await test("operation presentation resumes a dependent composite action after reconciliation", async () => {
+  const firstStepId = "step_confirmed_leg_12345678";
+  const app = await buildApp({
+    operation: async () => ({
+      ...operation(),
+      status: "in_progress",
+      progressStage: "source_action",
+      planKind: "composite_route",
+    }),
+    operationSteps: async () => [
+      {
+        ...operationSteps()[0],
+        id: firstStepId,
+        state: "succeeded",
+      },
+      {
+        ...operationSteps()[0],
+        id: "step_dependent_leg_12345678",
+        ordinal: 1,
+        state: "action_required",
+        dependsOnStepId: firstStepId,
+        dependencyState: "succeeded",
+      },
+    ],
+  });
+  try {
+    const response = await app.inject({
+      method: "GET",
+      url: "/funding/operations/operation_id_12345678",
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(
+      response
+        .json()
+        .steps.map((step: { actionable: boolean }) => step.actionable),
+      [false, true],
+    );
+  } finally {
+    await app.close();
+  }
+});
+
 await test("terminal operation presentation hides stale actions", async () => {
   const app = await buildApp({
     operation: async () => ({ ...operation(), status: "completed" }),

@@ -284,8 +284,58 @@ assert.deepEqual(
       has_started_attempt: true,
     },
   ]).target,
-  { status: "recovery_required", stage: "source_action" },
-  "a failed sibling cannot terminalize while another action attempt is still running",
+  { status: "reconcile_required", stage: "source_action" },
+  "a failed sibling cannot terminalize while another action attempt is still being reconciled",
+);
+assert.deepEqual(
+  deriveTargetState(operation, [], segments, [
+    step("00000000-0000-4000-8000-000000000071", segments[0].id, "succeeded"),
+    {
+      ...step(
+        "00000000-0000-4000-8000-000000000072",
+        segments[1].id,
+        "reconcile_required",
+      ),
+      broadcast_unresolved: true,
+    },
+    step(
+      "00000000-0000-4000-8000-000000000073",
+      segments[1].id,
+      "action_required",
+    ),
+  ]).target,
+  { status: "reconcile_required", stage: "source_action" },
+  "an unresolved composite leg remains in the bounded reconciliation lane",
+);
+assert.deepEqual(
+  deriveTargetState(
+    {
+      ...operation,
+      status: "reconcile_required",
+      progressStage: "source_action",
+    },
+    [],
+    segments,
+    [
+      step(
+        "00000000-0000-4000-8000-000000000071",
+        segments[0].id,
+        "succeeded",
+      ),
+      step(
+        "00000000-0000-4000-8000-000000000072",
+        segments[1].id,
+        "succeeded",
+      ),
+      step(
+        "00000000-0000-4000-8000-000000000073",
+        segments[1].id,
+        "action_required",
+      ),
+    ],
+  ).target,
+  { status: "in_progress", stage: "source_action" },
+  "a finalized composite leg resumes the operation so its dependent action can run",
 );
 assert.deepEqual(
   deriveTargetState(

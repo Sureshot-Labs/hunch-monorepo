@@ -369,6 +369,28 @@ export function deriveTargetState(
           : current.stage,
     };
   };
+  const unresolvedActionTarget = (): FundingOperationState => {
+    const stage =
+      current.stage === "committed" || current.stage === "terminal"
+        ? "source_action"
+        : current.stage;
+    const candidate: FundingOperationState = {
+      status: "reconcile_required",
+      stage,
+    };
+    // An ordinary in-flight broadcast is still inside the bounded automatic
+    // reconciliation path. Keep it retryable by the worker so a finalized
+    // receipt can resume dependent composite actions. Operations already in
+    // recovery (or reopened from a terminal state) remain fenced there.
+    return current.status !== "recovery_required" &&
+      !steps.some((step) => step.state === "recovery_required") &&
+      !["completed", "refunded", "failed", "cancelled"].includes(
+        current.status,
+      ) &&
+      isValidFundingOperationState(candidate)
+      ? candidate
+      : recoveryTarget();
+  };
   if (hasUnresolvedCanonicalityLoss(observations)) {
     // Keep a terminal refund in its durable terminal state while the bounded
     // refund-reorg watch looks for a canonical replacement. The Relay refund
@@ -393,7 +415,7 @@ export function deriveTargetState(
   if (unresolvedActionPresent) {
     return {
       reorgBlockedByTerminalState: false,
-      target: recoveryTarget(),
+      target: unresolvedActionTarget(),
     };
   }
 
