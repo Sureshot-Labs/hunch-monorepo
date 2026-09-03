@@ -192,6 +192,90 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "automatic funding reconciliation is presented as progress, not attention",
+    run: () => {
+      const candidate = {
+        action: "buy",
+        amount_usd: "2.000000",
+        attempt_reason_code: null,
+        attempt_state_fingerprint: "0:1:started",
+        consumer_reservation_id: null,
+        continuation_id: null,
+        delivery_mode: "app_handoff",
+        error_code: null,
+        error_message: null,
+        external_handoff_receipt_reason_code: null,
+        funding_destination_asset_id: null,
+        funding_destination_decimals: null,
+        funding_destination_raw: null,
+        funding_operation_id: "00000000-0000-4000-8000-000000000002",
+        funding_source_updated_at_us: "1",
+        has_automatic_provider_reference_wait: false,
+        has_broadcast_boundary: false,
+        has_started_attempt: true,
+        has_terminal_external_handoff_receipt: false,
+        id: "00000000-0000-4000-8000-000000000001",
+        intent_source_updated_at_us: "1",
+        is_direct_v2_handoff: false,
+        market_title: "Market",
+        operation_error_code: null,
+        operation_status: "reconcile_required",
+        progress_stage: "source_action",
+        receipt_state_fingerprint: "",
+        result: {
+          appHandoffExecution: { kind: "funding", version: 2 },
+        },
+        root_requires_router_continuation: false,
+        shares_raw: null,
+        side: "NO",
+        source_asset_decimals: null,
+        source_asset_id: null,
+        source_network_id: null,
+        status: "funding",
+        step_state_fingerprint: "0:action_required",
+        submit_started_at: null,
+        telegram_message_id: "1",
+        telegram_user_id: "1",
+        tracked_operation_id: "00000000-0000-4000-8000-000000000002",
+        user_id: "00000000-0000-4000-8000-000000000003",
+        venue: "limitless",
+        venue_order_id: null,
+      };
+      assert.equal(
+        telegramTradeLifecycleProgressTestHooks.liveProgressFor(
+          candidate as never,
+        ).state,
+        "preparing",
+      );
+      assert.equal(
+        telegramTradeLifecycleProgressTestHooks.liveProgressFor({
+          ...candidate,
+          has_broadcast_boundary: true,
+          has_started_attempt: false,
+        } as never).state,
+        "submitted",
+      );
+      assert.equal(
+        telegramTradeLifecycleProgressTestHooks.liveProgressFor({
+          ...candidate,
+          has_automatic_provider_reference_wait: true,
+          operation_status: "recovery_required",
+        } as never).state,
+        "needs_attention",
+      );
+      assert.equal(
+        telegramTradeLifecycleProgressTestHooks.liveProgressFor({
+          ...candidate,
+          has_automatic_provider_reference_wait: true,
+          has_broadcast_boundary: true,
+          has_started_attempt: false,
+          has_terminal_external_handoff_receipt: true,
+        } as never).state,
+        "needs_attention",
+      );
+    },
+  },
+  {
     name: "change amount callback remains valid and bounded",
     run: () => {
       const intentId = "00000000-0000-4000-8000-000000000001";

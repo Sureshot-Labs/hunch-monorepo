@@ -731,11 +731,10 @@ function liveProgressFor(
   const ready =
     candidate.operation_status === "ready" &&
     candidate.progress_stage === "ready_for_consumer";
+  const recoveryRequired =
+    candidate.operation_status === "recovery_required";
   const awaitingReconciliation =
-    candidate.operation_status === "recovery_required" ||
-    candidate.operation_status === "reconcile_required";
-  const automaticProviderReferenceWait =
-    candidate.has_automatic_provider_reference_wait;
+    recoveryRequired || candidate.operation_status === "reconcile_required";
   const externalHandoffReceiptNeedsAttention =
     candidate.has_terminal_external_handoff_receipt;
   // A Relay root only makes pUSD available at the controller. It is not ready
@@ -799,9 +798,7 @@ function liveProgressFor(
           ? "ready"
           : terminal
             ? "stopped"
-            : (awaitingReconciliation ||
-                  externalHandoffReceiptNeedsAttention) &&
-                !automaticProviderReferenceWait
+            : recoveryRequired || externalHandoffReceiptNeedsAttention
               ? "needs_attention"
               : candidate.has_broadcast_boundary
                 ? "submitted"
@@ -1793,6 +1790,7 @@ function progressKeyboard(
 }
 
 export const telegramTradeLifecycleProgressTestHooks = {
+  liveProgressFor,
   listCandidateIds: async (client: PoolClient, limit = 100) =>
     (await listCandidates(client, limit)).map((candidate) => candidate.id),
   markTelegramTradeLifecycleDelivered,
