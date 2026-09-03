@@ -2082,6 +2082,11 @@ const svmTransaction = {
   ],
   addressLookupTables: [] as const,
 };
+const computeBudgetInstruction = {
+  programId: "ComputeBudget111111111111111111111111111111",
+  accounts: [] as const,
+  dataHex: "0200000000",
+};
 assert.equal(
   evaluateSvmActionReceipt({
     action: svmAction,
@@ -2090,6 +2095,62 @@ assert.equal(
     previous: null,
   }).status,
   "finalized",
+);
+assert.equal(
+  evaluateSvmActionReceipt({
+    action: svmAction,
+    expectedSignerAddress: svmSigner,
+    transaction: {
+      ...svmTransaction,
+      instructions: [
+        computeBudgetInstruction,
+        ...svmTransaction.instructions,
+        { ...computeBudgetInstruction, dataHex: "030000000000000000" },
+      ],
+    },
+    previous: null,
+  }).status,
+  "finalized",
+  "wallet-injected accountless ComputeBudget instructions must not obscure the exact committed Relay action",
+);
+assert.equal(
+  evaluateSvmActionReceipt({
+    action: svmAction,
+    expectedSignerAddress: svmSigner,
+    transaction: {
+      ...svmTransaction,
+      instructions: [
+        ...svmTransaction.instructions,
+        {
+          programId: "11111111111111111111111111111111",
+          accounts: [] as const,
+          dataHex: "02",
+        },
+      ],
+    },
+    previous: null,
+  }).status,
+  "mismatch",
+  "an extra non-ComputeBudget instruction remains a hard action mismatch",
+);
+assert.equal(
+  evaluateSvmActionReceipt({
+    action: svmAction,
+    expectedSignerAddress: svmSigner,
+    transaction: {
+      ...svmTransaction,
+      instructions: [
+        ...svmTransaction.instructions,
+        {
+          ...computeBudgetInstruction,
+          accounts: [svmAction.instructions[0].accounts[0].address],
+        },
+      ],
+    },
+    previous: null,
+  }).status,
+  "mismatch",
+  "ComputeBudget instructions with accounts are not normalized away",
 );
 assert.equal(
   evaluateSvmActionReceipt({

@@ -994,6 +994,23 @@ export type SvmReceiptRecord = Readonly<{
   addressLookupTables: readonly string[];
 }>;
 
+const SVM_COMPUTE_BUDGET_PROGRAM_ID =
+  "ComputeBudget111111111111111111111111111111";
+
+function isWalletInjectedSvmComputeBudgetInstruction(
+  instruction: SvmReceiptInstruction,
+): boolean {
+  // Wallets such as MetaMask may add ComputeBudget instructions while
+  // signing/sending an otherwise immutable v0 transaction. They configure the
+  // transaction's execution budget only: accepting precisely this program
+  // with no accounts cannot add a token or SOL transfer. Every business
+  // instruction still has to match the committed action byte-for-byte below.
+  return (
+    instruction.programId === SVM_COMPUTE_BUDGET_PROGRAM_ID &&
+    instruction.accounts.length === 0
+  );
+}
+
 export function evaluateSvmActionReceipt(
   input: Readonly<{
     action: SvmTransactionAction;
@@ -1018,10 +1035,12 @@ export function evaluateSvmActionReceipt(
       evidence: evidence({ transactionObserved: false }),
     };
   }
+  const businessInstructions = input.transaction.instructions.filter(
+    (instruction) => !isWalletInjectedSvmComputeBudgetInstruction(instruction),
+  );
   const instructionsMatch =
-    input.transaction.instructions.length ===
-      input.action.instructions.length &&
-    input.transaction.instructions.every((actual, index) => {
+    businessInstructions.length === input.action.instructions.length &&
+    businessInstructions.every((actual, index) => {
       const expected = input.action.instructions[index];
       return (
         expected != null &&
