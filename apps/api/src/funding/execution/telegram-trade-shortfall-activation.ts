@@ -2,6 +2,7 @@ import type { PoolClient } from "@hunch/infra";
 
 import { isPolymarketDepositRouterProfileId } from "./delegated-funding-profile-ids.js";
 import { relayEvmFundingProfileSpec } from "./relay-evm-profile-specs.js";
+import { reduceFundingOperationInTransaction } from "../reconciliation/funding-reducer.js";
 
 /**
  * Shortfall consent is the authority to start exactly the root action of an
@@ -24,7 +25,7 @@ export function isTelegramTradeShortfallServerProfile(
  * crossed, so this is an idempotent liveness repair rather than a replay.
  */
 export async function activateTelegramTradeShortfallInitialStepInTransaction(
-  client: Pick<PoolClient, "query">,
+  client: PoolClient,
   input: Readonly<{
     operationId: string;
     profileId: string;
@@ -32,9 +33,11 @@ export async function activateTelegramTradeShortfallInitialStepInTransaction(
   }>,
 ): Promise<boolean> {
   if (!isTelegramTradeShortfallServerProfile(input.profileId)) return false;
-  const activated = await client.query<{ id: string }>(
-    `update funding_operation_steps root_step
-        set state = 'action_required', updated_at = clock_timestamp()
+  const candidates = await client.query<{
+    operation_id: string;
+    step_id: string;
+  }>(
+    `select operation_row.id as operation_id, root_step.id as step_id
        from funding_operations operation_row
        join telegram_trade_intents trade_intent_row
          on trade_intent_row.id::text =
@@ -54,15 +57,11 @@ export async function activateTelegramTradeShortfallInitialStepInTransaction(
       where root_step.operation_id = operation_row.id
         and operation_row.id = $1::uuid
         and operation_row.purpose = 'trade_shortfall'
-        and operation_row.status in (
-          'in_progress', 'reconcile_required', 'recovery_required'
-        )
         and operation_row.support_metadata ->> 'telegramTradeIntentId' = $2::text
         and operation_row.support_metadata ->> 'delegatedOriginKind' =
               'trade_shortfall_intent'
         and root_step.executor_id = $3
         and root_step.depends_on_step_id is null
-        and root_step.state = 'planned'
         and (
           $3 = 'polymarket_deposit_pusd_fund_v1'
           or reservation_row.id is not null
@@ -70,24 +69,38 @@ export async function activateTelegramTradeShortfallInitialStepInTransaction(
         and not exists (
           select 1
           from funding_operation_step_attempts root_attempt
-          where root_attempt.step_id = root_step.id
+        where root_attempt.step_id = root_step.id
         )
-      returning root_step.id`,
+      for update of root_step`,
     [input.operationId, input.tradeIntentId, input.profileId],
   );
-  return activated.rowCount === 1;
+  const candidate = candidates.rows[0];
+  if (!candidate) return false;
+  await reduceFundingOperationInTransaction(client, {
+    operationId: candidate.operation_id,
+  });
+  const projected = await client.query<{ state: string }>(
+    `select state
+       from funding_operation_steps
+      where id = $1`,
+    [candidate.step_id],
+  );
+  return projected.rows[0]?.state === "action_required";
 }
 
 /** Activate stranded no-attempt roots for one exact profile during worker reconciliation. */
 export async function activateStalledTelegramTradeShortfallInitialStepsInTransaction(
-  client: Pick<PoolClient, "query">,
+  client: PoolClient,
   input: Readonly<{ profileId: string; limit: number }>,
 ): Promise<number> {
   if (!isTelegramTradeShortfallServerProfile(input.profileId)) return 0;
-  const updated = await client.query<{ id: string }>({
+  const candidates = await client.query<{
+    operation_id: string;
+    step_id: string;
+  }>({
     name: "funding-shortfall-activate-stalled-roots-v1",
     text: `with candidates as (
-       select root_step.id
+       select root_step.id, root_step.operation_id
          from funding_operation_steps root_step
          join funding_operations operation_row
            on operation_row.id = root_step.operation_id
@@ -107,14 +120,10 @@ export async function activateStalledTelegramTradeShortfallInitialStepsInTransac
           and reservation_row.source_trade_intent_id = trade_intent_row.id
           and reservation_row.status = 'reserved'
         where operation_row.purpose = 'trade_shortfall'
-          and operation_row.status in (
-            'in_progress', 'reconcile_required', 'recovery_required'
-          )
           and operation_row.support_metadata ->> 'delegatedOriginKind' =
-                'trade_shortfall_intent'
+              'trade_shortfall_intent'
           and root_step.executor_id = $1
           and root_step.depends_on_step_id is null
-          and root_step.state = 'planned'
           and (
             $1 = 'polymarket_deposit_pusd_fund_v1'
             or reservation_row.id is not null
@@ -128,14 +137,24 @@ export async function activateStalledTelegramTradeShortfallInitialStepsInTransac
         limit $2
         for update of root_step skip locked
      )
-     update funding_operation_steps root_step
-        set state = 'action_required', updated_at = clock_timestamp()
-       from candidates
-      where root_step.id = candidates.id
-      returning root_step.id`,
+     select operation_id, id as step_id
+       from candidates`,
     values: [input.profileId, Math.max(1, Math.min(input.limit, 100))],
   });
-  return updated.rowCount ?? 0;
+  let activated = 0;
+  for (const candidate of candidates.rows) {
+    await reduceFundingOperationInTransaction(client, {
+      operationId: candidate.operation_id,
+    });
+    const projected = await client.query<{ state: string }>(
+      `select state
+         from funding_operation_steps
+        where id = $1`,
+      [candidate.step_id],
+    );
+    if (projected.rows[0]?.state === "action_required") activated += 1;
+  }
+  return activated;
 }
 
 /**
@@ -145,12 +164,14 @@ export async function activateStalledTelegramTradeShortfallInitialStepsInTransac
  * separate state machine.
  */
 export async function activateTelegramTradeShortfallRouterDependentFundInTransaction(
-  client: Pick<PoolClient, "query">,
+  client: PoolClient,
   input: Readonly<{ operationId: string; approvalStepId: string }>,
 ): Promise<boolean> {
-  const activated = await client.query<{ id: string }>(
-    `update funding_operation_steps fund_step
-        set state = 'action_required', updated_at = clock_timestamp()
+  const candidates = await client.query<{
+    operation_id: string;
+    step_id: string;
+  }>(
+    `select approval_step.operation_id, fund_step.id as step_id
        from funding_operation_steps approval_step
        join funding_operations operation_row
          on operation_row.id = approval_step.operation_id
@@ -170,7 +191,6 @@ export async function activateTelegramTradeShortfallRouterDependentFundInTransac
         and reservation_row.status = 'reserved'
       where approval_step.id = $2::uuid
         and approval_step.operation_id = $1::uuid
-        and approval_step.state = 'succeeded'
         and approval_step.executor_id = $3
         and approval_step.step_kind = 'transaction'
         and operation_row.purpose = 'trade_shortfall'
@@ -180,7 +200,6 @@ export async function activateTelegramTradeShortfallRouterDependentFundInTransac
         and fund_step.depends_on_step_id = approval_step.id
         and fund_step.executor_id = approval_step.executor_id
         and fund_step.step_kind in ('transaction', 'venue_preparation')
-        and fund_step.state = 'planned'
         and (
           approval_step.executor_id = 'polymarket_deposit_pusd_fund_v1'
           or reservation_row.id is not null
@@ -188,14 +207,25 @@ export async function activateTelegramTradeShortfallRouterDependentFundInTransac
         and not exists (
           select 1
           from funding_operation_step_attempts fund_attempt
-          where fund_attempt.step_id = fund_step.id
+        where fund_attempt.step_id = fund_step.id
         )
-      returning fund_step.id`,
+      for update of approval_step, fund_step`,
     [
       input.operationId,
       input.approvalStepId,
       "polymarket_deposit_pusd_fund_v1",
     ],
   );
-  return activated.rowCount === 1;
+  const candidate = candidates.rows[0];
+  if (!candidate) return false;
+  await reduceFundingOperationInTransaction(client, {
+    operationId: candidate.operation_id,
+  });
+  const projected = await client.query<{ state: string }>(
+    `select state
+       from funding_operation_steps
+      where id = $1`,
+    [candidate.step_id],
+  );
+  return projected.rows[0]?.state === "action_required";
 }

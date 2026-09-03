@@ -5,6 +5,8 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
+import { tx } from "@hunch/infra";
+
 import "../../../integration-test-database-guard.js";
 import { pool } from "../../../db.js";
 import { storeOrderInTransaction } from "../../../repos/orders-repo.js";
@@ -265,7 +267,7 @@ console.log(
   const intentId = crypto.randomUUID();
   const planFingerprint = digest("claim-at-expiry-plan");
   const handoffTokenHash = digest(opaque("claim_at_expiry_token"));
-  const reservationExpiry = new Date(Date.now() - 1_000);
+  let reservationExpiry: Date;
   const eventId = opaque("event");
   await pool.query(
     `insert into unified_events (
@@ -333,56 +335,98 @@ console.log(
     subjectLookupKeyVersion: 1,
   });
   const operationId = expiryCommitted.operation.id;
-  await pool.query(
-    `update funding_operation_steps set state = 'submitted'
-      where operation_id = $1`,
+  const executionRows = await pool.query<{
+    action_fingerprint: string;
+    executor_id: string;
+    segment_id: string;
+    step_id: string;
+  }>(
+    `select step.id as step_id,
+            step.segment_id,
+            step.action_fingerprint,
+            step.executor_id
+       from funding_operation_steps step
+      where step.operation_id = $1::uuid
+      order by step.ordinal`,
     [operationId],
   );
-  await pool.query(
-    `update funding_operation_steps set state = 'succeeded'
-      where operation_id = $1`,
-    [operationId],
-  );
-  await pool.query(
-    `update funding_operation_segments
-        set status = 'submitted', submitted_at = clock_timestamp()
-      where operation_id = $1`,
-    [operationId],
-  );
-  await pool.query(
-    `update funding_operation_segments
-        set status = 'succeeded', settled_at = clock_timestamp()
-      where operation_id = $1`,
-    [operationId],
-  );
-  await pool.query(
-    `update funding_operations
-        set status = 'ready', progress_stage = 'ready_for_consumer',
-            version = version + 1, completed_at = null
-      where id = $1`,
-    [operationId],
-  );
-  const reservation = await pool.query<{ id: string }>(
-    `insert into balance_reservations (
-       user_id, operation_id, component_id, location_id, network_id,
-       asset_id, asset_decimals, raw_amount, mode, expires_at
-     ) values (
-       $1, $2, $3, $4, $5, $6, $7, '1980000',
-       'settled_for_consumer', $8
-     ) returning id`,
-    [
+  assert.equal(executionRows.rows.length, 2);
+  for (const [ordinal, row] of executionRows.rows.entries()) {
+    const minOutputRaw = expiryPlan.segments[ordinal]?.quotedMinOutput.raw;
+    if (typeof minOutputRaw !== "string") {
+      throw new Error("expiry fixture segment has no quoted minimum output");
+    }
+    const attempt = await startFundingStepAttemptForUser(pool, {
       userId,
       operationId,
-      opaque("consumer_component"),
-      opaque("consumer_location"),
-      asset.networkId,
-      asset.assetId,
-      asset.decimals,
-      reservationExpiry,
-    ],
+      stepId: row.step_id,
+      canonicalActionFingerprint: row.action_fingerprint,
+      executorId: row.executor_id,
+    });
+    const observedAt = new Date();
+    await tx(pool, (client) =>
+      finishFundingStepAttemptForUserInTransaction(client, {
+        userId,
+        operationId,
+        stepId: row.step_id,
+        attemptId: attempt.attempt.id,
+        outcome: "succeeded",
+        broadcastMayHaveOccurred: false,
+        referenceKind: null,
+        receiptRefCiphertext: null,
+        receiptRefLookupHmac: null,
+        lookupKeyVersion: null,
+        actualCosts: { fixture: "claim_at_expiry" },
+        now: observedAt,
+      }),
+    );
+    await allocateFundingObservationInTransaction(pool, {
+      operationId,
+      segmentId: row.segment_id,
+      kind: "destination_credit",
+      networkId: asset.networkId,
+      assetId: asset.assetId,
+      assetDecimals: asset.decimals,
+      txHash: `0x${crypto.randomBytes(32).toString("hex")}`,
+      eventIndex: "0",
+      fromAddress: "0x00000000000000000000000000000000000000b1",
+      toAddress: "0x00000000000000000000000000000000000000c1",
+      rawAmount: minOutputRaw,
+      observedAt,
+      ledgerHeight: String(900 + ordinal),
+      blockHash: `0x${crypto.randomBytes(32).toString("hex")}`,
+      finalityStatus: "finalized",
+      finalizedAt: observedAt,
+      metadata: { fixture: "claim_at_expiry" },
+    });
+  }
+  const readyReduction = await reduceFundingOperation(pool, {
+    operationId,
+    now: new Date(),
+  });
+  assert.deepEqual(readyReduction.finalState, {
+    status: "ready",
+    stage: "ready_for_consumer",
+  });
+  const generatedReservation = await pool.query<{
+    expires_at: Date;
+    id: string;
+  }>(
+    `select id, expires_at
+       from balance_reservations
+      where operation_id = $1::uuid
+        and mode = 'settled_for_consumer'
+        and state = 'active'
+      for update`,
+    [operationId],
   );
-  const reservationId = reservation.rows[0]?.id;
-  assert.ok(reservationId);
+  assert.equal(generatedReservation.rowCount, 1);
+  const generatedReservationId = generatedReservation.rows[0]?.id;
+  assert.ok(generatedReservationId);
+  const generatedReservationExpiry = generatedReservation.rows[0]?.expires_at;
+  assert.ok(generatedReservationExpiry);
+  reservationExpiry = generatedReservationExpiry;
+  const reservationId = generatedReservationId;
   const telegramUserId = opaque("telegram_user");
   await pool.query(
     `insert into user_telegram_accounts (
@@ -507,7 +551,7 @@ console.log(
     );
     const expiry = reduceFundingOperationInTransaction(expiryClient, {
       operationId,
-      now: new Date(),
+      now: new Date(reservationExpiry.getTime() + 1),
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
     const claim =
@@ -564,17 +608,6 @@ console.log(
     claimClient.release();
     expiryClient.release();
   }
-
-  // The fixture intentionally omits provider observations because this suite
-  // exercises consumer locking, not segment evidence. Restore the durable
-  // pre-consumer state before the independent cancellation race below.
-  await pool.query(
-    `update funding_operations
-        set status = 'ready', progress_stage = 'ready_for_consumer',
-            version = version + 1, completed_at = null
-      where id = $1`,
-    [operationId],
-  );
 
   const retryClient = await pool.connect();
   try {
@@ -852,7 +885,7 @@ assert.deepEqual(
   { claimed: 1, completed: 0, deadLettered: 0, requeued: 1 },
   "a canonical sibling refund must not hide another segment's reorg",
 );
-const blockedComposite = await pool.query<{
+const reopenedComposite = await pool.query<{
   reorg_blocked: boolean;
   status: string;
 }>(
@@ -865,8 +898,8 @@ const blockedComposite = await pool.query<{
     where id = $1::uuid`,
   [replacementComposite.operationId],
 );
-assert.deepEqual(blockedComposite.rows, [
-  { reorg_blocked: true, status: "refunded" },
+assert.deepEqual(reopenedComposite.rows, [
+  { reorg_blocked: false, status: "recovery_required" },
 ]);
 
 const exactReplacementAt = new Date(replacementReorgAt.getTime() + 120_000);

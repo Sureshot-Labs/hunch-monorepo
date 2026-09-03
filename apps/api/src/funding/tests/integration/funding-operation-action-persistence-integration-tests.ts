@@ -14,6 +14,7 @@ import { canonicalJsonHash } from "../../persistence/canonical.js";
 import {
   fetchFundingOperationStepForUser,
   finishFundingStepAttemptForUserInTransaction,
+  listFundingOperationStepsForUser,
   listPotentialPolymarketHandoffsForCanonicalEvents,
   startFundingStepAttemptForUserInTransaction,
 } from "../../persistence/funding-evidence-repository.js";
@@ -302,6 +303,36 @@ try {
     subjectLookupHmac: hash("user"),
     subjectLookupKeyVersion: 1,
   });
+  const firstCommittedStep = await client.query<{ id: string }>(
+    `select id
+       from funding_operation_steps
+      where operation_id = $1 and ordinal = 0`,
+    [committed.operation.id],
+  );
+  const firstCommittedStepId = firstCommittedStep.rows[0]?.id;
+  assert.ok(firstCommittedStepId);
+  await client.query("savepoint projected_step_state_read");
+  await client.query(
+    `update funding_operation_steps
+        set state = 'recovery_required'
+      where id = $1`,
+    [firstCommittedStepId],
+  );
+  const projectedStep = await fetchFundingOperationStepForUser(client, {
+    userId,
+    operationId: committed.operation.id,
+    stepId: firstCommittedStepId,
+  });
+  assert.equal(projectedStep?.state, "action_required");
+  const projectedSteps = await listFundingOperationStepsForUser(client, {
+    userId,
+    operationId: committed.operation.id,
+  });
+  assert.deepEqual(
+    projectedSteps.map((step) => step.state),
+    ["action_required", "action_required"],
+  );
+  await client.query("rollback to savepoint projected_step_state_read");
 
   const preRouteRelayAction = {
     ...secondAction,
@@ -919,7 +950,7 @@ try {
   assert.deepEqual(afterCompositeHandoff.rows, [
     { ordinal: 0, state: "succeeded" },
     { ordinal: 1, state: "action_required" },
-    { ordinal: 2, state: "action_required" },
+    { ordinal: 2, state: "planned" },
     { ordinal: 3, state: "action_required" },
   ]);
   const compositeApprovalAttempt =
@@ -1920,6 +1951,14 @@ try {
     lookupKeyVersion: null,
     actualCosts: { reasonCode: "client_execution_failed" },
   });
+  // The materialized step state is deliberately stale here. Admission must
+  // still reject the sibling from the durable failed-attempt fact.
+  await client.query(
+    `update funding_operation_steps
+        set state = 'action_required', updated_at = clock_timestamp()
+      where id = $1`,
+    [stoppedSiblingIncident.first.id],
+  );
   await expectFundingError(
     startFundingStepAttemptForUserInTransaction(client, {
       userId,
@@ -2053,12 +2092,9 @@ try {
     userId,
     operationId: terminalReceiptIncident.operation.id,
   });
-  assert.equal(reopenedFirstFinal?.status, "recovery_required");
-  assert.equal(reopenedFirstFinal?.recoveryMode, "automatic_evidence");
-  assert.equal(
-    reopenedFirstFinal?.errorCode,
-    "late_finalized_receipt_after_terminal_operation",
-  );
+  assert.equal(reopenedFirstFinal?.status, "in_progress");
+  assert.equal(reopenedFirstFinal?.recoveryMode, null);
+  assert.equal(reopenedFirstFinal?.errorCode, null);
   await client.query(
     `update funding_operations
         set status = 'failed', progress_stage = 'terminal',
@@ -2080,8 +2116,8 @@ try {
   });
   assert.equal(
     repeatedFinalReceipt?.status,
-    "failed",
-    "repeated canonical finalized polling must not reopen a terminal operation",
+    "in_progress",
+    "a stale terminal cache cannot override a canonical receipt fact",
   );
 
   await expectFundingError(

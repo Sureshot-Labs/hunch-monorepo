@@ -1,5 +1,11 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
+
 import type { JsonValue } from "../domain/types.js";
+import {
+  deriveFundingLifecycle,
+  type FundingLifecycleProjection,
+} from "../lifecycle/funding-lifecycle-projector.js";
+import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
 import {
   sameFundingTradeConsumerIntent,
   storedFundingTradeConsumerIntentFromRow,
@@ -77,8 +83,6 @@ type FundingTradeReservationScopeRow = Readonly<{
   reservation_id: string;
   expires_at: Date;
   reservation_state: string;
-  operation_status: string;
-  progress_stage: string;
   purpose: string;
   venue_id: string | null;
   market_id: string | null;
@@ -219,8 +223,6 @@ async function loadReservationForUpdate(
         reservation.id as reservation_id,
         reservation.expires_at,
         reservation.state as reservation_state,
-        operation.status as operation_status,
-        operation.progress_stage,
         operation.purpose,
         operation.venue_id,
         operation.market_id,
@@ -254,6 +256,7 @@ async function loadReservationForUpdate(
 
 function assertReservationScope(
   row: FundingTradeReservationScopeRow,
+  lifecycle: FundingLifecycleProjection,
   input: Readonly<{
     venueId: string;
     marketId: string;
@@ -262,8 +265,8 @@ function assertReservationScope(
   }>,
 ): void {
   if (
-    row.operation_status !== "ready" ||
-    row.progress_stage !== "ready_for_consumer" ||
+    lifecycle.status !== "ready" ||
+    lifecycle.progressStage !== "ready_for_consumer" ||
     row.purpose !== "trade_shortfall" ||
     row.reservation_state !== "active" ||
     row.expires_at.getTime() <= input.now.getTime() ||
@@ -285,6 +288,26 @@ function assertReservationScope(
       "funding reservation does not match this exact normalized trade spend",
     );
   }
+}
+
+async function projectedFundingLifecycleForTradeAttemptInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{ operationId: string; now: Date }>,
+): Promise<FundingLifecycleProjection> {
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+    client,
+    {
+      operationId: input.operationId,
+      now: input.now,
+    },
+  );
+  if (!facts) {
+    throw new FundingTradeAttemptError(
+      "reservation_unavailable",
+      "funding operation disappeared before trade claim",
+    );
+  }
+  return deriveFundingLifecycle(facts);
 }
 
 async function fetchAttemptForUpdate(
@@ -474,12 +497,19 @@ export async function claimFundingTradeAttemptInTransaction(
     );
   }
 
-  assertReservationScope(scope, {
-    venueId: input.venueId,
-    marketId: input.marketId,
-    consumerIntent: input.consumerIntent,
-    now,
-  });
+  assertReservationScope(
+    scope,
+    await projectedFundingLifecycleForTradeAttemptInTransaction(client, {
+      operationId: input.operationId,
+      now,
+    }),
+    {
+      venueId: input.venueId,
+      marketId: input.marketId,
+      consumerIntent: input.consumerIntent,
+      now,
+    },
+  );
 
   const replayResult = await client.query<FundingTradeAttemptRow>(
     `
@@ -588,7 +618,8 @@ export async function markFundingTradeAttemptSubmissionStartedInTransaction(
     now?: Date;
   }>,
 ): Promise<FundingTradeAttempt> {
-  await client.query(
+  const now = input.now ?? new Date();
+  const operation = await client.query<{ id: string }>(
     `
         select id
         from funding_operations
@@ -597,6 +628,25 @@ export async function markFundingTradeAttemptSubmissionStartedInTransaction(
       `,
     [input.operationId, input.userId],
   );
+  if (!operation.rows[0]) {
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "funding operation disappeared before trade submission",
+    );
+  }
+  const lifecycle = await projectedFundingLifecycleForTradeAttemptInTransaction(
+    client,
+    { operationId: input.operationId, now },
+  );
+  if (
+    lifecycle.status !== "ready" ||
+    lifecycle.progressStage !== "ready_for_consumer"
+  ) {
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "trade submission claim is no longer ready",
+    );
+  }
   const result = await client.query<FundingTradeAttemptRow>(
     `
         update funding_trade_attempts attempt
@@ -618,8 +668,6 @@ export async function markFundingTradeAttemptSubmissionStartedInTransaction(
           and reservation.expires_at > $6
           and operation.id = attempt.operation_id
           and operation.user_id = attempt.user_id
-          and operation.status = 'ready'
-          and operation.progress_stage = 'ready_for_consumer'
         returning attempt.*
       `,
     [
@@ -628,7 +676,7 @@ export async function markFundingTradeAttemptSubmissionStartedInTransaction(
       input.operationId,
       input.reservationId,
       input.claimToken,
-      input.now ?? new Date(),
+      now,
     ],
   );
   const row = result.rows[0];
@@ -1278,8 +1326,6 @@ export async function recoverFundingTradeAttemptForOrderInTransaction(
        from funding_operations
       where id = $1
         and user_id = $2
-        and status = 'ready'
-        and progress_stage = 'ready_for_consumer'
       for update`,
     [candidate.operation_id, input.userId],
   );

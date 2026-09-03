@@ -349,7 +349,7 @@ export function assertTelegramTradeShortfallDelegatedRelayActionTtl(input: {
  * allowance ownership is anchored.
  */
 export async function activateTelegramTradeShortfallInitialActionInTransaction(
-  client: Pick<PoolClient, "query">,
+  client: PoolClient,
   input: Readonly<{
     operationId: string;
     profileId: string;

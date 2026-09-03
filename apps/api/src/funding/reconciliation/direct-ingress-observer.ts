@@ -8,9 +8,12 @@ import type { FundingOperationState } from "../domain/transitions.js";
 import {
   allocateFundingObservationInTransaction,
   FundingPersistenceError,
-  transitionFundingOperationInTransaction,
+  writeFundingOperationSupportFactsInTransaction,
 } from "../persistence/funding-operation-repository.js";
+import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
+import { deriveFundingLifecycle } from "../lifecycle/funding-lifecycle-projector.js";
 import { sameAsset } from "../planner/money.js";
+import { reduceFundingOperationInTransaction } from "./funding-reducer.js";
 import { observeOwnedWalletAssetBalance } from "./owned-wallet-asset-balance.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
@@ -45,8 +48,13 @@ export type DirectIngressObservationTarget = Readonly<{
   venueBindingOptionId: string;
   requestedAsset: AssetRef;
   requestedRaw: string;
+  /** Optimistic snapshot for callers which also carry this immutable target. */
   operationVersion: number;
-  operationState: FundingOperationState;
+  /**
+   * Legacy transport context kept for receive-session callers. The direct
+   * ingress observer never reads it; lifecycle eligibility comes from facts.
+   */
+  operationState?: FundingOperationState;
   variants: readonly DirectIngressObservationVariant[];
 }>;
 
@@ -176,16 +184,15 @@ export function parseDirectIngressObservationVariant(
 }
 
 async function loadTarget(
-  db: Pick<Pool, "query">,
+  db: Pick<PoolClient, "query">,
   operationId: string,
+  now: Date,
 ): Promise<DirectIngressObservationTarget | null> {
   const { rows } = await db.query<{
     operation_id: string;
     user_id: string;
     purpose: FundingPurpose;
     market_id: string | null;
-    status: FundingOperationState["status"];
-    progress_stage: FundingOperationState["stage"];
     version: number;
     venue_binding_snapshot: JsonRecord;
     destination_target_snapshot: JsonRecord;
@@ -198,8 +205,6 @@ async function loadTarget(
         operation.user_id,
         operation.purpose,
         operation.market_id,
-        operation.status,
-        operation.progress_stage,
         operation.version,
         operation.venue_binding_snapshot,
         operation.destination_target_snapshot,
@@ -208,14 +213,6 @@ async function loadTarget(
       from funding_operations operation
       where operation.id = $1
         and operation.plan_kind = 'direct_external_handoff'
-        and operation.status not in (
-          'completed',
-          'refunded',
-          'failed',
-          'cancelled',
-          'reconcile_required',
-          'recovery_required'
-        )
         and not exists (
           select 1
           from funding_observations observation
@@ -230,6 +227,21 @@ async function loadTarget(
   );
   const row = rows[0];
   if (!row) return null;
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(db, {
+    operationId: row.operation_id,
+    now,
+  });
+  if (!facts) return null;
+  const lifecycle = deriveFundingLifecycle(facts);
+  // This observer only discovers a first external ingress.  Any later
+  // lifecycle phase is owned by its actual action/evidence worker; the
+  // materialized operation status is deliberately not used as this gate.
+  if (
+    lifecycle.safety.terminal ||
+    lifecycle.status !== "awaiting_external_funds"
+  ) {
+    return null;
+  }
   const binding = row.venue_binding_snapshot;
   const requested = row.requested_destination_amount;
   const target = row.destination_target_snapshot;
@@ -237,36 +249,39 @@ async function loadTarget(
   const details =
     location && isRecord(location.details) ? location.details : null;
   const requestedAsset = parseAsset(requested.asset);
-  const fallbackVariant: DirectIngressObservationVariant = {
-    variantId: `legacy:${row.operation_id}`,
-    networkId: requestedAsset.networkId,
-    asset: requestedAsset,
-    destinationLocationId: requiredString(
-      location?.locationId,
-      "destinationLocationId",
-    ),
-    destinationAddress: requiredString(
-      details?.address ?? location?.locationId,
-      "destinationAddress",
-    ),
-    baselineRaw: requiredString(
-      row.support_metadata.destinationBaselineRaw,
-      "destinationBaselineRaw",
-    ),
-    baselineRevision: requiredString(
-      row.support_metadata.destinationBaselineRevision,
-      "destinationBaselineRevision",
-    ),
-    observation: {
-      adapterId: "owned_destination_spendability_v1",
-      payload: {},
-    },
-    completion: { kind: "direct_destination_credit" },
-  };
   const rawVariants = row.support_metadata.ingressVariants;
-  const variants = Array.isArray(rawVariants)
+  const variants: readonly DirectIngressObservationVariant[] = Array.isArray(
+    rawVariants,
+  )
     ? rawVariants.map(parseDirectIngressObservationVariant)
-    : [fallbackVariant];
+    : [
+        {
+          variantId: `legacy:${row.operation_id}`,
+          networkId: requestedAsset.networkId,
+          asset: requestedAsset,
+          destinationLocationId: requiredString(
+            location?.locationId,
+            "destinationLocationId",
+          ),
+          destinationAddress: requiredString(
+            details?.address ?? location?.locationId,
+            "destinationAddress",
+          ),
+          baselineRaw: requiredString(
+            row.support_metadata.destinationBaselineRaw,
+            "destinationBaselineRaw",
+          ),
+          baselineRevision: requiredString(
+            row.support_metadata.destinationBaselineRevision,
+            "destinationBaselineRevision",
+          ),
+          observation: {
+            adapterId: "owned_destination_spendability_v1",
+            payload: {},
+          },
+          completion: { kind: "direct_destination_credit" as const },
+        },
+      ];
   if (
     variants.length === 0 ||
     new Set(variants.map((variant) => variant.variantId)).size !==
@@ -290,10 +305,6 @@ async function loadTarget(
     requestedAsset,
     requestedRaw: requiredString(requested.raw, "requestedRaw"),
     operationVersion: row.version,
-    operationState: {
-      status: row.status,
-      stage: row.progress_stage,
-    },
     variants,
   };
 }
@@ -412,63 +423,60 @@ export async function observeDirectIngressDestination(
 }
 
 async function moveToAmbiguousRecovery(
-  client: Pick<PoolClient, "query">,
+  client: PoolClient,
   input: Readonly<{
     target: DirectIngressObservationTarget;
     positiveVariantIds: readonly string[];
     now: Date;
   }>,
 ): Promise<void> {
-  await transitionFundingOperationInTransaction(client, {
+  const current = await client.query<{ version: number }>(
+    `select version
+       from funding_operations
+      where id = $1
+      for update`,
+    [input.target.operationId],
+  );
+  const operation = current.rows[0];
+  if (!operation) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "direct ingress operation disappeared before ambiguity handling",
+    );
+  }
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(client, {
     operationId: input.target.operationId,
-    scope: { kind: "worker" },
-    expectedVersion: input.target.operationVersion,
-    expectedState: input.target.operationState,
-    nextState: {
-      status: "recovery_required",
-      stage:
-        input.target.operationState.stage === "committed"
-          ? "source_action"
-          : input.target.operationState.stage,
-    },
-    errorCode: "mixed_external_ingress_assets",
+    now: input.now,
+  });
+  if (!facts) return;
+  const lifecycle = deriveFundingLifecycle(facts);
+  if (
+    lifecycle.safety.terminal ||
+    lifecycle.status !== "awaiting_external_funds"
+  ) {
+    return;
+  }
+  await writeFundingOperationSupportFactsInTransaction(client, {
+    operationId: input.target.operationId,
+    expectedVersion: operation.version,
     supportMetadataPatch: {
+      lifecycleManualRecovery: {
+        code: "mixed_external_ingress_assets",
+        requestedAt: input.now.toISOString(),
+      },
       ingressVariantConflict: input.positiveVariantIds,
       ingressVariantConflictDetectedAt: input.now.toISOString(),
     },
     now: input.now,
   });
-}
-
-async function activateCommittedStep(
-  client: Pick<PoolClient, "query">,
-  input: Readonly<{
-    operationId: string;
-    stepOrdinal: number;
-    now: Date;
-  }>,
-): Promise<void> {
-  const activated = await client.query(
-    `
-      update funding_operation_steps
-      set state = 'action_required',
-          updated_at = $3
-      where operation_id = $1
-        and ordinal = $2
-        and state = 'planned'
-    `,
-    [input.operationId, input.stepOrdinal, input.now],
-  );
-  if (activated.rowCount !== 1) {
-    throw new FundingPersistenceError(
-      "invalid_state_transition",
-      "committed ingress completion step is unavailable",
-    );
-  }
+  await reduceFundingOperationInTransaction(client, {
+    operationId: input.target.operationId,
+    now: input.now,
+  });
 }
 
 async function persistSatisfiedAmount(
-  client: Pick<PoolClient, "query">,
+  client: PoolClient,
   input: Readonly<{
     target: DirectIngressObservationTarget;
     observation: DirectIngressDestinationObservation;
@@ -489,6 +497,29 @@ async function persistSatisfiedAmount(
     return true;
   }
   if (selection.kind === "waiting") return false;
+  // External balance observation happens outside the transaction. Re-check
+  // the factual lifecycle while holding the operation row lock before that
+  // old observation is allowed to create new durable money evidence.
+  const locked = await client.query<{ id: string }>(
+    `select id
+       from funding_operations
+      where id = $1
+      for update`,
+    [input.target.operationId],
+  );
+  if (!locked.rows[0]) return false;
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(client, {
+    operationId: input.target.operationId,
+    now: input.now,
+  });
+  if (!facts) return false;
+  const lifecycle = deriveFundingLifecycle(facts);
+  if (
+    lifecycle.safety.terminal ||
+    lifecycle.status !== "awaiting_external_funds"
+  ) {
+    return false;
+  }
   const selected = selection;
   const creditedRaw = input.target.requestedRaw;
   const direct =
@@ -537,13 +568,13 @@ async function persistSatisfiedAmount(
       completionKind: selected.variant.completion.kind,
     },
   });
-  if (selected.variant.completion.kind === "committed_venue_preparation") {
-    await activateCommittedStep(client, {
-      operationId: input.target.operationId,
-      stepOrdinal: selected.variant.completion.stepOrdinal,
-      now: input.now,
-    });
-  }
+  // The source-credit fact activates a deferred action and the reducer writes
+  // the resulting step/operation projection caches. Do not manually mutate a
+  // step state here: that would make a cache an independent lifecycle writer.
+  await reduceFundingOperationInTransaction(client, {
+    operationId: input.target.operationId,
+    now: input.now,
+  });
   return true;
 }
 
@@ -640,6 +671,7 @@ export class DirectIngressDestinationObserver {
     const target = await (this.dependencies.loadTarget ?? loadTarget)(
       pool,
       operationId,
+      now,
     );
     if (!target) {
       return { destinationsPolled: 0, destinationSatisfied: false };

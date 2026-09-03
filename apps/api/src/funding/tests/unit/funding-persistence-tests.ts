@@ -174,7 +174,7 @@ const tests: readonly Test[] = [
     },
   },
   {
-    name: "action start takes a fresh snapshot after the operation lock before inspecting sibling stop states",
+    name: "action start takes a fresh fact snapshot after the operation lock and never gates on sibling state caches",
     run: () => {
       const source = readFileSync(
         new URL(
@@ -190,17 +190,21 @@ const tests: readonly Test[] = [
         source.indexOf("export async function startFundingStepAttemptForUser("),
       );
       const operationLock = start.indexOf("from funding_operations");
-      const siblingRead = start.indexOf("from funding_operation_steps step");
-      assert.ok(operationLock >= 0 && siblingRead > operationLock);
+      const stepRead = start.indexOf("from funding_operation_steps step");
+      const projection = start.indexOf(
+        "projectedFundingLifecycleInTransaction(client",
+      );
+      assert.ok(operationLock >= 0 && stepRead > operationLock);
       assert.match(
-        start.slice(0, siblingRead),
+        start.slice(0, stepRead),
         /from funding_operations[\s\S]*for update/u,
       );
+      assert.ok(projection > stepRead);
       assert.match(
         start,
-        /sibling_step\.state in \([\s\S]*'failed'[\s\S]*'cancelled'[\s\S]*'reconcile_required'[\s\S]*'recovery_required'/u,
+        /if \(!projectedAction\?\.actionable\)/u,
       );
-      assert.match(start, /if \(row\.sibling_stop_state\)/u);
+      assert.doesNotMatch(start, /sibling_step\.state|row\.sibling_stop_state/u);
     },
   },
   {
@@ -349,39 +353,6 @@ const tests: readonly Test[] = [
     },
   },
   {
-    name: "reducer clears unresolved attempt fencing only for canonical finalized success or failure",
-    run: () => {
-      const source = readFileSync(
-        new URL("../../reconciliation/funding-reducer.ts", import.meta.url),
-        "utf8",
-      );
-      const startedAttemptAlias = source.indexOf("as has_started_attempt");
-      const startedAttemptTable = source.indexOf(
-        "from funding_operation_step_attempts started_attempt",
-      );
-      const attemptFacts = source.slice(
-        source.lastIndexOf("exists (", startedAttemptTable),
-        source.indexOf(
-          "from funding_operation_steps step",
-          startedAttemptAlias,
-        ),
-      );
-      assert.equal(attemptFacts.match(/and not exists \(/gu)?.length, 2);
-      assert.match(
-        attemptFacts,
-        /receipt\.status = 'finalized'[\s\S]*receipt\.canonical[\s\S]*receipt\.action_match/u,
-      );
-      assert.match(
-        attemptFacts,
-        /receipt\.status = 'failed'[\s\S]*receipt\.canonical[\s\S]*failureFinalized/u,
-      );
-      assert.doesNotMatch(
-        attemptFacts,
-        /receipt\.status not in \('finalized', 'failed'\)/u,
-      );
-    },
-  },
-  {
     name: "consumer reservation expiry uses intent-operation-reservation order and preserves broadcast-capable trade attempts",
     run: () => {
       const source = readFileSync(
@@ -392,7 +363,7 @@ const tests: readonly Test[] = [
         source.indexOf(
           "async function preflightSettledConsumerReservationExpiry",
         ),
-        source.indexOf("async function reconcileBoundStepsForSegment"),
+        source.indexOf("async function writeFundingActionProjectionCaches"),
       );
       const intentLock = preflight.indexOf(
         "from telegram_trade_intents intent",
@@ -401,7 +372,7 @@ const tests: readonly Test[] = [
         "fetchFundingOperationForWorkerInTransaction",
       );
       const reservationLock = preflight.indexOf(
-        "expireSettledConsumerReservation(client",
+        "expired: await expireSettledConsumerReservation(",
       );
       assert.ok(
         intentLock >= 0 &&
@@ -410,7 +381,7 @@ const tests: readonly Test[] = [
       );
       const expiryQueries = source.slice(
         source.indexOf("async function expireSettledConsumerReservation"),
-        source.indexOf("async function reconcileBoundStepsForSegment"),
+        source.indexOf("async function writeFundingActionProjectionCaches"),
       );
       assert.match(
         expiryQueries,
@@ -440,12 +411,22 @@ const tests: readonly Test[] = [
         "from telegram_trade_intents intent",
       );
       const operationLock = cancelPath.indexOf("from funding_operations");
-      const stepLock = cancelPath.indexOf("from funding_operation_steps");
+      const lifecycleProjection = cancelPath.indexOf(
+        "projectedFundingLifecycleInTransaction",
+      );
+      const cancellationEvidence = cancelPath.indexOf(
+        "recordSafeFundingActionCancellationsInTransaction",
+      );
       assert.ok(
         unlockedScope >= 0 &&
           intentLock > unlockedScope &&
           operationLock > intentLock &&
-          stepLock > operationLock,
+          lifecycleProjection > operationLock &&
+          cancellationEvidence > lifecycleProjection,
+      );
+      assert.doesNotMatch(
+        cancelPath,
+        /step\.state not in \('planned', 'action_required'\)/u,
       );
 
       const attempts = readFileSync(

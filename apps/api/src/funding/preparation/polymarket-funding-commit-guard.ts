@@ -1,5 +1,7 @@
 import type { PoolClient } from "@hunch/infra";
 
+import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
+import { deriveFundingLifecycle } from "../lifecycle/funding-lifecycle-projector.js";
 import { FundingPersistenceError } from "../persistence/funding-operation-repository.js";
 
 export class PolymarketFundingPredecessorUnresolvedError extends FundingPersistenceError {
@@ -27,35 +29,35 @@ export async function lockPolymarketFundingOperationPredecessor(
   await client.query(`select pg_advisory_xact_lock(hashtextextended($1, 0))`, [
     `funding-router:${input.userId}:${venueBindingOptionId}`,
   ]);
-  const { rows } = await client.query<{ blocked: boolean }>(
+  const { rows } = await client.query<{ operation_id: string }>(
     `
-      select exists (
-        select 1
-        from funding_operations operation
-        where operation.user_id = $1
-          and operation.support_metadata ->> 'preparationKind' =
-                'polymarket_funding_router'
-          and (
-            coalesce(
-              operation.support_metadata ->> 'venueBindingOptionId',
-              operation.venue_binding_snapshot ->> 'venueBindingOptionId'
-            ) = $2
-            or coalesce(
-              operation.support_metadata ->> 'venueBindingOptionId',
-              operation.venue_binding_snapshot ->> 'venueBindingOptionId'
-            ) is null
-          )
-          and operation.status not in (
-            'completed',
-            'refunded',
-            'failed',
-            'cancelled'
-          )
-      ) as blocked
+      select operation.id as operation_id
+      from funding_operations operation
+      where operation.user_id = $1
+        and operation.support_metadata ->> 'preparationKind' =
+              'polymarket_funding_router'
+        and (
+          coalesce(
+            operation.support_metadata ->> 'venueBindingOptionId',
+            operation.venue_binding_snapshot ->> 'venueBindingOptionId'
+          ) = $2
+          or coalesce(
+            operation.support_metadata ->> 'venueBindingOptionId',
+            operation.venue_binding_snapshot ->> 'venueBindingOptionId'
+          ) is null
+        )
+      order by operation.created_at, operation.id
     `,
     [input.userId, venueBindingOptionId],
   );
-  if (rows[0]?.blocked) {
-    throw new PolymarketFundingPredecessorUnresolvedError();
+  const now = new Date();
+  for (const row of rows) {
+    const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+      client,
+      { operationId: row.operation_id, now },
+    );
+    if (facts && !deriveFundingLifecycle(facts).safety.terminal) {
+      throw new PolymarketFundingPredecessorUnresolvedError();
+    }
   }
 }

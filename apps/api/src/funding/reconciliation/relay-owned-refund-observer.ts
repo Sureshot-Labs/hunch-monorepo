@@ -2,6 +2,8 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import type { RelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
 import { sameAccountAddress } from "../domain/asset-identity.js";
+import { deriveFundingLifecycle } from "../lifecycle/funding-lifecycle-projector.js";
+import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
 import { allocateFundingObservationInTransaction } from "../persistence/funding-operation-repository.js";
 import {
   scanFundingReceiveCanonicalEvents,
@@ -132,33 +134,8 @@ async function loadRefundTarget(
           limit 1
        ) refund on true
        where operation.id = $1::uuid
-         and (
-           (
-             operation.status not in (
-               'completed', 'refunded', 'failed', 'cancelled'
-             )
-             and reservation.status in (
-               'reserved', 'cleanup_required', 'cleaned'
-             )
-           )
-           or (
-             operation.status = 'refunded'
-             and reservation.status in ('cleaned', 'refunded')
-             and (
-               (
-                 refund.finality_status = 'finalized'
-                 and refund.canonical
-                 and refund.finalized_at >=
-                       $2::timestamptz - interval '15 minutes'
-               )
-               or (
-                 refund.finality_status = 'reorged'
-                 and not refund.canonical
-                 and refund.reorged_at >=
-                       $2::timestamptz - interval '15 minutes'
-               )
-             )
-           )
+         and reservation.status in (
+           'reserved', 'cleanup_required', 'cleaned', 'refunded'
          )
          and (
            refund.id is not null
@@ -175,10 +152,19 @@ async function loadRefundTarget(
            )
          )
        limit 1`,
-    [operationId, now],
+    [operationId],
   );
   const row = rows[0];
   if (!row || !/^[0-9]+$/u.test(row.source_block)) return null;
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(db, {
+    operationId,
+    now,
+  });
+  if (!facts) return null;
+  const lifecycle = deriveFundingLifecycle(facts);
+  if (lifecycle.safety.terminal && lifecycle.status !== "refunded") {
+    return null;
+  }
   const profile = relayEvmFundingProfileSpec(row.profile_id);
   if (
     !profile ||
@@ -304,11 +290,9 @@ async function persistScan(
   }>,
 ): Promise<boolean> {
   const locked = await client.query<{
-    operation_status: string;
     reservation_status: string;
   }>(
-    `select operation.status as operation_status,
-            reservation.status as reservation_status
+    `select reservation.status as reservation_status
        from funding_operations operation
        join telegram_funding_authorization_reservations reservation
          on reservation.funding_operation_id = operation.id
@@ -325,7 +309,8 @@ async function persistScan(
   )
     return false;
   const terminalRefundWatch =
-    locked.rows[0]?.operation_status === "refunded" &&
+    input.target.refundFinalityStatus === "finalized" &&
+    input.target.refundCanonical === true &&
     ["cleaned", "refunded"].includes(lockedStatus);
   if (
     input.target.refundFinalityStatus === "reorged" &&

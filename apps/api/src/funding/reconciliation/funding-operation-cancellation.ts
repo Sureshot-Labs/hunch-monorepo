@@ -3,28 +3,34 @@ import { tx, type Pool } from "@hunch/infra";
 import {
   fetchFundingOperationForUser,
   FundingPersistenceError,
-  transitionFundingOperationInTransaction,
   type FundingOperationRow,
 } from "../persistence/funding-operation-repository.js";
-import { releaseFundingReservationForAbandonedTradeInTransaction } from "../persistence/funding-evidence-repository.js";
+import {
+  projectedFundingLifecycleInTransaction,
+  recordFundingOperationCancellationDecisionInTransaction,
+  recordSafeFundingActionCancellationsInTransaction,
+  releaseFundingReservationForAbandonedTradeInTransaction,
+} from "../persistence/funding-evidence-repository.js";
 import { reduceFundingOperationInTransaction } from "./funding-reducer.js";
 
 export function isSafelyCancellableStepLessIngress(
   input: Readonly<{
     operation: Pick<
       FundingOperationRow,
-      "planKind" | "progressStage" | "status"
+      "planKind"
     >;
     stepCount: number;
-    hasUnsafeExternalEffects: boolean;
+    lifecycle: Readonly<{
+      status: "awaiting_external_funds" | string;
+      safety: Readonly<{ cancelAllowed: boolean }>;
+    }>;
   }>,
 ): boolean {
   return (
-    !input.hasUnsafeExternalEffects &&
     input.stepCount === 0 &&
     input.operation.planKind === "direct_external_handoff" &&
-    input.operation.status === "awaiting_external_funds" &&
-    input.operation.progressStage === "source_action"
+    input.lifecycle.status === "awaiting_external_funds" &&
+    input.lifecycle.safety.cancelAllowed
   );
 }
 
@@ -62,6 +68,29 @@ async function cancelLinkedTelegramV2HandoffIntentInTransaction(input: {
         and intent.result->'appHandoffExecution'->>'version' = '2'`,
     [input.operationId, input.userId, input.now],
   );
+}
+
+async function releaseCancelledTelegramHandoffInTransaction(input: {
+  client: Parameters<typeof reduceFundingOperationInTransaction>[0];
+  now: Date;
+  operationId: string;
+  userId: string;
+}): Promise<void> {
+  await input.client.query(
+    `update telegram_funding_authorization_reservations
+        set status = 'released',
+            resolved_at = $2,
+            resolution_evidence = resolution_evidence || jsonb_build_object(
+              'operationStatus', 'cancelled',
+              'operationId', $1::text,
+              'reason', 'cancelled_before_broadcast'
+            ),
+            updated_at = $2
+      where funding_operation_id = $1::uuid
+        and status = 'reserved'`,
+    [input.operationId, input.now],
+  );
+  await cancelLinkedTelegramV2HandoffIntentInTransaction(input);
 }
 
 export async function cancelFundingOperationForUser(
@@ -109,19 +138,44 @@ export async function cancelFundingOperationForUser(
       );
     }
     const now = input.now ?? new Date();
-    if (
-      operation.status === "completed" ||
-      operation.status === "refunded" ||
-      operation.status === "failed" ||
-      operation.status === "cancelled"
-    ) {
-      return operation;
+    const lifecycle = await projectedFundingLifecycleInTransaction(client, {
+      operationId: input.operationId,
+      now,
+    });
+    // Materialize the facts before returning a terminal/ready compatibility
+    // response.  Stored operation status is intentionally never the branch
+    // selector here.
+    if (lifecycle.safety.terminal) {
+      await reduceFundingOperationInTransaction(client, {
+        operationId: input.operationId,
+        now,
+      });
+      const terminal = await fetchFundingOperationForUser(client, input);
+      if (!terminal) {
+        throw new FundingPersistenceError(
+          "operation_not_found",
+          "funding operation disappeared after terminal lifecycle reduction",
+        );
+      }
+      if (terminal.status === "cancelled") {
+        await releaseCancelledTelegramHandoffInTransaction({
+          client,
+          now,
+          operationId: input.operationId,
+          userId: input.userId,
+        });
+      }
+      return terminal;
     }
 
     if (
-      operation.status === "ready" &&
-      operation.progressStage === "ready_for_consumer"
+      lifecycle.status === "ready" &&
+      lifecycle.progressStage === "ready_for_consumer"
     ) {
+      await reduceFundingOperationInTransaction(client, {
+        operationId: input.operationId,
+        now,
+      });
       const reservationResult = await client.query<{ id: string }>(
         `
           select id
@@ -173,59 +227,29 @@ export async function cancelFundingOperationForUser(
       return released;
     }
 
-    const steps = await client.query<{ id: string }>(
-      `
-        select id
-        from funding_operation_steps
-        where operation_id = $1
-        order by ordinal
-        for update
-      `,
-      [input.operationId],
-    );
-    const unsafe = await client.query<{ unsafe: boolean }>(
-      `
-        select exists (
-          select 1
-          from funding_operation_steps step
-          left join funding_operation_step_attempts attempt
-            on attempt.step_id = step.id
-          where step.operation_id = $1
-            and (
-              step.state not in ('planned', 'action_required')
-              or attempt.id is not null
-            )
-        ) or exists (
-          select 1
-          from funding_observations observation
-          where observation.operation_id = $1
-        ) as unsafe
-      `,
-      [input.operationId],
-    );
-    const hasUnsafeExternalEffects = unsafe.rows[0]?.unsafe === true;
-    if (hasUnsafeExternalEffects) {
+    if (!lifecycle.safety.cancelAllowed) {
       throw new FundingPersistenceError(
         "invalid_state_transition",
         "funding operation may have external effects and must reconcile before cancellation",
       );
     }
-    const cancelledSteps = await client.query(
-      `
-        update funding_operation_steps
-        set state = 'cancelled',
-            updated_at = $2
-        where operation_id = $1
-          and state in ('planned', 'action_required')
-      `,
-      [input.operationId, now],
-    );
-    if ((cancelledSteps.rowCount ?? 0) === 0) {
+    const cancellationFacts =
+      await recordSafeFundingActionCancellationsInTransaction(client, {
+        operationId: input.operationId,
+        now,
+      });
+    if (cancellationFacts.unsafeStepIds.length > 0) {
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "funding action changed while recording cancellation",
+      );
+    }
+    if (cancellationFacts.cancelledStepIds.length === 0) {
       if (
         !isSafelyCancellableStepLessIngress({
           operation,
-          stepCount: steps.rowCount ?? 0,
-          hasUnsafeExternalEffects,
+          stepCount: lifecycle.actions.length,
+          lifecycle,
         })
       ) {
         throw new FundingPersistenceError(
@@ -233,15 +257,8 @@ export async function cancelFundingOperationForUser(
           "funding operation has no safely cancellable action",
         );
       }
-      await transitionFundingOperationInTransaction(client, {
+      await recordFundingOperationCancellationDecisionInTransaction(client, {
         operationId: operation.id,
-        scope: { kind: "user", userId: input.userId },
-        expectedVersion: operation.version,
-        expectedState: {
-          status: operation.status,
-          stage: operation.progressStage,
-        },
-        nextState: { status: "cancelled", stage: "terminal" },
         now,
       });
     }
@@ -257,21 +274,7 @@ export async function cancelFundingOperationForUser(
       );
     }
     if (cancelled.status === "cancelled") {
-      await client.query(
-        `update telegram_funding_authorization_reservations
-            set status = 'released',
-                resolved_at = $2,
-                resolution_evidence = resolution_evidence || jsonb_build_object(
-                  'operationStatus', 'cancelled',
-                  'operationId', $1::text,
-                  'reason', 'cancelled_before_broadcast'
-                ),
-                updated_at = $2
-          where funding_operation_id = $1::uuid
-            and status = 'reserved'`,
-        [input.operationId, now],
-      );
-      await cancelLinkedTelegramV2HandoffIntentInTransaction({
+      await releaseCancelledTelegramHandoffInTransaction({
         client,
         now,
         operationId: input.operationId,

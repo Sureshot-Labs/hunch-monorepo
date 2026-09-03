@@ -11,6 +11,11 @@ import {
 import { parseMoneyJson } from "../domain/money-json.js";
 import type { JsonValue } from "../domain/types.js";
 import { canonicalAssetId, sameAsset } from "../domain/asset-identity.js";
+import {
+  deriveFundingLifecycle,
+  type FundingLifecycleProjection,
+} from "../lifecycle/funding-lifecycle-projector.js";
+import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
 import { DELEGATED_PROVIDER_REPLAY_MS } from "../execution/delegated-funding-recovery-policy.js";
 import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "../execution/relay-evm-profile-specs.js";
 import {
@@ -19,7 +24,9 @@ import {
   finishFundingReconciliationLease,
   listFundingObservationsForOperation,
   releaseFundingReservationInTransaction,
-  transitionFundingSegmentInTransaction,
+  writeFundingOperationLifecycleProjectionCacheInTransaction,
+  writeFundingSegmentProjectionCacheInTransaction,
+  writeFundingOperationSupportFactsInTransaction,
   transitionFundingOperationInTransaction,
   type FundingObservationRow,
   type FundingOperationRow,
@@ -27,7 +34,11 @@ import {
   type FundingReconciliationLease,
   type FundingRecoveryMode,
 } from "../persistence/funding-operation-repository.js";
-import { failTelegramAppHandoffV2FundedIntentWithoutConsumerInTransaction } from "../persistence/funding-evidence-repository.js";
+import {
+  failTelegramAppHandoffV2FundedIntentWithoutConsumerInTransaction,
+  recordSafeFundingActionCancellationsInTransaction,
+  writeFundingStepProjectionCacheInTransaction,
+} from "../persistence/funding-evidence-repository.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 const DELEGATED_RELAY_EVM_PROFILE_ID_LIST = Object.freeze(
@@ -1037,11 +1048,12 @@ async function ensureSettledConsumerReservation(
 async function expireSettledConsumerReservation(
   client: Pick<PoolClient, "query">,
   operation: FundingOperationRow,
+  lifecycle: FundingLifecycleProjection,
   now: Date,
 ): Promise<FundingOperationRow | null> {
   if (
-    operation.status !== "ready" ||
-    operation.progressStage !== "ready_for_consumer"
+    lifecycle.status !== "ready" ||
+    lifecycle.progressStage !== "ready_for_consumer"
   ) {
     return null;
   }
@@ -1090,15 +1102,27 @@ async function expireSettledConsumerReservation(
     outcomeReason: "consumer_reservation_expired",
     now,
   });
-  return transitionFundingOperationInTransaction(client, {
-    operationId: operation.id,
-    scope: { kind: "worker" },
-    expectedVersion: operation.version,
-    expectedState: {
-      status: operation.status,
-      stage: operation.progressStage,
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+    client,
+    {
+      operationId: operation.id,
+      now,
+      reconciliationEvidenceTimeoutMs:
+        DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
     },
-    nextState: { status: "completed", stage: "terminal" },
+  );
+  if (!facts) {
+    throw new Error(`funding operation ${operation.id} disappeared after expiry`);
+  }
+  const projected = deriveFundingLifecycle(facts);
+  return writeFundingOperationLifecycleProjectionCacheInTransaction(client, {
+    operationId: operation.id,
+    expectedVersion: operation.version,
+    state: {
+      status: projected.status,
+      stage: projected.progressStage,
+    },
+    recoveryMode: projected.recoveryMode,
     supportMetadataPatch: {
       consumerResolution: "released_to_venue_cash",
       consumerResolvedAt: now.toISOString(),
@@ -1118,12 +1142,8 @@ async function preflightSettledConsumerReservationExpiry(
 }> | null> {
   const candidate = await client.query<{
     expiry_candidate: boolean;
-    progress_stage: string;
-    status: string;
   }>(
-    `select operation.status,
-            operation.progress_stage,
-            exists (
+    `select exists (
               select 1
               from balance_reservations reservation
               where reservation.operation_id = operation.id
@@ -1145,10 +1165,23 @@ async function preflightSettledConsumerReservationExpiry(
     [operationId, now],
   );
   const candidateRow = candidate.rows[0];
+  if (!candidateRow?.expiry_candidate) {
+    return null;
+  }
+  const beforeLockFacts = await loadFundingLifecycleFactsForOperationInTransaction(
+    client,
+    {
+      operationId,
+      now,
+      reconciliationEvidenceTimeoutMs:
+        DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
+    },
+  );
+  if (!beforeLockFacts) return null;
+  const beforeLockLifecycle = deriveFundingLifecycle(beforeLockFacts);
   if (
-    candidateRow?.status !== "ready" ||
-    candidateRow.progress_stage !== "ready_for_consumer" ||
-    !candidateRow.expiry_candidate
+    beforeLockLifecycle.status !== "ready" ||
+    beforeLockLifecycle.progressStage !== "ready_for_consumer"
   ) {
     return null;
   }
@@ -1171,39 +1204,46 @@ async function preflightSettledConsumerReservationExpiry(
   if (!initial) {
     throw new Error(`funding operation ${operationId} not found`);
   }
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+    client,
+    {
+      operationId,
+      now,
+      reconciliationEvidenceTimeoutMs:
+        DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
+    },
+  );
+  if (!facts) return null;
+  const lifecycle = deriveFundingLifecycle(facts);
+  if (
+    lifecycle.status !== "ready" ||
+    lifecycle.progressStage !== "ready_for_consumer"
+  ) {
+    return null;
+  }
   return {
     initial,
-    expired: await expireSettledConsumerReservation(client, initial, now),
+    expired: await expireSettledConsumerReservation(
+      client,
+      initial,
+      lifecycle,
+      now,
+    ),
   };
 }
 
-async function reconcileBoundStepsForSegment(
+async function writeFundingActionProjectionCachesInTransaction(
   client: Pick<PoolClient, "query">,
-  segmentId: string,
-  target: SegmentStatus,
+  lifecycle: FundingLifecycleProjection,
   now: Date,
 ): Promise<void> {
-  const stepTarget =
-    target === "succeeded" || target === "refunded"
-      ? "succeeded"
-      : target === "failed"
-        ? "failed"
-        : target === "recovery_required"
-          ? "recovery_required"
-          : target === "reconcile_required"
-            ? "reconcile_required"
-            : null;
-  if (!stepTarget) return;
-  await client.query(
-    `
-      update funding_operation_steps
-      set state = $2,
-          updated_at = $3
-      where segment_id = $1
-        and state in ('submitted', 'reconcile_required')
-    `,
-    [segmentId, stepTarget, now],
-  );
+  for (const action of lifecycle.actions) {
+    await writeFundingStepProjectionCacheInTransaction(client, {
+      stepId: action.actionId,
+      state: action.state,
+      now,
+    });
+  }
 }
 
 async function reduceFundingSegmentsInTransaction(
@@ -1211,6 +1251,7 @@ async function reduceFundingSegmentsInTransaction(
   input: Readonly<{
     operationId: string;
     observations: readonly FundingObservationRow[];
+    lifecycle: FundingLifecycleProjection;
     now: Date;
   }>,
 ): Promise<readonly StoredFundingSegmentRow[]> {
@@ -1223,6 +1264,9 @@ async function reduceFundingSegmentsInTransaction(
       for update
     `,
     [input.operationId],
+  );
+  const lifecycleSegmentById = new Map(
+    input.lifecycle.segments.map((segment) => [segment.routeLegId, segment]),
   );
   for (const segment of rows) {
     const observations = input.observations.filter(
@@ -1237,44 +1281,25 @@ async function reduceFundingSegmentsInTransaction(
       new Set(["destination_credit"]),
       segment.quoted_min_output,
     );
-    const target = deriveSegmentTargetStatus(
-      segment.status,
-      observations,
-      segment.quoted_min_output,
-    );
+    const lifecycleSegment = lifecycleSegmentById.get(segment.id);
+    if (!lifecycleSegment) {
+      throw new Error(`funding lifecycle is missing route leg ${segment.id}`);
+    }
+    const target = lifecycleSegment.status;
     const inputIsFinal =
       moneyMeetsOrExceeds(actualInput, segment.quoted_input) ||
       target === "succeeded" ||
       target === "refunded" ||
       target === "failed";
-    const path = findSegmentTransitionPath(segment.status, target);
-    if (!path) {
-      throw new Error(
-        `no declared funding segment transition path from ${segment.status} to ${target}`,
-      );
-    }
-    const transitions = path.length > 0 ? path : [segment.status];
-    let current = segment.status;
-    for (const [index, next] of transitions.entries()) {
-      await transitionFundingSegmentInTransaction(client, {
-        operationId: input.operationId,
-        segmentId: segment.id,
-        expectedStatus: current,
-        nextStatus: next,
-        actualInput:
-          index === 0 && inputIsFinal && actualInput ? actualInput : undefined,
-        actualOutput:
-          index === 0 && target === "succeeded" && actualOutput
-            ? actualOutput
-            : undefined,
-        submittedAt:
-          next === "submitted" || next === "refunded" ? input.now : undefined,
-        settledAt:
-          next === "succeeded" || next === "refunded" ? input.now : undefined,
-      });
-      current = next;
-    }
-    await reconcileBoundStepsForSegment(client, segment.id, target, input.now);
+    await writeFundingSegmentProjectionCacheInTransaction(client, {
+      operationId: input.operationId,
+      segmentId: segment.id,
+      status: target,
+      actualInput: inputIsFinal && actualInput ? actualInput : undefined,
+      actualOutput:
+        target === "succeeded" && actualOutput ? actualOutput : undefined,
+      now: input.now,
+    });
   }
   return rows;
 }
@@ -1298,16 +1323,26 @@ export async function reduceFundingOperationInTransaction(
   if (!initial) {
     throw new Error(`funding operation ${input.operationId} not found`);
   }
+  // This is a diagnostic/cache snapshot only. The lifecycle target below is
+  // derived without reading the previous status/stage as an input.
   const initialState = operationState(initial);
-  if (!isValidFundingOperationState(initialState)) {
-    throw new Error(
-      `funding operation ${input.operationId} has undeclared stored state`,
-    );
-  }
   const observations = await listFundingObservationsForOperation(
     client,
     input.operationId,
   );
+  const lifecycleFacts =
+    await loadFundingLifecycleFactsForOperationInTransaction(client, {
+      operationId: initial.id,
+      now,
+      reconciliationEvidenceTimeoutMs:
+        DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
+    });
+  if (!lifecycleFacts) {
+    throw new Error(
+      `funding operation ${input.operationId} has no lifecycle facts`,
+    );
+  }
+  const lifecycle = deriveFundingLifecycle(lifecycleFacts);
   const expired = expiryPreflight?.expired ?? null;
   if (expired) {
     const finalState = operationState(expired);
@@ -1321,114 +1356,29 @@ export async function reduceFundingOperationInTransaction(
       recoveryMode: expired.recoveryMode,
     };
   }
-  const segments = await reduceFundingSegmentsInTransaction(client, {
+  await reduceFundingSegmentsInTransaction(client, {
     operationId: initial.id,
     observations,
+    lifecycle,
     now,
   });
-  const stepResult = await client.query<StoredFundingStepStateRow>(
-    `
-      select step.id,
-             step.segment_id,
-             step.state,
-             step.executor_id,
-             step.action_validation_result,
-             exists (
-               select 1
-               from funding_operation_step_attempts failed_attempt
-               join funding_step_receipt_observations failed_receipt
-                 on failed_receipt.attempt_id = failed_attempt.id
-               where failed_attempt.step_id = step.id
-                 and failed_receipt.status = 'failed'
-                 and failed_receipt.canonical
-                 and failed_receipt.evidence ->> 'failureFinalized' = 'true'
-                 and not exists (
-                   select 1
-                   from funding_operation_step_attempts newer_attempt
-                   where newer_attempt.step_id = failed_attempt.step_id
-                     and newer_attempt.attempt_number >
-                           failed_attempt.attempt_number
-                 )
-             ) as latest_attempt_failed,
-             exists (
-               select 1
-               from funding_operation_step_attempts started_attempt
-               where started_attempt.step_id = step.id
-                 and started_attempt.outcome = 'started'
-                 and not exists (
-                   select 1
-                   from funding_step_receipt_observations started_receipt
-                   where started_receipt.attempt_id = started_attempt.id
-                     and (
-                       (
-                         started_receipt.status = 'finalized'
-                         and started_receipt.canonical
-                         and started_receipt.action_match
-                       )
-                       or (
-                         started_receipt.status = 'failed'
-                         and started_receipt.canonical
-                         and started_receipt.evidence ->> 'failureFinalized' = 'true'
-                       )
-                     )
-                 )
-             ) as has_started_attempt,
-             exists (
-               select 1
-               from funding_operation_step_attempts broadcast_attempt
-               where broadcast_attempt.step_id = step.id
-                 and (
-                   broadcast_attempt.outcome in ('submitted', 'ambiguous')
-                   or broadcast_attempt.broadcast_may_have_occurred
-                 )
-                 and not exists (
-                   select 1
-                   from funding_step_receipt_observations receipt
-                   where receipt.attempt_id = broadcast_attempt.id
-                     and (
-                       (
-                         receipt.status = 'finalized'
-                         and receipt.canonical
-                         and receipt.action_match
-                       )
-                       or (
-                         receipt.status = 'failed'
-                         and receipt.canonical
-                         and receipt.evidence ->> 'failureFinalized' = 'true'
-                       )
-                     )
-                 )
-             ) as broadcast_unresolved
-      from funding_operation_steps step
-      where step.operation_id = $1
-      order by step.ordinal
-      for update of step
-    `,
-    [initial.id],
-  );
-  const derived = deriveTargetState(
-    initial,
-    observations,
-    segments,
-    stepResult.rows,
-  );
+  await writeFundingActionProjectionCachesInTransaction(client, lifecycle, now);
+  const target = {
+    status: lifecycle.status,
+    stage: lifecycle.progressStage,
+  } satisfies FundingOperationState;
   const canonicalityRecoveryEvidencePresent = observations.some(
     (observation) =>
       observation.finalityStatus === "reorged" || !observation.canonical,
   );
   const automaticEvidenceRecovery =
-    stepResult.rows.some((step) => step.broadcast_unresolved) ||
-    canonicalityRecoveryEvidencePresent;
-  const path = findTransitionPath(initialState, derived.target);
-  if (!path) {
-    throw new Error(
-      `no declared funding transition path from ${stateKey(initialState)} to ${stateKey(derived.target)}`,
-    );
-  }
+    lifecycle.status === "recovery_required" &&
+    !lifecycle.safety.requiresManualRecovery;
+  const manualRecoveryCode = lifecycleFacts.manualRecovery?.code;
 
   const actualDestinationAmount = sumObservationAmount(
     observations,
-    destinationObservationKinds(initial),
+    DESTINATION_CREDIT_KINDS,
     initial.requestedDestinationAmount,
   );
   const directWithdrawalCompleted =
@@ -1450,23 +1400,36 @@ export async function reduceFundingOperationInTransaction(
   const venueReady = hasFinalObservation(observations, "venue_readiness");
   const successfulRecoveryResolved = fundingSuccessfulRecoveryResolved({
     initialStatus: initial.status,
-    targetStatus: derived.target.status,
-    reorgBlockedByTerminalState: derived.reorgBlockedByTerminalState,
+    targetStatus: target.status,
+    reorgBlockedByTerminalState: false,
   });
-  const sourceLegsFinal = segments.every((segment) => {
-    const segmentInput = effectiveSourceAmount(
-      observations.filter(
-        (observation) => observation.segmentId === segment.id,
-      ),
-      segment.quoted_input,
+  const sourceLegsFinal = lifecycleFacts.plan.routeLegs.every((routeLeg) => {
+    const actualInput = lifecycle.segments.find(
+      (segment) => segment.routeLegId === routeLeg.routeLegId,
+    )?.actualInput;
+    return (
+      actualInput !== null &&
+      actualInput !== undefined &&
+      sameAsset(
+        {
+          networkId: actualInput.networkId,
+          assetId: actualInput.assetId,
+          decimals: actualInput.decimals,
+        },
+        {
+          networkId: routeLeg.requestedSource.networkId,
+          assetId: routeLeg.requestedSource.assetId,
+          decimals: routeLeg.requestedSource.decimals,
+        },
+      ) &&
+      BigInt(actualInput.raw) >= BigInt(routeLeg.requestedSource.raw)
     );
-    return moneyMeetsOrExceeds(segmentInput, segment.quoted_input);
   });
   const recordActualSource =
     actualSourceAmount != null &&
     (sourceLegsFinal ||
       ["completed", "refunded", "failed", "cancelled"].includes(
-        derived.target.status,
+        target.status,
       ));
   const recordActualDestination =
     actualDestinationAmount != null &&
@@ -1475,53 +1438,49 @@ export async function reduceFundingOperationInTransaction(
       "venue_preparation",
       "ready_for_consumer",
       "terminal",
-    ].includes(derived.target.stage);
-  let operation = initial;
-  const appliedTransitions: FundingOperationState[] = [];
-  const steps = path.length > 0 ? path : [initialState];
-  for (const [index, nextState] of steps.entries()) {
-    const currentState = operationState(operation);
-    operation = await transitionFundingOperationInTransaction(client, {
-      operationId: operation.id,
-      scope: { kind: "worker" },
-      expectedVersion: operation.version,
-      expectedState: currentState,
-      nextState,
-      actualSourceAmount:
-        index === 0 && recordActualSource ? actualSourceAmount : undefined,
-      actualDestinationAmount:
-        index === 0 && recordActualDestination
-          ? actualDestinationAmount
-          : undefined,
+    ].includes(target.stage);
+  const stateChanged =
+    initialState.status !== target.status || initialState.stage !== target.stage;
+  const operation =
+    await writeFundingOperationLifecycleProjectionCacheInTransaction(client, {
+      operationId: initial.id,
+      expectedVersion: initial.version,
+      state: target,
+      actualSourceAmount: recordActualSource ? actualSourceAmount : undefined,
+      actualDestinationAmount: recordActualDestination
+        ? actualDestinationAmount
+        : undefined,
       errorCode:
-        derived.reorgBlockedByTerminalState ||
-        (nextState.status === "recovery_required" &&
-          canonicalityRecoveryEvidencePresent)
+        target.status === "recovery_required" &&
+        canonicalityRecoveryEvidencePresent
           ? "finalized_observation_reorg"
-          : successfulRecoveryResolved &&
-              currentState.status === "recovery_required" &&
-              nextState.status !== "recovery_required"
+          : target.status === "recovery_required" &&
+              automaticEvidenceRecovery &&
+              lifecycle.safety.reconciliationEvidenceTimedOut &&
+              !lifecycle.safety.awaitingProviderReceipt
+            ? FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE
+            : target.status === "recovery_required" &&
+                manualRecoveryCode !== undefined
+              ? manualRecoveryCode
+            : successfulRecoveryResolved &&
+              initialState.status === "recovery_required" &&
+              target.status !== "recovery_required"
             ? null
             : undefined,
       recoveryMode:
-        nextState.status === "recovery_required" && automaticEvidenceRecovery
-          ? "automatic_evidence"
+        target.status === "recovery_required"
+          ? automaticEvidenceRecovery
+            ? "automatic_evidence"
+            : "manual_review"
+          : null,
+      supportMetadataPatch:
+        lifecycleFacts.manualRecovery !== null &&
+        ["ready", "completed", "refunded"].includes(target.status)
+          ? { lifecycleManualRecovery: null }
           : undefined,
-      supportMetadataPatch: derived.reorgBlockedByTerminalState
-        ? {
-            reorgBlockedByTerminalState: true,
-            reorgDetectedAt: now.toISOString(),
-          }
-        : undefined,
       now,
     });
-    if (
-      currentState.status !== nextState.status ||
-      currentState.stage !== nextState.stage
-    ) {
-      appliedTransitions.push(nextState);
-    }
-  }
+  const appliedTransitions = stateChanged ? [target] : [];
 
   if (sourceObserved || destinationObserved || refundObserved) {
     await releaseSourceReservationsAfterEvidence(
@@ -1616,7 +1575,7 @@ export async function reduceFundingOperationInTransaction(
     terminal: ["completed", "refunded", "failed", "cancelled"].includes(
       operation.status,
     ),
-    reorgBlockedByTerminalState: derived.reorgBlockedByTerminalState,
+    reorgBlockedByTerminalState: false,
     recoveryMode: operation.recoveryMode,
   };
 }
@@ -1788,6 +1747,7 @@ export async function fundingReconciliationWaitState(
   client: Pick<PoolClient, "query">,
   operationId: string,
   broadcastEvidenceWindowMs = DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
+  now = new Date(),
 ): Promise<
   Readonly<{
     awaitingProviderReference: boolean;
@@ -1796,95 +1756,82 @@ export async function fundingReconciliationWaitState(
     providerReferenceRecoveryAt: Date | null;
   }>
 > {
-  const result = await client.query<{
-    awaiting_provider_reference: boolean;
-    awaiting_report: boolean;
-    broadcast_evidence_active_until: Date | null;
-    provider_reference_recovery_at: Date | null;
-  }>(
-    `
-      select
-        exists (
-          select 1
-          from funding_operation_steps step
-          where step.operation_id = $1
-            and step.state in ('planned', 'action_required')
-        )
-        and not exists (
-          select 1
-          from funding_operation_steps step
-          where step.operation_id = $1
-            and step.state in (
-              'submitted',
-              'reconcile_required',
-              'recovery_required'
-            )
-        )
-        and not exists (
-          select 1
-          from funding_operation_steps step
-          join funding_operation_step_attempts attempt
-            on attempt.step_id = step.id
-          left join funding_step_receipt_observations receipt
-            on receipt.attempt_id = attempt.id
-          where step.operation_id = $1
-            and attempt.broadcast_may_have_occurred
-            and receipt.status is distinct from 'failed'
-        ) as awaiting_report,
-        exists (
-          select 1
-          from funding_operation_steps step
-          join funding_operation_step_attempts attempt
-            on attempt.step_id = step.id
-          where step.operation_id = $1
-            and step.state = 'reconcile_required'
-            and attempt.outcome = 'ambiguous'
-            and attempt.broadcast_may_have_occurred
-            and attempt.reference_kind = 'provider_receipt'
-        ) as awaiting_provider_reference,
-        (
-          select max(
-            attempt.started_at +
-            $3::double precision * interval '1 millisecond'
-          )
-          from funding_operation_steps step
-          join funding_operation_step_attempts attempt
-            on attempt.step_id = step.id
-          left join funding_step_receipt_observations receipt
-            on receipt.attempt_id = attempt.id
-          where step.operation_id = $1
-            and attempt.broadcast_may_have_occurred
-            and (
-              receipt.attempt_id is null
-              or receipt.status in ('pending', 'confirmed', 'reorged')
-            )
-        ) as broadcast_evidence_active_until,
-        (
-          select min(
-            attempt.updated_at +
-            $2::double precision * interval '1 millisecond'
-          )
-          from funding_operation_steps step
-          join funding_operation_step_attempts attempt
-            on attempt.step_id = step.id
-          where step.operation_id = $1
-            and step.state = 'reconcile_required'
-            and attempt.outcome = 'ambiguous'
-            and attempt.broadcast_may_have_occurred
-            and attempt.reference_kind = 'provider_receipt'
-        ) as provider_reference_recovery_at
-    `,
-    [operationId, DELEGATED_PROVIDER_REPLAY_MS, broadcastEvidenceWindowMs],
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+    client,
+    {
+      operationId,
+      now,
+      reconciliationEvidenceTimeoutMs:
+        DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
+    },
   );
+  if (!facts) {
+    return {
+      awaitingProviderReference: false,
+      awaitingUnbroadcastActionReport: false,
+      broadcastEvidenceActiveUntil: null,
+      providerReferenceRecoveryAt: null,
+    };
+  }
+
+  const lifecycle = deriveFundingLifecycle(facts);
+  const actionStateById = new Map(
+    lifecycle.actions.map((action) => [action.actionId, action.state]),
+  );
+  const attempts = facts.actions.flatMap((action) =>
+    action.attempts.map((attempt) => ({ action, attempt })),
+  );
+  const hasUnresolvedBroadcast = attempts.some(
+    ({ attempt }) =>
+      attempt.broadcastMayHaveOccurred && attempt.receipt?.status !== "failed",
+  );
+  const providerReferenceAttempts = attempts.filter(
+    ({ action, attempt }) =>
+      actionStateById.get(action.actionId) === "reconcile_required" &&
+      attempt.outcome === "ambiguous" &&
+      attempt.broadcastMayHaveOccurred &&
+      attempt.referenceKind === "provider_receipt",
+  );
+  const broadcastEvidenceActiveUntil = attempts
+    .filter(
+      ({ attempt }) =>
+        attempt.broadcastMayHaveOccurred &&
+        (attempt.receipt === null ||
+          ["pending", "confirmed", "reorged"].includes(attempt.receipt.status)),
+    )
+    .reduce<Date | null>((latest, { attempt }) => {
+      const deadline = new Date(
+        attempt.startedAt.getTime() + broadcastEvidenceWindowMs,
+      );
+      return latest === null || deadline.getTime() > latest.getTime()
+        ? deadline
+        : latest;
+    }, null);
+  const providerReferenceRecoveryAt =
+    providerReferenceAttempts.reduce<Date | null>((earliest, { attempt }) => {
+      const recoveryAt = new Date(
+        attempt.updatedAt.getTime() + DELEGATED_PROVIDER_REPLAY_MS,
+      );
+      return earliest === null || recoveryAt.getTime() < earliest.getTime()
+        ? recoveryAt
+        : earliest;
+    }, null);
+
   return {
-    awaitingProviderReference: Boolean(
-      result.rows[0]?.awaiting_provider_reference,
-    ),
-    awaitingUnbroadcastActionReport: Boolean(result.rows[0]?.awaiting_report),
-    broadcastEvidenceActiveUntil:
-      result.rows[0]?.broadcast_evidence_active_until ?? null,
-    providerReferenceRecoveryAt:
-      result.rows[0]?.provider_reference_recovery_at ?? null,
+    awaitingProviderReference: providerReferenceAttempts.length > 0,
+    awaitingUnbroadcastActionReport:
+      lifecycle.actions.some(
+        (action) =>
+          action.state === "planned" || action.state === "action_required",
+      ) &&
+      !lifecycle.actions.some((action) =>
+        ["submitted", "reconcile_required", "recovery_required"].includes(
+          action.state,
+        ),
+      ) &&
+      !hasUnresolvedBroadcast,
+    broadcastEvidenceActiveUntil,
+    providerReferenceRecoveryAt,
   };
 }
 
@@ -1923,28 +1870,50 @@ async function hasCanonicalFinalizedStepEvidencePendingReduction(
 async function awaitingUnbroadcastActionReport(
   client: Pick<PoolClient, "query">,
   operationId: string,
+  now = new Date(),
 ): Promise<boolean> {
-  return (await fundingReconciliationWaitState(client, operationId))
-    .awaitingUnbroadcastActionReport;
+  return (
+    await fundingReconciliationWaitState(client, operationId, undefined, now)
+  ).awaitingUnbroadcastActionReport;
 }
 
 async function unbroadcastActionExpiresAt(
   client: Pick<PoolClient, "query">,
   operationId: string,
+  now = new Date(),
 ): Promise<Date | null> {
-  const result = await client.query<{ expires_at: Date | null }>(
-    `
-      select case
-        when count(*) = 0 or bool_or(action_expires_at is null) then null
-        else max(action_expires_at)
-      end as expires_at
-      from funding_operation_steps
-      where operation_id = $1
-        and state in ('planned', 'action_required')
-    `,
-    [operationId],
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+    client,
+    {
+      operationId,
+      now,
+      reconciliationEvidenceTimeoutMs:
+        DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
+    },
   );
-  return result.rows[0]?.expires_at ?? null;
+  if (!facts) return null;
+  const actionStateById = new Map(
+    deriveFundingLifecycle(facts).actions.map((action) => [
+      action.actionId,
+      action.state,
+    ]),
+  );
+  const actionable = facts.actions.filter((action) => {
+    const state = actionStateById.get(action.actionId);
+    return state === "planned" || state === "action_required";
+  });
+  if (
+    actionable.length === 0 ||
+    actionable.some((action) => action.expiresAt === null)
+  ) {
+    return null;
+  }
+  return actionable.reduce<Date>((latest, action) => {
+    const expiresAt = action.expiresAt;
+    return expiresAt !== null && expiresAt.getTime() > latest.getTime()
+      ? expiresAt
+      : latest;
+  }, actionable[0]!.expiresAt!);
 }
 
 async function synchronizeFundingReconciliationActiveWindow(
@@ -1953,6 +1922,7 @@ async function synchronizeFundingReconciliationActiveWindow(
     operationId: string;
     attemptCount: number;
     now: Date;
+    terminalTimeoutMs: number;
   }>,
 ): Promise<FundingReconciliationActiveWindow | null> {
   return tx(pool, async (client) => {
@@ -1963,9 +1933,28 @@ async function synchronizeFundingReconciliationActiveWindow(
     if (!operation) {
       return null;
     }
-    const activeStatus = RECONCILIATION_ACTIVE_STATUSES.has(operation.status);
+    const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+      client,
+      {
+        operationId: operation.id,
+        now: input.now,
+        reconciliationEvidenceTimeoutMs:
+          DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
+      },
+    );
+    if (!facts) return null;
+    const lifecycle = deriveFundingLifecycle(facts);
+    const activeStatus =
+      RECONCILIATION_ACTIVE_STATUSES.has(lifecycle.status) ||
+      (lifecycle.status === "recovery_required" &&
+        lifecycle.recoveryMode === "automatic_evidence");
     const waitState = activeStatus
-      ? await fundingReconciliationWaitState(client, operation.id)
+      ? await fundingReconciliationWaitState(
+          client,
+          operation.id,
+          undefined,
+          input.now,
+        )
       : null;
     // The delegated executor owns recovery of its durable provider reference.
     // Starting the generic evidence timeout before that reference resolves can
@@ -1973,21 +1962,20 @@ async function synchronizeFundingReconciliationActiveWindow(
     if (
       !activeStatus ||
       waitState?.awaitingUnbroadcastActionReport ||
-      waitState?.awaitingProviderReference
+      waitState?.awaitingProviderReference ||
+      lifecycle.safety.awaitingProviderReceipt
     ) {
       const hasStoredWindow =
         operation.supportMetadata.reconciliationActiveSince != null ||
         operation.supportMetadata.reconciliationActiveAttemptBaseline != null;
       if (hasStoredWindow) {
-        await transitionFundingOperationInTransaction(client, {
+        await writeFundingOperationSupportFactsInTransaction(client, {
           operationId: operation.id,
-          scope: { kind: "worker" },
           expectedVersion: operation.version,
-          expectedState: operationState(operation),
-          nextState: operationState(operation),
           supportMetadataPatch: {
             reconciliationActiveSince: null,
             reconciliationActiveAttemptBaseline: null,
+            reconciliationEvidenceDeadline: null,
           },
           now: input.now,
         });
@@ -1999,23 +1987,30 @@ async function synchronizeFundingReconciliationActiveWindow(
       input.attemptCount,
       input.now,
     );
-    if (stored) return stored;
-    const activeWindow = {
-      startedAt: input.now,
-      initialAttemptCount: Math.max(0, input.attemptCount - 1),
-    };
-    await transitionFundingOperationInTransaction(client, {
-      operationId: operation.id,
-      scope: { kind: "worker" },
-      expectedVersion: operation.version,
-      expectedState: operationState(operation),
-      nextState: operationState(operation),
-      supportMetadataPatch: {
-        reconciliationActiveSince: activeWindow.startedAt.toISOString(),
-        reconciliationActiveAttemptBaseline: activeWindow.initialAttemptCount,
-      },
-      now: input.now,
-    });
+    const activeWindow =
+      stored ??
+      ({
+        startedAt: input.now,
+        initialAttemptCount: Math.max(0, input.attemptCount - 1),
+      } satisfies FundingReconciliationActiveWindow);
+    const storedDeadline = operation.supportMetadata.reconciliationEvidenceDeadline;
+    const hasStoredDeadline =
+      typeof storedDeadline === "string" &&
+      Number.isFinite(new Date(storedDeadline).getTime());
+    if (!stored || !hasStoredDeadline) {
+      await writeFundingOperationSupportFactsInTransaction(client, {
+        operationId: operation.id,
+        expectedVersion: operation.version,
+        supportMetadataPatch: {
+          reconciliationActiveSince: activeWindow.startedAt.toISOString(),
+          reconciliationActiveAttemptBaseline: activeWindow.initialAttemptCount,
+          reconciliationEvidenceDeadline: new Date(
+            activeWindow.startedAt.getTime() + input.terminalTimeoutMs,
+          ).toISOString(),
+        },
+        now: input.now,
+      });
+    }
     return activeWindow;
   });
 }
@@ -2099,6 +2094,7 @@ export async function pollFundingReconciliationEvidence(
     recoveryMode?: FundingRecoveryMode | null;
     recentFailedReceiptWatch?: boolean;
     terminalReceiptWatch?: boolean;
+    terminalRelayRefundWatch?: boolean;
     awaitingUnbroadcastActionReport?: boolean;
     now: Date;
     providerPoll?: FundingReconciliationBatchOptions["providerPoll"];
@@ -2107,15 +2103,10 @@ export async function pollFundingReconciliationEvidence(
     destinationPoll?: FundingReconciliationBatchOptions["destinationPoll"];
   }>,
 ): Promise<Readonly<{ terminalReceiptPollFailed: boolean }>> {
-  const terminalReceiptWatch =
-    input.terminalReceiptWatch === true &&
-    ["completed", "refunded", "failed", "cancelled"].includes(
-      input.state.status,
-    );
+  const terminalReceiptWatch = input.terminalReceiptWatch === true;
   const receiptWatch =
     terminalReceiptWatch || input.recentFailedReceiptWatch === true;
-  const terminalRelayRefundWatch =
-    terminalReceiptWatch && input.state.status === "refunded";
+  const terminalRelayRefundWatch = input.terminalRelayRefundWatch === true;
   if (
     input.awaitingUnbroadcastActionReport &&
     !receiptWatch &&
@@ -2193,6 +2184,7 @@ async function loadFundingOperationState(
     recoveryMode: FundingRecoveryMode | null;
     recentFailedReceiptWatch: boolean;
     terminalReceiptWatch: boolean;
+    terminalRelayRefundWatch: boolean;
     awaitingProviderReference: boolean;
     awaitingUnbroadcastActionReport: boolean;
     broadcastEvidenceActiveUntil: Date | null;
@@ -2212,12 +2204,21 @@ async function loadFundingOperationState(
       client,
       operation.id,
       broadcastEvidenceWindowMs,
+      now,
     );
-    const terminal = ["completed", "refunded", "failed", "cancelled"].includes(
-      operation.status,
+    const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+      client,
+      {
+        operationId: operation.id,
+        now,
+        reconciliationEvidenceTimeoutMs: broadcastEvidenceWindowMs,
+      },
     );
-    const terminalEvidenceWatch = terminal
-      ? await client.query<{ watching: boolean }>(
+    if (!facts) {
+      throw new Error(`funding operation ${operationId} has no lifecycle facts`);
+    }
+    const lifecycle = deriveFundingLifecycle(facts);
+    const terminalEvidenceWatch = await client.query<{ watching: boolean }>(
           `select (
              exists (
                select 1
@@ -2252,8 +2253,28 @@ async function loadFundingOperationState(
              )
            ) as watching`,
           [operation.id, now],
-        )
-      : null;
+        );
+    const terminalRelayRefundWatch = await client.query<{ watching: boolean }>(
+      `select exists (
+         select 1
+           from funding_observations refund
+          where refund.operation_id = $1::uuid
+            and refund.kind = 'refund_credit'
+            and (
+              (
+                refund.finality_status = 'finalized'
+                and refund.canonical
+                and refund.finalized_at >= $2::timestamptz - interval '15 minutes'
+              )
+              or (
+                refund.finality_status = 'reorged'
+                and not refund.canonical
+                and refund.reorged_at >= $2::timestamptz - interval '15 minutes'
+              )
+            )
+       ) as watching`,
+      [operation.id, now],
+    );
     const recentFailedReceiptWatch = await client.query<{ watching: boolean }>(
       `select exists (
          select 1
@@ -2270,14 +2291,19 @@ async function loadFundingOperationState(
       [operation.id, now],
     );
     return {
-      state: operationState(operation),
-      recoveryMode: operation.recoveryMode,
+      state: {
+        status: lifecycle.status,
+        stage: lifecycle.progressStage,
+      },
+      recoveryMode: lifecycle.recoveryMode,
       recentFailedReceiptWatch:
         recentFailedReceiptWatch.rows[0]?.watching === true,
       terminalReceiptWatch:
-        terminalEvidenceWatch?.rows[0]?.watching === true ||
+        terminalEvidenceWatch.rows[0]?.watching === true ||
         operation.supportMetadata.withdrawalExecutionKind ===
           "exact_same_asset_transfer",
+      terminalRelayRefundWatch:
+        terminalRelayRefundWatch.rows[0]?.watching === true,
       awaitingProviderReference: waitState.awaitingProviderReference,
       awaitingUnbroadcastActionReport:
         waitState.awaitingUnbroadcastActionReport,
@@ -2286,6 +2312,7 @@ async function loadFundingOperationState(
       unbroadcastActionExpiresAt: await unbroadcastActionExpiresAt(
         client,
         operation.id,
+        now,
       ),
     };
   });
@@ -2296,70 +2323,52 @@ async function expireUnbroadcastActionWait(
   input: Readonly<{ operationId: string; now: Date }>,
 ): Promise<boolean> {
   return tx(pool, async (client) => {
-    let operation = await fetchFundingOperationForWorkerInTransaction(
+    const operation = await fetchFundingOperationForWorkerInTransaction(
       client,
       input.operationId,
     );
+    const facts = operation
+      ? await loadFundingLifecycleFactsForOperationInTransaction(client, {
+          operationId: operation.id,
+          now: input.now,
+          reconciliationEvidenceTimeoutMs:
+            DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
+        })
+      : null;
+    const lifecycle = facts ? deriveFundingLifecycle(facts) : null;
     if (
       !operation ||
-      ["completed", "refunded", "failed", "cancelled"].includes(
-        operation.status,
-      ) ||
-      !(await awaitingUnbroadcastActionReport(client, operation.id))
+      !lifecycle ||
+      lifecycle.safety.terminal ||
+      !(await awaitingUnbroadcastActionReport(client, operation.id, input.now))
     ) {
       return false;
     }
     const actionExpiresAt = await unbroadcastActionExpiresAt(
       client,
       operation.id,
+      input.now,
     );
     if (!actionExpiresAt || actionExpiresAt.getTime() > input.now.getTime()) {
       return false;
     }
-    const unsafe = await client.query<{ unsafe: boolean }>(
-      `
-        select
-          exists (
-            select 1
-            from funding_observations observation
-            where observation.operation_id = $1
-          )
-          or exists (
-            select 1
-            from funding_operation_steps step
-            join funding_operation_step_attempts attempt
-              on attempt.step_id = step.id
-            where step.operation_id = $1
-              and attempt.outcome = 'started'
-          ) as unsafe
-      `,
-      [operation.id],
-    );
-    if (unsafe.rows[0]?.unsafe) {
+    const cancellationFacts =
+      await recordSafeFundingActionCancellationsInTransaction(client, {
+        operationId: operation.id,
+        now: input.now,
+      });
+    if (cancellationFacts.unsafeStepIds.length > 0) {
       return false;
     }
-    operation = await transitionFundingOperationInTransaction(client, {
+    await writeFundingOperationSupportFactsInTransaction(client, {
       operationId: operation.id,
-      scope: { kind: "worker" },
       expectedVersion: operation.version,
-      expectedState: operationState(operation),
-      nextState: operationState(operation),
       supportMetadataPatch: {
         actionWaitExpiredAt: input.now.toISOString(),
         terminalReason: "unbroadcast_action_expired",
       },
       now: input.now,
     });
-    await client.query(
-      `
-        update funding_operation_steps
-        set state = 'cancelled',
-            updated_at = $2
-        where operation_id = $1
-          and state in ('planned', 'action_required')
-      `,
-      [operation.id, input.now],
-    );
     const reduction = await reduceFundingOperationInTransaction(client, {
       operationId: operation.id,
       now: input.now,
@@ -2390,57 +2399,63 @@ async function markFundingOperationRecoveryRequired(
       client,
       input.operationId,
     );
-    if (!operation || !RECONCILIATION_ACTIVE_STATUSES.has(operation.status)) {
+    if (!operation) {
       return false;
     }
-    const current = operationState(operation);
-    const target =
-      recoveryTargetFor(current) ??
-      ({
-        status: "recovery_required",
-        stage: current.stage === "committed" ? "source_action" : current.stage,
-      } satisfies FundingOperationState);
-    const path = findTransitionPath(current, target);
-    if (!path) {
-      throw new Error(
-        `no declared funding transition path from ${stateKey(current)} to ${stateKey(target)}`,
-      );
-    }
-    const transitions = path.length > 0 ? path : [target];
-    for (const [index, nextState] of transitions.entries()) {
-      const expectedState = operationState(operation);
-      operation = await transitionFundingOperationInTransaction(client, {
+    if (input.recoveryMode === "manual_review") {
+      // A manual escalation is a durable typed fact. It is deliberately not
+      // inferred from, or written through, the previous public cache state.
+      operation = await writeFundingOperationSupportFactsInTransaction(client, {
         operationId: operation.id,
-        scope: { kind: "worker" },
         expectedVersion: operation.version,
-        expectedState,
-        nextState,
-        recoveryMode:
-          index === transitions.length - 1 ? input.recoveryMode : undefined,
-        errorCode:
-          index === transitions.length - 1 ? input.errorCode : undefined,
-        supportMetadataPatch:
-          index === transitions.length - 1
-            ? {
-                reconciliationRecoveryRequiredAt: input.now.toISOString(),
-                reconciliationRecoveryReason: input.errorCode,
-              }
-            : undefined,
+        supportMetadataPatch: {
+          lifecycleManualRecovery: {
+            code: input.errorCode,
+            requestedAt: input.now.toISOString(),
+          },
+          reconciliationRecoveryRequiredAt: input.now.toISOString(),
+          reconciliationRecoveryReason: input.errorCode,
+        },
         now: input.now,
       });
     }
-    // Only work that actually started or already needs reconciliation owns
-    // this timeout. Future dependent steps stay planned for a later resume.
-    await client.query(
-      `
-        update funding_operation_steps
-        set state = 'recovery_required',
-            updated_at = $2
-        where operation_id = $1
-          and state in ('submitted', 'reconcile_required')
-      `,
-      [operation.id, input.now],
+    const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+      client,
+      {
+        operationId: operation.id,
+        now: input.now,
+        reconciliationEvidenceTimeoutMs:
+          DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
+      },
     );
+    if (!facts) return false;
+    const lifecycle = deriveFundingLifecycle(facts);
+    if (lifecycle.status !== "recovery_required") {
+      return false;
+    }
+    await writeFundingActionProjectionCachesInTransaction(
+      client,
+      lifecycle,
+      input.now,
+    );
+    await writeFundingOperationLifecycleProjectionCacheInTransaction(client, {
+      operationId: operation.id,
+      expectedVersion: operation.version,
+      state: {
+        status: lifecycle.status,
+        stage: lifecycle.progressStage,
+      },
+      recoveryMode: lifecycle.recoveryMode,
+      errorCode: input.errorCode,
+      supportMetadataPatch:
+        input.recoveryMode === "automatic_evidence"
+          ? {
+              reconciliationRecoveryRequiredAt: input.now.toISOString(),
+              reconciliationRecoveryReason: input.errorCode,
+            }
+          : undefined,
+      now: input.now,
+    });
     return true;
   });
 }
@@ -2453,52 +2468,9 @@ async function markFundingOperationRecoveryManualReview(
     now: Date;
   }>,
 ): Promise<boolean> {
-  return tx(pool, async (client) => {
-    let operation = await fetchFundingOperationForWorkerInTransaction(
-      client,
-      input.operationId,
-    );
-    if (!operation) return false;
-    const current = operationState(operation);
-    const target =
-      recoveryTargetFor(current) ??
-      ({
-        status: "recovery_required",
-        stage:
-          current.stage === "committed" || current.stage === "terminal"
-            ? "source_action"
-            : current.stage,
-      } satisfies FundingOperationState);
-    const path = findTransitionPath(current, target);
-    if (!path) {
-      throw new Error(
-        `no declared funding transition path from ${stateKey(current)} to ${stateKey(target)}`,
-      );
-    }
-    const transitions = path.length > 0 ? path : [target];
-    for (const [index, nextState] of transitions.entries()) {
-      const expectedState = operationState(operation);
-      operation = await transitionFundingOperationInTransaction(client, {
-        operationId: operation.id,
-        scope: { kind: "worker" },
-        expectedVersion: operation.version,
-        expectedState,
-        nextState,
-        recoveryMode:
-          index === transitions.length - 1 ? "manual_review" : undefined,
-        errorCode:
-          index === transitions.length - 1 ? input.errorCode : undefined,
-        supportMetadataPatch:
-          index === transitions.length - 1
-            ? {
-                receiptReorgManualReviewAt: input.now.toISOString(),
-                receiptReorgManualReviewReason: input.errorCode,
-              }
-            : undefined,
-        now: input.now,
-      });
-    }
-    return true;
+  return markFundingOperationRecoveryRequired(pool, {
+    ...input,
+    recoveryMode: "manual_review",
   });
 }
 
@@ -2566,6 +2538,8 @@ async function processLease(
       recoveryMode: operationBeforePoll.recoveryMode,
       recentFailedReceiptWatch: operationBeforePoll.recentFailedReceiptWatch,
       terminalReceiptWatch: operationBeforePoll.terminalReceiptWatch,
+      terminalRelayRefundWatch:
+        operationBeforePoll.terminalRelayRefundWatch,
       awaitingUnbroadcastActionReport:
         operationBeforePoll.awaitingUnbroadcastActionReport,
       now: options.now,
@@ -2700,9 +2674,13 @@ async function processLease(
           pool,
           lease.operationId,
         );
-    const terminalRefundReorgIncident =
-      reduction.terminal && reduction.reorgBlockedByTerminalState
-        ? await pool.query<{ incident: boolean }>(
+    // A reorged refund is a money-movement incident, not a property of the
+    // materialized operation cache.  The projector deliberately reopens its
+    // public cache to recovery_required as soon as the canonical credit is
+    // lost.  Keep the bounded watch/dead-letter decision anchored in the
+    // reorged refund fact, otherwise that correct cache update would turn the
+    // final scan into an unbounded retry loop.
+    const terminalRefundReorgIncident = await pool.query<{ incident: boolean }>(
             `select exists (
                select 1
                  from funding_observations reorged_refund
@@ -2747,9 +2725,8 @@ async function processLease(
                   )
              ) as incident`,
             [lease.operationId, options.now],
-          )
-        : null;
-    if (terminalRefundReorgIncident?.rows[0]?.incident === true) {
+          );
+    if (terminalRefundReorgIncident.rows[0]?.incident === true) {
       await finishFundingReconciliationLease(pool, {
         jobId: lease.jobId,
         leaseOwner: lease.leaseOwner,
@@ -2772,6 +2749,7 @@ async function processLease(
           operationId: lease.operationId,
           attemptCount: lease.attemptCount,
           now: options.now,
+          terminalTimeoutMs: options.terminalTimeoutMs,
         });
     const disposition = fundingReconciliationDisposition({
       canonicalFinalizedStepEvidencePendingReduction,
@@ -2782,6 +2760,16 @@ async function processLease(
       now: options.now,
       terminalTimeoutMs: options.terminalTimeoutMs,
     });
+    const providerReferenceDueAt =
+      operationBeforePoll.awaitingProviderReference &&
+      operationBeforePoll.providerReferenceRecoveryAt
+        ? new Date(
+            Math.max(
+              operationBeforePoll.providerReferenceRecoveryAt.getTime(),
+              options.now.getTime() + options.pollDelayMs,
+            ),
+          )
+        : null;
     if (disposition === "complete") {
       await finishFundingReconciliationLease(pool, {
         jobId: lease.jobId,
@@ -2805,24 +2793,26 @@ async function processLease(
         leaseToken: lease.leaseToken,
         result: {
           kind: "requeue",
-          dueAt: new Date(
-            options.now.getTime() +
-              fundingReconciliationPollDelayMs(
-                {
-                  status: "recovery_required",
-                  stage: reduction.finalState.stage,
-                },
-                {
-                  activePollDelayMs: options.pollDelayMs,
-                  broadcastEvidenceActiveUntil:
-                    operationBeforePoll.broadcastEvidenceActiveUntil,
-                  idlePollDelayMs: options.idlePollDelayMs,
-                  now: options.now,
-                  recoveryMode: "automatic_evidence",
-                  recoveryPollDelayMs: options.recoveryPollDelayMs,
-                },
-              ),
-          ),
+          dueAt:
+            providerReferenceDueAt ??
+            new Date(
+              options.now.getTime() +
+                fundingReconciliationPollDelayMs(
+                  {
+                    status: "recovery_required",
+                    stage: reduction.finalState.stage,
+                  },
+                  {
+                    activePollDelayMs: options.pollDelayMs,
+                    broadcastEvidenceActiveUntil:
+                      operationBeforePoll.broadcastEvidenceActiveUntil,
+                    idlePollDelayMs: options.idlePollDelayMs,
+                    now: options.now,
+                    recoveryMode: "automatic_evidence",
+                    recoveryPollDelayMs: options.recoveryPollDelayMs,
+                  },
+                ),
+            ),
         },
         now: options.now,
       });
@@ -2835,14 +2825,8 @@ async function processLease(
       result: {
         kind: "requeue",
         dueAt:
-          operationBeforePoll.awaitingProviderReference &&
-          operationBeforePoll.providerReferenceRecoveryAt
-            ? new Date(
-                Math.max(
-                  operationBeforePoll.providerReferenceRecoveryAt.getTime(),
-                  options.now.getTime() + options.pollDelayMs,
-                ),
-              )
+          providerReferenceDueAt !== null
+            ? providerReferenceDueAt
             : new Date(
                 options.now.getTime() +
                   fundingReconciliationPollDelayMs(reduction.finalState, {
@@ -2869,6 +2853,7 @@ async function processLease(
         operationId: lease.operationId,
         attemptCount: lease.attemptCount,
         now: options.now,
+        terminalTimeoutMs: options.terminalTimeoutMs,
       },
     );
     const terminalTimeoutReached =

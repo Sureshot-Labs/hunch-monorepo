@@ -12,6 +12,7 @@ import type {
 import { canonicalAccountAddress } from "../domain/asset-identity.js";
 import {
   finishFundingStepAttemptForUserInTransaction,
+  projectedFundingLifecycleInTransaction,
   resolveAmbiguousProviderFundingStepAttemptForUserInTransaction,
   startFundingStepAttemptInTransaction,
   startFundingStepAttemptForUserInTransaction,
@@ -936,21 +937,10 @@ async function recoverPolymarketRouterInTransaction(
        and funding_authorization.user_id = operation.user_id
       where attempt.executor_id = $1
         and (
-          (
-            attempt.outcome = 'started'
-            and step.state = 'action_required'
-          )
+          attempt.outcome = 'started'
           or (
             attempt.outcome = 'ambiguous'
             and attempt.reference_kind = 'provider_receipt'
-            and (
-              step.state = 'reconcile_required'
-              or (
-                step.state = 'recovery_required'
-                and operation.status = 'recovery_required'
-                and operation.recovery_mode = 'automatic_evidence'
-              )
-            )
           )
         )
         and attempt.updated_at <= case
@@ -997,12 +987,9 @@ async function recoverPolymarketRouterInTransaction(
                      'trade_shortfall_intent'
           )
         )
-        and operation.status not in (
-          'completed', 'refunded', 'failed', 'cancelled'
-        )
       order by attempt.updated_at asc, attempt.id asc
       for update of attempt, step, operation skip locked
-      limit 1
+      limit 25
     `,
     [
       input.configuration.profileId,
@@ -1010,9 +997,27 @@ async function recoverPolymarketRouterInTransaction(
       input.recoverProviderReplayBefore,
     ],
   );
-  const row = rows[0];
-  if (!row) return null;
-  const leased = await client.query(
+  for (const row of rows) {
+    const lifecycle = await projectedFundingLifecycleInTransaction(client, {
+      operationId: row.operation_id,
+      now: input.now,
+    });
+    const actionProjection = lifecycle.actions.find(
+      (action) => action.actionId === row.step_id,
+    );
+    const automaticRecovery =
+      lifecycle.recoveryMode !== "manual_review" &&
+      !lifecycle.safety.terminal &&
+      !lifecycle.safety.requiresManualRecovery;
+    const actionNeedsRecovery =
+      actionProjection !== undefined &&
+      ["reconcile_required", "recovery_required"].includes(
+        actionProjection.state,
+      );
+    if (!automaticRecovery || !actionNeedsRecovery) {
+      continue;
+    }
+    const leased = await client.query(
     `
       update funding_operation_step_attempts
       set updated_at = $2
@@ -1027,28 +1032,30 @@ async function recoverPolymarketRouterInTransaction(
         ? input.recoverUnbroadcastRetryBefore
         : input.recoverProviderReplayBefore,
     ],
-  );
-  if (leased.rowCount !== 1) {
-    throw new Error("delegated funding recovery lease was lost");
+    );
+    if (leased.rowCount !== 1) {
+      continue;
+    }
+    const parsed = normalizedActionSchema.safeParse(row.normalized_action);
+    const action = parsed.success ? (parsed.data as NormalizedAction) : null;
+    if (!action || canonicalJsonHash(action) !== row.action_fingerprint) {
+      throw new Error("delegated funding recovery action is invalid");
+    }
+    const expectedActionWalletId = actionWalletId(row);
+    validatePolymarketDepositRouterAction({
+      action,
+      expectedRaw: row.receipt_raw,
+      walletId: expectedActionWalletId,
+      profileId: input.configuration.profileId,
+    });
+    return executionClaimFromRow(row, {
+      action,
+      actionWalletId: expectedActionWalletId,
+      attemptId: row.attempt_id,
+      broadcastBoundaryCrossed: row.attempt_outcome === "ambiguous",
+    });
   }
-  const parsed = normalizedActionSchema.safeParse(row.normalized_action);
-  const action = parsed.success ? (parsed.data as NormalizedAction) : null;
-  if (!action || canonicalJsonHash(action) !== row.action_fingerprint) {
-    throw new Error("delegated funding recovery action is invalid");
-  }
-  const expectedActionWalletId = actionWalletId(row);
-  validatePolymarketDepositRouterAction({
-    action,
-    expectedRaw: row.receipt_raw,
-    walletId: expectedActionWalletId,
-    profileId: input.configuration.profileId,
-  });
-  return executionClaimFromRow(row, {
-    action,
-    actionWalletId: expectedActionWalletId,
-    attemptId: row.attempt_id,
-    broadcastBoundaryCrossed: row.attempt_outcome === "ambiguous",
-  });
+  return null;
 }
 
 export type DelegatedFundingExecutorBatchResult = Readonly<{
@@ -1232,7 +1239,6 @@ async function polymarketRouterPreBroadcastDecisionInTransaction(
         and operation.support_metadata ->> 'fundingAuthorizationFingerprint' = $4
         and step.id = $5
         and step.executor_id = $6
-        and step.state = 'action_required'
         and attempt.id = $7
         and attempt.outcome = 'started'
         and attempt.canonical_action_fingerprint = step.action_fingerprint
@@ -1287,6 +1293,26 @@ async function polymarketRouterPreBroadcastDecisionInTransaction(
   );
   const row = scope.rows[0];
   if (!row) {
+    return {
+      kind: "hard_invalid",
+      reasonCode: "delegated_action_invalid",
+    };
+  }
+  const lifecycle = await projectedFundingLifecycleInTransaction(client, {
+    operationId: input.claim.operationId,
+    now: input.now,
+  });
+  const actionProjection = lifecycle.actions.find(
+    (action) => action.actionId === input.claim.stepId,
+  );
+  if (
+    lifecycle.safety.terminal ||
+    lifecycle.safety.requiresManualRecovery ||
+    actionProjection === undefined ||
+    !["reconcile_required", "recovery_required"].includes(
+      actionProjection.state,
+    )
+  ) {
     return {
       kind: "hard_invalid",
       reasonCode: "delegated_action_invalid",

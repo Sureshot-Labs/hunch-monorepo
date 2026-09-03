@@ -75,6 +75,7 @@ import {
 } from "../../persistence/funding-operation-repository.js";
 import {
   finishFundingStepAttemptInTransaction,
+  recordSafeFundingActionCancellationsInTransaction,
   startFundingStepAttemptInTransaction,
 } from "../../persistence/funding-evidence-repository.js";
 import {
@@ -103,6 +104,7 @@ import {
 import { fundingSidecarRuntimeConfig } from "../../runtime/sidecar-runtime-config.js";
 import { FundingReceiveReceiptRouter } from "../../receive/receive-receipt-router.js";
 import {
+  fundingReconciliationWaitState,
   reduceFundingOperation,
   runFundingReconciliationBatch,
 } from "../../reconciliation/funding-reducer.js";
@@ -1620,6 +1622,34 @@ async function recordRelayApprovalSuccess(
       now: at,
     }),
   );
+}
+
+async function recordRelayExecutorReportSuccess(
+  fixture: RelayFixture,
+  input: Readonly<{ ordinal: number; stepId: string; at: Date }>,
+): Promise<void> {
+  const planStep = fixture.plan.steps[input.ordinal];
+  assert.ok(planStep);
+  await tx(pool, async (client) => {
+    const started = await startFundingStepAttemptInTransaction(client, {
+      operationId: fixture.operationId,
+      stepId: input.stepId,
+      canonicalActionFingerprint: planStep.actionFingerprint,
+      executorId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+      now: input.at,
+    });
+    await finishFundingStepAttemptInTransaction(client, {
+      attemptId: started.id,
+      outcome: "succeeded",
+      broadcastMayHaveOccurred: false,
+      referenceKind: null,
+      receiptRefCiphertext: null,
+      receiptRefLookupHmac: null,
+      lookupKeyVersion: null,
+      actualCosts: {},
+      now: input.at,
+    });
+  });
 }
 
 async function recordRelayDepositSuccess(
@@ -3244,6 +3274,18 @@ try {
   );
   assert.equal(
     (
+      await fundingReconciliationWaitState(
+        pool,
+        crashRecovery.operationId,
+        90_000,
+        providerRecoveryDeadline,
+      )
+    ).awaitingProviderReference,
+    true,
+    "wait state must derive a provider-receipt recovery lease from the ambiguous attempt",
+  );
+  assert.equal(
+    (
       await ambiguousExecutor.runBatch({
         limit: 1,
         now: providerRecoveryDeadline,
@@ -4778,6 +4820,14 @@ try {
       where operation_id = $1::uuid`,
     [immutableBaselineRelay.operationId],
   );
+  // The cache rows above deliberately model an old/stale materialization. The
+  // lifecycle decision itself must be driven by durable executor attempts,
+  // not by those mutable step labels.
+  await recordRelayExecutorReportSuccess(immutableBaselineRelay, {
+    ordinal: 0,
+    stepId: immutableBaselineRelay.approvalStepId,
+    at: immutableBaselineAt,
+  });
   await pool.query(
     `update funding_operation_segments
         set status = 'submitted',
@@ -4825,6 +4875,11 @@ try {
       metadata: { relayDeposit: true },
     }),
   );
+  await recordRelayExecutorReportSuccess(immutableBaselineRelay, {
+    ordinal: 1,
+    stepId: immutableBaselineRelay.depositStepId,
+    at: immutableBaselineAt,
+  });
   let immutableBaselineObserved = false;
   const immutableBaselineObserver = new OwnedRouteDestinationObserver({
     observe: async (_db, target) => {
@@ -4947,6 +5002,16 @@ try {
       ]),
     ],
   );
+  await recordRelayExecutorReportSuccess(exactReceiptRelay, {
+    ordinal: 0,
+    stepId: exactReceiptRelay.approvalStepId,
+    at: exactReceiptAt,
+  });
+  await recordRelayExecutorReportSuccess(exactReceiptRelay, {
+    ordinal: 1,
+    stepId: exactReceiptRelay.depositStepId,
+    at: exactReceiptAt,
+  });
   await reduceFundingOperation(pool, {
     operationId: exactReceiptRelay.operationId,
     now: exactReceiptAt,
@@ -5460,58 +5525,21 @@ try {
     ],
   );
   await tx(pool, async (client) => {
-    const current = await client.query<{
-      progress_stage: "committed" | "source_action";
-      status: "in_progress" | "reconcile_required";
-      version: string | number;
-    }>(
-      `select status, progress_stage, version
+    await client.query(
+      `select id
          from funding_operations
         where id = $1::uuid
         for update`,
       [priorApprovalRoute.operationId],
     );
-    const operation = current.rows[0];
-    assert.ok(operation);
-    let version = Number(operation.version);
-    let status = operation.status;
-    let stage = operation.progress_stage;
-    if (stage === "committed") {
-      const activated = await transitionFundingOperationInTransaction(client, {
+    const cancellation =
+      await recordSafeFundingActionCancellationsInTransaction(client, {
         operationId: priorApprovalRoute.operationId,
-        scope: { kind: "worker" },
-        expectedVersion: version,
-        expectedState: { status, stage },
-        nextState: { status: "in_progress", stage: "source_action" },
         now: new Date(now.getTime() + 2),
       });
-      version = activated.version;
-      status = "in_progress";
-      stage = "source_action";
-    }
-    if (status === "in_progress") {
-      const reconciling = await transitionFundingOperationInTransaction(
-        client,
-        {
-          operationId: priorApprovalRoute.operationId,
-          scope: { kind: "worker" },
-          expectedVersion: version,
-          expectedState: { status, stage },
-          nextState: { status: "reconcile_required", stage },
-          now: new Date(now.getTime() + 2),
-        },
-      );
-      version = reconciling.version;
-      status = "reconcile_required";
-    }
-    await transitionFundingOperationInTransaction(client, {
-      operationId: priorApprovalRoute.operationId,
-      scope: { kind: "worker" },
-      expectedVersion: version,
-      expectedState: { status, stage },
-      nextState: { status: "failed", stage: "terminal" },
-      errorCode: "test_terminal_approve_without_deposit",
-      now: new Date(now.getTime() + 2),
+    assert.deepEqual(cancellation, {
+      cancelledStepIds: [priorApprovalRoute.depositStepId],
+      unsafeStepIds: [],
     });
   });
   await reduceFundingOperation(pool, {
@@ -5542,7 +5570,11 @@ try {
       where step_id = $1::uuid`,
     [priorApprovalRoute.depositStepId],
   );
-  assert.equal(priorDepositAttempts.rows[0]?.count, "0");
+  assert.equal(
+    priorDepositAttempts.rows[0]?.count,
+    "1",
+    "cancellation is durable evidence on the still-unstarted deposit only",
+  );
   const freshRelayBroadcasts: string[] = [];
   const freshRelayExecutor = relayExecutor(
     [priorAllowance, priorAllowance],
@@ -7299,7 +7331,7 @@ try {
       requeued: missingReplacementPass.requeued,
     },
     { claimed: 1, completed: 0, deadLettered: 0, requeued: 1 },
-    "a missing replacement must keep the terminal refund observable until the bounded watch ends",
+    "a missing replacement must keep the refunded route on its bounded watch",
   );
   const missingReplacementState = await pool.query<{
     operation_status: string;
@@ -7315,7 +7347,7 @@ try {
   );
   assert.deepEqual(missingReplacementState.rows, [
     {
-      operation_status: "refunded",
+      operation_status: "recovery_required",
       reservation_status: "refunded",
     },
   ]);
@@ -7361,6 +7393,10 @@ try {
   assert.deepEqual(replacementRefund, {
     refundsPolled: 1,
     refundSatisfied: true,
+  });
+  await reduceFundingOperation(pool, {
+    operationId: replacementRefundRelay.operationId,
+    now: new Date(refundReorgAt.getTime() + 1_000),
   });
   const replacementRefundState = await pool.query<{
     canonical: boolean;
@@ -7593,7 +7629,7 @@ try {
       error_code: "finalized_observation_reorg",
       job_status: "dead_letter",
       last_error_code: "terminal_refund_reorg_unresolved",
-      operation_status: "refunded",
+      operation_status: "recovery_required",
     },
   ]);
 

@@ -11,6 +11,9 @@ import {
   allocateFundingObservationInTransaction,
   FundingPersistenceError,
 } from "../persistence/funding-operation-repository.js";
+import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
+import { deriveFundingLifecycle } from "../lifecycle/funding-lifecycle-projector.js";
+import { reduceFundingOperationInTransaction } from "../reconciliation/funding-reducer.js";
 import type { FundingTransactionReferenceCodec } from "../execution/transaction-reference-codec.js";
 import {
   verifyPolymarketFundingPostconditions,
@@ -33,7 +36,8 @@ export type PolymarketFundingPostconditionTarget = Readonly<{
   userId: string;
   stepId: string;
   attemptId: string;
-  stepState: "submitted" | "succeeded" | "recovery_required";
+  /** Compatibility payload for injected tests; projection is fact-derived. */
+  stepState?: "submitted" | "succeeded" | "recovery_required";
   binding: VenueAccountBinding;
   plan: PolymarketFundingPlan;
   before: PolymarketFundingObservation;
@@ -167,8 +171,9 @@ function parseBinding(value: unknown): VenueAccountBinding {
 }
 
 async function loadTarget(
-  db: Pick<Pool, "query">,
+  db: Pick<PoolClient, "query">,
   operationId: string,
+  now: Date,
 ): Promise<PolymarketFundingPostconditionTarget | null> {
   const { rows } = await db.query<{
     operation_id: string;
@@ -176,7 +181,6 @@ async function loadTarget(
     user_id: string;
     step_id: string;
     attempt_id: string;
-    step_state: PolymarketFundingPostconditionTarget["stepState"];
     venue_binding_snapshot: JsonRecord;
     requested_destination_amount: JsonRecord;
     support_metadata: JsonRecord;
@@ -196,7 +200,6 @@ async function loadTarget(
         operation.user_id,
         step.id as step_id,
         attempt.id as attempt_id,
-        step.state as step_state,
         operation.venue_binding_snapshot,
         operation.requested_destination_amount,
         operation.support_metadata,
@@ -232,13 +235,6 @@ async function loadTarget(
         )
         and operation.support_metadata->>'preparationKind'
           = 'polymarket_funding_router'
-        and operation.status not in (
-          'completed',
-          'refunded',
-          'failed',
-          'cancelled'
-        )
-        and step.state in ('submitted', 'succeeded', 'recovery_required')
         and not exists (
           select 1
           from funding_observations observation
@@ -254,6 +250,11 @@ async function loadTarget(
   );
   const row = rows[0];
   if (!row) return null;
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(db, {
+    operationId: row.operation_id,
+    now,
+  });
+  if (!facts || deriveFundingLifecycle(facts).safety.terminal) return null;
   const metadata = row.support_metadata;
   const requested = row.requested_destination_amount;
   return {
@@ -262,7 +263,6 @@ async function loadTarget(
     userId: row.user_id,
     stepId: row.step_id,
     attemptId: row.attempt_id,
-    stepState: row.step_state,
     binding: parseBinding(
       row.plan_kind === "direct_external_handoff"
         ? metadata.venueBinding
@@ -283,7 +283,7 @@ async function loadTarget(
 }
 
 async function persistSatisfiedPostcondition(
-  client: Pick<PoolClient, "query">,
+  client: PoolClient,
   input: Readonly<{
     target: PolymarketFundingPostconditionTarget;
     transactionHash: string;
@@ -293,6 +293,24 @@ async function persistSatisfiedPostcondition(
     now: Date;
   }>,
 ): Promise<void> {
+  // The receipt was inspected outside this transaction. Lock and re-derive
+  // before making its postcondition durable so an old inspection cannot add
+  // evidence after a concurrent terminal decision.
+  const locked = await client.query<{ id: string }>(
+    `select id
+       from funding_operations
+      where id = $1
+      for update`,
+    [input.target.operationId],
+  );
+  if (!locked.rows[0]) return;
+  const currentFacts = await loadFundingLifecycleFactsForOperationInTransaction(
+    client,
+    { operationId: input.target.operationId, now: input.now },
+  );
+  if (!currentFacts || deriveFundingLifecycle(currentFacts).safety.terminal) {
+    return;
+  }
   const observationBase = {
     operationId: input.target.operationId,
     segmentId: null,
@@ -336,25 +354,12 @@ async function persistSatisfiedPostcondition(
       },
     });
   }
-  if (input.target.stepState !== "succeeded") {
-    const updated = await client.query(
-      `
-        update funding_operation_steps
-        set state = 'succeeded',
-            updated_at = $3
-        where operation_id = $1
-          and id = $2
-          and state in ('submitted', 'recovery_required')
-      `,
-      [input.target.operationId, input.target.stepId, input.now],
-    );
-    if (updated.rowCount !== 1) {
-      throw new FundingPersistenceError(
-        "invalid_state_transition",
-        "Polymarket preparation step changed before postcondition commit",
-      );
-    }
-  }
+  // `venue_readiness` is the fact. The reducer derives `succeeded` for this
+  // preparation action and writes all state caches from one projection.
+  await reduceFundingOperationInTransaction(client, {
+    operationId: input.target.operationId,
+    now: input.now,
+  });
 }
 
 export class PolymarketFundingPostconditionDriver implements FundingPostconditionDriver {
@@ -390,6 +395,7 @@ export class PolymarketFundingPostconditionDriver implements FundingPostconditio
     const target = await (this.dependencies.loadTarget ?? loadTarget)(
       pool,
       operationId,
+      now,
     );
     if (!target) return { postconditionsPolled: 0 };
     if (target.lookupKeyVersion !== this.codec.keyVersion) {

@@ -25,6 +25,9 @@ function attempt(
     attemptNumber: 1,
     outcome: "started",
     broadcastMayHaveOccurred: false,
+    referenceKind: null,
+    startedAt: now,
+    updatedAt: now,
     receipt: null,
     ...overrides,
   };
@@ -37,12 +40,14 @@ function action(
   return {
     actionId,
     ordinal: 0,
+    executorId: "test-executor",
     routeLegId: null,
     dependsOnActionId: null,
     activation: "immediate",
     expiresAt: new Date(now.getTime() + 60_000),
     independentLane: true,
     mayMoveMoney: true,
+    requiresSourceDebitEvidence: false,
     requiresVenueReadiness: false,
     attempts: [],
     ...overrides,
@@ -71,6 +76,9 @@ function transfer(
     money: destination,
     finality: "finalized",
     canonical: true,
+    observedAt: now,
+    reorgedAt: null,
+    replacementForTransferId: null,
     ...overrides,
     transferId:
       overrides.transferId ?? `${kind}:${overrides.routeLegId ?? "default"}`,
@@ -82,6 +90,10 @@ function facts(
 ): FundingLifecycleFacts {
   return {
     plan: {
+      initialState: {
+        status: "awaiting_user",
+        progressStage: "source_action",
+      },
       requestedDestination: destination,
       routeLegs: [],
       completionEvidence: "destination_credit",
@@ -120,6 +132,56 @@ function facts(
       ["polygon", "action_required", true],
       ["base", "action_required", true],
     ],
+  );
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      plan: {
+        initialState: {
+          status: "in_progress",
+          progressStage: "committed",
+        },
+        requestedDestination: destination,
+        routeLegs: [],
+        completionEvidence: "destination_credit",
+      },
+    }),
+  );
+  assert.deepEqual(
+    { status: projection.status, progressStage: projection.progressStage },
+    { status: "in_progress", progressStage: "source_action" },
+  );
+  assert.equal(projection.safety.retryAllowed, true);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      plan: {
+        initialState: {
+          status: "in_progress",
+          progressStage: "committed",
+        },
+        requestedDestination: destination,
+        routeLegs: [],
+        completionEvidence: "destination_credit",
+      },
+      actions: [action("sealed-telegram-action", { authorization: "blocked" })],
+    }),
+  );
+  assert.deepEqual(projection.actions, [
+    {
+      actionId: "sealed-telegram-action",
+      state: "planned",
+      actionable: false,
+    },
+  ]);
+  assert.deepEqual(
+    { status: projection.status, progressStage: projection.progressStage },
+    { status: "in_progress", progressStage: "source_action" },
+    "an expired or revoked Telegram authority must not turn a planned server action into recovery or a new executable action",
   );
 }
 
@@ -260,6 +322,126 @@ function facts(
 {
   const projection = deriveFundingLifecycle(
     facts({
+      actions: [action("unfinished", { attempts: [attempt()] })],
+    }),
+  );
+  assert.equal(projection.status, "recovery_required");
+  assert.equal(projection.safety.requiresManualRecovery, false);
+  assert.deepEqual(projection.actions, [
+    { actionId: "unfinished", state: "recovery_required", actionable: false },
+  ]);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      now: new Date(now.getTime() + 61_000),
+      reconciliation: {
+        evidenceDeadline: new Date(now.getTime() + 60_000),
+      },
+      actions: [
+        action("provider-receipt", {
+          expiresAt: new Date(now.getTime() + 60_000),
+          attempts: [
+            attempt({
+              outcome: "ambiguous",
+              broadcastMayHaveOccurred: true,
+              referenceKind: "provider_receipt",
+            }),
+          ],
+        }),
+      ],
+  }),
+  );
+  assert.equal(projection.status, "recovery_required");
+  assert.equal(projection.safety.requiresManualRecovery, false);
+  assert.equal(projection.safety.requiresWorker, true);
+  assert.deepEqual(projection.actions, [
+    {
+      actionId: "provider-receipt",
+      state: "reconcile_required",
+      actionable: false,
+    },
+  ]);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      now: new Date(now.getTime() + 61_000),
+      actions: [
+        action("known-transaction-after-action-expiry", {
+          expiresAt: new Date(now.getTime() + 60_000),
+          attempts: [
+            attempt({
+              outcome: "ambiguous",
+              broadcastMayHaveOccurred: true,
+              referenceKind: "transaction",
+            }),
+          ],
+        }),
+      ],
+    }),
+  );
+  assert.equal(projection.status, "recovery_required");
+  assert.equal(projection.safety.requiresManualRecovery, false);
+  assert.equal(projection.safety.requiresWorker, true);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      actions: [
+        action("receipt-reorg", {
+          attempts: [
+            attempt({
+              outcome: "submitted",
+              broadcastMayHaveOccurred: true,
+              receipt: {
+                status: "reorged",
+                canonical: false,
+                actionMatched: true,
+                failureFinalized: false,
+              },
+            }),
+          ],
+        }),
+      ],
+    }),
+  );
+  assert.equal(projection.status, "recovery_required");
+  assert.equal(projection.safety.requiresManualRecovery, false);
+  assert.equal(projection.safety.requiresWorker, true);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      actions: [
+        action("receipt-mismatch", {
+          attempts: [
+            attempt({
+              outcome: "submitted",
+              broadcastMayHaveOccurred: true,
+              receipt: {
+                status: "mismatch",
+                canonical: true,
+                actionMatched: false,
+                failureFinalized: false,
+              },
+            }),
+          ],
+        }),
+      ],
+    }),
+  );
+  assert.equal(projection.status, "recovery_required");
+  assert.equal(projection.safety.requiresManualRecovery, true);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
       actions: [
         action("reported-success", {
           attempts: [attempt({ outcome: "succeeded" })],
@@ -310,9 +492,39 @@ function facts(
       transfers: [transfer("source_debit")],
     }),
   );
-  assert.equal(projection.status, "reconcile_required");
+  assert.equal(projection.status, "recovery_required");
   assert.equal(projection.safety.cancelAllowed, false);
   assert.equal(projection.safety.requiresWorker, true);
+  assert.equal(projection.safety.retryAllowed, false);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      actions: [
+        action("cancelled-after-debit", {
+          attempts: [attempt({ outcome: "cancelled" })],
+        }),
+        action("otherwise-actionable-sibling", { ordinal: 1 }),
+      ],
+      transfers: [transfer("source_debit")],
+    }),
+  );
+  assert.equal(projection.status, "recovery_required");
+  assert.equal(projection.safety.requiresWorker, true);
+  assert.equal(projection.safety.retryAllowed, false);
+  assert.deepEqual(projection.actions, [
+    {
+      actionId: "cancelled-after-debit",
+      state: "cancelled",
+      actionable: false,
+    },
+    {
+      actionId: "otherwise-actionable-sibling",
+      state: "action_required",
+      actionable: false,
+    },
+  ]);
 }
 
 {
@@ -400,7 +612,149 @@ function facts(
 {
   const projection = deriveFundingLifecycle(
     facts({
+      manualRecovery: { code: "receipt_mismatch", requestedAt: now },
+      transfers: [transfer("destination_credit")],
+      consumer: {
+        required: true,
+        completed: false,
+        unresolved: false,
+      },
+    }),
+  );
+  assert.equal(
+    projection.status,
+    "ready",
+    "final destination evidence must resolve a stale manual-recovery fact",
+  );
+  assert.equal(projection.recoveryMode, null);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
       plan: {
+        initialState: {
+          status: "awaiting_user",
+          progressStage: "source_action",
+        },
+        requestedDestination: destination,
+        routeLegs: [routeLeg("delegated-relay")],
+        completionEvidence: "destination_credit",
+      },
+      actions: [
+        action("delegated-deposit", {
+          routeLegId: "delegated-relay",
+          requiresSourceDebitEvidence: true,
+          attempts: [attempt({ outcome: "succeeded" })],
+        }),
+      ],
+      transfers: [
+        transfer("destination_credit", { routeLegId: "delegated-relay" }),
+      ],
+    }),
+  );
+  assert.deepEqual(
+    { status: projection.status, progressStage: projection.progressStage },
+    { status: "reconcile_required", progressStage: "source_action" },
+    "destination evidence alone must not complete a delegated source-debit route",
+  );
+  assert.equal(projection.safety.requiresWorker, true);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      plan: {
+        initialState: {
+          status: "awaiting_user",
+          progressStage: "source_action",
+        },
+        requestedDestination: destination,
+        routeLegs: [routeLeg("delegated-relay")],
+        completionEvidence: "destination_credit",
+      },
+      actions: [
+        action("delegated-deposit", {
+          routeLegId: "delegated-relay",
+          requiresSourceDebitEvidence: true,
+          attempts: [attempt({ outcome: "succeeded" })],
+        }),
+      ],
+      transfers: [
+        transfer("source_debit", { routeLegId: "delegated-relay" }),
+        transfer("destination_credit", { routeLegId: "delegated-relay" }),
+      ],
+    }),
+  );
+  assert.equal(projection.status, "ready");
+  assert.equal(projection.progressStage, "ready_for_consumer");
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      plan: {
+        initialState: {
+          status: "awaiting_user",
+          progressStage: "source_action",
+        },
+        requestedDestination: destination,
+        routeLegs: [routeLeg("polygon"), routeLeg("base")],
+        completionEvidence: "destination_credit",
+      },
+      actions: [
+        action("polygon-deposit", {
+          routeLegId: "polygon",
+          requiresSourceDebitEvidence: true,
+          attempts: [attempt({ outcome: "succeeded" })],
+        }),
+        action("base-deposit", {
+          ordinal: 1,
+          routeLegId: "base",
+          requiresSourceDebitEvidence: true,
+          attempts: [attempt({ outcome: "succeeded" })],
+        }),
+      ],
+      transfers: [
+        transfer("source_debit", { routeLegId: "polygon" }),
+        transfer("destination_credit", { routeLegId: "polygon" }),
+        transfer("destination_credit", { routeLegId: "base" }),
+      ],
+    }),
+  );
+  assert.equal(projection.status, "reconcile_required");
+  assert.equal(projection.safety.requiresWorker, true);
+}
+
+{
+  const unexpectedDestination = {
+    ...destination,
+    assetId: "0x0000000000000000000000000000000000000001",
+  };
+  const projection = deriveFundingLifecycle(
+    facts({
+      transfers: [
+        transfer("destination_credit"),
+        transfer("destination_credit", {
+          transferId: "unexpected-destination-credit",
+          money: unexpectedDestination,
+        }),
+      ],
+    }),
+  );
+  assert.equal(projection.status, "recovery_required");
+  assert.equal(projection.safety.requiresWorker, true);
+  assert.equal(projection.safety.retryAllowed, false);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      plan: {
+        initialState: {
+          status: "awaiting_user",
+          progressStage: "source_action",
+        },
         requestedDestination: destination,
         routeLegs: [routeLeg("polygon"), routeLeg("base")],
         completionEvidence: "destination_credit",
@@ -413,6 +767,27 @@ function facts(
 }
 
 {
+  const projection = deriveFundingLifecycle(
+    facts({
+      plan: {
+        initialState: {
+          status: "in_progress",
+          progressStage: "routing",
+        },
+        requestedDestination: destination,
+        routeLegs: [routeLeg("polygon"), routeLeg("base")],
+        completionEvidence: "destination_credit",
+      },
+      transfers: [transfer("refund_credit", { routeLegId: "polygon" })],
+    }),
+  );
+  assert.equal(projection.status, "recovery_required");
+  assert.equal(projection.progressStage, "routing");
+  assert.equal(projection.safety.requiresWorker, true);
+  assert.equal(projection.safety.retryAllowed, false);
+}
+
+{
   const polygonLeg = routeLeg("polygon");
   const solanaLeg = routeLeg("solana", {
     minimumDestination: { ...destination, raw: "4000000" },
@@ -420,6 +795,10 @@ function facts(
   const projection = deriveFundingLifecycle(
     facts({
       plan: {
+        initialState: {
+          status: "awaiting_user",
+          progressStage: "source_action",
+        },
         requestedDestination: { ...destination, raw: "10000000" },
         routeLegs: [
           {
@@ -459,6 +838,10 @@ function facts(
   const projection = deriveFundingLifecycle(
     facts({
       plan: {
+        initialState: {
+          status: "awaiting_user",
+          progressStage: "source_action",
+        },
         requestedDestination: { ...destination, raw: "10000000" },
         routeLegs: [polygonLeg, solanaLeg],
         completionEvidence: "destination_credit",
@@ -483,6 +866,10 @@ function facts(
   const projection = deriveFundingLifecycle(
     facts({
       plan: {
+        initialState: {
+          status: "awaiting_user",
+          progressStage: "source_action",
+        },
         requestedDestination: destination,
         routeLegs: [routeLeg("polygon")],
         completionEvidence: "destination_credit",
@@ -515,6 +902,10 @@ function facts(
   const projection = deriveFundingLifecycle(
     facts({
       plan: {
+        initialState: {
+          status: "awaiting_user",
+          progressStage: "source_action",
+        },
         requestedDestination: destination,
         routeLegs: [routeLeg("polygon")],
         completionEvidence: "destination_credit",
@@ -535,6 +926,10 @@ function facts(
   const projection = deriveFundingLifecycle(
     facts({
       plan: {
+        initialState: {
+          status: "awaiting_user",
+          progressStage: "source_action",
+        },
         requestedDestination: destination,
         routeLegs: [routeLeg("polygon")],
         completionEvidence: "destination_credit",
@@ -554,6 +949,10 @@ function facts(
   const projection = deriveFundingLifecycle(
     facts({
       plan: {
+        initialState: {
+          status: "awaiting_user",
+          progressStage: "source_action",
+        },
         requestedDestination: destination,
         routeLegs: [routeLeg("polygon")],
         completionEvidence: "destination_credit",
@@ -572,6 +971,81 @@ function facts(
 }
 
 {
+  const projection = deriveFundingLifecycle(
+    facts({
+      plan: {
+        initialState: {
+          status: "awaiting_user",
+          progressStage: "source_action",
+        },
+        requestedDestination: destination,
+        routeLegs: [routeLeg("polygon")],
+        completionEvidence: "destination_credit",
+      },
+      transfers: [
+        transfer("destination_credit", { routeLegId: "polygon" }),
+        transfer("source_debit", {
+          routeLegId: "polygon",
+          finality: "reorged",
+          canonical: false,
+        }),
+      ],
+    }),
+  );
+  assert.equal(projection.status, "recovery_required");
+  assert.equal(projection.segments[0]?.status, "succeeded");
+}
+
+{
+  const reorgedRefund = transfer("refund_credit", {
+    transferId: "original-refund",
+    finality: "reorged",
+    canonical: false,
+    reorgedAt: new Date(now.getTime() + 1_000),
+  });
+  const projection = deriveFundingLifecycle(
+    facts({
+      transfers: [
+        reorgedRefund,
+        transfer("refund_credit", {
+          transferId: "replacement-refund",
+          observedAt: new Date(now.getTime() + 1_001),
+          replacementForTransferId: reorgedRefund.transferId,
+        }),
+      ],
+    }),
+  );
+  assert.equal(projection.status, "refunded");
+  assert.equal(projection.safety.terminal, true);
+}
+
+{
+  const reorgedRefund = transfer("refund_credit", {
+    transferId: "original-refund-with-wrong-successor",
+    routeLegId: "polygon",
+    finality: "reorged",
+    canonical: false,
+    reorgedAt: new Date(now.getTime() + 1_000),
+  });
+  const projection = deriveFundingLifecycle(
+    facts({
+      transfers: [
+        reorgedRefund,
+        transfer("refund_credit", {
+          transferId: "wrong-amount-successor",
+          routeLegId: "polygon",
+          money: { ...destination, raw: "999999" },
+          observedAt: new Date(now.getTime() + 1_001),
+          replacementForTransferId: reorgedRefund.transferId,
+        }),
+      ],
+    }),
+  );
+  assert.equal(projection.status, "recovery_required");
+  assert.equal(projection.safety.terminal, false);
+}
+
+{
   const mixedCaseDestination = {
     ...destination,
     assetId: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
@@ -580,6 +1054,10 @@ function facts(
   const projection = deriveFundingLifecycle(
     facts({
       plan: {
+        initialState: {
+          status: "awaiting_user",
+          progressStage: "source_action",
+        },
         requestedDestination: mixedCaseDestination,
         routeLegs: [],
         completionEvidence: "destination_credit",
@@ -601,6 +1079,10 @@ function facts(
   const projection = deriveFundingLifecycle(
     facts({
       plan: {
+        initialState: {
+          status: "awaiting_user",
+          progressStage: "source_action",
+        },
         requestedDestination: destination,
         routeLegs: [],
         completionEvidence: "destination_credit_and_venue_readiness",
@@ -621,6 +1103,10 @@ function facts(
   const projection = deriveFundingLifecycle(
     facts({
       plan: {
+        initialState: {
+          status: "awaiting_user",
+          progressStage: "source_action",
+        },
         requestedDestination: destination,
         routeLegs: [],
         completionEvidence: "destination_credit_and_venue_readiness",
@@ -641,6 +1127,10 @@ function facts(
   const projection = deriveFundingLifecycle(
     facts({
       plan: {
+        initialState: {
+          status: "awaiting_user",
+          progressStage: "source_action",
+        },
         requestedDestination: destination,
         routeLegs: [],
         completionEvidence: "venue_readiness",
@@ -668,10 +1158,58 @@ function facts(
       },
     }),
   );
-  assert.equal(projection.status, "reconcile_required");
+  assert.equal(projection.status, "ready");
   assert.equal(projection.progressStage, "ready_for_consumer");
   assert.equal(projection.safety.cancelAllowed, false);
   assert.equal(projection.safety.requiresWorker, true);
+  assert.equal(projection.safety.terminal, false);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      transfers: [transfer("destination_credit")],
+      consumer: {
+        required: true,
+        completed: false,
+        settledWithoutConsumer: true,
+        unresolved: true,
+      },
+    }),
+  );
+  assert.deepEqual(
+    { status: projection.status, progressStage: projection.progressStage },
+    { status: "completed", progressStage: "terminal" },
+    "an expired pre-broadcast consumer cannot keep already-settled funding pending",
+  );
+}
+
+{
+  const leg = routeLeg("under-minimum", {
+    minimumDestination: { ...destination, raw: "1000001" },
+  });
+  const projection = deriveFundingLifecycle(
+    facts({
+      plan: {
+        initialState: {
+          status: "awaiting_user",
+          progressStage: "source_action",
+        },
+        requestedDestination: leg.minimumDestination,
+        routeLegs: [leg],
+        completionEvidence: "destination_credit",
+      },
+      transfers: [
+        transfer("destination_credit", {
+          routeLegId: leg.routeLegId,
+          money: destination,
+        }),
+      ],
+    }),
+  );
+  assert.equal(projection.status, "in_progress");
+  assert.equal(projection.progressStage, "routing");
+  assert.equal(projection.segments[0]?.status, "settling");
 }
 
 {
@@ -704,4 +1242,55 @@ function facts(
   });
   const canonical = deriveFundingLifecycle(base);
   assert.deepEqual(reordered, canonical);
+}
+
+{
+  const directIngress = facts({
+    plan: {
+      initialState: {
+        status: "awaiting_external_funds",
+        progressStage: "source_action",
+      },
+      requestedDestination: destination,
+      routeLegs: [],
+      completionEvidence: "destination_credit",
+    },
+    actions: [],
+    reservations: [{ mode: "advisory_destination", state: "active" }],
+  });
+  const beforeCancellation = deriveFundingLifecycle(directIngress);
+  assert.deepEqual(
+    {
+      status: beforeCancellation.status,
+      cancelAllowed: beforeCancellation.safety.cancelAllowed,
+    },
+    { status: "awaiting_external_funds", cancelAllowed: true },
+  );
+
+  const cancelled = deriveFundingLifecycle({
+    ...directIngress,
+    cancellation: { requestedAt: now },
+  });
+  assert.deepEqual(
+    {
+      status: cancelled.status,
+      progressStage: cancelled.progressStage,
+      terminal: cancelled.safety.terminal,
+    },
+    { status: "cancelled", progressStage: "terminal", terminal: true },
+  );
+
+  const lateTransfer = deriveFundingLifecycle({
+    ...directIngress,
+    cancellation: { requestedAt: now },
+    transfers: [transfer("destination_credit")],
+  });
+  assert.deepEqual(
+    {
+      status: lateTransfer.status,
+      terminal: lateTransfer.safety.terminal,
+      requiresWorker: lateTransfer.safety.requiresWorker,
+    },
+    { status: "recovery_required", terminal: false, requiresWorker: true },
+  );
 }

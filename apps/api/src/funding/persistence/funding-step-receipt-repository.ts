@@ -1,7 +1,6 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 import bs58 from "bs58";
 
-import { activateTelegramTradeShortfallRouterDependentFundInTransaction } from "../execution/telegram-trade-shortfall-activation.js";
 import {
   relayClientSourceDebitPostcondition,
   withRelayClientSourceDebitPostcondition,
@@ -16,9 +15,8 @@ import { moneySchema, normalizedActionSchema } from "../domain/schemas.js";
 import {
   allocateFundingObservationInTransaction,
   FundingPersistenceError,
-  transitionFundingOperationInTransaction,
-  type FundingOperationRow,
 } from "./funding-operation-repository.js";
+import { reduceFundingOperationInTransaction } from "../reconciliation/funding-reducer.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -434,7 +432,7 @@ export function fundingStepStateForReceipt(
 }
 
 export async function applyFundingStepReceiptEvidenceInTransaction(
-  client: Pick<PoolClient, "query">,
+  client: PoolClient,
   input: Readonly<{
     operationId: string;
     stepId: string;
@@ -446,20 +444,14 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
 ): Promise<FundingStepReceiptObservation> {
   const now = input.now ?? new Date();
   const operationResult = await client.query<{
-    operation_progress_stage: FundingOperationRow["progressStage"];
-    operation_status: FundingOperationRow["status"];
     operation_user_id: string;
-    operation_version: string | number;
     requested_source_amount: JsonRecord | null;
     operation_support_metadata: JsonRecord;
   }>(
     `
       select user_id as operation_user_id,
              requested_source_amount,
-             support_metadata as operation_support_metadata,
-             progress_stage as operation_progress_stage,
-             status as operation_status,
-             version as operation_version
+             support_metadata as operation_support_metadata
       from funding_operations
       where id = $1
       for update
@@ -474,7 +466,6 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     );
   }
   const stepResult = await client.query<{
-    step_state: FundingStepReceiptTarget["stepState"];
     step_kind: FundingStepReceiptTarget["stepKind"];
     executor_id: string;
     segment_id: string | null;
@@ -482,8 +473,7 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     action_validation_result: JsonRecord;
   }>(
     `
-      select step.state as step_state,
-             step.step_kind,
+      select step.step_kind,
              step.executor_id,
              step.segment_id,
              step.normalized_action,
@@ -504,17 +494,9 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
   }
   const attemptResult = await client.query<{
     id: string;
-    is_latest_attempt: boolean;
   }>(
     `
-      select current_attempt.id,
-             not exists (
-               select 1
-               from funding_operation_step_attempts newer_attempt
-               where newer_attempt.step_id = current_attempt.step_id
-                 and newer_attempt.attempt_number >
-                       current_attempt.attempt_number
-             ) as is_latest_attempt
+      select current_attempt.id
       from funding_operation_step_attempts current_attempt
       where current_attempt.step_id = $1
         and current_attempt.id = $2
@@ -826,36 +808,6 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
   const row = stored.rows[0];
   if (!row) throw new Error("funding step receipt upsert returned no row");
 
-  const previousWasCanonicalFinalSuccess =
-    previous?.status === "finalized" &&
-    previous.action_match === true &&
-    previous.canonical;
-  const firstCanonicalFinalSuccess =
-    row.status === "finalized" &&
-    row.action_match === true &&
-    row.canonical &&
-    !previousWasCanonicalFinalSuccess;
-  if (
-    firstCanonicalFinalSuccess &&
-    ["completed", "refunded", "failed", "cancelled"].includes(
-      scopedOperation.operation_status,
-    )
-  ) {
-    await transitionFundingOperationInTransaction(client, {
-      operationId: input.operationId,
-      scope: { kind: "worker" },
-      expectedVersion: Number(scopedOperation.operation_version),
-      expectedState: {
-        status: scopedOperation.operation_status,
-        stage: scopedOperation.operation_progress_stage,
-      },
-      nextState: { status: "recovery_required", stage: "source_action" },
-      errorCode: "late_finalized_receipt_after_terminal_operation",
-      recoveryMode: "automatic_evidence",
-      now,
-    });
-  }
-
   if (
     scoped.executor_id === "wallet_profile_evm_v1" &&
     row.status === "finalized" &&
@@ -1007,50 +959,13 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     );
   }
 
-  // Older finalized failures stay under canonical reorg watch, but only the
-  // latest attempt may re-arm the global step. Otherwise polling attempt N
-  // after attempt N+1 was submitted could reopen the action and authorize a
-  // third broadcast. A reorg remains operation-wide safety evidence.
-  const nextStepState =
-    scopedAttempt.is_latest_attempt || incomingReceipt.status === "reorged"
-      ? fundingStepStateForReceipt(
-          incomingReceipt.status,
-          scoped.step_state,
-          scoped.step_kind,
-        )
-      : scoped.step_state;
-  if (nextStepState !== scoped.step_state) {
-    const updated = await client.query(
-      `
-        update funding_operation_steps
-        set state = $4,
-            updated_at = $5
-        where operation_id = $1
-          and id = $2
-          and state = $3
-      `,
-      [input.operationId, input.stepId, scoped.step_state, nextStepState, now],
-    );
-    if (updated.rowCount !== 1) {
-      throw new FundingPersistenceError(
-        "invalid_state_transition",
-        "funding step state changed while applying receipt evidence",
-      );
-    }
-    if (
-      nextStepState === "succeeded" &&
-      scoped.step_kind === "transaction" &&
-      incomingReceipt.status === "finalized"
-    ) {
-      await activateTelegramTradeShortfallRouterDependentFundInTransaction(
-        client,
-        {
-          operationId: input.operationId,
-          approvalStepId: input.stepId,
-        },
-      );
-    }
-  }
+  // Receipts and any derived transfer observations are durable facts. The
+  // reducer alone materializes action/segment/operation state, including
+  // reorg recovery and dependent Telegram Router actions.
+  await reduceFundingOperationInTransaction(client, {
+    operationId: input.operationId,
+    now,
+  });
   return mapReceipt(row);
 }
 

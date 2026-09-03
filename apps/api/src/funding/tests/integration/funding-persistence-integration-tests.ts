@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
+import { tx } from "@hunch/infra";
 import type { PoolClient } from "pg";
 
 import "../../../integration-test-database-guard.js";
@@ -67,11 +68,15 @@ import {
   transitionFundingOperation,
   transitionFundingOperationInTransaction,
   wakeFundingReconciliationInTransaction,
+  writeFundingOperationSupportFactsInTransaction,
   type FundingCommitInput,
   type FundingCommitPlan,
   type FundingQuoteInsert,
 } from "../../persistence/funding-operation-repository.js";
-import { applyFundingStepReceiptEvidenceInTransaction } from "../../persistence/funding-step-receipt-repository.js";
+import {
+  applyFundingStepReceiptEvidence,
+  applyFundingStepReceiptEvidenceInTransaction,
+} from "../../persistence/funding-step-receipt-repository.js";
 import {
   claimFundingTradeAttemptInTransaction,
   claimLimitlessTradeAttemptForReconciliation,
@@ -90,6 +95,7 @@ import {
 } from "../../persistence/funding-preparation-run-repository.js";
 import { ingestFundingObservationInTransaction } from "../../reconciliation/funding-observation-ingestion.js";
 import {
+  DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
   FUNDING_RECEIPT_REORG_UNRESOLVED_ERROR_CODE,
   FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
   fundingReconciliationPollDelayMs,
@@ -98,6 +104,11 @@ import {
   runFundingReconciliationBatch,
 } from "../../reconciliation/funding-reducer.js";
 import { OwnedRouteDestinationObserver } from "../../reconciliation/owned-route-destination-observer.js";
+import { DirectIngressDestinationObserver } from "../../reconciliation/direct-ingress-observer.js";
+import {
+  lockPolymarketFundingOperationPredecessor,
+  PolymarketFundingPredecessorUnresolvedError,
+} from "../../preparation/polymarket-funding-commit-guard.js";
 import { hashOpaqueToken } from "../../persistence/canonical.js";
 import { loadTelegramAppHandoffProjection } from "../../../services/telegram-bot-trading.js";
 import { FundingPlanningRuntime } from "../../planner/runtime-service.js";
@@ -896,6 +907,36 @@ async function testPollingFailureHonorsTerminalTimeout(): Promise<void> {
       commitInput(userId, quote.id, consentToken, plan),
     );
     operationId = committed.operation.id;
+    const stepResult = await pool.query<{
+      action_fingerprint: string;
+      executor_id: string;
+      id: string;
+    }>(
+      `select id, action_fingerprint, executor_id
+         from funding_operation_steps
+        where operation_id = $1::uuid and ordinal = 0`,
+      [operationId],
+    );
+    const step = stepResult.rows[0];
+    assert.ok(step);
+    const attempt = await startFundingStepAttemptInTransaction(pool, {
+      operationId,
+      stepId: step.id,
+      canonicalActionFingerprint: step.action_fingerprint,
+      executorId: step.executor_id,
+      now: new Date(Date.now() - 90_000),
+    });
+    await finishFundingStepAttemptInTransaction(pool, {
+      attemptId: attempt.id,
+      outcome: "ambiguous",
+      broadcastMayHaveOccurred: true,
+      referenceKind: "transaction",
+      receiptRefCiphertext: "ciphertext:terminal-timeout",
+      receiptRefLookupHmac: hash("e"),
+      lookupKeyVersion: 1,
+      actualCosts: {},
+      now: new Date(Date.now() - 89_000),
+    });
     await pool.query(
       `
         update funding_operation_steps
@@ -1164,32 +1205,7 @@ async function testLateCanonicalFailureRearmsRetryAndKeepsReorgWatch(): Promise<
       attemptClient.release();
     }
 
-    const sourceActionOperation = await transitionFundingOperation(pool, {
-      operationId,
-      scope: { kind: "worker" },
-      expectedVersion: committed.operation.version,
-      expectedState: { status: "in_progress", stage: "committed" },
-      nextState: { status: "in_progress", stage: "source_action" },
-      now: new Date(failedAt.getTime() - 3_000),
-    });
-    await transitionFundingOperation(pool, {
-      operationId,
-      scope: { kind: "worker" },
-      expectedVersion: sourceActionOperation.version,
-      expectedState: { status: "in_progress", stage: "source_action" },
-      nextState: { status: "recovery_required", stage: "source_action" },
-      errorCode: FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
-      recoveryMode: "automatic_evidence",
-      now: new Date(failedAt.getTime() - 2_000),
-    });
-    await pool.query(
-      `update funding_operation_steps
-          set state = 'recovery_required', updated_at = $2::timestamptz
-        where id = $1::uuid and state = 'submitted'`,
-      [step.id, new Date(failedAt.getTime() - 2_000)],
-    );
-
-    const failedReceipt = await applyFundingStepReceiptEvidenceInTransaction(
+    const failedReceipt = await applyFundingStepReceiptEvidence(
       pool,
       {
         operationId,
@@ -1393,7 +1409,8 @@ async function testLateCanonicalFailureRearmsRetryAndKeepsReorgWatch(): Promise<
           candidateCount: 2,
         },
       );
-      const invalidatedFailure = await applyFundingStepReceiptEvidenceInTransaction(
+      const invalidatedFailure =
+        await applyFundingStepReceiptEvidenceInTransaction(
           providerConflictProbe,
           {
             operationId,
@@ -1737,6 +1754,36 @@ async function testReconciliationBatchClaimsOnlyRunnableWave(): Promise<void> {
         quoteId: quote.id,
         userId,
       });
+      const stepResult = await pool.query<{
+        action_fingerprint: string;
+        executor_id: string;
+        id: string;
+      }>(
+        `select id, action_fingerprint, executor_id
+           from funding_operation_steps
+          where operation_id = $1::uuid and ordinal = 0`,
+        [committed.operation.id],
+      );
+      const step = stepResult.rows[0];
+      assert.ok(step);
+      const attempt = await startFundingStepAttemptInTransaction(pool, {
+        operationId: committed.operation.id,
+        stepId: step.id,
+        canonicalActionFingerprint: step.action_fingerprint,
+        executorId: step.executor_id,
+        now,
+      });
+      await finishFundingStepAttemptInTransaction(pool, {
+        attemptId: attempt.id,
+        outcome: "ambiguous",
+        broadcastMayHaveOccurred: true,
+        referenceKind: "transaction",
+        receiptRefCiphertext: `ciphertext:wave-${index}`,
+        receiptRefLookupHmac: hash(`${index + 3}`),
+        lookupKeyVersion: 1,
+        actualCosts: {},
+        now,
+      });
       await pool.query(
         `update funding_operation_steps
             set state = 'submitted', updated_at = $2::timestamptz
@@ -2026,63 +2073,45 @@ async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<vo
       commitInput(userId, quote.id, consentToken, plan),
     );
     operationId = committed.operation.id;
-    let operation = await transitionFundingOperation(pool, {
+    let operation = await writeFundingOperationSupportFactsInTransaction(pool, {
       operationId,
-      scope: { kind: "worker" },
       expectedVersion: committed.operation.version,
-      expectedState: {
-        status: committed.operation.status,
-        stage: committed.operation.progressStage,
+      supportMetadataPatch: {
+        lifecycleManualRecovery: {
+          code: "manual_fixture",
+          requestedAt: new Date().toISOString(),
+        },
       },
-      nextState: { status: "in_progress", stage: "source_action" },
+      now: new Date(),
     });
-    operation = await transitionFundingOperation(pool, {
+    const stepResult = await pool.query<{
+      action_fingerprint: string;
+      executor_id: string;
+      id: string;
+    }>(
+      `select id, action_fingerprint, executor_id
+         from funding_operation_steps
+        where operation_id = $1 and ordinal = 0`,
+      [operationId],
+    );
+    const step = stepResult.rows[0];
+    assert.ok(step);
+    const reportedAttempt = await startFundingStepAttemptInTransaction(pool, {
       operationId,
-      scope: { kind: "worker" },
-      expectedVersion: operation.version,
-      expectedState: {
-        status: operation.status,
-        stage: operation.progressStage,
-      },
-      nextState: {
-        status: "recovery_required",
-        stage: "source_action",
-      },
-      errorCode: "manual_fixture",
-      recoveryMode: "manual_review",
+      stepId: step.id,
+      canonicalActionFingerprint: step.action_fingerprint,
+      executorId: step.executor_id,
     });
-    await pool.query(
-      `
-        update funding_operation_steps
-        set state = 'submitted'
-        where operation_id = $1
-      `,
-      [operationId],
-    );
-    await pool.query(
-      `
-        update funding_operation_steps
-        set state = 'succeeded'
-        where operation_id = $1
-      `,
-      [operationId],
-    );
-    await pool.query(
-      `
-        update funding_operation_segments
-        set status = 'submitted',
-            submitted_at = now(),
-            raw_status = 'success',
-            support_metadata = support_metadata || jsonb_build_object(
-              'relayStatusCategory', 'provider_success',
-              'originTransactionReferenceCount', 1,
-              'destinationTransactionReferenceCount', 1
-            )
-        where operation_id = $1
-      `,
-      [operationId],
-    );
-
+    await finishFundingStepAttemptInTransaction(pool, {
+      attemptId: reportedAttempt.id,
+      outcome: "succeeded",
+      broadcastMayHaveOccurred: false,
+      referenceKind: null,
+      receiptRefCiphertext: null,
+      receiptRefLookupHmac: null,
+      lookupKeyVersion: null,
+      actualCosts: {},
+    });
     const observedAt = new Date();
     let balanceReads = 0;
     const observer = new OwnedRouteDestinationObserver({
@@ -2157,43 +2186,24 @@ async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<vo
       manualRecoveryClient.release();
     }
 
-    operation = await transitionFundingOperation(pool, {
+    const recoveryDeadline = new Date(
+      Date.now() - DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS - 1,
+    );
+    await writeFundingOperationSupportFactsInTransaction(pool, {
       operationId,
-      scope: { kind: "worker" },
       expectedVersion: operation.version,
-      expectedState: {
-        status: operation.status,
-        stage: operation.progressStage,
+      supportMetadataPatch: {
+        lifecycleManualRecovery: null,
+        reconciliationActiveSince: recoveryDeadline.toISOString(),
+        reconciliationActiveAttemptBaseline: 0,
+        reconciliationEvidenceDeadline: recoveryDeadline.toISOString(),
       },
-      nextState: { status: "in_progress", stage: "source_action" },
-    });
-    await transitionFundingOperation(pool, {
-      operationId,
-      scope: { kind: "worker" },
-      expectedVersion: operation.version,
-      expectedState: {
-        status: operation.status,
-        stage: operation.progressStage,
-      },
-      nextState: {
-        status: "recovery_required",
-        stage: "source_action",
-      },
-      errorCode: FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
-      recoveryMode: "automatic_evidence",
+      now: new Date(),
     });
 
     const withoutEvidenceClient = await pool.connect();
     try {
       await withoutEvidenceClient.query("begin");
-      await withoutEvidenceClient.query(
-        `
-          update funding_operation_steps
-          set state = 'recovery_required'
-          where operation_id = $1
-        `,
-        [operationId],
-      );
       const withoutEvidence = await reduceFundingOperationInTransaction(
         withoutEvidenceClient,
         { operationId },
@@ -2398,22 +2408,34 @@ async function testHistoricalReadyAndUnexposedRecoveryRoutesDoNotBlockDestinatio
     const settledReadyCommit = await commit("settled-ready");
     const currentCommit = await commit("current");
 
-    await client.query(
-      `
-        update funding_operation_steps
-        set state = 'submitted'
-        where operation_id = $1
-      `,
+    const currentStep = await client.query<{
+      action_fingerprint: string;
+      executor_id: string;
+      id: string;
+    }>(
+      `select id, action_fingerprint, executor_id
+         from funding_operation_steps
+        where operation_id = $1 and ordinal = 0`,
       [currentCommit.operation.id],
     );
-    await client.query(
-      `
-        update funding_operation_steps
-        set state = 'succeeded'
-        where operation_id = $1
-      `,
-      [currentCommit.operation.id],
-    );
+    const currentAction = currentStep.rows[0];
+    assert.ok(currentAction);
+    const currentAttempt = await startFundingStepAttemptInTransaction(client, {
+      operationId: currentCommit.operation.id,
+      stepId: currentAction.id,
+      canonicalActionFingerprint: currentAction.action_fingerprint,
+      executorId: currentAction.executor_id,
+    });
+    await finishFundingStepAttemptInTransaction(client, {
+      attemptId: currentAttempt.id,
+      outcome: "succeeded",
+      broadcastMayHaveOccurred: false,
+      referenceKind: "transaction",
+      receiptRefCiphertext: "ciphertext:current-route",
+      receiptRefLookupHmac: hash("c"),
+      lookupKeyVersion: 1,
+      actualCosts: {},
+    });
     await client.query(
       `
         update funding_operation_segments
@@ -2451,30 +2473,14 @@ async function testHistoricalReadyAndUnexposedRecoveryRoutesDoNotBlockDestinatio
     });
     await finishFundingStepAttemptInTransaction(client, {
       attemptId: settledAttempt.id,
-      outcome: "submitted",
-      broadcastMayHaveOccurred: true,
+      outcome: "succeeded",
+      broadcastMayHaveOccurred: false,
       referenceKind: "transaction",
       receiptRefCiphertext: "ciphertext:settled-ready",
       receiptRefLookupHmac: hash("7"),
       lookupKeyVersion: 1,
       actualCosts: {},
     });
-    await client.query(
-      `
-        update funding_operation_steps
-        set state = 'submitted'
-        where id = $1
-      `,
-      [settledStepId],
-    );
-    await client.query(
-      `
-        update funding_operation_steps
-        set state = 'succeeded'
-        where id = $1
-      `,
-      [settledStepId],
-    );
     const settledObservedAt = new Date("2026-07-29T22:35:00.000Z");
     await ingestFundingObservationInTransaction(client, {
       discoverySource: "chain_rpc",
@@ -2497,30 +2503,6 @@ async function testHistoricalReadyAndUnexposedRecoveryRoutesDoNotBlockDestinatio
         finalizedAt: settledObservedAt,
       },
     });
-    await client.query(
-      `
-        update funding_operation_segments
-        set status = 'succeeded',
-            actual_output = $2::jsonb,
-            submitted_at = created_at,
-            settled_at = now()
-        where operation_id = $1
-      `,
-      [settledReadyCommit.operation.id, money("980000")],
-    );
-    await client.query(
-      `
-        update funding_operations
-        set status = 'ready',
-            progress_stage = 'ready_for_consumer',
-            actual_destination_amount = $2::jsonb,
-            version = version + 1,
-            updated_at = now()
-        where id = $1
-      `,
-      [settledReadyCommit.operation.id, money("980000")],
-    );
-
     const observer = new OwnedRouteDestinationObserver({
       observe: async () => ({
         observedRaw: "1990000",
@@ -2540,42 +2522,47 @@ async function testHistoricalReadyAndUnexposedRecoveryRoutesDoNotBlockDestinatio
       "an unbroadcast route and a ready route credited before the immutable baseline must not block a later delivered route",
     );
 
-    let competingOperation = await transitionFundingOperationInTransaction(
+    const competingStep = await client.query<{
+      action_fingerprint: string;
+      executor_id: string;
+      id: string;
+    }>(
+      `select id, action_fingerprint, executor_id
+         from funding_operation_steps
+        where operation_id = $1 and ordinal = 0`,
+      [competingCommit.operation.id],
+    );
+    const competingAction = competingStep.rows[0];
+    assert.ok(competingAction);
+    const competingAttempt = await startFundingStepAttemptInTransaction(
       client,
       {
         operationId: competingCommit.operation.id,
-        scope: { kind: "worker" },
-        expectedVersion: competingCommit.operation.version,
-        expectedState: {
-          status: competingCommit.operation.status,
-          stage: competingCommit.operation.progressStage,
-        },
-        nextState: { status: "in_progress", stage: "source_action" },
+        stepId: competingAction.id,
+        canonicalActionFingerprint: competingAction.action_fingerprint,
+        executorId: competingAction.executor_id,
       },
     );
-    competingOperation = await transitionFundingOperationInTransaction(client, {
-      operationId: competingOperation.id,
-      scope: { kind: "worker" },
-      expectedVersion: competingOperation.version,
-      expectedState: {
-        status: competingOperation.status,
-        stage: competingOperation.progressStage,
-      },
-      nextState: {
-        status: "reconcile_required",
-        stage: "source_action",
-      },
+    await finishFundingStepAttemptInTransaction(client, {
+      attemptId: competingAttempt.id,
+      outcome: "submitted",
+      broadcastMayHaveOccurred: true,
+      referenceKind: "transaction",
+      receiptRefCiphertext: "ciphertext:competing-route",
+      receiptRefLookupHmac: hash("d"),
+      lookupKeyVersion: 1,
+      actualCosts: {},
     });
-    await transitionFundingOperationInTransaction(client, {
-      operationId: competingOperation.id,
-      scope: { kind: "worker" },
-      expectedVersion: competingOperation.version,
-      expectedState: {
-        status: competingOperation.status,
-        stage: competingOperation.progressStage,
+    const recoveryDeadline = new Date(Date.now() - 1);
+    await writeFundingOperationSupportFactsInTransaction(client, {
+      operationId: competingCommit.operation.id,
+      expectedVersion: competingCommit.operation.version,
+      supportMetadataPatch: {
+        reconciliationActiveSince: recoveryDeadline.toISOString(),
+        reconciliationActiveAttemptBaseline: 0,
+        reconciliationEvidenceDeadline: recoveryDeadline.toISOString(),
       },
-      nextState: { status: "recovery_required", stage: "source_action" },
-      errorCode: "fixture_recovery",
+      now: new Date(),
     });
     await client.query(
       `
@@ -2754,20 +2741,42 @@ async function testActionWaitUsesIdleReconciliationWithoutExternalPolling(): Pro
       due_at: new Date(waitingAt.getTime() + 15_000),
     });
 
-    const firstStepResult = await pool.query<{ id: string }>(
+    const firstStepResult = await pool.query<{
+      action_fingerprint: string;
+      executor_id: string;
+      id: string;
+    }>(
       `
-        select id
+        select id, action_fingerprint, executor_id
         from funding_operation_steps
         where operation_id = $1 and ordinal = 0
       `,
       [operationId],
     );
-    const firstStepId = firstStepResult.rows[0]?.id;
-    assert.ok(firstStepId);
+    const firstStep = firstStepResult.rows[0];
+    assert.ok(firstStep);
     const reportedAt = new Date(waitingAt.getTime() + 1_000);
     const reportClient = await pool.connect();
     try {
       await reportClient.query("begin");
+      const attempt = await startFundingStepAttemptInTransaction(reportClient, {
+        operationId,
+        stepId: firstStep.id,
+        canonicalActionFingerprint: firstStep.action_fingerprint,
+        executorId: firstStep.executor_id,
+        now: reportedAt,
+      });
+      await finishFundingStepAttemptInTransaction(reportClient, {
+        attemptId: attempt.id,
+        outcome: "submitted",
+        broadcastMayHaveOccurred: true,
+        referenceKind: "transaction",
+        receiptRefCiphertext: "ciphertext:idle-wait-resume",
+        receiptRefLookupHmac: hash("f"),
+        lookupKeyVersion: 1,
+        actualCosts: {},
+        now: reportedAt,
+      });
       await reportClient.query(
         `
           update funding_operation_steps
@@ -2775,7 +2784,7 @@ async function testActionWaitUsesIdleReconciliationWithoutExternalPolling(): Pro
               updated_at = $3
           where operation_id = $1 and id = $2
         `,
-        [operationId, firstStepId, reportedAt],
+        [operationId, firstStep.id, reportedAt],
       );
       await wakeFundingReconciliationInTransaction(reportClient, {
         operationId,
@@ -2965,6 +2974,8 @@ async function testExpiredUnbroadcastActionWaitCancelsSafely(): Promise<void> {
     );
     const expired = await pool.query<{
       completed_at: Date | null;
+      cancellation_attempt_count: string;
+      cancellation_attempt_outcome: string | null;
       expires_at: Date;
       job_status: string;
       reservation_state: string;
@@ -2980,6 +2991,16 @@ async function testExpiredUnbroadcastActionWaitCancelsSafely(): Promise<void> {
           operation.support_metadata ->> 'terminalReason'
             as terminal_reason,
           step.state as step_state,
+          (
+            select count(*)::text
+            from funding_operation_step_attempts attempt
+            where attempt.step_id = step.id
+          ) as cancellation_attempt_count,
+          (
+            select min(attempt.outcome)
+            from funding_operation_step_attempts attempt
+            where attempt.step_id = step.id
+          ) as cancellation_attempt_outcome,
           reservation.state as reservation_state,
           job.status as job_status
         from funding_operations operation
@@ -2996,6 +3017,8 @@ async function testExpiredUnbroadcastActionWaitCancelsSafely(): Promise<void> {
     assert.deepEqual(expired.rows[0], {
       status: "cancelled",
       completed_at: actionExpiresAt,
+      cancellation_attempt_count: "1",
+      cancellation_attempt_outcome: "cancelled",
       expires_at: committed.operation.expiresAt,
       terminal_reason: "unbroadcast_action_expired",
       step_state: "cancelled",
@@ -3196,6 +3219,24 @@ async function testDirectIngressWithDeferredPreparationCommit(): Promise<void> {
   const userId = await insertUser(pool);
   const destinationLocationId = opaque("destination-location");
   const venueBindingOptionId = opaque("venue-binding-option");
+  const destinationAddress = "0x00000000000000000000000000000000000000d1";
+  const ingressVariant = {
+    variantId: opaque("direct-ingress-variant"),
+    networkId: ASSET.networkId,
+    asset: ASSET,
+    destinationAddress,
+    destinationLocationId,
+    baselineRaw: "1000000",
+    baselineRevision: opaque("direct-ingress-baseline"),
+    observation: {
+      adapterId: "owned_destination_spendability_v1",
+      payload: {},
+    },
+    completion: {
+      kind: "committed_venue_preparation",
+      stepOrdinal: 0,
+    },
+  } as const;
   const plan: FundingCommitPlan = {
     operation: {
       purpose: "add_funds",
@@ -3211,7 +3252,10 @@ async function testDirectIngressWithDeferredPreparationCommit(): Promise<void> {
       },
       destinationTargetSnapshot: {
         kind: "owned_location",
-        locationId: destinationLocationId,
+        location: {
+          locationId: destinationLocationId,
+          details: { address: destinationAddress },
+        },
       },
       externalRecipientId: null,
       venueId: "polymarket",
@@ -3230,6 +3274,7 @@ async function testDirectIngressWithDeferredPreparationCommit(): Promise<void> {
       supportMetadata: {
         preparationKind: "polymarket_funding_router",
         venueBindingOptionId,
+        ingressVariants: [ingressVariant],
       },
     },
     segments: [],
@@ -3312,6 +3357,66 @@ async function testDirectIngressWithDeferredPreparationCommit(): Promise<void> {
     assert.deepEqual(shape.rows[0], {
       reservation_count: "2",
       step_count: "1",
+    });
+    // Simulate a stale materialized cache from an interrupted older writer.
+    // The commit guard and ingress observer must still follow immutable plan
+    // plus evidence facts and not allow that cache to bypass a live route.
+    await pool.query(
+      `update funding_operations
+          set status = 'completed',
+              progress_stage = 'terminal',
+              completed_at = clock_timestamp(),
+              updated_at = clock_timestamp(),
+              version = version + 1
+        where id = $1`,
+      [operationId],
+    );
+    await assert.rejects(
+      tx(pool, (client) =>
+        lockPolymarketFundingOperationPredecessor(client, {
+          userId,
+          venueBindingOptionId,
+        }),
+      ),
+      PolymarketFundingPredecessorUnresolvedError,
+    );
+    const observed = await new DirectIngressDestinationObserver({
+      observe: async () => ({
+        variants: [
+          {
+            variantId: ingressVariant.variantId,
+            observedRaw: "2000000",
+            revision: opaque("direct-ingress-observed"),
+            observedAt: new Date().toISOString(),
+          },
+        ],
+      }),
+    }).pollOperation(pool, operationId);
+    assert.deepEqual(observed, {
+      destinationsPolled: 1,
+      destinationSatisfied: true,
+    });
+    const projection = await pool.query<{
+      status: string;
+      progress_stage: string;
+      step_state: string;
+    }>(
+      `
+        select
+          operation.status,
+          operation.progress_stage,
+          step.state as step_state
+        from funding_operations operation
+        join funding_operation_steps step
+          on step.operation_id = operation.id
+        where operation.id = $1
+      `,
+      [operationId],
+    );
+    assert.deepEqual(projection.rows[0], {
+      status: "in_progress",
+      progress_stage: "source_observed",
+      step_state: "action_required",
     });
   } finally {
     await cleanupCommittedOperation(operationId, quote.id, userId);
@@ -5818,396 +5923,428 @@ async function testFundedTradeTerminalLockRace(): Promise<void> {
   let attemptClaimLeaseUntil = new Date(0);
   let intentId = "";
   let orderId = "";
+  let quoteId = "";
+  let eventId = "";
+  let marketId = "";
+  let tokenId = "";
   const clientOrderId = opaque("limitless-client-order");
   try {
-    await setup.query("begin");
-    userId = await insertUser(setup);
-    const eventId = opaque("limitless-lock-event");
-    const venueMarketId = opaque("limitless-lock-market");
-    const marketId = `limitless:${venueMarketId}`;
-    const rawTokenId = "123456789012345678901234567890123456789";
-    const tokenId = `limitless:${rawTokenId}`;
-    await setup.query(
-      `insert into unified_events (
+    try {
+      await setup.query("begin");
+      userId = await insertUser(setup);
+      eventId = opaque("limitless-lock-event");
+      const venueMarketId = opaque("limitless-lock-market");
+      marketId = `limitless:${venueMarketId}`;
+      const rawTokenId = "123456789012345678901234567890123456789";
+      tokenId = `limitless:${rawTokenId}`;
+      await setup.query(
+        `insert into unified_events (
          id, venue, venue_event_id, title, status, end_date
        ) values ($1, 'limitless', $2, 'Limitless lock event', 'ACTIVE',
                  now() + interval '1 day')`,
-      [eventId, opaque("venue-event")],
-    );
-    await setup.query(
-      `insert into unified_markets (
+        [eventId, opaque("venue-event")],
+      );
+      await setup.query(
+        `insert into unified_markets (
          id, venue, venue_market_id, event_id, title, status, market_type
        ) values ($1, 'limitless', $2, $3, 'Limitless lock market',
                  'ACTIVE', 'binary')`,
-      [marketId, venueMarketId, eventId],
-    );
-    await setup.query(
-      `insert into unified_tokens (token_id, venue, market_id, side)
+        [marketId, venueMarketId, eventId],
+      );
+      await setup.query(
+        `insert into unified_tokens (token_id, venue, market_id, side)
        values ($1, 'limitless', $2, 'YES')`,
-      [tokenId, marketId],
-    );
-    const basePlan = buildPlan({
-      purpose: "trade_shortfall",
-      venueId: "limitless",
-      marketId,
-      requestedCollateralRaw: "1000000",
-    });
-    const plan: FundingCommitPlan = {
-      ...basePlan,
-      operation: {
-        ...basePlan.operation,
-        marketContextSnapshot: {
-          marketContextId: rawTokenId,
-          marketId,
-          venueId: "limitless",
-          side: "BUY",
-          collateralAsset: ASSET,
-          requestedCollateralRaw: "1000000",
+        [tokenId, marketId],
+      );
+      const basePlan = buildPlan({
+        purpose: "trade_shortfall",
+        venueId: "limitless",
+        marketId,
+        requestedCollateralRaw: "1000000",
+      });
+      const plan: FundingCommitPlan = {
+        ...basePlan,
+        operation: {
+          ...basePlan.operation,
+          marketContextSnapshot: {
+            marketContextId: rawTokenId,
+            marketId,
+            venueId: "limitless",
+            side: "BUY",
+            collateralAsset: ASSET,
+            requestedCollateralRaw: "1000000",
+          },
         },
-      },
-    };
-    const consentToken = opaque("consent");
-    const quote = await createFundingQuoteInTransaction(
-      setup,
-      quoteInput(userId, plan, consentToken),
-    );
-    const committed = await commitFundingOperationInTransaction(
-      setup,
-      commitInput(userId, quote.id, consentToken, plan),
-    );
-    operationId = committed.operation.id;
-    const segment = await setup.query<{ id: string }>(
-      `select id from funding_operation_segments
+      };
+      const consentToken = opaque("consent");
+      const quote = await createFundingQuoteInTransaction(
+        setup,
+        quoteInput(userId, plan, consentToken),
+      );
+      quoteId = quote.id;
+      const committed = await commitFundingOperationInTransaction(
+        setup,
+        commitInput(userId, quote.id, consentToken, plan),
+      );
+      operationId = committed.operation.id;
+      const segment = await setup.query<{ id: string }>(
+        `select id from funding_operation_segments
         where operation_id = $1 order by ordinal limit 1`,
-      [operationId],
-    );
-    await ingestFundingObservationInTransaction(setup, {
-      discoverySource: "venue_api",
-      observation: {
-        operationId,
-        segmentId: segment.rows[0]?.id ?? null,
-        kind: "destination_credit",
-        networkId: ASSET.networkId,
-        assetId: ASSET.assetId,
-        assetDecimals: ASSET.decimals,
-        txHash: opaque("destination-tx"),
-        eventIndex: "0",
-        fromAddress: "0xrouter",
-        toAddress: "0xvenue",
-        rawAmount: "990000",
-        observedAt: new Date(),
-        ledgerHeight: "1",
-        blockHash: opaque("block"),
-        finalityStatus: "finalized",
-        finalizedAt: new Date(),
-      },
-    });
-    await reduceFundingOperationInTransaction(setup, { operationId });
-    const reservation = await setup.query<{ id: string }>(
-      `select id from balance_reservations
+        [operationId],
+      );
+      await ingestFundingObservationInTransaction(setup, {
+        discoverySource: "venue_api",
+        observation: {
+          operationId,
+          segmentId: segment.rows[0]?.id ?? null,
+          kind: "destination_credit",
+          networkId: ASSET.networkId,
+          assetId: ASSET.assetId,
+          assetDecimals: ASSET.decimals,
+          txHash: opaque("destination-tx"),
+          eventIndex: "0",
+          fromAddress: "0xrouter",
+          toAddress: "0xvenue",
+          rawAmount: "990000",
+          observedAt: new Date(),
+          ledgerHeight: "1",
+          blockHash: opaque("block"),
+          finalityStatus: "finalized",
+          finalizedAt: new Date(),
+        },
+      });
+      await reduceFundingOperationInTransaction(setup, { operationId });
+      const reservation = await setup.query<{ id: string }>(
+        `select id from balance_reservations
         where operation_id = $1 and mode = 'settled_for_consumer'`,
-      [operationId],
-    );
-    reservationId = reservation.rows[0]?.id ?? "";
-    assert.ok(reservationId);
-    const intent = await setup.query<{ id: string }>(
-      `insert into telegram_trade_intents (
+        [operationId],
+      );
+      reservationId = reservation.rows[0]?.id ?? "";
+      assert.ok(reservationId);
+      const intent = await setup.query<{ id: string }>(
+        `insert into telegram_trade_intents (
          telegram_user_id, user_id, action, venue, market_id, side,
          amount_usd, status, expires_at, idempotency_key,
          funding_operation_id, funding_reservation_id
        ) values ($1, $2, 'buy', 'limitless', $3, 'YES', 1,
                  'executing', now() + interval '30 minutes', $4, $5, $6)
        returning id`,
-      [
-        opaque("telegram-user"),
-        userId,
+        [
+          opaque("telegram-user"),
+          userId,
+          marketId,
+          opaque("intent"),
+          operationId,
+          reservationId,
+        ],
+      );
+      intentId = intent.rows[0]?.id ?? "";
+      const consumerIntent = buildFundingTradeConsumerIntent({
+        venueId: "limitless",
         marketId,
-        opaque("intent"),
+        marketContextId: rawTokenId,
+        spend: { asset: ASSET, raw: "1000000" },
+      });
+      const claim = await claimFundingTradeAttemptInTransaction(setup, {
+        userId,
         operationId,
         reservationId,
-      ],
-    );
-    intentId = intent.rows[0]?.id ?? "";
-    const consumerIntent = buildFundingTradeConsumerIntent({
-      venueId: "limitless",
-      marketId,
-      marketContextId: rawTokenId,
-      spend: { asset: ASSET, raw: "1000000" },
-    });
-    const claim = await claimFundingTradeAttemptInTransaction(setup, {
-      userId,
-      operationId,
-      reservationId,
-      venueId: "limitless",
-      marketId,
-      executionPath: "limitless_clob",
-      idempotencyKey: opaque("trade-attempt"),
-      canonicalFingerprint: hash("f"),
-      consumerIntent,
-      externalReference: clientOrderId,
-    });
-    attemptId = claim.attempt.id;
-    attemptClaimToken = claim.attempt.claimToken;
-    attemptClaimLeaseUntil = claim.attempt.claimLeaseUntil;
-    await markFundingTradeAttemptSubmissionStartedInTransaction(setup, {
-      userId,
-      operationId,
-      reservationId,
-      attemptId,
-      claimToken: claim.attempt.claimToken,
-    });
-    const order = await setup.query<{ id: string }>(
-      `insert into orders (
+        venueId: "limitless",
+        marketId,
+        executionPath: "limitless_clob",
+        idempotencyKey: opaque("trade-attempt"),
+        canonicalFingerprint: hash("f"),
+        consumerIntent,
+        externalReference: clientOrderId,
+      });
+      attemptId = claim.attempt.id;
+      attemptClaimToken = claim.attempt.claimToken;
+      attemptClaimLeaseUntil = claim.attempt.claimLeaseUntil;
+      await markFundingTradeAttemptSubmissionStartedInTransaction(setup, {
+        userId,
+        operationId,
+        reservationId,
+        attemptId,
+        claimToken: claim.attempt.claimToken,
+      });
+      const order = await setup.query<{ id: string }>(
+        `insert into orders (
          user_id, wallet_address, venue, venue_order_id, token_id, side,
          order_type, price, size, status, filled_size, error_message, raw_error,
          funding_operation_id, funding_reservation_id
        ) values ($1, $2, 'limitless', $3, $4, 'BUY', 'FOK', null, null,
                  'submitted', 0, null, null, $5, $6)
        returning id`,
-      [
+        [
+          userId,
+          "0x00000000000000000000000000000000000000b1",
+          clientOrderId,
+          tokenId,
+          operationId,
+          reservationId,
+        ],
+      );
+      orderId = order.rows[0]?.id ?? "";
+      assert.ok(intentId && attemptId && orderId);
+      await setup.query("commit");
+    } finally {
+      await setup.query("rollback").catch(() => undefined);
+      setup.release();
+    }
+
+    const takeoverNow = new Date(attemptClaimLeaseUntil.getTime() + 1);
+    const crashTakeover = await claimLimitlessTradeAttemptForReconciliation(
+      pool,
+      {
+        attemptId,
+        leaseSeconds: 30,
+        now: takeoverNow,
         userId,
-        "0x00000000000000000000000000000000000000b1",
-        clientOrderId,
-        tokenId,
-        operationId,
-        reservationId,
-      ],
+      },
     );
-    orderId = order.rows[0]?.id ?? "";
-    assert.ok(intentId && attemptId && orderId);
-    await setup.query("commit");
-  } finally {
-    await setup.query("rollback").catch(() => undefined);
-    setup.release();
-  }
+    assert.ok(crashTakeover);
+    assert.notEqual(crashTakeover.claimToken, attemptClaimToken);
+    assert.equal(crashTakeover.state, "ambiguous");
+    assert.equal(crashTakeover.resolvedAt?.getTime(), takeoverNow.getTime());
 
-  const takeoverNow = new Date(attemptClaimLeaseUntil.getTime() + 1);
-  const crashTakeover = await claimLimitlessTradeAttemptForReconciliation(
-    pool,
-    {
-      attemptId,
-      leaseSeconds: 30,
-      now: takeoverNow,
-      userId,
-    },
-  );
-  assert.ok(crashTakeover);
-  assert.notEqual(crashTakeover.claimToken, attemptClaimToken);
-  assert.equal(crashTakeover.state, "ambiguous");
-  assert.equal(crashTakeover.resolvedAt?.getTime(), takeoverNow.getTime());
+    const immediateAbsenceClient = await pool.connect();
+    try {
+      await immediateAbsenceClient.query("begin");
+      await assert.rejects(
+        () =>
+          proveAmbiguousLimitlessTradeAttemptAbsentInTransaction(
+            immediateAbsenceClient,
+            {
+              attemptId,
+              clientOrderId,
+              expectedClaimToken: crashTakeover.claimToken,
+              minimumAgeMs: 5 * 60_000,
+              userId,
+              now: new Date(takeoverNow.getTime() + 1),
+            },
+          ),
+        (error: unknown) =>
+          error instanceof FundingTradeAttemptError &&
+          error.code === "invalid_state",
+      );
+    } finally {
+      await immediateAbsenceClient.query("rollback").catch(() => undefined);
+      immediateAbsenceClient.release();
+    }
 
-  const immediateAbsenceClient = await pool.connect();
-  try {
-    await immediateAbsenceClient.query("begin");
-    await assert.rejects(
-      () =>
-        proveAmbiguousLimitlessTradeAttemptAbsentInTransaction(
-          immediateAbsenceClient,
+    const matureNow = new Date(takeoverNow.getTime() + 5 * 60_000);
+    const matureTakeover = await claimLimitlessTradeAttemptForReconciliation(
+      pool,
+      {
+        attemptId,
+        leaseSeconds: 30,
+        now: matureNow,
+        userId,
+      },
+    );
+    assert.ok(matureTakeover);
+    assert.notEqual(matureTakeover.claimToken, crashTakeover.claimToken);
+    assert.equal(matureTakeover.resolvedAt?.getTime(), takeoverNow.getTime());
+
+    for (const terminalStatus of ["rejected", "cancelled"] as const) {
+      const terminalClient = await pool.connect();
+      try {
+        await terminalClient.query("begin");
+        await proveAmbiguousLimitlessTerminalRejectionInTransaction(
+          terminalClient,
           {
             attemptId,
             clientOrderId,
-            expectedClaimToken: crashTakeover.claimToken,
-            minimumAgeMs: 5 * 60_000,
+            errorCode: `limitless_exact_status_${terminalStatus}`,
+            expectedClaimToken: matureTakeover.claimToken,
             userId,
-            now: new Date(takeoverNow.getTime() + 1),
+            now: matureNow,
           },
-        ),
-      (error: unknown) =>
-        error instanceof FundingTradeAttemptError &&
-        error.code === "invalid_state",
-    );
-  } finally {
-    await immediateAbsenceClient.query("rollback").catch(() => undefined);
-    immediateAbsenceClient.release();
-  }
-
-  const matureNow = new Date(takeoverNow.getTime() + 5 * 60_000);
-  const matureTakeover = await claimLimitlessTradeAttemptForReconciliation(
-    pool,
-    {
-      attemptId,
-      leaseSeconds: 30,
-      now: matureNow,
-      userId,
-    },
-  );
-  assert.ok(matureTakeover);
-  assert.notEqual(matureTakeover.claimToken, crashTakeover.claimToken);
-  assert.equal(matureTakeover.resolvedAt?.getTime(), takeoverNow.getTime());
-
-  for (const terminalStatus of ["rejected", "cancelled"] as const) {
-    const terminalClient = await pool.connect();
-    try {
-      await terminalClient.query("begin");
-      await proveAmbiguousLimitlessTerminalRejectionInTransaction(
-        terminalClient,
-        {
-          attemptId,
-          clientOrderId,
-          errorCode: `limitless_exact_status_${terminalStatus}`,
-          expectedClaimToken: matureTakeover.claimToken,
-          userId,
-          now: matureNow,
-        },
-      );
-      await releaseFundingReservationForAbandonedTradeInTransaction(
-        terminalClient,
-        {
-          userId,
-          link: { operationId, reservationId },
-          outcomeReason: "trade_rejected",
-          now: matureNow,
-        },
-      );
-      const terminalOutcome = await terminalClient.query<{
-        attempt_state: string;
-        reservation_state: string;
-      }>(
-        `select trade_attempt.state as attempt_state,
+        );
+        await releaseFundingReservationForAbandonedTradeInTransaction(
+          terminalClient,
+          {
+            userId,
+            link: { operationId, reservationId },
+            outcomeReason: "trade_rejected",
+            now: matureNow,
+          },
+        );
+        const terminalOutcome = await terminalClient.query<{
+          attempt_state: string;
+          reservation_state: string;
+        }>(
+          `select trade_attempt.state as attempt_state,
                 reservation.state as reservation_state
            from funding_trade_attempts trade_attempt
            join balance_reservations reservation
              on reservation.id = trade_attempt.reservation_id
           where trade_attempt.id = $1`,
+          [attemptId],
+        );
+        assert.deepEqual(terminalOutcome.rows[0], {
+          attempt_state: "definitive_failure",
+          reservation_state: "released",
+        });
+      } finally {
+        await terminalClient.query("rollback").catch(() => undefined);
+        terminalClient.release();
+      }
+    }
+
+    const matureAbsenceClient = await pool.connect();
+    try {
+      await matureAbsenceClient.query("begin");
+      await proveAmbiguousLimitlessTradeAttemptAbsentInTransaction(
+        matureAbsenceClient,
+        {
+          attemptId,
+          clientOrderId,
+          expectedClaimToken: matureTakeover.claimToken,
+          minimumAgeMs: 5 * 60_000,
+          userId,
+          now: matureNow,
+        },
+      );
+      await releaseFundingReservationForAbandonedTradeInTransaction(
+        matureAbsenceClient,
+        {
+          userId,
+          link: { operationId, reservationId },
+          outcomeReason: "trade_not_accepted",
+          now: matureNow,
+        },
+      );
+      const terminalInsideProof = await matureAbsenceClient.query<{
+        attempt_state: string;
+        reservation_state: string;
+      }>(
+        `select trade_attempt.state as attempt_state,
+              reservation.state as reservation_state
+         from funding_trade_attempts trade_attempt
+         join balance_reservations reservation
+           on reservation.id = trade_attempt.reservation_id
+        where trade_attempt.id = $1`,
         [attemptId],
       );
-      assert.deepEqual(terminalOutcome.rows[0], {
+      assert.deepEqual(terminalInsideProof.rows[0], {
         attempt_state: "definitive_failure",
         reservation_state: "released",
       });
     } finally {
-      await terminalClient.query("rollback").catch(() => undefined);
-      terminalClient.release();
+      // Keep the mature lease for the takeover race below while proving that a
+      // mature exact absence would release atomically.
+      await matureAbsenceClient.query("rollback").catch(() => undefined);
+      matureAbsenceClient.release();
     }
-  }
 
-  const matureAbsenceClient = await pool.connect();
-  try {
-    await matureAbsenceClient.query("begin");
-    await proveAmbiguousLimitlessTradeAttemptAbsentInTransaction(
-      matureAbsenceClient,
-      {
-        attemptId,
-        clientOrderId,
-        expectedClaimToken: matureTakeover.claimToken,
-        minimumAgeMs: 5 * 60_000,
-        userId,
-        now: matureNow,
-      },
-    );
-    await releaseFundingReservationForAbandonedTradeInTransaction(
-      matureAbsenceClient,
-      {
-        userId,
-        link: { operationId, reservationId },
-        outcomeReason: "trade_not_accepted",
-        now: matureNow,
-      },
-    );
-    const terminalInsideProof = await matureAbsenceClient.query<{
-      attempt_state: string;
-      reservation_state: string;
-    }>(
-      `select trade_attempt.state as attempt_state,
-              reservation.state as reservation_state
-         from funding_trade_attempts trade_attempt
-         join balance_reservations reservation
-           on reservation.id = trade_attempt.reservation_id
-        where trade_attempt.id = $1`,
-      [attemptId],
-    );
-    assert.deepEqual(terminalInsideProof.rows[0], {
-      attempt_state: "definitive_failure",
-      reservation_state: "released",
-    });
-  } finally {
-    // Keep the mature lease for the takeover race below while proving that a
-    // mature exact absence would release atomically.
-    await matureAbsenceClient.query("rollback").catch(() => undefined);
-    matureAbsenceClient.release();
-  }
-
-  const consumerClient = await pool.connect();
-  const proofClient = await pool.connect();
-  try {
-    await consumerClient.query("begin");
-    await proofClient.query("begin");
-    await consumerClient.query("set local lock_timeout = '5s'");
-    await proofClient.query("set local lock_timeout = '5s'");
-    const proof = (async () => {
-      try {
-        await proveAmbiguousLimitlessTradeAttemptAbsentInTransaction(
-          proofClient,
+    const consumerClient = await pool.connect();
+    const proofClient = await pool.connect();
+    try {
+      await consumerClient.query("begin");
+      await proofClient.query("begin");
+      await consumerClient.query("set local lock_timeout = '5s'");
+      await proofClient.query("set local lock_timeout = '5s'");
+      const proof = (async () => {
+        try {
+          await proveAmbiguousLimitlessTradeAttemptAbsentInTransaction(
+            proofClient,
+            {
+              attemptId,
+              clientOrderId,
+              expectedClaimToken: attemptClaimToken,
+              minimumAgeMs: 1,
+              userId,
+              now: new Date(matureNow.getTime() + 1),
+            },
+          );
+          await releaseFundingReservationForAbandonedTradeInTransaction(
+            proofClient,
+            {
+              userId,
+              link: { operationId, reservationId },
+              outcomeReason: "trade_not_accepted",
+              now: new Date(matureNow.getTime() + 1),
+            },
+          );
+          await proofClient.query("commit");
+        } catch (error) {
+          await proofClient.query("rollback");
+          throw error;
+        }
+      })();
+      const consume = (async () => {
+        await consumeFundingReservationForLinkedConsumerInTransaction(
+          consumerClient,
           {
-            attemptId,
-            clientOrderId,
-            expectedClaimToken: attemptClaimToken,
-            minimumAgeMs: 1,
             userId,
+            reservationId,
+            tradeAttemptId: attemptId,
+            tradeAttemptReconciliationClaimToken: matureTakeover.claimToken,
+            consumer: { kind: "web_order", orderId },
+            outcomeReason: "trade_order_recorded",
             now: new Date(matureNow.getTime() + 1),
           },
         );
-        await releaseFundingReservationForAbandonedTradeInTransaction(
-          proofClient,
-          {
-            userId,
-            link: { operationId, reservationId },
-            outcomeReason: "trade_not_accepted",
-            now: new Date(matureNow.getTime() + 1),
-          },
-        );
-        await proofClient.query("commit");
-      } catch (error) {
-        await proofClient.query("rollback");
-        throw error;
+        await consumerClient.query("commit");
+      })();
+      const [proofResult, consumeResult] = await Promise.allSettled([
+        proof,
+        consume,
+      ]);
+      assert.equal(proofResult.status, "rejected");
+      if (proofResult.status === "rejected") {
+        assert.ok(proofResult.reason instanceof FundingTradeAttemptError);
+        assert.equal(proofResult.reason.code, "invalid_state");
       }
-    })();
-    const consume = (async () => {
-      await consumeFundingReservationForLinkedConsumerInTransaction(
-        consumerClient,
-        {
-          userId,
-          reservationId,
-          tradeAttemptId: attemptId,
-          tradeAttemptReconciliationClaimToken: matureTakeover.claimToken,
-          consumer: { kind: "web_order", orderId },
-          outcomeReason: "trade_order_recorded",
-          now: new Date(matureNow.getTime() + 1),
-        },
-      );
-      await consumerClient.query("commit");
-    })();
-    const [proofResult, consumeResult] = await Promise.allSettled([
-      proof,
-      consume,
-    ]);
-    assert.equal(proofResult.status, "rejected");
-    if (proofResult.status === "rejected") {
-      assert.ok(proofResult.reason instanceof FundingTradeAttemptError);
-      assert.equal(proofResult.reason.code, "invalid_state");
-    }
-    assert.equal(consumeResult.status, "fulfilled");
-    const outcome = await pool.query<{
-      attempt_state: string;
-      reservation_state: string;
-    }>(
-      `select trade_attempt.state as attempt_state,
+      assert.equal(consumeResult.status, "fulfilled");
+      const outcome = await pool.query<{
+        attempt_state: string;
+        reservation_state: string;
+      }>(
+        `select trade_attempt.state as attempt_state,
               reservation.state as reservation_state
          from funding_trade_attempts trade_attempt
          join balance_reservations reservation
            on reservation.id = trade_attempt.reservation_id
         where trade_attempt.id = $1`,
-      [attemptId],
-    );
-    assert.deepEqual(outcome.rows[0], {
-      attempt_state: "accepted",
-      reservation_state: "consumed",
-    });
+        [attemptId],
+      );
+      assert.deepEqual(outcome.rows[0], {
+        attempt_state: "accepted",
+        reservation_state: "consumed",
+      });
+    } finally {
+      await consumerClient.query("rollback").catch(() => undefined);
+      await proofClient.query("rollback").catch(() => undefined);
+      consumerClient.release();
+      proofClient.release();
+    }
   } finally {
-    await consumerClient.query("rollback").catch(() => undefined);
-    await proofClient.query("rollback").catch(() => undefined);
-    consumerClient.release();
-    proofClient.release();
+    if (operationId) {
+      await pool.query("delete from orders where funding_operation_id = $1", [
+        operationId,
+      ]);
+      await pool.query(
+        "delete from telegram_trade_intents where funding_operation_id = $1",
+        [operationId],
+      );
+      await pool.query(
+        "delete from funding_trade_attempts where operation_id = $1",
+        [operationId],
+      );
+    }
+    if (quoteId && userId) {
+      await cleanupCommittedOperation(operationId || null, quoteId, userId);
+    }
+    if (tokenId) {
+      await pool.query("delete from unified_tokens where token_id = $1", [
+        tokenId,
+      ]);
+    }
+    if (eventId) {
+      await pool.query("delete from unified_events where id = $1", [eventId]);
+    }
   }
 }
 

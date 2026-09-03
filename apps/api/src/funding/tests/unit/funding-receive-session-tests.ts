@@ -63,7 +63,6 @@ import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.j
 import { relayReceiveQuotePlan } from "../../../funding-providers/relay/receive-routing.js";
 import {
   lockPolymarketFundingOperationPredecessor,
-  PolymarketFundingPredecessorUnresolvedError,
 } from "../../preparation/polymarket-funding-commit-guard.js";
 
 const ASSET = {
@@ -490,25 +489,21 @@ assert.equal(
 );
 {
   const queries: string[] = [];
-  await assert.rejects(
-    lockPolymarketFundingOperationPredecessor(
-      {
-        query: async (sql: string) => {
-          queries.push(sql);
-          return sql.includes("select exists")
-            ? { rowCount: 1, rows: [{ blocked: true }] }
-            : { rowCount: 1, rows: [{}] };
-        },
-      } as never,
-      {
-        userId: "user-polymarket-predecessor",
-        venueBindingOptionId: "binding-polymarket-predecessor",
+  await lockPolymarketFundingOperationPredecessor(
+    {
+      query: async (sql: string) => {
+        queries.push(sql);
+        return { rowCount: 0, rows: [] };
       },
-    ),
-    PolymarketFundingPredecessorUnresolvedError,
+    } as never,
+    {
+      userId: "user-polymarket-predecessor",
+      venueBindingOptionId: "binding-polymarket-predecessor",
+    },
   );
   assert.match(queries[0] ?? "", /pg_advisory_xact_lock/u);
   assert.match(queries[1] ?? "", /polymarket_funding_router/u);
+  assert.doesNotMatch(queries[1] ?? "", /operation\.status/u);
 }
 assert.equal(
   fundingReceiveRoutingNeedsRecovery("routing_preparation_unavailable", 500),

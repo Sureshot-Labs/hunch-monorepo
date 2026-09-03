@@ -15,6 +15,11 @@ import {
 import type { FundingOperationState } from "../domain/transitions.js";
 import { sameAccountAddress } from "../domain/asset-identity.js";
 import {
+  deriveFundingLifecycle,
+  type FundingLifecycleFacts,
+} from "../lifecycle/funding-lifecycle-projector.js";
+import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
+import {
   allocateFundingObservationInTransaction,
   FundingPersistenceError,
 } from "../persistence/funding-operation-repository.js";
@@ -104,9 +109,14 @@ function parseAsset(value: unknown): AssetRef {
 }
 
 function nonNegativeCount(value: unknown): number {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0
-    ? value
-    : 0;
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+    return value;
+  }
+  if (typeof value === "string" && /^\d+$/u.test(value)) {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : 0;
+  }
+  return 0;
 }
 
 function stringArray(value: unknown): readonly string[] {
@@ -215,6 +225,240 @@ function parseProviderSegments(
   });
 }
 
+type CompetingProviderSegment = Readonly<{
+  destinationReferenceCount: number;
+  originReferenceCount: number;
+  providerStatusCategory: string | null;
+  providerUpdatedAt: Date | null;
+  rawStatus: string | null;
+}>;
+
+function dateFromEpochMilliseconds(value: unknown): Date | null {
+  const numeric =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && /^\d+(?:\.\d+)?$/u.test(value)
+        ? Number(value)
+        : null;
+  if (numeric === null || !Number.isFinite(numeric)) return null;
+  const parsed = new Date(numeric);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+function competingProviderSegments(
+  value: unknown,
+): readonly CompetingProviderSegment[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!isRecord(entry)) return [];
+    return [
+      {
+        destinationReferenceCount: nonNegativeCount(
+          entry.destinationTransactionReferenceCount,
+        ),
+        originReferenceCount: nonNegativeCount(
+          entry.originTransactionReferenceCount,
+        ),
+        providerStatusCategory:
+          typeof entry.relayStatusCategory === "string"
+            ? entry.relayStatusCategory
+            : null,
+        providerUpdatedAt: dateFromEpochMilliseconds(entry.providerUpdatedAt),
+        rawStatus: typeof entry.rawStatus === "string" ? entry.rawStatus : null,
+      },
+    ];
+  });
+}
+
+function hasFinalEvidenceAfter(
+  facts: FundingLifecycleFacts,
+  kind: FundingLifecycleFacts["transfers"][number]["kind"],
+  baselineAsOf: Date | null,
+): boolean {
+  return (
+    baselineAsOf !== null &&
+    facts.transfers.some(
+      (transfer) =>
+        transfer.kind === kind &&
+        transfer.canonical &&
+        transfer.finality === "finalized" &&
+        transfer.observedAt > baselineAsOf,
+    )
+  );
+}
+
+function hasFinalEvidenceAtOrBefore(
+  facts: FundingLifecycleFacts,
+  kind: FundingLifecycleFacts["transfers"][number]["kind"],
+  baselineAsOf: Date | null,
+): boolean {
+  return (
+    baselineAsOf !== null &&
+    facts.transfers.some(
+      (transfer) =>
+        transfer.kind === kind &&
+        transfer.canonical &&
+        transfer.finality === "finalized" &&
+        transfer.observedAt <= baselineAsOf,
+    )
+  );
+}
+
+function providerReportedDestinationAfterBaseline(
+  segments: readonly CompetingProviderSegment[],
+  baselineAsOf: Date | null,
+): boolean {
+  return segments.some(
+    (segment) =>
+      segment.rawStatus === "success" &&
+      segment.providerStatusCategory === "provider_success" &&
+      segment.destinationReferenceCount >= 1 &&
+      segment.providerUpdatedAt !== null &&
+      baselineAsOf !== null &&
+      segment.providerUpdatedAt > baselineAsOf,
+  );
+}
+
+function providerReportsMovement(
+  segments: readonly CompetingProviderSegment[],
+): boolean {
+  return segments.some(
+    (segment) =>
+      segment.originReferenceCount >= 1 || segment.destinationReferenceCount >= 1,
+  );
+}
+
+async function hasCompetingDestinationRoute(
+  db: Pick<Pool, "query">,
+  input: Readonly<{
+    baselineAsOf: Date | null;
+    currentOperationId: string;
+    currentProviderSegments: OwnedRouteDestinationTarget["providerSegments"];
+    destinationLocationId: string;
+    now: Date;
+    userId: string;
+  }>,
+): Promise<boolean> {
+  const { rows } = await db.query<{
+    operation_id: string;
+    provider_segments: unknown;
+    support_metadata: JsonRecord;
+  }>(
+    `select competing_operation.id as operation_id,
+            competing_operation.support_metadata,
+            coalesce(
+              jsonb_agg(
+                jsonb_build_object(
+                  'rawStatus', competing_segment.raw_status,
+                  'relayStatusCategory',
+                    competing_segment.support_metadata ->> 'relayStatusCategory',
+                  'originTransactionReferenceCount',
+                    competing_segment.support_metadata
+                      -> 'originTransactionReferenceCount',
+                  'destinationTransactionReferenceCount',
+                    competing_segment.support_metadata
+                      -> 'destinationTransactionReferenceCount',
+                  'providerUpdatedAt',
+                    competing_segment.support_metadata -> 'providerUpdatedAt'
+                )
+                order by competing_segment.ordinal
+              ) filter (where competing_segment.id is not null),
+              '[]'::jsonb
+            ) as provider_segments
+       from funding_operations competing_operation
+       left join funding_operation_segments competing_segment
+         on competing_segment.operation_id = competing_operation.id
+        and competing_segment.provider_id = 'relay'
+      where competing_operation.id <> $1::uuid
+        and competing_operation.user_id = $2::uuid
+        and competing_operation.plan_kind in ('wallet_route', 'composite_route')
+        and competing_operation.destination_target_snapshot #>>
+              '{location,locationId}' = $3
+      group by competing_operation.id, competing_operation.support_metadata`,
+    [input.currentOperationId, input.userId, input.destinationLocationId],
+  );
+  const currentProviderReportedDestination = input.currentProviderSegments.some(
+    (segment) =>
+      segment.providerRawStatus === "success" &&
+      segment.providerStatusCategory === "provider_success" &&
+      segment.providerDestinationReferenceCount >= 1,
+  );
+
+  for (const row of rows) {
+    const facts = await loadFundingLifecycleFactsForOperationInTransaction(db, {
+      operationId: row.operation_id,
+      now: input.now,
+    });
+    if (!facts) continue;
+    const lifecycle = deriveFundingLifecycle(facts);
+    const destinationAfterBaseline = hasFinalEvidenceAfter(
+      facts,
+      "destination_credit",
+      input.baselineAsOf,
+    );
+    const destinationAtOrBeforeBaseline = hasFinalEvidenceAtOrBefore(
+      facts,
+      "destination_credit",
+      input.baselineAsOf,
+    );
+    if (destinationAfterBaseline) return true;
+    if (
+      lifecycle.status === "ready" &&
+      destinationAtOrBeforeBaseline
+    ) {
+      continue;
+    }
+
+    const providerSegments = competingProviderSegments(row.provider_segments);
+    const providerMovementMayHaveOccurred =
+      facts.actions.some((action) =>
+        action.attempts.some((attempt) => attempt.broadcastMayHaveOccurred),
+      ) || providerReportsMovement(providerSegments);
+    if (
+      providerMovementMayHaveOccurred &&
+      providerReportedDestinationAfterBaseline(
+        providerSegments,
+        input.baselineAsOf,
+      )
+    ) {
+      return true;
+    }
+
+    const containsVenuePreparation =
+      row.support_metadata.containsVenuePreparation === true;
+    if (containsVenuePreparation) {
+      if (
+        hasFinalEvidenceAfter(facts, "venue_readiness", input.baselineAsOf)
+      ) {
+        return true;
+      }
+      if (
+        hasFinalEvidenceAtOrBefore(
+          facts,
+          "venue_readiness",
+          input.baselineAsOf,
+        )
+      ) {
+        continue;
+      }
+      if (!lifecycle.safety.terminal) return true;
+    }
+
+    if (!providerMovementMayHaveOccurred || lifecycle.safety.terminal) {
+      continue;
+    }
+    const onlyUnexposedAutomaticRecovery =
+      lifecycle.status === "recovery_required" &&
+      !lifecycle.safety.requiresManualRecovery &&
+      currentProviderReportedDestination &&
+      providerSegments.every(
+        (segment) => segment.destinationReferenceCount === 0,
+      );
+    if (!onlyUnexposedAutomaticRecovery) return true;
+  }
+  return false;
+}
+
 function destinationObservationEvidence(
   supportMetadata: JsonRecord,
   plannerSnapshot: JsonRecord | null,
@@ -316,14 +560,14 @@ function destinationObservationEvidence(
 async function loadTarget(
   db: Pick<Pool, "query">,
   operationId: string,
+  now: Date,
 ): Promise<OwnedRouteDestinationTarget | null> {
   const { rows } = await db.query<{
     operation_id: string;
     user_id: string;
     purpose: FundingPurpose;
     market_id: string | null;
-    status: FundingOperationState["status"];
-    progress_stage: FundingOperationState["stage"];
+    baseline_as_of: Date | null;
     version: number;
     venue_binding_snapshot: JsonRecord;
     destination_target_snapshot: JsonRecord;
@@ -333,7 +577,6 @@ async function loadTarget(
     quoted_min_output: JsonRecord;
     requested_destination_amount: JsonRecord | null;
     provider_segments: unknown;
-    competing_count: string | number;
   }>(
     `
       select
@@ -341,8 +584,6 @@ async function loadTarget(
         operation.user_id,
         operation.purpose,
         operation.market_id,
-        operation.status,
-        operation.progress_stage,
         operation.version,
         operation.venue_binding_snapshot,
         operation.destination_target_snapshot,
@@ -350,6 +591,7 @@ async function loadTarget(
         projection.planner_snapshot,
         receive_destination_baseline.destination_observation
           as receive_destination_observation,
+        destination_baseline.baseline_as_of,
         segment.quoted_min_output,
         operation.requested_destination_amount,
         (
@@ -374,208 +616,7 @@ async function loadTarget(
           from funding_operation_segments provider_segment
           where provider_segment.operation_id = operation.id
             and provider_segment.provider_id = 'relay'
-        ) as provider_segments,
-        (
-          select count(*)
-          from funding_operations competing
-          where competing.id <> operation.id
-            and competing.user_id = operation.user_id
-            and competing.plan_kind in ('wallet_route', 'composite_route')
-            and competing.destination_target_snapshot #>>
-                  '{location,locationId}' =
-                operation.destination_target_snapshot #>>
-                  '{location,locationId}'
-            and not (
-              competing.status = 'ready'
-              -- A ready route with finalized credit at or before this
-              -- operation's immutable baseline is already included in that
-              -- baseline. It can keep its consumer reservation alive, but it
-              -- must not make a later Relay credit ambiguous forever.
-              and exists (
-                select 1
-                from funding_observations settled_competing_credit
-                where settled_competing_credit.operation_id = competing.id
-                  and settled_competing_credit.kind = 'destination_credit'
-                  and settled_competing_credit.canonical
-                  and settled_competing_credit.finality_status = 'finalized'
-                  and settled_competing_credit.observed_at <=
-                    destination_baseline.baseline_as_of
-              )
-              and not exists (
-                select 1
-                from funding_observations unsettled_competing_credit
-                where unsettled_competing_credit.operation_id = competing.id
-                  and unsettled_competing_credit.kind = 'destination_credit'
-                  and unsettled_competing_credit.canonical
-                  and unsettled_competing_credit.finality_status = 'finalized'
-                  and unsettled_competing_credit.observed_at >
-                    destination_baseline.baseline_as_of
-              )
-            )
-            and (
-              exists (
-                select 1
-                from funding_operation_segments competing_segment
-                where competing_segment.operation_id = competing.id
-                  and competing_segment.provider_id = 'relay'
-                  and (
-                    exists (
-                      select 1
-                      from funding_operation_steps competing_step
-                      join funding_operation_step_attempts competing_attempt
-                        on competing_attempt.step_id = competing_step.id
-                      where competing_step.operation_id = competing.id
-                        and competing_step.segment_id = competing_segment.id
-                        and competing_attempt.broadcast_may_have_occurred
-                    )
-                    or (
-                      coalesce(
-                        competing_segment.support_metadata
-                          ->>'originTransactionReferenceCount',
-                        '0'
-                      ) ~ '^[0-9]+$'
-                      and (
-                        coalesce(
-                          competing_segment.support_metadata
-                            ->>'originTransactionReferenceCount',
-                          '0'
-                        )
-                      )::integer >= 1
-                    )
-                    or (
-                      coalesce(
-                        competing_segment.support_metadata
-                          ->>'destinationTransactionReferenceCount',
-                        '0'
-                      ) ~ '^[0-9]+$'
-                      and (
-                        coalesce(
-                          competing_segment.support_metadata
-                            ->>'destinationTransactionReferenceCount',
-                          '0'
-                        )
-                      )::integer >= 1
-                    )
-                  )
-                  and case
-                    when
-                      competing_segment.raw_status = 'success'
-                      and competing_segment.support_metadata
-                        ->>'relayStatusCategory' = 'provider_success'
-                      and (
-                        competing_segment.support_metadata
-                          ->>'destinationTransactionReferenceCount'
-                      ) ~ '^[0-9]+$'
-                      and (
-                        competing_segment.support_metadata
-                          ->>'destinationTransactionReferenceCount'
-                      )::integer >= 1
-                      and (
-                        competing_segment.support_metadata
-                          ->>'providerUpdatedAt'
-                      ) ~ '^[0-9]+$'
-                      and destination_baseline.baseline_as_of is not null
-                    then to_timestamp(
-                      (
-                        competing_segment.support_metadata
-                          ->>'providerUpdatedAt'
-                      )::numeric / 1000
-                    ) > destination_baseline.baseline_as_of
-                    else (
-                      competing.status in (
-                        'awaiting_user',
-                        'awaiting_external_funds',
-                        'in_progress',
-                        'ready',
-                        'reconcile_required'
-                      )
-                      or (
-                        competing.status = 'recovery_required'
-                        -- A delivered current route cannot be blocked forever
-                        -- by an older recovery route that has no destination
-                        -- transaction. If that older route delivers later,
-                        -- this operation's finalized destination observation
-                        -- prevents the same balance delta from being
-                        -- attributed twice.
-                        and not (
-                          segment.raw_status = 'success'
-                          and segment.support_metadata
-                            ->>'relayStatusCategory' = 'provider_success'
-                          and coalesce(
-                            segment.support_metadata
-                              ->>'destinationTransactionReferenceCount',
-                            '0'
-                          ) ~ '^[0-9]+$'
-                          and (
-                            coalesce(
-                              segment.support_metadata
-                                ->>'destinationTransactionReferenceCount',
-                              '0'
-                            )
-                          )::integer >= 1
-                          and coalesce(
-                            competing_segment.support_metadata
-                              ->>'destinationTransactionReferenceCount',
-                            '0'
-                          ) ~ '^[0-9]+$'
-                          and (
-                            coalesce(
-                              competing_segment.support_metadata
-                                ->>'destinationTransactionReferenceCount',
-                              '0'
-                            )
-                          )::integer = 0
-                        )
-                      )
-                    )
-                  end
-              )
-              or (
-                competing.support_metadata->>'containsVenuePreparation' =
-                  'true'
-                and case
-                  when exists (
-                    select 1
-                    from funding_observations competing_preparation
-                    where competing_preparation.operation_id = competing.id
-                      and competing_preparation.kind = 'venue_readiness'
-                      and competing_preparation.canonical
-                      and competing_preparation.finality_status = 'finalized'
-                      and competing_preparation.observed_at >
-                        destination_baseline.baseline_as_of
-                  ) then true
-                  when exists (
-                    select 1
-                    from funding_observations competing_preparation
-                    where competing_preparation.operation_id = competing.id
-                      and competing_preparation.kind = 'venue_readiness'
-                      and competing_preparation.canonical
-                      and competing_preparation.finality_status = 'finalized'
-                      and competing_preparation.observed_at <=
-                        destination_baseline.baseline_as_of
-                  ) then false
-                  else competing.status in (
-                    'awaiting_user',
-                    'awaiting_external_funds',
-                    'in_progress',
-                    'ready',
-                    'reconcile_required',
-                    'recovery_required'
-                  )
-                end
-              )
-              or exists (
-                select 1
-                from funding_observations competing_credit
-                where competing_credit.operation_id = competing.id
-                  and competing_credit.kind = 'destination_credit'
-                  and competing_credit.canonical
-                  and competing_credit.finality_status = 'finalized'
-                  and competing_credit.observed_at >
-                    destination_baseline.baseline_as_of
-                )
-            )
-        ) as competing_count
+        ) as provider_segments
       from funding_operations operation
       join funding_operation_segments segment
         on segment.operation_id = operation.id
@@ -657,26 +698,10 @@ async function loadTarget(
       ) destination_baseline
       where operation.id = $1
         and operation.plan_kind in ('wallet_route', 'composite_route')
-        and operation.status not in (
-          'completed',
-          'refunded',
-          'failed',
-          'cancelled'
-        )
-        and (
-          operation.status <> 'recovery_required'
-          or operation.recovery_mode = 'automatic_evidence'
-        )
         and exists (
           select 1
           from funding_operation_steps step
           where step.operation_id = operation.id
-        )
-        and not exists (
-          select 1
-          from funding_operation_steps step
-          where step.operation_id = operation.id
-            and step.state <> 'succeeded'
         )
         and not exists (
           select 1
@@ -692,7 +717,21 @@ async function loadTarget(
     [operationId],
   );
   const row = rows[0];
-  if (!row || Number(row.competing_count) > 0) return null;
+  if (!row) return null;
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(db, {
+    operationId: row.operation_id,
+    now,
+  });
+  if (!facts) return null;
+  const lifecycle = deriveFundingLifecycle(facts);
+  if (
+    lifecycle.safety.terminal ||
+    lifecycle.safety.requiresManualRecovery ||
+    lifecycle.actions.length === 0 ||
+    lifecycle.actions.some((action) => action.state !== "succeeded")
+  ) {
+    return null;
+  }
   const target = row.destination_target_snapshot;
   const location = isRecord(target.location) ? target.location : null;
   const details =
@@ -720,9 +759,12 @@ async function loadTarget(
     row.receive_destination_observation,
   );
   const locationAsset = parseAsset(location?.asset);
+  const destinationLocationId = requiredString(
+    location?.locationId,
+    "destination locationId",
+  );
   if (
-    baseline.locationId !==
-      requiredString(location?.locationId, "destination locationId") ||
+    baseline.locationId !== destinationLocationId ||
     !sameAsset(baseline.asset, minimumAsset) ||
     !sameAsset(locationAsset, minimumAsset) ||
     providerSegments.some(
@@ -737,6 +779,18 @@ async function loadTarget(
       "quote_mismatch",
       "owned route destination baseline differs from the committed target",
     );
+  }
+  if (
+    await hasCompetingDestinationRoute(db, {
+      baselineAsOf: row.baseline_as_of,
+      currentOperationId: row.operation_id,
+      currentProviderSegments: providerSegments,
+      destinationLocationId,
+      now,
+      userId: row.user_id,
+    })
+  ) {
+    return null;
   }
   const sourceReceiptValue =
     row.operation_support_metadata.fundingReceiveReceiptId;
@@ -846,7 +900,7 @@ async function loadTarget(
       blockHash: receipt.block_hash,
       observedAt: receipt.observed_at.toISOString(),
     })),
-    destinationLocationId: baseline.locationId,
+    destinationLocationId,
     destinationAddress,
     asset: minimumAsset,
     requestedRaw,
@@ -855,8 +909,8 @@ async function loadTarget(
     baselineRevision: baseline.baselineRevision,
     operationVersion: row.version,
     operationState: {
-      status: row.status,
-      stage: row.progress_stage,
+      status: lifecycle.status,
+      stage: lifecycle.progressStage,
     },
   };
 }
@@ -1180,6 +1234,7 @@ export class OwnedRouteDestinationObserver {
     const target = await (this.dependencies.loadTarget ?? loadTarget)(
       pool,
       operationId,
+      now,
     );
     if (!target) {
       return { destinationsPolled: 0, destinationSatisfied: false };

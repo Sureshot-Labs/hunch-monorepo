@@ -6,15 +6,18 @@ import { isSafelyCancellableStepLessIngress } from "../../reconciliation/funding
 
 const waitingDirectIngress = {
   planKind: "direct_external_handoff",
+} as const;
+
+const untouchedExternalIngressLifecycle = {
   status: "awaiting_external_funds",
-  progressStage: "source_action",
+  safety: { cancelAllowed: true },
 } as const;
 
 assert.equal(
   isSafelyCancellableStepLessIngress({
     operation: waitingDirectIngress,
     stepCount: 0,
-    hasUnsafeExternalEffects: false,
+    lifecycle: untouchedExternalIngressLifecycle,
   }),
   true,
 );
@@ -22,7 +25,10 @@ assert.equal(
   isSafelyCancellableStepLessIngress({
     operation: waitingDirectIngress,
     stepCount: 0,
-    hasUnsafeExternalEffects: true,
+    lifecycle: {
+      ...untouchedExternalIngressLifecycle,
+      safety: { cancelAllowed: false },
+    },
   }),
   false,
 );
@@ -30,7 +36,7 @@ assert.equal(
   isSafelyCancellableStepLessIngress({
     operation: waitingDirectIngress,
     stepCount: 1,
-    hasUnsafeExternalEffects: false,
+    lifecycle: untouchedExternalIngressLifecycle,
   }),
   false,
 );
@@ -38,11 +44,12 @@ assert.equal(
   isSafelyCancellableStepLessIngress({
     operation: {
       ...waitingDirectIngress,
-      status: "in_progress",
-      progressStage: "source_observed",
     },
     stepCount: 0,
-    hasUnsafeExternalEffects: false,
+    lifecycle: {
+      ...untouchedExternalIngressLifecycle,
+      status: "in_progress",
+    },
   }),
   false,
 );

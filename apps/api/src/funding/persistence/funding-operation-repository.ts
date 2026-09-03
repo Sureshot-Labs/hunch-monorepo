@@ -1546,6 +1546,207 @@ export async function transitionFundingOperationInTransaction(
   return mapOperation(updatedRow);
 }
 
+/**
+ * Writes the public operation-state cache from a lifecycle projection.
+ *
+ * Unlike transitionFundingOperationInTransaction this deliberately does not
+ * consult the historical transition graph: the projection is derived from
+ * immutable plan/execution/evidence facts, so the prior cached pair has no
+ * authority over the next cached pair. Callers still need the operation lock
+ * and optimistic version to serialize the cache with fact writes.
+ */
+export async function writeFundingOperationLifecycleProjectionCacheInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    operationId: string;
+    expectedVersion: number;
+    state: FundingOperationState;
+    actualSourceAmount?: JsonRecord | null;
+    actualDestinationAmount?: JsonRecord | null;
+    errorCode?: string | null;
+    recoveryMode?: FundingRecoveryMode | null;
+    supportMetadataPatch?: JsonRecord;
+    now: Date;
+  }>,
+): Promise<FundingOperationRow> {
+  if (!isValidFundingOperationState(input.state)) {
+    throw new FundingPersistenceError(
+      "invalid_operation_state",
+      "lifecycle projector produced an undeclared public operation state",
+    );
+  }
+  if (
+    input.state.status !== "recovery_required" &&
+    input.recoveryMode !== undefined &&
+    input.recoveryMode !== null
+  ) {
+    throw new FundingPersistenceError(
+      "invalid_state_transition",
+      "recovery mode may only accompany a recovery projection",
+    );
+  }
+  const { rows } = await client.query<FundingOperationDbRow>(
+    `select ${operationColumns}
+       from funding_operations
+      where id = $1
+      for update`,
+    [input.operationId],
+  );
+  const currentRow = rows[0];
+  if (!currentRow) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "funding operation disappeared while caching lifecycle projection",
+    );
+  }
+  const current = mapOperation(currentRow);
+  if (current.version !== input.expectedVersion) {
+    throw new FundingPersistenceError(
+      "operation_version_conflict",
+      "funding operation version changed before lifecycle cache write",
+    );
+  }
+  assertActualAmountUpdate(
+    "source",
+    current.actualSourceAmount,
+    input.actualSourceAmount,
+  );
+  assertActualAmountUpdate(
+    "destination",
+    current.actualDestinationAmount,
+    input.actualDestinationAmount,
+  );
+  const nextRecoveryMode =
+    input.state.status === "recovery_required"
+      ? (input.recoveryMode ?? current.recoveryMode ?? "manual_review")
+      : null;
+  const noStateChange =
+    current.status === input.state.status &&
+    current.progressStage === input.state.stage &&
+    current.recoveryMode === nextRecoveryMode;
+  const noDataChange =
+    input.actualSourceAmount === undefined &&
+    input.actualDestinationAmount === undefined &&
+    input.errorCode === undefined &&
+    input.supportMetadataPatch === undefined;
+  if (noStateChange && noDataChange) return current;
+
+  const terminal = ["completed", "refunded", "failed", "cancelled"].includes(
+    input.state.status,
+  );
+  const updated = await client.query<FundingOperationDbRow>(
+    `
+      update funding_operations
+         set status = $2,
+             progress_stage = $3,
+             recovery_mode = $4::text,
+             actual_source_amount = case
+               when $5::jsonb is null then actual_source_amount
+               else $5::jsonb
+             end,
+             actual_destination_amount = case
+               when $6::jsonb is null then actual_destination_amount
+               else $6::jsonb
+             end,
+             error_code = case when $7::boolean then $8::text else error_code end,
+             support_metadata = support_metadata || $9::jsonb,
+             completed_at = case
+               when $10::boolean then coalesce(completed_at, $11::timestamptz)
+               else null
+             end,
+             version = version + 1
+       where id = $1
+         and version = $12
+       returning ${operationColumns}
+    `,
+    [
+      input.operationId,
+      input.state.status,
+      input.state.stage,
+      nextRecoveryMode,
+      input.actualSourceAmount ?? null,
+      input.actualDestinationAmount ?? null,
+      input.errorCode !== undefined,
+      input.errorCode ?? null,
+      input.supportMetadataPatch ?? {},
+      terminal,
+      input.now,
+      input.expectedVersion,
+    ],
+  );
+  const updatedRow = updated.rows[0];
+  if (!updatedRow) {
+    throw new FundingPersistenceError(
+      "operation_version_conflict",
+      "funding operation version changed during lifecycle cache write",
+    );
+  }
+  return mapOperation(updatedRow);
+}
+
+/**
+ * Records non-lifecycle operational facts on an already locked operation.
+ *
+ * This deliberately leaves the public status/progress cache untouched. Call
+ * the lifecycle projector afterwards to materialize a cache that reflects the
+ * new fact; using the transition graph here would make the old cache an input
+ * to a new decision.
+ */
+export async function writeFundingOperationSupportFactsInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    operationId: string;
+    expectedVersion: number;
+    supportMetadataPatch: JsonRecord;
+    now: Date;
+  }>,
+): Promise<FundingOperationRow> {
+  const { rows } = await client.query<FundingOperationDbRow>(
+    `select ${operationColumns}
+       from funding_operations
+      where id = $1
+      for update`,
+    [input.operationId],
+  );
+  const currentRow = rows[0];
+  if (!currentRow) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "funding operation disappeared while recording lifecycle facts",
+    );
+  }
+  const current = mapOperation(currentRow);
+  if (current.version !== input.expectedVersion) {
+    throw new FundingPersistenceError(
+      "operation_version_conflict",
+      "funding operation version changed before recording lifecycle facts",
+    );
+  }
+  const updated = await client.query<FundingOperationDbRow>(
+    `update funding_operations
+        set support_metadata = support_metadata || $2::jsonb,
+            updated_at = $3,
+            version = version + 1
+      where id = $1
+        and version = $4
+      returning ${operationColumns}`,
+    [
+      input.operationId,
+      input.supportMetadataPatch,
+      input.now,
+      input.expectedVersion,
+    ],
+  );
+  const updatedRow = updated.rows[0];
+  if (!updatedRow) {
+    throw new FundingPersistenceError(
+      "operation_version_conflict",
+      "funding operation version changed while recording lifecycle facts",
+    );
+  }
+  return mapOperation(updatedRow);
+}
+
 export async function transitionFundingOperation(
   pool: Pool,
   input: FundingOperationTransitionInput,
@@ -1637,6 +1838,83 @@ export async function transitionFundingSegmentInTransaction(
     throw new FundingPersistenceError(
       "invalid_segment_transition",
       "funding segment state or actual amount changed before transition",
+    );
+  }
+}
+
+/**
+ * Writes a segment's public cache from the lifecycle projection.
+ *
+ * Segment status is derived output, so this intentionally has no
+ * `expectedStatus` or transition-map check. Immutable route terms and
+ * recorded actual amounts retain their database-level protections.
+ */
+export async function writeFundingSegmentProjectionCacheInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    operationId: string;
+    segmentId: string;
+    status: SegmentStatus;
+    actualInput?: JsonRecord | null;
+    actualOutput?: JsonRecord | null;
+    now: Date;
+  }>,
+): Promise<void> {
+  const result = await client.query(
+    `
+      update funding_operation_segments
+         set status = $3,
+             actual_input = case
+               when $4::jsonb is null then actual_input
+               else coalesce(actual_input, $4::jsonb)
+             end,
+             actual_output = case
+               when $5::jsonb is null then actual_output
+               else coalesce(actual_output, $5::jsonb)
+             end,
+             submitted_at = case
+               -- The projector can observe final evidence before this cache
+               -- was ever materialized as submitted. The schema still
+               -- requires a submit timestamp before a settlement timestamp,
+               -- so derive both cache timestamps from the same observation.
+               -- A replay/test clock may predate the durable segment row;
+               -- cache timestamps must never violate the physical row's
+               -- created-at lower bound.
+               when $3 in ('submitted', 'succeeded', 'refunded')
+                 then coalesce(
+                   submitted_at,
+                   greatest($6::timestamptz, created_at)
+                 )
+               else submitted_at
+             end,
+             settled_at = case
+               when $3 in ('succeeded', 'refunded')
+                 then coalesce(
+                   settled_at,
+                   greatest(
+                     $6::timestamptz,
+                     created_at,
+                     coalesce(submitted_at, $6::timestamptz, created_at)
+                   )
+                 )
+               else settled_at
+             end
+       where id = $1
+         and operation_id = $2
+    `,
+    [
+      input.segmentId,
+      input.operationId,
+      input.status,
+      input.actualInput ?? null,
+      input.actualOutput ?? null,
+      input.now,
+    ],
+  );
+  if (result.rowCount !== 1) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "funding segment disappeared while caching lifecycle projection",
     );
   }
 }

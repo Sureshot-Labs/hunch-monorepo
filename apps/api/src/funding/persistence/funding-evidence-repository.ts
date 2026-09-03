@@ -1,6 +1,8 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import type { JsonValue } from "../domain/types.js";
+import { deriveFundingLifecycle } from "../lifecycle/funding-lifecycle-projector.js";
+import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
 import { canonicalJsonEqual, canonicalJsonHash } from "./canonical.js";
 import {
   consumeFundingReservationInTransaction,
@@ -10,6 +12,7 @@ import {
   transitionFundingOperationInTransaction,
   type FundingOperationRow,
   wakeFundingReconciliationInTransaction,
+  writeFundingOperationLifecycleProjectionCacheInTransaction,
 } from "./funding-operation-repository.js";
 import {
   acceptFundingTradeAttemptInTransaction,
@@ -86,23 +89,46 @@ type FundingOperationStepDbRow = {
 
 function mapOperationStep(
   row: FundingOperationStepDbRow,
+  projectedStates: ReadonlyMap<string, FundingOperationStepState> | null = null,
 ): FundingOperationStep {
+  const state = projectedStates?.get(row.id) ?? row.state;
+  const dependencyState =
+    row.depends_on_step_id === null
+      ? null
+      : (projectedStates?.get(row.depends_on_step_id) ?? row.dependency_state);
   return {
     id: row.id,
     operationId: row.operation_id,
     segmentId: row.segment_id,
     ordinal: row.ordinal,
     stepKind: row.step_kind,
-    state: row.state,
+    state,
     actionFingerprint: row.action_fingerprint,
     executorId: row.executor_id,
     payerRequirement: row.payer_requirement,
     dependsOnStepId: row.depends_on_step_id,
-    dependencyState: row.dependency_state,
+    dependencyState,
     normalizedAction: row.normalized_action,
     actionValidationResult: row.action_validation_result,
     actionExpiresAt: row.action_expires_at,
   };
+}
+
+async function projectedFundingStepStates(
+  db: Pick<Pool, "query">,
+  operationId: string,
+): Promise<ReadonlyMap<string, FundingOperationStepState>> {
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(db, {
+    operationId,
+    now: new Date(),
+  });
+  if (!facts) return new Map();
+  return new Map(
+    deriveFundingLifecycle(facts).actions.map((action) => [
+      action.actionId,
+      action.state,
+    ]),
+  );
 }
 
 const operationStepColumns = `
@@ -144,7 +170,12 @@ export async function fetchFundingOperationStepForUser(
     `,
     [input.userId, input.operationId, input.stepId],
   );
-  return rows[0] ? mapOperationStep(rows[0]) : null;
+  const row = rows[0];
+  if (!row) return null;
+  return mapOperationStep(
+    row,
+    await projectedFundingStepStates(db, input.operationId),
+  );
 }
 
 export async function listFundingOperationStepsForUser(
@@ -168,7 +199,11 @@ export async function listFundingOperationStepsForUser(
     `,
     [input.userId, input.operationId],
   );
-  return rows.map(mapOperationStep);
+  const projectedStates = await projectedFundingStepStates(
+    db,
+    input.operationId,
+  );
+  return rows.map((row) => mapOperationStep(row, projectedStates));
 }
 
 export type FundingPolymarketHandoffCandidate = Readonly<{
@@ -600,6 +635,173 @@ export type FundingStepAttempt = Readonly<{
   finishedAt: Date | null;
 }>;
 
+/**
+ * Records cancellation as durable action evidence.  The lifecycle projection
+ * decides which actions remain safely cancellable; this writer only appends
+ * those cancellation facts.  In particular, a completed approval is harmless
+ * and must not prevent cancellation of a still-unstarted debit action.
+ *
+ * The enclosing caller must already hold the operation lock.  The projection
+ * establishes the no-money-movement boundary before this helper appends any
+ * cancellation fact.
+ */
+export async function recordSafeFundingActionCancellationsInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    operationId: string;
+    now: Date;
+  }>,
+): Promise<
+  Readonly<{
+    cancelledStepIds: readonly string[];
+    unsafeStepIds: readonly string[];
+  }>
+> {
+  const lifecycle = await projectedFundingLifecycleInTransaction(client, {
+    operationId: input.operationId,
+    now: input.now,
+  });
+  const projectedActionById = new Map(
+    lifecycle.actions.map((action) => [action.actionId, action]),
+  );
+  const unsafeStepIds = lifecycle.actions
+    .filter(
+      (action) =>
+        action.state !== "planned" &&
+        action.state !== "action_required" &&
+        action.state !== "succeeded" &&
+        action.state !== "failed" &&
+        action.state !== "cancelled",
+    )
+    .map((action) => action.actionId);
+  if (!lifecycle.safety.cancelAllowed || unsafeStepIds.length > 0) {
+    return {
+      cancelledStepIds: [],
+      unsafeStepIds:
+        unsafeStepIds.length > 0
+          ? unsafeStepIds
+          : lifecycle.actions.map((action) => action.actionId),
+    };
+  }
+
+  const candidateResult = await client.query<{
+    attempt_number: number | null;
+    canonical_action_fingerprint: string;
+    executor_id: string;
+    step_id: string;
+  }>(
+    `
+      select
+        step.id as step_id,
+        attempt.attempt_number,
+        step.action_fingerprint as canonical_action_fingerprint,
+        step.executor_id
+      from funding_operation_steps step
+      left join lateral (
+        select
+          candidate.attempt_number
+        from funding_operation_step_attempts candidate
+        where candidate.step_id = step.id
+        order by candidate.attempt_number desc
+        limit 1
+      ) attempt on true
+      where step.operation_id = $1::uuid
+      order by step.ordinal
+      for update of step
+    `,
+    [input.operationId],
+  );
+  const cancelledStepIds: string[] = [];
+  for (const row of candidateResult.rows) {
+    const projectedAction = projectedActionById.get(row.step_id);
+    if (!projectedAction) {
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "funding lifecycle projection omitted a committed action",
+      );
+    }
+    if (
+      projectedAction.state !== "planned" &&
+      projectedAction.state !== "action_required"
+    ) {
+      continue;
+    }
+    const attemptNumber = (row.attempt_number ?? 0) + 1;
+    const { rows } = await client.query<{ step_id: string }>(
+      `
+        insert into funding_operation_step_attempts (
+          step_id,
+          attempt_number,
+          canonical_action_fingerprint,
+          executor_id,
+          outcome,
+          broadcast_may_have_occurred,
+          actual_costs,
+          started_at,
+          finished_at
+        )
+        values (
+          $1::uuid, $2, $3, $4, 'cancelled', false,
+          '{"reasonCode":"cancelled_after_safe_evidence"}'::jsonb,
+          $5::timestamptz, $5::timestamptz
+        )
+        on conflict (step_id, attempt_number) do nothing
+        returning step_id
+      `,
+      [
+        row.step_id,
+        attemptNumber,
+        row.canonical_action_fingerprint,
+        row.executor_id,
+        input.now,
+      ],
+    );
+    const cancelled = rows[0]?.step_id;
+    if (!cancelled) {
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "funding action changed while recording its cancellation",
+      );
+    }
+    cancelledStepIds.push(cancelled);
+  }
+  return { cancelledStepIds, unsafeStepIds: [] };
+}
+
+/**
+ * A zero-action external ingress has no step on which to store cancellation.
+ * Keep the decision as one explicit, append-only-in-practice lifecycle fact
+ * instead of treating the materialized operation status as the decision.
+ */
+export async function recordFundingOperationCancellationDecisionInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{ operationId: string; now: Date }>,
+): Promise<void> {
+  const updated = await client.query(
+    `update funding_operations
+        set support_metadata = jsonb_set(
+              support_metadata,
+              '{lifecycleCancellation}',
+              jsonb_build_object(
+                'reason', 'user_cancelled_before_money_moved',
+                'requestedAt', $2::timestamptz
+              ),
+              true
+            ),
+            version = version + 1,
+            updated_at = $2
+      where id = $1::uuid
+        and support_metadata -> 'lifecycleCancellation' is null`,
+    [input.operationId, input.now],
+  );
+  if ((updated.rowCount ?? 0) > 1) {
+    throw new FundingPersistenceError(
+      "invalid_state_transition",
+      "funding cancellation decision matched multiple operations",
+    );
+  }
+}
+
 type FundingStepAttemptDbRow = {
   id: string;
   step_id: string;
@@ -651,6 +853,54 @@ function mapAttempt(row: FundingStepAttemptDbRow): FundingStepAttempt {
     startedAt: row.started_at,
     finishedAt: row.finished_at,
   };
+}
+
+/**
+ * Actions are admitted from the same immutable facts that drive the public
+ * lifecycle, not from the materialized `funding_operation_steps.state` cache.
+ * The caller must already hold the operation lock before using this helper.
+ */
+export async function projectedFundingLifecycleInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{ operationId: string; now: Date }>,
+) {
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+    client,
+    input,
+  );
+  if (!facts) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "funding operation disappeared while reading lifecycle facts",
+    );
+  }
+  return deriveFundingLifecycle(facts);
+}
+
+export async function writeFundingStepProjectionCacheInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    stepId: string;
+    state: FundingOperationStepState;
+    now: Date;
+  }>,
+): Promise<void> {
+  // This is deliberately an unconditional cache write. The decision was
+  // already made by deriveFundingLifecycle from immutable facts; a stale
+  // cached state must never veto or alter it.
+  const updated = await client.query(
+    `update funding_operation_steps
+        set state = $2,
+            updated_at = $3
+      where id = $1`,
+    [input.stepId, input.state, input.now],
+  );
+  if (updated.rowCount !== 1) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "funding operation step disappeared while caching lifecycle projection",
+    );
+  }
 }
 
 export async function startFundingStepAttemptInTransaction(
@@ -798,24 +1048,10 @@ export async function startFundingStepAttemptForUserInTransaction(
       "funding operation step was not found for authenticated user",
     );
   }
-  const { rows } = await client.query<
-    FundingOperationStepDbRow & { sibling_stop_state: boolean }
-  >(
+  const { rows } = await client.query<FundingOperationStepDbRow>(
     `
         select
-          ${operationStepColumns},
-          exists (
-            select 1
-            from funding_operation_steps sibling_step
-            where sibling_step.operation_id = step.operation_id
-              and sibling_step.id <> step.id
-              and sibling_step.state in (
-                'failed',
-                'cancelled',
-                'reconcile_required',
-                'recovery_required'
-              )
-          ) as sibling_stop_state
+          ${operationStepColumns}
         from funding_operation_steps step
         left join funding_operation_steps dependency
           on dependency.id = step.depends_on_step_id
@@ -865,38 +1101,17 @@ export async function startFundingStepAttemptForUserInTransaction(
       "funding action differs from its committed fingerprint",
     );
   }
-  if (
-    [
-      "ready",
-      "reconcile_required",
-      "recovery_required",
-      "completed",
-      "refunded",
-      "failed",
-      "cancelled",
-    ].includes(operation.status)
-  ) {
+  const lifecycle = await projectedFundingLifecycleInTransaction(client, {
+    operationId: input.operationId,
+    now,
+  });
+  const projectedAction = lifecycle.actions.find(
+    (action) => action.actionId === input.stepId,
+  );
+  if (!projectedAction?.actionable) {
     throw new FundingPersistenceError(
       "invalid_state_transition",
-      "stopped funding operation cannot start an action",
-    );
-  }
-  if (row.state !== "planned" && row.state !== "action_required") {
-    throw new FundingPersistenceError(
-      "invalid_state_transition",
-      "funding operation step is not awaiting an action",
-    );
-  }
-  if (row.sibling_stop_state) {
-    throw new FundingPersistenceError(
-      "invalid_state_transition",
-      "a stopped or uncertain sibling prevents another funding action from starting",
-    );
-  }
-  if (row.depends_on_step_id && row.dependency_state !== "succeeded") {
-    throw new FundingPersistenceError(
-      "invalid_state_transition",
-      "funding operation step dependency is not complete",
+      "funding operation step is not currently actionable from lifecycle facts",
     );
   }
   const attempt = await startFundingStepAttemptInTransaction(client, {
@@ -906,7 +1121,13 @@ export async function startFundingStepAttemptForUserInTransaction(
     executorId: input.executorId,
     now,
   });
-  return { attempt, step: mapOperationStep(row) };
+  return {
+    attempt,
+    step: mapOperationStep(
+      row,
+      new Map(lifecycle.actions.map((action) => [action.actionId, action.state])),
+    ),
+  };
 }
 
 export async function startFundingStepAttemptForUser(
@@ -995,15 +1216,6 @@ export async function finishFundingStepAttemptInTransaction(
   return mapAttempt(row);
 }
 
-function stepStateForAttemptOutcome(
-  outcome: FundingStepAttemptOutcome,
-): "submitted" | "reconcile_required" | "failed" | "cancelled" {
-  if (outcome === "submitted" || outcome === "succeeded") return "submitted";
-  if (outcome === "ambiguous") return "reconcile_required";
-  if (outcome === "failed") return "failed";
-  return "cancelled";
-}
-
 function finalizedAttemptMatchesReport(
   attempt: FundingStepAttempt,
   input: Readonly<{
@@ -1023,6 +1235,19 @@ function finalizedAttemptMatchesReport(
     attempt.lookupKeyVersion === input.lookupKeyVersion &&
     canonicalJsonEqual(attempt.actualCosts, input.actualCosts)
   );
+}
+
+// The action-report endpoint preserves its existing acknowledgement contract:
+// a successful executor report still means "submitted" to the caller until
+// canonical receipt/evidence is observed. This is presentation only; the
+// stored step cache is written from the lifecycle projection below.
+function reportAcknowledgementStepState(
+  outcome: FundingStepAttemptOutcome,
+): "submitted" | "reconcile_required" | "failed" | "cancelled" {
+  if (outcome === "submitted" || outcome === "succeeded") return "submitted";
+  if (outcome === "ambiguous") return "reconcile_required";
+  if (outcome === "failed") return "failed";
+  return "cancelled";
 }
 
 export async function finishFundingStepAttemptForUserInTransaction(
@@ -1071,11 +1296,9 @@ export async function finishFundingStepAttemptForUserInTransaction(
       "funding action attempt was not found for authenticated user",
     );
   }
-  const stepResult = await client.query<{
-    step_state: FundingOperationStepState;
-  }>(
+  const stepResult = await client.query<{ id: string }>(
     `
-      select state as step_state
+      select id
       from funding_operation_steps
       where operation_id = $1 and id = $2
       for update
@@ -1115,39 +1338,33 @@ export async function finishFundingStepAttemptForUserInTransaction(
     }
     return {
       attempt: priorAttempt,
-      stepState: stepStateForAttemptOutcome(priorAttempt.outcome),
+      stepState: reportAcknowledgementStepState(priorAttempt.outcome),
     };
   }
-  if (
-    scopedStep.step_state !== "planned" &&
-    scopedStep.step_state !== "action_required"
-  ) {
-    throw new FundingPersistenceError(
-      "invalid_state_transition",
-      "funding operation step is no longer awaiting this report",
-    );
-  }
   const attempt = await finishFundingStepAttemptInTransaction(client, input);
-  const stepState = stepStateForAttemptOutcome(input.outcome);
-  const updated = await client.query(
-    `
-        update funding_operation_steps
-        set state = $2,
-            updated_at = $3
-        where id = $1
-          and state in ('planned', 'action_required')
-    `,
-    [input.stepId, stepState, input.now ?? new Date()],
+  const now = input.now ?? new Date();
+  const lifecycle = await projectedFundingLifecycleInTransaction(client, {
+    operationId: input.operationId,
+    now,
+  });
+  const action = lifecycle.actions.find(
+    (candidate) => candidate.actionId === input.stepId,
   );
-  if (updated.rowCount !== 1) {
+  if (!action) {
     throw new FundingPersistenceError(
-      "invalid_state_transition",
-      "funding operation step changed while recording the report",
+      "operation_not_found",
+      "funding action disappeared while projecting its report",
     );
   }
+  const stepState = action.state;
+  await writeFundingStepProjectionCacheInTransaction(client, {
+    stepId: input.stepId,
+    state: stepState,
+    now,
+  });
   await wakeFundingReconciliationInTransaction(client, {
     operationId: input.operationId,
-    dueAt: input.now ?? new Date(),
+    dueAt: now,
   });
   if (
     input.broadcastMayHaveOccurred &&
@@ -1172,10 +1389,13 @@ export async function finishFundingStepAttemptForUserInTransaction(
         lateBroadcastAttemptId: input.attemptId,
         lateBroadcastObservedAt: (input.now ?? new Date()).toISOString(),
       },
-      now: input.now,
+      now,
     });
   }
-  return { attempt, stepState };
+  return {
+    attempt,
+    stepState: reportAcknowledgementStepState(input.outcome),
+  };
 }
 
 export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransaction(
@@ -1458,6 +1678,7 @@ export async function fetchFundingConsumerReservationForUser(
     /** Bind the read to an enclosing intent transition when a caller must
      * atomically attach the reservation to a consumer. */
     forUpdate?: boolean;
+    now?: Date;
     userId: string;
     operationId: string;
   }>,
@@ -1496,8 +1717,6 @@ export async function fetchFundingConsumerReservationForUser(
         and reservation.operation_id = $2
         and reservation.mode = 'settled_for_consumer'
         and reservation.state = 'active'
-        and operation.status = 'ready'
-        and operation.progress_stage = 'ready_for_consumer'
       order by reservation.id
       limit 2
       ${input.forUpdate ? "for update of reservation" : ""}
@@ -1511,6 +1730,21 @@ export async function fetchFundingConsumerReservationForUser(
     );
   }
   const row = result.rows[0];
+  const now = input.now ?? new Date();
+  const facts = row
+    ? await loadFundingLifecycleFactsForOperationInTransaction(db, {
+        operationId: row.operation_id,
+        now,
+      })
+    : null;
+  const lifecycle = facts ? deriveFundingLifecycle(facts) : null;
+  if (
+    row &&
+    (lifecycle?.status !== "ready" ||
+      lifecycle.progressStage !== "ready_for_consumer")
+  ) {
+    return null;
+  }
   const consumerIntent = row
     ? storedFundingTradeConsumerIntentFromRow(row)
     : null;
@@ -1544,8 +1778,6 @@ type FundingTradeReservationScopeRow = Readonly<{
   reservation_state: "active" | "consumed" | "released";
   consumer_kind: string | null;
   consumer_ref: string | null;
-  operation_status: string;
-  progress_stage: string;
   purpose: string;
   venue_id: string | null;
   market_id: string | null;
@@ -1574,8 +1806,6 @@ async function loadFundingTradeReservationScope(
         reservation.state as reservation_state,
         reservation.consumer_kind,
         reservation.consumer_ref,
-        operation.status as operation_status,
-        operation.progress_stage,
         operation.purpose,
         operation.venue_id,
         operation.market_id,
@@ -1620,9 +1850,14 @@ export async function assertFundingReservationReadyForTrade(
     reservationId: input.link.reservationId,
   });
   const now = input.now ?? new Date();
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(db, {
+    operationId: row.operation_id,
+    now,
+  });
+  const lifecycle = facts ? deriveFundingLifecycle(facts) : null;
   if (
-    row.operation_status !== "ready" ||
-    row.progress_stage !== "ready_for_consumer" ||
+    lifecycle?.status !== "ready" ||
+    lifecycle.progressStage !== "ready_for_consumer" ||
     row.purpose !== "trade_shortfall" ||
     row.reservation_state !== "active" ||
     row.expires_at.getTime() <= now.getTime() ||
@@ -1666,43 +1901,34 @@ async function completeReadyFundingOperation(
       "funding operation was not found for authenticated user",
     );
   }
-  if (
-    operation.status === "completed" &&
-    operation.progressStage === "terminal"
-  ) {
-    // A previous consumer-resolution commit may have completed before the
-    // source reservation was released.  The source debit is already final in
-    // this state; retaining it would understate the next route's available
-    // balance forever.  Do not touch the settled consumer reservation here.
-    await releaseCompletedTradeShortfallSourceReservationsInTransaction(
-      client,
-      {
-        operationId: operation.id,
-        userId: input.userId,
-        now: input.now,
-      },
+  if (operation.purpose !== "trade_shortfall") {
+    throw new FundingPersistenceError(
+      "invalid_state_transition",
+      "funding operation is not a trade-shortfall route",
     );
-    return;
   }
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+    client,
+    { operationId: operation.id, now: input.now },
+  );
+  const lifecycle = facts ? deriveFundingLifecycle(facts) : null;
   if (
-    operation.status !== "ready" ||
-    operation.progressStage !== "ready_for_consumer" ||
-    operation.purpose !== "trade_shortfall"
+    lifecycle?.status !== "completed" ||
+    lifecycle.progressStage !== "terminal"
   ) {
     throw new FundingPersistenceError(
       "invalid_state_transition",
-      "funding operation is not awaiting a trade consumer",
+      "funding operation is not completed by its consumer facts",
     );
   }
-  await transitionFundingOperationInTransaction(client, {
+  await writeFundingOperationLifecycleProjectionCacheInTransaction(client, {
     operationId: operation.id,
-    scope: { kind: "user", userId: input.userId },
     expectedVersion: operation.version,
-    expectedState: {
-      status: operation.status,
-      stage: operation.progressStage,
+    state: {
+      status: lifecycle.status,
+      stage: lifecycle.progressStage,
     },
-    nextState: { status: "completed", stage: "terminal" },
+    recoveryMode: lifecycle.recoveryMode,
     supportMetadataPatch: {
       consumerResolution: input.resolution,
       consumerResolvedAt: input.now.toISOString(),
@@ -1822,6 +2048,17 @@ export async function releaseCompletedTradeShortfallSourceReservationsInTransact
   }>,
 ): Promise<number> {
   const now = input.now ?? new Date();
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+    client,
+    { operationId: input.operationId, now },
+  );
+  const lifecycle = facts ? deriveFundingLifecycle(facts) : null;
+  if (
+    lifecycle?.status !== "completed" ||
+    lifecycle.progressStage !== "terminal"
+  ) {
+    return 0;
+  }
   const result = await client.query<{ id: string }>(
     `
       select reservation.id
@@ -1834,8 +2071,6 @@ export async function releaseCompletedTradeShortfallSourceReservationsInTransact
         and reservation.state = 'active'
         and reservation.mode <> 'settled_for_consumer'
         and operation.purpose = 'trade_shortfall'
-        and operation.status = 'completed'
-        and operation.progress_stage = 'terminal'
       order by reservation.id
       for update of reservation
     `,
@@ -2179,15 +2414,15 @@ export async function releaseFundingReservationForAbandonedTradeInTransaction(
       "funding reservation has an unresolved trade attempt and must reconcile before release",
     );
   }
+  await releaseFundingReservationInTransaction(client, {
+    reservationId: input.link.reservationId,
+    outcomeReason: input.outcomeReason,
+    now,
+  });
   await completeReadyFundingOperation(client, {
     userId: input.userId,
     operationId: input.link.operationId,
     resolution: "released_to_venue_cash",
-    now,
-  });
-  await releaseFundingReservationInTransaction(client, {
-    reservationId: input.link.reservationId,
-    outcomeReason: input.outcomeReason,
     now,
   });
 }
