@@ -3436,6 +3436,26 @@ const tests: TestCase[] = [
         resolve(apiSrcDir, "services/limitless-trading-execution-service.ts"),
         "utf8",
       );
+      const limitlessMarketExchangeServiceBlock = sourceSlice(
+        limitlessService,
+        "export async function fetchLimitlessMarketExchangeRoute",
+        "export async function resolveLimitlessEmbeddedOrderSigningContext",
+      );
+      const limitlessOrderSigningContextBlock = sourceSlice(
+        limitlessService,
+        "export async function resolveLimitlessEmbeddedOrderSigningContext",
+        "export async function fetchLimitlessOrderRoute",
+      );
+      for (const canonicalProbeBlock of [
+        limitlessMarketExchangeServiceBlock,
+        limitlessOrderSigningContextBlock,
+      ]) {
+        assert.doesNotMatch(
+          canonicalProbeBlock,
+          /requestPath:\s*["']\/orders["']/,
+          "exchange discovery must not submit an invalid order as a metadata probe",
+        );
+      }
       const limitlessAccountServiceBlock = sourceSlice(
         limitlessService,
         "export async function fetchLimitlessAccountRoute",

@@ -2243,73 +2243,11 @@ export async function fetchLimitlessMarketExchangeRoute(input: {
     upstream.payload,
   );
   const adapterAddress = extractLimitlessMarketAdapterAddress(upstream.payload);
-  let canonicalExchangeAddress = exchangeAddress;
   let canonicalAdapterAddress = adapterAddress;
-
-  if (
-    (input.query.forceCanonical || !exchangeAddress) &&
-    authContext &&
-    isEvmWallet(input.signer)
-  ) {
-    const signerChecksum = toChecksumAddress(input.signer);
-    const tokenPair = extractLimitlessTokenPair(upstream.payload);
-    const probeTokenId = tokenPair?.tokenYes ?? tokenPair?.tokenNo ?? null;
-    const profile = await loadLimitlessProfileForWallet({
-      walletAddress: input.signer,
-      authContext,
-      additionalData: authContext.creds.additionalData ?? null,
-    });
-    const ownerId = profile?.id;
-
-    if (signerChecksum && ownerId && probeTokenId) {
-      const probeSide = input.query.side === "SELL" ? 1 : 0;
-      try {
-        const probe = await limitlessRequest({
-          method: "POST",
-          requestPath: "/orders",
-          ...requestAuth,
-          body: {
-            order: {
-              salt: Date.now() * 1000,
-              maker: signerChecksum,
-              signer: signerChecksum,
-              taker: ZERO_ADDRESS,
-              tokenId: probeTokenId,
-              makerAmount: 1_000_000,
-              takerAmount: 1,
-              expiration: "0",
-              nonce: 0,
-              feeRateBps: 300,
-              side: probeSide,
-              signatureType: 0,
-              signature: `0x${"0".repeat(130)}`,
-            },
-            orderType: "FOK",
-            marketSlug: input.query.slug,
-            ownerId,
-            onBehalfOf: ownerId,
-          },
-        });
-        if (!probe.ok) {
-          const probedExchange = extractLimitlessExpectedExchangeAddress(
-            probe.payload,
-          );
-          if (probedExchange) {
-            canonicalExchangeAddress = probedExchange;
-          }
-        }
-      } catch (error) {
-        input.log?.warn?.(
-          { error, slug: input.query.slug },
-          "Limitless canonical exchange probe failed",
-        );
-      }
-    }
-  }
 
   if (!canonicalAdapterAddress) {
     canonicalAdapterAddress = resolveLimitlessLegacyOperatorForExchange(
-      canonicalExchangeAddress ?? exchangeAddress ?? null,
+      exchangeAddress ?? null,
     );
   }
 
@@ -2318,7 +2256,7 @@ export async function fetchLimitlessMarketExchangeRoute(input: {
     payload: {
       ok: true,
       marketSlug: input.query.slug,
-      exchangeAddress: canonicalExchangeAddress,
+      exchangeAddress,
       adapterAddress: canonicalAdapterAddress,
     },
   };
@@ -2377,52 +2315,7 @@ export async function resolveLimitlessEmbeddedOrderSigningContext(input: {
     throw new Error("Unable to resolve Limitless exchange for this market.");
   }
 
-  let canonicalExchangeAddress = exchangeAddress;
-  const probeTokenId = tokenPair.tokenYes ?? tokenPair.tokenNo ?? tokenId;
-  const signerChecksum = toChecksumAddress(input.signer);
-  if (signerChecksum && input.ownerId && probeTokenId) {
-    const probeSide = Number(input.payload.side) === 1 ? 1 : 0;
-    try {
-      const probe = await limitlessRequest({
-        method: "POST",
-        requestPath: "/orders",
-        ...(input.requestAuth as object),
-        body: {
-          order: {
-            salt: Date.now() * 1000,
-            maker: signerChecksum,
-            signer: signerChecksum,
-            taker: ZERO_ADDRESS,
-            tokenId: probeTokenId,
-            makerAmount: 1_000_000,
-            takerAmount: 1,
-            expiration: "0",
-            nonce: 0,
-            feeRateBps: 300,
-            side: probeSide,
-            signatureType: 0,
-            signature: `0x${"0".repeat(130)}`,
-          },
-          orderType: "FOK",
-          marketSlug,
-          ownerId: input.ownerId,
-          onBehalfOf: input.ownerId,
-        },
-      });
-      if (!probe.ok) {
-        const probedExchange = extractLimitlessExpectedExchangeAddress(
-          probe.payload,
-        );
-        if (probedExchange) {
-          canonicalExchangeAddress = probedExchange;
-        }
-      }
-    } catch (error) {
-      void error;
-    }
-  }
-
-  return { exchangeAddress: canonicalExchangeAddress };
+  return { exchangeAddress };
 }
 
 export async function fetchLimitlessOrderRoute(input: {
@@ -3050,32 +2943,6 @@ function extractLimitlessMarketAdapterAddress(payload: unknown): string | null {
         return ethers.getAddress(candidate.trim());
       }
     }
-  }
-
-  return null;
-}
-
-function extractLimitlessExpectedExchangeAddress(
-  payload: unknown,
-): string | null {
-  if (!isRecord(payload)) return null;
-
-  const nestedPayload = isRecord(payload.payload) ? payload.payload : null;
-  const candidates: unknown[] = [
-    payload.message,
-    payload.error,
-    nestedPayload?.message,
-    nestedPayload?.error,
-  ];
-
-  const pattern = /exchange address for this market:\s*(0x[a-fA-F0-9]{40})/i;
-  for (const candidate of candidates) {
-    if (typeof candidate !== "string") continue;
-    const match = candidate.match(pattern);
-    if (!match?.[1]) continue;
-    const value = match[1].trim();
-    if (!ethers.isAddress(value)) continue;
-    return ethers.getAddress(value);
   }
 
   return null;
