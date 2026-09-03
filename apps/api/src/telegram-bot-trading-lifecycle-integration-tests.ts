@@ -1356,12 +1356,9 @@ try {
     (
       await telegramTradeLifecycleProgressTestHooks.listCandidateIds(client)
     ).includes(directLifecycleIntentId),
-    true,
-    "a legacy projection without a source watermark is selected once",
+    false,
+    "missing renderer metadata must not replay a settled terminal card",
   );
-  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
-    limit: 100,
-  });
   assert.equal(
     Number(
       (
@@ -1374,21 +1371,24 @@ try {
       ).rows[0]?.revision,
     ),
     directRevisionBeforeWatermarkBackfill,
-    "watermark backfill does not create a duplicate lifecycle revision",
+    "missing terminal renderer metadata does not create a duplicate lifecycle revision",
   );
   assert.equal(
     (
       await telegramTradeLifecycleProgressTestHooks.listCandidateIds(client)
     ).includes(directLifecycleIntentId),
     false,
-    "the backfilled legacy projection stays out of later candidate batches",
+    "the settled terminal projection stays out of later candidate batches",
   );
   await client.query(
     `update telegram_trade_intents
-        set result = jsonb_set(
-              result,
-              '{shortfallProgressSourceWatermark,projectionVersion}',
-              '5'::jsonb
+        set result = result || jsonb_build_object(
+              'shortfallProgressSourceWatermark',
+              jsonb_build_object(
+                'projectionVersion', 5,
+                'intentUpdatedAtUs', 900000000000000000::bigint,
+                'fundingUpdatedAtUs', 900000000000000000::bigint
+              )
             )
       where id = $1::uuid`,
     [directLifecycleIntentId],
@@ -1397,12 +1397,9 @@ try {
     (
       await telegramTradeLifecycleProgressTestHooks.listCandidateIds(client)
     ).includes(directLifecycleIntentId),
-    true,
-    "a stale projector version invalidates the source watermark",
+    false,
+    "a renderer version change must not replay a settled terminal card",
   );
-  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
-    limit: 100,
-  });
   assert.deepEqual(
     (
       await client.query<{
@@ -1418,17 +1415,10 @@ try {
       )
     ).rows[0],
     {
-      projection_version: "7",
+      projection_version: "5",
       revision: String(directRevisionBeforeWatermarkBackfill),
     },
-    "projector invalidation refreshes only the watermark when rendering is unchanged",
-  );
-  assert.equal(
-    (
-      await telegramTradeLifecycleProgressTestHooks.listCandidateIds(client)
-    ).includes(directLifecycleIntentId),
-    false,
-    "the current projector version settles after one pass",
+    "terminal projector metadata stays unchanged without a durable source transition",
   );
   const directLifecycleOutbox = await client.query<{
     revision: number;

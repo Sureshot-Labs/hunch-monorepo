@@ -1223,9 +1223,6 @@ async function listCandidates(
         and intent.result ->> $2::text is distinct from $3::text
         and (
           intent.result -> 'shortfallProgress' is null
-          or projection_watermark.projection_version is distinct from $5::integer
-          or projection_watermark.intent_updated_at_us is null
-          or projection_watermark.funding_updated_at_us is null
           or floor(
                extract(epoch from intent.updated_at) * 1000000
              )::bigint > projection_watermark.intent_updated_at_us
@@ -1235,6 +1232,14 @@ async function listCandidates(
                )::bigint,
                0
              ) > projection_watermark.funding_updated_at_us
+          or (
+            intent.status not in ('failed', 'cancelled', 'filled')
+            and (
+              projection_watermark.projection_version is distinct from $5::integer
+              or projection_watermark.intent_updated_at_us is null
+              or projection_watermark.funding_updated_at_us is null
+            )
+          )
         )
         and not exists (
           select 1
