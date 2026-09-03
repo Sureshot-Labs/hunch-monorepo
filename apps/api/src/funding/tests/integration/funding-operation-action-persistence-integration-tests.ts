@@ -527,7 +527,13 @@ try {
         dependsOnOrdinal: 0,
         normalizedAction: routerApprovalAction,
         actionValidationResult: {
+          valid: true,
+          validatorId: "polymarket_funding_router_v1",
           kind: "controller_usdce_router_approval",
+          signerAddress: sourceLocation.details.address,
+          routerAddress: routerFundAction.to,
+          sponsorshipPolicyId: null,
+          signingMode: "user_signature",
         },
       },
       {
@@ -541,6 +547,7 @@ try {
         dependsOnOrdinal: 1,
         normalizedAction: routerFundAction,
         actionValidationResult: {
+          valid: true,
           validatorId: "polymarket_funding_router_v1",
         },
       },
@@ -668,6 +675,243 @@ try {
   );
   await client.query("set constraints all deferred");
 
+  const compositeRouterPlan: FundingCommitPlan = {
+    operation: {
+      ...controllerHandoffPlan.operation,
+      planKind: "composite_route",
+      sourceSnapshot: { kind: "composite", legCount: 2 },
+      supportMetadata: {
+        ...controllerHandoffPlan.operation.supportMetadata,
+        composite: true,
+        containsVenuePreparation: true,
+      },
+    },
+    segments: [
+      {
+        ...primarySegment,
+        providerQuoteRefCiphertext: "ciphertext:composite-router-request",
+        providerQuoteRefLookupHmac: hash("composite-router-request"),
+        quoteExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    ],
+    steps: [
+      ...controllerHandoffPlan.steps,
+      {
+        ...storedRelayActionStep,
+        ordinal: controllerHandoffPlan.steps.length,
+        segmentOrdinal: 0,
+        dependsOnOrdinal: null,
+      },
+    ],
+    reservations: [
+      ...controllerHandoffPlan.reservations.map((reservation) => ({
+        ...reservation,
+        componentId: opaque("component"),
+      })),
+      {
+        ...storedReservation,
+        segmentOrdinal: 0,
+        componentId: opaque("component"),
+        expiresAt: durableReservationExpiresAt,
+      },
+    ],
+  };
+  const compositeRouterConsentToken = opaque("consent");
+  const compositeRouterQuote = await createFundingQuoteInTransaction(client, {
+    userId,
+    discoveryProjectionId: opaque("projection"),
+    selectedSourceOptionSnapshot:
+      compositeRouterPlan.operation.sourceSnapshot ?? {},
+    marketContextSnapshot: null,
+    destinationOptionSnapshot:
+      compositeRouterPlan.operation.destinationTargetSnapshot,
+    venueBindingSnapshot: null,
+    planSnapshot: compositeRouterPlan,
+    policyVersion: 1,
+    policyRevision: "policy_revision_composite_router_handoff",
+    canonicalRequest: {
+      source: compositeRouterPlan.operation.sourceSnapshot,
+    },
+    consentToken: compositeRouterConsentToken,
+    expiresAt: controllerHandoffQuoteExpiresAt,
+  });
+  const compositeRouterCommitted = await commitFundingOperationInTransaction(
+    client,
+    {
+      userId,
+      quoteId: compositeRouterQuote.id,
+      consentToken: compositeRouterConsentToken,
+      idempotencyKey: opaque("idempotency"),
+      plan: compositeRouterPlan,
+      subjectLookupHmac: hash("composite-router-handoff-user"),
+      subjectLookupKeyVersion: 1,
+    },
+  );
+  await client.query("set constraints all immediate");
+  const compositeRouterShape = await client.query<{
+    bound_steps: string;
+    unbound_steps: string;
+  }>(
+    `select count(*) filter (where segment_id is not null)::text as bound_steps,
+            count(*) filter (where segment_id is null)::text as unbound_steps
+       from funding_operation_steps
+      where operation_id = $1::uuid`,
+    [compositeRouterCommitted.operation.id],
+  );
+  assert.deepEqual(compositeRouterShape.rows[0], {
+    bound_steps: "1",
+    unbound_steps: "3",
+  });
+  await client.query("set constraints all deferred");
+
+  await client.query("savepoint malformed_composite_router_chain");
+  const malformedCompositeRouterPlan: FundingCommitPlan = {
+    ...compositeRouterPlan,
+    steps: compositeRouterPlan.steps.map((step) =>
+      step.ordinal === 1 ? { ...step, dependsOnOrdinal: null } : step,
+    ),
+    reservations: compositeRouterPlan.reservations.map((reservation) => ({
+      ...reservation,
+      componentId: opaque("component"),
+      locationId: opaque("location"),
+    })),
+  };
+  const malformedCompositeRouterConsentToken = opaque("consent");
+  const malformedCompositeRouterQuote = await createFundingQuoteInTransaction(
+    client,
+    {
+      userId,
+      discoveryProjectionId: opaque("projection"),
+      selectedSourceOptionSnapshot:
+        malformedCompositeRouterPlan.operation.sourceSnapshot ?? {},
+      marketContextSnapshot: null,
+      destinationOptionSnapshot:
+        malformedCompositeRouterPlan.operation.destinationTargetSnapshot,
+      venueBindingSnapshot: null,
+      planSnapshot: malformedCompositeRouterPlan,
+      policyVersion: 1,
+      policyRevision: "policy_revision_malformed_composite_router_handoff",
+      canonicalRequest: {
+        source: malformedCompositeRouterPlan.operation.sourceSnapshot,
+      },
+      consentToken: malformedCompositeRouterConsentToken,
+      expiresAt: controllerHandoffQuoteExpiresAt,
+    },
+  );
+  await commitFundingOperationInTransaction(client, {
+    userId,
+    quoteId: malformedCompositeRouterQuote.id,
+    consentToken: malformedCompositeRouterConsentToken,
+    idempotencyKey: opaque("idempotency"),
+    plan: malformedCompositeRouterPlan,
+    subjectLookupHmac: hash("malformed-composite-router-handoff-user"),
+    subjectLookupKeyVersion: 1,
+  });
+  await assert.rejects(
+    client.query("set constraints all immediate"),
+    /Polymarket pre-route handoff must directly gate its next exact route step/u,
+  );
+  await client.query("rollback to savepoint malformed_composite_router_chain");
+  await client.query("set constraints all deferred");
+
+  const invalidCompositeRouterValidationCases = [
+    {
+      label: "untrusted_approval_validator",
+      expected:
+        /only exact venue preparation, controller approval, or Polymarket pre-route handoff steps may be unbound/u,
+      steps: compositeRouterPlan.steps.map((step) =>
+        step.ordinal === 1
+          ? {
+              ...step,
+              actionValidationResult: {
+                ...step.actionValidationResult,
+                validatorId: "untrusted_validator_v1",
+              },
+            }
+          : step,
+      ),
+    },
+    {
+      label: "string_approval_validity",
+      expected:
+        /only exact venue preparation, controller approval, or Polymarket pre-route handoff steps may be unbound/u,
+      steps: compositeRouterPlan.steps.map((step) =>
+        step.ordinal === 1
+          ? {
+              ...step,
+              actionValidationResult: {
+                ...step.actionValidationResult,
+                valid: "true",
+              },
+            }
+          : step,
+      ),
+    },
+    {
+      label: "rejected_router_fund",
+      expected:
+        /Polymarket venue preparation steps cannot change executor, state, or order/u,
+      steps: compositeRouterPlan.steps.map((step) =>
+        step.stepKind === "venue_preparation"
+          ? {
+              ...step,
+              actionValidationResult: {
+                ...step.actionValidationResult,
+                valid: false,
+              },
+            }
+          : step,
+      ),
+    },
+  ];
+  for (const invalidCase of invalidCompositeRouterValidationCases) {
+    await client.query("savepoint invalid_composite_router_validation");
+    const invalidPlan: FundingCommitPlan = {
+      ...compositeRouterPlan,
+      steps: invalidCase.steps,
+      reservations: compositeRouterPlan.reservations.map((reservation) => ({
+        ...reservation,
+        componentId: opaque("component"),
+        locationId: opaque("location"),
+      })),
+    };
+    const invalidConsentToken = opaque("consent");
+    const invalidQuote = await createFundingQuoteInTransaction(client, {
+      userId,
+      discoveryProjectionId: opaque("projection"),
+      selectedSourceOptionSnapshot: invalidPlan.operation.sourceSnapshot ?? {},
+      marketContextSnapshot: null,
+      destinationOptionSnapshot:
+        invalidPlan.operation.destinationTargetSnapshot,
+      venueBindingSnapshot: null,
+      planSnapshot: invalidPlan,
+      policyVersion: 1,
+      policyRevision: `policy_revision_${invalidCase.label}`,
+      canonicalRequest: {
+        source: invalidPlan.operation.sourceSnapshot,
+      },
+      consentToken: invalidConsentToken,
+      expiresAt: controllerHandoffQuoteExpiresAt,
+    });
+    await commitFundingOperationInTransaction(client, {
+      userId,
+      quoteId: invalidQuote.id,
+      consentToken: invalidConsentToken,
+      idempotencyKey: opaque("idempotency"),
+      plan: invalidPlan,
+      subjectLookupHmac: hash(`${invalidCase.label}-user`),
+      subjectLookupKeyVersion: 1,
+    });
+    await assert.rejects(
+      client.query("set constraints all immediate"),
+      invalidCase.expected,
+    );
+    await client.query(
+      "rollback to savepoint invalid_composite_router_validation",
+    );
+    await client.query("set constraints all deferred");
+  }
+
   await client.query("savepoint controller_future_credit_conflict");
   const controllerFundStep = controllerHandoffPlan.steps[2];
   const controllerFutureReservation = controllerHandoffPlan.reservations[1];
@@ -777,7 +1021,7 @@ try {
   });
   await assert.rejects(
     client.query("set constraints all immediate"),
-    /only the exact Polymarket Funding Router may use multi-step venue preparation/u,
+    /only exact venue preparation, controller approval, or Polymarket pre-route handoff steps may be unbound/u,
   );
   await client.query("rollback to savepoint unrelated_venue_router_shape");
   await client.query("set constraints all deferred");
