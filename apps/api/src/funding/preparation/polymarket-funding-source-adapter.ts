@@ -657,6 +657,10 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         supportMetadata: {
           preparationKind: "polymarket_funding_router",
           adapterId: this.adapterId,
+          planValidation: {
+            validatorId: this.adapterId,
+            version: 1,
+          },
           venueBindingOptionId: facts.bindingOption.venueBindingOptionId,
           fundingPlan: jsonRecord(plan),
           ...(preRouteHandoff

@@ -550,6 +550,10 @@ function plannedControllerRouterPreparationSource(
         supportMetadata: {
           preparationKind: "polymarket_funding_router",
           adapterId: "polymarket_funding_router_v1",
+          planValidation: {
+            validatorId: "polymarket_funding_router_v1",
+            version: 1,
+          },
         },
       },
       steps: [
@@ -563,7 +567,11 @@ function plannedControllerRouterPreparationSource(
           payerRequirement: "privy_sponsor" as const,
           dependsOnOrdinal: ordinal === 0 ? null : ordinal - 1,
           normalizedAction: { kind: "evm_transaction" },
-          actionValidationResult: { kind },
+          actionValidationResult: {
+            valid: true,
+            validatorId: "polymarket_funding_router_v1",
+            kind,
+          },
           actionExpiresAt: null,
         })),
         {
@@ -577,6 +585,7 @@ function plannedControllerRouterPreparationSource(
           dependsOnOrdinal: approvalKinds.length - 1,
           normalizedAction: { kind: "evm_transaction" },
           actionValidationResult: {
+            valid: true,
             validatorId: "polymarket_funding_router_v1",
           },
           actionExpiresAt: null,
@@ -600,6 +609,10 @@ function plannedClientPolymarketHandoffPreparationSource(
         supportMetadata: {
           preparationKind: "polymarket_funding_router",
           adapterId: "polymarket_funding_router_v1",
+          planValidation: {
+            validatorId: "polymarket_funding_router_v1",
+            version: 1,
+          },
         },
       },
       steps: [
@@ -631,6 +644,8 @@ function plannedClientPolymarketHandoffPreparationSource(
           dependsOnOrdinal: 0,
           normalizedAction: { kind: "evm_transaction" },
           actionValidationResult: {
+            valid: true,
+            validatorId: "polymarket_funding_router_v1",
             kind: "controller_usdce_router_approval",
           },
         },
@@ -645,6 +660,7 @@ function plannedClientPolymarketHandoffPreparationSource(
           dependsOnOrdinal: 1,
           normalizedAction: { kind: "evm_transaction" },
           actionValidationResult: {
+            valid: true,
             validatorId: "polymarket_funding_router_v1",
           },
         },

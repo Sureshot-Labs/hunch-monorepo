@@ -751,6 +751,10 @@ const polymarketRouterPreparation: PlannedSourceOption = {
         ...clientPreparation.commitPlan.operation.supportMetadata,
         preparationKind: "polymarket_funding_router",
         adapterId: "polymarket_funding_router_v1",
+        planValidation: {
+          validatorId: "polymarket_funding_router_v1",
+          version: 1,
+        },
       },
     },
     steps: [
@@ -760,6 +764,8 @@ const polymarketRouterPreparation: PlannedSourceOption = {
         stepKind: "transaction" as const,
         dependsOnOrdinal: null,
         actionValidationResult: {
+          valid: true,
+          validatorId: "polymarket_funding_router_v1",
           kind: "controller_pusd_router_approval",
         },
       },
@@ -769,6 +775,7 @@ const polymarketRouterPreparation: PlannedSourceOption = {
         stepKind: "venue_preparation" as const,
         dependsOnOrdinal: 0,
         actionValidationResult: {
+          valid: true,
           validatorId: "polymarket_funding_router_v1",
         },
       },

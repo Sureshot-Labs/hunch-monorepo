@@ -11,18 +11,17 @@ const POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID =
 const CLIENT_EVM_WALLET_EXECUTOR_ID = "wallet_profile_evm_v1";
 
 /**
- * A Polymarket Router preparation is one linear action chain. Client execution
- * may first move one exact Deposit Wallet balance back to its controller, then
- * add either controller approval, before the single Router fund call. Server
- * execution may add only the reviewed controller approvals. Exact action
- * validators still bind every address, token and amount; this helper validates
- * only that the durable dependency topology cannot skip or reorder a leg.
+ * Version 1 of the Polymarket Router commit contract. It owns the exact
+ * executor, action, initial-state and dependency topology accepted at commit.
+ * Later lifecycle changes are governed by the generic step transition rules.
  */
-export function isPolymarketRouterPreparationStepChain(
+export function isPolymarketRouterV1CommitPlan(
   plan: Pick<FundingCommitPlan, "operation" | "steps">,
 ): boolean {
   if (
-    plan.operation.planKind !== "venue_preparation" ||
+    !["venue_preparation", "composite_route"].includes(
+      plan.operation.planKind,
+    ) ||
     plan.operation.venueId !== "polymarket" ||
     plan.operation.supportMetadata?.preparationKind !==
       "polymarket_funding_router" ||
@@ -31,8 +30,11 @@ export function isPolymarketRouterPreparationStepChain(
   ) {
     return false;
   }
-  const steps = plan.steps;
-  if (steps.length < 2 || steps.length > 4) return false;
+  const steps =
+    plan.operation.planKind === "composite_route"
+      ? plan.steps.filter((step) => step.segmentOrdinal === null)
+      : plan.steps;
+  if (steps.length < 1 || steps.length > 4) return false;
   const first = steps[0];
   const hasPreRouteHandoff =
     first?.stepKind === "external_handoff" &&
@@ -76,6 +78,9 @@ export function isPolymarketRouterPreparationStepChain(
       step.dependsOnOrdinal !== (ordinal === 0 ? null : ordinal - 1) ||
       typeof kind !== "string" ||
       !CONTROLLER_ROUTER_APPROVAL_KINDS.has(kind) ||
+      step.actionValidationResult.valid !== true ||
+      step.actionValidationResult.validatorId !==
+        POLYMARKET_FUNDING_SOURCE_ADAPTER_ID ||
       approvalKinds.has(kind)
     ) {
       return false;
@@ -89,8 +94,9 @@ export function isPolymarketRouterPreparationStepChain(
     fund.state === downstreamState &&
     fund.segmentOrdinal === null &&
     fund.executorId === downstreamExecutorId &&
-    fund.dependsOnOrdinal === fundOrdinal - 1 &&
+    fund.dependsOnOrdinal === (fundOrdinal === 0 ? null : fundOrdinal - 1) &&
     fund.normalizedAction.kind === "evm_transaction" &&
+    fund.actionValidationResult.valid === true &&
     fund.actionValidationResult.validatorId ===
       POLYMARKET_FUNDING_SOURCE_ADAPTER_ID
   );

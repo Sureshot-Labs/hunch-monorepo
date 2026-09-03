@@ -50,7 +50,7 @@ import {
 import { fundingQuoteAmountBindingForCommitPlan } from "./quote-amount-binding.js";
 import { DIRECT_WITHDRAWAL_PROVIDER_ID } from "../execution/direct-withdrawal-transfer.js";
 import { fundingEconomicSourceReservations } from "../persistence/funding-operation-repository.js";
-import { isPolymarketRouterPreparationStepChain } from "./polymarket-router-plan-shape.js";
+import { isPolymarketRouterV1CommitPlan } from "../validation/polymarket-router-commit-plan-validator.js";
 
 export type FundingSourcePlanningRequest = Readonly<{
   accountId: string;
@@ -229,8 +229,9 @@ function validatePlannedSources(
     const segmentCount = source.commitPlan.segments.length;
     const planKind = source.commitPlan.operation.planKind;
     const steps = source.commitPlan.steps;
-    const polymarketRouterPreparationStepChain =
-      isPolymarketRouterPreparationStepChain(source.commitPlan);
+    const polymarketRouterPreparationStepChain = isPolymarketRouterV1CommitPlan(
+      source.commitPlan,
+    );
     const composite =
       source.option.kind === "composite" ||
       source.option.source.kind === "composite" ||

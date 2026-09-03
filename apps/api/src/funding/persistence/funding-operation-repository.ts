@@ -20,6 +20,7 @@ import {
   type FundingProgressStage,
   type SegmentStatus,
 } from "../domain/transitions.js";
+import { isValidFundingCommitPlanBoundary } from "../validation/funding-commit-plan-validator.js";
 import {
   canonicalJsonEqual,
   canonicalJsonHash,
@@ -1098,6 +1099,12 @@ export async function commitFundingOperationInTransaction(
     throw new FundingPersistenceError(
       "invalid_operation_state",
       "initial funding operation state is not declared by WP1",
+    );
+  }
+  if (!isValidFundingCommitPlanBoundary(input.plan)) {
+    throw new FundingPersistenceError(
+      "quote_mismatch",
+      "funding plan failed its declared versioned validator",
     );
   }
   await client.query(

@@ -426,6 +426,14 @@ assert.equal(
   "polymarket_funding_router_v1",
   "the produced Router fund step must carry its exact validator identity",
 );
+assert.deepEqual(
+  clientHandoff.commitPlan.operation.supportMetadata?.planValidation,
+  {
+    validatorId: "polymarket_funding_router_v1",
+    version: 1,
+  },
+  "the produced Router plan must declare its exact commit validator version",
+);
 assert.ok(
   clientHandoff.option.requiredActions.every(
     (requiredAction) => requiredAction.actor === "user",

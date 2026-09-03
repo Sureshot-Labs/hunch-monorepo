@@ -368,6 +368,10 @@ function buildPlan(
       supportMetadata: {
         adapterId: "polymarket_funding_router_v1",
         preparationKind: "polymarket_funding_router",
+        planValidation: {
+          validatorId: "polymarket_funding_router_v1",
+          version: 1,
+        },
         venueBindingOptionId: input.authorization.venueBindingOptionId,
         fundingPlan: jsonRecord(plan),
         before: {
