@@ -12,6 +12,7 @@ import {
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
 import { PolymarketFundingSourceAdapter } from "../../preparation/polymarket-funding-source-adapter.js";
 import { polymarketFundingEvidence } from "../../preparation/polymarket-funding-snapshot.js";
+import { maximumInternalFundingDestinationRaw } from "../../planner/composite-source-options.js";
 import type { FundingSourcePlanningInput } from "../../planner/source-adapter.js";
 import {
   FUNDING_OPERATION_RECONCILIATION_TTL_MS,
@@ -310,6 +311,19 @@ const clientHandoffInput = planningInput(
 );
 const [clientHandoff] = await clientHandoffAdapter.list(clientHandoffInput);
 assert.ok(clientHandoff);
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    candidates: [clientHandoff],
+    destinationAsset: PUSD,
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: "1",
+    maximumFeeBps: 2_000,
+    maximumSlippageBps: 1_000,
+    executionBoundary: "client_handoff",
+  }),
+  3_000_000n,
+  "the production Deposit Wallet handoff/approval/fund chain must remain eligible for Mini App capacity planning",
+);
 assert.deepEqual(
   clientHandoff.commitPlan.reservations.map((reservation) => ({
     componentId: reservation.componentId,

@@ -715,6 +715,97 @@ const clientSolana = partialSource({
   feeUsd: "0.01",
   payerRequirement: "user",
 });
+const clientPreparationStep = clientPreparation.commitPlan.steps[0];
+assert.ok(clientPreparationStep);
+const polymarketRouterPreparation: PlannedSourceOption = {
+  ...clientPreparation,
+  option: {
+    ...clientPreparation.option,
+    source: {
+      ...clientPreparation.option.source,
+      venueId: "polymarket",
+    },
+    requiredActions: [
+      {
+        kind: "evm_transaction" as const,
+        safeLabel: "Approve Polymarket Funding Router",
+        actor: "user" as const,
+        valueMoving: false,
+        sponsorship: "requested" as const,
+      },
+      {
+        kind: "evm_transaction" as const,
+        safeLabel: "Fund Polymarket Deposit Wallet",
+        actor: "user" as const,
+        valueMoving: true,
+        sponsorship: "requested" as const,
+      },
+    ],
+  },
+  commitPlan: {
+    ...clientPreparation.commitPlan,
+    operation: {
+      ...clientPreparation.commitPlan.operation,
+      venueId: "polymarket",
+      supportMetadata: {
+        ...clientPreparation.commitPlan.operation.supportMetadata,
+        preparationKind: "polymarket_funding_router",
+        adapterId: "polymarket_funding_router_v1",
+      },
+    },
+    steps: [
+      {
+        ...clientPreparationStep,
+        ordinal: 0,
+        stepKind: "transaction" as const,
+        dependsOnOrdinal: null,
+        actionValidationResult: {
+          kind: "controller_pusd_router_approval",
+        },
+      },
+      {
+        ...clientPreparationStep,
+        ordinal: 1,
+        stepKind: "venue_preparation" as const,
+        dependsOnOrdinal: 0,
+        actionValidationResult: {
+          validatorId: "polymarket_funding_router_v1",
+        },
+      },
+    ],
+  },
+};
+const polymarketResidualSolana: PlannedSourceOption = {
+  ...clientSolana,
+  commitPlan: {
+    ...clientSolana.commitPlan,
+    operation: {
+      ...clientSolana.commitPlan.operation,
+      venueId: "polymarket",
+    },
+  },
+};
+const polymarketRouterComposite = buildCompositeSourceOption({
+  candidates: [polymarketRouterPreparation, polymarketResidualSolana],
+  requiredDestination: money(DESTINATION_ASSET, "2282018"),
+  destinationUnitPriceUsd: "1",
+  maximumFeeUsd: "1",
+  maximumFeeBps: 2_000,
+  executionBoundary: "client_handoff",
+});
+assert.ok(polymarketRouterComposite);
+assert.deepEqual(
+  polymarketRouterComposite.commitPlan.steps.map((step) => ({
+    kind: step.stepKind,
+    dependsOnOrdinal: step.dependsOnOrdinal,
+  })),
+  [
+    { kind: "transaction", dependsOnOrdinal: null },
+    { kind: "venue_preparation", dependsOnOrdinal: 0 },
+    { kind: "transaction", dependsOnOrdinal: null },
+  ],
+  "a canonical Router approval/fund chain must remain usable in a client composite",
+);
 const clientHandoffComposite = buildCompositeSourceOption({
   candidates: [clientPreparation, clientSolana],
   requiredDestination: money(DESTINATION_ASSET, "2282018"),

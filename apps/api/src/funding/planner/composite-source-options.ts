@@ -23,6 +23,7 @@ import {
   type FundingCommitStep,
 } from "../persistence/funding-operation-repository.js";
 import { assertSameAsset, rawAmount } from "./money.js";
+import { isPolymarketRouterPreparationStepChain } from "./polymarket-router-plan-shape.js";
 import {
   commitPlanRunsWithoutUserWalletAction,
   plannedSourceRunsWithClientWalletActions,
@@ -137,9 +138,11 @@ function venuePreparationCandidate(
     source.commitPlan.operation.planKind !== "venue_preparation" ||
     source.commitPlan.segments.length !== 0 ||
     source.commitPlan.steps.length === 0 ||
-    source.commitPlan.steps.some(
-      (step) =>
-        step.stepKind !== "venue_preparation" || step.segmentOrdinal !== null,
+    !(
+      (source.commitPlan.steps.length === 1 &&
+        source.commitPlan.steps[0]?.stepKind === "venue_preparation" &&
+        source.commitPlan.steps[0]?.segmentOrdinal === null) ||
+      isPolymarketRouterPreparationStepChain(source.commitPlan)
     ) ||
     economicReservations.length !== source.option.source.inputCount ||
     source.commitPlan.reservations.some(

@@ -8010,7 +8010,12 @@ async function getReadiness(
     });
   } catch (error) {
     ctx.logger?.warn?.(
-      { error, userId: input.actor.userId, walletAddress: signer },
+      {
+        error: error instanceof Error ? error.message : String(error),
+        errorName: error instanceof Error ? error.name : null,
+        userId: input.actor.userId,
+        walletAddress: signer,
+      },
       "Polymarket bot executable funds check failed",
     );
     return readiness("polymarket", capabilities, {
