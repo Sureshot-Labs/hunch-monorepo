@@ -934,7 +934,7 @@ async function listCandidates(
   limit: number,
 ): Promise<readonly ProjectionCandidate[]> {
   const { rows } = await client.query<ProjectionCandidate>({
-    name: "telegram-trade-lifecycle-candidates-v4",
+    name: "telegram-trade-lifecycle-candidates-v5",
     text: `select intent.id,
             intent.user_id,
             intent.telegram_user_id,
@@ -1171,6 +1171,10 @@ async function listCandidates(
                0
              ) > projection_watermark.funding_updated_at_us
           or (
+            intent.status = 'cancelled'
+            and intent.error_code = 'funding_recovery_detached'
+          )
+          or (
             intent.status not in ('failed', 'cancelled', 'filled')
             and (
               projection_watermark.projection_version is distinct from $5::integer
@@ -1264,52 +1268,66 @@ export async function runTelegramTradeLifecycleProjectionBatchInTransaction(
   const candidates = await listCandidates(client, limit);
   let created = 0;
   for (const candidate of candidates) {
-    // A routine recovery can still reach the consumer-ready state from durable
-    // evidence. Keep that confirmed Buy linked; the normal auto-resume path
-    // re-quotes and re-checks its bounds before a venue order is submitted.
-    // Detach only a route the lifecycle has declared unsafe to continue.
+    let projectedCandidate = candidate;
+    // Older builds made an unsafe unilateral decision here: a temporary
+    // funding recovery changed an already-confirmed Buy to `cancelled`.  That
+    // includes the normal gap between recording an action start and receiving
+    // its client report. Restore only that machine-generated cancellation;
+    // user cancellation and terminal funding decisions retain their own codes
+    // and are never revived.
     if (
       candidate.action === "buy" &&
-      candidate.status === "funding" &&
+      candidate.status === "cancelled" &&
+      candidate.error_code === "funding_recovery_detached" &&
       candidate.submit_started_at == null &&
-      candidate.operation_status === "recovery_required" &&
-      !candidate.consumer_may_remain_linked
+      !["completed", "refunded", "failed", "cancelled"].includes(
+        candidate.operation_status ?? "",
+      )
     ) {
-      await client.query(
+      const restored = await client.query(
         `update telegram_trade_intents
-            set status = 'cancelled',
-                error_code = 'funding_recovery_detached',
-                error_message = 'Funding needs reconciliation; the Buy was cancelled before venue submission.',
+            set status = 'funding',
+                error_code = null,
+                error_message = null,
                 updated_at = clock_timestamp()
           where id = $1::uuid
-            and status = 'funding'
-            and submit_started_at is null`,
+            and status = 'cancelled'
+            and error_code = 'funding_recovery_detached'
+            and submit_started_at is null
+          returning id`,
         [candidate.id],
       );
-      continue;
+      if (restored.rowCount === 1) {
+        projectedCandidate = {
+          ...candidate,
+          status: "funding",
+          error_code: null,
+          error_message: null,
+        };
+      }
     }
     // A cancelled Buy must never consume funded venue cash. Once the route
     // is ready, release just its consumer reservation; the transfer itself
     // is already final and is not cancelled or moved again.
     if (
-      candidate.status === "cancelled" &&
-      candidate.operation_status === "ready" &&
-      candidate.progress_stage === "ready_for_consumer" &&
-      candidate.tracked_operation_id &&
-      candidate.consumer_reservation_id &&
-      candidate.user_id
+      projectedCandidate.status === "cancelled" &&
+      projectedCandidate.operation_status === "ready" &&
+      projectedCandidate.progress_stage === "ready_for_consumer" &&
+      projectedCandidate.tracked_operation_id &&
+      projectedCandidate.consumer_reservation_id &&
+      projectedCandidate.user_id
     ) {
       await releaseFundingReservationForAbandonedTradeInTransaction(client, {
-        userId: candidate.user_id,
+        userId: projectedCandidate.user_id,
         link: {
-          operationId: candidate.tracked_operation_id,
-          reservationId: candidate.consumer_reservation_id,
+          operationId: projectedCandidate.tracked_operation_id,
+          reservationId: projectedCandidate.consumer_reservation_id,
         },
         outcomeReason: "telegram_buy_cancelled_after_funding",
       });
     }
-    const progress = progressFor(candidate);
-    const existing = parseProgress(candidate.result.shortfallProgress);
+    const progress = progressFor(projectedCandidate);
+    const existing = parseProgress(projectedCandidate.result.shortfallProgress);
     if (sameProgress(existing, progress)) {
       // A source transition can be lifecycle-neutral (for example, support
       // metadata or receipt evidence that leaves the rendered state intact).
@@ -1327,19 +1345,19 @@ export async function runTelegramTradeLifecycleProjectionBatchInTransaction(
                 )
           where id = $1::uuid`,
         [
-          candidate.id,
+          projectedCandidate.id,
           TELEGRAM_TRADE_LIFECYCLE_SOURCE_WATERMARK_RESULT_KEY,
-          candidate.intent_source_updated_at_us,
-          candidate.funding_source_updated_at_us,
+          projectedCandidate.intent_source_updated_at_us,
+          projectedCandidate.funding_source_updated_at_us,
           TELEGRAM_TRADE_LIFECYCLE_PROJECTION_VERSION,
         ],
       );
       continue;
     }
     const revision =
-      typeof candidate.result.shortfallProgressRevision === "number" &&
-      Number.isSafeInteger(candidate.result.shortfallProgressRevision)
-        ? candidate.result.shortfallProgressRevision + 1
+      typeof projectedCandidate.result.shortfallProgressRevision === "number" &&
+      Number.isSafeInteger(projectedCandidate.result.shortfallProgressRevision)
+        ? projectedCandidate.result.shortfallProgressRevision + 1
         : 1;
     const updated = await client.query(
       `update telegram_trade_intents
@@ -1359,20 +1377,20 @@ export async function runTelegramTradeLifecycleProjectionBatchInTransaction(
               'reconcile_required', 'failed', 'cancelled', 'filled'
             )`,
       [
-        candidate.id,
+        projectedCandidate.id,
         JSON.stringify(progress),
         revision,
         TELEGRAM_TRADE_LIFECYCLE_SOURCE_WATERMARK_RESULT_KEY,
-        candidate.intent_source_updated_at_us,
-        candidate.funding_source_updated_at_us,
+        projectedCandidate.intent_source_updated_at_us,
+        projectedCandidate.funding_source_updated_at_us,
         TELEGRAM_TRADE_LIFECYCLE_PROJECTION_VERSION,
       ],
     );
     if (updated.rowCount !== 1) continue;
     if (
-      candidate.chat_id &&
-      candidate.telegram_message_id &&
-      candidate.user_id
+      projectedCandidate.chat_id &&
+      projectedCandidate.telegram_message_id &&
+      projectedCandidate.user_id
     ) {
       // A later durable revision is authoritative. Old pending/retry edits
       // must never be delivered after it and restore stale card content.
@@ -1385,7 +1403,11 @@ export async function runTelegramTradeLifecycleProjectionBatchInTransaction(
               and action = $3::text
               and state_revision < $2::int
               and status in ('pending', 'retry')`,
-        [candidate.id, revision, TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION],
+        [
+          projectedCandidate.id,
+          revision,
+          TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION,
+        ],
       );
       await client.query(
         `insert into telegram_bot_action_outbox (
@@ -1399,9 +1421,9 @@ export async function runTelegramTradeLifecycleProjectionBatchInTransaction(
            do nothing`,
         [
           TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION,
-          candidate.user_id,
-          candidate.telegram_user_id,
-          candidate.id,
+          projectedCandidate.user_id,
+          projectedCandidate.telegram_user_id,
+          projectedCandidate.id,
           revision,
           JSON.stringify(progress),
         ],

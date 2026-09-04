@@ -1069,6 +1069,13 @@ export function deriveFundingLifecycle(
     !awaitingProviderReceipt;
   const automaticRecoveryRequired =
     facts.automaticRecovery != null || reconciliationEvidenceTimedOut;
+  // Starting a client action records a durable lease before the client can
+  // report its result. It is neither proof of a broadcast nor a reason to
+  // detach the already-confirmed consumer: a concurrent Telegram projection
+  // can otherwise cancel the Buy in the sub-second gap before that report.
+  const actionAwaitingClientReport = facts.actions.some(
+    (action) => actionExecution(action) === "started",
+  );
   const actionHasTerminalStop = facts.actions.some((action) => {
     const execution = actionExecution(action);
     return execution === "final_failure" || execution === "cancelled";
@@ -1092,7 +1099,8 @@ export function deriveFundingLifecycle(
     !(unresolvedActionNeedsManualRecovery && !awaitingProviderReceipt) &&
     !evidence.partialRefundEvidence &&
     !actionHasTerminalStop &&
-    (unresolvedMovement ||
+    (actionAwaitingClientReport ||
+      unresolvedMovement ||
       actionReportedMovement ||
       evidence.finalizedSource ||
       evidence.finalizedIntermediate ||

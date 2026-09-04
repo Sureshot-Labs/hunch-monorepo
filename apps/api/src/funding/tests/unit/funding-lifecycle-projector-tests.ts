@@ -119,9 +119,15 @@ function facts(
   const startedFacts = facts({
     actions: [action("broadcast", { attempts: [attempt()] })],
   });
-  assert.deepEqual(deriveFundingLifecycle(startedFacts).actions, [
+  const startedProjection = deriveFundingLifecycle(startedFacts);
+  assert.deepEqual(startedProjection.actions, [
     { actionId: "broadcast", state: "recovery_required", actionable: false },
   ]);
+  assert.equal(
+    startedProjection.safety.consumerMayRemainLinked,
+    true,
+    "recording an unbroadcast action start must not detach a confirmed Buy before its client report",
+  );
   assert.deepEqual(
     deriveFundingLifecycleBeforeActionBroadcast(startedFacts, {
       actionId: "broadcast",

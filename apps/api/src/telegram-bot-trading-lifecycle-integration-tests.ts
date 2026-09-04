@@ -3950,15 +3950,21 @@ try {
   });
   assert.deepEqual(
     (
-      await client.query<{ error_code: string | null; status: string }>(
-        `select status, error_code
+      await client.query<{
+        error_code: string | null;
+        progress_state: string | null;
+        status: string;
+      }>(
+        `select status,
+                error_code,
+                result -> 'shortfallProgress' ->> 'state' as progress_state
            from telegram_trade_intents
           where id = $1::uuid`,
         [autoDetachedRecoveryIntentId],
       )
     ).rows[0],
-    { error_code: "funding_recovery_detached", status: "cancelled" },
-    "a recovery-required route automatically revokes an unsubmitted Buy",
+    { error_code: null, progress_state: "needs_attention", status: "funding" },
+    "recovery keeps the confirmed Buy attached; only an explicit user cancellation or terminal funding decision may stop it",
   );
 
   const actionRows = await client.query<{ action: string }>(
