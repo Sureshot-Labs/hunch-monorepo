@@ -394,6 +394,36 @@ async function lockFundingOperationForAttempt(
   return operationId;
 }
 
+/**
+ * Trade-submission evidence is a durable operation fact.  The immutable-plan
+ * trigger deliberately requires every operation mutation to advance its
+ * revision, including metadata-only evidence writes.  Keep that rule in one
+ * helper so submit and exact-status reconciliation cannot drift apart.
+ */
+async function appendFundingOperationEvidenceInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    operationId: string;
+    supportMetadataPatch: Readonly<Record<string, JsonValue>>;
+    userId: string;
+  }>,
+): Promise<void> {
+  const result = await client.query(
+    `update funding_operations
+        set support_metadata = support_metadata || $3::jsonb,
+            updated_at = clock_timestamp(),
+            version = version + 1
+      where id = $1 and user_id = $2`,
+    [input.operationId, input.userId, input.supportMetadataPatch],
+  );
+  if (result.rowCount !== 1) {
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "funding operation disappeared while recording trade evidence",
+    );
+  }
+}
+
 export async function claimFundingTradeAttemptInTransaction(
   client: Pick<PoolClient, "query">,
   input: Readonly<{
@@ -715,18 +745,11 @@ export async function recordFundingTradeAttemptOutcomeInTransaction(
 ): Promise<FundingTradeAttempt> {
   const appendOperationEvidence = async (operationId: string) => {
     if (input.operationSupportMetadataPatch === undefined) return;
-    const result = await client.query(
-      `update funding_operations
-          set support_metadata = support_metadata || $3::jsonb
-        where id = $1 and user_id = $2`,
-      [operationId, input.userId, input.operationSupportMetadataPatch],
-    );
-    if (result.rowCount !== 1) {
-      throw new FundingTradeAttemptError(
-        "invalid_state",
-        "funding operation disappeared while recording trade evidence",
-      );
-    }
+    await appendFundingOperationEvidenceInTransaction(client, {
+      operationId,
+      supportMetadataPatch: input.operationSupportMetadataPatch,
+      userId: input.userId,
+    });
   };
   await lockFundingOperationForAttempt(client, input);
   const attempt = await fetchAttemptForUpdate(client, input);
@@ -981,18 +1004,11 @@ export async function proveAmbiguousLimitlessTradeAttemptAbsentInTransaction(
     );
   }
   if (input.operationSupportMetadataPatch !== undefined) {
-    const evidence = await client.query(
-      `update funding_operations
-          set support_metadata = support_metadata || $3::jsonb
-        where id = $1 and user_id = $2`,
-      [operationId, input.userId, input.operationSupportMetadataPatch],
-    );
-    if (evidence.rowCount !== 1) {
-      throw new FundingTradeAttemptError(
-        "invalid_state",
-        "funding operation disappeared while recording absence proof",
-      );
-    }
+    await appendFundingOperationEvidenceInTransaction(client, {
+      operationId,
+      supportMetadataPatch: input.operationSupportMetadataPatch,
+      userId: input.userId,
+    });
   }
   return mapAttempt(row);
 }

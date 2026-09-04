@@ -834,16 +834,48 @@ async function isKnownLimitlessMarket(
   const { rowCount } = await db.query(
     `
       select 1
-      from unified_markets
-      where venue = 'limitless'
-        and lower(coalesce(metadata->>'address', metadata->>'marketAddress')) =
-            lower($1)
+      from unified_markets market_row
+      left join unified_events event_row
+        on event_row.id = market_row.event_id
+       and event_row.venue = 'limitless'
+      where market_row.venue = 'limitless'
+        and (
+          lower(
+            coalesce(
+              nullif(btrim(market_row.metadata->>'address'), ''),
+              nullif(btrim(market_row.metadata->>'marketAddress'), '')
+            )
+          ) = lower($1)
+          or lower(${LIMITLESS_EFFECTIVE_VENUE_EXCHANGE_SQL}) = lower($1)
+        )
       limit 1
     `,
     [normalized],
   );
   return Boolean(rowCount);
 }
+
+/**
+ * The market's execution exchange is an approved Limitless operator just as
+ * much as its market address is.  Indexing normalizes this field into the
+ * `venueExchange` metadata key; older records can keep it on the event.
+ */
+const LIMITLESS_EFFECTIVE_VENUE_EXCHANGE_SQL = `coalesce(
+  nullif(btrim(market_row.metadata->>'negRiskExchange'), ''),
+  nullif(btrim(market_row.metadata->>'neg_risk_exchange'), ''),
+  nullif(btrim(market_row.metadata->>'exchangeAddress'), ''),
+  nullif(btrim(market_row.metadata->>'exchange_address'), ''),
+  nullif(btrim(market_row.metadata->>'exchange'), ''),
+  nullif(btrim(market_row.metadata->>'venueExchange'), ''),
+  nullif(btrim(market_row.metadata->>'venue_exchange'), ''),
+  nullif(btrim(event_row.metadata->>'negRiskExchange'), ''),
+  nullif(btrim(event_row.metadata->>'neg_risk_exchange'), ''),
+  nullif(btrim(event_row.metadata->>'exchangeAddress'), ''),
+  nullif(btrim(event_row.metadata->>'exchange_address'), ''),
+  nullif(btrim(event_row.metadata->>'exchange'), ''),
+  nullif(btrim(event_row.metadata->>'venueExchange'), ''),
+  nullif(btrim(event_row.metadata->>'venue_exchange'), '')
+)`;
 
 const LIMITLESS_EFFECTIVE_VENUE_ADAPTER_SQL = `coalesce(
   nullif(btrim(market_row.metadata->>'venueAdapter'), ''),
@@ -1081,6 +1113,7 @@ export const embeddedEvmSponsorshipTestHooks = {
   exactTransactionMatches,
   fundingActionSignerMatches,
   fundingActionMatchesTransaction,
+  isKnownLimitlessMarket,
   matchesFundingAction,
   matchesPositionAction,
   isKnownLimitlessNegRiskAdapter,

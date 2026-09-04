@@ -18,6 +18,7 @@ import {
   resolveLimitlessAuthContext,
 } from "../../services/limitless-auth.js";
 import { isLimitlessPartnerHmacConfigured } from "../../services/limitless-client.js";
+import { extractLimitlessMarketExchangeAddress } from "../../services/limitless-market-contracts.js";
 import { fetchLimitlessOnchainSnapshot } from "../../services/limitless-onchain.js";
 import { fetchOpenOrderCollateralLocks } from "../../services/open-order-collateral.js";
 import {
@@ -120,8 +121,15 @@ type RuntimeMarketContext = Readonly<{
   market: ApiTradeMarket | null;
   marketClass: string | null;
   evidence: RuntimeMarketEvidence;
+  /** Exact market CLOB exchange when the canonical market metadata provides it. */
+  exchangeAddress: string | null;
   adapterAddress: string | null;
   ammAddress: string | null;
+}>;
+
+type LimitlessPreparationContracts = Readonly<{
+  clobAddress: string | null;
+  negRiskAddress: string | null;
 }>;
 
 export type PreparedRuntimeDestination = Readonly<{
@@ -176,6 +184,29 @@ function normalizeAddress(value: string | null | undefined): string {
   } catch {
     return value.trim();
   }
+}
+
+/**
+ * An explicit market exchange is authoritative for every CLOB readiness check
+ * and every generated approval.  The configured address remains only for
+ * legacy market rows that have no canonical contract metadata.
+ */
+function limitlessPreparationContracts(input: {
+  marketClass: string | null;
+  marketExchangeAddress: string | null;
+}): LimitlessPreparationContracts {
+  return {
+    clobAddress:
+      input.marketClass === "clob"
+        ? (input.marketExchangeAddress ??
+          fundingSidecarRuntimeConfig.limitlessClobAddress)
+        : fundingSidecarRuntimeConfig.limitlessClobAddress,
+    negRiskAddress:
+      input.marketClass === "clob_neg_risk"
+        ? (input.marketExchangeAddress ??
+          fundingSidecarRuntimeConfig.limitlessNegRiskAddress)
+        : fundingSidecarRuntimeConfig.limitlessNegRiskAddress,
+  };
 }
 
 function sameAddress(
@@ -493,6 +524,7 @@ function unavailableRuntimeMarketContext(
   return {
     market: null,
     marketClass: requestedMarketClass,
+    exchangeAddress: null,
     adapterAddress: null,
     ammAddress: null,
     evidence: {
@@ -539,6 +571,14 @@ function runtimeMarketContextFromMarket(input: {
       : isNegRisk(input.market)
         ? fundingSidecarRuntimeConfig.polymarketNegRiskAdapterAddress || null
         : fundingSidecarRuntimeConfig.polymarketConditionalTokensAddress;
+  const exchangeAddress =
+    input.venue === "limitless" && marketClass.startsWith("clob")
+      ? extractLimitlessMarketExchangeAddress(input.market.metadata)
+      : null;
+  const contracts = limitlessPreparationContracts({
+    marketClass,
+    marketExchangeAddress: exchangeAddress,
+  });
   const routeResolved =
     input.venue === "polymarket"
       ? Boolean(input.market.token_yes && input.market.token_no)
@@ -559,13 +599,14 @@ function runtimeMarketContextFromMarket(input: {
       : marketClass.startsWith("amm")
         ? Boolean(ammAddress)
         : Boolean(
-            isNegRisk(input.market)
-              ? fundingSidecarRuntimeConfig.limitlessNegRiskAddress
-              : fundingSidecarRuntimeConfig.limitlessClobAddress,
+            marketClass === "clob"
+              ? contracts.clobAddress
+              : contracts.negRiskAddress,
           );
   return {
     market: input.market,
     marketClass,
+    exchangeAddress,
     adapterAddress,
     ammAddress,
     evidence: {
@@ -593,6 +634,7 @@ async function loadRuntimeMarketContext(input: {
     return {
       market: null,
       marketClass: input.requestedMarketClass,
+      exchangeAddress: null,
       adapterAddress: null,
       ammAddress: null,
       evidence: {
@@ -1569,12 +1611,16 @@ export class WalletPreparationRuntimeService {
     );
     const marketContext = await marketContextPromise;
     const effectiveMarketClass = input.marketClass ?? marketContext.marketClass;
+    const contracts = limitlessPreparationContracts({
+      marketClass: effectiveMarketClass,
+      marketExchangeAddress: marketContext.exchangeAddress,
+    });
     const snapshotPromise = fetchLimitlessOnchainSnapshot({
       rpcUrl: fundingSidecarRuntimeConfig.baseRpcUrl,
       timeoutMs: fundingSidecarRuntimeConfig.baseRpcTimeoutMs,
       owner: input.wallet.walletAddress,
-      clobAddress: fundingSidecarRuntimeConfig.limitlessClobAddress,
-      negRiskAddress: fundingSidecarRuntimeConfig.limitlessNegRiskAddress,
+      clobAddress: contracts.clobAddress,
+      negRiskAddress: contracts.negRiskAddress,
       adapterAddress: marketContext.adapterAddress,
       ammAddress: marketContext.ammAddress,
       conditionalTokensAddress:
@@ -1702,6 +1748,7 @@ export class WalletPreparationRuntimeService {
         cashLockedRaw,
         reservedRaw,
         marketRef: marketContext.evidence.safeMarketRef,
+        marketExchangeAddress: marketContext.exchangeAddress,
         marketAdapterRequired: Boolean(marketContext.adapterAddress),
       },
     };
@@ -1719,6 +1766,8 @@ export class WalletPreparationRuntimeService {
         wallet: input.wallet,
         adapterAddress: marketContext.adapterAddress,
         ammAddress: marketContext.ammAddress,
+        clobAddress: contracts.clobAddress,
+        negRiskAddress: contracts.negRiskAddress,
       }),
     );
     const preparation = await adapter.inspect(inspectionInput);
@@ -2054,8 +2103,10 @@ export class WalletPreparationRuntimeService {
 
 export const walletPreparationRuntimeTestHooks = {
   availableRaw,
+  limitlessPreparationContracts,
   polymarketInspectionAccountRef,
   polymarketTopology,
+  runtimeMarketContextFromMarket,
   shouldInspectPolymarketDepositWallet,
 };
 

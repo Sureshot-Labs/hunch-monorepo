@@ -33,6 +33,7 @@ export type LimitlessSanitizedValue =
   | LimitlessSanitizedObject;
 
 export type LimitlessRejectionKind =
+  | "allowance"
   | "authentication"
   | "fok_no_fill"
   | "network_or_lost_response"
@@ -281,6 +282,14 @@ export function classifyLimitlessOrderRejection(input: {
     .filter((value): value is string => Boolean(value))
     .join(" ")
     .toLowerCase();
+  // A venue's explicit allowance rejection happens before it accepts or
+  // forwards an order.  Do not let the broader "insufficient collateral"
+  // balance/indexing heuristic turn this deterministic 4xx into a seven-day
+  // reconciliation hold.
+  const insufficientAllowance =
+    /insufficient (?:collateral )?allowance|(?:collateral )?allowance (?:is )?(?:insufficient|required|missing)/i.test(
+      searchable,
+    );
   const transientBalanceOrIndexing =
     /insufficient (?:available )?(?:cash|collateral|funds|balance)|balance (?:is )?(?:pending|unavailable|not (?:yet )?(?:available|indexed|updated))|(?:index|indexer|indexing).*(?:delay|lag|pending|sync)|(?:account|balance).*(?:still )?syncing/i.test(
       searchable,
@@ -291,6 +300,15 @@ export function classifyLimitlessOrderRejection(input: {
       disposition: "ambiguous",
       errorCode: "limitless_submit_state_unknown",
       kind: "network_or_lost_response",
+      retryableAfterReconciliation: false,
+    });
+  }
+
+  if (insufficientAllowance) {
+    return decision({
+      disposition: "definitive_failure",
+      errorCode: "limitless_trade_allowance_rejected",
+      kind: "allowance",
       retryableAfterReconciliation: false,
     });
   }

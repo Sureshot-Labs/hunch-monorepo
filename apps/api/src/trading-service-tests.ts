@@ -812,6 +812,14 @@ const tests: TestCase[] = [
       assert.equal(balancePending.retryableAfterReconciliation, true);
       assert.equal(balancePending.mayRetrySubmission, false);
 
+      const insufficientAllowance = classify(400, {
+        error: "Insufficient collateral allowance for this order.",
+      });
+      assert.equal(insufficientAllowance.kind, "allowance");
+      assert.equal(insufficientAllowance.disposition, "definitive_failure");
+      assert.equal(insufficientAllowance.releaseFundingReservation, true);
+      assert.equal(insufficientAllowance.requiresStatusReconciliation, false);
+
       for (const [status, payload, expectedKind] of [
         [401, null, "authentication"],
         [400, { error: { message: "Invalid signature" } }, "signature"],
@@ -4175,7 +4183,7 @@ const tests: TestCase[] = [
       );
       assert.match(
         cancelFundingBlock,
-        /external_boundary_crossed === false[\s\S]*?cancelFundingOperation[\s\S]*?else[\s\S]*?cancellingBuyContinuation = true/,
+        /externalBoundaryCrossed[\s\S]*?if \(!externalBoundaryCrossed\)[\s\S]*?cancelFundingOperation[\s\S]*?else[\s\S]*?cancellingBuyContinuation = true/,
       );
       assert.match(
         progressSource,
@@ -4245,6 +4253,10 @@ const tests: TestCase[] = [
         resolve(apiSrcDir, "services/limitless-trading-execution-service.ts"),
         "utf8",
       );
+      const limitlessContracts = readFileSync(
+        resolve(apiSrcDir, "services/limitless-market-contracts.ts"),
+        "utf8",
+      );
       const kalshi = readFileSync(
         resolve(apiSrcDir, "services/kalshi-trading-execution-service.ts"),
         "utf8",
@@ -4255,9 +4267,9 @@ const tests: TestCase[] = [
       );
 
       const limitlessExchangeBlock = sourceSlice(
-        limitless,
-        "function extractLimitlessMarketExchangeAddress(",
-        "function extractLimitlessMarketAdapterAddress(",
+        limitlessContracts,
+        "export function extractLimitlessMarketExchangeAddress(",
+        "function firstAddress(",
       );
       assert.match(limitlessExchangeBlock, /venueExchange/);
       assert.match(limitlessExchangeBlock, /venue_exchange/);

@@ -370,6 +370,39 @@ await test("Polymarket inspection preserves an exact signer-held position owner"
   );
 });
 
+await test("Limitless readiness selects the explicit market exchange over the legacy default", () => {
+  const marketExchange = "0x00000000000000000000000000000000000000a1";
+  const context =
+    walletPreparationRuntimeTestHooks.runtimeMarketContextFromMarket({
+      venue: "limitless",
+      market: {
+        ...market,
+        id: "limitless:market-1",
+        venue: "limitless",
+        metadata: { venueExchange: marketExchange },
+      },
+      requestedMarketClass: "clob",
+    });
+  assert.equal(
+    context.exchangeAddress?.toLowerCase(),
+    marketExchange.toLowerCase(),
+  );
+  const contracts =
+    walletPreparationRuntimeTestHooks.limitlessPreparationContracts({
+      marketClass: context.marketClass,
+      marketExchangeAddress: context.exchangeAddress,
+    });
+  assert.equal(contracts.clobAddress?.toLowerCase(), marketExchange);
+
+  const legacy =
+    walletPreparationRuntimeTestHooks.limitlessPreparationContracts({
+      marketClass: "clob",
+      marketExchangeAddress: null,
+    });
+  assert.ok(legacy.clobAddress);
+  assert.notEqual(legacy.clobAddress, marketExchange);
+});
+
 await test("only the canonical derived Deposit Wallet is owner verified", () => {
   const signer = wallets[0].walletAddress;
   const canonicalDeposit = wallets[1].walletAddress;

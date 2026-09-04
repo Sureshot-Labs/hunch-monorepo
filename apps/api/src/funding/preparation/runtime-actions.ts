@@ -291,7 +291,12 @@ export function createPolymarketRuntimeActionMaterializer(input: {
 
 function spenderForLimitlessCheck(
   checkId: string,
-  input: { adapterAddress: string | null; ammAddress: string | null },
+  input: {
+    adapterAddress: string | null;
+    ammAddress: string | null;
+    clobAddress: string | null;
+    negRiskAddress: string | null;
+  },
 ): { token: string; spender: string; kind: "erc20" | "erc1155" } | null {
   const erc20 = (spender: string | null | undefined) =>
     spender
@@ -310,17 +315,17 @@ function spenderForLimitlessCheck(
         }
       : null;
   if (checkId === "clob_usdc_allowance") {
-    return erc20(fundingSidecarRuntimeConfig.limitlessClobAddress);
+    return erc20(input.clobAddress);
   }
   if (checkId === "clob_neg_risk_usdc_allowance") {
-    return erc20(fundingSidecarRuntimeConfig.limitlessNegRiskAddress);
+    return erc20(input.negRiskAddress);
   }
   if (checkId === "amm_usdc_allowance") return erc20(input.ammAddress);
   if (checkId === "clob_operator_approval") {
-    return erc1155(fundingSidecarRuntimeConfig.limitlessClobAddress);
+    return erc1155(input.clobAddress);
   }
   if (checkId === "clob_neg_risk_operator_approval") {
-    return erc1155(fundingSidecarRuntimeConfig.limitlessNegRiskAddress);
+    return erc1155(input.negRiskAddress);
   }
   if (checkId === "amm_operator_approval") {
     return erc1155(input.ammAddress);
@@ -338,6 +343,9 @@ export function createLimitlessRuntimeActionMaterializer(input: {
   wallet: UserWallet;
   adapterAddress: string | null;
   ammAddress: string | null;
+  /** Canonical CLOB contracts selected from this market's metadata. */
+  clobAddress?: string | null;
+  negRiskAddress?: string | null;
   fetchSigningMessage?: () => Promise<string>;
 }): PreparationActionMaterializer {
   return async ({ facts, requiredActions }) => {
@@ -400,6 +408,11 @@ export function createLimitlessRuntimeActionMaterializer(input: {
       const approval = spenderForLimitlessCheck(checkId, {
         adapterAddress: input.adapterAddress,
         ammAddress: input.ammAddress,
+        clobAddress:
+          input.clobAddress ?? fundingSidecarRuntimeConfig.limitlessClobAddress,
+        negRiskAddress:
+          input.negRiskAddress ??
+          fundingSidecarRuntimeConfig.limitlessNegRiskAddress,
       });
       if (!approval) {
         throw new Error(

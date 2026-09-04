@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { Interface } from "ethers";
 
 import type { UserWallet } from "../../../auth.js";
 import { env } from "../../../env.js";
@@ -16,6 +17,9 @@ import type { VenueAccountBinding } from "../../domain/types.js";
 import { fundingSidecarRuntimeConfig } from "../../runtime/sidecar-runtime-config.js";
 
 const OBSERVED_AT = "2026-07-24T12:00:00.000Z";
+const erc20Interface = new Interface([
+  "function approve(address spender,uint256 amount) returns (bool)",
+]);
 
 async function test(
   name: string,
@@ -219,13 +223,15 @@ await test("Polymarket Funding Router approvals are controller-signer transactio
   }
 });
 
-await test("Limitless connect and CLOB approval use exact prepared inputs", async () => {
+await test("Limitless connect and CLOB approval use the exact market exchange", async () => {
   const exactBinding = binding("limitless");
+  const marketExchange = "0x00000000000000000000000000000000000000a1";
   let signingMessageReads = 0;
   const materialize = createLimitlessRuntimeActionMaterializer({
     wallet: wallet(true),
     adapterAddress: null,
     ammAddress: null,
+    clobAddress: marketExchange,
     fetchSigningMessage: async () => {
       signingMessageReads += 1;
       return "Sign in to Limitless";
@@ -244,6 +250,36 @@ await test("Limitless connect and CLOB approval use exact prepared inputs", asyn
     assert.equal(
       actions[1].action.to.toLowerCase(),
       env.limitlessUsdcAddress.toLowerCase(),
+    );
+    const decoded = erc20Interface.decodeFunctionData(
+      "approve",
+      actions[1].action.data,
+    );
+    assert.equal(String(decoded[0]).toLowerCase(), marketExchange);
+  }
+});
+
+await test("Limitless legacy CLOB approval retains the configured fallback", async () => {
+  const exactBinding = binding("limitless");
+  const materialize = createLimitlessRuntimeActionMaterializer({
+    wallet: wallet(true),
+    adapterAddress: null,
+    ammAddress: null,
+  });
+  const actions = await materialize(
+    materializerInput(exactBinding, [
+      requirement("approve-clob_usdc_allowance", "evm_transaction"),
+    ]),
+  );
+  assert.equal(actions[0]?.action?.kind, "evm_transaction");
+  if (actions[0]?.action?.kind === "evm_transaction") {
+    const decoded = erc20Interface.decodeFunctionData(
+      "approve",
+      actions[0].action.data,
+    );
+    assert.equal(
+      String(decoded[0]).toLowerCase(),
+      fundingSidecarRuntimeConfig.limitlessClobAddress.toLowerCase(),
     );
   }
 });

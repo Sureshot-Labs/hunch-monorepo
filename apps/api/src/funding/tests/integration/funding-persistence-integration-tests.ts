@@ -2071,17 +2071,20 @@ async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<vo
       commitInput(userId, quote.id, consentToken, plan),
     );
     operationId = committed.operation.id;
-    let operation = await writeFundingOperationSupportFactsInTransaction(pool, {
-      operationId,
-      expectedVersion: committed.operation.version,
-      supportMetadataPatch: {
-        lifecycleManualRecovery: {
-          code: "manual_fixture",
-          requestedAt: new Date().toISOString(),
+    const operation = await writeFundingOperationSupportFactsInTransaction(
+      pool,
+      {
+        operationId,
+        expectedVersion: committed.operation.version,
+        supportMetadataPatch: {
+          lifecycleManualRecovery: {
+            code: "manual_fixture",
+            requestedAt: new Date().toISOString(),
+          },
         },
+        now: new Date(),
       },
-      now: new Date(),
-    });
+    );
     const stepResult = await pool.query<{
       action_fingerprint: string;
       executor_id: string;
@@ -5348,6 +5351,17 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       });
     assert.equal(startedTrade.state, "submission_started");
     await client.query("savepoint ambiguous_attempt_survives_expiry");
+    const operationBeforeTradeEvidence = await client.query<{
+      version: number;
+    }>(
+      `select version::int as version
+         from funding_operations
+        where id = $1::uuid`,
+      [committedB.operation.id],
+    );
+    const versionBeforeTradeEvidence =
+      operationBeforeTradeEvidence.rows[0]?.version;
+    assert.ok(Number.isSafeInteger(versionBeforeTradeEvidence));
     await recordFundingTradeAttemptOutcomeInTransaction(client, {
       userId: userB,
       attemptId: tradeClaim.attempt.id,
@@ -5355,6 +5369,24 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       externalReference: tradeExecutionReference,
       errorCode: "provider_response_unknown",
       broadcastMayHaveOccurred: true,
+      operationSupportMetadataPatch: {
+        fixtureTradeSubmissionEvidence: { version: 1 },
+      },
+    });
+    const operationAfterTradeEvidence = await client.query<{
+      evidence_version: number | null;
+      version: number;
+    }>(
+      `select version::int as version,
+              (support_metadata -> 'fixtureTradeSubmissionEvidence' ->> 'version')::int
+                as evidence_version
+         from funding_operations
+        where id = $1::uuid`,
+      [committedB.operation.id],
+    );
+    assert.deepEqual(operationAfterTradeEvidence.rows[0], {
+      evidence_version: 1,
+      version: (versionBeforeTradeEvidence as number) + 1,
     });
     const retainedAfterExpiry = await reduceFundingOperationInTransaction(
       client,
@@ -6239,6 +6271,17 @@ async function testFundedTradeTerminalLockRace(): Promise<void> {
     const matureAbsenceClient = await pool.connect();
     try {
       await matureAbsenceClient.query("begin");
+      const operationBeforeAbsenceEvidence = await matureAbsenceClient.query<{
+        version: number;
+      }>(
+        `select version::int as version
+           from funding_operations
+          where id = $1::uuid`,
+        [operationId],
+      );
+      const versionBeforeAbsenceEvidence =
+        operationBeforeAbsenceEvidence.rows[0]?.version;
+      assert.ok(Number.isSafeInteger(versionBeforeAbsenceEvidence));
       await proveAmbiguousLimitlessTradeAttemptAbsentInTransaction(
         matureAbsenceClient,
         {
@@ -6246,10 +6289,28 @@ async function testFundedTradeTerminalLockRace(): Promise<void> {
           clientOrderId,
           expectedClaimToken: matureTakeover.claimToken,
           minimumAgeMs: 5 * 60_000,
+          operationSupportMetadataPatch: {
+            fixtureExactStatusAbsenceEvidence: { version: 1 },
+          },
           userId,
           now: matureNow,
         },
       );
+      const operationAfterAbsenceEvidence = await matureAbsenceClient.query<{
+        evidence_version: number | null;
+        version: number;
+      }>(
+        `select version::int as version,
+                (support_metadata -> 'fixtureExactStatusAbsenceEvidence' ->> 'version')::int
+                  as evidence_version
+           from funding_operations
+          where id = $1::uuid`,
+        [operationId],
+      );
+      assert.deepEqual(operationAfterAbsenceEvidence.rows[0], {
+        evidence_version: 1,
+        version: (versionBeforeAbsenceEvidence as number) + 1,
+      });
       await releaseFundingReservationForAbandonedTradeInTransaction(
         matureAbsenceClient,
         {

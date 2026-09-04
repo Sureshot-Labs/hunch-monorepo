@@ -27,6 +27,9 @@ try {
   const marketId = `limitless:redemption-market:${suffix}`;
   const adapterAddress = "0x6151EF8368b6316c1aa3C68453EF083ad31E712D";
   const otherAdapterAddress = "0x1111111111111111111111111111111111111111";
+  const marketExchangeAddress = "0x5a38afc17f7e97ad8d6c547ddb837e40b4aedfc6";
+  const otherMarketExchangeAddress =
+    "0x3333333333333333333333333333333333333333";
   const signer = "0x2222222222222222222222222222222222222222";
   const conditionId = `0x${"ab".repeat(32)}`;
   const otherConditionId = `0x${"cd".repeat(32)}`;
@@ -51,9 +54,27 @@ try {
        condition_id, metadata
      ) values (
        $1::text, 'limitless', $2::text, $3::text,
-       'Redemption adapter test', 'SETTLED', 'binary', $4::text, '{}'::jsonb
+       'Redemption adapter test', 'SETTLED', 'binary', $4::text,
+       jsonb_build_object('venueExchange', $5::text)
      )`,
-    [marketId, `market-${suffix}`, eventId, conditionId],
+    [marketId, `market-${suffix}`, eventId, conditionId, marketExchangeAddress],
+  );
+
+  assert.equal(
+    await embeddedEvmSponsorshipTestHooks.isKnownLimitlessMarket(
+      client,
+      marketExchangeAddress,
+    ),
+    true,
+    "the indexed market exchange is a permitted Limitless operator",
+  );
+  assert.equal(
+    await embeddedEvmSponsorshipTestHooks.isKnownLimitlessMarket(
+      client,
+      otherMarketExchangeAddress,
+    ),
+    false,
+    "an arbitrary Base spender is never accepted",
   );
 
   assert.equal(
@@ -101,9 +122,13 @@ try {
   const operatorApprovalData = new ethers.Interface([
     "function setApprovalForAll(address operator,bool approved)",
   ]).encodeFunctionData("setApprovalForAll", [adapterAddress, true]);
+  const collateralApprovalData = new ethers.Interface([
+    "function approve(address spender,uint256 amount)",
+  ]).encodeFunctionData("approve", [marketExchangeAddress, 2_000_000n]);
   const sponsorshipDependencies = {
     isAuthorizedDestination: async () => false,
-    isKnownLimitlessMarket: async () => false,
+    isKnownLimitlessMarket: (address: string) =>
+      embeddedEvmSponsorshipTestHooks.isKnownLimitlessMarket(client, address),
     isKnownLimitlessNegRiskAdapter: (adapter: string) =>
       embeddedEvmSponsorshipTestHooks.isKnownLimitlessNegRiskAdapter(
         client,
@@ -120,6 +145,45 @@ try {
     matchesFundingAction: async () => false,
     matchesPositionAction: async () => false,
   };
+  await assert.doesNotReject(() =>
+    assertEmbeddedEvmSponsorshipAllowed({
+      chainId: 8453,
+      dependencies: sponsorshipDependencies,
+      signer,
+      transactions: [
+        {
+          id: "limitless-market-collateral-approval",
+          label: "Approve Limitless market collateral",
+          to: env.limitlessUsdcAddress,
+          data: collateralApprovalData,
+        },
+      ],
+      userId,
+    }),
+  );
+  await assert.rejects(
+    () =>
+      assertEmbeddedEvmSponsorshipAllowed({
+        chainId: 8453,
+        dependencies: sponsorshipDependencies,
+        signer,
+        transactions: [
+          {
+            id: "unknown-limitless-market-collateral-approval",
+            label: "Approve unknown collateral spender",
+            to: env.limitlessUsdcAddress,
+            data: new ethers.Interface([
+              "function approve(address spender,uint256 amount)",
+            ]).encodeFunctionData("approve", [
+              otherMarketExchangeAddress,
+              2_000_000n,
+            ]),
+          },
+        ],
+        userId,
+      }),
+    /not an allowed Hunch operation/u,
+  );
   await assert.doesNotReject(() =>
     assertEmbeddedEvmSponsorshipAllowed({
       chainId: 8453,
