@@ -49,7 +49,12 @@ the configured live Privy policies; no policies or secrets were changed.
 
 ## Switch sequence (operator action; not performed by this change)
 
-1. Deploy this backend change while retaining `fallback` and current secrets.
+1. Deploy backend and frontend changes while retaining `fallback` and current
+   secrets. The status API exposes `miniAppHandoffMode` and contract version;
+   the frontend completes `always`/v2 login after account/link/wallet readiness,
+   without waiting for automation preferences or a signer. Older responses
+   without these fields retain the existing onboarding checks. Both releases
+   must be live before switching to `always`.
 2. Verify existing direct Polymarket bot Buy/Sell and Limitless Mini App flows.
 3. Inspect outstanding delegated funding/trades. Let already-authorized money
    movements reconcile; do not force-terminal them to change execution mode.

@@ -2114,6 +2114,8 @@ async function registerTelegramBotTradingRoutes(
       return reply.send({
         policy: {
           autoEnableOnTelegramLink: policy.autoEnableOnTelegramLink,
+          miniAppHandoffMode: policy.miniAppHandoffMode,
+          miniAppHandoffContractVersion: policy.miniAppHandoffContractVersion,
           autoManagedMaxAmountUsd: policy.autoManagedMaxAmountUsd,
           autoManagedVenues: policy.autoManagedVenues,
           policyRevision: policyState.policyRevision,

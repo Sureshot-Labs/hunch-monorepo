@@ -685,6 +685,14 @@ try {
     [userId],
   );
   let delegatedFundingInspections = 0;
+  const miniAppStatus = await app.inject({
+    method: "GET",
+    url: "/telegram/bot-trading/status",
+  });
+  assert.equal(miniAppStatus.statusCode, 200, miniAppStatus.body);
+  assert.equal(miniAppStatus.json().policy.miniAppHandoffMode, "always");
+  assert.equal(miniAppStatus.json().policy.miniAppHandoffContractVersion, 2);
+  assert.equal(miniAppStatus.json().policy.autoEnableOnTelegramLink, false);
   const retryableLimitlessHandoff = await captureTelegramBotTradingCallback({
     appBaseUrl: "https://app.hunch.trade",
     callbackQuery: {
