@@ -244,6 +244,9 @@ try {
       fingerprint: () => LOOKUP_HMAC,
       decrypt: () => TRANSACTION_HASH,
     },
+    relayReferenceCodec: {
+      fingerprint: (reference) => `relay:${reference}`,
+    },
     scanCanonicalEvents: async (variants) => {
       const variant = variants.find(
         (entry) => entry.variantId === input.variantId,
@@ -284,6 +287,7 @@ try {
   const { rows: suppressedRows } = await pool.query<{
     receipts: string;
     canonical_events: string;
+    allocation_error_code: string | null;
   }>(
     `
       select
@@ -296,13 +300,20 @@ try {
           select count(*)::text
           from funding_receive_canonical_events
           where tx_hash = $2
-        ) as canonical_events
+        ) as canonical_events,
+        (
+          select allocation_error_code
+          from funding_receive_canonical_events
+          where tx_hash = $2
+          limit 1
+        ) as allocation_error_code
     `,
     [created.snapshot.session.receiveSessionId, TRANSACTION_HASH],
   );
   assert.deepEqual(suppressedRows[0], {
     receipts: "0",
-    canonical_events: "0",
+    canonical_events: "1",
+    allocation_error_code: "internal_handoff_suppressed",
   });
   await pool.query(
     `
@@ -357,24 +368,31 @@ try {
     now: new Date(NOW.getTime() + 15_000),
   });
   assert.equal(ambiguousObserved.retryableErrors, 0);
-  assert.equal(ambiguousObserved.receiptsRecorded, 1);
-  assert.equal(ambiguousObserved.recoveriesRequired, 1);
+  assert.equal(ambiguousObserved.receiptsRecorded, 0);
+  assert.equal(ambiguousObserved.recoveriesRequired, 0);
   const { rows: ambiguousRows } = await pool.query<{
     session_status: string;
-    receipt_status: string;
-    child_funding_operation_id: string | null;
+    receipt_count: string;
+    allocation_error_code: string | null;
     event_cursor_block: string;
   }>(
     `
       select
         session.status as session_status,
-        receipt.status as receipt_status,
-        receipt.child_funding_operation_id,
+        (
+          select count(*)::text
+          from funding_receive_receipts receipt
+          where receipt.receive_session_id = session.id
+        ) as receipt_count,
+        (
+          select allocation_error_code
+          from funding_receive_canonical_events
+          where tx_hash = $3
+          limit 1
+        ) as allocation_error_code,
         variant -> 'observation' -> 'payload' ->> 'eventCursorBlock'
           as event_cursor_block
       from funding_receive_sessions session
-      join funding_receive_receipts receipt
-        on receipt.receive_session_id = session.id
       cross join lateral jsonb_array_elements(session.observation_variants) variant
       where session.id = $1
         and variant ->> 'variantId' = $2
@@ -382,12 +400,13 @@ try {
     [
       ambiguousSession.snapshot.session.receiveSessionId,
       ambiguousInput.variantId,
+      AMBIGUOUS_TRANSACTION_HASH,
     ],
   );
   assert.deepEqual(ambiguousRows[0], {
-    session_status: "recovery_required",
-    receipt_status: "recovery_required",
-    child_funding_operation_id: null,
+    session_status: "open",
+    receipt_count: "0",
+    allocation_error_code: "handoff_candidate_ambiguity",
     event_cursor_block: "101",
   });
 

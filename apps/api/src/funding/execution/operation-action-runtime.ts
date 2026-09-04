@@ -449,6 +449,17 @@ export class FundingOperationActionRuntime {
     }
     const unreferencedAmbiguity = isUnreferencedFundingActionAmbiguity(input);
     if (
+      input.failureCode === "embedded_evm_submission_unknown" &&
+      (step.executorId !== "wallet_profile_evm_v1" ||
+        (action.kind !== "evm_transaction" &&
+          action.kind !== "evm_transaction_batch"))
+    ) {
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        "embedded EVM diagnostic requires a committed EVM wallet action",
+      );
+    }
+    if (
       (mayHaveBroadcast &&
         !input.transactionReference &&
         !unreferencedAmbiguity) ||
@@ -485,6 +496,9 @@ export class FundingOperationActionRuntime {
     const actualCosts = {
       ...input.actualCosts,
       ...(input.failureCode ? { reasonCode: input.failureCode } : {}),
+      ...(normalizedReference?.kind === "provider_receipt"
+        ? { providerReferenceKind: "privy_transaction" }
+        : {}),
     };
     const finished = await finishFundingStepAttemptForUser(this.db, {
       userId,

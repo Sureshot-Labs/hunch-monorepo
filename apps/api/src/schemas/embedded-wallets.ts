@@ -69,6 +69,8 @@ export const solanaPrefundOperationSchema = z.enum([
 
 export const embeddedEvmPrepareBodySchema = z.object({
   chainId: z.number().int().positive(),
+  executionKey: embeddedExecutionKeySchema.optional(),
+  returnOnAccepted: z.boolean().default(false),
   executionMode: z.enum(["sequential", "atomic"]).default("sequential"),
   transactions: z.array(embeddedEvmTransactionSchema).min(1).max(8),
 });

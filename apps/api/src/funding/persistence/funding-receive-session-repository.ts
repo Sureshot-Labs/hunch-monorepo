@@ -15,7 +15,10 @@ import {
   type FundingReceiveSessionStatus,
   type JsonValue,
 } from "../domain/types.js";
-import { canonicalAccountAddress } from "../domain/asset-identity.js";
+import {
+  canonicalAccountAddress,
+  canonicalAssetId,
+} from "../domain/asset-identity.js";
 import { allocateFundingObservationInTransaction } from "./funding-operation-repository.js";
 import { lockFundingAuthorizationReservationScope } from "./funding-authorization-reservation-lock.js";
 import { canonicalJsonEqual } from "./canonical.js";
@@ -1404,8 +1407,8 @@ export type RecoverableFundingReceiveCanonicalEvent = Readonly<{
  * Returns a bounded backlog of canonical transfers which arrived before an
  * eligible receive session was visible. The chain scanner may already have
  * advanced past these immutable events, so normal rescanning cannot recover
- * them. Only the narrow, ownership-unavailable quarantine is retryable;
- * ambiguous-owner events remain fail-closed for manual recovery.
+ * them. Ownership-unavailable and in-flight route-correlation quarantines are
+ * retryable; ambiguous-owner events remain fail-closed for manual recovery.
  */
 export async function listRecoverableFundingReceiveCanonicalEvents(
   db: Pick<PoolClient, "query">,
@@ -1446,8 +1449,10 @@ export async function listRecoverableFundingReceiveCanonicalEvents(
       from funding_receive_sessions receive_session
       join funding_receive_canonical_events canonical_event
         on canonical_event.allocation_status = 'recovery_required'
-       and canonical_event.allocation_error_code =
-             'receive_session_allocation_unavailable'
+       and canonical_event.allocation_error_code in (
+             'receive_session_allocation_unavailable',
+             'owned_route_destination_correlation_pending'
+           )
       cross join lateral (
         select start_variant->>'variantId' as variant_id
         from jsonb_array_elements(
@@ -1511,34 +1516,139 @@ export async function listRecoverableFundingReceiveCanonicalEvents(
 }
 
 /**
- * A historical event can enter the retry backlog before the matching Hunch
- * handoff evidence becomes visible. Once that event is proven internal, keep
- * the immutable evidence for audit but remove it from external-deposit retry.
+ * Reserve a physical transfer for an internal Hunch workflow before the
+ * receive allocator can expose it as a user deposit. The row deliberately
+ * remains immutable audit evidence in the canonical-event table, but its
+ * error code keeps it out of the external-deposit retry queue.
  */
-export async function suppressRecoverableFundingReceiveCanonicalInternalEvent(
+export async function quarantineFundingReceiveCanonicalInternalEvent(
   db: Pick<PoolClient, "query">,
   input: Readonly<{
     networkId: string;
+    asset: AssetRef;
+    destinationAddress: string;
+    sourceAddress: string | null;
+    rawAmount: string;
     transactionHash: string;
     eventIndex: string;
+    ledgerHeight: string;
+    blockHash: string;
+    observedAt: Date;
+    reason: string;
     now: Date;
   }>,
 ): Promise<boolean> {
-  const result = await db.query(
+  const event = await db.query<FundingReceiveCanonicalEventAllocationRow>(
+    `
+      insert into funding_receive_canonical_events (
+        network_id,
+        asset_id,
+        asset_decimals,
+        destination_address,
+        source_address,
+        raw_amount,
+        tx_hash,
+        event_index,
+        ledger_height,
+        block_hash,
+        observed_at,
+        allocation_status,
+        allocation_error_code,
+        first_observed_at,
+        last_observed_at
+      )
+      values (
+        $1, $2, $3, $4, $5, $6::numeric, $7, $8, $9::numeric, $10, $11,
+        'recovery_required', $12, $13, $13
+      )
+      on conflict (network_id, tx_hash, event_index)
+      do update set last_observed_at = greatest(
+        funding_receive_canonical_events.last_observed_at,
+        excluded.last_observed_at
+      )
+      returning
+        id,
+        network_id,
+        asset_id,
+        asset_decimals,
+        destination_address,
+        source_address,
+        raw_amount::text,
+        tx_hash,
+        event_index,
+        ledger_height::text,
+        block_hash,
+        observed_at,
+        allocation_status,
+        allocated_receive_session_id,
+        allocated_receipt_id,
+        allocation_error_code
+    `,
+    [
+      input.networkId,
+      canonicalAssetId(input.asset),
+      input.asset.decimals,
+      canonicalAccountAddress(input.networkId, input.destinationAddress),
+      input.sourceAddress == null
+        ? null
+        : canonicalAccountAddress(input.networkId, input.sourceAddress),
+      input.rawAmount,
+      input.transactionHash,
+      input.eventIndex,
+      input.ledgerHeight,
+      input.blockHash,
+      input.observedAt,
+      input.reason,
+      input.now,
+    ],
+  );
+  const row = event.rows[0];
+  if (!row || !sameCanonicalEventIdentity(row, input)) {
+    throw new Error("canonical internal event identity collision");
+  }
+  if (
+    row.allocation_status === "recovery_required" &&
+    row.allocation_error_code === input.reason
+  ) {
+    return true;
+  }
+  if (
+    row.allocation_status !== "pending" &&
+    !(
+      row.allocation_status === "recovery_required" &&
+      row.allocation_error_code != null &&
+      [
+        "receive_session_allocation_unavailable",
+        "owned_route_destination_correlation_pending",
+      ].includes(row.allocation_error_code)
+    )
+  ) {
+    return false;
+  }
+  const quarantined = await db.query(
     `
       update funding_receive_canonical_events
-      set allocation_error_code = 'internal_handoff_suppressed',
-          last_observed_at = greatest(last_observed_at, $4)
-      where network_id = $1
-        and tx_hash = $2
-        and event_index = $3
-        and allocation_status = 'recovery_required'
-        and allocation_error_code =
-              'receive_session_allocation_unavailable'
+      set allocation_status = 'recovery_required',
+          allocated_receive_session_id = null,
+          allocated_receipt_id = null,
+          allocation_error_code = $2,
+          allocated_at = null,
+          last_observed_at = greatest(last_observed_at, $3)
+      where id = $1
+        and (
+          allocation_status = 'pending'
+          or (
+            allocation_status = 'recovery_required'
+            and allocation_error_code in (
+                  'receive_session_allocation_unavailable',
+                  'owned_route_destination_correlation_pending'
+                )
+          )
+        )
     `,
-    [input.networkId, input.transactionHash, input.eventIndex, input.now],
+    [row.id, input.reason, input.now],
   );
-  return result.rowCount === 1;
+  return quarantined.rowCount === 1;
 }
 
 function sameCanonicalReceiveValue(
@@ -1798,7 +1908,11 @@ export async function claimFundingReceiveCanonicalEventAllocation(
   }
   const retryUnavailableAllocation =
     row.allocation_status === "recovery_required" &&
-    row.allocation_error_code === "receive_session_allocation_unavailable";
+    row.allocation_error_code != null &&
+    [
+      "receive_session_allocation_unavailable",
+      "owned_route_destination_correlation_pending",
+    ].includes(row.allocation_error_code);
   if (row.allocation_status !== "pending" && !retryUnavailableAllocation) {
     return {
       eventId: row.id,
@@ -1867,8 +1981,10 @@ export async function claimFundingReceiveCanonicalEventAllocation(
             allocation_status = 'pending'
             or (
               allocation_status = 'recovery_required'
-              and allocation_error_code =
-                    'receive_session_allocation_unavailable'
+              and allocation_error_code in (
+                    'receive_session_allocation_unavailable',
+                    'owned_route_destination_correlation_pending'
+                  )
             )
           )
       `,
@@ -1906,8 +2022,10 @@ export async function claimFundingReceiveCanonicalEventAllocation(
             last_observed_at = $2
         where id = $1
           and allocation_status = 'recovery_required'
-          and allocation_error_code =
-                'receive_session_allocation_unavailable'
+          and allocation_error_code in (
+                'receive_session_allocation_unavailable',
+                'owned_route_destination_correlation_pending'
+              )
       `,
       [row.id, input.now],
     );

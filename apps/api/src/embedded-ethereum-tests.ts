@@ -5,6 +5,10 @@ import { ethers } from "ethers";
 
 import { env } from "./env.js";
 import {
+  embeddedEvmPrepareBodySchema,
+  embeddedEvmExecuteBodySchema,
+} from "./schemas/embedded-wallets.js";
+import {
   assertEmbeddedEvmSponsorshipAllowed,
   buildEmbeddedEvmTransactionFingerprint,
   embeddedEvmSponsorshipTestHooks,
@@ -12,11 +16,18 @@ import {
 } from "./services/embedded-evm-sponsorship.js";
 import {
   buildEmbeddedEthereumSendTransactionRequest,
+  confirmEmbeddedEthereumExecution,
+  executeEmbeddedEthereumTransactionRequests,
   prepareEmbeddedEthereumTransactionRequests,
   resolvePrivyTransactionHash,
   transactionHashFromUserOperationReceipt,
   type EmbeddedEthereumWalletContext,
 } from "./services/embedded-ethereum.js";
+import {
+  encodePrivyTransactionIdReference,
+  encodePrivyUserOperationReference,
+  parsePrivyFundingTransactionReference,
+} from "./funding/execution/privy-transaction-reference.js";
 
 type TestCase = {
   name: string;
@@ -152,6 +163,163 @@ const tests: TestCase[] = [
       };
       assert.equal(secondBody.caip2, "eip155:137");
       assert.equal(secondBody.sponsor, false);
+    },
+  },
+  {
+    name: "embedded ethereum execution key binds a stable Privy idempotency key",
+    run: () => {
+      const prepare = (executionKey: string) =>
+        prepareEmbeddedEthereumTransactionRequests({
+          context: walletContext,
+          chainId: 137,
+          executionKey,
+          transactions: [
+            {
+              id: "withdrawal-transfer",
+              label: "Withdrawal transfer",
+              to: "0x1111111111111111111111111111111111111111",
+              data: "0x01",
+            },
+          ],
+        })[0]?.input.headers["privy-idempotency-key"];
+
+      assert.ok(prepare("funding-attempt-1"));
+      assert.equal(prepare("funding-attempt-1"), prepare("funding-attempt-1"));
+      assert.notEqual(
+        prepare("funding-attempt-1"),
+        prepare("funding-attempt-2"),
+      );
+    },
+  },
+  {
+    name: "Privy pending references are versioned and round-trip safely",
+    run: () => {
+      const transactionReference =
+        encodePrivyTransactionIdReference("transaction_123");
+      const userOperationReference = encodePrivyUserOperationReference(
+        `0x${"ab".repeat(32)}`,
+      );
+      assert.deepEqual(
+        parsePrivyFundingTransactionReference(transactionReference),
+        { kind: "transaction_id", value: "transaction_123" },
+      );
+      assert.deepEqual(
+        parsePrivyFundingTransactionReference(userOperationReference),
+        { kind: "user_operation", value: `0x${"ab".repeat(32)}` },
+      );
+      assert.equal(
+        parsePrivyFundingTransactionReference("privy-transaction-v1:bad:id"),
+        null,
+      );
+    },
+  },
+  {
+    name: "old clients and ordinary repeated transfers keep their signed request unchanged",
+    run: () => {
+      const body = {
+        chainId: 137,
+        transactions: [
+          {
+            id: "transfer",
+            label: "Transfer",
+            to: walletContext.signer,
+            data: "0x",
+          },
+        ],
+      };
+      const prepared = embeddedEvmPrepareBodySchema.parse(body);
+      const executed = embeddedEvmExecuteBodySchema.parse({
+        ...body,
+        executionKey: "embedded-evm:existing-client-key",
+        signedRequests: [{ id: "transfer", signature: "signature" }],
+      });
+      const requests = (input: typeof prepared) =>
+        prepareEmbeddedEthereumTransactionRequests({
+          ...input,
+          context: walletContext,
+          executionKey: input.returnOnAccepted ? input.executionKey : undefined,
+        });
+      assert.deepEqual(requests(prepared), requests(executed));
+      assert.equal(
+        requests(executed)[0]?.input.headers["privy-idempotency-key"],
+        undefined,
+      );
+      const funding = { ...executed, returnOnAccepted: true };
+      assert.ok(requests(funding)[0]?.input.headers["privy-idempotency-key"]);
+      assert.deepEqual(requests(funding), requests({ ...funding }));
+    },
+  },
+  {
+    name: "a confirmed caller resolves a cached accepted response without broadcasting again",
+    run: async () => {
+      const hash = `0x${"ab".repeat(32)}`;
+      const reads: string[] = [];
+      const hashes = await confirmEmbeddedEthereumExecution(
+        137,
+        [{ value: "privy-transaction-v1:transaction_accepted_123" }],
+        {
+          transactionById: async (id) => {
+            reads.push(id);
+            return hash;
+          },
+          userOperation: async () => {
+            throw new Error("unexpected user operation lookup");
+          },
+          receipt: async (chainId, value) => {
+            assert.equal(chainId, 137);
+            reads.push(value);
+          },
+        },
+      );
+      assert.deepEqual(hashes, [hash]);
+      assert.deepEqual(reads, ["transaction_accepted_123", hash]);
+    },
+  },
+  {
+    name: "accepted Privy EVM execution returns its durable provider reference without waiting",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async () =>
+        new Response(
+          JSON.stringify({
+            data: { transaction_id: "transaction_accepted_123" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      try {
+        const result = await executeEmbeddedEthereumTransactionRequests({
+          chainId: 137,
+          requests: [
+            buildEmbeddedEthereumSendTransactionRequest({
+              context: walletContext,
+              chainId: 137,
+              executionKey: "funding-attempt-accepted",
+              transaction: {
+                id: "withdrawal-transfer",
+                label: "Funding transaction",
+                to: "0x1111111111111111111111111111111111111111",
+                data: "0x",
+              },
+            }),
+          ],
+          signatures: [
+            { id: "withdrawal-transfer", signature: "authorization-signature" },
+          ],
+          returnOnAccepted: true,
+        });
+        assert.deepEqual(result, {
+          confirmationPending: true,
+          transactionHashes: [],
+          transactionReferences: [
+            {
+              kind: "provider_transaction",
+              value: "privy-transaction-v1:transaction_accepted_123",
+            },
+          ],
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     },
   },
   {

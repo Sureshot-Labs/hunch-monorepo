@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import type { Pool } from "@hunch/infra";
 
 import {
+  classifyOwnedRouteCanonicalDestinationEvents,
+  destinationObservationEvidence,
   observeOwnedRouteDestination,
   ownedRouteExactDestinationCredits,
   ownedRouteProviderCredits,
@@ -184,6 +186,122 @@ assert.equal(
   "an unrelated ready receipt cannot satisfy Relay destination evidence",
 );
 
+const exactCanonicalTransactionHash = `0x${"12".repeat(32)}`;
+const ambiguousCanonicalTransactionHash = `0x${"34".repeat(32)}`;
+const externalCanonicalTransactionHash = `0x${"56".repeat(32)}`;
+const pendingCanonicalTransactionHash = `0x${"67".repeat(32)}`;
+const canonicalDestinationEvents = [
+  exactCanonicalTransactionHash,
+  ambiguousCanonicalTransactionHash,
+  externalCanonicalTransactionHash,
+  pendingCanonicalTransactionHash,
+].map((transactionHash, eventIndex) => ({
+  networkId: target.asset.networkId,
+  asset: target.asset,
+  destinationAddress: target.destinationAddress,
+  sourceAddress: "0x0000000000000000000000000000000000000006",
+  rawAmount: "1010102",
+  transactionHash,
+  eventIndex: String(eventIndex),
+  ledgerHeight: String(200 + eventIndex),
+  blockHash: `0x${"78".repeat(32)}`,
+  observedAt: new Date(`2026-08-14T17:20:1${eventIndex}.873Z`),
+}));
+const canonicalClassifications =
+  await classifyOwnedRouteCanonicalDestinationEvents(
+    {
+      query: async (sql: string, values?: readonly unknown[]) => {
+        assert.match(sql, /relayTransactionReferenceFingerprints/);
+        assert.match(sql, /destinationTransactionReferenceCount/);
+        assert.match(sql, /funding_account_identifier_equal/);
+        assert.match(sql, /candidate_rank <= 2/);
+        assert.match(sql, /operation_status not in/);
+        const lookups = JSON.parse(String(values?.[1])) as Array<{
+          identity: string;
+          transactionReferenceFingerprint: string;
+        }>;
+        assert.deepEqual(
+          lookups.map((lookup) => lookup.transactionReferenceFingerprint),
+          canonicalDestinationEvents.map(
+            (event) => `fingerprint:${event.transactionHash}`,
+          ),
+        );
+        return {
+          rows: [
+            {
+              event_identity: lookups[0]?.identity,
+              match_kind: "exact",
+              operation_id: target.operationId,
+              segment_id: primaryProviderSegment.segmentId,
+            },
+            {
+              event_identity: lookups[1]?.identity,
+              match_kind: "exact",
+              operation_id: target.operationId,
+              segment_id: primaryProviderSegment.segmentId,
+            },
+            {
+              event_identity: lookups[1]?.identity,
+              match_kind: "exact",
+              operation_id: "00000000-0000-4000-8000-000000000020",
+              segment_id: "00000000-0000-4000-8000-000000000021",
+            },
+            {
+              event_identity: lookups[3]?.identity,
+              match_kind: "possible",
+              operation_id: target.operationId,
+              segment_id: primaryProviderSegment.segmentId,
+            },
+          ],
+        };
+      },
+    } as never,
+    {
+      userId: target.userId,
+      events: canonicalDestinationEvents,
+      referenceCodec: {
+        fingerprint: (reference) => `fingerprint:${reference}`,
+      },
+    },
+  );
+const canonicalIdentity = (transactionHash: string, eventIndex: string) =>
+  `${target.asset.networkId}:${transactionHash}:${eventIndex}`;
+assert.deepEqual(
+  canonicalClassifications.get(
+    canonicalIdentity(exactCanonicalTransactionHash, "0"),
+  ),
+  {
+    kind: "internal",
+    operationId: target.operationId,
+    segmentId: primaryProviderSegment.segmentId,
+    transactionReferenceFingerprint: `fingerprint:${exactCanonicalTransactionHash}`,
+  },
+);
+assert.deepEqual(
+  canonicalClassifications.get(
+    canonicalIdentity(ambiguousCanonicalTransactionHash, "1"),
+  ),
+  {
+    kind: "recovery_required",
+    reason: "owned_route_destination_ambiguous",
+  },
+);
+assert.deepEqual(
+  canonicalClassifications.get(
+    canonicalIdentity(externalCanonicalTransactionHash, "2"),
+  ),
+  { kind: "external" },
+);
+assert.deepEqual(
+  canonicalClassifications.get(
+    canonicalIdentity(pendingCanonicalTransactionHash, "3"),
+  ),
+  {
+    kind: "recovery_required",
+    reason: "owned_route_destination_correlation_pending",
+  },
+);
+
 let persisted = 0;
 const observer = new OwnedRouteDestinationObserver({
   loadTarget: async () => target,
@@ -237,184 +355,22 @@ assert.deepEqual(
   { destinationsPolled: 0, destinationSatisfied: false },
 );
 
-let inspectedCompetitionQuery = false;
-const baselineAwareObserver = new OwnedRouteDestinationObserver();
 assert.deepEqual(
-  await baselineAwareObserver.pollOperation(
-    {
-      query: async (sql: string) => {
-        inspectedCompetitionQuery = true;
-        assert.match(sql, /providerUpdatedAt/);
-        assert.match(sql, /destinationObservation,baselineAsOf/);
-        assert.match(sql, /destination,spendability,asOf/);
-        assert.match(sql, /observation_start_variants/);
-        assert.match(sql, /receive_session\.opened_at/);
-        assert.match(sql, /direct_destination_credit/);
-        assert.match(
-          sql,
-          /receive_receipt\.child_funding_operation_id = operation\.id/,
-        );
-        assert.match(sql, /receive_destination_baseline\.baseline_as_of/);
-        assert.match(sql, /coalesce\(/);
-        assert.match(sql, /destination_baseline\.baseline_as_of/);
-        assert.match(sql, /destinationTransactionReferenceCount/);
-        assert.match(sql, /competing_attempt\.broadcast_may_have_occurred/);
-        assert.match(sql, /originTransactionReferenceCount/);
-        assert.doesNotMatch(sql, /competing\.updated_at >=/);
-        assert.match(sql, /to_timestamp/);
-        assert.match(sql, /competing_preparation\.kind = 'venue_readiness'/);
-        assert.match(sql, /competing_credit\.kind = 'destination_credit'/);
-        assert.match(
-          sql,
-          /competing\.status = 'ready'[\s\S]+settled_competing_credit\.observed_at <=[\s\S]+destination_baseline\.baseline_as_of/,
-        );
-        assert.match(
-          sql,
-          /not exists \([\s\S]+unsettled_competing_credit\.observed_at >[\s\S]+destination_baseline\.baseline_as_of/,
-        );
-        assert.match(sql, /'reconcile_required'/);
-        assert.match(sql, /'recovery_required'/);
-        assert.match(
-          sql,
-          /competing\.status = 'recovery_required'[\s\S]+segment\.raw_status = 'success'[\s\S]+relayStatusCategory[\s\S]+provider_success/,
-        );
-        assert.match(
-          sql,
-          /competing_segment\.support_metadata[\s\S]+destinationTransactionReferenceCount[\s\S]+::integer = 0/,
-        );
-        assert.match(sql, /exists \(\s+select 1[\s\S]+competing_segment/);
-        assert.match(
-          sql,
-          /then to_timestamp\([\s\S]+providerUpdatedAt[\s\S]+>\s+destination_baseline\.baseline_as_of/,
-        );
-        assert.doesNotMatch(sql, /and not \(\s+case/);
-        const preparationAfterBaseline = sql.indexOf(
-          "competing_preparation.observed_at >",
-        );
-        const preparationAtOrBeforeBaseline = sql.indexOf(
-          "competing_preparation.observed_at <=",
-        );
-        assert.ok(preparationAfterBaseline >= 0);
-        assert.ok(
-          preparationAtOrBeforeBaseline > preparationAfterBaseline,
-          "a post-baseline preparation observation must take precedence over historical readiness",
-        );
-        assert.doesNotMatch(sql, /competing_segment\.ordinal = 0/);
-        assert.doesNotMatch(sql, /\n\s+and segment\.raw_status = 'success'/);
-        assert.match(
-          sql,
-          /operation\.status not in \([^)]*'completed'[^)]*'cancelled'[^)]*\)/,
-        );
-        assert.doesNotMatch(
-          sql,
-          /operation\.status not in \([^)]*'reconcile_required'/,
-        );
-        assert.match(
-          sql,
-          /operation\.status <> 'recovery_required'[\s\S]*operation\.recovery_mode = 'automatic_evidence'/,
-        );
-        return { rows: [] };
-      },
-    } as unknown as Pool,
-    target.operationId,
-  ),
-  { destinationsPolled: 0, destinationSatisfied: false },
-);
-assert.equal(inspectedCompetitionQuery, true);
-
-const receiveBaselineObserver = new OwnedRouteDestinationObserver({
-  observe: async (_pool, loaded) => {
-    assert.equal(loaded.baselineRaw, "500000");
-    assert.equal(loaded.baselineRevision, "immutable-receive-baseline");
-    assert.equal(loaded.destinationLocationId, "limitless-usdc-location");
-    return {
-      observedRaw: "1500000",
-      revision: "destination-after-relay",
-      observedAt: "2026-08-14T17:20:15.873Z",
-    };
+  destinationObservationEvidence({}, null, {
+    locationId: target.destinationLocationId,
+    asset: target.asset,
+    baselineRaw: "500000",
+    baselineRevision: "immutable-receive-baseline",
+  }),
+  {
+    locationId: target.destinationLocationId,
+    asset: target.asset,
+    baselineRaw: "500000",
+    baselineRevision: "immutable-receive-baseline",
   },
-  persist: async (_pool, input) => {
-    assert.equal(input.target.baselineRaw, "500000");
-    assert.equal(input.target.baselineRevision, "immutable-receive-baseline");
-    return true;
-  },
-});
-assert.deepEqual(
-  await receiveBaselineObserver.pollOperation(
-    {
-      query: async (sql: string) => {
-        if (sql.includes("from funding_receive_receipts source_receipt")) {
-          return { rows: [] };
-        }
-        return {
-          rows: [
-            {
-              operation_id: target.operationId,
-              user_id: target.userId,
-              purpose: target.purpose,
-              market_id: target.marketId,
-              status: "recovery_required",
-              progress_stage: "source_observed",
-              version: 10,
-              venue_binding_snapshot: {
-                venueBindingOptionId: target.venueBindingOptionId,
-              },
-              destination_target_snapshot: {
-                kind: "owned_location",
-                location: {
-                  kind: "venue_account",
-                  locationId: target.destinationLocationId,
-                  accountId: target.userId,
-                  asset: target.asset,
-                  details: { address: target.destinationAddress },
-                },
-              },
-              operation_support_metadata: {
-                fundingReceiveReceiptId: "00000000-0000-4000-8000-000000000012",
-              },
-              planner_snapshot: null,
-              receive_destination_observation: {
-                locationId: target.destinationLocationId,
-                asset: target.asset,
-                baselineRaw: "500000",
-                baselineRevision: "immutable-receive-baseline",
-                baselineAsOf: "2026-08-14T17:19:15.000Z",
-              },
-              quoted_min_output: {
-                asset: target.asset,
-                raw: "1000000",
-              },
-              requested_destination_amount: {
-                asset: target.asset,
-                raw: "1000000",
-              },
-              provider_segments: [
-                {
-                  segmentId: target.providerSegments[0]?.segmentId,
-                  ordinal: 0,
-                  expectedOutput: {
-                    asset: target.asset,
-                    raw: "1000000",
-                  },
-                  minimumOutput: {
-                    asset: target.asset,
-                    raw: "1000000",
-                  },
-                  rawStatus: "success",
-                  destinationTransactionReferenceCount: 0,
-                },
-              ],
-              competing_count: "0",
-            },
-          ],
-        };
-      },
-    } as unknown as Pool,
-    target.operationId,
-  ),
-  { destinationsPolled: 1, destinationSatisfied: true },
+  "the immutable receive-session baseline remains a valid fallback",
 );
 
 console.log(
-  "[funding-owned-route-destination-observer-tests] exact balance delta, baseline-aware competition, and scoped polling passed",
+  "[funding-owned-route-destination-observer-tests] exact balance delta, canonical ownership, receive baseline, and scoped polling passed",
 );

@@ -40,6 +40,7 @@ import {
   extractDebridgeErrorMessage,
 } from "../services/debridge-client.js";
 import {
+  confirmEmbeddedEthereumExecution,
   executeEmbeddedEthereumTransactionRequests,
   prepareEmbeddedEthereumTransactionRequests,
   resolveEmbeddedEthereumWalletContext,
@@ -2512,6 +2513,9 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
         const requests = prepareEmbeddedEthereumTransactionRequests({
           context,
           chainId: request.body.chainId,
+          executionKey: request.body.returnOnAccepted
+            ? request.body.executionKey
+            : undefined,
           executionMode: request.body.executionMode,
           transactions: request.body.transactions,
         });
@@ -2599,23 +2603,37 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             const requests = prepareEmbeddedEthereumTransactionRequests({
               context,
               chainId: request.body.chainId,
+              executionKey: request.body.returnOnAccepted
+                ? request.body.executionKey
+                : undefined,
               executionMode: request.body.executionMode,
               transactions: request.body.transactions,
             });
-            const transactionHashes =
-              await executeEmbeddedEthereumTransactionRequests({
-                chainId: request.body.chainId,
-                requests,
-                signatures: request.body.signedRequests,
-              });
+            const execution = await executeEmbeddedEthereumTransactionRequests({
+              chainId: request.body.chainId,
+              requests,
+              returnOnAccepted: request.body.returnOnAccepted,
+              signatures: request.body.signedRequests,
+            });
             return {
               ok: true,
               signer: context.signer,
               chainId: request.body.chainId,
-              transactionHashes,
+              ...execution,
             };
           },
         });
+        if (!request.body.returnOnAccepted && result.confirmationPending) {
+          const transactionHashes = await confirmEmbeddedEthereumExecution(
+            request.body.chainId,
+            result.transactionReferences,
+          );
+          return reply.send({
+            ...result,
+            confirmationPending: false,
+            transactionHashes,
+          });
+        }
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send(result);
       } catch (error) {

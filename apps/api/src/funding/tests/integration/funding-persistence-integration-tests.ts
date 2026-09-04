@@ -102,7 +102,11 @@ import {
   reduceFundingOperationInTransaction,
   runFundingReconciliationBatch,
 } from "../../reconciliation/funding-reducer.js";
-import { OwnedRouteDestinationObserver } from "../../reconciliation/owned-route-destination-observer.js";
+import {
+  classifyOwnedRouteCanonicalDestinationEvents,
+  recordOwnedRouteCanonicalDestinationCredit,
+  OwnedRouteDestinationObserver,
+} from "../../reconciliation/owned-route-destination-observer.js";
 import { DirectIngressDestinationObserver } from "../../reconciliation/direct-ingress-observer.js";
 import {
   lockPolymarketFundingOperationPredecessor,
@@ -1431,6 +1435,7 @@ async function testLateCanonicalFailureRearmsRetryAndKeepsReorgWatch(): Promise<
       const candidateTransactionHashB = `0x${"33".repeat(32)}`;
       const exactHashConflict = await inspectEvmTarget(
         {
+          userId,
           operationId,
           stepId: step.id,
           segmentId: null,
@@ -1451,6 +1456,7 @@ async function testLateCanonicalFailureRearmsRetryAndKeepsReorgWatch(): Promise<
           receiptRefCiphertext: "ciphertext:late-hash-conflict",
           receiptRefLookupHmac: hash("7"),
           lookupKeyVersion: 1,
+          referenceKind: "external_handoff",
           previousReceipt: failedReceipt,
         },
         polymarketRelayerTransactionReference("relayer_late_hash_conflict"),
@@ -2239,6 +2245,119 @@ async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<vo
       );
       const segmentId = segment.rows[0]?.id;
       assert.ok(segmentId);
+      await manualRecoveryClient.query(
+        "savepoint canonical_route_classification",
+      );
+      const canonicalEvent = {
+        networkId: ASSET.networkId,
+        asset: ASSET,
+        destinationAddress: "0x00000000000000000000000000000000000000d2",
+        sourceAddress: "0x00000000000000000000000000000000000000e2",
+        rawAmount: "5057251",
+        transactionHash: `0x${"91".repeat(32)}`,
+        eventIndex: "3",
+        ledgerHeight: "200",
+        blockHash: `0x${"92".repeat(32)}`,
+        observedAt: new Date(),
+      };
+      const fingerprint = (value: string) =>
+        crypto.createHash("sha256").update(value).digest("hex");
+      const classify = async (event = canonicalEvent, accountId = userId) =>
+        (
+          await classifyOwnedRouteCanonicalDestinationEvents(
+            manualRecoveryClient,
+            {
+              userId: accountId,
+              events: [event],
+              referenceCodec: { fingerprint },
+            },
+          )
+        )
+          .values()
+          .next().value;
+      assert.deepEqual(
+        await classify(),
+        { kind: "external" },
+        "an unsubmitted route cannot hold an unrelated deposit",
+      );
+      await manualRecoveryClient.query(
+        `update funding_operation_segments
+         set support_metadata = support_metadata || '{"originTransactionReferenceCount":1}'::jsonb
+         where id = $1`,
+        [segmentId],
+      );
+      assert.deepEqual(
+        await classify(),
+        {
+          kind: "recovery_required",
+          reason: "owned_route_destination_correlation_pending",
+        },
+        "a live route waits for provider correlation before receive allocation",
+      );
+      assert.deepEqual(
+        await classify(canonicalEvent, crypto.randomUUID()),
+        { kind: "external" },
+        "another account cannot own this transfer",
+      );
+      await manualRecoveryClient.query(
+        `update funding_operation_segments
+         set raw_status = 'success', support_metadata = support_metadata || $2::jsonb
+         where id = $1`,
+        [
+          segmentId,
+          {
+            relayStatusCategory: "provider_success",
+            destinationTransactionReferenceCount: 1,
+            relayTransactionReferenceFingerprints: [
+              fingerprint(canonicalEvent.transactionHash),
+            ],
+          },
+        ],
+      );
+      const exact = await classify();
+      assert.equal(exact?.kind, "internal");
+      assert.equal(
+        (await classify({ ...canonicalEvent, observedAt: new Date(0) }))?.kind,
+        "internal",
+        "exact chain identity is stronger than scanner wall-clock time",
+      );
+      assert.equal(
+        (await classify({ ...canonicalEvent, rawAmount: "1" }))?.kind,
+        "internal",
+        "underfilled internal transfers are still not external deposits",
+      );
+      assert.deepEqual(
+        await classify({
+          ...canonicalEvent,
+          transactionHash: `0x${"93".repeat(32)}`,
+        }),
+        { kind: "external" },
+        "a known different destination transaction does not capture a new deposit",
+      );
+      assert.ok(exact?.kind === "internal");
+      await recordOwnedRouteCanonicalDestinationCredit(manualRecoveryClient, {
+        event: canonicalEvent,
+        match: exact,
+        now: new Date(),
+      });
+      await recordOwnedRouteCanonicalDestinationCredit(manualRecoveryClient, {
+        event: canonicalEvent,
+        match: exact,
+        now: new Date(),
+      });
+      const credited = await manualRecoveryClient.query<{ total: string }>(
+        `select count(*)::text as total from funding_observations
+         where operation_id = $1 and kind = 'destination_credit' and tx_hash = $2`,
+        [operationId, canonicalEvent.transactionHash],
+      );
+      assert.equal(
+        credited.rows[0]?.total,
+        "1",
+        "re-observation credits the physical transfer exactly once",
+      );
+      await manualRecoveryClient.query(
+        "rollback to savepoint canonical_route_classification",
+      );
       await ingestFundingObservationInTransaction(manualRecoveryClient, {
         discoverySource: "chain_rpc",
         observation: {

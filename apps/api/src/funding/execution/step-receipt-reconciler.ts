@@ -1,4 +1,4 @@
-import type { Pool } from "@hunch/infra";
+import { tx, type Pool } from "@hunch/infra";
 import { PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { ethers } from "ethers";
@@ -36,13 +36,19 @@ import {
   type FundingStepReceiptObservation,
   type FundingStepReceiptTarget,
 } from "../persistence/funding-step-receipt-repository.js";
+import { resolveAmbiguousProviderFundingStepAttemptForUserInTransaction } from "../persistence/funding-evidence-repository.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import {
   parsePolymarketRelayerTransactionReference,
   POLYMARKET_HANDOFF_CHAIN_ATTRIBUTION_WINDOW_MS,
   polymarketDepositWalletHandoffExpectation,
 } from "./polymarket-deposit-wallet-handoff.js";
+import {
+  parsePrivyFundingTransactionReference,
+  type PrivyFundingTransactionReference,
+} from "./privy-transaction-reference.js";
 import type { FundingTransactionReferenceCodec } from "./transaction-reference-codec.js";
+import type { DelegatedFundingExecutionResult } from "./delegated-funding-executor.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -2625,6 +2631,11 @@ export type FundingStepReceiptInspector = (
   reference: string,
 ) => Promise<FundingStepReceiptEvidence>;
 
+export type PrivyFundingReferenceResolver = (
+  reference: PrivyFundingTransactionReference,
+  networkId: string,
+) => Promise<DelegatedFundingExecutionResult>;
+
 export class FundingStepReceiptReconciliationDriver {
   constructor(
     readonly referenceCodec: FundingTransactionReferenceCodec,
@@ -2633,6 +2644,7 @@ export class FundingStepReceiptReconciliationDriver {
       inspectSvm?: FundingStepReceiptInspector;
       listTargets?: typeof listFundingStepReceiptTargets;
       applyEvidence?: typeof applyFundingStepReceiptEvidence;
+      resolvePrivyReference?: PrivyFundingReferenceResolver;
     }> = {},
   ) {}
 
@@ -2647,10 +2659,13 @@ export class FundingStepReceiptReconciliationDriver {
     const inspectionContext = createEvmReceiptInspectionContext();
     const inspectionResults: ReadonlyArray<
       PromiseSettledResult<
-        Readonly<{
-          target: FundingStepReceiptTarget;
-          inspected: FundingStepReceiptEvidence;
-        }>
+        | Readonly<{
+            kind: "receipt";
+            target: FundingStepReceiptTarget;
+            inspected: FundingStepReceiptEvidence;
+          }>
+        | Readonly<{ kind: "provider_pending" }>
+        | Readonly<{ kind: "provider_resolved" }>
       >
     > = await Promise.allSettled(
       targets.map(async (target) => {
@@ -2670,6 +2685,56 @@ export class FundingStepReceiptReconciliationDriver {
             "funding transaction reference integrity check failed",
           );
         }
+        if (target.referenceKind === "provider_receipt") {
+          const providerReference =
+            parsePrivyFundingTransactionReference(reference);
+          if (!providerReference || !this.dependencies.resolvePrivyReference) {
+            throw new Error(
+              "funding provider transaction reference cannot be resolved",
+            );
+          }
+          const resolution = await this.dependencies.resolvePrivyReference(
+            providerReference,
+            target.networkId,
+          );
+          if (
+            resolution.kind === "pending" ||
+            resolution.kind === "ambiguous"
+          ) {
+            return { kind: "provider_pending" } as const;
+          }
+          await tx(pool, (client) =>
+            resolveAmbiguousProviderFundingStepAttemptForUserInTransaction(
+              client,
+              {
+                userId: target.userId,
+                operationId: target.operationId,
+                stepId: target.stepId,
+                attemptId: target.attemptId,
+                providerReferenceLookupHmac: target.receiptRefLookupHmac,
+                retryableDefinitiveFailure: false,
+                resolution:
+                  resolution.kind === "submitted"
+                    ? {
+                        kind: "transaction",
+                        receiptRefCiphertext: this.referenceCodec.encrypt(
+                          resolution.transactionReference,
+                        ),
+                        receiptRefLookupHmac: this.referenceCodec.fingerprint(
+                          resolution.transactionReference,
+                        ),
+                        lookupKeyVersion: this.referenceCodec.keyVersion,
+                      }
+                    : {
+                        kind: "definitive_failure",
+                        actualCosts: { reasonCode: resolution.reasonCode },
+                      },
+                now,
+              },
+            ),
+          );
+          return { kind: "provider_resolved" } as const;
+        }
         const inspected =
           target.action.kind === "evm_transaction" ||
           target.action.kind === "evm_transaction_batch" ||
@@ -2681,7 +2746,7 @@ export class FundingStepReceiptReconciliationDriver {
                 target,
                 reference,
               );
-        return { target, inspected };
+        return { kind: "receipt", target, inspected } as const;
       }),
     );
 
@@ -2692,6 +2757,7 @@ export class FundingStepReceiptReconciliationDriver {
         failures.push(result.reason);
         continue;
       }
+      if (result.value.kind !== "receipt") continue;
       const { target, inspected } = result.value;
       try {
         await (

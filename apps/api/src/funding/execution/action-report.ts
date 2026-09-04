@@ -1,5 +1,6 @@
 export const FUNDING_ACTION_FAILURE_CODES = [
   "client_execution_failed",
+  "embedded_evm_submission_unknown",
   "external_handoff_provider_rejected",
   "external_handoff_provider_response_invalid",
   "external_handoff_submission_unknown",
@@ -32,7 +33,8 @@ export function isUnreferencedFundingActionAmbiguity(input: {
   return (
     input.outcome === "ambiguous" &&
     input.transactionReference === null &&
-    (input.failureCode === "external_handoff_submission_unknown" ||
+    (input.failureCode === "embedded_evm_submission_unknown" ||
+      input.failureCode === "external_handoff_submission_unknown" ||
       input.failureCode === "external_handoff_provider_response_invalid")
   );
 }
@@ -49,6 +51,7 @@ export function isFundingActionFailureReportConsistent(input: {
   if (input.failureCode === null) return true;
   if (input.transactionReference !== null) return false;
   if (
+    input.failureCode === "embedded_evm_submission_unknown" ||
     input.failureCode === "external_handoff_submission_unknown" ||
     input.failureCode === "external_handoff_provider_response_invalid"
   ) {

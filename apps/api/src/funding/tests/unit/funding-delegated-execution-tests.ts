@@ -400,6 +400,14 @@ assert.deepEqual(
 );
 assert.deepEqual(
   await resolvePrivyDelegatedFundingSubmission(
+    { status: "failed" },
+    submissionDependencies,
+  ),
+  { kind: "pending" },
+  "an unbound failed provider ID cannot clear possible broadcast evidence",
+);
+assert.deepEqual(
+  await resolvePrivyDelegatedFundingSubmission(
     { reference_id: "attempt-1" },
     submissionDependencies,
   ),

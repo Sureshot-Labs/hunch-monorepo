@@ -1,5 +1,6 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
+import type { RelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
 import { sameAccountAddress } from "../domain/asset-identity.js";
 import { normalizedActionSchema } from "../domain/schemas.js";
 import type {
@@ -29,13 +30,17 @@ import {
   insertFundingReceiveReceipt,
   listRecoverableFundingReceiveCanonicalEvents,
   lockFundingReceiveSessionScope,
-  suppressRecoverableFundingReceiveCanonicalInternalEvent,
+  quarantineFundingReceiveCanonicalInternalEvent,
   expireFundingReceiveSessions,
   updateClosedFundingReceiveSessionObservation,
   updateFundingReceiveSessionObservation,
   type RecoverableFundingReceiveCanonicalEvent,
   type FundingReceiveSessionSnapshot,
 } from "../persistence/funding-receive-session-repository.js";
+import {
+  classifyOwnedRouteCanonicalDestinationEvents,
+  recordOwnedRouteCanonicalDestinationCredit,
+} from "../reconciliation/owned-route-destination-observer.js";
 import {
   scanCanonicalFundingReceiveEvents,
   scanCanonicalFundingReceiveEventsBatch,
@@ -553,6 +558,7 @@ export class FundingReceiveSessionObserver {
         FundingTransactionReferenceCodec,
         "decrypt" | "fingerprint" | "keyVersion"
       >;
+      relayReferenceCodec?: Pick<RelayReferenceCodec, "fingerprint">;
       scanCanonicalEvents?: typeof scanCanonicalFundingReceiveEvents;
       scanCanonicalEventsBatch?: typeof scanCanonicalFundingReceiveEventsBatch;
       listPotentialPolymarketHandoffs?: typeof listPotentialPolymarketHandoffsForCanonicalEvents;
@@ -880,9 +886,6 @@ export class FundingReceiveSessionObserver {
         const event = recoveredCanonicalEvent(variants, entry);
         return event ? [event] : [];
       });
-      const recoveredEventIdentities = new Set(
-        recoveredEvents.map(canonicalEventIdentity),
-      );
       const uniqueEvents = deduplicateCanonicalEvents([
         ...recoveredEvents,
         ...events,
@@ -896,22 +899,137 @@ export class FundingReceiveSessionObserver {
         uniqueEvents,
         now,
       );
+      const ownedRouteClassifications = this.dependencies.relayReferenceCodec
+        ? await classifyOwnedRouteCanonicalDestinationEvents(client, {
+            userId: snapshot.userId,
+            events: uniqueEvents.map((event) => ({
+              networkId: event.variant.networkId,
+              asset: event.variant.asset,
+              destinationAddress: event.destinationAddress,
+              sourceAddress: event.sourceAddress,
+              rawAmount: event.rawAmount,
+              transactionHash: event.transactionHash,
+              eventIndex: event.eventIndex,
+              ledgerHeight: event.blockNumber,
+              blockHash: event.blockHash,
+              observedAt: new Date(event.observedAt),
+            })),
+            referenceCodec: this.dependencies.relayReferenceCodec,
+          })
+        : new Map();
       for (const event of uniqueEvents) {
-        const handoffClassification = handoffClassifications.get(
-          canonicalEventIdentity(event),
-        );
+        const eventIdentity = canonicalEventIdentity(event);
+        const handoffClassification = handoffClassifications.get(eventIdentity);
         if (handoffClassification?.kind === "internal") {
-          if (recoveredEventIdentities.has(canonicalEventIdentity(event))) {
-            await suppressRecoverableFundingReceiveCanonicalInternalEvent(
-              client,
-              {
-                networkId: event.variant.networkId,
-                transactionHash: event.transactionHash,
-                eventIndex: event.eventIndex,
-                now,
-              },
+          const quarantined =
+            await quarantineFundingReceiveCanonicalInternalEvent(client, {
+              networkId: event.variant.networkId,
+              asset: event.variant.asset,
+              destinationAddress: event.destinationAddress,
+              sourceAddress: event.sourceAddress,
+              rawAmount: event.rawAmount,
+              transactionHash: event.transactionHash,
+              eventIndex: event.eventIndex,
+              ledgerHeight: event.blockNumber,
+              blockHash: event.blockHash,
+              observedAt: new Date(event.observedAt),
+              reason: "internal_handoff_suppressed",
+              now,
+            });
+          if (!quarantined) {
+            throw new Error(
+              "internal handoff was already allocated as an external deposit",
             );
           }
+          continue;
+        }
+        if (handoffClassification?.kind === "recovery_required") {
+          const quarantined =
+            await quarantineFundingReceiveCanonicalInternalEvent(client, {
+              networkId: event.variant.networkId,
+              asset: event.variant.asset,
+              destinationAddress: event.destinationAddress,
+              sourceAddress: event.sourceAddress,
+              rawAmount: event.rawAmount,
+              transactionHash: event.transactionHash,
+              eventIndex: event.eventIndex,
+              ledgerHeight: event.blockNumber,
+              blockHash: event.blockHash,
+              observedAt: new Date(event.observedAt),
+              reason:
+                handoffClassification.reason ??
+                "internal_handoff_classification_ambiguous",
+              now,
+            });
+          if (!quarantined) {
+            throw new Error(
+              "ambiguous internal handoff was already allocated as an external deposit",
+            );
+          }
+          continue;
+        }
+        const ownedRouteClassification =
+          ownedRouteClassifications.get(eventIdentity);
+        if (ownedRouteClassification?.kind === "recovery_required") {
+          const quarantined =
+            await quarantineFundingReceiveCanonicalInternalEvent(client, {
+              networkId: event.variant.networkId,
+              asset: event.variant.asset,
+              destinationAddress: event.destinationAddress,
+              sourceAddress: event.sourceAddress,
+              rawAmount: event.rawAmount,
+              transactionHash: event.transactionHash,
+              eventIndex: event.eventIndex,
+              ledgerHeight: event.blockNumber,
+              blockHash: event.blockHash,
+              observedAt: new Date(event.observedAt),
+              reason: ownedRouteClassification.reason,
+              now,
+            });
+          if (!quarantined) {
+            throw new Error(
+              "ambiguous owned-route transfer was already allocated as an external deposit",
+            );
+          }
+          continue;
+        }
+        if (ownedRouteClassification?.kind === "internal") {
+          const quarantined =
+            await quarantineFundingReceiveCanonicalInternalEvent(client, {
+              networkId: event.variant.networkId,
+              asset: event.variant.asset,
+              destinationAddress: event.destinationAddress,
+              sourceAddress: event.sourceAddress,
+              rawAmount: event.rawAmount,
+              transactionHash: event.transactionHash,
+              eventIndex: event.eventIndex,
+              ledgerHeight: event.blockNumber,
+              blockHash: event.blockHash,
+              observedAt: new Date(event.observedAt),
+              reason: "internal_owned_route_destination_suppressed",
+              now,
+            });
+          if (!quarantined) {
+            throw new Error(
+              "owned-route transfer was already allocated as an external deposit",
+            );
+          }
+          await recordOwnedRouteCanonicalDestinationCredit(client, {
+            event: {
+              networkId: event.variant.networkId,
+              asset: event.variant.asset,
+              destinationAddress: event.destinationAddress,
+              sourceAddress: event.sourceAddress,
+              rawAmount: event.rawAmount,
+              transactionHash: event.transactionHash,
+              eventIndex: event.eventIndex,
+              ledgerHeight: event.blockNumber,
+              blockHash: event.blockHash,
+              observedAt: new Date(event.observedAt),
+            },
+            match: ownedRouteClassification,
+            now,
+          });
           continue;
         }
         const allocation = await claimFundingReceiveCanonicalEventAllocation(
@@ -953,8 +1071,6 @@ export class FundingReceiveSessionObserver {
           completion: event.variant.completion,
           handling,
         });
-        const handoffRecoveryRequired =
-          handoffClassification?.kind === "recovery_required";
         const observerId =
           event.variant.observation.payload.eventIdentity ===
           "solana_transfer_v1"
@@ -982,9 +1098,7 @@ export class FundingReceiveSessionObserver {
           },
           observedAt: new Date(event.observedAt),
           handling,
-          status: handoffRecoveryRequired
-            ? "recovery_required"
-            : disposition.receiptStatus,
+          status: disposition.receiptStatus,
           evidence: {
             observerId,
             transactionHash: event.transactionHash,
@@ -994,12 +1108,6 @@ export class FundingReceiveSessionObserver {
             sourceAddress: event.sourceAddress,
             canonicalEventId: allocation.eventId,
             lateReceipt: disposition.late,
-            ...(handoffRecoveryRequired
-              ? {
-                  handoffClassification: "recovery_required",
-                  handoffReason: handoffClassification.reason,
-                }
-              : {}),
           },
           now,
         });
@@ -1032,9 +1140,7 @@ export class FundingReceiveSessionObserver {
           canonicalEventId: allocation.eventId,
           now,
         });
-        recoveryRequired ||=
-          handoffRecoveryRequired ||
-          disposition.sessionStatus === "recovery_required";
+        recoveryRequired ||= disposition.sessionStatus === "recovery_required";
       }
       if (!cursorAdvanced && !eventBelongsToSession) {
         return { receiptsRecorded: 0, recoveryRequired: false };

@@ -3,6 +3,7 @@ import { ethers } from "ethers";
 import { RELAY_PINNED_ASSETS } from "../../funding-providers/relay/mappings.js";
 import { POLYMARKET_COLLATERAL_ONRAMP } from "../../funding-providers/relay/rehearsal.js";
 import type { JsonValue, NormalizedAction } from "../domain/types.js";
+import { parsePrivyFundingTransactionReference } from "./privy-transaction-reference.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -162,7 +163,7 @@ export function polymarketDepositWalletHandoffExpectation(
 }
 
 export type PolymarketDepositWalletTransactionReference = Readonly<{
-  kind: "external_handoff" | "transaction";
+  kind: "external_handoff" | "provider_receipt" | "transaction";
   reference: string;
 }>;
 
@@ -197,6 +198,13 @@ export function normalizePolymarketDepositWalletTransactionReference(
   reference: string,
 ): PolymarketDepositWalletTransactionReference {
   const trimmed = reference.trim();
+  if (
+    (action.kind === "evm_transaction" ||
+      action.kind === "evm_transaction_batch") &&
+    parsePrivyFundingTransactionReference(trimmed)
+  ) {
+    return { kind: "provider_receipt", reference: trimmed };
+  }
   const handoff = polymarketDepositWalletHandoffExpectation(action, validation);
   if (handoff && EVM_TRANSACTION_HASH_PATTERN.test(trimmed)) {
     return { kind: "transaction", reference: trimmed.toLowerCase() };

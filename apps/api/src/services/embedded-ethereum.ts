@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { ethers } from "ethers";
 
 import type { User } from "../auth.js";
@@ -9,6 +10,11 @@ import {
   type PrivyWalletProfile,
   PrivyService,
 } from "../privy-service.js";
+import {
+  encodePrivyTransactionIdReference,
+  encodePrivyUserOperationReference,
+  parsePrivyFundingTransactionReference,
+} from "../funding/execution/privy-transaction-reference.js";
 
 const PRIVY_WALLET_API_BASE_URL = "https://api.privy.io";
 
@@ -183,6 +189,7 @@ function createPrivyWalletRpcRequest(args: {
   id: string;
   label: string;
   walletId: string;
+  idempotencyKey?: string | null;
   body: Record<string, unknown>;
 }): EmbeddedPrivyAuthorizationRequest {
   return {
@@ -195,9 +202,23 @@ function createPrivyWalletRpcRequest(args: {
       body: args.body,
       headers: {
         "privy-app-id": env.privyAppId,
+        ...(args.idempotencyKey
+          ? { "privy-idempotency-key": args.idempotencyKey }
+          : {}),
       },
     },
   };
+}
+
+function buildPrivyIdempotencyKey(inputs: {
+  executionKey: string;
+  requestId: string;
+}): string {
+  const digest = createHash("sha256")
+    .update(`embedded-ethereum:${inputs.executionKey}:${inputs.requestId}`)
+    .digest("hex")
+    .slice(0, 32);
+  return `hunch-evm-${digest}`;
 }
 
 function resolveEvmRpcUrl(chainId: number): string | null {
@@ -751,6 +772,7 @@ export function buildEmbeddedEthereumSendTransactionRequest(inputs: {
   context: EmbeddedEthereumWalletContext;
   chainId: number;
   transaction: EmbeddedEthereumTransactionSpec;
+  executionKey?: string | null;
 }): EmbeddedPrivyAuthorizationRequest {
   const chainId = Math.trunc(inputs.chainId);
   if (!Number.isFinite(chainId) || chainId <= 0) {
@@ -781,6 +803,12 @@ export function buildEmbeddedEthereumSendTransactionRequest(inputs: {
     id: inputs.transaction.id,
     label: inputs.transaction.label,
     walletId: inputs.context.walletId,
+    idempotencyKey: inputs.executionKey
+      ? buildPrivyIdempotencyKey({
+          executionKey: inputs.executionKey,
+          requestId: inputs.transaction.id,
+        })
+      : null,
     body: {
       method: "eth_sendTransaction",
       caip2: `eip155:${chainId}`,
@@ -802,6 +830,7 @@ export function prepareEmbeddedEthereumTransactionRequests(inputs: {
   context: EmbeddedEthereumWalletContext;
   chainId: number;
   executionMode?: "sequential" | "atomic";
+  executionKey?: string | null;
   transactions: EmbeddedEthereumTransactionSpec[];
 }): EmbeddedPrivyAuthorizationRequest[] {
   if (inputs.executionMode === "atomic") {
@@ -850,6 +879,12 @@ export function prepareEmbeddedEthereumTransactionRequests(inputs: {
         id: requestId,
         label: "Atomic EVM funding transaction",
         walletId: inputs.context.walletId,
+        idempotencyKey: inputs.executionKey
+          ? buildPrivyIdempotencyKey({
+              executionKey: inputs.executionKey,
+              requestId,
+            })
+          : null,
         body: {
           method: "wallet_sendCalls",
           caip2: `eip155:${inputs.chainId}`,
@@ -864,6 +899,7 @@ export function prepareEmbeddedEthereumTransactionRequests(inputs: {
       context: inputs.context,
       chainId: inputs.chainId,
       transaction,
+      executionKey: inputs.executionKey,
     }),
   );
 }
@@ -952,8 +988,26 @@ export async function executeEmbeddedEthereumTransactionRequests(inputs: {
   chainId: number;
   requests: EmbeddedPrivyAuthorizationRequest[];
   signatures: EmbeddedPrivyAuthorizationSignature[];
-}): Promise<string[]> {
+  returnOnAccepted?: boolean;
+}): Promise<
+  Readonly<{
+    confirmationPending: boolean;
+    transactionHashes: string[];
+    transactionReferences: ReadonlyArray<
+      Readonly<{
+        kind: "provider_transaction" | "transaction" | "user_operation";
+        value: string;
+      }>
+    >;
+  }>
+> {
   const transactionHashes: string[] = [];
+  const transactionReferences: Array<
+    Readonly<{
+      kind: "provider_transaction" | "transaction" | "user_operation";
+      value: string;
+    }>
+  > = [];
   for (const request of inputs.requests) {
     const postcondition = await buildTokenPostcondition(
       inputs.chainId,
@@ -969,6 +1023,23 @@ export async function executeEmbeddedEthereumTransactionRequests(inputs: {
     );
     const { hash, transactionId, userOperationHash } =
       parsePrivyRpcTransactionHashResponse(payload);
+    if (inputs.returnOnAccepted) {
+      if (hash) {
+        transactionHashes.push(hash);
+        transactionReferences.push({ kind: "transaction", value: hash });
+      } else if (transactionId) {
+        transactionReferences.push({
+          kind: "provider_transaction",
+          value: encodePrivyTransactionIdReference(transactionId),
+        });
+      } else if (userOperationHash) {
+        transactionReferences.push({
+          kind: "user_operation",
+          value: encodePrivyUserOperationReference(userOperationHash),
+        });
+      }
+      continue;
+    }
     const resolvedHash =
       hash ??
       (transactionId
@@ -978,6 +1049,10 @@ export async function executeEmbeddedEthereumTransactionRequests(inputs: {
     if (resolvedHash) {
       await waitForEvmTransaction(inputs.chainId, resolvedHash, request.label);
       transactionHashes.push(resolvedHash);
+      transactionReferences.push({
+        kind: "transaction",
+        value: resolvedHash,
+      });
       continue;
     }
 
@@ -994,6 +1069,10 @@ export async function executeEmbeddedEthereumTransactionRequests(inputs: {
       );
       await waitForTokenPostcondition(postcondition, request.label);
       transactionHashes.push(transactionHash);
+      transactionReferences.push({
+        kind: "transaction",
+        value: transactionHash,
+      });
       continue;
     }
 
@@ -1001,5 +1080,47 @@ export async function executeEmbeddedEthereumTransactionRequests(inputs: {
       `${request.label} did not produce a transaction hash after Privy sponsorship.`,
     );
   }
-  return transactionHashes;
+  return {
+    confirmationPending: inputs.returnOnAccepted === true,
+    transactionHashes,
+    transactionReferences,
+  };
+}
+
+// Single-flight deliberately shares the same broadcast between callers. A
+// caller requiring confirmation must finish a cached early-accept response
+// by reading its receipt, never by sending the transaction again.
+export async function confirmEmbeddedEthereumExecution(
+  chainId: number,
+  references: readonly Readonly<{ value: string }>[],
+  dependencies = {
+    transactionById: waitForPrivyTransaction,
+    userOperation: waitForUserOperationTransactionHash,
+    receipt: waitForEvmTransaction,
+  },
+): Promise<string[]> {
+  if (references.length === 0)
+    throw new Error("Missing accepted EVM reference.");
+  const hashes: string[] = [];
+  for (const reference of references) {
+    const provider = parsePrivyFundingTransactionReference(reference.value);
+    const hash =
+      provider?.kind === "transaction_id"
+        ? await dependencies.transactionById(
+            provider.value,
+            "Funding transaction",
+          )
+        : provider?.kind === "user_operation"
+          ? await dependencies.userOperation(
+              chainId,
+              provider.value,
+              "Funding transaction",
+            )
+          : reference.value;
+    if (!hash)
+      throw new Error("Funding transaction is still pending in Privy.");
+    await dependencies.receipt(chainId, hash, "Funding transaction");
+    hashes.push(hash);
+  }
+  return hashes;
 }

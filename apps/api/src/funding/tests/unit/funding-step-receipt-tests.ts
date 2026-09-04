@@ -1856,6 +1856,7 @@ const hashlessFailedHandoffObservation: FundingStepReceiptObservation = {
   },
 };
 const hashlessFailedHandoffTarget: FundingStepReceiptTarget = {
+  userId: "00000000-0000-4000-8000-000000000101",
   operationId: hashlessFailedHandoffObservation.operationId,
   stepId: hashlessFailedHandoffObservation.stepId,
   segmentId: null,
@@ -1869,6 +1870,7 @@ const hashlessFailedHandoffTarget: FundingStepReceiptTarget = {
   receiptRefCiphertext: "encrypted:hashless-handoff",
   receiptRefLookupHmac: "fingerprint:hashless-handoff",
   lookupKeyVersion: 1,
+  referenceKind: "external_handoff",
   previousReceipt: hashlessFailedHandoffObservation,
 };
 await assert.rejects(
@@ -2387,6 +2389,7 @@ assert.throws(
   /Solana receipt lookup is unavailable during terminal receipt verification/u,
 );
 const svmTarget: FundingStepReceiptTarget = {
+  userId: "00000000-0000-4000-8000-000000000121",
   operationId: finalizedSvmObservation.operationId,
   stepId: finalizedSvmObservation.stepId,
   segmentId: "00000000-0000-4000-8000-000000000124",
@@ -2400,6 +2403,7 @@ const svmTarget: FundingStepReceiptTarget = {
   receiptRefCiphertext: `encrypted:${svmReference}`,
   receiptRefLookupHmac: `fingerprint:${svmReference}`,
   lookupKeyVersion: 1,
+  referenceKind: "signature",
   previousReceipt: finalizedSvmObservation,
 };
 let svmTransactionLookupCount = 0;
@@ -2433,6 +2437,7 @@ assert.equal(svmTransactionLookupCount, 1);
 
 const reference = `0x${"12".repeat(32)}`;
 const target: FundingStepReceiptTarget = {
+  userId: "00000000-0000-4000-8000-000000000000",
   operationId: "00000000-0000-4000-8000-000000000001",
   stepId: "00000000-0000-4000-8000-000000000002",
   segmentId: "00000000-0000-4000-8000-000000000003",
@@ -2446,6 +2451,7 @@ const target: FundingStepReceiptTarget = {
   receiptRefCiphertext: `encrypted:${reference}`,
   receiptRefLookupHmac: `fingerprint:${reference}`,
   lookupKeyVersion: 1,
+  referenceKind: "transaction",
   previousReceipt: null,
 };
 const applied: FundingStepReceiptEvidence[] = [];

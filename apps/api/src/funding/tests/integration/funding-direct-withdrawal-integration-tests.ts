@@ -27,6 +27,7 @@ import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.j
 import { canonicalJsonHash } from "../../persistence/canonical.js";
 import {
   finishFundingStepAttemptForUserInTransaction,
+  resolveAmbiguousProviderFundingStepAttemptForUserInTransaction,
   startFundingStepAttemptInTransaction,
 } from "../../persistence/funding-evidence-repository.js";
 import {
@@ -77,6 +78,7 @@ try {
       receipt: FundingStepReceiptEvidence;
       expectedDestinationAddress: string;
       legacyTerminalStatus: "completed" | "failed";
+      throughPrivyProviderReference?: boolean;
       futureCreditFence?: Readonly<{
         componentId: string;
         locationId: string;
@@ -347,19 +349,59 @@ try {
       canonicalActionFingerprint: canonicalJsonHash(input.action),
       executorId: input.executorId,
     });
-    await finishFundingStepAttemptForUserInTransaction(client, {
-      userId,
-      operationId: committed.operation.id,
-      stepId,
-      attemptId: attempt.id,
-      outcome: "submitted",
-      broadcastMayHaveOccurred: true,
-      referenceKind: "transaction",
-      receiptRefCiphertext: "ciphertext:transaction",
-      receiptRefLookupHmac: hash(attempt.id),
-      lookupKeyVersion: 1,
-      actualCosts: {},
-    });
+    if (input.throughPrivyProviderReference) {
+      const providerReferenceLookupHmac = hash("privy-transaction-id");
+      await finishFundingStepAttemptForUserInTransaction(client, {
+        userId,
+        operationId: committed.operation.id,
+        stepId,
+        attemptId: attempt.id,
+        outcome: "ambiguous",
+        broadcastMayHaveOccurred: true,
+        referenceKind: "provider_receipt",
+        receiptRefCiphertext: "ciphertext:privy-transaction-id",
+        receiptRefLookupHmac: providerReferenceLookupHmac,
+        lookupKeyVersion: 1,
+        actualCosts: { providerReferenceKind: "privy_transaction" },
+      });
+      const providerTargets = await listFundingStepReceiptTargets(
+        client,
+        committed.operation.id,
+      );
+      assert.equal(providerTargets.length, 1);
+      assert.equal(providerTargets[0]?.referenceKind, "provider_receipt");
+      await resolveAmbiguousProviderFundingStepAttemptForUserInTransaction(
+        client,
+        {
+          userId,
+          operationId: committed.operation.id,
+          stepId,
+          attemptId: attempt.id,
+          providerReferenceLookupHmac,
+          retryableDefinitiveFailure: false,
+          resolution: {
+            kind: "transaction",
+            receiptRefCiphertext: "ciphertext:transaction",
+            receiptRefLookupHmac: hash(attempt.id),
+            lookupKeyVersion: 1,
+          },
+        },
+      );
+    } else {
+      await finishFundingStepAttemptForUserInTransaction(client, {
+        userId,
+        operationId: committed.operation.id,
+        stepId,
+        attemptId: attempt.id,
+        outcome: "submitted",
+        broadcastMayHaveOccurred: true,
+        referenceKind: "transaction",
+        receiptRefCiphertext: "ciphertext:transaction",
+        receiptRefLookupHmac: hash(attempt.id),
+        lookupKeyVersion: 1,
+        actualCosts: {},
+      });
+    }
     await client.query(
       `update funding_operations
           set status = $2, progress_stage = 'terminal',
@@ -527,6 +569,7 @@ try {
     },
     expectedDestinationAddress: evmRecipient.toLowerCase(),
     legacyTerminalStatus: "failed",
+    throughPrivyProviderReference: true,
   });
 
   const solAmount = {
@@ -631,7 +674,7 @@ try {
   });
 
   console.log(
-    "[funding-direct-withdrawal-integration-tests] exact EVM/SOL/USDC.e completion, future-credit fencing, and terminal reorg detection passed",
+    "[funding-direct-withdrawal-integration-tests] exact EVM/SOL/USDC.e completion, Privy provider-reference recovery, future-credit fencing, and terminal reorg detection passed",
   );
 } finally {
   await client.query("rollback");

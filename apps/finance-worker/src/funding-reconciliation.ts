@@ -45,6 +45,10 @@ type FundingReconciliationOptions = {
       authorizationPrivateKey: string;
     }>;
   }>;
+  privyTransactionLookup?: Readonly<{
+    appId: string;
+    appSecret: string;
+  }>;
 };
 
 type FundingReconciliationResult = {
@@ -210,6 +214,13 @@ export function delegatedFundingWorkerConfig(
   };
 }
 
+export function privyTransactionLookupConfig(
+  input: Pick<typeof env, "privyAppId" | "privyAppSecret">,
+): FundingReconciliationOptions["privyTransactionLookup"] {
+  if (!input.privyAppId || !input.privyAppSecret) return undefined;
+  return { appId: input.privyAppId, appSecret: input.privyAppSecret };
+}
+
 let fundingModulePromise: Promise<FundingWorkerModule> | null = null;
 let fundingPool: Pool | null = null;
 let fundingModuleLoader: FundingWorkerModuleLoader =
@@ -265,6 +276,7 @@ export async function runFundingReconciliationJob(): Promise<FundingReconciliati
   const limitless = limitlessFundingWorkerConfig(env);
   const referenceProtection = fundingReferenceProtectionConfig(env);
   const delegatedExecution = delegatedFundingWorkerConfig(env);
+  const privyTransactionLookup = privyTransactionLookupConfig(env);
   return module.runFundingReconciliationJob(getFundingPool(), {
     workerId: fundingWorkerId(),
     limit: env.fundingReconciliationBatchSize,
@@ -280,6 +292,7 @@ export async function runFundingReconciliationJob(): Promise<FundingReconciliati
     ...(relay ? { relay } : {}),
     ...(limitless ? { limitless } : {}),
     ...(delegatedExecution ? { delegatedExecution } : {}),
+    ...(privyTransactionLookup ? { privyTransactionLookup } : {}),
   });
 }
 

@@ -9,6 +9,7 @@ import type {
   DelegatedFundingProviderLookupResult,
   DelegatedFundingRecoveryClaim,
 } from "./delegated-funding-executor.js";
+import type { PrivyFundingTransactionReference } from "./privy-transaction-reference.js";
 import type { PolymarketRouterExecutionConfiguration } from "./delegated-funding-config.js";
 import { derivePrivyAuthorizationPublicKey } from "./privy-authorization-key.js";
 import {
@@ -55,6 +56,10 @@ export class PrivyDelegatedFundingProfileInvalidError extends Error {
 }
 
 export type PrivyWalletProfileInspection = "valid" | "invalid" | "unavailable";
+export type PrivyFundingReferenceResolver = (
+  reference: PrivyFundingTransactionReference,
+  networkId: string,
+) => Promise<DelegatedFundingExecutionResult>;
 
 export function privyEvmQuantity(raw: string): string {
   if (!/^(0|[1-9]\d*)$/u.test(raw)) {
@@ -229,10 +234,16 @@ export async function resolvePrivyDelegatedFundingSubmission(
   }>,
   networkId = "evm:137",
 ): Promise<DelegatedFundingExecutionResult> {
+  // Prefer an onchain receipt whenever Privy exposes a transaction hash. Even
+  // a reverted transaction is stronger evidence than the provider status and
+  // lets the normal receipt reconciler prove that no token state changed.
   const directHash = transactionHash(result.hash ?? result.transaction_hash);
   if (directHash) {
     return { kind: "submitted", transactionReference: directHash };
   }
+  // A client-supplied provider ID is not bound to this action. Only the
+  // matching chain receipt may resolve it; an unrelated failed ID must never
+  // clear the action's possible-broadcast evidence.
   const transactionId = result.transaction_id?.trim();
   if (transactionId) {
     try {
@@ -268,6 +279,52 @@ function complete(input: PrivyDelegatedFundingDriverConfig): boolean {
     input.appSecret.trim().length > 0 &&
     input.authorizationPrivateKey.trim().length > 0
   );
+}
+
+async function resolveFundingProviderReferenceWithClient(
+  client: PrivyClient,
+  reference: PrivyFundingTransactionReference,
+  networkId: string,
+): Promise<DelegatedFundingExecutionResult> {
+  if (reference.kind === "transaction_id") {
+    try {
+      return await resolvePrivyDelegatedFundingSubmission(
+        await client.transactions().get(reference.value),
+        {
+          transactionById: (transactionId) =>
+            client.transactions().get(transactionId),
+          userOperationTransactionHash: resolveUserOperationHash,
+        },
+        networkId,
+      );
+    } catch {
+      return { kind: "pending" };
+    }
+  }
+  try {
+    const transactionReference = await resolveUserOperationHash(
+      reference.value,
+      networkId,
+    );
+    return transactionReference
+      ? { kind: "submitted", transactionReference }
+      : { kind: "pending" };
+  } catch {
+    return { kind: "pending" };
+  }
+}
+
+export function createPrivyFundingReferenceResolver(input: {
+  appId: string;
+  appSecret: string;
+}): PrivyFundingReferenceResolver | null {
+  if (!input.appId.trim() || !input.appSecret.trim()) return null;
+  const client = new PrivyClient({
+    appId: input.appId,
+    appSecret: input.appSecret,
+  });
+  return (reference, networkId) =>
+    resolveFundingProviderReferenceWithClient(client, reference, networkId);
 }
 
 export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDriver {
@@ -442,6 +499,17 @@ export class PrivyDelegatedFundingDriver implements DelegatedFundingNetworkDrive
           this.client.transactions().get(transactionId),
         userOperationTransactionHash: resolveUserOperationHash,
       },
+      networkId,
+    );
+  }
+
+  async resolveFundingProviderReference(
+    reference: PrivyFundingTransactionReference,
+    networkId: string,
+  ): Promise<DelegatedFundingExecutionResult> {
+    return resolveFundingProviderReferenceWithClient(
+      this.client,
+      reference,
       networkId,
     );
   }

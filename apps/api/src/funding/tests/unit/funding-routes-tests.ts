@@ -2095,6 +2095,24 @@ await test("operation action reports accept transaction references but no replac
     assert.equal(observed[1]?.attemptId, "attempt_id_12345678");
     assert.equal(observed[1]?.outcome, "submitted");
     assert.equal(observed[1]?.failureCode, null);
+    for (const outcome of ["failed", "ambiguous"] as const) {
+      const embeddedUnknown = await app.inject({
+        method: "POST",
+        url: "/funding/operations/operation_id_12345678/actions/step_id_12345678/report",
+        payload: {
+          attemptId: "attempt_id_12345678",
+          outcome,
+          transactionReference: null,
+          failureCode: "embedded_evm_submission_unknown",
+          actualCosts: { networkFeeRaw: null },
+        },
+      });
+      assert.equal(
+        embeddedUnknown.statusCode,
+        outcome === "ambiguous" ? 200 : 400,
+      );
+    }
+    assert.equal(observed[2]?.failureCode, "embedded_evm_submission_unknown");
   } finally {
     await app.close();
   }

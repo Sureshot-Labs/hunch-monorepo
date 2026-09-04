@@ -31,6 +31,7 @@ export type FundingStepReceiptStatus =
   | "reorged";
 
 export type FundingStepReceiptTarget = Readonly<{
+  userId: string;
   operationId: string;
   stepId: string;
   segmentId: string | null;
@@ -53,6 +54,11 @@ export type FundingStepReceiptTarget = Readonly<{
   receiptRefCiphertext: string;
   receiptRefLookupHmac: string;
   lookupKeyVersion: number;
+  referenceKind:
+    | "external_handoff"
+    | "provider_receipt"
+    | "signature"
+    | "transaction";
   previousReceipt: FundingStepReceiptObservation | null;
 }>;
 
@@ -135,6 +141,7 @@ export async function listFundingStepReceiptTargets(
   operationId: string,
 ): Promise<readonly FundingStepReceiptTarget[]> {
   const { rows } = await db.query<{
+    user_id: string;
     operation_id: string;
     step_id: string;
     segment_id: string | null;
@@ -150,6 +157,7 @@ export async function listFundingStepReceiptTargets(
     receipt_ref_ciphertext: string;
     receipt_ref_lookup_hmac: string;
     lookup_key_version: number;
+    reference_kind: FundingStepReceiptTarget["referenceKind"];
     receipt_operation_id: string | null;
     receipt_step_id: string | null;
     receipt_attempt_id: string | null;
@@ -168,6 +176,7 @@ export async function listFundingStepReceiptTargets(
   }>(
     `
       select
+        operation.user_id,
         step.operation_id,
         step.id as step_id,
         step.segment_id,
@@ -202,6 +211,7 @@ export async function listFundingStepReceiptTargets(
         attempt.receipt_ref_ciphertext,
         attempt.receipt_ref_lookup_hmac,
         attempt.lookup_key_version,
+        attempt.reference_kind,
         receipt.operation_id as receipt_operation_id,
         receipt.step_id as receipt_step_id,
         receipt.attempt_id as receipt_attempt_id,
@@ -221,7 +231,15 @@ export async function listFundingStepReceiptTargets(
       join funding_operation_step_attempts attempt
         on attempt.step_id = step.id
        and attempt.broadcast_may_have_occurred
-       and attempt.reference_kind <> 'provider_receipt'
+       and (
+         attempt.reference_kind <> 'provider_receipt'
+         or (
+           attempt.reference_kind = 'provider_receipt'
+           and step.executor_id = 'wallet_profile_evm_v1'
+           and attempt.actual_costs ->> 'providerReferenceKind' =
+                 'privy_transaction'
+         )
+       )
        and attempt.receipt_ref_ciphertext is not null
        and attempt.receipt_ref_lookup_hmac is not null
        and attempt.lookup_key_version is not null
@@ -291,6 +309,7 @@ export async function listFundingStepReceiptTargets(
           })
         : row.action_validation_result;
     return {
+      userId: row.user_id,
       operationId: row.operation_id,
       stepId: row.step_id,
       segmentId: row.segment_id,
@@ -304,6 +323,7 @@ export async function listFundingStepReceiptTargets(
       receiptRefCiphertext: row.receipt_ref_ciphertext,
       receiptRefLookupHmac: row.receipt_ref_lookup_hmac,
       lookupKeyVersion: row.lookup_key_version,
+      referenceKind: row.reference_kind,
       previousReceipt,
     };
   });

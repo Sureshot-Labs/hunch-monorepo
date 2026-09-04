@@ -39,7 +39,10 @@ import {
 } from "../execution/delegated-funding-executor.js";
 import type { PolymarketRouterExecutionConfiguration } from "../execution/delegated-funding-config.js";
 import { loadRelayEvmExecutionConfiguration } from "../execution/delegated-funding-config.js";
-import { createPrivyDelegatedFundingDriver } from "../execution/privy-delegated-funding-driver.js";
+import {
+  createPrivyDelegatedFundingDriver,
+  createPrivyFundingReferenceResolver,
+} from "../execution/privy-delegated-funding-driver.js";
 import {
   createRelayEvmDelegatedFundingProfile,
   recordFinalizedRelaySourceDebitForOperation,
@@ -139,6 +142,10 @@ export type FundingReconciliationJobOptions =
           appSecret: string;
           authorizationPrivateKey: string;
         }>;
+      }>;
+      privyTransactionLookup?: Readonly<{
+        appId: string;
+        appSecret: string;
       }>;
     }>;
 
@@ -404,6 +411,9 @@ export async function runFundingReconciliationJob(
         },
       })
     : null;
+  const privyReferenceResolver = options.privyTransactionLookup
+    ? createPrivyFundingReferenceResolver(options.privyTransactionLookup)
+    : null;
   const polymarketPusdFundProfile =
     options.delegatedExecution && delegatedDriver
       ? createPolymarketRouterDelegatedFundingProfile({
@@ -448,6 +458,7 @@ export async function runFundingReconciliationJob(
       transactionCodec
         ? {
             transactionReferenceCodec: transactionCodec,
+            ...(relayReferenceCodec ? { relayReferenceCodec } : {}),
           }
         : {},
     ).pollBatch(pool, {
@@ -505,8 +516,15 @@ export async function runFundingReconciliationJob(
   const relayRefundObserver = relayReferenceCodec
     ? new RelayOwnedRefundObserver(relayReferenceCodec)
     : null;
+  const resolvePrivyReference =
+    privyReferenceResolver ??
+    (delegatedDriver
+      ? delegatedDriver.resolveFundingProviderReference.bind(delegatedDriver)
+      : null);
   const receiptDriver = transactionCodec
-    ? new FundingStepReceiptReconciliationDriver(transactionCodec)
+    ? new FundingStepReceiptReconciliationDriver(transactionCodec, {
+        ...(resolvePrivyReference ? { resolvePrivyReference } : {}),
+      })
     : null;
   const polymarketPostconditionDriver =
     transactionCodec && codecConfig

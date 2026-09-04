@@ -22,6 +22,7 @@ import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle
 import {
   allocateFundingObservationInTransaction,
   FundingPersistenceError,
+  wakeFundingReconciliationInTransaction,
 } from "../persistence/funding-operation-repository.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
 import { sameAsset } from "../planner/money.js";
@@ -78,6 +79,300 @@ export type OwnedRouteDestinationObservation = Readonly<{
   revision: string;
   observedAt: string;
 }>;
+
+export type OwnedRouteCanonicalDestinationEvent = Readonly<{
+  networkId: string;
+  asset: AssetRef;
+  destinationAddress: string;
+  sourceAddress: string | null;
+  rawAmount: string;
+  transactionHash: string;
+  eventIndex: string;
+  ledgerHeight: string;
+  blockHash: string;
+  observedAt: Date;
+}>;
+
+export type OwnedRouteCanonicalDestinationClassification =
+  | Readonly<{ kind: "external" }>
+  | Readonly<{
+      kind: "internal";
+      operationId: string;
+      segmentId: string;
+      transactionReferenceFingerprint: string;
+    }>
+  | Readonly<{
+      kind: "recovery_required";
+      reason:
+        | "owned_route_destination_ambiguous"
+        | "owned_route_destination_correlation_pending";
+    }>;
+
+type OwnedRouteCanonicalDestinationCandidateRow = {
+  event_identity: string;
+  match_kind: "exact" | "possible";
+  operation_id: string;
+  segment_id: string;
+};
+
+function canonicalDestinationEventIdentity(
+  event: OwnedRouteCanonicalDestinationEvent,
+): string {
+  return [event.networkId, event.transactionHash, event.eventIndex].join(":");
+}
+
+/**
+ * Correlate chain transfers to Relay destinations before receive-session
+ * allocation. Provider references identify the transaction; the frozen route
+ * envelope (user, asset and destination) prevents a reference from claiming a
+ * transfer for another operation.
+ */
+export async function classifyOwnedRouteCanonicalDestinationEvents(
+  db: Pick<PoolClient, "query">,
+  input: Readonly<{
+    userId: string;
+    events: readonly OwnedRouteCanonicalDestinationEvent[];
+    referenceCodec: Pick<RelayReferenceCodec, "fingerprint">;
+  }>,
+): Promise<ReadonlyMap<string, OwnedRouteCanonicalDestinationClassification>> {
+  const lookups = input.events.map((event) => ({
+    identity: canonicalDestinationEventIdentity(event),
+    networkId: event.networkId,
+    assetId: event.asset.assetId,
+    assetDecimals: event.asset.decimals,
+    destinationAddress: event.destinationAddress,
+    rawAmount: event.rawAmount,
+    transactionReferenceFingerprint: input.referenceCodec.fingerprint(
+      event.transactionHash,
+    ),
+  }));
+  const classifications = new Map<
+    string,
+    OwnedRouteCanonicalDestinationClassification
+  >(
+    input.events.map((event) => [
+      canonicalDestinationEventIdentity(event),
+      { kind: "external" },
+    ]),
+  );
+  if (lookups.length === 0) return classifications;
+  const { rows } = await db.query<OwnedRouteCanonicalDestinationCandidateRow>(
+    `
+      with candidate_event as (
+        select value as event
+        from jsonb_array_elements($2::jsonb)
+      ),
+      candidate_route as (
+        select
+          candidate.event ->> 'identity' as event_identity,
+          operation.id as operation_id,
+          segment.id as segment_id,
+          operation.status as operation_status,
+          (
+            coalesce(segment.support_metadata ->>
+              'originTransactionReferenceCount', '0') ~ '^[1-9][0-9]*$'
+            or exists (
+              select 1
+              from funding_operation_steps source_step
+              join funding_operation_step_attempts source_attempt
+                on source_attempt.step_id = source_step.id
+              where source_step.operation_id = operation.id
+                and source_step.segment_id = segment.id
+                and (source_attempt.broadcast_may_have_occurred
+                     or source_attempt.outcome = 'started')
+            )
+          ) as source_may_be_moving,
+          (segment.raw_status = 'success'
+            and segment.support_metadata ->> 'relayStatusCategory' =
+                  'provider_success'
+            and coalesce(segment.support_metadata ->>
+                  'destinationTransactionReferenceCount', '0') ~ '^[1-9][0-9]*$'
+          ) as destination_known,
+          case
+            when segment.raw_status = 'success'
+             and segment.support_metadata ->> 'relayStatusCategory' =
+                   'provider_success'
+             and case
+                   when coalesce(
+                          segment.support_metadata ->>
+                            'destinationTransactionReferenceCount',
+                          ''
+                        ) ~ '^[0-9]+$'
+                     then (
+                       segment.support_metadata ->>
+                         'destinationTransactionReferenceCount'
+                     )::integer
+                   else 0
+                 end > 0
+             and exists (
+                   select 1
+                   from jsonb_array_elements_text(
+                     case
+                       when jsonb_typeof(
+                              segment.support_metadata ->
+                                'relayTransactionReferenceFingerprints'
+                            ) = 'array'
+                         then segment.support_metadata ->
+                                'relayTransactionReferenceFingerprints'
+                       else '[]'::jsonb
+                     end
+                   ) as fingerprint(reference_value)
+                   where fingerprint.reference_value =
+                         candidate.event ->>
+                           'transactionReferenceFingerprint'
+                 )
+              then 'exact'
+            else 'possible'
+          end as match_kind
+        from candidate_event candidate
+        join funding_operations operation
+         on operation.user_id = $1::uuid
+         and operation.plan_kind in ('wallet_route', 'composite_route')
+         and operation.destination_target_snapshot #>>
+               '{location,asset,networkId}' =
+               candidate.event ->> 'networkId'
+         and operation.destination_target_snapshot #>>
+               '{location,asset,decimals}' =
+               candidate.event ->> 'assetDecimals'
+         and funding_account_identifier_equal(
+               candidate.event ->> 'networkId',
+               operation.destination_target_snapshot #>>
+                 '{location,asset,assetId}',
+               candidate.event ->> 'assetId'
+             )
+         and funding_account_identifier_equal(
+               candidate.event ->> 'networkId',
+               operation.destination_target_snapshot #>>
+                 '{location,details,address}',
+               candidate.event ->> 'destinationAddress'
+             )
+        join funding_operation_segments segment
+          on segment.operation_id = operation.id
+         and segment.provider_id = 'relay'
+         and segment.quoted_min_output #>> '{asset,networkId}' =
+               candidate.event ->> 'networkId'
+         and segment.quoted_min_output #>> '{asset,decimals}' =
+               candidate.event ->> 'assetDecimals'
+         and funding_account_identifier_equal(
+               candidate.event ->> 'networkId',
+               segment.quoted_min_output #>> '{asset,assetId}',
+               candidate.event ->> 'assetId'
+             )
+      ),
+      eligible_candidate as (
+        select *
+        from candidate_route
+        where match_kind = 'exact'
+           or (
+             not coalesce(destination_known, false)
+             and source_may_be_moving
+             and operation_status not in (
+               'ready', 'completed', 'refunded', 'failed', 'cancelled'
+             )
+           )
+      ),
+      ranked_candidate as (
+        select
+          event_identity,
+          operation_id,
+          segment_id,
+          match_kind,
+          row_number() over (
+            partition by event_identity, match_kind
+            order by operation_id, segment_id
+          ) as candidate_rank
+        from eligible_candidate
+      )
+      select event_identity, operation_id, segment_id, match_kind
+      from ranked_candidate
+      where candidate_rank <= 2
+      order by event_identity, match_kind, candidate_rank
+    `,
+    [input.userId, JSON.stringify(lookups)],
+  );
+  const candidatesByEvent = new Map<
+    string,
+    OwnedRouteCanonicalDestinationCandidateRow[]
+  >();
+  for (const row of rows) {
+    const candidates = candidatesByEvent.get(row.event_identity) ?? [];
+    candidates.push(row);
+    candidatesByEvent.set(row.event_identity, candidates);
+  }
+  for (const lookup of lookups) {
+    const candidates = candidatesByEvent.get(lookup.identity) ?? [];
+    const exactCandidates = candidates.filter(
+      (candidate) => candidate.match_kind === "exact",
+    );
+    if (exactCandidates.length > 1) {
+      classifications.set(lookup.identity, {
+        kind: "recovery_required",
+        reason: "owned_route_destination_ambiguous",
+      });
+      continue;
+    }
+    const exactCandidate = exactCandidates[0];
+    if (exactCandidate) {
+      classifications.set(lookup.identity, {
+        kind: "internal",
+        operationId: exactCandidate.operation_id,
+        segmentId: exactCandidate.segment_id,
+        transactionReferenceFingerprint: lookup.transactionReferenceFingerprint,
+      });
+      continue;
+    }
+    if (candidates.some((candidate) => candidate.match_kind === "possible")) {
+      classifications.set(lookup.identity, {
+        kind: "recovery_required",
+        reason: "owned_route_destination_correlation_pending",
+      });
+    }
+  }
+  return classifications;
+}
+
+export async function recordOwnedRouteCanonicalDestinationCredit(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    event: OwnedRouteCanonicalDestinationEvent;
+    match: Extract<
+      OwnedRouteCanonicalDestinationClassification,
+      { kind: "internal" }
+    >;
+    now: Date;
+  }>,
+): Promise<void> {
+  await allocateFundingObservationInTransaction(client, {
+    operationId: input.match.operationId,
+    segmentId: input.match.segmentId,
+    kind: "destination_credit",
+    networkId: input.event.networkId,
+    assetId: input.event.asset.assetId,
+    assetDecimals: input.event.asset.decimals,
+    txHash: input.event.transactionHash,
+    eventIndex: input.event.eventIndex,
+    fromAddress: input.event.sourceAddress,
+    toAddress: input.event.destinationAddress,
+    rawAmount: input.event.rawAmount,
+    observedAt: input.event.observedAt,
+    ledgerHeight: input.event.ledgerHeight,
+    blockHash: input.event.blockHash,
+    finalityStatus: "finalized",
+    finalizedAt: input.now,
+    metadata: {
+      observerId: OWNED_ROUTE_DESTINATION_OBSERVER_ID,
+      relayTransactionReferenceMatched: true,
+      relayTransactionReferenceFingerprint:
+        input.match.transactionReferenceFingerprint,
+      canonicalReceiveEventSuppressed: true,
+    },
+  });
+  await wakeFundingReconciliationInTransaction(client, {
+    operationId: input.match.operationId,
+    dueAt: input.now,
+    priority: 10,
+  });
+}
 
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== "string" || !value.trim()) {
@@ -451,7 +746,7 @@ async function hasCompetingDestinationRoute(
   return false;
 }
 
-function destinationObservationEvidence(
+export function destinationObservationEvidence(
   supportMetadata: JsonRecord,
   plannerSnapshot: JsonRecord | null,
   receiveDestinationObservation: JsonRecord | null,
