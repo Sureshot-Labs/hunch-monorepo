@@ -468,11 +468,15 @@ async function directWithdrawalOptionsForAsset(
 for (const asset of [BASE_USDC, POLYGON_USDC, POLYGON_USDCE, SOLANA_NATIVE]) {
   const options = await directWithdrawalOptionsForAsset(asset);
   assert.equal(options.length, 1);
+  assert.equal(options[0]?.option.expiresAt, "2026-07-24T12:00:30.000Z");
   const plan = options[0]?.commitPlan;
   assert.ok(plan);
   assert.equal(plan.steps.length, 1);
   assert.equal(plan.steps[0]?.stepKind, "transaction");
   assert.equal(plan.steps[0]?.normalizedAction.networkId, asset.networkId);
+  assert.equal(plan.steps[0]?.actionExpiresAt, "2026-07-24T12:15:00.000Z");
+  assert.equal(plan.segments[0]?.quoteExpiresAt, "2026-07-24T12:15:00.000Z");
+  assert.equal(plan.reservations[0]?.expiresAt, "2026-07-24T12:15:00.000Z");
   assert.equal(
     plan.steps[0]?.normalizedAction.kind,
     asset.networkId === "solana:mainnet"
@@ -915,6 +919,22 @@ assert.equal(
   assert.equal(withdrawalPlan.steps[1]?.stepKind, "transaction");
   assert.equal(withdrawalPlan.steps[1]?.segmentOrdinal, 0);
   assert.equal(withdrawalPlan.steps[1]?.dependsOnOrdinal, 0);
+  assert.equal(
+    withdrawalOptions[0]?.option.expiresAt,
+    "2026-07-24T12:00:30.000Z",
+  );
+  assert.equal(
+    withdrawalPlan.steps[1]?.actionExpiresAt,
+    withdrawalRecipient.expiresAt,
+  );
+  assert.equal(
+    withdrawalPlan.segments[0]?.quoteExpiresAt,
+    withdrawalRecipient.expiresAt,
+  );
+  assert.equal(
+    withdrawalPlan.reservations[0]?.expiresAt,
+    withdrawalRecipient.expiresAt,
+  );
   assert.equal(
     withdrawalPlan.steps[1]?.actionValidationResult.recipientAddress,
     "0x1a9eC8B3C44A748F7fAd6623Fd79332cE683cEb0",

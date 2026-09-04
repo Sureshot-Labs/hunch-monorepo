@@ -247,6 +247,29 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "stored fill sync accepts venue overfill as a completed order",
+    run: () => {
+      assert.equal(
+        resolvePolymarketStoredFillSyncStatus({
+          currentStatus: "partially_filled",
+          orderType: "GTC",
+          filledSize: "15.188678",
+          orderSize: "15.0943",
+        }),
+        "filled",
+      );
+      assert.equal(
+        resolvePolymarketStoredFillSyncStatus({
+          currentStatus: POLYMARKET_UNCONFIRMED_STATUS,
+          orderType: "FOK",
+          filledSize: "15.188678",
+          orderSize: "15.0943",
+        }),
+        "matched",
+      );
+    },
+  },
+  {
     name: "stored fill sync preserves cancelled partial fills",
     run: () => {
       const status = resolvePolymarketStoredFillSyncStatus({

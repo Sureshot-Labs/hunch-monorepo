@@ -267,7 +267,6 @@ console.log(
   const intentId = crypto.randomUUID();
   const planFingerprint = digest("claim-at-expiry-plan");
   const handoffTokenHash = digest(opaque("claim_at_expiry_token"));
-  let reservationExpiry: Date;
   const eventId = opaque("event");
   await pool.query(
     `insert into unified_events (
@@ -425,7 +424,7 @@ console.log(
   assert.ok(generatedReservationId);
   const generatedReservationExpiry = generatedReservation.rows[0]?.expires_at;
   assert.ok(generatedReservationExpiry);
-  reservationExpiry = generatedReservationExpiry;
+  const reservationExpiry = generatedReservationExpiry;
   const reservationId = generatedReservationId;
   const telegramUserId = opaque("telegram_user");
   await pool.query(

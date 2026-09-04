@@ -17,6 +17,7 @@ import { sameAccountAddress } from "../funding/domain/asset-identity.js";
 import { SOLANA_NATIVE_ASSET } from "../funding/domain/network-fees.js";
 import { isRawAmount } from "../funding/domain/raw-amount.js";
 import { loadFundingLifecycleProjectionForOperation } from "../funding/lifecycle/funding-lifecycle-read-model.js";
+import type { FundingLifecycleProjection } from "../funding/lifecycle/funding-lifecycle-projector.js";
 import {
   isTelegramPolymarketRouterContinuationPending,
   telegramPolymarketRootRequiresRouterContinuationSql,
@@ -5126,6 +5127,16 @@ function isTransactionalDb(db: DbQuery): db is TransactionalDbQuery {
   return typeof (db as TransactionalDbQuery).connect === "function";
 }
 
+function fundingLifecycleKeepsTelegramTradeIntentActive(
+  lifecycle: FundingLifecycleProjection | null | undefined,
+): boolean {
+  if (!lifecycle || lifecycle.safety.terminal) return false;
+  return (
+    lifecycle.status !== "recovery_required" ||
+    lifecycle.safety.consumerMayRemainLinked
+  );
+}
+
 async function loadUnresolvedTelegramTradeIntent(
   db: DbQuery,
   input: {
@@ -5180,7 +5191,9 @@ async function loadUnresolvedTelegramTradeIntent(
     const projected = await loadFundingLifecycleProjectionForOperation(db, {
       operationId: row.funding_operation_id,
     });
-    if (projected && !projected.lifecycle.safety.terminal) return row;
+    if (fundingLifecycleKeepsTelegramTradeIntentActive(projected?.lifecycle)) {
+      return row;
+    }
   }
   return null;
 }
@@ -5220,7 +5233,9 @@ async function countUnresolvedTelegramTradeIntents(
     const projected = await loadFundingLifecycleProjectionForOperation(db, {
       operationId: row.funding_operation_id,
     });
-    if (projected && !projected.lifecycle.safety.terminal) count += 1;
+    if (fundingLifecycleKeepsTelegramTradeIntentActive(projected?.lifecycle)) {
+      count += 1;
+    }
   }
   return count;
 }
@@ -5297,7 +5312,9 @@ async function listResolvingTelegramTradeIntents(
             : null;
           if (
             row.status === "funding" &&
-            (!projected || projected.lifecycle.safety.terminal)
+            !fundingLifecycleKeepsTelegramTradeIntentActive(
+              projected?.lifecycle,
+            )
           ) {
             return null;
           }
@@ -7078,7 +7095,7 @@ export async function reconcileStaleTelegramTradeIntents(
           now,
         })
       : null;
-    if (!projected || projected.lifecycle.safety.terminal) {
+    if (!fundingLifecycleKeepsTelegramTradeIntentActive(projected?.lifecycle)) {
       inactiveFundingIds.push(candidate.id);
     }
   }

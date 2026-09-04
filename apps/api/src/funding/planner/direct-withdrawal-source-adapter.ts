@@ -116,11 +116,18 @@ export class DirectWithdrawalSourceAdapter implements FundingSourceAdapter {
     ) {
       return [];
     }
-    const expiresAt = new Date(
+    const selectionExpiresAt = new Date(
       Math.min(
         input.now.getTime() + input.policy.ttl.quoteMs,
         Date.parse(input.destination.target.recipient.expiresAt),
       ),
+    ).toISOString();
+    // This adapter has no provider quote. The short quote TTL only fences
+    // source selection and commit. Once committed, the immutable exact-amount
+    // transfer must remain executable after an optional Deposit Wallet ->
+    // controller handoff; persistence still caps every action at 15 minutes.
+    const executionExpiresAt = new Date(
+      Date.parse(input.destination.target.recipient.expiresAt),
     ).toISOString();
     return exactAvailableComponent(this.account, input).flatMap(
       ({ component, execution, withdrawableRaw }): PlannedSourceOption[] => {
@@ -166,7 +173,7 @@ export class DirectWithdrawalSourceAdapter implements FundingSourceAdapter {
             sponsorshipPolicyId: sponsorship.policyId,
             signingMode: sponsorship.signingMode,
           }),
-          actionExpiresAt: expiresAt,
+          actionExpiresAt: executionExpiresAt,
         };
         const steps = buildPolymarketPreRouteHandoffSteps({
           source: { preRouteHandoff: execution.preRouteHandoff },
@@ -231,7 +238,7 @@ export class DirectWithdrawalSourceAdapter implements FundingSourceAdapter {
                 ? ("requested" as const)
                 : ("none" as const),
           })),
-          expiresAt,
+          expiresAt: selectionExpiresAt,
           recommended: false,
           selectable: true,
           reasonCodes: [],
@@ -285,7 +292,7 @@ export class DirectWithdrawalSourceAdapter implements FundingSourceAdapter {
               depositAddressLookupHmac: null,
               lookupKeyVersion: 1,
               refundLocationSnapshot: jsonRecord(execution.executionLocation),
-              quoteExpiresAt: expiresAt,
+              quoteExpiresAt: executionExpiresAt,
               supportMetadata: {
                 executionKind:
                   built.action.kind === "svm_transaction"
@@ -305,7 +312,7 @@ export class DirectWithdrawalSourceAdapter implements FundingSourceAdapter {
               assetDecimals: input.requiredAmount.asset.decimals,
               rawAmount: input.requiredAmount.raw,
               mode: "subtract_available",
-              expiresAt,
+              expiresAt: executionExpiresAt,
             },
           ],
         };

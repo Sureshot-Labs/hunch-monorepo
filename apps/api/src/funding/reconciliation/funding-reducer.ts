@@ -9,6 +9,7 @@ import type { JsonValue } from "../domain/types.js";
 import { canonicalAssetId, sameAsset } from "../domain/asset-identity.js";
 import {
   deriveFundingLifecycle,
+  type FundingLifecycleActionReceipt,
   type FundingLifecycleFacts,
   type FundingLifecycleProjection,
 } from "../lifecycle/funding-lifecycle-projector.js";
@@ -64,6 +65,22 @@ type StoredFundingSegmentRow = {
   quoted_input: JsonRecord;
   quoted_min_output: JsonRecord;
 };
+
+function broadcastReceiptIsUnresolved(
+  status: FundingLifecycleActionReceipt["status"] | null,
+): boolean {
+  if (status === null) return true;
+  switch (status) {
+    case "pending":
+    case "confirmed":
+    case "reorged":
+      return true;
+    case "finalized":
+    case "failed":
+    case "mismatch":
+      return false;
+  }
+}
 
 function isCanonicalFinal(observation: FundingObservationRow): boolean {
   return observation.canonical && observation.finalityStatus === "finalized";
@@ -1236,7 +1253,8 @@ export async function fundingReconciliationWaitState(
   );
   const hasUnresolvedBroadcast = attempts.some(
     ({ attempt }) =>
-      attempt.broadcastMayHaveOccurred && attempt.receipt?.status !== "failed",
+      attempt.broadcastMayHaveOccurred &&
+      broadcastReceiptIsUnresolved(attempt.receipt?.status ?? null),
   );
   const providerReferenceAttempts = attempts.filter(
     ({ action, attempt }) =>
@@ -1249,8 +1267,7 @@ export async function fundingReconciliationWaitState(
     .filter(
       ({ attempt }) =>
         attempt.broadcastMayHaveOccurred &&
-        (attempt.receipt === null ||
-          ["pending", "confirmed", "reorged"].includes(attempt.receipt.status)),
+        broadcastReceiptIsUnresolved(attempt.receipt?.status ?? null),
     )
     .reduce<Date | null>((latest, { attempt }) => {
       const deadline = new Date(

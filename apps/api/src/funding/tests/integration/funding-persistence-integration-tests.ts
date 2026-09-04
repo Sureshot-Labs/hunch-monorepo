@@ -1139,6 +1139,101 @@ async function testRecentBroadcastRecoveryUsesActiveReceiptCadence(): Promise<vo
   }
 }
 
+async function testFinalizedBroadcastDoesNotHideUnbroadcastActionWait(): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const userId = await insertUser(client);
+    const basePlan = buildPlan();
+    const firstStep = basePlan.steps[0];
+    assert.ok(firstStep);
+    const plan: FundingCommitPlan = {
+      ...basePlan,
+      steps: [
+        firstStep,
+        {
+          ...firstStep,
+          ordinal: 1,
+          actionFingerprint: hash("d"),
+          dependsOnOrdinal: 0,
+        },
+      ],
+    };
+    const consentToken = opaque("finalized-before-action-wait-consent");
+    const quote = await createFundingQuoteInTransaction(
+      client,
+      quoteInput(userId, plan, consentToken),
+    );
+    const committed = await commitFundingOperationInTransaction(
+      client,
+      commitInput(userId, quote.id, consentToken, plan),
+    );
+    const steps = await client.query<{
+      action_fingerprint: string;
+      executor_id: string;
+      id: string;
+      ordinal: number;
+    }>(
+      `select id, ordinal, action_fingerprint, executor_id
+         from funding_operation_steps
+        where operation_id = $1::uuid
+        order by ordinal`,
+      [committed.operation.id],
+    );
+    const completedStep = steps.rows[0];
+    assert.ok(completedStep);
+    assert.equal(steps.rows.length, 2);
+    const attempt = await startFundingStepAttemptInTransaction(client, {
+      operationId: committed.operation.id,
+      stepId: completedStep.id,
+      canonicalActionFingerprint: completedStep.action_fingerprint,
+      executorId: completedStep.executor_id,
+    });
+    await finishFundingStepAttemptInTransaction(client, {
+      attemptId: attempt.id,
+      outcome: "submitted",
+      broadcastMayHaveOccurred: true,
+      referenceKind: "transaction",
+      receiptRefCiphertext: "ciphertext:finalized-before-action-wait",
+      receiptRefLookupHmac: hash("9"),
+      lookupKeyVersion: 1,
+      actualCosts: {},
+    });
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: committed.operation.id,
+      stepId: completedStep.id,
+      attemptId: attempt.id,
+      networkId: ASSET.networkId,
+      receipt: {
+        status: "finalized",
+        actionMatch: true,
+        ledgerHeight: "100",
+        blockHash: `0x${"13".repeat(32)}`,
+        canonical: true,
+        failureCode: null,
+        evidence: { confirmations: 12 },
+      },
+    });
+
+    const waitState = await fundingReconciliationWaitState(
+      client,
+      committed.operation.id,
+    );
+    assert.equal(waitState.broadcastEvidenceActiveUntil, null);
+    assert.equal(
+      waitState.awaitingUnbroadcastActionReport,
+      true,
+      "a completed upstream broadcast must not hide the untouched dependent action",
+    );
+    await client.query("rollback");
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function testLateCanonicalFailureRearmsRetryAndKeepsReorgWatch(): Promise<void> {
   const userId = await insertUser(pool);
   const plan = buildPlan();
@@ -7233,6 +7328,10 @@ console.log(
 await testRecentBroadcastRecoveryUsesActiveReceiptCadence();
 console.log(
   "[funding-persistence-integration-tests] ok recent Base, Polygon, and Solana broadcasts retain a bounded active receipt cadence during automatic recovery",
+);
+await testFinalizedBroadcastDoesNotHideUnbroadcastActionWait();
+console.log(
+  "[funding-persistence-integration-tests] ok finalized upstream broadcasts do not hide untouched dependent actions",
 );
 await testLateCanonicalFailureRearmsRetryAndKeepsReorgWatch();
 console.log(

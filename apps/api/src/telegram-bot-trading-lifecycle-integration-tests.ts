@@ -2981,6 +2981,121 @@ try {
       ],
     ],
   );
+
+  const detachedRecoveryConsentHash = crypto
+    .createHash("sha256")
+    .update(`telegram-detached-recovery:${suffix}`)
+    .digest("hex");
+  const detachedRecoveryQuote = await client.query<{ id: string }>(
+    `insert into funding_quotes (
+       user_id, discovery_projection_id, selected_source_option_snapshot,
+       destination_option_snapshot, plan_snapshot, policy_version,
+       policy_revision, canonical_request_hash, plan_hash, consent_token_hash,
+       expires_at, consumed_at
+     ) values (
+       $1, 'telegram-detached-recovery', '{}'::jsonb, '{}'::jsonb,
+       jsonb_build_object(
+         'operation',
+         jsonb_build_object(
+           'initialState',
+           jsonb_build_object('status', 'in_progress', 'stage', 'committed')
+         )
+       ),
+       1, 'telegram-detached-recovery', repeat('1', 64), repeat('2', 64),
+       $2, now() + interval '1 hour', now()
+     ) returning id`,
+    [userId, detachedRecoveryConsentHash],
+  );
+  const detachedRecoveryOperation = await client.query<{ id: string }>(
+    `insert into funding_operations (
+       user_id, quote_id, purpose, status, progress_stage, experience_mode,
+       plan_kind, idempotency_key, commit_request_hash, plan_hash,
+       policy_version, policy_revision, destination_target_snapshot, market_id,
+       placement_snapshot, quote_snapshot, consent_snapshot,
+       original_subject_lookup_hmac, subject_lookup_key_version,
+       support_metadata, expires_at
+     ) values (
+       $1, $2, 'trade_shortfall', 'recovery_required', 'source_action',
+       'instant', 'wallet_route', $3, repeat('4', 64), repeat('2', 64), 1,
+       'telegram-detached-recovery', '{}'::jsonb, $4, '{}'::jsonb, '{}'::jsonb,
+       '{}'::jsonb, repeat('5', 64), 1,
+       jsonb_build_object(
+         'lifecycleManualRecovery',
+         jsonb_build_object(
+           'code', 'fixture_manual_recovery',
+           'requestedAt', clock_timestamp()::text
+         )
+       ),
+       now() + interval '1 hour'
+     ) returning id`,
+    [
+      userId,
+      detachedRecoveryQuote.rows[0]?.id,
+      `detached-recovery:${suffix}`,
+      marketId,
+    ],
+  );
+  const detachedRecoveryIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, action, venue, market_id,
+       event_id, side, amount_usd, status, expires_at, idempotency_key,
+       funding_operation_id
+     ) values (
+       $1, $2, $3, 'buy', 'polymarket', $4, $5, 'YES', 1, 'funding',
+       now() + interval '2 minutes', $6, $7
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      eventId,
+      `detached-recovery-intent:${suffix}`,
+      detachedRecoveryOperation.rows[0]?.id,
+    ],
+  );
+  const detachedRecoveryIntentId = detachedRecoveryIntent.rows[0]?.id;
+  assert.ok(detachedRecoveryIntentId);
+  const marketDuringDetachedRecovery =
+    await buildTelegramBotTradingMarketMessage({
+      appBaseUrl: "https://app.hunch.trade",
+      chatId: telegramUserId,
+      db,
+      marketRef: marketId,
+      signerInspector,
+      telegramMiniAppEnabled: true,
+      telegramUserId,
+      trading,
+    });
+  assert.doesNotMatch(
+    marketDuringDetachedRecovery.text,
+    /existing Buy|Trade still resolving/u,
+    "manual funding recovery must not block a fresh Buy",
+  );
+  const statusDuringDetachedRecovery =
+    await buildTelegramBotTradingStatusMessage(db, telegramUserId, trading, {
+      reconcileLocal: false,
+    });
+  assert.doesNotMatch(
+    statusDuringDetachedRecovery.text,
+    /Resolving trades/u,
+    "manual funding recovery must not remain a resolving Telegram Buy",
+  );
+  const reconciledDetachedRecovery = await reconcileStaleTelegramTradeIntents(
+    db,
+    { telegramUserId },
+  );
+  assert.equal(reconciledDetachedRecovery.failedInactiveFunding, 1);
+  assert.equal(
+    (
+      await client.query<{ status: string }>(
+        `select status from telegram_trade_intents where id = $1::uuid`,
+        [detachedRecoveryIntentId],
+      )
+    ).rows[0]?.status,
+    "failed",
+  );
+
   const staleFundingIntent = await client.query<{ id: string }>(
     `insert into telegram_trade_intents (
        telegram_user_id, user_id, authorization_id, action, venue, market_id,

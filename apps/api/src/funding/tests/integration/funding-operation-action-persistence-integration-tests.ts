@@ -369,6 +369,10 @@ try {
       },
     ],
   } as const;
+  const sponsoredSegment = plan.segments[0];
+  const sponsoredReservation = plan.reservations[0];
+  assert.ok(sponsoredSegment);
+  assert.ok(sponsoredReservation);
   const sponsoredPlan: FundingCommitPlan = {
     operation: {
       ...plan.operation,
@@ -378,7 +382,7 @@ try {
     },
     segments: [
       {
-        ...plan.segments[0]!,
+        ...sponsoredSegment,
         providerQuoteRefCiphertext: "ciphertext:sponsored-admission",
         providerQuoteRefLookupHmac: hash("sponsored-admission"),
         quoteExpiresAt: new Date(Date.now() + 60_000).toISOString(),
@@ -403,7 +407,7 @@ try {
     ],
     reservations: [
       {
-        ...plan.reservations[0]!,
+        ...sponsoredReservation,
         componentId: opaque("component"),
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       },
