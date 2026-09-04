@@ -528,6 +528,54 @@ export async function recordPositionActionSubmission(
   });
 }
 
+export async function bindPositionActionSubmissionTransactionHash(
+  pool: Pool,
+  input: Readonly<{
+    userId: string;
+    operationId: string;
+    expectedSubmissionReference: string;
+    transactionHash: string;
+  }>,
+): Promise<StoredPositionAction> {
+  const transactionHash = input.transactionHash.trim().toLowerCase();
+  if (!/^0x[0-9a-f]{64}$/u.test(transactionHash)) {
+    throw new PositionActionPersistenceError(
+      "submission_conflict",
+      "position action transaction hash is invalid",
+    );
+  }
+  return tx(pool, async (client) => {
+    const operation = await fetchForUpdate(
+      client,
+      input.userId,
+      input.operationId,
+    );
+    if (operation.submissionFingerprint?.toLowerCase() === transactionHash) {
+      return operation;
+    }
+    if (
+      !operation.broadcastMayHaveOccurred ||
+      operation.submissionFingerprint !== input.expectedSubmissionReference ||
+      operation.status === "failed" ||
+      operation.status === "cancelled"
+    ) {
+      throw new PositionActionPersistenceError(
+        "submission_conflict",
+        "position action provider reference no longer matches",
+      );
+    }
+    await client.query(
+      `
+        update position_action_operations
+        set submission_fingerprint = $2
+        where id = $1
+      `,
+      [operation.id, transactionHash],
+    );
+    return refetch(client, operation.id);
+  });
+}
+
 export async function recordPositionActionReceipt(
   pool: Pool,
   input: Readonly<{

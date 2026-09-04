@@ -2,12 +2,17 @@ import { env } from "../../env.js";
 import type { MarketByTokenRow } from "../../repos/unified-read.js";
 import { buildPolymarketRedemptionPlan } from "../../services/polymarket-redemption-plan.js";
 import { fetchPolymarketAccountRoute } from "../../services/polymarket-trading-execution-service.js";
+import {
+  fetchPolymarketRelayerTransaction,
+  polymarketRelayerTransactionHash,
+} from "../../services/polymarket-deposit-wallet-relayer.js";
 import { syncPositionsForUserWallet } from "../../services/positions-sync.js";
 import {
   buildUnavailableRedemptionPlan,
   type RedemptionPlan,
 } from "../../services/redemption-plan.js";
 import { isRecord } from "../../lib/type-guards.js";
+import { parsePolymarketRelayerTransactionReference } from "../execution/polymarket-deposit-wallet-handoff.js";
 import type { JsonObject } from "../domain/types.js";
 import {
   createEvmPositionActionReceiptObserver,
@@ -142,6 +147,21 @@ export function createPolymarketPositionActionVenueDriver(): PositionActionVenue
       };
     },
     observeReceipt,
+    resolveSubmissionTransactionHash: async (submissionReference) => {
+      const transactionId =
+        parsePolymarketRelayerTransactionReference(submissionReference);
+      if (!transactionId) return null;
+      try {
+        return polymarketRelayerTransactionHash(
+          transactionId,
+          await fetchPolymarketRelayerTransaction(transactionId),
+        );
+      } catch {
+        // A relayer lookup is retryable. Never turn a missing provider response
+        // into proof that an already accepted redemption was not submitted.
+        return null;
+      }
+    },
     refreshPositions: async (input) => {
       await syncPositionsForUserWallet(input.db, {
         userId: input.userId,

@@ -48,6 +48,27 @@ export type PolymarketRelayerTransaction = {
   state?: string;
 };
 
+const EVM_TRANSACTION_HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/u;
+
+/**
+ * A relayer state is advisory; an exact transaction hash is the boundary that
+ * lets the funding runtime decide success or revert from canonical chain data.
+ */
+export function polymarketRelayerTransactionHash(
+  expectedTransactionId: string,
+  transaction: PolymarketRelayerTransaction | null,
+): string | null {
+  if (
+    !transaction ||
+    (transaction.transactionID != null &&
+      transaction.transactionID !== expectedTransactionId)
+  ) {
+    return null;
+  }
+  const hash = transaction.transactionHash?.trim() ?? "";
+  return EVM_TRANSACTION_HASH_PATTERN.test(hash) ? hash.toLowerCase() : null;
+}
+
 export function buildDepositWalletBatchTypedData(input: {
   depositWalletAddress: string;
   nonce: string;

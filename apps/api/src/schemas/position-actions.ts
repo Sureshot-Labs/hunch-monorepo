@@ -51,7 +51,9 @@ export const positionActionSubmissionReportSchema = z
     outcome: z.enum(["submitted", "ambiguous", "not_broadcast", "failed"]),
     submissionFingerprint: z
       .string()
-      .regex(/^0x[a-fA-F0-9]{64}$/)
+      .regex(
+        /^(?:0x[a-fA-F0-9]{64}|polymarket-relayer:v1:[A-Za-z0-9_-]{8,160})$/,
+      )
       .nullable(),
     errorCode: z.string().trim().min(1).max(160).nullable(),
   })

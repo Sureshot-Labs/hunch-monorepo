@@ -23,6 +23,7 @@ const NOW = new Date("2026-07-24T12:00:00.000Z");
 const BINDING_ID = "binding_position_owner_12345678";
 const REVISION = "position_inspection_revision_12345678";
 const TX_HASH = `0x${"ab".repeat(32)}`;
+const RELAYER_REFERENCE = "polymarket-relayer:v1:relayer_transaction_12345678";
 
 function readiness(): PositionActionReadiness {
   return {
@@ -298,6 +299,42 @@ await test("claim and report expose no persisted plan or owner address", async (
     });
     assert.equal(reported.statusCode, 200);
     assert.equal(reported.json().operation.submissionFingerprint, TX_HASH);
+  } finally {
+    await app.close();
+  }
+});
+
+await test("submission report accepts a durable Polymarket relayer reference", async () => {
+  let observedReference: string | null = null;
+  const app = await buildApp({
+    report: async (_userId, input) => {
+      observedReference = input.submissionFingerprint;
+      return operation({
+        status: "submitted",
+        executionMode: "venue_relayer",
+        submissionFingerprint: input.submissionFingerprint,
+        broadcastMayHaveOccurred: true,
+        receiptStatus: "pending",
+      });
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: `/position-actions/${OPERATION_ID}/submission/report`,
+      payload: {
+        attemptNumber: 1,
+        outcome: "submitted",
+        submissionFingerprint: RELAYER_REFERENCE,
+        errorCode: null,
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(observedReference, RELAYER_REFERENCE);
+    assert.equal(
+      response.json().operation.submissionFingerprint,
+      RELAYER_REFERENCE,
+    );
   } finally {
     await app.close();
   }

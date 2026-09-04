@@ -202,6 +202,26 @@ function applicableSourceBlockingReasons(
     : reasons;
 }
 
+function applicableWithdrawalBlockingReasons(
+  sources: readonly PlannedSourceOption[],
+  reasons: readonly FundingReasonCode[],
+): readonly FundingReasonCode[] {
+  const exactDirectWithdrawalExists = sources.some(
+    (source) =>
+      source.option.selectable &&
+      source.commitPlan.operation.purpose === "withdrawal" &&
+      source.commitPlan.segments.length === 1 &&
+      source.commitPlan.segments[0]?.providerId ===
+        DIRECT_WITHDRAWAL_PROVIDER_ID,
+  );
+  // Discovery also probes optional conversion routes. Their price, provider,
+  // or gas failures cannot invalidate an independently executable exact
+  // same-asset transfer.
+  return exactDirectWithdrawalExists
+    ? []
+    : applicableSourceBlockingReasons(sources, reasons);
+}
+
 function validatePlannedSources(
   sources: readonly PlannedSourceOption[],
   requiredAmount: Money,
@@ -1208,19 +1228,24 @@ export class FundingPlanner {
       externalRecipientId: recipient.recipientId,
       recipientAddress: recipient.address,
     };
+    const sourcePlanningRequest: FundingSourcePlanningRequest = {
+      accountId: input.accountId,
+      request: input.request,
+      marketContext: null,
+      destinationFacts: null,
+      destination: routeDestination,
+      placement,
+      requiredAmount: amount,
+      policy: withdrawalPolicy,
+      policyRevision: input.policyRevision,
+      now,
+    };
+    const sourceDiscovery = await discoverFundingSources(
+      this.dependencies,
+      sourcePlanningRequest,
+    );
     const sources = validatePlannedSources(
-      await this.dependencies.listSources({
-        accountId: input.accountId,
-        request: input.request,
-        marketContext: null,
-        destinationFacts: null,
-        destination: routeDestination,
-        placement,
-        requiredAmount: amount,
-        policy: withdrawalPolicy,
-        policyRevision: input.policyRevision,
-        now,
-      }),
+      sourceDiscovery.sources,
       amount,
       now,
       input.request.purpose,
@@ -1229,6 +1254,15 @@ export class FundingPlanner {
     const sourceOptions = sources.map((source) =>
       publicSourceOption(source, recommended?.option.sourceOptionId ?? null),
     );
+    const applicableSourceBlockers = applicableWithdrawalBlockingReasons(
+      sources,
+      sourceDiscovery.reasonCodes,
+    );
+    const sourceEvidenceReasonCodes = applicableSourceBlockers.filter(
+      (reason): reason is "rpc_unavailable" | "provider_status_unknown" =>
+        reason === "rpc_unavailable" || reason === "provider_status_unknown",
+    );
+    const sourceEvidenceUnavailable = sourceEvidenceReasonCodes.length > 0;
     const expiresAt = new Date(
       Math.min(
         now.getTime() + withdrawalPolicy.ttl.quoteMs,
@@ -1269,14 +1303,18 @@ export class FundingPlanner {
       asOf: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
       policyVersion: input.policy.contractVersion,
-      completeness: "partial",
-      freshness: "fresh",
-      errors: [{ code: "trusted_price_unavailable", retryable: true }],
+      completeness: sourceEvidenceUnavailable ? "partial" : "complete",
+      freshness: sourceEvidenceUnavailable ? "stale" : "fresh",
+      errors: sourceEvidenceReasonCodes.map((code) => ({
+        code,
+        retryable: true,
+      })),
       reasonCodes: [
-        "trusted_price_unavailable",
-        ...(sourceOptions.some((source) => source.selectable)
-          ? []
-          : (["insufficient_liquidity"] as const)),
+        ...applicableSourceBlockers,
+        ...(!sourceEvidenceUnavailable &&
+        !sourceOptions.some((source) => source.selectable)
+          ? (["insufficient_liquidity"] as const)
+          : []),
       ],
       destinationOptions: [],
     };

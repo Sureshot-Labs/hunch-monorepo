@@ -26,6 +26,7 @@ import {
 import { OwnerBoundPositionActionExecutor } from "../preparation/position-action-executor.js";
 import { WalletPreparationRuntimeService } from "../preparation/runtime-service.js";
 import {
+  bindPositionActionSubmissionTransactionHash,
   claimPositionActionSubmission,
   completePositionActionEffect,
   createOrReplayPositionAction,
@@ -37,6 +38,7 @@ import {
   type PositionActionSubmissionClaim,
   type StoredPositionAction,
 } from "./position-action-repository.js";
+import { parsePolymarketRelayerTransactionReference } from "../execution/polymarket-deposit-wallet-handoff.js";
 import {
   buildRedemptionPositionFacts,
   REDEMPTION_POSITION_REQUIRED_CHECKS,
@@ -484,9 +486,28 @@ export class PositionActionRuntimeService {
       submissionFingerprint: string | null;
     }>,
   ): Promise<StoredPositionAction> {
+    const operation = await fetchPositionActionForUser(this.db, {
+      userId,
+      operationId: input.operationId,
+    });
+    if (!operation) {
+      throw new PositionActionRuntimeError(
+        "position_not_found",
+        "position action operation was not found",
+      );
+    }
     const txHash = transactionHash(input.submissionFingerprint);
+    const providerReference =
+      operation.venueId === "polymarket" &&
+      operation.executionMode === "venue_relayer" &&
+      input.submissionFingerprint &&
+      parsePolymarketRelayerTransactionReference(input.submissionFingerprint)
+        ? input.submissionFingerprint.trim()
+        : null;
+    const submissionReference = txHash ?? providerReference;
     if (
-      (input.outcome === "submitted" && !txHash) ||
+      (input.submissionFingerprint != null && !submissionReference) ||
+      (input.outcome === "submitted" && !submissionReference) ||
       ((input.outcome === "failed" || input.outcome === "not_broadcast") &&
         input.submissionFingerprint != null)
     ) {
@@ -500,7 +521,7 @@ export class PositionActionRuntimeService {
       operationId: input.operationId,
       attemptNumber: input.attemptNumber,
       outcome: input.outcome,
-      submissionFingerprint: txHash,
+      submissionFingerprint: submissionReference,
       errorCode: input.errorCode,
     });
   }
@@ -590,7 +611,22 @@ export class PositionActionRuntimeService {
     if (operation.status === "failed" || operation.status === "cancelled") {
       return publicResult(operation);
     }
-    const txHash = transactionHash(operation.submissionFingerprint);
+    const submissionReference = operation.submissionFingerprint;
+    let txHash = transactionHash(submissionReference);
+    if (operation.broadcastMayHaveOccurred && submissionReference && !txHash) {
+      const resolved = await this.venueDriver(
+        operation.venueId,
+      ).resolveSubmissionTransactionHash?.(submissionReference);
+      if (resolved) {
+        operation = await bindPositionActionSubmissionTransactionHash(this.db, {
+          userId,
+          operationId,
+          expectedSubmissionReference: submissionReference,
+          transactionHash: resolved,
+        });
+        txHash = resolved;
+      }
+    }
     if (!operation.broadcastMayHaveOccurred || !txHash) {
       return {
         status: operation.broadcastMayHaveOccurred

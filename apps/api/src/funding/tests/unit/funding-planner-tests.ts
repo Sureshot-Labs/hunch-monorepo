@@ -7,6 +7,10 @@ import {
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
 } from "../../execution/delegated-funding-profile-ids.js";
+import {
+  DIRECT_WITHDRAWAL_ADAPTER_ID,
+  DIRECT_WITHDRAWAL_PROVIDER_ID,
+} from "../../execution/direct-withdrawal-transfer.js";
 
 import {
   FundingPersistenceError,
@@ -85,6 +89,11 @@ const POLYGON_OTHER_TOKEN: AssetRef = {
   networkId: "evm:137",
   assetId: "0x0000000000000000000000000000000000000003",
   decimals: 18,
+};
+const SOLANA_NATIVE: AssetRef = {
+  networkId: "solana:mainnet",
+  assetId: "11111111111111111111111111111111",
+  decimals: 9,
 };
 
 assert.equal(
@@ -469,6 +478,70 @@ function plannedSource(requiredRaw: string): PlannedSourceOption {
     commitPlan: commitPlan(requiredRaw, option),
     routeId: "relay_polygon_pusd",
     providerId: "relay",
+  };
+}
+
+function plannedDirectSolWithdrawalSource(
+  requiredRaw: string,
+): PlannedSourceOption {
+  const option = sourceOption(requiredRaw, {
+    sourceOptionId: "source_solana_direct_withdrawal_12345678",
+    safeLabel: "Hunch Solana wallet",
+    source: {
+      kind: "owned_location",
+      location: {
+        kind: "wallet",
+        locationId: "location_solana_direct_withdrawal_12345678",
+        accountId: USER_ID,
+        asset: SOLANA_NATIVE,
+        details: {
+          walletId: "wallet_solana_direct_withdrawal_12345678",
+          address: "78Hpb2CbmvW2Gp2aJGZec8nphXdqtRdfjPwwLfxKgo6t",
+        },
+      },
+    },
+    expectedDestination: { asset: SOLANA_NATIVE, raw: requiredRaw },
+    minimumDestination: { asset: SOLANA_NATIVE, raw: requiredRaw },
+    eta: null,
+    experienceMode: "prepare_first",
+  });
+  const base = commitPlan(requiredRaw, option);
+  const recipient = {
+    kind: "external_recipient" as const,
+    recipientId: "recipient_solana_direct_withdrawal_12345678",
+  };
+  return {
+    option,
+    commitPlan: {
+      ...base,
+      operation: {
+        ...base.operation,
+        purpose: "withdrawal",
+        experienceMode: "prepare_first",
+        sourceSnapshot: option as never,
+        destinationTargetSnapshot: recipient as never,
+        externalRecipientId: recipient.recipientId,
+        venueId: null,
+        venueBindingSnapshot: null,
+        requestedSourceAmount: { asset: SOLANA_NATIVE, raw: requiredRaw },
+        requestedDestinationAmount: {
+          asset: SOLANA_NATIVE,
+          raw: requiredRaw,
+        },
+      },
+      segments: base.segments.map((segment) => ({
+        ...segment,
+        providerId: DIRECT_WITHDRAWAL_PROVIDER_ID,
+        adapterId: DIRECT_WITHDRAWAL_ADAPTER_ID,
+        sourceSnapshot: option as never,
+        destinationTargetSnapshot: recipient as never,
+        quotedInput: { asset: SOLANA_NATIVE, raw: requiredRaw },
+        quotedExpectedOutput: { asset: SOLANA_NATIVE, raw: requiredRaw },
+        quotedMinOutput: { asset: SOLANA_NATIVE, raw: requiredRaw },
+      })),
+    },
+    routeId: "direct_solana_native_withdrawal_v1",
+    providerId: DIRECT_WITHDRAWAL_PROVIDER_ID,
   };
 }
 
@@ -3406,6 +3479,121 @@ await test("a tiny shortfall falls back when no source covers the executable ref
   assert.equal(projection.sourceOptions.length, 0);
   assert.equal(projection.mode, "unavailable");
   assert.equal(projection.reasonCodes.includes("insufficient_liquidity"), true);
+});
+
+await test("unpriced direct SOL withdrawal ignores optional route pricing and provider failures", async () => {
+  const recipient = {
+    recipientId: "recipient_solana_direct_withdrawal_12345678",
+    accountId: USER_ID,
+    networkId: SOLANA_NATIVE.networkId,
+    asset: SOLANA_NATIVE,
+    address: "F7RnPpFGLzY2r17MLTrxgJXDWiHF5etiEaLNn11GebLJ",
+    addressFingerprint: "e".repeat(64),
+    validatedAt: NOW.toISOString(),
+    expiresAt: "2026-07-24T12:01:00.000Z",
+    validationPolicyVersion: 1,
+  } as const;
+  const requestedRaw = "3280000";
+  const request = intent("withdrawal", requestedRaw, {
+    requestedDestinationAmount: { asset: SOLANA_NATIVE, raw: requestedRaw },
+    confirmedSourceAmount: { asset: SOLANA_NATIVE, raw: requestedRaw },
+    destinationOptionId: null,
+    withdrawalRecipientId: recipient.recipientId,
+  });
+  const projection = await new FundingPlanner({
+    listDestinations: async () => {
+      throw new Error("withdrawal must not select a venue destination");
+    },
+    resolveMarketContext: async () => null,
+    resolveWithdrawalRecipient: async () => recipient,
+    discoverSources: async ({ requiredAmount }) => ({
+      sources: [plannedDirectSolWithdrawalSource(requiredAmount.raw)],
+      reasonCodes: [
+        "trusted_price_unavailable" as const,
+        "provider_status_unknown" as const,
+        "insufficient_gas" as const,
+      ],
+    }),
+    listSources: async () => {
+      throw new Error("discoverSources must be the single source boundary");
+    },
+    store: new MemoryPlanningStore(),
+    now: () => NOW,
+  }).discover({
+    accountId: USER_ID,
+    request,
+    policy: mutablePolicy(),
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(projection.mode, "prepare_first");
+  assert.equal(projection.sourceOptions.length, 1);
+  assert.equal(projection.sourceOptions[0]?.estimatedUsd, null);
+  assert.deepEqual(projection.errors, []);
+  assert.equal(
+    projection.reasonCodes.includes("trusted_price_unavailable"),
+    false,
+  );
+  assert.equal(
+    projection.reasonCodes.includes("provider_status_unknown"),
+    false,
+  );
+  assert.equal(projection.reasonCodes.includes("insufficient_gas"), false);
+});
+
+await test("SOL withdrawal reports reserve-limited source eligibility without a price error", async () => {
+  const recipient = {
+    recipientId: "recipient_solana_reserve_limited_12345678",
+    accountId: USER_ID,
+    networkId: SOLANA_NATIVE.networkId,
+    asset: SOLANA_NATIVE,
+    address: "F7RnPpFGLzY2r17MLTrxgJXDWiHF5etiEaLNn11GebLJ",
+    addressFingerprint: "f".repeat(64),
+    validatedAt: NOW.toISOString(),
+    expiresAt: "2026-07-24T12:01:00.000Z",
+    validationPolicyVersion: 1,
+  } as const;
+  const requestedRaw = "3280000";
+  const request = intent("withdrawal", requestedRaw, {
+    requestedDestinationAmount: { asset: SOLANA_NATIVE, raw: requestedRaw },
+    confirmedSourceAmount: { asset: SOLANA_NATIVE, raw: requestedRaw },
+    destinationOptionId: null,
+    withdrawalRecipientId: recipient.recipientId,
+  });
+  const projection = await new FundingPlanner({
+    listDestinations: async () => {
+      throw new Error("withdrawal must not select a venue destination");
+    },
+    resolveMarketContext: async () => null,
+    resolveWithdrawalRecipient: async () => recipient,
+    discoverSources: async () => ({
+      sources: [],
+      // Production derives this only when the exact amount would consume the
+      // required native-SOL execution reserve.
+      reasonCodes: ["insufficient_gas" as const],
+    }),
+    listSources: async () => {
+      throw new Error("discoverSources must be the single source boundary");
+    },
+    store: new MemoryPlanningStore(),
+    now: () => NOW,
+  }).discover({
+    accountId: USER_ID,
+    request,
+    policy: mutablePolicy(),
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  });
+
+  assert.equal(projection.mode, "unavailable");
+  assert.deepEqual(projection.errors, []);
+  assert.equal(projection.reasonCodes.includes("insufficient_gas"), true);
+  assert.equal(projection.reasonCodes.includes("insufficient_liquidity"), true);
+  assert.equal(
+    projection.reasonCodes.includes("trusted_price_unavailable"),
+    false,
+  );
 });
 
 await test("withdrawal stays independent of funding pause through discovery, quote, and atomic commit", async () => {

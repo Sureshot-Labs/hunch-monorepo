@@ -88,6 +88,10 @@ export interface PositionActionVenueDriver {
     }>,
   ): Promise<PositionActionReceiptObservation | null>;
 
+  resolveSubmissionTransactionHash?(
+    submissionReference: string,
+  ): Promise<string | null>;
+
   refreshPositions(
     input: Readonly<{
       db: Pool;

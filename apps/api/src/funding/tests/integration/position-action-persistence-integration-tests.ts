@@ -8,6 +8,7 @@ import crypto from "node:crypto";
 import "../../../integration-test-database-guard.js";
 import { pool } from "../../../db.js";
 import {
+  bindPositionActionSubmissionTransactionHash,
   claimPositionActionSubmission,
   completePositionActionEffect,
   createOrReplayPositionAction,
@@ -141,6 +142,46 @@ try {
     executorId: "web-client-evm-v1",
   });
   assert.equal(retryAfterAmbiguous.claimed, false);
+
+  const relayerInput: PositionActionCreateInput = {
+    ...createInput(userId, "relayer-reference"),
+    executionMode: "venue_relayer",
+  };
+  const relayerCreated = await createOrReplayPositionAction(pool, relayerInput);
+  operationIds.push(relayerCreated.operation.id);
+  const relayerClaim = await claimPositionActionSubmission(pool, {
+    userId,
+    operationId: relayerCreated.operation.id,
+    canonicalActionFingerprint: "e".repeat(64),
+    executorId: "position-action:venue_relayer",
+  });
+  const relayerReference = "polymarket-relayer:v1:relayer_transaction_12345678";
+  const relayerSubmitted = await recordPositionActionSubmission(pool, {
+    userId,
+    operationId: relayerCreated.operation.id,
+    attemptNumber: relayerClaim.attemptNumber ?? 0,
+    outcome: "submitted",
+    submissionFingerprint: relayerReference,
+  });
+  assert.equal(relayerSubmitted.submissionFingerprint, relayerReference);
+  const resolvedHash = `0x${"f".repeat(64)}`;
+  const relayerBound = await bindPositionActionSubmissionTransactionHash(pool, {
+    userId,
+    operationId: relayerCreated.operation.id,
+    expectedSubmissionReference: relayerReference,
+    transactionHash: resolvedHash,
+  });
+  assert.equal(relayerBound.submissionFingerprint, resolvedHash);
+  const relayerBoundReplay = await bindPositionActionSubmissionTransactionHash(
+    pool,
+    {
+      userId,
+      operationId: relayerCreated.operation.id,
+      expectedSubmissionReference: relayerReference,
+      transactionHash: resolvedHash,
+    },
+  );
+  assert.equal(relayerBoundReplay.submissionFingerprint, resolvedHash);
 
   const successInput = createInput(userId, "success");
   const successCreated = await createOrReplayPositionAction(pool, successInput);
