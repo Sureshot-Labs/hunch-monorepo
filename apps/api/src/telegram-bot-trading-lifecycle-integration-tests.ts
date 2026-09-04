@@ -3967,6 +3967,46 @@ try {
     "recovery keeps the confirmed Buy attached; only an explicit user cancellation or terminal funding decision may stop it",
   );
 
+  const historicalCancelledRecoveryIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, event_id, side,
+       amount_usd, status, error_code, expires_at, idempotency_key,
+       delivery_mode, funding_operation_id
+     ) values (
+       $1, $2, $3, $1, '704', 'buy', 'polymarket', $4, $5, 'YES',
+       1, 'cancelled', 'funding_recovery_detached', now() + interval '1 hour',
+       $6, 'app_handoff', $7::uuid
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      eventId,
+      `historical-cancelled-recovery-intent:${suffix}`,
+      cancellableFundingOperation.rows[0]?.id,
+    ],
+  );
+  const historicalCancelledRecoveryIntentId =
+    historicalCancelledRecoveryIntent.rows[0]?.id;
+  assert.ok(historicalCancelledRecoveryIntentId);
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+    limit: 100,
+  });
+  assert.deepEqual(
+    (
+      await client.query<{ error_code: string | null; status: string }>(
+        `select status, error_code
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [historicalCancelledRecoveryIntentId],
+      )
+    ).rows[0],
+    { error_code: "funding_recovery_detached", status: "cancelled" },
+    "a historical cancellation remains terminal; a projection never revives it",
+  );
+
   const actionRows = await client.query<{ action: string }>(
     `insert into telegram_trade_intents (
        telegram_user_id, user_id, authorization_id, action, venue, market_id,

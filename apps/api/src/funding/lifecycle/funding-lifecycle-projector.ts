@@ -71,7 +71,17 @@ export type FundingLifecycleActionAttempt = Readonly<{
     | "ambiguous"
     | "cancelled";
   broadcastMayHaveOccurred: boolean;
-  referenceKind: "transaction" | "provider_receipt" | "external_handoff" | null;
+  /**
+   * `signature` is a Solana transaction signature. It is an equally durable
+   * chain reference to an EVM transaction hash, so an expired client action
+   * with one remains on the automatic receipt-reconciliation path.
+   */
+  referenceKind:
+    | "transaction"
+    | "signature"
+    | "provider_receipt"
+    | "external_handoff"
+    | null;
   /** A provider definitively rejected this attempt before broadcast; retry is safe. */
   retryableAfterFailure?: boolean;
   /** A bounded reorg watch concluded without canonical execution; retry is safe. */
@@ -461,8 +471,9 @@ function hasRecoverableProviderReceiptWait(
 }
 
 // An action deadline limits *starting a new action*. Once an attempt has a
-// durable transaction/provider reference, reconciliation owns the already
-// possible broadcast and can continue automatically after that deadline.
+// durable chain/provider reference, reconciliation owns the already possible
+// broadcast and can continue automatically after that deadline. `signature`
+// is the corresponding durable on-chain reference for an SVM transaction.
 function hasRecoverableBroadcastReference(
   action: FundingLifecycleActionFact,
 ): boolean {
@@ -471,6 +482,7 @@ function hasRecoverableBroadcastReference(
       unresolvedAttempt(attempt) &&
       attempt.broadcastMayHaveOccurred &&
       (attempt.referenceKind === "transaction" ||
+        attempt.referenceKind === "signature" ||
         attempt.referenceKind === "provider_receipt"),
   );
 }

@@ -164,6 +164,48 @@ function facts(
 {
   const projection = deriveFundingLifecycle(
     facts({
+      now: new Date(now.getTime() + 61_000),
+      actions: [
+        action("confirmed-svm-signature-after-action-expiry", {
+          expiresAt: new Date(now.getTime() + 60_000),
+          attempts: [
+            attempt({
+              outcome: "submitted",
+              broadcastMayHaveOccurred: true,
+              referenceKind: "signature",
+              receipt: {
+                status: "confirmed",
+                canonical: true,
+                actionMatched: true,
+                failureFinalized: false,
+              },
+            }),
+          ],
+        }),
+      ],
+    }),
+  );
+  assert.equal(projection.status, "recovery_required");
+  assert.equal(projection.recoveryMode, "automatic_evidence");
+  assert.equal(projection.safety.requiresManualRecovery, false);
+  assert.equal(projection.safety.requiresWorker, true);
+  assert.equal(
+    projection.safety.consumerMayRemainLinked,
+    true,
+    "a confirmed SVM signature remains an automatic receipt wait after the action deadline",
+  );
+  assert.deepEqual(projection.actions, [
+    {
+      actionId: "confirmed-svm-signature-after-action-expiry",
+      state: "reconcile_required",
+      actionable: false,
+    },
+  ]);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
       actions: [
         action("deposit-wallet-to-controller", {
           safeInternalHandoff: true,
