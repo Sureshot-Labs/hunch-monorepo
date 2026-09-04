@@ -677,6 +677,14 @@ try {
       where trade_intent_id = $1::uuid`,
     [limitlessHandoffIntentId],
   );
+  // Even with a valid server grant, strict Mini App mode must not fall back
+  // to delegated funding when the ordinary web planner is unavailable.
+  await client.query(
+    `update runtime_policies set payload = payload || '{"miniAppHandoffMode":"always"}'::jsonb
+      where policy_key = 'signal_bot' and created_by = $1::uuid`,
+    [userId],
+  );
+  let delegatedFundingInspections = 0;
   const retryableLimitlessHandoff = await captureTelegramBotTradingCallback({
     appBaseUrl: "https://app.hunch.trade",
     callbackQuery: {
@@ -694,15 +702,24 @@ try {
       kind: "temporarily_unavailable",
       reasonCodes: ["destination_unavailable"],
     }),
-    inspectTradeShortfall: async () => ({
-      kind: "temporarily_unavailable",
-      reasonCodes: ["destination_unavailable"],
-    }),
+    inspectTradeShortfall: async () => {
+      delegatedFundingInspections += 1;
+      return {
+        kind: "temporarily_unavailable",
+        reasonCodes: ["destination_unavailable"],
+      };
+    },
     signerInspector,
     telegramMiniAppEnabled: true,
     trading: limitlessTemporarilyUnavailableFundingTrading,
   });
   assert.equal(retryableLimitlessHandoff.handled, true);
+  assert.equal(delegatedFundingInspections, 0);
+  await client.query(
+    `update runtime_policies set payload = payload || '{"miniAppHandoffMode":"fallback"}'::jsonb
+      where policy_key = 'signal_bot' and created_by = $1::uuid`,
+    [userId],
+  );
   assert.equal(retryableLimitlessHandoff.intentStatus, "previewed");
   assert.match(
     retryableLimitlessHandoff.messages.at(-1)?.text ?? "",

@@ -128,7 +128,8 @@ export type TelegramTradeMiniAppFundingInspection =
     }>;
 
 export type TelegramTradeShortfallIdentity = Readonly<{
-  authorizationId: string;
+  /** Absent for user-signed Mini App funding; delegated funding requires it. */
+  authorizationId: string | null;
   telegramAccountId: string;
   telegramUserId: string;
   tradeIntentId: string;
@@ -822,6 +823,12 @@ export class TelegramTradeShortfallFundingService {
     input: TelegramTradeShortfallIdentity,
     options: Readonly<{ requiredProfileId?: string }> = {},
   ): Promise<TelegramTradeShortfallInspection> {
+    if (!input.authorizationId) {
+      return {
+        kind: "temporarily_unavailable",
+        reasonCodes: ["funding_authorization_unavailable"],
+      };
+    }
     // This is accounting repair, not a route retry.  A prior shortfall may
     // have reached the venue, then lost its consumer before submission.  Its
     // terminal source reservation must not suppress the fresh plan's real
@@ -1133,6 +1140,9 @@ export class TelegramTradeShortfallFundingService {
       proposal: TelegramTradeShortfallProposal;
     },
   ): Promise<Readonly<{ operationId: string }>> {
+    if (!input.authorizationId) {
+      throw new Error("delegated trade funding requires a bot authorization");
+    }
     const proposalBody = { ...input.proposal } as Record<string, unknown>;
     delete proposalBody.proposalFingerprint;
     if (

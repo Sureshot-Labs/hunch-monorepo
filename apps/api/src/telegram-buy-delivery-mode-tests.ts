@@ -7,16 +7,31 @@ import {
   resolveTelegramBuyIntentMaximumAmountUsd,
   resolveTelegramBuyPresetDeliveryModes,
   resolveTelegramBuyExecutionCapability,
+  resolveTelegramTradeExecutionCapability,
+  resolveTelegramTradeDeliveryMode,
   isInitialTelegramAppHandoffProposal,
   telegramVenueFromSealedHandoffSnapshot,
 } from "./services/telegram-bot-trading.js";
 import { isTelegramAppHandoffV2EnabledForVenue } from "./services/telegram-app-handoff-v2-contract.js";
-import { getDefaultSignalBotPolicy } from "./services/signal-bot-trading-policy.js";
+import {
+  getDefaultSignalBotPolicy,
+  normalizeSignalBotPolicy,
+} from "./services/signal-bot-trading-policy.js";
 
 const polymarketEvm = resolveTelegramBuyExecutionCapability({
   venue: "polymarket",
   walletChain: "ethereum",
 });
+for (const mode of ["off", "fallback", "always"] as const) {
+  assert.equal(
+    normalizeSignalBotPolicy({
+      ...getDefaultSignalBotPolicy(),
+      autoEnableOnTelegramLink: true,
+      miniAppHandoffMode: mode,
+    }).autoEnableOnTelegramLink,
+    mode !== "always",
+  );
+}
 const limitlessEvm = resolveTelegramBuyExecutionCapability({
   venue: "limitless",
   walletChain: "ethereum",
@@ -25,6 +40,47 @@ const kalshiSolana = resolveTelegramBuyExecutionCapability({
   venue: "kalshi",
   walletChain: "solana",
 });
+for (const action of ["buy", "sell"] as const) {
+  for (const venue of ["polymarket", "limitless"] as const) {
+    const capability = resolveTelegramTradeExecutionCapability({
+      action,
+      venue,
+      walletChain: "ethereum",
+    });
+    for (const available of [true, false]) {
+      assert.equal(
+        resolveTelegramTradeDeliveryMode({
+          action,
+          capability,
+          commonTradeSurfaceReady: true,
+          handoffContractAvailable: available,
+          miniAppHandoffMode: "always",
+          telegramMiniAppEnabled: true,
+          venueAllowedForBotSubmit: true,
+        }),
+        available ? "app_handoff" : "direct_deposit_only",
+      );
+    }
+  }
+}
+for (const miniAppEnabled of [true, false]) {
+  for (const handoffAvailable of [true, false]) {
+    assert.equal(
+      resolveTelegramBuyDeliveryMode({
+        capability: polymarketEvm,
+        commonBuySurfaceReady: true,
+        handoffContractAvailable: handoffAvailable,
+        miniAppHandoffMode: "always",
+        telegramMiniAppEnabled: miniAppEnabled,
+        venueAllowedForBotSubmit: true,
+      }),
+      miniAppEnabled && handoffAvailable
+        ? "app_handoff"
+        : "direct_deposit_only",
+      "always cannot silently fall back to a permitted server signer",
+    );
+  }
+}
 
 assert.equal(
   isInitialTelegramAppHandoffProposal({

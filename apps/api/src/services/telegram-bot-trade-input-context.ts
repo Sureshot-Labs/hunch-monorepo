@@ -32,7 +32,7 @@ export type TelegramBotTradeInputContext = Readonly<{
 }>;
 
 export type TelegramBotTradeAuthorityBinding = Readonly<{
-  authorizationId: string;
+  authorizationId: string | null;
   privyWalletId: string;
   telegramAccountLinkId: string;
   userId: string;
@@ -68,8 +68,8 @@ export function parseTelegramBotTradeAuthorityBinding(
   const telegramAccountLinkId = binding.telegramAccountLinkId;
   const userId = binding.userId;
   if (
-    typeof authorizationId !== "string" ||
-    authorizationId.length === 0 ||
+    (authorizationId !== null &&
+      (typeof authorizationId !== "string" || authorizationId.length === 0)) ||
     typeof telegramAccountLinkId !== "string" ||
     telegramAccountLinkId.length === 0 ||
     typeof userId !== "string" ||

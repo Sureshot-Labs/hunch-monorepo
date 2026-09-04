@@ -84,12 +84,15 @@ export function createApiTradingApplicationService(
     return executor;
   };
 
-  const assertIntentAllowed = async (intent: TradeIntent): Promise<void> => {
+  const assertIntentAllowed = async (
+    intent: TradeIntent,
+    automation = intent.actor.kind === "telegram_bot",
+  ): Promise<void> => {
     const allowed = await venueLifecycleAllowsTradingAction(
       input.pool,
       intent.venue,
       intent.action,
-      { automation: intent.actor.kind === "telegram_bot" },
+      { automation },
     );
     if (allowed) return;
     throw new TradingServiceError({
@@ -501,7 +504,11 @@ export function createApiTradingApplicationService(
       return executorFor(prepareInput.intent.venue).prepareTrade(prepareInput);
     },
     quote: async (quoteInput) => {
-      await assertReadyIntent(quoteInput.intent);
+      // Quotes do not sign or submit. Telegram also quotes user-signed Mini
+      // App trades, including position exits while automation is disabled.
+      // Preparation and submission retain the independent automation fence.
+      await assertIntentAllowed(quoteInput.intent, false);
+      await assertFundingReady(quoteInput.intent);
       return executorFor(quoteInput.intent.venue).quote(quoteInput);
     },
     submitPreparedTrade: async (submitInput) => {

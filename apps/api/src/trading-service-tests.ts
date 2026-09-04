@@ -4389,6 +4389,51 @@ const tests: TestCase[] = [
         /Market not found/,
       );
 
+      const exitOnlyTrading = createApiTradingApplicationService({
+        pool: {
+          query: async (sql: string) => ({
+            rows: /from runtime_policies/i.test(sql)
+              ? [
+                  {
+                    id: "exit-only-policy",
+                    payload: {
+                      version: 1,
+                      venues: {
+                        polymarket: {
+                          lifecycle: "exit-only",
+                          indexerMode: "maintenance",
+                        },
+                        limitless: { lifecycle: "active", indexerMode: "full" },
+                        kalshi: { lifecycle: "unreleased", indexerMode: "off" },
+                        hyperliquid: {
+                          lifecycle: "unreleased",
+                          indexerMode: "off",
+                        },
+                      },
+                    },
+                  },
+                ]
+              : [],
+            rowCount: 0,
+          }),
+        } as unknown as Pool,
+      });
+      const sellIntent = { ...intent, action: "SELL" as const };
+      await assert.rejects(
+        exitOnlyTrading.quote({ intent: sellIntent }),
+        /Market not found/,
+        "user-signed Sell quote may pass the exit-only lifecycle without automation",
+      );
+      await assert.rejects(
+        exitOnlyTrading.quote({ intent }),
+        /not accepting new exposure/,
+      );
+      await assert.rejects(
+        exitOnlyTrading.prepareTrade({ intent: sellIntent, quote: null }),
+        /unavailable for position exits/,
+        "read-only quote eligibility must not grant server execution",
+      );
+
       const executionSource = readFileSync(
         resolve(apiSrcDir, "services/polymarket-trading-execution-service.ts"),
         "utf8",

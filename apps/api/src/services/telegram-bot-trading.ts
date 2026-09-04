@@ -319,11 +319,7 @@ export function resolveTelegramTradeDeliveryMode(
   const canBotSubmit =
     input.capability.serverBotExact && input.venueAllowedForBotSubmit;
   if (input.miniAppHandoffMode === "always") {
-    return canHandoff
-      ? "app_handoff"
-      : canBotSubmit
-        ? "bot_submit"
-        : "direct_deposit_only";
+    return canHandoff ? "app_handoff" : "direct_deposit_only";
   }
   if (canBotSubmit) return "bot_submit";
   if (input.miniAppHandoffMode === "fallback" && canHandoff) {
@@ -713,7 +709,8 @@ type TelegramBotTradingStatusRow = {
 };
 
 type TelegramBotTradingAuthorizationRow = {
-  id: string;
+  /** Null for a verified user-signed identity that has never granted automation. */
+  id: string | null;
   telegram_account_link_id: string;
   user_id: string;
   telegram_user_id: string;
@@ -2040,6 +2037,7 @@ export const telegramBotTradingTestHooks = {
   isTelegramSellProceedsDisplayable,
   isTelegramVenueMinimumBlocking,
   loadEnabledAuthorization,
+  loadEnabledEvmAuthorization,
   marketForCallbackReadiness,
   buildTelegramTradingMiniAppButton,
   openMarketUrl,
@@ -5689,6 +5687,14 @@ async function markTelegramIntentSubmitBoundary(input: {
   intent: TelegramTradeIntentRow;
   result: Record<string, unknown>;
 }): Promise<boolean> {
+  // This is the unattended submit boundary, including old v1 handoff replay.
+  // V2 signs and submits through the ordinary authenticated app execution path.
+  if (
+    (await resolveTelegramBotTradingPolicy(input.db)).miniAppHandoffMode ===
+    "always"
+  ) {
+    return false;
+  }
   const committedAppHandoff =
     input.intent.delivery_mode === "app_handoff" &&
     readTelegramAppHandoffExecutionMarker(input.intent) != null;
@@ -6082,7 +6088,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     !input.isAdminTest &&
     !input.publicBrowseOnly &&
     !unresolvedIntent &&
-    automationAllowed &&
+    (automationAllowed || sealedAppHandoffAvailable) &&
     buyAllowed &&
     policy.tradingEnabled &&
     policy.tradingActions.includes("buy") &&
@@ -6244,6 +6250,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     policy.customTradeInputEnabled &&
     customSellSides.length > 0;
   const redeemPlan =
+    policy.miniAppHandoffMode !== "always" &&
     !input.isAdminTest &&
     !input.publicBrowseOnly &&
     !unresolvedIntent &&
@@ -6288,6 +6295,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
         ? 0
         : null;
   const depositNeeded =
+    policy.miniAppHandoffMode !== "always" &&
     !input.publicBrowseOnly &&
     status.linked &&
     marketOrderable &&
@@ -6753,6 +6761,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     ]);
   }
   const canOfferTelegramTradingSetup =
+    policy.miniAppHandoffMode !== "always" &&
     !input.isAdminTest &&
     !input.publicBrowseOnly &&
     input.telegramMiniAppEnabled === true &&
@@ -6903,7 +6912,7 @@ async function loadIntentByIdempotencyKey(
 async function updateIntentStatus(input: {
   allowedStatuses?: string[];
   allowRecoverableFinalization?: boolean;
-  authorizationId?: string;
+  authorizationId?: string | null;
   db: DbQuery;
   deliveryMode?: StoredTelegramBuyDeliveryMode;
   errorCode?: string;
@@ -7422,7 +7431,6 @@ function buildTelegramTradeAuthorityBinding(
   authorization: TelegramBotTradingAuthorizationRow,
 ): TelegramBotTradeAuthorityBinding | null {
   if (
-    !authorization.id ||
     !authorization.privy_wallet_id ||
     !authorization.telegram_account_link_id ||
     !authorization.user_id ||
@@ -7796,10 +7804,45 @@ async function loadEnabledEvmAuthorization(
   options: { allowInactiveForV2?: boolean; lock?: boolean } = {},
 ): Promise<TelegramBotTradingAuthorizationRow | null> {
   // The legacy name is intentionally retained because its default remains the
-  // v1/server-safe query. `allowInactiveForV2` is a narrow exception for an
-  // already user-confirmed v2 handoff: it preserves the same verified-wallet
-  // identity checks while omitting only unattended-server enablement.
+  // v1/server-safe query. V2 resolves user identity separately, before issuing
+  // a Review that still requires the user's one-time Mini App confirmation.
   const allowInactiveForV2 = options.allowInactiveForV2 === true;
+  if (allowInactiveForV2) {
+    // Identity is not permission to submit from the server. No authorization or
+    // preference row is created merely to let a user sign in the Mini App.
+    // Existing linked authorities retain their verified wallet binding even
+    // before wallet-profile enrichment; new users need a managed wallet profile.
+    const identity = await db.query<TelegramBotTradingAuthorizationRow>(
+      `SELECT funding_auth.id, telegram_account.id::text AS telegram_account_link_id,
+              app_user.id AS user_id, telegram_account.telegram_user_id,
+              app_user.privy_user_id, verified_wallet.wallet_address,
+              verified_wallet.wallet_type AS wallet_chain,
+              coalesce(funding_auth.privy_wallet_id, verified_wallet.privy_wallet_id) AS privy_wallet_id,
+              false AS enabled, '{}'::text[] AS enabled_venues,
+              null::jsonb AS limits, null::numeric AS max_amount_usd
+         FROM user_telegram_accounts telegram_account
+         JOIN users app_user ON app_user.id = telegram_account.user_id
+          AND coalesce(app_user.is_active, true) = true
+         JOIN user_wallets verified_wallet ON verified_wallet.user_id = app_user.id
+          AND verified_wallet.wallet_type = 'ethereum'
+          AND verified_wallet.is_verified = true
+         LEFT JOIN telegram_bot_trading_authorizations funding_auth
+           ON funding_auth.user_id = app_user.id
+          AND funding_auth.telegram_user_id = telegram_account.telegram_user_id
+          AND funding_auth.wallet_chain = verified_wallet.wallet_type
+          AND funding_account_identifier_equal(verified_wallet.wallet_type,
+                funding_auth.wallet_address, verified_wallet.wallet_address)
+        WHERE telegram_account.telegram_user_id = $1
+          AND (funding_auth.privy_wallet_id IS NOT NULL OR
+               (verified_wallet.is_internal_wallet = true AND verified_wallet.privy_wallet_id IS NOT NULL))
+        ORDER BY funding_auth.updated_at DESC NULLS LAST,
+                 verified_wallet.is_primary DESC, verified_wallet.id
+        LIMIT 1
+        ${options.lock ? "FOR UPDATE OF app_user, telegram_account, verified_wallet" : ""}`,
+      [telegramUserId],
+    );
+    return identity.rows[0] ?? null;
+  }
   const result = await db.query<TelegramBotTradingAuthorizationRow>(
     `SELECT
        funding_auth.id,
@@ -7820,7 +7863,7 @@ async function loadEnabledEvmAuthorization(
       AND coalesce(app_user.is_active, true) = true
      JOIN telegram_bot_trading_preferences trading_preference
        ON trading_preference.user_id = funding_auth.user_id
-      AND ($2::boolean OR trading_preference.desired_enabled = true)
+      AND trading_preference.desired_enabled = true
      JOIN user_telegram_accounts telegram_account
        ON telegram_account.telegram_user_id = funding_auth.telegram_user_id
       AND telegram_account.user_id = funding_auth.user_id
@@ -7834,7 +7877,7 @@ async function loadEnabledEvmAuthorization(
             funding_auth.wallet_address
           )
      WHERE funding_auth.telegram_user_id = $1
-       AND ($2::boolean OR funding_auth.enabled = true)
+       AND funding_auth.enabled = true
        AND funding_auth.wallet_chain = 'ethereum'
      ORDER BY funding_auth.updated_at DESC, funding_auth.id
      LIMIT 1
@@ -7843,7 +7886,7 @@ async function loadEnabledEvmAuthorization(
          ? "FOR UPDATE OF funding_auth, app_user, trading_preference, telegram_account, verified_wallet"
          : ""
      }`,
-    [telegramUserId, allowInactiveForV2],
+    [telegramUserId],
   );
   return result.rows[0] ?? null;
 }
@@ -9839,6 +9882,7 @@ async function handleTelegramRedeemCallback(input: {
     (await venueLifecycleAllows(callback.db, market.venue, "redeem"));
   if (
     !lifecycleReady ||
+    policy.miniAppHandoffMode === "always" ||
     !policy.tradingEnabled ||
     !policy.tradingActions.includes("redeem") ||
     !authorization?.enabled ||
@@ -10641,10 +10685,9 @@ async function previewTelegramTradeIntent(input: {
       if (
         fundingIdentity &&
         input.inspectTradeShortfall &&
-        // `always` prefers the generic web plan, but it does not turn a
-        // transient generic planner failure into a dead end. The exact bot
-        // envelope remains the next safe delivery choice, followed only then
-        // by interactive Deposit.
+        input.authorization.id != null &&
+        // Strict Mini App mode must never inspect a delegated funding plan.
+        input.policy.miniAppHandoffMode !== "always" &&
         miniAppFunding?.kind !== "web_funding_plan"
       ) {
         try {
@@ -10857,13 +10900,37 @@ async function previewTelegramTradeIntent(input: {
         internalFunding = { kind: "external_deposit_required" };
       }
       if (
-        miniAppFunding?.kind === "temporarily_unavailable" &&
-        preferWebFunding &&
+        input.policy.miniAppHandoffMode === "always" &&
+        miniAppFunding?.kind === "external_deposit"
+      ) {
+        const openMarketButton = buildTelegramTradingMiniAppButton({
+          appBaseUrl: input.appBaseUrl,
+          path: openMarketUrl(input.appBaseUrl, input.market),
+          telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+          text: "Open market in Hunch",
+        });
+        await input.sendMessage({
+          chat_id: input.chatId,
+          parse_mode: "MarkdownV2",
+          text: escapeMarkdown(
+            "Add funds and review this trade in Hunch. Nothing was submitted.",
+          ),
+          reply_markup: {
+            inline_keyboard: telegramTradingButtonRows(openMarketButton),
+          },
+        });
+        return;
+      }
+      if (
+        input.policy.miniAppHandoffMode === "always" &&
         internalFunding == null
       ) {
         internalFunding = {
           kind: "temporarily_unavailable",
-          reasonCodes: miniAppFunding.reasonCodes,
+          reasonCodes:
+            miniAppFunding?.kind === "temporarily_unavailable"
+              ? miniAppFunding.reasonCodes
+              : ["funding_planner_unavailable"],
         };
       }
       if (internalFunding?.kind === "temporarily_unavailable") {
@@ -10901,7 +10968,7 @@ async function previewTelegramTradeIntent(input: {
       if (internalFunding?.kind === "internal_route") {
         // `internal_route` is executable only by the server profile that just
         // produced it. A Mini App delivery mode may reach this branch when
-        // `always`/`fallback` could not build a generic client plan; keep the
+        // `fallback` could not build a generic client plan; keep the
         // existing intent, but switch it to its actual bot consumer before
         // issuing Confirm. Leaving it as app_handoff would create a review
         // that the callback correctly refuses because it has no v2 plan.
@@ -10981,6 +11048,7 @@ async function previewTelegramTradeIntent(input: {
           hasOpener: input.openFundingBuyReturn != null,
         }) &&
         input.openFundingBuyReturn &&
+        input.authorization.id != null &&
         amountUsd != null &&
         fundingVenue != null
       ) {
@@ -11625,6 +11693,7 @@ export async function completeTelegramBotTradeInput(input: {
         (policy.fundingReceiveEnabled && policy.buyContinuationEnabled)));
   const actionAllowed =
     policy.tradingEnabled &&
+    (deliveryMode !== "bot_submit" || policy.miniAppHandoffMode !== "always") &&
     policy.customTradeInputEnabled &&
     policy.tradingActions.includes(targetAction) &&
     policyVenueAllowsDelivery;
@@ -12740,6 +12809,8 @@ export async function handleTelegramBotTradingCallback(
   );
   if (
     !policy.tradingEnabled ||
+    (intent.delivery_mode === "bot_submit" &&
+      policy.miniAppHandoffMode === "always") ||
     (isCustomTelegramTradeIntent(intent) && !policy.customTradeInputEnabled) ||
     (readTelegramFundingReturnIntentMarker(intent) != null &&
       !policy.buyContinuationEnabled) ||

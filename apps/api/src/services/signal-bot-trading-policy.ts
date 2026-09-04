@@ -197,7 +197,11 @@ export function normalizeSignalBotPolicy(
   ).slice(0, 8);
 
   return {
-    autoEnableOnTelegramLink: Boolean(policy.autoEnableOnTelegramLink ?? false),
+    // Strict user-signed execution must not prompt new users for an unattended
+    // signer merely because an older runtime payload enabled automatic setup.
+    autoEnableOnTelegramLink:
+      policy.miniAppHandoffMode !== "always" &&
+      Boolean(policy.autoEnableOnTelegramLink ?? false),
     autoManagedMaxAmountUsd: clamp(
       Math.trunc(policy.autoManagedMaxAmountUsd ?? 1),
       1,
