@@ -19,6 +19,7 @@ import {
   telegramFundingVenueNetworkId,
 } from "../funding/execution/telegram-funding-managed-wallet.js";
 import { hashOpaqueToken } from "../funding/persistence/canonical.js";
+import { loadFundingLifecycleProjectionForOperation } from "../funding/lifecycle/funding-lifecycle-read-model.js";
 import { lockFundingReceiveSessionScope } from "../funding/persistence/funding-receive-session-repository.js";
 import {
   parseDirectIngressObservationVariant,
@@ -1028,28 +1029,28 @@ async function activeTelegramFundingHasLiveRouting(
   client: Pick<PoolClient, "query">,
   receiveSessionId: string,
 ): Promise<boolean> {
-  const { rows } = await client.query<{ live_routing: boolean }>(
-    `select exists (
-       select 1
-         from funding_receive_receipts receive_receipt
-         left join funding_operations operation_row
-           on operation_row.id = receive_receipt.child_funding_operation_id
-        where receive_receipt.receive_session_id = $1::uuid
-          and receive_receipt.status in ('observed', 'routing')
-          and (
-            receive_receipt.child_funding_operation_id is null
-            or operation_row.status in (
-              'awaiting_user',
-              'awaiting_external_funds',
-              'in_progress',
-              'reconcile_required',
-              'recovery_required'
-            )
-          )
-     ) as live_routing`,
+  const { rows } = await client.query<{
+    child_funding_operation_id: string | null;
+  }>(
+    `select distinct receive_receipt.child_funding_operation_id::text
+       from funding_receive_receipts receive_receipt
+      where receive_receipt.receive_session_id = $1::uuid
+        and receive_receipt.status in ('observed', 'routing')`,
     [receiveSessionId],
   );
-  return rows[0]?.live_routing === true;
+  for (const receipt of rows) {
+    // An observed receipt without a child operation is still a live
+    // money-bearing workflow. For a routed child, derive terminality from the
+    // same immutable facts used by execution and reconciliation; a stale
+    // operation cache must neither retain nor release this receive lease.
+    if (receipt.child_funding_operation_id === null) return true;
+    const projection = await loadFundingLifecycleProjectionForOperation(
+      client,
+      { operationId: receipt.child_funding_operation_id },
+    );
+    if (projection && !projection.lifecycle.safety.terminal) return true;
+  }
+  return false;
 }
 
 async function releaseTerminalTelegramReceiveLease(

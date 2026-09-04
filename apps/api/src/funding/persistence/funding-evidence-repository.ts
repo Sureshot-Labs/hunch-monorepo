@@ -1,18 +1,23 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import type { JsonValue } from "../domain/types.js";
-import { deriveFundingLifecycle } from "../lifecycle/funding-lifecycle-projector.js";
+import {
+  deriveFundingLifecycle,
+  deriveFundingLifecycleBeforeActionBroadcast,
+  type FundingLifecycleProjection,
+} from "../lifecycle/funding-lifecycle-projector.js";
 import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
+import { loadFundingLifecycleProjectionForOperation } from "../lifecycle/funding-lifecycle-read-model.js";
 import { canonicalJsonEqual, canonicalJsonHash } from "./canonical.js";
 import {
   consumeFundingReservationInTransaction,
   fetchFundingOperationForUser,
   FundingPersistenceError,
   releaseFundingReservationInTransaction,
-  transitionFundingOperationInTransaction,
   type FundingOperationRow,
   wakeFundingReconciliationInTransaction,
   writeFundingOperationLifecycleProjectionCacheInTransaction,
+  writeFundingOperationSupportFactsInTransaction,
 } from "./funding-operation-repository.js";
 import {
   acceptFundingTradeAttemptInTransaction,
@@ -68,6 +73,13 @@ export type FundingOperationStep = Readonly<{
   normalizedAction: JsonRecord;
   actionValidationResult: JsonRecord;
   actionExpiresAt: Date | null;
+  /** Derived by the lifecycle projector; never inferred from the cache row. */
+  actionable?: boolean;
+}>;
+
+type ProjectedFundingAction = Readonly<{
+  actionable: boolean;
+  state: FundingOperationStepState;
 }>;
 
 type FundingOperationStepDbRow = {
@@ -89,13 +101,15 @@ type FundingOperationStepDbRow = {
 
 function mapOperationStep(
   row: FundingOperationStepDbRow,
-  projectedStates: ReadonlyMap<string, FundingOperationStepState> | null = null,
+  projectedActions: ReadonlyMap<string, ProjectedFundingAction> | null = null,
 ): FundingOperationStep {
-  const state = projectedStates?.get(row.id) ?? row.state;
+  const projectedAction = projectedActions?.get(row.id);
+  const state = projectedAction?.state ?? row.state;
   const dependencyState =
     row.depends_on_step_id === null
       ? null
-      : (projectedStates?.get(row.depends_on_step_id) ?? row.dependency_state);
+      : (projectedActions?.get(row.depends_on_step_id)?.state ??
+        row.dependency_state);
   return {
     id: row.id,
     operationId: row.operation_id,
@@ -111,23 +125,20 @@ function mapOperationStep(
     normalizedAction: row.normalized_action,
     actionValidationResult: row.action_validation_result,
     actionExpiresAt: row.action_expires_at,
+    actionable: projectedAction?.actionable,
   };
 }
 
-async function projectedFundingStepStates(
+async function projectedFundingActions(
   db: Pick<Pool, "query">,
   operationId: string,
-): Promise<ReadonlyMap<string, FundingOperationStepState>> {
-  const facts = await loadFundingLifecycleFactsForOperationInTransaction(db, {
+): Promise<ReadonlyMap<string, ProjectedFundingAction>> {
+  const projected = await loadFundingLifecycleProjectionForOperation(db, {
     operationId,
-    now: new Date(),
   });
-  if (!facts) return new Map();
+  if (!projected) return new Map();
   return new Map(
-    deriveFundingLifecycle(facts).actions.map((action) => [
-      action.actionId,
-      action.state,
-    ]),
+    projected.lifecycle.actions.map((action) => [action.actionId, action]),
   );
 }
 
@@ -174,7 +185,7 @@ export async function fetchFundingOperationStepForUser(
   if (!row) return null;
   return mapOperationStep(
     row,
-    await projectedFundingStepStates(db, input.operationId),
+    await projectedFundingActions(db, input.operationId),
   );
 }
 
@@ -199,11 +210,8 @@ export async function listFundingOperationStepsForUser(
     `,
     [input.userId, input.operationId],
   );
-  const projectedStates = await projectedFundingStepStates(
-    db,
-    input.operationId,
-  );
-  return rows.map((row) => mapOperationStep(row, projectedStates));
+  const projectedActions = await projectedFundingActions(db, input.operationId);
+  return rows.map((row) => mapOperationStep(row, projectedActions));
 }
 
 export type FundingPolymarketHandoffCandidate = Readonly<{
@@ -258,6 +266,7 @@ export async function listPotentialPolymarketHandoffsForCanonicalEvents(
     userId: string;
     events: readonly FundingPolymarketHandoffCanonicalEventLookup[];
     currentLookupKeyVersion: number | null;
+    now?: Date;
   }>,
 ): Promise<readonly FundingPolymarketHandoffCandidate[]> {
   if (input.events.length === 0) return [];
@@ -323,9 +332,6 @@ export async function listPotentialPolymarketHandoffsForCanonicalEvents(
           and (
             (
               attempt.outcome = 'started'
-              and operation.status not in (
-                'completed', 'refunded', 'failed', 'cancelled'
-              )
               and semantic_match.matches_event
             )
             or (
@@ -356,19 +362,34 @@ export async function listPotentialPolymarketHandoffsForCanonicalEvents(
   if (rows.length > MAX_POLYMARKET_HANDOFF_CANDIDATES_PER_LOOKUP) {
     throw new FundingPolymarketHandoffLookupOverflowError();
   }
-  return rows.map((row) => ({
-    operationId: row.operation_id,
-    stepId: row.step_id,
-    attemptId: row.attempt_id,
-    attemptOutcome: row.attempt_outcome,
-    referenceKind: row.reference_kind,
-    resolvedTransactionHash: row.resolved_transaction_hash,
-    receiptRefCiphertext: row.receipt_ref_ciphertext,
-    receiptRefLookupHmac: row.receipt_ref_lookup_hmac,
-    lookupKeyVersion: row.lookup_key_version,
-    normalizedAction: row.normalized_action,
-    actionValidationResult: row.action_validation_result,
-  }));
+  const candidates: FundingPolymarketHandoffCandidate[] = [];
+  for (const row of rows) {
+    // A submitted/ambiguous broadcast stays attributable even if a previous
+    // reducer pass materialized a terminal cache. A started attempt has no
+    // broadcast reference, so only that branch needs the current lifecycle
+    // decision to distinguish a live overlap from an already terminal route.
+    if (row.attempt_outcome === "started") {
+      const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+        db,
+        { operationId: row.operation_id, now: input.now ?? new Date() },
+      );
+      if (!facts || deriveFundingLifecycle(facts).safety.terminal) continue;
+    }
+    candidates.push({
+      operationId: row.operation_id,
+      stepId: row.step_id,
+      attemptId: row.attempt_id,
+      attemptOutcome: row.attempt_outcome,
+      referenceKind: row.reference_kind,
+      resolvedTransactionHash: row.resolved_transaction_hash,
+      receiptRefCiphertext: row.receipt_ref_ciphertext,
+      receiptRefLookupHmac: row.receipt_ref_lookup_hmac,
+      lookupKeyVersion: row.lookup_key_version,
+      normalizedAction: row.normalized_action,
+      actionValidationResult: row.action_validation_result,
+    });
+  }
+  return candidates;
 }
 
 export type FundingWithdrawalDestination = Readonly<{
@@ -877,6 +898,69 @@ export async function projectedFundingLifecycleInTransaction(
   return deriveFundingLifecycle(facts);
 }
 
+/**
+ * Returns the one action's current projection from the same fact snapshot as
+ * the operation. Callers that already hold their normal row locks use this as
+ * the sole actionability boundary; stored step state is only a display cache.
+ */
+export async function projectedFundingActionInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{ operationId: string; stepId: string; now: Date }>,
+) {
+  const lifecycle = await projectedFundingLifecycleInTransaction(client, input);
+  const action = lifecycle.actions.find(
+    (candidate) => candidate.actionId === input.stepId,
+  );
+  if (!action) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "funding operation action disappeared while reading lifecycle facts",
+    );
+  }
+  return { lifecycle, action };
+}
+
+/**
+ * A started attempt needs one final admission check before its network
+ * broadcast. Re-project its own pre-start boundary while retaining every
+ * other contemporaneous fact, including cancellation, authority, and
+ * sibling-movement evidence.
+ */
+export async function projectedFundingActionBeforeBroadcastInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    operationId: string;
+    stepId: string;
+    attemptNumber: number;
+    now: Date;
+  }>,
+) {
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+    client,
+    input,
+  );
+  if (!facts) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "funding operation disappeared while reading broadcast lifecycle facts",
+    );
+  }
+  const lifecycle = deriveFundingLifecycleBeforeActionBroadcast(facts, {
+    actionId: input.stepId,
+    attemptNumber: input.attemptNumber,
+  });
+  const action = lifecycle.actions.find(
+    (candidate) => candidate.actionId === input.stepId,
+  );
+  if (!action) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "funding operation action disappeared while reading broadcast lifecycle facts",
+    );
+  }
+  return { lifecycle, action };
+}
+
 export async function writeFundingStepProjectionCacheInTransaction(
   client: Pick<PoolClient, "query">,
   input: Readonly<{
@@ -900,6 +984,25 @@ export async function writeFundingStepProjectionCacheInTransaction(
       "operation_not_found",
       "funding operation step disappeared while caching lifecycle projection",
     );
+  }
+}
+
+/**
+ * Materializes every action cache from one lifecycle decision.  Step state is
+ * presentation/cache data only: no caller may use a previous cached step to
+ * decide what another action is allowed to do.
+ */
+export async function writeFundingActionProjectionCachesInTransaction(
+  client: Pick<PoolClient, "query">,
+  lifecycle: FundingLifecycleProjection,
+  now: Date,
+): Promise<void> {
+  for (const action of lifecycle.actions) {
+    await writeFundingStepProjectionCacheInTransaction(client, {
+      stepId: action.actionId,
+      state: action.state,
+      now,
+    });
   }
 }
 
@@ -1101,13 +1204,12 @@ export async function startFundingStepAttemptForUserInTransaction(
       "funding action differs from its committed fingerprint",
     );
   }
-  const lifecycle = await projectedFundingLifecycleInTransaction(client, {
-    operationId: input.operationId,
-    now,
-  });
-  const projectedAction = lifecycle.actions.find(
-    (action) => action.actionId === input.stepId,
-  );
+  const { lifecycle, action: projectedAction } =
+    await projectedFundingActionInTransaction(client, {
+      operationId: input.operationId,
+      stepId: input.stepId,
+      now,
+    });
   if (!projectedAction?.actionable) {
     throw new FundingPersistenceError(
       "invalid_state_transition",
@@ -1125,7 +1227,7 @@ export async function startFundingStepAttemptForUserInTransaction(
     attempt,
     step: mapOperationStep(
       row,
-      new Map(lifecycle.actions.map((action) => [action.actionId, action.state])),
+      new Map(lifecycle.actions.map((action) => [action.actionId, action])),
     ),
   };
 }
@@ -1273,16 +1375,10 @@ export async function finishFundingStepAttemptForUserInTransaction(
   }>
 > {
   const operationResult = await client.query<{
-    operation_progress_stage: FundingOperationRow["progressStage"];
-    operation_recovery_mode: FundingOperationRow["recoveryMode"];
-    operation_status: FundingOperationRow["status"];
     operation_version: string | number;
   }>(
     `
-      select progress_stage as operation_progress_stage,
-             recovery_mode as operation_recovery_mode,
-             status as operation_status,
-             version as operation_version
+      select version as operation_version
       from funding_operations
       where user_id = $1 and id = $2
       for update
@@ -1356,42 +1452,29 @@ export async function finishFundingStepAttemptForUserInTransaction(
       "funding action disappeared while projecting its report",
     );
   }
-  const stepState = action.state;
-  await writeFundingStepProjectionCacheInTransaction(client, {
-    stepId: input.stepId,
-    state: stepState,
+  await writeFundingActionProjectionCachesInTransaction(client, lifecycle, now);
+  await writeFundingOperationLifecycleProjectionCacheInTransaction(client, {
+    operationId: input.operationId,
+    expectedVersion: Number(scopedOperation.operation_version),
+    state: {
+      status: lifecycle.status,
+      stage: lifecycle.progressStage,
+    },
+    recoveryMode: lifecycle.recoveryMode,
+    errorCode: lifecycle.errorCode,
+    supportMetadataPatch:
+      lifecycle.errorCode === "late_broadcast_after_terminal_operation"
+        ? {
+            lateBroadcastAttemptId: input.attemptId,
+            lateBroadcastObservedAt: now.toISOString(),
+          }
+        : undefined,
     now,
   });
   await wakeFundingReconciliationInTransaction(client, {
     operationId: input.operationId,
     dueAt: now,
   });
-  if (
-    input.broadcastMayHaveOccurred &&
-    (scopedOperation.operation_status === "failed" ||
-      scopedOperation.operation_status === "cancelled")
-  ) {
-    await transitionFundingOperationInTransaction(client, {
-      operationId: input.operationId,
-      scope: { kind: "worker" },
-      expectedVersion: Number(scopedOperation.operation_version),
-      expectedState: {
-        status: scopedOperation.operation_status,
-        stage: scopedOperation.operation_progress_stage,
-      },
-      nextState: { status: "recovery_required", stage: "source_action" },
-      recoveryMode:
-        input.receiptRefLookupHmac === null
-          ? "manual_review"
-          : "automatic_evidence",
-      errorCode: "late_broadcast_after_terminal_operation",
-      supportMetadataPatch: {
-        lateBroadcastAttemptId: input.attemptId,
-        lateBroadcastObservedAt: (input.now ?? new Date()).toISOString(),
-      },
-      now,
-    });
-  }
   return {
     attempt,
     stepState: reportAcknowledgementStepState(input.outcome),
@@ -1426,18 +1509,22 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
     stepState: FundingOperationStepState;
   }>
 > {
+  const now = input.now ?? new Date();
+  const resolvedActualCosts =
+    input.resolution.kind === "definitive_failure"
+      ? {
+          ...input.resolution.actualCosts,
+          ...(input.retryableDefinitiveFailure
+            ? { retryableProviderFailure: true }
+            : {}),
+        }
+      : null;
   const operationResult = await client.query<{
-    operation_progress_stage: FundingOperationRow["progressStage"];
-    operation_recovery_mode: FundingOperationRow["recoveryMode"];
-    operation_status: FundingOperationRow["status"];
     operation_support_metadata: JsonRecord;
     operation_version: string | number;
   }>(
     `
-      select status as operation_status,
-             progress_stage as operation_progress_stage,
-             recovery_mode as operation_recovery_mode,
-             support_metadata as operation_support_metadata,
+      select support_metadata as operation_support_metadata,
              version as operation_version
       from funding_operations
       where user_id = $1 and id = $2
@@ -1452,11 +1539,9 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
       "delegated funding attempt was not found for authenticated user",
     );
   }
-  const stepResult = await client.query<{
-    step_state: FundingOperationStepState;
-  }>(
+  const stepResult = await client.query<{ id: string }>(
     `
-      select state as step_state
+      select id
       from funding_operation_steps
       where operation_id = $1 and id = $2
       for update
@@ -1485,6 +1570,20 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
     );
   }
   const prior = mapAttempt(priorRow);
+  const lifecycleBeforeResolution =
+    await projectedFundingLifecycleInTransaction(client, {
+      operationId: input.operationId,
+      now,
+    });
+  const actionBeforeResolution = lifecycleBeforeResolution.actions.find(
+    (action) => action.actionId === input.stepId,
+  );
+  if (!actionBeforeResolution) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "delegated funding action disappeared while resolving its provider reference",
+    );
+  }
   if (input.resolution.kind === "transaction") {
     if (
       prior.outcome === "ambiguous" &&
@@ -1492,27 +1591,28 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
       prior.receiptRefLookupHmac === input.resolution.receiptRefLookupHmac &&
       prior.lookupKeyVersion === input.resolution.lookupKeyVersion
     ) {
-      return { attempt: prior, stepState: scopedStep.step_state };
+      return { attempt: prior, stepState: actionBeforeResolution.state };
     }
   } else if (
     prior.outcome === "failed" &&
-    canonicalJsonEqual(prior.actualCosts, input.resolution.actualCosts)
+    canonicalJsonEqual(prior.actualCosts, resolvedActualCosts ?? {})
   ) {
-    return { attempt: prior, stepState: "failed" };
+    return { attempt: prior, stepState: actionBeforeResolution.state };
   }
   if (
     prior.outcome !== "ambiguous" ||
     prior.referenceKind !== "provider_receipt" ||
     prior.receiptRefLookupHmac !== input.providerReferenceLookupHmac ||
     prior.lookupKeyVersion === null ||
-    !["reconcile_required", "recovery_required"].includes(scopedStep.step_state)
+    !["reconcile_required", "recovery_required"].includes(
+      actionBeforeResolution.state,
+    )
   ) {
     throw new FundingPersistenceError(
       "invalid_state_transition",
       "delegated provider reference is no longer awaiting resolution",
     );
   }
-  const now = input.now ?? new Date();
   const resolved =
     input.resolution.kind === "transaction"
       ? await client.query<FundingStepAttemptDbRow>(
@@ -1557,7 +1657,7 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
           `,
           [
             input.attemptId,
-            input.resolution.actualCosts,
+            resolvedActualCosts,
             now,
             input.providerReferenceLookupHmac,
           ],
@@ -1569,73 +1669,77 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
       "delegated provider reference resolution lost its compare-and-set",
     );
   }
-  const stepState =
-    input.resolution.kind === "transaction"
-      ? scopedStep.step_state
-      : input.retryableDefinitiveFailure
-        ? "action_required"
-        : "failed";
-  if (input.resolution.kind === "definitive_failure") {
-    const updated = await client.query(
-      `
-        update funding_operation_steps
-        set state = $3, updated_at = $2
-        where id = $1 and state in ('reconcile_required', 'recovery_required')
-      `,
-      [input.stepId, now, stepState],
-    );
-    if (updated.rowCount !== 1) {
-      throw new FundingPersistenceError(
-        "invalid_state_transition",
-        "delegated funding step changed while resolving provider failure",
-      );
-    }
-  }
   const strandedProviderFailure =
     input.resolution.kind === "definitive_failure" &&
-    scopedOperation.operation_status === "recovery_required" &&
-    scopedOperation.operation_recovery_mode === "automatic_evidence";
+    lifecycleBeforeResolution.status === "recovery_required" &&
+    lifecycleBeforeResolution.recoveryMode === "automatic_evidence";
   const hasGenericWindow =
     scopedOperation.operation_support_metadata.reconciliationActiveSince !=
       null ||
     scopedOperation.operation_support_metadata
       .reconciliationActiveAttemptBaseline != null;
+  let operationVersion = Number(scopedOperation.operation_version);
   if (hasGenericWindow || strandedProviderFailure) {
     // Provider recovery and generic reconciliation own different clocks. At
-    // their handoff, discard the old window; a proven failure also ends the
-    // automatic loop because no recovery selector can claim a failed step.
-    const state = {
-      status: scopedOperation.operation_status,
-      stage: scopedOperation.operation_progress_stage,
-    } as const;
-    await transitionFundingOperationInTransaction(client, {
-      operationId: input.operationId,
-      scope: { kind: "worker" },
-      expectedVersion: Number(scopedOperation.operation_version),
-      expectedState: state,
-      nextState: state,
-      ...(strandedProviderFailure
-        ? {
-            recoveryMode: "manual_review" as const,
-            errorCode: "delegated_provider_reference_failed",
-          }
-        : {}),
-      ...(hasGenericWindow
-        ? {
-            supportMetadataPatch: {
-              reconciliationActiveSince: null,
-              reconciliationActiveAttemptBaseline: null,
-            },
-          }
-        : {}),
-      now,
-    });
+    // handoff, clear only the stale timer fact. A proven failure records an
+    // explicit manual-recovery fact; the projector alone chooses public
+    // status, recovery mode, action state, and observable reason.
+    const operation = await writeFundingOperationSupportFactsInTransaction(
+      client,
+      {
+        operationId: input.operationId,
+        expectedVersion: operationVersion,
+        supportMetadataPatch: {
+          ...(hasGenericWindow
+            ? {
+                reconciliationActiveSince: null,
+                reconciliationActiveAttemptBaseline: null,
+              }
+            : {}),
+          ...(strandedProviderFailure
+            ? {
+                lifecycleManualRecovery: {
+                  code: "delegated_provider_reference_failed",
+                  requestedAt: now.toISOString(),
+                },
+              }
+            : {}),
+        },
+        now,
+      },
+    );
+    operationVersion = operation.version;
   }
+  const lifecycle = await projectedFundingLifecycleInTransaction(client, {
+    operationId: input.operationId,
+    now,
+  });
+  const action = lifecycle.actions.find(
+    (candidate) => candidate.actionId === input.stepId,
+  );
+  if (!action) {
+    throw new FundingPersistenceError(
+      "operation_not_found",
+      "delegated funding action disappeared after provider resolution",
+    );
+  }
+  await writeFundingActionProjectionCachesInTransaction(client, lifecycle, now);
+  await writeFundingOperationLifecycleProjectionCacheInTransaction(client, {
+    operationId: input.operationId,
+    expectedVersion: operationVersion,
+    state: {
+      status: lifecycle.status,
+      stage: lifecycle.progressStage,
+    },
+    recoveryMode: lifecycle.recoveryMode,
+    errorCode: lifecycle.errorCode,
+    now,
+  });
   await wakeFundingReconciliationInTransaction(client, {
     operationId: input.operationId,
     dueAt: now,
   });
-  return { attempt: mapAttempt(resolvedRow), stepState };
+  return { attempt: mapAttempt(resolvedRow), stepState: action.state };
 }
 
 export async function finishFundingStepAttemptForUser(

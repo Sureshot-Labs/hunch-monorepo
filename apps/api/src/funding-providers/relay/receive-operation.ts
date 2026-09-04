@@ -22,6 +22,7 @@ import {
   commitFundingOperationInTransaction,
   createFundingQuoteInTransaction,
 } from "../../funding/persistence/funding-operation-repository.js";
+import { loadFundingLifecycleProjectionForOperation } from "../../funding/lifecycle/funding-lifecycle-read-model.js";
 import {
   fundingReceiveReceiptOperationIdempotencyKey,
   type FundingReceiveReceiptRoutingTarget,
@@ -470,10 +471,9 @@ async function validateOperationLink(
     delegatedProfileId?: string;
   }>,
 ): Promise<boolean> {
-  const { rows } = await client.query<{ valid: boolean }>(
+  const { rows } = await client.query<{ operation_id: string }>(
     `
-      select exists (
-        select 1
+      select operation.id as operation_id
         from funding_operations operation
         join funding_operation_segments segment
           on segment.operation_id = operation.id
@@ -506,22 +506,7 @@ async function validateOperationLink(
             where other_segment.operation_id = operation.id
               and other_segment.id <> segment.id
           )
-          and (
-            ($11::text is null and exists (
-            select 1
-            from funding_operation_steps step
-            where step.operation_id = operation.id
-              and step.state = 'action_required'
-            ))
-            or ($11::text is not null and (
-              select count(*)
-              from funding_operation_steps step
-              where step.operation_id = operation.id
-                and step.executor_id = $11
-                and step.state = 'planned'
-            ) = 2)
-          )
-      ) as valid
+      limit 1
     `,
     [
       input.operationId,
@@ -534,10 +519,31 @@ async function validateOperationLink(
       input.expectedSource.networkId,
       input.expectedSource.decimals,
       input.expectedSource.assetId,
-      input.delegatedProfileId ?? null,
     ],
   );
-  return rows[0]?.valid === true;
+  const operationId = rows[0]?.operation_id;
+  if (!operationId) return false;
+  const projected = await loadFundingLifecycleProjectionForOperation(client, {
+    operationId,
+  });
+  if (!projected) return false;
+  const { facts, lifecycle } = projected;
+  if (input.delegatedProfileId === undefined) {
+    return lifecycle.actions.some(
+      (action) => action.state === "action_required",
+    );
+  }
+  const delegatedActions = facts.actions.filter(
+    (action) => action.executorId === input.delegatedProfileId,
+  );
+  // Linking a server-executed Relay route requires its frozen two-action
+  // shape and no prior attempt. The action cache used to encode this as two
+  // `planned` rows; immutable plan/attempt facts say it directly.
+  return (
+    delegatedActions.length === 2 &&
+    delegatedActions.every((action) => action.attempts.length === 0) &&
+    !lifecycle.safety.terminal
+  );
 }
 
 export function createRelayReceiveReceiptDispositionResolver(

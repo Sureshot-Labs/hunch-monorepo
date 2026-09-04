@@ -275,8 +275,12 @@ try {
       userId,
       operationId: committed.operation.id,
     });
-    assert.equal(reopened?.status, "recovery_required");
-    assert.equal(reopened?.recoveryMode, "automatic_evidence");
+    assert.equal(
+      reopened?.status,
+      "completed",
+      "a stale terminal cache cannot delay a finalized exact withdrawal",
+    );
+    assert.equal(reopened?.recoveryMode, null);
     const observation = await client.query<{
       kind: string;
       segment_id: string | null;
@@ -304,7 +308,6 @@ try {
     const terminalTargets = await listFundingStepReceiptTargets(
       client,
       committed.operation.id,
-      new Date(),
     );
     assert.equal(terminalTargets.length, 1);
     assert.equal(terminalTargets[0]?.attemptId, attempt.id);

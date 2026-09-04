@@ -49,7 +49,6 @@ import {
   validateFundingIntentPolicy,
 } from "../../policies/funding-policy-v2.js";
 import { relayOwnedRefundEventMatches } from "../../reconciliation/relay-owned-refund-observer.js";
-import { canTransitionFundingOperation } from "../../domain/transitions.js";
 
 const WALLET = "0x1111111111111111111111111111111111111111";
 const WALLET_ID = stableWalletOpaqueId({
@@ -146,14 +145,6 @@ assert.equal(relayEvmUsdCapMatchesRaw("10", CAP), true);
 assert.equal(relayEvmUsdCapMatchesRaw("10.000001", CAP), false);
 assert.equal(relayEvmUsdCapMatchesRaw(null, CAP), false);
 
-assert.equal(
-  canTransitionFundingOperation(
-    { status: "in_progress", stage: "source_action" },
-    { status: "completed", stage: "terminal" },
-  ),
-  true,
-  "a finalized non-value maintenance action can terminate its own operation",
-);
 const APPROVE_ABI = [
   {
     type: "function",

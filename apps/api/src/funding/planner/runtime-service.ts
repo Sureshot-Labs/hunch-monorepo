@@ -17,10 +17,12 @@ import {
 import {
   commitFundingOperationInTransaction,
   createFundingQuote,
-  fetchFundingOperationForUser,
-  listFundingOperationsForUser,
   type FundingQuoteCommitScope,
 } from "../persistence/funding-operation-repository.js";
+import {
+  listProjectedFundingOperationsForUser,
+  loadProjectedFundingOperationForUser,
+} from "../lifecycle/funding-lifecycle-read-model.js";
 import { listFundingOperationStepsForUser } from "../persistence/funding-evidence-repository.js";
 import {
   createOrReplayFundingPreparationRun,
@@ -764,8 +766,12 @@ export class FundingPlanningRuntime {
     );
   }
 
-  operation(userId: string, operationId: string) {
-    return fetchFundingOperationForUser(this.db, { userId, operationId });
+  async operation(userId: string, operationId: string) {
+    const projected = await loadProjectedFundingOperationForUser(this.db, {
+      userId,
+      operationId,
+    });
+    return projected?.operation ?? null;
   }
 
   operationSteps(userId: string, operationId: string) {
@@ -797,14 +803,15 @@ export class FundingPlanningRuntime {
     return this.actionRuntime.report(userId, input);
   }
 
-  operations(
+  async operations(
     userId: string,
     input: Readonly<{ limit: number; before: Date | null }>,
   ) {
-    return listFundingOperationsForUser(this.db, {
+    const operations = await listProjectedFundingOperationsForUser(this.db, {
       userId,
       limit: input.limit,
       beforeCreatedAt: input.before,
     });
+    return operations.map((projected) => projected.operation);
   }
 }

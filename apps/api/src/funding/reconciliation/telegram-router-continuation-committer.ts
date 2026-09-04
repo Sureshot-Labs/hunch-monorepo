@@ -32,9 +32,12 @@ import {
   createFundingQuoteInTransaction,
   FUNDING_OPERATION_RECONCILIATION_TTL_MS,
   releaseFundingReservationInTransaction,
-  transitionFundingOperationInTransaction,
   type FundingCommitPlan,
+  writeFundingOperationSupportFactsInTransaction,
 } from "../persistence/funding-operation-repository.js";
+import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
+import { deriveFundingLifecycle } from "../lifecycle/funding-lifecycle-projector.js";
+import { reduceFundingOperationInTransaction } from "./funding-reducer.js";
 import { resolveFundingPolicy } from "../policies/funding-policy-service.js";
 import {
   buildPolymarketControllerApprovalActionValidation,
@@ -499,8 +502,6 @@ function candidateSql(): string {
              and ($3::uuid is null or trade_intent.id = $3::uuid)
              and trade_intent.venue = 'polymarket'
              and trade_intent.action = 'buy'
-             and root_operation.status = 'ready'
-             and root_operation.progress_stage = 'ready_for_consumer'
              and ${telegramPolymarketRootRequiresRouterContinuationSql("root_operation")}
              and not exists (
                select 1 from funding_operations child_operation
@@ -608,12 +609,9 @@ async function hardBlockRouterContinuation(
   return tx(pool, async (client) => {
     const rows = await client.query<{
       id: string;
-      status: "ready" | string;
-      progress_stage: "ready_for_consumer" | string;
       version: string | number;
     }>(
-      `select root_operation.id, root_operation.status, root_operation.progress_stage,
-              root_operation.version
+      `select root_operation.id, root_operation.version
          from telegram_trade_intents trade_intent
          join funding_operations root_operation
            on root_operation.id = trade_intent.funding_operation_id
@@ -622,8 +620,6 @@ async function hardBlockRouterContinuation(
           and trade_intent.status = 'funding'
           and trade_intent.submit_started_at is null
           and root_operation.id = $3::uuid
-          and root_operation.status = 'ready'
-          and root_operation.progress_stage = 'ready_for_consumer'
           and not exists (
             select 1
               from funding_operations child_operation
@@ -636,6 +632,18 @@ async function hardBlockRouterContinuation(
     );
     const root = rows.rows[0];
     if (!root) return false;
+    const now = new Date();
+    const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+      client,
+      { operationId: root.id, now },
+    );
+    const lifecycle = facts ? deriveFundingLifecycle(facts) : null;
+    if (
+      lifecycle?.status !== "ready" ||
+      lifecycle.progressStage !== "ready_for_consumer"
+    ) {
+      return false;
+    }
     const reservations = await client.query<{ id: string }>(
       `select id
          from balance_reservations
@@ -649,18 +657,14 @@ async function hardBlockRouterContinuation(
     if (reservations.rows.length !== 1) return false;
     const reservation = reservations.rows[0];
     if (!reservation) return false;
-    const now = new Date();
     await releaseFundingReservationInTransaction(client, {
       reservationId: reservation.id,
       outcomeReason: "trade_shortfall_router_continuation_hard_blocked",
       now,
     });
-    await transitionFundingOperationInTransaction(client, {
+    await writeFundingOperationSupportFactsInTransaction(client, {
       operationId: root.id,
-      scope: { kind: "worker" },
       expectedVersion: Number(root.version),
-      expectedState: { status: "ready", stage: "ready_for_consumer" },
-      nextState: { status: "completed", stage: "terminal" },
       supportMetadataPatch: {
         consumerResolution: "released_to_controller_cash",
         consumerResolvedAt: now.toISOString(),
@@ -669,20 +673,15 @@ async function hardBlockRouterContinuation(
       },
       now,
     });
-    await client.query(
-      `update telegram_funding_authorization_reservations
-          set status = 'settled',
-              resolved_at = $2,
-              resolution_evidence = resolution_evidence || jsonb_build_object(
-                'operationStatus', 'completed',
-                'operationId', $1::text,
-                'reason', 'router_continuation_hard_blocked'
-              ),
-              updated_at = $2
-        where funding_operation_id = $1::uuid
-          and status = 'reserved'`,
-      [root.id, now],
-    );
+    const reduction = await reduceFundingOperationInTransaction(client, {
+      operationId: root.id,
+      now,
+    });
+    if (reduction.finalState.status !== "completed") {
+      throw new Error(
+        "Router continuation hard block did not settle root funding",
+      );
+    }
     const terminalized = await client.query(
       `update telegram_trade_intents
           set status = 'failed',
@@ -867,12 +866,24 @@ export async function runTelegramRouterContinuationCommitter(
               and trade_intent.status = 'funding'
               and trade_intent.submit_started_at is null
               and root_operation.id = $3::uuid
-              and root_operation.status = 'ready'
-              and root_operation.progress_stage = 'ready_for_consumer'
             for update of trade_intent, root_operation`,
           [row.trade_intent_id, row.user_id, row.root_operation_id],
         );
         if (!lockedRoot.rows[0]) {
+          throw new Error("Router continuation root is no longer available");
+        }
+        const lockedRootFacts =
+          await loadFundingLifecycleFactsForOperationInTransaction(client, {
+            operationId: row.root_operation_id,
+            now,
+          });
+        const lockedRootLifecycle = lockedRootFacts
+          ? deriveFundingLifecycle(lockedRootFacts)
+          : null;
+        if (
+          lockedRootLifecycle?.status !== "ready" ||
+          lockedRootLifecycle.progressStage !== "ready_for_consumer"
+        ) {
           throw new Error("Router continuation root is no longer ready");
         }
         const lockedAuthorization = await client.query<{ id: string }>(

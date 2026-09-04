@@ -37,6 +37,7 @@ import {
   type TelegramRelayEvmAutomationPolicyV3,
 } from "../funding/execution/telegram-funding-automation-policy.js";
 import type { FundingReceiveReceiptRoutingTarget } from "../funding/persistence/funding-receive-session-repository.js";
+import { loadFundingLifecycleProjectionForOperation } from "../funding/lifecycle/funding-lifecycle-read-model.js";
 import type {
   FundingReceiveReceiptAutomaticExecution,
   FundingReceiveReceiptDisposition,
@@ -1129,22 +1130,14 @@ async function validateRelayFundingOperationLink(
   const routeId = polygonSpec?.routeId ?? "base-usdc-to-polygon-pusd";
   const profileId =
     polygonSpec?.profileId ?? TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID;
-  const { rows } = await db.query<{ valid: boolean }>(
-    `select exists (
-       select 1
+  const { rows } = await db.query<{ operation_id: string }>(
+    `select operation.id as operation_id
        from funding_operations operation
        where operation.id = $1::uuid
          and operation.user_id = $2::uuid
          and operation.support_metadata ->> 'routeId' = $4
          and operation.requested_source_amount ->> 'raw' = $3
-         and (
-           select count(*)
-           from funding_operation_steps step
-           where step.operation_id = operation.id
-             and step.executor_id = $5
-             and step.state = 'planned'
-         ) = 2
-     ) as valid`,
+       limit 1`,
     [
       input.operationId,
       input.target.userId,
@@ -1153,7 +1146,20 @@ async function validateRelayFundingOperationLink(
       profileId,
     ],
   );
-  return rows[0]?.valid === true;
+  const operationId = rows[0]?.operation_id;
+  if (!operationId) return false;
+  const projected = await loadFundingLifecycleProjectionForOperation(db, {
+    operationId,
+  });
+  if (!projected) return false;
+  const relayActions = projected.facts.actions.filter(
+    (action) => action.executorId === profileId,
+  );
+  return (
+    relayActions.length === 2 &&
+    relayActions.every((action) => action.attempts.length === 0) &&
+    !projected.lifecycle.safety.terminal
+  );
 }
 
 function resolveRelayReceiptExecution(
@@ -1205,9 +1211,8 @@ async function hasReadyRelayFundingDestinationReceipt(
   db: Pick<Pool, "query">,
   contextId: string,
 ): Promise<boolean> {
-  const { rows } = await db.query<{ ready: boolean }>(
-    `select exists (
-       select 1
+  const { rows } = await db.query<{ operation_id: string }>(
+    `select operation.id::text as operation_id
        from telegram_funding_sessions context
        join funding_receive_receipts receipt
          on receipt.receive_session_id = context.receive_session_id
@@ -1216,12 +1221,20 @@ async function hasReadyRelayFundingDestinationReceipt(
          on operation.id = receipt.child_funding_operation_id
        where context.id = $1::uuid
          and receipt.status = 'ready'
-         and operation.status = 'completed'
          and operation.support_metadata ->> 'fundingAuthorizationId' is not null
-     ) as ready`,
+       order by operation.created_at desc
+       limit 16`,
     [contextId],
   );
-  return rows[0]?.ready === true;
+  for (const row of rows) {
+    const projected = await loadFundingLifecycleProjectionForOperation(db, {
+      operationId: row.operation_id,
+    });
+    if (projected?.lifecycle.status === "completed") {
+      return true;
+    }
+  }
+  return false;
 }
 
 function resolveLimitlessFundingConsentRoute(

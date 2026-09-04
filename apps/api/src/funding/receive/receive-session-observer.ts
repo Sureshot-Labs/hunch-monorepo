@@ -894,6 +894,7 @@ export class FundingReceiveSessionObserver {
         client,
         snapshot,
         uniqueEvents,
+        now,
       );
       for (const event of uniqueEvents) {
         const handoffClassification = handoffClassifications.get(
@@ -1082,6 +1083,7 @@ export class FundingReceiveSessionObserver {
     client: PoolClient,
     snapshot: FundingReceiveSessionSnapshot,
     events: readonly FundingReceiveCanonicalEvent[],
+    now: Date,
   ): Promise<ReadonlyMap<string, PolymarketHandoffEventClassification>> {
     const codec = this.dependencies.transactionReferenceCodec ?? null;
     const fingerprinted: FingerprintedFundingReceiveCanonicalEvent[] = [];
@@ -1113,6 +1115,7 @@ export class FundingReceiveSessionObserver {
       )(client, {
         userId: snapshot.userId,
         currentLookupKeyVersion: codec?.keyVersion ?? null,
+        now,
         events: fingerprinted.map((entry) => ({
           networkId: entry.event.variant.networkId,
           assetId: entry.event.variant.asset.assetId,

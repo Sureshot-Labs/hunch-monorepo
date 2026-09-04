@@ -16,6 +16,7 @@ import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { sameAccountAddress } from "../funding/domain/asset-identity.js";
 import { SOLANA_NATIVE_ASSET } from "../funding/domain/network-fees.js";
 import { isRawAmount } from "../funding/domain/raw-amount.js";
+import { loadFundingLifecycleProjectionForOperation } from "../funding/lifecycle/funding-lifecycle-read-model.js";
 import {
   isTelegramPolymarketRouterContinuationPending,
   telegramPolymarketRootRequiresRouterContinuationSql,
@@ -810,6 +811,7 @@ type UnresolvedTelegramTradeIntentRow = {
   delivery_mode: StoredTelegramBuyDeliveryMode;
   id: string;
   error_code: string | null;
+  funding_operation_id: string | null;
   side: TelegramBotTradingSide | null;
   status: string;
   user_id: string | null;
@@ -1141,12 +1143,6 @@ const RESUMABLE_TELEGRAM_APP_HANDOFF_V2_STATE_SQL = `(
    limit 1
 )`;
 const RESUMABLE_TELEGRAM_APP_HANDOFF_V2_SQL = `${RESUMABLE_TELEGRAM_APP_HANDOFF_V2_STATE_SQL} is not null`;
-const TERMINAL_FUNDING_OPERATION_STATUSES = [
-  "completed",
-  "refunded",
-  "failed",
-  "cancelled",
-];
 const SAFE_VENUES: TelegramBotTradingVenue[] = [
   "polymarket",
   "limitless",
@@ -5149,6 +5145,7 @@ async function loadUnresolvedTelegramTradeIntent(
        tti.side,
        tti.status,
        tti.error_code,
+       tti.funding_operation_id::text,
        tti.user_id::text
        FROM telegram_trade_intents tti
 	     WHERE telegram_user_id = $1
@@ -5164,36 +5161,39 @@ async function loadUnresolvedTelegramTradeIntent(
 	          OR status = ANY($5::text[])
 	          OR (
 	            status = 'funding'
-	            AND funding_operation_id IS NOT NULL
-	            AND EXISTS (
-	              SELECT 1
-	                FROM funding_operations funding_operation
-	               WHERE funding_operation.id = tti.funding_operation_id
-	                 AND funding_operation.user_id = tti.user_id
-	                 AND funding_operation.status <> ALL($6::text[])
-	            )
-	          )
-	        )
+            AND funding_operation_id IS NOT NULL
+          )
+        )
       ORDER BY updated_at DESC
-      LIMIT 1`,
+      LIMIT 32`,
     [
       input.telegramUserId,
       input.marketId,
       input.side ?? null,
       input.excludeIntentId ?? null,
       RESOLVING_NON_FUNDING_INTENT_STATUSES,
-      TERMINAL_FUNDING_OPERATION_STATUSES,
     ],
   );
-  return result.rows[0] ?? null;
+  for (const row of result.rows) {
+    if (row.status !== "funding") return row;
+    if (!row.funding_operation_id) continue;
+    const projected = await loadFundingLifecycleProjectionForOperation(db, {
+      operationId: row.funding_operation_id,
+    });
+    if (projected && !projected.lifecycle.safety.terminal) return row;
+  }
+  return null;
 }
 
 async function countUnresolvedTelegramTradeIntents(
   db: DbQuery,
   telegramUserId: string,
 ): Promise<number> {
-  const result = await db.query<{ count: string }>(
-    `SELECT count(*)::text AS count
+  const result = await db.query<{
+    funding_operation_id: string | null;
+    status: string;
+  }>(
+    `SELECT tti.status, tti.funding_operation_id::text
        FROM telegram_trade_intents tti
 	     WHERE telegram_user_id = $1
 	        AND (
@@ -5203,26 +5203,26 @@ async function countUnresolvedTelegramTradeIntents(
 	            AND ${RESUMABLE_TELEGRAM_APP_HANDOFF_V2_SQL}
 	          )
 	          OR status = ANY($2::text[])
-	          OR (
-	            status = 'funding'
-	            AND funding_operation_id IS NOT NULL
-	            AND EXISTS (
-	              SELECT 1
-	                FROM funding_operations funding_operation
-	               WHERE funding_operation.id = tti.funding_operation_id
-	                 AND funding_operation.user_id = tti.user_id
-	                 AND funding_operation.status <> ALL($3::text[])
-	            )
-	          )
-	        )`,
-    [
-      telegramUserId,
-      RESOLVING_NON_FUNDING_INTENT_STATUSES,
-      TERMINAL_FUNDING_OPERATION_STATUSES,
-    ],
+          OR (
+            status = 'funding'
+            AND funding_operation_id IS NOT NULL
+          )
+        )`,
+    [telegramUserId, RESOLVING_NON_FUNDING_INTENT_STATUSES],
   );
-  const parsed = Number(result.rows[0]?.count ?? 0);
-  return Number.isFinite(parsed) ? parsed : 0;
+  let count = 0;
+  for (const row of result.rows) {
+    if (row.status !== "funding") {
+      count += 1;
+      continue;
+    }
+    if (!row.funding_operation_id) continue;
+    const projected = await loadFundingLifecycleProjectionForOperation(db, {
+      operationId: row.funding_operation_id,
+    });
+    if (projected && !projected.lifecycle.safety.terminal) count += 1;
+  }
+  return count;
 }
 
 async function listResolvingTelegramTradeIntents(
@@ -5242,6 +5242,7 @@ async function listResolvingTelegramTradeIntents(
   const result = await db.query<{
     action: TelegramBotTradingAction;
     age_minutes: string;
+    funding_operation_id: string | null;
     funding_operation_status: string | null;
     funding_progress_stage: string | null;
     intent_id: string;
@@ -5251,8 +5252,7 @@ async function listResolvingTelegramTradeIntents(
     `SELECT
        tti.action,
        greatest(0, floor(extract(epoch FROM (now() - tti.created_at)) / 60))::text AS age_minutes,
-       funding_operation.status AS funding_operation_status,
-       funding_operation.progress_stage AS funding_progress_stage,
+       funding_operation.id::text AS funding_operation_id,
        tti.id::text AS intent_id,
        coalesce(m.title, tti.market_id) AS market_title,
        tti.status
@@ -5271,26 +5271,51 @@ async function listResolvingTelegramTradeIntents(
          OR (
            tti.status = 'funding'
            AND funding_operation.id IS NOT NULL
-           AND funding_operation.status <> ALL($3::text[])
          )
        )
      ORDER BY tti.created_at DESC
      LIMIT 5`,
-    [
-      telegramUserId,
-      RESOLVING_NON_FUNDING_INTENT_STATUSES,
-      TERMINAL_FUNDING_OPERATION_STATUSES,
-    ],
+    [telegramUserId, RESOLVING_NON_FUNDING_INTENT_STATUSES],
   );
-  return result.rows.map((row) => ({
-    action: row.action,
-    ageMinutes: Math.max(0, Number(row.age_minutes) || 0),
-    fundingOperationStatus: row.funding_operation_status,
-    fundingProgressStage: row.funding_progress_stage,
-    intentId: row.intent_id,
-    marketTitle: row.market_title,
-    status: row.status,
-  }));
+  type ResolvingTelegramTradeIntent = {
+    action: TelegramBotTradingAction;
+    ageMinutes: number;
+    fundingOperationStatus: string | null;
+    fundingProgressStage: string | null;
+    intentId: string;
+    marketTitle: string;
+    status: string;
+  };
+  const resolving: readonly (ResolvingTelegramTradeIntent | null)[] =
+    await Promise.all(
+      result.rows.map(
+        async (row): Promise<ResolvingTelegramTradeIntent | null> => {
+          const projected = row.funding_operation_id
+            ? await loadFundingLifecycleProjectionForOperation(db, {
+                operationId: row.funding_operation_id,
+              })
+            : null;
+          if (
+            row.status === "funding" &&
+            (!projected || projected.lifecycle.safety.terminal)
+          ) {
+            return null;
+          }
+          return {
+            action: row.action,
+            ageMinutes: Math.max(0, Number(row.age_minutes) || 0),
+            fundingOperationStatus: projected?.lifecycle.status ?? null,
+            fundingProgressStage: projected?.lifecycle.progressStage ?? null,
+            intentId: row.intent_id,
+            marketTitle: row.market_title,
+            status: row.status,
+          };
+        },
+      ),
+    );
+  return resolving.filter(
+    (intent): intent is ResolvingTelegramTradeIntent => intent !== null,
+  );
 }
 
 function telegramFundingProgressLabel(
@@ -7033,28 +7058,48 @@ export async function reconcileStaleTelegramTradeIntents(
     input.telegramUserId == null
       ? null
       : normalizeTelegramUserId(input.telegramUserId);
-  const failedInactiveFunding = await db.query(
-    `UPDATE telegram_trade_intents funding_intent
-        SET status = 'failed',
-            error_code = coalesce(error_code, 'funding_no_longer_active'),
-            error_message = coalesce(
-              error_message,
-              'Funding stopped before the Buy could continue. No trade was submitted.'
-            ),
-            updated_at = now()
-      WHERE funding_intent.status = 'funding'
-        AND funding_intent.submit_started_at IS NULL
-        AND ($1::text IS NULL OR funding_intent.telegram_user_id = $1)
-        AND NOT EXISTS (
-          SELECT 1
-            FROM funding_operations funding_operation
-           WHERE funding_operation.id = funding_intent.funding_operation_id
-             AND funding_operation.user_id = funding_intent.user_id
-             AND funding_operation.status <> ALL($2::text[])
-        )
-      RETURNING funding_intent.id`,
-    [telegramUserId, TERMINAL_FUNDING_OPERATION_STATUSES],
+  const fundingCandidates = await db.query<{
+    funding_operation_id: string | null;
+    id: string;
+  }>(
+    `select funding_intent.id::text,
+            funding_intent.funding_operation_id::text
+       from telegram_trade_intents funding_intent
+      where funding_intent.status = 'funding'
+        and funding_intent.submit_started_at is null
+        and ($1::text is null or funding_intent.telegram_user_id = $1)`,
+    [telegramUserId],
   );
+  const inactiveFundingIds: string[] = [];
+  for (const candidate of fundingCandidates.rows) {
+    const projected = candidate.funding_operation_id
+      ? await loadFundingLifecycleProjectionForOperation(db, {
+          operationId: candidate.funding_operation_id,
+          now,
+        })
+      : null;
+    if (!projected || projected.lifecycle.safety.terminal) {
+      inactiveFundingIds.push(candidate.id);
+    }
+  }
+  const failedInactiveFunding =
+    inactiveFundingIds.length === 0
+      ? { rowCount: 0 }
+      : await db.query(
+          `update telegram_trade_intents funding_intent
+              set status = 'failed',
+                  error_code = coalesce(error_code, 'funding_no_longer_active'),
+                  error_message = coalesce(
+                    error_message,
+                    'Funding stopped before the Buy could continue. No trade was submitted.'
+                  ),
+                  updated_at = now()
+            where funding_intent.id = any($1::uuid[])
+              and funding_intent.status = 'funding'
+              and funding_intent.submit_started_at is null
+            returning funding_intent.id`,
+          [inactiveFundingIds],
+        );
   const expiredPending = await db.query(
     `UPDATE telegram_trade_intents pending_intent
         SET status = 'expired',
@@ -12330,30 +12375,18 @@ export async function handleTelegramBotTradingCallback(
   let cancellingFundingPreparation = false;
   let cancellingBuyContinuation = false;
   if (cancellingFundingIntent) {
-    const cancellationSafety = await input.db.query<{
-      external_boundary_crossed: boolean;
-    }>(
-      `select exists (
-         select 1
-         from funding_operation_steps step_row
-         left join funding_operation_step_attempts attempt_row
-           on attempt_row.step_id = step_row.id
-         where step_row.operation_id = $1::uuid
-           and (
-             attempt_row.id is not null
-             or step_row.state not in ('planned', 'action_required')
-           )
-       ) or exists (
-         select 1
-         from funding_observations observation_row
-         where observation_row.operation_id = $1::uuid
-       ) as external_boundary_crossed
-       from funding_operations operation_row
-      where operation_row.id = $1::uuid
-        and operation_row.user_id = $2::uuid`,
-      [cancellationOperationId, cancellationUserId],
+    const fundingLifecycle = await loadFundingLifecycleProjectionForOperation(
+      input.db,
+      {
+        operationId: cancellationOperationId,
+      },
     );
-    if (cancellationSafety.rows[0]?.external_boundary_crossed === false) {
+    // Failing to load facts is deliberately conservative: the Buy can still
+    // be detached, while the operation remains available for reconciliation.
+    // A stored step state is never evidence that a wallet effect occurred.
+    const externalBoundaryCrossed =
+      fundingLifecycle?.lifecycle.safety.externalEffectMayHaveOccurred ?? true;
+    if (!externalBoundaryCrossed) {
       if (!input.cancelFundingOperation) {
         await input.answerCallbackQuery({
           callbackQueryId: input.callbackQuery.id,
@@ -12878,17 +12911,14 @@ export async function handleTelegramBotTradingCallback(
   if (parsed.type === "retry_buy" && intent.status === "funding") {
     const fundingState = await input.db.query<{
       continuation_id: string | null;
-      operation_status: string;
-      progress_stage: string;
+      operation_id: string;
       reservation_id: string | null;
       root_requires_router_continuation: boolean;
-      has_broadcast_boundary: boolean;
     }>(
       `select continuation.id::text as continuation_id,
               ${telegramPolymarketRootRequiresRouterContinuationSql("operation")}
                 as root_requires_router_continuation,
-              tracked_operation.status as operation_status,
-              tracked_operation.progress_stage,
+              tracked_operation.id::text as operation_id,
               (
                 select reservation.id::text
                   from balance_reservations reservation
@@ -12899,16 +12929,6 @@ export async function handleTelegramBotTradingCallback(
                  order by reservation.id
                  limit 1
               ) as reservation_id,
-              exists (
-                select 1
-                  from funding_operation_step_attempts attempt
-                  join funding_operation_steps step on step.id = attempt.step_id
-               where step.operation_id = tracked_operation.id
-                   and (
-                     attempt.broadcast_may_have_occurred
-                     or attempt.outcome in ('submitted', 'ambiguous', 'succeeded')
-                   )
-              ) as has_broadcast_boundary
          from funding_operations operation
          left join lateral (
            select continuation.*
@@ -12921,15 +12941,28 @@ export async function handleTelegramBotTradingCallback(
          ) continuation on true
          cross join lateral (
            select coalesce(continuation.id, operation.id) as id,
-                  coalesce(continuation.user_id, operation.user_id) as user_id,
-                  coalesce(continuation.status, operation.status) as status,
-                  coalesce(continuation.progress_stage, operation.progress_stage) as progress_stage
+                  coalesce(continuation.user_id, operation.user_id) as user_id
          ) tracked_operation
         where operation.id = $1::uuid
           and operation.user_id = $2::uuid`,
       [intent.funding_operation_id, intent.user_id, intent.id],
     );
-    const funding = fundingState.rows[0];
+    const fundingRow = fundingState.rows[0];
+    const fundingProjection = fundingRow
+      ? await loadFundingLifecycleProjectionForOperation(input.db, {
+          operationId: fundingRow.operation_id,
+        })
+      : null;
+    const funding = fundingRow
+      ? {
+          ...fundingRow,
+          has_broadcast_boundary:
+            fundingProjection?.lifecycle.safety.externalEffectMayHaveOccurred ??
+            false,
+          operation_status: fundingProjection?.lifecycle.status ?? null,
+          progress_stage: fundingProjection?.lifecycle.progressStage ?? null,
+        }
+      : null;
     const routerContinuationPending =
       isTelegramPolymarketRouterContinuationPending({
         continuationId: funding?.continuation_id,

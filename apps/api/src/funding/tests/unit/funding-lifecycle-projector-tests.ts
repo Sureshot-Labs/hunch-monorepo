@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 
 import {
   deriveFundingLifecycle,
+  deriveFundingLifecycleBeforeActionBroadcast,
   type FundingLifecycleActionAttempt,
   type FundingLifecycleActionFact,
   type FundingLifecycleFacts,
@@ -26,6 +27,7 @@ function attempt(
     outcome: "started",
     broadcastMayHaveOccurred: false,
     referenceKind: null,
+    retryableAfterFailure: false,
     startedAt: now,
     updatedAt: now,
     receipt: null,
@@ -113,6 +115,23 @@ function facts(
 }
 
 {
+  const startedFacts = facts({
+    actions: [action("broadcast", { attempts: [attempt()] })],
+  });
+  assert.deepEqual(deriveFundingLifecycle(startedFacts).actions, [
+    { actionId: "broadcast", state: "recovery_required", actionable: false },
+  ]);
+  assert.deepEqual(
+    deriveFundingLifecycleBeforeActionBroadcast(startedFacts, {
+      actionId: "broadcast",
+      attemptNumber: 1,
+    }).actions,
+    [{ actionId: "broadcast", state: "action_required", actionable: true }],
+    "the pre-broadcast check sees the same action-admission facts, not its own started attempt",
+  );
+}
+
+{
   const projection = deriveFundingLifecycle(
     facts({
       actions: [
@@ -132,6 +151,112 @@ function facts(
       ["polygon", "action_required", true],
       ["base", "action_required", true],
     ],
+  );
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      actions: [
+        action("reorg-proven-safe-to-retry", {
+          attempts: [
+            attempt({
+              outcome: "submitted",
+              broadcastMayHaveOccurred: true,
+              retryableAfterReorg: true,
+              receipt: {
+                status: "reorged",
+                canonical: false,
+                actionMatched: true,
+                failureFinalized: false,
+              },
+            }),
+          ],
+        }),
+      ],
+    }),
+  );
+  assert.deepEqual(projection.actions, [
+    {
+      actionId: "reorg-proven-safe-to-retry",
+      state: "action_required",
+      actionable: true,
+    },
+  ]);
+  assert.equal(
+    projection.safety.requiresWorker,
+    false,
+    "the durable bounded-reorg decision replaces the stale cache rearm",
+  );
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      actions: [
+        action("approval", {
+          ordinal: 0,
+          attempts: [
+            attempt({
+              outcome: "submitted",
+              broadcastMayHaveOccurred: true,
+              receipt: {
+                status: "finalized",
+                canonical: true,
+                actionMatched: false,
+                failureFinalized: false,
+              },
+            }),
+          ],
+        }),
+        action("fund", { ordinal: 1, dependsOnActionId: "approval" }),
+      ],
+    }),
+  );
+  assert.deepEqual(projection.actions, [
+    { actionId: "approval", state: "reconcile_required", actionable: false },
+    { actionId: "fund", state: "reconcile_required", actionable: false },
+  ]);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      terminalCompletion: {
+        code: "relay_allowance_cleanup_completed",
+        decidedAt: now,
+        actionId: "cleanup",
+      },
+      actions: [
+        action("cleanup", {
+          mayMoveMoney: false,
+          attempts: [attempt({ outcome: "succeeded" })],
+        }),
+      ],
+    }),
+  );
+  assert.deepEqual(
+    { status: projection.status, progressStage: projection.progressStage },
+    { status: "completed", progressStage: "terminal" },
+    "a durable non-financial postcondition completes only its succeeded action",
+  );
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      terminalCompletion: {
+        code: "relay_allowance_cleanup_completed",
+        decidedAt: now,
+        actionId: "cleanup",
+      },
+      actions: [action("cleanup", { mayMoveMoney: false })],
+    }),
+  );
+  assert.notEqual(
+    projection.status,
+    "completed",
+    "a completion decision cannot fabricate an action that never succeeded",
   );
 }
 
@@ -322,6 +447,30 @@ function facts(
 {
   const projection = deriveFundingLifecycle(
     facts({
+      manualRecovery: {
+        code: "relay_cleanup_foreign_allowance_drift",
+        requestedAt: now,
+      },
+      actions: [
+        action("cleanup", {
+          attempts: [
+            attempt({ outcome: "submitted", broadcastMayHaveOccurred: true }),
+          ],
+        }),
+      ],
+    }),
+  );
+  assert.equal(
+    projection.status,
+    "recovery_required",
+    "an explicit manual escalation outranks generic automatic reconciliation",
+  );
+  assert.equal(projection.safety.requiresManualRecovery, true);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
       actions: [action("unfinished", { attempts: [attempt()] })],
     }),
   );
@@ -351,11 +500,17 @@ function facts(
           ],
         }),
       ],
-  }),
+    }),
   );
   assert.equal(projection.status, "recovery_required");
   assert.equal(projection.safety.requiresManualRecovery, false);
   assert.equal(projection.safety.requiresWorker, true);
+  assert.equal(
+    projection.safety.reconciliationEvidenceTimedOut,
+    false,
+    "a durable provider receipt owns its replay lease instead of the generic deadline",
+  );
+  assert.equal(projection.errorCode, null);
   assert.deepEqual(projection.actions, [
     {
       actionId: "provider-receipt",
@@ -386,6 +541,157 @@ function facts(
   assert.equal(projection.status, "recovery_required");
   assert.equal(projection.safety.requiresManualRecovery, false);
   assert.equal(projection.safety.requiresWorker, true);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      automaticRecovery: {
+        code: "reconciliation_evidence_timeout",
+        requestedAt: now,
+      },
+      actions: [
+        action("resolved-provider-reference", {
+          attempts: [
+            attempt({
+              outcome: "submitted",
+              broadcastMayHaveOccurred: true,
+              referenceKind: "transaction",
+            }),
+          ],
+        }),
+      ],
+    }),
+  );
+  assert.equal(
+    projection.status,
+    "recovery_required",
+    "an elapsed evidence window remains recovery-required after its active timer is cleared",
+  );
+  assert.equal(projection.recoveryMode, "automatic_evidence");
+  assert.equal(projection.errorCode, "reconciliation_evidence_timeout");
+  assert.deepEqual(projection.actions, [
+    {
+      actionId: "resolved-provider-reference",
+      state: "recovery_required",
+      actionable: false,
+    },
+  ]);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      actions: [
+        action("provider-proven-safe-retry", {
+          attempts: [
+            attempt({
+              outcome: "failed",
+              retryableAfterFailure: true,
+            }),
+          ],
+        }),
+      ],
+    }),
+  );
+  assert.deepEqual(projection.actions, [
+    {
+      actionId: "provider-proven-safe-retry",
+      state: "action_required",
+      actionable: true,
+    },
+  ]);
+  assert.equal(
+    projection.status,
+    "awaiting_user",
+    "a provider-proven non-broadcast failure retries from its attempt fact, never an imperative step-cache write",
+  );
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      manualRecovery: {
+        code: "relay_cleanup_foreign_allowance_drift",
+        requestedAt: now,
+      },
+      actions: [
+        action("cleanup", {
+          attempts: [attempt({ outcome: "failed" })],
+        }),
+      ],
+    }),
+  );
+  assert.equal(projection.status, "recovery_required");
+  assert.equal(projection.recoveryMode, "manual_review");
+  assert.equal(projection.safety.requiresManualRecovery, true);
+  assert.equal(projection.errorCode, "relay_cleanup_foreign_allowance_drift");
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      actions: [
+        action("stopped-before-late-broadcast", {
+          attempts: [attempt({ outcome: "failed" })],
+        }),
+        action("late-broadcast", {
+          ordinal: 1,
+          attempts: [
+            attempt({
+              outcome: "submitted",
+              broadcastMayHaveOccurred: true,
+              referenceKind: "transaction",
+            }),
+          ],
+        }),
+      ],
+    }),
+  );
+  assert.deepEqual(
+    {
+      status: projection.status,
+      progressStage: projection.progressStage,
+      recoveryMode: projection.recoveryMode,
+      errorCode: projection.errorCode,
+    },
+    {
+      status: "recovery_required",
+      progressStage: "source_action",
+      recoveryMode: "automatic_evidence",
+      errorCode: "late_broadcast_after_terminal_operation",
+    },
+    "a late possible broadcast reopens from durable attempt facts even if an old operation cache was terminal",
+  );
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      terminalFailure: {
+        code: "relay_allowance_ownership_changed",
+        decidedAt: now,
+        actionId: "deposit",
+      },
+      actions: [
+        action("approval", {
+          mayMoveMoney: false,
+          attempts: [attempt({ outcome: "succeeded" })],
+        }),
+        action("deposit", {
+          ordinal: 1,
+          dependsOnActionId: "approval",
+        }),
+      ],
+    }),
+  );
+  assert.equal(projection.status, "failed");
+  assert.equal(projection.safety.terminal, true);
+  assert.equal(projection.errorCode, "relay_allowance_ownership_changed");
+  assert.deepEqual(projection.actions, [
+    { actionId: "approval", state: "succeeded", actionable: false },
+    { actionId: "deposit", state: "failed", actionable: false },
+  ]);
 }
 
 {

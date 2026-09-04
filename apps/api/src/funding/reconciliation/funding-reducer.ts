@@ -1,23 +1,19 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
-import {
-  FUNDING_OPERATION_TRANSITIONS,
-  SEGMENT_TRANSITIONS,
-  isValidFundingOperationState,
-  type FundingOperationState,
-  type FundingStateKey,
-  type SegmentStatus,
+import type {
+  FundingOperationState,
+  SegmentStatus,
 } from "../domain/transitions.js";
 import { parseMoneyJson } from "../domain/money-json.js";
 import type { JsonValue } from "../domain/types.js";
 import { canonicalAssetId, sameAsset } from "../domain/asset-identity.js";
 import {
   deriveFundingLifecycle,
+  type FundingLifecycleFacts,
   type FundingLifecycleProjection,
 } from "../lifecycle/funding-lifecycle-projector.js";
 import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
 import { DELEGATED_PROVIDER_REPLAY_MS } from "../execution/delegated-funding-recovery-policy.js";
-import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "../execution/relay-evm-profile-specs.js";
 import {
   claimFundingReconciliationJobs,
   fetchFundingOperationForWorkerInTransaction,
@@ -27,7 +23,6 @@ import {
   writeFundingOperationLifecycleProjectionCacheInTransaction,
   writeFundingSegmentProjectionCacheInTransaction,
   writeFundingOperationSupportFactsInTransaction,
-  transitionFundingOperationInTransaction,
   type FundingObservationRow,
   type FundingOperationRow,
   type FundingPersistenceError,
@@ -37,16 +32,10 @@ import {
 import {
   failTelegramAppHandoffV2FundedIntentWithoutConsumerInTransaction,
   recordSafeFundingActionCancellationsInTransaction,
-  writeFundingStepProjectionCacheInTransaction,
+  writeFundingActionProjectionCachesInTransaction,
 } from "../persistence/funding-evidence-repository.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
-const DELEGATED_RELAY_EVM_PROFILE_ID_LIST = Object.freeze(
-  Object.keys(RELAY_EVM_FUNDING_PROFILE_SPECS),
-);
-const DELEGATED_RELAY_EVM_PROFILE_IDS = new Set(
-  DELEGATED_RELAY_EVM_PROFILE_ID_LIST,
-);
 
 export type FundingReductionResult = Readonly<{
   operationId: string;
@@ -56,6 +45,10 @@ export type FundingReductionResult = Readonly<{
   terminal: boolean;
   reorgBlockedByTerminalState: boolean;
   recoveryMode: FundingRecoveryMode | null;
+  /** The generic evidence window elapsed before its decision was persisted. */
+  reconciliationEvidenceTimedOut: boolean;
+  /** A durable automatic-evidence recovery decision already exists. */
+  automaticRecoveryRecorded: boolean;
 }>;
 
 type StoredReservationRow = {
@@ -72,110 +65,6 @@ type StoredFundingSegmentRow = {
   quoted_min_output: JsonRecord;
 };
 
-type StoredFundingStepStateRow = {
-  action_validation_result: JsonRecord;
-  broadcast_unresolved: boolean;
-  executor_id: string;
-  has_started_attempt: boolean;
-  id: string;
-  latest_attempt_failed?: boolean;
-  segment_id: string | null;
-  state:
-    | "planned"
-    | "action_required"
-    | "submitted"
-    | "succeeded"
-    | "reconcile_required"
-    | "recovery_required"
-    | "failed"
-    | "cancelled";
-};
-
-function stateKey(state: FundingOperationState): FundingStateKey {
-  return `${state.status}:${state.stage}`;
-}
-
-function parseStateKey(key: FundingStateKey): FundingOperationState {
-  const separator = key.indexOf(":");
-  return {
-    status: key.slice(0, separator) as FundingOperationState["status"],
-    stage: key.slice(separator + 1) as FundingOperationState["stage"],
-  };
-}
-
-function findTransitionPath(
-  from: FundingOperationState,
-  to: FundingOperationState,
-): readonly FundingOperationState[] | null {
-  if (
-    !isValidFundingOperationState(from) ||
-    !isValidFundingOperationState(to)
-  ) {
-    return null;
-  }
-  const start = stateKey(from);
-  const target = stateKey(to);
-  if (start === target) return [];
-
-  const queue: FundingStateKey[] = [start];
-  const previous = new Map<FundingStateKey, FundingStateKey | null>([
-    [start, null],
-  ]);
-  while (queue.length > 0) {
-    const current = queue.shift();
-    if (!current) break;
-    const nextStates =
-      (
-        FUNDING_OPERATION_TRANSITIONS as Readonly<
-          Partial<Record<FundingStateKey, readonly FundingStateKey[]>>
-        >
-      )[current] ?? [];
-    for (const next of nextStates) {
-      if (previous.has(next)) continue;
-      previous.set(next, current);
-      if (next === target) {
-        const path: FundingStateKey[] = [];
-        let cursor: FundingStateKey | null = target;
-        while (cursor && cursor !== start) {
-          path.push(cursor);
-          cursor = previous.get(cursor) ?? null;
-        }
-        return path.reverse().map(parseStateKey);
-      }
-      queue.push(next);
-    }
-  }
-  return null;
-}
-
-function findSegmentTransitionPath(
-  from: SegmentStatus,
-  to: SegmentStatus,
-): readonly SegmentStatus[] | null {
-  if (from === to) return [];
-  const queue: SegmentStatus[] = [from];
-  const previous = new Map<SegmentStatus, SegmentStatus | null>([[from, null]]);
-  while (queue.length > 0) {
-    const current = queue.shift();
-    if (!current) break;
-    for (const next of SEGMENT_TRANSITIONS[current]) {
-      if (previous.has(next)) continue;
-      previous.set(next, current);
-      if (next === to) {
-        const path: SegmentStatus[] = [];
-        let cursor: SegmentStatus | null = to;
-        while (cursor && cursor !== from) {
-          path.push(cursor);
-          cursor = previous.get(cursor) ?? null;
-        }
-        return path.reverse();
-      }
-      queue.push(next);
-    }
-  }
-  return null;
-}
-
 function isCanonicalFinal(observation: FundingObservationRow): boolean {
   return observation.canonical && observation.finalityStatus === "finalized";
 }
@@ -189,92 +78,11 @@ function hasFinalObservation(
   );
 }
 
-function sameRefundIdentity(
-  left: FundingObservationRow,
-  right: FundingObservationRow,
-): boolean {
-  return (
-    left.segmentId === right.segmentId &&
-    left.rawAmount === right.rawAmount &&
-    sameAsset(
-      {
-        networkId: left.networkId,
-        assetId: left.assetId,
-        decimals: left.assetDecimals,
-      },
-      {
-        networkId: right.networkId,
-        assetId: right.assetId,
-        decimals: right.assetDecimals,
-      },
-    )
-  );
-}
-
-function refundReorgHasRecordedSuccessor(
-  reorgedRefund: FundingObservationRow,
-  observations: readonly FundingObservationRow[],
-): boolean {
-  const reorgedAt = reorgedRefund.reorgedAt;
-  if (reorgedRefund.kind !== "refund_credit" || reorgedAt === null) {
-    return false;
-  }
-  return observations.some(
-    (candidate) =>
-      candidate.id !== reorgedRefund.id &&
-      candidate.kind === "refund_credit" &&
-      sameRefundIdentity(candidate, reorgedRefund) &&
-      candidate.metadata.replacementForRefundObservationId ===
-        reorgedRefund.id &&
-      candidate.observedAt.getTime() >= reorgedAt.getTime() &&
-      (isCanonicalFinal(candidate) ||
-        (candidate.finalityStatus === "reorged" && !candidate.canonical)),
-  );
-}
-
-function hasUnresolvedCanonicalityLoss(
-  observations: readonly FundingObservationRow[],
-): boolean {
-  return observations.some((observation) => {
-    if (observation.finalityStatus !== "reorged" && observation.canonical) {
-      return false;
-    }
-    return (
-      observation.kind !== "refund_credit" ||
-      !refundReorgHasRecordedSuccessor(observation, observations)
-    );
-  });
-}
-
 function operationState(operation: FundingOperationRow): FundingOperationState {
   return {
     status: operation.status,
     stage: operation.progressStage,
   };
-}
-
-export function fundingSuccessfulRecoveryResolved(
-  input: Readonly<{
-    initialStatus: FundingOperationState["status"];
-    targetStatus: FundingOperationState["status"];
-    reorgBlockedByTerminalState: boolean;
-  }>,
-): boolean {
-  return (
-    input.initialStatus === "recovery_required" &&
-    !input.reorgBlockedByTerminalState &&
-    ["in_progress", "ready", "completed"].includes(input.targetStatus)
-  );
-}
-
-function recoveryTargetFor(
-  current: FundingOperationState,
-): FundingOperationState | null {
-  const candidate: FundingOperationState = {
-    status: "recovery_required",
-    stage: current.stage,
-  };
-  return isValidFundingOperationState(candidate) ? candidate : null;
 }
 
 function destinationRequiresPreparation(
@@ -290,358 +98,6 @@ function destinationRequiresPreparation(
 const DESTINATION_CREDIT_KINDS = new Set<FundingObservationRow["kind"]>([
   "destination_credit",
 ]);
-const COMPOSITE_PREPARED_DESTINATION_KINDS = new Set<
-  FundingObservationRow["kind"]
->(["destination_credit", "venue_readiness"]);
-
-function destinationObservationKinds(
-  operation: FundingOperationRow,
-): ReadonlySet<FundingObservationRow["kind"]> {
-  return operation.planKind === "composite_route" &&
-    destinationRequiresPreparation(operation)
-    ? COMPOSITE_PREPARED_DESTINATION_KINDS
-    : DESTINATION_CREDIT_KINDS;
-}
-
-export function deriveTargetState(
-  operation: FundingOperationRow,
-  observations: readonly FundingObservationRow[],
-  segments: readonly StoredFundingSegmentRow[],
-  steps: readonly StoredFundingStepStateRow[],
-): Readonly<{
-  reorgBlockedByTerminalState: boolean;
-  target: FundingOperationState;
-}> {
-  const current = operationState(operation);
-  const segmentObservations = (segmentId: string) =>
-    observations.filter((observation) => observation.segmentId === segmentId);
-  const allSegmentsSucceeded =
-    segments.length > 0 &&
-    segments.every((segment) => {
-      const target = deriveSegmentTargetStatus(
-        segment.status,
-        segmentObservations(segment.id),
-        segment.quoted_min_output,
-      );
-      return segment.status === "succeeded" || target === "succeeded";
-    });
-  const allSegmentsRefunded =
-    segments.length > 0 &&
-    segments.every((segment) => {
-      const target = deriveSegmentTargetStatus(
-        segment.status,
-        segmentObservations(segment.id),
-        segment.quoted_min_output,
-      );
-      return segment.status === "refunded" || target === "refunded";
-    });
-  const actualDestination = sumObservationAmount(
-    observations,
-    destinationObservationKinds(operation),
-    operation.requestedDestinationAmount,
-  );
-  const requestedDestination = parseMoneyJson(
-    operation.requestedDestinationAmount,
-  );
-  const destinationRequirementMet =
-    actualDestination != null &&
-    requestedDestination != null &&
-    BigInt(actualDestination.raw as string) >= BigInt(requestedDestination.raw);
-  const composite = operation.planKind === "composite_route";
-  const financialEvidencePresent = observations.some(
-    (observation) =>
-      isCanonicalFinal(observation) && observation.kind !== "venue_readiness",
-  );
-  const delegatedRelayStepsSucceeded =
-    (steps.length === 2 && steps.every((step) => step.state === "succeeded")) ||
-    (steps.length === 1 &&
-      steps[0]?.state === "succeeded" &&
-      steps[0].action_validation_result.relayStepKind === "deposit" &&
-      steps[0].action_validation_result.relayAllowanceMode === "preexisting");
-  // Route IDs are shared by server-delegated and client-signed Relay plans.
-  // The stricter allowance/source-debit gate belongs only to the delegated
-  // executor profiles; a client atomic approve+deposit batch is one succeeded
-  // step and must not be mistaken for a delegated deposit-only operation.
-  const delegatedRelayExecution = steps.some((step) =>
-    DELEGATED_RELAY_EVM_PROFILE_IDS.has(step.executor_id),
-  );
-  const delegatedRelayReady =
-    !delegatedRelayExecution ||
-    (delegatedRelayStepsSucceeded &&
-      hasFinalObservation(observations, "source_debit"));
-  const recoveryTarget = (): FundingOperationState => {
-    const exact = recoveryTargetFor(current);
-    if (exact) return exact;
-    return {
-      status: "recovery_required",
-      stage:
-        current.stage === "committed" || current.stage === "terminal"
-          ? "source_action"
-          : current.stage,
-    };
-  };
-  const unresolvedActionTarget = (): FundingOperationState => {
-    const stage =
-      current.stage === "committed" || current.stage === "terminal"
-        ? "source_action"
-        : current.stage;
-    const candidate: FundingOperationState = {
-      status: "reconcile_required",
-      stage,
-    };
-    // An ordinary in-flight broadcast is still inside the bounded automatic
-    // reconciliation path. Keep it retryable by the worker so a finalized
-    // receipt can resume dependent composite actions. Operations already in
-    // recovery (or reopened from a terminal state) remain fenced there.
-    return current.status !== "recovery_required" &&
-      !steps.some((step) => step.state === "recovery_required") &&
-      !["completed", "refunded", "failed", "cancelled"].includes(
-        current.status,
-      ) &&
-      isValidFundingOperationState(candidate)
-      ? candidate
-      : recoveryTarget();
-  };
-  if (hasUnresolvedCanonicalityLoss(observations)) {
-    // Keep a terminal refund in its durable terminal state while the bounded
-    // refund-reorg watch looks for a canonical replacement. The Relay refund
-    // observer deliberately selects this exact operation/reservation pair;
-    // reopening only the operation would make a later replacement invisible.
-    if (current.status === "refunded") {
-      return {
-        reorgBlockedByTerminalState: true,
-        target: current,
-      };
-    }
-    const recovery = recoveryTarget();
-    return {
-      reorgBlockedByTerminalState: !isValidFundingOperationState(recovery),
-      target: isValidFundingOperationState(recovery) ? recovery : current,
-    };
-  }
-  const unresolvedActionPresent = steps.some(
-    (step) =>
-      step.has_started_attempt === true || step.broadcast_unresolved === true,
-  );
-  if (unresolvedActionPresent) {
-    return {
-      reorgBlockedByTerminalState: false,
-      target: unresolvedActionTarget(),
-    };
-  }
-
-  if (
-    (current.status === "failed" || current.status === "cancelled") &&
-    steps.some(
-      (step) =>
-        step.state === "reconcile_required" ||
-        step.state === "recovery_required",
-    )
-  ) {
-    return {
-      reorgBlockedByTerminalState: false,
-      target: {
-        status: "recovery_required",
-        stage: "source_action",
-      },
-    };
-  }
-  if (current.status === "failed" || current.status === "cancelled") {
-    return {
-      reorgBlockedByTerminalState: false,
-      target: current,
-    };
-  }
-  if (current.status === "completed" || current.status === "refunded") {
-    return {
-      reorgBlockedByTerminalState: false,
-      target: current,
-    };
-  }
-
-  if (steps.some((step) => step.state === "recovery_required")) {
-    return {
-      reorgBlockedByTerminalState: false,
-      target: recoveryTarget(),
-    };
-  }
-  if (steps.some((step) => step.state === "reconcile_required")) {
-    const stage =
-      current.stage === "committed" ? "source_action" : current.stage;
-    const target: FundingOperationState = {
-      status: "reconcile_required",
-      stage,
-    };
-    return {
-      reorgBlockedByTerminalState: false,
-      target: isValidFundingOperationState(target) ? target : recoveryTarget(),
-    };
-  }
-  if (
-    current.status === "recovery_required" &&
-    operation.recoveryMode === "automatic_evidence" &&
-    !financialEvidencePresent &&
-    steps.some(
-      (step) =>
-        step.state === "action_required" && step.latest_attempt_failed === true,
-    ) &&
-    steps.every((step) =>
-      ["planned", "action_required", "succeeded"].includes(step.state),
-    )
-  ) {
-    // A canonical, finalized failed receipt proves that the timed-out
-    // broadcast did not move funds. Receipt persistence re-arms only the
-    // latest attempt's step; once every ambiguity and canonicality loss above
-    // has cleared, resume the same operation so that exact step can be retried.
-    return {
-      reorgBlockedByTerminalState: false,
-      target: { status: "in_progress", stage: "source_action" },
-    };
-  }
-  if (
-    steps.some((step) => step.state === "failed" || step.state === "cancelled")
-  ) {
-    return {
-      reorgBlockedByTerminalState: false,
-      target: financialEvidencePresent
-        ? recoveryTarget()
-        : {
-            status: steps.some((step) => step.state === "failed")
-              ? "failed"
-              : "cancelled",
-            stage: "terminal",
-          },
-    };
-  }
-
-  if (hasFinalObservation(observations, "refund_credit")) {
-    if (composite && !allSegmentsRefunded) {
-      const recovery = recoveryTarget();
-      return {
-        reorgBlockedByTerminalState: false,
-        target: isValidFundingOperationState(recovery) ? recovery : current,
-      };
-    }
-    return {
-      reorgBlockedByTerminalState: false,
-      target: { status: "refunded", stage: "terminal" },
-    };
-  }
-
-  const venueReady = hasFinalObservation(observations, "venue_readiness");
-  const destinationObserved = hasFinalObservation(
-    observations,
-    "destination_credit",
-  );
-  if (
-    venueReady &&
-    delegatedRelayReady &&
-    (!composite || destinationRequirementMet)
-  ) {
-    return {
-      reorgBlockedByTerminalState: false,
-      target:
-        operation.purpose === "trade_shortfall"
-          ? { status: "ready", stage: "ready_for_consumer" }
-          : { status: "completed", stage: "terminal" },
-    };
-  }
-  if (
-    destinationObserved &&
-    delegatedRelayReady &&
-    (!composite || (allSegmentsSucceeded && destinationRequirementMet))
-  ) {
-    if (destinationRequiresPreparation(operation)) {
-      return {
-        reorgBlockedByTerminalState: false,
-        target: { status: "in_progress", stage: "venue_preparation" },
-      };
-    }
-    return {
-      reorgBlockedByTerminalState: false,
-      target:
-        operation.purpose === "trade_shortfall"
-          ? { status: "ready", stage: "ready_for_consumer" }
-          : { status: "completed", stage: "terminal" },
-    };
-  }
-  if (composite && destinationObserved) {
-    return {
-      reorgBlockedByTerminalState: false,
-      target: { status: "in_progress", stage: "routing" },
-    };
-  }
-  if (hasFinalObservation(observations, "intermediate_transfer")) {
-    return {
-      reorgBlockedByTerminalState: false,
-      target: { status: "in_progress", stage: "intermediate_observed" },
-    };
-  }
-  if (
-    hasFinalObservation(observations, "source_debit") ||
-    hasFinalObservation(observations, "source_credit")
-  ) {
-    return {
-      reorgBlockedByTerminalState: false,
-      target: { status: "in_progress", stage: "source_observed" },
-    };
-  }
-  if (
-    steps.some(
-      (step) => step.state === "submitted" || step.state === "succeeded",
-    )
-  ) {
-    return {
-      reorgBlockedByTerminalState: false,
-      target: { status: "in_progress", stage: "source_action" },
-    };
-  }
-  return { reorgBlockedByTerminalState: false, target: current };
-}
-
-export function deriveSegmentTargetStatus(
-  current: SegmentStatus,
-  observations: readonly FundingObservationRow[],
-  quotedMinimumOutput: JsonRecord,
-): SegmentStatus {
-  if (
-    observations.some(
-      (observation) =>
-        observation.finalityStatus === "reorged" || !observation.canonical,
-    )
-  ) {
-    return findSegmentTransitionPath(current, "recovery_required")
-      ? "recovery_required"
-      : current;
-  }
-  if (hasFinalObservation(observations, "refund_credit")) return "refunded";
-  if (hasFinalObservation(observations, "destination_credit")) {
-    const actualOutput = sumObservationAmount(
-      observations,
-      new Set(["destination_credit"]),
-      quotedMinimumOutput,
-    );
-    const minimumOutput = parseMoneyJson(quotedMinimumOutput);
-    if (!actualOutput || !minimumOutput) {
-      return findSegmentTransitionPath(current, "recovery_required")
-        ? "recovery_required"
-        : current;
-    }
-    return BigInt(actualOutput.raw as string) >= BigInt(minimumOutput.raw)
-      ? "succeeded"
-      : "settling";
-  }
-  if (hasFinalObservation(observations, "intermediate_transfer")) {
-    return "settling";
-  }
-  if (
-    hasFinalObservation(observations, "source_debit") ||
-    hasFinalObservation(observations, "source_credit")
-  ) {
-    return "submitted";
-  }
-  return current;
-}
 
 function sumObservationAmount(
   observations: readonly FundingObservationRow[],
@@ -811,8 +267,31 @@ async function releaseVenuePreparationReservationsAfterReadiness(
 async function releaseUnusedStoppedStepReservations(
   client: Pick<PoolClient, "query">,
   operationId: string,
+  facts: FundingLifecycleFacts,
+  lifecycle: FundingLifecycleProjection,
   now: Date,
 ): Promise<void> {
+  const actionStateById = new Map(
+    lifecycle.actions.map((action) => [action.actionId, action.state]),
+  );
+  // A source reservation can be released only when its own route leg stopped
+  // before any finalized money evidence. `step.state` used to approximate this
+  // decision; attempt/receipt facts and the projector are the canonical view.
+  const stoppedSegmentIds = [
+    ...new Set(
+      facts.actions.flatMap((action) => {
+        if (action.routeLegId === null) return [];
+        const state = actionStateById.get(action.actionId);
+        const receiptMismatched = action.attempts.some(
+          (attempt) => attempt.receipt?.status === "mismatch",
+        );
+        return state === "failed" || state === "cancelled" || receiptMismatched
+          ? [action.routeLegId]
+          : [];
+      }),
+    ),
+  ];
+  if (stoppedSegmentIds.length === 0) return;
   const { rows } = await client.query<{ id: string }>(
     `
       select reservation.id
@@ -820,25 +299,7 @@ async function releaseUnusedStoppedStepReservations(
       where reservation.operation_id = $1
         and reservation.state = 'active'
         and reservation.mode = 'subtract_available'
-        and reservation.segment_id is not null
-        and (
-          exists (
-            select 1
-            from funding_operation_steps step
-            where step.segment_id = reservation.segment_id
-              and step.state in ('failed', 'cancelled')
-          )
-          or exists (
-            select 1
-            from funding_operation_steps step
-            join funding_operation_step_attempts attempt
-              on attempt.step_id = step.id
-            join funding_step_receipt_observations receipt
-              on receipt.attempt_id = attempt.id
-             and receipt.status = 'mismatch'
-            where step.segment_id = reservation.segment_id
-          )
-        )
+        and reservation.segment_id = any($2::uuid[])
         and not exists (
           select 1
           from funding_observations observation
@@ -855,7 +316,7 @@ async function releaseUnusedStoppedStepReservations(
         )
       for update of reservation
     `,
-    [operationId],
+    [operationId, stoppedSegmentIds],
   );
   for (const row of rows) {
     await releaseFundingReservationInTransaction(client, {
@@ -893,7 +354,7 @@ async function releaseTerminalReservations(
 }
 
 async function ensureSettledConsumerReservation(
-  client: Pick<PoolClient, "query">,
+  client: PoolClient,
   operation: FundingOperationRow,
   now: Date,
 ): Promise<void> {
@@ -905,11 +366,9 @@ async function ensureSettledConsumerReservation(
   if (continuationOfOperationId) {
     const parentOperation = await client.query<{
       id: string;
-      progress_stage: FundingOperationRow["progressStage"];
-      status: FundingOperationRow["status"];
       version: number;
     }>(
-      `select id, status, progress_stage, version
+      `select id, version
          from funding_operations
         where id = $1::uuid
           and user_id = $2::uuid
@@ -920,15 +379,21 @@ async function ensureSettledConsumerReservation(
     if (!parent) {
       throw new Error("trade shortfall continuation parent is missing");
     }
+    const parentFacts =
+      await loadFundingLifecycleFactsForOperationInTransaction(client, {
+        operationId: parent.id,
+        now,
+        reconciliationEvidenceTimeoutMs:
+          DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
+      });
+    if (!parentFacts) {
+      throw new Error("trade shortfall continuation parent facts are missing");
+    }
+    const parentLifecycle = deriveFundingLifecycle(parentFacts);
     const parentIsReady =
-      parent.status === "ready" &&
-      parent.progress_stage === "ready_for_consumer";
-    const parentIsTerminal = [
-      "completed",
-      "refunded",
-      "failed",
-      "cancelled",
-    ].includes(parent.status);
+      parentLifecycle.status === "ready" &&
+      parentLifecycle.progressStage === "ready_for_consumer";
+    const parentIsTerminal = parentLifecycle.safety.terminal;
     if (!parentIsReady && !parentIsTerminal) {
       throw new Error("trade shortfall continuation parent is not consumable");
     }
@@ -965,21 +430,19 @@ async function ensureSettledConsumerReservation(
           "trade_shortfall_continuation_consumed_parent_ready_balance",
         now,
       });
-      await transitionFundingOperationInTransaction(client, {
+      await writeFundingOperationSupportFactsInTransaction(client, {
         operationId: parent.id,
-        scope: { kind: "worker" },
         expectedVersion: parent.version,
-        expectedState: {
-          status: parent.status,
-          stage: parent.progress_stage,
-        },
-        nextState: { status: "completed", stage: "terminal" },
         supportMetadataPatch: {
           consumerResolution: "consumed_by_continuation",
           consumerResolvedAt: now.toISOString(),
           consumerResolutionReason: "continuation_ready",
           continuationOperationId: operation.id,
         },
+        now,
+      });
+      await reduceFundingOperationInTransaction(client, {
+        operationId: parent.id,
         now,
       });
       await client.query(
@@ -1112,7 +575,9 @@ async function expireSettledConsumerReservation(
     },
   );
   if (!facts) {
-    throw new Error(`funding operation ${operation.id} disappeared after expiry`);
+    throw new Error(
+      `funding operation ${operation.id} disappeared after expiry`,
+    );
   }
   const projected = deriveFundingLifecycle(facts);
   return writeFundingOperationLifecycleProjectionCacheInTransaction(client, {
@@ -1168,15 +633,13 @@ async function preflightSettledConsumerReservationExpiry(
   if (!candidateRow?.expiry_candidate) {
     return null;
   }
-  const beforeLockFacts = await loadFundingLifecycleFactsForOperationInTransaction(
-    client,
-    {
+  const beforeLockFacts =
+    await loadFundingLifecycleFactsForOperationInTransaction(client, {
       operationId,
       now,
       reconciliationEvidenceTimeoutMs:
         DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
-    },
-  );
+    });
   if (!beforeLockFacts) return null;
   const beforeLockLifecycle = deriveFundingLifecycle(beforeLockFacts);
   if (
@@ -1230,20 +693,6 @@ async function preflightSettledConsumerReservationExpiry(
       now,
     ),
   };
-}
-
-async function writeFundingActionProjectionCachesInTransaction(
-  client: Pick<PoolClient, "query">,
-  lifecycle: FundingLifecycleProjection,
-  now: Date,
-): Promise<void> {
-  for (const action of lifecycle.actions) {
-    await writeFundingStepProjectionCacheInTransaction(client, {
-      stepId: action.actionId,
-      state: action.state,
-      now,
-    });
-  }
 }
 
 async function reduceFundingSegmentsInTransaction(
@@ -1345,15 +794,37 @@ export async function reduceFundingOperationInTransaction(
   const lifecycle = deriveFundingLifecycle(lifecycleFacts);
   const expired = expiryPreflight?.expired ?? null;
   if (expired) {
-    const finalState = operationState(expired);
+    // Expiry released the consumer reservation and wrote a presentation cache.
+    // Reload the facts so the worker's next decision remains tied to the
+    // durable release, never to that cache write's returned row.
+    const expiredFacts =
+      await loadFundingLifecycleFactsForOperationInTransaction(client, {
+        operationId: expired.id,
+        now,
+        reconciliationEvidenceTimeoutMs:
+          DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
+      });
+    if (!expiredFacts) {
+      throw new Error(
+        `funding operation ${expired.id} disappeared after reservation expiry`,
+      );
+    }
+    const expiredLifecycle = deriveFundingLifecycle(expiredFacts);
+    const finalState = {
+      status: expiredLifecycle.status,
+      stage: expiredLifecycle.progressStage,
+    } satisfies FundingOperationState;
     return {
       operationId: expired.id,
       initialState,
       finalState,
       appliedTransitions: [finalState],
-      terminal: true,
+      terminal: expiredLifecycle.safety.terminal,
       reorgBlockedByTerminalState: false,
-      recoveryMode: expired.recoveryMode,
+      recoveryMode: expiredLifecycle.recoveryMode,
+      reconciliationEvidenceTimedOut:
+        expiredLifecycle.safety.reconciliationEvidenceTimedOut,
+      automaticRecoveryRecorded: expiredFacts.automaticRecovery !== null,
     };
   }
   await reduceFundingSegmentsInTransaction(client, {
@@ -1367,15 +838,6 @@ export async function reduceFundingOperationInTransaction(
     status: lifecycle.status,
     stage: lifecycle.progressStage,
   } satisfies FundingOperationState;
-  const canonicalityRecoveryEvidencePresent = observations.some(
-    (observation) =>
-      observation.finalityStatus === "reorged" || !observation.canonical,
-  );
-  const automaticEvidenceRecovery =
-    lifecycle.status === "recovery_required" &&
-    !lifecycle.safety.requiresManualRecovery;
-  const manualRecoveryCode = lifecycleFacts.manualRecovery?.code;
-
   const actualDestinationAmount = sumObservationAmount(
     observations,
     DESTINATION_CREDIT_KINDS,
@@ -1398,11 +860,6 @@ export async function reduceFundingOperationInTransaction(
   );
   const refundObserved = hasFinalObservation(observations, "refund_credit");
   const venueReady = hasFinalObservation(observations, "venue_readiness");
-  const successfulRecoveryResolved = fundingSuccessfulRecoveryResolved({
-    initialStatus: initial.status,
-    targetStatus: target.status,
-    reorgBlockedByTerminalState: false,
-  });
   const sourceLegsFinal = lifecycleFacts.plan.routeLegs.every((routeLeg) => {
     const actualInput = lifecycle.segments.find(
       (segment) => segment.routeLegId === routeLeg.routeLegId,
@@ -1428,9 +885,7 @@ export async function reduceFundingOperationInTransaction(
   const recordActualSource =
     actualSourceAmount != null &&
     (sourceLegsFinal ||
-      ["completed", "refunded", "failed", "cancelled"].includes(
-        target.status,
-      ));
+      ["completed", "refunded", "failed", "cancelled"].includes(target.status));
   const recordActualDestination =
     actualDestinationAmount != null &&
     [
@@ -1440,7 +895,8 @@ export async function reduceFundingOperationInTransaction(
       "terminal",
     ].includes(target.stage);
   const stateChanged =
-    initialState.status !== target.status || initialState.stage !== target.stage;
+    initialState.status !== target.status ||
+    initialState.stage !== target.stage;
   const operation =
     await writeFundingOperationLifecycleProjectionCacheInTransaction(client, {
       operationId: initial.id,
@@ -1450,29 +906,8 @@ export async function reduceFundingOperationInTransaction(
       actualDestinationAmount: recordActualDestination
         ? actualDestinationAmount
         : undefined,
-      errorCode:
-        target.status === "recovery_required" &&
-        canonicalityRecoveryEvidencePresent
-          ? "finalized_observation_reorg"
-          : target.status === "recovery_required" &&
-              automaticEvidenceRecovery &&
-              lifecycle.safety.reconciliationEvidenceTimedOut &&
-              !lifecycle.safety.awaitingProviderReceipt
-            ? FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE
-            : target.status === "recovery_required" &&
-                manualRecoveryCode !== undefined
-              ? manualRecoveryCode
-            : successfulRecoveryResolved &&
-              initialState.status === "recovery_required" &&
-              target.status !== "recovery_required"
-            ? null
-            : undefined,
-      recoveryMode:
-        target.status === "recovery_required"
-          ? automaticEvidenceRecovery
-            ? "automatic_evidence"
-            : "manual_review"
-          : null,
+      errorCode: lifecycle.errorCode,
+      recoveryMode: lifecycle.recoveryMode,
       supportMetadataPatch:
         lifecycleFacts.manualRecovery !== null &&
         ["ready", "completed", "refunded"].includes(target.status)
@@ -1502,23 +937,27 @@ export async function reduceFundingOperationInTransaction(
       now,
     );
   }
-  if (operation.status === "ready") {
+  // `target` is the lifecycle decision made from this transaction's fact
+  // snapshot. Do not read the operation cache we just materialized above to
+  // decide reservation side effects.
+  if (target.status === "ready") {
     await ensureSettledConsumerReservation(client, operation, now);
   }
-  if (operation.status === "recovery_required") {
-    await releaseUnusedStoppedStepReservations(client, operation.id, now);
-  }
-  if (
-    ["completed", "refunded", "failed", "cancelled"].includes(operation.status)
-  ) {
-    await releaseTerminalReservations(
+  if (target.status === "recovery_required") {
+    await releaseUnusedStoppedStepReservations(
       client,
       operation.id,
-      operation.status,
+      lifecycleFacts,
+      lifecycle,
       now,
     );
   }
-  if (operation.status === "completed" || operation.status === "refunded") {
+  if (
+    ["completed", "refunded", "failed", "cancelled"].includes(target.status)
+  ) {
+    await releaseTerminalReservations(client, operation.id, target.status, now);
+  }
+  if (target.status === "completed" || target.status === "refunded") {
     await client.query(
       `update telegram_funding_authorization_reservations
           set status = case when $2 = 'refunded' then 'refunded' else 'settled' end,
@@ -1533,10 +972,10 @@ export async function reduceFundingOperationInTransaction(
             status = 'reserved'
             or ($2 = 'refunded' and status = 'cleaned')
           )`,
-      [operation.id, operation.status, now],
+      [operation.id, target.status, now],
     );
   }
-  if (operation.status === "failed" || operation.status === "cancelled") {
+  if (target.status === "failed" || target.status === "cancelled") {
     // A terminal route cannot retain an allowance lane or rolling-cap slot.
     // A direct reservation belongs to this operation; a cleanup_required row
     // belongs to its zero-allowance cleanup child. Both are safe to release
@@ -1563,20 +1002,23 @@ export async function reduceFundingOperationInTransaction(
                 reservation.cleanup_operation_id = $1::uuid
                 and reservation.status = 'cleanup_required'
               )`,
-      [operation.id, now, operation.status],
+      [operation.id, now, target.status],
     );
   }
 
   return {
     operationId: operation.id,
     initialState,
-    finalState: operationState(operation),
+    finalState: target,
     appliedTransitions,
     terminal: ["completed", "refunded", "failed", "cancelled"].includes(
-      operation.status,
+      target.status,
     ),
     reorgBlockedByTerminalState: false,
-    recoveryMode: operation.recoveryMode,
+    recoveryMode: lifecycle.recoveryMode,
+    reconciliationEvidenceTimedOut:
+      lifecycle.safety.reconciliationEvidenceTimedOut,
+    automaticRecoveryRecorded: lifecycleFacts.automaticRecovery !== null,
   };
 }
 
@@ -1676,6 +1118,8 @@ export function fundingReconciliationDisposition(
     canonicalFinalizedStepEvidencePendingReduction?: boolean;
     state: FundingOperationState;
     recoveryMode?: FundingRecoveryMode | null;
+    reconciliationEvidenceTimedOut?: boolean;
+    automaticRecoveryRecorded?: boolean;
     reductionCompleted: boolean;
     reconciliationStartedAt: Date | null;
     now: Date;
@@ -1686,6 +1130,15 @@ export function fundingReconciliationDisposition(
     return "complete";
   }
   if (input.state.status === "recovery_required") {
+    // The projector sees an elapsed generic deadline before this worker has
+    // made that recovery decision durable. Persist it once; later polls use
+    // the durable fact and the normal automatic-recovery cadence.
+    if (
+      input.reconciliationEvidenceTimedOut === true &&
+      input.automaticRecoveryRecorded !== true
+    ) {
+      return "recovery_required";
+    }
     return input.recoveryMode === "automatic_evidence" ? "requeue" : "complete";
   }
   // The timeout protects a missing-evidence wait. It must not turn already
@@ -1838,33 +1291,31 @@ export async function fundingReconciliationWaitState(
 async function hasCanonicalFinalizedStepEvidencePendingReduction(
   pool: Pool,
   operationId: string,
+  now: Date,
 ): Promise<boolean> {
-  const result = await pool.query<{ reducible: boolean }>(
-    `select
-        exists (
-          select 1
-            from funding_operation_steps step
-           where step.operation_id = $1::uuid
-        )
-        and not exists (
-          select 1
-            from funding_operation_steps step
-           where step.operation_id = $1::uuid
-             and (
-               step.state <> 'succeeded'
-               or not exists (
-                 select 1
-                   from funding_step_receipt_observations receipt
-                  where receipt.step_id = step.id
-                    and receipt.status = 'finalized'
-                    and receipt.canonical
-                    and receipt.action_match
-               )
-             )
-        ) as reducible`,
-    [operationId],
-  );
-  return result.rows[0]?.reducible === true;
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(pool, {
+    operationId,
+    now,
+  });
+  if (!facts || facts.actions.length === 0) return false;
+  const lifecycle = deriveFundingLifecycle(facts);
+  // This is a worker wake-up hint, never an admission decision. Require both
+  // the projector's current success result and a canonical finalized receipt
+  // for every action, which is the former SQL condition without stale caches.
+  return lifecycle.actions.every((projection) => {
+    const action = facts.actions.find(
+      (candidate) => candidate.actionId === projection.actionId,
+    );
+    return (
+      projection.state === "succeeded" &&
+      action?.attempts.some(
+        (attempt) =>
+          attempt.receipt?.status === "finalized" &&
+          attempt.receipt.canonical &&
+          attempt.receipt.actionMatched === true,
+      ) === true
+    );
+  });
 }
 
 async function awaitingUnbroadcastActionReport(
@@ -1908,12 +1359,14 @@ async function unbroadcastActionExpiresAt(
   ) {
     return null;
   }
+  const firstExpiry = actionable[0]?.expiresAt;
+  if (!firstExpiry) return null;
   return actionable.reduce<Date>((latest, action) => {
     const expiresAt = action.expiresAt;
     return expiresAt !== null && expiresAt.getTime() > latest.getTime()
       ? expiresAt
       : latest;
-  }, actionable[0]!.expiresAt!);
+  }, firstExpiry);
 }
 
 async function synchronizeFundingReconciliationActiveWindow(
@@ -1944,10 +1397,12 @@ async function synchronizeFundingReconciliationActiveWindow(
     );
     if (!facts) return null;
     const lifecycle = deriveFundingLifecycle(facts);
+    const genericTimeoutAwaitingEscalation =
+      lifecycle.safety.reconciliationEvidenceTimedOut &&
+      facts.automaticRecovery === null;
     const activeStatus =
       RECONCILIATION_ACTIVE_STATUSES.has(lifecycle.status) ||
-      (lifecycle.status === "recovery_required" &&
-        lifecycle.recoveryMode === "automatic_evidence");
+      genericTimeoutAwaitingEscalation;
     const waitState = activeStatus
       ? await fundingReconciliationWaitState(
           client,
@@ -1993,7 +1448,8 @@ async function synchronizeFundingReconciliationActiveWindow(
         startedAt: input.now,
         initialAttemptCount: Math.max(0, input.attemptCount - 1),
       } satisfies FundingReconciliationActiveWindow);
-    const storedDeadline = operation.supportMetadata.reconciliationEvidenceDeadline;
+    const storedDeadline =
+      operation.supportMetadata.reconciliationEvidenceDeadline;
     const hasStoredDeadline =
       typeof storedDeadline === "string" &&
       Number.isFinite(new Date(storedDeadline).getTime());
@@ -2215,11 +1671,13 @@ async function loadFundingOperationState(
       },
     );
     if (!facts) {
-      throw new Error(`funding operation ${operationId} has no lifecycle facts`);
+      throw new Error(
+        `funding operation ${operationId} has no lifecycle facts`,
+      );
     }
     const lifecycle = deriveFundingLifecycle(facts);
     const terminalEvidenceWatch = await client.query<{ watching: boolean }>(
-          `select (
+      `select (
              exists (
                select 1
                from funding_operation_steps step
@@ -2252,8 +1710,8 @@ async function loadFundingOperationState(
                  )
              )
            ) as watching`,
-          [operation.id, now],
-        );
+      [operation.id, now],
+    );
     const terminalRelayRefundWatch = await client.query<{ watching: boolean }>(
       `select exists (
          select 1
@@ -2418,6 +1876,22 @@ async function markFundingOperationRecoveryRequired(
         },
         now: input.now,
       });
+    } else {
+      // Record the elapsed automatic-evidence window as a durable fact before
+      // refreshing the projection cache. The generic active window is only a
+      // timer for an in-progress reconciliation; it must be clearable without
+      // making an already-escalated operation appear active again.
+      operation = await writeFundingOperationSupportFactsInTransaction(client, {
+        operationId: operation.id,
+        expectedVersion: operation.version,
+        supportMetadataPatch: {
+          lifecycleAutomaticRecovery: {
+            code: input.errorCode,
+            requestedAt: input.now.toISOString(),
+          },
+        },
+        now: input.now,
+      });
     }
     const facts = await loadFundingLifecycleFactsForOperationInTransaction(
       client,
@@ -2447,13 +1921,7 @@ async function markFundingOperationRecoveryRequired(
       },
       recoveryMode: lifecycle.recoveryMode,
       errorCode: input.errorCode,
-      supportMetadataPatch:
-        input.recoveryMode === "automatic_evidence"
-          ? {
-              reconciliationRecoveryRequiredAt: input.now.toISOString(),
-              reconciliationRecoveryReason: input.errorCode,
-            }
-          : undefined,
+      supportMetadataPatch: undefined,
       now: input.now,
     });
     return true;
@@ -2538,8 +2006,7 @@ async function processLease(
       recoveryMode: operationBeforePoll.recoveryMode,
       recentFailedReceiptWatch: operationBeforePoll.recentFailedReceiptWatch,
       terminalReceiptWatch: operationBeforePoll.terminalReceiptWatch,
-      terminalRelayRefundWatch:
-        operationBeforePoll.terminalRelayRefundWatch,
+      terminalRelayRefundWatch: operationBeforePoll.terminalRelayRefundWatch,
       awaitingUnbroadcastActionReport:
         operationBeforePoll.awaitingUnbroadcastActionReport,
       now: options.now,
@@ -2673,6 +2140,7 @@ async function processLease(
       : await hasCanonicalFinalizedStepEvidencePendingReduction(
           pool,
           lease.operationId,
+          options.now,
         );
     // A reorged refund is a money-movement incident, not a property of the
     // materialized operation cache.  The projector deliberately reopens its
@@ -2681,7 +2149,7 @@ async function processLease(
     // reorged refund fact, otherwise that correct cache update would turn the
     // final scan into an unbounded retry loop.
     const terminalRefundReorgIncident = await pool.query<{ incident: boolean }>(
-            `select exists (
+      `select exists (
                select 1
                  from funding_observations reorged_refund
                 where reorged_refund.operation_id = $1::uuid
@@ -2724,8 +2192,8 @@ async function processLease(
                        )
                   )
              ) as incident`,
-            [lease.operationId, options.now],
-          );
+      [lease.operationId, options.now],
+    );
     if (terminalRefundReorgIncident.rows[0]?.incident === true) {
       await finishFundingReconciliationLease(pool, {
         jobId: lease.jobId,
@@ -2755,6 +2223,8 @@ async function processLease(
       canonicalFinalizedStepEvidencePendingReduction,
       state: reduction.finalState,
       recoveryMode: reduction.recoveryMode,
+      reconciliationEvidenceTimedOut: reduction.reconciliationEvidenceTimedOut,
+      automaticRecoveryRecorded: reduction.automaticRecoveryRecorded,
       reductionCompleted,
       reconciliationStartedAt: activeWindow?.startedAt ?? null,
       now: options.now,

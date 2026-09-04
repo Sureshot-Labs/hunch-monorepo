@@ -12,6 +12,8 @@ import { isReceiptBearingFundingActionKind } from "../domain/action-kinds.js";
 import { isRawAmount } from "../domain/raw-amount.js";
 import type { JsonValue, NormalizedAction } from "../domain/types.js";
 import { moneySchema, normalizedActionSchema } from "../domain/schemas.js";
+import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
+import { deriveFundingLifecycle } from "../lifecycle/funding-lifecycle-projector.js";
 import {
   allocateFundingObservationInTransaction,
   FundingPersistenceError,
@@ -41,15 +43,6 @@ export type FundingStepReceiptTarget = Readonly<{
     | "provider"
     | "privy_sponsor"
     | "hunch_sponsor";
-  stepState:
-    | "planned"
-    | "action_required"
-    | "submitted"
-    | "succeeded"
-    | "reconcile_required"
-    | "recovery_required"
-    | "failed"
-    | "cancelled";
   networkId: string;
   action: NormalizedAction;
   actionValidationResult: JsonRecord;
@@ -58,10 +51,6 @@ export type FundingStepReceiptTarget = Readonly<{
   lookupKeyVersion: number;
   previousReceipt: FundingStepReceiptObservation | null;
 }>;
-
-type ReceiptManagedStepState =
-  | FundingStepReceiptTarget["stepState"]
-  | "action_required";
 
 export type FundingStepReceiptObservation = Readonly<{
   operationId: string;
@@ -140,7 +129,6 @@ function mapReceipt(row: ReceiptDbRow): FundingStepReceiptObservation {
 export async function listFundingStepReceiptTargets(
   db: Pick<Pool, "query">,
   operationId: string,
-  now = new Date(),
 ): Promise<readonly FundingStepReceiptTarget[]> {
   const { rows } = await db.query<{
     operation_id: string;
@@ -151,7 +139,6 @@ export async function listFundingStepReceiptTargets(
     step_kind: FundingStepReceiptTarget["stepKind"];
     executor_id: string;
     payer_requirement: FundingStepReceiptTarget["payerRequirement"];
-    step_state: FundingStepReceiptTarget["stepState"];
     normalized_action: JsonRecord;
     action_validation_result: JsonRecord;
     requested_source_amount: JsonRecord | null;
@@ -185,7 +172,6 @@ export async function listFundingStepReceiptTargets(
         step.step_kind,
         step.executor_id,
         step.payer_requirement,
-        step.state as step_state,
         step.normalized_action,
         case
           when step.executor_id = 'telegram_relay_evm_funding_v1'
@@ -240,53 +226,14 @@ export async function listFundingStepReceiptTargets(
       join funding_operations operation
         on operation.id = step.operation_id
       where step.operation_id = $1
-        and (
-          operation.status not in ('completed', 'refunded', 'failed', 'cancelled')
-          or (
-            attempt.broadcast_may_have_occurred
-            and (
-              receipt.attempt_id is null
-              or receipt.status in ('pending', 'confirmed', 'mismatch', 'reorged')
-              or (
-                receipt.status in ('finalized', 'failed')
-                and receipt.canonical
-                and receipt.finalized_at >=
-                      $2::timestamptz - interval '15 minutes'
-              )
-            )
-          )
-        )
-        and (
-          step.state in (
-            'submitted',
-            'reconcile_required',
-            'recovery_required'
-          )
-          -- A postcondition may prove a step succeeded before its broadcast
-          -- receipt reaches finality. Keep polling every succeeded step until
-          -- the operation itself terminates so confirmed receipts can advance
-          -- to finalized and finalized receipts remain reorg-monitored.
-          or step.state = 'succeeded'
-          -- A canonical failed receipt authorizes retry only after a bounded
-          -- reorg watch. Keep polling it regardless of the re-armed step state
-          -- until that fence expires.
-          or (
-            receipt.status = 'failed'
-            and receipt.canonical
-            and receipt.evidence ->> 'failureFinalized' = 'true'
-            and receipt.finalized_at >= $2::timestamptz - interval '15 minutes'
-          )
-          -- Legacy incidents may have terminalized the operation or step
-          -- while a sibling's durable attempt still carries a transaction.
-          -- Keep that exact reference observable instead of orphaning it.
-          or (
-            operation.status in ('completed', 'refunded', 'failed', 'cancelled')
-            and attempt.broadcast_may_have_occurred
-          )
-        )
+        -- Receipt eligibility is an attempt fact: a durable broadcast-capable
+        -- reference must remain observable even when an older reducer pass
+        -- left the operation or step projection cache terminal. The caller
+        -- owns queue cadence; this query never uses an aggregate cache to
+        -- decide whether a known transaction may still need reconciliation.
       order by step.ordinal, attempt.attempt_number
     `,
-    [operationId, now],
+    [operationId],
   );
   return rows.map((row) => {
     const action = normalizedActionSchema.parse(
@@ -347,7 +294,6 @@ export async function listFundingStepReceiptTargets(
       attemptStartedAt: row.attempt_started_at,
       stepKind: row.step_kind,
       payerRequirement: row.payer_requirement,
-      stepState: row.step_state,
       networkId: action.networkId,
       action,
       actionValidationResult,
@@ -404,31 +350,129 @@ export function shouldIgnoreFundingStepReceiptUpdate(
   return receiptRank[incoming.status] < receiptRank[previous];
 }
 
-export function fundingStepStateForReceipt(
-  receipt: FundingStepReceiptStatus,
-  current: FundingStepReceiptTarget["stepState"],
-  stepKind: FundingStepReceiptTarget["stepKind"],
-): ReceiptManagedStepState {
-  // Legacy inconsistent rows can carry a real broadcast reference after the
-  // step was stopped. Receipt evidence is still persisted and reduced at the
-  // operation level, but the immutable step state cannot be resurrected.
-  if (current === "failed" || current === "cancelled") return current;
-  if (receipt === "finalized") {
-    if (stepKind === "venue_preparation") {
-      // A finalized receipt only advances preparation into postcondition
-      // verification. Once that verifier succeeds (or recovery is required),
-      // later receipt polls must not move the step backwards.
-      return current === "reconcile_required" ? "submitted" : current;
+const MAX_POLYMARKET_HANDOFF_AMBIGUITY_CANDIDATES = 64;
+
+type PolymarketHandoffAmbiguityCandidate = Readonly<{
+  operation_id: string;
+  attempt_outcome: "started" | "submitted" | "ambiguous";
+}>;
+
+/**
+ * A chain-scanned Transfer must not be allocated while another matching
+ * handoff could own it. Submitted and ambiguous attempts always remain
+ * competitors because a broadcast may have moved money. A merely started
+ * attempt has no broadcast reference, so its current lifecycle projection is
+ * the canonical test for whether that route is still live.
+ */
+async function findLivePolymarketHandoffAmbiguityCandidate(
+  client: PoolClient,
+  input: Readonly<{
+    attemptId: string;
+    userId: string;
+    networkId: string;
+    actionValidationResult: JsonRecord;
+    chainTransactionBlockTimestampMs: number;
+    canonicalTransactionHash: string;
+    now: Date;
+  }>,
+): Promise<string | null> {
+  const { rows } = await client.query<PolymarketHandoffAmbiguityCandidate>(
+    `
+      select other_operation.id as operation_id,
+             other_attempt.outcome as attempt_outcome
+      from funding_operation_step_attempts other_attempt
+      join funding_operation_steps other_step
+        on other_step.id = other_attempt.step_id
+      join funding_operations other_operation
+        on other_operation.id = other_step.operation_id
+      left join funding_step_receipt_observations other_receipt
+        on other_receipt.attempt_id = other_attempt.id
+      where other_attempt.id <> $1
+        and other_operation.user_id = $2
+        and other_step.step_kind = 'external_handoff'
+        and other_step.normalized_action ->> 'kind' = 'external_handoff'
+        and other_step.normalized_action ->> 'handoffKind' =
+              'polymarket_deposit_wallet_transfer'
+        and (
+          other_attempt.outcome = 'started'
+          or (
+            other_attempt.outcome in ('submitted', 'ambiguous')
+            and other_attempt.broadcast_may_have_occurred
+          )
+        )
+        and funding_account_identifier_equal(
+              $3,
+              other_step.action_validation_result ->> 'tokenAddress',
+              $4
+            )
+        and funding_account_identifier_equal(
+              $3,
+              other_step.action_validation_result ->> 'funderAddress',
+              $5
+            )
+        and funding_account_identifier_equal(
+              $3,
+              other_step.action_validation_result ->> 'recipientAddress',
+              $6
+            )
+        and other_step.action_validation_result ->> 'amountRaw' = $7
+        and to_timestamp($8::double precision / 1000.0) >=
+              date_trunc('second', other_attempt.started_at) + interval '1 second'
+        and to_timestamp($8::double precision / 1000.0) <=
+              other_attempt.started_at +
+              $10::double precision * interval '1 millisecond'
+        and (
+          other_receipt.attempt_id is null
+          or other_receipt.status in ('pending', 'confirmed')
+          or (
+            other_receipt.status = 'mismatch'
+            and coalesce(
+                  lower(other_receipt.evidence ->> 'ambiguousTransactionHash'),
+                  lower(other_receipt.evidence ->> 'unboundChainTransactionHash')
+                ) = $9
+          )
+        )
+        and coalesce(
+              lower(other_receipt.evidence ->> 'transactionHash'),
+              lower(other_receipt.evidence ->> 'ambiguousTransactionHash'),
+              lower(other_receipt.evidence ->> 'unboundChainTransactionHash'),
+              $9
+            ) = $9
+      order by other_attempt.started_at asc
+      limit $11
+    `,
+    [
+      input.attemptId,
+      input.userId,
+      input.networkId,
+      input.actionValidationResult.tokenAddress ?? null,
+      input.actionValidationResult.funderAddress ?? null,
+      input.actionValidationResult.recipientAddress ?? null,
+      input.actionValidationResult.amountRaw ?? null,
+      input.chainTransactionBlockTimestampMs,
+      input.canonicalTransactionHash,
+      POLYMARKET_HANDOFF_CHAIN_ATTRIBUTION_WINDOW_MS,
+      MAX_POLYMARKET_HANDOFF_AMBIGUITY_CANDIDATES + 1,
+    ],
+  );
+  if (rows.length > MAX_POLYMARKET_HANDOFF_AMBIGUITY_CANDIDATES) {
+    // Do not allocate a physical Transfer after an unexpectedly broad match.
+    // The caller records ambiguity and lets recovery expose the operation.
+    return rows[0]?.operation_id ?? null;
+  }
+  for (const candidate of rows) {
+    if (candidate.attempt_outcome !== "started") {
+      return candidate.operation_id;
     }
-    return "succeeded";
+    const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+      client,
+      { operationId: candidate.operation_id, now: input.now },
+    );
+    if (facts && !deriveFundingLifecycle(facts).safety.terminal) {
+      return candidate.operation_id;
+    }
   }
-  if (receipt === "failed") return "action_required";
-  if (receipt === "mismatch") return "recovery_required";
-  if (receipt === "reorged") return "recovery_required";
-  if (receipt === "confirmed" && current === "reconcile_required") {
-    return "submitted";
-  }
-  return current;
+  return null;
 }
 
 export async function applyFundingStepReceiptEvidenceInTransaction(
@@ -562,105 +606,21 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
         incomingReceipt.evidence.transactionHashSource;
       const chainTransactionBlockTimestampMs =
         incomingReceipt.evidence.chainTransactionBlockTimestampMs;
-      const ambiguousCandidate =
+      const ambiguousCandidateOperationId =
         transactionHashSource === "chain_scan" &&
         typeof chainTransactionBlockTimestampMs === "number" &&
         Number.isSafeInteger(chainTransactionBlockTimestampMs)
-          ? await client.query<{ operation_id: string }>(
-              `
-                select other_operation.id as operation_id
-                from funding_operation_step_attempts other_attempt
-                join funding_operation_steps other_step
-                  on other_step.id = other_attempt.step_id
-                join funding_operations other_operation
-                  on other_operation.id = other_step.operation_id
-                left join funding_step_receipt_observations other_receipt
-                  on other_receipt.attempt_id = other_attempt.id
-                where other_attempt.id <> $1
-                  and other_operation.user_id = $2
-                  and other_step.step_kind = 'external_handoff'
-                  and other_step.normalized_action ->> 'kind' =
-                        'external_handoff'
-                  and other_step.normalized_action ->> 'handoffKind' =
-                        'polymarket_deposit_wallet_transfer'
-                  and (
-                    (
-                      other_attempt.outcome = 'started'
-                      and other_operation.status not in (
-                        'completed', 'refunded', 'failed', 'cancelled'
-                      )
-                    )
-                    or (
-                      other_attempt.outcome in ('submitted', 'ambiguous')
-                      and other_attempt.broadcast_may_have_occurred
-                    )
-                  )
-                  and funding_account_identifier_equal(
-                        $3,
-                        other_step.action_validation_result ->> 'tokenAddress',
-                        $4
-                      )
-                  and funding_account_identifier_equal(
-                        $3,
-                        other_step.action_validation_result ->> 'funderAddress',
-                        $5
-                      )
-                  and funding_account_identifier_equal(
-                        $3,
-                        other_step.action_validation_result ->> 'recipientAddress',
-                        $6
-                      )
-                  and other_step.action_validation_result ->> 'amountRaw' = $7
-                  and to_timestamp($8::double precision / 1000.0) >=
-                        date_trunc('second', other_attempt.started_at) +
-                        interval '1 second'
-                  and to_timestamp($8::double precision / 1000.0) <=
-                        other_attempt.started_at +
-                        $10::double precision * interval '1 millisecond'
-                  and (
-                    other_receipt.attempt_id is null
-                    or other_receipt.status in ('pending', 'confirmed')
-                    or (
-                      other_receipt.status = 'mismatch'
-                      and coalesce(
-                            lower(
-                              other_receipt.evidence ->>
-                                'ambiguousTransactionHash'
-                            ),
-                            lower(
-                              other_receipt.evidence ->>
-                                'unboundChainTransactionHash'
-                            )
-                          ) = $9
-                    )
-                  )
-                  and coalesce(
-                        lower(other_receipt.evidence ->> 'transactionHash'),
-                        lower(
-                          other_receipt.evidence ->> 'ambiguousTransactionHash'
-                        ),
-                        lower(
-                          other_receipt.evidence ->> 'unboundChainTransactionHash'
-                        ),
-                        $9
-                      ) = $9
-                limit 1
-              `,
-              [
-                input.attemptId,
-                scopedOperation.operation_user_id,
-                input.networkId,
-                scoped.action_validation_result.tokenAddress ?? null,
-                scoped.action_validation_result.funderAddress ?? null,
-                scoped.action_validation_result.recipientAddress ?? null,
-                scoped.action_validation_result.amountRaw ?? null,
-                chainTransactionBlockTimestampMs,
-                canonicalTransactionHash,
-                POLYMARKET_HANDOFF_CHAIN_ATTRIBUTION_WINDOW_MS,
-              ],
-            )
+          ? await findLivePolymarketHandoffAmbiguityCandidate(client, {
+              attemptId: input.attemptId,
+              userId: scopedOperation.operation_user_id,
+              networkId: input.networkId,
+              actionValidationResult: scoped.action_validation_result,
+              chainTransactionBlockTimestampMs,
+              canonicalTransactionHash,
+              now,
+            })
           : null;
-      if (ambiguousCandidate?.rows[0]) {
+      if (ambiguousCandidateOperationId) {
         incomingReceipt = {
           status: "pending",
           actionMatch: null,
@@ -673,7 +633,7 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
             transactionHash: null,
             ambiguousTransactionHash: canonicalTransactionHash,
             chainTransactionBlockTimestampMs,
-            competingOperationId: ambiguousCandidate.rows[0].operation_id,
+            competingOperationId: ambiguousCandidateOperationId,
             externalHandoffCandidateAmbiguous: true,
             handoffEventIndex,
             transactionHashSource: "chain_scan",

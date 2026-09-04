@@ -532,6 +532,11 @@ const tests: TestCase[] = [
           /operation_row\.purpose = 'trade_shortfall'/i,
           "ordinary in-app trade shortfalls must suppress their own Relay output notification",
         );
+        assert.doesNotMatch(
+          relayMatchQuery.sql,
+          /operation_row\.status/i,
+          "a stale terminal cache must not reclassify a proven Relay output as a wallet deposit",
+        );
         assert.match(
           relayMatchQuery.sql,
           /funding_attempt\.broadcast_may_have_occurred/i,

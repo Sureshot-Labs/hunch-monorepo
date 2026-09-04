@@ -129,8 +129,6 @@ function target(): FundingReceiveReceiptRoutingTarget {
     telegramFundingConsentFingerprint: null,
     telegramFundingConsentId: null,
     telegramUserId: null,
-    childOperationStatus: null,
-    childOperationRecoveryMode: null,
     childExecutorId: null,
     childBroadcastMayHaveOccurred: false,
     childHasUnfinishedAttempt: false,

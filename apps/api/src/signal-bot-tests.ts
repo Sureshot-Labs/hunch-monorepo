@@ -6062,8 +6062,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         submittedReconcileRequired: 3,
         unknownSubmitReconcileRequired: 2,
       });
-      assert.match(statements[0] ?? "", /funding_no_longer_active/);
-      assert.match(statements[0] ?? "", /funding_operation\.status <> ALL/);
+      assert.match(
+        statements[0] ?? "",
+        /from telegram_trade_intents funding_intent/i,
+      );
+      assert.match(
+        statements[0] ?? "",
+        /funding_intent\.funding_operation_id::text/i,
+      );
+      assert.doesNotMatch(
+        statements[0] ?? "",
+        /funding_operation\.status|funding_operation\.progress_stage/i,
+      );
       assert.match(statements[1] ?? "", /expires_at <=/);
       assert.match(statements[1] ?? "", /funding_operation_id IS NULL/);
       assert.match(statements[1] ?? "", /funding_reservation_id IS NULL/);

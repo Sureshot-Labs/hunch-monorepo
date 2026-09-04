@@ -17,6 +17,8 @@ import { createTelegramBotTradingRoutes } from "./routes/telegram-bot-trading.js
 import type { PrivyServerSignerStatus } from "./services/api-trading-wallet-signing.js";
 import type { ApiBotTradingExecutor } from "./services/api-trading-service.js";
 import { SOLANA_NATIVE_ASSET } from "./funding/domain/network-fees.js";
+import { advanceFundingObservationFinalityInTransaction } from "./funding/persistence/funding-operation-repository.js";
+import { cancelFundingOperationForUser } from "./funding/reconciliation/funding-operation-cancellation.js";
 import { fundingSidecarRuntimeConfig } from "./funding/runtime/sidecar-runtime-config.js";
 import { parseTelegramAppHandoffV2Plan } from "./services/telegram-app-handoff-v2.js";
 import {
@@ -183,10 +185,9 @@ try {
        '["Yes","No"]',
        '["yes-token","no-token"]',
        '{}'::jsonb
-     )`,
+     ) returning id`,
     [marketId, `market-${suffix}`, eventId],
   );
-
   const user: User = {
     createdAt: now,
     id: userId,
@@ -923,6 +924,9 @@ try {
         },
       },
       db,
+      cancelFundingOperation: async (input) => {
+        await cancelFundingOperationForUser(pool, input);
+      },
       expectedIntentId: intentId,
       expectedType: type,
       signerInspector,
@@ -2634,7 +2638,14 @@ try {
        policy_revision, canonical_request_hash, plan_hash, consent_token_hash,
        expires_at, consumed_at
      ) values (
-       $1, 'telegram-terminal-funding', '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+       $1, 'telegram-terminal-funding', '{}'::jsonb, '{}'::jsonb,
+       jsonb_build_object(
+         'operation',
+         jsonb_build_object(
+           'initialState',
+           jsonb_build_object('status', 'in_progress', 'stage', 'committed')
+         )
+       ),
        1, 'telegram-terminal-funding', repeat('a', 64), repeat('b', 64),
        repeat('c', 64), now() + interval '1 hour', now()
      ) returning id`,
@@ -2661,7 +2672,7 @@ try {
       marketId,
     ],
   );
-  await client.query(
+  const terminalFundingStep = await client.query<{ id: string }>(
     `insert into funding_operation_steps (
        operation_id, ordinal, step_kind, state, action_fingerprint,
        executor_id, payer_requirement, normalized_action,
@@ -2670,12 +2681,44 @@ try {
        $1::uuid, 0, 'transaction', 'succeeded', repeat('f', 64),
        'telegram_relay_evm_funding_v1', 'privy_sponsor', '{}'::jsonb,
        '{}'::jsonb, clock_timestamp(), clock_timestamp()
-     )`,
+     ) returning id`,
     [terminalFundingOperation.rows[0]?.id],
   );
-  // A funding operation becomes terminal when its reservation is consumed.
-  // The linked intent may already be submitting or reconciling a venue order;
-  // that trade boundary must remain authoritative over the funding status.
+  const terminalFundingStepId = terminalFundingStep.rows[0]?.id;
+  assert.ok(terminalFundingStepId);
+  await client.query(
+    `insert into funding_operation_step_attempts (
+       step_id, attempt_number, canonical_action_fingerprint, executor_id,
+       outcome, broadcast_may_have_occurred, reference_kind,
+       receipt_ref_ciphertext, receipt_ref_lookup_hmac, lookup_key_version,
+       started_at, finished_at
+     ) values (
+       $1::uuid, 1, repeat('f', 64), 'telegram_relay_evm_funding_v1',
+       'succeeded', false, null, null, null, null,
+       clock_timestamp(), clock_timestamp()
+     )`,
+    [terminalFundingStepId],
+  );
+  await client.query(
+    `update funding_operations
+        set support_metadata = support_metadata || jsonb_build_object(
+              'lifecycleTerminalCompletion',
+              jsonb_build_object(
+                'code', 'fixture_terminal_completion',
+                'decidedAt', clock_timestamp()::text,
+                'actionId', $2::text
+              )
+            ),
+            version = version + 1,
+            updated_at = clock_timestamp()
+      where id = $1::uuid`,
+    [terminalFundingOperation.rows[0]?.id, terminalFundingStepId],
+  );
+  // The stored operation cache deliberately says `cancelled`; the immutable
+  // plan, succeeded action, and durable terminal decision are the facts the
+  // projector must use instead.
+  // The linked intent has already crossed the venue submission boundary, so
+  // that trade boundary remains authoritative for the rendered card.
   const fundedSubmittingIntent = await client.query<{ id: string }>(
     `insert into telegram_trade_intents (
        telegram_user_id, user_id, authorization_id, chat_id,
@@ -3047,7 +3090,14 @@ try {
        expires_at, consumed_at, created_at, updated_at
      ) values (
        $1, 'telegram-lifecycle-source-gate', '{}'::jsonb, '{}'::jsonb,
-       '{}'::jsonb, 1, 'telegram-lifecycle-source-gate', repeat('6', 64),
+       jsonb_build_object(
+         'operation',
+         jsonb_build_object(
+           'initialState',
+           jsonb_build_object('status', 'in_progress', 'stage', 'committed')
+         )
+       ),
+       1, 'telegram-lifecycle-source-gate', repeat('6', 64),
        repeat('7', 64), repeat('8', 64), now() + interval '1 hour', now(),
        clock_timestamp(), clock_timestamp()
      ) returning id`,
@@ -3165,7 +3215,17 @@ try {
        expires_at, consumed_at
      ) values (
        $1, 'telegram-cancellable-handoff', '{}'::jsonb, '{}'::jsonb,
-       '{}'::jsonb, 1, 'telegram-cancellable-handoff', repeat('1', 64),
+       jsonb_build_object(
+         'operation',
+         jsonb_build_object(
+           'initialState',
+           jsonb_build_object(
+             'status', 'ready',
+             'stage', 'ready_for_consumer'
+           )
+         )
+       ),
+       1, 'telegram-cancellable-handoff', repeat('1', 64),
        repeat('2', 64), repeat('3', 64), now() + interval '1 hour', now()
      ) returning id`,
     [userId],
@@ -3176,6 +3236,7 @@ try {
        plan_kind, idempotency_key, commit_request_hash, plan_hash,
        policy_version, policy_revision, destination_target_snapshot, market_id,
        placement_snapshot, quote_snapshot, consent_snapshot,
+       requested_destination_amount,
        original_subject_lookup_hmac, subject_lookup_key_version, expires_at
      ) values (
        $1, $2, 'trade_shortfall', 'ready', 'ready_for_consumer', 'instant',
@@ -3187,7 +3248,16 @@ try {
            'details', jsonb_build_object('venueId', 'polymarket')
          )
        ), $4, '{}'::jsonb,
-       '{}'::jsonb, '{}'::jsonb, repeat('5', 64), 1,
+       '{}'::jsonb, '{}'::jsonb,
+       jsonb_build_object(
+         'asset', jsonb_build_object(
+           'networkId', 'evm:137',
+           'assetId', 'pusd',
+           'decimals', 6
+         ),
+         'raw', '1000000'
+       ),
+       repeat('5', 64), 1,
        now() + interval '1 hour'
      ) returning id`,
     [
@@ -3197,18 +3267,57 @@ try {
       marketId,
     ],
   );
-  await client.query(
+  const cancellableFundingStep = await client.query<{ id: string }>(
     `insert into funding_operation_steps (
        operation_id, ordinal, step_kind, state, action_fingerprint,
        executor_id, payer_requirement, normalized_action,
        action_validation_result, created_at, updated_at
      ) values (
        $1::uuid, 0, 'transaction', 'succeeded', repeat('6', 64),
-       'telegram_relay_evm_funding_v1', 'privy_sponsor', '{}'::jsonb,
+       'fixture_cancellable_destination_v1', 'privy_sponsor', '{}'::jsonb,
        '{}'::jsonb, clock_timestamp(), clock_timestamp()
-     )`,
+     ) returning id`,
     [cancellableFundingOperation.rows[0]?.id],
   );
+  const cancellableFundingStepId = cancellableFundingStep.rows[0]?.id;
+  assert.ok(cancellableFundingStepId);
+  // The operation has a durable successful executor report. Its later
+  // destination observation can be reorged, but that cannot erase the fact
+  // that its money-moving action may have completed; the Buy must detach
+  // while the route reconciles instead of cancelling the operation blindly.
+  await client.query(
+    `insert into funding_operation_step_attempts (
+       step_id, attempt_number, canonical_action_fingerprint, executor_id,
+       outcome, broadcast_may_have_occurred, reference_kind,
+       receipt_ref_ciphertext, receipt_ref_lookup_hmac, lookup_key_version,
+       started_at, finished_at
+     ) values (
+       $1::uuid, 1, repeat('6', 64), 'fixture_cancellable_destination_v1',
+       'succeeded', false, null, null, null, null,
+       clock_timestamp(), clock_timestamp()
+     )`,
+    [cancellableFundingStepId],
+  );
+  const cancellableDestination = await client.query<{ id: string }>(
+    `insert into funding_observations (
+       operation_id, segment_id, kind, network_id, asset_id, asset_decimals,
+       tx_hash, event_index, from_address, to_address, raw_amount,
+       observed_at, ledger_height, block_hash, finality_status, canonical,
+       reorged_at, finalized_at, metadata
+     ) values (
+       $1::uuid, null, 'destination_credit', 'evm:137', 'pusd', 6,
+       $2::text, '0', null, '0x0000000000000000000000000000000000000137',
+       '1000000', clock_timestamp(), '1', $3::text, 'finalized', true,
+       null, clock_timestamp(), '{}'::jsonb
+     ) returning id`,
+    [
+      cancellableFundingOperation.rows[0]?.id,
+      `0x${crypto.randomBytes(32).toString("hex")}`,
+      `0x${crypto.randomBytes(32).toString("hex")}`,
+    ],
+  );
+  const cancellableDestinationId = cancellableDestination.rows[0]?.id;
+  assert.ok(cancellableDestinationId);
   const cancellableFundingReservation = await client.query<{ id: string }>(
     `insert into balance_reservations (
        user_id, operation_id, component_id, location_id, network_id,
@@ -3305,6 +3414,13 @@ try {
     "Cancel Buy releases the ready consumer reservation while leaving settled venue cash untouched",
   );
 
+  await advanceFundingObservationFinalityInTransaction(client, {
+    observationId: cancellableDestinationId,
+    expectedFinality: "finalized",
+    nextFinality: "reorged",
+    reorgedAt: new Date(),
+    metadataPatch: { fixture: "cancellable_destination_reorg" },
+  });
   await client.query(
     `update funding_operations
         set status = 'recovery_required',
@@ -3312,6 +3428,13 @@ try {
             error_code = 'reconciliation_evidence_timeout',
             recovery_mode = 'automatic_evidence',
             completed_at = null,
+            support_metadata = support_metadata || jsonb_build_object(
+              'lifecycleAutomaticRecovery',
+              jsonb_build_object(
+                'code', 'reconciliation_evidence_timeout',
+                'requestedAt', clock_timestamp()::text
+              )
+            ),
             version = version + 1,
             updated_at = clock_timestamp()
       where id = $1::uuid`,

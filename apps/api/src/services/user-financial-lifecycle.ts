@@ -1,4 +1,5 @@
 import type { DbQuery } from "../db.js";
+import { listFundingLifecycleProjectionsForUsers } from "../funding/lifecycle/funding-lifecycle-read-model.js";
 
 type FinancialLifecycleDbRow = {
   active_funding_movement: boolean;
@@ -23,6 +24,8 @@ type FinancialLifecycleDbRow = {
 export type UserFinancialLifecycleSummary = Readonly<{
   activeMovement: boolean;
   activeReasons: readonly string[];
+  ambiguousFundingAttemptCount: number;
+  nonTerminalFundingOperationCount: number;
   preparationRunEvidence: number;
   protectedEvidence: boolean;
   protectedReasons: readonly string[];
@@ -36,6 +39,8 @@ export async function fetchUserFinancialLifecycleSummary(
     return {
       activeMovement: false,
       activeReasons: [],
+      ambiguousFundingAttemptCount: 0,
+      nonTerminalFundingOperationCount: 0,
       preparationRunEvidence: 0,
       protectedEvidence: false,
       protectedReasons: [],
@@ -56,14 +61,6 @@ export async function fetchUserFinancialLifecycleSummary(
         (
           exists (
             select 1
-            from funding_operations operation
-            where operation.user_id = any($1::uuid[])
-              and operation.status not in (
-                'completed', 'refunded', 'failed', 'cancelled'
-              )
-          )
-          or exists (
-            select 1
             from balance_reservations reservation
             where reservation.user_id = any($1::uuid[])
               and reservation.state = 'active'
@@ -75,21 +72,6 @@ export async function fetchUserFinancialLifecycleSummary(
               on funding_authorization.id = reservation.authorization_id
             where funding_authorization.user_id = any($1::uuid[])
               and reservation.status in ('reserved', 'cleanup_required')
-          )
-          or exists (
-            select 1
-            from funding_operation_step_attempts attempt
-            join funding_operation_steps step on step.id = attempt.step_id
-            join funding_operations operation
-              on operation.id = step.operation_id
-            where operation.user_id = any($1::uuid[])
-              and operation.status not in (
-                'completed', 'refunded', 'failed', 'cancelled'
-              )
-              and (
-                attempt.outcome = 'ambiguous'
-                or attempt.broadcast_may_have_occurred
-              )
           )
           or exists (
             select 1
@@ -192,21 +174,8 @@ export async function fetchUserFinancialLifecycleSummary(
           select 1
           from telegram_trade_intents intent
           where intent.user_id = any($1::uuid[])
-            and (
-              intent.status in (
-                'executing', 'submitted', 'reconcile_required'
-              )
-              or (
-                intent.status = 'funding'
-                and exists (
-                  select 1
-                  from funding_operations funding_operation
-                  where funding_operation.id = intent.funding_operation_id
-                    and funding_operation.status not in (
-                      'completed', 'refunded', 'failed', 'cancelled'
-                    )
-                )
-              )
+            and intent.status in (
+              'executing', 'submitted', 'reconcile_required'
             )
         ) as active_telegram_intent,
         exists (
@@ -279,8 +248,52 @@ export async function fetchUserFinancialLifecycleSummary(
   if (!row) {
     throw new Error("Financial lifecycle summary query returned no row");
   }
+  const operationLifecycles = await listFundingLifecycleProjectionsForUsers(
+    db,
+    { userIds },
+  );
+  const nonTerminalOperationIds = new Set(
+    operationLifecycles
+      .filter((projection) => !projection.lifecycle.safety.terminal)
+      .map((projection) => projection.operationId),
+  );
+  const nonTerminalOperationLifecycles = operationLifecycles.filter(
+    (projection) => !projection.lifecycle.safety.terminal,
+  );
+  const ambiguousFundingAttemptCount = nonTerminalOperationLifecycles.reduce(
+    (count, projection) =>
+      count +
+      projection.facts.actions.reduce(
+        (actionCount, action) =>
+          actionCount +
+          action.attempts.filter(
+            (attempt) =>
+              attempt.outcome === "ambiguous" ||
+              attempt.broadcastMayHaveOccurred,
+          ).length,
+        0,
+      ),
+    0,
+  );
+  const fundingIntentResult = await db.query<{
+    funding_operation_id: string | null;
+  }>(
+    `select distinct intent.funding_operation_id::text as funding_operation_id
+       from telegram_trade_intents intent
+      where intent.user_id = any($1::uuid[])
+        and intent.status = 'funding'
+        and intent.funding_operation_id is not null`,
+    [Array.from(userIds)],
+  );
+  const activeFundingIntent = fundingIntentResult.rows.some((intent) =>
+    intent.funding_operation_id === null
+      ? false
+      : nonTerminalOperationIds.has(intent.funding_operation_id),
+  );
+  const activeFundingMovement =
+    row.active_funding_movement || nonTerminalOperationIds.size > 0;
   const activeReasons = [
-    row.active_funding_movement ? "active_funding_movement" : null,
+    activeFundingMovement ? "active_funding_movement" : null,
     row.active_preparation ? "active_funding_preparation" : null,
     row.active_position_action ? "active_position_action" : null,
     row.active_receive_session ? "active_receive_session" : null,
@@ -288,7 +301,9 @@ export async function fetchUserFinancialLifecycleSummary(
       ? "active_telegram_funding_context"
       : null,
     row.active_legacy_bridge ? "active_legacy_bridge" : null,
-    row.active_telegram_intent ? "active_telegram_intent" : null,
+    row.active_telegram_intent || activeFundingIntent
+      ? "active_telegram_intent"
+      : null,
   ].filter((reason): reason is string => reason !== null);
   const protectedReasons = [
     row.funding_evidence ? "funding_evidence" : null,
@@ -309,6 +324,8 @@ export async function fetchUserFinancialLifecycleSummary(
   return {
     activeMovement: activeReasons.length > 0,
     activeReasons,
+    ambiguousFundingAttemptCount,
+    nonTerminalFundingOperationCount: nonTerminalOperationLifecycles.length,
     preparationRunEvidence: Number(row.preparation_run_count),
     protectedEvidence: protectedReasons.length > 0,
     protectedReasons,

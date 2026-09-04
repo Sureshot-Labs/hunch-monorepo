@@ -12,8 +12,6 @@ import {
   sameAccountAddress,
 } from "../domain/asset-identity.js";
 import {
-  assertFundingOperationTransition,
-  canTransitionSegment,
   isValidFundingOperationState,
   type FundingOperationState,
   type FundingOperationStatus,
@@ -1368,24 +1366,6 @@ export async function listFundingOperationsForUser(
   return rows.map(mapOperation);
 }
 
-type FundingOperationScope =
-  | Readonly<{ kind: "user"; userId: string }>
-  | Readonly<{ kind: "worker" }>;
-
-export type FundingOperationTransitionInput = Readonly<{
-  operationId: string;
-  scope: FundingOperationScope;
-  expectedVersion: number;
-  expectedState: FundingOperationState;
-  nextState: FundingOperationState;
-  actualSourceAmount?: JsonRecord | null;
-  actualDestinationAmount?: JsonRecord | null;
-  errorCode?: string | null;
-  recoveryMode?: FundingRecoveryMode;
-  supportMetadataPatch?: JsonRecord;
-  now?: Date;
-}>;
-
 function assertActualAmountUpdate(
   label: string,
   stored: JsonRecord | null,
@@ -1404,156 +1384,14 @@ function assertActualAmountUpdate(
   }
 }
 
-export async function transitionFundingOperationInTransaction(
-  client: Pick<PoolClient, "query">,
-  input: FundingOperationTransitionInput,
-): Promise<FundingOperationRow> {
-  if (
-    input.nextState.status !== "recovery_required" &&
-    input.recoveryMode !== undefined
-  ) {
-    throw new FundingPersistenceError(
-      "invalid_state_transition",
-      "recovery mode may only be assigned to recovery_required",
-    );
-  }
-  const userPredicate = input.scope.kind === "user" ? "and user_id = $2" : "";
-  const params =
-    input.scope.kind === "user"
-      ? [input.operationId, input.scope.userId]
-      : [input.operationId];
-  const { rows } = await client.query<FundingOperationDbRow>(
-    `
-      select ${operationColumns}
-      from funding_operations
-      where id = $1 ${userPredicate}
-      for update
-    `,
-    params,
-  );
-  const row = rows[0];
-  if (!row) {
-    throw new FundingPersistenceError(
-      "operation_not_found",
-      "funding operation was not found in the requested scope",
-    );
-  }
-  const current = mapOperation(row);
-  if (current.version !== input.expectedVersion) {
-    throw new FundingPersistenceError(
-      "operation_version_conflict",
-      "funding operation version changed",
-    );
-  }
-  if (
-    current.status !== input.expectedState.status ||
-    current.progressStage !== input.expectedState.stage
-  ) {
-    throw new FundingPersistenceError(
-      "invalid_state_transition",
-      "funding operation state changed before transition",
-    );
-  }
-  try {
-    assertFundingOperationTransition(input.expectedState, input.nextState);
-  } catch {
-    throw new FundingPersistenceError(
-      "invalid_state_transition",
-      "funding operation transition is not declared by WP1",
-    );
-  }
-  assertActualAmountUpdate(
-    "source",
-    current.actualSourceAmount,
-    input.actualSourceAmount,
-  );
-  assertActualAmountUpdate(
-    "destination",
-    current.actualDestinationAmount,
-    input.actualDestinationAmount,
-  );
-
-  const noStateChange =
-    input.expectedState.status === input.nextState.status &&
-    input.expectedState.stage === input.nextState.stage;
-  const noDataChange =
-    input.actualSourceAmount === undefined &&
-    input.actualDestinationAmount === undefined &&
-    input.errorCode === undefined &&
-    input.recoveryMode === undefined &&
-    input.supportMetadataPatch === undefined;
-  if (noStateChange && noDataChange) return current;
-
-  const now = input.now ?? new Date();
-  const terminal = ["completed", "refunded", "failed", "cancelled"].includes(
-    input.nextState.status,
-  );
-  const updated = await client.query<FundingOperationDbRow>(
-    `
-      update funding_operations
-      set status = $2,
-          progress_stage = $3,
-          recovery_mode = case
-            when $2 = 'recovery_required'
-              then $4::text
-            else null
-          end,
-          actual_source_amount = case
-            when $5::jsonb is null then actual_source_amount
-            else $5::jsonb
-          end,
-          actual_destination_amount = case
-            when $6::jsonb is null then actual_destination_amount
-            else $6::jsonb
-          end,
-          error_code = case
-            when $7::boolean then $8::text
-            else error_code
-          end,
-          support_metadata = support_metadata || $9::jsonb,
-          completed_at = case
-            when $10::boolean then coalesce(completed_at, $11::timestamptz)
-            else null
-          end,
-          version = version + 1
-      where id = $1 and version = $12
-      returning ${operationColumns}
-    `,
-    [
-      input.operationId,
-      input.nextState.status,
-      input.nextState.stage,
-      input.nextState.status === "recovery_required"
-        ? (input.recoveryMode ?? current.recoveryMode ?? "manual_review")
-        : null,
-      input.actualSourceAmount ?? null,
-      input.actualDestinationAmount ?? null,
-      input.errorCode !== undefined,
-      input.errorCode ?? null,
-      input.supportMetadataPatch ?? {},
-      terminal,
-      now,
-      input.expectedVersion,
-    ],
-  );
-  const updatedRow = updated.rows[0];
-  if (!updatedRow) {
-    throw new FundingPersistenceError(
-      "operation_version_conflict",
-      "funding operation version changed during transition",
-    );
-  }
-  return mapOperation(updatedRow);
-}
-
 /**
  * Writes the public operation-state cache from a lifecycle projection.
  *
- * Unlike transitionFundingOperationInTransaction this deliberately does not
- * consult the historical transition graph: the projection is derived from
- * immutable plan/execution/evidence facts, so the prior cached pair has no
- * authority over the next cached pair. Callers still need the operation lock
- * and optimistic version to serialize the cache with fact writes.
+ * This deliberately does not consult a historical transition graph: the
+ * projection is derived from immutable plan/execution/evidence facts, so the
+ * prior cached pair has no authority over the next cached pair. Callers still
+ * need the operation lock and optimistic version to serialize the cache with
+ * fact writes.
  */
 export async function writeFundingOperationLifecycleProjectionCacheInTransaction(
   client: Pick<PoolClient, "query">,
@@ -1745,101 +1583,6 @@ export async function writeFundingOperationSupportFactsInTransaction(
     );
   }
   return mapOperation(updatedRow);
-}
-
-export async function transitionFundingOperation(
-  pool: Pool,
-  input: FundingOperationTransitionInput,
-): Promise<FundingOperationRow> {
-  return tx(pool, (client) =>
-    transitionFundingOperationInTransaction(client, input),
-  );
-}
-
-export type FundingSegmentTransitionInput = Readonly<{
-  operationId: string;
-  segmentId: string;
-  expectedStatus: SegmentStatus;
-  nextStatus: SegmentStatus;
-  actualInput?: JsonRecord | null;
-  actualOutput?: JsonRecord | null;
-  rawStatus?: string | null;
-  submittedAt?: Date | null;
-  settledAt?: Date | null;
-  supportMetadataPatch?: JsonRecord;
-}>;
-
-export async function transitionFundingSegmentInTransaction(
-  client: Pick<PoolClient, "query">,
-  input: FundingSegmentTransitionInput,
-): Promise<void> {
-  if (!canTransitionSegment(input.expectedStatus, input.nextStatus)) {
-    throw new FundingPersistenceError(
-      "invalid_segment_transition",
-      "funding segment transition is not declared by WP1",
-    );
-  }
-  const result = await client.query(
-    `
-      update funding_operation_segments
-      set status = $3,
-          actual_input = case
-            when $4::jsonb is null then actual_input
-            else coalesce(actual_input, $4::jsonb)
-          end,
-          actual_output = case
-            when $5::jsonb is null then actual_output
-            else coalesce(actual_output, $5::jsonb)
-          end,
-          raw_status = case when $6::boolean then $7::text else raw_status end,
-          submitted_at = coalesce(submitted_at, $8),
-          -- A reducer may observe a segment after its submit timestamp was
-          -- recorded by a neighbouring transaction. Keep the physical time
-          -- invariant even when the reducer's single now value was sampled just
-          -- before that write.
-          settled_at = case
-            when settled_at is not null then settled_at
-            when $9::timestamptz is null then null
-            else greatest(
-              $9::timestamptz,
-              coalesce(submitted_at, $8::timestamptz, $9::timestamptz)
-            )
-          end,
-          support_metadata = support_metadata || $10::jsonb
-      where id = $1
-        and operation_id = $2
-        and status = $11
-        and (
-          $4::jsonb is null
-          or actual_input is null
-          or actual_input = $4::jsonb
-        )
-        and (
-          $5::jsonb is null
-          or actual_output is null
-          or actual_output = $5::jsonb
-        )
-    `,
-    [
-      input.segmentId,
-      input.operationId,
-      input.nextStatus,
-      input.actualInput ?? null,
-      input.actualOutput ?? null,
-      input.rawStatus !== undefined,
-      input.rawStatus ?? null,
-      input.submittedAt ?? null,
-      input.settledAt ?? null,
-      input.supportMetadataPatch ?? {},
-      input.expectedStatus,
-    ],
-  );
-  if (result.rowCount !== 1) {
-    throw new FundingPersistenceError(
-      "invalid_segment_transition",
-      "funding segment state or actual amount changed before transition",
-    );
-  }
 }
 
 /**

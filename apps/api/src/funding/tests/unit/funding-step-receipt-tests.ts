@@ -32,7 +32,6 @@ import type {
   FundingStepReceiptTarget,
 } from "../../persistence/funding-step-receipt-repository.js";
 import {
-  fundingStepStateForReceipt,
   listFundingStepReceiptTargets,
   shouldIgnoreFundingStepReceiptUpdate,
 } from "../../persistence/funding-step-receipt-repository.js";
@@ -464,10 +463,12 @@ const batchAction = {
   ],
 };
 let receiptTargetQuery = "";
+let receiptTargetParameters: readonly unknown[] = [];
 const [batchReceiptTarget] = await listFundingStepReceiptTargets(
   {
-    query: async (query: unknown) => {
+    query: async (query: unknown, parameters: readonly unknown[] = []) => {
       receiptTargetQuery = String(query);
+      receiptTargetParameters = parameters;
       return {
         rows: [
           {
@@ -504,29 +505,28 @@ const [batchReceiptTarget] = await listFundingStepReceiptTargets(
     },
   } as unknown as Parameters<typeof listFundingStepReceiptTargets>[0],
   "operation_batch_12345678",
-  new Date("2026-07-30T09:54:46.013Z"),
 );
 assert.equal(batchReceiptTarget?.action.kind, "evm_transaction_batch");
-assert.equal(batchReceiptTarget?.stepState, "succeeded");
 assert.equal(batchReceiptTarget?.previousReceipt?.status, "confirmed");
-assert.match(receiptTargetQuery, /or step\.state = 'succeeded'/u);
 assert.doesNotMatch(
   receiptTargetQuery,
-  /attempt\.outcome in \('submitted', 'ambiguous'\)/u,
-  "receipt polling must include legacy attempts whose broadcast flag and reference survived an inconsistent outcome",
+  /operation\.status/u,
+  "a materialized operation status must never hide a durable transaction reference",
+);
+assert.doesNotMatch(
+  receiptTargetQuery,
+  /step\.state\s*(?:=|in)/u,
+  "a materialized step state must never decide receipt eligibility",
 );
 assert.match(
   receiptTargetQuery,
-  /operation\.status in \('completed', 'refunded', 'failed', 'cancelled'\)[\s\S]*attempt\.broadcast_may_have_occurred/u,
+  /attempt\.broadcast_may_have_occurred/u,
+  "receipt polling is selected exclusively from durable attempt facts",
 );
-assert.match(
-  receiptTargetQuery,
-  /receipt\.finalized_at >= \$2::timestamptz - interval '15 minutes'/u,
-);
-assert.match(
-  receiptTargetQuery,
-  /or \(\s*receipt\.status = 'failed'/u,
-  "failed receipt reorg watch must cover Base, Polygon, and Solana executors",
+assert.deepEqual(
+  receiptTargetParameters,
+  ["operation_batch_12345678"],
+  "the cache-free query has no clock-dependent status-window parameter",
 );
 const batchExecutionCalldata = ethers.AbiCoder.defaultAbiCoder().encode(
   ["tuple(address target,uint256 value,bytes callData)[]"],
@@ -1690,7 +1690,6 @@ const hashlessFailedHandoffTarget: FundingStepReceiptTarget = {
   attemptStartedAt: handoffAttemptStartedAt,
   stepKind: "external_handoff",
   payerRequirement: "user",
-  stepState: "action_required",
   networkId: handoffAction.networkId,
   action: handoffAction,
   actionValidationResult: handoffValidation,
@@ -1740,7 +1739,8 @@ assert.deepEqual(
     invalidatingReceiptStatus:
       multiCandidateDuringProviderOutage.evidence.invalidatingReceiptStatus,
     invalidatingReceiptFailureCode:
-      multiCandidateDuringProviderOutage.evidence.invalidatingReceiptFailureCode,
+      multiCandidateDuringProviderOutage.evidence
+        .invalidatingReceiptFailureCode,
     candidateCount: Object.keys(
       (multiCandidateDuringProviderOutage.evidence
         .polymarketHandoffCandidateTransactions ?? {}) as object,
@@ -1843,7 +1843,8 @@ assert.deepEqual(
     invalidatingReceiptStatus:
       providerFailureAfterChainCandidate.evidence.invalidatingReceiptStatus,
     invalidatingReceiptFailureCode:
-      providerFailureAfterChainCandidate.evidence.invalidatingReceiptFailureCode,
+      providerFailureAfterChainCandidate.evidence
+        .invalidatingReceiptFailureCode,
     unboundChainTransactionHash:
       providerFailureAfterChainCandidate.evidence.unboundChainTransactionHash,
   },
@@ -2220,7 +2221,6 @@ const svmTarget: FundingStepReceiptTarget = {
   attemptStartedAt: new Date("2026-07-24T09:59:59.000Z"),
   stepKind: "transaction",
   payerRequirement: "user",
-  stepState: "succeeded",
   networkId: svmAction.networkId,
   action: svmAction,
   actionValidationResult: { signerAddress: svmSigner },
@@ -2267,7 +2267,6 @@ const target: FundingStepReceiptTarget = {
   attemptStartedAt: new Date("2026-07-24T09:59:59.000Z"),
   stepKind: "transaction",
   payerRequirement: "user",
-  stepState: "submitted",
   networkId: evmAction.networkId,
   action: evmAction,
   actionValidationResult: { signerAddress: evmTransaction.from },
@@ -2473,35 +2472,6 @@ for (const terminalStatus of ["mismatch", "reorged"] as const) {
     `repeated ${terminalStatus} polling must be an idempotent read`,
   );
 }
-assert.equal(
-  fundingStepStateForReceipt("finalized", "succeeded", "venue_preparation"),
-  "succeeded",
-);
-assert.equal(
-  fundingStepStateForReceipt(
-    "finalized",
-    "recovery_required",
-    "venue_preparation",
-  ),
-  "recovery_required",
-);
-assert.equal(
-  fundingStepStateForReceipt("finalized", "submitted", "venue_preparation"),
-  "submitted",
-);
-assert.equal(
-  fundingStepStateForReceipt(
-    "finalized",
-    "reconcile_required",
-    "venue_preparation",
-  ),
-  "submitted",
-);
-assert.equal(
-  fundingStepStateForReceipt("finalized", "submitted", "transaction"),
-  "succeeded",
-);
-
 console.log(
   "[funding-step-receipt-tests] exact EVM/Solana receipt matching, finality, failure, reorg, and persisted polling passed",
 );

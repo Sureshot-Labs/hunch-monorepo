@@ -19,6 +19,7 @@ import { canonicalAccountAddress } from "../domain/asset-identity.js";
 import { allocateFundingObservationInTransaction } from "./funding-operation-repository.js";
 import { lockFundingAuthorizationReservationScope } from "./funding-authorization-reservation-lock.js";
 import { canonicalJsonEqual } from "./canonical.js";
+import { reduceFundingOperationInTransaction } from "../reconciliation/funding-reducer.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 type ReceiveTargets = NonNullable<ExternalIngressInstruction["receiveTargets"]>;
@@ -2237,8 +2238,6 @@ export type FundingReceiveReceiptRoutingTarget = Readonly<{
   telegramFundingConsentFingerprint: string | null;
   telegramFundingConsentId: string | null;
   telegramUserId: string | null;
-  childOperationStatus: string | null;
-  childOperationRecoveryMode: "automatic_evidence" | "manual_review" | null;
   childExecutorId: string | null;
   childBroadcastMayHaveOccurred: boolean;
   childHasUnfinishedAttempt: boolean;
@@ -2278,8 +2277,6 @@ type ReceiveReceiptTargetRow = ReceiveReceiptRow & {
   telegram_funding_consent_fingerprint: string | null;
   telegram_funding_consent_id: string | null;
   telegram_user_id: string | null;
-  child_operation_status: string | null;
-  child_operation_recovery_mode: "automatic_evidence" | "manual_review" | null;
   child_executor_id: string | null;
   child_broadcast_may_have_occurred: boolean;
   child_has_unfinished_attempt: boolean;
@@ -2312,8 +2309,6 @@ function receiveReceiptRoutingTarget(
     telegramFundingConsentFingerprint: row.telegram_funding_consent_fingerprint,
     telegramFundingConsentId: row.telegram_funding_consent_id,
     telegramUserId: row.telegram_user_id,
-    childOperationStatus: row.child_operation_status,
-    childOperationRecoveryMode: row.child_operation_recovery_mode,
     childExecutorId: row.child_executor_id,
     childBroadcastMayHaveOccurred: row.child_broadcast_may_have_occurred,
     childHasUnfinishedAttempt: row.child_has_unfinished_attempt,
@@ -2385,8 +2380,6 @@ export async function listFundingReceiveReceiptsForRouting(
         telegram_consent.id as telegram_funding_consent_id,
         telegram_consent.consent_fingerprint
           as telegram_funding_consent_fingerprint,
-        operation.status as child_operation_status,
-        operation.recovery_mode as child_operation_recovery_mode,
         (
           select child_step.executor_id
           from funding_operation_steps child_step
@@ -2735,8 +2728,6 @@ export async function fetchFundingReceiveReceiptForReview(
         null::uuid as telegram_funding_authorization_id,
         null::uuid as telegram_funding_consent_id,
         null::text as telegram_funding_consent_fingerprint,
-        operation.status as child_operation_status,
-        operation.recovery_mode as child_operation_recovery_mode,
         (
           select child_step.executor_id
           from funding_operation_steps child_step
@@ -3050,7 +3041,6 @@ export async function linkFundingReceiveReceiptOperationInTransaction(
           and operation.user_id = $2
           and operation.requested_source_amount ->> 'raw' = $3
           and step.executor_id = $4
-          and step.state = 'planned'
         for update of operation, step
       `,
     [
@@ -3318,16 +3308,14 @@ export async function linkFundingReceiveReceiptOperationInTransaction(
       throw new Error("funding receive source credit cannot be reallocated");
     }
   }
-  await client.query(
-    `
-        update funding_operation_steps
-        set state = 'action_required',
-            updated_at = $2
-        where id = $1
-          and state = 'planned'
-      `,
-    [stepId, input.now],
-  );
+  // A finalized source-credit is the only ingress fact that unlocks this
+  // deferred action. Materialize every action cache from the common projector
+  // rather than inventing a receive-specific `planned -> action_required`
+  // transition here.
+  await reduceFundingOperationInTransaction(client, {
+    operationId: input.childFundingOperationId,
+    now: input.now,
+  });
   await refreshFundingReceiveSessionStatus(client, {
     receiveSessionId,
     userId: input.userId,

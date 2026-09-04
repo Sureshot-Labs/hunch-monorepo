@@ -327,6 +327,7 @@ function operationSteps(): readonly FundingOperationStep[] {
       normalizedAction: preparedAction(),
       actionValidationResult: {},
       actionExpiresAt: new Date(NOW.getTime() + 15 * 60_000),
+      actionable: false,
     },
   ];
 }
@@ -1882,6 +1883,36 @@ await test("operation presentation resumes a dependent composite action after re
         state: "action_required",
         dependsOnStepId: firstStepId,
         dependencyState: "succeeded",
+        actionable: true,
+      },
+    ],
+  });
+  try {
+    const response = await app.inject({
+      method: "GET",
+      url: "/funding/operations/operation_id_12345678",
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(
+      response
+        .json()
+        .steps.map((step: { actionable: boolean }) => step.actionable),
+      [false, true],
+    );
+  } finally {
+    await app.close();
+  }
+});
+
+await test("operation presentation preserves a parallel action selected by the projector", async () => {
+  const app = await buildApp({
+    operationSteps: async () => [
+      { ...operationSteps()[0], state: "reconcile_required" },
+      {
+        ...operationSteps()[0],
+        id: "step_independent_parallel_12345678",
+        ordinal: 1,
+        actionable: true,
       },
     ],
   });

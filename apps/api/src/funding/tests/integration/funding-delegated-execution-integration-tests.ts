@@ -69,7 +69,6 @@ import {
   createFundingQuoteInTransaction,
   FundingPersistenceError,
   allocateFundingObservationInTransaction,
-  transitionFundingOperationInTransaction,
   wakeFundingReconciliationInTransaction,
   type FundingCommitPlan,
 } from "../../persistence/funding-operation-repository.js";
@@ -1652,12 +1651,42 @@ async function recordRelayExecutorReportSuccess(
   });
 }
 
+/** Records the fact that Relay accepted an action before its canonical receipt. */
+async function recordRelayBroadcast(
+  fixture: RelayFixture,
+  input: Readonly<{ ordinal: number; stepId: string; at: Date }>,
+): Promise<void> {
+  const planStep = fixture.plan.steps[input.ordinal];
+  assert.ok(planStep);
+  await tx(pool, async (client) => {
+    const started = await startFundingStepAttemptInTransaction(client, {
+      operationId: fixture.operationId,
+      stepId: input.stepId,
+      canonicalActionFingerprint: planStep.actionFingerprint,
+      executorId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+      now: input.at,
+    });
+    await finishFundingStepAttemptInTransaction(client, {
+      attemptId: started.id,
+      outcome: "submitted",
+      broadcastMayHaveOccurred: true,
+      referenceKind: "transaction",
+      receiptRefCiphertext: `cipher:${started.id}`,
+      receiptRefLookupHmac: referenceCodec.fingerprint(started.id),
+      lookupKeyVersion: referenceCodec.keyVersion,
+      actualCosts: {},
+      now: input.at,
+    });
+  });
+}
+
 async function recordRelayDepositSuccess(
   fixture: RelayFixture,
   input: Readonly<{
     at: Date;
     blockHash: string;
     ledgerHeight?: string;
+    rawAmount?: string;
     transactionHash: string;
   }>,
 ): Promise<void> {
@@ -1682,7 +1711,7 @@ async function recordRelayDepositSuccess(
         canonical: true,
         failureCode: null,
         evidence: {
-          attributedSourceRaw: "2000000",
+          attributedSourceRaw: input.rawAmount ?? "2000000",
           singleOperationBundle: true,
           sourceDebitEventIndex: "0",
           transactionHash: input.transactionHash,
@@ -1844,22 +1873,21 @@ async function strandFixtureForAutomaticEvidence(
   await tx(pool, async (client) => {
     await client.query(
       `update funding_operations
-          set status = 'recovery_required',
-              recovery_mode = 'automatic_evidence',
-              error_code = 'reconciliation_evidence_timeout',
+          set support_metadata = support_metadata || jsonb_build_object(
+                'lifecycleAutomaticRecovery',
+                jsonb_build_object(
+                  'code', 'reconciliation_evidence_timeout',
+                  'requestedAt', $2::text
+                )
+              ),
               version = version + 1
-        where id = $1
-          and status = 'reconcile_required'
-          and progress_stage = 'source_action'`,
-      [fixture.operationId],
+        where id = $1`,
+      [fixture.operationId, new Date(now.getTime() + 1).toISOString()],
     );
-    await client.query(
-      `update funding_operation_steps
-          set state = 'recovery_required'
-        where operation_id = $1
-          and state = 'reconcile_required'`,
-      [fixture.operationId],
-    );
+  });
+  await reduceFundingOperation(pool, {
+    operationId: fixture.operationId,
+    now: new Date(now.getTime() + 1),
   });
 }
 
@@ -2450,15 +2478,12 @@ try {
       ],
     );
     await tx(pool, async (client) => {
-      // Fixture construction only: make the ordinary Relay fixture the
-      // canonical ready parent that a Router continuation consumes.
+      // Fixture construction only: attach the real Relay route to the trade
+      // intent before recording its canonical action/transfer facts below.
       await client.query("set local session_replication_role = replica");
       await client.query(
         `update funding_operations
             set purpose = 'trade_shortfall',
-                status = 'ready',
-                progress_stage = 'ready_for_consumer',
-                actual_destination_amount = $3::jsonb,
                 support_metadata =
                   (support_metadata - 'fundingReceiveReceiptId'
                                     - 'telegramFundingConsentId'
@@ -2467,14 +2492,9 @@ try {
                     'telegramTradeIntentId', $2::text,
                     'delegatedOriginKind', 'trade_shortfall_intent'
                   ),
-                updated_at = $4
+                updated_at = clock_timestamp()
           where id = $1::uuid`,
-        [
-          root.operationId,
-          intentId,
-          JSON.stringify({ asset: pUsd, raw: "750000" }),
-          now,
-        ],
+        [root.operationId, intentId],
       );
       await client.query(
         `update telegram_funding_authorization_reservations
@@ -2484,23 +2504,84 @@ try {
         [root.operationId, intentId],
       );
     });
-    await pool.query(
-      `insert into balance_reservations (
-         user_id, operation_id, component_id, location_id, network_id,
-         asset_id, asset_decimals, raw_amount, mode, expires_at
-       ) values (
-         $1::uuid, $2::uuid, $3, $4, $5, $6, 6, '750000',
-         'settled_for_consumer', clock_timestamp() + interval '30 minutes'
-       )`,
-      [
-        root.base.userId,
-        root.operationId,
-        `router-hard-block:${intentId}`,
-        root.walletId,
-        pUsd.networkId,
-        pUsd.assetId,
-      ],
+    const rootReadyAt = new Date(now.getTime() + 1_000);
+    await reduceFundingOperation(pool, {
+      operationId: root.operationId,
+      now: rootReadyAt,
+    });
+    await recordRelayBroadcast(root, {
+      ordinal: 0,
+      stepId: root.approvalStepId,
+      at: rootReadyAt,
+    });
+    await recordRelayApprovalSuccess(root, rootReadyAt, `0x${"71".repeat(32)}`);
+    await recordRelayBroadcast(root, {
+      ordinal: 1,
+      stepId: root.depositStepId,
+      at: rootReadyAt,
+    });
+    await recordRelayDepositSuccess(root, {
+      at: rootReadyAt,
+      blockHash: `0x${"72".repeat(32)}`,
+      rawAmount: "750000",
+      transactionHash: `0x${"73".repeat(32)}`,
+    });
+    const rootSegment = await pool.query<{ id: string }>(
+      `select id
+         from funding_operation_segments
+        where operation_id = $1::uuid and ordinal = 0`,
+      [root.operationId],
     );
+    const rootSegmentId = rootSegment.rows[0]?.id;
+    assert.ok(rootSegmentId);
+    await tx(pool, async (client) => {
+      await allocateFundingObservationInTransaction(client, {
+        operationId: root.operationId,
+        segmentId: rootSegmentId,
+        kind: "source_debit",
+        networkId: "evm:8453",
+        assetId: BASE_USDC,
+        assetDecimals: 6,
+        txHash: `0x${"74".repeat(32)}`,
+        eventIndex: "0",
+        fromAddress: root.walletAddress,
+        toAddress: RELAY_DEPOSITORY_V2,
+        rawAmount: "750000",
+        observedAt: rootReadyAt,
+        ledgerHeight: "301",
+        blockHash: `0x${"75".repeat(32)}`,
+        finalityStatus: "finalized",
+        finalizedAt: rootReadyAt,
+        metadata: { relayDeposit: true },
+      });
+      await allocateFundingObservationInTransaction(client, {
+        operationId: root.operationId,
+        segmentId: rootSegmentId,
+        kind: "destination_credit",
+        networkId: "evm:137",
+        assetId: POLYGON_PUSD,
+        assetDecimals: 6,
+        txHash: `0x${"76".repeat(32)}`,
+        eventIndex: "0",
+        fromAddress: RELAY_DEPOSITORY_V2,
+        toAddress: root.base.destinationAddress,
+        rawAmount: "750000",
+        observedAt: rootReadyAt,
+        ledgerHeight: "302",
+        blockHash: `0x${"77".repeat(32)}`,
+        finalityStatus: "finalized",
+        finalizedAt: rootReadyAt,
+        metadata: { relayDestination: true },
+      });
+    });
+    const rootReduction = await reduceFundingOperation(pool, {
+      operationId: root.operationId,
+      now: rootReadyAt,
+    });
+    assert.deepEqual(rootReduction.finalState, {
+      status: "ready",
+      stage: "ready_for_consumer",
+    });
     const committerInput = {
       limit: 1,
       subjectLookupHmacKey: "test-hmac-key",
@@ -5207,7 +5288,6 @@ try {
   const clientReceiptTargets = await listFundingStepReceiptTargets(
     pool,
     clientReceiptOperation.operation.id,
-    exactReceiptAt,
   );
   const clientReceiptTarget = clientReceiptTargets.find(
     (target) => target.attemptId === clientReceiptAttempt.id,
@@ -5759,10 +5839,12 @@ try {
   );
   await pool.query(
     `update funding_operation_steps
-        set state = 'action_required',
+        -- This is deliberately stale presentation data. The subsequent
+        -- executor pass must start from the finalized receipt facts once the
+        -- exact allowance evidence is recorded, not from this cache value.
+        set state = 'planned',
             updated_at = $2
-      where id = $1::uuid
-        and state = 'planned'`,
+      where id = $1::uuid`,
     [recoveredApprovalMaintenance.depositStepId, new Date(now.getTime() + 2)],
   );
   let prematureClaimOperationId: string | null = null;
@@ -5890,14 +5972,14 @@ try {
     "reconcile_required",
     "same-height allowance from another block must not activate deposit",
   );
-  await pool.query(
-    `update funding_step_receipt_observations
-        set evidence = evidence || jsonb_build_object(
-          'allowanceAnchorRejected', true
-        )
+  const hashAnchorEvidence = await pool.query<{ rejected: boolean }>(
+    `select coalesce(evidence ->> 'allowanceAnchorRejected' = 'true', false)
+       as rejected
+       from funding_step_receipt_observations
       where step_id = $1`,
     [hashAnchoredRelay.approvalStepId],
   );
+  assert.equal(hashAnchorEvidence.rows[0]?.rejected, true);
 
   const foreignApprovalMutationRelay = await createRelayFixture();
   const foreignApprovalMutationBroadcasts = { value: 0 };
@@ -6101,39 +6183,28 @@ try {
   });
 
   const terminalLaneHolder = await createRelayFixture();
-  const holderMutation = await pool.connect();
-  try {
-    await holderMutation.query("begin");
-    await holderMutation.query("set local session_replication_role = replica");
-    await holderMutation.query(
-      `update funding_operations
-          set status = 'cancelled',
-              progress_stage = 'terminal',
-              completed_at = clock_timestamp()
-        where id = $1`,
-      [terminalLaneHolder.operationId],
-    );
-    await holderMutation.query(
-      `update funding_operation_steps set state = 'cancelled'
-        where operation_id = $1`,
-      [terminalLaneHolder.operationId],
-    );
-    // This holder models a cancelled legacy/profile-migrated operation. Its
-    // no-attempt reservation shares the durable funding lane and must not
-    // strand a later Relay route merely because the executors differ.
-    await holderMutation.query(
-      `update funding_operation_steps
-          set executor_id = 'polymarket_deposit_wallet_relayer_v1'
-        where operation_id = $1`,
-      [terminalLaneHolder.operationId],
-    );
-    await holderMutation.query("commit");
-  } catch (error) {
-    await holderMutation.query("rollback");
-    throw error;
-  } finally {
-    holderMutation.release();
-  }
+  // A terminal no-deposit route owns a durable terminal decision. Its active
+  // reservation shares the allowance lane, but must not strand a later Relay
+  // route merely because the original executor profile has since changed.
+  await pool.query(
+    `update funding_operations
+        set support_metadata = support_metadata || jsonb_build_object(
+              'lifecycleTerminalFailure',
+              jsonb_build_object(
+                'code', 'legacy_terminal_without_deposit',
+                'decidedAt', $2::timestamptz,
+                'actionId', $3::text
+              )
+            ),
+            version = version + 1,
+            updated_at = $2::timestamptz
+      where id = $1::uuid`,
+    [
+      terminalLaneHolder.operationId,
+      new Date(now.getTime() + 1),
+      terminalLaneHolder.depositStepId,
+    ],
+  );
   const expiredLaneFollower = await createRelayFixture("2000000", {
     base: terminalLaneHolder.base,
   });
@@ -6174,7 +6245,7 @@ try {
   assert.deepEqual(terminalHolderState.rows[0], {
     follower_operation_status: "failed",
     follower_reservation_status: "released",
-    holder_reason: "terminal_without_deposit",
+    holder_reason: "terminal_without_source_debit",
     holder_reservation_status: "released",
   });
 
@@ -6219,7 +6290,7 @@ try {
   assert.deepEqual(alreadyZeroState.rows[0], {
     approval_state: "succeeded",
     cleanup_status: "completed",
-    deposit_state: "action_required",
+    deposit_state: "failed",
     parent_status: "failed",
     reservation_status: "cleaned",
   });
@@ -6319,6 +6390,14 @@ try {
     ledgerHeight: postDepositResidual.blockNumber,
     transactionHash: postDepositTransactionHash,
   });
+  await pool.query(
+    `update funding_operation_steps
+        -- Source-debit allocation is driven by the canonical receipt, not by
+        -- the materialized action cache left by an earlier reducer pass.
+        set state = 'planned', updated_at = $2
+      where id = $1::uuid`,
+    [postDepositAlreadyZeroRelay.depositStepId, new Date(now.getTime() + 3)],
+  );
   const preBroadcastLaneClient = await pool.connect();
   try {
     await preBroadcastLaneClient.query("begin");
@@ -6503,7 +6582,7 @@ try {
   } finally {
     foreignDriftParentTerminal.release();
   }
-  const cleanupLaneFollower = await createRelayFixture("1000000", {
+  await createRelayFixture("1000000", {
     base: foreignDriftRelay.base,
   });
   const cleanupLaneFollowerBroadcasts: Array<string> = [];
@@ -6536,18 +6615,20 @@ try {
     [foreignDriftCleanupOperationId],
   );
   assert.deepEqual(cleanupTerminalState.rows[0], {
-    cleanup_status: "failed",
-    reason: "cleanup_terminal_without_allowance_change",
-    reservation_status: "released",
+    cleanup_status: "recovery_required",
+    reason: null,
+    reservation_status: "cleanup_required",
   });
-  const cleanupLaneReleased = await relayExecutor(
+  const cleanupLaneStillHeld = await relayExecutor(
     [relayAllowanceEvidence("2000000", "42", "foreign")],
     (claim) => cleanupLaneFollowerBroadcasts.push(claim.operationId),
   ).runBatch({ limit: 20, now: new Date(now.getTime() + 15 * 60_000 + 9) });
-  assert.equal(cleanupLaneReleased.submitted, 1);
-  assert.deepEqual(cleanupLaneFollowerBroadcasts, [
-    cleanupLaneFollower.operationId,
-  ]);
+  assert.equal(cleanupLaneStillHeld.submitted, 0);
+  assert.deepEqual(
+    cleanupLaneFollowerBroadcasts,
+    [],
+    "a cache-only parent terminal marker must not release a live cleanup lane",
+  );
 
   const foreignLastMutationRelay = await createRelayFixture();
   const foreignLastMutationBroadcasts = { value: 0 };
@@ -6646,7 +6727,6 @@ try {
   const cleanupReceiptTargets = await listFundingStepReceiptTargets(
     pool,
     cleanup.cleanup_operation_id,
-    new Date(now.getTime() + 15 * 60_000 + 6),
   );
   assert.equal(cleanupReceiptTargets.length, 1);
   assert.equal(
@@ -6740,70 +6820,10 @@ try {
   );
   assert.deepEqual(beforeMaturityState.rows[0], {
     allowance_zero: false,
-    cleanup_state: "recovery_required",
-    cleanup_status: "in_progress",
+    cleanup_state: "reconcile_required",
+    cleanup_status: "reconcile_required",
     parent_status: "in_progress",
     reservation_status: "cleanup_required",
-  });
-  const preMaturityParent = await pool.query<{
-    progress_stage: "committed" | "source_action" | "source_observed";
-    status: "in_progress";
-    version: string | number;
-  }>(
-    `select status, progress_stage, version
-       from funding_operations
-      where id = $1::uuid`,
-    [unchangedOwnedRelay.operationId],
-  );
-  const preMaturityParentRow = preMaturityParent.rows[0];
-  assert.ok(preMaturityParentRow);
-  await tx(pool, async (client) => {
-    let version = Number(preMaturityParentRow.version);
-    let stage = preMaturityParentRow.progress_stage;
-    if (stage === "committed") {
-      const sourceAction = await transitionFundingOperationInTransaction(
-        client,
-        {
-          operationId: unchangedOwnedRelay.operationId,
-          scope: { kind: "worker" },
-          expectedVersion: version,
-          expectedState: { status: "in_progress", stage },
-          nextState: { status: "in_progress", stage: "source_action" },
-          now: new Date(
-            cleanupFinalizedAt.getTime() + RELAY_CLEANUP_CANONICAL_WATCH_MS - 3,
-          ),
-        },
-      );
-      version = sourceAction.version;
-      stage = "source_action";
-    }
-    if (stage === "source_action") {
-      const sourceObserved = await transitionFundingOperationInTransaction(
-        client,
-        {
-          operationId: unchangedOwnedRelay.operationId,
-          scope: { kind: "worker" },
-          expectedVersion: version,
-          expectedState: { status: "in_progress", stage },
-          nextState: { status: "in_progress", stage: "source_observed" },
-          now: new Date(
-            cleanupFinalizedAt.getTime() + RELAY_CLEANUP_CANONICAL_WATCH_MS - 2,
-          ),
-        },
-      );
-      version = sourceObserved.version;
-    }
-    await transitionFundingOperationInTransaction(client, {
-      operationId: unchangedOwnedRelay.operationId,
-      scope: { kind: "worker" },
-      expectedVersion: version,
-      expectedState: { status: "in_progress", stage: "source_observed" },
-      nextState: { status: "recovery_required", stage: "source_observed" },
-      errorCode: "reconciliation_evidence_timeout",
-      now: new Date(
-        cleanupFinalizedAt.getTime() + RELAY_CLEANUP_CANONICAL_WATCH_MS - 1,
-      ),
-    });
   });
   const atCleanupMaturity = await relayExecutor([cleanupZero], () => {
     throw new Error("mature cleanup rebroadcast unexpectedly");
@@ -8018,51 +8038,34 @@ try {
   const completedReceiptVerificationRelay = await createRelayFixture();
   const completedReceiptVerificationAt = new Date();
   await tx(pool, async (client) => {
-    const current = await client.query<{
-      progress_stage: "committed";
-      status: "in_progress";
-      version: string | number;
-    }>(
-      `select status, progress_stage, version
-         from funding_operations
-        where id = $1::uuid
-        for update`,
-      [completedReceiptVerificationRelay.operationId],
-    );
-    const operation = current.rows[0];
-    assert.ok(operation);
-    const activated = await transitionFundingOperationInTransaction(client, {
-      operationId: completedReceiptVerificationRelay.operationId,
-      scope: { kind: "worker" },
-      expectedVersion: Number(operation.version),
-      expectedState: {
-        status: operation.status,
-        stage: operation.progress_stage,
-      },
-      nextState: { status: "in_progress", stage: "source_action" },
-      now: completedReceiptVerificationAt,
-    });
-    await transitionFundingOperationInTransaction(client, {
-      operationId: completedReceiptVerificationRelay.operationId,
-      scope: { kind: "worker" },
-      expectedVersion: activated.version,
-      expectedState: { status: "in_progress", stage: "source_action" },
-      nextState: { status: "completed", stage: "terminal" },
-      now: completedReceiptVerificationAt,
-    });
-  });
-  for (const stepState of ["action_required", "submitted", "succeeded"]) {
-    await pool.query(
-      `update funding_operation_steps
-          set state = $2, updated_at = $3
+    // Simulate only the legacy cache defect under test: a late submitted
+    // receipt must remain observable even when an old writer left terminal
+    // operation/action cache values. Do not use transition maps to manufacture
+    // a financial lifecycle that lacks matching facts.
+    const cached = await client.query(
+      `update funding_operations
+          set status = 'completed',
+              progress_stage = 'terminal',
+              completed_at = $2,
+              updated_at = $2,
+              version = version + 1
         where id = $1::uuid`,
       [
-        completedReceiptVerificationRelay.depositStepId,
-        stepState,
+        completedReceiptVerificationRelay.operationId,
         completedReceiptVerificationAt,
       ],
     );
-  }
+    assert.equal(cached.rowCount, 1);
+  });
+  await pool.query(
+    `update funding_operation_steps
+        set state = 'succeeded', updated_at = $2
+      where id = $1::uuid`,
+    [
+      completedReceiptVerificationRelay.depositStepId,
+      completedReceiptVerificationAt,
+    ],
+  );
   const completedReceiptVerificationAttempt = await pool.query<{ id: string }>(
     `insert into funding_operation_step_attempts (
        step_id, attempt_number, canonical_action_fingerprint, executor_id,

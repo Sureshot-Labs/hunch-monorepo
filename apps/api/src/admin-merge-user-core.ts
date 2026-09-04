@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 
 import { pool } from "./db.js";
+import { reduceFundingOperationInTransaction } from "./funding/reconciliation/funding-reducer.js";
 import { fetchUserFinancialLifecycleSummary } from "./services/user-financial-lifecycle.js";
 
 export type UserRow = {
@@ -136,6 +137,50 @@ async function lockMergeUsers(
   }
 }
 
+/**
+ * Freeze the funding rows after the user rows are locked and before the
+ * fact-based conflict audit. The later ownership move must cover precisely
+ * the same rows that were proven terminal; materialized status is not a
+ * second, weaker eligibility test.
+ */
+async function lockFundingOperationsForMerge(
+  client: Pick<PoolClient, "query">,
+  sourceUserId: string,
+): Promise<readonly string[]> {
+  const { rows } = await client.query<{ id: string }>(
+    `select operation_row.id
+       from funding_operations operation_row
+      where operation_row.user_id = $1
+      order by operation_row.id
+      for update`,
+    [sourceUserId],
+  );
+  return rows.map((row) => row.id);
+}
+
+/**
+ * The current immutable-plan trigger permits a user reassignment only when
+ * its materialized projection cache is terminal. The factual audit above is
+ * authoritative; this writes that existing cache from the same projector so
+ * the trigger cannot reject a factually terminal operation because its cache
+ * was delayed. Stage 3 removes this cache compatibility requirement.
+ */
+async function materializeTerminalFundingProjectionCachesForMerge(
+  client: PoolClient,
+  operationIds: readonly string[],
+): Promise<void> {
+  for (const operationId of operationIds) {
+    const reduction = await reduceFundingOperationInTransaction(client, {
+      operationId,
+    });
+    if (!reduction.terminal) {
+      throw new Error(
+        `Funding operation ${operationId} was not terminal after the factual merge audit`,
+      );
+    }
+  }
+}
+
 async function fetchFundingMergeConflicts(
   client: Pick<PoolClient, "query">,
   sourceId: string,
@@ -153,13 +198,11 @@ async function fetchFundingMergeConflicts(
   const { rows } = await client.query<{
     active_funding_leases: string;
     active_funding_routes: string;
-    ambiguous_funding_attempts: string;
     funding_consent_conflicts: string;
     funding_idempotency_conflicts: string;
     funding_trade_attempts: string;
     live_funding_reservations: string;
     live_funding_authorization_reservations: string;
-    non_terminal_funding_operations: string;
     non_terminal_legacy_bridge_orders: string;
     non_terminal_telegram_trade_intents: string;
     position_action_evidence: string;
@@ -170,14 +213,6 @@ async function fetchFundingMergeConflicts(
   }>(
     `
       select
-        (
-          select count(*)::text
-          from funding_operations operation
-          where operation.user_id = any($1::uuid[])
-            and operation.status not in (
-              'completed', 'refunded', 'failed', 'cancelled'
-            )
-        ) as non_terminal_funding_operations,
         (
           select count(*)::text
           from balance_reservations reservation
@@ -192,20 +227,6 @@ async function fetchFundingMergeConflicts(
           where funding_authorization.user_id = any($1::uuid[])
             and reservation.status in ('reserved', 'cleanup_required')
         ) as live_funding_authorization_reservations,
-        (
-          select count(*)::text
-          from funding_operation_step_attempts attempt
-          join funding_operation_steps step on step.id = attempt.step_id
-          join funding_operations operation on operation.id = step.operation_id
-          where operation.user_id = any($1::uuid[])
-            and operation.status not in (
-              'completed', 'refunded', 'failed', 'cancelled'
-            )
-            and (
-              attempt.outcome = 'ambiguous'
-              or attempt.broadcast_may_have_occurred
-            )
-        ) as ambiguous_funding_attempts,
         (
           select count(*)::text
           from funding_reconciliation_jobs job
@@ -302,7 +323,7 @@ async function fetchFundingMergeConflicts(
   return {
     activeFundingLeases: Number(row.active_funding_leases),
     activeFundingRoutes: Number(row.active_funding_routes),
-    ambiguousFundingAttempts: Number(row.ambiguous_funding_attempts),
+    ambiguousFundingAttempts: lifecycle.ambiguousFundingAttemptCount,
     fundingConsentConflicts: Number(row.funding_consent_conflicts),
     fundingIdempotencyConflicts: Number(row.funding_idempotency_conflicts),
     fundingPreparationRuns: lifecycle.preparationRunEvidence,
@@ -310,7 +331,7 @@ async function fetchFundingMergeConflicts(
     liveFundingReservations:
       Number(row.live_funding_reservations) +
       Number(row.live_funding_authorization_reservations),
-    nonTerminalFundingOperations: Number(row.non_terminal_funding_operations),
+    nonTerminalFundingOperations: lifecycle.nonTerminalFundingOperationCount,
     nonTerminalLegacyBridgeOrders: Number(
       row.non_terminal_legacy_bridge_orders,
     ),
@@ -462,6 +483,10 @@ export async function mergeUsers(
       `user-merge:${source.id}:${target.id}`,
     ]);
     await lockMergeUsers(client, source.id, target.id);
+    const sourceFundingOperationIds = await lockFundingOperationsForMerge(
+      client,
+      source.id,
+    );
     const fundingConflicts = await fetchFundingMergeConflicts(
       client,
       source.id,
@@ -470,6 +495,10 @@ export async function mergeUsers(
     if (Object.values(fundingConflicts).some((count) => count > 0)) {
       throw new FundingMergeConflictError(fundingConflicts);
     }
+    await materializeTerminalFundingProjectionCachesForMerge(
+      client,
+      sourceFundingOperationIds,
+    );
     await client.query(
       `
         delete from funding_liquidity_projections
@@ -916,7 +945,6 @@ export async function mergeUsers(
                 ),
                 version = version + 1
             where user_id = $2
-              and status in ('completed', 'refunded', 'failed', 'cancelled')
           `,
           [target.id, source.id],
         )

@@ -489,7 +489,6 @@ async function findRelayFundingOutput(
        and segment_row.provider_id = 'relay'
       where operation_row.user_id = $1::uuid
         and operation_row.created_at > now() - interval '30 minutes'
-        and operation_row.status not in ('failed', 'cancelled')
         and exists (
           select 1
           from funding_operation_steps funding_step

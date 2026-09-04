@@ -4,7 +4,6 @@ import {
   fundingReconciliationDisposition,
   fundingReconciliationErrorIsNonTransient,
   fundingReconciliationPollDelayMs,
-  fundingSuccessfulRecoveryResolved,
   pollFundingReconciliationEvidence,
 } from "../../reconciliation/funding-reducer.js";
 
@@ -61,6 +60,7 @@ await pollFundingReconciliationEvidence({
   operationId: "00000000-0000-4000-8000-000000000008",
   state: { status: "refunded", stage: "terminal" },
   terminalReceiptWatch: true,
+  terminalRelayRefundWatch: true,
   now: new Date("2026-07-29T13:24:01.250Z"),
   providerPoll: async () => {
     terminalRefundCalls.push("provider");
@@ -78,6 +78,7 @@ await pollFundingReconciliationEvidence({
   operationId: "00000000-0000-4000-8000-000000000009",
   state: { status: "refunded", stage: "terminal" },
   terminalReceiptWatch: true,
+  terminalRelayRefundWatch: true,
   now: new Date("2026-07-29T13:24:01.375Z"),
   providerPoll: async () => {
     terminalRefundProviderFailureCalls.push("provider");
@@ -98,6 +99,7 @@ const terminalReceiptFailure = await pollFundingReconciliationEvidence({
   operationId: "00000000-0000-4000-8000-000000000010",
   state: { status: "refunded", stage: "terminal" },
   terminalReceiptWatch: true,
+  terminalRelayRefundWatch: true,
   now: new Date("2026-07-29T13:24:01.437Z"),
   receiptPoll: async () => {
     terminalRefundReceiptFailureCalls.push("receipt");
@@ -381,41 +383,6 @@ assert.equal(
     terminalTimeoutMs: 90_000,
   }),
   "complete",
-);
-
-for (const targetStatus of ["in_progress", "ready", "completed"] as const) {
-  assert.equal(
-    fundingSuccessfulRecoveryResolved({
-      initialStatus: "recovery_required",
-      targetStatus,
-      reorgBlockedByTerminalState: false,
-    }),
-    true,
-  );
-}
-for (const targetStatus of [
-  "recovery_required",
-  "reconcile_required",
-  "failed",
-  "refunded",
-  "cancelled",
-] as const) {
-  assert.equal(
-    fundingSuccessfulRecoveryResolved({
-      initialStatus: "recovery_required",
-      targetStatus,
-      reorgBlockedByTerminalState: false,
-    }),
-    false,
-  );
-}
-assert.equal(
-  fundingSuccessfulRecoveryResolved({
-    initialStatus: "recovery_required",
-    targetStatus: "completed",
-    reorgBlockedByTerminalState: true,
-  }),
-  false,
 );
 
 console.log(

@@ -2,7 +2,21 @@ import type { PoolClient } from "@hunch/infra";
 
 import { isPolymarketDepositRouterProfileId } from "./delegated-funding-profile-ids.js";
 import { relayEvmFundingProfileSpec } from "./relay-evm-profile-specs.js";
+import { projectedFundingLifecycleInTransaction } from "../persistence/funding-evidence-repository.js";
 import { reduceFundingOperationInTransaction } from "../reconciliation/funding-reducer.js";
+import type { FundingLifecycleProjection } from "../lifecycle/funding-lifecycle-projector.js";
+
+function isActionableProjectedAction(
+  lifecycle: FundingLifecycleProjection,
+  actionId: string,
+): boolean {
+  return lifecycle.actions.some(
+    (action) =>
+      action.actionId === actionId &&
+      action.state === "action_required" &&
+      action.actionable,
+  );
+}
 
 /**
  * Shortfall consent is the authority to start exactly the root action of an
@@ -39,6 +53,8 @@ export async function activateTelegramTradeShortfallInitialStepInTransaction(
   }>(
     `select operation_row.id as operation_id, root_step.id as step_id
        from funding_operations operation_row
+       join funding_operation_steps root_step
+         on root_step.operation_id = operation_row.id
        join telegram_trade_intents trade_intent_row
          on trade_intent_row.id::text =
               operation_row.support_metadata ->> 'telegramTradeIntentId'
@@ -76,16 +92,16 @@ export async function activateTelegramTradeShortfallInitialStepInTransaction(
   );
   const candidate = candidates.rows[0];
   if (!candidate) return false;
+  const now = new Date();
   await reduceFundingOperationInTransaction(client, {
     operationId: candidate.operation_id,
+    now,
   });
-  const projected = await client.query<{ state: string }>(
-    `select state
-       from funding_operation_steps
-      where id = $1`,
-    [candidate.step_id],
-  );
-  return projected.rows[0]?.state === "action_required";
+  const lifecycle = await projectedFundingLifecycleInTransaction(client, {
+    operationId: candidate.operation_id,
+    now,
+  });
+  return isActionableProjectedAction(lifecycle, candidate.step_id);
 }
 
 /** Activate stranded no-attempt roots for one exact profile during worker reconciliation. */
@@ -143,16 +159,18 @@ export async function activateStalledTelegramTradeShortfallInitialStepsInTransac
   });
   let activated = 0;
   for (const candidate of candidates.rows) {
+    const now = new Date();
     await reduceFundingOperationInTransaction(client, {
       operationId: candidate.operation_id,
+      now,
     });
-    const projected = await client.query<{ state: string }>(
-      `select state
-         from funding_operation_steps
-        where id = $1`,
-      [candidate.step_id],
-    );
-    if (projected.rows[0]?.state === "action_required") activated += 1;
+    const lifecycle = await projectedFundingLifecycleInTransaction(client, {
+      operationId: candidate.operation_id,
+      now,
+    });
+    if (isActionableProjectedAction(lifecycle, candidate.step_id)) {
+      activated += 1;
+    }
   }
   return activated;
 }
@@ -218,14 +236,14 @@ export async function activateTelegramTradeShortfallRouterDependentFundInTransac
   );
   const candidate = candidates.rows[0];
   if (!candidate) return false;
+  const now = new Date();
   await reduceFundingOperationInTransaction(client, {
     operationId: candidate.operation_id,
+    now,
   });
-  const projected = await client.query<{ state: string }>(
-    `select state
-       from funding_operation_steps
-      where id = $1`,
-    [candidate.step_id],
-  );
-  return projected.rows[0]?.state === "action_required";
+  const lifecycle = await projectedFundingLifecycleInTransaction(client, {
+    operationId: candidate.operation_id,
+    now,
+  });
+  return isActionableProjectedAction(lifecycle, candidate.step_id);
 }

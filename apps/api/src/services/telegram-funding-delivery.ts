@@ -11,6 +11,7 @@ import {
   type TelegramFundingProgressProjection,
 } from "./telegram-funding-contracts.js";
 import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
+import { loadFundingLifecycleProjectionForOperation } from "../funding/lifecycle/funding-lifecycle-read-model.js";
 import { isTelegramFundingReceiveDisclosureTargetCurrent } from "./telegram-funding-disclosure-target.js";
 import { canonicalJsonEqual } from "../funding/persistence/canonical.js";
 import { lockFundingPolicyForTransaction } from "../funding/policies/funding-policy-sidecar.js";
@@ -1624,16 +1625,8 @@ export async function cleanupTelegramFundingContexts(input: {
           and not exists (
             select 1
             from funding_receive_receipts receipt
-            left join funding_operations operation
-              on operation.id = receipt.child_funding_operation_id
             where receipt.receive_session_id = context.receive_session_id
-              and (
-                receipt.status <> 'ready'
-                or (
-                  operation.id is not null
-                  and operation.status not in ('completed', 'refunded', 'cancelled', 'failed')
-                )
-              )
+              and receipt.status <> 'ready'
           )
           and not exists (
             select 1
@@ -1658,7 +1651,41 @@ export async function cleanupTelegramFundingContexts(input: {
       `,
       [retentionDays, limit],
     );
-    const ids = candidates.rows.map((row) => row.id);
+    const candidateIds = candidates.rows.map((row) => row.id);
+    if (candidateIds.length === 0) return 0;
+    const childOperations = await client.query<{
+      context_id: string;
+      operation_id: string;
+    }>(
+      `select context.id::text as context_id,
+              receipt.child_funding_operation_id::text as operation_id
+         from telegram_funding_sessions context
+         join funding_receive_receipts receipt
+           on receipt.receive_session_id = context.receive_session_id
+        where context.id = any($1::uuid[])
+          and receipt.child_funding_operation_id is not null`,
+      [candidateIds],
+    );
+    const terminalByOperationId = new Map<string, boolean>();
+    for (const row of childOperations.rows) {
+      if (terminalByOperationId.has(row.operation_id)) continue;
+      const projected = await loadFundingLifecycleProjectionForOperation(
+        client,
+        { operationId: row.operation_id },
+      );
+      // This is retention, never recovery. A missing fact snapshot must keep
+      // the context instead of deleting an operation with uncertain money.
+      terminalByOperationId.set(
+        row.operation_id,
+        projected?.lifecycle.safety.terminal ?? false,
+      );
+    }
+    const blockedContexts = new Set(
+      childOperations.rows
+        .filter((row) => terminalByOperationId.get(row.operation_id) !== true)
+        .map((row) => row.context_id),
+    );
+    const ids = candidateIds.filter((id) => !blockedContexts.has(id));
     if (ids.length === 0) return 0;
     await client.query(
       `delete from telegram_funding_mutations

@@ -9,6 +9,7 @@ import { ethers } from "ethers";
 
 import "../../../integration-test-database-guard.js";
 import { pool } from "../../../db.js";
+import { fetchUserFinancialLifecycleSummary } from "../../../services/user-financial-lifecycle.js";
 import { POLYMARKET_HANDOFF_CHAIN_ATTRIBUTION_WINDOW_MS } from "../../execution/polymarket-deposit-wallet-handoff.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
 import {
@@ -2207,6 +2208,46 @@ try {
   );
   assert.equal(currentStartedHandoffs.length, 1);
   assert.equal(currentStartedHandoffs[0]?.attemptOutcome, "started");
+
+  // The worker must attribute a live started handoff from immutable plan and
+  // attempt facts even if an interrupted old reducer left a terminal cache.
+  // Keep the contradictory cache in this transaction only: production writes
+  // it through the projection materializer, never by bypassing constraints.
+  await client.query("savepoint stale_handoff_cache");
+  try {
+    await client.query("set local session_replication_role = replica");
+    await client.query(
+      `update funding_operations
+          set status = 'completed',
+              progress_stage = 'terminal',
+              completed_at = now()
+        where id = $1::uuid`,
+      [committed.operation.id],
+    );
+    const staleCacheHandoffs =
+      await listPotentialPolymarketHandoffsForCanonicalEvents(client, {
+        userId,
+        currentLookupKeyVersion: 1,
+        events: [canonicalHandoffEvent],
+      });
+    assert.ok(
+      staleCacheHandoffs.some(
+        (candidate) => candidate.attemptId === started.attempt.id,
+      ),
+      "a stale terminal cache must not hide a started handoff from chain attribution",
+    );
+    const staleCacheLifecycle = await fetchUserFinancialLifecycleSummary(
+      client,
+      [userId],
+    );
+    assert.ok(
+      staleCacheLifecycle.nonTerminalFundingOperationCount > 0,
+      "a stale terminal cache must not permit a destructive user lifecycle action",
+    );
+  } finally {
+    await client.query("rollback to savepoint stale_handoff_cache");
+    await client.query("release savepoint stale_handoff_cache");
+  }
 
   await expectFundingError(
     startFundingStepAttemptForUserInTransaction(client, {

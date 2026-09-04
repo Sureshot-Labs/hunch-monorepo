@@ -15,11 +15,12 @@ import {
 } from "../persistence/funding-authorization-reservation-lock.js";
 import {
   allocateFundingObservationInTransaction,
-  releaseFundingReservationInTransaction,
-  transitionFundingOperationInTransaction,
+  writeFundingOperationSupportFactsInTransaction,
 } from "../persistence/funding-operation-repository.js";
 import {
   finishFundingStepAttemptForUserInTransaction,
+  projectedFundingActionInTransaction,
+  projectedFundingActionBeforeBroadcastInTransaction,
   startFundingStepAttemptForUserInTransaction,
 } from "../persistence/funding-evidence-repository.js";
 import { lockFundingPolicyForTransaction } from "../policies/funding-policy-service.js";
@@ -54,6 +55,7 @@ import {
   parseRelayEvmAllowanceObservation,
   type RelayEvmAllowanceObservation,
 } from "./relay-evm-allowance-state.js";
+import { relayActionNeedsAllowanceMaintenance } from "./relay-evm-lifecycle.js";
 import { stableWalletOpaqueId } from "../../account-value/canonical.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import {
@@ -62,6 +64,9 @@ import {
 } from "../../services/polygon-rpc.js";
 import { RELAY_DEPOSITORY_V2 } from "../../funding-providers/relay/rehearsal.js";
 import { RELAY_ROUTE_SPECS } from "../../funding-providers/relay/mappings.js";
+import { reduceFundingOperationInTransaction } from "../reconciliation/funding-reducer.js";
+import { deriveFundingLifecycle } from "../lifecycle/funding-lifecycle-projector.js";
+import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 export const RELAY_CLEANUP_CANONICAL_WATCH_MS = 60_000;
@@ -107,6 +112,60 @@ type RelayClaimRow = TelegramFundingAuthorizationRow &
     step_id: string;
   }>;
 
+type RelayRecoveryClaimRow = RelayClaimRow &
+  Readonly<{
+    attempt_id: string;
+    attempt_outcome: "started" | "ambiguous";
+  }>;
+
+/**
+ * Relay's SQL query establishes immutable authority, reservation, and
+ * postcondition eligibility.  Whether the action can start is deliberately
+ * decided here from the locked durable fact snapshot, never from the cached
+ * operation or step state selected by that query.
+ */
+async function firstActionableRelayClaimRow(
+  client: PoolClient,
+  rows: readonly RelayClaimRow[],
+  now: Date,
+): Promise<RelayClaimRow | null> {
+  for (const row of rows) {
+    const { action } = await projectedFundingActionInTransaction(client, {
+      operationId: row.operation_id,
+      stepId: row.step_id,
+      now,
+    });
+    if (action.actionable) return row;
+  }
+  return null;
+}
+
+/**
+ * Recovery owns a broadcast-capable attempt, rather than starting a new
+ * action.  Its eligibility is still a lifecycle decision: cache terminality
+ * must not suppress a known attempt, and a cache rearm must not revive one.
+ */
+async function firstRecoverableRelayClaimRow(
+  client: PoolClient,
+  rows: readonly RelayRecoveryClaimRow[],
+  now: Date,
+): Promise<RelayRecoveryClaimRow | null> {
+  for (const row of rows) {
+    const { lifecycle, action } = await projectedFundingActionInTransaction(
+      client,
+      { operationId: row.operation_id, stepId: row.step_id, now },
+    );
+    if (
+      !lifecycle.safety.terminal &&
+      (action.state === "reconcile_required" ||
+        action.state === "recovery_required")
+    ) {
+      return row;
+    }
+  }
+  return null;
+}
+
 export type RelayEvmAllowanceReader = (
   input: Readonly<{
     owner: string;
@@ -129,8 +188,6 @@ const RELAY_ALLOWANCE_LANE_HEAD_PREDICATE = `not exists (
     from telegram_funding_authorization_reservations prior_reservation
     join telegram_funding_authorizations prior_funding_authorization
       on prior_funding_authorization.id = prior_reservation.authorization_id
-    join funding_operations prior_operation
-      on prior_operation.id = prior_reservation.funding_operation_id
    where prior_reservation.status in ('reserved', 'cleanup_required')
      and prior_reservation.id <> reservation.id
      and prior_funding_authorization.wallet_chain =
@@ -145,14 +202,10 @@ const RELAY_ALLOWANCE_LANE_HEAD_PREDICATE = `not exists (
            lower(funding_authorization.source_asset_id)
      and (prior_reservation.reserved_at, prior_reservation.id) <
            (reservation.reserved_at, reservation.id)
-     -- A completed/failed/cancelled route can no longer mutate this allowance.
-     -- Its accounting row may be retained for audit, but it must not retain the
-     -- shared lane forever. cleanup_required deliberately remains a head:
-     -- that state represents a separately-live cleanup operation.
-     and (
-       prior_reservation.status = 'cleanup_required'
-       or prior_operation.status not in ('completed', 'refunded', 'failed', 'cancelled')
-     )
+     -- Reserved and cleanup-required rows are the durable ownership leases for
+     -- this mutable allowance. A fact-derived terminal reduction releases a
+     -- no-deposit reservation before claim; never infer that release from an
+     -- operation-status cache inside the shared-lane predicate.
 )`;
 
 export async function readRelayEvmAllowance(
@@ -486,6 +539,19 @@ function relayAllowanceMutationIsOwned(
   );
 }
 
+async function relayActionNeedsAllowanceMaintenanceInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{ operationId: string; actionId: string; now: Date }>,
+): Promise<boolean> {
+  return relayActionNeedsAllowanceMaintenance(
+    await loadFundingLifecycleFactsForOperationInTransaction(client, {
+      operationId: input.operationId,
+      now: input.now,
+    }),
+    input.actionId,
+  );
+}
+
 async function observeRelayPostcondition(
   pool: Pool,
   allowance: RelayEvmAllowanceReader,
@@ -495,6 +561,7 @@ async function observeRelayPostcondition(
   const { rows } = await pool.query<{
     block_number: string | null;
     block_hash: string | null;
+    action_id: string;
     candidate_id: string;
     maintenance_kind: RelayMaintenanceKind;
     expected_mutation_transaction_hashes: unknown;
@@ -508,6 +575,7 @@ async function observeRelayPostcondition(
               'approval'::text as maintenance_kind,
               approval_receipt.id::text as candidate_id,
               operation.id::text as operation_id,
+              approval_step.id::text as action_id,
               funding_authorization.wallet_address,
               jsonb_build_array(approval_receipt.evidence ->> 'transactionHash')
                 as expected_mutation_transaction_hashes,
@@ -536,8 +604,6 @@ async function observeRelayPostcondition(
           and reservation.status = 'reserved'
         where approval_step.executor_id = $1
           and ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
-          and approval_step.state = 'succeeded'
-          and deposit_step.state in ('planned', 'action_required')
           and not exists (
             select 1
             from funding_operation_step_attempts deposit_attempt
@@ -545,12 +611,15 @@ async function observeRelayPostcondition(
           )
           and approval_receipt.evidence ->> 'allowanceExact'
                 is distinct from 'true'
+          and approval_receipt.evidence ->> 'allowanceExactRejected'
+                is distinct from 'true'
           and approval_receipt.evidence ->> 'allowanceAnchorRejected'
                 is distinct from 'true'
           and approval_receipt.evidence ->> 'allowanceOwnershipRejected'
                 is distinct from 'true'
        union all
        select 2, 'releasable', reservation.id::text, operation.id::text,
+              approval_step.id::text,
               funding_authorization.wallet_address,
               '[]'::jsonb,
               operation.support_metadata ->> 'relayApprovalBaselineAllowanceBlock',
@@ -568,17 +637,6 @@ async function observeRelayPostcondition(
                 'approve'
         where reservation.status = 'reserved'
           and ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
-          and (
-            approval_step.state in ('failed', 'recovery_required')
-            or (
-              approval_step.state = 'action_required'
-              and (
-                approval_step.action_expires_at <= clock_timestamp()
-                or (select count(*) from funding_operation_step_attempts used
-                    where used.step_id = approval_step.id) >= 2
-              )
-            )
-          )
           and not exists (
             select 1 from funding_step_receipt_observations success
              where success.step_id = approval_step.id
@@ -610,6 +668,7 @@ async function observeRelayPostcondition(
           )
        union all
        select 3, 'stranded', operation.id::text, operation.id::text,
+              deposit_step.id::text,
               funding_authorization.wallet_address,
               jsonb_build_array(approval_receipt.evidence ->> 'transactionHash'),
               operation.support_metadata ->> 'relayApprovalBaselineAllowanceBlock',
@@ -641,21 +700,7 @@ async function observeRelayPostcondition(
            on reservation.funding_operation_id = operation.id
           and reservation.status = 'reserved'
           and reservation.cleanup_operation_id is null
-        where operation.status in (
-                'in_progress', 'reconcile_required', 'recovery_required'
-              )
-          and ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
-          and (
-            deposit_step.state in ('failed', 'recovery_required')
-            or (
-              deposit_step.state = 'action_required'
-              and (
-                deposit_step.action_expires_at <= clock_timestamp()
-                or (select count(*) from funding_operation_step_attempts used
-                    where used.step_id = deposit_step.id) >= 2
-              )
-            )
-          )
+        where ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
           and not exists (
             select 1 from funding_operation_step_attempts unresolved
              where unresolved.step_id = deposit_step.id
@@ -680,6 +725,7 @@ async function observeRelayPostcondition(
           )
        union all
        select 4, 'deposit', deposit_receipt.id::text, operation.id::text,
+              deposit_step.id::text,
               funding_authorization.wallet_address,
               jsonb_build_array(
                 (select approval_receipt.evidence ->> 'transactionHash'
@@ -717,7 +763,6 @@ async function observeRelayPostcondition(
           and reservation.status = 'reserved'
         where deposit_step.executor_id = $1
           and ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
-          and deposit_step.state = 'succeeded'
           and deposit_receipt.evidence ->> 'attributedSourceRaw' =
                 reservation.source_raw::text
           and deposit_receipt.block_hash is not null
@@ -739,7 +784,7 @@ async function observeRelayPostcondition(
           )
        union all
        select 5, 'cleanup', cleanup_receipt.id::text,
-              cleanup_operation.id::text,
+              cleanup_operation.id::text, cleanup_step.id::text,
               funding_authorization.wallet_address,
               jsonb_build_array(cleanup_receipt.evidence ->> 'transactionHash'),
               parent_operation.support_metadata ->> 'relayApprovalBaselineAllowanceBlock',
@@ -755,9 +800,6 @@ async function observeRelayPostcondition(
           and cleanup_step.executor_id = $1
           and cleanup_step.action_validation_result ->> 'relayStepKind' =
                 'cleanup'
-          and cleanup_step.state in (
-                'submitted', 'reconcile_required', 'recovery_required'
-              )
          join funding_step_receipt_observations cleanup_receipt
            on cleanup_receipt.step_id = cleanup_step.id
           and cleanup_receipt.status = 'finalized'
@@ -770,10 +812,6 @@ async function observeRelayPostcondition(
            on funding_authorization.id = reservation.authorization_id
         where reservation.status = 'cleanup_required'
           and ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
-          and cleanup_operation.status in (
-                'in_progress', 'reconcile_required', 'recovery_required'
-              )
-          and cleanup_operation.progress_stage = 'source_action'
           and cleanup_receipt.evidence ->> 'allowanceZero'
                 is distinct from 'true'
           and cleanup_receipt.evidence ->> 'allowanceAnchorRejected'
@@ -781,36 +819,48 @@ async function observeRelayPostcondition(
           and cleanup_receipt.evidence ->> 'allowanceOwnershipRejected'
                 is distinct from 'true'
      )
-     select maintenance_kind, candidate_id, operation_id, wallet_address,
+     select maintenance_kind, candidate_id, operation_id, action_id, wallet_address,
             expected_mutation_transaction_hashes,
             mutation_baseline_block, block_number, block_hash
        from candidates
       order by priority, observed_at
-      limit 1`,
+      limit 25`,
     values: [profile.profileId, now, RELAY_CLEANUP_CANONICAL_WATCH_MS],
   });
-  const candidate = rows[0];
-  if (!candidate) return undefined;
-  const observed = await allowance({
-    owner: candidate.wallet_address,
-    blockNumber: candidate.block_number,
-    mutationBaselineBlock: candidate.mutation_baseline_block,
-  });
-  return {
-    maintenanceKind: candidate.maintenance_kind,
-    candidateId: candidate.candidate_id,
-    operationId: candidate.operation_id,
-    expectedBlockHash: candidate.block_hash,
-    expectedMutationTransactionHashes: Array.isArray(
-      candidate.expected_mutation_transaction_hashes,
-    )
-      ? candidate.expected_mutation_transaction_hashes.filter(
-          (item): item is string => typeof item === "string",
-        )
-      : [],
-    mutationBaselineBlock: candidate.mutation_baseline_block,
-    ...observed,
-  };
+  for (const candidate of rows) {
+    if (
+      (candidate.maintenance_kind === "releasable" ||
+        candidate.maintenance_kind === "stranded") &&
+      !(await relayActionNeedsAllowanceMaintenanceInTransaction(pool, {
+        operationId: candidate.operation_id,
+        actionId: candidate.action_id,
+        now,
+      }))
+    ) {
+      continue;
+    }
+    const observed = await allowance({
+      owner: candidate.wallet_address,
+      blockNumber: candidate.block_number,
+      mutationBaselineBlock: candidate.mutation_baseline_block,
+    });
+    return {
+      maintenanceKind: candidate.maintenance_kind,
+      candidateId: candidate.candidate_id,
+      operationId: candidate.operation_id,
+      expectedBlockHash: candidate.block_hash,
+      expectedMutationTransactionHashes: Array.isArray(
+        candidate.expected_mutation_transaction_hashes,
+      )
+        ? candidate.expected_mutation_transaction_hashes.filter(
+            (item): item is string => typeof item === "string",
+          )
+        : [],
+      mutationBaselineBlock: candidate.mutation_baseline_block,
+      ...observed,
+    };
+  }
+  return undefined;
 }
 
 function walletId(
@@ -908,17 +958,10 @@ async function retireRelayPreDepositRouteInTransaction(
 ): Promise<boolean> {
   const scope = await client.query<{
     deposit_step_id: string;
-    operation_stage: "committed" | "source_action";
-    operation_status:
-      | "in_progress"
-      | "reconcile_required"
-      | "recovery_required";
     operation_version: string | number;
     reservation_id: string;
   }>(
-    `select operation_row.status as operation_status,
-            operation_row.progress_stage as operation_stage,
-            operation_row.version as operation_version,
+    `select operation_row.version as operation_version,
             reservation_row.id as reservation_id,
             deposit_step.id as deposit_step_id
        from funding_operations operation_row
@@ -930,10 +973,6 @@ async function retireRelayPreDepositRouteInTransaction(
         and deposit_step.action_validation_result ->> 'relayStepKind' =
               'deposit'
       where operation_row.id = $1::uuid
-        and operation_row.status in (
-              'in_progress', 'reconcile_required', 'recovery_required'
-            )
-        and operation_row.progress_stage in ('committed', 'source_action')
         and not exists (
           select 1
             from funding_step_receipt_observations deposit_receipt
@@ -961,89 +1000,49 @@ async function retireRelayPreDepositRouteInTransaction(
   );
   const row = scope.rows[0];
   if (!row) return false;
-  await client.query(
-    `update funding_operation_steps
-        set state = 'failed', updated_at = $2
-      where id = $1::uuid
-        and state in (
-              'planned', 'action_required', 'reconcile_required',
-              'recovery_required', 'failed'
-            )`,
-    [row.deposit_step_id, input.now],
-  );
-  const released = await client.query(
-    `update telegram_funding_authorization_reservations
-        set status = 'released',
-            resolved_at = $2,
-            resolution_evidence = resolution_evidence || jsonb_build_object(
-              'operationId', $3::text,
-              'allowanceRaw', $4::text,
-              'allowanceBlock', $5::text,
-              'allowanceBlockHash', $6::text,
-              'allowanceObservationRevision', $7::text,
-              'lastAllowanceMutationTransactionHash', $8::text,
-              'reason', $9::text
-            ),
-            updated_at = $2
-      where id = $1::uuid and status = 'reserved'`,
-    [
-      row.reservation_id,
-      input.now,
-      input.operationId,
-      input.observed.raw,
-      input.observed.blockNumber,
-      input.observed.blockHash,
-      input.observed.revision,
-      input.observed.lastMutationTransactionHash,
-      input.reason,
-    ],
-  );
-  if (released.rowCount !== 1) {
-    throw new Error("Relay pre-deposit lane release was not applied");
-  }
-  let operationVersion = Number(row.operation_version);
-  let operationStatus = row.operation_status;
-  let operationStage = row.operation_stage;
-  if (operationStage === "committed") {
-    const activated = await transitionFundingOperationInTransaction(client, {
-      operationId: input.operationId,
-      scope: { kind: "worker" },
-      expectedVersion: operationVersion,
-      expectedState: { status: operationStatus, stage: operationStage },
-      nextState: { status: "in_progress", stage: "source_action" },
-      now: input.now,
-    });
-    operationVersion = activated.version;
-    operationStatus = "in_progress";
-    operationStage = "source_action";
-  }
-  if (operationStatus !== "reconcile_required") {
-    const reconciling = await transitionFundingOperationInTransaction(client, {
-      operationId: input.operationId,
-      scope: { kind: "worker" },
-      expectedVersion: operationVersion,
-      expectedState: { status: operationStatus, stage: operationStage },
-      nextState: { status: "reconcile_required", stage: "source_action" },
-      errorCode: input.errorCode,
-      now: input.now,
-    });
-    operationVersion = reconciling.version;
-  }
-  await transitionFundingOperationInTransaction(client, {
+  await writeFundingOperationSupportFactsInTransaction(client, {
     operationId: input.operationId,
-    scope: { kind: "worker" },
-    expectedVersion: operationVersion,
-    expectedState: { status: "reconcile_required", stage: "source_action" },
-    nextState: { status: "failed", stage: "terminal" },
-    errorCode: input.errorCode,
+    expectedVersion: Number(row.operation_version),
     supportMetadataPatch: {
-      observedAllowanceBlock: input.observed.blockNumber,
-      observedAllowanceBlockHash: input.observed.blockHash,
-      observedAllowanceRaw: input.observed.raw,
-      observedAllowanceRevision: input.observed.ownershipRevision,
+      lifecycleTerminalFailure: {
+        code: input.errorCode,
+        decidedAt: input.now.toISOString(),
+        actionId: row.deposit_step_id,
+        reason: input.reason,
+        observedAllowance: {
+          raw: input.observed.raw,
+          block: input.observed.blockNumber,
+          blockHash: input.observed.blockHash,
+          revision: input.observed.ownershipRevision,
+          lastMutationTransactionHash:
+            input.observed.lastMutationTransactionHash,
+        },
+      },
     },
     now: input.now,
   });
+  const reduction = await reduceFundingOperationInTransaction(client, {
+    operationId: input.operationId,
+    now: input.now,
+  });
+  if (reduction.finalState.status !== "failed") {
+    throw new Error("Relay pre-deposit terminal failure did not reduce");
+  }
+  // The reducer owns the generic terminal lease release. The terminal fact
+  // already keeps Relay's anchored allowance evidence, so this executor only
+  // verifies that reduction released the exact lease it had locked.
+  const lease = await client.query<{ status: string }>(
+    `select status
+         from telegram_funding_authorization_reservations
+        where id = $1::uuid
+        for update`,
+    [row.reservation_id],
+  );
+  if (lease.rows[0]?.status !== "released") {
+    throw new Error(
+      `Relay pre-deposit lease was not released by reduction (${lease.rows[0]?.status ?? "missing"})`,
+    );
+  }
   return true;
 }
 
@@ -1211,124 +1210,119 @@ async function reconcileRelayPostconditions(
     now,
     profile,
   });
-  if (allowRetry)
-    await client.query({
-      name: "funding-relay-retry-failed-action-v1",
-      text: `update funding_operation_steps step
-        set state = 'action_required', updated_at = $2
-       from funding_operations operation
-      where step.operation_id = operation.id
-        and step.executor_id = $1
-        and step.state = 'failed'
-        and step.action_validation_result ->> 'relayStepKind' in (
-              'approve', 'deposit'
-            )
-        and (step.action_expires_at is null or step.action_expires_at > $2)
-        and operation.status not in (
-              'completed', 'refunded', 'failed', 'cancelled'
-            )
-        and (
-          select count(*)
-          from funding_operation_step_attempts counted
-          where counted.step_id = step.id
-        ) < 2
-        and exists (
-          select 1
-          from telegram_funding_authorization_reservations reservation
-          where reservation.funding_operation_id = operation.id
-            and reservation.status = 'reserved'
-        )
-        and exists (
-          select 1
-          from funding_operation_step_attempts latest
-          left join funding_step_receipt_observations latest_receipt
-            on latest_receipt.attempt_id = latest.id
-          where latest.step_id = step.id
-            and latest.attempt_number = (
-              select max(candidate.attempt_number)
-              from funding_operation_step_attempts candidate
-              where candidate.step_id = step.id
-            )
-            and (
-              (
-                latest.outcome = 'failed'
-                and not latest.broadcast_may_have_occurred
-                and coalesce(latest.actual_costs ->> 'reasonCode', '') not in (
-                  'delegated_action_invalid',
-                  'delegated_authority_invalid',
-                  'delegated_profile_invalid',
-                  'delegated_profile_unavailable',
-                  'delegated_quote_expired',
-                  'delegated_route_changed',
-                  'funding_policy_changed'
+  if (allowRetry) {
+    // These are factual, bounded safety decisions. They used to be hidden in
+    // direct step-cache updates, which made Relay retry behaviour invisible to
+    // the common projector. A known non-broadcast failure and an elapsed reorg
+    // watch are now explicit attempt facts; the reducer materializes the
+    // resulting actionability for every consumer.
+    const retryableFailure = await client.query<{ operation_id: string }>({
+      name: "funding-relay-record-retryable-failure-v1",
+      text: `update funding_operation_step_attempts attempt
+                set actual_costs = coalesce(attempt.actual_costs, '{}'::jsonb)
+                                   || jsonb_build_object(
+                                        'retryableProviderFailure', true
+                                      ),
+                    updated_at = $2
+               from funding_operation_steps step
+               join funding_operations operation
+                 on operation.id = step.operation_id
+              where attempt.step_id = step.id
+                and step.executor_id = $1
+                and step.action_validation_result ->> 'relayStepKind' in (
+                      'approve', 'deposit'
+                    )
+                and attempt.attempt_number = (
+                      select max(candidate.attempt_number)
+                      from funding_operation_step_attempts candidate
+                      where candidate.step_id = step.id
+                    )
+                and attempt.outcome = 'failed'
+                and not attempt.broadcast_may_have_occurred
+                and coalesce(attempt.actual_costs ->> 'reasonCode', '') not in (
+                      'delegated_action_invalid',
+                      'delegated_authority_invalid',
+                      'delegated_profile_invalid',
+                      'delegated_profile_unavailable',
+                      'delegated_quote_expired',
+                      'delegated_route_changed',
+                      'funding_policy_changed'
+                    )
+                and attempt.actual_costs ->> 'retryableProviderFailure'
+                      is distinct from 'true'
+                and (
+                  select count(*)
+                  from funding_operation_step_attempts counted
+                  where counted.step_id = step.id
+                ) < 2
+                and exists (
+                  select 1
+                  from telegram_funding_authorization_reservations reservation
+                  where reservation.funding_operation_id = operation.id
+                    and reservation.status = 'reserved'
                 )
-              )
-              or (
-                latest_receipt.status = 'failed'
-                and latest_receipt.canonical
-                and latest_receipt.evidence ->> 'failureFinalized' = 'true'
-                and latest_receipt.finalized_at <=
-                      $2::timestamptz - interval '15 minutes'
-              )
-            )
-        )`,
+              returning operation.id as operation_id`,
       values: [profile.profileId, now],
     });
-  if (allowRetry)
-    await client.query({
-      name: "funding-relay-retry-reorged-cleanup-v1",
-      text: `update funding_operation_steps step
-          set state = 'action_required', updated_at = $2
-         from funding_operations operation
-        where step.operation_id = operation.id
-          and step.executor_id = $1
-          and step.state = 'recovery_required'
-          and step.action_validation_result ->> 'relayStepKind' = 'cleanup'
-          and operation.status not in (
-                'completed', 'refunded', 'failed', 'cancelled'
-              )
-          and (
-            select count(*)
-              from funding_operation_step_attempts counted
-             where counted.step_id = step.id
-          ) < 2
-          and exists (
-            select 1
-              from telegram_funding_authorization_reservations reservation
-             where reservation.cleanup_operation_id = operation.id
-               and reservation.status = 'cleanup_required'
-          )
-          and exists (
-            select 1
-              from funding_operation_step_attempts latest
-              join funding_step_receipt_observations latest_receipt
-                on latest_receipt.attempt_id = latest.id
-             where latest.step_id = step.id
-               and latest.attempt_number = (
-                 select max(candidate.attempt_number)
-                   from funding_operation_step_attempts candidate
-                  where candidate.step_id = step.id
-               )
-               and latest_receipt.status = 'reorged'
-               and not latest_receipt.canonical
-               and latest_receipt.reorged_at <=
-                     $2::timestamptz - interval '15 minutes'
-          )`,
+    const retryableReorg = await client.query<{ operation_id: string }>({
+      name: "funding-relay-record-retryable-reorg-v1",
+      text: `update funding_operation_step_attempts attempt
+                set actual_costs = coalesce(attempt.actual_costs, '{}'::jsonb)
+                                   || jsonb_build_object(
+                                        'retryableAfterReorg', true
+                                      ),
+                    updated_at = $2
+               from funding_operation_steps step
+               join funding_operations operation
+                 on operation.id = step.operation_id
+               cross join funding_step_receipt_observations receipt
+              where attempt.step_id = step.id
+                and receipt.attempt_id = attempt.id
+                and step.executor_id = $1
+                and step.action_validation_result ->> 'relayStepKind' = 'cleanup'
+                and attempt.attempt_number = (
+                      select max(candidate.attempt_number)
+                      from funding_operation_step_attempts candidate
+                      where candidate.step_id = step.id
+                    )
+                and receipt.status = 'reorged'
+                and not receipt.canonical
+                and receipt.reorged_at <= $2::timestamptz - interval '15 minutes'
+                and attempt.actual_costs ->> 'retryableAfterReorg'
+                      is distinct from 'true'
+                and (
+                  select count(*)
+                  from funding_operation_step_attempts counted
+                  where counted.step_id = step.id
+                ) < 2
+                and exists (
+                  select 1
+                  from telegram_funding_authorization_reservations reservation
+                  where reservation.cleanup_operation_id = operation.id
+                    and reservation.status = 'cleanup_required'
+                )
+              returning operation.id as operation_id`,
       values: [profile.profileId, now],
     });
+    const affectedOperationIds = new Set([
+      ...retryableFailure.rows.map((row) => row.operation_id),
+      ...retryableReorg.rows.map((row) => row.operation_id),
+    ]);
+    for (const operationId of affectedOperationIds) {
+      await reduceFundingOperationInTransaction(client, { operationId, now });
+    }
+  }
   const approval =
     maintenance?.kind === "approval"
       ? await client.query<{
           approval_receipt_id: string;
           approval_block: string;
-          deposit_step_id: string;
           expected_raw: string;
           operation_id: string;
           wallet_address: string;
         }>(
           `select approval_receipt.id as approval_receipt_id,
             approval_receipt.ledger_height as approval_block,
-            deposit_step.id as deposit_step_id,
             operation.id as operation_id,
             coalesce(
               approval_step.action_validation_result ->> 'relayApprovalCapRaw',
@@ -1354,14 +1348,14 @@ async function reconcileRelayPostconditions(
        where approval_step.executor_id = $1
          and approval_receipt.id = $2::uuid
          and operation.id = $3::uuid
-         and approval_step.state = 'succeeded'
-         and deposit_step.state in ('planned', 'action_required')
          and not exists (
            select 1
            from funding_operation_step_attempts deposit_attempt
            where deposit_attempt.step_id = deposit_step.id
          )
          and approval_receipt.evidence ->> 'allowanceExact' is distinct from 'true'
+         and approval_receipt.evidence ->> 'allowanceExactRejected'
+               is distinct from 'true'
        order by approval_receipt.observed_at
        for update of approval_step, deposit_step, approval_receipt, operation, reservation
        limit 1`,
@@ -1376,11 +1370,19 @@ async function reconcileRelayPostconditions(
     maintenance.expectedBlockHash !== maintenance.allowance.blockHash
   ) {
     await client.query(
-      `update funding_operation_steps
-          set state = 'reconcile_required', updated_at = $2
-        where id = $1::uuid and state = 'planned'`,
-      [approvalRow.deposit_step_id, now],
+      `update funding_step_receipt_observations
+          set evidence = evidence || jsonb_build_object(
+                'allowanceAnchorRejected', true,
+                'lastAllowanceAnchorBlockHash', $2::text
+              ),
+              updated_at = $3
+        where id = $1::uuid and status = 'finalized'`,
+      [approvalRow.approval_receipt_id, maintenance.allowance.blockHash, now],
     );
+    await reduceFundingOperationInTransaction(client, {
+      operationId: approvalRow.operation_id,
+      now,
+    });
   }
   if (
     approvalRow &&
@@ -1415,13 +1417,30 @@ async function reconcileRelayPostconditions(
           now,
           reason: "foreign_allowance_ownership",
         });
+      } else {
+        await client.query(
+          `update funding_step_receipt_observations
+              set evidence = evidence || jsonb_build_object(
+                    'allowanceExactRejected', true,
+                    'observedAllowanceRaw', $2::text,
+                    'observedAllowanceBlock', $3::text,
+                    'observedAllowanceBlockHash', $4::text
+                  ),
+                  updated_at = $5
+            where id = $1 and status = 'finalized'`,
+          [
+            approvalRow.approval_receipt_id,
+            observed.raw,
+            observed.blockNumber,
+            observed.blockHash,
+            now,
+          ],
+        );
+        await reduceFundingOperationInTransaction(client, {
+          operationId: approvalRow.operation_id,
+          now,
+        });
       }
-      await client.query(
-        `update funding_operation_steps
-            set state = 'reconcile_required', updated_at = $2
-          where id = $1 and state = 'planned'`,
-        [approvalRow.deposit_step_id, now],
-      );
     } else {
       await client.query(
         `update funding_step_receipt_observations
@@ -1444,12 +1463,10 @@ async function reconcileRelayPostconditions(
           now,
         ],
       );
-      await client.query(
-        `update funding_operation_steps
-            set state = 'action_required', updated_at = $2
-          where id = $1 and state = 'planned'`,
-        [approvalRow.deposit_step_id, now],
-      );
+      await reduceFundingOperationInTransaction(client, {
+        operationId: approvalRow.operation_id,
+        now,
+      });
     }
   }
 
@@ -1458,21 +1475,12 @@ async function reconcileRelayPostconditions(
       ? await client.query<{
           approval_step_id: string;
           operation_id: string;
-          operation_stage: "committed" | "source_action";
-          operation_status:
-            | "in_progress"
-            | "reconcile_required"
-            | "recovery_required";
           operation_version: string | number;
-          reservation_id: string;
           wallet_address: string;
         }>(
           `select operation.id as operation_id,
-            operation.status as operation_status,
-            operation.progress_stage as operation_stage,
             operation.version as operation_version,
             approval_step.id as approval_step_id,
-            reservation.id as reservation_id,
             funding_authorization.wallet_address
        from telegram_funding_authorization_reservations reservation
        join funding_operations operation
@@ -1487,17 +1495,6 @@ async function reconcileRelayPostconditions(
        where reservation.status = 'reserved'
          and reservation.id = $2::uuid
          and operation.id = $3::uuid
-         and (
-           approval_step.state in ('failed', 'recovery_required')
-           or (
-             approval_step.state = 'action_required'
-             and (
-               approval_step.action_expires_at <= clock_timestamp()
-               or (select count(*) from funding_operation_step_attempts used
-                   where used.step_id = approval_step.id) >= 2
-             )
-           )
-         )
          and not exists (
            select 1
            from funding_step_receipt_observations approval_success
@@ -1529,136 +1526,72 @@ async function reconcileRelayPostconditions(
         )
       : { rows: [] };
   const releasableRow = releasable.rows[0];
-  if (releasableRow && maintenance?.kind === "releasable") {
+  if (
+    releasableRow &&
+    maintenance?.kind === "releasable" &&
+    (await relayActionNeedsAllowanceMaintenanceInTransaction(client, {
+      operationId: releasableRow.operation_id,
+      actionId: releasableRow.approval_step_id,
+      now,
+    }))
+  ) {
     const observed = maintenance.allowance;
     if (observed.raw === "0") {
       // An exhausted approval must release its rolling-cap reservation; the
       // dependent deposit remains untouched and can never become claimable.
-      await client.query(
-        `update funding_operation_steps
-            set state = 'failed', updated_at = $2
-          where id = $1::uuid
-            and state in ('action_required', 'failed', 'recovery_required')`,
-        [releasableRow.approval_step_id, now],
-      );
-      await client.query(
-        `update telegram_funding_authorization_reservations
-            set status = 'released',
-                resolved_at = $2,
-                resolution_evidence = resolution_evidence ||
-                  jsonb_build_object(
-                    'operationId', $3::text,
-                    'allowanceRaw', '0',
-                    'allowanceBlock', $4::text,
-                    'allowanceBlockHash', $5::text,
-                    'allowanceObservationRevision', $6::text,
-                    'reason', 'approval_not_effective'
-                  ),
-                updated_at = $2
-          where id = $1::uuid and status = 'reserved'`,
-        [
-          releasableRow.reservation_id,
-          now,
-          releasableRow.operation_id,
-          observed.blockNumber,
-          observed.blockHash,
-          observed.revision,
-        ],
-      );
-      let operationVersion = Number(releasableRow.operation_version);
-      let operationStatus = releasableRow.operation_status;
-      let operationStage = releasableRow.operation_stage;
-      if (operationStage === "committed") {
-        const activated = await transitionFundingOperationInTransaction(
-          client,
-          {
-            operationId: releasableRow.operation_id,
-            scope: { kind: "worker" },
-            expectedVersion: operationVersion,
-            expectedState: {
-              status: operationStatus,
-              stage: operationStage,
-            },
-            nextState: { status: "in_progress", stage: "source_action" },
-            now,
-          },
-        );
-        operationVersion = activated.version;
-        operationStatus = "in_progress";
-        operationStage = "source_action";
-      }
-      if (operationStatus !== "reconcile_required") {
-        const reconciling = await transitionFundingOperationInTransaction(
-          client,
-          {
-            operationId: releasableRow.operation_id,
-            scope: { kind: "worker" },
-            expectedVersion: operationVersion,
-            expectedState: {
-              status: operationStatus,
-              stage: operationStage,
-            },
-            nextState: { status: "reconcile_required", stage: "source_action" },
-            errorCode: "relay_approval_exhausted",
-            now,
-          },
-        );
-        operationVersion = reconciling.version;
-      }
-      await transitionFundingOperationInTransaction(client, {
+      await writeFundingOperationSupportFactsInTransaction(client, {
         operationId: releasableRow.operation_id,
-        scope: { kind: "worker" },
-        expectedVersion: operationVersion,
-        expectedState: {
-          status: "reconcile_required",
-          stage: "source_action",
-        },
-        nextState: { status: "failed", stage: "terminal" },
-        errorCode: "relay_approval_exhausted",
+        expectedVersion: Number(releasableRow.operation_version),
         supportMetadataPatch: {
-          allowanceReleaseBlock: observed.blockNumber,
-          allowanceReleaseBlockHash: observed.blockHash,
-          allowanceReleaseRevision: observed.revision,
+          lifecycleTerminalFailure: {
+            code: "relay_approval_exhausted",
+            decidedAt: now.toISOString(),
+            actionId: releasableRow.approval_step_id,
+            reason: "approval_not_effective",
+            observedAllowance: {
+              raw: observed.raw,
+              block: observed.blockNumber,
+              blockHash: observed.blockHash,
+              revision: observed.revision,
+            },
+          },
         },
         now,
       });
+      const reduction = await reduceFundingOperationInTransaction(client, {
+        operationId: releasableRow.operation_id,
+        now,
+      });
+      if (reduction.finalState.status !== "failed") {
+        throw new Error("exhausted Relay approval did not reduce to failure");
+      }
     } else {
       // No finalized Hunch approval exists, so a positive allowance cannot be
-      // attributed to this operation. Never adopt or revoke it.
-      let operationVersion = Number(releasableRow.operation_version);
-      let operationStatus = releasableRow.operation_status;
-      let operationStage = releasableRow.operation_stage;
-      if (operationStage === "committed") {
-        const activated = await transitionFundingOperationInTransaction(
-          client,
-          {
-            operationId: releasableRow.operation_id,
-            scope: { kind: "worker" },
-            expectedVersion: operationVersion,
-            expectedState: { status: operationStatus, stage: operationStage },
-            nextState: { status: "in_progress", stage: "source_action" },
-            now,
+      // attributed to this operation. Never adopt or revoke it. This is a
+      // durable evidence-review fact; the lifecycle projector owns its public
+      // recovery cache rather than walking the old status transition graph.
+      await writeFundingOperationSupportFactsInTransaction(client, {
+        operationId: releasableRow.operation_id,
+        expectedVersion: Number(releasableRow.operation_version),
+        supportMetadataPatch: {
+          lifecycleManualRecovery: {
+            code: "relay_unattributed_allowance",
+            requestedAt: now.toISOString(),
           },
+          observedAllowanceBlock: observed.blockNumber,
+          observedAllowanceBlockHash: observed.blockHash,
+          observedAllowanceRaw: observed.raw,
+        },
+        now,
+      });
+      const reduction = await reduceFundingOperationInTransaction(client, {
+        operationId: releasableRow.operation_id,
+        now,
+      });
+      if (reduction.finalState.status !== "recovery_required") {
+        throw new Error(
+          "unattributed Relay allowance did not require recovery",
         );
-        operationVersion = activated.version;
-        operationStatus = "in_progress";
-        operationStage = "source_action";
-      }
-      if (operationStatus !== "recovery_required") {
-        await transitionFundingOperationInTransaction(client, {
-          operationId: releasableRow.operation_id,
-          scope: { kind: "worker" },
-          expectedVersion: operationVersion,
-          expectedState: { status: operationStatus, stage: operationStage },
-          nextState: { status: "recovery_required", stage: "source_action" },
-          errorCode: "relay_unattributed_allowance",
-          supportMetadataPatch: {
-            observedAllowanceBlock: observed.blockNumber,
-            observedAllowanceBlockHash: observed.blockHash,
-            observedAllowanceRaw: observed.raw,
-          },
-          now,
-        });
       }
     }
   }
@@ -1667,11 +1600,13 @@ async function reconcileRelayPostconditions(
     maintenance?.kind === "stranded"
       ? await client.query<{
           approval_receipt_id: string;
+          deposit_step_id: string;
           deposit_attempt_count: string | number;
           operation_id: string;
           wallet_address: string;
         }>(
           `select approval_receipt.id as approval_receipt_id,
+            deposit_step.id as deposit_step_id,
             (select count(*)
                from funding_operation_step_attempts deposit_attempt
               where deposit_attempt.step_id = deposit_step.id
@@ -1705,21 +1640,7 @@ async function reconcileRelayPostconditions(
          on reservation.funding_operation_id = operation.id
         and reservation.status = 'reserved'
         and reservation.cleanup_operation_id is null
-       where operation.status in (
-             'in_progress', 'reconcile_required', 'recovery_required'
-           )
-         and operation.id = $2::uuid
-         and (
-           deposit_step.state in ('failed', 'recovery_required')
-           or (
-             deposit_step.state = 'action_required'
-             and (
-               deposit_step.action_expires_at <= clock_timestamp()
-               or (select count(*) from funding_operation_step_attempts used
-                   where used.step_id = deposit_step.id) >= 2
-             )
-           )
-         )
+       where operation.id = $2::uuid
          and not exists (
            select 1
            from funding_operation_step_attempts unresolved_attempt
@@ -1743,7 +1664,15 @@ async function reconcileRelayPostconditions(
         )
       : { rows: [] };
   const strandedAllowanceRow = strandedAllowance.rows[0];
-  if (strandedAllowanceRow && maintenance?.kind === "stranded") {
+  if (
+    strandedAllowanceRow &&
+    maintenance?.kind === "stranded" &&
+    (await relayActionNeedsAllowanceMaintenanceInTransaction(client, {
+      operationId: strandedAllowanceRow.operation_id,
+      actionId: strandedAllowanceRow.deposit_step_id,
+      now,
+    }))
+  ) {
     const observed = maintenance.allowance;
     if (Number(strandedAllowanceRow.deposit_attempt_count) === 0) {
       // The approve is canonical but deposit was never claimed. It is safe to
@@ -1843,7 +1772,6 @@ async function reconcileRelayPostconditions(
        where deposit_step.executor_id = $1
          and deposit_receipt.id = $2::uuid
          and operation.id = $3::uuid
-         and deposit_step.state = 'succeeded'
          and deposit_receipt.evidence ->> 'attributedSourceRaw' = reservation.source_raw::text
          and deposit_receipt.block_hash is not null
          and deposit_receipt.evidence ->> 'sourceDebitEventIndex' is not null
@@ -1976,11 +1904,6 @@ async function reconcileRelayPostconditions(
           cleanup_context: RelayCleanupContext;
           cleanup_block: string;
           cleanup_operation_id: string;
-          cleanup_operation_stage: "source_action";
-          cleanup_operation_status:
-            | "in_progress"
-            | "reconcile_required"
-            | "recovery_required";
           cleanup_operation_version: string | number;
           cleanup_receipt_finalized_at: Date;
           cleanup_receipt_id: string;
@@ -1994,11 +1917,6 @@ async function reconcileRelayPostconditions(
           deposit_transaction_hash: string | null;
           expected_raw: string;
           parent_operation_id: string;
-          parent_operation_stage: "committed" | "source_action";
-          parent_operation_status:
-            | "in_progress"
-            | "reconcile_required"
-            | "recovery_required";
           parent_operation_version: string | number;
           reservation_id: string;
           segment_id: string | null;
@@ -2007,16 +1925,12 @@ async function reconcileRelayPostconditions(
           `select cleanup_receipt.id as cleanup_receipt_id,
             cleanup_receipt.ledger_height as cleanup_block,
             cleanup_operation.id as cleanup_operation_id,
-            cleanup_operation.status as cleanup_operation_status,
-            cleanup_operation.progress_stage as cleanup_operation_stage,
             cleanup_operation.version as cleanup_operation_version,
             cleanup_receipt.finalized_at as cleanup_receipt_finalized_at,
             cleanup_step.id as cleanup_step_id,
             cleanup_step.action_validation_result ->> 'cleanupContext'
               as cleanup_context,
             parent.id as parent_operation_id,
-            parent.status as parent_operation_status,
-            parent.progress_stage as parent_operation_stage,
             parent.version as parent_operation_version,
             deposit_receipt.id as deposit_receipt_id,
             deposit_receipt.attempt_id as deposit_attempt_id,
@@ -2038,9 +1952,6 @@ async function reconcileRelayPostconditions(
          on cleanup_step.operation_id = cleanup_operation.id
         and cleanup_step.executor_id = $1
         and cleanup_step.action_validation_result ->> 'relayStepKind' = 'cleanup'
-        and cleanup_step.state in (
-              'submitted', 'reconcile_required', 'recovery_required'
-            )
        join funding_step_receipt_observations cleanup_receipt
          on cleanup_receipt.step_id = cleanup_step.id
         and cleanup_receipt.status = 'finalized'
@@ -2070,13 +1981,6 @@ async function reconcileRelayPostconditions(
          and ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
          and cleanup_receipt.id = $2::uuid
          and cleanup_operation.id = $3::uuid
-         and cleanup_operation.status in (
-               'in_progress', 'reconcile_required', 'recovery_required'
-             )
-         and cleanup_operation.progress_stage = 'source_action'
-         and parent.status not in (
-               'completed', 'refunded', 'failed', 'cancelled'
-             )
          and cleanup_step.action_validation_result ->> 'cleanupContext' in (
                'approval_exhausted', 'pre_deposit_failure', 'post_deposit'
              )
@@ -2171,51 +2075,16 @@ async function reconcileRelayPostconditions(
           ],
         );
       }
-      let cleanupOperationVersion = Number(
-        cleanupRow.cleanup_operation_version,
-      );
-      const cleanupStep = await client.query(
-        `update funding_operation_steps
-            set state = 'succeeded', updated_at = $2
-          where id = $1::uuid
-            and state in (
-                  'submitted', 'reconcile_required', 'recovery_required'
-                )
-          returning id`,
-        [cleanupRow.cleanup_step_id, now],
-      );
-      if (cleanupStep.rowCount !== 1)
-        throw new Error("Relay cleanup maturity step transition was lost");
-      if (cleanupRow.cleanup_operation_status !== "in_progress") {
-        const normalized = await transitionFundingOperationInTransaction(
-          client,
-          {
-            operationId: cleanupRow.cleanup_operation_id,
-            scope: { kind: "worker" },
-            expectedVersion: cleanupOperationVersion,
-            expectedState: {
-              status: cleanupRow.cleanup_operation_status,
-              stage: cleanupRow.cleanup_operation_stage,
-            },
-            nextState: { status: "in_progress", stage: "source_action" },
-            now,
-          },
-        );
-        cleanupOperationVersion = normalized.version;
-      }
-      await transitionFundingOperationInTransaction(client, {
+      await completeRelayCleanupFromCanonicalZeroInTransaction(client, {
         operationId: cleanupRow.cleanup_operation_id,
-        scope: { kind: "worker" },
-        expectedVersion: cleanupOperationVersion,
-        expectedState: { status: "in_progress", stage: "source_action" },
-        nextState: { status: "completed", stage: "terminal" },
-        supportMetadataPatch: {
+        actionId: cleanupRow.cleanup_step_id,
+        now,
+        evidence: {
           allowanceZeroBlock: observed.blockNumber,
           allowanceZeroBlockHash: observed.blockHash,
           allowanceZeroReceiptId: cleanupRow.cleanup_receipt_id,
           cleanupCanonicalWatchCompletedAt: now.toISOString(),
         },
-        now,
       });
       const cleaned = await client.query(
         `update telegram_funding_authorization_reservations
@@ -2275,62 +2144,41 @@ async function reconcileRelayPostconditions(
         now,
       ],
     );
-    if (cleanupRow.cleanup_operation_status !== "recovery_required") {
-      await transitionFundingOperationInTransaction(client, {
-        operationId: cleanupRow.cleanup_operation_id,
-        scope: { kind: "worker" },
-        expectedVersion: Number(cleanupRow.cleanup_operation_version),
-        expectedState: {
-          status: cleanupRow.cleanup_operation_status,
-          stage: cleanupRow.cleanup_operation_stage,
-        },
-        nextState: { status: "recovery_required", stage: "source_action" },
-        errorCode: "relay_cleanup_foreign_allowance_drift",
-        now,
-      });
-    }
-    let parentVersion = Number(cleanupRow.parent_operation_version);
-    let parentStatus = cleanupRow.parent_operation_status;
-    let parentStage = cleanupRow.parent_operation_stage;
-    if (parentStage === "committed") {
-      const activated = await transitionFundingOperationInTransaction(client, {
-        operationId: cleanupRow.parent_operation_id,
-        scope: { kind: "worker" },
-        expectedVersion: parentVersion,
-        expectedState: { status: parentStatus, stage: parentStage },
-        nextState: { status: "in_progress", stage: "source_action" },
-        now,
-      });
-      parentVersion = activated.version;
-      parentStatus = "in_progress";
-      parentStage = "source_action";
-    }
-    if (parentStatus !== "recovery_required") {
-      await transitionFundingOperationInTransaction(client, {
-        operationId: cleanupRow.parent_operation_id,
-        scope: { kind: "worker" },
-        expectedVersion: parentVersion,
-        expectedState: {
-          status: parentStatus,
-          stage: parentStage,
-        },
-        nextState: { status: "recovery_required", stage: "source_action" },
-        errorCode: "relay_cleanup_foreign_allowance_drift",
-        supportMetadataPatch: {
-          cleanupOperationId: cleanupRow.cleanup_operation_id,
-          observedAllowanceRaw: observed.raw,
-          observedAllowanceRevision: observed.ownershipRevision,
-        },
-        now,
-      });
-    }
+    const recoveryFact = {
+      code: "relay_cleanup_foreign_allowance_drift",
+      requestedAt: now.toISOString(),
+    };
+    await writeFundingOperationSupportFactsInTransaction(client, {
+      operationId: cleanupRow.cleanup_operation_id,
+      expectedVersion: Number(cleanupRow.cleanup_operation_version),
+      supportMetadataPatch: {
+        lifecycleManualRecovery: recoveryFact,
+        observedAllowanceRaw: observed.raw,
+        observedAllowanceRevision: observed.ownershipRevision,
+      },
+      now,
+    });
+    await writeFundingOperationSupportFactsInTransaction(client, {
+      operationId: cleanupRow.parent_operation_id,
+      expectedVersion: Number(cleanupRow.parent_operation_version),
+      supportMetadataPatch: {
+        lifecycleManualRecovery: recoveryFact,
+        cleanupOperationId: cleanupRow.cleanup_operation_id,
+        observedAllowanceRaw: observed.raw,
+        observedAllowanceRevision: observed.ownershipRevision,
+      },
+      now,
+    });
+    await reduceFundingOperationInTransaction(client, {
+      operationId: cleanupRow.cleanup_operation_id,
+      now,
+    });
+    await reduceFundingOperationInTransaction(client, {
+      operationId: cleanupRow.parent_operation_id,
+      now,
+    });
   }
   await terminalizeCompletedRelayCleanupParent(client, now, profile);
-  await releaseCompletedRelayCleanupParentBalanceReservations(
-    client,
-    now,
-    profile,
-  );
 }
 
 async function claimRelayCleanup(
@@ -2372,11 +2220,7 @@ async function claimRelayCleanup(
        where reservation.status = 'cleanup_required'
          and ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
          and cleanup_step.executor_id = $1
-         and cleanup_step.state = 'action_required'
          and cleanup_step.action_validation_result ->> 'relayStepKind' = 'cleanup'
-         and cleanup_operation.status not in (
-               'completed', 'refunded', 'failed', 'cancelled'
-             )
          and (cleanup_step.action_expires_at is null
               or cleanup_step.action_expires_at > clock_timestamp())
          and (
@@ -2436,10 +2280,10 @@ async function claimRelayCleanup(
        order by cleanup_operation.created_at
        for update of cleanup_operation, cleanup_step, reservation,
                      funding_authorization skip locked
-       limit 1`,
+       limit 25`,
     values: [input.profile.profileId, input.now],
   });
-  const row = rows[0];
+  const row = await firstActionableRelayClaimRow(client, rows, input.now);
   if (!row) return null;
   if (
     !(await tryLockFundingAuthorizationReservationScope(client, {
@@ -2478,23 +2322,14 @@ async function expireRelayActionBeforeBroadcast(
     approval_step_id: string;
     authorization_id: string;
     operation_id: string;
-    operation_stage: "committed" | "source_action" | "source_observed";
-    operation_status:
-      | "in_progress"
-      | "reconcile_required"
-      | "recovery_required";
     operation_version: string | number;
-    reservation_id: string;
     user_id: string;
   }>({
     name: "funding-relay-expire-unstarted-action-v1",
     text: `select operation.id as operation_id,
             operation.user_id,
-            operation.status as operation_status,
-            operation.progress_stage as operation_stage,
             operation.version as operation_version,
             approval_step.id as approval_step_id,
-            reservation.id as reservation_id,
             funding_authorization.id::text as authorization_id
        from telegram_funding_authorization_reservations reservation
        join telegram_funding_authorizations funding_authorization
@@ -2508,17 +2343,6 @@ async function expireRelayActionBeforeBroadcast(
               'approve'
        where reservation.status = 'reserved'
          and ${RELAY_ALLOWANCE_LANE_HEAD_PREDICATE}
-         and operation.status in (
-               'in_progress', 'reconcile_required', 'recovery_required'
-             )
-         and operation.progress_stage in (
-               'committed', 'source_action', 'source_observed'
-             )
-         and (
-           operation.progress_stage <> 'committed'
-           or operation.status = 'in_progress'
-         )
-         and approval_step.state = 'action_required'
          and approval_step.action_expires_at is not null
          and approval_step.action_expires_at <= $2::timestamptz
          and not exists (
@@ -2543,72 +2367,50 @@ async function expireRelayActionBeforeBroadcast(
     return null;
   }
 
-  const stepUpdate = await client.query(
-    `update funding_operation_steps
-        set state = 'failed', updated_at = $2
-      where id = $1::uuid and state = 'action_required'`,
-    [row.approval_step_id, input.now],
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+    client,
+    { operationId: row.operation_id, now: input.now },
   );
-  if (stepUpdate.rowCount !== 1) return null;
-  const reservationUpdate = await client.query(
-    `update telegram_funding_authorization_reservations
-        set status = 'released',
-            resolved_at = $2,
-            resolution_evidence = resolution_evidence ||
-              jsonb_build_object(
-                'operationId', $3::text,
-                'reason', 'relay_action_expired_before_broadcast'
-              ),
-            updated_at = $2
-      where id = $1::uuid and status = 'reserved'`,
-    [row.reservation_id, input.now, row.operation_id],
+  const approval = facts?.actions.find(
+    (action) => action.actionId === row.approval_step_id,
   );
-  if (reservationUpdate.rowCount !== 1) {
-    throw new Error("expired Relay reservation release was lost");
+  const lifecycle = facts ? deriveFundingLifecycle(facts) : null;
+  // The candidate scan is deliberately cache-free. Revalidate every safety
+  // condition under the row locks because an old `action_required` cache must
+  // neither expire a live route nor keep a dead one alive.
+  if (
+    !facts ||
+    !approval ||
+    approval.attempts.length !== 0 ||
+    approval.expiresAt === null ||
+    approval.expiresAt.getTime() > input.now.getTime() ||
+    lifecycle?.safety.externalEffectMayHaveOccurred ||
+    lifecycle?.safety.terminal
+  ) {
+    return null;
   }
-
-  let version = Number(row.operation_version);
-  let status = row.operation_status;
-  let stage = row.operation_stage;
-  if (stage === "committed") {
-    const activated = await transitionFundingOperationInTransaction(client, {
-      operationId: row.operation_id,
-      scope: { kind: "worker" },
-      expectedVersion: version,
-      expectedState: { status, stage },
-      nextState: { status: "in_progress", stage: "source_action" },
-      now: input.now,
-    });
-    version = activated.version;
-    status = "in_progress";
-    stage = "source_action";
-  }
-  if (status !== "reconcile_required") {
-    const reconciling = await transitionFundingOperationInTransaction(client, {
-      operationId: row.operation_id,
-      scope: { kind: "worker" },
-      expectedVersion: version,
-      expectedState: { status, stage },
-      nextState: { status: "reconcile_required", stage },
-      errorCode: "relay_action_expired_before_broadcast",
-      now: input.now,
-    });
-    version = reconciling.version;
-    status = "reconcile_required";
-  }
-  await transitionFundingOperationInTransaction(client, {
+  await writeFundingOperationSupportFactsInTransaction(client, {
     operationId: row.operation_id,
-    scope: { kind: "worker" },
-    expectedVersion: version,
-    expectedState: { status, stage },
-    nextState: { status: "failed", stage: "terminal" },
-    errorCode: "relay_action_expired_before_broadcast",
+    expectedVersion: Number(row.operation_version),
     supportMetadataPatch: {
+      lifecycleTerminalFailure: {
+        code: "relay_action_expired_before_broadcast",
+        decidedAt: input.now.toISOString(),
+        actionId: row.approval_step_id,
+        reason: "unstarted_action_expired",
+      },
       relayPreclaimDiagnostic: "action_expired_without_attempt",
       relayPreclaimDiagnosedAt: input.now.toISOString(),
     },
     now: input.now,
   });
+  const reduction = await reduceFundingOperationInTransaction(client, {
+    operationId: row.operation_id,
+    now: input.now,
+  });
+  if (reduction.finalState.status !== "failed") {
+    throw new Error("expired Relay action did not reduce to failure");
+  }
   return {
     kind: "expired_without_broadcast",
     operationId: row.operation_id,
@@ -2646,8 +2448,6 @@ async function releaseTerminalRelayPreDepositReservation(
               'deposit'
       where reservation.status = 'reserved'
         and funding_authorization.profile_id = $1
-        and operation_row.status in ('completed', 'refunded', 'failed', 'cancelled')
-        and operation_row.progress_stage = 'terminal'
         and not exists (
           select 1
             from funding_operation_step_attempts deposit_attempt
@@ -2661,33 +2461,45 @@ async function releaseTerminalRelayPreDepositReservation(
       order by reservation.reserved_at, reservation.id
       for update of reservation, funding_authorization, operation_row, deposit_step
                     skip locked
-      limit 1`,
+      limit 25`,
     values: [input.profile.profileId],
   });
-  const row = rows[0];
-  if (
-    !row ||
-    !(await tryLockFundingAuthorizationReservationScope(client, {
-      authorizationId: row.authorization_id,
-      userId: row.user_id,
-    }))
-  ) {
+  for (const row of rows) {
+    if (
+      !(await tryLockFundingAuthorizationReservationScope(client, {
+        authorizationId: row.authorization_id,
+        userId: row.user_id,
+      }))
+    ) {
+      continue;
+    }
+    const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+      client,
+      { operationId: row.operation_id, now: input.now },
+    );
+    if (!facts || !deriveFundingLifecycle(facts).safety.terminal) {
+      continue;
+    }
+    // The cache can be stale precisely when this maintenance path runs. Let
+    // the common reducer materialize the terminal result and release its
+    // exact lease; this path only identifies the no-deposit candidate.
+    await reduceFundingOperationInTransaction(client, {
+      operationId: row.operation_id,
+      now: input.now,
+    });
+    const released = await client.query<{ status: string }>(
+      `select status
+         from telegram_funding_authorization_reservations
+        where id = $1::uuid
+        for update`,
+      [row.reservation_id],
+    );
+    if (released.rows[0]?.status !== "released") {
+      throw new Error(
+        "terminal Relay pre-deposit reservation release was lost",
+      );
+    }
     return;
-  }
-  const released = await client.query(
-    `update telegram_funding_authorization_reservations
-        set status = 'released',
-            resolved_at = $2,
-            resolution_evidence = resolution_evidence || jsonb_build_object(
-              'operationId', $3::text,
-              'reason', 'terminal_without_deposit'
-            ),
-            updated_at = $2
-      where id = $1::uuid and status = 'reserved'`,
-    [row.reservation_id, input.now, row.operation_id],
-  );
-  if (released.rowCount !== 1) {
-    throw new Error("terminal Relay pre-deposit reservation release was lost");
   }
 }
 
@@ -2844,12 +2656,9 @@ async function claimRelay(
              )
            )
          )
-         and step.state = 'action_required'
          and (
            step.depends_on_step_id is null
-           or (
-             dependency.state = 'succeeded'
-             and exists (
+           or exists (
                select 1
                from funding_step_receipt_observations dependency_receipt
                join funding_operation_step_attempts dependency_attempt
@@ -2878,9 +2687,7 @@ async function claimRelay(
                        dependency_receipt.evidence ->> 'allowanceBlockHash'
                      ) = lower(dependency_receipt.block_hash)
              )
-           )
          )
-         and operation.status not in ('completed', 'refunded', 'failed', 'cancelled')
          and (step.action_expires_at is null or step.action_expires_at > clock_timestamp())
          and (
            not exists (
@@ -2918,10 +2725,10 @@ async function claimRelay(
          )
        order by operation.created_at, step.ordinal
        for update of operation, step, funding_authorization, reservation skip locked
-       limit 1`,
+       limit 25`,
     values: [input.profile.profileId, input.now],
   });
-  const row = rows[0];
+  const row = await firstActionableRelayClaimRow(client, rows, input.now);
   if (!row) return claimRelayCleanup(client, input);
   if (
     !(await tryLockFundingAuthorizationReservationScope(client, {
@@ -2950,12 +2757,7 @@ async function recoverRelay(
     profile: RelayEvmFundingProfileSpec;
   }>,
 ): Promise<DelegatedFundingRecoveryClaim | null> {
-  const { rows } = await client.query<
-    RelayClaimRow & {
-      attempt_id: string;
-      attempt_outcome: "started" | "ambiguous";
-    }
-  >({
+  const { rows } = await client.query<RelayRecoveryClaimRow>({
     name: "funding-relay-recover-action-v1",
     text: `select attempt.id as attempt_id,
             attempt.outcome as attempt_outcome,
@@ -3055,35 +2857,28 @@ async function recoverRelay(
            )
          )
          and (
-           (attempt.outcome = 'started' and step.state = 'action_required')
+           attempt.outcome = 'started'
            or (
              attempt.outcome = 'ambiguous'
              and attempt.reference_kind = 'provider_receipt'
-             and step.state in ('reconcile_required', 'recovery_required')
            )
          )
          and attempt.updated_at <= case
                when attempt.outcome = 'started' then $2::timestamptz
                else $3::timestamptz
              end
-         and operation.status not in ('completed', 'refunded', 'failed', 'cancelled')
        order by attempt.updated_at, attempt.id
        for update of attempt, step, operation, reservation skip locked
-       limit 1`,
+       limit 25`,
     values: [
       input.profile.profileId,
       input.recoverUnbroadcastRetryBefore,
       input.recoverProviderReplayBefore,
     ],
   });
-  const row = rows[0];
+  const row = await firstRecoverableRelayClaimRow(client, rows, input.now);
   if (!row) {
-    const cleanup = await client.query<
-      RelayClaimRow & {
-        attempt_id: string;
-        attempt_outcome: "started" | "ambiguous";
-      }
-    >({
+    const cleanup = await client.query<RelayRecoveryClaimRow>({
       name: "funding-relay-recover-cleanup-v1",
       text: `select attempt.id as attempt_id,
               attempt.outcome as attempt_outcome,
@@ -3120,34 +2915,31 @@ async function recoverRelay(
            and cleanup_step.action_validation_result ->> 'relayStepKind' =
                  'cleanup'
            and (
-             (attempt.outcome = 'started'
-              and cleanup_step.state = 'action_required')
+             attempt.outcome = 'started'
              or (
                attempt.outcome = 'ambiguous'
                and attempt.reference_kind = 'provider_receipt'
-               and cleanup_step.state in (
-                     'reconcile_required', 'recovery_required'
-                   )
              )
            )
            and attempt.updated_at <= case
                  when attempt.outcome = 'started' then $2::timestamptz
                  else $3::timestamptz
                end
-           and cleanup_operation.status not in (
-                 'completed', 'refunded', 'failed', 'cancelled'
-               )
          order by attempt.updated_at, attempt.id
          for update of attempt, cleanup_step, cleanup_operation,
                        reservation skip locked
-         limit 1`,
+         limit 25`,
       values: [
         input.profile.profileId,
         input.recoverUnbroadcastRetryBefore,
         input.recoverProviderReplayBefore,
       ],
     });
-    const cleanupRow = cleanup.rows[0];
+    const cleanupRow = await firstRecoverableRelayClaimRow(
+      client,
+      cleanup.rows,
+      input.now,
+    );
     if (!cleanupRow) return null;
     if (
       !(await tryLockFundingAuthorizationReservationScope(client, {
@@ -3352,8 +3144,8 @@ async function preBroadcastRelay(
       reasonCode: "delegated_action_invalid" as const,
     };
   }
-  const attemptLock = await client.query(
-    `select id
+  const attemptLock = await client.query<{ attempt_number: number }>(
+    `select attempt_number
        from funding_operation_step_attempts
       where id = $1::uuid
         and step_id = $2::uuid
@@ -3396,6 +3188,29 @@ async function preBroadcastRelay(
       diagnosticCode: "reservation_lane_missing" as const,
     };
   }
+  const attemptNumber = attemptLock.rows[0]?.attempt_number;
+  if (attemptNumber === undefined) {
+    return {
+      kind: "hard_invalid" as const,
+      reasonCode: "delegated_action_invalid" as const,
+    };
+  }
+  const preBroadcastLifecycle =
+    await projectedFundingActionBeforeBroadcastInTransaction(client, {
+      operationId: input.claim.operationId,
+      stepId: input.claim.stepId,
+      attemptNumber,
+      now: input.now,
+    });
+  if (
+    preBroadcastLifecycle.lifecycle.safety.terminal ||
+    !preBroadcastLifecycle.action.actionable
+  ) {
+    return {
+      kind: "hard_invalid" as const,
+      reasonCode: "delegated_action_invalid" as const,
+    };
+  }
   let dependencyApprovalLocked =
     validated.kind !== "deposit" || usesPreexistingAllowance;
   let dependencyApprovalTransactionHash: string | null = null;
@@ -3413,7 +3228,6 @@ async function preBroadcastRelay(
          join funding_operation_steps dependency
            on dependency.id = step.depends_on_step_id
           and dependency.operation_id = operation.id
-          and dependency.state = 'succeeded'
          join funding_step_receipt_observations dependency_receipt
            on dependency_receipt.step_id = dependency.id
           and dependency_receipt.status = 'finalized'
@@ -3434,15 +3248,11 @@ async function preBroadcastRelay(
         where operation.id = $1::uuid
           and operation.policy_version = $4
           and operation.policy_revision = $5
-          and operation.status not in (
-                'completed', 'refunded', 'failed', 'cancelled'
-              )
           and step.id = $2::uuid
           and step.executor_id = $7
           and step.action_validation_result ->> 'relayStepKind' = 'deposit'
           and attempt.id = $3::uuid
           and attempt.outcome = 'started'
-          and step.state = 'action_required'
           and dependency.executor_id = $7
           and dependency.action_validation_result ->> 'relayStepKind' =
                 'approve'
@@ -3507,7 +3317,6 @@ async function preBroadcastRelay(
          and step.id = $2::uuid
          and attempt.id = $3::uuid
          and attempt.outcome = 'started'
-         and step.state = 'action_required'
          and (
            $5::boolean = true
            or (
@@ -3750,7 +3559,6 @@ async function allocateFinalizedRelaySourceDebitInTransaction(
               operation.support_metadata ->> 'fundingAuthorizationId'
       where deposit_step.executor_id = $1
         and ($2::uuid is null or operation.id = $2::uuid)
-        and deposit_step.state = 'succeeded'
         and deposit_receipt.evidence ->> 'attributedSourceRaw' =
               reservation.source_raw::text
         and deposit_receipt.block_hash is not null
@@ -3800,7 +3608,6 @@ async function allocateFinalizedRelaySourceDebitInTransaction(
       where id = $1::uuid
         and operation_id = $2::uuid
         and executor_id = $3
-        and state = 'succeeded'
       for update`,
     [
       candidate.depositStepId,
@@ -3925,6 +3732,14 @@ async function allocateFinalizedRelaySourceDebitInTransaction(
       where id = $1::uuid and status = 'finalized'`,
     [evidence.depositReceiptId, input.now],
   );
+  // The receipt established that a source debit must be observed; the exact
+  // canonical debit above now satisfies that fact. Recompute the projection
+  // in the same transaction rather than leaving a stale reconcile cache for
+  // the next worker pass.
+  await reduceFundingOperationInTransaction(client, {
+    operationId: evidence.parentOperationId,
+    now: input.now,
+  });
   return true;
 }
 
@@ -4012,6 +3827,48 @@ async function allocateRelayPostDepositSourceDebitInTransaction(
   );
 }
 
+async function completeRelayCleanupFromCanonicalZeroInTransaction(
+  client: PoolClient,
+  input: Readonly<{
+    actionId: string;
+    evidence: JsonRecord;
+    now: Date;
+    operationId: string;
+  }>,
+): Promise<void> {
+  // Attempt reporting may materialize a fresh lifecycle cache immediately
+  // before this terminal fact. Read the version under the existing operation
+  // lock at the point of mutation rather than carrying it across that write.
+  const versionResult = await client.query<{ version: string | number }>(
+    `select version
+       from funding_operations
+      where id = $1::uuid
+      for update`,
+    [input.operationId],
+  );
+  const operation = versionResult.rows[0];
+  if (!operation) {
+    throw new Error("Relay cleanup operation disappeared before completion");
+  }
+  await writeFundingOperationSupportFactsInTransaction(client, {
+    operationId: input.operationId,
+    expectedVersion: Number(operation.version),
+    supportMetadataPatch: {
+      lifecycleTerminalCompletion: {
+        code: "relay_allowance_cleanup_completed",
+        decidedAt: input.now.toISOString(),
+        actionId: input.actionId,
+      },
+      ...input.evidence,
+    },
+    now: input.now,
+  });
+  await reduceFundingOperationInTransaction(client, {
+    operationId: input.operationId,
+    now: input.now,
+  });
+}
+
 async function terminalizeRelayParentAfterCleanup(
   client: PoolClient,
   input: Readonly<{
@@ -4025,129 +3882,59 @@ async function terminalizeRelayParentAfterCleanup(
   if (input.cleanupContext === "post_deposit") return;
   const { rows } = await client.query<{
     approval_step_id: string;
-    operation_stage: "committed" | "source_action" | "source_observed";
-    operation_status:
-      | "in_progress"
-      | "reconcile_required"
-      | "recovery_required";
+    deposit_step_id: string;
     operation_version: string | number;
   }>(
-    `select operation.status as operation_status,
-            operation.progress_stage as operation_stage,
-            operation.version as operation_version,
-            approval_step.id as approval_step_id
+    `select operation.version as operation_version,
+            approval_step.id as approval_step_id,
+            deposit_step.id as deposit_step_id
        from funding_operations operation
        join funding_operation_steps approval_step
          on approval_step.operation_id = operation.id
         and approval_step.executor_id = $2
         and approval_step.action_validation_result ->> 'relayStepKind' =
               'approve'
+       join funding_operation_steps deposit_step
+         on deposit_step.operation_id = operation.id
+        and deposit_step.executor_id = $2
+        and deposit_step.action_validation_result ->> 'relayStepKind' =
+              'deposit'
       where operation.id = $1::uuid
-        and operation.status in (
-              'in_progress', 'reconcile_required', 'recovery_required'
-            )
-        and operation.progress_stage in (
-              'committed', 'source_action', 'source_observed'
-            )
-      for update of operation, approval_step`,
+      for update of operation, approval_step, deposit_step`,
     [input.parentOperationId, input.profile.profileId],
   );
   const row = rows[0];
   if (!row) return;
-  if (input.cleanupContext === "approval_exhausted") {
-    await client.query(
-      `update funding_operation_steps
-          set state = 'failed', updated_at = $2
-        where id = $1::uuid
-          and state in ('action_required', 'failed', 'recovery_required')`,
-      [row.approval_step_id, input.now],
-    );
-  }
-  let version = Number(row.operation_version);
-  let status = row.operation_status;
-  let stage = row.operation_stage;
-  if (stage === "committed") {
-    const activated = await transitionFundingOperationInTransaction(client, {
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+    client,
+    {
       operationId: input.parentOperationId,
-      scope: { kind: "worker" },
-      expectedVersion: version,
-      expectedState: { status, stage },
-      nextState: { status: "in_progress", stage: "source_action" },
       now: input.now,
-    });
-    version = activated.version;
-    status = "in_progress";
-    stage = "source_action";
-  }
-  if (status === "recovery_required") {
-    const reconciling = await transitionFundingOperationInTransaction(client, {
-      operationId: input.parentOperationId,
-      scope: { kind: "worker" },
-      expectedVersion: version,
-      expectedState: { status, stage },
-      nextState: { status: "reconcile_required", stage },
-      errorCode: "relay_allowance_cleanup_completed",
-      now: input.now,
-    });
-    version = reconciling.version;
-    status = "reconcile_required";
-  } else if (status === "in_progress") {
-    const reconciling = await transitionFundingOperationInTransaction(client, {
-      operationId: input.parentOperationId,
-      scope: { kind: "worker" },
-      expectedVersion: version,
-      expectedState: { status, stage },
-      nextState: { status: "reconcile_required", stage },
-      errorCode: "relay_allowance_cleanup_completed",
-      now: input.now,
-    });
-    version = reconciling.version;
-    status = "reconcile_required";
-  }
-  if (status === "reconcile_required") {
-    await transitionFundingOperationInTransaction(client, {
-      operationId: input.parentOperationId,
-      scope: { kind: "worker" },
-      expectedVersion: version,
-      expectedState: { status, stage },
-      nextState: { status: "failed", stage: "terminal" },
-      errorCode:
-        input.cleanupContext === "approval_exhausted"
+    },
+  );
+  if (!facts || deriveFundingLifecycle(facts).safety.terminal) return;
+  const approvalExhausted = input.cleanupContext === "approval_exhausted";
+  await writeFundingOperationSupportFactsInTransaction(client, {
+    operationId: input.parentOperationId,
+    expectedVersion: Number(row.operation_version),
+    supportMetadataPatch: {
+      lifecycleTerminalFailure: {
+        code: approvalExhausted
           ? "relay_approval_exhausted"
           : "relay_deposit_failed",
-      supportMetadataPatch: input.evidence,
-      now: input.now,
-    });
-    await releaseRelayParentBalanceReservations(
-      client,
-      input.parentOperationId,
-      input.now,
-    );
-  }
-}
-
-async function releaseRelayParentBalanceReservations(
-  client: PoolClient,
-  parentOperationId: string,
-  now: Date,
-): Promise<void> {
-  const { rows } = await client.query<{ id: string }>(
-    `select balance_reservation.id
-       from balance_reservations balance_reservation
-      where balance_reservation.operation_id = $1::uuid
-        and balance_reservation.state = 'active'
-        and balance_reservation.mode <> 'settled_for_consumer'
-      order by balance_reservation.created_at, balance_reservation.id
-      for update`,
-    [parentOperationId],
-  );
-  for (const row of rows) {
-    await releaseFundingReservationInTransaction(client, {
-      reservationId: row.id,
-      outcomeReason: "operation_failed",
-      now,
-    });
-  }
+        decidedAt: input.now.toISOString(),
+        actionId: approvalExhausted
+          ? row.approval_step_id
+          : row.deposit_step_id,
+      },
+      ...input.evidence,
+    },
+    now: input.now,
+  });
+  await reduceFundingOperationInTransaction(client, {
+    operationId: input.parentOperationId,
+    now: input.now,
+  });
 }
 
 async function terminalizeCompletedRelayCleanupParent(
@@ -4170,8 +3957,6 @@ async function terminalizeCompletedRelayCleanupParent(
        from telegram_funding_authorization_reservations reservation
        join funding_operations cleanup
          on cleanup.id = reservation.cleanup_operation_id
-        and cleanup.status = 'completed'
-        and cleanup.progress_stage = 'terminal'
        join funding_operation_steps cleanup_step
          on cleanup_step.operation_id = cleanup.id
         and cleanup_step.executor_id = $1
@@ -4182,12 +3967,6 @@ async function terminalizeCompletedRelayCleanupParent(
             )
        join funding_operations parent
          on parent.id = reservation.funding_operation_id
-        and parent.status in (
-              'in_progress', 'reconcile_required', 'recovery_required'
-            )
-        and parent.progress_stage in (
-              'committed', 'source_action', 'source_observed'
-            )
       where reservation.status = 'cleaned'
         and reservation.resolved_at is not null
       order by reservation.resolved_at, reservation.id
@@ -4207,45 +3986,6 @@ async function terminalizeCompletedRelayCleanupParent(
       cleanupParentRepairCompletedAt: now.toISOString(),
     },
   });
-}
-
-async function releaseCompletedRelayCleanupParentBalanceReservations(
-  client: PoolClient,
-  now: Date,
-  profile: RelayEvmFundingProfileSpec,
-): Promise<void> {
-  const { rows } = await client.query<{ parent_operation_id: string }>({
-    name: "funding-relay-release-cleaned-parent-balance-v1",
-    text: `select distinct parent.id as parent_operation_id
-       from telegram_funding_authorization_reservations reservation
-       join funding_operations cleanup
-         on cleanup.id = reservation.cleanup_operation_id
-        and cleanup.status = 'completed'
-        and cleanup.progress_stage = 'terminal'
-       join funding_operation_steps cleanup_step
-         on cleanup_step.operation_id = cleanup.id
-        and cleanup_step.executor_id = $1
-        and cleanup_step.action_validation_result ->> 'relayStepKind' =
-              'cleanup'
-        and cleanup_step.action_validation_result ->> 'cleanupContext' in (
-              'approval_exhausted', 'pre_deposit_failure'
-            )
-       join funding_operations parent
-         on parent.id = reservation.funding_operation_id
-        and parent.status = 'failed'
-        and parent.progress_stage = 'terminal'
-       join balance_reservations balance_reservation
-         on balance_reservation.operation_id = parent.id
-        and balance_reservation.state = 'active'
-        and balance_reservation.mode <> 'settled_for_consumer'
-      where reservation.status = 'cleaned'
-      order by parent.id
-      limit 1`,
-    values: [profile.profileId],
-  });
-  const parentOperationId = rows[0]?.parent_operation_id;
-  if (!parentOperationId) return;
-  await releaseRelayParentBalanceReservations(client, parentOperationId, now);
 }
 
 async function finalizeRelayAlreadySatisfiedInTransaction(
@@ -4281,11 +4021,6 @@ async function finalizeRelayAlreadySatisfiedInTransaction(
     cleanup_allowance_raw: string;
     cleanup_allowance_revision: string;
     cleanup_allowance_observed_block: string;
-    operation_stage: "source_action";
-    operation_status:
-      | "in_progress"
-      | "reconcile_required"
-      | "recovery_required";
     operation_version: string | number;
     reservation_id: string;
     parent_operation_id: string;
@@ -4296,8 +4031,6 @@ async function finalizeRelayAlreadySatisfiedInTransaction(
               as cleanup_allowance_raw,
             reservation.resolution_evidence ->> 'cleanupAllowanceObservedBlock'
               as cleanup_allowance_observed_block,
-            operation.status as operation_status,
-            operation.progress_stage as operation_stage,
             operation.version as operation_version,
             reservation.funding_operation_id as parent_operation_id,
             step.action_validation_result ->> 'cleanupContext'
@@ -4312,7 +4045,6 @@ async function finalizeRelayAlreadySatisfiedInTransaction(
          and step.id = $2::uuid
          and attempt.id = $3::uuid
          and attempt.outcome = 'started'
-         and step.state = 'action_required'
          and step.action_validation_result ->> 'relayStepKind' = 'cleanup'
          and step.action_validation_result ->> 'allowanceRevision' =
                reservation.cleanup_allowance_revision
@@ -4323,14 +4055,29 @@ async function finalizeRelayAlreadySatisfiedInTransaction(
          and step.action_validation_result ->> 'cleanupContext' in (
                'approval_exhausted', 'pre_deposit_failure', 'post_deposit'
              )
-         and operation.status in (
-               'in_progress', 'reconcile_required', 'recovery_required'
-             )
        for update of attempt, step, operation, reservation`,
     [input.claim.operationId, input.claim.stepId, input.claim.attemptId],
   );
   const row = scope.rows[0];
   if (!row) throw new Error("Relay zero cleanup binding changed");
+  const lifecycleFacts =
+    await loadFundingLifecycleFactsForOperationInTransaction(client, {
+      operationId: input.claim.operationId,
+      now: input.now,
+    });
+  const lifecycle = lifecycleFacts
+    ? deriveFundingLifecycle(lifecycleFacts)
+    : null;
+  const action = lifecycle?.actions.find(
+    (candidate) => candidate.actionId === input.claim.stepId,
+  );
+  // This is an attempt conclusion, not a fresh action admission. Its own
+  // started attempt makes the current projection recovery_required; accepting
+  // precisely that state preserves an expiry race while terminal/cancelled or
+  // conflicting facts still reject the conclusion.
+  if (lifecycle?.safety.terminal || action?.state !== "recovery_required") {
+    throw new Error("Relay zero cleanup lifecycle changed");
+  }
   if (
     !/^(0|[1-9][0-9]*)$/u.test(row.cleanup_allowance_observed_block) ||
     BigInt(observed.blockNumber) < BigInt(row.cleanup_allowance_observed_block)
@@ -4376,7 +4123,6 @@ async function finalizeRelayAlreadySatisfiedInTransaction(
           and deposit_step.executor_id = $2
           and deposit_step.action_validation_result ->> 'relayStepKind' =
                 'deposit'
-          and deposit_step.state = 'succeeded'
          join funding_step_receipt_observations deposit_receipt
            on deposit_receipt.step_id = deposit_step.id
           and deposit_receipt.status = 'finalized'
@@ -4392,9 +4138,6 @@ async function finalizeRelayAlreadySatisfiedInTransaction(
            on funding_authorization.id::text =
                 parent.support_metadata ->> 'fundingAuthorizationId'
         where parent.id = $1::uuid
-          and parent.status not in (
-                'completed', 'refunded', 'failed', 'cancelled'
-              )
         order by deposit_receipt.observed_at desc
         for update of parent, deposit_step, deposit_receipt
         limit 1`,
@@ -4450,34 +4193,10 @@ async function finalizeRelayAlreadySatisfiedInTransaction(
       profile: input.profile,
     });
   }
-  await client.query(
-    `update funding_operation_steps
-        set state = 'succeeded', updated_at = $2
-      where id = $1::uuid and state = 'submitted'`,
-    [input.claim.stepId, input.now],
-  );
-  let version = Number(row.operation_version);
-  if (row.operation_status !== "in_progress") {
-    const normalized = await transitionFundingOperationInTransaction(client, {
-      operationId: input.claim.operationId,
-      scope: { kind: "worker" },
-      expectedVersion: version,
-      expectedState: {
-        status: row.operation_status,
-        stage: row.operation_stage,
-      },
-      nextState: { status: "in_progress", stage: "source_action" },
-      now: input.now,
-    });
-    version = normalized.version;
-  }
-  await transitionFundingOperationInTransaction(client, {
+  await completeRelayCleanupFromCanonicalZeroInTransaction(client, {
     operationId: input.claim.operationId,
-    scope: { kind: "worker" },
-    expectedVersion: version,
-    expectedState: { status: "in_progress", stage: "source_action" },
-    nextState: { status: "completed", stage: "terminal" },
-    supportMetadataPatch: {
+    actionId: input.claim.stepId,
+    evidence: {
       allowanceAlreadyZero: true,
       allowanceZeroBlock: observed.blockNumber,
       allowanceZeroBlockHash: observed.blockHash,
@@ -4544,20 +4263,11 @@ async function finalizeRelayHardInvalidInTransaction(
     const ownership = await client.query<{
       approval_receipt_id: string;
       approval_transaction_hash: string;
-      operation_stage: "committed" | "source_action";
-      operation_status:
-        | "in_progress"
-        | "reconcile_required"
-        | "recovery_required";
-      operation_version: string | number;
       receipt_raw: string;
     }>(
       `select approval_receipt.id as approval_receipt_id,
               lower(approval_receipt.evidence ->> 'transactionHash')
                 as approval_transaction_hash,
-              operation.status as operation_status,
-              operation.progress_stage as operation_stage,
-              operation.version as operation_version,
               reservation.source_raw::text as receipt_raw
          from funding_operation_steps deposit_step
          join funding_operations operation
@@ -4577,10 +4287,6 @@ async function finalizeRelayHardInvalidInTransaction(
           and reservation.status = 'reserved'
         where operation.id = $1::uuid
           and deposit_step.id = $2::uuid
-          and operation.status in (
-                'in_progress', 'reconcile_required', 'recovery_required'
-              )
-          and operation.progress_stage in ('committed', 'source_action')
         order by approval_receipt.observed_at desc
         for update of operation, deposit_step, approval_step,
                       approval_receipt, reservation
@@ -4635,20 +4341,12 @@ async function finalizeRelayHardInvalidInTransaction(
   });
   if (cleanupState !== "foreign_drift") return;
   const { rows } = await client.query<{
-    cleanup_stage: "source_action";
-    cleanup_status: "in_progress" | "reconcile_required" | "recovery_required";
     cleanup_version: string | number;
     parent_operation_id: string;
-    parent_stage: "committed" | "source_action";
-    parent_status: "in_progress" | "reconcile_required" | "recovery_required";
     parent_version: string | number;
   }>(
-    `select cleanup.status as cleanup_status,
-            cleanup.progress_stage as cleanup_stage,
-            cleanup.version as cleanup_version,
+    `select cleanup.version as cleanup_version,
             parent.id as parent_operation_id,
-            parent.status as parent_status,
-            parent.progress_stage as parent_stage,
             parent.version as parent_version
        from telegram_funding_authorization_reservations reservation
        join funding_operations cleanup
@@ -4657,71 +4355,46 @@ async function finalizeRelayHardInvalidInTransaction(
          on parent.id = reservation.funding_operation_id
       where cleanup.id = $1::uuid
         and reservation.status = 'cleanup_required'
-        and cleanup.status in (
-              'in_progress', 'reconcile_required', 'recovery_required'
-            )
-        and cleanup.progress_stage = 'source_action'
-        and parent.status in (
-              'in_progress', 'reconcile_required', 'recovery_required'
-            )
-        and parent.progress_stage in ('committed', 'source_action')
       for update of cleanup, parent, reservation`,
     [input.claim.operationId],
   );
   const row = rows[0];
   if (!row) return;
-  if (row.cleanup_status !== "recovery_required") {
-    await transitionFundingOperationInTransaction(client, {
-      operationId: input.claim.operationId,
-      scope: { kind: "worker" },
-      expectedVersion: Number(row.cleanup_version),
-      expectedState: {
-        status: row.cleanup_status,
-        stage: row.cleanup_stage,
-      },
-      nextState: { status: "recovery_required", stage: "source_action" },
-      errorCode: "relay_cleanup_foreign_allowance_drift",
-      supportMetadataPatch: {
-        observedAllowanceRaw: observed.raw,
-        observedAllowanceRevision: observed.revision,
-        ownedAllowanceRaw: ownedRaw,
-        ownedAllowanceRevision: ownedRevision,
-      },
-      now: input.now,
-    });
-  }
-  let parentVersion = Number(row.parent_version);
-  let parentStatus = row.parent_status;
-  let parentStage = row.parent_stage;
-  if (parentStage === "committed") {
-    const activated = await transitionFundingOperationInTransaction(client, {
-      operationId: row.parent_operation_id,
-      scope: { kind: "worker" },
-      expectedVersion: parentVersion,
-      expectedState: { status: parentStatus, stage: parentStage },
-      nextState: { status: "in_progress", stage: "source_action" },
-      now: input.now,
-    });
-    parentVersion = activated.version;
-    parentStatus = "in_progress";
-    parentStage = "source_action";
-  }
-  if (parentStatus !== "recovery_required") {
-    await transitionFundingOperationInTransaction(client, {
-      operationId: row.parent_operation_id,
-      scope: { kind: "worker" },
-      expectedVersion: parentVersion,
-      expectedState: { status: parentStatus, stage: parentStage },
-      nextState: { status: "recovery_required", stage: "source_action" },
-      errorCode: "relay_cleanup_foreign_allowance_drift",
-      supportMetadataPatch: {
-        cleanupOperationId: input.claim.operationId,
-        observedAllowanceRaw: observed.raw,
-        observedAllowanceRevision: observed.revision,
-      },
-      now: input.now,
-    });
-  }
+  const recoveryFact = {
+    code: "relay_cleanup_foreign_allowance_drift",
+    requestedAt: input.now.toISOString(),
+  };
+  await writeFundingOperationSupportFactsInTransaction(client, {
+    operationId: input.claim.operationId,
+    expectedVersion: Number(row.cleanup_version),
+    supportMetadataPatch: {
+      lifecycleManualRecovery: recoveryFact,
+      observedAllowanceRaw: observed.raw,
+      observedAllowanceRevision: observed.revision,
+      ownedAllowanceRaw: ownedRaw,
+      ownedAllowanceRevision: ownedRevision,
+    },
+    now: input.now,
+  });
+  await writeFundingOperationSupportFactsInTransaction(client, {
+    operationId: row.parent_operation_id,
+    expectedVersion: Number(row.parent_version),
+    supportMetadataPatch: {
+      lifecycleManualRecovery: recoveryFact,
+      cleanupOperationId: input.claim.operationId,
+      observedAllowanceRaw: observed.raw,
+      observedAllowanceRevision: observed.revision,
+    },
+    now: input.now,
+  });
+  await reduceFundingOperationInTransaction(client, {
+    operationId: input.claim.operationId,
+    now: input.now,
+  });
+  await reduceFundingOperationInTransaction(client, {
+    operationId: row.parent_operation_id,
+    now: input.now,
+  });
 }
 
 export function createRelayEvmDelegatedFundingProfile(

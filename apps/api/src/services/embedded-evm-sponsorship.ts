@@ -5,6 +5,7 @@ import type { Pool } from "pg";
 import { AuthService } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { loadFundingLifecycleProjectionForOperation } from "../funding/lifecycle/funding-lifecycle-read-model.js";
 import type { EmbeddedEthereumTransactionSpec } from "./embedded-ethereum.js";
 
 const POLYGON_CHAIN_ID = 137;
@@ -628,9 +629,11 @@ async function matchesFundingAction(
 ): Promise<boolean> {
   const { rows } = await db.query<{
     normalized_action: Record<string, unknown>;
+    operation_id: string;
+    step_id: string;
   }>(
     `
-      select step.normalized_action
+      select step.normalized_action, operation.id as operation_id, step.id as step_id
       from funding_operation_steps step
       join funding_operations operation on operation.id = step.operation_id
       where operation.user_id = $1
@@ -649,14 +652,24 @@ async function matchesFundingAction(
           )
         )
         and step.payer_requirement = 'privy_sponsor'
-        and step.state in ('planned', 'action_required')
       order by step.updated_at desc
-      limit 5
+      limit 25
     `,
     [input.userId, input.transaction.id],
   );
   for (const row of rows) {
-    if (fundingActionMatchesTransaction(row.normalized_action, input)) {
+    if (!fundingActionMatchesTransaction(row.normalized_action, input)) {
+      continue;
+    }
+    const projected = await loadFundingLifecycleProjectionForOperation(db, {
+      operationId: row.operation_id,
+    });
+    const action = projected
+      ? projected.lifecycle.actions.find(
+          (candidate) => candidate.actionId === row.step_id,
+        )
+      : null;
+    if (action?.state === "planned" || action?.state === "action_required") {
       return true;
     }
   }

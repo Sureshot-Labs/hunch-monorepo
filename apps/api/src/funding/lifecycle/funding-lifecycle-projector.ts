@@ -72,6 +72,10 @@ export type FundingLifecycleActionAttempt = Readonly<{
     | "cancelled";
   broadcastMayHaveOccurred: boolean;
   referenceKind: "transaction" | "provider_receipt" | "external_handoff" | null;
+  /** A provider definitively rejected this attempt before broadcast; retry is safe. */
+  retryableAfterFailure?: boolean;
+  /** A bounded reorg watch concluded without canonical execution; retry is safe. */
+  retryableAfterReorg?: boolean;
   startedAt: Date;
   updatedAt: Date;
   receipt: FundingLifecycleActionReceipt | null;
@@ -160,6 +164,37 @@ export type FundingLifecycleManualRecoveryFact = Readonly<{
   requestedAt: Date;
 }>;
 
+/**
+ * A durable automatic-evidence escalation. Unlike the materialized operation
+ * status, this records that the bounded evidence window has actually elapsed.
+ */
+export type FundingLifecycleAutomaticRecoveryFact = Readonly<{
+  code: string;
+  requestedAt: Date;
+}>;
+
+/**
+ * A durable no-money-moved terminal decision. Late movement evidence still
+ * wins and returns the operation to reconciliation instead of hiding it.
+ */
+export type FundingLifecycleTerminalFailureFact = Readonly<{
+  code: string;
+  decidedAt: Date;
+  /** The unstarted action conclusively ruled out by the terminal decision. */
+  actionId: string | null;
+}>;
+
+/**
+ * A durable terminal postcondition decision for a non-financial action. The
+ * named action must itself have succeeded; a late canonicality conflict still
+ * takes precedence and reopens reconciliation.
+ */
+export type FundingLifecycleTerminalCompletionFact = Readonly<{
+  code: string;
+  decidedAt: Date;
+  actionId: string;
+}>;
+
 export type FundingLifecyclePlanFact = Readonly<{
   /** Immutable committed baseline from `funding_quotes.plan_snapshot`. */
   initialState: Readonly<{
@@ -189,6 +224,9 @@ export type FundingLifecycleFacts = Readonly<{
   receive: FundingLifecycleReceiveFact | null;
   cancellation?: FundingLifecycleCancellationFact | null;
   manualRecovery?: FundingLifecycleManualRecoveryFact | null;
+  automaticRecovery?: FundingLifecycleAutomaticRecoveryFact | null;
+  terminalFailure?: FundingLifecycleTerminalFailureFact | null;
+  terminalCompletion?: FundingLifecycleTerminalCompletionFact | null;
   reconciliation?: FundingLifecycleReconciliationFact;
   now: Date;
 }>;
@@ -239,6 +277,8 @@ export type FundingLifecycleProjection = Readonly<{
   status: FundingLifecycleOperationStatus;
   progressStage: FundingLifecycleProgressStage;
   recoveryMode: "automatic_evidence" | "manual_review" | null;
+  /** Observable lifecycle reason derived from facts, never a previous cache value. */
+  errorCode: string | null;
   actions: readonly FundingLifecycleActionProjection[];
   segments: readonly FundingLifecycleSegmentProjection[];
   safety: FundingLifecycleSafetyProjection;
@@ -333,6 +373,13 @@ function hasCanonicalFinalFailure(
 
 function unresolvedAttempt(attempt: FundingLifecycleActionAttempt): boolean {
   if (
+    attempt.retryableAfterReorg === true &&
+    attempt.receipt?.status === "reorged" &&
+    !attempt.receipt.canonical
+  ) {
+    return false;
+  }
+  if (
     hasCanonicalFinalReceipt(attempt.receipt) ||
     hasCanonicalFinalFailure(attempt.receipt)
   ) {
@@ -353,6 +400,13 @@ function actionExecution(action: FundingLifecycleActionFact): ActionExecution {
   if (!latest) return "not_started";
   if (hasCanonicalFinalReceipt(latest.receipt)) return "succeeded";
   if (hasCanonicalFinalFailure(latest.receipt)) return "retryable_failure";
+  if (
+    latest.retryableAfterReorg === true &&
+    latest.receipt?.status === "reorged" &&
+    !latest.receipt.canonical
+  ) {
+    return "retryable_failure";
+  }
   switch (latest.outcome) {
     case "started":
       return "started";
@@ -363,7 +417,11 @@ function actionExecution(action: FundingLifecycleActionFact): ActionExecution {
       // (for example a signature). Receipt evidence wins whenever it exists.
       return "succeeded";
     case "failed":
-      return latest.broadcastMayHaveOccurred ? "ambiguous" : "final_failure";
+      return latest.broadcastMayHaveOccurred
+        ? "ambiguous"
+        : latest.retryableAfterFailure === true
+          ? "retryable_failure"
+          : "final_failure";
     case "ambiguous":
       return "ambiguous";
     case "cancelled":
@@ -410,7 +468,12 @@ function actionMayHaveMovedMoney(action: FundingLifecycleActionFact): boolean {
     action.mayMoveMoney &&
     action.attempts.some(
       (attempt) =>
-        attempt.outcome === "succeeded" ||
+        (attempt.outcome === "succeeded" &&
+          !(
+            attempt.retryableAfterReorg === true &&
+            attempt.receipt?.status === "reorged" &&
+            !attempt.receipt.canonical
+          )) ||
         hasCanonicalFinalReceipt(attempt.receipt),
     )
   );
@@ -430,8 +493,14 @@ function actionCanonicalityConflict(
   return action.attempts.some(
     (attempt) =>
       attempt.receipt?.status === "mismatch" ||
-      attempt.receipt?.status === "reorged" ||
-      (attempt.receipt !== null && !attempt.receipt.canonical),
+      (attempt.receipt?.status === "reorged" &&
+        attempt.retryableAfterReorg !== true) ||
+      (attempt.receipt !== null &&
+        !attempt.receipt.canonical &&
+        !(
+          attempt.receipt.status === "reorged" &&
+          attempt.retryableAfterReorg === true
+        )),
   );
 }
 
@@ -797,7 +866,9 @@ function transferFacts(facts: FundingLifecycleFacts): Readonly<{
     sourceDebitRequirementsMet,
     sourceDebitEvidencePending,
     partialRefundEvidence:
-      finalizedRefund && facts.plan.routeLegs.length > 0 && !routeLegsAreRefunded,
+      finalizedRefund &&
+      facts.plan.routeLegs.length > 0 &&
+      !routeLegsAreRefunded,
     routeLegsSatisfied: routeLegsSatisfied(facts.transfers, facts.plan),
     routeLegsRefunded: routeLegsAreRefunded,
   };
@@ -805,12 +876,14 @@ function transferFacts(facts: FundingLifecycleFacts): Readonly<{
 
 function actionState(
   action: FundingLifecycleActionFact,
-  dependencySucceeded: boolean,
+  dependencyState: FundingLifecycleActionState | null,
   activationSatisfied: boolean,
   unresolvedMovement: boolean,
-  reconciliationEvidenceTimedOut: boolean,
+  automaticEvidenceRecoveryRequired: boolean,
   now: Date,
 ): FundingLifecycleActionState {
+  const dependencySucceeded =
+    dependencyState === null || dependencyState === "succeeded";
   const execution = actionExecution(action);
   if (execution === "succeeded") return "succeeded";
   if (execution === "cancelled") return "cancelled";
@@ -819,13 +892,15 @@ function actionState(
     return "reconcile_required";
   }
   if (unresolvedMovement || execution === "ambiguous") {
-    return reconciliationEvidenceTimedOut &&
+    return automaticEvidenceRecoveryRequired &&
       !hasRecoverableProviderReceiptWait(action)
       ? "recovery_required"
       : "reconcile_required";
   }
   if (execution === "started") return "recovery_required";
   if (execution === "submitted") return "submitted";
+  if (dependencyState === "recovery_required") return "recovery_required";
+  if (dependencyState === "reconcile_required") return "reconcile_required";
   if (action.authorization === "blocked") return "planned";
   if (execution === "retryable_failure") {
     if (
@@ -962,10 +1037,17 @@ export function deriveFundingLifecycle(
         transfer.kind !== "venue_readiness",
     );
   const evidenceDeadline = facts.reconciliation?.evidenceDeadline ?? null;
+  // A provider receipt has a durable replay identity and its own lease. The
+  // generic evidence timer must never turn that bounded recovery into a
+  // timeout incident; doing so would overwrite the provider cadence and make
+  // an ordinary delayed provider response look like a terminal failure.
   const reconciliationEvidenceTimedOut =
     evidenceDeadline !== null &&
     evidenceDeadline.getTime() <= facts.now.getTime() &&
-    moneyMayHaveMoved;
+    moneyMayHaveMoved &&
+    !awaitingProviderReceipt;
+  const automaticRecoveryRequired =
+    facts.automaticRecovery != null || reconciliationEvidenceTimedOut;
   const actionHasTerminalStop = facts.actions.some((action) => {
     const execution = actionExecution(action);
     return execution === "final_failure" || execution === "cancelled";
@@ -977,6 +1059,7 @@ export function deriveFundingLifecycle(
     evidence.sourceDebitEvidencePending ||
     evidence.partialRefundEvidence ||
     actionHasTerminalStop;
+  const terminalFailureActionId = facts.terminalFailure?.actionId ?? null;
   const activationSatisfied = evidence.finalizedSource;
   const byId = new Map<string, FundingLifecycleActionProjection>();
   const actions = [...facts.actions]
@@ -986,14 +1069,24 @@ export function deriveFundingLifecycle(
         action.dependsOnActionId === null
           ? null
           : (byId.get(action.dependsOnActionId) ?? null);
-      const state = actionState(
+      const derivedState = actionState(
         action,
-        dependency === null || dependency.state === "succeeded",
+        dependency?.state ?? null,
         activationSatisfied,
         hasUnresolvedMovement(action),
-        reconciliationEvidenceTimedOut,
+        automaticRecoveryRequired,
         facts.now,
       );
+      const state =
+        terminalFailureActionId === action.actionId &&
+        [
+          "planned",
+          "action_required",
+          "reconcile_required",
+          "recovery_required",
+        ].includes(derivedState)
+          ? "failed"
+          : derivedState;
       const actionable =
         state === "action_required" &&
         !actionabilityBlockedByEvidence &&
@@ -1030,6 +1123,13 @@ export function deriveFundingLifecycle(
   const finalEvidenceResolved =
     evidenceProgress?.status === "ready" ||
     evidenceProgress?.status === "completed";
+  const terminalCompletionSatisfied =
+    facts.terminalCompletion != null &&
+    actions.some(
+      (action) =>
+        action.actionId === facts.terminalCompletion?.actionId &&
+        action.state === "succeeded",
+    );
   const pristinePlan =
     facts.receive === null &&
     facts.transfers.length === 0 &&
@@ -1055,13 +1155,17 @@ export function deriveFundingLifecycle(
       actionManualRecovery || facts.manualRecovery != null;
   } else if (unresolvedMovement || conflictingActionHistory) {
     status =
-      unresolvedActionExpired || reconciliationEvidenceTimedOut
+      facts.manualRecovery != null ||
+      unresolvedActionExpired ||
+      automaticRecoveryRequired ||
+      hasStoppedAction
         ? "recovery_required"
         : "reconcile_required";
     progressStage = "source_action";
     requiresWorker = true;
     requiresManualRecovery =
-      unresolvedActionNeedsManualRecovery && !awaitingProviderReceipt;
+      facts.manualRecovery != null ||
+      (unresolvedActionNeedsManualRecovery && !awaitingProviderReceipt);
   } else if (evidence.sourceDebitEvidencePending) {
     // A delegated action can report success before the authoritative debit
     // arrives. Keep it on the automatic evidence path; presenting the
@@ -1109,13 +1213,21 @@ export function deriveFundingLifecycle(
     // Cancellation is a durable decision fact, recorded only while the
     // lifecycle proves that money has not moved. A late observed transfer
     // still wins this branch and stays on recovery rather than disappearing.
-    status = externalEffectMayHaveOccurred
-      ? "recovery_required"
-      : "cancelled";
+    status = externalEffectMayHaveOccurred ? "recovery_required" : "cancelled";
     progressStage = externalEffectMayHaveOccurred
       ? "source_action"
       : "terminal";
     requiresWorker = externalEffectMayHaveOccurred;
+  } else if (facts.manualRecovery != null && !finalEvidenceResolved) {
+    // This is an explicit escalation fact, never a stale cache value. Final
+    // money evidence above still wins and resolves the incident normally.
+    status = "recovery_required";
+    progressStage = "source_action";
+    requiresWorker = true;
+    requiresManualRecovery = true;
+  } else if (terminalCompletionSatisfied) {
+    status = "completed";
+    progressStage = "terminal";
   } else if (hasStoppedAction) {
     // A final action failure/cancellation can become terminal only before any
     // money movement. Once a debit, credit, or executor movement report
@@ -1130,13 +1242,16 @@ export function deriveFundingLifecycle(
       ? "source_action"
       : "terminal";
     requiresWorker = externalEffectMayHaveOccurred;
-  } else if (facts.manualRecovery != null && !finalEvidenceResolved) {
-    // This is an explicit escalation fact, never a stale cache value. Final
-    // money evidence above still wins and resolves the incident normally.
+  } else if (facts.terminalFailure != null) {
+    status = externalEffectMayHaveOccurred ? "recovery_required" : "failed";
+    progressStage = externalEffectMayHaveOccurred
+      ? "source_action"
+      : "terminal";
+    requiresWorker = externalEffectMayHaveOccurred;
+  } else if (facts.automaticRecovery != null && !finalEvidenceResolved) {
     status = "recovery_required";
     progressStage = "source_action";
     requiresWorker = true;
-    requiresManualRecovery = true;
   } else {
     if (pristinePlan) {
       status = facts.plan.initialState.status;
@@ -1213,6 +1328,25 @@ export function deriveFundingLifecycle(
           ? "manual_review"
           : "automatic_evidence"
         : null,
+    errorCode:
+      status === "failed" && facts.terminalFailure != null
+        ? facts.terminalFailure.code
+        : status === "recovery_required" &&
+            (evidence.canonicalityConflict ||
+              evidence.destinationEvidenceConflict)
+          ? "finalized_observation_reorg"
+          : status === "recovery_required" && reconciliationEvidenceTimedOut
+            ? "reconciliation_evidence_timeout"
+            : status === "recovery_required" && facts.manualRecovery != null
+              ? facts.manualRecovery.code
+              : status === "recovery_required" &&
+                  facts.automaticRecovery != null
+                ? facts.automaticRecovery.code
+                : status === "recovery_required" &&
+                    unresolvedMovement &&
+                    hasStoppedAction
+                  ? "late_broadcast_after_terminal_operation"
+                  : null,
     actions,
     segments,
     safety: {
@@ -1230,4 +1364,37 @@ export function deriveFundingLifecycle(
       terminal: resultTerminal,
     },
   };
+}
+
+/**
+ * Re-evaluates the admission boundary immediately before an executor can
+ * broadcast an already-started attempt. The attempt itself is omitted only
+ * from its owning action: it proves that admission happened, but would
+ * otherwise mechanically turn that same action into `recovery_required`.
+ * All sibling attempts, cancellation, authority, receipt, and money facts
+ * remain in force, so a concurrent safety change still stops the broadcast.
+ */
+export function deriveFundingLifecycleBeforeActionBroadcast(
+  facts: FundingLifecycleFacts,
+  input: Readonly<{ actionId: string; attemptNumber: number }>,
+): FundingLifecycleProjection {
+  const actionPresent = facts.actions.some(
+    (action) => action.actionId === input.actionId,
+  );
+  if (!actionPresent) {
+    throw new Error("funding lifecycle broadcast action is missing");
+  }
+  return deriveFundingLifecycle({
+    ...facts,
+    actions: facts.actions.map((action) =>
+      action.actionId !== input.actionId
+        ? action
+        : {
+            ...action,
+            attempts: action.attempts.filter(
+              (attempt) => attempt.attemptNumber !== input.attemptNumber,
+            ),
+          },
+    ),
+  });
 }

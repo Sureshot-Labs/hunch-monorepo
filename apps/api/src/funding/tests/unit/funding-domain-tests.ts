@@ -21,13 +21,9 @@ import {
   selectVenueBindingForCurrentIntent,
 } from "../../domain/selections.js";
 import {
-  FUNDING_OPERATION_TRANSITIONS,
-  assertFundingOperationTransition,
-  canTransitionFundingOperation,
-  canTransitionSegment,
+  FUNDING_OPERATION_STATE_KEYS,
   isValidFundingOperationState,
   type FundingOperationState,
-  type FundingStateKey,
 } from "../../domain/transitions.js";
 import type {
   AssetLocation,
@@ -589,42 +585,23 @@ await test("never auto-commits a recommended destination", () => {
   assert.equal(only.reason, "single_valid_option");
 });
 
-await test("declares every valid state and rejects regressions", () => {
-  for (const [from, destinations] of Object.entries(
-    FUNDING_OPERATION_TRANSITIONS,
-  )) {
-    const [fromStatus, fromStage] = from.split(":");
+await test("declares every valid projection cache shape", () => {
+  for (const key of FUNDING_OPERATION_STATE_KEYS) {
+    const [fromStatus, fromStage] = key.split(":");
     const fromState = {
       status: fromStatus,
       stage: fromStage,
     } as FundingOperationState;
     assert.equal(isValidFundingOperationState(fromState), true);
-    assert.equal(canTransitionFundingOperation(fromState, fromState), true);
-    for (const destination of destinations) {
-      const [status, stage] = (destination as FundingStateKey).split(":");
-      const toState = { status, stage } as FundingOperationState;
-      assert.equal(isValidFundingOperationState(toState), true);
-      assert.equal(canTransitionFundingOperation(fromState, toState), true);
-    }
   }
-
   assert.equal(
-    canTransitionFundingOperation(
-      { status: "completed", stage: "terminal" },
-      { status: "in_progress", stage: "routing" },
-    ),
+    isValidFundingOperationState({
+      status: "completed",
+      stage: "routing",
+    }),
     false,
+    "only projector cache shapes are valid; there is no cache transition graph",
   );
-  assert.throws(
-    () =>
-      assertFundingOperationTransition(
-        { status: "ready", stage: "ready_for_consumer" },
-        { status: "in_progress", stage: "source_action" },
-      ),
-    /invalid funding operation transition/,
-  );
-  assert.equal(canTransitionSegment("submitted", "settling"), true);
-  assert.equal(canTransitionSegment("succeeded", "submitted"), false);
 });
 
 await test("default policy is immutable and fail-closed for creation only", () => {

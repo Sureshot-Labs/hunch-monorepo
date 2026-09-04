@@ -167,9 +167,23 @@ const tests: readonly Test[] = [
         /when \$10::boolean then coalesce\(completed_at, \$11::timestamptz\)/i,
       );
       assert.doesNotMatch(source, /when \$10::boolean then \$11::timestamptz/i);
+      const lifecycleWriter = source.slice(
+        source.indexOf(
+          "export async function writeFundingOperationLifecycleProjectionCacheInTransaction",
+        ),
+        source.indexOf(
+          "export async function writeFundingOperationSupportFactsInTransaction",
+        ),
+      );
+      assert.match(lifecycleWriter, /recovery_mode = \$4::text/i);
       assert.match(
-        source,
-        /when \$2 = 'recovery_required'[\s\S]+then \$4::text[\s\S]+else null/i,
+        lifecycleWriter,
+        /isValidFundingOperationState\(input\.state\)/,
+      );
+      assert.doesNotMatch(
+        lifecycleWriter,
+        /transitionFundingOperation|assertFundingOperationTransition/,
+        "projection cache writing must never resurrect the deleted transition graph",
       );
     },
   },
@@ -192,7 +206,7 @@ const tests: readonly Test[] = [
       const operationLock = start.indexOf("from funding_operations");
       const stepRead = start.indexOf("from funding_operation_steps step");
       const projection = start.indexOf(
-        "projectedFundingLifecycleInTransaction(client",
+        "projectedFundingActionInTransaction(client",
       );
       assert.ok(operationLock >= 0 && stepRead > operationLock);
       assert.match(
@@ -200,11 +214,59 @@ const tests: readonly Test[] = [
         /from funding_operations[\s\S]*for update/u,
       );
       assert.ok(projection > stepRead);
-      assert.match(
+      assert.match(start, /if \(!projectedAction\?\.actionable\)/u);
+      assert.doesNotMatch(
         start,
-        /if \(!projectedAction\?\.actionable\)/u,
+        /sibling_step\.state|row\.sibling_stop_state|operation\.status|row\.state/u,
       );
-      assert.doesNotMatch(start, /sibling_step\.state|row\.sibling_stop_state/u);
+    },
+  },
+  {
+    name: "Relay candidate selection derives execution and recovery eligibility after locking",
+    run: () => {
+      const source = readFileSync(
+        new URL(
+          "../../execution/relay-evm-delegated-executor-profile.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const claim = source.slice(
+        source.indexOf("async function claimRelay("),
+        source.indexOf("async function recoverRelay("),
+      );
+      const recovery = source.slice(
+        source.indexOf("async function recoverRelay("),
+        source.indexOf("async function preBroadcastRelay("),
+      );
+      const preBroadcast = source.slice(
+        source.indexOf("async function preBroadcastRelay("),
+        source.indexOf(
+          "async function allocateFinalizedRelaySourceDebitInTransaction(",
+        ),
+      );
+      assert.match(
+        claim,
+        /firstActionableRelayClaimRow\(client, rows, input\.now\)/u,
+      );
+      assert.match(claim, /for update of operation, step,[\s\S]*limit 25/u);
+      assert.doesNotMatch(
+        claim,
+        /step\.state|dependency\.state|operation\.status/u,
+      );
+      assert.match(
+        recovery,
+        /firstRecoverableRelayClaimRow\(client, rows, input\.now\)/u,
+      );
+      assert.doesNotMatch(recovery, /step\.state|operation\.status/u);
+      assert.match(
+        preBroadcast,
+        /projectedFundingActionBeforeBroadcastInTransaction/u,
+      );
+      assert.doesNotMatch(
+        preBroadcast,
+        /step\.state|dependency\.state|operation\.status/u,
+      );
     },
   },
   {
@@ -856,6 +918,93 @@ const tests: readonly Test[] = [
         );
       }
       assert.match(source, /name: "funding-relay-observe-postcondition-v1"/u);
+    },
+  },
+  {
+    name: "service lifecycle decisions cannot fall back to materialized funding caches",
+    run: () => {
+      const serviceSources = [
+        "../../../services/embedded-evm-sponsorship.ts",
+        "../../../services/telegram-bot-trading.ts",
+        "../../../services/telegram-funding-delivery.ts",
+        "../../../services/telegram-funding-route.ts",
+        "../../../services/telegram-trade-lifecycle-progress.ts",
+        "../../../services/telegram-trade-shortfall-auto-resume.ts",
+        "../../../services/user-financial-lifecycle.ts",
+      ].map((path) => readFileSync(new URL(path, import.meta.url), "utf8"));
+      for (const source of serviceSources) {
+        assert.doesNotMatch(
+          source,
+          /\b(?:funding_operation|operation)\.(?:status|progress_stage)\b/u,
+        );
+        assert.doesNotMatch(source, /\bstep\.state\b/u);
+        assert.doesNotMatch(source, /\bsegment\.status\b/u);
+      }
+
+      const runtime = readFileSync(
+        new URL("../../planner/runtime-service.ts", import.meta.url),
+        "utf8",
+      );
+      assert.match(runtime, /loadProjectedFundingOperationForUser/u);
+      assert.match(runtime, /listProjectedFundingOperationsForUser/u);
+
+      const readModel = readFileSync(
+        new URL(
+          "../../lifecycle/funding-lifecycle-read-model.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      assert.match(readModel, /for \(const operation of operations\)/u);
+      assert.doesNotMatch(
+        readModel,
+        /Promise\.all\(\s*operations\.map/u,
+        "a PoolClient is valid here, so lifecycle listings must not issue concurrent pg queries",
+      );
+
+      const depositEvents = readFileSync(
+        new URL("../../../services/deposit-events.ts", import.meta.url),
+        "utf8",
+      );
+      assert.doesNotMatch(
+        depositEvents,
+        /operation_row\.status not in \('failed', 'cancelled'\)/u,
+        "proven Relay output classification must not depend on an operation cache",
+      );
+
+      const telegramFundingSessions = readFileSync(
+        new URL(
+          "../../../services/telegram-funding-sessions.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      assert.match(
+        telegramFundingSessions,
+        /loadFundingLifecycleProjectionForOperation/u,
+      );
+      assert.doesNotMatch(telegramFundingSessions, /operation_row\.status/u);
+
+      const telegramBotTrading = readFileSync(
+        new URL("../../../services/telegram-bot-trading.ts", import.meta.url),
+        "utf8",
+      );
+      const telegramCancellationStart = telegramBotTrading.indexOf(
+        "if (cancellingFundingIntent)",
+      );
+      const telegramCancellationEnd = telegramBotTrading.indexOf(
+        "const exitsToMarket",
+        telegramCancellationStart,
+      );
+      const telegramCancellation = telegramBotTrading.slice(
+        telegramCancellationStart,
+        telegramCancellationEnd,
+      );
+      assert.match(
+        telegramCancellation,
+        /lifecycle\.safety\.externalEffectMayHaveOccurred/u,
+      );
+      assert.doesNotMatch(telegramCancellation, /step_row\.state/u);
     },
   },
 ];

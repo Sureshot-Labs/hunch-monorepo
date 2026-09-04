@@ -24,6 +24,150 @@ and test. The tables below seed that inventory; the implementation must fail
 the changeset if a grep/AST inventory contains an unclassified reader or
 writer.
 
+## Stage 1 cutover ledger — in progress
+
+The tables below are the pre-cutover inventory; their historical line numbers
+are intentionally retained so each former branch remains traceable. The live
+cutover status is:
+
+- Complete: `deriveFundingLifecycle(facts)` is pure and does not read an
+  operation, action, or segment projection cache. The common reducer writes
+  all three caches only after deriving it.
+- Complete: authenticated action start, cancellation/report handling,
+  reconciliation, Telegram activation and Router continuation re-derive under
+  their normal locks. No production caller invokes
+  `transitionFundingOperation*`.
+- Complete: receipt polling selects durable broadcast-capable attempt facts,
+  not `funding_operations.status` or `funding_operation_steps.state`; a late
+  transaction reference therefore remains observable after a stale terminal
+  cache.
+- Complete: the former 550-line reducer/path-walking lifecycle calculator and
+  its implementation-coupled test were removed. Its money/reorg/multi-leg
+  cases are covered by `funding-lifecycle-projector-tests`.
+- Complete: delegated Router and Relay execution, cleanup, and recovery scan
+  immutable authority/reservation/attempt facts, lock a bounded candidate
+  set, then use the projector for start/recovery eligibility. Relay
+  source-debit allocation likewise trusts its canonical receipt rather than a
+  step cache. Integration tests deliberately stale those caches and prove the
+  valid action/evidence still progresses.
+- Complete: Relay's pre-broadcast decision uses the projector's explicit
+  pre-start counterfactual for its own locked attempt. That preserves the
+  old safety check without treating `action_required` as authority, while
+  keeping concurrent cancellation, authority, receipt/reorg, and sibling
+  movement facts visible.
+- Complete: verified receive ingress and Relay allowance postconditions write
+  source/receipt facts and call the common reducer. There are no remaining
+  production writers that directly assign a funding step state other than the
+  reducer's projection-cache materializer. Router control-plane rejection
+  also checks projector actionability before recording its intentional
+  non-broadcast invalid-action fact.
+- Complete: reducer reservation release and its finalized-receipt worker hint
+  use lifecycle facts plus the projector, not a prior `step.state`. A
+  finalized receipt can therefore wake reduction even when a cache write was
+  delayed, while a finalized money observation remains mandatory before any
+  source reservation can be released.
+- Complete: Relay allowance-maintenance, cleanup, and pre-broadcast binding
+  use one pure action/attempt-budget helper plus locked projector facts. The
+  shared allowance lane is held only by an authorization-reservation lease;
+  terminal fact reduction releases it before a later claim. Neither query has
+  an operation/step cache predicate.
+- Complete: receive receipt routing derives its child operation disposition
+  from projector facts. Polymarket handoff attribution and chain-scan
+  collision detection likewise use the projector for unbroadcast `started`
+  candidates while retaining submitted/ambiguous broadcast candidates. A
+  deliberately stale terminal cache cannot hide a potential physical transfer.
+- Complete: the unreferenced operation/segment transition APIs and their
+  transition maps were removed. The remaining state-key whitelist validates
+  public projection shapes only; it cannot choose a next state. The reducer
+  returns its fact-derived target to the worker even after cache materialization
+  and after consumer-reservation expiry.
+- Complete: the shared lifecycle read model is the one boundary used by the
+  funding API runtime, Relay receive-link validation, Privy sponsorship,
+  Telegram retry/auto-resume/card/delivery selectors, and account
+  merge/deletion checks. These readers no longer choose behavior from a stored
+  operation, step, or segment aggregate cache.
+- Complete: Relay-output deposit classification, Telegram receive-session
+  liveness, and Telegram Buy cancellation now use that same factual boundary.
+  A stale terminal cache cannot reclassify a proven Relay output as an
+  unrelated wallet deposit, close an observed/routing receive lease while its
+  child operation is still live, or make cancellation treat an executed action
+  as pristine.
+- Complete: API step presentation exposes the projector's exact `actionable`
+  result. A reconcile-required sibling no longer hides an independent action;
+  the response shape and public status strings are unchanged.
+- Complete: account merge and Privy deletion inspect every linked operation's
+  facts serially under their existing transaction. This deliberately favors
+  safe destructive-action blocking over a stale terminal cache or unsafe
+  concurrent `pg` calls on one transaction client.
+- Complete: account merge locks the source user's funding rows before its
+  factual audit and moves that frozen source set only after every operation is
+  proven terminal. The ownership update has no second `status` eligibility
+  predicate; it first refreshes the existing cache from the factual projector
+  solely to satisfy the current immutable-plan trigger, so a delayed cache
+  cannot disagree with the audit.
+- Complete: `funding-persistence-tests` prevents the service-level lifecycle
+  readers from reintroducing `operation.status`, `step.state`, or
+  `segment.status` as decision inputs. An integration fixture corrupts a
+  terminal cache and proves the account lifecycle still sees the live
+  operation from attempt facts.
+- Complete: the Stage 1 cache-reader inventory is classified below and the
+  full fast suite plus the 16 lifecycle integration flows pass against the
+  single disposable PostgreSQL database. The regression suite includes a
+  deliberately stale terminal cache, independent action lanes, cancellation,
+  reconciliation, receipt/reorg, receive, direct withdrawal, Relay, and
+  Telegram continuation paths.
+- In progress: independent review. Stage 2 receive/preparation aggregate
+  deletion and Stage 3 schema work remain explicitly out of scope.
+- Not started: receive/preparation aggregate deletion and final schema work
+  belong to Stages 2 and 3, not this cutover.
+
+Current proof for the completed items:
+
+```text
+pnpm -F api run typecheck
+pnpm -F api run test:unit -- admin-merge-user deposit-events telegram-funding \
+  funding-persistence funding-lifecycle-projector
+pnpm -F api run test:fast
+pnpm -F api run test:integration -- --database-url …hunch_receipt_poll_test \
+  --expect-database hunch_receipt_poll_test funding-delegated-execution \
+  funding-composite-action-race funding-planning telegram-funding-receive \
+  funding-persistence funding-receive-internal-handoff funding-direct-withdrawal \
+  funding-receive-notification funding-operation-action-persistence reconciliation \
+  telegram-funding-buy-continuation telegram-funding-buy-return-source \
+  telegram-app-handoff-consent telegram-bot-trading-lifecycle \
+  telegram-bot-trading-market telegram-bot-trading-managed
+```
+
+### Mechanical cache-reader inventory (2026-09-04)
+
+The Stage-1 inventory command is intentionally narrow enough to be rerun
+without interpretation:
+
+```text
+rg -l --glob '*.ts' --glob '!**/*test*.ts' \
+  "operation\\.status|step\\.state|segment\\.status|funding_operations[^\\n]*(status|progress_stage)|funding_operation_steps[^\\n]*state|funding_operation_segments[^\\n]*status" \
+  apps/api/src
+```
+
+Every remaining production hit is classified below. It is not a live funding
+lifecycle decision outside the projector:
+
+| Location                                                                                             | Classification                         | Why it remains in Stage 1                                                                                                           |
+| ---------------------------------------------------------------------------------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `funding/lifecycle/funding-lifecycle-projector.ts`, `funding-lifecycle-facts-repository.ts`          | Projector contract/documentation       | The strings distinguish immutable plan state from forbidden cache input; neither file reads a mutable aggregate status.             |
+| `funding/persistence/funding-operation-repository.ts`, `funding-evidence-repository.ts`              | Cache materialization/transport        | They map or write public cache fields after fact derivation; step reads overlay the projector's state and actionability.            |
+| `funding/reconciliation/funding-reducer.ts`                                                          | Diagnostic/cache comparison            | `initialState` is returned only for reduction diagnostics and cache-write reporting; target selection is fact-derived.              |
+| `routes/funding.ts`                                                                                  | Public serialization                   | Runtime operations and step reads are already projector-backed; the route does not choose actionability from the serialized fields. |
+| `funding/planner/planning-types.ts`, `funding/validation/polymarket-router-commit-plan-validator.ts` | Immutable pre-commit plan              | These inspect the proposed action DAG before persistence, not `funding_operation_steps.state` from a committed operation.           |
+| `funding/position-actions/**`, `routes/position-actions.ts`                                          | Separate position-action state machine | It has its own financial facts and is deliberately outside funding-operation lifecycle scope.                                       |
+| `funding-migration-preflight.ts`                                                                     | Historical read-only audit             | It classifies old rows for later migration work and cannot execute, reserve, or release funds.                                      |
+| Tests                                                                                                | Characterization                       | Tests intentionally corrupt cache fields to prove facts dominate them.                                                              |
+
+The service directory is additionally guarded by a unit test: no sponsorship,
+Telegram, or user-financial lifecycle service may add a direct funding cache
+predicate. Any new exception must be added to this table and justified with a
+separate test.
+
 ## Non-negotiable target
 
 There will be exactly one decision-maker for funding lifecycle state:

@@ -2223,8 +2223,7 @@ async function inspectEvmTargetEvidence(
             actionMatch: false,
             ledgerHeight:
               chainTransactionScan?.attributionEndBlock?.toString() ?? null,
-            blockHash:
-              chainTransactionScan?.attributionEndBlockHash ?? null,
+            blockHash: chainTransactionScan?.attributionEndBlockHash ?? null,
             canonical: true,
             failureCode: "polymarket_handoff_chain_candidate_ambiguity",
             evidence: {
@@ -2616,7 +2615,7 @@ export class FundingStepReceiptReconciliationDriver {
   ): Promise<Readonly<{ receiptsPolled: number; receiptsFinalized: number }>> {
     const targets = await (
       this.dependencies.listTargets ?? listFundingStepReceiptTargets
-    )(pool, operationId, now);
+    )(pool, operationId);
     const inspectionContext = createEvmReceiptInspectionContext();
     const inspectionResults: ReadonlyArray<
       PromiseSettledResult<

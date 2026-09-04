@@ -3,6 +3,7 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
 import { isRawAmount } from "../funding/domain/raw-amount.js";
 import { isFundingActionFailureCode } from "../funding/execution/action-report.js";
+import { loadFundingLifecycleProjectionForOperation } from "../funding/lifecycle/funding-lifecycle-read-model.js";
 import {
   isTelegramPolymarketRouterContinuationPending,
   isTelegramRouterContinuationHardReason,
@@ -731,8 +732,7 @@ function liveProgressFor(
   const ready =
     candidate.operation_status === "ready" &&
     candidate.progress_stage === "ready_for_consumer";
-  const recoveryRequired =
-    candidate.operation_status === "recovery_required";
+  const recoveryRequired = candidate.operation_status === "recovery_required";
   const awaitingReconciliation =
     recoveryRequired || candidate.operation_status === "reconcile_required";
   const externalHandoffReceiptNeedsAttention =
@@ -988,9 +988,6 @@ async function listCandidates(
             continuation.id::text as continuation_id,
             ${telegramPolymarketRootRequiresRouterContinuationSql("operation")}
               as root_requires_router_continuation,
-            tracked_operation.status as operation_status,
-            tracked_operation.progress_stage,
-            tracked_operation.error_code as operation_error_code,
             (
               select attempt.actual_costs ->> 'reasonCode'
                 from funding_operation_step_attempts attempt
@@ -1000,14 +997,6 @@ async function listCandidates(
                order by step.ordinal desc, attempt.attempt_number desc
                limit 1
             ) as attempt_reason_code,
-            coalesce((
-              select string_agg(
-                       step.ordinal::text || ':' || step.state,
-                       ',' order by step.ordinal
-                     )
-                from funding_operation_steps step
-               where step.operation_id = tracked_operation.id
-            ), '') as step_state_fingerprint,
             coalesce((
               select string_agg(
                        step.ordinal::text || ':' || receipt.status,
@@ -1048,51 +1037,6 @@ async function listCandidates(
                 join funding_operation_steps step on step.id = attempt.step_id
                where step.operation_id = tracked_operation.id
             ), '') as attempt_state_fingerprint,
-            exists (
-              select 1
-                from funding_operation_step_attempts attempt
-                join funding_operation_steps step on step.id = attempt.step_id
-               where step.operation_id = tracked_operation.id
-                 and (
-                   attempt.broadcast_may_have_occurred
-                   or attempt.outcome in ('submitted', 'ambiguous', 'succeeded')
-                 )
-            ) as has_broadcast_boundary,
-            exists (
-              select 1
-                from funding_operation_step_attempts attempt
-                join funding_operation_steps step on step.id = attempt.step_id
-               where step.operation_id = tracked_operation.id
-                 and attempt.outcome = 'ambiguous'
-                 and attempt.broadcast_may_have_occurred
-                 and (
-                   (
-                     attempt.reference_kind = 'provider_receipt'
-                     and not exists (
-                       select 1
-                         from funding_step_receipt_observations receipt
-                        where receipt.attempt_id = attempt.id
-                          and receipt.status = 'finalized'
-                          and receipt.canonical
-                          and receipt.action_match
-                     )
-                   )
-                   or (
-                     attempt.reference_kind = 'external_handoff'
-                     and step.state in ('submitted', 'reconcile_required')
-                     and not exists (
-                       select 1
-                         from funding_step_receipt_observations receipt
-                        where receipt.attempt_id = attempt.id
-                          and (
-                            receipt.status not in ('pending', 'confirmed')
-                            or not receipt.canonical
-                            or receipt.action_match is false
-                          )
-                     )
-                   )
-                 )
-            ) as has_automatic_provider_reference_wait,
             exists (
               select 1
                 from funding_operation_step_attempts attempt
@@ -1139,20 +1083,14 @@ async function listCandidates(
               continuation.support_metadata ->> 'fundingAuthorizationId',
               operation.support_metadata ->> 'fundingAuthorizationId'
             )
-       cross join lateral (
-         select coalesce(continuation.id, operation.id) as id,
-                coalesce(continuation.status, operation.status) as status,
-                coalesce(continuation.progress_stage, operation.progress_stage) as progress_stage,
+         cross join lateral (
+           select coalesce(continuation.id, operation.id) as id,
                 coalesce(
                   continuation.actual_destination_amount,
                   operation.actual_destination_amount,
                   continuation.requested_destination_amount,
                   operation.requested_destination_amount
-                ) as destination_amount,
-                case
-                  when continuation.id is null then operation.error_code
-                  else continuation.error_code
-                end as error_code
+                ) as destination_amount
        ) tracked_operation
        left join lateral (
          select greatest(
@@ -1267,7 +1205,48 @@ async function listCandidates(
       TELEGRAM_TRADE_LIFECYCLE_PROJECTION_VERSION,
     ],
   });
-  return rows;
+  const projected: ProjectionCandidate[] = [];
+  for (const candidate of rows) {
+    if (!candidate.tracked_operation_id) {
+      projected.push({
+        ...candidate,
+        has_automatic_provider_reference_wait: false,
+        has_broadcast_boundary: false,
+        operation_error_code: null,
+        operation_status: null,
+        progress_stage: null,
+        step_state_fingerprint: "",
+      });
+      continue;
+    }
+    // `client` is a single transaction connection. Fact reads must stay
+    // serial: parallel pg queries queue unpredictably and are deprecated.
+    const lifecycleProjection =
+      await loadFundingLifecycleProjectionForOperation(client, {
+        operationId: candidate.tracked_operation_id,
+      });
+    if (!lifecycleProjection) continue;
+    const { facts, lifecycle } = lifecycleProjection;
+    const actionStateById = new Map(
+      lifecycle.actions.map((action) => [action.actionId, action.state]),
+    );
+    projected.push({
+      ...candidate,
+      has_automatic_provider_reference_wait:
+        lifecycle.safety.awaitingProviderReceipt,
+      has_broadcast_boundary: lifecycle.safety.externalEffectMayHaveOccurred,
+      operation_error_code: lifecycle.errorCode,
+      operation_status: lifecycle.status,
+      progress_stage: lifecycle.progressStage,
+      step_state_fingerprint: facts.actions
+        .map(
+          (action) =>
+            `${action.ordinal}:${actionStateById.get(action.actionId) ?? "planned"}`,
+        )
+        .join(","),
+    });
+  }
+  return projected;
 }
 
 /**

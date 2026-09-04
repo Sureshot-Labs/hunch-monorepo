@@ -14,6 +14,8 @@ import {
   type FundingCommitPlan,
 } from "../persistence/funding-operation-repository.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
+import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
+import { relayActionCanCreateCleanup } from "./relay-evm-lifecycle.js";
 import type { RelayEvmFundingProfileSpec } from "./relay-evm-profile-specs.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
@@ -44,9 +46,11 @@ async function loadCleanupCandidate(
   client: PoolClient,
   parentOperationId: string,
   profileId: string,
+  now: Date,
 ): Promise<CleanupCandidate | null> {
   const { rows } = await client.query<{
     authorization_id: string;
+    approval_step_id: string;
     destination_target_snapshot: JsonRecord;
     deposit_step_id: string;
     operation_id: string;
@@ -75,23 +79,19 @@ async function loadCleanupCandidate(
             operation.original_subject_lookup_hmac as subject_lookup_hmac,
             operation.subject_lookup_key_version,
             operation.venue_id,
+            approval_step.id as approval_step_id,
             deposit_step.id as deposit_step_id,
             funding_authorization.id as authorization_id,
             funding_authorization.wallet_address,
             reservation.id as reservation_id,
             exists (
               select 1
-                from funding_operation_steps successful_approval
-                join funding_step_receipt_observations approval_receipt
-                  on approval_receipt.step_id = successful_approval.id
+                from funding_step_receipt_observations approval_receipt
+               where approval_receipt.step_id = approval_step.id
                  and approval_receipt.status = 'finalized'
                  and approval_receipt.action_match
                  and approval_receipt.canonical
                  and approval_receipt.evidence ->> 'allowanceExact' = 'true'
-               where successful_approval.operation_id = operation.id
-                 and successful_approval.executor_id = $2
-                 and successful_approval.action_validation_result ->> 'relayStepKind' =
-                       'approve'
             ) as approval_succeeded,
             exists (
               select 1
@@ -108,6 +108,10 @@ async function loadCleanupCandidate(
          on deposit_step.operation_id = operation.id
         and deposit_step.executor_id = $2
         and deposit_step.action_validation_result ->> 'relayStepKind' = 'deposit'
+       join funding_operation_steps approval_step
+         on approval_step.operation_id = operation.id
+        and approval_step.executor_id = $2
+        and approval_step.action_validation_result ->> 'relayStepKind' = 'approve'
        join telegram_funding_authorizations funding_authorization
          on funding_authorization.id::text =
               operation.support_metadata ->> 'fundingAuthorizationId'
@@ -116,43 +120,6 @@ async function loadCleanupCandidate(
         and reservation.status = 'reserved'
         and reservation.cleanup_operation_id is null
        where operation.id = $1::uuid
-         and operation.status in (
-               'in_progress', 'reconcile_required', 'recovery_required'
-             )
-         and deposit_step.state in (
-               'planned', 'action_required', 'succeeded', 'failed',
-               'recovery_required'
-             )
-         and exists (
-           select 1
-             from funding_operation_steps approval_step
-            where approval_step.operation_id = operation.id
-              and approval_step.executor_id = $2
-              and approval_step.action_validation_result ->> 'relayStepKind' =
-                    'approve'
-              and (
-                exists (
-                  select 1
-                    from funding_step_receipt_observations approval_receipt
-                   where approval_receipt.step_id = approval_step.id
-                     and approval_receipt.status = 'finalized'
-                     and approval_receipt.action_match
-                     and approval_receipt.canonical
-                     and approval_receipt.evidence ->> 'allowanceExact' = 'true'
-                )
-                or (
-                  approval_step.state in (
-                    'action_required', 'failed', 'recovery_required'
-                  )
-                  and (
-                    approval_step.action_expires_at <= clock_timestamp()
-                    or (select count(*)
-                          from funding_operation_step_attempts used
-                         where used.step_id = approval_step.id) >= 2
-                  )
-                )
-              )
-         )
          and not exists (
            select 1
            from funding_operation_step_attempts attempt
@@ -169,12 +136,21 @@ async function loadCleanupCandidate(
                  and attempt_receipt.canonical
              )
          )
-       for update of operation, deposit_step, funding_authorization, reservation
+       for update of operation, approval_step, deposit_step,
+                     funding_authorization, reservation
        limit 1`,
     [parentOperationId, profileId],
   );
   const row = rows[0];
   if (!row) return null;
+  const lifecycleFacts =
+    await loadFundingLifecycleFactsForOperationInTransaction(client, {
+      operationId: row.operation_id,
+      now,
+    });
+  if (!relayActionCanCreateCleanup(lifecycleFacts, row.approval_step_id)) {
+    return null;
+  }
   return {
     authorizationId: row.authorization_id,
     destinationSnapshot: row.destination_target_snapshot,
@@ -221,6 +197,7 @@ export async function createRelayAllowanceCleanupOperationInTransaction(
     client,
     input.parentOperationId,
     input.profile.profileId,
+    input.now,
   );
   if (!candidate) return null;
   const action = {

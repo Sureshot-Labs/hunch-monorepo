@@ -18,6 +18,8 @@ import { lockFundingPolicyForTransaction } from "../policies/funding-policy-serv
 import { sameAsset } from "../planner/money.js";
 import type { FundingPlanningRuntime } from "../planner/runtime-service.js";
 import { lockFundingAuthorizationReservationScope } from "../persistence/funding-authorization-reservation-lock.js";
+import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
+import { deriveFundingLifecycle } from "../lifecycle/funding-lifecycle-projector.js";
 import {
   claimFundingReceiveReceiptOperationLinkInTransaction,
   deferFundingReceiveReceiptRouting,
@@ -107,6 +109,34 @@ export type FundingReceiveChildOperationDisposition =
   | "review_retry"
   | "recovery"
   | "waiting";
+
+type FundingReceiveChildOperationLifecycle = Readonly<{
+  status: string;
+  recoveryMode: "automatic_evidence" | "manual_review" | null;
+}>;
+
+/**
+ * Child routing is a lifecycle decision, not a read of its materialized
+ * `funding_operations.status` cache. This preserves the conservative receive
+ * behavior across a reducer delay: no new routing action is created until the
+ * same immutable plan and durable execution facts agree on the child state.
+ */
+async function loadFundingReceiveChildOperationLifecycle(
+  db: Pick<Pool, "query">,
+  childOperationId: string,
+  now: Date,
+): Promise<FundingReceiveChildOperationLifecycle | null> {
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(db, {
+    operationId: childOperationId,
+    now,
+  });
+  if (!facts) return null;
+  const lifecycle = deriveFundingLifecycle(facts);
+  return {
+    status: lifecycle.status,
+    recoveryMode: lifecycle.recoveryMode,
+  };
+}
 
 /**
  * A generic failed/cancelled child is retryable only when durable attempt
@@ -609,18 +639,37 @@ export class FundingReceiveReceiptRouter {
         }
         continue;
       }
+      const childOperationId = target.receipt.childFundingOperationId;
+      if (!childOperationId) continue;
+      let childLifecycle: FundingReceiveChildOperationLifecycle | null;
+      try {
+        childLifecycle = await loadFundingReceiveChildOperationLifecycle(
+          this.db,
+          childOperationId,
+          now,
+        );
+      } catch (error) {
+        // A failed fact read is transient infrastructure uncertainty. Leave
+        // the receipt routing lease intact; the next worker tick rechecks it
+        // rather than classifying a healthy route from an old cache.
+        console.warn("[funding-receive] child lifecycle projection failed", {
+          receiptId: target.receipt.receiptId,
+          childOperationId,
+          errorName: error instanceof Error ? error.name : null,
+        });
+        continue;
+      }
       const childDisposition = fundingReceiveChildOperationDisposition({
-        childOperationStatus: target.childOperationStatus,
+        childOperationStatus: childLifecycle?.status ?? "recovery_required",
         delegatedExecution: Boolean(
           target.childExecutorId &&
           delegatedFundingProfile(target.childExecutorId),
         ),
         broadcastMayHaveOccurred: target.childBroadcastMayHaveOccurred,
         hasUnfinishedAttempt: target.childHasUnfinishedAttempt,
-        recoveryMode: target.childOperationRecoveryMode,
+        recoveryMode: childLifecycle?.recoveryMode ?? "manual_review",
       });
-      const childOperationId = target.receipt.childFundingOperationId;
-      if (!childOperationId || childDisposition === "waiting") continue;
+      if (childDisposition === "waiting") continue;
       const fallbackReview =
         childDisposition === "review_retry"
           ? this.reviewFallback(target).evidence
@@ -632,12 +681,7 @@ export class FundingReceiveReceiptRouter {
             ? "review_required"
             : "recovery_required";
       const childOperationStatus =
-        target.childOperationStatus ??
-        (childDisposition === "ready"
-          ? "completed"
-          : childDisposition === "review_retry"
-            ? "failed"
-            : "recovery_required");
+        childLifecycle?.status ?? "recovery_required";
       const settled = await settleFundingReceiveReceiptRouting(this.db, {
         receiptId: target.receipt.receiptId,
         receiveSessionId: target.receipt.receiveSessionId,

@@ -40,6 +40,7 @@ type LifecycleRouteLegRow = Readonly<{
 type LifecycleActionRow = Readonly<{
   action_expires_at: Date | null;
   action_validation_result: JsonRecord;
+  attempt_actual_costs: JsonRecord | null;
   attempt_number: number | null;
   attempt_outcome: FundingLifecycleActionAttempt["outcome"] | null;
   attempt_reference_kind: FundingLifecycleActionAttempt["referenceKind"] | null;
@@ -82,9 +83,7 @@ type DelegatedTelegramAuthorizationFacts = Readonly<{
   reservationActive: boolean;
 }>;
 
-function delegatedTelegramIntentId(
-  supportMetadata: JsonRecord,
-): string | null {
+function delegatedTelegramIntentId(supportMetadata: JsonRecord): string | null {
   if (supportMetadata.delegatedOriginKind !== "trade_shortfall_intent") {
     return null;
   }
@@ -129,12 +128,7 @@ async function loadDelegatedTelegramAuthorizationFacts(
             and reservation.status = 'reserved'
         ) as "reservationActive"
     `,
-    [
-      input.operationId,
-      intentId,
-      input.userId,
-      input.supportMetadata,
-    ],
+    [input.operationId, intentId, input.userId, input.supportMetadata],
   );
   return rows[0] ?? { intentActive: false, reservationActive: false };
 }
@@ -144,7 +138,8 @@ function actionAuthorization(
   telegram: DelegatedTelegramAuthorizationFacts | null,
 ): FundingLifecycleActionFact["authorization"] {
   if (telegram === null) return undefined;
-  const isRouterAction = action.executor_id === "polymarket_deposit_pusd_fund_v1";
+  const isRouterAction =
+    action.executor_id === "polymarket_deposit_pusd_fund_v1";
   const isRelayAction = relayEvmFundingProfileSpec(action.executor_id) !== null;
   if (!isRouterAction && !isRelayAction) return undefined;
   return telegram.intentActive && (isRouterAction || telegram.reservationActive)
@@ -215,7 +210,14 @@ function actionActivation(
 }
 
 function actionMayMoveMoney(action: LifecycleActionRow): boolean {
-  return !["approval", "signature"].includes(action.step_kind);
+  if (["approval", "signature"].includes(action.step_kind)) return false;
+  // Relay's approve action is represented by its generic transaction step
+  // kind. Its immutable profile payload, rather than a mutable step cache,
+  // is the canonical distinction from the following money-moving deposit.
+  return !(
+    relayEvmFundingProfileSpec(action.executor_id) !== null &&
+    action.action_validation_result.relayStepKind === "approve"
+  );
 }
 
 function actionRequiresSourceDebitEvidence(
@@ -234,6 +236,15 @@ function actionRequiresSourceDebitEvidence(
   );
 }
 
+function actionRequiresAllowanceZeroEvidence(
+  action: LifecycleActionRow,
+): boolean {
+  return (
+    relayEvmFundingProfileSpec(action.executor_id) !== null &&
+    action.action_validation_result.relayStepKind === "cleanup"
+  );
+}
+
 function receiptFromRow(
   row: LifecycleActionRow,
 ): FundingLifecycleActionReceipt | null {
@@ -243,7 +254,18 @@ function receiptFromRow(
   return {
     status: row.receipt_status,
     canonical: row.receipt_canonical,
-    actionMatched: row.receipt_action_match,
+    // A Relay allowance read at the approval's height but a different block
+    // hash invalidates that approval's exact postcondition. This is durable
+    // receipt evidence, not a mutable deposit-step cache override.
+    actionMatched:
+      row.receipt_evidence?.allowanceAnchorRejected === true ||
+      row.receipt_evidence?.allowanceExactRejected === true ||
+      (actionRequiresAllowanceZeroEvidence(row) &&
+        row.receipt_evidence?.allowanceOwnershipRejected === true) ||
+      (actionRequiresAllowanceZeroEvidence(row) &&
+        row.receipt_evidence?.allowanceZero !== true)
+        ? false
+        : row.receipt_action_match,
     failureFinalized: row.receipt_evidence?.failureFinalized === true,
   };
 }
@@ -296,43 +318,125 @@ function reconciliationEvidenceDeadline(
   return new Date(startedAt.getTime() + timeoutMs);
 }
 
+/**
+ * Lifecycle decisions are recorded as small, append-only facts in support
+ * metadata until the dedicated durable-event schema lands in Stage 3. Keep
+ * their decoding here, rather than letting each projection branch perform its
+ * own untyped JSON checks.
+ */
+function lifecycleMetadataRecord(
+  supportMetadata: JsonRecord,
+  key: string,
+): JsonRecord | null {
+  const candidate = supportMetadata[key];
+  return candidate !== null &&
+    typeof candidate === "object" &&
+    !Array.isArray(candidate)
+    ? (candidate as JsonRecord)
+    : null;
+}
+
+function lifecycleMetadataDate(metadata: JsonRecord, key: string): Date | null {
+  const value = metadata[key];
+  if (typeof value !== "string") return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 function lifecycleCancellation(
   supportMetadata: JsonRecord,
 ): FundingLifecycleFacts["cancellation"] {
-  const candidate = supportMetadata.lifecycleCancellation;
-  if (
-    candidate === null ||
-    typeof candidate !== "object" ||
-    Array.isArray(candidate)
-  ) {
-    return null;
-  }
-  const requestedAt = (candidate as JsonRecord).requestedAt;
-  if (typeof requestedAt !== "string") return null;
-  const parsed = new Date(requestedAt);
-  if (Number.isNaN(parsed.getTime())) return null;
-  return { requestedAt: parsed };
+  const candidate = lifecycleMetadataRecord(
+    supportMetadata,
+    "lifecycleCancellation",
+  );
+  const requestedAt = candidate
+    ? lifecycleMetadataDate(candidate, "requestedAt")
+    : null;
+  return requestedAt ? { requestedAt } : null;
 }
 
 function lifecycleManualRecovery(
   supportMetadata: JsonRecord,
 ): FundingLifecycleFacts["manualRecovery"] {
-  const candidate = supportMetadata.lifecycleManualRecovery;
-  if (
-    candidate === null ||
-    typeof candidate !== "object" ||
-    Array.isArray(candidate)
-  ) {
+  const candidate = lifecycleMetadataRecord(
+    supportMetadata,
+    "lifecycleManualRecovery",
+  );
+  const code = candidate?.code;
+  const requestedAt = candidate
+    ? lifecycleMetadataDate(candidate, "requestedAt")
+    : null;
+  return typeof code === "string" && requestedAt ? { code, requestedAt } : null;
+}
+
+function lifecycleAutomaticRecovery(
+  supportMetadata: JsonRecord,
+): FundingLifecycleFacts["automaticRecovery"] {
+  const candidate = lifecycleMetadataRecord(
+    supportMetadata,
+    "lifecycleAutomaticRecovery",
+  );
+  const code = candidate?.code;
+  const requestedAt = candidate
+    ? lifecycleMetadataDate(candidate, "requestedAt")
+    : null;
+  if (typeof code === "string" && requestedAt) {
+    return { code, requestedAt };
+  }
+
+  // Operations written before the projector recorded the same durable event
+  // as two diagnostics fields. Read them once as facts so an in-flight route
+  // cannot regress merely because its active-window cache is cleared.
+  const fallbackCode = supportMetadata.reconciliationRecoveryReason;
+  if (typeof fallbackCode !== "string") {
     return null;
   }
-  const code = (candidate as JsonRecord).code;
-  const requestedAt = (candidate as JsonRecord).requestedAt;
-  if (typeof code !== "string" || typeof requestedAt !== "string") {
+  const fallbackRequestedAt = lifecycleMetadataDate(
+    supportMetadata,
+    "reconciliationRecoveryRequiredAt",
+  );
+  return fallbackRequestedAt
+    ? { code: fallbackCode, requestedAt: fallbackRequestedAt }
+    : null;
+}
+
+function lifecycleTerminalFailure(
+  supportMetadata: JsonRecord,
+): FundingLifecycleFacts["terminalFailure"] {
+  const candidate = lifecycleMetadataRecord(
+    supportMetadata,
+    "lifecycleTerminalFailure",
+  );
+  const code = candidate?.code;
+  const decidedAt = candidate
+    ? lifecycleMetadataDate(candidate, "decidedAt")
+    : null;
+  if (typeof code !== "string" || !decidedAt) return null;
+  const actionId = candidate?.actionId;
+  return {
+    code,
+    decidedAt,
+    actionId: typeof actionId === "string" ? actionId : null,
+  };
+}
+
+function lifecycleTerminalCompletion(
+  supportMetadata: JsonRecord,
+): FundingLifecycleFacts["terminalCompletion"] {
+  const candidate = lifecycleMetadataRecord(
+    supportMetadata,
+    "lifecycleTerminalCompletion",
+  );
+  const code = candidate?.code;
+  const decidedAt = candidate
+    ? lifecycleMetadataDate(candidate, "decidedAt")
+    : null;
+  const actionId = candidate?.actionId;
+  if (typeof code !== "string" || !decidedAt || typeof actionId !== "string") {
     return null;
   }
-  const parsed = new Date(requestedAt);
-  if (Number.isNaN(parsed.getTime())) return null;
-  return { code, requestedAt: parsed };
+  return { code, decidedAt, actionId };
 }
 
 /**
@@ -402,6 +506,7 @@ export async function loadFundingLifecycleFactsForOperationInTransaction(
         attempt.outcome as attempt_outcome,
         attempt.broadcast_may_have_occurred,
         attempt.reference_kind as attempt_reference_kind,
+        attempt.actual_costs as attempt_actual_costs,
         attempt.started_at as attempt_started_at,
         coalesce(
           attempt.updated_at,
@@ -492,6 +597,10 @@ export async function loadFundingLifecycleFactsForOperationInTransaction(
             outcome: row.attempt_outcome,
             broadcastMayHaveOccurred: row.broadcast_may_have_occurred,
             referenceKind: row.attempt_reference_kind,
+            retryableAfterFailure:
+              row.attempt_actual_costs?.retryableProviderFailure === true,
+            retryableAfterReorg:
+              row.attempt_actual_costs?.retryableAfterReorg === true,
             startedAt: row.attempt_started_at,
             updatedAt: row.attempt_updated_at,
             receipt: receiptFromRow(row),
@@ -578,6 +687,9 @@ export async function loadFundingLifecycleFactsForOperationInTransaction(
         : null,
     cancellation: lifecycleCancellation(header.support_metadata),
     manualRecovery: lifecycleManualRecovery(header.support_metadata),
+    automaticRecovery: lifecycleAutomaticRecovery(header.support_metadata),
+    terminalFailure: lifecycleTerminalFailure(header.support_metadata),
+    terminalCompletion: lifecycleTerminalCompletion(header.support_metadata),
     reconciliation: {
       evidenceDeadline: reconciliationEvidenceDeadline(
         header.support_metadata,

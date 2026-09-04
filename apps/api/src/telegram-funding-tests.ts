@@ -181,10 +181,14 @@ function supersedeSessionPool(
         };
       }
       if (
-        normalized.startsWith("select exists (") &&
+        normalized.includes(
+          "select distinct receive_receipt.child_funding_operation_id",
+        ) &&
         normalized.includes("from funding_receive_receipts receive_receipt")
       ) {
-        return { rows: [{ live_routing: liveRouting }] };
+        return {
+          rows: liveRouting ? [{ child_funding_operation_id: null }] : [],
+        };
       }
       if (normalized.startsWith("update funding_receive_sessions")) {
         return { rows: receiveCanClose ? [{ id: receiveSessionId }] : [] };

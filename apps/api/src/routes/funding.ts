@@ -389,20 +389,7 @@ function publicConsumerReservation(
     : null;
 }
 
-const OPERATION_ACTION_STOP_STATES = new Set([
-  "ready",
-  "reconcile_required",
-  "recovery_required",
-  "completed",
-  "refunded",
-  "failed",
-  "cancelled",
-]);
-
-function publicOperationStep(
-  step: FundingOperationStep,
-  operationActionable: boolean,
-) {
+function publicOperationStep(step: FundingOperationStep) {
   return {
     stepId: step.id,
     ordinal: step.ordinal,
@@ -410,20 +397,11 @@ function publicOperationStep(
     state: step.state,
     dependsOnStepId: step.dependsOnStepId,
     dependencyState: step.dependencyState,
-    actionable:
-      operationActionable &&
-      step.state === "action_required" &&
-      (step.dependsOnStepId === null || step.dependencyState === "succeeded"),
+    actionable: step.actionable === true,
   };
 }
 
-function publicOperationSteps(
-  operation: FundingOperationRow,
-  steps: readonly FundingOperationStep[],
-) {
-  const operationActionable =
-    !OPERATION_ACTION_STOP_STATES.has(operation.status) &&
-    !steps.some((step) => OPERATION_ACTION_STOP_STATES.has(step.state));
+function publicOperationSteps(steps: readonly FundingOperationStep[]) {
   return steps
     .filter(
       (step) =>
@@ -432,7 +410,27 @@ function publicOperationSteps(
           step.actionValidationResult.activation === "after_verified_ingress"
         ),
     )
-    .map((step) => publicOperationStep(step, operationActionable));
+    .map(publicOperationStep);
+}
+
+/**
+ * Funding mutations return the result just written by the common reducer. The
+ * reducer derived that result from facts under the mutation lock; the action
+ * rows below are independently projector-backed. Ordinary GET/list reads use
+ * the runtime's projector-backed read model as well.
+ */
+async function publicProjectedOperationResponse(
+  dependencies: FundingRouteDependencies,
+  userId: string,
+  operation: FundingOperationRow,
+) {
+  return {
+    operation: publicOperation(operation),
+    steps: publicOperationSteps(
+      await dependencies.operationSteps(userId, operation.id),
+    ),
+    ingress: publicIngress(operation),
+  };
 }
 
 function errorStatus(error: unknown): number {
@@ -932,12 +930,11 @@ export function registerFundingRoutes(
           );
           return reply.send({
             ok: true,
-            operation: publicOperation(committed.operation),
-            steps: publicOperationSteps(
+            ...(await publicProjectedOperationResponse(
+              dependencies,
+              userId,
               committed.operation,
-              await dependencies.operationSteps(userId, committed.operation.id),
-            ),
-            ingress: publicIngress(committed.operation),
+            )),
             replayed: committed.replayed,
           });
         },
@@ -1340,12 +1337,11 @@ export function registerFundingRoutes(
           const committed = await dependencies.commit(userId, request.body);
           return reply.send({
             ok: true,
-            operation: publicOperation(committed.operation),
-            steps: publicOperationSteps(
+            ...(await publicProjectedOperationResponse(
+              dependencies,
+              userId,
               committed.operation,
-              await dependencies.operationSteps(userId, committed.operation.id),
-            ),
-            ingress: publicIngress(committed.operation),
+            )),
             replayed: committed.replayed,
           });
         },
@@ -1378,12 +1374,11 @@ export function registerFundingRoutes(
           );
           return reply.send({
             ok: true,
-            operation: publicOperation(operation),
-            steps: publicOperationSteps(
+            ...(await publicProjectedOperationResponse(
+              dependencies,
+              userId,
               operation,
-              await dependencies.operationSteps(userId, operation.id),
-            ),
-            ingress: publicIngress(operation),
+            )),
           });
         },
       ),
@@ -1423,7 +1418,6 @@ export function registerFundingRoutes(
             ok: true,
             operation: publicOperation(operation),
             steps: publicOperationSteps(
-              operation,
               await dependencies.operationSteps(userId, operation.id),
             ),
             ingress: publicIngress(operation),

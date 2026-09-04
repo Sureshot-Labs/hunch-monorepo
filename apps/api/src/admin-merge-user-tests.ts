@@ -94,7 +94,7 @@ function createMergeDb(fixture: MergeDbFixture) {
         ] as unknown as T[]);
       }
       if (
-        normalized.includes("as non_terminal_funding_operations") &&
+        normalized.includes("as live_funding_reservations") &&
         normalized.includes("as funding_consent_conflicts")
       ) {
         const conflicts = fixture.fundingConflicts ?? {};
@@ -102,9 +102,6 @@ function createMergeDb(fixture: MergeDbFixture) {
           {
             active_funding_leases: String(conflicts.activeFundingLeases ?? 0),
             active_funding_routes: String(conflicts.activeFundingRoutes ?? 0),
-            ambiguous_funding_attempts: String(
-              conflicts.ambiguousFundingAttempts ?? 0,
-            ),
             funding_consent_conflicts: String(
               conflicts.fundingConsentConflicts ?? 0,
             ),
@@ -116,9 +113,6 @@ function createMergeDb(fixture: MergeDbFixture) {
               conflicts.liveFundingReservations ?? 0,
             ),
             live_funding_authorization_reservations: "0",
-            non_terminal_funding_operations: String(
-              conflicts.nonTerminalFundingOperations ?? 0,
-            ),
             non_terminal_legacy_bridge_orders: String(
               conflicts.nonTerminalLegacyBridgeOrders ?? 0,
             ),
@@ -291,13 +285,13 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
           assert.deepEqual(error.conflicts, {
             activeFundingLeases: 1,
             activeFundingRoutes: 7,
-            ambiguousFundingAttempts: 2,
+            ambiguousFundingAttempts: 0,
             fundingConsentConflicts: 0,
             fundingIdempotencyConflicts: 0,
             fundingPreparationRuns: 11,
             fundingTradeAttempts: 8,
             liveFundingReservations: 3,
-            nonTerminalFundingOperations: 4,
+            nonTerminalFundingOperations: 0,
             nonTerminalLegacyBridgeOrders: 5,
             nonTerminalTelegramTradeIntents: 6,
             positionActionEvidence: 9,
@@ -348,6 +342,21 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
       assert.equal(fake.state.committed, true);
       assert.equal(fake.state.rolledBack, false);
       assert.equal(fake.state.released, true);
+      const fundingLockIndex = fake.calls.findIndex((call) =>
+        compactSql(call.sql).startsWith(
+          "select operation_row.id from funding_operations operation_row",
+        ),
+      );
+      const fundingConflictAuditIndex = fake.calls.findIndex((call) =>
+        compactSql(call.sql).includes("as live_funding_reservations"),
+      );
+      const fundingOwnershipMove = fake.calls.find((call) =>
+        compactSql(call.sql).startsWith("update funding_operations"),
+      );
+      assert.ok(fundingLockIndex >= 0);
+      assert.ok(fundingConflictAuditIndex > fundingLockIndex);
+      assert.ok(fundingOwnershipMove);
+      assert.doesNotMatch(compactSql(fundingOwnershipMove.sql), /status in/);
       assert.equal(countCalls(fake.calls, /^update user_telegram_accounts/), 1);
       assert.equal(
         countCalls(fake.calls, /^update telegram_bot_trading_authorizations/),

@@ -754,6 +754,18 @@ console.log(
     explicitStoreClient.release();
     implicitStoreClient.release();
   }
+
+  // This fixture exercises a real Telegram-funded trade attempt, but it does
+  // not exercise the global Telegram lifecycle worker. Remove only its card
+  // and handoff after the race assertions so a later integration test does
+  // not mistake this deliberately unfinished fixture for live user work.
+  await pool.query(
+    `delete from telegram_app_handoffs where trade_intent_id = $1::uuid`,
+    [intentId],
+  );
+  await pool.query(`delete from telegram_trade_intents where id = $1::uuid`, [
+    intentId,
+  ]);
 }
 
 console.log(

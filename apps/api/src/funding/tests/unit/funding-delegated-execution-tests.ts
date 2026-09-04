@@ -176,6 +176,11 @@ const fundInterface = new Interface(FUND_ABI);
     /lower\(receipt\.asset_id\)/u,
     "routing must not case-fold malformed EVM or Solana identifiers",
   );
+  assert.doesNotMatch(
+    routingSql,
+    /operation\.status/u,
+    "receive routing must derive child lifecycle from durable facts, not its cache",
+  );
   assert.equal(
     routingQueryName,
     "funding-receive-list-routing-receipts-v1",

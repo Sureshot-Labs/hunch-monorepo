@@ -65,9 +65,8 @@ import {
   FundingPersistenceError,
   releaseFundingReservationInTransaction,
   renewFundingReconciliationLease,
-  transitionFundingOperation,
-  transitionFundingOperationInTransaction,
   wakeFundingReconciliationInTransaction,
+  writeFundingOperationLifecycleProjectionCacheInTransaction,
   writeFundingOperationSupportFactsInTransaction,
   type FundingCommitInput,
   type FundingCommitPlan,
@@ -1023,7 +1022,9 @@ async function testPollingFailureHonorsTerminalTimeout(): Promise<void> {
     );
     assert.deepEqual(
       steps.rows.map((step) => step.state),
-      ["recovery_required", "planned"],
+      // A dependent action cannot remain plausibly runnable while its source
+      // action is under automatic evidence recovery.
+      ["recovery_required", "recovery_required"],
     );
     const job = await pool.query<{
       due_at: Date;
@@ -1205,25 +1206,22 @@ async function testLateCanonicalFailureRearmsRetryAndKeepsReorgWatch(): Promise<
       attemptClient.release();
     }
 
-    const failedReceipt = await applyFundingStepReceiptEvidence(
-      pool,
-      {
-        operationId,
-        stepId: step.id,
-        attemptId,
-        networkId: ASSET.networkId,
-        receipt: {
-          status: "failed",
-          actionMatch: true,
-          ledgerHeight: "700",
-          blockHash: `0x${"31".repeat(32)}`,
-          canonical: true,
-          failureCode: "polymarket_relayer_transaction_failed",
-          evidence: { confirmations: 12, failureFinalized: true },
-        },
-        now: failedAt,
+    const failedReceipt = await applyFundingStepReceiptEvidence(pool, {
+      operationId,
+      stepId: step.id,
+      attemptId,
+      networkId: ASSET.networkId,
+      receipt: {
+        status: "failed",
+        actionMatch: true,
+        ledgerHeight: "700",
+        blockHash: `0x${"31".repeat(32)}`,
+        canonical: true,
+        failureCode: "polymarket_relayer_transaction_failed",
+        evidence: { confirmations: 12, failureFinalized: true },
       },
-    );
+      now: failedAt,
+    });
     assert.equal(failedReceipt.status, "failed");
     const reduction = await pool.connect().then(async (client) => {
       try {
@@ -1344,7 +1342,6 @@ async function testLateCanonicalFailureRearmsRetryAndKeepsReorgWatch(): Promise<
           attemptStartedAt: new Date(failedAt.getTime() - 5_000),
           stepKind: "external_handoff",
           payerRequirement: "user",
-          stepState: "action_required",
           networkId: "evm:137",
           action: {
             kind: "external_handoff",
@@ -3824,6 +3821,22 @@ async function testTerminalFundingMergeLifecycle(): Promise<void> {
       refundObserved: false,
       recoveryRequired: false,
     });
+    // The operation is terminal by facts. Leave a coherent but stale live
+    // cache behind: merge eligibility must use the factual projection, then
+    // move the frozen row without applying a second status-cache predicate.
+    await pool.query(
+      `
+        update funding_operations
+        set status = 'recovery_required',
+            progress_stage = 'source_action',
+            error_code = 'reconciliation_evidence_timeout',
+            recovery_mode = 'automatic_evidence',
+            completed_at = null,
+            version = version + 1
+        where id = $1
+      `,
+      [committed.operation.id],
+    );
     const result = await mergeUsers(
       await readMergeUser(sourceId),
       await readMergeUser(targetId),
@@ -4689,19 +4702,15 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     assert.equal(segmentAfterSource.rows[0]?.status, "submitted");
     assert.equal(segmentAfterSource.rows[0]?.actual_input?.raw, "1000000");
     await expectFundingError(
-      transitionFundingOperationInTransaction(client, {
+      writeFundingOperationLifecycleProjectionCacheInTransaction(client, {
         operationId: committedA.operation.id,
-        scope: { kind: "worker" },
         expectedVersion: Number(operationAfterSource?.version),
-        expectedState: {
-          status: "in_progress",
-          stage: "source_observed",
-        },
-        nextState: {
+        state: {
           status: "in_progress",
           stage: "source_observed",
         },
         actualSourceAmount: money("999999"),
+        now: new Date(),
       }),
       "actual_amount_conflict",
     );
@@ -4781,17 +4790,11 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     const terminalPatchedAt = new Date(
       completedOperation.completedAt.getTime() + 60_000,
     );
-    const terminalMetadataPatch = await transitionFundingOperationInTransaction(
-      client,
-      {
+    const terminalMetadataPatch =
+      await writeFundingOperationLifecycleProjectionCacheInTransaction(client, {
         operationId: committedA.operation.id,
-        scope: { kind: "worker" },
         expectedVersion: completedOperation.version,
-        expectedState: {
-          status: "completed",
-          stage: "terminal",
-        },
-        nextState: {
+        state: {
           status: "completed",
           stage: "terminal",
         },
@@ -4799,8 +4802,7 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
           terminalReconciliationCheckedAt: terminalPatchedAt.toISOString(),
         },
         now: terminalPatchedAt,
-      },
-    );
+      });
     assert.equal(
       terminalMetadataPatch.completedAt?.toISOString(),
       completedOperation.completedAt.toISOString(),

@@ -12,6 +12,7 @@ import type {
 import { canonicalAccountAddress } from "../domain/asset-identity.js";
 import {
   finishFundingStepAttemptForUserInTransaction,
+  projectedFundingActionInTransaction,
   projectedFundingLifecycleInTransaction,
   resolveAmbiguousProviderFundingStepAttemptForUserInTransaction,
   startFundingStepAttemptInTransaction,
@@ -56,6 +57,8 @@ import {
   DELEGATED_UNBROADCAST_RETRY_MS,
 } from "./delegated-funding-recovery-policy.js";
 import { activateStalledTelegramTradeShortfallInitialStepsInTransaction } from "./telegram-trade-shortfall-activation.js";
+import { deriveFundingLifecycle } from "../lifecycle/funding-lifecycle-projector.js";
+import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -313,6 +316,29 @@ type ClaimRow = Omit<TelegramFundingAuthorizationRow, "id"> &
     step_id: string;
   }>;
 
+/**
+ * Candidate SQL narrows only immutable executor/authority/attempt facts.
+ * Actionability is derived after the candidate rows are locked, so a stale
+ * operation or step projection cannot either start or hide a delegated call.
+ */
+async function firstActionableClaimRow(
+  client: PoolClient,
+  rows: readonly ClaimRow[],
+  now: Date,
+): Promise<ClaimRow | null> {
+  for (const row of rows) {
+    const { action } = await projectedFundingActionInTransaction(client, {
+      operationId: row.operation_id,
+      stepId: row.step_id,
+      now,
+    });
+    if (action.actionable) {
+      return row;
+    }
+  }
+  return null;
+}
+
 function actionWalletId(
   row: Pick<ClaimRow, "wallet_chain" | "wallet_address">,
   networkId = "evm:137",
@@ -420,11 +446,21 @@ async function tryStartDelegatedFundingRejection(
   client: PoolClient,
   row: Pick<
     ClaimRow,
-    "action_fingerprint" | "executor_id" | "operation_id" | "step_id"
+    | "action_fingerprint"
+    | "executor_id"
+    | "operation_id"
+    | "step_id"
+    | "user_id"
   >,
   now: Date,
 ) {
   try {
+    const { action } = await projectedFundingActionInTransaction(client, {
+      operationId: row.operation_id,
+      stepId: row.step_id,
+      now,
+    });
+    if (!action.actionable) return null;
     return await startFundingStepAttemptInTransaction(client, {
       operationId: row.operation_id,
       stepId: row.step_id,
@@ -500,10 +536,6 @@ async function rejectInvalidPolymarketRouterInTransaction(
       from funding_operation_steps step
       join funding_operations operation on operation.id = step.operation_id
       where step.executor_id = $1
-        and step.state = 'action_required'
-        and operation.status not in (
-          'completed', 'refunded', 'failed', 'cancelled'
-        )
         and (
           step.action_expires_at is null
           or step.action_expires_at > clock_timestamp()
@@ -606,7 +638,7 @@ async function rejectInvalidPolymarketRouterInTransaction(
         )
       order by operation.created_at asc, step.ordinal asc
       for update of operation, step skip locked
-      limit 1
+      limit 25
     `,
     [
       input.configuration.profileId,
@@ -619,26 +651,27 @@ async function rejectInvalidPolymarketRouterInTransaction(
       polymarketRouterProfileConfigured(input.configuration),
     ],
   );
-  const row = invalid.rows[0];
-  if (!row) return null;
-  const attempt = await tryStartDelegatedFundingRejection(
-    client,
-    row,
-    input.now,
-  );
-  if (!attempt) return null;
-  await finishDelegatedFundingNonbroadcastFailure(client, {
-    userId: row.user_id,
-    operationId: row.operation_id,
-    stepId: row.step_id,
-    attemptId: attempt.id,
-    reasonCode:
-      input.controlDecision.kind === "hard_invalid"
-        ? input.controlDecision.reasonCode
-        : "delegated_authority_invalid",
-    now: input.now,
-  });
-  return { operationId: row.operation_id };
+  for (const row of invalid.rows) {
+    const attempt = await tryStartDelegatedFundingRejection(
+      client,
+      row,
+      input.now,
+    );
+    if (!attempt) continue;
+    await finishDelegatedFundingNonbroadcastFailure(client, {
+      userId: row.user_id,
+      operationId: row.operation_id,
+      stepId: row.step_id,
+      attemptId: attempt.id,
+      reasonCode:
+        input.controlDecision.kind === "hard_invalid"
+          ? input.controlDecision.reasonCode
+          : "delegated_authority_invalid",
+      now: input.now,
+    });
+    return { operationId: row.operation_id };
+  }
+  return null;
 }
 
 async function claimPolymarketRouterInTransaction(
@@ -692,9 +725,6 @@ async function claimPolymarketRouterInTransaction(
       from funding_operation_steps step
       join funding_operations operation
         on operation.id = step.operation_id
-      left join funding_operation_steps dependency
-        on dependency.id = step.depends_on_step_id
-       and dependency.operation_id = step.operation_id
       join telegram_funding_authorizations funding_authorization
         on funding_authorization.id::text =
              operation.support_metadata ->> 'fundingAuthorizationId'
@@ -718,13 +748,8 @@ async function claimPolymarketRouterInTransaction(
        and (
          funding_authorization.expires_at is null
          or funding_authorization.expires_at > clock_timestamp()
-       )
+      )
       where step.executor_id = $1
-        and step.state = 'action_required'
-        and (step.depends_on_step_id is null or dependency.state = 'succeeded')
-        and operation.status not in (
-          'completed', 'refunded', 'failed', 'cancelled'
-        )
         and (
           step.action_expires_at is null
           or step.action_expires_at > clock_timestamp()
@@ -776,11 +801,11 @@ async function claimPolymarketRouterInTransaction(
         )
       order by operation.created_at asc, step.ordinal asc
       for update of operation, step, funding_authorization skip locked
-      limit 1
+      limit 25
     `,
     [input.configuration.profileId],
   );
-  const row = rows[0];
+  const row = await firstActionableClaimRow(client, rows, input.now);
   if (!row) return null;
 
   const rejectClaim = async (
@@ -1018,20 +1043,20 @@ async function recoverPolymarketRouterInTransaction(
       continue;
     }
     const leased = await client.query(
-    `
+      `
       update funding_operation_step_attempts
       set updated_at = $2
       where id = $1
         and outcome in ('started', 'ambiguous')
         and updated_at <= $3
     `,
-    [
-      row.attempt_id,
-      input.now,
-      row.attempt_outcome === "started"
-        ? input.recoverUnbroadcastRetryBefore
-        : input.recoverProviderReplayBefore,
-    ],
+      [
+        row.attempt_id,
+        input.now,
+        row.attempt_outcome === "started"
+          ? input.recoverUnbroadcastRetryBefore
+          : input.recoverProviderReplayBefore,
+      ],
     );
     if (leased.rowCount !== 1) {
       continue;
@@ -1089,6 +1114,7 @@ async function listDelegatedFundingProviderLookupClaims(
   input: Readonly<{
     limit: number;
     lookupDueBefore: Date;
+    now: Date;
     profileIds: readonly string[];
   }>,
 ): Promise<readonly DelegatedFundingProviderLookupRow[]> {
@@ -1123,16 +1149,33 @@ async function listDelegatedFundingProviderLookupClaims(
         and attempt_row.finished_at <= $2
         and attempt_row.canonical_action_fingerprint =
               step_row.action_fingerprint
-        and step_row.state in ('reconcile_required', 'recovery_required')
-        and operation_row.status not in (
-              'completed', 'refunded', 'failed', 'cancelled'
-            )
       order by attempt_row.finished_at, attempt_row.id
-      limit $3
+      limit ($3::integer * 4)
     `,
     values: [input.profileIds, input.lookupDueBefore, input.limit],
   });
-  return rows;
+  const eligible: DelegatedFundingProviderLookupRow[] = [];
+  for (const row of rows) {
+    const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+      pool,
+      { operationId: row.operation_id, now: input.now },
+    );
+    if (!facts) continue;
+    const lifecycle = deriveFundingLifecycle(facts);
+    const action = lifecycle.actions.find(
+      (candidate) => candidate.actionId === row.step_id,
+    );
+    if (
+      lifecycle.safety.terminal ||
+      (action?.state !== "reconcile_required" &&
+        action?.state !== "recovery_required")
+    ) {
+      continue;
+    }
+    eligible.push(row);
+    if (eligible.length >= input.limit) break;
+  }
+  return eligible;
 }
 
 export function delegatedFundingProfileOrder<T>(
@@ -1495,6 +1538,7 @@ export class DelegatedFundingExecutor {
     const rows = await listDelegatedFundingProviderLookupClaims(this.pool, {
       limit: input.limit,
       lookupDueBefore: new Date(input.now.getTime() - lookupDelayMs),
+      now: input.now,
       profileIds: [...profileById.keys()],
     });
     let providerLookups = 0;
