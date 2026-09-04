@@ -15,6 +15,10 @@ import {
 } from "../lifecycle/funding-lifecycle-projector.js";
 import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
 import { DELEGATED_PROVIDER_REPLAY_MS } from "../execution/delegated-funding-recovery-policy.js";
+import {
+  isPolymarketDepositRouterProfileId,
+  TELEGRAM_RELAY_EVM_FUNDING_PROFILE_IDS,
+} from "../execution/delegated-funding-profile-ids.js";
 import { isDirectWithdrawalExecutionKind } from "../execution/direct-withdrawal-transfer.js";
 import {
   claimFundingReconciliationJobs,
@@ -1253,41 +1257,48 @@ export async function fundingReconciliationWaitState(
   const attempts = facts.actions.flatMap((action) =>
     action.attempts.map((attempt) => ({ action, attempt })),
   );
-  const hasUnresolvedBroadcast = attempts.some(
+  const unresolvedBroadcasts = attempts.filter(
     ({ attempt }) =>
       attempt.broadcastMayHaveOccurred &&
       broadcastReceiptIsUnresolved(attempt.receipt?.status ?? null),
   );
   const providerReferenceAttempts = attempts.filter(
     ({ action, attempt }) =>
+      // Only these executors own an idempotent provider replay lease. A
+      // client Privy reference is resolved by read-only receipt polling and
+      // must not inherit the five-minute replay delay.
+      (isPolymarketDepositRouterProfileId(action.executorId) ||
+        TELEGRAM_RELAY_EVM_FUNDING_PROFILE_IDS.includes(action.executorId)) &&
       actionStateById.get(action.actionId) === "reconcile_required" &&
       attempt.outcome === "ambiguous" &&
       attempt.broadcastMayHaveOccurred &&
       attempt.referenceKind === "provider_receipt",
   );
-  const broadcastEvidenceActiveUntil = attempts
-    .filter(
-      ({ attempt }) =>
-        attempt.broadcastMayHaveOccurred &&
-        broadcastReceiptIsUnresolved(attempt.receipt?.status ?? null),
-    )
-    .reduce<Date | null>((latest, { attempt }) => {
+  const broadcastEvidenceActiveUntil = unresolvedBroadcasts.reduce<Date | null>(
+    (latest, { attempt }) => {
       const deadline = new Date(
         attempt.startedAt.getTime() + broadcastEvidenceWindowMs,
       );
       return latest === null || deadline.getTime() > latest.getTime()
         ? deadline
         : latest;
-    }, null);
-  const providerReferenceRecoveryAt =
-    providerReferenceAttempts.reduce<Date | null>((earliest, { attempt }) => {
-      const recoveryAt = new Date(
-        attempt.updatedAt.getTime() + DELEGATED_PROVIDER_REPLAY_MS,
-      );
-      return earliest === null || recoveryAt.getTime() < earliest.getTime()
-        ? recoveryAt
-        : earliest;
-    }, null);
+    },
+    null,
+  );
+  // One delegated lane must not postpone receipt checks for another lane.
+  const hasOtherUnresolvedBroadcast = unresolvedBroadcasts.some(
+    (entry) => !providerReferenceAttempts.includes(entry),
+  );
+  const providerReferenceRecoveryAt = hasOtherUnresolvedBroadcast
+    ? null
+    : providerReferenceAttempts.reduce<Date | null>((earliest, { attempt }) => {
+        const recoveryAt = new Date(
+          attempt.updatedAt.getTime() + DELEGATED_PROVIDER_REPLAY_MS,
+        );
+        return earliest === null || recoveryAt.getTime() < earliest.getTime()
+          ? recoveryAt
+          : earliest;
+      }, null);
 
   return {
     awaitingProviderReference: providerReferenceAttempts.length > 0,
@@ -1301,7 +1312,7 @@ export async function fundingReconciliationWaitState(
           action.state,
         ),
       ) &&
-      !hasUnresolvedBroadcast,
+      unresolvedBroadcasts.length === 0,
     broadcastEvidenceActiveUntil,
     providerReferenceRecoveryAt,
   };
@@ -2250,12 +2261,22 @@ async function processLease(
       now: options.now,
       terminalTimeoutMs: options.terminalTimeoutMs,
     });
+    // A receipt lookup can resolve the provider reference in this very pass.
+    // Do not schedule from its stale pre-poll replay lease after new evidence.
+    const schedulingWaitState = operationBeforePoll.awaitingProviderReference
+      ? await fundingReconciliationWaitState(
+          pool,
+          lease.operationId,
+          options.terminalTimeoutMs,
+          options.now,
+        )
+      : operationBeforePoll;
     const providerReferenceDueAt =
-      operationBeforePoll.awaitingProviderReference &&
-      operationBeforePoll.providerReferenceRecoveryAt
+      schedulingWaitState.awaitingProviderReference &&
+      schedulingWaitState.providerReferenceRecoveryAt
         ? new Date(
             Math.max(
-              operationBeforePoll.providerReferenceRecoveryAt.getTime(),
+              schedulingWaitState.providerReferenceRecoveryAt.getTime(),
               options.now.getTime() + options.pollDelayMs,
             ),
           )

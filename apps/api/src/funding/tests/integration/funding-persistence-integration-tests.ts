@@ -51,6 +51,7 @@ import {
 } from "../../persistence/funding-evidence-repository.js";
 import { polymarketRelayerTransactionReference } from "../../execution/polymarket-deposit-wallet-handoff.js";
 import { inspectEvmTarget } from "../../execution/step-receipt-reconciler.js";
+import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "../../execution/delegated-funding-profile-ids.js";
 import {
   advanceFundingObservationFinalityInTransaction,
   allocateFundingObservationInTransaction,
@@ -1140,6 +1141,166 @@ async function testRecentBroadcastRecoveryUsesActiveReceiptCadence(): Promise<vo
     throw error;
   } finally {
     client.release();
+  }
+}
+
+async function testClientReferencesKeepActiveReceiptPolling(): Promise<void> {
+  for (const scenario of [
+    { referenceKind: "provider_receipt", mixed: false },
+    { referenceKind: "transaction", mixed: false },
+    { referenceKind: "signature", mixed: false },
+    { referenceKind: "provider_receipt", mixed: true },
+    { referenceKind: "transaction", mixed: true },
+    { referenceKind: "signature", mixed: true },
+    { referenceKind: "provider_receipt", mixed: false, resolve: true },
+  ] as const) {
+    const { referenceKind, mixed } = scenario;
+    const resolveDuringPoll = "resolve" in scenario;
+    const executorId = resolveDuringPoll
+      ? TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID
+      : referenceKind === "signature"
+        ? "wallet_profile_solana_v1"
+        : "wallet_profile_evm_v1";
+    const userId = await insertUser(pool);
+    const basePlan = buildPlan();
+    const plan: FundingCommitPlan = {
+      ...basePlan,
+      steps: basePlan.steps.flatMap((step) => [
+        {
+          ...step,
+          executorId,
+        },
+        ...(mixed
+          ? [
+              {
+                ...step,
+                ordinal: 1,
+                executorId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+                actionFingerprint: hash("d"),
+              },
+            ]
+          : []),
+      ]),
+    };
+    const consentToken = opaque("client-reference-cadence");
+    const quote = await createFundingQuote(
+      pool,
+      quoteInput(userId, plan, consentToken),
+    );
+    let operationId: string | null = null;
+    try {
+      const committed = await commitFundingOperation(
+        pool,
+        commitInput(userId, quote.id, consentToken, plan),
+      );
+      operationId = committed.operation.id;
+      const steps = (
+        await pool.query<{
+          id: string;
+          ordinal: number;
+          executor_id: string;
+          action_fingerprint: string;
+        }>(
+          "select id, ordinal, executor_id, action_fingerprint from funding_operation_steps where operation_id = $1 order by ordinal",
+          [operationId],
+        )
+      ).rows;
+      assert.equal(steps.length, mixed ? 2 : 1);
+      const now = new Date();
+      let firstAttemptId: string | null = null;
+      for (const step of steps) {
+        const attempt = await startFundingStepAttemptInTransaction(pool, {
+          operationId,
+          stepId: step.id,
+          canonicalActionFingerprint: step.action_fingerprint,
+          executorId: step.executor_id,
+          now,
+        });
+        if (step.ordinal === 0) firstAttemptId = attempt.id;
+        await finishFundingStepAttemptInTransaction(pool, {
+          attemptId: attempt.id,
+          outcome: "ambiguous",
+          broadcastMayHaveOccurred: true,
+          referenceKind:
+            step.ordinal === 0 ? referenceKind : "provider_receipt",
+          receiptRefCiphertext: "ciphertext:client-accepted",
+          receiptRefLookupHmac: hash("9"),
+          lookupKeyVersion: 1,
+          actualCosts: { providerReferenceKind: "privy_transaction" },
+          now,
+        });
+      }
+      const waitState = await fundingReconciliationWaitState(
+        pool,
+        operationId,
+        90_000,
+        now,
+      );
+      assert.equal(
+        waitState.awaitingProviderReference,
+        mixed || resolveDuringPoll,
+      );
+      if (resolveDuringPoll) assert.ok(waitState.providerReferenceRecoveryAt);
+      else assert.equal(waitState.providerReferenceRecoveryAt, null);
+      await pool.query(
+        "update funding_reconciliation_jobs set priority = 10000, due_at = $2 where operation_id = $1",
+        [operationId, now],
+      );
+      let polls = 0;
+      const run = (at: Date) =>
+        runFundingReconciliationBatch(pool, {
+          workerId: opaque("client-reference-worker"),
+          limit: 1,
+          pollDelayMs: 2_000,
+          now: at,
+          receiptPoll: async (input) => {
+            assert.equal(input, operationId);
+            polls += 1;
+            if (resolveDuringPoll && polls === 1) {
+              assert.ok(firstAttemptId);
+              const firstStep = steps[0];
+              assert.ok(firstStep);
+              await applyFundingStepReceiptEvidence(pool, {
+                operationId: input,
+                stepId: firstStep.id,
+                attemptId: firstAttemptId,
+                networkId: ASSET.networkId,
+                receipt: {
+                  status: "finalized",
+                  actionMatch: true,
+                  canonical: true,
+                  ledgerHeight: "100",
+                  blockHash: `0x${"13".repeat(32)}`,
+                  failureCode: null,
+                  evidence: { confirmations: 12 },
+                },
+                now: at,
+              });
+            }
+            return { receiptsPolled: 1 };
+          },
+        });
+      await run(now);
+      const job = (
+        await pool.query<{ due_at: Date }>(
+          "select due_at from funding_reconciliation_jobs where operation_id = $1",
+          [operationId],
+        )
+      ).rows[0];
+      assert.equal(
+        job?.due_at.getTime(),
+        now.getTime() + 2_000,
+        "an accepted client reference must be checked again in seconds, not after a provider replay lease",
+      );
+      await run(new Date(now.getTime() + 2_000));
+      assert.equal(
+        polls,
+        2,
+        "the next worker pass must actually poll the pending transfer",
+      );
+    } finally {
+      await cleanupCommittedOperation(operationId, quote.id, userId);
+    }
   }
 }
 
@@ -7444,6 +7605,7 @@ await testPollingFailureHonorsTerminalTimeout();
 console.log(
   "[funding-persistence-integration-tests] ok polling failure honors terminal timeout",
 );
+await testClientReferencesKeepActiveReceiptPolling();
 await testRecentBroadcastRecoveryUsesActiveReceiptCadence();
 console.log(
   "[funding-persistence-integration-tests] ok recent Base, Polygon, and Solana broadcasts retain a bounded active receipt cadence during automatic recovery",
