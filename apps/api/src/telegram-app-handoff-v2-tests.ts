@@ -1400,6 +1400,43 @@ const externalDeposit = projection([
     },
   },
 ]);
+const insufficient = {
+  ...projection([
+    {
+      ...evmSource,
+      selectable: false,
+      reasonCodes: ["minimum_output_not_met" as const],
+    },
+  ]),
+  reasonCodes: ["insufficient_liquidity" as const],
+};
+assert.deepEqual(
+  resolveTelegramAppHandoffFundingCapability({
+    projection: insufficient,
+    serverBotExact: false,
+  }),
+  { kind: "external_deposit" },
+);
+for (const unavailable of [
+  { ...insufficient, completeness: "partial" as const },
+  { ...insufficient, freshness: "stale" as const },
+  { ...insufficient, errors: [{ code: "rpc_unavailable", retryable: true }] },
+  {
+    ...insufficient,
+    reasonCodes: [
+      "creation_mode_off" as const,
+      "insufficient_liquidity" as const,
+    ],
+  },
+]) {
+  assert.equal(
+    resolveTelegramAppHandoffFundingCapability({
+      projection: unavailable,
+      serverBotExact: false,
+    }).kind,
+    "unavailable",
+  );
+}
 assert.deepEqual(
   resolveTelegramAppHandoffFundingCapability({
     projection: externalDeposit,

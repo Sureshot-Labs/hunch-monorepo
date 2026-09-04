@@ -593,6 +593,24 @@ export function resolveTelegramAppHandoffFundingCapability(input: {
   if (options.some(isInteractiveExternalDeposit)) {
     return { kind: "external_deposit" };
   }
+  // A complete capacity check is not an RPC/route outage. The ordinary
+  // verified receive flow will calculate the deposit and its exact address;
+  // do not retry forever or fabricate a client execution plan here.
+  if (
+    options.length === 0 &&
+    input.projection.completeness === "complete" &&
+    input.projection.freshness === "fresh" &&
+    input.projection.errors.length === 0 &&
+    input.projection.reasonCodes.includes("insufficient_liquidity") &&
+    input.projection.reasonCodes.every(
+      (reason) => reason === "insufficient_liquidity",
+    ) &&
+    input.projection.sourceOptions.every((option) =>
+      option.reasonCodes.every((reason) => reason === "minimum_output_not_met"),
+    )
+  ) {
+    return { kind: "external_deposit" };
+  }
   return { kind: "unavailable", reason: "no_supported_owned_source" };
 }
 

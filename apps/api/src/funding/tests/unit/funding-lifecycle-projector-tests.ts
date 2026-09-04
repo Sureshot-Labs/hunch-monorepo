@@ -116,6 +116,102 @@ function facts(
 }
 
 {
+  const prepared = { ...destination, raw: "2966935" };
+  const bridged = { ...destination, raw: "2282867" };
+  const settled = facts({
+    plan: {
+      ...facts().plan,
+      requestedDestination: { ...destination, raw: "5249802" },
+      venuePreparationMinimumDestination: prepared,
+      completionEvidence: "destination_credit_and_venue_readiness",
+      routeLegs: [routeLeg("relay", { minimumDestination: bridged })],
+    },
+    actions: [],
+    transfers: [
+      transfer("venue_readiness", { money: prepared }),
+      transfer("destination_credit", { routeLegId: "relay", money: bridged }),
+    ],
+    consumer: { required: true, completed: true, unresolved: false },
+  });
+  assert.equal(deriveFundingLifecycle(settled).status, "completed");
+  const [preparationCredit, relayCredit] = settled.transfers;
+  assert.ok(preparationCredit && relayCredit);
+  assert.equal(
+    deriveFundingLifecycle({
+      ...settled,
+      consumer: { required: true, completed: false, unresolved: false },
+    }).status,
+    "ready",
+  );
+  for (const transfers of [
+    settled.transfers.slice(1),
+    [transfer("venue_readiness", { money: { ...prepared, raw: "99999999" } })],
+    [
+      transfer("venue_readiness", { money: { ...prepared, raw: "2966934" } }),
+      relayCredit,
+    ],
+    [
+      transfer("venue_readiness", { money: prepared, routeLegId: "relay" }),
+      relayCredit,
+    ],
+    [
+      preparationCredit,
+      transfer("destination_credit", {
+        routeLegId: "relay",
+        money: { ...bridged, raw: "2282866" },
+      }),
+    ],
+    [
+      transfer("venue_readiness", {
+        money: { ...prepared, networkId: "evm:137" },
+      }),
+      relayCredit,
+    ],
+    [
+      transfer("venue_readiness", {
+        money: prepared,
+        canonical: false,
+        finality: "reorged",
+      }),
+      relayCredit,
+    ],
+  ]) {
+    assert.equal(
+      deriveFundingLifecycle({ ...settled, transfers }).safety.terminal,
+      false,
+    );
+  }
+  const duplicated = {
+    ...settled,
+    transfers: [
+      ...settled.transfers,
+      transfer("venue_readiness", {
+        transferId: "readiness-second-snapshot",
+        money: prepared,
+      }),
+    ],
+  };
+  assert.equal(deriveFundingLifecycle(duplicated).status, "completed");
+  assert.equal(
+    deriveFundingLifecycle({
+      ...duplicated,
+      plan: {
+        ...settled.plan,
+        requestedDestination: { ...destination, raw: "6000000" },
+      },
+    }).safety.terminal,
+    false,
+  );
+  assert.equal(
+    deriveFundingLifecycle({
+      ...settled,
+      plan: { ...settled.plan, venuePreparationMinimumDestination: null },
+    }).safety.terminal,
+    false,
+  );
+}
+
+{
   const completedAction = action("sent", {
     routeLegId: "sent",
     requiresSourceDebitEvidence: true,

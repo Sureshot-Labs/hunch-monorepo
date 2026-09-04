@@ -522,15 +522,35 @@ function compileFundingLifecycleFacts(
     settled_without_consumer: false,
     unresolved: false,
   };
+  const immutableOperation = lifecycleMetadataRecord(
+    header.plan_snapshot,
+    "operation",
+  );
+  const immutableMetadata = immutableOperation
+    ? lifecycleMetadataRecord(immutableOperation, "supportMetadata")
+    : null;
+  const venuePreparationMinimumDestination =
+    immutableMetadata?.containsVenuePreparation === true
+      ? lifecycleMoney(
+          lifecycleMetadataRecord(
+            immutableMetadata,
+            "venuePreparationMinimumDestination",
+          ),
+          "sealed venue preparation minimum destination",
+        )
+      : null;
   return {
     plan: {
       initialState: immutableInitialState(header.plan_snapshot),
       requestedDestination,
+      venuePreparationMinimumDestination,
       routeLegs,
       completionEvidence: (() => {
-        const requiresVenueReadiness = [...actionsById.values()].some(
-          (action) => action.requiresVenueReadiness,
-        );
+        const requiresVenueReadiness =
+          venuePreparationMinimumDestination !== null ||
+          [...actionsById.values()].some(
+            (action) => action.requiresVenueReadiness,
+          );
         if (!requiresVenueReadiness) return "destination_credit" as const;
         return routeLegs.length === 0
           ? "venue_readiness"

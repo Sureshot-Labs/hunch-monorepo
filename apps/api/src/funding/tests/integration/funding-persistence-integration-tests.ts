@@ -4164,7 +4164,7 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
           select id
           from funding_operation_steps
           where operation_id = $1
-            and step_kind = 'venue_preparation'
+            and ordinal = 0
         `,
         [operationId],
       );
@@ -4297,6 +4297,87 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
         [operationId, preparationStepId],
       );
       assert.equal(replayedPreparationStep.rows[0]?.state, "succeeded");
+      // The sealed preparation amount, not mutable operation metadata, must
+      // contribute alongside the independent Relay credit.
+      await replayClient.query(
+        "update funding_operations set support_metadata=support_metadata-'venuePreparationMinimumDestination',version=version+1 where id=$1",
+        [operationId],
+      );
+      const relayStep = (
+        await replayClient.query<{ id: string; segment_id: string }>(
+          "select id,segment_id from funding_operation_steps where operation_id=$1 and segment_id is not null",
+          [operationId],
+        )
+      ).rows[0];
+      assert.ok(relayStep);
+      const relayAttempt = await startFundingStepAttemptInTransaction(
+        replayClient,
+        {
+          operationId,
+          stepId: relayStep.id,
+          canonicalActionFingerprint: hash("1"),
+          executorId: "wallet_profile_evm_v1",
+        },
+      );
+      await finishFundingStepAttemptInTransaction(replayClient, {
+        attemptId: relayAttempt.id,
+        outcome: "succeeded",
+        broadcastMayHaveOccurred: false,
+        referenceKind: null,
+        receiptRefCiphertext: null,
+        receiptRefLookupHmac: null,
+        lookupKeyVersion: null,
+        actualCosts: {},
+      });
+      for (const [kind, amount, segmentId] of [
+        ["venue_readiness", "3569075", null],
+        ["source_debit", "670000", relayStep.segment_id],
+        ["destination_credit", "658574", relayStep.segment_id],
+      ] as const) {
+        await allocateFundingObservationInTransaction(replayClient, {
+          operationId,
+          segmentId,
+          kind,
+          networkId: ASSET.networkId,
+          assetId: ASSET.assetId,
+          assetDecimals: ASSET.decimals,
+          txHash: `composite-settlement-${kind}-${operationId}`,
+          eventIndex: "0",
+          fromAddress: "source",
+          toAddress: "destination",
+          rawAmount: amount,
+          observedAt: new Date(),
+          ledgerHeight: "100",
+          blockHash: hash("4"),
+          finalityStatus: "finalized",
+          finalizedAt: new Date(),
+        });
+      }
+      await reduceFundingOperationInTransaction(replayClient, { operationId });
+      const ready = await fetchFundingOperationForUser(replayClient, {
+        operationId,
+        userId,
+      });
+      assert.equal(ready?.status, "ready");
+      const reservation = (
+        await replayClient.query<{ id: string }>(
+          "select id from balance_reservations where operation_id=$1 and mode='settled_for_consumer' and state='active'",
+          [operationId],
+        )
+      ).rows[0];
+      assert.ok(reservation);
+      await releaseFundingReservationForAbandonedTradeInTransaction(
+        replayClient,
+        {
+          userId,
+          link: { operationId, reservationId: reservation.id },
+          outcomeReason: "test_abandoned",
+        },
+      );
+      await lockPolymarketFundingOperationPredecessor(replayClient, {
+        userId,
+        venueBindingOptionId,
+      });
     } finally {
       await replayClient.query("rollback");
       replayClient.release();
