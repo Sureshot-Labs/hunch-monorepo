@@ -346,6 +346,23 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         sessionId,
       });
       assert.match(rendered.text, /Spain/);
+      const firstResult = results[0];
+      assert.ok(firstResult);
+      const directional = buildSignalBotMarketSearchScreen({
+        callbackPrefix: "hm:v1:",
+        query: "Robinhood",
+        sessionId,
+        results: [
+          {
+            ...firstResult,
+            marketTitle: "Robinhood Up or Down?",
+            outcomes: '["Up","Down"]',
+          },
+        ],
+      });
+      assert.match(directional.text, /Up 21¢/u);
+      assert.match(directional.text, /Down 80¢/u);
+      assert.doesNotMatch(directional.text, /YES 21¢/u);
       assert.ok(
         (rendered.reply_markup.inline_keyboard[0]?.[0]?.callback_data.length ??
           65) <= 64,

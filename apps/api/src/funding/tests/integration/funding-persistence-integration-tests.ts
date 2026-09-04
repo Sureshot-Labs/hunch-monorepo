@@ -100,6 +100,7 @@ import {
   FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
   fundingReconciliationPollDelayMs,
   fundingReconciliationWaitState,
+  reduceFundingOperation,
   reduceFundingOperationInTransaction,
   runFundingReconciliationBatch,
 } from "../../reconciliation/funding-reducer.js";
@@ -109,6 +110,7 @@ import {
   OwnedRouteDestinationObserver,
 } from "../../reconciliation/owned-route-destination-observer.js";
 import { DirectIngressDestinationObserver } from "../../reconciliation/direct-ingress-observer.js";
+import { reconcileRelayDestinationReceipts } from "../../reconciliation/relay-destination-receipts.js";
 import {
   lockPolymarketFundingOperationPredecessor,
   PolymarketFundingPredecessorUnresolvedError,
@@ -2255,6 +2257,173 @@ async function testOwnedRouteCompetitionQueryParses(): Promise<void> {
     destinationsPolled: 0,
     destinationSatisfied: false,
   });
+}
+
+async function testPartialRelayReceiptSettlement(): Promise<void> {
+  const userId = await insertUser(pool);
+  const base = buildPlan({ purpose: "trade_shortfall", venueId: "limitless" });
+  const baseSegment = base.segments[0];
+  const baseStep = base.steps[0];
+  const baseReservation = base.reservations[0];
+  assert.ok(baseSegment && baseStep && baseReservation);
+  const destinationAddress = "0x00000000000000000000000000000000000000d2";
+  const target = {
+    ...base.operation.destinationTargetSnapshot,
+    location: {
+      asset: ASSET,
+      details: { address: destinationAddress },
+    },
+  };
+  const plan: FundingCommitPlan = {
+    ...base,
+    operation: {
+      ...base.operation,
+      planKind: "composite_route",
+      destinationTargetSnapshot: target,
+      requestedSourceAmount: money("2000000"),
+      requestedDestinationAmount: money("1960000"),
+    },
+    segments: [0, 1].map(() => ({
+      ...baseSegment,
+      providerId: "relay",
+      destinationTargetSnapshot: target,
+    })),
+    steps: [0, 1].map((ordinal) => ({
+      ...baseStep,
+      ordinal,
+      segmentOrdinal: ordinal,
+      actionFingerprint: hash(ordinal === 0 ? "b" : "c"),
+    })),
+    reservations: [0, 1].map((ordinal) => ({
+      ...baseReservation,
+      segmentOrdinal: ordinal,
+      locationId: opaque("partial-source"),
+      componentId: opaque("partial-component"),
+    })),
+  };
+  const consent = opaque("partial-consent");
+  const quote = await createFundingQuote(
+    pool,
+    quoteInput(userId, plan, consent),
+  );
+  let operationId: string | null = null;
+  try {
+    operationId = (
+      await commitFundingOperation(
+        pool,
+        commitInput(userId, quote.id, consent, plan),
+      )
+    ).operation.id;
+    const { rows: steps } = await pool.query<{
+      id: string;
+      segment_id: string;
+    }>(
+      "select id, segment_id from funding_operation_steps where operation_id=$1 order by ordinal",
+      [operationId],
+    );
+    const first = steps[0];
+    assert.ok(first);
+    const started = await startFundingStepAttemptInTransaction(pool, {
+      operationId,
+      stepId: first.id,
+      canonicalActionFingerprint: hash("b"),
+      executorId: "synthetic-executor",
+    });
+    await finishFundingStepAttemptInTransaction(pool, {
+      attemptId: started.id,
+      outcome: "succeeded",
+      broadcastMayHaveOccurred: false,
+      referenceKind: null,
+      receiptRefCiphertext: null,
+      receiptRefLookupHmac: null,
+      lookupKeyVersion: null,
+      actualCosts: {},
+    });
+    const txHash = `0x${"91".repeat(32)}`;
+    const fingerprint = () => hash("e");
+    await pool.query(
+      `update funding_operation_segments set raw_status='success',
+      support_metadata = support_metadata || $2::jsonb where id=$1`,
+      [
+        first.segment_id,
+        {
+          relayStatusCategory: "provider_success",
+          destinationTransactionReferenceCount: 1,
+          relayTransactionReferenceFingerprints: [fingerprint()],
+        },
+      ],
+    );
+    const now = new Date(Date.now() + 120_000);
+    await ingestFundingObservationInTransaction(pool, {
+      discoverySource: "chain_rpc",
+      observation: {
+        operationId,
+        segmentId: first.segment_id,
+        kind: "source_debit",
+        networkId: ASSET.networkId,
+        assetId: ASSET.assetId,
+        assetDecimals: ASSET.decimals,
+        txHash: opaque("partial-source"),
+        eventIndex: "0",
+        fromAddress: "0xsource",
+        toAddress: "0xrouter",
+        rawAmount: "1000000",
+        observedAt: now,
+        ledgerHeight: "100",
+        blockHash: hash("d"),
+        finalityStatus: "finalized",
+        finalizedAt: now,
+      },
+    });
+    for (let replay = 0; replay < 2; replay++) {
+      await reconcileRelayDestinationReceipts(
+        pool,
+        {
+          operationId,
+          segmentId: first.segment_id,
+          transactionHashes: [txHash],
+          now,
+          referenceCodec: { fingerprint },
+        },
+        async () => [
+          {
+            networkId: ASSET.networkId,
+            asset: ASSET,
+            destinationAddress,
+            sourceAddress: "0xrouter",
+            transactionHash: txHash,
+            eventIndex: "3",
+            rawAmount: "990000",
+            ledgerHeight: "101",
+            blockHash: hash("f"),
+            observedAt: now,
+          },
+        ],
+      );
+    }
+    const result = await reduceFundingOperation(pool, { operationId, now });
+    assert.equal(
+      result.finalState.status,
+      "failed",
+      "partial settled funding stops the Buy instead of waiting for an unsigned expired leg",
+    );
+    const reservations = await pool.query<{ state: string }>(
+      "select state from balance_reservations where operation_id=$1",
+      [operationId],
+    );
+    assert.ok(reservations.rows.every((row) => row.state === "released"));
+    const credits = await pool.query<{ total: string }>(
+      "select count(*)::text as total from funding_observations where operation_id=$1 and kind='destination_credit'",
+      [operationId],
+    );
+    assert.equal(
+      credits.rows[0]?.total,
+      "1",
+      "provider replay cannot allocate a transfer twice",
+    );
+  } finally {
+    await cleanupCommittedOperation(operationId, quote.id, userId);
+  }
 }
 
 async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<void> {
@@ -7630,6 +7799,7 @@ await testOlderFailedAttemptCannotRearmNewerBroadcast();
 console.log(
   "[funding-persistence-integration-tests] ok an older failed attempt cannot rearm a newer broadcast, while a reorg still stops it",
 );
+await testPartialRelayReceiptSettlement();
 await testOwnedRouteCompetitionQueryParses();
 console.log(
   "[funding-persistence-integration-tests] ok owned-route competition query parses",

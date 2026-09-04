@@ -230,16 +230,36 @@ try {
       );
     },
   });
+  const destinationReceiptPolls: Array<{
+    segmentId: string;
+    transactionHashes: readonly string[];
+  }> = [];
   const driver = new RelayReconciliationDriver(
     client,
     referenceCodec,
     depositCodec,
+    async (_pool, input) => {
+      destinationReceiptPolls.push({
+        segmentId: input.segmentId,
+        transactionHashes: input.transactionHashes,
+      });
+    },
   );
   const firstPoll = await driver.pollOperation(pool, operationId);
   assert.deepEqual(firstPoll, {
     requestsPolled: 1,
     childrenDiscovered: 1,
   });
+  assert.deepEqual(
+    destinationReceiptPolls,
+    [
+      {
+        segmentId,
+        transactionHashes: ["destination-reference-not-persisted"],
+      },
+    ],
+    "a successful provider poll immediately schedules exact chain evidence without waiting for a receive session",
+  );
   const secondPoll = await driver.pollOperation(pool, operationId);
   assert.equal(secondPoll.childrenDiscovered, 0);
   assert.equal(secondPoll.requestsPolled, 2);

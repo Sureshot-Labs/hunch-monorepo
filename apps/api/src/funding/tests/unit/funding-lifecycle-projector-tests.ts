@@ -116,6 +116,106 @@ function facts(
 }
 
 {
+  const completedAction = action("sent", {
+    routeLegId: "sent",
+    requiresSourceDebitEvidence: true,
+    attempts: [
+      attempt({
+        outcome: "submitted",
+        broadcastMayHaveOccurred: true,
+        referenceKind: "transaction",
+        receipt: {
+          status: "finalized",
+          canonical: true,
+          actionMatched: true,
+          failureFinalized: false,
+        },
+      }),
+    ],
+  });
+  const omittedAction = action("omitted", {
+    ordinal: 1,
+    routeLegId: "omitted",
+    expiresAt: new Date(now.getTime() - 1),
+  });
+  const partial = facts({
+    plan: {
+      ...facts().plan,
+      requestedDestination: { ...destination, raw: "2000000" },
+      routeLegs: [routeLeg("sent"), routeLeg("omitted")],
+    },
+    actions: [completedAction, omittedAction],
+    transfers: [
+      transfer("source_debit", { routeLegId: "sent" }),
+      transfer("destination_credit", { routeLegId: "sent" }),
+    ],
+  });
+  const result = deriveFundingLifecycle(partial);
+  assert.equal(
+    result.status,
+    "failed",
+    "expired untouched remainder must not strand a fully settled first leg",
+  );
+  assert.equal(result.safety.terminal, true);
+  assert.equal(result.safety.consumerMayRemainLinked, false);
+  assert.ok(result.actions.every((entry) => !entry.actionable));
+  const debit = partial.transfers[0];
+  const credit = partial.transfers[1];
+  assert.ok(debit && credit);
+  for (const unsafe of [
+    {
+      ...partial,
+      actions: [
+        completedAction,
+        { ...omittedAction, expiresAt: new Date(now.getTime() + 1000) },
+      ],
+    },
+    {
+      ...partial,
+      actions: [
+        completedAction,
+        {
+          ...omittedAction,
+          attempts: [
+            attempt({
+              outcome: "ambiguous",
+              broadcastMayHaveOccurred: true,
+              referenceKind: "signature",
+            }),
+          ],
+        },
+      ],
+    },
+    {
+      ...partial,
+      transfers: [
+        debit,
+        { ...credit, money: { ...destination, raw: "999999" } },
+      ],
+    },
+    {
+      ...partial,
+      transfers: [
+        debit,
+        {
+          ...credit,
+          finality: "reorged" as const,
+          canonical: false,
+        },
+      ],
+    },
+    { ...partial, transfers: [credit] },
+    { ...partial, consumer: { ...partial.consumer, unresolved: true } },
+  ]) {
+    assert.equal(
+      deriveFundingLifecycle(unsafe).safety.terminal,
+      false,
+      "unknown movement, unfinished authorization, underfill, reorg or consumer must keep evidence work alive",
+    );
+  }
+}
+
+{
   const startedFacts = facts({
     actions: [action("broadcast", { attempts: [attempt()] })],
   });

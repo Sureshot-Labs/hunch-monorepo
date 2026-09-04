@@ -230,6 +230,15 @@ export class RelayReconciliationDriver {
     readonly client: RelayClient,
     readonly referenceCodec: RelayReferenceCodec,
     readonly depositAddressCodec: RelayDepositAddressCodec,
+    private readonly observeDestinationReceipts?: (
+      pool: Pool,
+      input: {
+        operationId: string;
+        segmentId: string;
+        transactionHashes: readonly string[];
+        now: Date;
+      },
+    ) => Promise<void>,
   ) {}
 
   async pollOperation(
@@ -411,6 +420,12 @@ export class RelayReconciliationDriver {
       }
     }
 
+    const destinationReceiptTargets: Array<{
+      operationId: string;
+      segmentId: string;
+      transactionHashes: readonly string[];
+      now: Date;
+    }> = [];
     for (const { requestId, request, status } of statusResults) {
       if (status.requestId !== undefined && status.requestId !== requestId) {
         throw new Error("Relay Status v3 request ID does not match lookup");
@@ -427,7 +442,22 @@ export class RelayReconciliationDriver {
         referenceCodec: this.referenceCodec,
         now,
       });
+      if (status.status === "success") {
+        destinationReceiptTargets.push({
+          operationId,
+          segmentId: request.segment_id,
+          transactionHashes: status.txHashes ?? [],
+          now,
+        });
+      }
     }
+    // Persist every provider response first: an RPC outage on one destination
+    // must not prevent a sibling leg's status/references from being recorded.
+    await Promise.all(
+      destinationReceiptTargets.map((target) =>
+        this.observeDestinationReceipts?.(pool, target),
+      ),
+    );
     return {
       requestsPolled: statusResults.length,
       childrenDiscovered,

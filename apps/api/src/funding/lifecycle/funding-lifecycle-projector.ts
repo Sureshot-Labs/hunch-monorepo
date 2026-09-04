@@ -679,6 +679,79 @@ function routeLegsRefunded(
   );
 }
 
+/** A partial Buy can stop only when every moved leg is fully accounted for
+ * and every omitted leg expired without even starting an action. This is not
+ * a timeout shortcut for an ambiguous broadcast or an underfilled bridge.
+ */
+function isSettledPartialBuy(facts: FundingLifecycleFacts): boolean {
+  const legIds = new Set(facts.plan.routeLegs.map((leg) => leg.routeLegId));
+  if (
+    !facts.consumer.required ||
+    facts.consumer.completed ||
+    facts.consumer.unresolved ||
+    facts.reservations.some(
+      (reservation) => reservation.state === "consumed",
+    ) ||
+    facts.plan.routeLegs.length < 2 ||
+    facts.plan.completionEvidence !== "destination_credit" ||
+    facts.actions.some(
+      (action) => action.routeLegId === null || !legIds.has(action.routeLegId),
+    ) ||
+    facts.transfers.some(
+      (transfer) =>
+        transfer.routeLegId === null || !legIds.has(transfer.routeLegId),
+    )
+  )
+    return false;
+  let delivered = 0;
+  let omitted = 0;
+  for (const leg of facts.plan.routeLegs) {
+    const actions = facts.actions.filter(
+      (action) => action.routeLegId === leg.routeLegId,
+    );
+    const transfers = facts.transfers.filter(
+      (transfer) => transfer.routeLegId === leg.routeLegId,
+    );
+    if (actions.length === 0) return false;
+    if (
+      transfers.length === 0 &&
+      actions.every(
+        (action) =>
+          action.attempts.length === 0 &&
+          action.expiresAt !== null &&
+          action.expiresAt <= facts.now,
+      )
+    ) {
+      omitted++;
+      continue;
+    }
+    if (
+      !actions.every((action) => actionExecution(action) === "succeeded") ||
+      transfers.some(
+        (transfer) =>
+          !isCanonicalFinal(transfer) ||
+          (transfer.kind !== "source_debit" &&
+            transfer.kind !== "destination_credit") ||
+          !sameMoneyAsset(
+            transfer.money,
+            transfer.kind === "source_debit"
+              ? leg.requestedSource
+              : leg.minimumDestination,
+          ),
+      ) ||
+      !routeLegsSatisfied(transfers, { ...facts.plan, routeLegs: [leg] })
+    )
+      return false;
+    const debit = sumFinalTransfers(transfers, leg.requestedSource, [
+      "source_debit",
+    ]);
+    if (!debit || BigInt(debit.raw) !== BigInt(leg.requestedSource.raw))
+      return false;
+    delivered++;
+  }
+  return delivered > 0 && omitted > 0;
+}
+
 function sumFinalTransfers(
   transfers: readonly FundingLifecycleTransferEvidence[],
   expected: FundingLifecycleMoney,
@@ -1097,7 +1170,9 @@ export function deriveFundingLifecycle(
   // detach is appropriate only for an actual conflict, a stopped action, or a
   // user/manual terminal decision. This is a lifecycle fact so Telegram and
   // other consumers do not recreate their own status heuristics.
+  const settledPartialBuy = isSettledPartialBuy(facts);
   const consumerMayRemainLinked =
+    !settledPartialBuy &&
     facts.cancellation == null &&
     facts.manualRecovery == null &&
     facts.terminalFailure == null &&
@@ -1283,6 +1358,11 @@ export function deriveFundingLifecycle(
       ? "source_action"
       : "terminal";
     requiresWorker = externalEffectMayHaveOccurred;
+  } else if (settledPartialBuy) {
+    // The requested Buy is not funded, but no money is outstanding. Normal
+    // terminal cleanup releases reservations; destination cash is retained.
+    status = "failed";
+    progressStage = "terminal";
   } else if (facts.manualRecovery != null && !finalEvidenceResolved) {
     // This is an explicit escalation fact, never a stale cache value. Final
     // money evidence above still wins and resolves the incident normally.

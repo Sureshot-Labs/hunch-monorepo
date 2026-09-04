@@ -17,6 +17,7 @@ import {
   formatTelegramVenueLabel,
   formatTelegramVenueLabelMarkdownV2,
 } from "./telegram-market-identity.js";
+import { outcomeLabelOrSide } from "./wallet-intel-helpers.js";
 
 const SEARCH_KEY_PREFIX = "tg:signal_bot:v1:market_search";
 const SEARCH_TTL_SEC = 10 * 60;
@@ -36,6 +37,7 @@ export type SignalBotMarketSearchVenueOption = {
   marketId: string;
   marketTitle: string;
   noAsk: number | null;
+  outcomes?: string | null;
   venue: string;
   yesAsk: number | null;
 };
@@ -194,7 +196,7 @@ export function buildSignalBotMarketSearchScreen(input: {
             )} ${formatTelegramFieldWithMarkdownV2(
               "Odds",
               escapeTelegramMarkdownV2(
-                `YES ${price(result.yesAsk)} · NO ${price(result.noAsk)}`,
+                `${outcomeLabelOrSide(result.outcomes, "YES")} ${price(result.yesAsk)} · ${outcomeLabelOrSide(result.outcomes, "NO")} ${price(result.noAsk)}`,
               ),
             )}`;
       const block = [
@@ -364,7 +366,7 @@ export function buildSignalBotMarketVenuePickerScreen(input: {
           )} ${formatTelegramFieldWithMarkdownV2(
             "Odds",
             escapeTelegramMarkdownV2(
-              `YES ${price(option.yesAsk)} · NO ${price(option.noAsk)}`,
+              `${outcomeLabelOrSide(option.outcomes, "YES")} ${price(option.yesAsk)} · ${outcomeLabelOrSide(option.outcomes, "NO")} ${price(option.noAsk)}`,
             ),
           )}`,
       ),

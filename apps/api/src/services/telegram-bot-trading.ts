@@ -4823,6 +4823,8 @@ async function disableTelegramBotTradingLocal(
         [userId],
       );
     }
+    // Revoking server signing must not cancel a user-signed Mini App Review.
+    // Unlinking Telegram is different: that invalidates both execution paths.
     await client.query(
       `UPDATE telegram_trade_intents
           SET status = 'cancelled',
@@ -4830,11 +4832,12 @@ async function disableTelegramBotTradingLocal(
               error_message = 'Telegram bot trading was disabled before submission.',
               updated_at = now()
         WHERE ${intentSelector}
+          AND ($3::boolean OR delivery_mode IS DISTINCT FROM 'app_handoff')
           AND (
             status = ANY($2::text[])
             OR (status = 'executing' AND submit_started_at IS NULL)
           )`,
-      [value, PENDING_INTENT_STATUSES],
+      [value, PENDING_INTENT_STATUSES, options.blockLinkGeneration === true],
     );
     return {
       count: authorizationResult.rowCount ?? 0,
@@ -5785,34 +5788,46 @@ export async function buildTelegramBotTradingStatusMessage(
           .map((venue) => formatTelegramVenueLabelMarkdownV2(venue))
           .join(escapeMarkdown(" · "))
       : escapeMarkdown("none enabled");
-  const lines = [
-    `🤖 ${formatTelegramBoldMarkdownV2("Telegram Trading Status")}`,
-    "",
-    `⚙️ ${formatTelegramFieldMarkdownV2(
-      "Runtime policy",
-      policy.tradingEnabled ? "Enabled" : "Disabled",
-    )}`,
-    `🔗 ${formatTelegramFieldMarkdownV2(
-      "Linked account",
-      status.linked ? "Yes" : "No",
-    )}`,
-    `🤖 ${formatTelegramFieldMarkdownV2(
-      "Bot trading",
-      status.enabled ? "Enabled" : "Disabled",
-    )}`,
-    `👛 ${formatTelegramFieldWithMarkdownV2("Wallet", walletValue)}`,
-    `🌐 ${formatTelegramFieldWithMarkdownV2("Venues", venuesValue)}`,
-    "",
-    `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
-      "Max buy",
-      formatUsd(status.maxAmountUsd ?? policy.maxTradeAmountUsd),
-    )}`,
-    `⚡ ${formatTelegramFieldMarkdownV2(
-      "Direct execution",
-      status.directExecutionReady ? "Ready" : "Not ready",
-    )}`,
-    `🧰 ${formatTelegramFieldMarkdownV2("Actions", actions || "None enabled")}`,
-  ];
+  const miniAppOnly = policy.miniAppHandoffMode === "always";
+  const lines = miniAppOnly
+    ? [
+        `🤖 ${formatTelegramBoldMarkdownV2("Telegram Trading Status")}`,
+        "",
+        `⚙️ ${formatTelegramFieldMarkdownV2("Execution", "Mini App — user confirmation and signing")}`,
+        `🔗 ${formatTelegramFieldMarkdownV2("Linked account", status.linked ? "Yes" : "No")}`,
+        "",
+        escapeMarkdown(
+          "Bot access is not required. Each trade is reviewed and signed in Hunch.",
+        ),
+      ]
+    : [
+        `🤖 ${formatTelegramBoldMarkdownV2("Telegram Trading Status")}`,
+        "",
+        `⚙️ ${formatTelegramFieldMarkdownV2(
+          "Runtime policy",
+          policy.tradingEnabled ? "Enabled" : "Disabled",
+        )}`,
+        `🔗 ${formatTelegramFieldMarkdownV2(
+          "Linked account",
+          status.linked ? "Yes" : "No",
+        )}`,
+        `🤖 ${formatTelegramFieldMarkdownV2(
+          "Bot trading",
+          status.enabled ? "Enabled" : "Disabled",
+        )}`,
+        `👛 ${formatTelegramFieldWithMarkdownV2("Wallet", walletValue)}`,
+        `🌐 ${formatTelegramFieldWithMarkdownV2("Venues", venuesValue)}`,
+        "",
+        `${telegramCustomEmojiMarkdownV2("usdc")} ${formatTelegramFieldMarkdownV2(
+          "Max buy",
+          formatUsd(status.maxAmountUsd ?? policy.maxTradeAmountUsd),
+        )}`,
+        `⚡ ${formatTelegramFieldMarkdownV2(
+          "Direct execution",
+          status.directExecutionReady ? "Ready" : "Not ready",
+        )}`,
+        `🧰 ${formatTelegramFieldMarkdownV2("Actions", actions || "None enabled")}`,
+      ];
   if (unresolvedIntentCount > 0) {
     const terminalFundingIntent = resolvingIntents.some(
       (intent) =>
@@ -5845,7 +5860,7 @@ export async function buildTelegramBotTradingStatusMessage(
       ),
     );
   }
-  if (status.setupIssue) {
+  if (status.setupIssue && !miniAppOnly) {
     lines.push(
       "",
       formatTelegramCalloutMarkdownV2({
@@ -6329,8 +6344,12 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     marketPriceLine(market),
   );
   const observedOdds = [
-    observedYesAsk != null ? `YES ${formatLivePrice(observedYesAsk)}` : null,
-    observedNoAsk != null ? `NO ${formatLivePrice(observedNoAsk)}` : null,
+    observedYesAsk != null
+      ? `${sideLabel(market, "YES")} ${formatLivePrice(observedYesAsk)}`
+      : null,
+    observedNoAsk != null
+      ? `${sideLabel(market, "NO")} ${formatLivePrice(observedNoAsk)}`
+      : null,
   ].filter((value): value is string => value != null);
   if (observedOdds.length > 0) {
     lines.push(`Current buy odds: ${observedOdds.join(" · ")}`);
@@ -6426,6 +6445,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   } else if (sealedAppHandoffSellAvailable && !sealedAppHandoffAvailable) {
     lines.push("Open Hunch to continue a protected Sell.");
   } else if (
+    !v2MiniAppHandoffEnabled &&
     (buyOperationPermitted || sellOperationPermitted) &&
     buyOptions.length === 0 &&
     sellOptions.length === 0 &&
@@ -10516,13 +10536,18 @@ async function previewTelegramTradeIntent(input: {
     }
     await input.sendMessage({
       chat_id: input.chatId,
-      parse_mode: "MarkdownV2",
-      text: formatTelegramTradeLifecycleMessageMarkdownV2({
-        heading: "Unable to build a safe current quote.",
-        tone: "warn",
-        lines: ["Nothing was submitted. Send /market again."],
-        marketTitle: input.intent.market_title,
-        venue: input.intent.venue,
+      ...withTelegramTradeErrorActions({
+        intentId: input.intent.id,
+        message: {
+          parse_mode: "MarkdownV2",
+          text: formatTelegramTradeLifecycleMessageMarkdownV2({
+            heading: "Unable to build a safe current quote.",
+            tone: "warn",
+            lines: ["Nothing was submitted. Open the market to try again."],
+            marketTitle: input.intent.market_title,
+            venue: input.intent.venue,
+          }),
+        },
       }),
     });
     return;
@@ -12249,6 +12274,12 @@ export async function handleTelegramBotTradingCallback(
   const chatId = messageChat.id;
   const sourceMessageId = input.callbackQuery.message?.message_id ?? null;
   const isIntentCancellation = parsed.type === "cancel";
+  // A market card can point to a Review owned by another message. Reopening
+  // a user-signed handoff is navigation, not permission to submit it. Keep
+  // the original message binding and all confirmation/server-submit fences.
+  const isIntentNavigation =
+    parsed.type === "open_market" ||
+    (parsed.type === "retry_buy" && intent.delivery_mode === "app_handoff");
   const lifecycleDeliveryEligible = isTelegramTradeLifecycleDeliveryEligible({
     chatId: intent.chat_id,
     deliveryMode: intent.delivery_mode,
@@ -12261,7 +12292,8 @@ export async function handleTelegramBotTradingCallback(
     intent.telegram_message_id != null &&
     String(sourceMessageId) !== intent.telegram_message_id &&
     lifecycleDeliveryEligible &&
-    !isIntentCancellation
+    !isIntentCancellation &&
+    !isIntentNavigation
   ) {
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
@@ -12349,7 +12381,7 @@ export async function handleTelegramBotTradingCallback(
     });
     return true;
   }
-  if (sourceMessageId != null && !isIntentCancellation) {
+  if (sourceMessageId != null && !isIntentCancellation && !isIntentNavigation) {
     const rebound = await input.db.query(
       `UPDATE telegram_trade_intents
           SET telegram_message_id = $2,

@@ -15,6 +15,7 @@ export type TelegramMarketSearchResult = {
   marketId: string;
   marketTitle: string;
   noAsk: number | null;
+  outcomes?: string | null;
   venue: string;
   venueOptions?: TelegramMarketSearchVenueOption[];
   yesAsk: number | null;
@@ -45,6 +46,7 @@ function mapTelegramMarketSearchResult(
     marketId: row.market_uuid,
     marketTitle: row.market_title?.trim() || "Prediction market",
     noAsk: finiteNumber(row.best_ask_no),
+    outcomes: row.outcomes,
     venue: row.venue,
     yesAsk: finiteNumber(row.best_ask_yes ?? row.best_ask),
   };

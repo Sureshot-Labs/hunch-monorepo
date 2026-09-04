@@ -20,6 +20,7 @@ import { observePolymarketFundingRuntimeSidecar } from "../preparation/polymarke
 import { pollFundingPostconditions } from "../preparation/postcondition-driver.js";
 import { DirectIngressDestinationObserver } from "../reconciliation/direct-ingress-observer.js";
 import { OwnedRouteDestinationObserver } from "../reconciliation/owned-route-destination-observer.js";
+import { reconcileRelayDestinationReceipts } from "../reconciliation/relay-destination-receipts.js";
 import { RelayOwnedRefundObserver } from "../reconciliation/relay-owned-refund-observer.js";
 import { runTelegramRouterContinuation } from "../reconciliation/telegram-router-continuation.js";
 import {
@@ -611,6 +612,11 @@ export async function runFundingReconciliationJob(
       }),
       createRelayReferenceCodec(codecConfig),
       createRelayDepositAddressCodec(codecConfig),
+      (db, input) =>
+        reconcileRelayDestinationReceipts(db, {
+          ...input,
+          referenceCodec: createRelayReferenceCodec(codecConfig),
+        }),
     );
     result = await runFundingReconciliationBatch(pool, {
       ...options,

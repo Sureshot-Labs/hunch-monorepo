@@ -25,6 +25,7 @@ import {
   buildTelegramBotTradingMarketMessage,
   buildTelegramBotTradingStatusMessage,
   captureTelegramBotTradingCallback,
+  cleanupTelegramBotTradingForUnlink,
   loadTelegramAppHandoffProjection,
   reconcileStaleTelegramTradeIntents,
   resolveTelegramAppHandoffCurrentScope,
@@ -693,6 +694,34 @@ try {
   assert.equal(miniAppStatus.json().policy.miniAppHandoffMode, "always");
   assert.equal(miniAppStatus.json().policy.miniAppHandoffContractVersion, 2);
   assert.equal(miniAppStatus.json().policy.autoEnableOnTelegramLink, false);
+  // This uses the real signer inspector (no server key in this fixture):
+  // status may revoke automation, but must preserve the user-signed Review.
+  await client.query("savepoint mini_app_status_check");
+  const miniAppStatusCard = await buildTelegramBotTradingStatusMessage(
+    db,
+    telegramUserId,
+    trading,
+    { reconcileLocal: false },
+  );
+  assert.match(miniAppStatusCard.text, /Mini App/u);
+  assert.doesNotMatch(
+    miniAppStatusCard.text,
+    /Grant bot access|Direct execution|Setup needs attention/u,
+  );
+  const afterStatusRead = await client.query<{ status: string }>(
+    "select status from telegram_trade_intents where id = $1::uuid",
+    [limitlessHandoffIntentId],
+  );
+  assert.equal(afterStatusRead.rows[0]?.status, "previewed");
+  await cleanupTelegramBotTradingForUnlink(db, userId);
+  const afterUnlink = await client.query<{ status: string }>(
+    "select status from telegram_trade_intents where id = $1::uuid",
+    [limitlessHandoffIntentId],
+  );
+  assert.equal(afterUnlink.rows[0]?.status, "cancelled");
+  // Later cases exercise direct execution using the original server grant.
+  await client.query("rollback to savepoint mini_app_status_check");
+  await client.query("release savepoint mini_app_status_check");
   const retryableLimitlessHandoff = await captureTelegramBotTradingCallback({
     appBaseUrl: "https://app.hunch.trade",
     callbackQuery: {
@@ -783,7 +812,8 @@ try {
       id: `limitless-recovered-handoff:${suffix}`,
       message: {
         chat: { id: telegramUserId, type: "private" },
-        message_id: 701,
+        // Restore is rendered on a fresh market card, not the original Review.
+        message_id: 9701,
       },
     },
     db,
