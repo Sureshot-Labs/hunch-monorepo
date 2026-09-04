@@ -42,7 +42,7 @@ const tokenInterface = new Interface([
 ]);
 
 function buildDepositWalletBatchTypedData(
-  call: Record<string, unknown>,
+  call: Record<string, unknown> | readonly Record<string, unknown>[],
 ): EmbeddedPolymarketTypedData {
   const depositWallet = "0x2dFcaa5734CA03B3917eAcCb32f9B75c7675781A";
   return {
@@ -70,7 +70,7 @@ function buildDepositWalletBatchTypedData(
       wallet: depositWallet,
       nonce: "2",
       deadline: "1779124339",
-      calls: [call],
+      calls: Array.isArray(call) ? call : [call],
     },
   };
 }
@@ -411,6 +411,77 @@ const tests: TestCase[] = [
           }),
         /withdraw batches only support transfer and pUSD unwrap calls/,
       );
+    },
+  },
+  {
+    name: "embedded funding conversion requires one exact approve-wrap-transfer batch",
+    run: () => {
+      const depositWallet = "0x2dFcaa5734CA03B3917eAcCb32f9B75c7675781A";
+      const amount = 1_103_536n;
+      const calls = [
+        {
+          target: env.polymarketUsdceAddress,
+          value: "0",
+          data: tokenInterface.encodeFunctionData("approve", [
+            env.polymarketCollateralOnrampAddress,
+            amount,
+          ]),
+        },
+        {
+          target: env.polymarketCollateralOnrampAddress,
+          value: "0",
+          data: tokenInterface.encodeFunctionData("wrap", [
+            env.polymarketUsdceAddress,
+            depositWallet,
+            amount,
+          ]),
+        },
+        {
+          target: env.polymarketUsdcAddress,
+          value: "0",
+          data: tokenInterface.encodeFunctionData("transfer", [
+            walletContext.signer,
+            amount,
+          ]),
+        },
+      ];
+      const [approvalCall, wrapCall, transferCall] = calls;
+      assert.ok(approvalCall);
+      assert.ok(wrapCall);
+      assert.ok(transferCall);
+      assert.doesNotThrow(() =>
+        buildEmbeddedPolymarketTypedDataRequest({
+          context: walletContext,
+          depositWalletBatchPurpose: "funding_conversion",
+          typedData: buildDepositWalletBatchTypedData(calls),
+        }),
+      );
+      for (const invalidCalls of [
+        calls.slice(0, 2),
+        [wrapCall, approvalCall, transferCall],
+        [
+          approvalCall,
+          wrapCall,
+          {
+            ...transferCall,
+            data: tokenInterface.encodeFunctionData("transfer", [
+              walletContext.signer,
+              amount - 1n,
+            ]),
+          },
+        ],
+        [...calls, transferCall],
+      ]) {
+        assert.throws(
+          () =>
+            buildEmbeddedPolymarketTypedDataRequest({
+              context: walletContext,
+              depositWalletBatchPurpose: "funding_conversion",
+              typedData: buildDepositWalletBatchTypedData(invalidCalls),
+            }),
+          /funding conversion/i,
+        );
+      }
     },
   },
   {

@@ -61,9 +61,7 @@ import {
 } from "../../receive/receive-session-observer.js";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import { relayReceiveQuotePlan } from "../../../funding-providers/relay/receive-routing.js";
-import {
-  lockPolymarketFundingOperationPredecessor,
-} from "../../preparation/polymarket-funding-commit-guard.js";
+import { lockPolymarketFundingOperationPredecessor } from "../../preparation/polymarket-funding-commit-guard.js";
 
 const ASSET = {
   networkId: "evm:137",

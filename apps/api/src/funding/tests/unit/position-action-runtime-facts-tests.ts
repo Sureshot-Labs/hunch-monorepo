@@ -10,6 +10,8 @@ import {
   type RedemptionRuntimeEvidence,
 } from "../../position-actions/redemption-runtime-facts.js";
 import { OwnerBoundPositionActionExecutor } from "../../preparation/position-action-executor.js";
+import { preparedPositionActionFromStoredOperation } from "../../position-actions/position-action-replay.js";
+import type { StoredPositionAction } from "../../position-actions/position-action-repository.js";
 
 const NOW = new Date("2026-07-24T12:00:00.000Z");
 const EXPIRES = "2026-07-24T12:01:00.000Z";
@@ -245,6 +247,56 @@ await test("unsupported topology and RPC uncertainty are fail-closed", async () 
   );
   assert.equal(byId.get("rpc_fresh")?.status, "unavailable");
   assert.equal(byId.get("canonical_redemption_plan")?.actions.length, 0);
+});
+
+await test("idempotent replay returns the stored action and wallet binding", async () => {
+  const storedActionId = "action_stored_replay_12345678";
+  const operation: StoredPositionAction = {
+    id: "30000000-0000-4000-8000-000000000003",
+    userId: USER_ID,
+    marketId: null,
+    venueId: "limitless",
+    action: "redeem",
+    positionRef: POSITION_ID,
+    ownerBindingId: binding("limitless").bindingId,
+    ownerAddress: OWNER,
+    executionWalletId: binding("limitless").executionWalletId,
+    executionAddress: OWNER,
+    executionMode: "web_client",
+    inspectionRevision: "inspection_stored_replay_12345678",
+    actionDigest: "a".repeat(64),
+    idempotencyKey: "idempotency_stored_replay_12345678",
+    status: "awaiting_user",
+    planSnapshot: {},
+    evidenceSnapshot: {},
+    normalizedActions: [
+      {
+        kind: "evm_transaction",
+        actionId: storedActionId,
+        networkId: "evm:8453",
+        senderWalletId: binding("limitless").executionWalletId,
+        to: TARGET,
+        data: "0x1234",
+        valueRaw: "0",
+        gasLimitRaw: null,
+      },
+    ],
+    postconditions: [],
+    submissionFingerprint: null,
+    broadcastMayHaveOccurred: false,
+    receiptStatus: "unobserved",
+    receiptObservedAt: null,
+    postconditionStatus: "pending",
+    lastErrorCode: null,
+    submittedAt: null,
+    completedAt: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+  const replay = preparedPositionActionFromStoredOperation(operation);
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.controllerWalletRef, operation.executionWalletId);
+  assert.equal(replay.actions[0]?.actionId, storedActionId);
 });
 
 console.log("[position-action-runtime-facts-tests] complete");

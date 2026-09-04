@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
+import { stableWalletAssetLocationIdentity } from "../../../account-value/canonical.js";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import type { FundingRuntimePolicy } from "../../policies/funding-policy.js";
 import type {
@@ -978,6 +979,205 @@ assert.equal(
           ...withdrawalRecipient,
           address: "0x1111111111111111111111111111111111111111",
         },
+      }),
+    /differs from frozen recipient/,
+  );
+
+  const usdceLocation = {
+    ...location,
+    locationId: "location_polymarket_usdce_funder_12345678",
+    asset: POLYGON_USDCE,
+  } as const;
+  const usdceComponent = {
+    ...component,
+    componentId: "component_polymarket_usdce_funder_12345678",
+    location: usdceLocation,
+    amount: { asset: POLYGON_USDCE, raw: "18472217" },
+    estimatedUsd: { ...baseEstimatedUsd, value: "18.472217" },
+  } as const;
+  const usdceDepositWalletAccount = {
+    ...handoffAccount,
+    projection: {
+      ...handoffAccount.projection,
+      components: [usdceComponent],
+    },
+    cashAvailability: {
+      ...handoffAccount.cashAvailability,
+      components: [
+        {
+          ...baseAvailability,
+          componentId: usdceComponent.componentId,
+          amount: usdceComponent.amount,
+          availableRaw: usdceComponent.amount.raw,
+          availableEstimatedUsd: "18.472217",
+        },
+      ],
+    },
+  } as unknown as AccountValueReadModel;
+  assert.equal(
+    deriveProductionRelayEligibleSourceFacts({
+      accountId: ACCOUNT_ID,
+      account: usdceDepositWalletAccount,
+      policy: handoffPolicy,
+      destinationLocationPatternId: "venue_limitless_usdc",
+      requiredAmount: { asset: BASE_USDC, raw: "1000000" },
+      purpose: "trade_shortfall",
+    }).length,
+    0,
+    "generic Web/Telegram/automation Relay discovery must not treat Deposit Wallet USDC.e as controller USDC.e",
+  );
+  const usdceWithdrawalAmount = {
+    asset: POLYGON_USDCE,
+    raw: "5000000",
+  } as const;
+  const usdceWithdrawalRecipient = {
+    ...withdrawalRecipient,
+    recipientId: "recipient_usdce_withdrawal_12345678",
+    asset: POLYGON_USDCE,
+  } as const;
+  const usdceWithdrawalOptions = await new DirectWithdrawalSourceAdapter(
+    usdceDepositWalletAccount,
+  ).list({
+    accountId: ACCOUNT_ID,
+    request: {
+      purpose: "withdrawal",
+      requestedDestinationAmount: usdceWithdrawalAmount,
+      confirmedSourceAmount: null,
+      marketContextId: null,
+      destinationOptionId: null,
+      withdrawalRecipientId: usdceWithdrawalRecipient.recipientId,
+      venueBindingOptionId: null,
+      maxFeeUsd: null,
+      maxSlippageBps: null,
+      deadline: null,
+    },
+    marketContext: null,
+    destinationFacts: null,
+    destination: {
+      destinationId: usdceWithdrawalRecipient.recipientId,
+      destinationLocationPatternId: "withdrawal-polygon-usdce-v1",
+      target: {
+        kind: "external_recipient",
+        recipient: usdceWithdrawalRecipient,
+      },
+      requiredAsset: POLYGON_USDCE,
+      spendability: null,
+      venueId: null,
+      venueBindingOption: null,
+      externalRecipientId: usdceWithdrawalRecipient.recipientId,
+      recipientAddress: "0x1a9ec8b3c44a748f7fad6623fd79332ce683ceb0",
+    },
+    placement: {
+      mode: "confirmed_withdrawal_amount",
+      sourceAmount: usdceWithdrawalAmount,
+      destinationRequirement: usdceWithdrawalAmount,
+      targetVenueId: null,
+      target: {
+        kind: "external_recipient",
+        recipient: usdceWithdrawalRecipient,
+      },
+      boundedBuffer: null,
+      reason: "explicit",
+      policyVersion: 1,
+    },
+    requiredAmount: usdceWithdrawalAmount,
+    policy: handoffPolicy,
+    policyRevision: "policy_usdce_withdrawal_12345678",
+    now: new Date(NOW),
+  });
+  assert.equal(usdceWithdrawalOptions.length, 1);
+  const usdceWithdrawalPlan = usdceWithdrawalOptions[0]?.commitPlan;
+  assert.ok(usdceWithdrawalPlan);
+  assert.equal(
+    usdceWithdrawalPlan.operation.supportMetadata?.withdrawalExecutionKind,
+    "exact_same_asset_transfer",
+  );
+  assert.equal(usdceWithdrawalPlan.steps.length, 2);
+  assert.deepEqual(
+    usdceWithdrawalPlan.steps.map((step) => ({
+      kind: step.stepKind,
+      dependsOn: step.dependsOnOrdinal,
+    })),
+    [
+      { kind: "external_handoff", dependsOn: null },
+      { kind: "transaction", dependsOn: 0 },
+    ],
+  );
+  assert.equal(
+    usdceWithdrawalPlan.steps[0]?.actionValidationResult.executionEnvelope,
+    "polymarket_deposit_wallet_to_controller_v1",
+  );
+  const handoffPayload = usdceWithdrawalPlan.steps[0]?.normalizedAction
+    .payload as Readonly<Record<string, unknown>> | undefined;
+  assert.equal(
+    handoffPayload && Array.isArray(handoffPayload.calls)
+      ? handoffPayload.calls.length
+      : 0,
+    1,
+  );
+  assert.equal(handoffPayload?.token, POLYGON_USDCE.assetId);
+  assert.equal(handoffPayload?.conversionKind, undefined);
+  const controllerUsdceIdentity = stableWalletAssetLocationIdentity({
+    accountId: ACCOUNT_ID,
+    address: controllerAddress,
+    asset: POLYGON_USDCE,
+    balanceClass: "polymarket",
+  });
+  assert.deepEqual(
+    usdceWithdrawalPlan.reservations.map((reservation) => ({
+      componentId: reservation.componentId,
+      locationId: reservation.locationId,
+      assetId: reservation.assetId,
+      rawAmount: reservation.rawAmount,
+      economicRole: reservation.economicRole ?? "source_input",
+    })),
+    [
+      {
+        componentId: usdceComponent.componentId,
+        locationId: usdceLocation.locationId,
+        assetId: POLYGON_USDCE.assetId,
+        rawAmount: usdceWithdrawalAmount.raw,
+        economicRole: "source_input",
+      },
+      {
+        componentId: controllerUsdceIdentity.componentId,
+        locationId: controllerUsdceIdentity.locationId,
+        assetId: POLYGON_USDCE.assetId,
+        rawAmount: usdceWithdrawalAmount.raw,
+        economicRole: "future_credit_fence",
+      },
+    ],
+  );
+  const refundAsset = usdceWithdrawalPlan.segments[0]?.refundLocationSnapshot
+    ?.asset as Readonly<Record<string, unknown>> | undefined;
+  assert.equal(refundAsset?.assetId, POLYGON_USDCE.assetId);
+  for (const step of usdceWithdrawalPlan.steps.slice(1)) {
+    const action = step.normalizedAction;
+    assert.equal(action.kind, "evm_transaction");
+    assertDirectWithdrawalActionMatchesRecipient({
+      action: action as unknown as EvmTransactionAction,
+      actionValidationResult: step.actionValidationResult,
+      recipient: {
+        ...usdceWithdrawalRecipient,
+        address: "0x1a9ec8b3c44a748f7fad6623fd79332ce683ceb0",
+      },
+      required: true,
+    });
+  }
+  assert.throws(
+    () =>
+      assertDirectWithdrawalActionMatchesRecipient({
+        action: usdceWithdrawalPlan.steps[1]
+          ?.normalizedAction as unknown as EvmTransactionAction,
+        actionValidationResult: {
+          ...usdceWithdrawalPlan.steps[1]?.actionValidationResult,
+          expectedSourceAssetId: POLYGON_PUSD.assetId,
+        },
+        recipient: {
+          ...usdceWithdrawalRecipient,
+          address: "0x1a9ec8b3c44a748f7fad6623fd79332ce683ceb0",
+        },
+        required: true,
       }),
     /differs from frozen recipient/,
   );

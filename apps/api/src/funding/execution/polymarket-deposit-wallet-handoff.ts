@@ -1,11 +1,19 @@
 import { ethers } from "ethers";
 
+import { RELAY_PINNED_ASSETS } from "../../funding-providers/relay/mappings.js";
+import { POLYMARKET_COLLATERAL_ONRAMP } from "../../funding-providers/relay/rehearsal.js";
 import type { JsonValue, NormalizedAction } from "../domain/types.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
 const ERC20_TRANSFER_INTERFACE = new ethers.Interface([
   "function transfer(address recipient,uint256 amount)",
+]);
+const ERC20_APPROVE_INTERFACE = new ethers.Interface([
+  "function approve(address spender,uint256 amount)",
+]);
+const POLYMARKET_COLLATERAL_INTERFACE = new ethers.Interface([
+  "function wrap(address asset,address recipient,uint256 amount)",
 ]);
 const EVM_TRANSACTION_HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
 const POLYMARKET_RELAYER_TRANSACTION_REFERENCE_PREFIX =
@@ -36,20 +44,7 @@ export function polymarketDepositWalletHandoffExpectation(
     typeof action.payload.funder !== "string" ||
     typeof action.payload.recipient !== "string" ||
     typeof action.payload.amountRaw !== "string" ||
-    !Array.isArray(action.payload.calls) ||
-    action.payload.calls.length !== 1
-  ) {
-    return null;
-  }
-  const call = action.payload.calls[0];
-  if (
-    typeof call !== "object" ||
-    call === null ||
-    Array.isArray(call) ||
-    typeof call.target !== "string" ||
-    typeof call.value !== "string" ||
-    typeof call.data !== "string" ||
-    call.value !== "0"
+    !Array.isArray(action.payload.calls)
   ) {
     return null;
   }
@@ -67,24 +62,93 @@ export function polymarketDepositWalletHandoffExpectation(
       String(validation.recipientAddress),
     );
     const amountRaw = BigInt(action.payload.amountRaw);
-    const decoded = ERC20_TRANSFER_INTERFACE.decodeFunctionData(
+    const calls = action.payload.calls.map((call) => {
+      if (
+        typeof call !== "object" ||
+        call === null ||
+        Array.isArray(call) ||
+        typeof call.target !== "string" ||
+        typeof call.value !== "string" ||
+        typeof call.data !== "string" ||
+        call.value !== "0"
+      ) {
+        throw new Error("invalid handoff call");
+      }
+      return {
+        target: ethers.getAddress(call.target),
+        data: call.data,
+      };
+    });
+    const convertsUsdce =
+      action.payload.conversionKind === "polymarket_usdce_to_pusd";
+    const transferCall = calls.at(-1);
+    if (!transferCall) return null;
+    const decodedTransfer = ERC20_TRANSFER_INTERFACE.decodeFunctionData(
       "transfer",
-      call.data,
+      transferCall.data,
     );
-    if (
-      amountRaw <= 0n ||
-      ethers.getAddress(call.target) !== tokenAddress ||
-      ethers.getAddress(String(decoded[0])) !== recipientAddress ||
-      BigInt(decoded[1]) !== amountRaw ||
-      validation.executionEnvelope !==
-        "polymarket_deposit_wallet_to_controller_v1" ||
-      validatedTokenAddress !== tokenAddress ||
-      validatedFunderAddress !== funderAddress ||
-      validatedRecipientAddress !== recipientAddress ||
-      validation.amountRaw !== amountRaw.toString() ||
-      validation.transferData !== call.data
-    ) {
-      return null;
+    const baseEnvelopeMatches =
+      amountRaw > 0n &&
+      transferCall.target === tokenAddress &&
+      ethers.getAddress(String(decodedTransfer[0])) === recipientAddress &&
+      BigInt(decodedTransfer[1]) === amountRaw &&
+      validatedTokenAddress === tokenAddress &&
+      validatedFunderAddress === funderAddress &&
+      validatedRecipientAddress === recipientAddress &&
+      validation.amountRaw === amountRaw.toString() &&
+      validation.transferData === transferCall.data;
+    if (!baseEnvelopeMatches) return null;
+    if (!convertsUsdce) {
+      if (
+        calls.length !== 1 ||
+        validation.executionEnvelope !==
+          "polymarket_deposit_wallet_to_controller_v1"
+      ) {
+        return null;
+      }
+    } else {
+      if (
+        calls.length !== 3 ||
+        action.payload.sourceToken !== RELAY_PINNED_ASSETS.polygonUsdce ||
+        tokenAddress.toLowerCase() !== RELAY_PINNED_ASSETS.polygonPusd ||
+        validation.executionEnvelope !==
+          "polymarket_deposit_wallet_to_controller_v1" ||
+        validation.conversionKind !== "polymarket_usdce_to_pusd" ||
+        typeof validation.sourceTokenAddress !== "string" ||
+        ethers.getAddress(validation.sourceTokenAddress).toLowerCase() !==
+          RELAY_PINNED_ASSETS.polygonUsdce ||
+        typeof validation.collateralOnrampAddress !== "string" ||
+        ethers.getAddress(validation.collateralOnrampAddress) !==
+          ethers.getAddress(POLYMARKET_COLLATERAL_ONRAMP) ||
+        typeof validation.signerAddress !== "string" ||
+        ethers.getAddress(validation.signerAddress) !== recipientAddress
+      ) {
+        return null;
+      }
+      const approval = calls[0];
+      const wrap = calls[1];
+      if (!approval || !wrap) return null;
+      const decodedApproval = ERC20_APPROVE_INTERFACE.decodeFunctionData(
+        "approve",
+        approval.data,
+      );
+      const decodedWrap = POLYMARKET_COLLATERAL_INTERFACE.decodeFunctionData(
+        "wrap",
+        wrap.data,
+      );
+      if (
+        approval.target.toLowerCase() !== RELAY_PINNED_ASSETS.polygonUsdce ||
+        ethers.getAddress(String(decodedApproval[0])) !==
+          ethers.getAddress(POLYMARKET_COLLATERAL_ONRAMP) ||
+        BigInt(decodedApproval[1]) !== amountRaw ||
+        wrap.target !== ethers.getAddress(POLYMARKET_COLLATERAL_ONRAMP) ||
+        ethers.getAddress(String(decodedWrap[0])).toLowerCase() !==
+          RELAY_PINNED_ASSETS.polygonUsdce ||
+        ethers.getAddress(String(decodedWrap[1])) !== funderAddress ||
+        BigInt(decodedWrap[2]) !== amountRaw
+      ) {
+        return null;
+      }
     }
     return {
       tokenAddress,

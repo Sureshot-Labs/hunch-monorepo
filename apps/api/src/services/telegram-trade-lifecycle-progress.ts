@@ -1361,11 +1361,7 @@ export async function runTelegramTradeLifecycleProjectionBatchInTransaction(
               and action = $3::text
               and state_revision < $2::int
               and status in ('pending', 'retry')`,
-        [
-          candidate.id,
-          revision,
-          TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION,
-        ],
+        [candidate.id, revision, TELEGRAM_TRADE_LIFECYCLE_OUTBOX_ACTION],
       );
       await client.query(
         `insert into telegram_bot_action_outbox (

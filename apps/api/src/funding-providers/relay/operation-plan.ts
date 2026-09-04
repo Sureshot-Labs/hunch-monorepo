@@ -28,7 +28,7 @@ import type { FundingCommitStep } from "../../funding/persistence/funding-operat
 import { resolveActionSponsorship } from "../../funding/execution/sponsorship-policy.js";
 import { withRelayClientSourceDebitPostcondition } from "../../funding/execution/relay-client-source-debit.js";
 import { RelayPinnedActionValidator } from "./action-validator.js";
-import { isRelayPinnedStableAsset } from "./mappings.js";
+import { isRelayPinnedStableAsset, RELAY_PINNED_ASSETS } from "./mappings.js";
 import {
   RELAY_DEPOSITORY_V2,
   canonicalizeRelayDepositoryV2SelfBoundAction,
@@ -190,13 +190,19 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
 }): readonly FundingCommitStep[] {
   const handoff = input.source.preRouteHandoff;
   if (!handoff) return input.steps;
+  const expectedSourceToken = handoff.tokenAddress;
+  const isSupportedHandoffToken = [
+    RELAY_PINNED_ASSETS.polygonPusd,
+    RELAY_PINNED_ASSETS.polygonUsdce,
+  ].includes(expectedSourceToken.toLowerCase());
   if (
     handoff.kind !== "polymarket_deposit_wallet_to_controller_v1" ||
+    !isSupportedHandoffToken ||
     input.sourceAmount.asset.networkId !== "evm:137" ||
     canonicalAssetId(input.sourceAmount.asset) !==
       canonicalAssetId({
         ...input.sourceAmount.asset,
-        assetId: handoff.tokenAddress,
+        assetId: expectedSourceToken,
       }) ||
     !sameAccountAddress(
       input.sourceAmount.asset.networkId,
@@ -211,6 +217,9 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
     handoff.controllerAddress,
     BigInt(input.sourceAmount.raw),
   ]);
+  const calls = [
+    { target: expectedSourceToken, value: "0", data: transferData },
+  ];
   const action: ExternalHandoffAction = {
     kind: "external_handoff",
     actionId: stableOpaqueId(
@@ -219,7 +228,7 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
         kind: handoff.kind,
         funderAddress: handoff.funderAddress,
         controllerAddress: handoff.controllerAddress,
-        tokenAddress: handoff.tokenAddress,
+        tokenAddress: expectedSourceToken,
         amountRaw: input.sourceAmount.raw,
       }),
     ),
@@ -230,15 +239,9 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
       topology: "deposit_wallet",
       funder: handoff.funderAddress,
       recipient: handoff.controllerAddress,
-      token: handoff.tokenAddress,
+      token: expectedSourceToken,
       amountRaw: input.sourceAmount.raw,
-      calls: [
-        {
-          target: handoff.tokenAddress,
-          value: "0",
-          data: transferData,
-        },
-      ],
+      calls,
     },
   };
   return [
@@ -258,10 +261,13 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
       normalizedAction: jsonRecord(action),
       actionValidationResult: jsonRecord({
         signerAddress: input.profile.address,
-        executionEnvelope: handoff.kind,
+        // The relayer action is one exact same-asset transfer back to the
+        // controller. Downstream routing and approvals happen only from that
+        // ordinary controller wallet.
+        executionEnvelope: "polymarket_deposit_wallet_to_controller_v1",
         funderAddress: handoff.funderAddress,
         recipientAddress: handoff.controllerAddress,
-        tokenAddress: handoff.tokenAddress,
+        tokenAddress: expectedSourceToken,
         amountRaw: input.sourceAmount.raw,
         transferData,
       }),

@@ -1,7 +1,6 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import type { JsonObject, JsonValue } from "../domain/types.js";
-import { canonicalJsonEqual } from "../persistence/canonical.js";
 
 export type PositionActionStatus =
   | "prepared"
@@ -161,31 +160,39 @@ export class PositionActionPersistenceError extends Error {
   }
 }
 
-function sameCreate(
+export type PositionActionRequestIdentity = Readonly<{
+  userId: string;
+  venueId: string;
+  action: "sell" | "redeem";
+  positionRef: string;
+  ownerBindingId: string;
+  inspectionRevision: string;
+}>;
+
+function sameRequestIdentity(
   existing: StoredPositionAction,
-  input: PositionActionCreateInput,
+  input: PositionActionRequestIdentity,
 ): boolean {
-  const canonicalAddress = (value: string) =>
-    /^0x[0-9a-fA-F]{40}$/.test(value) ? value.toLowerCase() : value;
   return (
     existing.userId === input.userId &&
     existing.venueId === input.venueId &&
     existing.action === input.action &&
     existing.positionRef === input.positionRef &&
     existing.ownerBindingId === input.ownerBindingId &&
-    canonicalAddress(existing.ownerAddress) ===
-      canonicalAddress(input.ownerAddress) &&
-    existing.executionWalletId === input.executionWalletId &&
-    canonicalAddress(existing.executionAddress) ===
-      canonicalAddress(input.executionAddress) &&
-    existing.executionMode === input.executionMode &&
-    existing.inspectionRevision === input.inspectionRevision &&
-    existing.actionDigest === input.actionDigest &&
-    canonicalJsonEqual(existing.planSnapshot, input.planSnapshot) &&
-    canonicalJsonEqual(existing.evidenceSnapshot, input.evidenceSnapshot) &&
-    canonicalJsonEqual(existing.normalizedActions, input.normalizedActions) &&
-    canonicalJsonEqual(existing.postconditions, input.postconditions)
+    existing.inspectionRevision === input.inspectionRevision
   );
+}
+
+function assertSameRequestIdentity(
+  existing: StoredPositionAction,
+  input: PositionActionRequestIdentity,
+): void {
+  if (!sameRequestIdentity(existing, input)) {
+    throw new PositionActionPersistenceError(
+      "idempotency_conflict",
+      "position action idempotency key was reused with different request identity",
+    );
+  }
 }
 
 async function fetchForUpdate(
@@ -235,44 +242,64 @@ export async function createOrReplayPositionAction(
   input: PositionActionCreateInput,
 ): Promise<Readonly<{ operation: StoredPositionAction; replayed: boolean }>> {
   return tx(pool, async (client) => {
+    // A request key deduplicates transport retries. The position lock is a
+    // separate boundary: two fresh keys (for example from two tabs) must not
+    // create two simultaneously actionable operations for one position.
     await client.query(
       "select pg_advisory_xact_lock(hashtextextended($1, 0))",
       [`position-action:${input.userId}:${input.idempotencyKey}`],
     );
-    const { rows: existingRows } = await client.query<PositionActionRow>(
+    await client.query(
+      "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+      [`position-action-position:${input.userId}:${input.positionRef}`],
+    );
+    const { rows: requestRows } = await client.query<PositionActionRow>(
+      `
+        select ${COLUMNS}
+        from position_action_operations
+        where user_id = $1 and idempotency_key = $2
+        limit 1
+        for update
+      `,
+      [input.userId, input.idempotencyKey],
+    );
+    const requestOperation = requestRows[0];
+    if (requestOperation) {
+      const existing = mapRow(requestOperation);
+      assertSameRequestIdentity(existing, input);
+      return { operation: existing, replayed: true };
+    }
+
+    const { rows: activeRows } = await client.query<PositionActionRow>(
       `
         select ${COLUMNS}
         from position_action_operations
         where user_id = $1
-          and (
-            idempotency_key = $2
-            or (
-              venue_id = $3
-              and action = $4
-              and owner_binding_id = $5
-              and action_digest = $6
-            )
+          and position_ref = $2
+          and status in (
+            'prepared',
+            'awaiting_user',
+            'submitting',
+            'submitted',
+            'reconcile_required',
+            'confirmed'
           )
-        order by (idempotency_key = $2) desc
+        order by created_at desc
         limit 1
         for update
       `,
-      [
-        input.userId,
-        input.idempotencyKey,
-        input.venueId,
-        input.action,
-        input.ownerBindingId,
-        input.actionDigest,
-      ],
+      [input.userId, input.positionRef],
     );
-    const existingRow = existingRows[0];
-    if (existingRow) {
-      const existing = mapRow(existingRow);
-      if (!sameCreate(existing, input)) {
+    const activeRow = activeRows[0];
+    if (activeRow) {
+      const existing = mapRow(activeRow);
+      if (
+        existing.venueId !== input.venueId ||
+        existing.action !== input.action
+      ) {
         throw new PositionActionPersistenceError(
           "idempotency_conflict",
-          "position action idempotency key or action digest was reused with different inputs",
+          "position already has a different active action",
         );
       }
       return { operation: existing, replayed: true };
@@ -879,4 +906,29 @@ export async function fetchPositionActionForUser(
     [input.userId, input.operationId],
   );
   return rows[0] ? mapRow(rows[0]) : null;
+}
+
+/**
+ * Reads the immutable result of a prepare request before any live evidence is
+ * collected. A retry after a lost HTTP response must replay the stored action,
+ * even when the market or RPC is temporarily unavailable on the retry.
+ */
+export async function fetchPositionActionByIdempotencyKey(
+  db: Pick<Pool, "query">,
+  input: PositionActionRequestIdentity & Readonly<{ idempotencyKey: string }>,
+): Promise<StoredPositionAction | null> {
+  const { rows } = await db.query<PositionActionRow>(
+    `
+      select ${COLUMNS}
+      from position_action_operations
+      where user_id = $1 and idempotency_key = $2
+      limit 1
+    `,
+    [input.userId, input.idempotencyKey],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  const operation = mapRow(row);
+  assertSameRequestIdentity(operation, input);
+  return operation;
 }

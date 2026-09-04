@@ -23,6 +23,7 @@ import {
   DIRECT_WITHDRAWAL_PROVIDER_ID,
   DIRECT_WITHDRAWAL_ROUTE_ID,
 } from "../../execution/direct-withdrawal-transfer.js";
+import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
 import {
   finishFundingStepAttemptForUserInTransaction,
@@ -32,6 +33,7 @@ import {
   commitFundingOperationInTransaction,
   createFundingQuoteInTransaction,
   fetchFundingOperationForUser,
+  FundingPersistenceError,
   type FundingCommitPlan,
 } from "../../persistence/funding-operation-repository.js";
 import {
@@ -75,6 +77,11 @@ try {
       receipt: FundingStepReceiptEvidence;
       expectedDestinationAddress: string;
       legacyTerminalStatus: "completed" | "failed";
+      futureCreditFence?: Readonly<{
+        componentId: string;
+        locationId: string;
+        amount: Money;
+      }>;
     }>,
   ): Promise<void> {
     const recipientFingerprint = hash(input.recipientAddress);
@@ -197,6 +204,22 @@ try {
           mode: "subtract_available",
           expiresAt,
         },
+        ...(input.futureCreditFence
+          ? [
+              {
+                segmentOrdinal: null,
+                componentId: input.futureCreditFence.componentId,
+                locationId: input.futureCreditFence.locationId,
+                networkId: input.futureCreditFence.amount.asset.networkId,
+                assetId: input.futureCreditFence.amount.asset.assetId,
+                assetDecimals: input.futureCreditFence.amount.asset.decimals,
+                rawAmount: input.futureCreditFence.amount.raw,
+                mode: "subtract_available" as const,
+                expiresAt,
+                economicRole: "future_credit_fence" as const,
+              },
+            ]
+          : []),
       ],
     };
     const consentToken = opaque("consent");
@@ -225,6 +248,86 @@ try {
     });
     await client.query("set constraints all immediate");
     await client.query("set constraints all deferred");
+    let competingCommit:
+      | Readonly<{
+          consentToken: string;
+          idempotencyKey: string;
+          plan: FundingCommitPlan;
+          quoteId: string;
+        }>
+      | undefined;
+    if (input.futureCreditFence) {
+      // The source adapter test proves which canonical controller-asset
+      // identity is emitted. This database test isolates the matching
+      // reservation contract: no other operation may claim that identity
+      // between the Deposit Wallet handoff and the dependent transfer.
+      const competingPlan: FundingCommitPlan = {
+        ...plan,
+        reservations: [
+          {
+            segmentOrdinal: 0,
+            componentId: input.futureCreditFence.componentId,
+            locationId: input.futureCreditFence.locationId,
+            networkId: input.futureCreditFence.amount.asset.networkId,
+            assetId: input.futureCreditFence.amount.asset.assetId,
+            assetDecimals: input.futureCreditFence.amount.asset.decimals,
+            rawAmount: input.futureCreditFence.amount.raw,
+            mode: "subtract_available",
+            expiresAt,
+          },
+        ],
+      };
+      const competingConsentToken = opaque("consent");
+      const competingQuote = await createFundingQuoteInTransaction(client, {
+        userId,
+        discoveryProjectionId: opaque("projection"),
+        selectedSourceOptionSnapshot:
+          competingPlan.operation.sourceSnapshot ?? {},
+        marketContextSnapshot: null,
+        destinationOptionSnapshot:
+          competingPlan.operation.destinationTargetSnapshot,
+        venueBindingSnapshot: null,
+        planSnapshot: competingPlan,
+        policyVersion: 1,
+        policyRevision: "direct_withdrawal_future_credit_fence_v1",
+        canonicalRequest: {
+          purpose: "withdrawal",
+          sourceComponentId: input.futureCreditFence.componentId,
+        },
+        consentToken: competingConsentToken,
+        expiresAt: new Date(expiresAt),
+      });
+      competingCommit = {
+        consentToken: competingConsentToken,
+        idempotencyKey: opaque("idempotency"),
+        plan: competingPlan,
+        quoteId: competingQuote.id,
+      };
+      await client.query("savepoint competing_controller_credit_commit");
+      await assert.rejects(
+        commitFundingOperationInTransaction(client, {
+          userId,
+          quoteId: competingCommit.quoteId,
+          consentToken: competingCommit.consentToken,
+          idempotencyKey: competingCommit.idempotencyKey,
+          plan: competingCommit.plan,
+          subjectLookupHmac: hash("competing-controller-credit"),
+          subjectLookupKeyVersion: 1,
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof FundingPersistenceError);
+          assert.equal(error.code, "quote_invalidated");
+          return true;
+        },
+      );
+      // The production transaction wrapper rolls back the whole failed
+      // commit. Mirror that here while retaining the quote for the retry after
+      // the holder operation releases its fence.
+      await client.query(
+        "rollback to savepoint competing_controller_credit_commit",
+      );
+      await client.query("set constraints all deferred");
+    }
     const persisted = await client.query<{
       segment_id: string;
       step_id: string;
@@ -305,6 +408,34 @@ try {
       status: "completed",
       stage: "terminal",
     });
+    if (competingCommit) {
+      const releasedFence = await client.query<{
+        economic_role: string;
+        state: string;
+      }>(
+        `select economic_role, state
+           from balance_reservations
+          where operation_id = $1
+            and component_id = $2`,
+        [committed.operation.id, input.futureCreditFence?.componentId],
+      );
+      assert.deepEqual(releasedFence.rows, [
+        { economic_role: "future_credit_fence", state: "released" },
+      ]);
+      const committedAfterRelease = await commitFundingOperationInTransaction(
+        client,
+        {
+          userId,
+          quoteId: competingCommit.quoteId,
+          consentToken: competingCommit.consentToken,
+          idempotencyKey: competingCommit.idempotencyKey,
+          plan: competingCommit.plan,
+          subjectLookupHmac: hash("competing-controller-credit"),
+          subjectLookupKeyVersion: 1,
+        },
+      );
+      assert.equal(committedAfterRelease.replayed, false);
+    }
     const terminalTargets = await listFundingStepReceiptTargets(
       client,
       committed.operation.id,
@@ -446,8 +577,61 @@ try {
     legacyTerminalStatus: "completed",
   });
 
+  const usdceAmount = {
+    asset: {
+      networkId: "evm:137",
+      assetId: RELAY_PINNED_ASSETS.polygonUsdce,
+      decimals: 6,
+    },
+    raw: "6305257",
+  } as const;
+  const usdceRecipient = "0x2222222222222222222222222222222222222222";
+  const usdceProfile = {
+    ...evmProfile,
+    walletId: opaque("wallet"),
+  };
+  const usdceTransfer = buildExactErc20WithdrawalAction({
+    amount: usdceAmount,
+    profile: usdceProfile,
+    recipient: {
+      address: usdceRecipient,
+      addressFingerprint: hash(usdceRecipient),
+    },
+  });
+  await runScenario({
+    amount: usdceAmount,
+    profile: usdceProfile,
+    recipientAddress: usdceRecipient,
+    action: usdceTransfer.action,
+    actionValidation: usdceTransfer.validation,
+    executorId: "wallet_profile_evm_v1",
+    receipt: {
+      status: "finalized",
+      actionMatch: true,
+      ledgerHeight: "300",
+      blockHash: `0x${hash("usdce-withdrawal-block-hash")}`,
+      canonical: true,
+      failureCode: null,
+      evidence: {
+        attributedSourceRaw: usdceAmount.raw,
+        sourceDebitEventIndex: "0",
+        transactionHash: `0x${hash("usdce-withdrawal-transaction-hash")}`,
+      },
+    },
+    expectedDestinationAddress: usdceRecipient.toLowerCase(),
+    legacyTerminalStatus: "failed",
+    futureCreditFence: {
+      componentId: opaque("controller_usdce_component"),
+      locationId: opaque("controller_usdce_location"),
+      amount: {
+        asset: usdceAmount.asset,
+        raw: usdceAmount.raw,
+      },
+    },
+  });
+
   console.log(
-    "[funding-direct-withdrawal-integration-tests] exact EVM/SOL completion and terminal reorg detection passed",
+    "[funding-direct-withdrawal-integration-tests] exact EVM/SOL/USDC.e completion, future-credit fencing, and terminal reorg detection passed",
   );
 } finally {
   await client.query("rollback");

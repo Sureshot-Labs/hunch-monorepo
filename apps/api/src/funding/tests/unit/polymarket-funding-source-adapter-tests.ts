@@ -2,8 +2,9 @@
 
 import assert from "node:assert/strict";
 
-import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
 import { stableWalletAssetLocationIdentity } from "../../../account-value/canonical.js";
+import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
+import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import type { FundingPurpose } from "../../domain/types.js";
 import {
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
@@ -18,6 +19,7 @@ import {
   FUNDING_OPERATION_RECONCILIATION_TTL_MS,
   fundingEconomicSourceReservations,
 } from "../../persistence/funding-operation-repository.js";
+import { isValidFundingCommitPlanBoundary } from "../../validation/funding-commit-plan-validator.js";
 
 const ACCOUNT_ID = "account_pm_router_source_12345678";
 const SIGNER = "0x00000000000000000000000000000000000000a1";
@@ -25,12 +27,12 @@ const DEPOSIT = "0x00000000000000000000000000000000000000a2";
 const ROUTER = "0x00000000000000000000000000000000000000a3";
 const PUSD = {
   networkId: "evm:137",
-  assetId: "0x00000000000000000000000000000000000000b1",
+  assetId: RELAY_PINNED_ASSETS.polygonPusd,
   decimals: 6,
 } as const;
 const USDCE = {
   networkId: "evm:137",
-  assetId: "0x00000000000000000000000000000000000000b2",
+  assetId: RELAY_PINNED_ASSETS.polygonUsdce,
   decimals: 6,
 } as const;
 const EXPIRES_AT = "2026-07-24T12:01:00.000Z";
@@ -327,12 +329,29 @@ assert.equal(
 assert.deepEqual(
   clientHandoff.commitPlan.reservations.map((reservation) => ({
     componentId: reservation.componentId,
+    economicRole: reservation.economicRole ?? "source_input",
     rawAmount: reservation.rawAmount,
+    sourceInputRawAmount: reservation.sourceInputRawAmount ?? null,
   })),
   [
-    { componentId: "signer_pusd_12345678", rawAmount: "1500000" },
-    { componentId: "deposit_usdce_12345678", rawAmount: "1000000" },
-    { componentId: "signer_usdce_12345678", rawAmount: "1500000" },
+    {
+      componentId: "signer_pusd_12345678",
+      economicRole: "source_input",
+      rawAmount: "1500000",
+      sourceInputRawAmount: null,
+    },
+    {
+      componentId: "deposit_usdce_12345678",
+      economicRole: "source_input",
+      rawAmount: "1000000",
+      sourceInputRawAmount: null,
+    },
+    {
+      componentId: "signer_usdce_12345678",
+      economicRole: "source_input",
+      rawAmount: "1500000",
+      sourceInputRawAmount: "500000",
+    },
   ],
   "client preparation must fence both the Deposit Wallet debit and the controller balance after the exact transfer",
 );
@@ -403,7 +422,7 @@ assert.deepEqual(
       stepKind: "venue_preparation",
     },
   ],
-  "the exact Deposit Wallet transfer must gate controller approvals and Router v2 fund",
+  "the exact Deposit Wallet transfer must gate controller approvals and Router fund",
 );
 for (const approvalStep of clientHandoff.commitPlan.steps.filter(
   (step) =>
@@ -434,6 +453,11 @@ assert.deepEqual(
   },
   "the produced Router plan must declare its exact commit validator version",
 );
+assert.equal(
+  isValidFundingCommitPlanBoundary(clientHandoff.commitPlan),
+  true,
+  "the produced direct USDC.e handoff plan must pass its declared exact validator",
+);
 assert.ok(
   clientHandoff.option.requiredActions.every(
     (requiredAction) => requiredAction.actor === "user",
@@ -447,6 +471,18 @@ assert.equal(
   (handoffAction?.payload as Readonly<Record<string, unknown>> | undefined)
     ?.amountRaw,
   "1000000",
+);
+assert.equal(
+  (handoffAction?.payload as Readonly<Record<string, unknown>> | undefined)
+    ?.token,
+  USDCE.assetId,
+);
+assert.equal(
+  (
+    (handoffAction?.payload as Readonly<Record<string, unknown>> | undefined)
+      ?.calls as readonly unknown[] | undefined
+  )?.length,
+  1,
 );
 
 assert.deepEqual(
@@ -472,7 +508,7 @@ const [depositOnlyHandoff] = await depositOnlyHandoffAdapter.list(
   planningInput("2500000", "2500000", "0", "trade_shortfall", "0", "0", "0"),
 );
 assert.ok(depositOnlyHandoff);
-const futureControllerIdentity = stableWalletAssetLocationIdentity({
+const emptyControllerUsdceIdentity = stableWalletAssetLocationIdentity({
   accountId: ACCOUNT_ID,
   address: SIGNER,
   asset: USDCE,
@@ -502,13 +538,14 @@ assert.deepEqual(
       sourceInputRawAmount: null,
     },
     {
-      ...futureControllerIdentity,
+      componentId: emptyControllerUsdceIdentity.componentId,
       economicRole: "future_credit_fence",
+      locationId: emptyControllerUsdceIdentity.locationId,
       rawAmount: "1000000",
       sourceInputRawAmount: null,
     },
   ],
-  "a zero-balance controller must still receive the exact canonical future-credit fence",
+  "the controller USDC.e identity must be fenced before the direct handoff lands",
 );
 assert.deepEqual(
   fundingEconomicSourceReservations(
@@ -521,7 +558,7 @@ assert.deepEqual(
     { componentId: "signer_pusd_12345678", rawAmount: "1500000" },
     { componentId: "deposit_usdce_12345678", rawAmount: "1000000" },
   ],
-  "future controller credit must not become a third economic source input",
+  "the future controller USDC.e fence must not double-count the incoming source",
 );
 
 const [delegatedPusd] = await adapter.list(delegatedPusdPlanningInput());

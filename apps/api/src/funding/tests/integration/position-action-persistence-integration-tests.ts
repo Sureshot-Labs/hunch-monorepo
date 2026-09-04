@@ -69,6 +69,25 @@ function createInput(
   };
 }
 
+function freshAttempt(
+  input: PositionActionCreateInput,
+  label: string,
+): PositionActionCreateInput {
+  const idempotencyKey = `idempotency_${label}_${crypto.randomUUID()}`;
+  const actionId = `action_${label}_${crypto.randomUUID()}`;
+  return {
+    ...input,
+    idempotencyKey,
+    // Runtime action IDs are derived from the request key. Exercise the real
+    // concurrency shape instead of pretending that fresh keys share a digest.
+    actionDigest: crypto
+      .createHash("sha256")
+      .update(`${idempotencyKey}:${actionId}`)
+      .digest("hex"),
+    normalizedActions: [{ kind: "evm_transaction", actionId }],
+  };
+}
+
 const userId = await insertUser("owner");
 const otherUserId = await insertUser("other");
 const operationIds: string[] = [];
@@ -95,11 +114,24 @@ try {
   assert.equal(replay.replayed, true);
   assert.equal(replay.operation.id, created.operation.id);
 
+  const exactReplayIgnoresVolatileEvidence = await createOrReplayPositionAction(
+    pool,
+    {
+      ...ambiguousInput,
+      evidenceSnapshot: { owner: "fresh-rpc-snapshot" },
+    },
+  );
+  assert.equal(exactReplayIgnoresVolatileEvidence.replayed, true);
+  assert.equal(
+    exactReplayIgnoresVolatileEvidence.operation.id,
+    created.operation.id,
+  );
+
   await assert.rejects(
     () =>
       createOrReplayPositionAction(pool, {
         ...ambiguousInput,
-        evidenceSnapshot: { owner: "foreign" },
+        positionRef: "position_key_reuse_conflict",
       }),
     (error: unknown) =>
       error instanceof PositionActionPersistenceError &&
@@ -134,6 +166,13 @@ try {
   });
   assert.equal(ambiguous.status, "reconcile_required");
   assert.equal(ambiguous.broadcastMayHaveOccurred, true);
+
+  const ambiguousFreshRequest = await createOrReplayPositionAction(
+    pool,
+    freshAttempt(ambiguousInput, "ambiguous-retry"),
+  );
+  assert.equal(ambiguousFreshRequest.replayed, true);
+  assert.equal(ambiguousFreshRequest.operation.id, created.operation.id);
 
   const retryAfterAmbiguous = await claimPositionActionSubmission(pool, {
     userId,
@@ -232,6 +271,108 @@ try {
   });
   assert.equal(completed.status, "completed");
   assert.equal(completed.postconditionStatus, "satisfied");
+
+  const completedSameRequest = await createOrReplayPositionAction(
+    pool,
+    successInput,
+  );
+  assert.equal(completedSameRequest.replayed, true);
+  assert.equal(completedSameRequest.operation.id, successCreated.operation.id);
+
+  const completedFreshRequest = await createOrReplayPositionAction(
+    pool,
+    freshAttempt(successInput, "reacquired-position"),
+  );
+  assert.equal(completedFreshRequest.replayed, false);
+  assert.notEqual(
+    completedFreshRequest.operation.id,
+    successCreated.operation.id,
+  );
+  operationIds.push(completedFreshRequest.operation.id);
+
+  const retryableInput = createInput(userId, "safe-terminal-retry");
+  const retryableCreated = await createOrReplayPositionAction(
+    pool,
+    retryableInput,
+  );
+  operationIds.push(retryableCreated.operation.id);
+  const retryableClaim = await claimPositionActionSubmission(pool, {
+    userId,
+    operationId: retryableCreated.operation.id,
+    canonicalActionFingerprint: "f".repeat(64),
+    executorId: "privy-authorization-evm-v1",
+  });
+  await recordPositionActionSubmission(pool, {
+    userId,
+    operationId: retryableCreated.operation.id,
+    attemptNumber: retryableClaim.attemptNumber ?? 0,
+    outcome: "not_broadcast",
+    submissionFingerprint: null,
+    errorCode: "wallet_request_failed",
+  });
+
+  const terminalSameRequest = await createOrReplayPositionAction(
+    pool,
+    retryableInput,
+  );
+  assert.equal(terminalSameRequest.replayed, true);
+  assert.equal(terminalSameRequest.operation.id, retryableCreated.operation.id);
+
+  const freshRetryInputs = ["a", "b"].map((label) =>
+    freshAttempt(retryableInput, `safe-retry-${label}`),
+  );
+  const freshRetries = await Promise.all(
+    freshRetryInputs.map((input) => createOrReplayPositionAction(pool, input)),
+  );
+  assert.equal(freshRetries[0]?.operation.id, freshRetries[1]?.operation.id);
+  assert.equal(freshRetries.filter((result) => !result.replayed).length, 1);
+  const freshRetryOperation = freshRetries[0]?.operation;
+  assert.ok(freshRetryOperation);
+  assert.notEqual(freshRetryOperation.id, retryableCreated.operation.id);
+  operationIds.push(freshRetryOperation.id);
+
+  const exactFreshRequestReplay = await createOrReplayPositionAction(
+    pool,
+    freshRetryInputs[0] as PositionActionCreateInput,
+  );
+  assert.equal(exactFreshRequestReplay.replayed, true);
+  assert.equal(exactFreshRequestReplay.operation.id, freshRetryOperation.id);
+
+  const revertedInput = createInput(userId, "reverted-retry");
+  const revertedCreated = await createOrReplayPositionAction(
+    pool,
+    revertedInput,
+  );
+  operationIds.push(revertedCreated.operation.id);
+  const revertedClaim = await claimPositionActionSubmission(pool, {
+    userId,
+    operationId: revertedCreated.operation.id,
+    canonicalActionFingerprint: "9".repeat(64),
+    executorId: "privy-authorization-evm-v1",
+  });
+  await recordPositionActionSubmission(pool, {
+    userId,
+    operationId: revertedCreated.operation.id,
+    attemptNumber: revertedClaim.attemptNumber ?? 0,
+    outcome: "submitted",
+    submissionFingerprint: `0x${"8".repeat(64)}`,
+  });
+  await recordPositionActionReceipt(pool, {
+    userId,
+    operationId: revertedCreated.operation.id,
+    receipt: "reverted",
+    receiptEvidence: { status: "reverted" },
+  });
+  const revertedFreshRequest = await createOrReplayPositionAction(
+    pool,
+    freshAttempt(revertedInput, "reverted-fresh"),
+  );
+  assert.equal(revertedFreshRequest.replayed, false);
+  assert.notEqual(
+    revertedFreshRequest.operation.id,
+    revertedCreated.operation.id,
+  );
+  operationIds.push(revertedFreshRequest.operation.id);
 
   await pool.query(
     `
@@ -366,7 +507,7 @@ try {
   );
 
   console.log(
-    "[position-action-persistence-integration-tests] ok generic venue IDs, idempotency, owner binding, exact sponsored action binding, ambiguous submit, receipt, postconditions, marker recovery",
+    "[position-action-persistence-integration-tests] ok generic venue IDs, terminal-safe retry, concurrent idempotency, owner binding, exact sponsored action binding, ambiguous submit, receipt, postconditions, marker recovery",
   );
 } finally {
   if (operationIds.length > 0) {

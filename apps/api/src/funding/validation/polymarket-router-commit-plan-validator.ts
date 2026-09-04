@@ -1,6 +1,11 @@
 import { POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID } from "../execution/delegated-funding-profile-ids.js";
+import { polymarketDepositWalletHandoffExpectation } from "../execution/polymarket-deposit-wallet-handoff.js";
+import { sameAccountAddress } from "../domain/asset-identity.js";
+import { normalizedActionSchema } from "../domain/schemas.js";
+import type { JsonValue, NormalizedAction } from "../domain/types.js";
 import type { FundingCommitPlan } from "../persistence/funding-operation-repository.js";
 import { POLYMARKET_FUNDING_SOURCE_ADAPTER_ID } from "../preparation/polymarket-funding-snapshot.js";
+import { RELAY_PINNED_ASSETS } from "../../funding-providers/relay/mappings.js";
 
 const CONTROLLER_ROUTER_APPROVAL_KINDS = new Set([
   "controller_pusd_router_approval",
@@ -15,8 +20,10 @@ const CLIENT_EVM_WALLET_EXECUTOR_ID = "wallet_profile_evm_v1";
  * executor, action, initial-state and dependency topology accepted at commit.
  * Later lifecycle changes are governed by the generic step transition rules.
  */
-export function isPolymarketRouterV1CommitPlan(
+function isPolymarketRouterCommitPlanVersion(
   plan: Pick<FundingCommitPlan, "operation" | "steps">,
+  acceptsHandoff: (step: FundingCommitPlan["steps"][number]) => boolean,
+  requiresHandoff = false,
 ): boolean {
   if (
     !["venue_preparation", "composite_route"].includes(
@@ -45,8 +52,8 @@ export function isPolymarketRouterV1CommitPlan(
     first.normalizedAction.kind === "external_handoff" &&
     first.normalizedAction.handoffKind ===
       "polymarket_deposit_wallet_transfer" &&
-    first.actionValidationResult.executionEnvelope ===
-      "polymarket_deposit_wallet_to_controller_v1";
+    acceptsHandoff(first);
+  if (requiresHandoff && !hasPreRouteHandoff) return false;
   const approvalStart = hasPreRouteHandoff ? 1 : 0;
   const approvals = steps.slice(approvalStart, -1);
   if (approvals.length > 2) return false;
@@ -100,4 +107,77 @@ export function isPolymarketRouterV1CommitPlan(
     fund.actionValidationResult.validatorId ===
       POLYMARKET_FUNDING_SOURCE_ADAPTER_ID
   );
+}
+
+export function isPolymarketRouterV1CommitPlan(
+  plan: Pick<FundingCommitPlan, "operation" | "steps">,
+): boolean {
+  return isPolymarketRouterCommitPlanVersion(plan, (step) => {
+    const action = normalizedActionSchema.safeParse(step.normalizedAction);
+    const expectation = action.success
+      ? polymarketDepositWalletHandoffExpectation(
+          action.data as NormalizedAction,
+          step.actionValidationResult,
+        )
+      : null;
+    return (
+      action.success &&
+      action.data.kind === "external_handoff" &&
+      action.data.payload.conversionKind !== "polymarket_usdce_to_pusd" &&
+      expectation !== null &&
+      [
+        RELAY_PINNED_ASSETS.polygonPusd,
+        RELAY_PINNED_ASSETS.polygonUsdce,
+      ].includes(expectation.tokenAddress.toLowerCase()) &&
+      typeof step.actionValidationResult.signerAddress === "string" &&
+      sameAccountAddress(
+        "evm:137",
+        expectation.recipientAddress,
+        step.actionValidationResult.signerAddress,
+      )
+    );
+  });
+}
+
+export function isPolymarketRouterV2CommitPlan(
+  plan: Pick<FundingCommitPlan, "operation" | "steps">,
+): boolean {
+  return isPolymarketRouterCommitPlanVersion(
+    plan,
+    (step) => {
+      const action = normalizedActionSchema.safeParse(step.normalizedAction);
+      return (
+        action.success &&
+        action.data.kind === "external_handoff" &&
+        action.data.payload.conversionKind === "polymarket_usdce_to_pusd" &&
+        polymarketDepositWalletHandoffExpectation(
+          action.data as NormalizedAction,
+          step.actionValidationResult,
+        ) !== null
+      );
+    },
+    true,
+  );
+}
+
+export function isPolymarketRouterCommitPlan(
+  plan: Pick<FundingCommitPlan, "operation" | "steps">,
+): boolean {
+  const declaration = plan.operation.supportMetadata?.planValidation;
+  if (
+    !declaration ||
+    typeof declaration !== "object" ||
+    Array.isArray(declaration)
+  ) {
+    return false;
+  }
+  const declarationRecord = declaration as Readonly<Record<string, JsonValue>>;
+  if (declarationRecord.validatorId !== POLYMARKET_FUNDING_SOURCE_ADAPTER_ID) {
+    return false;
+  }
+  return declarationRecord.version === 1
+    ? isPolymarketRouterV1CommitPlan(plan)
+    : declarationRecord.version === 2
+      ? isPolymarketRouterV2CommitPlan(plan)
+      : false;
 }

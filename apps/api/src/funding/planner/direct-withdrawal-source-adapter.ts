@@ -1,9 +1,12 @@
 import { scaleUnsignedDecimalByRawRatio } from "../../account-value/decimal.js";
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
-import { stableOpaqueId } from "../../account-value/canonical.js";
+import {
+  stableOpaqueId,
+  stableWalletAssetLocationIdentity,
+} from "../../account-value/canonical.js";
 import type { PoolClient } from "@hunch/infra";
 import { buildPolymarketPreRouteHandoffSteps } from "../../funding-providers/relay/operation-plan.js";
-import { sameAsset } from "../domain/asset-identity.js";
+import { sameAccountAddress, sameAsset } from "../domain/asset-identity.js";
 import {
   SOLANA_NATIVE_ASSET,
   SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS,
@@ -63,6 +66,7 @@ function exactAvailableComponent(
     const execution = resolveProductionOwnedSourceExecution({
       account,
       component,
+      allowDepositWalletUsdceHandoff: true,
     });
     const availableRaw =
       available && isPositiveRawAmount(available.availableRaw)
@@ -131,6 +135,35 @@ export class DirectWithdrawalSourceAdapter implements FundingSourceAdapter {
     ).toISOString();
     return exactAvailableComponent(this.account, input).flatMap(
       ({ component, execution, withdrawableRaw }): PlannedSourceOption[] => {
+        const hasDepositWalletHandoff = execution.preRouteHandoff != null;
+        const existingControllerComponent = hasDepositWalletHandoff
+          ? this.account.projection.components.find((candidate) => {
+              const address = candidate.location.details.address;
+              return (
+                candidate.location.kind === "wallet" &&
+                typeof address === "string" &&
+                sameAsset(candidate.amount.asset, input.requiredAmount.asset) &&
+                sameAccountAddress(
+                  input.requiredAmount.asset.networkId,
+                  address,
+                  execution.profile.address,
+                )
+              );
+            })
+          : null;
+        const controllerCreditIdentity = hasDepositWalletHandoff
+          ? existingControllerComponent
+            ? {
+                componentId: existingControllerComponent.componentId,
+                locationId: existingControllerComponent.location.locationId,
+              }
+            : stableWalletAssetLocationIdentity({
+                accountId: input.accountId,
+                address: execution.profile.address,
+                asset: input.requiredAmount.asset,
+                balanceClass: "polymarket",
+              })
+          : null;
         const actionInput = {
           amount: input.requiredAmount,
           profile: execution.profile,
@@ -229,7 +262,7 @@ export class DirectWithdrawalSourceAdapter implements FundingSourceAdapter {
                 : built.action.kind,
             safeLabel:
               step.stepKind === "external_handoff"
-                ? "Move pUSD to your controller wallet"
+                ? "Move Polymarket funds to your controller wallet"
                 : "Send funds to the withdrawal address",
             actor: "user" as const,
             valueMoving: true,
@@ -314,6 +347,25 @@ export class DirectWithdrawalSourceAdapter implements FundingSourceAdapter {
               mode: "subtract_available",
               expiresAt: executionExpiresAt,
             },
+            ...(controllerCreditIdentity
+              ? [
+                  {
+                    segmentOrdinal: null,
+                    componentId: controllerCreditIdentity.componentId,
+                    locationId: controllerCreditIdentity.locationId,
+                    networkId: input.requiredAmount.asset.networkId,
+                    assetId: input.requiredAmount.asset.assetId,
+                    assetDecimals: input.requiredAmount.asset.decimals,
+                    rawAmount: input.requiredAmount.raw,
+                    mode: "subtract_available" as const,
+                    expiresAt: executionExpiresAt,
+                    // The exact handoff creates this same-asset controller
+                    // balance after commit. Fence it without counting it as a
+                    // second economic source for the withdrawal.
+                    economicRole: "future_credit_fence" as const,
+                  },
+                ]
+              : []),
           ],
         };
         return [
@@ -385,6 +437,7 @@ export class DirectWithdrawalSourceAdapter implements FundingSourceAdapter {
       ? resolveProductionOwnedSourceExecution({
           account: this.account,
           component,
+          allowDepositWalletUsdceHandoff: true,
         })
       : null;
     if (

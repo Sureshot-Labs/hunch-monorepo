@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { Interface } from "ethers";
 
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import {
@@ -672,6 +673,11 @@ function plannedClientPolymarketHandoffPreparationSource(
   requiredRaw: string,
 ): PlannedSourceOption {
   const prepared = plannedVenuePreparationSource(requiredRaw, "privy_sponsor");
+  const controllerAddress = "0x00000000000000000000000000000000000000a1";
+  const depositWalletAddress = "0x00000000000000000000000000000000000000a2";
+  const transferData = new Interface([
+    "function transfer(address recipient,uint256 amount)",
+  ]).encodeFunctionData("transfer", [controllerAddress, BigInt(requiredRaw)]);
   return {
     ...prepared,
     commitPlan: {
@@ -700,10 +706,33 @@ function plannedClientPolymarketHandoffPreparationSource(
           dependsOnOrdinal: null,
           normalizedAction: {
             kind: "external_handoff",
+            actionId: "action_pm_deposit_handoff_12345678",
+            networkId: "evm:137",
+            actorWalletId: "wallet_pm_controller_12345678",
             handoffKind: "polymarket_deposit_wallet_transfer",
+            payload: {
+              topology: "deposit_wallet",
+              funder: depositWalletAddress,
+              recipient: controllerAddress,
+              token: RELAY_PINNED_ASSETS.polygonUsdce,
+              amountRaw: requiredRaw,
+              calls: [
+                {
+                  target: RELAY_PINNED_ASSETS.polygonUsdce,
+                  value: "0",
+                  data: transferData,
+                },
+              ],
+            },
           },
           actionValidationResult: {
+            signerAddress: controllerAddress,
             executionEnvelope: "polymarket_deposit_wallet_to_controller_v1",
+            funderAddress: depositWalletAddress,
+            recipientAddress: controllerAddress,
+            tokenAddress: RELAY_PINNED_ASSETS.polygonUsdce,
+            amountRaw: requiredRaw,
+            transferData,
           },
         },
         {

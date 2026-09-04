@@ -324,7 +324,8 @@ function providerReportsMovement(
 ): boolean {
   return segments.some(
     (segment) =>
-      segment.originReferenceCount >= 1 || segment.destinationReferenceCount >= 1,
+      segment.originReferenceCount >= 1 ||
+      segment.destinationReferenceCount >= 1,
   );
 }
 
@@ -402,10 +403,7 @@ async function hasCompetingDestinationRoute(
       input.baselineAsOf,
     );
     if (destinationAfterBaseline) return true;
-    if (
-      lifecycle.status === "ready" &&
-      destinationAtOrBeforeBaseline
-    ) {
+    if (lifecycle.status === "ready" && destinationAtOrBeforeBaseline) {
       continue;
     }
 
@@ -427,17 +425,11 @@ async function hasCompetingDestinationRoute(
     const containsVenuePreparation =
       row.support_metadata.containsVenuePreparation === true;
     if (containsVenuePreparation) {
-      if (
-        hasFinalEvidenceAfter(facts, "venue_readiness", input.baselineAsOf)
-      ) {
+      if (hasFinalEvidenceAfter(facts, "venue_readiness", input.baselineAsOf)) {
         return true;
       }
       if (
-        hasFinalEvidenceAtOrBefore(
-          facts,
-          "venue_readiness",
-          input.baselineAsOf,
-        )
+        hasFinalEvidenceAtOrBefore(facts, "venue_readiness", input.baselineAsOf)
       ) {
         continue;
       }

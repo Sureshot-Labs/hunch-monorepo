@@ -9,7 +9,7 @@ import { directWithdrawalActionValidation } from "../execution/direct-withdrawal
 import { POLYMARKET_HANDOFF_CHAIN_ATTRIBUTION_WINDOW_MS } from "../execution/polymarket-deposit-wallet-handoff.js";
 
 import { isReceiptBearingFundingActionKind } from "../domain/action-kinds.js";
-import { isRawAmount } from "../domain/raw-amount.js";
+import { isPositiveRawAmount, isRawAmount } from "../domain/raw-amount.js";
 import type { JsonValue, NormalizedAction } from "../domain/types.js";
 import { moneySchema, normalizedActionSchema } from "../domain/schemas.js";
 import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
@@ -36,7 +36,11 @@ export type FundingStepReceiptTarget = Readonly<{
   segmentId: string | null;
   attemptId: string;
   attemptStartedAt: Date;
-  stepKind: "transaction" | "external_handoff" | "venue_preparation";
+  stepKind:
+    | "approval"
+    | "transaction"
+    | "external_handoff"
+    | "venue_preparation";
   payerRequirement:
     | "none"
     | "user"
@@ -795,11 +799,13 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     const postcondition = relayClientSourceDebitPostcondition(
       actionValidationResult,
     );
-    const observationKind = directWithdrawalActionValidation(
+    const withdrawalValidation = directWithdrawalActionValidation(
       actionValidationResult,
-    )
-      ? "destination_credit"
-      : "source_debit";
+    );
+    const observationKind =
+      withdrawalValidation?.observationKind === "destination_credit"
+        ? "destination_credit"
+        : "source_debit";
     const attributedSourceRaw = row.evidence.attributedSourceRaw;
     const sourceDebitEventIndex = row.evidence.sourceDebitEventIndex;
     const transactionHash = row.evidence.transactionHash;
@@ -838,6 +844,74 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
           receiptAttemptId: input.attemptId,
         },
       });
+    }
+    const destinationCreditTransfers = row.evidence.destinationCreditTransfers;
+    if (
+      withdrawalValidation?.kind === "polymarket_usdce_withdrawal_unwrap" &&
+      withdrawalValidation.postconditionEvidenceKind ===
+        "exact_erc20_destination_credit_v1" &&
+      Array.isArray(destinationCreditTransfers) &&
+      typeof transactionHash === "string" &&
+      /^0x[0-9a-fA-F]{64}$/u.test(transactionHash) &&
+      row.ledger_height &&
+      row.block_hash &&
+      row.finalized_at
+    ) {
+      const transfers = destinationCreditTransfers.flatMap((entry) => {
+        if (
+          typeof entry !== "object" ||
+          entry === null ||
+          Array.isArray(entry) ||
+          typeof entry.fromAddress !== "string" ||
+          !isRawAmount(entry.eventIndex) ||
+          !isPositiveRawAmount(entry.rawAmount)
+        ) {
+          return [];
+        }
+        return [
+          {
+            fromAddress: entry.fromAddress,
+            eventIndex: entry.eventIndex,
+            rawAmount: entry.rawAmount,
+          },
+        ];
+      });
+      const attributedRaw = transfers.reduce(
+        (total, transfer) => total + BigInt(transfer.rawAmount),
+        0n,
+      );
+      if (
+        transfers.length !== destinationCreditTransfers.length ||
+        attributedRaw !== BigInt(withdrawalValidation.expectedDestinationRaw)
+      ) {
+        throw new Error(
+          "direct withdrawal destination-credit receipt evidence is invalid",
+        );
+      }
+      for (const transfer of transfers) {
+        await allocateFundingObservationInTransaction(client, {
+          operationId: input.operationId,
+          segmentId: scoped.segment_id,
+          kind: "destination_credit",
+          networkId: input.networkId,
+          assetId: withdrawalValidation.expectedDestinationAssetId,
+          assetDecimals: withdrawalValidation.expectedDestinationAssetDecimals,
+          txHash: transactionHash.toLowerCase(),
+          eventIndex: transfer.eventIndex,
+          fromAddress: transfer.fromAddress,
+          toAddress: withdrawalValidation.expectedDestinationAddress,
+          rawAmount: transfer.rawAmount,
+          observedAt: row.observed_at,
+          ledgerHeight: row.ledger_height,
+          blockHash: row.block_hash,
+          finalityStatus: "finalized",
+          finalizedAt: row.finalized_at,
+          metadata: {
+            observerId: "direct_withdrawal_receipt_destination_credit_v2",
+            receiptAttemptId: input.attemptId,
+          },
+        });
+      }
     }
   }
 

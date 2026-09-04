@@ -444,10 +444,13 @@ async function moveToAmbiguousRecovery(
       "direct ingress operation disappeared before ambiguity handling",
     );
   }
-  const facts = await loadFundingLifecycleFactsForOperationInTransaction(client, {
-    operationId: input.target.operationId,
-    now: input.now,
-  });
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+    client,
+    {
+      operationId: input.target.operationId,
+      now: input.now,
+    },
+  );
   if (!facts) return;
   const lifecycle = deriveFundingLifecycle(facts);
   if (
@@ -508,10 +511,13 @@ async function persistSatisfiedAmount(
     [input.target.operationId],
   );
   if (!locked.rows[0]) return false;
-  const facts = await loadFundingLifecycleFactsForOperationInTransaction(client, {
-    operationId: input.target.operationId,
-    now: input.now,
-  });
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+    client,
+    {
+      operationId: input.target.operationId,
+      now: input.now,
+    },
+  );
   if (!facts) return false;
   const lifecycle = deriveFundingLifecycle(facts);
   if (

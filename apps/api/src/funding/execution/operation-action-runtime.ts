@@ -42,7 +42,10 @@ import {
   isUnreferencedFundingActionAmbiguity,
   type FundingActionFailureCode,
 } from "./action-report.js";
-import { assertDirectWithdrawalActionMatchesRecipient } from "./direct-withdrawal-transfer.js";
+import {
+  assertDirectWithdrawalActionMatchesRecipient,
+  isDirectWithdrawalExecutionKind,
+} from "./direct-withdrawal-transfer.js";
 
 const EXECUTOR_BY_ACTION_KIND = {
   evm_transaction: "wallet_profile_evm_v1",
@@ -303,9 +306,9 @@ export class FundingOperationActionRuntime {
             lockForShare: true,
           },
         );
-        const directWithdrawal =
-          operation.supportMetadata.withdrawalExecutionKind ===
-          "exact_same_asset_transfer";
+        const directWithdrawal = isDirectWithdrawalExecutionKind(
+          operation.supportMetadata.withdrawalExecutionKind,
+        );
         if (
           directWithdrawal &&
           action.kind !== "evm_transaction" &&

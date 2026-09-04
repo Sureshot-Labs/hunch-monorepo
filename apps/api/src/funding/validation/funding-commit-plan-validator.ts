@@ -1,6 +1,9 @@
 import type { FundingCommitPlan } from "../persistence/funding-operation-repository.js";
 import { POLYMARKET_FUNDING_SOURCE_ADAPTER_ID } from "../preparation/polymarket-funding-snapshot.js";
-import { isPolymarketRouterV1CommitPlan } from "./polymarket-router-commit-plan-validator.js";
+import {
+  isPolymarketRouterV1CommitPlan,
+  isPolymarketRouterV2CommitPlan,
+} from "./polymarket-router-commit-plan-validator.js";
 
 type CommitPlanValidator = (
   plan: Pick<FundingCommitPlan, "operation" | "steps">,
@@ -12,7 +15,10 @@ const VERSIONED_COMMIT_PLAN_VALIDATORS = new Map<
 >([
   [
     POLYMARKET_FUNDING_SOURCE_ADAPTER_ID,
-    new Map([[1, isPolymarketRouterV1CommitPlan]]),
+    new Map([
+      [1, isPolymarketRouterV1CommitPlan],
+      [2, isPolymarketRouterV2CommitPlan],
+    ]),
   ],
 ]);
 

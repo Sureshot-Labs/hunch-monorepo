@@ -201,7 +201,10 @@ export type EmbeddedPolymarketTypedData = {
   message: Record<string, unknown>;
 };
 
-export type DepositWalletBatchPurpose = "withdraw" | "redeem";
+export type DepositWalletBatchPurpose =
+  | "withdraw"
+  | "redeem"
+  | "funding_conversion";
 
 export type EmbeddedPolymarketWalletContext = {
   signer: string;
@@ -1062,6 +1065,90 @@ function validateDepositWalletBatchCall(
   );
 }
 
+function validateDepositWalletFundingConversion(input: {
+  calls: readonly unknown[];
+  depositWallet: string;
+  signer: string;
+}) {
+  if (input.calls.length !== 3) {
+    throw new Error(
+      "Deposit wallet funding conversion requires exactly three calls.",
+    );
+  }
+  const decodedCalls = input.calls.map((call) => {
+    if (typeof call !== "object" || call === null) {
+      throw new Error("Invalid deposit wallet funding conversion call.");
+    }
+    const record = call as Record<string, unknown>;
+    const target = normalizeTypedDataAddress(record.target);
+    const data = normalizeTypedDataHex(record.data);
+    const value = readTypedDataNumberString(record.value || "0");
+    if (!target || !data || value !== "0") {
+      throw new Error("Invalid deposit wallet funding conversion call.");
+    }
+    const decoded = TOKEN_APPROVAL_ABI.parseTransaction({ data, value: 0n });
+    if (!decoded) {
+      throw new Error("Invalid deposit wallet funding conversion call.");
+    }
+    return { decoded, target };
+  });
+  const approval = decodedCalls[0];
+  const wrap = decodedCalls[1];
+  const transfer = decodedCalls[2];
+  const usdce = normalizeAddress(env.polymarketUsdceAddress);
+  const pusd = normalizeAddress(env.polymarketUsdcAddress);
+  const onramp = normalizeAddress(env.polymarketCollateralOnrampAddress);
+  const depositWallet = normalizeAddress(input.depositWallet);
+  const signer = normalizeAddress(input.signer);
+  if (!approval || !wrap || !transfer || !usdce || !pusd || !onramp) {
+    throw new Error("Invalid deposit wallet funding conversion.");
+  }
+  if (
+    approval.decoded.name !== "approve" ||
+    wrap.decoded.name !== "wrap" ||
+    transfer.decoded.name !== "transfer"
+  ) {
+    throw new Error("Invalid deposit wallet funding conversion.");
+  }
+  const positiveAmount = (value: unknown): bigint | null => {
+    try {
+      const amount = BigInt(String(value));
+      return amount > 0n ? amount : null;
+    } catch {
+      return null;
+    }
+  };
+  const approvalAmount = positiveAmount(approval.decoded.args[1]);
+  const wrapAmount = positiveAmount(wrap.decoded.args[2]);
+  const transferAmount = positiveAmount(transfer.decoded.args[1]);
+  if (
+    !addressesEqual(approval.target, usdce) ||
+    !addressesEqual(
+      normalizeAddress(String(approval.decoded.args[0] ?? "")),
+      onramp,
+    ) ||
+    !addressesEqual(wrap.target, onramp) ||
+    !addressesEqual(
+      normalizeAddress(String(wrap.decoded.args[0] ?? "")),
+      usdce,
+    ) ||
+    !addressesEqual(
+      normalizeAddress(String(wrap.decoded.args[1] ?? "")),
+      depositWallet,
+    ) ||
+    !addressesEqual(transfer.target, pusd) ||
+    !addressesEqual(
+      normalizeAddress(String(transfer.decoded.args[0] ?? "")),
+      signer,
+    ) ||
+    !approvalAmount ||
+    approvalAmount !== wrapAmount ||
+    approvalAmount !== transferAmount
+  ) {
+    throw new Error("Invalid deposit wallet funding conversion.");
+  }
+}
+
 function validateDepositWalletBatchTypedData(
   typedData: EmbeddedPolymarketTypedData,
   context: EmbeddedPolymarketWalletContext,
@@ -1095,6 +1182,14 @@ function validateDepositWalletBatchTypedData(
   const calls = Array.isArray(message.calls) ? message.calls : [];
   if (calls.length < 1 || calls.length > 24) {
     throw new Error("Deposit wallet batch call count is invalid.");
+  }
+  if (purpose === "funding_conversion") {
+    validateDepositWalletFundingConversion({
+      calls,
+      depositWallet: wallet,
+      signer,
+    });
+    return;
   }
   for (const call of calls) {
     validateDepositWalletBatchCall(call, {

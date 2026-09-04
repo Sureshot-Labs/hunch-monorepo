@@ -15,6 +15,7 @@ import {
 } from "../lifecycle/funding-lifecycle-projector.js";
 import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
 import { DELEGATED_PROVIDER_REPLAY_MS } from "../execution/delegated-funding-recovery-policy.js";
+import { isDirectWithdrawalExecutionKind } from "../execution/direct-withdrawal-transfer.js";
 import {
   claimFundingReconciliationJobs,
   fetchFundingOperationForWorkerInTransaction,
@@ -862,8 +863,9 @@ export async function reduceFundingOperationInTransaction(
   );
   const directWithdrawalCompleted =
     initial.purpose === "withdrawal" &&
-    initial.supportMetadata.withdrawalExecutionKind ===
-      "exact_same_asset_transfer" &&
+    isDirectWithdrawalExecutionKind(
+      initial.supportMetadata.withdrawalExecutionKind,
+    ) &&
     actualDestinationAmount != null;
   const actualSourceAmount = directWithdrawalCompleted
     ? initial.requestedSourceAmount
@@ -1775,8 +1777,9 @@ async function loadFundingOperationState(
         recentFailedReceiptWatch.rows[0]?.watching === true,
       terminalReceiptWatch:
         terminalEvidenceWatch.rows[0]?.watching === true ||
-        operation.supportMetadata.withdrawalExecutionKind ===
-          "exact_same_asset_transfer",
+        isDirectWithdrawalExecutionKind(
+          operation.supportMetadata.withdrawalExecutionKind,
+        ),
       terminalRelayRefundWatch:
         terminalRelayRefundWatch.rows[0]?.watching === true,
       awaitingProviderReference: waitState.awaitingProviderReference,

@@ -357,6 +357,11 @@ type ExactDestinationCreditResult =
       valid: boolean;
       attributedRaw: string | null;
       expectedRaw: string | null;
+      transfers?: readonly Readonly<{
+        fromAddress: string;
+        eventIndex: string;
+        rawAmount: string;
+      }>[];
     }>;
 
 function exactErc20DestinationCredit(
@@ -398,7 +403,13 @@ function exactErc20DestinationCredit(
       expectedRaw,
     };
   }
+  const matchingTransfers: Array<{
+    fromAddress: string;
+    eventIndex: string;
+    rawAmount: string;
+  }> = [];
   let attributed = 0n;
+  let matchingTransferCount = 0;
   for (const log of receipt.logs) {
     if (log.address.toLowerCase() !== tokenAddress.toLowerCase()) continue;
     try {
@@ -410,17 +421,33 @@ function exactErc20DestinationCredit(
         parsed?.name === "Transfer" &&
         ethers.getAddress(String(parsed.args.to)) === destinationAddress
       ) {
-        attributed += BigInt(parsed.args.value);
+        const rawAmount = BigInt(parsed.args.value);
+        attributed += rawAmount;
+        matchingTransferCount += 1;
+        if (Number.isSafeInteger(log.logIndex) && Number(log.logIndex) >= 0) {
+          matchingTransfers.push({
+            fromAddress: ethers.getAddress(String(parsed.args.from)),
+            eventIndex: String(log.logIndex),
+            rawAmount: rawAmount.toString(),
+          });
+        }
       }
     } catch {
       // Non-Transfer logs from the same token do not carry destination credit.
     }
   }
+  const requiresEventIdentity =
+    validation.requiresDestinationEventIdentity === true;
   return {
     required: true,
-    valid: attributed === BigInt(expectedRaw),
+    valid:
+      matchingTransferCount > 0 &&
+      attributed === BigInt(expectedRaw) &&
+      (!requiresEventIdentity ||
+        matchingTransfers.length === matchingTransferCount),
     attributedRaw: attributed.toString(),
     expectedRaw,
+    transfers: matchingTransfers,
   };
 }
 
@@ -754,6 +781,7 @@ export function evaluateEvmActionReceipt(
         ? {
             attributedDestinationRaw:
               exactDestinationCredit.attributedRaw ?? "0",
+            destinationCreditTransfers: exactDestinationCredit.transfers ?? [],
           }
         : {}),
       ...(exactSourceDebit.required

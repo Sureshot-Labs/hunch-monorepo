@@ -1057,9 +1057,10 @@ async function insertCommitReservations(
           asset_decimals,
           raw_amount,
           mode,
+          economic_role,
           expires_at
         )
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       `,
       [
         userId,
@@ -1076,6 +1077,7 @@ async function insertCommitReservations(
         reservation.assetDecimals,
         reservation.rawAmount,
         reservation.mode,
+        reservation.economicRole ?? "source_input",
         reservation.expiresAt,
       ],
     );

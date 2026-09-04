@@ -211,18 +211,24 @@ export type ProductionOwnedSourceExecution = Readonly<{
 export function resolveProductionOwnedSourceExecution(input: {
   account: AccountValueReadModel;
   component: AccountValueReadModel["projection"]["components"][number];
+  allowDepositWalletUsdceHandoff?: boolean;
 }): ProductionOwnedSourceExecution | null {
   const { account, component } = input;
   const directProfile = profileForLocation(account, component.location);
   const funderAddress = detail(component.location, "address");
   const linkedAddress = detail(component.location, "linkedAddress");
+  const componentAssetId = canonicalAssetId(component.amount.asset);
+  const isDepositWalletPusd =
+    componentAssetId === RELAY_PINNED_ASSETS.polygonPusd.toLowerCase();
+  const isDepositWalletUsdce =
+    input.allowDepositWalletUsdceHandoff === true &&
+    componentAssetId === RELAY_PINNED_ASSETS.polygonUsdce.toLowerCase();
   const isPolymarketDepositWalletSource =
     component.location.kind === "venue_account" &&
     detail(component.location, "venueId") === "polymarket" &&
     detail(component.location, "polymarketFunderKind") === "deposit_wallet" &&
     component.amount.asset.networkId === "evm:137" &&
-    canonicalAssetId(component.amount.asset) ===
-      RELAY_PINNED_ASSETS.polygonPusd.toLowerCase() &&
+    (isDepositWalletPusd || isDepositWalletUsdce) &&
     Boolean(funderAddress) &&
     Boolean(linkedAddress) &&
     Boolean(

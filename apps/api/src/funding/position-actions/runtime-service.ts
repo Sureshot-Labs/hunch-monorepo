@@ -31,6 +31,7 @@ import {
   completePositionActionEffect,
   createOrReplayPositionAction,
   failPositionActionEffect,
+  fetchPositionActionByIdempotencyKey,
   fetchPositionActionForUser,
   recordPositionActionPostconditions,
   recordPositionActionReceipt,
@@ -52,6 +53,7 @@ import {
   type RedemptionMarketContext,
   type StoredPositionContext,
 } from "./venue-driver.js";
+import { preparedPositionActionFromStoredOperation } from "./position-action-replay.js";
 
 const POSITION_ACTION_TTL_MS = 45_000;
 const ZERO_POSITION_RE = /^0(?:\.0+)?$/;
@@ -369,6 +371,17 @@ export class PositionActionRuntimeService {
         "this runtime currently supports owner-bound redemption only",
       );
     }
+    const replay = await fetchPositionActionByIdempotencyKey(this.db, {
+      userId,
+      venueId: input.venueId,
+      action: input.action,
+      positionRef: input.positionRef,
+      ownerBindingId: input.ownerBindingId,
+      inspectionRevision: input.expectedInspectionRevision,
+      idempotencyKey: input.idempotencyKey,
+    });
+    if (replay) return preparedPositionActionFromStoredOperation(replay);
+
     let captured: CollectedRedemptionEvidence | null = null;
     const driver = this.venueDriver(input.venueId);
     const correlationId = `position_action_${canonicalJsonHash({
@@ -437,12 +450,14 @@ export class PositionActionRuntimeService {
       normalizedActions: jsonValues(actions),
       postconditions: postconditionsFromChecks(facts.checks),
     });
-    return {
-      actions,
-      controllerWalletRef: collected.controllerWalletRef,
-      operation: created.operation,
-      replayed: created.replayed,
-    };
+    return created.replayed
+      ? preparedPositionActionFromStoredOperation(created.operation)
+      : {
+          actions,
+          controllerWalletRef: collected.controllerWalletRef,
+          operation: created.operation,
+          replayed: false,
+        };
   }
 
   async operation(

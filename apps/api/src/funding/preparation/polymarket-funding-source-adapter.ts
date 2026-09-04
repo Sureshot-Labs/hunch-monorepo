@@ -313,6 +313,8 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         maximumFundingRaw,
         depositPusdRaw: BigInt(snapshot.depositPusdRaw),
         depositLockedRaw: BigInt(snapshot.depositLockedRaw),
+        // The preceding relayer action hands exact USDC.e back to this
+        // controller, so Router consumes it through its native USDC.e input.
         signerPusdRaw: controllerPusdRaw,
         signerLockedRaw: 0n,
         signerUsdceRaw: controllerUsdceRaw + depositUsdceRaw,
@@ -391,6 +393,8 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       BigInt(plan.signerUsdceAmountRaw);
     const requiresPusdApproval =
       BigInt(snapshot.routerPusdAllowanceRaw) < BigInt(plan.pUsdAmountRaw);
+    const plannedPusdRaw = BigInt(plan.pUsdAmountRaw);
+    const controllerPusdContributionRaw = plannedPusdRaw;
     const plannedUsdceRaw = BigInt(plan.signerUsdceAmountRaw);
     const controllerUsdceContributionRaw =
       plannedUsdceRaw < controllerUsdceRaw
@@ -410,11 +414,11 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
           balanceClass: "polymarket",
         });
     const resolvedInputs = [
-      ...(BigInt(plan.pUsdAmountRaw) > 0n && controllerPusdInput
+      ...(controllerPusdContributionRaw > 0n && controllerPusdInput
         ? [
             {
               asset: facts.option.requiredAsset,
-              rawAmount: plan.pUsdAmountRaw,
+              rawAmount: controllerPusdContributionRaw.toString(),
               resolved: controllerPusdInput,
             },
           ]
@@ -439,7 +443,7 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         : []),
     ];
     const expectedInputCount =
-      Number(BigInt(plan.pUsdAmountRaw) > 0n) +
+      Number(controllerPusdContributionRaw > 0n) +
       Number(controllerUsdceContributionRaw > 0n) +
       Number(depositUsdceContributionRaw > 0n);
     if (
@@ -713,14 +717,14 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       }),
       reservations: [
         ...resolvedInputs
-          // A Deposit Wallet transfer credits the controller before Router v2
-          // consumes it. The controller reservation below covers that future
-          // credit, so keep this reservation only on the actual Deposit Wallet
-          // debit and avoid a duplicate controller entry.
+          // The handoff credits controller USDC.e before Router consumes it.
+          // The aggregate reservation below owns that identity, so avoid a
+          // duplicate reservation for the pre-existing controller portion.
           .filter(
             (entry) =>
+              depositUsdceContributionRaw === 0n ||
               entry.resolved.component.componentId !==
-              controllerUsdceInput?.component.componentId,
+                controllerUsdceInput?.component.componentId,
           )
           .map((entry) => ({
             segmentOrdinal: null,
@@ -733,7 +737,7 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
             mode: "subtract_available" as const,
             expiresAt: reservationExpiresAt,
           })),
-        ...(plannedUsdceRaw > 0n
+        ...(depositUsdceContributionRaw > 0n
           ? [
               {
                 segmentOrdinal: null,
@@ -742,25 +746,21 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
                 networkId: usdceAsset.networkId,
                 assetId: usdceAsset.assetId,
                 assetDecimals: usdceAsset.decimals,
-                // Reserve existing controller USDC.e plus the exact incoming
-                // Deposit Wallet transfer. Before the transfer this floors at
-                // zero; after it lands the same durable identity fences every
-                // unit until Router v2 consumes the amount. Economic source
-                // reporting still counts only the controller balance that
-                // existed before this plan; the incoming transfer is already
-                // represented by its Deposit Wallet reservation.
+                // Before the handoff this future USDC.e may not exist. Once it
+                // lands, this exact controller identity stays fenced until the
+                // Router consumes it. Economic reporting still counts only
+                // the pre-existing controller USDC.e here; the incoming
+                // amount is already represented by the Deposit Wallet source.
                 rawAmount: plannedUsdceRaw.toString(),
                 mode: "subtract_available" as const,
                 expiresAt: reservationExpiresAt,
-                ...(depositUsdceContributionRaw > 0n
-                  ? controllerUsdceContributionRaw > 0n
-                    ? {
-                        economicRole: "source_input" as const,
-                        sourceInputRawAmount:
-                          controllerUsdceContributionRaw.toString(),
-                      }
-                    : { economicRole: "future_credit_fence" as const }
-                  : {}),
+                ...(controllerUsdceContributionRaw > 0n
+                  ? {
+                      economicRole: "source_input" as const,
+                      sourceInputRawAmount:
+                        controllerUsdceContributionRaw.toString(),
+                    }
+                  : { economicRole: "future_credit_fence" as const }),
               },
             ]
           : []),

@@ -23,7 +23,7 @@ import {
   type FundingCommitStep,
 } from "../persistence/funding-operation-repository.js";
 import { assertSameAsset, rawAmount } from "./money.js";
-import { isPolymarketRouterV1CommitPlan } from "../validation/polymarket-router-commit-plan-validator.js";
+import { isPolymarketRouterCommitPlan } from "../validation/polymarket-router-commit-plan-validator.js";
 import {
   commitPlanRunsWithoutUserWalletAction,
   plannedSourceRunsWithClientWalletActions,
@@ -142,7 +142,7 @@ function venuePreparationCandidate(
       (source.commitPlan.steps.length === 1 &&
         source.commitPlan.steps[0]?.stepKind === "venue_preparation" &&
         source.commitPlan.steps[0]?.segmentOrdinal === null) ||
-      isPolymarketRouterV1CommitPlan(source.commitPlan)
+      isPolymarketRouterCommitPlan(source.commitPlan)
     ) ||
     economicReservations.length !== source.option.source.inputCount ||
     source.commitPlan.reservations.some(

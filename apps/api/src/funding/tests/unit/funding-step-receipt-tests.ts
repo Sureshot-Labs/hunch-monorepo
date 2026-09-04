@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import bs58 from "bs58";
 import { ethers } from "ethers";
 
+import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
+import { POLYMARKET_COLLATERAL_ONRAMP } from "../../../funding-providers/relay/rehearsal.js";
 import {
   bindPolymarketRelayerTransactionHash,
   EVM_FUNDING_ACTION_FINALITY_CONFIRMATIONS,
@@ -172,6 +174,63 @@ const exactCreditReceipt = evaluateEvmActionReceipt({
 assert.equal(exactCreditReceipt.status, "finalized");
 assert.equal(exactCreditReceipt.actionMatch, true);
 assert.equal(exactCreditReceipt.evidence.attributedDestinationRaw, "4000000");
+
+const exactIdentifiedCreditReceipt = evaluateEvmActionReceipt({
+  action: evmAction,
+  actionValidationResult: {
+    ...exactCreditValidation,
+    requiresDestinationEventIdentity: true,
+  },
+  expectedSignerAddress: evmTransaction.from,
+  transaction: evmTransaction,
+  receipt: {
+    ...evmReceipt,
+    logs: [
+      {
+        address: destinationToken,
+        data: exactDestinationCreditLog.data,
+        logIndex: 9,
+        topics: exactDestinationCreditLog.topics,
+      },
+    ],
+  },
+  previous: null,
+});
+assert.equal(exactIdentifiedCreditReceipt.status, "finalized");
+assert.deepEqual(
+  exactIdentifiedCreditReceipt.evidence.destinationCreditTransfers,
+  [
+    {
+      eventIndex: "9",
+      fromAddress: ethers.ZeroAddress,
+      rawAmount: "4000000",
+    },
+  ],
+);
+assert.equal(
+  evaluateEvmActionReceipt({
+    action: evmAction,
+    actionValidationResult: {
+      ...exactCreditValidation,
+      requiresDestinationEventIdentity: true,
+    },
+    expectedSignerAddress: evmTransaction.from,
+    transaction: evmTransaction,
+    receipt: {
+      ...evmReceipt,
+      logs: [
+        {
+          address: destinationToken,
+          data: exactDestinationCreditLog.data,
+          topics: exactDestinationCreditLog.topics,
+        },
+      ],
+    },
+    previous: null,
+  }).status,
+  "mismatch",
+  "a durable withdrawal observation requires the receipt event index",
+);
 
 const sourceToken = "0x9999999999999999999999999999999999999999";
 const sourceRecipient = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1609,6 +1668,120 @@ assert.equal(
     previous: null,
   }).status,
   "finalized",
+);
+const conversionApprovalInterface = new ethers.Interface([
+  "function approve(address spender,uint256 amount)",
+]);
+const conversionWrapInterface = new ethers.Interface([
+  "function wrap(address asset,address recipient,uint256 amount)",
+]);
+const conversionTransferData = transferInterface.encodeFunctionData(
+  "transfer",
+  [handoffRecipient, handoffAmount],
+);
+const conversionAction = {
+  ...handoffAction,
+  actionId: "action_handoff_usdce_conversion_12345678",
+  payload: {
+    topology: "deposit_wallet",
+    funder: handoffFunder,
+    recipient: handoffRecipient,
+    token: RELAY_PINNED_ASSETS.polygonPusd,
+    amountRaw: handoffAmount.toString(),
+    conversionKind: "polymarket_usdce_to_pusd",
+    sourceToken: RELAY_PINNED_ASSETS.polygonUsdce,
+    calls: [
+      {
+        target: RELAY_PINNED_ASSETS.polygonUsdce,
+        value: "0",
+        data: conversionApprovalInterface.encodeFunctionData("approve", [
+          POLYMARKET_COLLATERAL_ONRAMP,
+          handoffAmount,
+        ]),
+      },
+      {
+        target: POLYMARKET_COLLATERAL_ONRAMP,
+        value: "0",
+        data: conversionWrapInterface.encodeFunctionData("wrap", [
+          RELAY_PINNED_ASSETS.polygonUsdce,
+          handoffFunder,
+          handoffAmount,
+        ]),
+      },
+      {
+        target: RELAY_PINNED_ASSETS.polygonPusd,
+        value: "0",
+        data: conversionTransferData,
+      },
+    ],
+  },
+};
+const conversionValidation = {
+  signerAddress: handoffRecipient,
+  executionEnvelope: "polymarket_deposit_wallet_to_controller_v1",
+  funderAddress: handoffFunder,
+  recipientAddress: handoffRecipient,
+  tokenAddress: RELAY_PINNED_ASSETS.polygonPusd,
+  conversionKind: "polymarket_usdce_to_pusd",
+  sourceTokenAddress: RELAY_PINNED_ASSETS.polygonUsdce,
+  collateralOnrampAddress: POLYMARKET_COLLATERAL_ONRAMP,
+  amountRaw: handoffAmount.toString(),
+  transferData: conversionTransferData,
+};
+assert.ok(
+  polymarketDepositWalletHandoffExpectation(
+    conversionAction,
+    conversionValidation,
+  ),
+  "the exact approve + wrap + pUSD controller transfer is a valid handoff",
+);
+assert.equal(
+  polymarketDepositWalletHandoffExpectation(
+    {
+      ...conversionAction,
+      payload: {
+        ...conversionAction.payload,
+        calls: conversionAction.payload.calls.slice(1),
+      },
+    },
+    conversionValidation,
+  ),
+  null,
+  "the conversion cannot omit its exact approval",
+);
+assert.equal(
+  polymarketDepositWalletHandoffExpectation(conversionAction, {
+    ...conversionValidation,
+    collateralOnrampAddress: "0x1111111111111111111111111111111111111111",
+  }),
+  null,
+  "the conversion cannot substitute another onramp",
+);
+const conversionTransferLog = transferInterface.encodeEventLog(transferEvent, [
+  handoffFunder,
+  handoffRecipient,
+  handoffAmount,
+]);
+assert.equal(
+  evaluatePolymarketDepositWalletHandoffReceipt({
+    action: conversionAction,
+    actionValidationResult: conversionValidation,
+    transaction: handoffTransaction,
+    receipt: {
+      ...handoffReceipt,
+      logs: [
+        {
+          address: RELAY_PINNED_ASSETS.polygonPusd,
+          data: conversionTransferLog.data,
+          logIndex: 4,
+          topics: conversionTransferLog.topics,
+        },
+      ],
+    },
+    previous: null,
+  }).status,
+  "finalized",
+  "the final pUSD controller credit proves the atomic conversion batch",
 );
 assert.equal(
   evaluatePolymarketDepositWalletHandoffReceipt({
