@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { ethers } from "ethers";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 
 import { AuthService } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
+import { deriveFundingLifecycleBeforeActionBroadcast } from "../funding/lifecycle/funding-lifecycle-projector.js";
 import { loadFundingLifecycleProjectionForOperation } from "../funding/lifecycle/funding-lifecycle-read-model.js";
 import type { EmbeddedEthereumTransactionSpec } from "./embedded-ethereum.js";
 
@@ -43,7 +44,7 @@ const limitlessAmmInterface = new ethers.Interface([
   "function sell(uint256 returnAmount,uint256 outcomeIndex,uint256 maxOutcomeTokens)",
 ]);
 
-type SponsorshipDb = Pick<Pool, "query">;
+type SponsorshipDb = Pick<Pool | PoolClient, "query">;
 
 type SponsoredTransaction = Readonly<{
   chainId: number;
@@ -628,12 +629,17 @@ async function matchesFundingAction(
   input: SponsoredTransaction,
 ): Promise<boolean> {
   const { rows } = await db.query<{
+    action_validation_result: Record<string, unknown>;
     normalized_action: Record<string, unknown>;
     operation_id: string;
     step_id: string;
   }>(
     `
-      select step.normalized_action, operation.id as operation_id, step.id as step_id
+      select
+        step.action_validation_result,
+        step.normalized_action,
+        operation.id as operation_id,
+        step.id as step_id
       from funding_operation_steps step
       join funding_operations operation on operation.id = step.operation_id
       where operation.user_id = $1
@@ -658,17 +664,43 @@ async function matchesFundingAction(
     [input.userId, input.transaction.id],
   );
   for (const row of rows) {
-    if (!fundingActionMatchesTransaction(row.normalized_action, input)) {
+    if (
+      !fundingActionMatchesTransaction(row.normalized_action, input) ||
+      !fundingActionSignerMatches(row.action_validation_result, input.signer)
+    ) {
       continue;
     }
     const projected = await loadFundingLifecycleProjectionForOperation(db, {
       operationId: row.operation_id,
     });
-    const action = projected
-      ? projected.lifecycle.actions.find(
-          (candidate) => candidate.actionId === row.step_id,
-        )
-      : null;
+    if (!projected) continue;
+
+    // `/funding/.../actions/.../prepare` claims an attempt before the Mini
+    // App asks Privy to prepare its authorization. That claim is deliberately
+    // represented as `started`, and the ordinary lifecycle therefore marks
+    // the action as recovery-required until its broadcast boundary is known.
+    // For this exact, still-unbroadcast claim, re-project only the owning
+    // action before its start. All other facts (a sibling attempt,
+    // cancellation, authority revocation, or receipt) remain in force.
+    // This is the same admission boundary used immediately before execution;
+    // it does not broaden sponsorship to arbitrary ERC-20 calls.
+    const actionFacts = projected.facts.actions.find(
+      (candidate) => candidate.actionId === row.step_id,
+    );
+    const unbroadcastStartedAttempts = actionFacts?.attempts.filter(
+      (attempt) =>
+        attempt.outcome === "started" && !attempt.broadcastMayHaveOccurred,
+    );
+    const lifecycle =
+      unbroadcastStartedAttempts?.length === 1
+        ? deriveFundingLifecycleBeforeActionBroadcast(projected.facts, {
+            actionId: row.step_id,
+            attemptNumber: unbroadcastStartedAttempts[0].attemptNumber,
+          })
+        : projected.lifecycle;
+    const action = lifecycle.actions.find(
+      (candidate) => candidate.actionId === row.step_id,
+    );
     if (action?.state === "planned" || action?.state === "action_required") {
       return true;
     }
@@ -774,6 +806,23 @@ function fundingActionMatchesTransaction(
   } catch {
     return false;
   }
+}
+
+/**
+ * Sponsorship is scoped to both an immutable call and the wallet that the
+ * funding plan validated. In particular, a Deposit Wallet cannot substitute
+ * itself for the controller wallet merely because the calldata is identical.
+ */
+function fundingActionSignerMatches(
+  actionValidationResult: Record<string, unknown>,
+  signer: string,
+): boolean {
+  const expectedSigner = normalizedAddress(
+    typeof actionValidationResult.signerAddress === "string"
+      ? actionValidationResult.signerAddress
+      : null,
+  );
+  return expectedSigner !== null && addressesEqual(expectedSigner, signer);
 }
 
 async function isKnownLimitlessMarket(
@@ -1030,7 +1079,9 @@ export async function assertEmbeddedEvmSponsorshipAllowed(input: {
 
 export const embeddedEvmSponsorshipTestHooks = {
   exactTransactionMatches,
+  fundingActionSignerMatches,
   fundingActionMatchesTransaction,
+  matchesFundingAction,
   matchesPositionAction,
   isKnownLimitlessNegRiskAdapter,
   isKnownLimitlessNegRiskRedemption,

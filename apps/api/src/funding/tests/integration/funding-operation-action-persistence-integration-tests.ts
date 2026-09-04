@@ -9,6 +9,11 @@ import { ethers } from "ethers";
 
 import "../../../integration-test-database-guard.js";
 import { pool } from "../../../db.js";
+import {
+  assertEmbeddedEvmSponsorshipAllowed,
+  embeddedEvmSponsorshipTestHooks,
+} from "../../../services/embedded-evm-sponsorship.js";
+import type { EmbeddedEvmSponsorshipDependencies } from "../../../services/embedded-evm-sponsorship.js";
 import { fetchUserFinancialLifecycleSummary } from "../../../services/user-financial-lifecycle.js";
 import { POLYMARKET_HANDOFF_CHAIN_ATTRIBUTION_WINDOW_MS } from "../../execution/polymarket-deposit-wallet-handoff.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
@@ -334,6 +339,194 @@ try {
     ["action_required", "action_required"],
   );
   await client.query("rollback to savepoint projected_step_state_read");
+
+  // A Mini App first claims its funding attempt and then asks the embedded
+  // wallet endpoint to prepare the exact sponsored calls. The claimed attempt
+  // is `started` during that authorization request, so the sponsorship
+  // boundary must use the action's pre-broadcast projection rather than
+  // mistaking its own claim for an ambiguous network broadcast.
+  const sponsoredApprovalId = `relay:${opaque("quote")}:approve`;
+  const sponsoredDepositId = `relay:${opaque("quote")}:deposit`;
+  const sponsoredBatchAction = {
+    kind: "evm_transaction_batch",
+    actionId: opaque("batch"),
+    networkId: ASSET.networkId,
+    senderWalletId: sourceLocation.details.walletId,
+    calls: [
+      {
+        actionId: sponsoredApprovalId,
+        to: "0x00000000000000000000000000000000000000c1",
+        data: "0xabcdef12",
+        valueRaw: "0",
+      },
+      {
+        actionId: sponsoredDepositId,
+        to: "0x00000000000000000000000000000000000000c2",
+        data: "0xabcdef34",
+        valueRaw: "0",
+      },
+    ],
+  } as const;
+  const sponsoredPlan: FundingCommitPlan = {
+    operation: {
+      ...plan.operation,
+      planKind: "wallet_route",
+      sourceSnapshot: { kind: "owned_location", location: sourceLocation },
+      supportMetadata: { test: true, sponsoredAdmission: true },
+    },
+    segments: [
+      {
+        ...plan.segments[0]!,
+        providerQuoteRefCiphertext: "ciphertext:sponsored-admission",
+        providerQuoteRefLookupHmac: hash("sponsored-admission"),
+        quoteExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    ],
+    steps: [
+      {
+        ordinal: 0,
+        segmentOrdinal: 0,
+        stepKind: "transaction",
+        state: "action_required",
+        actionFingerprint: canonicalJsonHash(sponsoredBatchAction),
+        executorId: "wallet_profile_evm_v1",
+        payerRequirement: "privy_sponsor",
+        dependsOnOrdinal: null,
+        normalizedAction: sponsoredBatchAction,
+        actionValidationResult: {
+          valid: true,
+          signerAddress: sourceLocation.details.address,
+        },
+      },
+    ],
+    reservations: [
+      {
+        ...plan.reservations[0]!,
+        componentId: opaque("component"),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    ],
+  };
+  const sponsoredConsentToken = opaque("consent");
+  const sponsoredQuote = await createFundingQuoteInTransaction(client, {
+    userId,
+    discoveryProjectionId: opaque("projection"),
+    selectedSourceOptionSnapshot: sponsoredPlan.operation.sourceSnapshot ?? {},
+    marketContextSnapshot: null,
+    destinationOptionSnapshot:
+      sponsoredPlan.operation.destinationTargetSnapshot,
+    venueBindingSnapshot: null,
+    planSnapshot: sponsoredPlan,
+    policyVersion: 1,
+    policyRevision: "policy_revision_sponsored_admission",
+    canonicalRequest: { source: sponsoredPlan.operation.sourceSnapshot },
+    consentToken: sponsoredConsentToken,
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+  const sponsoredCommitted = await commitFundingOperationInTransaction(client, {
+    userId,
+    quoteId: sponsoredQuote.id,
+    consentToken: sponsoredConsentToken,
+    idempotencyKey: opaque("idempotency"),
+    plan: sponsoredPlan,
+    subjectLookupHmac: hash("sponsored-admission-user"),
+    subjectLookupKeyVersion: 1,
+  });
+  const sponsoredStep = await client.query<{
+    action_fingerprint: string;
+    executor_id: string;
+    id: string;
+  }>(
+    `select id, action_fingerprint, executor_id
+       from funding_operation_steps
+      where operation_id = $1::uuid`,
+    [sponsoredCommitted.operation.id],
+  );
+  const sponsoredStepRow = sponsoredStep.rows[0];
+  assert.ok(sponsoredStepRow);
+  const sponsoredAttempt = await startFundingStepAttemptForUserInTransaction(
+    client,
+    {
+      userId,
+      operationId: sponsoredCommitted.operation.id,
+      stepId: sponsoredStepRow.id,
+      canonicalActionFingerprint: sponsoredStepRow.action_fingerprint,
+      executorId: sponsoredStepRow.executor_id,
+    },
+  );
+  const sponsoredApproval = {
+    chainId: 137,
+    signer: sourceLocation.details.address,
+    transaction: {
+      id: sponsoredApprovalId,
+      label: "Funding approval",
+      to: sponsoredBatchAction.calls[0].to,
+      data: sponsoredBatchAction.calls[0].data,
+      value: sponsoredBatchAction.calls[0].valueRaw,
+    },
+    userId,
+  };
+  const sponsorshipDependencies: EmbeddedEvmSponsorshipDependencies = {
+    isAuthorizedDestination: async () => false,
+    isKnownLimitlessMarket: async () => false,
+    isKnownLimitlessNegRiskAdapter: async () => false,
+    isKnownLimitlessNegRiskRedemption: async () => false,
+    isSupportedBridgeToken: async () => false,
+    matchesBridgeOrder: async () => false,
+    matchesFundingAction: async (transaction) =>
+      embeddedEvmSponsorshipTestHooks.matchesFundingAction(client, transaction),
+    matchesPositionAction: async () => false,
+  };
+  await assert.doesNotReject(() =>
+    assertEmbeddedEvmSponsorshipAllowed({
+      ...sponsoredApproval,
+      dependencies: sponsorshipDependencies,
+      transactions: [sponsoredApproval.transaction],
+    }),
+  );
+  await assert.rejects(
+    () =>
+      assertEmbeddedEvmSponsorshipAllowed({
+        ...sponsoredApproval,
+        dependencies: sponsorshipDependencies,
+        transactions: [
+          { ...sponsoredApproval.transaction, data: "0xabcdef13" },
+        ],
+      }),
+    /not an allowed Hunch operation/u,
+  );
+  await assert.rejects(
+    () =>
+      assertEmbeddedEvmSponsorshipAllowed({
+        ...sponsoredApproval,
+        signer: "0x00000000000000000000000000000000000000f1",
+        dependencies: sponsorshipDependencies,
+        transactions: [sponsoredApproval.transaction],
+      }),
+    /not an allowed Hunch operation/u,
+    "an exact funding call must not be sponsorable from a different wallet",
+  );
+  await finishFundingStepAttemptForUserInTransaction(client, {
+    userId,
+    operationId: sponsoredCommitted.operation.id,
+    stepId: sponsoredStepRow.id,
+    attemptId: sponsoredAttempt.attempt.id,
+    outcome: "submitted",
+    broadcastMayHaveOccurred: true,
+    referenceKind: "transaction",
+    receiptRefCiphertext: "ciphertext:sponsored-admission",
+    receiptRefLookupHmac: hash("sponsored-admission"),
+    lookupKeyVersion: 1,
+    actualCosts: {},
+  });
+  assert.equal(
+    await embeddedEvmSponsorshipTestHooks.matchesFundingAction(
+      client,
+      sponsoredApproval,
+    ),
+    false,
+    "a submitted attempt must never be re-admitted for another sponsored call",
+  );
 
   const preRouteRelayAction = {
     ...secondAction,
