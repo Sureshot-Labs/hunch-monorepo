@@ -151,7 +151,7 @@ type ProjectionCandidate = Readonly<{
   user_id: string | null;
   venue: string;
   venue_order_id: string | null;
-  has_automatic_provider_reference_wait: boolean;
+  consumer_may_remain_linked: boolean;
   has_broadcast_boundary: boolean;
   has_terminal_external_handoff_receipt: boolean;
   has_started_attempt: boolean;
@@ -733,6 +733,8 @@ function liveProgressFor(
     candidate.operation_status === "ready" &&
     candidate.progress_stage === "ready_for_consumer";
   const recoveryRequired = candidate.operation_status === "recovery_required";
+  const routineRecovery =
+    recoveryRequired && candidate.consumer_may_remain_linked;
   const awaitingReconciliation =
     recoveryRequired || candidate.operation_status === "reconcile_required";
   const externalHandoffReceiptNeedsAttention =
@@ -798,7 +800,8 @@ function liveProgressFor(
           ? "ready"
           : terminal
             ? "stopped"
-            : recoveryRequired || externalHandoffReceiptNeedsAttention
+            : externalHandoffReceiptNeedsAttention ||
+                (recoveryRequired && !routineRecovery)
               ? "needs_attention"
               : candidate.has_broadcast_boundary
                 ? "submitted"
@@ -824,7 +827,7 @@ function liveProgressFor(
       (candidate.status === "funding" ||
         candidate.status === "external_handoff") &&
       !terminal &&
-      (candidate.has_broadcast_boundary || ready),
+      (candidate.has_broadcast_boundary || ready || routineRecovery),
     failureMessage: null,
     fundingAmountLabel: fundingAmountLabel(candidate),
     intentId: candidate.id,
@@ -1210,7 +1213,7 @@ async function listCandidates(
     if (!candidate.tracked_operation_id) {
       projected.push({
         ...candidate,
-        has_automatic_provider_reference_wait: false,
+        consumer_may_remain_linked: false,
         has_broadcast_boundary: false,
         operation_error_code: null,
         operation_status: null,
@@ -1232,8 +1235,7 @@ async function listCandidates(
     );
     projected.push({
       ...candidate,
-      has_automatic_provider_reference_wait:
-        lifecycle.safety.awaitingProviderReceipt,
+      consumer_may_remain_linked: lifecycle.safety.consumerMayRemainLinked,
       has_broadcast_boundary: lifecycle.safety.externalEffectMayHaveOccurred,
       operation_error_code: lifecycle.errorCode,
       operation_status: lifecycle.status,
@@ -1262,16 +1264,16 @@ export async function runTelegramTradeLifecycleProjectionBatchInTransaction(
   const candidates = await listCandidates(client, limit);
   let created = 0;
   for (const candidate of candidates) {
-    // `recovery_required` has no user action that can safely resume a linked
-    // Buy. Keep reconciling the already-started funding operation, but revoke
-    // the unsubmitted trade consent so it cannot block or later surprise the
-    // user with a venue order.
+    // A routine recovery can still reach the consumer-ready state from durable
+    // evidence. Keep that confirmed Buy linked; the normal auto-resume path
+    // re-quotes and re-checks its bounds before a venue order is submitted.
+    // Detach only a route the lifecycle has declared unsafe to continue.
     if (
       candidate.action === "buy" &&
       candidate.status === "funding" &&
       candidate.submit_started_at == null &&
       candidate.operation_status === "recovery_required" &&
-      !candidate.has_automatic_provider_reference_wait
+      !candidate.consumer_may_remain_linked
     ) {
       await client.query(
         `update telegram_trade_intents

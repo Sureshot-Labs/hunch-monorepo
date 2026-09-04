@@ -210,7 +210,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         funding_destination_raw: null,
         funding_operation_id: "00000000-0000-4000-8000-000000000002",
         funding_source_updated_at_us: "1",
-        has_automatic_provider_reference_wait: false,
+        consumer_may_remain_linked: false,
         has_broadcast_boundary: false,
         has_started_attempt: true,
         has_terminal_external_handoff_receipt: false,
@@ -255,18 +255,23 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         } as never).state,
         "submitted",
       );
-      assert.equal(
+      const routineRecovery =
         telegramTradeLifecycleProgressTestHooks.liveProgressFor({
           ...candidate,
-          has_automatic_provider_reference_wait: true,
+          consumer_may_remain_linked: true,
           operation_status: "recovery_required",
-        } as never).state,
-        "needs_attention",
+        } as never);
+      assert.deepEqual(
+        {
+          canCancelBuy: routineRecovery.canCancelBuy,
+          state: routineRecovery.state,
+        },
+        { canCancelBuy: true, state: "preparing" },
+        "routine recovery keeps the confirmed Buy in progress and lets its owner detach it",
       );
       assert.equal(
         telegramTradeLifecycleProgressTestHooks.liveProgressFor({
           ...candidate,
-          has_automatic_provider_reference_wait: true,
           has_broadcast_boundary: true,
           has_started_attempt: false,
           has_terminal_external_handoff_receipt: true,

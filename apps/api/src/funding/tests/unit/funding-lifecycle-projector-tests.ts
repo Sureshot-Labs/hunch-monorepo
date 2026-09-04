@@ -159,6 +159,42 @@ function facts(
   const projection = deriveFundingLifecycle(
     facts({
       actions: [
+        action("deposit-wallet-to-controller", {
+          safeInternalHandoff: true,
+          attempts: [
+            attempt({
+              outcome: "succeeded",
+              broadcastMayHaveOccurred: false,
+              referenceKind: "external_handoff",
+              receipt: {
+                status: "finalized",
+                canonical: true,
+                actionMatched: true,
+                failureFinalized: false,
+              },
+            }),
+          ],
+        }),
+        action("relay-started", {
+          ordinal: 1,
+          dependsOnActionId: "deposit-wallet-to-controller",
+          attempts: [attempt()],
+        }),
+      ],
+    }),
+  );
+  assert.equal(projection.status, "recovery_required");
+  assert.equal(
+    projection.safety.consumerMayRemainLinked,
+    true,
+    "a confirmed Buy stays linked while its ordinary follow-up route action is still starting",
+  );
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      actions: [
         action("confirmed-deposit-wallet-handoff", {
           ordinal: 0,
           safeInternalHandoff: true,
@@ -189,12 +225,14 @@ function facts(
       status: projection.status,
       progressStage: projection.progressStage,
       terminal: projection.safety.terminal,
+      consumerMayRemainLinked: projection.safety.consumerMayRemainLinked,
       reservationsMayRelease: projection.safety.reservationsMayRelease,
     },
     {
       status: "failed",
       progressStage: "terminal",
       terminal: true,
+      consumerMayRemainLinked: false,
       reservationsMayRelease: true,
     },
     "a finalized Deposit Wallet-to-controller handoff must not strand cash when the following Relay action never broadcast",
@@ -524,6 +562,11 @@ function facts(
   );
   assert.equal(projection.status, "recovery_required");
   assert.equal(projection.safety.requiresManualRecovery, true);
+  assert.equal(
+    projection.safety.consumerMayRemainLinked,
+    false,
+    "an expired possible broadcast without a durable replay reference must detach the Buy for manual recovery",
+  );
 }
 
 {
@@ -548,6 +591,11 @@ function facts(
     "an explicit manual escalation outranks generic automatic reconciliation",
   );
   assert.equal(projection.safety.requiresManualRecovery, true);
+  assert.equal(
+    projection.safety.consumerMayRemainLinked,
+    false,
+    "an explicit manual recovery decision must detach a Buy rather than retain submission consent",
+  );
 }
 
 {
@@ -623,6 +671,40 @@ function facts(
   assert.equal(projection.status, "recovery_required");
   assert.equal(projection.safety.requiresManualRecovery, false);
   assert.equal(projection.safety.requiresWorker, true);
+  assert.equal(
+    projection.safety.consumerMayRemainLinked,
+    true,
+    "a known broadcast transaction remains a routine reconciliation, even after the action deadline",
+  );
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      actions: [
+        action("conflicting-attempt-history", {
+          attempts: [
+            attempt({
+              attemptNumber: 1,
+              outcome: "succeeded",
+              broadcastMayHaveOccurred: false,
+            }),
+            attempt({
+              attemptNumber: 2,
+              outcome: "started",
+              broadcastMayHaveOccurred: false,
+            }),
+          ],
+        }),
+      ],
+    }),
+  );
+  assert.equal(projection.status, "reconcile_required");
+  assert.equal(
+    projection.safety.consumerMayRemainLinked,
+    false,
+    "inconsistent action history must not leave a Buy attached for a later automatic submission",
+  );
 }
 
 {
@@ -800,6 +882,11 @@ function facts(
   assert.equal(projection.status, "recovery_required");
   assert.equal(projection.safety.requiresManualRecovery, false);
   assert.equal(projection.safety.requiresWorker, true);
+  assert.equal(
+    projection.safety.consumerMayRemainLinked,
+    false,
+    "canonicality conflict must detach a consumer rather than later submit its Buy",
+  );
 }
 
 {

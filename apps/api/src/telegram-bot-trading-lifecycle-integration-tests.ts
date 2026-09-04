@@ -25,7 +25,9 @@ import {
   buildTelegramBotTradingMarketMessage,
   buildTelegramBotTradingStatusMessage,
   captureTelegramBotTradingCallback,
+  loadTelegramAppHandoffProjection,
   reconcileStaleTelegramTradeIntents,
+  resolveTelegramAppHandoffCurrentScope,
 } from "./services/telegram-bot-trading.js";
 import {
   deliverTelegramTradeLifecycleProgress,
@@ -3550,6 +3552,377 @@ try {
     { intent_status: "cancelled", operation_status: "recovery_required" },
     "Cancel Buy detaches the trade while preserving funding reconciliation",
   );
+
+  // A Deposit Wallet -> controller handoff is final and safe, while the next
+  // Relay action has only just started.  The lifecycle correctly describes
+  // that brief period as recovery_required, but it is routine reconciliation:
+  // the confirmed bot Buy must remain attached so it can resume after the
+  // normal route reaches consumer-ready state.  This is the exact boundary
+  // that previously caused Telegram to cancel a valid Buy before the Relay
+  // receipt could settle.
+  signerAttached = true;
+  const routineRecoveryEnabled = await enable();
+  assert.equal(
+    routineRecoveryEnabled.statusCode,
+    200,
+    "the direct-bot regression fixture must run with its delegated authority enabled",
+  );
+  const routineRecoveryAuthorization = (
+    await client.query<{ id: string }>(
+      `select id
+         from telegram_bot_trading_authorizations
+        where user_id = $1::uuid
+          and enabled = true`,
+      [userId],
+    )
+  ).rows[0];
+  assert.ok(routineRecoveryAuthorization?.id);
+  const routineRecoveryQuote = await client.query<{ id: string }>(
+    `insert into funding_quotes (
+       user_id, discovery_projection_id, selected_source_option_snapshot,
+       destination_option_snapshot, plan_snapshot, policy_version,
+       policy_revision, canonical_request_hash, plan_hash, consent_token_hash,
+       expires_at, consumed_at
+     ) values (
+       $1, 'telegram-routine-recovery', '{}'::jsonb, '{}'::jsonb,
+       jsonb_build_object(
+         'operation',
+         jsonb_build_object(
+           'initialState',
+           jsonb_build_object(
+             'status', 'in_progress',
+             'stage', 'source_action'
+           )
+         )
+       ),
+       1, 'telegram-routine-recovery', repeat('7', 64), repeat('8', 64),
+       repeat('9', 64), now() + interval '1 hour', now()
+     ) returning id`,
+    [userId],
+  );
+  const routineRecoveryOperation = await client.query<{ id: string }>(
+    `insert into funding_operations (
+       user_id, quote_id, purpose, status, progress_stage, experience_mode,
+       plan_kind, idempotency_key, commit_request_hash, plan_hash,
+       policy_version, policy_revision, destination_target_snapshot, market_id,
+       placement_snapshot, quote_snapshot, consent_snapshot,
+       requested_destination_amount,
+       original_subject_lookup_hmac, subject_lookup_key_version, expires_at
+     ) values (
+       $1, $2, 'trade_shortfall', 'in_progress', 'source_action',
+       'prepare_first', 'wallet_route', $3, repeat('a', 64), repeat('8', 64),
+       1, 'telegram-routine-recovery', jsonb_build_object(
+         'kind', 'owned_location',
+         'location', jsonb_build_object(
+           'kind', 'venue_account',
+           'details', jsonb_build_object('venueId', 'polymarket')
+         )
+       ), $4, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+       jsonb_build_object(
+         'asset', jsonb_build_object(
+           'networkId', 'evm:137',
+           'assetId', 'pusd',
+           'decimals', 6
+         ),
+         'raw', '1000000'
+       ),
+       repeat('b', 64), 1, now() + interval '1 hour'
+     ) returning id`,
+    [
+      userId,
+      routineRecoveryQuote.rows[0]?.id,
+      `routine-recovery-funding:${suffix}`,
+      marketId,
+    ],
+  );
+  const routineRecoveryOperationId = routineRecoveryOperation.rows[0]?.id;
+  assert.ok(routineRecoveryOperationId);
+  const routineRecoveryHandoff = await client.query<{ id: string }>(
+    `insert into funding_operation_steps (
+       operation_id, ordinal, step_kind, state, action_fingerprint,
+       executor_id, payer_requirement, normalized_action,
+       action_validation_result, created_at, updated_at
+     ) values (
+       $1::uuid, 0, 'external_handoff', 'succeeded', repeat('c', 64),
+       'polymarket_deposit_wallet_relayer_v1', 'privy_sponsor', '{}'::jsonb,
+       jsonb_build_object(
+         'executionEnvelope', 'polymarket_deposit_wallet_to_controller_v1'
+       ), clock_timestamp(), clock_timestamp()
+     ) returning id`,
+    [routineRecoveryOperationId],
+  );
+  const routineRecoveryHandoffId = routineRecoveryHandoff.rows[0]?.id;
+  assert.ok(routineRecoveryHandoffId);
+  const routineRecoveryHandoffAttempt = await client.query<{ id: string }>(
+    `insert into funding_operation_step_attempts (
+       step_id, attempt_number, canonical_action_fingerprint, executor_id,
+       outcome, broadcast_may_have_occurred, reference_kind,
+       receipt_ref_ciphertext, receipt_ref_lookup_hmac, lookup_key_version,
+       started_at, finished_at
+     ) values (
+       $1::uuid, 1, repeat('c', 64),
+       'polymarket_deposit_wallet_relayer_v1', 'succeeded', false,
+       'external_handoff', 'cipher:routine-recovery-handoff', repeat('d', 64),
+       1, clock_timestamp(), clock_timestamp()
+     ) returning id`,
+    [routineRecoveryHandoffId],
+  );
+  const routineRecoveryHandoffAttemptId =
+    routineRecoveryHandoffAttempt.rows[0]?.id;
+  assert.ok(routineRecoveryHandoffAttemptId);
+  await client.query(
+    `insert into funding_step_receipt_observations (
+       operation_id, step_id, attempt_id, network_id, status, action_match,
+       canonical, evidence, first_seen_at, observed_at, finalized_at,
+       created_at, updated_at
+     ) values (
+       $1::uuid, $2::uuid, $3::uuid, 'evm:137', 'finalized', true, true,
+       '{}'::jsonb, clock_timestamp(), clock_timestamp(), clock_timestamp(),
+       clock_timestamp(), clock_timestamp()
+     )`,
+    [
+      routineRecoveryOperationId,
+      routineRecoveryHandoffId,
+      routineRecoveryHandoffAttemptId,
+    ],
+  );
+  const routineRecoveryRelay = await client.query<{ id: string }>(
+    `insert into funding_operation_steps (
+       operation_id, ordinal, step_kind, state, action_fingerprint,
+       executor_id, payer_requirement, depends_on_step_id, normalized_action,
+       action_validation_result, created_at, updated_at
+     ) values (
+       $1::uuid, 1, 'transaction', 'recovery_required', repeat('e', 64),
+       'wallet_profile_evm_v1', 'privy_sponsor', $2::uuid, '{}'::jsonb,
+       '{}'::jsonb, clock_timestamp(), clock_timestamp()
+     ) returning id`,
+    [routineRecoveryOperationId, routineRecoveryHandoffId],
+  );
+  const routineRecoveryRelayId = routineRecoveryRelay.rows[0]?.id;
+  assert.ok(routineRecoveryRelayId);
+  await client.query(
+    `insert into funding_operation_step_attempts (
+       step_id, attempt_number, canonical_action_fingerprint, executor_id,
+       outcome, broadcast_may_have_occurred, reference_kind,
+       receipt_ref_ciphertext, receipt_ref_lookup_hmac, lookup_key_version,
+       started_at, finished_at
+     ) values (
+       $1::uuid, 1, repeat('e', 64), 'wallet_profile_evm_v1', 'started',
+       false, null, null, null, null, clock_timestamp(), null
+     )`,
+    [routineRecoveryRelayId],
+  );
+  const routineRecoveryIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, event_id, side,
+       amount_usd, status, expires_at, idempotency_key, delivery_mode,
+       funding_operation_id, result
+     ) values (
+       $1, $2, $3, $1, '705', 'buy', 'polymarket', $4, $5, 'YES',
+       2, 'funding', now() + interval '1 hour', $6, 'bot_submit', $7::uuid,
+       jsonb_build_object(
+         'telegramAuthority',
+         jsonb_build_object(
+           'version', 1,
+           'authorizationId', $8::text,
+           'telegramAccountLinkId', (
+             select id::text from user_telegram_accounts where user_id = $2 limit 1
+           ),
+           'userId', $2::text,
+           'walletAddress', $9::text,
+           'walletChain', 'ethereum',
+           'privyWalletId', $10::text
+         )
+       )
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      routineRecoveryAuthorization.id,
+      marketId,
+      eventId,
+      `routine-recovery-intent:${suffix}`,
+      routineRecoveryOperationId,
+      routineRecoveryAuthorization.id,
+      walletAddress,
+      walletId,
+    ],
+  );
+  const routineRecoveryIntentId = routineRecoveryIntent.rows[0]?.id;
+  assert.ok(routineRecoveryIntentId);
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+    limit: 100,
+  });
+  assert.deepEqual(
+    (
+      await client.query<{
+        error_code: string | null;
+        can_cancel_buy: boolean | null;
+        operation_status: string | null;
+        progress_state: string | null;
+        status: string;
+      }>(
+        `select status,
+                error_code,
+                (result -> 'shortfallProgress' ->> 'canCancelBuy')::boolean
+                  as can_cancel_buy,
+                result -> 'shortfallProgress' ->> 'operationStatus'
+                  as operation_status,
+                result -> 'shortfallProgress' ->> 'state' as progress_state
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [routineRecoveryIntentId],
+      )
+    ).rows[0],
+    {
+      can_cancel_buy: true,
+      error_code: null,
+      operation_status: "recovery_required",
+      progress_state: "preparing",
+      status: "funding",
+    },
+    "routine in-flight reconciliation preserves the confirmed bot Buy instead of detaching it",
+  );
+  const routineRecoveryRefresh = await captureTelegramBotTradingCallback({
+    appBaseUrl: "https://app.hunch.trade",
+    callbackQuery: {
+      data: `hbt:retry_buy:${routineRecoveryIntentId}`,
+      from: { id: telegramUserId as never },
+      id: `routine-recovery-refresh:${suffix}`,
+      message: {
+        chat: { id: telegramUserId, type: "private" },
+        message_id: 705,
+      },
+    },
+    db,
+    expectedIntentId: routineRecoveryIntentId,
+    signerInspector,
+    telegramMiniAppEnabled: false,
+    trading,
+  });
+  assert.equal(routineRecoveryRefresh.intentStatus, "funding");
+  assert.equal(
+    routineRecoveryRefresh.answers[0]?.text,
+    "⏳ Funding is still being prepared.",
+    "Refresh must not turn ordinary funding reconciliation into a false review incident",
+  );
+
+  // The same routine route must remain usable through the sealed Mini App
+  // when unattended bot access is disabled. The Mini App is deliberately
+  // bound to the verified wallet, not to the server-delegated signer.
+  const disabledForRoutineMiniApp = await app.inject({
+    method: "POST",
+    url: "/telegram/bot-trading/disable",
+  });
+  assert.equal(disabledForRoutineMiniApp.statusCode, 200);
+  const routineMiniAppScope = await resolveTelegramAppHandoffCurrentScope({
+    action: "buy",
+    db,
+    executionContractVersion: 2,
+    telegramUserId,
+    venue: "polymarket",
+  });
+  assert.ok(
+    routineMiniAppScope,
+    "a v2 Mini App handoff keeps its verified-wallet scope after direct bot access is disabled",
+  );
+  const routineMiniAppIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, event_id, side,
+       amount_usd, status, expires_at, idempotency_key, delivery_mode,
+       funding_operation_id, result
+     ) values (
+       $1, $2, $3, $1, '706', 'buy', 'polymarket', $4, $5, 'YES',
+       2, 'funding', now() + interval '1 hour', $6, 'app_handoff', $7::uuid,
+       jsonb_build_object(
+         'telegramAuthority',
+         jsonb_build_object(
+           'version', 1,
+           'authorizationId', $8::text,
+           'telegramAccountLinkId', (
+             select id::text from user_telegram_accounts where user_id = $2 limit 1
+           ),
+           'userId', $2::text,
+           'walletAddress', $9::text,
+           'walletChain', 'ethereum',
+           'privyWalletId', $10::text
+         ),
+         'appHandoffExecution',
+         jsonb_build_object(
+           'version', 2,
+           'kind', 'funding',
+           'handoffId', $11::uuid,
+           'committedAt', clock_timestamp()::text
+         )
+       )
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      routineRecoveryAuthorization.id,
+      marketId,
+      eventId,
+      `routine-mini-app-recovery-intent:${suffix}`,
+      routineRecoveryOperationId,
+      routineRecoveryAuthorization.id,
+      walletAddress,
+      walletId,
+      crypto.randomUUID(),
+    ],
+  );
+  const routineMiniAppIntentId = routineMiniAppIntent.rows[0]?.id;
+  assert.ok(routineMiniAppIntentId);
+  await runTelegramTradeLifecycleProjectionBatchInTransaction(client, {
+    limit: 100,
+  });
+  assert.deepEqual(
+    (
+      await client.query<{
+        can_cancel_buy: boolean | null;
+        operation_status: string | null;
+        progress_state: string | null;
+        requires_mini_app_continuation: boolean | null;
+        status: string;
+      }>(
+        `select status,
+                (result -> 'shortfallProgress' ->> 'canCancelBuy')::boolean
+                  as can_cancel_buy,
+                result -> 'shortfallProgress' ->> 'operationStatus'
+                  as operation_status,
+                result -> 'shortfallProgress' ->> 'state' as progress_state,
+                (result -> 'shortfallProgress' ->> 'requiresMiniAppContinuation')::boolean
+                  as requires_mini_app_continuation
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [routineMiniAppIntentId],
+      )
+    ).rows[0],
+    {
+      can_cancel_buy: true,
+      operation_status: "recovery_required",
+      progress_state: "preparing",
+      requires_mini_app_continuation: true,
+      status: "funding",
+    },
+    "the Mini App keeps a routine-recovery Buy attached, actionable only as a safe cancellation",
+  );
+  const routineMiniAppProjection = await loadTelegramAppHandoffProjection(db, {
+    telegramUserId,
+    tradeIntentId: routineMiniAppIntentId,
+    userId,
+  });
+  assert.deepEqual(
+    {
+      stage: routineMiniAppProjection?.stage,
+      status: routineMiniAppProjection?.status,
+      terminal: routineMiniAppProjection?.terminal,
+    },
+    { stage: "funding", status: "funding", terminal: false },
+    "the Mini App sees the same live funding route instead of an artificial terminal failure",
+  );
+
   const autoDetachedRecoveryIntent = await client.query<{ id: string }>(
     `insert into telegram_trade_intents (
        telegram_user_id, user_id, authorization_id, chat_id,

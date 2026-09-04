@@ -12960,6 +12960,9 @@ export async function handleTelegramBotTradingCallback(
     const fundingProgressStage = fundingLifecycle?.progressStage ?? null;
     const fundingMayHaveExternalEffect =
       fundingLifecycle?.safety.externalEffectMayHaveOccurred ?? false;
+    const routineFundingRecovery =
+      fundingStatus === "recovery_required" &&
+      (fundingLifecycle?.safety.consumerMayRemainLinked ?? false);
     const routerContinuationPending =
       isTelegramPolymarketRouterContinuationPending({
         continuationId: fundingRow?.continuation_id,
@@ -13002,7 +13005,8 @@ export async function handleTelegramBotTradingCallback(
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
         text:
-          terminalFunding || fundingStatus === "recovery_required"
+          terminalFunding ||
+          (fundingStatus === "recovery_required" && !routineFundingRecovery)
             ? "⚠️ Funding needs review. No Buy was submitted."
             : "⏳ Funding is still being prepared.",
       });

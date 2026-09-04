@@ -271,6 +271,12 @@ export type FundingLifecycleSafetyProjection = Readonly<{
   reconciliationEvidenceTimedOut: boolean;
   /** A provider receipt has its own replay lease, distinct from generic evidence timeout. */
   awaitingProviderReceipt: boolean;
+  /**
+   * A confirmed consumer (for example a Telegram Buy) may remain attached
+   * while routine funding evidence is reconciled. This preserves existing
+   * consent only; it never authorizes a new venue submission by itself.
+   */
+  consumerMayRemainLinked: boolean;
   requiresWorker: boolean;
   requiresManualRecovery: boolean;
   retryAllowed: boolean;
@@ -1067,6 +1073,30 @@ export function deriveFundingLifecycle(
     const execution = actionExecution(action);
     return execution === "final_failure" || execution === "cancelled";
   });
+  // Do not detach a confirmed Buy merely because the projection temporarily
+  // uses `recovery_required` while a normal route is still reconciling. A
+  // detach is appropriate only for an actual conflict, a stopped action, or a
+  // user/manual terminal decision. This is a lifecycle fact so Telegram and
+  // other consumers do not recreate their own status heuristics.
+  const consumerMayRemainLinked =
+    facts.cancellation == null &&
+    facts.manualRecovery == null &&
+    facts.terminalFailure == null &&
+    !facts.consumer.completed &&
+    !facts.consumer.unresolved &&
+    !evidence.canonicalityConflict &&
+    !evidence.destinationEvidenceConflict &&
+    !actionEvidenceConflict &&
+    !actionManualRecovery &&
+    !conflictingActionHistory &&
+    !(unresolvedActionNeedsManualRecovery && !awaitingProviderReceipt) &&
+    !evidence.partialRefundEvidence &&
+    !actionHasTerminalStop &&
+    (unresolvedMovement ||
+      actionReportedMovement ||
+      evidence.finalizedSource ||
+      evidence.finalizedIntermediate ||
+      evidence.finalizedDestination);
   const actionabilityBlockedByEvidence =
     evidence.canonicalityConflict ||
     evidence.destinationEvidenceConflict ||
@@ -1369,6 +1399,7 @@ export function deriveFundingLifecycle(
       moneyMayHaveMoved,
       reconciliationEvidenceTimedOut,
       awaitingProviderReceipt,
+      consumerMayRemainLinked,
       requiresWorker,
       requiresManualRecovery,
       retryAllowed: actions.some((action) => action.actionable),
