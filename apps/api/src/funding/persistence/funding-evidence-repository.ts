@@ -88,12 +88,10 @@ type FundingOperationStepDbRow = {
   segment_id: string | null;
   ordinal: number;
   step_kind: FundingOperationStep["stepKind"];
-  state: FundingOperationStepState;
   action_fingerprint: string;
   executor_id: string;
   payer_requirement: FundingOperationStep["payerRequirement"];
   depends_on_step_id: string | null;
-  dependency_state: FundingOperationStepState | null;
   normalized_action: JsonRecord;
   action_validation_result: JsonRecord;
   action_expires_at: Date | null;
@@ -101,22 +99,33 @@ type FundingOperationStepDbRow = {
 
 function mapOperationStep(
   row: FundingOperationStepDbRow,
-  projectedActions: ReadonlyMap<string, ProjectedFundingAction> | null = null,
+  projectedActions: ReadonlyMap<string, ProjectedFundingAction>,
 ): FundingOperationStep {
-  const projectedAction = projectedActions?.get(row.id);
-  const state = projectedAction?.state ?? row.state;
-  const dependencyState =
-    row.depends_on_step_id === null
-      ? null
-      : (projectedActions?.get(row.depends_on_step_id)?.state ??
-        row.dependency_state);
+  const projectedAction = projectedActions.get(row.id);
+  if (!projectedAction) {
+    throw new FundingPersistenceError(
+      "invalid_state_transition",
+      "funding action is absent from its lifecycle projection",
+    );
+  }
+  let dependencyState: FundingOperationStepState | null = null;
+  if (row.depends_on_step_id !== null) {
+    const dependencyAction = projectedActions.get(row.depends_on_step_id);
+    if (!dependencyAction) {
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "funding action dependency is absent from its lifecycle projection",
+      );
+    }
+    dependencyState = dependencyAction.state;
+  }
   return {
     id: row.id,
     operationId: row.operation_id,
     segmentId: row.segment_id,
     ordinal: row.ordinal,
     stepKind: row.step_kind,
-    state,
+    state: projectedAction.state,
     actionFingerprint: row.action_fingerprint,
     executorId: row.executor_id,
     payerRequirement: row.payer_requirement,
@@ -125,7 +134,7 @@ function mapOperationStep(
     normalizedAction: row.normalized_action,
     actionValidationResult: row.action_validation_result,
     actionExpiresAt: row.action_expires_at,
-    actionable: projectedAction?.actionable,
+    actionable: projectedAction.actionable,
   };
 }
 
@@ -148,12 +157,10 @@ const operationStepColumns = `
   step.segment_id,
   step.ordinal,
   step.step_kind,
-  step.state,
   step.action_fingerprint,
   step.executor_id,
   step.payer_requirement,
   step.depends_on_step_id,
-  dependency.state as dependency_state,
   step.normalized_action,
   step.action_validation_result,
   step.action_expires_at
@@ -172,9 +179,6 @@ export async function fetchFundingOperationStepForUser(
       select ${operationStepColumns}
       from funding_operation_steps step
       join funding_operations operation on operation.id = step.operation_id
-      left join funding_operation_steps dependency
-        on dependency.id = step.depends_on_step_id
-       and dependency.operation_id = step.operation_id
       where operation.user_id = $1
         and operation.id = $2
         and step.id = $3
@@ -201,9 +205,6 @@ export async function listFundingOperationStepsForUser(
       select ${operationStepColumns}
       from funding_operation_steps step
       join funding_operations operation on operation.id = step.operation_id
-      left join funding_operation_steps dependency
-        on dependency.id = step.depends_on_step_id
-       and dependency.operation_id = step.operation_id
       where operation.user_id = $1
         and operation.id = $2
       order by step.ordinal asc
@@ -1156,9 +1157,6 @@ export async function startFundingStepAttemptForUserInTransaction(
         select
           ${operationStepColumns}
         from funding_operation_steps step
-        left join funding_operation_steps dependency
-          on dependency.id = step.depends_on_step_id
-         and dependency.operation_id = step.operation_id
         where step.operation_id = $1
           and step.id = $2
         for update of step

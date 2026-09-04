@@ -12928,7 +12928,7 @@ export async function handleTelegramBotTradingCallback(
                    and reservation.state = 'active'
                  order by reservation.id
                  limit 1
-              ) as reservation_id,
+              ) as reservation_id
          from funding_operations operation
          left join lateral (
            select continuation.*
@@ -12953,23 +12953,20 @@ export async function handleTelegramBotTradingCallback(
           operationId: fundingRow.operation_id,
         })
       : null;
-    const funding = fundingRow
-      ? {
-          ...fundingRow,
-          has_broadcast_boundary:
-            fundingProjection?.lifecycle.safety.externalEffectMayHaveOccurred ??
-            false,
-          operation_status: fundingProjection?.lifecycle.status ?? null,
-          progress_stage: fundingProjection?.lifecycle.progressStage ?? null,
-        }
-      : null;
+    // A Telegram retry is an execution decision.  Keep the immutable route
+    // binding from the row, but take every lifecycle value from facts.
+    const fundingLifecycle = fundingProjection?.lifecycle ?? null;
+    const fundingStatus = fundingLifecycle?.status ?? null;
+    const fundingProgressStage = fundingLifecycle?.progressStage ?? null;
+    const fundingMayHaveExternalEffect =
+      fundingLifecycle?.safety.externalEffectMayHaveOccurred ?? false;
     const routerContinuationPending =
       isTelegramPolymarketRouterContinuationPending({
-        continuationId: funding?.continuation_id,
-        operationStatus: funding?.operation_status,
-        progressStage: funding?.progress_stage,
+        continuationId: fundingRow?.continuation_id,
+        operationStatus: fundingStatus,
+        progressStage: fundingProgressStage,
         rootRequiresRouterContinuation:
-          funding?.root_requires_router_continuation === true,
+          fundingRow?.root_requires_router_continuation === true,
         venue: intent.venue,
       });
     if (routerContinuationPending) {
@@ -12980,20 +12977,21 @@ export async function handleTelegramBotTradingCallback(
       return true;
     }
     if (
-      funding?.operation_status !== "ready" ||
-      funding.progress_stage !== "ready_for_consumer" ||
-      !funding.reservation_id
+      !fundingRow ||
+      fundingStatus !== "ready" ||
+      fundingProgressStage !== "ready_for_consumer" ||
+      !fundingRow.reservation_id
     ) {
       const terminalFunding =
-        funding?.operation_status === "cancelled" ||
-        funding?.operation_status === "failed" ||
-        funding?.operation_status === "refunded" ||
-        funding?.operation_status === "completed";
+        fundingStatus === "cancelled" ||
+        fundingStatus === "failed" ||
+        fundingStatus === "refunded" ||
+        fundingStatus === "completed";
       if (terminalFunding) {
         await updateIntentStatus({
           allowedStatuses: ["funding"],
           db: input.db,
-          errorCode: `funding_${funding.operation_status}`,
+          errorCode: `funding_${fundingStatus}`,
           errorMessage:
             "Funding ended before the Buy could continue. No trade was submitted.",
           intentId: intent.id,
@@ -13004,7 +13002,7 @@ export async function handleTelegramBotTradingCallback(
         callbackQueryId: input.callbackQuery.id,
         showAlert: true,
         text:
-          terminalFunding || funding?.operation_status === "recovery_required"
+          terminalFunding || fundingStatus === "recovery_required"
             ? "⚠️ Funding needs review. No Buy was submitted."
             : "⏳ Funding is still being prepared.",
       });
@@ -13022,9 +13020,9 @@ export async function handleTelegramBotTradingCallback(
         : null;
       const canCancelPreparation =
         !terminalFunding &&
-        funding?.operation_status !== "recovery_required" &&
-        funding?.operation_status !== "reconcile_required" &&
-        funding?.has_broadcast_boundary !== true;
+        fundingStatus !== "recovery_required" &&
+        fundingStatus !== "reconcile_required" &&
+        !fundingMayHaveExternalEffect;
       const canCancelBuy =
         !terminalFunding &&
         intent.action === "buy" &&
@@ -13075,8 +13073,8 @@ export async function handleTelegramBotTradingCallback(
                   : null,
                 `Order: ${formatUsd(Number(intent.amount_usd ?? 0))}`,
                 `Status: ${telegramFundingProgressLabel(
-                  funding?.progress_stage ?? null,
-                  funding?.operation_status ?? null,
+                  fundingProgressStage,
+                  fundingStatus,
                 )}`,
                 "The Buy has not been submitted yet.",
               ],
@@ -13097,7 +13095,7 @@ export async function handleTelegramBotTradingCallback(
       }
       if (
         intent.funding_reservation_id != null &&
-        intent.funding_reservation_id !== funding.reservation_id
+        intent.funding_reservation_id !== fundingRow.reservation_id
       ) {
         await input.answerCallbackQuery({
           callbackQueryId: input.callbackQuery.id,
@@ -13129,7 +13127,7 @@ export async function handleTelegramBotTradingCallback(
               and intent.delivery_mode = 'app_handoff'
               and intent.funding_operation_id is not null
               and intent.funding_reservation_id is null`,
-          [intent.id, funding.reservation_id, committedFundedAppHandoffId],
+          [intent.id, fundingRow.reservation_id, committedFundedAppHandoffId],
         );
         if ((attached.rowCount ?? 0) !== 1) {
           await answerIntentAlreadyProcessed(input, intent);
@@ -13181,14 +13179,14 @@ export async function handleTelegramBotTradingCallback(
           and status = 'funding'
           and funding_operation_id is not null
           and funding_reservation_id is null`,
-      [intent.id, funding.reservation_id, resumeStatus],
+      [intent.id, fundingRow.reservation_id, resumeStatus],
     );
     if ((resumed.rowCount ?? 0) !== 1) {
       await answerIntentAlreadyProcessed(input, intent);
       return true;
     }
     intent.status = resumeStatus;
-    intent.funding_reservation_id = funding.reservation_id;
+    intent.funding_reservation_id = fundingRow.reservation_id;
     fundingResumedForExecution = true;
     // The readiness above was read before the durable funding operation became
     // ready. Re-read it for presentation/repair, but do not use its old

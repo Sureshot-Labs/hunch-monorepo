@@ -24,7 +24,7 @@ and test. The tables below seed that inventory; the implementation must fail
 the changeset if a grep/AST inventory contains an unclassified reader or
 writer.
 
-## Stage 1 cutover ledger — in progress
+## Stage 1 cutover ledger — complete
 
 The tables below are the pre-cutover inventory; their historical line numbers
 are intentionally retained so each former branch remains traceable. The live
@@ -95,6 +95,15 @@ cutover status is:
 - Complete: API step presentation exposes the projector's exact `actionable`
   result. A reconcile-required sibling no longer hides an independent action;
   the response shape and public status strings are unchanged.
+- Complete: Telegram Buy retry keeps only the immutable route/reservation
+  binding from its query row. Its readiness, cancellation boundary and
+  presentation values read named fields from `fundingLifecycle`, never a
+  synthetic or stored `operation_status`/`progress_stage` cache field.
+- Complete: every operation-step mapper now requires the corresponding fact
+  projection. It does not select stored `step.state` or dependency state, and
+  it fails closed with a typed error if an immutable action is absent from the
+  projection. This makes an incomplete facts query observable instead of
+  silently presenting a stale cache.
 - Complete: account merge and Privy deletion inspect every linked operation's
   facts serially under their existing transaction. This deliberately favors
   safe destructive-action blocking over a stale terminal cache or unsafe
@@ -116,7 +125,11 @@ cutover status is:
   deliberately stale terminal cache, independent action lanes, cancellation,
   reconciliation, receipt/reorg, receive, direct withdrawal, Relay, and
   Telegram continuation paths.
-- In progress: independent review. Stage 2 receive/preparation aggregate
+- Complete: an independent re-review found and verified a formerly hidden
+  `retry_buy` SQL parse failure, the cache-status cancellation branch, and the
+  missing `intent.status = 'funding'` execution regression. The repair runs
+  the real query against disposable PostgreSQL and proves it cannot submit an
+  unready Buy. The final verdict is GO; Stage 2 receive/preparation aggregate
   deletion and Stage 3 schema work remain explicitly out of scope.
 - Not started: receive/preparation aggregate deletion and final schema work
   belong to Stages 2 and 3, not this cutover.
@@ -152,16 +165,16 @@ rg -l --glob '*.ts' --glob '!**/*test*.ts' \
 Every remaining production hit is classified below. It is not a live funding
 lifecycle decision outside the projector:
 
-| Location                                                                                             | Classification                         | Why it remains in Stage 1                                                                                                           |
-| ---------------------------------------------------------------------------------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `funding/lifecycle/funding-lifecycle-projector.ts`, `funding-lifecycle-facts-repository.ts`          | Projector contract/documentation       | The strings distinguish immutable plan state from forbidden cache input; neither file reads a mutable aggregate status.             |
-| `funding/persistence/funding-operation-repository.ts`, `funding-evidence-repository.ts`              | Cache materialization/transport        | They map or write public cache fields after fact derivation; step reads overlay the projector's state and actionability.            |
-| `funding/reconciliation/funding-reducer.ts`                                                          | Diagnostic/cache comparison            | `initialState` is returned only for reduction diagnostics and cache-write reporting; target selection is fact-derived.              |
-| `routes/funding.ts`                                                                                  | Public serialization                   | Runtime operations and step reads are already projector-backed; the route does not choose actionability from the serialized fields. |
-| `funding/planner/planning-types.ts`, `funding/validation/polymarket-router-commit-plan-validator.ts` | Immutable pre-commit plan              | These inspect the proposed action DAG before persistence, not `funding_operation_steps.state` from a committed operation.           |
-| `funding/position-actions/**`, `routes/position-actions.ts`                                          | Separate position-action state machine | It has its own financial facts and is deliberately outside funding-operation lifecycle scope.                                       |
-| `funding-migration-preflight.ts`                                                                     | Historical read-only audit             | It classifies old rows for later migration work and cannot execute, reserve, or release funds.                                      |
-| Tests                                                                                                | Characterization                       | Tests intentionally corrupt cache fields to prove facts dominate them.                                                              |
+| Location                                                                                             | Classification                         | Why it remains in Stage 1                                                                                                                                 |
+| ---------------------------------------------------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `funding/lifecycle/funding-lifecycle-projector.ts`, `funding-lifecycle-facts-repository.ts`          | Projector contract/documentation       | The strings distinguish immutable plan state from forbidden cache input; neither file reads a mutable aggregate status.                                   |
+| `funding/persistence/funding-operation-repository.ts`, `funding-evidence-repository.ts`              | Cache materialization/transport        | They map or write public cache fields after fact derivation; every step read requires projector state/actionability and never falls back to cache fields. |
+| `funding/reconciliation/funding-reducer.ts`                                                          | Diagnostic/cache comparison            | `initialState` is returned only for reduction diagnostics and cache-write reporting; target selection is fact-derived.                                    |
+| `routes/funding.ts`                                                                                  | Public serialization                   | Runtime operations and step reads are already projector-backed; the route does not choose actionability from the serialized fields.                       |
+| `funding/planner/planning-types.ts`, `funding/validation/polymarket-router-commit-plan-validator.ts` | Immutable pre-commit plan              | These inspect the proposed action DAG before persistence, not `funding_operation_steps.state` from a committed operation.                                 |
+| `funding/position-actions/**`, `routes/position-actions.ts`                                          | Separate position-action state machine | It has its own financial facts and is deliberately outside funding-operation lifecycle scope.                                                             |
+| `funding-migration-preflight.ts`                                                                     | Historical read-only audit             | It classifies old rows for later migration work and cannot execute, reserve, or release funds.                                                            |
+| Tests                                                                                                | Characterization                       | Tests intentionally corrupt cache fields to prove facts dominate them.                                                                                    |
 
 The service directory is additionally guarded by a unit test: no sponsorship,
 Telegram, or user-financial lifecycle service may add a direct funding cache

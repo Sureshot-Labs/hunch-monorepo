@@ -15,10 +15,7 @@ import { reduceFundingOperationInTransaction } from "./funding-reducer.js";
 
 export function isSafelyCancellableStepLessIngress(
   input: Readonly<{
-    operation: Pick<
-      FundingOperationRow,
-      "planKind"
-    >;
+    operation: Pick<FundingOperationRow, "planKind">;
     stepCount: number;
     lifecycle: Readonly<{
       status: "awaiting_external_funds" | string;
@@ -146,7 +143,7 @@ export async function cancelFundingOperationForUser(
     // response.  Stored operation status is intentionally never the branch
     // selector here.
     if (lifecycle.safety.terminal) {
-      await reduceFundingOperationInTransaction(client, {
+      const reduction = await reduceFundingOperationInTransaction(client, {
         operationId: input.operationId,
         now,
       });
@@ -157,7 +154,7 @@ export async function cancelFundingOperationForUser(
           "funding operation disappeared after terminal lifecycle reduction",
         );
       }
-      if (terminal.status === "cancelled") {
+      if (reduction.finalState.status === "cancelled") {
         await releaseCancelledTelegramHandoffInTransaction({
           client,
           now,
@@ -262,7 +259,7 @@ export async function cancelFundingOperationForUser(
         now,
       });
     }
-    await reduceFundingOperationInTransaction(client, {
+    const reduction = await reduceFundingOperationInTransaction(client, {
       operationId: input.operationId,
       now,
     });
@@ -273,7 +270,7 @@ export async function cancelFundingOperationForUser(
         "funding operation disappeared after cancellation",
       );
     }
-    if (cancelled.status === "cancelled") {
+    if (reduction.finalState.status === "cancelled") {
       await releaseCancelledTelegramHandoffInTransaction({
         client,
         now,

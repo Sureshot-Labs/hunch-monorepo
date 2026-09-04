@@ -962,6 +962,33 @@ const tests: readonly Test[] = [
         "a PoolClient is valid here, so lifecycle listings must not issue concurrent pg queries",
       );
 
+      const evidenceSource = readFileSync(
+        new URL(
+          "../../persistence/funding-evidence-repository.ts",
+          import.meta.url,
+        ),
+        "utf8",
+      );
+      const operationStepColumnsStart = evidenceSource.indexOf(
+        "const operationStepColumns",
+      );
+      const operationStepColumnsEnd = evidenceSource.indexOf(
+        "export async function fetchFundingOperationStepForUser",
+        operationStepColumnsStart,
+      );
+      const operationStepColumns = evidenceSource.slice(
+        operationStepColumnsStart,
+        operationStepColumnsEnd,
+      );
+      assert.ok(operationStepColumnsStart >= 0);
+      assert.ok(operationStepColumnsEnd > operationStepColumnsStart);
+      assert.doesNotMatch(operationStepColumns, /step\.state/u);
+      assert.doesNotMatch(operationStepColumns, /dependency\.state/u);
+      assert.match(
+        evidenceSource,
+        /funding action is absent from its lifecycle projection/u,
+      );
+
       const depositEvents = readFileSync(
         new URL("../../../services/deposit-events.ts", import.meta.url),
         "utf8",
@@ -1005,6 +1032,28 @@ const tests: readonly Test[] = [
         /lifecycle\.safety\.externalEffectMayHaveOccurred/u,
       );
       assert.doesNotMatch(telegramCancellation, /step_row\.state/u);
+
+      const telegramRetryStart = telegramBotTrading.indexOf(
+        "const fundingState = await input.db.query",
+      );
+      const telegramRetryEnd = telegramBotTrading.indexOf(
+        'if (intent.delivery_mode === "app_handoff")',
+        telegramRetryStart,
+      );
+      const telegramRetry = telegramBotTrading.slice(
+        telegramRetryStart,
+        telegramRetryEnd,
+      );
+      assert.ok(telegramRetryStart >= 0);
+      assert.ok(telegramRetryEnd > telegramRetryStart);
+      assert.match(
+        telegramRetry,
+        /const fundingLifecycle = fundingProjection\?\.lifecycle \?\? null/u,
+      );
+      assert.doesNotMatch(
+        telegramRetry,
+        /\bfunding\.(?:operation_status|progress_stage|has_broadcast_boundary)\b/u,
+      );
     },
   },
 ];

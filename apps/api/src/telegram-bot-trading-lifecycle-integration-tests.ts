@@ -3000,6 +3000,69 @@ try {
   );
   const staleFundingIntentId = staleFundingIntent.rows[0]?.id;
   assert.ok(staleFundingIntentId);
+  // This executes the actual `retry_buy` funding query, rather than only
+  // testing its surrounding lifecycle helpers. The operation's stored cache
+  // is not the retry authority: the callback must parse, project facts, and
+  // keep the Buy in funding without placing a trade.
+  const retryQueryFundingIntent = await client.query<{ id: string }>(
+    `insert into telegram_trade_intents (
+       telegram_user_id, user_id, authorization_id, chat_id,
+       telegram_message_id, action, venue, market_id, event_id, side,
+       amount_usd, status, expires_at, idempotency_key, funding_operation_id
+     ) values (
+       $1, $2, $3, $1, '704', 'buy', 'polymarket', $4, $5, 'YES',
+       1, 'funding', now() + interval '2 minutes', $6, $7
+     ) returning id`,
+    [
+      telegramUserId,
+      userId,
+      authorization.id,
+      marketId,
+      eventId,
+      `retry-query-terminal-funding:${suffix}`,
+      terminalFundingOperation.rows[0]?.id,
+    ],
+  );
+  const retryQueryFundingIntentId = retryQueryFundingIntent.rows[0]?.id;
+  assert.ok(retryQueryFundingIntentId);
+  const retryQueryTerminalFunding = await captureTelegramBotTradingCallback({
+    appBaseUrl: "https://app.hunch.trade",
+    callbackQuery: {
+      data: `hbt:retry_buy:${retryQueryFundingIntentId}`,
+      from: { id: telegramUserId as never },
+      id: `retry-query-terminal-funding:${suffix}`,
+      message: {
+        chat: { id: telegramUserId, type: "private" },
+        message_id: 704,
+      },
+    },
+    db,
+    expectedIntentId: retryQueryFundingIntentId,
+    signerInspector,
+    telegramMiniAppEnabled: true,
+    trading,
+  });
+  assert.equal(retryQueryTerminalFunding.handled, true);
+  assert.equal(retryQueryTerminalFunding.intentStatus, "funding");
+  assert.ok(
+    retryQueryTerminalFunding.answers.length > 0,
+    "retry_buy responds after its funding query instead of falling through",
+  );
+  assert.deepEqual(
+    (
+      await client.query<{ status: string; submit_started_at: Date | null }>(
+        `select status, submit_started_at
+           from telegram_trade_intents
+          where id = $1::uuid`,
+        [retryQueryFundingIntentId],
+      )
+    ).rows[0],
+    { status: "funding", submit_started_at: null },
+    "retry_buy parses the funding query but does not submit an unready Buy",
+  );
+  await client.query(`delete from telegram_trade_intents where id = $1::uuid`, [
+    retryQueryFundingIntentId,
+  ]);
   const marketAfterTerminalFunding = await buildTelegramBotTradingMarketMessage(
     {
       appBaseUrl: "https://app.hunch.trade",
