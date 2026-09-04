@@ -49,6 +49,7 @@ function action(
     expiresAt: new Date(now.getTime() + 60_000),
     independentLane: true,
     mayMoveMoney: true,
+    safeInternalHandoff: false,
     requiresSourceDebitEvidence: false,
     requiresVenueReadiness: false,
     attempts: [],
@@ -151,6 +152,87 @@ function facts(
       ["polygon", "action_required", true],
       ["base", "action_required", true],
     ],
+  );
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      actions: [
+        action("confirmed-deposit-wallet-handoff", {
+          ordinal: 0,
+          safeInternalHandoff: true,
+          attempts: [
+            attempt({
+              outcome: "ambiguous",
+              broadcastMayHaveOccurred: true,
+              referenceKind: "external_handoff",
+              receipt: {
+                status: "finalized",
+                canonical: true,
+                actionMatched: true,
+                failureFinalized: false,
+              },
+            }),
+          ],
+        }),
+        action("relay-not-broadcast", {
+          ordinal: 1,
+          dependsOnActionId: "confirmed-deposit-wallet-handoff",
+          attempts: [attempt({ outcome: "failed" })],
+        }),
+      ],
+    }),
+  );
+  assert.deepEqual(
+    {
+      status: projection.status,
+      progressStage: projection.progressStage,
+      terminal: projection.safety.terminal,
+      reservationsMayRelease: projection.safety.reservationsMayRelease,
+    },
+    {
+      status: "failed",
+      progressStage: "terminal",
+      terminal: true,
+      reservationsMayRelease: true,
+    },
+    "a finalized Deposit Wallet-to-controller handoff must not strand cash when the following Relay action never broadcast",
+  );
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
+      actions: [
+        action("external-handoff", {
+          ordinal: 0,
+          attempts: [
+            attempt({
+              outcome: "ambiguous",
+              broadcastMayHaveOccurred: true,
+              referenceKind: "external_handoff",
+              receipt: {
+                status: "finalized",
+                canonical: true,
+                actionMatched: true,
+                failureFinalized: false,
+              },
+            }),
+          ],
+        }),
+        action("downstream-not-broadcast", {
+          ordinal: 1,
+          dependsOnActionId: "external-handoff",
+          attempts: [attempt({ outcome: "failed" })],
+        }),
+      ],
+    }),
+  );
+  assert.equal(
+    projection.status,
+    "recovery_required",
+    "an external handoff remains protected when a later action fails",
   );
 }
 

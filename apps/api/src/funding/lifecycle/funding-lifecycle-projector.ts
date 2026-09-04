@@ -95,6 +95,12 @@ export type FundingLifecycleActionFact = Readonly<{
   independentLane: boolean;
   /** The immutable action can debit, transfer, or otherwise move funding. */
   mayMoveMoney: boolean;
+  /**
+   * This handoff credits the user's own controller wallet. Once its receipt
+   * is final, the cash remains safely reusable even if a later route action
+   * stops before broadcast.
+   */
+  safeInternalHandoff?: boolean;
   /** The action needs an exact canonical source-debit before completion. */
   requiresSourceDebitEvidence: boolean;
   /** This immutable action establishes destination-venue readiness. */
@@ -477,6 +483,12 @@ function actionMayHaveMovedMoney(action: FundingLifecycleActionFact): boolean {
         hasCanonicalFinalReceipt(attempt.receipt),
     )
   );
+}
+
+function actionMayHaveMovedMoneyOutsideUserControl(
+  action: FundingLifecycleActionFact,
+): boolean {
+  return !action.safeInternalHandoff && actionMayHaveMovedMoney(action);
 }
 
 function actionHasConflictingExecutionHistory(
@@ -1010,6 +1022,9 @@ export function deriveFundingLifecycle(
     actionHasConflictingExecutionHistory,
   );
   const actionReportedMovement = facts.actions.some(actionMayHaveMovedMoney);
+  const actionReportedExternalMovement = facts.actions.some(
+    actionMayHaveMovedMoneyOutsideUserControl,
+  );
   const moneyMayHaveMoved =
     unresolvedMovement ||
     facts.consumer.unresolved ||
@@ -1028,7 +1043,7 @@ export function deriveFundingLifecycle(
     facts.actions.some(
       (action) => action.mayMoveMoney && hasUnresolvedMovement(action),
     ) ||
-    actionReportedMovement ||
+    actionReportedExternalMovement ||
     facts.transfers.some(
       (transfer) =>
         transfer.canonical &&

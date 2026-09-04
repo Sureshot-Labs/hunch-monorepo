@@ -189,6 +189,18 @@ function actionMayMoveMoney(action: LifecycleActionRow): boolean {
   );
 }
 
+function actionIsSafeInternalHandoff(action: LifecycleActionRow): boolean {
+  // The versioned commit validator accepts this envelope only for the exact
+  // Deposit Wallet -> controller transfer topology. Its final receipt means
+  // the asset remains on an owned, routable controller wallet.
+  return (
+    action.step_kind === "external_handoff" &&
+    action.executor_id === "polymarket_deposit_wallet_relayer_v1" &&
+    action.action_validation_result.executionEnvelope ===
+      "polymarket_deposit_wallet_to_controller_v1"
+  );
+}
+
 function actionRequiresSourceDebitEvidence(
   action: LifecycleActionRow,
 ): boolean {
@@ -476,6 +488,7 @@ function compileFundingLifecycleFacts(
       independentLane:
         row.segment_id !== null && row.depends_on_step_id === null,
       mayMoveMoney: actionMayMoveMoney(row),
+      safeInternalHandoff: actionIsSafeInternalHandoff(row),
       requiresSourceDebitEvidence: actionRequiresSourceDebitEvidence(row),
       requiresVenueReadiness: row.step_kind === "venue_preparation",
       authorization: actionAuthorization(row, telegramAuthorization),

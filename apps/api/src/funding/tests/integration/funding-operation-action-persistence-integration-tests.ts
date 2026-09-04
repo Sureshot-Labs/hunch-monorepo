@@ -16,7 +16,9 @@ import {
 import type { EmbeddedEvmSponsorshipDependencies } from "../../../services/embedded-evm-sponsorship.js";
 import { fetchUserFinancialLifecycleSummary } from "../../../services/user-financial-lifecycle.js";
 import { POLYMARKET_HANDOFF_CHAIN_ATTRIBUTION_WINDOW_MS } from "../../execution/polymarket-deposit-wallet-handoff.js";
+import { loadFundingLifecycleProjectionForOperation } from "../../lifecycle/funding-lifecycle-read-model.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
+import { reduceFundingOperationInTransaction } from "../../reconciliation/funding-reducer.js";
 import {
   fetchFundingOperationStepForUser,
   finishFundingStepAttemptForUserInTransaction,
@@ -644,6 +646,125 @@ try {
     "the user-authorized pre-route handoff must outlive the downstream Relay quote",
   );
   await client.query("set constraints all deferred");
+
+  const preRouteSteps = await client.query<{
+    action_fingerprint: string;
+    executor_id: string;
+    id: string;
+  }>(
+    `select id, action_fingerprint, executor_id
+       from funding_operation_steps
+      where operation_id = $1::uuid
+      order by ordinal`,
+    [preRouteCommitted.operation.id],
+  );
+  const preRouteHandoffStep = preRouteSteps.rows[0];
+  const preRouteRelayStep = preRouteSteps.rows[1];
+  assert.ok(preRouteHandoffStep);
+  assert.ok(preRouteRelayStep);
+  const preRouteHandoffAttempt =
+    await startFundingStepAttemptForUserInTransaction(client, {
+      userId,
+      operationId: preRouteCommitted.operation.id,
+      stepId: preRouteHandoffStep.id,
+      canonicalActionFingerprint: preRouteHandoffStep.action_fingerprint,
+      executorId: preRouteHandoffStep.executor_id,
+    });
+  await finishFundingStepAttemptForUserInTransaction(client, {
+    userId,
+    operationId: preRouteCommitted.operation.id,
+    stepId: preRouteHandoffStep.id,
+    attemptId: preRouteHandoffAttempt.attempt.id,
+    outcome: "ambiguous",
+    broadcastMayHaveOccurred: true,
+    referenceKind: "external_handoff",
+    receiptRefCiphertext: "ciphertext:pre-route-finalized",
+    receiptRefLookupHmac: hash("pre-route-finalized"),
+    lookupKeyVersion: 1,
+    actualCosts: {},
+  });
+  await applyFundingStepReceiptEvidenceInTransaction(client, {
+    operationId: preRouteCommitted.operation.id,
+    stepId: preRouteHandoffStep.id,
+    attemptId: preRouteHandoffAttempt.attempt.id,
+    networkId: ASSET.networkId,
+    receipt: {
+      status: "finalized",
+      actionMatch: true,
+      ledgerHeight: "101",
+      blockHash: `0x${"a1".repeat(32)}`,
+      canonical: true,
+      failureCode: null,
+      evidence: {
+        transactionHash: `0x${"b1".repeat(32)}`,
+        transactionHashSource: "provider",
+        handoffEventIndex: "0",
+      },
+    },
+  });
+  const preRouteRelayAttempt =
+    await startFundingStepAttemptForUserInTransaction(client, {
+      userId,
+      operationId: preRouteCommitted.operation.id,
+      stepId: preRouteRelayStep.id,
+      canonicalActionFingerprint: preRouteRelayStep.action_fingerprint,
+      executorId: preRouteRelayStep.executor_id,
+    });
+  await finishFundingStepAttemptForUserInTransaction(client, {
+    userId,
+    operationId: preRouteCommitted.operation.id,
+    stepId: preRouteRelayStep.id,
+    attemptId: preRouteRelayAttempt.attempt.id,
+    outcome: "failed",
+    broadcastMayHaveOccurred: false,
+    referenceKind: null,
+    receiptRefCiphertext: null,
+    receiptRefLookupHmac: null,
+    lookupKeyVersion: null,
+    actualCosts: { reasonCode: "client_execution_failed" },
+  });
+  const terminalPreRouteProjection =
+    await loadFundingLifecycleProjectionForOperation(client, {
+      operationId: preRouteCommitted.operation.id,
+    });
+  assert.deepEqual(
+    {
+      status: terminalPreRouteProjection?.lifecycle.status,
+      progressStage: terminalPreRouteProjection?.lifecycle.progressStage,
+      terminal: terminalPreRouteProjection?.lifecycle.safety.terminal,
+      reservationsMayRelease:
+        terminalPreRouteProjection?.lifecycle.safety.reservationsMayRelease,
+    },
+    {
+      status: "failed",
+      progressStage: "terminal",
+      terminal: true,
+      reservationsMayRelease: true,
+    },
+    "a finalized Deposit Wallet handoff followed by a proven non-broadcast Relay failure must stop and release the route",
+  );
+  const terminalPreRouteReduction = await reduceFundingOperationInTransaction(
+    client,
+    {
+      operationId: preRouteCommitted.operation.id,
+    },
+  );
+  assert.deepEqual(terminalPreRouteReduction.finalState, {
+    status: "failed",
+    stage: "terminal",
+  });
+  const terminalPreRouteReservations = await client.query<{ state: string }>(
+    `select state
+       from balance_reservations
+      where operation_id = $1::uuid`,
+    [preRouteCommitted.operation.id],
+  );
+  assert.ok(
+    terminalPreRouteReservations.rows.every(
+      (reservation) => reservation.state === "released",
+    ),
+    "the reducer must release reservations after a safe internal handoff stops",
+  );
 
   const secondPlanStep = plan.steps[1];
   assert.ok(secondPlanStep);
