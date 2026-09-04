@@ -324,6 +324,8 @@ export type FundingIntent = Readonly<{
   consumerIntent?: FundingTradeConsumerIntentInput | null;
   destinationOptionId: string | null;
   withdrawalRecipientId: string | null;
+  /** Exact balance chosen in the withdrawal composer; never substitute a wallet. */
+  withdrawalSourceComponentId?: string | null;
   venueBindingOptionId: string | null;
   controllerWalletRef?: string | null;
   /** Internal only: public request schemas intentionally omit this field. */

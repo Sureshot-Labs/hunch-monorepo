@@ -1,4 +1,5 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import { recordWithdrawalCompletionNotification } from "./withdrawal-completion-notification.js";
 
 import type {
   FundingOperationState,
@@ -939,6 +940,15 @@ export async function reduceFundingOperationInTransaction(
       now,
     });
   const appliedTransitions = stateChanged ? [target] : [];
+  // A fresh completion emits output; reading/reducing old terminal rows does
+  // not replay historical notifications. The unique key also fences reorgs.
+  if (stateChanged && target.status === "completed") {
+    await recordWithdrawalCompletionNotification(
+      client,
+      operation,
+      observations,
+    );
+  }
 
   if (sourceObserved || destinationObserved || refundObserved) {
     await releaseSourceReservationsAfterEvidence(

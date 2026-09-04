@@ -406,6 +406,7 @@ function accountForExactAsset(asset: AssetRef): AccountValueReadModel {
 async function directWithdrawalOptionsForAsset(
   asset: AssetRef,
   raw = "1000000",
+  withdrawalSourceComponentId?: string,
 ) {
   const recipient = {
     recipientId: `recipient_${asset.networkId.replace(":", "_")}_${asset.assetId.slice(-8)}`,
@@ -431,6 +432,7 @@ async function directWithdrawalOptionsForAsset(
       marketContextId: null,
       destinationOptionId: null,
       withdrawalRecipientId: recipient.recipientId,
+      withdrawalSourceComponentId,
       venueBindingOptionId: null,
       maxFeeUsd: null,
       maxSlippageBps: null,
@@ -469,6 +471,30 @@ async function directWithdrawalOptionsForAsset(
 for (const asset of [BASE_USDC, POLYGON_USDC, POLYGON_USDCE, SOLANA_NATIVE]) {
   const options = await directWithdrawalOptionsForAsset(asset);
   assert.equal(options.length, 1);
+  const selectedComponent =
+    options[0]?.commitPlan.operation.supportMetadata?.sourceComponentId;
+  assert.equal(typeof selectedComponent, "string");
+  assert.equal(
+    (
+      await directWithdrawalOptionsForAsset(
+        asset,
+        "1000000",
+        String(selectedComponent),
+      )
+    ).length,
+    1,
+  );
+  assert.equal(
+    (
+      await directWithdrawalOptionsForAsset(
+        asset,
+        "1000000",
+        "missing_component_12345678",
+      )
+    ).length,
+    0,
+    "an unavailable selected balance must not silently switch to another wallet",
+  );
   assert.equal(options[0]?.option.expiresAt, "2026-07-24T12:00:30.000Z");
   const plan = options[0]?.commitPlan;
   assert.ok(plan);
@@ -843,6 +869,25 @@ assert.equal(
     purpose: "withdrawal",
   });
   assert.equal(withdrawalHandoffFacts.length, 1);
+  for (const selected of [
+    component.componentId,
+    "missing_component_12345678",
+  ]) {
+    const selectedFacts = deriveProductionRelayEligibleSourceFacts({
+      accountId: ACCOUNT_ID,
+      account: handoffAccount,
+      policy: withWithdrawalPlanningContract(handoffPolicy, BASE_USDC),
+      destinationLocationPatternId: "withdrawal-base-usdc-v1",
+      requiredAmount: { asset: BASE_USDC, raw: "1000000" },
+      purpose: "withdrawal",
+      withdrawalSourceComponentId: selected,
+    });
+    assert.equal(
+      selectedFacts.length,
+      selected === component.componentId ? 1 : 0,
+      "Relay withdrawals must also retain the exact selected balance",
+    );
+  }
   assert.equal(
     withdrawalHandoffFacts[0]?.preRouteHandoff?.kind,
     "polymarket_deposit_wallet_to_controller_v1",

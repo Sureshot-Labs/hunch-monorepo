@@ -78,6 +78,8 @@ function exactAvailableComponent(
     ).toString();
     if (
       component.location.accountId !== input.accountId ||
+      (input.request.withdrawalSourceComponentId != null &&
+        component.componentId !== input.request.withdrawalSourceComponentId) ||
       component.category === "in_transit" ||
       component.observationFreshness !== "fresh" ||
       component.observationError ||

@@ -158,6 +158,7 @@ export const fundingDiscoveryRequestSchema = z
     consumerIntent: fundingTradeConsumerIntentInputSchema.nullable().optional(),
     destinationOptionId: opaqueIdSchema.nullable(),
     withdrawalRecipientId: opaqueIdSchema.nullable(),
+    withdrawalSourceComponentId: opaqueIdSchema.nullable().optional(),
     venueBindingOptionId: opaqueIdSchema.nullable(),
     controllerWalletRef: z.string().uuid().nullable().optional(),
     maxFeeUsd: usdAmountSchema.nullable(),
@@ -167,6 +168,13 @@ export const fundingDiscoveryRequestSchema = z
   .strict()
   .superRefine((request, context) => {
     const withdrawal = request.purpose === "withdrawal";
+    if (!withdrawal && request.withdrawalSourceComponentId != null) {
+      context.addIssue({
+        code: "custom",
+        path: ["withdrawalSourceComponentId"],
+        message: "withdrawal source is allowed only for withdrawals",
+      });
+    }
     if (
       withdrawal &&
       (!request.withdrawalRecipientId || !request.requestedDestinationAmount)

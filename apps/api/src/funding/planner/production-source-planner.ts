@@ -648,6 +648,7 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
   quoteAvailableSourceCapacity?: boolean;
   destinationLocationPatternId?: string;
   purpose?: FundingDiscoveryRequest["purpose"];
+  withdrawalSourceComponentId?: string | null;
   maximumSlippageBps?: number;
 }): readonly RelayEligibleSourceFact[] {
   const availabilityByComponent = new Map(
@@ -658,6 +659,12 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
   );
   const facts: RelayEligibleSourceFact[] = [];
   for (const component of input.account.projection.components) {
+    if (
+      input.purpose === "withdrawal" &&
+      input.withdrawalSourceComponentId != null &&
+      component.componentId !== input.withdrawalSourceComponentId
+    )
+      continue;
     const availability = availabilityByComponent.get(component.componentId);
     const execution = resolveProductionOwnedSourceExecution({
       account: input.account,
@@ -1196,6 +1203,7 @@ export class ProductionFundingSourcePlanner {
         destinationLocationPatternId:
           input.destination.destinationLocationPatternId,
         purpose: input.request.purpose,
+        withdrawalSourceComponentId: input.request.withdrawalSourceComponentId,
         maximumSlippageBps: Math.min(
           input.request.maxSlippageBps ?? policy.placement.maximumSlippageBps,
           policy.placement.maximumSlippageBps,

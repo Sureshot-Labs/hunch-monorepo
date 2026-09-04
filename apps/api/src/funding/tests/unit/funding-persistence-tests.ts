@@ -875,7 +875,8 @@ const tests: readonly Test[] = [
         "utf8",
       );
       assert.match(reducerSource, /listFundingObservationsForOperation/);
-      assert.doesNotMatch(reducerSource, /notifications?/i);
+      // Completion may WRITE an output notification, never read it as evidence.
+      assert.doesNotMatch(reducerSource, /from\s+notifications/i);
       assert.doesNotMatch(reducerSource, /telegram_notification_outbox/i);
 
       const ingestionSource = readFileSync(

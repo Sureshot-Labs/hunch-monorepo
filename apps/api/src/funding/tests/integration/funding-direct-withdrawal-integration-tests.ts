@@ -402,6 +402,16 @@ try {
         actualCosts: {},
       });
     }
+    const beforeConfirmation = await client.query<{ count: string }>(
+      `select count(*)::text as count from notifications
+        where user_id = $1 and dedupe_key = $2`,
+      [userId, `withdrawal:${committed.operation.id}`],
+    );
+    assert.equal(
+      beforeConfirmation.rows[0]?.count,
+      "0",
+      "submitted/ambiguous transfers must not announce successful withdrawal",
+    );
     await client.query(
       `update funding_operations
           set status = $2, progress_stage = 'terminal',
@@ -450,6 +460,16 @@ try {
       status: "completed",
       stage: "terminal",
     });
+    const notices = await client.query<{ count: string }>(
+      `select count(*)::text as count from notifications
+        where user_id = $1 and dedupe_key = $2`,
+      [userId, `withdrawal:${committed.operation.id}`],
+    );
+    assert.equal(
+      notices.rows[0]?.count,
+      input.legacyTerminalStatus === "completed" ? "0" : "1",
+      "canonical completion emits once; old terminal caches are not replayed",
+    );
     if (competingCommit) {
       const releasedFence = await client.query<{
         economic_role: string;
