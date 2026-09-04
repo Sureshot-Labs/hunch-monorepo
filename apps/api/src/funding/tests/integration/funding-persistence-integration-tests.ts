@@ -109,6 +109,7 @@ import {
   PolymarketFundingPredecessorUnresolvedError,
 } from "../../preparation/polymarket-funding-commit-guard.js";
 import { hashOpaqueToken } from "../../persistence/canonical.js";
+import { listProjectedFundingOperationsForUser } from "../../lifecycle/funding-lifecycle-read-model.js";
 import { loadTelegramAppHandoffProjection } from "../../../services/telegram-bot-trading.js";
 import { FundingPlanningRuntime } from "../../planner/runtime-service.js";
 import { PreparationContractError } from "../../preparation/core-adapter.js";
@@ -4037,6 +4038,47 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     await client.query("set constraints all immediate");
     await client.query("set constraints all deferred");
 
+    const historyPlan = buildPlan();
+    const historyToken = opaque("consent");
+    const historyQuote = await createFundingQuoteInTransaction(
+      client,
+      quoteInput(userA, historyPlan, historyToken),
+    );
+    await commitFundingOperationInTransaction(
+      client,
+      commitInput(userA, historyQuote.id, historyToken, historyPlan),
+    );
+    const historyStatements: string[] = [];
+    const historyDb = {
+      query: async (sql: string, values?: readonly unknown[]) => {
+        historyStatements.push(sql);
+        return client.query(sql, values as unknown[] | undefined);
+      },
+    };
+    const projectedHistory = await listProjectedFundingOperationsForUser(
+      historyDb as never,
+      { limit: 100, now: new Date(), userId: userA },
+    );
+    assert.ok(
+      projectedHistory.length >= 3,
+      "history fixture must exercise a multi-operation page",
+    );
+    assert.equal(
+      historyStatements.length,
+      8,
+      "ordinary history uses one operation query plus seven batched fact queries",
+    );
+    assert.match(
+      historyStatements[1] ?? "",
+      /operation_row\.id = any\(\$1::uuid\[\]\)/u,
+      "history projection loads its immutable headers as one set",
+    );
+    assert.match(
+      historyStatements[3] ?? "",
+      /step\.operation_id = any\(\$1::uuid\[\]\)/u,
+      "history projection loads every action/attempt fact as one set",
+    );
+
     const destinationNow = new Date();
     const destinationInput = {
       userId: userA,
@@ -6462,6 +6504,48 @@ async function testTelegramAppHandoffV2DirectTradeBinding(): Promise<void> {
       "attaching",
       "v2 projection query must parse against the real handoff schema",
     );
+    const fundingPlan = buildPlan();
+    const fundingConsent = opaque("handoff-projection-consent");
+    const fundingQuote = await createFundingQuoteInTransaction(
+      client,
+      quoteInput(userId, fundingPlan, fundingConsent),
+    );
+    const fundingOperation = await commitFundingOperationInTransaction(
+      client,
+      commitInput(userId, fundingQuote.id, fundingConsent, fundingPlan),
+    );
+    // Deliberately leave a contradictory materialized cache. The Mini App
+    // must render the current fact projection instead of treating this cache
+    // as the funding lifecycle authority.
+    await client.query(
+      `update funding_operations
+          set status = 'completed',
+              progress_stage = 'terminal',
+              completed_at = clock_timestamp(),
+              version = version + 1
+        where id = $1::uuid`,
+      [fundingOperation.operation.id],
+    );
+    await client.query(
+      `update telegram_trade_intents
+          set funding_operation_id = $1::uuid
+        where id = $2::uuid`,
+      [fundingOperation.operation.id, intentId],
+    );
+    const factProjectedHandoff = await loadTelegramAppHandoffProjection(
+      client as never,
+      {
+        telegramUserId,
+        tradeIntentId: intentId,
+        userId,
+      },
+    );
+    assert.equal(factProjectedHandoff?.stage, "funding");
+    assert.deepEqual(factProjectedHandoff?.funding, {
+      operationId: fundingOperation.operation.id,
+      progressStage: "source_action",
+      status: "in_progress",
+    });
     const binding = { handoffId, planFingerprint: fingerprint } as const;
     const assertCurrentScope: TelegramAppHandoffV2ScopeAssertion = async (
       sealed,

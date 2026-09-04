@@ -955,11 +955,16 @@ const tests: readonly Test[] = [
         ),
         "utf8",
       );
+      assert.match(
+        readModel,
+        /loadFundingLifecycleFactsForOperationsInTransaction/u,
+        "history reads must project a page from batched facts",
+      );
       assert.match(readModel, /for \(const operation of operations\)/u);
       assert.doesNotMatch(
         readModel,
-        /Promise\.all\(\s*operations\.map/u,
-        "a PoolClient is valid here, so lifecycle listings must not issue concurrent pg queries",
+        /requireFundingLifecycleProjection/u,
+        "history reads must not reload facts once per operation",
       );
 
       const evidenceSource = readFileSync(
@@ -1016,6 +1021,28 @@ const tests: readonly Test[] = [
         new URL("../../../services/telegram-bot-trading.ts", import.meta.url),
         "utf8",
       );
+      const appHandoffProjectionStart = telegramBotTrading.indexOf(
+        "export async function loadTelegramAppHandoffProjection",
+      );
+      const appHandoffProjectionEnd = telegramBotTrading.indexOf(
+        "export async function executeCommittedTelegramAppHandoff",
+        appHandoffProjectionStart,
+      );
+      const appHandoffProjection = telegramBotTrading.slice(
+        appHandoffProjectionStart,
+        appHandoffProjectionEnd,
+      );
+      assert.ok(appHandoffProjectionStart >= 0);
+      assert.ok(appHandoffProjectionEnd > appHandoffProjectionStart);
+      assert.match(
+        appHandoffProjection,
+        /loadFundingLifecycleProjectionForOperation/u,
+      );
+      assert.doesNotMatch(
+        appHandoffProjection,
+        /\bfunding\.(?:status|progress_stage)\b/u,
+      );
+
       const telegramCancellationStart = telegramBotTrading.indexOf(
         "if (cancellingFundingIntent)",
       );

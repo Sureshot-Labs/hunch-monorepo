@@ -8,7 +8,7 @@ import {
 } from "../domain/transitions.js";
 import { relayEvmFundingProfileSpec } from "../execution/relay-evm-profile-specs.js";
 import {
-  listFundingObservationsForOperation,
+  listFundingObservationsForOperations,
   type FundingObservationRow,
 } from "../persistence/funding-operation-repository.js";
 import type {
@@ -24,6 +24,7 @@ import type {
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
 type LifecycleHeaderRow = Readonly<{
+  operation_id: string;
   plan_snapshot: JsonRecord;
   purpose: FundingPurpose;
   user_id: string;
@@ -33,6 +34,7 @@ type LifecycleHeaderRow = Readonly<{
 
 type LifecycleRouteLegRow = Readonly<{
   id: string;
+  operation_id: string;
   quoted_input: JsonRecord;
   quoted_min_output: JsonRecord;
 }>;
@@ -51,6 +53,7 @@ type LifecycleActionRow = Readonly<{
   executor_id: string;
   id: string;
   ordinal: number;
+  operation_id: string;
   receipt_action_match: boolean | null;
   receipt_canonical: boolean | null;
   receipt_evidence: JsonRecord | null;
@@ -65,10 +68,13 @@ type LifecycleActionRow = Readonly<{
     | "venue_preparation";
 }>;
 
-type LifecycleReservationRow = Readonly<FundingLifecycleReservationFact>;
+type LifecycleReservationRow = Readonly<
+  FundingLifecycleReservationFact & { operation_id: string }
+>;
 
 type LifecycleConsumerRow = Readonly<{
   completed: boolean;
+  operation_id: string;
   settled_without_consumer: boolean;
   unresolved: boolean;
 }>;
@@ -76,6 +82,7 @@ type LifecycleConsumerRow = Readonly<{
 type LifecycleReceiveRow = Readonly<{
   closed_at: Date | null;
   expires_at: Date;
+  operation_id: string;
 }>;
 
 type DelegatedTelegramAuthorizationFacts = Readonly<{
@@ -83,54 +90,16 @@ type DelegatedTelegramAuthorizationFacts = Readonly<{
   reservationActive: boolean;
 }>;
 
+type LifecycleAuthorizationRow = Readonly<
+  DelegatedTelegramAuthorizationFacts & { operation_id: string }
+>;
+
 function delegatedTelegramIntentId(supportMetadata: JsonRecord): string | null {
   if (supportMetadata.delegatedOriginKind !== "trade_shortfall_intent") {
     return null;
   }
   const intentId = supportMetadata.telegramTradeIntentId;
   return typeof intentId === "string" && intentId.trim() ? intentId : "";
-}
-
-async function loadDelegatedTelegramAuthorizationFacts(
-  client: Pick<PoolClient, "query">,
-  input: Readonly<{
-    operationId: string;
-    userId: string;
-    supportMetadata: JsonRecord;
-  }>,
-): Promise<DelegatedTelegramAuthorizationFacts | null> {
-  const intentId = delegatedTelegramIntentId(input.supportMetadata);
-  if (intentId === null) return null;
-  if (!intentId) {
-    return { intentActive: false, reservationActive: false };
-  }
-  const { rows } = await client.query<DelegatedTelegramAuthorizationFacts>(
-    `
-      select
-        exists (
-          select 1
-          from telegram_trade_intents trade_intent
-          where trade_intent.id::text = $2
-            and trade_intent.user_id = $3::uuid
-            and trade_intent.status = 'funding'
-            and trade_intent.submit_started_at is null
-            and (
-              trade_intent.funding_operation_id = $1::uuid
-              or trade_intent.funding_operation_id::text =
-                   $4::jsonb ->> 'continuationOfOperationId'
-            )
-        ) as "intentActive",
-        exists (
-          select 1
-          from telegram_funding_authorization_reservations reservation
-          where reservation.funding_operation_id = $1::uuid
-            and reservation.source_trade_intent_id::text = $2
-            and reservation.status = 'reserved'
-        ) as "reservationActive"
-    `,
-    [input.operationId, intentId, input.userId, input.supportMetadata],
-  );
-  return rows[0] ?? { intentActive: false, reservationActive: false };
 }
 
 function actionAuthorization(
@@ -439,151 +408,34 @@ function lifecycleTerminalCompletion(
   return { code, decidedAt, actionId };
 }
 
-/**
- * Loads lifecycle facts, not transitional materialized state. Do not add
- * `funding_operation_steps.state` or `funding_operation_segments.status`, or
- * use `funding_operations.status` for a live decision: they are output
- * caches. Terminality is derived from immutable plan, action, receipt,
- * transfer, and consumer facts like every other lifecycle state.
- */
-export async function loadFundingLifecycleFactsForOperationInTransaction(
-  client: Pick<PoolClient, "query">,
+function compileFundingLifecycleFacts(
   input: Readonly<{
-    operationId: string;
+    actionRows: readonly LifecycleActionRow[];
+    consumer: LifecycleConsumerRow | null;
+    header: LifecycleHeaderRow;
     now: Date;
-    reconciliationEvidenceTimeoutMs?: number;
+    observationRows: readonly FundingObservationRow[];
+    receive: LifecycleReceiveRow | null;
+    reconciliationEvidenceTimeoutMs: number;
+    reservationRows: readonly LifecycleReservationRow[];
+    routeLegRows: readonly LifecycleRouteLegRow[];
+    telegramAuthorization: DelegatedTelegramAuthorizationFacts | null;
   }>,
-): Promise<FundingLifecycleFacts | null> {
-  const headerResult = await client.query<LifecycleHeaderRow>(
-    `
-      select
-        operation_row.user_id,
-        operation_row.purpose,
-        operation_row.requested_destination_amount,
-        operation_row.support_metadata,
-        quote.plan_snapshot
-      from funding_operations operation_row
-      join funding_quotes quote on quote.id = operation_row.quote_id
-      where operation_row.id = $1::uuid
-    `,
-    [input.operationId],
-  );
-  const header = headerResult.rows[0];
-  if (!header) return null;
-  const telegramAuthorization = await loadDelegatedTelegramAuthorizationFacts(
-    client,
-    {
-      operationId: input.operationId,
-      userId: header.user_id,
-      supportMetadata: header.support_metadata,
-    },
-  );
-
-  // A reducer passes one transactional pg client. Parallel `client.query()`
-  // calls only queue behind each other today and are deprecated by pg, so keep
-  // this factual read explicit and serial.
-  const routeLegResult = await client.query<LifecycleRouteLegRow>(
-    `
-      select segment.id, segment.quoted_input, segment.quoted_min_output
-      from funding_operation_segments segment
-      where segment.operation_id = $1::uuid
-      order by segment.ordinal asc
-    `,
-    [input.operationId],
-  );
-  const actionResult = await client.query<LifecycleActionRow>(
-    `
-      select
-        step.id,
-        step.ordinal,
-        step.segment_id,
-        step.step_kind,
-        step.depends_on_step_id,
-        step.action_validation_result,
-        step.action_expires_at,
-        step.executor_id,
-        attempt.attempt_number,
-        attempt.outcome as attempt_outcome,
-        attempt.broadcast_may_have_occurred,
-        attempt.reference_kind as attempt_reference_kind,
-        attempt.actual_costs as attempt_actual_costs,
-        attempt.started_at as attempt_started_at,
-        coalesce(
-          attempt.updated_at,
-          attempt.finished_at,
-          attempt.started_at
-        ) as attempt_updated_at,
-        receipt.status as receipt_status,
-        receipt.canonical as receipt_canonical,
-        receipt.action_match as receipt_action_match,
-        receipt.evidence as receipt_evidence
-      from funding_operation_steps step
-      left join funding_operation_step_attempts attempt
-        on attempt.step_id = step.id
-      left join funding_step_receipt_observations receipt
-        on receipt.attempt_id = attempt.id
-      where step.operation_id = $1::uuid
-      order by step.ordinal asc, attempt.attempt_number asc nulls first
-    `,
-    [input.operationId],
-  );
-  const observationRows = await listFundingObservationsForOperation(
-    client,
-    input.operationId,
-  );
-  const reservationResult = await client.query<LifecycleReservationRow>(
-    `
-      select reservation.mode, reservation.state
-      from balance_reservations reservation
-      where reservation.operation_id = $1::uuid
-      order by reservation.id asc
-    `,
-    [input.operationId],
-  );
-  const consumerResult = await client.query<LifecycleConsumerRow>(
-    `
-      select
-        exists (
-          select 1
-          from funding_trade_attempts trade_attempt
-          where trade_attempt.operation_id = $1::uuid
-            and trade_attempt.state = 'accepted'
-        ) as completed,
-        exists (
-          select 1
-          from funding_trade_attempts trade_attempt
-          where trade_attempt.operation_id = $1::uuid
-            and trade_attempt.state in (
-              'claimed',
-              'submission_started',
-              'ambiguous'
-            )
-        ) as unresolved,
-        exists (
-          select 1
-          from balance_reservations reservation
-          where reservation.operation_id = $1::uuid
-            and reservation.mode = 'settled_for_consumer'
-            and reservation.state in ('consumed', 'released')
-        ) as settled_without_consumer
-    `,
-    [input.operationId],
-  );
-  const receiveResult = await client.query<LifecycleReceiveRow>(
-    `
-      select session.closed_at, session.expires_at
-      from funding_receive_receipts receipt
-      join funding_receive_sessions session
-        on session.id = receipt.receive_session_id
-      where receipt.child_funding_operation_id = $1::uuid
-      order by receipt.created_at desc, receipt.id desc
-      limit 1
-    `,
-    [input.operationId],
-  );
-
+): FundingLifecycleFacts {
+  const {
+    actionRows,
+    consumer,
+    header,
+    now,
+    observationRows,
+    receive,
+    reconciliationEvidenceTimeoutMs,
+    reservationRows,
+    routeLegRows,
+    telegramAuthorization,
+  } = input;
   const actionsById = new Map<string, FundingLifecycleActionFact>();
-  for (const row of actionResult.rows) {
+  for (const row of actionRows) {
     const existing = actionsById.get(row.id);
     const attempt =
       row.attempt_number === null ||
@@ -631,7 +483,7 @@ export async function loadFundingLifecycleFactsForOperationInTransaction(
     });
   }
 
-  const routeLegs = routeLegResult.rows.map((row) => {
+  const routeLegs = routeLegRows.map((row) => {
     const requestedSource = lifecycleMoney(
       row.quoted_input,
       `route leg ${row.id} requested source`,
@@ -651,12 +503,12 @@ export async function loadFundingLifecycleFactsForOperationInTransaction(
     header.requested_destination_amount,
     "requested destination",
   );
-  const consumer = consumerResult.rows[0] ?? {
+  const consumerFacts = consumer ?? {
     completed: false,
+    operation_id: header.operation_id,
     settled_without_consumer: false,
     unresolved: false,
   };
-  const receive = receiveResult.rows[0];
   return {
     plan: {
       initialState: immutableInitialState(header.plan_snapshot),
@@ -674,12 +526,12 @@ export async function loadFundingLifecycleFactsForOperationInTransaction(
     },
     actions: [...actionsById.values()],
     transfers: observationRows.map(transferFromObservation),
-    reservations: reservationResult.rows,
+    reservations: reservationRows,
     consumer: {
       required: header.purpose === "trade_shortfall",
-      completed: consumer.completed,
-      settledWithoutConsumer: consumer.settled_without_consumer,
-      unresolved: consumer.unresolved,
+      completed: consumerFacts.completed,
+      settledWithoutConsumer: consumerFacts.settled_without_consumer,
+      unresolved: consumerFacts.unresolved,
     },
     receive:
       receive && receive.closed_at === null
@@ -693,10 +545,284 @@ export async function loadFundingLifecycleFactsForOperationInTransaction(
     reconciliation: {
       evidenceDeadline: reconciliationEvidenceDeadline(
         header.support_metadata,
-        input.now,
-        input.reconciliationEvidenceTimeoutMs ?? 0,
+        now,
+        reconciliationEvidenceTimeoutMs,
       ),
     },
-    now: input.now,
+    now,
   };
+}
+
+function groupRowsByOperation<Row extends Readonly<{ operation_id: string }>>(
+  rows: readonly Row[],
+): ReadonlyMap<string, readonly Row[]> {
+  const grouped = new Map<string, Row[]>();
+  for (const row of rows) {
+    const existing = grouped.get(row.operation_id);
+    if (existing) existing.push(row);
+    else grouped.set(row.operation_id, [row]);
+  }
+  return grouped;
+}
+
+/**
+ * Loads lifecycle facts, not transitional materialized state. Do not add
+ * `funding_operation_steps.state` or `funding_operation_segments.status`, or
+ * use `funding_operations.status` for a live decision: they are output
+ * caches. Terminality is derived from immutable plan, action, receipt,
+ * transfer, and consumer facts like every other lifecycle state.
+ */
+export async function loadFundingLifecycleFactsForOperationInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    operationId: string;
+    now: Date;
+    reconciliationEvidenceTimeoutMs?: number;
+  }>,
+): Promise<FundingLifecycleFacts | null> {
+  const factsByOperation =
+    await loadFundingLifecycleFactsForOperationsInTransaction(client, {
+      now: input.now,
+      operationIds: [input.operationId],
+      reconciliationEvidenceTimeoutMs: input.reconciliationEvidenceTimeoutMs,
+    });
+  return factsByOperation.get(input.operationId) ?? null;
+}
+
+/**
+ * Bounded lifecycle page loader. It deliberately executes a fixed sequence of
+ * fact queries so both Pool and PoolClient callers remain safe, while avoiding
+ * the serial per-operation N+1 that made a 100-row history page expensive.
+ */
+export async function loadFundingLifecycleFactsForOperationsInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    now: Date;
+    operationIds: readonly string[];
+    reconciliationEvidenceTimeoutMs?: number;
+  }>,
+): Promise<ReadonlyMap<string, FundingLifecycleFacts>> {
+  const requestedOperationIds = [...new Set(input.operationIds)];
+  if (requestedOperationIds.length === 0) return new Map();
+  const headerResult = await client.query<LifecycleHeaderRow>(
+    `
+      select operation_row.id::text as operation_id,
+             operation_row.user_id,
+             operation_row.purpose,
+             operation_row.requested_destination_amount,
+             operation_row.support_metadata,
+             quote.plan_snapshot
+        from funding_operations operation_row
+        join funding_quotes quote on quote.id = operation_row.quote_id
+       where operation_row.id = any($1::uuid[])
+    `,
+    [requestedOperationIds],
+  );
+  if (headerResult.rows.length === 0) return new Map();
+  const operationIds = headerResult.rows.map((row) => row.operation_id);
+  const delegatedOperationIds = headerResult.rows
+    .filter((row) => delegatedTelegramIntentId(row.support_metadata) !== null)
+    .map((row) => row.operation_id);
+
+  // Keep the fixed query sequence serial: PoolClient callers cannot safely
+  // issue concurrent pg queries. The page costs seven set reads for ordinary
+  // operations (eight when it includes delegated Telegram authorization),
+  // rather than seven or eight reads for every operation in it.
+  const authorizationRows =
+    delegatedOperationIds.length === 0
+      ? []
+      : (
+          await client.query<LifecycleAuthorizationRow>(
+            `
+      select operation_row.id::text as operation_id,
+             exists (
+               select 1
+                 from telegram_trade_intents trade_intent
+                where trade_intent.id::text =
+                        operation_row.support_metadata ->> 'telegramTradeIntentId'
+                  and trade_intent.user_id = operation_row.user_id
+                  and trade_intent.status = 'funding'
+                  and trade_intent.submit_started_at is null
+                  and (
+                    trade_intent.funding_operation_id = operation_row.id
+                    or trade_intent.funding_operation_id::text =
+                         operation_row.support_metadata ->>
+                           'continuationOfOperationId'
+                  )
+             ) as "intentActive",
+             exists (
+               select 1
+                 from telegram_funding_authorization_reservations reservation
+                where reservation.funding_operation_id = operation_row.id
+                  and reservation.source_trade_intent_id::text =
+                        operation_row.support_metadata ->> 'telegramTradeIntentId'
+                  and reservation.status = 'reserved'
+             ) as "reservationActive"
+        from funding_operations operation_row
+       where operation_row.id = any($1::uuid[])
+         and operation_row.support_metadata ->> 'delegatedOriginKind' =
+               'trade_shortfall_intent'
+    `,
+            [delegatedOperationIds],
+          )
+        ).rows;
+  const routeLegResult = await client.query<LifecycleRouteLegRow>(
+    `
+      select segment.operation_id::text as operation_id,
+             segment.id,
+             segment.quoted_input,
+             segment.quoted_min_output
+        from funding_operation_segments segment
+       where segment.operation_id = any($1::uuid[])
+       order by segment.operation_id asc, segment.ordinal asc
+    `,
+    [operationIds],
+  );
+  const actionResult = await client.query<LifecycleActionRow>(
+    `
+      select step.operation_id::text as operation_id,
+             step.id,
+             step.ordinal,
+             step.segment_id,
+             step.step_kind,
+             step.depends_on_step_id,
+             step.action_validation_result,
+             step.action_expires_at,
+             step.executor_id,
+             attempt.attempt_number,
+             attempt.outcome as attempt_outcome,
+             attempt.broadcast_may_have_occurred,
+             attempt.reference_kind as attempt_reference_kind,
+             attempt.actual_costs as attempt_actual_costs,
+             attempt.started_at as attempt_started_at,
+             coalesce(
+               attempt.updated_at,
+               attempt.finished_at,
+               attempt.started_at
+             ) as attempt_updated_at,
+             receipt.status as receipt_status,
+             receipt.canonical as receipt_canonical,
+             receipt.action_match as receipt_action_match,
+             receipt.evidence as receipt_evidence
+        from funding_operation_steps step
+        left join funding_operation_step_attempts attempt
+          on attempt.step_id = step.id
+        left join funding_step_receipt_observations receipt
+          on receipt.attempt_id = attempt.id
+       where step.operation_id = any($1::uuid[])
+       order by step.operation_id asc,
+                step.ordinal asc,
+                attempt.attempt_number asc nulls first
+    `,
+    [operationIds],
+  );
+  const observationsByOperation = await listFundingObservationsForOperations(
+    client,
+    operationIds,
+  );
+  const reservationResult = await client.query<LifecycleReservationRow>(
+    `
+      select reservation.operation_id::text as operation_id,
+             reservation.mode,
+             reservation.state
+        from balance_reservations reservation
+       where reservation.operation_id = any($1::uuid[])
+       order by reservation.operation_id asc, reservation.id asc
+    `,
+    [operationIds],
+  );
+  const consumerResult = await client.query<LifecycleConsumerRow>(
+    `
+      select operation_ids.operation_id::text as operation_id,
+             exists (
+               select 1
+                 from funding_trade_attempts trade_attempt
+                where trade_attempt.operation_id = operation_ids.operation_id
+                  and trade_attempt.state = 'accepted'
+             ) as completed,
+             exists (
+               select 1
+                 from funding_trade_attempts trade_attempt
+                where trade_attempt.operation_id = operation_ids.operation_id
+                  and trade_attempt.state in (
+                    'claimed',
+                    'submission_started',
+                    'ambiguous'
+                  )
+             ) as unresolved,
+             exists (
+               select 1
+                 from balance_reservations reservation
+                where reservation.operation_id = operation_ids.operation_id
+                  and reservation.mode = 'settled_for_consumer'
+                  and reservation.state in ('consumed', 'released')
+             ) as settled_without_consumer
+        from unnest($1::uuid[]) as operation_ids(operation_id)
+    `,
+    [operationIds],
+  );
+  const receiveResult = await client.query<LifecycleReceiveRow>(
+    `
+      select distinct on (receipt.child_funding_operation_id)
+             receipt.child_funding_operation_id::text as operation_id,
+             session.closed_at,
+             session.expires_at
+        from funding_receive_receipts receipt
+        join funding_receive_sessions session
+          on session.id = receipt.receive_session_id
+       where receipt.child_funding_operation_id = any($1::uuid[])
+       order by receipt.child_funding_operation_id asc,
+                receipt.created_at desc,
+                receipt.id desc
+    `,
+    [operationIds],
+  );
+
+  const authorizationsByOperation = new Map(
+    authorizationRows.map((row) => [
+      row.operation_id,
+      {
+        intentActive: row.intentActive,
+        reservationActive: row.reservationActive,
+      } satisfies DelegatedTelegramAuthorizationFacts,
+    ]),
+  );
+  const routeLegsByOperation = groupRowsByOperation(routeLegResult.rows);
+  const actionsByOperation = groupRowsByOperation(actionResult.rows);
+  const reservationsByOperation = groupRowsByOperation(reservationResult.rows);
+  const consumersByOperation = new Map(
+    consumerResult.rows.map((row) => [row.operation_id, row]),
+  );
+  const receivesByOperation = new Map(
+    receiveResult.rows.map((row) => [row.operation_id, row]),
+  );
+  const factsByOperation = new Map<string, FundingLifecycleFacts>();
+  for (const header of headerResult.rows) {
+    const delegatedIntentId = delegatedTelegramIntentId(
+      header.support_metadata,
+    );
+    factsByOperation.set(
+      header.operation_id,
+      compileFundingLifecycleFacts({
+        actionRows: actionsByOperation.get(header.operation_id) ?? [],
+        consumer: consumersByOperation.get(header.operation_id) ?? null,
+        header,
+        now: input.now,
+        observationRows: observationsByOperation.get(header.operation_id) ?? [],
+        receive: receivesByOperation.get(header.operation_id) ?? null,
+        reconciliationEvidenceTimeoutMs:
+          input.reconciliationEvidenceTimeoutMs ?? 0,
+        reservationRows: reservationsByOperation.get(header.operation_id) ?? [],
+        routeLegRows: routeLegsByOperation.get(header.operation_id) ?? [],
+        telegramAuthorization:
+          delegatedIntentId === null
+            ? null
+            : (authorizationsByOperation.get(header.operation_id) ?? {
+                intentActive: false,
+                reservationActive: false,
+              }),
+      }),
+    );
+  }
+  return factsByOperation;
 }

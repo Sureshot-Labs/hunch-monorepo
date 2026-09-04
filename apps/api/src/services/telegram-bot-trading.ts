@@ -14676,8 +14676,6 @@ export async function loadTelegramAppHandoffProjection(
     event_title: string | null;
     execution_id: string | null;
     funding_operation_id: string | null;
-    funding_progress_stage: string | null;
-    funding_status: string | null;
     id: string;
     market_title: string;
     minimum_receive_raw: string | null;
@@ -14714,8 +14712,6 @@ export async function loadTelegramAppHandoffProjection(
             event_row.title as event_title,
             intent.execution_id::text,
             intent.funding_operation_id::text,
-            funding.progress_stage as funding_progress_stage,
-            funding.status as funding_status,
             intent.id::text,
             market.title as market_title,
             case
@@ -14736,9 +14732,6 @@ export async function loadTelegramAppHandoffProjection(
        from telegram_trade_intents intent
        join unified_markets market on market.id = intent.market_id
        left join unified_events event_row on event_row.id = market.event_id
-       left join funding_operations funding
-         on funding.id = intent.funding_operation_id
-        and funding.user_id = intent.user_id
        left join lateral (
          select handoff_row.plan_snapshot
            from telegram_app_handoffs handoff_row
@@ -14758,6 +14751,17 @@ export async function loadTelegramAppHandoffProjection(
   );
   const row = projection.rows[0];
   if (!row) return null;
+  // Handoff presentation is still a lifecycle read. The operation row only
+  // identifies the immutable linkage; its materialized status is never a
+  // source for the Mini App's funding stage.
+  const fundingLifecycle = row.funding_operation_id
+    ? await loadFundingLifecycleProjectionForOperation(db, {
+        operationId: row.funding_operation_id,
+      })
+    : null;
+  const fundingStatus = fundingLifecycle?.lifecycle.status ?? null;
+  const fundingProgressStage =
+    fundingLifecycle?.lifecycle.progressStage ?? null;
   const terminalFailure = ["cancelled", "expired", "failed"].includes(
     row.status,
   );
@@ -14765,11 +14769,9 @@ export async function loadTelegramAppHandoffProjection(
   const reconciling = ["reconcile_required", "submitted"].includes(row.status);
   const fundingActive =
     row.funding_operation_id != null &&
-    row.funding_status != null &&
-    !["completed", "failed", "cancelled", "refunded"].includes(
-      row.funding_status,
-    ) &&
-    row.funding_progress_stage !== "ready_for_consumer";
+    fundingStatus != null &&
+    !["completed", "failed", "cancelled", "refunded"].includes(fundingStatus) &&
+    fundingProgressStage !== "ready_for_consumer";
   const side = row.side ?? "YES";
   const amountUsd = parseNumber(row.amount_usd);
   return {
@@ -14785,8 +14787,8 @@ export async function loadTelegramAppHandoffProjection(
     funding: row.funding_operation_id
       ? {
           operationId: row.funding_operation_id,
-          progressStage: row.funding_progress_stage,
-          status: row.funding_status,
+          progressStage: fundingProgressStage,
+          status: fundingStatus,
         }
       : null,
     marketTitle: row.market_title,

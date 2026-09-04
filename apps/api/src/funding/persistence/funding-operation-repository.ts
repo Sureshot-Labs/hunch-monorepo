@@ -2382,16 +2382,46 @@ export async function listFundingObservationsForOperation(
   db: Pick<PoolClient, "query">,
   operationId: string,
 ): Promise<readonly FundingObservationRow[]> {
+  const observationsByOperation = await listFundingObservationsForOperations(
+    db,
+    [operationId],
+  );
+  return observationsByOperation.get(operationId) ?? [];
+}
+
+/**
+ * Loads immutable transfer evidence for several operations in one bounded
+ * query. Lifecycle history is a paginated read, so projecting each operation
+ * must not turn one page into a serial observation-query N+1.
+ */
+export async function listFundingObservationsForOperations(
+  db: Pick<PoolClient, "query">,
+  operationIds: readonly string[],
+): Promise<ReadonlyMap<string, readonly FundingObservationRow[]>> {
+  const ids = [...new Set(operationIds)];
+  if (ids.length === 0) return new Map();
   const { rows } = await db.query<FundingObservationDbRow>(
     `
       select ${observationColumns}
       from funding_observations
-      where operation_id = $1
-      order by observed_at asc, id asc
+      where operation_id = any($1::uuid[])
+      order by operation_id asc, observed_at asc, id asc
     `,
-    [operationId],
+    [ids],
   );
-  return rows.map(mapObservation);
+  const observationsByOperation = new Map<
+    string,
+    readonly FundingObservationRow[]
+  >();
+  for (const row of rows) {
+    const observation = mapObservation(row);
+    const existing = observationsByOperation.get(observation.operationId) ?? [];
+    observationsByOperation.set(observation.operationId, [
+      ...existing,
+      observation,
+    ]);
+  }
+  return observationsByOperation;
 }
 
 export async function fetchFundingOperationForWorkerInTransaction(

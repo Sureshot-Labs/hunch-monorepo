@@ -131,6 +131,13 @@ cutover status is:
   the real query against disposable PostgreSQL and proves it cannot submit an
   unready Buy. The final verdict is GO; Stage 2 receive/preparation aggregate
   deletion and Stage 3 schema work remain explicitly out of scope.
+- Complete: the Mini App handoff projection now reads its linked operation
+  through the factual projector, not `funding.status`/`progress_stage`. A
+  disposable-PostgreSQL regression leaves a contradictory terminal cache and
+  proves the UI reports the live funding stage. Funding history uses the same
+  bounded fact loader in set mode: a three-operation page executes one
+  operation read plus seven fact reads, rather than a serial per-operation
+  query sequence.
 - Not started: receive/preparation aggregate deletion and final schema work
   belong to Stages 2 and 3, not this cutover.
 

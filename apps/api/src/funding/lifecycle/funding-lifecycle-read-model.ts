@@ -10,7 +10,10 @@ import {
   type FundingLifecycleFacts,
   type FundingLifecycleProjection,
 } from "./funding-lifecycle-projector.js";
-import { loadFundingLifecycleFactsForOperationInTransaction } from "./funding-lifecycle-facts-repository.js";
+import {
+  loadFundingLifecycleFactsForOperationInTransaction,
+  loadFundingLifecycleFactsForOperationsInTransaction,
+} from "./funding-lifecycle-facts-repository.js";
 
 type LifecycleReadDb = Pick<Pool | PoolClient, "query">;
 
@@ -53,30 +56,16 @@ export async function loadFundingLifecycleProjectionForOperation(
   return facts ? { facts, lifecycle: deriveFundingLifecycle(facts) } : null;
 }
 
-async function requireFundingLifecycleProjection(
-  db: LifecycleReadDb,
-  input: Readonly<{ now: Date; operationId: string }>,
-): Promise<ProjectedFundingLifecycle> {
-  const projected = await loadFundingLifecycleProjectionForOperation(db, input);
-  if (!projected) {
-    throw new Error(
-      `funding operation ${input.operationId} disappeared during lifecycle read`,
-    );
-  }
-  return projected;
-}
-
 /**
  * Safety-only account lifecycle reads (merge and deletion) must inspect every
  * operation's facts. A materialized terminal cache is deliberately not a
  * shortcut here: a stale terminal value must never permit deleting or merging
  * a user with money still in flight.
  *
- * This is intentionally a serial read, rather than a hot-path listing
- * primitive. A caller can pass one transaction client, and pg must not receive
- * concurrent queries on that client. Keeping the fact loader as the sole
- * derivation boundary is more important than a clever duplicate aggregate
- * query for these rare, destructive workflows.
+ * A caller can pass one transaction client, so the shared fact loader keeps
+ * its set queries serial. It still projects every operation from the same
+ * bounded fact boundary instead of trusting a terminal cache or issuing an
+ * N+1 query sequence in a destructive workflow.
  */
 export async function listFundingLifecycleProjectionsForUsers(
   db: LifecycleReadDb,
@@ -91,15 +80,22 @@ export async function listFundingLifecycleProjectionsForUsers(
     [Array.from(input.userIds)],
   );
   const now = input.now ?? new Date();
+  const factsByOperation =
+    await loadFundingLifecycleFactsForOperationsInTransaction(db, {
+      now,
+      operationIds: operationResult.rows.map((row) => row.id),
+    });
   const projections: FundingLifecycleOperationProjection[] = [];
   for (const row of operationResult.rows) {
-    const projected = await requireFundingLifecycleProjection(db, {
-      operationId: row.id,
-      now,
-    });
+    const facts = factsByOperation.get(row.id);
+    if (!facts) {
+      throw new Error(
+        `funding operation ${row.id} disappeared during lifecycle read`,
+      );
+    }
     projections.push({
-      facts: projected.facts,
-      lifecycle: projected.lifecycle,
+      facts,
+      lifecycle: deriveFundingLifecycle(facts),
       operationId: row.id,
     });
   }
@@ -147,17 +143,26 @@ export async function listProjectedFundingOperationsForUser(
 ): Promise<readonly ProjectedFundingOperation[]> {
   const operations = await listFundingOperationsForUser(db, input);
   const now = input.now ?? new Date();
-  // This accepts either Pool or PoolClient. Keep it serial so a caller can
-  // safely pass a transaction client without concurrent pg queries.
+  const factsByOperation =
+    await loadFundingLifecycleFactsForOperationsInTransaction(db, {
+      now,
+      operationIds: operations.map((operation) => operation.id),
+    });
+  // This accepts either Pool or PoolClient. The fact loader uses a bounded,
+  // serial sequence of set queries, so it remains transaction-safe without
+  // turning one history page into a per-operation N+1.
   const projectedOperations: ProjectedFundingOperation[] = [];
   for (const operation of operations) {
-    const projected = await requireFundingLifecycleProjection(db, {
-      operationId: operation.id,
-      now,
-    });
+    const facts = factsByOperation.get(operation.id);
+    if (!facts) {
+      throw new Error(
+        `funding operation ${operation.id} disappeared during lifecycle read`,
+      );
+    }
+    const lifecycle = deriveFundingLifecycle(facts);
     projectedOperations.push({
-      operation: withFundingLifecycleProjection(operation, projected.lifecycle),
-      lifecycle: projected.lifecycle,
+      operation: withFundingLifecycleProjection(operation, lifecycle),
+      lifecycle,
     });
   }
   return projectedOperations;

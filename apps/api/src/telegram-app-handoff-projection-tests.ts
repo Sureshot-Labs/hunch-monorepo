@@ -54,6 +54,11 @@ assert.match(
   /error_code = 'external_handoff_required'[\s\S]*?appHandoffExecution'[\s\S]*?'version' = '2'[\s\S]*?or handoff\.plan_snapshot ->> 'version' = '2'[\s\S]*?then null/u,
   "a v2 handoff must not project its routing marker as a failure before or after commit",
 );
+assert.doesNotMatch(
+  projectionSql,
+  /\bfunding\.(?:status|progress_stage)\b/u,
+  "the Mini App query must not treat funding cache fields as lifecycle authority",
+);
 
 const filled = await loadTelegramAppHandoffProjection(
   dbWithStatus("filled") as never,
