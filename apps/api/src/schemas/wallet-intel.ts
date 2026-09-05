@@ -398,6 +398,7 @@ export const walletWhalesQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).default(0),
   marketLimit: z.coerce.number().int().min(1).max(20).default(5),
+  includeTopMarkets: queryBooleanSchema.default(true),
   windowDays: z.coerce.number().int().min(1).max(365).default(30),
   includeSummary: queryBooleanSchema.default(false),
   windowHours: z.coerce

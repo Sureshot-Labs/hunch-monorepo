@@ -2100,6 +2100,12 @@ const tests: TestCase[] = [
       const series = walletSeriesQuerySchema.parse({});
 
       assert.equal(whales.includeSparkline, true);
+      assert.equal(whales.includeTopMarkets, true);
+      assert.equal(
+        walletWhalesQuerySchema.parse({ includeTopMarkets: "false" })
+          .includeTopMarkets,
+        false,
+      );
       assert.equal(whales.sparklineMetric, "trade_pnl");
       assert.equal(summary.includeSparkline, true);
       assert.equal(summary.sparklineMetric, "activity");

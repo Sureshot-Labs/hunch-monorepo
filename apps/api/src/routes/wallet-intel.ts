@@ -9740,12 +9740,14 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               }
             }
 
-            const topMarketMap = await loadWhaleTopMarkets(
-              client,
-              pagedIds,
-              query.marketLimit,
-              query.windowDays,
-            );
+            const topMarketMap = query.includeTopMarkets
+              ? await loadWhaleTopMarkets(
+                  client,
+                  pagedIds,
+                  query.marketLimit,
+                  query.windowDays,
+                )
+              : new Map<string, WhaleMarketItem[]>();
             const followerCountsMap = await loadWalletFollowerCountsMap(
               client,
               pagedIds,
