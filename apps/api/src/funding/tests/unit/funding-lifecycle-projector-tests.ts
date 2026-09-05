@@ -298,6 +298,78 @@ function facts(
   assert.equal(result.safety.terminal, true);
   assert.equal(result.safety.consumerMayRemainLinked, false);
   assert.ok(result.actions.every((entry) => !entry.actionable));
+  const handoff = action("internal-handoff", {
+    ordinal: 1,
+    safeInternalHandoff: true,
+    attempts: completedAction.attempts,
+  });
+  const withHandoff = {
+    ...partial,
+    actions: [
+      completedAction,
+      { ...omittedAction, ordinal: 2, dependsOnActionId: handoff.actionId },
+      handoff,
+    ],
+  };
+  assert.equal(deriveFundingLifecycle(withHandoff).status, "failed");
+  assert.equal(
+    deriveFundingLifecycle(withHandoff).safety.requiresWorker,
+    false,
+  );
+  for (const unsafeHandoff of [
+    { ...handoff, safeInternalHandoff: false },
+    { ...handoff, attempts: [attempt({ outcome: "succeeded" })] },
+    {
+      ...handoff,
+      attempts: [
+        attempt({ outcome: "ambiguous", broadcastMayHaveOccurred: true }),
+      ],
+    },
+    {
+      ...handoff,
+      attempts: [
+        attempt({
+          outcome: "submitted",
+          broadcastMayHaveOccurred: true,
+          receipt: {
+            status: "reorged" as const,
+            canonical: false,
+            actionMatched: true,
+            failureFinalized: false,
+          },
+        }),
+      ],
+    },
+  ]) {
+    assert.equal(
+      deriveFundingLifecycle({
+        ...withHandoff,
+        actions: [
+          completedAction,
+          { ...omittedAction, ordinal: 2, dependsOnActionId: handoff.actionId },
+          unsafeHandoff,
+        ],
+      }).safety.terminal,
+      false,
+    );
+  }
+  assert.equal(
+    deriveFundingLifecycle({
+      ...withHandoff,
+      transfers: partial.transfers.filter(
+        (entry) => entry.kind !== "source_debit",
+      ),
+    }).safety.terminal,
+    false,
+  );
+  assert.equal(
+    deriveFundingLifecycle({
+      ...withHandoff,
+      actions: [completedAction, { ...omittedAction, ordinal: 2 }, handoff],
+    }).safety.terminal,
+    false,
+    "an unrelated unbound action must not be ignored",
+  );
   const debit = partial.transfers[0];
   const credit = partial.transfers[1];
   assert.ok(debit && credit);

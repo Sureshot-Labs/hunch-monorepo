@@ -696,8 +696,27 @@ function isSettledPartialBuy(facts: FundingLifecycleFacts): boolean {
     ) ||
     facts.plan.routeLegs.length < 2 ||
     facts.plan.completionEvidence !== "destination_credit" ||
-    facts.actions.some(
-      (action) => action.routeLegId === null || !legIds.has(action.routeLegId),
+    facts.actions.some((action) =>
+      action.routeLegId === null
+        ? !(
+            // An exact finalized move to the user's controller is not an
+            // unfinished bridge leg. Its downstream route still must be
+            // either fully settled or untouched and expired below.
+            (
+              action.safeInternalHandoff === true &&
+              actionExecution(action) === "succeeded" &&
+              action.attempts.some((attempt) =>
+                hasCanonicalFinalReceipt(attempt.receipt),
+              ) &&
+              facts.actions.some(
+                (dependent) =>
+                  dependent.dependsOnActionId === action.actionId &&
+                  dependent.routeLegId !== null &&
+                  legIds.has(dependent.routeLegId),
+              )
+            )
+          )
+        : !legIds.has(action.routeLegId),
     ) ||
     facts.transfers.some(
       (transfer) =>

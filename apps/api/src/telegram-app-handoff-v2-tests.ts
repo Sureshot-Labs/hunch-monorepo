@@ -1424,6 +1424,13 @@ for (const unavailable of [
   {
     ...insufficient,
     reasonCodes: [
+      "insufficient_liquidity" as const,
+      "provider_quote_rejected" as const,
+    ],
+  },
+  {
+    ...insufficient,
+    reasonCodes: [
       "creation_mode_off" as const,
       "insufficient_liquidity" as const,
     ],
@@ -1432,6 +1439,41 @@ for (const unavailable of [
   assert.equal(
     resolveTelegramAppHandoffFundingCapability({
       projection: unavailable,
+      serverBotExact: false,
+    }).kind,
+    "unavailable",
+  );
+}
+for (const economicShortfall of [
+  {
+    ...insufficient,
+    sourceOptions: [
+      {
+        ...evmSource,
+        selectable: false,
+        reasonCodes: ["fee_limit_exceeded" as const],
+      },
+    ],
+  },
+  {
+    ...insufficient,
+    sourceOptions: [],
+    reasonCodes: [
+      "insufficient_liquidity" as const,
+      "provider_quote_economics_rejected" as const,
+    ],
+  },
+]) {
+  assert.deepEqual(
+    resolveTelegramAppHandoffFundingCapability({
+      projection: economicShortfall,
+      serverBotExact: false,
+    }),
+    { kind: "external_deposit" },
+  );
+  assert.equal(
+    resolveTelegramAppHandoffFundingCapability({
+      projection: { ...economicShortfall, freshness: "stale" },
       serverBotExact: false,
     }).kind,
     "unavailable",

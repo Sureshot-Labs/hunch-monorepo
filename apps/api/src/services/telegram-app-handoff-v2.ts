@@ -603,10 +603,16 @@ export function resolveTelegramAppHandoffFundingCapability(input: {
     input.projection.errors.length === 0 &&
     input.projection.reasonCodes.includes("insufficient_liquidity") &&
     input.projection.reasonCodes.every(
-      (reason) => reason === "insufficient_liquidity",
+      (reason) =>
+        reason === "insufficient_liquidity" ||
+        reason === "provider_quote_economics_rejected",
     ) &&
     input.projection.sourceOptions.every((option) =>
-      option.reasonCodes.every((reason) => reason === "minimum_output_not_met"),
+      option.reasonCodes.every(
+        (reason) =>
+          reason === "minimum_output_not_met" ||
+          reason === "fee_limit_exceeded",
+      ),
     )
   ) {
     return { kind: "external_deposit" };
