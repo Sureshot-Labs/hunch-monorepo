@@ -1636,7 +1636,7 @@ async function loadEventSignalSummaryByEventId(params: {
 }): Promise<Map<string, MarketMapSignalPreviewSummary>> {
   const { runId, eventIds, previewLimit = 1 } = params;
   const byEventId = new Map<string, MarketMapSignalPreviewSummary>();
-  if (eventIds.length === 0) return byEventId;
+  if (!runId || eventIds.length === 0) return byEventId;
 
   const { rows } = await pool.query<MarketMapEventSignalRow>(
     `
@@ -1669,7 +1669,8 @@ async function loadEventSignalSummaryByEventId(params: {
       where n.note_type = 'signal'
         and n.producer_type = 'map_signals'
         and n.status = 'active'
-        and coalesce(n.lineage->>'map_run_id', '') = $2
+        and n.lineage ? 'map_run_id'
+        and n.lineage->>'map_run_id' = $2
         and (
           (t.target_kind = 'event' and t.target_id = any($1::text[]))
           or (t.target_kind = 'market' and m.event_id = any($1::text[]))
