@@ -317,6 +317,8 @@ export type FundingTradeConsumerIntentInput = Readonly<{
 }>;
 
 export type FundingIntent = Readonly<{
+  /** Session capability hint: can only restrict owned external sources. */
+  connectedExternalWalletRefs?: readonly string[];
   purpose: FundingPurpose;
   requestedDestinationAmount: Money | null;
   confirmedSourceAmount: Money | null;

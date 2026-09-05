@@ -151,6 +151,7 @@ export const fundingTradeConsumerIntentInputSchema = z
 
 export const fundingDiscoveryRequestSchema = z
   .object({
+    connectedExternalWalletRefs: z.array(z.string().uuid()).max(100).optional(),
     purpose: fundingPurposeSchema,
     requestedDestinationAmount: moneySchema.nullable(),
     confirmedSourceAmount: moneySchema.nullable(),

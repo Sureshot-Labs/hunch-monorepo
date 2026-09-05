@@ -207,6 +207,8 @@ export function buildTelegramTradeShortfallRequest(
   const additionalFundingRaw = exactStableRaw(input);
   return {
     purpose: "trade_shortfall",
+    // Telegram cannot attest an external wallet connection in the future Mini App.
+    connectedExternalWalletRefs: [],
     requestedDestinationAmount,
     ...(additionalFundingRaw != null
       ? {

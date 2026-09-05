@@ -65,6 +65,7 @@ import { FundingPlannerError } from "./money.js";
 import { WalletPreparationRuntimeService } from "../preparation/runtime-service.js";
 import { PreparationContractError } from "../preparation/core-adapter.js";
 import { ProductionFundingSourcePlanner } from "./production-source-planner.js";
+import { sessionSourceAccount } from "./session-source-account.js";
 import { PolymarketFundingSourceAdapter } from "../preparation/polymarket-funding-source-adapter.js";
 import { DirectIngressFundingSourceAdapter } from "./direct-ingress-source-adapter.js";
 import { DirectWithdrawalSourceAdapter } from "./direct-withdrawal-source-adapter.js";
@@ -548,14 +549,17 @@ export class FundingPlanningRuntime {
           revision: preview?.account.policy.revision ?? "",
         }
       : await resolveFundingPolicy(this.db);
-    const sourcePlannerPromise = accountPromise.then(
-      (account) =>
-        new ProductionFundingSourcePlanner(
-          this.db,
-          account,
-          productionFundingSourceAdapters(account),
-        ),
-    );
+    const sourcePlannerPromise = accountPromise.then((account) => {
+      const sources = sessionSourceAccount(
+        account,
+        request.connectedExternalWalletRefs,
+      );
+      return new ProductionFundingSourcePlanner(
+        this.db,
+        sources,
+        productionFundingSourceAdapters(sources),
+      );
+    });
     const planner = new FundingPlanner({
       listDestinations: async ({ accountId, request, marketContext }) =>
         this.preparationRuntime.resolvedCandidates(

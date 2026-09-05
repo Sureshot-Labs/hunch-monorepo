@@ -24,6 +24,7 @@ import {
 } from "../../planner/production-source-planner.js";
 import { groupWalletExecutableActions } from "../../planner/evm-action-batching.js";
 import { DirectWithdrawalSourceAdapter } from "../../planner/direct-withdrawal-source-adapter.js";
+import { sessionSourceAccount } from "../../planner/session-source-account.js";
 import { assertDirectWithdrawalActionMatchesRecipient } from "../../execution/direct-withdrawal-transfer.js";
 
 const NOW = "2026-07-24T12:00:00.000Z";
@@ -670,6 +671,34 @@ const connectedExternalWalletSource = deriveProductionRelayEligibleSourceFacts({
   purpose: "trade_shortfall",
 });
 assert.equal(connectedExternalWalletSource.length, 1);
+{
+  const original = account({ internal: false });
+  const disconnected = sessionSourceAccount(original, []);
+  assert.equal(disconnected.projection, original.projection);
+  assert.equal(disconnected.cashAvailability, original.cashAvailability);
+  const discover = (snapshot: AccountValueReadModel) =>
+    deriveProductionRelayEligibleSourceFacts({
+      accountId: ACCOUNT_ID,
+      account: snapshot,
+      policy: policy(),
+      requiredAmount: { asset: POLYGON_PUSD, raw: "3000000" },
+      purpose: "trade_shortfall",
+    });
+  assert.equal(discover(disconnected).length, 0);
+  assert.equal(
+    discover(sessionSourceAccount(original, ["unknown-wallet"])).length,
+    0,
+  );
+  assert.equal(
+    discover(
+      sessionSourceAccount(original, ["8571f3cb-381e-4e55-8f4c-ecc4c7f2abb9"]),
+    ).length,
+    1,
+  );
+  assert.equal(discover(sessionSourceAccount(account(), [])).length, 1);
+  assert.equal(sessionSourceAccount(original, undefined), original);
+  assert.equal(original.ownership?.wallets.length, 1);
+}
 assert.equal(connectedExternalWalletSource[0]?.safeLabel, "Connected wallet");
 assert.equal(connectedExternalWalletSource[0]?.walletExecutionReady, true);
 assert.equal(

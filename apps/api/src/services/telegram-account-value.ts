@@ -612,6 +612,16 @@ export function buildTelegramAccountValueMessage(input: {
     );
   }
 
+  if (
+    account.ownership?.wallets.some((profile) => profile.source === "external")
+  ) {
+    lines.push(
+      escapeTelegramMarkdownV2(
+        "Linked external balances require their wallet to be connected in Hunch. Telegram Buy reviews use managed wallets only.",
+      ),
+    );
+  }
+
   appendBoundedSection(lines, {
     heading: "In transit",
     omissionLabel: (count) => `… ${count} more transfers in transit`,

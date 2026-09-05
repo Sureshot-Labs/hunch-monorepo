@@ -1351,6 +1351,7 @@ export async function prepareTelegramAppHandoffV2Funding(input: {
   // so materialization must use the current funding-policy quote window.
   const currentRequest: FundingDiscoveryRequest = {
     ...plan.funding.discoveryRequest,
+    connectedExternalWalletRefs: [],
     deadline: null,
     destinationOptionId: plan.funding.destination.destinationOptionId,
     venueBindingOptionId: plan.funding.destination.venueBindingOptionId,
