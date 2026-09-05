@@ -691,6 +691,151 @@ assert.equal(
   "sponsored_exact_credit_scope_ambiguous",
   "transaction-wide transfer logs cannot prove exact credit for one UserOp in a bundle",
 );
+const beforeExecutionLog = {
+  address: entryPointAddress,
+  topics: [ethers.id("BeforeExecution()")],
+  data: "0x",
+};
+const otherOperationEvent = entryPoint.encodeEventLog(userOperationEvent, [
+  `0x${"34".repeat(32)}`,
+  "0x5555555555555555555555555555555555555555",
+  ethers.ZeroAddress,
+  1n,
+  true,
+  0,
+  0,
+]);
+const otherOperationLog = {
+  address: entryPointAddress,
+  ...otherOperationEvent,
+};
+const ownTransferLog = {
+  address: destinationToken,
+  ...exactDestinationCreditLog,
+  logIndex: 17,
+};
+const scopedBundleInput = {
+  action: evmAction,
+  actionValidationResult: exactCreditValidation,
+  expectedSignerAddress: sponsoredSigner,
+  transaction: bundledSponsoredTransaction,
+  previous: null,
+  executionEnvelope: "privy_erc4337" as const,
+};
+assert.equal(
+  evaluateEvmActionReceipt({
+    ...scopedBundleInput,
+    receipt: {
+      ...sponsoredReceipt,
+      logs: [
+        beforeExecutionLog,
+        otherOperationLog,
+        ownTransferLog,
+        ...sponsoredReceipt.logs,
+      ],
+    },
+  }).status,
+  "finalized",
+  "a verified UserOperation interval proves its own exact transfer",
+);
+assert.equal(
+  evaluateEvmActionReceipt({
+    ...scopedBundleInput,
+    receipt: {
+      ...sponsoredReceipt,
+      logs: [
+        beforeExecutionLog,
+        ownTransferLog,
+        otherOperationLog,
+        ...sponsoredReceipt.logs,
+      ],
+    },
+  }).status,
+  "mismatch",
+  "an identical transfer in another UserOperation cannot fund ours",
+);
+assert.equal(
+  evaluateEvmActionReceipt({
+    ...scopedBundleInput,
+    receipt: {
+      ...sponsoredReceipt,
+      logs: [
+        ownTransferLog,
+        beforeExecutionLog,
+        otherOperationLog,
+        ...sponsoredReceipt.logs,
+      ],
+    },
+  }).status,
+  "mismatch",
+  "validation-phase transfers are outside the execution interval",
+);
+const scopedSourceLog = {
+  address: sourceToken,
+  ...exactCreditInterface.encodeEventLog(exactCreditEvent, [
+    sponsoredSigner,
+    sourceRecipient,
+    4_000_000n,
+  ]),
+  logIndex: 23,
+};
+for (const ownFirst of [true, false]) {
+  const foreignOperation = {
+    ...sponsoredUserOperation,
+    sender: "0x5555555555555555555555555555555555555555",
+    nonce: 1n,
+  };
+  const scopedDebitInput = {
+    ...scopedBundleInput,
+    actionValidationResult: {
+      postconditionEvidenceKind: "exact_erc20_source_debit_v1",
+      expectedSourceAssetId: sourceToken,
+      expectedSourceAddress: sponsoredSigner,
+      expectedSourceRecipient: sourceRecipient,
+      expectedSourceRaw: "4000000",
+    },
+    transaction: {
+      ...sponsoredTransaction,
+      data: entryPoint.encodeFunctionData("handleOps", [
+        ownFirst
+          ? [sponsoredUserOperation, foreignOperation]
+          : [foreignOperation, sponsoredUserOperation],
+        sponsoredTransactionBeneficiary,
+      ]),
+    },
+  };
+  const ownLogs = [scopedSourceLog, ...sponsoredReceipt.logs];
+  const foreignLogs = [scopedSourceLog, otherOperationLog];
+  const receipt = {
+    ...sponsoredReceipt,
+    logs: [
+      beforeExecutionLog,
+      ...(ownFirst
+        ? [...ownLogs, ...foreignLogs]
+        : [...foreignLogs, ...ownLogs]),
+    ],
+  };
+  const result = evaluateEvmActionReceipt({ ...scopedDebitInput, receipt });
+  assert.equal(
+    result.status,
+    "finalized",
+    "only our debit is counted, at either position in the bundle",
+  );
+  assert.equal(result.evidence.attributedSourceRaw, "4000000");
+  assert.equal(result.evidence.sourceDebitEventIndex, "23");
+  assert.equal(
+    evaluateEvmActionReceipt({
+      ...scopedDebitInput,
+      actionValidationResult: {
+        ...scopedDebitInput.actionValidationResult,
+        requiresSingleOperationBundle: true,
+      },
+      receipt,
+    }).status,
+    "mismatch",
+    "explicit exclusive-bundle policies stay enforced",
+  );
+}
 const ambiguousSponsoredTransaction = {
   ...sponsoredTransaction,
   data: entryPoint.encodeFunctionData("handleOps", [

@@ -101,6 +101,7 @@ const ENTRY_POINT_V07_ADDRESS = "0x0000000071727de22e5e9d8baf0edac6f37da032";
 const ERC7579_SINGLE_EXECUTION_MODE = `0x${"00".repeat(32)}`;
 const ERC7579_BATCH_EXECUTION_MODE = `0x01${"00".repeat(31)}`;
 const ENTRY_POINT_V07_INTERFACE = new ethers.Interface([
+  "event BeforeExecution()",
   "function handleOps((address sender,uint256 nonce,bytes initCode,bytes callData,bytes32 accountGasLimits,uint256 preVerificationGas,bytes32 gasFees,bytes paymasterAndData,bytes signature)[] ops,address beneficiary)",
   "event UserOperationEvent(bytes32 indexed userOpHash,address indexed sender,address indexed paymaster,uint256 nonce,bool success,uint256 actualGasCost,uint256 actualUserOpFeePerGas)",
 ]);
@@ -114,6 +115,7 @@ const ERC20_TRANSFER_EVENT_INTERFACE = new ethers.Interface([
 type SponsoredActionMatch = Readonly<{
   actionMatches: boolean;
   singleOperationBundle?: boolean;
+  scopedLogs?: EvmReceiptRecord["logs"];
   userOperationSucceeded: boolean | null;
   failureCode: string | null;
 }>;
@@ -314,8 +316,48 @@ function evaluateSponsoredErc4337Action(
     };
   }
   const userOperationSucceeded = matchingEvents[0] ?? false;
+  // handleOps validates first, then emits BeforeExecution and executes ops in
+  // calldata order. Attribute transfers only between this operation's bounds;
+  // unrelated operations in the same bundler transaction are not our funds.
+  let scopedLogs: EvmReceiptRecord["logs"] | undefined;
+  const boundaries = input.receipt.logs.flatMap((log, index) => {
+    if (log.address.toLowerCase() !== ENTRY_POINT_V07_ADDRESS) return [];
+    try {
+      const event = ENTRY_POINT_V07_INTERFACE.parseLog({
+        topics: [...log.topics],
+        data: log.data,
+      });
+      return event?.name === "BeforeExecution" ||
+        event?.name === "UserOperationEvent"
+        ? [{ index, event }]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  if (
+    boundaries.length === operations.length + 1 &&
+    boundaries[0]?.event.name === "BeforeExecution" &&
+    operations.every((candidate, index) => {
+      const event = boundaries[index + 1]?.event;
+      return (
+        event?.name === "UserOperationEvent" &&
+        String(event.args.sender).toLowerCase() ===
+          candidate.sender.toLowerCase() &&
+        BigInt(event.args.nonce) === candidate.nonce
+      );
+    })
+  ) {
+    const index = operations.indexOf(operation);
+    const start = boundaries[index]?.index;
+    const end = boundaries[index + 1]?.index;
+    if (index >= 0 && start != null && end != null) {
+      scopedLogs = input.receipt.logs.slice(start + 1, end);
+    }
+  }
   return {
     actionMatches: true,
+    scopedLogs,
     singleOperationBundle: operations.length === 1,
     userOperationSucceeded,
     failureCode: userOperationSucceeded
@@ -709,20 +751,23 @@ export function evaluateEvmActionReceipt(
       }),
     };
   }
+  const attributionReceipt = sponsoredMatch?.scopedLogs
+    ? { ...input.receipt, logs: sponsoredMatch.scopedLogs }
+    : input.receipt;
   const exactDestinationCredit = exactErc20DestinationCredit(
     input.actionValidationResult,
-    input.receipt,
+    attributionReceipt,
   );
   const exactSourceDebit = exactErc20SourceDebit(
     input.actionValidationResult,
-    input.receipt,
+    attributionReceipt,
   );
   const requiresSingleOperationBundle =
     input.actionValidationResult?.requiresSingleOperationBundle === true;
   if (
     (requiresSingleOperationBundle ||
-      exactDestinationCredit.required ||
-      exactSourceDebit.required) &&
+      ((exactDestinationCredit.required || exactSourceDebit.required) &&
+        !sponsoredMatch?.scopedLogs)) &&
     executionEnvelope === "privy_erc4337" &&
     sponsoredMatch?.singleOperationBundle !== true
   ) {
