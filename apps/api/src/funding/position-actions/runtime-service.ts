@@ -1,5 +1,14 @@
 import type { Pool } from "@hunch/infra";
 import { ethers } from "ethers";
+import { parsePrivyFundingTransactionReference } from "../execution/privy-transaction-reference.js";
+import {
+  positionActionPrivyReference,
+  resolvePositionActionPrivyHash,
+} from "./privy-submission-reference.js";
+import {
+  createPrivyFundingReferenceResolver,
+  type PrivyFundingReferenceResolver,
+} from "../execution/privy-delegated-funding-driver.js";
 
 import { isRecord } from "../../lib/type-guards.js";
 import { fetchMarketsByTokenIds } from "../../repos/unified-read.js";
@@ -161,6 +170,12 @@ export class PositionActionRuntimeService {
       createPolymarketPositionActionVenueDriver(),
       createLimitlessPositionActionVenueDriver(),
     ],
+    private readonly resolvePrivyReference: PrivyFundingReferenceResolver | null = createPrivyFundingReferenceResolver(
+      {
+        appId: process.env.PRIVY_APP_ID ?? "",
+        appSecret: process.env.PRIVY_APP_SECRET ?? "",
+      },
+    ),
   ) {
     this.preparation = new WalletPreparationRuntimeService(db, clock);
     this.venueDrivers = new PositionActionVenueRegistry(venueDrivers);
@@ -519,7 +534,15 @@ export class PositionActionRuntimeService {
       parsePolymarketRelayerTransactionReference(input.submissionFingerprint)
         ? input.submissionFingerprint.trim()
         : null;
-    const submissionReference = txHash ?? providerReference;
+    const privyReference =
+      input.submissionFingerprint &&
+      positionActionPrivyReference(
+        input.submissionFingerprint,
+        operation.executionMode,
+      )
+        ? input.submissionFingerprint.trim()
+        : null;
+    const submissionReference = txHash ?? providerReference ?? privyReference;
     if (
       (input.submissionFingerprint != null && !submissionReference) ||
       (input.outcome === "submitted" && !submissionReference) ||
@@ -629,9 +652,23 @@ export class PositionActionRuntimeService {
     const submissionReference = operation.submissionFingerprint;
     let txHash = transactionHash(submissionReference);
     if (operation.broadcastMayHaveOccurred && submissionReference && !txHash) {
-      const resolved = await this.venueDriver(
-        operation.venueId,
-      ).resolveSubmissionTransactionHash?.(submissionReference);
+      const privyReference =
+        parsePrivyFundingTransactionReference(submissionReference);
+      const plan = isRecord(operation.planSnapshot.plan)
+        ? operation.planSnapshot.plan
+        : null;
+      // A provider acceptance is not receipt success. Resolve the hash, then
+      // retain the existing owner/plan/receipt and payout verification below.
+      const resolved = privyReference
+        ? await resolvePositionActionPrivyHash({
+            reference: submissionReference,
+            executionMode: operation.executionMode,
+            chainId: plan?.chainId,
+            resolve: this.resolvePrivyReference,
+          })
+        : await this.venueDriver(
+            operation.venueId,
+          ).resolveSubmissionTransactionHash?.(submissionReference);
       if (resolved) {
         operation = await bindPositionActionSubmissionTransactionHash(this.db, {
           userId,

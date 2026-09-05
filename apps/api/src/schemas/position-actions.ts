@@ -52,7 +52,7 @@ export const positionActionSubmissionReportSchema = z
     submissionFingerprint: z
       .string()
       .regex(
-        /^(?:0x[a-fA-F0-9]{64}|polymarket-relayer:v1:[A-Za-z0-9_-]{8,160})$/,
+        /^(?:0x[a-fA-F0-9]{64}|polymarket-relayer:v1:[A-Za-z0-9_-]{8,160}|privy-transaction-v1:[A-Za-z0-9._-]{1,200}|privy-user-operation-v1:0x[a-fA-F0-9]{64})$/,
       )
       .nullable(),
     errorCode: z.string().trim().min(1).max(160).nullable(),

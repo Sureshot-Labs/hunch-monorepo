@@ -304,41 +304,44 @@ await test("claim and report expose no persisted plan or owner address", async (
   }
 });
 
-await test("submission report accepts a durable Polymarket relayer reference", async () => {
-  let observedReference: string | null = null;
-  const app = await buildApp({
-    report: async (_userId, input) => {
-      observedReference = input.submissionFingerprint;
-      return operation({
-        status: "submitted",
-        executionMode: "venue_relayer",
-        submissionFingerprint: input.submissionFingerprint,
-        broadcastMayHaveOccurred: true,
-        receiptStatus: "pending",
-      });
-    },
-  });
-  try {
-    const response = await app.inject({
-      method: "POST",
-      url: `/position-actions/${OPERATION_ID}/submission/report`,
-      payload: {
-        attemptNumber: 1,
-        outcome: "submitted",
-        submissionFingerprint: RELAYER_REFERENCE,
-        errorCode: null,
+for (const reference of [
+  RELAYER_REFERENCE,
+  "privy-transaction-v1:d0498c04-5dec-482d-90e6-e2196cf34f5b",
+  `privy-user-operation-v1:${TX_HASH}`,
+]) {
+  await test(`submission report preserves a durable provider reference: ${reference}`, async () => {
+    let observedReference: string | null = null;
+    const app = await buildApp({
+      report: async (_userId, input) => {
+        observedReference = input.submissionFingerprint;
+        return operation({
+          status: "submitted",
+          executionMode: "venue_relayer",
+          submissionFingerprint: input.submissionFingerprint,
+          broadcastMayHaveOccurred: true,
+          receiptStatus: "pending",
+        });
       },
     });
-    assert.equal(response.statusCode, 200);
-    assert.equal(observedReference, RELAYER_REFERENCE);
-    assert.equal(
-      response.json().operation.submissionFingerprint,
-      RELAYER_REFERENCE,
-    );
-  } finally {
-    await app.close();
-  }
-});
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: `/position-actions/${OPERATION_ID}/submission/report`,
+        payload: {
+          attemptNumber: 1,
+          outcome: "submitted",
+          submissionFingerprint: reference,
+          errorCode: null,
+        },
+      });
+      assert.equal(response.statusCode, 200);
+      assert.equal(observedReference, reference);
+      assert.equal(response.json().operation.submissionFingerprint, reference);
+    } finally {
+      await app.close();
+    }
+  });
+}
 
 await test("position action endpoints fail closed on rate-limit uncertainty", async () => {
   const app = await buildApp({ rateLimit: async () => false });
