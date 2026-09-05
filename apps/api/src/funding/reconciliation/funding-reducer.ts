@@ -10,6 +10,7 @@ import type { JsonValue } from "../domain/types.js";
 import { canonicalAssetId, sameAsset } from "../domain/asset-identity.js";
 import {
   deriveFundingLifecycle,
+  verifiedFundingPreparationContributionRaw,
   type FundingLifecycleActionReceipt,
   type FundingLifecycleFacts,
   type FundingLifecycleProjection,
@@ -861,11 +862,23 @@ export async function reduceFundingOperationInTransaction(
     status: lifecycle.status,
     stage: lifecycle.progressStage,
   } satisfies FundingOperationState;
-  const actualDestinationAmount = sumObservationAmount(
+  const routedDestinationAmount = sumObservationAmount(
     observations,
     DESTINATION_CREDIT_KINDS,
     initial.requestedDestinationAmount,
   );
+  // The consumer reserves the whole confirmed contribution, not just Relay.
+  // Recompute from evidence on every reduction; never add to a cached total.
+  const actualDestinationAmount =
+    routedDestinationAmount == null
+      ? null
+      : {
+          ...routedDestinationAmount,
+          raw: (
+            BigInt(String(routedDestinationAmount.raw)) +
+            verifiedFundingPreparationContributionRaw(lifecycleFacts)
+          ).toString(),
+        };
   const directWithdrawalCompleted =
     initial.purpose === "withdrawal" &&
     isDirectWithdrawalExecutionKind(

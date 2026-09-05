@@ -862,6 +862,29 @@ function deriveSegmentProjections(
   });
 }
 
+/** Shared by lifecycle readiness and the persisted destination accounting. */
+export function verifiedFundingPreparationContributionRaw(
+  facts: FundingLifecycleFacts,
+): bigint {
+  const prepared = facts.plan.venuePreparationMinimumDestination;
+  // Readiness is a balance snapshot: count only the sealed contribution once.
+  return prepared != null &&
+    facts.plan.requestedDestination != null &&
+    sameMoneyAsset(prepared, facts.plan.requestedDestination) &&
+    BigInt(prepared.raw) > 0n &&
+    BigInt(prepared.raw) <= BigInt(facts.plan.requestedDestination.raw) &&
+    facts.transfers.some(
+      (transfer) =>
+        transfer.kind === "venue_readiness" &&
+        transfer.routeLegId === null &&
+        isCanonicalFinal(transfer) &&
+        sameMoneyAsset(transfer.money, prepared) &&
+        BigInt(transfer.money.raw) >= BigInt(prepared.raw),
+    )
+    ? BigInt(prepared.raw)
+    : 0n;
+}
+
 function transferFacts(facts: FundingLifecycleFacts): Readonly<{
   canonicalityConflict: boolean;
   destinationEvidenceConflict: boolean;
@@ -883,24 +906,6 @@ function transferFacts(facts: FundingLifecycleFacts): Readonly<{
     facts.transfers,
   );
   const destinationTotal = sumDestination(facts.transfers, facts.plan);
-  const prepared = facts.plan.venuePreparationMinimumDestination;
-  // Readiness can describe a balance snapshot, not a new transfer. Count only
-  // the sealed preparation contribution once, never sum readiness snapshots
-  // or let them replace a provider leg's required destination receipt.
-  const preparedContributionVerified =
-    prepared != null &&
-    facts.plan.requestedDestination != null &&
-    sameMoneyAsset(prepared, facts.plan.requestedDestination) &&
-    BigInt(prepared.raw) > 0n &&
-    BigInt(prepared.raw) <= BigInt(facts.plan.requestedDestination.raw) &&
-    facts.transfers.some(
-      (transfer) =>
-        transfer.kind === "venue_readiness" &&
-        transfer.routeLegId === null &&
-        isCanonicalFinal(transfer) &&
-        sameMoneyAsset(transfer.money, prepared) &&
-        BigInt(transfer.money.raw) >= BigInt(prepared.raw),
-    );
   const requestedRaw = facts.plan.requestedDestination?.raw;
   const destinationEvidenceConflict =
     (facts.plan.requestedDestination !== null &&
@@ -918,8 +923,7 @@ function transferFacts(facts: FundingLifecycleFacts): Readonly<{
   const destinationCreditRequirementMet =
     destinationTotal !== null &&
     requestedRaw !== undefined &&
-    destinationTotal +
-      (preparedContributionVerified ? BigInt(prepared.raw) : 0n) >=
+    destinationTotal + verifiedFundingPreparationContributionRaw(facts) >=
       BigInt(requestedRaw);
   const finalizedVenueReadiness = facts.transfers.some(
     (transfer) =>

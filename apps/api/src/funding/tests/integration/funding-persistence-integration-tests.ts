@@ -36,6 +36,7 @@ import type { ValuedAssetComponent } from "../../domain/types.js";
 import type { PreparationResult } from "../../domain/contracts.js";
 import {
   assertFundingReservationReadyForTrade,
+  fetchFundingConsumerReservationForUser,
   consumeFundingReservationForLinkedConsumerInTransaction,
   fetchFundingWithdrawalDestinationForUser,
   finishFundingRouteObservationInTransaction,
@@ -3970,6 +3971,17 @@ async function testDirectIngressWithDeferredPreparationCommit(): Promise<void> {
 
 async function testCompositePreparationAndRelayCommit(): Promise<void> {
   const userId = await insertUser(pool);
+  const venueMarketId = opaque("composite-consumer-market");
+  const marketId = `polymarket:${venueMarketId}`;
+  const eventId = opaque("composite-consumer-event");
+  await pool.query(
+    "insert into unified_events (id,venue,venue_event_id,title,status,end_date) values ($1,'polymarket',$1,'Composite consumer test','ACTIVE',now()+interval '1 day')",
+    [eventId],
+  );
+  await pool.query(
+    "insert into unified_markets (id,venue,venue_market_id,event_id,title,status,market_type) values ($1,'polymarket',$2,$3,'Composite consumer test','ACTIVE','binary')",
+    [marketId, venueMarketId, eventId],
+  );
   const relaySource = {
     componentId: opaque("relay-component"),
     locationId: opaque("relay-source-location"),
@@ -3999,8 +4011,14 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
       destinationTargetSnapshot: destinationTarget,
       externalRecipientId: null,
       venueId: "polymarket",
-      marketId: null,
-      marketContextSnapshot: null,
+      marketId,
+      marketContextSnapshot: {
+        venueId: "polymarket",
+        marketId,
+        marketContextId: "123456789",
+        collateralAsset: ASSET,
+        requestedCollateralRaw: "5000000",
+      },
       venueBindingSnapshot: { venueId: "polymarket", venueBindingOptionId },
       walletExecutionSnapshot: {},
       placementSnapshot: {},
@@ -4359,6 +4377,34 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
         userId,
       });
       assert.equal(ready?.status, "ready");
+      assert.equal(ready?.actualDestinationAmount?.raw, "4227649");
+      const consumerReservation = await fetchFundingConsumerReservationForUser(
+        replayClient,
+        { operationId, userId },
+      );
+      assert.ok(consumerReservation);
+      assert.equal(consumerReservation.rawAmount, "4227649");
+      await assertFundingReservationReadyForTrade(replayClient, {
+        userId,
+        link: { operationId, reservationId: consumerReservation.reservationId },
+        intent: buildFundingTradeConsumerIntent({
+          venueId: "polymarket",
+          marketId,
+          marketContextId: "123456789",
+          spend: money("5000000"),
+        }),
+      });
+      await reduceFundingOperationInTransaction(replayClient, { operationId });
+      assert.equal(
+        (
+          await fetchFundingConsumerReservationForUser(replayClient, {
+            operationId,
+            userId,
+          })
+        )?.rawAmount,
+        "4227649",
+        "repeated reduction must not add the preparation contribution twice",
+      );
       const reservation = (
         await replayClient.query<{ id: string }>(
           "select id from balance_reservations where operation_id=$1 and mode='settled_for_consumer' and state='active'",
@@ -4384,6 +4430,8 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
     }
   } finally {
     await cleanupCommittedOperation(operationId, quote.id, userId);
+    await pool.query("delete from unified_markets where id=$1", [marketId]);
+    await pool.query("delete from unified_events where id=$1", [eventId]);
   }
 }
 
