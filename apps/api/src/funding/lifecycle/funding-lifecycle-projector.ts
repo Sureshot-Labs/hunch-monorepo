@@ -1024,6 +1024,9 @@ function actionState(
   }
   if (execution === "started") return "recovery_required";
   if (execution === "submitted") return "submitted";
+  // Authorization gates future execution, not a durable final failure.
+  // Revoking access must not resurrect an unbroadcast failed action as planned.
+  if (execution === "final_failure") return "failed";
   if (dependencyState === "recovery_required") return "recovery_required";
   if (dependencyState === "reconcile_required") return "reconcile_required";
   if (action.authorization === "blocked") return "planned";
@@ -1038,7 +1041,6 @@ function actionState(
     }
     return "action_required";
   }
-  if (execution === "final_failure") return "failed";
   if (
     !dependencySucceeded ||
     (action.activation === "after_verified_ingress" && !activationSatisfied) ||

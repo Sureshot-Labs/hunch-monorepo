@@ -396,9 +396,11 @@ const UNKNOWN_TRADE_RESOLVING_MESSAGE =
 function buildTelegramTradeShortfallUnavailableReplyMarkup(
   intentId: string,
   venue: TelegramBotTradingVenue,
+  openMarketButton: TelegramBotTradingButton | null = null,
 ): TelegramBotTradingClientReplyMarkup {
   return {
     inline_keyboard: [
+      ...telegramTradingButtonRows(openMarketButton),
       [
         {
           callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:retry_buy:${intentId}`,
@@ -10940,9 +10942,11 @@ async function previewTelegramTradeIntent(input: {
           text: escapeMarkdown(
             "Add funds and review this trade in Hunch. Nothing was submitted.",
           ),
-          reply_markup: {
-            inline_keyboard: telegramTradingButtonRows(openMarketButton),
-          },
+          reply_markup: buildTelegramTradeShortfallUnavailableReplyMarkup(
+            input.intent.id,
+            input.intent.venue,
+            openMarketButton,
+          ),
         });
         return;
       }

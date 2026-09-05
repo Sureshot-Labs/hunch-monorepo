@@ -7909,6 +7909,36 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     name: "temporary shortfall failure offers retry, market exit, Deposit and Home",
     run: () => {
       const intentId = "11111111-1111-4111-8111-111111111111";
+      // Strict Mini App external-deposit cards must retain native navigation
+      // even when no web_app button can be generated.
+      for (const openMarketButton of [
+        null,
+        {
+          text: "Open market in Hunch",
+          web_app: { url: "https://app.hunch.trade/events/test" },
+        },
+      ]) {
+        const buttons = telegramBotTradingTestHooks
+          .buildTelegramTradeShortfallUnavailableReplyMarkup(
+            intentId,
+            "polymarket",
+            openMarketButton,
+          )
+          .inline_keyboard.flat();
+        for (const callback of [
+          `hbt:cancel:${intentId}`,
+          "hm:v1:deposit:polymarket",
+          "hm:v1:home",
+        ]) {
+          assert.ok(
+            buttons.some(
+              (button) =>
+                "callback_data" in button && button.callback_data === callback,
+            ),
+          );
+        }
+        if (openMarketButton) assert.deepEqual(buttons[0], openMarketButton);
+      }
       assert.deepEqual(
         telegramBotTradingTestHooks
           .buildTelegramTradeShortfallUnavailableReplyMarkup(

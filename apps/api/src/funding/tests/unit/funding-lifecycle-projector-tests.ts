@@ -116,6 +116,49 @@ function facts(
 }
 
 {
+  const stopped = facts({
+    actions: [
+      action("failed-before-broadcast", {
+        authorization: "blocked",
+        expiresAt: null,
+        attempts: [attempt({ outcome: "failed" })],
+      }),
+    ],
+  });
+  const projected = deriveFundingLifecycle(stopped);
+  assert.equal(projected.actions[0]?.state, "failed");
+  assert.equal(projected.status, "failed");
+  assert.equal(projected.safety.terminal, true);
+  assert.equal(projected.safety.reservationsMayRelease, true);
+  for (const attempts of [
+    [attempt({ outcome: "failed", broadcastMayHaveOccurred: true })],
+    [attempt({ outcome: "failed", retryableAfterFailure: true })],
+    [
+      attempt({ outcome: "failed" }),
+      attempt({
+        attemptNumber: 2,
+        outcome: "submitted",
+        broadcastMayHaveOccurred: true,
+      }),
+    ],
+  ]) {
+    assert.equal(
+      deriveFundingLifecycle({
+        ...stopped,
+        actions: [
+          action("blocked", {
+            authorization: "blocked",
+            expiresAt: null,
+            attempts,
+          }),
+        ],
+      }).safety.terminal,
+      false,
+    );
+  }
+}
+
+{
   const prepared = { ...destination, raw: "2966935" };
   const bridged = { ...destination, raw: "2282867" };
   const settled = facts({
