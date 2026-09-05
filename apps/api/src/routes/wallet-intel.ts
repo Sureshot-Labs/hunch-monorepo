@@ -7422,14 +7422,34 @@ async function loadWhaleTopMarkets(
         select unnest($1::uuid[]) as wallet_id
       ),
       latest_snapshots as materialized (
-        select
-          snapshot_rows.wallet_id,
-          snapshot_rows.venue,
-          max(snapshot_rows.snapshot_at) as snapshot_at
-        from wallet_position_snapshots snapshot_rows
-        join wallet_set
-          on wallet_set.wallet_id = snapshot_rows.wallet_id
-        group by snapshot_rows.wallet_id, snapshot_rows.venue
+        -- Walk venue boundaries in (wallet_id, venue, snapshot_at DESC).
+        -- Reading every historical snapshot just to find MAX is expensive.
+        -- Both venue and snapshot_at are NOT NULL; discover all stored venues.
+        select distinct wallet_set.wallet_id, latest.venue, latest.snapshot_at
+        from wallet_set
+        cross join lateral (
+          with recursive venue_walk as (
+            (
+              select snapshot_rows.venue, snapshot_rows.snapshot_at
+              from wallet_position_snapshots snapshot_rows
+              where snapshot_rows.wallet_id = wallet_set.wallet_id
+              order by snapshot_rows.venue, snapshot_rows.snapshot_at desc
+              limit 1
+            )
+            union all
+            select next_venue.venue, next_venue.snapshot_at
+            from venue_walk previous_venue
+            cross join lateral (
+              select snapshot_rows.venue, snapshot_rows.snapshot_at
+              from wallet_position_snapshots snapshot_rows
+              where snapshot_rows.wallet_id = wallet_set.wallet_id
+                and snapshot_rows.venue > previous_venue.venue
+              order by snapshot_rows.venue, snapshot_rows.snapshot_at desc
+              limit 1
+            ) next_venue
+          )
+          select venue, snapshot_at from venue_walk
+        ) latest
       ),
       latest_position_rows as materialized (
         select distinct on (
