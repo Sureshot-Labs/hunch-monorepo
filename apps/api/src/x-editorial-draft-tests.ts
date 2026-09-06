@@ -2125,6 +2125,20 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(first.sent, 1);
       assert.equal(second.sent, 0);
       assert.equal(composeCalls, 1);
+      const publication = (
+        storedMessages.get("initial")?.metrics as {
+          publicationSnapshotV1: {
+            ask: number;
+            displayPrice: number;
+            quoteAsOf: string;
+            quoteQuality: string;
+          };
+        }
+      ).publicationSnapshotV1;
+      assert.equal(publication.ask, 0.2);
+      assert.equal(publication.displayPrice, 0.19);
+      assert.equal(publication.quoteAsOf, "2026-01-01T00:00:00.000Z");
+      assert.equal(publication.quoteQuality, "stale_quote");
       assert.equal(telegramMessages.length, 1);
       const deliveredText = String(telegramMessages[0]?.text);
       assert.match(

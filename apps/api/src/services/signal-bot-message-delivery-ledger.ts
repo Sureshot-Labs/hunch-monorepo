@@ -161,7 +161,10 @@ export async function reserveSignalBotMessageDelivery(input: {
           sent_at = excluded.sent_at,
           metrics = (
             signal_bot_messages.metrics - 'deliveryStateV2' - 'status'
-          ) || excluded.metrics
+          ) || excluded.metrics || case
+            when jsonb_typeof(signal_bot_messages.metrics->'publicationSnapshotV1') = 'object'
+            then jsonb_build_object('publicationSnapshotV1', signal_bot_messages.metrics->'publicationSnapshotV1')
+            else '{}'::jsonb end
         where (
           signal_bot_messages.metrics #>> '{deliveryStateV2,version}' = '2'
           and signal_bot_messages.metrics #>> '{deliveryStateV2,status}' = 'retry'
@@ -264,6 +267,7 @@ export async function beginSignalBotMessageDelivery(input: {
   db: DbQuery;
   deliveryRef: string;
   expectedStatus?: "queued" | "reserved";
+  metrics?: Record<string, unknown>;
   now?: Date;
 }): Promise<boolean> {
   const now = input.now ?? new Date();
@@ -271,7 +275,10 @@ export async function beginSignalBotMessageDelivery(input: {
   const result = await input.db.query(
     `
       update signal_bot_messages
-      set metrics = (metrics - 'deliveryStateV2' - 'status') || $3::jsonb,
+      set metrics = (metrics - 'deliveryStateV2' - 'status') || $3::jsonb || case
+            when jsonb_typeof(metrics->'publicationSnapshotV1') = 'object'
+            then jsonb_build_object('publicationSnapshotV1', metrics->'publicationSnapshotV1')
+            else '{}'::jsonb end,
           sent_at = $4::timestamptz
       where id = $1::uuid
         and metrics #>> '{deliveryStateV2,version}' = '2'
@@ -281,13 +288,14 @@ export async function beginSignalBotMessageDelivery(input: {
     [
       input.deliveryRef,
       input.attemptId,
-      JSON.stringify(
-        deliveryState({
+      JSON.stringify({
+        ...(input.metrics ?? {}),
+        ...deliveryState({
           attemptId: input.attemptId,
           at: now,
           status: "sending",
         }),
-      ),
+      }),
       now.toISOString(),
       expectedStatus,
     ],
@@ -328,7 +336,10 @@ export async function finishSignalBotMessageDelivery(input: {
             when $7::boolean then $8
             else reply_to_message_id
           end,
-          metrics = (metrics - 'deliveryStateV2' - 'status') || $5::jsonb,
+          metrics = (metrics - 'deliveryStateV2' - 'status') || $5::jsonb || case
+            when jsonb_typeof(metrics->'publicationSnapshotV1') = 'object'
+            then jsonb_build_object('publicationSnapshotV1', metrics->'publicationSnapshotV1')
+            else '{}'::jsonb end,
           sent_at = $6::timestamptz
       where id = $1::uuid
         and metrics #>> '{deliveryStateV2,version}' = '2'

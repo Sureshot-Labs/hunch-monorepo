@@ -1,4 +1,11 @@
 import { createHash } from "node:crypto";
+import {
+  buildHolderResearchPriceMovement,
+  loadHolderResearchPriceBaselines,
+  HOLDER_RESEARCH_PRICE_MOVEMENT_VERSION,
+  type HolderResearchPriceBaseline,
+  type HolderResearchPriceMovement,
+} from "./holder-research-price-movement.js";
 
 import {
   getMarketPriceSideState,
@@ -102,7 +109,9 @@ export type HolderResearchRelatedPosition = {
 
 export type HolderResearchMarketMovementContext = {
   yesProbabilityNow: number | null;
-  yesChange24h: number | null;
+  yesDeltaProbability24h: number | null;
+  priceBaseline?: HolderResearchPriceBaseline | null;
+  priceMovement?: HolderResearchPriceMovement;
   volume24h: number | null;
   volumeChange24h: number | null;
   volumeChangePct24h: number | null;
@@ -409,6 +418,9 @@ export type HolderResearchDecisionFeaturesV2 = {
     firstActivityAgeHours: number | null;
     lastActivityAgeHours: number | null;
     priceChange24hForSide: number | null;
+    priceMovementVersion: typeof HOLDER_RESEARCH_PRICE_MOVEMENT_VERSION;
+    priceChangeUnit: "probability";
+    priceReferenceAt: string | null;
   };
   context: {
     flowProfile: HolderResearchFlowProfile;
@@ -489,6 +501,7 @@ const PUBLISHABLE_HOLDER_RESEARCH_BUCKETS = new Set<HolderResearchBucket>([
 
 export type HolderResearchDecisionSnapshot = {
   version: 1;
+  priceMovementVersion?: typeof HOLDER_RESEARCH_PRICE_MOVEMENT_VERSION;
   key: string;
   bucket: HolderResearchBucket;
   side: HolderResearchSideKey | null;
@@ -946,7 +959,9 @@ export function buildHolderResearchInputDigest(
     yesProbability: candidate.market.yesProbability,
     marketMovementContext: {
       yesProbabilityNow: movement.yesProbabilityNow,
-      yesChange24h: movement.yesChange24h,
+      priceMovementVersion: HOLDER_RESEARCH_PRICE_MOVEMENT_VERSION,
+      yesDeltaProbability24h: movement.yesDeltaProbability24h,
+      priceReferenceAt: movement.priceMovement?.referenceAt ?? null,
       volume24h: movement.volume24h,
       volumeChange24h: movement.volumeChange24h,
       volumeChangePct24h: movement.volumeChangePct24h,
@@ -1476,7 +1491,7 @@ function selectedSignalPriceChange(
 ): number | null {
   const movement = candidate.market.marketMovementContext;
   const rawChange =
-    movement.yesChangeSincePreviousDecision ?? movement.yesChange24h;
+    movement.yesChangeSincePreviousDecision ?? movement.yesDeltaProbability24h;
   if (rawChange == null || candidate.side == null) return null;
   return candidate.side === "YES" ? rawChange : -rawChange;
 }
@@ -2116,7 +2131,8 @@ export function buildHolderResearchDecisionFeaturesV2(
   const positionSnapshotAt = latestIso(
     relevantHolders.map((holder) => holder.positionSnapshotAt),
   );
-  const rawPriceChange = candidate.market.marketMovementContext.yesChange24h;
+  const rawPriceChange =
+    candidate.market.marketMovementContext.yesDeltaProbability24h;
   return {
     version: 2,
     identity: {
@@ -2152,6 +2168,11 @@ export function buildHolderResearchDecisionFeaturesV2(
         .slice(0, 3),
     },
     timing: {
+      priceMovementVersion: HOLDER_RESEARCH_PRICE_MOVEMENT_VERSION,
+      priceChangeUnit: "probability",
+      priceReferenceAt:
+        candidate.market.marketMovementContext.priceMovement?.referenceAt ??
+        null,
       // This is the earliest exact-pair activity observed in the bounded
       // hourly window, not proof of the holder's lifetime first trade.
       firstActivityAt: candidate.market.firstObservedActivityAt ?? null,
@@ -2243,6 +2264,7 @@ export function buildHolderResearchDecisionSnapshot(
   });
   return {
     version: 1,
+    priceMovementVersion: HOLDER_RESEARCH_PRICE_MOVEMENT_VERSION,
     key: candidate.thesisKey,
     bucket: candidate.bucket,
     side: candidate.side,
@@ -2551,6 +2573,25 @@ export function evaluateHolderResearchDecisionCache(input: {
     input.policy,
     cached.checkedAt,
   );
+  // Revisit old non-published decisions without treating a schema fix as a
+  // new trading development or bypassing the publication cooldown.
+  if (
+    cached.status !== "PUBLISH" &&
+    cached.snapshot.priceMovementVersion !==
+      HOLDER_RESEARCH_PRICE_MOVEMENT_VERSION
+  ) {
+    return {
+      action: "analyze",
+      reason: "force_recheck",
+      snapshot,
+      digest,
+      cachedDecision: cached,
+      cachedStatus: cached.status,
+      lastCheckedAt: cached.checkedAt,
+      nextEligibleAt: cached.nextEligibleAt,
+      meaningfulDeltaReasons: [],
+    };
+  }
   const actionability = buildHolderResearchCandidateActionability(
     input.candidate,
     input.policy,
@@ -3552,7 +3593,8 @@ function buildMarketMovementContext(
 ): HolderResearchMarketMovementContext {
   return {
     yesProbabilityNow: yesProbability,
-    yesChange24h: toNumber(row.market_change_24h),
+    // Global market_change_24h is a relative return, never a probability delta.
+    yesDeltaProbability24h: null,
     volume24h: toNumber(row.volume_24h),
     volumeChange24h: toNumber(row.volume_last_24h_change),
     volumeChangePct24h: toNumber(row.volume_last_24h_change_pct),
@@ -4113,7 +4155,46 @@ async function loadHolderResearchCandidateMarketsFromPositionSource(
     ],
   );
 
-  return rows.map(rowToMarket);
+  const baselines = await loadHolderResearchPriceBaselines(
+    client,
+    rows.map((row) => row.market_id),
+  );
+  const now = new Date();
+  return rows.map((row) =>
+    applyMarketPriceMovement(
+      rowToMarket(row),
+      baselines.get(row.market_id) ?? null,
+      now,
+    ),
+  );
+}
+
+function applyMarketPriceMovement(
+  market: HolderResearchMarketInput,
+  baseline: HolderResearchPriceBaseline | null,
+  now: Date,
+): HolderResearchMarketInput {
+  const priceMovement = buildHolderResearchPriceMovement({
+    baseline,
+    yesProbabilityNow: market.yesProbability,
+    now,
+  });
+  const previousYes =
+    market.marketMovementContext.previousDecisionYesProbability;
+  return {
+    ...market,
+    marketMovementContext: {
+      ...market.marketMovementContext,
+      priceBaseline: baseline,
+      priceMovement,
+      yesProbabilityNow: market.yesProbability,
+      yesDeltaProbability24h: priceMovement.yesDeltaProbability24h,
+      yesChangeSincePreviousDecision:
+        previousYes != null && market.yesProbability != null
+          ? market.yesProbability - previousYes
+          : null,
+    },
+  };
 }
 
 function holderResearchMarketResultIdentity(
@@ -4822,12 +4903,17 @@ export function applyHolderResearchLivePriceChecks(
       tokenIds: state.tokenIds,
       yesProbability: state.priceState.yesProbability,
     };
-    const market = {
-      ...candidate.market,
-      livePriceCheck,
-      yesProbability:
-        livePriceCheck.yesProbability ?? candidate.market.yesProbability,
-    };
+    const market = applyMarketPriceMovement(
+      {
+        ...candidate.market,
+        livePriceCheck,
+        yesProbability: livePriceCheck.fresh
+          ? livePriceCheck.yesProbability
+          : null,
+      },
+      candidate.market.marketMovementContext.priceBaseline ?? null,
+      new Date(checkedAt),
+    );
     const withoutDigest = { ...candidate, market };
     return {
       ...withoutDigest,
@@ -5088,7 +5174,15 @@ function compactPromptSide(side: HolderResearchSide) {
 function compactPromptMovement(movement: HolderResearchMarketMovementContext) {
   return {
     pYes: movement.yesProbabilityNow,
-    dYes24h: movement.yesChange24h,
+    priceMovementVersion: HOLDER_RESEARCH_PRICE_MOVEMENT_VERSION,
+    probabilityDeltaUnit: "probability (0.01 = 1 percentage point = 1 cent)",
+    yesDeltaProbability24h: movement.yesDeltaProbability24h,
+    priceReferenceAt: movement.priceMovement?.referenceAt ?? null,
+    priceReferenceKind: "hourly_midpoint",
+    priceMovementQuality: movement.priceMovement?.quality ?? "missing",
+    priceCheckedAt: movement.priceMovement?.checkedAt ?? null,
+    yesRelativeReturn24h: movement.priceMovement?.yesRelativeReturn24h ?? null,
+    noRelativeReturn24h: movement.priceMovement?.noRelativeReturn24h ?? null,
     vol24h: movement.volume24h,
     dVol24h: movement.volumeChange24h,
     dVolPct24h: movement.volumeChangePct24h,

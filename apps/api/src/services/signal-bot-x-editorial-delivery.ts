@@ -1,4 +1,9 @@
 import type { DbQuery } from "../db.js";
+import {
+  buildSignalPublicationSnapshot,
+  parseSignalPublicationSnapshot,
+  type SignalPublicationSnapshotV1,
+} from "./signal-publication-snapshot.js";
 import { parseTelegramMarketIdentityV1 } from "./signal-publication-contract.js";
 import {
   beginSignalBotMessageDelivery,
@@ -1199,6 +1204,7 @@ export async function sendXEditorialFollowthroughPreview(input: {
 }
 
 async function deliverDraft(input: {
+  publicationSnapshot?: SignalPublicationSnapshotV1;
   baselineAt: string;
   chatId: string;
   composer: XEditorialDraftComposer;
@@ -1356,6 +1362,14 @@ async function deliverDraft(input: {
     }
   }
   const baseMetrics = {
+    ...(input.publicationSnapshot
+      ? {
+          publicationSnapshotV1:
+            parseSignalPublicationSnapshot(
+              existingMetrics.publicationSnapshotV1,
+            ) ?? input.publicationSnapshot,
+        }
+      : {}),
     contentProfile: X_EDITORIAL_CONTENT_PROFILE,
     editorialComposerV1: composerMetrics,
     editorialDraftV1: draft,
@@ -1509,6 +1523,12 @@ export async function publishXEditorialNote(input: {
   return deliverDraft({
     ...input,
     composer,
+    publicationSnapshot: buildSignalPublicationSnapshot({
+      marketId: input.note.marketId ?? "",
+      venue: input.note.marketVenue ?? "",
+      side: input.selectedSide,
+      priceSnapshot: input.note.signalPriceSnapshotV1 ?? null,
+    }),
     holderLink: buildInitialHolderLink({
       appBaseUrl: input.appBaseUrl,
       note: input.note,

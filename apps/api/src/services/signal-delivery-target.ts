@@ -12,6 +12,7 @@ export type SignalDestinationPolicy = {
 };
 
 export type SignalDeliveryCandidate = {
+  quoteAsOf?: string | null;
   active: boolean;
   eventId: string;
   executablePrice: number;

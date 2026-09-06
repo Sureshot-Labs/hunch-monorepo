@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { buildMarketPriceState } from "@hunch/shared";
+import { buildHolderResearchPriceMovement } from "./services/holder-research-price-movement.js";
 
 import { env } from "./env.js";
 import {
@@ -35,6 +37,7 @@ import {
 } from "./schemas/signals.js";
 import {
   adaptHolderResearchFinalOutputV2,
+  applyHolderResearchLivePriceChecks,
   applyHolderResearchPublishQualityGate,
   buildHolderResearchActorSummary,
   buildDeterministicHolderResearchDecision,
@@ -251,7 +254,7 @@ function market(
     liquidity: 25_000,
     marketMovementContext: {
       yesProbabilityNow: 0.55,
-      yesChange24h: null,
+      yesDeltaProbability24h: null,
       volume24h: 100_000,
       volumeChange24h: null,
       volumeChangePct24h: null,
@@ -338,6 +341,122 @@ function sharpMinorityCandidate(
 }
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
+  {
+    name: "24h relative YES returns never become probability points or a price-against gate",
+    run: () => {
+      const now = new Date("2026-09-06T12:30:00Z");
+      const baseline = {
+        yes: 0.2,
+        no: 0.8,
+        yesAt: "2026-09-05T12:00:00Z",
+        noAt: "2026-09-05T12:00:00Z",
+      };
+      const movement = buildHolderResearchPriceMovement({
+        baseline,
+        yesProbabilityNow: 0.22,
+        now,
+      });
+      assert.ok(
+        Math.abs((movement.yesDeltaProbability24h ?? NaN) - 0.02) < 1e-9,
+      );
+      assert.ok(Math.abs((movement.yesRelativeReturn24h ?? NaN) - 0.1) < 1e-9);
+      assert.ok(Math.abs((movement.noRelativeReturn24h ?? NaN) + 0.025) < 1e-9);
+      const p = policy();
+      const m = market({ yesProbability: 0.22 });
+      m.marketMovementContext = {
+        ...m.marketMovementContext,
+        yesProbabilityNow: 0.22,
+        yesDeltaProbability24h: movement.yesDeltaProbability24h,
+        priceBaseline: baseline,
+        priceMovement: movement,
+      };
+      const candidate = buildHolderResearchCandidatesFromMarket(m, p).find(
+        (c) => c.side === "NO",
+      );
+      assert.ok(candidate);
+      assert.equal(
+        buildHolderResearchQualityAssessment(candidate, p).priceContext,
+        "flat",
+      );
+      const features = buildHolderResearchDecisionFeaturesV2(candidate, p, now);
+      assert.ok(
+        Math.abs((features.timing.priceChange24hForSide ?? NaN) + 0.02) < 1e-9,
+      );
+      assert.equal(features.timing.priceChangeUnit, "probability");
+      candidate.market.marketMovementContext.previousDecisionYesProbability = 0.21;
+      const priceState = buildMarketPriceState({
+        now,
+        yesTop: { bestBid: 0.29, bestAsk: 0.31, ts: now },
+        noTop: { bestBid: 0.69, bestAsk: 0.71, ts: now },
+      });
+      const live = applyHolderResearchLivePriceChecks([candidate], {
+        checkedAt: now,
+        marketStates: new Map([
+          [m.marketId, { fresh: true, priceState, tokenIds: ["yes", "no"] }],
+        ]),
+      })[0];
+      assert.ok(live);
+      assert.ok(
+        Math.abs(
+          (live.market.marketMovementContext.yesDeltaProbability24h ?? NaN) -
+            0.1,
+        ) < 1e-9,
+      );
+      assert.ok(
+        Math.abs(
+          (live.market.marketMovementContext.yesChangeSincePreviousDecision ??
+            NaN) - 0.09,
+        ) < 1e-9,
+      );
+      assert.equal(
+        live.market.marketMovementContext.yesProbabilityNow,
+        live.market.yesProbability,
+      );
+      assert.equal(
+        buildHolderResearchQualityAssessment(live, p).priceContext,
+        "against_signal",
+      );
+      const stale = applyHolderResearchLivePriceChecks([candidate], {
+        checkedAt: now,
+        marketStates: new Map([
+          [m.marketId, { fresh: false, priceState, tokenIds: [] }],
+        ]),
+      })[0];
+      assert.ok(stale);
+      assert.equal(
+        stale.market.marketMovementContext.yesDeltaProbability24h,
+        null,
+      );
+      const cached = buildHolderResearchDecisionCacheRecord({
+        candidate,
+        output: { status: "CONTEXT", rationale: "prior" },
+        model: "test",
+        policy: p,
+        now,
+      });
+      delete cached.snapshot.priceMovementVersion;
+      assert.equal(
+        evaluateHolderResearchDecisionCache({
+          candidate,
+          cachedDecision: cached,
+          policy: p,
+          now,
+        }).action,
+        "analyze",
+      );
+      cached.status = "PUBLISH";
+      cached.nextEligibleAt = "2026-09-07T12:30:00Z";
+      assert.equal(
+        evaluateHolderResearchDecisionCache({
+          candidate,
+          cachedDecision: cached,
+          policy: p,
+          now,
+        }).action,
+        "skip",
+      );
+    },
+  },
   {
     name: "telegram market identity keeps parent context for compact child labels",
     run: () => {
@@ -2319,6 +2438,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       let queryParams: unknown[] = [];
       const client = {
         query: async (sql: unknown, params?: unknown[]) => {
+          if (String(sql).includes("from unnest($1::text[]) as requested"))
+            return { rows: [], rowCount: 0 };
           querySql = String(sql ?? "");
           queryParams = Array.isArray(params) ? params : [];
           return {
@@ -4623,7 +4744,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           marketMovementContext: {
             ...market().marketMovementContext,
             yesProbabilityNow: 0.6,
-            yesChange24h: 0.08,
+            yesDeltaProbability24h: 0.08,
             volumeChange24h: 50_000,
             liquidityChange24h: -2_000,
             openInterestChange24h: 15_000,
@@ -4711,7 +4832,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         Array.isArray((record.quality as Record<string, unknown>).riskTags),
         true,
       );
-      assert.deepEqual((record.move as Record<string, unknown>).dYes24h, 0.08);
+      assert.deepEqual(
+        (record.move as Record<string, unknown>).yesDeltaProbability24h,
+        0.08,
+      );
       const entry = (record.holderEntry as Array<Record<string, unknown>>)[0];
       assert.equal(entry?.entry, 0.3);
       assert.equal(entry?.cur, 0.4);

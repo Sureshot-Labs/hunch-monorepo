@@ -38,12 +38,16 @@ import {
   type AggMarketAlternativesCacheClient,
   type AggMarketAlternativesDiagnostics,
 } from "./agg-market-clusters.js";
-import type { ClusterMarketSummary } from "./clusters.js";
+import {
+  signalDeliveryCandidateFromSource,
+  signalDeliveryCandidateFromAgg,
+} from "./signal-bot-delivery-candidates.js";
 import {
   resolveNativeOutcomeForCanonicalSide,
   resolveStrictClusterNativeOffer,
 } from "./cluster-execution.js";
 import { loadClusterMarketNativeQuotes } from "./cluster-execution-quotes.js";
+import { buildSignalPublicationSnapshot } from "./signal-publication-snapshot.js";
 import {
   normalizeTestSignalOutcome,
   SIGNAL_BOT_QUOTE_MAX_AGE_MS,
@@ -345,6 +349,7 @@ export type SignalBotRedisLike = SignalBotMenuStateRedis & {
 };
 
 export type SignalBotCheaperAlternative = {
+  quoteAsOf?: string | null;
   eventId: string;
   marketId: string;
   price: number;
@@ -4366,6 +4371,7 @@ export type SignalBotPriceGuardDiagnostics = {
 };
 
 type SignalBotPriceGuardResult = {
+  quoteAsOf?: string | null;
   blockers: MarketPriceBlocker[];
   buyPrice: number | null;
   defer: boolean;
@@ -4602,6 +4608,7 @@ async function loadSignalBotPriceGuardBlockers(input: {
     return {
       blockers: Array.from(new Set(blockers)),
       buyPrice: strictOffer?.fresh ? strictOffer.ask : null,
+      quoteAsOf: strictTop?.asOf ?? null,
       defer: false,
       orderable: true,
       timedOut: false,
@@ -4926,73 +4933,6 @@ async function recordSignalBotPriceGuardDeferral(input: {
   return next;
 }
 
-function signalDeliveryCandidateFromSource(input: {
-  buySide: "NO" | "YES";
-  executablePrice: number | null;
-  note: SignalBotNote;
-  priceAsOf: string;
-}): SignalDeliveryCandidate | null {
-  const venue = normalizeHunchVenue(input.note.marketVenue);
-  if (
-    !venue ||
-    !input.note.eventId ||
-    !input.note.marketId ||
-    input.executablePrice == null
-  ) {
-    return null;
-  }
-  return {
-    active: true,
-    eventId: input.note.eventId,
-    executablePrice: input.executablePrice,
-    matchMethod: "source_identity",
-    marketId: input.note.marketId,
-    mappedSide: input.buySide,
-    mappingConfidence: 1,
-    mappingMethod: "source_identity",
-    orderable: true,
-    priceAsOf: input.priceAsOf,
-    sourceSide: input.buySide,
-    venue,
-  };
-}
-
-function signalDeliveryCandidateFromAgg(input: {
-  buySide: "NO" | "YES";
-  executablePrice: number | null;
-  market: ClusterMarketSummary;
-  priceAsOf: string;
-}): SignalDeliveryCandidate | null {
-  const mapping = input.market.outcomeMapping;
-  const mappedSide = mapping
-    ? resolveNativeOutcomeForCanonicalSide(mapping.sourceYesTo, input.buySide)
-    : null;
-  if (
-    !mapping ||
-    !mappedSide ||
-    input.executablePrice == null ||
-    !input.market.eventId ||
-    !input.market.marketId ||
-    !input.market.matchMethod
-  ) {
-    return null;
-  }
-  return {
-    active: input.market.active === true,
-    eventId: input.market.eventId,
-    executablePrice: input.executablePrice,
-    matchMethod: input.market.matchMethod,
-    marketId: input.market.marketId,
-    mappedSide,
-    mappingConfidence: mapping.confidence,
-    mappingMethod: mapping.method,
-    orderable: input.market.orderable === true,
-    priceAsOf: input.priceAsOf,
-    sourceSide: input.buySide,
-    venue: input.market.venue,
-  };
-}
-
 type SignalBotPolicyDeliveryResolution =
   | {
       allowBuyCta: boolean;
@@ -5069,6 +5009,7 @@ async function resolveSignalBotDeliveryForPolicy(input: {
     const source = signalDeliveryCandidateFromSource({
       buySide: input.buySide,
       executablePrice: sourceReadiness.buyPrice,
+      quoteAsOf: sourceReadiness.quoteAsOf ?? null,
       note: input.note,
       priceAsOf: nowIso,
     });
@@ -5086,6 +5027,7 @@ async function resolveSignalBotDeliveryForPolicy(input: {
     sourceSnapshotPrice != null
   ) {
     sourceNavigationTarget = {
+      quoteAsOf: input.note.signalPriceSnapshotV1?.asOf ?? null,
       eventId: input.note.eventId,
       marketId: input.note.marketId,
       price: sourceSnapshotPrice,
@@ -5101,6 +5043,7 @@ async function resolveSignalBotDeliveryForPolicy(input: {
     });
     if (alternative) {
       candidates.push({
+        quoteAsOf: alternative.quoteAsOf ?? null,
         active: true,
         eventId: alternative.eventId,
         executablePrice: alternative.price,
@@ -5195,6 +5138,7 @@ async function resolveSignalBotDeliveryForPolicy(input: {
             const candidate = signalDeliveryCandidateFromAgg({
               buySide: input.buySide,
               executablePrice: readiness.buyPrice,
+              quoteAsOf: readiness.quoteAsOf ?? null,
               market,
               priceAsOf: nowIso,
             });
@@ -5229,6 +5173,7 @@ async function resolveSignalBotDeliveryForPolicy(input: {
       diagnostics,
       status: "ready",
       target: {
+        quoteAsOf: resolution.target.quoteAsOf ?? null,
         eventId: resolution.target.eventId,
         marketId: resolution.target.marketId,
         price: resolution.target.executablePrice,
@@ -6049,6 +5994,22 @@ export async function publishSignalBotTick(input: {
         attemptId: reservation.attemptId,
         db: input.db,
         deliveryRef,
+        metrics: {
+          publicationSnapshotV1: buildSignalPublicationSnapshot({
+            marketId:
+              preparation.deliveryTarget?.marketId ?? note.marketId ?? "",
+            venue: preparation.deliveryTarget?.venue ?? note.marketVenue ?? "",
+            side: preparation.deliveryTarget?.side ?? preparation.buySide,
+            priceSnapshot: note.signalPriceSnapshotV1 ?? null,
+            displayPrice: deliveryView.target?.price,
+            nativeQuote: preparation.deliveryTarget
+              ? {
+                  ask: preparation.deliveryTarget.price,
+                  asOf: preparation.deliveryTarget.quoteAsOf ?? null,
+                }
+              : null,
+          }),
+        },
       });
       if (!began) break;
       const result = await sendSignalBotViaTransport({

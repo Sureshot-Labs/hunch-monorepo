@@ -1,5 +1,9 @@
 import type { DbQuery } from "../db.js";
 import {
+  parseSignalPublicationSnapshot,
+  publicationQuoteQuality,
+} from "./signal-publication-snapshot.js";
+import {
   buildMarketTypeText,
   classifyMarketSegmentFromText,
   classifyMarketTypeFromText,
@@ -80,6 +84,8 @@ export type HolderResearchSignalPerformance = {
   state: "open" | "resolved" | "unknown";
   outcome: "correct" | "wrong" | "open" | "unknown";
   createdAt: string;
+  publishedAt?: string | null;
+  entryQuoteAt?: string | null;
   hoursToCloseAtNote: number | null;
   noteYesProbability: number | null;
   currentYesProbability: number | null;
@@ -91,6 +97,8 @@ export type HolderResearchSignalPerformance = {
     | "nearest_trade"
     | "missing";
   entryQuality:
+    | "quoted_ask"
+    | "legacy_display"
     | "exact_snapshot"
     | "near_trade"
     | "distant_trade"
@@ -207,6 +215,9 @@ type HolderResearchPerformanceNoteRow = {
   market_token_no: string | null;
   clob_token_ids: string | null;
   frozen_entry_price?: string | number | null;
+  publication_snapshot?: unknown;
+  published_at?: Date | string | null;
+  delivered_initial?: boolean;
   frozen_side?: string | null;
   thesis_key?: string | null;
 };
@@ -820,6 +831,54 @@ function resolveEntryPrice(input: {
   quality: HolderResearchSignalPerformance["priceSourceQuality"];
   entryQuality: HolderResearchSignalPerformance["entryQuality"];
 } {
+  if (input.row.delivered_initial) {
+    if (input.row.publication_snapshot != null) {
+      const snapshot = parseSignalPublicationSnapshot(
+        input.row.publication_snapshot,
+      );
+      if (
+        snapshot &&
+        snapshot.marketId === input.row.market_id &&
+        snapshot.side === input.side &&
+        snapshot.venue === input.row.venue &&
+        input.row.published_at &&
+        publicationQuoteQuality(snapshot, new Date(input.row.published_at)) ===
+          "quoted_ask"
+      ) {
+        return {
+          price: snapshot.ask,
+          source: "frozen_delivery",
+          quality: "exact",
+          entryQuality: "quoted_ask",
+          distanceMinutes: null,
+        };
+      }
+      // Never fall back to note-time or present-day prices for an unpriced delivery.
+      return {
+        price: null,
+        source: "missing",
+        quality: "missing",
+        entryQuality: "missing_entry",
+        distanceMinutes: null,
+      };
+    }
+    const legacyPrice = normalizePrice(input.row.frozen_entry_price);
+    return legacyPrice != null && legacyPrice > 0 && legacyPrice < 1
+      ? {
+          price: legacyPrice,
+          source: "frozen_delivery",
+          quality: "approximate",
+          entryQuality: "legacy_display",
+          distanceMinutes: null,
+        }
+      : {
+          price: null,
+          source: "missing",
+          quality: "missing",
+          entryQuality: "missing_entry",
+          distanceMinutes: null,
+        };
+  }
   const frozenEntryPrice = normalizePrice(input.row.frozen_entry_price);
   if (frozenEntryPrice != null) {
     return {
@@ -977,6 +1036,14 @@ function buildPerformanceForRow(input: {
     state,
     outcome,
     createdAt,
+    ...(input.row.delivered_initial
+      ? {
+          publishedAt: toIso(input.row.published_at),
+          entryQuoteAt:
+            parseSignalPublicationSnapshot(input.row.publication_snapshot)
+              ?.quoteAsOf ?? null,
+        }
+      : {}),
     hoursToCloseAtNote: hoursToCloseAtNote(input.row),
     noteYesProbability: noteYesProbability(input.row.metrics),
     currentYesProbability: resolveHolderResearchYesProbability(input.row),
@@ -1193,12 +1260,19 @@ export async function auditHolderResearchSignalPerformance(
         select distinct on (target_market_id, target_side)
           target_market_id,
           target_side,
-          target_price
+          target_price,
+          publication_snapshot,
+          sent_at
         from (
           select
-            nullif(sbm.metrics #>> '{delivery,view,target,marketId}', '') as target_market_id,
-            upper(nullif(sbm.metrics #>> '{delivery,view,target,side}', '')) as target_side,
-            nullif(sbm.metrics #>> '{delivery,view,target,price}', '')::numeric as target_price,
+            coalesce(nullif(sbm.metrics #>> '{publicationSnapshotV1,marketId}', ''),
+              nullif(sbm.metrics #>> '{delivery,view,target,marketId}', ''), t.target_id) as target_market_id,
+            upper(coalesce(nullif(sbm.metrics #>> '{publicationSnapshotV1,side}', ''),
+              nullif(sbm.metrics #>> '{delivery,view,target,side}', ''),
+              nullif(t.target_meta->>'side', ''),
+              case n.direction when 'up' then 'YES' when 'down' then 'NO' end)) as target_side,
+            nullif(sbm.metrics #>> '{delivery,view,target,price}', '') as target_price,
+            sbm.metrics->'publicationSnapshotV1' as publication_snapshot,
             sbm.sent_at
           from signal_bot_messages sbm
           where sbm.note_id = n.id
@@ -1207,7 +1281,6 @@ export async function auditHolderResearchSignalPerformance(
         ) delivered
         where target_market_id is not null
           and target_side in ('YES', 'NO')
-          and target_price between 0 and 1
         order by target_market_id, target_side, sent_at asc
       ) delivery on true
     `
@@ -1229,6 +1302,9 @@ export async function auditHolderResearchSignalPerformance(
         ) as thesis_key,
         ${options.deliveredInitialOnly ? "delivery.target_side" : "null::text"} as frozen_side,
         ${options.deliveredInitialOnly ? "delivery.target_price" : "null::numeric"} as frozen_entry_price,
+        ${options.deliveredInitialOnly ? "delivery.publication_snapshot" : "null::jsonb"} as publication_snapshot,
+        ${options.deliveredInitialOnly ? "delivery.sent_at" : "null::timestamptz"} as published_at,
+        ${options.deliveredInitialOnly ? "true" : "false"} as delivered_initial,
         n.direction,
         n.confidence,
         n.created_at,
@@ -1285,6 +1361,7 @@ export async function auditHolderResearchSignalPerformance(
   );
 
   const fallbackRequests = rows.flatMap((row) => {
+    if (options.deliveredInitialOnly) return [];
     const side = resolveSignalSide(row);
     if (!side) return [];
     if (normalizePrice(row.frozen_entry_price) != null) return [];
