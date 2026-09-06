@@ -1,7 +1,12 @@
 import { z } from "zod";
+import {
+  openRouterReasoningEffortSchema,
+  supportsOpenRouterReasoningEffort,
+  type OpenRouterReasoningEffort,
+} from "../lib/openrouter-reasoning.js";
 
 import type { DbQuery } from "../db.js";
-import { fetchActiveRuntimePolicy } from "../repos/runtime-policies.js";
+import { fetchActiveRuntimePolicy } from "@hunch/db";
 import { DEFAULT_SIGNAL_BOT_POLICY_REVISION } from "./signal-bot-policy-revision.js";
 
 export type SignalBotTradingAction = "buy" | "sell" | "redeem";
@@ -22,6 +27,9 @@ export type TelegramMiniAppHandoffMode = "off" | "fallback" | "always";
 export type TelegramMiniAppHandoffContractVersion = 1 | 2;
 
 export type SignalBotPolicy = {
+  xEditorialModel?: string | null;
+  xEditorialReasoningEffort?: OpenRouterReasoningEffort | null;
+  xEditorialMaxOutputTokens?: number | null;
   autoEnableOnTelegramLink: boolean;
   autoManagedMaxAmountUsd: number;
   autoManagedVenues: SignalBotTradingVenue[];
@@ -66,6 +74,9 @@ const telegramMiniAppHandoffContractVersionSchema = z.union([
 
 export const signalBotSchema = z
   .object({
+    xEditorialModel: z.string().trim().min(1).max(160).nullable(),
+    xEditorialReasoningEffort: openRouterReasoningEffortSchema.nullable(),
+    xEditorialMaxOutputTokens: positiveInt.min(700).max(16_000).nullable(),
     autoEnableOnTelegramLink: strictBoolean,
     autoManagedMaxAmountUsd: positiveInt.max(100_000),
     autoManagedVenues: z.array(signalBotTradingVenueSchema).max(8),
@@ -84,7 +95,21 @@ export const signalBotSchema = z
     requireConfirmation: strictBoolean,
   })
   .strict()
-  .partial();
+  .partial()
+  .superRefine((policy, context) => {
+    if (
+      !supportsOpenRouterReasoningEffort(
+        policy.xEditorialModel ?? undefined,
+        policy.xEditorialReasoningEffort,
+      )
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["xEditorialReasoningEffort"],
+        message:
+          "GPT-6 Astra requires reasoning: low, medium, high, xhigh or max",
+      });
+  });
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -114,6 +139,9 @@ function clamp(value: number, min: number, max: number): number {
 
 export function getDefaultSignalBotPolicy(): SignalBotPolicy {
   return {
+    xEditorialModel: null,
+    xEditorialReasoningEffort: null,
+    xEditorialMaxOutputTokens: null,
     autoEnableOnTelegramLink: false,
     autoManagedMaxAmountUsd: 1,
     autoManagedVenues: ["polymarket"],
@@ -199,6 +227,9 @@ export function normalizeSignalBotPolicy(
   return {
     // Strict user-signed execution must not prompt new users for an unattended
     // signer merely because an older runtime payload enabled automatic setup.
+    xEditorialModel: policy.xEditorialModel ?? null,
+    xEditorialReasoningEffort: policy.xEditorialReasoningEffort ?? null,
+    xEditorialMaxOutputTokens: policy.xEditorialMaxOutputTokens ?? null,
     autoEnableOnTelegramLink:
       policy.miniAppHandoffMode !== "always" &&
       Boolean(policy.autoEnableOnTelegramLink ?? false),

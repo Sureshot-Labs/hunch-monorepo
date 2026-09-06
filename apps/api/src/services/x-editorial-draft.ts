@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 
 import { z } from "zod";
+import {
+  buildOpenRouterReasoningOptions,
+  type OpenRouterReasoningEffort,
+} from "../lib/openrouter-reasoning.js";
 
 export const X_EDITORIAL_CONTENT_PROFILE = "x_editorial_draft_v1" as const;
 export const X_EDITORIAL_PROMPT_VERSION = "x_editorial_prompt_v14" as const;
@@ -101,6 +105,7 @@ export type XEditorialDraftComposer = (input: {
 }) => Promise<XEditorialDraftV1>;
 
 export type XEditorialComposerConfig = {
+  reasoningEffort?: OpenRouterReasoningEffort | null;
   enabled: boolean;
   maxCharacters: number;
   maxOutputTokens: number;
@@ -942,7 +947,11 @@ async function callOpenRouter(input: {
           ],
           max_tokens: input.maxTokens,
           provider: { require_parameters: true },
-          reasoning: { effort: "minimal", exclude: true },
+          ...buildOpenRouterReasoningOptions({
+            model: input.config.model,
+            effort: input.config.reasoningEffort,
+            legacyEffort: "minimal",
+          }),
           response_format: {
             type: "json_schema",
             json_schema: {
@@ -1017,15 +1026,19 @@ async function callOpenRouter(input: {
 export function createOpenRouterXEditorialDraftComposer(input: {
   apiKey: string;
   config: XEditorialComposerConfig;
+  resolveConfig?: () => Promise<XEditorialComposerConfig>;
 }): XEditorialDraftComposer {
   const apiKey = input.apiKey.trim();
   return async ({ source }) => {
-    if (!input.config.enabled) {
+    const config = input.resolveConfig
+      ? await input.resolveConfig()
+      : input.config;
+    if (!config.enabled) {
       throw new Error("X editorial composer is disabled");
     }
     if (!apiKey) throw new Error("OPENROUTER_API_KEY missing");
     const generatedAt = new Date().toISOString();
-    const systemPrompt = buildXEditorialDraftSystemPrompt(input.config);
+    const systemPrompt = buildXEditorialDraftSystemPrompt(config);
     let previousAttempt: unknown = null;
     let repairIssues: string[] | undefined;
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1033,10 +1046,13 @@ export function createOpenRouterXEditorialDraftComposer(input: {
       try {
         const response = await callOpenRouter({
           apiKey,
-          config: input.config,
+          config,
           maxTokens: repairIssues?.includes("missing_content")
-            ? Math.min(4_000, Math.max(1_400, input.config.maxOutputTokens * 2))
-            : input.config.maxOutputTokens,
+            ? Math.max(
+                config.maxOutputTokens,
+                Math.min(4_000, Math.max(1_400, config.maxOutputTokens * 2)),
+              )
+            : config.maxOutputTokens,
           systemPrompt,
           userPrompt: buildUserPrompt({
             previousAttempt,
@@ -1084,7 +1100,7 @@ export function createOpenRouterXEditorialDraftComposer(input: {
         });
       }
       const validated = validateXEditorialModelOutput({
-        config: input.config,
+        config,
         output: parsed.data,
         source,
       });
@@ -1104,7 +1120,7 @@ export function createOpenRouterXEditorialDraftComposer(input: {
               ? parsed.data.safetyFlags
               : ["model_blocked"],
           generatedAt,
-          model: input.config.model,
+          model: config.model,
           source,
           storyFamily: parsed.data.storyFamily,
         });
@@ -1114,7 +1130,7 @@ export function createOpenRouterXEditorialDraftComposer(input: {
         formatting: parsed.data.formatting,
         generatedAt,
         marketId: source.marketId,
-        model: input.config.model,
+        model: config.model,
         postText: validated.postText,
         promptVersion: X_EDITORIAL_PROMPT_VERSION,
         safetyFlags: parsed.data.safetyFlags,

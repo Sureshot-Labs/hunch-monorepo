@@ -1245,6 +1245,10 @@ async function main() {
     addArgIfMissing(searchArgs, "--in", tmpInputPath);
     addArgIfMissing(searchArgs, "--out", tmpOutPath);
     addArgIfMissing(searchArgs, "--model", config.model);
+    if (config.reasoningEffort != null)
+      addArgIfMissing(searchArgs, "--reasoning-effort", config.reasoningEffort);
+    if (config.temperature != null)
+      addArgIfMissing(searchArgs, "--temperature", String(config.temperature));
     addArgIfMissing(searchArgs, "--embed-model", config.embedModel);
     addArgIfMissing(searchArgs, "--max-nodes", String(config.maxNodes));
     addArgIfMissing(searchArgs, "--max-signals", String(config.maxSignals));

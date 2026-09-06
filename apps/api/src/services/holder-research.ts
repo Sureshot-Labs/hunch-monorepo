@@ -539,6 +539,7 @@ export type HolderResearchCachedDecision = {
   candidateKey: string;
   status: HolderResearchStatus;
   model: string;
+  modelConfigSignature?: string;
   checkedAt: string;
   nextEligibleAt: string | null;
   forceEligibleAt: string | null;
@@ -2513,6 +2514,10 @@ export function parseHolderResearchCachedDecision(
       candidateKey: record.candidateKey,
       status: record.status,
       model: record.model,
+      modelConfigSignature:
+        typeof record.modelConfigSignature === "string"
+          ? record.modelConfigSignature
+          : undefined,
       checkedAt: record.checkedAt,
       nextEligibleAt:
         typeof record.nextEligibleAt === "string"
@@ -2529,6 +2534,17 @@ export function parseHolderResearchCachedDecision(
   } catch {
     return null;
   }
+}
+
+function holderResearchModelConfigSignature(
+  policy: HolderResearchPolicy,
+): string {
+  return JSON.stringify([
+    policy.model,
+    policy.reasoningEffort ?? null,
+    policy.triageModel,
+    policy.triageReasoningEffort ?? null,
+  ]);
 }
 
 export function evaluateHolderResearchDecisionCache(input: {
@@ -2573,12 +2589,21 @@ export function evaluateHolderResearchDecisionCache(input: {
     input.policy,
     cached.checkedAt,
   );
-  // Revisit old non-published decisions without treating a schema fix as a
-  // new trading development or bypassing the publication cooldown.
+  const modelConfigChanged =
+    cached.modelConfigSignature != null
+      ? cached.modelConfigSignature !==
+        holderResearchModelConfigSignature(input.policy)
+      : cached.model !== input.policy.model ||
+        input.policy.triageModel !== "openai/gpt-5.4-mini" ||
+        input.policy.reasoningEffort != null ||
+        input.policy.triageReasoningEffort != null;
+  // Model changes and schema fixes are not new trading developments and must
+  // never bypass the publication cooldown.
   if (
     cached.status !== "PUBLISH" &&
-    cached.snapshot.priceMovementVersion !==
-      HOLDER_RESEARCH_PRICE_MOVEMENT_VERSION
+    (modelConfigChanged ||
+      cached.snapshot.priceMovementVersion !==
+        HOLDER_RESEARCH_PRICE_MOVEMENT_VERSION)
   ) {
     return {
       action: "analyze",
@@ -2734,6 +2759,7 @@ export function buildHolderResearchDecisionCacheRecord(input: {
     candidateKey: input.candidate.thesisKey,
     status: input.output.status,
     model: input.model,
+    modelConfigSignature: holderResearchModelConfigSignature(input.policy),
     checkedAt: now.toISOString(),
     nextEligibleAt: cooldownHours > 0 ? addHoursIso(now, cooldownHours) : null,
     forceEligibleAt:

@@ -74,6 +74,8 @@ import { withTelegramPrivateNavigation } from "./services/telegram-bot-private-n
 import { formatTelegramCalloutMarkdownV2 } from "./services/telegram-bot-trading-presentation.js";
 import { buildHunchMiniAppWebButton } from "./services/telegram-mini-app-buttons.js";
 import { createOpenRouterXEditorialDraftComposer } from "./services/x-editorial-draft.js";
+import { resolveSignalBotTradingPolicyFromDb } from "./services/signal-bot-trading-policy.js";
+import { resolveSignalBotEditorialConfig } from "./services/signal-bot-editorial-config.js";
 
 function log(event: string, fields?: Record<string, unknown>): void {
   console.log(
@@ -214,6 +216,13 @@ export async function runSignalBotRunner(): Promise<void> {
     ? createOpenRouterXEditorialDraftComposer({
         apiKey: requiredEnv("OPENROUTER_API_KEY"),
         config: config.xEditorial,
+        resolveConfig: async () =>
+          dbPool
+            ? resolveSignalBotEditorialConfig(
+                config.xEditorial,
+                await resolveSignalBotTradingPolicyFromDb(dbPool),
+              )
+            : config.xEditorial,
       })
     : undefined;
   const botUsername = await telegram

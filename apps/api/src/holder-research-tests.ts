@@ -3334,6 +3334,40 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(beforeCooldown.action, "skip");
       assert.equal(beforeCooldown.reason, "decision_cache");
 
+      for (const change of [
+        { model: "openai/gpt-5.6-sol" },
+        { reasoningEffort: "low" as const },
+        { triageModel: "openai/gpt-5.6-luna" },
+        { triageReasoningEffort: "medium" as const },
+      ]) {
+        const changed = evaluateHolderResearchDecisionCache({
+          candidate,
+          cachedDecision: cachedSkip,
+          policy: { ...p, ...change },
+          now: new Date("2026-01-01T01:00:00.000Z"),
+        });
+        assert.equal(changed.reason, "force_recheck");
+        assert.deepEqual(changed.meaningfulDeltaReasons, []);
+        const published = evaluateHolderResearchDecisionCache({
+          candidate,
+          cachedDecision: { ...cachedSkip, status: "PUBLISH" },
+          policy: { ...p, ...change },
+          now: new Date("2026-01-01T01:00:00.000Z"),
+        });
+        assert.equal(published.action, "skip");
+      }
+      const legacyCache = { ...cachedSkip };
+      delete legacyCache.modelConfigSignature;
+      assert.equal(
+        evaluateHolderResearchDecisionCache({
+          candidate,
+          cachedDecision: legacyCache,
+          policy: p,
+          now: new Date("2026-01-01T01:00:00.000Z"),
+        }).action,
+        "skip",
+      );
+
       const movedCandidate = {
         ...candidate,
         market: { ...candidate.market, yesProbability: 0.61 },

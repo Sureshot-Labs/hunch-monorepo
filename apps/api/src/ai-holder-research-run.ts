@@ -17,7 +17,12 @@ import {
   resolveAiCost,
   type ResolvedCost,
 } from "./lib/ai-cost.js";
-import { getOpenRouterModelPricingPerM } from "./lib/ai-pricing.js";
+import {
+  getOpenRouterModelPricingPerM,
+  refreshOpenRouterModelPricing,
+} from "./lib/ai-pricing.js";
+import { buildOpenRouterReasoningOptions } from "./lib/openrouter-reasoning.js";
+import { buildHolderResearchResponseFormat } from "./services/holder-research-request.js";
 import { stripSourceMarkup } from "./lib/source-markup.js";
 import {
   buildHolderResearchSystemPrompt,
@@ -933,7 +938,11 @@ function estimateDryRunCost(params: {
   userPrompt: string;
   policy: HolderResearchPolicy;
 }): ResolvedCost {
-  const pricing = getOpenRouterModelPricingPerM(params.policy.model);
+  const inputTokens = estimateTokens(params.systemPrompt + params.userPrompt);
+  const pricing = getOpenRouterModelPricingPerM(
+    params.policy.model,
+    inputTokens,
+  );
   if (!pricing) {
     return {
       ...zeroCost(),
@@ -943,7 +952,7 @@ function estimateDryRunCost(params: {
     };
   }
   return resolveAiCost({
-    inputTokens: estimateTokens(params.systemPrompt + params.userPrompt),
+    inputTokens,
     outputTokens: params.policy.maxOutputTokens,
     priceInputPerM: pricing.inputPerM,
     priceOutputPerM: pricing.outputPerM,
@@ -1274,8 +1283,16 @@ async function callHolderResearchTriageModel(params: {
             { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt },
           ],
-          response_format: { type: "json_object" },
-          temperature: 0.05,
+          response_format: buildHolderResearchResponseFormat({
+            model: params.policy.triageModel,
+            stage: "triage",
+            useV2: params.useV2,
+          }),
+          ...buildOpenRouterReasoningOptions({
+            model: params.policy.triageModel,
+            effort: params.policy.triageReasoningEffort,
+            legacyTemperature: 0.05,
+          }),
           max_tokens: params.policy.triageMaxOutputTokens,
         }),
       },
@@ -1314,12 +1331,15 @@ async function callHolderResearchTriageModel(params: {
         },
       );
     }
-    const pricing = getOpenRouterModelPricingPerM(params.policy.triageModel);
     const provider = extractProviderCostUsd(payload);
     const promptTokens =
       payload.usage?.prompt_tokens ?? estimateTokens(systemPrompt + userPrompt);
     const completionTokens =
       payload.usage?.completion_tokens ?? estimateTokens(content);
+    const pricing = getOpenRouterModelPricingPerM(
+      params.policy.triageModel,
+      promptTokens,
+    );
     const cost = resolveAiCost({
       inputTokens: promptTokens,
       outputTokens: completionTokens,
@@ -1335,6 +1355,7 @@ async function callHolderResearchTriageModel(params: {
       cost,
       modelMeta: {
         model: params.policy.triageModel,
+        reasoningEffort: params.policy.triageReasoningEffort ?? null,
         mode: params.useV2 ? "openrouter_triage_v2" : "openrouter_triage_v1",
         prompt_tokens: promptTokens,
         completion_tokens: completionTokens,
@@ -1404,8 +1425,16 @@ async function callHolderResearchModel(params: {
             { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt },
           ],
-          response_format: { type: "json_object" },
-          temperature: 0.1,
+          response_format: buildHolderResearchResponseFormat({
+            model: params.policy.model,
+            stage: "final",
+            useV2: params.useV2,
+          }),
+          ...buildOpenRouterReasoningOptions({
+            model: params.policy.model,
+            effort: params.policy.reasoningEffort,
+            legacyTemperature: 0.1,
+          }),
           max_tokens: params.policy.maxOutputTokens,
         }),
       },
@@ -1446,12 +1475,15 @@ async function callHolderResearchModel(params: {
       params.candidate.evidence.map((evidence) => evidence.id),
     );
 
-    const pricing = getOpenRouterModelPricingPerM(params.policy.model);
     const provider = extractProviderCostUsd(payload);
     const promptTokens =
       payload.usage?.prompt_tokens ?? estimateTokens(systemPrompt + userPrompt);
     const completionTokens =
       payload.usage?.completion_tokens ?? estimateTokens(content);
+    const pricing = getOpenRouterModelPricingPerM(
+      params.policy.model,
+      promptTokens,
+    );
     const cost = resolveAiCost({
       inputTokens: promptTokens,
       outputTokens: completionTokens,
@@ -1468,6 +1500,7 @@ async function callHolderResearchModel(params: {
       cost,
       modelMeta: {
         model: params.policy.model,
+        reasoningEffort: params.policy.reasoningEffort ?? null,
         external_research: params.externalResearch,
         mode: params.useV2 ? "openrouter_v2" : "openrouter_v1",
         final_v2:
@@ -1812,6 +1845,11 @@ export async function runHolderResearch(
   const policyResult = await resolveHolderResearchPolicy(pool);
   const walletIntelPolicyResult = await resolveWalletIntelRefreshPolicy(pool);
   const policy = withPolicyOverrides(policyResult.effective, args);
+  if (args.callModel && policy.enabled) {
+    await refreshOpenRouterModelPricing(
+      policy.dryRun ? null : options.decisionCacheRedis,
+    );
+  }
   const observeV2 = policy.pipelineV2Mode !== "off";
   const useV2Triage =
     policy.pipelineV2Mode === "triage" ||

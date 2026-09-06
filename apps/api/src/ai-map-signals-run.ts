@@ -7,7 +7,14 @@ import { env } from "./env.js";
 import {
   getOpenRouterEmbeddingPricingPerM,
   getOpenRouterModelPricingPerM,
+  refreshOpenRouterModelPricing,
 } from "./lib/ai-pricing.js";
+import {
+  openRouterReasoningEffortSchema,
+  openRouterTemperatureSchema,
+  type OpenRouterReasoningEffort,
+} from "./lib/openrouter-reasoning.js";
+import { buildMapOpenRouterOptions } from "./services/map-openrouter-request.js";
 import {
   extractProviderCostUsd,
   resolveAiCost,
@@ -163,6 +170,8 @@ type MarketEmbeddingInput = {
 };
 
 type Args = {
+  reasoningEffort?: OpenRouterReasoningEffort | null;
+  temperature?: number | null;
   inputPath: string;
   outPath: string | null;
   reportPath: string | null;
@@ -435,6 +444,16 @@ function resolveArgs(argv: string[]): Args {
   const modelPricing = getOpenRouterModelPricingPerM(model);
   const embedPricing = getOpenRouterEmbeddingPricingPerM(embedModel);
   return {
+    reasoningEffort:
+      parseFlag(argv, "--reasoning-effort") == null
+        ? null
+        : openRouterReasoningEffortSchema.parse(
+            parseFlag(argv, "--reasoning-effort"),
+          ),
+    temperature:
+      parseFlag(argv, "--temperature") == null
+        ? null
+        : openRouterTemperatureSchema.parse(parseFlag(argv, "--temperature")),
     inputPath:
       parseFlag(argv, "--in") ??
       parseFlag(argv, "--input") ??
@@ -510,6 +529,8 @@ Input:
 
 Model:
   --model <id>                   OpenRouter model (default: openai/gpt-5.4)
+  --reasoning-effort <effort>     Optional reasoning override (legacy default: low)
+  --temperature <0..2>           Legacy sampling temperature; omitted for modern OpenAI reasoning models
   --embed-model <id>             OpenRouter embeddings model (default: OPENROUTER_EMBED_MODEL or AI_EMBED_MODEL or intfloat/e5-large-v2)
   --max-output-tokens <n>        Max output tokens per node call (default: 900)
   --timeout-sec <n>              Request timeout seconds (default: 90)
@@ -989,10 +1010,13 @@ async function callOpenRouter(
               { role: "system", content: systemPrompt },
               { role: "user", content: userPrompt },
             ],
-            temperature: 0,
+            ...buildMapOpenRouterOptions({
+              model: args.model,
+              reasoningEffort: args.reasoningEffort,
+              temperature: args.temperature,
+              stage: "signals",
+            }),
             max_tokens: args.maxOutputTokens,
-            response_format: { type: "json_object" },
-            reasoning: { effort: "low" },
           }),
           signal: controller.signal,
         },
@@ -2087,7 +2111,7 @@ export async function runMapSignals(
   activeRunContext = { ...DEFAULT_RUN_CONTEXT, ...context };
   if (hasFlag(argv, "--help") || hasFlag(argv, "-h"))
     usage(activeRunContext, 0);
-  const args = resolveArgs(argv);
+  let args = resolveArgs(argv);
 
   const input = await readInput(args.inputPath);
   const runId = input.run.runId;
@@ -2100,6 +2124,10 @@ export async function runMapSignals(
 
   try {
     const startedAt = Date.now();
+    if (!args.dryRun) {
+      await refreshOpenRouterModelPricing(redis);
+      args = resolveArgs(argv);
+    }
 
     console.log(`${logPrefix()} start`, {
       runId,
@@ -2732,6 +2760,8 @@ export async function runMapSignals(
     await redis.quit();
   }
 }
+
+export const mapSignalsModelTestHooks = { resolveArgs, callOpenRouter };
 
 const isDirectRun = (() => {
   const entry = process.argv[1];

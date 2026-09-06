@@ -9,6 +9,11 @@ import {
 import type { DbQuery } from "../db.js";
 import { env } from "../env.js";
 import {
+  openRouterReasoningEffortSchema,
+  supportsOpenRouterReasoningEffort,
+  type OpenRouterReasoningEffort,
+} from "../lib/openrouter-reasoning.js";
+import {
   holderResearchBucketSchema,
   type HolderResearchBucket,
 } from "../schemas/holder-research.js";
@@ -211,6 +216,8 @@ export type HolderResearchPolicy = {
   estimatedExternalSearchCostUsd: number;
   triageEnabled: boolean;
   triageModel: string;
+  triageReasoningEffort?: OpenRouterReasoningEffort | null;
+  reasoningEffort?: OpenRouterReasoningEffort | null;
   triageBatchSize: number;
   triageMaxBatchesPerRun: number;
   triageMaxOutputTokens: number;
@@ -384,6 +391,8 @@ export type MarketMapPolicy = {
   labelAiEnabled: boolean;
   labelLevels: number[];
   labelModel: string;
+  labelReasoningEffort?: OpenRouterReasoningEffort | null;
+  labelTemperature?: number | null;
   labelMaxTokens: number;
   labelChildSamplesMax: number;
   labelSiblingSamplesMax: number;
@@ -478,6 +487,8 @@ export type MapSearchPolicy = {
 };
 
 export type MapSignalsPolicy = {
+  reasoningEffort?: OpenRouterReasoningEffort | null;
+  temperature?: number | null;
   enabled: boolean;
   triggerMode: "interval" | "cron";
   pollIntervalSec: number;
@@ -824,6 +835,8 @@ const marketMapSchema = z
     labelAiEnabled: strictBoolean,
     labelLevels: z.array(z.coerce.number().int().min(1).max(3)).max(3),
     labelModel: z.string().trim().min(1).max(200),
+    labelReasoningEffort: openRouterReasoningEffortSchema.nullable(),
+    labelTemperature: z.coerce.number().min(0).max(2).nullable(),
     labelMaxTokens: positiveInt.max(2_000),
     labelChildSamplesMax: positiveInt.max(20),
     labelSiblingSamplesMax: nonNegativeInt.max(20),
@@ -838,7 +851,21 @@ const marketMapSchema = z
     projectionBudgetMs: positiveInt.max(60 * 60 * 1_000),
   })
   .strict()
-  .partial();
+  .partial()
+  .superRefine((policy, context) => {
+    if (
+      !supportsOpenRouterReasoningEffort(
+        policy.labelModel,
+        policy.labelReasoningEffort,
+      )
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["labelReasoningEffort"],
+        message:
+          "GPT-6 Astra requires reasoning: low, medium, high, xhigh or max",
+      });
+  });
 
 const mapSearchToolModeSchema = z.enum(["both", "web", "x", "none"]);
 const mapSearchReuseModeSchema = z.enum([
@@ -949,6 +976,8 @@ const mapSignalsSchema = z
     statusTtlSec: positiveInt.max(60 * 60 * 24 * 30),
     inputDigestEnabled: strictBoolean,
     model: z.string().trim().min(1).max(200),
+    reasoningEffort: openRouterReasoningEffortSchema.nullable(),
+    temperature: z.coerce.number().min(0).max(2).nullable(),
     embedModel: z.string().trim().min(1).max(200),
     maxNodes: positiveInt.max(500),
     maxSignals: positiveInt.max(500),
@@ -971,7 +1000,18 @@ const mapSignalsSchema = z
     maxPublishPerRun: positiveInt.max(5_000),
   })
   .strict()
-  .partial();
+  .partial()
+  .superRefine((policy, context) => {
+    if (
+      !supportsOpenRouterReasoningEffort(policy.model, policy.reasoningEffort)
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["reasoningEffort"],
+        message:
+          "GPT-6 Astra requires reasoning: low, medium, high, xhigh or max",
+      });
+  });
 
 const holderResearchSchema = z
   .object({
@@ -1001,6 +1041,8 @@ const holderResearchSchema = z
     estimatedExternalSearchCostUsd: nonNegativeNumber.max(10_000),
     triageEnabled: strictBoolean,
     triageModel: z.string().trim().min(1).max(200),
+    triageReasoningEffort: openRouterReasoningEffortSchema.nullable(),
+    reasoningEffort: openRouterReasoningEffortSchema.nullable(),
     triageBatchSize: positiveInt.max(50),
     triageMaxBatchesPerRun: positiveInt.max(20),
     triageMaxOutputTokens: positiveInt.max(8_000),
@@ -1110,7 +1152,25 @@ const holderResearchSchema = z
     quotaConcentrationRisk: nonNegativeInt.max(100),
   })
   .strict()
-  .partial();
+  .partial()
+  .superRefine((policy, context) => {
+    for (const [model, effort, path] of [
+      [policy.model, policy.reasoningEffort, "reasoningEffort"],
+      [
+        policy.triageModel,
+        policy.triageReasoningEffort,
+        "triageReasoningEffort",
+      ],
+    ] as const) {
+      if (!supportsOpenRouterReasoningEffort(model, effort))
+        context.addIssue({
+          code: "custom",
+          path: [path],
+          message:
+            "GPT-6 Astra requires reasoning: low, medium, high, xhigh or max",
+        });
+    }
+  });
 
 const arbitrageDefaultsSchema = z
   .object({
@@ -1606,6 +1666,8 @@ function getDefaults(): IntelPolicyMap {
       labelAiEnabled: env.aiMarketMapLabelAiEnabled,
       labelLevels: env.aiMarketMapLabelLevels,
       labelModel: env.aiMarketMapLabelModel,
+      labelReasoningEffort: null,
+      labelTemperature: null,
       labelMaxTokens: env.aiMarketMapLabelMaxTokens,
       labelChildSamplesMax: env.aiMarketMapLabelChildSamplesMax,
       labelSiblingSamplesMax: env.aiMarketMapLabelSiblingSamplesMax,
@@ -1724,6 +1786,8 @@ function getDefaults(): IntelPolicyMap {
       statusTtlSec: 60 * 60 * 24 * 7,
       inputDigestEnabled: true,
       model: "openai/gpt-5.4",
+      reasoningEffort: null,
+      temperature: null,
       embedModel:
         process.env.OPENROUTER_EMBED_MODEL ||
         process.env.AI_EMBED_MODEL ||
@@ -1773,6 +1837,8 @@ function getDefaults(): IntelPolicyMap {
       estimatedExternalSearchCostUsd: 0.03,
       triageEnabled: true,
       triageModel: "openai/gpt-5.4-mini",
+      triageReasoningEffort: null,
+      reasoningEffort: null,
       triageBatchSize: 8,
       triageMaxBatchesPerRun: 1,
       triageMaxOutputTokens: 2_000,
@@ -2416,6 +2482,8 @@ function normalizeMarketMapPolicy(policy: MarketMapPolicy): MarketMapPolicy {
     labelLevels:
       normalizedLabelLevels.length > 0 ? normalizedLabelLevels : [1, 2, 3],
     labelModel: policy.labelModel.trim(),
+    labelReasoningEffort: policy.labelReasoningEffort ?? null,
+    labelTemperature: policy.labelTemperature ?? null,
     labelMaxTokens: clamp(Math.trunc(policy.labelMaxTokens), 1, 2_000),
     labelChildSamplesMax: clamp(
       Math.trunc(policy.labelChildSamplesMax ?? 16),
@@ -2666,6 +2734,8 @@ function normalizeMapSignalsPolicy(policy: MapSignalsPolicy): MapSignalsPolicy {
     statusTtlSec: clamp(Math.trunc(policy.statusTtlSec), 60, 60 * 60 * 24 * 30),
     inputDigestEnabled: Boolean(policy.inputDigestEnabled),
     model: policy.model.trim(),
+    reasoningEffort: policy.reasoningEffort ?? null,
+    temperature: policy.temperature ?? null,
     embedModel: policy.embedModel.trim(),
     maxNodes: clamp(Math.trunc(policy.maxNodes), 1, 500),
     maxSignals: clamp(Math.trunc(policy.maxSignals), 1, 500),
@@ -2797,6 +2867,8 @@ function normalizeHolderResearchPolicy(
     ),
     triageEnabled: Boolean(policy.triageEnabled),
     triageModel: policy.triageModel.trim() || "openai/gpt-5.4-mini",
+    triageReasoningEffort: policy.triageReasoningEffort ?? null,
+    reasoningEffort: policy.reasoningEffort ?? null,
     triageBatchSize: clamp(Math.trunc(policy.triageBatchSize), 1, 50),
     triageMaxBatchesPerRun: clamp(
       Math.trunc(policy.triageMaxBatchesPerRun),

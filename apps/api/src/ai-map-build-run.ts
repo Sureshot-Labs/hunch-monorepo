@@ -7,7 +7,12 @@ import { UMAP } from "umap-js";
 import { pool } from "./db.js";
 import { env } from "./env.js";
 import { closeRedis } from "./redis.js";
-import { getOpenRouterModelPricingPerM } from "./lib/ai-pricing.js";
+import {
+  getOpenRouterModelPricingPerM,
+  refreshOpenRouterModelPricing,
+} from "./lib/ai-pricing.js";
+import { buildMapOpenRouterOptions } from "./services/map-openrouter-request.js";
+import type { OpenRouterReasoningEffort } from "./lib/openrouter-reasoning.js";
 import { extractProviderCostUsd, resolveAiCost } from "./lib/ai-cost.js";
 import { buildRenderableMarketSql } from "./lib/market-renderability.js";
 import {
@@ -190,6 +195,8 @@ type BuildConfig = {
   labelAiEnabled: boolean;
   labelLevels: number[];
   labelModel: string;
+  labelReasoningEffort?: OpenRouterReasoningEffort | null;
+  labelTemperature?: number | null;
   labelMaxTokens: number;
   labelChildSamplesMax: number;
   labelSiblingSamplesMax: number;
@@ -1127,6 +1134,8 @@ function isTransientLabelError(error: unknown): boolean {
 
 async function callOpenRouterLabel(params: {
   model: string;
+  reasoningEffort?: OpenRouterReasoningEffort | null;
+  temperature?: number | null;
   labelMaxTokens: number;
   timeoutMs: number;
   prompt: LabelPromptPayload;
@@ -1149,9 +1158,13 @@ async function callOpenRouterLabel(params: {
           { role: "system", content: params.prompt.system },
           { role: "user", content: params.prompt.user },
         ],
-        temperature: 0,
+        ...buildMapOpenRouterOptions({
+          model: params.model,
+          reasoningEffort: params.reasoningEffort,
+          temperature: params.temperature,
+          stage: "label",
+        }),
         max_tokens: params.labelMaxTokens,
-        reasoning: { effort: "low" },
       }),
       signal: controller.signal,
     });
@@ -1263,6 +1276,8 @@ async function callOpenRouterLabel(params: {
 
 async function callOpenRouterLabelWithRetry(params: {
   model: string;
+  reasoningEffort?: OpenRouterReasoningEffort | null;
+  temperature?: number | null;
   labelMaxTokens: number;
   timeoutMs: number;
   prompt: LabelPromptPayload;
@@ -1607,6 +1622,8 @@ async function applyAiLabels(params: {
       try {
         let result = await callOpenRouterLabelWithRetry({
           model: config.labelModel,
+          reasoningEffort: config.labelReasoningEffort,
+          temperature: config.labelTemperature,
           labelMaxTokens: config.labelMaxTokens,
           timeoutMs: DEFAULT_AI_LABEL_TIMEOUT_MS,
           prompt,
@@ -1626,6 +1643,8 @@ async function applyAiLabels(params: {
             labelMaxTokensUsed = retryLabelMaxTokens;
             result = await callOpenRouterLabelWithRetry({
               model: config.labelModel,
+              reasoningEffort: config.labelReasoningEffort,
+              temperature: config.labelTemperature,
               labelMaxTokens: retryLabelMaxTokens,
               timeoutMs: DEFAULT_AI_LABEL_TIMEOUT_MS,
               prompt,
@@ -2268,6 +2287,8 @@ function buildConfig(args: string[], policy: MarketMapPolicy): BuildConfig {
         : policy.labelAiEnabled,
     labelLevels: policy.labelLevels,
     labelModel: policy.labelModel,
+    labelReasoningEffort: policy.labelReasoningEffort,
+    labelTemperature: policy.labelTemperature,
     labelMaxTokens: clamp(
       Math.trunc(
         parseNumber(parseFlag(args, "--label-max-tokens")) ??
@@ -2378,6 +2399,8 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
     [RESP_TYPES.BLOB_STRING]: Buffer,
   });
   try {
+    if (config.labelAiEnabled && !config.dryRun)
+      await refreshOpenRouterModelPricing(redis);
     for (const venue of config.venues) {
       const queryStartedAt = Date.now();
       const candidates = await fetchVenueCandidates(venue, config);
@@ -2857,6 +2880,8 @@ export async function runMarketMapBuild(
     labelCostSummary: result.labelCostSummary,
   };
 }
+
+export const marketMapModelTestHooks = { buildConfig, callOpenRouterLabel };
 
 const isDirectRun = (() => {
   const entry = process.argv[1];
