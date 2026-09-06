@@ -1764,8 +1764,7 @@ function getDefaults(): IntelPolicyMap {
       signalBotFollowthroughMinDataQuality: "any",
       signalBotTerminalInitialCutoff: null,
       externalSearchEnabled: false,
-      externalSearchModel:
-        process.env.XAI_SEARCH_MODEL?.trim() || "grok-4-1-fast-reasoning",
+      externalSearchModel: process.env.XAI_SEARCH_MODEL?.trim() || "grok-4.3",
       maxExternalSearchCallsPerRun: 2,
       forceExternalSearchForInvestigations: true,
       externalSearchMinScore: 0.7,
@@ -2771,8 +2770,7 @@ function normalizeHolderResearchPolicy(
         ? new Date(policy.signalBotTerminalInitialCutoff).toISOString()
         : null,
     externalSearchEnabled: Boolean(policy.externalSearchEnabled),
-    externalSearchModel:
-      policy.externalSearchModel.trim() || "grok-4-1-fast-reasoning",
+    externalSearchModel: policy.externalSearchModel.trim() || "grok-4.3",
     maxExternalSearchCallsPerRun: clamp(
       Math.trunc(policy.maxExternalSearchCallsPerRun),
       0,

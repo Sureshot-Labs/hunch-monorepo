@@ -771,6 +771,13 @@ async function runExternalResearch(params: {
       },
       body: JSON.stringify({
         model: params.policy.externalSearchModel,
+        // Pin the effort previously selected by xAI's retired-model redirect.
+        // Other explicit model overrides keep their own supported defaults.
+        ...(["grok-4.3", "grok-4.3-latest"].includes(
+          params.policy.externalSearchModel,
+        )
+          ? { reasoning: { effort: "low" } }
+          : {}),
         max_output_tokens: params.policy.externalSearchMaxOutputTokens,
         input: [
           {
