@@ -14,6 +14,7 @@ import { maximumInternalFundingDestinationRaw } from "../funding/planner/composi
 import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
 import { effectiveFundingEconomicsLimits } from "../funding/planner/source-options.js";
 import { buildFundingTradeConsumerIntent } from "../funding/persistence/funding-trade-consumer-intent.js";
+import { fundingEconomicSourceReservations } from "../funding/persistence/funding-operation-repository.js";
 import { fetchPolymarketMarketInfo } from "../repos/polymarket-markets.js";
 import { env } from "../env.js";
 import { toChecksumAddress } from "./api-trading-common.js";
@@ -131,7 +132,9 @@ function buildAccountFundingRequest(input: {
       ? { serverQuoteAvailableSourceCapacity: true }
       : {}),
     maxFeeUsd: null,
-    maxSlippageBps: input.slippageBps,
+    // Order price tolerance is not bridge slippage. Use the same funding
+    // policy defaults as ordinary Buy preparation.
+    maxSlippageBps: null,
     deadline: null,
   };
 }
@@ -377,7 +380,7 @@ export async function computePolymarketAccountMaxSpend(input: {
     const directAvailableRaw = directFunder.availableRaw;
     const economics = effectiveFundingEconomicsLimits(runtimePolicy, {
       maximumFeeUsd: null,
-      maximumSlippageBps: input.slippageBps,
+      maximumSlippageBps: null,
     });
     const excludedSourceLocationIds = [
       directFunder.locationId,
@@ -507,8 +510,28 @@ export async function computePolymarketAccountMaxSpend(input: {
         maximumSlippageBps: economics.maximumSlippageBps,
         preview: exactPreview,
       });
+      const hasExactInternalRoute = exactPreview.projection.sourceOptions.some(
+        (option) => {
+          const source = exactPreview.plannerSnapshot.sources.find(
+            (candidate) =>
+              candidate.option.sourceOptionId === option.sourceOptionId,
+          );
+          return (
+            option.selectable &&
+            option.minimumDestination != null &&
+            BigInt(option.minimumDestination.raw) >= additionalRequiredRaw &&
+            source != null &&
+            !fundingEconomicSourceReservations(
+              source.commitPlan.reservations,
+            ).some(({ reservation }) =>
+              excludedSourceLocationIds.includes(reservation.locationId),
+            )
+          );
+        },
+      );
       if (
         !completeFreshProjection(exactPreview.projection) ||
+        !hasExactInternalRoute ||
         (exactCapacityRaw ?? -1n) < additionalRequiredRaw
       ) {
         input.log?.warn?.(

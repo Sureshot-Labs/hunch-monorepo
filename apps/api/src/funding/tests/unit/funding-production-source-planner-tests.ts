@@ -1811,6 +1811,45 @@ assert.equal(excludedByPreference.length, 0);
   assert.equal(belowReserveFacts[0]?.nativeGasReady, false);
   const gasProfile = belowReserveAccount.ownership?.wallets[0];
   assert.ok(gasProfile);
+  const externalPolygon = {
+    ...gasProfile,
+    networkId: "evm:137" as const,
+    address: "0xbc497c059f4e0ba1146c36a646924d6384039d0e",
+    source: "external" as const,
+  };
+  assert.equal(
+    deriveExecutionGas(
+      {
+        ...belowReserveAccount,
+        nativeGasBalances: [
+          {
+            networkId: "evm:137",
+            address: externalPolygon.address,
+            raw: "8450816131265488661",
+          },
+        ],
+      },
+      externalPolygon,
+    ).status,
+    "ready",
+    "unvalued Polygon native balance still proves gas readiness for a connected Safe owner",
+  );
+  assert.equal(
+    deriveExecutionGas(
+      {
+        ...belowReserveAccount,
+        nativeGasBalances: [
+          {
+            networkId: "evm:8453",
+            address: externalPolygon.address,
+            raw: "8450816131265488661",
+          },
+        ],
+      },
+      externalPolygon,
+    ).status,
+    "unknown",
+  );
   assert.deepEqual(deriveExecutionGas(belowReserveAccount, gasProfile), {
     status: "needs_gas",
     sponsored: false,

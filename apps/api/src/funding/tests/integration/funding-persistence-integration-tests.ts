@@ -4,6 +4,7 @@
 
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { Interface } from "ethers";
 import { buildPolymarketPreRouteHandoffSteps } from "../../../funding-providers/relay/operation-plan.js";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 
@@ -3640,6 +3641,7 @@ async function testDepositWalletHandoffKeepsItsOwnActionTtl(): Promise<void> {
 
 async function testExistingSafeHandoffCommitsAndGatesRoute(
   preparation = false,
+  crossController = false,
 ): Promise<void> {
   const userId = await insertUser(pool);
   const base = buildPlan();
@@ -3759,6 +3761,67 @@ async function testExistingSafeHandoffCommitsAndGatesRoute(
       })),
     };
   }
+  if (crossController) {
+    const recipient = "0x3333333333333333333333333333333333333333";
+    const handoff = plan.steps[0];
+    const fund = plan.steps.at(-1);
+    assert.ok(handoff && fund);
+    const actorWalletId = handoff.normalizedAction.actorWalletId;
+    assert.equal(typeof actorWalletId, "string");
+    assert.ok(actorWalletId);
+    const validatorId = "polymarket_funding_router_v1";
+    plan = {
+      ...plan,
+      operation: {
+        ...plan.operation,
+        supportMetadata: {
+          ...plan.operation.supportMetadata,
+          planValidation: { validatorId, version: 4 },
+        },
+      },
+      steps: [
+        handoff,
+        {
+          ...fund,
+          ordinal: 1,
+          dependsOnOrdinal: 0,
+          stepKind: "transaction",
+          actionFingerprint: opaque("cross-controller-transfer"),
+          normalizedAction: {
+            kind: "evm_transaction",
+            actionId: opaque("cross-controller-action"),
+            networkId: "evm:137",
+            senderWalletId: actorWalletId,
+            to: asset.assetId,
+            data: new Interface([
+              "function transfer(address recipient,uint256 amount)",
+            ]).encodeFunctionData("transfer", [recipient, "1000000"]),
+            valueRaw: "0",
+            gasLimitRaw: null,
+          },
+          actionValidationResult: {
+            valid: true,
+            validatorId,
+            kind: "owned_safe_controller_transfer",
+            signerAddress: owner,
+            postconditionEvidenceKind: "exact_erc20_destination_credit_v1",
+            expectedDestinationAddress: recipient,
+            expectedDestinationAssetId: asset.assetId,
+            expectedDestinationRaw: "1000000",
+          },
+        },
+        {
+          ...fund,
+          ordinal: 2,
+          dependsOnOrdinal: 1,
+          actionValidationResult: {
+            ...fund.actionValidationResult,
+            signerAddress: recipient,
+          },
+        },
+      ],
+    };
+  }
   const consent = opaque("safe-consent");
   const quote = await createFundingQuote(
     pool,
@@ -3787,7 +3850,12 @@ async function testExistingSafeHandoffCommitsAndGatesRoute(
     assert.equal(result.rows[1]?.dependency_ordinal, 0);
     if (preparation) {
       assert.equal(result.rows.length, 3);
-      assert.equal(result.rows[1]?.executor_id, "polymarket_safe_relayer_v1");
+      assert.equal(
+        result.rows[1]?.executor_id,
+        crossController
+          ? "wallet_profile_evm_v1"
+          : "polymarket_safe_relayer_v1",
+      );
       assert.equal(result.rows[2]?.dependency_ordinal, 1);
     }
   } finally {
@@ -4128,7 +4196,9 @@ async function testDirectIngressWithDeferredPreparationCommit(): Promise<void> {
   }
 }
 
-async function testCompositePreparationAndRelayCommit(): Promise<void> {
+async function testCompositePreparationAndRelayCommit(
+  relayFirst = false,
+): Promise<void> {
   const userId = await insertUser(pool);
   const venueMarketId = opaque("composite-consumer-market");
   const marketId = `polymarket:${venueMarketId}`;
@@ -4283,16 +4353,24 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
       },
     ],
   };
+  const orderedPlan = relayFirst
+    ? {
+        ...plan,
+        steps: [...plan.steps]
+          .reverse()
+          .map((step, ordinal) => ({ ...step, ordinal })),
+      }
+    : plan;
   const consentToken = opaque("consent");
   const quote = await createFundingQuote(
     pool,
-    quoteInput(userId, plan, consentToken),
+    quoteInput(userId, orderedPlan, consentToken),
   );
   let operationId: string | null = null;
   try {
     const committed = await commitFundingOperation(
       pool,
-      commitInput(userId, quote.id, consentToken, plan),
+      commitInput(userId, quote.id, consentToken, orderedPlan),
     );
     operationId = committed.operation.id;
     const shape = await pool.query<{
@@ -4341,7 +4419,7 @@ async function testCompositePreparationAndRelayCommit(): Promise<void> {
           select id
           from funding_operation_steps
           where operation_id = $1
-            and ordinal = 0
+            and step_kind = 'venue_preparation'
         `,
         [operationId],
       );
@@ -8111,6 +8189,7 @@ console.log(
 await testDepositWalletHandoffKeepsItsOwnActionTtl();
 await testExistingSafeHandoffCommitsAndGatesRoute();
 await testExistingSafeHandoffCommitsAndGatesRoute(true);
+await testExistingSafeHandoffCommitsAndGatesRoute(true, true);
 console.log(
   "[funding-persistence-integration-tests] ok Deposit Wallet handoff keeps its own action TTL",
 );
@@ -8123,6 +8202,7 @@ console.log(
   "[funding-persistence-integration-tests] ok direct ingress with deferred preparation commit",
 );
 await testCompositePreparationAndRelayCommit();
+await testCompositePreparationAndRelayCommit(true);
 console.log(
   "[funding-persistence-integration-tests] ok composite venue preparation plus Relay commit",
 );

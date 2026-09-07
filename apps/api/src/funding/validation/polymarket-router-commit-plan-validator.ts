@@ -6,6 +6,7 @@ import type { JsonValue, NormalizedAction } from "../domain/types.js";
 import type { FundingCommitPlan } from "../persistence/funding-operation-repository.js";
 import { POLYMARKET_FUNDING_SOURCE_ADAPTER_ID } from "../preparation/polymarket-funding-snapshot.js";
 import { RELAY_PINNED_ASSETS } from "../../funding-providers/relay/mappings.js";
+import { Interface } from "ethers";
 
 const CONTROLLER_ROUTER_APPROVAL_KINDS = new Set([
   "controller_pusd_router_approval",
@@ -38,10 +39,36 @@ function isPolymarketRouterCommitPlanVersion(
   ) {
     return false;
   }
-  const steps =
+  const preparationSteps =
     plan.operation.planKind === "composite_route"
       ? plan.steps.filter((step) => step.segmentOrdinal === null)
       : plan.steps;
+  // Composite contributors keep operation-global ordinals. Validate this
+  // contributor's topology locally without accepting dependencies on another
+  // contributor (which must not be silently erased by renumbering).
+  const localOrdinals = new Map(
+    preparationSteps.map((step, index) => [step.ordinal, index]),
+  );
+  if (localOrdinals.size !== preparationSteps.length) return false;
+  if (
+    preparationSteps.some(
+      (step, index) =>
+        step.ordinal !==
+        (plan.operation.planKind === "composite_route"
+          ? (preparationSteps[0]?.ordinal ?? 0)
+          : 0) +
+          index,
+    )
+  )
+    return false;
+  const steps = preparationSteps.map((step, ordinal) => ({
+    ...step,
+    ordinal,
+    dependsOnOrdinal:
+      step.dependsOnOrdinal == null
+        ? null
+        : (localOrdinals.get(step.dependsOnOrdinal) ?? -1),
+  }));
   if (steps.length < 1 || steps.length > (allowsSafe ? 6 : 4)) return false;
   const first = steps[0];
   const hasPreRouteHandoff =
@@ -257,5 +284,120 @@ export function isPolymarketRouterCommitPlan(
       ? isPolymarketRouterV2CommitPlan(plan)
       : declarationRecord.version === 3
         ? isPolymarketRouterV3CommitPlan(plan)
-        : false;
+        : declarationRecord.version === 4
+          ? isPolymarketRouterV4CommitPlan(plan)
+          : false;
+}
+
+/** Cross-controller extraction keeps the Safe's owner as its signer. Only
+ * the following exact ERC20 transfer may credit the Router's controller. */
+export function isPolymarketRouterV4CommitPlan(
+  plan: Pick<FundingCommitPlan, "operation" | "steps">,
+): boolean {
+  const steps = plan.steps.filter((step) => step.segmentOrdinal === null);
+  if (steps.length < 3 || steps.length > 8) return false;
+  const firstOrdinal =
+    plan.operation.planKind === "composite_route" ? steps[0]?.ordinal : 0;
+  if (
+    firstOrdinal == null ||
+    steps.some((step, index) => step.ordinal !== firstOrdinal + index)
+  )
+    return false;
+  if (
+    steps.some(
+      (step, index) =>
+        step.dependsOnOrdinal !==
+        (index === 0 ? null : steps[index - 1]?.ordinal),
+    )
+  )
+    return false;
+  const fund = steps.at(-1);
+  if (!fund || fund.executorId !== CLIENT_EVM_WALLET_EXECUTOR_ID) return false;
+  const transferIndex = steps.findIndex(
+    (step) =>
+      step.actionValidationResult.kind === "owned_safe_controller_transfer",
+  );
+  if (transferIndex < 1) return false;
+  const transferStep = steps[transferIndex];
+  const handoffStep = steps[transferIndex - 1];
+  if (!transferStep || !handoffStep) return false;
+  const handoff = normalizedActionSchema.safeParse(
+    handoffStep.normalizedAction,
+  );
+  const transfer = normalizedActionSchema.safeParse(
+    transferStep.normalizedAction,
+  );
+  const expectation = handoff.success
+    ? polymarketDepositWalletHandoffExpectation(
+        handoff.data as NormalizedAction,
+        handoffStep.actionValidationResult,
+      )
+    : null;
+  if (
+    !expectation ||
+    !handoff.success ||
+    handoff.data.kind !== "external_handoff" ||
+    handoff.data.handoffKind !== "polymarket_safe_transfer" ||
+    handoffStep.executorId !== "polymarket_safe_relayer_v1" ||
+    handoffStep.state !== "action_required" ||
+    !transfer.success ||
+    transfer.data.kind !== "evm_transaction" ||
+    transfer.data.networkId !== "evm:137" ||
+    transfer.data.valueRaw !== "0" ||
+    transfer.data.senderWalletId !== handoff.data.actorWalletId ||
+    transferStep.stepKind !== "transaction" ||
+    transferStep.state !== "action_required" ||
+    transferStep.executorId !== CLIENT_EVM_WALLET_EXECUTOR_ID ||
+    transferStep.actionValidationResult.valid !== true ||
+    transferStep.actionValidationResult.validatorId !==
+      POLYMARKET_FUNDING_SOURCE_ADAPTER_ID ||
+    expectation.tokenAddress.toLowerCase() !==
+      RELAY_PINNED_ASSETS.polygonUsdce ||
+    transfer.data.to.toLowerCase() !== expectation.tokenAddress.toLowerCase()
+  )
+    return false;
+  try {
+    const [recipient, amount] = new Interface([
+      "function transfer(address recipient,uint256 amount)",
+    ]).decodeFunctionData("transfer", transfer.data.data);
+    const validation = transferStep.actionValidationResult;
+    if (
+      !sameAccountAddress(
+        "evm:137",
+        String(recipient),
+        String(fund.actionValidationResult.signerAddress),
+      ) ||
+      sameAccountAddress(
+        "evm:137",
+        String(recipient),
+        expectation.recipientAddress,
+      ) ||
+      BigInt(amount) !== expectation.amountRaw ||
+      validation.signerAddress?.toString().toLowerCase() !==
+        expectation.recipientAddress.toLowerCase() ||
+      validation.postconditionEvidenceKind !==
+        "exact_erc20_destination_credit_v1" ||
+      validation.expectedDestinationAssetId?.toString().toLowerCase() !==
+        expectation.tokenAddress.toLowerCase() ||
+      validation.expectedDestinationAddress?.toString().toLowerCase() !==
+        String(recipient).toLowerCase() ||
+      validation.expectedDestinationRaw !== expectation.amountRaw.toString()
+    )
+      return false;
+  } catch {
+    return false;
+  }
+  const remaining = steps
+    .filter(
+      (_, index) => index !== transferIndex && index !== transferIndex - 1,
+    )
+    .map((step, ordinal) => ({
+      ...step,
+      ordinal,
+      dependsOnOrdinal: ordinal === 0 ? null : ordinal - 1,
+    }));
+  const remainder = { ...plan, steps: remaining };
+  return remaining[0]?.stepKind === "external_handoff"
+    ? isPolymarketRouterV3CommitPlan(remainder)
+    : isPolymarketRouterV1CommitPlan(remainder);
 }

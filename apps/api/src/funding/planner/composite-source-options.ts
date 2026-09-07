@@ -487,6 +487,11 @@ function candidateOrder(
   right: CompositeCandidate,
 ): number {
   return (
+    // Independent contributors must not wait behind a long Safe preparation
+    // while their provider quote expires. Dependencies inside each contributor
+    // are still preserved by rebaseSteps.
+    Date.parse(left.source.option.expiresAt) -
+      Date.parse(right.source.option.expiresAt) ||
     Number(left.kind === "provider_segment") -
       Number(right.kind === "provider_segment") ||
     left.source.option.sourceOptionId.localeCompare(

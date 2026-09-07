@@ -21,7 +21,10 @@ export type ExecutionGas = Readonly<{
 
 /** Gas-only readiness, not a promise that any particular funding route exists. */
 export function deriveExecutionGas(
-  account: Pick<AccountValueReadModel, "projection" | "cashAvailability">,
+  account: Pick<
+    AccountValueReadModel,
+    "projection" | "cashAvailability" | "nativeGasBalances"
+  >,
   profile: WalletExecutionProfile,
 ): ExecutionGas {
   const sponsored =
@@ -47,6 +50,16 @@ export function deriveExecutionGas(
       ? SOLANA_NATIVE_ASSET.assetId
       : "0x0000000000000000000000000000000000000000";
   let availableRaw: bigint | null = null;
+  const nativeObservation = account.nativeGasBalances?.find(
+    (observation) =>
+      observation.networkId === profile.networkId &&
+      sameAccountAddress(
+        profile.networkId,
+        observation.address,
+        profile.address,
+      ),
+  );
+  if (nativeObservation) availableRaw = BigInt(nativeObservation.raw);
   for (const component of account.projection.components) {
     const address = component.location.details.address;
     if (

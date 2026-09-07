@@ -343,6 +343,146 @@ const [safeFunding] = await new PolymarketFundingSourceAdapter(
   { canonicalRouterAddress: ROUTER, usdceAsset: USDCE },
 ).list(clientHandoffInput);
 assert.ok(safeFunding);
+const otherOwner = "0x00000000000000000000000000000000000000b1";
+const otherSafe = deriveSafeProxyAddress(otherOwner);
+assert.ok(otherSafe);
+const sourceOwnership = safeSourceAccount.ownership;
+assert.ok(sourceOwnership);
+const selectedProfile = sourceOwnership.wallets[0];
+assert.ok(selectedProfile);
+const ownerProfile = {
+  ...selectedProfile,
+  walletId: "wallet_other_safe_owner_12345678",
+  controllerWalletRef: "other_safe_owner_ref",
+  address: otherOwner,
+  source: "external" as const,
+  signingModes: ["web_client" as const],
+  serverWalletRef: null,
+  sponsorshipPolicyIds: [],
+};
+const crossOwnerAccount = {
+  ...safeSourceAccount,
+  connectedExternalWalletRefs: [ownerProfile.controllerWalletRef],
+  nativeGasBalances: [
+    { networkId: "evm:137", address: otherOwner, raw: "1000000000000000000" },
+  ],
+  ownership: {
+    ...sourceOwnership,
+    wallets: [...sourceOwnership.wallets, ownerProfile],
+  },
+  projection: {
+    ...safeSourceAccount.projection,
+    components: safeSourceAccount.projection.components.map((entry) =>
+      entry.componentId === "deposit_usdce_12345678"
+        ? {
+            ...entry,
+            location: {
+              ...entry.location,
+              details: {
+                ...entry.location.details,
+                address: otherSafe,
+                linkedAddress: otherOwner,
+              },
+            },
+          }
+        : entry,
+    ),
+  },
+};
+const crossAdapter = (value: AccountValueReadModel) =>
+  new PolymarketFundingSourceAdapter(value, {
+    canonicalRouterAddress: ROUTER,
+    usdceAsset: USDCE,
+  });
+const [crossFunding] =
+  await crossAdapter(crossOwnerAccount).list(clientHandoffInput);
+assert.ok(crossFunding);
+assert.equal(isValidFundingCommitPlanBoundary(crossFunding.commitPlan), true);
+assert.equal(
+  crossFunding.commitPlan.steps[0]?.normalizedAction.actorWalletId,
+  ownerProfile.walletId,
+);
+assert.equal(
+  crossFunding.commitPlan.steps[1]?.normalizedAction.senderWalletId,
+  ownerProfile.walletId,
+);
+assert.equal(
+  crossFunding.commitPlan.steps.at(-1)?.normalizedAction.senderWalletId,
+  "wallet_pm_signer_12345678",
+);
+assert.equal(
+  fundingEconomicSourceReservations(
+    crossFunding.commitPlan.reservations,
+  ).reduce((sum, entry) => sum + BigInt(entry.rawAmount), 0n),
+  3000000n,
+);
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    candidates: [crossFunding],
+    destinationAsset: PUSD,
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: "1",
+    maximumFeeBps: 2000,
+    maximumSlippageBps: 1000,
+    executionBoundary: "client_handoff",
+  }),
+  3000000n,
+  "Max and Buy share the exact Safe contribution, not its intermediate fences",
+);
+assert.equal(
+  isValidFundingCommitPlanBoundary({
+    ...crossFunding.commitPlan,
+    steps: crossFunding.commitPlan.steps.map((step) =>
+      step.actionValidationResult.kind === "owned_safe_controller_transfer"
+        ? {
+            ...step,
+            normalizedAction: {
+              ...step.normalizedAction,
+              senderWalletId: selectedProfile.walletId,
+            },
+          }
+        : step,
+    ),
+  }),
+  false,
+  "the destination controller cannot impersonate the Safe owner",
+);
+for (const unavailable of [
+  { ...crossOwnerAccount, connectedExternalWalletRefs: [] },
+  { ...crossOwnerAccount, nativeGasBalances: [] },
+  { ...crossOwnerAccount, ownership: safeSourceAccount.ownership },
+]) {
+  const [candidate] = await crossAdapter(unavailable).list(clientHandoffInput);
+  assert.ok(
+    !candidate?.commitPlan.steps.some(
+      (step) => step.normalizedAction.actorWalletId === ownerProfile.walletId,
+    ),
+    "an unconnected/unowned/unfunded signer cannot contribute Safe cash",
+  );
+}
+for (const field of [
+  "expectedDestinationAddress",
+  "expectedDestinationRaw",
+  "signerAddress",
+] as const) {
+  assert.equal(
+    isValidFundingCommitPlanBoundary({
+      ...crossFunding.commitPlan,
+      steps: crossFunding.commitPlan.steps.map((step) =>
+        step.actionValidationResult.kind === "owned_safe_controller_transfer"
+          ? {
+              ...step,
+              actionValidationResult: {
+                ...step.actionValidationResult,
+                [field]: field === "expectedDestinationRaw" ? "1" : DEPOSIT,
+              },
+            }
+          : step,
+      ),
+    }),
+    false,
+  );
+}
 const safePusdAccount = {
   ...safeSourceAccount,
   projection: {

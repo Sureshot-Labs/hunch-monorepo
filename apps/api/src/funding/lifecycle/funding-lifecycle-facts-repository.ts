@@ -180,6 +180,16 @@ function actionActivation(
 
 function actionMayMoveMoney(action: LifecycleActionRow): boolean {
   if (["approval", "signature"].includes(action.step_kind)) return false;
+  if (
+    action.step_kind === "transaction" &&
+    action.action_validation_result.validatorId ===
+      "polymarket_funding_router_v1" &&
+    [
+      "controller_pusd_router_approval",
+      "controller_usdce_router_approval",
+    ].includes(String(action.action_validation_result.kind))
+  )
+    return false;
   // Relay's approve action is represented by its generic transaction step
   // kind. Its immutable profile payload, rather than a mutable step cache,
   // is the canonical distinction from the following money-moving deposit.
@@ -190,17 +200,23 @@ function actionMayMoveMoney(action: LifecycleActionRow): boolean {
 }
 
 function actionIsSafeInternalHandoff(action: LifecycleActionRow): boolean {
-  // The versioned commit validator accepts this envelope only for the exact
-  // Deposit Wallet -> controller transfer topology. Its final receipt means
-  // the asset remains on an owned, routable controller wallet.
+  // Versioned commit validation pins the exact funder -> owner and optional
+  // owner -> selected controller transfers. Final receipts prove the asset
+  // remains on an owned controller, rather than an unknown external route.
   return (
-    action.step_kind === "external_handoff" &&
-    ((action.executor_id === "polymarket_deposit_wallet_relayer_v1" &&
-      action.action_validation_result.executionEnvelope ===
-        "polymarket_deposit_wallet_to_controller_v1") ||
-      (action.executor_id === "polymarket_safe_relayer_v1" &&
+    (action.step_kind === "transaction" &&
+      action.executor_id === "wallet_profile_evm_v1" &&
+      action.action_validation_result.kind ===
+        "owned_safe_controller_transfer" &&
+      action.action_validation_result.validatorId ===
+        "polymarket_funding_router_v1") ||
+    (action.step_kind === "external_handoff" &&
+      ((action.executor_id === "polymarket_deposit_wallet_relayer_v1" &&
         action.action_validation_result.executionEnvelope ===
-          "polymarket_safe_to_controller_v1"))
+          "polymarket_deposit_wallet_to_controller_v1") ||
+        (action.executor_id === "polymarket_safe_relayer_v1" &&
+          action.action_validation_result.executionEnvelope ===
+            "polymarket_safe_to_controller_v1")))
   );
 }
 

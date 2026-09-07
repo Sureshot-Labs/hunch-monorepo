@@ -801,6 +801,34 @@ const polymarketRouterComposite = buildCompositeSourceOption({
   executionBoundary: "client_handoff",
 });
 assert.ok(polymarketRouterComposite);
+const expiringRelayFirst = buildCompositeSourceOption({
+  candidates: [
+    {
+      ...polymarketRouterPreparation,
+      option: {
+        ...polymarketRouterPreparation.option,
+        expiresAt: "2026-07-24T12:15:00.000Z",
+      },
+    },
+    polymarketResidualSolana,
+  ],
+  requiredDestination: money(DESTINATION_ASSET, "2282018"),
+  destinationUnitPriceUsd: "1",
+  maximumFeeUsd: "1",
+  maximumFeeBps: 2_000,
+  executionBoundary: "client_handoff",
+});
+assert.ok(expiringRelayFirst);
+assert.notEqual(
+  expiringRelayFirst.commitPlan.steps[0]?.segmentOrdinal,
+  null,
+  "short Relay quote must not queue behind independent long-lived preparation",
+);
+assert.equal(
+  expiringRelayFirst.commitPlan.steps[2]?.dependsOnOrdinal,
+  1,
+  "preparation approval dependency must survive contributor reordering",
+);
 assert.deepEqual(
   polymarketRouterComposite.commitPlan.steps.map((step) => ({
     kind: step.stepKind,

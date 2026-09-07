@@ -48,6 +48,24 @@ function boundaryPlan(
 assert.equal(isValidFundingCommitPlanBoundary(boundaryPlan()), true);
 assert.equal(
   isValidFundingCommitPlanBoundary(
+    boundaryPlan({ planKind: "composite_route" }, [
+      { ...fundStep, ordinal: 2 },
+    ]),
+  ),
+  true,
+  "independent preparation after a Relay contributor uses global ordinals",
+);
+assert.equal(
+  isValidFundingCommitPlanBoundary(
+    boundaryPlan({ planKind: "composite_route" }, [
+      { ...fundStep, ordinal: 2, dependsOnOrdinal: 1 },
+    ]),
+  ),
+  false,
+  "renumbering must not erase an unknown contributor dependency",
+);
+assert.equal(
+  isValidFundingCommitPlanBoundary(
     boundaryPlan({}, [
       {
         ...fundStep,

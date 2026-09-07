@@ -3,6 +3,7 @@ import { Interface } from "ethers";
 import { deriveSafeProxyAddress } from "../../services/polymarket-funder.js";
 
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
+import { deriveExecutionGas } from "../../account-value/execution-gas.js";
 import {
   stableOpaqueId,
   stableWalletAssetLocationIdentity,
@@ -23,6 +24,8 @@ import type {
   FundingPurpose,
   JsonValue,
   SourceOption,
+  Money,
+  WalletExecutionProfile,
 } from "../domain/types.js";
 import { resolveActionSponsorship } from "../execution/sponsorship-policy.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
@@ -64,6 +67,76 @@ type JsonRecord = Readonly<Record<string, JsonValue>>;
 const ERC20_APPROVAL = new Interface([
   "function approve(address spender,uint256 amount) returns (bool)",
 ]);
+const ERC20_TRANSFER = new Interface([
+  "function transfer(address recipient,uint256 amount)",
+]);
+
+/** Credit another controller owned by this account, without making its
+ * Router (or server signer) impersonate the Safe owner. */
+function prependOwnedControllerTransfer(input: {
+  owner: WalletExecutionProfile;
+  recipient: WalletExecutionProfile;
+  amount: Money;
+  quoteCorrelationId: string;
+  steps: FundingCommitPlan["steps"];
+}): FundingCommitPlan["steps"] {
+  const action = {
+    kind: "evm_transaction" as const,
+    actionId: stableOpaqueId(
+      "funding_action",
+      canonicalJsonHash({
+        quoteCorrelationId: input.quoteCorrelationId,
+        owner: input.owner.address,
+        recipient: input.recipient.address,
+        amount: input.amount,
+      }),
+    ),
+    networkId: "evm:137",
+    senderWalletId: input.owner.walletId,
+    to: input.amount.asset.assetId,
+    data: ERC20_TRANSFER.encodeFunctionData("transfer", [
+      input.recipient.address,
+      input.amount.raw,
+    ]),
+    valueRaw: "0",
+    gasLimitRaw: null,
+  };
+  const sponsorship = resolveActionSponsorship({
+    action,
+    profile: input.owner,
+  });
+  return [
+    {
+      ordinal: 0,
+      segmentOrdinal: null,
+      stepKind: "transaction",
+      state: "action_required",
+      executorId: "wallet_profile_evm_v1",
+      payerRequirement: sponsorship.payerRequirement,
+      dependsOnOrdinal: null,
+      normalizedAction: jsonRecord(action),
+      actionFingerprint: canonicalJsonHash(action),
+      actionValidationResult: {
+        valid: true,
+        validatorId: POLYMARKET_FUNDING_SOURCE_ADAPTER_ID,
+        kind: "owned_safe_controller_transfer",
+        signerAddress: input.owner.address,
+        postconditionEvidenceKind: "exact_erc20_destination_credit_v1",
+        expectedDestinationAssetId: input.amount.asset.assetId,
+        expectedDestinationAddress: input.recipient.address,
+        expectedDestinationRaw: input.amount.raw,
+        sponsorshipPolicyId: sponsorship.policyId,
+        signingMode: sponsorship.signingMode,
+      },
+    },
+    ...input.steps.map((step) => ({
+      ...step,
+      ordinal: step.ordinal + 1,
+      dependsOnOrdinal:
+        step.dependsOnOrdinal == null ? 0 : step.dependsOnOrdinal + 1,
+    })),
+  ];
+}
 
 function jsonRecord(value: unknown): JsonRecord {
   return value as JsonRecord;
@@ -309,7 +382,46 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
                 snapshot.signerAddress.toLowerCase(),
           })
         : null;
-    const safeUsdceInput = availableSafeInput(usdceAsset);
+    let safeUsdceInput = availableSafeInput(usdceAsset);
+    let safeUsdceProfile = profile;
+    let safeUsdceAddress = safeAddress;
+    // A linked Safe may have a different controller from the destination.
+    // Its owner still signs extraction; an exact owner -> destination
+    // controller transfer then feeds the unchanged Router contract.
+    if (!safeUsdceInput && input.request.serverExecutionProfileId == null) {
+      for (const candidate of this.account.ownership?.wallets ?? []) {
+        if (
+          candidate.networkId !== "evm:137" ||
+          candidate.address.toLowerCase() === profile.address.toLowerCase() ||
+          !candidate.controllerWalletRef ||
+          !candidate.signingModes.includes("web_client") ||
+          (candidate.source === "external" &&
+            !this.account.connectedExternalWalletRefs?.includes(
+              candidate.controllerWalletRef,
+            )) ||
+          deriveExecutionGas(this.account, candidate).status !== "ready"
+        )
+          continue;
+        const candidateSafe = deriveSafeProxyAddress(candidate.address);
+        if (!candidateSafe) continue;
+        const resolved = this.availableInputComponent({
+          accountId: input.accountId,
+          address: candidateSafe,
+          asset: usdceAsset,
+          locationMatches: (location) =>
+            location.kind === "venue_account" &&
+            detail(location, "venueId") === "polymarket" &&
+            detail(location, "polymarketFunderKind") === "safe" &&
+            detail(location, "linkedAddress")?.toLowerCase() ===
+              candidate.address.toLowerCase(),
+        });
+        if (!resolved) continue;
+        safeUsdceInput = resolved;
+        safeUsdceProfile = candidate;
+        safeUsdceAddress = candidateSafe;
+        break;
+      }
+    }
     const safePusdInput = availableSafeInput(facts.option.requiredAsset);
     const availableRaw = (
       observedRaw: string,
@@ -531,7 +643,8 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         resolved: safeUsdceInput,
         raw: safeUsdceContributionRaw,
         asset: usdceAsset,
-        funderAddress: safeAddress,
+        funderAddress: safeUsdceAddress,
+        profile: safeUsdceProfile,
         kind: "polymarket_safe_to_controller_v1" as const,
       },
       {
@@ -550,9 +663,10 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
                 kind: entry.kind,
                 sourceLocation: entry.resolved.component.location,
                 funderAddress: entry.funderAddress,
-                controllerAddress: snapshot.signerAddress,
+                controllerAddress: (entry.profile ?? profile).address,
                 tokenAddress: entry.asset.assetId,
               },
+              profile: entry.profile ?? profile,
             },
           ]
         : [],
@@ -698,6 +812,18 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
           valueMoving: true,
           sponsorship: "none" as const,
         })),
+        ...(safeUsdceContributionRaw > 0n && safeUsdceProfile !== profile
+          ? [
+              {
+                kind: "evm_transaction" as const,
+                safeLabel:
+                  "Transfer recovered USDC.e to the selected Trading Wallet",
+                actor: "user" as const,
+                valueMoving: true,
+                sponsorship: "none" as const,
+              },
+            ]
+          : []),
         ...approvalActions.map(() => ({
           kind: "evm_transaction" as const,
           safeLabel: "Approve Polymarket Funding Router",
@@ -743,7 +869,11 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
           ? jsonRecord(input.marketContext)
           : null,
         venueBindingSnapshot: jsonRecord(facts.venueBinding),
-        walletExecutionSnapshot: jsonRecord(profile),
+        walletExecutionSnapshot: jsonRecord(
+          safeUsdceContributionRaw > 0n && safeUsdceProfile !== profile
+            ? { profiles: [profile, safeUsdceProfile] }
+            : profile,
+        ),
         placementSnapshot: jsonRecord(input.placement),
         requestedSourceAmount: delegatedPusdFund
           ? jsonRecord({
@@ -757,12 +887,15 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
           adapterId: this.adapterId,
           planValidation: {
             validatorId: this.adapterId,
-            version: preRouteHandoffs.some(
-              ({ handoff }) =>
-                handoff.kind === "polymarket_safe_to_controller_v1",
-            )
-              ? 3
-              : 1,
+            version:
+              safeUsdceContributionRaw > 0n && safeUsdceProfile !== profile
+                ? 4
+                : preRouteHandoffs.some(
+                      ({ handoff }) =>
+                        handoff.kind === "polymarket_safe_to_controller_v1",
+                    )
+                  ? 3
+                  : 1,
           },
           venueBindingOptionId: facts.bindingOption.venueBindingOptionId,
           fundingPlan: jsonRecord(plan),
@@ -789,8 +922,17 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
           buildPolymarketPreRouteHandoffSteps({
             source: { preRouteHandoff: entry.handoff },
             sourceAmount: entry.sourceAmount,
-            profile,
-            steps,
+            profile: entry.profile,
+            steps:
+              entry.profile === profile
+                ? steps
+                : prependOwnedControllerTransfer({
+                    owner: entry.profile,
+                    recipient: profile,
+                    amount: entry.sourceAmount,
+                    quoteCorrelationId,
+                    steps,
+                  }),
           }),
         [
           ...approvalCommitSteps,
@@ -822,6 +964,26 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         ],
       ),
       reservations: [
+        ...(safeUsdceContributionRaw > 0n && safeUsdceProfile !== profile
+          ? [
+              {
+                segmentOrdinal: null,
+                ...stableWalletAssetLocationIdentity({
+                  accountId: input.accountId,
+                  address: safeUsdceProfile.address,
+                  asset: usdceAsset,
+                  balanceClass: "polymarket",
+                }),
+                networkId: usdceAsset.networkId,
+                assetId: usdceAsset.assetId,
+                assetDecimals: usdceAsset.decimals,
+                rawAmount: safeUsdceContributionRaw.toString(),
+                mode: "subtract_available" as const,
+                economicRole: "future_credit_fence" as const,
+                expiresAt: reservationExpiresAt,
+              },
+            ]
+          : []),
         ...(safePusdContributionRaw > 0n
           ? [
               {

@@ -100,6 +100,12 @@ export type AccountValueVenueSummary = Readonly<{
 }>;
 
 export type AccountValueReadModel = Readonly<{
+  /** Raw EVM gas observations, separate from valued/tradable cash inventory. */
+  nativeGasBalances?: readonly Readonly<{
+    networkId: string;
+    address: string;
+    raw: string;
+  }>[];
   /** Request-local capability hint, never persisted as wallet ownership. */
   connectedExternalWalletRefs?: readonly string[];
   projection: AccountValueProjection;
@@ -556,12 +562,44 @@ export async function buildAccountValueReadModel(inputs: {
     now: () => now,
   }).resolve(inputs.userId);
 
-  const inventory = await collectInventory({
-    accountId: inputs.userId,
-    resolutions,
-    catalog,
-    observedAt: asOf,
-  });
+  const [inventory, nativeGasBalances] = await Promise.all([
+    collectInventory({
+      accountId: inputs.userId,
+      resolutions,
+      catalog,
+      observedAt: asOf,
+    }),
+    Promise.all(
+      ownership.wallets
+        .filter(
+          (profile) =>
+            profile.source === "external" &&
+            profile.networkId.startsWith("evm:"),
+        )
+        .map(async (profile) => {
+          try {
+            const chainId = profile.networkId.slice(4);
+            const result = await resolveWalletBalancesForWalletWithInflight({
+              walletAddress: profile.address,
+              walletType: "ethereum",
+              tokens: [],
+              chains: [chainId],
+            });
+            const native = result.balances.find(
+              (balance) => balance.isNative && balance.chainId === chainId,
+            );
+            if (result.warnings.length > 0 || !native) return null;
+            return {
+              networkId: profile.networkId,
+              address: profile.address,
+              raw: native.balanceRaw,
+            };
+          } catch {
+            return null;
+          }
+        }),
+    ).then((rows) => rows.filter((row) => row !== null)),
+  ]);
   const deduplicated = deduplicateObservedAssets(inventory.observations);
   const configuredCatalogByAsset = new Map(
     catalog.map((entry) => [canonicalAssetKey(entry.asset), entry]),
@@ -798,6 +836,7 @@ export async function buildAccountValueReadModel(inputs: {
   });
   return {
     projection,
+    nativeGasBalances,
     headline: resolveEffectiveHeadline(projection),
     cashAvailability: {
       ...cashAvailability,
@@ -816,7 +855,10 @@ export async function buildAccountValueReadModel(inputs: {
         return {
           ...component,
           executionGas: profile
-            ? deriveExecutionGas({ projection, cashAvailability }, profile)
+            ? deriveExecutionGas(
+                { projection, cashAvailability, nativeGasBalances },
+                profile,
+              )
             : null,
         };
       }),

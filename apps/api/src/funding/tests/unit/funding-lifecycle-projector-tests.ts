@@ -277,6 +277,96 @@ function facts(
     routeLegId: "omitted",
     expiresAt: new Date(now.getTime() - 1),
   });
+  const preparedPartial = facts({
+    plan: {
+      ...facts().plan,
+      requestedDestination: { ...destination, raw: "2000000" },
+      venuePreparationMinimumDestination: destination,
+      completionEvidence: "destination_credit_and_venue_readiness",
+      routeLegs: [routeLeg("omitted")],
+    },
+    actions: [
+      {
+        ...completedAction,
+        actionId: "handoff",
+        routeLegId: null,
+        safeInternalHandoff: true,
+        requiresSourceDebitEvidence: false,
+      },
+      {
+        ...completedAction,
+        actionId: "prepare",
+        ordinal: 1,
+        routeLegId: null,
+        requiresVenueReadiness: true,
+        requiresSourceDebitEvidence: false,
+        dependsOnActionId: "handoff",
+      },
+      { ...omittedAction, ordinal: 2 },
+    ],
+    transfers: [transfer("venue_readiness")],
+  });
+  assert.equal(
+    deriveFundingLifecycle(preparedPartial).status,
+    "failed",
+    "settled Safe preparation plus untouched expired Relay must stop, not wait forever",
+  );
+  for (const unsafe of [
+    { ...preparedPartial, transfers: [] },
+    {
+      ...preparedPartial,
+      transfers: [
+        transfer("venue_readiness"),
+        transfer("venue_readiness", {
+          transferId: "wrong-network-readiness",
+          money: { ...destination, networkId: "evm:137" },
+        }),
+      ],
+    },
+    {
+      ...preparedPartial,
+      transfers: [transfer("venue_readiness", { canonical: false })],
+    },
+    {
+      ...preparedPartial,
+      consumer: { ...preparedPartial.consumer, unresolved: true },
+    },
+    {
+      ...preparedPartial,
+      actions: preparedPartial.actions.map((row) =>
+        row.actionId === "omitted"
+          ? {
+              ...row,
+              attempts: [
+                attempt({
+                  outcome: "ambiguous",
+                  broadcastMayHaveOccurred: true,
+                }),
+              ],
+            }
+          : row,
+      ),
+    },
+    {
+      ...preparedPartial,
+      actions: preparedPartial.actions.map((row) =>
+        row.actionId === "omitted"
+          ? { ...row, expiresAt: new Date(now.getTime() + 1000) }
+          : row,
+      ),
+    },
+    {
+      ...preparedPartial,
+      actions: preparedPartial.actions.map((row) =>
+        row.actionId === "prepare" ? { ...row, attempts: [] } : row,
+      ),
+    },
+  ])
+    assert.equal(
+      deriveFundingLifecycle(unsafe).safety.terminal,
+      false,
+      "partial cleanup must not hide unfinished, ambiguous, unproven or still executable money movement",
+    );
   const partial = facts({
     plan: {
       ...facts().plan,

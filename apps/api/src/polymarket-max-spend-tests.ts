@@ -337,6 +337,7 @@ const tests: TestCase[] = [
           destinationOptionId: "destination_polymarket_after_trade_12345678",
           venueId: "polymarket",
           reasonCodes: [],
+          sourceOptions: [routeSource.option],
         },
         plannerSnapshot: {
           destination: {
@@ -379,7 +380,9 @@ const tests: TestCase[] = [
         "3c9a8727-00e9-4cdd-8fd4-2e4e52c79252",
       ];
       let quotedFundsRaw: bigint | null = null;
-      const result = await computePolymarketAccountMaxSpend({
+      const requestInput: Parameters<
+        typeof computePolymarketAccountMaxSpend
+      >[0] = {
         connectedExternalWalletRefs,
         funder: DEPOSIT,
         funds: {
@@ -425,7 +428,8 @@ const tests: TestCase[] = [
           },
           loadPolymarketQuoteContext: async () => quoteContext(),
         },
-      });
+      };
+      const result = await computePolymarketAccountMaxSpend(requestInput);
 
       assert.equal(result.ok, true);
       assert.equal(result.fundingScope, "account");
@@ -433,6 +437,11 @@ const tests: TestCase[] = [
       assert.equal(quotedFundsRaw, 4_860_000n);
       assert.equal(previewRequests.length, 2);
       for (const request of previewRequests) {
+        assert.equal(
+          request.maxSlippageBps,
+          null,
+          "funding uses ordinary Buy policy, not order slippage",
+        );
         assert.deepEqual(
           request.connectedExternalWalletRefs,
           connectedExternalWalletRefs,
@@ -444,6 +453,32 @@ const tests: TestCase[] = [
         (BigInt(String(result.totalRequiredUsdcRaw)) - 430_000n).toString(),
       );
       assert.ok(BigInt(String(result.maxAmountUsdRaw)) >= 2_500_000n);
+      const unavailableRoute = await computePolymarketAccountMaxSpend({
+        ...requestInput,
+        dependencies: {
+          ...requestInput.dependencies,
+          createFundingRuntime: () => ({
+            previewLiquidity: async () => ({
+              ...preview,
+              projection: {
+                ...preview.projection,
+                sourceOptions: [
+                  {
+                    ...routeSource.option,
+                    selectable: false,
+                    reasonCodes: ["fee_limit_exceeded"],
+                  },
+                ],
+              },
+            }),
+          }),
+        },
+      });
+      assert.equal(
+        unavailableRoute.ok,
+        false,
+        "aggregate capacity cannot certify an unavailable ordinary Buy route",
+      );
     },
   },
   {

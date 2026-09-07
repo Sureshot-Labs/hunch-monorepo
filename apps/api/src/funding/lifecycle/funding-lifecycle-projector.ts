@@ -687,6 +687,27 @@ function routeLegsRefunded(
  */
 function isSettledPartialBuy(facts: FundingLifecycleFacts): boolean {
   const legIds = new Set(facts.plan.routeLegs.map((leg) => leg.routeLegId));
+  const preparationActions = facts.actions.filter(
+    (action) => action.routeLegId === null,
+  );
+  // A completed controller preparation is also a settled contributor, even
+  // though it has no provider segment. A balance alone is not enough: every
+  // operation-level movement must have its own exact final receipt.
+  const settledPreparation =
+    facts.plan.completionEvidence ===
+      "destination_credit_and_venue_readiness" &&
+    verifiedFundingPreparationContributionRaw(facts) > 0n &&
+    preparationActions.some((action) => action.requiresVenueReadiness) &&
+    preparationActions.every(
+      (action) =>
+        actionExecution(action) === "succeeded" &&
+        (!action.mayMoveMoney ||
+          action.requiresVenueReadiness ||
+          action.safeInternalHandoff === true) &&
+        action.attempts.some((attempt) =>
+          hasCanonicalFinalReceipt(attempt.receipt),
+        ),
+    );
   if (
     !facts.consumer.required ||
     facts.consumer.completed ||
@@ -694,11 +715,13 @@ function isSettledPartialBuy(facts: FundingLifecycleFacts): boolean {
     facts.reservations.some(
       (reservation) => reservation.state === "consumed",
     ) ||
-    facts.plan.routeLegs.length < 2 ||
-    facts.plan.completionEvidence !== "destination_credit" ||
+    facts.plan.routeLegs.length < (settledPreparation ? 1 : 2) ||
+    (!settledPreparation &&
+      facts.plan.completionEvidence !== "destination_credit") ||
     facts.actions.some((action) =>
       action.routeLegId === null
-        ? !(
+        ? !settledPreparation &&
+          !(
             // An exact finalized move to the user's controller is not an
             // unfinished bridge leg. Its downstream route still must be
             // either fully settled or untouched and expired below.
@@ -718,13 +741,23 @@ function isSettledPartialBuy(facts: FundingLifecycleFacts): boolean {
           )
         : !legIds.has(action.routeLegId),
     ) ||
-    facts.transfers.some(
-      (transfer) =>
-        transfer.routeLegId === null || !legIds.has(transfer.routeLegId),
+    facts.transfers.some((transfer) =>
+      transfer.routeLegId === null
+        ? !(
+            settledPreparation &&
+            transfer.kind === "venue_readiness" &&
+            facts.plan.venuePreparationMinimumDestination != null &&
+            sameMoneyAsset(
+              transfer.money,
+              facts.plan.venuePreparationMinimumDestination,
+            ) &&
+            isCanonicalFinal(transfer)
+          )
+        : !legIds.has(transfer.routeLegId),
     )
   )
     return false;
-  let delivered = 0;
+  let delivered = settledPreparation ? 1 : 0;
   let omitted = 0;
   for (const leg of facts.plan.routeLegs) {
     const actions = facts.actions.filter(
