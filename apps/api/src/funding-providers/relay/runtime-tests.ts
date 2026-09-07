@@ -1,5 +1,103 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+
+// Independent clients must share transport budgets, not executable quote IDs.
+{
+  let active = 0;
+  let peak = 0;
+  let calls = 0;
+  const transport = async () => {
+    calls++;
+    active++;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    active--;
+    return new Response("{}", { status: 400 });
+  };
+  await Promise.allSettled(
+    Array.from({ length: 5 }, () =>
+      new RelayClient({
+        apiKey: "parallel-quote-test",
+        fetchImpl: transport,
+      }).quote({
+        user: "owner",
+        recipient: "recipient",
+        originChainId: 8453,
+        destinationChainId: 137,
+        originCurrency: "source",
+        destinationCurrency: "target",
+        amount: "1000000",
+        tradeType: "EXACT_INPUT",
+      }),
+    ),
+  );
+  assert.equal(
+    calls,
+    5,
+    "executable quote requests must not share provider IDs",
+  );
+  assert.ok(peak <= 2, "quote concurrency is shared across clients");
+  assert.equal(active, 0, "failed quotes release their slots");
+}
+{
+  let calls = 0;
+  const transport = async () => {
+    calls++;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return new Response("{}", { status: 503 });
+  };
+  const first = new RelayClient({
+    apiKey: "status-budget-test",
+    fetchImpl: transport,
+  });
+  const second = new RelayClient({
+    apiKey: "status-budget-test",
+    fetchImpl: transport,
+  });
+  await Promise.allSettled([
+    first.status("same-request-id"),
+    second.status("same-request-id"),
+  ]);
+  assert.equal(calls, 1, "simultaneous status reads must be coalesced");
+  await assert.rejects(first.status("same-request-id"));
+  assert.equal(calls, 2, "status failures must not remain cached");
+}
+
+{
+  let calls = 0;
+  const transport = async () => {
+    calls++;
+    return new Response("{}", {
+      status: 429,
+      headers: { "retry-after": "60" },
+    });
+  };
+  const request = {
+    user: "owner",
+    recipient: "recipient",
+    originChainId: 8453,
+    destinationChainId: 137,
+    originCurrency: "source",
+    destinationCurrency: "target",
+    amount: "1000000",
+    tradeType: "EXACT_INPUT" as const,
+  };
+  const first = new RelayClient({
+    apiKey: "quote-budget-test",
+    fetchImpl: transport,
+  });
+  await assert.rejects(first.quote(request));
+  const second = new RelayClient({
+    apiKey: "quote-budget-test",
+    fetchImpl: transport,
+  });
+  await assert.rejects(
+    second.quote(request),
+    (error: unknown) =>
+      error instanceof RelayClientError && error.httpStatus === 429,
+  );
+  assert.equal(calls, 1, "Retry-After must apply across client instances");
+}
 import { Interface, ZeroAddress } from "ethers";
 
 import type {

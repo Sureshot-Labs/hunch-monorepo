@@ -380,6 +380,46 @@ function facts(
     ],
   });
   const result = deriveFundingLifecycle(partial);
+  const failedBeforeBroadcast = {
+    ...omittedAction,
+    attempts: [
+      attempt({
+        outcome: "failed",
+        broadcastMayHaveOccurred: false,
+        referenceKind: null,
+        receipt: null,
+      }),
+    ],
+  };
+  assert.equal(
+    deriveFundingLifecycle({
+      ...partial,
+      actions: [completedAction, failedBeforeBroadcast],
+    }).status,
+    "failed",
+    "expired pre-broadcast failure must not strand a fully settled partial Buy",
+  );
+  for (const unsafeAttempt of [
+    attempt({ outcome: "failed", broadcastMayHaveOccurred: true }),
+    attempt({ outcome: "ambiguous", broadcastMayHaveOccurred: false }),
+    attempt({
+      outcome: "failed",
+      broadcastMayHaveOccurred: false,
+      referenceKind: "signature",
+    }),
+  ]) {
+    assert.notEqual(
+      deriveFundingLifecycle({
+        ...partial,
+        actions: [
+          completedAction,
+          { ...failedBeforeBroadcast, attempts: [unsafeAttempt] },
+        ],
+      }).status,
+      "failed",
+      "possible submission must remain under reconciliation",
+    );
+  }
   assert.equal(
     result.status,
     "failed",

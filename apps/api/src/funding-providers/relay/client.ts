@@ -14,6 +14,30 @@ const RELAY_PROVIDER_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,127}$/u;
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
+type RequestBudget = {
+  active: number;
+  nextStart: number;
+  cooldownUntil: number;
+  statusFlights: Map<string, Promise<RelayStatusResponse>>;
+};
+// Shared across short-lived clients, but isolated by transport and API key.
+const budgets = new WeakMap<FetchLike, Map<string, RequestBudget>>();
+function requestBudget(transport: FetchLike, key: string): RequestBudget {
+  let keys = budgets.get(transport);
+  if (!keys) budgets.set(transport, (keys = new Map()));
+  let budget = keys.get(key);
+  if (!budget) {
+    budget = {
+      active: 0,
+      nextStart: 0,
+      cooldownUntil: 0,
+      statusFlights: new Map(),
+    };
+    keys.set(key, budget);
+  }
+  return budget;
+}
+
 export class RelayClientError extends Error {
   constructor(
     message: string,
@@ -67,6 +91,7 @@ export class RelayClient {
   readonly #baseUrl: URL;
   readonly #fetch: FetchLike;
   readonly #timeoutMs: number;
+  readonly #budget: RequestBudget;
 
   constructor(config: RelayClientConfig) {
     if (!config.apiKey.trim()) {
@@ -75,6 +100,7 @@ export class RelayClient {
     this.#apiKey = config.apiKey;
     this.#baseUrl = new URL(DEFAULT_RELAY_API_BASE_URL);
     this.#fetch = config.fetchImpl ?? fetch;
+    this.#budget = requestBudget(this.#fetch, config.apiKey);
     this.#timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     if (
       !Number.isInteger(this.#timeoutMs) ||
@@ -108,6 +134,18 @@ export class RelayClient {
       requestId,
       "Relay request ID",
     );
+    const existing = this.#budget.statusFlights.get(normalizedRequestId);
+    if (existing) return existing;
+    const flight = this.#readStatus(normalizedRequestId);
+    this.#budget.statusFlights.set(normalizedRequestId, flight);
+    try {
+      return await flight;
+    } finally {
+      this.#budget.statusFlights.delete(normalizedRequestId);
+    }
+  }
+
+  async #readStatus(normalizedRequestId: string): Promise<RelayStatusResponse> {
     const response = await this.#request(
       "GET",
       "/intents/status/v3",
@@ -161,10 +199,40 @@ export class RelayClient {
     query?: URLSearchParams,
     body?: unknown,
   ): Promise<unknown> {
+    const startedAt = Date.now();
+    const isQuote = path === "/quote/v2";
+    if (isQuote) {
+      while (true) {
+        if (this.#budget.cooldownUntil > Date.now()) {
+          throw new RelayClientError(
+            "Relay quote cooldown",
+            "http_error",
+            true,
+            429,
+          );
+        }
+        if (Date.now() - startedAt >= this.#timeoutMs) {
+          throw new RelayClientError(
+            "Relay quote queue timed out",
+            "timeout",
+            true,
+          );
+        }
+        if (this.#budget.active < 2 && this.#budget.nextStart <= Date.now()) {
+          this.#budget.active++;
+          this.#budget.nextStart = Date.now() + 150;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
     const url = new URL(path, this.#baseUrl);
     if (query) url.search = query.toString();
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.#timeoutMs);
+    const timeout = setTimeout(
+      () => controller.abort(),
+      Math.max(1, this.#timeoutMs - (Date.now() - startedAt)),
+    );
     try {
       const response = await this.#fetch(url, {
         method,
@@ -191,6 +259,17 @@ export class RelayClient {
       }
       const text = await readBoundedResponseText(response);
       if (!response.ok) {
+        if (isQuote && response.status === 429) {
+          const retryAfter = response.headers.get("retry-after");
+          const seconds = retryAfter === null ? NaN : Number(retryAfter);
+          const until = Number.isFinite(seconds)
+            ? Date.now() + Math.max(0, seconds) * 1000
+            : Date.parse(retryAfter ?? "");
+          this.#budget.cooldownUntil = Math.max(
+            this.#budget.cooldownUntil,
+            Number.isFinite(until) ? until : Date.now() + 1000,
+          );
+        }
         throw new RelayClientError(
           `Relay HTTP ${response.status}`,
           "http_error",
@@ -221,6 +300,7 @@ export class RelayClient {
       );
     } finally {
       clearTimeout(timeout);
+      if (isQuote) this.#budget.active--;
     }
   }
 }

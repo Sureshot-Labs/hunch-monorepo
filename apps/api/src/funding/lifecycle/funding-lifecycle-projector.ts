@@ -682,7 +682,7 @@ function routeLegsRefunded(
 }
 
 /** A partial Buy can stop only when every moved leg is fully accounted for
- * and every omitted leg expired without even starting an action. This is not
+ * and every omitted leg expired without a possible broadcast. This is not
  * a timeout shortcut for an ambiguous broadcast or an underfilled bridge.
  */
 function isSettledPartialBuy(facts: FundingLifecycleFacts): boolean {
@@ -771,7 +771,13 @@ function isSettledPartialBuy(facts: FundingLifecycleFacts): boolean {
       transfers.length === 0 &&
       actions.every(
         (action) =>
-          action.attempts.length === 0 &&
+          action.attempts.every(
+            (attempt) =>
+              attempt.outcome === "failed" &&
+              !attempt.broadcastMayHaveOccurred &&
+              attempt.referenceKind === null &&
+              attempt.receipt === null,
+          ) &&
           action.expiresAt !== null &&
           action.expiresAt <= facts.now,
       )
