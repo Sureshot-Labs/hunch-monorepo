@@ -203,7 +203,10 @@ export class RelayClient {
     const isQuote = path === "/quote/v2";
     if (isQuote) {
       while (true) {
-        if (this.#budget.cooldownUntil > Date.now()) {
+        // Short Retry-After windows belong inside the existing request budget.
+        // Failing immediately made a caller's one retry hit the same cooldown
+        // without ever reaching Relay. Long cooldowns still fail promptly.
+        if (this.#budget.cooldownUntil >= startedAt + this.#timeoutMs) {
           throw new RelayClientError(
             "Relay quote cooldown",
             "http_error",
@@ -218,7 +221,11 @@ export class RelayClient {
             true,
           );
         }
-        if (this.#budget.active < 2 && this.#budget.nextStart <= Date.now()) {
+        if (
+          this.#budget.cooldownUntil <= Date.now() &&
+          this.#budget.active < 2 &&
+          this.#budget.nextStart <= Date.now()
+        ) {
           this.#budget.active++;
           this.#budget.nextStart = Date.now() + 150;
           break;

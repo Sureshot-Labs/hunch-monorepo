@@ -98,6 +98,48 @@ import crypto from "node:crypto";
   );
   assert.equal(calls, 1, "Retry-After must apply across client instances");
 }
+// A bounded retry must be able to wait out a short shared cooldown.
+{
+  const callTimes: number[] = [];
+  const transport = async () => {
+    callTimes.push(Date.now());
+    return new Response(
+      "{}",
+      callTimes.length === 1
+        ? { status: 429, headers: { "retry-after": "0.2" } }
+        : { status: 400 },
+    );
+  };
+  const request = {
+    user: "owner",
+    recipient: "recipient",
+    originChainId: 8453,
+    destinationChainId: 137,
+    originCurrency: "source",
+    destinationCurrency: "target",
+    amount: "1000000",
+    tradeType: "EXACT_INPUT" as const,
+  };
+  await assert.rejects(
+    new RelayClient({ apiKey: "short-cooldown", fetchImpl: transport }).quote(
+      request,
+    ),
+  );
+  await assert.rejects(
+    new RelayClient({
+      apiKey: "short-cooldown",
+      fetchImpl: transport,
+      timeoutMs: 1000,
+    }).quote(request),
+    (error: unknown) =>
+      error instanceof RelayClientError && error.httpStatus === 400,
+  );
+  assert.equal(callTimes.length, 2);
+  assert.ok(
+    (callTimes[1] ?? 0) - (callTimes[0] ?? 0) >= 200,
+    "must respect provider cooldown before retrying",
+  );
+}
 import { Interface, ZeroAddress } from "ethers";
 
 import type {
