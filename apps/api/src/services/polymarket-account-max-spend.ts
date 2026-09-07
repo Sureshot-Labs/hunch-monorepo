@@ -294,6 +294,7 @@ export function externalWalletSourceLocationIds(
  * The caller may expose `fundingScope: account` only when this function does.
  */
 export async function computePolymarketAccountMaxSpend(input: {
+  amountEstimateOnly?: boolean;
   connectedExternalWalletRefs?: string[];
   funder: string;
   funds: PolymarketAccountMaxSpendFunds;
@@ -340,6 +341,73 @@ export async function computePolymarketAccountMaxSpend(input: {
         "balance_unavailable",
         "Account-wide Polymarket funding is unavailable.",
       );
+    }
+
+    if (input.amountEstimateOnly) {
+      // MAX fills an editable amount; only ordinary Buy preparation certifies
+      // routing. Never ask Relay to price this input suggestion.
+      const excluded = new Set(externalWalletSourceLocationIds(account));
+      const eligibleIds = new Set(
+        account.projection.components
+          .filter((component) => !excluded.has(component.location.locationId))
+          .map((component) => component.componentId),
+      );
+      let estimatedRaw = 0n;
+      for (const component of account.cashAvailability.components) {
+        if (
+          !eligibleIds.has(component.componentId) ||
+          component.availableEstimatedUsd == null
+        )
+          continue;
+        estimatedRaw += BigInt(
+          rawForUsdCeil({
+            usd: component.availableEstimatedUsd,
+            decimals: POLYMARKET_PUSD_DECIMALS,
+            unitPriceUsd: "1",
+          }),
+        );
+      }
+      // A heuristic routing/gas reserve, not a promised provider fee.
+      const bufferedRaw = (estimatedRaw * 95n) / 100n - 100_000n;
+      if (bufferedRaw <= 0n)
+        return unavailable(
+          "below_min_order",
+          "Estimated cash is below the minimum order amount.",
+        );
+      const estimate = await dependencies.findMaxPolymarketMarketBuyUsdForFunds(
+        input.pool,
+        {
+          tokenId: input.tokenId,
+          executableFundsRaw: bufferedRaw,
+          context: quoteContext,
+          slippageBps: input.slippageBps ?? undefined,
+        },
+      );
+      if (!estimate.ok)
+        return unavailable(
+          estimate.reason,
+          "An estimated order amount is unavailable.",
+        );
+      return {
+        ...estimate.quote,
+        ok: true,
+        reason: "ok",
+        fundingScope: "account",
+        tokenId: input.tokenId,
+        side: "BUY",
+        orderType: "FOK",
+        amountType: "usd",
+        maxAmountUsd: Number(estimate.maxAmountUsdRaw) / 1_000_000,
+        maxAmountUsdRaw: estimate.maxAmountUsdRaw,
+        executableFundsRaw: bufferedRaw.toString(),
+        funderPusdRaw: input.funds.funderPusdRaw.toString(),
+        funderPusdAvailableRaw: input.funds.funderPusdAvailableRaw.toString(),
+        funderLockedRaw: input.funds.funderLockedRaw.toString(),
+        signerLockedRaw: input.funds.signerLockedRaw.toString(),
+        signerPusdTopUpRaw: input.funds.signerPusdTopUpRaw.toString(),
+        signerUsdceTopUpRaw: input.funds.signerUsdceTopUpRaw.toString(),
+        usesSignerTopUp: input.funds.usesSignerTopUp,
+      };
     }
 
     const runtime = dependencies.createFundingRuntime(input.pool);

@@ -432,9 +432,47 @@ const tests: TestCase[] = [
       const result = await computePolymarketAccountMaxSpend(requestInput);
 
       assert.equal(result.ok, true);
+      assert.equal(quotedFundsRaw, 4_860_000n);
+      const estimateAccount = {
+        ...account,
+        projection: {
+          ...account.projection,
+          components: [
+            {
+              componentId: "cash",
+              location: {
+                kind: "wallet",
+                locationId: "internal",
+                details: { walletId: "wallet_controller_after_trade_12345678" },
+              },
+            },
+          ],
+        },
+        cashAvailability: {
+          ...account.cashAvailability,
+          components: [{ componentId: "cash", availableEstimatedUsd: "5.78" }],
+        },
+      } as unknown as AccountValueReadModel;
+      const amountEstimate = await computePolymarketAccountMaxSpend({
+        ...requestInput,
+        amountEstimateOnly: true,
+        dependencies: {
+          ...requestInput.dependencies,
+          buildAccountValueReadModel: async () => estimateAccount,
+          createFundingRuntime: () => {
+            throw new Error(
+              "Amount MAX must never query Relay or funding planner",
+            );
+          },
+        },
+      });
+      assert.equal(amountEstimate.ok, true);
+      assert.equal(amountEstimate.executableFundsRaw, "5391000");
+      assert.ok(
+        BigInt(String(amountEstimate.totalRequiredUsdcRaw)) <= 5_391_000n,
+      );
       assert.equal(result.fundingScope, "account");
       assert.equal(result.executableFundsRaw, "4860000");
-      assert.equal(quotedFundsRaw, 4_860_000n);
       assert.equal(previewRequests.length, 2);
       for (const request of previewRequests) {
         assert.equal(

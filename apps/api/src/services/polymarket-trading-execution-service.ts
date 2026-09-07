@@ -4126,6 +4126,7 @@ export async function computePolymarketMaxSpendRoute(input: {
     return {
       ok: true,
       payload: await computePolymarketAccountMaxSpend({
+        amountEstimateOnly: true,
         connectedExternalWalletRefs: body.connectedExternalWalletRefs,
         funder,
         funds,
