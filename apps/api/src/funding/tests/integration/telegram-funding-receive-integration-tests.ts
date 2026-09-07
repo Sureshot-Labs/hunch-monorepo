@@ -13,7 +13,10 @@ import { pool } from "../../../db.js";
 import { fundingSidecarRuntimeConfig } from "../../runtime/sidecar-runtime-config.js";
 import { SOLANA_NATIVE_ASSET } from "../../domain/network-fees.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
-import { resolveTelegramFundingManagedWalletIdentity } from "../../execution/telegram-funding-managed-wallet.js";
+import {
+  resolveTelegramFundingManagedWalletIdentity,
+  resolveTelegramFundingProvisionWallet,
+} from "../../execution/telegram-funding-managed-wallet.js";
 import { lockTelegramFundingLinkLifecycle } from "../../execution/telegram-funding-link-lifecycle-lock.js";
 import { FUNDING_POLICY_KEY } from "../../policies/funding-policy.js";
 import {
@@ -188,6 +191,43 @@ try {
        privy_profile_updated_at
      ) values ($1, $2, 'ethereum', true, true, $3, 'embedded', true, $4)`,
     [userId, destinationAddress, privyWalletId, now],
+  );
+  await pool.query(
+    `delete from telegram_bot_trading_preferences where user_id = $1`,
+    [userId],
+  );
+  const newAccountIdentity = { userId, telegramAccountId, telegramUserId };
+  assert.equal(
+    (
+      await resolveTelegramFundingManagedWalletIdentity(
+        pool,
+        newAccountIdentity,
+      )
+    )?.walletAddress,
+    destinationAddress,
+    "Receive must work without automation authorization or preferences",
+  );
+  assert.equal(
+    await resolveTelegramFundingProvisionWallet(pool, {
+      ...newAccountIdentity,
+      executionVenueId: "polymarket",
+    }),
+    null,
+    "Receive identity must not grant delegated execution",
+  );
+  assert.equal(
+    await resolveTelegramFundingManagedWalletIdentity(pool, {
+      ...newAccountIdentity,
+      telegramUserId: `${telegramUserId}0`,
+    }),
+    null,
+    "Receive must retain exact Telegram ownership checks",
+  );
+  await pool.query(
+    `insert into telegram_bot_trading_preferences (
+       user_id, desired_enabled, decision_source
+     ) values ($1, true, 'manual_enable')`,
+    [userId],
   );
   await enableManagedTrading(telegramUserId, `did:privy:${suffix}`);
 

@@ -51,7 +51,8 @@ async function resolveTelegramFundingManagedWallet(
     user_wallet_id: string;
     wallet_address: string;
   }>(
-    `
+    requireExecutionReady
+      ? `
       select
         wallet.id as user_wallet_id,
         wallet.privy_wallet_id,
@@ -95,13 +96,46 @@ async function resolveTelegramFundingManagedWallet(
           )
         )
       limit 2
+    `
+      : `
+      select wallet.id as user_wallet_id, wallet.privy_wallet_id,
+             wallet.wallet_address
+      from users app_user
+      join user_telegram_accounts telegram_account
+        on telegram_account.user_id = app_user.id
+       and telegram_account.id = $2::uuid
+       and telegram_account.telegram_user_id = $3
+      join user_wallets wallet
+        on wallet.user_id = app_user.id
+       and wallet.wallet_type = 'ethereum'
+       and wallet.is_verified = true
+       and wallet.is_internal_wallet = true
+       and nullif(trim(wallet.privy_wallet_id), '') is not null
+      left join telegram_bot_trading_authorizations trading_authorization
+        on trading_authorization.user_id = app_user.id
+       and trading_authorization.telegram_user_id = $3
+       and trading_authorization.wallet_chain = 'ethereum'
+      where app_user.id = $1::uuid
+        and coalesce(app_user.is_active, true) = true
+        and (
+          trading_authorization.id is null
+          or (
+            wallet.privy_wallet_id = trading_authorization.privy_wallet_id
+            and funding_account_identifier_equal(
+              'ethereum', wallet.wallet_address,
+              trading_authorization.wallet_address
+            )
+          )
+        )
+      limit 2
     `,
     [
       input.userId,
       input.telegramAccountId,
       input.telegramUserId,
-      requireExecutionReady,
-      input.executionVenueId ?? null,
+      ...(requireExecutionReady
+        ? [requireExecutionReady, input.executionVenueId ?? null]
+        : []),
     ],
   );
   const row = rows[0];
@@ -128,8 +162,9 @@ export function resolveTelegramFundingManagedWalletIdentity(
     executionVenueId?: "polymarket" | "limitless";
   }>,
 ): Promise<TelegramFundingProvisionWallet | null> {
-  // Wallet identity survives a user/control-plane pause. Ownership checks must
-  // not confuse "cannot execute now" with "this is no longer the same wallet".
+  // Receive needs verified ownership, not automation enrollment. Preserve an
+  // existing wallet selection, but new users need no authorization/preferences.
+  // Multiple unselected internal wallets remain ambiguous (never pick arbitrarily).
   return resolveTelegramFundingManagedWallet(pool, input, false);
 }
 
