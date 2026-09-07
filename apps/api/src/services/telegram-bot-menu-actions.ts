@@ -3,6 +3,8 @@ import {
   buildSignalBotMarketSearchScreen,
   buildSignalBotMarketVenuePickerScreen,
   readSignalBotMarketSearchSession,
+  writeSignalBotMarketSearchSession,
+  type SignalBotMarketSearchResult,
   SIGNAL_BOT_MARKET_SEARCH_PAGE_SIZE,
 } from "./telegram-bot-menu-markets.js";
 import type {
@@ -32,6 +34,7 @@ export type SignalBotFundingMenuRoute =
 
 export type SignalBotInteractiveMenuRoute =
   | SignalBotFundingMenuRoute
+  | { kind: "market_search_filters"; sessionId: string; venue?: string }
   | { index: number; kind: "market_search_result"; sessionId: string }
   | { kind: "market_search_back"; page: number; sessionId: string }
   | { kind: "market_search_page"; page: number; sessionId: string }
@@ -48,6 +51,15 @@ export function parseSignalBotInteractiveMenuRoute(
 ): SignalBotInteractiveMenuRoute | null {
   const funding = parseTelegramFundingCallbackRoute(route);
   if (funding) return funding;
+  const filters = route.match(
+    /^search_filters:([a-f0-9]{12})(?::(polymarket|limitless|kalshi|all|sort|categories|s_trending|s_totalvol|s_time|c_all|c_politics|c_sports|c_crypto|c_economics|c_tech|c_culture))?$/i,
+  );
+  if (filters)
+    return {
+      kind: "market_search_filters",
+      sessionId: filters[1] ?? "",
+      venue: filters[2]?.toLowerCase(),
+    };
   const searchMatch = route.match(/^search:([a-f0-9]{12}):(\d{1,2})$/i);
   if (searchMatch) {
     return {
@@ -238,6 +250,7 @@ type MenuMessage = {
 };
 
 type MenuRedis = {
+  set?(key: string, value: string, options?: { EX?: number }): Promise<unknown>;
   get(key: string): Promise<string | null>;
 };
 
@@ -280,6 +293,13 @@ export type SignalBotInteractiveMenuLoaders = {
 };
 
 type SignalBotInteractiveMenuCallbackInput = {
+  searchOptions?: () => Promise<{ venues: string[] }>;
+  searchMarkets?: (input: {
+    category?: string;
+    sort?: "trending" | "totalvol" | "time";
+    query?: string | null;
+    venues?: string[];
+  }) => Promise<SignalBotMarketSearchResult[]>;
   callbackPrefix: string;
   chatId: string;
   loadDeposit?: SignalBotInteractiveMenuLoaders["deposit"];
@@ -317,6 +337,7 @@ async function deliverSignalBotInteractiveMenuCallback(
 ): Promise<boolean> {
   const { route } = input;
   if (
+    route.kind === "market_search_filters" ||
     route.kind === "market_search_result" ||
     route.kind === "market_search_back" ||
     route.kind === "market_search_page" ||
@@ -330,6 +351,188 @@ async function deliverSignalBotInteractiveMenuCallback(
     });
     if (!session) {
       await input.renderExpiredSearch();
+      return true;
+    }
+    if (route.kind === "market_search_filters") {
+      if (route.venue === "sort" || route.venue === "categories") {
+        const choices =
+          route.venue === "sort"
+            ? [
+                ["s_trending", "Trending"],
+                ["s_totalvol", "Volume"],
+                ["s_time", "Closing soon"],
+              ]
+            : [
+                ["c_all", "All categories"],
+                ["c_politics", "Politics"],
+                ["c_sports", "Sports"],
+                ["c_crypto", "Crypto"],
+                ["c_economics", "Economics"],
+                ["c_tech", "Tech"],
+                ["c_culture", "Culture"],
+              ];
+        await input.render({
+          text: route.venue === "sort" ? "↕️ Sort results" : "🗂 Category",
+          reply_markup: {
+            inline_keyboard: [
+              ...choices.map(([value, label]) => [
+                {
+                  text: label ?? "",
+                  callback_data: `${input.callbackPrefix}search_filters:${route.sessionId}:${value}`,
+                },
+              ]),
+              [
+                {
+                  text: "⬅️ Results",
+                  callback_data: `${input.callbackPrefix}search_back:${route.sessionId}:0`,
+                },
+              ],
+            ],
+          },
+        });
+        return true;
+      }
+      if (!route.venue) {
+        const options = await input.searchOptions?.().catch(() => null);
+        if (!options) {
+          await input.render({
+            text: "Filters temporarily unavailable. Try again.",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: "🔄 Retry",
+                    callback_data: `${input.callbackPrefix}search_filters:${route.sessionId}`,
+                  },
+                ],
+                [
+                  {
+                    text: "⬅️ Results",
+                    callback_data: `${input.callbackPrefix}search_back:${route.sessionId}:0`,
+                  },
+                ],
+              ],
+            },
+          });
+          return true;
+        }
+        await input.render({
+          text: "⚙️ Search filters\nChoose a venue. Your search query is preserved.",
+          reply_markup: {
+            inline_keyboard: [
+              ...[
+                ["polymarket", "🔵 Polymarket"],
+                ["limitless", "🟡 Limitless"],
+                ["kalshi", "🟢 Kalshi"],
+              ]
+                .filter(([venue]) => options.venues.includes(venue ?? ""))
+                .map(([venue, label]) => [
+                  {
+                    text: `${session.venues?.includes(venue ?? "") ? "✓ " : ""}${label}`,
+                    callback_data: `${input.callbackPrefix}search_filters:${route.sessionId}:${venue}`,
+                  },
+                ]),
+              [
+                {
+                  text: `🗂 Category (${session.category ?? "All"})`,
+                  callback_data: `${input.callbackPrefix}search_filters:${route.sessionId}:categories`,
+                },
+              ],
+              [
+                {
+                  text: "🧹 Clear filters",
+                  callback_data: `${input.callbackPrefix}search_filters:${route.sessionId}:all`,
+                },
+              ],
+              [
+                {
+                  text: "⬅️ Results",
+                  callback_data: `${input.callbackPrefix}search_back:${route.sessionId}:0`,
+                },
+              ],
+            ],
+          },
+        });
+        return true;
+      }
+      const venues =
+        route.venue === "all"
+          ? []
+          : route.venue.startsWith("s_") || route.venue.startsWith("c_")
+            ? (session.venues ?? [])
+            : [route.venue];
+      const category =
+        route.venue === "all" || route.venue === "c_all"
+          ? undefined
+          : route.venue === "c_tech"
+            ? "technology"
+            : route.venue === "c_culture"
+              ? "entertainment"
+              : route.venue.startsWith("c_")
+                ? route.venue.slice(2)
+                : session.category;
+      const sort =
+        route.venue === "s_totalvol"
+          ? "totalvol"
+          : route.venue === "s_time"
+            ? "time"
+            : route.venue === "s_trending"
+              ? "trending"
+              : (session.sort ?? "trending");
+      try {
+        if (!input.searchMarkets || !input.redis.set)
+          throw new Error("search_unavailable");
+        const results = await input.searchMarkets({
+          query: session.query,
+          venues,
+          category,
+          sort,
+        });
+        const sessionId = await writeSignalBotMarketSearchSession({
+          chatId: input.chatId,
+          telegramUserId: input.telegramUserId,
+          redis: {
+            get: input.redis.get.bind(input.redis),
+            set: input.redis.set.bind(input.redis),
+          },
+          query: session.query,
+          results,
+          venues,
+          category,
+          sort,
+        });
+        await input.render(
+          buildSignalBotMarketSearchScreen({
+            callbackPrefix: input.callbackPrefix,
+            query: session.query,
+            results,
+            sessionId,
+            venues,
+            category,
+            sort,
+          }),
+        );
+      } catch {
+        await input.render({
+          text: "Search temporarily unavailable. Try the filter again.",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: "🔄 Retry",
+                  callback_data: `${input.callbackPrefix}search_filters:${route.sessionId}:${route.venue}`,
+                },
+              ],
+              [
+                {
+                  text: "⬅️ Results",
+                  callback_data: `${input.callbackPrefix}search_back:${route.sessionId}:0`,
+                },
+              ],
+            ],
+          },
+        });
+      }
       return true;
     }
     if (
@@ -354,6 +557,9 @@ async function deliverSignalBotInteractiveMenuCallback(
           page: route.page,
           query: session.query,
           results: session.results,
+          venues: session.venues,
+          category: session.category,
+          sort: session.sort,
           sessionId: route.sessionId,
         }),
       );

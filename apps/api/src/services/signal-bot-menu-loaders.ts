@@ -51,7 +51,11 @@ export type SignalBotMenuLoaders = TelegramBotRewardsMenuDependencies & {
     action: TelegramBotMenuActions.SignalBotFundingMenuAction;
     errorCode: "unexpected_error";
   }) => void;
+  searchOptions?: () => Promise<{ venues: string[] }>;
   searchMarkets?: (input: {
+    category?: string;
+    sort?: "trending" | "totalvol" | "time";
+    venues?: string[];
     query?: string | null;
   }) => Promise<SignalBotMarketSearchResult[]>;
 };

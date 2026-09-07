@@ -6,6 +6,7 @@ import type {
 } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
+import { filterVenuesForLifecycleCapability } from "../services/venue-lifecycle.js";
 
 import { createAuthMiddleware } from "../auth.js";
 import { pool, type DbQuery } from "../db.js";
@@ -186,7 +187,24 @@ const internalMarketCardBodySchema = z
   .strict();
 
 const internalMarketSearchBodySchema = z
-  .object({ query: z.string().trim().max(240).optional().nullable() })
+  .object({
+    category: z
+      .enum([
+        "politics",
+        "sports",
+        "crypto",
+        "economics",
+        "technology",
+        "entertainment",
+      ])
+      .optional(),
+    sort: z.enum(["trending", "totalvol", "time"]).optional(),
+    query: z.string().trim().max(240).optional().nullable(),
+    venues: z
+      .array(z.enum(["polymarket", "limitless", "kalshi"]))
+      .max(3)
+      .optional(),
+  })
   .strict();
 
 const internalPositionCardBodySchema = z
@@ -1254,6 +1272,15 @@ async function registerTelegramBotTradingRoutes(
   );
 
   api.post(
+    "/internal/telegram-bot/trading/search-options",
+    { preHandler: requireInternal },
+    async () => ({
+      venues: (
+        await filterVenuesForLifecycleCapability(routePool, null, "discovery")
+      ).venues,
+    }),
+  );
+  api.post(
     "/internal/telegram-bot/trading/market-search",
     {
       preHandler: requireInternal,
@@ -1275,6 +1302,9 @@ async function registerTelegramBotTradingRoutes(
       return searchMarkets({
         pool: routePool,
         query: request.body.query,
+        venues: request.body.venues,
+        category: request.body.category,
+        sort: request.body.sort,
         resolveCrossVenueAlternatives: aggClient
           ? async ({ marketId, venues }) => {
               try {

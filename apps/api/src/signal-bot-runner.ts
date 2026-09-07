@@ -673,6 +673,13 @@ export async function runSignalBotRunner(): Promise<void> {
                     throw error;
                   })
               : Promise.reject(new Error("Market search is unavailable")),
+          searchOptions: () =>
+            tradingInternalApi
+              ? tradingInternalApi.searchOptions().catch((error: unknown) => {
+                  logTradingInternalApiFailure("market-search", error);
+                  throw error;
+                })
+              : Promise.reject(new Error("Market search is unavailable")),
           loadMarketCard: (input) =>
             tradingInternalApi
               ? tradingInternalApi

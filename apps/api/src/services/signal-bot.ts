@@ -2887,6 +2887,7 @@ export async function handleSignalBotMenuCallback(
     });
   }
   if (
+    route.kind === "market_search_filters" ||
     route.kind === "market_search_result" ||
     route.kind === "market_search_back" ||
     route.kind === "market_search_page" ||
@@ -2912,6 +2913,8 @@ export async function handleSignalBotMenuCallback(
       }
     };
     return TelegramBotMenuActions.handleSignalBotInteractiveMenuCallback({
+      searchMarkets: input.searchMarkets,
+      searchOptions: input.searchOptions,
       callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
       chatId,
       idempotencyKey: input.callbackQuery.id,

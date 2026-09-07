@@ -1,7 +1,6 @@
 import type { Pool } from "@hunch/infra";
 
 import {
-  fetchFeedMarketSearchCandidateIds,
   fetchFeedMarketsDirect,
   type FeedMarketRow,
 } from "../repos/unified-read.js";
@@ -267,6 +266,9 @@ async function enrichTelegramMarketSearchResults(input: {
 
 export async function searchTelegramMarkets(input: {
   pool: Pool;
+  venues?: string[];
+  category?: string;
+  sort?: "trending" | "totalvol" | "time";
   query?: string | null;
   resolveCrossVenueAlternatives?: (input: {
     marketId: string;
@@ -277,7 +279,7 @@ export async function searchTelegramMarkets(input: {
   const now = new Date();
   const lifecycle = await filterVenuesForLifecycleCapability(
     input.pool,
-    null,
+    input.venues?.length ? input.venues : null,
     "discovery",
   );
   if (lifecycle.venues.length === 0) return [];
@@ -288,8 +290,9 @@ export async function searchTelegramMarkets(input: {
     minLiquidity: 0,
     view: "markets",
     venues: lifecycle.venues,
-    sort: "trending_v2",
-    sortDir: "desc",
+    categories: input.category ? [input.category] : undefined,
+    sort: input.sort ?? "trending",
+    sortDir: input.sort === "time" ? "asc" : "desc",
     nowParam: now.toISOString(),
     sevenDaysAgo: new Date(
       now.getTime() - 7 * 24 * 60 * 60 * 1_000,
@@ -298,67 +301,19 @@ export async function searchTelegramMarkets(input: {
       now.getTime() + 7 * 24 * 60 * 60 * 1_000,
     ).toISOString(),
   } as const;
-  if (!query) {
-    const rows = await fetchFeedMarketsDirect(input.pool, baseInputs);
-    return rows
-      .slice(0, TELEGRAM_SEARCH_SESSION_RESULT_LIMIT)
-      .map(mapTelegramMarketSearchResult);
-  }
-  const fetchRankedResults = async (
-    venues: string[],
-    resultLimit: number,
-  ): Promise<TelegramMarketSearchResult[]> => {
-    for (const candidateLimit of [25, 100]) {
-      const candidateIds = await fetchFeedMarketSearchCandidateIds(input.pool, {
-        limit: candidateLimit,
-        now: now.toISOString(),
-        query,
-        venues,
-      });
-      if (candidateIds.length === 0) return [];
-      const rows = await fetchFeedMarketsDirect(
-        input.pool,
-        {
-          ...baseInputs,
-          limit: candidateIds.length,
-          sort: undefined,
-          venues: undefined,
-        },
-        candidateIds,
-      );
-      if (rows.length >= resultLimit || candidateIds.length < candidateLimit) {
-        return rows.slice(0, resultLimit).map(mapTelegramMarketSearchResult);
-      }
-    }
-    return [];
-  };
-
-  const primary = await fetchRankedResults(
-    lifecycle.venues,
-    TELEGRAM_SEARCH_SESSION_RESULT_LIMIT,
-  );
-  const secondaryVenues = resolveTelegramSearchSecondaryVenues({
-    results: primary,
-    venues: lifecycle.venues,
+  // Apply category and ordering in the feed query, before the result limit.
+  const rows = await fetchFeedMarketsDirect(input.pool, {
+    ...baseInputs,
+    q: query || undefined,
   });
-  const secondary =
-    secondaryVenues.length > 0
-      ? await fetchRankedResults(
-          secondaryVenues,
-          TELEGRAM_SEARCH_SESSION_RESULT_LIMIT,
-        )
-      : [];
-  const diversified =
-    secondary.length > 0
-      ? diversifyTelegramMarketSearchResults({
-          limit: TELEGRAM_SEARCH_SESSION_RESULT_LIMIT,
-          primary,
-          secondary,
-        })
-      : primary;
-  return enrichTelegramMarketSearchResults({
-    resolveCrossVenueAlternatives: input.resolveCrossVenueAlternatives,
-    results: diversified,
-    venues: lifecycle.venues,
-  });
+  const results = rows
+    .slice(0, TELEGRAM_SEARCH_SESSION_RESULT_LIMIT)
+    .map(mapTelegramMarketSearchResult);
+  return query && !input.category
+    ? enrichTelegramMarketSearchResults({
+        results,
+        venues: lifecycle.venues,
+        resolveCrossVenueAlternatives: input.resolveCrossVenueAlternatives,
+      })
+    : results;
 }

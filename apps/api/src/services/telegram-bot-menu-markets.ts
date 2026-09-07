@@ -47,6 +47,9 @@ export type SignalBotMarketSearchResult = SignalBotMarketSearchVenueOption & {
 };
 
 export type SignalBotMarketSearchSession = {
+  category?: string;
+  sort?: "trending" | "totalvol" | "time";
+  venues?: string[];
   chatId: string;
   query: string | null;
   results: SignalBotMarketSearchResult[];
@@ -71,6 +74,9 @@ function searchKey(sessionId: string): string {
 }
 
 export async function writeSignalBotMarketSearchSession(input: {
+  category?: string;
+  sort?: "trending" | "totalvol" | "time";
+  venues?: string[];
   chatId: string;
   query: string | null;
   redis: SearchRedis;
@@ -79,6 +85,9 @@ export async function writeSignalBotMarketSearchSession(input: {
 }): Promise<string> {
   const sessionId = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
   const session: SignalBotMarketSearchSession = {
+    category: input.category,
+    sort: input.sort,
+    venues: input.venues,
     chatId: input.chatId,
     query: input.query,
     results: input.results.slice(0, SEARCH_SESSION_RESULT_LIMIT),
@@ -108,6 +117,17 @@ export async function readSignalBotMarketSearchSession(input: {
       return null;
     }
     return {
+      category:
+        typeof parsed.category === "string" ? parsed.category : undefined,
+      sort:
+        parsed.sort === "totalvol" || parsed.sort === "time"
+          ? parsed.sort
+          : "trending",
+      venues: Array.isArray(parsed.venues)
+        ? parsed.venues.filter((venue) =>
+            ["polymarket", "limitless", "kalshi"].includes(venue),
+          )
+        : [],
       chatId: parsed.chatId,
       query: typeof parsed.query === "string" ? parsed.query : null,
       results: parsed.results.slice(
@@ -141,6 +161,9 @@ function venueOptions(
 }
 
 export function buildSignalBotMarketSearchScreen(input: {
+  category?: string;
+  sort?: "trending" | "totalvol" | "time";
+  venues?: string[];
   callbackPrefix: string;
   page?: number;
   query: string | null;
@@ -265,6 +288,18 @@ export function buildSignalBotMarketSearchScreen(input: {
     reply_markup: {
       inline_keyboard: [
         ...resultButtonRows,
+        [
+          {
+            text: `↕️ Sort (${input.sort === "totalvol" ? "Volume" : input.sort === "time" ? "Closing soon" : "Trending"})`,
+            callback_data: `${input.callbackPrefix}search_filters:${input.sessionId}:sort`,
+          },
+        ],
+        [
+          {
+            text: `⚙️ Filters (${input.venues?.length ? input.venues.map((venue) => ({ polymarket: "🔵", limitless: "🟡", kalshi: "🟢" })[venue] ?? venue).join(" ") : "All"}${input.category ? ` · ${input.category}` : ""})`,
+            callback_data: `${input.callbackPrefix}search_filters:${input.sessionId}`,
+          },
+        ],
         ...(input.results.length > SIGNAL_BOT_MARKET_SEARCH_PAGE_SIZE
           ? [
               [

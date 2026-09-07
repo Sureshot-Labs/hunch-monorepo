@@ -223,7 +223,13 @@ export type TelegramBotTradingInternalApiClient = {
     telegramMiniAppEnabled?: boolean;
     telegramUserId: string | number;
   }) => Promise<TelegramFundingClientMessage>;
-  searchMarkets: (input: { query?: string | null }) => Promise<
+  searchOptions: () => Promise<{ venues: string[] }>;
+  searchMarkets: (input: {
+    category?: string;
+    sort?: "trending" | "totalvol" | "time";
+    query?: string | null;
+    venues?: string[];
+  }) => Promise<
     Array<{
       eventId: string;
       eventTitle: string | null;
@@ -645,6 +651,11 @@ export function createTelegramBotTradingInternalApiClient(input: {
       post<TelegramFundingClientMessage>(
         "/internal/telegram-bot/funding/change-buy-amount",
         body,
+      ),
+    searchOptions: () =>
+      post<{ venues: string[] }>(
+        "/internal/telegram-bot/trading/search-options",
+        {},
       ),
     searchMarkets: (body) =>
       post<

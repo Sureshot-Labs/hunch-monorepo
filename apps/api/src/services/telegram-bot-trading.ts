@@ -449,11 +449,28 @@ function buildTelegramFundingBuyReturnOpenFailureMessage(input: {
 function withTelegramTradeErrorActions(input: {
   intentId: string;
   message: TelegramBotTradingMessage;
+  retry?: boolean;
 }): TelegramBotTradingMessage {
   const hasPrimaryAction = input.message.reply_markup?.inline_keyboard.some(
     (row) => row.length > 0,
   );
-  return withTelegramPrivateNavigation(input.message, {
+  const message =
+    input.retry && !hasPrimaryAction
+      ? {
+          ...input.message,
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: "🔄 Try again",
+                  callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${input.intentId}`,
+                },
+              ],
+            ],
+          },
+        }
+      : input.message;
+  return withTelegramPrivateNavigation(message, {
     marketCallbackData: hasPrimaryAction
       ? undefined
       : `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${input.intentId}`,
@@ -10540,6 +10557,7 @@ async function previewTelegramTradeIntent(input: {
       chat_id: input.chatId,
       ...withTelegramTradeErrorActions({
         intentId: input.intent.id,
+        retry: true,
         message: {
           parse_mode: "MarkdownV2",
           text: formatTelegramTradeLifecycleMessageMarkdownV2({
@@ -13420,6 +13438,7 @@ export async function handleTelegramBotTradingCallback(
         chat_id: chatId,
         ...withTelegramTradeErrorActions({
           intentId: intent.id,
+          retry: true,
           message: {
             parse_mode: "MarkdownV2",
             text: formatTelegramTradeLifecycleMessageMarkdownV2({
