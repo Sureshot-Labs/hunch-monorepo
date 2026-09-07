@@ -108,6 +108,27 @@ export type FundingSidecarRuntimeConfig = Readonly<{
   limitlessNegRiskAddress: string;
 }>;
 
+/** Shared by receipt readers; per-chain overrides are optional, not the RPC registry. */
+export function fundingEvmRpcUrl(
+  chainId: number,
+  config: FundingSidecarRuntimeConfig = fundingSidecarRuntimeConfig,
+): string | null {
+  if (!Number.isSafeInteger(chainId) || chainId <= 0) return null;
+  const override = config.evmRpcUrlsByChain[String(chainId)];
+  if (override?.trim()) return override.trim();
+  const named: Readonly<Record<number, string>> = {
+    1: config.ethereumRpcUrl,
+    10: config.optimismRpcUrl,
+    56: config.bscRpcUrl,
+    137: config.polygonRpcUrl,
+    8453: config.baseRpcUrl,
+    42161: config.arbitrumRpcUrl,
+    43114: config.avalancheRpcUrl,
+    59144: config.lineaRpcUrl,
+  };
+  return named[chainId]?.trim() || null;
+}
+
 export function loadFundingSidecarRuntimeConfig(
   source: Environment = process.env,
 ): FundingSidecarRuntimeConfig {

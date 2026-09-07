@@ -37,7 +37,10 @@ import {
   type FundingStepReceiptTarget,
 } from "../persistence/funding-step-receipt-repository.js";
 import { resolveAmbiguousProviderFundingStepAttemptForUserInTransaction } from "../persistence/funding-evidence-repository.js";
-import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
+import {
+  fundingSidecarRuntimeConfig,
+  fundingEvmRpcUrl,
+} from "../runtime/sidecar-runtime-config.js";
 import {
   parsePolymarketRelayerTransactionReference,
   POLYMARKET_HANDOFF_CHAIN_ATTRIBUTION_WINDOW_MS,
@@ -1196,21 +1199,6 @@ export function evaluateSvmActionReceipt(
   };
 }
 
-function evmRpcUrl(chainId: number): string | null {
-  const override =
-    fundingSidecarRuntimeConfig.evmRpcUrlsByChain[String(chainId)];
-  if (override?.trim()) return override.trim();
-  if (chainId === 137) return fundingSidecarRuntimeConfig.polygonRpcUrl;
-  if (chainId === 8453) return fundingSidecarRuntimeConfig.baseRpcUrl;
-  if (chainId === 1) return fundingSidecarRuntimeConfig.ethereumRpcUrl;
-  if (chainId === 10) return fundingSidecarRuntimeConfig.optimismRpcUrl;
-  if (chainId === 56) return fundingSidecarRuntimeConfig.bscRpcUrl;
-  if (chainId === 42161) return fundingSidecarRuntimeConfig.arbitrumRpcUrl;
-  if (chainId === 43114) return fundingSidecarRuntimeConfig.avalancheRpcUrl;
-  if (chainId === 59144) return fundingSidecarRuntimeConfig.lineaRpcUrl;
-  return null;
-}
-
 type EvmReceiptInspectionContext = Readonly<{
   latestBlockNumbersByChainId: Map<number, Promise<bigint>>;
   canonicalBlockHashesByChainAndHeight: Map<string, Promise<string | null>>;
@@ -2089,7 +2077,7 @@ async function inspectEvmTargetEvidence(
     throw new Error("EVM receipt inspector received a non-EVM action");
   }
   const chainId = Number(target.action.networkId.slice("evm:".length));
-  const rpcUrl = Number.isSafeInteger(chainId) ? evmRpcUrl(chainId) : null;
+  const rpcUrl = fundingEvmRpcUrl(chainId);
   if (!rpcUrl) {
     throw new Error("committed EVM receipt inspection context is incomplete");
   }

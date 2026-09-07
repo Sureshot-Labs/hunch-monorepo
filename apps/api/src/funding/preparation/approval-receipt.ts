@@ -7,7 +7,11 @@ import {
   fetchEvmBlockHash,
   fetchEvmBlockNumber,
 } from "../../services/polygon-rpc.js";
-import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
+import {
+  fundingSidecarRuntimeConfig,
+  fundingEvmRpcUrl,
+  type FundingSidecarRuntimeConfig,
+} from "../runtime/sidecar-runtime-config.js";
 import {
   evaluateEvmActionReceipt,
   type EvmReceiptRecord,
@@ -32,10 +36,16 @@ export type PreparationReceiptReader = (
   receipt: EvmReceiptRecord | null;
 }>;
 
-export const readPreparationReceipt: PreparationReceiptReader = async (
-  networkId,
-  transactionHash,
-) => {
+export async function readPreparationReceipt(
+  networkId: string,
+  transactionHash: string,
+  config: FundingSidecarRuntimeConfig = fundingSidecarRuntimeConfig,
+): ReturnType<PreparationReceiptReader> {
+  const chainId = /^evm:[1-9]\d*$/u.test(networkId)
+    ? Number(networkId.slice(4))
+    : NaN;
+  const rpcUrl = fundingEvmRpcUrl(chainId, config);
+  if (!rpcUrl) throw new Error("preparation_receipt_rpc_unavailable");
   const providerReference =
     parsePrivyFundingTransactionReference(transactionHash);
   if (providerReference) {
@@ -48,10 +58,6 @@ export const readPreparationReceipt: PreparationReceiptReader = async (
       return { transaction: null, receipt: null };
     transactionHash = result.transactionReference;
   }
-  const rpcUrl =
-    fundingSidecarRuntimeConfig.evmRpcUrlsByChain[networkId.slice(4)];
-  if (!networkId.startsWith("evm:") || !rpcUrl)
-    return { transaction: null, receipt: null };
   const rpc = { rpcUrl, timeoutMs: 6000, maxAttempts: 1 };
   const [transaction, receipt] = await Promise.all([
     fetchEvmTransactionByHash({ ...rpc, transactionHash }),
@@ -70,7 +76,7 @@ export const readPreparationReceipt: PreparationReceiptReader = async (
       confirmations: Number(head - BigInt(receipt.blockNumber) + 1n),
     },
   };
-};
+}
 
 /** null means another preparation kind; false means evidence is still missing.
  * Historical approval execution is not current market/trading readiness. */
