@@ -327,6 +327,7 @@ type PolymarketOrderHashBody = {
 };
 
 type PolymarketMaxSpendBody = {
+  connectedExternalWalletRefs?: string[];
   amountType?: string | null;
   funderAddress?: string | null;
   fundingScope?: "account" | null;
@@ -4125,6 +4126,7 @@ export async function computePolymarketMaxSpendRoute(input: {
     return {
       ok: true,
       payload: await computePolymarketAccountMaxSpend({
+        connectedExternalWalletRefs: body.connectedExternalWalletRefs,
         funder,
         funds,
         log: input.log,

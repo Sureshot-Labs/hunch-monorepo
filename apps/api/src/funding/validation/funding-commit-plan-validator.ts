@@ -3,6 +3,7 @@ import { POLYMARKET_FUNDING_SOURCE_ADAPTER_ID } from "../preparation/polymarket-
 import {
   isPolymarketRouterV1CommitPlan,
   isPolymarketRouterV2CommitPlan,
+  isPolymarketRouterV3CommitPlan,
 } from "./polymarket-router-commit-plan-validator.js";
 
 type CommitPlanValidator = (
@@ -18,6 +19,7 @@ const VERSIONED_COMMIT_PLAN_VALIDATORS = new Map<
     new Map([
       [1, isPolymarketRouterV1CommitPlan],
       [2, isPolymarketRouterV2CommitPlan],
+      [3, isPolymarketRouterV3CommitPlan],
     ]),
   ],
 ]);

@@ -375,8 +375,12 @@ const tests: TestCase[] = [
         runtimePolicy: DEFAULT_FUNDING_RUNTIME_POLICY,
       } as unknown as AccountValueReadModel;
       const previewRequests: FundingDiscoveryRequest[] = [];
+      const connectedExternalWalletRefs = [
+        "3c9a8727-00e9-4cdd-8fd4-2e4e52c79252",
+      ];
       let quotedFundsRaw: bigint | null = null;
       const result = await computePolymarketAccountMaxSpend({
+        connectedExternalWalletRefs,
         funder: DEPOSIT,
         funds: {
           funderPusdRaw: 430_000n,
@@ -428,6 +432,13 @@ const tests: TestCase[] = [
       assert.equal(result.executableFundsRaw, "4860000");
       assert.equal(quotedFundsRaw, 4_860_000n);
       assert.equal(previewRequests.length, 2);
+      for (const request of previewRequests) {
+        assert.deepEqual(
+          request.connectedExternalWalletRefs,
+          connectedExternalWalletRefs,
+          "capacity and exact Buy proof must use the same connected owner capabilities",
+        );
+      }
       assert.equal(
         previewRequests[1]?.serverAdditionalDestinationAmount?.raw,
         (BigInt(String(result.totalRequiredUsdcRaw)) - 430_000n).toString(),
@@ -466,6 +477,17 @@ const tests: TestCase[] = [
                 kind: "venue_account",
                 locationId: "location_external_venue",
                 details: { controllerWalletId: "wallet_external" },
+              },
+            },
+            {
+              location: {
+                kind: "venue_account",
+                locationId: "location_owned_safe",
+                details: {
+                  controllerWalletId: "wallet_external",
+                  venueId: "polymarket",
+                  polymarketFunderKind: "safe",
+                },
               },
             },
           ],

@@ -40,7 +40,8 @@ export function polymarketDepositWalletHandoffExpectation(
   if (
     action.kind !== "external_handoff" ||
     action.networkId !== "evm:137" ||
-    action.handoffKind !== "polymarket_deposit_wallet_transfer" ||
+    (action.handoffKind !== "polymarket_deposit_wallet_transfer" &&
+      action.handoffKind !== "polymarket_safe_transfer") ||
     typeof action.payload.token !== "string" ||
     typeof action.payload.funder !== "string" ||
     typeof action.payload.recipient !== "string" ||
@@ -63,6 +64,15 @@ export function polymarketDepositWalletHandoffExpectation(
       String(validation.recipientAddress),
     );
     const amountRaw = BigInt(action.payload.amountRaw);
+    const isSafe = action.handoffKind === "polymarket_safe_transfer";
+    if (
+      isSafe &&
+      (action.payload.topology !== "safe" ||
+        action.payload.conversionKind != null ||
+        validation.signerAddress?.toString().toLowerCase() !==
+          recipientAddress.toLowerCase())
+    )
+      return null;
     const calls = action.payload.calls.map((call) => {
       if (
         typeof call !== "object" ||
@@ -103,7 +113,9 @@ export function polymarketDepositWalletHandoffExpectation(
       if (
         calls.length !== 1 ||
         validation.executionEnvelope !==
-          "polymarket_deposit_wallet_to_controller_v1"
+          (isSafe
+            ? "polymarket_safe_to_controller_v1"
+            : "polymarket_deposit_wallet_to_controller_v1")
       ) {
         return null;
       }

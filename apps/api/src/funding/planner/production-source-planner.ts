@@ -45,6 +45,7 @@ import {
   fundingRouteExperienceFingerprint,
 } from "../persistence/route-experience-repository.js";
 import { deriveExecutionGas } from "../../account-value/execution-gas.js";
+import { deriveSafeProxyAddress } from "../../services/polymarket-funder.js";
 import {
   loadRelayEvmExecutionConfiguration,
   relayEvmSequentialQuoteTtlMs,
@@ -217,15 +218,24 @@ export function resolveProductionOwnedSourceExecution(input: {
   const funderAddress = detail(component.location, "address");
   const linkedAddress = detail(component.location, "linkedAddress");
   const componentAssetId = canonicalAssetId(component.amount.asset);
+  const isLegacySafe =
+    detail(component.location, "polymarketFunderKind") === "safe" &&
+    Boolean(
+      linkedAddress &&
+      funderAddress &&
+      deriveSafeProxyAddress(linkedAddress)?.toLowerCase() ===
+        funderAddress.toLowerCase(),
+    );
   const isDepositWalletPusd =
     componentAssetId === RELAY_PINNED_ASSETS.polygonPusd.toLowerCase();
   const isDepositWalletUsdce =
-    input.allowDepositWalletUsdceHandoff === true &&
+    (input.allowDepositWalletUsdceHandoff === true || isLegacySafe) &&
     componentAssetId === RELAY_PINNED_ASSETS.polygonUsdce.toLowerCase();
   const isPolymarketDepositWalletSource =
     component.location.kind === "venue_account" &&
     detail(component.location, "venueId") === "polymarket" &&
-    detail(component.location, "polymarketFunderKind") === "deposit_wallet" &&
+    (detail(component.location, "polymarketFunderKind") === "deposit_wallet" ||
+      isLegacySafe) &&
     component.amount.asset.networkId === "evm:137" &&
     (isDepositWalletPusd || isDepositWalletUsdce) &&
     Boolean(funderAddress) &&
@@ -247,7 +257,12 @@ export function resolveProductionOwnedSourceExecution(input: {
       : null;
   const usesPolymarketHandoff =
     Boolean(handoffControllerProfile) &&
-    handoffControllerProfile?.source !== "external" &&
+    (handoffControllerProfile?.source !== "external" ||
+      (isLegacySafe &&
+        handoffControllerProfile.controllerWalletRef != null &&
+        account.connectedExternalWalletRefs?.includes(
+          handoffControllerProfile.controllerWalletRef,
+        ))) &&
     Boolean(handoffControllerProfile?.controllerWalletRef) &&
     (handoffControllerProfile?.signingModes.includes("web_client") ||
       handoffControllerProfile?.signingModes.includes("privy_authorization"));
@@ -268,7 +283,9 @@ export function resolveProductionOwnedSourceExecution(input: {
       ? {
           safeLabel: "Polymarket balance",
           preRouteHandoff: {
-            kind: "polymarket_deposit_wallet_to_controller_v1" as const,
+            kind: isLegacySafe
+              ? ("polymarket_safe_to_controller_v1" as const)
+              : ("polymarket_deposit_wallet_to_controller_v1" as const),
             sourceLocation: component.location,
             funderAddress,
             controllerAddress: profile.address,
@@ -687,8 +704,10 @@ export function filterRelayEligibleSourceFactsForExecutionProfile(
   if (!serverExecutionProfileId) return facts;
   const profile = relayEvmFundingProfileSpec(serverExecutionProfileId);
   if (!profile) return [];
-  return facts.filter((fact) =>
-    sameAsset(fact.quoteInputAmount.asset, profile.sourceAsset),
+  return facts.filter(
+    (fact) =>
+      fact.preRouteHandoff?.kind !== "polymarket_safe_to_controller_v1" &&
+      sameAsset(fact.quoteInputAmount.asset, profile.sourceAsset),
   );
 }
 

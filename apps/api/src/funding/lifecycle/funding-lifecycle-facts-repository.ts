@@ -195,9 +195,12 @@ function actionIsSafeInternalHandoff(action: LifecycleActionRow): boolean {
   // the asset remains on an owned, routable controller wallet.
   return (
     action.step_kind === "external_handoff" &&
-    action.executor_id === "polymarket_deposit_wallet_relayer_v1" &&
-    action.action_validation_result.executionEnvelope ===
-      "polymarket_deposit_wallet_to_controller_v1"
+    ((action.executor_id === "polymarket_deposit_wallet_relayer_v1" &&
+      action.action_validation_result.executionEnvelope ===
+        "polymarket_deposit_wallet_to_controller_v1") ||
+      (action.executor_id === "polymarket_safe_relayer_v1" &&
+        action.action_validation_result.executionEnvelope ===
+          "polymarket_safe_to_controller_v1"))
   );
 }
 

@@ -111,7 +111,7 @@ function deriveMagicProxyAddress(signer: string): string | null {
   return ethers.getCreate2Address(factory, salt, initCodeHash);
 }
 
-function deriveSafeProxyAddress(signer: string): string | null {
+export function deriveSafeProxyAddress(signer: string): string | null {
   const factory = normalizeEthAddress(env.polymarketSafeFactoryAddress);
   const initCodeHash = normalizeHex32(env.polymarketSafeInitCodeHash);
 

@@ -1,4 +1,5 @@
 import { tx, type Pool } from "@hunch/infra";
+import { validatePolymarketFunderSelection } from "../../services/polymarket-funder.js";
 
 import { buildAccountValueReadModel } from "../../account-value/runtime-service.js";
 import { getCredentialsEncryptionKey } from "../../lib/credentials-encryption.js";
@@ -93,10 +94,15 @@ function assertClientExecutable(
   controllerProfile: WalletExecutionProfile;
 }> {
   if (action.kind === "external_handoff") {
+    const isSafe = action.handoffKind === "polymarket_safe_transfer";
     if (
       action.networkId !== "evm:137" ||
-      action.handoffKind !== "polymarket_deposit_wallet_transfer" ||
-      executorId !== EXECUTOR_BY_ACTION_KIND.external_handoff
+      (!isSafe &&
+        action.handoffKind !== "polymarket_deposit_wallet_transfer") ||
+      executorId !==
+        (isSafe
+          ? "polymarket_safe_relayer_v1"
+          : EXECUTOR_BY_ACTION_KIND.external_handoff)
     ) {
       throw new FundingPersistenceError(
         "quote_mismatch",
@@ -106,7 +112,7 @@ function assertClientExecutable(
     const profile = exactWalletProfile(profiles, action);
     if (
       !profile ||
-      profile.source === "external" ||
+      (profile.source === "external" && !isSafe) ||
       !profile.controllerWalletRef ||
       (!profile.signingModes.includes("web_client") &&
         !profile.signingModes.includes("privy_authorization"))
@@ -294,6 +300,41 @@ export class FundingOperationActionRuntime {
       step.executorId,
       account.ownership?.wallets ?? [],
     );
+    if (
+      action.kind === "external_handoff" &&
+      action.handoffKind === "polymarket_safe_transfer"
+    ) {
+      const expectation = polymarketDepositWalletHandoffExpectation(
+        action,
+        step.actionValidationResult,
+      );
+      if (
+        !expectation ||
+        expectation.recipientAddress.toLowerCase() !==
+          execution.controllerProfile.address.toLowerCase()
+      ) {
+        throw new FundingPersistenceError(
+          "quote_mismatch",
+          "Safe recovery must return the exact asset to its controller",
+        );
+      }
+      const checked = await validatePolymarketFunderSelection({
+        signer: execution.controllerProfile.address,
+        funderAddress: expectation.funderAddress,
+        includeMagicProxy: false,
+      });
+      if (
+        checked.candidate?.signatureType !== 2 ||
+        !checked.candidate.deployed ||
+        checked.candidate.safeThreshold !== 1 ||
+        checked.candidate.safeOwners?.length !== 1
+      ) {
+        throw new FundingPersistenceError(
+          "quote_invalidated",
+          "Safe recovery requires the existing canonical deployed Safe",
+        );
+      }
+    }
     return tx(this.db, async (client) => {
       if (externalRecipientId) {
         // The share lock makes revocation/crypto-shredding serialize with the

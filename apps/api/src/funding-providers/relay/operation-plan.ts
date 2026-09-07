@@ -191,12 +191,14 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
   const handoff = input.source.preRouteHandoff;
   if (!handoff) return input.steps;
   const expectedSourceToken = handoff.tokenAddress;
+  const isSafe = handoff.kind === "polymarket_safe_to_controller_v1";
   const isSupportedHandoffToken = [
     RELAY_PINNED_ASSETS.polygonPusd,
     RELAY_PINNED_ASSETS.polygonUsdce,
   ].includes(expectedSourceToken.toLowerCase());
   if (
-    handoff.kind !== "polymarket_deposit_wallet_to_controller_v1" ||
+    (!isSafe &&
+      handoff.kind !== "polymarket_deposit_wallet_to_controller_v1") ||
     !isSupportedHandoffToken ||
     input.sourceAmount.asset.networkId !== "evm:137" ||
     canonicalAssetId(input.sourceAmount.asset) !==
@@ -234,9 +236,11 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
     ),
     networkId: input.sourceAmount.asset.networkId,
     actorWalletId: input.profile.walletId,
-    handoffKind: "polymarket_deposit_wallet_transfer",
+    handoffKind: isSafe
+      ? "polymarket_safe_transfer"
+      : "polymarket_deposit_wallet_transfer",
     payload: {
-      topology: "deposit_wallet",
+      topology: isSafe ? "safe" : "deposit_wallet",
       funder: handoff.funderAddress,
       recipient: handoff.controllerAddress,
       token: expectedSourceToken,
@@ -255,7 +259,9 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
       stepKind: "external_handoff" as const,
       state: "action_required" as const,
       actionFingerprint: canonicalJsonHash(action),
-      executorId: POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID,
+      executorId: isSafe
+        ? "polymarket_safe_relayer_v1"
+        : POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID,
       payerRequirement: "provider" as const,
       dependsOnOrdinal: null,
       normalizedAction: jsonRecord(action),
@@ -264,7 +270,7 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
         // The relayer action is one exact same-asset transfer back to the
         // controller. Downstream routing and approvals happen only from that
         // ordinary controller wallet.
-        executionEnvelope: "polymarket_deposit_wallet_to_controller_v1",
+        executionEnvelope: handoff.kind,
         funderAddress: handoff.funderAddress,
         recipientAddress: handoff.controllerAddress,
         tokenAddress: expectedSourceToken,

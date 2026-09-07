@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { deriveSafeProxyAddress } from "../../../services/polymarket-funder.js";
 
 import { stableWalletAssetLocationIdentity } from "../../../account-value/canonical.js";
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
@@ -313,6 +314,208 @@ const clientHandoffInput = planningInput(
 );
 const [clientHandoff] = await clientHandoffAdapter.list(clientHandoffInput);
 assert.ok(clientHandoff);
+const canonicalSafe = deriveSafeProxyAddress(SIGNER);
+assert.ok(canonicalSafe);
+const existingSafeAccount = account(true, "500000", "automatic", true);
+const safeSourceAccount = {
+  ...existingSafeAccount,
+  projection: {
+    ...existingSafeAccount.projection,
+    components: existingSafeAccount.projection.components.map((entry) =>
+      entry.componentId === "deposit_usdce_12345678"
+        ? {
+            ...entry,
+            location: {
+              ...entry.location,
+              details: {
+                ...entry.location.details,
+                address: canonicalSafe,
+                polymarketFunderKind: "safe",
+              },
+            },
+          }
+        : entry,
+    ),
+  },
+};
+const [safeFunding] = await new PolymarketFundingSourceAdapter(
+  safeSourceAccount,
+  { canonicalRouterAddress: ROUTER, usdceAsset: USDCE },
+).list(clientHandoffInput);
+assert.ok(safeFunding);
+const safePusdAccount = {
+  ...safeSourceAccount,
+  projection: {
+    ...safeSourceAccount.projection,
+    components: safeSourceAccount.projection.components.map((entry) =>
+      entry.componentId === "deposit_usdce_12345678"
+        ? {
+            ...entry,
+            amount: { ...entry.amount, asset: PUSD },
+            location: { ...entry.location, asset: PUSD },
+          }
+        : entry,
+    ),
+  },
+};
+const [safePusdFunding] = await new PolymarketFundingSourceAdapter(
+  safePusdAccount,
+  { canonicalRouterAddress: ROUTER, usdceAsset: USDCE },
+).list(clientHandoffInput);
+assert.ok(safePusdFunding);
+const safeUsdceComponent = safeSourceAccount.projection.components.find(
+  (entry) => entry.componentId === "deposit_usdce_12345678",
+);
+const safePusdComponent = safePusdAccount.projection.components.find(
+  (entry) => entry.componentId === "deposit_usdce_12345678",
+);
+assert.ok(safeUsdceComponent && safePusdComponent);
+const safeAvailability = existingSafeAccount.cashAvailability.components[0];
+assert.ok(safeAvailability);
+const mixedAccount = {
+  ...existingSafeAccount,
+  cashAvailability: {
+    ...existingSafeAccount.cashAvailability,
+    components: [
+      ...existingSafeAccount.cashAvailability.components,
+      {
+        ...safeAvailability,
+        componentId: "safe_usdce_mixed",
+      },
+      {
+        ...safeAvailability,
+        componentId: "safe_pusd_mixed",
+      },
+    ],
+  },
+  projection: {
+    ...existingSafeAccount.projection,
+    components: [
+      ...existingSafeAccount.projection.components,
+      {
+        ...safeUsdceComponent,
+        componentId: "safe_usdce_mixed",
+        location: {
+          ...safeUsdceComponent.location,
+          locationId: "safe_usdce_location",
+        },
+      },
+      {
+        ...safePusdComponent,
+        componentId: "safe_pusd_mixed",
+        location: {
+          ...safePusdComponent.location,
+          locationId: "safe_pusd_location",
+        },
+      },
+    ],
+  },
+};
+const [mixedFunding] = await new PolymarketFundingSourceAdapter(mixedAccount, {
+  canonicalRouterAddress: ROUTER,
+  usdceAsset: USDCE,
+}).list({
+  ...clientHandoffInput,
+  requiredAmount: { ...clientHandoffInput.requiredAmount, raw: "5000000" },
+});
+assert.ok(mixedFunding);
+assert.equal(mixedFunding.option.selectable, true);
+assert.equal(isValidFundingCommitPlanBoundary(mixedFunding.commitPlan), true);
+assert.deepEqual(
+  mixedFunding.commitPlan.steps
+    .slice(0, 3)
+    .map((step) => step.normalizedAction.handoffKind),
+  [
+    "polymarket_deposit_wallet_transfer",
+    "polymarket_safe_transfer",
+    "polymarket_safe_transfer",
+  ],
+);
+assert.equal(
+  fundingEconomicSourceReservations(
+    mixedFunding.commitPlan.reservations,
+  ).reduce((sum, entry) => sum + BigInt(entry.rawAmount), 0n),
+  5000000n,
+);
+assert.equal(mixedFunding.commitPlan.steps.length, 6);
+const brokenDependency = { ...mixedFunding.commitPlan };
+brokenDependency.steps = brokenDependency.steps.map((step, ordinal) =>
+  ordinal === 1 ? { ...step, dependsOnOrdinal: null } : step,
+);
+assert.equal(isValidFundingCommitPlanBoundary(brokenDependency), false);
+const wrongController = { ...mixedFunding.commitPlan };
+wrongController.steps = wrongController.steps.map((step) =>
+  step.stepKind === "venue_preparation"
+    ? {
+        ...step,
+        actionValidationResult: {
+          ...step.actionValidationResult,
+          signerAddress: DEPOSIT,
+        },
+      }
+    : step,
+);
+assert.equal(isValidFundingCommitPlanBoundary(wrongController), false);
+const repeatedInput = { ...mixedFunding.commitPlan };
+const repeatedStep = repeatedInput.steps[1];
+assert.ok(repeatedStep);
+repeatedInput.steps = repeatedInput.steps.map((step, ordinal) =>
+  ordinal === 2 ? { ...repeatedStep, ordinal: 2, dependsOnOrdinal: 1 } : step,
+);
+assert.equal(isValidFundingCommitPlanBoundary(repeatedInput), false);
+assert.deepEqual(
+  mixedFunding.commitPlan.steps.map((step) => step.dependsOnOrdinal),
+  [null, 0, 1, 2, 3, 4],
+);
+assert.equal(
+  isValidFundingCommitPlanBoundary(safePusdFunding.commitPlan),
+  true,
+);
+assert.equal(
+  safePusdFunding.commitPlan.steps[0]?.normalizedAction.handoffKind,
+  "polymarket_safe_transfer",
+);
+assert.equal(
+  fundingEconomicSourceReservations(
+    safePusdFunding.commitPlan.reservations,
+  ).reduce((sum, entry) => sum + BigInt(entry.rawAmount), 0n),
+  3000000n,
+);
+assert.equal(
+  safeFunding.commitPlan.steps[0]?.normalizedAction.handoffKind,
+  "polymarket_safe_transfer",
+);
+assert.equal(isValidFundingCommitPlanBoundary(safeFunding.commitPlan), true);
+assert.deepEqual(
+  fundingEconomicSourceReservations(safeFunding.commitPlan.reservations).map(
+    (entry) => entry.rawAmount,
+  ),
+  ["1500000", "1000000", "500000"],
+);
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    candidates: [safeFunding],
+    destinationAsset: PUSD,
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: "1",
+    maximumFeeBps: 2000,
+    maximumSlippageBps: 1000,
+    executionBoundary: "automatic",
+  }),
+  0n,
+);
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    candidates: [safeFunding],
+    destinationAsset: PUSD,
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: "1",
+    maximumFeeBps: 2000,
+    maximumSlippageBps: 1000,
+    executionBoundary: "client_handoff",
+  }),
+  3000000n,
+);
 assert.equal(
   maximumInternalFundingDestinationRaw({
     candidates: [clientHandoff],

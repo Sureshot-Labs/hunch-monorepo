@@ -100,6 +100,8 @@ export type AccountValueVenueSummary = Readonly<{
 }>;
 
 export type AccountValueReadModel = Readonly<{
+  /** Request-local capability hint, never persisted as wallet ownership. */
+  connectedExternalWalletRefs?: readonly string[];
   projection: AccountValueProjection;
   headline: ReturnType<typeof resolveEffectiveHeadline>;
   cashAvailability: CashAvailabilityProjection;

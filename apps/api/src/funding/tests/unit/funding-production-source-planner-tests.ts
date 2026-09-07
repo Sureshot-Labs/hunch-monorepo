@@ -1,6 +1,9 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { deriveSafeProxyAddress } from "../../../services/polymarket-funder.js";
+import { polymarketDepositWalletHandoffExpectation } from "../../execution/polymarket-deposit-wallet-handoff.js";
+import type { NormalizedAction } from "../../domain/types.js";
 import { deriveExecutionGas } from "../../../account-value/execution-gas.js";
 
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
@@ -22,6 +25,7 @@ import {
   deriveProductionRelayEligibleSourceFacts,
   filterRelayEligibleSourceFactsForExecutionProfile,
   restrictRelayRoutesToExecutionProfile,
+  resolveProductionOwnedSourceExecution,
 } from "../../planner/production-source-planner.js";
 import { groupWalletExecutableActions } from "../../planner/evm-action-batching.js";
 import { DirectWithdrawalSourceAdapter } from "../../planner/direct-withdrawal-source-adapter.js";
@@ -869,6 +873,113 @@ assert.equal(
   });
   assert.equal(handoffFact.walletExecutionReady, true);
   assert.equal(handoffFact.nativeGasReady, true);
+  // A legacy balance is not a browser capability. Its external owner must be
+  // present in this request, and the address must be the canonical existing Safe.
+  const safeAddress = deriveSafeProxyAddress(controllerAddress);
+  assert.ok(safeAddress);
+  const safeComponent = {
+    ...component,
+    location: {
+      ...location,
+      details: {
+        ...location.details,
+        address: safeAddress,
+        polymarketFunderKind: "safe",
+      },
+    },
+  };
+  const safeAccount = {
+    ...handoffAccount,
+    ownership: {
+      ...baseOwnership,
+      wallets: (handoffAccount.ownership?.wallets ?? []).map((wallet) =>
+        wallet.walletId === funderWalletId
+          ? { ...wallet, address: safeAddress }
+          : {
+              ...wallet,
+              source: "external" as const,
+              signingModes: ["web_client" as const],
+            },
+      ),
+    },
+  };
+  const unavailable = resolveProductionOwnedSourceExecution({
+    account: safeAccount,
+    component: safeComponent,
+  });
+  assert.equal(unavailable?.preRouteHandoff, undefined);
+  const connectedSafeAccount = sessionSourceAccount(safeAccount, [
+    "8571f3cb-381e-4e55-8f4c-ecc4c7f2abb9",
+  ]);
+  for (const asset of [POLYGON_PUSD, POLYGON_USDCE]) {
+    const execution = resolveProductionOwnedSourceExecution({
+      account: connectedSafeAccount,
+      component: {
+        ...safeComponent,
+        amount: { asset, raw: "2000000" },
+        location: { ...safeComponent.location, asset },
+      },
+    });
+    assert.equal(
+      execution?.preRouteHandoff?.kind,
+      "polymarket_safe_to_controller_v1",
+    );
+    assert.ok(execution);
+    const [step] = buildPolymarketPreRouteHandoffSteps({
+      source: execution,
+      sourceAmount: { asset, raw: "1000000" },
+      profile: execution.profile,
+      steps: [],
+    });
+    assert.ok(step);
+    const action = step.normalizedAction as unknown as NormalizedAction;
+    const expectation = polymarketDepositWalletHandoffExpectation(
+      action,
+      step.actionValidationResult,
+    );
+    assert.equal(expectation?.amountRaw, 1000000n);
+    assert.equal(
+      expectation?.recipientAddress.toLowerCase(),
+      controllerAddress.toLowerCase(),
+    );
+    assert.equal(
+      polymarketDepositWalletHandoffExpectation(action, {
+        ...step.actionValidationResult,
+        signerAddress: safeAddress,
+      }),
+      null,
+    );
+    assert.equal(
+      filterRelayEligibleSourceFactsForExecutionProfile(
+        [{ ...handoffFact, preRouteHandoff: execution.preRouteHandoff }],
+        TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+      ).length,
+      0,
+    );
+  }
+  assert.equal(
+    resolveProductionOwnedSourceExecution({
+      account: sessionSourceAccount(safeAccount, []),
+      component: safeComponent,
+    })?.preRouteHandoff,
+    undefined,
+  );
+  assert.equal(
+    resolveProductionOwnedSourceExecution({
+      account: connectedSafeAccount,
+      component: {
+        ...safeComponent,
+        location: {
+          ...safeComponent.location,
+          details: {
+            ...safeComponent.location.details,
+            address: funderAddress,
+          },
+        },
+      },
+    })?.preRouteHandoff,
+    undefined,
+  );
   const controllerProfile = handoffAccount.ownership?.wallets.find(
     (wallet) => wallet.walletId === controllerWalletId,
   );

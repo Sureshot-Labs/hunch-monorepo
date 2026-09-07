@@ -96,6 +96,7 @@ function polymarketPusdMoney(raw: bigint): Money {
 }
 
 function buildAccountFundingRequest(input: {
+  connectedExternalWalletRefs?: string[];
   capacityQuote: boolean;
   controllerWalletRef: string;
   directAvailableRaw: bigint;
@@ -124,6 +125,7 @@ function buildAccountFundingRequest(input: {
     withdrawalRecipientId: null,
     venueBindingOptionId: null,
     controllerWalletRef: input.controllerWalletRef,
+    connectedExternalWalletRefs: input.connectedExternalWalletRefs,
     serverAdditionalDestinationAmount: polymarketPusdMoney(additionalRaw),
     ...(input.capacityQuote
       ? { serverQuoteAvailableSourceCapacity: true }
@@ -261,6 +263,15 @@ export function externalWalletSourceLocationIds(
   );
   if (externalWalletIds.size === 0) return [];
   return account.projection.components.flatMap((component) => {
+    // Owned Safe cash is venue inventory, not external-wallet ingress. The
+    // source planner independently verifies its canonical owner and connected
+    // signing capability before offering an exact extraction route.
+    if (
+      component.location.kind === "venue_account" &&
+      component.location.details.venueId === "polymarket" &&
+      component.location.details.polymarketFunderKind === "safe"
+    )
+      return [];
     const walletId =
       component.location.kind === "wallet"
         ? component.location.details.walletId
@@ -280,6 +291,7 @@ export function externalWalletSourceLocationIds(
  * The caller may expose `fundingScope: account` only when this function does.
  */
 export async function computePolymarketAccountMaxSpend(input: {
+  connectedExternalWalletRefs?: string[];
   funder: string;
   funds: PolymarketAccountMaxSpendFunds;
   log?: PolymarketAccountMaxSpendLogger | null;
@@ -334,6 +346,7 @@ export async function computePolymarketAccountMaxSpend(input: {
       input.userId,
       buildAccountFundingRequest({
         capacityQuote: true,
+        connectedExternalWalletRefs: input.connectedExternalWalletRefs,
         controllerWalletRef,
         directAvailableRaw: provisionalDirectRaw,
         marketId,
@@ -477,6 +490,7 @@ export async function computePolymarketAccountMaxSpend(input: {
         input.userId,
         buildAccountFundingRequest({
           capacityQuote: false,
+          connectedExternalWalletRefs: input.connectedExternalWalletRefs,
           controllerWalletRef,
           directAvailableRaw,
           marketId,

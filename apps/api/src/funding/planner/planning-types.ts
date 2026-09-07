@@ -26,7 +26,11 @@ export type PlannedSourceOption = Readonly<{
 export function commitPlanRunsWithoutUserWalletAction(
   plan: FundingCommitPlan,
 ): boolean {
-  return plan.steps.every((step) => step.payerRequirement !== "user");
+  return plan.steps.every(
+    (step) =>
+      step.payerRequirement !== "user" &&
+      step.normalizedAction.handoffKind !== "polymarket_safe_transfer",
+  );
 }
 
 /**

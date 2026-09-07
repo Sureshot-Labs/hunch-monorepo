@@ -1,5 +1,6 @@
 import type { PoolClient } from "@hunch/infra";
 import { Interface } from "ethers";
+import { deriveSafeProxyAddress } from "../../services/polymarket-funder.js";
 
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import {
@@ -281,6 +282,35 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
             },
           })
         : null;
+    // Reuse the exact controller USDC.e input path for an already-owned Safe.
+    // This adds no new wallet deployment and never grants a router allowance
+    // from the Safe; only its connected owner signs the preliminary transfer.
+    const safeAddress = deriveSafeProxyAddress(snapshot.signerAddress);
+    const canUseSafe = Boolean(
+      safeAddress &&
+      input.request.serverExecutionProfileId == null &&
+      (profile.source !== "external" ||
+        (profile.controllerWalletRef != null &&
+          this.account.connectedExternalWalletRefs?.includes(
+            profile.controllerWalletRef,
+          ))),
+    );
+    const availableSafeInput = (asset: AssetRef) =>
+      canUseSafe && safeAddress
+        ? this.availableInputComponent({
+            accountId: input.accountId,
+            address: safeAddress,
+            asset,
+            locationMatches: (location) =>
+              location.kind === "venue_account" &&
+              detail(location, "venueId") === "polymarket" &&
+              detail(location, "polymarketFunderKind") === "safe" &&
+              detail(location, "linkedAddress")?.toLowerCase() ===
+                snapshot.signerAddress.toLowerCase(),
+          })
+        : null;
+    const safeUsdceInput = availableSafeInput(usdceAsset);
+    const safePusdInput = availableSafeInput(facts.option.requiredAsset);
     const availableRaw = (
       observedRaw: string,
       resolved: ReturnType<
@@ -292,6 +322,14 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       const available = BigInt(resolved.availableRaw);
       return observed < available ? observed : available;
     };
+    const safePusdRaw = availableRaw(
+      safePusdInput?.component.amount.raw ?? "0",
+      safePusdInput,
+    );
+    const safeUsdceRaw = availableRaw(
+      safeUsdceInput?.component.amount.raw ?? "0",
+      safeUsdceInput,
+    );
     const controllerPusdRaw = availableRaw(
       snapshot.signerPusdRaw,
       controllerPusdInput,
@@ -315,9 +353,9 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         depositLockedRaw: BigInt(snapshot.depositLockedRaw),
         // The preceding relayer action hands exact USDC.e back to this
         // controller, so Router consumes it through its native USDC.e input.
-        signerPusdRaw: controllerPusdRaw,
+        signerPusdRaw: controllerPusdRaw + safePusdRaw,
         signerLockedRaw: 0n,
-        signerUsdceRaw: controllerUsdceRaw + depositUsdceRaw,
+        signerUsdceRaw: controllerUsdceRaw + depositUsdceRaw + safeUsdceRaw,
         // A client plan may durably include the missing controller approvals.
         // Deposit Wallet approval is never planned: its only allowed role is
         // the exact relayer transfer back to this controller.
@@ -394,14 +432,20 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
     const requiresPusdApproval =
       BigInt(snapshot.routerPusdAllowanceRaw) < BigInt(plan.pUsdAmountRaw);
     const plannedPusdRaw = BigInt(plan.pUsdAmountRaw);
-    const controllerPusdContributionRaw = plannedPusdRaw;
+    const controllerPusdContributionRaw =
+      plannedPusdRaw < controllerPusdRaw ? plannedPusdRaw : controllerPusdRaw;
+    const safePusdContributionRaw =
+      plannedPusdRaw - controllerPusdContributionRaw;
     const plannedUsdceRaw = BigInt(plan.signerUsdceAmountRaw);
     const controllerUsdceContributionRaw =
       plannedUsdceRaw < controllerUsdceRaw
         ? plannedUsdceRaw
         : controllerUsdceRaw;
+    const incomingUsdceRaw = plannedUsdceRaw - controllerUsdceContributionRaw;
     const depositUsdceContributionRaw =
-      plannedUsdceRaw - controllerUsdceContributionRaw;
+      incomingUsdceRaw < depositUsdceRaw ? incomingUsdceRaw : depositUsdceRaw;
+    const safeUsdceContributionRaw =
+      incomingUsdceRaw - depositUsdceContributionRaw;
     const controllerUsdceIdentity = controllerUsdceInput
       ? {
           componentId: controllerUsdceInput.component.componentId,
@@ -414,6 +458,15 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
           balanceClass: "polymarket",
         });
     const resolvedInputs = [
+      ...(safePusdContributionRaw > 0n && safePusdInput
+        ? [
+            {
+              asset: facts.option.requiredAsset,
+              rawAmount: safePusdContributionRaw.toString(),
+              resolved: safePusdInput,
+            },
+          ]
+        : []),
       ...(controllerPusdContributionRaw > 0n && controllerPusdInput
         ? [
             {
@@ -441,27 +494,69 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
             },
           ]
         : []),
+      ...(safeUsdceContributionRaw > 0n && safeUsdceInput
+        ? [
+            {
+              asset: usdceAsset,
+              rawAmount: safeUsdceContributionRaw.toString(),
+              resolved: safeUsdceInput,
+            },
+          ]
+        : []),
     ];
     const expectedInputCount =
+      Number(safeUsdceContributionRaw > 0n) +
       Number(controllerPusdContributionRaw > 0n) +
       Number(controllerUsdceContributionRaw > 0n) +
       Number(depositUsdceContributionRaw > 0n);
     if (
       resolvedInputs.length === 0 ||
-      resolvedInputs.length !== expectedInputCount
+      resolvedInputs.length !==
+        expectedInputCount + Number(safePusdContributionRaw > 0n)
     ) {
       return null;
     }
-    const preRouteHandoff =
-      depositUsdceContributionRaw > 0n && depositUsdceInput
-        ? {
-            kind: "polymarket_deposit_wallet_to_controller_v1" as const,
-            sourceLocation: depositUsdceInput.component.location,
-            funderAddress: snapshot.depositWallet,
-            controllerAddress: snapshot.signerAddress,
-            tokenAddress: usdceAsset.assetId,
-          }
-        : null;
+    // Each inventory location contributes independently. Exact transfers run
+    // before the shared controller approvals/fund; incoming credit is fenced
+    // once at the controller, not counted as an additional economic input.
+    const preRouteHandoffs = [
+      {
+        resolved: depositUsdceInput,
+        raw: depositUsdceContributionRaw,
+        asset: usdceAsset,
+        funderAddress: snapshot.depositWallet,
+        kind: "polymarket_deposit_wallet_to_controller_v1" as const,
+      },
+      {
+        resolved: safeUsdceInput,
+        raw: safeUsdceContributionRaw,
+        asset: usdceAsset,
+        funderAddress: safeAddress,
+        kind: "polymarket_safe_to_controller_v1" as const,
+      },
+      {
+        resolved: safePusdInput,
+        raw: safePusdContributionRaw,
+        asset: facts.option.requiredAsset,
+        funderAddress: safeAddress,
+        kind: "polymarket_safe_to_controller_v1" as const,
+      },
+    ].flatMap((entry) =>
+      entry.resolved && entry.raw > 0n && entry.funderAddress
+        ? [
+            {
+              sourceAmount: { asset: entry.asset, raw: entry.raw.toString() },
+              handoff: {
+                kind: entry.kind,
+                sourceLocation: entry.resolved.component.location,
+                funderAddress: entry.funderAddress,
+                controllerAddress: snapshot.signerAddress,
+                tokenAddress: entry.asset.assetId,
+              },
+            },
+          ]
+        : [],
+    );
     const quoteCorrelationId = stableOpaqueId(
       "funding_quote",
       canonicalJsonHash({
@@ -593,17 +688,16 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       eta: { minSeconds: 5, maxSeconds: 90 },
       experienceMode: "prepare_first",
       requiredActions: [
-        ...(preRouteHandoff
-          ? [
-              {
-                kind: "external_handoff" as const,
-                safeLabel: "Move Polymarket USDC.e to the Trading Wallet",
-                actor: "user" as const,
-                valueMoving: true,
-                sponsorship: "none" as const,
-              },
-            ]
-          : []),
+        ...preRouteHandoffs.map(({ sourceAmount }) => ({
+          kind: "external_handoff" as const,
+          safeLabel:
+            sourceAmount.asset.assetId === facts.option.requiredAsset.assetId
+              ? "Move Polymarket pUSD to the Trading Wallet"
+              : "Move Polymarket USDC.e to the Trading Wallet",
+          actor: "user" as const,
+          valueMoving: true,
+          sponsorship: "none" as const,
+        })),
         ...approvalActions.map(() => ({
           kind: "evm_transaction" as const,
           safeLabel: "Approve Polymarket Funding Router",
@@ -663,12 +757,21 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
           adapterId: this.adapterId,
           planValidation: {
             validatorId: this.adapterId,
-            version: 1,
+            version: preRouteHandoffs.some(
+              ({ handoff }) =>
+                handoff.kind === "polymarket_safe_to_controller_v1",
+            )
+              ? 3
+              : 1,
           },
           venueBindingOptionId: facts.bindingOption.venueBindingOptionId,
           fundingPlan: jsonRecord(plan),
-          ...(preRouteHandoff
-            ? { preRouteHandoff: jsonRecord(preRouteHandoff) }
+          ...(preRouteHandoffs.length
+            ? {
+                preRouteHandoffs: preRouteHandoffs.map(({ handoff }) =>
+                  jsonRecord(handoff),
+                ),
+              }
             : {}),
           before: {
             routerNonceRaw: snapshot.routerNonceRaw,
@@ -679,14 +782,17 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         },
       },
       segments: [],
-      steps: buildPolymarketPreRouteHandoffSteps({
-        source: { preRouteHandoff: preRouteHandoff ?? undefined },
-        sourceAmount: {
-          asset: usdceAsset,
-          raw: depositUsdceContributionRaw.toString(),
-        },
-        profile,
-        steps: [
+      steps: preRouteHandoffs.reduceRight<
+        PlannedSourceOption["commitPlan"]["steps"]
+      >(
+        (steps, entry) =>
+          buildPolymarketPreRouteHandoffSteps({
+            source: { preRouteHandoff: entry.handoff },
+            sourceAmount: entry.sourceAmount,
+            profile,
+            steps,
+          }),
+        [
           ...approvalCommitSteps,
           {
             ordinal: approvalActions.length,
@@ -714,17 +820,52 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
             },
           },
         ],
-      }),
+      ),
       reservations: [
+        ...(safePusdContributionRaw > 0n
+          ? [
+              {
+                segmentOrdinal: null,
+                ...(controllerPusdInput
+                  ? {
+                      componentId: controllerPusdInput.component.componentId,
+                      locationId:
+                        controllerPusdInput.component.location.locationId,
+                    }
+                  : stableWalletAssetLocationIdentity({
+                      accountId: input.accountId,
+                      address: snapshot.signerAddress,
+                      asset: facts.option.requiredAsset,
+                      balanceClass: "polymarket",
+                    })),
+                networkId: facts.option.requiredAsset.networkId,
+                assetId: facts.option.requiredAsset.assetId,
+                assetDecimals: facts.option.requiredAsset.decimals,
+                rawAmount: plannedPusdRaw.toString(),
+                mode: "subtract_available" as const,
+                expiresAt: reservationExpiresAt,
+                ...(controllerPusdContributionRaw > 0n
+                  ? {
+                      economicRole: "source_input" as const,
+                      sourceInputRawAmount:
+                        controllerPusdContributionRaw.toString(),
+                    }
+                  : { economicRole: "future_credit_fence" as const }),
+              },
+            ]
+          : []),
         ...resolvedInputs
           // The handoff credits controller USDC.e before Router consumes it.
           // The aggregate reservation below owns that identity, so avoid a
           // duplicate reservation for the pre-existing controller portion.
           .filter(
             (entry) =>
-              depositUsdceContributionRaw === 0n ||
-              entry.resolved.component.componentId !==
-                controllerUsdceInput?.component.componentId,
+              (safePusdContributionRaw === 0n ||
+                entry.resolved.component.componentId !==
+                  controllerPusdInput?.component.componentId) &&
+              (incomingUsdceRaw === 0n ||
+                entry.resolved.component.componentId !==
+                  controllerUsdceInput?.component.componentId),
           )
           .map((entry) => ({
             segmentOrdinal: null,
@@ -737,7 +878,7 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
             mode: "subtract_available" as const,
             expiresAt: reservationExpiresAt,
           })),
-        ...(depositUsdceContributionRaw > 0n
+        ...(incomingUsdceRaw > 0n
           ? [
               {
                 segmentOrdinal: null,

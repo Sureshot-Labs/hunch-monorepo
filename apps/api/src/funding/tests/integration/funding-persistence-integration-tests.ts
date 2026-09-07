@@ -4,6 +4,8 @@
 
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { buildPolymarketPreRouteHandoffSteps } from "../../../funding-providers/relay/operation-plan.js";
+import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 
 import { tx } from "@hunch/infra";
 import type { PoolClient } from "pg";
@@ -3631,6 +3633,163 @@ async function testDepositWalletHandoffKeepsItsOwnActionTtl(): Promise<void> {
       step.action_expires_at.getTime() > Date.parse(quoteExpiresAt),
       "the handoff remains actionable after its downstream Relay quote expires",
     );
+  } finally {
+    await cleanupCommittedOperation(operationId, quote.id, userId);
+  }
+}
+
+async function testExistingSafeHandoffCommitsAndGatesRoute(
+  preparation = false,
+): Promise<void> {
+  const userId = await insertUser(pool);
+  const base = buildPlan();
+  const asset = {
+    networkId: "evm:137",
+    assetId: RELAY_PINNED_ASSETS.polygonUsdce,
+    decimals: 6,
+  };
+  const owner = "0x1111111111111111111111111111111111111111";
+  const safe = "0x2222222222222222222222222222222222222222";
+  const steps = buildPolymarketPreRouteHandoffSteps({
+    source: {
+      preRouteHandoff: {
+        kind: "polymarket_safe_to_controller_v1",
+        controllerAddress: owner,
+        funderAddress: safe,
+        tokenAddress: asset.assetId,
+        sourceLocation: {
+          kind: "venue_account",
+          accountId: userId,
+          locationId: opaque("safe-location"),
+          asset,
+          details: {
+            address: safe,
+            linkedAddress: owner,
+            venueId: "polymarket",
+            polymarketFunderKind: "safe",
+          },
+        },
+      },
+    },
+    sourceAmount: { asset, raw: "1000000" },
+    profile: {
+      walletId: opaque("wallet"),
+      networkId: "evm:137",
+      address: owner,
+      source: "external",
+      signingModes: ["web_client"],
+      serverWalletRef: null,
+      sponsorshipPolicyIds: [],
+    },
+    steps: base.steps,
+  });
+  let plan: FundingCommitPlan = { ...base, steps };
+  if (preparation) {
+    const validatorId = "polymarket_funding_router_v1";
+    const first = steps[0];
+    const baseStep = base.steps[0];
+    assert.ok(first && baseStep);
+    const second = buildPolymarketPreRouteHandoffSteps({
+      source: {
+        preRouteHandoff: {
+          kind: "polymarket_safe_to_controller_v1",
+          funderAddress: safe,
+          controllerAddress: owner,
+          tokenAddress: RELAY_PINNED_ASSETS.polygonPusd,
+          sourceLocation: {
+            kind: "venue_account",
+            accountId: userId,
+            locationId: opaque("safe-pusd"),
+            asset: { ...asset, assetId: RELAY_PINNED_ASSETS.polygonPusd },
+            details: {},
+          },
+        },
+      },
+      sourceAmount: {
+        asset: { ...asset, assetId: RELAY_PINNED_ASSETS.polygonPusd },
+        raw: "1000000",
+      },
+      profile: {
+        walletId: opaque("wallet"),
+        networkId: "evm:137",
+        address: owner,
+        source: "external",
+        signingModes: ["web_client"],
+        serverWalletRef: null,
+        sponsorshipPolicyIds: [],
+      },
+      steps: [],
+    })[0];
+    assert.ok(second);
+    plan = {
+      ...base,
+      operation: {
+        ...base.operation,
+        planKind: "venue_preparation",
+        venueId: "polymarket",
+        supportMetadata: {
+          adapterId: validatorId,
+          preparationKind: "polymarket_funding_router",
+          planValidation: { validatorId, version: 3 },
+        },
+      },
+      segments: [],
+      steps: [
+        first,
+        { ...second, ordinal: 1, dependsOnOrdinal: 0 },
+        {
+          ...baseStep,
+          ordinal: 2,
+          segmentOrdinal: null,
+          stepKind: "venue_preparation",
+          executorId: "wallet_profile_evm_v1",
+          state: "action_required",
+          dependsOnOrdinal: 1,
+          normalizedAction: { kind: "evm_transaction" },
+          actionValidationResult: {
+            valid: true,
+            validatorId,
+            signerAddress: owner,
+          },
+        },
+      ],
+      reservations: base.reservations.map((entry) => ({
+        ...entry,
+        segmentOrdinal: null,
+      })),
+    };
+  }
+  const consent = opaque("safe-consent");
+  const quote = await createFundingQuote(
+    pool,
+    quoteInput(userId, plan, consent),
+  );
+  let operationId: string | null = null;
+  try {
+    const committed = await commitFundingOperation(
+      pool,
+      commitInput(userId, quote.id, consent, plan),
+    );
+    operationId = committed.operation.id;
+    const result = await pool.query<{
+      executor_id: string;
+      dependency_ordinal: number | null;
+      segment_id: string | null;
+    }>(
+      `select step_row.executor_id, predecessor_row.ordinal as dependency_ordinal, step_row.segment_id
+       from funding_operation_steps step_row
+       left join funding_operation_steps predecessor_row on predecessor_row.id = step_row.depends_on_step_id
+       where step_row.operation_id = $1 order by step_row.ordinal`,
+      [operationId],
+    );
+    assert.equal(result.rows[0]?.executor_id, "polymarket_safe_relayer_v1");
+    assert.equal(result.rows[0]?.segment_id, null);
+    assert.equal(result.rows[1]?.dependency_ordinal, 0);
+    if (preparation) {
+      assert.equal(result.rows.length, 3);
+      assert.equal(result.rows[1]?.executor_id, "polymarket_safe_relayer_v1");
+      assert.equal(result.rows[2]?.dependency_ordinal, 1);
+    }
   } finally {
     await cleanupCommittedOperation(operationId, quote.id, userId);
   }
@@ -7950,6 +8109,8 @@ console.log(
   "[funding-persistence-integration-tests] ok expired unbroadcast action wait cancels and releases reservations without external polling",
 );
 await testDepositWalletHandoffKeepsItsOwnActionTtl();
+await testExistingSafeHandoffCommitsAndGatesRoute();
+await testExistingSafeHandoffCommitsAndGatesRoute(true);
 console.log(
   "[funding-persistence-integration-tests] ok Deposit Wallet handoff keeps its own action TTL",
 );

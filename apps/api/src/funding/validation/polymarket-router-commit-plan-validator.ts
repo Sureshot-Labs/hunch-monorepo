@@ -24,6 +24,7 @@ function isPolymarketRouterCommitPlanVersion(
   plan: Pick<FundingCommitPlan, "operation" | "steps">,
   acceptsHandoff: (step: FundingCommitPlan["steps"][number]) => boolean,
   requiresHandoff = false,
+  allowsSafe = false,
 ): boolean {
   if (
     !["venue_preparation", "composite_route"].includes(
@@ -41,20 +42,58 @@ function isPolymarketRouterCommitPlanVersion(
     plan.operation.planKind === "composite_route"
       ? plan.steps.filter((step) => step.segmentOrdinal === null)
       : plan.steps;
-  if (steps.length < 1 || steps.length > 4) return false;
+  if (steps.length < 1 || steps.length > (allowsSafe ? 6 : 4)) return false;
   const first = steps[0];
   const hasPreRouteHandoff =
     first?.stepKind === "external_handoff" &&
     first.state === "action_required" &&
     first.segmentOrdinal === null &&
-    first.executorId === POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID &&
+    (first.executorId === POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID ||
+      (allowsSafe && first.executorId === "polymarket_safe_relayer_v1")) &&
     first.dependsOnOrdinal === null &&
     first.normalizedAction.kind === "external_handoff" &&
-    first.normalizedAction.handoffKind ===
-      "polymarket_deposit_wallet_transfer" &&
+    (first.normalizedAction.handoffKind ===
+      "polymarket_deposit_wallet_transfer" ||
+      (allowsSafe &&
+        first.normalizedAction.handoffKind === "polymarket_safe_transfer")) &&
     acceptsHandoff(first);
   if (requiresHandoff && !hasPreRouteHandoff) return false;
-  const approvalStart = hasPreRouteHandoff ? 1 : 0;
+  let approvalStart = hasPreRouteHandoff ? 1 : 0;
+  if (allowsSafe && hasPreRouteHandoff) {
+    while (steps[approvalStart]?.stepKind === "external_handoff")
+      approvalStart++;
+    if (approvalStart > 3) return false;
+    const sources = new Set<string>();
+    for (const [ordinal, step] of steps.slice(0, approvalStart).entries()) {
+      if (
+        step.ordinal !== ordinal ||
+        step.segmentOrdinal !== null ||
+        step.state !== "action_required" ||
+        step.dependsOnOrdinal !== (ordinal === 0 ? null : ordinal - 1) ||
+        !acceptsHandoff(step)
+      )
+        return false;
+      const parsed = normalizedActionSchema.safeParse(step.normalizedAction);
+      const expectation = parsed.success
+        ? polymarketDepositWalletHandoffExpectation(
+            parsed.data as NormalizedAction,
+            step.actionValidationResult,
+          )
+        : null;
+      if (
+        !expectation ||
+        !sameAccountAddress(
+          "evm:137",
+          expectation.recipientAddress,
+          String(steps.at(-1)?.actionValidationResult.signerAddress ?? ""),
+        )
+      )
+        return false;
+      const source = `${expectation.funderAddress.toLowerCase()}:${expectation.tokenAddress.toLowerCase()}`;
+      if (sources.has(source)) return false;
+      sources.add(source);
+    }
+  }
   const approvals = steps.slice(approvalStart, -1);
   if (approvals.length > 2) return false;
   const fund = steps.at(-1);
@@ -160,6 +199,43 @@ export function isPolymarketRouterV2CommitPlan(
   );
 }
 
+/** Safe extraction has a separate immutable version; existing plans retain
+ * their original acceptance rules. Only the controller performs Router calls. */
+export function isPolymarketRouterV3CommitPlan(
+  plan: Pick<FundingCommitPlan, "operation" | "steps">,
+): boolean {
+  return isPolymarketRouterCommitPlanVersion(
+    plan,
+    (step) => {
+      const parsed = normalizedActionSchema.safeParse(step.normalizedAction);
+      return (
+        [
+          "polymarket_safe_relayer_v1",
+          POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID,
+        ].includes(step.executorId ?? "") &&
+        parsed.success &&
+        parsed.data.kind === "external_handoff" &&
+        parsed.data.handoffKind ===
+          (step.executorId === "polymarket_safe_relayer_v1"
+            ? "polymarket_safe_transfer"
+            : "polymarket_deposit_wallet_transfer") &&
+        parsed.data.payload.conversionKind == null &&
+        [
+          RELAY_PINNED_ASSETS.polygonUsdce,
+          RELAY_PINNED_ASSETS.polygonPusd,
+        ].includes(
+          polymarketDepositWalletHandoffExpectation(
+            parsed.data as NormalizedAction,
+            step.actionValidationResult,
+          )?.tokenAddress.toLowerCase() ?? "",
+        )
+      );
+    },
+    true,
+    true,
+  );
+}
+
 export function isPolymarketRouterCommitPlan(
   plan: Pick<FundingCommitPlan, "operation" | "steps">,
 ): boolean {
@@ -179,5 +255,7 @@ export function isPolymarketRouterCommitPlan(
     ? isPolymarketRouterV1CommitPlan(plan)
     : declarationRecord.version === 2
       ? isPolymarketRouterV2CommitPlan(plan)
-      : false;
+      : declarationRecord.version === 3
+        ? isPolymarketRouterV3CommitPlan(plan)
+        : false;
 }

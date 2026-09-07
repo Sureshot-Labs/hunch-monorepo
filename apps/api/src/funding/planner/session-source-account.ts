@@ -11,6 +11,7 @@ export function sessionSourceAccount(
   const connected = new Set(connectedExternalWalletRefs);
   return {
     ...account,
+    connectedExternalWalletRefs,
     ownership: {
       ...account.ownership,
       wallets: account.ownership.wallets.filter(
