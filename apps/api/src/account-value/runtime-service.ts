@@ -1,4 +1,5 @@
 import type { Pool } from "@hunch/infra";
+import { deriveExecutionGas } from "./execution-gas.js";
 
 import { AuthService } from "../auth.js";
 import type {
@@ -796,7 +797,28 @@ export async function buildAccountValueReadModel(inputs: {
   return {
     projection,
     headline: resolveEffectiveHeadline(projection),
-    cashAvailability,
+    cashAvailability: {
+      ...cashAvailability,
+      components: cashAvailability.components.map((component) => {
+        const asset = projection.components.find(
+          (row) => row.componentId === component.componentId,
+        );
+        const profile =
+          asset?.location.kind === "wallet"
+            ? ownership.wallets.find(
+                (wallet) =>
+                  wallet.walletId === asset.location.details.walletId &&
+                  wallet.networkId === asset.amount.asset.networkId,
+              )
+            : null;
+        return {
+          ...component,
+          executionGas: profile
+            ? deriveExecutionGas({ projection, cashAvailability }, profile)
+            : null,
+        };
+      }),
+    },
     venues: summarizeVenues({
       assets: projectedAssets,
       positions: positionComponents,

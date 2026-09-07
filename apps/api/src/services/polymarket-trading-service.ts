@@ -8,6 +8,7 @@ import {
   type PolymarketClobOrderType,
   type PolymarketQuoteResult,
   type PolymarketSide,
+  type PolymarketQuoteContext,
 } from "./polymarket-quote.js";
 
 type PolymarketQuoteWarnLogger = (args: {
@@ -54,14 +55,17 @@ export async function findMaxPolymarketMarketBuyUsdForFunds(
   input: {
     tokenId: string;
     executableFundsRaw: bigint;
+    context?: PolymarketQuoteContext;
     slippageBps?: number | null;
     logWarn?: PolymarketQuoteWarnLogger;
   },
 ) {
-  const context = await loadPolymarketQuoteContext(pool, {
-    tokenId: input.tokenId,
-    logWarn: input.logWarn,
-  });
+  const context =
+    input.context ??
+    (await loadPolymarketQuoteContext(pool, {
+      tokenId: input.tokenId,
+      logWarn: input.logWarn,
+    }));
   return findMaxPolymarketMarketBuyUsdDetailed({
     context,
     tokenId: input.tokenId,

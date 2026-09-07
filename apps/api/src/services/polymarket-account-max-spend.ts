@@ -18,6 +18,7 @@ import { fetchPolymarketMarketInfo } from "../repos/polymarket-markets.js";
 import { env } from "../env.js";
 import { toChecksumAddress } from "./api-trading-common.js";
 import { findMaxPolymarketMarketBuyUsdForFunds } from "./polymarket-trading-service.js";
+import { loadPolymarketQuoteContext } from "./polymarket-quote.js";
 
 const POLYMARKET_PUSD_DECIMALS = 6;
 
@@ -42,6 +43,7 @@ export type PolymarketAccountMaxSpendDependencies = Readonly<{
   ) => Pick<FundingPlanningRuntime, "previewLiquidity">;
   fetchPolymarketMarketInfo: typeof fetchPolymarketMarketInfo;
   findMaxPolymarketMarketBuyUsdForFunds: typeof findMaxPolymarketMarketBuyUsdForFunds;
+  loadPolymarketQuoteContext: typeof loadPolymarketQuoteContext;
 }>;
 
 const defaultAccountMaxSpendDependencies: PolymarketAccountMaxSpendDependencies =
@@ -50,6 +52,7 @@ const defaultAccountMaxSpendDependencies: PolymarketAccountMaxSpendDependencies 
     createFundingRuntime: (pool) => new FundingPlanningRuntime(pool),
     fetchPolymarketMarketInfo,
     findMaxPolymarketMarketBuyUsdForFunds,
+    loadPolymarketQuoteContext,
   };
 
 type AccountMaxSpendUnavailableReason =
@@ -292,13 +295,23 @@ export async function computePolymarketAccountMaxSpend(input: {
       ...defaultAccountMaxSpendDependencies,
       ...input.dependencies,
     };
-    const [account, marketInfo] = await Promise.all([
+    // Fetch the current book/fees alongside balances, not after route discovery.
+    // This is request-local reuse; no stale cross-request MAX cache is introduced.
+    const [account, marketInfo, quoteContext] = await Promise.all([
       dependencies.buildAccountValueReadModel({
         pool: input.pool,
         userId: input.userId,
       }),
       dependencies.fetchPolymarketMarketInfo(input.pool, {
         tokenId: input.tokenId,
+      }),
+      dependencies.loadPolymarketQuoteContext(input.pool, {
+        tokenId: input.tokenId,
+        logWarn: ({ error, tokenId, conditionId }) =>
+          input.log?.warn?.(
+            { error, tokenId, conditionId },
+            "Failed to fetch Polymarket CLOB fee curve for account-wide max",
+          ),
       }),
     ]);
     const controllerWalletRef = accountControllerWalletRef(
@@ -420,12 +433,8 @@ export async function computePolymarketAccountMaxSpend(input: {
       {
         tokenId: input.tokenId,
         executableFundsRaw,
+        context: quoteContext,
         slippageBps: input.slippageBps ?? undefined,
-        logWarn: ({ error, tokenId: warningTokenId, conditionId }) =>
-          input.log?.warn?.(
-            { error, tokenId: warningTokenId, conditionId },
-            "Failed to fetch Polymarket CLOB fee curve for account-wide max",
-          ),
       },
     );
     if (!maxSpend.ok) {

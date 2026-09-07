@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { deriveExecutionGas } from "../../../account-value/execution-gas.js";
 
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
 import { stableWalletAssetLocationIdentity } from "../../../account-value/canonical.js";
@@ -1697,6 +1698,33 @@ assert.equal(excludedByPreference.length, 0);
   });
   assert.equal(belowReserveFacts.length, 1);
   assert.equal(belowReserveFacts[0]?.nativeGasReady, false);
+  const gasProfile = belowReserveAccount.ownership?.wallets[0];
+  assert.ok(gasProfile);
+  assert.deepEqual(deriveExecutionGas(belowReserveAccount, gasProfile), {
+    status: "needs_gas",
+    sponsored: false,
+    networkId: "solana:mainnet",
+    requiredRaw: "3000000",
+    availableRaw: "2999999",
+    shortfallRaw: "1",
+  });
+  assert.equal(
+    deriveExecutionGas(
+      {
+        ...belowReserveAccount,
+        projection: { ...belowReserveAccount.projection, components: [] },
+      },
+      gasProfile,
+    ).status,
+    "unknown",
+  );
+  assert.equal(
+    deriveExecutionGas(belowReserveAccount, {
+      ...gasProfile,
+      address: "another-wallet",
+    }).status,
+    "unknown",
+  );
 
   const fundedNativeComponent = {
     ...nativeComponent,

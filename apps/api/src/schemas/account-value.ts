@@ -92,6 +92,24 @@ const accountValueProjectionSchema = z
   .strict();
 const cashAvailabilityComponentSchema = z
   .object({
+    executionGas: z
+      .object({
+        status: z.enum(["ready", "needs_gas", "unknown"]),
+        sponsored: z.boolean(),
+        networkId: z.string(),
+        requiredRaw: z.string().regex(/^(0|[1-9]\d*)$/),
+        availableRaw: z
+          .string()
+          .regex(/^(0|[1-9]\d*)$/)
+          .nullable(),
+        shortfallRaw: z
+          .string()
+          .regex(/^(0|[1-9]\d*)$/)
+          .nullable(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
     componentId: z.string().min(8).max(192),
     venueId: z.string().min(1).max(160).nullable(),
     venueBindingId: z.string().min(8).max(192).nullable(),

@@ -1,5 +1,4 @@
 import type { Pool } from "@hunch/infra";
-import { ZeroAddress } from "ethers";
 
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import {
@@ -45,7 +44,7 @@ import {
   fetchFundingRouteExperience,
   fundingRouteExperienceFingerprint,
 } from "../persistence/route-experience-repository.js";
-import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../execution/sponsorship-policy.js";
+import { deriveExecutionGas } from "../../account-value/execution-gas.js";
 import {
   loadRelayEvmExecutionConfiguration,
   relayEvmSequentialQuoteTtlMs,
@@ -280,63 +279,11 @@ export function resolveProductionOwnedSourceExecution(input: {
   };
 }
 
-function nativeAssetId(asset: AssetRef): string {
-  return asset.networkId === "solana:mainnet"
-    ? RELAY_PINNED_ASSETS.solanaNative
-    : ZeroAddress;
-}
-
 export function productionFundingProfileHasNativeGas(
   account: AccountValueReadModel,
   profile: WalletExecutionProfile,
 ): boolean {
-  if (
-    profile.sponsorshipPolicyIds.includes(
-      PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID,
-    ) &&
-    profile.signingModes.includes("privy_authorization") &&
-    Boolean(profile.serverWalletRef)
-  ) {
-    return true;
-  }
-  const availableByComponent = new Map(
-    account.cashAvailability.components.map((component) => [
-      component.componentId,
-      component,
-    ]),
-  );
-  return account.projection.components.some((component) => {
-    const address = detail(component.location, "address");
-    const available = availableByComponent.get(component.componentId);
-    // Gas eligibility is an execution fact, not a USD-valuation fact. The
-    // cash projector marks an unpriced native token as stale even when its raw
-    // on-chain balance is fresh and fully available. Requiring that aggregate
-    // freshness made a temporary Pyth/SOL price gap disable otherwise valid
-    // Solana funding routes.
-    const rawAvailabilityIsFresh =
-      component.observationFreshness === "fresh" &&
-      !component.observationError &&
-      available != null &&
-      !available.reasonCodes.includes("cash_availability_unknown");
-    return (
-      component.location.kind === "wallet" &&
-      component.amount.asset.networkId === profile.networkId &&
-      canonicalAssetId(component.amount.asset) ===
-        canonicalAssetId({
-          ...component.amount.asset,
-          assetId: nativeAssetId(component.amount.asset),
-        }) &&
-      Boolean(
-        address &&
-        sameAccountAddress(profile.networkId, address, profile.address),
-      ) &&
-      rawAvailabilityIsFresh &&
-      BigInt(available.availableRaw) >=
-        (profile.networkId === "solana:mainnet"
-          ? SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS
-          : 1n)
-    );
-  });
+  return deriveExecutionGas(account, profile).status === "ready";
 }
 
 function isSolanaNativeAsset(asset: AssetRef): boolean {

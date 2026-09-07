@@ -5,6 +5,7 @@ import type {
   VenueId,
 } from "../funding/domain/types.js";
 import type { CollectorError } from "./account-value-projector.js";
+import type { ExecutionGas } from "./execution-gas.js";
 import {
   displayValuation,
   suppressReplacedMovementRepresentations,
@@ -26,6 +27,8 @@ export type CashAvailabilityAdjustment = Readonly<{
 }>;
 
 export type CashAvailabilityComponent = Readonly<{
+  /** Gas-only eligibility; absent for older responses, null for non-wallet sources. */
+  executionGas?: ExecutionGas | null;
   componentId: string;
   venueId: VenueId | null;
   venueBindingId: VenueBindingId | null;

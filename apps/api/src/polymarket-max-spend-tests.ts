@@ -410,14 +410,16 @@ const tests: TestCase[] = [
           }),
           findMaxPolymarketMarketBuyUsdForFunds: async (_pool, input) => {
             quotedFundsRaw = input.executableFundsRaw;
+            assert.ok(input.context);
             return findMaxPolymarketMarketBuyUsdDetailed({
-              context: quoteContext(),
+              context: input.context,
               tokenId: input.tokenId,
               executableFundsRaw: input.executableFundsRaw,
               slippageBps: input.slippageBps,
               requireOrderbookDepth: true,
             });
           },
+          loadPolymarketQuoteContext: async () => quoteContext(),
         },
       });
 
@@ -1006,7 +1008,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "max spend rejects below-min-order funds and accepts min-size funds",
+    name: "FOK max accepts fewer than book minimum shares while limit quotes retain it",
     run: () => {
       const context = quoteContext({
         marketInfo: { ...baseMarketInfo, taker_fee_bps: "0" },
@@ -1014,7 +1016,7 @@ const tests: TestCase[] = [
       const belowMin = findMaxPolymarketMarketBuyUsd({
         context,
         tokenId: "token-yes",
-        executableFundsRaw: 2_490_000n,
+        executableFundsRaw: 1_760_000n,
       });
       const atMin = findMaxPolymarketMarketBuyUsd({
         context,
@@ -1022,7 +1024,30 @@ const tests: TestCase[] = [
         executableFundsRaw: 2_500_000n,
       });
 
-      assert.equal(belowMin, null);
+      assert.ok(belowMin);
+      assert.equal(belowMin.maxAmountUsdRaw, "1760000");
+      assert.ok(belowMin.quote.size < 5);
+      assert.equal(belowMin.quote.violatesMinOrderSize, false);
+      for (const orderType of ["GTC", "GTD"] as const) {
+        const limit = calculatePolymarketQuote({
+          context,
+          tokenId: "token-yes",
+          side: "BUY",
+          orderType,
+          amountType: "usd",
+          amountUsdInput: 1.76,
+          limitPrice: 0.5,
+        });
+        assert.equal(limit.violatesMinOrderSize, true);
+      }
+      assert.equal(
+        findMaxPolymarketMarketBuyUsd({
+          context,
+          tokenId: "token-yes",
+          executableFundsRaw: 1n,
+        }),
+        null,
+      );
       assert.ok(atMin);
       assert.equal(atMin.maxAmountUsdRaw, "2500000");
       assert.equal(atMin.quote.violatesMinOrderSize, false);

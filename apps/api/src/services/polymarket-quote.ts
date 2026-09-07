@@ -1005,7 +1005,13 @@ export function calculatePolymarketQuote(inputs: {
       ? BigInt(Math.ceil(minOrderSize * 1_000_000))
       : null;
   const violatesMinOrderSize =
-    minOrderSizeRaw != null ? sizeMicro < minOrderSizeRaw : null;
+    // The book's share minimum belongs to resting orders, not FOK/FAK.
+    // Market quotes still enforce positive, representable amounts above.
+    isLimitOrder && minOrderSizeRaw != null
+      ? sizeMicro < minOrderSizeRaw
+      : isLimitOrder
+        ? null
+        : false;
   const feeEstimate = calculatePolymarketFeeEstimateRaw({
     feeRoleAssumption,
     feePolicySnapshot,
