@@ -2234,11 +2234,13 @@ await test("account routes require auth and preference response denies authority
       invalidStoredPolicy: false,
     },
     runtimePolicy: DEFAULT_FUNDING_RUNTIME_POLICY,
-    nativeGasBalances: [{
-      networkId: "evm:137",
-      address: "0x1111111111111111111111111111111111111111",
-      raw: "8450816131265488661",
-    }],
+    nativeGasBalances: [
+      {
+        networkId: "evm:137",
+        address: "0x1111111111111111111111111111111111111111",
+        raw: "8450816131265488661",
+      },
+    ],
     connectedExternalWalletRefs: ["private-controller-ref"],
     futureInternalDiagnostic: "must-not-leak",
     ownershipEvidenceRevision: "a".repeat(64),

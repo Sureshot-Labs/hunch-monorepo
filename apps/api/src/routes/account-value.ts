@@ -35,9 +35,7 @@ export type AccountValueRouteDependencies = Readonly<{
   }>;
 }>;
 
-function publicAccountValueReadModel(
-  account: AccountValueReadModel,
-) {
+function publicAccountValueReadModel(account: AccountValueReadModel) {
   // Explicit public boundary: new internal planner facts must neither leak
   // into this response nor break its strict runtime schema.
   return {
