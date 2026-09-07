@@ -343,10 +343,38 @@ export async function computePolymarketAccountMaxSpend(input: {
     }
 
     const runtime = dependencies.createFundingRuntime(input.pool);
+    // A provider quote can fail transiently even after capacity was verified.
+    // Share one retry budget across both phases; never retry indefinitely or
+    // return an earlier amount without a successful exact-route proof.
+    let providerRetryAvailable = true;
+    const previewLiquidity = async (request: FundingDiscoveryRequest) => {
+      let preview = await runtime.previewLiquidity(
+        input.userId,
+        request,
+        account,
+      );
+      if (
+        providerRetryAvailable &&
+        !completeFreshProjection(preview.projection) &&
+        preview.projection.reasonCodes.includes("provider_status_unknown") &&
+        !preview.projection.reasonCodes.includes("rpc_unavailable")
+      ) {
+        providerRetryAvailable = false;
+        input.log?.warn?.(
+          { userId: input.userId, reasonCodes: preview.projection.reasonCodes },
+          "Retrying transient Polymarket max funding route discovery",
+        );
+        preview = await runtime.previewLiquidity(
+          input.userId,
+          request,
+          account,
+        );
+      }
+      return preview;
+    };
     const provisionalDirectRaw = input.funds.funderPusdAvailableRaw;
     const probeRaw = accountCapacityProbeRaw(account, provisionalDirectRaw);
-    const capacityPreview = await runtime.previewLiquidity(
-      input.userId,
+    const capacityPreview = await previewLiquidity(
       buildAccountFundingRequest({
         capacityQuote: true,
         connectedExternalWalletRefs: input.connectedExternalWalletRefs,
@@ -357,7 +385,6 @@ export async function computePolymarketAccountMaxSpend(input: {
         slippageBps: input.slippageBps,
         tokenId: input.tokenId,
       }),
-      account,
     );
     if (!completeFreshProjection(capacityPreview.projection)) {
       return unavailable(
@@ -489,8 +516,7 @@ export async function computePolymarketAccountMaxSpend(input: {
         ? totalRequiredRaw - directAvailableRaw
         : 0n;
     if (additionalRequiredRaw > 0n) {
-      const exactPreview = await runtime.previewLiquidity(
-        input.userId,
+      const exactPreview = await previewLiquidity(
         buildAccountFundingRequest({
           capacityQuote: false,
           connectedExternalWalletRefs: input.connectedExternalWalletRefs,
@@ -501,7 +527,6 @@ export async function computePolymarketAccountMaxSpend(input: {
           slippageBps: input.slippageBps,
           tokenId: input.tokenId,
         }),
-        account,
       );
       const exactCapacityRaw = maximumPreviewInternalFundingRaw({
         excludedSourceLocationIds,

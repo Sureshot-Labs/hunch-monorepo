@@ -453,6 +453,64 @@ const tests: TestCase[] = [
         (BigInt(String(result.totalRequiredUsdcRaw)) - 430_000n).toString(),
       );
       assert.ok(BigInt(String(result.maxAmountUsdRaw)) >= 2_500_000n);
+      for (const failureAt of [1, 2]) {
+        let calls = 0;
+        const recovered = await computePolymarketAccountMaxSpend({
+          ...requestInput,
+          dependencies: {
+            ...requestInput.dependencies,
+            createFundingRuntime: () => ({
+              previewLiquidity: async () => {
+                calls++;
+                return calls === failureAt
+                  ? {
+                      ...preview,
+                      projection: {
+                        ...preview.projection,
+                        completeness: "partial",
+                        freshness: "stale",
+                        reasonCodes: ["provider_status_unknown"],
+                      },
+                    }
+                  : preview;
+              },
+            }),
+          },
+        });
+        assert.equal(
+          recovered.ok,
+          true,
+          "transient provider failure must recover in either phase",
+        );
+        assert.equal(calls, 3);
+      }
+      let persistentCalls = 0;
+      const persistentFailure = await computePolymarketAccountMaxSpend({
+        ...requestInput,
+        dependencies: {
+          ...requestInput.dependencies,
+          createFundingRuntime: () => ({
+            previewLiquidity: async () => {
+              persistentCalls++;
+              return {
+                ...preview,
+                projection: {
+                  ...preview.projection,
+                  completeness: "partial",
+                  freshness: "stale",
+                  reasonCodes: ["provider_status_unknown"],
+                },
+              };
+            },
+          }),
+        },
+      });
+      assert.equal(persistentFailure.ok, false);
+      assert.equal(
+        persistentCalls,
+        2,
+        "persistent outages must not create retry storms",
+      );
       const unavailableRoute = await computePolymarketAccountMaxSpend({
         ...requestInput,
         dependencies: {

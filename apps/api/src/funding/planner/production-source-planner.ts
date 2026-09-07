@@ -1256,6 +1256,14 @@ export class ProductionFundingSourcePlanner {
             reasonCode: "provider_quote_rejected",
           };
         }
+        console.warn("[funding-relay] quote unavailable", {
+          routeId: relayRoute.routeId,
+          sourceLocationId: sourceLocation.locationId,
+          quoteCorrelationId: input.quoteCorrelationId,
+          code: error.code,
+          httpStatus: error.httpStatus,
+          providerErrorCode: error.providerErrorCode,
+        });
         throw new FundingPlannerError(
           "provider_unavailable",
           `Relay funding quote failed: ${error.code}`,
