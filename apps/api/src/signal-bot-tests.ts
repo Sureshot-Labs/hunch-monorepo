@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { writeSignalBotMarketSearchSession } from "./services/telegram-bot-menu-markets.js";
 import { readFileSync } from "node:fs";
 import { existsSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -5653,6 +5654,55 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(
         buttons.some((button) => "web_app" in button),
         true,
+      );
+    },
+  },
+  {
+    name: "polling forwards discovery options to search filters",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      const sessionId = await writeSignalBotMarketSearchSession({
+        redis,
+        chatId: "999",
+        telegramUserId: 999,
+        query: "Fed",
+        results: [],
+      });
+      telegram.updates = [
+        {
+          update_id: 90,
+          callback_query: {
+            data: `hm:v1:search_filters:${sessionId}`,
+            from: { id: 999 },
+            id: "filters",
+            message: { chat: { id: 999, type: "private" }, message_id: 71 },
+          },
+        },
+      ];
+      let optionCalls = 0;
+      await pollSignalBotCommands({
+        config: parseSignalBotConfig({ HUNCH_SIGNAL_BOT_TOKEN: "token" }),
+        redis,
+        telegram,
+        db: {
+          query: async () => ({
+            rows: [{ link_id: "link-1", user_id: "user-1" }],
+          }),
+        } as never,
+        sendTestSignal: async () => false,
+        searchOptions: async () => {
+          optionCalls++;
+          return { venues: ["polymarket", "limitless"] };
+        },
+      });
+      assert.equal(optionCalls, 1);
+      assert.match(telegram.edits.at(-1)?.text ?? "", /Search filters/);
+      assert.ok(
+        !telegram.edits
+          .at(-1)
+          ?.reply_markup?.inline_keyboard.flat()
+          .some((button) => button.text.includes("Kalshi")),
       );
     },
   },

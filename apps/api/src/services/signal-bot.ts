@@ -3224,9 +3224,14 @@ export async function handleSignalBotMenuCallback(
     });
     await sendOrEditSignalBotMenuMessage({
       chatId,
-      message: buildSignalBotMarketSearchQueryPrompt({
-        callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
-      }),
+      message: {
+        ...buildSignalBotMarketSearchQueryPrompt({
+          callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
+        }),
+        text: escapeTelegramMarkdownV2(
+          "⏳ Loading trending markets…\n\nYou can also type a search query or paste a market link.",
+        ),
+      },
       messageId,
       transport: menuTransport,
     });
@@ -3235,9 +3240,34 @@ export async function handleSignalBotMenuCallback(
       if (!input.searchMarkets) throw new Error("market_search_unavailable");
       results = await input.searchMarkets({ query: null });
     } catch {
+      await sendOrEditSignalBotMenuMessage({
+        chatId,
+        messageId,
+        transport: menuTransport,
+        message: {
+          ...buildSignalBotMarketSearchQueryPrompt({
+            callbackPrefix: SIGNAL_BOT_MENU_CALLBACK_PREFIX,
+          }),
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: "🔄 Load trending",
+                  callback_data: `${SIGNAL_BOT_MENU_CALLBACK_PREFIX}trading:market_input`,
+                },
+              ],
+              [
+                {
+                  text: "🏠 Home",
+                  callback_data: `${SIGNAL_BOT_MENU_CALLBACK_PREFIX}home`,
+                },
+              ],
+            ],
+          },
+        },
+      });
       return true;
     }
-    if (results.length === 0) return true;
     const sessionId = await writeSignalBotMarketSearchSession({
       chatId,
       query: null,
@@ -4245,6 +4275,7 @@ export async function pollSignalBotCommands(
           loadPositions: input.loadPositions,
           loadRewards: input.loadRewards,
           searchMarkets: input.searchMarkets,
+          searchOptions: input.searchOptions,
           loadTradeStatus: input.loadTradeStatus,
           prepareRewardsReferralCodeChange:
             input.prepareRewardsReferralCodeChange,

@@ -187,6 +187,14 @@ export function buildSignalBotMarketSearchScreen(input: {
     ? `Results for “${compactTelegramText(input.query, 120)}”`
     : "Trending markets";
   const lines = [`🔎 ${bold(title)}`, ""];
+  if (!input.query) {
+    lines.push(
+      escapeTelegramMarkdownV2(
+        "Type a search query or paste a market link at any time.",
+      ),
+      "",
+    );
+  }
   const visibleResults: SignalBotMarketSearchResult[] = [];
   if (input.results.length === 0) {
     lines.push(
