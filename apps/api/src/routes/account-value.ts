@@ -37,13 +37,19 @@ export type AccountValueRouteDependencies = Readonly<{
 
 function publicAccountValueReadModel(
   account: AccountValueReadModel,
-): Omit<AccountValueReadModel, "ownership" | "runtimePolicy"> {
-  const {
-    ownership: _ownership,
-    runtimePolicy: _runtimePolicy,
-    ...publicAccount
-  } = account;
-  return publicAccount;
+) {
+  // Explicit public boundary: new internal planner facts must neither leak
+  // into this response nor break its strict runtime schema.
+  return {
+    projection: account.projection,
+    headline: account.headline,
+    cashAvailability: account.cashAvailability,
+    venues: account.venues,
+    policy: account.policy,
+    ownershipEvidenceRevision: account.ownershipEvidenceRevision,
+    duplicateAssetObservationCount: account.duplicateAssetObservationCount,
+    assetPreferences: account.assetPreferences,
+  };
 }
 
 export function registerAccountValueRoutes(

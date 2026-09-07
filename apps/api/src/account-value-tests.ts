@@ -2234,6 +2234,13 @@ await test("account routes require auth and preference response denies authority
       invalidStoredPolicy: false,
     },
     runtimePolicy: DEFAULT_FUNDING_RUNTIME_POLICY,
+    nativeGasBalances: [{
+      networkId: "evm:137",
+      address: "0x1111111111111111111111111111111111111111",
+      raw: "8450816131265488661",
+    }],
+    connectedExternalWalletRefs: ["private-controller-ref"],
+    futureInternalDiagnostic: "must-not-leak",
     ownershipEvidenceRevision: "a".repeat(64),
     ownership: {
       accountId: "account_00000001",
@@ -2280,6 +2287,9 @@ await test("account routes require auth and preference response denies authority
   assert.equal(value.json().account.headline.estimatedUsd, "2");
   assert.equal("runtimePolicy" in value.json().account, false);
   assert.equal("ownership" in value.json().account, false);
+  assert.equal("nativeGasBalances" in value.json().account, false);
+  assert.equal("connectedExternalWalletRefs" in value.json().account, false);
+  assert.equal("futureInternalDiagnostic" in value.json().account, false);
 
   const firstAssetsPage = await app.inject({
     method: "GET",
