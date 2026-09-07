@@ -92,6 +92,9 @@ await handleSignalBotInteractiveMenuCallback({
   route: { kind: "market_search_filters", sessionId },
   searchOptions: async () => ({ venues: ["polymarket", "limitless"] }),
   render: async (message) => {
+    // The real menu transport defaults to MarkdownV2; raw punctuation makes
+    // Telegram reject this screen even when the callback and API succeed.
+    assert.equal(/(?<!\\)[.!]/u.test(message.text), false);
     rendered = message;
   },
   renderExpiredSearch: async () => {

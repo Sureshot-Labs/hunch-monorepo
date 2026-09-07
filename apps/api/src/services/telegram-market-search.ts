@@ -2,6 +2,8 @@ import type { Pool } from "@hunch/infra";
 
 import {
   fetchFeedMarketsDirect,
+  fetchFeedEventIds,
+  fetchFeedMarkets,
   type FeedMarketRow,
 } from "../repos/unified-read.js";
 import type { ClusterMarketSummary } from "./clusters.js";
@@ -301,11 +303,27 @@ export async function searchTelegramMarkets(input: {
       now.getTime() + 7 * 24 * 60 * 60 * 1_000,
     ).toISOString(),
   } as const;
-  // Apply category and ordering in the feed query, before the result limit.
-  const rows = await fetchFeedMarketsDirect(input.pool, {
-    ...baseInputs,
-    q: query || undefined,
-  });
+  // Browse Trending uses the same event-first v1 rank as the main feed.
+  // Ranking the entire market universe here is much more expensive and also
+  // lets one large event occupy the whole Telegram page. Keep textual search
+  // and explicit market sorts on their market-level path.
+  let rows;
+  if (!query && baseInputs.sort === "trending") {
+    const eventInputs = { ...baseInputs, view: "events" as const };
+    const events = await fetchFeedEventIds(input.pool, eventInputs);
+    const eventIds = events.map((event) => event.id);
+    const markets = eventIds.length
+      ? await fetchFeedMarkets(input.pool, eventInputs, eventIds, {
+          useCachedChange24h: true,
+        })
+      : [];
+    rows = selectTelegramTrendingMarkets(eventIds, markets);
+  } else {
+    rows = await fetchFeedMarketsDirect(input.pool, {
+      ...baseInputs,
+      q: query || undefined,
+    });
+  }
   const results = rows
     .slice(0, TELEGRAM_SEARCH_SESSION_RESULT_LIMIT)
     .map(mapTelegramMarketSearchResult);
@@ -316,4 +334,34 @@ export async function searchTelegramMarkets(input: {
         resolveCrossVenueAlternatives: input.resolveCrossVenueAlternatives,
       })
     : results;
+}
+
+/** Preserve event rank and market rank within each event without monopolies. */
+export function selectTelegramTrendingMarkets<T extends { event_id: string }>(
+  eventIds: string[],
+  markets: T[],
+): T[] {
+  const groups = new Map<string, T[]>();
+  for (const market of markets) {
+    const group = groups.get(market.event_id) ?? [];
+    group.push(market);
+    groups.set(market.event_id, group);
+  }
+  const result: T[] = [];
+  for (
+    let index = 0;
+    result.length < TELEGRAM_SEARCH_SESSION_RESULT_LIMIT;
+    index++
+  ) {
+    let added = false;
+    for (const eventId of eventIds) {
+      const market = groups.get(eventId)?.[index];
+      if (!market) continue;
+      result.push(market);
+      added = true;
+      if (result.length === TELEGRAM_SEARCH_SESSION_RESULT_LIMIT) break;
+    }
+    if (!added) break;
+  }
+  return result;
 }

@@ -17,6 +17,7 @@ import { writeSignalBotMenuInput } from "./services/telegram-bot-menu-state.js";
 import { TELEGRAM_MESSAGE_PAYLOAD_BUDGET } from "./services/telegram-bot-text-budget.js";
 import {
   diversifyTelegramMarketSearchResults,
+  selectTelegramTrendingMarkets,
   groupTelegramMarketSearchResults,
   mapClusterMarketToTelegramSearchResult,
   resolveTelegramSearchSecondaryVenues,
@@ -728,6 +729,27 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
 ];
+
+tests.push({
+  name: "Trending preserves event rank, includes other events and caps the page",
+  run: async () => {
+    const largeEvent = Array.from({ length: 30 }, (_, id) => ({
+      event_id: "a",
+      id,
+    }));
+    const other = { event_id: "b", id: 100 };
+    const page = selectTelegramTrendingMarkets(
+      ["b", "a", "empty"],
+      [...largeEvent, other],
+    );
+    assert.equal(page.length, 25);
+    assert.equal(page[0], other);
+    assert.equal(page[1], largeEvent[0]);
+    assert.equal(new Set(page).size, 25);
+    assert.deepEqual(selectTelegramTrendingMarkets([], largeEvent), []);
+    assert.deepEqual(selectTelegramTrendingMarkets(["a"], []), []);
+  },
+});
 
 for (const test of tests) {
   try {

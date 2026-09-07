@@ -11,7 +11,10 @@ import type {
   SignalBotTelegramClient,
   TelegramBotCallbackQuery,
 } from "./signal-bot-contracts.js";
-import { formatTelegramCalloutMarkdownV2 } from "./telegram-bot-trading-presentation.js";
+import {
+  escapeTelegramMarkdownV2,
+  formatTelegramCalloutMarkdownV2,
+} from "./telegram-bot-trading-presentation.js";
 import {
   parseTelegramFundingCallbackRoute,
   type TelegramFundingCallbackRoute,
@@ -396,7 +399,9 @@ async function deliverSignalBotInteractiveMenuCallback(
         const options = await input.searchOptions?.().catch(() => null);
         if (!options) {
           await input.render({
-            text: "Filters temporarily unavailable. Try again.",
+            text: escapeTelegramMarkdownV2(
+              "Filters temporarily unavailable. Try again.",
+            ),
             reply_markup: {
               inline_keyboard: [
                 [
@@ -417,7 +422,9 @@ async function deliverSignalBotInteractiveMenuCallback(
           return true;
         }
         await input.render({
-          text: "⚙️ Search filters\nChoose a venue. Your search query is preserved.",
+          text: escapeTelegramMarkdownV2(
+            "⚙️ Search filters\nChoose a venue. Your search query is preserved.",
+          ),
           reply_markup: {
             inline_keyboard: [
               ...[
@@ -514,7 +521,9 @@ async function deliverSignalBotInteractiveMenuCallback(
         );
       } catch {
         await input.render({
-          text: "Search temporarily unavailable. Try the filter again.",
+          text: escapeTelegramMarkdownV2(
+            "Search temporarily unavailable. Try the filter again.",
+          ),
           reply_markup: {
             inline_keyboard: [
               [
