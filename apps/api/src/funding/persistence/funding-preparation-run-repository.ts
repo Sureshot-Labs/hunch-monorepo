@@ -445,6 +445,7 @@ export async function resolveFundingPreparationRun(
     userId: string;
     runId: string;
     succeeded: boolean;
+    expectedActions?: readonly FundingPreparationActionAttempt[];
     now?: Date;
   }>,
 ): Promise<FundingPreparationRun> {
@@ -466,6 +467,33 @@ export async function resolveFundingPreparationRun(
       );
     }
     if (!input.succeeded) return mapRun(client, run, false, true);
+    if (input.expectedActions) {
+      if (run.status !== "submitted" && run.status !== "ambiguous") {
+        return mapRun(client, run, false, true);
+      }
+      const currentActions = await client.query<ActionRow>(
+        `select ${ACTION_COLUMNS} from funding_preparation_action_attempts
+          where run_id = $1 order by ordinal for update`,
+        [run.id],
+      );
+      const evidenceIdentity = (action: FundingPreparationActionAttempt) => ({
+        actionId: action.actionId,
+        ordinal: action.ordinal,
+        actionFingerprint: action.actionFingerprint,
+        action: action.action,
+        state: action.state,
+        broadcastMayHaveOccurred: action.broadcastMayHaveOccurred,
+        transactionReference: action.transactionReference,
+      });
+      if (
+        !canonicalJsonEqual(
+          currentActions.rows.map(mapAction).map(evidenceIdentity),
+          input.expectedActions.map(evidenceIdentity),
+        )
+      ) {
+        return mapRun(client, run, false, true);
+      }
+    }
     const now = input.now ?? new Date();
     await client.query(
       `

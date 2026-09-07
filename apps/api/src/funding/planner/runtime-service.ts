@@ -1,4 +1,9 @@
 import type { Pool, PoolClient } from "@hunch/infra";
+import { AuthService } from "../../auth.js";
+import {
+  readPreparationReceipt,
+  verifyPreparationApprovalReceipts,
+} from "../preparation/approval-receipt.js";
 
 import {
   buildAccountValueReadModel,
@@ -456,6 +461,22 @@ export class FundingPlanningRuntime {
   private async reconcilePreparationRunSnapshot(
     run: FundingPreparationRun,
   ): Promise<FundingPreparationRun> {
+    if (run.status === "submitted" || run.status === "ambiguous") {
+      const approvalsExecuted = await verifyPreparationApprovalReceipts(
+        run,
+        await AuthService.getUserWallets(run.userId),
+        readPreparationReceipt,
+      );
+      if (approvalsExecuted !== null) {
+        if (!approvalsExecuted) return run;
+        return resolveFundingPreparationRun(this.db, {
+          userId: run.userId,
+          runId: run.runId,
+          succeeded: true,
+          expectedActions: run.actions,
+        });
+      }
+    }
     // A preparation inspection is reusable for discovery, but it is not valid
     // reconciliation evidence after an action was broadcast. In particular,
     // an approval can confirm while the pre-submit inspection remains cached.

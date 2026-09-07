@@ -479,10 +479,22 @@ async function testConcurrentPreparationRunReplay(): Promise<void> {
     }),
     "idempotency_conflict",
   );
+  const staleReceipt = await resolveFundingPreparationRun(pool, {
+    userId,
+    runId: first.runId,
+    succeeded: true,
+    expectedActions: first.actions,
+  });
+  assert.equal(
+    staleReceipt.status,
+    "submitted",
+    "late evidence cannot overwrite a changed action report",
+  );
   const resolved = await resolveFundingPreparationRun(pool, {
     userId,
     runId: first.runId,
     succeeded: true,
+    expectedActions: submitted.actions,
   });
   assert.equal(resolved.status, "succeeded");
 
