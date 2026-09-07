@@ -17,6 +17,7 @@ import { writeSignalBotMenuInput } from "./services/telegram-bot-menu-state.js";
 import { TELEGRAM_MESSAGE_PAYLOAD_BUDGET } from "./services/telegram-bot-text-budget.js";
 import {
   diversifyTelegramMarketSearchResults,
+  cachedDiscoveryRows,
   selectTelegramTrendingMarkets,
   groupTelegramMarketSearchResults,
   mapClusterMarketToTelegramSearchResult,
@@ -748,6 +749,32 @@ tests.push({
     assert.equal(new Set(page).size, 25);
     assert.deepEqual(selectTelegramTrendingMarkets([], largeEvent), []);
     assert.deepEqual(selectTelegramTrendingMarkets(["a"], []), []);
+  },
+});
+
+tests.push({
+  name: "discovery cache coalesces matching reads, isolates filters and retries failures",
+  run: async () => {
+    const pool = {} as Parameters<typeof cachedDiscoveryRows>[0];
+    let calls = 0;
+    const read = async () => {
+      calls++;
+      return [];
+    };
+    await Promise.all([
+      cachedDiscoveryRows(pool, "time:all", read),
+      cachedDiscoveryRows(pool, "time:all", read),
+    ]);
+    assert.equal(calls, 1);
+    await cachedDiscoveryRows(pool, "time:limitless", read);
+    assert.equal(calls, 2);
+    await assert.rejects(
+      cachedDiscoveryRows(pool, "failure", async () => {
+        throw new Error("transient");
+      }),
+    );
+    await cachedDiscoveryRows(pool, "failure", read);
+    assert.equal(calls, 3);
   },
 });
 

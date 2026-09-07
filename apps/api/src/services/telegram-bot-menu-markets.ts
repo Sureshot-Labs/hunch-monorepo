@@ -31,6 +31,8 @@ type SearchRedis = {
 };
 
 export type SignalBotMarketSearchVenueOption = {
+  closesAt?: string | null;
+  volumeUsd?: number | null;
   eventId: string;
   eventTitle: string | null;
   lastPrice: number | null;
@@ -152,6 +154,32 @@ function bold(value: string): string {
   return formatTelegramBoldMarkdownV2(value);
 }
 
+export function telegramSearchSortDetail(
+  result: SignalBotMarketSearchResult,
+  sort: SignalBotMarketSearchSession["sort"],
+  now = Date.now(),
+): string {
+  if (sort === "totalvol") {
+    return result.volumeUsd != null &&
+      Number.isFinite(result.volumeUsd) &&
+      result.volumeUsd >= 0
+      ? ` · Vol $${new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(result.volumeUsd)}`
+      : " · Vol —";
+  }
+  if (sort === "time") {
+    const remaining = result.closesAt ? Date.parse(result.closesAt) - now : NaN;
+    if (!Number.isFinite(remaining)) return " · Close time unknown";
+    if (remaining <= 0) return " · Closing time passed";
+    const minutes = Math.ceil(remaining / 60000);
+    return minutes < 60
+      ? ` · ${minutes}m left`
+      : minutes < 1440
+        ? ` · ${Math.floor(minutes / 60)}h ${minutes % 60}m left`
+        : ` · ${Math.floor(minutes / 1440)}d ${Math.floor((minutes % 1440) / 60)}h left`;
+  }
+  return "";
+}
+
 function venueOptions(
   result: SignalBotMarketSearchResult,
 ): SignalBotMarketSearchVenueOption[] {
@@ -185,7 +213,11 @@ export function buildSignalBotMarketSearchScreen(input: {
   );
   const title = input.query
     ? `Results for “${compactTelegramText(input.query, 120)}”`
-    : "Trending markets";
+    : input.sort === "time"
+      ? "Closing soon"
+      : input.sort === "totalvol"
+        ? "Markets by volume"
+        : "Trending markets";
   const lines = [`🔎 ${bold(title)}`, ""];
   if (!input.query) {
     lines.push(
@@ -231,7 +263,9 @@ export function buildSignalBotMarketSearchScreen(input: {
               ),
             )}`;
       const block = [
-        bold(`${index + 1}. ${compactTelegramText(identity.lines[0], 160)}`),
+        bold(
+          `${index + 1}. ${compactTelegramText(identity.lines[0], 160)}${telegramSearchSortDetail(result, input.sort)}`,
+        ),
         ...(identity.lines[1]
           ? [
               `🎯 ${formatTelegramFieldWithMarkdownV2(

@@ -7,6 +7,7 @@ import {
   writeSignalBotMarketSearchSession,
   readSignalBotMarketSearchSession,
   buildSignalBotMarketSearchScreen,
+  telegramSearchSortDetail,
 } from "./services/telegram-bot-menu-markets.js";
 
 const values = new Map<string, string>();
@@ -133,5 +134,34 @@ assert.ok(
   screen.reply_markup.inline_keyboard
     .flat()
     .some((button) => button.text === "↕️ Sort (Trending)"),
+);
+const detailResult = {
+  eventId: "e",
+  eventTitle: null,
+  marketId: "m",
+  marketTitle: "Market",
+  venue: "limitless",
+  lastPrice: null,
+  noAsk: null,
+  yesAsk: null,
+  closesAt: "2026-09-07T20:00:00Z",
+  volumeUsd: 12345,
+};
+assert.equal(
+  telegramSearchSortDetail(
+    detailResult,
+    "time",
+    Date.parse("2026-09-07T19:00:00Z"),
+  ),
+  " · 1h 0m left",
+);
+assert.equal(
+  telegramSearchSortDetail(detailResult, "totalvol"),
+  " · Vol $12.3K",
+);
+assert.equal(telegramSearchSortDetail(detailResult, "trending"), "");
+assert.equal(
+  telegramSearchSortDetail({ ...detailResult, closesAt: null }, "time"),
+  " · Close time unknown",
 );
 console.log("[telegram-search-filters-tests] passed");

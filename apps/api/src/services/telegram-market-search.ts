@@ -10,6 +10,8 @@ import type { ClusterMarketSummary } from "./clusters.js";
 import { filterVenuesForLifecycleCapability } from "./venue-lifecycle.js";
 
 export type TelegramMarketSearchResult = {
+  closesAt?: string | null;
+  volumeUsd?: number | null;
   eventId: string;
   eventTitle: string | null;
   lastPrice: number | null;
@@ -31,6 +33,36 @@ const TELEGRAM_SEARCH_SESSION_RESULT_LIMIT = 25;
 const TELEGRAM_SEARCH_AGG_SEED_LIMIT = 5;
 const TELEGRAM_SEARCH_DOMINANT_VENUE_RATIO = 0.6;
 
+// Discovery only, never order/funding quotes. Failed requests are not cached.
+const discoveryFlights = new WeakMap<
+  Pool,
+  Map<string, { expiresAt: number; rows: Promise<FeedMarketRow[]> }>
+>();
+export async function cachedDiscoveryRows(
+  pool: Pool,
+  key: string,
+  fetchRows: () => Promise<FeedMarketRow[]>,
+): Promise<FeedMarketRow[]> {
+  let entries = discoveryFlights.get(pool);
+  if (!entries) discoveryFlights.set(pool, (entries = new Map()));
+  const existing = entries.get(key);
+  if (existing && existing.expiresAt > Date.now()) return existing.rows;
+  for (const [candidateKey, entry] of entries) {
+    if (entry.expiresAt <= Date.now()) entries.delete(candidateKey);
+  }
+  if (entries.size >= 100) return fetchRows();
+  const entry = { expiresAt: Number.POSITIVE_INFINITY, rows: fetchRows() };
+  entries.set(key, entry);
+  try {
+    const rows = await entry.rows;
+    entry.expiresAt = Date.now() + 10_000;
+    return rows;
+  } catch (error) {
+    if (entries.get(key) === entry) entries.delete(key);
+    throw error;
+  }
+}
+
 function finiteNumber(value: unknown): number | null {
   if (value == null) return null;
   const parsed = Number(value);
@@ -41,6 +73,20 @@ function mapTelegramMarketSearchResult(
   row: FeedMarketRow,
 ): TelegramMarketSearchResult {
   return {
+    closesAt: (() => {
+      const value =
+        row.market_close_time ?? row.market_expiration_time ?? row.end_date;
+      const date =
+        value instanceof Date
+          ? value
+          : typeof value === "string"
+            ? new Date(value)
+            : null;
+      return date && Number.isFinite(date.getTime())
+        ? date.toISOString()
+        : null;
+    })(),
+    volumeUsd: finiteNumber(row.volume_display ?? row.volume_total),
     eventId: row.event_id,
     eventTitle: row.event_title,
     lastPrice: finiteNumber(row.last_price),
@@ -319,10 +365,20 @@ export async function searchTelegramMarkets(input: {
       : [];
     rows = selectTelegramTrendingMarkets(eventIds, markets);
   } else {
-    rows = await fetchFeedMarketsDirect(input.pool, {
-      ...baseInputs,
-      q: query || undefined,
-    });
+    rows = await cachedDiscoveryRows(
+      input.pool,
+      JSON.stringify({
+        query,
+        venues: lifecycle.venues,
+        category: input.category,
+        sort: baseInputs.sort,
+      }),
+      () =>
+        fetchFeedMarketsDirect(input.pool, {
+          ...baseInputs,
+          q: query || undefined,
+        }),
+    );
   }
   const results = rows
     .slice(0, TELEGRAM_SEARCH_SESSION_RESULT_LIMIT)
