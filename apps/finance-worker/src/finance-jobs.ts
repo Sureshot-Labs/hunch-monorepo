@@ -55,6 +55,7 @@ type PrivyDeletionReconcileOptions = {
 };
 
 type FinanceJobsModule = {
+  runStandaloneFinancialReconciliationJob: () => Promise<unknown>;
   runFeesCollectJob: (
     overrides?: Partial<CollectFeesOptions>,
   ) => Promise<CollectFeesRunResult>;
@@ -123,6 +124,11 @@ export function resetFinanceJobsModuleLoaderForTests(): void {
 
 export async function loadFinanceJobsModuleForSmoke(): Promise<FinanceJobsModule> {
   return getFinanceJobsModule();
+}
+
+export async function runStandaloneFinancialReconciliationJob(): Promise<unknown> {
+  const jobs = await getFinanceJobsModule();
+  return jobs.runStandaloneFinancialReconciliationJob();
 }
 
 export async function runFeesCollectJob(

@@ -25,17 +25,38 @@ export function isExternalHandoffFailureCode(
   return value?.startsWith("external_handoff_") ?? false;
 }
 
-export function isUnreferencedFundingActionAmbiguity(input: {
+type FundingActionReport = Readonly<{
   failureCode: FundingActionFailureCode | null;
   outcome: "submitted" | "ambiguous" | "failed" | "cancelled";
   transactionReference: string | null;
-}): boolean {
+}>;
+
+/** A generic client catch is not evidence that a started action never sent. */
+export function normalizeFundingActionReport(
+  input: FundingActionReport,
+): FundingActionReport {
+  return input.failureCode === "client_execution_failed" &&
+    input.outcome === "failed"
+    ? { ...input, outcome: "ambiguous" }
+    : input;
+}
+
+function hasUnknownSubmission(code: FundingActionFailureCode | null): boolean {
+  return (
+    code === "client_execution_failed" ||
+    code === "embedded_evm_submission_unknown" ||
+    code === "external_handoff_submission_unknown" ||
+    code === "external_handoff_provider_response_invalid"
+  );
+}
+
+export function isUnreferencedFundingActionAmbiguity(
+  input: FundingActionReport,
+): boolean {
   return (
     input.outcome === "ambiguous" &&
     input.transactionReference === null &&
-    (input.failureCode === "embedded_evm_submission_unknown" ||
-      input.failureCode === "external_handoff_submission_unknown" ||
-      input.failureCode === "external_handoff_provider_response_invalid")
+    hasUnknownSubmission(input.failureCode)
   );
 }
 
@@ -43,19 +64,13 @@ export function isUnreferencedFundingActionAmbiguity(input: {
  * The server derives the irreversible-boundary meaning from this pair rather
  * than trusting an arbitrary client outcome for a known diagnostic code.
  */
-export function isFundingActionFailureReportConsistent(input: {
-  failureCode: FundingActionFailureCode | null;
-  outcome: "submitted" | "ambiguous" | "failed" | "cancelled";
-  transactionReference: string | null;
-}): boolean {
+export function isFundingActionFailureReportConsistent(
+  input: FundingActionReport,
+): boolean {
   if (input.failureCode === null) return true;
   if (input.transactionReference !== null) return false;
-  if (
-    input.failureCode === "embedded_evm_submission_unknown" ||
-    input.failureCode === "external_handoff_submission_unknown" ||
-    input.failureCode === "external_handoff_provider_response_invalid"
-  ) {
-    return input.outcome === "ambiguous";
+  if (hasUnknownSubmission(input.failureCode)) {
+    return normalizeFundingActionReport(input).outcome === "ambiguous";
   }
   return input.outcome === "failed";
 }

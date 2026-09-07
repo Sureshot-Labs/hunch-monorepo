@@ -6680,6 +6680,100 @@ try {
   const unchangedOwnedRelay = await createRelayFixture("2000000", {
     checksumReceiptAddresses: true,
   });
+  const retryFactClient = await pool.connect();
+  try {
+    await retryFactClient.query("begin");
+    const retryStep = await retryFactClient.query<{
+      action_fingerprint: string;
+      executor_id: string;
+    }>(
+      `select action_fingerprint, executor_id from funding_operation_steps where id = $1`,
+      [unchangedOwnedRelay.approvalStepId],
+    );
+    const retryStepRow = retryStep.rows[0];
+    assert.ok(retryStepRow);
+    for (const outcome of ["failed", "ambiguous"] as const) {
+      await retryFactClient.query("savepoint retry_fact_case");
+      const retryInput = {
+        operationId: unchangedOwnedRelay.operationId,
+        stepId: unchangedOwnedRelay.approvalStepId,
+        canonicalActionFingerprint: retryStepRow.action_fingerprint,
+        executorId: retryStepRow.executor_id,
+      };
+      const failedAttempt = await startFundingStepAttemptInTransaction(
+        retryFactClient,
+        retryInput,
+      );
+      await finishFundingStepAttemptInTransaction(retryFactClient, {
+        attemptId: failedAttempt.id,
+        outcome,
+        broadcastMayHaveOccurred: outcome === "ambiguous",
+        referenceKind: null,
+        receiptRefCiphertext: null,
+        receiptRefLookupHmac: null,
+        lookupKeyVersion: null,
+        actualCosts: { reasonCode: "provider_unavailable" },
+      });
+      const recordRetry = () =>
+        retryFactClient.query(
+          `update funding_operation_step_attempts set actual_costs = actual_costs || '{"retryableProviderFailure":true}'::jsonb where id = $1`,
+          [failedAttempt.id],
+        );
+      if (outcome === "ambiguous") {
+        await assert.rejects(
+          recordRetry(),
+          /finished funding operation attempt cannot be rewritten/,
+        );
+      } else {
+        await recordRetry();
+        for (const mutation of [
+          "actual_costs = actual_costs || '{\"unrelated\":true}'::jsonb",
+          "actual_costs = actual_costs - 'retryableProviderFailure'",
+          "outcome = 'cancelled'",
+          "receipt_ref_ciphertext = 'cipher:replacement'",
+        ]) {
+          await retryFactClient.query("savepoint immutable_retry_boundary");
+          await assert.rejects(
+            retryFactClient.query(
+              `update funding_operation_step_attempts set ${mutation} where id = $1`,
+              [failedAttempt.id],
+            ),
+            /cannot be rewritten/,
+          );
+          await retryFactClient.query(
+            "rollback to savepoint immutable_retry_boundary",
+          );
+        }
+        const retry = await startFundingStepAttemptInTransaction(
+          retryFactClient,
+          retryInput,
+        );
+        assert.equal(retry.attemptNumber, 2);
+        await finishFundingStepAttemptInTransaction(retryFactClient, {
+          attemptId: retry.id,
+          outcome: "failed",
+          broadcastMayHaveOccurred: false,
+          referenceKind: null,
+          receiptRefCiphertext: null,
+          receiptRefLookupHmac: null,
+          lookupKeyVersion: null,
+          actualCosts: { reasonCode: "provider_unavailable" },
+        });
+        await assert.rejects(
+          retryFactClient.query(
+            `update funding_operation_step_attempts set actual_costs = actual_costs || '{"retryableProviderFailure":true}'::jsonb where id = $1`,
+            [retry.id],
+          ),
+          /finished funding operation attempt cannot be rewritten/,
+          "the bounded retry fact must not authorize a third attempt",
+        );
+      }
+      await retryFactClient.query("rollback to savepoint retry_fact_case");
+    }
+  } finally {
+    await retryFactClient.query("rollback");
+    retryFactClient.release();
+  }
   const unchangedOwnedBroadcasts = { value: 0 };
   await exhaustRelayDeposit(
     unchangedOwnedRelay,
@@ -6724,6 +6818,77 @@ try {
   );
   const cleanup = cleanupScope.rows[0];
   assert.ok(cleanup);
+  const reorgRetryClient = await pool.connect();
+  try {
+    await reorgRetryClient.query("begin");
+    await applyFundingStepReceiptEvidenceInTransaction(reorgRetryClient, {
+      operationId: cleanup.cleanup_operation_id,
+      stepId: cleanup.cleanup_step_id,
+      attemptId: cleanup.attempt_id,
+      networkId: "evm:8453",
+      receipt: {
+        status: "reorged",
+        actionMatch: true,
+        canonical: false,
+        ledgerHeight: "36",
+        blockHash: `0x${"76".repeat(32)}`,
+        failureCode: "test_cleanup_reorg",
+        evidence: {},
+      },
+    });
+    const markRetry = () =>
+      reorgRetryClient.query(
+        `update funding_operation_step_attempts set actual_costs = actual_costs || '{"retryableAfterReorg":true}'::jsonb where id = $1`,
+        [cleanup.attempt_id],
+      );
+    await reorgRetryClient.query("savepoint immature_reorg");
+    await assert.rejects(
+      markRetry(),
+      /finished funding operation attempt cannot be rewritten/,
+    );
+    await reorgRetryClient.query("rollback to savepoint immature_reorg");
+    // The disposable fixture alone advances the elapsed canonical watch.
+    await reorgRetryClient.query(
+      "set local session_replication_role = replica",
+    );
+    await reorgRetryClient.query(
+      `update funding_step_receipt_observations set reorged_at = now() - interval '16 minutes' where attempt_id = $1`,
+      [cleanup.attempt_id],
+    );
+    await reorgRetryClient.query("set local session_replication_role = origin");
+    await markRetry();
+    const retryStep = await reorgRetryClient.query<{
+      action_fingerprint: string;
+      executor_id: string;
+    }>(
+      `select action_fingerprint, executor_id from funding_operation_steps where id = $1`,
+      [cleanup.cleanup_step_id],
+    );
+    const retryStepRow = retryStep.rows[0];
+    assert.ok(retryStepRow);
+    const retryInput = {
+      operationId: cleanup.cleanup_operation_id,
+      stepId: cleanup.cleanup_step_id,
+      canonicalActionFingerprint: retryStepRow.action_fingerprint,
+      executorId: retryStepRow.executor_id,
+    };
+    const retry = await startFundingStepAttemptInTransaction(
+      reorgRetryClient,
+      retryInput,
+    );
+    assert.equal(
+      retry.attemptNumber,
+      2,
+      "the durable cleanup reorg decision must reach actual attempt admission",
+    );
+    await assert.rejects(
+      startFundingStepAttemptInTransaction(reorgRetryClient, retryInput),
+      /already started|unresolved|attempt/,
+    );
+  } finally {
+    await reorgRetryClient.query("rollback");
+    reorgRetryClient.release();
+  }
   const cleanupReceiptTargets = await listFundingStepReceiptTargets(
     pool,
     cleanup.cleanup_operation_id,
@@ -7630,12 +7795,14 @@ try {
   );
   const unresolvedRefundIncident = await pool.query<{
     error_code: string | null;
+    recovery_mode: string | null;
     last_error_code: string | null;
     job_status: string;
     operation_status: string;
   }>(
     `select operation.status as operation_status,
             operation.error_code,
+            operation.recovery_mode,
             job.status as job_status,
             job.last_error_code
        from funding_operations operation
@@ -7646,7 +7813,8 @@ try {
   );
   assert.deepEqual(unresolvedRefundIncident.rows, [
     {
-      error_code: "finalized_observation_reorg",
+      error_code: "terminal_refund_reorg_unresolved",
+      recovery_mode: "manual_review",
       job_status: "dead_letter",
       last_error_code: "terminal_refund_reorg_unresolved",
       operation_status: "recovery_required",

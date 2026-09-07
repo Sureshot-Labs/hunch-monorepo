@@ -286,6 +286,12 @@ export class RelayWalletQuoteAdapter {
           : ("EXACT_INPUT" as const),
       slippageTolerance: (input.maximumSlippageBps ?? 100).toString(),
       useDepositAddress: false,
+      // Same-chain quotes otherwise contain self-executed aggregator swaps.
+      // Request the solver deposit flow we validate; never relax calldata checks.
+      ...(input.route.sourceVm === "evm" &&
+      input.route.source.networkId === input.route.destination.networkId
+        ? { forceSolverExecution: true, explicitDeposit: true }
+        : {}),
     };
     const quote = await this.client.quote(request);
     const completedAt = this.clock();

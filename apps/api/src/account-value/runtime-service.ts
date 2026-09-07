@@ -215,12 +215,11 @@ function resolutionSupportsEntry(
   return entry.asset.networkId.startsWith("evm:");
 }
 
-function buildObservation(inputs: {
+export function buildAccountValueObservation(inputs: {
   accountId: string;
   resolution: BalanceWalletResolution;
   balance: WalletBalanceItem;
   entry: AccountAssetCatalogEntry;
-  observedAt: string;
 }): ObservedAsset {
   const address = normalizeAddress(inputs.resolution.walletAddress);
   const locationKind =
@@ -253,6 +252,15 @@ function buildObservation(inputs: {
         address,
       }),
       linkedAddress: inputs.resolution.linkedWalletAddress,
+      ...(locationKind === "venue_account"
+        ? {
+            controllerWalletId: stableWalletOpaqueId({
+              walletType: "ethereum",
+              networkId: inputs.entry.asset.networkId,
+              address: inputs.resolution.linkedWalletAddress,
+            }),
+          }
+        : {}),
       balanceClass: inputs.entry.venueId ?? "wallet",
       ...(inputs.entry.venueId ? { venueId: inputs.entry.venueId } : {}),
       ...(inputs.resolution.polymarketFunderKind
@@ -275,7 +283,7 @@ function buildObservation(inputs: {
       "evidence",
       `${inputs.resolution.source}:${inputs.resolution.linkedWalletAddress}:${address}`,
     ),
-    observedAt: inputs.observedAt,
+    observedAt: inputs.balance.observedAt,
     observationFreshness: "fresh",
     observationError: null,
     metadataRisk: inputs.entry.verified ? "verified" : "unverified",
@@ -286,7 +294,6 @@ async function collectInventory(inputs: {
   accountId: string;
   resolutions: readonly BalanceWalletResolution[];
   catalog: readonly AccountAssetCatalogEntry[];
-  observedAt: string;
 }): Promise<
   Readonly<{
     observations: readonly ObservedAsset[];
@@ -350,12 +357,11 @@ async function collectInventory(inputs: {
           }
           if (!isPositiveRaw(balance.balanceRaw)) continue;
           observations.push(
-            buildObservation({
+            buildAccountValueObservation({
               accountId: inputs.accountId,
               resolution,
               balance,
               entry,
-              observedAt: inputs.observedAt,
             }),
           );
         }
@@ -567,7 +573,6 @@ export async function buildAccountValueReadModel(inputs: {
       accountId: inputs.userId,
       resolutions,
       catalog,
-      observedAt: asOf,
     }),
     Promise.all(
       ownership.wallets

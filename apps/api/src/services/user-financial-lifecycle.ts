@@ -111,6 +111,8 @@ export async function fetchUserFinancialLifecycleSummary(
             from funding_preparation_action_attempts attempt
             join funding_preparation_runs run on run.id = attempt.run_id
             where run.user_id = any($1::uuid[])
+              and run.resolved_at is null
+              and attempt.resolved_at is null
               and (
                 attempt.state in ('submitted', 'ambiguous')
                 or attempt.broadcast_may_have_occurred

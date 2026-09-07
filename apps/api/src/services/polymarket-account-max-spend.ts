@@ -5,6 +5,9 @@ import {
   type AccountValueReadModel,
 } from "../account-value/runtime-service.js";
 import { rawForUsdCeil } from "../account-value/decimal.js";
+import { accountValueDisplayPriceAdapters } from "../account-value/display-price-adapters.js";
+import type { PriceAdapter } from "../funding/domain/contracts.js";
+import { sameAccountAddress } from "../funding/domain/asset-identity.js";
 import type {
   FundingDiscoveryRequest,
   IntentLiquidityProjection,
@@ -38,6 +41,7 @@ type PolymarketAccountMaxSpendLogger = Readonly<{
 }>;
 
 export type PolymarketAccountMaxSpendDependencies = Readonly<{
+  amountEstimatePriceAdapters: readonly PriceAdapter[];
   buildAccountValueReadModel: typeof buildAccountValueReadModel;
   createFundingRuntime: (
     pool: Pool,
@@ -49,6 +53,7 @@ export type PolymarketAccountMaxSpendDependencies = Readonly<{
 
 const defaultAccountMaxSpendDependencies: PolymarketAccountMaxSpendDependencies =
   {
+    amountEstimatePriceAdapters: accountValueDisplayPriceAdapters,
     buildAccountValueReadModel,
     createFundingRuntime: (pool) => new FundingPlanningRuntime(pool),
     fetchPolymarketMarketInfo,
@@ -281,7 +286,18 @@ export function externalWalletSourceLocationIds(
         : component.location.kind === "venue_account"
           ? component.location.details.controllerWalletId
           : null;
-    return typeof walletId === "string" && externalWalletIds.has(walletId)
+    const linkedAddress = component.location.details.linkedAddress;
+    const externallyControlled =
+      component.location.kind === "venue_account" &&
+      typeof linkedAddress === "string" &&
+      account.ownership?.wallets.some(
+        (profile) =>
+          profile.source === "external" &&
+          profile.networkId === component.amount.asset.networkId &&
+          sameAccountAddress(profile.networkId, profile.address, linkedAddress),
+      );
+    return (typeof walletId === "string" && externalWalletIds.has(walletId)) ||
+      externallyControlled
       ? [component.location.locationId]
       : [];
   });
@@ -317,6 +333,11 @@ export async function computePolymarketAccountMaxSpend(input: {
       dependencies.buildAccountValueReadModel({
         pool: input.pool,
         userId: input.userId,
+        ...(input.amountEstimateOnly
+          ? {
+              additionalPriceAdapters: dependencies.amountEstimatePriceAdapters,
+            }
+          : {}),
       }),
       dependencies.fetchPolymarketMarketInfo(input.pool, {
         tokenId: input.tokenId,

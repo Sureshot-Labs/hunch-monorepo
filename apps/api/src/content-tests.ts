@@ -895,21 +895,21 @@ test("registers gated protected routes and the content schema migrations", () =>
   assert.match(contentDb, /select count\(\*\) = 12/);
   assert.match(contentDb, /select count\(\*\) = 25/);
   assert.match(contentDb, /content_outbox_version_id_fkey/);
-  assert.ok(
-    prebuiltDeploy.indexOf('"${compose[@]}" run --rm api') <
-      prebuiltDeploy.indexOf(
-        '"${compose[@]}" stop "${application_services[@]}"',
-      ),
+  const migrationCommandIndex = prebuiltDeploy.indexOf(
+    '"${compose[@]}" run --rm --no-deps api',
   );
+  const applicationStopIndex = prebuiltDeploy.indexOf(
+    '"${compose[@]}" stop "${application_services[@]}"',
+  );
+  assert.ok(migrationCommandIndex >= 0);
+  assert.ok(applicationStopIndex >= 0);
+  assert.ok(migrationCommandIndex < applicationStopIndex);
   const migrationFailureGuard = prebuiltDeploy.match(
-    /if ! "\$\{compose\[@\]\}" run --rm api[\s\S]*?Migration failed; existing application containers were left running\.[\s\S]*?exit 1[\s\S]*?fi/,
+    /if ! "\$\{compose\[@\]\}" run --rm --no-deps api[\s\S]*?Migration failed; existing application containers were left running\.[\s\S]*?exit 1[\s\S]*?fi/,
   );
   assert.ok(migrationFailureGuard);
   assert.ok(
-    prebuiltDeploy.indexOf(migrationFailureGuard[0]) <
-      prebuiltDeploy.indexOf(
-        '"${compose[@]}" stop "${application_services[@]}"',
-      ),
+    prebuiltDeploy.indexOf(migrationFailureGuard[0]) < applicationStopIndex,
   );
   assert.equal(
     [

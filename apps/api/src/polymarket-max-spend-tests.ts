@@ -28,7 +28,19 @@ import {
   PolymarketFundingPlanError,
 } from "./services/polymarket-funding-router.js";
 import { polymarketMaxSpendBodySchema } from "./schemas/polymarket-private.js";
-import type { AccountValueReadModel } from "./account-value/runtime-service.js";
+import {
+  buildAccountValueObservation,
+  type buildAccountValueReadModel,
+  type AccountValueReadModel,
+} from "./account-value/runtime-service.js";
+import { stableWalletOpaqueId } from "./account-value/canonical.js";
+import { projectCashAvailability } from "./account-value/cash-availability-projector.js";
+import {
+  PYTH_SOL_USD_PRICE_POLICY_ID,
+  ValuationService,
+} from "./account-value/valuation-service.js";
+import type { PriceAdapter } from "./funding/domain/contracts.js";
+import { SOLANA_NATIVE_ASSET } from "./funding/domain/network-fees.js";
 import {
   computePolymarketAccountMaxSpend,
   externalWalletSourceLocationIds,
@@ -400,7 +412,10 @@ const tests: TestCase[] = [
         tokenId: "token-yes",
         userId: "account_after_completed_trade_12345678",
         dependencies: {
-          buildAccountValueReadModel: async () => account,
+          buildAccountValueReadModel: async (input) => {
+            assert.equal(input.additionalPriceAdapters, undefined);
+            return account;
+          },
           fetchPolymarketMarketInfo: async () =>
             ({
               ...baseMarketInfo,
@@ -471,6 +486,123 @@ const tests: TestCase[] = [
       assert.ok(
         BigInt(String(amountEstimate.totalRequiredUsdcRaw)) <= 5_391_000n,
       );
+      // Exercise the actual valuation/projector chain, not a pre-priced SOL
+      // mock: MAX must install the display adapter, while strict planning above
+      // must remain independent of display prices.
+      let solUsd: string | null = "10";
+      const solPriceAdapter: PriceAdapter = {
+        adapterId: PYTH_SOL_USD_PRICE_POLICY_ID,
+        value: async ({ policyId, observedAt }) =>
+          policyId === PYTH_SOL_USD_PRICE_POLICY_ID && solUsd != null
+            ? {
+                value: solUsd,
+                asOf: observedAt,
+                confidence: "high",
+                priceSource: PYTH_SOL_USD_PRICE_POLICY_ID,
+                policyId,
+              }
+            : null,
+      };
+      const solObservation = buildAccountValueObservation({
+        accountId: requestInput.userId,
+        resolution: {
+          walletAddress: "11111111111111111111111111111111",
+          walletType: "solana",
+          linkedWalletAddress: "11111111111111111111111111111111",
+          source: "linked",
+        },
+        balance: {
+          chainId: "7565164",
+          address: SOLANA_NATIVE_ASSET.assetId,
+          symbol: "SOL",
+          name: "Solana",
+          decimals: 9,
+          balance: "1",
+          balanceRaw: "1000000000",
+          isNative: true,
+          observedAt: new Date().toISOString(),
+        },
+        entry: {
+          asset: SOLANA_NATIVE_ASSET,
+          category: "cash",
+          symbol: "SOL",
+          venueId: null,
+          pricePolicyId: PYTH_SOL_USD_PRICE_POLICY_ID,
+          verified: true,
+        },
+      });
+      let includeStable = false;
+      const solEstimateDependencies = {
+        ...requestInput.dependencies,
+        amountEstimatePriceAdapters: [solPriceAdapter],
+        createFundingRuntime: () => {
+          throw new Error("SOL amount MAX must never query Relay");
+        },
+        buildAccountValueReadModel: async (
+          input: Parameters<typeof buildAccountValueReadModel>[0],
+        ) => {
+          assert.deepEqual(input.additionalPriceAdapters, [solPriceAdapter]);
+          const components = await new ValuationService({
+            policies: [
+              {
+                asset: SOLANA_NATIVE_ASSET,
+                category: "cash",
+                pricePolicyId: PYTH_SOL_USD_PRICE_POLICY_ID,
+                maximumObservationAgeMs: 60_000,
+                executionEligibility: "unknown",
+              },
+            ],
+            adapters: input.additionalPriceAdapters ?? [],
+          }).value([solObservation]);
+          const cashAvailability = projectCashAvailability({
+            components,
+            adjustments: [],
+            asOf: solObservation.observedAt,
+          });
+          return {
+            ...estimateAccount,
+            projection: {
+              ...estimateAccount.projection,
+              components: [
+                ...components,
+                ...(includeStable ? estimateAccount.projection.components : []),
+              ],
+            },
+            cashAvailability: {
+              ...cashAvailability,
+              components: [
+                ...cashAvailability.components,
+                ...(includeStable
+                  ? estimateAccount.cashAvailability.components
+                  : []),
+              ],
+            },
+          } as AccountValueReadModel;
+        },
+      };
+      const solOnlyMax = await computePolymarketAccountMaxSpend({
+        ...requestInput,
+        amountEstimateOnly: true,
+        dependencies: solEstimateDependencies,
+      });
+      assert.equal(solOnlyMax.ok, true);
+      assert.equal(solOnlyMax.executableFundsRaw, "9400000");
+      includeStable = true;
+      const mixedMax = await computePolymarketAccountMaxSpend({
+        ...requestInput,
+        amountEstimateOnly: true,
+        dependencies: solEstimateDependencies,
+      });
+      assert.equal(mixedMax.ok, true);
+      assert.equal(mixedMax.executableFundsRaw, "14891000");
+      solUsd = null;
+      const missingSolPrice = await computePolymarketAccountMaxSpend({
+        ...requestInput,
+        amountEstimateOnly: true,
+        dependencies: solEstimateDependencies,
+      });
+      assert.equal(missingSolPrice.ok, true);
+      assert.equal(missingSolPrice.executableFundsRaw, "5391000");
       assert.equal(result.fundingScope, "account");
       assert.equal(result.executableFundsRaw, "4860000");
       assert.equal(previewRequests.length, 2);
@@ -628,6 +760,97 @@ const tests: TestCase[] = [
         "location_external",
         "location_external_venue",
       ]);
+    },
+  },
+  {
+    name: "account MAX resolves external controllers from real derived-funder observations",
+    run: () => {
+      const controller = "0x0000000000000000000000000000000000000044";
+      const asset: AssetRef = {
+        networkId: "evm:137",
+        assetId: env.polymarketPusdAddress,
+        decimals: 6,
+      };
+      const observation = buildAccountValueObservation({
+        accountId: "account_external_funder",
+        resolution: {
+          walletAddress: DEPOSIT,
+          walletType: "ethereum",
+          linkedWalletAddress: controller,
+          source: "derived_funder",
+          polymarketFunderKind: "deposit_wallet",
+        },
+        balance: {
+          chainId: "137",
+          address: asset.assetId,
+          symbol: "pUSD",
+          name: "Polymarket USD",
+          decimals: 6,
+          balanceRaw: "100000000",
+          balance: "100",
+          isNative: false,
+          observedAt: new Date().toISOString(),
+        },
+        entry: {
+          asset,
+          category: "cash",
+          symbol: "pUSD",
+          venueId: "polymarket",
+          pricePolicyId: "exact-stable-policy-v1",
+          verified: true,
+        },
+      });
+      const controllerWalletId = stableWalletOpaqueId({
+        walletType: "ethereum",
+        networkId: "evm:137",
+        address: controller,
+      });
+      assert.equal(
+        observation.location.details.controllerWalletId,
+        controllerWalletId,
+      );
+      assert.notEqual(
+        observation.location.details.walletId,
+        controllerWalletId,
+      );
+      const account = {
+        ownership: {
+          wallets: [
+            {
+              walletId: controllerWalletId,
+              source: "external",
+              networkId: "evm:137",
+              address: controller,
+            },
+            {
+              walletId: observation.location.details.walletId,
+              source: "smart",
+              networkId: "evm:137",
+              address: DEPOSIT,
+            },
+          ],
+        },
+        projection: { components: [observation] },
+      } as unknown as AccountValueReadModel;
+      assert.deepEqual(externalWalletSourceLocationIds(account), [
+        observation.location.locationId,
+      ]);
+      // Older inventory snapshots have only linkedAddress, not controllerWalletId.
+      const legacyShape = structuredClone(account);
+      const legacyComponent = legacyShape.projection.components[0];
+      assert.ok(legacyComponent);
+      delete (legacyComponent.location.details as Record<string, unknown>)
+        .controllerWalletId;
+      assert.deepEqual(externalWalletSourceLocationIds(legacyShape), [
+        observation.location.locationId,
+      ]);
+      const ownedSafe = structuredClone(account);
+      const safeComponent = ownedSafe.projection.components[0];
+      assert.ok(safeComponent);
+      (
+        safeComponent.location.details as Record<string, unknown>
+      ).polymarketFunderKind = "safe";
+      assert.deepEqual(externalWalletSourceLocationIds(ownedSafe), []);
     },
   },
   {

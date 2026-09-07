@@ -9,6 +9,7 @@ import { ethers } from "ethers";
 
 import "../../../integration-test-database-guard.js";
 import { pool } from "../../../db.js";
+import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 import {
   assertEmbeddedEvmSponsorshipAllowed,
   embeddedEvmSponsorshipTestHooks,
@@ -35,6 +36,7 @@ import {
   type FundingCommitPlan,
 } from "../../persistence/funding-operation-repository.js";
 import { applyFundingStepReceiptEvidenceInTransaction } from "../../persistence/funding-step-receipt-repository.js";
+import { isValidFundingCommitPlanBoundary } from "../../validation/funding-commit-plan-validator.js";
 
 const ASSET = {
   networkId: "evm:137",
@@ -98,9 +100,9 @@ try {
       address: "0x00000000000000000000000000000000000000a1",
     },
   } as const;
-  const handoffToken = "0x1111111111111111111111111111111111111111";
+  const handoffToken = RELAY_PINNED_ASSETS.polygonUsdce;
   const handoffFunder = "0x2222222222222222222222222222222222222222";
-  const handoffRecipient = "0x3333333333333333333333333333333333333333";
+  const handoffRecipient = sourceLocation.details.address;
   const handoffAmount = "8736244";
   const handoffTransferData = new ethers.Interface([
     "function transfer(address recipient,uint256 amount)",
@@ -130,6 +132,7 @@ try {
     executionEnvelope: "polymarket_deposit_wallet_to_controller_v1",
     funderAddress: handoffFunder,
     recipientAddress: handoffRecipient,
+    signerAddress: handoffRecipient,
     tokenAddress: handoffToken,
     amountRaw: handoffAmount,
     transferData: handoffTransferData,
@@ -997,6 +1000,11 @@ try {
     ],
   };
   const controllerHandoffConsentToken = opaque("consent");
+  assert.equal(
+    isValidFundingCommitPlanBoundary(controllerHandoffPlan),
+    true,
+    "the controller handoff fixture must satisfy its declared Router v1 contract",
+  );
   const controllerHandoffQuote = await createFundingQuoteInTransaction(client, {
     userId,
     discoveryProjectionId: opaque("projection"),

@@ -7,6 +7,8 @@
  * status. `now` is explicit, keeping the reducer deterministic and testable.
  */
 
+import { fundingAttemptHasSafeRetryEvidence } from "../domain/attempt-retry.js";
+
 export type FundingLifecycleOperationStatus =
   | "awaiting_user"
   | "awaiting_external_funds"
@@ -385,27 +387,10 @@ function hasCanonicalFinalReceipt(
   );
 }
 
-function hasCanonicalFinalFailure(
-  receipt: FundingLifecycleActionReceipt | null,
-): boolean {
-  return (
-    receipt?.status === "failed" &&
-    receipt.canonical &&
-    receipt.failureFinalized
-  );
-}
-
 function unresolvedAttempt(attempt: FundingLifecycleActionAttempt): boolean {
   if (
-    attempt.retryableAfterReorg === true &&
-    attempt.receipt?.status === "reorged" &&
-    !attempt.receipt.canonical
-  ) {
-    return false;
-  }
-  if (
     hasCanonicalFinalReceipt(attempt.receipt) ||
-    hasCanonicalFinalFailure(attempt.receipt)
+    fundingAttemptHasSafeRetryEvidence(attempt)
   ) {
     return false;
   }
@@ -423,12 +408,7 @@ function actionExecution(action: FundingLifecycleActionFact): ActionExecution {
   const latest = attempts[0];
   if (!latest) return "not_started";
   if (hasCanonicalFinalReceipt(latest.receipt)) return "succeeded";
-  if (hasCanonicalFinalFailure(latest.receipt)) return "retryable_failure";
-  if (
-    latest.retryableAfterReorg === true &&
-    latest.receipt?.status === "reorged" &&
-    !latest.receipt.canonical
-  ) {
+  if (fundingAttemptHasSafeRetryEvidence(latest)) {
     return "retryable_failure";
   }
   switch (latest.outcome) {
@@ -1279,6 +1259,7 @@ export function deriveFundingLifecycle(
       evidence.finalizedIntermediate ||
       evidence.finalizedDestination);
   const actionabilityBlockedByEvidence =
+    facts.manualRecovery != null ||
     evidence.canonicalityConflict ||
     evidence.destinationEvidenceConflict ||
     actionEvidenceConflict ||
@@ -1449,6 +1430,9 @@ export function deriveFundingLifecycle(
     // terminal cleanup releases reservations; destination cash is retained.
     status = "failed";
     progressStage = "terminal";
+  } else if (terminalCompletionSatisfied) {
+    status = "completed";
+    progressStage = "terminal";
   } else if (facts.manualRecovery != null && !finalEvidenceResolved) {
     // This is an explicit escalation fact, never a stale cache value. Final
     // money evidence above still wins and resolves the incident normally.
@@ -1456,9 +1440,6 @@ export function deriveFundingLifecycle(
     progressStage = "source_action";
     requiresWorker = true;
     requiresManualRecovery = true;
-  } else if (terminalCompletionSatisfied) {
-    status = "completed";
-    progressStage = "terminal";
   } else if (hasStoppedAction) {
     // A final action failure/cancellation can become terminal only before any
     // money movement. Once a debit, credit, or executor movement report
@@ -1542,6 +1523,17 @@ export function deriveFundingLifecycle(
     }
   }
 
+  // Stopping an observer is a durable incident across every unfinished
+  // evidence branch, including partial refunds and late cancellation effects.
+  // Canonical ready/completed/refunded outcomes keep their terminal precedence.
+  if (
+    facts.manualRecovery != null &&
+    (status === "recovery_required" || status === "reconcile_required")
+  ) {
+    status = "recovery_required";
+    requiresManualRecovery = true;
+  }
+
   const resultTerminal = isTerminalStatus(status);
   const segments = deriveSegmentProjections(facts);
   const mayReleaseRefundedReservations =
@@ -1562,14 +1554,14 @@ export function deriveFundingLifecycle(
     errorCode:
       status === "failed" && facts.terminalFailure != null
         ? facts.terminalFailure.code
-        : status === "recovery_required" &&
-            (evidence.canonicalityConflict ||
-              evidence.destinationEvidenceConflict)
-          ? "finalized_observation_reorg"
-          : status === "recovery_required" && reconciliationEvidenceTimedOut
-            ? "reconciliation_evidence_timeout"
-            : status === "recovery_required" && facts.manualRecovery != null
-              ? facts.manualRecovery.code
+        : status === "recovery_required" && facts.manualRecovery != null
+          ? facts.manualRecovery.code
+          : status === "recovery_required" &&
+              (evidence.canonicalityConflict ||
+                evidence.destinationEvidenceConflict)
+            ? "finalized_observation_reorg"
+            : status === "recovery_required" && reconciliationEvidenceTimedOut
+              ? "reconciliation_evidence_timeout"
               : status === "recovery_required" &&
                   facts.automaticRecovery != null
                 ? facts.automaticRecovery.code

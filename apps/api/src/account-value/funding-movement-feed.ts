@@ -6,6 +6,7 @@ import type {
   ValuedAssetComponent,
 } from "../funding/domain/types.js";
 import { scaleUnsignedDecimalByRawRatio, subtractRawFloor } from "./decimal.js";
+import { fundingReservationHoldSql } from "../funding/persistence/source-reservation-hold.js";
 
 export type FundingAvailabilityFact = Readonly<{
   componentId: string;
@@ -84,7 +85,7 @@ export async function loadFundingAccountValueFacts(
           from balance_reservations
           where balance_reservations.user_id = $1
             and balance_reservations.state = 'active'
-            and balance_reservations.expires_at > now()
+            and ${fundingReservationHoldSql("balance_reservations")}
             and not exists (
               select 1
               from funding_observations observation
@@ -92,7 +93,7 @@ export async function loadFundingAccountValueFacts(
                     balance_reservations.operation_id
                 and observation.segment_id is not distinct from
                     balance_reservations.segment_id
-                and observation.kind in ('source_debit', 'source_credit')
+                and observation.kind = 'source_debit'
                 and observation.canonical
                 and observation.finality_status = 'finalized'
             )

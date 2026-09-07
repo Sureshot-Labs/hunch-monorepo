@@ -3863,6 +3863,338 @@ async function testExistingSafeHandoffCommitsAndGatesRoute(
   }
 }
 
+async function testSourceReservationEvidenceLifetime(): Promise<void> {
+  const client = await pool.connect();
+  await client.query("begin");
+  try {
+    const userId = await insertUser(client);
+    for (const expired of [false, true]) {
+      const basePlan = buildPlan();
+      const sourceReservation = basePlan.reservations[0];
+      assert.ok(sourceReservation);
+      const plan: FundingCommitPlan = {
+        ...basePlan,
+        reservations: [
+          {
+            ...sourceReservation,
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          },
+        ],
+      };
+      const consent = opaque("source-hold-consent");
+      const quote = await createFundingQuoteInTransaction(
+        client,
+        quoteInput(userId, plan, consent),
+      );
+      const committed = await commitFundingOperationInTransaction(
+        client,
+        commitInput(userId, quote.id, consent, plan),
+      );
+      const steps = await client.query<{ id: string; segment_id: string }>(
+        `select id, segment_id from funding_operation_steps where operation_id = $1`,
+        [committed.operation.id],
+      );
+      const step = steps.rows[0];
+      assert.ok(step);
+      const attempt = await startFundingStepAttemptInTransaction(client, {
+        operationId: committed.operation.id,
+        stepId: step.id,
+        canonicalActionFingerprint: hash("b"),
+        executorId: "synthetic-executor",
+      });
+      if (expired) {
+        // Only the disposable fixture rewinds the immutable deadline. This
+        // models an already-started action outliving its original quote.
+        await client.query("set local session_replication_role = replica");
+        await client.query(
+          `update balance_reservations set expires_at = now() - interval '1 second' where operation_id = $1`,
+          [committed.operation.id],
+        );
+        await client.query("set local session_replication_role = origin");
+      }
+      const availability = async () =>
+        (await loadFundingAccountValueFacts(client, userId)).availability.find(
+          (entry) => entry.componentId === sourceReservation.componentId,
+        );
+      assert.equal(
+        (await availability())?.reservedRaw,
+        "1000000",
+        "a started source action retains its hold beyond quote expiry",
+      );
+      await finishFundingStepAttemptInTransaction(client, {
+        attemptId: attempt.id,
+        outcome: "ambiguous",
+        broadcastMayHaveOccurred: true,
+        referenceKind: "transaction",
+        receiptRefCiphertext: "ciphertext:source-hold",
+        receiptRefLookupHmac: hash("e"),
+        lookupKeyVersion: 1,
+        actualCosts: {},
+      });
+      await allocateFundingObservationInTransaction(client, {
+        operationId: committed.operation.id,
+        segmentId: step.segment_id,
+        kind: "source_credit",
+        networkId: ASSET.networkId,
+        assetId: ASSET.assetId,
+        assetDecimals: ASSET.decimals,
+        txHash: opaque("source-hold-ingress"),
+        eventIndex: "0",
+        fromAddress: "external-sender",
+        toAddress: "owned-source",
+        rawAmount: "1000000",
+        observedAt: new Date(),
+        ledgerHeight: "100",
+        blockHash: hash("a"),
+        finalityStatus: "finalized",
+        finalizedAt: new Date(),
+      });
+      await reduceFundingOperationInTransaction(client, {
+        operationId: committed.operation.id,
+      });
+      assert.equal(
+        (await availability())?.reservedRaw,
+        "1000000",
+        "incoming credit must not unlock a pending outbound route",
+      );
+      const competingPlan = buildPlan({
+        sourceComponentId: sourceReservation.componentId,
+        sourceLocationId: sourceReservation.locationId,
+      });
+      const competingConsent = opaque("competing-source-hold");
+      const competingQuote = await createFundingQuoteInTransaction(
+        client,
+        quoteInput(userId, competingPlan, competingConsent),
+      );
+      await client.query("savepoint competing_source_hold");
+      await expectFundingError(
+        commitFundingOperationInTransaction(
+          client,
+          commitInput(
+            userId,
+            competingQuote.id,
+            competingConsent,
+            competingPlan,
+          ),
+        ),
+        "quote_invalidated",
+      );
+      await client.query("rollback to savepoint competing_source_hold");
+
+      await allocateFundingObservationInTransaction(client, {
+        operationId: committed.operation.id,
+        segmentId: step.segment_id,
+        kind: "source_debit",
+        networkId: ASSET.networkId,
+        assetId: ASSET.assetId,
+        assetDecimals: ASSET.decimals,
+        txHash: opaque("source-hold-debit"),
+        eventIndex: "0",
+        fromAddress: "owned-source",
+        toAddress: "provider",
+        rawAmount: "1000000",
+        observedAt: new Date(),
+        ledgerHeight: "101",
+        blockHash: hash("c"),
+        finalityStatus: "finalized",
+        finalizedAt: new Date(),
+      });
+      await reduceFundingOperationInTransaction(client, {
+        operationId: committed.operation.id,
+      });
+      assert.equal((await availability())?.reservedRaw, "0");
+      assert.equal(
+        (await availability())?.submittedDebitRaw,
+        "1000000",
+        "debit accounting replaces the released hold without exposing stale cash",
+      );
+      await commitFundingOperationInTransaction(
+        client,
+        commitInput(userId, competingQuote.id, competingConsent, competingPlan),
+      );
+    }
+    await client.query("set constraints all immediate");
+  } finally {
+    await client.query("rollback");
+    client.release();
+  }
+}
+
+async function testCanonicalFailureAndReorgRetryAdmission(): Promise<void> {
+  const client = await pool.connect();
+  await client.query("begin");
+  try {
+    const userId = await insertUser(client);
+    for (const status of ["failed", "reorged"] as const) {
+      const plan = buildPlan();
+      const consent = opaque("retry-evidence");
+      const quote = await createFundingQuoteInTransaction(
+        client,
+        quoteInput(userId, plan, consent),
+      );
+      const committed = await commitFundingOperationInTransaction(
+        client,
+        commitInput(userId, quote.id, consent, plan),
+      );
+      const steps = await client.query<{ id: string }>(
+        `select id from funding_operation_steps where operation_id = $1`,
+        [committed.operation.id],
+      );
+      const step = steps.rows[0];
+      assert.ok(step);
+      const startInput = {
+        operationId: committed.operation.id,
+        stepId: step.id,
+        canonicalActionFingerprint: hash("b"),
+        executorId: "synthetic-executor",
+      };
+      const attempt = await startFundingStepAttemptInTransaction(
+        client,
+        startInput,
+      );
+      await finishFundingStepAttemptInTransaction(client, {
+        attemptId: attempt.id,
+        outcome: "submitted",
+        broadcastMayHaveOccurred: true,
+        referenceKind: "transaction",
+        receiptRefCiphertext: "ciphertext:retry",
+        receiptRefLookupHmac: hash("f"),
+        lookupKeyVersion: 1,
+        actualCosts: {},
+      });
+      await applyFundingStepReceiptEvidenceInTransaction(client, {
+        operationId: committed.operation.id,
+        stepId: step.id,
+        attemptId: attempt.id,
+        networkId: ASSET.networkId,
+        receipt: {
+          status,
+          actionMatch: true,
+          ledgerHeight: "100",
+          blockHash: hash("a"),
+          canonical: status === "failed",
+          failureCode: "test-retry",
+          evidence: { failureFinalized: status === "failed" },
+        },
+      });
+      if (status === "reorged") {
+        await expectFundingError(
+          startFundingStepAttemptInTransaction(client, startInput),
+          "invalid_state_transition",
+        );
+        await client.query("savepoint rejected_non_cleanup_reorg");
+        await assert.rejects(
+          client.query(
+            `update funding_operation_step_attempts set actual_costs = actual_costs || '{"retryableAfterReorg":true}'::jsonb where id = $1`,
+            [attempt.id],
+          ),
+          /finished funding operation attempt cannot be rewritten/,
+        );
+        await client.query("rollback to savepoint rejected_non_cleanup_reorg");
+        continue;
+      }
+      const retry = await startFundingStepAttemptInTransaction(
+        client,
+        startInput,
+      );
+      assert.equal(retry.attemptNumber, 2);
+      await expectFundingError(
+        startFundingStepAttemptInTransaction(client, startInput),
+        "invalid_state_transition",
+      );
+    }
+    await client.query("set constraints all immediate");
+  } finally {
+    await client.query("rollback");
+    client.release();
+  }
+}
+
+async function testDeadLetterPublishesManualRecovery(): Promise<void> {
+  const userId = await insertUser(pool);
+  const plan = buildPlan();
+  const consent = opaque("dead-letter-incident");
+  const quote = await createFundingQuote(
+    pool,
+    quoteInput(userId, plan, consent),
+  );
+  let operationId: string | null = null;
+  try {
+    const committed = await commitFundingOperation(
+      pool,
+      commitInput(userId, quote.id, consent, plan),
+    );
+    operationId = committed.operation.id;
+    const steps = await pool.query<{ id: string }>(
+      `select id from funding_operation_steps where operation_id = $1`,
+      [operationId],
+    );
+    const step = steps.rows[0];
+    assert.ok(step);
+    const attempt = await startFundingStepAttemptInTransaction(pool, {
+      operationId,
+      stepId: step.id,
+      canonicalActionFingerprint: hash("b"),
+      executorId: "synthetic-executor",
+    });
+    await finishFundingStepAttemptInTransaction(pool, {
+      attemptId: attempt.id,
+      outcome: "submitted",
+      broadcastMayHaveOccurred: true,
+      referenceKind: "transaction",
+      receiptRefCiphertext: "ciphertext:dead-letter",
+      receiptRefLookupHmac: hash("f"),
+      lookupKeyVersion: 1,
+      actualCosts: {},
+    });
+    await applyFundingStepReceiptEvidence(pool, {
+      operationId,
+      stepId: step.id,
+      attemptId: attempt.id,
+      networkId: ASSET.networkId,
+      receipt: {
+        status: "finalized",
+        actionMatch: true,
+        ledgerHeight: "100",
+        blockHash: hash("a"),
+        canonical: true,
+        failureCode: null,
+        evidence: {},
+      },
+    });
+    const now = new Date(Date.now() + 16 * 60_000);
+    await pool.query(
+      `update funding_reconciliation_jobs set priority = 10000 where operation_id = $1`,
+      [operationId],
+    );
+    const result = await runFundingReconciliationBatch(pool, {
+      workerId: opaque("dead-letter-worker"),
+      limit: 1,
+      now,
+      receiptPoll: async () => {
+        throw new Error("synthetic receipt unavailable");
+      },
+    });
+    assert.equal(result.deadLettered, 1);
+    const projected = (
+      await listProjectedFundingOperationsForUser(pool, {
+        userId,
+        limit: 1,
+        now,
+      })
+    )[0];
+    assert.equal(projected?.lifecycle.status, "recovery_required");
+    assert.equal(projected?.lifecycle.recoveryMode, "manual_review");
+    assert.equal(
+      projected?.lifecycle.errorCode,
+      "terminal_relay_receipt_verification_unavailable",
+    );
+    assert.equal(projected?.lifecycle.safety.retryAllowed, false);
+  } finally {
+    await cleanupCommittedOperation(operationId, quote.id, userId);
+  }
+}
+
 async function testConcurrentSourceReservationExclusion(): Promise<void> {
   const userId = await insertUser(pool);
   const sourceComponentId = opaque("shared-component");
@@ -8193,6 +8525,9 @@ await testExistingSafeHandoffCommitsAndGatesRoute(true, true);
 console.log(
   "[funding-persistence-integration-tests] ok Deposit Wallet handoff keeps its own action TTL",
 );
+await testSourceReservationEvidenceLifetime();
+await testCanonicalFailureAndReorgRetryAdmission();
+await testDeadLetterPublishesManualRecovery();
 await testConcurrentSourceReservationExclusion();
 console.log(
   "[funding-persistence-integration-tests] ok concurrent source reservation exclusion",

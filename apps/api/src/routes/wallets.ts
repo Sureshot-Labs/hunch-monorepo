@@ -34,6 +34,10 @@ import {
 import { fetchOpenOrderCollateralLocks } from "../services/open-order-collateral.js";
 import { rpcReadCoordinator } from "../services/rpc-read-coordinator.js";
 import {
+  readCachedWalletBalanceObservation,
+  WALLET_BALANCES_RESULT_TTL_MS,
+} from "../services/wallet-balance-observation.js";
+import {
   walletBalancesBatchQuerySchema,
   walletBalancesQuerySchema,
   walletVenueStatusQuerySchema,
@@ -48,6 +52,7 @@ export type WalletBalanceItem = {
   balance: string;
   balanceRaw: string;
   isNative: boolean;
+  observedAt: string;
 };
 
 type TokenMeta = {
@@ -82,7 +87,6 @@ const EVM_NATIVE_ADDRESS = "0x0000000000000000000000000000000000000000";
 const EVM_NATIVE_ALT = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const VENUE_STATUS_TTL_MS = 15_000;
 const BALANCE_WALLET_LOOKUP_TTL_MS = 10_000;
-const WALLET_BALANCES_RESULT_TTL_MS = 5_000;
 const KALSHI_LOW_SOL_BUFFER_LAMPORTS = 2_000_000n;
 
 const DEBRIDGE_CHAIN_ID_ALIASES: Record<string, string> = {
@@ -832,9 +836,8 @@ async function resolveWalletBalancesForWallet(inputs: {
       }
 
       if (entry.address === SOLANA_NATIVE_ADDRESS) {
-        const lamports = await rpcReadCoordinator.memo(
-          `wallet-balance-entry:${buildWalletBalanceEntryCacheKey(inputs, entry)}`,
-          { ttlMs: WALLET_BALANCES_RESULT_TTL_MS },
+        const observation = await readCachedWalletBalanceObservation(
+          buildWalletBalanceEntryCacheKey(inputs, entry),
           () =>
             fetchSolanaBalanceLamports({
               rpcUrls: env.solanaRpcUrls,
@@ -842,6 +845,7 @@ async function resolveWalletBalancesForWallet(inputs: {
               timeoutMs: env.solanaRpcTimeoutMs,
             }),
         );
+        const lamports = observation.value;
         const decimals = 9;
         balances.push({
           chainId: entry.chainId,
@@ -852,13 +856,13 @@ async function resolveWalletBalancesForWallet(inputs: {
           balanceRaw: lamports.toString(),
           balance: formatUiAmount(lamports, decimals),
           isNative: true,
+          observedAt: observation.observedAt,
         });
         return;
       }
 
-      const tokenBalance = await rpcReadCoordinator.memo(
-        `wallet-balance-entry:${buildWalletBalanceEntryCacheKey(inputs, entry)}`,
-        { ttlMs: WALLET_BALANCES_RESULT_TTL_MS },
+      const observation = await readCachedWalletBalanceObservation(
+        buildWalletBalanceEntryCacheKey(inputs, entry),
         async () => {
           const resolved = await fetchSolanaTokenBalanceByOwnerAndMint({
             rpcUrls: env.solanaRpcUrls,
@@ -882,7 +886,7 @@ async function resolveWalletBalancesForWallet(inputs: {
         },
       );
 
-      const { amount, decimals } = tokenBalance;
+      const { amount, decimals } = observation.value;
 
       const metaMap = tokenMetaMapByChain.get(entry.chainId);
       const meta =
@@ -901,6 +905,7 @@ async function resolveWalletBalancesForWallet(inputs: {
             ? amount.toString()
             : formatUiAmount(amount, decimals),
         isNative: false,
+        observedAt: observation.observedAt,
       });
       return;
     }
@@ -922,9 +927,8 @@ async function resolveWalletBalancesForWallet(inputs: {
       getFallbackTokenMeta(entry.chainId, entry.address);
 
     if (isEvmNativeAddress(entry.address)) {
-      const balanceRaw = await rpcReadCoordinator.memo(
-        `wallet-balance-entry:${buildWalletBalanceEntryCacheKey(inputs, entry)}`,
-        { ttlMs: WALLET_BALANCES_RESULT_TTL_MS },
+      const observation = await readCachedWalletBalanceObservation(
+        buildWalletBalanceEntryCacheKey(inputs, entry),
         () =>
           fetchEvmBalance({
             rpcUrl: rpcConfig.rpcUrl,
@@ -932,6 +936,7 @@ async function resolveWalletBalancesForWallet(inputs: {
             address: inputs.walletAddress,
           }),
       );
+      const balanceRaw = observation.value;
       const decimals = meta?.decimals ?? 18;
       balances.push({
         chainId: entry.chainId,
@@ -942,13 +947,13 @@ async function resolveWalletBalancesForWallet(inputs: {
         balanceRaw: balanceRaw.toString(),
         balance: ethers.formatUnits(balanceRaw, decimals),
         isNative: true,
+        observedAt: observation.observedAt,
       });
       return;
     }
 
-    const balanceRaw = await rpcReadCoordinator.memo(
-      `wallet-balance-entry:${buildWalletBalanceEntryCacheKey(inputs, entry)}`,
-      { ttlMs: WALLET_BALANCES_RESULT_TTL_MS },
+    const observation = await readCachedWalletBalanceObservation(
+      buildWalletBalanceEntryCacheKey(inputs, entry),
       () =>
         fetchErc20BalanceOf({
           rpcUrl: rpcConfig.rpcUrl,
@@ -957,6 +962,7 @@ async function resolveWalletBalancesForWallet(inputs: {
           owner: inputs.walletAddress,
         }),
     );
+    const balanceRaw = observation.value;
     const decimals = meta?.decimals ?? null;
     balances.push({
       chainId: entry.chainId,
@@ -970,6 +976,7 @@ async function resolveWalletBalancesForWallet(inputs: {
           ? balanceRaw.toString()
           : ethers.formatUnits(balanceRaw, decimals),
       isNative: false,
+      observedAt: observation.observedAt,
     });
   };
 

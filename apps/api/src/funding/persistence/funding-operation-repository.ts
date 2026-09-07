@@ -19,6 +19,7 @@ import {
   type SegmentStatus,
 } from "../domain/transitions.js";
 import { isValidFundingCommitPlanBoundary } from "../validation/funding-commit-plan-validator.js";
+import { fundingReservationHoldSql } from "./source-reservation-hold.js";
 import {
   canonicalJsonEqual,
   canonicalJsonHash,
@@ -967,7 +968,7 @@ async function insertCommitReservations(
           and component_id = $2
           and mode = 'subtract_available'
           and state = 'active'
-          and expires_at > now()
+          and ${fundingReservationHoldSql("balance_reservations")}
         limit 1
         for update
       `,

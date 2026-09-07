@@ -116,6 +116,51 @@ function facts(
 }
 
 {
+  const projection = deriveFundingLifecycle(
+    facts({
+      manualRecovery: {
+        code: "terminal_relay_receipt_verification_unavailable",
+        requestedAt: now,
+      },
+      actions: [
+        action("source-debit-observer-stopped", {
+          requiresSourceDebitEvidence: true,
+          attempts: [attempt({ outcome: "succeeded" })],
+        }),
+        action("must-not-resume", { ordinal: 1 }),
+      ],
+    }),
+  );
+  assert.equal(projection.status, "recovery_required");
+  assert.equal(projection.recoveryMode, "manual_review");
+  assert.equal(
+    projection.errorCode,
+    "terminal_relay_receipt_verification_unavailable",
+  );
+  assert.equal(
+    projection.actions.some((entry) => entry.actionable),
+    false,
+  );
+}
+
+{
+  const partialRefund = facts({
+    actions: [],
+    plan: {
+      ...facts().plan,
+      routeLegs: [routeLeg("refunded-leg"), routeLeg("pending-leg")],
+    },
+    transfers: [transfer("refund_credit", { routeLegId: "refunded-leg" })],
+    manualRecovery: { code: "observer_failed", requestedAt: now },
+  });
+  const projection = deriveFundingLifecycle(partialRefund);
+  assert.equal(projection.status, "recovery_required");
+  assert.equal(projection.recoveryMode, "manual_review");
+  assert.equal(projection.safety.requiresManualRecovery, true);
+  assert.equal(projection.safety.reservationsMayRelease, false);
+}
+
+{
   const stopped = facts({
     actions: [
       action("failed-before-broadcast", {
@@ -829,26 +874,32 @@ function facts(
 }
 
 {
-  const projection = deriveFundingLifecycle(
-    facts({
-      terminalCompletion: {
-        code: "relay_allowance_cleanup_completed",
-        decidedAt: now,
-        actionId: "cleanup",
-      },
-      actions: [
-        action("cleanup", {
-          mayMoveMoney: false,
-          attempts: [attempt({ outcome: "succeeded" })],
-        }),
-      ],
-    }),
-  );
-  assert.deepEqual(
-    { status: projection.status, progressStage: projection.progressStage },
-    { status: "completed", progressStage: "terminal" },
-    "a durable non-financial postcondition completes only its succeeded action",
-  );
+  for (const manualRecovery of [
+    null,
+    { code: "observer_failed", requestedAt: now },
+  ]) {
+    const projection = deriveFundingLifecycle(
+      facts({
+        manualRecovery,
+        terminalCompletion: {
+          code: "relay_allowance_cleanup_completed",
+          decidedAt: now,
+          actionId: "cleanup",
+        },
+        actions: [
+          action("cleanup", {
+            mayMoveMoney: false,
+            attempts: [attempt({ outcome: "succeeded" })],
+          }),
+        ],
+      }),
+    );
+    assert.deepEqual(
+      { status: projection.status, progressStage: projection.progressStage },
+      { status: "completed", progressStage: "terminal" },
+      "a durable non-financial postcondition completes only its succeeded action",
+    );
+  }
 }
 
 {
@@ -1532,13 +1583,19 @@ function facts(
 }
 
 {
-  const projection = deriveFundingLifecycle(
-    facts({
-      transfers: [transfer("refund_credit")],
-    }),
-  );
-  assert.equal(projection.status, "refunded");
-  assert.equal(projection.safety.reservationsMayRelease, true);
+  for (const manualRecovery of [
+    null,
+    { code: "observer_failed", requestedAt: now },
+  ]) {
+    const projection = deriveFundingLifecycle(
+      facts({
+        transfers: [transfer("refund_credit")],
+        manualRecovery,
+      }),
+    );
+    assert.equal(projection.status, "refunded");
+    assert.equal(projection.safety.reservationsMayRelease, true);
+  }
 }
 
 {

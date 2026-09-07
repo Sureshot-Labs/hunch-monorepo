@@ -59,6 +59,7 @@ function buildTestEnv(overrides: Partial<typeof env> = {}): typeof env {
     privyDeletionReconciliationBatchSize: 10,
     privyDeletionReconciliationEnabled: false,
     privyDeletionReconciliationIntervalSec: 60,
+    standaloneFinancialReconciliationEnabled: false,
     retryBackoffSec: 1,
     telegramTradeIntentsEnabled: false,
     telegramTradeIntentsExecutingGraceSec: 600,
@@ -71,6 +72,24 @@ function buildTestEnv(overrides: Partial<typeof env> = {}): typeof env {
 
 const tests: TestCase[] = [
   {
+    name: "standalone recovery is scheduled independently of submission authority",
+    run: () => {
+      const job = buildJobs(
+        buildTestEnv({
+          databaseUrl: "postgres://localhost/disposable",
+          executeEnabled: false,
+          standaloneFinancialReconciliationEnabled: true,
+        }),
+      ).find(
+        (candidate) => candidate.name === "standalone_financial_reconciliation",
+      );
+      assert.equal(job?.enabled, true);
+      assert.equal(job?.maxRetries, 0);
+      assert.equal(job?.intervalSec, 60);
+      assert.equal(job?.timeoutSec, 90);
+    },
+  },
+  {
     name: "Bun development resolves the funding worker from source",
     run: () => {
       assert.deepEqual(apiPackage.exports?.["./funding-worker"], {
@@ -80,7 +99,7 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "funding worker imports without API-wide required secrets",
+    name: "funding reconciliation workers import without API-wide required secrets",
     run: () => {
       const output = execFileSync(
         process.execPath,
@@ -88,7 +107,7 @@ const tests: TestCase[] = [
           "--import",
           "tsx",
           "-e",
-          'import("./apps/api/src/funding/worker/funding-reconciliation-worker.ts").then(() => process.stdout.write("ok"))',
+          'Promise.all([import("./apps/api/src/funding/worker/funding-reconciliation-worker.ts"), import("./apps/api/src/funding/worker/standalone-reconciliation-worker.ts")]).then(() => process.stdout.write("ok"))',
         ],
         {
           cwd: repositoryRoot,
@@ -467,6 +486,7 @@ const tests: TestCase[] = [
       setFinanceJobsModuleLoaderForTests(async () => {
         loadCount += 1;
         return {
+          runStandaloneFinancialReconciliationJob: async () => null,
           runApiCacheWarmJob: async () => null,
           runFeesCollectJob: async () => ({
             collected: 0,

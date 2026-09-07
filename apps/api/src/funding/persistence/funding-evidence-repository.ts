@@ -1,6 +1,7 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import type { JsonValue } from "../domain/types.js";
+import { fundingAttemptHasSafeRetryEvidence } from "../domain/attempt-retry.js";
 import {
   deriveFundingLifecycle,
   deriveFundingLifecycleBeforeActionBroadcast,
@@ -1051,13 +1052,19 @@ export async function startFundingStepAttemptInTransaction(
     broadcast_may_have_occurred: boolean;
     outcome: FundingStepAttempt["outcome"];
     receipt_status: string | null;
+    receipt_canonical: boolean | null;
+    receipt_evidence: JsonRecord | null;
+    actual_costs: JsonRecord | null;
   }>(
     `
       select
         attempt.attempt_number,
         attempt.outcome,
         attempt.broadcast_may_have_occurred,
-        receipt.status as receipt_status
+        receipt.status as receipt_status,
+        receipt.canonical as receipt_canonical,
+        receipt.evidence as receipt_evidence,
+        attempt.actual_costs
       from funding_operation_step_attempts attempt
       left join funding_step_receipt_observations receipt
         on receipt.attempt_id = attempt.id
@@ -1069,15 +1076,30 @@ export async function startFundingStepAttemptInTransaction(
     [input.stepId],
   );
   const previous = previousResult.rows[0];
-  const previousBroadcastProvenFailed = previous?.receipt_status === "failed";
+  const previousAttemptSafeToRetry = previous
+    ? fundingAttemptHasSafeRetryEvidence({
+        retryableAfterReorg:
+          previous.actual_costs?.retryableAfterReorg === true,
+        receipt:
+          previous.receipt_status !== null &&
+          previous.receipt_canonical !== null
+            ? {
+                status: previous.receipt_status,
+                canonical: previous.receipt_canonical,
+                failureFinalized:
+                  previous.receipt_evidence?.failureFinalized === true,
+              }
+            : null,
+      })
+    : false;
   if (
     previous &&
+    !previousAttemptSafeToRetry &&
     (previous.outcome === "started" ||
       previous.outcome === "succeeded" ||
-      ((previous.outcome === "submitted" ||
-        previous.outcome === "ambiguous" ||
-        previous.broadcast_may_have_occurred) &&
-        !previousBroadcastProvenFailed))
+      previous.outcome === "submitted" ||
+      previous.outcome === "ambiguous" ||
+      previous.broadcast_may_have_occurred)
   ) {
     throw new FundingPersistenceError(
       "invalid_state_transition",

@@ -25,7 +25,7 @@ import { isDirectWithdrawalExecutionKind } from "../execution/direct-withdrawal-
 import {
   claimFundingReconciliationJobs,
   fetchFundingOperationForWorkerInTransaction,
-  finishFundingReconciliationLease,
+  finishFundingReconciliationLease as finishFundingReconciliationLeaseRaw,
   listFundingObservationsForOperation,
   releaseFundingReservationInTransaction,
   writeFundingOperationLifecycleProjectionCacheInTransaction,
@@ -221,16 +221,10 @@ async function releaseSourceReservationsAfterEvidence(
             observation.segmentId != null &&
             isCanonicalFinal(observation) &&
             (
-              [
-                "source_debit",
-                "source_credit",
-                "destination_credit",
-                "refund_credit",
-              ] as const
+              ["source_debit", "destination_credit", "refund_credit"] as const
             ).includes(
               observation.kind as
                 | "source_debit"
-                | "source_credit"
                 | "destination_credit"
                 | "refund_credit",
             ),
@@ -1897,8 +1891,8 @@ async function expireUnbroadcastActionWait(
   });
 }
 
-async function markFundingOperationRecoveryRequired(
-  pool: Pool,
+async function markFundingOperationRecoveryRequiredInTransaction(
+  client: PoolClient,
   input: Readonly<{
     operationId: string;
     errorCode: string;
@@ -1906,93 +1900,116 @@ async function markFundingOperationRecoveryRequired(
     now: Date;
   }>,
 ): Promise<boolean> {
-  return tx(pool, async (client) => {
-    let operation = await fetchFundingOperationForWorkerInTransaction(
-      client,
-      input.operationId,
-    );
-    if (!operation) {
-      return false;
-    }
-    if (input.recoveryMode === "manual_review") {
-      // A manual escalation is a durable typed fact. It is deliberately not
-      // inferred from, or written through, the previous public cache state.
-      operation = await writeFundingOperationSupportFactsInTransaction(client, {
-        operationId: operation.id,
-        expectedVersion: operation.version,
-        supportMetadataPatch: {
-          lifecycleManualRecovery: {
-            code: input.errorCode,
-            requestedAt: input.now.toISOString(),
-          },
-          reconciliationRecoveryRequiredAt: input.now.toISOString(),
-          reconciliationRecoveryReason: input.errorCode,
-        },
-        now: input.now,
-      });
-    } else {
-      // Record the elapsed automatic-evidence window as a durable fact before
-      // refreshing the projection cache. The generic active window is only a
-      // timer for an in-progress reconciliation; it must be clearable without
-      // making an already-escalated operation appear active again.
-      operation = await writeFundingOperationSupportFactsInTransaction(client, {
-        operationId: operation.id,
-        expectedVersion: operation.version,
-        supportMetadataPatch: {
-          lifecycleAutomaticRecovery: {
-            code: input.errorCode,
-            requestedAt: input.now.toISOString(),
-          },
-        },
-        now: input.now,
-      });
-    }
-    const facts = await loadFundingLifecycleFactsForOperationInTransaction(
-      client,
-      {
-        operationId: operation.id,
-        now: input.now,
-        reconciliationEvidenceTimeoutMs:
-          DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
-      },
-    );
-    if (!facts) return false;
-    const lifecycle = deriveFundingLifecycle(facts);
-    if (lifecycle.status !== "recovery_required") {
-      return false;
-    }
-    await writeFundingActionProjectionCachesInTransaction(
-      client,
-      lifecycle,
-      input.now,
-    );
-    await writeFundingOperationLifecycleProjectionCacheInTransaction(client, {
+  let operation = await fetchFundingOperationForWorkerInTransaction(
+    client,
+    input.operationId,
+  );
+  if (!operation) {
+    return false;
+  }
+  if (input.recoveryMode === "manual_review") {
+    // A manual escalation is a durable typed fact. It is deliberately not
+    // inferred from, or written through, the previous public cache state.
+    operation = await writeFundingOperationSupportFactsInTransaction(client, {
       operationId: operation.id,
       expectedVersion: operation.version,
-      state: {
-        status: lifecycle.status,
-        stage: lifecycle.progressStage,
+      supportMetadataPatch: {
+        lifecycleManualRecovery: {
+          code: input.errorCode,
+          requestedAt: input.now.toISOString(),
+        },
+        reconciliationRecoveryRequiredAt: input.now.toISOString(),
+        reconciliationRecoveryReason: input.errorCode,
       },
-      recoveryMode: lifecycle.recoveryMode,
-      errorCode: input.errorCode,
-      supportMetadataPatch: undefined,
       now: input.now,
     });
-    return true;
+  } else {
+    // Record the elapsed automatic-evidence window as a durable fact before
+    // refreshing the projection cache. The generic active window is only a
+    // timer for an in-progress reconciliation; it must be clearable without
+    // making an already-escalated operation appear active again.
+    operation = await writeFundingOperationSupportFactsInTransaction(client, {
+      operationId: operation.id,
+      expectedVersion: operation.version,
+      supportMetadataPatch: {
+        lifecycleAutomaticRecovery: {
+          code: input.errorCode,
+          requestedAt: input.now.toISOString(),
+        },
+      },
+      now: input.now,
+    });
+  }
+  const facts = await loadFundingLifecycleFactsForOperationInTransaction(
+    client,
+    {
+      operationId: operation.id,
+      now: input.now,
+      reconciliationEvidenceTimeoutMs:
+        DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
+    },
+  );
+  if (!facts) return false;
+  const lifecycle = deriveFundingLifecycle(facts);
+  if (lifecycle.status !== "recovery_required") {
+    return false;
+  }
+  await writeFundingActionProjectionCachesInTransaction(
+    client,
+    lifecycle,
+    input.now,
+  );
+  await writeFundingOperationLifecycleProjectionCacheInTransaction(client, {
+    operationId: operation.id,
+    expectedVersion: operation.version,
+    state: {
+      status: lifecycle.status,
+      stage: lifecycle.progressStage,
+    },
+    recoveryMode: lifecycle.recoveryMode,
+    errorCode: input.errorCode,
+    supportMetadataPatch: undefined,
+    now: input.now,
   });
+  return true;
 }
 
-async function markFundingOperationRecoveryManualReview(
+async function markFundingOperationRecoveryRequired(
   pool: Pool,
-  input: Readonly<{
-    operationId: string;
-    errorCode: string;
-    now: Date;
-  }>,
+  input: Parameters<
+    typeof markFundingOperationRecoveryRequiredInTransaction
+  >[1],
 ): Promise<boolean> {
-  return markFundingOperationRecoveryRequired(pool, {
-    ...input,
-    recoveryMode: "manual_review",
+  return tx(pool, (client) =>
+    markFundingOperationRecoveryRequiredInTransaction(client, input),
+  );
+}
+
+/** Stopping automatic work and publishing its incident are one leased effect. */
+async function finishFundingReconciliationLease(
+  pool: Pool,
+  input: Parameters<typeof finishFundingReconciliationLeaseRaw>[1],
+): Promise<void> {
+  if (input.result.kind !== "error" || input.result.deadLetter !== true) {
+    return finishFundingReconciliationLeaseRaw(pool, input);
+  }
+  const errorCode = input.result.errorCode;
+  await tx(pool, async (client) => {
+    const job = await client.query<{ operation_id: string }>(
+      `select operation_id from funding_reconciliation_jobs where id = $1`,
+      [input.jobId],
+    );
+    const operationId = job.rows[0]?.operation_id;
+    if (operationId) {
+      await markFundingOperationRecoveryRequiredInTransaction(client, {
+        operationId,
+        errorCode,
+        recoveryMode: "manual_review",
+        now: input.now ?? new Date(),
+      });
+    }
+    // A lost lease rolls back the incident fact as well as the job update.
+    await finishFundingReconciliationLeaseRaw(client, input);
   });
 }
 
@@ -2123,19 +2140,18 @@ async function processLease(
       `select exists (
          select 1
            from funding_step_receipt_observations receipt
+           join funding_operation_step_attempts receipt_attempt
+             on receipt_attempt.id = receipt.attempt_id
           where receipt.operation_id = $1::uuid
             and receipt.status = 'reorged'
+            and receipt_attempt.actual_costs ->> 'retryableAfterReorg'
+                  is distinct from 'true'
             and receipt.reorged_at <=
                   $2::timestamptz - interval '15 minutes'
        ) as incident`,
       [lease.operationId, options.now],
     );
     if (unresolvedReceiptReorg.rows[0]?.incident === true) {
-      await markFundingOperationRecoveryManualReview(pool, {
-        operationId: lease.operationId,
-        errorCode: FUNDING_RECEIPT_REORG_UNRESOLVED_ERROR_CODE,
-        now: options.now,
-      });
       await finishFundingReconciliationLease(pool, {
         jobId: lease.jobId,
         leaseOwner: lease.leaseOwner,
@@ -2422,18 +2438,10 @@ async function processLease(
       activeWindow != null &&
       lease.attemptCount - activeWindow.initialAttemptCount >=
         options.maxAttempts;
-    const maximumAttemptsRecoveryRequired =
+    const deadLetter =
       maximumActiveAttemptsReached &&
       !timeoutRecoveryRequired &&
-      fundingReconciliationErrorIsNonTransient(error)
-        ? await markFundingOperationRecoveryRequired(pool, {
-            operationId: lease.operationId,
-            errorCode: detail.code,
-            recoveryMode: "manual_review",
-            now: options.now,
-          })
-        : false;
-    const deadLetter = maximumAttemptsRecoveryRequired;
+      fundingReconciliationErrorIsNonTransient(error);
     await finishFundingReconciliationLease(pool, {
       jobId: lease.jobId,
       leaseOwner: lease.leaseOwner,

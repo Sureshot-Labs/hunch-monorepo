@@ -8,6 +8,7 @@ import {
   runPositionResolutionNotificationJob,
   runPrivyDeletionReconcileJob,
   runRewardsPayoutJob,
+  runStandaloneFinancialReconciliationJob,
   runTelegramTradeIntentReconcileJob,
   runTreasurySweepJob,
 } from "./finance-jobs.js";
@@ -119,6 +120,24 @@ export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
     );
   }
   return [
+    {
+      name: "standalone_financial_reconciliation",
+      enabled:
+        workerEnv.standaloneFinancialReconciliationEnabled &&
+        Boolean(workerEnv.databaseUrl),
+      intervalSec: 60,
+      timeoutSec: 90,
+      maxRetries: 0,
+      retryBackoffSec: workerEnv.retryBackoffSec,
+      jitterSec: 0,
+      run: () => runStandaloneFinancialReconciliationJob(),
+      isNoopResult: (result) =>
+        !hasPositiveActivity(result, [
+          "claimed",
+          "retryableErrors",
+          "timedOut",
+        ]),
+    },
     {
       name: "content",
       enabled:

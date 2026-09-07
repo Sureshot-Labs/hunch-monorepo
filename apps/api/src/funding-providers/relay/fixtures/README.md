@@ -36,6 +36,29 @@ captures.
 
 ## Capture boundaries
 
+### 2026-09-07 same-chain solver follow-up (not fixture-promoted)
+
+Quote-only Polygon USDC → pUSD probes exposed a distinction between the
+economic operation and its execution steps. Relay's default same-chain response
+was `operation: swap`, with `approve → swap` and nested aggregator calls through
+ApprovalProxyV3. This is not the already-validated deposit calldata; renaming the
+step or accepting an arbitrary `transferAndMulticall` would be unsafe.
+
+The documented [`forceSolverExecution` option](https://docs.relay.link/references/api/get-quote-v2)
+requests solver execution instead of a self-executed swap. Four probes varied
+amount ($1, $5, $20), EXACT_INPUT/EXPECTED_OUTPUT and same/different recipients.
+All returned `approve → deposit` to DepositoryV2 and passed the existing strict
+calldata validator. Full adapter probes also passed with exact $1 and $20
+minimum-output floors; no signature or transaction was submitted.
+
+The wallet adapter requests this mode, with `explicitDeposit: true`, for
+same-chain EVM routes. Cross-chain/Solana requests are unchanged. The solver
+quote includes its own fees and can differ from the direct-swap price; source
+caps and minimum output still use the actual quote, never a fixed exchange rate.
+If Relay ignores the preference or changes the executable shape, validation
+still rejects it. Runtime tests cover both quote modes, recipient variants and
+rejection of a substituted `swap` step.
+
 Initial read-only phase:
 
 Called:

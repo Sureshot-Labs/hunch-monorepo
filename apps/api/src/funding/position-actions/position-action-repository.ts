@@ -452,6 +452,7 @@ async function finishAttempt(
     submissionFingerprint: string | null;
     receiptEvidence?: JsonObject;
     errorCode?: string | null;
+    allowUnreferencedAmbiguity?: boolean;
   }>,
 ): Promise<void> {
   const result = await client.query(
@@ -465,7 +466,9 @@ async function finishAttempt(
           finished_at = now()
       where action_operation_id = $1
         and attempt_number = $2
-        and outcome = 'started'
+        and (outcome = 'started' or (
+          $8::boolean and outcome = 'ambiguous' and submission_fingerprint is null
+        ))
     `,
     [
       input.operationId,
@@ -475,6 +478,7 @@ async function finishAttempt(
       input.submissionFingerprint,
       input.receiptEvidence ?? {},
       input.errorCode ?? null,
+      input.allowUnreferencedAmbiguity === true,
     ],
   );
   if (result.rowCount !== 1) {
@@ -502,7 +506,14 @@ export async function recordPositionActionSubmission(
       input.userId,
       input.operationId,
     );
-    if (operation.status !== "submitting") {
+    // A stale client claim remains open to a late positive submission report.
+    // Never turn the recovery marker into permission for another broadcast.
+    const lateUncertainSubmission =
+      operation.status === "reconcile_required" &&
+      operation.lastErrorCode === POSITION_ACTION_MISSING_REFERENCE_CODE &&
+      operation.submissionFingerprint === null &&
+      (input.outcome === "submitted" || input.outcome === "ambiguous");
+    if (operation.status !== "submitting" && !lateUncertainSubmission) {
       if (
         operation.submissionFingerprint &&
         operation.submissionFingerprint === input.submissionFingerprint
@@ -523,6 +534,8 @@ export async function recordPositionActionSubmission(
       broadcastMayHaveOccurred: broadcast,
       submissionFingerprint: input.submissionFingerprint,
       errorCode: input.errorCode,
+      allowUnreferencedAmbiguity:
+        lateUncertainSubmission && input.submissionFingerprint !== null,
     });
     const status =
       input.outcome === "submitted"
@@ -550,6 +563,63 @@ export async function recordPositionActionSubmission(
         broadcast,
         input.errorCode ?? null,
       ],
+    );
+    return refetch(client, operation.id);
+  });
+}
+
+export const POSITION_ACTION_MISSING_REFERENCE_CODE =
+  "position_action_submission_reference_missing";
+
+/** An abandoned claim is uncertainty, never proof that signing did not occur. */
+export async function markStalePositionActionClaimForRecovery(
+  pool: Pool,
+  input: Readonly<{
+    userId: string;
+    operationId: string;
+    staleBefore: Date;
+  }>,
+): Promise<StoredPositionAction> {
+  return tx(pool, async (client) => {
+    const operation = await fetchForUpdate(
+      client,
+      input.userId,
+      input.operationId,
+    );
+    if (
+      !["submitting", "reconcile_required"].includes(operation.status) ||
+      operation.submissionFingerprint ||
+      operation.lastErrorCode === POSITION_ACTION_MISSING_REFERENCE_CODE
+    ) {
+      return operation;
+    }
+    const pending = await client.query<{ id: string }>(
+      `select id
+         from position_action_attempts
+        where action_operation_id = $1
+          and outcome in ('started', 'ambiguous')
+          and started_at <= $2
+        order by attempt_number desc
+        limit 1
+        for update`,
+      [operation.id, input.staleBefore],
+    );
+    const attempt = pending.rows[0];
+    if (!attempt) return operation;
+    await client.query(
+      `update position_action_attempts
+          set broadcast_may_have_occurred = true,
+              error_code = $2
+        where id = $1 and outcome in ('started', 'ambiguous')`,
+      [attempt.id, POSITION_ACTION_MISSING_REFERENCE_CODE],
+    );
+    await client.query(
+      `update position_action_operations
+          set status = 'reconcile_required',
+              broadcast_may_have_occurred = true,
+              last_error_code = $2
+        where id = $1`,
+      [operation.id, POSITION_ACTION_MISSING_REFERENCE_CODE],
     );
     return refetch(client, operation.id);
   });

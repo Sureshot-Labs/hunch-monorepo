@@ -75,6 +75,8 @@ export type RelayQuoteRequest = Readonly<{
   amount: string;
   tradeType: "EXACT_INPUT" | "EXPECTED_OUTPUT";
   useDepositAddress?: boolean;
+  forceSolverExecution?: boolean;
+  explicitDeposit?: boolean;
   strict?: boolean;
   refundTo?: string;
   slippageTolerance?: string;

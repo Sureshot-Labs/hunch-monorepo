@@ -157,6 +157,7 @@ import {
   isRelayQuoteRejectedError,
   RelayClient,
   RelayClientError,
+  type RelayQuoteRequest,
 } from "./client.js";
 import {
   assertStrictRelayDepositAddressPolicy,
@@ -187,6 +188,89 @@ import {
 } from "./rehearsal.js";
 import { verifyRelayWebhook } from "./webhook.js";
 import { RelayWalletQuoteAdapter } from "./wallet-adapter.js";
+
+// Solver responses keep operation=swap but use the existing V2 deposit ABI.
+function solverWalletQuote(request: RelayQuoteRequest) {
+  const amount =
+    request.tradeType === "EXPECTED_OUTPUT"
+      ? BigInt(request.amount) + 55_000n
+      : BigInt(request.amount);
+  const output = amount - 55_000n;
+  const token = (address: string, chainId: number) => ({
+    address,
+    chainId,
+    decimals: 6,
+  });
+  const abi = new Interface([
+    "function approve(address spender,uint256 amount)",
+    "function depositErc20(address depositor,address token,uint256 amount,bytes32 id)",
+  ]);
+  return {
+    details: {
+      operation: "swap",
+      sender: request.user,
+      recipient: request.recipient,
+      currencyIn: {
+        currency: token(request.originCurrency, request.originChainId),
+        amount: amount.toString(),
+        minimumAmount: amount.toString(),
+      },
+      currencyOut: {
+        currency: token(
+          request.destinationCurrency,
+          request.destinationChainId,
+        ),
+        amount: output.toString(),
+        minimumAmount: ((output * 99n) / 100n).toString(),
+      },
+    },
+    fees: {},
+    steps: [
+      {
+        id: "approve",
+        to: request.originCurrency,
+        data: abi.encodeFunctionData("approve", [RELAY_DEPOSITORY_V2, amount]),
+      },
+      {
+        id: "deposit",
+        to: RELAY_DEPOSITORY_V2,
+        data: abi.encodeFunctionData("depositErc20", [
+          request.user,
+          request.originCurrency,
+          amount,
+          `0x${"11".repeat(32)}`,
+        ]),
+      },
+    ].map(({ id, to, data }) => ({
+      id,
+      kind: "transaction",
+      requestId,
+      items: [
+        {
+          status: "incomplete",
+          data: {
+            from: request.user,
+            to,
+            data,
+            value: "0",
+            chainId: request.originChainId,
+            gas: "100000",
+            maxFeePerGas: "50000000000",
+            maxPriorityFeePerGas: "30000000000",
+          },
+          ...(id === "deposit"
+            ? {
+                check: {
+                  method: "GET",
+                  endpoint: `/intents/status/v3?requestId=${requestId}`,
+                },
+              }
+            : {}),
+        },
+      ],
+    })),
+  };
+}
 
 const user = "0x1111111111111111111111111111111111111111";
 const recipient = "0x2222222222222222222222222222222222222222";
@@ -477,6 +561,11 @@ const destination: FundingTarget = {
   assert.equal(observedBody.tradeType, "EXACT_INPUT");
   assert.equal(observedBody.slippageTolerance, "100");
   assert.equal(observedBody.useDepositAddress, false);
+  assert.equal(
+    observedBody.forceSolverExecution,
+    undefined,
+    "cross-chain flow is unchanged",
+  );
   assert.equal(normalized.requestId, requestId);
   assert.equal(normalized.actions.length, 1);
   assert.equal(normalized.actions[0]?.kind, "evm_transaction");
@@ -486,6 +575,74 @@ const destination: FundingTarget = {
     ["gas", "relayer"],
   );
   assert.doesNotMatch(normalized.candidate.opaqueQuoteRef, /runtime-request/u);
+}
+
+const sameChainRoute = RELAY_ROUTE_SPECS["polygon-usdc-to-polygon-pusd"];
+assert.ok(sameChainRoute);
+for (const mode of ["exact_input", "expected_output"] as const) {
+  for (const amount of [1_000_000n, 20_000_000n]) {
+    for (const receiver of [user, recipient]) {
+      const swapRoute = {
+        ...sameChainRoute,
+        quoteMode: mode,
+      };
+      let substituteDirectSwap = false;
+      const client = new RelayClient({
+        apiKey: "solver-test",
+        fetchImpl: async (_url, init) => {
+          const request = JSON.parse(String(init?.body)) as RelayQuoteRequest;
+          assert.equal(request.forceSolverExecution, true);
+          assert.equal(request.explicitDeposit, true);
+          assert.equal(request.useDepositAddress, false);
+          const quote = solverWalletQuote(request);
+          if (substituteDirectSwap) {
+            const depositStep = quote.steps[1];
+            assert.ok(depositStep);
+            depositStep.id = "swap";
+          }
+          return response(quote);
+        },
+      });
+      const adapter = new RelayWalletQuoteAdapter(client);
+      const input = {
+        route: swapRoute,
+        source: {
+          ...source,
+          location: { ...source.location, asset: swapRoute.source },
+        },
+        destination: {
+          ...destination,
+          location: {
+            ...destination.location,
+            asset: swapRoute.destination,
+            details: { ...destination.location.details, address: receiver },
+          },
+        },
+        sourceAmount: { asset: swapRoute.source, raw: amount.toString() },
+        minimumOutput: {
+          asset: swapRoute.destination,
+          raw: (amount / 2n).toString(),
+        },
+        userAddress: user,
+        recipientAddress: receiver,
+        senderWalletId: "wallet-1",
+        quoteCorrelationId: "same-chain-solver-quote",
+        deadline: new Date(Date.now() + 120_000),
+      };
+      const normalized = await adapter.quote(input);
+      assert.equal(normalized.actions.length, 2);
+      assert.equal(
+        normalized.sourceAmount.asset.assetId,
+        swapRoute.source.assetId,
+      );
+      substituteDirectSwap = true;
+      await assert.rejects(
+        adapter.quote(input),
+        /unexpected step swap/u,
+        "an ignored solver preference must not bypass the calldata validator",
+      );
+    }
+  }
 }
 
 {

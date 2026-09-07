@@ -42,6 +42,7 @@ import {
   failPositionActionEffect,
   fetchPositionActionByIdempotencyKey,
   fetchPositionActionForUser,
+  markStalePositionActionClaimForRecovery,
   recordPositionActionPostconditions,
   recordPositionActionReceipt,
   recordPositionActionSubmission,
@@ -65,6 +66,7 @@ import {
 import { preparedPositionActionFromStoredOperation } from "./position-action-replay.js";
 
 const POSITION_ACTION_TTL_MS = 45_000;
+export const POSITION_ACTION_SUBMISSION_REPORT_GRACE_MS = 5 * 60_000;
 const ZERO_POSITION_RE = /^0(?:\.0+)?$/;
 
 type CollectedRedemptionEvidence = Readonly<{
@@ -648,6 +650,19 @@ export class PositionActionRuntimeService {
     }
     if (operation.status === "failed" || operation.status === "cancelled") {
       return publicResult(operation);
+    }
+    if (
+      (operation.status === "submitting" ||
+        operation.status === "reconcile_required") &&
+      !operation.submissionFingerprint
+    ) {
+      operation = await markStalePositionActionClaimForRecovery(this.db, {
+        userId,
+        operationId,
+        staleBefore: new Date(
+          this.clock().getTime() - POSITION_ACTION_SUBMISSION_REPORT_GRACE_MS,
+        ),
+      });
     }
     const submissionReference = operation.submissionFingerprint;
     let txHash = transactionHash(submissionReference);

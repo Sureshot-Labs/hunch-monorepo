@@ -94,6 +94,11 @@ export const env = {
   databaseUrl,
   content,
 
+  standaloneFinancialReconciliationEnabled: parseBool(
+    readEnv("HUNCH_FINANCE_STANDALONE_RECONCILIATION_ENABLED"),
+    true,
+  ),
+
   fundingReconciliationEnabled: parseBool(
     readEnv("HUNCH_FINANCE_FUNDING_RECONCILIATION_ENABLED"),
     true,

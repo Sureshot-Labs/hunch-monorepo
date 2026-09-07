@@ -3825,8 +3825,16 @@ function deliveryPool(input: {
     if (
       normalized.includes(
         "from telegram_bot_trading_authorizations trading_authorization",
-      )
+      ) ||
+      (normalized.includes("from users app_user") &&
+        normalized.includes(
+          "left join telegram_bot_trading_authorizations trading_authorization",
+        ))
     ) {
+      assert.ok(normalized.includes("wallet.is_verified = true"));
+      assert.ok(normalized.includes("wallet.is_internal_wallet = true"));
+      assert.ok(normalized.includes("telegram_account.id = $2::uuid"));
+      assert.ok(normalized.includes("funding_account_identifier_equal("));
       return {
         rows: [
           {

@@ -41,6 +41,7 @@ import {
   isExternalHandoffFailureCode,
   isFundingActionFailureReportConsistent,
   isUnreferencedFundingActionAmbiguity,
+  normalizeFundingActionReport,
   type FundingActionFailureCode,
 } from "./action-report.js";
 import {
@@ -468,8 +469,9 @@ export class FundingOperationActionRuntime {
         "this endpoint accepts only committed transaction or relayer reports",
       );
     }
+    const report = normalizeFundingActionReport(input);
     const mayHaveBroadcast =
-      input.outcome === "submitted" || input.outcome === "ambiguous";
+      report.outcome === "submitted" || report.outcome === "ambiguous";
     if (!isFundingActionFailureReportConsistent(input)) {
       throw new FundingPersistenceError(
         "quote_mismatch",
@@ -488,7 +490,7 @@ export class FundingOperationActionRuntime {
         "external handoff diagnostic requires the exact committed handoff action",
       );
     }
-    const unreferencedAmbiguity = isUnreferencedFundingActionAmbiguity(input);
+    const unreferencedAmbiguity = isUnreferencedFundingActionAmbiguity(report);
     if (
       input.failureCode === "embedded_evm_submission_unknown" &&
       (step.executorId !== "wallet_profile_evm_v1" ||
@@ -546,7 +548,7 @@ export class FundingOperationActionRuntime {
       operationId: input.operationId,
       stepId: input.stepId,
       attemptId: input.attemptId,
-      outcome: input.outcome,
+      outcome: report.outcome,
       broadcastMayHaveOccurred: mayHaveBroadcast,
       referenceKind: normalizedReference
         ? action.kind === "svm_transaction"

@@ -38,6 +38,22 @@ import {
   reconcilePendingPrivyDeletions,
   type PrivyDeletionReconciliationSummary,
 } from "../services/privy-deletion-reconciler.js";
+import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
+import { PositionActionRuntimeService } from "../funding/position-actions/runtime-service.js";
+import { runStandaloneReconciliationBatch } from "../funding/worker/standalone-reconciliation-worker.js";
+
+// This module is already API-owned and requires the API secret bundle. Keep
+// these imports out of the independently bootable funding worker entrypoint.
+export async function runStandaloneFinancialReconciliationJob() {
+  const preparation = new FundingPlanningRuntime(pool);
+  const positions = new PositionActionRuntimeService(pool);
+  return runStandaloneReconciliationBatch(pool, {
+    preparation: (userId, runId) =>
+      preparation.reconcilePreparationRun(userId, runId),
+    positionAction: (userId, operationId) =>
+      positions.reconcile(userId, operationId),
+  });
+}
 
 export type ReconcileTelegramTradeIntentsOptions = {
   db?: DbQuery;
