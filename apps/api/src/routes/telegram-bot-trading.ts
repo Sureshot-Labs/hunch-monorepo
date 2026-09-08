@@ -268,6 +268,8 @@ const internalFundingOpenRouteBodySchema = internalFundingOpenBodySchema
     fundingRoute: z.enum([
       "limitless_base_usdc_direct_v1",
       "limitless_solana_sol_retained_v1",
+      "polymarket_solana_usdc_retained_v1",
+      "limitless_solana_usdc_retained_v1",
       "polymarket_polygon_pusd_direct_v1",
       "polymarket_solana_sol_retained_v1",
     ]),
@@ -934,6 +936,8 @@ async function registerTelegramBotTradingRoutes(
           choiceToken: {
             limitless_base_usdc_direct_v1: "ld",
             limitless_solana_sol_retained_v1: "ls",
+            polymarket_solana_usdc_retained_v1: "pu",
+            limitless_solana_usdc_retained_v1: "lu",
             polymarket_polygon_pusd_direct_v1: "pd",
             polymarket_solana_sol_retained_v1: "ps",
           }[request.body.fundingRoute],

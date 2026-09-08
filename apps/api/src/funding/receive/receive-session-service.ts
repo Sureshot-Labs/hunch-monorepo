@@ -1,6 +1,7 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { stableOpaqueId } from "../../account-value/canonical.js";
+import { SOLANA_RETAINED_USDC_ASSET } from "./retained-solana-assets.js";
 import type {
   AssetRef,
   ExternalIngressInstruction,
@@ -601,7 +602,13 @@ export class FundingReceiveSessionService {
         "receive capability lacks observable variants",
       );
     }
-    const variants = rawVariants.map(parseDirectIngressObservationVariant);
+    const variants = rawVariants.map(parseDirectIngressObservationVariant).map((variant) =>
+      ownerChannel === "telegram" &&
+      sameAsset(variant.asset, SOLANA_RETAINED_USDC_ASSET) &&
+      variant.completion.kind === "child_funding_operation"
+        ? { ...variant, completion: { kind: "retained_owned_source_credit" as const } }
+        : variant,
+    );
     const selectedReceiveAsset = resolvedRequest.selectedReceiveAsset;
     const selectedReceiveTarget = resolvedRequest.selectedReceiveTarget;
     const selectedVariants = selectedReceiveAsset

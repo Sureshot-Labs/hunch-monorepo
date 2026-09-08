@@ -293,6 +293,8 @@ export type SignalBotInteractiveMenuLoaders = {
     fundingRoute?:
       | "limitless_base_usdc_direct_v1"
       | "limitless_solana_sol_retained_v1"
+      | "polymarket_solana_usdc_retained_v1"
+      | "limitless_solana_usdc_retained_v1"
       | "polymarket_polygon_pusd_direct_v1"
       | "polymarket_solana_sol_retained_v1";
     idempotencyKey: string;

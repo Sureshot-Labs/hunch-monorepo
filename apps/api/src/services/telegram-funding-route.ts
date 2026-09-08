@@ -16,6 +16,7 @@ import {
 } from "../funding/domain/types.js";
 import type { DelegatedFundingPreBroadcastDecision } from "../funding/execution/delegated-funding-capability.js";
 import { SOLANA_NATIVE_ASSET } from "../funding/domain/network-fees.js";
+import { SOLANA_RETAINED_USDC_ASSET } from "../funding/receive/retained-solana-assets.js";
 import { resolveTelegramRelayEvmCapability } from "../funding/execution/delegated-funding-capability-resolver.js";
 import {
   loadRelayEvmExecutionConfiguration,
@@ -74,14 +75,18 @@ export type TelegramFundingReceivePresentationMode =
   | "base_usdc_relay_automatic"
   | "limitless_base_usdc_direct"
   | "polymarket_solana_sol_retained"
-  | "limitless_solana_sol_retained";
+  | "limitless_solana_sol_retained"
+  | "polymarket_solana_usdc_retained"
+  | "limitless_solana_usdc_retained";
 
 export function isTelegramSolanaRetainedFundingMode(
   mode: TelegramFundingReceivePresentationMode,
-): mode is "polymarket_solana_sol_retained" | "limitless_solana_sol_retained" {
+): mode is TelegramSolanaRetainedRouteSpec["mode"] {
   return (
     mode === "polymarket_solana_sol_retained" ||
-    mode === "limitless_solana_sol_retained"
+    mode === "limitless_solana_sol_retained" ||
+    mode === "polymarket_solana_usdc_retained" ||
+    mode === "limitless_solana_usdc_retained"
   );
 }
 
@@ -90,7 +95,9 @@ export function isTelegramSolanaRetainedFundingRouteKey(
 ): boolean {
   return (
     routeKey === "polymarket_solana_sol_retained_v1" ||
-    routeKey === "limitless_solana_sol_retained_v1"
+    routeKey === "limitless_solana_sol_retained_v1" ||
+    routeKey === "polymarket_solana_usdc_retained_v1" ||
+    routeKey === "limitless_solana_usdc_retained_v1"
   );
 }
 
@@ -139,7 +146,9 @@ export type TelegramFundingDepositRouteKey =
   | "limitless_base_usdc_direct_v1"
   | "limitless_solana_sol_retained_v1"
   | "polymarket_polygon_pusd_direct_v1"
-  | "polymarket_solana_sol_retained_v1";
+  | "polymarket_solana_sol_retained_v1"
+  | "polymarket_solana_usdc_retained_v1"
+  | "limitless_solana_usdc_retained_v1";
 
 type TelegramFundingRouteDescriptor = Readonly<{
   automaticServerExecution: boolean;
@@ -158,6 +167,8 @@ type TelegramFundingRouteDescriptor = Readonly<{
   );
 
 const TELEGRAM_FUNDING_ROUTE_DESCRIPTORS = Object.freeze([
+  { automaticServerExecution: false, choiceToken: "pu", depositMenu: true, routeKey: "polymarket_solana_usdc_retained_v1", venueId: "polymarket" },
+  { automaticServerExecution: false, choiceToken: "lu", depositMenu: true, routeKey: "limitless_solana_usdc_retained_v1", venueId: "limitless" },
   {
     automaticServerExecution: false,
     choiceToken: "ld",
@@ -562,6 +573,22 @@ const LIMITLESS_SOLANA_SOL_RETAINED_PRESENTATION = {
   venueId: "limitless",
 } as const satisfies TelegramFundingRoutePresentation;
 
+const POLYMARKET_SOLANA_USDC_RETAINED_PRESENTATION = {
+  ...POLYMARKET_SOLANA_SOL_RETAINED_PRESENTATION,
+  routeKey: "polymarket_solana_usdc_retained_v1",
+  destinationAssetSymbol: "USDC",
+  acceptedAssetSymbols: ["USDC"],
+  automaticSourceAssetSymbol: "USDC",
+  selectionButtonLabel: "USDC · Solana",
+  instructions: ["Send only USDC on Solana.", "USDC stays in your Hunch wallet. No automatic conversion or Buy."],
+  decimals: 6,
+} as const satisfies TelegramFundingRoutePresentation;
+const LIMITLESS_SOLANA_USDC_RETAINED_PRESENTATION = {
+  ...POLYMARKET_SOLANA_USDC_RETAINED_PRESENTATION,
+  routeKey: "limitless_solana_usdc_retained_v1",
+  venueId: "limitless",
+} as const satisfies TelegramFundingRoutePresentation;
+
 function exactPolygonPusd(asset: AssetRef): boolean {
   const configured = fundingSidecarRuntimeConfig.polymarketPusdAddress;
   return (
@@ -735,6 +762,8 @@ export function parseTelegramFundingRoutePresentation(
 export function telegramPolygonFundingPresentation(
   mode: TelegramFundingReceivePresentationMode,
 ): TelegramFundingRoutePresentation {
+  if (mode === "polymarket_solana_usdc_retained") return POLYMARKET_SOLANA_USDC_RETAINED_PRESENTATION;
+  if (mode === "limitless_solana_usdc_retained") return LIMITLESS_SOLANA_USDC_RETAINED_PRESENTATION;
   if (mode === "limitless_base_usdc_direct") {
     return LIMITLESS_BASE_USDC_DIRECT_PRESENTATION;
   }
@@ -1541,8 +1570,9 @@ async function hasReadyLimitlessFundingDestinationReceipt(
 }
 
 type TelegramSolanaRetainedRouteSpec = Readonly<{
+  sourceAsset: AssetRef;
   destinationAsset: AssetRef;
-  mode: "polymarket_solana_sol_retained" | "limitless_solana_sol_retained";
+  mode: "polymarket_solana_sol_retained" | "limitless_solana_sol_retained" | "polymarket_solana_usdc_retained" | "limitless_solana_usdc_retained";
   presentation: TelegramFundingRoutePresentation;
   venueId: "limitless" | "polymarket";
 }>;
@@ -1550,6 +1580,7 @@ type TelegramSolanaRetainedRouteSpec = Readonly<{
 const TELEGRAM_SOLANA_RETAINED_ROUTE_SPECS: readonly TelegramSolanaRetainedRouteSpec[] =
   Object.freeze([
     {
+      sourceAsset: SOLANA_NATIVE_ASSET,
       destinationAsset: {
         networkId: "evm:137",
         assetId: POLYGON_PUSD,
@@ -1566,20 +1597,19 @@ const TELEGRAM_SOLANA_RETAINED_ROUTE_SPECS: readonly TelegramSolanaRetainedRoute
         decimals: 6,
       },
       mode: "limitless_solana_sol_retained",
+      sourceAsset: SOLANA_NATIVE_ASSET,
       presentation: LIMITLESS_SOLANA_SOL_RETAINED_PRESENTATION,
       venueId: "limitless",
     },
+    { sourceAsset: SOLANA_RETAINED_USDC_ASSET, destinationAsset: {networkId:"evm:137", assetId:POLYGON_PUSD,decimals:6}, mode: "polymarket_solana_usdc_retained", presentation: POLYMARKET_SOLANA_USDC_RETAINED_PRESENTATION, venueId:"polymarket" },
+    { sourceAsset: SOLANA_RETAINED_USDC_ASSET, destinationAsset: {networkId:"evm:8453", assetId:BASE_USDC,decimals:6}, mode: "limitless_solana_usdc_retained", presentation: LIMITLESS_SOLANA_USDC_RETAINED_PRESENTATION, venueId:"limitless" },
   ]);
-
-function exactSolanaNativeSol(asset: AssetRef): boolean {
-  return sameAsset(asset, SOLANA_NATIVE_ASSET);
-}
 
 function fundingPolicyAllowsSolanaRetainedRoute(
   policy: FundingRuntimePolicy,
   spec: TelegramSolanaRetainedRouteSpec,
 ): boolean {
-  const sourceAsset = SOLANA_NATIVE_ASSET;
+  const sourceAsset = spec.sourceAsset;
   return (
     policy.creationMode === "on" &&
     fundingReceiveAssetEnabled(policy, sourceAsset) &&
@@ -1596,12 +1626,14 @@ function fundingPolicyAllowsSolanaRetainedRoute(
 
 export function telegramSolanaRetainedDepositRouteForPolicy(
   policy: FundingRuntimePolicy,
+  asset: AssetRef = SOLANA_NATIVE_ASSET,
 ): Readonly<{
   choiceToken: string;
   routeKey: TelegramFundingDepositRouteKey;
   venueId: "limitless" | "polymarket";
 }> | null {
   for (const spec of TELEGRAM_SOLANA_RETAINED_ROUTE_SPECS) {
+    if (!sameAsset(spec.sourceAsset, asset)) continue;
     if (!fundingPolicyAllowsSolanaRetainedRoute(policy, spec)) continue;
     const descriptor = telegramFundingRouteDescriptorForRouteKey(
       spec.presentation.routeKey,
@@ -1623,7 +1655,7 @@ function resolveSolanaRetainedTarget(
     const accepted = target.acceptedAssets.filter(
       (candidate) =>
         candidate.handling === "direct" &&
-        exactSolanaNativeSol(candidate.asset),
+        sameAsset(candidate.asset, spec.sourceAsset),
     );
     return accepted.length === 1 && accepted[0]
       ? [{ asset: accepted[0].asset, target }]
@@ -1653,7 +1685,7 @@ function resolveSolanaRetainedChoice(
   if (!target?.automaticSourceAsset) return null;
   const variants = input.observationVariants.filter(
     (variant) =>
-      exactSolanaNativeSol(variant.asset) &&
+      sameAsset(variant.asset, spec.sourceAsset) &&
       sameAccountAddress(
         variant.networkId,
         variant.destinationAddress,
@@ -1684,10 +1716,10 @@ function resolveSolanaRetainedConsentRoute(
   return !consent.automationEnabled &&
     consent.policySnapshot.presentationMode === spec.mode &&
     presentation?.routeKey === spec.presentation.routeKey &&
-    exactSolanaNativeSol(consent.asset)
+    sameAsset(consent.asset, spec.sourceAsset)
     ? {
         destinationAsset: spec.destinationAsset,
-        automaticSourceAsset: SOLANA_NATIVE_ASSET,
+        automaticSourceAsset: spec.sourceAsset,
         mode: spec.mode,
         presentation,
       }
@@ -1798,7 +1830,7 @@ function createSolanaRetainedFundingAdapter(
 ): TelegramFundingRouteAdapter {
   return Object.freeze({
     adapterKey: "solana_sol_retained_v1",
-    listedByDefault: true,
+    listedByDefault: sameAsset(spec.sourceAsset, SOLANA_NATIVE_ASSET),
     profileId: "solana_sol_retained_v1",
     venueId: spec.venueId,
     routeKeys: new Set<string>([spec.presentation.routeKey]),
@@ -1844,7 +1876,7 @@ function createSolanaRetainedFundingAdapter(
     prepareAutomaticVariants: async (variants) => variants,
     resolveReceiptDisposition: (target) =>
       target.receipt.handling === "direct" &&
-      exactSolanaNativeSol(target.receipt.asset)
+      sameAsset(target.receipt.asset, spec.sourceAsset)
         ? { kind: "direct" }
         : { kind: "hard_invalid", reasonCode: "unsupported_asset" },
     reviewQuotePlan: () => null,

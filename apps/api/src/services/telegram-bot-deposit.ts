@@ -2,6 +2,7 @@ import type { DbQuery } from "../db.js";
 import { resolveFundingPolicy } from "../funding/policies/funding-policy-service.js";
 import type { TelegramBotTradingClientMessage } from "./telegram-bot-trading-client.js";
 import { telegramSolanaRetainedDepositRouteForPolicy } from "./telegram-funding-route.js";
+import { SOLANA_RETAINED_USDC_ASSET } from "../funding/receive/retained-solana-assets.js";
 import {
   escapeTelegramMarkdownV2,
   formatTelegramCalloutMarkdownV2,
@@ -226,7 +227,7 @@ function buildDepositVenueMenu(
 async function managedSolReceiveChoiceToken(input: {
   db: DbQuery;
   telegramUserId?: string | number;
-}): Promise<string | null> {
+}): Promise<{ sol: string | null; usdc: string | null } | null> {
   if (input.telegramUserId == null) return null;
   const [resolvedPolicy, managedWallet] = await Promise.all([
     resolveFundingPolicy(input.db),
@@ -246,19 +247,21 @@ async function managedSolReceiveChoiceToken(input: {
     ),
   ]);
   if (managedWallet.rows[0]?.available !== true) return null;
-  return (
-    telegramSolanaRetainedDepositRouteForPolicy(resolvedPolicy.runtime)
-      ?.choiceToken ?? null
-  );
+  return {
+    sol: telegramSolanaRetainedDepositRouteForPolicy(resolvedPolicy.runtime)?.choiceToken ?? null,
+    usdc: telegramSolanaRetainedDepositRouteForPolicy(resolvedPolicy.runtime, SOLANA_RETAINED_USDC_ASSET)?.choiceToken ?? null,
+  };
 }
 
 function buildJustDepositMenu(input: {
   solReceiveChoiceToken: string | null;
+  usdcReceiveChoiceToken: string | null;
 }): TelegramDepositMessage {
   return {
     parse_mode: "MarkdownV2",
     reply_markup: {
       inline_keyboard: [
+        ...(input.usdcReceiveChoiceToken ? [[{callback_data: `hm:v1:deposit_route:${input.usdcReceiveChoiceToken}`, text: "USDC · Solana · Hunch"}]] : []),
         [
           {
             callback_data: "hm:v1:deposit_route:pd",
@@ -306,6 +309,9 @@ function buildJustDepositMenu(input: {
             `${telegramCustomEmojiMarkdownV2ForNetwork("Solana")} ${formatTelegramFieldMarkdownV2("Receive SOL", "Kept as SOL in Hunch · does not fund a venue")}`,
           ]
         : []),
+      ...(input.usdcReceiveChoiceToken ? [
+        `${telegramCustomEmojiMarkdownV2ForNetwork("Solana")} ${formatTelegramFieldMarkdownV2("Receive USDC", "Kept as USDC in Hunch · no automatic conversion")}`,
+      ] : []),
       "",
       escapeTelegramMarkdownV2(
         "Relay routes that require a target venue are available after choosing that venue, not from Just Deposit.",
@@ -363,11 +369,10 @@ export async function buildTelegramDepositMessage(input: {
     return buildDepositVenueMenu(venues, activeDeposit);
   }
   if (requestedVenue === "any") {
+    const choices = await managedSolReceiveChoiceToken({db: input.pool, telegramUserId: input.telegramUserId});
     return buildJustDepositMenu({
-      solReceiveChoiceToken: await managedSolReceiveChoiceToken({
-        db: input.pool,
-        telegramUserId: input.telegramUserId,
-      }),
+      solReceiveChoiceToken: choices?.sol ?? null,
+      usdcReceiveChoiceToken: choices?.usdc ?? null,
     });
   }
   // Financial addresses have one egress gateway: the durable funding outbox.
