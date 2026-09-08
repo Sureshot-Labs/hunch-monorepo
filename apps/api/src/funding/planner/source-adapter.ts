@@ -18,6 +18,9 @@ import type { PlannedSourceOption } from "./planning-types.js";
 import type { FundingCommitPlan } from "../persistence/funding-operation-repository.js";
 
 export type FundingSourcePlanningInput = Readonly<{
+  /** Planner-only restrictions; never expand user/session execution authority. */
+  internalSourcesOnly?: boolean;
+  excludedSourceComponentIds?: readonly string[];
   accountId: string;
   request: FundingDiscoveryRequest;
   marketContext: MarketContextBinding | null;

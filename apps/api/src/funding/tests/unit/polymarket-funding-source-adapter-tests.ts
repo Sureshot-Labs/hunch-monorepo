@@ -1,6 +1,9 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import type { Pool } from "@hunch/infra";
+import { ProductionFundingSourcePlanner } from "../../planner/production-source-planner.js";
+import { DEFAULT_FUNDING_RUNTIME_POLICY } from "../../policies/funding-policy.js";
 import { deriveSafeProxyAddress } from "../../../services/polymarket-funder.js";
 
 import { stableWalletAssetLocationIdentity } from "../../../account-value/canonical.js";
@@ -397,6 +400,77 @@ const crossAdapter = (value: AccountValueReadModel) =>
 const [crossFunding] =
   await crossAdapter(crossOwnerAccount).list(clientHandoffInput);
 assert.ok(crossFunding);
+const priorityPolicy = {
+  ...DEFAULT_FUNDING_RUNTIME_POLICY,
+  placement: {
+    ...DEFAULT_FUNDING_RUNTIME_POLICY.placement,
+    minimumDestinationUsd: "0.5",
+  },
+};
+const priorityAccount: AccountValueReadModel = {
+  ...crossOwnerAccount,
+  runtimePolicy: priorityPolicy,
+  projection: { ...crossOwnerAccount.projection, collectorErrors: [] },
+};
+const priorityPlanner = new ProductionFundingSourcePlanner(
+  {} as Pool,
+  priorityAccount,
+  [crossAdapter(priorityAccount)],
+);
+const priorityDiscovery = await priorityPlanner.discover({
+  ...clientHandoffInput,
+  policy: priorityPolicy,
+});
+assert.ok(
+  priorityDiscovery.sources.some(
+    (source) =>
+      source.option.selectable &&
+      source.option.minimumDestination?.raw === "3000000",
+  ),
+  "external Safe can complete the same Router plan after internal capacity is exhausted",
+);
+const [internalOnlyFunding] = await crossAdapter(crossOwnerAccount).list({
+  ...clientHandoffInput,
+  internalSourcesOnly: true,
+});
+assert.ok(internalOnlyFunding);
+assert.equal(
+  fundingEconomicSourceReservations(
+    internalOnlyFunding.commitPlan.reservations,
+  ).some(
+    ({ reservation }) => reservation.componentId === "deposit_usdce_12345678",
+  ),
+  false,
+  "external Safe must wait until internal sources have contributed",
+);
+const [internalSafeFunding] = await crossAdapter(safeSourceAccount).list({
+  ...clientHandoffInput,
+  internalSourcesOnly: true,
+});
+assert.ok(internalSafeFunding);
+assert.equal(
+  fundingEconomicSourceReservations(
+    internalSafeFunding.commitPlan.reservations,
+  ).some(
+    ({ reservation }) => reservation.componentId === "deposit_usdce_12345678",
+  ),
+  true,
+  "a legacy Safe owned by the internal wallet remains a first-priority source",
+);
+const [excludedSafeFunding] = await crossAdapter(safeSourceAccount).list({
+  ...clientHandoffInput,
+  excludedSourceComponentIds: ["deposit_usdce_12345678"],
+});
+assert.ok(excludedSafeFunding);
+assert.equal(
+  fundingEconomicSourceReservations(
+    excludedSafeFunding.commitPlan.reservations,
+  ).some(
+    ({ reservation }) => reservation.componentId === "deposit_usdce_12345678",
+  ),
+  false,
+  "a source already used by another contributor cannot be spent again",
+);
 assert.equal(isValidFundingCommitPlanBoundary(crossFunding.commitPlan), true);
 assert.equal(
   crossFunding.commitPlan.steps[0]?.normalizedAction.actorWalletId,

@@ -12,6 +12,9 @@ import { isReceiptBearingFundingActionKind } from "../domain/action-kinds.js";
 import type { ResolvedDestinationCandidate } from "./destination-adapters.js";
 
 export type PlannedSourceOption = Readonly<{
+  /** Estimated source USD by descending preference cost: external native,
+   * external stable, internal native. Only used to recommend a valid plan. */
+  sourcePreferenceCost?: readonly [string, string, string];
   option: SourceOption;
   commitPlan: FundingCommitPlan;
   routeId: string | null;

@@ -4789,6 +4789,26 @@ async function testCompositePreparationAndRelayCommit(
       commitInput(userId, quote.id, consentToken, orderedPlan),
     );
     operationId = committed.operation.id;
+    // Production composite plans carry a versioned validator marker. Exercise
+    // the SQL branch too: legacy fixtures alone missed provider-first ordering.
+    const shapeClient = await pool.connect();
+    try {
+      await shapeClient.query("begin");
+      await shapeClient.query(
+        `update funding_operations set version = version + 1, support_metadata = support_metadata ||
+          '{"planValidation":{"validatorId":"polymarket_funding_router_v1","version":1}}'::jsonb
+         where id = $1`,
+        [operationId],
+      );
+      await shapeClient.query(
+        "select funding_validate_operation_segment_shape($1)",
+        [operationId],
+      );
+      await shapeClient.query("rollback");
+    } finally {
+      await shapeClient.query("rollback");
+      shapeClient.release();
+    }
     const shape = await pool.query<{
       bound_reservations: string;
       segment_count: string;

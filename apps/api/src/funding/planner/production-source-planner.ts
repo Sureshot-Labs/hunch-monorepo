@@ -2,12 +2,14 @@ import type { Pool } from "@hunch/infra";
 
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import {
+  addUnsignedDecimals,
   compareUnsignedDecimals,
   formatUnsignedDecimal,
   multiplyUnsignedDecimals,
   scaleUnsignedDecimalByRawRatio,
 } from "../../account-value/decimal.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
+import { fundingEconomicSourceReservations } from "../persistence/funding-operation-repository.js";
 import { createRelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
 import {
   isRelayQuoteRejectedError,
@@ -60,6 +62,9 @@ import {
 import { buildCompositeSourceOption } from "./composite-source-options.js";
 import {
   RelayFirstSourcePlanner,
+  RELAY_QUOTE_TIMEOUT_MS,
+  TOTAL_FUNDING_PLANNER_TIMEOUT_MS,
+  MAX_RELAY_SOURCE_QUOTES,
   effectiveFundingEconomicsLimits,
   type RelayEligibleSourceFact,
   type RelayPlanningQuoteResult,
@@ -860,6 +865,42 @@ type ProductionRelayDiscovery = Readonly<{
   reasonCodes: readonly FundingReasonCode[];
 }>;
 
+export async function planOrderedFundingContributions(input: {
+  componentIds: readonly string[];
+  requiredAmount: Money;
+  discover: (
+    componentId: string,
+    remaining: Money,
+  ) => Promise<ProductionRelayDiscovery>;
+  eligible: (source: PlannedSourceOption) => boolean;
+}): Promise<ProductionRelayDiscovery> {
+  const sources: PlannedSourceOption[] = [];
+  const reasonCodes = new Set<FundingReasonCode>();
+  let remaining = BigInt(input.requiredAmount.raw);
+  for (const componentId of new Set(input.componentIds)) {
+    if (remaining === 0n) break;
+    const result = await input.discover(componentId, {
+      ...input.requiredAmount,
+      raw: remaining.toString(),
+    });
+    result.reasonCodes.forEach((code) => reasonCodes.add(code));
+    const candidate = result.sources.find(
+      (source) => source.option.minimumDestination && input.eligible(source),
+    );
+    if (!candidate?.option.minimumDestination) continue;
+    assertSameAsset(
+      candidate.option.minimumDestination.asset,
+      input.requiredAmount.asset,
+      "ordered contribution",
+    );
+    const contribution = rawAmount(candidate.option.minimumDestination.raw);
+    if (contribution === 0n) continue;
+    sources.push(candidate);
+    remaining = contribution >= remaining ? 0n : remaining - contribution;
+  }
+  return { sources, reasonCodes: [...reasonCodes] };
+}
+
 /**
  * Automatic and Mini App composites have different execution boundaries.
  * Discover each Relay residual against only the venue preparation that the
@@ -873,7 +914,16 @@ export async function planProductionFundingSourceBoundaries(
     destinationUnitPriceUsd: string | null;
     maximumFeeUsd: string;
     maximumFeeBps: number;
-    discoverRelay: (requiredAmount: Money) => Promise<ProductionRelayDiscovery>;
+    discoverRelay: (
+      requiredAmount: Money,
+      boundary: FundingExecutionBoundary,
+    ) => Promise<ProductionRelayDiscovery>;
+    extendBoundary?: (
+      boundary: FundingExecutionBoundary,
+      relay: ProductionRelayDiscovery,
+    ) => Promise<
+      ProductionRelayDiscovery & { adapted: readonly PlannedSourceOption[] }
+    >;
   }>,
 ): Promise<FundingSourcePlanningResult> {
   const requirements = {
@@ -891,20 +941,30 @@ export async function planProductionFundingSourceBoundaries(
   const discoveries = new Map<string, Promise<ProductionRelayDiscovery>>();
   const discover = (
     requirement: Money | null,
+    boundary: FundingExecutionBoundary,
   ): Promise<ProductionRelayDiscovery> => {
     if (!requirement) {
       return Promise.resolve({ sources: [], reasonCodes: [] });
     }
-    const key = `${requirement.asset.networkId}:${requirement.asset.assetId}:${requirement.asset.decimals}:${requirement.raw}`;
+    const key = `${boundary}:${requirement.asset.networkId}:${requirement.asset.assetId}:${requirement.asset.decimals}:${requirement.raw}`;
     const existing = discoveries.get(key);
     if (existing) return existing;
-    const pending = input.discoverRelay(requirement);
+    const pending = input.discoverRelay(requirement, boundary);
     discoveries.set(key, pending);
     return pending;
   };
+  const extend = async (
+    boundary: FundingExecutionBoundary,
+    requirement: Money | null,
+  ) => {
+    const relay = await discover(requirement, boundary);
+    return input.extendBoundary
+      ? input.extendBoundary(boundary, relay)
+      : { ...relay, adapted: input.adapted };
+  };
   const [automaticDiscovery, clientDiscovery] = await Promise.all([
-    discover(requirements.automatic),
-    discover(requirements.client_handoff),
+    extend("automatic", requirements.automatic),
+    extend("client_handoff", requirements.client_handoff),
   ]);
   const residualSources = (
     discovery: ProductionRelayDiscovery,
@@ -932,15 +992,16 @@ export async function planProductionFundingSourceBoundaries(
   } as const;
   const automaticComposite = buildCompositeSourceOption({
     ...compositeInput,
-    candidates: [...input.adapted, ...automaticRelay],
+    candidates: [...automaticDiscovery.adapted, ...automaticRelay],
   });
   const clientComposite = buildCompositeSourceOption({
     ...compositeInput,
-    candidates: [...input.adapted, ...clientRelay],
+    candidates: [...clientDiscovery.adapted, ...clientRelay],
     executionBoundary: "client_handoff",
   });
   const sources = [
-    ...input.adapted,
+    ...automaticDiscovery.adapted,
+    ...clientDiscovery.adapted,
     ...automaticRelay,
     ...clientRelay,
     automaticComposite,
@@ -980,8 +1041,15 @@ export class ProductionFundingSourcePlanner {
   async discover(
     input: FundingSourcePlanningInput,
   ): Promise<FundingSourcePlanningResult> {
+    const prioritized =
+      !input.request.confirmedSourceAmount &&
+      !input.request.withdrawalSourceComponentId &&
+      !input.request.serverQuoteAvailableSourceCapacity;
     const [adapted, inventoryReasonCodes] = await Promise.all([
-      listAdaptedFundingSources(this.sourceAdapters, input),
+      listAdaptedFundingSources(this.sourceAdapters, {
+        ...input,
+        internalSourcesOnly: prioritized,
+      }),
       this.listBlockingReasonCodes(input),
     ]);
     const limits = effectiveFundingEconomicsLimits(input.policy, {
@@ -989,6 +1057,11 @@ export class ProductionFundingSourcePlanner {
       maximumSlippageBps: input.request.maxSlippageBps,
     });
     const relayPlanner = this.relayPlanner();
+    const relayDeadline = performance.now() + TOTAL_FUNDING_PLANNER_TIMEOUT_MS;
+    const relayDiscoveries = new Map<
+      string,
+      Promise<ProductionRelayDiscovery>
+    >();
     const planned = await planProductionFundingSourceBoundaries({
       adapted,
       requiredAmount: input.requiredAmount,
@@ -996,18 +1069,144 @@ export class ProductionFundingSourcePlanner {
         input.destinationFacts?.collateralValuation?.unitPriceUsd ?? null,
       maximumFeeUsd: limits.maximumFeeUsd,
       maximumFeeBps: limits.maximumFeeBps,
-      discoverRelay: (requiredAmount) =>
-        relayPlanner.discover({
-          ...input,
-          policy: restrictRelayRoutesToExecutionProfile(
-            input.policy,
-            input.request.serverExecutionProfileId,
-          ),
-          requiredAmount,
-        }),
+      discoverRelay: (requiredAmount, boundary) =>
+        this.discoverPrioritizedRelay(
+          {
+            ...input,
+            internalSourcesOnly: prioritized,
+            excludedSourceComponentIds: adapted
+              .filter((source) =>
+                venuePreparationSupportsBoundary(source, boundary, false),
+              )
+              .flatMap((source) =>
+                source.commitPlan.reservations.map(
+                  (reservation) => reservation.componentId,
+                ),
+              ),
+            policy: restrictRelayRoutesToExecutionProfile(
+              input.policy,
+              input.request.serverExecutionProfileId,
+            ),
+            requiredAmount,
+          },
+          boundary,
+          relayPlanner,
+          relayDiscoveries,
+          relayDeadline,
+        ),
+      ...(prioritized
+        ? {
+            extendBoundary: async (
+              boundary: FundingExecutionBoundary,
+              internalRelay: ProductionRelayDiscovery,
+            ) => {
+              const internalRaw = internalRelay.sources.reduce(
+                (sum, source) =>
+                  sum + BigInt(source.option.minimumDestination?.raw ?? "0"),
+                0n,
+              );
+              const requiredRaw = BigInt(input.requiredAmount.raw);
+              const internalPreparationRaw =
+                maximumVenuePreparationContributionRaw(
+                  adapted,
+                  input.requiredAmount,
+                  boundary,
+                );
+              if (
+                internalRaw + internalPreparationRaw >= requiredRaw ||
+                remainingFundingRequirementAfterVenuePreparation(
+                  adapted,
+                  input.requiredAmount,
+                  boundary,
+                ) === null
+              ) {
+                return { ...internalRelay, adapted };
+              }
+              const excludedSourceComponentIds = internalRelay.sources.flatMap(
+                (source) =>
+                  source.commitPlan.reservations.map(
+                    (reservation) => reservation.componentId,
+                  ),
+              );
+              // Rebuild one Router plan: never concatenate two plans sharing its nonce.
+              const expanded = await listAdaptedFundingSources(
+                this.sourceAdapters,
+                {
+                  ...input,
+                  excludedSourceComponentIds,
+                  requiredAmount: {
+                    ...input.requiredAmount,
+                    raw: (requiredRaw - internalRaw).toString(),
+                  },
+                },
+              );
+              const preparationRaw = expanded.reduce((maximum, source) => {
+                if (
+                  source.option.source.kind !== "venue_preparation" ||
+                  !venuePreparationSupportsBoundary(source, boundary, false)
+                )
+                  return maximum;
+                const raw = BigInt(
+                  source.option.minimumDestination?.raw ?? "0",
+                );
+                return raw > maximum ? raw : maximum;
+              }, 0n);
+              const remaining = requiredRaw - internalRaw - preparationRaw;
+              const externalRelay =
+                remaining > 0n
+                  ? await this.discoverPrioritizedRelay(
+                      {
+                        ...input,
+                        internalSourcesOnly: false,
+                        excludedSourceComponentIds: [
+                          ...excludedSourceComponentIds,
+                          ...expanded.flatMap((source) =>
+                            source.commitPlan.reservations.map(
+                              (reservation) => reservation.componentId,
+                            ),
+                          ),
+                        ],
+                        policy: restrictRelayRoutesToExecutionProfile(
+                          input.policy,
+                          input.request.serverExecutionProfileId,
+                        ),
+                        requiredAmount: {
+                          ...input.requiredAmount,
+                          raw: remaining.toString(),
+                        },
+                      },
+                      boundary,
+                      relayPlanner,
+                      relayDiscoveries,
+                      relayDeadline,
+                    )
+                  : { sources: [], reasonCodes: [] };
+              return {
+                adapted: restrictResidualSourcesToCompositeContribution(
+                  expanded,
+                  {
+                    plannedRequirement: {
+                      ...input.requiredAmount,
+                      raw: (requiredRaw - internalRaw).toString(),
+                    },
+                    fullRequirement: input.requiredAmount,
+                  },
+                ),
+                sources: [...internalRelay.sources, ...externalRelay.sources],
+                reasonCodes: [
+                  ...internalRelay.reasonCodes,
+                  ...externalRelay.reasonCodes,
+                ],
+              };
+            },
+          }
+        : {}),
     });
     return {
-      sources: planned.sources,
+      sources: planned.sources.map((source) => ({
+        ...source,
+        sourcePreferenceCost: this.sourcePreferenceCost(source),
+      })),
       reasonCodes: [
         ...new Set<FundingReasonCode>([
           ...inventoryReasonCodes,
@@ -1015,6 +1214,55 @@ export class ProductionFundingSourcePlanner {
         ]),
       ],
     };
+  }
+
+  private sourcePreferenceCost(
+    source: PlannedSourceOption,
+  ): readonly [string, string, string] {
+    const cost: [string, string, string] = ["0", "0", "0"];
+    for (const { reservation, rawAmount } of fundingEconomicSourceReservations(
+      source.commitPlan.reservations,
+    )) {
+      const component = this.account.projection.components.find(
+        (item) => item.componentId === reservation.componentId,
+      );
+      if (!component) continue;
+      const location = component.location;
+      const controller =
+        location.kind === "venue_account"
+          ? detail(location, "linkedAddress")
+          : detail(location, "address");
+      const profile = controller
+        ? profileForExactAddress(
+            this.account,
+            location.asset.networkId,
+            controller,
+          )
+        : null;
+      const tier =
+        (profile?.source === "external" || !profile ? 2 : 0) +
+        (isRelayPinnedStableAsset(component.amount.asset) ? 0 : 1);
+      if (tier === 0) continue;
+      const usd = isRelayPinnedStableAsset(component.amount.asset)
+        ? formatUnsignedDecimal(
+            BigInt(rawAmount),
+            component.amount.asset.decimals,
+          )
+        : component.estimatedUsd && BigInt(component.amount.raw) > 0n
+          ? scaleUnsignedDecimalByRawRatio({
+              value: component.estimatedUsd.value,
+              numeratorRaw: rawAmount,
+              denominatorRaw: component.amount.raw,
+            })
+          : (source.option.estimatedUsd ??
+            formatUnsignedDecimal(
+              BigInt(rawAmount),
+              reservation.assetDecimals,
+            ));
+      const index = 3 - tier;
+      cost[index] = addUnsignedDecimals([cost[index] ?? "0", usd]);
+    }
+    return cost;
   }
 
   async listBlockingReasonCodes(
@@ -1097,36 +1345,132 @@ export class ProductionFundingSourcePlanner {
     });
   }
 
-  private relayPlanner(): RelayFirstSourcePlanner {
-    return new RelayFirstSourcePlanner({
-      listEligibleSources: (input) => this.listEligibleSources(input),
-      quoteRelay: (input) => this.quoteRelay(input),
-      serverExecutionQuoteWindow: (profileId) => {
-        if (!relayEvmFundingProfileSpec(profileId)) return null;
-        const configuration = loadRelayEvmExecutionConfiguration();
-        return {
-          maximumQuoteTtlMs: relayEvmSequentialQuoteTtlMs(configuration),
-          minimumRemainingTtlMs: configuration.minimumSequentialTtlMs,
-        };
-      },
-      observeRoute: async ({ route, amountBand, now }) => {
-        const lookupKey = process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim();
-        const keyVersion =
-          parsePositiveInteger(
-            process.env.FUNDING_REFERENCE_LOOKUP_KEY_VERSION,
-          ) ?? 1;
-        if (!lookupKey) return null;
-        return fetchFundingRouteExperience(this.db, {
-          routeKeyHmac: fundingRouteExperienceFingerprint(
-            `${route.routeId}:${amountBand}`,
-            lookupKey,
-          ),
-          routeKeyVersion: keyVersion,
-          maximumAgeMs: ROUTE_EXPERIENCE_MAX_AGE_MS,
-          now,
-        });
-      },
+  private async discoverPrioritizedRelay(
+    input: FundingSourcePlanningInput,
+    boundary: FundingExecutionBoundary,
+    fallback: RelayFirstSourcePlanner,
+    discoveries: Map<string, Promise<ProductionRelayDiscovery>>,
+    deadline: number,
+  ): Promise<ProductionRelayDiscovery> {
+    // Explicit source consent and capacity previews must retain their exact scope.
+    if (
+      input.request.confirmedSourceAmount ||
+      input.request.withdrawalSourceComponentId ||
+      input.request.serverQuoteAvailableSourceCapacity
+    ) {
+      const key = `explicit:${input.requiredAmount.raw}`;
+      const existing = discoveries.get(key);
+      if (existing) return existing;
+      const pending = fallback.discover(input);
+      discoveries.set(key, pending);
+      return pending;
+    }
+    const facts = (await this.listEligibleSources(input)).filter((fact) => {
+      if (input.excludedSourceComponentIds?.includes(fact.componentId))
+        return false;
+      const profile =
+        fact.source.kind === "owned_location"
+          ? profileForLocation(this.account, fact.source.location)
+          : null;
+      return input.internalSourcesOnly
+        ? profile != null && profile.source !== "external"
+        : profile?.source === "external";
     });
+    const priority = (fact: RelayEligibleSourceFact): number => {
+      const profile =
+        fact.source.kind === "owned_location"
+          ? profileForLocation(this.account, fact.source.location)
+          : null;
+      return (
+        (profile?.source === "external" || !profile ? 2 : 0) +
+        (isRelayPinnedStableAsset(fact.quoteInputAmount.asset) ? 0 : 1)
+      );
+    };
+    const ordered = [...facts].sort(
+      (a, b) =>
+        priority(a) - priority(b) || a.componentId.localeCompare(b.componentId),
+    );
+    return planOrderedFundingContributions({
+      componentIds: ordered
+        .slice(0, MAX_RELAY_SOURCE_QUOTES)
+        .map((fact) => fact.componentId),
+      requiredAmount: input.requiredAmount,
+      discover: (componentId, requiredAmount) => {
+        const key = `${componentId}:${requiredAmount.raw}`;
+        const existing = discoveries.get(key);
+        if (existing) return existing;
+        const remainingMs = deadline - performance.now();
+        if (remainingMs <= 0) {
+          return Promise.resolve({
+            sources: [],
+            reasonCodes: ["provider_status_unknown"],
+          });
+        }
+        const pending = this.relayPlanner(componentId, remainingMs).discover({
+          ...input,
+          requiredAmount,
+        });
+        discoveries.set(key, pending);
+        return pending;
+      },
+      eligible: (source) =>
+        boundary === "client_handoff"
+          ? plannedSourceRunsWithClientWalletActions(source) &&
+            (source.option.selectable ||
+              source.option.reasonCodes.every(
+                (code) => code === "minimum_output_not_met",
+              ))
+          : source.compositeEligible === true &&
+            commitPlanRunsWithoutUserWalletAction(source.commitPlan),
+    });
+  }
+
+  private relayPlanner(
+    componentId?: string,
+    budgetMs?: number,
+  ): RelayFirstSourcePlanner {
+    return new RelayFirstSourcePlanner(
+      {
+        listEligibleSources: async (input) =>
+          (await this.listEligibleSources(input)).filter(
+            (source) =>
+              componentId == null || source.componentId === componentId,
+          ),
+        quoteRelay: (input) => this.quoteRelay(input),
+        serverExecutionQuoteWindow: (profileId) => {
+          if (!relayEvmFundingProfileSpec(profileId)) return null;
+          const configuration = loadRelayEvmExecutionConfiguration();
+          return {
+            maximumQuoteTtlMs: relayEvmSequentialQuoteTtlMs(configuration),
+            minimumRemainingTtlMs: configuration.minimumSequentialTtlMs,
+          };
+        },
+        observeRoute: async ({ route, amountBand, now }) => {
+          const lookupKey =
+            process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim();
+          const keyVersion =
+            parsePositiveInteger(
+              process.env.FUNDING_REFERENCE_LOOKUP_KEY_VERSION,
+            ) ?? 1;
+          if (!lookupKey) return null;
+          return fetchFundingRouteExperience(this.db, {
+            routeKeyHmac: fundingRouteExperienceFingerprint(
+              `${route.routeId}:${amountBand}`,
+              lookupKey,
+            ),
+            routeKeyVersion: keyVersion,
+            maximumAgeMs: ROUTE_EXPERIENCE_MAX_AGE_MS,
+            now,
+          });
+        },
+      },
+      budgetMs == null
+        ? {}
+        : {
+            totalPlannerTimeoutMs: budgetMs,
+            relayQuoteTimeoutMs: Math.min(RELAY_QUOTE_TIMEOUT_MS, budgetMs),
+          },
+    );
   }
 
   private async listEligibleSources(

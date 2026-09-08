@@ -235,6 +235,7 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
   }
 
   private availableInputComponent(input: {
+    excludedSourceComponentIds?: readonly string[];
     accountId: string;
     address: string;
     asset: AssetRef;
@@ -253,6 +254,7 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       const availability = availabilityByComponent.get(component.componentId);
       const address = detail(component.location, "address");
       if (
+        input.excludedSourceComponentIds?.includes(component.componentId) ||
         component.location.accountId !== input.accountId ||
         component.category === "in_transit" ||
         component.observationFreshness !== "fresh" ||
@@ -323,19 +325,28 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
       return null;
     }
     const usdceAsset = this.config.usdceAsset;
-    const controllerPusdInput = this.availableInputComponent({
-      accountId: input.accountId,
-      address: snapshot.signerAddress,
-      asset: facts.option.requiredAsset,
-    });
-    const controllerUsdceInput = this.availableInputComponent({
-      accountId: input.accountId,
-      address: snapshot.signerAddress,
-      asset: usdceAsset,
-    });
+    const controllerSourcesAllowed =
+      !input.internalSourcesOnly || profile.source !== "external";
+    const controllerPusdInput = controllerSourcesAllowed
+      ? this.availableInputComponent({
+          excludedSourceComponentIds: input.excludedSourceComponentIds,
+          accountId: input.accountId,
+          address: snapshot.signerAddress,
+          asset: facts.option.requiredAsset,
+        })
+      : null;
+    const controllerUsdceInput = controllerSourcesAllowed
+      ? this.availableInputComponent({
+          excludedSourceComponentIds: input.excludedSourceComponentIds,
+          accountId: input.accountId,
+          address: snapshot.signerAddress,
+          asset: usdceAsset,
+        })
+      : null;
     const depositUsdceInput =
-      input.request.serverExecutionProfileId == null
+      controllerSourcesAllowed && input.request.serverExecutionProfileId == null
         ? this.availableInputComponent({
+            excludedSourceComponentIds: input.excludedSourceComponentIds,
             accountId: input.accountId,
             address: snapshot.depositWallet,
             asset: usdceAsset,
@@ -360,6 +371,7 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
     // from the Safe; only its connected owner signs the preliminary transfer.
     const safeAddress = deriveSafeProxyAddress(snapshot.signerAddress);
     const canUseSafe = Boolean(
+      controllerSourcesAllowed &&
       safeAddress &&
       input.request.serverExecutionProfileId == null &&
       (profile.source !== "external" ||
@@ -371,6 +383,7 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
     const availableSafeInput = (asset: AssetRef) =>
       canUseSafe && safeAddress
         ? this.availableInputComponent({
+            excludedSourceComponentIds: input.excludedSourceComponentIds,
             accountId: input.accountId,
             address: safeAddress,
             asset,
@@ -391,6 +404,7 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
     if (!safeUsdceInput && input.request.serverExecutionProfileId == null) {
       for (const candidate of this.account.ownership?.wallets ?? []) {
         if (
+          (input.internalSourcesOnly && candidate.source === "external") ||
           candidate.networkId !== "evm:137" ||
           candidate.address.toLowerCase() === profile.address.toLowerCase() ||
           !candidate.controllerWalletRef ||
@@ -405,6 +419,7 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         const candidateSafe = deriveSafeProxyAddress(candidate.address);
         if (!candidateSafe) continue;
         const resolved = this.availableInputComponent({
+          excludedSourceComponentIds: input.excludedSourceComponentIds,
           accountId: input.accountId,
           address: candidateSafe,
           asset: usdceAsset,

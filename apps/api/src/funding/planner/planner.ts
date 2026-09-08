@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  compareUnsignedDecimals,
   multiplyRawByUnitPrice,
   rawForUsdCeil,
 } from "../../account-value/decimal.js";
@@ -142,7 +143,7 @@ function preparationPurpose(
   return "fund";
 }
 
-function recommendedSource(
+export function recommendedSource(
   sources: readonly PlannedSourceOption[],
 ): PlannedSourceOption | null {
   const selectable = sources.filter((source) => source.option.selectable);
@@ -152,6 +153,18 @@ function recommendedSource(
       (left, right) =>
         Number(left.option.source.kind === "external_ingress") -
           Number(right.option.source.kind === "external_ingress") ||
+        compareUnsignedDecimals(
+          left.sourcePreferenceCost?.[0] ?? "0",
+          right.sourcePreferenceCost?.[0] ?? "0",
+        ) ||
+        compareUnsignedDecimals(
+          left.sourcePreferenceCost?.[1] ?? "0",
+          right.sourcePreferenceCost?.[1] ?? "0",
+        ) ||
+        compareUnsignedDecimals(
+          left.sourcePreferenceCost?.[2] ?? "0",
+          right.sourcePreferenceCost?.[2] ?? "0",
+        ) ||
         Number(isSelectableAutomaticSource(right)) -
           Number(isSelectableAutomaticSource(left)) ||
         Number(right.option.recommended) - Number(left.option.recommended) ||

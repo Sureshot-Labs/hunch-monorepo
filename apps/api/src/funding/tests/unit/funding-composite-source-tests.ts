@@ -16,11 +16,13 @@ import {
 } from "../../planner/composite-source-options.js";
 import {
   planProductionFundingSourceBoundaries,
+  planOrderedFundingContributions,
   remainingFundingRequirementAfterVenuePreparation,
   restrictResidualSourcesToCompositeContribution,
 } from "../../planner/production-source-planner.js";
 import type { PlannedSourceOption } from "../../planner/planning-types.js";
 import { sourceOptionSchema } from "../../../schemas/funding.js";
+import { recommendedSource } from "../../planner/planner.js";
 
 const DESTINATION_ASSET: AssetRef = {
   networkId: "evm:137",
@@ -1353,6 +1355,65 @@ assert.equal(
   }),
   null,
 );
+
+const residualRequests: string[] = [];
+const preferredCandidates: PlannedSourceOption[] = [
+  {
+    ...base,
+    option: { ...base.option, selectable: true },
+    sourcePreferenceCost: ["0", "0", "0"],
+  },
+  {
+    ...solana,
+    option: { ...solana.option, selectable: true },
+    sourcePreferenceCost: ["0", "0", "10"],
+  },
+  {
+    ...base,
+    option: { ...base.option, selectable: true },
+    sourcePreferenceCost: ["0", "2", "0"],
+  },
+  {
+    ...solana,
+    option: { ...solana.option, selectable: true },
+    sourcePreferenceCost: ["1", "0", "0"],
+  },
+];
+for (let index = 0; index < preferredCandidates.length; index++) {
+  assert.equal(
+    recommendedSource(preferredCandidates.slice(index).reverse()),
+    preferredCandidates[index],
+    "source ownership and asset priority precede execution convenience",
+  );
+}
+const residualPlan = await planOrderedFundingContributions({
+  componentIds: ["stable", "stable", "native", "external"],
+  requiredAmount: money(DESTINATION_ASSET, "1000000"),
+  eligible: () => true,
+  discover: async (componentId, remaining) => {
+    residualRequests.push(`${componentId}:${remaining.raw}`);
+    const output = componentId === "stable" ? "700000" : remaining.raw;
+    return {
+      sources: [
+        partialSource({
+          id: componentId,
+          location: sourceLocation(
+            componentId,
+            "evm:137",
+            "0x00000000000000000000000000000000000000b6",
+          ),
+          sourceRaw: output,
+          expectedRaw: output,
+          minimumRaw: output,
+          feeUsd: "0",
+        }),
+      ],
+      reasonCodes: [],
+    };
+  },
+});
+assert.deepEqual(residualRequests, ["stable:1000000", "native:300000"]);
+assert.equal(residualPlan.sources.length, 2);
 
 console.log(
   "[funding-composite-source-tests] ok exact destination/required fixture, minimal-excess selection, insufficient aggregate rejection, bounded fail-closed search, automatic venue preparation plus one or two Relay sources, irrelevant gas blocker exclusion, user-wallet exclusion, exact aggregate minimum, independent dependencies, atomic multi-reservations, fee cap, duplicate rejection, account capacity across automatic/client boundaries",
