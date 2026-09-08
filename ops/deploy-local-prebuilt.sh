@@ -72,6 +72,11 @@ else
   echo "Creating repo archive ${ARCHIVE_PATH} from git ref ${GIT_REF}"
   git -C "${ROOT_DIR}" archive --format=tar.gz --output "${ARCHIVE_PATH}" "${GIT_REF}"
 
+  # Run before any artifact upload; the remote check only reads disk metadata.
+  bash "${ROOT_DIR}/ops/preflight-deploy-space.sh" \
+    "${REMOTE_HOST}" "${REMOTE_ARCHIVE_DIR}" "${APP_DIR}" \
+    "${ARCHIVE_PATH}" "${IMAGE_ARCHIVE_PATH}"
+
   echo "Uploading repo archive to ${REMOTE_HOST}:${REMOTE_ARCHIVE}"
   scp "${ARCHIVE_PATH}" "${REMOTE_HOST}:${REMOTE_ARCHIVE}"
 

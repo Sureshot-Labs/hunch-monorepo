@@ -125,6 +125,14 @@ fi
 
 echo "Deploy complete."
 
+# Keep the current checkout plus three previous file copies. Never rotate on a
+# failed deploy, or on an invocation that did not create a backup.
+if [[ -n "${BACKUP_DIR:-}" ]]; then
+  if ! bash "${APP_DIR}/ops/rotate-deploy-backups.sh" "${APP_DIR}" --apply; then
+    echo "WARNING: deploy succeeded, but old backup rotation failed." >&2
+  fi
+fi
+
 # Optional cleanup to reclaim disk (keeps images used in last 3h by default).
 # Run it detached so a slow prune cannot turn a successful deploy into an SSH failure.
 if [[ "${DOCKER_PRUNE:-1}" == "1" ]]; then
