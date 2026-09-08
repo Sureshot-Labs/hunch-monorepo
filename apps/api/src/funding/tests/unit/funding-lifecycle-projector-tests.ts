@@ -425,6 +425,83 @@ function facts(
     ],
   });
   const result = deriveFundingLifecycle(partial);
+  const expiredPreparation = facts({
+    plan: {
+      ...partial.plan,
+      completionEvidence: "destination_credit_and_venue_readiness",
+      venuePreparationMinimumDestination: destination,
+      routeLegs: [routeLeg("sent")],
+    },
+    actions: [
+      { ...completedAction, requiresSourceDebitEvidence: false },
+      { ...omittedAction, routeLegId: null, requiresVenueReadiness: true },
+    ],
+    transfers: [transfer("destination_credit", { routeLegId: "sent" })],
+  });
+  const expiredProjection = deriveFundingLifecycle(expiredPreparation);
+  assert.equal(expiredProjection.status, "failed");
+  assert.equal(expiredProjection.safety.terminal, true);
+  assert.equal(
+    expiredProjection.actions.some((row) => row.actionable),
+    false,
+  );
+  for (const unsafe of [
+    {
+      ...expiredPreparation,
+      actions: expiredPreparation.actions.map((row) =>
+        row.routeLegId === null
+          ? { ...row, expiresAt: new Date(now.getTime() + 1) }
+          : row,
+      ),
+    },
+    {
+      ...expiredPreparation,
+      actions: expiredPreparation.actions.map((row) =>
+        row.routeLegId === null
+          ? {
+              ...row,
+              attempts: [
+                attempt({
+                  outcome: "ambiguous",
+                  broadcastMayHaveOccurred: true,
+                }),
+              ],
+            }
+          : row,
+      ),
+    },
+    {
+      ...expiredPreparation,
+      actions: expiredPreparation.actions.map((row) =>
+        row.routeLegId !== null
+          ? { ...row, requiresSourceDebitEvidence: true }
+          : row,
+      ),
+    },
+    {
+      ...expiredPreparation,
+      transfers: [
+        transfer("destination_credit", {
+          routeLegId: "sent",
+          money: { ...destination, raw: "1" },
+        }),
+      ],
+    },
+    {
+      ...expiredPreparation,
+      transfers: [
+        transfer("destination_credit", {
+          routeLegId: "sent",
+          canonical: false,
+        }),
+      ],
+    },
+    {
+      ...expiredPreparation,
+      consumer: { ...expiredPreparation.consumer, unresolved: true },
+    },
+  ])
+    assert.equal(deriveFundingLifecycle(unsafe).safety.terminal, false);
   const failedBeforeBroadcast = {
     ...omittedAction,
     attempts: [

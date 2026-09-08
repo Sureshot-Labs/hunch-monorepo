@@ -665,6 +665,23 @@ function routeLegsRefunded(
  * and every omitted leg expired without a possible broadcast. This is not
  * a timeout shortcut for an ambiguous broadcast or an underfilled bridge.
  */
+function expiredWithoutBroadcast(
+  action: FundingLifecycleActionFact,
+  now: Date,
+): boolean {
+  return (
+    action.expiresAt !== null &&
+    action.expiresAt <= now &&
+    action.attempts.every(
+      (attempt) =>
+        attempt.outcome === "failed" &&
+        !attempt.broadcastMayHaveOccurred &&
+        attempt.referenceKind === null &&
+        attempt.receipt === null,
+    )
+  );
+}
+
 function isSettledPartialBuy(facts: FundingLifecycleFacts): boolean {
   const legIds = new Set(facts.plan.routeLegs.map((leg) => leg.routeLegId));
   const preparationActions = facts.actions.filter(
@@ -688,6 +705,16 @@ function isSettledPartialBuy(facts: FundingLifecycleFacts): boolean {
           hasCanonicalFinalReceipt(attempt.receipt),
         ),
     );
+  // Symmetric case: bridges settled, but the local preparation was never
+  // broadcast and expired. Received cash is retained, not a completed Buy.
+  const omittedPreparation =
+    facts.plan.completionEvidence ===
+      "destination_credit_and_venue_readiness" &&
+    preparationActions.some((action) => action.requiresVenueReadiness) &&
+    preparationActions.every((action) =>
+      expiredWithoutBroadcast(action, facts.now),
+    ) &&
+    !facts.transfers.some((transfer) => transfer.routeLegId === null);
   if (
     !facts.consumer.required ||
     facts.consumer.completed ||
@@ -695,12 +722,15 @@ function isSettledPartialBuy(facts: FundingLifecycleFacts): boolean {
     facts.reservations.some(
       (reservation) => reservation.state === "consumed",
     ) ||
-    facts.plan.routeLegs.length < (settledPreparation ? 1 : 2) ||
+    facts.plan.routeLegs.length <
+      (settledPreparation || omittedPreparation ? 1 : 2) ||
     (!settledPreparation &&
+      !omittedPreparation &&
       facts.plan.completionEvidence !== "destination_credit") ||
     facts.actions.some((action) =>
       action.routeLegId === null
         ? !settledPreparation &&
+          !omittedPreparation &&
           !(
             // An exact finalized move to the user's controller is not an
             // unfinished bridge leg. Its downstream route still must be
@@ -738,7 +768,7 @@ function isSettledPartialBuy(facts: FundingLifecycleFacts): boolean {
   )
     return false;
   let delivered = settledPreparation ? 1 : 0;
-  let omitted = 0;
+  let omitted = omittedPreparation ? 1 : 0;
   for (const leg of facts.plan.routeLegs) {
     const actions = facts.actions.filter(
       (action) => action.routeLegId === leg.routeLegId,
@@ -749,18 +779,7 @@ function isSettledPartialBuy(facts: FundingLifecycleFacts): boolean {
     if (actions.length === 0) return false;
     if (
       transfers.length === 0 &&
-      actions.every(
-        (action) =>
-          action.attempts.every(
-            (attempt) =>
-              attempt.outcome === "failed" &&
-              !attempt.broadcastMayHaveOccurred &&
-              attempt.referenceKind === null &&
-              attempt.receipt === null,
-          ) &&
-          action.expiresAt !== null &&
-          action.expiresAt <= facts.now,
-      )
+      actions.every((action) => expiredWithoutBroadcast(action, facts.now))
     ) {
       omitted++;
       continue;
@@ -785,7 +804,20 @@ function isSettledPartialBuy(facts: FundingLifecycleFacts): boolean {
     const debit = sumFinalTransfers(transfers, leg.requestedSource, [
       "source_debit",
     ]);
-    if (!debit || BigInt(debit.raw) !== BigInt(leg.requestedSource.raw))
+    // Some executors prove the exact source action with a matched canonical
+    // receipt rather than a separate debit observation. Respect that sealed
+    // evidence contract, but never ignore a conflicting observed debit.
+    if (
+      debit
+        ? BigInt(debit.raw) !== BigInt(leg.requestedSource.raw)
+        : actions.some(
+            (action) =>
+              action.requiresSourceDebitEvidence ||
+              !action.attempts.some((attempt) =>
+                hasCanonicalFinalReceipt(attempt.receipt),
+              ),
+          )
+    )
       return false;
     delivered++;
   }
