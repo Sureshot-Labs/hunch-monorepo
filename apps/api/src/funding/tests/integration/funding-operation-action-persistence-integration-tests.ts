@@ -25,6 +25,7 @@ import {
   finishFundingStepAttemptForUserInTransaction,
   listFundingOperationStepsForUser,
   listPotentialPolymarketHandoffsForCanonicalEvents,
+  resolveAmbiguousProviderFundingStepAttemptForUserInTransaction,
   startFundingStepAttemptForUserInTransaction,
 } from "../../persistence/funding-evidence-repository.js";
 import {
@@ -37,6 +38,8 @@ import {
 } from "../../persistence/funding-operation-repository.js";
 import { applyFundingStepReceiptEvidenceInTransaction } from "../../persistence/funding-step-receipt-repository.js";
 import { isValidFundingCommitPlanBoundary } from "../../validation/funding-commit-plan-validator.js";
+import { readFundingExecutionPreflight } from "../../execution/operation-execution-preflight.js";
+import { ingestFundingObservationInTransaction } from "../../reconciliation/funding-observation-ingestion.js";
 
 const ASSET = {
   networkId: "evm:137",
@@ -2645,6 +2648,227 @@ try {
   assert.equal(
     unknownProviderSubmission.attempt.actualCosts.reasonCode,
     "external_handoff_submission_unknown",
+  );
+
+  const lateReport = {
+    ...reportInput,
+    stepId: independentStepId,
+    attemptId: independentlyStarted.attempt.id,
+    outcome: "submitted" as const,
+    referenceKind: "transaction" as const,
+    receiptRefLookupHmac: hash("late-transaction-reference"),
+    receiptRefCiphertext: "ciphertext:late-transaction-reference",
+  };
+  await client.query("savepoint late_reference_after_success");
+  await applyFundingStepReceiptEvidenceInTransaction(client, {
+    operationId: committed.operation.id,
+    stepId,
+    attemptId: started.attempt.id,
+    networkId: ASSET.networkId,
+    receipt: {
+      ...firstFinalReceipt,
+      evidence: {
+        ...firstFinalReceipt.evidence,
+        transactionHash: `0x${hash("late-success-handoff")}`,
+      },
+    },
+  });
+  await applyFundingStepReceiptEvidenceInTransaction(client, {
+    operationId: committed.operation.id,
+    stepId: independentStepId,
+    attemptId: independentlyStarted.attempt.id,
+    networkId: ASSET.networkId,
+    receipt: {
+      ...firstFinalReceipt,
+      evidence: { transactionHash: `0x${"cd".repeat(32)}` },
+    },
+  });
+  const lateSuccessSegments = await client.query<{ id: string }>(
+    "select id from funding_operation_segments where operation_id = $1 order by ordinal",
+    [committed.operation.id],
+  );
+  for (const segment of lateSuccessSegments.rows) {
+    for (const kind of ["source_debit", "destination_credit"] as const) {
+      await ingestFundingObservationInTransaction(client, {
+        discoverySource: "chain_rpc",
+        observation: {
+          operationId: committed.operation.id,
+          segmentId: segment.id,
+          kind,
+          networkId: ASSET.networkId,
+          assetId: ASSET.assetId,
+          assetDecimals: ASSET.decimals,
+          txHash: opaque(`late-success-${kind}`),
+          eventIndex: "0",
+          fromAddress: sourceLocation.details.address,
+          toAddress: sourceLocation.details.address,
+          rawAmount: kind === "source_debit" ? "1000000" : "995000",
+          observedAt: new Date(),
+          ledgerHeight: "999",
+          blockHash: opaque("late-success-block"),
+          finalityStatus: "finalized",
+          finalizedAt: new Date(),
+        },
+      });
+    }
+  }
+  assert.equal(
+    (
+      await loadFundingLifecycleProjectionForOperation(client, {
+        operationId: committed.operation.id,
+      })
+    )?.lifecycle.status,
+    "completed",
+    "the fixture must have canonical completion facts before the late report",
+  );
+  await finishFundingStepAttemptForUserInTransaction(client, lateReport);
+  assert.equal(
+    (
+      await fetchFundingOperationStepForUser(client, {
+        userId,
+        operationId: committed.operation.id,
+        stepId: independentStepId,
+      })
+    )?.state,
+    "succeeded",
+    "late evidence must never undo a canonical success",
+  );
+  assert.equal(
+    (
+      await fetchFundingOperationForUser(client, {
+        userId,
+        operationId: committed.operation.id,
+      })
+    )?.status,
+    "completed",
+  );
+  await client.query("rollback to savepoint late_reference_after_success");
+  await client.query("release savepoint late_reference_after_success");
+
+  await client.query("savepoint late_provider_reference");
+  const lateProviderReport = {
+    ...lateReport,
+    outcome: "ambiguous" as const,
+    referenceKind: "provider_receipt" as const,
+    receiptRefLookupHmac: hash("late-provider-reference"),
+    receiptRefCiphertext: "ciphertext:late-provider-reference",
+    actualCosts: {
+      networkFeeRaw: null,
+      providerReferenceKind: "privy_transaction",
+    },
+  };
+  const providerEnriched = await finishFundingStepAttemptForUserInTransaction(
+    client,
+    lateProviderReport,
+  );
+  assert.equal(providerEnriched.attempt.referenceKind, "provider_receipt");
+  for (const resolution of [
+    {
+      kind: "transaction",
+      receiptRefCiphertext: "ciphertext:resolved-late-provider",
+      receiptRefLookupHmac: hash("resolved-late-provider"),
+      lookupKeyVersion: 1,
+    },
+    {
+      kind: "definitive_failure",
+      actualCosts: { reasonCode: "provider_transaction_failed" },
+    },
+  ] as const) {
+    await client.query("savepoint resolved_late_provider");
+    await resolveAmbiguousProviderFundingStepAttemptForUserInTransaction(
+      client,
+      {
+        userId,
+        operationId: committed.operation.id,
+        stepId: independentStepId,
+        attemptId: independentlyStarted.attempt.id,
+        providerReferenceLookupHmac: lateProviderReport.receiptRefLookupHmac,
+        resolution,
+      },
+    );
+    const acknowledged = await finishFundingStepAttemptForUserInTransaction(
+      client,
+      lateProviderReport,
+    );
+    assert.equal(acknowledged.attempt.id, providerEnriched.attempt.id);
+    assert.equal(
+      acknowledged.attempt.referenceKind,
+      resolution.kind === "transaction" ? "transaction" : null,
+    );
+    await expectFundingError(
+      finishFundingStepAttemptForUserInTransaction(client, {
+        ...lateProviderReport,
+        receiptRefLookupHmac: hash("conflicting-late-provider"),
+      }),
+      "invalid_state_transition",
+    );
+    await client.query("rollback to savepoint resolved_late_provider");
+    await client.query("release savepoint resolved_late_provider");
+  }
+  await client.query("rollback to savepoint late_provider_reference");
+  await client.query("release savepoint late_provider_reference");
+  const enriched = await finishFundingStepAttemptForUserInTransaction(
+    client,
+    lateReport,
+  );
+  assert.equal(enriched.attempt.id, independentlyStarted.attempt.id);
+  assert.equal(
+    enriched.attempt.finishedAt?.getTime(),
+    unknownProviderSubmission.attempt.finishedAt?.getTime(),
+  );
+  assert.equal(
+    enriched.attempt.receiptRefLookupHmac,
+    lateReport.receiptRefLookupHmac,
+  );
+  const lateReplay = await finishFundingStepAttemptForUserInTransaction(
+    client,
+    lateReport,
+  );
+  assert.equal(lateReplay.attempt.id, enriched.attempt.id);
+  const operationAfterReport = await fetchFundingOperationForUser(client, {
+    userId,
+    operationId: committed.operation.id,
+  });
+  assert.ok(operationAfterReport);
+  const stepsAfterReport = await listFundingOperationStepsForUser(client, {
+    userId,
+    operationId: committed.operation.id,
+  });
+  const readPreflight = await readFundingExecutionPreflight(
+    client,
+    userId,
+    operationAfterReport,
+    stepsAfterReport,
+  );
+  assert.equal(readPreflight.operationVersion, operationAfterReport.version);
+  assert.equal(
+    (
+      await readFundingExecutionPreflight(
+        client,
+        otherUserId,
+        operationAfterReport,
+        stepsAfterReport,
+      )
+    ).complete,
+    false,
+  );
+  assert.equal(
+    (
+      await readFundingExecutionPreflight(
+        client,
+        userId,
+        { ...operationAfterReport, version: operationAfterReport.version - 1 },
+        stepsAfterReport,
+      )
+    ).complete,
+    false,
+  );
+  await expectFundingError(
+    finishFundingStepAttemptForUserInTransaction(client, {
+      ...lateReport,
+      receiptRefLookupHmac: hash("conflicting-late-reference"),
+    }),
+    "invalid_state_transition",
   );
 
   const matchingHandoffs =

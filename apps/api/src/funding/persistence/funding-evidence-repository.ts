@@ -1275,6 +1275,8 @@ export async function finishFundingStepAttemptInTransaction(
     lookupKeyVersion: number | null;
     actualCosts: JsonRecord;
     now?: Date;
+    /** Only the scoped report path may enrich a locked reference-less attempt. */
+    enrichUnreferencedAmbiguity?: boolean;
   }>,
 ): Promise<FundingStepAttempt> {
   const requiresAmbiguousBroadcastEvidence =
@@ -1313,7 +1315,12 @@ export async function finishFundingStepAttemptInTransaction(
           lookup_key_version = $7,
           actual_costs = $8::jsonb,
           finished_at = $9
-      where id = $1 and outcome = 'started'
+      where id = $1 and (
+        outcome = 'started'
+        or ($10::boolean and outcome = 'ambiguous'
+            and reference_kind is null and receipt_ref_lookup_hmac is null
+            and receipt_ref_ciphertext is null)
+      )
       returning ${attemptColumns}
     `,
     [
@@ -1326,6 +1333,7 @@ export async function finishFundingStepAttemptInTransaction(
       input.lookupKeyVersion,
       input.actualCosts,
       input.now ?? new Date(),
+      input.enrichUnreferencedAmbiguity === true,
     ],
   );
   const row = rows[0];
@@ -1338,17 +1346,38 @@ export async function finishFundingStepAttemptInTransaction(
   return mapAttempt(row);
 }
 
+type FundingAttemptReportEvidence = Readonly<{
+  outcome: FundingStepAttemptOutcome;
+  broadcastMayHaveOccurred: boolean;
+  referenceKind: FundingStepAttempt["referenceKind"];
+  receiptRefLookupHmac: string | null;
+  lookupKeyVersion: number | null;
+  actualCosts: JsonRecord;
+}>;
+
+function clientReportFingerprint(input: FundingAttemptReportEvidence): string {
+  return canonicalJsonHash({
+    outcome: input.outcome,
+    broadcastMayHaveOccurred: input.broadcastMayHaveOccurred,
+    referenceKind: input.referenceKind,
+    receiptRefLookupHmac: input.receiptRefLookupHmac,
+    lookupKeyVersion: input.lookupKeyVersion,
+    actualCosts: input.actualCosts,
+  });
+}
+
 function finalizedAttemptMatchesReport(
   attempt: FundingStepAttempt,
-  input: Readonly<{
-    outcome: FundingStepAttemptOutcome;
-    broadcastMayHaveOccurred: boolean;
-    referenceKind: FundingStepAttempt["referenceKind"];
-    receiptRefLookupHmac: string | null;
-    lookupKeyVersion: number | null;
-    actualCosts: JsonRecord;
-  }>,
+  input: FundingAttemptReportEvidence,
 ): boolean {
+  // Provider resolution changes the current reference, not whether this exact
+  // late client report was already accepted. Keep an opaque acknowledgement.
+  if (
+    attempt.actualCosts.acceptedLateClientReportFingerprint ===
+    clientReportFingerprint(input)
+  ) {
+    return true;
+  }
   return (
     attempt.outcome === input.outcome &&
     attempt.broadcastMayHaveOccurred === input.broadcastMayHaveOccurred &&
@@ -1445,7 +1474,20 @@ export async function finishFundingStepAttemptForUserInTransaction(
     );
   }
   const priorAttempt = mapAttempt(priorAttemptRow);
-  if (priorAttempt.outcome !== "started") {
+  const enrichUnreferencedAmbiguity =
+    priorAttempt.outcome === "ambiguous" &&
+    priorAttempt.broadcastMayHaveOccurred &&
+    priorAttempt.referenceKind === null &&
+    priorAttempt.receiptRefLookupHmac === null &&
+    priorAttempt.receiptRefCiphertext === null &&
+    priorAttempt.lookupKeyVersion === null &&
+    (input.outcome === "submitted" || input.outcome === "ambiguous") &&
+    input.broadcastMayHaveOccurred &&
+    input.referenceKind !== null &&
+    input.receiptRefLookupHmac !== null &&
+    input.receiptRefCiphertext !== null &&
+    input.lookupKeyVersion !== null;
+  if (priorAttempt.outcome !== "started" && !enrichUnreferencedAmbiguity) {
     if (!finalizedAttemptMatchesReport(priorAttempt, input)) {
       throw new FundingPersistenceError(
         "invalid_state_transition",
@@ -1457,7 +1499,19 @@ export async function finishFundingStepAttemptForUserInTransaction(
       stepState: reportAcknowledgementStepState(priorAttempt.outcome),
     };
   }
-  const attempt = await finishFundingStepAttemptInTransaction(client, input);
+  const attempt = await finishFundingStepAttemptInTransaction(client, {
+    ...input,
+    enrichUnreferencedAmbiguity,
+    actualCosts: enrichUnreferencedAmbiguity
+      ? {
+          ...input.actualCosts,
+          acceptedLateClientReportFingerprint: clientReportFingerprint(input),
+        }
+      : input.actualCosts,
+    now: enrichUnreferencedAmbiguity
+      ? (priorAttempt.finishedAt ?? input.now)
+      : input.now,
+  });
   const now = input.now ?? new Date();
   const lifecycle = await projectedFundingLifecycleInTransaction(client, {
     operationId: input.operationId,
@@ -1530,15 +1584,6 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
   }>
 > {
   const now = input.now ?? new Date();
-  const resolvedActualCosts =
-    input.resolution.kind === "definitive_failure"
-      ? {
-          ...input.resolution.actualCosts,
-          ...(input.retryableDefinitiveFailure
-            ? { retryableProviderFailure: true }
-            : {}),
-        }
-      : null;
   const operationResult = await client.query<{
     operation_support_metadata: JsonRecord;
     operation_version: string | number;
@@ -1590,6 +1635,22 @@ export async function resolveAmbiguousProviderFundingStepAttemptForUserInTransac
     );
   }
   const prior = mapAttempt(priorRow);
+  const resolvedActualCosts =
+    input.resolution.kind === "definitive_failure"
+      ? {
+          ...input.resolution.actualCosts,
+          ...(input.retryableDefinitiveFailure
+            ? { retryableProviderFailure: true }
+            : {}),
+          ...(typeof prior.actualCosts.acceptedLateClientReportFingerprint ===
+          "string"
+            ? {
+                acceptedLateClientReportFingerprint:
+                  prior.actualCosts.acceptedLateClientReportFingerprint,
+              }
+            : {}),
+        }
+      : null;
   const lifecycleBeforeResolution =
     await projectedFundingLifecycleInTransaction(client, {
       operationId: input.operationId,

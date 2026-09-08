@@ -30,6 +30,10 @@ import {
 } from "../funding/planner/runtime-service.js";
 import { preflightTrustedTradeShortfall } from "../funding/planner/trade-shortfall-preflight.js";
 import {
+  readFundingExecutionPreflight,
+  type FundingExecutionPreflight,
+} from "../funding/execution/operation-execution-preflight.js";
+import {
   FundingReceiveSessionSelectionConflictError,
   FundingReceiveSessionService,
   type FundingReceiveSessionResponse,
@@ -243,6 +247,11 @@ export type FundingRouteDependencies = Readonly<{
     userId: string,
     operationId: string,
   ): Promise<readonly FundingOperationStep[]>;
+  executionPreflight?(
+    userId: string,
+    operation: FundingOperationRow,
+    steps: readonly FundingOperationStep[],
+  ): Promise<FundingExecutionPreflight>;
   consumerReservation(
     userId: string,
     operationId: string,
@@ -424,11 +433,13 @@ async function publicProjectedOperationResponse(
   userId: string,
   operation: FundingOperationRow,
 ) {
+  const steps = await dependencies.operationSteps(userId, operation.id);
   return {
     operation: publicOperation(operation),
-    steps: publicOperationSteps(
-      await dependencies.operationSteps(userId, operation.id),
-    ),
+    steps: publicOperationSteps(steps),
+    executionPreflight: dependencies.executionPreflight
+      ? await dependencies.executionPreflight(userId, operation, steps)
+      : null,
     ingress: publicIngress(operation),
   };
 }
@@ -1416,11 +1427,11 @@ export function registerFundingRoutes(
           }
           return reply.send({
             ok: true,
-            operation: publicOperation(operation),
-            steps: publicOperationSteps(
-              await dependencies.operationSteps(userId, operation.id),
-            ),
-            ingress: publicIngress(operation),
+            ...(await publicProjectedOperationResponse(
+              dependencies,
+              userId,
+              operation,
+            )),
             consumerReservation: publicConsumerReservation(
               await dependencies.consumerReservation(userId, request.params.id),
             ),
@@ -1515,6 +1526,8 @@ export const fundingRoutes: FastifyPluginAsync = async (app) => {
     operation: (userId, operationId) => runtime.operation(userId, operationId),
     operationSteps: (userId, operationId) =>
       runtime.operationSteps(userId, operationId),
+    executionPreflight: (userId, operation, steps) =>
+      readFundingExecutionPreflight(pool, userId, operation, steps),
     consumerReservation: (userId, operationId) =>
       fetchFundingConsumerReservationForUser(pool, {
         userId,

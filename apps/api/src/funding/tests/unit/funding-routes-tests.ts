@@ -28,6 +28,8 @@ import {
   type FundingRouteDependencies,
 } from "../../../routes/funding.js";
 import { fundingValidationErrorResponseSchema } from "../../../schemas/funding.js";
+import { buildFundingExecutionPreflight } from "../../execution/operation-execution-preflight.js";
+import { canonicalJsonHash } from "../../persistence/canonical.js";
 
 const USER_ID = "10000000-0000-4000-8000-000000000001";
 const NOW = new Date("2026-07-24T12:00:00.000Z");
@@ -331,6 +333,91 @@ function operationSteps(): readonly FundingOperationStep[] {
     },
   ];
 }
+
+await test("execution preflight includes dependent controllers from immutable profiles", () => {
+  const first = operationSteps()[0];
+  assert.ok(first);
+  const secondAction = {
+    ...preparedAction(),
+    kind: "evm_transaction" as const,
+    senderWalletId: "wallet_external_12345678",
+  };
+  const steps = [
+    { ...first, actionFingerprint: canonicalJsonHash(first.normalizedAction) },
+    {
+      ...first,
+      id: "dependent_step_12345678",
+      state: "planned" as const,
+      dependsOnStepId: first.id,
+      normalizedAction: secondAction,
+      actionFingerprint: canonicalJsonHash(secondAction),
+    },
+  ];
+  const profiles = {
+    profiles: [
+      {
+        walletId: "wallet_poly_runtime_12345678",
+        networkId: "evm:137",
+        controllerWalletRef: "controller_internal_12345678",
+      },
+      {
+        profiles: [
+          {
+            walletId: "wallet_external_12345678",
+            networkId: "evm:137",
+            controllerWalletRef: "controller_external_12345678",
+          },
+        ],
+      },
+    ],
+  };
+  const result = buildFundingExecutionPreflight(operation(), steps, profiles);
+  assert.equal(result.complete, true);
+  assert.deepEqual(result.requiredControllerWalletRefs, [
+    "controller_external_12345678",
+    "controller_internal_12345678",
+  ]);
+  assert.equal(result.operationVersion, operation().version);
+  assert.equal(
+    buildFundingExecutionPreflight(operation(), steps, null).complete,
+    false,
+  );
+  const [firstStep, secondStep] = steps;
+  assert.ok(firstStep && secondStep);
+  assert.equal(
+    buildFundingExecutionPreflight(operation(), [firstStep], {
+      profiles: [
+        { ...profiles.profiles[0], controllerWalletRef: "invalid/ref" },
+      ],
+    }).complete,
+    false,
+    "malformed historical refs must not break operation response serialization",
+  );
+  assert.deepEqual(
+    buildFundingExecutionPreflight(
+      operation(),
+      [{ ...firstStep, state: "succeeded" }, secondStep],
+      profiles,
+    ).requiredControllerWalletRefs,
+    ["controller_external_12345678"],
+  );
+  assert.equal(
+    buildFundingExecutionPreflight(
+      operation(),
+      [{ ...firstStep, actionFingerprint: "bad" }],
+      profiles,
+    ).complete,
+    false,
+  );
+  assert.equal(
+    buildFundingExecutionPreflight(
+      operation(),
+      [{ ...firstStep, executorId: "unknown" }],
+      profiles,
+    ).complete,
+    false,
+  );
+});
 
 function receiveSession(): FundingReceiveSession {
   const receiveTarget = {
@@ -1726,6 +1813,16 @@ await test("operation reads expose safe resumable state, not internal snapshots"
         },
       },
     }),
+    executionPreflight: async (userId, operationRow, steps) => {
+      assert.equal(userId, USER_ID);
+      assert.equal(steps.length, 1);
+      return {
+        operationId: operationRow.id,
+        operationVersion: operationRow.version,
+        complete: true,
+        requiredControllerWalletRefs: [USER_ID],
+      };
+    },
     consumerReservation: async (userId, operationId) => {
       reservationScope = { userId, operationId };
       return {
@@ -1747,6 +1844,12 @@ await test("operation reads expose safe resumable state, not internal snapshots"
     const body = response.json();
     assert.equal(body.operation.operationId, "operation_id_12345678");
     assert.equal(body.operation.venueId, "polymarket");
+    assert.deepEqual(body.executionPreflight, {
+      operationId: body.operation.operationId,
+      operationVersion: body.operation.version,
+      complete: true,
+      requiredControllerWalletRefs: [USER_ID],
+    });
     assert.deepEqual(body.operation.requestedSourceAmount, {
       asset: ASSET,
       raw: "1000000",

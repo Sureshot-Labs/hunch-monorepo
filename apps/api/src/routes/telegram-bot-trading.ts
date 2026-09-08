@@ -1080,25 +1080,10 @@ async function registerTelegramBotTradingRoutes(
         : null;
       try {
         const cancelled = await fundingService.cancel(request.body);
-        if (!marketReturn) return reply.send(cancelled);
-        return reply.send(
-          await buildTelegramBotTradingMarketMessage({
-            appBaseUrl: request.body.appBaseUrl,
-            chatId: String(request.body.chatId),
-            context: {
-              focusSide: marketReturn.side,
-              origin: "direct",
-              returnCallbackData: "hm:v1:home",
-            },
-            db,
-            marketRef: marketReturn.marketId,
-            telegramMessageId: request.body.telegramMessageId,
-            telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
-            telegramUserId: request.body.telegramUserId,
-            trading: createTradingForRequest(request),
-            writeTradeInputContext,
-          }),
-        );
+        // Cancellation has its own terminal outbox edit. Do not render a market
+        // here only to have that edit replace it with "Receive cancelled".
+        // Navigation uses the separate, non-cancelling back-to-market endpoint.
+        return reply.send(cancelled);
       } catch (error) {
         if (
           marketReturn &&

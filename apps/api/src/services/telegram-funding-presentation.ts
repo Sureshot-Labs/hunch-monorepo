@@ -26,6 +26,19 @@ import {
 } from "./telegram-funding-route.js";
 import type { FundingQuoteSummary, Money } from "../funding/domain/types.js";
 import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
+import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
+
+function telegramFundingAppDepositRows() {
+  const button = buildHunchMiniAppWebButton({
+    appBaseUrl:
+      process.env.HUNCH_SIGNAL_BOT_APP_BASE_URL?.trim() ||
+      "https://app.hunch.trade",
+    enabled: true,
+    path: "/tg?deposit=bridge",
+    text: "Deposit SOL, USDC & more · Hunch",
+  });
+  return button ? [[button]] : [];
+}
 
 function expiryLabel(value: string): string {
   const date = new Date(value);
@@ -204,9 +217,10 @@ export function buildTelegramFundingTargetMessage(input: {
               contextId: input.contextId,
               kind: "cancel",
             }),
-            text: "Cancel",
+            text: "Cancel receive",
           },
         ],
+        ...telegramFundingAppDepositRows(),
       ],
     },
     text: joinTelegramMarkdownV2Lines([
@@ -285,6 +299,7 @@ export function buildTelegramFundingTargetChoicesMessage(input: {
     reply_markup: {
       inline_keyboard: [
         ...targetRows,
+        ...telegramFundingAppDepositRows(),
         [
           {
             callback_data: telegramFundingCallbackData({
@@ -552,30 +567,29 @@ function fundingProgressReplyMarkup(
   const moneyReceived =
     projection.rawAmount != null ||
     (projection.receiptBreakdown?.sourceReceiptCount ?? 0) > 0;
-  const navigationButton =
-    projection.returnToMarketAvailable && moneyReceived
+  const navigationButton = projection.returnToMarketAvailable
+    ? {
+        callback_data: telegramFundingCallbackData({
+          contextId: projection.fundingContextId,
+          kind: "back_to_market",
+        }),
+        text: "⬅️ Back to market",
+      }
+    : !moneyReceived
       ? {
           callback_data: telegramFundingCallbackData({
             contextId: projection.fundingContextId,
-            kind: "back_to_market",
+            kind: "targets",
           }),
-          text: "⬅️ Back to market",
+          text: "⬅️ Back",
         }
-      : !moneyReceived
-        ? {
-            callback_data: telegramFundingCallbackData({
-              contextId: projection.fundingContextId,
-              kind: "targets",
-            }),
-            text: "⬅️ Back",
-          }
-        : {
-            callback_data: telegramFundingCallbackData({
-              contextId: projection.fundingContextId,
-              kind: "cancel",
-            }),
-            text: "Cancel",
-          };
+      : {
+          callback_data: telegramFundingCallbackData({
+            contextId: projection.fundingContextId,
+            kind: "cancel",
+          }),
+          text: "Cancel",
+        };
   return {
     inline_keyboard: [
       ...(projection.receiveAddress
@@ -607,6 +621,7 @@ function fundingProgressReplyMarkup(
         },
         navigationButton,
       ],
+      ...telegramFundingAppDepositRows(),
       homeRow,
     ],
   };

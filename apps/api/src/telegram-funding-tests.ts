@@ -79,6 +79,7 @@ import {
   loadTelegramFundingReceiveSession,
   resolveTelegramDirectPusdChoice,
   resolveTelegramFundingTargetChoice,
+  soleDirectTelegramFundingChoice,
   telegramFundingConsentPresentationMode,
 } from "./services/telegram-funding.js";
 import {
@@ -2043,6 +2044,39 @@ for (const expected of [
   assert.equal(requestedToken, expected.token);
 }
 
+const soleDirectTarget = {
+  presentation: telegramPolygonFundingPresentation("pusd_direct"),
+};
+assert.equal(soleDirectTelegramFundingChoice([soleDirectTarget]), "pd");
+assert.equal(soleDirectTelegramFundingChoice([]), null);
+assert.equal(
+  soleDirectTelegramFundingChoice([soleDirectTarget, soleDirectTarget]),
+  null,
+);
+assert.equal(
+  soleDirectTelegramFundingChoice([
+    {
+      presentation: {
+        ...soleDirectTarget.presentation,
+        routeKey: "polymarket_base_usdc_relay_v1",
+      },
+    },
+  ]),
+  null,
+  "a sole automatic conversion must still require explicit consent",
+);
+assert.equal(
+  soleDirectTelegramFundingChoice([
+    {
+      presentation: {
+        ...soleDirectTarget.presentation,
+        routeKey: "future_unknown_route",
+      },
+    },
+  ]),
+  null,
+);
+
 const targetMessage = buildTelegramFundingTargetMessage({
   automaticConversion: false,
   contextId,
@@ -2753,6 +2787,36 @@ await assert.rejects(
 );
 assert.ok(waiting);
 const waitingMessage = buildTelegramFundingProgressMessage(waiting);
+const waitingBuyButtons =
+  buildTelegramFundingProgressMessage({
+    ...waiting,
+    returnToMarketAvailable: true,
+  }).reply_markup?.inline_keyboard.flat() ?? [];
+assert.ok(
+  waitingBuyButtons.some(
+    (button) =>
+      "callback_data" in button &&
+      button.callback_data === `hm:v1:fund:market:${contextId}`,
+  ),
+  "returning to the market before a deposit must be navigation, not cancellation",
+);
+assert.ok(
+  !waitingBuyButtons.some(
+    (button) =>
+      "callback_data" in button &&
+      button.callback_data === `hm:v1:fund:cancel:${contextId}`,
+  ),
+);
+const appDepositButton = waitingBuyButtons.find(
+  (button) =>
+    "web_app" in button && button.text === "Deposit SOL, USDC & more · Hunch",
+);
+assert.ok(appDepositButton && "web_app" in appDepositButton);
+assert.equal(new URL(appDepositButton.web_app.url).pathname, "/tg");
+assert.equal(
+  new URL(appDepositButton.web_app.url).searchParams.get("deposit"),
+  "bridge",
+);
 assert.match(waitingMessage.text, /Receive window.*24 hours/u);
 assert.equal(waitingMessage.text.includes("2026\\-08\\-06 12:00:00 UTC"), true);
 assert.equal(

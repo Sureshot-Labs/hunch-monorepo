@@ -1033,6 +1033,16 @@ export const fundingOperationResponseSchema = z
     operation: fundingOperationPublicSchema,
     steps: z.array(fundingOperationStepPublicSchema).max(256),
     ingress: externalIngressInstructionSchema.nullable(),
+    executionPreflight: z
+      .object({
+        operationId: opaqueIdSchema,
+        operationVersion: z.number().int().nonnegative(),
+        complete: z.boolean(),
+        requiredControllerWalletRefs: z.array(opaqueIdSchema).max(256),
+      })
+      .strict()
+      .nullable()
+      .optional(),
     consumerReservation: z
       .object({
         operationId: opaqueIdSchema,

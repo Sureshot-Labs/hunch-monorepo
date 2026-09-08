@@ -2770,6 +2770,28 @@ try {
   } finally {
     claimBoundary.release();
   }
+  const selectedAgain = await service.selectTarget(
+    {
+      chatId: telegramUserId,
+      telegramUserId,
+      telegramMessageId: 101,
+      contextId: fundingContextId,
+      choiceToken: "p",
+      idempotencyKey: selectIdempotencyKey,
+    },
+    new Date(now.getTime() + 1_075),
+  );
+  assert.equal(selectedAgain.durableFundingDeliveryRequired, true);
+  assert.equal(
+    (
+      await pool.query<{ status: string }>(
+        `select status from telegram_bot_action_outbox where funding_session_id = $1 and action = 'funding_edit'`,
+        [fundingContextId],
+      )
+    ).rows[0]?.status,
+    "pending",
+    "selecting the same pUSD option after Back must rearm the delivered address",
+  );
   const reopenedAfterMenuOverwrite = await service.open(
     {
       chatId: telegramUserId,

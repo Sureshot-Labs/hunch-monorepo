@@ -112,6 +112,7 @@ import {
   resolveTelegramFundingTargets,
   resolveTelegramFundingTargetChoice,
   telegramFundingRouteDescriptorForChoiceToken,
+  telegramFundingRouteDescriptorForRouteKey,
   type TelegramFundingReceivePresentationMode,
   type TelegramFundingTargetCapability,
 } from "./telegram-funding-route.js";
@@ -541,6 +542,18 @@ export function buildTelegramFundingTargetMessageForSession(input: {
         targets,
       })
     : buildTelegramFundingUnavailableMessage({ reason: "unavailable" });
+}
+
+export function soleDirectTelegramFundingChoice(
+  targets: readonly Pick<TelegramFundingTargetCapability, "presentation">[],
+): string | null {
+  const target = targets.length === 1 ? targets[0] : null;
+  const descriptor = target
+    ? telegramFundingRouteDescriptorForRouteKey(target.presentation.routeKey)
+    : null;
+  return descriptor && !descriptor.automaticServerExecution
+    ? descriptor.choiceToken
+    : null;
 }
 
 export function loadTelegramFundingReceiveSession(
@@ -1308,26 +1321,14 @@ export class TelegramFundingService {
         });
       },
     });
-    if (context.replayed) {
-      return this.session(
-        {
-          contextId: context.context.id,
-          telegramUserId: identity.telegramUserId,
-          telegramMessageId: input.telegramMessageId,
-          chatId: identity.chatId,
-          view: "progress",
-        },
-        now,
-        decorateProgress,
-      );
-    }
     return this.session(
       {
+        ...input,
         contextId: context.context.id,
+        selectSoleDirectOnOpen: true,
         telegramUserId: identity.telegramUserId,
         telegramMessageId: input.telegramMessageId,
         chatId: identity.chatId,
-        view: "progress",
       },
       now,
       decorateProgress,
@@ -1705,11 +1706,12 @@ export class TelegramFundingService {
     }
     return this.session(
       {
+        ...input,
         contextId: context.context.id,
+        selectSoleDirectOnOpen: true,
         telegramUserId: identity.telegramUserId,
         telegramMessageId: input.telegramMessageId,
         chatId: identity.chatId,
-        view: "progress",
       },
       now,
       decorateProgress,
@@ -2027,6 +2029,8 @@ export class TelegramFundingService {
       contextId: string;
       deliveryProjection?: unknown;
       requestObservation?: boolean;
+      /** Internal open path only; status reads never select a receive asset. */
+      selectSoleDirectOnOpen?: boolean;
       view?: "address" | "delivery" | "progress" | "targets";
     },
     now = new Date(),
@@ -2259,6 +2263,21 @@ export class TelegramFundingService {
     if (!addressDisclosureOpen) {
       return buildTelegramFundingUnavailableMessage({ reason: "expired" });
     }
+    const soleChoice = soleDirectTelegramFundingChoice(availableTargets);
+    // A sole direct receive option involves no conversion or signature.
+    // Other routes still require the explicit asset/automation disclosure.
+    if (input.selectSoleDirectOnOpen && soleChoice) {
+      return this.selectTarget(
+        {
+          ...input,
+          choiceToken: soleChoice,
+          telegramMessageId: input.telegramMessageId ?? null,
+          idempotencyKey: `direct-receive:${input.contextId}`,
+        },
+        now,
+        decorateProgress,
+      );
+    }
     const message = buildTelegramFundingTargetMessageForSession({
       contextId: owned.context.id,
       expiresAt: owned.context.expiresAt,
@@ -2315,17 +2334,14 @@ export class TelegramFundingService {
           userId: replayOwned.link.userId,
         });
         await this.projectMutationContext(input.contextId, now);
-        return this.session(
-          {
-            contextId: input.contextId,
-            telegramUserId: identity.telegramUserId,
-            telegramMessageId: input.telegramMessageId,
-            chatId: identity.chatId,
-            view: "progress",
-          },
+        return this.presentExistingContext({
+          context: replayOwned.context,
+          identity,
+          link,
+          telegramMessageId: input.telegramMessageId,
           now,
           decorateProgress,
-        );
+        });
       }
     } catch (error) {
       rethrowTelegramFundingPersistenceError(error);
@@ -2509,17 +2525,14 @@ export class TelegramFundingService {
         now,
       });
       await this.projectMutationContext(input.contextId, now);
-      return this.session(
-        {
-          contextId: input.contextId,
-          telegramUserId: identity.telegramUserId,
-          telegramMessageId: input.telegramMessageId,
-          chatId: identity.chatId,
-          view: "progress",
-        },
+      return this.presentExistingContext({
+        context: (await this.loadOwned(input)).context,
+        identity,
+        link,
+        telegramMessageId: input.telegramMessageId,
         now,
         decorateProgress,
-      );
+      });
     } catch (error) {
       rethrowTelegramFundingPersistenceError(error);
     }
