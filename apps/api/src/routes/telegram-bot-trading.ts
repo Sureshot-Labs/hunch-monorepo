@@ -250,6 +250,8 @@ const internalFundingMutationSchema = internalFundingIdentitySchema.extend({
 
 const internalFundingOpenBodySchema = internalFundingMutationSchema
   .extend({
+    navigationMarketId: z.string().uuid().optional(),
+    navigationSide: z.enum(["YES", "NO"]).optional(),
     appBaseUrl: z.string().trim().url(),
     telegramMiniAppEnabled: z.boolean().optional(),
     venue: z.enum(["limitless", "polymarket"]),

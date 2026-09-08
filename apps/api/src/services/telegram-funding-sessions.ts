@@ -208,6 +208,8 @@ type TelegramFundingSessionRow = Readonly<{
   telegram_message_id: string | number | null;
   receive_session_id: string;
   origin: "generic_add_funds" | "buy_return_context";
+  navigation_market_id: string | null;
+  navigation_side: "YES" | "NO" | null;
   market_id: string | null;
   event_id: string | null;
   side: "NO" | "YES" | null;
@@ -276,6 +278,8 @@ export type TelegramFundingSessionContext = Readonly<{
   telegramMessageId: number | null;
   receiveSessionId: string;
   origin: "generic_add_funds" | "buy_return_context";
+  navigationMarketId?: string | null;
+  navigationSide?: "YES" | "NO" | null;
   activeConsentRevision: number | null;
   initialMarketId: string | null;
   initialEventId: string | null;
@@ -323,6 +327,8 @@ const sessionColumns = `
   telegram_message_id,
   receive_session_id,
   origin,
+  navigation_market_id,
+  navigation_side,
   market_id,
   event_id,
   side,
@@ -373,6 +379,8 @@ function publicSession(
       messageId != null && Number.isSafeInteger(messageId) ? messageId : null,
     receiveSessionId: row.receive_session_id,
     origin: row.origin,
+    navigationMarketId: row.navigation_market_id ?? null,
+    navigationSide: row.navigation_side ?? null,
     initialMarketId: row.market_id,
     initialEventId: row.event_id,
     initialSide: row.side,
@@ -776,6 +784,8 @@ type CreateTelegramFundingSessionInput = Readonly<{
   idempotencyKey: string;
   expiresAt: Date;
   now: Date;
+  navigationMarketId?: string;
+  navigationSide?: "YES" | "NO";
   initialBuyReturn?: Readonly<{
     eventId: string | null;
     marketId: string;
@@ -828,6 +838,8 @@ export async function createOrReuseTelegramFundingSessionInTransaction(
         telegram_message_id,
         receive_session_id,
         origin,
+        navigation_market_id,
+        navigation_side,
         market_id,
         event_id,
         side,
@@ -838,7 +850,7 @@ export async function createOrReuseTelegramFundingSessionInTransaction(
         created_at,
         updated_at
       ) values (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::numeric,
+        $1, $2, $3, $4, $5, $6, $7, $16, $17, $8, $9, $10, $11::numeric,
         $12::numeric, $13, $14, $15, $15
       )
       on conflict do nothing
@@ -860,6 +872,8 @@ export async function createOrReuseTelegramFundingSessionInTransaction(
       input.idempotencyKey,
       input.expiresAt,
       input.now,
+      input.navigationMarketId ?? null,
+      input.navigationSide ?? null,
     ],
   );
   const created = inserted.rows[0];

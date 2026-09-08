@@ -996,6 +996,8 @@ export class TelegramFundingService {
       >;
       identity: Readonly<{ chatId: string; telegramUserId: string }>;
       initialBuyReturn?: TelegramFundingInitialBuyReturn;
+      navigationMarketId?: string;
+      navigationSide?: "YES" | "NO";
       initialLink: ActiveTelegramAccountLink;
       now: Date;
       reuseActiveContextForBuyReturn?: boolean;
@@ -1130,6 +1132,8 @@ export class TelegramFundingService {
               expiresAt: new Date(persisted.snapshot.session.expiresAt),
               now: input.now,
               initialBuyReturn: input.initialBuyReturn,
+              navigationMarketId: input.navigationMarketId,
+              navigationSide: input.navigationSide,
             },
           );
           await input.afterContext?.(client, opened);
@@ -1178,7 +1182,11 @@ export class TelegramFundingService {
   }
 
   async open(
-    input: TelegramFundingMutationInput & { venue: string },
+    input: TelegramFundingMutationInput & {
+      venue: string;
+      navigationMarketId?: string;
+      navigationSide?: "YES" | "NO";
+    },
     now = new Date(),
     decorateProgress?: TelegramFundingProgressDecorator,
   ): Promise<TelegramFundingMessage> {
@@ -1191,6 +1199,12 @@ export class TelegramFundingService {
       telegramUserId: identity.telegramUserId,
       userId: initialLink.userId,
       venue: input.venue,
+      ...(input.navigationMarketId
+        ? {
+            navigationMarketId: input.navigationMarketId,
+            navigationSide: input.navigationSide ?? "YES",
+          }
+        : {}),
     });
     try {
       const mutationReplay = await fetchTelegramFundingOpenMutationReplay(
@@ -1303,8 +1317,19 @@ export class TelegramFundingService {
       link: initialLink,
       now,
     });
+    const navigationMarket = input.navigationMarketId
+      ? await findTradeMarketById(this.pool, input.navigationMarketId)
+      : null;
+    const navigation =
+      navigationMarket?.venue === input.venue
+        ? {
+            navigationMarketId: navigationMarket.id,
+            navigationSide: input.navigationSide ?? ("YES" as const),
+          }
+        : {};
     const context = await this.openReceiveContext({
       initialLink,
+      ...navigation,
       identity,
       destination,
       controllerWalletId,
@@ -2597,9 +2622,10 @@ export class TelegramFundingService {
       side: "NO" | "YES";
     }>(
       `
-        select buy_return.market_id, buy_return.side
+        select coalesce(buy_return.market_id, context.navigation_market_id) as market_id,
+               coalesce(buy_return.side, context.navigation_side, 'YES') as side
         from telegram_funding_sessions context
-        join telegram_funding_buy_return_revisions buy_return
+        left join telegram_funding_buy_return_revisions buy_return
           on buy_return.telegram_funding_session_id = context.id
          and buy_return.revision = context.active_buy_return_revision
         where context.id = $1
@@ -2607,7 +2633,7 @@ export class TelegramFundingService {
           and context.telegram_account_id = $3::uuid
           and context.telegram_user_id = $4
           and context.chat_id = $5
-          and context.origin = 'buy_return_context'
+          and coalesce(buy_return.market_id, context.navigation_market_id) is not null
         limit 1
       `,
       [

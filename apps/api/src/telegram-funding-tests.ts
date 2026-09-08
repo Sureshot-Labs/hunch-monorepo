@@ -1,6 +1,10 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import {
+  parseTelegramMarketDeposit,
+  telegramMarketDepositCallback,
+} from "./services/telegram-funding-navigation.js";
 import { readFileSync } from "node:fs";
 
 import { stableWalletOpaqueId } from "./account-value/canonical.js";
@@ -99,6 +103,7 @@ import { classifyTelegramEditFailure } from "./services/signal-bot-telegram-clie
 import {
   drainSignalBotFundingOpenTasks,
   handleSignalBotInteractiveMenuCallback,
+  parseSignalBotInteractiveMenuRoute,
 } from "./services/telegram-bot-menu-actions.js";
 import {
   getDefaultSignalBotPolicy,
@@ -107,6 +112,66 @@ import {
 } from "./services/signal-bot-trading-policy.js";
 
 const contextId = "123e4567-e89b-42d3-a456-426614174000";
+for (const venue of ["polymarket", "limitless"] as const) {
+  for (const side of ["YES", "NO"] as const) {
+    const callback = telegramMarketDepositCallback({
+      venue,
+      marketId: contextId,
+      side,
+    });
+    assert.ok(Buffer.byteLength(callback) <= 64);
+    const parsed = parseTelegramMarketDeposit(callback.slice("hm:v1:".length));
+    assert.deepEqual(parsed, {
+      venue,
+      navigationMarketId: contextId,
+      navigationSide: side,
+    });
+    assert.deepEqual(
+      parseSignalBotInteractiveMenuRoute(callback.slice("hm:v1:".length)),
+      {
+        kind: "deposit",
+        showQr: false,
+        ...parsed,
+      },
+    );
+  }
+}
+assert.equal(
+  parseTelegramMarketDeposit("deposit:polymarket:not-a-market:y"),
+  null,
+);
+assert.equal(
+  telegramMarketDepositCallback({ venue: "polymarket", marketId: "unknown" }),
+  "hm:v1:deposit:polymarket",
+);
+{
+  let receivedNavigation: string | undefined;
+  await handleSignalBotInteractiveMenuCallback({
+    callbackPrefix: "hm:v1:",
+    chatId: "42",
+    telegramUserId: 42,
+    idempotencyKey: "navigation-deposit",
+    messageId: 100,
+    redis: { get: async () => null },
+    render: async () => undefined,
+    renderExpiredSearch: async () => undefined,
+    route: {
+      kind: "deposit",
+      venue: "polymarket",
+      showQr: false,
+      navigationMarketId: contextId,
+      navigationSide: "NO",
+    },
+    loadFunding: async (input) => {
+      receivedNavigation = input.navigationMarketId;
+      assert.equal(input.navigationSide, "NO");
+      assert.equal(input.action, "open");
+      return { text: "Receive" };
+    },
+  });
+  await drainSignalBotFundingOpenTasks();
+  assert.equal(receivedNavigation, contextId);
+}
 const receiveSessionId = "223e4567-e89b-42d3-a456-426614174000";
 const reviewReceiptId = "323e4567-e89b-42d3-a456-426614174001";
 const receiveTargetId = "receive_target_telegram_pusd_12345678";
@@ -3387,6 +3452,34 @@ const cancelled = projectTelegramFundingProgress({
 });
 assert.equal(cancelled?.state, "cancelled");
 assert.ok(cancelled);
+{
+  const navigationOnly = projectTelegramFundingProgress({
+    consent,
+    context: {
+      ...context,
+      navigationMarketId: contextId,
+      navigationSide: "NO",
+    },
+    receipts: [],
+    session: { ...session, status: "cancelled" },
+  });
+  assert.ok(navigationOnly);
+  assert.equal(navigationOnly.state, "cancelled");
+  assert.equal(navigationOnly.returnToMarketAvailable, true);
+  const buttons =
+    buildTelegramFundingProgressMessage(
+      navigationOnly,
+    ).reply_markup?.inline_keyboard.flat();
+  assert.ok(
+    buttons?.some(
+      (button) =>
+        "callback_data" in button &&
+        button.callback_data === `hm:v1:fund:market:${contextId}`,
+    ),
+  );
+  assert.ok(!buttons?.some((button) => /buy|confirm/i.test(button.text)));
+  assert.equal(cancelled.returnToMarketAvailable, undefined);
+}
 const cancelledAfterReceipt = projectTelegramFundingProgress({
   consent,
   context: { ...context, cancelledAt: "2026-08-05T12:04:00.000Z" },

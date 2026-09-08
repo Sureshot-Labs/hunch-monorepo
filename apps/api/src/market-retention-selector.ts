@@ -228,6 +228,7 @@ function protectedRefsSql(
     from ${candidatePoolTable} c
     join telegram_funding_sessions context
       on context.market_id = c.market_id
+      or context.navigation_market_id = c.market_id
       or (context.event_id is not null and context.event_id = c.event_id)
   `
     : "";

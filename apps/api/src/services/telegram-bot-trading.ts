@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { telegramMarketDepositCallback } from "./telegram-funding-navigation.js";
 import { ethers } from "ethers";
 
 import { AuthService } from "../auth.js";
@@ -397,6 +398,7 @@ function buildTelegramTradeShortfallUnavailableReplyMarkup(
   intentId: string,
   venue: TelegramBotTradingVenue,
   openMarketButton: TelegramBotTradingButton | null = null,
+  navigation?: { marketId: string; side: "YES" | "NO" | null },
 ): TelegramBotTradingClientReplyMarkup {
   return {
     inline_keyboard: [
@@ -413,7 +415,9 @@ function buildTelegramTradeShortfallUnavailableReplyMarkup(
           text: "⬅️ Back to market",
         },
         {
-          callback_data: `hm:v1:deposit:${venue}`,
+          callback_data: navigation
+            ? telegramMarketDepositCallback({ venue, ...navigation })
+            : `hm:v1:deposit:${venue}`,
           text: "Deposit",
         },
       ],
@@ -6793,7 +6797,11 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   if (depositNeeded) {
     keyboard.push([
       {
-        callback_data: `hm:v1:deposit:${market.venue}`,
+        callback_data: telegramMarketDepositCallback({
+          venue: market.venue,
+          marketId: market.id,
+          side: focusedSide,
+        }),
         icon_custom_emoji_id: telegramCustomEmojiId("usdc"),
         text: `Deposit to ${formatTelegramVenueLabel(market.venue)}`,
       },
@@ -10964,6 +10972,7 @@ async function previewTelegramTradeIntent(input: {
             input.intent.id,
             input.intent.venue,
             openMarketButton,
+            { marketId: input.market.id, side: input.intent.side },
           ),
         });
         return;
@@ -11008,6 +11017,8 @@ async function previewTelegramTradeIntent(input: {
           reply_markup: buildTelegramTradeShortfallUnavailableReplyMarkup(
             input.intent.id,
             input.intent.venue,
+            null,
+            { marketId: input.market.id, side: input.intent.side },
           ),
         });
         return;

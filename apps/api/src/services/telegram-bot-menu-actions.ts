@@ -23,9 +23,16 @@ import {
   telegramFundingDepositRouteDescriptorForChoiceToken,
   type TelegramFundingDepositRouteKey,
 } from "./telegram-funding-route.js";
+import { parseTelegramMarketDeposit } from "./telegram-funding-navigation.js";
 
 export type SignalBotFundingMenuRoute =
-  | { kind: "deposit"; showQr: boolean; venue: string }
+  | {
+      kind: "deposit";
+      showQr: boolean;
+      venue: string;
+      navigationMarketId?: string;
+      navigationSide?: "YES" | "NO";
+    }
   | {
       kind: "deposit_route";
       route: TelegramFundingDepositRouteKey;
@@ -115,6 +122,9 @@ export function parseSignalBotInteractiveMenuRoute(
     return { kind: "deposit_cancel_active" };
   }
   const depositMatch = route.match(/^(deposit|deposit_qr):([a-z0-9_-]+)$/i);
+  const marketDeposit = parseTelegramMarketDeposit(route);
+  if (marketDeposit)
+    return { kind: "deposit", showQr: false, ...marketDeposit };
   const depositRouteMatch = route.match(/^deposit_route:([a-z0-9]{1,8})$/i);
   if (depositRouteMatch) {
     const token = depositRouteMatch[1]?.toLowerCase();
@@ -286,6 +296,8 @@ export type SignalBotInteractiveMenuLoaders = {
       | "polymarket_polygon_pusd_direct_v1"
       | "polymarket_solana_sol_retained_v1";
     idempotencyKey: string;
+    navigationMarketId?: string;
+    navigationSide?: "YES" | "NO";
     receiptId?: string;
     requestObservation?: boolean;
     telegramMessageId: number | null;
@@ -707,6 +719,12 @@ async function deliverSignalBotInteractiveMenuCallback(
         ? await input.loadFunding({
             action: fundingAction,
             chatId: input.chatId,
+            ...(route.kind === "deposit" && route.navigationMarketId
+              ? {
+                  navigationMarketId: route.navigationMarketId,
+                  navigationSide: route.navigationSide,
+                }
+              : {}),
             ...(route.kind === "select"
               ? {
                   choiceToken: route.choiceToken,

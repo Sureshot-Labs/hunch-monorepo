@@ -61,6 +61,8 @@ import { isTelegramFundingReceiveDisclosureTargetCurrent } from "../../../servic
 
 const now = new Date();
 const suffix = crypto.randomUUID();
+const navigationMarketId = crypto.randomUUID();
+const navigationEventId = crypto.randomUUID();
 const userId = crypto.randomUUID();
 const telegramUserId = `7${Date.now()}`;
 const pUsd = {
@@ -726,8 +728,20 @@ try {
     isolatedWebId,
   ]);
 
+  await pool.query(
+    `insert into unified_events (id, venue, venue_event_id, title, status)
+     values ($1, 'polymarket', $1, 'Funding navigation test', 'ACTIVE')`,
+    [navigationEventId],
+  );
+  await pool.query(
+    `insert into unified_markets (id, venue, venue_market_id, event_id, title, status, market_type)
+     values ($1, 'polymarket', $1, $2, 'Funding navigation test', 'ACTIVE', 'binary')`,
+    [navigationMarketId, navigationEventId],
+  );
   const [firstContext, replayedContext] = await Promise.all([
     createOrReuseTelegramFundingSession(pool, {
+      navigationMarketId,
+      navigationSide: "NO",
       userId,
       telegramAccountId,
       telegramUserId,
@@ -739,6 +753,8 @@ try {
       now,
     }),
     createOrReuseTelegramFundingSession(pool, {
+      navigationMarketId,
+      navigationSide: "NO",
       userId,
       telegramAccountId,
       telegramUserId,
@@ -751,6 +767,17 @@ try {
     }),
   ]);
   fundingContextId = firstContext.context.id;
+  assert.equal(firstContext.context.navigationMarketId, navigationMarketId);
+  assert.equal(firstContext.context.navigationSide, "NO");
+  assert.equal(firstContext.context.origin, "generic_add_funds");
+  assert.equal(firstContext.context.initialMarketId, null);
+  assert.equal(firstContext.context.resumeIntentId, null);
+  const navigationConsent = await pool.query(
+    `select active_buy_return_revision from telegram_funding_sessions where id = $1`,
+    [fundingContextId],
+  );
+  assert.equal(navigationConsent.rows[0]?.active_buy_return_revision, null);
+  assert.equal(replayedContext.context.navigationMarketId, navigationMarketId);
   assert.equal(replayedContext.context.id, fundingContextId);
   assert.deepEqual([firstContext.replayed, replayedContext.replayed].sort(), [
     false,
@@ -875,6 +902,22 @@ try {
       }
     },
   });
+  assert.deepEqual(
+    await service.loadMarketReturn({
+      contextId: fundingContextId,
+      chatId: telegramUserId,
+      telegramUserId,
+    }),
+    { marketId: navigationMarketId, side: "NO" },
+  );
+  assert.equal(
+    await service.loadMarketReturn({
+      contextId: crypto.randomUUID(),
+      chatId: telegramUserId,
+      telegramUserId,
+    }),
+    null,
+  );
   await assert.rejects(
     service.open(
       {
@@ -1112,6 +1155,16 @@ try {
       responsePayload: { text: "cancelled" },
       now: new Date(now.getTime() + 550),
     }),
+  );
+
+  assert.deepEqual(
+    await service.loadMarketReturn({
+      contextId: fundingContextId,
+      chatId: telegramUserId,
+      telegramUserId,
+    }),
+    { marketId: navigationMarketId, side: "NO" },
+    "superseded receive retains navigation, without creating a Buy revision",
   );
 
   const ambiguousCanonical = await createOrReuseFundingReceiveSession(pool, {
@@ -5220,6 +5273,12 @@ try {
       [userId],
     );
     await cleanup.query("delete from users where id = $1", [userId]);
+    await cleanup.query("delete from unified_markets where id = $1", [
+      navigationMarketId,
+    ]);
+    await cleanup.query("delete from unified_events where id = $1", [
+      navigationEventId,
+    ]);
     await cleanup.query("commit");
   } catch (error) {
     cleanupFailure = error;

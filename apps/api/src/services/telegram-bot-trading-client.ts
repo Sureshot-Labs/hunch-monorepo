@@ -128,6 +128,8 @@ export type TelegramBotTradingInternalApiClient = {
     }
   >;
   openFunding: (input: {
+    navigationMarketId?: string;
+    navigationSide?: "YES" | "NO";
     appBaseUrl: string;
     chatId: string | number;
     idempotencyKey: string;

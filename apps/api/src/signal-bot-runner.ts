@@ -527,6 +527,8 @@ export async function runSignalBotRunner(): Promise<void> {
                   })
                 : input.action === "open"
                   ? tradingInternalApi.openFunding({
+                      navigationMarketId: input.navigationMarketId,
+                      navigationSide: input.navigationSide,
                       appBaseUrl: config.appBaseUrl,
                       chatId: input.chatId,
                       idempotencyKey: input.idempotencyKey,
