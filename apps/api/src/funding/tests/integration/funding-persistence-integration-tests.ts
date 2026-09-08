@@ -1235,6 +1235,28 @@ async function testClientReferencesKeepActiveReceiptPolling(): Promise<void> {
           now,
         });
         if (step.ordinal === 0) firstAttemptId = attempt.id;
+        const clientReportWait = await fundingReconciliationWaitState(
+          pool,
+          operationId,
+          90_000,
+          now,
+        );
+        assert.ok(clientReportWait.broadcastEvidenceActiveUntil);
+        assert.equal(
+          fundingReconciliationPollDelayMs(
+            { status: "recovery_required", stage: "source_action" },
+            {
+              activePollDelayMs: 2_000,
+              idlePollDelayMs: 15_000,
+              recoveryMode: "automatic_evidence",
+              broadcastEvidenceActiveUntil:
+                clientReportWait.broadcastEvidenceActiveUntil,
+              now,
+            },
+          ),
+          2_000,
+          "a fresh started attempt must not use minute-long recovery cadence",
+        );
         await finishFundingStepAttemptInTransaction(pool, {
           attemptId: attempt.id,
           outcome: "ambiguous",
@@ -7053,6 +7075,24 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     });
     assert.equal(workerB.length, 1);
     assert.equal(workerB[0]?.operationId, committedB.operation.id);
+    await wakeFundingReconciliationInTransaction(client, {
+      operationId: committedB.operation.id,
+      dueAt: leaseNow,
+      wakeDuringLease: false,
+    });
+    const pollerWake = await client.query(
+      `select due_at from funding_reconciliation_jobs where operation_id = $1`,
+      [committedB.operation.id],
+    );
+    assert.equal(
+      pollerWake.rows[0]?.due_at,
+      Infinity,
+      "a poller must not self-wake its current lease",
+    );
+    await wakeFundingReconciliationInTransaction(client, {
+      operationId: committedB.operation.id,
+      dueAt: leaseNow,
+    });
     assert.notEqual(workerB[0]?.leaseToken, workerA[0]?.leaseToken);
     await expectFundingError(
       finishFundingReconciliationLease(client as never, {
@@ -7069,10 +7109,19 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
       leaseToken: String(workerB[0]?.leaseToken),
       result: {
         kind: "requeue",
-        dueAt: leaseNow,
+        dueAt: new Date(leaseNow.getTime() + 60_000),
       },
       now: leaseNow,
     });
+    const preservedWake = await client.query<{ due_at: Date }>(
+      `select due_at from funding_reconciliation_jobs where operation_id = $1`,
+      [committedB.operation.id],
+    );
+    assert.equal(
+      preservedWake.rows[0]?.due_at.getTime(),
+      leaseNow.getTime(),
+      "finishing the old lease must not overwrite a report wake with recovery backoff",
+    );
     await wakeFundingReconciliationInTransaction(client, {
       operationId: committedB.operation.id,
       dueAt: leaseNow,
@@ -7089,6 +7138,74 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     });
     assert.equal(workerC.length, 1);
     assert.equal(workerC[0]?.attemptCount, 3);
+    await finishFundingReconciliationLease(client as never, {
+      jobId: String(workerC[0]?.jobId),
+      leaseOwner: "worker-c",
+      leaseToken: String(workerC[0]?.leaseToken),
+      result: { kind: "requeue", dueAt: new Date(leaseNow.getTime() + 60_000) },
+      now: leaseNow,
+    });
+    const idleSchedule = await client.query(
+      `select due_at from funding_reconciliation_jobs where operation_id = $1`,
+      [committedB.operation.id],
+    );
+    assert.equal(
+      idleSchedule.rows[0]?.due_at.getTime(),
+      leaseNow.getTime() + 60_000,
+      "without a new wake the normal backoff must remain effective",
+    );
+    await wakeFundingReconciliationInTransaction(client, {
+      operationId: committedB.operation.id,
+      dueAt: leaseNow,
+    });
+    const [finishingWorker] = await claimFundingReconciliationJobsInTransaction(
+      client,
+      {
+        leaseOwner: "finishing-worker",
+        limit: 1,
+        leaseSeconds: 5,
+        now: leaseNow,
+      },
+    );
+    assert.ok(finishingWorker);
+    await wakeFundingReconciliationInTransaction(client, {
+      operationId: committedB.operation.id,
+      dueAt: leaseNow,
+    });
+    await finishFundingReconciliationLease(client as never, {
+      ...finishingWorker,
+      result: { kind: "completed" },
+      now: leaseNow,
+    });
+    const wakeAtCompletion = await client.query(
+      `select status, completed_at from funding_reconciliation_jobs where operation_id = $1`,
+      [committedB.operation.id],
+    );
+    assert.equal(
+      wakeAtCompletion.rows[0]?.status,
+      "scheduled",
+      "completion must not erase a concurrent external wake",
+    );
+    assert.equal(wakeAtCompletion.rows[0]?.completed_at, null);
+    const [finalWorker] = await claimFundingReconciliationJobsInTransaction(
+      client,
+      { leaseOwner: "final-worker", limit: 1, leaseSeconds: 5, now: leaseNow },
+    );
+    assert.ok(finalWorker);
+    await finishFundingReconciliationLease(client as never, {
+      ...finalWorker,
+      result: { kind: "completed" },
+      now: leaseNow,
+    });
+    const finalJob = await client.query(
+      `select status from funding_reconciliation_jobs where operation_id = $1`,
+      [committedB.operation.id],
+    );
+    assert.equal(
+      finalJob.rows[0]?.status,
+      "completed",
+      "without a new wake terminal work must stop",
+    );
 
     const routeOnlyUser = await insertUser(client);
     const routeOnlyPlan = buildPlan({

@@ -1291,17 +1291,23 @@ export async function fundingReconciliationWaitState(
       attempt.broadcastMayHaveOccurred &&
       attempt.referenceKind === "provider_receipt",
   );
-  const broadcastEvidenceActiveUntil = unresolvedBroadcasts.reduce<Date | null>(
-    (latest, { attempt }) => {
+  // A just-started client attempt is also an interactive evidence wait, not
+  // an old recovery incident. This deadline only controls polling; it does
+  // not assert a broadcast or permit another submission.
+  const activeEvidenceAttempts = attempts.filter(
+    (entry) =>
+      unresolvedBroadcasts.includes(entry) ||
+      entry.attempt.outcome === "started",
+  );
+  const broadcastEvidenceActiveUntil =
+    activeEvidenceAttempts.reduce<Date | null>((latest, { attempt }) => {
       const deadline = new Date(
         attempt.startedAt.getTime() + broadcastEvidenceWindowMs,
       );
       return latest === null || deadline.getTime() > latest.getTime()
         ? deadline
         : latest;
-    },
-    null,
-  );
+    }, null);
   // One delegated lane must not postpone receipt checks for another lane.
   const hasOtherUnresolvedBroadcast = unresolvedBroadcasts.some(
     (entry) => !providerReferenceAttempts.includes(entry),
@@ -2312,14 +2318,12 @@ async function processLease(
     });
     // A receipt lookup can resolve the provider reference in this very pass.
     // Do not schedule from its stale pre-poll replay lease after new evidence.
-    const schedulingWaitState = operationBeforePoll.awaitingProviderReference
-      ? await fundingReconciliationWaitState(
-          pool,
-          lease.operationId,
-          options.terminalTimeoutMs,
-          options.now,
-        )
-      : operationBeforePoll;
+    const schedulingWaitState = await fundingReconciliationWaitState(
+      pool,
+      lease.operationId,
+      options.terminalTimeoutMs,
+      options.now,
+    );
     const providerReferenceDueAt =
       schedulingWaitState.awaitingProviderReference &&
       schedulingWaitState.providerReferenceRecoveryAt
@@ -2365,7 +2369,7 @@ async function processLease(
                   {
                     activePollDelayMs: options.pollDelayMs,
                     broadcastEvidenceActiveUntil:
-                      operationBeforePoll.broadcastEvidenceActiveUntil,
+                      schedulingWaitState.broadcastEvidenceActiveUntil,
                     idlePollDelayMs: options.idlePollDelayMs,
                     now: options.now,
                     recoveryMode: "automatic_evidence",
@@ -2392,13 +2396,13 @@ async function processLease(
                   fundingReconciliationPollDelayMs(reduction.finalState, {
                     activePollDelayMs: options.pollDelayMs,
                     broadcastEvidenceActiveUntil:
-                      operationBeforePoll.broadcastEvidenceActiveUntil,
+                      schedulingWaitState.broadcastEvidenceActiveUntil,
                     idlePollDelayMs: options.idlePollDelayMs,
                     now: options.now,
                     recoveryMode: reduction.recoveryMode,
                     recoveryPollDelayMs: options.recoveryPollDelayMs,
                     awaitingUnbroadcastActionReport:
-                      operationBeforePoll.awaitingUnbroadcastActionReport,
+                      schedulingWaitState.awaitingUnbroadcastActionReport,
                   }),
               ),
       },

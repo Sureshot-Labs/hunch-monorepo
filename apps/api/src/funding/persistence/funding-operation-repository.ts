@@ -2154,6 +2154,8 @@ export async function wakeFundingReconciliationInTransaction(
     operationId: string;
     dueAt?: Date;
     priority?: number;
+    /** Pollers already inside the lease must not wake themselves forever. */
+    wakeDuringLease?: boolean;
   }>,
 ): Promise<void> {
   const dueAt = input.dueAt ?? new Date();
@@ -2167,7 +2169,12 @@ export async function wakeFundingReconciliationInTransaction(
       )
       values ($1, 'scheduled', $2, $3)
       on conflict (operation_id) do update set
-        due_at = least(funding_reconciliation_jobs.due_at, excluded.due_at),
+        due_at = case
+          when not $4::boolean and funding_reconciliation_jobs.status = 'leased'
+            and funding_reconciliation_jobs.lease_until > now()
+            then funding_reconciliation_jobs.due_at
+          else least(funding_reconciliation_jobs.due_at, excluded.due_at)
+        end,
         priority = greatest(
           funding_reconciliation_jobs.priority,
           excluded.priority
@@ -2198,7 +2205,12 @@ export async function wakeFundingReconciliationInTransaction(
         end,
         completed_at = null
     `,
-    [input.operationId, dueAt, input.priority ?? 0],
+    [
+      input.operationId,
+      dueAt,
+      input.priority ?? 0,
+      input.wakeDuringLease ?? true,
+    ],
   );
 }
 
@@ -2231,6 +2243,9 @@ export async function claimFundingReconciliationJobsInTransaction(
       )
       update funding_reconciliation_jobs job
       set status = 'leased',
+          -- Consume the old schedule. A wake during this lease replaces the
+          -- sentinel; finishing a requeue must preserve that earlier wake.
+          due_at = 'infinity'::timestamptz,
           lease_owner = $3,
           lease_token = gen_random_uuid(),
           lease_until = $1 + make_interval(secs => $4),
@@ -2345,15 +2360,23 @@ export async function finishFundingReconciliationLease(
   const result = await db.query(
     `
       update funding_reconciliation_jobs
-      set status = $4,
-          due_at = $5,
+      set status = case
+            when $4 = 'completed' and due_at <> 'infinity'::timestamptz
+              then 'scheduled'
+            else $4
+          end,
+          due_at = case when $4 = 'scheduled'
+            then least(due_at, $5::timestamptz)
+            else $5::timestamptz
+          end,
           lease_owner = null,
           lease_token = null,
           lease_until = null,
           last_error_code = $6,
           last_error_summary = $7,
           completed_at = case
-            when $8 then $9::timestamptz
+            when $8 and not ($4 = 'completed' and due_at <> 'infinity'::timestamptz)
+              then $9::timestamptz
             else null
           end
       where id = $1

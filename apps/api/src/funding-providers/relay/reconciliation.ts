@@ -218,6 +218,7 @@ async function persistStatus(
       providerUpdatedAt: input.status.updatedAt,
     });
     await wakeFundingReconciliationInTransaction(client, {
+      wakeDuringLease: false,
       operationId: input.operationId,
       dueAt: input.now,
       priority: 10,

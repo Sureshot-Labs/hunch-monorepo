@@ -368,6 +368,7 @@ export async function recordOwnedRouteCanonicalDestinationCredit(
     },
   });
   await wakeFundingReconciliationInTransaction(client, {
+    wakeDuringLease: false,
     operationId: input.match.operationId,
     dueAt: input.now,
     priority: 10,
