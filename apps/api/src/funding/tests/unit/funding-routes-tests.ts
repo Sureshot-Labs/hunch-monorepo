@@ -2221,6 +2221,46 @@ await test("operation action reports accept transaction references but no replac
   }
 });
 
+await test("signed Solana report transports bytes but never accepts client expiry evidence", async () => {
+  let signedTransaction: string | undefined;
+  const app = await buildApp({
+    reportOperationAction: async (_userId, input) => {
+      signedTransaction = input.signedTransaction;
+      return { accepted: true, stepState: "reconcile_required" };
+    },
+  });
+  try {
+    const payload = {
+      attemptId: "attempt_id_12345678",
+      outcome: "ambiguous",
+      transactionReference: "signed_reference_12345678",
+      signedTransaction: "AQ==",
+      actualCosts: { networkFeeRaw: null },
+    };
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/operations/operation_id_12345678/actions/step_id_12345678/report",
+      payload,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(signedTransaction, "AQ==");
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/funding/operations/operation_id_12345678/actions/step_id_12345678/report",
+      payload: {
+        ...payload,
+        actualCosts: {
+          networkFeeRaw: null,
+          verifiedSolanaSubmission: { lastValidBlockHeight: 1 },
+        },
+      },
+    });
+    assert.equal(rejected.statusCode, 400);
+  } finally {
+    await app.close();
+  }
+});
+
 await test("operation cancellation is owner-scoped and returns the terminal result", async () => {
   let observed: Readonly<{ userId: string; operationId: string }> | undefined;
   const app = await buildApp({

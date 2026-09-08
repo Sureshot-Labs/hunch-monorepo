@@ -2580,6 +2580,105 @@ await assert.rejects(
 );
 assert.equal(svmTransactionLookupCount, 1);
 
+const signedSvmTarget: FundingStepReceiptTarget = {
+  ...svmTarget,
+  previousReceipt: null,
+  verifiedSolanaSubmission: {
+    version: 1,
+    signature: svmReference,
+    blockhash: "11111111111111111111111111111111",
+    lastValidBlockHeight: 100,
+  },
+};
+const expiredSvmRpc = {
+  fetchSignatureStatus: async () => null,
+  fetchTransaction: async () => null,
+  fetchFinalizedBlockHeight: async () => 101,
+};
+const expiredSvmReceipt = await inspectSvmTarget(
+  signedSvmTarget,
+  svmReference,
+  expiredSvmRpc,
+);
+assert.equal(expiredSvmReceipt.status, "failed");
+assert.equal(
+  expiredSvmReceipt.failureCode,
+  "signed_solana_transaction_expired",
+);
+assert.equal(expiredSvmReceipt.evidence.failureFinalized, true);
+assert.equal(expiredSvmReceipt.evidence.transactionSignature, svmReference);
+assert.equal(
+  (
+    await inspectSvmTarget(signedSvmTarget, svmReference, {
+      ...expiredSvmRpc,
+      fetchFinalizedBlockHeight: async () => 100,
+    })
+  ).status,
+  "pending",
+  "the final valid block is still eligible for execution",
+);
+assert.equal(
+  (
+    await inspectSvmTarget(
+      { ...signedSvmTarget, verifiedSolanaSubmission: undefined },
+      svmReference,
+      expiredSvmRpc,
+    )
+  ).status,
+  "pending",
+  "legacy hash alone is not verified expiry evidence",
+);
+assert.equal(
+  (
+    await inspectSvmTarget(
+      {
+        ...signedSvmTarget,
+        verifiedSolanaSubmission: {
+          ...signedSvmTarget.verifiedSolanaSubmission,
+          signature: bs58.encode(new Uint8Array(64).fill(2)),
+        },
+      },
+      svmReference,
+      expiredSvmRpc,
+    )
+  ).status,
+  "pending",
+  "another signature cannot borrow this expiry proof",
+);
+let signatureChecks = 0;
+assert.equal(
+  (
+    await inspectSvmTarget(signedSvmTarget, svmReference, {
+      ...expiredSvmRpc,
+      fetchSignatureStatus: async () =>
+        ++signatureChecks === 1
+          ? null
+          : { confirmationStatus: "confirmed" as const, failed: false },
+    })
+  ).status,
+  "pending",
+  "a late positive status defeats the absence proof",
+);
+await assert.rejects(
+  inspectSvmTarget(signedSvmTarget, svmReference, {
+    ...expiredSvmRpc,
+    fetchFinalizedBlockHeight: async () => {
+      throw new Error("RPC unavailable");
+    },
+  }),
+  /RPC unavailable/,
+  "RPC failure cannot release money",
+);
+await assert.rejects(
+  inspectSvmTarget(
+    { ...signedSvmTarget, previousReceipt: finalizedSvmObservation },
+    svmReference,
+    expiredSvmRpc,
+  ),
+  /terminal receipt verification/,
+  "expiry cannot erase an earlier finalized execution",
+);
+
 const reference = `0x${"12".repeat(32)}`;
 const target: FundingStepReceiptTarget = {
   userId: "00000000-0000-4000-8000-000000000000",

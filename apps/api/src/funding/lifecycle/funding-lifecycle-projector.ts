@@ -88,6 +88,8 @@ export type FundingLifecycleActionAttempt = Readonly<{
   retryableAfterFailure?: boolean;
   /** A bounded reorg watch concluded without canonical execution; retry is safe. */
   retryableAfterReorg?: boolean;
+  /** Diagnostic only; never proves that a client did not broadcast. */
+  clientExecutionFailed?: boolean;
   startedAt: Date;
   updatedAt: Date;
   receipt: FundingLifecycleActionReceipt | null;
@@ -662,10 +664,11 @@ function routeLegsRefunded(
 }
 
 /** A partial Buy can stop only when every moved leg is fully accounted for
- * and every omitted leg expired without a possible broadcast. This is not
+ * and every omitted leg expired without execution (unsubmitted or a canonical
+ * finalized failure). This is not
  * a timeout shortcut for an ambiguous broadcast or an underfilled bridge.
  */
-function expiredWithoutBroadcast(
+function expiredWithoutSourceExecution(
   action: FundingLifecycleActionFact,
   now: Date,
 ): boolean {
@@ -674,10 +677,11 @@ function expiredWithoutBroadcast(
     action.expiresAt <= now &&
     action.attempts.every(
       (attempt) =>
-        attempt.outcome === "failed" &&
-        !attempt.broadcastMayHaveOccurred &&
-        attempt.referenceKind === null &&
-        attempt.receipt === null,
+        fundingAttemptHasSafeRetryEvidence({ receipt: attempt.receipt }) ||
+        (attempt.outcome === "failed" &&
+          !attempt.broadcastMayHaveOccurred &&
+          attempt.referenceKind === null &&
+          attempt.receipt === null),
     )
   );
 }
@@ -712,7 +716,7 @@ function isSettledPartialBuy(facts: FundingLifecycleFacts): boolean {
       "destination_credit_and_venue_readiness" &&
     preparationActions.some((action) => action.requiresVenueReadiness) &&
     preparationActions.every((action) =>
-      expiredWithoutBroadcast(action, facts.now),
+      expiredWithoutSourceExecution(action, facts.now),
     ) &&
     !facts.transfers.some((transfer) => transfer.routeLegId === null);
   if (
@@ -779,7 +783,9 @@ function isSettledPartialBuy(facts: FundingLifecycleFacts): boolean {
     if (actions.length === 0) return false;
     if (
       transfers.length === 0 &&
-      actions.every((action) => expiredWithoutBroadcast(action, facts.now))
+      actions.every((action) =>
+        expiredWithoutSourceExecution(action, facts.now),
+      )
     ) {
       omitted++;
       continue;
@@ -1601,7 +1607,17 @@ export function deriveFundingLifecycle(
                     unresolvedMovement &&
                     hasStoppedAction
                   ? "late_broadcast_after_terminal_operation"
-                  : null,
+                  : (status === "recovery_required" ||
+                        status === "reconcile_required") &&
+                      unresolvedActions.some((action) =>
+                        action.attempts.some(
+                          (attempt) =>
+                            attempt.clientExecutionFailed === true &&
+                            attempt.referenceKind === null,
+                        ),
+                      )
+                    ? "funding_wallet_submission_unknown"
+                    : null,
     actions,
     segments,
     safety: {

@@ -2602,6 +2602,53 @@ try {
     lookupKeyVersion: 1,
     actualCosts: { networkFeeRaw: "21000" },
   } as const;
+  // The persistence writer receives already-validated metadata from runtime.
+  // Verify first-write-wins/replay separately from Solana message validation.
+  await client.query("savepoint signed_submission_metadata");
+  const verifiedSolanaSubmission = {
+    version: 1,
+    signature:
+      "3ktQ7Do7HzPzSEPGuEq5hivy9KYaQB5pdoYA7cjW7oW5WjsRkbCTe619VbbqTh7K336Jg3ZRafmWPYZSPFy8viJm",
+    blockhash: "11111111111111111111111111111111",
+    lastValidBlockHeight: 100,
+  };
+  const signedReport = {
+    ...reportInput,
+    actualCosts: { ...reportInput.actualCosts, verifiedSolanaSubmission },
+  };
+  await finishFundingStepAttemptForUserInTransaction(client, signedReport);
+  const signedReplay = await finishFundingStepAttemptForUserInTransaction(
+    client,
+    {
+      ...signedReport,
+      actualCosts: {
+        ...signedReport.actualCosts,
+        verifiedSolanaSubmission: {
+          ...verifiedSolanaSubmission,
+          lastValidBlockHeight: 200,
+        },
+      },
+    },
+  );
+  assert.deepEqual(
+    signedReplay.attempt.actualCosts.verifiedSolanaSubmission,
+    verifiedSolanaSubmission,
+  );
+  await expectFundingError(
+    finishFundingStepAttemptForUserInTransaction(client, {
+      ...signedReport,
+      actualCosts: {
+        ...signedReport.actualCosts,
+        verifiedSolanaSubmission: {
+          ...verifiedSolanaSubmission,
+          blockhash: "SysvarRent111111111111111111111111111111111",
+        },
+      },
+    }),
+    "invalid_state_transition",
+  );
+  await client.query("rollback to savepoint signed_submission_metadata");
+  await client.query("release savepoint signed_submission_metadata");
   const reported = await finishFundingStepAttemptForUserInTransaction(
     client,
     reportInput,

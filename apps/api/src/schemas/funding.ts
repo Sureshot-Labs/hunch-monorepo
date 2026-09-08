@@ -1094,12 +1094,20 @@ export const fundingOperationActionPrepareResponseSchema = z
     ]),
     payerRequirement: z.enum(["user", "privy_sponsor", "provider"]),
     sponsorshipPolicyId: z.string().trim().min(2).max(160).nullable(),
+    solanaSigningContext: z
+      .object({
+        blockhash: z.string().min(32).max(44),
+        lastValidBlockHeight: z.number().int().positive(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
 export const fundingOperationActionReportRequestSchema = z
   .object({
     attemptId: opaqueIdSchema,
+    signedTransaction: z.string().min(1).max(1644).optional(),
     outcome: z.enum(["submitted", "ambiguous", "failed", "cancelled"]),
     transactionReference: z.string().trim().min(8).max(512).nullable(),
     failureCode: z.enum(FUNDING_ACTION_FAILURE_CODES).nullable().optional(),

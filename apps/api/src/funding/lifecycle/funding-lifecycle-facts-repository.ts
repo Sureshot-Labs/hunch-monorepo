@@ -480,6 +480,9 @@ function compileFundingLifecycleFacts(
             outcome: row.attempt_outcome,
             broadcastMayHaveOccurred: row.broadcast_may_have_occurred,
             referenceKind: row.attempt_reference_kind,
+            clientExecutionFailed:
+              row.attempt_actual_costs?.reasonCode ===
+              "client_execution_failed",
             retryableAfterFailure:
               row.attempt_actual_costs?.retryableProviderFailure === true,
             retryableAfterReorg:

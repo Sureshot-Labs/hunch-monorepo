@@ -530,6 +530,22 @@ export async function fetchSolanaSignatureReceiptStatus(inputs: {
   return { confirmationStatus, failed: entry.err != null };
 }
 
+export async function fetchSolanaFinalizedBlockHeight(inputs: {
+  rpcUrls: string[];
+  timeoutMs: number;
+}): Promise<number> {
+  const result = await solanaRpcRequest<unknown>({
+    ...inputs,
+    maxAttempts: 1,
+    totalTimeoutMs: inputs.timeoutMs,
+    method: "getBlockHeight",
+    params: [{ commitment: "finalized" }],
+  });
+  if (typeof result !== "number" || !Number.isSafeInteger(result) || result < 0)
+    throw new Error("Invalid finalized Solana block height");
+  return result;
+}
+
 function parseSolanaReceiptIndex(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     throw new Error(`Solana RPC ${field} is invalid`);

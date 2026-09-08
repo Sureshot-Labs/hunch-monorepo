@@ -277,6 +277,10 @@ export type FundingRouteDependencies = Readonly<{
       executionMode: "web_client" | "privy_authorization" | "venue_relayer";
       payerRequirement: "user" | "privy_sponsor" | "provider";
       sponsorshipPolicyId: string | null;
+      solanaSigningContext?: Readonly<{
+        blockhash: string;
+        lastValidBlockHeight: number;
+      }>;
     }>
   >;
   reportOperationAction(
@@ -286,6 +290,7 @@ export type FundingRouteDependencies = Readonly<{
       stepId: string;
       attemptId: string;
       outcome: "submitted" | "ambiguous" | "failed" | "cancelled";
+      signedTransaction?: string;
       transactionReference: string | null;
       failureCode: FundingActionFailureCode | null;
       actualCosts: Readonly<{ networkFeeRaw: string | null }>;
@@ -1018,6 +1023,7 @@ export function registerFundingRoutes(
             stepId: request.params.stepId,
             attemptId: request.body.attemptId,
             outcome: request.body.outcome,
+            signedTransaction: request.body.signedTransaction,
             transactionReference: request.body.transactionReference,
             failureCode: request.body.failureCode ?? null,
             actualCosts: request.body.actualCosts,

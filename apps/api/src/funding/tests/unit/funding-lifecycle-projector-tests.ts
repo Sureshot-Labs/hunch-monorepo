@@ -118,6 +118,28 @@ function facts(
 {
   const projection = deriveFundingLifecycle(
     facts({
+      actions: [
+        action("wallet-send", {
+          attempts: [
+            attempt({
+              outcome: "ambiguous",
+              broadcastMayHaveOccurred: true,
+              clientExecutionFailed: true,
+            }),
+          ],
+        }),
+      ],
+    }),
+  );
+  assert.equal(projection.errorCode, "funding_wallet_submission_unknown");
+  assert.equal(projection.safety.terminal, false);
+  assert.equal(projection.safety.retryAllowed, false);
+  assert.equal(projection.safety.reservationsMayRelease, false);
+}
+
+{
+  const projection = deriveFundingLifecycle(
+    facts({
       manualRecovery: {
         code: "terminal_relay_receipt_verification_unavailable",
         requestedAt: now,
@@ -521,7 +543,45 @@ function facts(
     "failed",
     "expired pre-broadcast failure must not strand a fully settled partial Buy",
   );
+  assert.equal(
+    deriveFundingLifecycle({
+      ...partial,
+      actions: [
+        completedAction,
+        {
+          ...omittedAction,
+          attempts: [
+            attempt({
+              outcome: "ambiguous",
+              broadcastMayHaveOccurred: true,
+              referenceKind: "signature",
+              receipt: {
+                status: "failed",
+                canonical: true,
+                actionMatched: true,
+                failureFinalized: true,
+              },
+            }),
+          ],
+        },
+      ],
+    }).status,
+    "failed",
+    "verified expired Solana non-execution permits partial funding to stop, not Buy",
+  );
   for (const unsafeAttempt of [
+    attempt({
+      outcome: "ambiguous",
+      broadcastMayHaveOccurred: true,
+      referenceKind: "signature",
+      retryableAfterReorg: true,
+      receipt: {
+        status: "reorged",
+        canonical: false,
+        actionMatched: true,
+        failureFinalized: false,
+      },
+    }),
     attempt({ outcome: "failed", broadcastMayHaveOccurred: true }),
     attempt({ outcome: "ambiguous", broadcastMayHaveOccurred: false }),
     attempt({

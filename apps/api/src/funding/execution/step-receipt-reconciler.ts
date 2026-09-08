@@ -1,5 +1,7 @@
 import { tx, type Pool } from "@hunch/infra";
 import { PublicKey } from "@solana/web3.js";
+import { fetchSolanaFinalizedBlockHeight } from "../../services/solana-rpc.js";
+import { parseVerifiedSolanaSubmission } from "./signed-solana-submission.js";
 import bs58 from "bs58";
 import { ethers } from "ethers";
 
@@ -2513,11 +2515,13 @@ function instructionDataHex(data: unknown): string | null {
 }
 
 export type SvmReceiptRpcReader = Readonly<{
+  fetchFinalizedBlockHeight?: typeof fetchSolanaFinalizedBlockHeight;
   fetchSignatureStatus: typeof fetchSolanaSignatureReceiptStatus;
   fetchTransaction: typeof fetchSolanaReceiptTransaction;
 }>;
 
 const defaultSvmReceiptRpcReader: SvmReceiptRpcReader = {
+  fetchFinalizedBlockHeight: fetchSolanaFinalizedBlockHeight,
   fetchSignatureStatus: fetchSolanaSignatureReceiptStatus,
   fetchTransaction: fetchSolanaReceiptTransaction,
 };
@@ -2576,6 +2580,62 @@ export async function inspectSvmTarget(
     },
   });
   if (!status) {
+    const submission = parseVerifiedSolanaSubmission(
+      target.verifiedSolanaSubmission,
+    );
+    if (
+      submission?.signature === reference &&
+      rpc.fetchFinalizedBlockHeight &&
+      (!target.previousReceipt ||
+        target.previousReceipt.status === "pending" ||
+        (target.previousReceipt.status === "failed" &&
+          target.previousReceipt.evidence.signedTransactionExpired === true))
+    ) {
+      // An expiry proof must not mix a current height from one endpoint with
+      // absent history from a lagging fallback. RPC failure stays unknown.
+      const proofRpcUrls = fundingSidecarRuntimeConfig.solanaRpcUrls.slice(
+        0,
+        1,
+      );
+      const finalizedHeight = await rpc.fetchFinalizedBlockHeight({
+        rpcUrls: proofRpcUrls,
+        timeoutMs: receiptRpcTimeoutMs,
+      });
+      if (finalizedHeight > submission.lastValidBlockHeight) {
+        // Recheck history AFTER observing finalized expiry. A lost RPC response
+        // cannot hide a landed transaction behind an earlier absence snapshot.
+        const lateStatus = await rpc.fetchSignatureStatus({
+          rpcUrls: proofRpcUrls,
+          signature: reference,
+          timeoutMs: receiptRpcTimeoutMs,
+          maxAttempts: 1,
+          totalTimeoutMs: receiptRpcTimeoutMs,
+        });
+        const lateTransaction = await rpc.fetchTransaction({
+          rpcUrls: proofRpcUrls,
+          signature: reference,
+          timeoutMs: receiptRpcTimeoutMs,
+          maxAttempts: 1,
+          totalTimeoutMs: receiptRpcTimeoutMs,
+          commitment: "finalized",
+        });
+        if (!lateStatus && !lateTransaction)
+          return withTransactionSignature({
+            status: "failed",
+            actionMatch: true,
+            ledgerHeight: null,
+            blockHash: null,
+            canonical: true,
+            failureCode: "signed_solana_transaction_expired",
+            evidence: evidence({
+              failureFinalized: true,
+              signedTransactionExpired: true,
+              finalizedBlockHeight: finalizedHeight,
+              lastValidBlockHeight: submission.lastValidBlockHeight,
+            }),
+          });
+      }
+    }
     return withTransactionSignature(
       evaluateSvmActionReceipt({
         action: target.action,

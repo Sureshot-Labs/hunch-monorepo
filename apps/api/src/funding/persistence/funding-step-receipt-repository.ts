@@ -1,5 +1,6 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 import bs58 from "bs58";
+import { parseVerifiedSolanaSubmission } from "../execution/signed-solana-submission.js";
 
 import {
   relayClientSourceDebitPostcondition,
@@ -31,6 +32,7 @@ export type FundingStepReceiptStatus =
   | "reorged";
 
 export type FundingStepReceiptTarget = Readonly<{
+  verifiedSolanaSubmission?: JsonRecord | null;
   userId: string;
   operationId: string;
   stepId: string;
@@ -147,6 +149,7 @@ export async function listFundingStepReceiptTargets(
     segment_id: string | null;
     attempt_id: string;
     attempt_started_at: Date;
+    attempt_actual_costs: JsonRecord;
     step_kind: FundingStepReceiptTarget["stepKind"];
     executor_id: string;
     payer_requirement: FundingStepReceiptTarget["payerRequirement"];
@@ -182,6 +185,7 @@ export async function listFundingStepReceiptTargets(
         step.segment_id,
         attempt.id as attempt_id,
         attempt.started_at as attempt_started_at,
+        attempt.actual_costs as attempt_actual_costs,
         step.step_kind,
         step.executor_id,
         step.payer_requirement,
@@ -315,6 +319,9 @@ export async function listFundingStepReceiptTargets(
       segmentId: row.segment_id,
       attemptId: row.attempt_id,
       attemptStartedAt: row.attempt_started_at,
+      verifiedSolanaSubmission: parseVerifiedSolanaSubmission(
+        row.attempt_actual_costs?.verifiedSolanaSubmission,
+      ),
       stepKind: row.step_kind,
       payerRequirement: row.payer_requirement,
       networkId: action.networkId,

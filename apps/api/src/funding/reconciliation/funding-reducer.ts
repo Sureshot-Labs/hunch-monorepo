@@ -16,6 +16,7 @@ import {
   type FundingLifecycleProjection,
 } from "../lifecycle/funding-lifecycle-projector.js";
 import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
+import { fundingReservationHoldSql } from "../persistence/source-reservation-hold.js";
 import { DELEGATED_PROVIDER_REPLAY_MS } from "../execution/delegated-funding-recovery-policy.js";
 import {
   isPolymarketDepositRouterProfileId,
@@ -309,7 +310,6 @@ async function releaseUnusedStoppedStepReservations(
       }),
     ),
   ];
-  if (stoppedSegmentIds.length === 0) return;
   const { rows } = await client.query<{ id: string }>(
     `
       select reservation.id
@@ -317,7 +317,11 @@ async function releaseUnusedStoppedStepReservations(
       where reservation.operation_id = $1
         and reservation.state = 'active'
         and reservation.mode = 'subtract_available'
-        and reservation.segment_id = any($2::uuid[])
+        and reservation.segment_id is not null
+        and (
+          reservation.segment_id = any($2::uuid[])
+          or not ${fundingReservationHoldSql("reservation")}
+        )
         and not exists (
           select 1
           from funding_observations observation

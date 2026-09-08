@@ -1,4 +1,12 @@
 import { tx, type Pool } from "@hunch/infra";
+import { PublicKey } from "@solana/web3.js";
+import { createSolanaRpcConnection } from "../../services/rpc-client-factory.js";
+import {
+  parseSolanaSigningContext,
+  parseVerifiedSolanaSubmission,
+  verifySignedSolanaFundingSubmission,
+  type SolanaSigningContext,
+} from "./signed-solana-submission.js";
 import { validatePolymarketFunderSelection } from "../../services/polymarket-funder.js";
 
 import { buildAccountValueReadModel } from "../../account-value/runtime-service.js";
@@ -11,6 +19,7 @@ import type {
 } from "../domain/types.js";
 import {
   fetchFundingOperationStepForUser,
+  bindFundingSolanaSigningContextInTransaction,
   finishFundingStepAttemptForUser,
   startFundingStepAttemptForUserInTransaction,
 } from "../persistence/funding-evidence-repository.js";
@@ -265,6 +274,7 @@ export class FundingOperationActionRuntime {
       executionMode: "web_client" | "privy_authorization" | "venue_relayer";
       payerRequirement: "user" | "privy_sponsor" | "provider";
       sponsorshipPolicyId: string | null;
+      solanaSigningContext?: SolanaSigningContext;
     }>
   > {
     const [operation, step, account] = await Promise.all([
@@ -301,6 +311,27 @@ export class FundingOperationActionRuntime {
       step.executorId,
       account.ownership?.wallets ?? [],
     );
+    // Bind a server-observed lifetime BEFORE signing. A delayed registration
+    // can then be reconciled even if the wallet dialog outlives this blockhash.
+    let solanaSigningContext: SolanaSigningContext | undefined;
+    if (
+      action.kind === "svm_transaction" &&
+      execution.executionMode === "web_client"
+    ) {
+      const rpcUrl = process.env.SOLANA_RPC_URL?.trim();
+      if (!rpcUrl)
+        throw new FundingPersistenceError(
+          "quote_invalidated",
+          "Solana signing is unavailable",
+        );
+      const connection = createSolanaRpcConnection(rpcUrl, {
+        commitment: "confirmed",
+        disableRetryOnRateLimit: true,
+        fetch: (url, init) =>
+          fetch(url, { ...init, signal: AbortSignal.timeout(10_000) }),
+      });
+      solanaSigningContext = await connection.getLatestBlockhash("confirmed");
+    }
     if (
       action.kind === "external_handoff" &&
       action.handoffKind === "polymarket_safe_transfer"
@@ -419,6 +450,14 @@ export class FundingOperationActionRuntime {
         execution.controllerProfile,
       );
       const durableStart = started ?? (await start());
+      if (solanaSigningContext) {
+        solanaSigningContext =
+          await bindFundingSolanaSigningContextInTransaction(client, {
+            attemptId: durableStart.attempt.id,
+            stepId: input.stepId,
+            context: solanaSigningContext,
+          });
+      }
       return {
         attemptId: durableStart.attempt.id,
         action,
@@ -428,6 +467,7 @@ export class FundingOperationActionRuntime {
         executionMode: execution.executionMode,
         payerRequirement: execution.payerRequirement,
         sponsorshipPolicyId: execution.sponsorshipPolicyId,
+        ...(solanaSigningContext ? { solanaSigningContext } : {}),
       };
     });
   }
@@ -439,6 +479,7 @@ export class FundingOperationActionRuntime {
       stepId: string;
       attemptId: string;
       outcome: FundingActionReportOutcome;
+      signedTransaction?: string;
       transactionReference: string | null;
       failureCode: FundingActionFailureCode | null;
       actualCosts: Readonly<{ networkFeeRaw: string | null }>;
@@ -536,9 +577,110 @@ export class FundingOperationActionRuntime {
         )
       : null;
     const reference = normalizedReference?.reference ?? null;
+    let signedSubmission = null;
+    if (input.signedTransaction !== undefined) {
+      const signer = step.actionValidationResult.signerAddress;
+      const rpcUrl = process.env.SOLANA_RPC_URL?.trim();
+      if (
+        action.kind !== "svm_transaction" ||
+        step.executorId !== "wallet_profile_svm_v1" ||
+        typeof signer !== "string" ||
+        !rpcUrl ||
+        report.outcome !== "ambiguous" ||
+        !reference
+      ) {
+        throw new FundingPersistenceError(
+          "quote_mismatch",
+          "signed submission requires an exact Solana wallet action and ambiguous reference report",
+        );
+      }
+      const connection = createSolanaRpcConnection(rpcUrl, {
+        commitment: "confirmed",
+        disableRetryOnRateLimit: true,
+        fetch: (url, init) =>
+          fetch(url, { ...init, signal: AbortSignal.timeout(10_000) }),
+      });
+      const lookupTables = await Promise.all(
+        action.addressLookupTables.map(async (address) => {
+          const result = await connection.getAddressLookupTable(
+            new PublicKey(address),
+          );
+          if (!result.value)
+            throw new FundingPersistenceError(
+              "quote_invalidated",
+              "Solana lookup table unavailable",
+            );
+          return result.value;
+        }),
+      );
+      let identity;
+      try {
+        identity = verifySignedSolanaFundingSubmission({
+          action,
+          signer,
+          signedTransaction: input.signedTransaction,
+          lookupTables,
+        });
+      } catch {
+        throw new FundingPersistenceError(
+          "quote_mismatch",
+          "signed Solana submission does not match the committed action",
+        );
+      }
+      if (identity.signature !== reference)
+        throw new FundingPersistenceError(
+          "quote_mismatch",
+          "signed submission reference mismatch",
+        );
+      const existing = await this.db.query<{
+        actual_costs: Record<string, unknown>;
+      }>(
+        `select attempt_row.actual_costs from funding_operation_step_attempts attempt_row
+         join funding_operation_steps step_row on step_row.id = attempt_row.step_id
+         join funding_operations operation_row on operation_row.id = step_row.operation_id
+         where attempt_row.id=$1 and step_row.id=$2 and operation_row.id=$3 and operation_row.user_id=$4`,
+        [input.attemptId, input.stepId, input.operationId, userId],
+      );
+      if (!existing.rows[0])
+        throw new FundingPersistenceError(
+          "operation_not_found",
+          "funding attempt not found",
+        );
+      const prior = parseVerifiedSolanaSubmission(
+        existing.rows[0].actual_costs?.verifiedSolanaSubmission,
+      );
+      if (prior) {
+        if (
+          prior.signature !== identity.signature ||
+          prior.blockhash !== identity.blockhash
+        )
+          throw new FundingPersistenceError(
+            "quote_mismatch",
+            "funding attempt already has another signed transaction",
+          );
+        signedSubmission = prior;
+      } else {
+        const context = parseSolanaSigningContext(
+          existing.rows[0].actual_costs?.solanaSigningContext,
+        );
+        if (!context || context.blockhash !== identity.blockhash)
+          throw new FundingPersistenceError(
+            "quote_mismatch",
+            "signed Solana submission requires its server-issued blockhash",
+          );
+        signedSubmission = {
+          version: 1 as const,
+          ...identity,
+          lastValidBlockHeight: context.lastValidBlockHeight,
+        };
+      }
+    }
     const actualCosts = {
       ...input.actualCosts,
       ...(input.failureCode ? { reasonCode: input.failureCode } : {}),
+      ...(signedSubmission
+        ? { verifiedSolanaSubmission: signedSubmission }
+        : {}),
       ...(normalizedReference?.kind === "provider_receipt"
         ? { providerReferenceKind: "privy_transaction" }
         : {}),

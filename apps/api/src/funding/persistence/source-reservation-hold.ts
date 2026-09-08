@@ -24,7 +24,25 @@ export function fundingReservationHoldSql(
            and (
              ${reservationAlias}.segment_id is null
              or source_hold_step.segment_id = ${reservationAlias}.segment_id
-             or source_hold_step.segment_id is null
+             or (
+               source_hold_step.segment_id is null
+               and exists (
+                 with recursive source_lane_steps as (
+                   select lane_step.id, lane_step.depends_on_step_id
+                     from funding_operation_steps lane_step
+                    where lane_step.operation_id = ${reservationAlias}.operation_id
+                      and lane_step.segment_id = ${reservationAlias}.segment_id
+                   union
+                   select parent_step.id, parent_step.depends_on_step_id
+                     from funding_operation_steps parent_step
+                     join source_lane_steps child_step
+                       on child_step.depends_on_step_id = parent_step.id
+                    where parent_step.operation_id = ${reservationAlias}.operation_id
+                 )
+                 select 1 from source_lane_steps
+                  where source_lane_steps.id = source_hold_step.id
+               )
+             )
            )
            and (
              source_hold_attempt.outcome in ('started', 'submitted', 'ambiguous', 'succeeded')

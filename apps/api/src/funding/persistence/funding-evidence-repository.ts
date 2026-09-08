@@ -1,6 +1,11 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import type { JsonValue } from "../domain/types.js";
+import {
+  parseSolanaSigningContext,
+  parseVerifiedSolanaSubmission,
+  type SolanaSigningContext,
+} from "../execution/signed-solana-submission.js";
 import { fundingAttemptHasSafeRetryEvidence } from "../domain/attempt-retry.js";
 import {
   deriveFundingLifecycle,
@@ -37,6 +42,28 @@ import {
 } from "./funding-trade-consumer-intent.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
+
+/** Call under the owned operation/step lock. Replays never extend a signature's lifetime. */
+export async function bindFundingSolanaSigningContextInTransaction(
+  client: PoolClient,
+  input: { attemptId: string; stepId: string; context: SolanaSigningContext },
+): Promise<SolanaSigningContext> {
+  const result = await client.query<{ context: unknown }>(
+    `update funding_operation_step_attempts
+     set actual_costs = actual_costs || jsonb_build_object('solanaSigningContext',
+       coalesce(actual_costs -> 'solanaSigningContext', $3::jsonb))
+     where id = $1 and step_id = $2 and outcome = 'started'
+     returning actual_costs -> 'solanaSigningContext' as context`,
+    [input.attemptId, input.stepId, input.context],
+  );
+  const context = parseSolanaSigningContext(result.rows[0]?.context);
+  if (!context)
+    throw new FundingPersistenceError(
+      "invalid_state_transition",
+      "funding signing context requires a started attempt",
+    );
+  return context;
+}
 
 export type FundingOperationStepState =
   | "planned"
@@ -1474,6 +1501,28 @@ export async function finishFundingStepAttemptForUserInTransaction(
     );
   }
   const priorAttempt = mapAttempt(priorAttemptRow);
+  const priorSubmission = parseVerifiedSolanaSubmission(
+    priorAttempt.actualCosts.verifiedSolanaSubmission,
+  );
+  const incomingSubmission = parseVerifiedSolanaSubmission(
+    input.actualCosts.verifiedSolanaSubmission,
+  );
+  if (
+    priorSubmission &&
+    incomingSubmission &&
+    priorSubmission.signature === incomingSubmission.signature &&
+    priorSubmission.blockhash === incomingSubmission.blockhash
+  ) {
+    // Concurrent registrations can observe different RPC tips. The first
+    // durable lifetime wins; a replay must never extend it.
+    input = {
+      ...input,
+      actualCosts: {
+        ...input.actualCosts,
+        verifiedSolanaSubmission: priorSubmission,
+      },
+    };
+  }
   const enrichUnreferencedAmbiguity =
     priorAttempt.outcome === "ambiguous" &&
     priorAttempt.broadcastMayHaveOccurred &&

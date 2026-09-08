@@ -820,6 +820,7 @@ export class FundingPlanningRuntime {
       stepId: string;
       attemptId: string;
       outcome: FundingActionReportOutcome;
+      signedTransaction?: string;
       transactionReference: string | null;
       failureCode: FundingActionFailureCode | null;
       actualCosts: Readonly<{ networkFeeRaw: string | null }>;
