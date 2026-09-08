@@ -58,7 +58,7 @@ await test("Telegram funding schemas accept only server-owned opaque inputs", ()
       appBaseUrl: "https://app.hunch.trade",
       telegramMiniAppEnabled: true,
       venue: "polymarket",
-      navigationMarketId: "123e4567-e89b-42d3-a456-426614174000",
+      navigationMarketId: "polymarket:908713",
       navigationSide: "NO",
     }).success,
     true,

@@ -113,27 +113,35 @@ import {
 
 const contextId = "123e4567-e89b-42d3-a456-426614174000";
 for (const venue of ["polymarket", "limitless"] as const) {
-  for (const side of ["YES", "NO"] as const) {
-    const callback = telegramMarketDepositCallback({
-      venue,
-      marketId: contextId,
-      side,
-    });
-    assert.ok(Buffer.byteLength(callback) <= 64);
-    const parsed = parseTelegramMarketDeposit(callback.slice("hm:v1:".length));
-    assert.deepEqual(parsed, {
-      venue,
-      navigationMarketId: contextId,
-      navigationSide: side,
-    });
-    assert.deepEqual(
-      parseSignalBotInteractiveMenuRoute(callback.slice("hm:v1:".length)),
-      {
-        kind: "deposit",
-        showQr: false,
-        ...parsed,
-      },
-    );
+  for (const marketId of [
+    contextId,
+    `${venue}:908713`,
+    `${venue}:${contextId}`,
+  ]) {
+    for (const side of ["YES", "NO"] as const) {
+      const callback = telegramMarketDepositCallback({
+        venue,
+        marketId,
+        side,
+      });
+      assert.ok(Buffer.byteLength(callback) <= 64);
+      const parsed = parseTelegramMarketDeposit(
+        callback.slice("hm:v1:".length),
+      );
+      assert.deepEqual(parsed, {
+        venue,
+        navigationMarketId: marketId,
+        navigationSide: side,
+      });
+      assert.deepEqual(
+        parseSignalBotInteractiveMenuRoute(callback.slice("hm:v1:".length)),
+        {
+          kind: "deposit",
+          showQr: false,
+          ...parsed,
+        },
+      );
+    }
   }
 }
 assert.equal(

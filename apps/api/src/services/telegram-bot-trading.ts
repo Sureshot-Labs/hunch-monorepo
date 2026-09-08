@@ -13852,7 +13852,11 @@ export async function handleTelegramBotTradingCallback(
             ...telegramTradingButtonRows(reopenMarketButton),
             [
               {
-                callback_data: `hm:v1:deposit:${intent.venue}`,
+                callback_data: telegramMarketDepositCallback({
+                  venue: intent.venue,
+                  marketId: market.id,
+                  side: intent.side,
+                }),
                 text: "Deposit",
               },
             ],

@@ -61,7 +61,7 @@ import { isTelegramFundingReceiveDisclosureTargetCurrent } from "../../../servic
 
 const now = new Date();
 const suffix = crypto.randomUUID();
-const navigationMarketId = crypto.randomUUID();
+const navigationMarketId = `polymarket:${crypto.randomUUID()}`;
 const navigationEventId = crypto.randomUUID();
 const userId = crypto.randomUUID();
 const telegramUserId = `7${Date.now()}`;

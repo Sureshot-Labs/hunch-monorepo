@@ -6,6 +6,7 @@ import type {
 } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
+import { isTelegramFundingNavigationMarketId } from "../services/telegram-funding-navigation.js";
 import { filterVenuesForLifecycleCapability } from "../services/venue-lifecycle.js";
 
 import { createAuthMiddleware } from "../auth.js";
@@ -250,7 +251,11 @@ const internalFundingMutationSchema = internalFundingIdentitySchema.extend({
 
 const internalFundingOpenBodySchema = internalFundingMutationSchema
   .extend({
-    navigationMarketId: z.string().uuid().optional(),
+    navigationMarketId: z
+      .string()
+      .max(180)
+      .refine(isTelegramFundingNavigationMarketId)
+      .optional(),
     navigationSide: z.enum(["YES", "NO"]).optional(),
     appBaseUrl: z.string().trim().url(),
     telegramMiniAppEnabled: z.boolean().optional(),
