@@ -18,6 +18,7 @@ import {
   PrivyService,
 } from "../privy-service.js";
 import { fetchSolanaBalanceLamports } from "./solana-rpc.js";
+import { checkRelaySplGas } from "../funding-providers/relay/solana-gas.js";
 
 const PRIVY_WALLET_API_BASE_URL = "https://api.privy.io";
 const SPL_TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -711,6 +712,7 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
   embeddedSolanaSponsorshipEnabled?: boolean;
   fetchSponsorBalanceLamports?: EmbeddedSolanaSponsorBalanceFetcher;
   onSponsorBalanceFetchError?: (error: unknown) => void;
+  checkRelayGas?: typeof checkRelaySplGas;
 }): Promise<EmbeddedPrivyAuthorizationRequest[]> {
   const embeddedSolanaSponsorshipEnabled =
     inputs.embeddedSolanaSponsorshipEnabled === true;
@@ -744,10 +746,26 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
   }
 
   if (!embeddedSolanaSponsorshipEnabled) {
-    const requiredLamports = getEmbeddedSolanaRequiredSignerLamports({
+    let requiredLamports = getEmbeddedSolanaRequiredSignerLamports({
       context: inputs.context,
       transactions: inputs.transactions,
     });
+    // Only the single, recognized Relay USDC transaction can use measured gas.
+    // Native SOL, batches, unknown actions and RPC failures keep the old guard.
+    const singleTransaction =
+      inputs.transactions.length === 1 ? inputs.transactions[0] : null;
+    if (
+      sponsorBalanceLamports != null &&
+      sponsorBalanceLamports < requiredLamports &&
+      singleTransaction
+    ) {
+      const gas = await (inputs.checkRelayGas ?? checkRelaySplGas)({
+        signer: inputs.context.signer,
+        transaction: singleTransaction.transaction,
+        availableLamports: sponsorBalanceLamports,
+      });
+      if (gas?.sufficient) requiredLamports = gas.requiredLamports;
+    }
     if (
       sponsorBalanceLamports == null ||
       sponsorBalanceLamports < requiredLamports

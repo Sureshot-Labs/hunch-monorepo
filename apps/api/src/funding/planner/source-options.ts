@@ -116,6 +116,8 @@ export type RelayEligibleSourceFact = Readonly<{
   riskEligible: boolean;
   walletExecutionReady: boolean;
   nativeGasReady: boolean;
+  /** Server-only: a low-gas SPL source must pass exact quote simulation. */
+  requiresSolanaGasCheck?: boolean;
   suggestionPreferred?: boolean;
   freshness: "fresh" | "stale";
   preRouteHandoff?: Readonly<{
@@ -144,6 +146,7 @@ export type RelayPlanningQuoteRejectionReason = Extract<
   | "provider_quote_economics_rejected"
   | "provider_quote_invalid"
   | "provider_quote_rejected"
+  | "insufficient_gas"
 >;
 
 export type RelayPlanningQuoteRejection = Readonly<{
@@ -635,7 +638,7 @@ export class RelayFirstSourcePlanner {
             !source.transferable ||
             !source.riskEligible ||
             !source.walletExecutionReady ||
-            !source.nativeGasReady ||
+            (!source.nativeGasReady && !source.requiresSolanaGasCheck) ||
             source.freshness !== "fresh" ||
             !sameAsset(
               source.source.location.asset,

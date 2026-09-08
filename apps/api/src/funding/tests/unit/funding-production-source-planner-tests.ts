@@ -1809,8 +1809,83 @@ assert.equal(excludedByPreference.length, 0);
   });
   assert.equal(belowReserveFacts.length, 1);
   assert.equal(belowReserveFacts[0]?.nativeGasReady, false);
+  assert.equal(
+    belowReserveFacts[0]?.requiresSolanaGasCheck,
+    true,
+    "below-floor SPL may be quoted, but is not gas-ready until exact simulation",
+  );
   const gasProfile = belowReserveAccount.ownership?.wallets[0];
   assert.ok(gasProfile);
+  const zeroSolAccount = {
+    ...belowReserveAccount,
+    projection: {
+      ...belowReserveAccount.projection,
+      components: [
+        sourceComponent,
+        {
+          ...nativeComponent,
+          amount: { asset: SOLANA_NATIVE, raw: "0" },
+        },
+      ],
+    },
+    cashAvailability: {
+      ...belowReserveAccount.cashAvailability,
+      components: belowReserveAccount.cashAvailability.components.map(
+        (component) =>
+          component.componentId === nativeComponent.componentId
+            ? {
+                ...component,
+                amount: { asset: SOLANA_NATIVE, raw: "0" },
+                availableRaw: "0",
+              }
+            : component,
+      ),
+    },
+    ownership: {
+      ...belowReserveAccount.ownership,
+      wallets: [
+        {
+          ...gasProfile,
+          signingModes: ["privy_authorization" as const],
+          serverWalletRef: "new-embedded-wallet",
+        },
+      ],
+    },
+  };
+  const zeroSolFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: zeroSolAccount,
+    policy: tokenPolicy,
+    requiredAmount: { asset: POLYGON_PUSD, raw: "1000000" },
+  });
+  assert.equal(
+    zeroSolFacts.length,
+    1,
+    "new wallet's existing USDC remains a candidate",
+  );
+  assert.equal(zeroSolFacts[0]?.nativeGasReady, false);
+  assert.equal(
+    zeroSolFacts[0]?.requiresSolanaGasCheck,
+    true,
+    "zero SOL must reach exact sponsorship proof",
+  );
+  const externalLowGasFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: {
+      ...belowReserveAccount,
+      ownership: {
+        ...belowReserveAccount.ownership,
+        wallets: [{ ...gasProfile, source: "external" }],
+      },
+    },
+    policy: tokenPolicy,
+    requiredAmount: { asset: POLYGON_PUSD, raw: "1000000" },
+  });
+  assert.equal(
+    externalLowGasFacts[0]?.requiresSolanaGasCheck,
+    undefined,
+    "external wallet execution keeps its existing gas contract",
+  );
   const externalPolygon = {
     ...gasProfile,
     networkId: "evm:137" as const,

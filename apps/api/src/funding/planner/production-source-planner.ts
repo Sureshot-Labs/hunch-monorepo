@@ -47,6 +47,8 @@ import {
   fundingRouteExperienceFingerprint,
 } from "../persistence/route-experience-repository.js";
 import { deriveExecutionGas } from "../../account-value/execution-gas.js";
+import { checkRelaySplGas } from "../../funding-providers/relay/solana-gas.js";
+import { checkRelaySolanaFeeOnly } from "../../funding-providers/relay/solana-sponsorship.js";
 import { deriveSafeProxyAddress } from "../../services/polymarket-funder.js";
 import {
   loadRelayEvmExecutionConfiguration,
@@ -594,6 +596,12 @@ function sourceFactsForComponent(input: {
         nativeGasReady: nativeSolSource
           ? spendableRaw > 0n
           : productionFundingProfileHasNativeGas(input.account, input.profile),
+        ...(input.component.amount.asset.networkId === "solana:mainnet" &&
+        !nativeSolSource &&
+        input.profile.source !== "external" &&
+        deriveExecutionGas(input.account, input.profile).status === "needs_gas"
+          ? { requiresSolanaGasCheck: true }
+          : {}),
         suggestionPreferred: input.suggestionPreferred,
         freshness: "fresh" as const,
         ...(input.preRouteHandoff
@@ -1285,6 +1293,9 @@ export class ProductionFundingSourcePlanner {
     const otherwiseExecutableWithoutGas = facts.some(
       (fact) =>
         !fact.nativeGasReady &&
+        // Exact SPL quotation emits its own gas rejection after simulation.
+        // Do not keep the generic floor blocker on a successfully proved route.
+        !fact.requiresSolanaGasCheck &&
         fact.transferable &&
         fact.riskEligible &&
         fact.walletExecutionReady &&
@@ -1636,6 +1647,36 @@ export class ProductionFundingSourcePlanner {
         };
       }
       throw error;
+    }
+    if (input.signal.aborted) return null;
+    if (input.source.requiresSolanaGasCheck) {
+      const action = quote.actions[0];
+      const available = deriveExecutionGas(this.account, profile).availableRaw;
+      const gas =
+        quote.actions.length === 1 &&
+        action?.kind === "svm_transaction" &&
+        available != null
+          ? await checkRelaySplGas({
+              signer: userAddress,
+              action,
+              availableLamports: BigInt(available),
+              signal: input.signal,
+            })
+          : null;
+      const sponsorReady =
+        !gas?.sufficient &&
+        quote.actions.length === 1 &&
+        action?.kind === "svm_transaction" &&
+        profile.source !== "external" &&
+        Boolean(profile.serverWalletRef) &&
+        profile.signingModes.includes("privy_authorization") &&
+        (await checkRelaySolanaFeeOnly({
+          action,
+          signer: userAddress,
+          signal: input.signal,
+        }));
+      if (!gas?.sufficient && !sponsorReady)
+        return { kind: "rejected", reasonCode: "insufficient_gas" };
     }
     if (input.signal.aborted) return null;
     return buildRelayPlanningQuote({

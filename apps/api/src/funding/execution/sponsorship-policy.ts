@@ -2,6 +2,11 @@ import type {
   NormalizedAction,
   WalletExecutionProfile,
 } from "../domain/types.js";
+import {
+  isRelaySolanaSponsorAction,
+  relaySolanaSponsorshipEnabled,
+  RELAY_SOLANA_FEE_ONLY_POLICY,
+} from "../../funding-providers/relay/solana-sponsorship.js";
 
 export const PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID =
   "privy_user_authorized_evm_sponsorship_v1";
@@ -55,6 +60,16 @@ export function resolveActionSponsorship(input: {
     input.profile.serverWalletRef &&
     input.profile.signingModes.includes("privy_authorization")
   ) {
+    if (
+      relaySolanaSponsorshipEnabled() &&
+      isRelaySolanaSponsorAction(input.action, input.profile.address)
+    ) {
+      return {
+        payerRequirement: "privy_sponsor",
+        policyId: RELAY_SOLANA_FEE_ONLY_POLICY,
+        signingMode: "privy_authorization",
+      };
+    }
     return {
       payerRequirement: "user",
       policyId: null,

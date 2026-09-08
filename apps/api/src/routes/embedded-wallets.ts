@@ -19,6 +19,7 @@ import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
+import { SOLANA_MAINNET_CAIP2 } from "../lib/chain-identifiers.js";
 import { fetchActiveDebridgeConfig } from "../repos/debridge-config.js";
 import { getRedis } from "../redis.js";
 import { createSolanaRpcConnection } from "../services/rpc-client-factory.js";
@@ -67,6 +68,8 @@ import {
   validateKalshiLossCloseSponsoredTransaction,
 } from "../services/kalshi-loss-close.js";
 import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
+import { prepareRelaySolanaSponsorship } from "../funding/execution/relay-solana-sponsorship.js";
+import { relaySolanaSponsorshipEnabled } from "../funding-providers/relay/solana-sponsorship.js";
 import {
   fetchSolanaBalanceLamports,
   fetchSolanaTokenBalanceByOwnerAndMint,
@@ -1763,8 +1766,10 @@ async function applyEmbeddedSolanaBackendSponsorshipPolicy(inputs: {
 }): Promise<{
   transactions: EmbeddedSolanaTransactionSpec[];
   embeddedSolanaSponsorshipEnabled: boolean;
+  relayIdempotencyKeys: Record<string, string>;
 }> {
   let sponsoredCount = 0;
+  const relayIdempotencyKeys: Record<string, string> = {};
   const transactions: EmbeddedSolanaTransactionSpec[] = [];
   const authAccessPolicy = await resolveAuthAccessPolicy(pool);
   const lossCloseSponsorshipEnabled =
@@ -1775,6 +1780,35 @@ async function applyEmbeddedSolanaBackendSponsorshipPolicy(inputs: {
       transaction.id,
     );
     if (!lossCloseTokenId) {
+      const relay =
+        inputs.transactions.length === 1 &&
+        relaySolanaSponsorshipEnabled() &&
+        transaction.id.startsWith("action_")
+          ? await prepareRelaySolanaSponsorship({
+              db: pool,
+              redis: await getRedis(),
+              userId: inputs.user.id,
+              signer: inputs.signer,
+              requestId: transaction.id,
+              transaction: transaction.transaction,
+            })
+          : null;
+      if (relay) {
+        if (
+          transaction.caip2?.trim() &&
+          transaction.caip2.trim() !== SOLANA_MAINNET_CAIP2
+        )
+          throw new Error("Relay funding sponsorship requires Solana mainnet.");
+        sponsoredCount++;
+        relayIdempotencyKeys[transaction.id] = relay.idempotencyKey;
+        transactions.push({
+          ...transaction,
+          transaction: relay.transaction,
+          sponsor: true,
+          caip2: SOLANA_MAINNET_CAIP2,
+        });
+        continue;
+      }
       transactions.push({
         ...transaction,
         sponsor: false,
@@ -1816,6 +1850,7 @@ async function applyEmbeddedSolanaBackendSponsorshipPolicy(inputs: {
   return {
     transactions,
     embeddedSolanaSponsorshipEnabled: sponsoredCount > 0,
+    relayIdempotencyKeys,
   };
 }
 
@@ -1837,7 +1872,7 @@ function isEmbeddedSolanaPreparedRequestSponsored(
   return body?.sponsor === true;
 }
 
-async function validateEmbeddedSolanaSponsoredLossCloseAtExecute(inputs: {
+async function validateEmbeddedSolanaSponsorshipAtExecute(inputs: {
   user: NonNullable<FastifyRequest["user"]>;
   signer: string;
   requests: EmbeddedPrivyAuthorizationRequest[];
@@ -1846,10 +1881,6 @@ async function validateEmbeddedSolanaSponsoredLossCloseAtExecute(inputs: {
     isEmbeddedSolanaPreparedRequestSponsored(request),
   );
   if (!sponsoredRequests.length) return;
-  const authAccessPolicy = await resolveAuthAccessPolicy(pool);
-  if (authAccessPolicy.effective.solanaLossCloseSponsorshipEnabled !== true) {
-    throw new Error("Kalshi loss close sponsorship is disabled.");
-  }
   if (sponsoredRequests.length !== inputs.requests.length) {
     throw new Error(
       "Sponsored Kalshi loss close transactions cannot be mixed with other Solana transactions.",
@@ -1859,8 +1890,28 @@ async function validateEmbeddedSolanaSponsoredLossCloseAtExecute(inputs: {
   for (const request of sponsoredRequests) {
     const lossCloseTokenId = parseKalshiLossCloseTransactionTokenId(request.id);
     if (!lossCloseTokenId) {
-      throw new Error("Only Kalshi loss close transactions can be sponsored.");
+      const transaction = readEmbeddedSolanaPreparedTransaction(request);
+      if (inputs.requests.length !== 1 || !transaction)
+        throw new Error("Invalid Relay sponsored batch.");
+      const relay = await prepareRelaySolanaSponsorship({
+        db: pool,
+        redis: await getRedis(),
+        userId: inputs.user.id,
+        signer: inputs.signer,
+        requestId: request.id,
+        transaction,
+        execute: true,
+      });
+      if (
+        !relay ||
+        request.input.headers["privy-idempotency-key"] !== relay.idempotencyKey
+      )
+        throw new Error("Relay sponsorship authorization is unavailable.");
+      continue;
     }
+    const authAccessPolicy = await resolveAuthAccessPolicy(pool);
+    if (authAccessPolicy.effective.solanaLossCloseSponsorshipEnabled !== true)
+      throw new Error("Kalshi loss close sponsorship is disabled.");
     const transaction = readEmbeddedSolanaPreparedTransaction(request);
     if (!transaction) {
       throw new Error(
@@ -2695,6 +2746,10 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             );
           },
         });
+        for (const prepared of requests) {
+          const key = sponsorshipPolicy.relayIdempotencyKeys[prepared.id];
+          if (key) prepared.input.headers["privy-idempotency-key"] = key;
+        }
         await cacheEmbeddedSolanaPreparedRequests({
           signer: context.signer,
           executionKey,
@@ -2765,15 +2820,33 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
                 "Prepared Solana authorization expired. Refresh quote and try again.",
               );
             }
-            await validateEmbeddedSolanaSponsoredLossCloseAtExecute({
-              user,
-              signer: context.signer,
-              requests,
-            });
-            const signatures = await executeEmbeddedSolanaTransactionRequests({
-              requests,
-              signatures: request.body.signedRequests,
-            });
+            const submit = async () => {
+              await validateEmbeddedSolanaSponsorshipAtExecute({
+                user,
+                signer: context.signer,
+                requests,
+              });
+              return executeEmbeddedSolanaTransactionRequests({
+                requests,
+                signatures: request.body.signedRequests,
+              });
+            };
+            const prepared = requests.length === 1 ? requests[0] : null;
+            const relayKey =
+              prepared &&
+              isEmbeddedSolanaPreparedRequestSponsored(prepared) &&
+              !parseKalshiLossCloseTransactionTokenId(prepared.id)
+                ? prepared.input.headers["privy-idempotency-key"]
+                : null;
+            // Client execution keys are not the concurrency boundary for a
+            // sponsored funding action. The server-derived key stays stable.
+            const signatures = relayKey
+              ? await runEmbeddedExecutionSingleFlight({
+                  key: `relay-solana-sponsorship:${relayKey}`,
+                  redis: await getRedis(),
+                  run: submit,
+                })
+              : await submit();
             await deleteCachedEmbeddedSolanaPreparedRequests({
               signer: context.signer,
               executionKey: request.body.executionKey,

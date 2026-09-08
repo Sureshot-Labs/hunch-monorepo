@@ -691,6 +691,77 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "measured Relay gas relaxes only one user-paid preparation and preserves sponsor false",
+    run: async () => {
+      const transaction = serializeTransaction([
+        new TransactionInstruction({
+          programId: Keypair.generate().publicKey,
+          keys: [],
+          data: Buffer.alloc(0),
+        }),
+      ]);
+      const input = {
+        context: walletContext,
+        transactions: [
+          { id: "relay", label: "Relay funding", transaction, sponsor: true },
+        ],
+        fetchSponsorBalanceLamports: async () => 2_995_000n,
+      };
+      let checks = 0;
+      const checkRelayGas = async () => {
+        checks++;
+        return {
+          requiredLamports: 950_880n,
+          availableLamports: 2_995_000n,
+          sufficient: true,
+        };
+      };
+      const requests = await prepareEmbeddedSolanaTransactionRequests({
+        ...input,
+        checkRelayGas,
+      });
+      assert.equal(checks, 1);
+      const prepared = requests[0];
+      assert.ok(prepared);
+      assert.equal(getSponsor(prepared), false);
+      await assert.rejects(
+        () =>
+          prepareEmbeddedSolanaTransactionRequests({
+            ...input,
+            checkRelayGas: async () => null,
+          }),
+        /Add SOL/,
+      );
+      await assert.rejects(
+        () =>
+          prepareEmbeddedSolanaTransactionRequests({
+            ...input,
+            checkRelayGas: async () => ({
+              requiredLamports: 4_000_000n,
+              availableLamports: 2_995_000n,
+              sufficient: false,
+            }),
+          }),
+        /Add SOL/,
+      );
+      checks = 0;
+      await assert.rejects(
+        () =>
+          prepareEmbeddedSolanaTransactionRequests({
+            ...input,
+            transactions: [...input.transactions, ...input.transactions],
+            checkRelayGas,
+          }),
+        /Add SOL/,
+      );
+      assert.equal(
+        checks,
+        0,
+        "batch must not reuse one transaction gas allowance",
+      );
+    },
+  },
+  {
     name: "prepare embedded solana requests ignores client sponsor true when sponsorship is disabled",
     run: async () => {
       const transaction = serializeTransaction([
