@@ -969,7 +969,7 @@ assert.deepEqual(
   }),
   {
     receiptStatus: "recovery_required",
-    sessionStatus: "recovery_required",
+    sessionStatus: "open",
     late: true,
   },
 );
@@ -980,10 +980,19 @@ assert.deepEqual(
   }),
   {
     receiptStatus: "recovery_required",
-    sessionStatus: "recovery_required",
+    sessionStatus: "open",
     late: true,
   },
   "a routed late deposit cannot execute against the completed session's stale plan",
+);
+assert.deepEqual(
+  fundingReceiveObservationDisposition({
+    sessionStatus: "expired",
+    completion: convertible.completion,
+    handling: "automatic_conversion",
+  }),
+  { receiptStatus: "recovery_required", sessionStatus: "open", late: true },
+  "a late conversion receipt is retained without reopening the expired scenario",
 );
 assert.equal(targets[1]?.networkId, "solana:mainnet");
 assert.equal(targets[1]?.acceptedAssets[0]?.handling, "automatic_conversion");

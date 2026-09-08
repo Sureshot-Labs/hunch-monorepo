@@ -1952,6 +1952,16 @@ async function markFundingOperationRecoveryRequiredInTransaction(
   if (!facts) return false;
   const lifecycle = deriveFundingLifecycle(facts);
   if (lifecycle.status !== "recovery_required") {
+    if (lifecycle.safety.terminal) {
+      // The incident cannot override a proven settlement. Still materialize
+      // that settlement before stopping the lease: otherwise the public cache
+      // and reservation accounting can remain at the previous recovery state.
+      // Restrict this to terminal outcomes; escalation must not resume a Buy.
+      await reduceFundingOperationInTransaction(client, {
+        operationId: operation.id,
+        now: input.now,
+      });
+    }
     return false;
   }
   await writeFundingActionProjectionCachesInTransaction(

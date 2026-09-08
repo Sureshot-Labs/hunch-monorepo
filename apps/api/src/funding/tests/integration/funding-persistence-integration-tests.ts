@@ -4122,7 +4122,9 @@ async function testCanonicalFailureAndReorgRetryAdmission(): Promise<void> {
   }
 }
 
-async function testDeadLetterPublishesManualRecovery(): Promise<void> {
+async function testDeadLetterPublishesManualRecovery(
+  settlesDuringPoll = false,
+): Promise<void> {
   const userId = await insertUser(pool);
   const plan = buildPlan();
   const consent = opaque("dead-letter-incident");
@@ -4137,8 +4139,8 @@ async function testDeadLetterPublishesManualRecovery(): Promise<void> {
       commitInput(userId, quote.id, consent, plan),
     );
     operationId = committed.operation.id;
-    const steps = await pool.query<{ id: string }>(
-      `select id from funding_operation_steps where operation_id = $1`,
+    const steps = await pool.query<{ id: string; segment_id: string }>(
+      `select id, segment_id from funding_operation_steps where operation_id = $1`,
       [operationId],
     );
     const step = steps.rows[0];
@@ -4186,8 +4188,56 @@ async function testDeadLetterPublishesManualRecovery(): Promise<void> {
       receiptPoll: async () => {
         throw new Error("synthetic receipt unavailable");
       },
+      destinationPoll: settlesDuringPoll
+        ? async () => {
+            for (const kind of [
+              "source_debit",
+              "destination_credit",
+            ] as const) {
+              await allocateFundingObservationInTransaction(pool, {
+                operationId: committed.operation.id,
+                segmentId: step.segment_id,
+                kind,
+                networkId: ASSET.networkId,
+                assetId: ASSET.assetId,
+                assetDecimals: ASSET.decimals,
+                txHash: opaque(kind),
+                eventIndex: "0",
+                fromAddress: "owned-source",
+                toAddress: "owned-destination",
+                rawAmount: kind === "source_debit" ? "1000000" : "990000",
+                observedAt: now,
+                ledgerHeight: "101",
+                blockHash: hash("c"),
+                finalityStatus: "finalized",
+                finalizedAt: now,
+              });
+            }
+            return { destinationsPolled: 1, destinationSatisfied: true };
+          }
+        : undefined,
     });
     assert.equal(result.deadLettered, 1);
+    if (settlesDuringPoll) {
+      const cached = await pool.query<{
+        status: string;
+        recovery_mode: string | null;
+        active_reservations: string;
+      }>(
+        `select operation_row.status, operation_row.recovery_mode,
+                (select count(*) from balance_reservations reservation_row
+                 where reservation_row.operation_id = operation_row.id
+                   and reservation_row.state = 'active') as active_reservations
+         from funding_operations operation_row where operation_row.id = $1`,
+        [operationId],
+      );
+      assert.deepEqual(cached.rows[0], {
+        status: "completed",
+        recovery_mode: null,
+        active_reservations: "0",
+      });
+      return;
+    }
     const projected = (
       await listProjectedFundingOperationsForUser(pool, {
         userId,
@@ -8540,6 +8590,7 @@ console.log(
 await testSourceReservationEvidenceLifetime();
 await testCanonicalFailureAndReorgRetryAdmission();
 await testDeadLetterPublishesManualRecovery();
+await testDeadLetterPublishesManualRecovery(true);
 await testConcurrentSourceReservationExclusion();
 console.log(
   "[funding-persistence-integration-tests] ok concurrent source reservation exclusion",

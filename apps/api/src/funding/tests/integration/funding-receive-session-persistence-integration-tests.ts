@@ -32,9 +32,13 @@ import {
   recordFundingReceiveReceiptRoutingDisposition,
   replayFundingReceiveSessionOpenIdempotency,
   settleFundingReceiveReceiptRouting,
+  updateClosedFundingReceiveSessionObservation,
   updateFundingReceiveSessionObservation,
 } from "../../persistence/funding-receive-session-repository.js";
-import { FundingReceiveSessionObserver } from "../../receive/receive-session-observer.js";
+import {
+  FundingReceiveSessionObserver,
+  fundingReceiveObservationDisposition,
+} from "../../receive/receive-session-observer.js";
 
 const NOW = new Date();
 const DESTINATION_OPTION_ID = "destination_receive_persistence_12345678";
@@ -649,6 +653,84 @@ try {
     "settled old work must close instead of reclaiming the fresh open slot",
   );
   assert.equal(stillOpenFreshSession?.session.status, "open");
+  const lateObservationClient = await pool.connect();
+  try {
+    await lateObservationClient.query("begin");
+    for (const closedStatus of ["completed", "expired", "cancelled"] as const) {
+      const scopedSessionId =
+        reviewReleaseSession.snapshot.session.receiveSessionId;
+      const updatedSession = await lateObservationClient.query<{
+        version: number;
+      }>(
+        `update funding_receive_sessions set status = $2
+         where id = $1 returning version`,
+        [scopedSessionId, closedStatus],
+      );
+      const sessionRow = updatedSession.rows[0];
+      assert.ok(sessionRow);
+      const disposition = fundingReceiveObservationDisposition({
+        sessionStatus: closedStatus,
+        completion: { kind: "committed_venue_preparation", stepOrdinal: 0 },
+        handling: "automatic_conversion",
+      });
+      const lateReceipt = await insertFundingReceiveReceipt(
+        lateObservationClient,
+        {
+          receiveSessionId: scopedSessionId,
+          userId: reviewReleaseUserId,
+          variantId: reviewReleaseInput.observationVariants[0].variantId,
+          asset: reviewReleaseInput.destinationAsset,
+          destinationAddress:
+            reviewReleaseInput.observationVariants[0].destinationAddress,
+          rawAmount: "123456",
+          observationRevision: `late_non_routed_${closedStatus}_${RUN_ID}`,
+          observedAt: NOW,
+          status: disposition.receiptStatus,
+          handling: "automatic_conversion",
+          evidence: { lateReceipt: true },
+          now: NOW,
+        },
+      );
+      assert.equal(
+        await updateClosedFundingReceiveSessionObservation(
+          lateObservationClient,
+          {
+            receiveSessionId: scopedSessionId,
+            expectedVersion: sessionRow.version,
+            observationVariants: reviewReleaseInput.observationVariants,
+            lastObservedAt: NOW,
+            recoveryRequired: disposition.sessionStatus === "recovery_required",
+            now: NOW,
+          },
+        ),
+        true,
+      );
+      const persisted = await lateObservationClient.query<{ status: string }>(
+        `select status from funding_receive_sessions where id = $1`,
+        [scopedSessionId],
+      );
+      assert.equal(persisted.rows[0]?.status, closedStatus);
+      assert.equal(lateReceipt.receipt.status, "recovery_required");
+      assert.equal(lateReceipt.receipt.childFundingOperationId, null);
+      const routing = await listFundingReceiveReceiptsForRouting(
+        lateObservationClient,
+        {
+          limit: 1000,
+          now: NOW,
+        },
+      );
+      assert.equal(
+        routing.some(
+          (target) =>
+            target.receipt.receiptId === lateReceipt.receipt.receiptId,
+        ),
+        false,
+      );
+    }
+  } finally {
+    await lateObservationClient.query("rollback");
+    lateObservationClient.release();
+  }
   const completedObservationClient = await pool.connect();
   try {
     await completedObservationClient.query("begin");

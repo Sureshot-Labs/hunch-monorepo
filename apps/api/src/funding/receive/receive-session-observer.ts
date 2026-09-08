@@ -472,8 +472,13 @@ export function fundingReceiveObservationDisposition(
   const reviewRequired = input.handling === "review_required";
   if (late && !direct) {
     return {
+      // Keep the unconverted receipt out of automatic routing and do not
+      // falsely mark the destination ready. This is historical evidence,
+      // not new work for the expired/cancelled/completed receive scenario.
       receiptStatus: "recovery_required",
-      sessionStatus: "recovery_required",
+      // As for late direct credits below, the closed-session writer retains
+      // the actual terminal state; this neutral proposal must not reopen it.
+      sessionStatus: "open",
       late,
     };
   }
