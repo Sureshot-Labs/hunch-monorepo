@@ -680,7 +680,7 @@ for (const mode of ["exact_input", "expected_output"] as const) {
   assert.equal(normalized.sourceAmount.raw, "1000000000000000000");
 }
 
-{
+for (const maximumQuoteTtlMs of [undefined, 6 * 60_000]) {
   const clock = new Date("2030-01-01T00:00:00.000Z");
   const client = new RelayClient({
     apiKey: "relay-test-secret",
@@ -706,12 +706,12 @@ for (const mode of ["exact_input", "expected_output"] as const) {
     senderWalletId: "wallet-1",
     quoteCorrelationId: "quote-correlation-sequential-delegated",
     deadline: new Date(clock.getTime() + 10 * 60_000),
-    maximumQuoteTtlMs: 6 * 60_000,
+    maximumQuoteTtlMs,
   });
   assert.equal(
     normalized.candidate.expiresAt,
-    new Date(clock.getTime() + 6 * 60_000).toISOString(),
-    "a sequential delegated route can retain its envelope through provider recovery",
+    new Date(clock.getTime() + (maximumQuoteTtlMs ?? 60_000)).toISOString(),
+    "ordinary quotes retain 60 seconds; delegated execution keeps its own bounded window",
   );
 }
 

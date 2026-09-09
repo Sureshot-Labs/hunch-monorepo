@@ -4521,8 +4521,8 @@ await test("direct ingress receives a fresh commit window after review", async (
     ownershipRevision: "ownership_revision_12345678",
   });
 
-  assert.equal(storedExpiresAtIso, "2026-07-24T12:00:59.000Z");
-  assert.equal(summary.expiresAt, "2026-07-24T12:00:59.000Z");
+  assert.equal(storedExpiresAtIso, "2026-07-24T12:01:29.000Z");
+  assert.equal(summary.expiresAt, "2026-07-24T12:01:29.000Z");
 });
 
 await test("commit revalidates policy and durable source facts under the locked quote", async () => {

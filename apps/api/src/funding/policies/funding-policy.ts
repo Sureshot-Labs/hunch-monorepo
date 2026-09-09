@@ -372,7 +372,7 @@ export const FUNDING_ROUTE_EXPERIENCE = deepFreeze({
 export const FUNDING_TTL = deepFreeze({
   collectorMs: 60_000,
   priceMs: 60_000,
-  quoteMs: 30_000,
+  quoteMs: 60_000,
   pollingMs: 15_000,
   reservationMs: 300_000,
 });
