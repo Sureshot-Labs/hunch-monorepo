@@ -2485,6 +2485,7 @@ export async function runFundingReconciliationBatch(
   const limit = Number.isFinite(requestedLimit)
     ? Math.max(1, Math.min(100, Math.trunc(requestedLimit)))
     : 25;
+  await releaseExpiredUnusedSourceReservations(pool, limit);
   const requestedConcurrency = options.concurrency ?? 4;
   const concurrency = Math.max(
     1,
@@ -2548,4 +2549,66 @@ export async function runFundingReconciliationBatch(
     ...counts,
     operationIds: claimedLeases.map((lease) => lease.operationId),
   };
+}
+
+/** A stopped/manual-review job may never run again after its unused source
+ * reservation expires. Materialize the same no-hold decision as availability,
+ * without reopening the operation, polling Relay, or reviving its consumer.
+ */
+export async function releaseExpiredUnusedSourceReservations(
+  pool: Pool,
+  limit = 25,
+): Promise<number> {
+  const eligible = `reservation.state = 'active'
+    and reservation.mode = 'subtract_available'
+    and reservation.expires_at <= now()
+    and not ${fundingReservationHoldSql("reservation")}
+    and not exists (
+      select 1 from funding_observations observation_row
+      where observation_row.operation_id = reservation.operation_id
+        and observation_row.segment_id is not distinct from reservation.segment_id
+        and observation_row.canonical
+        and observation_row.finality_status = 'finalized'
+        and observation_row.kind in ('source_debit', 'source_credit', 'destination_credit', 'refund_credit')
+    )`;
+  return tx(pool, async (client) => {
+    const candidates = await client.query<{ id: string }>(
+      `select operation_row.id
+       from funding_operations operation_row
+       where exists (
+         select 1 from balance_reservations reservation
+         where reservation.operation_id = operation_row.id
+           and ${eligible}
+       )
+       order by operation_row.id
+       limit $1
+       for update of operation_row skip locked`,
+      [
+        Number.isFinite(limit)
+          ? Math.max(1, Math.min(100, Math.trunc(limit)))
+          : 25,
+      ],
+    );
+    let released = 0;
+    for (const operation of candidates.rows) {
+      // Recheck AFTER locking the operation: an attempt admitted just before
+      // expiry may have committed while the candidate query was waiting.
+      const reservations = await client.query<{ id: string }>(
+        `select reservation.id from balance_reservations reservation
+         where reservation.operation_id = $1
+           and ${eligible}
+         for update of reservation`,
+        [operation.id],
+      );
+      for (const reservation of reservations.rows) {
+        await releaseFundingReservationInTransaction(client, {
+          reservationId: reservation.id,
+          outcomeReason: "expired_unused_source_reservation",
+          now: new Date(),
+        });
+        released += 1;
+      }
+    }
+    return released;
+  });
 }

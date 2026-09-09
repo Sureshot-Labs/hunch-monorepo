@@ -108,6 +108,7 @@ import {
   fundingReconciliationPollDelayMs,
   fundingReconciliationWaitState,
   expireUnbroadcastActionWait,
+  releaseExpiredUnusedSourceReservations,
   reduceFundingOperation,
   reduceFundingOperationInTransaction,
   runFundingReconciliationBatch,
@@ -3551,6 +3552,33 @@ async function testExpiredUnbroadcastActionWaitCancelsSafely(
     );
     const actionExpiresAt = deadline.rows[0]?.action_expires_at;
     assert.ok(actionExpiresAt);
+    if (expireFromRequest) {
+      // Rewind only this disposable fixture's reservation deadline. This
+      // models manual recovery whose job stopped before the quote expired.
+      await tx(pool, async (client) => {
+        await client.query("set local session_replication_role = replica");
+        await client.query(
+          `update balance_reservations set expires_at = now() - interval '1 second'
+           where operation_id = $1`,
+          [operationId],
+        );
+        await client.query("set local session_replication_role = origin");
+      });
+      await releaseExpiredUnusedSourceReservations(pool);
+      const swept = await pool.query<{ state: string }>(
+        `select state from balance_reservations where operation_id = $1`,
+        [operationId],
+      );
+      assert.equal(
+        swept.rows[0]?.state,
+        unresolvedAttempt ? "active" : "released",
+      );
+      assert.equal(
+        await releaseExpiredUnusedSourceReservations(pool),
+        0,
+        "cleanup is idempotent and never clears an unresolved submission hold",
+      );
+    }
     if (unresolvedAttempt) {
       assert.equal(
         await expireUnbroadcastActionWait(pool, {
