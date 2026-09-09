@@ -43,28 +43,6 @@ import {
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
-/** Call under the owned operation/step lock. Replays never extend a signature's lifetime. */
-export async function bindFundingSolanaSigningContextInTransaction(
-  client: PoolClient,
-  input: { attemptId: string; stepId: string; context: SolanaSigningContext },
-): Promise<SolanaSigningContext> {
-  const result = await client.query<{ context: unknown }>(
-    `update funding_operation_step_attempts
-     set actual_costs = actual_costs || jsonb_build_object('solanaSigningContext',
-       coalesce(actual_costs -> 'solanaSigningContext', $3::jsonb))
-     where id = $1 and step_id = $2 and outcome = 'started'
-     returning actual_costs -> 'solanaSigningContext' as context`,
-    [input.attemptId, input.stepId, input.context],
-  );
-  const context = parseSolanaSigningContext(result.rows[0]?.context);
-  if (!context)
-    throw new FundingPersistenceError(
-      "invalid_state_transition",
-      "funding signing context requires a started attempt",
-    );
-  return context;
-}
-
 export type FundingOperationStepState =
   | "planned"
   | "action_required"
@@ -1042,15 +1020,17 @@ export async function startFundingStepAttemptInTransaction(
     stepId: string;
     canonicalActionFingerprint: string;
     executorId: string;
+    solanaSigningContext?: SolanaSigningContext;
     now?: Date;
   }>,
 ): Promise<FundingStepAttempt> {
   const stepResult = await client.query<{
     action_fingerprint: string;
     executor_id: string;
+    action_kind: string | null;
   }>(
     `
-      select action_fingerprint, executor_id
+      select action_fingerprint, executor_id, normalized_action ->> 'kind' as action_kind
       from funding_operation_steps
       where id = $1 and operation_id = $2
       for update
@@ -1134,6 +1114,19 @@ export async function startFundingStepAttemptInTransaction(
     );
   }
   const attemptNumber = (previous?.attempt_number ?? 0) + 1;
+  const signingContext =
+    input.solanaSigningContext === undefined
+      ? null
+      : parseSolanaSigningContext(input.solanaSigningContext);
+  if (
+    input.solanaSigningContext !== undefined &&
+    (!signingContext || step.action_kind !== "svm_transaction")
+  ) {
+    throw new FundingPersistenceError(
+      "quote_mismatch",
+      "invalid Solana attempt signing context",
+    );
+  }
   const { rows } = await client.query<FundingStepAttemptDbRow>(
     `
       insert into funding_operation_step_attempts (
@@ -1141,9 +1134,10 @@ export async function startFundingStepAttemptInTransaction(
         attempt_number,
         canonical_action_fingerprint,
         executor_id,
-        started_at
+        started_at,
+        actual_costs
       )
-      values ($1, $2, $3, $4, $5)
+      values ($1, $2, $3, $4, $5, $6::jsonb)
       returning ${attemptColumns}
     `,
     [
@@ -1152,6 +1146,7 @@ export async function startFundingStepAttemptInTransaction(
       input.canonicalActionFingerprint,
       input.executorId,
       input.now ?? new Date(),
+      signingContext ? { solanaSigningContext: signingContext } : {},
     ],
   );
   const row = rows[0];
@@ -1167,6 +1162,7 @@ export async function startFundingStepAttemptForUserInTransaction(
     stepId: string;
     canonicalActionFingerprint: string;
     executorId: string;
+    solanaSigningContext?: SolanaSigningContext;
     expectedPolicy?: Readonly<{ revision: string; version: number }>;
     now?: Date;
   }>,
@@ -1268,6 +1264,7 @@ export async function startFundingStepAttemptForUserInTransaction(
     stepId: input.stepId,
     canonicalActionFingerprint: input.canonicalActionFingerprint,
     executorId: input.executorId,
+    solanaSigningContext: input.solanaSigningContext,
     now,
   });
   return {

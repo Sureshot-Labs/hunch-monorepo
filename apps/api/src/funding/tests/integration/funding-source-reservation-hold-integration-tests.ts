@@ -3,7 +3,6 @@
 import assert from "node:assert/strict";
 import { createIntegrationTestPool } from "../../../test-database-target.js";
 import { fundingReservationHoldSql } from "../../persistence/source-reservation-hold.js";
-import { bindFundingSolanaSigningContextInTransaction } from "../../persistence/funding-evidence-repository.js";
 
 const pool = await createIntegrationTestPool({ max: 1 });
 const client = await pool.connect();
@@ -75,49 +74,6 @@ try {
     await held("base-lane"),
     false,
     "finalized approval alone does not retain source cash",
-  );
-  await client.query(
-    "insert into funding_operation_step_attempts (id, step_id, outcome, broadcast_may_have_occurred) values ('signing-attempt', 'sol', 'started', false)",
-  );
-  const context = {
-    blockhash: "11111111111111111111111111111111",
-    lastValidBlockHeight: 100,
-  };
-  assert.deepEqual(
-    await bindFundingSolanaSigningContextInTransaction(client, {
-      attemptId: "signing-attempt",
-      stepId: "sol",
-      context,
-    }),
-    context,
-  );
-  assert.deepEqual(
-    await bindFundingSolanaSigningContextInTransaction(client, {
-      attemptId: "signing-attempt",
-      stepId: "sol",
-      context: { ...context, lastValidBlockHeight: 200 },
-    }),
-    context,
-    "a replay cannot extend the server-issued lifetime",
-  );
-  await assert.rejects(
-    bindFundingSolanaSigningContextInTransaction(client, {
-      attemptId: "signing-attempt",
-      stepId: "base",
-      context,
-    }),
-    /started attempt/,
-  );
-  await client.query(
-    "update funding_operation_step_attempts set outcome = 'failed' where id = 'signing-attempt'",
-  );
-  await assert.rejects(
-    bindFundingSolanaSigningContextInTransaction(client, {
-      attemptId: "signing-attempt",
-      stepId: "sol",
-      context,
-    }),
-    /started attempt/,
   );
   await client.query(
     "insert into funding_step_receipt_observations values ('sol-attempt', 'failed', true, true, '{\"failureFinalized\": true, \"signedTransactionExpired\": true}')",

@@ -19,7 +19,6 @@ import type {
 } from "../domain/types.js";
 import {
   fetchFundingOperationStepForUser,
-  bindFundingSolanaSigningContextInTransaction,
   finishFundingStepAttemptForUser,
   startFundingStepAttemptForUserInTransaction,
 } from "../persistence/funding-evidence-repository.js";
@@ -438,6 +437,7 @@ export class FundingOperationActionRuntime {
           stepId: input.stepId,
           canonicalActionFingerprint: fingerprint,
           executorId: step.executorId,
+          solanaSigningContext,
           ...(expectedPolicy ? { expectedPolicy } : {}),
         });
       // Policy-controlled actions lock operation/step before the wallet. The
@@ -450,14 +450,6 @@ export class FundingOperationActionRuntime {
         execution.controllerProfile,
       );
       const durableStart = started ?? (await start());
-      if (solanaSigningContext) {
-        solanaSigningContext =
-          await bindFundingSolanaSigningContextInTransaction(client, {
-            attemptId: durableStart.attempt.id,
-            stepId: input.stepId,
-            context: solanaSigningContext,
-          });
-      }
       return {
         attemptId: durableStart.attempt.id,
         action,

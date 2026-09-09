@@ -92,6 +92,8 @@ import {
 } from "../../persistence/funding-trade-attempt-repository.js";
 import { buildFundingTradeConsumerIntent } from "../../persistence/funding-trade-consumer-intent.js";
 import { fundingReservationHoldSql } from "../../persistence/source-reservation-hold.js";
+import { canonicalJsonHash } from "../../persistence/canonical.js";
+import { startFundingStepAttemptForUserInTransaction } from "../../persistence/funding-evidence-repository.js";
 import {
   createOrReplayFundingPreparationRun,
   fetchFundingPreparationRun,
@@ -4277,6 +4279,129 @@ async function testDeadLetterPublishesManualRecovery(
     assert.equal(projected?.lifecycle.safety.retryAllowed, false);
   } finally {
     await cleanupCommittedOperation(operationId, quote.id, userId);
+  }
+}
+
+async function testSolanaSigningContextOnRealAttemptSchema(): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const userId = await insertUser(client);
+    const base = buildPlan({ includeReservation: false });
+    const action = {
+      kind: "svm_transaction",
+      actionId: "solana-context-test",
+      networkId: "solana:mainnet",
+      signerWalletId: "wallet_test",
+      instructions: [],
+      addressLookupTables: [],
+    };
+    const step = base.steps[0];
+    assert.ok(step);
+    const plan: FundingCommitPlan = {
+      ...base,
+      steps: [
+        {
+          ...step,
+          normalizedAction: action,
+          actionFingerprint: canonicalJsonHash(action),
+          executorId: "wallet_profile_svm_v1",
+        },
+      ],
+    };
+    const consent = opaque("solana-context");
+    const quote = await createFundingQuoteInTransaction(
+      client,
+      quoteInput(userId, plan, consent),
+    );
+    const committed = await commitFundingOperationInTransaction(
+      client,
+      commitInput(userId, quote.id, consent, plan),
+    );
+    const stepRows = await client.query<{ id: string }>(
+      "select id from funding_operation_steps where operation_id=$1",
+      [committed.operation.id],
+    );
+    const persistedStep = stepRows.rows[0];
+    assert.ok(persistedStep);
+    const context = {
+      blockhash: "11111111111111111111111111111111",
+      lastValidBlockHeight: 100,
+    };
+    const input = {
+      userId,
+      operationId: committed.operation.id,
+      stepId: persistedStep.id,
+      canonicalActionFingerprint: canonicalJsonHash(action),
+      executorId: "wallet_profile_svm_v1",
+      solanaSigningContext: context,
+    };
+    await assert.rejects(
+      () =>
+        startFundingStepAttemptForUserInTransaction(client, {
+          ...input,
+          solanaSigningContext: { ...context, lastValidBlockHeight: -1 },
+        }),
+      (error: unknown) =>
+        error instanceof FundingPersistenceError &&
+        error.code === "quote_mismatch",
+    );
+    const started = await startFundingStepAttemptForUserInTransaction(
+      client,
+      input,
+    );
+    assert.equal(started.attempt.outcome, "started");
+    assert.equal(started.attempt.broadcastMayHaveOccurred, false);
+    assert.deepEqual(started.attempt.actualCosts.solanaSigningContext, context);
+    await assert.rejects(
+      () =>
+        startFundingStepAttemptForUserInTransaction(client, {
+          ...input,
+          solanaSigningContext: { ...context, lastValidBlockHeight: 200 },
+        }),
+      (error: unknown) =>
+        error instanceof FundingPersistenceError &&
+        error.code === "invalid_state_transition",
+    );
+
+    // This reproduces the production exception. The guard must remain enabled:
+    // prepare binds context in INSERT, never by mutating a started attempt.
+    await client.query("savepoint reject_started_context_rewrite");
+    await assert.rejects(
+      () =>
+        client.query(
+          "update funding_operation_step_attempts set actual_costs=jsonb_set(actual_costs, '{solanaSigningContext,lastValidBlockHeight}', '200'::jsonb) where id=$1",
+          [started.attempt.id],
+        ),
+      (error: unknown) => (error as { code?: string }).code === "23514",
+    );
+    await client.query("rollback to savepoint reject_started_context_rewrite");
+    const finished = await finishFundingStepAttemptForUserInTransaction(
+      client,
+      {
+        userId,
+        operationId: committed.operation.id,
+        stepId: persistedStep.id,
+        attemptId: started.attempt.id,
+        outcome: "ambiguous",
+        broadcastMayHaveOccurred: true,
+        referenceKind: "transaction",
+        receiptRefCiphertext: "ciphertext:solana-test",
+        receiptRefLookupHmac: hash("7"),
+        lookupKeyVersion: 1,
+        actualCosts: {
+          verifiedSolanaSubmission: {
+            version: 1,
+            signature: "test-signature",
+            ...context,
+          },
+        },
+      },
+    );
+    assert.equal(finished.attempt.outcome, "ambiguous");
+  } finally {
+    await client.query("rollback");
+    client.release();
   }
 }
 
@@ -8872,6 +8997,7 @@ await testDeadLetterPublishesManualRecovery();
 await testDeadLetterPublishesManualRecovery(true);
 await testConcurrentSourceReservationExclusion();
 await testConcurrentSourceReservationExclusion(true);
+await testSolanaSigningContextOnRealAttemptSchema();
 console.log(
   "[funding-persistence-integration-tests] ok concurrent source reservation exclusion",
 );

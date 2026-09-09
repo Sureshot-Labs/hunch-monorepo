@@ -26,8 +26,10 @@ this attempt to failed/non-broadcast by overwriting its original report.
 The old external wallet path combined signing and sending. Connected state
 does not establish service-worker health. The new funding path separates them:
 
-1. Prepare stores a server-observed blockhash and last-valid block height on
-   the started attempt. Replays cannot extend it.
+1. Prepare stores a server-observed blockhash and last-valid block height in
+   the initial attempt INSERT. A separate UPDATE of a `started` attempt is
+   forbidden by `funding_guard_attempt_update`; the guard remains unchanged.
+   Replays cannot extend the context or start another unresolved attempt.
 2. The external wallet signs only. During signing the recovery journal denotes
    no broadcast, not an unknown send. Rejection or a disconnected port fails
    before submission.
@@ -49,6 +51,23 @@ does not establish service-worker health. The new funding path separates them:
 The diagnostic `funding_wallet_submission_unknown` still explains historical
 no-reference ambiguity without granting retry. No migration, sponsorship
 permission or production mutation is introduced.
+
+## September 9 prepare regression
+
+Operation `b063058d-ffe9-407f-b9fb-8b98e79fdd7a` exposed a missing real-schema
+test: updating signing context after attempt insertion raised SQLSTATE 23514.
+The transaction rolled back before a Solana action was returned. The fix writes
+the validated, server-only context atomically at insertion instead. The full
+PostgreSQL 16 persistence suite now tests context insertion, subsequent report,
+rejection of a second unresolved attempt, and rejection of context UPDATE by
+the real trigger. The temporary-table reserve-predicate suite no longer claims
+to verify this persistence contract.
+
+Production read-only evidence at investigation time: Base source debit 9.598820
+USDC and Polygon destination credit 9.542195 pUSD were canonical/finalized; both
+Solana steps had no attempts; the operation was `failed` and all three source
+reservations were released. Do not replay the old Buy or resend its successful
+Base leg. A new user-confirmed purchase must use fresh balances and a fresh plan.
 
 ## All-chain reserve scope and EVM boundary
 
