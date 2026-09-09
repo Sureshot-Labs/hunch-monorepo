@@ -45,6 +45,7 @@ import {
 import { createFundingTransactionReferenceCodec } from "./transaction-reference-codec.js";
 import { WithdrawalDestinationRuntime } from "./withdrawal-destination-runtime.js";
 import { lockFundingControllerWallet } from "./funding-controller-wallet-lock.js";
+import { expireUnbroadcastActionWait } from "../reconciliation/funding-reducer.js";
 import {
   isExternalHandoffFailureCode,
   isFundingActionFailureReportConsistent,
@@ -461,6 +462,22 @@ export class FundingOperationActionRuntime {
         sponsorshipPolicyId: execution.sponsorshipPolicyId,
         ...(solanaSigningContext ? { solanaSigningContext } : {}),
       };
+    }).catch(async (error: unknown) => {
+      if (
+        operation.purpose === "trade_shortfall" &&
+        error instanceof FundingPersistenceError &&
+        error.code === "quote_expired"
+      ) {
+        // The failed attempt transaction has rolled back. Use the same
+        // evidence-checked expiry path as the worker now, rather than leave
+        // the client waiting for the next reconciliation tick. It refuses
+        // cancellation if any submission outcome remains uncertain.
+        await expireUnbroadcastActionWait(this.db, {
+          operationId: input.operationId,
+          now: new Date(),
+        });
+      }
+      throw error;
     });
   }
 

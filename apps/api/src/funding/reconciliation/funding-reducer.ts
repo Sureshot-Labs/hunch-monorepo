@@ -1834,7 +1834,7 @@ async function loadFundingOperationState(
   });
 }
 
-async function expireUnbroadcastActionWait(
+export async function expireUnbroadcastActionWait(
   pool: Pool,
   input: Readonly<{ operationId: string; now: Date }>,
 ): Promise<boolean> {

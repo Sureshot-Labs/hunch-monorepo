@@ -60,6 +60,7 @@ import {
   selectRelayFirstSourceOptions,
 } from "../../planner/source-options.js";
 import { FundingPlanner } from "../../planner/planner.js";
+import { tradeFundingFeeReferenceUsd } from "../../planner/fee-reference.js";
 import { FundingPlannerError } from "../../planner/money.js";
 import {
   classifyFundingQuoteConsent,
@@ -2095,6 +2096,7 @@ await test("source economics fail closed on unknown fee, fee cap, or slippage", 
       warningFeeBps?: number;
       minimumDestinationUsd?: string;
       minimumDestinationEstimatedUsd?: string | null;
+      feeReferenceUsd?: string | null;
     }> = {},
   ) =>
     buildRelayWalletSourceOption({
@@ -2109,6 +2111,7 @@ await test("source economics fail closed on unknown fee, fee cap, or slippage", 
       routeObservation: null,
       routeExperiencePolicy: DEFAULT_FUNDING_RUNTIME_POLICY.routeExperience,
       maximumFeeUsd,
+      feeReferenceUsd: economics.feeReferenceUsd,
       maximumFeeBps: economics.maximumFeeBps ?? 10_000,
       warningFeeUsd: economics.warningFeeUsd ?? "100",
       warningFeeBps: economics.warningFeeBps ?? 10_000,
@@ -2159,6 +2162,79 @@ await test("source economics fail closed on unknown fee, fee cap, or slippage", 
     build("0.25", "10", 500, { maximumFeeBps: 2_000 }).reasonCodes,
     ["fee_limit_exceeded"],
   );
+  for (const [tradeRaw, deficitRaw, feeUsd] of [
+    ["2119002", "244996", "0.293801"],
+    ["10000000", "279294", "0.230876"],
+    ["11000000", "1279294", "0.231612"],
+    // Economics from unsigned production Relay probes, 2026-09-09.
+    // Calldata validation is covered separately by the Relay adapter suite.
+    ["2119002", "244996", "0.142864"],
+    ["10000000", "279294", "0.104435"],
+    ["11000000", "1279294", "0.104634"],
+  ]) {
+    const deficitUsd = (Number(deficitRaw) / 1e6).toString();
+    const feeReferenceUsd = tradeFundingFeeReferenceUsd(
+      intent("trade_shortfall", tradeRaw),
+      { asset: POLYGON_PUSD, raw: deficitRaw },
+      deficitUsd,
+    );
+    assert.equal(feeReferenceUsd, (Number(tradeRaw) / 1e6).toString());
+    assert.equal(
+      build(feeUsd, "1", 500, {
+        maximumFeeBps: 2_000,
+        minimumDestinationEstimatedUsd: deficitUsd,
+        feeReferenceUsd,
+      }).selectable,
+      true,
+      "a fixed route fee must not block only the smaller trade deficit",
+    );
+    assert.equal(
+      build(feeUsd, "0.01", 500, {
+        maximumFeeBps: 2_000,
+        minimumDestinationEstimatedUsd: deficitUsd,
+        feeReferenceUsd,
+      }).selectable,
+      false,
+      "the user absolute fee cap must still apply",
+    );
+    assert.equal(
+      tradeFundingFeeReferenceUsd(
+        intent("add_funds", tradeRaw),
+        { asset: POLYGON_PUSD, raw: deficitRaw },
+        deficitUsd,
+      ),
+      null,
+    );
+    assert.equal(
+      tradeFundingFeeReferenceUsd(
+        intent("trade_shortfall", tradeRaw, {
+          serverQuoteAvailableSourceCapacity: true,
+        }),
+        { asset: POLYGON_PUSD, raw: deficitRaw },
+        deficitUsd,
+      ),
+      null,
+      "Max capacity retains its own conservative route economics",
+    );
+    assert.equal(
+      tradeFundingFeeReferenceUsd(
+        intent("trade_shortfall", tradeRaw),
+        { asset: BASE_USDC, raw: deficitRaw },
+        deficitUsd,
+      ),
+      null,
+      "an unrelated asset cannot supply the percentage reference",
+    );
+    assert.equal(
+      tradeFundingFeeReferenceUsd(
+        intent("trade_shortfall", tradeRaw),
+        { asset: POLYGON_PUSD, raw: deficitRaw },
+        null,
+      ),
+      null,
+      "unknown valuation remains unknown",
+    );
+  }
   const warning = build("0.11", "10", 500, {
     maximumFeeBps: 2_000,
     warningFeeBps: 1_000,

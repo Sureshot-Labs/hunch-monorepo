@@ -6,6 +6,7 @@ import {
   compareUnsignedDecimals,
   formatUnsignedDecimal,
   multiplyUnsignedDecimals,
+  multiplyRawByUnitPrice,
   scaleUnsignedDecimalByRawRatio,
 } from "../../account-value/decimal.js";
 import { stableOpaqueId } from "../../account-value/canonical.js";
@@ -89,6 +90,7 @@ import {
 import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../domain/network-fees.js";
 import { withWithdrawalPlanningContract } from "../domain/withdrawal-contract.js";
 import { parsePositiveInteger } from "../runtime/positive-integer.js";
+import { tradeFundingFeeReferenceUsd } from "./fee-reference.js";
 
 const ROUTE_EXPERIENCE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 
@@ -922,6 +924,7 @@ export async function planProductionFundingSourceBoundaries(
     destinationUnitPriceUsd: string | null;
     maximumFeeUsd: string;
     maximumFeeBps: number;
+    feeReferenceUsd?: string | null;
     discoverRelay: (
       requiredAmount: Money,
       boundary: FundingExecutionBoundary,
@@ -997,6 +1000,7 @@ export async function planProductionFundingSourceBoundaries(
     destinationUnitPriceUsd: input.destinationUnitPriceUsd,
     maximumFeeUsd: input.maximumFeeUsd,
     maximumFeeBps: input.maximumFeeBps,
+    feeReferenceUsd: input.feeReferenceUsd,
   } as const;
   const automaticComposite = buildCompositeSourceOption({
     ...compositeInput,
@@ -1077,6 +1081,18 @@ export class ProductionFundingSourcePlanner {
         input.destinationFacts?.collateralValuation?.unitPriceUsd ?? null,
       maximumFeeUsd: limits.maximumFeeUsd,
       maximumFeeBps: limits.maximumFeeBps,
+      feeReferenceUsd: tradeFundingFeeReferenceUsd(
+        input.request,
+        input.requiredAmount,
+        input.destinationFacts?.collateralValuation
+          ? multiplyRawByUnitPrice({
+              raw: input.requiredAmount.raw,
+              decimals: input.requiredAmount.asset.decimals,
+              unitPriceUsd:
+                input.destinationFacts.collateralValuation.unitPriceUsd,
+            })
+          : null,
+      ),
       discoverRelay: (requiredAmount, boundary) =>
         this.discoverPrioritizedRelay(
           {
@@ -1606,6 +1622,13 @@ export class ProductionFundingSourcePlanner {
     } catch (error) {
       if (error instanceof RelayClientError) {
         if (isRelayQuoteRejectedError(error)) {
+          console.warn("[funding-relay] quote rejected", {
+            routeId: relayRoute.routeId,
+            sourceLocationId: sourceLocation.locationId,
+            quoteCorrelationId: input.quoteCorrelationId,
+            httpStatus: error.httpStatus,
+            providerErrorCode: error.providerErrorCode,
+          });
           return {
             kind: "rejected",
             reasonCode: "provider_quote_rejected",

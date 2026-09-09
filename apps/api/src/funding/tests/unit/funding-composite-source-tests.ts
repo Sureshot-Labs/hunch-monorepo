@@ -1415,6 +1415,50 @@ const residualPlan = await planOrderedFundingContributions({
 assert.deepEqual(residualRequests, ["stable:1000000", "native:300000"]);
 assert.equal(residualPlan.sources.length, 2);
 
+const tinyContributions = ["a", "b"].map((id) =>
+  partialSource({
+    id: `tiny-${id}`,
+    location: sourceLocation(
+      `tiny-${id}`,
+      "evm:137",
+      "0x00000000000000000000000000000000000000b6",
+    ),
+    sourceRaw: "240000",
+    expectedRaw: "140000",
+    minimumRaw: "140000",
+    feeUsd: "0.1",
+  }),
+);
+const tinyCompositeInput = {
+  candidates: tinyContributions,
+  requiredDestination: money(DESTINATION_ASSET, "279294"),
+  destinationUnitPriceUsd: "1",
+  maximumFeeUsd: "1",
+  maximumFeeBps: 2_000,
+};
+assert.equal(buildCompositeSourceOption(tinyCompositeInput), null);
+assert.ok(
+  buildCompositeSourceOption({ ...tinyCompositeInput, feeReferenceUsd: "10" }),
+  "combined fixed fees use one full-trade reference, not the small deficit",
+);
+assert.equal(
+  buildCompositeSourceOption({
+    ...tinyCompositeInput,
+    feeReferenceUsd: "10",
+    maximumFeeUsd: "0.15",
+  }),
+  null,
+  "the aggregate absolute cap applies across all contributions",
+);
+assert.equal(
+  buildCompositeSourceOption({
+    ...tinyCompositeInput,
+    feeReferenceUsd: "0.5",
+  }),
+  null,
+  "aggregate fees cannot each reuse the full percentage budget",
+);
+
 console.log(
   "[funding-composite-source-tests] ok exact destination/required fixture, minimal-excess selection, insufficient aggregate rejection, bounded fail-closed search, automatic venue preparation plus one or two Relay sources, irrelevant gas blocker exclusion, user-wallet exclusion, exact aggregate minimum, independent dependencies, atomic multi-reservations, fee cap, duplicate rejection, account capacity across automatic/client boundaries",
 );

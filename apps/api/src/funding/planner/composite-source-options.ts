@@ -305,6 +305,7 @@ function selectSubset(
   destinationUnitPriceUsd: string,
   maximumFeeUsd: string,
   maximumFeeBps: number,
+  feeReferenceUsd?: string | null,
 ): readonly CompositeCandidate[] | null {
   const viable = candidateSubsets(candidates)
     .map((legs) => {
@@ -328,12 +329,20 @@ function selectSubset(
         decimals: requiredDestination.asset.decimals,
         unitPriceUsd: destinationUnitPriceUsd,
       });
+      const percentageReferenceUsd =
+        feeReferenceUsd != null &&
+        compareUnsignedDecimals(feeReferenceUsd, minimumUsd) > 0
+          ? feeReferenceUsd
+          : minimumUsd;
       if (
         feeUsd == null ||
         compareUnsignedDecimals(feeUsd, maximumFeeUsd) > 0 ||
         compareUnsignedDecimals(
           multiplyUnsignedDecimals(feeUsd, "10000"),
-          multiplyUnsignedDecimals(minimumUsd, maximumFeeBps.toString()),
+          multiplyUnsignedDecimals(
+            percentageReferenceUsd,
+            maximumFeeBps.toString(),
+          ),
         ) > 0
       ) {
         return null;
@@ -717,6 +726,7 @@ export function buildCompositeSourceOption(
     destinationUnitPriceUsd: string | null;
     maximumFeeUsd: string;
     maximumFeeBps: number;
+    feeReferenceUsd?: string | null;
     executionBoundary?: "automatic" | "client_handoff";
   }>,
 ): PlannedSourceOption | null {
@@ -752,6 +762,7 @@ export function buildCompositeSourceOption(
     input.destinationUnitPriceUsd,
     input.maximumFeeUsd,
     input.maximumFeeBps,
+    input.feeReferenceUsd,
   );
   if (!selected) return null;
   const ordered = [...selected].sort(candidateOrder);

@@ -107,6 +107,7 @@ import {
   FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
   fundingReconciliationPollDelayMs,
   fundingReconciliationWaitState,
+  expireUnbroadcastActionWait,
   reduceFundingOperation,
   reduceFundingOperationInTransaction,
   runFundingReconciliationBatch,
@@ -3473,7 +3474,10 @@ async function testActionWaitUsesIdleReconciliationWithoutExternalPolling(): Pro
   }
 }
 
-async function testExpiredUnbroadcastActionWaitCancelsSafely(): Promise<void> {
+async function testExpiredUnbroadcastActionWaitCancelsSafely(
+  expireFromRequest = false,
+  unresolvedAttempt?: "started" | "ambiguous",
+): Promise<void> {
   const userId = await insertUser(pool);
   const plan = buildPlan();
   const consentToken = opaque("expiry-consent");
@@ -3488,6 +3492,39 @@ async function testExpiredUnbroadcastActionWaitCancelsSafely(): Promise<void> {
       commitInput(userId, quote.id, consentToken, plan),
     );
     operationId = committed.operation.id;
+    if (unresolvedAttempt) {
+      await tx(pool, async (client) => {
+        const stepResult = await client.query<{
+          id: string;
+          action_fingerprint: string;
+          executor_id: string;
+        }>(
+          `select id, action_fingerprint, executor_id
+           from funding_operation_steps where operation_id = $1`,
+          [operationId],
+        );
+        const step = stepResult.rows[0];
+        assert.ok(step);
+        const attempt = await startFundingStepAttemptInTransaction(client, {
+          operationId: committed.operation.id,
+          stepId: step.id,
+          canonicalActionFingerprint: step.action_fingerprint,
+          executorId: step.executor_id,
+        });
+        if (unresolvedAttempt === "ambiguous") {
+          await finishFundingStepAttemptInTransaction(client, {
+            attemptId: attempt.id,
+            outcome: "ambiguous",
+            broadcastMayHaveOccurred: true,
+            referenceKind: null,
+            receiptRefCiphertext: null,
+            receiptRefLookupHmac: null,
+            lookupKeyVersion: null,
+            actualCosts: {},
+          });
+        }
+      });
+    }
     await pool.query(
       `
         update funding_operations
@@ -3514,6 +3551,22 @@ async function testExpiredUnbroadcastActionWaitCancelsSafely(): Promise<void> {
     );
     const actionExpiresAt = deadline.rows[0]?.action_expires_at;
     assert.ok(actionExpiresAt);
+    if (unresolvedAttempt) {
+      assert.equal(
+        await expireUnbroadcastActionWait(pool, {
+          operationId,
+          now: actionExpiresAt,
+        }),
+        false,
+        "quote expiry cannot cancel a signing attempt or an unknown submission",
+      );
+      const reservations = await pool.query<{ state: string }>(
+        `select state from balance_reservations where operation_id = $1`,
+        [operationId],
+      );
+      assert.equal(reservations.rows[0]?.state, "active");
+      return;
+    }
     await pool.query(
       `
         update funding_reconciliation_jobs
@@ -3528,6 +3581,24 @@ async function testExpiredUnbroadcastActionWaitCancelsSafely(): Promise<void> {
       [operationId, actionExpiresAt],
     );
 
+    if (expireFromRequest) {
+      assert.equal(
+        await expireUnbroadcastActionWait(pool, {
+          operationId,
+          now: actionExpiresAt,
+        }),
+        true,
+        "the failed prepare request can expire safely without waiting for a worker",
+      );
+      assert.equal(
+        await expireUnbroadcastActionWait(pool, {
+          operationId,
+          now: actionExpiresAt,
+        }),
+        false,
+        "a concurrent or repeated expiry cannot create another cancellation",
+      );
+    }
     const externalPolls: string[] = [];
     const result = await runFundingReconciliationBatch(pool, {
       workerId: opaque("expired-action-wait-worker"),
@@ -3556,7 +3627,16 @@ async function testExpiredUnbroadcastActionWaitCancelsSafely(): Promise<void> {
         completed: result.completed,
         externalPolls,
       },
-      { claimed: 1, completed: 1, externalPolls: [] },
+      {
+        claimed: 1,
+        completed: 1,
+        // Request-side expiry leaves the scheduled job intact. Its normal
+        // terminal receipt checks still run once, but Relay is not requoted
+        // or polled and no execution is restarted.
+        externalPolls: expireFromRequest
+          ? ["receipt", "postcondition", "destination"]
+          : [],
+      },
     );
     const expired = await pool.query<{
       completed_at: Date | null;
@@ -8981,6 +9061,9 @@ console.log(
   "[funding-persistence-integration-tests] ok action wait skips external polling, uses idle cadence, wakes on report, and mixed work remains active",
 );
 await testExpiredUnbroadcastActionWaitCancelsSafely();
+await testExpiredUnbroadcastActionWaitCancelsSafely(true);
+await testExpiredUnbroadcastActionWaitCancelsSafely(true, "started");
+await testExpiredUnbroadcastActionWaitCancelsSafely(true, "ambiguous");
 console.log(
   "[funding-persistence-integration-tests] ok expired unbroadcast action wait cancels and releases reservations without external polling",
 );

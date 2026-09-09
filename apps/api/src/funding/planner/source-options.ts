@@ -24,6 +24,7 @@ import {
   multiplyUnsignedDecimals,
 } from "../../account-value/decimal.js";
 import { canonicalJsonEqual } from "../persistence/canonical.js";
+import { tradeFundingFeeReferenceUsd } from "./fee-reference.js";
 import {
   FundingPlannerError,
   assertSameAsset,
@@ -242,6 +243,7 @@ export function buildRelayWalletSourceOption(
     minimumDestinationUsd: string;
     maximumSlippageBps: number;
     minimumDestinationEstimatedUsd: string | null;
+    feeReferenceUsd?: string | null;
     recommended?: boolean;
   }>,
 ): SourceOption {
@@ -311,7 +313,7 @@ export function buildRelayWalletSourceOption(
     input.minimumDestinationEstimatedUsd != null &&
     exceedsDecimalBps(
       feeTotalUsd,
-      input.minimumDestinationEstimatedUsd,
+      input.feeReferenceUsd ?? input.minimumDestinationEstimatedUsd,
       input.maximumFeeBps,
     );
   const feeWarning =
@@ -859,6 +861,11 @@ export class RelayFirstSourcePlanner {
             maximumSlippageBps: limits.maximumSlippageBps,
             minimumDestinationEstimatedUsd:
               plannedQuote.minimumDestinationEstimatedUsd,
+            feeReferenceUsd: tradeFundingFeeReferenceUsd(
+              input.request,
+              plannedQuote.candidate.minimumOutput,
+              plannedQuote.minimumDestinationEstimatedUsd,
+            ),
             recommended: sourceForQuote.suggestionPreferred,
           });
           if (
@@ -969,6 +976,7 @@ export class RelayFirstSourcePlanner {
               ? [outcome.reasonCode]
               : [],
           ),
+          ...selected.flatMap((source) => source.option.reasonCodes),
         ]),
       ],
     };
