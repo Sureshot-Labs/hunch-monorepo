@@ -58,6 +58,7 @@ import type { PreparationResult } from "../domain/contracts.js";
 import type { FundingActionFailureCode } from "../execution/action-report.js";
 import { FundingPlanner } from "./planner.js";
 import { FundingQuoteService } from "./quote-service.js";
+import { assertSharedFundingSourceCapacity } from "./source-reservation-capacity.js";
 import {
   FundingOperationService,
   type PreparedFundingOperationCommit,
@@ -750,6 +751,15 @@ export class FundingPlanningRuntime {
     const controllerProfiles = durableControllerProfiles(account);
     const service = new FundingOperationService({
       db: this.db,
+      verifySharedSourceCapacity: async (sources) => {
+        // Re-read after source locks, so a concurrent commit cannot spend the
+        // same remainder. Normal exclusive commits need no extra collection.
+        const currentAccount = await buildAccountValueReadModel({
+          pool: this.db,
+          userId,
+        });
+        assertSharedFundingSourceCapacity(currentAccount, userId, sources);
+      },
       subjectLookupHmac: (subjectUserId) =>
         fundingSubjectLookupHmac(subjectUserId, lookupKey),
       subjectLookupKeyVersion: keyVersion,

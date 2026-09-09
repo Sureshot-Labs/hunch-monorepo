@@ -91,6 +91,7 @@ import {
   recordFundingTradeAttemptOutcomeInTransaction,
 } from "../../persistence/funding-trade-attempt-repository.js";
 import { buildFundingTradeConsumerIntent } from "../../persistence/funding-trade-consumer-intent.js";
+import { fundingReservationHoldSql } from "../../persistence/source-reservation-hold.js";
 import {
   createOrReplayFundingPreparationRun,
   fetchFundingPreparationRun,
@@ -4279,12 +4280,24 @@ async function testDeadLetterPublishesManualRecovery(
   }
 }
 
-async function testConcurrentSourceReservationExclusion(): Promise<void> {
+async function testConcurrentSourceReservationExclusion(
+  shared = false,
+): Promise<void> {
   const userId = await insertUser(pool);
   const sourceComponentId = opaque("shared-component");
   const sourceLocationId = opaque("shared-source-location");
-  const planA = buildPlan({ sourceComponentId, sourceLocationId });
-  const planB = buildPlan({ sourceComponentId, sourceLocationId });
+  const makePlan = (raw: string): FundingCommitPlan => {
+    const plan = buildPlan({ sourceComponentId, sourceLocationId });
+    return {
+      ...plan,
+      reservations: plan.reservations.map((entry) => ({
+        ...entry,
+        rawAmount: raw,
+      })),
+    };
+  };
+  const planA = makePlan(shared ? "384360" : "1000000");
+  const planB = makePlan(shared ? "384360" : "1000000");
   const consentA = opaque("consent");
   const consentB = opaque("consent");
   const quoteA = await createFundingQuote(
@@ -4296,17 +4309,113 @@ async function testConcurrentSourceReservationExclusion(): Promise<void> {
     quoteInput(userId, planB, consentB),
   );
   const operationIds: string[] = [];
+  const quoteIds = [quoteA.id, quoteB.id];
   let cleanupFailure: unknown;
   try {
+    if (shared) {
+      const seedPlan = makePlan("1398210");
+      const seedConsent = opaque("seed-consent");
+      const seedQuote = await createFundingQuote(
+        pool,
+        quoteInput(userId, seedPlan, seedConsent),
+      );
+      quoteIds.push(seedQuote.id);
+      const seed = await commitFundingOperation(
+        pool,
+        commitInput(userId, seedQuote.id, seedConsent, seedPlan),
+      );
+      operationIds.push(seed.operation.id);
+      for (const metadata of [
+        { economicRole: "future_credit_fence" as const, segmentOrdinal: null },
+        { sourceInputRawAmount: "1" },
+      ]) {
+        const fencePlan = {
+          ...planA,
+          reservations: planA.reservations.map((entry) => ({
+            ...entry,
+            ...metadata,
+          })),
+        };
+        const fenceConsent = opaque("fence-consent");
+        const fenceQuote = await createFundingQuote(
+          pool,
+          quoteInput(userId, fencePlan, fenceConsent),
+        );
+        quoteIds.push(fenceQuote.id);
+        await assert.rejects(
+          () =>
+            commitFundingOperation(pool, {
+              ...commitInput(userId, fenceQuote.id, fenceConsent, fencePlan),
+              verifySharedSourceCapacity: async () => {
+                assert.fail("future-credit fences must remain exclusive");
+              },
+            }),
+          (error: unknown) =>
+            error instanceof FundingPersistenceError &&
+            error.code === "quote_invalidated",
+        );
+      }
+      const expiryConsent = opaque("shared-expiry-consent");
+      const expiryQuote = await createFundingQuote(
+        pool,
+        quoteInput(userId, planA, expiryConsent),
+      );
+      quoteIds.push(expiryQuote.id);
+      const commitClock = new Date();
+      await assert.rejects(
+        () =>
+          commitFundingOperation(pool, {
+            ...commitInput(userId, expiryQuote.id, expiryConsent, planA),
+            now: commitClock,
+            verifySharedSourceCapacity: async () => {
+              commitClock.setTime(expiryQuote.expiresAt.getTime() + 1);
+            },
+          }),
+        (error: unknown) =>
+          error instanceof FundingPersistenceError &&
+          error.code === "quote_expired",
+      );
+    }
+    const seenHolds: string[] = [];
+    const verifySharedSourceCapacity: FundingCommitInput["verifySharedSourceCapacity"] =
+      async (sources) => {
+        assert.equal(sources.length, 1);
+        const current = await pool.query<{ held: string }>(
+          `
+        select coalesce(sum(raw_amount::numeric), 0)::text as held
+        from balance_reservations
+        where user_id=$1 and component_id=$2 and state='active'
+          and mode='subtract_available' and ${fundingReservationHoldSql("balance_reservations")}
+      `,
+          [userId, sourceComponentId],
+        );
+        const currentRow = current.rows[0];
+        const source = sources[0];
+        assert.ok(currentRow);
+        assert.ok(source);
+        const held = currentRow.held;
+        assert.equal(
+          source.heldRaw,
+          held,
+          "capacity re-read must include the lock winner's committed reservation",
+        );
+        seenHolds.push(held);
+        if (BigInt(held) + BigInt(source.reservation.rawAmount) > 1782570n) {
+          throw new FundingPersistenceError(
+            "quote_invalidated",
+            "insufficient remaining source capacity",
+          );
+        }
+      };
     const results = await Promise.allSettled([
-      commitFundingOperation(
-        pool,
-        commitInput(userId, quoteA.id, consentA, planA),
-      ),
-      commitFundingOperation(
-        pool,
-        commitInput(userId, quoteB.id, consentB, planB),
-      ),
+      commitFundingOperation(pool, {
+        ...commitInput(userId, quoteA.id, consentA, planA),
+        ...(shared ? { verifySharedSourceCapacity } : {}),
+      }),
+      commitFundingOperation(pool, {
+        ...commitInput(userId, quoteB.id, consentB, planB),
+        ...(shared ? { verifySharedSourceCapacity } : {}),
+      }),
     ]);
     const successes = results.filter(
       (
@@ -4325,6 +4434,39 @@ async function testConcurrentSourceReservationExclusion(): Promise<void> {
     operationIds.push(committed.operation.id);
     assert.ok(failures[0]?.reason instanceof FundingPersistenceError);
     assert.equal(failures[0]?.reason.code, "quote_invalidated");
+    if (shared) {
+      assert.deepEqual(seenHolds, ["1398210", "1782570"]);
+      const totals = await pool.query<{
+        reservation_count: string;
+        total_raw: string;
+      }>(
+        "select count(*)::text as reservation_count, sum(raw_amount::numeric)::text as total_raw from balance_reservations where user_id=$1 and component_id=$2 and state='active'",
+        [userId, sourceComponentId],
+      );
+      assert.deepEqual(
+        totals.rows,
+        [{ reservation_count: "2", total_raw: "1782570" }],
+        "the old hold stays intact; the rejected commit adds no reservation",
+      );
+      const winner =
+        results[0]?.status === "fulfilled"
+          ? commitInput(userId, quoteA.id, consentA, planA)
+          : commitInput(userId, quoteB.id, consentB, planB);
+      const stored = await pool.query<{ idempotency_key: string }>(
+        "select idempotency_key from funding_operations where id=$1",
+        [committed.operation.id],
+      );
+      const storedRow = stored.rows[0];
+      assert.ok(storedRow);
+      const replay = await commitFundingOperation(pool, {
+        ...winner,
+        idempotencyKey: storedRow.idempotency_key,
+        verifySharedSourceCapacity: async () => {
+          assert.fail("replay must not reserve again");
+        },
+      });
+      assert.equal(replay.replayed, true);
+    }
   } finally {
     const cleanupClient = await pool.connect();
     try {
@@ -4364,7 +4506,7 @@ async function testConcurrentSourceReservationExclusion(): Promise<void> {
       }
       await cleanupClient.query(
         "delete from funding_quotes where id = any($1::uuid[])",
-        [[quoteA.id, quoteB.id]],
+        [quoteIds],
       );
       await cleanupClient.query("delete from users where id = $1", [userId]);
       await cleanupClient.query("commit");
@@ -8729,6 +8871,7 @@ await testCanonicalFailureAndReorgRetryAdmission();
 await testDeadLetterPublishesManualRecovery();
 await testDeadLetterPublishesManualRecovery(true);
 await testConcurrentSourceReservationExclusion();
+await testConcurrentSourceReservationExclusion(true);
 console.log(
   "[funding-persistence-integration-tests] ok concurrent source reservation exclusion",
 );

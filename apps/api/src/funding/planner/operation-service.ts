@@ -6,6 +6,7 @@ import {
   commitFundingOperation,
   fetchFundingQuoteForUser,
   type FundingCommitPlan,
+  type FundingCommitInput,
   type FundingOperationRow,
   type FundingQuoteCommitScope,
   type StoredFundingQuote,
@@ -80,6 +81,7 @@ export class FundingOperationService {
       commitOperation?: typeof commitFundingOperation;
       resolvePolicy?: FundingPolicyResolver;
       now?: () => Date;
+      verifySharedSourceCapacity?: FundingCommitInput["verifySharedSourceCapacity"];
     }>,
   ) {}
 
@@ -174,6 +176,7 @@ export class FundingOperationService {
       subjectLookupHmac: this.dependencies.subjectLookupHmac(input.userId),
       subjectLookupKeyVersion: this.dependencies.subjectLookupKeyVersion,
       now: this.dependencies.now?.() ?? new Date(),
+      verifySharedSourceCapacity: this.dependencies.verifySharedSourceCapacity,
       verifyCurrentFacts: async (client, lockedQuote) => {
         if (!withdrawal) {
           await lockFundingPolicyForTransaction(client);

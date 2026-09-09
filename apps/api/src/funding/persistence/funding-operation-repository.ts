@@ -259,6 +259,15 @@ export type FundingCommitInput = Readonly<{
     client: PoolClient,
     quote: StoredFundingQuote,
   ) => Promise<void>;
+  /** Re-read capacity only after every source lock is held; never use a pre-lock snapshot. */
+  verifySharedSourceCapacity?: (
+    sources: readonly FundingSharedSourceReservation[],
+  ) => Promise<void>;
+}>;
+
+export type FundingSharedSourceReservation = Readonly<{
+  reservation: FundingCommitReservation;
+  heldRaw: string;
 }>;
 
 export type FundingOperationRow = Readonly<{
@@ -937,21 +946,25 @@ function commitReservations(
   return reservations;
 }
 
-async function insertCommitReservations(
+async function lockCommitSourceReservations(
   client: Pick<PoolClient, "query">,
   userId: string,
-  operationId: string,
   reservations: readonly FundingCommitReservation[],
-  segmentIdByOrdinal: ReadonlyMap<number, string>,
+  verifySharedSourceCapacity: FundingCommitInput["verifySharedSourceCapacity"],
 ): Promise<void> {
-  const subtractComponentIds = [
-    ...new Set(
-      reservations
-        .filter((reservation) => reservation.mode === "subtract_available")
-        .map((reservation) => reservation.componentId),
-    ),
-  ].sort();
-  for (const componentId of subtractComponentIds) {
+  // commitReservations has already rejected duplicate component/mode pairs.
+  const subtractReservations = reservations
+    .filter((reservation) => reservation.mode === "subtract_available")
+    .sort((left, right) =>
+      left.componentId < right.componentId
+        ? -1
+        : left.componentId > right.componentId
+          ? 1
+          : 0,
+    );
+  const sharedSources: FundingSharedSourceReservation[] = [];
+  for (const reservation of subtractReservations) {
+    const componentId = reservation.componentId;
     await client.query(
       `
         select pg_advisory_xact_lock(
@@ -960,27 +973,53 @@ async function insertCommitReservations(
       `,
       [["funding-source-reservation", userId, componentId].join(":")],
     );
-    const conflict = await client.query<{ id: string }>(
+    const conflict = await client.query<{ raw_amount: string }>(
       `
-        select id
+        select raw_amount
         from balance_reservations
         where user_id = $1
           and component_id = $2
           and mode = 'subtract_available'
           and state = 'active'
           and ${fundingReservationHoldSql("balance_reservations")}
-        limit 1
+        order by id
         for update
       `,
       [userId, componentId],
     );
     if (conflict.rows[0]) {
-      throw new FundingPersistenceError(
-        "quote_invalidated",
-        "another funding operation already reserves this source balance",
-      );
+      // Future credits are not present inventory. Preserve exclusive admission
+      // for these fences, including a source input combined with a later credit.
+      if (
+        !verifySharedSourceCapacity ||
+        reservation.economicRole === "future_credit_fence" ||
+        (reservation.sourceInputRawAmount !== undefined &&
+          reservation.sourceInputRawAmount !== reservation.rawAmount)
+      ) {
+        throw new FundingPersistenceError(
+          "quote_invalidated",
+          "source reservation requires exclusive capacity",
+        );
+      }
+      sharedSources.push({
+        reservation,
+        heldRaw: conflict.rows
+          .reduce((sum, row) => sum + BigInt(row.raw_amount), 0n)
+          .toString(),
+      });
     }
   }
+  if (sharedSources.length > 0 && verifySharedSourceCapacity)
+    await verifySharedSourceCapacity(sharedSources);
+}
+
+async function insertCommitReservations(
+  client: Pick<PoolClient, "query">,
+  userId: string,
+  operationId: string,
+  reservations: readonly FundingCommitReservation[],
+  segmentIdByOrdinal: ReadonlyMap<number, string>,
+): Promise<void> {
   for (const reservation of reservations) {
     const segmentId =
       reservation.segmentOrdinal == null
@@ -1153,6 +1192,13 @@ export async function commitFundingOperationInTransaction(
   const preflightNow = input.now ?? new Date();
   assertQuoteMatchesCommit(quote, input, preflightNow);
   await input.verifyCurrentFacts?.(client, quote);
+  const reservations = commitReservations(input.plan);
+  await lockCommitSourceReservations(
+    client,
+    input.userId,
+    reservations,
+    input.verifySharedSourceCapacity,
+  );
   const { rows: clockRows } = await client.query<{ now: Date }>(
     "select clock_timestamp() as now",
   );
@@ -1286,7 +1332,7 @@ export async function commitFundingOperationInTransaction(
     client,
     input.userId,
     operation.id,
-    commitReservations(input.plan),
+    reservations,
     segmentIdByOrdinal,
   );
   await client.query(

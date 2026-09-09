@@ -4514,6 +4514,10 @@ await test("commit revalidates policy and durable source facts under the locked 
           );
         }
       },
+      verifySharedSourceCapacity: async (sources) => {
+        assert.deepEqual(sources, []);
+        commitBoundaryEvents.push("shared_capacity_verified");
+      },
       commitOperation: async (_db, input) => {
         const client = {
           query: async () => {
@@ -4522,6 +4526,8 @@ await test("commit revalidates policy and durable source facts under the locked 
           },
         };
         await input.verifyCurrentFacts?.(client as never, quote);
+        assert.ok(input.verifySharedSourceCapacity);
+        await input.verifySharedSourceCapacity([]);
         return { operation: {} as never, replayed: false };
       },
       now: () => NOW,
@@ -4539,6 +4545,7 @@ await test("commit revalidates policy and durable source facts under the locked 
     ownershipRevision: "ownership_revision_12345678",
   });
   assert.equal(sourceCommitChecks, 1);
+  assert.ok(commitBoundaryEvents.includes("shared_capacity_verified"));
   assert.ok(
     commitBoundaryEvents.indexOf("policy_locked") <
       commitBoundaryEvents.indexOf("policy_resolved"),
