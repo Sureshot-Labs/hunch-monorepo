@@ -100,7 +100,7 @@ import {
 import { venueLifecycleAllowsTradingAction } from "./venue-lifecycle.js";
 import {
   buildTelegramFundingAutomaticPolicyForRoute,
-  isTelegramSolanaRetainedFundingRouteKey,
+  isTelegramRetainedFundingRouteKey,
   prepareTelegramFundingAutomaticVariantsForRoute,
   resolveTelegramFundingConsentRoute,
   resolveTelegramFundingConsentCapability,
@@ -509,7 +509,7 @@ export function canListTelegramFundingTarget(
   return (
     input.authorizationAvailable ||
     input.automaticSourceAsset === null ||
-    (isTelegramSolanaRetainedFundingRouteKey(input.routeKey) &&
+    (isTelegramRetainedFundingRouteKey(input.routeKey) &&
       canListTelegramRetainedSourceReceive(input))
   );
 }
@@ -777,6 +777,13 @@ export class TelegramFundingService {
       now: Date;
     }>,
   ): Promise<void> {
+    const consent = await fetchActiveTelegramFundingConsent(
+      this.pool,
+      input.context.id,
+    );
+    const route = consent ? resolveTelegramFundingConsentRoute(consent) : null;
+    if (route && isTelegramRetainedFundingRouteKey(route.presentation.routeKey))
+      return;
     const [receive, controllerWalletId] = await Promise.all([
       loadTelegramFundingReceiveSession(
         this.receive,
@@ -1184,6 +1191,8 @@ export class TelegramFundingService {
   async open(
     input: TelegramFundingMutationInput & {
       venue: string;
+      /** Explicit menu choice: never disclose a default route first. */
+      initialChoiceToken?: string;
       navigationMarketId?: string;
       navigationSide?: "YES" | "NO";
     },
@@ -1192,6 +1201,34 @@ export class TelegramFundingService {
   ): Promise<TelegramFundingMessage> {
     const idempotencyKey = assertIdempotencyKey(input.idempotencyKey);
     const { identity, link: initialLink } = await this.currentLink(input);
+    if (
+      input.initialChoiceToken != null &&
+      telegramFundingRouteDescriptorForChoiceToken(input.initialChoiceToken)
+        ?.venueId !== input.venue
+    ) {
+      throw new TelegramFundingError("invalid_funding_choice");
+    }
+    const presentOpenedContext = (context: TelegramFundingSessionContext) =>
+      input.initialChoiceToken != null
+        ? this.selectTarget(
+            {
+              ...input,
+              contextId: context.id,
+              choiceToken: input.initialChoiceToken,
+              idempotencyKey: `receive-route:${canonicalJsonHash({ idempotencyKey })}`,
+            },
+            now,
+            decorateProgress,
+          )
+        : this.presentExistingContext({
+            context,
+            decorateProgress,
+            identity,
+            link: initialLink,
+            now,
+            telegramMessageId: input.telegramMessageId,
+            venue: input.venue,
+          });
     const requestFingerprint = canonicalJsonHash({
       action: "open",
       chatId: identity.chatId,
@@ -1199,6 +1236,9 @@ export class TelegramFundingService {
       telegramUserId: identity.telegramUserId,
       userId: initialLink.userId,
       venue: input.venue,
+      ...(input.initialChoiceToken != null
+        ? { initialChoiceToken: input.initialChoiceToken }
+        : {}),
       ...(input.navigationMarketId
         ? {
             navigationMarketId: input.navigationMarketId,
@@ -1218,15 +1258,7 @@ export class TelegramFundingService {
         },
       );
       if (mutationReplay) {
-        return this.presentExistingContext({
-          context: mutationReplay,
-          decorateProgress,
-          identity,
-          link: initialLink,
-          now,
-          telegramMessageId: input.telegramMessageId,
-          venue: input.venue,
-        });
+        return presentOpenedContext(mutationReplay);
       }
     } catch (error) {
       rethrowTelegramFundingPersistenceError(error);
@@ -1238,15 +1270,7 @@ export class TelegramFundingService {
       chatId: identity.chatId,
     });
     if (replay) {
-      return this.presentExistingContext({
-        context: replay,
-        decorateProgress,
-        identity,
-        link: initialLink,
-        now,
-        telegramMessageId: input.telegramMessageId,
-        venue: input.venue,
-      });
+      return presentOpenedContext(replay);
     }
     const managedWallet = this.resolveManagedWallet
       ? await this.managedWallet(initialLink, identity.telegramUserId)
@@ -1296,27 +1320,30 @@ export class TelegramFundingService {
       rethrowTelegramFundingPersistenceError(error);
     }
     if (active) {
-      return this.presentExistingContext({
-        context: active,
-        decorateProgress,
-        identity,
-        link: initialLink,
-        now,
-        telegramMessageId: input.telegramMessageId,
-        venue: input.venue,
-      });
+      return presentOpenedContext(active);
     }
     destination ??= await this.resolveReceiveDestination(
       initialLink.userId,
       input.venue,
       controllerWalletId,
     );
-    await this.provisionFundingAuthorization({
-      destination: { ...destination, venueId: input.venue },
-      identity,
-      link: initialLink,
-      now,
-    });
+    const explicitRoute =
+      input.initialChoiceToken == null
+        ? null
+        : telegramFundingRouteDescriptorForChoiceToken(
+            input.initialChoiceToken,
+          );
+    if (
+      !explicitRoute ||
+      !isTelegramRetainedFundingRouteKey(explicitRoute.routeKey)
+    ) {
+      await this.provisionFundingAuthorization({
+        destination: { ...destination, venueId: input.venue },
+        identity,
+        link: initialLink,
+        now,
+      });
+    }
     const navigationMarket = input.navigationMarketId
       ? await findTradeMarketById(this.pool, input.navigationMarketId)
       : null;
@@ -1346,6 +1373,9 @@ export class TelegramFundingService {
         });
       },
     });
+    if (input.initialChoiceToken != null) {
+      return presentOpenedContext(context.context);
+    }
     return this.session(
       {
         ...input,
@@ -2400,7 +2430,7 @@ export class TelegramFundingService {
     ) {
       throw new TelegramFundingError("funding_session_expired");
     }
-    if (isTelegramSolanaRetainedFundingRouteKey(selectedRouteKey)) {
+    if (isTelegramRetainedFundingRouteKey(selectedRouteKey)) {
       const activeBuyReturn =
         snapshot.context.origin === "buy_return_context"
           ? await fetchActiveTelegramFundingBuyReturn(
@@ -2527,7 +2557,7 @@ export class TelegramFundingService {
         chatId: identity.chatId,
         telegramMessageId: input.telegramMessageId,
         controllerWalletId,
-        retainedSourceWalletAddress: isTelegramSolanaRetainedFundingRouteKey(
+        retainedSourceWalletAddress: isTelegramRetainedFundingRouteKey(
           selectedRouteKey,
         )
           ? choice.address
@@ -2577,6 +2607,23 @@ export class TelegramFundingService {
       telegramUserId: identity.telegramUserId,
       userId: link.userId,
     });
+    const presentCancellation = async () => {
+      const context = await fetchTelegramFundingSessionContext(this.pool, {
+        contextId: input.contextId,
+        userId: link.userId,
+        telegramUserId: identity.telegramUserId,
+        chatId: identity.chatId,
+      });
+      const terminal = resolveTelegramFundingRetainedTerminal(
+        context?.latestTerminalProjection,
+        input.contextId,
+      );
+      // The same address-free card is used by callbacks and the outbox. A
+      // receipt-free picker may have no projection/consent to deliver at all.
+      return terminal.kind === "valid"
+        ? buildTelegramFundingProgressMessage(terminal.projection)
+        : buildTelegramFundingCancelledMessage();
+    };
     try {
       const replay = await fetchTelegramFundingMutationReplay(this.pool, {
         action: "cancel",
@@ -2586,7 +2633,7 @@ export class TelegramFundingService {
       });
       if (replay) {
         await this.projectMutationContext(input.contextId, now);
-        return telegramFundingMessage(replay);
+        return presentCancellation();
       }
       const response = buildTelegramFundingCancelledMessage();
       const cancelled = await cancelTelegramFundingSessionContext(this.pool, {
@@ -2605,9 +2652,7 @@ export class TelegramFundingService {
         throw new TelegramFundingError("funding_context_not_found");
       }
       await this.projectMutationContext(cancelled.context.id, now);
-      return cancelled.mutationResponse
-        ? telegramFundingMessage(cancelled.mutationResponse)
-        : response;
+      return presentCancellation();
     } catch (error) {
       rethrowTelegramFundingPersistenceError(error);
     }

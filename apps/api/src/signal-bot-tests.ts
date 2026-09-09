@@ -11038,8 +11038,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "funding:callback:funding-selection",
       );
       assert.equal(
-        menuRenderToken({ kind: "deposit" }, "active-funding"),
+        menuRenderToken(
+          { kind: "deposit", venue: "polymarket" },
+          "active-funding",
+        ),
         "funding:callback:active-funding",
+      );
+      assert.equal(
+        menuRenderToken({ kind: "deposit", venue: "any" }, "deposit-menu"),
+        "deposit-menu",
+        "background funding must not overwrite deposit navigation",
       );
       assert.equal(
         menuRenderToken({ kind: "back_to_market" }, "market-navigation"),
@@ -11047,7 +11055,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.equal(
         menuRenderToken({ kind: "cancel" }, "cancel-navigation"),
-        "cancel-navigation",
+        "funding:callback:cancel-navigation",
+      );
+      assert.equal(
+        menuRenderToken({ kind: "deposit_cancel_active" }, "cancel-active"),
+        "funding:callback:cancel-active",
       );
     },
   },

@@ -4,9 +4,9 @@ import {
   sameAccountAddress,
   sameAsset,
 } from "../funding/domain/asset-identity.js";
-import { SOLANA_NATIVE_ASSET } from "../funding/domain/network-fees.js";
+import { isRetainedOwnedSourceAsset } from "../funding/receive/retained-solana-assets.js";
 import {
-  isTelegramFundingManagedSolanaWalletCurrent,
+  isTelegramFundingManagedReceiveWalletCurrent,
   isTelegramFundingReceiveControllerCurrent,
 } from "../funding/execution/telegram-funding-managed-wallet.js";
 import { fetchFundingReceiveSessionForUser } from "../funding/persistence/funding-receive-session-repository.js";
@@ -16,7 +16,7 @@ import { fetchActiveTelegramFundingConsent } from "./telegram-funding-sessions.j
 /**
  * Revalidates every wallet identity whose address can appear in a Telegram
  * funding card. Most routes disclose only the EVM destination controller. A
- * retained-SOL route additionally discloses the selected owned Solana source,
+ * retained-source route additionally discloses the selected owned source wallet,
  * so its exact consent target must still be current at projection and again
  * immediately before delivery.
  */
@@ -26,7 +26,7 @@ export async function isTelegramFundingReceiveDisclosureTargetCurrent(
     expectedReceiveAddress?: string | null;
     fundingContextId: string;
     receiveSessionId: string;
-    retainedSolanaTarget: boolean;
+    retainedSourceTarget: boolean;
     telegramAccountId: string;
     telegramUserId: string;
     userId: string;
@@ -35,7 +35,7 @@ export async function isTelegramFundingReceiveDisclosureTargetCurrent(
   if (!(await isTelegramFundingReceiveControllerCurrent(pool, input))) {
     return false;
   }
-  if (!input.retainedSolanaTarget) return true;
+  if (!input.retainedSourceTarget) return true;
   const receive = await fetchFundingReceiveSessionForUser(pool, {
     receiveSessionId: input.receiveSessionId,
     userId: input.userId,
@@ -49,7 +49,7 @@ export async function isTelegramFundingReceiveDisclosureTargetCurrent(
     receive.ownerChannel !== "telegram" ||
     !consent ||
     consent.automationEnabled ||
-    !sameAsset(consent.asset, SOLANA_NATIVE_ASSET) ||
+    !isRetainedOwnedSourceAsset(consent.asset) ||
     consent.variantIds.length !== 1
   ) {
     return false;
@@ -60,11 +60,11 @@ export async function isTelegramFundingReceiveDisclosureTargetCurrent(
   const target = targets.length === 1 ? targets[0] : null;
   if (
     !target ||
-    target.networkId !== SOLANA_NATIVE_ASSET.networkId ||
+    target.networkId !== consent.asset.networkId ||
     target.acceptedAssets.filter(
       (candidate) =>
         candidate.handling === "direct" &&
-        sameAsset(candidate.asset, SOLANA_NATIVE_ASSET),
+        sameAsset(candidate.asset, consent.asset),
     ).length !== 1
   ) {
     return false;
@@ -81,9 +81,9 @@ export async function isTelegramFundingReceiveDisclosureTargetCurrent(
     (candidate) =>
       candidate.variantId === consent.variantIds[0] &&
       candidate.completion.kind === "retained_owned_source_credit" &&
-      sameAsset(candidate.asset, SOLANA_NATIVE_ASSET) &&
+      sameAsset(candidate.asset, consent.asset) &&
       sameAccountAddress(
-        SOLANA_NATIVE_ASSET.networkId,
+        consent.asset.networkId,
         candidate.destinationAddress,
         target.destinationAddress,
       ),
@@ -92,14 +92,15 @@ export async function isTelegramFundingReceiveDisclosureTargetCurrent(
     retainedVariants.length !== 1 ||
     (input.expectedReceiveAddress != null &&
       !sameAccountAddress(
-        SOLANA_NATIVE_ASSET.networkId,
+        consent.asset.networkId,
         input.expectedReceiveAddress,
         target.destinationAddress,
       ))
   ) {
     return false;
   }
-  return isTelegramFundingManagedSolanaWalletCurrent(pool, {
+  return isTelegramFundingManagedReceiveWalletCurrent(pool, {
+    networkId: consent.asset.networkId,
     telegramAccountId: input.telegramAccountId,
     telegramUserId: input.telegramUserId,
     userId: input.userId,

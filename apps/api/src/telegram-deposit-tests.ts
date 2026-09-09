@@ -27,7 +27,11 @@ function authorizationDb(walletAddress: string | null) {
 const owner = "0x1111111111111111111111111111111111111111";
 const deposit = "0x3333333333333333333333333333333333333333";
 
-assert.equal(parseSignalBotInteractiveMenuRoute("deposit_route:pw"), null);
+assert.deepEqual(parseSignalBotInteractiveMenuRoute("deposit_route:pw"), {
+  kind: "deposit_route",
+  route: "polymarket_polygon_controller_usdce_v1",
+  venue: "polymarket",
+});
 assert.deepEqual(parseSignalBotInteractiveMenuRoute("deposit_route:pd"), {
   kind: "deposit_route",
   route: "polymarket_polygon_pusd_direct_v1",
@@ -45,6 +49,39 @@ assert.deepEqual(parseSignalBotInteractiveMenuRoute("deposit_cancel_active"), {
 });
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "USDC.e button opens the controller route without selecting a different asset",
+    run: async () => {
+      const route = parseSignalBotInteractiveMenuRoute("deposit_route:pw");
+      assert.ok(route);
+      let rendered = "";
+      await handleSignalBotInteractiveMenuCallback({
+        callbackPrefix: "hm:v1:",
+        chatId: "20",
+        telegramUserId: 20,
+        messageId: 42,
+        route,
+        redis: { get: async () => null, set: async () => "OK" },
+        renderExpiredSearch: async () => {
+          throw new Error("not a search callback");
+        },
+        loadFunding: async (input) => {
+          assert.equal(input.action, "open_route");
+          assert.equal(
+            input.fundingRoute,
+            "polymarket_polygon_controller_usdce_v1",
+          );
+          assert.equal(input.venue, "polymarket");
+          return { text: "USDC.e on Polygon" };
+        },
+        render: async (message) => {
+          rendered = message.text;
+        },
+      });
+      await drainSignalBotFundingOpenTasks();
+      assert.equal(rendered, "USDC.e on Polygon");
+    },
+  },
   {
     name: "funding target selection receives the Buy-return decorator immediately",
     run: async () => {
@@ -115,6 +152,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       const routeCalls: Array<string | null | undefined> = [];
       const directSelections: Array<Record<string, unknown>> = [];
+      const directOpens: Array<Record<string, unknown>> = [];
       const activeCancellations: Array<Record<string, unknown>> = [];
       const app = Fastify({ logger: false });
       app.setValidatorCompiler(validatorCompiler);
@@ -143,10 +181,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               activeCancellations.push(input);
               return { text: "cancel" };
             },
-            open: async () => ({
-              fundingContextId: "123e4567-e89b-42d3-a456-426614174000",
-              text: "open",
-            }),
+            open: async (input) => {
+              directOpens.push(input);
+              return {
+                fundingContextId: "123e4567-e89b-42d3-a456-426614174000",
+                text: "open",
+              };
+            },
             selectTarget: async (input) => {
               directSelections.push(input);
               return { text: "direct selected" };
@@ -205,6 +246,36 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         });
         assert.equal(direct.statusCode, 400);
         assert.equal(directSelections.length, 0);
+        for (const [fundingRoute, venue, choice] of [
+          ["polymarket_polygon_controller_usdce_v1", "polymarket", "pw"],
+          ["polymarket_solana_usdc_retained_v1", "polymarket", "pu"],
+          ["limitless_solana_usdc_retained_v1", "limitless", "lu"],
+          ["polymarket_solana_sol_retained_v1", "polymarket", "ps"],
+          ["limitless_solana_sol_retained_v1", "limitless", "ls"],
+          ["polymarket_polygon_pusd_direct_v1", "polymarket", "pd"],
+          ["limitless_base_usdc_direct_v1", "limitless", "ld"],
+        ]) {
+          const selected = await app.inject({
+            method: "POST",
+            url: "/internal/telegram-bot/funding/open-route",
+            payload: {
+              appBaseUrl: "https://app.hunch.trade",
+              chatId: 20,
+              fundingRoute,
+              venue,
+              idempotencyKey: `funding:explicit:${choice}`,
+              telegramMessageId: 42,
+              telegramUserId: 20,
+            },
+          });
+          assert.equal(selected.statusCode, 200);
+          assert.equal(directOpens.at(-1)?.initialChoiceToken, choice);
+        }
+        assert.equal(
+          directSelections.length,
+          0,
+          "explicit route must be selected inside open, not after an intermediate default card",
+        );
         const cancelActive = await app.inject({
           method: "POST",
           payload: {
@@ -504,6 +575,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         JSON.stringify(justDeposit.reply_markup),
         /USDC\.e · Polygon/u,
       );
+      assert.match(justDeposit.text, /USDC\\\.e/u);
+      for (const row of justDeposit.reply_markup?.inline_keyboard ?? []) {
+        for (const button of row) {
+          if ("callback_data" in button)
+            assert.ok(
+              parseSignalBotInteractiveMenuRoute(
+                button.callback_data.replace(/^hm:v1:/u, ""),
+              ),
+              `unhandled deposit button: ${button.callback_data}`,
+            );
+        }
+      }
       assert.match(JSON.stringify(justDeposit.reply_markup), /USDC · Base/u);
       assert.doesNotMatch(
         JSON.stringify(justDeposit.reply_markup),

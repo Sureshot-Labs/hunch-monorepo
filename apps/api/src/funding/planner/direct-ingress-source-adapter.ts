@@ -34,6 +34,7 @@ import type { PlannedSourceOption } from "./planning-types.js";
 import { buildFundingReceiveTargets } from "./receive-targets.js";
 import { sameAsset } from "./money.js";
 import { supportsCanonicalFundingReceiveEvents } from "../receive/canonical-receive-capabilities.js";
+import { POLYGON_RETAINED_USDCE_ASSET } from "../receive/retained-solana-assets.js";
 
 function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
   return value as Readonly<Record<string, JsonValue>>;
@@ -133,6 +134,110 @@ function isNativeSolAsset(asset: AssetRef): boolean {
     asset.assetId === RELAY_PINNED_ASSETS.solanaNative &&
     asset.decimals === 9
   );
+}
+
+/** Receive on the owned controller; no Router, allowance or conversion is needed. */
+function controllerUsdceReceiveVariant(
+  account: AccountValueReadModel,
+  input: FundingSourcePlanningInput,
+): DirectIngressVariant[] {
+  const asset = POLYGON_RETAINED_USDCE_ASSET;
+  const facts = input.destinationFacts;
+  if (
+    !facts ||
+    input.destination.venueId !== "polymarket" ||
+    !sameAsset(input.requiredAmount.asset, {
+      ...asset,
+      assetId: RELAY_PINNED_ASSETS.polygonPusd,
+    }) ||
+    !fundingReceiveAssetEnabled(input.policy, asset) ||
+    input.policy.locations.filter(
+      (location) =>
+        location.enabled &&
+        location.observable &&
+        location.ownership === "owned" &&
+        location.locationKind === "wallet" &&
+        sameAsset(location.asset, asset),
+    ).length !== 1
+  )
+    return [];
+  const profiles = (account.ownership?.wallets ?? []).filter(
+    (profile) =>
+      profile.walletId === facts.venueBinding.executionWalletId &&
+      profile.networkId === asset.networkId &&
+      profile.source !== "external",
+  );
+  const profile = profiles.length === 1 ? profiles[0] : null;
+  if (
+    !profile ||
+    canonicalAccountAddress(asset.networkId, profile.address) ===
+      canonicalAccountAddress(asset.networkId, facts.venueBinding.accountRef)
+  )
+    return [];
+  const location: AssetLocation = {
+    kind: "wallet",
+    locationId: stableOpaqueId(
+      "location",
+      [
+        input.accountId,
+        "wallet",
+        canonicalAccountAddress(asset.networkId, profile.address),
+        canonicalAssetKey(asset),
+      ].join(":"),
+    ),
+    accountId: input.accountId,
+    asset,
+    details: { walletId: profile.walletId, address: profile.address },
+  };
+  const component = account.projection?.components.find(
+    (entry) =>
+      entry.location.kind === "wallet" &&
+      entry.location.accountId === input.accountId &&
+      locationDetail(entry.location, "walletId") === profile.walletId &&
+      sameAsset(entry.amount.asset, asset) &&
+      canonicalAccountAddress(
+        asset.networkId,
+        locationDetail(entry.location, "address") ?? "",
+      ) === canonicalAccountAddress(asset.networkId, profile.address),
+  );
+  return [
+    {
+      variantId: stableOpaqueId(
+        "ingress_variant",
+        canonicalJsonHash({
+          destinationAddress: canonicalAccountAddress(
+            asset.networkId,
+            profile.address,
+          ),
+          asset,
+          completion: "retained_owned_source_credit",
+          adapterId: "polymarket_controller_usdce_receive_v1",
+        }),
+      ),
+      networkId: asset.networkId,
+      asset,
+      destinationAddress: profile.address,
+      destinationLocationId:
+        component?.location.locationId ?? location.locationId,
+      baselineRaw: component?.amount.raw ?? "0",
+      baselineRevision: canonicalJsonHash({
+        walletId: profile.walletId,
+        asset,
+        observedAt: component?.observedAt ?? null,
+      }),
+      observation: {
+        adapterId: "owned_wallet_liquid_balances_v1",
+        payload: {
+          balanceKey: canonicalAssetKey(asset),
+          sourceComponentId:
+            component?.componentId ??
+            stableOpaqueId("asset", canonicalLocationKey(location)),
+          walletExecutionProfile: profile,
+        },
+      },
+      completion: { kind: "retained_owned_source_credit" },
+    },
+  ];
 }
 
 function buildRoutedReceiveVariants(input: {
@@ -599,13 +704,17 @@ export class DirectIngressFundingSourceAdapter implements FundingSourceAdapter {
     // observer. Polygon and Base share the EVM Transfer scanner. Solana SPL
     // and native SOL use exact finalized instruction identity. A Relay quote
     // or aggregate wallet balance is never sufficient receipt identity.
+    const retainedVariants = this.account
+      ? controllerUsdceReceiveVariant(this.account, input)
+      : [];
     const receiveSessionVariants = [
       ...directVariants,
+      ...retainedVariants,
       ...(this.account
         ? buildRoutedReceiveVariants({
             account: this.account,
             planning: input,
-            existing: directVariants,
+            existing: [...directVariants, ...retainedVariants],
           })
         : []),
     ].filter((variant) =>

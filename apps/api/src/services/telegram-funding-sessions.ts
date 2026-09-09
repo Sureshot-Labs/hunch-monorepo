@@ -10,10 +10,10 @@ import {
   sameAccountAddress,
   sameAsset,
 } from "../funding/domain/asset-identity.js";
-import { isRetainedSolanaAsset } from "../funding/receive/retained-solana-assets.js";
+import { isRetainedOwnedSourceAsset } from "../funding/receive/retained-solana-assets.js";
 import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
 import {
-  isTelegramFundingManagedSolanaWalletCurrent,
+  isTelegramFundingManagedReceiveWalletCurrent,
   resolveTelegramFundingManagedWalletIdentity,
   telegramFundingManagedWalletControllerId,
   telegramFundingVenueNetworkId,
@@ -1667,7 +1667,7 @@ export async function appendTelegramFundingConsent(
       );
     }
     if (
-      isRetainedSolanaAsset(input.asset) &&
+      isRetainedOwnedSourceAsset(input.asset) &&
       contextRow.origin !== "generic_add_funds"
     ) {
       const retainedSourceCapability = await client.query<{
@@ -1754,7 +1754,7 @@ export async function appendTelegramFundingConsent(
         "telegram_funding_session_unavailable",
       );
     }
-    if (isRetainedSolanaAsset(input.asset)) {
+    if (isRetainedOwnedSourceAsset(input.asset)) {
       const retainedSourceWalletAddress =
         input.retainedSourceWalletAddress?.trim() ?? "";
       let selectedVariant: DirectIngressObservationVariant | null = null;
@@ -1784,8 +1784,9 @@ export async function appendTelegramFundingConsent(
           selectedVariant.destinationAddress,
           retainedSourceWalletAddress,
         ) ||
-        !(await isTelegramFundingManagedSolanaWalletCurrent(client, {
+        !(await isTelegramFundingManagedReceiveWalletCurrent(client, {
           lock: true,
+          networkId: input.asset.networkId,
           telegramAccountId: input.telegramAccountId,
           telegramUserId: input.telegramUserId,
           userId: input.userId,

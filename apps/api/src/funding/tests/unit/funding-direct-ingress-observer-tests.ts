@@ -76,7 +76,24 @@ assert.equal(
   parseDirectIngressObservationVariant(retainedUsdcVariant).completion.kind,
   "retained_owned_source_credit",
 );
+
+const retainedUsdceVariant = {
+  ...retainedSolVariant,
+  networkId: "evm:137",
+  asset: {
+    networkId: "evm:137",
+    assetId: "0x2791bca1f2de4661ed88a30c99a7a9449aa84174",
+    decimals: 6,
+  },
+  destinationAddress: "0x1111111111111111111111111111111111111111",
+};
+assert.equal(
+  parseDirectIngressObservationVariant(retainedUsdceVariant).completion.kind,
+  "retained_owned_source_credit",
+);
 for (const asset of [
+  { ...retainedUsdceVariant.asset, decimals: 18 },
+  { ...retainedUsdceVariant.asset, networkId: "evm:8453" },
   { ...retainedUsdcVariant.asset, decimals: 9 },
   {
     ...retainedUsdcVariant.asset,
@@ -92,7 +109,7 @@ for (const asset of [
         networkId: asset.networkId,
         asset,
       }),
-    /limited to native SOL and Solana USDC/u,
+    /unsupported retained owned source asset/u,
   );
 }
 

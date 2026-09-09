@@ -266,6 +266,7 @@ const internalFundingOpenBodySchema = internalFundingMutationSchema
 const internalFundingOpenRouteBodySchema = internalFundingOpenBodySchema
   .extend({
     fundingRoute: z.enum([
+      "polymarket_polygon_controller_usdce_v1",
       "limitless_base_usdc_direct_v1",
       "limitless_solana_sol_retained_v1",
       "polymarket_solana_usdc_retained_v1",
@@ -927,13 +928,10 @@ async function registerTelegramBotTradingRoutes(
         return reply.code(409).send({ error: "invalid_funding_choice" });
       }
       try {
-        const opened = await fundingService.open(request.body);
-        if (!opened.fundingContextId) {
-          return reply.code(409).send({ error: "funding_context_not_found" });
-        }
-        return await fundingService.selectTarget({
-          chatId: request.body.chatId,
-          choiceToken: {
+        return await fundingService.open({
+          ...request.body,
+          initialChoiceToken: {
+            polymarket_polygon_controller_usdce_v1: "pw",
             limitless_base_usdc_direct_v1: "ld",
             limitless_solana_sol_retained_v1: "ls",
             polymarket_solana_usdc_retained_v1: "pu",
@@ -941,10 +939,6 @@ async function registerTelegramBotTradingRoutes(
             polymarket_polygon_pusd_direct_v1: "pd",
             polymarket_solana_sol_retained_v1: "ps",
           }[request.body.fundingRoute],
-          contextId: opened.fundingContextId,
-          idempotencyKey: `${request.body.idempotencyKey.slice(0, 177)}:route`,
-          telegramMessageId: request.body.telegramMessageId,
-          telegramUserId: request.body.telegramUserId,
         });
       } catch (error) {
         return sendTelegramFundingError(request, reply, error);

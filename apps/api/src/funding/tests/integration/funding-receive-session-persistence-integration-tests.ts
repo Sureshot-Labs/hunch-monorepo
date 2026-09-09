@@ -39,7 +39,10 @@ import {
   FundingReceiveSessionObserver,
   fundingReceiveObservationDisposition,
 } from "../../receive/receive-session-observer.js";
-import { SOLANA_RETAINED_USDC_ASSET } from "../../receive/retained-solana-assets.js";
+import {
+  POLYGON_RETAINED_USDCE_ASSET,
+  SOLANA_RETAINED_USDC_ASSET,
+} from "../../receive/retained-solana-assets.js";
 import { buildFundingReceiveTargets } from "../../planner/receive-targets.js";
 
 const NOW = new Date();
@@ -315,7 +318,23 @@ try {
       payload: { eventIdentity: "solana_transfer_v1" },
     },
   };
+
+  const retainedUsdceVariant = {
+    ...retainedInput.observationVariants[0],
+    variantId: "ingress_variant_retained_usdce_12345678",
+    networkId: "evm:137",
+    asset: POLYGON_RETAINED_USDCE_ASSET,
+    destinationAddress: "0x9898989898989898989898989898989898989898",
+    observation: {
+      adapterId: "owned_wallet_liquid_balances_v1",
+      payload: {
+        eventIdentity: "evm_erc20_transfer_v1",
+        eventCursorBlock: "100",
+      },
+    },
+  };
   const retainedVariants = [
+    retainedUsdceVariant,
     ...retainedInput.observationVariants,
     retainedUsdcVariant,
   ];
@@ -333,7 +352,25 @@ try {
       scannedRetainedUsdc ||= variants.some(
         (variant) => variant.variantId === retainedUsdcVariant.variantId,
       );
-      return { events: [], variants, cursorAdvanced: false };
+      return {
+        events: variants
+          .filter(
+            (variant) => variant.variantId === retainedUsdceVariant.variantId,
+          )
+          .map((variant) => ({
+            variant,
+            transactionHash: uniqueHash("retained-usdce-transfer"),
+            eventIndex: "0",
+            blockNumber: "101",
+            blockHash: uniqueHash("retained-usdce-block"),
+            sourceAddress: "0x6767676767676767676767676767676767676767",
+            destinationAddress: variant.destinationAddress,
+            rawAmount: "2000000",
+            observedAt: new Date(NOW.getTime() + 500).toISOString(),
+          })),
+        variants,
+        cursorAdvanced: false,
+      };
     },
     listPotentialPolymarketHandoffs: async () => [],
   });
@@ -345,6 +382,35 @@ try {
   assert.equal(scannedRetainedUsdc, true);
   assert.equal(retainedPoll.recoveriesRequired, 0);
   assert.equal(retainedPoll.retryableErrors, 0);
+  const observedUsdce = await pool.query<{
+    status: string;
+    handling: string;
+    raw_amount: string;
+    child_funding_operation_id: string | null;
+    exact_variant: boolean;
+  }>(
+    `select status, handling, raw_amount::text, child_funding_operation_id,
+       funding_receive_receipt_matches_frozen_variant(receipt_row) as exact_variant
+       from funding_receive_receipts receipt_row
+       where receive_session_id = $1 and variant_id = $2`,
+    [
+      retainedSession.snapshot.session.receiveSessionId,
+      retainedUsdceVariant.variantId,
+    ],
+  );
+  assert.deepEqual(
+    observedUsdce.rows,
+    [
+      {
+        status: "ready",
+        handling: "direct",
+        raw_amount: "2000000",
+        child_funding_operation_id: null,
+        exact_variant: true,
+      },
+    ],
+    "canonical USDC.e evidence must be credited to its retained source with no conversion operation",
+  );
   const retainedReload = await fetchFundingReceiveSessionForUser(pool, {
     userId: retainedSolUserId,
     receiveSessionId: retainedSession.snapshot.session.receiveSessionId,

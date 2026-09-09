@@ -153,16 +153,19 @@ export function isSignalBotFundingMenuRoute(
 }
 
 /** Only callbacks whose response is owned by the durable funding outbox hand
- * over their message generation. Navigation/cancel callbacks keep ownership. */
+ * over their message generation. Navigation callbacks keep ownership. */
 export function menuRenderToken(
   route: Readonly<{ kind: string; venue?: string }>,
   callbackQueryId: string,
 ): string {
-  return route.kind === "deposit" ||
+  return (route.kind === "deposit" &&
+    signalBotFundingMenuAction(route) === "open") ||
     route.kind === "deposit_route" ||
     route.kind === "select" ||
     route.kind === "refresh" ||
     route.kind === "qr" ||
+    route.kind === "cancel" ||
+    route.kind === "deposit_cancel_active" ||
     route.kind === "confirm_conversion"
     ? `funding:callback:${callbackQueryId}`
     : callbackQueryId;
@@ -291,6 +294,7 @@ export type SignalBotInteractiveMenuLoaders = {
     contextId?: string;
     continuationToken?: string;
     fundingRoute?:
+      | "polymarket_polygon_controller_usdce_v1"
       | "limitless_base_usdc_direct_v1"
       | "limitless_solana_sol_retained_v1"
       | "polymarket_solana_usdc_retained_v1"

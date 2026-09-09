@@ -267,3 +267,48 @@ export async function isTelegramFundingReceiveControllerCurrent(
       ) === frozenControllerWalletId
     : false;
 }
+
+/** Receive ownership only. Never requires or grants delegated trading authority. */
+export async function isTelegramFundingManagedReceiveWalletCurrent(
+  pool: Pick<Pool, "query">,
+  input: Readonly<{
+    lock?: boolean;
+    networkId: string;
+    telegramAccountId: string;
+    telegramUserId: string;
+    userId: string;
+    walletAddress: string;
+  }>,
+): Promise<boolean> {
+  if (input.networkId === "solana:mainnet") {
+    return isTelegramFundingManagedSolanaWalletCurrent(pool, input);
+  }
+  if (input.networkId !== "evm:137") return false;
+  const identity = await resolveTelegramFundingManagedWalletIdentity(
+    pool,
+    input,
+  );
+  if (
+    !identity ||
+    identity.walletAddress.toLowerCase() !== input.walletAddress.toLowerCase()
+  )
+    return false;
+  if (input.lock) {
+    const { rows } = await pool.query<{ id: string }>(
+      `select id from user_wallets
+       where id = $1 and user_id = $2 and is_verified = true
+         and is_internal_wallet = true and wallet_type = 'ethereum'
+         and privy_wallet_id = $3
+         and lower(wallet_address) = lower($4)
+       for share`,
+      [
+        identity.userWalletId,
+        input.userId,
+        identity.privyWalletId,
+        input.walletAddress,
+      ],
+    );
+    return rows.length === 1;
+  }
+  return true;
+}

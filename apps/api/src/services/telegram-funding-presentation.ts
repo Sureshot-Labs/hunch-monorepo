@@ -19,7 +19,7 @@ import {
 import { FUNDING_RECEIVE_SESSION_TTL_HOURS } from "../funding/receive/receive-session-constants.js";
 import QRCode from "qrcode";
 import {
-  isTelegramSolanaRetainedFundingRouteKey,
+  isTelegramRetainedFundingRouteKey,
   telegramFundingRouteDescriptorForRouteKey,
   type TelegramFundingRoutePresentation,
   type TelegramFundingTargetCapability,
@@ -265,9 +265,7 @@ export function buildTelegramFundingTargetChoicesMessage(input: {
     return buildTelegramFundingTargetMessage({
       automaticConversion:
         targets[0].automaticSourceAsset !== null &&
-        !isTelegramSolanaRetainedFundingRouteKey(
-          targets[0].presentation.routeKey,
-        ),
+        !isTelegramRetainedFundingRouteKey(targets[0].presentation.routeKey),
       contextId: input.contextId,
       expiresAt: input.expiresAt,
       presentation: targets[0].presentation,
@@ -279,9 +277,7 @@ export function buildTelegramFundingTargetChoicesMessage(input: {
         choiceToken: fundingTargetChoiceToken({
           automaticConversion:
             target.automaticSourceAsset !== null &&
-            !isTelegramSolanaRetainedFundingRouteKey(
-              target.presentation.routeKey,
-            ),
+            !isTelegramRetainedFundingRouteKey(target.presentation.routeKey),
           routeKey: target.presentation.routeKey,
         }),
         contextId: input.contextId,
@@ -414,6 +410,11 @@ export function buildTelegramFundingBuyReturnAttachedMessage(): TelegramFundingM
 export function buildTelegramFundingCancelledMessage(): TelegramFundingMessage {
   return {
     parse_mode: "MarkdownV2",
+    reply_markup: {
+      inline_keyboard: [
+        [{ callback_data: "hm:v1:deposit:any", text: "💳 Add funds" }],
+      ],
+    },
     text: formatTelegramCalloutMarkdownV2({
       bodyMarkdownV2: escapeTelegramMarkdownV2(
         "The funding screen is closed. A transfer already sent to the verified address will still be detected during the observation window.",
@@ -522,6 +523,7 @@ function fundingProgressReplyMarkup(
   if (projection.terminal) {
     return {
       inline_keyboard: [
+        [{ callback_data: "hm:v1:deposit:any", text: "💳 Add funds" }],
         ...(projection.returnToMarketAvailable
           ? [
               [
@@ -720,7 +722,7 @@ function buildTelegramFundingProgressMessageInternal(
   const conversionOutputDetected =
     projection.state === "converting" &&
     (projection.receiptBreakdown?.destinationReceiptCount ?? 0) > 0;
-  const retainedSolana = isTelegramSolanaRetainedFundingRouteKey(
+  const retainedSource = isTelegramRetainedFundingRouteKey(
     projection.presentation.routeKey,
   );
   const hasReceiptEvidence = Boolean(
@@ -745,13 +747,13 @@ function buildTelegramFundingProgressMessageInternal(
     },
     funds_received: {
       icon: "📥",
-      title: retainedSolana
+      title: retainedSource
         ? `${projection.assetSymbol} received`
         : `${projection.assetSymbol} detected`,
-      body: retainedSolana
+      body: retainedSource
         ? amount
-          ? `${amount} is kept in your Solana wallet. Hunch is preparing the Mini App funding route.`
-          : `${projection.assetSymbol} is kept in your Solana wallet. Hunch is preparing the Mini App funding route.`
+          ? `${amount} is kept in your ${presentation.networkLabel} wallet. Hunch is preparing the Mini App funding route.`
+          : `${projection.assetSymbol} is kept in your ${presentation.networkLabel} wallet. Hunch is preparing the Mini App funding route.`
         : amount
           ? `${amount} was detected.`
           : "The transfer was detected.",
@@ -776,13 +778,13 @@ function buildTelegramFundingProgressMessageInternal(
     },
     ready: {
       icon: "✅",
-      title: retainedSolana
+      title: retainedSource
         ? `${projection.assetSymbol} received`
         : `${destinationAsset} ready`,
-      body: retainedSolana
+      body: retainedSource
         ? amount
-          ? `${amount} was received and kept in your Solana wallet.`
-          : `${projection.assetSymbol} was received and kept in your Solana wallet.`
+          ? `${amount} was received and kept in your ${presentation.networkLabel} wallet.`
+          : `${projection.assetSymbol} was received and kept in your ${presentation.networkLabel} wallet.`
         : amount
           ? `${amount} is now available at ${presentation.venueLabel}.`
           : `The received ${destinationAsset} is now available at ${presentation.venueLabel}.`,

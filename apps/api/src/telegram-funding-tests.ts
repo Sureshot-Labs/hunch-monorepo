@@ -1496,6 +1496,100 @@ const relayBaseChoice = resolveTelegramFundingTargetChoice({
   observationVariants: [relayBaseVariant],
   routeKey: "polymarket_base_usdc_relay_v1",
 });
+const controllerUsdceSession: FundingReceiveSession = {
+  ...session,
+  receiveTargets: [
+    {
+      receiveTargetId: "controller-usdce-target",
+      networkId: usdce.networkId,
+      destinationAddress: "0x4444444444444444444444444444444444444444",
+      acceptedAssets: [
+        { asset: usdce, handling: "direct", senderNativeFeeRequirement: null },
+      ],
+      safeInstructions: [],
+    },
+  ],
+};
+const controllerUsdceTarget = controllerUsdceSession.receiveTargets[0];
+assert.ok(controllerUsdceTarget);
+const controllerUsdceVariant: DirectIngressObservationVariant = {
+  ...relayBaseVariant,
+  variantId: "controller-usdce-variant",
+  networkId: usdce.networkId,
+  asset: usdce,
+  completion: { kind: "retained_owned_source_credit" },
+  destinationAddress: controllerUsdceTarget.destinationAddress,
+};
+const controllerUsdceInput = {
+  automaticConversionEnabled: true,
+  session: controllerUsdceSession,
+  observationVariants: [controllerUsdceVariant],
+  routeKey: "polymarket_polygon_controller_usdce_v1",
+};
+const controllerUsdceChoice =
+  resolveTelegramFundingTargetChoice(controllerUsdceInput);
+assert.ok(controllerUsdceChoice);
+assert.equal(
+  controllerUsdceChoice.address,
+  controllerUsdceVariant.destinationAddress,
+);
+assert.deepEqual(controllerUsdceChoice.presentation.acceptedAssetSymbols, [
+  "USDC.e",
+]);
+assert.equal(controllerUsdceChoice.mode, "polymarket_polygon_usdce_retained");
+assert.equal(
+  controllerUsdceChoice.asset.assetId.toLowerCase(),
+  usdce.assetId.toLowerCase(),
+);
+assert.equal(controllerUsdceChoice.asset.networkId, pUsd.networkId);
+assert.equal(controllerUsdceChoice.asset.decimals, pUsd.decimals);
+assert.equal(
+  telegramFundingRouteDescriptorForChoiceToken("pw")?.routeKey,
+  controllerUsdceInput.routeKey,
+);
+assert.deepEqual(
+  resolveTelegramFundingTargetChoice({
+    ...controllerUsdceInput,
+    automaticConversionEnabled: false,
+  }),
+  controllerUsdceChoice,
+);
+assert.equal(controllerUsdceChoice.automaticConversion, false);
+assert.equal(
+  telegramFundingRouteDescriptorForChoiceToken("pw")?.automaticServerExecution,
+  false,
+);
+assert.equal(
+  resolveTelegramFundingTargetChoice({
+    ...controllerUsdceInput,
+    observationVariants: [
+      { ...controllerUsdceVariant, destinationAddress: address },
+    ],
+  }),
+  null,
+  "a different receive address must not match the selected controller",
+);
+assert.equal(
+  resolveTelegramFundingTargetChoice({
+    ...controllerUsdceInput,
+    observationVariants: [
+      {
+        ...controllerUsdceVariant,
+        completion: { kind: "committed_venue_preparation", stepOrdinal: 0 },
+      },
+    ],
+  }),
+  null,
+  "a legacy committed wrap is not the new controller route",
+);
+assert.equal(
+  resolveTelegramFundingTargetChoice({
+    ...controllerUsdceInput,
+    routeKey: "polymarket_polygon_usdce_wrap_v1",
+  }),
+  null,
+  "frozen legacy wrap consents remain non-executable",
+);
 assert.equal(relayBaseChoice?.mode, "base_usdc_relay_automatic");
 assert.equal(relayBaseChoice?.receiveTargetId, relayBaseReceiveTargetId);
 assert.deepEqual(
@@ -2664,6 +2758,44 @@ const retainedSolEstimatedMessage =
 assert.equal(retainedSolEstimateRaw, "52000000");
 assert.match(retainedSolEstimatedMessage.text, /Approximate value/u);
 assert.match(retainedSolEstimatedMessage.text.replaceAll("\\", ""), /\$5\.20/u);
+
+for (const [routeKey, symbol, networkLabel] of [
+  ["polymarket_solana_usdc_retained_v1", "USDC", "Solana"],
+  ["polymarket_polygon_controller_usdce_v1", "USDC.e", "Polygon"],
+] as const) {
+  const stableProgress = {
+    ...genericSolanaRetained,
+    assetSymbol: symbol,
+    rawAmount: "2000000",
+    presentation: {
+      ...genericSolanaRetained.presentation,
+      routeKey: routeKey,
+      networkLabel: networkLabel,
+    },
+  };
+  const stableMessage = buildTelegramFundingProgressMessage(stableProgress);
+  let stableBalanceInvalidated = false;
+  const decorated =
+    await telegramBotTradingTestHooks.decorateRetainedSolReceiptEstimate({
+      invalidateAccountValue: (userId) => {
+        assert.equal(userId, context.userId);
+        stableBalanceInvalidated = true;
+      },
+      estimateRetainedSolUsd: async () => {
+        throw new Error("stablecoins must not be priced as lamports");
+      },
+      presentation: {
+        ...retainedSolPresentation,
+        message: stableMessage,
+        progress: stableProgress,
+      },
+    });
+  assert.deepEqual(decorated, stableMessage);
+  assert.equal(stableBalanceInvalidated, true);
+  assert.ok(stableMessage.text.includes(networkLabel));
+  if (networkLabel === "Polygon")
+    assert.doesNotMatch(stableMessage.text, /Solana/u);
+}
 const retainedSolHandoffPlan = {
   executionContractVersion: 2,
   funding: {

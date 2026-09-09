@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { POLYMARKET_FUNDING_ROUTER } from "@hunch/contracts";
 
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
@@ -20,7 +21,7 @@ const ASSET = {
 } as const;
 const ADDRESS = "0x0000000000000000000000000000000000000002";
 const SIGNER = "0x0000000000000000000000000000000000000003";
-const ROUTER = "0x0000000000000000000000000000000000000004";
+const ROUTER = POLYMARKET_FUNDING_ROUTER.polygon;
 const USDCE = {
   networkId: "evm:137",
   assetId: RELAY_PINNED_ASSETS.polygonUsdce,
@@ -327,6 +328,63 @@ assert.equal(multiAsset.commitPlan.reservations.length, 1);
 sourceOptionSchema.parse(multiAsset.option);
 
 const v2Input = input(false, "add_funds", true);
+const [controllerUsdceReceive] = await multiAssetAdapter.list({
+  ...v2Input,
+  policy: compileFundingIntentPolicy({
+    version: 2,
+    venues: ["polymarket"],
+    receive: { assets: ["polygon:usdce"], privy: false },
+    paused: false,
+  }),
+});
+assert.ok(controllerUsdceReceive);
+const usdceTargets = controllerUsdceReceive.option.ingress?.receiveTargets;
+assert.equal(usdceTargets?.length, 1);
+assert.equal(usdceTargets?.[0]?.destinationAddress, SIGNER);
+assert.notEqual(usdceTargets?.[0]?.destinationAddress, ADDRESS);
+assert.deepEqual(
+  usdceTargets?.[0]?.acceptedAssets.map(({ asset, handling }) => ({
+    asset,
+    handling,
+  })),
+  [{ asset: USDCE, handling: "direct" }],
+  "USDC.e is accepted by the owned controller, never by the retired Deposit Wallet wrap route",
+);
+assert.equal(controllerUsdceReceive.commitPlan.steps.length, 0);
+assert.ok(
+  Array.isArray(
+    controllerUsdceReceive.commitPlan.operation.supportMetadata
+      ?.receiveSessionVariants,
+  ),
+);
+assert.ok(v2Input.destinationFacts);
+const withoutExecutionSetup = {
+  ...v2Input,
+  policy: {
+    ...compileFundingIntentPolicy({
+      version: 2,
+      venues: ["polymarket"],
+      receive: { assets: ["polygon:usdce"], privy: false },
+      paused: false,
+    }),
+    automation: { ...v2Input.policy.automation, stagedContinuation: false },
+    routes: [],
+  },
+  destinationFacts: {
+    ...v2Input.destinationFacts,
+    sourcePlanningEvidence: null,
+  },
+};
+const [receiveWithoutRouter] = await multiAssetAdapter.list(
+  withoutExecutionSetup,
+);
+assert.equal(
+  receiveWithoutRouter?.option.ingress?.receiveTargets?.[0]?.destinationAddress,
+  SIGNER,
+  "owned USDC.e receive must not require a Router snapshot, a Relay route or staged automation",
+);
+assert.equal(receiveWithoutRouter?.commitPlan.steps.length, 0);
+
 const [nativePolygonOnly] = await multiAssetAdapter.list({
   ...v2Input,
   policy: compileFundingIntentPolicy({
@@ -473,9 +531,13 @@ const [failClosedIngress] = await new DirectIngressFundingSourceAdapter(
 ).list(inputWithUnprovenBaseRoute);
 assert.ok(failClosedIngress);
 assert.deepEqual(
-  failClosedIngress.option.ingress?.receiveTargets?.map(
-    (target) => target.networkId,
-  ),
+  [
+    ...new Set(
+      failClosedIngress.option.ingress?.receiveTargets?.map(
+        (target) => target.networkId,
+      ),
+    ),
+  ],
   ["evm:137"],
   "a Relay route and aggregate wallet balance must not activate cross-network receive without one exact owned source-location policy",
 );
@@ -517,6 +579,10 @@ assert.deepEqual(
       assets: [{ assetId: ASSET.assetId, handling: "direct" }],
     },
     {
+      networkId: "evm:137",
+      assets: [{ assetId: USDCE.assetId, handling: "direct" }],
+    },
+    {
       networkId: "evm:8453",
       assets: [
         {
@@ -540,7 +606,7 @@ assert.deepEqual(
     provenBaseIngress.commitPlan.operation.supportMetadata
       ?.receiveSessionVariants as readonly Readonly<{ networkId: string }>[]
   ).map((variant) => variant.networkId),
-  ["evm:137", "evm:8453"],
+  ["evm:137", "evm:137", "evm:8453"],
 );
 
 const solanaAddress = "9xQeWvG816bUx9EPfB1G6QxgXLKWMuD5YpLQwJwN6JY";

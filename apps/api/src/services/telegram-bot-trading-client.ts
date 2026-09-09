@@ -142,6 +142,7 @@ export type TelegramBotTradingInternalApiClient = {
     appBaseUrl: string;
     chatId: string | number;
     fundingRoute:
+      | "polymarket_polygon_controller_usdce_v1"
       | "limitless_base_usdc_direct_v1"
       | "limitless_solana_sol_retained_v1"
       | "polymarket_solana_usdc_retained_v1"

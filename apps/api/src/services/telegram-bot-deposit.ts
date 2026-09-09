@@ -248,8 +248,14 @@ async function managedSolReceiveChoiceToken(input: {
   ]);
   if (managedWallet.rows[0]?.available !== true) return null;
   return {
-    sol: telegramSolanaRetainedDepositRouteForPolicy(resolvedPolicy.runtime)?.choiceToken ?? null,
-    usdc: telegramSolanaRetainedDepositRouteForPolicy(resolvedPolicy.runtime, SOLANA_RETAINED_USDC_ASSET)?.choiceToken ?? null,
+    sol:
+      telegramSolanaRetainedDepositRouteForPolicy(resolvedPolicy.runtime)
+        ?.choiceToken ?? null,
+    usdc:
+      telegramSolanaRetainedDepositRouteForPolicy(
+        resolvedPolicy.runtime,
+        SOLANA_RETAINED_USDC_ASSET,
+      )?.choiceToken ?? null,
   };
 }
 
@@ -261,12 +267,23 @@ function buildJustDepositMenu(input: {
     parse_mode: "MarkdownV2",
     reply_markup: {
       inline_keyboard: [
-        ...(input.usdcReceiveChoiceToken ? [[{callback_data: `hm:v1:deposit_route:${input.usdcReceiveChoiceToken}`, text: "USDC · Solana · Hunch"}]] : []),
+        ...(input.usdcReceiveChoiceToken
+          ? [
+              [
+                {
+                  callback_data: `hm:v1:deposit_route:${input.usdcReceiveChoiceToken}`,
+                  text: "USDC · Solana · Hunch",
+                },
+              ],
+            ]
+          : []),
         [
           {
             callback_data: "hm:v1:deposit_route:pd",
             text: "pUSD · Polygon · Direct",
           },
+        ],
+        [
           {
             callback_data: "hm:v1:deposit_route:pw",
             text: "USDC.e · Polygon",
@@ -302,19 +319,21 @@ function buildJustDepositMenu(input: {
         title: "Any / Just Deposit",
       }),
       "",
-      `${telegramCustomEmojiMarkdownV2ForNetwork("Polygon")} ${formatTelegramFieldMarkdownV2("Polygon", "pUSD direct · USDC.e → pUSD")}`,
+      `${telegramCustomEmojiMarkdownV2ForNetwork("Polygon")} ${formatTelegramFieldMarkdownV2("Polygon", "pUSD direct · USDC.e kept in Hunch")}`,
       `${telegramCustomEmojiMarkdownV2ForNetwork("Base")} ${formatTelegramFieldMarkdownV2("Base", "USDC direct to Limitless")}`,
       ...(input.solReceiveChoiceToken
         ? [
             `${telegramCustomEmojiMarkdownV2ForNetwork("Solana")} ${formatTelegramFieldMarkdownV2("Receive SOL", "Kept as SOL in Hunch · does not fund a venue")}`,
           ]
         : []),
-      ...(input.usdcReceiveChoiceToken ? [
-        `${telegramCustomEmojiMarkdownV2ForNetwork("Solana")} ${formatTelegramFieldMarkdownV2("Receive USDC", "Kept as USDC in Hunch · no automatic conversion")}`,
-      ] : []),
+      ...(input.usdcReceiveChoiceToken
+        ? [
+            `${telegramCustomEmojiMarkdownV2ForNetwork("Solana")} ${formatTelegramFieldMarkdownV2("Receive USDC", "Kept as USDC in Hunch · no automatic conversion")}`,
+          ]
+        : []),
       "",
       escapeTelegramMarkdownV2(
-        "Relay routes that require a target venue are available after choosing that venue, not from Just Deposit.",
+        "USDC.e stays in your Hunch wallet. Conversion, if needed, happens when you review a later purchase in Hunch.",
       ),
     ]),
   };
@@ -369,7 +388,10 @@ export async function buildTelegramDepositMessage(input: {
     return buildDepositVenueMenu(venues, activeDeposit);
   }
   if (requestedVenue === "any") {
-    const choices = await managedSolReceiveChoiceToken({db: input.pool, telegramUserId: input.telegramUserId});
+    const choices = await managedSolReceiveChoiceToken({
+      db: input.pool,
+      telegramUserId: input.telegramUserId,
+    });
     return buildJustDepositMenu({
       solReceiveChoiceToken: choices?.sol ?? null,
       usdcReceiveChoiceToken: choices?.usdc ?? null,

@@ -189,7 +189,7 @@ import {
   type TelegramFundingProgressDecorator,
 } from "./telegram-funding.js";
 import { isTelegramFundingReadyTerminalProjection } from "./telegram-funding-progress.js";
-import { isTelegramSolanaRetainedFundingRouteKey } from "./telegram-funding-route.js";
+import { isTelegramRetainedFundingRouteKey } from "./telegram-funding-route.js";
 import {
   isTelegramAppHandoffV2EnabledForVenue,
   isTelegramAppHandoffV2DirectTradeVenue,
@@ -7941,13 +7941,12 @@ async function loadEnabledEvmAuthorization(
 type TelegramFundingProgressPresentation =
   Parameters<TelegramFundingProgressDecorator>[0];
 
-function isRetainedSolFundingProgress(
+function isRetainedSourceFundingProgress(
   progress: TelegramFundingProgressPresentation["progress"],
 ): boolean {
   const routeKey = progress?.presentation?.routeKey;
   return (
-    typeof routeKey === "string" &&
-    isTelegramSolanaRetainedFundingRouteKey(routeKey)
+    typeof routeKey === "string" && isTelegramRetainedFundingRouteKey(routeKey)
   );
 }
 
@@ -7960,16 +7959,24 @@ async function decorateRetainedSolReceiptEstimate(input: {
   if (
     !progress ||
     !["funds_received", "ready"].includes(progress.state) ||
-    !isRetainedSolFundingProgress(progress) ||
+    !isRetainedSourceFundingProgress(progress) ||
     !progress.rawAmount ||
     !isRawAmount(progress.rawAmount) ||
-    progress.rawAmount === "0" ||
-    !input.estimateRetainedSolUsd
+    progress.rawAmount === "0"
   ) {
     return input.presentation.message;
   }
   try {
     input.invalidateAccountValue?.(input.presentation.context.userId);
+    if (
+      !input.estimateRetainedSolUsd ||
+      ![
+        "polymarket_solana_sol_retained_v1",
+        "limitless_solana_sol_retained_v1",
+      ].includes(progress.presentation.routeKey)
+    ) {
+      return input.presentation.message;
+    }
     const estimatedUsd = await input.estimateRetainedSolUsd(progress.rawAmount);
     return estimatedUsd
       ? {
@@ -8155,7 +8162,7 @@ export function createTelegramFundingBuyContinuationDecorator(input: {
     const progressState = presentation.progress?.state ?? null;
     const retainedSolSourceReady =
       progressState === "funds_received" &&
-      isRetainedSolFundingProgress(presentation.progress);
+      isRetainedSourceFundingProgress(presentation.progress);
     const destinationSymbol =
       continuationVenue === "polymarket" ? "pUSD" : "USDC";
     const continuationVenueLabel = formatTelegramVenueLabel(continuationVenue);

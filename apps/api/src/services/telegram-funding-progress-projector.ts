@@ -16,7 +16,7 @@ import {
   telegramFundingProgressFingerprint,
 } from "./telegram-funding-progress.js";
 import {
-  isTelegramSolanaRetainedFundingRouteKey,
+  isTelegramRetainedFundingRouteKey,
   resolveTelegramFundingConsentCapability,
   resolveTelegramFundingConsentRoute,
 } from "./telegram-funding-route.js";
@@ -226,13 +226,13 @@ async function projectCandidate(
         expectedReceiveAddress: projectionTarget?.receiveAddress ?? null,
         fundingContextId: context.id,
         receiveSessionId: context.receiveSessionId,
-        retainedSolanaTarget:
+        retainedSourceTarget:
           projectionTarget != null
-            ? isTelegramSolanaRetainedFundingRouteKey(
+            ? isTelegramRetainedFundingRouteKey(
                 projectionTarget.presentation.routeKey,
               )
             : consentRoute != null &&
-              isTelegramSolanaRetainedFundingRouteKey(
+              isTelegramRetainedFundingRouteKey(
                 consentRoute.presentation.routeKey,
               ),
         telegramAccountId: context.telegramAccountId,

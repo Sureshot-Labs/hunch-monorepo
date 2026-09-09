@@ -12,10 +12,12 @@ import { AuthService } from "../../../auth.js";
 import { pool } from "../../../db.js";
 import { fundingSidecarRuntimeConfig } from "../../runtime/sidecar-runtime-config.js";
 import { SOLANA_NATIVE_ASSET } from "../../domain/network-fees.js";
+import { SOLANA_RETAINED_USDC_ASSET } from "../../receive/retained-solana-assets.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
 import {
   resolveTelegramFundingManagedWalletIdentity,
   resolveTelegramFundingProvisionWallet,
+  isTelegramFundingManagedReceiveWalletCurrent,
 } from "../../execution/telegram-funding-managed-wallet.js";
 import { lockTelegramFundingLinkLifecycle } from "../../execution/telegram-funding-link-lifecycle-lock.js";
 import { FUNDING_POLICY_KEY } from "../../policies/funding-policy.js";
@@ -56,7 +58,10 @@ import {
   TelegramFundingError,
   TelegramFundingService,
 } from "../../../services/telegram-funding.js";
-import { telegramPolygonFundingPresentation } from "../../../services/telegram-funding-route.js";
+import {
+  hasReadyTelegramFundingDestinationReceipt,
+  telegramPolygonFundingPresentation,
+} from "../../../services/telegram-funding-route.js";
 import { isTelegramFundingReceiveDisclosureTargetCurrent } from "../../../services/telegram-funding-disclosure-target.js";
 
 const now = new Date();
@@ -104,6 +109,7 @@ const usdceVariantId = `telegram_usdce_${suffix}`;
 let receiveSessionId: string | null = null;
 let fundingContextId: string | null = null;
 let signalPolicyId: string | null = null;
+let retainedFundingPolicyId: string | null = null;
 let cleanupFailure: unknown;
 const renderCoordinator = {
   claim: async () => {},
@@ -1476,7 +1482,7 @@ try {
       expectedReceiveAddress: destinationAddress,
       fundingContextId,
       receiveSessionId,
-      retainedSolanaTarget: true,
+      retainedSourceTarget: true,
       telegramAccountId,
       telegramUserId,
       userId,
@@ -1583,6 +1589,10 @@ try {
             {
               acceptedAssets: [
                 { asset: SOLANA_NATIVE_ASSET, handling: "direct" as const },
+                {
+                  asset: SOLANA_RETAINED_USDC_ASSET,
+                  handling: "direct" as const,
+                },
               ],
               destinationAddress: retainedSolWalletAddress,
               networkId: SOLANA_NATIVE_ASSET.networkId,
@@ -1598,6 +1608,7 @@ try {
       {
         acceptedAssets: [
           { asset: SOLANA_NATIVE_ASSET, handling: "direct" as const },
+          { asset: SOLANA_RETAINED_USDC_ASSET, handling: "direct" as const },
         ],
         destinationAddress: retainedSolWalletAddress,
         networkId: SOLANA_NATIVE_ASSET.networkId,
@@ -1619,6 +1630,20 @@ try {
           payload: {},
         },
         variantId: retainedSolVariantId,
+      },
+      {
+        asset: SOLANA_RETAINED_USDC_ASSET,
+        baselineRaw: "0",
+        baselineRevision: `retained-usdc-baseline-${suffix}`,
+        completion: { kind: "retained_owned_source_credit" as const },
+        destinationAddress: retainedSolWalletAddress,
+        destinationLocationId: `retained-sol-location-${suffix}`,
+        networkId: SOLANA_RETAINED_USDC_ASSET.networkId,
+        observation: {
+          adapterId: "owned_wallet_liquid_balances_v1",
+          payload: { eventIdentity: "solana_transfer_v1" },
+        },
+        variantId: `retained-usdc-variant-${suffix}`,
       },
     ],
     now: new Date(now.getTime() + 1_004),
@@ -1666,7 +1691,7 @@ try {
     expectedReceiveAddress: retainedSolWalletAddress,
     fundingContextId: retainedSolContext.context.id,
     receiveSessionId: retainedSolReceive.snapshot.session.receiveSessionId,
-    retainedSolanaTarget: true,
+    retainedSourceTarget: true,
     telegramAccountId,
     telegramUserId,
     userId,
@@ -1823,18 +1848,376 @@ try {
     true,
     "restoring the exact managed SOL wallet restores only that frozen disclosure target",
   );
-  await cancelTelegramFundingSessionContext(pool, {
+  const explicitUsdcOpen = {
+    chatId: telegramUserId,
+    telegramUserId,
+    telegramMessageId: 3334,
+    venue: "polymarket",
+    initialChoiceToken: "pu",
+    idempotencyKey: `retained-sol-open-${suffix}`,
+  };
+  const retainedPolicy = await pool.query<{ id: string }>(
+    `insert into runtime_policies (policy_key, effective_at, payload, created_by)
+     values ($1, now(), $2::jsonb, null) returning id`,
+    [
+      FUNDING_POLICY_KEY,
+      JSON.stringify({
+        version: 2,
+        venues: ["polymarket"],
+        receive: {
+          assets: [
+            "solana:usdc",
+            "solana:sol",
+            "polygon:pusd",
+            "polygon:usdce",
+          ],
+          privy: false,
+        },
+        paused: false,
+      }),
+    ],
+  );
+  retainedFundingPolicyId = retainedPolicy.rows[0]?.id ?? null;
+  assert.ok(retainedFundingPolicyId);
+  const explicitUsdcMessage = await exactManagedService.open(
+    explicitUsdcOpen,
+    new Date(now.getTime() + 1_007),
+  );
+  assert.equal(
+    explicitUsdcMessage.fundingContextId,
+    retainedSolContext.context.id,
+  );
+  assert.equal(explicitUsdcMessage.durableFundingDeliveryRequired, true);
+  const repeatUsdcOpen = await exactManagedService.open(
+    explicitUsdcOpen,
+    new Date(now.getTime() + 1_007),
+  );
+  assert.equal(repeatUsdcOpen.fundingContextId, retainedSolContext.context.id);
+  const usdcConsents = await pool.query<{
+    selected_asset_network_id: string;
+    selected_asset_id: string;
+  }>(
+    `select selected_asset_network_id, selected_asset_id from telegram_funding_consents
+     where telegram_funding_session_id = $1 order by revision`,
+    [retainedSolContext.context.id],
+  );
+  assert.deepEqual(
+    usdcConsents.rows,
+    [
+      {
+        selected_asset_network_id: SOLANA_NATIVE_ASSET.networkId,
+        selected_asset_id: SOLANA_NATIVE_ASSET.assetId,
+      },
+      {
+        selected_asset_network_id: SOLANA_RETAINED_USDC_ASSET.networkId,
+        selected_asset_id: SOLANA_RETAINED_USDC_ASSET.assetId,
+      },
+    ],
+    "explicit open and replay must neither select Polygon nor append duplicate consents",
+  );
+  assert.equal(
+    await isTelegramFundingReceiveDisclosureTargetCurrent(
+      pool,
+      retainedDisclosureScope,
+    ),
+    true,
+    "USDC disclosure must verify the exact selected mint and owned Solana wallet, not require native SOL",
+  );
+  assert.equal(
+    await isTelegramFundingReceiveDisclosureTargetCurrent(pool, {
+      ...retainedDisclosureScope,
+      expectedReceiveAddress: destinationAddress,
+    }),
+    false,
+    "a Polygon address must never be substituted for USDC Solana",
+  );
+  await runTelegramFundingProgressProjectionForContext(pool, {
     contextId: retainedSolContext.context.id,
+    now: new Date(now.getTime() + 1_007),
+  });
+  const usdcProjection = await fetchTelegramFundingSessionContext(pool, {
+    contextId: retainedSolContext.context.id,
+    chatId: telegramUserId,
+    telegramUserId,
     userId,
-    telegramAccountId,
+  });
+  assert.equal(
+    (usdcProjection?.latestProgressProjection as { state?: string })?.state,
+    "waiting_for_transfer",
+  );
+  const usdcMessages: string[] = [];
+  await deliverTelegramFundingActions({
+    pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async (message) => {
+        usdcMessages.push(message.text);
+        return { ok: true, messageId: message.message_id };
+      },
+      sendMessage: async () => {
+        throw new Error("receive address must be delivered as owned edit");
+      },
+      sendPhoto: async () => {
+        throw new Error("no QR requested");
+      },
+    },
+  });
+  assert.ok(
+    usdcMessages.some(
+      (text) =>
+        text.includes(retainedSolWalletAddress) &&
+        text.includes("USDC") &&
+        text.includes("Solana"),
+    ),
+  );
+  assert.ok(
+    usdcMessages.every(
+      (text) => !text.includes(destinationAddress) && !text.includes("Polygon"),
+    ),
+  );
+  const cancelRetainedInput = {
+    contextId: retainedSolContext.context.id,
     telegramUserId,
     chatId: telegramUserId,
     telegramMessageId: 3334,
     idempotencyKey: `retained-sol-cancel-${suffix}`,
-    requestFingerprint: hash("retained-sol-cancel"),
-    responsePayload: { text: "cancelled" },
-    now: new Date(now.getTime() + 1_008),
+  };
+  const cancelledUsdc = await exactManagedService.cancel(
+    cancelRetainedInput,
+    new Date(now.getTime() + 1_008),
+  );
+  assert.match(cancelledUsdc.text, /Receive cancelled/u);
+  assert.match(cancelledUsdc.text, /USDC/u);
+  assert.doesNotMatch(cancelledUsdc.text, /Polygon|pUSD/u);
+  assert.ok(JSON.stringify(cancelledUsdc.reply_markup).includes("deposit:any"));
+  assert.deepEqual(
+    await exactManagedService.cancel(
+      cancelRetainedInput,
+      new Date(now.getTime() + 1_009),
+    ),
+    cancelledUsdc,
+    "cancel retries must keep the same canonical network and navigation",
+  );
+
+  // Any USDC.e receives into the managed controller without execution authority.
+  await pool.query(
+    "update telegram_bot_trading_authorizations set enabled = false where user_id = $1",
+    [userId],
+  );
+  assert.equal(
+    await resolveTelegramFundingProvisionWallet(pool, {
+      ...newAccountIdentity,
+      executionVenueId: "polymarket",
+    }),
+    null,
+  );
+  const retainedUsdceTarget = {
+    receiveTargetId: `retained-usdce-target-${suffix}`,
+    networkId: usdce.networkId,
+    destinationAddress,
+    acceptedAssets: [{ asset: usdce, handling: "direct" as const }],
+    safeInstructions: [],
+  };
+  const retainedUsdceVariant = {
+    variantId: `retained-usdce-variant-${suffix}`,
+    networkId: usdce.networkId,
+    asset: usdce,
+    destinationAddress,
+    destinationLocationId: `retained-usdce-location-${suffix}`,
+    baselineRaw: "0",
+    baselineRevision: hash("retained-usdce-baseline"),
+    completion: { kind: "retained_owned_source_credit" as const },
+    observation: {
+      adapterId: "owned_wallet_liquid_balances_v1",
+      payload: {
+        eventIdentity: "evm_erc20_transfer_v1",
+        eventCursorBlock: "100",
+      },
+    },
+  };
+  const retainedUsdceReceive = await createOrReuseFundingReceiveSession(pool, {
+    ...canonicalInput,
+    destinationOptionId: `retained-usdce-destination-${suffix}`,
+    venueBindingOptionId: `retained-usdce-binding-${suffix}`,
+    methods: canonicalInput.methods.map((method) => ({
+      ...method,
+      ingress: { ...method.ingress, receiveTargets: [retainedUsdceTarget] },
+    })),
+    receiveTargets: [retainedUsdceTarget],
+    observationVariants: [retainedUsdceVariant],
+    now: new Date(now.getTime() + 1_009),
   });
+  const retainedUsdceContext = await createOrReuseTelegramFundingSession(pool, {
+    userId,
+    telegramAccountId,
+    telegramUserId,
+    chatId: telegramUserId,
+    telegramMessageId: 3336,
+    receiveSessionId: retainedUsdceReceive.snapshot.session.receiveSessionId,
+    idempotencyKey: `retained-usdce-open-${suffix}`,
+    expiresAt: new Date(retainedUsdceReceive.snapshot.session.expiresAt),
+    now: new Date(now.getTime() + 1_009),
+  });
+  const usdceOpen = {
+    chatId: telegramUserId,
+    telegramUserId,
+    telegramMessageId: 3336,
+    venue: "polymarket",
+    initialChoiceToken: "pw",
+    idempotencyKey: `retained-usdce-open-${suffix}`,
+  };
+  const receiveOnlyService = new TelegramFundingService(pool, {
+    resolveManagedWallet: (input) =>
+      resolveTelegramFundingManagedWalletIdentity(pool, input),
+    provisionAuthorization: async () => {
+      throw new Error("receive must not provision automation");
+    },
+  });
+  const usdceOpened = await receiveOnlyService.open(
+    usdceOpen,
+    new Date(now.getTime() + 1_010),
+  );
+  assert.equal(usdceOpened.fundingContextId, retainedUsdceContext.context.id);
+  assert.equal(
+    (await receiveOnlyService.open(usdceOpen, new Date(now.getTime() + 1_010)))
+      .fundingContextId,
+    retainedUsdceContext.context.id,
+  );
+  const receivedUsdceConsents = await pool.query<{
+    selected_asset_id: string;
+    automation_enabled: boolean;
+  }>(
+    "select selected_asset_id, automation_enabled from telegram_funding_consents where telegram_funding_session_id = $1",
+    [retainedUsdceContext.context.id],
+  );
+  assert.deepEqual(
+    receivedUsdceConsents.rows,
+    [{ selected_asset_id: usdce.assetId, automation_enabled: false }],
+    "explicit USDC.e open must never select pUSD or enable conversion, including replay",
+  );
+  const usdceDisclosureScope = {
+    ...retainedDisclosureScope,
+    expectedReceiveAddress: destinationAddress,
+    fundingContextId: retainedUsdceContext.context.id,
+    receiveSessionId: retainedUsdceReceive.snapshot.session.receiveSessionId,
+  };
+  assert.equal(
+    await isTelegramFundingReceiveDisclosureTargetCurrent(
+      pool,
+      usdceDisclosureScope,
+    ),
+    true,
+  );
+  assert.equal(
+    await isTelegramFundingReceiveDisclosureTargetCurrent(pool, {
+      ...usdceDisclosureScope,
+      expectedReceiveAddress: replacementWalletAddress,
+    }),
+    false,
+  );
+  assert.equal(
+    await isTelegramFundingManagedReceiveWalletCurrent(pool, {
+      ...newAccountIdentity,
+      networkId: usdce.networkId,
+      walletAddress: replacementWalletAddress,
+    }),
+    false,
+    "another owned wallet must not replace the selected controller",
+  );
+  await runTelegramFundingProgressProjectionForContext(pool, {
+    contextId: retainedUsdceContext.context.id,
+    now: new Date(now.getTime() + 1_010),
+  });
+  const usdceDelivered: string[] = [];
+  await deliverTelegramFundingActions({
+    pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async (message) => {
+        if (message.message_id === 3336) usdceDelivered.push(message.text);
+        return { ok: true, messageId: message.message_id };
+      },
+      sendMessage: async () => {
+        throw new Error("USDC.e must use its owned card");
+      },
+    },
+  });
+  assert.ok(
+    usdceDelivered.some(
+      (text) =>
+        text.includes(destinationAddress) &&
+        text.includes("USDC") &&
+        text.includes("Polygon"),
+    ),
+  );
+  assert.ok(
+    usdceDelivered.every(
+      (text) => !text.includes("pUSD") && !text.includes("Automatic wrap"),
+    ),
+  );
+  await insertFundingReceiveReceipt(pool, {
+    receiveSessionId: retainedUsdceReceive.snapshot.session.receiveSessionId,
+    userId,
+    variantId: retainedUsdceVariant.variantId,
+    asset: usdce,
+    destinationAddress,
+    rawAmount: "2000000",
+    observationRevision: hash("retained-usdce-receipt"),
+    canonicalEvent: {
+      transactionHash: `0x${hash("retained-usdce-tx")}`,
+      eventIndex: "0",
+      ledgerHeight: "101",
+      blockHash: `0x${hash("retained-usdce-block")}`,
+      sourceAddress: replacementWalletAddress,
+    },
+    handling: "direct",
+    status: "ready",
+    evidence: { test: "retained USDCE" },
+    observedAt: new Date(now.getTime() + 1_011),
+    now: new Date(now.getTime() + 1_011),
+  });
+  await runTelegramFundingProgressProjectionForContext(pool, {
+    contextId: retainedUsdceContext.context.id,
+    now: new Date(now.getTime() + 1_012),
+  });
+  const usdceReady = await fetchTelegramFundingSessionContext(pool, {
+    contextId: retainedUsdceContext.context.id,
+    chatId: telegramUserId,
+    telegramUserId,
+    userId,
+  });
+  assert.equal(
+    (usdceReady?.latestProgressProjection as { state?: string })?.state,
+    "ready",
+  );
+  assert.equal(
+    (usdceReady?.latestProgressProjection as { terminal?: boolean })?.terminal,
+    true,
+  );
+  const usdceReceiptState = await pool.query<{
+    child_funding_operation_id: string | null;
+    status: string;
+  }>(
+    "select child_funding_operation_id, status from funding_receive_receipts where receive_session_id = $1",
+    [retainedUsdceReceive.snapshot.session.receiveSessionId],
+  );
+  assert.deepEqual(usdceReceiptState.rows, [
+    { child_funding_operation_id: null, status: "ready" },
+  ]);
+  assert.equal(
+    await hasReadyTelegramFundingDestinationReceipt(
+      pool,
+      retainedUsdceContext.context.id,
+    ),
+    false,
+    "retained USDC.e must not authorize a Buy as already-funded pUSD",
+  );
+  await enableManagedTrading(telegramUserId, `did:privy:${suffix}`);
+
+  await pool.query("delete from runtime_policies where id = $1", [
+    retainedFundingPolicyId,
+  ]);
+  retainedFundingPolicyId = null;
   const retainedSolCleanup = await pool.connect();
   try {
     await retainedSolCleanup.query("begin");
@@ -1856,6 +2239,31 @@ try {
     await retainedSolCleanup.query(
       "delete from funding_receive_sessions where id = $1",
       [retainedSolReceive.snapshot.session.receiveSessionId],
+    );
+
+    await retainedSolCleanup.query(
+      "delete from telegram_bot_action_outbox where funding_session_id = $1",
+      [retainedUsdceContext.context.id],
+    );
+    await retainedSolCleanup.query(
+      "delete from telegram_funding_mutations where funding_context_id = $1",
+      [retainedUsdceContext.context.id],
+    );
+    await retainedSolCleanup.query(
+      "delete from telegram_funding_consents where telegram_funding_session_id = $1",
+      [retainedUsdceContext.context.id],
+    );
+    await retainedSolCleanup.query(
+      "delete from telegram_funding_sessions where id = $1",
+      [retainedUsdceContext.context.id],
+    );
+    await retainedSolCleanup.query(
+      "delete from funding_receive_receipts where receive_session_id = $1",
+      [retainedUsdceReceive.snapshot.session.receiveSessionId],
+    );
+    await retainedSolCleanup.query(
+      "delete from funding_receive_sessions where id = $1",
+      [retainedUsdceReceive.snapshot.session.receiveSessionId],
     );
     await retainedSolCleanup.query("commit");
   } catch (error) {
@@ -5259,6 +5667,11 @@ try {
     if (signalPolicyId) {
       await cleanup.query("delete from runtime_policies where id = $1", [
         signalPolicyId,
+      ]);
+    }
+    if (retainedFundingPolicyId) {
+      await cleanup.query("delete from runtime_policies where id = $1", [
+        retainedFundingPolicyId,
       ]);
     }
     await cleanup.query(

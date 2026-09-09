@@ -25,7 +25,7 @@ import {
 } from "./telegram-funding-progress.js";
 import type { TelegramFundingSessionContext } from "./telegram-funding-sessions.js";
 import {
-  isTelegramSolanaRetainedFundingRouteKey,
+  isTelegramRetainedFundingRouteKey,
   resolveTelegramFundingAutomaticCapability,
 } from "./telegram-funding-route.js";
 import {
@@ -576,7 +576,7 @@ async function loadCurrentDestination(
       expectedReceiveAddress: projection.receiveAddress,
       fundingContextId: row.funding_session_id,
       receiveSessionId: destination.receive_session_id,
-      retainedSolanaTarget: isTelegramSolanaRetainedFundingRouteKey(
+      retainedSourceTarget: isTelegramRetainedFundingRouteKey(
         projection.presentation.routeKey,
       ),
       telegramAccountId: destination.telegram_account_id,
