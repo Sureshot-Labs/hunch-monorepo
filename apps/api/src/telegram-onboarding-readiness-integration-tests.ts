@@ -187,13 +187,30 @@ try {
   assert.equal(sent, 0);
   const deferred = (
     await client.query(
-      `select status, attempt_count, last_error from telegram_bot_action_outbox where user_id=$1 and action='welcome_menu'`,
+      `select status, attempt_count, last_error, extract(epoch from next_attempt_at - now())::int as retry_seconds from telegram_bot_action_outbox where user_id=$1 and action='welcome_menu'`,
       [userId],
     )
   ).rows[0];
   assert.equal(deferred.status, "retry");
   assert.equal(deferred.attempt_count, 0);
   assert.equal(deferred.last_error, "onboarding_not_ready");
+  assert.equal(deferred.retry_seconds, 5);
+  await client.query(
+    `update telegram_bot_action_outbox set created_at=now()-interval '3 minutes', next_attempt_at=now() where user_id=$1 and action='welcome_menu'`,
+    [userId],
+  );
+  await deliver();
+  const slowRetry = (
+    await client.query(
+      `select extract(epoch from next_attempt_at-now())::int as seconds from telegram_bot_action_outbox where user_id=$1 and action='welcome_menu'`,
+      [userId],
+    )
+  ).rows[0];
+  assert.equal(
+    slowRetry.seconds,
+    60,
+    "old incomplete setup does not create a rapid retry loop",
+  );
   prepared = true;
   assert.equal((await inspect()).state, "ready");
   const app = Fastify({ logger: false });

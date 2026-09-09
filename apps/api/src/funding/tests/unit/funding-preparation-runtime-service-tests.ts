@@ -172,6 +172,77 @@ await test("explicit binding controller inspects exactly the selected wallet", a
   assert.equal(queries.length, 1);
 });
 
+await test("onboarding shortens only negative cache and preserves singleflight and ready reuse", async () => {
+  for (const shortReuse of [undefined, 3_000]) {
+    let now = NOW.getTime();
+    let calls = 0;
+    let ready = false;
+    const service = new WalletPreparationRuntimeService(
+      marketDb([]),
+      () => new Date(now),
+      [
+        {
+          ...driver([]),
+          inspect: async (input) => {
+            calls++;
+            const value = preparedDestination(input);
+            return {
+              ...value,
+              frozen: {
+                ...value.frozen,
+                preparation: {
+                  ...value.frozen.preparation,
+                  status: ready ? "ready" : "setup_required",
+                },
+              },
+            };
+          },
+        },
+      ],
+      async () => wallets,
+      shortReuse,
+    );
+    const request = {
+      accountId: ACCOUNT_ID,
+      purpose: "buy" as const,
+      marketContextId: market.id,
+      marketClass: null,
+      positionActionRef: null,
+      compatibleVenueBindingOptionIds: [SELECTED_BINDING_ID],
+      controllerWalletRef: SELECTED_WALLET_ID,
+      venueBindingOptionId: SELECTED_BINDING_ID,
+    };
+    await Promise.all(
+      Array.from({ length: 8 }, () => service.inspectBindingOption(request)),
+    );
+    assert.equal(calls, 1);
+    ready = true;
+    now += 2_999;
+    assert.equal(
+      (await service.inspectBindingOption(request)).status,
+      "setup_required",
+    );
+    now += 1;
+    assert.equal(
+      (await service.inspectBindingOption(request)).status,
+      shortReuse ? "ready" : "setup_required",
+    );
+    if (!shortReuse) {
+      now = NOW.getTime() + 30_000;
+      assert.equal(
+        (await service.inspectBindingOption(request)).status,
+        "ready",
+      );
+    }
+    assert.equal(calls, 2);
+    now += 3_001;
+    await service.inspectBindingOption(request);
+    assert.equal(calls, 2, "successful evidence retains ordinary reuse");
+    await service.inspectBindingOption(request, { forceFresh: true });
+    assert.equal(calls, 3, "execution still bypasses cached evidence");
+  }
+});
+
 await test("authoritative binding inspection bypasses reusable pre-action evidence", async () => {
   const inspected: RuntimeVenueInspectionInput[] = [];
   const queries: string[] = [];

@@ -265,6 +265,7 @@ export async function runSignalBotRunner(): Promise<void> {
   let lastNotificationPolicySignature: string | null = null;
   let heartbeatLost = false;
   let fundingDeliveryTimer: ReturnType<typeof setInterval> | null = null;
+  let onboardingDeliveryTimer: ReturnType<typeof setInterval> | null = null;
   let fundingDeliveryInFlight: Promise<void> | null = null;
   const lockHeartbeat = setInterval(() => {
     void refreshSignalBotLock({ owner, redis })
@@ -395,6 +396,46 @@ export async function runSignalBotRunner(): Promise<void> {
       1_000,
     );
     fundingDeliveryTimer.unref?.();
+    const drainOnboardingDelivery = (): void => {
+      if (
+        shuttingDown ||
+        onboardingStopping ||
+        heartbeatLost ||
+        onboardingDeliveryInFlight
+      )
+        return;
+      onboardingDeliveryInFlight = deliverTelegramBotOnboardingActions({
+        config,
+        db,
+        isReady: async (scope) =>
+          !shuttingDown &&
+          !onboardingStopping &&
+          !heartbeatLost &&
+          (await tradingInternalApi?.inspectOnboarding?.(scope))?.onboarding
+            .state === "ready" &&
+          !shuttingDown &&
+          !onboardingStopping &&
+          !heartbeatLost,
+        limit: 5,
+        telegram,
+      })
+        .then((delivery) => {
+          if (delivery.claimed > 0 || delivery.quarantined > 0)
+            log("signal_bot_onboarding_delivery", delivery);
+        })
+        .catch((error: unknown) => {
+          log("signal_bot_onboarding_delivery_error", {
+            errorCode: error instanceof Error ? error.name : "unexpected_error",
+          });
+        })
+        .finally(() => {
+          onboardingDeliveryInFlight = null;
+        });
+    };
+    // Welcome must wake even while getUpdates is waiting for a user message.
+    onboardingDeliveryTimer = setInterval(drainOnboardingDelivery, 2_000);
+    onboardingDeliveryTimer.unref?.();
+    drainOnboardingDelivery();
     while (!shuttingDown) {
       try {
         if (heartbeatLost) break;
@@ -962,37 +1003,6 @@ export async function runSignalBotRunner(): Promise<void> {
 
         const now = Date.now();
         if (!heartbeatLost && now >= nextNotificationAt) {
-          // Readiness can wait on venue RPC. Never block callback polling on it.
-          if (!onboardingDeliveryInFlight) {
-            onboardingDeliveryInFlight = deliverTelegramBotOnboardingActions({
-              config,
-              db,
-              isReady: async (scope) =>
-                !onboardingStopping &&
-                !heartbeatLost &&
-                (await tradingInternalApi?.inspectOnboarding?.(scope))
-                  ?.onboarding.state === "ready" &&
-                !onboardingStopping &&
-                !heartbeatLost,
-              limit: 5,
-              telegram,
-            })
-              .then((onboardingDelivery) => {
-                if (
-                  onboardingDelivery.claimed > 0 ||
-                  onboardingDelivery.quarantined > 0
-                )
-                  log("signal_bot_onboarding_delivery", onboardingDelivery);
-              })
-              .catch((error: unknown) => {
-                log("signal_bot_onboarding_delivery_error", {
-                  error: error instanceof Error ? error.message : String(error),
-                });
-              })
-              .finally(() => {
-                onboardingDeliveryInFlight = null;
-              });
-          }
           let cleaned = 0;
           let onboardingCleaned = 0;
           let fundingCleaned = 0;
@@ -1116,6 +1126,7 @@ export async function runSignalBotRunner(): Promise<void> {
   } finally {
     clearInterval(lockHeartbeat);
     if (fundingDeliveryTimer) clearInterval(fundingDeliveryTimer);
+    if (onboardingDeliveryTimer) clearInterval(onboardingDeliveryTimer);
     // A successful Telegram mutation is not durable until its result is stored.
     // Keep the pool alive for the one bounded delivery already in progress.
     onboardingStopping = true;

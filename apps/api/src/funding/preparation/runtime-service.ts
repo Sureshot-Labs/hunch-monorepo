@@ -1104,6 +1104,7 @@ export class WalletPreparationRuntimeService {
     venueDrivers?: readonly WalletPreparationRuntimeDriver[],
     loadWallets: UserWalletLoader = (accountId) =>
       AuthService.getUserWallets(accountId),
+    private readonly unreadyInspectionReuseMs = DESTINATION_INSPECTION_REUSE_MS,
   ) {
     this.venueDrivers = venueDrivers ?? this.defaultVenueDrivers();
     this.loadWallets = loadWallets;
@@ -1228,7 +1229,13 @@ export class WalletPreparationRuntimeService {
           value.frozen.preparation.expiresAt,
         );
         const reusableUntil = Math.min(
-          completedAt + DESTINATION_INSPECTION_REUSE_MS,
+          completedAt +
+            (value.frozen.preparation.status === "ready"
+              ? DESTINATION_INSPECTION_REUSE_MS
+              : Math.min(
+                  DESTINATION_INSPECTION_REUSE_MS,
+                  this.unreadyInspectionReuseMs,
+                )),
           evidenceExpiresAt,
         );
         if (

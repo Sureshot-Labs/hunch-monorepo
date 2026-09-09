@@ -59,10 +59,13 @@ New links in `always` no longer auto-request bot access. Existing preferences,
 including explicit opt-ins/opt-outs, are preserved. There is no migration.
 
 Welcome waits for the same readiness, preserving outbox deduplication and
-current-link checks. Setup waiting retries every 60 seconds for up to 24 hours
+current-link checks. Setup waiting retries every 5 seconds during the first two
+minutes, then every 60 seconds for up to 24 hours
 without consuming Telegram send attempts; old terminal welcomes are not revived.
-The signal-bot uses one bounded background delivery task so venue RPC cannot
-block callback polling. The sidecar calls an authenticated internal API endpoint
+The signal-bot checks this queue on an independent two-second timer, with only
+one delivery task in flight. It stops scheduling on shutdown/leadership loss and
+drains an existing task before closing Postgres. Neither Telegram long polling
+nor venue RPC blocks the other. The sidecar calls an authenticated internal API endpoint
 and does not import API-only runtime secrets.
 
 Unresolved Buy preparation now displays a retryable failure instead of a
@@ -71,6 +74,28 @@ destination ambiguity now instructs the user to finish wallet setup in Hunch,
 without demanding Bot trading or exposing an unverified address.
 
 ## API and rollout
+
+### Latency follow-up
+
+On 9 September, the Welcome created at 11:19:44.683 UTC was sent at
+11:21:02.739 UTC (78.056 seconds). Its first readiness check finished at
+11:19:45.664 and deferred it until 11:20:45.664. The next claim started only at
+11:21:01.770; the successful API check took 837 ms. The previous 60-second
+deferral and polling-coupled scheduling caused most of this delay.
+
+Onboarding alone now reuses non-ready destination evidence for three seconds,
+instead of 30. Ready evidence and ordinary funding runtimes retain their
+previous reuse, expiry, singleflight and force-fresh execution checks. This
+avoids repeatedly displaying pre-bootstrap failure after setup has completed,
+without asking RPC/venues on every frontend poll or weakening Buy validation.
+No Relay quote is requested by onboarding. The two-minute fast Welcome retry
+window bounds the extra verification load for abandoned onboarding sessions.
+
+These are scheduling/cache bounds, not a promise that RPC, signing or chain
+confirmation always completes within a fixed time. No migration or production
+data repair is needed for this latency follow-up.
+
+### Response contract
 
 Authenticated `GET /telegram/bot-trading/status` preserves existing fields and
 adds the schema/OpenAPI field:

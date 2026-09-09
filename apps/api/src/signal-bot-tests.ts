@@ -10786,6 +10786,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         runnerSource,
+        /setInterval\(drainOnboardingDelivery, 2_000\)/,
+      );
+      assert.match(runnerSource, /clearInterval\(onboardingDeliveryTimer\)/);
+      assert.ok(
+        runnerSource.indexOf("setInterval(drainOnboardingDelivery") <
+          runnerSource.indexOf("await pollSignalBotCommands"),
+        "Welcome timer starts independently of long polling",
+      );
+      assert.match(
+        runnerSource,
         /onboardingStopping = true;[\s\S]*?await onboardingDeliveryInFlight;[\s\S]*?await dbPool\?\.end\(\)/,
         "shutdown must drain Welcome delivery before closing Postgres",
       );

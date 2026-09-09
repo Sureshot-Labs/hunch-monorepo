@@ -290,7 +290,10 @@ export async function deliverTelegramBotOnboardingActions(input: {
          set status = case when created_at < now() - interval '24 hours' then 'skipped' else 'retry' end,
              last_error = 'onboarding_not_ready',
              attempt_count = greatest(0, attempt_count - 1),
-             next_attempt_at = now() + interval '60 seconds', updated_at = now()
+             next_attempt_at = now() + case
+               when created_at > now() - interval '2 minutes' then interval '5 seconds'
+               else interval '60 seconds' end,
+             updated_at = now()
          where id = $1 and status = 'sending'`,
         [row.id],
       );

@@ -215,10 +215,17 @@ export class FundingPlanningRuntime {
     private readonly db: Pool,
     options: Readonly<{
       opportunisticPreparationReconcileTimeoutMs?: number;
+      unreadyInspectionReuseMs?: number;
     }> = {},
   ) {
     this.planningStore = new PostgresFundingPlanningStore(db);
-    this.preparationRuntime = new WalletPreparationRuntimeService(db);
+    this.preparationRuntime = new WalletPreparationRuntimeService(
+      db,
+      undefined,
+      undefined,
+      undefined,
+      options.unreadyInspectionReuseMs,
+    );
     this.actionRuntime = new FundingOperationActionRuntime(db);
     this.withdrawalRuntime = new WithdrawalDestinationRuntime(db);
     this.opportunisticPreparationReconcileTimeoutMs =

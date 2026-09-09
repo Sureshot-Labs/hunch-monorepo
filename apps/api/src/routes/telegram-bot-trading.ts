@@ -588,7 +588,11 @@ async function registerTelegramBotTradingRoutes(
   const api = app.withTypeProvider<ZodTypeProvider>();
   const db = dependencies.db ?? pool;
   const routePool = db as typeof pool;
-  const onboardingRuntime = new FundingPlanningRuntime(routePool);
+  // Only onboarding needs fast recovery after bootstrap. Ordinary funding
+  // retains its existing cache; concurrent polls still share one inspection.
+  const onboardingRuntime = new FundingPlanningRuntime(routePool, {
+    unreadyInspectionReuseMs: 3_000,
+  });
   const inspectOnboarding =
     dependencies.inspectOnboarding ?? inspectTelegramOnboardingReadiness;
   const reconciliationEnabled =
