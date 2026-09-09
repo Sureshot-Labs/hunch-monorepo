@@ -5015,7 +5015,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.deepEqual(
         multiPresetBuyButtons.map((button) => button.text),
-        ["$1 · YES", "$5 · YES", "$10 · YES", "$1 · NO", "$5 · NO", "$10 · NO"],
+        [
+          "🟢 $1 · YES",
+          "🟢 $5 · YES",
+          "🟢 $10 · YES",
+          "🟢 $1 · NO",
+          "🟢 $5 · NO",
+          "🟢 $10 · NO",
+        ],
       );
       const multiPresetBuyRows =
         multiPresetMessage.reply_markup?.inline_keyboard.filter((row) =>
@@ -5042,7 +5049,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.deepEqual(
         customButtons.map((button) => button.text),
-        ["Custom buy · YES", "Custom buy · NO"],
+        ["🟢 Buy YES…", "🟢 Buy NO…"],
       );
       assert.equal(
         multiPresetMessage.reply_markup?.inline_keyboard.some(
@@ -5259,14 +5266,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.deepEqual(
         appFallbackButtons.map((button) => button.text),
         [
-          "$1 · YES",
-          "$5 · YES",
-          "$15 · YES",
-          "$1 · NO",
-          "$5 · NO",
-          "$15 · NO",
-          "Custom buy · YES",
-          "Custom buy · NO",
+          "🟢 $1 · YES",
+          "🟢 $5 · YES",
+          "🟢 $15 · YES",
+          "🟢 $1 · NO",
+          "🟢 $5 · NO",
+          "🟢 $15 · NO",
+          "🟢 Buy YES…",
+          "🟢 Buy NO…",
           "Open market",
           "⬅️ Back",
         ],

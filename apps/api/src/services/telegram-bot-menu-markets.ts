@@ -338,7 +338,14 @@ export function buildSignalBotMarketSearchScreen(input: {
         ],
         [
           {
-            text: `⚙️ Filters (${input.venues?.length ? input.venues.map((venue) => ({ polymarket: "🔵", limitless: "🟡", kalshi: "🟢" })[venue] ?? venue).join(" ") : "All"}${input.category ? ` · ${input.category}` : ""})`,
+            text: `${input.venues?.length === 1 ? "" : "⚙️ "}Filters (${input.venues?.length ? input.venues.map(formatTelegramVenueLabel).join(" · ") : "All"}${input.category ? ` · ${input.category}` : ""})`,
+            ...(input.venues?.length === 1
+              ? {
+                  icon_custom_emoji_id: formatTelegramVenueButtonIcon(
+                    input.venues[0]!,
+                  ),
+                }
+              : {}),
             callback_data: `${input.callbackPrefix}search_filters:${input.sessionId}`,
           },
         ],

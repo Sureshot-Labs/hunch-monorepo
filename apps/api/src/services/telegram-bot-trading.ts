@@ -6593,8 +6593,8 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       icon_custom_emoji_id: formatTelegramVenueButtonIcon(market.venue),
       text:
         input.context?.origin === "position"
-          ? `${action === "buy" ? "Buy" : "Sell"} · Custom amount`
-          : `${action === "buy" ? "Custom buy" : "Custom sell"} · ${sideLabel(market, side)}`,
+          ? `${action === "buy" ? "🟢 Buy" : "🔴 Sell"}…`
+          : `${action === "buy" ? "🟢 Buy" : "🔴 Sell"} ${sideLabel(market, side)}…`,
     };
   };
   const customBuyRow: TelegramBotTradingButton[] = [];
@@ -6617,7 +6617,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       });
       row.push({
         callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:buy:${intentId}`,
-        text: `${formatUsd(option.amountUsd)} · ${sideLabel(market, option.side)}`,
+        text: `🟢 ${formatUsd(option.amountUsd)} · ${sideLabel(market, option.side)}`,
       });
     }
     if (row.length > 0) keyboard.push(row);
@@ -6651,14 +6651,10 @@ export async function buildTelegramBotTradingMarketMessage(input: {
         {
           callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:sell:${intentId}`,
           icon_custom_emoji_id: formatTelegramVenueButtonIcon(market.venue),
-          text: (() => {
-            const proceeds = isTelegramEstimatedSellProceeds(option.quote)
-              ? `Estimated ≈ ${formatUsd(option.minimumReceiveUsd)}`
-              : `Receive ≥ ${formatUsd(option.minimumReceiveUsd)}`;
-            return input.context?.origin === "position"
-              ? `Sell ${option.sellPercent}% · ${proceeds}`
-              : `Sell ${option.sellPercent}% ${sideLabel(market, option.side)} · ${formatLivePrice(option.currentPrice) ?? "live"} · ${proceeds}`;
-          })(),
+          text:
+            input.context?.origin === "position"
+              ? `🔴 Sell ${option.sellPercent}%`
+              : `🔴 Sell ${option.sellPercent}% · ${sideLabel(market, option.side)}`,
         },
       ]);
     }

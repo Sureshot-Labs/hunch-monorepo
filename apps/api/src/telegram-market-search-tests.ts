@@ -51,6 +51,69 @@ const sampleResult = {
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
+    name: "venue filters use branded button icons and retain callback routes",
+    run: async () => {
+      const redis = redisStore();
+      const sessionId = await writeSignalBotMarketSearchSession({
+        chatId: "10",
+        query: "World Cup",
+        redis,
+        results: [sampleResult],
+        telegramUserId: 20,
+      });
+      await handleSignalBotInteractiveMenuCallback({
+        searchOptions: async () => ({ venues: ["polymarket", "limitless"] }),
+        callbackPrefix: "hm:v1:",
+        chatId: "10",
+        messageId: 42,
+        redis,
+        render: async (message) => {
+          const buttons = message.reply_markup?.inline_keyboard.flat() ?? [];
+          for (const venue of ["polymarket", "limitless"] as const) {
+            const button = buttons.find(
+              (button) =>
+                "callback_data" in button &&
+                button.callback_data ===
+                  `hm:v1:search_filters:${sessionId}:${venue}`,
+            );
+            assert.equal(
+              button && "icon_custom_emoji_id" in button
+                ? button.icon_custom_emoji_id
+                : undefined,
+              TELEGRAM_CUSTOM_EMOJI[venue].id,
+            );
+            assert.doesNotMatch(button?.text ?? "", /🔵|🟡|🟢/);
+          }
+        },
+        renderExpiredSearch: async () => {
+          assert.fail("session must remain valid");
+        },
+        route: { kind: "market_search_filters", sessionId },
+        telegramUserId: 20,
+      });
+      for (const venue of ["polymarket", "limitless"] as const) {
+        const screen = buildSignalBotMarketSearchScreen({
+          callbackPrefix: "hm:v1:",
+          sessionId,
+          query: "World Cup",
+          results: [sampleResult],
+          venues: [venue],
+        });
+        const button = screen.reply_markup.inline_keyboard
+          .flat()
+          .find(
+            (button) =>
+              button.callback_data === `hm:v1:search_filters:${sessionId}`,
+          );
+        assert.equal(
+          button?.icon_custom_emoji_id,
+          TELEGRAM_CUSTOM_EMOJI[venue].id,
+        );
+        assert.doesNotMatch(button?.text ?? "", /🔵|🟡|🟢/);
+      }
+    },
+  },
+  {
     name: "AGG midpoint never becomes an executable ask",
     run: () => {
       assert.deepEqual(

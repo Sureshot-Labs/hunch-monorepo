@@ -24,6 +24,7 @@ import {
   type TelegramFundingDepositRouteKey,
 } from "./telegram-funding-route.js";
 import { parseTelegramMarketDeposit } from "./telegram-funding-navigation.js";
+import { telegramCustomEmojiIdForVenue } from "./telegram-custom-emoji.js";
 
 export type SignalBotFundingMenuRoute =
   | {
@@ -446,14 +447,15 @@ async function deliverSignalBotInteractiveMenuCallback(
           reply_markup: {
             inline_keyboard: [
               ...[
-                ["polymarket", "🔵 Polymarket"],
-                ["limitless", "🟡 Limitless"],
-                ["kalshi", "🟢 Kalshi"],
+                ["polymarket", "Polymarket"],
+                ["limitless", "Limitless"],
+                ["kalshi", "Kalshi"],
               ]
                 .filter(([venue]) => options.venues.includes(venue ?? ""))
                 .map(([venue, label]) => [
                   {
                     text: `${session.venues?.includes(venue ?? "") ? "✓ " : ""}${label}`,
+                    icon_custom_emoji_id: telegramCustomEmojiIdForVenue(venue),
                     callback_data: `${input.callbackPrefix}search_filters:${route.sessionId}:${venue}`,
                   },
                 ]),
