@@ -97,6 +97,15 @@ data repair is needed for this latency follow-up.
 
 ### Response contract
 
+The public status must still populate `signerWallets` for verified internal EVM
+wallets in `always`, even when no bot authorization exists. Disconnect/revoke
+uses these facts to verify removal. Omitting the inspection broke that consumer:
+successful `unlink-cleanup` could be followed by a missing-wallet verification
+failure. Restore the shared status contract, not an optimistic "revoked" value.
+An attached or unconfigured signer does not itself block Mini App onboarding;
+the internal Welcome readiness endpoint does not inspect absent authorizations.
+Regression coverage checks both contracts together with exact wallet identity.
+
 Authenticated `GET /telegram/bot-trading/status` preserves existing fields and
 adds the schema/OpenAPI field:
 

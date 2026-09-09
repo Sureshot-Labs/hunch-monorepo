@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { Keypair } from "@solana/web3.js";
+import type { PrivyServerSignerStatus } from "./services/api-trading-wallet-signing.js";
 import Fastify from "fastify";
 import {
   serializerCompiler,
@@ -213,6 +214,17 @@ try {
   );
   prepared = true;
   assert.equal((await inspect()).state, "ready");
+  let signerInspections = 0;
+  let signerStatus: PrivyServerSignerStatus = {
+    attached: false,
+    canRemoveAllSigners: true,
+    grant: null,
+    message: null,
+    policyId: null,
+    policyMaxBuyUsd: null,
+    signerId: null,
+    state: "grant_required",
+  };
   const app = Fastify({ logger: false });
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
@@ -241,10 +253,12 @@ try {
           walletChain: "ethereum",
         },
       ],
-      signerInspector: async () => {
-        throw new Error(
-          "Mini App status must not require bot signer configuration",
-        );
+      signerInspector: async (scope) => {
+        signerInspections++;
+        assert.equal(scope.signer, walletAddress);
+        assert.equal(scope.walletId, `privy-${userId}`);
+        assert.equal(scope.authorizationEnabled, false);
+        return signerStatus;
       },
       inspectOnboarding: async (scope) => {
         assert.equal(scope.userId, userId);
@@ -272,6 +286,42 @@ try {
     );
     assert.deepEqual(payload.status.authorizations, []);
     assert.equal(payload.status.preference.desiredEnabled, false);
+    assert.equal(signerInspections, 1);
+    assert.deepEqual(
+      payload.status.signerWallets,
+      [
+        {
+          privyWalletId: `privy-${userId}`,
+          walletAddress,
+          walletChain: "ethereum",
+          signerStatus,
+        },
+      ],
+      "always/no authorization still exposes verified revoke evidence",
+    );
+    for (const state of ["revoke_required", "not_configured"] as const) {
+      signerStatus = {
+        ...signerStatus,
+        state,
+        attached: state === "revoke_required",
+        canRemoveAllSigners: state === "revoke_required",
+      };
+      const refreshed = await app.inject({
+        method: "GET",
+        url: "/telegram/bot-trading/status",
+      });
+      assert.equal(refreshed.statusCode, 200, refreshed.body);
+      assert.equal(
+        refreshed.json().status.signerWallets[0].signerStatus.state,
+        state,
+      );
+      assert.equal(
+        refreshed.json().status.onboarding.state,
+        "ready",
+        "signer state is not a Mini App readiness gate",
+      );
+    }
+    const inspectedBeforeWelcome = signerInspections;
     const internal = await app.inject({
       method: "POST",
       url: "/internal/telegram-bot/trading/onboarding",
@@ -279,6 +329,11 @@ try {
     });
     assert.equal(internal.statusCode, 200, internal.body);
     assert.deepEqual(internal.json().onboarding, payload.status.onboarding);
+    assert.equal(
+      signerInspections,
+      inspectedBeforeWelcome,
+      "Welcome without bot authorization does not inspect signers",
+    );
     const foreignLink = await app.inject({
       method: "POST",
       url: "/internal/telegram-bot/trading/onboarding",

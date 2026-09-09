@@ -2164,11 +2164,9 @@ async function registerTelegramBotTradingRoutes(
         ),
       );
       for (const wallet of internalWallets) {
-        if (
-          wallet.walletChain !== "ethereum" ||
-          policy.miniAppHandoffMode === "always"
-        )
-          continue;
+        // Revoke/unlink needs verified signer facts even without a bot
+        // authorization. Mini App readiness is a separate projection below.
+        if (wallet.walletChain !== "ethereum") continue;
         const key = `${wallet.privyWalletId}:${canonicalWalletIdentity(
           wallet.walletChain,
           wallet.walletAddress,
