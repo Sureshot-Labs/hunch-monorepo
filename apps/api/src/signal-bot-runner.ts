@@ -210,6 +210,8 @@ export async function runSignalBotRunner(): Promise<void> {
   }
 
   let dbPool: Pool | null = null;
+  let onboardingDeliveryInFlight: Promise<void> | null = null;
+  let onboardingStopping = false;
   const telegram = new TelegramBotApiClient(config.token);
   const signalTransports = [createSignalBotTelegramTransport(telegram)];
   const xEditorialComposer = config.xEditorial.enabled
@@ -960,24 +962,36 @@ export async function runSignalBotRunner(): Promise<void> {
 
         const now = Date.now();
         if (!heartbeatLost && now >= nextNotificationAt) {
-          try {
-            const onboardingDelivery =
-              await deliverTelegramBotOnboardingActions({
-                config,
-                db,
-                limit: 25,
-                telegram,
+          // Readiness can wait on venue RPC. Never block callback polling on it.
+          if (!onboardingDeliveryInFlight) {
+            onboardingDeliveryInFlight = deliverTelegramBotOnboardingActions({
+              config,
+              db,
+              isReady: async (scope) =>
+                !onboardingStopping &&
+                !heartbeatLost &&
+                (await tradingInternalApi?.inspectOnboarding?.(scope))
+                  ?.onboarding.state === "ready" &&
+                !onboardingStopping &&
+                !heartbeatLost,
+              limit: 5,
+              telegram,
+            })
+              .then((onboardingDelivery) => {
+                if (
+                  onboardingDelivery.claimed > 0 ||
+                  onboardingDelivery.quarantined > 0
+                )
+                  log("signal_bot_onboarding_delivery", onboardingDelivery);
+              })
+              .catch((error: unknown) => {
+                log("signal_bot_onboarding_delivery_error", {
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              })
+              .finally(() => {
+                onboardingDeliveryInFlight = null;
               });
-            if (
-              onboardingDelivery.claimed > 0 ||
-              onboardingDelivery.quarantined > 0
-            ) {
-              log("signal_bot_onboarding_delivery", onboardingDelivery);
-            }
-          } catch (error) {
-            log("signal_bot_onboarding_delivery_error", {
-              error: error instanceof Error ? error.message : String(error),
-            });
           }
           let cleaned = 0;
           let onboardingCleaned = 0;
@@ -1104,7 +1118,9 @@ export async function runSignalBotRunner(): Promise<void> {
     if (fundingDeliveryTimer) clearInterval(fundingDeliveryTimer);
     // A successful Telegram mutation is not durable until its result is stored.
     // Keep the pool alive for the one bounded delivery already in progress.
+    onboardingStopping = true;
     await fundingDeliveryInFlight;
+    await onboardingDeliveryInFlight;
     const drainedConfirmTasks = await drainSignalBotConfirmTasks(10_000);
     if (!drainedConfirmTasks) {
       log("signal_bot_confirm_tasks_drain_timeout");

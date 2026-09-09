@@ -14,9 +14,13 @@ const COMMON = [
   "rpc_fresh",
 ] as const;
 
-const FUND = [
-  ...COMMON,
-  "collateral_observed",
+const FUND = [...COMMON, "collateral_observed"] as const;
+
+// Receiving is not trading. CLOB credentials/visibility and Router allowances
+// are verified when preparing the subsequent purchase/conversion, not before
+// disclosing an owned receive address to a new, unfunded user.
+const BUY_FUNDING = [
+  ...FUND,
   "funding_router_ready",
   "funding_router_signer_pusd_allowance",
   "funding_router_signer_usdce_allowance",
@@ -24,7 +28,7 @@ const FUND = [
 ] as const;
 
 const BUY_COMMON = [
-  ...FUND,
+  ...BUY_FUNDING,
   "credentials_valid",
   "market_context_resolved",
   "collateral_spendable",

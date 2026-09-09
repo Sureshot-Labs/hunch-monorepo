@@ -347,6 +347,51 @@ await test("Polymarket distinguishes deployable Deposit Wallet from undeployed u
   assert.equal((await unsupported.inspect(input)).status, "unavailable");
 });
 
+await test("Polymarket Receive does not require trading connection or Router approvals; Buy still does", async () => {
+  const exactBinding = binding("polymarket");
+  const blockedChecks = [
+    "credentials_valid",
+    "clob_collateral_visible",
+    "funding_router_ready",
+    "funding_router_signer_pusd_allowance",
+    "funding_router_signer_usdce_allowance",
+  ];
+  for (const purpose of ["fund", "buy"] as const) {
+    const adapter = new PolymarketWalletPreparationAdapter(
+      async () =>
+        facts({
+          exactBinding,
+          purpose,
+          marketClass: "standard",
+          topology: "deposit_wallet",
+          checkIds: polymarketCheckIds,
+          overrides: Object.fromEntries(
+            blockedChecks.map((id) => [
+              id,
+              {
+                status: "unavailable",
+                reasonCode: "binding_not_ready",
+                postcondition: null,
+              },
+            ]),
+          ),
+        }),
+      () => NOW,
+    );
+    const inspected = await adapter.inspect(
+      preparationInput(exactBinding, purpose, "standard"),
+    );
+    assert.equal(
+      inspected.status,
+      purpose === "fund" ? "ready" : "unavailable",
+    );
+    if (purpose === "fund") {
+      assert.deepEqual(inspected.requiredActions, []);
+      assert.deepEqual(inspected.reasonCodes, []);
+    }
+  }
+});
+
 await test("Polymarket stale credentials require the exact reconnect action", async () => {
   const exactBinding = binding("polymarket");
   const input = preparationInput(exactBinding, "buy", "neg_risk");

@@ -437,8 +437,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
         openResult = "ambiguous";
         const ambiguous = await request();
-        assert.equal(ambiguous.statusCode, 409);
-        assert.equal(ambiguous.json().error, "destination_ambiguous");
+        assert.equal(ambiguous.statusCode, 200);
+        assert.equal(
+          ambiguous.json().fundingReasonCode,
+          "destination_ambiguous",
+        );
+        assert.match(ambiguous.json().text, /finish wallet setup/);
+        assert.doesNotMatch(ambiguous.json().text, /Try again shortly/);
 
         openResult = "private";
         const privateChat = await request();

@@ -176,6 +176,9 @@ export async function ensureTelegramBotTradingPreferenceForLink(
   db: DbQuery,
   input: { isNewLink: boolean; userId: string },
 ): Promise<void> {
+  const { policy } = await resolveSignalBotTradingPolicyStateFromDb(db);
+  const requestedBotAccess =
+    input.isNewLink && policy.miniAppHandoffMode !== "always";
   await db.query(
     `INSERT INTO telegram_bot_trading_preferences (
        user_id,
@@ -190,7 +193,7 @@ export async function ensureTelegramBotTradingPreferenceForLink(
      ON CONFLICT (user_id) DO NOTHING`,
     [
       input.userId,
-      input.isNewLink,
+      requestedBotAccess,
       input.isNewLink ? "auto_link" : "legacy_preserved",
     ],
   );

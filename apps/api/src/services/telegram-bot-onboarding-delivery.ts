@@ -235,6 +235,12 @@ export async function deliverTelegramBotOnboardingActions(input: {
   db: DbQuery;
   limit?: number;
   telegram: Pick<SignalBotTelegramClient, "sendMessage">;
+  /** API-owned check; do not load API secrets in the signal sidecar. */
+  isReady?: (scope: {
+    userId: string;
+    telegramAccountId: string;
+    telegramUserId: string;
+  }) => Promise<boolean>;
 }): Promise<{
   blocked: number;
   claimed: number;
@@ -269,6 +275,37 @@ export async function deliverTelegramBotOnboardingActions(input: {
       continue;
     }
 
+    const ready = await input
+      .isReady?.({
+        userId: row.user_id,
+        telegramAccountId: row.telegram_account_id,
+        telegramUserId: row.telegram_user_id,
+      })
+      .catch(() => false);
+    if (!ready) {
+      // Waiting for setup is not a failed Telegram send. Preserve deduplication
+      // and bound waiting without reviving historical terminal welcomes.
+      await input.db.query(
+        `update telegram_bot_action_outbox
+         set status = case when created_at < now() - interval '24 hours' then 'skipped' else 'retry' end,
+             last_error = 'onboarding_not_ready',
+             attempt_count = greatest(0, attempt_count - 1),
+             next_attempt_at = now() + interval '60 seconds', updated_at = now()
+         where id = $1 and status = 'sending'`,
+        [row.id],
+      );
+      continue;
+    }
+    if (!(await loadCurrentDestination({ db: input.db, row }))) {
+      await markActionSkipped({
+        db: input.db,
+        id: row.id,
+        reason:
+          "The Telegram account link changed during readiness inspection.",
+      });
+      skipped += 1;
+      continue;
+    }
     const telegramUserId = Number(destination.telegram_user_id);
     const menu = buildSignalBotMenuScreen({
       appBaseUrl: input.config.appBaseUrl,

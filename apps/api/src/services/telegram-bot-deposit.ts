@@ -224,7 +224,8 @@ function buildDepositVenueMenu(
   };
 }
 
-async function managedSolReceiveChoiceToken(input: {
+/** Null means an enabled Solana Receive route has no verified internal wallet. */
+export async function resolveTelegramSolanaReceiveChoices(input: {
   db: DbQuery;
   telegramUserId?: string | number;
 }): Promise<{ sol: string | null; usdc: string | null } | null> {
@@ -246,8 +247,7 @@ async function managedSolReceiveChoiceToken(input: {
       [String(input.telegramUserId)],
     ),
   ]);
-  if (managedWallet.rows[0]?.available !== true) return null;
-  return {
+  const choices = {
     sol:
       telegramSolanaRetainedDepositRouteForPolicy(resolvedPolicy.runtime)
         ?.choiceToken ?? null,
@@ -257,6 +257,12 @@ async function managedSolReceiveChoiceToken(input: {
         SOLANA_RETAINED_USDC_ASSET,
       )?.choiceToken ?? null,
   };
+  if (
+    (choices.sol || choices.usdc) &&
+    managedWallet.rows[0]?.available !== true
+  )
+    return null;
+  return choices;
 }
 
 function buildJustDepositMenu(input: {
@@ -388,7 +394,7 @@ export async function buildTelegramDepositMessage(input: {
     return buildDepositVenueMenu(venues, activeDeposit);
   }
   if (requestedVenue === "any") {
-    const choices = await managedSolReceiveChoiceToken({
+    const choices = await resolveTelegramSolanaReceiveChoices({
       db: input.pool,
       telegramUserId: input.telegramUserId,
     });

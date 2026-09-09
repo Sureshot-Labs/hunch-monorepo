@@ -75,6 +75,11 @@ export type TelegramBotTradingClientCallbackInput = {
 };
 
 export type TelegramBotTradingInternalApiClient = {
+  inspectOnboarding?: (input: {
+    userId: string;
+    telegramAccountId: string;
+    telegramUserId: string;
+  }) => Promise<{ onboarding: { state: string } }>;
   buildAccountValueMessage: (input: {
     chatId: string | number;
     telegramUserId: string | number;
@@ -694,6 +699,10 @@ export function createTelegramBotTradingInternalApiClient(input: {
         "/internal/telegram-bot/trading/market-card",
         body,
       ),
+    inspectOnboarding: (body) =>
+      post("/internal/telegram-bot/trading/onboarding", body, {
+        timeoutMs: 45_000,
+      }),
     buildStatusMessage: (telegramUserId) =>
       post<TelegramBotTradingClientMessage>(
         "/internal/telegram-bot/trading/status",

@@ -3893,7 +3893,7 @@ export async function getTelegramBotTradingStatus(
   telegramUserId: string | number,
   trading?: ApiBotTradingExecutor,
   signerInspector: TelegramBotTradingSignerInspector = inspectServerEvmWalletAuthorization,
-  options: { resolveActionReadiness?: boolean } = {},
+  options: { resolveActionReadiness?: boolean; readOnly?: boolean } = {},
 ): Promise<TelegramBotTradingStatus> {
   const normalizedTelegramUserId = normalizeTelegramUserId(telegramUserId);
   const policyState = await resolveSignalBotTradingPolicyStateFromDb(db);
@@ -4023,13 +4023,14 @@ export async function getTelegramBotTradingStatus(
       authorizationRow.enabled &&
       (!botPolicySafe || !preference?.desiredEnabled)
     ) {
-      await disableTelegramBotTradingLocal(
-        db,
-        {
-          telegramUserId: normalizedTelegramUserId,
-        },
-        { recordLifecycle: true, updatePreference: false },
-      );
+      if (!options.readOnly)
+        await disableTelegramBotTradingLocal(
+          db,
+          {
+            telegramUserId: normalizedTelegramUserId,
+          },
+          { recordLifecycle: true, updatePreference: false },
+        );
       safetyDisableApplied = true;
       enabled = false;
       if (signerStatus?.attached && signerStatus.state === "ready") {
@@ -11013,10 +11014,12 @@ async function previewTelegramTradeIntent(input: {
           chat_id: input.chatId,
           parse_mode: "MarkdownV2",
           text: formatTelegramTradeLifecycleMessageMarkdownV2({
-            heading: "Checking available Hunch funds.",
-            tone: "working",
+            heading: "Could not prepare this Buy",
+            tone: "warn",
             lines: [
-              "The internal balance or route could not be verified safely. No Deposit was opened and nothing was submitted. Try again shortly.",
+              internalFunding.reasonCodes.includes("destination_unavailable")
+                ? "Finish wallet setup in Hunch, then retry this Buy. Bot trading is not required in Mini App mode. Nothing was submitted."
+                : "The balance or route could not be verified. Retry the check or open Hunch. Nothing was submitted; no background check is running.",
             ],
             marketTitle: input.intent.market_title,
             venue: input.intent.venue,
@@ -11024,7 +11027,12 @@ async function previewTelegramTradeIntent(input: {
           reply_markup: buildTelegramTradeShortfallUnavailableReplyMarkup(
             input.intent.id,
             input.intent.venue,
-            null,
+            buildTelegramTradingMiniAppButton({
+              appBaseUrl: input.appBaseUrl,
+              path: openMarketUrl(input.appBaseUrl, input.market),
+              telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+              text: "Open Hunch",
+            }),
             { marketId: input.market.id, side: input.intent.side },
           ),
         });
@@ -11095,9 +11103,11 @@ async function previewTelegramTradeIntent(input: {
           chat_id: input.chatId,
           parse_mode: "MarkdownV2",
           text: formatTelegramTradeLifecycleMessageMarkdownV2({
-            heading: "Funding route is still being checked.",
-            tone: "working",
-            lines: ["No Deposit was opened. Try again shortly."],
+            heading: "Could not verify the funding route",
+            tone: "warn",
+            lines: [
+              "No Deposit was opened and nothing was submitted. Retry the Buy in Hunch.",
+            ],
             marketTitle: input.intent.market_title,
             venue: input.intent.venue,
           }),

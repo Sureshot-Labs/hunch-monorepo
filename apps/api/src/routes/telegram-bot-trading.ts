@@ -13,6 +13,11 @@ import { createAuthMiddleware } from "../auth.js";
 import { pool, type DbQuery } from "../db.js";
 import { cancelFundingOperationForUser } from "../funding/reconciliation/funding-operation-cancellation.js";
 import { env } from "../env.js";
+import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
+import {
+  inspectTelegramOnboardingReadiness,
+  telegramOnboardingReadinessSchema,
+} from "../services/telegram-onboarding-readiness.js";
 import { getRedis } from "../redis.js";
 import { evaluateGeoFence, type GeoFenceConfig } from "../lib/geo-fence.js";
 import { canonicalWalletIdentity } from "../lib/wallet-address.js";
@@ -67,7 +72,10 @@ import {
 } from "../services/telegram-market-search.js";
 import { buildTelegramDepositMessage } from "../services/telegram-bot-deposit.js";
 import { TelegramTradeShortfallFundingService } from "../services/telegram-trade-shortfall-funding.js";
-import { buildHunchMiniAppWebButton } from "../services/telegram-mini-app-buttons.js";
+import {
+  buildHunchMiniAppWebButton,
+  buildHunchMiniAppDeepLinkButton,
+} from "../services/telegram-mini-app-buttons.js";
 import {
   buildTelegramPositionsMessage,
   loadTelegramPositions,
@@ -538,6 +546,7 @@ async function buildKalshiEligibilityForRequest(input: {
 }
 
 export type TelegramBotTradingRouteDependencies = {
+  inspectOnboarding?: typeof inspectTelegramOnboardingReadiness;
   authPreHandler?: ReturnType<typeof createAuthMiddleware>;
   internalPreHandler?: preHandlerHookHandler;
   buildAccountValue?: (userId: string) => Promise<AccountValueReadModel>;
@@ -579,6 +588,9 @@ async function registerTelegramBotTradingRoutes(
   const api = app.withTypeProvider<ZodTypeProvider>();
   const db = dependencies.db ?? pool;
   const routePool = db as typeof pool;
+  const onboardingRuntime = new FundingPlanningRuntime(routePool);
+  const inspectOnboarding =
+    dependencies.inspectOnboarding ?? inspectTelegramOnboardingReadiness;
   const reconciliationEnabled =
     dependencies.reconciliationEnabled ??
     isTelegramBotTradingReconciliationEnabled({
@@ -884,6 +896,29 @@ async function registerTelegramBotTradingRoutes(
       error.code === "funding_session_active_elsewhere"
     ) {
       return reply.send(buildTelegramFundingActiveElsewhereMessage());
+    }
+    if (
+      error instanceof TelegramFundingError &&
+      error.code === "destination_ambiguous"
+    ) {
+      const openButton = buildHunchMiniAppDeepLinkButton({
+        miniAppLinkBase: env.telegramMiniAppLinkBase,
+        startParam: null,
+        text: "Open Hunch",
+      });
+      return reply.send({
+        fundingReasonCode: error.code,
+        parse_mode: "MarkdownV2",
+        text: escapeTelegramMarkdownV2(
+          "Receiving wallet setup needs attention. Open Hunch to finish wallet setup, then open Deposit again. Bot trading is not required.",
+        ),
+        reply_markup: {
+          inline_keyboard: [
+            ...(openButton ? [[openButton]] : []),
+            [{ text: "Home", callback_data: "hm:v1:home" }],
+          ],
+        },
+      });
     }
     return reply
       .code(error instanceof TelegramFundingError ? 409 : 503)
@@ -1461,6 +1496,47 @@ async function registerTelegramBotTradingRoutes(
   );
 
   api.post(
+    "/internal/telegram-bot/trading/onboarding",
+    {
+      preHandler: requireInternal,
+      schema: {
+        body: internalStatusBodySchema.extend({
+          userId: z.string().uuid(),
+          telegramAccountId: z.string().uuid(),
+        }),
+      },
+    },
+    async (request, reply) => {
+      const body = request.body;
+      const currentLink = await db.query(
+        `select id from user_telegram_accounts where id = $1 and user_id = $2 and telegram_user_id = $3`,
+        [body.telegramAccountId, body.userId, String(body.telegramUserId)],
+      );
+      if (!currentLink.rows.length)
+        return reply.code(409).send({ error: "telegram_link_changed" });
+      const [policyState, status] = await Promise.all([
+        resolveSignalBotTradingPolicyStateFromDb(db),
+        getTelegramBotTradingStatus(
+          db,
+          String(body.telegramUserId),
+          createTradingForRequest(request),
+          signerInspector,
+          { readOnly: true, resolveActionReadiness: false },
+        ),
+      ]);
+      return {
+        onboarding: await inspectOnboarding({
+          db,
+          runtime: onboardingRuntime,
+          userId: body.userId,
+          policyState,
+          status,
+        }),
+      };
+    },
+  );
+
+  api.post(
     "/internal/telegram-bot/trading/status",
     {
       preHandler: requireInternal,
@@ -1989,7 +2065,22 @@ async function registerTelegramBotTradingRoutes(
 
   api.get(
     "/telegram/bot-trading/status",
-    { preHandler: authPreHandler },
+    {
+      preHandler: authPreHandler,
+      schema: {
+        response: {
+          200: z
+            .object({
+              policy: z.object({}).passthrough(),
+              status: z
+                .object({ onboarding: telegramOnboardingReadinessSchema })
+                .passthrough(),
+            })
+            .passthrough(),
+          401: z.object({ error: z.string() }),
+        },
+      },
+    },
     async (request, reply) => {
       const user = request.user;
       if (!user) {
@@ -2069,7 +2160,11 @@ async function registerTelegramBotTradingRoutes(
         ),
       );
       for (const wallet of internalWallets) {
-        if (wallet.walletChain !== "ethereum") continue;
+        if (
+          wallet.walletChain !== "ethereum" ||
+          policy.miniAppHandoffMode === "always"
+        )
+          continue;
         const key = `${wallet.privyWalletId}:${canonicalWalletIdentity(
           wallet.walletChain,
           wallet.walletAddress,
@@ -2094,6 +2189,13 @@ async function registerTelegramBotTradingRoutes(
       }
       const statusPayload = {
         ...baseStatusPayload,
+        onboarding: await inspectOnboarding({
+          db,
+          runtime: onboardingRuntime,
+          userId: user.id,
+          policyState,
+          status: baseStatusPayload,
+        }),
         actionStatuses: status
           ? baseStatusPayload.actionStatuses
           : buildTelegramBotTradingActionStatuses({

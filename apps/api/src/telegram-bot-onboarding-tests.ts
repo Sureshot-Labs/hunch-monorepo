@@ -58,6 +58,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       } as never;
 
       const result = await deliverTelegramBotOnboardingActions({
+        isReady: async () => true,
         config,
         db,
         telegram: {
@@ -105,6 +106,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const updates: string[] = [];
       let sends = 0;
       const result = await deliverTelegramBotOnboardingActions({
+        isReady: async () => true,
         config,
         db: {
           query: async (sql: string) => {
@@ -139,6 +141,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: async () => {
       const queries: Array<{ params: unknown[]; sql: string }> = [];
       const result = await deliverTelegramBotOnboardingActions({
+        isReady: async () => true,
         config,
         db: {
           query: async (sql: string, params: unknown[] = []) => {
@@ -180,6 +183,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: async () => {
       const queries: Array<{ params: unknown[]; sql: string }> = [];
       const result = await deliverTelegramBotOnboardingActions({
+        isReady: async () => true,
         config,
         db: {
           query: async (sql: string, params: unknown[] = []) => {
@@ -220,6 +224,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: async () => {
       const queries: Array<{ params: unknown[]; sql: string }> = [];
       const result = await deliverTelegramBotOnboardingActions({
+        isReady: async () => true,
         config,
         db: {
           query: async (sql: string, params: unknown[] = []) => {
@@ -262,6 +267,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     run: async () => {
       const queries: string[] = [];
       const result = await deliverTelegramBotOnboardingActions({
+        isReady: async () => true,
         config,
         db: {
           query: async (sql: string) => {

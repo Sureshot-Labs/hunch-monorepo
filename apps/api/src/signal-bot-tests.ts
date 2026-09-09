@@ -10779,6 +10779,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         /finally\s*\{[\s\S]*?clearInterval\(fundingDeliveryTimer\)[\s\S]*?await fundingDeliveryInFlight;[\s\S]*?await dbPool\?\.end\(\)/,
         "shutdown must persist an in-flight Telegram delivery before closing Postgres",
       );
+      assert.doesNotMatch(
+        runnerSource,
+        /await deliverTelegramBotOnboardingActions\(/,
+        "onboarding RPC must not block callback polling",
+      );
+      assert.match(
+        runnerSource,
+        /onboardingStopping = true;[\s\S]*?await onboardingDeliveryInFlight;[\s\S]*?await dbPool\?\.end\(\)/,
+        "shutdown must drain Welcome delivery before closing Postgres",
+      );
       const retentionSelector = readFileSync(
         new URL("./market-retention-selector.ts", import.meta.url),
         "utf8",

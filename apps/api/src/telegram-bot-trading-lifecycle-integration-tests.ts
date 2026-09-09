@@ -760,7 +760,7 @@ try {
   assert.equal(retryableLimitlessHandoff.intentStatus, "previewed");
   assert.match(
     retryableLimitlessHandoff.messages.at(-1)?.text ?? "",
-    /Checking available Hunch funds/u,
+    /Could not prepare this Buy/u,
   );
   assert.doesNotMatch(
     retryableLimitlessHandoff.messages.at(-1)?.text ?? "",
