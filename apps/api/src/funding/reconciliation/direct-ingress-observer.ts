@@ -1,7 +1,7 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { isRecord } from "../../lib/type-guards.js";
-import { SOLANA_NATIVE_ASSET } from "../domain/network-fees.js";
+import { isRetainedSolanaAsset } from "../receive/retained-solana-assets.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
 import type { AssetRef, FundingPurpose, JsonValue } from "../domain/types.js";
 import type { FundingOperationState } from "../domain/transitions.js";
@@ -137,10 +137,10 @@ export function parseDirectIngressObservationVariant(
   if (completionKind === "direct_destination_credit") {
     completion = { kind: completionKind };
   } else if (completionKind === "retained_owned_source_credit") {
-    if (!sameAsset(asset, SOLANA_NATIVE_ASSET)) {
+    if (!isRetainedSolanaAsset(asset)) {
       throw new FundingPersistenceError(
         "quote_mismatch",
-        "retained owned source credit is limited to native SOL",
+        "retained owned source credit is limited to native SOL and Solana USDC",
       );
     }
     completion = { kind: completionKind };

@@ -2251,6 +2251,23 @@ const reviewProjection: TelegramFundingProgressProjection = {
   reviewReceiptId,
 };
 const reviewMessage = buildTelegramFundingProgressMessage(reviewProjection);
+const emptyRecoveryMessage = buildTelegramFundingProgressMessage({
+  ...reviewProjection,
+  rawAmount: null,
+  observedAt: null,
+});
+assert.match(emptyRecoveryMessage.text, /Receive needs attention/u);
+assert.match(emptyRecoveryMessage.text, /do not send it again/u);
+assert.doesNotMatch(
+  emptyRecoveryMessage.text,
+  /received funds|Automatic preparation/u,
+);
+assert.match(reviewMessage.text, /Funds need attention/u);
+const mixedReceiptRecoveryMessage = buildTelegramFundingProgressMessage({
+  ...reviewProjection,
+  rawAmount: null,
+});
+assert.match(mixedReceiptRecoveryMessage.text, /Funds need attention/u);
 const reviewButton = reviewMessage.reply_markup?.inline_keyboard[0]?.[0];
 assert.equal(
   reviewButton && "callback_data" in reviewButton
@@ -2601,6 +2618,24 @@ const genericSolanaRetainedMessage = buildTelegramFundingProgressMessage(
   genericSolanaRetained,
 );
 assert.match(genericSolanaRetainedMessage.text, /SOL received/u);
+for (const state of ["ready", "funds_received"] as const) {
+  const usdcMessage = buildTelegramFundingProgressMessage({
+    ...genericSolanaRetained,
+    state,
+    assetSymbol: "USDC",
+    rawAmount: null,
+    presentation: {
+      ...genericSolanaRetained.presentation,
+      routeKey: "polymarket_solana_usdc_retained_v1",
+    },
+  });
+  assert.match(usdcMessage.text, /USDC received/u);
+  assert.match(usdcMessage.text, /USDC.*kept in your Solana wallet/u);
+  assert.doesNotMatch(
+    usdcMessage.text,
+    /SOL received|SOL was received|SOL is kept/u,
+  );
+}
 assert.match(genericSolanaRetainedMessage.text, /kept in your Solana wallet/u);
 assert.doesNotMatch(
   genericSolanaRetainedMessage.text,

@@ -64,18 +64,37 @@ assert.equal(
   parseDirectIngressObservationVariant(retainedSolVariant).completion.kind,
   "retained_owned_source_credit",
 );
-assert.throws(
-  () =>
-    parseDirectIngressObservationVariant({
-      ...retainedSolVariant,
-      asset: {
-        networkId: "solana:mainnet",
-        assetId: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-        decimals: 6,
-      },
-    }),
-  /limited to native SOL/u,
+const retainedUsdcVariant = {
+  ...retainedSolVariant,
+  asset: {
+    networkId: "solana:mainnet",
+    assetId: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    decimals: 6,
+  },
+};
+assert.equal(
+  parseDirectIngressObservationVariant(retainedUsdcVariant).completion.kind,
+  "retained_owned_source_credit",
 );
+for (const asset of [
+  { ...retainedUsdcVariant.asset, decimals: 9 },
+  {
+    ...retainedUsdcVariant.asset,
+    assetId: "So11111111111111111111111111111111111111112",
+  },
+  { ...retainedUsdcVariant.asset, networkId: "evm:137" },
+  { ...retainedSolVariant.asset, decimals: 6 },
+]) {
+  assert.throws(
+    () =>
+      parseDirectIngressObservationVariant({
+        ...retainedUsdcVariant,
+        networkId: asset.networkId,
+        asset,
+      }),
+    /limited to native SOL and Solana USDC/u,
+  );
+}
 
 assert.equal(
   directIngressSatisfiedAmount({

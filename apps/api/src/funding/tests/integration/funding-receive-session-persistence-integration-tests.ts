@@ -39,6 +39,8 @@ import {
   FundingReceiveSessionObserver,
   fundingReceiveObservationDisposition,
 } from "../../receive/receive-session-observer.js";
+import { SOLANA_RETAINED_USDC_ASSET } from "../../receive/retained-solana-assets.js";
+import { buildFundingReceiveTargets } from "../../planner/receive-targets.js";
 
 const NOW = new Date();
 const DESTINATION_OPTION_ID = "destination_receive_persistence_12345678";
@@ -304,10 +306,66 @@ try {
 
   retainedSolUserId = await insertUser();
   const retainedInput = retainedSolSessionInput(retainedSolUserId);
-  const retainedSession = await createOrReuseFundingReceiveSession(
-    pool,
-    retainedInput,
-  );
+  const retainedUsdcVariant = {
+    ...retainedInput.observationVariants[0],
+    variantId: "ingress_variant_retained_usdc_12345678",
+    asset: SOLANA_RETAINED_USDC_ASSET,
+    observation: {
+      adapterId: "owned_wallet_liquid_balances_v1",
+      payload: { eventIdentity: "solana_transfer_v1" },
+    },
+  };
+  const retainedVariants = [
+    ...retainedInput.observationVariants,
+    retainedUsdcVariant,
+  ];
+  const retainedSession = await createOrReuseFundingReceiveSession(pool, {
+    ...retainedInput,
+    observationVariants: retainedVariants,
+    receiveTargets: buildFundingReceiveTargets(retainedVariants),
+    selectedReceiveTargetId: null,
+  });
+  // Persisted USDC must not poison the whole session on the next observer tick,
+  // even before a transfer arrives or an asset has been selected.
+  let scannedRetainedUsdc = false;
+  const retainedObserver = new FundingReceiveSessionObserver({
+    scanCanonicalEvents: async (variants) => {
+      scannedRetainedUsdc ||= variants.some(
+        (variant) => variant.variantId === retainedUsdcVariant.variantId,
+      );
+      return { events: [], variants, cursorAdvanced: false };
+    },
+    listPotentialPolymarketHandoffs: async () => [],
+  });
+  const retainedPoll = await retainedObserver.pollBatch(pool, {
+    limit: 100,
+    minimumPollIntervalMs: 1_000,
+    now: new Date(NOW.getTime() + 1_000),
+  });
+  assert.equal(scannedRetainedUsdc, true);
+  assert.equal(retainedPoll.recoveriesRequired, 0);
+  assert.equal(retainedPoll.retryableErrors, 0);
+  const retainedReload = await fetchFundingReceiveSessionForUser(pool, {
+    userId: retainedSolUserId,
+    receiveSessionId: retainedSession.snapshot.session.receiveSessionId,
+  });
+  assert.equal(retainedReload?.session.status, "open");
+  const retainedUsdcReceipt = await insertFundingReceiveReceipt(pool, {
+    receiveSessionId: retainedSession.snapshot.session.receiveSessionId,
+    userId: retainedSolUserId,
+    variantId: retainedUsdcVariant.variantId,
+    asset: retainedUsdcVariant.asset,
+    destinationAddress: retainedUsdcVariant.destinationAddress,
+    rawAmount: "2000000",
+    observationRevision: "retained_usdc_observation_12345678",
+    observedAt: new Date(NOW.getTime() + 1_000),
+    status: "ready",
+    handling: "direct",
+    evidence: { test: "retained_owned_source_credit" },
+    now: new Date(NOW.getTime() + 1_000),
+  });
+  assert.equal(retainedUsdcReceipt.receipt.status, "ready");
+  assert.equal(retainedUsdcReceipt.receipt.childFundingOperationId, null);
   const retainedReceipt = await insertFundingReceiveReceipt(pool, {
     receiveSessionId: retainedSession.snapshot.session.receiveSessionId,
     userId: retainedSolUserId,

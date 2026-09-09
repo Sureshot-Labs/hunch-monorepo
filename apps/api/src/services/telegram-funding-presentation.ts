@@ -720,8 +720,15 @@ function buildTelegramFundingProgressMessageInternal(
   const conversionOutputDetected =
     projection.state === "converting" &&
     (projection.receiptBreakdown?.destinationReceiptCount ?? 0) > 0;
-  const retainedSol = isTelegramSolanaRetainedFundingRouteKey(
+  const retainedSolana = isTelegramSolanaRetainedFundingRouteKey(
     projection.presentation.routeKey,
+  );
+  const hasReceiptEvidence = Boolean(
+    projection.observedAt ||
+    projection.rawAmount ||
+    projection.sourceRawAmount ||
+    (projection.receiptBreakdown?.sourceReceiptCount ?? 0) > 0 ||
+    (projection.receiptBreakdown?.destinationReceiptCount ?? 0) > 0,
   );
   const stateCopy: Record<
     TelegramFundingProgressProjection["state"],
@@ -738,13 +745,13 @@ function buildTelegramFundingProgressMessageInternal(
     },
     funds_received: {
       icon: "📥",
-      title: retainedSol
-        ? "SOL received"
+      title: retainedSolana
+        ? `${projection.assetSymbol} received`
         : `${projection.assetSymbol} detected`,
-      body: retainedSol
+      body: retainedSolana
         ? amount
           ? `${amount} is kept in your Solana wallet. Hunch is preparing the Mini App funding route.`
-          : "SOL is kept in your Solana wallet. Hunch is preparing the Mini App funding route."
+          : `${projection.assetSymbol} is kept in your Solana wallet. Hunch is preparing the Mini App funding route.`
         : amount
           ? `${amount} was detected.`
           : "The transfer was detected.",
@@ -769,11 +776,13 @@ function buildTelegramFundingProgressMessageInternal(
     },
     ready: {
       icon: "✅",
-      title: retainedSol ? "SOL received" : `${destinationAsset} ready`,
-      body: retainedSol
+      title: retainedSolana
+        ? `${projection.assetSymbol} received`
+        : `${destinationAsset} ready`,
+      body: retainedSolana
         ? amount
           ? `${amount} was received and kept in your Solana wallet.`
-          : "SOL was received and kept in your Solana wallet."
+          : `${projection.assetSymbol} was received and kept in your Solana wallet.`
         : amount
           ? `${amount} is now available at ${presentation.venueLabel}.`
           : `The received ${destinationAsset} is now available at ${presentation.venueLabel}.`,
@@ -795,10 +804,14 @@ function buildTelegramFundingProgressMessageInternal(
     },
     needs_attention: {
       icon: "⚠️",
-      title: "Funds need attention",
-      body: amount
-        ? `Automatic preparation of ${amount} did not complete. The transfer is preserved and needs review.`
-        : "Automatic preparation did not complete. The received funds are preserved and need review.",
+      title: hasReceiptEvidence
+        ? "Funds need attention"
+        : "Receive needs attention",
+      body: !hasReceiptEvidence
+        ? "This receive session could not continue. If you already sent a transfer, do not send it again. Otherwise, open Add funds again before sending."
+        : amount
+          ? `Automatic preparation of ${amount} did not complete. The transfer is preserved and needs review.`
+          : "Automatic preparation did not complete. The received funds are preserved and need review.",
     },
   };
   const copy = stateCopy[projection.state];
