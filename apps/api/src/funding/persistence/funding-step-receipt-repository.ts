@@ -961,7 +961,8 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
       }
     }
     if (
-      validation?.kind === "exact_sol_withdrawal" &&
+      (validation?.kind === "exact_sol_withdrawal" ||
+        validation?.kind === "exact_solana_usdc_withdrawal") &&
       typeof transactionSignature === "string" &&
       signatureLength === 64 &&
       row.ledger_height &&
@@ -975,7 +976,11 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
         assetId: validation.expectedSourceAssetId,
         assetDecimals: validation.expectedSourceAssetDecimals,
         txHash: transactionSignature,
-        eventIndex: "0",
+        eventIndex:
+          validation.kind === "exact_solana_usdc_withdrawal" &&
+          validation.createRecipientAta
+            ? "1"
+            : "0",
         fromAddress: validation.expectedSourceAddress,
         toAddress: validation.expectedSourceRecipient,
         rawAmount: validation.expectedSourceRaw,

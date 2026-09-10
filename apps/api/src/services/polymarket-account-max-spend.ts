@@ -4,7 +4,10 @@ import {
   buildAccountValueReadModel,
   type AccountValueReadModel,
 } from "../account-value/runtime-service.js";
-import { rawForUsdCeil } from "../account-value/decimal.js";
+import {
+  parseUnsignedDecimal,
+  rawForUsdCeil,
+} from "../account-value/decimal.js";
 import { accountValueDisplayPriceAdapters } from "../account-value/display-price-adapters.js";
 import type { PriceAdapter } from "../funding/domain/contracts.js";
 import { sameAccountAddress } from "../funding/domain/asset-identity.js";
@@ -380,17 +383,14 @@ export async function computePolymarketAccountMaxSpend(input: {
           component.availableEstimatedUsd == null
         )
           continue;
-        estimatedRaw += BigInt(
-          rawForUsdCeil({
-            usd: component.availableEstimatedUsd,
-            decimals: POLYMARKET_PUSD_DECIMALS,
-            unitPriceUsd: "1",
-          }),
-        );
+        const valued = parseUnsignedDecimal(component.availableEstimatedUsd);
+        estimatedRaw +=
+          (valued.coefficient * 10n ** BigInt(POLYMARKET_PUSD_DECIMALS)) /
+          10n ** BigInt(valued.scale);
       }
-      // A heuristic routing/gas reserve, not a promised provider fee.
-      const bufferedRaw = (estimatedRaw * 95n) / 100n - 100_000n;
-      if (bufferedRaw <= 0n)
+      // Max is an editable estimate. Venue fees are handled below; live
+      // routing costs belong to Buy preparation, not a blanket haircut.
+      if (estimatedRaw <= 0n)
         return unavailable(
           "below_min_order",
           "Estimated cash is below the minimum order amount.",
@@ -399,7 +399,7 @@ export async function computePolymarketAccountMaxSpend(input: {
         input.pool,
         {
           tokenId: input.tokenId,
-          executableFundsRaw: bufferedRaw,
+          executableFundsRaw: estimatedRaw,
           context: quoteContext,
           slippageBps: input.slippageBps ?? undefined,
         },
@@ -420,7 +420,7 @@ export async function computePolymarketAccountMaxSpend(input: {
         amountType: "usd",
         maxAmountUsd: Number(estimate.maxAmountUsdRaw) / 1_000_000,
         maxAmountUsdRaw: estimate.maxAmountUsdRaw,
-        executableFundsRaw: bufferedRaw.toString(),
+        executableFundsRaw: estimatedRaw.toString(),
         funderPusdRaw: input.funds.funderPusdRaw.toString(),
         funderPusdAvailableRaw: input.funds.funderPusdAvailableRaw.toString(),
         funderLockedRaw: input.funds.funderLockedRaw.toString(),

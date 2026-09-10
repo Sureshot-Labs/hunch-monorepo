@@ -6,6 +6,7 @@ import type {
   preHandlerHookHandler,
 } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { z as schema } from "zod";
 
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
@@ -118,6 +119,7 @@ export function fundingRequestsPerMinute(endpoint: string): number {
 }
 
 export type FundingRouteDependencies = Readonly<{
+  withdrawalCapacity?: FundingPlanningRuntime["withdrawalCapacity"];
   authenticate: preHandlerHookHandler;
   rateLimit(userId: string, endpoint: string): Promise<boolean>;
   capabilities(): Promise<
@@ -623,6 +625,55 @@ export function registerFundingRoutes(
               ...capabilities,
             }),
           );
+        },
+      ),
+  );
+
+  z.post(
+    "/funding/withdrawal-capacity",
+    {
+      preHandler: dependencies.authenticate,
+      schema: {
+        body: schema
+          .object({
+            componentId: schema.string().min(1).max(200),
+            recipientId: schema.string().uuid(),
+          })
+          .strict(),
+        response: {
+          200: schema.object({
+            ok: schema.literal(true),
+            componentId: schema.string(),
+            recipientId: schema.string(),
+            maximumSourceRaw: schema.string(),
+            networkFeeRaw: schema.string(),
+            accountRentRaw: schema.string(),
+            payer: schema.enum(["user", "privy_sponsor"]),
+            reasonCodes: schema.array(schema.string()),
+            expiresAt: schema.string(),
+          }),
+          ...errors,
+        },
+      },
+    },
+    (request, reply) =>
+      handleFundingRequest(
+        request,
+        reply,
+        dependencies,
+        {
+          endpoint: "withdrawal-capacity",
+          logMessage: "Withdrawal capacity check failed",
+          publicError:
+            "Withdrawal capacity could not be checked; retry before sending",
+        },
+        async (userId) => {
+          if (!dependencies.withdrawalCapacity)
+            throw new Error("Withdrawal capacity unavailable");
+          return reply.send({
+            ok: true as const,
+            ...(await dependencies.withdrawalCapacity(userId, request.body)),
+          });
         },
       ),
   );
@@ -1502,6 +1553,8 @@ export const fundingRoutes: FastifyPluginAsync = async (app) => {
     capabilities: () => runtime.capabilities(),
     destinations: (userId, query) => runtime.destinations(userId, query),
     receiveOptions: (userId) => receiveSessions.options(userId),
+    withdrawalCapacity: (userId, request) =>
+      runtime.withdrawalCapacity(userId, request),
     registerWithdrawalDestination: (userId, request) =>
       runtime.registerWithdrawalDestination(userId, request),
     revokeWithdrawalDestination: (userId, recipientId) =>

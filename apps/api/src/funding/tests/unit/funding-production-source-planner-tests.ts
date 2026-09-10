@@ -31,6 +31,7 @@ import { groupWalletExecutableActions } from "../../planner/evm-action-batching.
 import { DirectWithdrawalSourceAdapter } from "../../planner/direct-withdrawal-source-adapter.js";
 import { sessionSourceAccount } from "../../planner/session-source-account.js";
 import { assertDirectWithdrawalActionMatchesRecipient } from "../../execution/direct-withdrawal-transfer.js";
+import { buildExactSolWithdrawalAction } from "../../execution/direct-withdrawal-transfer.js";
 
 const NOW = "2026-07-24T12:00:00.000Z";
 const ACCOUNT_ID = "account_source_planner_12345678";
@@ -429,7 +430,30 @@ async function directWithdrawalOptionsForAsset(
     asset.networkId === "solana:mainnet"
       ? "F7RnPpFGLzY2r17MLTrxgJXDWiHF5etiEaLNn11GebLJ"
       : "0x1a9ec8b3c44a748f7fad6623fd79332ce683ceb0";
-  return new DirectWithdrawalSourceAdapter(accountForExactAsset(asset)).list({
+  return new DirectWithdrawalSourceAdapter(accountForExactAsset(asset), {
+    sponsorBudgetAvailable: async () => false,
+    inspectCost: async (input) => ({
+      maximumSourceRaw: input.availableRaw - 5000n,
+      networkFeeRaw: 5000n,
+      accountRentRaw: 0n,
+      payer: "user",
+      createRecipientAta: false,
+      userFeeRaw: 5000n,
+      userSolCostRaw: 5000n,
+      reasonCode: null,
+      built:
+        input.requestedRaw && input.requestedRaw <= input.availableRaw - 5000n
+          ? buildExactSolWithdrawalAction({
+              amount: {
+                asset: input.asset,
+                raw: input.requestedRaw.toString(),
+              },
+              profile: input.profile,
+              recipient: input.recipient,
+            })
+          : null,
+    }),
+  }).list({
     accountId: ACCOUNT_ID,
     request: {
       purpose: "withdrawal",
@@ -524,7 +548,7 @@ for (const asset of [BASE_USDC, POLYGON_USDC, POLYGON_USDCE, SOLANA_NATIVE]) {
   );
   assert.equal(
     options[0]?.option.maximumSourceRaw,
-    asset.networkId === "solana:mainnet" ? "1000000" : "4000000",
+    asset.networkId === "solana:mainnet" ? "3995000" : "4000000",
   );
   const expectedSourceAssetId =
     plan.steps[0]?.actionValidationResult.expectedSourceAssetId;
@@ -536,6 +560,12 @@ for (const asset of [BASE_USDC, POLYGON_USDC, POLYGON_USDCE, SOLANA_NATIVE]) {
     asset.assetId.toLowerCase(),
   );
   if (asset.networkId === "solana:mainnet") {
+    assert.equal(
+      plan.reservations[0]?.rawAmount,
+      "1005000",
+      "The exact network fee remains reserved until settlement",
+    );
+    assert.equal(options[0]?.option.fees[0]?.amount?.raw, "5000");
     const action = plan.steps[0]?.normalizedAction;
     assert.equal(action?.kind, "svm_transaction");
     assertDirectWithdrawalActionMatchesRecipient({
@@ -558,7 +588,7 @@ for (const asset of [BASE_USDC, POLYGON_USDC, POLYGON_USDCE, SOLANA_NATIVE]) {
 }
 
 assert.equal(
-  (await directWithdrawalOptionsForAsset(SOLANA_NATIVE, "1000001")).length,
+  (await directWithdrawalOptionsForAsset(SOLANA_NATIVE, "3995001")).length,
   0,
 );
 

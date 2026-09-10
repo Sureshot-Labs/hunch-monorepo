@@ -251,6 +251,32 @@ export class FundingPlanningRuntime {
     return this.withdrawalRuntime.revoke(userId, recipientId);
   }
 
+  async withdrawalCapacity(
+    userId: string,
+    input: { componentId: string; recipientId: string },
+  ) {
+    const [account, recipient] = await Promise.all([
+      buildAccountValueReadModel({ pool: this.db, userId }),
+      this.withdrawalRuntime.resolve(userId, input.recipientId),
+    ]);
+    const cost = await new DirectWithdrawalSourceAdapter(account).capacity(
+      input.componentId,
+      recipient,
+    );
+    return {
+      componentId: input.componentId,
+      recipientId: input.recipientId,
+      maximumSourceRaw: cost.maximumSourceRaw.toString(),
+      networkFeeRaw: cost.networkFeeRaw.toString(),
+      accountRentRaw: cost.accountRentRaw.toString(),
+      payer: cost.payer,
+      reasonCodes: cost.reasonCode ? [cost.reasonCode] : [],
+      expiresAt: new Date(
+        Math.min(Date.now() + 15_000, Date.parse(recipient.expiresAt)),
+      ).toISOString(),
+    };
+  }
+
   async capabilities() {
     const resolvedPolicy = await resolveFundingPolicy(this.db);
     return {

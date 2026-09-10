@@ -13,6 +13,8 @@ import { buildAccountValueReadModel } from "../../account-value/runtime-service.
 import { getCredentialsEncryptionKey } from "../../lib/credentials-encryption.js";
 import { isReceiptBearingFundingActionKind } from "../domain/action-kinds.js";
 import { normalizedActionSchema } from "../domain/schemas.js";
+import { DirectWithdrawalSourceAdapter } from "../planner/direct-withdrawal-source-adapter.js";
+import { DIRECT_SOLANA_WITHDRAWAL_FEE_ONLY_POLICY } from "./direct-solana-sponsorship-policy.js";
 import type {
   NormalizedAction,
   WalletExecutionProfile,
@@ -28,6 +30,7 @@ import {
   type FundingOperationRow,
 } from "../persistence/funding-operation-repository.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
+import { fundingReservationHoldSql } from "../persistence/source-reservation-hold.js";
 import {
   lockFundingPolicyForTransaction,
   resolveFundingPolicy,
@@ -306,7 +309,7 @@ export class FundingOperationActionRuntime {
         "stored funding action differs from its immutable fingerprint",
       );
     }
-    const execution = assertClientExecutable(
+    let execution = assertClientExecutable(
       action,
       step.executorId,
       account.ownership?.wallets ?? [],
@@ -403,6 +406,92 @@ export class FundingOperationActionRuntime {
             recipient,
             required: directWithdrawal,
           });
+          if (directWithdrawal && action.kind === "svm_transaction") {
+            const componentId = operation.supportMetadata.sourceComponentId;
+            const raw = step.actionValidationResult.expectedSourceRaw;
+            if (
+              typeof componentId !== "string" ||
+              typeof raw !== "string" ||
+              !/^[1-9][0-9]*$/.test(raw)
+            )
+              throw new FundingPersistenceError(
+                "quote_invalidated",
+                "Withdrawal source binding missing",
+              );
+            const feeRaw = step.actionValidationResult.withdrawalUserSolCostRaw;
+            const fee =
+              typeof feeRaw === "string" && /^(0|[1-9][0-9]*)$/.test(feeRaw)
+                ? BigInt(feeRaw)
+                : 0n;
+            const native =
+              recipient.asset.assetId === "11111111111111111111111111111111";
+            const held = await client.query<{
+              component_id: string;
+              raw_amount: string;
+            }>(
+              `
+              select reservation.component_id, reservation.raw_amount
+              from balance_reservations reservation
+              where reservation.user_id = $1 and reservation.operation_id = $2
+                and reservation.state = 'active' and reservation.mode = 'subtract_available'
+                and ${fundingReservationHoldSql("reservation")}
+              for update
+            `,
+              [userId, operation.id],
+            );
+            const sourceHeld = held.rows
+              .filter((row) => row.component_id === componentId)
+              .reduce((sum, row) => sum + BigInt(row.raw_amount), 0n);
+            const solIds = new Set(
+              account.projection.components
+                .filter(
+                  (row) =>
+                    row.amount.asset.networkId === "solana:mainnet" &&
+                    row.amount.asset.assetId ===
+                      "11111111111111111111111111111111" &&
+                    row.location.details.address ===
+                      execution.controllerProfile.address,
+                )
+                .map((row) => row.componentId),
+            );
+            const gasHeld = native
+              ? 0n
+              : held.rows
+                  .filter((row) => solIds.has(row.component_id))
+                  .reduce((sum, row) => sum + BigInt(row.raw_amount), 0n);
+            if (
+              sourceHeld !== BigInt(raw) + (native ? fee : 0n) ||
+              gasHeld !== (native ? 0n : fee)
+            )
+              throw new FundingPersistenceError(
+                "quote_invalidated",
+                "Withdrawal reservation no longer matches the reviewed cost",
+              );
+            const checked = await new DirectWithdrawalSourceAdapter(
+              account,
+            ).capacity(componentId, recipient, {
+              requestedRaw: BigInt(raw),
+              ownReservedRaw: sourceHeld,
+              ownReservedSolRaw: gasHeld,
+              frozenPayer: step.payerRequirement,
+            });
+            if (
+              !checked.built ||
+              checked.userSolCostRaw > fee ||
+              canonicalJsonHash(checked.built.action) !== fingerprint ||
+              checked.payer !== step.payerRequirement
+            )
+              throw new FundingPersistenceError(
+                "quote_invalidated",
+                "Withdrawal cost or payer changed; review again",
+              );
+            if (checked.payer === "privy_sponsor")
+              execution = {
+                ...execution,
+                payerRequirement: checked.payer,
+                sponsorshipPolicyId: DIRECT_SOLANA_WITHDRAWAL_FEE_ONLY_POLICY,
+              };
+          }
         }
         await this.dependencies.revalidateWithdrawalRecipient?.(
           userId,

@@ -1,5 +1,10 @@
 import { ethers } from "ethers";
 import { PublicKey, SystemProgram } from "@solana/web3.js";
+import {
+  createAssociatedTokenAccountIdempotentInstruction,
+  createTransferCheckedInstruction,
+  getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
 
 import type {
   AssetRef,
@@ -60,6 +65,16 @@ export type ExactSolWithdrawalActionValidation = Readonly<{
   observationKind: "destination_credit";
 }>;
 
+export type ExactUsdcWithdrawalActionValidation = Omit<
+  ExactSolWithdrawalActionValidation,
+  "kind" | "postconditionEvidenceKind"
+> &
+  Readonly<{
+    kind: "exact_solana_usdc_withdrawal";
+    postconditionEvidenceKind: "exact_solana_usdc_source_debit_v1";
+    createRecipientAta: boolean;
+  }>;
+
 export type PolymarketUsdceWithdrawalApprovalValidation = Readonly<{
   kind: "polymarket_usdce_withdrawal_pusd_approval";
   signerAddress: string;
@@ -95,6 +110,7 @@ export type PolymarketUsdceWithdrawalUnwrapValidation = Readonly<{
 export type DirectWithdrawalActionValidation =
   | ExactErc20WithdrawalActionValidation
   | ExactSolWithdrawalActionValidation
+  | ExactUsdcWithdrawalActionValidation
   | PolymarketUsdceWithdrawalApprovalValidation
   | PolymarketUsdceWithdrawalUnwrapValidation;
 
@@ -240,6 +256,95 @@ export function buildExactSolWithdrawalAction(
       expectedSourceRecipient: recipient,
       expectedSourceRaw: input.amount.raw,
       observationKind: "destination_credit",
+    },
+  };
+}
+
+export function buildExactUsdcWithdrawalAction(input: {
+  amount: Money;
+  profile: WalletExecutionProfile;
+  recipient: { address: string; addressFingerprint: string };
+  createRecipientAta: boolean;
+}): {
+  action: SvmTransactionAction;
+  validation: ExactUsdcWithdrawalActionValidation;
+} {
+  if (
+    input.amount.asset.networkId !== "solana:mainnet" ||
+    input.profile.networkId !== "solana:mainnet" ||
+    input.amount.asset.assetId !== RELAY_PINNED_ASSETS.solanaUsdc ||
+    input.amount.asset.decimals !== 6 ||
+    !isPositiveRawAmount(input.amount.raw)
+  )
+    throw new Error("Direct USDC withdrawal requires canonical Solana USDC");
+  const signer = new PublicKey(input.profile.address);
+  const recipient = new PublicKey(input.recipient.address);
+  const mint = new PublicKey(RELAY_PINNED_ASSETS.solanaUsdc);
+  const source = getAssociatedTokenAddressSync(mint, signer);
+  const destination = getAssociatedTokenAddressSync(mint, recipient);
+  if (source.equals(destination))
+    throw new Error("Withdrawal recipient must differ from source");
+  const instructions = [
+    ...(input.createRecipientAta
+      ? [
+          createAssociatedTokenAccountIdempotentInstruction(
+            signer,
+            destination,
+            recipient,
+            mint,
+          ),
+        ]
+      : []),
+    createTransferCheckedInstruction(
+      source,
+      mint,
+      destination,
+      signer,
+      BigInt(input.amount.raw),
+      6,
+    ),
+  ];
+  return {
+    action: {
+      kind: "svm_transaction",
+      networkId: "solana:mainnet",
+      signerWalletId: input.profile.walletId,
+      actionId: stableOpaqueId(
+        "funding_action",
+        canonicalJsonHash({
+          kind: "exact_solana_usdc_withdrawal",
+          amount: input.amount,
+          signer: signer.toBase58(),
+          recipient: recipient.toBase58(),
+          createRecipientAta: input.createRecipientAta,
+        }),
+      ),
+      instructions: instructions.map((ix) => ({
+        programId: ix.programId.toBase58(),
+        accounts: ix.keys.map((key) => ({
+          address: key.pubkey.toBase58(),
+          signer: key.isSigner,
+          writable: key.isWritable,
+        })),
+        data: ix.data.toString("hex"),
+        dataEncoding: "hex" as const,
+      })),
+      addressLookupTables: [],
+    },
+    validation: {
+      kind: "exact_solana_usdc_withdrawal",
+      signerAddress: signer.toBase58(),
+      signerWalletId: input.profile.walletId,
+      recipientAddress: recipient.toBase58(),
+      recipientAddressFingerprint: input.recipient.addressFingerprint,
+      postconditionEvidenceKind: "exact_solana_usdc_source_debit_v1",
+      expectedSourceAssetId: mint.toBase58(),
+      expectedSourceAssetDecimals: 6,
+      expectedSourceAddress: signer.toBase58(),
+      expectedSourceRecipient: recipient.toBase58(),
+      expectedSourceRaw: input.amount.raw,
+      observationKind: "destination_credit",
+      createRecipientAta: input.createRecipientAta,
     },
   };
 }
@@ -412,9 +517,12 @@ export function directWithdrawalActionValidation(
   }
   if (
     (value.kind !== "exact_erc20_withdrawal" &&
-      value.kind !== "exact_sol_withdrawal") ||
+      value.kind !== "exact_sol_withdrawal" &&
+      value.kind !== "exact_solana_usdc_withdrawal") ||
     (value.postconditionEvidenceKind !== "exact_erc20_source_debit_v1" &&
-      value.postconditionEvidenceKind !== "exact_sol_source_debit_v1") ||
+      value.postconditionEvidenceKind !== "exact_sol_source_debit_v1" &&
+      value.postconditionEvidenceKind !==
+        "exact_solana_usdc_source_debit_v1") ||
     value.observationKind !== "destination_credit" ||
     typeof value.signerAddress !== "string" ||
     typeof value.recipientAddress !== "string" ||
@@ -432,7 +540,12 @@ export function directWithdrawalActionValidation(
     (value.kind === "exact_erc20_withdrawal" &&
       value.postconditionEvidenceKind !== "exact_erc20_source_debit_v1") ||
     (value.kind === "exact_sol_withdrawal" &&
-      value.postconditionEvidenceKind !== "exact_sol_source_debit_v1")
+      value.postconditionEvidenceKind !== "exact_sol_source_debit_v1") ||
+    (value.kind === "exact_solana_usdc_withdrawal" &&
+      (value.postconditionEvidenceKind !==
+        "exact_solana_usdc_source_debit_v1" ||
+        typeof value.signerWalletId !== "string" ||
+        typeof value.createRecipientAta !== "boolean"))
   ) {
     return null;
   }
@@ -535,11 +648,21 @@ export function assertDirectWithdrawalActionMatchesRecipient(
     }
     return;
   }
-  if (validation.kind === "exact_sol_withdrawal") {
+  if (
+    validation.kind === "exact_sol_withdrawal" ||
+    validation.kind === "exact_solana_usdc_withdrawal"
+  ) {
     if (input.action.kind !== "svm_transaction") {
       throw new Error("direct withdrawal action differs from frozen recipient");
     }
-    const expected = buildExactSolWithdrawalAction({
+    const builder =
+      validation.kind === "exact_sol_withdrawal"
+        ? buildExactSolWithdrawalAction
+        : buildExactUsdcWithdrawalAction;
+    const expected = builder({
+      createRecipientAta:
+        validation.kind === "exact_solana_usdc_withdrawal" &&
+        validation.createRecipientAta,
       amount: {
         asset: {
           networkId: input.action.networkId,

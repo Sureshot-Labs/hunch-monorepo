@@ -482,9 +482,9 @@ const tests: TestCase[] = [
         },
       });
       assert.equal(amountEstimate.ok, true);
-      assert.equal(amountEstimate.executableFundsRaw, "5391000");
+      assert.equal(amountEstimate.executableFundsRaw, "5780000");
       assert.ok(
-        BigInt(String(amountEstimate.totalRequiredUsdcRaw)) <= 5_391_000n,
+        BigInt(String(amountEstimate.totalRequiredUsdcRaw)) <= 5_780_000n,
       );
       // Exercise the actual valuation/projector chain, not a pre-priced SOL
       // mock: MAX must install the display adapter, while strict planning above
@@ -586,7 +586,7 @@ const tests: TestCase[] = [
         dependencies: solEstimateDependencies,
       });
       assert.equal(solOnlyMax.ok, true);
-      assert.equal(solOnlyMax.executableFundsRaw, "9400000");
+      assert.equal(solOnlyMax.executableFundsRaw, "10000000");
       includeStable = true;
       const mixedMax = await computePolymarketAccountMaxSpend({
         ...requestInput,
@@ -594,7 +594,7 @@ const tests: TestCase[] = [
         dependencies: solEstimateDependencies,
       });
       assert.equal(mixedMax.ok, true);
-      assert.equal(mixedMax.executableFundsRaw, "14891000");
+      assert.equal(mixedMax.executableFundsRaw, "15780000");
       solUsd = null;
       const missingSolPrice = await computePolymarketAccountMaxSpend({
         ...requestInput,
@@ -602,7 +602,7 @@ const tests: TestCase[] = [
         dependencies: solEstimateDependencies,
       });
       assert.equal(missingSolPrice.ok, true);
-      assert.equal(missingSolPrice.executableFundsRaw, "5391000");
+      assert.equal(missingSolPrice.executableFundsRaw, "5780000");
       assert.equal(result.fundingScope, "account");
       assert.equal(result.executableFundsRaw, "4860000");
       assert.equal(previewRequests.length, 2);

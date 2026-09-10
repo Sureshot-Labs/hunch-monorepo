@@ -1783,7 +1783,8 @@ async function applyEmbeddedSolanaBackendSponsorshipPolicy(inputs: {
       const relay =
         inputs.transactions.length === 1 &&
         relaySolanaSponsorshipEnabled() &&
-        transaction.id.startsWith("action_")
+        (transaction.id.startsWith("action_") ||
+          transaction.id.startsWith("funding_action_"))
           ? await prepareRelaySolanaSponsorship({
               db: pool,
               redis: await getRedis(),

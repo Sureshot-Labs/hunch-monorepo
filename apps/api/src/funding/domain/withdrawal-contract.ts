@@ -29,12 +29,14 @@ function isSupportedWithdrawalSource(asset: AssetRef): boolean {
 }
 
 export function supportsWithdrawalDestinationAsset(asset: AssetRef): boolean {
-  // Code-owned EVM stables and native SOL use an exact same-asset transfer.
-  // Relay destination coverage is needed only for assets that cannot use that
-  // identity route (currently Solana USDC).
+  // Code-owned EVM stables, native SOL, and canonical Solana USDC use
+  // exact same-asset transfers without provider quotes.
   if (
     (asset.networkId.startsWith("evm:") && isRelayPinnedStableAsset(asset)) ||
-    sameAsset(asset, SOLANA_NATIVE_ASSET)
+    sameAsset(asset, SOLANA_NATIVE_ASSET) ||
+    (asset.networkId === "solana:mainnet" &&
+      asset.assetId === RELAY_PINNED_ASSETS.solanaUsdc &&
+      asset.decimals === 6)
   ) {
     return true;
   }

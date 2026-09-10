@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
 import bs58 from "bs58";
+import { Keypair } from "@solana/web3.js";
 
 import "../../../integration-test-database-guard.js";
 import { pool } from "../../../db.js";
@@ -19,6 +20,7 @@ import type {
 import {
   buildExactErc20WithdrawalAction,
   buildExactSolWithdrawalAction,
+  buildExactUsdcWithdrawalAction,
   DIRECT_WITHDRAWAL_ADAPTER_ID,
   DIRECT_WITHDRAWAL_PROVIDER_ID,
   DIRECT_WITHDRAWAL_ROUTE_ID,
@@ -639,6 +641,50 @@ try {
     expectedDestinationAddress: solRecipient,
     legacyTerminalStatus: "completed",
   });
+
+  for (const createRecipientAta of [false, true]) {
+    const tokenRecipient = Keypair.generate().publicKey.toBase58();
+    const amount = {
+      asset: {
+        networkId: "solana:mainnet",
+        assetId: RELAY_PINNED_ASSETS.solanaUsdc,
+        decimals: 6,
+      },
+      raw: "2000000",
+    };
+    const built = buildExactUsdcWithdrawalAction({
+      amount,
+      profile: solProfile,
+      recipient: {
+        address: tokenRecipient,
+        addressFingerprint: hash(tokenRecipient),
+      },
+      createRecipientAta,
+    });
+    await runScenario({
+      amount,
+      profile: solProfile,
+      recipientAddress: tokenRecipient,
+      action: built.action,
+      actionValidation: built.validation,
+      executorId: "wallet_profile_svm_v1",
+      receipt: {
+        status: "finalized",
+        actionMatch: true,
+        ledgerHeight: "201",
+        blockHash: null,
+        canonical: true,
+        failureCode: null,
+        evidence: {
+          transactionSignature: bs58.encode(
+            Buffer.alloc(64, createRecipientAta ? 9 : 8),
+          ),
+        },
+      },
+      expectedDestinationAddress: tokenRecipient,
+      legacyTerminalStatus: "completed",
+    });
+  }
 
   const usdceAmount = {
     asset: {

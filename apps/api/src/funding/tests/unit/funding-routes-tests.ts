@@ -1281,6 +1281,45 @@ await test("standard auth errors remain serializable", async () => {
   }
 });
 
+await test("withdrawal capacity binds the authenticated owner and rejects client authority", async () => {
+  const recipientId = "11111111-1111-4111-8111-111111111111";
+  let calls = 0;
+  const app = await buildApp({
+    withdrawalCapacity: async (userId, input) => {
+      assert.equal(userId, USER_ID);
+      assert.deepEqual(input, { componentId: "asset_sol", recipientId });
+      calls++;
+      return {
+        ...input,
+        maximumSourceRaw: "3275121",
+        networkFeeRaw: "5000",
+        accountRentRaw: "0",
+        payer: "user",
+        reasonCodes: [],
+        expiresAt: new Date(NOW.getTime() + 15000).toISOString(),
+      };
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/withdrawal-capacity",
+      payload: { componentId: "asset_sol", recipientId },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().maximumSourceRaw, "3275121");
+    const invalid = await app.inject({
+      method: "POST",
+      url: "/funding/withdrawal-capacity",
+      payload: { componentId: "asset_sol", recipientId, sponsor: true },
+    });
+    assert.equal(invalid.statusCode, 400);
+    assert.equal(calls, 1);
+  } finally {
+    await app.close();
+  }
+});
+
 await test("withdrawal registration is owner-scoped and never echoes the raw address", async () => {
   const rawAddress = "0x0000000000000000000000000000000000000001";
   let observed:
