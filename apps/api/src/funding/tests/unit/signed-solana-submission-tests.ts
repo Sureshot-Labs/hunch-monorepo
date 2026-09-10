@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   Keypair,
+  ComputeBudgetProgram,
   AddressLookupTableAccount,
   PublicKey,
   SystemProgram,
@@ -153,6 +154,34 @@ const nativeInput = {
   lookupTables: [lookupTable],
 };
 const nativeIdentity = verifySignedSolanaFundingSubmission(nativeInput);
+const walletMessage = relaySolanaActionMessage(
+  nativeAction,
+  signer,
+  SystemProgram.programId.toBase58(),
+);
+walletMessage.instructions.unshift(
+  ComputeBudgetProgram.setComputeUnitLimit({ units: 200000 }),
+  ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 }),
+);
+const walletTx = new VersionedTransaction(
+  walletMessage.compileToV0Message([lookupTable]),
+);
+walletTx.sign([key]);
+assert.ok(
+  verifySignedSolanaFundingSubmission({
+    ...nativeInput,
+    signedTransaction: Buffer.from(walletTx.serialize()).toString("base64"),
+  }).signature,
+);
+walletTx.signatures[0][0] ^= 1;
+assert.throws(
+  () =>
+    verifySignedSolanaFundingSubmission({
+      ...nativeInput,
+      signedTransaction: Buffer.from(walletTx.serialize()).toString("base64"),
+    }),
+  /signature is invalid/,
+);
 assert.ok(nativeIdentity.signature);
 assert.throws(
   () =>

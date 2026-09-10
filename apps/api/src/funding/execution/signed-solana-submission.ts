@@ -6,6 +6,7 @@ import {
 } from "@solana/web3.js";
 import type { SvmTransactionAction } from "../domain/types.js";
 import { relaySolanaActionMessage } from "../../funding-providers/relay/solana-sponsorship.js";
+import { matchesFundingMessageWithComputeBudget } from "./solana-compute-budget.js";
 
 /** Validates identity, not permission to broadcast. Caller must bind the owned
  * operation/attempt and atomically retain this identity before sending bytes.
@@ -42,8 +43,10 @@ export function verifySignedSolanaFundingSubmission(input: {
     transaction.message.recentBlockhash,
   ).compileToV0Message(input.lookupTables);
   if (
-    !Buffer.from(expected.serialize()).equals(
-      Buffer.from(transaction.message.serialize()),
+    !matchesFundingMessageWithComputeBudget(
+      expected,
+      transaction.message,
+      input.lookupTables,
     )
   ) {
     throw new Error("Signed funding message does not match committed action");
