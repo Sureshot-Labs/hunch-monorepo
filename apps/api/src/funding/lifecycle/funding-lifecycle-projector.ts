@@ -1522,6 +1522,31 @@ export function deriveFundingLifecycle(
       ? "source_action"
       : "terminal";
     requiresWorker = externalEffectMayHaveOccurred;
+  } else if (
+    facts.receive === null &&
+    facts.transfers.length === 0 &&
+    facts.reservations.every(
+      (reservation) => reservation.state !== "consumed",
+    ) &&
+    !facts.consumer.completed &&
+    !facts.consumer.unresolved &&
+    facts.actions.some((action) =>
+      action.attempts.some(
+        (attempt) =>
+          attempt.receipt?.status === "failed" &&
+          attempt.receipt.canonical &&
+          attempt.receipt.failureFinalized,
+      ),
+    ) &&
+    facts.actions.every((action) =>
+      expiredWithoutSourceExecution(action, facts.now),
+    )
+  ) {
+    // Definitive non-execution plus an expired quote cannot offer a retry of
+    // this plan. Finish it; a user-requested retry must obtain a new quote.
+    // Receive sessions retain their separate observation-window lifecycle.
+    status = "failed";
+    progressStage = "terminal";
   } else if (solanaClientReportTimedOut && !finalEvidenceResolved) {
     status = "recovery_required";
     progressStage = "source_action";

@@ -10,6 +10,7 @@ import {
   fetchSolanaLatestBlockhash,
   fetchSolanaTokenBalanceByOwnerAndMint,
   sendSolanaRawTransaction,
+  solanaSubmissionErrorDiagnostic,
 } from "../services/solana-rpc.js";
 import {
   solanaBalanceQuerySchema,
@@ -335,7 +336,11 @@ export const solanaRoutes: FastifyPluginAsync = async (app) => {
         });
       } catch (error) {
         app.log.error(
-          { error, userId: user.id, walletAddress },
+          {
+            ...solanaSubmissionErrorDiagnostic(error),
+            userId: user.id,
+            walletAddress: owner,
+          },
           "Solana submit failed",
         );
         const message =

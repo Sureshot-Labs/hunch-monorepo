@@ -116,6 +116,78 @@ function facts(
 }
 
 {
+  const expired = facts({
+    now: new Date(now.getTime() + 120_000),
+    actions: [
+      action("expired-signed-send", {
+        attempts: [
+          attempt({
+            outcome: "ambiguous",
+            broadcastMayHaveOccurred: true,
+            referenceKind: "signature",
+            receipt: {
+              status: "failed",
+              canonical: true,
+              actionMatched: true,
+              failureFinalized: true,
+            },
+          }),
+        ],
+      }),
+    ],
+  });
+  const closed = deriveFundingLifecycle(expired);
+  assert.equal(closed.status, "failed");
+  assert.equal(closed.safety.reservationsMayRelease, true);
+  assert.equal(closed.safety.requiresWorker, false);
+  const receiving = deriveFundingLifecycle({
+    ...expired,
+    receive: {
+      open: true,
+      expiresAt: new Date(expired.now.getTime() + 60_000),
+    },
+  });
+  assert.equal(receiving.status, "awaiting_external_funds");
+  assert.equal(receiving.safety.terminal, false);
+  assert.equal(receiving.safety.reservationsMayRelease, false);
+  assert.equal(
+    deriveFundingLifecycle({ ...expired, now }).safety.terminal,
+    false,
+  );
+  const expiredAction = expired.actions[0];
+  assert.ok(expiredAction);
+  const pendingRetry = deriveFundingLifecycle({
+    ...expired,
+    actions: [
+      {
+        ...expiredAction,
+        attempts: [...expiredAction.attempts, attempt({ attemptNumber: 2 })],
+      },
+    ],
+  });
+  assert.equal(pendingRetry.safety.terminal, false);
+  for (const unsafe of [
+    { ...expired, transfers: [transfer("source_debit")] },
+    { ...expired, consumer: { ...expired.consumer, unresolved: true } },
+    {
+      ...expired,
+      actions: [
+        action("unknown", {
+          attempts: [
+            attempt({
+              outcome: "ambiguous",
+              broadcastMayHaveOccurred: true,
+              referenceKind: "signature",
+            }),
+          ],
+        }),
+      ],
+    },
+  ])
+    assert.equal(deriveFundingLifecycle(unsafe).safety.terminal, false);
+}
+
+{
   const pending = action("solana-sign-only", {
     executorId: "wallet_profile_svm_v1",
     attempts: [attempt()],

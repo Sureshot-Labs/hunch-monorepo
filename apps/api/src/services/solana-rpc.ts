@@ -18,6 +18,28 @@ type JsonRpcError = {
   data?: unknown;
 };
 
+/** Safe structured diagnostics: never include provider text, URLs or payloads. */
+export function solanaSubmissionErrorDiagnostic(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  const details = error as { rpcCode?: unknown; httpStatus?: unknown } | null;
+  return {
+    rpcCode: typeof details?.rpcCode === "number" ? details.rpcCode : null,
+    httpStatus:
+      typeof details?.httpStatus === "number" ? details.httpStatus : null,
+    reason: /blockhash.*not found|blockhashnotfound/i.test(message)
+      ? "blockhash_not_found"
+      : /insufficient.*fund|insufficientfund/i.test(message)
+        ? "insufficient_funds"
+        : /comput.*budget|comput.*exceed/i.test(message)
+          ? "compute_budget_exceeded"
+          : /simulation/i.test(message)
+            ? "simulation_failed"
+            : isAbortError(error)
+              ? "timeout"
+              : "rpc_submission_failed",
+  };
+}
+
 type JsonRpcResponse<T> =
   | { jsonrpc: "2.0"; id: number; result: T }
   | { jsonrpc: "2.0"; id: number; error: JsonRpcError };
@@ -184,6 +206,7 @@ async function executeSolanaRpcRequest<T>(inputs: {
           const error = new Error(
             `Solana RPC error: ${response.status} ${response.statusText}`,
           );
+          Object.assign(error, { httpStatus: response.status });
           lastError = error;
           recordAttempt(response.status === 429 ? "http_429" : "http_error");
           if (response.status === 429 && inputs.rpcUrls.length > 1) {
@@ -207,6 +230,7 @@ async function executeSolanaRpcRequest<T>(inputs: {
           const error = new Error(
             `Solana RPC ${inputs.method} error: ${message}`,
           );
+          Object.assign(error, { rpcCode: rpc.error.code });
           lastError = error;
           recordAttempt(isRpcRateLimit(error) ? "rpc_429" : "rpc_error");
           if (/too many requests/i.test(message) && inputs.rpcUrls.length > 1) {
@@ -831,7 +855,12 @@ export async function sendSolanaRawTransaction(inputs: {
   skipPreflight?: boolean;
   maxRetries?: number;
 }): Promise<string> {
-  const params: Record<string, unknown> = { encoding: "base64" };
+  // Funding obtains a confirmed blockhash. Default finalized preflight can
+  // reject that valid hash while finalized is still ~32 slots behind.
+  const params: Record<string, unknown> = {
+    encoding: "base64",
+    preflightCommitment: "confirmed",
+  };
   if (inputs.skipPreflight !== undefined) {
     params.skipPreflight = inputs.skipPreflight;
   }
