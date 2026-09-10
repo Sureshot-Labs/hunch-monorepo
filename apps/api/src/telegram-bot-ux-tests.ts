@@ -15,9 +15,50 @@ import {
   writeSignalBotMenuInput,
 } from "./services/telegram-bot-menu-state.js";
 import { parseTelegramBotTradingCallbackData } from "./services/telegram-bot-trading-client.js";
+import { telegramBotTradingTestHooks } from "./services/telegram-bot-trading.js";
 import { telegramTradeLifecycleProgressTestHooks } from "./services/telegram-trade-lifecycle-progress.js";
+import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "position trade buttons use custom directional emoji without circle prefixes",
+    run: () => {
+      assert.deepEqual(
+        telegramBotTradingTestHooks.telegramTradeActionButtonDecoration(
+          "buy",
+          "position",
+        ),
+        {
+          iconCustomEmojiId: TELEGRAM_CUSTOM_EMOJI.positionBuy.id,
+          textPrefix: "",
+        },
+      );
+      assert.deepEqual(
+        telegramBotTradingTestHooks.telegramTradeActionButtonDecoration(
+          "sell",
+          "position",
+        ),
+        {
+          iconCustomEmojiId: TELEGRAM_CUSTOM_EMOJI.positionSell.id,
+          textPrefix: "",
+        },
+      );
+      assert.deepEqual(
+        telegramBotTradingTestHooks.telegramTradeActionButtonDecoration(
+          "buy",
+          "search",
+        ),
+        { textPrefix: "🟢 " },
+      );
+      assert.deepEqual(
+        telegramBotTradingTestHooks.telegramTradeActionButtonDecoration(
+          "sell",
+          "direct",
+        ),
+        { textPrefix: "🔴 " },
+      );
+    },
+  },
   {
     name: "retry buy callback remains valid and bounded",
     run: () => {

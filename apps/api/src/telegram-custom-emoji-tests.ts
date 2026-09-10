@@ -28,6 +28,8 @@ const tests: Array<{ name: string; run: () => void }> = [
         ),
         {
           base: "5399884702758770830",
+          positionBuy: "5267252006669561577",
+          positionSell: "5267348686383391706",
           hunch: "5400370308941127529",
           hyperliquid: "5397762885835332158",
           kalshi: "5399820394213450697",
@@ -47,6 +49,8 @@ const tests: Array<{ name: string; run: () => void }> = [
         ),
         {
           base: "🟦",
+          positionBuy: "⬆️",
+          positionSell: "⬇️",
           hunch: "🟠",
           hyperliquid: "♾️",
           kalshi: "♻️",
@@ -117,7 +121,7 @@ const tests: Array<{ name: string; run: () => void }> = [
     },
   },
   {
-    name: "fallback removes entities and native button icons without losing copy",
+    name: "fallback removes native button icons and preserves position action semantics",
     run: () => {
       assert.equal(
         stripTelegramCustomEmojiMarkdownV2(
@@ -135,10 +139,28 @@ const tests: Array<{ name: string; run: () => void }> = [
                 text: "Polymarket",
               },
             ],
+            [
+              {
+                callback_data: "buy",
+                icon_custom_emoji_id: TELEGRAM_CUSTOM_EMOJI.positionBuy.id,
+                text: "Buy",
+              },
+            ],
+            [
+              {
+                callback_data: "sell",
+                icon_custom_emoji_id: TELEGRAM_CUSTOM_EMOJI.positionSell.id,
+                text: "Sell",
+              },
+            ],
           ],
         }),
         {
-          inline_keyboard: [[{ callback_data: "trade", text: "Polymarket" }]],
+          inline_keyboard: [
+            [{ callback_data: "trade", text: "Polymarket" }],
+            [{ callback_data: "buy", text: "⬆️ Buy" }],
+            [{ callback_data: "sell", text: "⬇️ Sell" }],
+          ],
         },
       );
     },
