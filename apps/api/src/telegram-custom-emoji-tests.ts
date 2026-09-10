@@ -32,6 +32,8 @@ const tests: Array<{ name: string; run: () => void }> = [
           hyperliquid: "5397762885835332158",
           kalshi: "5399820394213450697",
           limitless: "5400267199661253196",
+          minus: "5267295853990684437",
+          plus: "5264902891486881799",
           polygon: "5399966058029293176",
           polymarket: "5397905371375383129",
           solana: "5400271155326130010",
@@ -51,6 +53,8 @@ const tests: Array<{ name: string; run: () => void }> = [
           hyperliquid: "♾️",
           kalshi: "♻️",
           limitless: "↔️",
+          minus: "➖",
+          plus: "➕",
           polygon: "🟣",
           polymarket: "🔵",
           solana: "🪙",
@@ -117,7 +121,7 @@ const tests: Array<{ name: string; run: () => void }> = [
     },
   },
   {
-    name: "fallback removes entities and native button icons without losing copy",
+    name: "fallback removes native button icons and preserves position action semantics",
     run: () => {
       assert.equal(
         stripTelegramCustomEmojiMarkdownV2(
@@ -135,10 +139,28 @@ const tests: Array<{ name: string; run: () => void }> = [
                 text: "Polymarket",
               },
             ],
+            [
+              {
+                callback_data: "buy",
+                icon_custom_emoji_id: TELEGRAM_CUSTOM_EMOJI.plus.id,
+                text: "Buy",
+              },
+            ],
+            [
+              {
+                callback_data: "sell",
+                icon_custom_emoji_id: TELEGRAM_CUSTOM_EMOJI.minus.id,
+                text: "Sell",
+              },
+            ],
           ],
         }),
         {
-          inline_keyboard: [[{ callback_data: "trade", text: "Polymarket" }]],
+          inline_keyboard: [
+            [{ callback_data: "trade", text: "Polymarket" }],
+            [{ callback_data: "buy", text: "➕ Buy" }],
+            [{ callback_data: "sell", text: "➖ Sell" }],
+          ],
         },
       );
     },

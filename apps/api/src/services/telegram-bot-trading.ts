@@ -696,6 +696,21 @@ export type TelegramMarketCardContext = {
   returnCallbackData?: string;
 };
 
+function telegramTradeActionButtonDecoration(
+  action: "buy" | "sell",
+  origin: TelegramMarketCardContext["origin"] | undefined,
+): Readonly<{ iconCustomEmojiId?: string; textPrefix: string }> {
+  if (origin === "position") {
+    return {
+      iconCustomEmojiId: telegramCustomEmojiId(
+        action === "buy" ? "plus" : "minus",
+      ),
+      textPrefix: "",
+    };
+  }
+  return { textPrefix: action === "buy" ? "🟢 " : "🔴 " };
+}
+
 type TelegramBotTradingStatusRow = {
   id: string | null;
   telegram_account_link_id: string;
@@ -2081,6 +2096,7 @@ export const telegramBotTradingTestHooks = {
   parseTelegramCustomSellAmount,
   decorateRetainedSolReceiptEstimate,
   telegramTradeInputFingerprint,
+  telegramTradeActionButtonDecoration,
   venueStatusFromReadiness,
 };
 
@@ -6526,6 +6542,15 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   }
 
   const keyboard: TelegramBotTradingButton[][] = [];
+  const isPositionContext = input.context?.origin === "position";
+  const buyButtonDecoration = telegramTradeActionButtonDecoration(
+    "buy",
+    input.context?.origin,
+  );
+  const sellButtonDecoration = telegramTradeActionButtonDecoration(
+    "sell",
+    input.context?.origin,
+  );
   const createCustomInputButton = async (
     action: "buy" | "sell",
     side: TelegramBotTradingSide,
@@ -6588,13 +6613,16 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     const callbackAction = action === "buy" ? "buy_input" : "sell_input";
     const callbackData = `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:${callbackAction}:${id}`;
     if (Buffer.byteLength(callbackData, "utf8") > 64) return null;
+    const decoration =
+      action === "buy" ? buyButtonDecoration : sellButtonDecoration;
     return {
       callback_data: callbackData,
-      icon_custom_emoji_id: formatTelegramVenueButtonIcon(market.venue),
-      text:
-        input.context?.origin === "position"
-          ? `${action === "buy" ? "🟢 Buy" : "🔴 Sell"}…`
-          : `${action === "buy" ? "🟢 Buy" : "🔴 Sell"} ${sideLabel(market, side)}…`,
+      icon_custom_emoji_id:
+        decoration.iconCustomEmojiId ??
+        formatTelegramVenueButtonIcon(market.venue),
+      text: isPositionContext
+        ? `${action === "buy" ? "Buy" : "Sell"}…`
+        : `${decoration.textPrefix}${action === "buy" ? "Buy" : "Sell"} ${sideLabel(market, side)}…`,
     };
   };
   const customBuyRow: TelegramBotTradingButton[] = [];
@@ -6617,7 +6645,10 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       });
       row.push({
         callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:buy:${intentId}`,
-        text: `🟢 ${formatUsd(option.amountUsd)} · ${sideLabel(market, option.side)}`,
+        ...(buyButtonDecoration.iconCustomEmojiId
+          ? { icon_custom_emoji_id: buyButtonDecoration.iconCustomEmojiId }
+          : {}),
+        text: `${buyButtonDecoration.textPrefix}${formatUsd(option.amountUsd)} · ${sideLabel(market, option.side)}`,
       });
     }
     if (row.length > 0) keyboard.push(row);
@@ -6650,11 +6681,12 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       keyboard.push([
         {
           callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:sell:${intentId}`,
-          icon_custom_emoji_id: formatTelegramVenueButtonIcon(market.venue),
-          text:
-            input.context?.origin === "position"
-              ? `🔴 Sell ${option.sellPercent}%`
-              : `🔴 Sell ${option.sellPercent}% · ${sideLabel(market, option.side)}`,
+          icon_custom_emoji_id:
+            sellButtonDecoration.iconCustomEmojiId ??
+            formatTelegramVenueButtonIcon(market.venue),
+          text: isPositionContext
+            ? `${sellButtonDecoration.textPrefix}Sell ${option.sellPercent}%`
+            : `${sellButtonDecoration.textPrefix}Sell ${option.sellPercent}% · ${sideLabel(market, option.side)}`,
         },
       ]);
     }

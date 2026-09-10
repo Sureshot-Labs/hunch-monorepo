@@ -19,6 +19,14 @@ export const TELEGRAM_CUSTOM_EMOJI = {
     fallback: "↔️",
     id: "5400267199661253196",
   },
+  minus: {
+    fallback: "➖",
+    id: "5267295853990684437",
+  },
+  plus: {
+    fallback: "➕",
+    id: "5264902891486881799",
+  },
   polygon: {
     fallback: "🟣",
     id: "5399966058029293176",
@@ -42,6 +50,11 @@ export type TelegramCustomEmojiName = keyof typeof TELEGRAM_CUSTOM_EMOJI;
 const TELEGRAM_CUSTOM_EMOJI_MARKDOWN_V2_RE =
   /!\[([^\]\r\n]+)\]\(tg:\/\/emoji\?id=\d+\)/g;
 
+const TELEGRAM_CUSTOM_EMOJI_BUTTON_FALLBACKS = new Map<string, string>([
+  [TELEGRAM_CUSTOM_EMOJI.plus.id, TELEGRAM_CUSTOM_EMOJI.plus.fallback],
+  [TELEGRAM_CUSTOM_EMOJI.minus.id, TELEGRAM_CUSTOM_EMOJI.minus.fallback],
+]);
+
 export function telegramCustomEmojiId(name: TelegramCustomEmojiName): string {
   return TELEGRAM_CUSTOM_EMOJI[name].id;
 }
@@ -64,13 +77,25 @@ export function stripTelegramCustomEmojiButtonIcons<T>(value: T): T {
     ) as T;
   }
   if (typeof value !== "object" || value === null) return value;
+  const iconCustomEmojiId = Reflect.get(value, "icon_custom_emoji_id");
   const cleaned = Object.fromEntries(
     Object.entries(value).flatMap(([key, entry]) =>
       key === "icon_custom_emoji_id"
         ? []
         : [[key, stripTelegramCustomEmojiButtonIcons(entry)]],
     ),
-  );
+  ) as Record<string, unknown>;
+  const fallback =
+    typeof iconCustomEmojiId === "string"
+      ? TELEGRAM_CUSTOM_EMOJI_BUTTON_FALLBACKS.get(iconCustomEmojiId)
+      : undefined;
+  if (
+    fallback &&
+    typeof cleaned.text === "string" &&
+    !cleaned.text.startsWith(`${fallback} `)
+  ) {
+    cleaned.text = `${fallback} ${cleaned.text}`;
+  }
   return cleaned as T;
 }
 
