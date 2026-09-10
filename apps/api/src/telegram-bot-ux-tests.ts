@@ -21,7 +21,7 @@ import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
-    name: "position trade buttons use custom plus and minus emoji without circle prefixes",
+    name: "position trade buttons use custom directional emoji without circle prefixes",
     run: () => {
       assert.deepEqual(
         telegramBotTradingTestHooks.telegramTradeActionButtonDecoration(
@@ -29,7 +29,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           "position",
         ),
         {
-          iconCustomEmojiId: TELEGRAM_CUSTOM_EMOJI.plus.id,
+          iconCustomEmojiId: TELEGRAM_CUSTOM_EMOJI.positionBuy.id,
           textPrefix: "",
         },
       );
@@ -39,7 +39,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           "position",
         ),
         {
-          iconCustomEmojiId: TELEGRAM_CUSTOM_EMOJI.minus.id,
+          iconCustomEmojiId: TELEGRAM_CUSTOM_EMOJI.positionSell.id,
           textPrefix: "",
         },
       );

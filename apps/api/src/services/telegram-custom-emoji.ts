@@ -3,6 +3,14 @@ export const TELEGRAM_CUSTOM_EMOJI = {
     fallback: "🟦",
     id: "5399884702758770830",
   },
+  positionBuy: {
+    fallback: "⬆️",
+    id: "5267252006669561577",
+  },
+  positionSell: {
+    fallback: "⬇️",
+    id: "5267348686383391706",
+  },
   hunch: {
     fallback: "🟠",
     id: "5400370308941127529",
@@ -18,14 +26,6 @@ export const TELEGRAM_CUSTOM_EMOJI = {
   limitless: {
     fallback: "↔️",
     id: "5400267199661253196",
-  },
-  minus: {
-    fallback: "➖",
-    id: "5267295853990684437",
-  },
-  plus: {
-    fallback: "➕",
-    id: "5264902891486881799",
   },
   polygon: {
     fallback: "🟣",
@@ -51,8 +51,14 @@ const TELEGRAM_CUSTOM_EMOJI_MARKDOWN_V2_RE =
   /!\[([^\]\r\n]+)\]\(tg:\/\/emoji\?id=\d+\)/g;
 
 const TELEGRAM_CUSTOM_EMOJI_BUTTON_FALLBACKS = new Map<string, string>([
-  [TELEGRAM_CUSTOM_EMOJI.plus.id, TELEGRAM_CUSTOM_EMOJI.plus.fallback],
-  [TELEGRAM_CUSTOM_EMOJI.minus.id, TELEGRAM_CUSTOM_EMOJI.minus.fallback],
+  [
+    TELEGRAM_CUSTOM_EMOJI.positionBuy.id,
+    TELEGRAM_CUSTOM_EMOJI.positionBuy.fallback,
+  ],
+  [
+    TELEGRAM_CUSTOM_EMOJI.positionSell.id,
+    TELEGRAM_CUSTOM_EMOJI.positionSell.fallback,
+  ],
 ]);
 
 export function telegramCustomEmojiId(name: TelegramCustomEmojiName): string {

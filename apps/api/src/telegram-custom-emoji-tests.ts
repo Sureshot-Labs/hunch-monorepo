@@ -28,12 +28,12 @@ const tests: Array<{ name: string; run: () => void }> = [
         ),
         {
           base: "5399884702758770830",
+          positionBuy: "5267252006669561577",
+          positionSell: "5267348686383391706",
           hunch: "5400370308941127529",
           hyperliquid: "5397762885835332158",
           kalshi: "5399820394213450697",
           limitless: "5400267199661253196",
-          minus: "5267295853990684437",
-          plus: "5264902891486881799",
           polygon: "5399966058029293176",
           polymarket: "5397905371375383129",
           solana: "5400271155326130010",
@@ -49,12 +49,12 @@ const tests: Array<{ name: string; run: () => void }> = [
         ),
         {
           base: "🟦",
+          positionBuy: "⬆️",
+          positionSell: "⬇️",
           hunch: "🟠",
           hyperliquid: "♾️",
           kalshi: "♻️",
           limitless: "↔️",
-          minus: "➖",
-          plus: "➕",
           polygon: "🟣",
           polymarket: "🔵",
           solana: "🪙",
@@ -142,14 +142,14 @@ const tests: Array<{ name: string; run: () => void }> = [
             [
               {
                 callback_data: "buy",
-                icon_custom_emoji_id: TELEGRAM_CUSTOM_EMOJI.plus.id,
+                icon_custom_emoji_id: TELEGRAM_CUSTOM_EMOJI.positionBuy.id,
                 text: "Buy",
               },
             ],
             [
               {
                 callback_data: "sell",
-                icon_custom_emoji_id: TELEGRAM_CUSTOM_EMOJI.minus.id,
+                icon_custom_emoji_id: TELEGRAM_CUSTOM_EMOJI.positionSell.id,
                 text: "Sell",
               },
             ],
@@ -158,8 +158,8 @@ const tests: Array<{ name: string; run: () => void }> = [
         {
           inline_keyboard: [
             [{ callback_data: "trade", text: "Polymarket" }],
-            [{ callback_data: "buy", text: "➕ Buy" }],
-            [{ callback_data: "sell", text: "➖ Sell" }],
+            [{ callback_data: "buy", text: "⬆️ Buy" }],
+            [{ callback_data: "sell", text: "⬇️ Sell" }],
           ],
         },
       );

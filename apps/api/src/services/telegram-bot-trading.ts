@@ -703,7 +703,7 @@ function telegramTradeActionButtonDecoration(
   if (origin === "position") {
     return {
       iconCustomEmojiId: telegramCustomEmojiId(
-        action === "buy" ? "plus" : "minus",
+        action === "buy" ? "positionBuy" : "positionSell",
       ),
       textPrefix: "",
     };
