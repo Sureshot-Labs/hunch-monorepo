@@ -54,3 +54,41 @@ assert.equal(
   "a generic error must not override an independently supplied receipt",
 );
 console.log("Funding action report safety tests passed");
+
+for (const failureCode of [
+  "solana_signing_failed",
+  "solana_signed_transaction_invalid",
+] as const) {
+  assert.equal(
+    isFundingActionFailureReportConsistent({ ...genericFailure, failureCode }),
+    true,
+  );
+  assert.equal(
+    isFundingActionFailureReportConsistent({
+      ...genericFailure,
+      failureCode,
+      transactionReference: "signature",
+    }),
+    false,
+  );
+  assert.equal(
+    isFundingActionFailureReportConsistent({
+      ...genericFailure,
+      failureCode,
+      outcome: "submitted",
+    }),
+    false,
+  );
+  assert.equal(
+    isUnreferencedFundingActionAmbiguity({ ...genericFailure, failureCode }),
+    false,
+  );
+}
+assert.equal(
+  isFundingActionFailureReportConsistent({
+    ...genericFailure,
+    failureCode: "solana_signing_failed",
+    outcome: "cancelled",
+  }),
+  true,
+);

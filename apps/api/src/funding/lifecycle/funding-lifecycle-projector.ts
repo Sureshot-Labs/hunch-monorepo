@@ -1265,6 +1265,28 @@ export function deriveFundingLifecycle(
   const actionAwaitingClientReport = facts.actions.some(
     (action) => actionExecution(action) === "started",
   );
+  // A sign-only client may disappear without ever registering a signature.
+  // There is nothing the receipt poller can look up in that case. Bound the
+  // automatic wait, but do NOT turn absence of a report into non-broadcast
+  // evidence or release funds. A late report still supersedes this projection.
+  const solanaActionsAwaitingClientReport = facts.actions.filter(
+    (action) =>
+      action.executorId === "wallet_profile_svm_v1" &&
+      actionExecution(action) === "started",
+  );
+  const solanaClientReportTimedOut =
+    facts.transfers.length === 0 &&
+    !unresolvedMovement &&
+    !conflictingActionHistory &&
+    !facts.consumer.unresolved &&
+    solanaActionsAwaitingClientReport.some((action) =>
+      action.attempts.every(
+        (attempt) =>
+          attempt.referenceKind === null &&
+          !attempt.broadcastMayHaveOccurred &&
+          facts.now.getTime() - attempt.startedAt.getTime() >= 15 * 60_000,
+      ),
+    );
   const actionHasTerminalStop = facts.actions.some((action) => {
     const execution = actionExecution(action);
     return execution === "final_failure" || execution === "cancelled";
@@ -1282,6 +1304,7 @@ export function deriveFundingLifecycle(
     facts.terminalFailure == null &&
     !facts.consumer.completed &&
     !facts.consumer.unresolved &&
+    !solanaClientReportTimedOut &&
     !evidence.canonicalityConflict &&
     !evidence.destinationEvidenceConflict &&
     !actionEvidenceConflict &&
@@ -1341,6 +1364,7 @@ export function deriveFundingLifecycle(
       return projection;
     });
   const canReleaseUntouchedReservations =
+    solanaActionsAwaitingClientReport.length === 0 &&
     !externalEffectMayHaveOccurred &&
     facts.reservations.every((reservation) => reservation.state !== "consumed");
 
@@ -1498,6 +1522,11 @@ export function deriveFundingLifecycle(
       ? "source_action"
       : "terminal";
     requiresWorker = externalEffectMayHaveOccurred;
+  } else if (solanaClientReportTimedOut && !finalEvidenceResolved) {
+    status = "recovery_required";
+    progressStage = "source_action";
+    requiresWorker = true;
+    requiresManualRecovery = true;
   } else if (facts.automaticRecovery != null && !finalEvidenceResolved) {
     status = "recovery_required";
     progressStage = "source_action";
@@ -1598,26 +1627,28 @@ export function deriveFundingLifecycle(
               (evidence.canonicalityConflict ||
                 evidence.destinationEvidenceConflict)
             ? "finalized_observation_reorg"
-            : status === "recovery_required" && reconciliationEvidenceTimedOut
-              ? "reconciliation_evidence_timeout"
-              : status === "recovery_required" &&
-                  facts.automaticRecovery != null
-                ? facts.automaticRecovery.code
+            : status === "recovery_required" && solanaClientReportTimedOut
+              ? "funding_client_report_timeout"
+              : status === "recovery_required" && reconciliationEvidenceTimedOut
+                ? "reconciliation_evidence_timeout"
                 : status === "recovery_required" &&
-                    unresolvedMovement &&
-                    hasStoppedAction
-                  ? "late_broadcast_after_terminal_operation"
-                  : (status === "recovery_required" ||
-                        status === "reconcile_required") &&
-                      unresolvedActions.some((action) =>
-                        action.attempts.some(
-                          (attempt) =>
-                            attempt.clientExecutionFailed === true &&
-                            attempt.referenceKind === null,
-                        ),
-                      )
-                    ? "funding_wallet_submission_unknown"
-                    : null,
+                    facts.automaticRecovery != null
+                  ? facts.automaticRecovery.code
+                  : status === "recovery_required" &&
+                      unresolvedMovement &&
+                      hasStoppedAction
+                    ? "late_broadcast_after_terminal_operation"
+                    : (status === "recovery_required" ||
+                          status === "reconcile_required") &&
+                        unresolvedActions.some((action) =>
+                          action.attempts.some(
+                            (attempt) =>
+                              attempt.clientExecutionFailed === true &&
+                              attempt.referenceKind === null,
+                          ),
+                        )
+                      ? "funding_wallet_submission_unknown"
+                      : null,
     actions,
     segments,
     safety: {

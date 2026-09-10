@@ -116,6 +116,72 @@ function facts(
 }
 
 {
+  const pending = action("solana-sign-only", {
+    executorId: "wallet_profile_svm_v1",
+    attempts: [attempt()],
+  });
+  const active = deriveFundingLifecycle(facts({ actions: [pending] }));
+  assert.equal(active.recoveryMode, "automatic_evidence");
+  assert.equal(active.safety.cancelAllowed, false);
+  const timedOut = deriveFundingLifecycle(
+    facts({
+      actions: [pending],
+      now: new Date(now.getTime() + 15 * 60_000),
+    }),
+  );
+  assert.equal(timedOut.recoveryMode, "manual_review");
+  assert.equal(timedOut.errorCode, "funding_client_report_timeout");
+  assert.equal(timedOut.safety.reservationsMayRelease, false);
+  assert.equal(timedOut.safety.cancelAllowed, false);
+  assert.equal(timedOut.safety.retryAllowed, false);
+  const alreadyRecovering = deriveFundingLifecycle(
+    facts({
+      actions: [pending],
+      now: new Date(now.getTime() + 15 * 60_000),
+      automaticRecovery: {
+        code: "reconciliation_evidence_timeout",
+        requestedAt: now,
+      },
+    }),
+  );
+  assert.equal(alreadyRecovering.recoveryMode, "manual_review");
+  const evm = deriveFundingLifecycle(
+    facts({
+      actions: [{ ...pending, executorId: "wallet_profile_evm_v1" }],
+      now: new Date(now.getTime() + 15 * 60_000),
+    }),
+  );
+  assert.equal(evm.recoveryMode, "automatic_evidence");
+  const lateReport = deriveFundingLifecycle(
+    facts({
+      actions: [{ ...pending, attempts: [attempt({ outcome: "failed" })] }],
+      now: new Date(now.getTime() + 16 * 60_000),
+    }),
+  );
+  assert.equal(lateReport.status, "failed");
+  assert.equal(lateReport.safety.reservationsMayRelease, true);
+  const referenced = deriveFundingLifecycle(
+    facts({
+      actions: [
+        {
+          ...pending,
+          attempts: [
+            attempt({
+              outcome: "ambiguous",
+              referenceKind: "signature",
+              broadcastMayHaveOccurred: true,
+            }),
+          ],
+        },
+      ],
+      now: new Date(now.getTime() + 16 * 60_000),
+    }),
+  );
+  assert.notEqual(referenced.errorCode, "funding_client_report_timeout");
+  assert.equal(referenced.safety.reservationsMayRelease, false);
+}
+
+{
   const projection = deriveFundingLifecycle(
     facts({
       actions: [

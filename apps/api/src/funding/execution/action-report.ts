@@ -1,5 +1,7 @@
 export const FUNDING_ACTION_FAILURE_CODES = [
   "client_execution_failed",
+  "solana_signing_failed",
+  "solana_signed_transaction_invalid",
   "embedded_evm_submission_unknown",
   "external_handoff_provider_rejected",
   "external_handoff_provider_response_invalid",
@@ -72,5 +74,9 @@ export function isFundingActionFailureReportConsistent(
   if (hasUnknownSubmission(input.failureCode)) {
     return normalizeFundingActionReport(input).outcome === "ambiguous";
   }
+  // Sign-only failures have not crossed the send boundary. A wallet rejection
+  // may retain its cancellation outcome without losing the diagnostic stage.
+  if (input.failureCode === "solana_signing_failed")
+    return input.outcome === "failed" || input.outcome === "cancelled";
   return input.outcome === "failed";
 }
