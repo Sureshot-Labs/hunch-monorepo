@@ -25,6 +25,10 @@ export type TelegramBotTradeInputContext = Readonly<{
   id: string;
   marketId: string;
   messageScope: TelegramBotTradeInputMessageScope;
+  origin?: "direct" | "position" | "search";
+  positionLines?: string[];
+  positionRedemptionStatus?: string | null;
+  returnCallbackData?: string | null;
   side: "NO" | "YES";
   telegramUserId: string;
   venue: "limitless" | "polymarket";
@@ -150,6 +154,22 @@ export function isTelegramBotTradeInputContext(
     context.telegramUserId.length > 0 &&
     typeof context.chatId === "string" &&
     context.chatId.length > 0 &&
+    (context.origin == null ||
+      context.origin === "direct" ||
+      context.origin === "position" ||
+      context.origin === "search") &&
+    (context.positionLines == null ||
+      (Array.isArray(context.positionLines) &&
+        context.positionLines.length <= 8 &&
+        context.positionLines.every(
+          (line) => typeof line === "string" && line.length <= 240,
+        ))) &&
+    isNullableString(context.positionRedemptionStatus) &&
+    (context.positionRedemptionStatus == null ||
+      context.positionRedemptionStatus.length <= 64) &&
+    isNullableString(context.returnCallbackData) &&
+    (context.returnCallbackData == null ||
+      context.returnCallbackData.length <= 64) &&
     isAuthorityBinding(context.authority) &&
     isMessageScope(context.messageScope) &&
     isNullableString(context.controlledPositionId) &&

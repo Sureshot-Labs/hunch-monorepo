@@ -55,7 +55,8 @@ export type SignalBotInteractiveMenuRoute =
       resultIndex: number;
       sessionId: string;
     }
-  | { kind: "position"; positionId: string };
+  | { kind: "positions_page"; page: number }
+  | { kind: "position"; page: number; positionId: string };
 
 export function parseSignalBotInteractiveMenuRoute(
   route: string,
@@ -110,11 +111,19 @@ export function parseSignalBotInteractiveMenuRoute(
       sessionId: searchVenueMatch[1] ?? "",
     };
   }
+  const positionsPageMatch = route.match(/^positions_page:(\d{1,4})$/i);
+  if (positionsPageMatch) {
+    return { kind: "positions_page", page: Number(positionsPageMatch[1]) };
+  }
   const positionMatch = route.match(
-    /^pos:([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i,
+    /^pos:([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?::(\d{1,4}))?$/i,
   );
   if (positionMatch) {
-    return { kind: "position", positionId: positionMatch[1] ?? "" };
+    return {
+      kind: "position",
+      page: Number(positionMatch[2] ?? 0),
+      positionId: positionMatch[1] ?? "",
+    };
   }
   if (route === "deposit") {
     return { kind: "deposit_menu" };
@@ -341,9 +350,14 @@ type SignalBotInteractiveMenuCallbackInput = {
   }) => Promise<MenuMessage>;
   loadPositionCard?: (input: {
     messageId: number;
+    page: number;
     positionId: string;
     telegramUserId: number;
   }) => Promise<MenuMessage>;
+  loadPositions?: (
+    telegramUserId: number,
+    page: number,
+  ) => Promise<MenuMessage>;
   messageId: number | null;
   idempotencyKey?: string;
   onFundingOperationError?: (action: SignalBotFundingMenuAction) => void;
@@ -358,6 +372,52 @@ async function deliverSignalBotInteractiveMenuCallback(
   input: SignalBotInteractiveMenuCallbackInput,
 ): Promise<boolean> {
   const { route } = input;
+  if (route.kind === "positions_page") {
+    let positionsMessage: MenuMessage;
+    try {
+      positionsMessage = input.loadPositions
+        ? await input.loadPositions(input.telegramUserId, route.page)
+        : {
+            parse_mode: "MarkdownV2",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    callback_data: `${input.callbackPrefix}home`,
+                    text: "🏠 Home",
+                  },
+                ],
+              ],
+            },
+            text: formatTelegramCalloutMarkdownV2({
+              bodyMarkdownV2: "Try again from My positions\\.",
+              icon: "⚠️",
+              title: "Positions unavailable",
+            }),
+          };
+    } catch {
+      positionsMessage = {
+        parse_mode: "MarkdownV2",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                callback_data: `${input.callbackPrefix}home`,
+                text: "🏠 Home",
+              },
+            ],
+          ],
+        },
+        text: formatTelegramCalloutMarkdownV2({
+          bodyMarkdownV2: "Try again from My positions\\.",
+          icon: "⚠️",
+          title: "Positions unavailable",
+        }),
+      };
+    }
+    await input.render(positionsMessage);
+    return true;
+  }
   if (
     route.kind === "market_search_filters" ||
     route.kind === "market_search_result" ||
@@ -666,6 +726,7 @@ async function deliverSignalBotInteractiveMenuCallback(
         input.loadPositionCard && input.messageId != null
           ? await input.loadPositionCard({
               messageId: input.messageId,
+              page: route.page,
               positionId: route.positionId,
               telegramUserId: input.telegramUserId,
             })

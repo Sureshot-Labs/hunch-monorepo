@@ -507,6 +507,50 @@ assert.deepEqual(
   await readTelegramBotTradeInputContext({ id: contextId, redis }),
   context,
 );
+const positionNavigationContext = {
+  focusPositionId: "b852857a-3787-4fa4-a567-2aba90e6c61e",
+  focusPositionWalletAddress: context.authority.walletAddress,
+  focusSide: "NO" as const,
+  origin: "position" as const,
+  positionLines: ["Position: 4 shares · Avg 25¢"],
+  positionRedemptionStatus: "market_open",
+  returnCallbackData: "hm:v1:positions_page:2",
+};
+const positionNavigationResult =
+  telegramBotTradingTestHooks.buildIntentNavigationResult(
+    positionNavigationContext,
+  );
+assert.deepEqual(
+  telegramBotTradingTestHooks.readIntentNavigationContext({
+    result: positionNavigationResult,
+  } as never),
+  positionNavigationContext,
+  "position navigation survives action cards so Back retains directional icons and page",
+);
+const positionInputContext: TelegramBotTradeInputContext = {
+  ...context,
+  controlledPositionId: positionNavigationContext.focusPositionId,
+  id: "381e50b7-d723-425a-a3cb-13f46d9957ea",
+  origin: "position",
+  positionLines: positionNavigationContext.positionLines,
+  positionRedemptionStatus: positionNavigationContext.positionRedemptionStatus,
+  returnCallbackData: positionNavigationContext.returnCallbackData,
+};
+assert.equal(
+  await writeTelegramBotTradeInputContext({
+    context: positionInputContext,
+    redis,
+  }),
+  true,
+);
+assert.deepEqual(
+  await readTelegramBotTradeInputContext({
+    id: positionInputContext.id,
+    redis,
+  }),
+  positionInputContext,
+  "custom inputs retain position origin and their page-aware Back target",
+);
 const limitlessSellContext: TelegramBotTradeInputContext = {
   ...context,
   deliveryMode: "app_handoff",

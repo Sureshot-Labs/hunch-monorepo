@@ -37,10 +37,14 @@ export type SignalBotMenuLoaders = TelegramBotRewardsMenuDependencies & {
   }) => Promise<TelegramBotMenuMessage>;
   loadPositionCard?: (input: {
     messageId: number;
+    page: number;
     positionId: string;
     telegramUserId: number;
   }) => Promise<TelegramBotMenuMessage>;
-  loadPositions?: (telegramUserId: number) => Promise<TelegramBotMenuMessage>;
+  loadPositions?: (
+    telegramUserId: number,
+    page?: number,
+  ) => Promise<TelegramBotMenuMessage>;
   loadTradeStatus?: (telegramUserId: number) => Promise<TelegramBotMenuMessage>;
   onFundingMenuDelivery?: (input: {
     action: TelegramBotMenuActions.SignalBotFundingMenuAction;

@@ -64,11 +64,12 @@ const tests: Array<{ name: string; run: () => void }> = [
     },
   },
   {
-    name: "USDC, USDC.e, and pUSD resolve to the same custom emoji",
+    name: "funding assets reuse their matching USDC and Solana custom emoji",
     run: () => {
       for (const asset of ["USDC", "usdc.e", "pUSD"]) {
         assert.equal(telegramAssetCustomEmojiName(asset), "usdc");
       }
+      assert.equal(telegramAssetCustomEmojiName("SOL"), "solana");
     },
   },
   {

@@ -12,6 +12,7 @@ import {
   type TelegramFundingProgressProjection,
 } from "./telegram-funding-contracts.js";
 import {
+  telegramCustomEmojiMarkdownV2,
   telegramCustomEmojiMarkdownV2ForAsset,
   telegramCustomEmojiMarkdownV2ForNetwork,
   telegramCustomEmojiMarkdownV2ForVenue,
@@ -465,17 +466,30 @@ export async function buildTelegramFundingQrPhoto(
     type: "png",
     width: 768,
   });
+  const networkEmoji = telegramCustomEmojiMarkdownV2ForNetwork(
+    projection.presentation.networkLabel,
+  );
+  const assetEmojis = Array.from(
+    new Set(
+      projection.presentation.acceptedAssetSymbols
+        .map(telegramCustomEmojiMarkdownV2ForAsset)
+        .filter((emoji): emoji is string => emoji != null),
+    ),
+  ).join(" ");
   return {
     caption: joinTelegramMarkdownV2Lines([
-      formatTelegramBoldMarkdownV2(
-        `${projection.presentation.venueLabel} funding QR`,
-      ),
+      `${telegramCustomEmojiMarkdownV2("hunch")} ${formatTelegramBoldMarkdownV2(
+        "Hunch wallet funding QR",
+      )}`,
       "",
-      formatTelegramFieldMarkdownV2(
+      `${networkEmoji ? `${networkEmoji} ` : ""}${formatTelegramFieldMarkdownV2(
         "Network",
         projection.presentation.networkLabel,
-      ),
-      formatTelegramFieldMarkdownV2("Asset", acceptedAssetsLabel(projection)),
+      )}`,
+      `${assetEmojis ? `${assetEmojis} ` : ""}${formatTelegramFieldMarkdownV2(
+        "Asset",
+        acceptedAssetsLabel(projection),
+      )}`,
       ...(projection.minimumFundingUsd
         ? [
             formatTelegramFieldMarkdownV2(
@@ -488,10 +502,10 @@ export async function buildTelegramFundingQrPhoto(
       "",
       `📍 ${formatTelegramBoldMarkdownV2("Verified receive address")}`,
       formatTelegramCodeMarkdownV2(projection.receiveAddress),
-      formatTelegramFieldMarkdownV2(
+      `⏳ ${formatTelegramFieldMarkdownV2(
         "Expires at",
         expiryLabel(projection.expiresAt),
-      ),
+      )}`,
     ]),
     filename: `hunch-funding-${projection.fundingContextId}.png`,
     photo: new Uint8Array(png),

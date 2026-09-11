@@ -2858,6 +2858,7 @@ export async function handleSignalBotMenuCallback(
       route.kind === "admin_preview" ||
       route.kind === "rewards_confirm" ||
       route.kind === "rewards_view" ||
+      route.kind === "positions_page" ||
       (route.kind === "screen" && route.screen === "positions") ||
       TelegramBotMenuActions.isSignalBotFundingMenuRoute(route)
         ? { text: "⏳ Working…" }
@@ -2892,6 +2893,7 @@ export async function handleSignalBotMenuCallback(
     route.kind === "market_search_back" ||
     route.kind === "market_search_page" ||
     route.kind === "market_search_venue" ||
+    route.kind === "positions_page" ||
     route.kind === "position" ||
     route.kind === "deposit" ||
     route.kind === "deposit_menu" ||
@@ -2928,6 +2930,7 @@ export async function handleSignalBotMenuCallback(
             })
         : undefined,
       loadPositionCard: input.loadPositionCard,
+      loadPositions: input.loadPositions,
       messageId,
       onFundingOperationError: (action) => {
         try {
@@ -3047,7 +3050,7 @@ export async function handleSignalBotMenuCallback(
     };
     try {
       positionsMessage = input.loadPositions
-        ? await input.loadPositions(telegramUserId)
+        ? await input.loadPositions(telegramUserId, 0)
         : {
             parse_mode: "MarkdownV2",
             text: [
@@ -3079,12 +3082,11 @@ export async function handleSignalBotMenuCallback(
       miniAppEnabled: input.config.telegramMiniAppLinkBase != null,
     });
     const keyboard: TelegramInlineKeyboard = {
-      inline_keyboard: [
-        ...(positionsMessage.reply_markup?.inline_keyboard ??
-          buildSignalBotOptionalButtonRows(positionsFallbackButton)),
+      inline_keyboard: positionsMessage.reply_markup?.inline_keyboard ?? [
+        ...buildSignalBotOptionalButtonRows(positionsFallbackButton),
         [
           {
-            callback_data: SIGNAL_BOT_MENU_CALLBACK_PREFIX + "home",
+            callback_data: `${SIGNAL_BOT_MENU_CALLBACK_PREFIX}home`,
             text: "🏠 Home",
           },
         ],

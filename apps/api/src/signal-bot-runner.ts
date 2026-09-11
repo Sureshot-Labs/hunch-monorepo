@@ -510,11 +510,12 @@ export async function runSignalBotRunner(): Promise<void> {
               action,
               errorCode,
             }),
-          loadPositions: (telegramUserId) =>
+          loadPositions: (telegramUserId, page = 0) =>
             tradingInternalApi
               ? tradingInternalApi
                   .buildPositionsMessage({
                     appBaseUrl: config.appBaseUrl,
+                    page,
                     telegramMiniAppEnabled:
                       config.telegramMiniAppLinkBase != null,
                     telegramUserId,
@@ -693,11 +694,17 @@ export async function runSignalBotRunner(): Promise<void> {
               throw error;
             });
           },
-          loadPositionCard: ({ messageId, positionId, telegramUserId }) =>
+          loadPositionCard: ({
+            messageId,
+            page,
+            positionId,
+            telegramUserId,
+          }) =>
             tradingInternalApi
               ? tradingInternalApi
                   .buildPositionMessage({
                     appBaseUrl: config.appBaseUrl,
+                    page,
                     telegramMessageId: messageId,
                     positionId,
                     telegramMiniAppEnabled:

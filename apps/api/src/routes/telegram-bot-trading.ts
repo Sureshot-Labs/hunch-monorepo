@@ -219,6 +219,7 @@ const internalMarketSearchBodySchema = z
 const internalPositionCardBodySchema = z
   .object({
     appBaseUrl: z.string().trim().url(),
+    page: z.number().int().nonnegative().max(10_000).optional(),
     positionId: z.string().uuid(),
     telegramMessageId: z.number().int().positive(),
     telegramMiniAppEnabled: z.boolean().optional(),
@@ -370,6 +371,7 @@ const internalStatusBodySchema = z
 
 const internalPositionsBodySchema = internalStatusBodySchema.extend({
   appBaseUrl: z.string().trim().url(),
+  page: z.number().int().nonnegative().max(10_000).optional(),
   telegramMiniAppEnabled: z.boolean().optional(),
 });
 
@@ -1294,6 +1296,7 @@ async function registerTelegramBotTradingRoutes(
     (request) =>
       buildPositionsMessage({
         appBaseUrl: request.body.appBaseUrl,
+        page: request.body.page,
         pool: routePool,
         telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
         telegramUserId: request.body.telegramUserId,
@@ -1428,7 +1431,7 @@ async function registerTelegramBotTradingRoutes(
             inline_keyboard: [
               [
                 {
-                  callback_data: "hm:v1:positions",
+                  callback_data: `hm:v1:positions_page:${request.body.page ?? 0}`,
                   text: "⬅️ Back to positions",
                 },
               ],
@@ -1486,7 +1489,7 @@ async function registerTelegramBotTradingRoutes(
             ...(walletSuffix ? [`Wallet: …${walletSuffix}`] : []),
           ],
           positionRedemptionStatus: position.redemptionStatus,
-          returnCallbackData: "hm:v1:positions",
+          returnCallbackData: `hm:v1:positions_page:${request.body.page ?? 0}`,
         },
         db,
         marketRef: position.marketId,
@@ -1903,7 +1906,24 @@ async function registerTelegramBotTradingRoutes(
       await buildTelegramBotTradingMarketMessage({
         appBaseUrl: request.body.appBaseUrl,
         chatId,
-        context: { focusSide: context.side, origin: "direct" },
+        context:
+          context.origin === "position" || context.controlledPositionId
+            ? {
+                focusPositionId: context.controlledPositionId ?? undefined,
+                focusPositionWalletAddress: context.funderAddress,
+                focusSide: context.side,
+                origin: "position",
+                positionLines: context.positionLines,
+                positionRedemptionStatus:
+                  context.positionRedemptionStatus ?? null,
+                returnCallbackData:
+                  context.returnCallbackData ?? "hm:v1:positions",
+              }
+            : {
+                focusSide: context.side,
+                origin: context.origin === "search" ? "search" : "direct",
+                returnCallbackData: context.returnCallbackData ?? undefined,
+              },
         db,
         marketRef: context.marketId,
         telegramMessageId: request.body.telegramMessageId,

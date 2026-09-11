@@ -2060,6 +2060,7 @@ function venueStatusFromReadiness(input: {
 }
 
 export const telegramBotTradingTestHooks = {
+  buildIntentNavigationResult,
   buildTelegramAppHandoffFundingReviewLines,
   buildTelegramFundingBuyReturnOpenFailureMessage,
   buildTelegramTradeConfirmButton,
@@ -2089,6 +2090,7 @@ export const telegramBotTradingTestHooks = {
   resolveFundingReturnPreviewAllowedStatuses,
   resolveTelegramExecutableBuyOption,
   resolveTelegramCallbackMessageId,
+  readIntentNavigationContext,
   sameTelegramTradeAuthorityBinding,
   shouldLoadInactiveTelegramAppHandoffAuthority,
   shouldOpenTelegramFundingBuyReturn,
@@ -4938,6 +4940,7 @@ async function insertBuyIntent(input: {
   db: DbQuery;
   deliveryMode: StoredTelegramBuyDeliveryMode;
   market: TelegramBotMarketRow;
+  navigationContext?: TelegramMarketCardContext;
   policy: SignalBotPolicy;
   side: TelegramBotTradingSide;
   telegramMessageId?: number | null;
@@ -4989,7 +4992,10 @@ async function insertBuyIntent(input: {
         bestAsk: input.market.best_ask,
       }),
       JSON.stringify(buildPolicySnapshot(input.policy)),
-      JSON.stringify(buildIntentAuthorityResult(input.authority)),
+      JSON.stringify({
+        ...buildIntentAuthorityResult(input.authority),
+        ...buildIntentNavigationResult(input.navigationContext),
+      }),
       expiresAt,
       `telegram-bot:${id}`,
     ],
@@ -5003,6 +5009,7 @@ async function insertSellIntent(input: {
   db: DbQuery;
   deliveryMode: StoredTelegramBuyDeliveryMode;
   market: TelegramBotMarketRow;
+  navigationContext?: TelegramMarketCardContext;
   policy: SignalBotPolicy;
   quote: TradeQuote;
   sellPercent: 50 | 100;
@@ -5038,7 +5045,10 @@ async function insertSellIntent(input: {
       input.sharesRaw.toString(),
       JSON.stringify(buildTelegramTradeQuotePreview(input.quote)),
       JSON.stringify(buildPolicySnapshot(input.policy)),
-      JSON.stringify(buildIntentAuthorityResult(input.authority)),
+      JSON.stringify({
+        ...buildIntentAuthorityResult(input.authority),
+        ...buildIntentNavigationResult(input.navigationContext),
+      }),
       expiresAt,
       `telegram-bot:${id}`,
     ],
@@ -5051,6 +5061,7 @@ async function insertRedeemIntent(input: {
   chatId: string;
   db: DbQuery;
   market: TelegramBotMarketRow;
+  navigationContext?: TelegramMarketCardContext;
   plan: Awaited<ReturnType<typeof buildPolymarketRedemptionPlan>>;
   policy: SignalBotPolicy;
   telegramMessageId?: number | null;
@@ -5079,7 +5090,10 @@ async function insertRedeemIntent(input: {
       input.market.event_id,
       JSON.stringify(input.plan),
       JSON.stringify(buildPolicySnapshot(input.policy)),
-      JSON.stringify(buildIntentAuthorityResult(input.authority)),
+      JSON.stringify({
+        ...buildIntentAuthorityResult(input.authority),
+        ...buildIntentNavigationResult(input.navigationContext),
+      }),
       expiresAt,
       `telegram-bot:${id}`,
     ],
@@ -6598,6 +6612,11 @@ export async function buildTelegramBotTradingMarketMessage(input: {
                 kind: "exact_message",
                 messageId: input.telegramMessageId,
               },
+        origin: input.context?.origin ?? "direct",
+        positionLines: input.context?.positionLines,
+        positionRedemptionStatus:
+          input.context?.positionRedemptionStatus ?? null,
+        returnCallbackData: input.context?.returnCallbackData ?? null,
         side,
         telegramUserId,
         deliveryMode:
@@ -6639,6 +6658,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
         db: input.db,
         deliveryMode: option.deliveryMode,
         market,
+        navigationContext: input.context,
         policy,
         side: option.side,
         telegramMessageId: input.telegramMessageId,
@@ -6671,6 +6691,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
         deliveryMode:
           sellDeliveryMode === "app_handoff" ? "app_handoff" : "bot_submit",
         market,
+        navigationContext: input.context,
         policy,
         quote: option.quote,
         sellPercent: option.sellPercent,
@@ -6703,6 +6724,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       chatId: String(input.chatId),
       db: input.db,
       market,
+      navigationContext: input.context,
       plan: redeemPlan,
       policy,
       telegramMessageId: input.telegramMessageId,
@@ -7730,6 +7752,65 @@ function buildIntentAuthorityResult(
   binding: TelegramBotTradeAuthorityBinding,
 ): Record<string, unknown> {
   return { telegramAuthority: { ...binding, version: 1 } };
+}
+
+function buildIntentNavigationResult(
+  context: TelegramMarketCardContext | undefined,
+): Record<string, unknown> {
+  if (!context) return {};
+  return {
+    telegramNavigation: {
+      focusPositionId: context.focusPositionId ?? null,
+      focusPositionWalletAddress: context.focusPositionWalletAddress ?? null,
+      focusSide: context.focusSide ?? null,
+      origin: context.origin,
+      positionLines: context.positionLines ?? null,
+      positionRedemptionStatus: context.positionRedemptionStatus ?? null,
+      returnCallbackData: context.returnCallbackData ?? null,
+      version: 1,
+    },
+  };
+}
+
+function readIntentNavigationContext(
+  intent: TelegramTradeIntentRow,
+): TelegramMarketCardContext | undefined {
+  const raw = isRecord(intent.result.telegramNavigation)
+    ? intent.result.telegramNavigation
+    : null;
+  if (
+    !raw ||
+    raw.version !== 1 ||
+    (raw.origin !== "direct" &&
+      raw.origin !== "position" &&
+      raw.origin !== "search")
+  ) {
+    return undefined;
+  }
+  const positionLines = Array.isArray(raw.positionLines)
+    ? raw.positionLines.filter(
+        (line): line is string => typeof line === "string",
+      )
+    : undefined;
+  return {
+    ...(typeof raw.focusPositionId === "string"
+      ? { focusPositionId: raw.focusPositionId }
+      : {}),
+    ...(typeof raw.focusPositionWalletAddress === "string"
+      ? { focusPositionWalletAddress: raw.focusPositionWalletAddress }
+      : {}),
+    ...(raw.focusSide === "YES" || raw.focusSide === "NO"
+      ? { focusSide: raw.focusSide }
+      : {}),
+    origin: raw.origin,
+    ...(positionLines?.length ? { positionLines } : {}),
+    ...(typeof raw.positionRedemptionStatus === "string"
+      ? { positionRedemptionStatus: raw.positionRedemptionStatus }
+      : {}),
+    ...(typeof raw.returnCallbackData === "string"
+      ? { returnCallbackData: raw.returnCallbackData }
+      : {}),
+  };
 }
 
 /**
@@ -12177,6 +12258,32 @@ export async function completeTelegramBotTradeInput(input: {
         JSON.stringify(buildPolicySnapshot(policy)),
         JSON.stringify({
           ...buildIntentAuthorityResult(creationContext.authority),
+          ...buildIntentNavigationResult({
+            ...(creationContext.controlledPositionId
+              ? { focusPositionId: creationContext.controlledPositionId }
+              : {}),
+            ...(creationContext.funderAddress
+              ? {
+                  focusPositionWalletAddress: creationContext.funderAddress,
+                }
+              : {}),
+            focusSide: creationContext.side,
+            origin:
+              creationContext.origin ??
+              (creationContext.controlledPositionId ? "position" : "direct"),
+            ...(creationContext.positionLines?.length
+              ? { positionLines: creationContext.positionLines }
+              : {}),
+            ...(creationContext.positionRedemptionStatus
+              ? {
+                  positionRedemptionStatus:
+                    creationContext.positionRedemptionStatus,
+                }
+              : {}),
+            ...(creationContext.returnCallbackData
+              ? { returnCallbackData: creationContext.returnCallbackData }
+              : {}),
+          }),
           telegramInput: marker,
         }),
         expiresAt,
@@ -12419,12 +12526,14 @@ export async function handleTelegramBotTradingCallback(
       });
       if (lifecycleDeliveryEligible && fenced !== 1) return false;
     }
+    const navigationContext = readIntentNavigationContext(intent);
     const marketMessage = await buildTelegramBotTradingMarketMessage({
       appBaseUrl: input.appBaseUrl,
       chatId,
       context: {
+        ...navigationContext,
         ...(focusSide ? { focusSide } : {}),
-        origin: "direct",
+        origin: navigationContext?.origin ?? "direct",
       },
       db: input.db,
       marketRef: intent.market_id,

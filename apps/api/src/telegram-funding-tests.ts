@@ -105,6 +105,7 @@ import {
   handleSignalBotInteractiveMenuCallback,
   parseSignalBotInteractiveMenuRoute,
 } from "./services/telegram-bot-menu-actions.js";
+import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 import {
   getDefaultSignalBotPolicy,
   normalizeSignalBotPolicy,
@@ -4593,7 +4594,11 @@ for (const closedDestination of [
     qrPhoto.slice(0, 8),
     [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
   );
-  assert.match(qrCaption, /Polymarket funding QR/u);
+  assert.match(qrCaption, /Hunch wallet funding QR/u);
+  assert.match(qrCaption, new RegExp(TELEGRAM_CUSTOM_EMOJI.hunch.id, "u"));
+  assert.match(qrCaption, new RegExp(TELEGRAM_CUSTOM_EMOJI.polygon.id, "u"));
+  assert.match(qrCaption, new RegExp(TELEGRAM_CUSTOM_EMOJI.usdc.id, "u"));
+  assert.match(qrCaption, /⏳ \*Expires at:\*/u);
   assert.match(qrCaption, /Minimum to add:\* \$0\\\.37/u);
   assert.match(qrCaption, /Verified receive address/u);
   assert.ok(qrCaption.includes("`" + address + "`"));

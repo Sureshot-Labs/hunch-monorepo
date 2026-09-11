@@ -140,7 +140,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "search results preserve detail text and use compact numbered venue buttons",
+    name: "search results keep venue branding in text and use neutral keycap buttons",
     run: () => {
       const message = buildSignalBotMarketSearchScreen({
         callbackPrefix: "hm:v1:",
@@ -162,10 +162,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         new RegExp(TELEGRAM_CUSTOM_EMOJI.polymarket.id),
       );
       assert.doesNotMatch(message.text, /polymarket ·/);
-      assert.equal(message.reply_markup.inline_keyboard[0]?.[0]?.text, "1.");
+      assert.match(message.text, /1️⃣/u);
+      assert.equal(message.reply_markup.inline_keyboard[0]?.[0]?.text, "1️⃣");
       assert.equal(
         message.reply_markup.inline_keyboard[0]?.[0]?.icon_custom_emoji_id,
-        TELEGRAM_CUSTOM_EMOJI.polymarket.id,
+        undefined,
       );
 
       const sameTitleMessage = buildSignalBotMarketSearchScreen({
@@ -231,13 +232,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         ),
         [
           [
-            { icon: TELEGRAM_CUSTOM_EMOJI.polymarket.id, text: "1." },
-            { icon: TELEGRAM_CUSTOM_EMOJI.limitless.id, text: "2." },
-            { icon: TELEGRAM_CUSTOM_EMOJI.polymarket.id, text: "3." },
+            { icon: undefined, text: "1️⃣" },
+            { icon: undefined, text: "2️⃣" },
+            { icon: undefined, text: "3️⃣" },
           ],
           [
-            { icon: TELEGRAM_CUSTOM_EMOJI.polymarket.id, text: "4." },
-            { icon: TELEGRAM_CUSTOM_EMOJI.polymarket.id, text: "5." },
+            { icon: undefined, text: "4️⃣" },
+            { icon: undefined, text: "5️⃣" },
           ],
         ],
       );
@@ -254,7 +255,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "multi-venue search results use a compact neutral icon",
+    name: "multi-venue search results use the same neutral keycap button",
     run: () => {
       const message = buildSignalBotMarketSearchScreen({
         callbackPrefix: "hm:v1:",
@@ -271,7 +272,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         sessionId: "123456789abc",
       });
 
-      assert.equal(message.reply_markup.inline_keyboard[0]?.[0]?.text, "🌐 1.");
+      assert.equal(message.reply_markup.inline_keyboard[0]?.[0]?.text, "1️⃣");
       assert.equal(
         message.reply_markup.inline_keyboard[0]?.[0]?.icon_custom_emoji_id,
         undefined,
@@ -700,7 +701,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         sessionId,
       });
       assert.match(first.text, /Trending markets/u);
-      assert.doesNotMatch(first.text, /6\. /u);
+      assert.doesNotMatch(first.text, /6️⃣/u);
       assert.match(JSON.stringify(first.reply_markup), /Next/u);
       assert.match(
         JSON.stringify(first.reply_markup),
@@ -742,7 +743,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         route: nextRoute,
         telegramUserId: 20,
       });
-      assert.match(rendered, /"text":"6\."/u);
+      assert.match(rendered, /"text":"1️⃣"/u);
       assert.match(rendered, /Market 6/u);
       assert.match(rendered, /Previous/u);
       assert.match(rendered, /Next/u);

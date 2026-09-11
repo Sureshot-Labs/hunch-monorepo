@@ -18,6 +18,7 @@ import {
   formatTelegramVenueLabelMarkdownV2,
 } from "./telegram-market-identity.js";
 import { outcomeLabelOrSide } from "./wallet-intel-helpers.js";
+import { telegramMenuIndexEmoji } from "./telegram-bot-menu-numbering.js";
 
 const SEARCH_KEY_PREFIX = "tg:signal_bot:v1:market_search";
 const SEARCH_TTL_SEC = 10 * 60;
@@ -211,6 +212,8 @@ export function buildSignalBotMarketSearchScreen(input: {
     pageStart,
     pageStart + SIGNAL_BOT_MARKET_SEARCH_PAGE_SIZE,
   );
+  const selectedVenue =
+    input.venues?.length === 1 ? input.venues[0] : undefined;
   const title = input.query
     ? `Results for “${compactTelegramText(input.query, 120)}”`
     : input.sort === "time"
@@ -238,7 +241,7 @@ export function buildSignalBotMarketSearchScreen(input: {
     );
   } else {
     for (const result of pageResults) {
-      const index = pageStart + visibleResults.length;
+      const displayIndex = visibleResults.length + 1;
       const identity = buildTelegramMarketIdentity({
         eventTitle: result.eventTitle,
         marketTitle: result.marketTitle,
@@ -264,7 +267,7 @@ export function buildSignalBotMarketSearchScreen(input: {
             )}`;
       const block = [
         bold(
-          `${index + 1}. ${compactTelegramText(identity.lines[0], 160)}${telegramSearchSortDetail(result, input.sort)}`,
+          `${telegramMenuIndexEmoji(displayIndex)} ${compactTelegramText(identity.lines[0], 160)}${telegramSearchSortDetail(result, input.sort)}`,
         ),
         ...(identity.lines[1]
           ? [
@@ -310,19 +313,13 @@ export function buildSignalBotMarketSearchScreen(input: {
     const result = visibleResults[localIndex];
     if (!result) continue;
     const index = pageStart + localIndex;
-    const options = venueOptions(result);
-    const venueIcon =
-      options.length === 1
-        ? formatTelegramVenueButtonIcon(result.venue)
-        : undefined;
     const rowIndex = Math.floor(
       localIndex / SIGNAL_BOT_MARKET_SEARCH_GRID_COLUMNS,
     );
     const row = resultButtonRows[rowIndex] ?? [];
     row.push({
       callback_data: `${input.callbackPrefix}search:${input.sessionId}:${index}`,
-      ...(venueIcon ? { icon_custom_emoji_id: venueIcon } : {}),
-      text: `${venueIcon ? "" : "🌐 "}${index + 1}.`,
+      text: telegramMenuIndexEmoji(localIndex + 1),
     });
     resultButtonRows[rowIndex] = row;
   }
@@ -339,11 +336,10 @@ export function buildSignalBotMarketSearchScreen(input: {
         [
           {
             text: `${input.venues?.length === 1 ? "" : "⚙️ "}Filters (${input.venues?.length ? input.venues.map(formatTelegramVenueLabel).join(" · ") : "All"}${input.category ? ` · ${input.category}` : ""})`,
-            ...(input.venues?.length === 1
+            ...(selectedVenue
               ? {
-                  icon_custom_emoji_id: formatTelegramVenueButtonIcon(
-                    input.venues[0]!,
-                  ),
+                  icon_custom_emoji_id:
+                    formatTelegramVenueButtonIcon(selectedVenue),
                 }
               : {}),
             callback_data: `${input.callbackPrefix}search_filters:${input.sessionId}`,

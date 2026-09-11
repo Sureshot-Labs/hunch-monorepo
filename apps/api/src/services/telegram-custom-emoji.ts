@@ -145,6 +145,8 @@ export function telegramAssetCustomEmojiName(
   asset: string | null | undefined,
 ): TelegramCustomEmojiName | null {
   switch (normalizeSemanticValue(asset)) {
+    case "sol":
+      return "solana";
     case "pusd":
     case "usdc":
     case "usdc.e":

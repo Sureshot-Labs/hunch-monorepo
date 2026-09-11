@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 
 import type { Position } from "./order-types.js";
 import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
+import { parseSignalBotInteractiveMenuRoute } from "./services/telegram-bot-menu-actions.js";
 import {
   buildTelegramPositionDetail,
   buildTelegramPositionsSnapshotMessage,
@@ -41,6 +42,7 @@ function detail(overrides: Partial<TelegramPositionDetail> = {}) {
     averagePrice: 0.25,
     currentValueUsd: 1.4,
     eventId: crypto.randomUUID(),
+    eventTitle: "World Cup winner",
     marketId: crypto.randomUUID(),
     marketOrderable: true,
     marketTitle: "Spain wins the World Cup",
@@ -94,6 +96,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const result = buildTelegramPositionDetail(source, undefined, "NO");
       assert.equal(result.marketId, null);
       assert.equal(result.eventId, null);
+      assert.equal(result.eventTitle, null);
       assert.equal(result.marketTitle, "Position");
       assert.equal(result.side, "NO");
       assert.equal(result.position.id, source.id);
@@ -109,7 +112,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(message.text, /tg:\/\/emoji\?id=/);
       assert.match(message.text, /Polymarket/);
       assert.match(message.text, />ℹ️ \*Data may be incomplete\*/);
-      assert.equal(message.reply_markup?.inline_keyboard.length, 1);
+      assert.equal(message.reply_markup?.inline_keyboard.length, 3);
+      assert.equal(message.reply_markup?.inline_keyboard[0]?.[0]?.text, "1️⃣");
+      assert.equal(
+        message.reply_markup?.inline_keyboard[0]?.[0]?.icon_custom_emoji_id,
+        undefined,
+      );
     },
   },
   {
@@ -147,10 +155,97 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           "callback_data" in row[0] &&
           row[0].callback_data.startsWith("hm:v1:pos:"),
       )?.[0];
-      assert.equal(
-        positionButton?.icon_custom_emoji_id,
-        TELEGRAM_CUSTOM_EMOJI.polymarket.id,
+      assert.equal(positionButton?.icon_custom_emoji_id, undefined);
+      assert.equal(positionButton?.text, "1️⃣");
+      assert.match(
+        positionButton && "callback_data" in positionButton
+          ? positionButton.callback_data
+          : "",
+        /:0$/u,
       );
+      assert.match(
+        message.text,
+        new RegExp(TELEGRAM_CUSTOM_EMOJI.polymarket.id),
+      );
+    },
+  },
+  {
+    name: "positions use local keycap grids and preserve page-aware callbacks",
+    run: () => {
+      const positions = Array.from({ length: 12 }, (_, index) =>
+        detail({
+          eventTitle: `Event ${index + 1}`,
+          marketTitle: `Market ${index + 1}`,
+        }),
+      );
+      const first = buildTelegramPositionsSnapshotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        page: 0,
+        snapshot: { partialFailure: false, positions },
+        telegramMiniAppEnabled: true,
+      });
+      assert.deepEqual(
+        first.reply_markup?.inline_keyboard.slice(0, 2).map((row) =>
+          row.map((button) => ({
+            icon: button.icon_custom_emoji_id,
+            text: button.text,
+          })),
+        ),
+        [
+          [
+            { icon: undefined, text: "1️⃣" },
+            { icon: undefined, text: "2️⃣" },
+            { icon: undefined, text: "3️⃣" },
+          ],
+          [
+            { icon: undefined, text: "4️⃣" },
+            { icon: undefined, text: "5️⃣" },
+          ],
+        ],
+      );
+      assert.match(first.text, /Market 1/u);
+      assert.match(first.text, /Market 5/u);
+      assert.doesNotMatch(first.text, /Market 6/u);
+      assert.match(JSON.stringify(first.reply_markup), /positions_page:1/u);
+
+      const second = buildTelegramPositionsSnapshotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        page: 1,
+        snapshot: { partialFailure: false, positions },
+        telegramMiniAppEnabled: true,
+      });
+      assert.match(second.text, /1️⃣ Event 6/u);
+      assert.match(second.text, /5️⃣ Event 10/u);
+      assert.match(second.text, /\*Page:\* 2\/3/u);
+      assert.deepEqual(
+        second.reply_markup?.inline_keyboard
+          .slice(0, 2)
+          .flat()
+          .map((button) => button.text),
+        ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"],
+      );
+      assert.equal(
+        second.reply_markup?.inline_keyboard
+          .slice(0, 2)
+          .flat()
+          .every(
+            (button) =>
+              "callback_data" in button &&
+              button.callback_data.endsWith(":1") &&
+              button.icon_custom_emoji_id == null,
+          ),
+        true,
+      );
+      const selectedPositionId = positions[5]?.position.id;
+      assert.ok(selectedPositionId);
+      assert.deepEqual(
+        parseSignalBotInteractiveMenuRoute(`pos:${selectedPositionId}:1`),
+        { kind: "position", page: 1, positionId: selectedPositionId },
+      );
+      assert.deepEqual(parseSignalBotInteractiveMenuRoute("positions_page:2"), {
+        kind: "positions_page",
+        page: 2,
+      });
     },
   },
   {

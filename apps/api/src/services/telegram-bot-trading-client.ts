@@ -110,11 +110,13 @@ export type TelegramBotTradingInternalApiClient = {
   ) => Promise<TelegramBotTradingClientMessage>;
   buildPositionsMessage: (input: {
     appBaseUrl: string;
+    page?: number;
     telegramMiniAppEnabled?: boolean;
     telegramUserId: string | number;
   }) => Promise<TelegramBotTradingClientMessage>;
   buildPositionMessage: (input: {
     appBaseUrl: string;
+    page?: number;
     positionId: string;
     telegramMessageId: number;
     telegramMiniAppEnabled?: boolean;
@@ -590,6 +592,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
         `/internal/telegram-bot/positions/${body.positionId}/card`,
         {
           appBaseUrl: body.appBaseUrl,
+          page: body.page,
           telegramMessageId: body.telegramMessageId,
           telegramMiniAppEnabled: body.telegramMiniAppEnabled,
           telegramUserId: body.telegramUserId,
