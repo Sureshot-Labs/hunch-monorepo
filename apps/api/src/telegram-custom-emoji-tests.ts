@@ -28,8 +28,8 @@ const tests: Array<{ name: string; run: () => void }> = [
         ),
         {
           base: "5399884702758770830",
-          positionBuy: "5267252006669561577",
-          positionSell: "5267348686383391706",
+          positionBuy: "5269682928094325366",
+          positionSell: "5269614187142752548",
           hunch: "5400370308941127529",
           hyperliquid: "5397762885835332158",
           kalshi: "5399820394213450697",

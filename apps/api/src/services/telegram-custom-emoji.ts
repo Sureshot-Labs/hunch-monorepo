@@ -5,11 +5,11 @@ export const TELEGRAM_CUSTOM_EMOJI = {
   },
   positionBuy: {
     fallback: "⬆️",
-    id: "5267252006669561577",
+    id: "5269682928094325366",
   },
   positionSell: {
     fallback: "⬇️",
-    id: "5267348686383391706",
+    id: "5269614187142752548",
   },
   hunch: {
     fallback: "🟠",
