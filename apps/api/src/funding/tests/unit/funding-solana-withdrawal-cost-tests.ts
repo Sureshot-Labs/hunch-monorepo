@@ -4,6 +4,8 @@ import {
   PublicKey,
   SystemProgram,
   type Connection,
+  type VersionedTransaction,
+  type TransactionError,
 } from "@solana/web3.js";
 import { AccountLayout, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
@@ -26,6 +28,8 @@ const profile: WalletExecutionProfile = {
 };
 let simulated = 0;
 let failSimulation = false;
+let rentFailureAccount: PublicKey | null = null;
+const simulatedAmounts: bigint[] = [];
 let fee: number | null = 5000;
 const connection = {
   getAccountInfo: async () => ({
@@ -49,10 +53,26 @@ const connection = {
   }),
   getFeeForMessage: async () => ({ value: fee }),
   getSlot: async () => 10,
-  simulateTransaction: async () => {
+  getMinimumBalanceForRentExemption: async () => 890880,
+  simulateTransaction: async (transaction: VersionedTransaction) => {
     simulated++;
+    const data = Buffer.from(transaction.message.compiledInstructions[0].data);
+    const raw = data.length === 12 ? data.readBigUInt64LE(4) : 0n;
+    simulatedAmounts.push(raw);
+    let err: TransactionError | null = failSimulation
+      ? "AccountNotFound"
+      : null;
+    const failedAccount = rentFailureAccount;
+    if (failedAccount && (raw === 3280000n || !failedAccount.equals(sender)))
+      err = {
+        InsufficientFundsForRent: {
+          account_index: transaction.message.staticAccountKeys.findIndex(
+            (key) => key.equals(failedAccount),
+          ),
+        },
+      };
     return {
-      value: { err: failSimulation ? "InsufficientFundsForRent" : null },
+      value: { err },
     };
   },
 } as unknown as Connection;
@@ -90,6 +110,75 @@ const sponsored = await inspectSolanaWithdrawalCost({
 assert.equal(sponsored.maximumSourceRaw, 3280121n);
 assert.equal(sponsored.accountRentRaw, 0n);
 assert.equal(sponsored.payer, "privy_sponsor");
+rentFailureAccount = sender;
+const normalized = await inspectSolanaWithdrawalCost({
+  ...input,
+  sponsorEligible: true,
+  requestedRaw: 3280000n,
+  normalizeAmount: true,
+});
+assert.equal(normalized.sourceAmountRaw, 2389241n);
+assert.deepEqual(simulatedAmounts.slice(-2), [3280000n, 2389241n]);
+assert.equal(
+  normalized.accountRentRaw,
+  0n,
+  "Rent stays with the user; sponsor never pays it",
+);
+assert.equal(normalized.payer, "privy_sponsor");
+await assert.rejects(
+  inspectSolanaWithdrawalCost({
+    ...input,
+    sponsorEligible: true,
+    requestedRaw: 3280000n,
+  }),
+  /simulation failed/,
+  "Exact committed actions must never be reduced",
+);
+const normalizedMax = await inspectSolanaWithdrawalCost({
+  ...input,
+  sponsorEligible: true,
+  normalizeAmount: true,
+});
+assert.equal(
+  normalizedMax.sourceAmountRaw,
+  3280121n,
+  "Full drain needs no rent reserve",
+);
+const reservedMax = await inspectSolanaWithdrawalCost({
+  ...input,
+  availableRaw: 3280000n,
+  availableSolRaw: 3280000n,
+  sponsorEligible: true,
+  normalizeAmount: true,
+});
+assert.equal(
+  reservedMax.maximumSourceRaw,
+  2389241n,
+  "Max also respects rent when another reservation prevents a full drain",
+);
+assert.equal(reservedMax.sourceAmountRaw, 2389241n);
+const bounded = await inspectSolanaWithdrawalCost({
+  ...input,
+  requestedRaw: 3280242n,
+  normalizeAmount: true,
+});
+assert.equal(
+  bounded.sourceAmountRaw,
+  3275121n,
+  "Overage is clamped before confirmation",
+);
+rentFailureAccount = recipient;
+await assert.rejects(
+  inspectSolanaWithdrawalCost({
+    ...input,
+    sponsorEligible: true,
+    requestedRaw: 3280000n,
+    normalizeAmount: true,
+  }),
+  /simulation failed/,
+  "Do not misclassify recipient rent as sender rent",
+);
+rentFailureAccount = null;
 failSimulation = true;
 await assert.rejects(inspectSolanaWithdrawalCost(input), /simulation failed/);
 failSimulation = false;

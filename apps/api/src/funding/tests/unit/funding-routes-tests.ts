@@ -1287,11 +1287,14 @@ await test("withdrawal capacity binds the authenticated owner and rejects client
   const app = await buildApp({
     withdrawalCapacity: async (userId, input) => {
       assert.equal(userId, USER_ID);
-      assert.deepEqual(input, { componentId: "asset_sol", recipientId });
+      assert.equal(input.componentId, "asset_sol");
+      assert.equal(input.recipientId, recipientId);
+      if (calls > 0) assert.equal(input.requestedSourceRaw, "3280121");
       calls++;
       return {
         ...input,
         maximumSourceRaw: "3275121",
+        sourceAmountRaw: "3275121",
         networkFeeRaw: "5000",
         accountRentRaw: "0",
         payer: "user",
@@ -1308,13 +1311,32 @@ await test("withdrawal capacity binds the authenticated owner and rejects client
     });
     assert.equal(response.statusCode, 200);
     assert.equal(response.json().maximumSourceRaw, "3275121");
+    const normalized = await app.inject({
+      method: "POST",
+      url: "/funding/withdrawal-capacity",
+      payload: {
+        componentId: "asset_sol",
+        recipientId,
+        requestedSourceRaw: "3280121",
+      },
+    });
+    assert.equal(normalized.statusCode, 200);
+    assert.equal(normalized.json().sourceAmountRaw, "3275121");
+    for (const requestedSourceRaw of ["0", "-1", "1.2", "9".repeat(21)]) {
+      const malformed = await app.inject({
+        method: "POST",
+        url: "/funding/withdrawal-capacity",
+        payload: { componentId: "asset_sol", recipientId, requestedSourceRaw },
+      });
+      assert.equal(malformed.statusCode, 400);
+    }
     const invalid = await app.inject({
       method: "POST",
       url: "/funding/withdrawal-capacity",
       payload: { componentId: "asset_sol", recipientId, sponsor: true },
     });
     assert.equal(invalid.statusCode, 400);
-    assert.equal(calls, 1);
+    assert.equal(calls, 2);
   } finally {
     await app.close();
   }

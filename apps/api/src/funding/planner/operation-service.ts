@@ -6,7 +6,7 @@ import {
   commitFundingOperation,
   fetchFundingQuoteForUser,
   type FundingCommitPlan,
-  type FundingCommitInput,
+  type FundingSharedSourceReservation,
   type FundingOperationRow,
   type FundingQuoteCommitScope,
   type StoredFundingQuote,
@@ -81,7 +81,10 @@ export class FundingOperationService {
       commitOperation?: typeof commitFundingOperation;
       resolvePolicy?: FundingPolicyResolver;
       now?: () => Date;
-      verifySharedSourceCapacity?: FundingCommitInput["verifySharedSourceCapacity"];
+      verifySharedSourceCapacity?: (
+        sources: readonly FundingSharedSourceReservation[],
+        plan: FundingCommitPlan,
+      ) => Promise<void>;
     }>,
   ) {}
 
@@ -167,6 +170,8 @@ export class FundingOperationService {
       commitFundingOperation,
   ): Promise<Readonly<{ operation: FundingOperationRow; replayed: boolean }>> {
     const { externalRecipientId, input, quote, withdrawal } = prepared;
+    const verifySharedSourceCapacity =
+      this.dependencies.verifySharedSourceCapacity;
     return commitOperation(this.dependencies.db, {
       userId: input.userId,
       quoteId: input.request.quoteId,
@@ -176,7 +181,9 @@ export class FundingOperationService {
       subjectLookupHmac: this.dependencies.subjectLookupHmac(input.userId),
       subjectLookupKeyVersion: this.dependencies.subjectLookupKeyVersion,
       now: this.dependencies.now?.() ?? new Date(),
-      verifySharedSourceCapacity: this.dependencies.verifySharedSourceCapacity,
+      verifySharedSourceCapacity: verifySharedSourceCapacity
+        ? (sources) => verifySharedSourceCapacity(sources, quote.planSnapshot)
+        : undefined,
       verifyCurrentFacts: async (client, lockedQuote) => {
         if (!withdrawal) {
           await lockFundingPolicyForTransaction(client);

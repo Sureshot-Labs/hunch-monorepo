@@ -27,6 +27,8 @@ export type SolanaWithdrawalCostInput = {
   availableSolRaw: bigint;
   sponsorEligible: boolean;
   requestedRaw?: bigint;
+  /** Read-only preflight only. Committed actions must remain exact. */
+  normalizeAmount?: boolean;
   connection?: Connection;
 };
 
@@ -175,23 +177,61 @@ export async function inspectSolanaWithdrawalCost(
     accountRentRaw,
     payer,
   });
-  const raw = input.requestedRaw ?? capacity.maximumSourceRaw;
+  let raw = input.requestedRaw ?? capacity.maximumSourceRaw;
+  if (input.normalizeAmount && raw > capacity.maximumSourceRaw)
+    raw = capacity.maximumSourceRaw;
   if (raw > 0n && raw <= capacity.maximumSourceRaw) {
-    const simulation = await connection.simulateTransaction(
-      new VersionedTransaction(messageFor(raw)),
-      {
-        sigVerify: false,
-        commitment: "confirmed",
-        minContextSlot: await connection.getSlot("confirmed"),
-      },
-    );
-    if (simulation.value.err) throw new Error("Withdrawal simulation failed");
+    const simulate = (amount: bigint) =>
+      connection.simulateTransaction(
+        new VersionedTransaction(messageFor(amount)),
+        {
+          sigVerify: false,
+          commitment: "confirmed",
+          minContextSlot,
+        },
+      );
+    const minContextSlot = await connection.getSlot("confirmed");
+    let simulation = await simulate(raw);
+    const error = simulation.value.err;
+    const rentError =
+      error && typeof error === "object" && "InsufficientFundsForRent" in error
+        ? error.InsufficientFundsForRent
+        : null;
+    const rentAccountIndex =
+      rentError &&
+      typeof rentError === "object" &&
+      "account_index" in rentError &&
+      typeof rentError.account_index === "number" &&
+      Number.isInteger(rentError.account_index) &&
+      rentError.account_index >= 0
+        ? rentError.account_index
+        : null;
+    // A near-full native withdrawal can leave a nonzero, rent-ineligible
+    // sender balance. Reduce only during preflight, never after confirmation.
+    if (
+      input.normalizeAmount &&
+      nativeAsset &&
+      rentAccountIndex !== null &&
+      messageFor(raw).staticAccountKeys[rentAccountIndex]?.equals(signer)
+    ) {
+      const rent = BigInt(
+        await connection.getMinimumBalanceForRentExemption(0, "confirmed"),
+      );
+      const spendable = nativeBalance - capacity.userSolCostRaw - rent;
+      raw = spendable > 0n && spendable < raw ? spendable : 0n;
+      if (input.requestedRaw == null) capacity.maximumSourceRaw = raw;
+      if (raw > 0n) simulation = await simulate(raw);
+      else capacity.reasonCode = "insufficient_sol_for_rent";
+    }
+    if (raw > 0n && simulation.value.err)
+      throw new Error("Withdrawal simulation failed");
   }
   return {
     ...capacity,
     networkFeeRaw: BigInt(fee),
     accountRentRaw,
     payer,
+    sourceAmountRaw: raw,
     createRecipientAta,
     built: raw > 0n && raw <= capacity.maximumSourceRaw ? build(raw) : null,
   };

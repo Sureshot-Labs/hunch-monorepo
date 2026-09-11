@@ -1,4 +1,6 @@
 import { scaleUnsignedDecimalByRawRatio } from "../../account-value/decimal.js";
+import { withdrawalRawAvailabilityKnown } from "../domain/withdrawal-capacity.js";
+import { FundingPlannerError } from "./money.js";
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import {
   stableOpaqueId,
@@ -89,7 +91,7 @@ function exactAvailableComponent(
       component.observationError ||
       !sameAsset(component.amount.asset, input.requiredAmount.asset) ||
       !available ||
-      available.freshness !== "fresh" ||
+      !withdrawalRawAvailabilityKnown(available) ||
       !isPositiveRawAmount(available.availableRaw) ||
       BigInt(withdrawableRaw) < BigInt(input.requiredAmount.raw) ||
       !execution ||
@@ -126,6 +128,7 @@ export class DirectWithdrawalSourceAdapter implements FundingSourceAdapter {
     >,
     options: {
       requestedRaw?: bigint;
+      normalizeAmount?: boolean;
       ownReservedRaw?: bigint;
       ownReservedSolRaw?: bigint;
       frozenPayer?: string;
@@ -156,10 +159,13 @@ export class DirectWithdrawalSourceAdapter implements FundingSourceAdapter {
       component.category === "in_transit" ||
       component.observationFreshness !== "fresh" ||
       component.observationError ||
-      available.freshness !== "fresh" ||
+      !withdrawalRawAvailabilityKnown(available) ||
       !sameAsset(component.amount.asset, recipient.asset)
     )
-      throw new Error("Withdrawal source unavailable");
+      throw new FundingPlannerError(
+        "source_not_selected",
+        "Withdrawal source unavailable: refresh the selected balance",
+      );
     if (recipient.asset.networkId !== "solana:mainnet")
       throw new Error("Withdrawal capacity currently supports Solana assets");
     const solIds = new Set(
@@ -171,7 +177,8 @@ export class DirectWithdrawalSourceAdapter implements FundingSourceAdapter {
     const availableSolRaw =
       this.account.cashAvailability.components
         .filter(
-          (row) => solIds.has(row.componentId) && row.freshness === "fresh",
+          (row) =>
+            solIds.has(row.componentId) && withdrawalRawAvailabilityKnown(row),
         )
         .reduce((sum, row) => sum + BigInt(row.availableRaw), 0n) +
       (sameAsset(recipient.asset, SOLANA_NATIVE_ASSET)
@@ -185,6 +192,7 @@ export class DirectWithdrawalSourceAdapter implements FundingSourceAdapter {
       availableRaw: BigInt(available.availableRaw) + ownReservedRaw,
       availableSolRaw,
       requestedRaw,
+      normalizeAmount: options.normalizeAmount,
       sponsorEligible:
         frozenPayer !== "user" &&
         relaySolanaSponsorshipEnabled() &&
@@ -638,7 +646,7 @@ export class DirectWithdrawalSourceAdapter implements FundingSourceAdapter {
       component.observationFreshness !== "fresh" ||
       component.observationError ||
       !available ||
-      available.freshness !== "fresh" ||
+      !withdrawalRawAvailabilityKnown(available) ||
       !isPositiveRawAmount(available.availableRaw) ||
       BigInt(available.availableRaw) < BigInt(frozenRaw) ||
       execution?.profile.walletId !== executionWalletId

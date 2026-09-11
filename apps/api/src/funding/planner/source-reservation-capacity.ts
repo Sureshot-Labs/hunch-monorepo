@@ -1,5 +1,6 @@
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import { sameAsset } from "../domain/asset-identity.js";
+import { withdrawalRawAvailabilityKnown } from "../domain/withdrawal-capacity.js";
 import { senderNativeFeeRequirement } from "../domain/network-fees.js";
 import {
   FundingPersistenceError,
@@ -17,6 +18,7 @@ export function assertSharedFundingSourceCapacity(
   }>,
   userId: string,
   sources: readonly FundingSharedSourceReservation[],
+  options: { directWithdrawal?: boolean } = {},
 ): void {
   for (const { reservation, heldRaw } of sources) {
     const component = account.projection.components.find(
@@ -32,7 +34,9 @@ export function assertSharedFundingSourceCapacity(
     };
     const nativeFee = senderNativeFeeRequirement(asset.networkId);
     const gasReserve =
-      nativeFee && sameAsset(nativeFee.asset, asset)
+      !options.directWithdrawal &&
+      nativeFee &&
+      sameAsset(nativeFee.asset, asset)
         ? BigInt(nativeFee.raw)
         : 0n;
     if (
@@ -45,7 +49,9 @@ export function assertSharedFundingSourceCapacity(
       component.category !== "cash" ||
       component.observationFreshness !== "fresh" ||
       component.observationError ||
-      availability.freshness !== "fresh" ||
+      !(options.directWithdrawal
+        ? withdrawalRawAvailabilityKnown(availability)
+        : availability.freshness === "fresh") ||
       availability.reasonCodes.includes("cash_availability_unknown") ||
       // A snapshot must include every locked hold. A concurrent debit/reduction
       // may require a fresh retry; it must never silently enlarge capacity.

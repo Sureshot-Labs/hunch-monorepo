@@ -414,6 +414,7 @@ async function directWithdrawalOptionsForAsset(
   asset: AssetRef,
   raw = "1000000",
   withdrawalSourceComponentId?: string,
+  sourceAccount = accountForExactAsset(asset),
 ) {
   const recipient = {
     recipientId: `recipient_${asset.networkId.replace(":", "_")}_${asset.assetId.slice(-8)}`,
@@ -430,10 +431,11 @@ async function directWithdrawalOptionsForAsset(
     asset.networkId === "solana:mainnet"
       ? "F7RnPpFGLzY2r17MLTrxgJXDWiHF5etiEaLNn11GebLJ"
       : "0x1a9ec8b3c44a748f7fad6623fd79332ce683ceb0";
-  return new DirectWithdrawalSourceAdapter(accountForExactAsset(asset), {
+  return new DirectWithdrawalSourceAdapter(sourceAccount, {
     sponsorBudgetAvailable: async () => false,
     inspectCost: async (input) => ({
       maximumSourceRaw: input.availableRaw - 5000n,
+      sourceAmountRaw: input.requestedRaw ?? input.availableRaw - 5000n,
       networkFeeRaw: 5000n,
       accountRentRaw: 0n,
       payer: "user",
@@ -591,6 +593,88 @@ assert.equal(
   (await directWithdrawalOptionsForAsset(SOLANA_NATIVE, "3995001")).length,
   0,
 );
+
+for (const priceReason of [
+  "trusted_price_unavailable",
+  "trusted_price_stale",
+] as const) {
+  const base = accountForExactAsset(SOLANA_NATIVE);
+  const unpriced: AccountValueReadModel = {
+    ...base,
+    projection: {
+      ...base.projection,
+      components: base.projection.components.map((component) => ({
+        ...component,
+        estimatedUsd: null,
+        valuationEligibility: "unpriced",
+        reasonCodes: [priceReason],
+      })),
+    },
+    cashAvailability: {
+      ...base.cashAvailability,
+      components: base.cashAvailability.components.map((component) => ({
+        ...component,
+        freshness: "stale",
+        availableEstimatedUsd: null,
+        reasonCodes: [priceReason],
+      })),
+    },
+  };
+  const options = await directWithdrawalOptionsForAsset(
+    SOLANA_NATIVE,
+    "1000000",
+    undefined,
+    unpriced,
+  );
+  assert.equal(
+    options.length,
+    1,
+    "SOL withdrawal must not require a USD price",
+  );
+  assert.equal(options[0]?.option.maximumSourceRaw, "3995000");
+  assert.equal(
+    (
+      await directWithdrawalOptionsForAsset(
+        SOLANA_NATIVE,
+        "1000000",
+        undefined,
+        {
+          ...unpriced,
+          cashAvailability: {
+            ...unpriced.cashAvailability,
+            components: unpriced.cashAvailability.components.map(
+              (component) => ({
+                ...component,
+                reasonCodes: [priceReason, "cash_availability_unknown"],
+              }),
+            ),
+          },
+        },
+      )
+    ).length,
+    0,
+  );
+  assert.equal(
+    (
+      await directWithdrawalOptionsForAsset(
+        SOLANA_NATIVE,
+        "1000000",
+        undefined,
+        {
+          ...unpriced,
+          projection: {
+            ...unpriced.projection,
+            components: unpriced.projection.components.map((component) => ({
+              ...component,
+              observationFreshness: "stale",
+            })),
+          },
+        },
+      )
+    ).length,
+    0,
+  );
+}
 
 const sponsored = deriveProductionRelayEligibleSourceFacts({
   accountId: ACCOUNT_ID,

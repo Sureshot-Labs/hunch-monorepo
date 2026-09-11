@@ -75,6 +75,7 @@ import { sessionSourceAccount } from "./session-source-account.js";
 import { PolymarketFundingSourceAdapter } from "../preparation/polymarket-funding-source-adapter.js";
 import { DirectIngressFundingSourceAdapter } from "./direct-ingress-source-adapter.js";
 import { DirectWithdrawalSourceAdapter } from "./direct-withdrawal-source-adapter.js";
+import { DIRECT_WITHDRAWAL_ADAPTER_ID } from "../execution/direct-withdrawal-transfer.js";
 import { parsePositiveInteger } from "../runtime/positive-integer.js";
 import {
   FundingOperationActionRuntime,
@@ -253,7 +254,11 @@ export class FundingPlanningRuntime {
 
   async withdrawalCapacity(
     userId: string,
-    input: { componentId: string; recipientId: string },
+    input: {
+      componentId: string;
+      recipientId: string;
+      requestedSourceRaw?: string;
+    },
   ) {
     const [account, recipient] = await Promise.all([
       buildAccountValueReadModel({ pool: this.db, userId }),
@@ -262,11 +267,19 @@ export class FundingPlanningRuntime {
     const cost = await new DirectWithdrawalSourceAdapter(account).capacity(
       input.componentId,
       recipient,
+      {
+        normalizeAmount: true,
+        requestedRaw:
+          input.requestedSourceRaw == null
+            ? undefined
+            : BigInt(input.requestedSourceRaw),
+      },
     );
     return {
       componentId: input.componentId,
       recipientId: input.recipientId,
       maximumSourceRaw: cost.maximumSourceRaw.toString(),
+      sourceAmountRaw: cost.sourceAmountRaw.toString(),
       networkFeeRaw: cost.networkFeeRaw.toString(),
       accountRentRaw: cost.accountRentRaw.toString(),
       payer: cost.payer,
@@ -784,14 +797,19 @@ export class FundingPlanningRuntime {
     const controllerProfiles = durableControllerProfiles(account);
     const service = new FundingOperationService({
       db: this.db,
-      verifySharedSourceCapacity: async (sources) => {
+      verifySharedSourceCapacity: async (sources, plan) => {
         // Re-read after source locks, so a concurrent commit cannot spend the
         // same remainder. Normal exclusive commits need no extra collection.
         const currentAccount = await buildAccountValueReadModel({
           pool: this.db,
           userId,
         });
-        assertSharedFundingSourceCapacity(currentAccount, userId, sources);
+        assertSharedFundingSourceCapacity(currentAccount, userId, sources, {
+          directWithdrawal:
+            plan.operation.purpose === "withdrawal" &&
+            plan.operation.supportMetadata?.adapterId ===
+              DIRECT_WITHDRAWAL_ADAPTER_ID,
+        });
       },
       subjectLookupHmac: (subjectUserId) =>
         fundingSubjectLookupHmac(subjectUserId, lookupKey),

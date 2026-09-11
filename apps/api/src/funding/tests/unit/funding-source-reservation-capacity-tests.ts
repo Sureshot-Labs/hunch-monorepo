@@ -83,6 +83,43 @@ for (const asset of [
   const sources = [{ reservation, heldRaw: "1398210" }];
   const available = account.cashAvailability.components[0];
   assert.ok(available);
+  if (asset === SOLANA_NATIVE_ASSET) {
+    const unpriced = {
+      ...account,
+      cashAvailability: {
+        ...account.cashAvailability,
+        components: [
+          {
+            ...available,
+            availableRaw: "384360",
+            freshness: "stale" as const,
+            reasonCodes: ["trusted_price_unavailable" as const],
+          },
+        ],
+      },
+    };
+    assert.doesNotThrow(() =>
+      assertSharedFundingSourceCapacity(unpriced, "owner", sources, {
+        directWithdrawal: true,
+      }),
+    );
+    assert.throws(() =>
+      assertSharedFundingSourceCapacity(unpriced, "owner", sources),
+    );
+    assert.throws(() =>
+      assertSharedFundingSourceCapacity(
+        unpriced,
+        "owner",
+        [
+          {
+            heldRaw: "1398210",
+            reservation: { ...reservation, rawAmount: "384361" },
+          },
+        ],
+        { directWithdrawal: true },
+      ),
+    );
+  }
   assert.doesNotThrow(() =>
     assertSharedFundingSourceCapacity(account, "owner", sources),
   );

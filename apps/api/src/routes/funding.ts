@@ -638,6 +638,10 @@ export function registerFundingRoutes(
           .object({
             componentId: schema.string().min(1).max(200),
             recipientId: schema.string().uuid(),
+            requestedSourceRaw: schema
+              .string()
+              .regex(/^[1-9][0-9]{0,19}$/)
+              .optional(),
           })
           .strict(),
         response: {
@@ -646,6 +650,7 @@ export function registerFundingRoutes(
             componentId: schema.string(),
             recipientId: schema.string(),
             maximumSourceRaw: schema.string(),
+            sourceAmountRaw: schema.string(),
             networkFeeRaw: schema.string(),
             accountRentRaw: schema.string(),
             payer: schema.enum(["user", "privy_sponsor"]),

@@ -1,3 +1,22 @@
+import type { CashAvailabilityComponent } from "../../account-value/cash-availability-projector.js";
+
+/** A same-asset transfer needs fresh units, not a fresh USD price. The caller
+ * must independently verify the underlying balance observation and ownership. */
+export function withdrawalRawAvailabilityKnown(
+  available: CashAvailabilityComponent,
+): boolean {
+  return (
+    !available.reasonCodes.includes("cash_availability_unknown") &&
+    (available.freshness === "fresh" ||
+      (available.reasonCodes.length > 0 &&
+        available.reasonCodes.every(
+          (reason) =>
+            reason === "trusted_price_unavailable" ||
+            reason === "trusted_price_stale",
+        )))
+  );
+}
+
 /** Exact cost accounting shared by withdrawal discovery and execution checks.
  * RPC/authorization evidence is supplied by the caller; unknown costs must not
  * be passed as zero. Amounts are raw units, never floating-point USD estimates.
