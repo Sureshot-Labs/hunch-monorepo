@@ -1978,6 +1978,28 @@ assert.equal(excludedByPreference.length, 0);
     "new wallet's existing USDC remains a candidate",
   );
   assert.equal(zeroSolFacts[0]?.nativeGasReady, false);
+  const missingSolAccount = {
+    ...zeroSolAccount,
+    projection: { ...zeroSolAccount.projection, components: [sourceComponent] },
+    nativeGasBalances: [],
+  };
+  assert.equal(
+    deriveExecutionGas(missingSolAccount, gasProfile).status,
+    "unknown",
+  );
+  const missingSolFacts = deriveProductionRelayEligibleSourceFacts({
+    accountId: ACCOUNT_ID,
+    account: missingSolAccount,
+    policy: tokenPolicy,
+    requiredAmount: { asset: POLYGON_PUSD, raw: "1049602" },
+  });
+  assert.equal(missingSolFacts.length, 1);
+  assert.equal(missingSolFacts[0]?.nativeGasReady, false);
+  assert.equal(
+    missingSolFacts[0]?.requiresSolanaGasCheck,
+    true,
+    "missing SOL inventory must reach exact proof, not a generic gas rejection",
+  );
   assert.equal(
     zeroSolFacts[0]?.requiresSolanaGasCheck,
     true,

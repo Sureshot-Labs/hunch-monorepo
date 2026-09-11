@@ -601,7 +601,7 @@ function sourceFactsForComponent(input: {
         ...(input.component.amount.asset.networkId === "solana:mainnet" &&
         !nativeSolSource &&
         input.profile.source !== "external" &&
-        deriveExecutionGas(input.account, input.profile).status === "needs_gas"
+        deriveExecutionGas(input.account, input.profile).status !== "ready"
           ? { requiresSolanaGasCheck: true }
           : {}),
         suggestionPreferred: input.suggestionPreferred,
@@ -1698,8 +1698,16 @@ export class ProductionFundingSourcePlanner {
           signer: userAddress,
           signal: input.signal,
         }));
-      if (!gas?.sufficient && !sponsorReady)
+      if (!gas?.sufficient && !sponsorReady) {
+        // Unknown RPC/simulation results are not evidence of insufficient SOL.
+        if (gas == null || sponsorReady == null) {
+          throw new FundingPlannerError(
+            "provider_unavailable",
+            "Solana transaction fee or sponsorship could not be verified",
+          );
+        }
         return { kind: "rejected", reasonCode: "insufficient_gas" };
+      }
     }
     if (input.signal.aborted) return null;
     return buildRelayPlanningQuote({

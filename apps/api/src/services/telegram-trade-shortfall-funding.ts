@@ -121,6 +121,11 @@ export type TelegramTradeMiniAppFundingInspection =
   | Readonly<{
       kind: "temporarily_unavailable";
       reasonCodes: readonly string[];
+      balance?: Readonly<{
+        requiredUsd: string;
+        availableUsd: string;
+        shortfallUsd: string;
+      }>;
     }>
   | Readonly<{
       kind: "web_funding_plan";
@@ -769,6 +774,17 @@ export class TelegramTradeShortfallFundingService {
       additionalFundingUsd: undefined,
     };
     const discoveryRequest = buildTelegramTradeShortfallRequest(exactInput);
+    const balance =
+      observed.freshness === "fresh" &&
+      observed.requestedUsd != null &&
+      observed.availableNowUsd != null &&
+      observed.shortfallUsd != null
+        ? {
+            requiredUsd: observed.requestedUsd,
+            availableUsd: observed.availableNowUsd,
+            shortfallUsd: observed.shortfallUsd,
+          }
+        : undefined;
     let plan;
     try {
       plan = await this.runtime.liquidity(input.userId, discoveryRequest);
@@ -776,6 +792,7 @@ export class TelegramTradeShortfallFundingService {
       return {
         kind: "temporarily_unavailable",
         reasonCodes: [shortfallPlannerFailureReasonCode(error)],
+        balance,
       };
     }
     if (plan.completeness !== "complete" || plan.errors.length > 0) {
@@ -804,10 +821,12 @@ export class TelegramTradeShortfallFundingService {
       return {
         kind: "temporarily_unavailable",
         reasonCodes: [
+          ...plan.reasonCodes,
           capability.kind === "unavailable"
             ? capability.reason
             : "unexpected_server_funding_capability",
         ],
+        balance,
       };
     }
     return {

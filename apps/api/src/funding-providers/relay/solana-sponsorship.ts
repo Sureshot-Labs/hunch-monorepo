@@ -223,9 +223,10 @@ export async function checkRelaySolanaFeeOnly(input: {
   action: SvmTransactionAction;
   signer: string;
   signal?: AbortSignal;
-}): Promise<boolean> {
+}): Promise<boolean | null> {
   const rpcUrl = process.env.SOLANA_RPC_URL?.trim();
-  if (!relaySolanaSponsorshipEnabled() || !rpcUrl) return false;
+  if (!relaySolanaSponsorshipEnabled()) return false;
+  if (!rpcUrl) return null;
   const deadline = AbortSignal.timeout(4000);
   const signal = input.signal
     ? AbortSignal.any([input.signal, deadline])
@@ -242,6 +243,12 @@ export async function checkRelaySolanaFeeOnly(input: {
       signer: input.signer,
     });
   } catch {
-    return false;
+    // Do not leak RPC URLs or conflate an unavailable proof with a rejection.
+    console.warn("[funding-relay] sponsorship verification unavailable", {
+      reason: signal.aborted
+        ? "timeout_or_cancelled"
+        : "rpc_or_validation_error",
+    });
+    return null;
   }
 }

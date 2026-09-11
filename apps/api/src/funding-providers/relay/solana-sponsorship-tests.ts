@@ -19,6 +19,7 @@ import type {
 import { resolveActionSponsorship } from "../../funding/execution/sponsorship-policy.js";
 import { relaySponsorIdempotencyKey } from "../../funding/execution/relay-solana-sponsorship.js";
 import {
+  checkRelaySolanaFeeOnly,
   isRelaySolanaSponsorAction,
   matchesRelaySolanaSponsorTransaction,
   proveRelaySolanaFeeOnly,
@@ -382,6 +383,27 @@ try {
     "user",
   );
 } finally {
+  if (previous === undefined)
+    delete process.env.FUNDING_RELAY_SOLANA_SPONSORSHIP_ENABLED;
+  else process.env.FUNDING_RELAY_SOLANA_SPONSORSHIP_ENABLED = previous;
+}
+const savedRpc = process.env.SOLANA_RPC_URL;
+const savedFetch = globalThis.fetch;
+try {
+  process.env.FUNDING_RELAY_SOLANA_SPONSORSHIP_ENABLED = "true";
+  delete process.env.SOLANA_RPC_URL;
+  assert.equal(await checkRelaySolanaFeeOnly({ action, signer }), null);
+  process.env.SOLANA_RPC_URL = "https://rpc.invalid";
+  globalThis.fetch = async () => {
+    throw new Error("synthetic RPC failure");
+  };
+  assert.equal(await checkRelaySolanaFeeOnly({ action, signer }), null);
+  process.env.FUNDING_RELAY_SOLANA_SPONSORSHIP_ENABLED = "false";
+  assert.equal(await checkRelaySolanaFeeOnly({ action, signer }), false);
+} finally {
+  globalThis.fetch = savedFetch;
+  if (savedRpc === undefined) delete process.env.SOLANA_RPC_URL;
+  else process.env.SOLANA_RPC_URL = savedRpc;
   if (previous === undefined)
     delete process.env.FUNDING_RELAY_SOLANA_SPONSORSHIP_ENABLED;
   else process.env.FUNDING_RELAY_SOLANA_SPONSORSHIP_ENABLED = previous;

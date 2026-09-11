@@ -781,9 +781,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
           parsed.type === "cancel_input" ||
           parsed.type === "open_input_market"
         ) {
-          const cancelled = await post<{
-            message: TelegramBotTradingClientMessage;
-          }>(
+          const cancelled = await post<TelegramBotTradingClientMessage>(
             `/internal/telegram-bot/trading/input-contexts/${parsed.inputContextId}/${
               parsed.type === "open_input_market" ? "market" : "cancel"
             }`,
@@ -796,11 +794,13 @@ export function createTelegramBotTradingInternalApiClient(input: {
             },
           ).catch(() => null);
           const completed =
-            cancelled != null && callbackInput.cancelTradeInput
+            cancelled != null &&
+            typeof cancelled.text === "string" &&
+            callbackInput.cancelTradeInput
               ? await callbackInput.cancelTradeInput({
                   contextId: parsed.inputContextId,
                   menuMessageId: telegramMessageId,
-                  message: cancelled.message,
+                  message: cancelled,
                 })
               : false;
           await callbackInput.answerCallbackQuery({

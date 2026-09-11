@@ -105,6 +105,7 @@ import type {
   TelegramTradeMiniAppFundingInspection,
 } from "./telegram-trade-shortfall-funding.js";
 import { TelegramTradeShortfallCommitError } from "./telegram-trade-shortfall-funding.js";
+import { telegramFundingUnavailableLines } from "./telegram-funding-unavailable-copy.js";
 import {
   buildTelegramAppHandoffV2DirectTradePlan,
   isTelegramAppHandoffV2Plan,
@@ -11044,11 +11045,17 @@ async function previewTelegramTradeIntent(input: {
           text: formatTelegramTradeLifecycleMessageMarkdownV2({
             heading: "Could not prepare this Buy",
             tone: "warn",
-            lines: [
-              internalFunding.reasonCodes.includes("destination_unavailable")
-                ? "Finish wallet setup in Hunch, then retry this Buy. Bot trading is not required in Mini App mode. Nothing was submitted."
-                : "The balance or route could not be verified. Retry the check or open Hunch. Nothing was submitted; no background check is running.",
-            ],
+            lines: telegramFundingUnavailableLines({
+              reasonCodes: internalFunding.reasonCodes,
+              venue:
+                input.intent.venue === "polymarket"
+                  ? "Polymarket"
+                  : "Limitless",
+              balance:
+                miniAppFunding?.kind === "temporarily_unavailable"
+                  ? miniAppFunding.balance
+                  : undefined,
+            }),
             marketTitle: input.intent.market_title,
             venue: input.intent.venue,
           }),
