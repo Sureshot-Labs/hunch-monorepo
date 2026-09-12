@@ -116,12 +116,56 @@ try {
     "utf8",
   );
   assert.ok(migration.includes("/* no-transaction */"));
+  const migrationStatements = migration
+    .split(";")
+    .map((statement) => statement.trim())
+    .filter(Boolean);
+  const originalTimeout = (await client.query("show statement_timeout")).rows[0]
+    .statement_timeout;
   for (let replay = 0; replay < 2; replay++) {
-    for (const statement of migration
-      .split(";")
-      .map((s) => s.trim())
-      .filter(Boolean)) {
-      await client.query(statement);
+    const blocker = await db.connect();
+    try {
+      await blocker.query("begin");
+      await blocker.query(
+        "update unified_markets set volume_total=volume_total where id='l-000001'",
+      );
+      await client.query("set statement_timeout='50ms'");
+      if (replay === 0) {
+        const createIndex = migrationStatements.find((statement) =>
+          /^CREATE INDEX CONCURRENTLY/i.test(statement),
+        );
+        assert.ok(createIndex);
+        await assert.rejects(client.query(createIndex), { code: "57014" });
+        assert.equal(
+          (
+            await client.query(
+              "select indisvalid from pg_index where indexrelid='idx_unified_markets_live_trending_prefix'::regclass",
+            )
+          ).rows[0].indisvalid,
+          false,
+          "reproduce the cancelled production build before testing repair",
+        );
+      }
+      await Promise.all([
+        (async () => {
+          for (const statement of migrationStatements) {
+            await client.query(statement);
+          }
+        })(),
+        (async () => {
+          await blocker.query("select pg_sleep(0.2)");
+          await blocker.query("rollback");
+        })(),
+      ]);
+      assert.equal(
+        (await client.query("show statement_timeout")).rows[0]
+          .statement_timeout,
+        originalTimeout,
+        "the migration must restore the connection default after its build",
+      );
+    } finally {
+      await blocker.query("rollback");
+      blocker.release();
     }
   }
   for (const variant of [
