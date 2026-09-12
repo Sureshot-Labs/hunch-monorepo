@@ -601,7 +601,6 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
             candidateWindowSize: eventProbabilityPolicy.candidateWindowSize,
             probabilityBatchSize: eventProbabilityPolicy.probabilityBatchSize,
             maxCandidates: eventProbabilityPolicy.maxCandidates,
-            initialProbabilityBatchSize: 20,
             fetchCandidateEvents: async ({ limit: candidateLimit, offset }) => {
               setFeedQueryPhase("candidate");
               const candidates = await fetchFeedEventIds(
@@ -675,14 +674,8 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
               });
             },
           });
-          if (probabilityPage) {
-            usedProgressiveProbabilityMarketPage = true;
-            observedProbabilityMarketIds = probabilityPage.marketIds;
-          } else {
-            setFeedQueryPhase("probability_mapping");
-            observedProbabilityMarketIds =
-              await fetchObservedCanonicalProbabilityMarketIds(pool, inputs);
-          }
+          usedProgressiveProbabilityMarketPage = true;
+          observedProbabilityMarketIds = probabilityPage.marketIds;
         }
         const databaseInputs = hasProbabilityFilter
           ? {

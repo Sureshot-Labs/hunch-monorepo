@@ -11,6 +11,7 @@ import {
   buildOrderableMarketSql,
   buildPolymarketGraceCandidateSql,
   buildPolymarketGraceMarketSql,
+  buildNativeTradableMarketSql,
   POLYMARKET_ACCEPTING_ORDERS_GRACE_INTERVAL_SQL,
   buildStrictIndexedMarketSql,
 } from "../lib/market-availability.js";
@@ -930,10 +931,11 @@ type ProbabilityMarketFilterInputs = Pick<
   | "nowParam"
   | "sevenDaysAgo"
   | "sevenDaysFromNow"
-> & {
-  candidateEventIds?: string[];
-  candidateMarketIds?: string[];
-};
+> &
+  (
+    | { candidateEventIds: string[]; candidateMarketIds?: string[] }
+    | { candidateEventIds?: string[]; candidateMarketIds: string[] }
+  );
 
 type ProbabilityMarketCacheState = {
   values: Map<
@@ -1174,6 +1176,7 @@ async function fetchObservedCanonicalProbabilityMarketsUncached(
       marketTokenSources,
     );
   } else {
+    if (!inputs.candidateEventIds?.length) return [];
     const { params, add } = createParamBuilder();
     const nowParam = add(inputs.nowParam);
     const expressions = buildFeedSqlExpressions();
@@ -1189,39 +1192,30 @@ async function fetchObservedCanonicalProbabilityMarketsUncached(
       includeOrderableExists: false,
       includeDurationExists: false,
     });
-    const candidateEventIdsParam = inputs.candidateEventIds?.length
-      ? add(inputs.candidateEventIds)
-      : null;
+    const candidateEventIdsParam = add(inputs.candidateEventIds);
     const probabilityCandidateEventsCte = `
       probability_candidate_events as materialized (
         select e.id, e.status, e.end_date
-        from ${
-          candidateEventIdsParam
-            ? `unnest(${candidateEventIdsParam}::text[]) as selected_event(event_id)
-        join unified_events e on e.id = selected_event.event_id`
-            : "unified_events e"
-        }
+        from unnest(${candidateEventIdsParam}::text[]) as selected_event(event_id)
+        join unified_events e on e.id = selected_event.event_id
         where ${probabilityEventWhere.join(" and ")}
       )
     `;
-    const candidateEventMarketSql = candidateEventIdsParam
-      ? (() => {
-          const marketOnlyExtraSql = buildFeedMarketCandidateExtraSql({
-            add,
-            inputs,
-            nowParam,
-            venueTarget: "event",
-            renderableMarketExpr: expressions.renderableMarketExpr,
-            supportedLimitlessMarketExpr:
-              expressions.supportedLimitlessMarketExpr,
-            marketOnly: true,
-          });
-          const marketWhere = [
-            expressions.supportedLimitlessMarketExpr,
-            expressions.renderableMarketExpr,
-            ...marketOnlyExtraSql,
-          ];
-          return `
+    const marketOnlyExtraSql = buildFeedMarketCandidateExtraSql({
+      add,
+      inputs,
+      nowParam,
+      venueTarget: "event",
+      renderableMarketExpr: expressions.renderableMarketExpr,
+      supportedLimitlessMarketExpr: expressions.supportedLimitlessMarketExpr,
+      marketOnly: true,
+    });
+    const marketWhere = [
+      expressions.supportedLimitlessMarketExpr,
+      expressions.renderableMarketExpr,
+      ...marketOnlyExtraSql,
+    ];
+    const candidateEventMarketSql = `
             with ${probabilityCandidateEventsCte},
             probability_strict_markets as materialized (
               select strict_market.*
@@ -1292,40 +1286,10 @@ async function fetchObservedCanonicalProbabilityMarketsUncached(
             join probability_grace_availability available_grace_market
               on available_grace_market.id = grace_market.venue_market_id
           `;
-        })()
-      : null;
-    const candidateCtes = candidateEventMarketSql
-      ? null
-      : `${probabilityCandidateEventsCte},
-        ${buildBroadOrderableMarketCandidatesCte({
-          candidateEventIdsCte: "probability_candidate_events",
-          cteName: "probability_market_candidates",
-          materialized: true,
-          nowParam,
-          extraMarketSql: buildFeedMarketCandidateExtraSql({
-            add,
-            inputs,
-            nowParam,
-            venueTarget: inputs.view === "markets" ? "market" : "event",
-            renderableMarketExpr: expressions.renderableMarketExpr,
-            supportedLimitlessMarketExpr:
-              expressions.supportedLimitlessMarketExpr,
-          }),
-        })}`;
     const marketTokenSources =
       await queryRowsWithLocalSettings<CanonicalProbabilityMarketTokenSourceRow>(
         pool,
-        candidateEventMarketSql ??
-          `
-            with ${candidateCtes}
-            select
-              probability_candidate.market_id,
-              m.token_yes,
-              m.token_no,
-              m.clob_token_ids
-            from probability_market_candidates probability_candidate
-            join unified_markets m on m.id = probability_candidate.market_id
-          `,
+        candidateEventMarketSql,
         params,
         {
           jitOff: true,
@@ -1344,9 +1308,9 @@ async function fetchObservedCanonicalProbabilityMarketsUncached(
   ): Promise<Map<string, CanonicalProbabilityTopRow>> => {
     if (!tokenIds.length) return new Map();
 
-    // Keep the token array as a direct parameter so PostgreSQL sees its real
-    // cardinality and can choose a bitmap heap scan instead of thousands of
-    // underestimated random primary-key probes.
+    // Keep the array cardinality visible to the planner. The compact token
+    // hash index supports these exact (often negative) lookups without the
+    // wide primary-key working set; hash collisions are rechecked by PG.
     const topRows =
       await queryRowsWithLocalSettings<CanonicalProbabilityTopRow>(
         pool,
@@ -4089,6 +4053,8 @@ type FeedMarketIdPageRow = {
 
 type FeedProjectedMarketCandidateStateRow = FeedMarketIdPageRow & {
   pm_prefix_count: number;
+  live_prefix_count?: number;
+  live_remainder_below_page?: boolean;
 };
 
 type FeedTrendingV2CandidateStateRow = {
@@ -5401,7 +5367,42 @@ async function fetchFeedMarketIdsFast(
   );
   const graceCandidateLimitParam = add(graceCandidateLimit);
   const graceCandidateLimitParamIndex = params.length - 1;
+  // Keep the existing exact rank and availability checks, but drive narrow
+  // time-filtered trending pages from a live, indexed score prefix. The only
+  // score not known by this index is the event bonus: 0, 50, 200, or 250.
+  const useLiveTrendingPrefix = Boolean(
+    options?.acceptPartialMetricPage &&
+    isLegacyTrending &&
+    !inputs.filter &&
+    sortDir === "desc" &&
+    (inputs.endWithin || inputs.ageSince),
+  );
+  let livePrefixLimit = Math.max(1_000, pageTarget * 4);
+  const livePrefixLimitParam = useLiveTrendingPrefix
+    ? add(livePrefixLimit)
+    : null;
+  const livePrefixLimitParamIndex = params.length - 1;
+  const liveVenueParam =
+    useLiveTrendingPrefix && inputs.venues?.length ? add(inputs.venues) : null;
+  const liveBaseScoreSql = `(coalesce(${marketVolumeDisplayExpr}, 0) * 0.4
+    + coalesce(${marketLiquidityDisplayExpr}, 0) * 0.3)`;
+  const livePrefixCte = useLiveTrendingPrefix
+    ? `live_trending_prefix as materialized (
+        select m.id as market_id, ${liveBaseScoreSql} as base_score
+        from unified_markets m
+        where m.status = 'ACTIVE'
+          and ${buildNativeTradableMarketSql("m")}
+          and ${renderableMarketExpr}
+          ${liveVenueParam ? `and m.venue = any(${liveVenueParam}::text[])` : ""}
+          ${inputs.venues?.length === 0 ? "and false" : ""}
+        order by ${liveBaseScoreSql} desc nulls last, m.id
+        limit ${livePrefixLimitParam}
+      )`
+    : null;
   const orderableCandidateCte = buildBroadOrderableMarketCandidatesCte({
+    candidateMarketIdsCte: useLiveTrendingPrefix
+      ? "live_trending_prefix"
+      : null,
     candidateEventIdsCte: preRankEventCte ? preRankEventCteName : null,
     includeRankingColumns: true,
     materialized: true,
@@ -5419,6 +5420,7 @@ async function fetchFeedMarketIdsFast(
   });
   const sql = `
     with ${preRankEventCte ? `${preRankEventCte},` : ""}
+    ${livePrefixCte ? `${livePrefixCte},` : ""}
     ${orderableCandidateCte},
     ranked_market_page as materialized (
       select
@@ -5445,11 +5447,24 @@ async function fetchFeedMarketIdsFast(
         select count(*)::int
         from orderable_market_candidates_pm_ranked_candidates
       ) as pm_prefix_count
+      ${
+        useLiveTrendingPrefix
+          ? `, (select count(*)::int from live_trending_prefix) as live_prefix_count,
+        coalesce(
+          (select min(sort_value) from ranked_market_page)
+            > (select min(base_score) from live_trending_prefix) + 250,
+          false
+        ) as live_remainder_below_page`
+          : ""
+      }
     from ranked_market_page
   `;
 
   for (;;) {
     params[graceCandidateLimitParamIndex] = graceCandidateLimit;
+    if (useLiveTrendingPrefix) {
+      params[livePrefixLimitParamIndex] = livePrefixLimit;
+    }
     const rows =
       await queryRowsWithLocalSettings<FeedProjectedMarketCandidateStateRow>(
         pool,
@@ -5464,6 +5479,16 @@ async function fetchFeedMarketIdsFast(
     const state = rows[0];
     const ids = state?.ids ?? [];
     const pmPrefixCount = Number(state?.pm_prefix_count ?? 0);
+    if (
+      useLiveTrendingPrefix &&
+      Number(state?.live_prefix_count ?? 0) >= livePrefixLimit &&
+      !(ids.length >= inputs.limit && state?.live_remainder_below_page === true)
+    ) {
+      // Equality cannot stop: an unseen market may tie with a smaller venue
+      // ID. Re-read the enlarged prefix and its proof in one SQL snapshot.
+      livePrefixLimit = expandFeedCandidateLimit(livePrefixLimit);
+      continue;
+    }
     if (
       !options?.acceptPartialMetricPage &&
       ids.length < inputs.limit &&

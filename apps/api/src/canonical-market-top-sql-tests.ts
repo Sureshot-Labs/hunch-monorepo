@@ -62,7 +62,7 @@ const topParams: unknown[][] = [];
 let eventSql = "";
 const localStatements: string[] = [];
 const probabilityMarketSourceQuery =
-  /from probability_candidate_events candidate_event\s+join lateral|from probability_market_candidates probability_candidate\s+join unified_markets m on m\.id = probability_candidate\.market_id/i;
+  /from probability_candidate_events candidate_event\s+join lateral/i;
 const client = {
   query: async (sql: string, params: unknown[] = []) => {
     localStatements.push(sql);
@@ -123,6 +123,35 @@ const commonInputs = {
   sortDir: "desc" as const,
   view: "events" as const,
 };
+
+for (const emptyScope of [
+  { candidateEventIds: [] },
+  { candidateMarketIds: [] },
+]) {
+  const queryCount = localStatements.length;
+  assert.deepEqual(
+    await fetchObservedCanonicalProbabilityMarketIds(pool, {
+      ...commonInputs,
+      minProb: 0.4,
+      maxProb: 0.6,
+      ...emptyScope,
+    }),
+    [],
+  );
+  assert.equal(localStatements.length, queryCount);
+}
+console.log("ok - empty probability scopes never scan the market universe");
+
+{
+  const queryCount = localStatements.length;
+  assert.deepEqual(
+    // @ts-expect-error Missing scopes must be rejected statically and stay bounded at runtime.
+    await fetchObservedCanonicalProbabilityMarketIds(pool, commonInputs),
+    [],
+  );
+  assert.equal(localStatements.length, queryCount);
+}
+console.log("ok - missing probability scopes cannot trigger a global query");
 
 assert.deepEqual(
   await fetchObservedCanonicalProbabilityMarketIds(pool, {
@@ -309,6 +338,7 @@ const probabilityQueryCountBeforeSingleFlight = localStatements.filter((sql) =>
 ).length;
 const sharedScopeInputs = {
   ...commonInputs,
+  candidateEventIds: ["event-1", "event-2"],
   venues: ["polymarket", "limitless"],
   endWithin: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(),
 };

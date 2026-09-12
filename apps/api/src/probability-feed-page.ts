@@ -70,11 +70,11 @@ export async function fetchProbabilityFeedMarketPage(args: {
   }) => Promise<{
     marketIds: string[];
     scannedCandidateCount: number;
-  } | null>;
+  }>;
   fetchBatchProbabilityMarketIds: (
     candidateMarketIds: string[],
   ) => Promise<string[]>;
-}): Promise<{ marketIds: string[] } | null> {
+}): Promise<{ marketIds: string[] }> {
   const qualifiedMarketIds: string[] = [];
   const seenQualifiedMarketIds = new Set<string>();
   const pageTarget = args.requestedOffset + args.requestedLimit;
@@ -89,7 +89,6 @@ export async function fetchProbabilityFeedMarketPage(args: {
       limit: candidateLimit,
       offset: candidateOffset,
     });
-    if (candidatePage == null) return null;
     const candidateMarketIds = candidatePage.marketIds;
 
     for (
@@ -138,7 +137,6 @@ export async function fetchProbabilityFeedEventPage<
   candidateWindowSize: number;
   probabilityBatchSize: number;
   maxCandidates: number;
-  initialProbabilityBatchSize?: number;
   fetchCandidateEvents: (input: {
     limit: number;
     offset: number;
@@ -162,33 +160,23 @@ export async function fetchProbabilityFeedEventPage<
       offset: candidateOffset,
     });
     const candidateEventIds = candidateEventRows.map((row) => row.id);
-    // Split expensive probability reads, but preserve the original logical
-    // stopping boundaries: exact filtered ranking can differ from candidate
-    // ranking. Returning within a logical batch can skip or duplicate events.
-    let batchSize = Math.min(
-      args.probabilityBatchSize,
-      Math.max(
-        1,
-        args.initialProbabilityBatchSize ?? args.probabilityBatchSize,
-      ),
-    );
-    for (let batchOffset = 0; batchOffset < candidateEventIds.length; ) {
-      const logicalBatchEnd = Math.min(
-        candidateEventIds.length,
-        (Math.floor(batchOffset / args.probabilityBatchSize) + 1) *
-          args.probabilityBatchSize,
+    // Read each complete ranking batch once. Smaller physical reads repeat
+    // market/book lookups without allowing an earlier safe return: exact
+    // filtered ranking can differ from candidate ranking within the batch.
+    for (
+      let batchOffset = 0;
+      batchOffset < candidateEventIds.length;
+      batchOffset += args.probabilityBatchSize
+    ) {
+      const candidateEventBatch = candidateEventIds.slice(
+        batchOffset,
+        batchOffset + args.probabilityBatchSize,
       );
-      const readEnd = Math.min(logicalBatchEnd, batchOffset + batchSize);
-      const candidateEventBatch = candidateEventIds.slice(batchOffset, readEnd);
-      batchOffset = readEnd;
-      batchSize = Math.min(args.probabilityBatchSize, batchSize * 2);
       const marketIds =
         await args.fetchBatchProbabilityMarketIds(candidateEventBatch);
       for (const marketId of marketIds) {
         probabilityMarketIds.add(marketId);
       }
-      if (batchOffset < logicalBatchEnd) continue;
-
       const accumulatedMarketIds = [...probabilityMarketIds];
       latestEventRows = accumulatedMarketIds.length
         ? await args.fetchFilteredEvents(accumulatedMarketIds)

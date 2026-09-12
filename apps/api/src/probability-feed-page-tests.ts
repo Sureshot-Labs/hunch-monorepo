@@ -100,19 +100,20 @@ console.log("ok - probability market page preserves ranked order and offset");
     candidateWindowSize: 300,
     probabilityBatchSize: 300,
     maxCandidates: 8_000,
-    fetchCandidateMarketIds: async () => null,
+    fetchCandidateMarketIds: async () => ({
+      marketIds: [],
+      scannedCandidateCount: 0,
+    }),
     fetchBatchProbabilityMarketIds: async () => {
       probabilityCalls += 1;
       return [];
     },
   });
 
-  assert.equal(result, null);
+  assert.deepEqual(result, { marketIds: [] });
   assert.equal(probabilityCalls, 0);
 }
-console.log(
-  "ok - unsupported probability market ranking falls back explicitly",
-);
+console.log("ok - exhausted candidates do not trigger an unbounded fallback");
 
 {
   const candidateCalls: Array<{ limit: number; offset: number }> = [];
@@ -282,11 +283,10 @@ console.log("ok - probability feed stays bounded at the scan cap");
 console.log("ok - default event probability policy stops after four windows");
 
 {
-  const run = (initialProbabilityBatchSize: number, offset: number) =>
+  const run = (offset: number) =>
     fetchProbabilityFeedEventPage({
       requestedLimit: 10,
       ...resolveProbabilityEventProbePolicy(0.4, 0.6),
-      initialProbabilityBatchSize,
       fetchCandidateEvents: async ({ limit, offset: candidateOffset }) =>
         Array.from({ length: limit }, (_, i) => ({
           id: String(i + candidateOffset),
@@ -303,15 +303,20 @@ console.log("ok - default event probability policy stops after four windows");
     });
   const pages: string[] = [];
   for (const offset of [0, 10, 20]) {
-    const original = await run(100, offset);
-    const split = await run(Math.max(20, (10 + offset) * 2), offset);
+    const page = await run(offset);
+    const expectedIds = [
+      "20",
+      ...Array.from({ length: 100 }, (_, i) => String(i)).filter(
+        (id) => id !== "20",
+      ),
+    ].slice(offset, offset + 10);
     assert.deepEqual(
-      split.eventRows,
-      original.eventRows,
-      "physical read sizes cannot change filtered ranking or page membership",
+      page.eventRows.map((row) => row.id),
+      expectedIds,
+      "the whole ranking batch must be checked before returning a page",
     );
-    assert.deepEqual(split.marketIds, original.marketIds);
-    pages.push(...split.eventRows.map((row) => row.id));
+    assert.equal(page.marketIds.length, 100);
+    pages.push(...page.eventRows.map((row) => row.id));
   }
   assert.equal(
     new Set(pages).size,
@@ -322,15 +327,16 @@ console.log("ok - default event probability policy stops after four windows");
 console.log("ok - reranking preserves logical batch boundaries across pages");
 
 for (const qualifiedAfter of [0, 700, 1_190]) {
-  const run = async (initialProbabilityBatchSize: number) => {
+  const run = async () => {
     const checked: string[] = [];
+    const batchSizes: number[] = [];
     const result = await fetchProbabilityFeedEventPage({
       requestedLimit: 10,
       ...resolveProbabilityEventProbePolicy(0.4, 0.6),
-      initialProbabilityBatchSize,
       fetchCandidateEvents: async ({ limit, offset }) =>
         Array.from({ length: limit }, (_, i) => ({ id: String(i + offset) })),
       fetchBatchProbabilityMarketIds: async (ids) => {
+        batchSizes.push(ids.length);
         checked.push(...ids);
         return ids.filter(
           (id) => Number(id) >= qualifiedAfter && Number(id) % 2 === 0,
@@ -342,24 +348,29 @@ for (const qualifiedAfter of [0, 700, 1_190]) {
     assert.equal(
       new Set(checked).size,
       checked.length,
-      "growing batches cannot skip or repeat candidates",
+      "batches cannot skip or repeat candidates",
     );
     assert.equal(checked[0], "0");
     assert.equal(checked.at(-1), String(checked.length - 1));
+    assert.ok(batchSizes.every((size) => size === 100));
     return { result, checked };
   };
-  const original = await run(100);
-  const progressive = await run(20);
-  assert.deepEqual(progressive.result.eventRows, original.result.eventRows);
-  assert.deepEqual(progressive.result.marketIds, original.result.marketIds);
-  if (qualifiedAfter === 0) assert.equal(progressive.checked.length, 100);
+  const page = await run();
+  const expectedIds = Array.from({ length: 1_200 - qualifiedAfter }, (_, i) =>
+    String(i + qualifiedAfter),
+  ).filter((id) => Number(id) % 2 === 0);
+  assert.deepEqual(
+    page.result.eventRows.map((row) => row.id),
+    expectedIds.slice(0, 10),
+  );
+  if (qualifiedAfter === 0) assert.equal(page.checked.length, 100);
   if (qualifiedAfter === 1_190)
     assert.equal(
-      progressive.checked.length,
+      page.checked.length,
       1_200,
       "sparse pages keep the original scan budget",
     );
 }
 console.log(
-  "ok - small pages grow batches without shrinking coverage or changing ranked results",
+  "ok - complete batches avoid repeated probes and preserve dense/sparse coverage",
 );

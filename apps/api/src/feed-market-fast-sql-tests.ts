@@ -340,6 +340,48 @@ console.log("ok - grouped projected sorts rank a bounded strict prefix");
 }
 console.log("ok - projected sorts push safe filters before bounded ranking");
 
+for (const firstPage of [
+  { ids: ["wrong-first", "wrong-second"], live_remainder_below_page: false },
+  { ids: ["incomplete"], live_remainder_below_page: true },
+]) {
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      [{ ...firstPage, pm_prefix_count: 0, live_prefix_count: 1_000 }],
+      [
+        {
+          ids: ["right-first", "right-second"],
+          pm_prefix_count: 0,
+          live_prefix_count: 4_000,
+          live_remainder_below_page: true,
+        },
+      ],
+    ],
+  });
+  const page = await fetchFeedMarketIdsForProbabilityProbe(pool, {
+    ...baseInputs,
+    limit: 2,
+    sort: "trending",
+    endWithin: "2026-08-29T12:00:00.000Z",
+  });
+  assert.deepEqual(page.marketIds, ["right-first", "right-second"]);
+  assert.equal(capturedSql.length, 2);
+  assert.ok(capturedParams[0].includes(1_000));
+  assert.ok(capturedParams[1].includes(4_000));
+  assert.match(capturedSql[0], /live_trending_prefix as materialized/);
+  assert.match(
+    capturedSql[0],
+    /min\(sort_value\)[\s\S]*?>\s*\(select min\(base_score\)[\s\S]*?\+ 250/,
+  );
+  assert.doesNotMatch(capturedSql[0], /unified_market_activity_metrics/);
+}
+console.log(
+  "ok - live trending expands until a full page strictly beats all unseen bonuses",
+);
+
 {
   const capturedSql: string[] = [];
   const capturedParams: unknown[][] = [];
