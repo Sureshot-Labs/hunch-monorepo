@@ -22,8 +22,8 @@ try {
   );
   // Only transaction-local fixtures; do not mutate the real funding tables.
   await client.query(`
-    create temporary table funding_operations (id uuid, user_id uuid, created_at timestamptz);
-    create temporary table funding_operation_steps (id uuid, operation_id uuid, segment_id uuid, normalized_action jsonb, action_fingerprint text, action_expires_at timestamptz);
+    create temporary table funding_operations (id uuid, user_id uuid, created_at timestamptz, purpose text, external_recipient_id uuid, wallet_execution_snapshot jsonb);
+    create temporary table funding_operation_steps (id uuid, operation_id uuid, segment_id uuid, normalized_action jsonb, action_fingerprint text, action_expires_at timestamptz, action_validation_result jsonb, payer_requirement text);
     create temporary table funding_operation_segments (id uuid, operation_id uuid, provider_id text);
     create temporary table funding_operation_step_attempts (step_id uuid, outcome text, broadcast_may_have_occurred boolean);
   `);
@@ -31,17 +31,17 @@ try {
     operationId = randomUUID(),
     stepId = randomUUID(),
     segmentId = randomUUID();
-  await client.query("insert into funding_operations values ($1, $2, now())", [
-    operationId,
-    userId,
-  ]);
   await client.query(
-    "insert into funding_operation_steps values ($1,$2,$3,$4,'fingerprint',now() + interval '1 minute')",
+    "insert into funding_operations (id,user_id,created_at,purpose) values ($1, $2, now(),'trade_shortfall')",
+    [operationId, userId],
+  );
+  await client.query(
+    "insert into funding_operation_steps (id,operation_id,segment_id,normalized_action,action_fingerprint,action_expires_at,payer_requirement) values ($1,$2,$3,$4,'fingerprint',now() + interval '1 minute','privy_sponsor')",
     [
       stepId,
       operationId,
       segmentId,
-      { kind: "svm_transaction", actionId: "action_integration" },
+      { kind: "svm_transaction", actionId: "relay:provider-intent:deposit" },
     ],
   );
   await client.query(
@@ -49,7 +49,10 @@ try {
     [segmentId, operationId],
   );
   const read = (owner = userId) =>
-    client.query(relaySponsorCandidateSql, [owner, "action_integration"]);
+    client.query(relaySponsorCandidateSql, [
+      owner,
+      "relay:provider-intent:deposit",
+    ]);
   assert.equal(
     (await read()).rowCount,
     0,
@@ -60,6 +63,18 @@ try {
     [stepId],
   );
   assert.equal((await read()).rowCount, 1);
+  assert.equal((await read()).rows[0]?.payer_requirement, "privy_sponsor");
+  await client.query(
+    "update funding_operation_steps set payer_requirement = 'user'",
+  );
+  assert.equal(
+    (await read()).rows[0]?.payer_requirement,
+    "user",
+    "User-paid direct payments need the same immutable binding",
+  );
+  await client.query(
+    "update funding_operation_steps set payer_requirement = 'privy_sponsor'",
+  );
   assert.equal(
     (await read(randomUUID())).rowCount,
     0,
@@ -70,11 +85,30 @@ try {
   );
   assert.equal((await read()).rowCount, 0);
   await client.query(
+    "update funding_operation_segments set provider_id = 'direct_wallet'",
+  );
+  assert.equal(
+    (await read()).rowCount,
+    0,
+    "Direct route requires withdrawal purpose",
+  );
+  await client.query("update funding_operations set purpose = 'withdrawal'");
+  assert.equal(
+    (await read()).rowCount,
+    0,
+    "Broadcast uncertainty still blocks direct payments",
+  );
+  await client.query(
     "update funding_operation_step_attempts set broadcast_may_have_occurred = false, outcome = 'ambiguous'",
   );
   assert.equal((await read()).rowCount, 0);
   await client.query(
     "update funding_operation_step_attempts set outcome = 'started'",
+  );
+  assert.equal(
+    (await read()).rowCount,
+    1,
+    "Owned unsubmitted direct withdrawal can be verified",
   );
   await client.query(
     "update funding_operation_segments set provider_id = 'not-relay'",

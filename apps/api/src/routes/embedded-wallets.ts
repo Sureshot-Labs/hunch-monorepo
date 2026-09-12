@@ -68,8 +68,11 @@ import {
   validateKalshiLossCloseSponsoredTransaction,
 } from "../services/kalshi-loss-close.js";
 import { resolveAuthAccessPolicy } from "../services/runtime-policies.js";
-import { prepareRelaySolanaSponsorship } from "../funding/execution/relay-solana-sponsorship.js";
-import { relaySolanaSponsorshipEnabled } from "../funding-providers/relay/solana-sponsorship.js";
+import { prepareFundingSolanaPayment } from "../funding/execution/relay-solana-sponsorship.js";
+import {
+  SolanaFundingPaymentError,
+  type VerifiedSolanaFundingPayment,
+} from "../funding/execution/solana-funding-payment.js";
 import {
   fetchSolanaBalanceLamports,
   fetchSolanaTokenBalanceByOwnerAndMint,
@@ -1759,21 +1762,29 @@ async function deleteCachedSolanaPrefundPreparedRequest(inputs: {
   }
 }
 
-async function applyEmbeddedSolanaBackendSponsorshipPolicy(inputs: {
+export async function applyEmbeddedSolanaBackendSponsorshipPolicy(inputs: {
   user: NonNullable<FastifyRequest["user"]>;
   signer: string;
   transactions: EmbeddedSolanaTransactionSpec[];
+  dependencies?: {
+    prepareFunding: typeof prepareFundingSolanaPayment;
+    getRedis: typeof getRedis;
+    lossCloseEnabled: () => Promise<boolean>;
+  };
 }): Promise<{
   transactions: EmbeddedSolanaTransactionSpec[];
   embeddedSolanaSponsorshipEnabled: boolean;
   relayIdempotencyKeys: Record<string, string>;
+  fundingPayment?: VerifiedSolanaFundingPayment;
 }> {
   let sponsoredCount = 0;
   const relayIdempotencyKeys: Record<string, string> = {};
   const transactions: EmbeddedSolanaTransactionSpec[] = [];
-  const authAccessPolicy = await resolveAuthAccessPolicy(pool);
-  const lossCloseSponsorshipEnabled =
-    authAccessPolicy.effective.solanaLossCloseSponsorshipEnabled === true;
+  let fundingPayment: VerifiedSolanaFundingPayment | undefined;
+  const lossCloseSponsorshipEnabled = inputs.dependencies
+    ? await inputs.dependencies.lossCloseEnabled()
+    : (await resolveAuthAccessPolicy(pool)).effective
+        .solanaLossCloseSponsorshipEnabled === true;
 
   for (const transaction of inputs.transactions) {
     const lossCloseTokenId = parseKalshiLossCloseTransactionTokenId(
@@ -1781,17 +1792,17 @@ async function applyEmbeddedSolanaBackendSponsorshipPolicy(inputs: {
     );
     if (!lossCloseTokenId) {
       const relay =
-        inputs.transactions.length === 1 &&
-        relaySolanaSponsorshipEnabled() &&
-        (transaction.id.startsWith("action_") ||
-          transaction.id.startsWith("funding_action_"))
-          ? await prepareRelaySolanaSponsorship({
+        inputs.transactions.length === 1
+          ? await (
+              inputs.dependencies?.prepareFunding ?? prepareFundingSolanaPayment
+            )({
               db: pool,
-              redis: await getRedis(),
+              redis: await (inputs.dependencies?.getRedis ?? getRedis)(),
               userId: inputs.user.id,
               signer: inputs.signer,
               requestId: transaction.id,
               transaction: transaction.transaction,
+              requestedSponsor: transaction.sponsor === true,
             })
           : null;
       if (relay) {
@@ -1800,16 +1811,25 @@ async function applyEmbeddedSolanaBackendSponsorshipPolicy(inputs: {
           transaction.caip2.trim() !== SOLANA_MAINNET_CAIP2
         )
           throw new Error("Relay funding sponsorship requires Solana mainnet.");
-        sponsoredCount++;
+        fundingPayment = relay.payment;
+        if (relay.payment.binding.payer === "privy_sponsor") sponsoredCount++;
         relayIdempotencyKeys[transaction.id] = relay.idempotencyKey;
         transactions.push({
           ...transaction,
           transaction: relay.transaction,
-          sponsor: true,
+          sponsor: relay.payment.binding.payer === "privy_sponsor",
           caip2: SOLANA_MAINNET_CAIP2,
         });
         continue;
       }
+      // No ID prefix grants sponsorship. Do not silently change the requested
+      // payer if an owned funding proof is absent. User-paid native Relay/wrap
+      // actions keep their existing generic guard below.
+      if (transaction.sponsor === true)
+        throw new SolanaFundingPaymentError(
+          "funding_payment_unavailable",
+          "Funding sponsorship could not be verified. Nothing was submitted.",
+        );
       transactions.push({
         ...transaction,
         sponsor: false,
@@ -1852,6 +1872,7 @@ async function applyEmbeddedSolanaBackendSponsorshipPolicy(inputs: {
     transactions,
     embeddedSolanaSponsorshipEnabled: sponsoredCount > 0,
     relayIdempotencyKeys,
+    fundingPayment,
   };
 }
 
@@ -1873,35 +1894,46 @@ function isEmbeddedSolanaPreparedRequestSponsored(
   return body?.sponsor === true;
 }
 
-async function validateEmbeddedSolanaSponsorshipAtExecute(inputs: {
+export async function validateEmbeddedSolanaSponsorshipAtExecute(inputs: {
   user: NonNullable<FastifyRequest["user"]>;
   signer: string;
   requests: EmbeddedPrivyAuthorizationRequest[];
+  prepareFunding?: typeof prepareFundingSolanaPayment;
+  fundingRedis?: Awaited<ReturnType<typeof getRedis>>;
 }): Promise<void> {
-  const sponsoredRequests = inputs.requests.filter((request) =>
-    isEmbeddedSolanaPreparedRequestSponsored(request),
+  const protectedRequests = inputs.requests.filter(
+    (request) =>
+      request.fundingPayment ||
+      isEmbeddedSolanaPreparedRequestSponsored(request),
   );
-  if (!sponsoredRequests.length) return;
-  if (sponsoredRequests.length !== inputs.requests.length) {
+  if (!protectedRequests.length) return;
+  if (protectedRequests.length !== inputs.requests.length) {
     throw new Error(
       "Sponsored Kalshi loss close transactions cannot be mixed with other Solana transactions.",
     );
   }
 
-  for (const request of sponsoredRequests) {
+  for (const request of protectedRequests) {
     const lossCloseTokenId = parseKalshiLossCloseTransactionTokenId(request.id);
     if (!lossCloseTokenId) {
       const transaction = readEmbeddedSolanaPreparedTransaction(request);
       if (inputs.requests.length !== 1 || !transaction)
         throw new Error("Invalid Relay sponsored batch.");
-      const relay = await prepareRelaySolanaSponsorship({
+      const relay = await (
+        inputs.prepareFunding ?? prepareFundingSolanaPayment
+      )({
         db: pool,
-        redis: await getRedis(),
+        redis:
+          inputs.fundingRedis === undefined
+            ? await getRedis()
+            : inputs.fundingRedis,
         userId: inputs.user.id,
         signer: inputs.signer,
         requestId: request.id,
         transaction,
         execute: true,
+        requestedSponsor: isEmbeddedSolanaPreparedRequestSponsored(request),
+        expectedBinding: request.fundingPayment,
       });
       if (
         !relay ||
@@ -2738,6 +2770,7 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           context,
           executionKey,
           transactions: sponsorshipPolicy.transactions,
+          fundingPayment: sponsorshipPolicy.fundingPayment,
           embeddedSolanaSponsorshipEnabled:
             sponsorshipPolicy.embeddedSolanaSponsorshipEnabled,
           onSponsorBalanceFetchError: (error) => {
@@ -2751,6 +2784,17 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           const key = sponsorshipPolicy.relayIdempotencyKeys[prepared.id];
           if (key) prepared.input.headers["privy-idempotency-key"] = key;
         }
+        if (sponsorshipPolicy.fundingPayment && requests[0])
+          app.log.info(
+            {
+              ...sponsorshipPolicy.fundingPayment.binding,
+              stage: "embedded_prepare",
+              finalSponsor: isEmbeddedSolanaPreparedRequestSponsored(
+                requests[0],
+              ),
+            },
+            "Funding Solana payment prepared",
+          );
         await cacheEmbeddedSolanaPreparedRequests({
           signer: context.signer,
           executionKey,
@@ -2769,6 +2813,12 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             error,
             userId: user.id,
             signer,
+            stage: "embedded_prepare",
+            actionIds: request.body.transactions.map((entry) => entry.id),
+            code:
+              error instanceof SolanaFundingPaymentError
+                ? error.code
+                : undefined,
           },
           "Failed to prepare embedded Solana transactions",
         );
@@ -2778,6 +2828,9 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             error instanceof Error
               ? error.message
               : "Failed to prepare embedded Solana transactions",
+          ...(error instanceof SolanaFundingPaymentError
+            ? { code: error.code }
+            : {}),
         });
       }
     },
@@ -2827,6 +2880,17 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
                 signer: context.signer,
                 requests,
               });
+              if (requests[0]?.fundingPayment)
+                app.log.info(
+                  {
+                    ...requests[0].fundingPayment,
+                    stage: "embedded_execute",
+                    finalSponsor: isEmbeddedSolanaPreparedRequestSponsored(
+                      requests[0],
+                    ),
+                  },
+                  "Funding Solana payment verified before submission",
+                );
               return executeEmbeddedSolanaTransactionRequests({
                 requests,
                 signatures: request.body.signedRequests,
@@ -2835,7 +2899,8 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             const prepared = requests.length === 1 ? requests[0] : null;
             const relayKey =
               prepared &&
-              isEmbeddedSolanaPreparedRequestSponsored(prepared) &&
+              (prepared.fundingPayment ||
+                isEmbeddedSolanaPreparedRequestSponsored(prepared)) &&
               !parseKalshiLossCloseTransactionTokenId(prepared.id)
                 ? prepared.input.headers["privy-idempotency-key"]
                 : null;
@@ -2869,6 +2934,11 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             userId: user.id,
             executionKey: request.body.executionKey,
             signer,
+            stage: "embedded_execute",
+            code:
+              error instanceof SolanaFundingPaymentError
+                ? error.code
+                : undefined,
           },
           "Failed to execute embedded Solana transactions",
         );
@@ -2878,6 +2948,9 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             error instanceof Error
               ? error.message
               : "Failed to execute embedded Solana transactions",
+          ...(error instanceof SolanaFundingPaymentError
+            ? { code: error.code }
+            : {}),
         });
       }
     },

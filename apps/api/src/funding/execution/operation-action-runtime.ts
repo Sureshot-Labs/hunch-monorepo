@@ -23,6 +23,7 @@ import {
   fetchFundingOperationStepForUser,
   finishFundingStepAttemptForUser,
   startFundingStepAttemptForUserInTransaction,
+  type FundingOperationStep,
 } from "../persistence/funding-evidence-repository.js";
 import {
   fetchFundingOperationForUser,
@@ -95,10 +96,11 @@ function exactWalletProfile(
   );
 }
 
-function assertClientExecutable(
+export function assertClientExecutable(
   action: NormalizedAction,
   executorId: string,
   profiles: readonly WalletExecutionProfile[],
+  reviewedSolanaPayer?: FundingOperationStep["payerRequirement"],
 ): Readonly<{
   controllerWalletRef: string;
   executionMode: "web_client" | "privy_authorization" | "venue_relayer";
@@ -201,6 +203,15 @@ function assertClientExecutable(
     action,
     profile,
   });
+  if (
+    action.kind === "svm_transaction" &&
+    reviewedSolanaPayer !== undefined &&
+    sponsorship.payerRequirement !== reviewedSolanaPayer
+  )
+    throw new FundingPersistenceError(
+      "quote_invalidated",
+      "The reviewed Solana fee payer changed; review this transfer again.",
+    );
   return {
     controllerWalletRef: profile.controllerWalletRef,
     controllerProfile,
@@ -313,6 +324,13 @@ export class FundingOperationActionRuntime {
       action,
       step.executorId,
       account.ownership?.wallets ?? [],
+      // Direct withdrawals recheck their exact cost and frozen payer below.
+      externalRecipientId &&
+        isDirectWithdrawalExecutionKind(
+          operation.supportMetadata.withdrawalExecutionKind,
+        )
+        ? undefined
+        : step.payerRequirement,
     );
     // Bind a server-observed lifetime BEFORE signing. A delayed registration
     // can then be reconciled even if the wallet dialog outlives this blockhash.

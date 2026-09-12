@@ -19,6 +19,11 @@ import {
 } from "../privy-service.js";
 import { fetchSolanaBalanceLamports } from "./solana-rpc.js";
 import { checkRelaySplGas } from "../funding-providers/relay/solana-gas.js";
+import {
+  SolanaFundingPaymentError,
+  type SolanaFundingPaymentBinding,
+  type VerifiedSolanaFundingPayment,
+} from "../funding/execution/solana-funding-payment.js";
 
 const PRIVY_WALLET_API_BASE_URL = "https://api.privy.io";
 const SPL_TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -411,6 +416,8 @@ function normalizeEmbeddedSolanaRpcErrorMessage(message: string): string {
 }
 
 export type EmbeddedPrivyAuthorizationRequest = {
+  /** Cached server metadata, not part of the signed Privy request body. */
+  fundingPayment?: SolanaFundingPaymentBinding;
   id: string;
   label: string;
   input: PrivyWalletApiRequestSignatureInput;
@@ -615,6 +622,7 @@ export function buildEmbeddedSolanaSignAndSendRequest(inputs: {
   executionKey?: string | null;
   embeddedSolanaSponsorshipEnabled?: boolean;
   sponsorBalanceLamports?: bigint | null;
+  fundingPayment?: VerifiedSolanaFundingPayment;
 }): EmbeddedPrivyAuthorizationRequest {
   const transaction = inputs.transaction.transaction.trim();
   if (!transaction) {
@@ -623,7 +631,20 @@ export function buildEmbeddedSolanaSignAndSendRequest(inputs: {
     );
   }
 
-  return createPrivyWalletRpcRequest({
+  const payment = inputs.fundingPayment;
+  if (
+    payment &&
+    (payment.signer !== inputs.context.signer ||
+      payment.transaction !== transaction ||
+      payment.requiredSignerLamports < 0n ||
+      (inputs.transaction.caip2 &&
+        inputs.transaction.caip2 !== SOLANA_MAINNET_CAIP2))
+  )
+    throw new SolanaFundingPaymentError(
+      "funding_payment_mismatch",
+      "Verified funding payment does not match this Solana message.",
+    );
+  const prepared = createPrivyWalletRpcRequest({
     id: inputs.transaction.id,
     label: inputs.transaction.label,
     walletId: inputs.context.walletId,
@@ -636,13 +657,15 @@ export function buildEmbeddedSolanaSignAndSendRequest(inputs: {
     body: {
       chain_type: "solana",
       method: "signAndSendTransaction",
-      sponsor: resolveEmbeddedSolanaSponsor({
-        context: inputs.context,
-        transaction: inputs.transaction,
-        embeddedSolanaSponsorshipEnabled:
-          inputs.embeddedSolanaSponsorshipEnabled === true,
-        sponsorBalanceLamports: inputs.sponsorBalanceLamports,
-      }),
+      sponsor: payment
+        ? payment.binding.payer === "privy_sponsor"
+        : resolveEmbeddedSolanaSponsor({
+            context: inputs.context,
+            transaction: inputs.transaction,
+            embeddedSolanaSponsorshipEnabled:
+              inputs.embeddedSolanaSponsorshipEnabled === true,
+            sponsorBalanceLamports: inputs.sponsorBalanceLamports,
+          }),
       params: {
         transaction,
         encoding: inputs.transaction.encoding ?? "base64",
@@ -650,6 +673,8 @@ export function buildEmbeddedSolanaSignAndSendRequest(inputs: {
       caip2: inputs.transaction.caip2?.trim() || SOLANA_MAINNET_CAIP2,
     },
   });
+  if (payment) prepared.fundingPayment = payment.binding;
+  return prepared;
 }
 
 async function fetchEmbeddedSolanaSponsorBalanceLamports(
@@ -713,7 +738,41 @@ export async function prepareEmbeddedSolanaTransactionRequests(inputs: {
   fetchSponsorBalanceLamports?: EmbeddedSolanaSponsorBalanceFetcher;
   onSponsorBalanceFetchError?: (error: unknown) => void;
   checkRelayGas?: typeof checkRelaySplGas;
+  fundingPayment?: VerifiedSolanaFundingPayment;
 }): Promise<EmbeddedPrivyAuthorizationRequest[]> {
+  if (inputs.fundingPayment) {
+    if (inputs.transactions.length !== 1 || !inputs.transactions[0])
+      throw new SolanaFundingPaymentError(
+        "funding_payment_mismatch",
+        "Verified funding payments cannot be mixed with other transactions.",
+      );
+    // Ownership, exact bytes, costs and simulation were verified by the funding
+    // boundary. Do not re-select a payer or apply generic native/wrap heuristics.
+    const prepared = buildEmbeddedSolanaSignAndSendRequest({
+      ...inputs,
+      transaction: inputs.transactions[0],
+    });
+    if (inputs.fundingPayment.requiredSignerLamports > 0n) {
+      let balance: bigint;
+      try {
+        balance = await (
+          inputs.fetchSponsorBalanceLamports ??
+          fetchEmbeddedSolanaSponsorBalanceLamports
+        )(inputs.context);
+      } catch {
+        throw new SolanaFundingPaymentError(
+          "funding_payment_unavailable",
+          EMBEDDED_SOLANA_BALANCE_VERIFICATION_ERROR,
+        );
+      }
+      if (balance < inputs.fundingPayment.requiredSignerLamports)
+        throw buildEmbeddedSolanaSolRequiredError({
+          requiredLamports: inputs.fundingPayment.requiredSignerLamports,
+          currentLamports: balance,
+        });
+    }
+    return [prepared];
+  }
   const embeddedSolanaSponsorshipEnabled =
     inputs.embeddedSolanaSponsorshipEnabled === true;
   const hasNativeSolSourceTransaction =
