@@ -6,6 +6,7 @@ import type { Pool } from "@hunch/infra";
 import { createIntegrationTestPool } from "./test-database-target.js";
 import {
   fetchFeedMarketIdsForProbabilityProbe,
+  fetchObservedCanonicalProbabilityMarketIds,
   type FeedInputs,
 } from "./repos/unified-read.js";
 import {
@@ -22,6 +23,10 @@ const db = await createIntegrationTestPool({
 const client = await db.connect();
 let schemaCreated = false;
 const captured: Array<{ sql: string; params: unknown[] }> = [];
+let captureProbabilitySource = false;
+const sourceCaptured = new Error(
+  "probability source captured before execution",
+);
 const pool = {
   connect: async () => {
     const connection = await db.connect();
@@ -30,6 +35,8 @@ const pool = {
       query: async (sql: string, params: unknown[] = []) => {
         if (/^\s*(with|select)/i.test(sql))
           captured.push({ sql, params: [...params] });
+        if (captureProbabilitySource && /probability_market_sources/.test(sql))
+          throw sourceCaptured;
         return connection.query(sql, params);
       },
     };
@@ -253,6 +260,108 @@ try {
       );
     console.log(
       `ok - live trending equals full exact scan: ${JSON.stringify(variant)}`,
+    );
+  }
+
+  // Verify the shared strict/grace read independently of token-book caching.
+  await client.query(`
+    alter table unified_markets add column token_yes text,
+      add column token_no text, add column clob_token_ids text;
+    update unified_markets set token_yes='yes-token',token_no='no-token'
+      where id='l-001501';
+    update unified_markets set clob_token_ids='["yes-clob","no-clob"]'
+      where id='grace-valid';
+    insert into unified_events values
+      ('inactive','polymarket','CLOSED',null,null,'test'),
+      ('undated','polymarket','ACTIVE',null,null,'test');
+    insert into unified_markets
+      (id,event_id,venue,venue_market_id,status,volume_total,metadata)
+    values
+      ('inactive-event','inactive','polymarket','inactive-event','ACTIVE',1,'{}'),
+      ('inactive-market','undated','polymarket','inactive-market','CLOSED',1,'{}'),
+      ('undated-strict','undated','polymarket','undated-strict','ACTIVE',1,null),
+      ('native-false','undated','kalshi','native-false','ACTIVE',1,'{"dflowNativeAcceptingOrders":false}'),
+      ('native-missing','undated','kalshi','native-missing','ACTIVE',1,null);
+  `);
+  const eventIds = ["old", "new", "excluded", "inactive", "undated"];
+  for (const variant of [
+    {},
+    { endWithin: undefined },
+    { ageSince: "2026-09-10T00:00:00Z" },
+    { venues: [] },
+    { venues: ["polymarket"] },
+  ]) {
+    const input = {
+      ...base,
+      view: "events" as const,
+      venues: undefined,
+      ...variant,
+    };
+    captured.length = 0;
+    captureProbabilitySource = true;
+    try {
+      await assert.rejects(
+        fetchObservedCanonicalProbabilityMarketIds(pool, {
+          ...input,
+          minProb: 0.4,
+          maxProb: 0.6,
+          candidateEventIds: eventIds,
+        }),
+        (error) => error === sourceCaptured,
+      );
+    } finally {
+      captureProbabilitySource = false;
+    }
+    const source = captured[0];
+    const actual = await client.query(source.sql, source.params);
+    const expected = await client.query(
+      `
+      select m.id as market_id,m.token_yes,m.token_no,m.clob_token_ids
+      from unified_markets m join unified_events e on e.id=m.event_id
+      left join polymarket_markets pm on m.venue='polymarket' and pm.id=m.venue_market_id
+      where e.id=any($2::text[]) and e.status='ACTIVE'
+        and ($3::timestamptz is null or (e.end_date>$1::timestamptz and e.end_date<=$3))
+        and ($4::timestamptz is null or e.start_date >= $4)
+        and ($5::text[] is null or e.venue=any($5))
+        and (${buildStrictIndexedMarketSql({ marketAlias: "m", eventAlias: "e", nowParam: "$1" })}
+          or ${buildPolymarketGraceMarketSql({ marketAlias: "m", eventAlias: "e", nowParam: "$1", pmAlias: "pm" })})
+        and ${buildRenderableMarketSql({ alias: "m" })}
+    `,
+      [
+        input.nowParam,
+        eventIds,
+        input.endWithin ?? null,
+        input.ageSince ?? null,
+        input.venues ?? null,
+      ],
+    );
+    const byId = (a: { market_id: string }, b: { market_id: string }) =>
+      a.market_id.localeCompare(b.market_id);
+    assert.deepEqual(actual.rows.sort(byId), expected.rows.sort(byId));
+    assert.equal(
+      new Set(actual.rows.map((row) => row.market_id)).size,
+      actual.rowCount,
+      "strict and grace must remain disjoint",
+    );
+    const plan = await client.query(
+      `explain (analyze,buffers,format json) ${source.sql}`,
+      source.params,
+    );
+    const relationScans = (node: {
+      "Relation Name"?: string;
+      Plans?: unknown[];
+    }): number =>
+      Number(node["Relation Name"] === "unified_markets") +
+      (node.Plans ?? []).reduce<number>(
+        (total, child) => total + relationScans(child as typeof node),
+        0,
+      );
+    assert.ok(
+      relationScans(plan.rows[0]["QUERY PLAN"][0].Plan) <= 1,
+      "strict and grace must not read the market relation twice",
+    );
+    console.log(
+      `ok - shared probability sources equal strict/grace oracle: ${JSON.stringify(variant)}`,
     );
   }
 } finally {

@@ -372,6 +372,15 @@ for (const firstPage of [
   assert.ok(capturedParams[0].includes(1_000));
   assert.ok(capturedParams[1].includes(4_000));
   assert.match(capturedSql[0], /live_trending_prefix as materialized/);
+  assert.match(capturedSql[0], /live_trending_markets as materialized/);
+  assert.match(
+    capturedSql[0],
+    /where source_market.id = selected_market.market_id\s+offset 0/,
+  );
+  assert.match(
+    capturedSql[0],
+    /orderable_market_candidates_pm_unvalidated_candidates as materialized[\s\S]*?from live_trending_markets m\s+join unified_events/,
+  );
   assert.match(
     capturedSql[0],
     /min\(sort_value\)[\s\S]*?>\s*\(select min\(base_score\)[\s\S]*?\+ 250/,

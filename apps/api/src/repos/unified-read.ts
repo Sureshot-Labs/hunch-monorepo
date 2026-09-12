@@ -260,7 +260,19 @@ export function buildEventDurationExistsSql(args: {
   )`;
 }
 
+function feedMarketCandidateColumns(marketAlias: string): string {
+  return `
+    ${marketAlias}.id, ${marketAlias}.event_id, ${marketAlias}.venue_market_id,
+    ${marketAlias}.venue, ${marketAlias}.volume_total, ${marketAlias}.volume_24h,
+    ${marketAlias}.liquidity, ${marketAlias}.open_interest,
+    ${marketAlias}.best_bid, ${marketAlias}.best_ask, ${marketAlias}.last_price,
+    ${marketAlias}.close_time, ${marketAlias}.expiration_time,
+    ${marketAlias}.duration_minutes
+  `;
+}
+
 function buildBroadOrderableMarketCandidatesCte(args: {
+  marketSourceCte?: string | null;
   candidateMarketIdsCte?: string | null;
   candidateEventIdsCte?: string | null;
   candidateMarketIdsParam?: string | null;
@@ -292,6 +304,8 @@ function buildBroadOrderableMarketCandidatesCte(args: {
   const pmAvailabilityCte = `${safeCtePrefix}_pm_availability`;
   const pmGraceCandidatesCte = `${safeCtePrefix}_pm_grace_candidates`;
   const candidateMarketIdsCte = args.candidateMarketIdsCte ?? null;
+  const marketSource = args.marketSourceCte ?? "unified_markets";
+  assertSafeSqlIdentifier(marketSource, "market source CTE");
   if (candidateMarketIdsCte) {
     assertSafeSqlIdentifier(candidateMarketIdsCte, "candidate market ids CTE");
   }
@@ -315,22 +329,6 @@ function buildBroadOrderableMarketCandidatesCte(args: {
     .filter(Boolean)
     .map((clause) => `and ${clause}`)
     .join("\n        ");
-  const marketCandidateColumns = (marketAlias: string) => `
-        ${marketAlias}.id,
-        ${marketAlias}.event_id,
-        ${marketAlias}.venue_market_id,
-        ${marketAlias}.venue,
-        ${marketAlias}.volume_total,
-        ${marketAlias}.volume_24h,
-        ${marketAlias}.liquidity,
-        ${marketAlias}.open_interest,
-        ${marketAlias}.best_bid,
-        ${marketAlias}.best_ask,
-        ${marketAlias}.last_price,
-        ${marketAlias}.close_time,
-        ${marketAlias}.expiration_time,
-        ${marketAlias}.duration_minutes
-  `;
   const rankedCandidateColumns = (marketAlias: string, eventAlias: string) => `
         ${marketAlias}.id as market_id,
         ${marketAlias}.event_id,
@@ -369,7 +367,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
   `;
   const includeRankingColumns = args.includeRankingColumns ?? false;
   const strictMarketBaseColumns = includeRankingColumns
-    ? marketCandidateColumns("m")
+    ? feedMarketCandidateColumns("m")
     : `
         m.id as market_id,
         m.event_id
@@ -387,7 +385,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
     `
     : `
       from ${strictMarketBaseCte} c
-      join unified_markets m on m.id = c.market_id
+      join ${marketSource} m on m.id = c.market_id
       join unified_events e on e.id = c.event_id
     `;
   const graceCandidateColumns = includeRankingColumns
@@ -408,7 +406,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
   const strictMarketBaseSql = `
       select
         ${strictMarketBaseColumns}
-      from unified_markets m
+      from ${marketSource} m
       ${candidateMarketJoin}
       ${candidateEventJoin}
       where ${buildStrictIndexedMarketSql({
@@ -441,8 +439,12 @@ function buildBroadOrderableMarketCandidatesCte(args: {
     ${pmUnvalidatedCandidatesCte} as materialized (
       select
         ${rankedCandidateColumns("m", "e")}
-      from ${pmRecentCandidatesCte} c
-      join unified_markets m on m.id = c.market_id
+      ${
+        args.marketSourceCte
+          ? `from ${marketSource} m`
+          : `from ${pmRecentCandidatesCte} c
+      join ${marketSource} m on m.id = c.market_id`
+      }
       join unified_events e on e.id = m.event_id
       where ${buildPolymarketGraceCandidateSql({
         marketAlias: "m",
@@ -506,7 +508,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
       select
         ${graceCandidateColumns}
       from ${pmRecentCandidatesCte} c
-      join unified_markets m on m.id = c.market_id
+      join ${marketSource} m on m.id = c.market_id
       join unified_events e on e.id = m.event_id
       join ${pmAvailabilityCte} pm_filter
         on pm_filter.id = c.venue_market_id
@@ -543,7 +545,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         m.id as market_id,
         m.event_id,
         m.venue_market_id
-      from unified_markets m
+      from ${marketSource} m
       ${candidateMarketJoin}
       ${candidateEventJoin}
       where m.status = 'ACTIVE'
@@ -566,7 +568,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
         m.event_id,
         m.venue_market_id
       from unified_events e
-      join unified_markets m on m.event_id = e.id
+      join ${marketSource} m on m.event_id = e.id
       ${candidateMarketJoin}
       ${candidateEventJoin}
       where e.status = 'ACTIVE'
@@ -1215,29 +1217,20 @@ async function fetchObservedCanonicalProbabilityMarketsUncached(
       expressions.renderableMarketExpr,
       ...marketOnlyExtraSql,
     ];
+    const strictMarketSql = buildStrictIndexedMarketSql({
+      marketAlias: "m",
+      eventAlias: "candidate_event",
+      nowParam,
+    });
+    const graceMarketSql = buildPolymarketGraceCandidateSql({
+      marketAlias: "m",
+      eventAlias: "candidate_event",
+      nowParam,
+    });
     const candidateEventMarketSql = `
             with ${probabilityCandidateEventsCte},
-            probability_strict_markets as materialized (
-              select strict_market.*
-              from probability_candidate_events candidate_event
-              join lateral (
-                select
-                  m.id as market_id,
-                  m.token_yes,
-                  m.token_no,
-                  m.clob_token_ids
-                from unified_markets m
-                where m.event_id = candidate_event.id
-                  and ${buildStrictIndexedMarketSql({
-                    marketAlias: "m",
-                    eventAlias: "candidate_event",
-                    nowParam,
-                  })}
-                  and ${marketWhere.join(" and ")}
-              ) strict_market on true
-            ),
-            probability_grace_markets as materialized (
-              select grace_market.*
+            probability_market_sources as materialized (
+              select selected_market.*
               from probability_candidate_events candidate_event
               join lateral (
                 select
@@ -1245,16 +1238,25 @@ async function fetchObservedCanonicalProbabilityMarketsUncached(
                   m.venue_market_id,
                   m.token_yes,
                   m.token_no,
-                  m.clob_token_ids
+                  m.clob_token_ids,
+                  ${strictMarketSql} as is_strict
                 from unified_markets m
                 where m.event_id = candidate_event.id
-                  and ${buildPolymarketGraceCandidateSql({
-                    marketAlias: "m",
-                    eventAlias: "candidate_event",
-                    nowParam,
-                  })}
+                  and m.status = 'ACTIVE'
+                  and ${buildNativeTradableMarketSql("m")}
+                  and (${strictMarketSql} or ${graceMarketSql})
                   and ${marketWhere.join(" and ")}
-              ) grace_market on true
+              ) selected_market on true
+            ),
+            probability_strict_markets as materialized (
+              select market_id, token_yes, token_no, clob_token_ids
+              from probability_market_sources
+              where is_strict
+            ),
+            probability_grace_markets as materialized (
+              select market_id, venue_market_id, token_yes, token_no, clob_token_ids
+              from probability_market_sources
+              where not is_strict
             ),
             probability_grace_market_ids as materialized (
               select array_agg(distinct venue_market_id) as venue_market_ids
@@ -5397,12 +5399,25 @@ async function fetchFeedMarketIdsFast(
           ${inputs.venues?.length === 0 ? "and false" : ""}
         order by ${liveBaseScoreSql} desc nulls last, m.id
         limit ${livePrefixLimitParam}
+      ),
+      live_trending_markets as materialized (
+        select ${feedMarketCandidateColumns("m")}, m.status,
+          case when m.venue = 'kalshi'
+            then jsonb_build_object('dflowNativeAcceptingOrders', m.metadata->'dflowNativeAcceptingOrders')
+            else '{}'::jsonb
+          end as metadata
+        from live_trending_prefix selected_market
+        cross join lateral (
+          select * from unified_markets source_market
+          where source_market.id = selected_market.market_id
+          offset 0
+        ) m
       )`
     : null;
   const orderableCandidateCte = buildBroadOrderableMarketCandidatesCte({
-    candidateMarketIdsCte: useLiveTrendingPrefix
-      ? "live_trending_prefix"
-      : null,
+    // Read the bounded rows once. A join to IDs alone lets PostgreSQL scan
+    // broad availability indexes before intersecting the selected prefix.
+    marketSourceCte: useLiveTrendingPrefix ? "live_trending_markets" : null,
     candidateEventIdsCte: preRankEventCte ? preRankEventCteName : null,
     includeRankingColumns: true,
     materialized: true,

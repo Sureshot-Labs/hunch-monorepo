@@ -238,6 +238,13 @@ assert.equal(
 assert.deepEqual(topParams.slice(-2), [[["yes-1", "yes-2"]], [["no-2"]]]);
 console.log("ok - candidate event batches narrow NO tops for each range");
 console.log("ok - feed probability candidates are scoped and time-bounded");
+assert.match(candidateSql, /probability_market_sources as materialized/);
+assert.equal((candidateSql.match(/from unified_markets m/g) ?? []).length, 1);
+assert.match(
+  candidateSql,
+  /from probability_market_sources\s+where not is_strict/,
+);
+console.log("ok - strict and grace probability reuse one market read");
 
 {
   let scopedCandidateSql = "";
