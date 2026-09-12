@@ -5436,6 +5436,11 @@ async function fetchFeedMarketIdsFast(
     useLiveTrendingPrefix && inputs.venues?.length ? add(inputs.venues) : null;
   const liveBaseScoreSql = `(coalesce(${marketVolumeDisplayExpr}, 0) * 0.4
     + coalesce(${marketLiquidityDisplayExpr}, 0) * 0.3)`;
+  // Duration is a market-local predicate: exclude unrelated durations before
+  // the score prefix, without weakening the exact unseen-score proof.
+  const liveDurationSql = useLiveTrendingPrefix
+    ? buildMarketDurationSql(inputs, add, "m")
+    : null;
   const livePrefixCte = useLiveTrendingPrefix
     ? `live_trending_prefix as materialized (
         select m.id as market_id, ${liveBaseScoreSql} as base_score
@@ -5445,6 +5450,7 @@ async function fetchFeedMarketIdsFast(
           and ${renderableMarketExpr}
           ${liveVenueParam ? `and m.venue = any(${liveVenueParam}::text[])` : ""}
           ${inputs.venues?.length === 0 ? "and false" : ""}
+          ${liveDurationSql ? `and ${liveDurationSql}` : ""}
         order by ${liveBaseScoreSql} desc nulls last, m.id
         limit ${livePrefixLimitParam}
       ),

@@ -3,7 +3,6 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import {
   getVenueLifecycleCapabilities,
   HUNCH_VENUES,
-  normalizeHunchVenue,
   venueHasLifecycleCapability,
 } from "@hunch/shared";
 
@@ -20,19 +19,16 @@ import {
   resolveMinTotalVolumeFilter,
 } from "../schemas/feed.js";
 import { resolveVenueLifecyclePolicy } from "../services/runtime-policies.js";
+import {
+  createVenueCoverageCache,
+  VENUE_COVERAGE_STALE_SECONDS,
+  type VenueCoverageRow,
+} from "../services/venue-coverage-cache.js";
 
 type CategoryRow = {
   venue: string;
   category: string;
   events: number;
-};
-
-type VenueCoverageRow = {
-  venue: string;
-  active_markets: number;
-  markets_with_volume: number;
-  markets_with_liquidity: number;
-  markets_with_price: number;
 };
 
 const DYNAMIC_CATEGORY_FACETS_ENABLED = false;
@@ -456,30 +452,24 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
-  z.get("/meta/venues", async (_req, reply) => {
-    const lifecycle = await resolveVenueLifecyclePolicy(pool);
-    const cacheKey = `meta:venues:v2:${lifecycle.revision}`;
-    const r = await getRedis();
-
-    if (r) {
-      const cached = await r.get(cacheKey);
-      if (cached) {
-        reply.header("x-cache", "hit");
-        reply.header("Content-Type", "application/json; charset=utf-8");
-        reply.header(
-          "Cache-Control",
-          "public, max-age=30, stale-while-revalidate=60",
-        );
-        return reply.send(cached);
-      }
-    }
-
-    const discoverableVenues = HUNCH_VENUES.filter((venue) =>
-      venueHasLifecycleCapability(lifecycle.effective, venue, "discovery"),
-    );
-    const rows = await queryRowsWithLocalSettings<VenueCoverageRow>(
-      pool,
-      `
+  const venueCoverage = createVenueCoverageCache({
+    load: async (key) => {
+      const redis = await getRedis();
+      const body = await redis?.get(key);
+      return body ? JSON.parse(body) : null;
+    },
+    save: async (key, snapshot) => {
+      const redis = await getRedis();
+      await redis?.set(key, JSON.stringify(snapshot), {
+        EX: VENUE_COVERAGE_STALE_SECONDS,
+      });
+    },
+    onError: (error) =>
+      app.log.warn({ err: error }, "Venue coverage background refresh failed"),
+    refresh: (discoverableVenues) =>
+      queryRowsWithLocalSettings<VenueCoverageRow>(
+        pool,
+        `
         with requested_venues as (
           select unnest($1::text[]) as venue
         ),
@@ -513,45 +503,62 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
         left join active_coverage coverage on coverage.venue = requested.venue
         order by requested.venue asc
       `,
-      [discoverableVenues],
-      { statementTimeoutMs: env.feedFilterTimeoutMs },
+        [discoverableVenues],
+        { statementTimeoutMs: 45_000, jitOff: true },
+      ),
+  });
+
+  z.get("/meta/venues", async (_req, reply) => {
+    const lifecycle = await resolveVenueLifecyclePolicy(pool);
+    const discoverableVenues = HUNCH_VENUES.filter((venue) =>
+      venueHasLifecycleCapability(lifecycle.effective, venue, "discovery"),
     );
+    const coverageSnapshot = venueCoverage.get(discoverableVenues);
+    const rows = coverageSnapshot.rows;
 
-    const venues = rows.flatMap((row) => {
-      const venue = normalizeHunchVenue(row.venue);
-      if (
-        !venue ||
-        !venueHasLifecycleCapability(lifecycle.effective, venue, "discovery")
-      ) {
-        return [];
-      }
-      const activeMarkets = Number(row.active_markets) || 0;
-      const withVolume = Number(row.markets_with_volume) || 0;
-      const withLiquidity = Number(row.markets_with_liquidity) || 0;
-      const withPrice = Number(row.markets_with_price) || 0;
-      const volumeCoverage = activeMarkets > 0 ? withVolume / activeMarkets : 0;
-      const liquidityCoverage =
-        activeMarkets > 0 ? withLiquidity / activeMarkets : 0;
-      const priceCoverage = activeMarkets > 0 ? withPrice / activeMarkets : 0;
-      const score = (volumeCoverage + liquidityCoverage + priceCoverage) / 3;
+    const venues = discoverableVenues.map((venue) => {
+      const row = rows?.find((row) => row.venue === venue);
+      const activeMarkets = row?.active_markets ?? null;
+      const withVolume = row?.markets_with_volume ?? null;
+      const withLiquidity = row?.markets_with_liquidity ?? null;
+      const withPrice = row?.markets_with_price ?? null;
+      const volumeCoverage = row
+        ? row.active_markets > 0
+          ? row.markets_with_volume / row.active_markets
+          : 0
+        : null;
+      const liquidityCoverage = row
+        ? row.active_markets > 0
+          ? row.markets_with_liquidity / row.active_markets
+          : 0
+        : null;
+      const priceCoverage = row
+        ? row.active_markets > 0
+          ? row.markets_with_price / row.active_markets
+          : 0
+        : null;
+      const score =
+        volumeCoverage == null ||
+        liquidityCoverage == null ||
+        priceCoverage == null
+          ? null
+          : (volumeCoverage + liquidityCoverage + priceCoverage) / 3;
 
-      return [
-        {
-          venue,
-          activeMarkets,
-          counts: {
-            withVolume,
-            withLiquidity,
-            withPrice,
-          },
-          coverage: {
-            volume: volumeCoverage,
-            liquidity: liquidityCoverage,
-            price: priceCoverage,
-            score,
-          },
+      return {
+        venue,
+        activeMarkets,
+        counts: {
+          withVolume,
+          withLiquidity,
+          withPrice,
         },
-      ];
+        coverage: {
+          volume: volumeCoverage,
+          liquidity: liquidityCoverage,
+          price: priceCoverage,
+          score,
+        },
+      };
     });
 
     const policyVenues = Object.fromEntries(
@@ -570,6 +577,8 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
     const payload = {
       total: venues.length,
       generatedAt: new Date().toISOString(),
+      coverageStatus: coverageSnapshot.status,
+      coverageAsOf: coverageSnapshot.measuredAt,
       venues,
       policy: {
         source: lifecycle.source,
@@ -581,10 +590,10 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
     };
     const body = JSON.stringify(payload);
 
-    if (r) {
-      await r.set(cacheKey, body, { EX: 60 });
-      reply.header("x-cache", "miss");
-    }
+    reply.header(
+      "x-cache",
+      coverageSnapshot.status === "ready" ? "hit" : coverageSnapshot.status,
+    );
 
     reply.header("Content-Type", "application/json; charset=utf-8");
     reply.header(

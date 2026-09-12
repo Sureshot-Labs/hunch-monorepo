@@ -79,7 +79,7 @@ try {
     insert into unified_markets
     select 'l-' || lpad(sample_row::text, 6, '0'),
       case when sample_row <= 1500 then 'excluded' when sample_row % 2 = 0 then 'new' else 'old' end,
-      'limitless', lpad(sample_row::text, 6, '0'), 'ACTIVE', 60,
+      'limitless', lpad(sample_row::text, 6, '0'), 'ACTIVE', case when sample_row > 8000 then 5 else 60 end,
       (20001 - sample_row) * 100, 0,
       case when sample_row % 3=0 then 0 else sample_row % 101 end,
       sample_row % 53, 0.4, 0.6, null, '2026-09-14', '2026-09-14', '{}'
@@ -179,6 +179,9 @@ try {
     {},
     { endWithin: undefined },
     { endWithin: undefined, offset: 10 },
+    { endWithin: undefined, durationMinutes: [5] },
+    { endWithin: undefined, durationMinutes: [5, 15], offset: 10 },
+    { endWithin: undefined, durationMinutes: [15] },
     { offset: 10 },
     { offset: 20 },
     { minVol: 100 },
@@ -205,6 +208,7 @@ try {
         and ($4::timestamptz is null or e.start_date >= $4)
         and ($5::numeric <= 0 or coalesce(nullif(m.liquidity,0),nullif(m.open_interest,0)) >= $5)
         and ($6::numeric <= 1e-9 or m.volume_total >= $6)
+        and ($11::int[] is null or m.duration_minutes=any($11::int[]))
       order by (
         case when m.volume_total>0 then m.volume_total else 0 end * 0.4
         + coalesce(nullif(m.liquidity,0),nullif(m.open_interest,0),0) * 0.3
@@ -223,6 +227,7 @@ try {
         input.sevenDaysFromNow,
         input.limit,
         input.offset,
+        input.durationMinutes ?? null,
       ],
     );
     assert.deepEqual(
