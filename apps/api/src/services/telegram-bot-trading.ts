@@ -2234,6 +2234,42 @@ function effectiveMaxTradeAmountUsd(
   });
 }
 
+export function telegramTradeInputQuoteFailure(input: {
+  action: string;
+  orderType: string | null | undefined;
+  venue: string;
+  meetsVenueMinimum: boolean | null | undefined;
+  minimumOrderSizeShares: number | null | undefined;
+  maxSpendUsd: number | null;
+  maxAmountUsd: number;
+  deliveryMode: StoredTelegramBuyDeliveryMode;
+}): { reason: string; body: string } | null {
+  if (isTelegramVenueMinimumBlocking(input)) {
+    const minimum = input.minimumOrderSizeShares;
+    return {
+      reason: "venue_minimum",
+      body:
+        minimum != null && Number.isFinite(minimum) && minimum > 0
+          ? `The venue requires at least ${minimum} shares. Increase the amount and retry.`
+          : "This amount is below the venue minimum. Increase the amount and retry.",
+    };
+  }
+  if (input.action.toLowerCase() !== "buy") return null;
+  if (input.maxSpendUsd == null || !Number.isFinite(input.maxSpendUsd)) {
+    return {
+      reason: "quote_unavailable",
+      body: "Maximum total spend could not be checked. Retry the quote; nothing was submitted.",
+    };
+  }
+  if (input.maxSpendUsd > input.maxAmountUsd) {
+    return {
+      reason: "maximum_spend_exceeded",
+      body: `Maximum total spend ${formatUsd(input.maxSpendUsd)} exceeds the ${input.deliveryMode === "app_handoff" ? "Hunch confirmation" : "bot trading"} limit of ${formatUsd(input.maxAmountUsd)}. Reduce the amount; fees count toward this limit.`,
+    };
+  }
+  return null;
+}
+
 /**
  * A sealed v2 handoff is authorised by the exact user-confirmed snapshot and
  * its later Mini App consumer, rather than by the unattended server signer.
@@ -12141,23 +12177,30 @@ export async function completeTelegramBotTradeInput(input: {
       venue: targetVenue,
     });
     const quoteMaxSpendUsd = quoteOverride.maxSpendUsd ?? amountUsd;
-    if (
-      isTelegramVenueMinimumBlocking({
-        action: provisionalTradeIntent.action,
-        meetsVenueMinimum: quoteOverride.meetsVenueMinimum,
-        orderType: provisionalTradeIntent.orderType,
-        venue: provisionalTradeIntent.venue,
-      }) ||
-      (targetAction === "buy" &&
-        (quoteMaxSpendUsd == null || quoteMaxSpendUsd > maxAmountUsd))
-    ) {
+    const quoteFailure = telegramTradeInputQuoteFailure({
+      action: provisionalTradeIntent.action,
+      meetsVenueMinimum: quoteOverride.meetsVenueMinimum,
+      minimumOrderSizeShares: quoteOverride.minimumOrderSizeShares,
+      orderType: provisionalTradeIntent.orderType,
+      venue: provisionalTradeIntent.venue,
+      maxSpendUsd: quoteMaxSpendUsd,
+      maxAmountUsd,
+      deliveryMode,
+    });
+    if (quoteFailure) {
+      console.warn("[telegram-trade-input] quote rejected", {
+        contextId: input.contextId,
+        reason: quoteFailure.reason,
+        action: targetAction,
+        venue: targetVenue,
+        deliveryMode,
+        maxSpendUsd: quoteMaxSpendUsd,
+        maximumAmountUsd: maxAmountUsd,
+      });
       return {
         completed: false,
         message: buildTelegramTradeInputNotice({
-          body:
-            targetAction === "buy"
-              ? `Maximum total spend exceeds ${formatUsd(maxAmountUsd)}.`
-              : "The current sell quote is not executable.",
+          body: quoteFailure.body,
           title: "Amount not executable",
         }),
       };

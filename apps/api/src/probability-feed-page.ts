@@ -138,6 +138,7 @@ export async function fetchProbabilityFeedEventPage<
   candidateWindowSize: number;
   probabilityBatchSize: number;
   maxCandidates: number;
+  initialProbabilityBatchSize?: number;
   fetchCandidateEvents: (input: {
     limit: number;
     offset: number;
@@ -161,25 +162,32 @@ export async function fetchProbabilityFeedEventPage<
       offset: candidateOffset,
     });
     const candidateEventIds = candidateEventRows.map((row) => row.id);
-    const probabilityBatches: string[][] = [];
-    for (
-      let batchOffset = 0;
-      batchOffset < candidateEventIds.length;
-      batchOffset += args.probabilityBatchSize
-    ) {
-      probabilityBatches.push(
-        candidateEventIds.slice(
-          batchOffset,
-          batchOffset + args.probabilityBatchSize,
-        ),
+    // Split expensive probability reads, but preserve the original logical
+    // stopping boundaries: exact filtered ranking can differ from candidate
+    // ranking. Returning within a logical batch can skip or duplicate events.
+    let batchSize = Math.min(
+      args.probabilityBatchSize,
+      Math.max(
+        1,
+        args.initialProbabilityBatchSize ?? args.probabilityBatchSize,
+      ),
+    );
+    for (let batchOffset = 0; batchOffset < candidateEventIds.length; ) {
+      const logicalBatchEnd = Math.min(
+        candidateEventIds.length,
+        (Math.floor(batchOffset / args.probabilityBatchSize) + 1) *
+          args.probabilityBatchSize,
       );
-    }
-    for (const candidateEventBatch of probabilityBatches) {
+      const readEnd = Math.min(logicalBatchEnd, batchOffset + batchSize);
+      const candidateEventBatch = candidateEventIds.slice(batchOffset, readEnd);
+      batchOffset = readEnd;
+      batchSize = Math.min(args.probabilityBatchSize, batchSize * 2);
       const marketIds =
         await args.fetchBatchProbabilityMarketIds(candidateEventBatch);
       for (const marketId of marketIds) {
         probabilityMarketIds.add(marketId);
       }
+      if (batchOffset < logicalBatchEnd) continue;
 
       const accumulatedMarketIds = [...probabilityMarketIds];
       latestEventRows = accumulatedMarketIds.length

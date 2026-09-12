@@ -3,6 +3,7 @@ import { AuthService } from "../../auth.js";
 import {
   readPreparationReceipt,
   verifyPreparationApprovalReceipts,
+  type PreparationReceiptReader,
 } from "../preparation/approval-receipt.js";
 
 import {
@@ -211,12 +212,14 @@ export class FundingPlanningRuntime {
   private readonly liquiditySingleflight = new FundingLiquiditySingleflight();
 
   private readonly opportunisticPreparationReconcileTimeoutMs: number;
+  private readonly preparationReceiptReader: PreparationReceiptReader;
 
   constructor(
     private readonly db: Pool,
     options: Readonly<{
       opportunisticPreparationReconcileTimeoutMs?: number;
       unreadyInspectionReuseMs?: number;
+      preparationReceiptReader?: PreparationReceiptReader;
     }> = {},
   ) {
     this.planningStore = new PostgresFundingPlanningStore(db);
@@ -232,6 +235,8 @@ export class FundingPlanningRuntime {
     this.opportunisticPreparationReconcileTimeoutMs =
       options.opportunisticPreparationReconcileTimeoutMs ??
       OPPORTUNISTIC_PREPARATION_RECONCILE_TIMEOUT_MS;
+    this.preparationReceiptReader =
+      options.preparationReceiptReader ?? readPreparationReceipt;
   }
 
   registerWithdrawalDestination(
@@ -467,7 +472,7 @@ export class FundingPlanningRuntime {
     runId: string,
   ): Promise<FundingPreparationRun | null> {
     const run = await fetchFundingPreparationRun(this.db, { userId, runId });
-    if (!run || run.status === "succeeded" || run.status === "expired") {
+    if (!run || (run.resolvedAt != null && run.status !== "succeeded")) {
       return run;
     }
     return this.reconcilePreparationRunSnapshot(run);
@@ -476,7 +481,12 @@ export class FundingPlanningRuntime {
   private async reconcilePendingPreparationRun(
     run: FundingPreparationRun,
   ): Promise<FundingPreparationRun> {
-    if (run.status !== "submitted" && run.status !== "ambiguous") return run;
+    if (
+      run.status !== "submitted" &&
+      run.status !== "ambiguous" &&
+      run.status !== "succeeded"
+    )
+      return run;
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -508,20 +518,29 @@ export class FundingPlanningRuntime {
   private async reconcilePreparationRunSnapshot(
     run: FundingPreparationRun,
   ): Promise<FundingPreparationRun> {
+    // Another process may have resolved this run while this API instance
+    // still holds pre-approval readiness. Refresh locally without re-reading
+    // receipts, changing the terminal journal, or submitting another action.
+    if (run.status === "succeeded") {
+      return this.refreshSuccessfulPreparationRun(run);
+    }
     if (run.status === "submitted" || run.status === "ambiguous") {
-      const approvalsExecuted = await verifyPreparationApprovalReceipts(
+      const approvalOutcomes = await verifyPreparationApprovalReceipts(
         run,
         await AuthService.getUserWallets(run.userId),
-        readPreparationReceipt,
+        this.preparationReceiptReader,
       );
-      if (approvalsExecuted !== null) {
-        if (!approvalsExecuted) return run;
-        return resolveFundingPreparationRun(this.db, {
+      if (approvalOutcomes !== null) {
+        const resolved = await resolveFundingPreparationRun(this.db, {
           userId: run.userId,
           runId: run.runId,
-          succeeded: true,
+          approvalOutcomes,
           expectedActions: run.actions,
         });
+        if (resolved.status === "succeeded") {
+          await this.refreshSuccessfulPreparationRun(resolved);
+        }
+        return run.replayed ? { ...resolved, replayed: true } : resolved;
       }
     }
     // A preparation inspection is reusable for discovery, but it is not valid
@@ -529,7 +548,32 @@ export class FundingPlanningRuntime {
     // an approval can confirm while the pre-submit inspection remains cached.
     // Re-read the authoritative venue/RPC state and resolve the existing run;
     // never materialize or submit a replacement action from this path.
-    const preparation = await this.inspectPreparation(
+    const preparation = await this.refreshPreparationInspection(run);
+    const resolved = await resolveFundingPreparationRun(this.db, {
+      userId: run.userId,
+      runId: run.runId,
+      succeeded: preparation.status === "ready",
+    });
+    return run.replayed && !resolved.replayed
+      ? { ...resolved, replayed: true }
+      : resolved;
+  }
+
+  private async refreshSuccessfulPreparationRun(run: FundingPreparationRun) {
+    // Historical execution success is not permission to trade now. A failed
+    // readiness refresh must not undo that success or unlock another approval.
+    try {
+      await this.refreshPreparationInspection(run);
+    } catch {
+      console.warn("[funding-preparation] readiness refresh unavailable", {
+        runId: run.runId,
+      });
+    }
+    return run;
+  }
+
+  private refreshPreparationInspection(run: FundingPreparationRun) {
+    return this.inspectPreparation(
       run.userId,
       {
         ...run.request,
@@ -542,14 +586,6 @@ export class FundingPlanningRuntime {
       },
       { forceFresh: true },
     );
-    const resolved = await resolveFundingPreparationRun(this.db, {
-      userId: run.userId,
-      runId: run.runId,
-      succeeded: preparation.status === "ready",
-    });
-    return run.replayed && !resolved.replayed
-      ? { ...resolved, replayed: true }
-      : resolved;
   }
 
   liquidity(

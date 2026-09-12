@@ -272,6 +272,63 @@ await test("authoritative binding inspection bypasses reusable pre-action eviden
   assert.equal(inspected[1]?.forceFresh, true);
 });
 
+await test("failed forceFresh discards old readiness instead of resurrecting it", async () => {
+  const inspected: RuntimeVenueInspectionInput[] = [];
+  let ready = false;
+  let rpcFailed = false;
+  const service = new WalletPreparationRuntimeService(
+    marketDb([]),
+    () => NOW,
+    [
+      venueDriver({
+        inspected,
+        venueId: "polymarket",
+        inspect: async (input) => {
+          if (rpcFailed) throw new Error("RPC unavailable");
+          const result = preparedDestination(input);
+          return {
+            ...result,
+            frozen: {
+              ...result.frozen,
+              preparation: {
+                ...result.frozen.preparation,
+                status: ready ? "ready" : "setup_required",
+              } as PreparationResult,
+            },
+          };
+        },
+      }),
+    ],
+    async () => wallets,
+  );
+  const request = {
+    accountId: ACCOUNT_ID,
+    purpose: "buy" as const,
+    marketContextId: market.id,
+    marketClass: null,
+    positionActionRef: null,
+    compatibleVenueBindingOptionIds: [SELECTED_BINDING_ID],
+    controllerWalletRef: SELECTED_WALLET_ID,
+    venueBindingOptionId: SELECTED_BINDING_ID,
+  };
+  assert.equal(
+    (await service.inspectBindingOption(request)).status,
+    "setup_required",
+  );
+  rpcFailed = true;
+  await assert.rejects(
+    service.inspectBindingOption(request, { forceFresh: true }),
+  );
+  rpcFailed = false;
+  ready = true;
+  assert.equal((await service.inspectBindingOption(request)).status, "ready");
+  assert.equal(
+    inspected.length,
+    3,
+    "same-clock read cannot reuse pre-approval evidence",
+  );
+});
+
 await test("older normal inspection cannot overwrite newer forceFresh evidence", async () => {
   const inspected: RuntimeVenueInspectionInput[] = [];
   const queries: string[] = [];

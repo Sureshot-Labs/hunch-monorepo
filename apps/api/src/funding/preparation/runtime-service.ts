@@ -1209,6 +1209,8 @@ export class WalletPreparationRuntimeService {
     const pending = this.destinationInspectionInflight.get(inflightKey);
     if (pending) return pending;
 
+    // A failed authoritative refresh must not resurrect pre-broadcast facts.
+    if (input.forceFresh) this.destinationInspectionCache.delete(key);
     const generation = ++this.destinationInspectionGenerationSequence;
     this.destinationInspectionGeneration.set(key, generation);
 

@@ -10,6 +10,14 @@ import { FundingPersistenceError } from "./funding-operation-repository.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
+export type PreparationApprovalOutcome =
+  | Readonly<{ actionId: string; status: "pending" | "unknown" }>
+  | Readonly<{
+      actionId: string;
+      status: "succeeded" | "failed";
+      evidence: JsonRecord;
+    }>;
+
 export type FundingPreparationRunRequest = Readonly<{
   venueBindingOptionId: string;
   purpose: PreparationPurpose;
@@ -333,10 +341,12 @@ function runStatusForActions(
     return "ambiguous";
   if (actions.some((action) => action.state === "submitted"))
     return "submitted";
+  // An unresolved broadcast still wins above; an unsubmitted sibling must
+  // not restart a run after another approval has provably failed.
+  if (actions.some((action) => action.state === "failed")) return "failed";
   if (actions.some((action) => action.state === "action_required")) {
     return "action_required";
   }
-  if (actions.some((action) => action.state === "failed")) return "failed";
   if (actions.some((action) => action.state === "cancelled"))
     return "cancelled";
   return "succeeded";
@@ -426,14 +436,22 @@ export async function reportFundingPreparationAction(
     );
     const updatedActions = await loadActions(client, run.id, true);
     const status = runStatusForActions(updatedActions);
+    const resolvedAt =
+      status === "failed" &&
+      updatedActions.some(
+        (attempt) =>
+          attempt.state === "failed" && attempt.broadcastMayHaveOccurred,
+      )
+        ? now
+        : null;
     const updatedRun = await client.query<RunRow>(
       `
         update funding_preparation_runs
-        set status = $2, resolved_at = null
+        set status = $2, resolved_at = $3
         where id = $1
         returning ${RUN_COLUMNS}
       `,
-      [run.id, status],
+      [run.id, status, resolvedAt],
     );
     return mapRun(client, updatedRun.rows[0] ?? run, false, true);
   });
@@ -444,10 +462,20 @@ export async function resolveFundingPreparationRun(
   input: Readonly<{
     userId: string;
     runId: string;
-    succeeded: boolean;
-    expectedActions?: readonly FundingPreparationActionAttempt[];
     now?: Date;
-  }>,
+  }> &
+    (
+      | Readonly<{
+          succeeded: boolean;
+          expectedActions?: readonly FundingPreparationActionAttempt[];
+          approvalOutcomes?: never;
+        }>
+      | Readonly<{
+          approvalOutcomes: readonly PreparationApprovalOutcome[];
+          expectedActions: readonly FundingPreparationActionAttempt[];
+          succeeded?: never;
+        }>
+    ),
 ): Promise<FundingPreparationRun> {
   return tx(pool, async (client) => {
     const result = await client.query<RunRow>(
@@ -466,7 +494,9 @@ export async function resolveFundingPreparationRun(
         "funding preparation run was not found",
       );
     }
-    if (!input.succeeded) return mapRun(client, run, false, true);
+    if (!input.succeeded && !input.approvalOutcomes)
+      return mapRun(client, run, false, true);
+    if (run.resolved_at != null) return mapRun(client, run, false, true);
     if (input.expectedActions) {
       if (run.status !== "submitted" && run.status !== "ambiguous") {
         return mapRun(client, run, false, true);
@@ -495,6 +525,54 @@ export async function resolveFundingPreparationRun(
       }
     }
     const now = input.now ?? new Date();
+    if (input.approvalOutcomes) {
+      let updated = false;
+      for (const outcome of input.approvalOutcomes) {
+        if (outcome.status !== "succeeded" && outcome.status !== "failed")
+          continue;
+        const attempt = input.expectedActions.find(
+          (candidate) => candidate.actionId === outcome.actionId,
+        );
+        if (
+          !attempt ||
+          !attempt.broadcastMayHaveOccurred ||
+          !["submitted", "ambiguous"].includes(attempt.state) ||
+          !attempt.transactionReference ||
+          outcome.evidence.transactionReference !==
+            attempt.transactionReference ||
+          outcome.evidence.canonical !== true ||
+          outcome.evidence.actionMatch !== true ||
+          (outcome.status === "failed" &&
+            outcome.evidence.failureFinalized !== true)
+        ) {
+          throw new FundingPersistenceError(
+            "invalid_state_transition",
+            "approval receipt does not match the submitted attempt",
+          );
+        }
+        await client.query(
+          `update funding_preparation_action_attempts
+           set state = $3, resolved_at = $4, receipt_evidence = $5::jsonb
+           where run_id = $1 and action_id = $2`,
+          [run.id, outcome.actionId, outcome.status, now, outcome.evidence],
+        );
+        updated = true;
+      }
+      if (!updated) return mapRun(client, run, false, true);
+      const actions = await loadActions(client, run.id, true);
+      const status = runStatusForActions(actions);
+      const result = await client.query<RunRow>(
+        `update funding_preparation_runs
+         set status = $2, resolved_at = $3
+         where id = $1 returning ${RUN_COLUMNS}`,
+        [
+          run.id,
+          status,
+          status === "succeeded" || status === "failed" ? now : null,
+        ],
+      );
+      return mapRun(client, result.rows[0] ?? run, false, true);
+    }
     await client.query(
       `
         update funding_preparation_action_attempts

@@ -280,3 +280,86 @@ console.log("ok - probability feed stays bounded at the scan cap");
   assert.deepEqual(result, { eventRows: [], marketIds: [] });
 }
 console.log("ok - default event probability policy stops after four windows");
+
+{
+  const run = (initialProbabilityBatchSize: number, offset: number) =>
+    fetchProbabilityFeedEventPage({
+      requestedLimit: 10,
+      ...resolveProbabilityEventProbePolicy(0.4, 0.6),
+      initialProbabilityBatchSize,
+      fetchCandidateEvents: async ({ limit, offset: candidateOffset }) =>
+        Array.from({ length: limit }, (_, i) => ({
+          id: String(i + candidateOffset),
+        })),
+      fetchBatchProbabilityMarketIds: async (ids) => ids,
+      // Exact filtered ranking can differ from cached whole-event ranking.
+      fetchFilteredEvents: async (ids) => {
+        const score = (id: string) => (id === "20" ? 1_000 : 100 - Number(id));
+        return [...ids]
+          .sort((a, b) => score(b) - score(a))
+          .slice(offset, offset + 10)
+          .map((id) => ({ id }));
+      },
+    });
+  const pages: string[] = [];
+  for (const offset of [0, 10, 20]) {
+    const original = await run(100, offset);
+    const split = await run(Math.max(20, (10 + offset) * 2), offset);
+    assert.deepEqual(
+      split.eventRows,
+      original.eventRows,
+      "physical read sizes cannot change filtered ranking or page membership",
+    );
+    assert.deepEqual(split.marketIds, original.marketIds);
+    pages.push(...split.eventRows.map((row) => row.id));
+  }
+  assert.equal(
+    new Set(pages).size,
+    pages.length,
+    "pages cannot repeat an event due to batch size",
+  );
+}
+console.log("ok - reranking preserves logical batch boundaries across pages");
+
+for (const qualifiedAfter of [0, 700, 1_190]) {
+  const run = async (initialProbabilityBatchSize: number) => {
+    const checked: string[] = [];
+    const result = await fetchProbabilityFeedEventPage({
+      requestedLimit: 10,
+      ...resolveProbabilityEventProbePolicy(0.4, 0.6),
+      initialProbabilityBatchSize,
+      fetchCandidateEvents: async ({ limit, offset }) =>
+        Array.from({ length: limit }, (_, i) => ({ id: String(i + offset) })),
+      fetchBatchProbabilityMarketIds: async (ids) => {
+        checked.push(...ids);
+        return ids.filter(
+          (id) => Number(id) >= qualifiedAfter && Number(id) % 2 === 0,
+        );
+      },
+      fetchFilteredEvents: async (ids) =>
+        ids.slice(0, 10).map((id) => ({ id })),
+    });
+    assert.equal(
+      new Set(checked).size,
+      checked.length,
+      "growing batches cannot skip or repeat candidates",
+    );
+    assert.equal(checked[0], "0");
+    assert.equal(checked.at(-1), String(checked.length - 1));
+    return { result, checked };
+  };
+  const original = await run(100);
+  const progressive = await run(20);
+  assert.deepEqual(progressive.result.eventRows, original.result.eventRows);
+  assert.deepEqual(progressive.result.marketIds, original.result.marketIds);
+  if (qualifiedAfter === 0) assert.equal(progressive.checked.length, 100);
+  if (qualifiedAfter === 1_190)
+    assert.equal(
+      progressive.checked.length,
+      1_200,
+      "sparse pages keep the original scan budget",
+    );
+}
+console.log(
+  "ok - small pages grow batches without shrinking coverage or changing ranked results",
+);

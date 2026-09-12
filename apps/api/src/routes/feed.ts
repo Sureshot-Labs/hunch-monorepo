@@ -571,6 +571,19 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       let data: FeedEvent[] = [];
       let feedQueryPhase: FeedQueryPhase = "candidate";
+      const feedQueryStartedAt = performance.now();
+      let phaseStartedAt = feedQueryStartedAt;
+      const phaseMs: Partial<Record<FeedQueryPhase, number>> = {};
+      const phaseCalls: Partial<Record<FeedQueryPhase, number>> = {};
+      let candidateCount = 0;
+      const setFeedQueryPhase = (phase: FeedQueryPhase) => {
+        const now = performance.now();
+        phaseMs[feedQueryPhase] =
+          (phaseMs[feedQueryPhase] ?? 0) + now - phaseStartedAt;
+        feedQueryPhase = phase;
+        phaseCalls[phase] = (phaseCalls[phase] ?? 0) + 1;
+        phaseStartedAt = now;
+      };
       try {
         let probabilityEventRows: Awaited<
           ReturnType<typeof fetchFeedEventIds>
@@ -588,9 +601,10 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
             candidateWindowSize: eventProbabilityPolicy.candidateWindowSize,
             probabilityBatchSize: eventProbabilityPolicy.probabilityBatchSize,
             maxCandidates: eventProbabilityPolicy.maxCandidates,
-            fetchCandidateEvents: ({ limit: candidateLimit, offset }) => {
-              feedQueryPhase = "candidate";
-              return fetchFeedEventIds(
+            initialProbabilityBatchSize: 20,
+            fetchCandidateEvents: async ({ limit: candidateLimit, offset }) => {
+              setFeedQueryPhase("candidate");
+              const candidates = await fetchFeedEventIds(
                 pool,
                 {
                   ...inputs,
@@ -605,16 +619,18 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
                 },
                 { acceptPartialMetricPage: true },
               );
+              candidateCount += candidates.length;
+              return candidates;
             },
             fetchBatchProbabilityMarketIds: (candidateEventIds) => {
-              feedQueryPhase = "probability_mapping";
+              setFeedQueryPhase("probability_mapping");
               return fetchObservedCanonicalProbabilityMarketIds(pool, {
                 ...inputs,
                 candidateEventIds,
               });
             },
             fetchFilteredEvents: (marketIds) => {
-              feedQueryPhase = "filtered_events";
+              setFeedQueryPhase("filtered_events");
               return fetchFeedEventIds(pool, {
                 ...inputs,
                 marketIds,
@@ -636,7 +652,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
               limit: candidateLimit,
               offset: candidateOffset,
             }) => {
-              feedQueryPhase = "candidate";
+              setFeedQueryPhase("candidate");
               return fetchFeedMarketIdsForProbabilityProbe(
                 pool,
                 {
@@ -646,13 +662,13 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
                 },
                 {
                   onPhase: (phase) => {
-                    feedQueryPhase = phase;
+                    setFeedQueryPhase(phase);
                   },
                 },
               );
             },
             fetchBatchProbabilityMarketIds: (candidateMarketIds) => {
-              feedQueryPhase = "probability_mapping";
+              setFeedQueryPhase("probability_mapping");
               return fetchObservedCanonicalProbabilityMarketIds(pool, {
                 ...inputs,
                 candidateMarketIds,
@@ -663,7 +679,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
             usedProgressiveProbabilityMarketPage = true;
             observedProbabilityMarketIds = probabilityPage.marketIds;
           } else {
-            feedQueryPhase = "probability_mapping";
+            setFeedQueryPhase("probability_mapping");
             observedProbabilityMarketIds =
               await fetchObservedCanonicalProbabilityMarketIds(pool, inputs);
           }
@@ -680,9 +696,9 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         if (observedProbabilityMarketIds?.length === 0) {
           data = [];
         } else if (view === "markets") {
-          feedQueryPhase = usedProgressiveProbabilityMarketPage
-            ? "hydration"
-            : "candidate";
+          setFeedQueryPhase(
+            usedProgressiveProbabilityMarketPage ? "hydration" : "candidate",
+          );
           const rows = usedProgressiveProbabilityMarketPage
             ? await fetchFeedMarketsByIds(
                 pool,
@@ -692,12 +708,12 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
               )
             : await fetchFeedMarketsDirect(pool, databaseInputs, undefined, {
                 onPhase: (phase) => {
-                  feedQueryPhase = phase;
+                  setFeedQueryPhase(phase);
                 },
               });
           data = buildFeedData({ rows, eventIds: [], view });
         } else {
-          feedQueryPhase = "candidate";
+          setFeedQueryPhase("candidate");
           const eventRows =
             probabilityEventRows ??
             (await fetchFeedEventIds(pool, databaseInputs));
@@ -705,7 +721,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           const useCachedChange24h = eventRows.some(
             (row) => row.cached_change_24h === true,
           );
-          feedQueryPhase = "hydration";
+          setFeedQueryPhase("hydration");
           const rows = eventIds.length
             ? await fetchFeedMarkets(pool, databaseInputs, eventIds, {
                 useCachedChange24h,
@@ -732,6 +748,31 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
             .send({ error: search ? "Search timed out" : "Feed timed out" });
         }
         throw error;
+      } finally {
+        const elapsedMs = performance.now() - feedQueryStartedAt;
+        phaseMs[feedQueryPhase] =
+          (phaseMs[feedQueryPhase] ?? 0) + performance.now() - phaseStartedAt;
+        if (elapsedMs >= 1_500) {
+          req.log.warn(
+            {
+              elapsedMs: Math.round(elapsedMs),
+              phaseMs,
+              phaseCalls,
+              candidateCount,
+              cacheHit: false,
+              view,
+              sort,
+              limit,
+              offset,
+              venues,
+              minProb,
+              maxProb,
+              endWithinHours,
+              eventCount: data.length,
+            },
+            "Feed query slow",
+          );
+        }
       }
 
       if (!data.length) {

@@ -17,7 +17,10 @@ import {
   type EvmReceiptRecord,
   type EvmReceiptTransaction,
 } from "../execution/step-receipt-reconciler.js";
-import type { FundingPreparationRun } from "../persistence/funding-preparation-run-repository.js";
+import type {
+  FundingPreparationRun,
+  PreparationApprovalOutcome,
+} from "../persistence/funding-preparation-run-repository.js";
 import { parsePrivyFundingTransactionReference } from "../execution/privy-transaction-reference.js";
 import { createPrivyFundingReferenceResolver } from "../execution/privy-delegated-funding-driver.js";
 
@@ -78,13 +81,13 @@ export async function readPreparationReceipt(
   };
 }
 
-/** null means another preparation kind; false means evidence is still missing.
+/** null means another preparation kind. Unknown evidence never authorizes retry.
  * Historical approval execution is not current market/trading readiness. */
 export async function verifyPreparationApprovalReceipts(
   run: FundingPreparationRun,
   wallets: readonly UserWallet[],
   read: PreparationReceiptReader,
-): Promise<boolean | null> {
+): Promise<readonly PreparationApprovalOutcome[] | null> {
   if (run.actions.length === 0) return null;
   const approvals = run.actions.map((attempt) => {
     if (attempt.action.kind !== "evm_transaction") return null;
@@ -105,10 +108,13 @@ export async function verifyPreparationApprovalReceipts(
     }
   });
   if (approvals.some((approval) => approval === null)) return null;
+  const outcomes: PreparationApprovalOutcome[] = [];
   for (const approval of approvals) {
-    if (!approval) return false;
+    if (!approval) continue;
     const { attempt, action, call } = approval;
-    if (attempt.state === "succeeded") continue;
+    if (["succeeded", "failed", "cancelled"].includes(attempt.state)) continue;
+    const unknown = () =>
+      outcomes.push({ actionId: attempt.actionId, status: "unknown" });
     const reference = attempt.transactionReference;
     if (
       !reference ||
@@ -118,8 +124,10 @@ export async function verifyPreparationApprovalReceipts(
         !parsePrivyFundingTransactionReference(
           attempt.transactionReference ?? "",
         ))
-    )
-      return false;
+    ) {
+      unknown();
+      continue;
+    }
     const owners = wallets.filter(
       (wallet) =>
         wallet.walletType === "ethereum" &&
@@ -132,8 +140,18 @@ export async function verifyPreparationApprovalReceipts(
         }) === action.senderWalletId,
     );
     const owner = owners.length === 1 ? owners[0] : undefined;
-    if (!owner) return false;
-    const { transaction, receipt } = await read(action.networkId, reference);
+    if (!owner) {
+      unknown();
+      continue;
+    }
+    let observed: Awaited<ReturnType<PreparationReceiptReader>>;
+    try {
+      observed = await read(action.networkId, reference);
+    } catch {
+      unknown();
+      continue;
+    }
+    const { transaction, receipt } = observed;
     const verdict = evaluateEvmActionReceipt({
       action,
       transaction,
@@ -145,13 +163,38 @@ export async function verifyPreparationApprovalReceipts(
           ? "direct"
           : "privy_erc4337",
     });
+    if (verdict.status === "pending" || verdict.status === "confirmed") {
+      outcomes.push({ actionId: attempt.actionId, status: "pending" });
+      continue;
+    }
+    const evidence = {
+      ...verdict.evidence,
+      transactionReference: reference,
+      networkId: action.networkId,
+      canonical: verdict.canonical,
+      actionMatch: verdict.actionMatch,
+      blockHash: verdict.blockHash,
+      ledgerHeight: verdict.ledgerHeight,
+      failureCode: verdict.failureCode,
+    };
+    if (
+      verdict.status === "failed" &&
+      verdict.canonical &&
+      verdict.actionMatch &&
+      verdict.evidence.failureFinalized === true
+    ) {
+      outcomes.push({ actionId: attempt.actionId, status: "failed", evidence });
+      continue;
+    }
     if (
       verdict.status !== "finalized" ||
       !verdict.canonical ||
       !verdict.actionMatch ||
       !receipt
-    )
-      return false;
+    ) {
+      unknown();
+      continue;
+    }
     const eventName = call.name === "approve" ? "Approval" : "ApprovalForAll";
     const matches = receipt.logs.filter((log) => {
       if (log.address.toLowerCase() !== action.to.toLowerCase()) return false;
@@ -174,7 +217,15 @@ export async function verifyPreparationApprovalReceipts(
     });
     // Exact action bytes + signer + successful canonical execution are checked
     // above. Duplicate matching events are not accepted as unique evidence.
-    if (matches.length !== 1) return false;
+    if (matches.length !== 1) {
+      unknown();
+      continue;
+    }
+    outcomes.push({
+      actionId: attempt.actionId,
+      status: "succeeded",
+      evidence,
+    });
   }
-  return true;
+  return outcomes;
 }

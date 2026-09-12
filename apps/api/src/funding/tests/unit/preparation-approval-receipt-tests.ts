@@ -25,6 +25,16 @@ const wallet = {
   isVerified: true,
   walletAddress: owner,
 } as UserWallet;
+async function status(
+  run: FundingPreparationRun,
+  wallets: readonly UserWallet[],
+  read: PreparationReceiptReader,
+) {
+  return (
+    (await verifyPreparationApprovalReceipts(run, wallets, read))?.[0]
+      ?.status ?? null
+  );
+}
 function fixture(operator = false) {
   const data = iface.encodeFunctionData(
     operator ? "setApprovalForAll" : "approve",
@@ -101,25 +111,19 @@ test("settled-market ERC20 and operator approvals resolve from exact receipts", 
   for (const operator of [false, true]) {
     const { run, evidence } = fixture(operator);
     assert.equal(
-      await verifyPreparationApprovalReceipts(
-        run,
-        [wallet],
-        async () => evidence,
-      ),
-      true,
+      await status(run, [wallet], async () => evidence),
+      "succeeded",
     );
   }
 });
 
-test("approval recovery rejects missing, failed, reorged and foreign evidence", async () => {
+test("approval recovery separates pending from reorged and foreign evidence", async () => {
   const { run, evidence } = fixture();
   const originalReceipt = evidence.receipt;
   const originalTransaction = evidence.transaction;
   assert.ok(originalReceipt);
   assert.ok(originalTransaction);
   for (const receipt of [
-    null,
-    { ...originalReceipt, succeeded: false },
     { ...originalReceipt, canonicalBlockHash: `0x${"cd".repeat(32)}` },
     { ...originalReceipt, logs: [] },
     {
@@ -128,27 +132,23 @@ test("approval recovery rejects missing, failed, reorged and foreign evidence", 
     },
   ]) {
     assert.equal(
-      await verifyPreparationApprovalReceipts(run, [wallet], async () => ({
+      await status(run, [wallet], async () => ({
         ...evidence,
         receipt,
       })),
-      false,
+      "unknown",
     );
   }
   assert.equal(
-    await verifyPreparationApprovalReceipts(
-      run,
-      [{ ...wallet, id: "another" }],
-      async () => evidence,
-    ),
-    false,
+    await status(run, [{ ...wallet, id: "another" }], async () => evidence),
+    "unknown",
   );
   assert.equal(
-    await verifyPreparationApprovalReceipts(run, [wallet], async () => ({
+    await status(run, [wallet], async () => ({
       ...evidence,
       transaction: { ...originalTransaction, value: 1n },
     })),
-    false,
+    "unknown",
   );
 });
 
@@ -162,23 +162,19 @@ test("Privy references are resolved before checking exact approval receipts", as
     actions: [{ ...attempt, transactionReference: reference }],
   };
   assert.equal(
-    await verifyPreparationApprovalReceipts(
-      accepted,
-      [wallet],
-      async (network, input) => {
-        assert.equal(network, "evm:8453");
-        assert.equal(input, reference);
-        return evidence;
-      },
-    ),
-    true,
+    await status(accepted, [wallet], async (network, input) => {
+      assert.equal(network, "evm:8453");
+      assert.equal(input, reference);
+      return evidence;
+    }),
+    "succeeded",
   );
   assert.equal(
-    await verifyPreparationApprovalReceipts(accepted, [wallet], async () => ({
+    await status(accepted, [wallet], async () => ({
       transaction: null,
       receipt: null,
     })),
-    false,
+    "pending",
   );
 });
 
@@ -193,10 +189,10 @@ test("no reference, unsubmitted actions and unknown calldata cannot be marked su
   ]) {
     const changed = { ...run, actions: [{ ...attempt, ...patch }] };
     assert.equal(
-      await verifyPreparationApprovalReceipts(changed, [wallet], async () => {
+      await status(changed, [wallet], async () => {
         throw Error("must not read");
       }),
-      false,
+      "unknown",
     );
   }
   const action = attempt.action;
@@ -215,5 +211,85 @@ test("no reference, unsubmitted actions and unknown calldata cannot be marked su
       async () => evidence,
     ),
     null,
+  );
+});
+
+test("only finalized exact canonical reverts become failed, without approval events", async () => {
+  const { run, evidence } = fixture();
+  assert.ok(evidence.receipt);
+  assert.ok(evidence.transaction);
+  const originalTransaction = evidence.transaction;
+  const failed = { ...evidence.receipt, succeeded: false, logs: [] };
+  for (const [receipt, expected] of [
+    [null, "pending"],
+    [failed, "failed"],
+    [{ ...failed, confirmations: 1 }, "pending"],
+    [{ ...failed, canonicalBlockHash: null }, "pending"],
+    [{ ...failed, canonicalBlockHash: `0x${"cd".repeat(32)}` }, "unknown"],
+  ] as const) {
+    assert.equal(
+      await status(run, [wallet], async () => ({ ...evidence, receipt })),
+      expected,
+    );
+  }
+  assert.equal(
+    await status(run, [wallet], async () => ({
+      transaction: { ...originalTransaction, value: 1n },
+      receipt: failed,
+    })),
+    "unknown",
+  );
+  assert.equal(
+    await status(run, [wallet], async () => {
+      throw new Error("RPC lost");
+    }),
+    "unknown",
+  );
+  const outcomes = await verifyPreparationApprovalReceipts(
+    run,
+    [wallet],
+    async () => ({ ...evidence, receipt: failed }),
+  );
+  const outcome = outcomes?.[0];
+  assert.ok(outcome?.status === "failed");
+  assert.equal(outcome.evidence.failureFinalized, true);
+  assert.equal(outcome.evidence.transactionReference, hash);
+  assert.equal(outcome.evidence.blockHash, hash);
+});
+
+test("unknown sibling does not hide a proven reverted approval", async () => {
+  const { run, evidence } = fixture();
+  assert.ok(evidence.receipt);
+  const originalReceipt = evidence.receipt;
+  const firstAttempt = run.actions[0];
+  assert.ok(firstAttempt);
+  const mixed = {
+    ...run,
+    actions: [
+      {
+        ...firstAttempt,
+        actionId: "unknown",
+        transactionReference: `0x${"cd".repeat(32)}`,
+      },
+      firstAttempt,
+    ],
+  };
+  const outcomes = await verifyPreparationApprovalReceipts(
+    mixed,
+    [wallet],
+    async (_, reference) => {
+      if (reference !== hash) throw new Error("RPC unavailable");
+      return {
+        ...evidence,
+        receipt: { ...originalReceipt, succeeded: false, logs: [] },
+      };
+    },
+  );
+  assert.deepEqual(
+    outcomes?.map(({ actionId, status }) => ({ actionId, status })),
+    [
+      { actionId: "unknown", status: "unknown" },
+      { actionId: "approval", status: "failed" },
+    ],
   );
 });

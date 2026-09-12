@@ -11,6 +11,7 @@ import {
   resolveTelegramTradeDeliveryMode,
   isInitialTelegramAppHandoffProposal,
   telegramVenueFromSealedHandoffSnapshot,
+  telegramTradeInputQuoteFailure,
 } from "./services/telegram-bot-trading.js";
 import { isTelegramAppHandoffV2EnabledForVenue } from "./services/telegram-app-handoff-v2-contract.js";
 import {
@@ -22,6 +23,75 @@ const polymarketEvm = resolveTelegramBuyExecutionCapability({
   venue: "polymarket",
   walletChain: "ethereum",
 });
+const limitInput = {
+  action: "buy",
+  venue: "limitless",
+  orderType: "FOK",
+  meetsVenueMinimum: true,
+  minimumOrderSizeShares: 5,
+  maxSpendUsd: 25,
+  maxAmountUsd: 20,
+  deliveryMode: "bot_submit" as const,
+};
+assert.equal(
+  telegramTradeInputQuoteFailure(limitInput)?.reason,
+  "maximum_spend_exceeded",
+);
+assert.match(
+  telegramTradeInputQuoteFailure(limitInput)?.body ?? "",
+  /\$25.*bot trading.*\$20/,
+);
+assert.equal(
+  telegramTradeInputQuoteFailure({
+    ...limitInput,
+    maxAmountUsd: 25,
+    deliveryMode: "app_handoff",
+  }),
+  null,
+);
+assert.match(
+  telegramTradeInputQuoteFailure({
+    ...limitInput,
+    maxAmountUsd: 25,
+    maxSpendUsd: 25.25,
+    deliveryMode: "app_handoff",
+  })?.body ?? "",
+  /\$25\.25.*Hunch confirmation.*\$25/,
+);
+const minimumFailure = telegramTradeInputQuoteFailure({
+  ...limitInput,
+  meetsVenueMinimum: false,
+});
+assert.equal(minimumFailure?.reason, "venue_minimum");
+assert.ok(minimumFailure);
+assert.match(minimumFailure.body, /at least 5 shares/);
+assert.doesNotMatch(minimumFailure.body, /exceeds|limit of/);
+assert.equal(
+  telegramTradeInputQuoteFailure({
+    ...limitInput,
+    action: "sell",
+    meetsVenueMinimum: false,
+  })?.reason,
+  "venue_minimum",
+);
+assert.equal(
+  telegramTradeInputQuoteFailure({ ...limitInput, action: "sell" }),
+  null,
+);
+assert.equal(
+  telegramTradeInputQuoteFailure({
+    ...limitInput,
+    venue: "polymarket",
+    meetsVenueMinimum: false,
+    maxAmountUsd: 25,
+  }),
+  null,
+  "Polymarket FOK keeps its established minimum semantics",
+);
+assert.equal(
+  telegramTradeInputQuoteFailure({ ...limitInput, maxSpendUsd: null })?.reason,
+  "quote_unavailable",
+);
 for (const mode of ["off", "fallback", "always"] as const) {
   assert.equal(
     normalizeSignalBotPolicy({
