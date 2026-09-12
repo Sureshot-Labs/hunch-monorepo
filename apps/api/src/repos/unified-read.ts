@@ -189,34 +189,53 @@ function buildEventHasOrderableMarketSql(args: {
   });
 }
 
-function buildExactEventVolumeSortSql(args: {
-  eventVolumeDisplayExpr: string;
+function buildExactEventMetricSortSql(args: {
+  eventMetricExpr: string;
+  metric: "volume_total" | "open_interest";
   nowParam: string;
 }): string {
   const marketAlias = "fallback_volume_market";
   const polymarketAlias = "fallback_volume_polymarket";
-  const marketVolumeExpr = `case
+  const marketVolumeExpr =
+    args.metric === "open_interest"
+      ? `${marketAlias}.open_interest`
+      : `case
     when ${marketAlias}.volume_total is not null
      and ${marketAlias}.volume_total > 0
       then ${marketAlias}.volume_total
     else null
   end`;
+  const amountPredicate = `${marketAlias}.${args.metric} ${args.metric === "volume_total" ? ">" : "<>"} 0`;
   return `coalesce(
-    ${args.eventVolumeDisplayExpr},
+    ${args.eventMetricExpr},
     (
-      select sum(coalesce(${marketVolumeExpr}, 0))
-      from unified_markets ${marketAlias}
-      left join polymarket_markets ${polymarketAlias}
-        on ${polymarketAlias}.id = ${marketAlias}.venue_market_id
-       and ${marketAlias}.venue = 'polymarket'
-      where ${marketAlias}.event_id = e.id
-        and ${buildRenderableMarketSql({ alias: marketAlias })}
-        and ${buildBroadOrderableMarketSql({
-          marketAlias,
-          eventAlias: "e",
-          nowParam: args.nowParam,
-          pmAlias: polymarketAlias,
-        })}
+      select ${args.metric === "volume_total" ? "coalesce" : "nullif"}(sum(orderable_volume.volume_total), 0)
+      from (
+        select ${marketVolumeExpr} as volume_total
+        from unified_markets ${marketAlias}
+        where ${marketAlias}.event_id = e.id
+          and ${amountPredicate}
+          and ${buildRenderableMarketSql({ alias: marketAlias })}
+          and ${buildStrictIndexedMarketSql({
+            marketAlias,
+            eventAlias: "e",
+            nowParam: args.nowParam,
+          })}
+        union all
+        select ${marketVolumeExpr} as volume_total
+        from unified_markets ${marketAlias}
+        join polymarket_markets ${polymarketAlias}
+          on ${polymarketAlias}.id = ${marketAlias}.venue_market_id
+        where ${marketAlias}.event_id = e.id
+          and ${amountPredicate}
+          and ${buildRenderableMarketSql({ alias: marketAlias })}
+          and ${buildPolymarketGraceMarketSql({
+            marketAlias,
+            eventAlias: "e",
+            nowParam: args.nowParam,
+            pmAlias: polymarketAlias,
+          })}
+      ) orderable_volume
     )
   )`;
 }
@@ -2153,15 +2172,19 @@ function requiresFeedEventMarketJoin(
   );
 }
 
-function canUseFeedEventMaxSpreadFastPath(inputs: FeedInputs): boolean {
+function canUseFeedEventQualificationFastPath(inputs: FeedInputs): boolean {
   return (
-    inputs.maxSpread != null &&
+    (inputs.maxSpread != null || inputs.eventScope != null) &&
     !inputs.marketIds?.length &&
     inputs.minProb == null &&
     inputs.maxProb == null &&
-    inputs.minVol <= 1e-9 &&
-    inputs.minLiquidity <= 0 &&
     !inputs.durationMinutes?.length &&
+    // Preserve the existing metric-backed trending_v2 rollout. Its partial
+    // generation semantics are not an exact substitute for the scope join.
+    (inputs.sort !== "trending_v2" ||
+      (inputs.maxSpread != null &&
+        inputs.minVol <= 1e-9 &&
+        inputs.minLiquidity <= 0)) &&
     (inputs.sort == null ||
       inputs.sort === "trending" ||
       inputs.sort === "trending_v2" ||
@@ -2334,8 +2357,9 @@ async function fetchFeedChange24hEventIdsFast(
     );
     if (inputs.minVol > 1e-9) {
       eventWhere.push(
-        `${buildExactEventVolumeSortSql({
-          eventVolumeDisplayExpr: expressions.eventVolumeDisplayExpr,
+        `${buildExactEventMetricSortSql({
+          eventMetricExpr: expressions.eventVolumeDisplayExpr,
+          metric: "volume_total",
           nowParam,
         })} >= ${add(inputs.minVol)}`,
       );
@@ -2421,8 +2445,9 @@ async function fetchFeedEventIdsFast(
     return fetchFeedChange24hEventIdsFast(pool, inputs);
   }
   if (!isFeedEventFastPathSort(inputs)) return null;
-  const useMaxSpreadFastPath = canUseFeedEventMaxSpreadFastPath(inputs);
-  if (requiresFeedEventMarketJoin(inputs) && !useMaxSpreadFastPath) return null;
+  const useQualificationFastPath = canUseFeedEventQualificationFastPath(inputs);
+  if (requiresFeedEventMarketJoin(inputs) && !useQualificationFastPath)
+    return null;
   if (buildFeedSearchPlan(inputs.q).hasSearch) return null;
 
   const pageTarget = inputs.limit + inputs.offset;
@@ -2436,6 +2461,13 @@ async function fetchFeedEventIdsFast(
   const { eventVolumeDisplayExpr, eventLiquidityDisplayExpr } = expressions;
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
   const nowParam = add(inputs.nowParam);
+  const rankedEventVolumeExpr = useQualificationFastPath
+    ? buildExactEventMetricSortSql({
+        eventMetricExpr: eventVolumeDisplayExpr,
+        metric: "volume_total",
+        nowParam,
+      })
+    : eventVolumeDisplayExpr;
   const eventWhere = buildFeedEventWhere({
     add,
     inputs,
@@ -2447,16 +2479,30 @@ async function fetchFeedEventIdsFast(
     buildOrderableEventFreshnessSql({ eventAlias: "e", nowParam }),
   );
   if (inputs.minVol > 1e-9) {
-    eventWhere.push(`${eventVolumeDisplayExpr} >= ${add(inputs.minVol)}`);
+    eventWhere.push(`${rankedEventVolumeExpr} >= ${add(inputs.minVol)}`);
   }
-  if (inputs.minLiquidity > 0) {
+  if (inputs.minLiquidity > 0 && !useQualificationFastPath) {
     eventWhere.push(
       `${eventLiquidityDisplayExpr} >= ${add(inputs.minLiquidity)}`,
     );
   }
-  const maxSpreadParam = useMaxSpreadFastPath
-    ? add(inputs.maxSpread as number)
-    : null;
+  const maxSpreadParam =
+    useQualificationFastPath && inputs.maxSpread != null
+      ? add(inputs.maxSpread)
+      : null;
+  const marketQualificationSql: string[] = [];
+  if (maxSpreadParam) {
+    marketQualificationSql.push(
+      "om.best_bid is not null",
+      "om.best_ask is not null",
+      `(om.best_ask - om.best_bid) <= ${maxSpreadParam}`,
+    );
+  }
+  if (useQualificationFastPath && inputs.minLiquidity > 0) {
+    marketQualificationSql.push(
+      `coalesce(nullif(om.liquidity, 0), nullif(om.open_interest, 0)) >= ${add(inputs.minLiquidity)}`,
+    );
+  }
   const eventWhereSql = eventWhere.length ? eventWhere.join(" and ") : "true";
   const candidateLimitParam = add(candidateLimit);
   const candidateLimitParamIndex = params.length - 1;
@@ -2464,32 +2510,39 @@ async function fetchFeedEventIdsFast(
 
   let eventScopeCtes = "";
   let eventScopeJoin = "";
-  if (useMaxSpreadFastPath && inputs.eventScope) {
-    const nowCloseParam = add(inputs.nowParam);
-    const eventScopeMarketCandidatesCte =
-      buildBroadOrderableMarketCandidatesCte({
-        candidateEventIdsCte: "ranked_event_candidates",
-        cteName: "ranked_event_orderable_market_candidates",
-        materialized: true,
-        nowParam,
-        nowCloseParam,
-        extraMarketSql: buildFeedMarketCandidateExtraSql({
-          add,
-          inputs,
-          nowParam,
-          venueTarget: "event",
-          renderableMarketExpr: expressions.renderableMarketExpr,
-          supportedLimitlessMarketExpr:
-            expressions.supportedLimitlessMarketExpr,
-        }),
-      });
+  if (useQualificationFastPath && inputs.eventScope) {
+    // Scope only distinguishes 0, 1 and >=2. Stop after two orderable rows;
+    // never count every child of a large event or apply spread/liquidity here.
     eventScopeCtes = `,
-      ${eventScopeMarketCandidatesCte},
       ranked_event_scope as materialized (
-        select scoped_market.event_id
-        from ranked_event_orderable_market_candidates scoped_market
-        group by scoped_market.event_id
-        having count(*) ${inputs.eventScope === "grouped" ? "> 1" : "= 1"}
+        select e.id as event_id
+        from ranked_event_candidates ranked_event
+        join unified_events e on e.id = ranked_event.id
+        where (
+          select count(*) from (
+            select 1 from unified_markets scope_market
+            where scope_market.event_id = e.id
+              and ${buildRenderableMarketSql({ alias: "scope_market" })}
+              and ${buildStrictIndexedMarketSql({
+                marketAlias: "scope_market",
+                eventAlias: "e",
+                nowParam,
+              })}
+            union all
+            select 1 from unified_markets scope_market
+            join polymarket_markets scope_polymarket
+              on scope_polymarket.id = scope_market.venue_market_id
+            where scope_market.event_id = e.id
+              and ${buildRenderableMarketSql({ alias: "scope_market" })}
+              and ${buildPolymarketGraceMarketSql({
+                marketAlias: "scope_market",
+                eventAlias: "e",
+                nowParam,
+                pmAlias: "scope_polymarket",
+              })}
+            limit 2
+          ) scope_rows
+        ) ${inputs.eventScope === "grouped" ? "> 1" : "= 1"}
       )
     `;
     eventScopeJoin = `
@@ -2498,7 +2551,13 @@ async function fetchFeedEventIdsFast(
     `;
   }
 
-  const eventOpenInterestSortExpr = "coalesce(nullif(e.open_interest, 0), 0)";
+  const eventOpenInterestSortExpr = useQualificationFastPath
+    ? buildExactEventMetricSortSql({
+        eventMetricExpr: "nullif(e.open_interest, 0)",
+        metric: "open_interest",
+        nowParam,
+      })
+    : "coalesce(nullif(e.open_interest, 0), 0)";
   let filteredEventSortValue: string | null = null;
   let candidateSourceSql: string | null = null;
 
@@ -2538,7 +2597,7 @@ async function fetchFeedEventIdsFast(
   } else {
     let eventOrder = "";
     if (inputs.sort === "totalvol")
-      eventOrder = `(${eventVolumeDisplayExpr}) ${sortDir} nulls last, e.id`;
+      eventOrder = `(${rankedEventVolumeExpr}) ${sortDir} nulls last, e.id`;
     else if (inputs.sort === "liquidity")
       eventOrder = `(${eventLiquidityDisplayExpr}) ${sortDir} nulls last, e.id`;
     else if (inputs.sort === "openinterest")
@@ -2559,12 +2618,10 @@ async function fetchFeedEventIdsFast(
          case when e.end_date > ${nowParam}::timestamptz and e.end_date <= ${sevenDaysFromNow}::timestamptz then 500 else 0 end * 0.1
         )
       `;
-      const candidateSortValue = buildTrendingSortValue(eventVolumeDisplayExpr);
+      const candidateSortValue = buildTrendingSortValue(rankedEventVolumeExpr);
       eventOrder = `${candidateSortValue} ${sortDir} nulls last, e.id`;
-      if (useMaxSpreadFastPath) {
-        filteredEventSortValue = buildTrendingSortValue(
-          buildExactEventVolumeSortSql({ eventVolumeDisplayExpr, nowParam }),
-        );
+      if (useQualificationFastPath) {
+        filteredEventSortValue = buildTrendingSortValue(rankedEventVolumeExpr);
       }
     }
 
@@ -2603,13 +2660,7 @@ async function fetchFeedEventIdsFast(
       where ${buildEventHasOrderableMarketSql({
         eventAlias: "e",
         nowParam,
-        extraMarketSql: maxSpreadParam
-          ? [
-              `om.best_bid is not null`,
-              `om.best_ask is not null`,
-              `(om.best_ask - om.best_bid) <= ${maxSpreadParam}`,
-            ]
-          : [],
+        extraMarketSql: marketQualificationSql,
       })}
     )
     select
@@ -4055,6 +4106,7 @@ type FeedMarketIdPageRow = {
 
 type FeedProjectedMarketCandidateStateRow = FeedMarketIdPageRow & {
   pm_prefix_count: number;
+  pm_remainder_below_page?: boolean;
   live_prefix_count?: number;
   live_remainder_below_page?: boolean;
 };
@@ -5369,15 +5421,11 @@ async function fetchFeedMarketIdsFast(
   );
   const graceCandidateLimitParam = add(graceCandidateLimit);
   const graceCandidateLimitParamIndex = params.length - 1;
-  // Keep the existing exact rank and availability checks, but drive narrow
-  // time-filtered trending pages from a live, indexed score prefix. The only
+  // Keep the existing exact rank and availability checks, but drive
+  // descending trending pages from a live, indexed score prefix. The only
   // score not known by this index is the event bonus: 0, 50, 200, or 250.
   const useLiveTrendingPrefix = Boolean(
-    options?.acceptPartialMetricPage &&
-    isLegacyTrending &&
-    !inputs.filter &&
-    sortDir === "desc" &&
-    (inputs.endWithin || inputs.ageSince),
+    isLegacyTrending && !inputs.filter && sortDir === "desc",
   );
   let livePrefixLimit = Math.max(1_000, pageTarget * 4);
   const livePrefixLimitParam = useLiveTrendingPrefix
@@ -5464,7 +5512,13 @@ async function fetchFeedMarketIdsFast(
       ) as pm_prefix_count
       ${
         useLiveTrendingPrefix
-          ? `, (select count(*)::int from live_trending_prefix) as live_prefix_count,
+          ? `, coalesce(
+          (select min(sort_value) from ranked_market_page)
+            > (select min((${projectedSortValue}))
+              from orderable_market_candidates_pm_ranked_candidates candidate_market),
+          false
+        ) as pm_remainder_below_page,
+        (select count(*)::int from live_trending_prefix) as live_prefix_count,
         coalesce(
           (select min(sort_value) from ranked_market_page)
             > (select min(base_score) from live_trending_prefix) + 250,
@@ -5494,6 +5548,16 @@ async function fetchFeedMarketIdsFast(
     const state = rows[0];
     const ids = state?.ids ?? [];
     const pmPrefixCount = Number(state?.pm_prefix_count ?? 0);
+    if (
+      useLiveTrendingPrefix &&
+      pmPrefixCount >= graceCandidateLimit &&
+      !(ids.length >= inputs.limit && state?.pm_remainder_below_page === true)
+    ) {
+      // Rejected grace candidates must not hide a later eligible winner,
+      // even when the strict branch already filled the requested page.
+      graceCandidateLimit = expandFeedCandidateLimit(graceCandidateLimit);
+      continue;
+    }
     if (
       useLiveTrendingPrefix &&
       Number(state?.live_prefix_count ?? 0) >= livePrefixLimit &&

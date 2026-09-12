@@ -1120,11 +1120,11 @@ console.log("ok - event spread sorts use ranked candidates");
   assert.match(capturedSql[0], /ranked_event_candidates as materialized/i);
   assert.match(
     capturedSql[0],
-    /ranked_event_orderable_market_candidates_strict_market_base as materialized[\s\S]*?join ranked_event_candidates candidate_event_filter/i,
+    /ranked_event_scope as materialized[\s\S]*?from ranked_event_candidates ranked_event/i,
   );
   assert.match(
     capturedSql[0],
-    /ranked_event_scope as materialized[\s\S]*?having count\(\*\) > 1/i,
+    /select count\(\*\) from \([\s\S]*?limit 2\s*\) scope_rows\s*\) > 1/i,
   );
   assert.match(
     capturedSql[0],
@@ -1136,6 +1136,54 @@ console.log("ok - event spread sorts use ranked candidates");
   );
 }
 console.log("ok - grouped event spread scopes only ranked candidates");
+
+{
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      [
+        {
+          ids: ["strict-winner"],
+          pm_prefix_count: 100,
+          live_prefix_count: 1000,
+          live_remainder_below_page: true,
+          pm_remainder_below_page: false,
+        },
+      ],
+      [
+        {
+          ids: ["later-grace-winner"],
+          pm_prefix_count: 101,
+          live_prefix_count: 1000,
+          live_remainder_below_page: true,
+          pm_remainder_below_page: true,
+        },
+      ],
+      [],
+    ],
+  });
+  await fetchFeedMarketsDirect(pool, {
+    ...baseInputs,
+    limit: 1,
+    sort: "trending",
+  });
+  assert.equal(capturedSql.length, 3);
+  assert.match(capturedSql[0], /live_trending_prefix as materialized/);
+  assert.match(capturedSql[0], /as pm_remainder_below_page/);
+  assert.ok(capturedParams[0].includes(100));
+  assert.ok(capturedParams[1].includes(400));
+  assert.ok(capturedParams[0].includes(1000));
+  assert.ok(
+    capturedParams[1].includes(1000),
+    "grace expansion must not unnecessarily grow the live prefix",
+  );
+}
+console.log(
+  "ok - unfiltered market ranking checks unseen grace winners even with a full page",
+);
 
 {
   const capturedSql: string[] = [];

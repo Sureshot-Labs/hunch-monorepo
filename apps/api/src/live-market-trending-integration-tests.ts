@@ -177,6 +177,8 @@ try {
   }
   for (const variant of [
     {},
+    { endWithin: undefined },
+    { endWithin: undefined, offset: 10 },
     { offset: 10 },
     { offset: 20 },
     { minVol: 100 },
@@ -198,7 +200,8 @@ try {
       where (${buildStrictIndexedMarketSql({ marketAlias: "m", eventAlias: "e", nowParam: "$1" })}
         or ${buildPolymarketGraceMarketSql({ marketAlias: "m", eventAlias: "e", nowParam: "$1", pmAlias: "pm" })})
         and ${buildRenderableMarketSql({ alias: "m" })}
-        and m.venue=any($2::text[]) and e.end_date>$1::timestamptz and e.end_date<=$3::timestamptz
+        and m.venue=any($2::text[])
+        and ($3::timestamptz is null or (e.end_date>$1::timestamptz and e.end_date<=$3::timestamptz))
         and ($4::timestamptz is null or e.start_date >= $4)
         and ($5::numeric <= 0 or coalesce(nullif(m.liquidity,0),nullif(m.open_interest,0)) >= $5)
         and ($6::numeric <= 1e-9 or m.volume_total >= $6)
@@ -212,7 +215,7 @@ try {
       [
         input.nowParam,
         input.venues,
-        input.endWithin,
+        input.endWithin ?? null,
         input.ageSince ?? null,
         input.minLiquidity,
         input.minVol,
@@ -227,13 +230,13 @@ try {
       expected.rows.map((r) => r.id),
       JSON.stringify(variant),
     );
-    if (input.venues?.length)
+    if (input.venues?.length && input.endWithin)
       assert.ok(
         captured.length >= 2,
         "the first prefix must not hide later eligible or tied winners",
       );
     assert.ok(captured[0].params.includes(1000));
-    if (input.venues?.length)
+    if (input.venues?.length && input.endWithin)
       assert.ok(
         captured
           .at(-1)
@@ -262,6 +265,93 @@ try {
       `ok - live trending equals full exact scan: ${JSON.stringify(variant)}`,
     );
   }
+
+  await client.query(`
+    insert into unified_markets
+      (id,event_id,venue,venue_market_id,status,volume_total,liquidity,close_time,expiration_time,metadata)
+    select 'rejected-prefix-' || n,'old','polymarket','rejected-prefix-' || n,
+      'ACTIVE',1000000,0,'2026-09-12T11:00:00Z','2026-09-14','{}'
+    from generate_series(1,101) n;
+    insert into polymarket_markets
+    select 'rejected-prefix-' || n,false,true,false,false from generate_series(1,101) n;
+    insert into unified_markets
+      (id,event_id,venue,venue_market_id,status,volume_total,liquidity,close_time,expiration_time,metadata)
+    values ('late-grace-winner','old','polymarket','late-grace-winner','ACTIVE',50000,0,
+      '2026-09-12T11:00:00Z','2026-09-14','{}');
+    insert into polymarket_markets values ('late-grace-winner',true,true,false,false);
+  `);
+  captured.length = 0;
+  const lateGrace = await fetchFeedMarketIdsForProbabilityProbe(pool, {
+    ...base,
+    endWithin: undefined,
+    venues: ["polymarket"],
+    limit: 1,
+  });
+  assert.deepEqual(lateGrace.marketIds, ["late-grace-winner"]);
+  assert.ok(
+    captured.length >= 2,
+    "full strict page cannot hide a later grace winner",
+  );
+  console.log(
+    "ok - real SQL expands rejected grace prefix despite a full strict page",
+  );
+
+  const coverageSql = `select venue, count(*)::int as active_markets,
+    count(*) filter(where coalesce(volume_24h,0)>0 or coalesce(volume_total,0)>0)::int as with_volume,
+    count(*) filter(where liquidity>0 or open_interest>0)::int as with_liquidity,
+    count(*) filter(where best_bid is not null or best_ask is not null or last_price is not null)::int as with_price
+    from unified_markets where status='ACTIVE' and venue=any($1::text[])
+    group by venue order by venue`;
+  const coverageVenues = [["polymarket", "limitless", "kalshi"]];
+  const originalCoverage = (await client.query(coverageSql, coverageVenues))
+    .rows;
+  const coverageMigration = await readFile(
+    new URL(
+      "../../../packages/db/migrations/0259_active_market_coverage_index.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  for (let replay = 0; replay < 2; replay++) {
+    for (const statement of coverageMigration
+      .split(";")
+      .map((value) => value.trim())
+      .filter(Boolean)) {
+      await client.query(statement);
+    }
+    assert.equal(
+      (await client.query("show statement_timeout")).rows[0].statement_timeout,
+      originalTimeout,
+    );
+    assert.deepEqual(
+      (await client.query(coverageSql, coverageVenues)).rows,
+      originalCoverage,
+    );
+  }
+  await client.query("vacuum analyze unified_markets");
+  const coveragePlan = await client.query(
+    `explain (analyze,buffers,format json) ${coverageSql}`,
+    coverageVenues,
+  );
+  assert.match(
+    JSON.stringify(coveragePlan.rows),
+    /idx_unified_markets_active_coverage/,
+  );
+  assert.match(JSON.stringify(coveragePlan.rows), /Index Only Scan/);
+  const volumePlan = await client.query(`explain (analyze,buffers,format json)
+    select sum(volume_total) from unified_markets
+    where event_id='old' and status='ACTIVE' and volume_total>0
+      and (venue <> 'kalshi' or lower(coalesce(metadata->>'dflowNativeAcceptingOrders','false'))='true')
+      and (expiration_time is null or expiration_time>'2026-09-12T12:00:00Z')
+      and (close_time is null or close_time>'2026-09-12T12:00:00Z')`);
+  assert.match(
+    JSON.stringify(volumePlan.rows),
+    /idx_unified_markets_event_positive_volume/,
+  );
+  assert.match(JSON.stringify(volumePlan.rows), /Index Only Scan/);
+  console.log(
+    "ok - coverage migration replays, preserves counts, and uses index-only coverage",
+  );
 
   // Verify the shared strict/grace read independently of token-book caching.
   await client.query(`
