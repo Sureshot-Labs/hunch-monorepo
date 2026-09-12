@@ -10,6 +10,7 @@ import {
   joinTelegramMarkdownV2Lines,
 } from "./telegram-bot-trading-presentation.js";
 import { filterVenuesForLifecycleCapability } from "./venue-lifecycle.js";
+import { TELEGRAM_BACK_BUTTON_TEXT } from "./telegram-bot-navigation.js";
 import {
   telegramCustomEmojiIdForVenue,
   telegramCustomEmojiMarkdownV2,
@@ -311,7 +312,12 @@ function buildJustDepositMenu(input: {
             text: "USDC · Base · Limitless",
           },
         ],
-        [{ callback_data: "hm:v1:deposit", text: "⬅️ Back" }],
+        [
+          {
+            callback_data: "hm:v1:deposit",
+            text: TELEGRAM_BACK_BUTTON_TEXT,
+          },
+        ],
       ],
     },
     text: joinTelegramMarkdownV2Lines([
@@ -356,7 +362,12 @@ function buildLegacyDepositUnavailableMessage(
     parse_mode: "MarkdownV2",
     reply_markup: {
       inline_keyboard: [
-        [{ callback_data: "hm:v1:deposit", text: "⬅️ Back to Receive" }],
+        [
+          {
+            callback_data: "hm:v1:deposit",
+            text: TELEGRAM_BACK_BUTTON_TEXT,
+          },
+        ],
       ],
     },
     text: joinTelegramMarkdownV2Lines([

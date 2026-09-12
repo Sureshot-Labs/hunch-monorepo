@@ -25,6 +25,7 @@ import {
 } from "./telegram-funding-route.js";
 import { parseTelegramMarketDeposit } from "./telegram-funding-navigation.js";
 import { telegramCustomEmojiIdForVenue } from "./telegram-custom-emoji.js";
+import { TELEGRAM_BACK_BUTTON_TEXT } from "./telegram-bot-navigation.js";
 
 export type SignalBotFundingMenuRoute =
   | {
@@ -465,7 +466,7 @@ async function deliverSignalBotInteractiveMenuCallback(
               ]),
               [
                 {
-                  text: "⬅️ Results",
+                  text: TELEGRAM_BACK_BUTTON_TEXT,
                   callback_data: `${input.callbackPrefix}search_back:${route.sessionId}:0`,
                 },
               ],
@@ -491,7 +492,7 @@ async function deliverSignalBotInteractiveMenuCallback(
                 ],
                 [
                   {
-                    text: "⬅️ Results",
+                    text: TELEGRAM_BACK_BUTTON_TEXT,
                     callback_data: `${input.callbackPrefix}search_back:${route.sessionId}:0`,
                   },
                 ],
@@ -533,7 +534,7 @@ async function deliverSignalBotInteractiveMenuCallback(
               ],
               [
                 {
-                  text: "⬅️ Results",
+                  text: TELEGRAM_BACK_BUTTON_TEXT,
                   callback_data: `${input.callbackPrefix}search_back:${route.sessionId}:0`,
                 },
               ],
@@ -614,7 +615,7 @@ async function deliverSignalBotInteractiveMenuCallback(
               ],
               [
                 {
-                  text: "⬅️ Results",
+                  text: TELEGRAM_BACK_BUTTON_TEXT,
                   callback_data: `${input.callbackPrefix}search_back:${route.sessionId}:0`,
                 },
               ],

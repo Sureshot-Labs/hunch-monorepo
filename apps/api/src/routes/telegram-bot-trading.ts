@@ -88,6 +88,7 @@ import {
 } from "../services/telegram-bot-trading-presentation.js";
 import { buildTelegramAccountValueMessage } from "../services/telegram-account-value.js";
 import { buildTelegramAccountValueUnavailableMessage } from "../services/telegram-account-value-contract.js";
+import { TELEGRAM_BACK_BUTTON_TEXT } from "../services/telegram-bot-navigation.js";
 import type { AccountValueReadModel } from "../account-value/runtime-service.js";
 import {
   accountValueReadService,
@@ -1432,7 +1433,7 @@ async function registerTelegramBotTradingRoutes(
               [
                 {
                   callback_data: `hm:v1:positions_page:${request.body.page ?? 0}`,
-                  text: "⬅️ Back to positions",
+                  text: TELEGRAM_BACK_BUTTON_TEXT,
                 },
               ],
             ],

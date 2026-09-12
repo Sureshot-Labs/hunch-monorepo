@@ -216,6 +216,7 @@ import {
 } from "./telegram-custom-emoji.js";
 import { TelegramBotApiClient } from "./signal-bot-telegram-client.js";
 import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
+import { TELEGRAM_BACK_BUTTON_TEXT } from "./telegram-bot-navigation.js";
 import {
   formatTelegramBoldMarkdownV2,
   formatTelegramCalloutMarkdownV2,
@@ -1923,7 +1924,7 @@ function buildSignalBotMenuNavRow(input: {
   const row: TelegramInlineKeyboardButton[] = [
     {
       callback_data: SIGNAL_BOT_MENU_CALLBACK_PREFIX + input.parent,
-      text: "⬅️ Back",
+      text: TELEGRAM_BACK_BUTTON_TEXT,
     },
   ];
   if (input.includeHome) {

@@ -8010,7 +8010,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           ),
         [
           ["🔄 Retry balance check", `hbt:retry_buy:${intentId}`],
-          ["⬅️ Back to market", `hbt:cancel:${intentId}`],
+          ["⬅️ Back", `hbt:cancel:${intentId}`],
           ["Deposit", "hm:v1:deposit:polymarket"],
           ["🏠 Home", "hm:v1:home"],
         ],

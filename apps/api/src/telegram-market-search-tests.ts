@@ -84,6 +84,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             );
             assert.doesNotMatch(button?.text ?? "", /🔵|🟡|🟢/);
           }
+          const backButton = buttons.find(
+            (button) =>
+              "callback_data" in button &&
+              button.callback_data === `hm:v1:search_back:${sessionId}:0`,
+          );
+          assert.equal(backButton?.text, "⬅️ Back");
         },
         renderExpiredSearch: async () => {
           assert.fail("session must remain valid");
@@ -645,7 +651,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "stale session result keeps Back to results",
+    name: "stale session result keeps the standard Back button",
     run: async () => {
       const redis = redisStore();
       const sessionId = await writeSignalBotMarketSearchSession({
@@ -675,7 +681,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.ok(lastMessage);
       assert.match(lastMessage.text, /no longer available/);
       assert.match(lastMessage.text, />⚠️ \*Market unavailable\*/);
-      assert.match(JSON.stringify(lastMessage), /Back to results/);
+      assert.equal(
+        (
+          lastMessage.reply_markup as {
+            inline_keyboard: Array<
+              Array<{ callback_data: string; text: string }>
+            >;
+          }
+        ).inline_keyboard
+          .flat()
+          .find((button) => button.callback_data.includes("search_back"))?.text,
+        "⬅️ Back",
+      );
     },
   },
   {

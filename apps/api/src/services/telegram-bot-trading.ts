@@ -59,6 +59,7 @@ import {
   type TelegramBotTradingClientReplyMarkup,
 } from "./telegram-bot-trading-client.js";
 import { withTelegramPrivateNavigation } from "./telegram-bot-private-navigation.js";
+import { TELEGRAM_BACK_BUTTON_TEXT } from "./telegram-bot-navigation.js";
 import {
   fenceTelegramTradeLifecycleNavigation,
   isTelegramTradeLifecycleDeliveryEligible,
@@ -413,7 +414,7 @@ function buildTelegramTradeShortfallUnavailableReplyMarkup(
       [
         {
           callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${intentId}`,
-          text: "⬅️ Back to market",
+          text: TELEGRAM_BACK_BUTTON_TEXT,
         },
         {
           callback_data: navigation
@@ -6898,7 +6899,10 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   if (!input.isAdminTest && !input.publicBrowseOnly) {
     if (input.context?.returnCallbackData) {
       keyboard.push([
-        { callback_data: input.context.returnCallbackData, text: "⬅️ Back" },
+        {
+          callback_data: input.context.returnCallbackData,
+          text: TELEGRAM_BACK_BUTTON_TEXT,
+        },
       ]);
     } else {
       keyboard.push([{ callback_data: "hm:v1:home", text: "🏠 Home" }]);

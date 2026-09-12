@@ -1,4 +1,5 @@
 import type { TelegramBotTradingClientMessage } from "./telegram-bot-trading-client.js";
+import { TELEGRAM_BACK_BUTTON_TEXT } from "./telegram-bot-navigation.js";
 import {
   escapeTelegramMarkdownV2,
   formatTelegramBoldMarkdownV2,
@@ -21,7 +22,12 @@ export function buildTelegramAccountValueKeyboard(): NonNullable<
           text: "💸 Buy",
         },
       ],
-      [{ callback_data: `${CALLBACK_PREFIX}home`, text: "⬅️ Back" }],
+      [
+        {
+          callback_data: `${CALLBACK_PREFIX}home`,
+          text: TELEGRAM_BACK_BUTTON_TEXT,
+        },
+      ],
     ],
   };
 }

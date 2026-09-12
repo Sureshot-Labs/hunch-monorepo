@@ -28,6 +28,7 @@ import {
 import type { FundingQuoteSummary, Money } from "../funding/domain/types.js";
 import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
 import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
+import { TELEGRAM_BACK_BUTTON_TEXT } from "./telegram-bot-navigation.js";
 
 function telegramFundingAppDepositRows() {
   const button = buildHunchMiniAppWebButton({
@@ -120,7 +121,7 @@ export function buildTelegramFundingReviewQuoteMessage(input: {
               contextId: input.contextId,
               kind: "refresh",
             }),
-            text: "Back",
+            text: TELEGRAM_BACK_BUTTON_TEXT,
           },
         ],
       ],
@@ -546,7 +547,7 @@ function fundingProgressReplyMarkup(
                     contextId: projection.fundingContextId,
                     kind: "back_to_market",
                   }),
-                  text: "⬅️ Back to market",
+                  text: TELEGRAM_BACK_BUTTON_TEXT,
                 },
               ],
             ]
@@ -589,7 +590,7 @@ function fundingProgressReplyMarkup(
           contextId: projection.fundingContextId,
           kind: "back_to_market",
         }),
-        text: "⬅️ Back to market",
+        text: TELEGRAM_BACK_BUTTON_TEXT,
       }
     : !moneyReceived
       ? {
@@ -597,7 +598,7 @@ function fundingProgressReplyMarkup(
             contextId: projection.fundingContextId,
             kind: "targets",
           }),
-          text: "⬅️ Back",
+          text: TELEGRAM_BACK_BUTTON_TEXT,
         }
       : {
           callback_data: telegramFundingCallbackData({

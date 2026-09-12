@@ -17,6 +17,7 @@ import {
   buildSignalBotReferralStartParam,
 } from "./signal-bot-mini-app-links.js";
 import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
+import { TELEGRAM_BACK_BUTTON_TEXT } from "./telegram-bot-navigation.js";
 import {
   escapeTelegramMarkdownV2,
   formatTelegramBoldMarkdownV2,
@@ -181,11 +182,23 @@ function buildRewardsNavigationRows(input: {
   return input.includeBackToRewards
     ? [
         [
-          callbackButton(input.callbackPrefix, "rewards", "⬅️ Back"),
+          callbackButton(
+            input.callbackPrefix,
+            "rewards",
+            TELEGRAM_BACK_BUTTON_TEXT,
+          ),
           callbackButton(input.callbackPrefix, "home", "🏠 Home"),
         ],
       ]
-    : [[callbackButton(input.callbackPrefix, "home", "⬅️ Back")]];
+    : [
+        [
+          callbackButton(
+            input.callbackPrefix,
+            "home",
+            TELEGRAM_BACK_BUTTON_TEXT,
+          ),
+        ],
+      ];
 }
 
 function nextReferralBonus(summary: RewardsSummary) {

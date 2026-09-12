@@ -19,6 +19,7 @@ import {
 } from "./telegram-market-identity.js";
 import { outcomeLabelOrSide } from "./wallet-intel-helpers.js";
 import { telegramMenuIndexEmoji } from "./telegram-bot-menu-numbering.js";
+import { TELEGRAM_BACK_BUTTON_TEXT } from "./telegram-bot-navigation.js";
 
 const SEARCH_KEY_PREFIX = "tg:signal_bot:v1:market_search";
 const SEARCH_TTL_SEC = 10 * 60;
@@ -411,7 +412,7 @@ export function buildSignalBotMarketVenuePickerScreen(input: {
         [
           {
             callback_data: `${input.callbackPrefix}search_back:${input.sessionId}:${returnPage}`,
-            text: "⬅️ Back to results",
+            text: TELEGRAM_BACK_BUTTON_TEXT,
           },
           {
             callback_data: `${input.callbackPrefix}home`,
@@ -538,7 +539,7 @@ export function buildSignalBotMarketUnavailableResultScreen(input: {
         [
           {
             callback_data: `${input.callbackPrefix}search_back:${input.sessionId}`,
-            text: "⬅️ Back to results",
+            text: TELEGRAM_BACK_BUTTON_TEXT,
           },
           {
             callback_data: `${input.callbackPrefix}home`,
