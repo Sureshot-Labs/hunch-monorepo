@@ -101,6 +101,8 @@ export type FundingSidecarRuntimeConfig = Readonly<{
   polymarketBuilderCode: string;
   polymarketBotBuyPolicyMaxUsd: number;
   polymarketNegRiskAdapterAddress: string;
+  polymarketCollateralOnrampAddress: string;
+  polymarketCollateralOfframpAddress: string;
   polymarketConditionalTokensAddress: string;
   limitlessUsdcAddress: string;
   limitlessConditionalTokensAddress: string;
@@ -267,6 +269,16 @@ export function loadFundingSidecarRuntimeConfig(
       "0xe2222d279d744050d28e00520010520000310F59",
     ),
     polymarketFundingRouterAddress,
+    polymarketCollateralOnrampAddress: stringValue(
+      source,
+      "POLYMARKET_COLLATERAL_ONRAMP_ADDRESS",
+      "0x93070a847efEf7F70739046A929D47a521F5B8ee",
+    ),
+    polymarketCollateralOfframpAddress: stringValue(
+      source,
+      "POLYMARKET_COLLATERAL_OFFRAMP_ADDRESS",
+      "0x2957922Eb93258b93368531d39fAcCA3B4dC5854",
+    ),
     polymarketBuilderCode: stringValue(source, "POLYMARKET_BUILDER_CODE", ""),
     polymarketBotBuyPolicyMaxUsd: optionalPositiveNumber(
       source,

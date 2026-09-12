@@ -5,6 +5,7 @@ import {
   isPolymarketRouterV2CommitPlan,
   isPolymarketRouterV3CommitPlan,
   isPolymarketRouterV4CommitPlan,
+  isPolymarketRouterV5CommitPlan,
 } from "./polymarket-router-commit-plan-validator.js";
 
 type CommitPlanValidator = (
@@ -22,6 +23,7 @@ const VERSIONED_COMMIT_PLAN_VALIDATORS = new Map<
       [2, isPolymarketRouterV2CommitPlan],
       [3, isPolymarketRouterV3CommitPlan],
       [4, isPolymarketRouterV4CommitPlan],
+      [5, isPolymarketRouterV5CommitPlan],
     ]),
   ],
 ]);

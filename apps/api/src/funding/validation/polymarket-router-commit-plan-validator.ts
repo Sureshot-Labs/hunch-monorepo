@@ -286,7 +286,9 @@ export function isPolymarketRouterCommitPlan(
         ? isPolymarketRouterV3CommitPlan(plan)
         : declarationRecord.version === 4
           ? isPolymarketRouterV4CommitPlan(plan)
-          : false;
+          : declarationRecord.version === 5
+            ? isPolymarketRouterV5CommitPlan(plan)
+            : false;
 }
 
 /** Cross-controller extraction keeps the Safe's owner as its signer. Only
@@ -294,8 +296,22 @@ export function isPolymarketRouterCommitPlan(
 export function isPolymarketRouterV4CommitPlan(
   plan: Pick<FundingCommitPlan, "operation" | "steps">,
 ): boolean {
+  return isCrossControllerCommitPlan(plan, false);
+}
+
+/** V5 adds owned Deposit Wallet pUSD without widening existing V4 plans. */
+export function isPolymarketRouterV5CommitPlan(
+  plan: Pick<FundingCommitPlan, "operation" | "steps">,
+): boolean {
+  return isCrossControllerCommitPlan(plan, true);
+}
+
+function isCrossControllerCommitPlan(
+  plan: Pick<FundingCommitPlan, "operation" | "steps">,
+  deposit: boolean,
+): boolean {
   const steps = plan.steps.filter((step) => step.segmentOrdinal === null);
-  if (steps.length < 3 || steps.length > 8) return false;
+  if (steps.length < 3 || (!deposit && steps.length > 8)) return false;
   const firstOrdinal =
     plan.operation.planKind === "composite_route" ? steps[0]?.ordinal : 0;
   if (
@@ -315,7 +331,10 @@ export function isPolymarketRouterV4CommitPlan(
   if (!fund || fund.executorId !== CLIENT_EVM_WALLET_EXECUTOR_ID) return false;
   const transferIndex = steps.findIndex(
     (step) =>
-      step.actionValidationResult.kind === "owned_safe_controller_transfer",
+      step.actionValidationResult.kind ===
+      (deposit
+        ? "owned_deposit_controller_transfer"
+        : "owned_safe_controller_transfer"),
   );
   if (transferIndex < 1) return false;
   const transferStep = steps[transferIndex];
@@ -337,8 +356,15 @@ export function isPolymarketRouterV4CommitPlan(
     !expectation ||
     !handoff.success ||
     handoff.data.kind !== "external_handoff" ||
-    handoff.data.handoffKind !== "polymarket_safe_transfer" ||
-    handoffStep.executorId !== "polymarket_safe_relayer_v1" ||
+    handoff.data.handoffKind !==
+      (deposit
+        ? "polymarket_deposit_wallet_transfer"
+        : "polymarket_safe_transfer") ||
+    (deposit && handoff.data.payload.conversionKind != null) ||
+    handoffStep.executorId !==
+      (deposit
+        ? POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID
+        : "polymarket_safe_relayer_v1") ||
     handoffStep.state !== "action_required" ||
     !transfer.success ||
     transfer.data.kind !== "evm_transaction" ||
@@ -352,7 +378,9 @@ export function isPolymarketRouterV4CommitPlan(
     transferStep.actionValidationResult.validatorId !==
       POLYMARKET_FUNDING_SOURCE_ADAPTER_ID ||
     expectation.tokenAddress.toLowerCase() !==
-      RELAY_PINNED_ASSETS.polygonUsdce ||
+      (deposit
+        ? RELAY_PINNED_ASSETS.polygonPusd
+        : RELAY_PINNED_ASSETS.polygonUsdce) ||
     transfer.data.to.toLowerCase() !== expectation.tokenAddress.toLowerCase()
   )
     return false;
@@ -397,6 +425,23 @@ export function isPolymarketRouterV4CommitPlan(
       dependsOnOrdinal: ordinal === 0 ? null : ordinal - 1,
     }));
   const remainder = { ...plan, steps: remaining };
+  if (
+    deposit &&
+    remaining.some(
+      (step) =>
+        step.actionValidationResult.kind ===
+        "owned_deposit_controller_transfer",
+    )
+  )
+    return isPolymarketRouterV5CommitPlan(remainder);
+  if (
+    deposit &&
+    remaining.some(
+      (step) =>
+        step.actionValidationResult.kind === "owned_safe_controller_transfer",
+    )
+  )
+    return isPolymarketRouterV4CommitPlan(remainder);
   return remaining[0]?.stepKind === "external_handoff"
     ? isPolymarketRouterV3CommitPlan(remainder)
     : isPolymarketRouterV1CommitPlan(remainder);

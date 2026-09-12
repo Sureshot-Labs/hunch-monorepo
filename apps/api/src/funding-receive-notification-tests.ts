@@ -52,7 +52,11 @@ const canonicalEvent: FundingReceiveCanonicalEvent = {
 
 type RecordedQuery = Readonly<{ sql: string; params: readonly unknown[] }>;
 
-function mockDb(input: { suppressed: boolean; duplicate?: boolean }): {
+function mockDb(input: {
+  suppressed: boolean;
+  duplicate?: boolean;
+  eligible?: boolean;
+}): {
   db: DbQuery;
   queries: RecordedQuery[];
 } {
@@ -62,6 +66,10 @@ function mockDb(input: { suppressed: boolean; duplicate?: boolean }): {
     params: readonly unknown[] = [],
   ): Promise<{ rows: T[] }> => {
     queries.push({ sql, params });
+    if (sql.includes("as eligible"))
+      return { rows: [{ eligible: input.eligible ?? true } as unknown as T] };
+    if (sql.includes("as suppressed"))
+      return { rows: [{ suppressed: input.suppressed } as unknown as T] };
     if (/select exists \(/iu.test(sql)) {
       return {
         rows: [{ suppressed: input.suppressed } as unknown as T],
@@ -202,4 +210,78 @@ function mockDb(input: { suppressed: boolean; duplicate?: boolean }): {
   assert.deepEqual(queries, []);
 }
 
+const pusdVariant: DirectIngressObservationVariant = {
+  ...retainedSolVariant,
+  networkId: "evm:137",
+  destinationAddress: "0x85fff5e1be3b82dcb35048f6d4c9b02f51920f5d",
+  asset: {
+    networkId: "evm:137",
+    assetId: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
+    decimals: 6,
+  },
+  completion: { kind: "direct_destination_credit" },
+};
+const pusdInput = {
+  userId: USER_ID,
+  receiveSessionId: RECEIVE_SESSION_ID,
+  ownerChannel: "web" as const,
+  variant: pusdVariant,
+  now: NOW,
+  canonicalEventId: CANONICAL_EVENT_ID,
+  event: {
+    ...canonicalEvent,
+    variant: pusdVariant,
+    eventIndex: "698",
+    destinationAddress: pusdVariant.destinationAddress,
+    sourceAddress: "0xf9557d6b189Ad14cc280b5AFF66fCB3770077e87",
+    rawAmount: "1000000",
+    transactionHash:
+      "0x35fc124db87ec1e7e785b954d7ad90448698e19209c8b0a3a347089cd9d0f79b",
+  },
+};
+{
+  const { db, queries } = mockDb({ suppressed: false });
+  assert.equal(
+    await recordCanonicalReceiveDepositNotification(db, pusdInput),
+    "created",
+  );
+  const insert = queries.find(({ sql }) =>
+    sql.includes("insert into notifications"),
+  );
+  assert.ok(insert);
+  assert.equal(insert.params[3], "1 pUSD deposit received on Polygon");
+  assert.equal(insert.params[6], `deposit:canonical:${CANONICAL_EVENT_ID}`);
+}
+for (const condition of [
+  { suppressed: true },
+  { suppressed: false, eligible: false },
+  { suppressed: false, duplicate: true },
+]) {
+  const { db } = mockDb(condition);
+  assert.equal(
+    await recordCanonicalReceiveDepositNotification(db, pusdInput),
+    condition.suppressed
+      ? "suppressed"
+      : condition.eligible === false
+        ? "ineligible"
+        : "deduplicated",
+  );
+}
+{
+  const { db, queries } = mockDb({ suppressed: false });
+  assert.equal(
+    await recordCanonicalReceiveDepositNotification(db, {
+      ...pusdInput,
+      event: {
+        ...pusdInput.event,
+        sourceAddress: "0xe2222d279d744050d28e00520010520000310F59",
+      },
+    }),
+    "suppressed",
+  );
+  assert.equal(
+    queries.some(({ sql }) => sql.includes("insert into notifications")),
+    false,
+  );
+}
 console.log("[funding-receive-notification-tests] complete");

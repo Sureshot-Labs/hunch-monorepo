@@ -6,6 +6,123 @@ import type { FundingReceiveSessionChannel } from "../domain/types.js";
 import { sameAsset } from "../planner/money.js";
 import type { DirectIngressObservationVariant } from "../reconciliation/direct-ingress-observer.js";
 import type { FundingReceiveCanonicalEvent } from "./canonical-receive-event-scanner.js";
+import { buildDepositNotification } from "../../services/deposit-notification-content.js";
+import {
+  isKnownAcrossBridgeDeposit,
+  isVenueCashDeposit,
+} from "../../services/deposit-transfer-classification.js";
+import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
+
+/** These derived addresses use the canonical scanner as their sole deposit
+ * notification producer, even if a webhook is delivered before the scan. */
+export async function isCanonicalPusdReceiveAddress(
+  db: DbQuery,
+  input: {
+    userId: string;
+    recipient: string;
+    caip2: string;
+    assetId: string | null | undefined;
+  },
+): Promise<boolean> {
+  if (
+    input.caip2.toLowerCase() !== "eip155:137" ||
+    input.assetId?.toLowerCase() !==
+      fundingSidecarRuntimeConfig.polymarketPusdAddress.toLowerCase()
+  )
+    return false;
+  const { rows } = await db.query<{ eligible: boolean }>(
+    `select exists (
+       select 1 from funding_receive_sessions receive_session
+       where receive_session.user_id = $1::uuid
+         and receive_session.observe_until > now()
+         and receive_session.venue_id = 'polymarket'
+         and receive_session.venue_binding_snapshot ->> 'topology' = 'deposit_wallet'
+         and lower(receive_session.destination_target_snapshot #>> '{location,details,address}') = lower($2)
+     ) as eligible`,
+    [input.userId, input.recipient],
+  );
+  return rows[0]?.eligible === true;
+}
+
+async function recordPusdDepositNotification(
+  db: DbQuery,
+  input: Parameters<typeof recordCanonicalReceiveDepositNotification>[1],
+): Promise<CanonicalReceiveDepositNotificationResult> {
+  const { event, variant } = input;
+  if (
+    !(await isCanonicalPusdReceiveAddress(db, {
+      userId: input.userId,
+      recipient: event.destinationAddress,
+      caip2: "eip155:137",
+      assetId: variant.asset.assetId,
+    }))
+  )
+    return "ineligible";
+  const transfer = {
+    caip2: "eip155:137",
+    sender: event.sourceAddress,
+    asset: { address: variant.asset.assetId },
+  };
+  if (
+    !event.sourceAddress ||
+    isKnownAcrossBridgeDeposit(transfer) ||
+    isVenueCashDeposit(transfer, fundingSidecarRuntimeConfig)
+  )
+    return "suppressed";
+  // Routing/handoff outputs have already been excluded by the canonical
+  // observer. These are the remaining wallet/legacy venue movements, not a
+  // second accounting classification: only the notification is suppressed.
+  const { rows } = await db.query<{ suppressed: boolean }>(
+    `select (
+       exists (select 1 from user_wallets source_wallet
+         where source_wallet.user_id = $1::uuid and source_wallet.wallet_address_norm = lower($2))
+       or exists (select 1 from user_venue_credentials source_funder
+         where source_funder.user_id = $1::uuid and lower(source_funder.funder_address) = lower($2))
+       or exists (select 1 from executions venue_execution
+         where venue_execution.user_id = $1::uuid and lower(venue_execution.tx_signature) = lower($3))
+       or exists (select 1 from bridge_orders bridge_order
+         where bridge_order.user_id = $1::uuid and lower(bridge_order.tx_hash_dst) = lower($3))
+       or exists (select 1 from notifications deposit_notification
+         where deposit_notification.user_id = $1::uuid and deposit_notification.type = 'deposit_received'
+           and lower(deposit_notification.data ->> 'txHash') = lower($3)
+           and lower(deposit_notification.data ->> 'walletAddress') = lower($4)
+           and deposit_notification.data ->> 'amountRaw' = $5
+           and lower(deposit_notification.data #>> '{asset,address}') = lower($6)
+           and deposit_notification.data ->> 'canonicalEventId' is null)
+     ) as suppressed`,
+    [
+      input.userId,
+      event.sourceAddress,
+      event.transactionHash,
+      event.destinationAddress,
+      event.rawAmount,
+      variant.asset.assetId,
+    ],
+  );
+  if (rows[0]?.suppressed) return "suppressed";
+  const content = buildDepositNotification({
+    userId: input.userId,
+    source: "funding_receive",
+    walletAddress: event.destinationAddress,
+    walletType: "ethereum",
+    caip2: "eip155:137",
+    asset: { type: "erc20", address: variant.asset.assetId },
+    amountRaw: event.rawAmount,
+    txHash: event.transactionHash,
+    idempotencyKey: input.canonicalEventId,
+    dedupeKey: `deposit:canonical:${input.canonicalEventId}`,
+  });
+  const inserted = await insertNotification(db, {
+    ...content,
+    data: {
+      ...(content.data as Record<string, unknown>),
+      canonicalEventId: input.canonicalEventId,
+      eventIndex: event.eventIndex,
+      receiveSessionId: input.receiveSessionId,
+    },
+  });
+  return inserted ? "created" : "deduplicated";
+}
 
 export type CanonicalReceiveDepositNotificationResult =
   | "created"
@@ -112,9 +229,16 @@ export async function recordCanonicalReceiveDepositNotification(
     now: Date;
   }>,
 ): Promise<CanonicalReceiveDepositNotificationResult> {
+  const directPusd =
+    input.variant.completion.kind === "direct_destination_credit" &&
+    input.variant.asset.networkId === "evm:137" &&
+    input.variant.asset.decimals === 6 &&
+    input.variant.asset.assetId.toLowerCase() ===
+      fundingSidecarRuntimeConfig.polymarketPusdAddress.toLowerCase();
   if (
-    input.variant.completion.kind !== "retained_owned_source_credit" ||
-    !sameAsset(input.variant.asset, SOLANA_NATIVE_ASSET)
+    !directPusd &&
+    (input.variant.completion.kind !== "retained_owned_source_credit" ||
+      !sameAsset(input.variant.asset, SOLANA_NATIVE_ASSET))
   ) {
     return "ineligible";
   }
@@ -124,6 +248,7 @@ export async function recordCanonicalReceiveDepositNotification(
   ) {
     return "suppressed";
   }
+  if (directPusd) return recordPusdDepositNotification(db, input);
 
   const dedupeKey = nativeSolDepositNotificationDedupeKey({
     networkId: input.variant.networkId,

@@ -17,7 +17,11 @@ import {
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../../execution/sponsorship-policy.js";
 import { PolymarketFundingSourceAdapter } from "../../preparation/polymarket-funding-source-adapter.js";
 import { polymarketFundingEvidence } from "../../preparation/polymarket-funding-snapshot.js";
-import { maximumInternalFundingDestinationRaw } from "../../planner/composite-source-options.js";
+import {
+  maximumInternalFundingDestinationRaw,
+  buildCompositeSourceOption,
+} from "../../planner/composite-source-options.js";
+import type { PlannedSourceOption } from "../../planner/planning-types.js";
 import type { FundingSourcePlanningInput } from "../../planner/source-adapter.js";
 import {
   FUNDING_OPERATION_RECONCILIATION_TTL_MS,
@@ -1227,6 +1231,306 @@ for (const purpose of [
     "exact_output",
   );
 }
+
+// MAR33: the selected Deposit Wallet is empty, but another internal one
+// contains the missing dollar. No native gas or external connection is needed.
+const mar33Owner = {
+  ...selectedProfile,
+  source: "embedded" as const,
+  walletId: "wallet_mar33_owner",
+  address: otherOwner,
+  controllerWalletRef: "mar33_owner_ref",
+  serverWalletRef: "mar33_privy",
+  signingModes: ["web_client", "privy_authorization"] as const,
+  sponsorshipPolicyIds: [PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID],
+};
+const mar33Deposit = "0x85fff5e1be3b82dcb35048f6d4c9b02f51920f5d";
+const mar33Component = component("mar33_pusd", mar33Deposit, PUSD, "1000000", {
+  walletId: "wallet_mar33_deposit",
+  venueId: "polymarket",
+  polymarketFunderKind: "deposit_wallet",
+  linkedAddress: otherOwner,
+});
+const mar33Account: AccountValueReadModel = {
+  ...safeSourceAccount,
+  nativeGasBalances: [],
+  connectedExternalWalletRefs: [],
+  projection: { ...safeSourceAccount.projection, components: [mar33Component] },
+  cashAvailability: {
+    ...safeSourceAccount.cashAvailability,
+    components: [
+      {
+        componentId: mar33Component.componentId,
+        availableRaw: "1000000",
+        freshness: "fresh",
+      },
+    ] as unknown as AccountValueReadModel["cashAvailability"]["components"],
+  },
+  ownership: {
+    ...sourceOwnership,
+    wallets: [
+      selectedProfile,
+      mar33Owner,
+      {
+        ...mar33Owner,
+        walletId: "wallet_mar33_deposit",
+        address: mar33Deposit,
+        source: "smart",
+        signingModes: [],
+        serverWalletRef: null,
+      },
+    ],
+  },
+};
+const mar33Input = {
+  ...planningInput("7098652", "7098652", "0", "trade_shortfall", "0", "0", "0"),
+  internalSourcesOnly: true,
+};
+const [mar33Funding] = await crossAdapter(mar33Account).list(mar33Input);
+assert.ok(mar33Funding);
+assert.ok(mar33Funding.option.minimumDestination);
+assert.equal(mar33Funding.option.minimumDestination?.raw, "1000000");
+assert.equal(isValidFundingCommitPlanBoundary(mar33Funding.commitPlan), true);
+assert.equal(
+  mar33Funding.commitPlan.steps[0]?.normalizedAction.actorWalletId,
+  mar33Owner.walletId,
+);
+assert.equal(
+  mar33Funding.commitPlan.steps[1]?.normalizedAction.senderWalletId,
+  mar33Owner.walletId,
+);
+assert.equal(
+  mar33Funding.commitPlan.steps.at(-1)?.normalizedAction.senderWalletId,
+  selectedProfile.walletId,
+);
+assert.equal(
+  fundingEconomicSourceReservations(
+    mar33Funding.commitPlan.reservations,
+  ).reduce((sum, entry) => sum + BigInt(entry.rawAmount), 0n),
+  1000000n,
+);
+assert.equal(
+  mar33Funding.commitPlan.reservations.filter(
+    (entry) => entry.economicRole === "future_credit_fence",
+  ).length,
+  2,
+);
+assert.equal(
+  BigInt(mar33Funding.option.minimumDestination.raw) + 1931876n + 4189921n >=
+    7098652n,
+  true,
+);
+assert.equal(
+  BigInt(mar33Funding.option.minimumDestination.raw) + 1931876n + 4189921n >=
+    7204602n,
+  false,
+);
+assert.deepEqual(
+  await crossAdapter(mar33Account).list({
+    ...mar33Input,
+    excludedSourceComponentIds: [mar33Component.componentId],
+  }),
+  [],
+);
+assert.deepEqual(
+  await crossAdapter(mar33Account).list({
+    ...mar33Input,
+    request: {
+      ...mar33Input.request,
+      serverExecutionProfileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+    },
+  }),
+  [],
+);
+for (const field of [
+  "expectedDestinationRaw",
+  "expectedDestinationAddress",
+  "signerAddress",
+]) {
+  assert.equal(
+    isValidFundingCommitPlanBoundary({
+      ...mar33Funding.commitPlan,
+      steps: mar33Funding.commitPlan.steps.map((step) =>
+        step.actionValidationResult.kind === "owned_deposit_controller_transfer"
+          ? {
+              ...step,
+              actionValidationResult: {
+                ...step.actionValidationResult,
+                [field]: field === "expectedDestinationRaw" ? "1" : DEPOSIT,
+              },
+            }
+          : step,
+      ),
+    }),
+    false,
+  );
+}
+assert.equal(
+  isValidFundingCommitPlanBoundary({
+    ...mar33Funding.commitPlan,
+    operation: {
+      ...mar33Funding.commitPlan.operation,
+      supportMetadata: {
+        ...mar33Funding.commitPlan.operation.supportMetadata,
+        planValidation: {
+          validatorId: "polymarket_funding_router_v1",
+          version: 4,
+        },
+      },
+    },
+  }),
+  false,
+);
+assert.ok(mar33Account.ownership);
+const mar33Unowned = {
+  ...mar33Account,
+  ownership: {
+    ...mar33Account.ownership,
+    wallets: mar33Account.ownership.wallets.filter(
+      (entry) => entry.walletId !== mar33Owner.walletId,
+    ),
+  },
+};
+assert.deepEqual(await crossAdapter(mar33Unowned).list(mar33Input), []);
+
+function mar33RelayLeg(
+  id: string,
+  networkId: string,
+  sourceRaw: string,
+  expectedRaw: string,
+  minimumRaw: string,
+): PlannedSourceOption {
+  const template = mar33Funding;
+  assert.ok(template);
+  const templateStep = template.commitPlan.steps.at(-1);
+  assert.ok(templateStep);
+  const asset = { networkId, assetId: `${id}_usdc`, decimals: 6 };
+  const location = {
+    kind: "wallet" as const,
+    locationId: `location_${id}_mar33`,
+    accountId: ACCOUNT_ID,
+    asset,
+    details: { address: `${id}_address`, walletId: `${id}_wallet` },
+  };
+  const source = { kind: "owned_location" as const, location };
+  const expected = { asset: PUSD, raw: expectedRaw };
+  const minimum = { asset: PUSD, raw: minimumRaw };
+  const option = {
+    ...template.option,
+    kind: "wallet_asset" as const,
+    sourceOptionId: `source_${id}_mar33`,
+    source,
+    maximumSourceRaw: sourceRaw,
+    expectedDestination: expected,
+    minimumDestination: minimum,
+    requiredActions: [
+      {
+        kind: "evm_transaction" as const,
+        actor: "user" as const,
+        safeLabel: id,
+        valueMoving: true,
+        sponsorship: "requested" as const,
+      },
+    ],
+  };
+  return {
+    option,
+    providerId: "relay",
+    routeId: `route_${id}`,
+    compositeEligible: true,
+    commitPlan: {
+      operation: {
+        ...template.commitPlan.operation,
+        planKind: "wallet_route",
+        sourceSnapshot: source,
+        supportMetadata: {
+          destinationObservation: {
+            observerId: "owned_route_destination_observer_v1",
+            locationId: "location_pm_deposit_12345678",
+            asset: PUSD,
+            baselineRaw: "0",
+            baselineRevision: "mar33_baseline",
+            baselineAsOf: "2026-07-24T12:00:00.000Z",
+          },
+        },
+        requestedSourceAmount: { asset, raw: sourceRaw },
+      },
+      segments: [
+        {
+          providerId: "relay",
+          adapterId: "relay_quote_v2",
+          adapterVersion: 1,
+          segmentKind: "cross_network_transfer",
+          status: "planned",
+          sourceSnapshot: source,
+          destinationTargetSnapshot:
+            template.commitPlan.operation.destinationTargetSnapshot,
+          quotedInput: { asset, raw: sourceRaw },
+          quotedExpectedOutput: expected,
+          quotedMinOutput: minimum,
+          providerQuoteRefCiphertext: `ciphertext_${id}`,
+          providerQuoteRefLookupHmac: `hmac_${id}`,
+          depositAddressCiphertext: null,
+          depositAddressLookupHmac: null,
+          lookupKeyVersion: 1,
+          refundLocationSnapshot: location,
+          quoteExpiresAt: EXPIRES_AT,
+        },
+      ],
+      steps: [
+        {
+          ...templateStep,
+          ordinal: 0,
+          segmentOrdinal: 0,
+          stepKind: "transaction",
+          dependsOnOrdinal: null,
+          actionValidationResult: { validatorId: "fixture_relay" },
+          normalizedAction: { kind: "evm_transaction" },
+        },
+      ],
+      reservations: [
+        {
+          segmentOrdinal: 0,
+          componentId: `component_${id}_mar33`,
+          locationId: location.locationId,
+          networkId,
+          assetId: asset.assetId,
+          assetDecimals: 6,
+          rawAmount: sourceRaw,
+          mode: "subtract_available",
+          expiresAt: EXPIRES_AT,
+        },
+      ],
+    },
+  };
+}
+const mar33Candidates = [
+  mar33Funding,
+  mar33RelayLeg("solana", "solana:mainnet", "2000000", "1951390", "1931876"),
+  mar33RelayLeg("base", "evm:8453", "4281691", "4232244", "4189921"),
+];
+const mar33CompositeInput = {
+  candidates: mar33Candidates,
+  requiredDestination: { asset: PUSD, raw: "7098652" },
+  destinationUnitPriceUsd: "1",
+  maximumFeeUsd: "1",
+  maximumFeeBps: 2000,
+  executionBoundary: "client_handoff" as const,
+};
+const mar33Composite = buildCompositeSourceOption(mar33CompositeInput);
+assert.ok(
+  mar33Composite,
+  "historical MAR33 must form a three-source client composite",
+);
+assert.equal(mar33Composite.option.minimumDestination?.raw, "7121797");
+assert.equal(isValidFundingCommitPlanBoundary(mar33Composite.commitPlan), true);
+assert.equal(
+  buildCompositeSourceOption({
+    ...mar33CompositeInput,
+    requiredDestination: { asset: PUSD, raw: "7204602" },
+  }),
+  null,
+);
 
 console.log(
   "[polymarket-funding-source-adapter-tests] exact and maximum partial multi-input plans, purpose-compatible exact-output preparation, automatic-only composite eligibility, sponsorship, fail-closed cap/allowance handling, and reservations passed",

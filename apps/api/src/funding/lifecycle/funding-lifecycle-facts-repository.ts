@@ -206,8 +206,10 @@ function actionIsSafeInternalHandoff(action: LifecycleActionRow): boolean {
   return (
     (action.step_kind === "transaction" &&
       action.executor_id === "wallet_profile_evm_v1" &&
-      action.action_validation_result.kind ===
-        "owned_safe_controller_transfer" &&
+      [
+        "owned_safe_controller_transfer",
+        "owned_deposit_controller_transfer",
+      ].includes(String(action.action_validation_result.kind)) &&
       action.action_validation_result.validatorId ===
         "polymarket_funding_router_v1") ||
     (action.step_kind === "external_handoff" &&

@@ -473,6 +473,132 @@ try {
     [ambiguousIdempotencyKey],
   );
   assert.equal(ambiguousDeposit.rows[0]?.status, "notified");
+  // POR27: canonical pUSD notifications and webhook ordering share one
+  // producer. All fixture writes roll back with the existing transaction.
+  const pusdWallet = "0x85fff5e1be3b82dcb35048f6d4c9b02f51920f5d";
+  const pusdAsset = {
+    networkId: "evm:137",
+    assetId: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
+    decimals: 6,
+  };
+  const pusdContext = await createTelegramBuyContext({
+    client,
+    userId,
+    telegramAccountId,
+    marketId,
+    wallet: pusdWallet,
+    suffix: "pusd-canonical",
+  });
+  const pusdVariant: DirectIngressObservationVariant = {
+    ...variant,
+    networkId: "evm:137",
+    asset: pusdAsset,
+    destinationAddress: pusdWallet,
+    completion: { kind: "direct_destination_credit" },
+  };
+  await client.query(
+    `update funding_receive_sessions set venue_id = 'polymarket', destination_asset = $2::jsonb,
+    venue_binding_snapshot = '{"topology":"deposit_wallet"}'::jsonb,
+    destination_target_snapshot = $3::jsonb, observation_variants = $4::jsonb
+    where id = $1::uuid`,
+    [
+      pusdContext.receiveSessionId,
+      JSON.stringify(pusdAsset),
+      JSON.stringify({ location: { details: { address: pusdWallet } } }),
+      JSON.stringify([pusdVariant]),
+    ],
+  );
+  await client.query(
+    `insert into user_wallets (user_id,wallet_address,wallet_type,is_primary,is_verified) values ($1::uuid,$2,'ethereum',false,true)`,
+    [userId, pusdWallet],
+  );
+  const pusdTx = `0x${"a".repeat(64)}`;
+  const pusdEvent: FundingReceiveCanonicalEvent = {
+    variant: pusdVariant,
+    transactionHash: pusdTx,
+    eventIndex: "698",
+    blockNumber: "93687477",
+    blockHash: `0x${"b".repeat(64)}`,
+    sourceAddress: "0xf9557d6b189Ad14cc280b5AFF66fCB3770077e87",
+    destinationAddress: pusdWallet,
+    rawAmount: "1000000",
+    observedAt: new Date().toISOString(),
+  };
+  const pusdInput = {
+    userId,
+    receiveSessionId: pusdContext.receiveSessionId,
+    ownerChannel: "web" as const,
+    variant: pusdVariant,
+    event: pusdEvent,
+    canonicalEventId: crypto.randomUUID(),
+    now: new Date(),
+  };
+  const pusdWebhook = {
+    type: "wallet.funds_deposited",
+    wallet_id: "por27-wallet",
+    idempotency_key: `por27-${crypto.randomUUID()}`,
+    caip2: "eip155:137",
+    asset: { type: "erc20", address: pusdAsset.assetId },
+    amount: "1000000",
+    transaction_hash: pusdTx,
+    sender: pusdEvent.sourceAddress,
+    recipient: pusdWallet,
+  };
+  assert.equal(
+    (await handlePrivyDepositWebhook(client, pusdWebhook)).status,
+    "recorded",
+  );
+  assert.equal(
+    await recordCanonicalReceiveDepositNotification(client, pusdInput),
+    "created",
+  );
+  assert.equal(
+    await recordCanonicalReceiveDepositNotification(client, pusdInput),
+    "deduplicated",
+  );
+  assert.equal(
+    (await handlePrivyDepositWebhook(client, pusdWebhook)).status,
+    "recorded",
+  );
+  const pusdRows = await client.query<{ body: string }>(
+    `select body from notifications where user_id=$1::uuid and data->>'canonicalEventId'=$2`,
+    [userId, pusdInput.canonicalEventId],
+  );
+  assert.equal(pusdRows.rows.length, 1);
+  assert.equal(pusdRows.rows[0]?.body, "1 pUSD deposit received on Polygon");
+  assert.equal(
+    await recordCanonicalReceiveDepositNotification(client, {
+      ...pusdInput,
+      canonicalEventId: crypto.randomUUID(),
+      event: { ...pusdEvent, eventIndex: "699" },
+    }),
+    "created",
+    "distinct logs must not collapse into one receipt",
+  );
+  assert.equal(
+    await recordCanonicalReceiveDepositNotification(client, {
+      ...pusdInput,
+      event: {
+        ...pusdEvent,
+        sourceAddress: "0xe2222d279d744050d28e00520010520000310F59",
+      },
+    }),
+    "suppressed",
+  );
+  assert.equal(
+    await recordCanonicalReceiveDepositNotification(client, {
+      ...pusdInput,
+      event: { ...pusdEvent, sourceAddress: pusdWallet },
+    }),
+    "suppressed",
+  );
+  assert.equal(
+    await recordCanonicalReceiveDepositNotification(client, {
+      ...pusdInput,
+      userId: crypto.randomUUID(),
+    }),
+    "ineligible",
+  );
 } finally {
   await client.query("rollback");
   client.release();

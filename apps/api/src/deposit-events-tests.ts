@@ -145,6 +145,12 @@ function createMockDb(options: MockDbOptions): MockDb {
     params?: unknown[],
   ): Promise<{ rows: T[] }> => {
     calls.push({ sql, params });
+    if (
+      sql.includes("as eligible") &&
+      sql.includes("funding_receive_sessions")
+    ) {
+      return { rows: [{ eligible: false } as unknown as T] };
+    }
 
     if (/from user_wallets/i.test(sql)) {
       const walletType = typeof params?.[0] === "string" ? params[0] : "";

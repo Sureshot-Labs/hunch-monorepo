@@ -6,7 +6,10 @@ import {
   buildDepositNotification,
   createNotificationSafe,
 } from "./notifications.js";
-import { nativeSolDepositNotificationDedupeKey } from "../funding/receive/receive-deposit-notification.js";
+import {
+  nativeSolDepositNotificationDedupeKey,
+  isCanonicalPusdReceiveAddress,
+} from "../funding/receive/receive-deposit-notification.js";
 import { canonicalizeBridgeOrderStatus } from "./bridge-status.js";
 import {
   RELAY_SOLVER,
@@ -99,39 +102,14 @@ type NotificationIdRow = {
   id: string;
 };
 
-const HUNCH_SOLANA_CHAIN_ID = "7565164";
-const POLYGON_CHAIN_ID = "137";
-const BASE_CHAIN_ID = "8453";
-const ACROSS_SOLANA_DEPOSIT_SENDER =
-  "E4bX4nCwe2GcKqt9NpofnXVrCeRp37PAMaiZtV9x3kxC";
-const ACROSS_BASE_WITHDRAW_SENDER =
-  "0xcad97616f91872c02ba3553db315db4015cbe850";
-const ACROSS_BASE_SPOKE_POOL_SENDER =
-  "0xfd03abcadaf3f930fa4e37eb2f6ea3a44a41b7f0";
-const ACROSS_BASE_FILL_TRANSFER_SENDER =
-  "0x0f7ae28de1c8532170ad4ee566b5801485c13a0e";
-const ACROSS_POLYGON_DEPOSIT_SENDER =
-  "0xb5b25e9b8c5c2d4e03ca0a79e42aa226cdec3ff2";
-const ACROSS_POLYGON_ENTRYPOINT_SENDER =
-  "0x0000000071727de22e5e9d8baf0edac6f37da032";
-const ACROSS_POLYGON_FILL_TRANSFER_SENDER =
-  "0x0000000000000000000000000000000000000000";
-const ACROSS_POLYGON_FILL_TRANSFER_FROM_SENDER =
-  "0x07ae8551be970cb1cca11dd7a11f47ae82e70e67";
-const KNOWN_ACROSS_DEPOSIT_SENDERS_BY_CHAIN: Record<string, Set<string>> = {
-  [HUNCH_SOLANA_CHAIN_ID]: new Set([ACROSS_SOLANA_DEPOSIT_SENDER]),
-  [BASE_CHAIN_ID]: new Set([
-    ACROSS_BASE_WITHDRAW_SENDER,
-    ACROSS_BASE_SPOKE_POOL_SENDER,
-    ACROSS_BASE_FILL_TRANSFER_SENDER,
-  ]),
-  [POLYGON_CHAIN_ID]: new Set([
-    ACROSS_POLYGON_DEPOSIT_SENDER,
-    ACROSS_POLYGON_ENTRYPOINT_SENDER,
-    ACROSS_POLYGON_FILL_TRANSFER_SENDER,
-    ACROSS_POLYGON_FILL_TRANSFER_FROM_SENDER,
-  ]),
-};
+import {
+  ACROSS_SOLANA_DEPOSIT_SENDER,
+  HUNCH_SOLANA_CHAIN_ID,
+  isKnownAcrossBridgeDeposit,
+  isVenueCashDeposit,
+  normalizeEvmAddress,
+  resolveBridgeChainIdFromCaip2,
+} from "./deposit-transfer-classification.js";
 
 const privyAssetSchema = zod
   .object({
@@ -165,25 +143,6 @@ const privyFundsDepositedSchema = zod
 export type PrivyFundsDepositedWebhook = zod.infer<
   typeof privyFundsDepositedSchema
 >;
-
-function normalizeKnownAcrossSender(chainId: string, sender: string): string {
-  return chainId === HUNCH_SOLANA_CHAIN_ID
-    ? sender.trim()
-    : sender.toLowerCase();
-}
-
-function isKnownAcrossBridgeDeposit(
-  event: PrivyFundsDepositedWebhook,
-): boolean {
-  const chainId = resolveBridgeChainIdFromCaip2(event.caip2);
-  const sender = event.sender?.trim();
-  if (!chainId || !sender) return false;
-  return (
-    KNOWN_ACROSS_DEPOSIT_SENDERS_BY_CHAIN[chainId]?.has(
-      normalizeKnownAcrossSender(chainId, sender),
-    ) ?? false
-  );
-}
 
 function readWebhookType(payload: unknown): string | null {
   if (
@@ -235,24 +194,6 @@ function normalizeWalletAddress(walletType: string, address: string): string {
   return walletType === "ethereum" ? address.toLowerCase() : address;
 }
 
-function normalizeEvmAddress(value: string | null | undefined): string | null {
-  const trimmed = value?.trim() ?? "";
-  if (!/^0x[0-9a-fA-F]{40}$/.test(trimmed)) return null;
-  return trimmed.toLowerCase();
-}
-
-function resolveBridgeChainIdFromCaip2(caip2: string): string | null {
-  const normalized = caip2.trim().toLowerCase();
-  if (normalized.startsWith("eip155:")) {
-    const chainId = normalized.slice("eip155:".length).trim();
-    return chainId || null;
-  }
-  if (normalized.startsWith("solana:")) {
-    return HUNCH_SOLANA_CHAIN_ID;
-  }
-  return null;
-}
-
 function resolveDepositAssetAddress(
   event: PrivyFundsDepositedWebhook,
 ): string | null {
@@ -267,50 +208,6 @@ function resolveFundingNetworkId(caip2: string): string | null {
     return /^[1-9][0-9]*$/u.test(chainId) ? `evm:${chainId}` : null;
   }
   return normalized.startsWith("solana:") ? "solana:mainnet" : null;
-}
-
-function buildAddressSet(
-  values: Array<string | null | undefined>,
-): Set<string> {
-  return new Set(
-    values
-      .map((value) => normalizeEvmAddress(value))
-      .filter((value): value is string => Boolean(value)),
-  );
-}
-
-function isVenueCashDeposit(event: PrivyFundsDepositedWebhook): boolean {
-  const caip2 = event.caip2.toLowerCase();
-  const sender = normalizeEvmAddress(event.sender);
-  const assetAddress = normalizeEvmAddress(event.asset.address);
-  if (!sender || !assetAddress) return false;
-
-  if (caip2 === "eip155:137") {
-    const cashAssets = buildAddressSet([
-      env.polymarketPusdAddress,
-      env.polymarketUsdcAddress,
-      env.polymarketUsdceAddress,
-    ]);
-    const venueSenders = buildAddressSet([
-      env.polymarketExchangeAddress,
-      env.polymarketNegRiskExchangeAddress,
-      env.polymarketNegRiskAdapterAddress,
-      env.polymarketCollateralOnrampAddress,
-      env.polymarketCollateralOfframpAddress,
-    ]);
-    return cashAssets.has(assetAddress) && venueSenders.has(sender);
-  }
-
-  if (caip2 === "eip155:8453") {
-    const cashAssets = buildAddressSet([env.limitlessUsdcAddress]);
-    const venueSenders = buildAddressSet([
-      env.limitlessClobAddress,
-      env.limitlessNegRiskAddress,
-    ]);
-    return cashAssets.has(assetAddress) && venueSenders.has(sender);
-  }
-
-  return false;
 }
 
 async function resolveUserWallet(
@@ -1200,7 +1097,7 @@ export async function handlePrivyDepositWebhook(
   const venueCashDeposit =
     !bridgeOrder &&
     !knownAcrossBridgeDeposit &&
-    (Boolean(execution) || isVenueCashDeposit(event));
+    (Boolean(execution) || isVenueCashDeposit(event, env));
   const internalMovement =
     !bridgeOrder && !knownAcrossBridgeDeposit && !venueCashDeposit
       ? await findInternalDepositMovement(db, {
@@ -1464,6 +1361,16 @@ export async function handlePrivyDepositWebhook(
       walletType: wallet.wallet_type,
     });
   }
+
+  if (
+    await isCanonicalPusdReceiveAddress(db, {
+      userId: wallet.user_id,
+      recipient: wallet.wallet_address,
+      caip2: event.caip2,
+      assetId: event.asset.address,
+    })
+  )
+    return { ok: true, duplicate, status: "recorded" };
 
   const notificationInput = buildDepositNotification({
     userId: wallet.user_id,

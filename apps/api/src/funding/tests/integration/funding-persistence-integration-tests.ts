@@ -1848,8 +1848,10 @@ async function testLateCanonicalFailureRearmsRetryAndKeepsReorgWatch(): Promise<
         where operation.id = $1::uuid`,
       [operationId],
     );
+    // A finalized failed transaction followed by quote expiry is a failure,
+    // not a cancellation. Release funds while retaining the reorg watch.
     assert.deepEqual(expired.rows[0], {
-      status: "cancelled",
+      status: "failed",
       job_status: "scheduled",
       reservation_state: "released",
     });
@@ -3787,12 +3789,15 @@ async function testDepositWalletHandoffKeepsItsOwnActionTtl(): Promise<void> {
 async function testExistingSafeHandoffCommitsAndGatesRoute(
   preparation = false,
   crossController = false,
+  depositPusd = false,
 ): Promise<void> {
   const userId = await insertUser(pool);
   const base = buildPlan();
   const asset = {
     networkId: "evm:137",
-    assetId: RELAY_PINNED_ASSETS.polygonUsdce,
+    assetId: depositPusd
+      ? RELAY_PINNED_ASSETS.polygonPusd
+      : RELAY_PINNED_ASSETS.polygonUsdce,
     decimals: 6,
   };
   const owner = "0x1111111111111111111111111111111111111111";
@@ -3800,7 +3805,9 @@ async function testExistingSafeHandoffCommitsAndGatesRoute(
   const steps = buildPolymarketPreRouteHandoffSteps({
     source: {
       preRouteHandoff: {
-        kind: "polymarket_safe_to_controller_v1",
+        kind: depositPusd
+          ? "polymarket_deposit_wallet_to_controller_v1"
+          : "polymarket_safe_to_controller_v1",
         controllerAddress: owner,
         funderAddress: safe,
         tokenAddress: asset.assetId,
@@ -3813,7 +3820,7 @@ async function testExistingSafeHandoffCommitsAndGatesRoute(
             address: safe,
             linkedAddress: owner,
             venueId: "polymarket",
-            polymarketFunderKind: "safe",
+            polymarketFunderKind: depositPusd ? "deposit_wallet" : "safe",
           },
         },
       },
@@ -3921,7 +3928,7 @@ async function testExistingSafeHandoffCommitsAndGatesRoute(
         ...plan.operation,
         supportMetadata: {
           ...plan.operation.supportMetadata,
-          planValidation: { validatorId, version: 4 },
+          planValidation: { validatorId, version: depositPusd ? 5 : 4 },
         },
       },
       steps: [
@@ -3947,7 +3954,9 @@ async function testExistingSafeHandoffCommitsAndGatesRoute(
           actionValidationResult: {
             valid: true,
             validatorId,
-            kind: "owned_safe_controller_transfer",
+            kind: depositPusd
+              ? "owned_deposit_controller_transfer"
+              : "owned_safe_controller_transfer",
             signerAddress: owner,
             postconditionEvidenceKind: "exact_erc20_destination_credit_v1",
             expectedDestinationAddress: recipient,
@@ -3990,7 +3999,12 @@ async function testExistingSafeHandoffCommitsAndGatesRoute(
        where step_row.operation_id = $1 order by step_row.ordinal`,
       [operationId],
     );
-    assert.equal(result.rows[0]?.executor_id, "polymarket_safe_relayer_v1");
+    assert.equal(
+      result.rows[0]?.executor_id,
+      depositPusd
+        ? "polymarket_deposit_wallet_relayer_v1"
+        : "polymarket_safe_relayer_v1",
+    );
     assert.equal(result.rows[0]?.segment_id, null);
     assert.equal(result.rows[1]?.dependency_ordinal, 0);
     if (preparation) {
@@ -9099,6 +9113,7 @@ await testDepositWalletHandoffKeepsItsOwnActionTtl();
 await testExistingSafeHandoffCommitsAndGatesRoute();
 await testExistingSafeHandoffCommitsAndGatesRoute(true);
 await testExistingSafeHandoffCommitsAndGatesRoute(true, true);
+await testExistingSafeHandoffCommitsAndGatesRoute(true, true, true);
 console.log(
   "[funding-persistence-integration-tests] ok Deposit Wallet handoff keeps its own action TTL",
 );
