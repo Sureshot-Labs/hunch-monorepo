@@ -10,13 +10,14 @@ import {
 } from "../account-value/decimal.js";
 import { accountValueDisplayPriceAdapters } from "../account-value/display-price-adapters.js";
 import type { PriceAdapter } from "../funding/domain/contracts.js";
-import { sameAccountAddress } from "../funding/domain/asset-identity.js";
+import { externalWalletSourceLocationIds } from "../funding/planner/session-source-account.js";
+export { externalWalletSourceLocationIds } from "../funding/planner/session-source-account.js";
 import type {
   FundingDiscoveryRequest,
   IntentLiquidityProjection,
   Money,
 } from "../funding/domain/types.js";
-import { maximumInternalFundingDestinationRaw } from "../funding/planner/composite-source-options.js";
+import { maximumInternalFundingCapacityRaw } from "../funding/planner/composite-source-options.js";
 import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
 import { effectiveFundingEconomicsLimits } from "../funding/planner/source-options.js";
 import { buildFundingTradeConsumerIntent } from "../funding/persistence/funding-trade-consumer-intent.js";
@@ -241,68 +242,18 @@ function maximumPreviewInternalFundingRaw(input: {
   maximumSlippageBps: number;
   preview: Awaited<ReturnType<FundingPlanningRuntime["previewLiquidity"]>>;
 }): bigint | null {
-  const capacityFor = (
-    boundary: "automatic" | "client_handoff",
-  ): bigint | null =>
-    maximumInternalFundingDestinationRaw({
-      candidates: input.preview.plannerSnapshot.sources,
-      destinationAsset: polymarketPusdMoney(0n).asset,
-      destinationUnitPriceUsd: "1",
-      maximumFeeUsd: input.maximumFeeUsd,
-      maximumFeeBps: input.maximumFeeBps,
-      maximumSlippageBps: input.maximumSlippageBps,
-      executionBoundary: boundary,
-      // The Deposit Wallet balance is already counted as direct executable
-      // collateral. Excluding its frozen source location prevents a
-      // Deposit Wallet -> controller -> Deposit Wallet loop from counting
-      // the same pUSD a second time.
-      excludedSourceLocationIds: input.excludedSourceLocationIds,
-    });
-  const automaticRaw = capacityFor("automatic");
-  const clientRaw = capacityFor("client_handoff");
-  if (automaticRaw == null || clientRaw == null) return null;
-  return automaticRaw > clientRaw ? automaticRaw : clientRaw;
-}
-
-export function externalWalletSourceLocationIds(
-  account: AccountValueReadModel,
-): readonly string[] {
-  const externalWalletIds = new Set(
-    (account.ownership?.wallets ?? [])
-      .filter((profile) => profile.source === "external")
-      .map((profile) => profile.walletId),
-  );
-  if (externalWalletIds.size === 0) return [];
-  return account.projection.components.flatMap((component) => {
-    // Owned Safe cash is venue inventory, not external-wallet ingress. The
-    // source planner independently verifies its canonical owner and connected
-    // signing capability before offering an exact extraction route.
-    if (
-      component.location.kind === "venue_account" &&
-      component.location.details.venueId === "polymarket" &&
-      component.location.details.polymarketFunderKind === "safe"
-    )
-      return [];
-    const walletId =
-      component.location.kind === "wallet"
-        ? component.location.details.walletId
-        : component.location.kind === "venue_account"
-          ? component.location.details.controllerWalletId
-          : null;
-    const linkedAddress = component.location.details.linkedAddress;
-    const externallyControlled =
-      component.location.kind === "venue_account" &&
-      typeof linkedAddress === "string" &&
-      account.ownership?.wallets.some(
-        (profile) =>
-          profile.source === "external" &&
-          profile.networkId === component.amount.asset.networkId &&
-          sameAccountAddress(profile.networkId, profile.address, linkedAddress),
-      );
-    return (typeof walletId === "string" && externalWalletIds.has(walletId)) ||
-      externallyControlled
-      ? [component.location.locationId]
-      : [];
+  return maximumInternalFundingCapacityRaw({
+    candidates: input.preview.plannerSnapshot.sources,
+    destinationAsset: polymarketPusdMoney(0n).asset,
+    destinationUnitPriceUsd: "1",
+    maximumFeeUsd: input.maximumFeeUsd,
+    maximumFeeBps: input.maximumFeeBps,
+    maximumSlippageBps: input.maximumSlippageBps,
+    // The Deposit Wallet balance is already counted as direct executable
+    // collateral. Excluding its frozen source location prevents a
+    // Deposit Wallet -> controller -> Deposit Wallet loop from counting
+    // the same pUSD a second time.
+    excludedSourceLocationIds: input.excludedSourceLocationIds,
   });
 }
 

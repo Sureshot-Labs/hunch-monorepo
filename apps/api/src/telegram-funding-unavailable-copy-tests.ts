@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { telegramFundingUnavailableLines } from "./services/telegram-funding-unavailable-copy.js";
+import {
+  telegramFundingUnavailableLines,
+  telegramDepositShortfallLines,
+  telegramQuoteFailureCopy,
+} from "./services/telegram-funding-unavailable-copy.js";
 
 const text = telegramFundingUnavailableLines({
   venue: "Polymarket",
@@ -10,7 +14,7 @@ const text = telegramFundingUnavailableLines({
     shortfallUsd: "1.049602",
   },
 }).join("\n");
-assert.match(text, /1\.049602 including trade fees/);
+assert.match(text, /1\.049602 including fees/);
 assert.match(text, /Available there: \$0/);
 assert.match(text, /not necessarily an amount you need to deposit/);
 assert.match(text, /adding funds is not a verified solution/);
@@ -21,6 +25,31 @@ const unknown = telegramFundingUnavailableLines({
 }).join("\n");
 assert.doesNotMatch(unknown, /\$/);
 assert.match(unknown, /Nothing was submitted/);
+
+const deposited = telegramDepositShortfallLines({
+  venue: "Polymarket",
+  balance: {
+    requiredUsd: "1.049962",
+    availableUsd: "1",
+    shortfallUsd: "0.049962",
+  },
+}).join("\n");
+assert.match(deposited, /Required on Polymarket: \$1\.049962/);
+assert.match(deposited, /Available there: \$1\./);
+assert.match(deposited, /Shortfall: \$0\.049962/);
+assert.match(deposited, /price-movement allowance/);
+assert.doesNotMatch(
+  telegramDepositShortfallLines({ venue: "Polymarket" }).join("\n"),
+  /\$/,
+);
+assert.match(
+  telegramQuoteFailureCopy("market_orderbook_unavailable").lines.join(" "),
+  /Adding funds will not fix/,
+);
+assert.doesNotMatch(
+  telegramQuoteFailureCopy("venue_request_failed").heading,
+  /Market is currently unavailable/,
+);
 
 // RelayFirstSourcePlanner normalizes a thrown provider_unavailable to this code.
 for (const reason of [

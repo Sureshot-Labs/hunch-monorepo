@@ -31,6 +31,7 @@ import {
   limitlessAmmHandoffBroadcastResponseSchema,
 } from "./schemas/limitless-private.js";
 import { canonicalJsonHash } from "./funding/persistence/canonical.js";
+import { TelegramTradeShortfallFundingService } from "./services/telegram-trade-shortfall-funding.js";
 
 const POLYGON_PUSD = {
   assetId: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
@@ -344,6 +345,63 @@ const projection = (
 });
 
 const generic = projection([evmSource, solanaSource]);
+
+// BOT15: every retry reads the new balance, and keeps the full Buy budget in copy.
+for (const availableRaw of ["0", "1000000", "1049962"]) {
+  let reads = 0;
+  const gap = (1049962n - BigInt(availableRaw)).toString();
+  const decimal = (raw: string) => String(Number(raw) / 1_000_000);
+  const runtime = {
+    liquidity: async () => {
+      reads++;
+      return {
+        ...projection([]),
+        requestedCollateralRaw: "1049962",
+        requestedUsd: "1.049962",
+        availableNowRaw: availableRaw,
+        availableNowUsd: decimal(availableRaw),
+        shortfallRaw: gap,
+        shortfallUsd: decimal(gap),
+        mode: "unavailable",
+        reasonCodes: ["insufficient_liquidity"],
+      };
+    },
+  };
+  const result =
+    await TelegramTradeShortfallFundingService.prototype.inspectMiniAppFunding.call(
+      { runtime } as unknown as TelegramTradeShortfallFundingService,
+      {
+        authorizationId: null,
+        telegramAccountId: "account",
+        telegramUserId: "123",
+        tradeIntentId: "intent",
+        userId: "user",
+        venue: "polymarket",
+        marketId: "polymarket:market-1",
+        marketContextId: "market-token",
+        side: "YES",
+        maximumSpendUsd: "1.049962",
+        maxFeeUsd: "1",
+        maxSlippageBps: 500,
+        deadline: "2026-09-15T12:00:00Z",
+      },
+      trade,
+    );
+  assert.deepEqual(
+    result,
+    gap === "0"
+      ? { kind: "destination_ready" }
+      : {
+          kind: "external_deposit",
+          balance: {
+            requiredUsd: "1.049962",
+            availableUsd: decimal(availableRaw),
+            shortfallUsd: decimal(gap),
+          },
+        },
+  );
+  assert.equal(reads, gap === "0" ? 1 : 2);
+}
 
 const LIMITLESS_DESTINATION_OPTION_ID = "destination-limitless";
 const LIMITLESS_BINDING_OPTION_ID = "limitless-binding-option";

@@ -5,6 +5,23 @@ import type {
 } from "../server-types.js";
 import { isRecord } from "../lib/type-guards.js";
 
+/** Preserve upstream classification without retaining credentials or query strings. */
+export class PolymarketHttpError extends Error {
+  readonly statusCode = 502;
+  readonly code: string;
+  constructor(
+    readonly upstreamStatus: number,
+    readonly endpoint: string,
+  ) {
+    super(`Polymarket ${endpoint} returned HTTP ${upstreamStatus}`);
+    this.name = "PolymarketHttpError";
+    this.code =
+      upstreamStatus === 404 && endpoint === "/book"
+        ? "market_orderbook_unavailable"
+        : "venue_request_failed";
+  }
+}
+
 function isPriceHistoryPoint(value: unknown): value is PriceHistoryPoint {
   return isRecord(value) && typeof value.t === "number";
 }
@@ -228,9 +245,7 @@ export class PolymarketRateLimiter {
         signal: controller.signal,
       });
       if (!response.ok) {
-        throw new Error(
-          `Polymarket API error: ${response.status} ${response.statusText}`,
-        );
+        throw new PolymarketHttpError(response.status, new URL(url).pathname);
       }
       return response.json();
     } catch (error) {

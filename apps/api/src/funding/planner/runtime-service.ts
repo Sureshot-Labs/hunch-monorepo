@@ -73,6 +73,7 @@ import { WalletPreparationRuntimeService } from "../preparation/runtime-service.
 import { PreparationContractError } from "../preparation/core-adapter.js";
 import { ProductionFundingSourcePlanner } from "./production-source-planner.js";
 import { sessionSourceAccount } from "./session-source-account.js";
+import { suggestSmallerMarketBuy } from "./market-buy-suggestion.js";
 import { PolymarketFundingSourceAdapter } from "../preparation/polymarket-funding-source-adapter.js";
 import { DirectIngressFundingSourceAdapter } from "./direct-ingress-source-adapter.js";
 import { DirectWithdrawalSourceAdapter } from "./direct-withdrawal-source-adapter.js";
@@ -179,9 +180,15 @@ export class FundingLiquiditySingleflight {
 class CapturingFundingPlanningStore implements FundingPlanningStore {
   latest: PersistedFundingPlanningSnapshot | null = null;
 
+  constructor(private readonly delegate?: FundingPlanningStore) {}
+
   async create(
     input: Parameters<FundingPlanningStore["create"]>[0],
   ): Promise<PersistedFundingPlanningSnapshot> {
+    if (this.delegate) {
+      this.latest = await this.delegate.create(input);
+      return this.latest;
+    }
     const createdAt = new Date();
     const stored: PersistedFundingPlanningSnapshot = {
       id: input.projection.liquidityProjectionId,
@@ -664,6 +671,10 @@ export class FundingPlanningRuntime {
         productionFundingSourceAdapters(sources),
       );
     });
+    const capture =
+      !preview && request.marketBuyAmountUsdCents != null
+        ? new CapturingFundingPlanningStore(this.planningStore)
+        : null;
     const planner = new FundingPlanner({
       listDestinations: async ({ accountId, request, marketContext }) =>
         this.preparationRuntime.resolvedCandidates(
@@ -758,9 +769,9 @@ export class FundingPlanningRuntime {
         (await sourcePlannerPromise).discover(sourceInput),
       listSourceBlockers: async (sourceInput) =>
         (await sourcePlannerPromise).listBlockingReasonCodes(sourceInput),
-      store: preview?.store ?? this.planningStore,
+      store: preview?.store ?? capture ?? this.planningStore,
     });
-    return planner.discover({
+    const projection = await planner.discover({
       accountId: userId,
       request,
       policy: resolvedPolicy.runtime,
@@ -769,6 +780,23 @@ export class FundingPlanningRuntime {
         (account) => account.ownershipEvidenceRevision,
       ),
     });
+    if (capture?.latest) {
+      try {
+        const suggestedMarketBuy = await suggestSmallerMarketBuy(
+          this.db,
+          capture.latest.plannerSnapshot,
+          await accountPromise,
+          resolvedPolicy.runtime,
+        );
+        if (suggestedMarketBuy) return { ...projection, suggestedMarketBuy };
+      } catch {
+        // A failed advisory must not replace the authoritative funding result.
+        console.warn("[funding] market Buy suggestion unavailable", {
+          liquidityProjectionId: projection.liquidityProjectionId,
+        });
+      }
+    }
+    return projection;
   }
 
   private async quoteUsing(

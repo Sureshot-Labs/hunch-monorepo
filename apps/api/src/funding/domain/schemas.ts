@@ -151,6 +151,13 @@ export const fundingTradeConsumerIntentInputSchema = z
 
 export const fundingDiscoveryRequestSchema = z
   .object({
+    marketBuySlippageBps: z.number().int().min(0).max(10_000).optional(),
+    marketBuyAmountUsdCents: z
+      .number()
+      .int()
+      .positive()
+      .max(Number.MAX_SAFE_INTEGER)
+      .optional(),
     connectedExternalWalletRefs: z.array(z.string().uuid()).max(100).optional(),
     purpose: fundingPurposeSchema,
     requestedDestinationAmount: moneySchema.nullable(),

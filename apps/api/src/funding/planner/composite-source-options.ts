@@ -491,6 +491,28 @@ export function maximumInternalFundingDestinationRaw(
   return maximumRaw;
 }
 
+/** Never add automatic and wallet-action capacities: they may spend the same cash. */
+export function maximumInternalFundingCapacityRaw(
+  input: Omit<
+    Parameters<typeof maximumInternalFundingDestinationRaw>[0],
+    "executionBoundary"
+  >,
+): bigint | null {
+  const automatic = maximumInternalFundingDestinationRaw({
+    ...input,
+    executionBoundary: "automatic",
+  });
+  const client = maximumInternalFundingDestinationRaw({
+    ...input,
+    executionBoundary: "client_handoff",
+  });
+  return automatic == null || client == null
+    ? null
+    : automatic > client
+      ? automatic
+      : client;
+}
+
 function candidateOrder(
   left: CompositeCandidate,
   right: CompositeCandidate,

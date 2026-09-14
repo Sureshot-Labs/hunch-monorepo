@@ -317,6 +317,9 @@ export type FundingTradeConsumerIntentInput = Readonly<{
 }>;
 
 export type FundingIntent = Readonly<{
+  /** Presentation hint only; never authorizes funding or changes its amount. */
+  marketBuyAmountUsdCents?: number;
+  marketBuySlippageBps?: number;
   /** Session capability hint: can only restrict owned external sources. */
   connectedExternalWalletRefs?: readonly string[];
   purpose: FundingPurpose;
@@ -461,6 +464,12 @@ export type FundingDestinationOption = Readonly<{
 }>;
 
 export type IntentLiquidityProjection = Readonly<{
+  /** Nominal Buy suggestion, not an executable quote. Uses this projection's expiry. */
+  suggestedMarketBuy?: Readonly<{
+    originalAmountUsdCents: number;
+    amountUsdCents: number;
+    expiresAt: string;
+  }>;
   liquidityProjectionId: string;
   marketContextId: string | null;
   venueId: VenueId | null;

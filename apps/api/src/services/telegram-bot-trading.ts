@@ -106,7 +106,11 @@ import type {
   TelegramTradeMiniAppFundingInspection,
 } from "./telegram-trade-shortfall-funding.js";
 import { TelegramTradeShortfallCommitError } from "./telegram-trade-shortfall-funding.js";
-import { telegramFundingUnavailableLines } from "./telegram-funding-unavailable-copy.js";
+import {
+  telegramFundingUnavailableLines,
+  telegramDepositShortfallLines,
+  telegramQuoteFailureCopy,
+} from "./telegram-funding-unavailable-copy.js";
 import {
   buildTelegramAppHandoffV2DirectTradePlan,
   isTelegramAppHandoffV2Plan,
@@ -10730,9 +10734,8 @@ async function previewTelegramTradeIntent(input: {
         message: {
           parse_mode: "MarkdownV2",
           text: formatTelegramTradeLifecycleMessageMarkdownV2({
-            heading: "Unable to build a safe current quote.",
+            ...telegramQuoteFailureCopy(normalized.code),
             tone: "warn",
-            lines: ["Nothing was submitted. Open the market to try again."],
             marketTitle: input.intent.market_title,
             venue: input.intent.venue,
           }),
@@ -11127,7 +11130,13 @@ async function previewTelegramTradeIntent(input: {
           chat_id: input.chatId,
           parse_mode: "MarkdownV2",
           text: escapeMarkdown(
-            "Add funds and review this trade in Hunch. Nothing was submitted.",
+            telegramDepositShortfallLines({
+              venue:
+                input.intent.venue === "polymarket"
+                  ? "Polymarket"
+                  : "Limitless",
+              balance: miniAppFunding.balance,
+            }).join("\n\n"),
           ),
           reply_markup: buildTelegramTradeShortfallUnavailableReplyMarkup(
             input.intent.id,
@@ -13664,9 +13673,8 @@ export async function handleTelegramBotTradingCallback(
           message: {
             parse_mode: "MarkdownV2",
             text: formatTelegramTradeLifecycleMessageMarkdownV2({
-              heading: "Unable to build a safe current quote.",
+              ...telegramQuoteFailureCopy(normalized.code),
               tone: "warn",
-              lines: ["Nothing was submitted. Open the market again."],
               marketTitle: intent.market_title,
               venue: intent.venue,
             }),

@@ -117,7 +117,14 @@ export type TelegramTradeShortfallInspection =
  */
 export type TelegramTradeMiniAppFundingInspection =
   | Readonly<{ kind: "destination_ready" }>
-  | Readonly<{ kind: "external_deposit" }>
+  | Readonly<{
+      kind: "external_deposit";
+      balance?: {
+        requiredUsd: string;
+        availableUsd: string;
+        shortfallUsd: string;
+      };
+    }>
   | Readonly<{
       kind: "temporarily_unavailable";
       reasonCodes: readonly string[];
@@ -815,7 +822,7 @@ export class TelegramTradeShortfallFundingService {
       serverBotExact: false,
     });
     if (capability.kind === "external_deposit") {
-      return { kind: "external_deposit" };
+      return { kind: "external_deposit", balance };
     }
     if (capability.kind !== "web_funding_plan") {
       return {

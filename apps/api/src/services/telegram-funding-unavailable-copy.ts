@@ -7,7 +7,7 @@ export function telegramFundingUnavailableLines(input: {
   const lines: string[] = [];
   if (input.balance) {
     lines.push(
-      `Required on ${input.venue}: $${input.balance.requiredUsd} including trade fees. Available there: $${input.balance.availableUsd}. To move there: $${input.balance.shortfallUsd}.`,
+      `Required on ${input.venue}: $${input.balance.requiredUsd} including fees and the quote's price-movement allowance. Available there: $${input.balance.availableUsd}. To move there: $${input.balance.shortfallUsd}.`,
       "This is the venue shortfall, not necessarily an amount you need to deposit.",
     );
   }
@@ -24,4 +24,44 @@ export function telegramFundingUnavailableLines(input: {
     "Nothing was submitted; no background check is running.",
   );
   return lines;
+}
+
+export function telegramDepositShortfallLines(input: {
+  venue: string;
+  balance?: { requiredUsd: string; availableUsd: string; shortfallUsd: string };
+}): string[] {
+  return [
+    ...(input.balance
+      ? [
+          `Required on ${input.venue}: $${input.balance.requiredUsd} including fees and the quote's price-movement allowance.`,
+          `Available there: $${input.balance.availableUsd}. Shortfall: $${input.balance.shortfallUsd}.`,
+        ]
+      : []),
+    "No usable route from your other balances was found. Add funds or review a smaller Buy in Hunch. The market minimum still applies.",
+    "Retry balance check refreshes the balance. Nothing was submitted.",
+  ];
+}
+
+export function telegramQuoteFailureCopy(code: string): {
+  heading: string;
+  lines: string[];
+} {
+  if (
+    code === "market_orderbook_unavailable" ||
+    code === "market_not_accepting_orders" ||
+    code === "market_not_orderable"
+  ) {
+    return {
+      heading: "Market is currently unavailable for trading.",
+      lines: [
+        "The venue has no available orderbook or is not accepting orders. Adding funds will not fix this. Open the market to check its current availability. Nothing was submitted.",
+      ],
+    };
+  }
+  return {
+    heading: "Unable to build a safe current quote.",
+    lines: [
+      "The venue quote could not be verified. Nothing was submitted. Open the market to try again.",
+    ],
+  };
 }

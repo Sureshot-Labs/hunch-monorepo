@@ -795,6 +795,18 @@ export const fundingWithdrawalDestinationRevokeResponseSchema = z
 
 export const intentLiquidityProjectionSchema = z
   .object({
+    suggestedMarketBuy: z
+      .object({
+        originalAmountUsdCents: z
+          .number()
+          .int()
+          .positive()
+          .max(Number.MAX_SAFE_INTEGER),
+        amountUsdCents: z.number().int().min(100).max(Number.MAX_SAFE_INTEGER),
+        expiresAt: z.string().datetime(),
+      })
+      .strict()
+      .optional(),
     liquidityProjectionId: opaqueIdSchema,
     marketContextId: marketReferenceSchema.nullable(),
     venueId: z.string().trim().min(2).max(160).nullable(),

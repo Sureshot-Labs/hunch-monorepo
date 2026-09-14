@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { normalizeTradingError } from "./services/trading-errors.js";
 
 import {
   PolymarketClient,
+  PolymarketHttpError,
   PolymarketRateLimiter,
 } from "./services/polymarket-client.js";
 
@@ -118,6 +120,41 @@ async function testHungInteractiveRequestIsAbortedAndReleasesCapacity(): Promise
 await testIdenticalRequestsUseOneUpstreamCall();
 await testInteractiveBookBypassesQueuedBackgroundWork();
 await testHungInteractiveRequestIsAbortedAndReleasesCapacity();
+
+const originalFetch = globalThis.fetch;
+try {
+  for (const status of [404, 429, 500]) {
+    globalThis.fetch = (async () =>
+      new Response("upstream body", { status })) as typeof fetch;
+    const client = new PolymarketClient(new PolymarketRateLimiter());
+    await assert.rejects(
+      client.getOrderBook("private-token-query"),
+      (error: unknown) => {
+        assert.ok(error instanceof PolymarketHttpError);
+        assert.equal(error.upstreamStatus, status);
+        assert.equal(error.endpoint, "/book");
+        assert.equal(
+          normalizeTradingError(error, { venue: "polymarket" }).code,
+          error.code,
+        );
+        assert.equal(
+          error.code,
+          status === 404
+            ? "market_orderbook_unavailable"
+            : "venue_request_failed",
+        );
+        assert.doesNotMatch(error.message, /private-token-query|upstream body/);
+        return true;
+      },
+    );
+  }
+  assert.equal(
+    new PolymarketHttpError(404, "/fee-rate").code,
+    "venue_request_failed",
+  );
+} finally {
+  globalThis.fetch = originalFetch;
+}
 
 console.log("ok - identical Polymarket requests share one upstream call");
 console.log("ok - interactive orderbook bypasses queued background work");

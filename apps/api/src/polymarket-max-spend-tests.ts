@@ -58,6 +58,7 @@ import type { FundingCommitPlan } from "./funding/persistence/funding-operation-
 import type { FundingLiquidityPreview } from "./funding/planner/runtime-service.js";
 import type { PlannedSourceOption } from "./funding/planner/planning-types.js";
 import { env } from "./env.js";
+import { suggestSmallerMarketBuy } from "./funding/planner/market-buy-suggestion.js";
 
 type TestCase = {
   name: string;
@@ -445,6 +446,257 @@ const tests: TestCase[] = [
         },
       };
       const result = await computePolymarketAccountMaxSpend(requestInput);
+
+      // Reuse the ordinary discovery's frozen sources, not another capacity probe.
+      const suggestionSnapshot: FundingLiquidityPreview["plannerSnapshot"] = {
+        ...preview.plannerSnapshot,
+        request: {
+          purpose: "trade_shortfall",
+          marketBuyAmountUsdCents: 908,
+          marketBuySlippageBps: 0,
+          marketContextId: "token-yes",
+          consumerIntent: {
+            venueId: "polymarket",
+            marketId: "polymarket:market-test",
+            marketContextId: "token-yes",
+            side: "BUY",
+            spend: { asset: destinationAsset, raw: "9620000" },
+          },
+          requestedDestinationAmount: {
+            asset: destinationAsset,
+            raw: "9620000",
+          },
+          confirmedSourceAmount: null,
+          destinationOptionId: null,
+          venueBindingOptionId: null,
+          withdrawalRecipientId: null,
+          maxFeeUsd: null,
+          maxSlippageBps: null,
+          deadline: null,
+        },
+        projection: {
+          ...preview.projection,
+          collateralAsset: destinationAsset,
+          availableNowRaw: "430000",
+          requestedCollateralRaw: "9620000",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          reasonCodes: ["insufficient_liquidity"],
+          sourceOptions: [{ ...routeSource.option, selectable: false }],
+        },
+        sources: [
+          {
+            ...routeSource,
+            option: {
+              ...routeSource.option,
+              selectable: false,
+              expiresAt: new Date(Date.now() + 30_000).toISOString(),
+            },
+          },
+        ],
+      };
+      let suggestionQuoteCalls = 0;
+      let suggestionBudget = 0n;
+      const quoteSuggestion: NonNullable<
+        Parameters<typeof suggestSmallerMarketBuy>[4]
+      > = async (_pool, input) => {
+        suggestionQuoteCalls++;
+        suggestionBudget = input.executableFundsRaw;
+        return findMaxPolymarketMarketBuyUsdDetailed({
+          ...input,
+          context: quoteContext(),
+          requireOrderbookDepth: true,
+        });
+      };
+      const suggest = (snapshot = suggestionSnapshot) =>
+        suggestSmallerMarketBuy(
+          {} as Pool,
+          snapshot,
+          account,
+          DEFAULT_FUNDING_RUNTIME_POLICY,
+          quoteSuggestion,
+        );
+      const callsBeforeSuggestion = previewRequests.length;
+      let suggestedSlippage: number | null | undefined;
+      await suggestSmallerMarketBuy(
+        {} as Pool,
+        {
+          ...suggestionSnapshot,
+          request: { ...suggestionSnapshot.request, marketBuySlippageBps: 500 },
+        },
+        account,
+        DEFAULT_FUNDING_RUNTIME_POLICY,
+        async (_pool, input) => {
+          suggestedSlippage = input.slippageBps;
+          return { ok: false, reason: "below_min_order" };
+        },
+      );
+      assert.equal(
+        suggestedSlippage,
+        500,
+        "smaller Buy must retain the reviewed price-movement budget",
+      );
+      const suggestion = await suggest();
+      assert.ok(suggestion);
+      assert.equal(suggestionBudget, 4_860_000n);
+      assert.ok(
+        suggestion.amountUsdCents < 486,
+        "trading fees come out of the destination budget",
+      );
+      assert.equal(
+        previewRequests.length,
+        callsBeforeSuggestion,
+        "suggestion must not perform any Relay discovery",
+      );
+      assert.equal(suggestionQuoteCalls, 1);
+      for (const cents of [0, 1, 99, 100]) {
+        const small = await suggestSmallerMarketBuy(
+          {} as Pool,
+          {
+            ...suggestionSnapshot,
+            sources: [],
+            projection: {
+              ...suggestionSnapshot.projection,
+              availableNowRaw: (BigInt(cents) * 10_000n).toString(),
+            },
+          },
+          account,
+          DEFAULT_FUNDING_RUNTIME_POLICY,
+          async (_pool, input) =>
+            findMaxPolymarketMarketBuyUsdDetailed({
+              ...input,
+              context: noFeeNoMinContext(),
+              requireOrderbookDepth: true,
+            }),
+        );
+        assert.equal(
+          small?.amountUsdCents,
+          cents === 100 ? 100 : undefined,
+          "never offer a sub-dollar Buy",
+        );
+      }
+      assert.equal(
+        await suggestSmallerMarketBuy(
+          {} as Pool,
+          suggestionSnapshot,
+          account,
+          DEFAULT_FUNDING_RUNTIME_POLICY,
+          async () => {
+            throw new Error("CLOB fixture unavailable");
+          },
+        ),
+        undefined,
+      );
+      const started = Date.now();
+      assert.equal(
+        await suggestSmallerMarketBuy(
+          {} as Pool,
+          suggestionSnapshot,
+          account,
+          DEFAULT_FUNDING_RUNTIME_POLICY,
+          () => new Promise(() => {}),
+        ),
+        undefined,
+      );
+      assert.ok(
+        Date.now() - started < 2_000,
+        "optional advice must not hold the funding response for CLOB timeout",
+      );
+      assert.equal(
+        suggestion.expiresAt,
+        suggestionSnapshot.sources[0]?.option.expiresAt,
+      );
+      const beforeInvalid = suggestionQuoteCalls;
+      for (const projection of [
+        { ...suggestionSnapshot.projection, completeness: "partial" as const },
+        { ...suggestionSnapshot.projection, freshness: "stale" as const },
+        {
+          ...suggestionSnapshot.projection,
+          errors: [{ code: "provider_status_unknown", retryable: true }],
+        },
+        {
+          ...suggestionSnapshot.projection,
+          reasonCodes: [
+            "insufficient_liquidity",
+            "provider_quote_economics_rejected",
+          ] as const,
+        },
+        {
+          ...suggestionSnapshot.projection,
+          expiresAt: new Date(0).toISOString(),
+        },
+        {
+          ...suggestionSnapshot.projection,
+          sourceOptions: [{ ...routeSource.option, selectable: true }],
+        },
+      ])
+        assert.equal(
+          await suggest({ ...suggestionSnapshot, projection }),
+          undefined,
+        );
+      assert.equal(
+        await suggest({
+          ...suggestionSnapshot,
+          request: {
+            ...suggestionSnapshot.request,
+            marketBuyAmountUsdCents: undefined,
+          },
+        }),
+        undefined,
+        "legacy/limit clients stay unchanged",
+      );
+      assert.equal(
+        suggestionQuoteCalls,
+        beforeInvalid,
+        "unavailable evidence does not load an orderbook",
+      );
+      assert.equal(
+        await suggest({
+          ...suggestionSnapshot,
+          request: {
+            ...suggestionSnapshot.request,
+            marketBuyAmountUsdCents: 1,
+          },
+        }),
+        undefined,
+        "never increase an entered amount",
+      );
+      await suggest({
+        ...suggestionSnapshot,
+        sources: [...suggestionSnapshot.sources, ...suggestionSnapshot.sources],
+      });
+      assert.equal(
+        suggestionBudget,
+        4_860_000n,
+        "overlapping source quotes are not added together",
+      );
+      await suggest({
+        ...suggestionSnapshot,
+        sources: suggestionSnapshot.sources.map((source) => ({
+          ...source,
+          commitPlan: {
+            ...source.commitPlan,
+            reservations: source.commitPlan.reservations.map((reservation) => ({
+              ...reservation,
+              locationId: destinationLocation.locationId,
+            })),
+          },
+        })),
+      });
+      assert.equal(
+        suggestionBudget,
+        430_000n,
+        "direct destination cash cannot be counted twice",
+      );
+      assert.equal(
+        await suggestSmallerMarketBuy(
+          {} as Pool,
+          suggestionSnapshot,
+          account,
+          DEFAULT_FUNDING_RUNTIME_POLICY,
+          async () => ({ ok: false, reason: "below_min_order" }),
+        ),
+        undefined,
+      );
 
       assert.equal(result.ok, true);
       assert.equal(quotedFundsRaw, 4_860_000n);
