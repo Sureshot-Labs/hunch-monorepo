@@ -1861,8 +1861,7 @@ export type SignalBotMenuScreenName =
   | "performance"
   | "positions"
   | "settings"
-  | "signals"
-  | "trading";
+  | "signals";
 
 type SignalBotMenuCallbackRoute =
   | { kind: "admin_preview" }
@@ -2025,7 +2024,7 @@ export function buildSignalBotMenuScreen(input: {
       [callback("trading:market_input", "🔎 Markets")],
       [callback("balance", "💰 Balance")],
       [callback("positions", "💼 My positions")],
-      [callback("trading:status", "👤 My trading")],
+      [callback("trade_history", "📜 Trading History")],
       [callback("deposit", "Deposit", telegramCustomEmojiId("usdc"))],
       [callback("settings:notifications", "🔔 Notifications")],
       [callback("rewards", "🎁 Rewards & referrals")],
@@ -2064,25 +2063,6 @@ export function buildSignalBotMenuScreen(input: {
         formatTelegramNativeTitle("💼", "My positions"),
         "",
         escapeTelegramMarkdownV2("Updating positions…"),
-      ].join("\n"),
-    };
-  }
-  if (input.screen === "trading") {
-    return {
-      keyboard: {
-        inline_keyboard: [
-          [callback("trading:status", "🔄 Refresh trading status")],
-          ...buildSignalBotOptionalButtonRows(miniAppButton),
-          buildSignalBotMenuNavRow({ parent: "home" }),
-        ],
-      },
-      text: [
-        formatTelegramNativeTitle("👤", "My trading"),
-        "",
-        escapeTelegramMarkdownV2(
-          "Your detailed trading status is sent as a separate card below this menu.",
-        ),
-        ...noticeLines,
       ].join("\n"),
     };
   }
@@ -2565,7 +2545,6 @@ function parseSignalBotMenuCallback(
   }
   switch (route) {
     case "home":
-    case "trading":
     case "help":
     case "performance":
     case "balance":
@@ -2727,7 +2706,9 @@ export async function handleSignalBotMenuCallback(
   }
   const isBalance = route.kind === "screen" && route.screen === "balance";
   if (
-    (isBalance || TelegramBotMenuActions.isSignalBotFundingMenuRoute(route)) &&
+    (isBalance ||
+      route.kind === "trade_history" ||
+      TelegramBotMenuActions.isSignalBotFundingMenuRoute(route)) &&
     String(message.chat.id) !== String(telegramUserId)
   ) {
     await input.telegram.answerCallbackQuery({
@@ -2861,6 +2842,7 @@ export async function handleSignalBotMenuCallback(
       route.kind === "rewards_view" ||
       route.kind === "positions_page" ||
       (route.kind === "screen" && route.screen === "positions") ||
+      route.kind === "trade_history" ||
       TelegramBotMenuActions.isSignalBotFundingMenuRoute(route)
         ? { text: "⏳ Working…" }
         : {}),
@@ -2896,6 +2878,7 @@ export async function handleSignalBotMenuCallback(
     route.kind === "market_search_venue" ||
     route.kind === "positions_page" ||
     route.kind === "position" ||
+    route.kind === "trade_history" ||
     route.kind === "deposit" ||
     route.kind === "deposit_menu" ||
     TelegramBotMenuActions.isSignalBotFundingMenuRoute(route)
@@ -2932,6 +2915,7 @@ export async function handleSignalBotMenuCallback(
         : undefined,
       loadPositionCard: input.loadPositionCard,
       loadPositions: input.loadPositions,
+      loadTradeHistory: input.loadTradeHistory,
       messageId,
       onFundingOperationError: (action) => {
         try {
