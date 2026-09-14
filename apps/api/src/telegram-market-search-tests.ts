@@ -724,6 +724,36 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         JSON.stringify(first.reply_markup),
         new RegExp(`search_page:${sessionId}:1`, "u"),
       );
+      assert.deepEqual(
+        first.reply_markup.inline_keyboard
+          .flat()
+          .filter(
+            (button) =>
+              "callback_data" in button &&
+              button.callback_data.includes(`search_page:${sessionId}:`),
+          )
+          .map((button) => button.text),
+        ["Page 1/3", "Next ➡️"],
+      );
+
+      const last = buildSignalBotMarketSearchScreen({
+        callbackPrefix: "hm:v1:",
+        page: 2,
+        query: null,
+        results,
+        sessionId,
+      });
+      assert.deepEqual(
+        last.reply_markup.inline_keyboard
+          .flat()
+          .filter(
+            (button) =>
+              "callback_data" in button &&
+              button.callback_data.includes(`search_page:${sessionId}:`),
+          )
+          .map((button) => button.text),
+        ["⬅️ Previous", "Page 3/3"],
+      );
 
       const nextRoute = parseSignalBotInteractiveMenuRoute(
         `search_page:${sessionId}:1`,

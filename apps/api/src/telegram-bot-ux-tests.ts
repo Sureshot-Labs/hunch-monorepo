@@ -37,6 +37,38 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           textPrefix: "",
         },
       );
+      assert.equal(
+        telegramBotTradingTestHooks.telegramCustomTradeInputButtonText({
+          action: "buy",
+          origin: "position",
+          sideLabel: "YES",
+        }),
+        "Custom Buy",
+      );
+      assert.equal(
+        telegramBotTradingTestHooks.telegramCustomTradeInputButtonText({
+          action: "sell",
+          origin: "position",
+          sideLabel: "NO",
+        }),
+        "Custom Sell",
+      );
+      assert.equal(
+        telegramBotTradingTestHooks.telegramCustomTradeInputButtonText({
+          action: "buy",
+          origin: "search",
+          sideLabel: "YES",
+        }),
+        "Custom Buy · YES",
+      );
+      assert.equal(
+        telegramBotTradingTestHooks.telegramCustomTradeInputButtonText({
+          action: "sell",
+          origin: "direct",
+          sideLabel: "NO",
+        }),
+        "Custom Sell · NO",
+      );
     },
   },
   {

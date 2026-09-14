@@ -709,6 +709,16 @@ function telegramTradeActionButtonDecoration(
   };
 }
 
+function telegramCustomTradeInputButtonText(input: {
+  action: "buy" | "sell";
+  origin: TelegramMarketCardContext["origin"] | undefined;
+  sideLabel: string;
+}): string {
+  const actionLabel = input.action === "buy" ? "Custom Buy" : "Custom Sell";
+  if (input.origin === "position") return actionLabel;
+  return `${actionLabel} · ${input.sideLabel}`;
+}
+
 type TelegramBotTradingStatusRow = {
   id: string | null;
   telegram_account_link_id: string;
@@ -2097,6 +2107,7 @@ export const telegramBotTradingTestHooks = {
   decorateRetainedSolReceiptEstimate,
   telegramTradeInputFingerprint,
   telegramTradeActionButtonDecoration,
+  telegramCustomTradeInputButtonText,
   venueStatusFromReadiness,
 };
 
@@ -6667,9 +6678,11 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       icon_custom_emoji_id:
         decoration.iconCustomEmojiId ??
         formatTelegramVenueButtonIcon(market.venue),
-      text: isPositionContext
-        ? `${action === "buy" ? "Buy" : "Sell"}…`
-        : `${decoration.textPrefix}${action === "buy" ? "Buy" : "Sell"} ${sideLabel(market, side)}…`,
+      text: telegramCustomTradeInputButtonText({
+        action,
+        origin: input.context?.origin,
+        sideLabel: sideLabel(market, side),
+      }),
     };
   };
   const customBuyRow: TelegramBotTradingButton[] = [];

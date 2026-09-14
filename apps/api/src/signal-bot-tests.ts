@@ -5042,7 +5042,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.deepEqual(
         customButtons.map((button) => button.text),
-        ["Buy YES…", "Buy NO…"],
+        ["Custom Buy · YES", "Custom Buy · NO"],
       );
       for (const button of [...multiPresetBuyButtons, ...customButtons]) {
         assert.equal(
@@ -5271,8 +5271,8 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           "$1 · NO",
           "$5 · NO",
           "$15 · NO",
-          "Buy YES…",
-          "Buy NO…",
+          "Custom Buy · YES",
+          "Custom Buy · NO",
           "Open market",
           "⬅️ Back",
         ],
