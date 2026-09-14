@@ -691,7 +691,7 @@ export function buildTelegramPositionsSnapshotMessage(input: {
             {
               callback_data: `hm:v1:positions_page:${Math.max(0, page - 1)}`,
               text:
-                page === 0 ? `· Page ${page + 1}/${pageCount}` : "⬅️ Previous",
+                page === 0 ? `Page ${page + 1}/${pageCount}` : "⬅️ Previous",
             },
             {
               callback_data: `hm:v1:positions_page:${Math.min(
@@ -700,7 +700,7 @@ export function buildTelegramPositionsSnapshotMessage(input: {
               )}`,
               text:
                 page === pageCount - 1
-                  ? `Page ${page + 1}/${pageCount} ·`
+                  ? `Page ${page + 1}/${pageCount}`
                   : "Next ➡️",
             },
           ],

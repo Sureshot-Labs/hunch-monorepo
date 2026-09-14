@@ -207,6 +207,18 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(first.text, /Market 5/u);
       assert.doesNotMatch(first.text, /Market 6/u);
       assert.match(JSON.stringify(first.reply_markup), /positions_page:1/u);
+      assert.deepEqual(
+        first.reply_markup?.inline_keyboard
+          .find((row) =>
+            row.some(
+              (button) =>
+                "callback_data" in button &&
+                button.callback_data.startsWith("hm:v1:positions_page:"),
+            ),
+          )
+          ?.map((button) => button.text),
+        ["Page 1/3", "Next ➡️"],
+      );
 
       const second = buildTelegramPositionsSnapshotMessage({
         appBaseUrl: "https://app.hunch.trade",
@@ -246,6 +258,25 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         kind: "positions_page",
         page: 2,
       });
+
+      const last = buildTelegramPositionsSnapshotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        page: 2,
+        snapshot: { partialFailure: false, positions },
+        telegramMiniAppEnabled: true,
+      });
+      assert.deepEqual(
+        last.reply_markup?.inline_keyboard
+          .find((row) =>
+            row.some(
+              (button) =>
+                "callback_data" in button &&
+                button.callback_data.startsWith("hm:v1:positions_page:"),
+            ),
+          )
+          ?.map((button) => button.text),
+        ["⬅️ Previous", "Page 3/3"],
+      );
     },
   },
   {

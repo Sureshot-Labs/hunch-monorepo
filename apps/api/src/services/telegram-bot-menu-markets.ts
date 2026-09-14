@@ -353,14 +353,14 @@ export function buildSignalBotMarketSearchScreen(input: {
                   callback_data: `${input.callbackPrefix}search_page:${input.sessionId}:${Math.max(0, page - 1)}`,
                   text:
                     page === 0
-                      ? `· Page ${page + 1}/${pageCount}`
+                      ? `Page ${page + 1}/${pageCount}`
                       : "⬅️ Previous",
                 },
                 {
                   callback_data: `${input.callbackPrefix}search_page:${input.sessionId}:${Math.min(pageCount - 1, page + 1)}`,
                   text:
                     page === pageCount - 1
-                      ? `Page ${page + 1}/${pageCount} ·`
+                      ? `Page ${page + 1}/${pageCount}`
                       : "Next ➡️",
                 },
               ],
