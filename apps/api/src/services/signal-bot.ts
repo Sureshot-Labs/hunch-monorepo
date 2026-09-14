@@ -4260,6 +4260,7 @@ export async function pollSignalBotCommands(
           loadFunding: input.loadFunding,
           loadPositionCard: input.loadPositionCard,
           loadPositions: input.loadPositions,
+          loadTradeHistory: input.loadTradeHistory,
           loadRewards: input.loadRewards,
           searchMarkets: input.searchMarkets,
           searchOptions: input.searchOptions,

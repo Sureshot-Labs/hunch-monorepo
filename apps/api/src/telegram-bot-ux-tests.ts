@@ -21,41 +21,21 @@ import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
-    name: "position trade buttons use custom directional emoji without circle prefixes",
+    name: "all trade buttons use custom directional emoji without origin-dependent circle prefixes",
     run: () => {
       assert.deepEqual(
-        telegramBotTradingTestHooks.telegramTradeActionButtonDecoration(
-          "buy",
-          "position",
-        ),
+        telegramBotTradingTestHooks.telegramTradeActionButtonDecoration("buy"),
         {
           iconCustomEmojiId: TELEGRAM_CUSTOM_EMOJI.positionBuy.id,
           textPrefix: "",
         },
       );
       assert.deepEqual(
-        telegramBotTradingTestHooks.telegramTradeActionButtonDecoration(
-          "sell",
-          "position",
-        ),
+        telegramBotTradingTestHooks.telegramTradeActionButtonDecoration("sell"),
         {
           iconCustomEmojiId: TELEGRAM_CUSTOM_EMOJI.positionSell.id,
           textPrefix: "",
         },
-      );
-      assert.deepEqual(
-        telegramBotTradingTestHooks.telegramTradeActionButtonDecoration(
-          "buy",
-          "search",
-        ),
-        { textPrefix: "🟢 " },
-      );
-      assert.deepEqual(
-        telegramBotTradingTestHooks.telegramTradeActionButtonDecoration(
-          "sell",
-          "direct",
-        ),
-        { textPrefix: "🔴 " },
       );
     },
   },
