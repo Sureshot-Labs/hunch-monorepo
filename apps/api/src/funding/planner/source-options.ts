@@ -687,6 +687,14 @@ export class RelayFirstSourcePlanner {
               this.totalPlannerTimeoutMs -
               (this.monotonicNow() - planningStartedAt);
             if (remainingPlannerMs <= 0) {
+              console.warn("[funding-relay] discovery budget exhausted", {
+                stage: "before_quote",
+                accountId: input.accountId,
+                componentId: candidateSource.componentId,
+                quoteCorrelationId: correlationId,
+                routeId: route.routeId,
+                budgetMs: this.totalPlannerTimeoutMs,
+              });
               return { kind: "transient_unknown" as const };
             }
             try {
@@ -994,6 +1002,13 @@ export class RelayFirstSourcePlanner {
     const timeout = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(
         () => {
+          console.warn("[funding-relay] quote deadline reached", {
+            stage: "quote",
+            quoteCorrelationId: input.quoteCorrelationId,
+            componentId: input.source.componentId,
+            routeId: input.route.routeId,
+            timeoutMs: Math.max(1, Math.floor(timeoutMs)),
+          });
           reject(
             new FundingPlannerError(
               "provider_unavailable",

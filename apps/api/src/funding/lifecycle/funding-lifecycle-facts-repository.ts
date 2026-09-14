@@ -199,7 +199,12 @@ function actionMayMoveMoney(action: LifecycleActionRow): boolean {
   );
 }
 
-function actionIsSafeInternalHandoff(action: LifecycleActionRow): boolean {
+export function actionIsSafeInternalHandoff(
+  action: Pick<
+    LifecycleActionRow,
+    "step_kind" | "executor_id" | "action_validation_result"
+  >,
+): boolean {
   // Versioned commit validation pins the exact funder -> owner and optional
   // owner -> selected controller transfers. Final receipts prove the asset
   // remains on an owned controller, rather than an unknown external route.
@@ -209,6 +214,7 @@ function actionIsSafeInternalHandoff(action: LifecycleActionRow): boolean {
       [
         "owned_safe_controller_transfer",
         "owned_deposit_controller_transfer",
+        "owned_wallet_controller_transfer",
       ].includes(String(action.action_validation_result.kind)) &&
       action.action_validation_result.validatorId ===
         "polymarket_funding_router_v1") ||

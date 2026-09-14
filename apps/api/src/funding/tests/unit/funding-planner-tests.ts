@@ -3032,6 +3032,58 @@ await test("explicit unavailable destination never falls back to another venue",
   assert.deepEqual(projection.reasonCodes, ["destination_unavailable"]);
 });
 
+await test("unavailable destination preserves only the selected binding's inspection reason", async () => {
+  const policy = mutablePolicy();
+  policy.creationMode = "on";
+  const requested = intent("add_funds", "1000000");
+  const exact = candidate();
+  for (const reason of [
+    "market_not_orderable",
+    "market_evidence_unavailable",
+    "rpc_unavailable",
+  ] as const) {
+    const projection = await new FundingPlanner({
+      listDestinations: async () => [
+        candidate({
+          option: destinationOption({
+            destinationOptionId: "destination_refreshed_unavailable",
+            selectable: false,
+            reasonCodes: [reason],
+          }),
+        }),
+        candidate({
+          option: destinationOption({
+            venueBindingOptionId: "binding_foreign",
+            destinationOptionId: "destination_foreign",
+            selectable: false,
+            reasonCodes: ["insufficient_gas"],
+          }),
+        }),
+      ],
+      resolveMarketContext: async () => null,
+      listSources: async () => {
+        throw new Error("unavailable market must not move funds");
+      },
+      store: new MemoryPlanningStore(),
+      now: () => NOW,
+    }).discover({
+      accountId: USER_ID,
+      request: {
+        ...requested,
+        venueBindingOptionId: exact.option.venueBindingOptionId,
+      },
+      policy,
+      policyRevision: "policy_revision_12345678",
+      ownershipRevision: "ownership_revision_12345678",
+    });
+    assert.equal(projection.mode, "unavailable");
+    assert.deepEqual(projection.reasonCodes, [
+      "destination_unavailable",
+      reason,
+    ]);
+  }
+});
+
 await test("planner rebinds a refreshed destination through the exact stable binding", async () => {
   const policy = mutablePolicy();
   policy.creationMode = "on";

@@ -7,6 +7,7 @@ import type { FundingCommitPlan } from "../persistence/funding-operation-reposit
 import { POLYMARKET_FUNDING_SOURCE_ADAPTER_ID } from "../preparation/polymarket-funding-snapshot.js";
 import { RELAY_PINNED_ASSETS } from "../../funding-providers/relay/mappings.js";
 import { Interface } from "ethers";
+import { z } from "zod";
 
 const CONTROLLER_ROUTER_APPROVAL_KINDS = new Set([
   "controller_pusd_router_approval",
@@ -288,7 +289,184 @@ export function isPolymarketRouterCommitPlan(
           ? isPolymarketRouterV4CommitPlan(plan)
           : declarationRecord.version === 5
             ? isPolymarketRouterV5CommitPlan(plan)
-            : false;
+            : declarationRecord.version === 6
+              ? isPolymarketRouterV6CommitPlan(plan)
+              : false;
+}
+
+const ownedWalletTransfersSchema = z
+  .array(
+    z.object({
+      walletId: z.string().min(1),
+      address: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+      raw: z.string().regex(/^[1-9][0-9]*$/),
+    }),
+  )
+  .min(1);
+
+/** V6 adds exact, user-signed USDC.e transfers from owned internal EOA wallets.
+ * The persisted source declaration and wallet profiles bind every prefix step;
+ * the remainder retains the existing Router validators and lifecycle. */
+export function isPolymarketRouterV6CommitPlan(
+  plan: Pick<FundingCommitPlan, "operation" | "steps">,
+): boolean {
+  const declared = ownedWalletTransfersSchema.safeParse(
+    plan.operation.supportMetadata?.ownedWalletTransfers,
+  );
+  const profiles = z
+    .array(
+      z.object({
+        walletId: z.string(),
+        address: z.string(),
+        networkId: z.string(),
+        source: z.string(),
+        signingModes: z.array(z.string()),
+      }),
+    )
+    .safeParse(plan.operation.walletExecutionSnapshot?.profiles);
+  if (!declared.success || !profiles.success) return false;
+  const steps =
+    plan.operation.planKind === "composite_route"
+      ? plan.steps.filter((step) => step.segmentOrdinal === null)
+      : plan.steps;
+  const fund = steps.at(-1);
+  const fundingAction = normalizedActionSchema.safeParse(
+    fund?.normalizedAction,
+  );
+  if (
+    !fund ||
+    fund.executorId !== CLIENT_EVM_WALLET_EXECUTOR_ID ||
+    !fundingAction.success ||
+    fundingAction.data.kind !== "evm_transaction"
+  )
+    return false;
+  const destinationId = fundingAction.data.senderWalletId;
+  const destination = profiles.data.find(
+    (profile) => profile.walletId === destinationId,
+  );
+  if (
+    !destination ||
+    destination.networkId !== "evm:137" ||
+    !sameAccountAddress(
+      "evm:137",
+      destination.address,
+      String(fund.actionValidationResult.signerAddress),
+    )
+  )
+    return false;
+  const firstOrdinal =
+    plan.operation.planKind === "composite_route" ? steps[0]?.ordinal : 0;
+  if (
+    firstOrdinal == null ||
+    steps.some(
+      (step, index) =>
+        step.ordinal !== firstOrdinal + index ||
+        step.dependsOnOrdinal !==
+          (index === 0 ? null : steps[index - 1]?.ordinal),
+    )
+  )
+    return false;
+  const seen = new Set<string>();
+  const erc20 = new Interface([
+    "function transfer(address recipient,uint256 amount)",
+  ]);
+  let totalRaw = 0n;
+  for (const [index, source] of declared.data.entries()) {
+    const step = steps[index];
+    const owner = profiles.data.find(
+      (profile) => profile.walletId === source.walletId,
+    );
+    const parsed = normalizedActionSchema.safeParse(step?.normalizedAction);
+    if (
+      !step ||
+      !owner ||
+      owner.source !== "embedded" ||
+      owner.networkId !== "evm:137" ||
+      !owner.signingModes.includes("web_client") ||
+      owner.walletId === destinationId ||
+      sameAccountAddress("evm:137", owner.address, destination.address) ||
+      !sameAccountAddress("evm:137", owner.address, source.address) ||
+      seen.has(source.address.toLowerCase()) ||
+      !parsed.success ||
+      parsed.data.kind !== "evm_transaction" ||
+      parsed.data.networkId !== "evm:137" ||
+      parsed.data.senderWalletId !== owner.walletId ||
+      parsed.data.to.toLowerCase() !== RELAY_PINNED_ASSETS.polygonUsdce ||
+      parsed.data.valueRaw !== "0" ||
+      step.segmentOrdinal !== null ||
+      step.stepKind !== "transaction" ||
+      step.state !== "action_required" ||
+      step.executorId !== CLIENT_EVM_WALLET_EXECUTOR_ID
+    )
+      return false;
+    const validation = step.actionValidationResult;
+    if (
+      validation.valid !== true ||
+      validation.validatorId !== POLYMARKET_FUNDING_SOURCE_ADAPTER_ID ||
+      validation.kind !== "owned_wallet_controller_transfer" ||
+      validation.postconditionEvidenceKind !==
+        "exact_erc20_destination_credit_v1" ||
+      !sameAccountAddress(
+        "evm:137",
+        String(validation.signerAddress),
+        owner.address,
+      ) ||
+      !sameAccountAddress(
+        "evm:137",
+        String(validation.expectedDestinationAddress),
+        destination.address,
+      ) ||
+      String(validation.expectedDestinationAssetId).toLowerCase() !==
+        RELAY_PINNED_ASSETS.polygonUsdce ||
+      validation.expectedDestinationRaw !== source.raw
+    )
+      return false;
+    try {
+      if (
+        parsed.data.data.toLowerCase() !==
+        erc20
+          .encodeFunctionData("transfer", [destination.address, source.raw])
+          .toLowerCase()
+      )
+        return false;
+      totalRaw += BigInt(source.raw);
+    } catch {
+      return false;
+    }
+    seen.add(source.address.toLowerCase());
+  }
+  const fundingPlan = z
+    .object({ signerUsdceAmountRaw: z.string().regex(/^[0-9]+$/) })
+    .safeParse(plan.operation.supportMetadata?.fundingPlan);
+  if (
+    !fundingPlan.success ||
+    totalRaw > BigInt(fundingPlan.data.signerUsdceAmountRaw)
+  )
+    return false;
+  const remaining = steps.slice(declared.data.length).map((step, ordinal) => ({
+    ...step,
+    ordinal,
+    dependsOnOrdinal: ordinal === 0 ? null : ordinal - 1,
+  }));
+  const remainder = { ...plan, steps: remaining };
+  if (
+    remaining.some(
+      (step) =>
+        step.actionValidationResult.kind ===
+        "owned_deposit_controller_transfer",
+    )
+  )
+    return isPolymarketRouterV5CommitPlan(remainder);
+  if (
+    remaining.some(
+      (step) =>
+        step.actionValidationResult.kind === "owned_safe_controller_transfer",
+    )
+  )
+    return isPolymarketRouterV4CommitPlan(remainder);
+  return remaining[0]?.stepKind === "external_handoff"
+    ? isPolymarketRouterV3CommitPlan(remainder)
+    : isPolymarketRouterV1CommitPlan(remainder);
 }
 
 /** Cross-controller extraction keeps the Safe's owner as its signer. Only

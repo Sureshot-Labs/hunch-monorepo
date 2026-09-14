@@ -458,6 +458,30 @@ await test("Polymarket runtime facts produce ready rows for every purpose", asyn
   }
 });
 
+await test("closed markets and unavailable market evidence have distinct reasons", async () => {
+  const exactBinding = binding("polymarket");
+  for (const resolved of [true, false]) {
+    const evidence = polymarketEvidence({ binding: exactBinding });
+    const adapter = new PolymarketWalletPreparationAdapter(
+      async (request) =>
+        buildPolymarketRuntimeFacts(request, {
+          ...evidence,
+          market: { ...evidence.market, resolved, orderable: false },
+        }),
+      () => NOW,
+    );
+    const result = await adapter.inspect(
+      input(exactBinding, "buy", "standard"),
+    );
+    assert.equal(result.status, "unavailable");
+    assert.ok(
+      result.reasonCodes.includes(
+        resolved ? "market_not_orderable" : "market_evidence_unavailable",
+      ),
+    );
+  }
+});
+
 await test("unknown wallet authority fails closed", async () => {
   const exactBinding = binding("polymarket");
   const exactInput = input(exactBinding, "fund", null);

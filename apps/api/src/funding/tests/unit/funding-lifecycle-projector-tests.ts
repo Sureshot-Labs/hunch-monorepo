@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { actionIsSafeInternalHandoff } from "../../lifecycle/funding-lifecycle-facts-repository.js";
 
 import {
   deriveFundingLifecycle,
@@ -12,6 +13,35 @@ import {
 } from "../../lifecycle/funding-lifecycle-projector.js";
 
 const now = new Date("2026-09-03T10:00:00.000Z");
+for (const kind of [
+  "owned_safe_controller_transfer",
+  "owned_deposit_controller_transfer",
+  "owned_wallet_controller_transfer",
+]) {
+  const row = {
+    step_kind: "transaction" as const,
+    executor_id: "wallet_profile_evm_v1",
+    action_validation_result: {
+      validatorId: "polymarket_funding_router_v1",
+      kind,
+    },
+  };
+  assert.equal(actionIsSafeInternalHandoff(row), true);
+  assert.equal(
+    actionIsSafeInternalHandoff({ ...row, executor_id: "untrusted_executor" }),
+    false,
+  );
+  assert.equal(
+    actionIsSafeInternalHandoff({
+      ...row,
+      action_validation_result: {
+        ...row.action_validation_result,
+        validatorId: "untrusted_validator",
+      },
+    }),
+    false,
+  );
+}
 const destination = {
   networkId: "evm:8453",
   assetId: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",

@@ -364,7 +364,9 @@ function marketChecks(market: RuntimeMarketEvidence): PreparationFactCheck[] {
           market.resolved
             ? "Market is not currently executable"
             : "Exact market evidence is unavailable",
-          "market_evidence_unavailable",
+          market.resolved && !market.orderable
+            ? "market_not_orderable"
+            : "market_evidence_unavailable",
         ),
     market.adapterResolved
       ? satisfied(

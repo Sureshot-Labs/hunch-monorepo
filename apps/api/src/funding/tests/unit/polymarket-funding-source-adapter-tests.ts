@@ -28,6 +28,7 @@ import {
   fundingEconomicSourceReservations,
 } from "../../persistence/funding-operation-repository.js";
 import { isValidFundingCommitPlanBoundary } from "../../validation/funding-commit-plan-validator.js";
+import { isPolymarketRouterCommitPlan } from "../../validation/polymarket-router-commit-plan-validator.js";
 
 const ACCOUNT_ID = "account_pm_router_source_12345678";
 const SIGNER = "0x00000000000000000000000000000000000000a1";
@@ -404,6 +405,276 @@ const crossAdapter = (value: AccountValueReadModel) =>
 const [crossFunding] =
   await crossAdapter(crossOwnerAccount).list(clientHandoffInput);
 assert.ok(crossFunding);
+// The selected controller is empty. Another owned controller holds USDC.e;
+// changing the trading wallet or involving Relay is unnecessary.
+const ownedUsdce = component(
+  "owned_usdce_12345678",
+  otherOwner,
+  USDCE,
+  "1957954",
+  { walletId: "wallet_owned_usdce_12345678" },
+);
+const ownedProfile = {
+  ...selectedProfile,
+  walletId: "wallet_owned_usdce_12345678",
+  controllerWalletRef: "owned_usdce_ref",
+  address: otherOwner,
+};
+const ownedUsdceAccount: AccountValueReadModel = {
+  ...account(false),
+  projection: { ...account(false).projection, components: [ownedUsdce] },
+  cashAvailability: {
+    ...account(false).cashAvailability,
+    components: [
+      {
+        componentId: ownedUsdce.componentId,
+        freshness: "fresh",
+        availableRaw: "1957954",
+      } as AccountValueReadModel["cashAvailability"]["components"][number],
+    ],
+  },
+  ownership: { ...sourceOwnership, wallets: [selectedProfile, ownedProfile] },
+};
+const ownedUsdceInput = {
+  ...planningInput("0", "1059502", "0", "trade_shortfall", "0", "0", "0"),
+  internalSourcesOnly: true,
+};
+const [ownedUsdceFunding] =
+  await crossAdapter(ownedUsdceAccount).list(ownedUsdceInput);
+assert.ok(ownedUsdceFunding?.option.selectable);
+for (const walletRaw of ["0", "500000", "1000000"]) {
+  const walletIdentity = stableWalletAssetLocationIdentity({
+    accountId: ACCOUNT_ID,
+    address: ownedProfile.address,
+    asset: USDCE,
+    balanceClass: "polymarket",
+  });
+  const walletSource = {
+    ...ownedUsdce,
+    componentId: walletIdentity.componentId,
+    location: {
+      ...ownedUsdce.location,
+      locationId: walletIdentity.locationId,
+    },
+    amount: { asset: USDCE, raw: walletRaw },
+  };
+  const safeComponent = component(
+    "other_safe_usdce",
+    otherSafe,
+    USDCE,
+    "1000000",
+    {
+      linkedAddress: ownedProfile.address,
+      polymarketFunderKind: "safe",
+      venueId: "polymarket",
+    },
+  );
+  const safeSource = {
+    ...safeComponent,
+    location: { ...safeComponent.location, kind: "venue_account" as const },
+  };
+  const components = [walletSource, safeSource];
+  const availabilityTemplate = ownedUsdceAccount.cashAvailability.components[0];
+  assert.ok(availabilityTemplate);
+  const requiredRaw = (BigInt(walletRaw) + 1000000n).toString();
+  const [combined] = await crossAdapter({
+    ...ownedUsdceAccount,
+    projection: { ...ownedUsdceAccount.projection, components },
+    cashAvailability: {
+      ...ownedUsdceAccount.cashAvailability,
+      components: components.map((entry) => ({
+        ...availabilityTemplate,
+        componentId: entry.componentId,
+        availableRaw: entry.amount.raw,
+      })),
+    },
+  }).list({
+    ...ownedUsdceInput,
+    requiredAmount: { asset: PUSD, raw: requiredRaw },
+    request: {
+      ...ownedUsdceInput.request,
+      requestedDestinationAmount: { asset: PUSD, raw: requiredRaw },
+    },
+  });
+  assert.ok(combined?.option.selectable);
+  assert.equal(isValidFundingCommitPlanBoundary(combined.commitPlan), true);
+  const reservations = combined.commitPlan.reservations;
+  assert.equal(
+    new Set(
+      reservations.map((entry) => `${entry.componentId}\u0000${entry.mode}`),
+    ).size,
+    reservations.length,
+    "commit must not reject a canonical wallet source plus its Safe credit as duplicate reservations",
+  );
+  const ownerReservation = reservations.find(
+    (entry) => entry.componentId === walletIdentity.componentId,
+  );
+  assert.equal(ownerReservation?.rawAmount, requiredRaw);
+  assert.equal(
+    ownerReservation?.economicRole,
+    walletRaw === "0" ? "future_credit_fence" : "source_input",
+  );
+  assert.equal(
+    ownerReservation?.sourceInputRawAmount,
+    walletRaw === "0" ? undefined : walletRaw,
+  );
+  assert.equal(
+    fundingEconomicSourceReservations(reservations).reduce(
+      (sum, entry) => sum + BigInt(entry.rawAmount),
+      0n,
+    ),
+    BigInt(requiredRaw),
+    "future credits must stay fenced without counting them as additional money",
+  );
+  assert.deepEqual(
+    combined.commitPlan.steps.map((step) => step.dependsOnOrdinal),
+    combined.commitPlan.steps.map((_, index) =>
+      index === 0 ? null : index - 1,
+    ),
+  );
+}
+assert.equal(
+  isValidFundingCommitPlanBoundary(ownedUsdceFunding.commitPlan),
+  true,
+);
+assert.equal(
+  ownedUsdceFunding.commitPlan.steps[0]?.actionValidationResult.kind,
+  "owned_wallet_controller_transfer",
+);
+assert.equal(
+  ownedUsdceFunding.commitPlan.steps[0]?.normalizedAction.senderWalletId,
+  ownedProfile.walletId,
+);
+assert.equal(
+  ownedUsdceFunding.commitPlan.steps.at(-1)?.normalizedAction.senderWalletId,
+  selectedProfile.walletId,
+);
+assert.equal(ownedUsdceFunding.commitPlan.segments.length, 0);
+const persistedOwnedUsdcePlan = JSON.parse(
+  JSON.stringify(ownedUsdceFunding.commitPlan),
+) as typeof ownedUsdceFunding.commitPlan;
+assert.equal(isValidFundingCommitPlanBoundary(persistedOwnedUsdcePlan), true);
+assert.equal(
+  isPolymarketRouterCommitPlan({
+    ...persistedOwnedUsdcePlan,
+    operation: {
+      ...persistedOwnedUsdcePlan.operation,
+      planKind: "composite_route",
+    },
+    steps: persistedOwnedUsdcePlan.steps.map((step) => ({
+      ...step,
+      ordinal: step.ordinal + 3,
+      dependsOnOrdinal:
+        step.dependsOnOrdinal === null ? null : step.dependsOnOrdinal + 3,
+    })),
+  }),
+  true,
+  "a persisted local contribution retains its exact dependencies in a composite",
+);
+assert.equal(
+  fundingEconomicSourceReservations(
+    ownedUsdceFunding.commitPlan.reservations,
+  ).reduce((sum, entry) => sum + BigInt(entry.rawAmount), 0n),
+  1059502n,
+);
+const ownedTransfer = ownedUsdceFunding.commitPlan.steps[0];
+assert.ok(ownedTransfer);
+for (const change of [
+  {
+    normalizedAction: {
+      ...ownedTransfer.normalizedAction,
+      senderWalletId: selectedProfile.walletId,
+    },
+  },
+  {
+    normalizedAction: {
+      ...ownedTransfer.normalizedAction,
+      to: PUSD.assetId,
+    },
+  },
+  {
+    actionValidationResult: {
+      ...ownedTransfer.actionValidationResult,
+      expectedDestinationRaw: "1",
+    },
+  },
+  {
+    actionValidationResult: {
+      ...ownedTransfer.actionValidationResult,
+      expectedDestinationAddress: otherOwner,
+    },
+  },
+  { dependsOnOrdinal: 1 },
+  { segmentOrdinal: 0 },
+  { normalizedAction: { ...ownedTransfer.normalizedAction, data: "0x" } },
+]) {
+  assert.equal(
+    isValidFundingCommitPlanBoundary({
+      ...ownedUsdceFunding.commitPlan,
+      steps: ownedUsdceFunding.commitPlan.steps.map((step, index) =>
+        index === 0 ? { ...step, ...change } : step,
+      ),
+    }),
+    false,
+  );
+}
+for (const unavailableAccount of [
+  {
+    ...ownedUsdceAccount,
+    ownership: { ...sourceOwnership, wallets: [selectedProfile] },
+  },
+  {
+    ...ownedUsdceAccount,
+    ownership: {
+      ...sourceOwnership,
+      wallets: [
+        selectedProfile,
+        { ...ownedProfile, source: "external" as const },
+      ],
+    },
+  },
+  {
+    ...ownedUsdceAccount,
+    cashAvailability: {
+      ...ownedUsdceAccount.cashAvailability,
+      components: ownedUsdceAccount.cashAvailability.components.map(
+        (entry) => ({ ...entry, availableRaw: "0" }),
+      ),
+    },
+  },
+]) {
+  assert.equal(
+    (await crossAdapter(unavailableAccount).list(ownedUsdceInput)).length,
+    0,
+  );
+}
+assert.equal(
+  (
+    await crossAdapter(ownedUsdceAccount).list({
+      ...ownedUsdceInput,
+      excludedSourceComponentIds: [ownedUsdce.componentId],
+    })
+  ).length,
+  0,
+);
+assert.equal(
+  (
+    await crossAdapter(ownedUsdceAccount).list({
+      ...ownedUsdceInput,
+      request: {
+        ...ownedUsdceInput.request,
+        serverExecutionProfileId: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
+      },
+    })
+  ).length,
+  0,
+);
+const [overCapacityOwnedUsdce] = await crossAdapter(ownedUsdceAccount).list({
+  ...ownedUsdceInput,
+  requiredAmount: { asset: PUSD, raw: "1957955" },
+});
+assert.equal(overCapacityOwnedUsdce?.option.selectable, false);
+assert.equal(overCapacityOwnedUsdce?.option.minimumDestination?.raw, "1957954");
 const priorityPolicy = {
   ...DEFAULT_FUNDING_RUNTIME_POLICY,
   placement: {
