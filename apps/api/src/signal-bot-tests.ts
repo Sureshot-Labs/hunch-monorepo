@@ -5015,14 +5015,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.deepEqual(
         multiPresetBuyButtons.map((button) => button.text),
-        [
-          "🟢 $1 · YES",
-          "🟢 $5 · YES",
-          "🟢 $10 · YES",
-          "🟢 $1 · NO",
-          "🟢 $5 · NO",
-          "🟢 $10 · NO",
-        ],
+        ["$1 · YES", "$5 · YES", "$10 · YES", "$1 · NO", "$5 · NO", "$10 · NO"],
       );
       const multiPresetBuyRows =
         multiPresetMessage.reply_markup?.inline_keyboard.filter((row) =>
@@ -5049,8 +5042,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.deepEqual(
         customButtons.map((button) => button.text),
-        ["🟢 Buy YES…", "🟢 Buy NO…"],
+        ["Buy YES…", "Buy NO…"],
       );
+      for (const button of [...multiPresetBuyButtons, ...customButtons]) {
+        assert.equal(
+          button.icon_custom_emoji_id,
+          TELEGRAM_CUSTOM_EMOJI.positionBuy.id,
+        );
+      }
       assert.equal(
         multiPresetMessage.reply_markup?.inline_keyboard.some(
           (row) =>
@@ -5266,14 +5265,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.deepEqual(
         appFallbackButtons.map((button) => button.text),
         [
-          "🟢 $1 · YES",
-          "🟢 $5 · YES",
-          "🟢 $15 · YES",
-          "🟢 $1 · NO",
-          "🟢 $5 · NO",
-          "🟢 $15 · NO",
-          "🟢 Buy YES…",
-          "🟢 Buy NO…",
+          "$1 · YES",
+          "$5 · YES",
+          "$15 · YES",
+          "$1 · NO",
+          "$5 · NO",
+          "$15 · NO",
+          "Buy YES…",
+          "Buy NO…",
           "Open market",
           "⬅️ Back",
         ],
@@ -10999,6 +10998,44 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(telegram.edits[1]?.text ?? "", /1️⃣ BUY/u);
       assert.equal(telegram.edits[1]?.message_id, 51);
       assert.equal(telegram.messages.length, 0);
+    },
+  },
+  {
+    name: "Trading History loader survives the incoming Telegram update dispatch",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      telegram.updates = [
+        {
+          update_id: 90,
+          callback_query: {
+            data: "hm:v1:trade_history",
+            from: { id: 999 },
+            id: "history-dispatch",
+            message: { chat: { id: 999, type: "private" }, message_id: 51 },
+          },
+        },
+      ];
+      let loads = 0;
+      await pollSignalBotCommands({
+        config: parseSignalBotConfig({ HUNCH_SIGNAL_BOT_TOKEN: "token" }),
+        db: {
+          query: async () => ({
+            rows: [{ link_id: "link-1", user_id: "user-1" }],
+          }),
+        } as never,
+        loadTradeHistory: async (telegramUserId) => {
+          assert.equal(telegramUserId, 999);
+          loads += 1;
+          return { text: "Completed trade history" };
+        },
+        redis,
+        sendTestSignal: async () => false,
+        telegram,
+      });
+      assert.equal(loads, 1);
+      assert.equal(telegram.edits.at(-1)?.text, "Completed trade history");
+      assert.equal(await readSignalBotUpdateOffset(redis), 91);
     },
   },
   {

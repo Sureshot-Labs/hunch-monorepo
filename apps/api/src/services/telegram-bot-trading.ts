@@ -700,17 +700,13 @@ export type TelegramMarketCardContext = {
 
 function telegramTradeActionButtonDecoration(
   action: "buy" | "sell",
-  origin: TelegramMarketCardContext["origin"] | undefined,
 ): Readonly<{ iconCustomEmojiId?: string; textPrefix: string }> {
-  if (origin === "position") {
-    return {
-      iconCustomEmojiId: telegramCustomEmojiId(
-        action === "buy" ? "positionBuy" : "positionSell",
-      ),
-      textPrefix: "",
-    };
-  }
-  return { textPrefix: action === "buy" ? "🟢 " : "🔴 " };
+  return {
+    iconCustomEmojiId: telegramCustomEmojiId(
+      action === "buy" ? "positionBuy" : "positionSell",
+    ),
+    textPrefix: "",
+  };
 }
 
 type TelegramBotTradingStatusRow = {
@@ -6595,14 +6591,8 @@ export async function buildTelegramBotTradingMarketMessage(input: {
 
   const keyboard: TelegramBotTradingButton[][] = [];
   const isPositionContext = input.context?.origin === "position";
-  const buyButtonDecoration = telegramTradeActionButtonDecoration(
-    "buy",
-    input.context?.origin,
-  );
-  const sellButtonDecoration = telegramTradeActionButtonDecoration(
-    "sell",
-    input.context?.origin,
-  );
+  const buyButtonDecoration = telegramTradeActionButtonDecoration("buy");
+  const sellButtonDecoration = telegramTradeActionButtonDecoration("sell");
   const createCustomInputButton = async (
     action: "buy" | "sell",
     side: TelegramBotTradingSide,
