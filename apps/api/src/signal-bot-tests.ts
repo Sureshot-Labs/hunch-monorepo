@@ -2152,7 +2152,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "🔎 Markets",
         "💰 Balance",
         "💼 My positions",
-        "👤 My trading",
+        "📜 Trading History",
         "Deposit",
         "🔔 Notifications",
         "🎁 Rewards & referrals",
@@ -10891,7 +10891,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       const handled = await handleSignalBotMenuCallback({
         callbackQuery: {
-          data: "hm:v1:trading",
+          data: "hm:v1:settings",
           from: { id: 999 },
           id: "menu-callback-1",
           message: {
@@ -10915,7 +10915,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       ]);
       assert.equal(telegram.edits.length, 1);
       assert.equal(telegram.edits[0]?.message_id, 50);
-      assert.match(telegram.edits[0]?.text ?? "", /My trading/);
+      assert.match(telegram.edits[0]?.text ?? "", /Settings/);
       assert.equal(
         telegram.edits[0]?.reply_markup?.inline_keyboard
           .flat()
@@ -10936,6 +10936,69 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
         null,
       );
+    },
+  },
+  {
+    name: "Trading History refreshes the same menu message with completed trades",
+    run: async () => {
+      const redis = new FakeRedis();
+      const telegram = new FakeTelegram();
+      const config = parseSignalBotConfig({
+        HUNCH_SIGNAL_BOT_TOKEN: "token",
+      });
+      let loads = 0;
+      const handled = await handleSignalBotMenuCallback({
+        callbackQuery: {
+          data: "hm:v1:trade_history",
+          from: { id: 999 },
+          id: "trade-history-callback",
+          message: {
+            chat: { id: 999, type: "private" },
+            message_id: 51,
+          },
+        },
+        config,
+        db: {
+          query: async () => ({
+            rows: [{ link_id: "link-1", user_id: "user-1" }],
+          }),
+        } as never,
+        loadTradeHistory: async () => {
+          loads += 1;
+          return {
+            parse_mode: "MarkdownV2",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    callback_data: "hm:v1:trade_history",
+                    text: "🔄 Refresh",
+                  },
+                ],
+                [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+              ],
+            },
+            text: "📜 *Trading History*\n\n1️⃣ BUY · YES",
+          };
+        },
+        redis,
+        sendTestSignal: async () => false,
+        telegram,
+      });
+
+      assert.equal(handled, true);
+      assert.equal(loads, 1);
+      assert.deepEqual(telegram.callbackAnswers, [
+        {
+          callbackQueryId: "trade-history-callback",
+          text: "⏳ Working…",
+        },
+      ]);
+      assert.equal(telegram.edits.length, 2);
+      assert.match(telegram.edits[0]?.text ?? "", /Updating completed trades/u);
+      assert.match(telegram.edits[1]?.text ?? "", /1️⃣ BUY/u);
+      assert.equal(telegram.edits[1]?.message_id, 51);
+      assert.equal(telegram.messages.length, 0);
     },
   },
   {

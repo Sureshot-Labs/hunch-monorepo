@@ -80,6 +80,7 @@ import {
   buildTelegramPositionsMessage,
   loadTelegramPositions,
 } from "../services/telegram-bot-positions.js";
+import { buildTelegramTradeHistoryMessage } from "../services/telegram-bot-trade-history.js";
 import {
   escapeTelegramMarkdownV2,
   formatTelegramBoldMarkdownV2,
@@ -564,6 +565,7 @@ export type TelegramBotTradingRouteDependencies = {
   signerInspector?: typeof inspectServerEvmWalletAuthorization;
   buildDepositMessage?: typeof buildTelegramDepositMessage;
   buildPositionsMessage?: typeof buildTelegramPositionsMessage;
+  buildTradeHistoryMessage?: typeof buildTelegramTradeHistoryMessage;
   loadPositions?: typeof loadTelegramPositions;
   fundingService?: Pick<
     TelegramFundingService,
@@ -611,6 +613,8 @@ async function registerTelegramBotTradingRoutes(
     dependencies.resolveInternalWallets ?? resolveInternalPrivyWalletCandidates;
   const buildPositionsMessage =
     dependencies.buildPositionsMessage ?? buildTelegramPositionsMessage;
+  const buildTradeHistoryMessage =
+    dependencies.buildTradeHistoryMessage ?? buildTelegramTradeHistoryMessage;
   const buildDepositMessage =
     dependencies.buildDepositMessage ?? buildTelegramDepositMessage;
   const buildAccountValue =
@@ -1300,6 +1304,19 @@ async function registerTelegramBotTradingRoutes(
         page: request.body.page,
         pool: routePool,
         telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
+        telegramUserId: request.body.telegramUserId,
+      }),
+  );
+
+  api.post(
+    "/internal/telegram-bot/trading-history",
+    {
+      preHandler: requireInternal,
+      schema: { body: internalStatusBodySchema },
+    },
+    (request) =>
+      buildTradeHistoryMessage({
+        pool: routePool,
         telegramUserId: request.body.telegramUserId,
       }),
   );

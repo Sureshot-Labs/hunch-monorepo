@@ -99,6 +99,7 @@ function logTradingInternalApiFailure(
     | "position-card"
     | "positions"
     | "status"
+    | "trade-history"
     | "trade-input",
   error: unknown,
 ): void {
@@ -525,6 +526,15 @@ export async function runSignalBotRunner(): Promise<void> {
                     throw error;
                   })
               : Promise.reject(new Error("Positions API is unavailable")),
+          loadTradeHistory: (telegramUserId) =>
+            tradingInternalApi
+              ? tradingInternalApi
+                  .buildTradeHistoryMessage(telegramUserId)
+                  .catch((error: unknown) => {
+                    logTradingInternalApiFailure("trade-history", error);
+                    throw error;
+                  })
+              : Promise.reject(new Error("Trading history API is unavailable")),
           loadRewards: ({ notice, telegramUserId, view }) =>
             loadTelegramBotRewardsMessage({
               appBaseUrl: config.appBaseUrl,
