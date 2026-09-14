@@ -875,6 +875,13 @@ export class FundingPlanner {
     const baseReasons = [...destinationSelection.reasonCodes];
 
     if (!selected || !amount) {
+      // A refreshed inspection changes destination IDs. Preserve the cause
+      // for the exact requested binding, never borrow another wallet's error.
+      const unavailableDestinations = publicDestinations.filter((option) =>
+        input.request.venueBindingOptionId
+          ? option.venueBindingOptionId === input.request.venueBindingOptionId
+          : option.destinationOptionId === input.request.destinationOptionId,
+      );
       const collateral = amount?.asset ??
         publicDestinations[0]?.requiredAsset ?? {
           networkId: "unknown",
@@ -883,6 +890,9 @@ export class FundingPlanner {
         };
       const reasonCodes: FundingReasonCode[] = [
         ...baseReasons,
+        ...new Set(
+          unavailableDestinations.flatMap((option) => option.reasonCodes),
+        ),
         ...(!amount ? (["invalid_amount"] as const) : []),
         ...(input.policy.creationMode === "off"
           ? (["creation_mode_off"] as const)

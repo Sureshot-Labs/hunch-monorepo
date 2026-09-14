@@ -45,6 +45,9 @@ export type SignalBotMenuLoaders = TelegramBotRewardsMenuDependencies & {
     telegramUserId: number,
     page?: number,
   ) => Promise<TelegramBotMenuMessage>;
+  loadTradeHistory?: (
+    telegramUserId: number,
+  ) => Promise<TelegramBotMenuMessage>;
   loadTradeStatus?: (telegramUserId: number) => Promise<TelegramBotMenuMessage>;
   onFundingMenuDelivery?: (input: {
     action: TelegramBotMenuActions.SignalBotFundingMenuAction;

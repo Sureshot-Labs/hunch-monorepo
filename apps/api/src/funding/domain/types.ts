@@ -912,6 +912,7 @@ export const FUNDING_REASON_CODES = [
   "locked_funds",
   "market_class_required",
   "market_evidence_unavailable",
+  "market_not_orderable",
   "invalid_state_transition",
   "trade_submission_reconciling",
   "minimum_output_not_met",

@@ -46,6 +46,7 @@ export type SignalBotFundingMenuRoute =
 
 export type SignalBotInteractiveMenuRoute =
   | SignalBotFundingMenuRoute
+  | { kind: "trade_history" }
   | { kind: "market_search_filters"; sessionId: string; venue?: string }
   | { index: number; kind: "market_search_result"; sessionId: string }
   | { kind: "market_search_back"; page: number; sessionId: string }
@@ -64,6 +65,7 @@ export function parseSignalBotInteractiveMenuRoute(
 ): SignalBotInteractiveMenuRoute | null {
   const funding = parseTelegramFundingCallbackRoute(route);
   if (funding) return funding;
+  if (route === "trade_history") return { kind: "trade_history" };
   const filters = route.match(
     /^search_filters:([a-f0-9]{12})(?::(polymarket|limitless|kalshi|all|sort|categories|s_trending|s_totalvol|s_time|c_all|c_politics|c_sports|c_crypto|c_economics|c_tech|c_culture))?$/i,
   );
@@ -359,6 +361,7 @@ type SignalBotInteractiveMenuCallbackInput = {
     telegramUserId: number,
     page: number,
   ) => Promise<MenuMessage>;
+  loadTradeHistory?: (telegramUserId: number) => Promise<MenuMessage>;
   messageId: number | null;
   idempotencyKey?: string;
   onFundingOperationError?: (action: SignalBotFundingMenuAction) => void;
@@ -373,6 +376,64 @@ async function deliverSignalBotInteractiveMenuCallback(
   input: SignalBotInteractiveMenuCallbackInput,
 ): Promise<boolean> {
   const { route } = input;
+  if (route.kind === "trade_history") {
+    await input.render({
+      parse_mode: "MarkdownV2",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              callback_data: `${input.callbackPrefix}home`,
+              text: TELEGRAM_BACK_BUTTON_TEXT,
+            },
+          ],
+        ],
+      },
+      text: "📜 *Trading History*\n\nUpdating completed trades…",
+    });
+    let historyMessage: MenuMessage;
+    try {
+      historyMessage = input.loadTradeHistory
+        ? await input.loadTradeHistory(input.telegramUserId)
+        : {
+            parse_mode: "MarkdownV2",
+            text: formatTelegramCalloutMarkdownV2({
+              bodyMarkdownV2: "Try again shortly\\.",
+              icon: "⚠️",
+              title: "Trading history unavailable",
+            }),
+          };
+    } catch {
+      historyMessage = {
+        parse_mode: "MarkdownV2",
+        text: formatTelegramCalloutMarkdownV2({
+          bodyMarkdownV2: "Try again shortly\\.",
+          icon: "⚠️",
+          title: "Trading history unavailable",
+        }),
+      };
+    }
+    const rows = historyMessage.reply_markup?.inline_keyboard ?? [];
+    const homeCallback = `${input.callbackPrefix}home`;
+    const hasHome = rows.some((row) =>
+      row.some(
+        (button) =>
+          "callback_data" in button && button.callback_data === homeCallback,
+      ),
+    );
+    await input.render({
+      ...historyMessage,
+      reply_markup: {
+        inline_keyboard: [
+          ...rows,
+          ...(!hasHome
+            ? [[{ callback_data: homeCallback, text: "🏠 Home" }]]
+            : []),
+        ],
+      },
+    });
+    return true;
+  }
   if (route.kind === "positions_page") {
     let positionsMessage: MenuMessage;
     try {

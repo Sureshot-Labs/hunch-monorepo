@@ -1428,6 +1428,12 @@ export class ProductionFundingSourcePlanner {
         if (existing) return existing;
         const remainingMs = deadline - performance.now();
         if (remainingMs <= 0) {
+          console.warn("[funding-relay] discovery budget exhausted", {
+            stage: "source_selection",
+            accountId: input.accountId,
+            componentId,
+            executionBoundary: boundary,
+          });
           return Promise.resolve({
             sources: [],
             reasonCodes: ["provider_status_unknown"],
