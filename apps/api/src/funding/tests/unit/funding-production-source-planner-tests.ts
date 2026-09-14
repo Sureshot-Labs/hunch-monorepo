@@ -688,6 +688,20 @@ assert.equal(sponsored[0]?.quoteMinimumOutput?.raw, "3000000");
 assert.equal(sponsored[0]?.maximumSourceRaw, "4000000");
 assert.equal(sponsored[0]?.nativeGasReady, true);
 assert.equal(sponsored[0]?.quoteModeOverride, undefined);
+assert.equal(sponsored[0]?.exactInputFallbackOnSourceCap, true);
+
+// Nominal balance covers slippage, but Relay fees can still exceed the cap.
+const marginalStableSource = deriveProductionRelayEligibleSourceFacts({
+  accountId: ACCOUNT_ID,
+  account: account({ availableRaw: "4281691" }),
+  policy: policy(),
+  requiredAmount: { asset: POLYGON_PUSD, raw: "4215195" },
+});
+assert.equal(marginalStableSource.length, 1);
+assert.equal(marginalStableSource[0]?.quoteModeOverride, undefined);
+assert.equal(marginalStableSource[0]?.maximumSourceRaw, "4281691");
+assert.equal(marginalStableSource[0]?.quoteMinimumOutput?.raw, "4215195");
+assert.equal(marginalStableSource[0]?.exactInputFallbackOnSourceCap, true);
 
 const balanceCappedStableSource = deriveProductionRelayEligibleSourceFacts({
   accountId: ACCOUNT_ID,
@@ -700,6 +714,10 @@ assert.equal(balanceCappedStableSource[0]?.quoteInputAmount.raw, "4000000");
 assert.equal(balanceCappedStableSource[0]?.quoteMinimumOutput?.raw, "1");
 assert.equal(balanceCappedStableSource[0]?.quoteModeOverride, "exact_input");
 assert.equal(balanceCappedStableSource[0]?.maximumSourceRaw, "4000000");
+assert.notEqual(
+  balanceCappedStableSource[0]?.exactInputFallbackOnSourceCap,
+  true,
+);
 
 const exactReceivedSource = deriveProductionRelayEligibleSourceFacts({
   accountId: ACCOUNT_ID,
@@ -712,6 +730,7 @@ assert.equal(exactReceivedSource.length, 1);
 assert.equal(exactReceivedSource[0]?.quoteInputAmount.raw, "3000000");
 assert.equal(exactReceivedSource[0]?.quoteMinimumOutput?.raw, "1");
 assert.equal(exactReceivedSource[0]?.quoteModeOverride, "exact_input");
+assert.notEqual(exactReceivedSource[0]?.exactInputFallbackOnSourceCap, true);
 
 const exactInputConversionSource = deriveProductionRelayEligibleSourceFacts({
   accountId: ACCOUNT_ID,

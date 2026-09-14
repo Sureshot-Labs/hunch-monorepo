@@ -1893,6 +1893,12 @@ await test("Relay-first source planner asks only one exact Relay route", async (
   ]);
   assert.equal(marginalPartialResult.sources.length, 1);
   assert.equal(
+    marginalPartialResult.reasonCodes.includes(
+      "provider_quote_economics_rejected",
+    ),
+    false,
+  );
+  assert.equal(
     marginalPartialResult.sources[0]?.option.amountMode,
     "exact_input",
   );

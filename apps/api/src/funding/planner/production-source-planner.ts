@@ -535,6 +535,9 @@ function sourceFactsForComponent(input: {
           // whether that contribution is economically usable.
           ({ raw, minimumDestinationRaw, quoteModeOverride } = sizing);
         } else {
+          // Nominal stablecoin coverage excludes provider fees. If the actual
+          // quote exceeds the cap, preserve a validated partial contribution.
+          exactInputFallbackOnSourceCap = true;
           raw = sourceRawWithSlippage.toString();
           const grossDestinationRaw = rescaleStableRaw(
             raw,
@@ -1665,6 +1668,13 @@ export class ProductionFundingSourcePlanner {
         };
       }
       if (error instanceof RelayQuoteEconomicsError) {
+        console.warn("[funding-relay] quote economics rejected", {
+          routeId: relayRoute.routeId,
+          quoteCorrelationId: input.quoteCorrelationId,
+          quoteMode: relayRoute.quoteMode,
+          reason: error.reason,
+          maximumSourceRaw: input.source.maximumSourceRaw,
+        });
         return {
           kind: "rejected",
           reasonCode: "provider_quote_economics_rejected",
