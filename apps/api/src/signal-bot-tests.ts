@@ -1774,6 +1774,86 @@ function decodeStartAppPayload(startParam: string): string {
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
+    name: "expired entry navigation does not revive trades or displace newer lifecycle messages",
+    run: async () => {
+      for (const action of ["buy", "sell", "redeem", "confirm"] as const) {
+        for (const status of ["expired", "filled"] as const) {
+          for (const fromId of [999, 888]) {
+            const telegram = new FakeTelegram();
+            const writes: string[] = [];
+            let marketReads = 0;
+            let executionCalls = 0;
+            const callback = buildTradeCallbackQuery({
+              data: `hbt:${action}:00000000-0000-4000-8000-000000000001`,
+              fromId,
+            });
+            assert.ok(callback.message);
+            callback.message.message_id = 100;
+            const handled = await handleTelegramBotTradingCallback({
+              appBaseUrl: "https://app.hunch.trade",
+              callbackQuery: callback,
+              answerCallbackQuery: (value) =>
+                telegram.answerCallbackQuery(value),
+              sendMessage: (value) => telegram.sendMessage(value as never),
+              db: {
+                query: async (sql: string) => {
+                  if (sql.includes("FROM telegram_trade_intents i"))
+                    return {
+                      rowCount: 1,
+                      rows: [
+                        {
+                          id: "00000000-0000-4000-8000-000000000001",
+                          telegram_user_id: "999",
+                          chat_id: "999",
+                          telegram_message_id: "200",
+                          status,
+                          action: action === "confirm" ? "buy" : action,
+                          delivery_mode: "app_handoff",
+                          funding_operation_id: null,
+                          result: { appHandoffExecution: { version: 2 } },
+                          market_id: "market-1",
+                          market_title: "Market",
+                          venue: "polymarket",
+                          expires_at: new Date(Date.now() - 60_000),
+                        },
+                      ],
+                    };
+                  if (/\b(update|insert|delete)\b/i.test(sql)) writes.push(sql);
+                  marketReads++;
+                  // A missing market exercises the real navigation fallback,
+                  // without depending on the full market-card DB fixture.
+                  return { rowCount: 0, rows: [] };
+                },
+              } as never,
+              trading: {
+                executePreparedTrade: async () => {
+                  executionCalls++;
+                  throw new Error("unexpected execution");
+                },
+              } as never,
+            });
+            const navigates =
+              fromId === 999 && status === "expired" && action !== "confirm";
+            assert.equal(handled, true);
+            assert.equal(telegram.messages.length, navigates ? 1 : 0);
+            assert.equal(marketReads > 0, navigates);
+            assert.equal(executionCalls, 0);
+            assert.deepEqual(
+              writes,
+              [],
+              "do not fence, rebind, or revive the newer intent",
+            );
+            if (navigates)
+              assert.match(
+                telegram.callbackAnswers[0]?.text ?? "",
+                /Opening the current market/,
+              );
+          }
+        }
+      }
+    },
+  },
+  {
     name: "Limitless direct not-found uses immutable submit start and exact deterministic id",
     run: () => {
       const idempotencyKey = "telegram-bot:direct-limitless-intent";
@@ -4972,7 +5052,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         ).length,
         2,
       );
-      assert.match(repairableMessage.text, /Buttons valid for 2 minutes/);
+      assert.doesNotMatch(repairableMessage.text, /Buttons valid/);
+      assert.match(
+        repairableMessage.text,
+        /Prices and availability are checked/,
+      );
       assert.match(
         repairableButtons.find(
           (button) =>
@@ -5002,6 +5086,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             buildTestPolymarketReadiness({ executable: true }),
         } as never,
         writeTradeInputContext: async (context) => {
+          assert.equal(
+            Date.parse(context.expiresAt) - Date.parse(context.createdAt),
+            24 * 60 * 60 * 1_000,
+            "market input lifetime is independent of the 120-second quote TTL",
+          );
           customContexts.push({ action: context.action, side: context.side });
           return true;
         },
@@ -5164,7 +5253,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         )?.text ?? "",
         /\$1 · YES/,
       );
-      assert.match(unfundedMessage.text, /Buttons valid/);
+      assert.doesNotMatch(unfundedMessage.text, /Buttons valid/);
       assert.match(
         unfundedMessage.text,
         /\*Polymarket balance:\* \$0 available/,

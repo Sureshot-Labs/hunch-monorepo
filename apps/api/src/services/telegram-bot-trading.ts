@@ -132,7 +132,6 @@ import {
   formatTelegramLivePrice as formatLivePrice,
   formatTelegramQuotePrice,
   formatTelegramQuoteTtl as formatQuoteTtl,
-  formatTelegramTtl as formatTtl,
 } from "./telegram-bot-trading-presentation.js";
 import {
   buildHunchMiniAppDeepLinkButton,
@@ -177,6 +176,8 @@ import { venueLifecycleAllows } from "./venue-lifecycle.js";
 import {
   parseTelegramBotTradeAuthorityBinding,
   telegramBotTradeAuthorityFingerprint,
+  TELEGRAM_MARKET_INPUT_CONTEXT_TTL_MS,
+  isExpiredTelegramMarketEntry,
   type TelegramBotTradeAuthorityBinding,
   type TelegramBotTradeInputContext,
 } from "./telegram-bot-trade-input-context.js";
@@ -6598,7 +6599,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     canBuildCustomSell ||
     redeemPlan
   ) {
-    lines.push("", `Buttons valid for ${formatTtl(policy.intentTtlSec)}.`);
+    lines.push("", "Prices and availability are checked when you continue.");
   }
   if (input.telegramMiniAppEnabled !== true) {
     lines.push("", "Mini App temporarily unavailable.");
@@ -6623,7 +6624,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     const id = crypto.randomUUID();
     const createdAt = new Date();
     const expiresAt = new Date(
-      createdAt.getTime() + policy.intentTtlSec * 1_000,
+      createdAt.getTime() + TELEGRAM_MARKET_INPUT_CONTEXT_TTL_MS,
     );
     const written = await input
       .writeTradeInputContext({
@@ -12525,10 +12526,15 @@ export async function handleTelegramBotTradingCallback(
   const chatId = messageChat.id;
   const sourceMessageId = input.callbackQuery.message?.message_id ?? null;
   const isIntentCancellation = parsed.type === "cancel";
+  const isExpiredMarketEntry = isExpiredTelegramMarketEntry(
+    parsed.type,
+    intent.status,
+  );
   // A market card can point to a Review owned by another message. Reopening
   // a user-signed handoff is navigation, not permission to submit it. Keep
   // the original message binding and all confirmation/server-submit fences.
   const isIntentNavigation =
+    isExpiredMarketEntry ||
     parsed.type === "open_market" ||
     (parsed.type === "retry_buy" && intent.delivery_mode === "app_handoff");
   const lifecycleDeliveryEligible = isTelegramTradeLifecycleDeliveryEligible({
@@ -12575,7 +12581,15 @@ export async function handleTelegramBotTradingCallback(
     // message before building it so a pending lifecycle revision cannot later
     // overwrite the fresh market card. The next lifecycle state, if any, is
     // sent as a new message and safely establishes a new editable generation.
-    if (callbackMessageId != null) {
+    // An expired entry on an older message may replace that older message only;
+    // it must not fence or rebind the intent's newer lifecycle card.
+    if (
+      callbackMessageId != null &&
+      !(
+        isExpiredMarketEntry &&
+        String(callbackMessageId) !== intent.telegram_message_id
+      )
+    ) {
       const fenced = await fenceTelegramTradeLifecycleNavigation({
         chatId,
         db: input.db,
@@ -12619,7 +12633,7 @@ export async function handleTelegramBotTradingCallback(
     });
     return true;
   };
-  if (parsed.type === "open_market") {
+  if (parsed.type === "open_market" || isExpiredMarketEntry) {
     // This callback is navigation only. It deliberately works for expired and
     // terminal intents and never changes a trade, funding operation, or quote.
     const opened = await sendCurrentMarketCard();

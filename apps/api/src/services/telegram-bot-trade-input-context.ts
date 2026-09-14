@@ -3,6 +3,17 @@ import { canonicalWalletIdentity } from "../lib/wallet-address.js";
 
 const TRADE_INPUT_CONTEXT_KEY_PREFIX = "tg:signal_bot:v2:trade_input_context";
 const TRADE_INPUT_CONTEXT_NAVIGATION_GRACE_SEC = 5 * 60;
+// Navigation state, not a quote or consent. Bound Redis retention independently
+// of the short trade-intent TTL; authority is checked again when input is used.
+export const TELEGRAM_MARKET_INPUT_CONTEXT_TTL_MS = 24 * 60 * 60 * 1_000;
+
+/** Old entry buttons may navigate, never revive an expired trade/confirmation. */
+export function isExpiredTelegramMarketEntry(
+  type: string,
+  status: string,
+): boolean {
+  return status === "expired" && ["buy", "sell", "redeem"].includes(type);
+}
 
 const EXACT_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

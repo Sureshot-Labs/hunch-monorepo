@@ -16,6 +16,7 @@ import {
 } from "./services/telegram-bot-menu-state.js";
 import {
   readTelegramBotTradeInputContext,
+  isExpiredTelegramMarketEntry,
   readTelegramBotTradeInputContextForNavigation,
   telegramBotTradeInputMessageScopeMatches,
   writeTelegramBotTradeInputContext,
@@ -28,6 +29,23 @@ import {
 } from "./services/telegram-bot-trade-input.js";
 import type { TelegramInlineKeyboard } from "./services/signal-bot-contracts.js";
 import { handleTelegramBotRewardsInput } from "./services/telegram-bot-rewards-menu.js";
+
+for (const action of ["buy", "sell", "redeem"]) {
+  assert.equal(isExpiredTelegramMarketEntry(action, "expired"), true);
+  for (const status of [
+    "confirming",
+    "executing",
+    "funding",
+    "filled",
+    "cancelled",
+    "failed",
+  ]) {
+    assert.equal(isExpiredTelegramMarketEntry(action, status), false);
+  }
+}
+for (const action of ["confirm", "retry_buy", "cancel", "change_amount"]) {
+  assert.equal(isExpiredTelegramMarketEntry(action, "expired"), false);
+}
 
 class FakeRedis {
   readonly values = new Map<string, string>();
