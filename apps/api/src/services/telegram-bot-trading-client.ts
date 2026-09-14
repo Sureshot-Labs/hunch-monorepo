@@ -108,6 +108,9 @@ export type TelegramBotTradingInternalApiClient = {
   buildStatusMessage: (
     telegramUserId: string | number,
   ) => Promise<TelegramBotTradingClientMessage>;
+  buildTradeHistoryMessage: (
+    telegramUserId: string | number,
+  ) => Promise<TelegramBotTradingClientMessage>;
   buildPositionsMessage: (input: {
     appBaseUrl: string;
     page?: number;
@@ -585,6 +588,12 @@ export function createTelegramBotTradingInternalApiClient(input: {
       post<TelegramBotTradingClientMessage>(
         "/internal/telegram-bot/positions",
         body,
+        { timeoutMs: executeTimeoutMs },
+      ),
+    buildTradeHistoryMessage: (telegramUserId) =>
+      post<TelegramBotTradingClientMessage>(
+        "/internal/telegram-bot/trading-history",
+        { telegramUserId },
         { timeoutMs: executeTimeoutMs },
       ),
     buildPositionMessage: (body) =>

@@ -5,10 +5,21 @@ import {
   updatePositionMetricsInTx,
   withPositionMutationLock,
 } from "../repos/positions-repo.js";
+import {
+  COMPLETED_EXECUTION_STATUSES,
+  COMPLETED_ORDER_STATUSES,
+  normalizeTradeAction,
+} from "./completed-trade-semantics.js";
 
 const USDC_DECIMALS = 6;
 const RAW_DECIMALS = 1_000_000;
-const EXECUTED_STATUSES = new Set(["matched", "filled", "partially_filled"]);
+const EXECUTED_STATUSES = new Set([
+  ...COMPLETED_ORDER_STATUSES,
+  "partially_filled",
+]);
+const COMPLETED_EXECUTION_STATUS_SET = new Set<string>(
+  COMPLETED_EXECUTION_STATUSES,
+);
 
 type PositionSnapshot = {
   tokenId: string;
@@ -142,18 +153,6 @@ function normalizeLimitlessPrice(value: unknown): number | null {
   return normalized;
 }
 
-function normalizeSide(value: unknown): "BUY" | "SELL" | null {
-  if (typeof value === "string") {
-    const upper = value.toUpperCase();
-    if (upper === "BUY" || upper === "SELL") return upper;
-  }
-  if (typeof value === "number") {
-    if (value === 0) return "BUY";
-    if (value === 1) return "SELL";
-  }
-  return null;
-}
-
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.min(1, Math.max(0, value));
@@ -215,7 +214,7 @@ function buildPolymarketFill(row: {
 }): TradeFill | null {
   if (!row.token_id) return null;
   const payload = normalizePayload(row.order_payload);
-  const side = normalizeSide(row.side ?? payload?.side);
+  const side = normalizeTradeAction(row.side ?? payload?.side);
   if (!side) return null;
 
   const status = row.status?.toLowerCase() ?? "";
@@ -333,10 +332,10 @@ export function buildDflowFill(row: {
   raw?: unknown;
   created_at: Date;
 }): TradeFill | null {
-  const side = normalizeSide(row.side);
+  const side = normalizeTradeAction(row.side);
   if (!side) return null;
   const status = row.status?.toLowerCase() ?? "";
-  if (status && status !== "fulfilled" && status !== "closed") return null;
+  if (status && !COMPLETED_EXECUTION_STATUS_SET.has(status)) return null;
 
   let tokenId: string | null = null;
   let sharesRaw: number | null = null;
@@ -383,7 +382,7 @@ export function buildLimitlessFill(row: {
 }): TradeFill | null {
   if (!row.token_id) return null;
   const payload = normalizePayload(row.order_payload);
-  const side = normalizeSide(row.side ?? payload?.side);
+  const side = normalizeTradeAction(row.side ?? payload?.side);
   if (!side) return null;
 
   const status = row.status?.toLowerCase() ?? "";
@@ -703,13 +702,13 @@ async function fetchDflowFills(
       where user_id = $1
         and (wallet_address is null or wallet_address = $2)
         and venue = 'kalshi'
-        and lower(coalesce(status, '')) in ('fulfilled', 'closed')
+        and lower(coalesce(status, '')) = any($4::text[])
         and (
           input_mint = any($3::text[])
           or output_mint = any($3::text[])
         )
     `,
-    [inputs.userId, walletAddress, mintIds],
+    [inputs.userId, walletAddress, mintIds, COMPLETED_EXECUTION_STATUSES],
   );
 
   return rows
