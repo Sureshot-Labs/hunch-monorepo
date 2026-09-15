@@ -5,6 +5,7 @@ import { ethers } from "ethers";
 import { AuthService } from "../auth.js";
 import type { Pool } from "@hunch/infra";
 import type { DbQuery } from "../db.js";
+import { refreshExpiredTelegramQuote } from "./telegram-quote-refresh.js";
 import {
   isKnownNativeSolAsset,
   resolveKnownAccountAssetSymbol,
@@ -473,8 +474,14 @@ function withTelegramTradeErrorActions(input: {
             inline_keyboard: [
               [
                 {
-                  text: "🔄 Try again",
+                  text: "⬅️ Back to market",
                   callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${input.intentId}`,
+                },
+              ],
+              [
+                {
+                  text: "🔎 Markets",
+                  callback_data: "hm:v1:trading:market_input",
                 },
               ],
             ],
@@ -7077,6 +7084,10 @@ async function updateIntentStatus(input: {
   txSignature?: string | null;
   venueOrderId?: string | null;
 }): Promise<boolean> {
+  const quotedExpiry =
+    typeof input.quoteSnapshot?.expiresAt === "string"
+      ? new Date(input.quoteSnapshot.expiresAt)
+      : null;
   const result = await input.db.query(
     `UPDATE telegram_trade_intents
         SET status = $2,
@@ -7094,6 +7105,7 @@ async function updateIntentStatus(input: {
             tx_signature = coalesce($10::text, tx_signature),
             prepared_snapshot = coalesce($11::jsonb, prepared_snapshot),
             quote_snapshot = coalesce($15::jsonb, quote_snapshot),
+            expires_at = least(expires_at, coalesce($21::timestamptz, expires_at)),
             confirmed_at = CASE WHEN $2 = 'executing' THEN now() ELSE confirmed_at END,
             submitted_at = CASE
               WHEN $12::boolean THEN coalesce(submitted_at, now())
@@ -7166,6 +7178,9 @@ async function updateIntentStatus(input: {
       Boolean(input.requireRetryableAppHandoffFundingInspection),
       Boolean(input.preserveClaimedAppHandoff),
       [...RETRYABLE_TELEGRAM_APP_HANDOFF_FUNDING_STATES],
+      quotedExpiry && Number.isFinite(quotedExpiry.getTime())
+        ? quotedExpiry
+        : null,
     ],
   );
   return (result.rowCount ?? 0) > 0;
@@ -7276,6 +7291,20 @@ export async function reconcileStaleTelegramTradeIntents(
   const expiredPending = await db.query(
     `UPDATE telegram_trade_intents pending_intent
         SET status = 'expired',
+            result = coalesce(result, '{}'::jsonb) ||
+              CASE WHEN (pending_intent.status = 'confirming'
+                OR (pending_intent.status = 'previewed' AND pending_intent.result ? 'previewQuote'))
+                AND pending_intent.action IN ('buy', 'sell')
+                AND pending_intent.funding_operation_id IS NULL
+                AND pending_intent.funding_reservation_id IS NULL
+                AND pending_intent.submit_started_at IS NULL
+                AND pending_intent.submitted_at IS NULL
+                AND pending_intent.order_id IS NULL
+                AND pending_intent.execution_id IS NULL
+                AND pending_intent.venue_order_id IS NULL
+                AND pending_intent.tx_signature IS NULL
+                THEN '{"quoteExpiredReview":true}'::jsonb
+                ELSE '{}'::jsonb END,
             error_code = coalesce(error_code, 'intent_expired'),
             error_message = coalesce(error_message, 'Trade intent expired before confirmation.'),
             updated_at = now()
@@ -12174,12 +12203,15 @@ export async function completeTelegramBotTradeInput(input: {
       quoteOverride = await input.trading.quote({
         intent: provisionalTradeIntent,
       });
-    } catch {
+    } catch (error) {
+      const failure = telegramQuoteFailureCopy(
+        input.trading.normalizeError(targetVenue, error).code,
+      );
       return {
         completed: false,
         message: buildTelegramTradeInputNotice({
-          body: "A fresh quote is unavailable. Try the same amount again shortly.",
-          title: "Quote unavailable",
+          body: failure.lines.join(" "),
+          title: failure.heading,
         }),
       };
     }
@@ -12672,6 +12704,37 @@ export async function handleTelegramBotTradingCallback(
     }
     intent.telegram_message_id = String(sourceMessageId);
   }
+  if (parsed.type === "refresh_quote") {
+    const policy = await resolveTelegramBotTradingPolicy(input.db);
+    const fresh =
+      sourceMessageId == null
+        ? null
+        : await refreshExpiredTelegramQuote({
+            db: input.db,
+            intentId: intent.id,
+            telegramUserId: intent.telegram_user_id,
+            chatId,
+            messageId: sourceMessageId,
+            ttlSec: policy.intentTtlSec,
+          });
+    if (!fresh) {
+      await input.answerCallbackQuery({
+        callbackQueryId: input.callbackQuery.id,
+        showAlert: true,
+        text: "This review cannot be refreshed. Check the current trade status or return to the market.",
+      });
+      return true;
+    }
+    return handleTelegramBotTradingCallback({
+      ...input,
+      expectedIntentId: fresh.id,
+      expectedType: fresh.action === "sell" ? "sell" : "buy",
+      callbackQuery: {
+        ...input.callbackQuery,
+        data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:${fresh.action === "sell" ? "sell" : "buy"}:${fresh.id}`,
+      },
+    });
+  }
   const restoredFundingVenue = telegramShortfallVenue(intent.venue);
   const isV2DirectHandoff =
     intent.funding_operation_id == null &&
@@ -12924,6 +12987,48 @@ export async function handleTelegramBotTradingCallback(
     );
     return true;
   }
+  const sendExpiredReview = async () => {
+    await input.answerCallbackQuery({
+      callbackQueryId: input.callbackQuery.id,
+      text: "Quote expired. Refresh it before confirming.",
+    });
+    await input.sendMessage({
+      chat_id: chatId,
+      ...withTelegramPrivateNavigation(
+        {
+          parse_mode: "MarkdownV2",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: "🔄 Refresh quote",
+                  callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:refresh_quote:${intent.id}`,
+                },
+              ],
+            ],
+          },
+          text: formatTelegramTradeLifecycleMessageMarkdownV2({
+            ...telegramQuoteFailureCopy("quote_expired"),
+            tone: "warn",
+            marketTitle: intent.market_title,
+            venue: intent.venue,
+          }),
+        },
+        {
+          marketCallbackData: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${intent.id}`,
+        },
+      ),
+    });
+  };
+  if (
+    intent.status === "expired" &&
+    intent.result.quoteExpiredReview === true &&
+    intent.result.quoteRefreshRequested !== true &&
+    parsed.type === "confirm"
+  ) {
+    await sendExpiredReview();
+    return true;
+  }
   if (
     (isTerminalIntentStatus(intent.status) || intent.status === "executing") &&
     !canDeliverExternalHandoff
@@ -12949,6 +13054,15 @@ export async function handleTelegramBotTradingCallback(
       errorMessage: "Trade intent expired.",
       intentId: intent.id,
       preserveClaimedAppHandoff: true,
+      result:
+        (intent.status === "confirming" ||
+          (intent.status === "previewed" &&
+            isRecord(intent.result.previewQuote))) &&
+        intent.funding_operation_id == null &&
+        intent.funding_reservation_id == null &&
+        (intent.action === "buy" || intent.action === "sell")
+          ? { quoteExpiredReview: true }
+          : undefined,
       status: "expired",
     });
     if (!expired) {
@@ -12960,6 +13074,17 @@ export async function handleTelegramBotTradingCallback(
       // Claim won the race with quote expiry; continue the compatibility
       // callback against the already-consented handoff.
     } else {
+      if (
+        (intent.status === "confirming" ||
+          (intent.status === "previewed" &&
+            isRecord(intent.result.previewQuote))) &&
+        intent.funding_operation_id == null &&
+        intent.funding_reservation_id == null &&
+        (intent.action === "buy" || intent.action === "sell")
+      ) {
+        await sendExpiredReview();
+        return true;
+      }
       await input.answerCallbackQuery({
         callbackQueryId: input.callbackQuery.id,
         text: "Quote expired. Opening the market.",
@@ -13150,7 +13275,10 @@ export async function handleTelegramBotTradingCallback(
     const markedFailed = await updateIntentStatus({
       allowedStatuses: PENDING_INTENT_STATUSES,
       db: input.db,
-      errorCode: "not_ready",
+      errorCode:
+        market && !isMarketOrderable(market)
+          ? "market_not_orderable"
+          : "not_ready",
       errorMessage:
         tradeReadiness?.message ??
         "Telegram bot trading is not ready for this user or market.",
@@ -13164,7 +13292,10 @@ export async function handleTelegramBotTradingCallback(
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
-      text: "⚠️ Bot trading is not ready. Check /trade_status.",
+      text:
+        market && !isMarketOrderable(market)
+          ? "This market is not accepting orders. Nothing was submitted."
+          : "⚠️ Bot trading is not ready. Check /trade_status.",
     });
     if (market) {
       const openButton = buildTelegramTradingMiniAppButton({
@@ -13183,11 +13314,16 @@ export async function handleTelegramBotTradingCallback(
               ? { reply_markup: { inline_keyboard: [[openButton]] } }
               : {}),
             text: formatTelegramTradeLifecycleMessageMarkdownV2({
-              heading: "Direct bot trading is not ready.",
+              heading: !isMarketOrderable(market)
+                ? telegramQuoteFailureCopy("market_not_orderable").heading
+                : "Direct bot trading is not ready.",
               tone: "warn",
-              lines: [
-                tradeReadiness?.message ?? "Open Hunch to trade this market.",
-              ],
+              lines: !isMarketOrderable(market)
+                ? telegramQuoteFailureCopy("market_not_orderable").lines
+                : [
+                    tradeReadiness?.message ??
+                      "Open Hunch to trade this market.",
+                  ],
               marketTitle: market.title,
               venue: intent.venue,
             }),

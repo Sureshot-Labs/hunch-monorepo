@@ -111,6 +111,8 @@ export async function fenceTelegramTradeLifecycleNavigation(input: {
         and ($4::uuid is null or intent_row.id = $4::uuid)
         and (
           intent_row.funding_operation_id is not null
+          or intent_row.result ? 'previewQuote'
+          or intent_row.result ->> 'quoteExpiredReview' = 'true'
           or (
             intent_row.delivery_mode = 'app_handoff'
             and intent_row.result #>> '{appHandoffExecution,version}' = '2'

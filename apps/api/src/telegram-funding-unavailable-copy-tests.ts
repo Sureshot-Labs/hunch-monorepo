@@ -50,6 +50,22 @@ assert.doesNotMatch(
   telegramQuoteFailureCopy("venue_request_failed").heading,
   /Market is currently unavailable/,
 );
+assert.match(
+  telegramQuoteFailureCopy("quote_expired").heading,
+  /Quote expired/,
+);
+assert.match(
+  telegramQuoteFailureCopy("market_not_orderable").heading,
+  /not accepting orders/,
+);
+assert.doesNotMatch(
+  telegramQuoteFailureCopy("market_orderbook_unavailable").lines.join(" "),
+  /market.*closed/i,
+);
+assert.match(
+  telegramQuoteFailureCopy("venue_request_failed").lines.join(" "),
+  /Nothing was submitted/,
+);
 
 // RelayFirstSourcePlanner normalizes a thrown provider_unavailable to this code.
 for (const reason of [

@@ -307,6 +307,7 @@ export type ParsedTelegramBotTradingCallback =
         | "redeem"
         | "retry_buy"
         | "open_market"
+        | "refresh_quote"
         | "cancel"
         | "change_amount"
         | "confirm";
@@ -330,6 +331,7 @@ export function parseTelegramBotTradingCallbackData(
     type !== "redeem" &&
     type !== "retry_buy" &&
     type !== "open_market" &&
+    type !== "refresh_quote" &&
     type !== "buy_input" &&
     type !== "sell_input" &&
     type !== "cancel_input" &&
@@ -869,6 +871,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
         parsed.type === "buy" ||
         parsed.type === "retry_buy" ||
         parsed.type === "open_market" ||
+        parsed.type === "refresh_quote" ||
         parsed.type === "sell" ||
         parsed.type === "redeem"
           ? "/internal/telegram-bot/trading/preview-intent"
@@ -1085,7 +1088,24 @@ export function createTelegramBotTradingInternalApiClient(input: {
           !confirmAcknowledged &&
           index === result.messages.length - 1 &&
           !previewEdited
-            ? withoutMessageScopedTradeInputButtons(deliveredMessage)
+            ? parsed.type === "refresh_quote"
+              ? {
+                  chat_id: deliveredMessage.chat_id,
+                  ...withTelegramPrivateNavigation({
+                    text: "The original review card could not be updated. Return to the market for a new review. No new order was submitted.",
+                    reply_markup: {
+                      inline_keyboard: [
+                        [
+                          {
+                            text: "⬅️ Back to market",
+                            callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${parsed.intentId}`,
+                          },
+                        ],
+                      ],
+                    },
+                  }),
+                }
+              : withoutMessageScopedTradeInputButtons(deliveredMessage)
             : deliveredMessage;
         const sendResult = await callbackInput.sendMessage(
           fallbackPreviewMessage,

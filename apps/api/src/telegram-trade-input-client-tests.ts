@@ -8,6 +8,51 @@ const client = createTelegramBotTradingInternalApiClient({
   token: "test-only",
 });
 try {
+  for (const editSucceeds of [true, false]) {
+    const confirmation = {
+      chat_id: "123",
+      text: "Review updated price",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "Confirm Buy", callback_data: `hbt:confirm:${contextId}` }],
+        ],
+      },
+    };
+    globalThis.fetch = async (url) => {
+      assert.ok(
+        String(url).endsWith("/preview-intent"),
+        "refresh is never execution",
+      );
+      return Response.json({
+        handled: true,
+        intentStatus: "expired",
+        answers: [],
+        messages: [confirmation],
+      });
+    };
+    let sent = 0;
+    await client.handleCallback({
+      appBaseUrl: "https://app.invalid",
+      callbackQuery: {
+        id: "refresh",
+        data: `hbt:refresh_quote:${contextId}`,
+        from: { id: 123 },
+        message: { message_id: 7, chat: { id: 123, type: "private" } },
+      },
+      answerCallbackQuery: async () => undefined,
+      editMessageText: async (message) => {
+        assert.equal(message.message_id, 7);
+        if (!editSucceeds) throw new Error("message cannot be edited");
+        return { ok: true, result: { message_id: 7 } };
+      },
+      sendMessage: async (message) => {
+        sent++;
+        assert.doesNotMatch(JSON.stringify(message), /hbt:confirm:/);
+        assert.match(message.text, /original review card could not be updated/);
+      },
+    });
+    assert.equal(sent, editSucceeds ? 0 : 1);
+  }
   for (const action of ["cancel_input", "open_input_market"] as const) {
     for (const customSide of ["Buy", "Sell"]) {
       const message = {

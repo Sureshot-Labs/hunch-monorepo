@@ -13,6 +13,7 @@ import "./integration-test-database-guard.js";
 import type { User } from "./auth.js";
 import { pool, type DbQuery } from "./db.js";
 import { env } from "./env.js";
+import { refreshExpiredTelegramQuote } from "./services/telegram-quote-refresh.js";
 import { createTelegramBotTradingRoutes } from "./routes/telegram-bot-trading.js";
 import type { PrivyServerSignerStatus } from "./services/api-trading-wallet-signing.js";
 import type { ApiBotTradingExecutor } from "./services/api-trading-service.js";
@@ -1071,6 +1072,103 @@ try {
     assert.ok(id);
     return id;
   };
+  {
+    const oldId = await insertExpiredIntent("quote-refresh", "buy");
+    await reconcileStaleTelegramTradeIntents(db, { telegramUserId });
+    const expiredRow = await client.query<{
+      status: string;
+      result: Record<string, unknown>;
+    }>("select status,result from telegram_trade_intents where id=$1", [oldId]);
+    assert.equal(expiredRow.rows[0]?.status, "expired");
+    assert.equal(expiredRow.rows[0]?.result.quoteExpiredReview, true);
+    await runTelegramTradeLifecycleProjectionBatchInTransaction(client);
+    const projected = await client.query<{ payload: Record<string, unknown> }>(
+      "select payload from telegram_bot_action_outbox where trade_intent_id=$1 and action='trade_funding_edit'",
+      [oldId],
+    );
+    assert.equal(projected.rows[0]?.payload.state, "quote_expired");
+    assert.match(
+      telegramTradeLifecycleProgressTestHooks.progressText(
+        projected.rows[0]?.payload as never,
+      ),
+      /Quote expired/,
+    );
+    assert.match(
+      JSON.stringify(
+        telegramTradeLifecycleProgressTestHooks.progressKeyboard(
+          projected.rows[0]?.payload as never,
+        ),
+      ),
+      /Refresh quote/,
+    );
+    const request = {
+      db,
+      intentId: oldId,
+      telegramUserId,
+      chatId: telegramUserId,
+      messageId: 700,
+      ttlSec: 120,
+    };
+    assert.equal(
+      await refreshExpiredTelegramQuote({ ...request, messageId: 701 }),
+      null,
+    );
+    assert.equal(
+      await refreshExpiredTelegramQuote({ ...request, telegramUserId: "123" }),
+      null,
+    );
+    await client.query(
+      "update telegram_trade_intents set submit_started_at=now() where id=$1",
+      [oldId],
+    );
+    assert.equal(
+      await refreshExpiredTelegramQuote(request),
+      null,
+      "never refresh after a submission boundary",
+    );
+    await client.query(
+      "update telegram_trade_intents set submit_started_at=null where id=$1",
+      [oldId],
+    );
+    const refreshed = await refreshExpiredTelegramQuote(request);
+    assert.ok(refreshed);
+    assert.notEqual(refreshed.id, oldId);
+    assert.deepEqual(await refreshExpiredTelegramQuote(request), refreshed);
+    const freshRow = await client.query<{
+      status: string;
+      amount_usd: string;
+      side: string;
+    }>(
+      "select status,amount_usd::text,side from telegram_trade_intents where id=$1",
+      [refreshed.id],
+    );
+    assert.equal(freshRow.rows[0]?.status, "draft");
+    assert.equal(Number(freshRow.rows[0]?.amount_usd), 1);
+    assert.equal(freshRow.rows[0]?.side, "YES");
+    const eligible =
+      await telegramTradeLifecycleProgressTestHooks.listCandidateIds(client);
+    assert.equal(eligible.includes(oldId), false);
+    const navigatedId = await insertExpiredIntent("quote-navigation", "sell");
+    await reconcileStaleTelegramTradeIntents(db, { telegramUserId });
+    await fenceTelegramTradeLifecycleNavigation({
+      db,
+      chatId: telegramUserId,
+      messageId: 700,
+      telegramUserId,
+      intentId: navigatedId,
+    });
+    assert.equal(
+      (
+        await telegramTradeLifecycleProgressTestHooks.listCandidateIds(client)
+      ).includes(navigatedId),
+      false,
+      "expiry must not overwrite a screen the user opened instead of the review",
+    );
+    await client.query(
+      "update telegram_trade_intents set status='cancelled' where id=$1",
+      [refreshed.id],
+    );
+  }
   const invokeIntentNavigation = async (
     intentId: string,
     type: "cancel" | "open_market" | "retry_buy",

@@ -9075,8 +9075,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(handled, true);
       assert.equal(quoteCalls, 0);
       assert.deepEqual(updateStatuses, ["failed"]);
-      assert.match(telegram.callbackAnswers[0]?.text ?? "", /not ready/);
-      assert.match(telegram.messages[0]?.text ?? "", /not ready|not open/i);
+      assert.match(
+        telegram.callbackAnswers[0]?.text ?? "",
+        /not accepting orders/,
+      );
+      assert.match(telegram.messages[0]?.text ?? "", /not accepting orders/i);
+      assert.doesNotMatch(
+        telegram.messages[0]?.text ?? "",
+        /Direct bot trading is not ready/i,
+      );
     },
   },
   {

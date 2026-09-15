@@ -292,6 +292,12 @@ async function expireIfNeeded(
   await client.query(
     `update telegram_trade_intents trade_intent
         set status = 'expired',
+            result = coalesce(trade_intent.result, '{}'::jsonb) ||
+              case when handoff_row.state = 'issued'
+                and trade_intent.action in ('buy', 'sell')
+                and (trade_intent.status = 'confirming' or
+                  (trade_intent.status = 'previewed' and trade_intent.result ? 'previewQuote'))
+              then '{"quoteExpiredReview":true}'::jsonb else '{}'::jsonb end,
             error_code = 'intent_expired',
             error_message = 'The Mini App handoff expired before trade submission.',
             updated_at = clock_timestamp()
@@ -379,7 +385,7 @@ export async function expireStaleTelegramAppHandoffs(
     intents_expired: number;
   }>(
     `with candidate_handoff as materialized (
-       select handoff_row.id, handoff_row.trade_intent_id
+       select handoff_row.id, handoff_row.trade_intent_id, handoff_row.state
          from telegram_app_handoffs handoff_row
          join telegram_trade_intents intent_row
            on intent_row.id = handoff_row.trade_intent_id
@@ -424,6 +430,12 @@ export async function expireStaleTelegramAppHandoffs(
      expired_intent as (
        update telegram_trade_intents intent_row
           set status = 'expired',
+              result = coalesce(intent_row.result, '{}'::jsonb) ||
+                case when candidate_row.state = 'issued'
+                  and intent_row.action in ('buy', 'sell')
+                  and (intent_row.status = 'confirming' or
+                    (intent_row.status = 'previewed' and intent_row.result ? 'previewQuote'))
+                then '{"quoteExpiredReview":true}'::jsonb else '{}'::jsonb end,
               error_code = 'intent_expired',
               error_message = 'The Mini App handoff expired before trade submission.',
               updated_at = $2::timestamptz

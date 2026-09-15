@@ -46,22 +46,37 @@ export function telegramQuoteFailureCopy(code: string): {
   heading: string;
   lines: string[];
 } {
+  if (code === "market_orderbook_unavailable") {
+    return {
+      heading: "Trading this outcome is currently unavailable.",
+      lines: [
+        "The venue has no available orderbook for this outcome. Adding funds will not fix this. Return to the market or choose another market. Nothing was submitted.",
+      ],
+    };
+  }
   if (
-    code === "market_orderbook_unavailable" ||
     code === "market_not_accepting_orders" ||
     code === "market_not_orderable"
   ) {
     return {
-      heading: "Market is currently unavailable for trading.",
+      heading: "The market is not accepting orders.",
       lines: [
-        "The venue has no available orderbook or is not accepting orders. Adding funds will not fix this. Open the market to check its current availability. Nothing was submitted.",
+        "Trading is currently unavailable on the venue. Adding funds will not fix this. Nothing was submitted.",
+      ],
+    };
+  }
+  if (code === "quote_expired" || code === "intent_expired") {
+    return {
+      heading: "Quote expired.",
+      lines: [
+        "Refresh the quote and review the current price before confirming. Nothing was submitted.",
       ],
     };
   }
   return {
-    heading: "Unable to build a safe current quote.",
+    heading: "Could not check the current price.",
     lines: [
-      "The venue quote could not be verified. Nothing was submitted. Open the market to try again.",
+      "The price check did not complete. Nothing was submitted. Return to the market to retry; adding funds is not a verified solution.",
     ],
   };
 }

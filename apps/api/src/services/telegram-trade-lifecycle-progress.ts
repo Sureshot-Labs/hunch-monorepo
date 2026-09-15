@@ -67,6 +67,7 @@ function formatRawShares(raw: string): string {
 }
 
 type TelegramTradeLifecycleState =
+  | "quote_expired"
   | "awaiting_client"
   | "filled"
   | "failed"
@@ -203,6 +204,7 @@ function parseProgress(value: unknown): TelegramTradeLifecycleProgress | null {
   }
   if (
     ![
+      "quote_expired",
       "awaiting_client",
       "starting",
       "preparing",
@@ -680,17 +682,20 @@ function directHandoffProgressFor(
   candidate: ProjectionCandidate,
 ): TelegramTradeLifecycleProgress {
   const state: TelegramTradeLifecycleState =
-    candidate.status === "external_handoff"
-      ? "awaiting_client"
-      : candidate.status === "executing"
-        ? "submitting_trade"
-        : ["submitted", "reconcile_required"].includes(candidate.status)
-          ? "confirming_trade"
-          : candidate.status === "filled"
-            ? "filled"
-            : candidate.status === "cancelled"
-              ? "cancelled"
-              : "failed";
+    candidate.status === "expired" &&
+    candidate.result.quoteExpiredReview === true
+      ? "quote_expired"
+      : candidate.status === "external_handoff"
+        ? "awaiting_client"
+        : candidate.status === "executing"
+          ? "submitting_trade"
+          : ["submitted", "reconcile_required"].includes(candidate.status)
+            ? "confirming_trade"
+            : candidate.status === "filled"
+              ? "filled"
+              : candidate.status === "cancelled"
+                ? "cancelled"
+                : "failed";
   return {
     action: candidate.action === "sell" ? "sell" : "buy",
     amountUsd: candidate.amount_usd ?? "0",
@@ -723,7 +728,11 @@ function directHandoffProgressFor(
 function liveProgressFor(
   candidate: ProjectionCandidate,
 ): TelegramTradeLifecycleProgress {
-  if (candidate.is_direct_v2_handoff) {
+  if (
+    candidate.is_direct_v2_handoff ||
+    (candidate.status === "expired" &&
+      candidate.result.quoteExpiredReview === true)
+  ) {
     return directHandoffProgressFor(candidate);
   }
   const terminal = ["completed", "refunded", "failed", "cancelled"].includes(
@@ -1148,10 +1157,26 @@ async function listCandidates(
        ) projection_watermark
       where intent.status in (
               'external_handoff', 'funding', 'executing', 'submitted',
-              'reconcile_required', 'failed', 'cancelled', 'filled'
+              'reconcile_required', 'failed', 'cancelled', 'filled', 'expired'
             )
+        and (intent.status <> 'expired' or (
+          intent.result ->> 'quoteExpiredReview' = 'true'
+          and intent.funding_operation_id is null
+          and intent.funding_reservation_id is null
+          and intent.submit_started_at is null
+          and intent.submitted_at is null
+          and intent.order_id is null
+          and intent.execution_id is null
+          and intent.venue_order_id is null
+          and intent.tx_signature is null
+          and not (intent.result ? 'telegramLifecycleMessageBoundary')
+        ))
         and (
-          intent.funding_operation_id is not null
+          (intent.status = 'expired'
+            and intent.result ->> 'quoteExpiredReview' = 'true'
+            and intent.funding_operation_id is null
+            and intent.submit_started_at is null)
+          or intent.funding_operation_id is not null
           or (
             intent.delivery_mode = 'app_handoff'
             and intent.funding_operation_id is null
@@ -1159,6 +1184,7 @@ async function listCandidates(
           )
         )
         and intent.result ->> $2::text is distinct from $3::text
+        and intent.result ->> 'quoteRefreshRequested' is distinct from 'true'
         and (
           intent.result -> 'shortfallProgress' is null
           or floor(
@@ -1332,7 +1358,7 @@ export async function runTelegramTradeLifecycleProjectionBatchInTransaction(
           where id = $1::uuid
             and status in (
               'external_handoff', 'funding', 'executing', 'submitted',
-              'reconcile_required', 'failed', 'cancelled', 'filled'
+              'reconcile_required', 'failed', 'cancelled', 'filled', 'expired'
             )`,
       [
         candidate.id,
@@ -1405,6 +1431,11 @@ function directHandoffText(progress: TelegramTradeLifecycleProgress): string {
   const trade = progress.action === "sell" ? "Sell" : "Buy";
   const subject = progress.action === "sell" ? "sell" : "buy";
   const status = {
+    quote_expired: [
+      "⌛",
+      "Quote expired",
+      "Refresh the quote and review the current price before confirming. Nothing was submitted.",
+    ],
     awaiting_client: [
       "▶️",
       `Continue ${trade} in Hunch`,
@@ -1662,7 +1693,15 @@ function progressKeyboard(
     text: "🎯 Open market",
   } as const;
   if (progress.isDirectHandoff) {
-    if (progress.state === "filled") {
+    if (progress.state === "quote_expired") {
+      rows.push([
+        {
+          callback_data: `${CALLBACK_PREFIX}:refresh_quote:${progress.intentId}`,
+          text: "🔄 Refresh quote",
+        },
+      ]);
+      rows.push([openMarket]);
+    } else if (progress.state === "filled") {
       rows.push([{ ...openMarket, text: "🎯 Trade this market" }]);
       rows.push([
         { callback_data: "hm:v1:positions", text: "💼 My positions" },
@@ -1787,6 +1826,7 @@ async function claimTelegramTradeLifecycleOutbox(
           and outbox.status in ('pending', 'retry')
           and outbox.attempt_count < $2::integer
           and outbox.next_attempt_at <= clock_timestamp()
+          and intent.result ->> 'quoteRefreshRequested' is distinct from 'true'
           and intent.chat_id is not null
           and intent.telegram_message_id is not null
           and intent.result ->> 'shortfallProgressRevision' =
@@ -2040,6 +2080,9 @@ export async function deliverTelegramTradeLifecycleProgress(
       }
       if (current.boundary_message_id !== row.telegram_message_id)
         return "edit";
+      // Expiry is advisory: never resurrect a review after the user navigated
+      // away, or send another copy across an uncertain Telegram boundary.
+      if (progress.state === "quote_expired") return "superseded";
       if (current.boundary_mutation === "send") return "quarantined";
       return "send";
     };
