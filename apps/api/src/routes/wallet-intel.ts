@@ -5341,21 +5341,6 @@ async function withWalletIntelQuerySettings<T>(
   }
 }
 
-async function runWalletIntelParallelQuery<T>(
-  task: (client: PoolClient) => Promise<T>,
-): Promise<T> {
-  const client = await pool.connect();
-  try {
-    return await withWalletIntelQuerySettings(
-      client,
-      walletPositionRouteQuerySettings,
-      () => task(client),
-    );
-  } finally {
-    client.release();
-  }
-}
-
 export const walletPositionRouteQuerySettings = {
   workMem: "48MB",
   disableJit: true,
@@ -6503,6 +6488,7 @@ type WalletActivitySummaryPageContext = {
 };
 
 async function loadWalletActivitySummaryPageContext(inputs: {
+  client: PoolClient;
   userId: string | null;
   pagedIds: string[];
   summaryOptions: WalletActivitySummaryOptions;
@@ -6514,67 +6500,62 @@ async function loadWalletActivitySummaryPageContext(inputs: {
     ReturnType<typeof resolveWalletIntelRefreshPolicy>
   >["effective"];
 }): Promise<WalletActivitySummaryPageContext> {
-  const [pageRows, activityMaps, displayMaps, performanceMaps] =
-    await Promise.all([
-      runWalletIntelParallelQuery((parallelClient) =>
-        loadWalletRowsByIds(
-          parallelClient,
-          inputs.userId,
-          inputs.pagedIds,
-          null,
-        ),
-      ),
-      runWalletIntelParallelQuery(async (parallelClient) => ({
-        pageTopChangesMap: await fetchWalletActivityTopChanges(
-          parallelClient,
-          inputs.pagedIds,
-          inputs.summaryOptions,
-        ),
-        pageSignalSummaryMap: await fetchWalletActivitySignalSummary(
-          parallelClient,
-          inputs.pagedIds,
-          inputs.attributionSummaryOptions,
-        ),
-      })),
-      runWalletIntelParallelQuery(async (parallelClient) => ({
-        sparklineMap: inputs.includeSparkline
-          ? await fetchWalletSparklineMap(parallelClient, inputs.pagedIds, {
-              metric: inputs.sparklineMetric,
-              windowHours: inputs.windowHours,
-            })
-          : new Map<string, WalletActivitySparkline>(),
-        followerCountsMap: await loadWalletFollowerCountsMap(
-          parallelClient,
-          inputs.pagedIds,
-        ),
-        openPositionStatsMap: await loadWalletOpenPositionStatsPreferRollupMap(
-          parallelClient,
-          inputs.pagedIds,
-        ),
-      })),
-      runWalletIntelParallelQuery(async (parallelClient) => ({
-        portfolioPerformanceMap: await loadWalletPortfolioPerformanceMap(
-          parallelClient,
-          inputs.pagedIds,
-          { rangeHours: 720 },
-        ),
-        resolvedTradeStatsMap: await loadWalletResolvedTradeStatsMap(
-          parallelClient,
-          inputs.pagedIds,
-        ),
-      })),
-    ]);
+  // The caller already holds a transaction. Never acquire more pool clients
+  // while holding it: concurrent pages can exhaust the pool waiting on themselves.
+  const client = inputs.client;
+  const pageRows = await loadWalletRowsByIds(
+    client,
+    inputs.userId,
+    inputs.pagedIds,
+    null,
+  );
+  const activityMaps = {
+    pageTopChangesMap: await fetchWalletActivityTopChanges(
+      client,
+      inputs.pagedIds,
+      inputs.summaryOptions,
+    ),
+    pageSignalSummaryMap: await fetchWalletActivitySignalSummary(
+      client,
+      inputs.pagedIds,
+      inputs.attributionSummaryOptions,
+    ),
+  };
+  const displayMaps = {
+    sparklineMap: inputs.includeSparkline
+      ? await fetchWalletSparklineMap(client, inputs.pagedIds, {
+          metric: inputs.sparklineMetric,
+          windowHours: inputs.windowHours,
+        })
+      : new Map<string, WalletActivitySparkline>(),
+    followerCountsMap: await loadWalletFollowerCountsMap(
+      client,
+      inputs.pagedIds,
+    ),
+    openPositionStatsMap: await loadWalletOpenPositionStatsPreferRollupMap(
+      client,
+      inputs.pagedIds,
+    ),
+  };
+  const performanceMaps = {
+    portfolioPerformanceMap: await loadWalletPortfolioPerformanceMap(
+      client,
+      inputs.pagedIds,
+      { rangeHours: 720 },
+    ),
+    resolvedTradeStatsMap: await loadWalletResolvedTradeStatsMap(
+      client,
+      inputs.pagedIds,
+    ),
+  };
 
-  const mmDiagnosticsByWallet = await runWalletIntelParallelQuery(
-    (parallelClient) =>
-      loadWalletMmDiagnosticsMap(
-        parallelClient,
-        pageRows.map((row) => ({
-          walletId: row.id,
-          chain: row.chain,
-        })),
-        inputs.refreshPolicy,
-      ),
+  const mmDiagnosticsByWallet = await loadWalletMmDiagnosticsMap(
+    client,
+    pageRows.map((row) => ({
+      walletId: row.id,
+      chain: row.chain,
+    })),
+    inputs.refreshPolicy,
   );
 
   return {
@@ -10527,6 +10508,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 resolvedTradeStatsMap,
                 mmDiagnosticsByWallet,
               } = await loadWalletActivitySummaryPageContext({
+                client,
                 userId,
                 pagedIds,
                 summaryOptions,

@@ -1,9 +1,12 @@
 import { buildApp } from "./app.js";
-import { waitForDatabaseReady } from "./db.js";
+import { pool, waitForDatabaseReady } from "./db.js";
 import { env } from "./env.js";
 import { getRedis } from "./redis.js";
 
 export async function start() {
+  // HTTP traffic needs headroom; workers importing db.ts keep their existing cap.
+  pool.options.max = 30;
+  pool.options.application_name = "hunch-api";
   await getRedis().catch(() => {}); // optional
   await waitForDatabaseReady();
 

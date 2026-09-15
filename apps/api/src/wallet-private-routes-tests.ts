@@ -1056,11 +1056,34 @@ async function main() {
         avgOpenEntryApprox: true,
       });
 
-      const response = await app.inject({
-        method: "GET",
-        url: "/wallets/activity/summary?scope=whales&limit=100&offset=0&includeAttribution=false",
-      });
+      let leasedConnections = 0;
+      let peakConnections = 0;
+      const onAcquire = () => {
+        peakConnections = Math.max(peakConnections, ++leasedConnections);
+      };
+      const onRelease = () => {
+        leasedConnections--;
+      };
+      pool.on("acquire", onAcquire);
+      pool.on("release", onRelease);
+      const response = await (async () => {
+        try {
+          return await app.inject({
+            method: "GET",
+            url: "/wallets/activity/summary?scope=whales&limit=100&offset=0&includeAttribution=false",
+          });
+        } finally {
+          pool.off("acquire", onAcquire);
+          pool.off("release", onRelease);
+        }
+      })();
       assert.equal(response.statusCode, 200);
+      assert.equal(
+        peakConnections,
+        1,
+        "summary must not acquire nested pool clients",
+      );
+      assert.equal(leasedConnections, 0, "summary must release its client");
       const body = response.json() as {
         ok: boolean;
         items: Array<{
