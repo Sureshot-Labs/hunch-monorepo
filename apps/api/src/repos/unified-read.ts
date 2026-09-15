@@ -2393,18 +2393,31 @@ async function fetchFeedChange24hEventIdsFast(
           join change24h_v2_ranked_events ranked_event
             on ranked_event.event_id = e.id
           where ${[...eventWhere, `${nowParam}::timestamptz is not null`].join(" and ")}
+        ),
+        complete_ranked_events as (
+          select event_id, change_24h from valid_ranked_events
+          union all
+          select e.id, missing_cache.change_24h
+          from unified_events e
+          left join unified_event_change_24h missing_cache
+            on missing_cache.event_id = e.id
+           and missing_cache.calculation_version = 2
+          where (select count(*) from change24h_v2_ranked_events) < ${candidateLimitParam}
+            and (select count(*) from valid_ranked_events) < ${limitParam}::bigint + ${offsetParam}::bigint
+            and ${eventWhere.join(" and ")}
+            and missing_cache.change_24h is null
         )
         select
           coalesce(
             (
               select array_agg(
                 page.event_id
-                order by page.change_24h ${sortDir}, page.event_id
+                order by page.change_24h ${sortDir} nulls last, page.event_id
               )
               from (
                 select event_id, change_24h
-                from valid_ranked_events
-                order by change_24h ${sortDir}, event_id
+                from complete_ranked_events
+                order by change_24h ${sortDir} nulls last, event_id
                 limit ${limitParam} offset ${offsetParam}
               ) page
             ),
@@ -2429,7 +2442,7 @@ async function fetchFeedChange24hEventIdsFast(
     }));
     if (eventRows.length >= inputs.limit) return eventRows;
     if (candidateCount < candidateLimit) {
-      return candidateCount === 0 ? null : eventRows;
+      return eventRows;
     }
   }
 
@@ -4130,7 +4143,6 @@ type FeedTrendingV2ScoreRow = {
 async function fetchFeedPreselectedMarketIdsFast(
   pool: Pool,
   inputs: FeedInputs,
-  options?: { acceptPartialMetricPage?: boolean },
 ): Promise<string[] | null> {
   if (!inputs.marketIds?.length || buildFeedSearchPlan(inputs.q).hasSearch) {
     return null;
@@ -4167,12 +4179,13 @@ async function fetchFeedPreselectedMarketIdsFast(
     marketOrder = `m.open_interest ${sortDir} nulls last, m.venue_market_id`;
   } else if (inputs.sort === "change24h") {
     metricJoin = `
-      join unified_market_change_24h cached_change
+      left join unified_market_change_24h cached_change
         on cached_change.market_id = m.id
        and cached_change.calculation_version = 2
-       and cached_change.change_24h is not null
     `;
-    marketOrder = `cached_change.change_24h ${sortDir}, m.venue_market_id`;
+    marketOrder = `cached_change.change_24h ${sortDir} nulls last,
+      case when cached_change.change_24h is null then e.start_date end desc nulls last,
+      case when cached_change.change_24h is null then e.id end, m.id`;
   } else if (inputs.sort === "time") {
     marketOrder = `${buildFutureMarketEndSortSql(nowParam)} ${sortDir} nulls last, m.venue_market_id`;
   } else if (inputs.filter === "newest") {
@@ -4221,14 +4234,110 @@ async function fetchFeedPreselectedMarketIdsFast(
       jitOff: true,
     },
   );
-  if (
-    inputs.sort === "change24h" &&
-    rows.length < inputs.limit &&
-    !options?.acceptPartialMetricPage
-  ) {
-    return null;
-  }
   return rows.map((row) => row.id);
+}
+
+/** Missing metrics follow numeric rows, newest event first, then event/market ID.
+ * Bound the event prefix BEFORE market hydration; expand until the page is exact.
+ */
+async function fetchFeedMissingChange24hMarketIds(
+  pool: Pool,
+  inputs: FeedInputs,
+): Promise<string[]> {
+  let batchSize = 32;
+  const deadline = performance.now() + feedFilterStatementTimeoutMs();
+  while (true) {
+    const remainingMs = Math.floor(deadline - performance.now());
+    if (remainingMs <= 0) {
+      // Never report a scan-budget limit as an empty/exhausted result.
+      throw Object.assign(new Error("Feed missing-metric scan timed out"), {
+        code: "57014",
+      });
+    }
+    const { params, add } = createParamBuilder();
+    const nowParam = add(inputs.nowParam);
+    const eventWhere = buildFeedEventWhere({
+      add,
+      inputs: { ...inputs, venues: undefined },
+      nowParam,
+      hasSearch: false,
+      includeOrderableExists: false,
+      includeDurationExists: false,
+    });
+    const batchParam = add(batchSize);
+    const limitParam = add(inputs.limit);
+    const offsetParam = add(inputs.offset);
+    const context = buildFeedMarketViewContext({
+      add,
+      inputs,
+      nowParam,
+      nowCloseParam: nowParam,
+      expressions: buildFeedSqlExpressions(),
+      venueFilterTarget: "market",
+      candidateMarketIdsCte: "missing_metric_scan_candidates",
+    });
+    const ctes = [context.orderableMarketCandidatesCte];
+    if (context.scopedOrderableMarketCandidatesCte)
+      ctes.push(context.scopedOrderableMarketCandidatesCte);
+    const rows = await queryRowsWithLocalSettings<{
+      ids: string[];
+      scanned_count: number;
+    }>(
+      pool,
+      `
+      with missing_metric_dated_events as materialized (
+        select e.id, e.start_date from unified_events e
+        where ${eventWhere.join(" and ")} and e.start_date is not null
+        order by e.start_date desc nulls last, e.id limit ${batchParam}
+      ), missing_metric_event_prefix as materialized (
+        select id, start_date from (
+          select id, start_date from missing_metric_dated_events
+          union all
+          (select e.id, e.start_date from unified_events e
+           where (select count(*) from missing_metric_dated_events) < ${batchParam}
+             and ${eventWhere.join(" and ")} and e.start_date is null
+           order by e.id limit ${batchParam})
+        ) event_prefix
+        order by start_date desc nulls last, id limit ${batchParam}
+      ), missing_metric_scan_candidates as materialized (
+        select m.id as market_id
+        from missing_metric_event_prefix e
+        join unified_markets m on m.event_id = e.id
+        left join unified_market_change_24h cached_change
+          on cached_change.market_id = m.id and cached_change.calculation_version = 2
+        where m.status = 'ACTIVE' and ${nowParam}::timestamptz is not null
+          and cached_change.change_24h is null
+      ), ${ctes.join(",\n")}
+      select coalesce((
+        select array_agg(page.id order by page.start_date desc nulls last, page.event_id, page.id)
+        from (
+          select m.id, e.id as event_id, e.start_date
+          from ${context.orderableMarketCandidateSource} candidate_market
+          join unified_markets m on m.id = candidate_market.market_id
+          join unified_events e on e.id = candidate_market.event_id
+          where ${context.where.join(" and ")}
+          order by e.start_date desc nulls last, e.id, m.id
+          limit ${limitParam} offset ${offsetParam}
+        ) page
+      ), '{}'::text[]) as ids,
+      (select count(*)::int from missing_metric_event_prefix) as scanned_count
+    `,
+      params,
+      {
+        workMem: FEED_HEAVY_QUERY_WORK_MEM,
+        statementTimeoutMs: remainingMs,
+        jitOff: true,
+      },
+    );
+    const state = rows[0];
+    const ids = state?.ids ?? [];
+    if (
+      ids.length >= inputs.limit ||
+      Number(state?.scanned_count ?? 0) < batchSize
+    )
+      return ids;
+    batchSize *= 4;
+  }
 }
 
 async function fetchFeedChange24hMarketIdsFast(
@@ -4330,7 +4439,10 @@ async function fetchFeedChange24hMarketIdsFast(
       eventAlias: "grace_event",
       nowParam,
     });
-    const candidateRows = await queryRowsWithLocalSettings<{ id: string }>(
+    const candidateRows = await queryRowsWithLocalSettings<{
+      ids: string[];
+      valid_count: number;
+    }>(
       pool,
       `
         with lifecycle_change_candidates as materialized (
@@ -4376,10 +4488,15 @@ async function fetchFeedChange24hMarketIdsFast(
             and coalesce(grace_pm.closed, false) = false
             and coalesce(grace_pm.archived, false) = false
         )
-        select orderable_candidate.market_id as id
-        from lifecycle_orderable_candidates orderable_candidate
-        order by orderable_candidate.change_24h ${sortDir}, orderable_candidate.market_id
-        limit ${limitParam} offset ${offsetParam}
+        select coalesce((
+          select array_agg(page.market_id order by page.change_24h ${sortDir}, page.market_id)
+          from (
+            select market_id, change_24h from lifecycle_orderable_candidates
+            order by change_24h ${sortDir}, market_id
+            limit ${limitParam} offset ${offsetParam}
+          ) page
+        ), '{}'::text[]) as ids,
+        (select count(*)::int from lifecycle_orderable_candidates) as valid_count
       `,
       params,
       {
@@ -4388,7 +4505,17 @@ async function fetchFeedChange24hMarketIdsFast(
         jitOff: true,
       },
     );
-    return candidateRows.map((row) => row.id);
+    const state = candidateRows[0];
+    const ids = state?.ids ?? [];
+    if (ids.length >= inputs.limit) return ids;
+    return [
+      ...ids,
+      ...(await fetchFeedMissingChange24hMarketIds(pool, {
+        ...inputs,
+        limit: inputs.limit - ids.length,
+        offset: Math.max(0, inputs.offset - Number(state?.valid_count ?? 0)),
+      })),
+    ];
   }
 
   const sortDir = inputs.sortDir === "asc" ? "asc" : "desc";
@@ -4515,7 +4642,11 @@ async function fetchFeedChange24hMarketIdsFast(
     const limitParam = add(inputs.limit);
     const offsetParam = add(inputs.offset);
     const candidateLimitParam = add(candidateLimit);
-    const rows = await queryRowsWithLocalSettings<{ id: string }>(
+    const rows = await queryRowsWithLocalSettings<{
+      ids: string[];
+      candidate_count: number;
+      valid_count: number;
+    }>(
       pool,
       `
         with ${candidateCteName} as materialized (
@@ -4526,12 +4657,23 @@ async function fetchFeedChange24hMarketIdsFast(
           order by cache.change_24h ${sortDir}, cache.market_id
           limit ${candidateLimitParam}
         ),
-        ${marketCandidateCtes}
-        select m.id
-        from ${marketCandidateFrom}
-        where ${marketCandidateWhere.join(" and ")}
-        order by ranked_cache.change_24h ${sortDir}, ranked_cache.market_id
-        limit ${limitParam} offset ${offsetParam}
+        ${marketCandidateCtes},
+        ranked_market_page as materialized (
+          select m.id, ranked_cache.change_24h
+          from ${marketCandidateFrom}
+          where ${marketCandidateWhere.join(" and ")}
+          order by ranked_cache.change_24h ${sortDir}, ranked_cache.market_id
+          limit ${limitParam} offset ${offsetParam}
+        )
+        select coalesce((
+          select array_agg(page.id order by page.change_24h ${sortDir}, page.id)
+          from ranked_market_page page
+        ), '{}'::text[]) as ids,
+        (select count(*)::int from ${candidateCteName}) as candidate_count,
+        case when (select count(*) from ${candidateCteName}) < ${candidateLimitParam}
+               and (select count(*) from ranked_market_page) < ${limitParam}
+          then (select count(*)::int from ${marketCandidateFrom} where ${marketCandidateWhere.join(" and ")})
+          else 0 end as valid_count
       `,
       params,
       {
@@ -4541,7 +4683,18 @@ async function fetchFeedChange24hMarketIdsFast(
       },
     );
 
-    if (rows.length >= inputs.limit) return rows.map((row) => row.id);
+    const state = rows[0];
+    const ids = state?.ids ?? [];
+    if (ids.length >= inputs.limit) return ids;
+    if (Number(state?.candidate_count ?? 0) < candidateLimit) {
+      // Numeric rows always precede the missing-metric tail, in either direction.
+      const missingIds = await fetchFeedMissingChange24hMarketIds(pool, {
+        ...inputs,
+        limit: inputs.limit - ids.length,
+        offset: Math.max(0, inputs.offset - Number(state?.valid_count ?? 0)),
+      });
+      return [...ids, ...missingIds];
+    }
   }
 
   return null;
@@ -4893,11 +5046,10 @@ async function fetchFeedProjectedMetricMarketIdsFast(
   // to the bounded IDs so stale metrics can only affect candidate recall, not
   // the values, availability, or ordering returned to the client.
   return (
-    (await fetchFeedPreselectedMarketIdsFast(
-      pool,
-      { ...inputs, marketIds: candidateMarketIds },
-      { acceptPartialMetricPage: true },
-    )) ?? []
+    (await fetchFeedPreselectedMarketIdsFast(pool, {
+      ...inputs,
+      marketIds: candidateMarketIds,
+    })) ?? []
   );
 }
 
@@ -4907,7 +5059,7 @@ async function fetchFeedMarketIdsFast(
   options?: FeedMarketFastPathOptions,
 ): Promise<string[] | null> {
   if (inputs.marketIds?.length) {
-    return fetchFeedPreselectedMarketIdsFast(pool, inputs, options);
+    return fetchFeedPreselectedMarketIdsFast(pool, inputs);
   }
   if (buildFeedSearchPlan(inputs.q).hasSearch) return null;
   if (inputs.eventScope || hasFeedMarketCategoryFilter(inputs)) {

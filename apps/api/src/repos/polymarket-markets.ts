@@ -9,6 +9,8 @@ export type PolymarketMarketInfoRow = {
   order_price_min_tick_size: unknown;
   order_min_size: unknown;
   accepting_orders: boolean | null;
+  closed?: boolean | null;
+  market_status?: string | null;
   taker_fee_bps: string | null;
   maker_fee_bps: string | null;
 };
@@ -29,6 +31,8 @@ async function queryPolymarketMarketInfo(
         pm.order_price_min_tick_size,
         pm.order_min_size,
         pm.accepting_orders,
+        pm.closed,
+        m.status as market_status,
         coalesce(pm.raw->>'takerBaseFee', pm.raw->>'taker_fee_bps') as taker_fee_bps,
         coalesce(pm.raw->>'makerBaseFee', pm.raw->>'maker_fee_bps') as maker_fee_bps
       ${fromAndWhereSql}

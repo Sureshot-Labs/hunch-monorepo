@@ -38,12 +38,37 @@ import {
 } from "./services/telegram-funding-buy-continuation.js";
 import {
   buildTelegramFundingActiveElsewhereMessage,
+  buildTelegramFundingReceiptStatusMessage,
   buildTelegramFundingBuyReturnAttachedMessage,
   buildTelegramFundingDeliveryQueuedMessage,
   buildTelegramFundingProgressMessage,
   buildTelegramFundingReviewQuoteMessage,
   buildTelegramFundingTargetMessage,
 } from "./services/telegram-funding-presentation.js";
+
+{
+  const status = buildTelegramFundingReceiptStatusMessage({
+    contextId: "fixture",
+    venue: "polymarket",
+    receipts: [
+      {
+        receiptId: "receipt",
+        receiveSessionId: "session",
+        variantId: "solana",
+        asset: { networkId: "solana:mainnet", assetId: "native", decimals: 9 },
+        destinationAddress: "not-for-status",
+        rawAmount: "1000000000",
+        observationRevision: "fixture",
+        observedAt: "2026-09-15T12:00:00Z",
+        status: "ready",
+        handling: "automatic_conversion",
+        childFundingOperationId: null,
+      },
+    ],
+  });
+  assert.match(status.text, /on Solana/);
+  assert.doesNotMatch(status.text, /solana:mainnet|not-for-status/);
+}
 import {
   parseTelegramFundingProgressProjection,
   projectTelegramFundingProgress,

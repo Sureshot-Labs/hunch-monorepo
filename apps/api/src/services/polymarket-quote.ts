@@ -11,7 +11,7 @@ import {
   resolvePolymarketFeePolicySnapshot,
   type PolymarketFeePolicySnapshot,
 } from "./polymarket-builder-fees.js";
-import { polymarketClient } from "./polymarket-client.js";
+import { polymarketClient, PolymarketHttpError } from "./polymarket-client.js";
 
 export type PolymarketSide = "BUY" | "SELL";
 export type PolymarketOrderType = "GTC" | "GTD" | "FAK" | "FOK";
@@ -100,6 +100,9 @@ export class PolymarketQuoteError extends Error {
       | "invalid_orderbook"
       | "missing_top_of_book"
       | "market_not_accepting_orders"
+      | "market_orderbook_unavailable"
+      | "market_trading_closed"
+      | "market_resolved"
       | "quote_timeout"
       | "invalid_price"
       | "invalid_order_options"
@@ -111,6 +114,40 @@ export class PolymarketQuoteError extends Error {
     super(publicMessage);
     this.name = "PolymarketQuoteError";
   }
+}
+
+export function polymarketOrderbookFailure(
+  error: unknown,
+  marketInfo: PolymarketMarketInfoRow | null,
+): unknown {
+  if (
+    !(error instanceof PolymarketHttpError) ||
+    error.code !== "market_orderbook_unavailable"
+  )
+    return error;
+  if (
+    marketInfo?.accepting_orders === false &&
+    (marketInfo.closed === true ||
+      marketInfo.market_status === "CLOSED" ||
+      marketInfo.market_status === "RESOLVED")
+  ) {
+    return marketInfo.market_status === "RESOLVED"
+      ? new PolymarketQuoteError(
+          409,
+          "Market resolved. Trading has ended.",
+          "market_resolved",
+        )
+      : new PolymarketQuoteError(
+          409,
+          "Trading has ended. Awaiting the market result.",
+          "market_trading_closed",
+        );
+  }
+  return new PolymarketQuoteError(
+    503,
+    "The live order book is unavailable. Please try again later.",
+    "market_orderbook_unavailable",
+  );
 }
 
 const USDC_SCALE = 1_000_000n;
@@ -708,13 +745,18 @@ export async function loadPolymarketQuoteContext(
     }) => void;
   },
 ): Promise<PolymarketQuoteContext> {
-  const [orderbookPayload, marketInfo, feePolicySnapshot] = await Promise.all([
-    polymarketClient.getOrderBook(inputs.tokenId),
+  const [orderbookResult, marketInfo, feePolicySnapshot] = await Promise.all([
+    polymarketClient.getOrderBook(inputs.tokenId).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    ),
     fetchPolymarketMarketInfo(pool, { tokenId: inputs.tokenId }),
     resolvePolymarketFeePolicySnapshot(pool),
   ]);
 
-  const orderbook = extractOrderbookSummary(orderbookPayload);
+  if (!orderbookResult.ok)
+    throw polymarketOrderbookFailure(orderbookResult.error, marketInfo);
+  const orderbook = extractOrderbookSummary(orderbookResult.value);
   if (!orderbook) {
     throw new PolymarketQuoteError(
       502,

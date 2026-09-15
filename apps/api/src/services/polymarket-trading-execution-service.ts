@@ -3512,7 +3512,7 @@ export async function quotePolymarketOrderRoute(input: {
       return {
         ok: false,
         statusCode: error.statusCode,
-        payload: { error: error.publicMessage },
+        payload: { error: error.publicMessage, code: error.reason },
       };
     }
     input.log?.error?.(

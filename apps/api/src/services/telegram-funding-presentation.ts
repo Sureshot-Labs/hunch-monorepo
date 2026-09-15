@@ -427,7 +427,7 @@ export function buildTelegramFundingReceiptStatusMessage(input: {
         {
           "evm:8453": "Base",
           "evm:137": "Polygon",
-          solana: "Solana",
+          "solana:mainnet": "Solana",
         } as Record<string, string>
       )[receipt.asset.networkId] ?? receipt.asset.networkId;
     const amount = fundingMoneyLabel({

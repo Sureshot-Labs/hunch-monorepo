@@ -858,9 +858,13 @@ console.log("ok - probability market ids are ranked before page hydration");
 
   assert.match(
     capturedSql[0],
-    /join unified_market_change_24h cached_change[\s\S]*?cached_change\.calculation_version = 2[\s\S]*?cached_change\.change_24h is not null/i,
+    /left join unified_market_change_24h cached_change[\s\S]*?cached_change\.calculation_version = 2/i,
   );
-  assert.match(capturedSql[0], /order by cached_change\.change_24h desc/i);
+  assert.match(
+    capturedSql[0],
+    /order by cached_change\.change_24h desc nulls last/i,
+  );
+  assert.doesNotMatch(capturedSql[0], /cached_change\.change_24h is not null/i);
   assert.match(
     capturedSql[1],
     /left join unified_market_change_24h cached_change[\s\S]*?cached_change\.calculation_version = 2/i,
@@ -885,7 +889,8 @@ console.log("ok - probability change24h ranks and hydrates from the v2 cache");
   });
 
   assert.deepEqual(rows, []);
-  assert.equal(capturedSql.length, 1);
+  assert.equal(capturedSql.length, 2);
+  assert.match(capturedSql[1], /missing_metric_event_prefix as materialized/);
   assert.match(
     capturedSql[0],
     /lifecycle_change_candidates as materialized[\s\S]*?from unified_market_change_24h cached_change[\s\S]*?from lifecycle_change_candidates cached_candidate[\s\S]*?join lateral[\s\S]*?from unified_markets candidate_market[\s\S]*?join unified_events candidate_event/i,
@@ -905,7 +910,8 @@ console.log("ok - change24h age filters stop after exact lifecycle prefilter");
     capturedSql,
     capturedParams,
     candidateRows: [
-      [{ id: "market-1" }, { id: "market-2" }],
+      [{ ids: ["market-1", "market-2"], valid_count: 2 }],
+      [{ ids: [], scanned_count: 0 }],
       [{ id: "market-1" }, { id: "market-2" }],
       [],
     ],
@@ -919,21 +925,21 @@ console.log("ok - change24h age filters stop after exact lifecycle prefilter");
     sort: "change24h",
   });
 
-  assert.equal(capturedSql.length, 3);
+  assert.equal(capturedSql.length, 4);
   assert.match(
     capturedSql[0],
     /candidate_event\.end_date is not null[\s\S]*?candidate_event\.end_date <= \$\d+::timestamptz/i,
   );
   assert.match(
     capturedSql[0],
-    /lifecycle_change_candidates as materialized[\s\S]*?lifecycle_strict_candidates as materialized[\s\S]*?lifecycle_grace_candidates as materialized[\s\S]*?order by orderable_candidate\.change_24h desc/i,
-  );
-  assert.match(
-    capturedSql[1],
-    /selected_event_scope as materialized[\s\S]*?join lateral[\s\S]*?limit 2[\s\S]*?matched_event_scope\.market_count > 1/i,
+    /lifecycle_change_candidates as materialized[\s\S]*?lifecycle_strict_candidates as materialized[\s\S]*?lifecycle_grace_candidates as materialized[\s\S]*?order by change_24h desc/i,
   );
   assert.match(
     capturedSql[2],
+    /selected_event_scope as materialized[\s\S]*?join lateral[\s\S]*?limit 2[\s\S]*?matched_event_scope\.market_count > 1/i,
+  );
+  assert.match(
+    capturedSql[3],
     /left join unified_market_change_24h cached_change[\s\S]*?cached_change\.calculation_version = 2/i,
   );
 }
@@ -946,9 +952,16 @@ console.log("ok - grouped change24h reuses exact lifecycle candidates");
     capturedSql,
     capturedParams,
     candidateRows: [
-      Array.from({ length: 1000 }, (_, index) => ({
-        id: `ranked-market-${index}`,
-      })),
+      [
+        {
+          ids: Array.from(
+            { length: 1000 },
+            (_, index) => `ranked-market-${index}`,
+          ),
+          candidate_count: 1000,
+          valid_count: 1000,
+        },
+      ],
       [{ id: "market-1" }, { id: "market-2" }, { id: "market-3" }],
       [],
     ],
