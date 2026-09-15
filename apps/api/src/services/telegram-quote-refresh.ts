@@ -64,7 +64,9 @@ export async function refreshExpiredTelegramQuote(input: {
        jsonb_strip_nulls(jsonb_build_object(
          'telegramAuthority',result -> 'telegramAuthority',
          'telegramNavigation',result -> 'telegramNavigation',
-         'telegramInput',result -> 'telegramInput'
+         'telegramInput',result -> 'telegramInput',
+         'strictSlippage',result -> 'strictSlippage',
+         'telegramBudget',(result -> 'telegramBudget') - 'normalized' - 'spendLimitUsd'
        )), clock_timestamp() + ($5::integer * interval '1 second'),
        'telegram-quote-refresh:' || id::text
      from source_intent

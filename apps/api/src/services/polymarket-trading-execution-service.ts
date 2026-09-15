@@ -183,6 +183,7 @@ import {
 import {
   calculatePolymarketQuote,
   calculatePolymarketSignedBuyRequiredSpendRaw,
+  quotePolymarketMarketBuyWithinBudget,
   loadPolymarketQuoteContext,
   PolymarketQuoteError,
   type PolymarketQuoteResult,
@@ -349,6 +350,7 @@ type PolymarketFunderDeriveBatchBody = {
 };
 
 type PolymarketQuoteBody = {
+  strictSlippage?: boolean;
   amount?: number | null;
   amountType?: "usd" | "shares" | null;
   amountUsd?: number | null;
@@ -3431,6 +3433,7 @@ export async function quotePolymarketOrderRoute(input: {
         limitPrice: body.limitPrice,
         postOnly: body.postOnly === true,
         slippageBps: body.slippageBps,
+        strictSlippage: body.strictSlippage,
         logWarn: ({ error, tokenId: warningTokenId, conditionId }) =>
           input.log?.warn?.(
             { error, tokenId: warningTokenId, conditionId },
@@ -8254,16 +8257,46 @@ async function quote(
       venue: "polymarket",
     });
   }
-  const orderQuote = calculatePolymarketQuote({
-    tokenId,
-    side: action,
-    orderType: "FOK",
-    amountType: action === "SELL" ? "shares" : "usd",
-    amountUsdInput: action === "BUY" ? amountUsd(intent) : null,
-    amountSharesRawInput: requestedSharesRaw,
-    slippageBps: intent.slippageBps ?? 100,
-    context: quoteContext,
-  });
+  const quoteOptions = isRecord(intent.raw) ? intent.raw : {};
+  const budgetUsd =
+    intent.actor.kind === "telegram_bot" &&
+    action === "BUY" &&
+    quoteOptions.strictSlippage === true &&
+    typeof quoteOptions.telegramBudgetUsd === "number"
+      ? quoteOptions.telegramBudgetUsd
+      : null;
+  const orderQuote =
+    budgetUsd != null
+      ? quotePolymarketMarketBuyWithinBudget({
+          tokenId,
+          context: quoteContext,
+          budgetRaw: ethers.parseUnits(budgetUsd.toFixed(6), 6),
+          executableFundsRaw:
+            typeof quoteOptions.telegramExecutableFundsUsd === "number" &&
+            Number.isFinite(quoteOptions.telegramExecutableFundsUsd) &&
+            quoteOptions.telegramExecutableFundsUsd >= 0
+              ? BigInt(
+                  Math.floor(
+                    quoteOptions.telegramExecutableFundsUsd * 1_000_000,
+                  ),
+                )
+              : undefined,
+          // Keep a $1 nominal floor; do not assume a locally sized sub-dollar
+          // FOK is accepted. The book's resting share minimum is unrelated.
+          minimumNominalRaw: 1_000_000n,
+          slippageBps: intent.slippageBps ?? 100,
+        })
+      : calculatePolymarketQuote({
+          tokenId,
+          side: action,
+          orderType: "FOK",
+          amountType: action === "SELL" ? "shares" : "usd",
+          amountUsdInput: action === "BUY" ? amountUsd(intent) : null,
+          amountSharesRawInput: requestedSharesRaw,
+          slippageBps: intent.slippageBps ?? 100,
+          strictSlippage: quoteOptions.strictSlippage === true,
+          context: quoteContext,
+        });
   const raw: PolymarketBotQuoteRaw = {
     ...orderQuote,
     feePolicySnapshot: quoteContext.feePolicySnapshot,
@@ -8272,7 +8305,10 @@ async function quote(
     venue: "polymarket",
     target: { ...intent.target, tokenId, raw: { market } },
     action,
-    amount: intent.amount,
+    amount:
+      budgetUsd == null
+        ? intent.amount
+        : { type: "usd", value: String(orderQuote.amountUsdUsed) },
     currentPrice: action === "BUY" ? orderQuote.bestAsk : orderQuote.bestBid,
     price: orderQuote.price,
     estimatedShares: orderQuote.size,

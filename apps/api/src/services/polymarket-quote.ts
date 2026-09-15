@@ -105,6 +105,7 @@ export class PolymarketQuoteError extends Error {
       | "invalid_order_options"
       | "missing_amount"
       | "amount_too_small"
+      | "no_liquidity"
       | "fee_unavailable",
   ) {
     super(publicMessage);
@@ -588,11 +589,13 @@ export function calculatePolymarketSignedFokBuyRequiredSpendRaw(input: {
 function hasAvailableAskDepthForBuy(
   orderbook: PolymarketOrderbookSummary,
   quote: PolymarketQuoteResult,
+  strictSlippage = false,
 ): boolean {
   const targetSharesRaw = BigInt(quote.takerAmount);
   if (targetSharesRaw <= 0n) return false;
 
   let availableSharesRaw = 0n;
+  let availableSpendRaw = 0n;
   for (const ask of orderbook.asks) {
     if (
       !Number.isFinite(ask.price) ||
@@ -602,10 +605,25 @@ function hasAvailableAskDepthForBuy(
     ) {
       continue;
     }
-    if (ask.price > quote.price + 1e-9) continue;
+    if (
+      ask.price >
+      (strictSlippage
+        ? Math.min(
+            quote.price,
+            Number(quote.makerAmount) / Number(quote.takerAmount),
+          ) + 1e-12
+        : quote.price + 1e-9)
+    )
+      continue;
 
     const sizeRaw = floorNumberToRaw(ask.size, USDC_SCALE);
     if (sizeRaw == null || sizeRaw <= 0n) continue;
+    if (strictSlippage) {
+      const priceRaw = BigInt(Math.round(ask.price * Number(USDC_SCALE)));
+      availableSpendRaw += (sizeRaw * priceRaw) / USDC_SCALE;
+      if (availableSpendRaw >= BigInt(quote.makerAmount)) return true;
+      continue;
+    }
     availableSharesRaw += sizeRaw;
     if (availableSharesRaw >= targetSharesRaw) return true;
   }
@@ -742,6 +760,7 @@ export function calculatePolymarketQuote(inputs: {
   limitPrice?: number | null;
   postOnly?: boolean;
   slippageBps?: number | null;
+  strictSlippage?: boolean;
   context: PolymarketQuoteContext;
 }): PolymarketQuoteResult {
   const { orderbook, marketInfo, feePolicySnapshot, platformFeeCurve } =
@@ -803,12 +822,28 @@ export function calculatePolymarketQuote(inputs: {
       ? Number(marketInfo.order_min_size)
       : null);
 
-  price = isLimitOrder
-    ? roundLimitPriceToTick(price, priceTick, inputs.side)
-    : roundPriceToTick(price, priceTick, inputs.side);
+  const slippageBoundary = price;
+  price =
+    isLimitOrder || inputs.strictSlippage === true
+      ? roundLimitPriceToTick(price, priceTick, inputs.side)
+      : roundPriceToTick(price, priceTick, inputs.side);
 
   if (!isLimitOrder) {
     price = clampMarketOrderPriceToValidRange(price, priceTick);
+  }
+
+  if (
+    !isLimitOrder &&
+    inputs.strictSlippage === true &&
+    (inputs.side === "BUY"
+      ? price > slippageBoundary + 1e-12 || price < topPrice - 1e-12
+      : price < slippageBoundary - 1e-12 || price > topPrice + 1e-12)
+  ) {
+    throw new PolymarketQuoteError(
+      400,
+      "No executable price tick within the selected slippage limit",
+      "no_liquidity",
+    );
   }
 
   if (!Number.isFinite(price) || price <= 0 || price >= 1) {
@@ -907,6 +942,13 @@ export function calculatePolymarketQuote(inputs: {
       const sizeMicroRaw = (makerAmountMicroMax * USDC_SCALE) / priceMicro;
       if (inputs.side === "BUY") {
         sizeMicro = roundDownToStep(sizeMicroRaw, shareStep);
+        if (
+          inputs.strictSlippage === true &&
+          sizeMicro > 0n &&
+          Number(makerAmountMicroMax) / Number(sizeMicro) > slippageBoundary
+        ) {
+          sizeMicro += shareStep;
+        }
         if (sizeMicro <= 0n) {
           throw new PolymarketQuoteError(
             400,
@@ -1096,6 +1138,7 @@ function searchMaxPolymarketMarketBuyUsd(inputs: {
   tokenId: string;
   executableFundsRaw: bigint;
   slippageBps?: number | null;
+  strictSlippage?: boolean;
   requireOrderbookDepth?: boolean;
 }): PolymarketMaxSpendDetailedResult {
   const upperCents = inputs.executableFundsRaw / MARKET_USD_MICRO_STEP;
@@ -1111,6 +1154,7 @@ function searchMaxPolymarketMarketBuyUsd(inputs: {
         amountType: "usd",
         amountUsdRawInput: cents * MARKET_USD_MICRO_STEP,
         slippageBps: inputs.slippageBps,
+        strictSlippage: inputs.strictSlippage,
         context: inputs.context,
       });
     } catch (error) {
@@ -1145,7 +1189,11 @@ function searchMaxPolymarketMarketBuyUsd(inputs: {
     sawMinValidQuote = true;
     if (
       inputs.requireOrderbookDepth === true &&
-      !hasAvailableAskDepthForBuy(inputs.context.orderbook, quote)
+      !hasAvailableAskDepthForBuy(
+        inputs.context.orderbook,
+        quote,
+        inputs.strictSlippage,
+      )
     ) {
       sawDepthLimitedQuote = true;
       high = mid - 1n;
@@ -1184,9 +1232,94 @@ export function findMaxPolymarketMarketBuyUsdDetailed(inputs: {
   tokenId: string;
   executableFundsRaw: bigint;
   slippageBps?: number | null;
+  strictSlippage?: boolean;
   requireOrderbookDepth?: boolean;
 }): PolymarketMaxSpendDetailedResult {
   return searchMaxPolymarketMarketBuyUsd(inputs);
+}
+
+/** Budget sizing and liquidity are separate: never silently buy a tiny
+ * fraction of the budget just because the book is thin. No network calls. */
+export function quotePolymarketMarketBuyWithinBudget(inputs: {
+  context: PolymarketQuoteContext;
+  tokenId: string;
+  budgetRaw: bigint;
+  slippageBps: number;
+  executableFundsRaw?: bigint;
+  /** Caller-owned verified minimum; distinct from resting-order shares. */
+  minimumNominalRaw?: bigint;
+}): PolymarketQuoteResult {
+  const nominal = calculatePolymarketQuote({
+    context: inputs.context,
+    tokenId: inputs.tokenId,
+    side: "BUY",
+    orderType: "FOK",
+    amountType: "usd",
+    amountUsdRawInput: inputs.budgetRaw,
+    slippageBps: inputs.slippageBps,
+    strictSlippage: true,
+  });
+  if (
+    inputs.executableFundsRaw != null &&
+    nominal.totalRequiredUsdcRaw != null &&
+    BigInt(nominal.totalRequiredUsdcRaw) <= inputs.executableFundsRaw &&
+    (inputs.minimumNominalRaw == null ||
+      BigInt(nominal.makerAmount) >= inputs.minimumNominalRaw)
+  ) {
+    if (!hasAvailableAskDepthForBuy(inputs.context.orderbook, nominal, true)) {
+      throw new PolymarketQuoteError(
+        400,
+        "Insufficient liquidity within the slippage limit",
+        "no_liquidity",
+      );
+    }
+    return nominal;
+  }
+  const result = findMaxPolymarketMarketBuyUsdDetailed({
+    ...inputs,
+    executableFundsRaw: inputs.budgetRaw,
+    strictSlippage: true,
+    requireOrderbookDepth: false,
+  });
+  if (!result.ok) {
+    throw new PolymarketQuoteError(
+      400,
+      "The selected budget is too small for an order including fees",
+      "amount_too_small",
+    );
+  }
+  if (
+    inputs.minimumNominalRaw != null &&
+    BigInt(result.maxAmountUsdRaw) < inputs.minimumNominalRaw
+  ) {
+    const minimum = calculatePolymarketQuote({
+      tokenId: inputs.tokenId,
+      context: inputs.context,
+      side: "BUY",
+      orderType: "FOK",
+      amountType: "usd",
+      amountUsdRawInput: inputs.minimumNominalRaw,
+      slippageBps: inputs.slippageBps,
+      strictSlippage: true,
+    });
+    const minimumBudget =
+      Math.ceil(Number(minimum.totalRequiredUsdcRaw) / 10_000) / 100;
+    throw new PolymarketQuoteError(
+      400,
+      `This order needs a trading budget of at least $${minimumBudget.toFixed(2)} including fees. Transfer fees, if needed, are separate.`,
+      "amount_too_small",
+    );
+  }
+  if (
+    !hasAvailableAskDepthForBuy(inputs.context.orderbook, result.quote, true)
+  ) {
+    throw new PolymarketQuoteError(
+      400,
+      "Insufficient liquidity for the selected budget within the slippage limit",
+      "no_liquidity",
+    );
+  }
+  return result.quote;
 }
 
 export function findMaxPolymarketMarketBuyUsd(inputs: {

@@ -745,7 +745,8 @@ function parseV2Plan(snapshot: JsonObject): TelegramAppHandoffV2Plan {
     !(typeof trade.eventId === "string" || trade.eventId === null) ||
     typeof trade.maxSlippageBps !== "number" ||
     !Number.isInteger(trade.maxSlippageBps) ||
-    trade.maxSlippageBps < 0
+    trade.maxSlippageBps < 0 ||
+    (trade.strictSlippage !== undefined && trade.strictSlippage !== true)
   ) {
     throw new TelegramAppHandoffV2Error(
       "plan_invalid",

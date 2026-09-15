@@ -1195,6 +1195,25 @@ assert.equal(
   "unknown handoff generations must not reach the legacy executor",
 );
 assert.equal(
+  parseTelegramAppHandoffV2Plan({
+    ...directTrade,
+    trade: { ...trade, maxSlippageBps: 100, strictSlippage: true },
+  }).trade.strictSlippage,
+  true,
+);
+assert.equal(
+  parseTelegramAppHandoffV2Plan(directTrade).trade.strictSlippage,
+  undefined,
+);
+assert.throws(
+  () =>
+    parseTelegramAppHandoffV2Plan({
+      ...directTrade,
+      trade: { ...trade, strictSlippage: "true" },
+    }),
+  /sealed trade scope is malformed/u,
+);
+assert.equal(
   telegramAppHandoffV2FundingIdempotencyKey(
     "00000000-0000-4000-8000-000000000003",
   ),

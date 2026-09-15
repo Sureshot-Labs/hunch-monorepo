@@ -6,6 +6,8 @@ import { AuthService } from "../auth.js";
 import type { Pool } from "@hunch/infra";
 import type { DbQuery } from "../db.js";
 import { refreshExpiredTelegramQuote } from "./telegram-quote-refresh.js";
+import { recordTelegramBuyBudget } from "./telegram-buy-budget.js";
+import { PolymarketQuoteError } from "./polymarket-quote.js";
 import {
   isKnownNativeSolAsset,
   resolveKnownAccountAssetSymbol,
@@ -37,6 +39,7 @@ import {
   venueLocalMarketContextId,
 } from "./api-trading-market-repo.js";
 import {
+  DEFAULT_SIGNAL_BOT_SLIPPAGE_BPS,
   resolveSignalBotTradingPolicyFromDb,
   resolveSignalBotTradingPolicyStateFromDb,
   type TelegramMiniAppHandoffMode,
@@ -2541,6 +2544,74 @@ function buildTelegramTradingReadinessInput(input: {
   };
 }
 
+function telegramQuoteSemantics(
+  venue: string,
+  deliveryMode: string,
+  contractVersion: number,
+  budgetUsd?: number,
+): {
+  strictSlippage?: true;
+  telegramBudget?: { version: number; amountUsd: number };
+} {
+  return venue === "polymarket" &&
+    deliveryMode === "app_handoff" &&
+    contractVersion >= 2
+    ? {
+        strictSlippage: true,
+        ...(budgetUsd == null
+          ? {}
+          : {
+              telegramBudget: { version: 1, amountUsd: budgetUsd },
+            }),
+      }
+    : {};
+}
+
+function telegramPreviewFailureCopy(error: unknown, code: string) {
+  if (
+    error instanceof PolymarketQuoteError &&
+    (error.reason === "amount_too_small" || error.reason === "no_liquidity")
+  ) {
+    return {
+      heading:
+        error.reason === "no_liquidity"
+          ? "No suitable liquidity."
+          : "Trading budget is too small.",
+      lines: [error.publicMessage, "Nothing was submitted."],
+    };
+  }
+  return telegramQuoteFailureCopy(code);
+}
+
+function readUnnormalizedTelegramBudget(
+  intent: TelegramTradeIntentRow,
+): number | undefined {
+  const budget = intent.result.telegramBudget;
+  return intent.action === "buy" &&
+    intent.venue === "polymarket" &&
+    intent.delivery_mode === "app_handoff" &&
+    isRecord(budget) &&
+    budget.version === 1 &&
+    budget.normalized !== true &&
+    typeof budget.amountUsd === "number" &&
+    Number.isFinite(budget.amountUsd) &&
+    budget.amountUsd > 0
+    ? budget.amountUsd
+    : undefined;
+}
+
+function telegramExecutableFundsUsd(
+  readiness: TradingReadiness | null | undefined,
+): number | undefined {
+  const amount = readiness?.maxExecutableBuyUsd;
+  return readiness?.ready &&
+    typeof amount === "number" &&
+    Number.isFinite(amount) &&
+    amount >= 0
+    ? amount
+    : undefined;
+}
+
 function buildTelegramTradeIntent(input: {
   amountUsd: number;
   authorization: TelegramBotTradingAuthorizationRow;
@@ -2549,6 +2620,9 @@ function buildTelegramTradeIntent(input: {
   maxSlippageBps: number;
   side: TelegramBotTradingSide;
   fundingReservation?: TradeIntent["fundingReservation"];
+  strictSlippage?: boolean;
+  budgetUsd?: number;
+  executableFundsUsd?: number;
 }): TradeIntent {
   return {
     id: input.intentId,
@@ -2576,11 +2650,20 @@ function buildTelegramTradeIntent(input: {
     slippageBps: input.maxSlippageBps,
     fundingReservation: input.fundingReservation,
     idempotencyKey: `telegram-bot:${input.intentId}`,
-    raw: {},
+    raw: {
+      ...(input.strictSlippage ? { strictSlippage: true } : {}),
+      ...(input.budgetUsd == null
+        ? {}
+        : { telegramBudgetUsd: input.budgetUsd }),
+      ...(input.executableFundsUsd == null
+        ? {}
+        : { telegramExecutableFundsUsd: input.executableFundsUsd }),
+    },
   };
 }
 
 function buildTelegramSellTradeIntent(input: {
+  strictSlippage?: boolean;
   availableSharesRaw?: bigint;
   authorization: TelegramBotTradingAuthorizationRow;
   intentId: string;
@@ -2604,6 +2687,7 @@ function buildTelegramSellTradeIntent(input: {
       value: ethers.formatUnits(input.sharesRaw, 6),
     },
     raw: {
+      ...(input.strictSlippage ? { strictSlippage: true } : {}),
       sharesRaw: input.sharesRaw.toString(),
       availableSharesRaw: (
         input.availableSharesRaw ?? input.sharesRaw
@@ -2613,6 +2697,7 @@ function buildTelegramSellTradeIntent(input: {
 }
 
 function buildTelegramStoredTradeIntent(input: {
+  executableFundsUsd?: number;
   amountUsd: number | null;
   authorization: TelegramBotTradingAuthorizationRow;
   intent: TelegramTradeIntentRow;
@@ -2627,6 +2712,7 @@ function buildTelegramStoredTradeIntent(input: {
       intentId: input.intent.id,
       market: input.market,
       maxSlippageBps: input.policy.maxSlippageBps,
+      strictSlippage: input.intent.result?.strictSlippage === true,
       sharesRaw: input.sharesRaw,
       side: input.side,
     });
@@ -2637,6 +2723,9 @@ function buildTelegramStoredTradeIntent(input: {
     intentId: input.intent.id,
     market: input.market,
     maxSlippageBps: input.policy.maxSlippageBps,
+    strictSlippage: input.intent.result?.strictSlippage === true,
+    budgetUsd: readUnnormalizedTelegramBudget(input.intent),
+    executableFundsUsd: input.executableFundsUsd,
     side: input.side,
     fundingReservation:
       input.intent.funding_operation_id && input.intent.funding_reservation_id
@@ -3168,6 +3257,16 @@ function buildTelegramTradeConfirmationMessage(input: {
               "Exact quantity",
               quantityLabel,
             )}`,
+        ...(action === "BUY" && isRecord(input.intent.result.telegramBudget)
+          ? [
+              formatTelegramUsdcLineMarkdownV2(
+                `Selected amount: ${formatUsd(Number(input.intent.result.telegramBudget.amountUsd))}`,
+              ),
+              formatTelegramUsdcLineMarkdownV2(
+                `Fees up to: ${formatUsd(Math.max(0, (previewMaxSpendUsd ?? 0) - (amountUsd ?? 0)))}`,
+              ),
+            ]
+          : []),
         action === "SELL"
           ? formatTelegramUsdcLineMarkdownV2(
               `${
@@ -3226,7 +3325,7 @@ function buildTelegramTradeConfirmationMessage(input: {
         ...(input.appHandoffFundingReviewLines ?? []),
         `🎚️ ${formatTelegramFieldMarkdownV2(
           "Price tolerance",
-          `${input.policy.maxSlippageBps / 100}%`,
+          `${(typeof appHandoffV2Plan?.trade.maxSlippageBps === "number" ? appHandoffV2Plan.trade.maxSlippageBps : input.policy.maxSlippageBps) / 100}%`,
         )}`,
         `⚙️ ${formatTelegramFieldMarkdownV2(
           "Possible setup",
@@ -3345,7 +3444,7 @@ function buildTelegramTradeAppHandoffMessage(input: {
             ),
         `🎚️ ${formatTelegramFieldMarkdownV2(
           "Price tolerance",
-          `${input.policy.maxSlippageBps / 100}%`,
+          `${(typeof v2Plan?.trade.maxSlippageBps === "number" ? v2Plan.trade.maxSlippageBps : input.policy.maxSlippageBps) / 100}%`,
         )}`,
         formatQuoteTtl(quoteExpiresAt)
           ? `⏱️ ${formatTelegramFieldMarkdownV2(
@@ -3409,6 +3508,9 @@ function buildTelegramAppHandoffV2TradeSnapshot(input: {
     marketId: input.intent.market_id,
     marketTitle: input.intent.market_title,
     maxSlippageBps: input.policy.maxSlippageBps,
+    ...(input.intent.result.strictSlippage === true
+      ? { strictSlippage: true }
+      : {}),
     // The ordinary web order endpoint validates the sealed exact outcome, not
     // merely a market plus a human-readable YES/NO label.
     outcomeTokenId:
@@ -3953,7 +4055,7 @@ export function buildUnlinkedTelegramBotTradingStatus(input: {
           tradingVenues: ["polymarket"],
           buyAmountPresetsUsd: [1],
           maxTradeAmountUsd: 1,
-          maxSlippageBps: 500,
+          maxSlippageBps: DEFAULT_SIGNAL_BOT_SLIPPAGE_BPS,
           intentTtlSec: 120,
           requireConfirmation: true,
         } satisfies SignalBotPolicy),
@@ -5049,6 +5151,12 @@ async function insertBuyIntent(input: {
       }),
       JSON.stringify(buildPolicySnapshot(input.policy)),
       JSON.stringify({
+        ...telegramQuoteSemantics(
+          input.market.venue,
+          input.deliveryMode,
+          input.policy.miniAppHandoffContractVersion,
+          input.amountUsd,
+        ),
         ...buildIntentAuthorityResult(input.authority),
         ...buildIntentNavigationResult(input.navigationContext),
       }),
@@ -5102,6 +5210,11 @@ async function insertSellIntent(input: {
       JSON.stringify(buildTelegramTradeQuotePreview(input.quote)),
       JSON.stringify(buildPolicySnapshot(input.policy)),
       JSON.stringify({
+        ...telegramQuoteSemantics(
+          input.market.venue,
+          input.deliveryMode,
+          input.policy.miniAppHandoffContractVersion,
+        ),
         ...buildIntentAuthorityResult(input.authority),
         ...buildIntentNavigationResult(input.navigationContext),
       }),
@@ -10666,9 +10779,8 @@ async function previewTelegramTradeIntent(input: {
     });
     return true;
   };
-  const { action, amountUsd, sharesRaw } = readTelegramTradeIntentAmount(
-    input.intent,
-  );
+  const { action, sharesRaw } = readTelegramTradeIntentAmount(input.intent);
+  let { amountUsd } = readTelegramTradeIntentAmount(input.intent);
   const side = input.intent.side;
   if (!side || (action === "BUY" ? !amountUsd : !sharesRaw)) {
     await updatePreviewIntentStatus({
@@ -10710,6 +10822,7 @@ async function previewTelegramTradeIntent(input: {
     return;
   }
   const previewIntent = buildTelegramStoredTradeIntent({
+    executableFundsUsd: telegramExecutableFundsUsd(input.readiness),
     amountUsd,
     authorization: input.authorization,
     intent: input.intent,
@@ -10764,7 +10877,7 @@ async function previewTelegramTradeIntent(input: {
         message: {
           parse_mode: "MarkdownV2",
           text: formatTelegramTradeLifecycleMessageMarkdownV2({
-            ...telegramQuoteFailureCopy(normalized.code),
+            ...telegramPreviewFailureCopy(error, normalized.code),
             tone: "warn",
             marketTitle: input.intent.market_title,
             venue: input.intent.venue,
@@ -10773,6 +10886,56 @@ async function previewTelegramTradeIntent(input: {
       }),
     });
     return;
+  }
+  let budget = input.intent.result.telegramBudget;
+  if (
+    readUnnormalizedTelegramBudget(input.intent) != null &&
+    isRecord(budget)
+  ) {
+    const nominal = quote.estimatedNotionalUsd;
+    if (
+      nominal == null ||
+      !Number.isFinite(nominal) ||
+      nominal <= 0 ||
+      quote.maxSpendUsd == null ||
+      !Number.isFinite(quote.maxSpendUsd) ||
+      nominal > Number(budget.amountUsd) ||
+      quote.maxSpendUsd >
+        Math.max(
+          Number(budget.amountUsd),
+          telegramExecutableFundsUsd(input.readiness) ?? 0,
+        )
+    ) {
+      await updatePreviewIntentStatus({
+        allowedStatuses: ["draft"],
+        status: "failed",
+        errorCode: "max_spend_exceeded",
+        errorMessage: "Quote exceeds the selected trading budget.",
+      });
+      return;
+    }
+    if (
+      !(await recordTelegramBuyBudget({
+        db: input.db,
+        intentId: input.intent.id,
+        budget,
+        amountUsd: nominal,
+        spendLimitUsd: quote.maxSpendUsd,
+      }))
+    ) {
+      await sendCurrentConfirmation();
+      return;
+    }
+    amountUsd = nominal;
+    budget = { ...budget, normalized: true, spendLimitUsd: quote.maxSpendUsd };
+    input.intent = {
+      ...input.intent,
+      amount_usd: String(nominal),
+      result: {
+        ...input.intent.result,
+        telegramBudget: budget,
+      },
+    };
   }
   const { maxSpendUsd, venueMinimumBlocking: minimumBlocking } =
     resolveTelegramTradeQuoteLimits({
@@ -10790,7 +10953,10 @@ async function previewTelegramTradeIntent(input: {
       (amountUsd == null ||
         amountUsd > input.maxAmountUsd ||
         maxSpendUsd == null ||
-        maxSpendUsd > input.maxAmountUsd))
+        maxSpendUsd > input.maxAmountUsd ||
+        (isRecord(budget) &&
+          budget.version === 1 &&
+          maxSpendUsd > Number(budget.spendLimitUsd ?? budget.amountUsd))))
   ) {
     const failed = await updatePreviewIntentStatus({
       allowedStatuses: ["draft", "previewed"],
@@ -12169,6 +12335,12 @@ export async function completeTelegramBotTradeInput(input: {
     telegramUserId: input.telegramUserId,
   });
   const provisionalIntentId = intent?.id ?? crypto.randomUUID();
+  const quoteSemantics = telegramQuoteSemantics(
+    targetVenue,
+    deliveryMode,
+    policy.miniAppHandoffContractVersion,
+    targetAction === "buy" ? (amountUsd ?? undefined) : undefined,
+  );
   const provisionalTradeIntent =
     targetAction === "sell" && sharesRaw != null
       ? buildTelegramSellTradeIntent({
@@ -12176,6 +12348,7 @@ export async function completeTelegramBotTradeInput(input: {
           intentId: provisionalIntentId,
           market,
           maxSlippageBps: policy.maxSlippageBps,
+          strictSlippage: !intent && quoteSemantics.strictSlippage === true,
           sharesRaw,
           side,
         })
@@ -12185,6 +12358,12 @@ export async function completeTelegramBotTradeInput(input: {
           intentId: provisionalIntentId,
           market,
           maxSlippageBps: policy.maxSlippageBps,
+          strictSlippage: !intent && quoteSemantics.strictSlippage === true,
+          budgetUsd:
+            !intent && quoteSemantics.strictSlippage === true
+              ? (amountUsd ?? undefined)
+              : undefined,
+          executableFundsUsd: telegramExecutableFundsUsd(readiness),
           side,
         });
   let quoteOverride: TradeQuote | undefined;
@@ -12204,7 +12383,8 @@ export async function completeTelegramBotTradeInput(input: {
         intent: provisionalTradeIntent,
       });
     } catch (error) {
-      const failure = telegramQuoteFailureCopy(
+      const failure = telegramPreviewFailureCopy(
+        error,
         input.trading.normalizeError(targetVenue, error).code,
       );
       return {
@@ -12377,6 +12557,7 @@ export async function completeTelegramBotTradeInput(input: {
               : {}),
           }),
           telegramInput: marker,
+          ...quoteSemantics,
         }),
         expiresAt,
         idempotencyKey,

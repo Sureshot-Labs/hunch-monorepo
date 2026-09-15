@@ -11,6 +11,7 @@ import { DEFAULT_SIGNAL_BOT_POLICY_REVISION } from "./signal-bot-policy-revision
 
 export type SignalBotTradingAction = "buy" | "sell" | "redeem";
 export type SignalBotTradingVenue = "polymarket" | "limitless" | "kalshi";
+export const DEFAULT_SIGNAL_BOT_SLIPPAGE_BPS = 100;
 /**
  * Controls the sealed Telegram → Mini App handoff protocol.  It is deliberately
  * independent of direct bot trading: the web consumer may support an exact
@@ -155,7 +156,7 @@ export function getDefaultSignalBotPolicy(): SignalBotPolicy {
     tradingVenues: ["polymarket", "limitless", "kalshi"],
     buyAmountPresetsUsd: [1],
     maxTradeAmountUsd: 50,
-    maxSlippageBps: 500,
+    maxSlippageBps: DEFAULT_SIGNAL_BOT_SLIPPAGE_BPS,
     intentTtlSec: 120,
     requireConfirmation: true,
   };

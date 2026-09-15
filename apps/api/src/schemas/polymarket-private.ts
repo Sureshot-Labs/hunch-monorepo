@@ -237,6 +237,7 @@ export const polymarketQuoteBodySchema = z
     postOnly: z.boolean().optional(),
     limitPrice: z.coerce.number().positive("limitPrice must be > 0").optional(),
     slippageBps: z.coerce.number().int().min(0).max(10_000).optional(),
+    strictSlippage: z.boolean().optional(),
     // Legacy clients receive the same response shape as before. Unified
     // funding clients can skip this optional, RPC-heavy preview because they
     // prepare the exact shortfall through /funding instead.
