@@ -767,6 +767,7 @@ export type FundingReceiveReceipt = Readonly<{
     | "recovery_required";
   handling: FundingReceiveHandling;
   childFundingOperationId: string | null;
+  automationReason?: "receive_automation_not_consented";
   reviewContinuation?: FundingReceiveReviewContinuation;
   reviewQuotePlan?: FundingReceiveQuotePlan;
 }>;

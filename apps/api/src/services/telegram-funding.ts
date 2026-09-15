@@ -54,6 +54,7 @@ import {
 } from "./telegram-bot-trade-input-context.js";
 import {
   buildTelegramFundingActiveElsewhereMessage,
+  buildTelegramFundingReceiptStatusMessage,
   buildTelegramFundingCancelledMessage,
   buildTelegramFundingBuyReturnAttachedMessage,
   buildTelegramFundingDeliveryQueuedMessage,
@@ -71,6 +72,7 @@ import {
 } from "./telegram-funding-progress.js";
 import {
   appendTelegramFundingConsent,
+  classifyTelegramFundingOpenReceipts,
   cancelTelegramFundingSessionContext,
   createOrReuseTelegramFundingSessionInTransaction,
   fetchActiveTelegramFundingReviewResponse,
@@ -271,6 +273,7 @@ export type TelegramFundingErrorCode =
   | "funding_buy_continuation_disabled"
   | "funding_receive_disabled"
   | "funding_session_active_elsewhere"
+  | "funding_context_ambiguous"
   | "funding_session_expired"
   | "funding_session_unavailable"
   | "receive_channel_conflict"
@@ -280,7 +283,11 @@ export type TelegramFundingErrorCode =
   | "telegram_account_required";
 
 export class TelegramFundingError extends Error {
-  constructor(readonly code: TelegramFundingErrorCode) {
+  constructor(
+    readonly code: TelegramFundingErrorCode,
+    readonly contextId?: string,
+    readonly contextIds?: readonly string[],
+  ) {
     super(code);
     this.name = "TelegramFundingError";
   }
@@ -453,13 +460,20 @@ function rethrowTelegramFundingPersistenceError(error: unknown): never {
     error instanceof TelegramFundingPersistenceError &&
     error.code === "telegram_funding_active_context_ambiguous"
   ) {
-    throw new TelegramFundingError("destination_ambiguous");
+    throw new TelegramFundingError(
+      "funding_context_ambiguous",
+      undefined,
+      error.contextIds,
+    );
   }
   if (
     error instanceof TelegramFundingPersistenceError &&
     error.code === "telegram_funding_session_active_elsewhere"
   ) {
-    throw new TelegramFundingError("funding_session_active_elsewhere");
+    throw new TelegramFundingError(
+      "funding_session_active_elsewhere",
+      error.contextId,
+    );
   }
   throw error;
 }
@@ -835,6 +849,7 @@ export class TelegramFundingService {
         [input.context.receiveSessionId],
       );
       return buildTelegramFundingActiveElsewhereMessage({
+        contextId: input.context.id,
         canCancel: cancellation.rows[0]?.can_cancel === true,
         projection: parseTelegramFundingProgressProjection(
           input.context.latestProgressProjection,
@@ -1775,6 +1790,7 @@ export class TelegramFundingService {
 
   private async loadOwned(
     input: TelegramFundingIdentityInput & { contextId: string },
+    statusOnly = false,
   ) {
     const { identity, link } = await this.currentLink(input);
     const context = await fetchTelegramFundingSessionContext(this.pool, {
@@ -1783,10 +1799,11 @@ export class TelegramFundingService {
       telegramUserId: identity.telegramUserId,
       chatId: identity.chatId,
     });
-    if (!context) {
+    if (!context || context.telegramAccountId !== link.linkId) {
       throw new TelegramFundingError("funding_context_not_found");
     }
     if (
+      !statusOnly &&
       input.telegramMessageId != null &&
       context.telegramMessageId !== input.telegramMessageId
     ) {
@@ -2091,7 +2108,32 @@ export class TelegramFundingService {
     now = new Date(),
     decorateProgress?: TelegramFundingProgressDecorator,
   ): Promise<TelegramFundingMessage> {
-    const owned = await this.loadOwned(input);
+    let owned = await this.loadOwned(input, input.view === "progress");
+    if (
+      input.view === "progress" &&
+      owned.receive.receipts.some(
+        (receipt) =>
+          receipt.status === "observed" &&
+          receipt.handling === "automatic_conversion" &&
+          !receipt.childFundingOperationId,
+      )
+    ) {
+      await tx(this.pool, async (client) => {
+        await lockTelegramFundingLinkLifecycle(client, owned.link.userId);
+        await classifyTelegramFundingOpenReceipts(client, {
+          userId: owned.link.userId,
+          telegramAccountId: owned.link.linkId,
+          telegramUserId: owned.identity.telegramUserId,
+          chatId: owned.identity.chatId,
+          contextId: owned.context.id,
+          venueId: owned.receive.session.venueId,
+          destinationOptionId: owned.receive.session.destinationOptionId,
+          venueBindingOptionId: owned.receive.session.venueBindingOptionId,
+          now,
+        });
+      });
+      owned = await this.loadOwned(input, true);
+    }
     if (input.requestObservation === true) {
       await requestFundingReceiveSessionObservation(this.pool, {
         now,
@@ -2099,6 +2141,33 @@ export class TelegramFundingService {
         userId: owned.link.userId,
       });
     }
+    if (
+      input.view === "progress" &&
+      input.telegramMessageId != null &&
+      input.telegramMessageId !== owned.context.telegramMessageId
+    ) {
+      return buildTelegramFundingReceiptStatusMessage({
+        contextId: owned.context.id,
+        venue: owned.receive.session.venueId,
+        receipts: owned.receive.receipts,
+      });
+    }
+    const receiptStatus = owned.receive.receipts.some(
+      (receipt) =>
+        receipt.automationReason === "receive_automation_not_consented",
+    )
+      ? buildTelegramFundingReceiptStatusMessage({
+          contextId: owned.context.id,
+          venue: owned.receive.session.venueId,
+          receipts: owned.receive.receipts,
+        })
+      : null;
+    const progressMessage = (progress: TelegramFundingProgressProjection) => {
+      const message = buildTelegramFundingProgressMessage(progress);
+      // Change only explanatory copy. Never derive Buy readiness or revive a
+      // terminal handoff from an unconverted source receipt.
+      return receiptStatus ? { ...message, text: receiptStatus.text } : message;
+    };
     const frozenPresentationMode = owned.consent
       ? (resolveTelegramFundingConsentRoute(owned.consent)?.mode ?? null)
       : null;
@@ -2106,7 +2175,7 @@ export class TelegramFundingService {
       progress: TelegramFundingProgressProjection,
       presentationMode: TelegramFundingReceivePresentationMode | null,
     ): Promise<TelegramFundingMessage> | TelegramFundingMessage => {
-      const message = buildTelegramFundingProgressMessage(progress);
+      const message = progressMessage(progress);
       return decorateProgress
         ? decorateProgress({
             consent: owned.consent,
@@ -2124,7 +2193,7 @@ export class TelegramFundingService {
     ): Promise<TelegramFundingMessage> | TelegramFundingMessage =>
       progress.state === "ready"
         ? presentFrozenProgress(progress, frozenPresentationMode)
-        : buildTelegramFundingProgressMessage(progress);
+        : progressMessage(progress);
     const retainedTerminal = resolveTelegramFundingRetainedTerminal(
       owned.context.latestTerminalProjection,
       owned.context.id,

@@ -20,7 +20,10 @@ import {
 } from "../funding/execution/telegram-funding-managed-wallet.js";
 import { hashOpaqueToken } from "../funding/persistence/canonical.js";
 import { loadFundingLifecycleProjectionForOperation } from "../funding/lifecycle/funding-lifecycle-read-model.js";
-import { lockFundingReceiveSessionScope } from "../funding/persistence/funding-receive-session-repository.js";
+import {
+  classifyUnconsentedTelegramReceipts,
+  lockFundingReceiveSessionScope,
+} from "../funding/persistence/funding-receive-session-repository.js";
 import {
   parseDirectIngressObservationVariant,
   type DirectIngressObservationVariant,
@@ -31,7 +34,11 @@ type JsonRecord = Readonly<Record<string, JsonValue>>;
 type ReceiveTargets = NonNullable<ExternalIngressInstruction["receiveTargets"]>;
 
 export class TelegramFundingPersistenceError extends Error {
-  constructor(readonly code: string) {
+  constructor(
+    readonly code: string,
+    readonly contextId?: string,
+    readonly contextIds?: readonly string[],
+  ) {
     super(code);
     this.name = "TelegramFundingPersistenceError";
   }
@@ -813,6 +820,7 @@ export async function createOrReuseTelegramFundingSessionInTransaction(
       // also terminalizes the old card. This low-level reuse must never rebind it.
       throw new TelegramFundingPersistenceError(
         "telegram_funding_session_active_elsewhere",
+        existing.id,
       );
     }
     const refreshed = await client.query<TelegramFundingSessionRow>(
@@ -1031,6 +1039,8 @@ async function lockActiveTelegramFundingOpenContext(
   if (inFlight.length > 1 || (inFlight.length === 0 && rows.length > 1)) {
     throw new TelegramFundingPersistenceError(
       "telegram_funding_active_context_ambiguous",
+      undefined,
+      rows.map((row) => row.id),
     );
   }
   // A resumed receipt may start routing after a fresh address was opened.
@@ -1062,7 +1072,7 @@ async function activeTelegramFundingHasLiveRouting(
       client,
       { operationId: receipt.child_funding_operation_id },
     );
-    if (projection && !projection.lifecycle.safety.terminal) return true;
+    if (!projection || !projection.lifecycle.safety.terminal) return true;
   }
   return false;
 }
@@ -1129,6 +1139,76 @@ async function releaseTerminalTelegramReceiveLease(
   );
 }
 
+export async function classifyTelegramFundingOpenReceipts(
+  client: PoolClient,
+  input: ActiveTelegramFundingOpenScope & {
+    telegramAccountId: string;
+    destinationOptionId?: string;
+    contextId?: string;
+  },
+): Promise<void> {
+  // Include terminal cards. Acquire the receive scope before row locks, in the
+  // same order as the observer; the caller already owns the account link lock.
+  const historical = await client.query<{
+    receive_session_id: string;
+    destination_option_id: string;
+    venue_binding_option_id: string;
+  }>(
+    `select context.receive_session_id, receive_session.destination_option_id,
+            receive_session.venue_binding_option_id
+     from telegram_funding_sessions context
+     join funding_receive_sessions receive_session
+       on receive_session.id = context.receive_session_id
+      and receive_session.user_id = context.user_id
+     where context.user_id = $1::uuid
+       and context.telegram_user_id = $2
+       and context.chat_id = $3
+       and context.telegram_account_id = $4::uuid
+       and ($9::uuid is null or context.id = $9::uuid)
+       and receive_session.owner_channel = 'telegram'
+       and ($5::text is null or receive_session.destination_option_id = $5)
+       and ($6::text is null or receive_session.venue_binding_option_id = $6)
+       and receive_session.venue_id = $7
+       and ($8::text is null or receive_session.destination_target_snapshot #>>
+         '{location,details,controllerWalletId}' = $8)
+       and exists (
+         select 1 from funding_receive_receipts pending_receipt
+         where pending_receipt.receive_session_id = receive_session.id
+           and pending_receipt.status = 'observed'
+           and pending_receipt.handling = 'automatic_conversion'
+           and pending_receipt.child_funding_operation_id is null
+       )
+     order by receive_session.destination_option_id, receive_session.venue_binding_option_id, context.id`,
+    [
+      input.userId,
+      input.telegramUserId,
+      input.chatId,
+      input.telegramAccountId,
+      input.destinationOptionId ?? null,
+      input.venueBindingOptionId ?? null,
+      input.venueId,
+      input.controllerWalletId ?? null,
+      input.contextId ?? null,
+    ],
+  );
+  for (const historicalContext of historical.rows) {
+    await lockFundingReceiveSessionScope(client, {
+      userId: input.userId,
+      destinationOptionId: historicalContext.destination_option_id,
+      venueBindingOptionId: historicalContext.venue_binding_option_id,
+    });
+    const locked = await client.query(
+      "select id from funding_receive_sessions where id=$1::uuid for update skip locked",
+      [historicalContext.receive_session_id],
+    );
+    if (!locked.rows.length) continue;
+    await classifyUnconsentedTelegramReceipts(client, {
+      receiveSessionId: historicalContext.receive_session_id,
+      now: input.now,
+    });
+  }
+}
+
 export async function prepareTelegramFundingSessionOpenInTransaction(
   client: PoolClient,
   input: ActiveTelegramFundingOpenScope &
@@ -1164,6 +1244,7 @@ export async function prepareTelegramFundingSessionOpenInTransaction(
       );
     }
   }
+  await classifyTelegramFundingOpenReceipts(client, input);
   await releaseTerminalTelegramReceiveLease(client, input);
   const active = await lockActiveTelegramFundingOpenContext(client, input);
   if (!active) return null;
@@ -1189,6 +1270,7 @@ export async function prepareTelegramFundingSessionOpenInTransaction(
     if (hasLiveRouting) {
       throw new TelegramFundingPersistenceError(
         "telegram_funding_session_active_elsewhere",
+        active.id,
       );
     }
     const retired = await client.query<{ id: string }>(
@@ -1206,6 +1288,7 @@ export async function prepareTelegramFundingSessionOpenInTransaction(
     if (!retired.rows[0]) {
       throw new TelegramFundingPersistenceError(
         "telegram_funding_session_active_elsewhere",
+        active.id,
       );
     }
     return publicSession(active);
@@ -1220,6 +1303,7 @@ export async function prepareTelegramFundingSessionOpenInTransaction(
   if (input.telegramMessageId < Number(active.telegram_message_id)) {
     throw new TelegramFundingPersistenceError(
       "telegram_funding_session_active_elsewhere",
+      active.id,
     );
   }
   const closed = await client.query<{ id: string }>(
@@ -1245,6 +1329,7 @@ export async function prepareTelegramFundingSessionOpenInTransaction(
   if (!closed.rows[0]) {
     throw new TelegramFundingPersistenceError(
       "telegram_funding_session_active_elsewhere",
+      active.id,
     );
   }
   return publicSession(active);
@@ -1406,6 +1491,7 @@ export async function reuseActiveTelegramFundingSession(
         return null;
       }
     }
+    await classifyTelegramFundingOpenReceipts(client, input);
     const active = await lockActiveTelegramFundingOpenContext(client, input);
     if (!active) return null;
     const opensInAnotherMessage =

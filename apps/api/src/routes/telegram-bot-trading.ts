@@ -904,9 +904,25 @@ async function registerTelegramBotTradingRoutes(
     }
     if (
       error instanceof TelegramFundingError &&
-      error.code === "funding_session_active_elsewhere"
+      (error.code === "funding_session_active_elsewhere" ||
+        error.code === "funding_context_ambiguous")
     ) {
-      return reply.send(buildTelegramFundingActiveElsewhereMessage());
+      request.log.info(
+        {
+          requestId: request.id,
+          contextId: error.contextId,
+          contextIds: error.contextIds,
+          reason: error.code,
+          action: "view_existing_deposit",
+        },
+        "Telegram deposit context conflict",
+      );
+      return reply.send(
+        buildTelegramFundingActiveElsewhereMessage({
+          contextId: error.contextId,
+          contextIds: error.contextIds,
+        }),
+      );
     }
     if (
       error instanceof TelegramFundingError &&

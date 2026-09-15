@@ -340,9 +340,8 @@ const supersedeInput = {
     true,
   );
   const activeLookup =
-    fake.statements.find((sql) =>
-      sql.includes("from telegram_funding_sessions context"),
-    ) ?? "";
+    fake.statements.find((sql) => sql.includes("as has_in_flight_receipt")) ??
+    "";
   assert.match(
     activeLookup,
     /active_receipt\.status in \('observed', 'routing'\)/u,

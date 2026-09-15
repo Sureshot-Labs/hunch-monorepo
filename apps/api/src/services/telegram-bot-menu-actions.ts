@@ -888,7 +888,9 @@ async function deliverSignalBotInteractiveMenuCallback(
               : {}),
             ...(route.kind === "qr" ? { view: "address" as const } : {}),
             ...(route.kind === "targets" ? { view: "targets" as const } : {}),
-            ...(route.kind === "refresh" ? { requestObservation: true } : {}),
+            ...(route.kind === "refresh"
+              ? { requestObservation: true, view: "progress" as const }
+              : {}),
           })
         : {
             parse_mode: "MarkdownV2" as const,

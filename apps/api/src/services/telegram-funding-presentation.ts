@@ -25,7 +25,11 @@ import {
   type TelegramFundingRoutePresentation,
   type TelegramFundingTargetCapability,
 } from "./telegram-funding-route.js";
-import type { FundingQuoteSummary, Money } from "../funding/domain/types.js";
+import type {
+  FundingQuoteSummary,
+  FundingReceiveReceipt,
+  Money,
+} from "../funding/domain/types.js";
 import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
 import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
 import { TELEGRAM_BACK_BUTTON_TEXT } from "./telegram-bot-navigation.js";
@@ -337,6 +341,8 @@ export function buildTelegramFundingDeliveryQueuedMessage(input: {
 
 export function buildTelegramFundingActiveElsewhereMessage(
   input: Readonly<{
+    contextId?: string;
+    contextIds?: readonly string[];
     canCancel?: boolean;
     projection?: TelegramFundingProgressProjection | null;
     venue?: string;
@@ -352,10 +358,23 @@ export function buildTelegramFundingActiveElsewhereMessage(
     parse_mode: "MarkdownV2",
     reply_markup: {
       inline_keyboard: [
+        ...(input.contextIds?.map((contextId, index) => [
+          {
+            text: `View Deposit ${index + 1}`,
+            callback_data: telegramFundingCallbackData({
+              kind: "refresh",
+              contextId,
+            }),
+          },
+        ]) ?? []),
         [
           {
-            callback_data:
-              input.venue === "limitless" || input.venue === "polymarket"
+            callback_data: input.contextId
+              ? telegramFundingCallbackData({
+                  kind: "refresh",
+                  contextId: input.contextId,
+                })
+              : input.venue === "limitless" || input.venue === "polymarket"
                 ? `hm:v1:deposit:${input.venue}`
                 : "hm:v1:deposit",
             text: summary ? "🔄 Refresh active Deposit" : "Open Deposit",
@@ -393,6 +412,80 @@ export function buildTelegramFundingActiveElsewhereMessage(
           icon: "ℹ️",
           title: "Deposit already active",
         }),
+  };
+}
+
+/** Read-only cross-card status. Never carries an address, QR or Buy consent. */
+export function buildTelegramFundingReceiptStatusMessage(input: {
+  contextId: string;
+  venue: string;
+  receipts: readonly FundingReceiveReceipt[];
+}): TelegramFundingMessage {
+  const lines = input.receipts.slice(0, 10).map((receipt) => {
+    const network =
+      (
+        {
+          "evm:8453": "Base",
+          "evm:137": "Polygon",
+          solana: "Solana",
+        } as Record<string, string>
+      )[receipt.asset.networkId] ?? receipt.asset.networkId;
+    const amount = fundingMoneyLabel({
+      asset: receipt.asset,
+      raw: receipt.rawAmount,
+    });
+    const status =
+      receipt.automationReason === "receive_automation_not_consented"
+        ? "Automatic conversion was not started."
+        : receipt.status === "ready"
+          ? "Receipt completed."
+          : receipt.status === "routing"
+            ? "Transfer is being reconciled."
+            : "Processing or review is pending.";
+    return escapeTelegramMarkdownV2(
+      `Received ${amount} on ${network}. ${status}`,
+    );
+  });
+  return {
+    parse_mode: "MarkdownV2",
+    text: joinTelegramMarkdownV2Lines([
+      formatTelegramBoldMarkdownV2("Deposit status"),
+      ...lines,
+      ...(input.receipts.length > 10
+        ? [
+            escapeTelegramMarkdownV2(
+              `${input.receipts.length - 10} additional receipts are retained in the deposit history.`,
+            ),
+          ]
+        : []),
+      ...(!lines.length
+        ? [
+            escapeTelegramMarkdownV2(
+              "No receipt recorded yet. Use the original verified deposit card.",
+            ),
+          ]
+        : []),
+    ]),
+    reply_markup: {
+      inline_keyboard: [
+        [
+          {
+            text: "Refresh status",
+            callback_data: telegramFundingCallbackData({
+              kind: "refresh",
+              contextId: input.contextId,
+            }),
+          },
+        ],
+        [
+          {
+            text: "Open Deposit",
+            callback_data: `hm:v1:deposit:${input.venue === "limitless" ? "limitless" : "polymarket"}`,
+          },
+        ],
+        [{ text: "🏠 Home", callback_data: "hm:v1:home" }],
+      ],
+    },
   };
 }
 

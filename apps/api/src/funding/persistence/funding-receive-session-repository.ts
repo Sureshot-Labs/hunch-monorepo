@@ -22,6 +22,7 @@ import {
 import { allocateFundingObservationInTransaction } from "./funding-operation-repository.js";
 import { lockFundingAuthorizationReservationScope } from "./funding-authorization-reservation-lock.js";
 import { canonicalJsonEqual } from "./canonical.js";
+import { telegramReceiveConsentWhereSql } from "./telegram-receive-consent-sql.js";
 import { reduceFundingOperationInTransaction } from "../reconciliation/funding-reducer.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
@@ -195,6 +196,11 @@ function publicReceipt(row: ReceiveReceiptRow): FundingReceiveReceipt {
     status: row.status,
     handling: row.handling,
     childFundingOperationId: row.child_funding_operation_id,
+    ...(row.status === "recovery_required" &&
+    row.child_funding_operation_id === null &&
+    row.evidence.receiveAutomationReason === "receive_automation_not_consented"
+      ? { automationReason: "receive_automation_not_consented" as const }
+      : {}),
     ...(reviewContinuation && reviewQuotePlan
       ? { reviewContinuation, reviewQuotePlan }
       : {}),
@@ -2042,6 +2048,96 @@ export async function claimFundingReceiveCanonicalEventAllocation(
   };
 }
 
+/**
+ * Classify only a proven lack of consent, never an executor/policy pause.
+ * The caller holds the receive-session lock. The receipt lock serializes this
+ * with child creation; canonical allocation and observe_until are untouched.
+ * An enabled consent for this variant that fails the exact matcher remains
+ * unknown (possibly incomplete evidence), rather than being retired.
+ */
+export async function classifyUnconsentedTelegramReceipts(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    receiveSessionId: string;
+    now: Date;
+    /** The canonical observer owns its final session-version CAS. */
+    refreshSession?: boolean;
+    receiptId?: string;
+  }>,
+): Promise<number> {
+  const result = await client.query<{ id: string; user_id: string }>(
+    `with unconsented_receipts as (
+      select receipt.id
+      from funding_receive_receipts receipt
+      join funding_receive_sessions receive_session
+        on receive_session.id = receipt.receive_session_id
+       and receive_session.user_id = receipt.user_id
+       and receive_session.owner_channel = 'telegram'
+      join telegram_funding_sessions telegram_context
+        on telegram_context.receive_session_id = receive_session.id
+       and telegram_context.user_id = receipt.user_id
+      join funding_receive_canonical_events canonical_event
+        on canonical_event.allocated_receipt_id = receipt.id
+       and canonical_event.allocated_receive_session_id = receive_session.id
+       and canonical_event.allocation_status = 'allocated'
+      where receive_session.id = $1::uuid
+        and ($3::uuid is null or receipt.id = $3::uuid)
+        and receipt.status = 'observed'
+        and receipt.handling = 'automatic_conversion'
+        and receipt.child_funding_operation_id is null
+        and receipt.ledger_height is not null
+        and canonical_event.first_observed_at is not null
+        and not exists (
+          select 1 from telegram_funding_consents consent
+          where ${telegramReceiveConsentWhereSql}
+        )
+        and not exists (
+          select 1 from telegram_funding_consents possible_consent
+          where possible_consent.telegram_funding_session_id = telegram_context.id
+            and possible_consent.consented_at <= canonical_event.first_observed_at
+            and possible_consent.automation_enabled
+            and (
+              possible_consent.consented_variant_ids is null
+              or receipt.variant_id = any(possible_consent.consented_variant_ids)
+            )
+        )
+      for update of receipt skip locked
+    )
+    update funding_receive_receipts receipt
+    set status = 'recovery_required',
+        routing_disposition = 'recovery_required',
+        routing_last_error_code = 'receive_automation_not_consented',
+        evidence = jsonb_set(coalesce(receipt.evidence, '{}'::jsonb),
+          '{receiveAutomationReason}', '"receive_automation_not_consented"'::jsonb),
+        updated_at = $2
+    from unconsented_receipts candidate_receipt
+    where receipt.id = candidate_receipt.id
+      and receipt.status = 'observed'
+      and receipt.child_funding_operation_id is null
+    returning receipt.id, receipt.user_id`,
+    [input.receiveSessionId, input.now, input.receiptId ?? null],
+  );
+  const first = result.rows[0];
+  if (first) {
+    if (input.refreshSession !== false) {
+      await refreshFundingReceiveSessionStatus(client, {
+        ...input,
+        userId: first.user_id,
+      });
+    }
+    console.info(
+      JSON.stringify({
+        event: "telegram_receive_consent_classification",
+        action: "recovery_staged_in_transaction",
+        receiveSessionId: input.receiveSessionId,
+        receiptIds: result.rows.map((row) => row.id),
+        reason: "receive_automation_not_consented",
+      }),
+    );
+  }
+  return result.rowCount ?? 0;
+}
+
 export async function finalizeFundingReceiveCanonicalEventAllocation(
   client: Pick<PoolClient, "query">,
   input: Readonly<{
@@ -2064,7 +2160,13 @@ export async function finalizeFundingReceiveCanonicalEventAllocation(
     `,
     [input.eventId, input.receiveSessionId, input.receiptId, input.now],
   );
-  if (result.rowCount === 1) return true;
+  if (result.rowCount === 1) {
+    await classifyUnconsentedTelegramReceipts(client, {
+      ...input,
+      refreshSession: false,
+    });
+    return true;
+  }
   const { rows } = await client.query<{
     allocated_receive_session_id: string | null;
     allocated_receipt_id: string | null;
@@ -2535,59 +2637,7 @@ export async function listFundingReceiveReceiptsForRouting(
       left join lateral (
         select consent.*
         from telegram_funding_consents consent
-        where consent.telegram_funding_session_id = telegram_context.id
-          and consent.consented_at <= canonical_event.first_observed_at
-          and jsonb_typeof(
-                consent.automation_policy_snapshot -> 'presentation'
-              ) = 'object'
-          and receipt.variant_id = any(consent.consented_variant_ids)
-          and (
-            receipt.handling = 'review_required'
-            or (
-              consent.automation_enabled
-              and (
-                (
-                  consent.max_auto_execute_source_raw is null
-                  and consent.automation_policy_snapshot ->> 'version' = '2'
-                  and consent.automation_policy_snapshot ->> 'fullReceipt' = 'true'
-                )
-                or (
-                  consent.max_auto_execute_source_raw > 0
-                  and consent.automation_policy_snapshot ->> 'version' = '3'
-                  and consent.automation_policy_snapshot ->> 'fullReceipt' = 'false'
-                  and receipt.raw_amount <= consent.max_auto_execute_source_raw
-                )
-              )
-              and receipt.ledger_height is not null
-              and receipt.network_id =
-                    consent.automation_policy_snapshot #>> '{sourceAsset,networkId}'
-              and receipt.asset_decimals::text =
-                    consent.automation_policy_snapshot #>> '{sourceAsset,decimals}'
-              and funding_account_identifier_equal(
-                receipt.network_id,
-                receipt.asset_id,
-                consent.automation_policy_snapshot #>>
-                  '{sourceAsset,assetId}'
-              )
-              and exists (
-                select 1
-                from jsonb_array_elements(
-                  case
-                    when jsonb_typeof(
-                      consent.automation_policy_snapshot -> 'variantCursors'
-                    ) = 'array'
-                      then consent.automation_policy_snapshot -> 'variantCursors'
-                    else '[]'::jsonb
-                  end
-                ) cursor
-                where cursor ->> 'variantId' = receipt.variant_id
-                  and cursor ->> 'networkId' = receipt.network_id
-                  and cursor ->> 'ledgerHeightExclusive' ~ '^(0|[1-9][0-9]*)$'
-                  and receipt.ledger_height >
-                        (cursor ->> 'ledgerHeightExclusive')::numeric
-              )
-            )
-          )
+        where ${telegramReceiveConsentWhereSql}
         order by consent.consented_at desc, consent.revision desc
         limit 1
       ) telegram_consent on true
