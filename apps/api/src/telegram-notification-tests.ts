@@ -508,6 +508,35 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         resolved?.keyboard?.inline_keyboard[0]?.[0]?.text,
         "View position",
       );
+      const legacyPositionButton = resolved?.keyboard?.inline_keyboard[0]?.[0];
+      assert.ok(
+        legacyPositionButton && "callback_data" in legacyPositionButton,
+      );
+      assert.equal(
+        legacyPositionButton.callback_data,
+        "hm:v1:positions_page:0",
+      );
+      const exactPosition = buildTelegramActivityNotificationMessage({
+        market,
+        miniAppLinkBase: "https://t.me/hunch_bot/hunch",
+        payload: {
+          body: "Claim available",
+          data: {
+            result: "won",
+            venue: "kalshi",
+            positionId: "00000000-0000-4000-8000-000000000001",
+          },
+          title: "Position resolved",
+          type: "position_resolved",
+        },
+      });
+      const exactPositionButton =
+        exactPosition?.keyboard?.inline_keyboard[0]?.[0];
+      assert.ok(exactPositionButton && "callback_data" in exactPositionButton);
+      assert.equal(
+        exactPositionButton.callback_data,
+        "hm:v1:pos:00000000-0000-4000-8000-000000000001:0",
+      );
       assert.equal(
         resolved?.keyboard?.inline_keyboard[0]?.[0]?.icon_custom_emoji_id,
         TELEGRAM_CUSTOM_EMOJI.kalshi.id,

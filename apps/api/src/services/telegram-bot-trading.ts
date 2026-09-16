@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 import { telegramMarketDepositCallback } from "./telegram-funding-navigation.js";
+import { loadTelegramPositions } from "./telegram-bot-positions.js";
+import { buildTelegramSettledPositionMessage } from "./telegram-position-presentation.js";
 import { ethers } from "ethers";
 
 import { AuthService } from "../auth.js";
@@ -2851,6 +2853,7 @@ type TelegramExecutableSellResolution = {
   availableRaw: bigint;
   options: TelegramExecutableSellOption[];
   side: TelegramBotTradingSide;
+  checkFailed?: boolean;
 };
 
 const MIN_TELEGRAM_SELL_PROCEEDS_USD = 0.01;
@@ -2987,10 +2990,16 @@ async function resolveTelegramExecutableSellOptions(input: {
       venue: input.market.venue,
     });
   } catch {
-    return empty;
+    console.warn("telegram_sell_check_failed", {
+      marketId: input.market.id,
+      side: input.side,
+      stage: "balance",
+    });
+    return { ...empty, checkFailed: true };
   }
   if (!availability) return empty;
   const options: TelegramExecutableSellOption[] = [];
+  let checkFailed = false;
   for (const sellPercent of [50, 100] as const) {
     const requestedRaw =
       (availability.availableRaw * BigInt(sellPercent)) / 100n;
@@ -3038,6 +3047,13 @@ async function resolveTelegramExecutableSellOptions(input: {
         side: input.side,
       });
     } catch {
+      checkFailed = true;
+      console.warn("telegram_sell_check_failed", {
+        marketId: input.market.id,
+        side: input.side,
+        stage: "quote",
+        sellPercent,
+      });
       continue;
     }
   }
@@ -3045,6 +3061,7 @@ async function resolveTelegramExecutableSellOptions(input: {
     availableRaw: availability.availableRaw,
     options,
     side: input.side,
+    checkFailed,
   };
 }
 
@@ -5225,51 +5242,6 @@ async function insertSellIntent(input: {
   return id;
 }
 
-async function insertRedeemIntent(input: {
-  authority: TelegramBotTradeAuthorityBinding;
-  chatId: string;
-  db: DbQuery;
-  market: TelegramBotMarketRow;
-  navigationContext?: TelegramMarketCardContext;
-  plan: Awaited<ReturnType<typeof buildPolymarketRedemptionPlan>>;
-  policy: SignalBotPolicy;
-  telegramMessageId?: number | null;
-  telegramUserId: string;
-}): Promise<string> {
-  const id = crypto.randomUUID();
-  const expiresAt = new Date(Date.now() + input.policy.intentTtlSec * 1000);
-  await input.db.query(
-    `INSERT INTO telegram_trade_intents (
-       id, telegram_user_id, user_id, authorization_id, chat_id,
-       telegram_message_id, action, venue,
-       market_id, event_id, status, quote_snapshot, policy_snapshot,
-       result, expires_at, idempotency_key
-     )
-     VALUES ($1, $2, $3, $4, $5, $6, 'redeem', $7, $8, $9, 'draft',
-       $10::jsonb, $11::jsonb, $12::jsonb, $13, $14)`,
-    [
-      id,
-      input.telegramUserId,
-      input.authority.userId,
-      input.authority.authorizationId,
-      input.chatId,
-      input.telegramMessageId ?? null,
-      input.market.venue,
-      input.market.id,
-      input.market.event_id,
-      JSON.stringify(input.plan),
-      JSON.stringify(buildPolicySnapshot(input.policy)),
-      JSON.stringify({
-        ...buildIntentAuthorityResult(input.authority),
-        ...buildIntentNavigationResult(input.navigationContext),
-      }),
-      expiresAt,
-      `telegram-bot:${id}`,
-    ],
-  );
-  return id;
-}
-
 function marketMetadataString(
   market: TelegramBotMarketRow,
   ...keys: string[]
@@ -6202,6 +6174,51 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     ? buildTelegramTradeAuthorityBinding(handoffAuthority)
     : null;
   const marketOrderable = isMarketOrderable(market);
+  // A custom-input cancel / restored market card can outlive settlement.
+  // Reuse the same terminal holding surface as My positions, with fresh data.
+  if (
+    !marketOrderable &&
+    status.linked &&
+    !input.isAdminTest &&
+    !input.publicBrowseOnly
+  ) {
+    const loaded = await loadTelegramPositions({
+      pool: input.db as Pool,
+      telegramUserId,
+      sync: false,
+    });
+    const holdings = loaded.snapshot.positions.filter(
+      (item) => item.marketId === market.id,
+    );
+    const detail = input.context?.focusPositionId
+      ? holdings.find(
+          (item) => item.position.id === input.context?.focusPositionId,
+        )
+      : holdings.length === 1
+        ? holdings[0]
+        : undefined;
+    if (detail) {
+      const settled = buildTelegramSettledPositionMessage({
+        appBaseUrl: input.appBaseUrl,
+        telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+        page: 0,
+        detail,
+      });
+      if (settled) return { ...settled, marketFound: true };
+    }
+    if (!detail && holdings.length > 1) {
+      return {
+        marketFound: true,
+        text: "This market is no longer open for trading. Open My positions to review each holding and its settlement status.",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "My positions", callback_data: "hm:v1:positions_page:0" }],
+            [{ text: "Home", callback_data: "hm:v1:home" }],
+          ],
+        },
+      };
+    }
+  }
   const policyVenueAllowed = policy.tradingVenues.includes(market.venue);
   const authorizationVenues = filterVenuesForWalletChain(
     normalizeVenues(authorization?.enabled_venues ?? []),
@@ -6884,25 +6901,17 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   }
   if (customSellRow.length > 0) keyboard.push(customSellRow);
   if (redeemPlan) {
-    const intentId = await insertRedeemIntent({
-      authority: authorityBinding as TelegramBotTradeAuthorityBinding,
-      chatId: String(input.chatId),
-      db: input.db,
-      market,
-      navigationContext: input.context,
-      plan: redeemPlan,
-      policy,
-      telegramMessageId: input.telegramMessageId,
-      telegramUserId,
+    // Keep old intent callbacks compatible, but new cards always open review
+    // in the app, including the legacy server-trading policy branch.
+    const redeemButton = buildHunchMiniAppWebButton({
+      appBaseUrl: input.appBaseUrl,
+      enabled: input.telegramMiniAppEnabled === true,
+      path: input.context?.focusPositionId
+        ? `/portfolio?redeemPosition=${encodeURIComponent(input.context.focusPositionId)}`
+        : "/portfolio",
+      text: "Redeem in Hunch",
     });
-    const payoutRaw = BigInt(redeemPlan.expectedPayoutRaw ?? "0");
-    keyboard.push([
-      {
-        callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:redeem:${intentId}`,
-        icon_custom_emoji_id: telegramCustomEmojiId("usdc"),
-        text: `Redeem · ≈ ${formatUsd(Number(payoutRaw) / 1_000_000)} pUSD`,
-      },
-    ]);
+    if (redeemButton) keyboard.push([redeemButton]);
   }
   const miniAppMarketPath = openMarketUrl(input.appBaseUrl, market);
   const buildMiniAppButton = (buttonInput: {
@@ -7043,13 +7052,39 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   }
   if (input.context?.origin === "position") {
     if (sellOptions.length === 0 && !canBuildCustomSell && marketOrderable) {
-      pushMiniAppButton({ startParam: marketStartParam, text: "Sell" });
+      const checkFailed = sellResolutions.some((result) => result.checkFailed);
+      if (sellResolutions.length > 0)
+        lines.push(
+          "",
+          checkFailed
+            ? "We couldn't verify this Sell. Retry the check; nothing was submitted."
+            : "No executable Sell quote is available for this holding right now. Nothing was submitted.",
+        );
+      if (checkFailed && input.context.focusPositionId)
+        keyboard.push([
+          {
+            text: "Retry sell check",
+            callback_data: `hm:v1:pos:${input.context.focusPositionId}`,
+          },
+        ]);
+      pushMiniAppButton({
+        startParam: marketStartParam,
+        text: "Sell in Hunch",
+      });
     }
     if (
       !redeemPlan &&
       input.context.positionRedemptionStatus === "redeemable"
     ) {
-      pushMiniAppButton({ startParam: marketStartParam, text: "Redeem" });
+      const redeemButton = buildHunchMiniAppWebButton({
+        appBaseUrl: input.appBaseUrl,
+        enabled: input.telegramMiniAppEnabled === true,
+        path: input.context.focusPositionId
+          ? `/portfolio?redeemPosition=${encodeURIComponent(input.context.focusPositionId)}`
+          : "/portfolio",
+        text: "Redeem in Hunch",
+      });
+      if (redeemButton) keyboard.push([redeemButton]);
     }
   }
   pushMiniAppButton({

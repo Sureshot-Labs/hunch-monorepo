@@ -111,6 +111,7 @@ export async function createResolvedPositionNotificationIfVisible(
   const severity =
     result === "won" ? "success" : result === "lost" ? "warning" : "info";
   const data = {
+    positionId: inputs.position.id,
     venue: inputs.position.venue,
     marketId: inputs.position.market_id ?? null,
     tokenId: inputs.position.token_id,

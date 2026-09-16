@@ -1,6 +1,7 @@
 import type { Pool } from "@hunch/infra";
 
 import { env } from "../env.js";
+import { telegramPositionStatusLabel } from "./telegram-position-presentation.js";
 import type { Position } from "../order-types.js";
 import { getRedis } from "../redis.js";
 import { fetchPositionsForUserWallet } from "../repos/positions-repo.js";
@@ -277,7 +278,11 @@ export function buildTelegramPositionDetail(
       pnl != null && cost != null && cost > 0 ? (pnl / cost) * 100 : null,
     pnlUsd: pnl,
     position,
-    redemptionStatus: marketEntry.market.redemption.status,
+    redemptionStatus:
+      marketEntry.market.redemption.status === "redeemable" &&
+      position.size <= 0
+        ? "redeemed"
+        : marketEntry.market.redemption.status,
     side,
   };
 }
@@ -335,7 +340,7 @@ function renderPosition(
     `${formatTelegramVenueFieldMarkdownV2(
       detail.position.venue,
     )} ${escapeTelegramMarkdownV2("·")} ${status.icon} ${formatTelegramBoldMarkdownV2(
-      status.label,
+      telegramPositionStatusLabel(detail.redemptionStatus),
     )}`,
     `📦 ${formatTelegramFieldMarkdownV2(
       "Position",
@@ -383,6 +388,7 @@ export async function loadTelegramPositions(input: {
   pool: Pool;
   telegramUserId: string | number;
   sync?: boolean;
+  includeHidden?: boolean;
 }): Promise<
   | { linked: false; snapshot: TelegramPositionsSnapshot }
   | { linked: true; snapshot: TelegramPositionsSnapshot; userId: string }
@@ -460,6 +466,8 @@ export async function loadTelegramPositions(input: {
     userId,
     walletAddresses: wallets.map((wallet) => wallet.wallet_address),
     venues: ["polymarket", "limitless", "kalshi"],
+    includeHidden: input.includeHidden,
+    includeResolved: input.includeHidden,
   });
   const tokenIds = Array.from(
     new Set(positions.map((position) => position.tokenId)),

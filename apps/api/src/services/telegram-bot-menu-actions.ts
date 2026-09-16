@@ -58,7 +58,12 @@ export type SignalBotInteractiveMenuRoute =
       sessionId: string;
     }
   | { kind: "positions_page"; page: number }
-  | { kind: "position"; page: number; positionId: string };
+  | {
+      kind: "position";
+      page: number;
+      positionId: string;
+      visibility?: "hide_loss" | "show";
+    };
 
 export function parseSignalBotInteractiveMenuRoute(
   route: string,
@@ -119,13 +124,21 @@ export function parseSignalBotInteractiveMenuRoute(
     return { kind: "positions_page", page: Number(positionsPageMatch[1]) };
   }
   const positionMatch = route.match(
-    /^pos:([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?::(\d{1,4}))?$/i,
+    /^pos(?:_(hide|show))?:([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?::(\d{1,4}))?$/i,
   );
   if (positionMatch) {
     return {
       kind: "position",
-      page: Number(positionMatch[2] ?? 0),
-      positionId: positionMatch[1] ?? "",
+      page: Number(positionMatch[3] ?? 0),
+      positionId: positionMatch[2] ?? "",
+      ...(positionMatch[1]
+        ? {
+            visibility:
+              positionMatch[1].toLowerCase() === "hide"
+                ? ("hide_loss" as const)
+                : ("show" as const),
+          }
+        : {}),
     };
   }
   if (route === "deposit") {
@@ -352,6 +365,7 @@ type SignalBotInteractiveMenuCallbackInput = {
     telegramUserId: number;
   }) => Promise<MenuMessage>;
   loadPositionCard?: (input: {
+    visibility?: "hide_loss" | "show";
     messageId: number;
     page: number;
     positionId: string;
@@ -664,7 +678,7 @@ async function deliverSignalBotInteractiveMenuCallback(
       } catch {
         await input.render({
           text: escapeTelegramMarkdownV2(
-            "Search temporarily unavailable. Try the filter again.",
+            `Could not load ${sort === "time" ? "Closing soon" : sort === "totalvol" ? "Volume" : "Trending"}${category ? ` · ${category}` : ""}. Retry keeps your selected filters. Back returns to the previous results.`,
           ),
           reply_markup: {
             inline_keyboard: [
@@ -787,6 +801,7 @@ async function deliverSignalBotInteractiveMenuCallback(
       positionMessage =
         input.loadPositionCard && input.messageId != null
           ? await input.loadPositionCard({
+              ...(route.visibility ? { visibility: route.visibility } : {}),
               messageId: input.messageId,
               page: route.page,
               positionId: route.positionId,

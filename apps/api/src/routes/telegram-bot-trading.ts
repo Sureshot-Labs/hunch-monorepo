@@ -13,6 +13,11 @@ import { createAuthMiddleware } from "../auth.js";
 import { pool, type DbQuery } from "../db.js";
 import { cancelFundingOperationForUser } from "../funding/reconciliation/funding-operation-cancellation.js";
 import { env } from "../env.js";
+import { setPositionHidden } from "../repos/positions-repo.js";
+import {
+  buildTelegramSettledPositionMessage,
+  telegramPositionStatusLabel,
+} from "../services/telegram-position-presentation.js";
 import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
 import {
   inspectTelegramOnboardingReadiness,
@@ -220,6 +225,7 @@ const internalMarketSearchBodySchema = z
 
 const internalPositionCardBodySchema = z
   .object({
+    visibility: z.enum(["hide_loss", "show"]).optional(),
     appBaseUrl: z.string().trim().url(),
     page: z.number().int().nonnegative().max(10_000).optional(),
     positionId: z.string().uuid(),
@@ -567,6 +573,7 @@ export type TelegramBotTradingRouteDependencies = {
   buildPositionsMessage?: typeof buildTelegramPositionsMessage;
   buildTradeHistoryMessage?: typeof buildTelegramTradeHistoryMessage;
   loadPositions?: typeof loadTelegramPositions;
+  setPositionVisibility?: typeof setPositionHidden;
   fundingService?: Pick<
     TelegramFundingService,
     "cancel" | "open" | "selectTarget" | "session"
@@ -1453,6 +1460,7 @@ async function registerTelegramBotTradingRoutes(
       const loaded = await loadPositions({
         pool: routePool,
         sync: false,
+        includeHidden: request.body.visibility != null,
         telegramUserId: request.body.telegramUserId,
       });
       const position = loaded.snapshot.positions.find(
@@ -1478,6 +1486,54 @@ async function registerTelegramBotTradingRoutes(
           }),
         };
       }
+      if (request.body.visibility) {
+        // Telegram identity selects the account; position identity, wallet,
+        // token and settlement are loaded server-side, never from the callback.
+        if (
+          !position.position.walletAddress ||
+          (request.body.visibility === "hide_loss" &&
+            (position.marketOrderable ||
+              position.redemptionStatus !== "resolved_not_redeemable"))
+        ) {
+          return {
+            parse_mode: "MarkdownV2" as const,
+            text: escapeTelegramMarkdownV2(
+              "This position is not a confirmed loss. Refresh My positions.",
+            ),
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: "⬅️ My positions",
+                    callback_data: `hm:v1:positions_page:${request.body.page ?? 0}`,
+                  },
+                ],
+              ],
+            },
+          };
+        }
+        const hidden = request.body.visibility === "hide_loss";
+        const updated = await (
+          dependencies.setPositionVisibility ?? setPositionHidden
+        )(routePool, {
+          userId: loaded.userId,
+          positionId: position.position.id,
+          walletAddress: position.position.walletAddress,
+          venue: position.position.venue,
+          tokenId: position.position.tokenId,
+          hidden,
+          reason: hidden ? "user" : null,
+        });
+        if (!updated) throw new Error("position_visibility_not_updated");
+        position.position.isHidden = hidden;
+      }
+      const settledMessage = buildTelegramSettledPositionMessage({
+        appBaseUrl: request.body.appBaseUrl,
+        telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
+        page: request.body.page ?? 0,
+        detail: position,
+      });
+      if (settledMessage) return settledMessage;
       const average =
         position.averagePrice == null
           ? "unavailable"
@@ -1500,14 +1556,9 @@ async function registerTelegramBotTradingRoutes(
           ? position.position.walletAddress.slice(-6)
           : null;
       const settlementLine =
-        position.redemptionStatus === "redeemable"
-          ? "Ready to redeem"
-          : position.redemptionStatus === "market_open"
-            ? null
-            : position.redemptionStatus === "resolved_not_redeemable" ||
-                position.redemptionStatus === "redeemed"
-              ? "Resolved"
-              : "Waiting for settlement";
+        position.redemptionStatus === "market_open"
+          ? null
+          : telegramPositionStatusLabel(position.redemptionStatus);
       return buildTelegramBotTradingMarketMessage({
         appBaseUrl: request.body.appBaseUrl,
         chatId: String(request.body.telegramUserId),
@@ -1518,7 +1569,7 @@ async function registerTelegramBotTradingRoutes(
           origin: "position",
           positionLines: [
             `Position: ${position.position.size.toFixed(4)} shares · Avg ${average}`,
-            `Live bid: ${bid} · PnL ${pnl}`,
+            `${position.marketOrderable ? "Live bid" : "Position value per share"}: ${bid} · PnL ${pnl}`,
             ...(settlementLine ? [`Status: ${settlementLine}`] : []),
             ...(walletSuffix ? [`Wallet: …${walletSuffix}`] : []),
           ],

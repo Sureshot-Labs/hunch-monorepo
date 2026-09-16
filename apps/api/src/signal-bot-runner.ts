@@ -705,6 +705,7 @@ export async function runSignalBotRunner(): Promise<void> {
             });
           },
           loadPositionCard: ({
+            visibility,
             messageId,
             page,
             positionId,
@@ -713,6 +714,7 @@ export async function runSignalBotRunner(): Promise<void> {
             tradingInternalApi
               ? tradingInternalApi
                   .buildPositionMessage({
+                    visibility,
                     appBaseUrl: config.appBaseUrl,
                     page,
                     telegramMessageId: messageId,

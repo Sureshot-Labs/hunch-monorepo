@@ -36,6 +36,7 @@ export type SignalBotMenuLoaders = TelegramBotRewardsMenuDependencies & {
     telegramUserId: number;
   }) => Promise<TelegramBotMenuMessage>;
   loadPositionCard?: (input: {
+    visibility?: "hide_loss" | "show";
     messageId: number;
     page: number;
     positionId: string;

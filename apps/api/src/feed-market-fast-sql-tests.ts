@@ -159,6 +159,30 @@ console.log("ok - trending v2 bounds metric rows before market lookups");
 }
 console.log("ok - trending v2 stops when a full page dominates the remainder");
 
+for (const sortDir of ["asc", "desc"] as const) {
+  const capturedSql: string[] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams: [],
+    candidateRows: [[{ ids: [] }], []],
+  });
+  await fetchFeedMarketsDirect(pool, {
+    ...baseInputs,
+    venues: ["polymarket"],
+    categories: ["sports"],
+    sort: "time",
+    sortDir,
+  });
+  const sql = capturedSql[0];
+  const materialization =
+    sortDir === "asc" ? "not materialized" : "materialized";
+  assert.match(sql, new RegExp(`strict_market_base as ${materialization}`));
+  assert.match(sql, new RegExp(`strict_candidates as ${materialization}`));
+  assert.match(sql, /interval '6 hours'/);
+  assert.match(sql, /accepting_orders/);
+  assert.match(sql, /pm_ranked_candidates as materialized/);
+}
+
 const projectedSortPatterns: Record<string, RegExp> = {
   trending:
     /candidate_market\.volume_total[\s\S]*?\* 0\.4[\s\S]*?candidate_market\.event_start_date/i,

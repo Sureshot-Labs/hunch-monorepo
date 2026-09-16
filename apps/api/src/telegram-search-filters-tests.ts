@@ -54,7 +54,11 @@ assert.equal(searched, true);
 assert.ok(
   rendered?.reply_markup?.inline_keyboard
     .flat()
-    .some((button) => button.text === "⚙️ Filters (🟡)"),
+    .some(
+      (button) =>
+        button.text === "Filters (Limitless)" &&
+        "icon_custom_emoji_id" in button,
+    ),
 );
 assert.equal(
   await readSignalBotMarketSearchSession({
@@ -165,3 +169,46 @@ assert.equal(
   " · Close time unknown",
 );
 console.log("[telegram-search-filters-tests] passed");
+
+const sportsSession = await writeSignalBotMarketSearchSession({
+  redis,
+  chatId: "1",
+  telegramUserId: 1,
+  query: "",
+  venues: ["polymarket"],
+  category: "sports",
+  sort: "trending",
+  results: [],
+});
+await handleSignalBotInteractiveMenuCallback({
+  redis,
+  chatId: "1",
+  telegramUserId: 1,
+  messageId: 1,
+  callbackPrefix: "menu:",
+  route: {
+    kind: "market_search_filters",
+    sessionId: sportsSession,
+    venue: "s_time",
+  },
+  render: async (message) => {
+    rendered = message;
+  },
+  renderExpiredSearch: async () => {
+    throw new Error("unexpected expiry");
+  },
+  searchMarkets: async (input) => {
+    assert.equal(input.sort, "time");
+    assert.equal(input.category, "sports");
+    assert.deepEqual(input.venues, ["polymarket"]);
+    throw new Error("timeout");
+  },
+});
+assert.ok(rendered);
+assert.match(rendered.text, /Closing soon/);
+assert.match(rendered.text, /previous results/);
+assert.ok(
+  JSON.stringify(rendered.reply_markup).includes(
+    `search_filters:${sportsSession}:s_time`,
+  ),
+);

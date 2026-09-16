@@ -298,6 +298,7 @@ function buildBroadOrderableMarketCandidatesCte(args: {
   cteName?: string;
   includeRankingColumns?: boolean;
   materialized?: boolean;
+  inlineStrictCandidates?: boolean;
   nowParam: string;
   nowCloseParam?: string;
   extraMarketSql?: string[];
@@ -548,10 +549,10 @@ function buildBroadOrderableMarketCandidatesCte(args: {
     )
   `;
   return `
-    ${strictMarketBaseCte} as materialized (
+    ${strictMarketBaseCte} as ${args.inlineStrictCandidates ? "not materialized" : "materialized"} (
       ${boundedStrictMarketBaseSql}
     ),
-    ${strictCandidatesCte} as materialized (
+    ${strictCandidatesCte} as ${args.inlineStrictCandidates ? "not materialized" : "materialized"} (
       select
         ${strictCandidateColumns}
       ${strictCandidateSource}
@@ -5624,6 +5625,10 @@ async function fetchFeedMarketIdsFast(
     // Read the bounded rows once. A join to IDs alone lets PostgreSQL scan
     // broad availability indexes before intersecting the selected prefix.
     marketSourceCte: useLiveTrendingPrefix ? "live_trending_markets" : null,
+    // Closing-soon has one strict-branch consumer. Let PostgreSQL push
+    // predicates and joins through it instead of materializing the entire
+    // active universe before ranking. Keep other sort plans unchanged.
+    inlineStrictCandidates: inputs.sort === "time" && sortDir === "asc",
     candidateEventIdsCte: preRankEventCte ? preRankEventCteName : null,
     includeRankingColumns: true,
     materialized: true,

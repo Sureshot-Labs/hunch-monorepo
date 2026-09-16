@@ -421,16 +421,42 @@ export function buildTelegramActivityNotificationMessage(input: {
     }
   }
 
+  const positionId = readString(data, "positionId");
+  const positionCallback =
+    positionId &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      positionId,
+    )
+      ? `hm:v1:pos:${positionId}:0`
+      : "hm:v1:positions_page:0";
   return {
-    keyboard: actionText
-      ? notificationButton({
-          eventId: input.market?.eventId ?? null,
-          marketId: input.market?.marketId ?? null,
-          miniAppLinkBase: input.miniAppLinkBase,
-          text: actionText,
-          venue,
-        })
-      : undefined,
+    keyboard:
+      type === "position_resolved" || type === "redemption_completed"
+        ? {
+            inline_keyboard: [
+              [
+                {
+                  text: "View position",
+                  callback_data: positionCallback,
+                  ...(venue
+                    ? {
+                        icon_custom_emoji_id:
+                          telegramCustomEmojiIdForVenue(venue) ?? undefined,
+                      }
+                    : {}),
+                },
+              ],
+            ],
+          }
+        : actionText
+          ? notificationButton({
+              eventId: input.market?.eventId ?? null,
+              marketId: input.market?.marketId ?? null,
+              miniAppLinkBase: input.miniAppLinkBase,
+              text: actionText,
+              venue,
+            })
+          : undefined,
     text: lines.join("\n"),
   };
 }

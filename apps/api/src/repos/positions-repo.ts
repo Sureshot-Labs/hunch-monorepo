@@ -824,6 +824,7 @@ export async function setPositionHidden(
     tokenId: string;
     hidden: boolean;
     reason?: string | null;
+    positionId?: string;
   },
 ): Promise<number> {
   const walletAddresses =
@@ -853,6 +854,7 @@ export async function setPositionHidden(
               and venue = $4
               and token_id = $5
               and position_scope = 'own'
+              and ($8::uuid is null or p.id = $8::uuid)
               and (
                 p.wallet_address = any($6::text[])
                 or lower(p.wallet_address) = any($7::text[])
@@ -878,6 +880,7 @@ export async function setPositionHidden(
           inputs.tokenId,
           exactWalletAddresses,
           evmWalletAddresses,
+          inputs.positionId ?? null,
         ],
       );
 

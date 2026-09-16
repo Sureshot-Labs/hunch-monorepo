@@ -118,6 +118,7 @@ export type TelegramBotTradingInternalApiClient = {
     telegramUserId: string | number;
   }) => Promise<TelegramBotTradingClientMessage>;
   buildPositionMessage: (input: {
+    visibility?: "hide_loss" | "show";
     appBaseUrl: string;
     page?: number;
     positionId: string;
@@ -602,6 +603,7 @@ export function createTelegramBotTradingInternalApiClient(input: {
       post<TelegramBotTradingClientMessage>(
         `/internal/telegram-bot/positions/${body.positionId}/card`,
         {
+          ...(body.visibility ? { visibility: body.visibility } : {}),
           appBaseUrl: body.appBaseUrl,
           page: body.page,
           telegramMessageId: body.telegramMessageId,

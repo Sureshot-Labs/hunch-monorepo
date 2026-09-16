@@ -1,4 +1,14 @@
 import assert from "node:assert/strict";
+import Fastify from "fastify";
+import {
+  serializerCompiler,
+  validatorCompiler,
+} from "fastify-type-provider-zod";
+import { createTelegramBotTradingRoutes } from "./routes/telegram-bot-trading.js";
+import {
+  buildTelegramSettledPositionMessage,
+  telegramPositionStatusLabel,
+} from "./services/telegram-position-presentation.js";
 
 import type { Position } from "./order-types.js";
 import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
@@ -89,6 +99,151 @@ class FakeCooldownRedis implements TelegramPositionSyncRedis {
 }
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "settled holdings expose redeem review or reversible hide, never a Sell",
+    run: () => {
+      for (const venue of ["polymarket", "limitless", "kalshi"] as const) {
+        const holding = detail({
+          marketOrderable: false,
+          redemptionStatus: "redeemable",
+          position: position({ venue }),
+        });
+        const input = {
+          appBaseUrl: "https://app.hunch.trade",
+          telegramMiniAppEnabled: true,
+          page: 3,
+          detail: holding,
+        };
+        const winner = buildTelegramSettledPositionMessage(input);
+        assert.ok(winner);
+        assert.match(JSON.stringify(winner), /Redeem in Hunch/);
+        assert.match(
+          JSON.stringify(winner),
+          new RegExp(`redeemPosition=${holding.position.id}`),
+        );
+        assert.doesNotMatch(JSON.stringify(winner), /hbt:|pos_hide|Live bid/);
+        holding.redemptionStatus = "resolved_not_redeemable";
+        const loser = buildTelegramSettledPositionMessage(input);
+        assert.ok(loser?.reply_markup);
+        const hide = loser.reply_markup.inline_keyboard[0][0];
+        assert.equal(hide.text, "Hide loss");
+        assert.ok("callback_data" in hide);
+        assert.deepEqual(
+          parseSignalBotInteractiveMenuRoute(
+            hide.callback_data.replace("hm:v1:", ""),
+          ),
+          {
+            kind: "position",
+            positionId: holding.position.id,
+            page: 3,
+            visibility: "hide_loss",
+          },
+        );
+        assert.ok(Buffer.byteLength(hide.callback_data) <= 64);
+        assert.doesNotMatch(
+          JSON.stringify(loser),
+          /Redeem in Hunch|Live bid|hbt:/,
+        );
+        holding.position.isHidden = true;
+        assert.match(
+          JSON.stringify(buildTelegramSettledPositionMessage(input)),
+          /Show position/,
+        );
+        holding.redemptionStatus = "market_open";
+        holding.pnlUsd = -1;
+        assert.equal(buildTelegramSettledPositionMessage(input), null);
+        holding.redemptionStatus = "pending_resolution";
+        assert.equal(buildTelegramSettledPositionMessage(input), null);
+      }
+      assert.notEqual(
+        telegramPositionStatusLabel("redeemed"),
+        telegramPositionStatusLabel("resolved_not_redeemable"),
+      );
+    },
+  },
+  {
+    name: "hide loss checks live account-owned settlement and scopes mutation to one position; retries and undo are safe",
+    run: async () => {
+      const app = Fastify();
+      app.setValidatorCompiler(validatorCompiler);
+      app.setSerializerCompiler(serializerCompiler);
+      const holding = detail({
+        marketOrderable: false,
+        redemptionStatus: "resolved_not_redeemable",
+      });
+      const mutations: Array<Record<string, unknown>> = [];
+      await app.register(
+        createTelegramBotTradingRoutes({
+          internalPreHandler: async () => {},
+          loadPositions: async (input) => ({
+            linked: true,
+            userId: "user-1",
+            snapshot: {
+              partialFailure: false,
+              positions:
+                String(input.telegramUserId) === "123" ? [holding] : [],
+            },
+          }),
+          setPositionVisibility: async (_pool, input) => {
+            mutations.push(input);
+            return 1;
+          },
+        }),
+      );
+      const invoke = (
+        visibility: "hide_loss" | "show",
+        telegramUserId = "123",
+      ) =>
+        app.inject({
+          method: "POST",
+          url: `/internal/telegram-bot/positions/${holding.position.id}/card`,
+          payload: {
+            appBaseUrl: "https://app.hunch.trade",
+            telegramMessageId: 7,
+            telegramUserId,
+            visibility,
+          },
+        });
+      try {
+        await invoke("hide_loss", "456");
+        assert.equal(
+          mutations.length,
+          0,
+          "another account cannot hide this position",
+        );
+        for (const status of [
+          "market_open",
+          "pending_resolution",
+          "settlement_pending",
+          "redeemable",
+          "metadata_unavailable",
+        ]) {
+          holding.redemptionStatus = status;
+          await invoke("hide_loss");
+          assert.equal(mutations.length, 0, status);
+        }
+        holding.redemptionStatus = "resolved_not_redeemable";
+        holding.marketOrderable = true;
+        await invoke("hide_loss");
+        assert.equal(mutations.length, 0);
+        holding.marketOrderable = false;
+        for (let retry = 0; retry < 2; retry++)
+          assert.equal((await invoke("hide_loss")).statusCode, 200);
+        assert.equal((await invoke("show")).statusCode, 200);
+        assert.deepEqual(
+          mutations.map((item) => item.hidden),
+          [true, true, false],
+        );
+        for (const mutation of mutations) {
+          assert.equal(mutation.userId, "user-1");
+          assert.equal(mutation.positionId, holding.position.id);
+          assert.equal(mutation.tokenId, holding.position.tokenId);
+        }
+      } finally {
+        await app.close();
+      }
+    },
+  },
   {
     name: "missing market metadata preserves the holding and canonical outcome side",
     run: () => {
