@@ -10,6 +10,7 @@ import {
 import { validatePolymarketFunderSelection } from "../../services/polymarket-funder.js";
 
 import { buildAccountValueReadModel } from "../../account-value/runtime-service.js";
+import { deriveExecutionGas } from "../../account-value/execution-gas.js";
 import { getCredentialsEncryptionKey } from "../../lib/credentials-encryption.js";
 import { isReceiptBearingFundingActionKind } from "../domain/action-kinds.js";
 import { normalizedActionSchema } from "../domain/schemas.js";
@@ -361,14 +362,35 @@ export class FundingOperationActionRuntime {
         action,
         step.actionValidationResult,
       );
+      const toOwnedWallet =
+        step.actionValidationResult.executionEnvelope ===
+        "polymarket_safe_to_owned_wallet_v1";
+      const recipientProfile = toOwnedWallet
+        ? account.ownership?.wallets.find(
+            (profile) =>
+              profile.walletId === action.payload.recipientWalletId &&
+              profile.networkId === "evm:137" &&
+              profile.source === "embedded" &&
+              profile.controllerWalletRef &&
+              profile.serverWalletRef &&
+              profile.signingModes.includes("privy_authorization") &&
+              deriveExecutionGas(account, profile).sponsored &&
+              profile.address.toLowerCase() ===
+                expectation?.recipientAddress.toLowerCase(),
+          )
+        : null;
       if (
         !expectation ||
-        expectation.recipientAddress.toLowerCase() !==
-          execution.controllerProfile.address.toLowerCase()
+        step.actionValidationResult.signerAddress?.toString().toLowerCase() !==
+          execution.controllerProfile.address.toLowerCase() ||
+        (toOwnedWallet
+          ? !recipientProfile
+          : expectation.recipientAddress.toLowerCase() !==
+            execution.controllerProfile.address.toLowerCase())
       ) {
         throw new FundingPersistenceError(
           "quote_mismatch",
-          "Safe recovery must return the exact asset to its controller",
+          "Safe recovery must transfer the exact asset to its authorized owned wallet",
         );
       }
       const checked = await validatePolymarketFunderSelection({

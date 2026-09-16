@@ -3790,14 +3790,17 @@ async function testExistingSafeHandoffCommitsAndGatesRoute(
   preparation = false,
   crossController = false,
   depositPusd = false,
+  ownedRecipient = false,
 ): Promise<void> {
   const userId = await insertUser(pool);
   const base = buildPlan();
   const asset = {
     networkId: "evm:137",
-    assetId: depositPusd
-      ? RELAY_PINNED_ASSETS.polygonPusd
-      : RELAY_PINNED_ASSETS.polygonUsdce,
+    assetId: ownedRecipient
+      ? RELAY_PINNED_ASSETS.polygonUsdc
+      : depositPusd
+        ? RELAY_PINNED_ASSETS.polygonPusd
+        : RELAY_PINNED_ASSETS.polygonUsdce,
     decimals: 6,
   };
   const owner = "0x1111111111111111111111111111111111111111";
@@ -3805,10 +3808,28 @@ async function testExistingSafeHandoffCommitsAndGatesRoute(
   const steps = buildPolymarketPreRouteHandoffSteps({
     source: {
       preRouteHandoff: {
-        kind: depositPusd
-          ? "polymarket_deposit_wallet_to_controller_v1"
-          : "polymarket_safe_to_controller_v1",
-        controllerAddress: owner,
+        kind: ownedRecipient
+          ? "polymarket_safe_to_owned_wallet_v1"
+          : depositPusd
+            ? "polymarket_deposit_wallet_to_controller_v1"
+            : "polymarket_safe_to_controller_v1",
+        controllerAddress: ownedRecipient
+          ? "0x3333333333333333333333333333333333333333"
+          : owner,
+        ...(ownedRecipient
+          ? {
+              ownerProfile: {
+                walletId: opaque("safe-owner"),
+                networkId: "evm:137",
+                address: owner,
+                source: "external" as const,
+                signingModes: ["web_client" as const],
+                controllerWalletRef: opaque("external-controller"),
+                serverWalletRef: null,
+                sponsorshipPolicyIds: [],
+              },
+            }
+          : {}),
         funderAddress: safe,
         tokenAddress: asset.assetId,
         sourceLocation: {
@@ -3829,10 +3850,12 @@ async function testExistingSafeHandoffCommitsAndGatesRoute(
     profile: {
       walletId: opaque("wallet"),
       networkId: "evm:137",
-      address: owner,
-      source: "external",
-      signingModes: ["web_client"],
-      serverWalletRef: null,
+      address: ownedRecipient
+        ? "0x3333333333333333333333333333333333333333"
+        : owner,
+      source: ownedRecipient ? "embedded" : "external",
+      signingModes: ownedRecipient ? ["privy_authorization"] : ["web_client"],
+      serverWalletRef: ownedRecipient ? opaque("privy-internal") : null,
       sponsorshipPolicyIds: [],
     },
     steps: base.steps,
@@ -9111,6 +9134,7 @@ console.log(
 );
 await testDepositWalletHandoffKeepsItsOwnActionTtl();
 await testExistingSafeHandoffCommitsAndGatesRoute();
+await testExistingSafeHandoffCommitsAndGatesRoute(false, false, false, true);
 await testExistingSafeHandoffCommitsAndGatesRoute(true);
 await testExistingSafeHandoffCommitsAndGatesRoute(true, true);
 await testExistingSafeHandoffCommitsAndGatesRoute(true, true, true);

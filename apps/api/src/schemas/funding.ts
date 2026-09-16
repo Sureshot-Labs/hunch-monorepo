@@ -831,6 +831,17 @@ export const intentLiquidityProjectionSchema = z
       .nullable(),
     requiredActions: z.array(actionSummarySchema).max(64),
     sourceOptions: z.array(sourceOptionSchema).max(128),
+    sourceBlockers: z
+      .array(
+        z.object({
+          networkId: z.string(),
+          walletAddress: z.string(),
+          assetId: z.string(),
+          availableSourceRaw: z.string(),
+          reason: z.literal("insufficient_gas"),
+        }),
+      )
+      .optional(),
     asOf: z.string().datetime(),
     expiresAt: z.string().datetime(),
     policyVersion: z.number().int().positive(),

@@ -191,10 +191,30 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
   const handoff = input.source.preRouteHandoff;
   if (!handoff) return input.steps;
   const expectedSourceToken = handoff.tokenAddress;
-  const isSafe = handoff.kind === "polymarket_safe_to_controller_v1";
+  const toOwnedWallet = handoff.kind === "polymarket_safe_to_owned_wallet_v1";
+  const isSafe =
+    toOwnedWallet || handoff.kind === "polymarket_safe_to_controller_v1";
+  const owner = toOwnedWallet ? handoff.ownerProfile : input.profile;
+  if (
+    !owner ||
+    (toOwnedWallet &&
+      (owner.networkId !== "evm:137" ||
+        owner.source !== "external" ||
+        !owner.signingModes.includes("web_client") ||
+        !owner.controllerWalletRef ||
+        input.profile.networkId !== "evm:137" ||
+        input.profile.source !== "embedded" ||
+        !input.profile.serverWalletRef ||
+        !input.profile.signingModes.includes("privy_authorization")))
+  ) {
+    throw new Error(
+      "Safe handoff requires the exact owner and internal recipient",
+    );
+  }
   const isSupportedHandoffToken = [
     RELAY_PINNED_ASSETS.polygonPusd,
     RELAY_PINNED_ASSETS.polygonUsdce,
+    ...(toOwnedWallet ? [RELAY_PINNED_ASSETS.polygonUsdc] : []),
   ].includes(expectedSourceToken.toLowerCase());
   if (
     (!isSafe &&
@@ -235,7 +255,7 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
       }),
     ),
     networkId: input.sourceAmount.asset.networkId,
-    actorWalletId: input.profile.walletId,
+    actorWalletId: owner.walletId,
     handoffKind: isSafe
       ? "polymarket_safe_transfer"
       : "polymarket_deposit_wallet_transfer",
@@ -246,6 +266,13 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
       token: expectedSourceToken,
       amountRaw: input.sourceAmount.raw,
       calls,
+      ...(toOwnedWallet
+        ? {
+            executionEnvelope: handoff.kind,
+            owner: owner.address,
+            recipientWalletId: input.profile.walletId,
+          }
+        : {}),
     },
   };
   return [
@@ -266,10 +293,10 @@ export function buildPolymarketPreRouteHandoffSteps(input: {
       dependsOnOrdinal: null,
       normalizedAction: jsonRecord(action),
       actionValidationResult: jsonRecord({
-        signerAddress: input.profile.address,
-        // The relayer action is one exact same-asset transfer back to the
-        // controller. Downstream routing and approvals happen only from that
-        // ordinary controller wallet.
+        signerAddress: owner.address,
+        ...(toOwnedWallet ? { recipientWalletId: input.profile.walletId } : {}),
+        // One exact transfer to the owner or a verified internal recipient.
+        // Downstream routing and approvals happen only from that EOA.
         executionEnvelope: handoff.kind,
         funderAddress: handoff.funderAddress,
         recipientAddress: handoff.controllerAddress,
@@ -522,7 +549,16 @@ export async function buildRelayPlanningQuote(
       venueBindingSnapshot: input.destination.venueBindingOption
         ? jsonRecord(input.destination.venueBindingOption)
         : null,
-      walletExecutionSnapshot: jsonRecord(input.profile),
+      walletExecutionSnapshot: jsonRecord(
+        input.source.preRouteHandoff?.ownerProfile
+          ? {
+              profiles: [
+                input.profile,
+                input.source.preRouteHandoff.ownerProfile,
+              ],
+            }
+          : input.profile,
+      ),
       placementSnapshot: {},
       requestedSourceAmount: jsonRecord(input.quote.sourceAmount),
       requestedDestinationAmount: jsonRecord(

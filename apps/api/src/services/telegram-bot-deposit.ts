@@ -1,4 +1,8 @@
 import type { DbQuery } from "../db.js";
+import {
+  telegramDepositButtonLabel,
+  telegramDepositButtonRows,
+} from "./telegram-deposit-buttons.js";
 import { resolveFundingPolicy } from "../funding/policies/funding-policy-service.js";
 import type { TelegramBotTradingClientMessage } from "./telegram-bot-trading-client.js";
 import { telegramSolanaRetainedDepositRouteForPolicy } from "./telegram-funding-route.js";
@@ -274,44 +278,36 @@ function buildJustDepositMenu(input: {
     parse_mode: "MarkdownV2",
     reply_markup: {
       inline_keyboard: [
-        ...(input.usdcReceiveChoiceToken
-          ? [
-              [
+        ...telegramDepositButtonRows([
+          ...(input.usdcReceiveChoiceToken
+            ? [
                 {
                   callback_data: `hm:v1:deposit_route:${input.usdcReceiveChoiceToken}`,
-                  text: "USDC · Solana · Hunch",
+                  text: telegramDepositButtonLabel(["USDC"], "Solana"),
                 },
-              ],
-            ]
-          : []),
-        [
-          {
-            callback_data: "hm:v1:deposit_route:pd",
-            text: "pUSD · Polygon · Direct",
-          },
-        ],
-        [
-          {
-            callback_data: "hm:v1:deposit_route:pw",
-            text: "USDC.e · Polygon",
-          },
-        ],
-        ...(input.solReceiveChoiceToken
-          ? [
-              [
+              ]
+            : []),
+          ...(input.solReceiveChoiceToken
+            ? [
                 {
                   callback_data: `hm:v1:deposit_route:${input.solReceiveChoiceToken}`,
-                  text: "Receive SOL in Hunch",
+                  text: telegramDepositButtonLabel(["SOL"], "Solana"),
                 },
-              ],
-            ]
-          : []),
-        [
+              ]
+            : []),
+          {
+            callback_data: "hm:v1:deposit_route:pd",
+            text: telegramDepositButtonLabel(["pUSD"], "Polygon"),
+          },
+          {
+            callback_data: "hm:v1:deposit_route:pw",
+            text: telegramDepositButtonLabel(["USDC.e"], "Polygon"),
+          },
           {
             callback_data: "hm:v1:deposit_route:ld",
-            text: "USDC · Base · Limitless",
+            text: telegramDepositButtonLabel(["USDC"], "Base"),
           },
-        ],
+        ]),
         [
           {
             callback_data: "hm:v1:deposit",
@@ -323,30 +319,7 @@ function buildJustDepositMenu(input: {
     text: joinTelegramMarkdownV2Lines([
       buildDepositTitleMarkdownV2(),
       "",
-      formatTelegramCalloutMarkdownV2({
-        bodyMarkdownV2: escapeTelegramMarkdownV2(
-          "Choose the network and asset you already have. Venue routes prepare venue collateral; Receive SOL keeps SOL in your Hunch balance.",
-        ),
-        icon: "💳",
-        title: "Any / Just Deposit",
-      }),
-      "",
-      `${telegramCustomEmojiMarkdownV2ForNetwork("Polygon")} ${formatTelegramFieldMarkdownV2("Polygon", "pUSD direct · USDC.e kept in Hunch")}`,
-      `${telegramCustomEmojiMarkdownV2ForNetwork("Base")} ${formatTelegramFieldMarkdownV2("Base", "USDC direct to Limitless")}`,
-      ...(input.solReceiveChoiceToken
-        ? [
-            `${telegramCustomEmojiMarkdownV2ForNetwork("Solana")} ${formatTelegramFieldMarkdownV2("Receive SOL", "Kept as SOL in Hunch · does not fund a venue")}`,
-          ]
-        : []),
-      ...(input.usdcReceiveChoiceToken
-        ? [
-            `${telegramCustomEmojiMarkdownV2ForNetwork("Solana")} ${formatTelegramFieldMarkdownV2("Receive USDC", "Kept as USDC in Hunch · no automatic conversion")}`,
-          ]
-        : []),
-      "",
-      escapeTelegramMarkdownV2(
-        "USDC.e stays in your Hunch wallet. Conversion, if needed, happens when you review a later purchase in Hunch.",
-      ),
+      escapeTelegramMarkdownV2("Choose the asset and network to deposit."),
     ]),
   };
 }

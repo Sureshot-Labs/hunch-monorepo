@@ -67,6 +67,7 @@ export type FundingSourcePlanningRequest = Readonly<{
 }>;
 
 export type FundingSourcePlanningResult = Readonly<{
+  sourceBlockers?: readonly import("../domain/types.js").FundingSourceBlocker[];
   sources: readonly PlannedSourceOption[];
   reasonCodes: readonly FundingReasonCode[];
 }>;
@@ -1087,6 +1088,9 @@ export class FundingPlanner {
       eta: recommended?.option.eta ?? null,
       requiredActions,
       sourceOptions,
+      ...(sourceDiscovery.sourceBlockers?.length
+        ? { sourceBlockers: sourceDiscovery.sourceBlockers }
+        : {}),
       asOf: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
       policyVersion: input.policy.contractVersion,

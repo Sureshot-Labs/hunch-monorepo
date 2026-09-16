@@ -221,6 +221,7 @@ export function resolveProductionOwnedSourceExecution(input: {
   account: AccountValueReadModel;
   component: AccountValueReadModel["projection"]["components"][number];
   allowDepositWalletUsdceHandoff?: boolean;
+  allowSafeOwnedWalletHandoff?: boolean;
 }): ProductionOwnedSourceExecution | null {
   const { account, component } = input;
   const directProfile = profileForLocation(account, component.location);
@@ -240,13 +241,17 @@ export function resolveProductionOwnedSourceExecution(input: {
   const isDepositWalletUsdce =
     (input.allowDepositWalletUsdceHandoff === true || isLegacySafe) &&
     componentAssetId === RELAY_PINNED_ASSETS.polygonUsdce.toLowerCase();
+  const isSafeUsdc =
+    isLegacySafe &&
+    input.allowSafeOwnedWalletHandoff === true &&
+    componentAssetId === RELAY_PINNED_ASSETS.polygonUsdc;
   const isPolymarketDepositWalletSource =
     component.location.kind === "venue_account" &&
     detail(component.location, "venueId") === "polymarket" &&
     (detail(component.location, "polymarketFunderKind") === "deposit_wallet" ||
       isLegacySafe) &&
     component.amount.asset.networkId === "evm:137" &&
-    (isDepositWalletPusd || isDepositWalletUsdce) &&
+    (isDepositWalletPusd || isDepositWalletUsdce || isSafeUsdc) &&
     Boolean(funderAddress) &&
     Boolean(linkedAddress) &&
     Boolean(
@@ -275,9 +280,27 @@ export function resolveProductionOwnedSourceExecution(input: {
     Boolean(handoffControllerProfile?.controllerWalletRef) &&
     (handoffControllerProfile?.signingModes.includes("web_client") ||
       handoffControllerProfile?.signingModes.includes("privy_authorization"));
-  const profile = usesPolymarketHandoff
-    ? handoffControllerProfile
-    : directProfile;
+  // Relay must run on a sponsored internal signer, not on the external
+  // Safe owner. The owner still authorizes the exact Safe transfer.
+  const internalRecipient =
+    usesPolymarketHandoff &&
+    isLegacySafe &&
+    input.allowSafeOwnedWalletHandoff === true &&
+    handoffControllerProfile?.source === "external"
+      ? account.ownership?.wallets
+          .filter(
+            (candidate) =>
+              candidate.networkId === "evm:137" &&
+              candidate.source === "embedded" &&
+              candidate.controllerWalletRef &&
+              deriveExecutionGas(account, candidate).sponsored,
+          )
+          .sort((a, b) => a.walletId.localeCompare(b.walletId))[0]
+      : undefined;
+  const profile =
+    internalRecipient ??
+    (usesPolymarketHandoff ? handoffControllerProfile : directProfile);
+  if (isSafeUsdc && !internalRecipient) return null;
   const executionLocation =
     usesPolymarketHandoff && profile
       ? linkedControllerExecutionLocation(component.location, profile)
@@ -292,13 +315,18 @@ export function resolveProductionOwnedSourceExecution(input: {
       ? {
           safeLabel: "Polymarket balance",
           preRouteHandoff: {
-            kind: isLegacySafe
-              ? ("polymarket_safe_to_controller_v1" as const)
-              : ("polymarket_deposit_wallet_to_controller_v1" as const),
+            kind: internalRecipient
+              ? ("polymarket_safe_to_owned_wallet_v1" as const)
+              : isLegacySafe
+                ? ("polymarket_safe_to_controller_v1" as const)
+                : ("polymarket_deposit_wallet_to_controller_v1" as const),
             sourceLocation: component.location,
             funderAddress,
             controllerAddress: profile.address,
             tokenAddress: component.amount.asset.assetId,
+            ...(internalRecipient && handoffControllerProfile
+              ? { ownerProfile: handoffControllerProfile }
+              : {}),
           },
         }
       : {}),
@@ -651,6 +679,7 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
     const execution = resolveProductionOwnedSourceExecution({
       account: input.account,
       component,
+      allowSafeOwnedWalletHandoff: input.purpose !== "withdrawal",
     });
     const profile = execution?.profile ?? null;
     const executionLocation = execution?.executionLocation ?? null;
@@ -725,6 +754,7 @@ export function filterRelayEligibleSourceFactsForExecutionProfile(
   return facts.filter(
     (fact) =>
       fact.preRouteHandoff?.kind !== "polymarket_safe_to_controller_v1" &&
+      fact.preRouteHandoff?.kind !== "polymarket_safe_to_owned_wallet_v1" &&
       sameAsset(fact.quoteInputAmount.asset, profile.sourceAsset),
   );
 }
@@ -1234,6 +1264,36 @@ export class ProductionFundingSourcePlanner {
         ...source,
         sourcePreferenceCost: this.sourcePreferenceCost(source),
       })),
+      sourceBlockers: this.relaySourceFacts(input).flatMap((fact) => {
+        if (
+          fact.nativeGasReady ||
+          fact.requiresSolanaGasCheck ||
+          !fact.walletExecutionReady ||
+          fact.source.kind !== "owned_location" ||
+          !fact.transferable ||
+          !fact.riskEligible ||
+          fact.freshness !== "fresh"
+        )
+          return [];
+        const address = detail(fact.source.location, "address");
+        if (!address) return [];
+        const profile = profileForLocation(this.account, fact.source.location);
+        // Unknown observations are not a confirmed gas shortage.
+        if (
+          !profile ||
+          deriveExecutionGas(this.account, profile).status !== "needs_gas"
+        )
+          return [];
+        return [
+          {
+            networkId: fact.quoteInputAmount.asset.networkId,
+            walletAddress: address,
+            assetId: fact.quoteInputAmount.asset.assetId,
+            availableSourceRaw: fact.maximumSourceRaw,
+            reason: "insufficient_gas" as const,
+          },
+        ];
+      }),
       reasonCodes: [
         ...new Set<FundingReasonCode>([
           ...inventoryReasonCodes,

@@ -230,6 +230,14 @@ export type ObservationError = Readonly<{
   retryable: boolean;
 }>;
 
+export type FundingSourceBlocker = Readonly<{
+  networkId: string;
+  walletAddress: string;
+  assetId: string;
+  availableSourceRaw: string;
+  reason: "insufficient_gas";
+}>;
+
 export type ObservedAsset = Readonly<{
   componentId: string;
   location: AssetLocation;
@@ -471,6 +479,7 @@ export type IntentLiquidityProjection = Readonly<{
     expiresAt: string;
   }>;
   liquidityProjectionId: string;
+  sourceBlockers?: readonly FundingSourceBlocker[];
   marketContextId: string | null;
   venueId: VenueId | null;
   venueBindingOptionId: string | null;

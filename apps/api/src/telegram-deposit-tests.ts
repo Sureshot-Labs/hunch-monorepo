@@ -15,6 +15,10 @@ import {
 import { buildTelegramDepositMessage } from "./services/telegram-bot-deposit.js";
 import { TelegramFundingError } from "./services/telegram-funding.js";
 import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
+import {
+  telegramDepositButtonLabel,
+  telegramDepositButtonRows,
+} from "./services/telegram-deposit-buttons.js";
 
 function authorizationDb(walletAddress: string | null) {
   return {
@@ -49,6 +53,40 @@ assert.deepEqual(parseSignalBotInteractiveMenuRoute("deposit_cancel_active"), {
 });
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+  {
+    name: "deposit buttons use asset/network labels and preserve every callback in two columns",
+    run: () => {
+      const buttons = (
+        [
+          ["USDC", "Solana"],
+          ["SOL", "Solana"],
+          ["pUSD", "Polygon"],
+          ["USDC.e", "Polygon"],
+          ["USDC", "Base"],
+        ] as const
+      ).map(([asset, network], index) => ({
+        text: telegramDepositButtonLabel([asset], network),
+        callback_data: `route:${index}`,
+      }));
+      assert.deepEqual(
+        buttons.map((button) => button.text),
+        [
+          "USDC · Solana",
+          "SOL · Solana",
+          "pUSD · Polygon",
+          "USDC.e · Polygon",
+          "USDC · Base",
+        ],
+      );
+      for (let count = 0; count <= buttons.length; count++) {
+        const subset = buttons.slice(0, count);
+        const rows = telegramDepositButtonRows(subset);
+        assert.deepEqual(rows.flat(), subset);
+        assert.ok(rows.every((row) => row.length > 0 && row.length <= 2));
+        assert.equal(rows.length, Math.ceil(count / 2));
+      }
+    },
+  },
   {
     name: "USDC.e button opens the controller route without selecting a different asset",
     run: async () => {
@@ -573,14 +611,21 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         pool: authorizationDb(null),
         venue: "any",
       });
-      assert.match(justDeposit.text, /Any \/ Just Deposit/u);
-      assert.match(justDeposit.text, /Receive SOL keeps SOL/u);
+      assert.match(
+        justDeposit.text,
+        /Choose the asset and network to deposit/u,
+      );
       assert.match(JSON.stringify(justDeposit.reply_markup), /pUSD · Polygon/u);
       assert.match(
         JSON.stringify(justDeposit.reply_markup),
         /USDC\.e · Polygon/u,
       );
-      assert.match(justDeposit.text, /USDC\\\.e/u);
+      assert.deepEqual(
+        justDeposit.reply_markup?.inline_keyboard
+          .slice(0, 2)
+          .map((row) => row.map((button) => button.text)),
+        [["pUSD · Polygon", "USDC.e · Polygon"], ["USDC · Base"]],
+      );
       for (const row of justDeposit.reply_markup?.inline_keyboard ?? []) {
         for (const button of row) {
           if ("callback_data" in button)

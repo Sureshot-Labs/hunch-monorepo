@@ -33,6 +33,10 @@ import type {
 import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-catalog.js";
 import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
 import { TELEGRAM_BACK_BUTTON_TEXT } from "./telegram-bot-navigation.js";
+import {
+  telegramDepositButtonLabel,
+  telegramDepositButtonRows,
+} from "./telegram-deposit-buttons.js";
 
 function telegramFundingAppDepositRows() {
   const button = buildHunchMiniAppWebButton({
@@ -182,9 +186,10 @@ export function buildTelegramFundingTargetMessage(input: {
   presentation: TelegramFundingRoutePresentation;
 }): TelegramFundingMessage {
   const acceptedAssets = input.presentation.acceptedAssetSymbols.join(" / ");
-  const button =
-    input.presentation.selectionButtonLabel ??
-    `${acceptedAssets} on ${input.presentation.networkLabel}`;
+  const button = telegramDepositButtonLabel(
+    input.presentation.acceptedAssetSymbols,
+    input.presentation.networkLabel,
+  );
   const settlement =
     input.presentation.settlementLabel ??
     (input.automaticConversion ? "Automatic conversion" : "Direct");
@@ -277,8 +282,8 @@ export function buildTelegramFundingTargetChoicesMessage(input: {
       presentation: targets[0].presentation,
     });
   }
-  const targetRows = targets.map((target) => [
-    {
+  const targetRows = telegramDepositButtonRows(
+    targets.map((target) => ({
       callback_data: telegramFundingCallbackData({
         choiceToken: fundingTargetChoiceToken({
           automaticConversion:
@@ -289,11 +294,12 @@ export function buildTelegramFundingTargetChoicesMessage(input: {
         contextId: input.contextId,
         kind: "select",
       }),
-      text:
-        target.presentation.selectionButtonLabel ??
-        `${target.presentation.acceptedAssetSymbols.join(" / ")} on ${target.presentation.networkLabel}`,
-    },
-  ]);
+      text: telegramDepositButtonLabel(
+        target.presentation.acceptedAssetSymbols,
+        target.presentation.networkLabel,
+      ),
+    })),
+  );
   const venueLabel = targets[0]?.presentation.venueLabel ?? "venue";
   return {
     fundingContextId: input.contextId,

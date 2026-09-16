@@ -9,6 +9,7 @@ import type {
   Money,
   PlacementDecision,
   SourceOption,
+  WalletExecutionProfile,
 } from "../domain/types.js";
 import type { ProviderQuoteCandidate } from "../domain/contracts.js";
 import type { FundingRuntimePolicy } from "../policies/funding-policy.js";
@@ -124,11 +125,13 @@ export type RelayEligibleSourceFact = Readonly<{
   preRouteHandoff?: Readonly<{
     kind:
       | "polymarket_deposit_wallet_to_controller_v1"
-      | "polymarket_safe_to_controller_v1";
+      | "polymarket_safe_to_controller_v1"
+      | "polymarket_safe_to_owned_wallet_v1";
     sourceLocation: AssetLocation;
     funderAddress: string;
     controllerAddress: string;
     tokenAddress: string;
+    ownerProfile?: WalletExecutionProfile;
   }>;
 }>;
 

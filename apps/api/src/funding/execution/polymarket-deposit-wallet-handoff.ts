@@ -65,12 +65,31 @@ export function polymarketDepositWalletHandoffExpectation(
     );
     const amountRaw = BigInt(action.payload.amountRaw);
     const isSafe = action.handoffKind === "polymarket_safe_transfer";
+    const toOwnedWallet =
+      isSafe &&
+      validation.executionEnvelope === "polymarket_safe_to_owned_wallet_v1";
+    if (
+      toOwnedWallet &&
+      (action.payload.executionEnvelope !== validation.executionEnvelope ||
+        typeof action.payload.owner !== "string" ||
+        ethers.getAddress(action.payload.owner) !==
+          ethers.getAddress(String(validation.signerAddress)) ||
+        typeof action.payload.recipientWalletId !== "string" ||
+        action.payload.recipientWalletId !== validation.recipientWalletId ||
+        ![
+          RELAY_PINNED_ASSETS.polygonPusd,
+          RELAY_PINNED_ASSETS.polygonUsdce,
+          RELAY_PINNED_ASSETS.polygonUsdc,
+        ].includes(tokenAddress.toLowerCase()))
+    )
+      return null;
     if (
       isSafe &&
       (action.payload.topology !== "safe" ||
         action.payload.conversionKind != null ||
-        validation.signerAddress?.toString().toLowerCase() !==
-          recipientAddress.toLowerCase())
+        (!toOwnedWallet &&
+          validation.signerAddress?.toString().toLowerCase() !==
+            recipientAddress.toLowerCase()))
     )
       return null;
     const calls = action.payload.calls.map((call) => {
@@ -113,9 +132,11 @@ export function polymarketDepositWalletHandoffExpectation(
       if (
         calls.length !== 1 ||
         validation.executionEnvelope !==
-          (isSafe
-            ? "polymarket_safe_to_controller_v1"
-            : "polymarket_deposit_wallet_to_controller_v1")
+          (toOwnedWallet
+            ? "polymarket_safe_to_owned_wallet_v1"
+            : isSafe
+              ? "polymarket_safe_to_controller_v1"
+              : "polymarket_deposit_wallet_to_controller_v1")
       ) {
         return null;
       }

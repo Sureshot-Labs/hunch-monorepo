@@ -3,7 +3,10 @@
 import assert from "node:assert/strict";
 import { deriveSafeProxyAddress } from "../../../services/polymarket-funder.js";
 import { polymarketDepositWalletHandoffExpectation } from "../../execution/polymarket-deposit-wallet-handoff.js";
-import type { NormalizedAction } from "../../domain/types.js";
+import type {
+  NormalizedAction,
+  WalletExecutionProfile,
+} from "../../domain/types.js";
 import { deriveExecutionGas } from "../../../account-value/execution-gas.js";
 
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
@@ -1044,6 +1047,135 @@ assert.equal(
   const connectedSafeAccount = sessionSourceAccount(safeAccount, [
     "8571f3cb-381e-4e55-8f4c-ecc4c7f2abb9",
   ]);
+  const internalRecipient = {
+    ...(handoffAccount.ownership?.wallets.find(
+      (wallet) => wallet.walletId === controllerWalletId,
+    ) as WalletExecutionProfile),
+    walletId: "wallet_internal_recipient_12345678",
+    address: "0x00000000000000000000000000000000000000d1",
+    controllerWalletRef: "9571f3cb-381e-4e55-8f4c-ecc4c7f2abb9",
+  };
+  const sponsoredAccount = {
+    ...connectedSafeAccount,
+    ownership: {
+      ...baseOwnership,
+      wallets: [
+        ...(connectedSafeAccount.ownership?.wallets ?? []),
+        internalRecipient,
+      ],
+    },
+  };
+  for (const asset of [POLYGON_USDCE, POLYGON_USDC]) {
+    const candidateComponent = {
+      ...safeComponent,
+      amount: { asset, raw: "2144555" },
+      location: { ...safeComponent.location, asset },
+    };
+    const candidatePolicy = {
+      ...handoffPolicy,
+      locations: handoffPolicy.locations.map((entry) => ({ ...entry, asset })),
+      routes: handoffPolicy.routes.map((entry) => ({
+        ...entry,
+        sourceAsset: asset,
+      })),
+    };
+    const factsAccount = {
+      ...sponsoredAccount,
+      projection: {
+        ...sponsoredAccount.projection,
+        components: [candidateComponent],
+      },
+      nativeGasBalances: [
+        { networkId: "evm:137", address: controllerAddress, raw: "0" },
+      ],
+    };
+    for (const requiredRaw of ["1000000", "1500000"]) {
+      const facts = deriveProductionRelayEligibleSourceFacts({
+        accountId: ACCOUNT_ID,
+        account: factsAccount,
+        policy: candidatePolicy,
+        requiredAmount: { asset: BASE_USDC, raw: requiredRaw },
+        purpose: "trade_shortfall",
+        destinationLocationPatternId: "venue_limitless_usdc",
+      });
+      assert.equal(facts.length, 1);
+      assert.equal(
+        facts[0]?.nativeGasReady,
+        true,
+        "Safe owner has no POL; Relay uses the sponsored internal recipient",
+      );
+      assert.equal(
+        facts[0]?.reservationLocationId,
+        safeComponent.location.locationId,
+      );
+      assert.equal(
+        facts[0]?.preRouteHandoff?.ownerProfile?.address,
+        controllerAddress,
+      );
+    }
+    const execution = resolveProductionOwnedSourceExecution({
+      account: sponsoredAccount,
+      component: {
+        ...safeComponent,
+        amount: { asset, raw: "2144555" },
+        location: { ...safeComponent.location, asset },
+      },
+      allowSafeOwnedWalletHandoff: true,
+    });
+    assert.ok(execution);
+    assert.equal(execution.profile.walletId, internalRecipient.walletId);
+    assert.equal(
+      execution.preRouteHandoff?.kind,
+      "polymarket_safe_to_owned_wallet_v1",
+    );
+    assert.equal(
+      execution.preRouteHandoff?.ownerProfile?.address,
+      controllerAddress,
+    );
+    const [step] = buildPolymarketPreRouteHandoffSteps({
+      source: execution,
+      profile: execution.profile,
+      sourceAmount: { asset, raw: "1500000" },
+      steps: [],
+    });
+    assert.ok(step);
+    const action = step.normalizedAction as unknown as NormalizedAction;
+    const expectation = polymarketDepositWalletHandoffExpectation(
+      action,
+      step.actionValidationResult,
+    );
+    assert.equal(
+      expectation?.recipientAddress.toLowerCase(),
+      internalRecipient.address.toLowerCase(),
+    );
+    assert.equal(expectation?.amountRaw, 1500000n);
+    assert.equal(
+      action.kind === "external_handoff" ? action.actorWalletId : null,
+      controllerWalletId,
+    );
+    for (const change of [
+      { signerAddress: internalRecipient.address },
+      { recipientAddress: controllerAddress },
+      { amountRaw: "1500001" },
+      { recipientWalletId: controllerWalletId },
+      { executionEnvelope: "polymarket_safe_to_controller_v1" },
+    ] as Record<string, string>[])
+      assert.equal(
+        polymarketDepositWalletHandoffExpectation(action, {
+          ...step.actionValidationResult,
+          ...change,
+        }),
+        null,
+      );
+  }
+  assert.equal(
+    resolveProductionOwnedSourceExecution({
+      account: sessionSourceAccount(sponsoredAccount, []),
+      component: safeComponent,
+      allowSafeOwnedWalletHandoff: true,
+    })?.preRouteHandoff,
+    undefined,
+  );
   for (const asset of [POLYGON_PUSD, POLYGON_USDCE]) {
     const execution = resolveProductionOwnedSourceExecution({
       account: connectedSafeAccount,
