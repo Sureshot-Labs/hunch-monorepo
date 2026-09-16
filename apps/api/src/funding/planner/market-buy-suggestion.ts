@@ -5,7 +5,7 @@ import type { IntentLiquidityProjection } from "../domain/types.js";
 import type { FundingRuntimePolicy } from "../policies/funding-policy.js";
 import type { FundingPlanningSnapshot } from "./planning-types.js";
 import { maximumInternalFundingCapacityRaw } from "./composite-source-options.js";
-import { externalWalletSourceLocationIds } from "./session-source-account.js";
+import { unavailableSessionSourceLocationIds } from "./session-source-account.js";
 import { effectiveFundingEconomicsLimits } from "./source-options.js";
 
 /** Advisory only. Reuse frozen quotes; never discover, reserve, or execute funds here. */
@@ -64,7 +64,10 @@ export async function suggestSmallerMarketBuy(
     }),
     excludedSourceLocationIds: [
       destination.target.location.locationId,
-      ...externalWalletSourceLocationIds(account),
+      ...unavailableSessionSourceLocationIds(
+        account,
+        request.connectedExternalWalletRefs,
+      ),
     ],
   });
   if (capacity == null) return undefined;

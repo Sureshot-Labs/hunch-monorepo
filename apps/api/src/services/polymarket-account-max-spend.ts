@@ -10,7 +10,7 @@ import {
 } from "../account-value/decimal.js";
 import { accountValueDisplayPriceAdapters } from "../account-value/display-price-adapters.js";
 import type { PriceAdapter } from "../funding/domain/contracts.js";
-import { externalWalletSourceLocationIds } from "../funding/planner/session-source-account.js";
+import { unavailableSessionSourceLocationIds } from "../funding/planner/session-source-account.js";
 export { externalWalletSourceLocationIds } from "../funding/planner/session-source-account.js";
 import type {
   FundingDiscoveryRequest,
@@ -135,7 +135,7 @@ function buildAccountFundingRequest(input: {
     withdrawalRecipientId: null,
     venueBindingOptionId: null,
     controllerWalletRef: input.controllerWalletRef,
-    connectedExternalWalletRefs: input.connectedExternalWalletRefs,
+    connectedExternalWalletRefs: input.connectedExternalWalletRefs ?? [],
     serverAdditionalDestinationAmount: polymarketPusdMoney(additionalRaw),
     ...(input.capacityQuote
       ? { serverQuoteAvailableSourceCapacity: true }
@@ -321,7 +321,12 @@ export async function computePolymarketAccountMaxSpend(input: {
     if (input.amountEstimateOnly) {
       // MAX fills an editable amount; only ordinary Buy preparation certifies
       // routing. Never ask Relay to price this input suggestion.
-      const excluded = new Set(externalWalletSourceLocationIds(account));
+      const excluded = new Set(
+        unavailableSessionSourceLocationIds(
+          account,
+          input.connectedExternalWalletRefs,
+        ),
+      );
       const eligibleIds = new Set(
         account.projection.components
           .filter((component) => !excluded.has(component.location.locationId))
@@ -417,7 +422,7 @@ export async function computePolymarketAccountMaxSpend(input: {
     const capacityPreview = await previewLiquidity(
       buildAccountFundingRequest({
         capacityQuote: true,
-        connectedExternalWalletRefs: input.connectedExternalWalletRefs,
+        connectedExternalWalletRefs: input.connectedExternalWalletRefs ?? [],
         controllerWalletRef,
         directAvailableRaw: provisionalDirectRaw,
         marketId,
@@ -451,7 +456,10 @@ export async function computePolymarketAccountMaxSpend(input: {
     });
     const excludedSourceLocationIds = [
       directFunder.locationId,
-      ...externalWalletSourceLocationIds(account),
+      ...unavailableSessionSourceLocationIds(
+        account,
+        input.connectedExternalWalletRefs,
+      ),
     ];
     const additionalCapacityRaw = maximumPreviewInternalFundingRaw({
       excludedSourceLocationIds,
@@ -559,7 +567,7 @@ export async function computePolymarketAccountMaxSpend(input: {
       const exactPreview = await previewLiquidity(
         buildAccountFundingRequest({
           capacityQuote: false,
-          connectedExternalWalletRefs: input.connectedExternalWalletRefs,
+          connectedExternalWalletRefs: input.connectedExternalWalletRefs ?? [],
           controllerWalletRef,
           directAvailableRaw,
           marketId,

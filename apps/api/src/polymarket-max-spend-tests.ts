@@ -45,6 +45,7 @@ import {
   computePolymarketAccountMaxSpend,
   externalWalletSourceLocationIds,
 } from "./services/polymarket-account-max-spend.js";
+import { unavailableSessionSourceLocationIds } from "./funding/planner/session-source-account.js";
 import { DEFAULT_FUNDING_RUNTIME_POLICY } from "./funding/policies/funding-policy.js";
 import type {
   AssetLocation,
@@ -538,6 +539,54 @@ const tests: TestCase[] = [
       const suggestion = await suggest();
       assert.ok(suggestion);
       assert.equal(suggestionBudget, 4_860_000n);
+      const externalReservation = routeSource.commitPlan.reservations[0];
+      assert.ok(externalReservation);
+      const sessionSuggestionAccount = {
+        ...account,
+        ownership: {
+          ...account.ownership,
+          wallets: [
+            {
+              walletId: "suggestion-external",
+              source: "external",
+              controllerWalletRef: "suggestion-ref",
+            },
+          ],
+        },
+        projection: {
+          ...account.projection,
+          components: [
+            {
+              location: {
+                kind: "wallet",
+                locationId: externalReservation.locationId,
+                details: { walletId: "suggestion-external" },
+              },
+            },
+          ],
+        },
+      } as unknown as AccountValueReadModel;
+      for (const refs of [[], ["suggestion-ref"]]) {
+        await suggestSmallerMarketBuy(
+          {} as Pool,
+          {
+            ...suggestionSnapshot,
+            request: {
+              ...suggestionSnapshot.request,
+              connectedExternalWalletRefs: refs,
+            },
+          },
+          sessionSuggestionAccount,
+          DEFAULT_FUNDING_RUNTIME_POLICY,
+          async (_pool, input) => {
+            assert.equal(
+              input.executableFundsRaw,
+              refs.length ? 4_860_000n : 430_000n,
+            );
+            return { ok: false, reason: "below_min_order" };
+          },
+        );
+      }
       assert.ok(
         suggestion.amountUsdCents < 486,
         "trading fees come out of the destination budget",
@@ -735,6 +784,60 @@ const tests: TestCase[] = [
       });
       assert.equal(amountEstimate.ok, true);
       assert.equal(amountEstimate.executableFundsRaw, "5780000");
+      const sessionEstimateAccount = {
+        ...estimateAccount,
+        ownership: {
+          ...estimateAccount.ownership,
+          wallets: [
+            ...(estimateAccount.ownership?.wallets ?? []),
+            {
+              walletId: "external-estimate",
+              source: "external",
+              controllerWalletRef: "external-ref",
+            },
+          ],
+        },
+        projection: {
+          ...estimateAccount.projection,
+          components: [
+            ...estimateAccount.projection.components,
+            {
+              componentId: "external-cash",
+              location: {
+                kind: "wallet",
+                locationId: "external-location",
+                details: { walletId: "external-estimate" },
+              },
+            },
+          ],
+        },
+        cashAvailability: {
+          ...estimateAccount.cashAvailability,
+          components: [
+            ...estimateAccount.cashAvailability.components,
+            { componentId: "external-cash", availableEstimatedUsd: "3.33" },
+          ],
+        },
+      } as unknown as AccountValueReadModel;
+      for (const refs of [undefined, [], ["foreign-ref"], ["external-ref"]]) {
+        const estimate = await computePolymarketAccountMaxSpend({
+          ...requestInput,
+          amountEstimateOnly: true,
+          connectedExternalWalletRefs: refs,
+          dependencies: {
+            ...requestInput.dependencies,
+            buildAccountValueReadModel: async () => sessionEstimateAccount,
+            createFundingRuntime: () => {
+              throw new Error("MAX must not query Relay");
+            },
+          },
+        });
+        assert.equal(estimate.ok, true);
+        assert.equal(
+          estimate.executableFundsRaw,
+          refs?.includes("external-ref") ? "9110000" : "5780000",
+        );
+      }
       assert.ok(
         BigInt(String(amountEstimate.totalRequiredUsdcRaw)) <= 5_780_000n,
       );
@@ -967,7 +1070,11 @@ const tests: TestCase[] = [
       const account = {
         ownership: {
           wallets: [
-            { walletId: "wallet_external", source: "external" },
+            {
+              walletId: "wallet_external",
+              source: "external",
+              controllerWalletRef: "external-ref",
+            },
             { walletId: "wallet_internal", source: "embedded" },
           ],
         },
@@ -1012,6 +1119,16 @@ const tests: TestCase[] = [
         "location_external",
         "location_external_venue",
       ]);
+      for (const refs of [undefined, [], ["unrelated-ref"]])
+        assert.deepEqual(unavailableSessionSourceLocationIds(account, refs), [
+          "location_external",
+          "location_external_venue",
+          "location_owned_safe",
+        ]);
+      assert.deepEqual(
+        unavailableSessionSourceLocationIds(account, ["external-ref"]),
+        [],
+      );
     },
   },
   {
