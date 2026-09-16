@@ -304,6 +304,24 @@ const ownedWalletTransfersSchema = z
   )
   .min(1);
 
+// Composite contributors may themselves contain several wallet profiles.
+// Preserve malformed leaves so schema validation rejects them, not skips them.
+function flattenWalletProfiles(value: unknown, depth = 0): unknown[] {
+  if (
+    depth < 16 &&
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    "profiles" in value &&
+    !("walletId" in value) &&
+    Array.isArray(value.profiles)
+  )
+    return value.profiles.flatMap((entry) =>
+      flattenWalletProfiles(entry, depth + 1),
+    );
+  return [value];
+}
+
 /** V6 adds exact, user-signed USDC.e transfers from owned internal EOA wallets.
  * The persisted source declaration and wallet profiles bind every prefix step;
  * the remainder retains the existing Router validators and lifecycle. */
@@ -323,7 +341,7 @@ export function isPolymarketRouterV6CommitPlan(
         signingModes: z.array(z.string()),
       }),
     )
-    .safeParse(plan.operation.walletExecutionSnapshot?.profiles);
+    .safeParse(flattenWalletProfiles(plan.operation.walletExecutionSnapshot));
   if (!declared.success || !profiles.success) return false;
   const steps =
     plan.operation.planKind === "composite_route"

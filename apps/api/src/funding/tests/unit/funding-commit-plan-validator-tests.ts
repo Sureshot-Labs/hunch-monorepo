@@ -46,6 +46,133 @@ function boundaryPlan(
 }
 
 assert.equal(isValidFundingCommitPlanBoundary(boundaryPlan()), true);
+
+// MAR38: an owned USDC.e preparation contributor nested inside a composite.
+{
+  const source = "0x1111111111111111111111111111111111111111";
+  const destination = "0x2222222222222222222222222222222222222222";
+  const profiles = [source, destination].map((address, index) => ({
+    walletId: `wallet_mar38_${index}`,
+    address,
+    networkId: "evm:137",
+    source: "embedded",
+    signingModes: ["web_client", "privy_authorization"],
+  }));
+  const [sourceProfile, destinationProfile] = profiles;
+  assert.ok(sourceProfile && destinationProfile);
+  const plan = {
+    operation: { ...boundaryPlan().operation },
+    steps: [] as FundingCommitPlan["steps"],
+  };
+  plan.operation.planKind = "composite_route";
+  plan.operation.supportMetadata = {
+    ...plan.operation.supportMetadata,
+    planValidation: { validatorId: "polymarket_funding_router_v1", version: 6 },
+    ownedWalletTransfers: [
+      { walletId: sourceProfile.walletId, address: source, raw: "1508172" },
+    ],
+    fundingPlan: { signerUsdceAmountRaw: "1508172" },
+  };
+  plan.operation.walletExecutionSnapshot = { profiles: [{ profiles }] };
+  const transfer = {
+    ...fundStep,
+    stepKind: "transaction" as const,
+    normalizedAction: {
+      kind: "evm_transaction",
+      actionId: "mar38_transfer_action",
+      networkId: "evm:137",
+      senderWalletId: sourceProfile.walletId,
+      to: RELAY_PINNED_ASSETS.polygonUsdce,
+      valueRaw: "0",
+      gasLimitRaw: null,
+      data: new Interface([
+        "function transfer(address,uint256)",
+      ]).encodeFunctionData("transfer", [destination, "1508172"]),
+    },
+    actionValidationResult: {
+      ...fundStep.actionValidationResult,
+      kind: "owned_wallet_controller_transfer",
+      signerAddress: source,
+      expectedDestinationAddress: destination,
+      expectedDestinationAssetId: RELAY_PINNED_ASSETS.polygonUsdce,
+      expectedDestinationRaw: "1508172",
+      postconditionEvidenceKind: "exact_erc20_destination_credit_v1",
+    },
+  };
+  plan.steps = [
+    transfer,
+    {
+      ...fundStep,
+      ordinal: 1,
+      dependsOnOrdinal: 0,
+      normalizedAction: {
+        ...transfer.normalizedAction,
+        senderWalletId: destinationProfile.walletId,
+      },
+      actionValidationResult: {
+        ...fundStep.actionValidationResult,
+        signerAddress: destination,
+      },
+    },
+  ];
+  assert.equal(
+    isValidFundingCommitPlanBoundary(plan),
+    true,
+    "nested composite profiles",
+  );
+  plan.operation.walletExecutionSnapshot = { profiles };
+  assert.equal(
+    isValidFundingCommitPlanBoundary(plan),
+    true,
+    "flat legacy profiles",
+  );
+  for (const change of [
+    { address: destination },
+    { source: "external" },
+    { networkId: "evm:8453" },
+    { signingModes: [] },
+  ]) {
+    plan.operation.walletExecutionSnapshot = {
+      profiles: [
+        { profiles: [{ ...sourceProfile, ...change }, destinationProfile] },
+      ],
+    };
+    assert.equal(
+      isValidFundingCommitPlanBoundary(plan),
+      false,
+      JSON.stringify(change),
+    );
+  }
+  plan.operation.walletExecutionSnapshot = { profiles: [{ profiles }, null] };
+  assert.equal(
+    isValidFundingCommitPlanBoundary(plan),
+    false,
+    "malformed leaves are not discarded",
+  );
+  plan.operation.walletExecutionSnapshot = { profiles: [{ profiles }] };
+  const routerStep = plan.steps[1];
+  assert.ok(routerStep);
+  for (const change of [
+    { expectedDestinationRaw: "1508173" },
+    { expectedDestinationAddress: source },
+  ]) {
+    plan.steps = [
+      {
+        ...transfer,
+        actionValidationResult: {
+          ...transfer.actionValidationResult,
+          ...change,
+        },
+      },
+      routerStep,
+    ];
+    assert.equal(
+      isValidFundingCommitPlanBoundary(plan),
+      false,
+      "exact transfer guards remain enforced",
+    );
+  }
+}
 assert.equal(
   isValidFundingCommitPlanBoundary(
     boundaryPlan({ planKind: "composite_route" }, [
