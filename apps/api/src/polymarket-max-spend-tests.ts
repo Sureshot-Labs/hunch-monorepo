@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import type { Pool } from "@hunch/infra";
 import {
   calculatePolymarketQuote,
+  validatePolymarketLimitBuy,
   calculatePolymarketSignedBuyRequiredSpendRaw,
   calculatePolymarketSignedFokBuyRequiredSpendRaw,
   findMaxPolymarketMarketBuyUsd,
@@ -1750,6 +1751,67 @@ const tests: TestCase[] = [
       assert.equal(funds.signerPusdTopUpRaw, 700_000_000n);
       assert.equal(funds.signerUsdceTopUpRaw, 42_710_000n);
       assert.equal(funds.executableFundsRaw, 747_860_000n);
+    },
+  },
+  {
+    name: "marketable limit Buys enforce nominal minimum independently of fees",
+    run: () => {
+      const context = quoteContext();
+      context.orderbook.asks = [{ price: 0.15, size: 100 }];
+      context.orderbook.minOrderSize = 5;
+      for (const price of [0.15, 0.17]) {
+        for (const orderType of ["GTC", "GTD"] as const) {
+          const quote = calculatePolymarketQuote({
+            context,
+            tokenId: "token-yes",
+            side: "BUY",
+            orderType,
+            amountType: "shares",
+            amountSharesInput: 5,
+            limitPrice: price,
+          });
+          assert.equal(quote.violatesMinOrderSize, false);
+          assert.equal(
+            quote.limitOrderValidation?.code,
+            "below_marketable_buy_notional",
+          );
+          assert.ok(quote.limitOrderValidation);
+          const minimum = BigInt(quote.limitOrderValidation.minimumSharesRaw);
+          const accepted = calculatePolymarketQuote({
+            context,
+            tokenId: "token-yes",
+            side: "BUY",
+            orderType,
+            amountType: "shares",
+            amountSharesRawInput: minimum,
+            limitPrice: price,
+          });
+          assert.equal(accepted.limitOrderValidation?.valid, true);
+          assert.ok(BigInt(accepted.makerAmount) >= 1_000_000n);
+        }
+      }
+      const check = (nominal: bigint, overrides = {}) =>
+        validatePolymarketLimitBuy({
+          context,
+          side: "BUY",
+          orderType: "GTC",
+          postOnly: false,
+          makerAmountRaw: nominal,
+          takerAmountRaw: 5_000_000n,
+          ...overrides,
+        });
+      assert.equal(check(1_000_000n)?.valid, true);
+      assert.equal(check(999_999n)?.code, "below_marketable_buy_notional");
+      assert.equal(check(750_000n, { postOnly: true })?.valid, true);
+      assert.equal(check(750_000n, { orderType: "FOK" }), undefined);
+      assert.equal(check(750_000n, { orderType: "FAK" }), undefined);
+      assert.equal(check(750_000n, { side: "SELL" }), undefined);
+      context.orderbook.asks = [{ price: 0.3, size: 100 }];
+      assert.equal(check(750_000n)?.valid, true);
+      context.orderbook.asks = [];
+      assert.equal(check(750_000n)?.valid, true);
+      context.orderbook.minOrderSize = 10;
+      assert.equal(check(1_000_000n)?.code, "below_min_shares");
     },
   },
   {

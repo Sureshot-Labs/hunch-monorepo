@@ -182,6 +182,7 @@ import {
 } from "./open-order-collateral.js";
 import {
   calculatePolymarketQuote,
+  validatePolymarketLimitBuy,
   calculatePolymarketSignedBuyRequiredSpendRaw,
   quotePolymarketMarketBuyWithinBudget,
   loadPolymarketQuoteContext,
@@ -7071,6 +7072,48 @@ export async function submitPolymarketClientSignedOrder(input: {
       }
     }
   }
+  let limitValidationContext:
+    | Awaited<ReturnType<typeof loadPolymarketQuoteContext>>
+    | undefined;
+  if (side === "BUY" && (orderType === "GTC" || orderType === "GTD")) {
+    try {
+      limitValidationContext = await loadPolymarketQuoteContext(input.pool, {
+        tokenId: normalizedForHash.tokenId,
+      });
+      const validation = validatePolymarketLimitBuy({
+        orderType,
+        side,
+        postOnly: input.body.postOnly === true,
+        makerAmountRaw: BigInt(normalizedForHash.makerAmount),
+        takerAmountRaw: BigInt(normalizedForHash.takerAmount),
+        context: limitValidationContext,
+      });
+      if (validation && !validation.valid) {
+        return {
+          ok: false,
+          statusCode: 400,
+          payload: {
+            code: "polymarket_limit_validation_rejected",
+            error:
+              validation.code === "below_marketable_buy_notional"
+                ? "This immediately executable limit Buy requires at least $1 before fees. Increase the shares or change the limit price."
+                : "This limit Buy is below the market minimum shares.",
+            limitOrderValidation: validation,
+          },
+        };
+      }
+    } catch {
+      return {
+        ok: false,
+        statusCode: 503,
+        payload: {
+          code: "polymarket_limit_validation_unavailable",
+          error:
+            "Could not verify the limit order minimum. No order was submitted. Try again.",
+        },
+      };
+    }
+  }
   const payload = {
     order: normalizedOrder,
     owner: creds.apiKey,
@@ -7174,14 +7217,16 @@ export async function submitPolymarketClientSignedOrder(input: {
     try {
       const makerAmountRaw = parseBigIntValue(normalizedForHash.makerAmount);
       const takerAmountRaw = parseBigIntValue(normalizedForHash.takerAmount);
-      const fundingQuoteContext = await loadPolymarketQuoteContext(input.pool, {
-        tokenId: normalizedForHash.tokenId,
-        logWarn: (details) =>
-          input.log?.warn?.(
-            details,
-            "Failed to load Polymarket platform fee curve for funded order",
-          ),
-      });
+      const fundingQuoteContext =
+        limitValidationContext ??
+        (await loadPolymarketQuoteContext(input.pool, {
+          tokenId: normalizedForHash.tokenId,
+          logWarn: (details) =>
+            input.log?.warn?.(
+              details,
+              "Failed to load Polymarket platform fee curve for funded order",
+            ),
+        }));
       const currentBuilderValidation =
         validatePolymarketOrderBuilderCodeForConfig(normalizedForHash.builder, {
           active:
@@ -7512,7 +7557,12 @@ export async function submitPolymarketClientSignedOrder(input: {
       payload: {
         error: tradingPaused
           ? POLYMARKET_TRADING_PAUSED_MESSAGE
-          : "Polymarket order placement failed",
+          : /invalid amount for a marketable BUY order/i.test(
+                upstreamMessage ?? "",
+              )
+            ? "Order not placed. An immediately executable Buy requires at least $1 before fees."
+            : "Polymarket order placement failed",
+        ...(definitiveRejection ? { code: "polymarket_trade_rejected" } : {}),
         ...(tradingPaused
           ? {
               code: POLYMARKET_TRADING_PAUSED_CODE,
@@ -7564,6 +7614,7 @@ export async function submitPolymarketClientSignedOrder(input: {
       statusCode: 400,
       payload: {
         error: "Polymarket order rejected",
+        code: "polymarket_trade_rejected",
         payload: upstream.payload,
       },
     };

@@ -72,12 +72,75 @@ export type PolymarketQuoteResult = {
   orderPriceMinTickSize: number | null;
   orderMinSize: number | null;
   violatesMinOrderSize: boolean | null;
+  limitOrderValidation?: PolymarketLimitOrderValidation;
   negRisk: boolean | null;
   exchangeAddress: string | null;
   estimatedPayout: number;
   estimatedProfit: number;
   slippageBps: number | null;
 };
+
+export type PolymarketLimitOrderValidation = {
+  valid: boolean;
+  code: "below_min_shares" | "below_marketable_buy_notional" | null;
+  minimumSharesRaw: string;
+  minimumNotionalRaw: string | null;
+};
+
+/** Validate the exact signed BUY amounts, independently of fees or funding. */
+export function validatePolymarketLimitBuy(input: {
+  orderType: string;
+  side: string;
+  postOnly: boolean;
+  makerAmountRaw: bigint;
+  takerAmountRaw: bigint;
+  context: PolymarketQuoteContext;
+}): PolymarketLimitOrderValidation | undefined {
+  if (input.side !== "BUY" || !["GTC", "GTD"].includes(input.orderType))
+    return undefined;
+  const { makerAmountRaw: nominal, takerAmountRaw: shares, context } = input;
+  const bookMinimum =
+    context.orderbook.minOrderSize ??
+    Number(context.marketInfo?.order_min_size ?? 0);
+  const bookMinimumRaw =
+    Number.isFinite(bookMinimum) && bookMinimum > 0
+      ? BigInt(Math.ceil(bookMinimum * 1_000_000))
+      : 0n;
+  const bestAsk = findBestAsk(context.orderbook.asks);
+  const crosses =
+    !input.postOnly &&
+    bestAsk != null &&
+    shares > 0n &&
+    nominal * USDC_SCALE >= BigInt(Math.round(bestAsk * 1_000_000)) * shares;
+  const minimumNominal = crosses ? 1_000_000n : 0n;
+  const priceMicro = shares > 0n ? (nominal * USDC_SCALE) / shares : 0n;
+  const step =
+    priceMicro > 0n
+      ? lcm(
+          LIMIT_SHARES_MICRO_STEP,
+          (LIMIT_USD_MICRO_STEP * USDC_SCALE) /
+            gcd(priceMicro, LIMIT_USD_MICRO_STEP * USDC_SCALE),
+        )
+      : LIMIT_SHARES_MICRO_STEP;
+  const nominalShares =
+    minimumNominal > 0n && priceMicro > 0n
+      ? (minimumNominal * USDC_SCALE + priceMicro - 1n) / priceMicro
+      : 0n;
+  const minimum =
+    bookMinimumRaw > nominalShares ? bookMinimumRaw : nominalShares;
+  const code =
+    shares < bookMinimumRaw
+      ? "below_min_shares"
+      : nominal < minimumNominal
+        ? "below_marketable_buy_notional"
+        : null;
+  return {
+    valid: code === null,
+    code,
+    minimumSharesRaw: (((minimum + step - 1n) / step) * step).toString(),
+    minimumNotionalRaw: crosses ? minimumNominal.toString() : null,
+  };
+}
 
 export type PolymarketMaxSpendFailureReason =
   | "below_min_order"
@@ -1167,6 +1230,14 @@ export function calculatePolymarketQuote(inputs: {
     orderPriceMinTickSize: tickSize,
     orderMinSize: minOrderSize,
     violatesMinOrderSize,
+    limitOrderValidation: validatePolymarketLimitBuy({
+      orderType: inputs.orderType,
+      side: inputs.side,
+      postOnly,
+      makerAmountRaw: makerAmountMicro,
+      takerAmountRaw: takerAmountMicro,
+      context: inputs.context,
+    }),
     negRisk,
     exchangeAddress: exchangeAddressForNegRisk(negRisk),
     estimatedPayout,
