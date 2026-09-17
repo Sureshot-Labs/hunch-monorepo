@@ -634,7 +634,7 @@ const tests: TestCase[] = [
             throw new Error("CLOB fixture unavailable");
           },
         ),
-        undefined,
+        null,
       );
       const started = Date.now();
       assert.equal(
@@ -645,7 +645,7 @@ const tests: TestCase[] = [
           DEFAULT_FUNDING_RUNTIME_POLICY,
           () => new Promise(() => {}),
         ),
-        undefined,
+        null,
       );
       assert.ok(
         Date.now() - started < 2_000,
@@ -656,6 +656,66 @@ const tests: TestCase[] = [
         suggestionSnapshot.sources[0]?.option.expiresAt,
       );
       const beforeInvalid = suggestionQuoteCalls;
+      for (const [feeUsd, expectedCents, expectedBudgets] of [
+        ["0.04", 500, [5_000_000n]],
+        ["1.10", 492, [5_000_000n, 4_920_000n]],
+      ] as const) {
+        const tinyRoute = accountMaxRelaySource({
+          destinationAsset,
+          destinationRaw: "80000",
+        });
+        const budgets: bigint[] = [];
+        const reduced = await suggestSmallerMarketBuy(
+          {} as Pool,
+          {
+            ...suggestionSnapshot,
+            projection: {
+              ...suggestionSnapshot.projection,
+              availableNowRaw: "4920000",
+            },
+            sources: [
+              {
+                ...tinyRoute,
+                option: {
+                  ...tinyRoute.option,
+                  expiresAt: new Date(Date.now() + 30_000).toISOString(),
+                  fees: tinyRoute.option.fees.map((fee) => ({
+                    ...fee,
+                    estimatedUsd: feeUsd,
+                  })),
+                },
+              },
+            ],
+          },
+          account,
+          DEFAULT_FUNDING_RUNTIME_POLICY,
+          async (_pool, input) => {
+            budgets.push(input.executableFundsRaw);
+            return findMaxPolymarketMarketBuyUsdDetailed({
+              ...input,
+              context: noFeeNoMinContext(),
+              requireOrderbookDepth: true,
+            });
+          },
+        );
+        assert.equal(
+          reduced?.amountUsdCents,
+          expectedCents,
+          "Reduce shares the whole-Buy fee rule and rechecks it after lowering the amount",
+        );
+        assert.deepEqual(budgets, expectedBudgets);
+      }
+      assert.equal(
+        await suggestSmallerMarketBuy(
+          {} as Pool,
+          suggestionSnapshot,
+          account,
+          DEFAULT_FUNDING_RUNTIME_POLICY,
+          async () => ({ ok: false, reason: "no_liquidity" }),
+        ),
+        null,
+        "missing book liquidity is not evidence that a deposit will help",
+      );
       for (const projection of [
         { ...suggestionSnapshot.projection, completeness: "partial" as const },
         { ...suggestionSnapshot.projection, freshness: "stale" as const },
@@ -681,7 +741,7 @@ const tests: TestCase[] = [
       ])
         assert.equal(
           await suggest({ ...suggestionSnapshot, projection }),
-          undefined,
+          Date.parse(projection.expiresAt) <= Date.now() ? null : undefined,
         );
       assert.equal(
         await suggest({

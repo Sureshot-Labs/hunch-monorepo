@@ -789,11 +789,14 @@ export class FundingPlanningRuntime {
           resolvedPolicy.runtime,
         );
         if (suggestedMarketBuy) return { ...projection, suggestedMarketBuy };
+        if (suggestedMarketBuy === null)
+          return { ...projection, marketBuySuggestionUnavailable: true };
       } catch {
         // A failed advisory must not replace the authoritative funding result.
         console.warn("[funding] market Buy suggestion unavailable", {
           liquidityProjectionId: projection.liquidityProjectionId,
         });
+        return { ...projection, marketBuySuggestionUnavailable: true };
       }
     }
     return projection;

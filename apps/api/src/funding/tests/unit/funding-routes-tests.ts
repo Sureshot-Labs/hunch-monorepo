@@ -1482,9 +1482,12 @@ await test("liquidity rejects provider and raw destination authority fields", as
   }
 });
 
-await test("liquidity response preserves the frozen quote amount binding", async () => {
+await test("liquidity response preserves quote binding and unavailable optional advice", async () => {
   const app = await buildApp({
-    liquidity: async () => liquidityWithQuoteAmountBinding(),
+    liquidity: async () => ({
+      ...liquidityWithQuoteAmountBinding(),
+      marketBuySuggestionUnavailable: true,
+    }),
   });
   try {
     const response = await app.inject({
@@ -1505,6 +1508,10 @@ await test("liquidity response preserves the frozen quote amount binding", async
     });
 
     assert.equal(response.statusCode, 200);
+    assert.equal(
+      response.json().liquidity.marketBuySuggestionUnavailable,
+      true,
+    );
     assert.deepEqual(
       response.json().liquidity.sourceOptions[0].quoteAmountBinding,
       {

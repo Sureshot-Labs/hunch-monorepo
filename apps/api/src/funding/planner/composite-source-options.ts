@@ -299,6 +299,31 @@ function estimatedFeeUsd(source: PlannedSourceOption): string | null {
     : addUnsignedDecimals(values as string[]);
 }
 
+function fundingFeeWithinLimits(
+  feeUsd: string | null,
+  minimumUsd: string,
+  maximumFeeUsd: string,
+  maximumFeeBps: number,
+  feeReferenceUsd?: string | null,
+): boolean {
+  const percentageReferenceUsd =
+    feeReferenceUsd != null &&
+    compareUnsignedDecimals(feeReferenceUsd, minimumUsd) > 0
+      ? feeReferenceUsd
+      : minimumUsd;
+  return (
+    feeUsd != null &&
+    compareUnsignedDecimals(feeUsd, maximumFeeUsd) <= 0 &&
+    compareUnsignedDecimals(
+      multiplyUnsignedDecimals(feeUsd, "10000"),
+      multiplyUnsignedDecimals(
+        percentageReferenceUsd,
+        maximumFeeBps.toString(),
+      ),
+    ) <= 0
+  );
+}
+
 function selectSubset(
   candidates: readonly CompositeCandidate[],
   requiredDestination: Money,
@@ -329,21 +354,15 @@ function selectSubset(
         decimals: requiredDestination.asset.decimals,
         unitPriceUsd: destinationUnitPriceUsd,
       });
-      const percentageReferenceUsd =
-        feeReferenceUsd != null &&
-        compareUnsignedDecimals(feeReferenceUsd, minimumUsd) > 0
-          ? feeReferenceUsd
-          : minimumUsd;
       if (
         feeUsd == null ||
-        compareUnsignedDecimals(feeUsd, maximumFeeUsd) > 0 ||
-        compareUnsignedDecimals(
-          multiplyUnsignedDecimals(feeUsd, "10000"),
-          multiplyUnsignedDecimals(
-            percentageReferenceUsd,
-            maximumFeeBps.toString(),
-          ),
-        ) > 0
+        !fundingFeeWithinLimits(
+          feeUsd,
+          minimumUsd,
+          maximumFeeUsd,
+          maximumFeeBps,
+          feeReferenceUsd,
+        )
       ) {
         return null;
       }
@@ -378,6 +397,7 @@ function candidateFeeWithinLimits(input: {
   maximumFeeUsd: string;
   maximumFeeBps: number;
   maximumSlippageBps: number;
+  feeReferenceUsd?: string | null;
 }): Readonly<{ feeUsd: string; minimumRaw: bigint }> | null {
   let minimumRaw = 0n;
   for (const item of input.legs) {
@@ -410,11 +430,13 @@ function candidateFeeWithinLimits(input: {
     unitPriceUsd: input.destinationUnitPriceUsd,
   });
   if (
-    compareUnsignedDecimals(feeUsd, input.maximumFeeUsd) > 0 ||
-    compareUnsignedDecimals(
-      multiplyUnsignedDecimals(feeUsd, "10000"),
-      multiplyUnsignedDecimals(minimumUsd, input.maximumFeeBps.toString()),
-    ) > 0
+    !fundingFeeWithinLimits(
+      feeUsd,
+      minimumUsd,
+      input.maximumFeeUsd,
+      input.maximumFeeBps,
+      input.feeReferenceUsd,
+    )
   ) {
     return null;
   }
@@ -436,6 +458,7 @@ export function maximumInternalFundingDestinationRaw(
     maximumFeeUsd: string;
     maximumFeeBps: number;
     maximumSlippageBps: number;
+    feeReferenceUsd?: string | null;
     executionBoundary?: "automatic" | "client_handoff";
     excludedSourceLocationIds?: readonly string[];
   }>,
@@ -483,6 +506,7 @@ export function maximumInternalFundingDestinationRaw(
       maximumFeeUsd: input.maximumFeeUsd,
       maximumFeeBps: input.maximumFeeBps,
       maximumSlippageBps: input.maximumSlippageBps,
+      feeReferenceUsd: input.feeReferenceUsd,
     });
     if (economics && economics.minimumRaw > maximumRaw) {
       maximumRaw = economics.minimumRaw;

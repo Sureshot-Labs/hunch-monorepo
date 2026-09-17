@@ -795,6 +795,7 @@ export const fundingWithdrawalDestinationRevokeResponseSchema = z
 
 export const intentLiquidityProjectionSchema = z
   .object({
+    marketBuySuggestionUnavailable: z.boolean().optional(),
     suggestedMarketBuy: z
       .object({
         originalAmountUsdCents: z

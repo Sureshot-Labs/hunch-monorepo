@@ -1356,6 +1356,66 @@ assert.equal(
   null,
 );
 
+const feeBudgetContributions = ["tiny_a", "tiny_b"].map((id) =>
+  partialSource({
+    id,
+    location: sourceLocation(
+      id,
+      "evm:8453",
+      "0x00000000000000000000000000000000000000b5",
+    ),
+    sourceRaw: "60000",
+    expectedRaw: "40000",
+    minimumRaw: "40000",
+    feeUsd: "0.02",
+  }),
+);
+const tinyEconomics = {
+  candidates: feeBudgetContributions,
+  destinationUnitPriceUsd: "1",
+  maximumFeeUsd: "1",
+  maximumFeeBps: 1_000,
+};
+assert.equal(
+  buildCompositeSourceOption({
+    ...tinyEconomics,
+    requiredDestination: money(DESTINATION_ASSET, "80000"),
+    feeReferenceUsd: "5",
+  })?.option.minimumDestination?.raw,
+  "80000",
+);
+const tinyCapacity = {
+  ...tinyEconomics,
+  destinationAsset: DESTINATION_ASSET,
+  maximumSlippageBps: 100,
+};
+assert.equal(maximumInternalFundingDestinationRaw(tinyCapacity), 0n);
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    ...tinyCapacity,
+    feeReferenceUsd: "5",
+  }),
+  80_000n,
+  "trade capacity and executable plan use the same whole-Buy percentage budget",
+);
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    ...tinyCapacity,
+    feeReferenceUsd: "0.1",
+  }),
+  0n,
+  "a smaller Buy must not inherit the original order's fee allowance",
+);
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    ...tinyCapacity,
+    feeReferenceUsd: "5",
+    maximumFeeUsd: "0.01",
+  }),
+  0n,
+  "whole-Buy percentage budget never bypasses the absolute fee cap",
+);
+
 const residualRequests: string[] = [];
 const preferredCandidates: PlannedSourceOption[] = [
   {

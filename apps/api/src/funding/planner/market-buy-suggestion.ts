@@ -1,4 +1,5 @@
 import type { Pool } from "@hunch/infra";
+import { multiplyRawByUnitPrice } from "../../account-value/decimal.js";
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import { findMaxPolymarketMarketBuyUsdForFunds } from "../../services/polymarket-trading-service.js";
 import type { IntentLiquidityProjection } from "../domain/types.js";
@@ -8,14 +9,16 @@ import { maximumInternalFundingCapacityRaw } from "./composite-source-options.js
 import { unavailableSessionSourceLocationIds } from "./session-source-account.js";
 import { effectiveFundingEconomicsLimits } from "./source-options.js";
 
-/** Advisory only. Reuse frozen quotes; never discover, reserve, or execute funds here. */
+/** Advisory only. Reuse frozen quotes; never discover, reserve, or execute funds here.
+ * Undefined means no applicable smaller Buy; null means the check was unavailable.
+ */
 export async function suggestSmallerMarketBuy(
   pool: Pool,
   snapshot: FundingPlanningSnapshot,
   account: AccountValueReadModel,
   policy: FundingRuntimePolicy,
   findMax = findMaxPolymarketMarketBuyUsdForFunds,
-): Promise<IntentLiquidityProjection["suggestedMarketBuy"]> {
+): Promise<IntentLiquidityProjection["suggestedMarketBuy"] | null> {
   const { request, projection, destination } = snapshot;
   const original = request.marketBuyAmountUsdCents;
   if (
@@ -52,44 +55,80 @@ export async function suggestSmallerMarketBuy(
     Date.parse(projection.expiresAt),
     ...snapshot.sources.map((source) => Date.parse(source.option.expiresAt)),
   );
-  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now())
-    return undefined;
-  const capacity = maximumInternalFundingCapacityRaw({
-    candidates: snapshot.sources,
-    destinationAsset: projection.collateralAsset,
-    destinationUnitPriceUsd: "1",
-    ...effectiveFundingEconomicsLimits(policy, {
-      maximumFeeUsd: request.maxFeeUsd,
-      maximumSlippageBps: request.maxSlippageBps,
-    }),
-    excludedSourceLocationIds: [
-      destination.target.location.locationId,
-      ...unavailableSessionSourceLocationIds(
-        account,
-        request.connectedExternalWalletRefs,
-      ),
-    ],
-  });
-  if (capacity == null) return undefined;
-  const budget = BigInt(projection.availableNowRaw) + capacity;
-  if (budget <= 0n) return undefined;
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) return null;
+  const destinationLocationId = destination.target.location.locationId;
+  const capacityFor = (feeReferenceRaw: string) =>
+    maximumInternalFundingCapacityRaw({
+      candidates: snapshot.sources,
+      destinationAsset: projection.collateralAsset,
+      destinationUnitPriceUsd: "1",
+      feeReferenceUsd: multiplyRawByUnitPrice({
+        raw: feeReferenceRaw,
+        decimals: projection.collateralAsset.decimals,
+        unitPriceUsd: "1",
+      }),
+      ...effectiveFundingEconomicsLimits(policy, {
+        maximumFeeUsd: request.maxFeeUsd,
+        maximumSlippageBps: request.maxSlippageBps,
+      }),
+      excludedSourceLocationIds: [
+        destinationLocationId,
+        ...unavailableSessionSourceLocationIds(
+          account,
+          request.connectedExternalWalletRefs,
+        ),
+      ],
+    });
+  const available = BigInt(projection.availableNowRaw);
+  const tokenId = request.marketContextId;
+  const deadlineMs = Math.min(expiresAtMs, Date.now() + 1_000);
   // Market-data requests are singleflight/shared with real quotes: do not cancel
   // those consumers, but never delay the funding response for optional advice.
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let result: Awaited<ReturnType<typeof findMax>> | undefined;
   try {
-    result = await Promise.race([
-      findMax(pool, {
-        tokenId: request.marketContextId,
-        executableFundsRaw: budget,
-        slippageBps: request.marketBuySlippageBps,
-      }),
-      new Promise<undefined>((resolve) => {
+    return await Promise.race([
+      (async () => {
+        let capacity = capacityFor(projection.requestedCollateralRaw);
+        // Reducing the Buy also reduces its percentage fee budget. Revalidate
+        // against the smaller quote's total required collateral,
+        // never keep the original larger order's allowance.
+        for (let pass = 0; pass < 3; pass++) {
+          if (Date.now() >= deadlineMs) return null;
+          if (capacity == null) return null;
+          const budget = available + capacity;
+          if (budget <= 0n) return undefined;
+          const result = await findMax(pool, {
+            tokenId,
+            executableFundsRaw: budget,
+            slippageBps: request.marketBuySlippageBps,
+          });
+          if (Date.now() >= deadlineMs) return null;
+          if (!result.ok)
+            return result.reason === "below_min_order" ? undefined : null;
+          const cents = BigInt(result.maxAmountUsdRaw) / 10_000n;
+          if (cents < 100n || cents >= BigInt(original)) return undefined;
+          const required = result.quote.totalRequiredUsdcRaw;
+          if (required == null) return null;
+          const verifiedCapacity = capacityFor(required);
+          if (verifiedCapacity == null || Date.now() >= deadlineMs) return null;
+          if (available + verifiedCapacity >= BigInt(required)) {
+            return {
+              originalAmountUsdCents: original,
+              amountUsdCents: Number(cents),
+              expiresAt: new Date(expiresAtMs).toISOString(),
+            };
+          }
+          if (verifiedCapacity >= capacity) return null;
+          capacity = verifiedCapacity;
+        }
+        return null;
+      })(),
+      new Promise<null>((resolve) => {
         timer = setTimeout(() => {
           console.warn("[funding] market Buy suggestion timed out", {
             liquidityProjectionId: projection.liquidityProjectionId,
           });
-          resolve(undefined);
+          resolve(null);
         }, 1_000);
       }),
     ]);
@@ -97,17 +136,8 @@ export async function suggestSmallerMarketBuy(
     console.warn("[funding] market Buy suggestion quote unavailable", {
       liquidityProjectionId: projection.liquidityProjectionId,
     });
-    return undefined;
+    return null;
   } finally {
     clearTimeout(timer);
   }
-  if (!result?.ok || expiresAtMs <= Date.now()) return undefined;
-  const cents = BigInt(result.maxAmountUsdRaw) / 10_000n;
-  // Sub-dollar reductions are not a useful recovery action; keep Add funds.
-  if (cents < 100n || cents >= BigInt(original)) return undefined;
-  return {
-    originalAmountUsdCents: original,
-    amountUsdCents: Number(cents),
-    expiresAt: new Date(expiresAtMs).toISOString(),
-  };
 }

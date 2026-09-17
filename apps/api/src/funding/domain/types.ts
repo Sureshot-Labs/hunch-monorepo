@@ -472,6 +472,8 @@ export type FundingDestinationOption = Readonly<{
 }>;
 
 export type IntentLiquidityProjection = Readonly<{
+  /** Optional advice failed, not evidence that depositing is required. */
+  marketBuySuggestionUnavailable?: boolean;
   /** Nominal Buy suggestion, not an executable quote. Uses this projection's expiry. */
   suggestedMarketBuy?: Readonly<{
     originalAmountUsdCents: number;
