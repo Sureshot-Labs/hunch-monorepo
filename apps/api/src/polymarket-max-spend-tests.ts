@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import type { Pool } from "@hunch/infra";
 import {
   calculatePolymarketQuote,
+  findMaxPolymarketLimitBuyShares,
   validatePolymarketLimitBuy,
   calculatePolymarketSignedBuyRequiredSpendRaw,
   calculatePolymarketSignedFokBuyRequiredSpendRaw,
@@ -325,6 +326,90 @@ function accountMaxRelaySource(input: {
 }
 
 const tests: TestCase[] = [
+  {
+    name: "limit MAX includes fees at the chosen price and returns the largest normalized shares",
+    run: () => {
+      const context = quoteContext({
+        marketInfo: { ...baseMarketInfo, taker_fee_bps: "0" },
+        feePolicySnapshot: builderFeePolicy(820),
+      });
+      for (const orderType of ["GTC", "GTD"] as const) {
+        const result = findMaxPolymarketLimitBuyShares({
+          context,
+          tokenId: "yes",
+          executableFundsRaw: 4_000_000n,
+          limitPrice: 0.23,
+          orderType,
+        });
+        assert.equal(result.ok, true);
+        if (!result.ok) throw new Error("Expected a limit maximum");
+        assert.equal(result.quote.orderType, orderType);
+        assert.equal(result.quote.price, 0.23);
+        assert.ok(result.quote.totalRequiredUsdcRaw != null);
+        assert.ok(BigInt(result.quote.totalRequiredUsdcRaw) <= 4_000_000n);
+        assert.ok(result.quote.size < 17.3913);
+        const next = calculatePolymarketQuote({
+          context,
+          tokenId: "yes",
+          side: "BUY",
+          orderType,
+          amountType: "shares",
+          limitPrice: 0.23,
+          amountSharesRawInput: BigInt(result.quote.takerAmount) + 10_000n,
+        });
+        assert.ok(next.totalRequiredUsdcRaw != null);
+        assert.ok(BigInt(next.totalRequiredUsdcRaw) > 4_000_000n);
+      }
+    },
+  },
+  {
+    name: "limit MAX preserves marketable notional and share minima without importing FOK rules",
+    run: () => {
+      const context = quoteContext({
+        marketInfo: { ...baseMarketInfo, taker_fee_bps: "0" },
+      });
+      const max = (budget: bigint, limitPrice: number) =>
+        findMaxPolymarketLimitBuyShares({
+          context,
+          tokenId: "yes",
+          executableFundsRaw: budget,
+          limitPrice,
+        });
+      assert.equal(max(999_999n, 0.5).ok, false);
+      // Resting limit below $1 remains valid when it meets the market's shares minimum.
+      assert.equal(max(900_000n, 0.15).ok, true);
+      const fiveShares = max(2_500_000n, 0.5);
+      assert.equal(fiveShares.ok, true);
+      assert.equal(max(2_499_999n, 0.5).ok, false);
+      assert.equal(max(0n, 0.23).ok, false);
+      const crossing = {
+        ...context,
+        orderbook: {
+          ...context.orderbook,
+          minOrderSize: 1,
+          asks: [{ price: 0.5, size: 100 }],
+        },
+      };
+      assert.equal(
+        findMaxPolymarketLimitBuyShares({
+          context: crossing,
+          tokenId: "yes",
+          executableFundsRaw: 999_999n,
+          limitPrice: 0.5,
+        }).ok,
+        false,
+      );
+      assert.equal(
+        findMaxPolymarketLimitBuyShares({
+          context: crossing,
+          tokenId: "yes",
+          executableFundsRaw: 1_000_000n,
+          limitPrice: 0.5,
+        }).ok,
+        true,
+      );
+    },
+  },
   {
     name: "account MAX remains executable after a completed trade with venue cash plus internal funding",
     run: async () => {
@@ -845,6 +930,29 @@ const tests: TestCase[] = [
       });
       assert.equal(amountEstimate.ok, true);
       assert.equal(amountEstimate.executableFundsRaw, "5780000");
+      const limitEstimate = await computePolymarketAccountMaxSpend({
+        ...requestInput,
+        amountEstimateOnly: true,
+        orderType: "GTC",
+        limitPrice: 0.23,
+        dependencies: {
+          ...requestInput.dependencies,
+          buildAccountValueReadModel: async () => estimateAccount,
+          createFundingRuntime: () => {
+            throw new Error("Limit Max must not query Relay");
+          },
+          findMaxPolymarketMarketBuyUsdForFunds: async () => {
+            throw new Error("Limit Max must not use FOK prices");
+          },
+        },
+      });
+      assert.equal(limitEstimate.ok, true);
+      assert.equal(limitEstimate.orderType, "GTC");
+      assert.equal(limitEstimate.amountType, "shares");
+      assert.ok(BigInt(String(limitEstimate.maxSharesRaw)) > 0n);
+      assert.ok(
+        BigInt(String(limitEstimate.totalRequiredUsdcRaw)) <= 5_780_000n,
+      );
       const sessionEstimateAccount = {
         ...estimateAccount,
         ownership: {
@@ -1123,6 +1231,17 @@ const tests: TestCase[] = [
         false,
         "aggregate capacity cannot certify an unavailable ordinary Buy route",
       );
+      const verifiedLimit = await computePolymarketAccountMaxSpend({
+        ...requestInput,
+        orderType: "GTC",
+        limitPrice: 0.23,
+      });
+      assert.equal(verifiedLimit.ok, true);
+      assert.equal(verifiedLimit.orderType, "GTC");
+      assert.ok(
+        BigInt(String(verifiedLimit.totalRequiredUsdcRaw)) <= 4_860_000n,
+      );
+      assert.ok(BigInt(String(verifiedLimit.maxSharesRaw)) > 0n);
     },
   },
   {

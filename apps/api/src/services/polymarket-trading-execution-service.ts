@@ -329,6 +329,8 @@ type PolymarketOrderHashBody = {
 };
 
 type PolymarketMaxSpendBody = {
+  limitPrice?: number;
+  verifyFunding?: boolean;
   connectedExternalWalletRefs?: string[];
   amountType?: string | null;
   funderAddress?: string | null;
@@ -4002,13 +4004,22 @@ export async function computePolymarketMaxSpendRoute(input: {
   });
   const orderType = body.orderType ?? "FOK";
   const amountType = body.amountType ?? "usd";
-
-  if (orderType !== "FOK" || amountType !== "usd") {
+  const limitOrderType =
+    orderType === "GTC" || orderType === "GTD" ? orderType : undefined;
+  const supportedLimit =
+    limitOrderType != null &&
+    amountType === "shares" &&
+    body.fundingScope === "account" &&
+    body.limitPrice != null &&
+    Number.isFinite(body.limitPrice) &&
+    body.limitPrice > 0 &&
+    body.limitPrice < 1;
+  if (!supportedLimit && (orderType !== "FOK" || amountType !== "usd")) {
     return {
       ok: true,
       payload: polymarketMaxSpendUnavailable(
         "unsupported_order_type",
-        "Polymarket max spend currently supports market BUY FOK USD orders only.",
+        "Max spend requires a market BUY or an account-scoped limit BUY with a valid limit price.",
       ),
     };
   }
@@ -4130,7 +4141,10 @@ export async function computePolymarketMaxSpendRoute(input: {
     return {
       ok: true,
       payload: await computePolymarketAccountMaxSpend({
-        amountEstimateOnly: true,
+        amountEstimateOnly: !(supportedLimit && body.verifyFunding === true),
+        ...(supportedLimit
+          ? { orderType: limitOrderType, limitPrice: body.limitPrice }
+          : {}),
         connectedExternalWalletRefs: body.connectedExternalWalletRefs,
         funder,
         funds,

@@ -1246,6 +1246,64 @@ export function calculatePolymarketQuote(inputs: {
   };
 }
 
+/** Request-local budget search using the same rounding, fees and minimums as signing. */
+export function findMaxPolymarketLimitBuyShares(inputs: {
+  context: PolymarketQuoteContext;
+  tokenId: string;
+  executableFundsRaw: bigint;
+  limitPrice: number;
+  orderType?: "GTC" | "GTD";
+}): PolymarketMaxSpendDetailedResult {
+  const quoteAt = (shares: bigint) =>
+    calculatePolymarketQuote({
+      tokenId: inputs.tokenId,
+      context: inputs.context,
+      side: "BUY",
+      orderType: inputs.orderType ?? "GTC",
+      amountType: "shares",
+      amountSharesRawInput: shares,
+      limitPrice: inputs.limitPrice,
+    });
+  const seed = quoteAt(USDC_SCALE);
+  const priceRaw = BigInt(Math.round(seed.price * Number(USDC_SCALE)));
+  let low = 1n;
+  let high =
+    (inputs.executableFundsRaw * USDC_SCALE) /
+    priceRaw /
+    LIMIT_SHARES_MICRO_STEP;
+  let best: PolymarketQuoteResult | null = null;
+  while (low <= high) {
+    const mid = (low + high) / 2n;
+    let quote: PolymarketQuoteResult;
+    try {
+      quote = quoteAt(mid * LIMIT_SHARES_MICRO_STEP);
+    } catch (error) {
+      if (
+        error instanceof PolymarketQuoteError &&
+        error.reason === "amount_too_small"
+      ) {
+        low = mid + 1n;
+        continue;
+      }
+      throw error;
+    }
+    if (
+      quote.totalRequiredUsdcRaw != null &&
+      BigInt(quote.totalRequiredUsdcRaw) <= inputs.executableFundsRaw
+    ) {
+      best = quote;
+      low = mid + 1n;
+    } else high = mid - 1n;
+  }
+  if (
+    !best ||
+    best.violatesMinOrderSize ||
+    best.limitOrderValidation?.valid === false
+  )
+    return { ok: false, reason: "below_min_order" };
+  return { ok: true, maxAmountUsdRaw: best.makerAmount, quote: best };
+}
+
 function searchMaxPolymarketMarketBuyUsd(inputs: {
   context: PolymarketQuoteContext;
   tokenId: string;

@@ -26,7 +26,10 @@ import { fetchPolymarketMarketInfo } from "../repos/polymarket-markets.js";
 import { env } from "../env.js";
 import { toChecksumAddress } from "./api-trading-common.js";
 import { findMaxPolymarketMarketBuyUsdForFunds } from "./polymarket-trading-service.js";
-import { loadPolymarketQuoteContext } from "./polymarket-quote.js";
+import {
+  loadPolymarketQuoteContext,
+  findMaxPolymarketLimitBuyShares,
+} from "./polymarket-quote.js";
 
 const POLYMARKET_PUSD_DECIMALS = 6;
 
@@ -264,6 +267,8 @@ function maximumPreviewInternalFundingRaw(input: {
  * The caller may expose `fundingScope: account` only when this function does.
  */
 export async function computePolymarketAccountMaxSpend(input: {
+  limitPrice?: number;
+  orderType?: "GTC" | "GTD";
   amountEstimateOnly?: boolean;
   connectedExternalWalletRefs?: string[];
   funder: string;
@@ -305,6 +310,21 @@ export async function computePolymarketAccountMaxSpend(input: {
           ),
       }),
     ]);
+    const findMaxForBudget = (executableFundsRaw: bigint) =>
+      input.orderType
+        ? findMaxPolymarketLimitBuyShares({
+            context: quoteContext,
+            tokenId: input.tokenId,
+            executableFundsRaw,
+            limitPrice: input.limitPrice ?? NaN,
+            orderType: input.orderType,
+          })
+        : dependencies.findMaxPolymarketMarketBuyUsdForFunds(input.pool, {
+            tokenId: input.tokenId,
+            executableFundsRaw,
+            context: quoteContext,
+            slippageBps: input.slippageBps ?? undefined,
+          });
     const controllerWalletRef = accountControllerWalletRef(
       account,
       input.signer,
@@ -351,15 +371,7 @@ export async function computePolymarketAccountMaxSpend(input: {
           "below_min_order",
           "Estimated cash is below the minimum order amount.",
         );
-      const estimate = await dependencies.findMaxPolymarketMarketBuyUsdForFunds(
-        input.pool,
-        {
-          tokenId: input.tokenId,
-          executableFundsRaw: estimatedRaw,
-          context: quoteContext,
-          slippageBps: input.slippageBps ?? undefined,
-        },
-      );
+      const estimate = await findMaxForBudget(estimatedRaw);
       if (!estimate.ok)
         return unavailable(
           estimate.reason,
@@ -372,8 +384,11 @@ export async function computePolymarketAccountMaxSpend(input: {
         fundingScope: "account",
         tokenId: input.tokenId,
         side: "BUY",
-        orderType: "FOK",
-        amountType: "usd",
+        orderType: input.orderType ?? "FOK",
+        amountType: input.orderType ? "shares" : "usd",
+        ...(input.orderType
+          ? { maxSharesRaw: estimate.quote.takerAmount }
+          : {}),
         maxAmountUsd: Number(estimate.maxAmountUsdRaw) / 1_000_000,
         maxAmountUsdRaw: estimate.maxAmountUsdRaw,
         executableFundsRaw: estimatedRaw.toString(),
@@ -519,15 +534,7 @@ export async function computePolymarketAccountMaxSpend(input: {
       );
     }
 
-    const maxSpend = await dependencies.findMaxPolymarketMarketBuyUsdForFunds(
-      input.pool,
-      {
-        tokenId: input.tokenId,
-        executableFundsRaw,
-        context: quoteContext,
-        slippageBps: input.slippageBps ?? undefined,
-      },
-    );
+    const maxSpend = await findMaxForBudget(executableFundsRaw);
     if (!maxSpend.ok) {
       input.log?.warn?.(
         {
@@ -646,8 +653,9 @@ export async function computePolymarketAccountMaxSpend(input: {
       fundingScope: "account",
       tokenId: input.tokenId,
       side: "BUY",
-      orderType: "FOK",
-      amountType: "usd",
+      orderType: input.orderType ?? "FOK",
+      amountType: input.orderType ? "shares" : "usd",
+      ...(input.orderType ? { maxSharesRaw: quote.takerAmount } : {}),
       maxAmountUsd: Number(maxSpend.maxAmountUsdRaw) / 1_000_000,
       maxAmountUsdRaw: maxSpend.maxAmountUsdRaw,
       totalRequiredUsdcRaw: quote.totalRequiredUsdcRaw ?? "0",

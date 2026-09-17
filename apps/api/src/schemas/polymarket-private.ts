@@ -281,6 +281,8 @@ export const polymarketQuoteBodySchema = z
   );
 
 export const polymarketMaxSpendBodySchema = z.object({
+  limitPrice: z.coerce.number().gt(0).lt(1).optional(),
+  verifyFunding: z.boolean().optional(),
   tokenId: zRequiredString("tokenId is required"),
   side: z.enum(["BUY"], {
     message: "Max spend only supports BUY orders",
