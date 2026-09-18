@@ -397,6 +397,7 @@ function candidateFeeWithinLimits(input: {
   maximumFeeUsd: string;
   maximumFeeBps: number;
   maximumSlippageBps: number;
+  minimumDestinationUsd?: string;
   feeReferenceUsd?: string | null;
 }): Readonly<{ feeUsd: string; minimumRaw: bigint }> | null {
   let minimumRaw = 0n;
@@ -429,7 +430,11 @@ function candidateFeeWithinLimits(input: {
     decimals: input.destinationAsset.decimals,
     unitPriceUsd: input.destinationUnitPriceUsd,
   });
+  // Advice must not count a refill that ordinary preparation will reject.
+  // Check the selected combination, just like the aggregate placement target.
   if (
+    compareUnsignedDecimals(minimumUsd, input.minimumDestinationUsd ?? "0") <
+      0 ||
     !fundingFeeWithinLimits(
       feeUsd,
       minimumUsd,
@@ -458,6 +463,7 @@ export function maximumInternalFundingDestinationRaw(
     maximumFeeUsd: string;
     maximumFeeBps: number;
     maximumSlippageBps: number;
+    minimumDestinationUsd?: string;
     feeReferenceUsd?: string | null;
     executionBoundary?: "automatic" | "client_handoff";
     excludedSourceLocationIds?: readonly string[];
@@ -506,6 +512,7 @@ export function maximumInternalFundingDestinationRaw(
       maximumFeeUsd: input.maximumFeeUsd,
       maximumFeeBps: input.maximumFeeBps,
       maximumSlippageBps: input.maximumSlippageBps,
+      minimumDestinationUsd: input.minimumDestinationUsd,
       feeReferenceUsd: input.feeReferenceUsd,
     });
     if (economics && economics.minimumRaw > maximumRaw) {

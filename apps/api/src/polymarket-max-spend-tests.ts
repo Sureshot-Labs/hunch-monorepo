@@ -813,6 +813,49 @@ const tests: TestCase[] = [
         },
       );
       assert.equal(shortageHint?.amountUsdCents, 162);
+      const belowFloorRoute = accountMaxRelaySource({
+        destinationAsset,
+        destinationRaw: "377645",
+      });
+      const refillFloorHint = await suggestSmallerMarketBuy(
+        {} as Pool,
+        {
+          ...suggestionSnapshot,
+          request: {
+            ...suggestionSnapshot.request,
+            marketBuyAmountUsdCents: 235,
+          },
+          projection: {
+            ...suggestionSnapshot.projection,
+            availableNowRaw: "2117991",
+            requestedCollateralRaw: "2489827",
+          },
+          sources: [
+            {
+              ...belowFloorRoute,
+              option: {
+                ...belowFloorRoute.option,
+                expiresAt: new Date(Date.now() + 30_000).toISOString(),
+              },
+            },
+          ],
+        },
+        account,
+        DEFAULT_FUNDING_RUNTIME_POLICY,
+        async (_pool, input) => {
+          assert.equal(
+            input.executableFundsRaw,
+            2117991n,
+            "a route below the refill floor cannot increase Reduce",
+          );
+          return findMaxPolymarketMarketBuyUsdDetailed({
+            ...input,
+            context: quoteContext({ feePolicySnapshot: builderFeePolicy(595) }),
+            requireOrderbookDepth: true,
+          });
+        },
+      );
+      assert.equal(refillFloorHint?.amountUsdCents, 199);
       for (const [feeUsd, expectedCents, expectedBudgets] of [
         ["0.04", 500, [5_000_000n]],
         ["1.10", 492, [5_000_000n, 4_920_000n]],
@@ -845,7 +888,13 @@ const tests: TestCase[] = [
             ],
           },
           account,
-          DEFAULT_FUNDING_RUNTIME_POLICY,
+          {
+            ...DEFAULT_FUNDING_RUNTIME_POLICY,
+            placement: {
+              ...DEFAULT_FUNDING_RUNTIME_POLICY.placement,
+              minimumDestinationUsd: "0",
+            },
+          },
           async (_pool, input) => {
             budgets.push(input.executableFundsRaw);
             return findMaxPolymarketMarketBuyUsdDetailed({
@@ -858,7 +907,7 @@ const tests: TestCase[] = [
         assert.equal(
           reduced?.amountUsdCents,
           expectedCents,
-          "Reduce shares the whole-Buy fee rule and rechecks it after lowering the amount",
+          "with the refill floor disabled, Reduce still rechecks the smaller Buy fee budget",
         );
         assert.deepEqual(budgets, expectedBudgets);
       }

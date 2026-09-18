@@ -243,6 +243,7 @@ function maximumPreviewInternalFundingRaw(input: {
   maximumFeeBps: number;
   maximumFeeUsd: string;
   maximumSlippageBps: number;
+  minimumDestinationUsd: string;
   preview: Awaited<ReturnType<FundingPlanningRuntime["previewLiquidity"]>>;
 }): bigint | null {
   return maximumInternalFundingCapacityRaw({
@@ -252,6 +253,7 @@ function maximumPreviewInternalFundingRaw(input: {
     maximumFeeUsd: input.maximumFeeUsd,
     maximumFeeBps: input.maximumFeeBps,
     maximumSlippageBps: input.maximumSlippageBps,
+    minimumDestinationUsd: input.minimumDestinationUsd,
     // The Deposit Wallet balance is already counted as direct executable
     // collateral. Excluding its frozen source location prevents a
     // Deposit Wallet -> controller -> Deposit Wallet loop from counting
@@ -481,6 +483,7 @@ export async function computePolymarketAccountMaxSpend(input: {
       maximumFeeUsd: economics.maximumFeeUsd,
       maximumFeeBps: economics.maximumFeeBps,
       maximumSlippageBps: economics.maximumSlippageBps,
+      minimumDestinationUsd: economics.minimumDestinationUsd,
       preview: capacityPreview,
     });
     if (additionalCapacityRaw == null) {
@@ -588,6 +591,7 @@ export async function computePolymarketAccountMaxSpend(input: {
         maximumFeeUsd: economics.maximumFeeUsd,
         maximumFeeBps: economics.maximumFeeBps,
         maximumSlippageBps: economics.maximumSlippageBps,
+        minimumDestinationUsd: economics.minimumDestinationUsd,
         preview: exactPreview,
       });
       const hasExactInternalRoute = exactPreview.projection.sourceOptions.some(

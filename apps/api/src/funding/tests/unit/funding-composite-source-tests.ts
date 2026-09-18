@@ -1389,6 +1389,30 @@ const tinyCapacity = {
   destinationAsset: DESTINATION_ASSET,
   maximumSlippageBps: 100,
 };
+for (const minimumRaw of ["377645", "499999", "500000", "500001"]) {
+  const source = partialSource({
+    id: "refill_floor",
+    location: sourceLocation(
+      "refill_floor",
+      "evm:8453",
+      "0x00000000000000000000000000000000000000b5",
+    ),
+    sourceRaw: "600000",
+    expectedRaw: minimumRaw,
+    minimumRaw,
+    feeUsd: "0.05",
+  });
+  assert.equal(
+    maximumInternalFundingDestinationRaw({
+      ...tinyCapacity,
+      candidates: [source],
+      feeReferenceUsd: "2.49",
+      minimumDestinationUsd: "0.50",
+    }),
+    BigInt(minimumRaw) < 500000n ? 0n : BigInt(minimumRaw),
+    "advice must honor the refill minimum in raw units",
+  );
+}
 assert.equal(maximumInternalFundingDestinationRaw(tinyCapacity), 0n);
 assert.equal(
   maximumInternalFundingDestinationRaw({
