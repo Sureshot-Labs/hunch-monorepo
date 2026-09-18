@@ -1,6 +1,7 @@
 import type { Pool } from "@hunch/infra";
 
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
+import { classifyProvenCashShortfall } from "./proven-cash-shortfall.js";
 import {
   addUnsignedDecimals,
   compareUnsignedDecimals,
@@ -1294,12 +1295,12 @@ export class ProductionFundingSourcePlanner {
           },
         ];
       }),
-      reasonCodes: [
+      reasonCodes: classifyProvenCashShortfall(this.account, input.request, [
         ...new Set<FundingReasonCode>([
           ...inventoryReasonCodes,
           ...planned.reasonCodes,
         ]),
-      ],
+      ]),
     };
   }
 

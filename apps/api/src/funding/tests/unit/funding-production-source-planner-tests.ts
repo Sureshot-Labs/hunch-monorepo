@@ -33,6 +33,11 @@ import {
 import { groupWalletExecutableActions } from "../../planner/evm-action-batching.js";
 import { DirectWithdrawalSourceAdapter } from "../../planner/direct-withdrawal-source-adapter.js";
 import { sessionSourceAccount } from "../../planner/session-source-account.js";
+import { classifyProvenCashShortfall } from "../../planner/proven-cash-shortfall.js";
+import type {
+  FundingDiscoveryRequest,
+  FundingReasonCode,
+} from "../../domain/types.js";
 import { assertDirectWithdrawalActionMatchesRecipient } from "../../execution/direct-withdrawal-transfer.js";
 import { buildExactSolWithdrawalAction } from "../../execution/direct-withdrawal-transfer.js";
 
@@ -2553,6 +2558,97 @@ assert.deepEqual(
     TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
   ).routes.map((route) => route.routeId),
   ["base-usdc-to-polygon-pusd"],
+);
+
+const shortageRequest = {
+  purpose: "trade_shortfall",
+  consumerIntent: { side: "BUY", venueId: "polymarket" },
+  requestedDestinationAmount: { asset: POLYGON_PUSD, raw: "5297502" },
+} as FundingDiscoveryRequest;
+const rejectedReasons = [
+  "provider_quote_rejected",
+  "insufficient_liquidity",
+] as const;
+const shortageAccount = account({ availableRaw: "1740002" });
+assert.deepEqual(
+  classifyProvenCashShortfall(
+    shortageAccount,
+    shortageRequest,
+    rejectedReasons,
+  ),
+  ["insufficient_liquidity"],
+);
+// Compare full requested collateral, not just the venue shortfall. Exact raw
+// balances, not display-rounded USD, decide the boundary.
+for (const raw of ["1740001", "1740002", "1740003"]) {
+  assert.deepEqual(
+    classifyProvenCashShortfall(
+      shortageAccount,
+      {
+        ...shortageRequest,
+        requestedDestinationAmount: { asset: POLYGON_PUSD, raw },
+      },
+      rejectedReasons,
+    ),
+    raw === "1740003" ? ["insufficient_liquidity"] : rejectedReasons,
+  );
+}
+for (const reason of [
+  "rpc_unavailable",
+  "provider_status_unknown",
+  "provider_quote_invalid",
+  "insufficient_gas",
+] as const) {
+  const reasons: readonly FundingReasonCode[] = [...rejectedReasons, reason];
+  assert.deepEqual(
+    classifyProvenCashShortfall(shortageAccount, shortageRequest, reasons),
+    reasons,
+  );
+}
+for (const availability of [
+  { ...shortageAccount.cashAvailability, completeness: "partial" as const },
+  { ...shortageAccount.cashAvailability, freshness: "stale" as const },
+  {
+    ...shortageAccount.cashAvailability,
+    components: shortageAccount.cashAvailability.components.map(
+      (component) => ({ ...component, freshness: "stale" as const }),
+    ),
+  },
+  {
+    ...shortageAccount.cashAvailability,
+    components: shortageAccount.cashAvailability.components.map(
+      (component) => ({
+        ...component,
+        amount: { asset: SOLANA_NATIVE, raw: component.amount.raw },
+      }),
+    ),
+  },
+]) {
+  assert.deepEqual(
+    classifyProvenCashShortfall(
+      { ...shortageAccount, cashAvailability: availability },
+      shortageRequest,
+      rejectedReasons,
+    ),
+    rejectedReasons,
+  );
+}
+assert.deepEqual(
+  classifyProvenCashShortfall(
+    shortageAccount,
+    { ...shortageRequest, purpose: "withdrawal" },
+    rejectedReasons,
+  ),
+  rejectedReasons,
+);
+assert.deepEqual(
+  classifyProvenCashShortfall(
+    account({ availableRaw: "6000000", internal: false }),
+    shortageRequest,
+    rejectedReasons,
+  ),
+  rejectedReasons,
+  "even disconnected cash counts toward the conservative upper bound",
 );
 
 console.log(

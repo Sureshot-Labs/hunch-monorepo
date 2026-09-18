@@ -62,6 +62,7 @@ import type { FundingLiquidityPreview } from "./funding/planner/runtime-service.
 import type { PlannedSourceOption } from "./funding/planner/planning-types.js";
 import { env } from "./env.js";
 import { suggestSmallerMarketBuy } from "./funding/planner/market-buy-suggestion.js";
+import { classifyProvenCashShortfall } from "./funding/planner/proven-cash-shortfall.js";
 
 type TestCase = {
   name: string;
@@ -741,6 +742,77 @@ const tests: TestCase[] = [
         suggestionSnapshot.sources[0]?.option.expiresAt,
       );
       const beforeInvalid = suggestionQuoteCalls;
+      const shortageAccount = {
+        ...account,
+        projection: { ...account.projection, collectorErrors: [] },
+        cashAvailability: {
+          ...account.cashAvailability,
+          completeness: "complete" as const,
+          freshness: "fresh" as const,
+          collectorErrors: [],
+          components: [
+            {
+              availableRaw: "1723368",
+              amount: { asset: destinationAsset },
+              freshness: "fresh",
+              reasonCodes: [],
+            },
+            {
+              availableRaw: "16634",
+              amount: {
+                asset: {
+                  networkId: "evm:8453",
+                  assetId: env.limitlessUsdcAddress,
+                  decimals: 6,
+                },
+              },
+              freshness: "fresh",
+              reasonCodes: [],
+            },
+          ],
+        },
+      } as unknown as AccountValueReadModel;
+      const shortageRequest = {
+        ...suggestionSnapshot.request,
+        marketBuyAmountUsdCents: 500,
+        requestedDestinationAmount: { asset: destinationAsset, raw: "5297502" },
+      };
+      const shortageReasons = classifyProvenCashShortfall(
+        shortageAccount,
+        shortageRequest,
+        ["insufficient_liquidity", "provider_quote_rejected"],
+      );
+      assert.deepEqual(shortageReasons, ["insufficient_liquidity"]);
+      const shortageHint = await suggestSmallerMarketBuy(
+        {} as Pool,
+        {
+          ...suggestionSnapshot,
+          request: shortageRequest,
+          sources: [],
+          projection: {
+            ...suggestionSnapshot.projection,
+            sourceOptions: [],
+            availableNowRaw: "1723368",
+            requestedCollateralRaw: "5297502",
+            reasonCodes: shortageReasons,
+          },
+        },
+        shortageAccount,
+        DEFAULT_FUNDING_RUNTIME_POLICY,
+        async (_pool, input) => {
+          assert.equal(
+            input.executableFundsRaw,
+            1723368n,
+            "rejected Base cash must not inflate executable Reduce",
+          );
+          return findMaxPolymarketMarketBuyUsdDetailed({
+            ...input,
+            context: quoteContext({ feePolicySnapshot: builderFeePolicy(595) }),
+            requireOrderbookDepth: true,
+          });
+        },
+      );
+      assert.equal(shortageHint?.amountUsdCents, 162);
       for (const [feeUsd, expectedCents, expectedBudgets] of [
         ["0.04", 500, [5_000_000n]],
         ["1.10", 492, [5_000_000n, 4_920_000n]],
