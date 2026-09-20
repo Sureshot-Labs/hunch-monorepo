@@ -1,25 +1,34 @@
 import type { MarketMatchingPolicy } from "./policy.js";
 import { SUPPORTED_VENUES } from "./contracts.js";
 
+// Transport safety ceiling, sized for the largest policy-allowed feed page.
+const MAX_SELECTOR_BYTES = 8_000_000;
 // Read-only product selectors, owned by the matcher. No dependency on cache warming
 // or public page visits. Their ranking remains implemented once, in the product API.
-export const PRODUCT_SEED_PATHS = {
-  feed: [
-    "/feed?limit=25&offset=0&sort=trending_v2&sort_dir=desc",
-    "/feed?limit=25&offset=0&sort=change24h&sort_dir=desc",
-  ],
-  map: [
-    `/market-map/sidebars?venues=${SUPPORTED_VENUES.join(",")}&trendingLimit=10&volumeMoversLimit=10&liquidityMoversLimit=10&topMoversLimit=10&minVolume24h=1000`,
-  ],
-  whales: [
-    "/wallets/whales?limit=30&offset=0&topChanges=3&sort=last_activity&marketLimit=5&includeSummary=true&windowDays=30&windowHours=168",
-  ],
-} as const;
-export type SeedSurface = keyof typeof PRODUCT_SEED_PATHS;
+export type SeedSurface = "feed" | "map" | "whales";
+export function productSeedPaths(
+  p: MarketMatchingPolicy,
+): Record<SeedSurface, string[]> {
+  return {
+    feed: ["trending_v2", "change24h"].map(
+      (sort) =>
+        `/feed?limit=${p.seedFeedDepth}&offset=0&sort=${sort}&sort_dir=desc`,
+    ),
+    map: [
+      `/market-map/sidebars?venues=${p.venues.join(",")}&trendingLimit=${p.seedMapDepth}&volumeMoversLimit=${p.seedMapDepth}&liquidityMoversLimit=${p.seedMapDepth}&topMoversLimit=${p.seedMapDepth}&minVolume24h=${p.seedMapMinVolumeUsd}`,
+    ],
+    whales: [
+      `/wallets/whales?limit=${p.seedWhalesDepth}&offset=0&topChanges=${p.seedWhaleChangeCount}&sort=last_activity&marketLimit=${p.seedWhaleMarketCount}&includeSummary=true&windowDays=30&windowHours=168`,
+    ],
+  };
+}
 
 /** Extract market references only, never bare event/wallet IDs. Bounds also cover
  * malformed responses. Venue/liveness are checked against PostgreSQL before enqueue. */
-export function productMarketIds(payload: unknown): string[] {
+export function productMarketIds(
+  payload: unknown,
+  marketsPerEvent = 3,
+): string[] {
   const ids = new Set<string>();
   let visited = 0;
   const add = (value: unknown) => {
@@ -31,7 +40,7 @@ export function productMarketIds(payload: unknown): string[] {
       ids.add(value);
   };
   const visit = (value: unknown, marketContext = false, depth = 0) => {
-    if (++visited > 10000 || depth > 12 || ids.size >= 500) return;
+    if (++visited > 10000 || depth > 12 || ids.size >= 4000) return;
     if (Array.isArray(value)) {
       for (const entry of value) visit(entry, marketContext, depth + 1);
     } else if (value && typeof value === "object") {
@@ -67,7 +76,7 @@ export function productMarketIds(payload: unknown): string[] {
         if (entry && typeof entry === "object")
           visit(
             key === "markets" && Array.isArray(entry)
-              ? entry.slice(0, 3)
+              ? entry.slice(0, marketsPerEvent)
               : entry,
             ["markets", "market", "targetMarket", "topMarkets"].includes(key),
             depth + 1,
@@ -89,10 +98,14 @@ export async function collectProductSeeds(
     map: policy.seedMapCount,
     whales: policy.seedWhalesCount,
   };
-  const ids: string[] = [];
+  const pools: Record<SeedSurface, string[]> = {
+    feed: [],
+    map: [],
+    whales: [],
+  };
   const counts: Partial<Record<SeedSurface, number>> = {};
   const unavailable: SeedSurface[] = [];
-  if (!baseUrl) return { ids, counts, unavailable, configured: false };
+  if (!baseUrl) return { pools, counts, unavailable, configured: false };
   const base = new URL(baseUrl);
   if (
     !["http:", "https:"].includes(base.protocol) ||
@@ -100,10 +113,11 @@ export async function collectProductSeeds(
     base.password
   )
     throw new Error("invalid_matching_discovery_api_url");
-  for (const surface of Object.keys(PRODUCT_SEED_PATHS) as SeedSurface[]) {
+  const paths = productSeedPaths(policy);
+  for (const surface of Object.keys(paths) as SeedSurface[]) {
     if (!quotas[surface]) continue;
     const selections: string[][] = [];
-    for (const path of PRODUCT_SEED_PATHS[surface]) {
+    for (const path of paths[surface]) {
       try {
         const response = await fetcher(new URL(path, base), {
           signal: AbortSignal.timeout(10000),
@@ -111,7 +125,7 @@ export async function collectProductSeeds(
         });
         if (
           !response.ok ||
-          Number(response.headers.get("content-length")) > 2_000_000
+          Number(response.headers.get("content-length")) > MAX_SELECTOR_BYTES
         )
           throw new Error("selector_unavailable");
         // Stream a bounded body instead of buffering an unbounded API response.
@@ -124,7 +138,7 @@ export async function collectProductSeeds(
             const next = await reader.read();
             if (next.done) break;
             bytes += next.value.byteLength;
-            if (bytes > 2_000_000)
+            if (bytes > MAX_SELECTOR_BYTES)
               throw new Error("selector_response_too_large");
             chunks.push(next.value);
           }
@@ -132,20 +146,28 @@ export async function collectProductSeeds(
           await reader.cancel();
         }
         selections.push(
-          productMarketIds(JSON.parse(Buffer.concat(chunks).toString("utf8"))),
+          productMarketIds(
+            JSON.parse(Buffer.concat(chunks).toString("utf8")),
+            policy.seedMarketsPerEvent,
+          ),
         );
       } catch {
         if (!unavailable.includes(surface)) unavailable.push(surface);
       }
     }
     const selected = new Set<string>();
-    for (let rank = 0; rank < 500 && selected.size < quotas[surface]; rank++) {
+    // Preserve ranked pools until PostgreSQL has excluded cooling/pending work.
+    for (
+      let rank = 0;
+      rank < Math.max(0, ...selections.map((s) => s.length));
+      rank++
+    ) {
       for (const selection of selections)
         if (selection[rank]) selected.add(selection[rank]);
     }
-    const picked = [...selected].slice(0, quotas[surface]);
+    const picked = [...selected];
     counts[surface] = picked.length;
-    ids.push(...picked);
+    pools[surface] = picked;
   }
-  return { ids: [...new Set(ids)], counts, unavailable, configured: true };
+  return { pools, counts, unavailable, configured: true };
 }

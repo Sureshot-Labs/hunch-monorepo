@@ -43,12 +43,21 @@ export const marketMatchingPolicySchema = z
     timeoutMs: integer(15000, 1000, 15000),
     attempts: integer(3, 1, 3),
     warmIntervalSeconds: integer(900, 60, 86400),
-    warmTrendingCount: integer(25, 0, 100),
-    warmLimitlessCount: integer(25, 0, 100),
-    seedFeedCount: integer(20, 0, 100),
-    seedMapCount: integer(15, 0, 100),
-    seedWhalesCount: integer(15, 0, 100),
-    warmPrefixCount: integer(200, 1, 500),
+    warmBatchSize: integer(300, 1, 1000),
+    warmTrendingCount: integer(75, 0, 1000),
+    warmLimitlessCount: integer(75, 0, 1000),
+    seedFeedCount: integer(60, 0, 1000),
+    seedMapCount: integer(45, 0, 1000),
+    seedWhalesCount: integer(45, 0, 1000),
+    warmPrefixCount: integer(1000, 1, 10000),
+    warmLimitlessPoolSize: integer(500, 1, 5000),
+    seedFeedDepth: integer(100, 1, 200),
+    seedMapDepth: integer(25, 1, 25),
+    seedWhalesDepth: integer(60, 1, 100),
+    seedMarketsPerEvent: integer(3, 1, 20),
+    seedWhaleMarketCount: integer(5, 1, 20),
+    seedWhaleChangeCount: integer(3, 1, 10),
+    seedMapMinVolumeUsd: amount(1000, 0, 1e9),
     warmLimitlessMinVolumeUsd: amount(1000, 0, 1e9),
     eventCandidates: integer(2, 0, 5),
     contractCandidates: integer(3, 0, 10),
@@ -83,11 +92,16 @@ export const marketMatchingPolicySchema = z
         p.seedFeedCount +
         p.seedMapCount +
         p.seedWhalesCount >
-      100
+      p.warmBatchSize
     )
-      invalid("warmTrendingCount", "Total warm allocation cannot exceed 100");
+      invalid("warmBatchSize", "Source allocations exceed the warm batch size");
     if (p.warmTrendingCount > p.warmPrefixCount)
       invalid("warmPrefixCount", "Prefix must cover the trending allocation");
+    if (p.warmLimitlessCount > p.warmLimitlessPoolSize)
+      invalid(
+        "warmLimitlessPoolSize",
+        "Pool must cover the Limitless allocation",
+      );
     if (p.pendingInterests > p.storedInterests)
       invalid("pendingInterests", "Pending capacity exceeds stored capacity");
     if (

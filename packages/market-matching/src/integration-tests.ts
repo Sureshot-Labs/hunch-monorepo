@@ -1167,7 +1167,10 @@ integration(
     await pool.query(
       "delete from market_matching_state where state_key='warm'",
     );
-    assert((await warmInterest(pool)) <= 100);
+    assert(
+      (await warmInterest(pool)) <=
+        DEFAULT_MARKET_MATCHING_POLICY.warmBatchSize,
+    );
     assert.equal(await warmInterest(pool), 0);
     assert((await revalidateLinks(pool)) <= 10);
     const refs = await pool.query(
@@ -1390,6 +1393,156 @@ integration(
         (await resolveMarketLinks(pool, marketIds[0])).length,
         0,
         entry.id,
+      );
+    }
+  },
+);
+
+integration(
+  "PG16: policy-sized batches rotate through unseen markets, then due markets, within the bounded pool",
+  { skip: !url },
+  async () => {
+    const [a] = await seed("selection-rotation");
+    const prefix = `polymarket:rotation-${randomUUID()}-`;
+    const ids = Array.from(
+      { length: 650 },
+      (_, i) => prefix + String(i).padStart(4, "0"),
+    );
+    await pool.query(
+      `insert into unified_markets(id,event_id,venue,title,status,volume_total)
+    select item_id,$2,'polymarket','Selection rotation','ACTIVE',1e18 from unnest($1::text[]) item_rows(item_id)`,
+      [ids, a.eventId],
+    );
+    // Previous fixtures must not consume the pending capacity; only these high-score
+    // rows fit the configured prefix. Closed rows are filtered before source quotas.
+    await pool.query(
+      "update market_matching_interest set status='done',next_attempt_at=now()+interval '6 hours'",
+    );
+    const resetCycle = () =>
+      pool.query("delete from market_matching_state where state_key='warm'");
+    await matchingOverride({
+      warmBatchSize: 300,
+      warmTrendingCount: 300,
+      warmPrefixCount: 600,
+      warmLimitlessCount: 0,
+      seedFeedCount: 0,
+      seedMapCount: 0,
+      seedWhalesCount: 0,
+    });
+    try {
+      await resetCycle();
+      assert.equal(await warmInterest(pool), 300);
+      assert.equal(await warmInterest(pool), 0);
+      await pool.query(
+        "update market_matching_interest set status='done',next_attempt_at=now()+interval '6 hours' where market_id=any($1::text[])",
+        [ids],
+      );
+      await resetCycle();
+      assert.equal(await warmInterest(pool), 300);
+      const admitted = (
+        await pool.query(
+          "select market_id from market_matching_interest where market_id=any($1::text[]) order by market_id",
+          [ids],
+        )
+      ).rows.map((r) => r.market_id);
+      assert.deepEqual(admitted, ids.slice(0, 600));
+      await resetCycle();
+      assert.equal(await warmInterest(pool), 0); // pending and cooling rows cannot recycle
+      await pool.query(
+        "update market_matching_interest set status='done',next_attempt_at=now()-interval '1 hour' where market_id=$1",
+        [ids[0]],
+      );
+      await resetCycle();
+      assert.equal(await warmInterest(pool), 1);
+      // Expanding just the policy pool exposes the remaining 50 unseen rows.
+      await matchingOverride({
+        warmBatchSize: 300,
+        warmTrendingCount: 300,
+        warmPrefixCount: 650,
+        warmLimitlessCount: 0,
+        seedFeedCount: 0,
+        seedMapCount: 0,
+        seedWhalesCount: 0,
+      });
+      await resetCycle();
+      assert.equal(await warmInterest(pool), 50);
+    } finally {
+      await pool.query(
+        "delete from market_matching_interest where market_id=any($1::text[])",
+        [ids],
+      );
+      await pool.query("delete from unified_markets where id=any($1::text[])", [
+        ids,
+      ]);
+      await resetCycle();
+    }
+  },
+);
+
+integration(
+  "PG16: full storage skips unseen rows without starving due interests",
+  { skip: !url },
+  async () => {
+    const [due] = await seed("stored-due");
+    const [unseen] = await seed("storage-unseen");
+    await pool.query(
+      "update market_matching_interest set status='done',next_attempt_at=now()+interval '6 hours'",
+    );
+    await pool.query(
+      "insert into market_matching_interest(market_id,source,status,next_attempt_at) values($1,'warm','done',now()-interval '1 hour')",
+      [due.id],
+    );
+    await pool.query(
+      "update unified_markets set volume_total=1e20 where id=any($1::text[])",
+      [[due.id, unseen.id]],
+    );
+    const stored = (
+      await pool.query(
+        "select count(*)::int as total from market_matching_interest",
+      )
+    ).rows[0].total;
+    await matchingOverride({
+      warmTrendingCount: 1,
+      warmPrefixCount: 2,
+      warmLimitlessCount: 0,
+      seedFeedCount: 0,
+      seedMapCount: 0,
+      seedWhalesCount: 0,
+      storedInterests: stored,
+      pendingInterests: 1,
+      lazyStoredInterests: 0,
+      lazyPendingInterests: 0,
+    });
+    try {
+      await pool.query(
+        "delete from market_matching_state where state_key='warm'",
+      );
+      assert.equal(await warmInterest(pool), 1);
+      assert.equal(
+        (
+          await pool.query(
+            "select status from market_matching_interest where market_id=$1",
+            [due.id],
+          )
+        ).rows[0].status,
+        "queued",
+      );
+      assert.equal(
+        (
+          await pool.query(
+            "select 1 from market_matching_interest where market_id=$1",
+            [unseen.id],
+          )
+        ).rowCount,
+        0,
+      );
+    } finally {
+      await pool.query(
+        "update unified_markets set volume_total=null where id=any($1::text[])",
+        [[due.id, unseen.id]],
+      );
+      await pool.query(
+        "delete from market_matching_state where state_key='warm'",
       );
     }
   },

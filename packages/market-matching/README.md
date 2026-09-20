@@ -6,9 +6,25 @@ every consumer. No production data, policies, schedules or secrets were changed.
 
 ## Processing
 
-An independent matcher selector samples at most 100 seeds every 15 minutes:
-25 indexed trending, 25 Limitless markets with historical volume >= $1,000,
-20 feed/movers, 15 Market Map and 15 whale-activity markets, before deduplication.
+An independent matcher selector samples at most `warmBatchSize` seeds every
+`warmIntervalSeconds` (defaults: 300 / 15 minutes). Source allocations default to
+75 indexed trending, 75 Limitless markets with historical volume >= $1,000,
+60 feed/movers, 45 Market Map and 45 whale-activity markets. Allocations sum to
+at most the batch size; duplicates are skipped before consuming each allocation.
+
+Candidate pool depths are separate policy controls: `warmPrefixCount` (1,000),
+`warmLimitlessPoolSize` (500), `seedFeedDepth` (100 rows per feed sort),
+`seedMapDepth` (25 per sidebar), and `seedWhalesDepth` (60 wallets).
+`seedMarketsPerEvent` (3), `seedWhaleMarketCount` (5),
+`seedWhaleChangeCount` (3), and `seedMapMinVolumeUsd` (1,000) control product
+selection detail. API page bounds remain schema ceilings, not hidden batch caps.
+Before source quotas are applied, a single bounded PostgreSQL lookup removes
+closed, lifecycle-ineligible, already pending and cooling warm interests.
+Existing lazy work can be promoted even at capacity; unseen markets come next,
+then due markets by oldest request. Successive cycles advance through these
+ranked pools; they do not crawl the entire catalog. A cycle may select fewer
+than its cap when pools overlap, cool down, or exhaust their eligible rows.
+Larger batches do not change inference budgets, pair limits or approval evidence.
 Product sources use read-only API selections through `MATCHING_DISCOVERY_API_URL`;
 the API cache warmer is unchanged and never calls Jev. Unknown liquidity/24h volume
 is not treated as zero. Explicitly zero-activity product records are skipped.
@@ -60,20 +76,20 @@ The independent `venue_lifecycle` policy remains mandatory: discovery capability
 and full indexing are required in addition to a supported, policy-selected venue.
 Selecting a venue in matching cannot override its lifecycle restriction.
 
-| Operational control | Default | Release-owned ceiling/floor |
-| --- | --- | --- |
-| Worker, lazy, each consumer | disabled | boolean |
-| Daily dollars / provider requests, including retries | $1 / 5,000 | finite nonnegative budget / 100,000 requests |
-| Lazy dollars / requests | 20% / 200 | 20% / 200 |
-| Concurrent inference per worker / timeout / attempts | 2 / 15s / 3 | 3 / 15s / 3 |
-| Seed allocation / interval | 25 trending + 25 Limitless + 50 product / 15min | 100 total / at least 1min |
-| Event / contract candidates per seed | 2 / 3 | 5 / 10 |
-| Pending / stored interest | 500 / 5,000 | 500 / 5,000 |
-| Lazy pending / stored interest | 100 / 1,000 | 100 / 1,000 |
-| Inference backlog / lazy backlog | 2,000 / 400 | 2,000 / 400 |
-| New markets per actor, rolling hour / day | 5 / 20 | 5 / 20 |
-| HTTP requests per minute: IP / actor / global | 30 / 10 / 100 | 30 / 10 / 100 |
-| Event and contract probability / confidence | .95 / .90 | cannot lower below .95 / .90 |
+| Operational control                                  | Default                                          | Release-owned ceiling/floor                  |
+| ---------------------------------------------------- | ------------------------------------------------ | -------------------------------------------- |
+| Worker, lazy, each consumer                          | disabled                                         | boolean                                      |
+| Daily dollars / provider requests, including retries | $1 / 5,000                                       | finite nonnegative budget / 100,000 requests |
+| Lazy dollars / requests                              | 20% / 200                                        | 20% / 200                                    |
+| Concurrent inference per worker / timeout / attempts | 2 / 15s / 3                                      | 3 / 15s / 3                                  |
+| Seed allocation / interval                           | 75 trending + 75 Limitless + 150 product / 15min | 1,000 total / at least 1min                  |
+| Event / contract candidates per seed                 | 2 / 3                                            | 5 / 10                                       |
+| Pending / stored interest                            | 500 / 5,000                                      | 500 / 5,000                                  |
+| Lazy pending / stored interest                       | 100 / 1,000                                      | 100 / 1,000                                  |
+| Inference backlog / lazy backlog                     | 2,000 / 400                                      | 2,000 / 400                                  |
+| New markets per actor, rolling hour / day            | 5 / 20                                           | 5 / 20                                       |
+| HTTP requests per minute: IP / actor / global        | 30 / 10 / 100                                    | 30 / 10 / 100                                |
+| Event and contract probability / confidence          | .95 / .90                                        | cannot lower below .95 / .90                 |
 
 Warm volume filters, retrieval bounds/context overlap, cooldown and revalidation
 cadence are also policy fields. SQL timeouts, lease durations, the 90KB request

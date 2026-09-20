@@ -187,23 +187,113 @@ export async function warmInterest(pool: Pool) {
       order by (coalesce(case when volume_total is not null and volume_total>0 then volume_total else null end,0)*0.4 + coalesce(coalesce(nullif(liquidity,0),nullif(open_interest,0)),0)*0.3) desc nulls last,id limit $1
     ) select p.id from prefix_rows p join unified_markets m on m.id=p.id join unified_events e on e.id=m.event_id
     where p.venue=any($3::text[]) and ${liveSql} order by p.warm_score desc nulls last,p.id limit $2`,
-      [matching.warmPrefixCount, matching.warmTrendingCount, matching.venues],
+      [
+        matching.warmTrendingCount ? matching.warmPrefixCount : 0,
+        matching.warmPrefixCount,
+        matching.venues,
+      ],
     );
     // Limitless has unknown liquidity/24h volume. Its bounded native catalog is a separate allocation.
     const native = await db.query(
       `select m.id from unified_markets m join unified_events e on e.id=m.event_id where m.venue='limitless' and ${liveSql} and m.volume_total>=$1 order by m.volume_total desc,m.id limit $2`,
       [
         matching.warmLimitlessMinVolumeUsd,
-        matching.venues.includes("limitless") ? matching.warmLimitlessCount : 0,
+        matching.venues.includes("limitless") && matching.warmLimitlessCount
+          ? matching.warmLimitlessPoolSize
+          : 0,
       ],
     );
-    const ids = [
-      ...new Set([
-        ...product.ids,
-        ...prefix.rows.map((r) => r.id as string),
-        ...native.rows.map((r) => r.id as string),
-      ]),
-    ].slice(0, 100);
+    const pools = {
+      ...product.pools,
+      trending: prefix.rows.map((r) => r.id as string),
+      limitless: native.rows.map((r) => r.id as string),
+    };
+    const quotas = {
+      feed: matching.seedFeedCount,
+      map: matching.seedMapCount,
+      whales: matching.seedWhalesCount,
+      trending: matching.warmTrendingCount,
+      limitless: matching.warmLimitlessCount,
+    };
+    const lifecycle = await readPolicy(db);
+    const venues = matching.venues.filter((v) => eligible(lifecycle, v));
+    // One bounded lookup before quotas: repeated top rows must not hide unseen
+    // markets deeper in a product pool. Lazy rows remain eligible for promotion
+    // even while cooling or pending, including when the queue is full.
+    const availability = await db.query<{
+      id: string;
+      priority: number;
+      requested_at: Date | null;
+      unseen: boolean;
+      needs_admission: boolean;
+    }>(
+      `select m.id,case when interest_row.source='lazy' then 0 when interest_row.market_id is null then 1 else 2 end as priority,interest_row.requested_at,
+       interest_row.market_id is null as unseen,
+       (interest_row.market_id is null or (interest_row.status='done' and interest_row.next_attempt_at<=now())) as needs_admission
+       from unified_markets m join unified_events e on e.id=m.event_id
+       left join market_matching_interest interest_row on interest_row.market_id=m.id
+       where m.id=any($1::text[]) and m.venue=any($2::text[]) and ${liveSql}
+       and (interest_row.market_id is null or interest_row.source='lazy' or (interest_row.status='done' and interest_row.next_attempt_at<=now()))`,
+      [[...new Set(Object.values(pools).flat())], venues],
+    );
+    const available = new Map(availability.rows.map((row) => [row.id, row]));
+    const capacity = (
+      await db.query(
+        "select count(*)::int as stored_count,count(*) filter(where status<>'done')::int as pending from market_matching_interest",
+      )
+    ).rows[0];
+    let storedSlots = Math.max(
+      0,
+      matching.storedInterests - capacity.stored_count,
+    );
+    let pendingSlots = Math.max(
+      0,
+      matching.pendingInterests - capacity.pending,
+    );
+    const ids = new Set<string>();
+    const selectedCounts: Record<string, number> = {};
+    for (const source of Object.keys(pools) as (keyof typeof pools)[]) {
+      const ranked = pools[source]
+        .filter((id) => available.has(id))
+        .sort((a, b) => {
+          const left = available.get(a),
+            right = available.get(b);
+          if (!left || !right) return 0;
+          return (
+            left.priority - right.priority ||
+            (left.priority === 2
+              ? Number(left.requested_at) - Number(right.requested_at)
+              : 0)
+          );
+        });
+      let selected = 0;
+      for (const id of ranked) {
+        if (selected >= quotas[source] || ids.size >= matching.warmBatchSize)
+          break;
+        if (ids.has(id)) continue;
+        const candidate = available.get(id);
+        if (!candidate) continue;
+        // Saturated storage must not let unseen rows starve due stored work.
+        // Lazy promotions remain admissible without consuming new capacity.
+        if (
+          candidate.needs_admission &&
+          candidate.priority !== 0 &&
+          (!pendingSlots || (candidate.unseen && !storedSlots))
+        )
+          continue;
+        if (
+          candidate.needs_admission &&
+          pendingSlots &&
+          (!candidate.unseen || storedSlots)
+        ) {
+          pendingSlots--;
+          if (candidate.unseen) storedSlots--;
+        }
+        ids.add(id);
+        selected++;
+      }
+      selectedCounts[source] = selected;
+    }
     let queued = 0;
     for (const id of ids)
       if ((await putInterest(db, id, "warm", matching)) === "pending") queued++;
@@ -211,7 +301,14 @@ export async function warmInterest(pool: Pool) {
       "insert into market_matching_state(state_key,payload) values('warm',$1) on conflict(state_key) do update set payload=excluded.payload,updated_at=now()",
       [
         {
-          selected: ids.length,
+          selected: ids.size,
+          selectedCounts,
+          poolCounts: Object.fromEntries(
+            Object.entries(pools).map(([source, rows]) => [
+              source,
+              rows.length,
+            ]),
+          ),
           queued,
           product: {
             counts: product.counts,

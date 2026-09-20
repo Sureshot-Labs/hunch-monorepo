@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { collectProductSeeds, productMarketIds } from "./product-seeds.js";
+import {
+  collectProductSeeds,
+  productMarketIds,
+  productSeedPaths,
+} from "./product-seeds.js";
 import { DEFAULT_MARKET_MATCHING_POLICY } from "./policy.js";
 
 test("product seeds accept market references, excluding event/wallet identities and disabled venues", () => {
@@ -35,7 +39,7 @@ test("product seeds accept market references, excluding event/wallet identities 
     ["polymarket:1", "limitless:3", "polymarket:4"],
   );
 });
-test("independent selector respects source quotas, survives errors, never calls inference", async () => {
+test("independent selector preserves deeper pools, survives errors, never calls inference", async () => {
   const calls: string[] = [];
   const fetcher: typeof fetch = async (url) => {
     calls.push(String(url));
@@ -50,7 +54,7 @@ test("independent selector respects source quotas, survives errors, never calls 
     "http://api.internal",
     fetcher,
   );
-  assert.deepEqual(result.ids, ["polymarket:1"]);
+  assert.deepEqual(result.pools.feed, ["polymarket:1", "limitless:2"]);
   assert.deepEqual(result.unavailable, ["map"]);
   assert.equal(calls.length, 3);
   assert(calls.every((url) => url.startsWith("http://api.internal/")));
@@ -70,9 +74,9 @@ test("oversized selector data is discarded before allocating an inference job", 
   const result = await collectProductSeeds(
     { ...DEFAULT_MARKET_MATCHING_POLICY, seedFeedCount: 0, seedWhalesCount: 0 },
     "http://api.internal",
-    async () => new Response("x".repeat(2_000_001)),
+    async () => new Response("x".repeat(8_000_001)),
   );
-  assert.deepEqual(result.ids, []);
+  assert.deepEqual(result.pools.map, []);
   assert.deepEqual(result.unavailable, ["map"]);
 });
 
@@ -105,5 +109,50 @@ test("trending cannot starve movers; zero activity and excessive children do not
         ],
       }),
   );
-  assert.deepEqual(result.ids, ["polymarket:trending", "polymarket:mover"]);
+  assert.deepEqual(result.pools.feed, [
+    "polymarket:trending",
+    "polymarket:mover",
+    "polymarket:second",
+  ]);
+});
+
+test("product request depths and child limits come from policy", () => {
+  const p = {
+    ...DEFAULT_MARKET_MATCHING_POLICY,
+    seedFeedDepth: 150,
+    seedMapDepth: 20,
+    seedWhalesDepth: 80,
+    seedWhaleMarketCount: 9,
+    seedWhaleChangeCount: 7,
+    seedMapMinVolumeUsd: 2000,
+  };
+  const paths = productSeedPaths(p);
+  assert(
+    paths.feed.every(
+      (path) => new URL(path, "http://api").searchParams.get("limit") === "150",
+    ),
+  );
+  assert.equal(
+    new URL(paths.map[0], "http://api").searchParams.get("trendingLimit"),
+    "20",
+  );
+  assert.equal(
+    new URL(paths.map[0], "http://api").searchParams.get("minVolume24h"),
+    "2000",
+  );
+  const whales = new URL(paths.whales[0], "http://api").searchParams;
+  assert.equal(whales.get("limit"), "80");
+  assert.equal(whales.get("marketLimit"), "9");
+  assert.equal(whales.get("topChanges"), "7");
+  assert.equal(
+    productMarketIds(
+      {
+        markets: Array.from({ length: 10 }, (_, i) => ({
+          id: `polymarket:${i}`,
+        })),
+      },
+      8,
+    ).length,
+    8,
+  );
 });
