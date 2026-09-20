@@ -226,7 +226,10 @@ export function buildClusterExecution(input: {
 
   const canonicalOffers: CanonicalOffer[] = [];
   const markets = input.cluster.markets.map((market) => {
-    const mapping = resolveExplicitMarketOutcomeMapping(seed, market);
+    const mapping =
+      market.source === "hunch_matcher"
+        ? (market.outcomeMapping ?? null)
+        : resolveExplicitMarketOutcomeMapping(seed, market);
     const native = input.nativeQuotesByMarketId.get(market.marketId);
     if (!mapping || !native || !native.active || !native.orderable) {
       return { ...market, outcomeMapping: mapping, executionOffers: null };

@@ -1,4 +1,16 @@
 import type { FastifyPluginAsync } from "fastify";
+import { z as zod } from "zod";
+import {
+  requestInterest,
+  readMatchingPolicy,
+  matchingWorkerEnabled,
+  boostRelatedMarkets,
+} from "@hunch/market-matching";
+import { createAuthMiddleware } from "../auth.js";
+import {
+  enabledConsumer,
+  getMatchedAlternatives,
+} from "../services/matched-markets.js";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { buildObservedCanonicalMarketTop } from "@hunch/shared";
 import { createHash } from "crypto";
@@ -18,6 +30,7 @@ import {
   isLimitlessNegRiskMetadata,
 } from "../lib/limitless-metadata.js";
 import { requestPriceRefreshForTokens } from "../lib/price-refresh.js";
+import { requestMarketRefreshForMarketRefs } from "../lib/market-refresh.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
   parseMetadata,
@@ -112,6 +125,11 @@ type MarketRoutesOptions = {
   aggMarketAlternativesCacheTtlSec?: number;
   aggMarketAlternativesNotFoundCacheTtlSec?: number;
   aggMarketAlternativesDb?: DbQuery;
+  getMatchedAlternatives?: typeof getMatchedAlternatives;
+  requestMatchedPriceRefresh?: typeof requestMarketRefreshForMarketRefs;
+  matchingRateLimit?: typeof checkRateLimit;
+  registerMatchingInterest?: typeof requestInterest;
+  matchingAuthenticate?: ReturnType<typeof createAuthMiddleware>;
   getAggMarketAlternativesRedis?: () => Promise<AggMarketAlternativesCacheClient | null>;
   createAggMarketClient?: (config: {
     apiKey?: string | null;
@@ -148,6 +166,43 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
   const createAggClient =
     options.createAggMarketClient ?? createAggMarketClient;
   const aggAlternativesDb = options.aggMarketAlternativesDb ?? pool;
+
+  z.get(
+    "/matching/config",
+    {
+      schema: {
+        response: {
+          200: zod.object({
+            lazyEnabled: zod.boolean(),
+            clusterSource: zod.enum(["agg", "hunch_matcher"]),
+            agentClusterSource: zod.enum(["agg", "hunch_matcher"]),
+          }),
+        },
+      },
+    },
+    async (_request, reply) => {
+      const matching = await readMatchingPolicy(aggAlternativesDb);
+      reply.header("Cache-Control", "no-store");
+      return {
+        agentClusterSource:
+          matching.agentsEnabled &&
+          process.env.MATCHING_AGENTS_ENABLED !== "false"
+            ? ("hunch_matcher" as const)
+            : ("agg" as const),
+        lazyEnabled:
+          matchingWorkerEnabled(matching) &&
+          matching.lazyEnabled &&
+          matching.alternativesEnabled &&
+          process.env.MATCHING_LAZY_ENABLED !== "false" &&
+          process.env.MATCHING_ALTERNATIVES_ENABLED !== "false",
+        clusterSource:
+          matching.clustersEnabled &&
+          process.env.MATCHING_CLUSTERS_ENABLED !== "false"
+            ? ("hunch_matcher" as const)
+            : ("agg" as const),
+      };
+    },
+  );
 
   /**
    * GET /markets/by-token
@@ -536,6 +591,73 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
     },
   );
 
+  z.post(
+    "/markets/:marketId/alternatives/discovery",
+    {
+      preHandler: options.matchingAuthenticate ?? createAuthMiddleware(),
+      schema: {
+        params: marketParamsSchema,
+        response: {
+          202: zod.object({ status: zod.enum(["pending", "cached"]) }),
+          401: zod.object({ error: zod.string() }),
+          404: zod.object({ status: zod.literal("unavailable") }),
+          429: zod.object({ status: zod.literal("limited") }),
+          503: zod.object({ status: zod.enum(["disabled", "unavailable"]) }),
+        },
+      },
+    },
+    async (request, reply) => {
+      const matching = await readMatchingPolicy(aggAlternativesDb);
+      if (
+        !matchingWorkerEnabled(matching) ||
+        !matching.lazyEnabled ||
+        process.env.MATCHING_LAZY_ENABLED === "false" ||
+        !(await enabledConsumer(aggAlternativesDb, "alternatives"))
+      )
+        return reply.code(503).send({ status: "disabled" });
+      if (!request.user) return reply.code(401).send({ error: "Unauthorized" });
+      // No query text, pair IDs, source or actor identity is accepted from the caller.
+      const ip = resolveSecurityClientIp(request);
+      const rateLimit = options.matchingRateLimit ?? checkRateLimit;
+      const allowed =
+        (await rateLimit(
+          `matching-demand:ip:${ip}`,
+          matching.ipRequestsPerMinute,
+          60_000,
+          {
+            onError: "fail_closed",
+          },
+        )) &&
+        (await rateLimit(
+          `matching-demand:user:${request.user.id}`,
+          matching.actorRequestsPerMinute,
+          60_000,
+          { onError: "fail_closed" },
+        )) &&
+        (await rateLimit(
+          "matching-demand:global",
+          matching.globalRequestsPerMinute,
+          60_000,
+          {
+            onError: "fail_closed",
+          },
+        ));
+      if (!allowed) return reply.code(429).send({ status: "limited" });
+      try {
+        const status = await (
+          options.registerMatchingInterest ?? requestInterest
+        )(pool, request.params.marketId, request.user.id);
+        return reply
+          .code(
+            status === "limited" ? 429 : status === "unavailable" ? 404 : 202,
+          )
+          .send({ status });
+      } catch {
+        return reply.code(503).send({ status: "unavailable" });
+      }
+    },
+  );
+
   /**
    * GET /markets/:marketId/alternatives
    * Get exact cross-venue alternatives using AGG matched markets.
@@ -550,6 +672,23 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
     },
     async (request, reply) => {
       const aggMarketAppId = options.aggMarketAppId ?? env.aggMarketAppId;
+      if (await enabledConsumer(aggAlternativesDb, request.query.consumer)) {
+        const response = await (
+          options.getMatchedAlternatives ?? getMatchedAlternatives
+        )(aggAlternativesDb, request.params.marketId, request.query);
+        if (response)
+          (
+            options.requestMatchedPriceRefresh ??
+            requestMarketRefreshForMarketRefs
+          )({
+            db: aggAlternativesDb,
+            marketIds: [
+              ...new Set(response.markets.map((m) => m.marketId)),
+            ].slice(0, 100),
+            logLabel: "markets:matched-alternatives",
+          });
+        return response ?? reply.code(404).send({ error: "Market not found" });
+      }
       const aggMarketApiKey = options.aggMarketApiKey ?? env.aggMarketApiKey;
       if (!aggMarketAppId) {
         return reply.code(503).send({ error: "AGG Market is not configured" });
@@ -657,6 +796,17 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
         excludeEvents,
       } = request.query;
       const cappedLimit = Math.min(200, Math.max(1, limit ?? 20));
+      const boost = async (items: Array<{ id: string; score: number }>) => {
+        try {
+          return await boostRelatedMarkets(pool, marketId, items);
+        } catch (err) {
+          request.log.warn(
+            { err, marketId },
+            "Similar market boost unavailable",
+          );
+          return items;
+        }
+      };
       const active = activeOnly ?? true;
       const lifecycle = await filterVenuesForLifecycleCapability(
         pool,
@@ -757,7 +907,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
               score: number;
             }>;
             return reply.send({
-              items,
+              items: await boost(items),
               cache_status: "hit" as const,
               cache_source: "cache",
             });
@@ -904,7 +1054,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
         }
 
         return reply.send({
-          items: filteredItems,
+          items: await boost(filteredItems),
           cache_status: "hit" as const,
           cache_source: "knn",
         });

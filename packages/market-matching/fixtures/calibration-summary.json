@@ -1,0 +1,346 @@
+{
+  "runs": [
+    {
+      "fixtureHash": "784460bbc20c6a71a81142586bb214a164f8d2dad6c625f3a0ba558bfed62e33",
+      "variant": "baseline",
+      "split": "development",
+      "orientation": "forward",
+      "planned": 30,
+      "completed": 30,
+      "errors": 0,
+      "metrics": {
+        "event": {
+          "scored": 6,
+          "correct": 6,
+          "predictedLinks": 2,
+          "falsePredictedLinks": 0,
+          "approved": 2,
+          "falseApproved": 0
+        },
+        "contract": {
+          "scored": 24,
+          "correct": 22,
+          "predictedLinks": 16,
+          "falsePredictedLinks": 0,
+          "approved": 0,
+          "falseApproved": 0
+        },
+        "outcome": {
+          "scored": 43,
+          "correct": 43,
+          "predictedLinks": 33,
+          "falsePredictedLinks": 0,
+          "approved": 0,
+          "falseApproved": 0
+        }
+      },
+      "blockers": {
+        "contract_model_gate": 23,
+        "context_requires_review": 2,
+        "model_gate_or_no_matching_claim": 20,
+        "rules_require_review": 10,
+        "inactive": 4,
+        "special_selection_requires_review": 1,
+        "unresolved_parent_rules": 1
+      },
+      "spentUsd": 0.0016707180000000005,
+      "labelScope": "Provisional supplied-text labels; not independently adjudicated settlement equivalence",
+      "retrievalRecall": "not measured by decision fixture",
+      "run": "dev-baseline"
+    },
+    {
+      "fixtureHash": "784460bbc20c6a71a81142586bb214a164f8d2dad6c625f3a0ba558bfed62e33",
+      "variant": "evidence",
+      "split": "development",
+      "orientation": "forward",
+      "planned": 30,
+      "completed": 30,
+      "errors": 0,
+      "metrics": {
+        "event": {
+          "scored": 6,
+          "correct": 6,
+          "predictedLinks": 2,
+          "falsePredictedLinks": 0,
+          "approved": 2,
+          "falseApproved": 0
+        },
+        "contract": {
+          "scored": 24,
+          "correct": 23,
+          "predictedLinks": 17,
+          "falsePredictedLinks": 1,
+          "approved": 5,
+          "falseApproved": 0
+        },
+        "outcome": {
+          "scored": 43,
+          "correct": 42,
+          "predictedLinks": 34,
+          "falsePredictedLinks": 1,
+          "approved": 10,
+          "falseApproved": 0
+        }
+      },
+      "blockers": {
+        "context_requires_review": 2,
+        "contract_model_gate": 13,
+        "model_gate_or_no_matching_claim": 15,
+        "rules_require_review": 10,
+        "inactive": 4,
+        "special_selection_requires_review": 1,
+        "unresolved_parent_rules": 1
+      },
+      "spentUsd": 0.0019220039999999997,
+      "labelScope": "Provisional supplied-text labels; not independently adjudicated settlement equivalence",
+      "retrievalRecall": "not measured by decision fixture",
+      "run": "dev-evidence"
+    },
+    {
+      "fixtureHash": "784460bbc20c6a71a81142586bb214a164f8d2dad6c625f3a0ba558bfed62e33",
+      "variant": "outcomes",
+      "split": "development",
+      "orientation": "forward",
+      "planned": 30,
+      "completed": 30,
+      "errors": 0,
+      "metrics": {
+        "event": {
+          "scored": 6,
+          "correct": 6,
+          "predictedLinks": 2,
+          "falsePredictedLinks": 0,
+          "approved": 2,
+          "falseApproved": 0
+        },
+        "contract": {
+          "scored": 24,
+          "correct": 23,
+          "predictedLinks": 17,
+          "falsePredictedLinks": 1,
+          "approved": 3,
+          "falseApproved": 0
+        },
+        "outcome": {
+          "scored": 43,
+          "correct": 38,
+          "predictedLinks": 38,
+          "falsePredictedLinks": 5,
+          "approved": 5,
+          "falseApproved": 0
+        }
+      },
+      "blockers": {
+        "model_gate_or_no_matching_claim": 21,
+        "context_requires_review": 2,
+        "contract_model_gate": 10,
+        "rules_require_review": 10,
+        "inactive": 4,
+        "special_selection_requires_review": 1,
+        "unresolved_parent_rules": 1
+      },
+      "spentUsd": 0.0018118379999999994,
+      "labelScope": "Provisional supplied-text labels; not independently adjudicated settlement equivalence",
+      "retrievalRecall": "not measured by decision fixture",
+      "run": "dev-outcomes"
+    },
+    {
+      "fixtureHash": "784460bbc20c6a71a81142586bb214a164f8d2dad6c625f3a0ba558bfed62e33",
+      "variant": "evidence",
+      "split": "holdout",
+      "orientation": "forward",
+      "planned": 31,
+      "completed": 31,
+      "errors": 0,
+      "metrics": {
+        "event": {
+          "scored": 6,
+          "correct": 6,
+          "predictedLinks": 2,
+          "falsePredictedLinks": 0,
+          "approved": 2,
+          "falseApproved": 0
+        },
+        "contract": {
+          "scored": 24,
+          "correct": 22,
+          "predictedLinks": 13,
+          "falsePredictedLinks": 1,
+          "approved": 5,
+          "falseApproved": 0
+        },
+        "outcome": {
+          "scored": 36,
+          "correct": 34,
+          "predictedLinks": 26,
+          "falsePredictedLinks": 2,
+          "approved": 8,
+          "falseApproved": 0
+        }
+      },
+      "blockers": {
+        "unresolved_parent_rules": 5,
+        "rules_require_review": 18,
+        "contract_model_gate": 14,
+        "model_gate_or_no_matching_claim": 15,
+        "inactive": 2,
+        "context_requires_review": 3,
+        "missing_rules": 3
+      },
+      "spentUsd": 0.002086644,
+      "labelScope": "Provisional supplied-text labels; not independently adjudicated settlement equivalence",
+      "retrievalRecall": "not measured by decision fixture",
+      "run": "holdout-evidence"
+    },
+    {
+      "fixtureHash": "784460bbc20c6a71a81142586bb214a164f8d2dad6c625f3a0ba558bfed62e33",
+      "variant": "evidence",
+      "split": "holdout",
+      "orientation": "swapped",
+      "planned": 31,
+      "completed": 31,
+      "errors": 0,
+      "metrics": {
+        "event": {
+          "scored": 6,
+          "correct": 6,
+          "predictedLinks": 2,
+          "falsePredictedLinks": 0,
+          "approved": 2,
+          "falseApproved": 0
+        },
+        "contract": {
+          "scored": 24,
+          "correct": 22,
+          "predictedLinks": 14,
+          "falsePredictedLinks": 2,
+          "approved": 2,
+          "falseApproved": 0
+        },
+        "outcome": {
+          "scored": 36,
+          "correct": 35,
+          "predictedLinks": 25,
+          "falsePredictedLinks": 1,
+          "approved": 4,
+          "falseApproved": 0
+        }
+      },
+      "blockers": {
+        "unresolved_parent_rules": 5,
+        "rules_require_review": 18,
+        "contract_model_gate": 22,
+        "model_gate_or_no_matching_claim": 23,
+        "inactive": 2,
+        "context_requires_review": 3,
+        "missing_rules": 3
+      },
+      "spentUsd": 0.002086644,
+      "labelScope": "Provisional supplied-text labels; not independently adjudicated settlement equivalence",
+      "retrievalRecall": "not measured by decision fixture",
+      "run": "holdout-swapped"
+    },
+    {
+      "fixtureHash": "023b5465939dd39a99f6e18a105213a9713315069ac9ad10e335fa675834e78d",
+      "variant": "evidence",
+      "split": "holdout",
+      "orientation": "forward",
+      "planned": 10,
+      "completed": 10,
+      "errors": 0,
+      "metrics": {
+        "event": {
+          "scored": 0,
+          "correct": 0,
+          "predictedLinks": 0,
+          "falsePredictedLinks": 0,
+          "approved": 0,
+          "falseApproved": 0
+        },
+        "contract": {
+          "scored": 10,
+          "correct": 5,
+          "predictedLinks": 3,
+          "falsePredictedLinks": 2,
+          "approved": 3,
+          "falseApproved": 0
+        },
+        "outcome": {
+          "scored": 11,
+          "correct": 9,
+          "predictedLinks": 8,
+          "falsePredictedLinks": 1,
+          "approved": 4,
+          "falseApproved": 0
+        }
+      },
+      "blockers": {
+        "model_gate_or_no_matching_claim": 6,
+        "rules_require_review": 3,
+        "ambiguous_outcome_identity": 1,
+        "unresolved_parent_rules": 1,
+        "missing_rules": 1
+      },
+      "spentUsd": 0.000592788,
+      "labelScope": "Provisional supplied-text labels; not independently adjudicated settlement equivalence",
+      "retrievalRecall": "not measured by decision fixture",
+      "run": "named-evidence"
+    },
+    {
+      "fixtureHash": "023b5465939dd39a99f6e18a105213a9713315069ac9ad10e335fa675834e78d",
+      "variant": "evidence",
+      "split": "holdout",
+      "orientation": "swapped",
+      "planned": 10,
+      "completed": 10,
+      "errors": 0,
+      "metrics": {
+        "event": {
+          "scored": 0,
+          "correct": 0,
+          "predictedLinks": 0,
+          "falsePredictedLinks": 0,
+          "approved": 0,
+          "falseApproved": 0
+        },
+        "contract": {
+          "scored": 10,
+          "correct": 4,
+          "predictedLinks": 2,
+          "falsePredictedLinks": 1,
+          "approved": 3,
+          "falseApproved": 0
+        },
+        "outcome": {
+          "scored": 11,
+          "correct": 8,
+          "predictedLinks": 10,
+          "falsePredictedLinks": 3,
+          "approved": 4,
+          "falseApproved": 0
+        }
+      },
+      "blockers": {
+        "model_gate_or_no_matching_claim": 7,
+        "rules_require_review": 3,
+        "ambiguous_outcome_identity": 1,
+        "unresolved_parent_rules": 1,
+        "missing_rules": 1
+      },
+      "spentUsd": 0.000592788,
+      "labelScope": "Provisional supplied-text labels; not independently adjudicated settlement equivalence",
+      "retrievalRecall": "not measured by decision fixture",
+      "run": "named-swapped"
+    }
+  ],
+  "requests": 172,
+  "costUsd": 0.010763424,
+  "model": [
+    "typesafe/jev-1.13-20260917"
+  ],
+  "latencyMs": {
+    "median": 357.5,
+    "p95": 599,
+    "max": 853
+  }
+}

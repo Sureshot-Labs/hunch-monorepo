@@ -32,6 +32,11 @@ import {
   type ApiBotTradingExecutor,
 } from "../services/api-trading-service.js";
 import { createAggMarketClient } from "../services/agg-market-client.js";
+import { requestMarketRefreshForMarketRefs } from "../lib/market-refresh.js";
+import {
+  enabledConsumer,
+  getMatchedAlternatives,
+} from "../services/matched-markets.js";
 import { getAggMarketAlternativesResponseCachedWithMetadata } from "../services/agg-market-clusters.js";
 import {
   hasConfiguredPrivyBotPolicyForActions,
@@ -588,6 +593,8 @@ export type TelegramBotTradingRouteDependencies = {
       >
     >;
   searchMarkets?: typeof searchTelegramMarkets;
+  getMatchedAlternatives?: typeof getMatchedAlternatives;
+  requestMatchedPriceRefresh?: typeof requestMarketRefreshForMarketRefs;
   writeTradeInputContext?: (
     context: TelegramBotTradeInputContext,
   ) => Promise<boolean>;
@@ -1360,14 +1367,16 @@ async function registerTelegramBotTradingRoutes(
       schema: { body: internalMarketSearchBodySchema },
     },
     async (request) => {
-      const aggClient = env.aggMarketAppId
-        ? createAggMarketClient({
-            apiKey: env.aggMarketApiKey,
-            appId: env.aggMarketAppId,
-            baseUrl: env.aggMarketBaseUrl,
-            timeoutMs: env.aggMarketTimeoutMs,
-          })
-        : null;
+      const nativeMatching = await enabledConsumer(routePool, "telegram");
+      const aggClient =
+        !nativeMatching && env.aggMarketAppId
+          ? createAggMarketClient({
+              apiKey: env.aggMarketApiKey,
+              appId: env.aggMarketAppId,
+              baseUrl: env.aggMarketBaseUrl,
+              timeoutMs: env.aggMarketTimeoutMs,
+            })
+          : null;
       const cacheClientPromise = aggClient
         ? getRedis().catch(() => null)
         : Promise.resolve(null);
@@ -1378,49 +1387,78 @@ async function registerTelegramBotTradingRoutes(
         venues: request.body.venues,
         category: request.body.category,
         sort: request.body.sort,
-        resolveCrossVenueAlternatives: aggClient
+        resolveCrossVenueAlternatives: nativeMatching
           ? async ({ marketId, venues }) => {
-              try {
-                const { response } =
-                  await getAggMarketAlternativesResponseCachedWithMetadata({
-                    cacheClient: await cacheClientPromise,
-                    client: aggClient,
-                    db: routePool,
-                    marketId,
-                    matchedTtlSec: env.aggClustersCacheTtlSec,
-                    notFoundTtlSec:
-                      env.aggMarketAlternativesNotFoundCacheTtlSec,
-                    onCacheError: (operation, error) => {
-                      request.log.warn(
-                        { error, operation },
-                        "Telegram market search AGG cache failed",
-                      );
-                    },
-                    query: {
-                      limit: 10,
-                      sourceLimit: 50,
-                      venues: venues.join(","),
-                    },
-                  });
-                if (!response || response.status !== "matched") return [];
-                return response.alternatives
+              const response = await (
+                dependencies.getMatchedAlternatives ?? getMatchedAlternatives
+              )(routePool, marketId, { venues: venues.join(","), limit: 10 });
+              if (response)
+                (
+                  dependencies.requestMatchedPriceRefresh ??
+                  requestMarketRefreshForMarketRefs
+                )({
+                  db: routePool,
+                  marketIds: response.markets
+                    .map((market) => market.marketId)
+                    .slice(0, 100),
+                  logLabel: "telegram:matched-alternatives",
+                });
+              return (
+                (response?.alternatives ?? [])
+                  // The existing venue picker compares native YES prices and
+                  // cannot represent an inverse or partial outcome mapping.
                   .filter(
-                    (market) =>
-                      market.active !== false && market.orderable !== false,
+                    (m) =>
+                      m.active &&
+                      m.orderable &&
+                      m.outcomeMapping?.sourceYesTo === "YES",
                   )
-                  .map(mapClusterMarketToTelegramSearchResult);
-              } catch (error) {
-                if (!loggedAggFallback) {
-                  loggedAggFallback = true;
-                  request.log.warn(
-                    { error },
-                    "Telegram market search AGG enrichment skipped",
-                  );
-                }
-                return [];
-              }
+                  .map(mapClusterMarketToTelegramSearchResult)
+              );
             }
-          : undefined,
+          : aggClient
+            ? async ({ marketId, venues }) => {
+                try {
+                  const { response } =
+                    await getAggMarketAlternativesResponseCachedWithMetadata({
+                      cacheClient: await cacheClientPromise,
+                      client: aggClient,
+                      db: routePool,
+                      marketId,
+                      matchedTtlSec: env.aggClustersCacheTtlSec,
+                      notFoundTtlSec:
+                        env.aggMarketAlternativesNotFoundCacheTtlSec,
+                      onCacheError: (operation, error) => {
+                        request.log.warn(
+                          { error, operation },
+                          "Telegram market search AGG cache failed",
+                        );
+                      },
+                      query: {
+                        limit: 10,
+                        sourceLimit: 50,
+                        venues: venues.join(","),
+                      },
+                    });
+                  if (!response || response.status !== "matched") return [];
+                  return response.alternatives
+                    .filter(
+                      (market) =>
+                        market.active !== false && market.orderable !== false,
+                    )
+                    .map(mapClusterMarketToTelegramSearchResult);
+                } catch (error) {
+                  if (!loggedAggFallback) {
+                    loggedAggFallback = true;
+                    request.log.warn(
+                      { error },
+                      "Telegram market search AGG enrichment skipped",
+                    );
+                  }
+                  return [];
+                }
+              }
+            : undefined,
       });
     },
   );

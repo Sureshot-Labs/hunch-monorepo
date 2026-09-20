@@ -138,7 +138,8 @@ function dbRow(args: {
 
 function fakeDb(rows: Array<ReturnType<typeof dbRow>>): DbQuery {
   return {
-    async query() {
+    async query(sql: string) {
+      if (sql.includes("from runtime_policies")) return { rows: [] };
       return { rows };
     },
   } as unknown as DbQuery;

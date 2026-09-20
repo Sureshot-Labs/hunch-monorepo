@@ -1,0 +1,102 @@
+{
+  "date": "2026-09-20",
+  "source": "Two read-only 1000-seed captures; final source-link rule recapture rechecks the second fixed 380-pair cohort. Not an independent precision benchmark.",
+  "final": {
+    "seeds": 1000,
+    "pairs": 380,
+    "contractPairs": 271,
+    "eventPairs": 109,
+    "contractApprovals": 92,
+    "eventApprovals": 61,
+    "approvedEventGroups": 42,
+    "outcomeMappings": 171,
+    "newRequests": 109,
+    "newCost": 0.009598974,
+    "fullColdCost": 0.03053631,
+    "aggCompared": 31,
+    "aggRetrieved": 26,
+    "aggApproved": 10,
+    "nonAggApproved": 82,
+    "completeBinaryLinks": 79,
+    "singleOutcomeLinks": 13,
+    "replayedDecisions": 380,
+    "resolvedApprovedContractLinks": 92
+  },
+  "earlier": {
+    "matching-scale-20260920": {
+      "seeds": 1000,
+      "venues": {
+        "polymarket": 828,
+        "limitless": 172
+      },
+      "pairs": 321,
+      "byKind": {
+        "contract": 213,
+        "event": 108
+      },
+      "approvals": {
+        "event": 58,
+        "contract": 69
+      },
+      "paidCalls": 321,
+      "paidCost": 0.025950624,
+      "coldCost": 0.025950624,
+      "related": 13,
+      "strongRelated": 0,
+      "aggPairs": 31,
+      "aggRetrieved": 23,
+      "aggApproved": 5,
+      "nativeOnlyApproved": 64,
+      "withContracts": 255
+    },
+    "matching-scale-candidate-20260920": {
+      "seeds": 1000,
+      "venues": {
+        "limitless": 173,
+        "polymarket": 827
+      },
+      "pairs": 380,
+      "byKind": {
+        "contract": 271,
+        "event": 109
+      },
+      "approvals": {
+        "event": 59,
+        "contract": 62
+      },
+      "paidCalls": 73,
+      "paidCost": 0.004928952,
+      "coldCost": 0.029709876,
+      "related": 13,
+      "strongRelated": 0,
+      "aggPairs": 31,
+      "aggRetrieved": 26,
+      "aggApproved": 5,
+      "nativeOnlyApproved": 57,
+      "withContracts": 313
+    },
+    "matching-normalization-20260920": {
+      "seeds": 1000,
+      "pairs": 380,
+      "contractPairs": 271,
+      "eventPairs": 109,
+      "contractApprovals": 86,
+      "eventApprovals": 59,
+      "approvedEventGroups": 39,
+      "outcomeMappings": 161,
+      "newRequests": 26,
+      "newCost": 0.002366742,
+      "fullColdCost": 0.030535428,
+      "aggCompared": 31,
+      "aggRetrieved": 26,
+      "aggApproved": 7,
+      "nonAggApproved": 79
+    }
+  },
+  "rawRoot": "untracked/matching-source-links-final-20260920",
+  "paidTotal": {
+    "requests": 701,
+    "cost": 0.053608716,
+    "scope": "Earlier 172-request prompt calibration and all four scale/refinement rounds; excludes older exploratory work."
+  }
+}

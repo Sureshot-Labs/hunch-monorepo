@@ -71,3 +71,5 @@ export const logger = pino({
   level: (process.env.LOG_LEVEL as LogLevel) ?? "info",
   timestamp: pino.stdTimeFunctions.isoTime,
 });
+
+export * from "./market-matching-policy.js";

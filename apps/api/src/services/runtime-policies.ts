@@ -1,3 +1,8 @@
+import {
+  DEFAULT_MARKET_MATCHING_POLICY,
+  marketMatchingPolicySchema,
+  type MarketMatchingPolicy,
+} from "@hunch/shared";
 import { z } from "zod";
 import {
   buildVenueLifecyclePolicyRevision,
@@ -65,6 +70,7 @@ export const INTEL_POLICY_KEYS = [
   "signal_post_copy",
   "telegram_notifications",
   "venue_lifecycle",
+  "market_matching",
 ] as const;
 
 export type IntelPolicyKey = (typeof INTEL_POLICY_KEYS)[number];
@@ -73,6 +79,7 @@ type PolicySource<K extends IntelPolicyKey> = K extends
   | "signal_post_copy"
   | "telegram_notifications"
   | "venue_lifecycle"
+  | "market_matching"
   ? "default" | "db"
   : "env" | "db";
 
@@ -634,6 +641,7 @@ type IntelPolicyMap = {
   signal_post_copy: SignalPostCopyPolicyV1;
   telegram_notifications: TelegramNotificationsPolicyV1;
   venue_lifecycle: VenueLifecyclePolicy;
+  market_matching: MarketMatchingPolicy;
 };
 
 type IntelPolicyResult<K extends IntelPolicyKey> = {
@@ -1360,6 +1368,7 @@ const policySchemas = {
   signal_post_copy: signalPostCopyPolicySchema,
   telegram_notifications: telegramNotificationsPolicySchema,
   venue_lifecycle: venueLifecyclePolicySchema,
+  market_matching: marketMatchingPolicySchema,
 } as const;
 
 const warnedInvalidOverrides = new Set<string>();
@@ -1962,6 +1971,7 @@ function getDefaults(): IntelPolicyMap {
     signal_post_copy: DEFAULT_SIGNAL_POST_COPY_POLICY,
     telegram_notifications: DEFAULT_TELEGRAM_NOTIFICATIONS_POLICY,
     venue_lifecycle: DEFAULT_VENUE_LIFECYCLE_POLICY,
+    market_matching: DEFAULT_MARKET_MATCHING_POLICY,
   };
 }
 
@@ -3234,6 +3244,8 @@ function normalizeMerged<K extends IntelPolicyKey>(
       return telegramNotificationsPolicySchema.parse(
         merged,
       ) as IntelPolicyMap[K];
+    case "market_matching":
+      return marketMatchingPolicySchema.parse(merged) as IntelPolicyMap[K];
     case "venue_lifecycle":
       return venueLifecyclePolicySchema.parse(merged) as IntelPolicyMap[K];
     default:
@@ -3347,7 +3359,8 @@ function resolveFromRow<K extends IntelPolicyKey>(
   if (!row) {
     return {
       key,
-      source: (key === "venue_lifecycle" ||
+      source: (key === "market_matching" ||
+      key === "venue_lifecycle" ||
       key === "telegram_notifications" ||
       key === "signal_post_copy"
         ? "default"
@@ -3376,7 +3389,8 @@ function resolveFromRow<K extends IntelPolicyKey>(
     }
     return {
       key,
-      source: (key === "venue_lifecycle" ||
+      source: (key === "market_matching" ||
+      key === "venue_lifecycle" ||
       key === "telegram_notifications" ||
       key === "signal_post_copy"
         ? "default"
@@ -3469,6 +3483,10 @@ export async function resolveAllIntelPolicies(
     telegram_notifications: resolveFromRow(
       "telegram_notifications",
       byKey.get("telegram_notifications") ?? null,
+    ),
+    market_matching: resolveFromRow(
+      "market_matching",
+      byKey.get("market_matching") ?? null,
     ),
     venue_lifecycle: resolveFromRow(
       "venue_lifecycle",

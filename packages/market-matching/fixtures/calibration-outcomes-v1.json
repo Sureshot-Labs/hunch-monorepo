@@ -1,0 +1,1188 @@
+{
+  "description": "Post-freeze validation only. Synthetic named instrument IDs; do not claim real multi-outcome precision.",
+  "cases": [
+    {
+      "id": "named-child-named",
+      "group": "named-suite",
+      "split": "holdout",
+      "kind": "contract",
+      "expected": "insufficient_information",
+      "expectedOutcomes": {
+        "outcome_0_0": "equivalent"
+      },
+      "origin": "controlled named-outcome validation; related scenarios, not independent live examples",
+      "a": {
+        "id": "polymarket:child-named",
+        "eventId": "polymarket:event:child-named",
+        "venue": "polymarket",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES",
+            "id": "polymarket:child-named:YES",
+            "tokenId": null
+          },
+          {
+            "label": "NO",
+            "side": "NO",
+            "id": "polymarket:child-named:NO",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "b": {
+        "id": "limitless:child-named",
+        "eventId": "limitless:event:child-named",
+        "venue": "limitless",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null,
+            "id": "limitless:child-named:Alice",
+            "tokenId": null
+          },
+          {
+            "label": "Bob",
+            "side": null,
+            "id": "limitless:child-named:Bob",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "inputA": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES"
+          },
+          {
+            "label": "NO",
+            "side": "NO"
+          }
+        ]
+      },
+      "inputB": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null
+          },
+          {
+            "label": "Bob",
+            "side": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "named-named-child",
+      "group": "named-suite",
+      "split": "holdout",
+      "kind": "contract",
+      "expected": "insufficient_information",
+      "expectedOutcomes": {
+        "outcome_0_0": "equivalent"
+      },
+      "origin": "controlled named-outcome validation; related scenarios, not independent live examples",
+      "a": {
+        "id": "polymarket:named-child",
+        "eventId": "polymarket:event:named-child",
+        "venue": "polymarket",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null,
+            "id": "polymarket:named-child:Alice",
+            "tokenId": null
+          },
+          {
+            "label": "Bob",
+            "side": null,
+            "id": "polymarket:named-child:Bob",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "b": {
+        "id": "limitless:named-child",
+        "eventId": "limitless:event:named-child",
+        "venue": "limitless",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES",
+            "id": "limitless:named-child:YES",
+            "tokenId": null
+          },
+          {
+            "label": "NO",
+            "side": "NO",
+            "id": "limitless:named-child:NO",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "inputA": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null
+          },
+          {
+            "label": "Bob",
+            "side": null
+          }
+        ]
+      },
+      "inputB": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES"
+          },
+          {
+            "label": "NO",
+            "side": "NO"
+          }
+        ]
+      }
+    },
+    {
+      "id": "named-partial",
+      "group": "named-suite",
+      "split": "holdout",
+      "kind": "contract",
+      "expected": "insufficient_information",
+      "expectedOutcomes": {
+        "outcome_0_0": "equivalent"
+      },
+      "origin": "controlled named-outcome validation; related scenarios, not independent live examples",
+      "a": {
+        "id": "polymarket:partial",
+        "eventId": "polymarket:event:partial",
+        "venue": "polymarket",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES",
+            "id": "polymarket:partial:YES",
+            "tokenId": null
+          },
+          {
+            "label": "NO",
+            "side": "NO",
+            "id": "polymarket:partial:NO",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "b": {
+        "id": "limitless:partial",
+        "eventId": "limitless:event:partial",
+        "venue": "limitless",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null,
+            "id": "limitless:partial:Alice",
+            "tokenId": null
+          },
+          {
+            "label": "Bob",
+            "side": null,
+            "id": "limitless:partial:Bob",
+            "tokenId": null
+          },
+          {
+            "label": "Carol",
+            "side": null,
+            "id": "limitless:partial:Carol",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "inputA": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES"
+          },
+          {
+            "label": "NO",
+            "side": "NO"
+          }
+        ]
+      },
+      "inputB": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null
+          },
+          {
+            "label": "Bob",
+            "side": null
+          },
+          {
+            "label": "Carol",
+            "side": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "named-reordered",
+      "group": "named-suite",
+      "split": "holdout",
+      "kind": "contract",
+      "expected": "insufficient_information",
+      "expectedOutcomes": {
+        "outcome_0_1": "equivalent"
+      },
+      "origin": "controlled named-outcome validation; related scenarios, not independent live examples",
+      "a": {
+        "id": "polymarket:reordered",
+        "eventId": "polymarket:event:reordered",
+        "venue": "polymarket",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES",
+            "id": "polymarket:reordered:YES",
+            "tokenId": null
+          },
+          {
+            "label": "NO",
+            "side": "NO",
+            "id": "polymarket:reordered:NO",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "b": {
+        "id": "limitless:reordered",
+        "eventId": "limitless:event:reordered",
+        "venue": "limitless",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "Bob",
+            "side": null,
+            "id": "limitless:reordered:Bob",
+            "tokenId": null
+          },
+          {
+            "label": "Alice",
+            "side": null,
+            "id": "limitless:reordered:Alice",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "inputA": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES"
+          },
+          {
+            "label": "NO",
+            "side": "NO"
+          }
+        ]
+      },
+      "inputB": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "Bob",
+            "side": null
+          },
+          {
+            "label": "Alice",
+            "side": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "named-cancellation",
+      "group": "named-suite",
+      "split": "holdout",
+      "kind": "contract",
+      "expected": "different",
+      "expectedOutcomes": {
+        "outcome_0_0": "different"
+      },
+      "origin": "controlled named-outcome validation; related scenarios, not independent live examples",
+      "a": {
+        "id": "polymarket:cancellation",
+        "eventId": "polymarket:event:cancellation",
+        "venue": "polymarket",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES",
+            "id": "polymarket:cancellation:YES",
+            "tokenId": null
+          },
+          {
+            "label": "NO",
+            "side": "NO",
+            "id": "polymarket:cancellation:NO",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "b": {
+        "id": "limitless:cancellation",
+        "eventId": "limitless:event:cancellation",
+        "venue": "limitless",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0.5. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null,
+            "id": "limitless:cancellation:Alice",
+            "tokenId": null
+          },
+          {
+            "label": "Bob",
+            "side": null,
+            "id": "limitless:cancellation:Bob",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "inputA": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES"
+          },
+          {
+            "label": "NO",
+            "side": "NO"
+          }
+        ]
+      },
+      "inputB": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0.5. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null
+          },
+          {
+            "label": "Bob",
+            "side": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "named-source",
+      "group": "named-suite",
+      "split": "holdout",
+      "kind": "contract",
+      "expected": "different",
+      "expectedOutcomes": {
+        "outcome_0_0": "different"
+      },
+      "origin": "controlled named-outcome validation; related scenarios, not independent live examples",
+      "a": {
+        "id": "polymarket:source",
+        "eventId": "polymarket:event:source",
+        "venue": "polymarket",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES",
+            "id": "polymarket:source:YES",
+            "tokenId": null
+          },
+          {
+            "label": "NO",
+            "side": "NO",
+            "id": "polymarket:source:NO",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "b": {
+        "id": "limitless:source",
+        "eventId": "limitless:event:source",
+        "venue": "limitless",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the first newspaper projection published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null,
+            "id": "limitless:source:Alice",
+            "tokenId": null
+          },
+          {
+            "label": "Bob",
+            "side": null,
+            "id": "limitless:source:Bob",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "inputA": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES"
+          },
+          {
+            "label": "NO",
+            "side": "NO"
+          }
+        ]
+      },
+      "inputB": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the first newspaper projection published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null
+          },
+          {
+            "label": "Bob",
+            "side": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "named-missing-identity",
+      "group": "named-suite",
+      "split": "holdout",
+      "kind": "contract",
+      "expected": "insufficient_information",
+      "expectedOutcomes": {
+        "outcome_0_0": "equivalent"
+      },
+      "origin": "controlled named-outcome validation; related scenarios, not independent live examples",
+      "a": {
+        "id": "polymarket:missing-identity",
+        "eventId": "polymarket:event:missing-identity",
+        "venue": "polymarket",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES",
+            "id": "polymarket:missing-identity:YES",
+            "tokenId": null
+          },
+          {
+            "label": "NO",
+            "side": "NO",
+            "id": "polymarket:missing-identity:NO",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "b": {
+        "id": "limitless:missing-identity",
+        "eventId": "limitless:event:missing-identity",
+        "venue": "limitless",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null,
+            "id": "",
+            "tokenId": null
+          },
+          {
+            "label": "Bob",
+            "side": null,
+            "id": "",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [
+          "ambiguous_outcome_identity"
+        ],
+        "fingerprint": "controlled"
+      },
+      "inputA": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES"
+          },
+          {
+            "label": "NO",
+            "side": "NO"
+          }
+        ]
+      },
+      "inputB": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null
+          },
+          {
+            "label": "Bob",
+            "side": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "named-parent-conflict",
+      "group": "named-suite",
+      "split": "holdout",
+      "kind": "contract",
+      "expected": "insufficient_information",
+      "expectedOutcomes": {
+        "outcome_0_0": "insufficient_information"
+      },
+      "origin": "controlled named-outcome validation; related scenarios, not independent live examples",
+      "a": {
+        "id": "polymarket:parent-conflict",
+        "eventId": "polymarket:event:parent-conflict",
+        "venue": "polymarket",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES",
+            "id": "polymarket:parent-conflict:YES",
+            "tokenId": null
+          },
+          {
+            "label": "NO",
+            "side": "NO",
+            "id": "polymarket:parent-conflict:NO",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "b": {
+        "id": "limitless:parent-conflict",
+        "eventId": "limitless:event:parent-conflict",
+        "venue": "limitless",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "Candidate Alice always pays zero regardless of the election result.",
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null,
+            "id": "limitless:parent-conflict:Alice",
+            "tokenId": null
+          },
+          {
+            "label": "Bob",
+            "side": null,
+            "id": "limitless:parent-conflict:Bob",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [
+          "unresolved_parent_rules"
+        ],
+        "fingerprint": "controlled"
+      },
+      "inputA": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES"
+          },
+          {
+            "label": "NO",
+            "side": "NO"
+          }
+        ]
+      },
+      "inputB": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "parentRules": "Candidate Alice always pays zero regardless of the election result.",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null
+          },
+          {
+            "label": "Bob",
+            "side": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "named-no-rules",
+      "group": "named-suite",
+      "split": "holdout",
+      "kind": "contract",
+      "expected": "insufficient_information",
+      "expectedOutcomes": {
+        "outcome_0_0": "insufficient_information"
+      },
+      "origin": "controlled named-outcome validation; related scenarios, not independent live examples",
+      "a": {
+        "id": "polymarket:no-rules",
+        "eventId": "polymarket:event:no-rules",
+        "venue": "polymarket",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES",
+            "id": "polymarket:no-rules:YES",
+            "tokenId": null
+          },
+          {
+            "label": "NO",
+            "side": "NO",
+            "id": "polymarket:no-rules:NO",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "b": {
+        "id": "limitless:no-rules",
+        "eventId": "limitless:event:no-rules",
+        "venue": "limitless",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "rules": [],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null,
+            "id": "limitless:no-rules:Alice",
+            "tokenId": null
+          },
+          {
+            "label": "Bob",
+            "side": null,
+            "id": "limitless:no-rules:Bob",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [
+          "missing_rules"
+        ],
+        "fingerprint": "controlled"
+      },
+      "inputA": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Alice",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "YES",
+            "side": "YES"
+          },
+          {
+            "label": "NO",
+            "side": "NO"
+          }
+        ]
+      },
+      "inputB": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "parentRules": "",
+        "rules": [],
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null
+          },
+          {
+            "label": "Bob",
+            "side": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "named-named-named",
+      "group": "named-suite",
+      "split": "holdout",
+      "kind": "contract",
+      "expected": "equivalent",
+      "expectedOutcomes": {
+        "outcome_0_0": "equivalent",
+        "outcome_1_1": "equivalent"
+      },
+      "origin": "controlled named-outcome validation; related scenarios, not independent live examples",
+      "a": {
+        "id": "polymarket:named-named",
+        "eventId": "polymarket:event:named-named",
+        "venue": "polymarket",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null,
+            "id": "polymarket:named-named:Alice",
+            "tokenId": null
+          },
+          {
+            "label": "Bob",
+            "side": null,
+            "id": "polymarket:named-named:Bob",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "b": {
+        "id": "limitless:named-named",
+        "eventId": "limitless:event:named-named",
+        "venue": "limitless",
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "parentRules": "",
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null,
+            "id": "limitless:named-named:Alice",
+            "tokenId": null
+          },
+          {
+            "label": "Bob",
+            "side": null,
+            "id": "limitless:named-named:Bob",
+            "tokenId": null
+          }
+        ],
+        "eventMembers": [],
+        "status": "ACTIVE",
+        "eventStatus": "ACTIVE",
+        "provenance": {
+          "normalizer": "controlled fixture"
+        },
+        "blockers": [],
+        "fingerprint": "controlled"
+      },
+      "inputA": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null
+          },
+          {
+            "label": "Bob",
+            "side": null
+          }
+        ]
+      },
+      "inputB": {
+        "event": "2030 Example City mayoral election winner",
+        "selection": "Winner",
+        "question": "",
+        "parentRules": "",
+        "rules": [
+          "The 2030 Example City mayoral election is resolved using the final official election commission certification published by December 31, 2030 23:59 UTC. Each named candidate outcome, and YES in the binary market for that same candidate, pays 1 if that candidate is certified as the winner, otherwise 0. If the election is cancelled, tied without a certified winner, or no winner is certified by the deadline, all candidate outcomes and all binary YES positions pay 0. Binary NO pays 1 minus its YES payout."
+        ],
+        "outcomes": [
+          {
+            "label": "Alice",
+            "side": null
+          },
+          {
+            "label": "Bob",
+            "side": null
+          }
+        ]
+      }
+    }
+  ]
+}

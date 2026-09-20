@@ -720,6 +720,8 @@ function createPolymarketConfirmDb(updates: ConfirmIntentUpdate[]) {
 }
 
 class FakeDb {
+  matchingSignalsEnabled = false;
+  matchingLookupFails = false;
   marketRows: unknown[] = [
     {
       best_ask: null,
@@ -758,6 +760,27 @@ class FakeDb {
     const sql = String(args[0] ?? "");
     const params = Array.isArray(args[1]) ? (args[1] as unknown[]) : [];
     this.queries.push({ params, sql });
+    if (
+      this.matchingSignalsEnabled &&
+      sql.includes("from runtime_policies") &&
+      params[0] === "market_matching"
+    ) {
+      return {
+        command: "SELECT",
+        fields: [],
+        oid: 0,
+        rowCount: 1,
+        rows: [{ payload: { signalsEnabled: true } }] as unknown as T[],
+      };
+    }
+    if (
+      this.matchingSignalsEnabled &&
+      sql === "select event_id from unified_markets where id=$1"
+    ) {
+      if (this.matchingLookupFails)
+        throw new Error("Native matcher unavailable");
+      return { command: "SELECT", fields: [], oid: 0, rowCount: 0, rows: [] };
+    }
     if (sql.includes("yes_top.best_ask as yes_ask")) {
       const marketIds = new Set(
         Array.isArray(params[0]) ? (params[0] as string[]) : [],
@@ -14755,6 +14778,59 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(sql, /previous_note|previous_decision_snapshot/);
       assert.doesNotMatch(sql, /accepting_orders/);
       assert.doesNotMatch(sql, /w\.id::text = t\.target_id/);
+    },
+  },
+  {
+    name: "native matching policy never calls AGG on empty/error and preserves source delivery",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalAppId = process.env.AGG_APP_ID;
+      let requests = 0;
+      try {
+        process.env.AGG_APP_ID = "must-not-be-used";
+        globalThis.fetch = (async () => {
+          requests++;
+          throw new Error("External request forbidden");
+        }) as typeof fetch;
+        for (const failure of [false, true]) {
+          const redis = new FakeRedis();
+          await enableSignalBotChat({
+            chat: { id: "-100", title: "Signals", type: "group" },
+            enabledBy: 123,
+            now: new Date("2025-12-31T00:00:00.000Z"),
+            redis,
+          });
+          const db = new FakeDb();
+          db.rows = [noteRow()];
+          db.matchingSignalsEnabled = true;
+          db.matchingLookupFails = failure;
+          const telegram = new FakeTelegram();
+          const result = await publishSignalBotTickImpl({
+            config: parseSignalBotConfig({
+              HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+              HUNCH_SIGNAL_BOT_TELEGRAM_MINI_APP_LINK_BASE:
+                TEST_TELEGRAM_MINI_APP_LINK_BASE,
+              HUNCH_SIGNAL_BOT_TOKEN: "token",
+            }),
+            db,
+            redis,
+            telegram,
+          });
+          assert.equal(result.sent, 1);
+          assert(
+            db.queries.some(
+              (q) =>
+                q.sql === "select event_id from unified_markets where id=$1",
+            ),
+          );
+          assert.equal(result.aggMatched, 0);
+        }
+        assert.equal(requests, 0);
+      } finally {
+        globalThis.fetch = originalFetch;
+        if (originalAppId === undefined) delete process.env.AGG_APP_ID;
+        else process.env.AGG_APP_ID = originalAppId;
+      }
     },
   },
   {

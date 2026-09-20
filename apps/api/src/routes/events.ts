@@ -1,4 +1,9 @@
 import type { FastifyPluginAsync } from "fastify";
+import { z as zod } from "zod";
+import {
+  enabledConsumer,
+  resolveEventLinks,
+} from "../services/matched-markets.js";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { buildObservedCanonicalMarketTop } from "@hunch/shared";
 import { createHash } from "crypto";
@@ -315,6 +320,22 @@ function resolveYesProbability(row: EventDetailsRow): {
 
 export const eventRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+  z.get(
+    "/events/:eventId/alternatives",
+    {
+      schema: {
+        params: eventParamsSchema,
+        querystring: zod.object({
+          consumer: zod.enum(["events", "agents"]).default("events"),
+        }),
+      },
+    },
+    async (request, reply) => {
+      if (!(await enabledConsumer(pool, request.query.consumer)))
+        return reply.code(503).send({ error: "Event matching is disabled" });
+      return resolveEventLinks(pool, request.params.eventId);
+    },
+  );
 
   /**
    * GET /events/:eventId

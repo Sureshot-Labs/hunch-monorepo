@@ -1,0 +1,166 @@
+{
+  "description": "Provisional labels for event/outcome evaluation. Named real event titles come from the read-only Hunch capture on 2026-09-18; controlled rule examples are synthetic. No independent oracle-equivalence claim. Run separately from the old pair benchmark.",
+  "cases": [
+    {
+      "id": "real-presidential-partial",
+      "kind": "event",
+      "expected": "same_event",
+      "a": {
+        "title": "Presidential Election Winner 2028",
+        "selections": ["Gavin Newsom", "Marco Rubio"]
+      },
+      "b": {
+        "title": "Presidential Election Winner 2028",
+        "selections": ["Gavin Newsom", "Marco Rubio", "Other"]
+      }
+    },
+    {
+      "id": "real-israel-rephrased",
+      "kind": "event",
+      "expected": "same_event",
+      "a": {
+        "title": "Who will be the next Prime Minister of Israel after next election?",
+        "selections": ["Naftali Bennett", "Yair Golan"]
+      },
+      "b": {
+        "title": "Prime Minister of Israel after the next election?",
+        "selections": ["Naftali Bennett", "Yair Golan"]
+      }
+    },
+    {
+      "id": "real-nominee-versus-winner",
+      "kind": "event",
+      "expected": "related",
+      "a": {
+        "title": "Democratic Presidential Nominee 2028",
+        "selections": ["Gavin Newsom"]
+      },
+      "b": {
+        "title": "Presidential Election Winner 2028",
+        "selections": ["Gavin Newsom"]
+      }
+    },
+    {
+      "id": "controlled-different-cycle",
+      "kind": "event",
+      "expected": "different",
+      "a": { "title": "US Presidential Election Winner 2028" },
+      "b": { "title": "US Presidential Election Winner 2032" }
+    },
+    {
+      "id": "controlled-different-office",
+      "kind": "event",
+      "expected": "different",
+      "a": {
+        "title": "Which party controls the US House after the 2026 election?"
+      },
+      "b": {
+        "title": "Which party controls the US Senate after the 2026 election?"
+      }
+    },
+    {
+      "id": "controlled-candidate-reordered",
+      "kind": "event",
+      "expected": "same_event",
+      "a": {
+        "title": "2028 US presidential election winner",
+        "selections": ["Alice", "Bob", "Other"]
+      },
+      "b": {
+        "title": "2028 US presidential election winner",
+        "selections": ["Other", "Alice", "Bob"]
+      }
+    },
+    {
+      "id": "controlled-single-child-versus-group",
+      "kind": "contract",
+      "expected": "insufficient_information",
+      "expectedOutcomes": { "outcome_0_0": "equivalent" },
+      "a": {
+        "event": "2028 US election winner",
+        "selection": "Alice",
+        "rules": [
+          "The selected outcome pays 1 if its candidate wins the 2028 US presidential election. On cancellation every affirmative outcome pays 0. Official certification determines the winner."
+        ],
+        "outcomes": [
+          { "label": "YES", "side": "YES" },
+          { "label": "NO", "side": "NO" }
+        ]
+      },
+      "b": {
+        "event": "2028 US election winner",
+        "selection": "Winner",
+        "rules": [
+          "The selected outcome pays 1 if its candidate wins the 2028 US presidential election. On cancellation every affirmative outcome pays 0. Official certification determines the winner."
+        ],
+        "outcomes": [
+          { "label": "Alice", "side": null },
+          { "label": "Bob", "side": null }
+        ]
+      }
+    },
+    {
+      "id": "controlled-cancellation-conflict",
+      "kind": "contract",
+      "expected": "different",
+      "a": {
+        "event": "2028 US election winner",
+        "selection": "Alice",
+        "rules": ["YES pays 1 if Alice wins. If canceled, YES pays 0."],
+        "outcomes": [
+          { "label": "YES", "side": "YES" },
+          { "label": "NO", "side": "NO" }
+        ]
+      },
+      "b": {
+        "event": "2028 US election winner",
+        "selection": "Alice",
+        "rules": ["YES pays 1 if Alice wins. If canceled, YES pays 0.5."],
+        "outcomes": [
+          { "label": "YES", "side": "YES" },
+          { "label": "NO", "side": "NO" }
+        ]
+      }
+    },
+    {
+      "id": "controlled-other-exclusion-set",
+      "kind": "contract",
+      "expected": "different",
+      "a": {
+        "event": "2028 US election winner",
+        "selection": "Other",
+        "rules": ["YES if anyone except Alice or Bob wins."],
+        "outcomes": [
+          { "label": "YES", "side": "YES" },
+          { "label": "NO", "side": "NO" }
+        ]
+      },
+      "b": {
+        "event": "2028 US election winner",
+        "selection": "Other",
+        "rules": ["YES if anyone except Alice or Carol wins."],
+        "outcomes": [
+          { "label": "YES", "side": "YES" },
+          { "label": "NO", "side": "NO" }
+        ]
+      }
+    },
+    {
+      "id": "controlled-missing-rules",
+      "kind": "contract",
+      "expected": "insufficient_information",
+      "a": {
+        "event": "2028 US election winner",
+        "selection": "Alice",
+        "rules": [],
+        "outcomes": []
+      },
+      "b": {
+        "event": "2028 US election winner",
+        "selection": "Alice",
+        "rules": [],
+        "outcomes": []
+      }
+    }
+  ]
+}

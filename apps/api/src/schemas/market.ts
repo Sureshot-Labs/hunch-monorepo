@@ -60,6 +60,7 @@ export const marketSimilarQuerySchema = z.object({
 });
 
 export const marketAlternativesQuerySchema = z.object({
+  consumer: z.enum(["alternatives", "agents"]).default("alternatives"),
   venues: z.string().trim().min(1).optional(),
   limit: zOptionalInt.optional(),
   sourceLimit: zOptionalInt.optional(),

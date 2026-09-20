@@ -125,6 +125,9 @@ importers:
       '@hunch/infra':
         specifier: workspace:*
         version: link:../../packages/infra
+      '@hunch/market-matching':
+        specifier: workspace:*
+        version: link:../../packages/market-matching
       '@hunch/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -378,6 +381,18 @@ importers:
         specifier: ^3.23.8
         version: 3.25.76
 
+  apps/market-matcher:
+    dependencies:
+      '@hunch/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@hunch/market-matching':
+        specifier: workspace:*
+        version: link:../../packages/market-matching
+      pg:
+        specifier: 8.22.0
+        version: 8.22.0
+
   packages/config:
     dependencies:
       dotenv:
@@ -466,6 +481,18 @@ importers:
       '@types/node':
         specifier: ^24.13.2
         version: 24.13.2
+
+  packages/market-matching:
+    dependencies:
+      '@hunch/db':
+        specifier: workspace:*
+        version: link:../db
+      '@hunch/shared':
+        specifier: workspace:*
+        version: link:../shared
+      pg:
+        specifier: 8.22.0
+        version: 8.22.0
 
   packages/shared:
     dependencies:

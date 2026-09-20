@@ -1,0 +1,17 @@
+{
+  "name": "market-matcher",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@hunch/market-matching": "workspace:*",
+    "@hunch/config": "workspace:*",
+    "pg": "8.22.0"
+  }
+}

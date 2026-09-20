@@ -28,6 +28,10 @@ export const clusterParamsSchema = z.object({
   id: z.string().min(1),
 });
 
+export const matchedClustersQuerySchema = aggClustersQuerySchema.extend({
+  consumer: z.enum(["clusters", "agents"]).default("clusters"),
+});
+
 export type ClustersQuery = z.infer<typeof clustersQuerySchema>;
 export type AggClustersQuery = z.infer<typeof aggClustersQuerySchema>;
 export type ClusterParams = z.infer<typeof clusterParamsSchema>;

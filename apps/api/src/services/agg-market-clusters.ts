@@ -87,10 +87,11 @@ type AggClusterDefaults = {
 };
 
 export type AggClusterSummary = {
+  outcomeLinks?: AggMarketAlternativesResponse["outcomeLinks"];
   id: string;
   label: string;
   score: number;
-  source: "agg";
+  source: "agg" | "hunch_matcher";
   category: string | null;
   seedMarketId: string | null;
   marketCount: number;
@@ -109,7 +110,7 @@ export type AggClusterSummary = {
   analysisModel: null;
   qualityScore: null;
   matchDiagnostics: {
-    source: "agg";
+    source: "agg" | "hunch_matcher";
     sourceMarketIds: string[];
     matchedMarketIds: string[];
     venues: AggSupportedVenue[];
@@ -145,6 +146,7 @@ export type AggMarketAlternativesQueryInput = {
 };
 
 export type AggMarketAlternativeMidpoint = {
+  outcomeMapping?: ClusterMarketSummary["outcomeMapping"];
   marketId: string;
   eventId: string;
   venue: string;
@@ -153,9 +155,15 @@ export type AggMarketAlternativeMidpoint = {
 };
 
 export type AggMarketAlternativesResponse = {
+  outcomeLinks?: {
+    sourceMarketId: string;
+    targetMarketId: string;
+    sourceOutcomeId: string;
+    targetOutcomeId: string;
+  }[];
   generatedAt: string;
-  source: "agg";
-  pricingSource: "agg_midpoint";
+  source: "agg" | "hunch_matcher";
+  pricingSource: "agg_midpoint" | "native_orderbook";
   marketId: string;
   eventId: string | null;
   status: "matched" | "not_found";

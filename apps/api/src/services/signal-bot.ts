@@ -1,4 +1,6 @@
 import { requestFreshMarketPrices, type PriceRefreshRedis } from "@hunch/infra";
+import { enabledConsumer } from "./matched-markets.js";
+import { loadMatchedSignalCandidates } from "./signal-matching.js";
 import {
   DEFAULT_VENUE_LIFECYCLE_POLICY,
   getVenuesWithLifecycleCapability,
@@ -5080,6 +5082,23 @@ async function resolveSignalBotDeliveryForPolicy(input: {
         venue: alternative.venue,
       });
     }
+  } else if (await enabledConsumer(input.db, "signals")) {
+    const result = await loadMatchedSignalCandidates({
+      db: input.db,
+      marketId: input.note.marketId,
+      venues: input.destinationPolicy.targetVenues,
+      buySide: input.buySide,
+      nowIso,
+      readiness: (marketId, buySide) =>
+        loadSignalBotPriceGuardBlockers({
+          ...input,
+          buySide,
+          note: { marketId },
+        }),
+    });
+    candidates.push(...result.candidates);
+    sawDeferredQuote ||= result.deferred;
+    diagnostics.aggErrors += Number(result.failed);
   } else {
     const alternativeVenues = input.destinationPolicy.targetVenues.filter(
       (venue) =>

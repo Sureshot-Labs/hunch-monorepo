@@ -1,4 +1,8 @@
 import type { PoolClient } from "pg";
+import {
+  matchingProtectedReferences,
+  matchingDerivedReferences,
+} from "./services/matching-retention.js";
 import { pool } from "./db.js";
 import {
   hasCliFlag as hasFlag,
@@ -155,6 +159,7 @@ function protectedRefsSql(
   candidatePoolTable: string,
   candidateRefTokensTable: string,
   options: {
+    includeMatchingHistory?: boolean;
     includeFundingOperations?: boolean;
     includeFundingLiquidityProjections?: boolean;
     includeFundingPreparationRuns?: boolean;
@@ -259,6 +264,7 @@ function protectedRefsSql(
     from ${candidatePoolTable} c
     join executions ex on ex.unified_market_id = c.market_id
     ${fundingOperationsRef}
+    ${options.includeMatchingHistory ? `union ${matchingProtectedReferences(candidatePoolTable)}` : ""}
     ${fundingLiquidityProjectionsRef}
     ${fundingPreparationRunsRef}
     ${positionActionOperationsRef}
@@ -396,6 +402,7 @@ function refTokensSql(
 
 function candidateCte(
   options: {
+    includeMatchingHistory?: boolean;
     includeFundingOperations?: boolean;
     includeFundingLiquidityProjections?: boolean;
     includeFundingPreparationRuns?: boolean;
@@ -626,6 +633,7 @@ async function relationExists(
 }
 
 async function protectedRefOptions(client: PoolClient): Promise<{
+  includeMatchingHistory: boolean;
   includeFundingOperations: boolean;
   includeFundingLiquidityProjections: boolean;
   includeFundingPreparationRuns: boolean;
@@ -635,6 +643,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
   includeTelegramTradeIntents: boolean;
 }> {
   const [
+    includeMatchingHistory,
     includeFundingOperations,
     includeFundingLiquidityProjections,
     includeFundingPreparationRuns,
@@ -643,6 +652,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     includeTelegramFundingBuyReturns,
     includeTelegramTradeIntents,
   ] = await Promise.all([
+    relationExists(client, "public.market_contract_versions"),
     relationExists(client, "public.funding_operations"),
     relationExists(client, "public.funding_liquidity_projections"),
     relationExists(client, "public.funding_preparation_runs"),
@@ -652,6 +662,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     relationExists(client, "public.telegram_trade_intents"),
   ]);
   return {
+    includeMatchingHistory,
     includeFundingOperations,
     includeFundingLiquidityProjections,
     includeFundingPreparationRuns,
@@ -679,6 +690,7 @@ async function queryBatchSummary(
     `
       ${candidateCte(options)},
       derived_refs as materialized (
+        ${options.includeMatchingHistory ? `${matchingDerivedReferences("candidate_pool")} union all` : ""}
         select 'unified_market_tokens' as label, count(distinct x.market_id)::text as markets, count(*)::text as rows
         from unified_market_tokens x
         join candidate_pool c on c.market_id = x.market_id

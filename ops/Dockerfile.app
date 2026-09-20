@@ -15,6 +15,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.js
 COPY apps/api/package.json apps/api/package.json
 COPY apps/ai-worker/package.json apps/ai-worker/package.json
 COPY apps/finance-worker/package.json apps/finance-worker/package.json
+COPY apps/market-matcher/package.json apps/market-matcher/package.json
 COPY apps/indexer-dflow/package.json apps/indexer-dflow/package.json
 COPY apps/indexer-kalshi/package.json apps/indexer-kalshi/package.json
 COPY apps/indexer-limitless/package.json apps/indexer-limitless/package.json
@@ -24,6 +25,7 @@ COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/db/package.json packages/db/package.json
 COPY packages/infra/package.json packages/infra/package.json
 COPY packages/shared/package.json packages/shared/package.json
+COPY packages/market-matching/package.json packages/market-matching/package.json
 
 RUN pnpm install --frozen-lockfile
 

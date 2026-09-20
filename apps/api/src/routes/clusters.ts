@@ -1,4 +1,8 @@
 import type { FastifyPluginAsync } from "fastify";
+import {
+  enabledConsumer,
+  getMatchedClusters,
+} from "../services/matched-markets.js";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { pool } from "../db.js";
 import { getRedis, getRedisStatus } from "../redis.js";
@@ -22,6 +26,7 @@ import {
 import { requestMarketRefreshForMarketRefs } from "../lib/market-refresh.js";
 import {
   aggClustersQuerySchema,
+  matchedClustersQuerySchema,
   clusterParamsSchema,
   clustersQuerySchema,
 } from "../schemas/clusters.js";
@@ -219,6 +224,17 @@ function requestClusterMarketRefresh(
 
 export const clustersRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+  z.get(
+    "/clusters/matched",
+    { schema: { querystring: matchedClustersQuerySchema } },
+    async (request, reply) => {
+      if (!(await enabledConsumer(pool, request.query.consumer)))
+        return reply.code(503).send({ error: "Market matching is disabled" });
+      const response = await getMatchedClusters(pool, request.query);
+      requestClusterMarketRefresh(response.items, "clusters:matched");
+      return response;
+    },
+  );
 
   z.get(
     "/clusters",

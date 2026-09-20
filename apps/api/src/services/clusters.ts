@@ -34,14 +34,22 @@ export type ClusterMarketSummary = {
   marketId: string;
   eventId: string;
   venue: string;
-  source?: "hunch" | "agg";
-  pricingSource?: "hunch_db" | "agg_midpoint" | "agg_orderbook";
+  source?: "hunch" | "agg" | "hunch_matcher";
+  pricingSource?:
+    | "hunch_db"
+    | "agg_midpoint"
+    | "agg_orderbook"
+    | "native_orderbook";
   aggVenueMarketId?: string | null;
   aggVenueEventId?: string | null;
   matchMethod?: string | null;
   outcomeMapping?: {
     confidence: number;
-    method: "exact_title" | "selected_participant" | "source_identity";
+    method:
+      | "exact_title"
+      | "selected_participant"
+      | "source_identity"
+      | "verified_outcome_link";
     sourceYesTo: "NO" | "YES";
   } | null;
   executionOffers?: ClusterMarketExecutionOffers | null;
@@ -241,6 +249,12 @@ function resolveComparablePrice(
   market: ClusterMarketSummary,
   canonicalSelection: ParticipantGroup | null,
 ): number | null {
+  if (market.source === "hunch_matcher") {
+    if (!market.outcomeMapping) return null;
+    return market.outcomeMapping.sourceYesTo === "YES"
+      ? market.yesMid
+      : market.noMid;
+  }
   if (market.yesMid == null) return null;
   if (!canonicalSelection) return market.yesMid;
 
