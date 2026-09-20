@@ -15,6 +15,8 @@ if ! docker network inspect hunch-internal >/dev/null 2>&1; then
   docker network create hunch-internal
 fi
 
+APP_DIR="${APP_DIR}" bash "${APP_DIR}/ops/market-matcher-deploy.sh" adopt
+
 docker-compose --project-directory "${APP_DIR}" \
   -f "${APP_DIR}/ops/docker-compose.prod.yml" \
   --env-file "${ENV_FILE}" down --remove-orphans
@@ -27,6 +29,8 @@ fi
 docker-compose --project-directory "${APP_DIR}" \
   -f "${APP_DIR}/ops/docker-compose.prod.yml" \
   --env-file "${ENV_FILE}" up -d
+
+bash "${APP_DIR}/ops/market-matcher-deploy.sh" verify
 EOF
 )
 

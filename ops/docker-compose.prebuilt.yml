@@ -9,6 +9,8 @@ services:
     image: ${HUNCH_BACKEND_IMAGE}
   ai-worker:
     image: ${HUNCH_BACKEND_IMAGE}
+  market-matcher:
+    image: ${HUNCH_BACKEND_IMAGE}
   finance-worker:
     image: ${HUNCH_BACKEND_IMAGE}
   signal-bot:

@@ -229,6 +229,40 @@ services:
       - packages/config/dist/run-with-secrets.js
       - apps/ai-worker/dist/main.js
 
+  market-matcher:
+    build:
+      context: .
+      dockerfile: ops/Dockerfile.app
+    container_name: hunch-market-matcher
+    restart: unless-stopped
+    stop_grace_period: 120s
+    networks:
+      - hunch-net
+    env_file:
+      - /opt/hunch/.env
+    environment:
+      HUNCH_SECRET_BUNDLES: ${HUNCH_SECRET_BUNDLES_MARKET_MATCHER:-aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/ai}
+      HUNCH_SECRET_REQUIRED_KEYS: DATABASE_URL
+      MATCHING_DISCOVERY_API_URL: http://api:3001
+    volumes:
+      - /opt/hunch/.env:/app/.env:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "apps/market-matcher/dist/health.js"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    command:
+      - node
+      - packages/config/dist/run-with-secrets.js
+      - apps/market-matcher/dist/main.js
+      - run
+
   finance-worker:
     build:
       context: .

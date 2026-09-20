@@ -37,6 +37,7 @@ application_services=(
   indexer-limitless
   indexer-dflow
   ai-worker
+  market-matcher
   finance-worker
   signal-bot
   social-media-worker
@@ -75,10 +76,13 @@ fi
 
 # Replace only application containers. Postgres and Redis retain their process
 # state and do not reload their datasets during an ordinary backend deploy.
+APP_DIR="${APP_DIR}" bash "${APP_DIR}/ops/market-matcher-deploy.sh" adopt
 "${compose[@]}" stop "${application_services[@]}" || true
 "${compose[@]}" rm -f "${application_services[@]}" || true
 "${compose[@]}" up -d --no-build --no-deps --remove-orphans \
   "${application_services[@]}"
+
+bash "${APP_DIR}/ops/market-matcher-deploy.sh" verify
 
 # Give the secret loader and worker entrypoint enough time to fail before we
 # accept the deployment. A container caught in a restart loop is not healthy.

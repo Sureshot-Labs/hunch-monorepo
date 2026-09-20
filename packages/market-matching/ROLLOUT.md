@@ -1,7 +1,8 @@
 # Jev matching: rollout and rollback
 
-This is an operator runbook, not an executed deployment. No production migrations,
-processes, policies, schedules or credentials were changed during local validation.
+The matcher is part of the normal backend deployment on push to `main`.
+Deployment updates code; the runtime policy independently controls paid work and
+consumer activation.
 
 ## Defaults and ownership
 
@@ -17,28 +18,26 @@ It is an abuse/traffic guard, not a conversion of dollars into tokens. Actual
 charges plus outstanding reservations must fit the budget. Raising the request
 guard does not raise the dollar budget. Lazy demand has its own smaller share.
 
-The matcher independently samples up to 100 seeds every 15 minutes: 25 indexed
-trending, 25 Limitless historical-volume, 20 feed/movers, 15 map sidebars and 15
+The matcher independently samples up to 300 seeds every 15 minutes: 75 indexed
+trending, 75 Limitless historical-volume, 60 feed/movers, 45 map sidebars and 45
 whale-activity markets, before deduplication. It reads existing product APIs;
 it does not modify, depend on or run from the API cache-warming job. Browser GETs
 do not enqueue inference. Venue lifecycle/full-indexing eligibility still applies.
 
 ## Prepare the release
 
-1. Review the backend, frontend, admin and public-agent changes on `jev-matching`.
+1. Review the backend, frontend, admin and public-agent changes.
    Build their normal release artifacts. The backend application Dockerfile includes
    both new workspace package manifests. Do not change venue lifecycle policies.
 2. Verify migrations through `0261_market_matching.sql` on disposable PostgreSQL 16.
    The migration creates empty tables, with no historical-data fail-fast assertions.
-   Production deployment stops services during migration, so migration verification
-   must precede that operation. Use the normal explicit production migration process
-   only when deployment is separately authorized.
+   Normal backend deployment runs migrations before stopping application services;
+   a migration failure leaves the currently running API and workers online.
 3. Deploy API before clients that read `/matching/config`; deploy admin and clients
    with all matching policy switches still false. Existing sources remain selected.
    Invalid matching policy is an error, not permission to silently use AGG.
-4. Add **one separate matcher process** using the same backend image and network.
-   This delivery deliberately does not install a Compose service or schedule.
-   Start it with the existing secrets bootstrap and these service-owned settings:
+4. Merge backend `develop` into `main` and push through the normal release process.
+   Compose starts **one `market-matcher` service**, with these service-owned settings:
 
    ```text
    HUNCH_SECRET_BUNDLES=aws-sm:/hunch/prod/shared,aws-sm:/hunch/prod/ai
@@ -47,9 +46,12 @@ do not enqueue inference. Venue lifecycle/full-indexing eligibility still applie
    ```
 
    The bundles must provide `DATABASE_URL` and `OPENROUTER_API_KEY`. Do not load
-   wallet/Privy/API secrets into this sidecar. Use the normal platform service user,
-   restart policy, network, AWS access and health/log supervision. The matcher has
-   its own loop; no second cron is needed. Missing product API configuration is
+   wallet/Privy/API secrets into this sidecar. The first rollout validates and
+   gracefully replaces the known standalone container after migrations succeed.
+   Later deployments update the Compose service normally, allowing 120 seconds
+   for shutdown. Deployment verifies a fresh worker heartbeat, no restarts and
+   the same image ID as API. Disabled policy keeps the loop healthy and idle.
+   The matcher has its own loop; no second cron is needed. Missing product API configuration is
    reported in selector status and leaves only the two bounded DB seed sources.
 
 ## Shadow operation and switching

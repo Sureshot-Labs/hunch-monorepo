@@ -60,6 +60,7 @@ application_services=(
   indexer-limitless
   indexer-dflow
   ai-worker
+  market-matcher
   finance-worker
   signal-bot
   social-media-worker
@@ -111,10 +112,13 @@ fi
 
 # Replace only application containers after the database is ready. Postgres and
 # Redis stay up, so a backend deploy cannot trigger a long Redis dataset reload.
+APP_DIR="${APP_DIR}" bash "${APP_DIR}/ops/market-matcher-deploy.sh" adopt
 "${compose[@]}" stop "${application_services[@]}" || true
 "${compose[@]}" rm -f "${application_services[@]}" || true
 "${compose[@]}" up -d --no-build --no-deps --remove-orphans \
   "${application_services[@]}"
+
+bash "${APP_DIR}/ops/market-matcher-deploy.sh" verify
 
 if [[ -n "${ARCHIVE}" ]]; then
   rm -f "${ARCHIVE}" || true

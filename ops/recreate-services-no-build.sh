@@ -5,7 +5,7 @@ REMOTE_HOST="${REMOTE_HOST:-ubuntu@13.51.155.185}"
 APP_DIR="${APP_DIR:-/home/ubuntu/hunch-monorepo}"
 ENV_FILE="${ENV_FILE:-/opt/hunch/.env}"
 PROJECT_NAME="${PROJECT_NAME:-hunch-monorepo}"
-SERVICES="${SERVICES:-api indexer-polymarket indexer-limitless indexer-dflow ai-worker finance-worker signal-bot social-media-worker}"
+SERVICES="${SERVICES:-api indexer-polymarket indexer-limitless indexer-dflow ai-worker market-matcher finance-worker signal-bot social-media-worker}"
 BACKEND_IMAGE="${BACKEND_IMAGE:-}"
 HUNCH_SOCIAL_MEDIA_WORKER_IMAGE="${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE:-}"
 RESTART_NGINX="${RESTART_NGINX:-1}"
@@ -48,7 +48,7 @@ find_backend_image() {
     return 0
   fi
 
-  for container in hunch-api hunch-indexer-polymarket hunch-indexer-limitless hunch-indexer-dflow hunch-ai-worker hunch-finance-worker hunch-signal-bot; do
+  for container in hunch-api hunch-indexer-polymarket hunch-indexer-limitless hunch-indexer-dflow hunch-ai-worker hunch-market-matcher hunch-finance-worker hunch-signal-bot; do
     image_id="$(docker inspect -f '{{.Image}}' "${container}" 2>/dev/null || true)"
     if [ -n "${image_id}" ]; then
       echo "${image_id}"
@@ -72,8 +72,12 @@ find_backend_image() {
 }
 
 social_media_worker_selected=0
+market_matcher_selected=0
 backend_service_selected=0
 for service in ${SERVICES}; do
+  if [ "${service}" = "market-matcher" ]; then
+    market_matcher_selected=1
+  fi
   if [ "${service}" = "social-media-worker" ]; then
     social_media_worker_selected=1
   else
@@ -84,6 +88,15 @@ done
 if [ "${backend_service_selected}" = "1" ]; then
   backend_image="$(find_backend_image)"
   echo "Using backend image: ${backend_image}"
+fi
+
+if [ "${market_matcher_selected}" = "1" ]; then
+  if ! docker run --rm --network none --read-only --entrypoint node \
+    "${backend_image}" -e \
+    'require("node:fs").accessSync("/app/apps/market-matcher/dist/health.js")'; then
+    echo "Refusing to recreate services: selected image lacks matcher health support. Use a compatible image or explicitly exclude market-matcher from SERVICES for legacy recovery." >&2
+    exit 1
+  fi
 fi
 
 find_social_media_worker_image() {
@@ -138,12 +151,21 @@ for service in ${SERVICES}; do
   docker tag "${backend_image}" "${PROJECT_NAME}_${service}:latest"
 done
 
+if [ "${market_matcher_selected}" = "1" ]; then
+  APP_DIR="${APP_DIR}" bash "${APP_DIR}/ops/market-matcher-deploy.sh" adopt
+fi
+
 for service in ${SERVICES}; do
   container="hunch-${service}"
-  ids="$(docker ps -aq --filter "name=${container}" || true)"
+  ids="$(docker ps -aq --filter "name=^/${container}$" || true)"
   if [ -n "${ids}" ]; then
     echo "Removing existing container(s) for ${container}"
-    docker rm -f ${ids}
+    if [ "${service}" = "market-matcher" ]; then
+      docker stop --time 120 ${ids} >/dev/null
+      docker rm ${ids}
+    else
+      docker rm -f ${ids}
+    fi
   fi
 done
 
@@ -195,8 +217,12 @@ if [ "${VERIFY}" = "1" ]; then
   fi
 fi
 
+if [ "${market_matcher_selected}" = "1" ]; then
+  bash "${APP_DIR}/ops/market-matcher-deploy.sh" verify
+fi
+
 docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' \
-  | grep -E 'hunch-(api|indexer|ai-worker|finance-worker|signal-bot|social-media-worker|nginx|postgres|redis|web)' || true
+  | grep -E 'hunch-(api|indexer|ai-worker|market-matcher|finance-worker|signal-bot|social-media-worker|nginx|postgres|redis|web)' || true
 EOF
 )
 

@@ -1,5 +1,7 @@
 import { Pool } from "pg";
 import { setTimeout as delay } from "node:timers/promises";
+import { rm } from "node:fs/promises";
+import { HEARTBEAT_PATH, markHealthy } from "./health.js";
 import {
   readMatchingPolicy,
   approvalRevision,
@@ -13,7 +15,11 @@ import {
 // Run using the repository run-with-secrets bootstrap; never import API env.
 const command = process.argv[2] ?? "run";
 const readOnly = command === "status" || command === "report";
-if (!readOnly && process.env.MATCHING_WORKER_ENABLED === "false") {
+if (
+  !readOnly &&
+  command !== "run" &&
+  process.env.MATCHING_WORKER_ENABLED === "false"
+) {
   console.log(
     JSON.stringify({ status: "disabled", reason: "environment_kill_switch" }),
   );
@@ -70,9 +76,11 @@ if (!readOnly && process.env.MATCHING_WORKER_ENABLED === "false") {
         ),
       );
     } else if (["run", "run-once", "scan"].includes(command)) {
+      if (command === "run") await rm(HEARTBEAT_PATH, { force: true });
       let nextScan = 0;
       do {
         const matching = await readMatchingPolicy(pool);
+        if (command === "run") await markHealthy();
         if (!matchingWorkerEnabled(matching)) {
           if (command !== "run") {
             console.log(

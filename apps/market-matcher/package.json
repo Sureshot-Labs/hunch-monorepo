@@ -5,6 +5,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/health.test.ts && node --test ../../ops/market-matcher-deploy.test.mjs",
     "lint": "eslint .",
     "start": "node dist/main.js",
     "dev": "tsx src/main.ts"

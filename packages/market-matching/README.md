@@ -175,8 +175,10 @@ No provider account setting was changed here.
 
 Build shared/workspace dependencies before the matcher and worker. The application
 Dockerfile now includes both new package manifests before its frozen install.
-The worker is deliberately not added to production Compose or a schedule in this
-local-only delivery. Starting a process and enabling a policy are separate actions.
+Production Compose runs `market-matcher` on the same backend image as API.
+Pushing backend `main` updates it through the normal deployment; no separate
+container command or cron is needed. Its heartbeat healthcheck verifies the loop
+even when policy disables paid work. Enabling work remains a policy action.
 The entrypoint works with the existing `run-with-secrets` bootstrap; its required
 runtime credentials are DATABASE_URL and OPENROUTER_API_KEY, not API wallet keys.
 

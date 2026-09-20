@@ -69,8 +69,9 @@ are unavailable, with no executable link. Lazy/auth gates govern discovery,
 not access to known comparisons. Search status distinguishes cached no-match,
 pending work, rate limiting and temporary failure within the existing panel.
 
-Production currently runs `hunch-market-matcher` separately from backend
-Compose. Pushing API/frontend changes alone does not replace that container.
-The matcher must use the updated backend image before its normal revalidation
-loop can recover these reviews. No bulk requeue, database rewrite, model
-threshold change or runtime budget increase is required.
+At the time of this audit, `hunch-market-matcher` ran outside backend Compose.
+The deployment integration now replaces it as part of the normal backend
+rollout, verifies its loop heartbeat and checks that its image matches the API.
+The first rollout adopts the validated standalone container after successful
+migrations; later deployments use the regular Compose service. No bulk requeue,
+database rewrite, model threshold change or budget increase is required.
