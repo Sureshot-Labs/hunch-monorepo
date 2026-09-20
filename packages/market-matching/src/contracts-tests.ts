@@ -7,11 +7,17 @@ import {
   eligible,
   EXPECTED_MODEL,
   outcomeCandidates,
+  parentRuleEvidence,
   type MarketRow,
   type Answer,
 } from "./contracts.js";
 import { DEFAULT_VENUE_LIFECYCLE_POLICY } from "@hunch/shared";
-import { decide, makeRequest, type JevResult } from "./jev.js";
+import {
+  decide,
+  inferenceEvidence,
+  makeRequest,
+  type JevResult,
+} from "./jev.js";
 
 const answer: Answer = {
   choice: "equivalent",
@@ -23,6 +29,34 @@ const answer: Answer = {
     insufficient_information: 0,
   },
 };
+test("captured parent-rule calibration preserves election/price matches and rejects conflicts", async () => {
+  const fixture = JSON.parse(
+    await readFile(
+      new URL("../fixtures/parent-rule-calibration.json", import.meta.url),
+      "utf8",
+    ),
+  ) as {
+    cases: {
+      id: string;
+      a: MarketRow;
+      b: MarketRow;
+      expectedApproval: boolean;
+      answer: Answer;
+      outcomeAnswers: Record<string, Answer>;
+      model: string;
+    }[];
+  };
+  for (const entry of fixture.cases) {
+    const gate = approveContract(
+      normalizeContract(entry.a),
+      normalizeContract(entry.b),
+      entry.answer,
+      entry.model,
+      entry.outcomeAnswers,
+    );
+    assert.equal(gate.approved, entry.expectedApproval, entry.id);
+  }
+});
 test("captured normalization regressions preserve useful matches and reject unresolved rules", async () => {
   const fixture = JSON.parse(
     await readFile(
@@ -70,6 +104,69 @@ export function fixture(
     ...overrides,
   };
 }
+
+test("binary winner parent complement is redundant but other parent changes remain blockers", () => {
+  const rule =
+    "This market will resolve to the person who wins the 2028 US Presidential Election. The resolution source is AP. If undecided, use inauguration on January 20, 2029.";
+  const parent = rule.replace(
+    "Election.",
+    "Election. Otherwise, this market will resolve to “No.”",
+  );
+  const base = fixture("polymarket:winner", {
+    description: rule,
+    event_description: parent,
+  });
+  const normalized = normalizeContract(base);
+  assert(!normalized.blockers.includes("unresolved_parent_rules"));
+  assert.equal(normalized.parentRules, parent);
+  assert.equal(inferenceEvidence(normalized).parentRules, rule);
+  assert.notEqual(
+    normalized.fingerprint,
+    normalizeContract({ ...base, event_description: rule }).fingerprint,
+  );
+  for (const changed of [
+    parent.replace("2028", "2024"),
+    parent.replace("AP", "NBC"),
+    parent.replace("January 20", "January 21"),
+    parent.replace("“No.”", "“Yes.”"),
+    parent.replace("“No.”", "50-50."),
+    parent + " On cancellation, resolve 50-50.",
+    parent.replace("Otherwise,", "On cancellation,"),
+  ]) {
+    const c = normalizeContract({ ...base, event_description: changed });
+    assert(c.blockers.includes("unresolved_parent_rules"), changed);
+    assert.equal(parentRuleEvidence(c).rules, changed);
+  }
+  assert(
+    normalizeContract({
+      ...base,
+      outcomes: ["Alice", "Bob"],
+    }).blockers.includes("unresolved_parent_rules"),
+  );
+});
+
+test("event description headings are context, while wrong year and appended rules are material", () => {
+  const base = fixture("polymarket:heading", {
+    event_title: "What price will Ethereum hit in 2026?",
+    event_description: "What price will Ethereum hit before 2027?",
+  });
+  const c = normalizeContract(base);
+  assert(!c.blockers.includes("unresolved_parent_rules"));
+  assert.equal(inferenceEvidence(c).parentRules, "");
+  for (const parent of [
+    "What price will Ethereum hit before 2026?",
+    "What price will Ethereum hit in 2026? Resolve using Coinbase.",
+    "What price will Bitcoin hit before 2027?",
+    "What price will Ethereum hit before January 1, 2027?",
+  ])
+    assert(
+      normalizeContract({
+        ...base,
+        event_description: parent,
+      }).blockers.includes("unresolved_parent_rules"),
+      parent,
+    );
+});
 test("policy respects maintenance and unreleased venues", () => {
   assert(eligible(DEFAULT_VENUE_LIFECYCLE_POLICY, "polymarket"));
   assert(eligible(DEFAULT_VENUE_LIFECYCLE_POLICY, "limitless"));

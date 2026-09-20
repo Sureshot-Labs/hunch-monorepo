@@ -1,0 +1,391 @@
+{
+  "capturedAt": "2026-09-20",
+  "cases": [
+    {
+      "id": "limitless:36774|polymarket:561229",
+      "a": {
+        "id": "limitless:36774",
+        "event_id": "limitless:10000449",
+        "venue": "limitless",
+        "title": "JD Vance",
+        "event_title": "Presidential Election Winner 2028",
+        "description": "The 2028 US Presidential Election is scheduled to take place on November 7, 2028. This market will resolve to the person who wins the 2028 US Presidential Election. The resolution source for this market is the Associated Press, Fox News, and NBC. This market will resolve once all three sources call the race for the same candidate. If all three sources haven’t called the race for the same candidate by the inauguration date (January 20, 2029) this market will resolve based on who is inaugurated.",
+        "metadata": {
+          "question": ""
+        },
+        "event_description": "",
+        "outcomes": ["YES", "NO"],
+        "tokens": [
+          {
+            "token_id": "limitless:105632691967456892782181320395973034480965069574113862552649402149346523861069",
+            "outcome_side": "YES"
+          },
+          {
+            "token_id": "limitless:107976550025100987452930254334578718647732267013861937877652274401316597166905",
+            "outcome_side": "NO"
+          }
+        ],
+        "status": "ACTIVE",
+        "event_status": "ACTIVE"
+      },
+      "b": {
+        "id": "polymarket:561229",
+        "event_id": "polymarket:31552",
+        "venue": "polymarket",
+        "title": "JD Vance",
+        "event_title": "Presidential Election Winner 2028",
+        "description": "The 2028 US Presidential Election is scheduled to take place on November 7, 2028. This market will resolve to the person who wins the 2028 US Presidential Election. The resolution source for this market is the Associated Press, Fox News, and NBC. This market will resolve once all three sources call the race for the same candidate. If all three sources haven’t called the race for the same candidate by the inauguration date (January 20, 2029) this market will resolve based on who is inaugurated.",
+        "metadata": {
+          "question": "Will JD Vance win the 2028 US Presidential Election?"
+        },
+        "event_description": "The 2028 US Presidential Election is scheduled to take place on November 7, 2028. This market will resolve to the person who wins the 2028 US Presidential Election. Otherwise, this market will resolve to “No.” The resolution source for this market is the Associated Press, Fox News, and NBC. This market will resolve once all three sources call the race for the same candidate. If all three sources haven’t called the race for the same candidate by the inauguration date (January 20, 2029) this market will resolve based on who is inaugurated.",
+        "outcomes": ["Yes", "No"],
+        "tokens": [
+          {
+            "token_id": "16040015440196279900485035793550429453516625694844857319147506590755961451627",
+            "outcome_side": "YES"
+          },
+          {
+            "token_id": "94476829201604408463453426454480212459887267917122244941405244686637914508323",
+            "outcome_side": "NO"
+          }
+        ],
+        "status": "ACTIVE",
+        "event_status": "ACTIVE"
+      },
+      "expectedApproval": true,
+      "answer": {
+        "type": "choice",
+        "choice": "equivalent",
+        "probabilities": {
+          "insufficient_information": 0.01,
+          "different": 0,
+          "inverse": 0,
+          "equivalent": 0.99
+        },
+        "confidence": 0.98
+      },
+      "outcomeAnswers": {
+        "relation": {
+          "type": "choice",
+          "choice": "equivalent",
+          "probabilities": {
+            "insufficient_information": 0.01,
+            "different": 0,
+            "inverse": 0,
+            "equivalent": 0.99
+          },
+          "confidence": 0.98
+        },
+        "outcome_0_0": {
+          "type": "choice",
+          "choice": "equivalent",
+          "probabilities": {
+            "insufficient_information": 0.05,
+            "different": 0,
+            "inverse": 0,
+            "equivalent": 0.95
+          },
+          "confidence": 0.93
+        },
+        "outcome_1_1": {
+          "type": "choice",
+          "choice": "equivalent",
+          "probabilities": {
+            "insufficient_information": 0.03,
+            "different": 0,
+            "inverse": 0,
+            "equivalent": 0.97
+          },
+          "confidence": 0.94
+        }
+      },
+      "model": "typesafe/jev-1.13-20260917",
+      "cost": 0.000080262
+    },
+    {
+      "id": "limitless:398058|polymarket:701552",
+      "a": {
+        "id": "limitless:398058",
+        "event_id": "limitless:10014389",
+        "venue": "limitless",
+        "title": "↓ 1,500",
+        "event_title": "What price will Ethereum hit in 2026?",
+        "description": "This market will immediately resolve to “Yes” if any Binance 1-minute candle for Ethereum (ETH/USDT) between November 24, 2025, 14:00 and December 31, 2026, 23:59 in the ET timezone has a final “Low” price equal to or lower than the price specified in the title. Otherwise, this market will resolve to “No.” The resolution source for this market is Binance, specifically the ETH/USDT “Low” prices available at: https://www.binance.com/en/trade/ETH_USDT with the chart settings on “1m” (one-minute candles) selected on the top bar. Please note that the outcome of this market depends solely on the price data from the Binance ETH/USDT trading pair. Prices from other exchanges, different trading pairs, or spot markets will not be considered for the resolution of this market.",
+        "metadata": {
+          "question": ""
+        },
+        "event_description": "",
+        "outcomes": ["YES", "NO"],
+        "tokens": [
+          {
+            "token_id": "limitless:4169710459828631661397625303061839341193824115735763101172892347884856805857",
+            "outcome_side": "YES"
+          },
+          {
+            "token_id": "limitless:74110031926941667687684379778154478939956895065172252750309080825453114341424",
+            "outcome_side": "NO"
+          }
+        ],
+        "status": "ACTIVE",
+        "event_status": "ACTIVE"
+      },
+      "b": {
+        "id": "polymarket:701552",
+        "event_id": "polymarket:89519",
+        "venue": "polymarket",
+        "title": "↓ 1,500",
+        "event_title": "What price will Ethereum hit in 2026?",
+        "description": "This market will immediately resolve to “Yes” if any Binance 1-minute candle for Ethereum (ETH/USDT) between November 24, 2025, 14:00 and December 31, 2026, 23:59 in the ET timezone has a final “Low” price equal to or lower than the price specified in the title. Otherwise, this market will resolve to “No.” The resolution source for this market is Binance, specifically the ETH/USDT “Low” prices available at: https://www.binance.com/en/trade/ETH_USDT with the chart settings on “1m” (one-minute candles) selected on the top bar. Please note that the outcome of this market depends solely on the price data from the Binance ETH/USDT trading pair. Prices from other exchanges, different trading pairs, or spot markets will not be considered for the resolution of this market.",
+        "metadata": {
+          "question": "Will Ethereum dip to $1,500 by December 31, 2026?"
+        },
+        "event_description": "What price will Ethereum hit before 2027?",
+        "outcomes": ["Yes", "No"],
+        "tokens": [
+          {
+            "token_id": "101639751789549589765350117072740510018809594718571111931328241076831078702528",
+            "outcome_side": "YES"
+          },
+          {
+            "token_id": "38508858428676968447825900892305750232615791339175195608011299023691549494960",
+            "outcome_side": "NO"
+          }
+        ],
+        "status": "ACTIVE",
+        "event_status": "ACTIVE"
+      },
+      "expectedApproval": true,
+      "answer": {
+        "type": "choice",
+        "choice": "equivalent",
+        "probabilities": {
+          "inverse": 0,
+          "insufficient_information": 0.01,
+          "equivalent": 0.98,
+          "different": 0.01
+        },
+        "confidence": 0.98
+      },
+      "outcomeAnswers": {
+        "relation": {
+          "type": "choice",
+          "choice": "equivalent",
+          "probabilities": {
+            "inverse": 0,
+            "insufficient_information": 0.01,
+            "equivalent": 0.98,
+            "different": 0.01
+          },
+          "confidence": 0.98
+        },
+        "outcome_0_0": {
+          "type": "choice",
+          "choice": "equivalent",
+          "probabilities": {
+            "inverse": 0,
+            "insufficient_information": 0.01,
+            "equivalent": 0.99,
+            "different": 0
+          },
+          "confidence": 0.98
+        },
+        "outcome_1_1": {
+          "type": "choice",
+          "choice": "equivalent",
+          "probabilities": {
+            "inverse": 0,
+            "insufficient_information": 0.02,
+            "equivalent": 0.98,
+            "different": 0
+          },
+          "confidence": 0.96
+        }
+      },
+      "model": "typesafe/jev-1.13-20260917",
+      "cost": 0.000082446
+    },
+    {
+      "id": "limitless:36779|polymarket:561244",
+      "a": {
+        "id": "limitless:36779",
+        "event_id": "limitless:10000449",
+        "venue": "limitless",
+        "title": "Donald Trump",
+        "event_title": "Presidential Election Winner 2028",
+        "description": "The 2028 US Presidential Election is scheduled to take place on November 7, 2028. This market will resolve to the person who wins the 2028 US Presidential Election. The resolution source for this market is the Associated Press, Fox News, and NBC. This market will resolve once all three sources call the race for the same candidate. If all three sources haven’t called the race for the same candidate by the inauguration date (January 20, 2029) this market will resolve based on who is inaugurated.",
+        "metadata": {
+          "question": ""
+        },
+        "event_description": "",
+        "outcomes": ["YES", "NO"],
+        "tokens": [
+          {
+            "token_id": "limitless:96603010610589710797074129374558036526690389728187706372601066166940058368813",
+            "outcome_side": "YES"
+          },
+          {
+            "token_id": "limitless:62530855718233842121520315573274787352457894418080516988218385654013639941372",
+            "outcome_side": "NO"
+          }
+        ],
+        "status": "ACTIVE",
+        "event_status": "ACTIVE"
+      },
+      "b": {
+        "id": "polymarket:561244",
+        "event_id": "polymarket:31552",
+        "venue": "polymarket",
+        "title": "Donald Trump Jr.",
+        "event_title": "Presidential Election Winner 2028",
+        "description": "The 2028 US Presidential Election is scheduled to take place on November 7, 2028. This market will resolve to the person who wins the 2028 US Presidential Election. The resolution source for this market is the Associated Press, Fox News, and NBC. This market will resolve once all three sources call the race for the same candidate. If all three sources haven’t called the race for the same candidate by the inauguration date (January 20, 2029) this market will resolve based on who is inaugurated.",
+        "metadata": {
+          "question": "Will Donald Trump Jr. win the 2028 US Presidential Election?"
+        },
+        "event_description": "The 2028 US Presidential Election is scheduled to take place on November 7, 2028. This market will resolve to the person who wins the 2028 US Presidential Election. Otherwise, this market will resolve to “No.” The resolution source for this market is the Associated Press, Fox News, and NBC. This market will resolve once all three sources call the race for the same candidate. If all three sources haven’t called the race for the same candidate by the inauguration date (January 20, 2029) this market will resolve based on who is inaugurated.",
+        "outcomes": ["Yes", "No"],
+        "tokens": [
+          {
+            "token_id": "77660944053451874285291959901958937238149180369572698706675030657716494119346",
+            "outcome_side": "YES"
+          },
+          {
+            "token_id": "52761630651452310319295064365704431564140478140269624735570317771849185169635",
+            "outcome_side": "NO"
+          }
+        ],
+        "status": "ACTIVE",
+        "event_status": "ACTIVE"
+      },
+      "expectedApproval": false,
+      "answer": {
+        "type": "choice",
+        "choice": "different",
+        "probabilities": {
+          "different": 0.62,
+          "equivalent": 0.04,
+          "insufficient_information": 0.05,
+          "inverse": 0.29
+        },
+        "confidence": 0.5
+      },
+      "outcomeAnswers": {
+        "relation": {
+          "type": "choice",
+          "choice": "different",
+          "probabilities": {
+            "different": 0.62,
+            "equivalent": 0.04,
+            "insufficient_information": 0.05,
+            "inverse": 0.29
+          },
+          "confidence": 0.5
+        }
+      },
+      "model": "typesafe/jev-1.13-20260917",
+      "cost": 0.000048552
+    },
+    {
+      "id": "limitless:373891|polymarket:3215074",
+      "a": {
+        "id": "limitless:373891",
+        "event_id": "limitless:10013818",
+        "venue": "limitless",
+        "title": "September 30",
+        "event_title": "Kharg Island no longer under Iranian control by...?",
+        "description": "This market will resolve to \"Yes\" if Kharg Island is no longer under Iranian control by September 30, 2026, 11:59 PM ET. Otherwise, this market will resolve to \"No\". “No longer under the control of Iran” means that Iran no longer exercises primary governmental or military control over Kharg Island, and another state, occupying force, or internationally backed authority has established control over the island. Temporary raids, isolated landings, special operations, bombardment, sabotage, naval presence offshore, or temporary disruption of Iranian activity will not qualify on their own. An announcement, threat, or claim that Iran has lost control will not qualify without actual control being established. If control changes pursuant to a negotiated settlement, ceasefire term, surrender, or transfer agreement, this will qualify only once actual control has been established on the island. If control over Kharg Island is contested, unclear, disputed, or not sufficiently established by the resolution date, this will not qualify, and the market will resolve to “No”. The primary resolution source will be official statements from the relevant governments and militaries, along with a consensus of credible reporting.",
+        "metadata": {
+          "question": ""
+        },
+        "event_description": "",
+        "outcomes": ["YES", "NO"],
+        "tokens": [
+          {
+            "token_id": "limitless:17295578804350983377584831489164948024620599818013171982872275569757517424190",
+            "outcome_side": "YES"
+          },
+          {
+            "token_id": "limitless:20880366762046893296783350290815779525488638675039244752529841580627255843811",
+            "outcome_side": "NO"
+          }
+        ],
+        "status": "ACTIVE",
+        "event_status": "ACTIVE"
+      },
+      "b": {
+        "id": "polymarket:3215074",
+        "event_id": "polymarket:267102",
+        "venue": "polymarket",
+        "title": "September 30",
+        "event_title": "Kharg Island no longer under Iranian control by...?",
+        "description": "This market will resolve to \"Yes\" if Kharg Island is no longer under Iranian control by September 30, 2026, 11:59 PM ET. Otherwise, this market will resolve to \"No\". “No longer under the control of Iran” means that Iran no longer exercises primary governmental or military control over Kharg Island, and another state, occupying force, or internationally backed authority has established control over the island. Temporary raids, isolated landings, special operations, bombardment, sabotage, naval presence offshore, or temporary disruption of Iranian activity will not qualify on their own. An announcement, threat, or claim that Iran has lost control will not qualify without actual control being established. If control changes pursuant to a negotiated settlement, ceasefire term, surrender, or transfer agreement, this will qualify only once actual control has been established on the island. If control over Kharg Island is contested, unclear, disputed, or not sufficiently established by the resolution date, this will not qualify, and the market will resolve to “No”. The primary resolution source will be official statements from the relevant governments and militaries, along with a consensus of credible reporting.",
+        "metadata": {
+          "question": "Kharg Island no longer under Iranian control by September 30?"
+        },
+        "event_description": "This market will resolve to \"Yes\" if Kharg Island is no longer under Iranian control by March 31, 2026 11:59PM ET. Otherwise, this market will resolve to \"No\". “No longer under the control of Iran” means that Iran no longer exercises primary governmental or military control over Kharg Island, and another state, occupying force, or internationally backed authority has established control over the island. Temporary raids, isolated landings, special operations, bombardment, sabotage, naval presence offshore, or temporary disruption of Iranian activity will not qualify on their own. An announcement, threat, or claim that Iran has lost control will not qualify without actual control being established. If control changes pursuant to a negotiated settlement, ceasefire term, surrender, or transfer agreement, this will qualify only once actual control has been established on the island. If control over Kharg Island is contested, unclear, disputed, or not sufficiently established by the resolution date, this will not qualify, and the market will resolve to “No”. The primary resolution source will be official statements from the relevant governments and militaries, along with a consensus of credible reporting.",
+        "outcomes": ["Yes", "No"],
+        "tokens": [
+          {
+            "token_id": "96189502204227781235785567019151308983559978995662677899952915271147601680025",
+            "outcome_side": "YES"
+          },
+          {
+            "token_id": "91998194726136927632450483424614012890691446509262750452187052878486812367191",
+            "outcome_side": "NO"
+          }
+        ],
+        "status": "ACTIVE",
+        "event_status": "ACTIVE"
+      },
+      "expectedApproval": false,
+      "answer": {
+        "type": "choice",
+        "choice": "insufficient_information",
+        "probabilities": {
+          "equivalent": 0.14,
+          "insufficient_information": 0.45999999999999996,
+          "different": 0.39,
+          "inverse": 0.01
+        },
+        "confidence": 0.29
+      },
+      "outcomeAnswers": {
+        "relation": {
+          "type": "choice",
+          "choice": "insufficient_information",
+          "probabilities": {
+            "equivalent": 0.14,
+            "insufficient_information": 0.45999999999999996,
+            "different": 0.39,
+            "inverse": 0.01
+          },
+          "confidence": 0.29
+        },
+        "outcome_0_0": {
+          "type": "choice",
+          "choice": "insufficient_information",
+          "probabilities": {
+            "equivalent": 0.21,
+            "insufficient_information": 0.48,
+            "different": 0.29,
+            "inverse": 0.02
+          },
+          "confidence": 0.3
+        },
+        "outcome_1_1": {
+          "type": "choice",
+          "choice": "insufficient_information",
+          "probabilities": {
+            "different": 0.35,
+            "insufficient_information": 0.49,
+            "inverse": 0,
+            "equivalent": 0.16
+          },
+          "confidence": 0.32
+        }
+      },
+      "model": "typesafe/jev-1.13-20260917",
+      "cost": 0.00009576
+    }
+  ]
+}

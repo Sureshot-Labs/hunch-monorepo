@@ -136,6 +136,43 @@ function comparableRule(text: string): string {
     .replace(/\(\s*(https?:\/\/[^\s()]+)\s*\)/g, "($1)")
     .replace(/(\b\d{1,2}:\d{2})\s+(AM|PM)\b/g, "$1$2");
 }
+
+/** Recognize redundant parent context without discarding different settlement terms. */
+export function parentRuleEvidence(
+  c: Pick<Contract, "parentRules" | "rules" | "event" | "outcomes">,
+): { compatible: boolean; rules: string } {
+  const parent = comparableRule(c.parentRules);
+  if (!parent || c.rules.some((rule) => comparableRule(rule) === parent))
+    return { compatible: true, rules: c.parentRules };
+  // Catalog descriptions sometimes repeat the event question rather than rules.
+  // The only calendar alias accepted here is a full year ending before Jan 1.
+  const heading = (text: string) =>
+    clean(text).replace(
+      /\bbefore (\d{4})\?$/,
+      (_, year: string) => `in ${Number(year) - 1}?`,
+    );
+  if (heading(parent) === heading(c.event))
+    return { compatible: true, rules: "" };
+  const binary =
+    c.outcomes.length === 2 &&
+    c.outcomes.some((o) => o.side === "YES") &&
+    c.outcomes.some((o) => o.side === "NO");
+  if (binary) {
+    // A binary winner template's explicit negative branch restates NO. Match
+    // the complete remainder exactly; never strip a deadline/source/exception.
+    const withoutComplement = parent.replace(
+      /(This market will resolve to the (?:person|candidate|team) who wins [^.?!]+\.) Otherwise, this market will resolve to (?:“No\.”|“No”\.|"No\."|"No"\.)/,
+      "$1",
+    );
+    if (withoutComplement !== parent) {
+      const duplicate = c.rules.find(
+        (rule) => comparableRule(rule) === withoutComplement,
+      );
+      if (duplicate) return { compatible: true, rules: duplicate };
+    }
+  }
+  return { compatible: false, rules: c.parentRules };
+}
 export function hash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
@@ -262,8 +299,12 @@ export function normalizeContract(row: MarketRow): Contract {
   )
     blockers.push("ambiguous_outcome_identity");
   if (
-    parentRules &&
-    !rules.some((rule) => comparableRule(rule) === comparableRule(parentRules))
+    !parentRuleEvidence({
+      parentRules,
+      rules,
+      event: clean(row.event_title),
+      outcomes,
+    }).compatible
   )
     blockers.push("unresolved_parent_rules");
   if (

@@ -630,7 +630,10 @@ export async function revalidateLinks(pool: Pool) {
     if (state.rows[0]?.cooling || !matching.revalidateCount) return 0;
     const cursor = state.rows[0]?.payload?.cursor ?? "";
     const links = await db.query(
-      `select * from (select 'contract:'||id as cursor_key,'contract' as entity_kind,left_id,right_id from market_links where disposition='approved'
+      `select * from (select 'contract:'||ml.id as cursor_key,'contract' as entity_kind,ml.left_id,ml.right_id from market_links ml
+      where ml.disposition='approved' or (ml.disposition='review' and exists (
+        select 1 from matching_evaluations evaluation_row where evaluation_row.id=ml.evaluation_id
+          and evaluation_row.diagnostics->'blockers' ? 'unresolved_parent_rules'))
       union all select 'event:'||id,'event',left_id,right_id from event_links where disposition='approved') link_rows where cursor_key>$1 order by cursor_key limit $2`,
       [cursor, matching.revalidateCount],
     );

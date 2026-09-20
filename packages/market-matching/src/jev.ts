@@ -6,6 +6,7 @@ import {
   EXPECTED_MODEL,
   PROMPT_VERSION,
   outcomeCandidates,
+  parentRuleEvidence,
   type EntityKind,
   type Answer,
   type Outcome,
@@ -21,7 +22,7 @@ export function inferenceEvidence(s: Contract | EventContract) {
         selection: s.selection,
         question: s.question,
         rules: s.rules,
-        parentRules: s.parentRules,
+        parentRules: parentRuleEvidence(s).rules,
         outcomes: s.outcomes.map((o) => ({ label: o.label, side: o.side })),
       }
     : {

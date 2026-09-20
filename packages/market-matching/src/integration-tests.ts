@@ -1155,6 +1155,51 @@ integration(
 );
 
 integration(
+  "PG16: parent-rule reviews are revisited without rebilling unchanged evidence",
+  { skip: !url },
+  async () => {
+    await clearJobs();
+    await matchingOverride({ revalidateCount: 1 });
+    const initial = await seed("parent-review");
+    await pool.query("update unified_events set description=$2 where id=$1", [
+      initial[0].eventId,
+      "Different deadline: 2024.",
+    ]);
+    const pair = await loadContracts(
+      pool,
+      initial.map((c) => c.id),
+    );
+    await enqueue(pool, "contract", pair[0], pair[1], "warm");
+    assert.equal(await runJob(pool, { key: "test", infer }), "review");
+    const link = (
+      await pool.query(
+        "select id from market_links where left_id=any($1::text[]) and right_id=any($1::text[])",
+        [pair.map((c) => c.id)],
+      )
+    ).rows[0];
+    const rewind = () =>
+      pool.query(
+        "insert into market_matching_state(state_key,payload,updated_at) values('revalidate',$1,now()-interval '1 day') on conflict(state_key) do update set payload=excluded.payload,updated_at=excluded.updated_at",
+        [{ cursor: `contract:${link.id.slice(0, -1)}` }],
+      );
+    await rewind();
+    assert.equal(await revalidateLinks(pool), 1);
+    assert.equal(await runJob(pool, { key: "test", infer }), "idle");
+    await pool.query(
+      "update unified_events set description=title where id=$1",
+      [pair[0].eventId],
+    );
+    await rewind();
+    assert.equal(await revalidateLinks(pool), 1);
+    assert.equal(await runJob(pool, { key: "test", infer }), "approved");
+    assert.equal((await resolveMarketLinks(pool, pair[0].id)).length, 1);
+    await rewind();
+    await revalidateLinks(pool);
+    assert.equal(await runJob(pool, { key: "test", infer }), "idle");
+  },
+);
+
+integration(
   "PG16: bounded warmer, revalidation and retention demand references execute",
   { skip: !url },
   async () => {
