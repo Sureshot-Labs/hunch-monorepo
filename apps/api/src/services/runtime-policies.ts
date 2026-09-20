@@ -12,6 +12,10 @@ import {
 } from "@hunch/shared";
 
 import type { DbQuery } from "../db.js";
+import {
+  xaiReasoningEffortSchema,
+  type XaiReasoningEffort,
+} from "../lib/xai-reasoning.js";
 import { env } from "../env.js";
 import {
   openRouterReasoningEffortSchema,
@@ -174,6 +178,7 @@ export type WalletIntelRefreshPolicy = {
 };
 
 export type AiWhaleProfilesPolicy = {
+  reasoningEffort?: OpenRouterReasoningEffort | null;
   autoRun: boolean;
   limit: number;
   marketLimit: number;
@@ -215,6 +220,7 @@ export type HolderResearchPolicy = {
   signalBotTerminalInitialCutoff: string | null;
   externalSearchEnabled: boolean;
   externalSearchModel: string;
+  externalSearchReasoningEffort?: XaiReasoningEffort | null;
   maxExternalSearchCallsPerRun: number;
   forceExternalSearchForInvestigations: boolean;
   externalSearchMinScore: number;
@@ -335,6 +341,10 @@ export type HolderResearchPolicy = {
 };
 
 export type AiClustersPolicy = {
+  reasoningEffortFast?: OpenRouterReasoningEffort | null;
+  reasoningEffortFinal?: OpenRouterReasoningEffort | null;
+  maxTokensFast?: number;
+  maxTokensFinal?: number;
   analysisEnabled: boolean;
   modelFast: string;
   modelFinal: string;
@@ -439,6 +449,7 @@ export type MapSearchPolicy = {
     | "resume_same_run"
     | "warm_start_prior_run";
   persistenceMode: "artifact_only" | "normalized_keys";
+  reasoningEffort?: XaiReasoningEffort | null;
   model: string;
   embedModel: string;
   toolMode: "both" | "web" | "x" | "none";
@@ -760,6 +771,7 @@ const walletIntelRefreshSchema = z
 
 const aiWhaleProfilesSchema = z
   .object({
+    reasoningEffort: openRouterReasoningEffortSchema.nullable(),
     autoRun: strictBoolean,
     limit: positiveInt,
     marketLimit: positiveInt,
@@ -782,10 +794,24 @@ const aiWhaleProfilesSchema = z
     promptVersion: z.string().trim().min(1).max(64),
   })
   .strict()
-  .partial();
+  .partial()
+  .superRefine((policy, context) => {
+    if (
+      !supportsOpenRouterReasoningEffort(policy.model, policy.reasoningEffort)
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["reasoningEffort"],
+        message: "Unsupported reasoning effort for model",
+      });
+  });
 
 const aiClustersSchema = z
   .object({
+    reasoningEffortFast: openRouterReasoningEffortSchema.nullable(),
+    reasoningEffortFinal: openRouterReasoningEffortSchema.nullable(),
+    maxTokensFast: positiveInt.max(32_000),
+    maxTokensFinal: positiveInt.max(32_000),
     analysisEnabled: strictBoolean,
     modelFast: z.string().trim().min(1).max(200),
     modelFinal: z.string().trim().min(1).max(200),
@@ -804,7 +830,26 @@ const aiClustersSchema = z
     maxClustersPerRun: positiveInt.max(2_000),
   })
   .strict()
-  .partial();
+  .partial()
+  .superRefine((policy, context) => {
+    for (const [model, effort, field] of [
+      [policy.modelFast, policy.reasoningEffortFast, "reasoningEffortFast"],
+      [policy.modelFinal, policy.reasoningEffortFinal, "reasoningEffortFinal"],
+      [policy.modelFallback, policy.reasoningEffortFast, "reasoningEffortFast"],
+      [
+        policy.modelFallback,
+        policy.reasoningEffortFinal,
+        "reasoningEffortFinal",
+      ],
+    ] as const) {
+      if (!supportsOpenRouterReasoningEffort(model, effort))
+        context.addIssue({
+          code: "custom",
+          path: [field],
+          message: "Unsupported reasoning effort for stage or fallback model",
+        });
+    }
+  });
 
 const marketMapSizeBySchema = z.enum([
   "count",
@@ -870,8 +915,7 @@ const marketMapSchema = z
       context.addIssue({
         code: "custom",
         path: ["labelReasoningEffort"],
-        message:
-          "GPT-6 Astra requires reasoning: low, medium, high, xhigh or max",
+        message: "Unsupported reasoning effort for the selected model",
       });
   });
 
@@ -909,6 +953,7 @@ const mapSearchSchema = z
     statusTtlSec: positiveInt.max(60 * 60 * 24 * 30),
     reuseMode: mapSearchReuseModeSchema,
     persistenceMode: mapSearchPersistenceModeSchema,
+    reasoningEffort: xaiReasoningEffortSchema.nullable(),
     model: z.string().trim().min(1).max(200),
     embedModel: z.string().trim().min(1).max(200),
     toolMode: mapSearchToolModeSchema,
@@ -1016,8 +1061,7 @@ const mapSignalsSchema = z
       context.addIssue({
         code: "custom",
         path: ["reasoningEffort"],
-        message:
-          "GPT-6 Astra requires reasoning: low, medium, high, xhigh or max",
+        message: "Unsupported reasoning effort for the selected model",
       });
   });
 
@@ -1041,6 +1085,7 @@ const holderResearchSchema = z
     signalBotTerminalInitialCutoff: z.string().datetime().nullable(),
     externalSearchEnabled: strictBoolean,
     externalSearchModel: z.string().trim().min(1).max(200),
+    externalSearchReasoningEffort: xaiReasoningEffortSchema.nullable(),
     maxExternalSearchCallsPerRun: nonNegativeInt.max(100),
     forceExternalSearchForInvestigations: strictBoolean,
     externalSearchMinScore: ratio,
@@ -1174,8 +1219,7 @@ const holderResearchSchema = z
         context.addIssue({
           code: "custom",
           path: [path],
-          message:
-            "GPT-6 Astra requires reasoning: low, medium, high, xhigh or max",
+          message: "Unsupported reasoning effort for the selected model",
         });
     }
   });
@@ -1623,6 +1667,7 @@ function getDefaults(): IntelPolicyMap {
       selectionSignalsWindowHours:
         env.aiWhaleProfileSelectionSignalsWindowHours,
       model: env.aiWhaleProfileModel,
+      reasoningEffort: null,
       styleGuide: env.aiWhaleProfileStyleGuide,
       maxTokens: env.aiWhaleProfileMaxTokens,
       maxTokensFallback: env.aiWhaleProfileMaxTokensFallback,
@@ -1631,6 +1676,10 @@ function getDefaults(): IntelPolicyMap {
     ai_clusters: {
       analysisEnabled: env.aiClusterAnalysisEnabled,
       modelFast: env.aiClusterModelFast,
+      reasoningEffortFast: null,
+      reasoningEffortFinal: null,
+      maxTokensFast: 800,
+      maxTokensFinal: 800,
       modelFinal: env.aiClusterModelFinal,
       modelFallback: env.aiClusterModelFallback,
       maxStageB: env.aiClusterMaxStageB,
@@ -1710,6 +1759,7 @@ function getDefaults(): IntelPolicyMap {
       reuseMode: "auto",
       persistenceMode: "normalized_keys",
       model: process.env.XAI_SEARCH_MODEL?.trim() || "grok-4-1-fast-reasoning",
+      reasoningEffort: null,
       embedModel:
         process.env.OPENROUTER_EMBED_MODEL ||
         process.env.AI_EMBED_MODEL ||
@@ -1838,6 +1888,7 @@ function getDefaults(): IntelPolicyMap {
       signalBotTerminalInitialCutoff: null,
       externalSearchEnabled: false,
       externalSearchModel: process.env.XAI_SEARCH_MODEL?.trim() || "grok-4.3",
+      externalSearchReasoningEffort: null,
       maxExternalSearchCallsPerRun: 2,
       forceExternalSearchForInvestigations: true,
       externalSearchMinScore: 0.7,

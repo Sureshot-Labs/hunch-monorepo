@@ -6,6 +6,14 @@ import { RESP_TYPES } from "redis";
 import { pool } from "./db.js";
 import { env } from "./env.js";
 import {
+  buildOpenRouterReasoningOptions,
+  type OpenRouterReasoningEffort,
+} from "./lib/openrouter-reasoning.js";
+import {
+  assertAiCompletionComplete,
+  aiCompletionMetadata,
+} from "./lib/ai-completion-diagnostics.js";
+import {
   buildMarketSummary,
   computeClusterMetrics,
   scoreMarket,
@@ -3231,6 +3239,7 @@ async function callOpenRouter(
   messages: Array<{ role: "system" | "user"; content: string }>,
   maxTokens: number,
   responseFormat?: { type: "json_object" },
+  effort?: OpenRouterReasoningEffort | null,
 ): Promise<string> {
   if (!env.openRouterKey) {
     throw new Error("OPENROUTER_API_KEY missing");
@@ -3247,6 +3256,15 @@ async function callOpenRouter(
     });
   }
 
+  const startedAt = Date.now();
+  const options = buildOpenRouterReasoningOptions({
+    model,
+    effort,
+    legacyTemperature: 0,
+    legacyEffort: "low",
+    legacyExcludeReasoning: false,
+  });
+
   const response = await fetch(
     "https://openrouter.ai/api/v1/chat/completions",
     {
@@ -3259,9 +3277,8 @@ async function callOpenRouter(
       body: JSON.stringify({
         model,
         messages,
-        temperature: 0,
         max_tokens: maxTokens,
-        reasoning: { effort: "low" },
+        ...options,
         response_format: responseFormat,
       }),
     },
@@ -3275,6 +3292,14 @@ async function callOpenRouter(
   const payload = (await response.json()) as {
     choices?: Array<{ message?: { content?: unknown } }>;
   };
+  console.info("[cluster] completion", {
+    model,
+    effort: options.reasoning?.effort,
+    maxTokens,
+    durationMs: Date.now() - startedAt,
+    ...aiCompletionMetadata(payload),
+  });
+  assertAiCompletionComplete(payload);
   if (aiClustersPolicy.debugLogs) {
     console.info("[cluster] openrouter response", {
       model,
@@ -3375,8 +3400,9 @@ async function runStageAAnalysis(
           { role: "system", content: system },
           { role: "user", content: user },
         ],
-        800,
+        aiClustersPolicy.maxTokensFast ?? 800,
         { type: "json_object" },
+        aiClustersPolicy.reasoningEffortFast,
       );
       return { raw, parsed: parseRaw(raw), model, error: null };
     } catch (error) {
@@ -3540,8 +3566,9 @@ async function runStageBAnalysis(
           { role: "system", content: system },
           { role: "user", content: user },
         ],
-        800,
+        aiClustersPolicy.maxTokensFinal ?? 800,
         { type: "json_object" },
+        aiClustersPolicy.reasoningEffortFinal,
       );
       return { raw, parsed: parseRaw(raw), model, error: null };
     } catch (error) {
@@ -4359,6 +4386,7 @@ async function main() {
 }
 
 const directRunArg = process.argv[1];
+export const clusterModelTestHooks = { callOpenRouter };
 const isDirectRun =
   typeof directRunArg === "string" &&
   import.meta.url === pathToFileURL(directRunArg).href;

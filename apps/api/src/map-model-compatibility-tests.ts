@@ -9,13 +9,16 @@ import { buildMapOpenRouterOptions } from "./services/map-openrouter-request.js"
 
 assert.deepEqual(
   buildMapOpenRouterOptions({ model: "openai/gpt-5.4", stage: "label" }),
-  { temperature: 0, reasoning: { effort: "low" } },
+  {
+    reasoning: { effort: "low", exclude: true },
+    provider: { require_parameters: true },
+  },
 );
 assert.deepEqual(
   buildMapOpenRouterOptions({ model: "openai/gpt-5.4", stage: "signals" }),
   {
-    temperature: 0,
-    reasoning: { effort: "low" },
+    reasoning: { effort: "low", exclude: true },
+    provider: { require_parameters: true },
     response_format: { type: "json_object" },
   },
 );

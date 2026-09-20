@@ -13,6 +13,7 @@ import {
 } from "./lib/ai-pricing.js";
 import { buildMapOpenRouterOptions } from "./services/map-openrouter-request.js";
 import type { OpenRouterReasoningEffort } from "./lib/openrouter-reasoning.js";
+import { aiCompletionError } from "./lib/ai-completion-diagnostics.js";
 import { extractProviderCostUsd, resolveAiCost } from "./lib/ai-cost.js";
 import { buildRenderableMarketSql } from "./lib/market-renderability.js";
 import {
@@ -1200,6 +1201,17 @@ async function callOpenRouterLabel(params: {
   const usage = extractUsage(payload);
   const providerCost = extractProviderCostUsd(payload);
   const finishReason = payload.choices?.[0]?.finish_reason ?? null;
+  const completionError = aiCompletionError(payload);
+  if (completionError)
+    return {
+      label: null,
+      reason: "invalid_schema",
+      finishReason,
+      ...usage,
+      ...providerCost,
+      detail: completionError,
+      promptChars: params.prompt.promptChars,
+    };
   const messageContent = payload.choices?.[0]?.message?.content;
   const raw = parseOpenRouterMessageContent(messageContent);
   const trimmed = raw.trim();

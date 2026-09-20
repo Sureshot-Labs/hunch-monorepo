@@ -43,7 +43,7 @@ assert.throws(
 );
 assert.deepEqual(
   buildOpenRouterReasoningOptions({ model: legacy, legacyTemperature: 0.1 }),
-  { temperature: 0.1 },
+  { provider: { require_parameters: true } },
 );
 assert.deepEqual(
   buildOpenRouterReasoningOptions({
@@ -51,7 +51,10 @@ assert.deepEqual(
     effort: null,
     legacyEffort: "minimal",
   }),
-  { reasoning: { effort: "minimal", exclude: true } },
+  {
+    reasoning: { effort: "low", exclude: true },
+    provider: { require_parameters: true },
+  },
 );
 assert.deepEqual(
   buildHolderResearchResponseFormat({
@@ -219,7 +222,7 @@ try {
   await composer({ source });
   assert.equal(resolutions, 2);
   assert.equal(requests[2]?.model, legacy);
-  assert.equal(requests[2]?.reasoning.effort, "minimal");
+  assert.equal(requests[2]?.reasoning.effort, "low");
 } finally {
   globalThis.fetch = originalFetch;
 }

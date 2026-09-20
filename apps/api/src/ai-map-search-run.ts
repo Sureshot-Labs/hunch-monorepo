@@ -6,6 +6,12 @@ import { RESP_TYPES } from "redis";
 import { ZodError } from "zod";
 import { pool } from "./db.js";
 import { env } from "./env.js";
+import { aiCompletionError } from "./lib/ai-completion-diagnostics.js";
+import {
+  buildXaiReasoningOptions,
+  xaiReasoningEffortSchema,
+  type XaiReasoningEffort,
+} from "./lib/xai-reasoning.js";
 import {
   buildMapSearchSystemPromptV2,
   buildMapSearchUserPromptV2,
@@ -329,6 +335,7 @@ type ResumeStatePayload = {
 };
 
 type Args = {
+  reasoningEffort?: XaiReasoningEffort | null;
   runId: string | null;
   out: string | null;
   reportOut: string | null;
@@ -594,6 +601,10 @@ function resolveArgs(argv: string[]): Args {
       parseFlag(argv, "--model") ??
       process.env.XAI_SEARCH_MODEL?.trim() ??
       "grok-4-1-fast-reasoning",
+    reasoningEffort:
+      parseFlag(argv, "--reasoning-effort") == null
+        ? null
+        : xaiReasoningEffortSchema.parse(parseFlag(argv, "--reasoning-effort")),
     embedModel:
       parseFlag(argv, "--embed-model") ??
       process.env.OPENROUTER_EMBED_MODEL ??
@@ -780,6 +791,7 @@ function usage(context: MapSearchRunContext, exitCode = 1): never {
 Core:
   --run-id <id>                       Optional map snapshot run id (default: active)
   --model <id>                        xAI responses model (default: XAI_SEARCH_MODEL or grok-4-1-fast-reasoning)
+  --reasoning-effort <level>          xAI effort: low, medium, high, xhigh; omitted keeps provider default
   --embed-model <id>                  OpenRouter embeddings model (default: OPENROUTER_EMBED_MODEL or AI_EMBED_MODEL or intfloat/e5-large-v2)
   --tool-mode <both|web|x|none>       Tool surface (default: both)
   --out <path>                        JSON report output path
@@ -1543,6 +1555,7 @@ async function callXaiOnce(
       },
       body: JSON.stringify({
         model: args.model,
+        ...buildXaiReasoningOptions({ effort: args.reasoningEffort }),
         max_output_tokens: args.maxOutputTokens,
         max_turns: args.maxTurns,
         input: [
@@ -1569,6 +1582,9 @@ async function callXaiOnce(
     const outputText = extractAiOutputText(payload);
     const payloadText = stringifyPayload(payload);
     const resolvedOutputText = outputText || payloadText;
+    const completionError =
+      aiCompletionError(payload) ??
+      (outputText.trim() ? null : "AI response missing content");
     const usage = extractAiUsageMetrics(payload);
     const costEstimate = computeEstimatedCost(args, usage);
     const serverSideUsage = extractAiServerSideToolUsage(payload);
@@ -1577,7 +1593,7 @@ async function callXaiOnce(
       extractAiSuccessfulToolCount(payload),
     );
     return {
-      ok: response.ok,
+      ok: response.ok && !completionError,
       status: response.status,
       durationMs: Date.now() - startedAt,
       prompt: `${prompt.system}\n\n${prompt.user}`,
@@ -1593,7 +1609,7 @@ async function callXaiOnce(
       finishReason: extractFinishReason(payload),
       rawResponse: payload,
       error: response.ok
-        ? null
+        ? completionError
         : `HTTP ${response.status}: ${preview(stringifyPayload(payload), 400)}`,
     };
   } catch (error) {
@@ -4110,6 +4126,8 @@ const isDirectRun = (() => {
     return false;
   }
 })();
+
+export const mapSearchModelTestHooks = { resolveArgs, callXaiOnce };
 
 if (isDirectRun) {
   runMapSearch().catch(async (error) => {

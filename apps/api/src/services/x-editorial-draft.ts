@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertAiCompletionComplete } from "../lib/ai-completion-diagnostics.js";
 
 import { z } from "zod";
 import {
@@ -1014,10 +1015,8 @@ async function callOpenRouter(input: {
         message: `OpenRouter editorial response missing content (finish_reason=${choice?.finish_reason ?? "unknown"})`,
       });
     }
-    return {
-      content,
-      finishReason: choice?.finish_reason ?? null,
-    };
+    assertAiCompletionComplete(payload);
+    return { content, finishReason: choice?.finish_reason ?? null };
   } finally {
     clearTimeout(timeout);
   }

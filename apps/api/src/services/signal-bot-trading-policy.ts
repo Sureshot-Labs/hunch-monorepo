@@ -107,8 +107,7 @@ export const signalBotSchema = z
       context.addIssue({
         code: "custom",
         path: ["xEditorialReasoningEffort"],
-        message:
-          "GPT-6 Astra requires reasoning: low, medium, high, xhigh or max",
+        message: "Unsupported reasoning effort for the selected model",
       });
   });
 

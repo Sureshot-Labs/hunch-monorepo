@@ -3,6 +3,7 @@ import { resolve } from "path";
 import { createHash } from "crypto";
 import { pool } from "./db.js";
 import { env } from "./env.js";
+import { buildOpenRouterReasoningOptions } from "./lib/openrouter-reasoning.js";
 import {
   buildSynthesisSystemPromptV1,
   buildSynthesisUserPromptV1,
@@ -665,10 +666,14 @@ async function callOpenRouter(
             { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt },
           ],
-          temperature: 0,
           max_tokens: args.maxOutputTokens,
           response_format: { type: "json_object" },
-          reasoning: { effort: "low" },
+          ...buildOpenRouterReasoningOptions({
+            model: args.model,
+            legacyTemperature: 0,
+            legacyEffort: "low",
+            legacyExcludeReasoning: false,
+          }),
         }),
         signal: controller.signal,
       },

@@ -719,6 +719,8 @@ async function main() {
     addArgIfMissing(searchArgs, "--run-id", activeMapRunIdForSignal);
     addArgIfMissing(searchArgs, "--out", outPath);
     addArgIfMissing(searchArgs, "--model", config.model);
+    if (config.reasoningEffort != null)
+      addArgIfMissing(searchArgs, "--reasoning-effort", config.reasoningEffort);
     addArgIfMissing(searchArgs, "--embed-model", config.embedModel);
     addArgIfMissing(searchArgs, "--tool-mode", config.toolMode);
     addBoolArgIfMissing(searchArgs, "--strict-schema", config.strictSchema);

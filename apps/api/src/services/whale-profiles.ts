@@ -1,4 +1,12 @@
 import crypto from "node:crypto";
+import {
+  buildOpenRouterReasoningOptions,
+  type OpenRouterReasoningEffort,
+} from "../lib/openrouter-reasoning.js";
+import {
+  aiCompletionError,
+  aiCompletionMetadata,
+} from "../lib/ai-completion-diagnostics.js";
 
 import type { PoolClient } from "pg";
 import { z } from "zod";
@@ -2072,10 +2080,20 @@ async function callOpenRouter(
   model: string,
   messages: Array<{ role: "system" | "user"; content: string }>,
   maxTokens: number,
+  effort?: OpenRouterReasoningEffort | null,
 ): Promise<string> {
   if (!env.openRouterKey) {
     throw new Error("OPENROUTER_API_KEY missing");
   }
+
+  const startedAt = Date.now();
+  const options = buildOpenRouterReasoningOptions({
+    model,
+    effort,
+    legacyTemperature: 0,
+    legacyEffort: "low",
+    legacyExcludeReasoning: false,
+  });
 
   const response = await fetch(
     "https://openrouter.ai/api/v1/chat/completions",
@@ -2089,9 +2107,8 @@ async function callOpenRouter(
       body: JSON.stringify({
         model,
         messages,
-        temperature: 0,
         max_tokens: maxTokens,
-        reasoning: { effort: "low" },
+        ...options,
         response_format: { type: "json_object" },
       }),
     },
@@ -2105,6 +2122,21 @@ async function callOpenRouter(
   const payload = (await response.json()) as {
     choices?: Array<{ message?: { content?: unknown } }>;
   };
+  console.info("[whale-profile] completion", {
+    model,
+    effort: options.reasoning?.effort,
+    maxTokens,
+    durationMs: Date.now() - startedAt,
+    ...aiCompletionMetadata(payload),
+  });
+  const completionError = aiCompletionError(payload);
+  if (completionError) {
+    console.warn("[whale-profile] invalid completion", {
+      model,
+      error: completionError,
+    });
+    return ""; // Preserve the existing single compact-prompt fallback.
+  }
   const content = payload.choices?.[0]?.message?.content;
   if (typeof content === "string") return content;
   if (content && typeof content === "object" && "text" in content) {
@@ -2113,6 +2145,8 @@ async function callOpenRouter(
   }
   return "";
 }
+
+export const whaleProfileModelTestHooks = { callOpenRouter };
 
 function toActivityKind(
   hasTrade: boolean | null,
@@ -3200,6 +3234,7 @@ Extra constraint: Keep label_short and label_long compact. Keep notes to exactly
             { role: "user", content: user },
           ],
           policy.maxTokens,
+          policy.reasoningEffort,
         );
       } catch (error) {
         failed += 1;
@@ -3230,6 +3265,7 @@ Extra constraint: Keep label_short and label_long compact. Keep notes to exactly
               { role: "user", content: compactUser },
             ],
             policy.maxTokensFallback,
+            policy.reasoningEffort,
           );
           parsed = parseProfileJson(profileRaw);
         } catch (error) {

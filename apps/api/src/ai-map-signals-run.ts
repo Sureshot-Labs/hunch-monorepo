@@ -1,4 +1,5 @@
 import { readFile, writeFile } from "fs/promises";
+import { aiCompletionError } from "./lib/ai-completion-diagnostics.js";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createRedisClient, ensureRedis } from "@hunch/infra";
@@ -147,6 +148,7 @@ type CostBreakdown = {
 };
 
 type OpenRouterCallResult = {
+  completionError?: string | null;
   content: string;
   usage: OpenRouterUsage;
   cost: CostBreakdown;
@@ -1037,6 +1039,7 @@ async function callOpenRouter(
         };
       };
 
+      const completionError = aiCompletionError(payload);
       const content = parseMessageContent(
         payload.choices?.[0]?.message?.content,
       );
@@ -1063,6 +1066,7 @@ async function callOpenRouter(
 
       return {
         content,
+        completionError,
         usage: {
           promptTokens,
           completionTokens,
@@ -1673,6 +1677,7 @@ async function evaluateNodeWithModel(params: {
 
     const raw = await callOpenRouter(args, systemPrompt, userPrompt);
     addCallCost(raw);
+    if (raw.completionError) throw new Error(raw.completionError);
     const firstParsed = parsePossibleJson(raw.content);
     try {
       parsed = parseMapSignalsAgentOutputV2(firstParsed);
@@ -1688,6 +1693,8 @@ async function evaluateNodeWithModel(params: {
           buildRepairPrompt(raw.content, toParseErrorMessage(parseError)),
         );
         addCallCost(repairRaw);
+        if (repairRaw.completionError)
+          throw new Error(repairRaw.completionError);
         const repairedParsed = parsePossibleJson(repairRaw.content);
         try {
           parsed = parseMapSignalsAgentOutputV2(repairedParsed);

@@ -1,6 +1,11 @@
 #!/usr/bin/env tsx
 
 import { randomUUID } from "node:crypto";
+import { buildXaiReasoningOptions } from "./lib/xai-reasoning.js";
+import {
+  assertAiCompletionComplete,
+  aiCompletionError,
+} from "./lib/ai-completion-diagnostics.js";
 import { writeFile } from "node:fs/promises";
 
 import {
@@ -778,11 +783,14 @@ async function runExternalResearch(params: {
         model: params.policy.externalSearchModel,
         // Pin the effort previously selected by xAI's retired-model redirect.
         // Other explicit model overrides keep their own supported defaults.
-        ...(["grok-4.3", "grok-4.3-latest"].includes(
-          params.policy.externalSearchModel,
-        )
-          ? { reasoning: { effort: "low" } }
-          : {}),
+        ...buildXaiReasoningOptions({
+          effort: params.policy.externalSearchReasoningEffort,
+          legacyEffort: ["grok-4.3", "grok-4.3-latest"].includes(
+            params.policy.externalSearchModel,
+          )
+            ? "low"
+            : undefined,
+        }),
         max_output_tokens: params.policy.externalSearchMaxOutputTokens,
         input: [
           {
@@ -830,6 +838,18 @@ async function runExternalResearch(params: {
         error: `HTTP ${response.status}: ${text.slice(0, 300)}`,
       });
     }
+    const completionError =
+      aiCompletionError(payload) ??
+      (text.trim() ? null : "AI response missing content");
+    if (completionError)
+      return {
+        ...emptyExternalResearchResult({
+          status: "error",
+          error: completionError,
+          toolCalls: extractServerToolCallCount(payload),
+        }),
+        costUsd: params.policy.estimatedExternalSearchCostUsd,
+      };
     if (params.useV2) {
       let structured: HolderResearchExternalResearchV2;
       try {
@@ -1306,6 +1326,7 @@ async function callHolderResearchTriageModel(params: {
       );
     }
 
+    assertAiCompletionComplete(payload);
     const choice = payload.choices?.[0];
     const content = choice?.message?.content;
     if (!content) throw new Error("OpenRouter triage response missing content");
@@ -1449,6 +1470,7 @@ async function callHolderResearchModel(params: {
       );
     }
 
+    assertAiCompletionComplete(payload);
     const content = payload.choices?.[0]?.message?.content;
     if (!content) throw new Error("OpenRouter response missing content");
 
