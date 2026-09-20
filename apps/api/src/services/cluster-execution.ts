@@ -1,5 +1,8 @@
 import type { ClusterMarketSummary } from "./clusters.js";
-import { resolveExplicitMarketOutcomeMapping } from "./clusters.js";
+import {
+  resolveExplicitMarketOutcomeMapping,
+  resolveClusterOutcomeSide,
+} from "./clusters.js";
 
 export const CLUSTER_EXECUTION_QUOTE_MAX_AGE_MS = 10 * 60_000;
 
@@ -231,7 +234,15 @@ export function buildClusterExecution(input: {
         ? (market.outcomeMapping ?? null)
         : resolveExplicitMarketOutcomeMapping(seed, market);
     const native = input.nativeQuotesByMarketId.get(market.marketId);
-    if (!mapping || !native || !native.active || !native.orderable) {
+    const aligned = { ...market, outcomeMapping: mapping };
+    const yesSide = resolveClusterOutcomeSide(aligned, "YES");
+    const noSide = resolveClusterOutcomeSide(aligned, "NO");
+    if (
+      (!yesSide && !noSide) ||
+      !native ||
+      !native.active ||
+      !native.orderable
+    ) {
       return { ...market, outcomeMapping: mapping, executionOffers: null };
     }
 
@@ -248,19 +259,15 @@ export function buildClusterExecution(input: {
       top: native.no,
     });
     const canonicalYes =
-      resolveNativeOutcomeForCanonicalSide(mapping.sourceYesTo, "YES") === "YES"
-        ? yesNative
-        : noNative;
+      yesSide === "YES" ? yesNative : yesSide === "NO" ? noNative : null;
     const canonicalNo =
-      resolveNativeOutcomeForCanonicalSide(mapping.sourceYesTo, "NO") === "YES"
-        ? yesNative
-        : noNative;
+      noSide === "YES" ? yesNative : noSide === "NO" ? noNative : null;
     const executionOffers: ClusterMarketExecutionOffers = {
       no: canonicalNo,
       yes: canonicalYes,
     };
 
-    if (canonicalYes?.fresh) {
+    if (mapping && canonicalYes?.fresh) {
       canonicalOffers.push(
         toExecutionOffer({
           canonicalSide: "YES",
@@ -269,7 +276,7 @@ export function buildClusterExecution(input: {
         }),
       );
     }
-    if (canonicalNo?.fresh) {
+    if (mapping && canonicalNo?.fresh) {
       canonicalOffers.push(
         toExecutionOffer({
           canonicalSide: "NO",

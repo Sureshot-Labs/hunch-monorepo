@@ -9,6 +9,7 @@ import type { Pool } from "@hunch/infra";
 import type { DbQuery } from "../db.js";
 import {
   buildMarketSummary,
+  resolveClusterOutcomeSide,
   computeClusterMetrics,
   type ClusterMarketSummary,
 } from "./clusters.js";
@@ -43,25 +44,36 @@ function freshMid(top: ClusterNativeTop, now: number): number | null {
 function binaryMapping(link: ResolvedLink): "YES" | "NO" | null {
   if (link.source.outcomes.length !== 2 || link.target.outcomes.length !== 2)
     return null;
-  for (const direction of ["YES", "NO"] as const) {
-    if (
-      (["YES", "NO"] as const).every((side) => {
-        const targetSide =
-          direction === "YES" ? side : side === "YES" ? "NO" : "YES";
-        const a = link.source.outcomes.find((x) => x.side === side),
-          b = link.target.outcomes.find((x) => x.side === targetSide);
-        return (
-          a &&
-          b &&
-          link.outcomes.some(
-            (x) => x.sourceOutcomeId === a.id && x.targetOutcomeId === b.id,
-          )
-        );
-      })
-    )
-      return direction;
+  const sides = verifiedSides(link);
+  return sides.YES === "YES" && sides.NO === "NO"
+    ? "YES"
+    : sides.YES === "NO" && sides.NO === "YES"
+      ? "NO"
+      : null;
+}
+function verifiedSides(
+  link: ResolvedLink,
+): NonNullable<ClusterMarketSummary["verifiedOutcomeMapping"]> {
+  const result: NonNullable<ClusterMarketSummary["verifiedOutcomeMapping"]> = {
+    YES: null,
+    NO: null,
+  };
+  for (const side of ["YES", "NO"] as const) {
+    const source = link.source.outcomes.find((o) => o.side === side);
+    if (!source) continue;
+    const targets = link.outcomes
+      .filter((o) => o.sourceOutcomeId === source.id)
+      .map(
+        (o) =>
+          link.target.outcomes.find((target) => target.id === o.targetOutcomeId)
+            ?.side,
+      )
+      .filter(
+        (target): target is "YES" | "NO" => target === "YES" || target === "NO",
+      );
+    if (targets.length === 1) result[side] = targets[0];
   }
-  return null;
+  return result;
 }
 function outcomeLinks(links: ResolvedLink[]) {
   return links.flatMap((link) =>
@@ -97,8 +109,26 @@ function matchedMarkets(
       : links.some(binaryMapping)
         ? "YES"
         : null;
-    const yesMid = mapped && native ? freshMid(native.yes, now) : null,
-      noMid = mapped && native ? freshMid(native.no, now) : null;
+    const source = links[0]?.source;
+    const verifiedOutcomeMapping = link
+      ? verifiedSides(link)
+      : {
+          YES: source?.outcomes.some((o) => o.side === "YES")
+            ? ("YES" as const)
+            : null,
+          NO: source?.outcomes.some((o) => o.side === "NO")
+            ? ("NO" as const)
+            : null,
+        };
+    const yesMid = native ? freshMid(native.yes, now) : null,
+      noMid = native ? freshMid(native.no, now) : null;
+    const displayQuote = (top: ClusterNativeTop) => ({
+      ...top,
+      fresh:
+        !!top.asOf &&
+        Date.parse(top.asOf) <= now + 5000 &&
+        now - Date.parse(top.asOf) <= CLUSTER_EXECUTION_QUOTE_MAX_AGE_MS,
+    });
     return {
       ...summary,
       source: "hunch_matcher",
@@ -111,8 +141,14 @@ function matchedMarkets(
             sourceYesTo: mapped,
           }
         : null,
+      verifiedOutcomeMapping,
+      nativeQuotes: native
+        ? { yes: displayQuote(native.yes), no: displayQuote(native.no) }
+        : undefined,
       active: native?.active ?? false,
-      orderable: !!mapped && (native?.orderable ?? false),
+      orderable:
+        !!(verifiedOutcomeMapping.YES || verifiedOutcomeMapping.NO) &&
+        (native?.orderable ?? false),
       yesBid: yesMid !== null ? (native?.yes.bid ?? null) : null,
       yesAsk: yesMid !== null ? (native?.yes.ask ?? null) : null,
       yesMid,
@@ -155,10 +191,17 @@ export async function getMatchedAlternatives(
   const markets = matchedMarkets(result.rows, quotes, marketId, links, now);
   const alternatives = markets.filter((x) => x.marketId !== marketId);
   const lowest = (side: "yesMid" | "noMid") => {
-    const canonicalMid = (market: ClusterMarketSummary) =>
-      market.outcomeMapping?.sourceYesTo === "NO"
-        ? market[side === "yesMid" ? "noMid" : "yesMid"]
-        : market[side];
+    const canonicalMid = (market: ClusterMarketSummary) => {
+      const native = resolveClusterOutcomeSide(
+        market,
+        side === "yesMid" ? "YES" : "NO",
+      );
+      return native === "YES"
+        ? market.yesMid
+        : native === "NO"
+          ? market.noMid
+          : null;
+    };
     const selected = markets
       .filter((x) => canonicalMid(x) !== null)
       .sort((a, b) => (canonicalMid(a) ?? 0) - (canonicalMid(b) ?? 0))[0];
@@ -170,6 +213,7 @@ export async function getMatchedAlternatives(
           yesMid: selected.yesMid,
           noMid: selected.noMid,
           outcomeMapping: selected.outcomeMapping,
+          verifiedOutcomeMapping: selected.verifiedOutcomeMapping,
         }
       : null;
   };

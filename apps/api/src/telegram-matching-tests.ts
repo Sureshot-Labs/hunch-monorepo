@@ -14,7 +14,7 @@ test("Telegram native enrichment refreshes matched prices and never calls AGG on
   const previousFetch = globalThis.fetch,
     previousAppId = env.aggMarketAppId;
   let requests = 0,
-    mode: "matched" | "empty" | "error" | "inverse" = "matched";
+    mode: "matched" | "empty" | "error" | "inverse" | "partial" = "matched";
   const refreshed: string[][] = [];
   const app = Fastify();
   app.setValidatorCompiler(validatorCompiler);
@@ -53,7 +53,12 @@ test("Telegram native enrichment refreshes matched prices and never calls AGG on
             orderable: true,
             yesAsk: 0.43,
             yesMid: 0.42,
-            outcomeMapping: { sourceYesTo: mode === "inverse" ? "NO" : "YES" },
+            outcomeMapping:
+              mode === "partial"
+                ? null
+                : { sourceYesTo: mode === "inverse" ? "NO" : "YES" },
+            verifiedOutcomeMapping:
+              mode === "partial" ? { YES: "YES", NO: null } : undefined,
           };
           return {
             markets: [market],
@@ -73,7 +78,13 @@ test("Telegram native enrichment refreshes matched prices and never calls AGG on
         },
       }),
     );
-    for (const next of ["matched", "empty", "error", "inverse"] as const) {
+    for (const next of [
+      "matched",
+      "empty",
+      "error",
+      "inverse",
+      "partial",
+    ] as const) {
       mode = next;
       const response = await app.inject({
         method: "POST",
@@ -83,7 +94,11 @@ test("Telegram native enrichment refreshes matched prices and never calls AGG on
       assert.equal(response.statusCode, 200);
       assert.equal(response.json().length, mode === "matched" ? 1 : 0);
     }
-    assert.deepEqual(refreshed, [["limitless:target"], ["limitless:target"]]);
+    assert.deepEqual(refreshed, [
+      ["limitless:target"],
+      ["limitless:target"],
+      ["limitless:target"],
+    ]);
     assert.equal(requests, 0);
   } finally {
     await app.close();

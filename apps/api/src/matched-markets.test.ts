@@ -186,12 +186,13 @@ test("matched reads hand visible IDs to price refresh without inference or AGG",
       ({
         source: "hunch_matcher",
         status: "matched",
+        alternatives: [],
         markets: [
           { marketId: "polymarket:test" },
           { marketId: "limitless:test" },
           { marketId: "limitless:test" },
         ],
-      }) as AggMarketAlternativesResponse,
+      }) as unknown as AggMarketAlternativesResponse,
   });
   try {
     const response = await app.inject({

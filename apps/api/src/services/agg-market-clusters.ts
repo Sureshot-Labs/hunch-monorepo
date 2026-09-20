@@ -146,6 +146,7 @@ export type AggMarketAlternativesQueryInput = {
 };
 
 export type AggMarketAlternativeMidpoint = {
+  verifiedOutcomeMapping?: ClusterMarketSummary["verifiedOutcomeMapping"];
   outcomeMapping?: ClusterMarketSummary["outcomeMapping"];
   marketId: string;
   eventId: string;

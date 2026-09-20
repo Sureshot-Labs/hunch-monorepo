@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import { z as zod } from "zod";
+import { matchedAlternativesResponseSchema } from "../schemas/clusters.js";
 import {
   requestInterest,
   readMatchingPolicy,
@@ -668,6 +669,10 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
       schema: {
         params: marketParamsSchema,
         querystring: marketAlternativesQuerySchema,
+        response: {
+          200: matchedAlternativesResponseSchema,
+          default: zod.unknown(),
+        },
       },
     },
     async (request, reply) => {

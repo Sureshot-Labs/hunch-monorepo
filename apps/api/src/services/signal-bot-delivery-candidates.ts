@@ -1,7 +1,7 @@
 import { normalizeHunchVenue } from "@hunch/shared";
 import type { SignalBotNote } from "./signal-bot-contracts.js";
 import type { ClusterMarketSummary } from "./clusters.js";
-import { resolveNativeOutcomeForCanonicalSide } from "./cluster-execution.js";
+import { resolveClusterOutcomeSide } from "./clusters.js";
 import type { SignalDeliveryCandidate } from "./signal-delivery-target.js";
 
 export function signalDeliveryCandidateFromSource(input: {
@@ -45,11 +45,8 @@ export function signalDeliveryCandidateFromAgg(input: {
   priceAsOf: string;
 }): SignalDeliveryCandidate | null {
   const mapping = input.market.outcomeMapping;
-  const mappedSide = mapping
-    ? resolveNativeOutcomeForCanonicalSide(mapping.sourceYesTo, input.buySide)
-    : null;
+  const mappedSide = resolveClusterOutcomeSide(input.market, input.buySide);
   if (
-    !mapping ||
     !mappedSide ||
     input.executablePrice == null ||
     !input.market.eventId ||
@@ -65,8 +62,8 @@ export function signalDeliveryCandidateFromAgg(input: {
     matchMethod: input.market.matchMethod,
     marketId: input.market.marketId,
     mappedSide,
-    mappingConfidence: mapping.confidence,
-    mappingMethod: mapping.method,
+    mappingConfidence: mapping?.confidence ?? 1,
+    mappingMethod: mapping?.method ?? "verified_outcome_link",
     orderable: input.market.orderable === true,
     priceAsOf: input.priceAsOf,
     quoteAsOf: input.quoteAsOf ?? null,

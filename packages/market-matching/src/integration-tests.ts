@@ -1547,3 +1547,116 @@ integration(
     }
   },
 );
+
+integration(
+  "PG16: partial outcome links expose native prices but authorize only the verified side",
+  { skip: !url },
+  async () => {
+    await clearJobs();
+    const initial = await seed("partial-quotes");
+    for (const c of initial)
+      for (const side of ["YES", "NO"])
+        await pool.query(
+          "insert into unified_market_tokens(market_id,token_id,outcome_side) values($1,$2,$3)",
+          [c.id, `${c.id}:${side}`, side],
+        );
+    const [a, b] = await loadContracts(
+      pool,
+      initial.map((c) => c.id),
+    );
+    await enqueue(pool, "contract", a, b, "test");
+    assert.equal(await runJob(pool, { key: "test", infer }), "approved");
+    for (const c of [a, b])
+      for (const side of ["YES", "NO"])
+        await pool.query(
+          "insert into unified_token_top_latest(token_id,best_bid,best_ask,ts) values($1,$2,$3,now())",
+          [
+            `${c.id}:${side}`,
+            c.id === a.id ? 0.4 : 0.2,
+            c.id === a.id ? 0.6 : 0.3,
+          ],
+        );
+    const [link] = await resolveMarketLinks(pool, a.id);
+    const aNo = a.outcomes.find((o) => o.side === "NO")?.id,
+      bNo = b.outcomes.find((o) => o.side === "NO")?.id;
+    await pool.query(
+      "delete from market_outcome_links where market_link_id=$1 and ((left_outcome_id=$2 and right_outcome_id=$3) or (left_outcome_id=$3 and right_outcome_id=$2))",
+      [link.link.id, aNo, bNo],
+    );
+    const response = await getMatchedAlternatives(pool, a.id);
+    const target = response?.alternatives[0];
+    assert(target);
+    assert.equal(target.yesMid, 0.25);
+    assert.equal(target.noMid, 0.25);
+    assert.equal(target.nativeQuotes?.no.fresh, true);
+    assert.equal(target.outcomeMapping, null);
+    assert.deepEqual(target.verifiedOutcomeMapping, { YES: "YES", NO: null });
+    assert.equal(target.executionOffers?.yes?.ask, 0.3);
+    assert.equal(target.executionOffers?.no, null);
+    assert.equal(response?.lowestYesMid?.marketId, b.id);
+    assert.equal(response?.lowestNoMid?.marketId, a.id);
+    let readinessCalls = 0;
+    const input = {
+      db: pool,
+      marketId: a.id,
+      venues: [b.venue],
+      nowIso: new Date().toISOString(),
+      readiness: async () => {
+        readinessCalls++;
+        return { defer: false, orderable: true, blockers: [], buyPrice: 0.3 };
+      },
+    };
+    assert.equal(
+      (await loadMatchedSignalCandidates({ ...input, buySide: "NO" }))
+        .candidates.length,
+      0,
+    );
+    assert.equal(readinessCalls, 0);
+    assert.equal(
+      (await loadMatchedSignalCandidates({ ...input, buySide: "YES" }))
+        .candidates[0]?.mappedSide,
+      "YES",
+    );
+    const clusters = await getMatchedClusters(pool, { limit: 100 });
+    const cluster = clusters.items.find((c) =>
+      c.markets.some((m) => m.marketId === a.id),
+    );
+    assert(cluster);
+    assert.equal(cluster.execution?.bundleCost, null);
+    assert.notEqual(cluster.execution?.kind, "live_arbitrage");
+    const right = [a, b].find((c) => c.id === link.link.right_id);
+    assert(right);
+    await pool.query(
+      "update market_outcome_links set right_outcome_id=$2 where market_link_id=$1",
+      [link.link.id, right.outcomes.find((o) => o.side === "NO")?.id],
+    );
+    await pool.query(
+      "update unified_token_top_latest set best_bid=.01,best_ask=.03,ts=now() where token_id=$1",
+      [right.outcomes.find((o) => o.side === "NO")?.tokenId],
+    );
+    const inverse = await getMatchedAlternatives(pool, link.link.left_id);
+    assert.equal(inverse?.lowestYesMid?.marketId, right.id);
+    assert.deepEqual(inverse?.lowestYesMid?.verifiedOutcomeMapping, {
+      YES: "NO",
+      NO: null,
+    });
+    assert.equal(inverse?.lowestYesMid?.noMid, 0.02);
+    assert.deepEqual(inverse?.alternatives[0].verifiedOutcomeMapping, {
+      YES: "NO",
+      NO: null,
+    });
+    assert.equal(
+      inverse?.alternatives[0].executionOffers?.yes?.nativeOutcome,
+      "NO",
+    );
+    assert.equal(inverse?.alternatives[0].executionOffers?.no, null);
+    await pool.query(
+      "update unified_token_top_latest set ts=now()-interval '11 minutes' where token_id=any($1::text[])",
+      [[...a.outcomes, ...b.outcomes].map((o) => o.tokenId)],
+    );
+    const stale = await getMatchedAlternatives(pool, link.link.left_id);
+    assert.equal(stale?.alternatives[0].yesMid, null);
+    assert.equal(stale?.alternatives[0].nativeQuotes?.yes.fresh, false);
+    assert.equal(stale?.alternatives[0].executionOffers?.yes?.fresh, false);
+  },
+);

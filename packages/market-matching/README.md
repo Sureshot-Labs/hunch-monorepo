@@ -129,6 +129,22 @@ Catalog close/expiration/event-end dates participate in fingerprints even when
 both versions remain ACTIVE; prices and volumes do not. Catalog timestamps do
 not replace the actual settlement deadlines in the rules.
 
+## Quote display and partial outcome links
+
+Matched market summaries expose `nativeQuotes` independently of matching. Each
+native YES/NO book includes bid, ask, timestamp and freshness; fresh `yesMid` and
+`noMid` stay native and do not imply a verified relationship.
+`verifiedOutcomeMapping` maps each source side to an explicitly verified target
+side or null. Partial links retain a null legacy `outcomeMapping`, so older
+consumers cannot assume a complete binary mapping. Lowest-price summaries carry
+the per-side mapping too, including partial inverses.
+
+Single-leg offers and signal alternatives require the requested side's mapping
+and normal native execution checks. Unverified sides never inherit complements.
+Two-leg arbitrage continues to require complete mappings. Telegram's existing
+venue picker accepts only complete, direct mappings. Desktop/mobile comparisons
+show partial status and native bid/ask separately from midpoints.
+
 ## Approval and spending safety
 
 Automatic contract approval requires identical normalized rules and bound event context,

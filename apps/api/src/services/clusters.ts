@@ -52,6 +52,21 @@ export type ClusterMarketSummary = {
       | "verified_outcome_link";
     sourceYesTo: "NO" | "YES";
   } | null;
+  /** Source claim -> native target side. Null means unverified, never complement it. */
+  verifiedOutcomeMapping?: {
+    YES: "YES" | "NO" | null;
+    NO: "YES" | "NO" | null;
+  };
+  /** Native display quotes, independent of matching/execution permission. */
+  nativeQuotes?: Record<
+    "yes" | "no",
+    {
+      bid: number | null;
+      ask: number | null;
+      asOf: string | null;
+      fresh: boolean;
+    }
+  >;
   executionOffers?: ClusterMarketExecutionOffers | null;
   active?: boolean;
   orderable?: boolean;
@@ -81,6 +96,25 @@ export type ClusterMarketSummary = {
   openInterest: number | null;
   expiresAt: string | null;
 };
+
+export function resolveClusterOutcomeSide(
+  market: ClusterMarketSummary,
+  side: "YES" | "NO",
+): "YES" | "NO" | null {
+  if (
+    market.source === "hunch_matcher" &&
+    market.verifiedOutcomeMapping !== undefined
+  )
+    return market.verifiedOutcomeMapping[side];
+  const mapping = market.outcomeMapping;
+  return !mapping
+    ? null
+    : mapping.sourceYesTo === "YES"
+      ? side
+      : side === "YES"
+        ? "NO"
+        : "YES";
+}
 
 type ClusterMetrics = {
   venueCounts: Record<string, number>;
@@ -250,10 +284,8 @@ function resolveComparablePrice(
   canonicalSelection: ParticipantGroup | null,
 ): number | null {
   if (market.source === "hunch_matcher") {
-    if (!market.outcomeMapping) return null;
-    return market.outcomeMapping.sourceYesTo === "YES"
-      ? market.yesMid
-      : market.noMid;
+    const side = resolveClusterOutcomeSide(market, "YES");
+    return side === "YES" ? market.yesMid : side === "NO" ? market.noMid : null;
   }
   if (market.yesMid == null) return null;
   if (!canonicalSelection) return market.yesMid;

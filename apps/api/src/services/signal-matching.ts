@@ -1,6 +1,6 @@
 import type { DbQuery } from "../db.js";
 import { getMatchedAlternatives } from "./matched-markets.js";
-import { resolveNativeOutcomeForCanonicalSide } from "./cluster-execution.js";
+import { resolveClusterOutcomeSide } from "./clusters.js";
 import { signalDeliveryCandidateFromAgg } from "./signal-bot-delivery-candidates.js";
 import type { SignalDeliveryCandidate } from "./signal-delivery-target.js";
 
@@ -31,11 +31,8 @@ export async function loadMatchedSignalCandidates(input: {
       limit: 20,
     });
     for (const market of response?.alternatives ?? []) {
-      if (!market.outcomeMapping || !market.orderable) continue;
-      const side = resolveNativeOutcomeForCanonicalSide(
-        market.outcomeMapping.sourceYesTo,
-        input.buySide,
-      );
+      const side = resolveClusterOutcomeSide(market, input.buySide);
+      if (!side || !market.orderable) continue;
       const readiness = await input.readiness(market.marketId, side);
       if (readiness.defer) {
         deferred = true;
