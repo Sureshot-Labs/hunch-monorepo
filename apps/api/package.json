@@ -27,6 +27,7 @@
     "cleanup:expired": "tsx src/cleanup-expired-markets.ts",
     "delete-closed": "tsx src/delete-closed-markets.ts",
     "market:active-status-repair": "tsx src/market-active-status-repair.ts",
+    "test:market-repair-sweep": "tsx src/market-repair-sweep-tests.ts",
     "market:resolution-outcome-repair": "tsx src/market-resolution-outcome-repair.ts",
     "market:retention:select": "tsx src/market-retention-selector.ts",
     "market:source-retention": "tsx src/market-source-retention.ts",

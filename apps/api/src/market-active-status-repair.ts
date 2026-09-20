@@ -1,4 +1,12 @@
 import type { PoolClient } from "pg";
+import { createClient } from "redis";
+import {
+  MARKET_REPAIR_CANDIDATES_SQL,
+  parseRepairCursor,
+  repairCursorKey,
+  runRepairSweep,
+  type RepairCursor,
+} from "./lib/market-repair-sweep.js";
 import { pool } from "./db.js";
 import { env } from "./env.js";
 import {
@@ -37,6 +45,8 @@ type UnifiedStatus = "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED";
 type Venue = "polymarket" | "limitless" | "kalshi";
 
 type Args = {
+  batchSize: number;
+  fromStart: boolean;
   apiTimeoutSec: number;
   concurrency: number;
   confirmUpdate: boolean;
@@ -51,6 +61,7 @@ type Args = {
 };
 
 type CandidateRow = {
+  cursor_terminal_at: string;
   market_id: string;
   venue: Venue;
   venue_market_id: string;
@@ -112,6 +123,8 @@ function normalizeVenues(values: string[]): Venue[] {
 function parseArgs(argvInput: string[]): Args {
   const argv = argvInput.filter((arg) => arg !== "--");
   return {
+    batchSize: Math.min(1000, readPositiveInt(argv, "batch-size", 500)),
+    fromStart: hasFlag(argv, "from-start"),
     apiTimeoutSec: readPositiveInt(
       argv,
       "api-timeout-sec",
@@ -142,7 +155,9 @@ function printUsage(): void {
 
 Options:
   --cutoff-days <days>          ACTIVE market terminal age threshold. Default: ${DEFAULT_CUTOFF_DAYS}
-  --limit <count>               Bounded candidate pool size. Default: ${DEFAULT_LIMIT}
+  --limit <count>               Total candidates per run. Default: ${DEFAULT_LIMIT}
+  --batch-size <count>          Validate/commit per page (default 500, maximum 1000).
+  --from-start                  Ignore saved progress for this run.
   --sample <count>              Sample row count. Default: ${DEFAULT_SAMPLE_LIMIT}
   --venue <venue[,venue]>       Optional venue filter: polymarket, limitless, kalshi. Repeatable.
   --concurrency <count>         Live API request concurrency. Default: ${DEFAULT_CONCURRENCY}
@@ -173,7 +188,11 @@ payloads, refreshes Polymarket source rows touched by Gamma validation, and
 refreshes wallet metrics for markets whose outcome was newly filled.
 
 Dry-run is the default. Update mode only runs when both --execute and
---confirm-update are present.`);
+--confirm-update are present. Progress is stored in Redis per venue filter and
+cutoff; dry-run reads but never advances it. A completed sweep resets progress
+for the NEXT run. API failures are reported as PARTIAL and revisited next sweep.
+Each page commits separately; a later failure does not undo previous pages.
+--json emits one object with per-page reports under batches and a sweep summary.`);
 }
 
 function assertExecutionFlags(args: Args): void {
@@ -182,14 +201,6 @@ function assertExecutionFlags(args: Args): void {
   throw new Error(
     "ACTIVE status repair requires both --execute and --confirm-update. Omit both flags for dry-run.",
   );
-}
-
-function queryParams(args: Args): Array<number | Venue[] | null> {
-  return [
-    args.venues.length > 0 ? args.venues : null,
-    args.cutoffDays,
-    args.limit,
-  ];
 }
 
 function dateToString(value: Date | null): string | null {
@@ -922,80 +933,36 @@ async function validateCandidates(
 async function queryCandidates(
   client: PoolClient,
   args: Args,
+  cursor: RepairCursor | null,
+  limit: number,
+  cutoff: Date,
 ): Promise<CandidateRow[]> {
   const { rows } = await client.query<CandidateRow>(
-    `
-      with raw_candidates as materialized (
-        select
-          m.id as market_id,
-          m.venue::text as venue,
-          m.venue_market_id,
-          m.slug,
-          m.event_id,
-          m.title,
-          m.close_time as terminal_at
-        from unified_markets m
-        where m.status = 'ACTIVE'::unified_status
-          and ($1::text[] is null or m.venue = any($1::text[]))
-          and m.venue in ('polymarket', 'limitless', 'kalshi')
-          and m.venue_market_id is not null
-          and m.close_time is not null
-          and m.close_time < now() - make_interval(days => $2::int)
-        union all
-        select
-          m.id as market_id,
-          m.venue::text as venue,
-          m.venue_market_id,
-          m.slug,
-          m.event_id,
-          m.title,
-          m.expiration_time as terminal_at
-        from unified_markets m
-        where m.status = 'ACTIVE'::unified_status
-          and ($1::text[] is null or m.venue = any($1::text[]))
-          and m.venue in ('polymarket', 'limitless', 'kalshi')
-          and m.venue_market_id is not null
-          and m.close_time is null
-          and m.expiration_time is not null
-          and m.expiration_time < now() - make_interval(days => $2::int)
-        union all
-        select
-          m.id as market_id,
-          m.venue::text as venue,
-          m.venue_market_id,
-          m.slug,
-          m.event_id,
-          m.title,
-          e.end_date as terminal_at
-        from unified_markets m
-        join unified_events e on e.id = m.event_id
-        where m.status = 'ACTIVE'::unified_status
-          and ($1::text[] is null or m.venue = any($1::text[]))
-          and m.venue in ('polymarket', 'limitless', 'kalshi')
-          and m.venue_market_id is not null
-          and m.close_time is null
-          and m.expiration_time is null
-          and e.end_date is not null
-          and e.end_date < now() - make_interval(days => $2::int)
-      )
-      select *
-      from raw_candidates
-      order by terminal_at asc, market_id asc
-      limit $3::int
-    `,
-    queryParams(args),
+    MARKET_REPAIR_CANDIDATES_SQL,
+    [
+      args.venues.length ? args.venues : null,
+      cutoff,
+      limit,
+      cursor?.terminalAt ?? null,
+      cursor?.marketId ?? null,
+    ],
   );
   return rows;
 }
 
-async function loadCandidates(args: Args): Promise<CandidateRow[]> {
+async function loadCandidates(
+  args: Args,
+  cursor: RepairCursor | null,
+  limit: number,
+  cutoff: Date,
+): Promise<CandidateRow[]> {
   const client = await pool.connect();
   try {
     await client.query("begin read only");
     await client.query("select set_config('statement_timeout', $1, true)", [
       `${args.statementTimeoutSec}s`,
     ]);
-    const rows = await queryCandidates(client, args);
+    const rows = await queryCandidates(client, args, cursor, limit, cutoff);
     await client.query("commit");
     return rows;
   } catch (error) {
@@ -1387,13 +1354,13 @@ async function runUpdates(client: PoolClient): Promise<{
 async function executeRepair(
   args: Args,
   validations: ValidationRow[],
+  client: PoolClient,
 ): Promise<{
   outcomeMarketIds: string[];
   outcomeMarketRefs: RepairMarketRef[];
   selectionCounts: CountRow[];
   updateCounts: CountRow[];
 }> {
-  const client = await pool.connect();
   try {
     await client.query("begin");
     await client.query("select set_config('statement_timeout', $1, true)", [
@@ -1420,8 +1387,6 @@ async function executeRepair(
   } catch (error) {
     await client.query("rollback").catch(() => {});
     throw error;
-  } finally {
-    client.release();
   }
 }
 
@@ -1446,39 +1411,35 @@ function jsonReport(
   };
 }
 
-async function main(): Promise<void> {
-  const rawArgs = process.argv.slice(2);
-  if (hasFlag(rawArgs, "help")) {
-    printUsage();
-    return;
-  }
-
-  const args = parseArgs(rawArgs);
-  assertExecutionFlags(args);
+async function processBatch(
+  args: Args,
+  validations: ValidationRow[],
+  client: PoolClient,
+  reports: unknown[],
+): Promise<void> {
   const startedAt = Date.now();
-
-  const candidates = await loadCandidates(args);
-  const validations = await validateCandidates(candidates, args);
 
   if (args.execute) {
     const { outcomeMarketIds, outcomeMarketRefs, ...execution } =
-      await executeRepair(args, validations);
+      await executeRepair(args, validations, client);
     const metricsCounts = await refreshWalletMetricsForMarkets(pool, {
       enabled: !args.skipRefreshWalletMetrics,
       marketRefs: outcomeMarketRefs,
       statementTimeoutSec: args.statementTimeoutSec,
       logPrefix: "[market:active-status-repair]",
+    }).catch((error: unknown) => {
+      console.error(
+        "[market:active-status-repair] statuses already committed; wallet metrics refresh failed",
+        { outcomeMarketIds },
+      );
+      throw error;
     });
     if (args.json) {
-      console.log(
-        JSON.stringify(
-          jsonReport(args, validations, startedAt, {
-            ...execution,
-            metricsCounts,
-          }),
-          null,
-          2,
-        ),
+      reports.push(
+        jsonReport(args, validations, startedAt, {
+          ...execution,
+          metricsCounts,
+        }),
       );
       return;
     }
@@ -1525,9 +1486,7 @@ async function main(): Promise<void> {
 
   const report = buildReport(args, validations);
   if (args.json) {
-    console.log(
-      JSON.stringify(jsonReport(args, validations, startedAt), null, 2),
-    );
+    reports.push(jsonReport(args, validations, startedAt));
     return;
   }
 
@@ -1555,6 +1514,102 @@ async function main(): Promise<void> {
     durationMs: Date.now() - startedAt,
     readOnly: true,
   });
+}
+
+async function main(): Promise<void> {
+  const rawArgs = process.argv.slice(2);
+  if (hasFlag(rawArgs, "help")) {
+    printUsage();
+    return;
+  }
+  const args = parseArgs(rawArgs);
+  assertExecutionFlags(args);
+  if (args.execute && !env.redisUrl)
+    throw new Error("REDIS_URL required to checkpoint repair progress");
+  const client = await pool.connect();
+  const redis = env.redisUrl
+    ? createClient({
+        url: env.redisUrl,
+        socket: { connectTimeout: 5000, reconnectStrategy: false },
+        disableOfflineQueue: true,
+      })
+    : null;
+  redis?.on("error", () =>
+    console.error("[market:active-status-repair] Redis connection failed"),
+  );
+  try {
+    // Hold the same lock as the update transaction across selection, API checks
+    // and checkpoints. The transaction re-enters it on this SAME connection.
+    if (args.execute) {
+      const result = await client.query<{ locked: boolean }>(
+        "select pg_try_advisory_lock(hashtext('market_active_status_repair')) as locked",
+      );
+      if (!result.rows[0]?.locked)
+        throw new Error("Another market status repair is running");
+    }
+    if (redis) {
+      await redis.connect();
+      await redis.ping();
+    }
+    const key = repairCursorKey(args.venues, args.cutoffDays);
+    const cursor = args.fromStart
+      ? null
+      : parseRepairCursor(redis ? await redis.get(key) : null);
+    const cutoff = new Date(Date.now() - args.cutoffDays * 86400_000);
+    const reports: unknown[] = [];
+    let unverified = 0;
+    let batches = 0;
+    const sweep = await runRepairSweep({
+      cursor,
+      limit: args.limit,
+      batchSize: args.batchSize,
+      load: (after, limit) => loadCandidates(args, after, limit, cutoff),
+      process: async (candidates) => {
+        const validations = await validateCandidates(candidates, args);
+        const batchUnverified = validations.filter(
+          (row) =>
+            row.target_status === null &&
+            ![
+              "gamma_active",
+              "limitless_active",
+              "dflow_active",
+              "kalshi_public_event_active",
+              "kalshi_public_market_active",
+            ].includes(row.reason),
+        ).length;
+        unverified += batchUnverified;
+        if (batchUnverified === validations.length) {
+          throw new Error(
+            "Entire repair page is unverified; stopped without advancing its checkpoint",
+          );
+        }
+        await processBatch(args, validations, client, reports);
+        batches += 1;
+      },
+      checkpoint: async (next) => {
+        if (!args.execute || !redis) return;
+        if (next) await redis.set(key, JSON.stringify(next));
+        else await redis.del(key);
+      },
+    });
+    const summary = { ...sweep, batches, unverified, readOnly: !args.execute };
+    if (args.json)
+      console.log(
+        JSON.stringify({ args, batches: reports, sweep: summary }, null, 2),
+      );
+    else console.log("[market:active-status-repair] sweep", summary);
+    if (unverified) {
+      console.error(
+        "[market:active-status-repair] PARTIAL: unverified markets remain unchanged and will be revisited next sweep",
+      );
+      process.exitCode = 1;
+    }
+  } finally {
+    // Destroying this dedicated session releases its advisory lock even if
+    // rollback/unlock or Redis shutdown fails. Never return a locked session.
+    client.release(true);
+    if (redis?.isOpen) redis.destroy();
+  }
 }
 
 main()
