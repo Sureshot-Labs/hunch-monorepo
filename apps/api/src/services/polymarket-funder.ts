@@ -1,5 +1,6 @@
 import { Interface, ethers } from "ethers";
 import { env } from "../env.js";
+import { deriveSafeProxyAddress as deriveSafeAddress } from "./polymarket-safe-address.js";
 import {
   inspectPolymarketDepositWallet,
   type PolymarketDepositWalletDerivation,
@@ -117,13 +118,7 @@ export function deriveSafeProxyAddress(signer: string): string | null {
 
   if (!factory || !initCodeHash) return null;
 
-  const encodedOwner = ethers.AbiCoder.defaultAbiCoder().encode(
-    ["address"],
-    [signer],
-  );
-  const salt = ethers.keccak256(encodedOwner);
-
-  return ethers.getCreate2Address(factory, salt, initCodeHash);
+  return deriveSafeAddress(signer, factory, initCodeHash);
 }
 
 async function inspectSafe(inputs: {

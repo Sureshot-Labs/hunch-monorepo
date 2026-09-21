@@ -8,7 +8,7 @@ import { POLYMARKET_FUNDING_SOURCE_ADAPTER_ID } from "../preparation/polymarket-
 import { RELAY_PINNED_ASSETS } from "../../funding-providers/relay/mappings.js";
 import { Interface } from "ethers";
 import { z } from "zod";
-import { deriveSafeProxyAddress } from "../../services/polymarket-funder.js";
+import { deriveSafeProxyAddress } from "../../services/polymarket-safe-address.js";
 
 const CONTROLLER_ROUTER_APPROVAL_KINDS = new Set([
   "controller_pusd_router_approval",
