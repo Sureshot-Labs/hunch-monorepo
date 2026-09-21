@@ -40,6 +40,9 @@ export async function suggestSmallerMarketBuy(
     projection.reasonCodes.some(
       (reason) =>
         reason !== "insufficient_liquidity" &&
+        // A refused optional source contributes no capacity. Verified routes
+        // may still support a smaller Buy; this advice never authorizes funding.
+        reason !== "provider_quote_rejected" &&
         reason !== "destination_setup_required",
     ) ||
     projection.sourceOptions.some((source) => source.selectable) ||

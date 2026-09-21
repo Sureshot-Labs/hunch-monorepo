@@ -813,6 +813,79 @@ const tests: TestCase[] = [
         },
       );
       assert.equal(shortageHint?.amountUsdCents, 162);
+      // MAR41/42: nominal cash covers the order, but the verified Solana
+      // output does not. A rejected Base dust route must not suppress advice.
+      const partialRoute = accountMaxRelaySource({
+        destinationAsset,
+        destinationRaw: "1922596",
+      });
+      const mixedSnapshot = {
+        ...suggestionSnapshot,
+        request: {
+          ...suggestionSnapshot.request,
+          marketBuyAmountUsdCents: 476,
+        },
+        projection: {
+          ...suggestionSnapshot.projection,
+          availableNowRaw: "2996173",
+          requestedCollateralRaw: "4997811",
+          reasonCodes: [
+            "insufficient_liquidity",
+            "provider_quote_rejected",
+          ] as const,
+        },
+        sources: [
+          {
+            ...partialRoute,
+            option: {
+              ...partialRoute.option,
+              selectable: false,
+              reasonCodes: ["minimum_output_not_met"] as const,
+              expiresAt: new Date(Date.now() + 30_000).toISOString(),
+            },
+          },
+        ],
+      };
+      const mixedHint = await suggestSmallerMarketBuy(
+        {} as Pool,
+        mixedSnapshot,
+        account,
+        DEFAULT_FUNDING_RUNTIME_POLICY,
+        async (_pool, input) => {
+          assert.equal(input.executableFundsRaw, 4918769n);
+          return findMaxPolymarketMarketBuyUsdDetailed({
+            ...input,
+            context: quoteContext({ feePolicySnapshot: builderFeePolicy(500) }),
+            requireOrderbookDepth: true,
+          });
+        },
+      );
+      assert.ok(mixedHint && mixedHint.amountUsdCents < 476);
+      for (const reason of [
+        "provider_status_unknown",
+        "rpc_unavailable",
+        "provider_quote_invalid",
+        "insufficient_gas",
+      ] as const) {
+        assert.equal(
+          await suggestSmallerMarketBuy(
+            {} as Pool,
+            {
+              ...mixedSnapshot,
+              projection: {
+                ...mixedSnapshot.projection,
+                reasonCodes: [...mixedSnapshot.projection.reasonCodes, reason],
+              },
+            },
+            account,
+            DEFAULT_FUNDING_RUNTIME_POLICY,
+            async () => {
+              throw new Error("Unsafe advice must not request a quote");
+            },
+          ),
+          undefined,
+        );
+      }
       const belowFloorRoute = accountMaxRelaySource({
         destinationAsset,
         destinationRaw: "377645",
