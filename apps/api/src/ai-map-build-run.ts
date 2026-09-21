@@ -23,6 +23,9 @@ import {
   buildSemanticGroups,
   reviewSemanticGroups,
   representativeExamples,
+  DEFAULT_SEMANTIC_REVIEW_MAX_PAIRS,
+  semanticReviewLogSummary,
+  semanticReviewMoveLogs,
   type SemanticGroup,
   type SemanticReviewSummary,
 } from "./services/market-map-semantic-review.js";
@@ -2313,7 +2316,8 @@ function buildConfig(args: string[], policy: MarketMapPolicy): BuildConfig {
     semanticReviewEnabled:
       !hasFlag(args, "--without-semantic-review") &&
       (policy.semanticReviewEnabled ?? true),
-    semanticReviewMaxPairs: policy.semanticReviewMaxPairs ?? 200,
+    semanticReviewMaxPairs:
+      policy.semanticReviewMaxPairs ?? DEFAULT_SEMANTIC_REVIEW_MAX_PAIRS,
     semanticReviewBudgetUsd: policy.semanticReviewBudgetUsd ?? 0.1,
     venues: venues.length > 0 ? venues : [...MARKET_MAP_DEFAULT_VENUES],
     depth: clamp(
@@ -2781,7 +2785,18 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
     maxPairs: config.semanticReviewMaxPairs,
     budgetUsd: config.semanticReviewBudgetUsd,
   });
-  console.log("[market-map] semantic review done", semanticReviewSummary);
+  console.log(
+    "[market-map] semantic review done",
+    JSON.stringify(semanticReviewLogSummary(semanticReviewSummary)),
+  );
+  for (const move of semanticReviewMoveLogs(semanticReviewSummary, allPoints)) {
+    console.log("[market-map] semantic move", move);
+  }
+  if (config.debugLogs)
+    console.log(
+      "[market-map] semantic move membership",
+      JSON.stringify(semanticReviewSummary.moves),
+    );
   const nodes = buildTreeGlobal({
     groups,
     points: allPoints,
@@ -3052,7 +3067,9 @@ export async function runMarketMapBuild(
     projectionDurationMs: result.meta.projectionDurationMs,
     buildDurationMs: result.meta.buildDurationMs,
     labelCostSummary: result.labelCostSummary,
-    semanticReviewSummary: result.semanticReviewSummary,
+    semanticReviewSummary: semanticReviewLogSummary(
+      result.semanticReviewSummary,
+    ),
   });
 
   if (config.dryRun) {

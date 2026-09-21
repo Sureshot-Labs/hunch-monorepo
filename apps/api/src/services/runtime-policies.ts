@@ -4,6 +4,7 @@ import {
   type MarketMatchingPolicy,
 } from "@hunch/shared";
 import { z } from "zod";
+import { DEFAULT_SEMANTIC_REVIEW_MAX_PAIRS } from "./market-map-semantic-review.js";
 import {
   DEFAULT_EMBEDDING_POLICY,
   embeddingPolicyOverrideSchema,
@@ -1714,7 +1715,7 @@ function getDefaults(): IntelPolicyMap {
     },
     market_map: {
       semanticReviewEnabled: true,
-      semanticReviewMaxPairs: 200,
+      semanticReviewMaxPairs: DEFAULT_SEMANTIC_REVIEW_MAX_PAIRS,
       semanticReviewBudgetUsd: 0.1,
       enabled: env.aiMarketMapEnabled,
       triggerMode: env.aiMarketMapTriggerMode,

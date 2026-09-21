@@ -135,6 +135,17 @@ for (const node of nodes) {
 }
 const policy = getIntelPolicyDefaults("market_map");
 assert.equal(policy.semanticReviewEnabled, true);
+assert.equal(policy.semanticReviewMaxPairs, 2000);
+assert.equal(
+  hooks.buildConfig([], { ...policy, semanticReviewMaxPairs: undefined })
+    .semanticReviewMaxPairs,
+  2000,
+);
+assert.equal(
+  hooks.buildConfig([], { ...policy, semanticReviewMaxPairs: 500 })
+    .semanticReviewMaxPairs,
+  500,
+);
 assert.equal(
   hooks.buildConfig(["--without-semantic-review"], policy)
     .semanticReviewEnabled,

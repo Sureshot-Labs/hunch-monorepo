@@ -9,6 +9,8 @@ import {
   reviewSemanticGroups,
   SEMANTIC_REVIEW_MODEL,
   semanticLeaves,
+  semanticReviewLogSummary,
+  semanticReviewMoveLogs,
   type SemanticGroup,
   type SemanticPoint,
 } from "./services/market-map-semantic-review.js";
@@ -117,6 +119,29 @@ const summary = await reviewSemanticGroups(reviewed, {
 });
 assert.equal(calls, 2);
 assert.equal(summary.moved, 1);
+assert.equal(summary.totalEvents, 4);
+assert.equal(summary.singletonEvents, 1);
+assert.equal(summary.totalPairs, 3);
+assert.equal(summary.eligibleEvents, 3);
+assert.equal(summary.selectedEvents, 1);
+assert.equal(summary.reviewedPairs, 1);
+assert.equal(summary.reviewedEvents, 1);
+assert.equal(summary.pairLimitReached, true);
+assert.ok(!Object.hasOwn(semanticReviewLogSummary(summary), "moves"));
+const moveLog = semanticReviewMoveLogs(
+  summary,
+  input().flatMap((g) => g.points),
+);
+assert.equal(moveLog.length, 1);
+assert.ok(!moveLog[0].includes("[Array]"));
+assert.deepEqual(JSON.parse(moveLog[0]), {
+  eventId: "earnings",
+  title: "Nike earnings",
+  fromCountBefore: 3,
+  toCountBefore: 1,
+  fromExamples: ["Video views", "Video views tomorrow"],
+  toExamples: ["Micron earnings"],
+});
 assert.equal(summary.chargedCostUsd, 0.00006);
 assert.deepEqual(
   reviewed[1].points.map((p) => p.eventId),
@@ -204,6 +229,8 @@ const budget = await reviewSemanticGroups(input(), {
 });
 assert.equal(budget.stopped, "budget");
 assert.equal(budget.attempted, 0);
+assert.equal(budget.reviewedEvents, 0);
+assert.equal(budget.reviewedPairs, 0);
 const missingCost = await reviewSemanticGroups(input(), {
   apiKey: "test",
   maxPairs: 1,
