@@ -1,5 +1,11 @@
 import { freemem } from "node:os";
 import { readFile } from "node:fs/promises";
+import {
+  EmbeddingMemoryError,
+  embeddingBytesPerItem,
+  memoryAdmission,
+  type MemoryAdmission,
+} from "./memory.js";
 import { fetchActiveRuntimePolicy } from "@hunch/db";
 import {
   DEFAULT_VENUE_LIFECYCLE_POLICY,
@@ -121,6 +127,8 @@ export class EmbeddingEngine {
   private claimCursor = "0-0";
   private lastMaintenance = 0;
   private lastReport = 0;
+  private memoryPauses = new Map<string, MemoryAdmission>();
+  private memorySamples = new Map<string, { at: number; bytes: number }>();
   private backgroundFailures = new Map<
     string,
     { code: string; retryAt: number }
@@ -158,36 +166,44 @@ export class EmbeddingEngine {
     const info = String(await this.store.redis.sendCommand(["INFO", "memory"]));
     return Number(/^used_memory:(\d+)/m.exec(info)?.[1] ?? NaN);
   }
-  private async memoryCheck(pass?: Pass) {
+  private async memoryCheck(generation: EmbeddingGeneration, pass?: Pass) {
     const used = await this.usedMemory();
     const available = await (
       this.options.availableMemory ?? workerAvailableMemory
     )();
-    if (pass && pass.pilotItems >= 1000) {
-      const remaining = Math.max(
+    let remaining = 0;
+    let perItem = 0;
+    if (pass && pass.pilotItems >= 1000 && pass.phase === "building") {
+      remaining = Math.max(
         0,
         pass.coverage.events.eligible +
           pass.coverage.markets.eligible -
           pass.pilotItems,
       );
-      const perItem = Math.max(
-        12288,
-        (used - pass.pilotStartBytes) / pass.pilotItems,
-      );
-      pass.projectedBytes = used + perItem * remaining * 1.25;
+      let sample = this.memorySamples.get(generation.id);
+      if (!sample || Date.now() - sample.at >= 60000) {
+        sample = {
+          at: Date.now(),
+          bytes: await embeddingBytesPerItem(this.store, generation),
+        };
+        this.memorySamples.set(generation.id, sample);
+      }
+      perItem = sample.bytes;
     }
-    if (
-      !Number.isFinite(used) ||
-      used > 6 * 1024 ** 3 ||
-      available < 2 * 1024 ** 3 ||
-      (pass?.projectedBytes ?? 0) > 6 * 1024 ** 3
-    )
-      throw new Error("embedding_memory_headroom");
-    return {
-      redisUsedBytes: used,
-      workerAvailableBytes: available,
-      projectedBytes: pass?.projectedBytes ?? null,
-    };
+    const admission = memoryAdmission(
+      generation.id,
+      used,
+      available,
+      remaining,
+      perItem,
+    );
+    if (pass) pass.projectedBytes = admission.projectedBytes;
+    if (admission.blockedBy) {
+      this.memoryPauses.set(generation.id, admission);
+      throw new EmbeddingMemoryError(admission);
+    }
+    this.memoryPauses.delete(generation.id);
+    return admission;
   }
   private async prepare(generation: EmbeddingGeneration) {
     for (const kind of ["event", "market"] as const)
@@ -368,7 +384,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       return alreadyServing;
     }
     if (!registered.some((g) => g.id === desired.id)) {
-      await this.memoryCheck();
+      await this.memoryCheck(desired);
       await this.prepare(desired);
       registered.push(desired);
       await this.store.put(`${CONTROL}generations`, registered);
@@ -770,7 +786,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       await this.store.put(stateKey(desired), pass);
       if (!pass.countsReady) return pass;
     }
-    await this.memoryCheck(pass);
+    await this.memoryCheck(desired, pass);
     if (!pass.gcDone) {
       await this.cleanTerminal(desired, pass);
       await this.store.put(stateKey(desired), pass);
@@ -900,14 +916,6 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
         pass.probes[pass.kind] = stats.verifiedId;
       if (pass.phase === "building") {
         pass.pilotItems += page.ids.length;
-        if (pass.pilotItems >= 1000 && !pass.projectedBytes) {
-          const used = await this.usedMemory();
-          pass.projectedBytes =
-            pass.pilotStartBytes +
-            Math.max(8192, (used - pass.pilotStartBytes) / pass.pilotItems) *
-              (pass.coverage.events.eligible + pass.coverage.markets.eligible) *
-              1.25;
-        }
       }
     }
     pass.after = page.after;
@@ -1012,11 +1020,17 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
           : null,
       dlqLength: Number(await this.store.redis.sendCommand(["XLEN", DLQ])),
       memory: {
+        pauses: [...this.memoryPauses.values()],
         redisUsedBytes: await this.usedMemory(),
         workerAvailableBytes: await (
           this.options.availableMemory ?? workerAvailableMemory
         )(),
-        projectedBytes: pass?.projectedBytes ?? null,
+        projectedBytes:
+          (desired
+            ? this.memoryPauses.get(desired.id)?.projectedBytes
+            : null) ??
+          pass?.projectedBytes ??
+          null,
         workerRssBytes: process.memoryUsage().rss,
         redisRssBytes: Number(
           /^used_memory_rss:(\d+)/m.exec(memoryInfo)?.[1] ?? 0,
@@ -1206,6 +1220,8 @@ return 0`,
     await this.refreshPolicy();
     const active = await readActiveGeneration(this.store.redis);
     const desired = this.policy ? generationForPolicy(this.policy) : null;
+    for (const id of this.memoryPauses.keys())
+      if (id !== active.id && id !== desired?.id) this.memoryPauses.delete(id);
     try {
       if (Date.now() - this.lastMaintenance > 1000) {
         await this.store.prune();
@@ -1244,10 +1260,17 @@ return 0`,
         // failure, without turning one timeout into a tight retry loop.
         await this.maintain(active);
       }
-      if (active.id !== desired.id)
-        await this.background(`advance:${active.id}`, () =>
-          this.advance(active, active),
-        );
+      if (active.id !== desired.id) {
+        try {
+          await this.background(`advance:${active.id}`, () =>
+            this.advance(active, active),
+          );
+        } catch (error) {
+          // A serving-generation projection is not admission for its replacement.
+          // The desired pass independently checks actual global limits as well.
+          if (!(error instanceof EmbeddingMemoryError)) throw error;
+        }
+      }
       // Bounded live priority: allow one background page after every message batch.
       const pass = canBuild
         ? await this.background(`advance:${desired.id}`, () =>
@@ -1262,12 +1285,18 @@ return 0`,
             ? "verifying"
             : (pass?.phase ?? "building")
           : "paused",
-        canBuild ? null : "previous_generation_retained",
+        canBuild
+          ? this.memoryPauses.has(active.id)
+            ? `background_memory_paused:${active.id}:${this.memoryPauses.get(active.id)?.blockedBy}`
+            : null
+          : "previous_generation_retained",
       );
       if (!hadMessages) await sleep(200);
     } catch (error) {
       let reason =
         error instanceof Error ? error.message : "embedding_worker_error";
+      if (error instanceof EmbeddingMemoryError)
+        reason = `${reason}:${error.admission.generation}:${error.admission.blockedBy}`;
       if (error instanceof EmbeddingProviderError) {
         reason = `${error.code}${error.status ? `_${error.status}` : ""}`;
         await this.store.put(

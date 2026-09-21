@@ -22,6 +22,7 @@ import {
 import { DEFAULT_VENUE_LIFECYCLE_POLICY } from "@hunch/shared";
 import { enqueueEmbedItems } from "@hunch/infra";
 import { EmbeddingEngine, initializeEmbeddingWorker } from "./engine.js";
+import { embeddingBytesPerItem } from "./memory.js";
 import {
   CONTROL,
   STREAM,
@@ -250,6 +251,106 @@ test("canonical SQL eligibility, stable pages and terminal rows", async () => {
   );
   assert.equal(sources[0].eventTitle, "Will Bitcoin exceed $100,000?");
   assert.equal(sources[0].marketType, "binary");
+});
+test("memory sampling measures this generation, not unrelated Redis keys", async () => {
+  await seedGeneration(generation);
+  const before = await embeddingBytesPerItem(store, generation);
+  await redis.set("fixture:unrelated-cache", "x".repeat(1000000));
+  assert.equal(await embeddingBytesPerItem(store, generation), before);
+  assert.ok(before >= 12288);
+  await redis.hSet(
+    embeddingKey(generation, "event", "event:a"),
+    "fixture_large",
+    "x".repeat(100000),
+  );
+  assert.ok((await embeddingBytesPerItem(store, generation)) > 100000);
+});
+test("old global-growth projection is discarded without restarting the pass or budget", async () => {
+  await serve(generation);
+  await store.reserve(generation, 0.4, 5);
+  await store.put(
+    checkpointKey(generation),
+    checkpoint("building", {
+      pilotItems: 1000,
+      pilotStartBytes: 0,
+      projectedBytes: 100 * 1024 ** 3,
+      after: JSON.stringify({ version: 3, venue: "polymarket", keys: null }),
+      coverage: {
+        // This fixture has one indexed document per kind: HNSW's initial
+        // allocation must not be extrapolated over thousands of fake documents.
+        events: { eligible: 501, verified: 0, missing: 0 },
+        markets: { eligible: 501, verified: 0, missing: 0 },
+      },
+    }),
+  );
+  await engine().tick();
+  const pass = await store.get<Checkpoint>(checkpointKey(generation));
+  assert.equal(pass?.kind, "market");
+  assert.equal(pass?.pilotItems, 1001);
+  assert.equal(await store.spent(generation), 0.4);
+  assert.equal(providerCalls.length, 0);
+});
+test("serving projection pause does not block replacement; real headroom still blocks it", async () => {
+  await serve(legacy);
+  for (const kind of ["event", "market"] as const)
+    await store.ensureIndex(generation, kind);
+  await store.put(`${CONTROL}generations`, [legacy, generation]);
+  await store.put(
+    checkpointKey(legacy),
+    checkpoint("building", {
+      pilotItems: 1000,
+      coverage: {
+        events: { eligible: 1000000, verified: 0, missing: 0 },
+        markets: { eligible: 1000000, verified: 0, missing: 0 },
+      },
+    }),
+  );
+  const start = checkpoint("building", {
+    after: JSON.stringify({ version: 3, venue: "polymarket", keys: null }),
+  });
+  await store.put(checkpointKey(generation), start);
+  await engine().tick();
+  assert.deepEqual(providerCalls, [generation.id]);
+  const status = await store.get<{
+    state: string;
+    reason: string;
+    memory: {
+      pauses: Array<{
+        generation: string;
+        blockedBy: string;
+        projectedBytes: number;
+      }>;
+    };
+  }>(`${CONTROL}status`);
+  assert.equal(status?.state, "building");
+  assert.equal(
+    status?.reason,
+    `background_memory_paused:${legacy.id}:projection`,
+  );
+  assert.equal(status?.memory.pauses[0].generation, legacy.id);
+  assert.ok(Number(status?.memory.pauses[0].projectedBytes) > 6 * 1024 ** 3);
+  await store.put(checkpointKey(generation), start);
+  const worker = new EmbeddingEngine({
+    store,
+    db,
+    apiKey: "fixture",
+    provider,
+    availableMemory: async () => 1024 ** 3,
+  });
+  await worker.tick();
+  assert.deepEqual(
+    providerCalls,
+    [generation.id],
+    "no new inference with real memory pressure",
+  );
+  const blocked = await store.get<{ state: string; reason: string }>(
+    `${CONTROL}status`,
+  );
+  assert.equal(blocked?.state, "paused");
+  assert.equal(
+    blocked?.reason,
+    `embedding_memory_headroom:${generation.id}:worker_available`,
+  );
 });
 test("stream IDs compare numerically", () =>
   assert.equal(compareStreamId("10-0", "9-100"), 1));

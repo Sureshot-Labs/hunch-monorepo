@@ -74,6 +74,15 @@ substitute a new-model vector into an old snapshot. No map rebuild is forced.
   requires recovered headroom: Redis estimate at most 6 GiB and at least 2 GiB
   available to the worker. These checks are not a guarantee against unrelated
   host memory pressure. Admin also shows Redis/worker RSS and persistence work.
+- Memory forecasting uses generation-owned hash samples (up to 16 per index)
+  plus index memory per document, refreshed at most once a minute. It retains a
+  12 KiB/item floor and 25% margin. Global Redis usage is added once, never
+  extrapolated as embedding growth. Old saved global-delta projections are
+  recomputed without resetting the scan, vectors or monetary reservations.
+  A serving-generation memory pause does not block the desired generation's
+  independent admission. Real Redis/host limits still apply to both. Status
+  `memory.pauses` identifies each blocked generation, measured values and cause;
+  a background-only pause also appears in `reason` without marking Qwen paused.
 - Retired generations have **no mandatory grace period**. Published snapshots
   do not retain their vectors; legacy `map:*` snapshot pins are removed in bounded
   batches. Cleanup starts once in-flight request/job pins have drained. Jobs use
