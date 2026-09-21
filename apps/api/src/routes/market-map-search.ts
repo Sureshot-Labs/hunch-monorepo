@@ -16,18 +16,34 @@ import {
 } from "../services/market-map.js";
 import {
   buildMapSearchDocuments,
+  buildMapSearchView,
+  hydrateMapSearchDocuments,
   searchMapDocuments,
   type MapSearchDocument,
 } from "../services/market-map-text-search.js";
 
-export const marketMapSearchRoutes: FastifyPluginAsync = async (app) => {
+export const marketMapSearchRoutes: FastifyPluginAsync<{
+  hydrateNodes: (
+    runId: string,
+    nodes: MarketMapNode[],
+  ) => Promise<MarketMapNode[]>;
+  hydrateEvents: (
+    runId: string,
+    events: MarketMapEventSummary[],
+  ) => Promise<MarketMapEventSummary[]>;
+}> = async (app, options) => {
   // One bounded snapshot cache, shared across queries and concurrent requests.
   // Never cache arbitrary user query strings or create one Redis key per query.
   let cache:
     | {
         runId: string;
         expiresAt: number;
-        documents: Promise<MapSearchDocument[]>;
+        documents: Promise<{
+          nodes: MarketMapNode[];
+          documents: MapSearchDocument[];
+        }>;
+        hydrated: Map<string, Promise<MarketMapEventSummary | null>>;
+        nodesWithSignals?: Promise<MarketMapNode[]>;
       }
     | undefined;
   app.withTypeProvider<ZodTypeProvider>().get(
@@ -90,13 +106,48 @@ export const marketMapSearchRoutes: FastifyPluginAsync = async (app) => {
               events.set(leaf.id, parsed);
             }
           }
-          return buildMapSearchDocuments(nodes, events);
+          return { nodes, documents: buildMapSearchDocuments(nodes, events) };
         })();
-        cache = { runId, expiresAt: Date.now() + 60000, documents };
+        cache = {
+          runId,
+          expiresAt: Date.now() + 60000,
+          documents,
+          hydrated: new Map(),
+        };
       }
       const selectedCache = cache;
       try {
-        const documents = await selectedCache.documents;
+        const snapshot = await selectedCache.documents;
+        let documents = snapshot.documents;
+        let nodes = snapshot.nodes;
+        if (request.query.includeView === "true") {
+          const matches = searchMapDocuments(
+            documents,
+            q,
+            venues,
+            documents.length,
+          );
+          const ids = new Set(
+            matches.items.map((item) => `${item.venue}:${item.eventId}`),
+          );
+          const selected = documents.filter((doc) =>
+            ids.has(`${doc.venue}:${doc.eventId}`),
+          );
+          if (selected.length) {
+            selectedCache.nodesWithSignals ??= options.hydrateNodes(
+              runId,
+              snapshot.nodes,
+            );
+            [documents, nodes] = await Promise.all([
+              hydrateMapSearchDocuments(
+                selected,
+                selectedCache.hydrated,
+                (events) => options.hydrateEvents(runId, events),
+              ),
+              selectedCache.nodesWithSignals,
+            ]);
+          } else documents = [];
+        }
         return {
           enabled: true,
           runId,
@@ -105,6 +156,9 @@ export const marketMapSearchRoutes: FastifyPluginAsync = async (app) => {
           limit,
           offset,
           ...searchMapDocuments(documents, q, venues, limit, offset),
+          ...(request.query.includeView === "true"
+            ? { view: buildMapSearchView(nodes, documents, q, venues) }
+            : {}),
         };
       } catch (error) {
         if (cache === selectedCache) cache = undefined;

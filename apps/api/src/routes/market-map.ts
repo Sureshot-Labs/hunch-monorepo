@@ -1751,7 +1751,45 @@ function applyLiveMarketDataToEvents(
 }
 
 export const marketMapRoutes: FastifyPluginAsync = async (app) => {
-  await app.register(marketMapSearchRoutes);
+  await app.register(marketMapSearchRoutes, {
+    hydrateNodes: async (runId, nodes) => {
+      const summary = await loadNodeSignalSummaryByNodeId({
+        runId,
+        nodeIds: nodes.map((node) => node.id),
+        previewLimit: 3,
+      });
+      return applySignalSummaryToNodes({
+        nodes,
+        ...summary,
+        subtreeCountByNodeId: computeNodeSignalSubtreeCounts(
+          nodes,
+          summary.directCountByNodeId,
+        ),
+      });
+    },
+    hydrateEvents: async (runId, events) => {
+      // Matching events are hydrated once per snapshot cache lifetime, shared across terms.
+      // Keep the existing bounded enrichment batches used by map consumers.
+      const hydrated: MarketMapEventSummary[] = [];
+      for (let start = 0; start < events.length; start += 100) {
+        const batch = events.slice(start, start + 100);
+        const live = await loadLiveMarketDataForEvents(batch, 8);
+        const usable = filterUsableEvents(
+          applyLiveMarketDataToEvents(
+            batch,
+            live.primaryByEventVenue,
+            live.marketsByEventVenue,
+          ),
+        ).items;
+        const signals = await loadEventSignalSummaryByEventId({
+          runId,
+          eventIds: usable.map((event) => event.eventId),
+        });
+        hydrated.push(...applySignalSummaryToEvents(usable, signals));
+      }
+      return hydrated;
+    },
+  });
   const z = app.withTypeProvider<ZodTypeProvider>();
 
   z.get(
@@ -2795,7 +2833,11 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       );
       const node = safeJsonParse<MarketMapNode>(raw);
       if (!node) {
-        return reply.code(404).send({ error: "Market map node not found" });
+        return reply.code(404).send({
+          error: "Market map node not found",
+          code: "MAP_NODE_EXPIRED",
+          runId,
+        });
       }
       requestMarketMapPayloadRefresh({ node }, "market-map:node");
       return { runId, node };
@@ -2898,7 +2940,11 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
       ]);
       const node = safeJsonParse<MarketMapNode>(nodeRaw);
       if (!node) {
-        return reply.code(404).send({ error: "Market map node not found" });
+        return reply.code(404).send({
+          error: "Market map node not found",
+          code: "MAP_NODE_EXPIRED",
+          runId,
+        });
       }
       const events = (
         safeJsonParse<MarketMapEventSummary[]>(eventsRaw) ?? []
