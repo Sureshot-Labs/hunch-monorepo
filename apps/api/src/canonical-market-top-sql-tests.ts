@@ -1,6 +1,54 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { selectDiscoveryIds } from "./services/discovery-selection.js";
+import {
+  buildMarketMapSidebarQuery,
+  emptyMarketMapSidebarQualityFloors,
+} from "./repos/market-map-sidebar-candidates.js";
+
+for (const kind of [
+  "trendingNow",
+  "volumeMovers24h",
+  "liquidityMovers24h",
+  "topMovers24h",
+] as const) {
+  const query = buildMarketMapSidebarQuery({
+    kind,
+    venues: ["polymarket"],
+    limit: 100,
+    quality: emptyMarketMapSidebarQualityFloors(),
+  });
+  assert.match(query.text, /ranked_events as materialized/);
+  assert.match(query.text, /e.status = 'ACTIVE'/);
+  assert.match(query.text, /limit \$9/);
+  assert.match(query.text, /limit \$2/);
+  assert.deepEqual(query.values, [["polymarket"], 100, 0, 0, 0, 0, 0, 0, 1000]);
+}
+
+const blended = selectDiscoveryIds(
+  [
+    { ids: ["a", "b", "c", "d", "e", "f", "g", "h"], share: 0.6 },
+    { ids: ["a", "m", "n"], share: 0.2 },
+    { ids: ["a", "x", "y"], share: 0.2 },
+  ],
+  10,
+);
+assert.equal(blended.length, 10);
+assert.equal(new Set(blended).size, 10);
+assert.ok(blended.slice(0, 5).includes("m"));
+assert.ok(blended.slice(0, 5).includes("x"));
+assert.deepEqual(
+  selectDiscoveryIds(
+    [
+      { ids: ["a", "b", "c"], share: 0.6 },
+      { ids: [], share: 0.4 },
+    ],
+    3,
+  ),
+  ["a", "b", "c"],
+);
+assert.deepEqual(selectDiscoveryIds([{ ids: ["a"], share: 1 }], 0), []);
 
 import type { Pool } from "@hunch/infra";
 
@@ -9,6 +57,7 @@ import {
   buildObservedCanonicalMarketProbabilitySql,
   buildObservedCanonicalProbabilityFromTopSql,
   fetchFeedEventIds,
+  fetchFeedMarkets,
   fetchObservedCanonicalProbabilityMarketIds,
 } from "./repos/unified-read.js";
 
@@ -22,6 +71,51 @@ assert.match(observedMarket, /abs\(/i);
 assert.match(observedMarket, /1 -/i);
 assert.doesNotMatch(observedMarket, /m\.best_bid|m\.best_ask/i);
 console.log("ok - feed probability uses observed canonical token tops");
+
+for (const directTokenLookup of [false, true]) {
+  let captured = "";
+  const client = {
+    query: async (sql: string) => {
+      if (sql.trim().startsWith("with ")) captured = sql;
+      return { rows: [] };
+    },
+    release() {},
+  };
+  await fetchFeedMarkets(
+    { connect: async () => client } as unknown as Pool,
+    {
+      limit: 25,
+      offset: 100,
+      minVol: 0,
+      minLiquidity: 0,
+      view: "events",
+      sortDir: "desc",
+      nowParam: "2026-09-21T12:00:00Z",
+      sevenDaysAgo: "2026-09-14T12:00:00Z",
+      sevenDaysFromNow: "2026-09-28T12:00:00Z",
+    },
+    ["polymarket:example"],
+    { directTokenLookup },
+  );
+  assert.match(captured, /market_rank <= \$\d+/);
+  if (directTokenLookup) {
+    assert.doesNotMatch(captured, /latest_book as|book_24h as|token_set as/);
+    assert.match(captured, /left join unified_token_top_latest yes_top/);
+    assert.match(captured, /left join unified_token_top_latest no_top/);
+    assert.equal(
+      (
+        captured.match(
+          /from unified_token_change_24h where avg_mid_24h is not null/g,
+        ) ?? []
+      ).length,
+      2,
+    );
+  } else {
+    assert.match(captured, /latest_book as materialized/);
+    assert.match(captured, /book_24h as materialized/);
+  }
+}
+console.log("ok - For You direct token lookups preserve the default feed path");
 
 const predicate = buildObservedCanonicalMarketProbabilityPredicateSql({
   marketAlias: "m",

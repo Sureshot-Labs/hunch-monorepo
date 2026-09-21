@@ -1,5 +1,12 @@
 import { z } from "zod";
 
+export const marketMapSearchQuerySchema = z.object({
+  q: z.string().trim().min(1).max(500),
+  venues: z.string().trim().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(50),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
 const queryBooleanSchema = z.preprocess((value) => {
   if (value == null || value === "") return undefined;
   if (typeof value === "boolean") return value;

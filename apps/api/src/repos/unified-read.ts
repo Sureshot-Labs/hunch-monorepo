@@ -3016,6 +3016,7 @@ async function queryRowsWithSearchHint<T extends QueryResultRow>(
 function buildFeedBookSnapshotCtes(args: {
   nowParam: string;
   include24h: boolean;
+  directTokenLookup?: boolean;
   sourceCteName?: string;
   tokenYesColumn?: string;
   tokenNoColumn?: string;
@@ -3029,6 +3030,24 @@ function buildFeedBookSnapshotCtes(args: {
   const sourceCteName = args.sourceCteName ?? "market_base";
   const tokenYesColumn = args.tokenYesColumn ?? "resolved_token_yes";
   const tokenNoColumn = args.tokenNoColumn ?? "resolved_token_no";
+  if (args.directTokenLookup) {
+    // Personalized candidates can contain thousands of markets. Joining their
+    // materialized price sets repeatedly becomes quadratic under row-count
+    // underestimation; use the same token-keyed tables directly instead.
+    const history = `(select token_id, avg_mid_24h as best_bid, avg_mid_24h as best_ask
+      from unified_token_change_24h where avg_mid_24h is not null)`;
+    return {
+      ctes: [],
+      yesTopJoin: `left join unified_token_top_latest yes_top on yes_top.token_id = m.${tokenYesColumn}`,
+      noTopJoin: `left join unified_token_top_latest no_top on no_top.token_id = m.${tokenNoColumn}`,
+      yes24hJoin: args.include24h
+        ? `left join ${history} yes_24h on yes_24h.token_id = m.${tokenYesColumn}`
+        : "",
+      no24hJoin: args.include24h
+        ? `left join ${history} no_24h on no_24h.token_id = m.${tokenNoColumn}`
+        : "",
+    };
+  }
   const ctes = [
     `
       token_set as materialized (
@@ -3662,7 +3681,7 @@ export async function fetchFeedMarkets(
   pool: Pool,
   inputs: FeedInputs,
   eventIds: string[],
-  options?: { useCachedChange24h?: boolean },
+  options?: { useCachedChange24h?: boolean; directTokenLookup?: boolean },
 ): Promise<FeedMarketRow[]> {
   const useCachedChange24h =
     inputs.sort === "change24h" && options?.useCachedChange24h === true;
@@ -4004,6 +4023,7 @@ export async function fetchFeedMarkets(
   const bookSnapshot = buildFeedBookSnapshotCtes({
     nowParam,
     include24h: true,
+    directTokenLookup: options?.directTokenLookup,
   });
   const limitlessAmmFallbackAllowedExpr = buildLimitlessAmmFallbackAllowedExpr(
     nowParam,

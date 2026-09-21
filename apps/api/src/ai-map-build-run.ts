@@ -12,6 +12,13 @@ import { PCA } from "ml-pca";
 import { RESP_TYPES } from "redis";
 import { UMAP } from "umap-js";
 import { pool } from "./db.js";
+import { fetchFeedEventIds } from "./repos/unified-read.js";
+import {
+  buildMarketMapSidebarQuery,
+  emptyMarketMapSidebarQualityFloors,
+} from "./repos/market-map-sidebar-candidates.js";
+import { filterVenuesForLifecycleCapability } from "./services/venue-lifecycle.js";
+import { selectDiscoveryIds } from "./services/discovery-selection.js";
 import { env } from "./env.js";
 import { closeRedis } from "./redis.js";
 import {
@@ -1924,13 +1931,16 @@ async function applyAiLabels(params: {
 async function fetchVenueCandidates(
   venue: MarketMapVenue,
   config: BuildConfig,
+  eventIds: string[],
 ): Promise<EventCandidateRow[]> {
+  if (!eventIds.length) return [];
   const now = new Date();
   const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const sevenDaysFromNow = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
   const queryLimit = Math.max(
     config.maxEventsPerVenue,
     config.maxEventsPerVenue * 2,
+    eventIds.length,
   );
   const renderableMarketExpr = buildRenderableMarketSql({ alias: "m" });
   const { rows } = await pool.query<EventCandidateRow>(
@@ -1942,6 +1952,7 @@ async function fetchVenueCandidates(
         from unified_markets m
         where m.status = 'ACTIVE'
           and m.venue = $1
+          and m.event_id = any($8::text[])
           and (m.expiration_time is null or m.expiration_time > $2)
           and (m.close_time is null or m.close_time > $2)
           and ${renderableMarketExpr}
@@ -1992,6 +2003,7 @@ async function fetchVenueCandidates(
           on eam.event_id = e.id
         where e.status = 'ACTIVE'
           and e.venue = $1
+          and e.id = any($8::text[])
           and (e.end_date is null or e.end_date > $2)
           and (
             (${MARKET_MAP_EVENT_ACTIVITY_VOLUME_SQL}) >= $3
@@ -2108,6 +2120,7 @@ async function fetchVenueCandidates(
       queryLimit,
       sevenDaysAgo.toISOString(),
       sevenDaysFromNow.toISOString(),
+      eventIds,
     ],
   );
   return rows;
@@ -2438,7 +2451,62 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
       await refreshOpenRouterModelPricing(redis);
     for (const venue of config.venues) {
       const queryStartedAt = Date.now();
-      const candidates = await fetchVenueCandidates(venue, config);
+      const now = new Date();
+      const pools: { ids: string[]; share: number }[] = [];
+      for (const [kind, share] of [
+        ["trendingNow", 0.5],
+        ["volumeMovers24h", 0.1],
+        ["liquidityMovers24h", 0.1],
+        ["topMovers24h", 0.1],
+      ] as const) {
+        // Comparable liquidity deltas currently exist only for Polymarket,
+        // matching the sidebar's venue eligibility.
+        if (kind === "liquidityMovers24h" && venue !== "polymarket") continue;
+        const query = buildMarketMapSidebarQuery({
+          kind,
+          venues: [venue],
+          limit: Math.ceil(config.maxEventsPerVenue * share * 2),
+          quality: emptyMarketMapSidebarQualityFloors(),
+        });
+        const { rows } = await pool.query<{ event_id: string }>(
+          query.text,
+          query.values,
+        );
+        pools.push({ ids: rows.map((row) => row.event_id), share });
+      }
+      // Same upstream product selectors used by matcher seeding. Do not read
+      // matcher output or the previous map: that would create a feedback loop.
+      for (const [sort, share] of [
+        ["newest", 0.2],
+        ["totalvol", 0],
+      ] as const) {
+        const rows = await fetchFeedEventIds(pool, {
+          limit:
+            share === 0
+              ? config.maxEventsPerVenue
+              : Math.ceil(config.maxEventsPerVenue * share * 2),
+          offset: 0,
+          minVol: 0,
+          minLiquidity: 0,
+          venues: [venue],
+          view: "events",
+          sort: sort === "newest" ? undefined : sort,
+          filter: sort === "newest" ? "newest" : undefined,
+          sortDir: "desc",
+          nowParam: now.toISOString(),
+          sevenDaysAgo: new Date(now.getTime() - 7 * 86400000).toISOString(),
+          sevenDaysFromNow: new Date(
+            now.getTime() + 7 * 86400000,
+          ).toISOString(),
+        });
+        pools.push({ ids: rows.map((row) => row.id), share });
+      }
+      const candidateIds = [...new Set(pools.flatMap((source) => source.ids))];
+      const candidates = await fetchVenueCandidates(
+        venue,
+        config,
+        candidateIds,
+      );
       const candidateQueryMs = Date.now() - queryStartedAt;
       const { rows: qualityCandidates, summary: qualitySummary } =
         await filterCandidatesByRepresentativeQuality({
@@ -2577,9 +2645,17 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
         });
       }
       diagnostics[venue].embedded = points.length;
-      byVenuePoints[venue] = points
-        .sort((a, b) => b.score - a.score || a.eventId.localeCompare(b.eventId))
-        .slice(0, config.maxEventsPerVenue);
+      const pointById = new Map(points.map((point) => [point.eventId, point]));
+      byVenuePoints[venue] = selectDiscoveryIds(
+        pools.map((source) => ({
+          ...source,
+          ids: source.ids.filter((id) => pointById.has(id)),
+        })),
+        config.maxEventsPerVenue,
+      ).flatMap((id) => {
+        const point = pointById.get(id);
+        return point ? [point] : [];
+      });
       diagnostics[venue].selected = byVenuePoints[venue].length;
     }
   } finally {
@@ -2854,6 +2930,14 @@ export async function runMarketMapBuild(
 
   const policy = await resolveMarketMapPolicy(pool);
   const config = buildConfig(args, policy.effective);
+  const lifecycleScope = await filterVenuesForLifecycleCapability(
+    pool,
+    config.venues,
+    "discovery",
+  );
+  config.venues = config.venues.filter((venue) =>
+    lifecycleScope.venues.some((enabledVenue) => enabledVenue === venue),
+  );
   if (!config.enabled) {
     console.log(
       "[market-map] skipped (policy disabled). use --force to run anyway",
@@ -2933,6 +3017,7 @@ export async function runMarketMapBuild(
 }
 
 export const marketMapModelTestHooks = {
+  fetchVenueCandidates,
   buildConfig,
   callOpenRouterLabel,
   drainPromises,

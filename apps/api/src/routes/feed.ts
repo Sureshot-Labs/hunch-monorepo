@@ -49,6 +49,7 @@ import {
   type FeedMarketRow,
 } from "../repos/unified-read.js";
 import { filterVenuesForLifecycleCapability } from "../services/venue-lifecycle.js";
+import { selectDiscoveryIds } from "../services/discovery-selection.js";
 
 const FOR_YOU_MIN_VOLUME_24H = 100;
 const FOR_YOU_MIN_LIQUIDITY = 1000;
@@ -1233,6 +1234,15 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         query.venue,
         "discovery",
       );
+      if (venues.length === 0) {
+        return reply.send({
+          count: 0,
+          limit,
+          offset,
+          minVolume24h: 0,
+          data: [],
+        });
+      }
       const categories = query.categories;
       const minProb = query.min_prob;
       const maxProb = query.max_prob;
@@ -1346,6 +1356,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       let sum: Float32Array | null = null;
       let weightSum = 0;
+      const interestVectors: { vector: Float32Array; weight: number }[] = [];
       for (const [eventId, weight] of eventWeights.entries()) {
         pin.assertHeld();
         const raw = await bufferClient.hGet(
@@ -1356,6 +1367,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         if (!Buffer.isBuffer(raw)) continue;
         const vec = parseEmbeddingVector(raw, generation);
         if (!vec) continue;
+        interestVectors.push({ vector: new Float32Array(vec), weight });
         if (!sum) sum = new Float32Array(vec.length);
         if (sum.length !== vec.length) continue;
         for (let i = 0; i < vec.length; i += 1) {
@@ -1387,39 +1399,59 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           50,
         ),
       );
-      const queryText = `@status:{ACTIVE}=>[KNN ${knnLimit} @embedding $vec AS score]`;
+      // Apply venue scope before KNN, so excluded venues do not consume recall.
+      const venueFilter = venues.length ? ` @venue:{${venues.join("|")}}` : "";
+      const queryText = `(@status:{ACTIVE}${venueFilter})=>[KNN ${knnLimit} @embedding $vec AS score]`;
 
-      pin.assertHeld();
-      const raw = (await redis.sendCommand([
-        "FT.SEARCH",
-        embeddingIndex(generation, "event"),
-        queryText,
-        "PARAMS",
-        "2",
-        "vec",
-        vectorToBuffer(userVector),
-        "SORTBY",
-        "score",
-        "RETURN",
-        "1",
-        "score",
-        "LIMIT",
-        "0",
-        String(knnLimit),
-        "DIALECT",
-        "2",
-      ])) as unknown[];
-      pin.assertHeld();
+      const searchVector = async (vector: Float32Array): Promise<string[]> => {
+        pin.assertHeld();
+        const raw = (await redis.sendCommand([
+          "FT.SEARCH",
+          embeddingIndex(generation, "event"),
+          queryText,
+          "PARAMS",
+          "2",
+          "vec",
+          vectorToBuffer(vector),
+          "SORTBY",
+          "score",
+          "RETURN",
+          "1",
+          "score",
+          "LIMIT",
+          "0",
+          String(knnLimit),
+          "DIALECT",
+          "2",
+        ])) as unknown[];
+        pin.assertHeld();
 
-      const candidateEventIds: string[] = [];
-      for (let i = 1; i < raw.length; i += 2) {
-        const key = raw[i];
-        const prefix = embeddingKey(generation, "event", "");
-        if (!String(key).startsWith(prefix)) continue;
-        const id = String(key).slice(prefix.length);
-        if (interactedEventIds.has(id)) continue;
-        candidateEventIds.push(id);
+        const candidateEventIds: string[] = [];
+        for (let i = 1; i < raw.length; i += 2) {
+          const key = raw[i];
+          const prefix = embeddingKey(generation, "event", "");
+          if (!String(key).startsWith(prefix)) continue;
+          const id = String(key).slice(prefix.length);
+          if (interactedEventIds.has(id)) continue;
+          candidateEventIds.push(id);
+        }
+        return candidateEventIds;
+      };
+      const centroidIds = await searchVector(userVector);
+      const sources = [{ ids: centroidIds, share: 0.7 }];
+      // Retain a bounded slice of distinct interests instead of letting their
+      // average erase them. Candidate/hydration cap stays unchanged.
+      const strongest = interestVectors
+        .sort((a, b) => b.weight - a.weight)
+        .slice(0, 2);
+      if (interestVectors.length > 1) {
+        for (const interest of strongest)
+          sources.push({
+            ids: await searchVector(interest.vector),
+            share: 0.15,
+          });
       }
+      const candidateEventIds = selectDiscoveryIds(sources, knnLimit);
 
       if (!candidateEventIds.length) {
         return reply.send({
@@ -1587,7 +1619,9 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         sevenDaysFromNow,
       };
 
-      const feedRows = await fetchFeedMarkets(pool, inputs, filteredEventIds);
+      const feedRows = await fetchFeedMarkets(pool, inputs, filteredEventIds, {
+        directTokenLookup: true,
+      });
       if (!feedRows.length) {
         return reply.send({
           count: 0,
