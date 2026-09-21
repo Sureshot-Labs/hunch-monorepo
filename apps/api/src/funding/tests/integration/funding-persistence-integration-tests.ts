@@ -5026,6 +5026,7 @@ async function testDirectIngressWithDeferredPreparationCommit(): Promise<void> {
 
 async function testCompositePreparationAndRelayCommit(
   relayFirst = false,
+  providerHandoff = false,
 ): Promise<void> {
   const userId = await insertUser(pool);
   const venueMarketId = opaque("composite-consumer-market");
@@ -5181,14 +5182,75 @@ async function testCompositePreparationAndRelayCommit(
       },
     ],
   };
-  const orderedPlan = relayFirst
+  const [preparationFixture, relayFixture] = plan.steps;
+  assert.ok(preparationFixture && relayFixture);
+  const providerPlan: FundingCommitPlan = providerHandoff
     ? {
         ...plan,
-        steps: [...plan.steps]
+        operation: {
+          ...plan.operation,
+          supportMetadata: {
+            ...plan.operation.supportMetadata,
+            adapterId: "polymarket_funding_router_v1",
+            planValidation: {
+              validatorId: "polymarket_funding_router_v1",
+              version: 1,
+            },
+          },
+        },
+        steps: [
+          {
+            ...preparationFixture,
+            actionValidationResult: {
+              valid: true,
+              validatorId: "polymarket_funding_router_v1",
+              compositeSourceLegId: "router-leg",
+              compositeSegmentOrdinal: null,
+            },
+          },
+          {
+            ordinal: 1,
+            segmentOrdinal: null,
+            stepKind: "external_handoff",
+            state: "action_required",
+            actionFingerprint: hash("8"),
+            executorId: "polymarket_safe_relayer_v1",
+            payerRequirement: "provider",
+            dependsOnOrdinal: null,
+            normalizedAction: {
+              kind: "external_handoff",
+              actionId: opaque("safe-handoff"),
+              handoffKind: "polymarket_safe_transfer",
+              actorWalletId: userId,
+              networkId: ASSET.networkId,
+              payload: { topology: "safe" },
+            },
+            actionValidationResult: {
+              compositeSourceLegId: "relay-leg",
+              compositeSegmentOrdinal: 0,
+            },
+          },
+          {
+            ...relayFixture,
+            ordinal: 2,
+            dependsOnOrdinal: 1,
+            actionValidationResult: {
+              valid: true,
+              compositeSourceLegId: "relay-leg",
+              compositeSegmentOrdinal: 0,
+            },
+          },
+        ],
+      }
+    : plan;
+  const orderedPlan = relayFirst
+    ? {
+        ...providerPlan,
+        steps: [...providerPlan.steps]
           .reverse()
           .map((step, ordinal) => ({ ...step, ordinal })),
       }
-    : plan;
+    : providerPlan;
   const consentToken = opaque("consent");
   const quote = await createFundingQuote(
     pool,
@@ -5216,6 +5278,7 @@ async function testCompositePreparationAndRelayCommit(
         "select funding_validate_operation_segment_shape($1)",
         [operationId],
       );
+      await shapeClient.query("set constraints all immediate");
       await shapeClient.query("rollback");
     } finally {
       await shapeClient.query("rollback");
@@ -5256,8 +5319,12 @@ async function testCompositePreparationAndRelayCommit(
       bound_reservations: "1",
       segment_count: "1",
       unbound_reservations: "1",
-      unbound_steps: "1",
+      unbound_steps: providerHandoff ? "2" : "1",
     });
+
+    // This variant verifies the real tables, deferred triggers and commit path;
+    // the existing variants below exercise preparation receipt lifecycle.
+    if (providerHandoff) return;
 
     const replayClient = await pool.connect();
     await replayClient.query("begin");
@@ -9157,6 +9224,7 @@ console.log(
 );
 await testCompositePreparationAndRelayCommit();
 await testCompositePreparationAndRelayCommit(true);
+await testCompositePreparationAndRelayCommit(false, true);
 console.log(
   "[funding-persistence-integration-tests] ok composite venue preparation plus Relay commit",
 );
