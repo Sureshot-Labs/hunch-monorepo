@@ -21,7 +21,8 @@ See `packages/embeddings/QUALITY-RESULTS.md` for measured gains and limitations.
 3. Maintain the serving generation while building the desired generation from
    canonical eligible DB rows. ACTIVE means lifecycle-enabled for discovery; an
    event also needs an eligible ACTIVE child. No volume filter is added.
-4. Verify current text hashes, queue watermark, lifecycle configuration, index
+4. Check/repair text hashes within that same pass (no second full verification
+   scan). Then check queue watermark, lifecycle configuration, index
    dimensions and an actual KNN query; only then atomically change the active
    pointer if auto-activation remains enabled. Invalid/unavailable policy blocks
    switching, not existing reads.
@@ -46,6 +47,17 @@ substitute a new-model vector into an old snapshot. No map rebuild is forced.
 - A full serving reconciliation runs at most once per six hours unless explicitly
   requested or invalidated. Checkpoints and conservative monetary reservations
   survive restarts. Live messages take priority over bounded DB pages.
+- Coverage gaps are diagnostic: a completed repair pass can activate with
+  nonzero `missing`, preserving those counts for operators. They do not schedule
+  a six-hour retry hold or discard the verification report. Old persisted holds
+  are ignored on upgrade. Live work and subsequent reconciliation repair gaps;
+  `ai:embed:backfill --execute` requests reconciliation without waiting for the
+  ordinary serving cadence. It does not interrupt an already running pass.
+- Existing `verifying` checkpoints resume at their cursor, now repairing gaps
+  instead of merely counting them. Newly written vectors count as repaired/valid;
+  `missing` retains only unresolved items. Earlier gaps in a resumed legacy pass
+  remain diagnostic until live updates or a subsequent repair reaches them.
+  Provider-free serving TTL maintenance remains available during provider outages.
 - Source scans page **only ACTIVE rows in allowed venues**, using the existing
   `(venue, end_date)` and `(venue, expiration_time, close_time)` partial indexes.
   ID only breaks ties within a date group. Seek branches handle NULL dates
@@ -58,7 +70,8 @@ substitute a new-model vector into an old snapshot. No map rebuild is forced.
 - Worker and CLI SQL have a 15-second safety timeout. Background PostgreSQL
   timeout/lock/connection failures retry after 60 seconds without blocking live
   queue ACKs; the status reason identifies the deferred stage and SQLSTATE.
-  Provider, budget, memory, lease and verification failures remain fail-closed.
+  Provider, budget, memory, lease and index/KNN failures remain fail-closed;
+  incomplete source coverage alone does not block activation.
   On upgrade to time cursors, old scan/census/maintenance checkpoints restart
   against the ACTIVE set. Existing vectors and monetary reservations are retained,
   not reset/rebilled. No migration or new index is needed.

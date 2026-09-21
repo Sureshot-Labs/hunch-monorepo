@@ -1477,7 +1477,94 @@ test("new DLQ diagnostics trim at most 1000 historical entries and prune gradual
   assert.equal(snapshot?.length, beforePrune);
 });
 
-test("invalid canonical title is quarantined without starving healthy work or passing coverage", async () => {
+for (const phase of ["building", "verifying"]) {
+  test(`${phase} repairs in place and finishes without a second full scan`, async () => {
+    await serve(generation);
+    await redis.hDel(
+      embeddingKey(generation, "market", "market:a"),
+      "embedding",
+    );
+    await store.put(
+      checkpointKey(generation),
+      checkpoint(phase, {
+        kind: "market",
+        after: JSON.stringify({ version: 3, venue: "polymarket", keys: null }),
+        probes: { event: "event:a" },
+        coverage: {
+          events: { eligible: 1, verified: 1, missing: 0 },
+          markets: { eligible: 1, verified: 0, missing: 0 },
+        },
+      }),
+    );
+    const worker = engine();
+    await worker.tick();
+    const pass = await store.get<Checkpoint>(checkpointKey(generation));
+    assert.equal(pass?.phase, "ready");
+    assert.equal(pass?.kind, "market");
+    assert.deepEqual((pass?.coverage as Record<string, unknown>).markets, {
+      eligible: 1,
+      verified: 1,
+      missing: 0,
+    });
+    assert.deepEqual(pass?.probes, { event: "event:a", market: "market:a" });
+    assert.deepEqual(providerCalls, [generation.id]);
+    await worker.tick();
+    assert.equal(
+      (await store.get<Checkpoint>(checkpointKey(generation)))?.phase,
+      "active",
+    );
+    assert.deepEqual(providerCalls, [generation.id]);
+  });
+}
+
+test("coverage gaps remain visible but do not block generation activation", async () => {
+  await serve(legacy);
+  await seedGeneration(generation);
+  await store.put(`${CONTROL}generations`, [legacy, generation]);
+  await store.put(
+    checkpointKey(generation),
+    checkpoint("verifying", {
+      kind: "market",
+      after: JSON.stringify({
+        version: 3,
+        venue: "polymarket",
+        keys: [null, null, "zzzz"],
+      }),
+      coverage: {
+        events: { eligible: 2, verified: 1, missing: 1 },
+        markets: { eligible: 1, verified: 1, missing: 0 },
+      },
+    }),
+  );
+  const worker = engine();
+  for (let i = 0; i < 4; i++) await worker.tick();
+  assert.equal((await readActiveGeneration(redis)).id, generation.id);
+  const pass = await store.get<Checkpoint>(checkpointKey(generation));
+  assert.equal(pass?.phase, "active");
+  assert.equal(
+    (pass?.coverage as { events: { missing: number } }).events.missing,
+    1,
+  );
+  assert.equal(providerCalls.length, 0);
+});
+
+test("persisted six-hour coverage hold cannot block repair after upgrade", async () => {
+  await serve(generation);
+  await store.put(
+    checkpointKey(generation),
+    checkpoint("building", {
+      notBefore: Date.now() + 6 * 3600000,
+      after: JSON.stringify({ version: 3, venue: "polymarket", keys: null }),
+    }),
+  );
+  await engine().tick();
+  const pass = await store.get<Checkpoint>(checkpointKey(generation));
+  assert.equal(pass?.notBefore, undefined);
+  assert.equal(pass?.kind, "market");
+  assert.equal(providerCalls.length, 0);
+});
+
+test("invalid canonical title is quarantined and reported without blocking healthy publication", async () => {
   await seedGeneration(legacy);
   await seedGeneration(generation);
   await store.put(`${CONTROL}generations`, [legacy, generation]);
@@ -1541,7 +1628,7 @@ test("invalid canonical title is quarantined without starving healthy work or pa
   );
   assert.ok(await redis.get(`${CONTROL}maintenance:${legacy.id}`));
   for (let count = 0; count < 4; count++) await worker.tick();
-  assert.equal((await readActiveGeneration(redis)).id, legacy.id);
+  assert.equal((await readActiveGeneration(redis)).id, generation.id);
   assert.equal(await redis.xLen(DLQ), 2, "one diagnostic per content revision");
 });
 

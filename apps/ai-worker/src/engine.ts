@@ -411,6 +411,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       retryAt: number;
     }[] = [];
     let verified = 0;
+    let repaired = 0;
     let verifiedId: string | undefined;
     let invalid = 0;
     for (const source of sources) {
@@ -596,6 +597,9 @@ redis.call('SET',KEYS[3],'1'); return 1`,
               item.hash,
               response.embeddings[i],
             );
+            repaired++;
+            verified++;
+            verifiedId ??= source.id;
             await this.store.fenced("return redis.call('UNLINK',KEYS[2])", [
               `${CONTROL}failure:${generation.id}:${kind}:${source.id}`,
             ]);
@@ -611,7 +615,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       eligible: sources.filter((s) => s.eligible).length,
       verified,
       verifiedId,
-      missing: missing.length + invalid,
+      missing: missing.length - repaired + invalid,
     };
   }
   private async recordFailure(
@@ -768,8 +772,9 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       (pass.phase === "active" && now - pass.startedAt >= 6 * 3600000)
     )
       pass = await this.newPass();
-    if ((pass.notBefore ?? 0) > now)
-      throw new Error("embedding_coverage_retry_wait");
+    // Legacy coverage retries persisted a six-hour hold. Coverage gaps are
+    // diagnostic, not a reason to suspend reconciliation or explicit requests.
+    delete pass.notBefore;
     if (!pass.countsReady) {
       const census = await this.background("source_census", () =>
         this.advanceCensus(),
@@ -902,17 +907,12 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
         pass.kind,
         page.ids,
         active.id !== desired.id,
-        pass.phase === "verifying",
       );
       const bucket =
         pass.kind === "event" ? pass.coverage.events : pass.coverage.markets;
       bucket.verified += stats.verified;
       bucket.missing += stats.missing;
-      if (
-        pass.phase === "verifying" &&
-        stats.verifiedId &&
-        !pass.probes[pass.kind]
-      )
+      if (stats.verifiedId && !pass.probes[pass.kind])
         pass.probes[pass.kind] = stats.verifiedId;
       if (pass.phase === "building") {
         pass.pilotItems += page.ids.length;
@@ -924,18 +924,10 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
     } else if (pass.kind === "event") {
       pass.kind = "market";
       pass.after = null;
-    } else if (pass.phase === "building") {
-      const next = await this.newPass("verifying");
-      next.gcDone = true;
-      next.projectedBytes = pass.projectedBytes;
-      pass = next;
-    } else if (
-      pass.coverage.events.missing + pass.coverage.markets.missing >
-      0
-    ) {
-      pass = await this.newPass();
-      pass.notBefore = Date.now() + 6 * 3600000;
     } else {
+      // Live sources can change during the scan. Preserve measured gaps for
+      // operators, but do not require an impossible atomic 100% snapshot.
+      // Subsequent reconciliation repairs gaps using the same content cache.
       pass.phase = "ready";
       // Rows can close or arrive while a read-committed sweep is running. Report
       // the eligible set actually checked, not a stale pre-sweep COUNT estimate.

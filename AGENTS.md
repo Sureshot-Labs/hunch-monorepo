@@ -1,5 +1,21 @@
 # Production SQL performance
 
+## Proportionate safeguards
+
+- Never add unjustified blocking guards, arbitrary waiting periods, or perfect
+  coverage requirements that delay useful work without preventing a concrete
+  material failure. Explain the failure being prevented and why blocking is
+  preferable to a warning and bounded background repair.
+- For partial derived data (such as embeddings), prefer visible gap counts and
+  resumable repair over blocking publication. Explicit repair requests must not
+  be trapped behind a stale housekeeping delay.
+- Preserve safeguards for financial execution, data integrity, vector-space
+  compatibility, concurrent writers, and actual resource/budget exhaustion.
+- Test recovery as well as rejection; a safeguard without a practical recovery
+  path is incomplete. Do not remove unrelated safeguards to fix one bad guard.
+
+## SQL verification
+
 This is a production database with millions of rows. Small fixtures, typechecks,
 and SQL syntax checks do not establish acceptable query performance.
 
