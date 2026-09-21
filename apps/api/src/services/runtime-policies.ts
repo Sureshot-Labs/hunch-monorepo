@@ -388,6 +388,9 @@ export type ApiCacheWarmPolicy = {
 };
 
 export type MarketMapPolicy = {
+  semanticReviewEnabled?: boolean;
+  semanticReviewMaxPairs?: number;
+  semanticReviewBudgetUsd?: number;
   enabled: boolean;
   triggerMode: "interval" | "cron";
   pollIntervalSec: number;
@@ -869,6 +872,9 @@ const marketMapSizeBySchema = z.enum([
 
 const marketMapSchema = z
   .object({
+    semanticReviewEnabled: strictBoolean,
+    semanticReviewMaxPairs: nonNegativeInt.max(2_000),
+    semanticReviewBudgetUsd: nonNegativeNumber.max(10),
     enabled: strictBoolean,
     triggerMode: z.enum(["interval", "cron"]),
     pollIntervalSec: positiveInt.max(60 * 60 * 24),
@@ -1707,6 +1713,9 @@ function getDefaults(): IntelPolicyMap {
       maxClustersPerRun: 400,
     },
     market_map: {
+      semanticReviewEnabled: true,
+      semanticReviewMaxPairs: 200,
+      semanticReviewBudgetUsd: 0.1,
       enabled: env.aiMarketMapEnabled,
       triggerMode: env.aiMarketMapTriggerMode,
       pollIntervalSec: env.aiMarketMapPollIntervalSec,

@@ -233,6 +233,9 @@ export type MarketMapEventSummary = MarketMapActivityMetricFields & {
 };
 
 export type MarketMapMeta = {
+  semanticReviewSummary?: import("./market-map-semantic-review.js").SemanticReviewSummary;
+  clusteringDurationMs?: number;
+  labelDurationMs?: number;
   embeddingGeneration?: import("@hunch/embeddings").EmbeddingGeneration;
   runId: string;
   generatedAt: string;

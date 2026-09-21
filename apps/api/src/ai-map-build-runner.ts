@@ -363,7 +363,8 @@ async function main() {
     );
     const budgetWindowSpentUsd = sumCost(runsInBudgetWindow);
     const daySpentUsd = sumCost(runsInDay);
-    const estimatedCostUsd = args.dryRun ? 0 : config.estimatedRunCostUsd;
+    // A dry-run skips snapshot publication, not paid inference.
+    const estimatedCostUsd = config.estimatedRunCostUsd;
 
     if (!args.ignorePolicyRate) {
       if (lastRunMs > 0 && nowMs - lastRunMs < config.pollIntervalSec * 1_000) {
@@ -465,27 +466,27 @@ async function main() {
 
     try {
       const buildResult = await runMarketMapBuild(buildArgs);
-      const actualEstimatedCostUsd = args.dryRun
-        ? 0
-        : buildResult.labelCostSummary.estimatedCostUsd;
-      const actualChargedCostUsd = args.dryRun
-        ? 0
-        : buildResult.labelCostSummary.chargedCostUsd;
-      const providerReportedCostUsd = args.dryRun
-        ? 0
-        : buildResult.labelCostSummary.providerReportedCostUsd;
-      const providerReportedCostCalls = args.dryRun
-        ? 0
-        : buildResult.labelCostSummary.providerReportedCostCalls;
+      const actualEstimatedCostUsd =
+        buildResult.labelCostSummary.estimatedCostUsd +
+        (buildResult.semanticReviewSummary?.estimatedCostUsd ?? 0);
+      const actualChargedCostUsd =
+        buildResult.labelCostSummary.chargedCostUsd +
+        (buildResult.semanticReviewSummary?.chargedCostUsd ?? 0);
+      const providerReportedCostUsd =
+        buildResult.labelCostSummary.providerReportedCostUsd +
+        (buildResult.semanticReviewSummary?.providerReportedCostUsd ?? 0);
+      const providerReportedCostCalls =
+        buildResult.labelCostSummary.providerReportedCostCalls +
+        (buildResult.semanticReviewSummary?.providerReportedCostCalls ?? 0);
+      const attemptedCalls =
+        buildResult.labelCostSummary.attempted +
+        (buildResult.semanticReviewSummary?.attempted ?? 0);
       const costSource: "estimated" | "provider_reported" | "mixed" =
-        args.dryRun
+        providerReportedCostCalls <= 0
           ? "estimated"
-          : providerReportedCostCalls <= 0
-            ? "estimated"
-            : providerReportedCostCalls >=
-                buildResult.labelCostSummary.attempted
-              ? "provider_reported"
-              : "mixed";
+          : providerReportedCostCalls >= attemptedCalls
+            ? "provider_reported"
+            : "mixed";
       const finishedAt = Date.now();
       const runEntry: RunEntry = {
         runId,
@@ -555,12 +556,15 @@ async function main() {
           Math.max(0, config.dayBudgetUsd - postDaySpentUsd).toFixed(6),
         ),
         providerReportedCostShare: Number(
-          (buildResult.labelCostSummary.providerReportedCostShare ?? 0).toFixed(
-            4,
-          ),
+          (attemptedCalls > 0
+            ? providerReportedCostCalls / attemptedCalls
+            : 0
+          ).toFixed(4),
         ),
         providerCostMissing:
-          !args.dryRun && providerReportedCostCalls === 0 ? "true" : "false",
+          attemptedCalls > 0 && providerReportedCostCalls === 0
+            ? "true"
+            : "false",
       });
       console.log(
         `[map-build-runner] done runId=${runId} state=${args.dryRun ? "dry_run" : "completed"} est_cost=${actualEstimatedCostUsd.toFixed(6)} charged_cost=${actualChargedCostUsd.toFixed(6)} source=${costSource}`,

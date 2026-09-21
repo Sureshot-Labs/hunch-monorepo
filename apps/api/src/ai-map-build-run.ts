@@ -19,6 +19,13 @@ import {
 } from "./repos/market-map-sidebar-candidates.js";
 import { filterVenuesForLifecycleCapability } from "./services/venue-lifecycle.js";
 import { selectDiscoveryIds } from "./services/discovery-selection.js";
+import {
+  buildSemanticGroups,
+  reviewSemanticGroups,
+  representativeExamples,
+  type SemanticGroup,
+  type SemanticReviewSummary,
+} from "./services/market-map-semantic-review.js";
 import { env } from "./env.js";
 import { closeRedis } from "./redis.js";
 import {
@@ -206,6 +213,9 @@ type EventPoint = {
 };
 
 type BuildConfig = {
+  semanticReviewEnabled: boolean;
+  semanticReviewMaxPairs: number;
+  semanticReviewBudgetUsd: number;
   enabled: boolean;
   venues: MarketMapVenue[];
   depth: number;
@@ -236,6 +246,7 @@ type BuildConfig = {
 };
 
 type BuildResult = {
+  semanticReviewSummary: SemanticReviewSummary;
   nodes: MarketMapNode[];
   byNodeEvents: Map<string, MarketMapEventSummary[]>;
   meta: Omit<MarketMapMeta, "runId">;
@@ -284,6 +295,7 @@ type LabelCostSummary = {
 };
 
 type MarketMapBuildRunResult = {
+  semanticReviewSummary?: SemanticReviewSummary;
   status: "completed" | "dry_run" | "skipped_disabled";
   source: "env" | "db";
   effectiveAt: string | null;
@@ -686,6 +698,7 @@ function pickRepresentative(points: EventPoint[]): EventPoint {
 }
 
 function buildTreeGlobal(params: {
+  groups?: SemanticGroup<EventPoint>[];
   points: EventPoint[];
   depth: number;
   k1: number;
@@ -698,16 +711,14 @@ function buildTreeGlobal(params: {
   const nodes: MarketMapNode[] = [];
 
   function makeNodes(
-    clusterPoints: EventPoint[],
+    groups: SemanticGroup<EventPoint>[],
     level: number,
     parentId: string | null,
   ): string[] {
-    if (clusterPoints.length === 0) return [];
-    const splitK = level === 1 ? k1 : level === 2 ? k2 : k3;
-    const clusters = partitionCluster(clusterPoints, splitK);
     const createdIds: string[] = [];
 
-    for (const bucket of clusters) {
+    for (const group of groups) {
+      const bucket = group.points;
       if (bucket.length === 0) continue;
       const eventIds = bucket.map((point) => point.eventId);
       const nodeId = buildMarketMapNodeId({
@@ -812,15 +823,20 @@ function buildTreeGlobal(params: {
           .map(summarizeEvent),
       );
 
-      if (level < depth && bucket.length >= 2) {
-        const childIds = makeNodes(bucket, level + 1, nodeId);
+      if (group.children.length) {
+        const childIds = makeNodes(group.children, level + 1, nodeId);
         node.childIds = childIds;
       }
     }
     return createdIds;
   }
 
-  makeNodes(points, 1, null);
+  makeNodes(
+    params.groups ??
+      buildSemanticGroups(points, depth, [k1, k2, k3], partitionCluster),
+    1,
+    null,
+  );
   return nodes;
 }
 
@@ -1333,11 +1349,15 @@ async function callOpenRouterLabelWithRetry(params: {
 }
 
 async function applyAiLabels(params: {
+  points: EventPoint[];
   nodes: MarketMapNode[];
   byNodeEvents: Map<string, MarketMapEventSummary[]>;
   config: BuildConfig;
 }): Promise<LabelCostSummary> {
   const { nodes, byNodeEvents, config } = params;
+  const pointById = new Map(
+    params.points.map((point) => [point.eventId, point]),
+  );
   if (!config.labelAiEnabled) {
     console.log("[market-map] ai labels skipped (disabled)");
     return emptyLabelCostSummary();
@@ -1598,7 +1618,24 @@ async function applyAiLabels(params: {
           : (() => {
               const out: string[] = [];
               const seen = new Set<string>();
-              for (const event of byNodeEvents.get(node.id) ?? []) {
+              const members = (byNodeEvents.get(node.id) ?? []).flatMap(
+                (event) => {
+                  const point = pointById.get(event.eventId);
+                  return point ? [point] : [];
+                },
+              );
+              const distinctMembers = [
+                ...new Map(
+                  members.map((point) => [
+                    point.title.trim().toLowerCase(),
+                    point,
+                  ]),
+                ).values(),
+              ];
+              for (const event of representativeExamples(
+                distinctMembers,
+                config.labelChildSamplesMax,
+              )) {
                 const normalized = normalizeLabelSampleText(
                   event.title,
                   config.labelSampleMaxChars,
@@ -2273,6 +2310,11 @@ function buildConfig(args: string[], policy: MarketMapPolicy): BuildConfig {
 
   return {
     enabled: enabledOverride ?? (forceEnabled ? true : policy.enabled),
+    semanticReviewEnabled:
+      !hasFlag(args, "--without-semantic-review") &&
+      (policy.semanticReviewEnabled ?? true),
+    semanticReviewMaxPairs: policy.semanticReviewMaxPairs ?? 200,
+    semanticReviewBudgetUsd: policy.semanticReviewBudgetUsd ?? 0.1,
     venues: venues.length > 0 ? venues : [...MARKET_MAP_DEFAULT_VENUES],
     depth: clamp(
       Math.trunc(parseNumber(parseFlag(args, "--depth")) ?? policy.depth),
@@ -2393,6 +2435,7 @@ Options:
   --max-ai-labels <n>            Max AI label calls per run (default 400)
   --with-ai-labels               Enable AI label rewrite for this run
   --without-ai-labels            Disable AI labels for this run
+  --without-semantic-review      Disable semantic relocations for this run
   --enabled=<bool>               Override policy enabled (true/false)
   --force                        Run even if policy enabled=false
   --dry-run                      Build only, do not write Redis
@@ -2713,6 +2756,8 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
     allPoints[i].x = formatCoord(normalizedProjected[i]?.[0] ?? 0);
     allPoints[i].y = formatCoord(normalizedProjected[i]?.[1] ?? 0);
   }
+  // Stop the projection clock before clustering, semantic review and labels.
+  const projectionDurationMs = Date.now() - projectionStarted;
 
   console.log("[market-map] clustering start", {
     depth: config.depth,
@@ -2723,7 +2768,22 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
       config.venues.map((venue) => [venue, byVenuePoints[venue]?.length ?? 0]),
     ),
   });
+  const clusteringStarted = Date.now();
+  const groups = buildSemanticGroups(
+    allPoints,
+    config.depth,
+    [config.k1, config.k2, config.k3],
+    partitionCluster,
+  );
+  const clusteringDurationMs = Date.now() - clusteringStarted;
+  const semanticReviewSummary = await reviewSemanticGroups(groups, {
+    apiKey: config.semanticReviewEnabled ? (env.openRouterKey ?? "") : "",
+    maxPairs: config.semanticReviewMaxPairs,
+    budgetUsd: config.semanticReviewBudgetUsd,
+  });
+  console.log("[market-map] semantic review done", semanticReviewSummary);
   const nodes = buildTreeGlobal({
+    groups,
     points: allPoints,
     depth: config.depth,
     k1: config.k1,
@@ -2740,6 +2800,7 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
     {} as Record<number, number>,
   );
   console.log("[market-map] clustering done", {
+    clusteringDurationMs,
     totalNodes: nodes.length,
     levelNodeCounts,
     dominantVenueNodeCounts: Object.fromEntries(
@@ -2750,16 +2811,26 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
     ),
   });
 
-  const labelCostSummary = await applyAiLabels({ nodes, byNodeEvents, config });
+  const labelsStarted = Date.now();
+  const labelCostSummary = await applyAiLabels({
+    nodes,
+    byNodeEvents,
+    config,
+    points: allPoints,
+  });
+  const labelDurationMs = Date.now() - labelsStarted;
 
-  const projectionDurationMs = Date.now() - projectionStarted;
   const buildDurationMs = Date.now() - startedAt;
 
   return {
     nodes,
     byNodeEvents,
     labelCostSummary,
+    semanticReviewSummary,
     meta: {
+      semanticReviewSummary,
+      clusteringDurationMs,
+      labelDurationMs,
       embeddingGeneration: generation,
       generatedAt: nowIso,
       version: MARKET_MAP_VERSION,
@@ -2981,6 +3052,7 @@ export async function runMarketMapBuild(
     projectionDurationMs: result.meta.projectionDurationMs,
     buildDurationMs: result.meta.buildDurationMs,
     labelCostSummary: result.labelCostSummary,
+    semanticReviewSummary: result.semanticReviewSummary,
   });
 
   if (config.dryRun) {
@@ -2997,6 +3069,7 @@ export async function runMarketMapBuild(
       projectionDurationMs: result.meta.projectionDurationMs,
       buildDurationMs: result.meta.buildDurationMs,
       labelCostSummary: result.labelCostSummary,
+      semanticReviewSummary: result.semanticReviewSummary,
     };
   }
   const redisRunId = await storeSnapshot(env.redisUrl, config, result);
@@ -3013,10 +3086,13 @@ export async function runMarketMapBuild(
     projectionDurationMs: result.meta.projectionDurationMs,
     buildDurationMs: result.meta.buildDurationMs,
     labelCostSummary: result.labelCostSummary,
+    semanticReviewSummary: result.semanticReviewSummary,
   };
 }
 
 export const marketMapModelTestHooks = {
+  buildTreeGlobal,
+  partitionCluster,
   fetchVenueCandidates,
   buildConfig,
   callOpenRouterLabel,
