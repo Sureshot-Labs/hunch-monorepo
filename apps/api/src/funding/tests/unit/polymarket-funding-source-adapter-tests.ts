@@ -115,6 +115,7 @@ function account(
       wallets: [
         {
           walletId: "wallet_pm_signer_12345678",
+          controllerWalletRef: "pm_signer_ref",
           networkId: "evm:137",
           address: SIGNER,
           source: executionMode === "automatic" ? "embedded" : "external",
@@ -405,6 +406,82 @@ const crossAdapter = (value: AccountValueReadModel) =>
 const [crossFunding] =
   await crossAdapter(crossOwnerAccount).list(clientHandoffInput);
 assert.ok(crossFunding);
+// MAR46: MetaMask has zero POL; its Safe holds USDC.e, while the selected
+// internal controller has only 0.125 USDC.e. A $1 Buy needs 1.049962 pUSD.
+const mar46Components = crossOwnerAccount.projection.components.map(
+  (entry) => ({
+    ...entry,
+    amount: {
+      ...entry.amount,
+      raw:
+        entry.componentId === "deposit_usdce_12345678"
+          ? "1534146"
+          : entry.componentId === "signer_usdce_12345678"
+            ? "125000"
+            : "0",
+    },
+  }),
+);
+const mar46Account = {
+  ...crossOwnerAccount,
+  nativeGasBalances: [{ networkId: "evm:137", address: otherOwner, raw: "0" }],
+  projection: { ...crossOwnerAccount.projection, components: mar46Components },
+  cashAvailability: {
+    ...crossOwnerAccount.cashAvailability,
+    components: crossOwnerAccount.cashAvailability.components.map((entry) => {
+      const source = mar46Components.find(
+        (component) => component.componentId === entry.componentId,
+      );
+      assert.ok(source);
+      return { ...entry, availableRaw: source.amount.raw };
+    }),
+  },
+};
+const mar46Input = planningInput(
+  "125000",
+  "1049962",
+  "125000",
+  "trade_shortfall",
+  "0",
+  "0",
+  "125000",
+);
+const [mar46] = await crossAdapter(mar46Account).list(mar46Input);
+assert.ok(mar46?.option.selectable);
+assert.equal(isValidFundingCommitPlanBoundary(mar46.commitPlan), true);
+assert.equal(
+  mar46.commitPlan.steps[0]?.actionValidationResult.amountRaw,
+  "924962",
+);
+assert.equal(
+  mar46.commitPlan.segments.length,
+  0,
+  "same-chain USDC.e uses Router, not Relay",
+);
+assert.equal(
+  fundingEconomicSourceReservations(mar46.commitPlan.reservations).reduce(
+    (sum, entry) => sum + BigInt(entry.rawAmount),
+    0n,
+  ),
+  1049962n,
+);
+const [mar46TooLarge] = await crossAdapter(mar46Account).list({
+  ...mar46Input,
+  requiredAmount: { asset: PUSD, raw: "1659147" },
+});
+assert.equal(mar46TooLarge?.option.selectable, false);
+assert.equal(mar46TooLarge?.option.minimumDestination?.raw, "1659146");
+const [unsponsored] = await crossAdapter({
+  ...mar46Account,
+  ownership: {
+    ...sourceOwnership,
+    wallets: [{ ...selectedProfile, sponsorshipPolicyIds: [] }, ownerProfile],
+  },
+}).list(mar46Input);
+assert.ok(
+  !unsponsored?.option.selectable,
+  "ordinary wallet gas protections remain in force",
+);
 // The selected controller is empty. Another owned controller holds USDC.e;
 // changing the trading wallet or involving Relay is unnecessary.
 const ownedUsdce = component(
@@ -752,9 +829,53 @@ assert.equal(
   ownerProfile.walletId,
 );
 assert.equal(
-  crossFunding.commitPlan.steps[1]?.normalizedAction.senderWalletId,
-  ownerProfile.walletId,
+  crossFunding.commitPlan.steps[0]?.normalizedAction.payload &&
+    (
+      crossFunding.commitPlan.steps[0].normalizedAction.payload as {
+        recipient: string;
+      }
+    ).recipient,
+  selectedProfile.address,
 );
+assert.equal(
+  crossFunding.commitPlan.steps.some(
+    (step) => step.normalizedAction.senderWalletId === ownerProfile.walletId,
+  ),
+  false,
+  "the external owner signs the Safe transfer but sends no gas-funded transaction",
+);
+for (const nativeGasBalances of [
+  [],
+  [{ networkId: "evm:137", address: otherOwner, raw: "0" }],
+]) {
+  const [noGasFunding] = await crossAdapter({
+    ...crossOwnerAccount,
+    nativeGasBalances,
+  }).list(clientHandoffInput);
+  assert.ok(noGasFunding?.option.selectable);
+  assert.equal(isValidFundingCommitPlanBoundary(noGasFunding.commitPlan), true);
+  assert.equal(noGasFunding.commitPlan.steps[0]?.payerRequirement, "provider");
+  assert.equal(
+    fundingEconomicSourceReservations(
+      noGasFunding.commitPlan.reservations,
+    ).reduce((sum, entry) => sum + BigInt(entry.rawAmount), 0n),
+    3000000n,
+  );
+  assert.equal(
+    noGasFunding.commitPlan.reservations.some(
+      (entry) =>
+        entry.economicRole === "future_credit_fence" &&
+        entry.componentId ===
+          stableWalletAssetLocationIdentity({
+            accountId: ACCOUNT_ID,
+            address: otherOwner,
+            asset: USDCE,
+            balanceClass: "polymarket",
+          }).componentId,
+    ),
+    false,
+  );
+}
 assert.equal(
   crossFunding.commitPlan.steps.at(-1)?.normalizedAction.senderWalletId,
   "wallet_pm_signer_12345678",
@@ -782,12 +903,12 @@ assert.equal(
   isValidFundingCommitPlanBoundary({
     ...crossFunding.commitPlan,
     steps: crossFunding.commitPlan.steps.map((step) =>
-      step.actionValidationResult.kind === "owned_safe_controller_transfer"
+      step.normalizedAction.actorWalletId === ownerProfile.walletId
         ? {
             ...step,
             normalizedAction: {
               ...step.normalizedAction,
-              senderWalletId: selectedProfile.walletId,
+              actorWalletId: selectedProfile.walletId,
             },
           }
         : step,
@@ -798,7 +919,6 @@ assert.equal(
 );
 for (const unavailable of [
   { ...crossOwnerAccount, connectedExternalWalletRefs: [] },
-  { ...crossOwnerAccount, nativeGasBalances: [] },
   { ...crossOwnerAccount, ownership: safeSourceAccount.ownership },
 ]) {
   const [candidate] = await crossAdapter(unavailable).list(clientHandoffInput);
@@ -806,24 +926,24 @@ for (const unavailable of [
     !candidate?.commitPlan.steps.some(
       (step) => step.normalizedAction.actorWalletId === ownerProfile.walletId,
     ),
-    "an unconnected/unowned/unfunded signer cannot contribute Safe cash",
+    "an unconnected/unowned signer cannot contribute Safe cash",
   );
 }
 for (const field of [
-  "expectedDestinationAddress",
-  "expectedDestinationRaw",
+  "recipientAddress",
+  "amountRaw",
   "signerAddress",
 ] as const) {
   assert.equal(
     isValidFundingCommitPlanBoundary({
       ...crossFunding.commitPlan,
       steps: crossFunding.commitPlan.steps.map((step) =>
-        step.actionValidationResult.kind === "owned_safe_controller_transfer"
+        step.normalizedAction.actorWalletId === ownerProfile.walletId
           ? {
               ...step,
               actionValidationResult: {
                 ...step.actionValidationResult,
-                [field]: field === "expectedDestinationRaw" ? "1" : DEPOSIT,
+                [field]: field === "amountRaw" ? "1" : DEPOSIT,
               },
             }
           : step,

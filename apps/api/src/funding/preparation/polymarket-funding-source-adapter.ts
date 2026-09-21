@@ -403,9 +403,13 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
     let safeUsdceInput = availableSafeInput(usdceAsset);
     let safeUsdceProfile = profile;
     let safeUsdceAddress = safeAddress;
+    const canReceiveSafeDirectly =
+      profile.source === "embedded" &&
+      Boolean(profile.controllerWalletRef) &&
+      deriveExecutionGas(this.account, profile).sponsored;
     // A linked Safe may have a different controller from the destination.
-    // Its owner still signs extraction; an exact owner -> destination
-    // controller transfer then feeds the unchanged Router contract.
+    // Prefer direct relayed receipt for an external owner; other controllers
+    // retain the existing exact transfer into the unchanged Router contract.
     if (!safeUsdceInput && input.request.serverExecutionProfileId == null) {
       for (const candidate of this.account.ownership?.wallets ?? []) {
         if (
@@ -418,7 +422,8 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
             !this.account.connectedExternalWalletRefs?.includes(
               candidate.controllerWalletRef,
             )) ||
-          deriveExecutionGas(this.account, candidate).status !== "ready"
+          (!(candidate.source === "external" && canReceiveSafeDirectly) &&
+            deriveExecutionGas(this.account, candidate).status !== "ready")
         )
           continue;
         const candidateSafe = deriveSafeProxyAddress(candidate.address);
@@ -442,6 +447,14 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         break;
       }
     }
+    // The connected Safe owner signs an exact relayed transfer straight to
+    // our sponsored controller; no gas-funded MetaMask transaction is needed.
+    const directSafeUsdce =
+      safeUsdceProfile !== profile &&
+      safeUsdceProfile.source === "external" &&
+      canReceiveSafeDirectly;
+    const requiresSafeControllerTransfer =
+      safeUsdceProfile !== profile && !directSafeUsdce;
     const safePusdInput = availableSafeInput(facts.option.requiredAsset);
     // Other internal Deposit Wallets are local cash, not same-chain Relay
     // routes. Their own controller signs extraction; never impersonate it
@@ -730,7 +743,7 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
     // One reservation must fence both, but count only the existing wallet
     // portion as source economics (the Safe has its own source reservation).
     const safeOwnerUsdceContribution =
-      safeUsdceContributionRaw > 0n && safeUsdceProfile !== profile
+      safeUsdceContributionRaw > 0n && requiresSafeControllerTransfer
         ? walletUsdceContributions.find(
             (entry) => entry.profile.walletId === safeUsdceProfile.walletId,
           )
@@ -842,8 +855,11 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         raw: safeUsdceContributionRaw,
         asset: usdceAsset,
         funderAddress: safeUsdceAddress,
-        profile: safeUsdceProfile,
-        kind: "polymarket_safe_to_controller_v1" as const,
+        profile: directSafeUsdce ? profile : safeUsdceProfile,
+        ownerProfile: directSafeUsdce ? safeUsdceProfile : undefined,
+        kind: directSafeUsdce
+          ? ("polymarket_safe_to_owned_wallet_v1" as const)
+          : ("polymarket_safe_to_controller_v1" as const),
       },
       {
         resolved: safePusdInput,
@@ -863,6 +879,9 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
                 funderAddress: entry.funderAddress,
                 controllerAddress: (entry.profile ?? profile).address,
                 tokenAddress: entry.asset.assetId,
+                ...("ownerProfile" in entry && entry.ownerProfile
+                  ? { ownerProfile: entry.ownerProfile }
+                  : {}),
               },
               profile: entry.profile ?? profile,
             },
@@ -1026,7 +1045,7 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
           valueMoving: true,
           sponsorship: "none" as const,
         })),
-        ...(safeUsdceContributionRaw > 0n && safeUsdceProfile !== profile
+        ...(safeUsdceContributionRaw > 0n && requiresSafeControllerTransfer
           ? [
               {
                 kind: "evm_transaction" as const,
@@ -1085,12 +1104,14 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
         venueBindingSnapshot: jsonRecord(facts.venueBinding),
         walletExecutionSnapshot: jsonRecord(
           walletUsdceContributions.length > 0 ||
+            directSafeUsdce ||
             preRouteHandoffs.some((entry) => entry.profile !== profile)
             ? {
                 profiles: [
                   ...new Map(
                     [
                       profile,
+                      ...(directSafeUsdce ? [safeUsdceProfile] : []),
                       ...walletUsdceContributions.map((entry) => entry.profile),
                       ...preRouteHandoffs.map((entry) => entry.profile),
                     ].map((entry) => [entry.walletId, entry]),
@@ -1118,11 +1139,14 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
                 : depositPusdContributions.length > 0
                   ? 5
                   : safeUsdceContributionRaw > 0n &&
-                      safeUsdceProfile !== profile
+                      requiresSafeControllerTransfer
                     ? 4
                     : preRouteHandoffs.some(
                           ({ handoff }) =>
-                            handoff.kind === "polymarket_safe_to_controller_v1",
+                            handoff.kind ===
+                              "polymarket_safe_to_controller_v1" ||
+                            handoff.kind ===
+                              "polymarket_safe_to_owned_wallet_v1",
                         )
                       ? 3
                       : 1,
@@ -1235,7 +1259,7 @@ export class PolymarketFundingSourceAdapter implements FundingSourceAdapter {
           economicRole: "future_credit_fence" as const,
           expiresAt: reservationExpiresAt,
         })),
-        ...(safeUsdceContributionRaw > 0n && safeUsdceProfile !== profile
+        ...(safeUsdceContributionRaw > 0n && requiresSafeControllerTransfer
           ? [
               {
                 segmentOrdinal: null,

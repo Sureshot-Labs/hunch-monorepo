@@ -8,6 +8,7 @@ import { POLYMARKET_FUNDING_SOURCE_ADAPTER_ID } from "../preparation/polymarket-
 import { RELAY_PINNED_ASSETS } from "../../funding-providers/relay/mappings.js";
 import { Interface } from "ethers";
 import { z } from "zod";
+import { deriveSafeProxyAddress } from "../../services/polymarket-funder.js";
 
 const CONTROLLER_ROUTER_APPROVAL_KINDS = new Set([
   "controller_pusd_router_approval",
@@ -236,6 +237,67 @@ export function isPolymarketRouterV3CommitPlan(
     plan,
     (step) => {
       const parsed = normalizedActionSchema.safeParse(step.normalizedAction);
+      if (
+        parsed.success &&
+        parsed.data.kind === "external_handoff" &&
+        parsed.data.payload.executionEnvelope ===
+          "polymarket_safe_to_owned_wallet_v1"
+      ) {
+        const action = parsed.data;
+        const profiles = z
+          .array(
+            z.object({
+              walletId: z.string(),
+              address: z.string(),
+              networkId: z.string(),
+              source: z.string(),
+              signingModes: z.array(z.string()),
+              controllerWalletRef: z.string().nullish(),
+              serverWalletRef: z.string().nullish(),
+            }),
+          )
+          .safeParse(
+            flattenWalletProfiles(plan.operation.walletExecutionSnapshot),
+          );
+        if (!profiles.success) return false;
+        const owner = profiles.data.find(
+          (entry) => entry.walletId === action.actorWalletId,
+        );
+        const recipient = profiles.data.find(
+          (entry) => entry.walletId === action.payload.recipientWalletId,
+        );
+        if (
+          !owner ||
+          !recipient ||
+          owner.source !== "external" ||
+          owner.networkId !== "evm:137" ||
+          !owner.controllerWalletRef ||
+          !owner.signingModes.includes("web_client") ||
+          recipient.source !== "embedded" ||
+          recipient.networkId !== "evm:137" ||
+          !recipient.controllerWalletRef ||
+          !recipient.serverWalletRef ||
+          !recipient.signingModes.includes("privy_authorization") ||
+          !sameAccountAddress(
+            "evm:137",
+            owner.address,
+            String(action.payload.owner),
+          ) ||
+          !sameAccountAddress(
+            "evm:137",
+            recipient.address,
+            String(action.payload.recipient),
+          ) ||
+          !sameAccountAddress(
+            "evm:137",
+            deriveSafeProxyAddress(owner.address) ?? "",
+            String(action.payload.funder),
+          ) ||
+          plan.steps.at(-1)?.normalizedAction.senderWalletId !==
+            recipient.walletId
+        )
+          return false;
+      }
       return (
         [
           "polymarket_safe_relayer_v1",
