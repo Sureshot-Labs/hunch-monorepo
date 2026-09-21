@@ -46,8 +46,12 @@ substitute a new-model vector into an old snapshot. No map rebuild is forced.
 - A full serving reconciliation runs at most once per six hours unless explicitly
   requested or invalidated. Checkpoints and conservative monetary reservations
   survive restarts. Live messages take priority over bounded DB pages.
-- Source scans limit **raw rows before eligibility**, at most 500 per SQL query.
-  Empty eligible pages advance the raw-ID cursor, not the end-of-scan marker.
+- Source scans page **only ACTIVE rows in allowed venues**, using the existing
+  `(venue, end_date)` and `(venue, expiration_time, close_time)` partial indexes.
+  ID only breaks ties within a date group. Seek branches handle NULL dates
+  explicitly, without OFFSET or an OR-filtered walk over the previous pages.
+  Up to 500 candidates are returned per page; same-date ties may read more rows
+  inside that ACTIVE group. Empty orphan-event pages still advance the cursor.
   The worker uses a shared resumable source census (cached for six hours), not
   full-table startup COUNT queries. Background building waits for complete census
   totals before applying the pilot's projected-memory admission.
@@ -55,8 +59,9 @@ substitute a new-model vector into an old snapshot. No map rebuild is forced.
   timeout/lock/connection failures retry after 60 seconds without blocking live
   queue ACKs; the status reason identifies the deferred stage and SQLSTATE.
   Provider, budget, memory, lease and verification failures remain fail-closed.
-  On the first upgrade to bounded scans, old pass checkpoints are rechecked;
-  existing vectors and monetary reservations are retained, not reset/rebilled.
+  On upgrade to time cursors, old scan/census/maintenance checkpoints restart
+  against the ACTIVE set. Existing vectors and monetary reservations are retained,
+  not reset/rebilled. No migration or new index is needed.
 - A provider request makes at most four attempts, reserving before each attempt.
   Exhausted failures are deduplicated per content hash and cooled down for six
   hours before reconciliation retries. Auth/credit errors open a five-minute

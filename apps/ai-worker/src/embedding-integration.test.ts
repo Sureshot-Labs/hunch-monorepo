@@ -92,9 +92,15 @@ type Checkpoint = {
   verifiedAt: string | null;
   [key: string]: unknown;
 };
+const sourceCursor = (kind: "event" | "market", id: string) =>
+  JSON.stringify({
+    version: 3,
+    venue: "polymarket",
+    keys: kind === "event" ? [null, id] : [null, null, id],
+  });
 function checkpoint(phase = "active", overrides: Record<string, unknown> = {}) {
   return {
-    scanVersion: 2,
+    scanVersion: 3,
     countsReady: true,
     probes: { event: "event:a", market: "market:a" },
     phase,
@@ -177,6 +183,12 @@ before(async () => {
   await db.query(`create table if not exists unified_events(id text primary key,venue text,status text,title text,description text,category text);
     create table if not exists unified_markets(id text primary key,event_id text,venue text,status text,title text,description text,category text,outcomes jsonb,market_type text);
     alter table unified_markets add column if not exists market_type text;
+    alter table unified_events add column if not exists end_date timestamptz;
+    alter table unified_markets add column if not exists expiration_time timestamptz;
+    alter table unified_markets add column if not exists close_time timestamptz;
+    create index if not exists idx_unified_events_active_venue_end_date on unified_events(venue,end_date) where status='ACTIVE';
+    create index if not exists idx_unified_markets_active_venue_exp_close on unified_markets(venue,expiration_time,close_time) where status='ACTIVE';
+    create index if not exists idx_unified_markets_active_event_id on unified_markets(event_id) where status='ACTIVE';
     create table if not exists runtime_policies(id text default 'test',policy_key text,effective_at timestamptz default now(),payload jsonb,created_by text,created_by_admin_id text,created_at timestamptz default now());`);
   await redis.connect();
 });
@@ -211,11 +223,20 @@ test("canonical SQL eligibility, stable pages and terminal rows", async () => {
   });
   assert.deepEqual(
     await readEmbeddingSourcePage(db, "event", null, ["polymarket"]),
-    { ids: ["event:a"], after: "event:orphan", done: true },
+    {
+      ids: ["event:a"],
+      after: sourceCursor("event", "event:orphan"),
+      done: true,
+    },
   );
   assert.deepEqual(
-    await readEmbeddingSourcePage(db, "market", "market:a", ["polymarket"]),
-    { ids: [], after: "market:closed", done: true },
+    await readEmbeddingSourcePage(
+      db,
+      "market",
+      sourceCursor("market", "market:a"),
+      ["polymarket"],
+    ),
+    { ids: [], after: sourceCursor("market", "market:a"), done: true },
   );
   const sources = await loadEmbeddingSources(
     db,
@@ -232,7 +253,7 @@ test("canonical SQL eligibility, stable pages and terminal rows", async () => {
 });
 test("stream IDs compare numerically", () =>
   assert.equal(compareStreamId("10-0", "9-100"), 1));
-test("raw pages bound ineligible prefixes, preserve exact boundaries and scan each ID once", async () => {
+test("ACTIVE pages skip terminal history and disabled venues entirely", async () => {
   await db.query(`insert into unified_markets(id,venue,status,title)
     select 'a:' || lpad(fixture_no::text,6,'0'),
       case when fixture_no % 2 = 0 then 'kalshi' else 'polymarket' end,
@@ -241,17 +262,9 @@ test("raw pages bound ineligible prefixes, preserve exact boundaries and scan ea
   const first = await readEmbeddingSourcePage(db, "market", null, [
     "polymarket",
   ]);
-  assert.deepEqual(first, { ids: [], after: "a:000500", done: false });
-  const second = await readEmbeddingSourcePage(db, "market", first.after, [
-    "polymarket",
-  ]);
-  assert.deepEqual(second, { ids: [], after: "a:001000", done: false });
-  const third = await readEmbeddingSourcePage(db, "market", second.after, [
-    "polymarket",
-  ]);
-  assert.deepEqual(third, {
+  assert.deepEqual(first, {
     ids: ["market:a"],
-    after: "market:closed",
+    after: sourceCursor("market", "market:a"),
     done: true,
   });
   assert.deepEqual(await countEmbeddingSources(db, ["polymarket"]), {
@@ -259,8 +272,8 @@ test("raw pages bound ineligible prefixes, preserve exact boundaries and scan ea
     market: 1,
   });
   assert.deepEqual(
-    await readEmbeddingSourcePage(db, "market", third.after, ["polymarket"]),
-    { ids: [], after: "market:closed", done: true },
+    await readEmbeddingSourcePage(db, "market", first.after, ["polymarket"]),
+    { ids: [], after: sourceCursor("market", "market:a"), done: true },
   );
   assert.deepEqual(await readEmbeddingSourcePage(db, "market", null, []), {
     ids: [],
@@ -268,10 +281,75 @@ test("raw pages bound ineligible prefixes, preserve exact boundaries and scan ea
     done: true,
   });
 });
+test("venue branches merge stable exact pages without duplicate IDs or skipped tails", async () => {
+  await db.query(`insert into unified_markets(id,venue,status,title)
+    select 'b:' || lpad(fixture_no::text,6,'0'),
+      case when fixture_no % 2 = 0 then 'limitless' else 'polymarket' end,
+      'ACTIVE','Included' from generate_series(1,1000) as fixture_rows(fixture_no)`);
+  const ids: string[] = [];
+  let after: string | null = null;
+  let pages = 0;
+  for (;;) {
+    const page = await readEmbeddingSourcePage(db, "market", after, [
+      "polymarket",
+      "limitless",
+      "polymarket",
+    ]);
+    pages++;
+    ids.push(...page.ids);
+    after = page.after;
+    if (page.done) break;
+    assert.ok(pages < 5);
+  }
+  assert.equal(pages, 4);
+  assert.equal(ids.length, 1001);
+  assert.equal(new Set(ids).size, ids.length);
+  assert.equal(ids.at(-1), "market:a");
+});
+test("time cursors preserve NULLs, tied dates and microseconds across small pages", async () => {
+  await db.query(`insert into unified_events(id,venue,status,title,end_date)
+    select 'date:' || fixture_no,
+      case when fixture_no % 2=0 then 'polymarket' else 'limitless' end,
+      'ACTIVE','Fixture',
+      case when fixture_no % 3=0 then null else '2026-01-01'::timestamptz + (fixture_no % 5) * interval '1 microsecond' end
+    from generate_series(1,80) as fixture_rows(fixture_no);
+    insert into unified_markets(id,event_id,venue,status,title,expiration_time,close_time)
+    select id,id,venue,status,title,end_date,
+      case when substring(id from 6)::integer % 4=0 then null else end_date + interval '1 microsecond' end
+    from unified_events where id like 'date:%'`);
+  for (const kind of ["event", "market"] as const) {
+    const expected = await db.query(
+      kind === "market"
+        ? `select id from unified_markets where status='ACTIVE' and venue in ('polymarket','limitless') order by venue,expiration_time nulls last,close_time nulls last,id`
+        : `select entity.id from unified_events entity where status='ACTIVE' and venue in ('polymarket','limitless')
+          and exists(select 1 from unified_markets child where child.event_id=entity.id and child.status='ACTIVE') order by venue,end_date nulls last,id`,
+    );
+    const ids: string[] = [];
+    let after: string | null = null;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const page = await readEmbeddingSourcePage(
+        db,
+        kind,
+        after,
+        ["polymarket", "limitless"],
+        7,
+      );
+      ids.push(...page.ids);
+      after = page.after;
+      if (page.done) break;
+      assert.ok(attempt < 29, "pagination must terminate");
+    }
+    assert.deepEqual(
+      ids,
+      expected.rows.map((row) => row.id),
+    );
+    assert.equal(new Set(ids).size, ids.length);
+  }
+});
 test("source census is bounded, shared, restartable and required before background inference", async () => {
   await serve();
   await db.query(`insert into unified_events(id,venue,status,title)
-    select 'a:' || lpad(fixture_no::text,6,'0'),'kalshi','ACTIVE','Excluded'
+    select 'a:' || lpad(fixture_no::text,6,'0'),'polymarket','ACTIVE','Orphan'
     from generate_series(1,1000) as fixture_rows(fixture_no)`);
   await store.put(
     checkpointKey(generation),
@@ -290,7 +368,10 @@ test("source census is bounded, shared, restartable and required before backgrou
     counts: { event: number };
     completedAt: number | null;
   }>(`${CONTROL}source-census`);
-  assert.equal(first?.after, "a:000500");
+  assert.equal(
+    first?.after,
+    JSON.stringify({ version: 3, venue: "polymarket", keys: null }),
+  );
   assert.equal(first?.counts.event, 0);
   assert.equal(first?.completedAt, null);
   assert.equal(
@@ -306,8 +387,10 @@ test("source census is bounded, shared, restartable and required before backgrou
   await restarted.tick();
   assert.equal(
     (await store.get<{ after: string }>(`${CONTROL}source-census`))?.after,
-    "a:001000",
+    sourceCursor("event", "a:000500"),
   );
+  await restarted.tick();
+  await restarted.tick();
   await restarted.tick();
   await restarted.tick();
   const completed = await store.get<{ counts: unknown; completedAt: number }>(
@@ -367,7 +450,7 @@ test("empty verification pages do not skip later entities or weaken KNN admissio
   await store.put(`${CONTROL}generations`, [legacy, generation]);
   await store.put(checkpointKey(legacy), checkpoint());
   await db.query(`insert into unified_events(id,venue,status,title)
-    select 'a:' || lpad(fixture_no::text,6,'0'),'polymarket','CLOSED','Closed'
+    select 'a:' || lpad(fixture_no::text,6,'0'),'polymarket','ACTIVE','Orphan'
     from generate_series(1,500) as fixture_rows(fixture_no)`);
   await store.put(
     checkpointKey(generation),
@@ -381,10 +464,12 @@ test("empty verification pages do not skip later entities or weaken KNN admissio
   );
   const worker = engine();
   await worker.tick();
+  await worker.tick();
   const first = await store.get<Checkpoint>(checkpointKey(generation));
   assert.equal(first?.kind, "event");
-  assert.equal(first?.after, "a:000500");
+  assert.equal(first?.after, sourceCursor("event", "a:000500"));
   assert.equal(first?.phase, "verifying");
+  await worker.tick();
   await worker.tick();
   await worker.tick();
   const ready = await store.get<Checkpoint>(checkpointKey(generation));
@@ -403,7 +488,7 @@ test("pre-fix ready checkpoints are reverified rather than skipping the new admi
   await store.put(
     checkpointKey(generation),
     checkpoint("ready", {
-      scanVersion: undefined,
+      scanVersion: 2,
       countsReady: undefined,
       probes: undefined,
     }),
@@ -411,7 +496,7 @@ test("pre-fix ready checkpoints are reverified rather than skipping the new admi
   await engine().tick();
   assert.equal((await readActiveGeneration(redis)).id, legacy.id);
   const restarted = await store.get<Checkpoint>(checkpointKey(generation));
-  assert.equal(restarted?.scanVersion, 2);
+  assert.equal(restarted?.scanVersion, 3);
   assert.equal(restarted?.phase, "building");
   assert.equal(providerCalls.length, 0);
 });
@@ -538,7 +623,7 @@ test("reservations and page checkpoint survive worker restart", async () => {
   await store.put(checkpointKey(legacy), checkpoint());
   await store.put(
     checkpointKey(generation),
-    checkpoint("building", { after: "event:a" }),
+    checkpoint("building", { after: sourceCursor("event", "event:a") }),
   );
   await store.reserve(generation, 0.4, 1);
   await store.release();
@@ -727,7 +812,7 @@ test("serving legacy TTLs renew while provider circuit is open", async () => {
   for (const kind of ["event", "market"] as const)
     await redis.expire(embeddingKey(legacy, kind, `${kind}:a`), 10);
   const worker = engine();
-  for (let count = 0; count < 3; count++) await worker.tick();
+  for (let count = 0; count < 4; count++) await worker.tick();
   for (const kind of ["event", "market"] as const)
     assert.ok(
       (await redis.ttl(embeddingKey(legacy, kind, `${kind}:a`))) > 170000,
@@ -748,7 +833,7 @@ test("serving TTLs renew while desired generation budget is exhausted", async ()
   for (const kind of ["event", "market"] as const)
     await redis.expire(embeddingKey(legacy, kind, `${kind}:a`), 10);
   const worker = engine();
-  for (let count = 0; count < 3; count++) await worker.tick();
+  for (let count = 0; count < 4; count++) await worker.tick();
   for (const kind of ["event", "market"] as const)
     assert.ok(
       (await redis.ttl(embeddingKey(legacy, kind, `${kind}:a`))) > 170000,
@@ -866,13 +951,15 @@ test("retry reservations stop before overspend and persist across a real worker 
     }
     throw new Error("fixture expected budget to veto the third attempt");
   };
-  await engine(retryingProvider).tick();
+  const worker = engine(retryingProvider);
+  await worker.tick();
+  await worker.tick();
   assert.equal(attempted, 3);
   assert.equal(admitted, 2);
   assert.equal(await store.spent(generation), 0.4);
   assert.equal(
     (await store.get<Checkpoint>(checkpointKey(generation)))?.after,
-    null,
+    JSON.stringify({ version: 3, venue: "polymarket", keys: null }),
   );
   await store.release();
   store = new EmbeddingStore(redis);
@@ -904,7 +991,9 @@ test("Qwen actual cost above its reservation persists a fail-stop before vector 
       attempts: 1,
     };
   };
-  await engine(overchargingProvider).tick();
+  const worker = engine(overchargingProvider);
+  await worker.tick();
+  await worker.tick();
   assert.equal(calls, 1);
   assert.ok(estimated > 0);
   const drift = await store.get<{ charged: number; reserved: number }>(
@@ -918,7 +1007,10 @@ test("Qwen actual cost above its reservation persists a fail-stop before vector 
     null,
   );
   assert.equal((await readActiveGeneration(redis)).id, legacy.id);
-  assert.equal((await store.get<Checkpoint>(checkpointKey(qwen)))?.after, null);
+  assert.equal(
+    (await store.get<Checkpoint>(checkpointKey(qwen)))?.after,
+    JSON.stringify({ version: 3, venue: "polymarket", keys: null }),
+  );
   // A replacement process must also observe the durable breaker before inference.
   await engine(overchargingProvider).tick();
   assert.equal(calls, 1);
@@ -1310,6 +1402,7 @@ test("invalid canonical title is quarantined without starving healthy work or pa
   });
   await enqueueMarket();
   const worker = engine();
+  await worker.tick();
   await worker.tick();
   assert.deepEqual(providerCalls.sort(), [legacy.id, generation.id].sort());
   assert.equal(await pendingCount(), 0);

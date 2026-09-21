@@ -72,7 +72,14 @@ function fixture(policyPayload: unknown = {}) {
       }
       return {
         rows: Array.from(
-          { length: sql.includes("from unified_events") ? 200 : 300 },
+          {
+            length:
+              params?.[2] === "limitless"
+                ? 0
+                : sql.includes("from unified_events")
+                  ? 200
+                  : 300,
+          },
           (_, index) => ({ id: `fixture:${index}`, eligible: true }),
         ),
       };

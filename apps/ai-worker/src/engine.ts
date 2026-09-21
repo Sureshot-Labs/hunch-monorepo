@@ -38,7 +38,7 @@ import {
 
 type Coverage = { eligible: number; verified: number; missing: number };
 type Pass = {
-  scanVersion: 2;
+  scanVersion: 3;
   countsReady: boolean;
   probes: Partial<Record<EmbeddingKind, string>>;
   phase: "building" | "verifying" | "ready" | "active";
@@ -202,7 +202,7 @@ export class EmbeddingEngine {
     ]);
   }
   private async advanceCensus(): Promise<SourceCensus> {
-    const revision = [...this.venues].sort().join(",");
+    const revision = `time-v3:${[...this.venues].sort().join(",")}`;
     let census = await this.store.get<SourceCensus>(CENSUS_KEY);
     if (
       !census ||
@@ -247,7 +247,7 @@ export class EmbeddingEngine {
       "1",
     ])) as unknown[][];
     return {
-      scanVersion: 2,
+      scanVersion: 3,
       countsReady: false,
       probes: {},
       phase,
@@ -725,9 +725,9 @@ redis.call('SET',KEYS[3],'1'); return 1`,
   ) {
     let pass = await this.store.get<Pass>(stateKey(desired));
     const now = Date.now();
-    // Old ready checkpoints have no verified probe IDs. Recheck coverage, never
-    // admit them using an empty first raw page. Cached vectors/costs remain intact.
-    if (pass?.scanVersion !== 2) pass = null;
+    // ID cursors cannot resume a venue/time ordered scan. Recheck coverage
+    // from its start, keeping cached vectors and monetary reservations intact.
+    if (pass?.scanVersion !== 3) pass = null;
     if (pass && pass.eligibilityRevision !== [...this.venues].sort().join(","))
       pass = null;
     if (
@@ -877,7 +877,7 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
       500,
     );
     if (page.ids.length) {
-      // Empty/raw pages and terminal-vector GC can also take time after census.
+      // Orphan event pages and terminal-vector GC can take time after census.
       // Start the pilot measurement immediately before its first actual page.
       if (pass.phase === "building" && pass.pilotItems === 0)
         pass.pilotStartBytes = await this.usedMemory();
@@ -912,7 +912,7 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
     }
     pass.after = page.after;
     if (!page.done) {
-      // Empty eligible pages still advance; they must not finish verification.
+      // Empty venue/orphan pages still advance, without finishing verification.
     } else if (pass.kind === "event") {
       pass.kind = "market";
       pass.after = null;
@@ -1131,7 +1131,7 @@ return 0`,
     // budget or provider outage must not expire unchanged serving vectors.
     if (!this.policy) return;
     const key = `${CONTROL}maintenance:${active.id}`;
-    const revision = [...this.venues].sort().join(",");
+    const revision = `time-v3:${[...this.venues].sort().join(",")}`;
     let pass = await this.store.get<{
       kind: EmbeddingKind;
       after: string | null;
@@ -1152,7 +1152,7 @@ return 0`,
       await this.process(active, pass.kind, page.ids, false, true);
     pass.after = page.after;
     if (!page.done) {
-      // Keep traversing even when this raw page contains no eligible entities.
+      // Keep traversing empty venues and orphan-event pages.
     } else if (pass.kind === "event") {
       pass.kind = "market";
       pass.after = null;
