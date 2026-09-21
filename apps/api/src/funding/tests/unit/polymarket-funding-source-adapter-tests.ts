@@ -9,6 +9,7 @@ import { deriveSafeProxyAddress } from "../../../services/polymarket-funder.js";
 import { stableWalletAssetLocationIdentity } from "../../../account-value/canonical.js";
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
+import { buildPolymarketPreRouteHandoffSteps } from "../../../funding-providers/relay/operation-plan.js";
 import type { FundingPurpose } from "../../domain/types.js";
 import {
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
@@ -1790,12 +1791,13 @@ function mar33RelayLeg(
   sourceRaw: string,
   expectedRaw: string,
   minimumRaw: string,
+  template = mar33Funding,
+  assetId = `${id}_usdc`,
 ): PlannedSourceOption {
-  const template = mar33Funding;
   assert.ok(template);
   const templateStep = template.commitPlan.steps.at(-1);
   assert.ok(templateStep);
-  const asset = { networkId, assetId: `${id}_usdc`, decimals: 6 };
+  const asset = { networkId, assetId, decimals: 6 };
   const location = {
     kind: "wallet" as const,
     locationId: `location_${id}_mar33`,
@@ -1915,6 +1917,172 @@ assert.ok(
 );
 assert.equal(mar33Composite.option.minimumDestination?.raw, "7121797");
 assert.equal(isValidFundingCommitPlanBoundary(mar33Composite.commitPlan), true);
+
+// Production MAR46 retry: Safe USDC.e -> Router plus a separate Safe USDC
+// handoff -> Relay. Both handoffs have null segmentOrdinal by design.
+const [retryPreparation] = await crossAdapter(mar46Account).list({
+  ...mar46Input,
+  requiredAmount: { asset: PUSD, raw: "1261927" },
+});
+assert.ok(retryPreparation);
+const retryRelay = mar33RelayLeg(
+  "safe_usdc",
+  "evm:137",
+  "913911",
+  "850000",
+  "837995",
+  retryPreparation,
+  RELAY_PINNED_ASSETS.polygonUsdc,
+);
+assert.equal(retryRelay.option.source.kind, "owned_location");
+if (retryRelay.option.source.kind !== "owned_location")
+  throw new Error("fixture source");
+const retryRelaySteps = buildPolymarketPreRouteHandoffSteps({
+  source: {
+    preRouteHandoff: {
+      kind: "polymarket_safe_to_owned_wallet_v1",
+      ownerProfile,
+      funderAddress: otherSafe,
+      controllerAddress: selectedProfile.address,
+      tokenAddress: RELAY_PINNED_ASSETS.polygonUsdc,
+      sourceLocation: retryRelay.option.source.location,
+    },
+  },
+  profile: selectedProfile,
+  sourceAmount: {
+    asset: { ...PUSD, assetId: RELAY_PINNED_ASSETS.polygonUsdc },
+    raw: "913911",
+  },
+  steps: retryRelay.commitPlan.steps,
+});
+// The same composition contract applies to owned EOA, Safe, Deposit Wallet,
+// and mixed preparation chains, not just the latest two-step Router fixture.
+for (const preparation of [
+  mar46,
+  ownedUsdceFunding,
+  mar33Funding,
+  safeFunding,
+  mixedFunding,
+]) {
+  assert.ok(preparation);
+  for (const providerFirst of [false, true]) {
+    let ordinalBase = 0;
+    const groups = providerFirst
+      ? [
+          { steps: retryRelaySteps, segment: 0, leg: "provider" },
+          { steps: preparation.commitPlan.steps, segment: null, leg: "router" },
+        ]
+      : [
+          { steps: preparation.commitPlan.steps, segment: null, leg: "router" },
+          { steps: retryRelaySteps, segment: 0, leg: "provider" },
+        ];
+    const steps = groups.flatMap((group) => {
+      const base = ordinalBase;
+      ordinalBase += group.steps.length;
+      return group.steps.map((step) => ({
+        ...step,
+        ordinal: base + step.ordinal,
+        dependsOnOrdinal:
+          step.dependsOnOrdinal == null ? null : base + step.dependsOnOrdinal,
+        actionValidationResult: {
+          ...step.actionValidationResult,
+          compositeSourceLegId: group.leg,
+          compositeSegmentOrdinal: group.segment,
+        },
+      }));
+    });
+    assert.equal(
+      isValidFundingCommitPlanBoundary({
+        operation: {
+          ...preparation.commitPlan.operation,
+          planKind: "composite_route",
+        },
+        steps,
+      }),
+      true,
+      "every supported preparation chain composes with an independent provider handoff",
+    );
+  }
+}
+for (const providerFirst of [false, true]) {
+  const candidate = {
+    ...retryRelay,
+    commitPlan: { ...retryRelay.commitPlan, steps: retryRelaySteps },
+    option: {
+      ...retryRelay.option,
+      expiresAt: providerFirst
+        ? "2026-07-24T12:00:59.000Z"
+        : "2026-07-24T12:01:01.000Z",
+    },
+  };
+  const composed = buildCompositeSourceOption({
+    ...mar33CompositeInput,
+    candidates: [retryPreparation, candidate],
+    requiredDestination: { asset: PUSD, raw: "2099922" },
+  });
+  assert.ok(composed);
+  assert.equal(
+    isValidFundingCommitPlanBoundary(composed.commitPlan),
+    true,
+    `Router and provider handoffs stay separate (provider first: ${providerFirst})`,
+  );
+  const providerStep = composed.commitPlan.steps.find(
+    (step) => step.segmentOrdinal === 0,
+  );
+  const routerStep = composed.commitPlan.steps.find(
+    (step) => step.stepKind === "venue_preparation",
+  );
+  const providerHandoff = composed.commitPlan.steps.find(
+    (step) =>
+      step.segmentOrdinal === null &&
+      step.actionValidationResult.compositeSegmentOrdinal === 0,
+  );
+  assert.ok(providerStep && routerStep && providerHandoff);
+  for (const steps of [
+    composed.commitPlan.steps.filter((step) => step !== providerStep),
+    composed.commitPlan.steps.map((step) =>
+      step === providerStep ? { ...step, dependsOnOrdinal: null } : step,
+    ),
+    composed.commitPlan.steps.map((step) =>
+      step === routerStep
+        ? { ...step, dependsOnOrdinal: providerHandoff.ordinal }
+        : step,
+    ),
+    composed.commitPlan.steps.map((step) =>
+      step === providerHandoff
+        ? {
+            ...step,
+            actionValidationResult: {
+              ...step.actionValidationResult,
+              compositeSegmentOrdinal: 9,
+            },
+          }
+        : step,
+    ),
+    composed.commitPlan.steps.map((step) =>
+      step === routerStep
+        ? {
+            ...step,
+            actionValidationResult: {
+              ...step.actionValidationResult,
+              valid: false,
+            },
+          }
+        : step,
+    ),
+    composed.commitPlan.steps.map((step) =>
+      step === providerHandoff
+        ? { ...step, stepKind: "transaction" as const }
+        : step,
+    ),
+  ]) {
+    assert.equal(
+      isValidFundingCommitPlanBoundary({ ...composed.commitPlan, steps }),
+      false,
+      "orphan, crossed, mislabeled or invalid contributor cannot bypass validation",
+    );
+  }
+}
 assert.equal(
   buildCompositeSourceOption({
     ...mar33CompositeInput,
