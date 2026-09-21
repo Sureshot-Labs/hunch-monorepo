@@ -233,6 +233,7 @@ export type MarketMapEventSummary = MarketMapActivityMetricFields & {
 };
 
 export type MarketMapMeta = {
+  embeddingGeneration?: import("@hunch/embeddings").EmbeddingGeneration;
   runId: string;
   generatedAt: string;
   version: string;

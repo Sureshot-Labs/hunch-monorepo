@@ -1,348 +1,279 @@
+import { pathToFileURL } from "node:url";
+import { fetchActiveRuntimePolicy, type RuntimePolicyQuery } from "@hunch/db";
 import {
-  buildTopMarketsText,
-  createRedisClient,
-  enqueueEmbedItems,
-  ensureRedis,
-} from "@hunch/infra";
-import type { EmbedQueueItem } from "@hunch/infra";
-import { pool } from "./db.js";
-import { env } from "./env.js";
+  countEmbeddingSources,
+  embeddingPolicySchema,
+  generationForPolicy,
+  readActiveGeneration,
+  EMBEDDING_STATUS_KEY,
+} from "@hunch/embeddings";
+import { createPgPool, createRedisClient } from "@hunch/infra";
+import {
+  DEFAULT_VENUE_LIFECYCLE_POLICY,
+  parseVenueLifecyclePolicy,
+  venueHasLifecycleCapability,
+} from "@hunch/shared";
+import { parseAdminEmbeddingStatus } from "./services/admin-embeddings-status.js";
 
-type VenueFilter = string[];
-
-type BackfillOptions = {
-  venues: VenueFilter;
-  batchSize: number;
+export type EmbeddingBackfillOptions = {
+  mode: "preview" | "execute" | "status" | "help";
+  venues: string[];
   limit?: number;
-  dryRun: boolean;
   includeMarkets: boolean;
   includeEvents: boolean;
 };
 
-function parseFlag(args: string[], flag: string): string | undefined {
-  const idx = args.indexOf(flag);
-  if (idx === -1) return undefined;
-  return args[idx + 1];
-}
-
-function hasFlag(args: string[], flag: string): boolean {
-  return args.includes(flag);
-}
-
-function parsePositiveInt(value: string | undefined): number | undefined {
-  if (!value) return undefined;
-  const n = Number(value);
-  if (!Number.isFinite(n)) return undefined;
-  const asInt = Math.trunc(n);
-  return asInt > 0 ? asInt : undefined;
-}
-
-function parseVenues(value: string | undefined): VenueFilter {
-  if (!value) return [];
-  return value
-    .split(",")
-    .map((entry) => entry.trim().toLowerCase())
-    .filter((entry) => entry.length > 0);
-}
-
-function resolveOptions(args: string[]): BackfillOptions {
-  const venues = parseVenues(parseFlag(args, "--venue"));
-  const limit = parsePositiveInt(parseFlag(args, "--limit"));
-  const batchSize = parsePositiveInt(parseFlag(args, "--batch-size")) ?? 1000;
-  const dryRun = hasFlag(args, "--dry-run");
-  const onlyMarkets = hasFlag(args, "--markets");
-  const onlyEvents = hasFlag(args, "--events");
-  const includeMarkets = onlyMarkets || !onlyEvents;
-  const includeEvents = onlyEvents || !onlyMarkets;
-
-  return { venues, batchSize, limit, dryRun, includeMarkets, includeEvents };
-}
-
-function printHelp(): void {
-  console.log(`Usage: pnpm -C hunch-monorepo -F api run ai:embed:backfill -- [options]
-
-Options:
-  --venue <venue[,venue]>  Limit to venues (polymarket,limitless,kalshi,dflow)
-  --limit <n>              Max items per entity type (default: unlimited)
-  --batch-size <n>         Batch size (default: 1000)
-  --markets                Only backfill markets
-  --events                 Only backfill events
-  --dry-run                Print counts without enqueueing
-  --help                   Show this help
-`);
-}
-
-async function backfillMarkets(
-  redis: ReturnType<typeof createRedisClient>,
-  options: BackfillOptions,
-): Promise<number> {
-  let total = 0;
-  let cursorTs: Date | null = null;
-  let cursorId: string | null = null;
-  const sortExpr =
-    "coalesce(m.updated_at, m.created_at, m.updated_at_db, m.created_at_db)";
-
-  while (true) {
-    const remaining =
-      options.limit != null ? Math.max(options.limit - total, 0) : undefined;
-    if (remaining === 0) break;
-    const pageSize =
-      remaining != null
-        ? Math.min(options.batchSize, remaining)
-        : options.batchSize;
-
-    const params: Array<string | Date | string[] | number> = [pageSize];
-    let where = "m.status = 'ACTIVE'";
-    if (options.venues.length) {
-      params.push(options.venues);
-      where += ` and m.venue = any($${params.length})`;
-    }
-    if (cursorTs && cursorId) {
-      const startIndex = params.length + 1;
-      params.push(cursorTs, cursorId);
-      where += ` and (${sortExpr}, m.id) < ($${startIndex}, $${startIndex + 1})`;
-    }
-
-    const sql = `
-      select
-        m.id,
-        m.venue,
-        m.status,
-        m.title as market_title,
-        e.title as event_title,
-        m.description,
-        m.category,
-        m.outcomes,
-        m.market_type,
-        ${sortExpr} as sort_ts
-      from unified_markets m
-      left join unified_events e on e.id = m.event_id
-      where ${where}
-      order by ${sortExpr} desc, m.id desc
-      limit $1;
-    `;
-    const { rows } = await pool.query(sql, params);
-    if (rows.length === 0) break;
-
-    const items: EmbedQueueItem[] = rows.map((row) => ({
-      entity_type: "market",
-      market_id: row.id,
-      venue: row.venue,
-      status: row.status,
-      market_title: row.market_title,
-      event_title: row.event_title,
-      description: row.description,
-      category: row.category,
-      outcomes: row.outcomes,
-      market_type: row.market_type,
-      updated_at: row.sort_ts,
-      source: "backfill",
-    }));
-
-    if (!options.dryRun) {
-      await enqueueEmbedItems(redis, items);
-    }
-
-    total += items.length;
-    const lastRow = rows[rows.length - 1];
-    const nextCursorTs =
-      lastRow.sort_ts ?? lastRow.updated_at ?? lastRow.created_at ?? null;
+export function parseEmbeddingBackfillOptions(
+  args: string[],
+): EmbeddingBackfillOptions {
+  const options: EmbeddingBackfillOptions = {
+    mode: "preview",
+    venues: [],
+    includeMarkets: true,
+    includeEvents: true,
+  };
+  const seen = new Set<string>();
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (arg === "--" && index === 0) continue;
+    const equalAt = arg.indexOf("=");
+    const key = equalAt < 0 ? arg : arg.slice(0, equalAt);
+    if (seen.has(key)) throw new Error(`Repeated option: ${key}`);
+    seen.add(key);
     if (
-      cursorId &&
-      cursorTs &&
-      nextCursorTs &&
-      cursorId === lastRow.id &&
-      cursorTs.getTime() === nextCursorTs.getTime()
+      [
+        "--execute",
+        "--dry-run",
+        "--status",
+        "--help",
+        "--markets",
+        "--events",
+      ].includes(key)
     ) {
-      console.warn(
-        "[backfill] markets cursor stalled; stopping to avoid loop",
-        { cursorId, cursorTs },
+      if (equalAt >= 0) throw new Error(`${key} does not take a value`);
+      if (key === "--execute") options.mode = "execute";
+      if (key === "--status") options.mode = "status";
+      if (key === "--help") options.mode = "help";
+      continue;
+    }
+    if (key !== "--venue" && key !== "--limit") {
+      throw new Error(
+        key === "--batch-size"
+          ? "--batch-size is now controlled by the ai_embeddings policy"
+          : `Unknown option: ${key}`,
       );
-      break;
     }
-    cursorTs = nextCursorTs;
-    cursorId = lastRow.id;
-    console.log(`[backfill] markets batch=${items.length} total=${total}`);
+    const value = equalAt < 0 ? args[++index] : arg.slice(equalAt + 1);
+    if (!value || value.startsWith("--"))
+      throw new Error(`Missing value for ${key}`);
+    if (key === "--limit") {
+      if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))) {
+        throw new Error("--limit must be a positive safe integer");
+      }
+      options.limit = Number(value);
+    } else {
+      options.venues = [
+        ...new Set(value.split(",").map((item) => item.trim().toLowerCase())),
+      ];
+      if (
+        options.venues.some(
+          (venue) =>
+            !["polymarket", "limitless", "kalshi", "dflow"].includes(venue),
+        )
+      ) {
+        throw new Error(
+          "--venue supports polymarket, limitless, kalshi or dflow",
+        );
+      }
+      options.venues = [
+        ...new Set(
+          options.venues.map((venue) => (venue === "dflow" ? "kalshi" : venue)),
+        ),
+      ];
+    }
   }
-
-  return total;
-}
-
-async function backfillEvents(
-  redis: ReturnType<typeof createRedisClient>,
-  options: BackfillOptions,
-): Promise<number> {
-  let total = 0;
-  let cursorTs: Date | null = null;
-  let cursorId: string | null = null;
-  const sortExpr =
-    "coalesce(e.updated_at, e.created_at, e.updated_at_db, e.created_at_db)";
-
-  while (true) {
-    const remaining =
-      options.limit != null ? Math.max(options.limit - total, 0) : undefined;
-    if (remaining === 0) break;
-    const pageSize =
-      remaining != null
-        ? Math.min(options.batchSize, remaining)
-        : options.batchSize;
-
-    const params: Array<string | Date | string[] | number> = [pageSize];
-    let where = "e.status = 'ACTIVE'";
-    if (options.venues.length) {
-      params.push(options.venues);
-      where += ` and e.venue = any($${params.length})`;
-    }
-    if (cursorTs && cursorId) {
-      const startIndex = params.length + 1;
-      params.push(cursorTs, cursorId);
-      where += ` and (${sortExpr}, e.id) < ($${startIndex}, $${startIndex + 1})`;
-    }
-
-    const sql = `
-      select
-        e.id,
-        e.venue,
-        e.status,
-        e.title as event_title,
-        e.description,
-        e.category,
-        ${sortExpr} as sort_ts
-      from unified_events e
-      where ${where}
-      order by ${sortExpr} desc, e.id desc
-      limit $1;
-    `;
-    const { rows } = await pool.query(sql, params);
-    if (rows.length === 0) break;
-
-    const eventIds = rows.map((row) => row.id);
-    const marketRows = await pool.query(
-      `
-      select
-        event_id,
-        title,
-        volume_24h,
-        volume_total,
-        liquidity,
-        open_interest
-      from unified_markets
-      where event_id = any($1)
-        and status = 'ACTIVE'
-      `,
-      [eventIds],
+  const modes = ["--execute", "--dry-run", "--status", "--help"].filter((key) =>
+    seen.has(key),
+  );
+  if (modes.length > 1)
+    throw new Error(
+      "Choose only one of --execute, --dry-run, --status or --help",
     );
-    const marketsByEvent = new Map<
-      string,
-      Array<{
-        title?: string | null;
-        volume_24h?: number | null;
-        volume_total?: number | null;
-        liquidity?: number | null;
-        open_interest?: number | null;
-      }>
-    >();
-    for (const row of marketRows.rows) {
-      const list = marketsByEvent.get(row.event_id) ?? [];
-      list.push(row);
-      marketsByEvent.set(row.event_id, list);
-    }
-
-    const items: EmbedQueueItem[] = rows.map((row) => {
-      const topMarkets = buildTopMarketsText(
-        marketsByEvent.get(row.id) ?? [],
-        row.event_title,
-      );
-      return {
-        entity_type: "event",
-        event_id: row.id,
-        venue: row.venue,
-        status: row.status,
-        event_title: row.event_title,
-        top_markets: topMarkets,
-        description: row.description,
-        category: row.category,
-        updated_at: row.sort_ts,
-        source: "backfill",
-      };
-    });
-
-    if (!options.dryRun) {
-      await enqueueEmbedItems(redis, items);
-    }
-
-    total += items.length;
-    const lastRow = rows[rows.length - 1];
-    const nextCursorTs =
-      lastRow.sort_ts ?? lastRow.updated_at ?? lastRow.created_at ?? null;
-    if (
-      cursorId &&
-      cursorTs &&
-      nextCursorTs &&
-      cursorId === lastRow.id &&
-      cursorTs.getTime() === nextCursorTs.getTime()
-    ) {
-      console.warn("[backfill] events cursor stalled; stopping to avoid loop", {
-        cursorId,
-        cursorTs,
-      });
-      break;
-    }
-    cursorTs = nextCursorTs;
-    cursorId = lastRow.id;
-    console.log(`[backfill] events batch=${items.length} total=${total}`);
+  if (seen.has("--markets") && seen.has("--events"))
+    throw new Error("Choose --markets, --events, or neither for both");
+  options.includeMarkets = !seen.has("--events");
+  options.includeEvents = !seen.has("--markets");
+  const filtered =
+    options.venues.length > 0 ||
+    options.limit != null ||
+    !options.includeMarkets ||
+    !options.includeEvents;
+  if (filtered && options.mode !== "preview") {
+    throw new Error(
+      "Venue/entity/limit filters are preview-only; --execute requests the full canonical reconciliation",
+    );
   }
-
-  return total;
+  return options;
 }
 
-async function run() {
-  const args = process.argv.slice(2);
-  if (hasFlag(args, "--help")) {
-    printHelp();
+const help = `Usage: pnpm -C hunch-monorepo -F api run ai:embed:backfill -- [options]
+
+Default: read-only preview of eligible source counts and the desired generation.
+  --dry-run                 Explicit read-only preview (no embedding requests)
+  --venue <venue[,venue]>    Preview only: polymarket,limitless,kalshi,dflow
+  --limit <n>               Preview only: cap displayed candidates per entity type
+  --markets | --events      Preview only: select one entity type
+  --status                  Read the worker's saved verification/progress report
+  --execute                 Request a full reconciliation by the existing worker
+  --help                    Show this help
+
+Execution does not write vectors, reset checkpoints or call the provider here.
+The worker uses its policy batch size, budget, lease and resumable checkpoint.
+A request being accepted is NOT evidence of completed coverage. Use --status.
+`;
+
+type BackfillRedis = {
+  get(key: string): Promise<string | null>;
+  incr(key: string): Promise<number>;
+};
+
+export async function runEmbeddingBackfill(
+  options: EmbeddingBackfillOptions,
+  dependencies: {
+    db: RuntimePolicyQuery;
+    redis: BackfillRedis;
+    log: (value: unknown) => void;
+  },
+): Promise<void> {
+  const { db, redis, log } = dependencies;
+  if (options.mode === "help") {
+    log(help);
     return;
   }
-
-  if (!env.redisUrl) {
-    throw new Error("[backfill] REDIS_URL is required");
+  if (options.mode === "status") {
+    const report = parseAdminEmbeddingStatus(
+      await redis.get(EMBEDDING_STATUS_KEY),
+    );
+    if (report.error) throw new Error(report.error);
+    log({ readOnly: true, ...report });
+    return;
   }
-
-  const options = resolveOptions(args);
-  const redis = createRedisClient({ url: env.redisUrl });
-  await ensureRedis(redis, {
-    waitForReady: true,
-    logLabel: "ai-embed-backfill",
+  const policyRow = await fetchActiveRuntimePolicy(db, "ai_embeddings");
+  const policy = embeddingPolicySchema.parse(policyRow?.payload ?? {});
+  const lifecycleRow = await fetchActiveRuntimePolicy(db, "venue_lifecycle");
+  const lifecycle = lifecycleRow
+    ? parseVenueLifecyclePolicy(lifecycleRow.payload)
+    : DEFAULT_VENUE_LIFECYCLE_POLICY;
+  if (!lifecycle)
+    throw new Error(
+      "Venue lifecycle policy is invalid; no reconciliation requested",
+    );
+  const eligibleVenues = Object.keys(lifecycle.venues).filter((venue) =>
+    venueHasLifecycleCapability(lifecycle, venue, "discovery"),
+  );
+  const venues = options.venues.length
+    ? eligibleVenues.filter((venue) => options.venues.includes(venue))
+    : eligibleVenues;
+  const desiredGeneration = generationForPolicy(policy);
+  const activeGeneration = await readActiveGeneration(redis);
+  const counts = await countEmbeddingSources(db, venues);
+  const count = (value: number) => Math.min(value, options.limit ?? value);
+  log({
+    readOnly: true,
+    preview: true,
+    policyEnabled: policy.enabled,
+    activeGeneration,
+    desiredGeneration,
+    venues,
+    eligible: counts,
+    previewCandidates: {
+      event: options.includeEvents ? count(counts.event) : 0,
+      market: options.includeMarkets ? count(counts.market) : 0,
+    },
+    generationBudgetUsd: policy.generationBudgetUsd,
+    note: "Eligible candidates are not a count of missing embeddings or a price quote. The worker skips unchanged content and verifies coverage separately.",
   });
-
-  console.log("[backfill] starting", {
-    venues: options.venues.length ? options.venues : "all",
-    batchSize: options.batchSize,
-    limit: options.limit ?? "unlimited",
-    dryRun: options.dryRun,
-    includeMarkets: options.includeMarkets,
-    includeEvents: options.includeEvents,
+  if (options.mode !== "execute") return;
+  if (!policy.enabled)
+    throw new Error(
+      "Embeddings are disabled by policy; no reconciliation requested",
+    );
+  const requestRevision = await redis.incr("ai:embed:control:reconcile");
+  log({
+    readOnly: false,
+    requested: true,
+    completed: false,
+    requestRevision,
+    note: "Full reconciliation requested. The worker owns execution, checkpoints and budget. Use --status to inspect progress; this does not prove completion.",
   });
-
-  let marketsTotal = 0;
-  let eventsTotal = 0;
-  if (options.includeMarkets) {
-    marketsTotal = await backfillMarkets(redis, options);
-  }
-  if (options.includeEvents) {
-    eventsTotal = await backfillEvents(redis, options);
-  }
-
-  console.log("[backfill] done", {
-    markets: marketsTotal,
-    events: eventsTotal,
-    dryRun: options.dryRun,
-  });
-
-  await redis.quit();
-  await pool.end();
 }
 
-run().catch((err) => {
-  console.error("[backfill] failed", err);
-  process.exit(1);
-});
+async function run(): Promise<void> {
+  const options = parseEmbeddingBackfillOptions(process.argv.slice(2));
+  if (options.mode === "help") {
+    console.log(help);
+    return;
+  }
+  const { env } = await import("./env.js");
+  if (!env.redisUrl) throw new Error("REDIS_URL is required");
+  const redis = createRedisClient({ url: env.redisUrl });
+  redis.on("error", () => {
+    /* The bounded operation reports a sanitized failure. */
+  });
+  const db = createPgPool({
+    connectionString: env.dbUrl,
+    max: 1,
+    connectionTimeoutMillis: 5000,
+    options:
+      "-c default_transaction_read_only=on -c statement_timeout=5000 -c jit=off",
+  });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      redis.connect(),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("Redis connection timed out")),
+          5000,
+        );
+      }),
+    ]);
+    if (timeout) clearTimeout(timeout);
+    await Promise.race([
+      runEmbeddingBackfill(options, {
+        db,
+        redis,
+        log: (value) => console.log(JSON.stringify(value, null, 2)),
+      }),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () =>
+            reject(
+              new Error(
+                "Backfill inspection/request timed out; inspect --status before retrying",
+              ),
+            ),
+          30_000,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    if (redis.isOpen) redis.destroy();
+    await db.end();
+  }
+}
+
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  run().catch((error) => {
+    // Do not dump provider or connection objects that may contain credentials.
+    console.error(
+      "[backfill] failed",
+      error instanceof Error ? error.message : "Unknown error",
+    );
+    process.exitCode = 1;
+  });
+}

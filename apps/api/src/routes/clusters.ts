@@ -240,7 +240,11 @@ export const clustersRoutes: FastifyPluginAsync = async (app) => {
     async (request, reply) => {
       if (!(await enabledConsumer(pool, request.query.consumer)))
         return reply.code(503).send({ error: "Market matching is disabled" });
-      const response = await getMatchedClusters(pool, request.query);
+      const response = await getMatchedClusters(
+        pool,
+        request.query,
+        enrichClusterExecutions,
+      );
       requestClusterMarketRefresh(response.items, "clusters:matched");
       return response;
     },

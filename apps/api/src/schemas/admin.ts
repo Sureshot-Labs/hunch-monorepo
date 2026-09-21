@@ -666,6 +666,7 @@ export const adminIntelPolicyKeySchema = z.enum([
   "wallet_intel_attribution",
   "ai_whale_profiles",
   "ai_clusters",
+  "ai_embeddings",
   "api_cache_warm",
   "market_map",
   "map_search",

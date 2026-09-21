@@ -1,4 +1,12 @@
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
+import {
+  embeddingKey,
+  embeddingIndex,
+  readActiveGeneration,
+  acquireEmbeddingGenerationPin,
+  type EmbeddingGeneration,
+} from "@hunch/embeddings";
+import { validEmbeddingBuffer } from "./lib/embedding-consumer.js";
 import { pathToFileURL } from "node:url";
 import { createRedisClient, ensureRedis } from "@hunch/infra";
 import type { RedisClientType } from "redis";
@@ -2704,13 +2712,14 @@ async function fetchMarketNeighbors(
   redis: RedisClientType,
   embedding: Buffer,
   options: Options,
+  generation: EmbeddingGeneration,
 ): Promise<Array<{ id: string; score: number }>> {
   const filterClause = "(@status:{ACTIVE})";
   const query = `${filterClause}=>[KNN ${options.knnLimit} @embedding $vec AS score]`;
 
   const raw = (await redis.sendCommand([
     "FT.SEARCH",
-    "idx:ai:embed:market",
+    embeddingIndex(generation, "market"),
     query,
     "PARAMS",
     "2",
@@ -2732,7 +2741,9 @@ async function fetchMarketNeighbors(
   for (let i = 1; i < raw.length; i += 2) {
     const key = raw[i];
     const fields = raw[i + 1] as unknown[];
-    const id = String(key).replace("ai:embed:market:", "");
+    const prefix = embeddingKey(generation, "market", "");
+    if (!String(key).startsWith(prefix)) continue;
+    const id = String(key).slice(prefix.length);
     let score = Number.POSITIVE_INFINITY;
     for (let j = 0; j < fields.length; j += 2) {
       if (String(fields[j]) === "score") {
@@ -3694,10 +3705,11 @@ function shouldReuseAnalysis(
         version: string | null;
       }
     | undefined,
+  generation: EmbeddingGeneration,
 ): ClusterAnalysis | null {
   if (!existing?.analysis || existing.analysisStatus !== "ready") return null;
   if (!existing.analysisUpdatedAt) return null;
-  if (existing.version !== CLUSTER_VERSION) return null;
+  if (existing.version !== `${CLUSTER_VERSION}:${generation.id}`) return null;
   if (existing.marketIds !== JSON.stringify(cluster.marketIds)) return null;
   if (aiClustersPolicy.reanalyzeHours === 0) return null;
 
@@ -3713,6 +3725,7 @@ function shouldReuseAnalysis(
 async function applyClusterAnalysis(
   redis: RedisClientType,
   clusters: ClusterRecord[],
+  generation: EmbeddingGeneration,
 ): Promise<void> {
   if (!aiClustersPolicy.analysisEnabled) return;
   if (!env.openRouterKey) {
@@ -3770,7 +3783,11 @@ async function applyClusterAnalysis(
   });
 
   const pending = candidates.filter((cluster) => {
-    const reused = shouldReuseAnalysis(cluster, existingMap.get(cluster.id));
+    const reused = shouldReuseAnalysis(
+      cluster,
+      existingMap.get(cluster.id),
+      generation,
+    );
     if (!reused) return true;
     cluster.analysis = JSON.stringify(reused);
     cluster.analysisStatus = "ready";
@@ -3914,6 +3931,8 @@ async function buildClusters(
   redis: RedisClientType,
   seeds: SeedRow[],
   options: Options,
+  generation: EmbeddingGeneration,
+  assertPinHeld: () => void,
 ): Promise<ClusterRecord[]> {
   const clusters: ClusterSeed[] = [];
   const bufferClient = redis.withTypeMapping({
@@ -3921,6 +3940,7 @@ async function buildClusters(
   });
 
   for (const seed of seeds) {
+    assertPinHeld();
     const seedSignature = buildSignature({
       eventTitle: seed.event_title,
       marketTitle: seed.market_title,
@@ -3929,16 +3949,24 @@ async function buildClusters(
       dates: [seed.end_date, seed.expiration_time, seed.close_time],
     });
     const embeddingRaw = (
-      await bufferClient.hmGet(`ai:embed:market:${seed.id}`, ["embedding"])
+      await bufferClient.hmGet(embeddingKey(generation, "market", seed.id), [
+        "embedding",
+      ])
     )[0];
-    const embedding = Buffer.isBuffer(embeddingRaw) ? embeddingRaw : null;
+    const embedding = validEmbeddingBuffer(embeddingRaw, generation);
     if (!embedding) continue;
 
     const exactCandidates = await fetchExactCandidateMarkets(
       seed,
       seedSignature,
     );
-    const neighbors = await fetchMarketNeighbors(redis, embedding, options);
+    assertPinHeld();
+    const neighbors = await fetchMarketNeighbors(
+      redis,
+      embedding,
+      options,
+      generation,
+    );
     const exactScoreById = new Map(
       exactCandidates.map((candidate) => [candidate.id, candidate.matchScore]),
     );
@@ -4275,6 +4303,7 @@ async function storeClusters(
   redis: RedisClientType,
   clusters: ClusterRecord[],
   options: Options,
+  generation: EmbeddingGeneration,
 ): Promise<void> {
   const now = new Date().toISOString();
 
@@ -4326,7 +4355,8 @@ async function storeClusters(
       market_ids: JSON.stringify(cluster.marketIds),
       markets_preview: JSON.stringify(cluster.marketsPreview),
       updated_at: now,
-      version: CLUSTER_VERSION,
+      version: `${CLUSTER_VERSION}:${generation.id}`,
+      embedding_generation: JSON.stringify(generation),
     });
     multi.expire(key, options.ttlSec);
   }
@@ -4335,7 +4365,8 @@ async function storeClusters(
   multi.hSet(META_KEY, {
     generated_at: now,
     count: String(clusters.length),
-    version: CLUSTER_VERSION,
+    version: `${CLUSTER_VERSION}:${generation.id}`,
+    embedding_generation: JSON.stringify(generation),
   });
   multi.expire(META_KEY, options.ttlSec);
 
@@ -4365,21 +4396,42 @@ async function main() {
     logLabel: "ai-embed-cluster",
   });
 
+  let pin: Awaited<ReturnType<typeof acquireEmbeddingGenerationPin>> = null;
   try {
+    const generation = await readActiveGeneration(redis);
+    if (!options.dryRun) {
+      pin = await acquireEmbeddingGenerationPin(
+        redis,
+        generation,
+        `cluster-build:${randomUUID()}`,
+      );
+      if (!pin) throw new Error("embedding_generation_changed_retry");
+    }
     const seeds = await fetchSeedMarkets(options);
     console.log("[cluster] seeds", { count: seeds.length });
 
-    const clusters = await buildClusters(redis, seeds, options);
+    const clusters = await buildClusters(
+      redis,
+      seeds,
+      options,
+      generation,
+      () => pin?.assertHeld(),
+    );
+    pin?.assertHeld();
+    // All vectors have been consumed; labels and stored artifacts need no pin.
+    await pin?.release();
+    pin = null;
     console.log("[cluster] clusters", { count: clusters.length });
 
     if (!options.dryRun) {
       if (!options.noAnalysis) {
-        await applyClusterAnalysis(redis, clusters);
+        await applyClusterAnalysis(redis, clusters, generation);
       }
-      await storeClusters(redis, clusters, options);
+      await storeClusters(redis, clusters, options, generation);
       console.log("[cluster] stored", { count: clusters.length });
     }
   } finally {
+    await pin?.release().catch(() => {});
     await redis.quit();
     await pool.end();
   }

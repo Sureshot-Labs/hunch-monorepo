@@ -24,6 +24,7 @@ COPY packages/config/package.json packages/config/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/db/package.json packages/db/package.json
 COPY packages/infra/package.json packages/infra/package.json
+COPY packages/embeddings/package.json packages/embeddings/package.json
 COPY packages/shared/package.json packages/shared/package.json
 COPY packages/market-matching/package.json packages/market-matching/package.json
 

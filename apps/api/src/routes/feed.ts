@@ -1,4 +1,11 @@
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
+import {
+  embeddingKey,
+  embeddingIndex,
+  readActiveGeneration,
+  parseEmbeddingVector,
+} from "@hunch/embeddings";
+import { withEmbeddingPinScope } from "../lib/embedding-consumer.js";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { buildObservedCanonicalMarketTop } from "@hunch/shared";
 import crypto from "node:crypto";
@@ -220,13 +227,6 @@ function decayWeight(
   const ageDays = ageMs / (24 * 60 * 60 * 1000);
   const lambda = Math.log(2) / halfLifeDays;
   return Math.exp(-lambda * ageDays);
-}
-
-function parseEmbeddingBuffer(buffer: Buffer): Float32Array | null {
-  if (buffer.byteLength % 4 !== 0) return null;
-  const aligned = new ArrayBuffer(buffer.byteLength);
-  new Uint8Array(aligned).set(buffer);
-  return new Float32Array(aligned);
 }
 
 function normalizeVector(vec: Float32Array): Float32Array {
@@ -1107,7 +1107,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
   z.get(
     "/feed/for-you/status",
     { preHandler: createAuthMiddleware() },
-    async (request, reply) => {
+    withEmbeddingPinScope(async (acquirePin, request, reply) => {
       const user = request.user;
       if (!user) {
         reply.code(401);
@@ -1168,16 +1168,31 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       let embeddedEventCount = 0;
       const redis = await getRedis();
       if (redis && activeEventIds.size) {
-        const bufferClient = redis.withTypeMapping({
-          [RESP_TYPES.BLOB_STRING]: Buffer,
-        });
-        const checks = await Promise.all(
-          Array.from(activeEventIds).map((id) =>
-            bufferClient.hGet(`ai:embed:event:${id}`, "embedding"),
-          ),
+        const generation = await readActiveGeneration(redis);
+        const pin = await acquirePin(
+          redis,
+          generation,
+          `for-you-status:${user.id}:${crypto.randomUUID()}`,
         );
-        for (const res of checks) {
-          if (Buffer.isBuffer(res)) embeddedEventCount += 1;
+        if (pin) {
+          const bufferClient = redis.withTypeMapping({
+            [RESP_TYPES.BLOB_STRING]: Buffer,
+          });
+          pin.assertHeld();
+          const checks = await Promise.allSettled(
+            Array.from(activeEventIds).map((id) =>
+              bufferClient.hGet(
+                embeddingKey(generation, "event", id),
+                "embedding",
+              ),
+            ),
+          );
+          pin.assertHeld();
+          for (const res of checks) {
+            if (res.status === "rejected") throw res.reason;
+            if (parseEmbeddingVector(res.value, generation))
+              embeddedEventCount += 1;
+          }
         }
       }
 
@@ -1187,7 +1202,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         activeEventCount,
         embeddedEventCount,
       });
-    },
+    }),
   );
 
   /**
@@ -1200,7 +1215,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       preHandler: createAuthMiddleware(),
       schema: { querystring: forYouQuerySchema },
     },
-    async (request, reply) => {
+    withEmbeddingPinScope(async (acquirePin, request, reply) => {
       const user = request.user;
       if (!user) {
         reply.code(401);
@@ -1301,6 +1316,21 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const bufferClient = redis.withTypeMapping({
         [RESP_TYPES.BLOB_STRING]: Buffer,
       });
+      const generation = await readActiveGeneration(redis);
+      const pin = await acquirePin(
+        redis,
+        generation,
+        `for-you:${user.id}:${crypto.randomUUID()}`,
+      );
+      if (!pin) {
+        return reply.send({
+          count: 0,
+          limit,
+          offset,
+          minVolume24h: 0,
+          data: [],
+        });
+      }
 
       // Aggregate event weights with EMA decay.
       const eventWeights = new Map<string, number>();
@@ -1317,12 +1347,14 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       let sum: Float32Array | null = null;
       let weightSum = 0;
       for (const [eventId, weight] of eventWeights.entries()) {
+        pin.assertHeld();
         const raw = await bufferClient.hGet(
-          `ai:embed:event:${eventId}`,
+          embeddingKey(generation, "event", eventId),
           "embedding",
         );
+        pin.assertHeld();
         if (!Buffer.isBuffer(raw)) continue;
-        const vec = parseEmbeddingBuffer(raw);
+        const vec = parseEmbeddingVector(raw, generation);
         if (!vec) continue;
         if (!sum) sum = new Float32Array(vec.length);
         if (sum.length !== vec.length) continue;
@@ -1357,9 +1389,10 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       );
       const queryText = `@status:{ACTIVE}=>[KNN ${knnLimit} @embedding $vec AS score]`;
 
+      pin.assertHeld();
       const raw = (await redis.sendCommand([
         "FT.SEARCH",
-        "idx:ai:embed:event",
+        embeddingIndex(generation, "event"),
         queryText,
         "PARAMS",
         "2",
@@ -1376,11 +1409,14 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         "DIALECT",
         "2",
       ])) as unknown[];
+      pin.assertHeld();
 
       const candidateEventIds: string[] = [];
       for (let i = 1; i < raw.length; i += 2) {
         const key = raw[i];
-        const id = String(key).replace("ai:embed:event:", "");
+        const prefix = embeddingKey(generation, "event", "");
+        if (!String(key).startsWith(prefix)) continue;
+        const id = String(key).slice(prefix.length);
         if (interactedEventIds.has(id)) continue;
         candidateEventIds.push(id);
       }
@@ -1732,6 +1768,6 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       reply.header("Cache-Control", "no-store");
       reply.header("Content-Type", "application/json; charset=utf-8");
       return reply.send(JSON.stringify(payload));
-    },
+    }),
   );
 };

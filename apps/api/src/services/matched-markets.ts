@@ -251,7 +251,11 @@ export async function getMatchedAlternatives(
 }
 export async function getMatchedClusters(
   db: Pool,
-  query: AggClustersQueryInput = {},
+  query: AggClustersQueryInput,
+  enrichExecutions: (
+    db: Pool,
+    items: AggClusterSummary[],
+  ) => Promise<AggClusterSummary[]>,
 ): Promise<AggClusterListResponse> {
   const limit = Math.min(100, Math.max(1, query.limit ?? 20));
   const rows = await db.query<{
@@ -339,10 +343,8 @@ export async function getMatchedClusters(
     });
     if (items.length >= limit) break;
   }
-  // Execution verification is API-only; sidecar alternative reads must not load API env.
-  const { enrichClusterExecutions } =
-    await import("./cluster-execution-enrichment.js");
-  const enriched = await enrichClusterExecutions(db, items);
+  // The API caller owns verification; shared sidecar reads must not import API env.
+  const enriched = await enrichExecutions(db, items);
   if (query.sort_by)
     enriched.sort(
       (a, b) =>

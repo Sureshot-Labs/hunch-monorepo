@@ -1,0 +1,4818 @@
+{
+  "preflight": {
+    "mode": "dry-run",
+    "fingerprint": "f7c390ce538f65011aee58b0e422123ee933fd032411671afd76f2fbc2ce6613",
+    "model": "intfloat/e5-large-v2",
+    "publicEvents": 873,
+    "mapQueries": 48,
+    "syntheticSimilarDocs": 36,
+    "syntheticSimilarQueries": 12,
+    "budgetUsd": 0.05,
+    "priorChargedUsd": 0.00042357,
+    "maxAttemptsPerBatch": 1,
+    "variants": [
+      {
+        "name": "diagnostic-oldfields-query",
+        "texts": 969,
+        "tokens": 23193,
+        "estimatedCostUsd": 0.00046386,
+        "requests": 8
+      },
+      {
+        "name": "diagnostic-cleanfields-passage",
+        "texts": 969,
+        "tokens": 19260,
+        "estimatedCostUsd": 0.0003852,
+        "requests": 8
+      },
+      {
+        "name": "diagnostic-minimal-query",
+        "texts": 969,
+        "tokens": 16833,
+        "estimatedCostUsd": 0.00033666,
+        "requests": 8
+      }
+    ],
+    "totalEstimatedCostUsd": 0.00118572,
+    "provenance": {
+      "source": "Public Hunch market-map snapshot",
+      "generatedAt": "2026-09-20T13:45:02.749Z",
+      "limitations": "Public card titles and one representative outcome only; no full rules, prices, accounts or histories. Synthetic Similar cases are labelled separately, not copied user traffic."
+    }
+  },
+  "completedAt": "2026-09-20T23:34:48.083Z",
+  "reservedUsd": 0.0011857200000000001,
+  "chargedUsd": 0.0005928600000000001,
+  "variants": [
+    {
+      "name": "diagnostic-oldfields-query",
+      "generation": {
+        "id": "g-967f94827cf442f1ded0",
+        "model": "intfloat/e5-large-v2",
+        "dimensions": 1024,
+        "textVersion": "clean-v1",
+        "adapterVersion": "e5-query-v1"
+      },
+      "batches": [
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 3198,
+          "costUsd": 0.00003198,
+          "elapsedMs": 2825
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 2887,
+          "costUsd": 0.00002887,
+          "elapsedMs": 1839
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 3049,
+          "costUsd": 0.00003049,
+          "elapsedMs": 2057
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 3474,
+          "costUsd": 0.00003474,
+          "elapsedMs": 1633
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 2755,
+          "costUsd": 0.00002755,
+          "elapsedMs": 2535
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 3088,
+          "costUsd": 0.00003088,
+          "elapsedMs": 2428
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 3282,
+          "costUsd": 0.00003282,
+          "elapsedMs": 2607
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 1460,
+          "costUsd": 0.0000146,
+          "elapsedMs": 1855
+        }
+      ],
+      "mapSummary": {
+        "queries": 48,
+        "rank1": 30,
+        "rank3": 35,
+        "recall1": 0.625,
+        "recall3": 0.7291666666666666,
+        "mrr": 0.6934819546858112,
+        "meanMargin": 0.011080314927279913
+      },
+      "mapEnglishSummary": {
+        "queries": 36,
+        "rank1": 29,
+        "rank3": 34,
+        "recall1": 0.8055555555555556,
+        "recall3": 0.9444444444444444,
+        "mrr": 0.8796296296296295,
+        "meanMargin": 0.02515094973981923
+      },
+      "mapRussianSummary": {
+        "queries": 12,
+        "rank1": 1,
+        "rank3": 1,
+        "recall1": 0.08333333333333333,
+        "recall3": 0.08333333333333333,
+        "mrr": 0.1350389298543563,
+        "meanMargin": -0.031131589510338037
+      },
+      "similarSummary": {
+        "queries": 12,
+        "rank1": 2,
+        "rank3": 12,
+        "recall1": 0.16666666666666666,
+        "recall3": 1,
+        "mrr": 0.5138888888888888,
+        "meanMargin": -0.015288133291946773
+      },
+      "mapRows": [
+        {
+          "targetId": "polymarket:45915",
+          "text": "Who is going to become president of Brazil?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.001963087192754842,
+          "top": [
+            {
+              "id": "polymarket:45915",
+              "title": "Brazil Presidential Election",
+              "score": 0.8474929921444867
+            },
+            {
+              "id": "polymarket:864475",
+              "title": "Brazil Presidential Election First Round: 1st Place in Pará",
+              "score": 0.8455299049517319
+            },
+            {
+              "id": "polymarket:45925",
+              "title": "Which candidates will advance to Brazil's presidential runoff?",
+              "score": 0.8444048862791687
+            }
+          ],
+          "targetTitle": "Brazil Presidential Election"
+        },
+        {
+          "targetId": "polymarket:45915",
+          "text": "Кто победит на президентских выборах в Бразилии?",
+          "language": "ru",
+          "rank": 367,
+          "margin": -0.054065865706098504,
+          "top": [
+            {
+              "id": "limitless:403805",
+              "title": "Team Yandex vs Team Nemesis",
+              "score": 0.7679334341186954
+            },
+            {
+              "id": "polymarket:951073",
+              "title": "How many seats will New People (NL) win in the next Russian legislative election?",
+              "score": 0.7585684837621557
+            },
+            {
+              "id": "polymarket:983433",
+              "title": "Amed Sportif vs. Beşiktaş JK",
+              "score": 0.757903940727794
+            }
+          ],
+          "targetTitle": "Brazil Presidential Election"
+        },
+        {
+          "targetId": "polymarket:743544",
+          "text": "Who will become mayor of Lima?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.06587186069705997,
+          "top": [
+            {
+              "id": "polymarket:743544",
+              "title": "Lima Mayoral Election Winner",
+              "score": 0.8522430599164064
+            },
+            {
+              "id": "polymarket:839293",
+              "title": "Trujillo Mayoral Election Winner",
+              "score": 0.7863711992193464
+            },
+            {
+              "id": "polymarket:637442",
+              "title": "Next Prime Minister of Spain?",
+              "score": 0.7681591424162533
+            }
+          ],
+          "targetTitle": "Lima Mayoral Election Winner"
+        },
+        {
+          "targetId": "polymarket:743544",
+          "text": "Кто станет мэром Лимы?",
+          "language": "ru",
+          "rank": 804,
+          "margin": -0.07251830070605048,
+          "top": [
+            {
+              "id": "polymarket:951073",
+              "title": "How many seats will New People (NL) win in the next Russian legislative election?",
+              "score": 0.7589942637024146
+            },
+            {
+              "id": "limitless:403805",
+              "title": "Team Yandex vs Team Nemesis",
+              "score": 0.7577662862331507
+            },
+            {
+              "id": "polymarket:951022",
+              "title": "Which parties will win at least one seat in the next Russian State Duma election?",
+              "score": 0.7556416964582457
+            }
+          ],
+          "targetTitle": "Lima Mayoral Election Winner"
+        },
+        {
+          "targetId": "polymarket:531333",
+          "text": "Which contenders qualify for the runoff in the next French presidential vote?",
+          "language": "en",
+          "rank": 2,
+          "margin": -0.009456408992278953,
+          "top": [
+            {
+              "id": "limitless:10000454",
+              "title": "Next French Presidential Election",
+              "score": 0.8574987339945498
+            },
+            {
+              "id": "polymarket:531333",
+              "title": "Next French Presidential Election: who will advance to the 2nd round?",
+              "score": 0.8480423250022708
+            },
+            {
+              "id": "polymarket:407284",
+              "title": "2027 French Presidential Election: who will be on the ballot?",
+              "score": 0.8392408527074904
+            }
+          ],
+          "targetTitle": "Next French Presidential Election: who will advance to the 2nd round?"
+        },
+        {
+          "targetId": "polymarket:531333",
+          "text": "Кто выйдет во второй тур следующих президентских выборов во Франции?",
+          "language": "ru",
+          "rank": 14,
+          "margin": -0.01634796768995228,
+          "top": [
+            {
+              "id": "polymarket:980499",
+              "title": "OGC Nice vs. Lille OSC",
+              "score": 0.7744211733722592
+            },
+            {
+              "id": "limitless:10000454",
+              "title": "Next French Presidential Election",
+              "score": 0.7682831372706812
+            },
+            {
+              "id": "limitless:33151",
+              "title": "Theo FDV above $100M one day after launch?",
+              "score": 0.7639384541965668
+            }
+          ],
+          "targetTitle": "Next French Presidential Election: who will advance to the 2nd round?"
+        },
+        {
+          "targetId": "polymarket:378769",
+          "text": "Who gets the Democratic vice presidential nomination for 2028?",
+          "language": "en",
+          "rank": 2,
+          "margin": -0.008813073265824922,
+          "top": [
+            {
+              "id": "limitless:10000447",
+              "title": "Democratic Presidential Nominee 2028",
+              "score": 0.856445790405092
+            },
+            {
+              "id": "polymarket:378769",
+              "title": "Democratic VP Nominee 2028",
+              "score": 0.847632717139267
+            },
+            {
+              "id": "polymarket:33228",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.8262899959829378
+            }
+          ],
+          "targetTitle": "Democratic VP Nominee 2028"
+        },
+        {
+          "targetId": "polymarket:378769",
+          "text": "Кого демократы выдвинут в вице-президенты в 2028 году?",
+          "language": "ru",
+          "rank": 13,
+          "margin": -0.02359926140083246,
+          "top": [
+            {
+              "id": "polymarket:33228",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.802106913865139
+            },
+            {
+              "id": "limitless:10000456",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.8021068979522777
+            },
+            {
+              "id": "limitless:10000449",
+              "title": "Presidential Election Winner 2028",
+              "score": 0.7934731900572743
+            }
+          ],
+          "targetTitle": "Democratic VP Nominee 2028"
+        },
+        {
+          "targetId": "limitless:10000447",
+          "text": "Who becomes the Democrats presidential candidate in 2028?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.027885435064297415,
+          "top": [
+            {
+              "id": "limitless:10000447",
+              "title": "Democratic Presidential Nominee 2028",
+              "score": 0.8835566788319941
+            },
+            {
+              "id": "polymarket:33228",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.8556712437676967
+            },
+            {
+              "id": "limitless:10000456",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.8556712354754414
+            }
+          ],
+          "targetTitle": "Democratic Presidential Nominee 2028"
+        },
+        {
+          "targetId": "limitless:10000447",
+          "text": "Кто станет кандидатом демократов в президенты в 2028?",
+          "language": "ru",
+          "rank": 4,
+          "margin": -0.0069764855001387405,
+          "top": [
+            {
+              "id": "polymarket:33228",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.8125930367005082
+            },
+            {
+              "id": "limitless:10000456",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.8125930292732689
+            },
+            {
+              "id": "limitless:10000449",
+              "title": "Presidential Election Winner 2028",
+              "score": 0.8072670656080952
+            }
+          ],
+          "targetTitle": "Democratic Presidential Nominee 2028"
+        },
+        {
+          "targetId": "limitless:10013328",
+          "text": "Which political party takes control of the Senate in 2026?",
+          "language": "en",
+          "rank": 2,
+          "margin": -1.741344957117974e-9,
+          "top": [
+            {
+              "id": "polymarket:32224",
+              "title": "Which party will win the Senate in 2026?",
+              "score": 0.8901689424028651
+            },
+            {
+              "id": "limitless:10013328",
+              "title": "Which party will win the Senate in 2026?",
+              "score": 0.8901689406615202
+            },
+            {
+              "id": "polymarket:106193",
+              "title": "Republican Senate seats after the 2026 midterm elections?",
+              "score": 0.863443813752528
+            }
+          ],
+          "targetTitle": "Which party will win the Senate in 2026?"
+        },
+        {
+          "targetId": "limitless:10013328",
+          "text": "Какая партия выиграет Сенат в 2026 году?",
+          "language": "ru",
+          "rank": 24,
+          "margin": -0.032765818104835254,
+          "top": [
+            {
+              "id": "polymarket:448037",
+              "title": "Hantavirus pandemic in 2026?",
+              "score": 0.8311523331947707
+            },
+            {
+              "id": "polymarket:79905",
+              "title": "Where will 2026 rank among the hottest years on record?",
+              "score": 0.8163944549867868
+            },
+            {
+              "id": "polymarket:79836",
+              "title": "Which movie has biggest opening weekend in 2026?",
+              "score": 0.812970310217332
+            }
+          ],
+          "targetTitle": "Which party will win the Senate in 2026?"
+        },
+        {
+          "targetId": "polymarket:57672",
+          "text": "Who wins the race for the Texas Senate seat?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.02095764993337812,
+          "top": [
+            {
+              "id": "polymarket:57672",
+              "title": "Texas Senate Election Winner",
+              "score": 0.8560279040665262
+            },
+            {
+              "id": "polymarket:769205",
+              "title": "Which Senate races will be within 5%?",
+              "score": 0.8350702541331481
+            },
+            {
+              "id": "polymarket:57664",
+              "title": "North Carolina Senate Election Winner",
+              "score": 0.8009034393943764
+            }
+          ],
+          "targetTitle": "Texas Senate Election Winner"
+        },
+        {
+          "targetId": "polymarket:57672",
+          "text": "Кто победит на выборах в Сенат от Техаса?",
+          "language": "ru",
+          "rank": 543,
+          "margin": -0.0727727142737512,
+          "top": [
+            {
+              "id": "limitless:403805",
+              "title": "Team Yandex vs Team Nemesis",
+              "score": 0.7758029427836253
+            },
+            {
+              "id": "polymarket:448037",
+              "title": "Hantavirus pandemic in 2026?",
+              "score": 0.7534652628681371
+            },
+            {
+              "id": "limitless:403803",
+              "title": "Pipsqueak+4 vs Yakult Brothers",
+              "score": 0.750744693573216
+            }
+          ],
+          "targetTitle": "Texas Senate Election Winner"
+        },
+        {
+          "targetId": "polymarket:715392",
+          "text": "Which person tops Google searches for the year 2026?",
+          "language": "en",
+          "rank": 4,
+          "margin": -0.021328096008118913,
+          "top": [
+            {
+              "id": "polymarket:779081",
+              "title": "#1 Searched Person on Google in the US 2026?",
+              "score": 0.8567068189381538
+            },
+            {
+              "id": "polymarket:718982",
+              "title": "#1 Searched Actor on Google 2026?",
+              "score": 0.8543327587654598
+            },
+            {
+              "id": "polymarket:79090",
+              "title": "Richest person on December 31, 2026?",
+              "score": 0.844034301944913
+            }
+          ],
+          "targetTitle": "#1 Searched Person on Google 2026?"
+        },
+        {
+          "targetId": "polymarket:715392",
+          "text": "Кого чаще всего будут искать в Google в 2026 году?",
+          "language": "ru",
+          "rank": 12,
+          "margin": -0.014671306554586816,
+          "top": [
+            {
+              "id": "polymarket:779078",
+              "title": "#1 Searched Movie on Google 2026?",
+              "score": 0.8015888550662682
+            },
+            {
+              "id": "polymarket:779079",
+              "title": "#1 Searched TV Show on Google 2026?",
+              "score": 0.7976570029740159
+            },
+            {
+              "id": "polymarket:715394",
+              "title": "#1 Searched Passing on Google 2026?",
+              "score": 0.7936422819178093
+            }
+          ],
+          "targetTitle": "#1 Searched Person on Google 2026?"
+        },
+        {
+          "targetId": "limitless:399068",
+          "text": "Will the Man City Sunderland game have at least three goals?",
+          "language": "en",
+          "rank": 3,
+          "margin": -0.0045493598937923485,
+          "top": [
+            {
+              "id": "limitless:399041",
+              "title": "Sunderland to win by 2 or more goals vs Manchester City?",
+              "score": 0.9172681715464824
+            },
+            {
+              "id": "limitless:399055",
+              "title": "Manchester City to win by 2 or more goals vs Sunderland?",
+              "score": 0.9165700876922043
+            },
+            {
+              "id": "limitless:399068",
+              "title": "Manchester City and Sunderland have 3 or more total goals?",
+              "score": 0.9127188116526901
+            }
+          ],
+          "targetTitle": "Manchester City and Sunderland have 3 or more total goals?"
+        },
+        {
+          "targetId": "limitless:399068",
+          "text": "Будет ли минимум три гола в матче Манчестер Сити против Сандерленда?",
+          "language": "ru",
+          "rank": 22,
+          "margin": -0.011832595876203,
+          "top": [
+            {
+              "id": "limitless:362999",
+              "title": "Will Lionel Messi announce his retirement in 2026?",
+              "score": 0.7831858153817671
+            },
+            {
+              "id": "limitless:399043",
+              "title": "Manchester United to win by 2 or more goals vs Fulham?",
+              "score": 0.7831097158575452
+            },
+            {
+              "id": "limitless:399063",
+              "title": "Atletico Madrid and Real Madrid have 3 or more total goals?",
+              "score": 0.783030075253321
+            }
+          ],
+          "targetTitle": "Manchester City and Sunderland have 3 or more total goals?"
+        },
+        {
+          "targetId": "limitless:399056",
+          "text": "Can Leeds beat Crystal Palace by a margin of at least two?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.006079638460938175,
+          "top": [
+            {
+              "id": "limitless:399056",
+              "title": "Leeds to win by 2 or more goals vs Crystal Palace?",
+              "score": 0.9372025378154971
+            },
+            {
+              "id": "limitless:399042",
+              "title": "Crystal Palace to win by 2 or more goals vs Leeds?",
+              "score": 0.9311228993545589
+            },
+            {
+              "id": "limitless:399073",
+              "title": "Leeds and Crystal Palace both to score?",
+              "score": 0.9081753684188364
+            }
+          ],
+          "targetTitle": "Leeds to win by 2 or more goals vs Crystal Palace?"
+        },
+        {
+          "targetId": "limitless:399056",
+          "text": "Победит ли Лидс Кристал Пэлас с разницей минимум два мяча?",
+          "language": "ru",
+          "rank": 24,
+          "margin": -0.015787932874231192,
+          "top": [
+            {
+              "id": "limitless:404150",
+              "title": "Yao Xinxin vs Maya Joint",
+              "score": 0.7727675397649589
+            },
+            {
+              "id": "limitless:404158",
+              "title": "Barbora Krejcikova vs Anna-Lena Friedsam",
+              "score": 0.7727653632206016
+            },
+            {
+              "id": "limitless:403805",
+              "title": "Team Yandex vs Team Nemesis",
+              "score": 0.7712660606575108
+            }
+          ],
+          "targetTitle": "Leeds to win by 2 or more goals vs Crystal Palace?"
+        },
+        {
+          "targetId": "limitless:10006818",
+          "text": "Who takes the English Premier League title in the 2026-27 season?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.010123324549394797,
+          "top": [
+            {
+              "id": "limitless:10006818",
+              "title": "2026/27 English Premier League Winner",
+              "score": 0.8641757342137407
+            },
+            {
+              "id": "limitless:10014251",
+              "title": "English Premier League Top 4 Finishers (2026-27)",
+              "score": 0.8540524096643459
+            },
+            {
+              "id": "limitless:177457",
+              "title": "Tottenham to finish the 2026/27 Premier League season in the Top 3",
+              "score": 0.8522428578863703
+            }
+          ],
+          "targetTitle": "2026/27 English Premier League Winner"
+        },
+        {
+          "targetId": "limitless:10006818",
+          "text": "Кто выиграет английскую Премьер-лигу в сезоне 2026/27?",
+          "language": "ru",
+          "rank": 1,
+          "margin": 0.006028222982727871,
+          "top": [
+            {
+              "id": "limitless:10006818",
+              "title": "2026/27 English Premier League Winner",
+              "score": 0.8302136792767454
+            },
+            {
+              "id": "polymarket:448037",
+              "title": "Hantavirus pandemic in 2026?",
+              "score": 0.8241854562940175
+            },
+            {
+              "id": "limitless:10014251",
+              "title": "English Premier League Top 4 Finishers (2026-27)",
+              "score": 0.8228134962876406
+            }
+          ],
+          "targetTitle": "2026/27 English Premier League Winner"
+        },
+        {
+          "targetId": "limitless:10014425",
+          "text": "Which driver qualifies on pole at the Azerbaijan GP?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.05171323318092225,
+          "top": [
+            {
+              "id": "limitless:10014425",
+              "title": "Azerbaijan Grand Prix: Driver Pole Position",
+              "score": 0.8788549689900792
+            },
+            {
+              "id": "limitless:10014424",
+              "title": "Azerbaijan Grand Prix: Driver Winner",
+              "score": 0.827141735809157
+            },
+            {
+              "id": "polymarket:925483",
+              "title": "Azerbaijan Grand Prix: Driver Winner",
+              "score": 0.827141726989413
+            }
+          ],
+          "targetTitle": "Azerbaijan Grand Prix: Driver Pole Position"
+        },
+        {
+          "targetId": "limitless:10014425",
+          "text": "Кто возьмёт поул на Гран-при Азербайджана?",
+          "language": "ru",
+          "rank": 239,
+          "margin": -0.058269048420104386,
+          "top": [
+            {
+              "id": "limitless:397731",
+              "title": "Zimbabwe vs Australia",
+              "score": 0.7832308616333997
+            },
+            {
+              "id": "limitless:403805",
+              "title": "Team Yandex vs Team Nemesis",
+              "score": 0.7577063080499309
+            },
+            {
+              "id": "polymarket:74056",
+              "title": "Where will Zelenskyy and Putin meet next before 2027?",
+              "score": 0.755231474417549
+            }
+          ],
+          "targetTitle": "Azerbaijan Grand Prix: Driver Pole Position"
+        },
+        {
+          "targetId": "limitless:10014426",
+          "text": "Which drivers finish in the top three at the Azerbaijan Grand Prix?",
+          "language": "en",
+          "rank": 4,
+          "margin": -0.008550054044210054,
+          "top": [
+            {
+              "id": "limitless:10014425",
+              "title": "Azerbaijan Grand Prix: Driver Pole Position",
+              "score": 0.8605019974290117
+            },
+            {
+              "id": "polymarket:925483",
+              "title": "Azerbaijan Grand Prix: Driver Winner",
+              "score": 0.854504426341004
+            },
+            {
+              "id": "limitless:10014424",
+              "title": "Azerbaijan Grand Prix: Driver Winner",
+              "score": 0.8545043992162148
+            }
+          ],
+          "targetTitle": "Azerbaijan Grand Prix: Driver Podium Finish"
+        },
+        {
+          "targetId": "polymarket:36173",
+          "text": "At what point will BTC reach one hundred fifty thousand dollars?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.023597001339287993,
+          "top": [
+            {
+              "id": "polymarket:36173",
+              "title": "When will Bitcoin hit $150k?",
+              "score": 0.861520514267388
+            },
+            {
+              "id": "limitless:323731",
+              "title": "Will MicroStrategy announce holding 1M+ BTC by December 31, 2026?",
+              "score": 0.8379235129281
+            },
+            {
+              "id": "limitless:33698",
+              "title": "Will stablecoins hit $500B before 2027?",
+              "score": 0.8361265130485505
+            }
+          ],
+          "targetTitle": "When will Bitcoin hit $150k?"
+        },
+        {
+          "targetId": "polymarket:148014",
+          "text": "Levels reached by the SPX index before December ends",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.02206544875605687,
+          "top": [
+            {
+              "id": "polymarket:148014",
+              "title": "What will S&P 500 (SPX) hit by end of December?",
+              "score": 0.8521392660312019
+            },
+            {
+              "id": "polymarket:435099",
+              "title": "Crude Oil all time high by...?",
+              "score": 0.8300738172751451
+            },
+            {
+              "id": "polymarket:770450",
+              "title": "Fed Decision in December?",
+              "score": 0.8298195770684643
+            }
+          ],
+          "targetTitle": "What will S&P 500 (SPX) hit by end of December?"
+        },
+        {
+          "targetId": "polymarket:727186",
+          "text": "Who leads the AI model rankings at the end of September?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.012551979533381719,
+          "top": [
+            {
+              "id": "polymarket:727186",
+              "title": "Which company has the best AI model end of September?",
+              "score": 0.8761130522701601
+            },
+            {
+              "id": "polymarket:727042",
+              "title": "Best Chinese AI Company end of September?",
+              "score": 0.8635610727367784
+            },
+            {
+              "id": "polymarket:841230",
+              "title": "Which company has the best AI model end of October?",
+              "score": 0.8495911944304569
+            }
+          ],
+          "targetTitle": "Which company has the best AI model end of September?"
+        },
+        {
+          "targetId": "polymarket:841230",
+          "text": "Who leads the AI model rankings at the end of October?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.022391066989039476,
+          "top": [
+            {
+              "id": "polymarket:841230",
+              "title": "Which company has the best AI model end of October?",
+              "score": 0.8776844032068195
+            },
+            {
+              "id": "polymarket:727186",
+              "title": "Which company has the best AI model end of September?",
+              "score": 0.85529333621778
+            },
+            {
+              "id": "polymarket:727042",
+              "title": "Best Chinese AI Company end of September?",
+              "score": 0.8398407560994204
+            }
+          ],
+          "targetTitle": "Which company has the best AI model end of October?"
+        },
+        {
+          "targetId": "polymarket:79090",
+          "text": "Who will be the wealthiest individual on the last day of 2026?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.03701996789801598,
+          "top": [
+            {
+              "id": "polymarket:79090",
+              "title": "Richest person on December 31, 2026?",
+              "score": 0.8750201098115061
+            },
+            {
+              "id": "limitless:33109",
+              "title": "US recession by end of 2026?",
+              "score": 0.8380001419134901
+            },
+            {
+              "id": "polymarket:196914",
+              "title": "Largest IPO by market cap in 2026?",
+              "score": 0.8265091136576111
+            }
+          ],
+          "targetTitle": "Richest person on December 31, 2026?"
+        },
+        {
+          "targetId": "limitless:10011866",
+          "text": "How many Starship flights make it to space during 2026?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.06758264715236684,
+          "top": [
+            {
+              "id": "limitless:10011866",
+              "title": "How many SpaceX Starship launches reach space in 2026?",
+              "score": 0.8983114497375477
+            },
+            {
+              "id": "polymarket:79932",
+              "title": "How many different countries will the US conduct military action against in 2026?",
+              "score": 0.8307288025851809
+            },
+            {
+              "id": "limitless:10014377",
+              "title": "How many Semi Trucks will Tesla Produce in a quarter in 2026?",
+              "score": 0.8295828657079102
+            }
+          ],
+          "targetTitle": "How many SpaceX Starship launches reach space in 2026?"
+        },
+        {
+          "targetId": "limitless:10011472",
+          "text": "South Korean yearly inflation rate for 2026",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.05228142121777357,
+          "top": [
+            {
+              "id": "limitless:10011472",
+              "title": "South Korea Annual Inflation 2026",
+              "score": 0.9029064401251599
+            },
+            {
+              "id": "limitless:10013443",
+              "title": "South Korea GDP growth (YoY) in Q3 2026?",
+              "score": 0.8506250189073863
+            },
+            {
+              "id": "polymarket:1034268",
+              "title": "Another Fed rate hike in 2026?",
+              "score": 0.8239800408850184
+            }
+          ],
+          "targetTitle": "South Korea Annual Inflation 2026"
+        },
+        {
+          "targetId": "limitless:10013443",
+          "text": "Korean third quarter 2026 economic growth compared with last year",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.04045406667090845,
+          "top": [
+            {
+              "id": "limitless:10013443",
+              "title": "South Korea GDP growth (YoY) in Q3 2026?",
+              "score": 0.8953282931244105
+            },
+            {
+              "id": "limitless:10011472",
+              "title": "South Korea Annual Inflation 2026",
+              "score": 0.8548742264535021
+            },
+            {
+              "id": "polymarket:166383",
+              "title": "China Annual GDP Growth 2026",
+              "score": 0.8231442302539419
+            }
+          ],
+          "targetTitle": "South Korea GDP growth (YoY) in Q3 2026?"
+        },
+        {
+          "targetId": "limitless:10014437",
+          "text": "US manufacturing purchasing managers ISM index for September 2026",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.051728089092600404,
+          "top": [
+            {
+              "id": "limitless:10014437",
+              "title": "ISM Manufacturing PMI - September 2026",
+              "score": 0.904364870746221
+            },
+            {
+              "id": "limitless:10014423",
+              "title": "PPI YoY - September 2026",
+              "score": 0.8526367816536206
+            },
+            {
+              "id": "limitless:10014083",
+              "title": "What will US Dollar Index (DXY) hit in September 2026?",
+              "score": 0.8440500023390505
+            }
+          ],
+          "targetTitle": "ISM Manufacturing PMI - September 2026"
+        },
+        {
+          "targetId": "limitless:10014386",
+          "text": "August 2026 annual growth in the core personal consumption expenditures index",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.017589897757112172,
+          "top": [
+            {
+              "id": "limitless:10014386",
+              "title": "Core PCE YoY - August 2026",
+              "score": 0.8649543317558647
+            },
+            {
+              "id": "limitless:10014423",
+              "title": "PPI YoY - September 2026",
+              "score": 0.8473644339987525
+            },
+            {
+              "id": "limitless:10014437",
+              "title": "ISM Manufacturing PMI - September 2026",
+              "score": 0.8256290510563072
+            }
+          ],
+          "targetTitle": "Core PCE YoY - August 2026"
+        },
+        {
+          "targetId": "limitless:10014041",
+          "text": "October monetary policy rate announcement from the Korean central bank",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.016421390897064736,
+          "top": [
+            {
+              "id": "limitless:10014041",
+              "title": "Bank of Korea decision in October?",
+              "score": 0.8631528218495645
+            },
+            {
+              "id": "limitless:10014192",
+              "title": "Bank of Korea decision in November?",
+              "score": 0.8467314309524998
+            },
+            {
+              "id": "limitless:10011472",
+              "title": "South Korea Annual Inflation 2026",
+              "score": 0.8405591723410322
+            }
+          ],
+          "targetTitle": "Bank of Korea decision in October?"
+        },
+        {
+          "targetId": "limitless:10014192",
+          "text": "November monetary policy rate announcement from the Korean central bank",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.035602101194616154,
+          "top": [
+            {
+              "id": "limitless:10014192",
+              "title": "Bank of Korea decision in November?",
+              "score": 0.8773870363459126
+            },
+            {
+              "id": "limitless:10011472",
+              "title": "South Korea Annual Inflation 2026",
+              "score": 0.8417849351512965
+            },
+            {
+              "id": "limitless:10014041",
+              "title": "Bank of Korea decision in October?",
+              "score": 0.835333161364639
+            }
+          ],
+          "targetTitle": "Bank of Korea decision in November?"
+        },
+        {
+          "targetId": "limitless:10014382",
+          "text": "British central bank interest rate decision in November",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.04313467709855412,
+          "top": [
+            {
+              "id": "limitless:10014382",
+              "title": "Bank of England decision in November?",
+              "score": 0.8827994653143774
+            },
+            {
+              "id": "limitless:10014192",
+              "title": "Bank of Korea decision in November?",
+              "score": 0.8396647882158232
+            },
+            {
+              "id": "limitless:10014379",
+              "title": "Bank of Brazil decision in November?",
+              "score": 0.8269156586308201
+            }
+          ],
+          "targetTitle": "Bank of England decision in November?"
+        },
+        {
+          "targetId": "limitless:10014384",
+          "text": "October monetary policy decision of the Japanese central bank",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.03544934453562243,
+          "top": [
+            {
+              "id": "limitless:10014384",
+              "title": "Bank of Japan Decision in October?",
+              "score": 0.8758930482029137
+            },
+            {
+              "id": "limitless:10014041",
+              "title": "Bank of Korea decision in October?",
+              "score": 0.8404437036672913
+            },
+            {
+              "id": "limitless:10013448",
+              "title": "Fed Decision in October?",
+              "score": 0.8266307421545186
+            }
+          ],
+          "targetTitle": "Bank of Japan Decision in October?"
+        },
+        {
+          "targetId": "limitless:10014434",
+          "text": "European Central Bank December 2026 interest rate decision",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.02473622686876864,
+          "top": [
+            {
+              "id": "limitless:10014434",
+              "title": "ECB Interest Rates: December 2026",
+              "score": 0.8953591483803883
+            },
+            {
+              "id": "limitless:10014243",
+              "title": "ECB Interest Rates: October 2026",
+              "score": 0.8706229215116197
+            },
+            {
+              "id": "polymarket:1034268",
+              "title": "Another Fed rate hike in 2026?",
+              "score": 0.854122518429907
+            }
+          ],
+          "targetTitle": "ECB Interest Rates: December 2026"
+        },
+        {
+          "targetId": "polymarket:1038330",
+          "text": "How many times is the next MrBeast upload watched in its first day?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.011004447812313356,
+          "top": [
+            {
+              "id": "polymarket:1038330",
+              "title": "# of views of next MrBeast video on day 1?",
+              "score": 0.8653503240931671
+            },
+            {
+              "id": "polymarket:1038622",
+              "title": "# of views of next MrBeast video on week 1?",
+              "score": 0.8543458762808538
+            },
+            {
+              "id": "limitless:134086",
+              "title": "Will ZywOo reach 36 HLTV MVP awards by December 31, 2026?",
+              "score": 0.7923313293534633
+            }
+          ],
+          "targetTitle": "# of views of next MrBeast video on day 1?"
+        },
+        {
+          "targetId": "polymarket:1038622",
+          "text": "View count during the first week of the next MrBeast upload",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.01874091050410487,
+          "top": [
+            {
+              "id": "polymarket:1038622",
+              "title": "# of views of next MrBeast video on week 1?",
+              "score": 0.8875047703912704
+            },
+            {
+              "id": "polymarket:1038330",
+              "title": "# of views of next MrBeast video on day 1?",
+              "score": 0.8687638598871655
+            },
+            {
+              "id": "polymarket:1038683",
+              "title": "Elon Musk # tweets September 19 - September 21, 2026?",
+              "score": 0.7941782058782257
+            }
+          ],
+          "targetTitle": "# of views of next MrBeast video on week 1?"
+        },
+        {
+          "targetId": "polymarket:51456",
+          "text": "Total number of Federal Reserve interest rate reductions during 2026",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.01499308316428416,
+          "top": [
+            {
+              "id": "polymarket:51456",
+              "title": "How many Fed rate cuts in 2026?",
+              "score": 0.8969620223840987
+            },
+            {
+              "id": "polymarket:1034268",
+              "title": "Another Fed rate hike in 2026?",
+              "score": 0.8819689392198146
+            },
+            {
+              "id": "limitless:401183",
+              "title": "Another Fed rate hike in 2026?",
+              "score": 0.8819689357312875
+            }
+          ],
+          "targetTitle": "How many Fed rate cuts in 2026?"
+        },
+        {
+          "targetId": "polymarket:626860",
+          "text": "Total number of Federal Reserve interest rate increases during 2026",
+          "language": "en",
+          "rank": 3,
+          "margin": -0.0251850198909932,
+          "top": [
+            {
+              "id": "polymarket:1034268",
+              "title": "Another Fed rate hike in 2026?",
+              "score": 0.9058225821069533
+            },
+            {
+              "id": "limitless:401183",
+              "title": "Another Fed rate hike in 2026?",
+              "score": 0.9058225804227683
+            },
+            {
+              "id": "polymarket:626860",
+              "title": "How many Fed rate hikes in 2026?",
+              "score": 0.8806375622159601
+            }
+          ],
+          "targetTitle": "How many Fed rate hikes in 2026?"
+        },
+        {
+          "targetId": "polymarket:153719",
+          "text": "Will Bitcoins creator transfer any BTC during 2026?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.05811791463880389,
+          "top": [
+            {
+              "id": "polymarket:153719",
+              "title": "Will Satoshi move any Bitcoin in 2026?",
+              "score": 0.8973509413941371
+            },
+            {
+              "id": "limitless:323731",
+              "title": "Will MicroStrategy announce holding 1M+ BTC by December 31, 2026?",
+              "score": 0.8392330267553332
+            },
+            {
+              "id": "limitless:33547",
+              "title": "US national Bitcoin reserve before 2027?",
+              "score": 0.8261140227636166
+            }
+          ],
+          "targetTitle": "Will Satoshi move any Bitcoin in 2026?"
+        },
+        {
+          "targetId": "polymarket:79905",
+          "text": "Position of 2026 in the historical ranking of warmest years",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.057109190500830964,
+          "top": [
+            {
+              "id": "polymarket:79905",
+              "title": "Where will 2026 rank among the hottest years on record?",
+              "score": 0.8728217737529772
+            },
+            {
+              "id": "limitless:375040",
+              "title": "Will another country leave OPEC in 2026?",
+              "score": 0.8157125832521462
+            },
+            {
+              "id": "limitless:33109",
+              "title": "US recession by end of 2026?",
+              "score": 0.8150216215764877
+            }
+          ],
+          "targetTitle": "Where will 2026 rank among the hottest years on record?"
+        },
+        {
+          "targetId": "polymarket:775267",
+          "text": "Who wins the open competition at the 46th Chess Olympiad?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.11104050022580214,
+          "top": [
+            {
+              "id": "polymarket:775267",
+              "title": "46th FIDE Chess Olympiad Open Tournament Winner",
+              "score": 0.8992299148643911
+            },
+            {
+              "id": "polymarket:478299",
+              "title": "2026 World Chess Championship: Winner",
+              "score": 0.7881894146385889
+            },
+            {
+              "id": "limitless:252242",
+              "title": "FIFA U-15 Tournament: Israel U-15 vs Palestine U-15 Opening Match?",
+              "score": 0.7692814450399814
+            }
+          ],
+          "targetTitle": "46th FIDE Chess Olympiad Open Tournament Winner"
+        },
+        {
+          "targetId": "polymarket:281143",
+          "text": "Will a Chinese invasion of Taiwan happen by September 30 2026?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.025110601544001132,
+          "top": [
+            {
+              "id": "polymarket:281143",
+              "title": "Will China invade Taiwan by September 30, 2026?",
+              "score": 0.9529393620846736
+            },
+            {
+              "id": "limitless:36812",
+              "title": "Will China invade Taiwan by end of 2026?",
+              "score": 0.9278287605406724
+            },
+            {
+              "id": "polymarket:34044",
+              "title": "Will China invade Taiwan by end of 2026?",
+              "score": 0.9278287592008727
+            }
+          ],
+          "targetTitle": "Will China invade Taiwan by September 30, 2026?"
+        }
+      ],
+      "similarRows": [
+        {
+          "query": "Will the Federal Reserve cut interest rates in September 2026?",
+          "targetId": "similar-0:0",
+          "rank": 3,
+          "margin": -0.044411808793334506,
+          "top": [
+            {
+              "id": "similar-0:1",
+              "title": "Will the Fed cut rates in December 2026?",
+              "score": 0.9623908511642313
+            },
+            {
+              "id": "similar-0:2",
+              "title": "Will the ECB cut interest rates in September 2026?",
+              "score": 0.9581264205466432
+            },
+            {
+              "id": "similar-0:0",
+              "title": "September 2026 FOMC: a lower target rate at the meeting?",
+              "score": 0.9179790423708968
+            }
+          ],
+          "targetTitle": "September 2026 FOMC: a lower target rate at the meeting?"
+        },
+        {
+          "query": "Will Bitcoin close above $100,000 on September 30, 2026?",
+          "targetId": "similar-1:0",
+          "rank": 2,
+          "margin": -0.03281797766382255,
+          "top": [
+            {
+              "id": "similar-1:1",
+              "title": "Will Bitcoin touch $100,000 at any time in September 2026?",
+              "score": 0.9858228655966735
+            },
+            {
+              "id": "similar-1:0",
+              "title": "BTC September 30 2026 closing price greater than 100k dollars?",
+              "score": 0.953004887932851
+            },
+            {
+              "id": "similar-1:2",
+              "title": "Will Ethereum close above $5,000 on September 30, 2026?",
+              "score": 0.9441008359044681
+            }
+          ],
+          "targetTitle": "BTC September 30 2026 closing price greater than 100k dollars?"
+        },
+        {
+          "query": "Who wins the 2028 US presidential election?",
+          "targetId": "similar-2:0",
+          "rank": 2,
+          "margin": -0.007178359489295683,
+          "top": [
+            {
+              "id": "similar-2:1",
+              "title": "Who wins the Republican presidential nomination in 2028?",
+              "score": 0.9647593499448262
+            },
+            {
+              "id": "similar-2:0",
+              "title": "Next president elected in the United States in November 2028?",
+              "score": 0.9575809904555305
+            },
+            {
+              "id": "similar-2:2",
+              "title": "Who wins the 2026 US House elections?",
+              "score": 0.9114091016744466
+            }
+          ],
+          "targetTitle": "Next president elected in the United States in November 2028?"
+        },
+        {
+          "query": "Los Angeles Dodgers vs Cincinnati Reds: first five innings winner on September 14, 2026",
+          "targetId": "similar-3:0",
+          "rank": 2,
+          "margin": -0.014274537850717861,
+          "top": [
+            {
+              "id": "similar-3:2",
+              "title": "Dodgers vs Reds first five innings winner September 15, 2026",
+              "score": 0.9796508579686616
+            },
+            {
+              "id": "similar-3:0",
+              "title": "Dodgers versus Reds September 14 2026: lead after five innings?",
+              "score": 0.9653763201179437
+            },
+            {
+              "id": "similar-3:1",
+              "title": "Dodgers vs Reds full game winner September 14, 2026",
+              "score": 0.960371157223837
+            }
+          ],
+          "targetTitle": "Dodgers versus Reds September 14 2026: lead after five innings?"
+        },
+        {
+          "query": "Cape Town highest temperature on September 15, 2026: 18 degrees Celsius",
+          "targetId": "similar-4:0",
+          "rank": 3,
+          "margin": -0.018126579774475293,
+          "top": [
+            {
+              "id": "similar-4:2",
+              "title": "Cape Town highest temperature September 16 2026: 18 C",
+              "score": 0.9828899940807543
+            },
+            {
+              "id": "similar-4:1",
+              "title": "Cape Town lowest temperature September 15 2026: 18 C",
+              "score": 0.9699639615902179
+            },
+            {
+              "id": "similar-4:0",
+              "title": "Cape Town maximum temperature 15 September 2026 equals 18 C?",
+              "score": 0.964763414306279
+            }
+          ],
+          "targetTitle": "Cape Town maximum temperature 15 September 2026 equals 18 C?"
+        },
+        {
+          "query": "Will SpaceX launch Starship before October 1, 2026?",
+          "targetId": "similar-5:0",
+          "rank": 2,
+          "margin": -0.016132689831019564,
+          "top": [
+            {
+              "id": "similar-5:1",
+              "title": "Will SpaceX successfully land Starship before October 1 2026?",
+              "score": 0.9801694358973237
+            },
+            {
+              "id": "similar-5:0",
+              "title": "Starship liftoff before the start of October 2026?",
+              "score": 0.9640367460663042
+            },
+            {
+              "id": "similar-5:2",
+              "title": "Will Blue Origin launch New Glenn before October 1 2026?",
+              "score": 0.9266775560938494
+            }
+          ],
+          "targetTitle": "Starship liftoff before the start of October 2026?"
+        },
+        {
+          "query": "Will US annual CPI inflation exceed 3 percent in August 2026?",
+          "targetId": "similar-6:0",
+          "rank": 1,
+          "margin": 0.01337815697791811,
+          "top": [
+            {
+              "id": "similar-6:0",
+              "title": "August 2026 United States year-over-year consumer inflation above 3%?",
+              "score": 0.9552040100433621
+            },
+            {
+              "id": "similar-6:1",
+              "title": "US August 2026 core CPI year-over-year above 3%",
+              "score": 0.941825853065444
+            },
+            {
+              "id": "similar-6:2",
+              "title": "US August 2026 monthly CPI above 0.3%",
+              "score": 0.9221892504751614
+            }
+          ],
+          "targetTitle": "August 2026 United States year-over-year consumer inflation above 3%?"
+        },
+        {
+          "query": "Will the UK hold a general election before 2028?",
+          "targetId": "similar-7:0",
+          "rank": 3,
+          "margin": -0.038319211745732384,
+          "top": [
+            {
+              "id": "similar-7:2",
+              "title": "Will France hold a general election before 2028?",
+              "score": 0.9451656626354848
+            },
+            {
+              "id": "similar-7:1",
+              "title": "Who wins the next UK general election?",
+              "score": 0.9156436410056283
+            },
+            {
+              "id": "similar-7:0",
+              "title": "British parliamentary general election during 2026 or 2027?",
+              "score": 0.9068464508897525
+            }
+          ],
+          "targetTitle": "British parliamentary general election during 2026 or 2027?"
+        },
+        {
+          "query": "Will Ethereum ETF net inflows exceed $1 billion in September 2026?",
+          "targetId": "similar-8:0",
+          "rank": 3,
+          "margin": -0.014373009277056426,
+          "top": [
+            {
+              "id": "similar-8:2",
+              "title": "Ethereum ETF assets under management above $1 billion September 2026",
+              "score": 0.9444765113870446
+            },
+            {
+              "id": "similar-8:1",
+              "title": "Bitcoin ETF net inflows above $1 billion September 2026",
+              "score": 0.9387251589034982
+            },
+            {
+              "id": "similar-8:0",
+              "title": "ETH exchange traded funds September 2026 net subscriptions greater than one billion dollars?",
+              "score": 0.9301035021099882
+            }
+          ],
+          "targetTitle": "ETH exchange traded funds September 2026 net subscriptions greater than one billion dollars?"
+        },
+        {
+          "query": "Will the US government shut down on October 1, 2026?",
+          "targetId": "similar-9:0",
+          "rank": 3,
+          "margin": -0.06063114271726544,
+          "top": [
+            {
+              "id": "similar-9:2",
+              "title": "Will the government shut down on October 1 2027?",
+              "score": 0.9758319023676375
+            },
+            {
+              "id": "similar-9:1",
+              "title": "Will the US default on its debt in October 2026?",
+              "score": 0.9495171844213018
+            },
+            {
+              "id": "similar-9:0",
+              "title": "Federal government funding lapse at the start of October 2026?",
+              "score": 0.9152007596503721
+            }
+          ],
+          "targetTitle": "Federal government funding lapse at the start of October 2026?"
+        },
+        {
+          "query": "Will Nvidia report quarterly revenue above $50 billion in Q3 fiscal 2027?",
+          "targetId": "similar-10:0",
+          "rank": 2,
+          "margin": -0.0071674329683733,
+          "top": [
+            {
+              "id": "similar-10:1",
+              "title": "Nvidia Q3 fiscal 2027 net income above $50 billion",
+              "score": 0.9513172965833
+            },
+            {
+              "id": "similar-10:0",
+              "title": "NVDA fiscal 2027 third quarter sales exceed fifty billion dollars?",
+              "score": 0.9441498636149267
+            },
+            {
+              "id": "similar-10:2",
+              "title": "Nvidia Q4 fiscal 2027 revenue above $50 billion",
+              "score": 0.9365573074493507
+            }
+          ],
+          "targetTitle": "NVDA fiscal 2027 third quarter sales exceed fifty billion dollars?"
+        },
+        {
+          "query": "Will Japan raise its policy interest rate at the October 2026 meeting?",
+          "targetId": "similar-11:0",
+          "rank": 1,
+          "margin": 0.05659699362981363,
+          "top": [
+            {
+              "id": "similar-11:0",
+              "title": "Bank of Japan October 2026 monetary policy meeting rate hike?",
+              "score": 0.9661700004861494
+            },
+            {
+              "id": "similar-11:1",
+              "title": "Bank of Japan December 2026 rate increase",
+              "score": 0.9095730068563358
+            },
+            {
+              "id": "similar-0:2",
+              "title": "Will the ECB cut interest rates in September 2026?",
+              "score": 0.9050569728107308
+            }
+          ],
+          "targetTitle": "Bank of Japan October 2026 monetary policy meeting rate hike?"
+        }
+      ]
+    },
+    {
+      "name": "diagnostic-cleanfields-passage",
+      "generation": {
+        "id": "g-967f94827cf442f1ded0",
+        "model": "intfloat/e5-large-v2",
+        "dimensions": 1024,
+        "textVersion": "clean-v1",
+        "adapterVersion": "e5-query-v1"
+      },
+      "batches": [
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 2558,
+          "costUsd": 0.00002558,
+          "elapsedMs": 2112
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 2375,
+          "costUsd": 0.00002375,
+          "elapsedMs": 2407
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 2475,
+          "costUsd": 0.00002475,
+          "elapsedMs": 2100
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 2848,
+          "costUsd": 0.00002848,
+          "elapsedMs": 2049
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 2271,
+          "costUsd": 0.00002271,
+          "elapsedMs": 2108
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 2594,
+          "costUsd": 0.00002594,
+          "elapsedMs": 2579
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 2823,
+          "costUsd": 0.00002823,
+          "elapsedMs": 2108
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 1316,
+          "costUsd": 0.00001316,
+          "elapsedMs": 1548
+        }
+      ],
+      "mapSummary": {
+        "queries": 48,
+        "rank1": 30,
+        "rank3": 36,
+        "recall1": 0.625,
+        "recall3": 0.75,
+        "mrr": 0.6937843320843383,
+        "meanMargin": 0.00995400615351569
+      },
+      "mapEnglishSummary": {
+        "queries": 36,
+        "rank1": 29,
+        "rank3": 35,
+        "recall1": 0.8055555555555556,
+        "recall3": 0.9722222222222222,
+        "mrr": 0.8773148148148148,
+        "meanMargin": 0.021401359455509722
+      },
+      "mapRussianSummary": {
+        "queries": 12,
+        "rank1": 1,
+        "rank3": 1,
+        "recall1": 0.08333333333333333,
+        "recall3": 0.08333333333333333,
+        "mrr": 0.1431928838929089,
+        "meanMargin": -0.024388053752466405
+      },
+      "similarSummary": {
+        "queries": 12,
+        "rank1": 2,
+        "rank3": 11,
+        "recall1": 0.16666666666666666,
+        "recall3": 0.9166666666666666,
+        "mrr": 0.4791666666666666,
+        "meanMargin": -0.017224240436543487
+      },
+      "mapRows": [
+        {
+          "targetId": "polymarket:45915",
+          "text": "Who is going to become president of Brazil?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.001144724495269478,
+          "top": [
+            {
+              "id": "polymarket:45915",
+              "title": "Brazil Presidential Election",
+              "score": 0.8414137517852072
+            },
+            {
+              "id": "polymarket:864492",
+              "title": "Brazil Presidential Election First Round: 1st Place in Rio Grande do Sul",
+              "score": 0.8402690272899377
+            },
+            {
+              "id": "polymarket:864488",
+              "title": "Brazil Presidential Election First Round: 1st Place in Rio de Janeiro",
+              "score": 0.8399975265465659
+            }
+          ],
+          "targetTitle": "Brazil Presidential Election"
+        },
+        {
+          "targetId": "polymarket:45915",
+          "text": "Кто победит на президентских выборах в Бразилии?",
+          "language": "ru",
+          "rank": 445,
+          "margin": -0.04522828613278851,
+          "top": [
+            {
+              "id": "polymarket:951022",
+              "title": "Which parties will win at least one seat in the next Russian State Duma election?",
+              "score": 0.7815632776593974
+            },
+            {
+              "id": "polymarket:810896",
+              "title": "Russia Elections: United Russia Wins Every Region?",
+              "score": 0.776176404424322
+            },
+            {
+              "id": "polymarket:474389",
+              "title": "Which cities will Russia enter by December 31?",
+              "score": 0.7709554917705272
+            }
+          ],
+          "targetTitle": "Brazil Presidential Election"
+        },
+        {
+          "targetId": "polymarket:743544",
+          "text": "Who will become mayor of Lima?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.057647417475575446,
+          "top": [
+            {
+              "id": "polymarket:743544",
+              "title": "Lima Mayoral Election Winner",
+              "score": 0.8470433708519975
+            },
+            {
+              "id": "polymarket:839293",
+              "title": "Trujillo Mayoral Election Winner",
+              "score": 0.7893959533764221
+            },
+            {
+              "id": "polymarket:839288",
+              "title": "Maynas Mayoral Election Winner",
+              "score": 0.7867018071770437
+            }
+          ],
+          "targetTitle": "Lima Mayoral Election Winner"
+        },
+        {
+          "targetId": "polymarket:743544",
+          "text": "Кто станет мэром Лимы?",
+          "language": "ru",
+          "rank": 772,
+          "margin": -0.06455441792166505,
+          "top": [
+            {
+              "id": "polymarket:951022",
+              "title": "Which parties will win at least one seat in the next Russian State Duma election?",
+              "score": 0.7754637065962631
+            },
+            {
+              "id": "polymarket:951073",
+              "title": "How many seats will New People (NL) win in the next Russian legislative election?",
+              "score": 0.7725504152756745
+            },
+            {
+              "id": "limitless:332630",
+              "title": "Premier League manager to be sacked by December 31, 2026",
+              "score": 0.7703150715996623
+            }
+          ],
+          "targetTitle": "Lima Mayoral Election Winner"
+        },
+        {
+          "targetId": "polymarket:531333",
+          "text": "Which contenders qualify for the runoff in the next French presidential vote?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.00042856775829092086,
+          "top": [
+            {
+              "id": "polymarket:531333",
+              "title": "Next French Presidential Election: who will advance to the 2nd round?",
+              "score": 0.8339023097414067
+            },
+            {
+              "id": "limitless:10000454",
+              "title": "Next French Presidential Election",
+              "score": 0.8334737419831157
+            },
+            {
+              "id": "polymarket:79987",
+              "title": "Next French Presidential Election",
+              "score": 0.8226623388136728
+            }
+          ],
+          "targetTitle": "Next French Presidential Election: who will advance to the 2nd round?"
+        },
+        {
+          "targetId": "polymarket:531333",
+          "text": "Кто выйдет во второй тур следующих президентских выборов во Франции?",
+          "language": "ru",
+          "rank": 13,
+          "margin": -0.0077135191151320726,
+          "top": [
+            {
+              "id": "limitless:33151",
+              "title": "Theo FDV above $100M one day after launch?",
+              "score": 0.7892235762426395
+            },
+            {
+              "id": "limitless:33149",
+              "title": "Theo FDV above $700M one day after launch?",
+              "score": 0.7888309684653537
+            },
+            {
+              "id": "limitless:36723",
+              "title": "Will Trump acquire Greenland before 2027?",
+              "score": 0.7873029470744253
+            }
+          ],
+          "targetTitle": "Next French Presidential Election: who will advance to the 2nd round?"
+        },
+        {
+          "targetId": "polymarket:378769",
+          "text": "Who gets the Democratic vice presidential nomination for 2028?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.00019796064374177913,
+          "top": [
+            {
+              "id": "polymarket:378769",
+              "title": "Democratic VP Nominee 2028",
+              "score": 0.8386160598816609
+            },
+            {
+              "id": "limitless:10000447",
+              "title": "Democratic Presidential Nominee 2028",
+              "score": 0.8384180992379191
+            },
+            {
+              "id": "polymarket:30829",
+              "title": "Democratic Presidential Nominee 2028",
+              "score": 0.8275874830016428
+            }
+          ],
+          "targetTitle": "Democratic VP Nominee 2028"
+        },
+        {
+          "targetId": "polymarket:378769",
+          "text": "Кого демократы выдвинут в вице-президенты в 2028 году?",
+          "language": "ru",
+          "rank": 33,
+          "margin": -0.013970114491787533,
+          "top": [
+            {
+              "id": "polymarket:33228",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.8003687361018252
+            },
+            {
+              "id": "limitless:10000456",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.8003282582210489
+            },
+            {
+              "id": "polymarket:131586",
+              "title": "Jeffrey Epstein confirmed to be alive before 2027?",
+              "score": 0.7990639189693187
+            }
+          ],
+          "targetTitle": "Democratic VP Nominee 2028"
+        },
+        {
+          "targetId": "limitless:10000447",
+          "text": "Who becomes the Democrats presidential candidate in 2028?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.017849466575952766,
+          "top": [
+            {
+              "id": "limitless:10000447",
+              "title": "Democratic Presidential Nominee 2028",
+              "score": 0.8606449978586919
+            },
+            {
+              "id": "polymarket:30829",
+              "title": "Democratic Presidential Nominee 2028",
+              "score": 0.8427955312827391
+            },
+            {
+              "id": "polymarket:378769",
+              "title": "Democratic VP Nominee 2028",
+              "score": 0.8380444780127156
+            }
+          ],
+          "targetTitle": "Democratic Presidential Nominee 2028"
+        },
+        {
+          "targetId": "limitless:10000447",
+          "text": "Кто станет кандидатом демократов в президенты в 2028?",
+          "language": "ru",
+          "rank": 10,
+          "margin": -0.008291491903414161,
+          "top": [
+            {
+              "id": "limitless:33548",
+              "title": "US national Ethereum reserve before 2027?",
+              "score": 0.7988460149980323
+            },
+            {
+              "id": "limitless:10000449",
+              "title": "Presidential Election Winner 2028",
+              "score": 0.7946138307798473
+            },
+            {
+              "id": "limitless:375068",
+              "title": "Crypto Market Structure legislation becomes law in 2026?",
+              "score": 0.79445908125236
+            }
+          ],
+          "targetTitle": "Democratic Presidential Nominee 2028"
+        },
+        {
+          "targetId": "limitless:10013328",
+          "text": "Which political party takes control of the Senate in 2026?",
+          "language": "en",
+          "rank": 2,
+          "margin": -1.07914299718459e-9,
+          "top": [
+            {
+              "id": "polymarket:32224",
+              "title": "Which party will win the Senate in 2026?",
+              "score": 0.8183420702580694
+            },
+            {
+              "id": "limitless:10013328",
+              "title": "Which party will win the Senate in 2026?",
+              "score": 0.8183420691789264
+            },
+            {
+              "id": "limitless:36816",
+              "title": "Netanyahu out by end of 2026?",
+              "score": 0.804238241238167
+            }
+          ],
+          "targetTitle": "Which party will win the Senate in 2026?"
+        },
+        {
+          "targetId": "limitless:10013328",
+          "text": "Какая партия выиграет Сенат в 2026 году?",
+          "language": "ru",
+          "rank": 191,
+          "margin": -0.049629346626273385,
+          "top": [
+            {
+              "id": "polymarket:448037",
+              "title": "Hantavirus pandemic in 2026?",
+              "score": 0.8242207557536302
+            },
+            {
+              "id": "limitless:332631",
+              "title": "Messi to play for Argentina again after the 2026 WC by Dec 31, 2026",
+              "score": 0.813290788159604
+            },
+            {
+              "id": "polymarket:871869",
+              "title": "English Premier League: Top Goalscorer 2026-27",
+              "score": 0.8104224936676518
+            }
+          ],
+          "targetTitle": "Which party will win the Senate in 2026?"
+        },
+        {
+          "targetId": "polymarket:57672",
+          "text": "Who wins the race for the Texas Senate seat?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.05490530939207405,
+          "top": [
+            {
+              "id": "polymarket:57672",
+              "title": "Texas Senate Election Winner",
+              "score": 0.8731705811802437
+            },
+            {
+              "id": "polymarket:769205",
+              "title": "Which Senate races will be within 5%?",
+              "score": 0.8182652717881697
+            },
+            {
+              "id": "polymarket:57664",
+              "title": "North Carolina Senate Election Winner",
+              "score": 0.8128009952561165
+            }
+          ],
+          "targetTitle": "Texas Senate Election Winner"
+        },
+        {
+          "targetId": "polymarket:57672",
+          "text": "Кто победит на выборах в Сенат от Техаса?",
+          "language": "ru",
+          "rank": 785,
+          "margin": -0.06191853528487723,
+          "top": [
+            {
+              "id": "limitless:46944",
+              "title": "Will Thorin appear as an analyst at an S-Tier CS tournament in 2026?",
+              "score": 0.7797088707362037
+            },
+            {
+              "id": "polymarket:448037",
+              "title": "Hantavirus pandemic in 2026?",
+              "score": 0.7778370939216026
+            },
+            {
+              "id": "limitless:343467",
+              "title": "New case or terminal to be added in the game by the end of September?",
+              "score": 0.7763923773353247
+            }
+          ],
+          "targetTitle": "Texas Senate Election Winner"
+        },
+        {
+          "targetId": "polymarket:715392",
+          "text": "Which person tops Google searches for the year 2026?",
+          "language": "en",
+          "rank": 4,
+          "margin": -0.0053744725772026936,
+          "top": [
+            {
+              "id": "polymarket:718982",
+              "title": "#1 Searched Actor on Google 2026?",
+              "score": 0.8265825889285788
+            },
+            {
+              "id": "polymarket:779081",
+              "title": "#1 Searched Person on Google in the US 2026?",
+              "score": 0.8252194235580879
+            },
+            {
+              "id": "polymarket:715394",
+              "title": "#1 Searched Passing on Google 2026?",
+              "score": 0.8228753214486038
+            }
+          ],
+          "targetTitle": "#1 Searched Person on Google 2026?"
+        },
+        {
+          "targetId": "polymarket:715392",
+          "text": "Кого чаще всего будут искать в Google в 2026 году?",
+          "language": "ru",
+          "rank": 9,
+          "margin": -0.01129692040313679,
+          "top": [
+            {
+              "id": "limitless:54009",
+              "title": "Will Stripe acquire Paypal in 2026?",
+              "score": 0.8199747140815753
+            },
+            {
+              "id": "polymarket:779078",
+              "title": "#1 Searched Movie on Google 2026?",
+              "score": 0.8181174375537512
+            },
+            {
+              "id": "polymarket:715394",
+              "title": "#1 Searched Passing on Google 2026?",
+              "score": 0.8175095192112758
+            }
+          ],
+          "targetTitle": "#1 Searched Person on Google 2026?"
+        },
+        {
+          "targetId": "limitless:399068",
+          "text": "Will the Man City Sunderland game have at least three goals?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.005003797881463878,
+          "top": [
+            {
+              "id": "limitless:399068",
+              "title": "Manchester City and Sunderland have 3 or more total goals?",
+              "score": 0.8928244265845467
+            },
+            {
+              "id": "limitless:399072",
+              "title": "Manchester City and Sunderland both to score?",
+              "score": 0.8878206287030829
+            },
+            {
+              "id": "limitless:399041",
+              "title": "Sunderland to win by 2 or more goals vs Manchester City?",
+              "score": 0.8738966040792862
+            }
+          ],
+          "targetTitle": "Manchester City and Sunderland have 3 or more total goals?"
+        },
+        {
+          "targetId": "limitless:399068",
+          "text": "Будет ли минимум три гола в матче Манчестер Сити против Сандерленда?",
+          "language": "ru",
+          "rank": 4,
+          "margin": -0.0033600439960289608,
+          "top": [
+            {
+              "id": "limitless:399066",
+              "title": "Valencia and Real Sociedad have 3 or more total goals?",
+              "score": 0.8140494301214983
+            },
+            {
+              "id": "limitless:399063",
+              "title": "Atletico Madrid and Real Madrid have 3 or more total goals?",
+              "score": 0.8119603320211742
+            },
+            {
+              "id": "limitless:391825",
+              "title": "Levante and Athletic Club have 3 or more total goals?",
+              "score": 0.8117887522865531
+            }
+          ],
+          "targetTitle": "Manchester City and Sunderland have 3 or more total goals?"
+        },
+        {
+          "targetId": "limitless:399056",
+          "text": "Can Leeds beat Crystal Palace by a margin of at least two?",
+          "language": "en",
+          "rank": 3,
+          "margin": -0.002764069343031861,
+          "top": [
+            {
+              "id": "limitless:399073",
+              "title": "Leeds and Crystal Palace both to score?",
+              "score": 0.8926495477016525
+            },
+            {
+              "id": "limitless:399069",
+              "title": "Leeds and Crystal Palace have 3 or more total goals?",
+              "score": 0.8910632049331062
+            },
+            {
+              "id": "limitless:399056",
+              "title": "Leeds to win by 2 or more goals vs Crystal Palace?",
+              "score": 0.8898854783586206
+            }
+          ],
+          "targetTitle": "Leeds to win by 2 or more goals vs Crystal Palace?"
+        },
+        {
+          "targetId": "limitless:399056",
+          "text": "Победит ли Лидс Кристал Пэлас с разницей минимум два мяча?",
+          "language": "ru",
+          "rank": 8,
+          "margin": -0.010424431931829847,
+          "top": [
+            {
+              "id": "limitless:399041",
+              "title": "Sunderland to win by 2 or more goals vs Manchester City?",
+              "score": 0.7904913145148977
+            },
+            {
+              "id": "polymarket:951022",
+              "title": "Which parties will win at least one seat in the next Russian State Duma election?",
+              "score": 0.7871177305268784
+            },
+            {
+              "id": "limitless:399055",
+              "title": "Manchester City to win by 2 or more goals vs Sunderland?",
+              "score": 0.7864883729609226
+            }
+          ],
+          "targetTitle": "Leeds to win by 2 or more goals vs Crystal Palace?"
+        },
+        {
+          "targetId": "limitless:10006818",
+          "text": "Who takes the English Premier League title in the 2026-27 season?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.011667816541023557,
+          "top": [
+            {
+              "id": "limitless:10006818",
+              "title": "2026/27 English Premier League Winner",
+              "score": 0.8515101250676084
+            },
+            {
+              "id": "limitless:177457",
+              "title": "Tottenham to finish the 2026/27 Premier League season in the Top 3",
+              "score": 0.8398423085265848
+            },
+            {
+              "id": "limitless:10014251",
+              "title": "English Premier League Top 4 Finishers (2026-27)",
+              "score": 0.8397743024109922
+            }
+          ],
+          "targetTitle": "2026/27 English Premier League Winner"
+        },
+        {
+          "targetId": "limitless:10006818",
+          "text": "Кто выиграет английскую Премьер-лигу в сезоне 2026/27?",
+          "language": "ru",
+          "rank": 1,
+          "margin": 0.00009921376296695428,
+          "top": [
+            {
+              "id": "limitless:10006818",
+              "title": "2026/27 English Premier League Winner",
+              "score": 0.8324484605036456
+            },
+            {
+              "id": "limitless:177457",
+              "title": "Tottenham to finish the 2026/27 Premier League season in the Top 3",
+              "score": 0.8323492467406787
+            },
+            {
+              "id": "polymarket:871869",
+              "title": "English Premier League: Top Goalscorer 2026-27",
+              "score": 0.83033019235374
+            }
+          ],
+          "targetTitle": "2026/27 English Premier League Winner"
+        },
+        {
+          "targetId": "limitless:10014425",
+          "text": "Which driver qualifies on pole at the Azerbaijan GP?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.04460976976155484,
+          "top": [
+            {
+              "id": "limitless:10014425",
+              "title": "Azerbaijan Grand Prix: Driver Pole Position",
+              "score": 0.8679864150835357
+            },
+            {
+              "id": "limitless:10014426",
+              "title": "Azerbaijan Grand Prix: Driver Podium Finish",
+              "score": 0.8233766453219808
+            },
+            {
+              "id": "polymarket:925483",
+              "title": "Azerbaijan Grand Prix: Driver Winner",
+              "score": 0.8179409638595301
+            }
+          ],
+          "targetTitle": "Azerbaijan Grand Prix: Driver Pole Position"
+        },
+        {
+          "targetId": "limitless:10014425",
+          "text": "Кто возьмёт поул на Гран-при Азербайджана?",
+          "language": "ru",
+          "rank": 67,
+          "margin": -0.016368750985630287,
+          "top": [
+            {
+              "id": "limitless:373857",
+              "title": "Will the U.S. invade Iran before 2027?",
+              "score": 0.7780798203630903
+            },
+            {
+              "id": "polymarket:73130",
+              "title": "Will the U.S. invade Iran before 2027?",
+              "score": 0.7780798173952478
+            },
+            {
+              "id": "limitless:403760",
+              "title": "Antigua and Barbuda Falcons vs Jamaica Kingsmen",
+              "score": 0.7747269809634794
+            }
+          ],
+          "targetTitle": "Azerbaijan Grand Prix: Driver Pole Position"
+        },
+        {
+          "targetId": "limitless:10014426",
+          "text": "Which drivers finish in the top three at the Azerbaijan Grand Prix?",
+          "language": "en",
+          "rank": 2,
+          "margin": -0.0084746469589978,
+          "top": [
+            {
+              "id": "limitless:10014425",
+              "title": "Azerbaijan Grand Prix: Driver Pole Position",
+              "score": 0.8497893646685653
+            },
+            {
+              "id": "limitless:10014426",
+              "title": "Azerbaijan Grand Prix: Driver Podium Finish",
+              "score": 0.8413147177095675
+            },
+            {
+              "id": "polymarket:925483",
+              "title": "Azerbaijan Grand Prix: Driver Winner",
+              "score": 0.8397190249573975
+            }
+          ],
+          "targetTitle": "Azerbaijan Grand Prix: Driver Podium Finish"
+        },
+        {
+          "targetId": "polymarket:36173",
+          "text": "At what point will BTC reach one hundred fifty thousand dollars?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.019770977914134402,
+          "top": [
+            {
+              "id": "polymarket:36173",
+              "title": "When will Bitcoin hit $150k?",
+              "score": 0.8451930786231976
+            },
+            {
+              "id": "limitless:10014082",
+              "title": "STRC hits $100 by…",
+              "score": 0.8254221007090632
+            },
+            {
+              "id": "polymarket:1043486",
+              "title": "Bitcoin above ___ on September 25?",
+              "score": 0.8252835893707144
+            }
+          ],
+          "targetTitle": "When will Bitcoin hit $150k?"
+        },
+        {
+          "targetId": "polymarket:148014",
+          "text": "Levels reached by the SPX index before December ends",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.034158799692218134,
+          "top": [
+            {
+              "id": "polymarket:148014",
+              "title": "What will S&P 500 (SPX) hit by end of December?",
+              "score": 0.8528795350998544
+            },
+            {
+              "id": "polymarket:770450",
+              "title": "Fed Decision in December?",
+              "score": 0.8187207354076362
+            },
+            {
+              "id": "polymarket:435099",
+              "title": "Crude Oil all time high by...?",
+              "score": 0.8102471258536668
+            }
+          ],
+          "targetTitle": "What will S&P 500 (SPX) hit by end of December?"
+        },
+        {
+          "targetId": "polymarket:727186",
+          "text": "Who leads the AI model rankings at the end of September?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.00977592862496468,
+          "top": [
+            {
+              "id": "polymarket:727186",
+              "title": "Which company has the best AI model end of September?",
+              "score": 0.820625315146961
+            },
+            {
+              "id": "polymarket:727042",
+              "title": "Best Chinese AI Company end of September?",
+              "score": 0.8108493865219963
+            },
+            {
+              "id": "polymarket:841230",
+              "title": "Which company has the best AI model end of October?",
+              "score": 0.8023345884625153
+            }
+          ],
+          "targetTitle": "Which company has the best AI model end of September?"
+        },
+        {
+          "targetId": "polymarket:841230",
+          "text": "Who leads the AI model rankings at the end of October?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.012555420547784024,
+          "top": [
+            {
+              "id": "polymarket:841230",
+              "title": "Which company has the best AI model end of October?",
+              "score": 0.8242779806381316
+            },
+            {
+              "id": "polymarket:727186",
+              "title": "Which company has the best AI model end of September?",
+              "score": 0.8117225600903476
+            },
+            {
+              "id": "polymarket:727042",
+              "title": "Best Chinese AI Company end of September?",
+              "score": 0.8035546640242647
+            }
+          ],
+          "targetTitle": "Which company has the best AI model end of October?"
+        },
+        {
+          "targetId": "polymarket:79090",
+          "text": "Who will be the wealthiest individual on the last day of 2026?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.049597182655776395,
+          "top": [
+            {
+              "id": "polymarket:79090",
+              "title": "Richest person on December 31, 2026?",
+              "score": 0.8734205101227257
+            },
+            {
+              "id": "polymarket:237598",
+              "title": "Iran leader end of 2026?",
+              "score": 0.8238233274669493
+            },
+            {
+              "id": "limitless:33109",
+              "title": "US recession by end of 2026?",
+              "score": 0.8229350199259639
+            }
+          ],
+          "targetTitle": "Richest person on December 31, 2026?"
+        },
+        {
+          "targetId": "limitless:10011866",
+          "text": "How many Starship flights make it to space during 2026?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.018694929581084985,
+          "top": [
+            {
+              "id": "limitless:10011866",
+              "title": "How many SpaceX Starship launches reach space in 2026?",
+              "score": 0.8367954211234444
+            },
+            {
+              "id": "limitless:10006670",
+              "title": "AST SpaceMobile BlueBird satellites in orbit above __ in Q4 2026?",
+              "score": 0.8181004915423594
+            },
+            {
+              "id": "polymarket:79932",
+              "title": "How many different countries will the US conduct military action against in 2026?",
+              "score": 0.8066993165852403
+            }
+          ],
+          "targetTitle": "How many SpaceX Starship launches reach space in 2026?"
+        },
+        {
+          "targetId": "limitless:10011472",
+          "text": "South Korean yearly inflation rate for 2026",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.033777511480051925,
+          "top": [
+            {
+              "id": "limitless:10011472",
+              "title": "South Korea Annual Inflation 2026",
+              "score": 0.8724460241617457
+            },
+            {
+              "id": "limitless:10013443",
+              "title": "South Korea GDP growth (YoY) in Q3 2026?",
+              "score": 0.8386685126816937
+            },
+            {
+              "id": "limitless:10014441",
+              "title": "What will South Korea ETF (EWY) hit Week of September 21 2026?",
+              "score": 0.8260955758171499
+            }
+          ],
+          "targetTitle": "South Korea Annual Inflation 2026"
+        },
+        {
+          "targetId": "limitless:10013443",
+          "text": "Korean third quarter 2026 economic growth compared with last year",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.049197512702793156,
+          "top": [
+            {
+              "id": "limitless:10013443",
+              "title": "South Korea GDP growth (YoY) in Q3 2026?",
+              "score": 0.8814898257477485
+            },
+            {
+              "id": "limitless:10011472",
+              "title": "South Korea Annual Inflation 2026",
+              "score": 0.8322923130449553
+            },
+            {
+              "id": "limitless:10014386",
+              "title": "Core PCE YoY - August 2026",
+              "score": 0.8141565067031926
+            }
+          ],
+          "targetTitle": "South Korea GDP growth (YoY) in Q3 2026?"
+        },
+        {
+          "targetId": "limitless:10014437",
+          "text": "US manufacturing purchasing managers ISM index for September 2026",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.0496103441803194,
+          "top": [
+            {
+              "id": "limitless:10014437",
+              "title": "ISM Manufacturing PMI - September 2026",
+              "score": 0.874289427462124
+            },
+            {
+              "id": "limitless:10014423",
+              "title": "PPI YoY - September 2026",
+              "score": 0.8246790832818046
+            },
+            {
+              "id": "limitless:33109",
+              "title": "US recession by end of 2026?",
+              "score": 0.8169389873121479
+            }
+          ],
+          "targetTitle": "ISM Manufacturing PMI - September 2026"
+        },
+        {
+          "targetId": "limitless:10014386",
+          "text": "August 2026 annual growth in the core personal consumption expenditures index",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.02318290454263494,
+          "top": [
+            {
+              "id": "limitless:10014386",
+              "title": "Core PCE YoY - August 2026",
+              "score": 0.8424398092359582
+            },
+            {
+              "id": "limitless:10014423",
+              "title": "PPI YoY - September 2026",
+              "score": 0.8192569046933232
+            },
+            {
+              "id": "limitless:33109",
+              "title": "US recession by end of 2026?",
+              "score": 0.8073722130347002
+            }
+          ],
+          "targetTitle": "Core PCE YoY - August 2026"
+        },
+        {
+          "targetId": "limitless:10014041",
+          "text": "October monetary policy rate announcement from the Korean central bank",
+          "language": "en",
+          "rank": 3,
+          "margin": -0.019058065335370244,
+          "top": [
+            {
+              "id": "limitless:10014192",
+              "title": "Bank of Korea decision in November?",
+              "score": 0.8295925589529127
+            },
+            {
+              "id": "limitless:10011472",
+              "title": "South Korea Annual Inflation 2026",
+              "score": 0.8116211155791407
+            },
+            {
+              "id": "limitless:10014041",
+              "title": "Bank of Korea decision in October?",
+              "score": 0.8105344936175425
+            }
+          ],
+          "targetTitle": "Bank of Korea decision in October?"
+        },
+        {
+          "targetId": "limitless:10014192",
+          "text": "November monetary policy rate announcement from the Korean central bank",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.03425940732516286,
+          "top": [
+            {
+              "id": "limitless:10014192",
+              "title": "Bank of Korea decision in November?",
+              "score": 0.8423187854431899
+            },
+            {
+              "id": "limitless:10011472",
+              "title": "South Korea Annual Inflation 2026",
+              "score": 0.8080593781180271
+            },
+            {
+              "id": "limitless:10013443",
+              "title": "South Korea GDP growth (YoY) in Q3 2026?",
+              "score": 0.7933319094094312
+            }
+          ],
+          "targetTitle": "Bank of Korea decision in November?"
+        },
+        {
+          "targetId": "limitless:10014382",
+          "text": "British central bank interest rate decision in November",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.036912145246951966,
+          "top": [
+            {
+              "id": "limitless:10014382",
+              "title": "Bank of England decision in November?",
+              "score": 0.845866944550458
+            },
+            {
+              "id": "limitless:10014192",
+              "title": "Bank of Korea decision in November?",
+              "score": 0.808954799303506
+            },
+            {
+              "id": "limitless:10014379",
+              "title": "Bank of Brazil decision in November?",
+              "score": 0.8068889624176893
+            }
+          ],
+          "targetTitle": "Bank of England decision in November?"
+        },
+        {
+          "targetId": "limitless:10014384",
+          "text": "October monetary policy decision of the Japanese central bank",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.019690992301289234,
+          "top": [
+            {
+              "id": "limitless:10014384",
+              "title": "Bank of Japan Decision in October?",
+              "score": 0.8279777557452425
+            },
+            {
+              "id": "limitless:10013448",
+              "title": "Fed Decision in October?",
+              "score": 0.8082867634439532
+            },
+            {
+              "id": "polymarket:606422",
+              "title": "Fed Decision in October?",
+              "score": 0.8082683598698853
+            }
+          ],
+          "targetTitle": "Bank of Japan Decision in October?"
+        },
+        {
+          "targetId": "limitless:10014434",
+          "text": "European Central Bank December 2026 interest rate decision",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.03302018752266056,
+          "top": [
+            {
+              "id": "limitless:10014434",
+              "title": "ECB Interest Rates: December 2026",
+              "score": 0.8801466294585488
+            },
+            {
+              "id": "limitless:10014243",
+              "title": "ECB Interest Rates: October 2026",
+              "score": 0.8471264419358883
+            },
+            {
+              "id": "polymarket:1034268",
+              "title": "Another Fed rate hike in 2026?",
+              "score": 0.8225420278863923
+            }
+          ],
+          "targetTitle": "ECB Interest Rates: December 2026"
+        },
+        {
+          "targetId": "polymarket:1038330",
+          "text": "How many times is the next MrBeast upload watched in its first day?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.01932154677784015,
+          "top": [
+            {
+              "id": "polymarket:1038330",
+              "title": "# of views of next MrBeast video on day 1?",
+              "score": 0.8435944877908195
+            },
+            {
+              "id": "polymarket:1038622",
+              "title": "# of views of next MrBeast video on week 1?",
+              "score": 0.8242729410129793
+            },
+            {
+              "id": "limitless:134086",
+              "title": "Will ZywOo reach 36 HLTV MVP awards by December 31, 2026?",
+              "score": 0.7615348516622334
+            }
+          ],
+          "targetTitle": "# of views of next MrBeast video on day 1?"
+        },
+        {
+          "targetId": "polymarket:1038622",
+          "text": "View count during the first week of the next MrBeast upload",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.0009678357475836341,
+          "top": [
+            {
+              "id": "polymarket:1038622",
+              "title": "# of views of next MrBeast video on week 1?",
+              "score": 0.8459485025331109
+            },
+            {
+              "id": "polymarket:1038330",
+              "title": "# of views of next MrBeast video on day 1?",
+              "score": 0.8449806667855273
+            },
+            {
+              "id": "polymarket:1038683",
+              "title": "Elon Musk # tweets September 19 - September 21, 2026?",
+              "score": 0.76472326426718
+            }
+          ],
+          "targetTitle": "# of views of next MrBeast video on week 1?"
+        },
+        {
+          "targetId": "polymarket:51456",
+          "text": "Total number of Federal Reserve interest rate reductions during 2026",
+          "language": "en",
+          "rank": 3,
+          "margin": -0.0006722088410013871,
+          "top": [
+            {
+              "id": "polymarket:1034268",
+              "title": "Another Fed rate hike in 2026?",
+              "score": 0.8448392945498051
+            },
+            {
+              "id": "limitless:401183",
+              "title": "Another Fed rate hike in 2026?",
+              "score": 0.8448392901961042
+            },
+            {
+              "id": "polymarket:51456",
+              "title": "How many Fed rate cuts in 2026?",
+              "score": 0.8441670857088037
+            }
+          ],
+          "targetTitle": "How many Fed rate cuts in 2026?"
+        },
+        {
+          "targetId": "polymarket:626860",
+          "text": "Total number of Federal Reserve interest rate increases during 2026",
+          "language": "en",
+          "rank": 3,
+          "margin": -0.017498972155610693,
+          "top": [
+            {
+              "id": "polymarket:1034268",
+              "title": "Another Fed rate hike in 2026?",
+              "score": 0.8660281955312358
+            },
+            {
+              "id": "limitless:401183",
+              "title": "Another Fed rate hike in 2026?",
+              "score": 0.8660281894628253
+            },
+            {
+              "id": "polymarket:626860",
+              "title": "How many Fed rate hikes in 2026?",
+              "score": 0.8485292233756251
+            }
+          ],
+          "targetTitle": "How many Fed rate hikes in 2026?"
+        },
+        {
+          "targetId": "polymarket:153719",
+          "text": "Will Bitcoins creator transfer any BTC during 2026?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.039286940573244444,
+          "top": [
+            {
+              "id": "polymarket:153719",
+              "title": "Will Satoshi move any Bitcoin in 2026?",
+              "score": 0.856357644583268
+            },
+            {
+              "id": "limitless:323731",
+              "title": "Will MicroStrategy announce holding 1M+ BTC by December 31, 2026?",
+              "score": 0.8170707040100236
+            },
+            {
+              "id": "limitless:10002170",
+              "title": "Bitcoin all time high by ___?",
+              "score": 0.8099196831998196
+            }
+          ],
+          "targetTitle": "Will Satoshi move any Bitcoin in 2026?"
+        },
+        {
+          "targetId": "polymarket:79905",
+          "text": "Position of 2026 in the historical ranking of warmest years",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.0485606058895417,
+          "top": [
+            {
+              "id": "polymarket:79905",
+              "title": "Where will 2026 rank among the hottest years on record?",
+              "score": 0.8369953186434148
+            },
+            {
+              "id": "polymarket:448037",
+              "title": "Hantavirus pandemic in 2026?",
+              "score": 0.7884347127538731
+            },
+            {
+              "id": "polymarket:1034268",
+              "title": "Another Fed rate hike in 2026?",
+              "score": 0.7868086888425567
+            }
+          ],
+          "targetTitle": "Where will 2026 rank among the hottest years on record?"
+        },
+        {
+          "targetId": "polymarket:775267",
+          "text": "Who wins the open competition at the 46th Chess Olympiad?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.07704381787265668,
+          "top": [
+            {
+              "id": "polymarket:775267",
+              "title": "46th FIDE Chess Olympiad Open Tournament Winner",
+              "score": 0.8472400996111366
+            },
+            {
+              "id": "polymarket:478299",
+              "title": "2026 World Chess Championship: Winner",
+              "score": 0.7701962817384799
+            },
+            {
+              "id": "polymarket:925483",
+              "title": "Azerbaijan Grand Prix: Driver Winner",
+              "score": 0.7556812025146018
+            }
+          ],
+          "targetTitle": "46th FIDE Chess Olympiad Open Tournament Winner"
+        },
+        {
+          "targetId": "polymarket:281143",
+          "text": "Will a Chinese invasion of Taiwan happen by September 30 2026?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.021451554985067678,
+          "top": [
+            {
+              "id": "polymarket:281143",
+              "title": "Will China invade Taiwan by September 30, 2026?",
+              "score": 0.8973195443704992
+            },
+            {
+              "id": "limitless:36812",
+              "title": "Will China invade Taiwan by end of 2026?",
+              "score": 0.8758679893854315
+            },
+            {
+              "id": "polymarket:34044",
+              "title": "Will China invade Taiwan by end of 2026?",
+              "score": 0.8758679713722517
+            }
+          ],
+          "targetTitle": "Will China invade Taiwan by September 30, 2026?"
+        }
+      ],
+      "similarRows": [
+        {
+          "query": "Will the Federal Reserve cut interest rates in September 2026?",
+          "targetId": "similar-0:0",
+          "rank": 3,
+          "margin": -0.03408453974288472,
+          "top": [
+            {
+              "id": "similar-0:1",
+              "title": "Will the Fed cut rates in December 2026?",
+              "score": 0.9669628556863842
+            },
+            {
+              "id": "similar-0:2",
+              "title": "Will the ECB cut interest rates in September 2026?",
+              "score": 0.9653114322991784
+            },
+            {
+              "id": "similar-0:0",
+              "title": "September 2026 FOMC: a lower target rate at the meeting?",
+              "score": 0.9328783159434995
+            }
+          ],
+          "targetTitle": "September 2026 FOMC: a lower target rate at the meeting?"
+        },
+        {
+          "query": "Will Bitcoin close above $100,000 on September 30, 2026?",
+          "targetId": "similar-1:0",
+          "rank": 3,
+          "margin": -0.03941700649917912,
+          "top": [
+            {
+              "id": "similar-1:1",
+              "title": "Will Bitcoin touch $100,000 at any time in September 2026?",
+              "score": 0.9819039171813264
+            },
+            {
+              "id": "similar-1:2",
+              "title": "Will Ethereum close above $5,000 on September 30, 2026?",
+              "score": 0.9498674522287262
+            },
+            {
+              "id": "similar-1:0",
+              "title": "BTC September 30 2026 closing price greater than 100k dollars?",
+              "score": 0.9424869106821473
+            }
+          ],
+          "targetTitle": "BTC September 30 2026 closing price greater than 100k dollars?"
+        },
+        {
+          "query": "Who wins the 2028 US presidential election?",
+          "targetId": "similar-2:0",
+          "rank": 3,
+          "margin": -0.031812148533505336,
+          "top": [
+            {
+              "id": "similar-2:1",
+              "title": "Who wins the Republican presidential nomination in 2028?",
+              "score": 0.972823464497349
+            },
+            {
+              "id": "similar-2:2",
+              "title": "Who wins the 2026 US House elections?",
+              "score": 0.9412229617389701
+            },
+            {
+              "id": "similar-2:0",
+              "title": "Next president elected in the United States in November 2028?",
+              "score": 0.9410113159638437
+            }
+          ],
+          "targetTitle": "Next president elected in the United States in November 2028?"
+        },
+        {
+          "query": "Los Angeles Dodgers vs Cincinnati Reds: first five innings winner on September 14, 2026",
+          "targetId": "similar-3:0",
+          "rank": 3,
+          "margin": -0.023514640771329698,
+          "top": [
+            {
+              "id": "similar-3:2",
+              "title": "Dodgers vs Reds first five innings winner September 15, 2026",
+              "score": 0.9676592619780524
+            },
+            {
+              "id": "similar-3:1",
+              "title": "Dodgers vs Reds full game winner September 14, 2026",
+              "score": 0.9541873105464994
+            },
+            {
+              "id": "similar-3:0",
+              "title": "Dodgers versus Reds September 14 2026: lead after five innings?",
+              "score": 0.9441446212067227
+            }
+          ],
+          "targetTitle": "Dodgers versus Reds September 14 2026: lead after five innings?"
+        },
+        {
+          "query": "Cape Town highest temperature on September 15, 2026: 18 degrees Celsius",
+          "targetId": "similar-4:0",
+          "rank": 2,
+          "margin": -0.019597260282999684,
+          "top": [
+            {
+              "id": "similar-4:2",
+              "title": "Cape Town highest temperature September 16 2026: 18 C",
+              "score": 0.9862711096090425
+            },
+            {
+              "id": "similar-4:0",
+              "title": "Cape Town maximum temperature 15 September 2026 equals 18 C?",
+              "score": 0.9666738493260428
+            },
+            {
+              "id": "similar-4:1",
+              "title": "Cape Town lowest temperature September 15 2026: 18 C",
+              "score": 0.9653020197328612
+            }
+          ],
+          "targetTitle": "Cape Town maximum temperature 15 September 2026 equals 18 C?"
+        },
+        {
+          "query": "Will SpaceX launch Starship before October 1, 2026?",
+          "targetId": "similar-5:0",
+          "rank": 2,
+          "margin": -0.015691516798916227,
+          "top": [
+            {
+              "id": "similar-5:1",
+              "title": "Will SpaceX successfully land Starship before October 1 2026?",
+              "score": 0.983534851689471
+            },
+            {
+              "id": "similar-5:0",
+              "title": "Starship liftoff before the start of October 2026?",
+              "score": 0.9678433348905547
+            },
+            {
+              "id": "similar-5:2",
+              "title": "Will Blue Origin launch New Glenn before October 1 2026?",
+              "score": 0.943508073506529
+            }
+          ],
+          "targetTitle": "Starship liftoff before the start of October 2026?"
+        },
+        {
+          "query": "Will US annual CPI inflation exceed 3 percent in August 2026?",
+          "targetId": "similar-6:0",
+          "rank": 1,
+          "margin": 0.019643282770843706,
+          "top": [
+            {
+              "id": "similar-6:0",
+              "title": "August 2026 United States year-over-year consumer inflation above 3%?",
+              "score": 0.9598746132163701
+            },
+            {
+              "id": "similar-6:1",
+              "title": "US August 2026 core CPI year-over-year above 3%",
+              "score": 0.9402313304455264
+            },
+            {
+              "id": "similar-6:2",
+              "title": "US August 2026 monthly CPI above 0.3%",
+              "score": 0.920243728846491
+            }
+          ],
+          "targetTitle": "August 2026 United States year-over-year consumer inflation above 3%?"
+        },
+        {
+          "query": "Will the UK hold a general election before 2028?",
+          "targetId": "similar-7:0",
+          "rank": 2,
+          "margin": -0.02311974530342198,
+          "top": [
+            {
+              "id": "similar-7:2",
+              "title": "Will France hold a general election before 2028?",
+              "score": 0.9628703216425513
+            },
+            {
+              "id": "similar-7:0",
+              "title": "British parliamentary general election during 2026 or 2027?",
+              "score": 0.9397505763391293
+            },
+            {
+              "id": "similar-7:1",
+              "title": "Who wins the next UK general election?",
+              "score": 0.9313536343863149
+            }
+          ],
+          "targetTitle": "British parliamentary general election during 2026 or 2027?"
+        },
+        {
+          "query": "Will Ethereum ETF net inflows exceed $1 billion in September 2026?",
+          "targetId": "similar-8:0",
+          "rank": 3,
+          "margin": -0.010873199307656956,
+          "top": [
+            {
+              "id": "similar-8:2",
+              "title": "Ethereum ETF assets under management above $1 billion September 2026",
+              "score": 0.9517957007096725
+            },
+            {
+              "id": "similar-8:1",
+              "title": "Bitcoin ETF net inflows above $1 billion September 2026",
+              "score": 0.9489882985376684
+            },
+            {
+              "id": "similar-8:0",
+              "title": "ETH exchange traded funds September 2026 net subscriptions greater than one billion dollars?",
+              "score": 0.9409225014020155
+            }
+          ],
+          "targetTitle": "ETH exchange traded funds September 2026 net subscriptions greater than one billion dollars?"
+        },
+        {
+          "query": "Will the US government shut down on October 1, 2026?",
+          "targetId": "similar-9:0",
+          "rank": 4,
+          "margin": -0.05256740961376316,
+          "top": [
+            {
+              "id": "similar-9:2",
+              "title": "Will the government shut down on October 1 2027?",
+              "score": 0.9764006818817649
+            },
+            {
+              "id": "similar-9:1",
+              "title": "Will the US default on its debt in October 2026?",
+              "score": 0.9598938915028685
+            },
+            {
+              "id": "similar-0:1",
+              "title": "Will the Fed cut rates in December 2026?",
+              "score": 0.9242685999241903
+            }
+          ],
+          "targetTitle": "Federal government funding lapse at the start of October 2026?"
+        },
+        {
+          "query": "Will Nvidia report quarterly revenue above $50 billion in Q3 fiscal 2027?",
+          "targetId": "similar-10:0",
+          "rank": 3,
+          "margin": -0.013868179548552573,
+          "top": [
+            {
+              "id": "similar-10:1",
+              "title": "Nvidia Q3 fiscal 2027 net income above $50 billion",
+              "score": 0.9682417456391611
+            },
+            {
+              "id": "similar-10:2",
+              "title": "Nvidia Q4 fiscal 2027 revenue above $50 billion",
+              "score": 0.9577842142353341
+            },
+            {
+              "id": "similar-10:0",
+              "title": "NVDA fiscal 2027 third quarter sales exceed fifty billion dollars?",
+              "score": 0.9543735660906085
+            }
+          ],
+          "targetTitle": "NVDA fiscal 2027 third quarter sales exceed fifty billion dollars?"
+        },
+        {
+          "query": "Will Japan raise its policy interest rate at the October 2026 meeting?",
+          "targetId": "similar-11:0",
+          "rank": 1,
+          "margin": 0.03821147839284389,
+          "top": [
+            {
+              "id": "similar-11:0",
+              "title": "Bank of Japan October 2026 monetary policy meeting rate hike?",
+              "score": 0.9677920677375937
+            },
+            {
+              "id": "similar-11:1",
+              "title": "Bank of Japan December 2026 rate increase",
+              "score": 0.9295805893447499
+            },
+            {
+              "id": "similar-11:2",
+              "title": "Bank of Korea October 2026 interest rate hike",
+              "score": 0.9234819203190585
+            }
+          ],
+          "targetTitle": "Bank of Japan October 2026 monetary policy meeting rate hike?"
+        }
+      ]
+    },
+    {
+      "name": "diagnostic-minimal-query",
+      "generation": {
+        "id": "g-967f94827cf442f1ded0",
+        "model": "intfloat/e5-large-v2",
+        "dimensions": 1024,
+        "textVersion": "clean-v1",
+        "adapterVersion": "e5-query-v1"
+      },
+      "batches": [
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 2174,
+          "costUsd": 0.00002174,
+          "elapsedMs": 2466
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 2055,
+          "costUsd": 0.00002055,
+          "elapsedMs": 2196
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 2124,
+          "costUsd": 0.00002124,
+          "elapsedMs": 2193
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 2471,
+          "costUsd": 0.00002471,
+          "elapsedMs": 2269
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 1965,
+          "costUsd": 0.00001965,
+          "elapsedMs": 2242
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 2283,
+          "costUsd": 0.00002283,
+          "elapsedMs": 2116
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 2541,
+          "costUsd": 0.00002541,
+          "elapsedMs": 2423
+        },
+        {
+          "model": "intfloat/e5-large-v2",
+          "inputTokens": 1220,
+          "costUsd": 0.0000122,
+          "elapsedMs": 1603
+        }
+      ],
+      "mapSummary": {
+        "queries": 48,
+        "rank1": 30,
+        "rank3": 37,
+        "recall1": 0.625,
+        "recall3": 0.7708333333333334,
+        "mrr": 0.699049126859061,
+        "meanMargin": 0.011663056351184203
+      },
+      "mapEnglishSummary": {
+        "queries": 36,
+        "rank1": 29,
+        "rank3": 35,
+        "recall1": 0.8055555555555556,
+        "recall3": 0.9722222222222222,
+        "mrr": 0.8851851851851852,
+        "meanMargin": 0.029249948071241132
+      },
+      "mapRussianSummary": {
+        "queries": 12,
+        "rank1": 1,
+        "rank3": 2,
+        "recall1": 0.08333333333333333,
+        "recall3": 0.16666666666666666,
+        "mrr": 0.14064095188068845,
+        "meanMargin": -0.04109761880898658
+      },
+      "similarSummary": {
+        "queries": 12,
+        "rank1": 2,
+        "rank3": 11,
+        "recall1": 0.16666666666666666,
+        "recall3": 0.9166666666666666,
+        "mrr": 0.5069444444444444,
+        "meanMargin": -0.02323769105853087
+      },
+      "mapRows": [
+        {
+          "targetId": "polymarket:45915",
+          "text": "Who is going to become president of Brazil?",
+          "language": "en",
+          "rank": 2,
+          "margin": -0.007695925261483216,
+          "top": [
+            {
+              "id": "polymarket:45925",
+              "title": "Which candidates will advance to Brazil's presidential runoff?",
+              "score": 0.8860828042516979
+            },
+            {
+              "id": "polymarket:45915",
+              "title": "Brazil Presidential Election",
+              "score": 0.8783868789902147
+            },
+            {
+              "id": "polymarket:864488",
+              "title": "Brazil Presidential Election First Round: 1st Place in Rio de Janeiro",
+              "score": 0.8614272279762762
+            }
+          ],
+          "targetTitle": "Brazil Presidential Election"
+        },
+        {
+          "targetId": "polymarket:45915",
+          "text": "Кто победит на президентских выборах в Бразилии?",
+          "language": "ru",
+          "rank": 385,
+          "margin": -0.06257212232798448,
+          "top": [
+            {
+              "id": "limitless:403805",
+              "title": "Team Yandex vs Team Nemesis",
+              "score": 0.7701607989039164
+            },
+            {
+              "id": "limitless:403737",
+              "title": "Tatiana Prozorova vs Sofia Costoulas",
+              "score": 0.7681031148332405
+            },
+            {
+              "id": "polymarket:951073",
+              "title": "How many seats will New People (NL) win in the next Russian legislative election?",
+              "score": 0.7650216614153089
+            }
+          ],
+          "targetTitle": "Brazil Presidential Election"
+        },
+        {
+          "targetId": "polymarket:743544",
+          "text": "Who will become mayor of Lima?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.07729282948589933,
+          "top": [
+            {
+              "id": "polymarket:743544",
+              "title": "Lima Mayoral Election Winner",
+              "score": 0.8695863305843199
+            },
+            {
+              "id": "polymarket:839293",
+              "title": "Trujillo Mayoral Election Winner",
+              "score": 0.7922935010984206
+            },
+            {
+              "id": "polymarket:143443",
+              "title": "Venezuela leader end of 2026?",
+              "score": 0.7772698902932164
+            }
+          ],
+          "targetTitle": "Lima Mayoral Election Winner"
+        },
+        {
+          "targetId": "polymarket:743544",
+          "text": "Кто станет мэром Лимы?",
+          "language": "ru",
+          "rank": 850,
+          "margin": -0.09906218581420245,
+          "top": [
+            {
+              "id": "polymarket:951073",
+              "title": "How many seats will New People (NL) win in the next Russian legislative election?",
+              "score": 0.7675940443905552
+            },
+            {
+              "id": "limitless:403805",
+              "title": "Team Yandex vs Team Nemesis",
+              "score": 0.762029281300238
+            },
+            {
+              "id": "polymarket:573890",
+              "title": "Is Earth flat?",
+              "score": 0.7605861358240951
+            }
+          ],
+          "targetTitle": "Lima Mayoral Election Winner"
+        },
+        {
+          "targetId": "polymarket:531333",
+          "text": "Which contenders qualify for the runoff in the next French presidential vote?",
+          "language": "en",
+          "rank": 2,
+          "margin": -0.007977935361547117,
+          "top": [
+            {
+              "id": "limitless:10000454",
+              "title": "Next French Presidential Election",
+              "score": 0.8852786253391081
+            },
+            {
+              "id": "polymarket:531333",
+              "title": "Next French Presidential Election: who will advance to the 2nd round?",
+              "score": 0.8773006899775609
+            },
+            {
+              "id": "polymarket:45925",
+              "title": "Which candidates will advance to Brazil's presidential runoff?",
+              "score": 0.8629260038860866
+            }
+          ],
+          "targetTitle": "Next French Presidential Election: who will advance to the 2nd round?"
+        },
+        {
+          "targetId": "polymarket:531333",
+          "text": "Кто выйдет во второй тур следующих президентских выборов во Франции?",
+          "language": "ru",
+          "rank": 73,
+          "margin": -0.032639711616649025,
+          "top": [
+            {
+              "id": "polymarket:1048649",
+              "title": "Rennes: Harold Mayot vs Sascha Gueymard-Wayenburg",
+              "score": 0.778966014796672
+            },
+            {
+              "id": "polymarket:980499",
+              "title": "OGC Nice vs. Lille OSC",
+              "score": 0.7714548791427044
+            },
+            {
+              "id": "polymarket:1050444",
+              "title": "Saint Tropez: Henri Squire vs Maxime Janvier",
+              "score": 0.7704357910334299
+            }
+          ],
+          "targetTitle": "Next French Presidential Election: who will advance to the 2nd round?"
+        },
+        {
+          "targetId": "polymarket:378769",
+          "text": "Who gets the Democratic vice presidential nomination for 2028?",
+          "language": "en",
+          "rank": 5,
+          "margin": -0.03526810703493899,
+          "top": [
+            {
+              "id": "limitless:10000447",
+              "title": "Democratic Presidential Nominee 2028",
+              "score": 0.9164364565773147
+            },
+            {
+              "id": "polymarket:33228",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.9047281077121743
+            },
+            {
+              "id": "limitless:10000456",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.904728100777485
+            }
+          ],
+          "targetTitle": "Democratic VP Nominee 2028"
+        },
+        {
+          "targetId": "polymarket:378769",
+          "text": "Кого демократы выдвинут в вице-президенты в 2028 году?",
+          "language": "ru",
+          "rank": 41,
+          "margin": -0.03903520255298831,
+          "top": [
+            {
+              "id": "polymarket:33228",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.8072816014036769
+            },
+            {
+              "id": "limitless:10000456",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.8072815970183274
+            },
+            {
+              "id": "limitless:10000449",
+              "title": "Presidential Election Winner 2028",
+              "score": 0.7983628159390975
+            }
+          ],
+          "targetTitle": "Democratic VP Nominee 2028"
+        },
+        {
+          "targetId": "limitless:10000447",
+          "text": "Who becomes the Democrats presidential candidate in 2028?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.008253582629218381,
+          "top": [
+            {
+              "id": "limitless:10000447",
+              "title": "Democratic Presidential Nominee 2028",
+              "score": 0.942867994468597
+            },
+            {
+              "id": "polymarket:33228",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.9346144118393787
+            },
+            {
+              "id": "limitless:10000456",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.9346144044897006
+            }
+          ],
+          "targetTitle": "Democratic Presidential Nominee 2028"
+        },
+        {
+          "targetId": "limitless:10000447",
+          "text": "Кто станет кандидатом демократов в президенты в 2028?",
+          "language": "ru",
+          "rank": 4,
+          "margin": -0.009310864186031664,
+          "top": [
+            {
+              "id": "limitless:10000449",
+              "title": "Presidential Election Winner 2028",
+              "score": 0.8146818645923556
+            },
+            {
+              "id": "polymarket:33228",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.8137555245325669
+            },
+            {
+              "id": "limitless:10000456",
+              "title": "Which party wins 2028 US Presidential Election?",
+              "score": 0.8137555137758622
+            }
+          ],
+          "targetTitle": "Democratic Presidential Nominee 2028"
+        },
+        {
+          "targetId": "limitless:10013328",
+          "text": "Which political party takes control of the Senate in 2026?",
+          "language": "en",
+          "rank": 2,
+          "margin": -1.4774780288107081e-9,
+          "top": [
+            {
+              "id": "polymarket:32224",
+              "title": "Which party will win the Senate in 2026?",
+              "score": 0.9445494244702949
+            },
+            {
+              "id": "limitless:10013328",
+              "title": "Which party will win the Senate in 2026?",
+              "score": 0.9445494229928169
+            },
+            {
+              "id": "polymarket:32225",
+              "title": "Which party will win the House in 2026?",
+              "score": 0.9050527901032199
+            }
+          ],
+          "targetTitle": "Which party will win the Senate in 2026?"
+        },
+        {
+          "targetId": "limitless:10013328",
+          "text": "Какая партия выиграет Сенат в 2026 году?",
+          "language": "ru",
+          "rank": 61,
+          "margin": -0.043958312914337494,
+          "top": [
+            {
+              "id": "polymarket:448037",
+              "title": "Hantavirus pandemic in 2026?",
+              "score": 0.8297265621992342
+            },
+            {
+              "id": "polymarket:79905",
+              "title": "Where will 2026 rank among the hottest years on record?",
+              "score": 0.8213862584016118
+            },
+            {
+              "id": "polymarket:79932",
+              "title": "How many different countries will the US conduct military action against in 2026?",
+              "score": 0.8186928249557955
+            }
+          ],
+          "targetTitle": "Which party will win the Senate in 2026?"
+        },
+        {
+          "targetId": "polymarket:57672",
+          "text": "Who wins the race for the Texas Senate seat?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.007234176688481253,
+          "top": [
+            {
+              "id": "polymarket:57672",
+              "title": "Texas Senate Election Winner",
+              "score": 0.8701777467876255
+            },
+            {
+              "id": "polymarket:769205",
+              "title": "Which Senate races will be within 5%?",
+              "score": 0.8629435700991442
+            },
+            {
+              "id": "polymarket:638084",
+              "title": "Closest Senate Race?",
+              "score": 0.8347116757355949
+            }
+          ],
+          "targetTitle": "Texas Senate Election Winner"
+        },
+        {
+          "targetId": "polymarket:57672",
+          "text": "Кто победит на выборах в Сенат от Техаса?",
+          "language": "ru",
+          "rank": 754,
+          "margin": -0.08945076861350665,
+          "top": [
+            {
+              "id": "limitless:403805",
+              "title": "Team Yandex vs Team Nemesis",
+              "score": 0.7747389048804386
+            },
+            {
+              "id": "polymarket:983433",
+              "title": "Amed Sportif vs. Beşiktaş JK",
+              "score": 0.7591062363222686
+            },
+            {
+              "id": "limitless:403436",
+              "title": "Katie Volynets vs Elvina Kalieva",
+              "score": 0.7584944824826143
+            }
+          ],
+          "targetTitle": "Texas Senate Election Winner"
+        },
+        {
+          "targetId": "polymarket:715392",
+          "text": "Which person tops Google searches for the year 2026?",
+          "language": "en",
+          "rank": 3,
+          "margin": -0.023428034050852364,
+          "top": [
+            {
+              "id": "polymarket:779081",
+              "title": "#1 Searched Person on Google in the US 2026?",
+              "score": 0.8943153206082466
+            },
+            {
+              "id": "polymarket:718982",
+              "title": "#1 Searched Actor on Google 2026?",
+              "score": 0.8817595756345449
+            },
+            {
+              "id": "polymarket:715392",
+              "title": "#1 Searched Person on Google 2026?",
+              "score": 0.8708872865573942
+            }
+          ],
+          "targetTitle": "#1 Searched Person on Google 2026?"
+        },
+        {
+          "targetId": "polymarket:715392",
+          "text": "Кого чаще всего будут искать в Google в 2026 году?",
+          "language": "ru",
+          "rank": 3,
+          "margin": -0.004227670252465288,
+          "top": [
+            {
+              "id": "polymarket:779078",
+              "title": "#1 Searched Movie on Google 2026?",
+              "score": 0.8097708728191394
+            },
+            {
+              "id": "polymarket:779079",
+              "title": "#1 Searched TV Show on Google 2026?",
+              "score": 0.8083938965899218
+            },
+            {
+              "id": "polymarket:715392",
+              "title": "#1 Searched Person on Google 2026?",
+              "score": 0.8055432025666741
+            }
+          ],
+          "targetTitle": "#1 Searched Person on Google 2026?"
+        },
+        {
+          "targetId": "limitless:399068",
+          "text": "Will the Man City Sunderland game have at least three goals?",
+          "language": "en",
+          "rank": 3,
+          "margin": -0.020595173152008983,
+          "top": [
+            {
+              "id": "limitless:399041",
+              "title": "Sunderland to win by 2 or more goals vs Manchester City?",
+              "score": 0.9425445065304244
+            },
+            {
+              "id": "limitless:399055",
+              "title": "Manchester City to win by 2 or more goals vs Sunderland?",
+              "score": 0.9415510598522084
+            },
+            {
+              "id": "limitless:399068",
+              "title": "Manchester City and Sunderland have 3 or more total goals?",
+              "score": 0.9219493333784154
+            }
+          ],
+          "targetTitle": "Manchester City and Sunderland have 3 or more total goals?"
+        },
+        {
+          "targetId": "limitless:399068",
+          "text": "Будет ли минимум три гола в матче Манчестер Сити против Сандерленда?",
+          "language": "ru",
+          "rank": 116,
+          "margin": -0.041405215158940356,
+          "top": [
+            {
+              "id": "limitless:10014417",
+              "title": "POR PL, Santa Clara vs SC Braga",
+              "score": 0.7967202574096267
+            },
+            {
+              "id": "polymarket:1048651",
+              "title": "Szczecin: Nikolas Sanchez Izquierdo vs Thiago Monteiro",
+              "score": 0.7935335754254903
+            },
+            {
+              "id": "limitless:10014415",
+              "title": "POR PL, Vitória SC vs Moreirense",
+              "score": 0.792282755952856
+            }
+          ],
+          "targetTitle": "Manchester City and Sunderland have 3 or more total goals?"
+        },
+        {
+          "targetId": "limitless:399056",
+          "text": "Can Leeds beat Crystal Palace by a margin of at least two?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.005415108896377752,
+          "top": [
+            {
+              "id": "limitless:399056",
+              "title": "Leeds to win by 2 or more goals vs Crystal Palace?",
+              "score": 0.9665129533186381
+            },
+            {
+              "id": "limitless:399042",
+              "title": "Crystal Palace to win by 2 or more goals vs Leeds?",
+              "score": 0.9610978444222603
+            },
+            {
+              "id": "limitless:10014411",
+              "title": "EPL, Leeds vs Crystal Palace",
+              "score": 0.9204390310068827
+            }
+          ],
+          "targetTitle": "Leeds to win by 2 or more goals vs Crystal Palace?"
+        },
+        {
+          "targetId": "limitless:399056",
+          "text": "Победит ли Лидс Кристал Пэлас с разницей минимум два мяча?",
+          "language": "ru",
+          "rank": 41,
+          "margin": -0.02716777901918732,
+          "top": [
+            {
+              "id": "limitless:404158",
+              "title": "Barbora Krejcikova vs Anna-Lena Friedsam",
+              "score": 0.7889939059655116
+            },
+            {
+              "id": "limitless:404150",
+              "title": "Yao Xinxin vs Maya Joint",
+              "score": 0.7878918920440895
+            },
+            {
+              "id": "limitless:403733",
+              "title": "Rebecca Sramkova vs Maja Chwalinska",
+              "score": 0.7853340054320133
+            }
+          ],
+          "targetTitle": "Leeds to win by 2 or more goals vs Crystal Palace?"
+        },
+        {
+          "targetId": "limitless:10006818",
+          "text": "Who takes the English Premier League title in the 2026-27 season?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.0005672013851332203,
+          "top": [
+            {
+              "id": "limitless:10006818",
+              "title": "2026/27 English Premier League Winner",
+              "score": 0.8897231996258806
+            },
+            {
+              "id": "limitless:10014251",
+              "title": "English Premier League Top 4 Finishers (2026-27)",
+              "score": 0.8891559982407474
+            },
+            {
+              "id": "limitless:10014245",
+              "title": "English Premier League: Top Goalscorer 2026-27",
+              "score": 0.8780445649053173
+            }
+          ],
+          "targetTitle": "2026/27 English Premier League Winner"
+        },
+        {
+          "targetId": "limitless:10006818",
+          "text": "Кто выиграет английскую Премьер-лигу в сезоне 2026/27?",
+          "language": "ru",
+          "rank": 1,
+          "margin": 0.009675611074096535,
+          "top": [
+            {
+              "id": "limitless:10006818",
+              "title": "2026/27 English Premier League Winner",
+              "score": 0.841981418162612
+            },
+            {
+              "id": "limitless:10014251",
+              "title": "English Premier League Top 4 Finishers (2026-27)",
+              "score": 0.8323058070885154
+            },
+            {
+              "id": "limitless:10014245",
+              "title": "English Premier League: Top Goalscorer 2026-27",
+              "score": 0.8244073206002164
+            }
+          ],
+          "targetTitle": "2026/27 English Premier League Winner"
+        },
+        {
+          "targetId": "limitless:10014425",
+          "text": "Which driver qualifies on pole at the Azerbaijan GP?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.06007480262300158,
+          "top": [
+            {
+              "id": "limitless:10014425",
+              "title": "Azerbaijan Grand Prix: Driver Pole Position",
+              "score": 0.9053058225418338
+            },
+            {
+              "id": "limitless:10014426",
+              "title": "Azerbaijan Grand Prix: Driver Podium Finish",
+              "score": 0.8452310199188322
+            },
+            {
+              "id": "limitless:10014424",
+              "title": "Azerbaijan Grand Prix: Driver Winner",
+              "score": 0.8420056236934992
+            }
+          ],
+          "targetTitle": "Azerbaijan Grand Prix: Driver Pole Position"
+        },
+        {
+          "targetId": "limitless:10014425",
+          "text": "Кто возьмёт поул на Гран-при Азербайджана?",
+          "language": "ru",
+          "rank": 85,
+          "margin": -0.0540172043256425,
+          "top": [
+            {
+              "id": "limitless:397731",
+              "title": "Zimbabwe vs Australia",
+              "score": 0.790570612654078
+            },
+            {
+              "id": "limitless:403760",
+              "title": "Antigua and Barbuda Falcons vs Jamaica Kingsmen",
+              "score": 0.7702933016007054
+            },
+            {
+              "id": "limitless:402823",
+              "title": "QUAZAR vs G2 Ares",
+              "score": 0.7658599506436317
+            }
+          ],
+          "targetTitle": "Azerbaijan Grand Prix: Driver Pole Position"
+        },
+        {
+          "targetId": "limitless:10014426",
+          "text": "Which drivers finish in the top three at the Azerbaijan Grand Prix?",
+          "language": "en",
+          "rank": 2,
+          "margin": -0.002098043199154076,
+          "top": [
+            {
+              "id": "limitless:10014425",
+              "title": "Azerbaijan Grand Prix: Driver Pole Position",
+              "score": 0.8691387921627508
+            },
+            {
+              "id": "limitless:10014426",
+              "title": "Azerbaijan Grand Prix: Driver Podium Finish",
+              "score": 0.8670407489635967
+            },
+            {
+              "id": "limitless:10014424",
+              "title": "Azerbaijan Grand Prix: Driver Winner",
+              "score": 0.8656195872090077
+            }
+          ],
+          "targetTitle": "Azerbaijan Grand Prix: Driver Podium Finish"
+        },
+        {
+          "targetId": "polymarket:36173",
+          "text": "At what point will BTC reach one hundred fifty thousand dollars?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.02094746002556025,
+          "top": [
+            {
+              "id": "polymarket:36173",
+              "title": "When will Bitcoin hit $150k?",
+              "score": 0.8953351710202895
+            },
+            {
+              "id": "polymarket:89502",
+              "title": "What price will Bitcoin hit in 2026?",
+              "score": 0.8743877109947292
+            },
+            {
+              "id": "limitless:10002170",
+              "title": "Bitcoin all time high by ___?",
+              "score": 0.8707634763354245
+            }
+          ],
+          "targetTitle": "When will Bitcoin hit $150k?"
+        },
+        {
+          "targetId": "polymarket:148014",
+          "text": "Levels reached by the SPX index before December ends",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.03402374568943478,
+          "top": [
+            {
+              "id": "polymarket:148014",
+              "title": "What will S&P 500 (SPX) hit by end of December?",
+              "score": 0.8804064729957579
+            },
+            {
+              "id": "polymarket:435099",
+              "title": "Crude Oil all time high by...?",
+              "score": 0.8463827273063231
+            },
+            {
+              "id": "limitless:10007040",
+              "title": "Fed rate cut by __?",
+              "score": 0.8364952740148647
+            }
+          ],
+          "targetTitle": "What will S&P 500 (SPX) hit by end of December?"
+        },
+        {
+          "targetId": "polymarket:727186",
+          "text": "Who leads the AI model rankings at the end of September?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.025007624728580646,
+          "top": [
+            {
+              "id": "polymarket:727186",
+              "title": "Which company has the best AI model end of September?",
+              "score": 0.8973487982267624
+            },
+            {
+              "id": "polymarket:841230",
+              "title": "Which company has the best AI model end of October?",
+              "score": 0.8723411734981817
+            },
+            {
+              "id": "polymarket:727042",
+              "title": "Best Chinese AI Company end of September?",
+              "score": 0.8633503434774231
+            }
+          ],
+          "targetTitle": "Which company has the best AI model end of September?"
+        },
+        {
+          "targetId": "polymarket:841230",
+          "text": "Who leads the AI model rankings at the end of October?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.021272656598994688,
+          "top": [
+            {
+              "id": "polymarket:841230",
+              "title": "Which company has the best AI model end of October?",
+              "score": 0.9005721176288854
+            },
+            {
+              "id": "polymarket:727186",
+              "title": "Which company has the best AI model end of September?",
+              "score": 0.8792994610298908
+            },
+            {
+              "id": "polymarket:556382",
+              "title": "Which company has best AI model end of 2026?",
+              "score": 0.8480765337351026
+            }
+          ],
+          "targetTitle": "Which company has the best AI model end of October?"
+        },
+        {
+          "targetId": "polymarket:79090",
+          "text": "Who will be the wealthiest individual on the last day of 2026?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.06873517306182042,
+          "top": [
+            {
+              "id": "polymarket:79090",
+              "title": "Richest person on December 31, 2026?",
+              "score": 0.9120583432921923
+            },
+            {
+              "id": "limitless:33109",
+              "title": "US recession by end of 2026?",
+              "score": 0.8433231702303718
+            },
+            {
+              "id": "polymarket:79905",
+              "title": "Where will 2026 rank among the hottest years on record?",
+              "score": 0.8419392586154455
+            }
+          ],
+          "targetTitle": "Richest person on December 31, 2026?"
+        },
+        {
+          "targetId": "limitless:10011866",
+          "text": "How many Starship flights make it to space during 2026?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.09510865728330176,
+          "top": [
+            {
+              "id": "limitless:10011866",
+              "title": "How many SpaceX Starship launches reach space in 2026?",
+              "score": 0.9459413180018151
+            },
+            {
+              "id": "limitless:10014377",
+              "title": "How many Semi Trucks will Tesla Produce in a quarter in 2026?",
+              "score": 0.8508326607185134
+            },
+            {
+              "id": "polymarket:79932",
+              "title": "How many different countries will the US conduct military action against in 2026?",
+              "score": 0.8507181468615806
+            }
+          ],
+          "targetTitle": "How many SpaceX Starship launches reach space in 2026?"
+        },
+        {
+          "targetId": "limitless:10011472",
+          "text": "South Korean yearly inflation rate for 2026",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.05522925397176437,
+          "top": [
+            {
+              "id": "limitless:10011472",
+              "title": "South Korea Annual Inflation 2026",
+              "score": 0.9524178573956945
+            },
+            {
+              "id": "limitless:10013443",
+              "title": "South Korea GDP growth (YoY) in Q3 2026?",
+              "score": 0.8971886034239301
+            },
+            {
+              "id": "limitless:10014441",
+              "title": "What will South Korea ETF (EWY) hit Week of September 21 2026?",
+              "score": 0.8464579622330709
+            }
+          ],
+          "targetTitle": "South Korea Annual Inflation 2026"
+        },
+        {
+          "targetId": "limitless:10013443",
+          "text": "Korean third quarter 2026 economic growth compared with last year",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.04917373968403349,
+          "top": [
+            {
+              "id": "limitless:10013443",
+              "title": "South Korea GDP growth (YoY) in Q3 2026?",
+              "score": 0.9441455367775056
+            },
+            {
+              "id": "limitless:10011472",
+              "title": "South Korea Annual Inflation 2026",
+              "score": 0.8949717970934721
+            },
+            {
+              "id": "polymarket:166383",
+              "title": "China Annual GDP Growth 2026",
+              "score": 0.8744356544473555
+            }
+          ],
+          "targetTitle": "South Korea GDP growth (YoY) in Q3 2026?"
+        },
+        {
+          "targetId": "limitless:10014437",
+          "text": "US manufacturing purchasing managers ISM index for September 2026",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.06774924074297572,
+          "top": [
+            {
+              "id": "limitless:10014437",
+              "title": "ISM Manufacturing PMI - September 2026",
+              "score": 0.9334512533185122
+            },
+            {
+              "id": "limitless:10014423",
+              "title": "PPI YoY - September 2026",
+              "score": 0.8657020125755365
+            },
+            {
+              "id": "limitless:10014083",
+              "title": "What will US Dollar Index (DXY) hit in September 2026?",
+              "score": 0.8567832141249431
+            }
+          ],
+          "targetTitle": "ISM Manufacturing PMI - September 2026"
+        },
+        {
+          "targetId": "limitless:10014386",
+          "text": "August 2026 annual growth in the core personal consumption expenditures index",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.025508509573231142,
+          "top": [
+            {
+              "id": "limitless:10014386",
+              "title": "Core PCE YoY - August 2026",
+              "score": 0.8927025004405598
+            },
+            {
+              "id": "limitless:10014423",
+              "title": "PPI YoY - September 2026",
+              "score": 0.8671939908673286
+            },
+            {
+              "id": "polymarket:166383",
+              "title": "China Annual GDP Growth 2026",
+              "score": 0.854225102175205
+            }
+          ],
+          "targetTitle": "Core PCE YoY - August 2026"
+        },
+        {
+          "targetId": "limitless:10014041",
+          "text": "October monetary policy rate announcement from the Korean central bank",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.004771151164851495,
+          "top": [
+            {
+              "id": "limitless:10014041",
+              "title": "Bank of Korea decision in October?",
+              "score": 0.8785881167046922
+            },
+            {
+              "id": "limitless:10011472",
+              "title": "South Korea Annual Inflation 2026",
+              "score": 0.8738169655398407
+            },
+            {
+              "id": "limitless:10013443",
+              "title": "South Korea GDP growth (YoY) in Q3 2026?",
+              "score": 0.8638995127760464
+            }
+          ],
+          "targetTitle": "Bank of Korea decision in October?"
+        },
+        {
+          "targetId": "limitless:10014192",
+          "text": "November monetary policy rate announcement from the Korean central bank",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.018843848327489532,
+          "top": [
+            {
+              "id": "limitless:10014192",
+              "title": "Bank of Korea decision in November?",
+              "score": 0.8918875832677128
+            },
+            {
+              "id": "limitless:10011472",
+              "title": "South Korea Annual Inflation 2026",
+              "score": 0.8730437349402232
+            },
+            {
+              "id": "limitless:10013443",
+              "title": "South Korea GDP growth (YoY) in Q3 2026?",
+              "score": 0.8550394341646488
+            }
+          ],
+          "targetTitle": "Bank of Korea decision in November?"
+        },
+        {
+          "targetId": "limitless:10014382",
+          "text": "British central bank interest rate decision in November",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.05899878632414757,
+          "top": [
+            {
+              "id": "limitless:10014382",
+              "title": "Bank of England decision in November?",
+              "score": 0.9185621636457031
+            },
+            {
+              "id": "limitless:10014379",
+              "title": "Bank of Brazil decision in November?",
+              "score": 0.8595633773215555
+            },
+            {
+              "id": "limitless:10014192",
+              "title": "Bank of Korea decision in November?",
+              "score": 0.8551569519319272
+            }
+          ],
+          "targetTitle": "Bank of England decision in November?"
+        },
+        {
+          "targetId": "limitless:10014384",
+          "text": "October monetary policy decision of the Japanese central bank",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.05414304243362489,
+          "top": [
+            {
+              "id": "limitless:10014384",
+              "title": "Bank of Japan Decision in October?",
+              "score": 0.9118287475898669
+            },
+            {
+              "id": "limitless:10014041",
+              "title": "Bank of Korea decision in October?",
+              "score": 0.857685705156242
+            },
+            {
+              "id": "polymarket:606422",
+              "title": "Fed Decision in October?",
+              "score": 0.8432711461632423
+            }
+          ],
+          "targetTitle": "Bank of Japan Decision in October?"
+        },
+        {
+          "targetId": "limitless:10014434",
+          "text": "European Central Bank December 2026 interest rate decision",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.02695806030256298,
+          "top": [
+            {
+              "id": "limitless:10014434",
+              "title": "ECB Interest Rates: December 2026",
+              "score": 0.9367322213573117
+            },
+            {
+              "id": "limitless:10014243",
+              "title": "ECB Interest Rates: October 2026",
+              "score": 0.9097741610547487
+            },
+            {
+              "id": "polymarket:159954",
+              "title": "What will the Fed rate be at the end of 2026?",
+              "score": 0.8682859074529257
+            }
+          ],
+          "targetTitle": "ECB Interest Rates: December 2026"
+        },
+        {
+          "targetId": "polymarket:1038330",
+          "text": "How many times is the next MrBeast upload watched in its first day?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.018534633965267555,
+          "top": [
+            {
+              "id": "polymarket:1038330",
+              "title": "# of views of next MrBeast video on day 1?",
+              "score": 0.9177449424119887
+            },
+            {
+              "id": "polymarket:1038622",
+              "title": "# of views of next MrBeast video on week 1?",
+              "score": 0.8992103084467211
+            },
+            {
+              "id": "limitless:134086",
+              "title": "Will ZywOo reach 36 HLTV MVP awards by December 31, 2026?",
+              "score": 0.7946288814353198
+            }
+          ],
+          "targetTitle": "# of views of next MrBeast video on day 1?"
+        },
+        {
+          "targetId": "polymarket:1038622",
+          "text": "View count during the first week of the next MrBeast upload",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.01392920026062261,
+          "top": [
+            {
+              "id": "polymarket:1038622",
+              "title": "# of views of next MrBeast video on week 1?",
+              "score": 0.9420530280671526
+            },
+            {
+              "id": "polymarket:1038330",
+              "title": "# of views of next MrBeast video on day 1?",
+              "score": 0.92812382780653
+            },
+            {
+              "id": "polymarket:1038683",
+              "title": "Elon Musk # tweets September 19 - September 21, 2026?",
+              "score": 0.8045823778934733
+            }
+          ],
+          "targetTitle": "# of views of next MrBeast video on week 1?"
+        },
+        {
+          "targetId": "polymarket:51456",
+          "text": "Total number of Federal Reserve interest rate reductions during 2026",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.03368908930681447,
+          "top": [
+            {
+              "id": "polymarket:51456",
+              "title": "How many Fed rate cuts in 2026?",
+              "score": 0.932427987981913
+            },
+            {
+              "id": "polymarket:159954",
+              "title": "What will the Fed rate be at the end of 2026?",
+              "score": 0.8987388986750985
+            },
+            {
+              "id": "polymarket:626860",
+              "title": "How many Fed rate hikes in 2026?",
+              "score": 0.8945382169139665
+            }
+          ],
+          "targetTitle": "How many Fed rate cuts in 2026?"
+        },
+        {
+          "targetId": "polymarket:626860",
+          "text": "Total number of Federal Reserve interest rate increases during 2026",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.007253274740987137,
+          "top": [
+            {
+              "id": "polymarket:626860",
+              "title": "How many Fed rate hikes in 2026?",
+              "score": 0.9173020102958683
+            },
+            {
+              "id": "limitless:401183",
+              "title": "Another Fed rate hike in 2026?",
+              "score": 0.9100487355548812
+            },
+            {
+              "id": "polymarket:1034268",
+              "title": "Another Fed rate hike in 2026?",
+              "score": 0.9100487328738784
+            }
+          ],
+          "targetTitle": "How many Fed rate hikes in 2026?"
+        },
+        {
+          "targetId": "polymarket:153719",
+          "text": "Will Bitcoins creator transfer any BTC during 2026?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.06406319991086207,
+          "top": [
+            {
+              "id": "polymarket:153719",
+              "title": "Will Satoshi move any Bitcoin in 2026?",
+              "score": 0.9167894588354235
+            },
+            {
+              "id": "limitless:323731",
+              "title": "Will MicroStrategy announce holding 1M+ BTC by December 31, 2026?",
+              "score": 0.8527262589245614
+            },
+            {
+              "id": "limitless:10002170",
+              "title": "Bitcoin all time high by ___?",
+              "score": 0.8397319010474442
+            }
+          ],
+          "targetTitle": "Will Satoshi move any Bitcoin in 2026?"
+        },
+        {
+          "targetId": "polymarket:79905",
+          "text": "Position of 2026 in the historical ranking of warmest years",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.09196247061799667,
+          "top": [
+            {
+              "id": "polymarket:79905",
+              "title": "Where will 2026 rank among the hottest years on record?",
+              "score": 0.9239480645905718
+            },
+            {
+              "id": "limitless:10013330",
+              "title": "Balance of Power: 2026 Midterms",
+              "score": 0.8319855939725751
+            },
+            {
+              "id": "polymarket:32228",
+              "title": "Balance of Power: 2026 Midterms",
+              "score": 0.8319855906658142
+            }
+          ],
+          "targetTitle": "Where will 2026 rank among the hottest years on record?"
+        },
+        {
+          "targetId": "polymarket:775267",
+          "text": "Who wins the open competition at the 46th Chess Olympiad?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.11311896618462791,
+          "top": [
+            {
+              "id": "polymarket:775267",
+              "title": "46th FIDE Chess Olympiad Open Tournament Winner",
+              "score": 0.9136048230387189
+            },
+            {
+              "id": "polymarket:478299",
+              "title": "2026 World Chess Championship: Winner",
+              "score": 0.800485856854091
+            },
+            {
+              "id": "limitless:252242",
+              "title": "FIFA U-15 Tournament: Israel U-15 vs Palestine U-15 Opening Match?",
+              "score": 0.76632294259299
+            }
+          ],
+          "targetTitle": "46th FIDE Chess Olympiad Open Tournament Winner"
+        },
+        {
+          "targetId": "polymarket:281143",
+          "text": "Will a Chinese invasion of Taiwan happen by September 30 2026?",
+          "language": "en",
+          "rank": 1,
+          "margin": 0.022201863494479834,
+          "top": [
+            {
+              "id": "polymarket:281143",
+              "title": "Will China invade Taiwan by September 30, 2026?",
+              "score": 0.9861453145400779
+            },
+            {
+              "id": "limitless:36812",
+              "title": "Will China invade Taiwan by end of 2026?",
+              "score": 0.9639434510455981
+            },
+            {
+              "id": "polymarket:34044",
+              "title": "Will China invade Taiwan by end of 2026?",
+              "score": 0.9639333142432268
+            }
+          ],
+          "targetTitle": "Will China invade Taiwan by September 30, 2026?"
+        }
+      ],
+      "similarRows": [
+        {
+          "query": "Will the Federal Reserve cut interest rates in September 2026?",
+          "targetId": "similar-0:0",
+          "rank": 3,
+          "margin": -0.04210660393424703,
+          "top": [
+            {
+              "id": "similar-0:1",
+              "title": "Will the Fed cut rates in December 2026?",
+              "score": 0.9563278292382411
+            },
+            {
+              "id": "similar-0:2",
+              "title": "Will the ECB cut interest rates in September 2026?",
+              "score": 0.9456115202692615
+            },
+            {
+              "id": "similar-0:0",
+              "title": "September 2026 FOMC: a lower target rate at the meeting?",
+              "score": 0.9142212253039941
+            }
+          ],
+          "targetTitle": "September 2026 FOMC: a lower target rate at the meeting?"
+        },
+        {
+          "query": "Will Bitcoin close above $100,000 on September 30, 2026?",
+          "targetId": "similar-1:0",
+          "rank": 2,
+          "margin": -0.03734732279155106,
+          "top": [
+            {
+              "id": "similar-1:1",
+              "title": "Will Bitcoin touch $100,000 at any time in September 2026?",
+              "score": 0.9852901814417987
+            },
+            {
+              "id": "similar-1:0",
+              "title": "BTC September 30 2026 closing price greater than 100k dollars?",
+              "score": 0.9479428586502476
+            },
+            {
+              "id": "similar-1:2",
+              "title": "Will Ethereum close above $5,000 on September 30, 2026?",
+              "score": 0.935954380707003
+            }
+          ],
+          "targetTitle": "BTC September 30 2026 closing price greater than 100k dollars?"
+        },
+        {
+          "query": "Who wins the 2028 US presidential election?",
+          "targetId": "similar-2:0",
+          "rank": 2,
+          "margin": -0.036208635553035995,
+          "top": [
+            {
+              "id": "similar-2:1",
+              "title": "Who wins the Republican presidential nomination in 2028?",
+              "score": 0.9680705875953758
+            },
+            {
+              "id": "similar-2:0",
+              "title": "Next president elected in the United States in November 2028?",
+              "score": 0.9318619520423398
+            },
+            {
+              "id": "similar-2:2",
+              "title": "Who wins the 2026 US House elections?",
+              "score": 0.9096066407557157
+            }
+          ],
+          "targetTitle": "Next president elected in the United States in November 2028?"
+        },
+        {
+          "query": "Los Angeles Dodgers vs Cincinnati Reds: first five innings winner on September 14, 2026",
+          "targetId": "similar-3:0",
+          "rank": 2,
+          "margin": -0.02482655353358465,
+          "top": [
+            {
+              "id": "similar-3:2",
+              "title": "Dodgers vs Reds first five innings winner September 15, 2026",
+              "score": 0.9837525403200649
+            },
+            {
+              "id": "similar-3:0",
+              "title": "Dodgers versus Reds September 14 2026: lead after five innings?",
+              "score": 0.9589259867864802
+            },
+            {
+              "id": "similar-3:1",
+              "title": "Dodgers vs Reds full game winner September 14, 2026",
+              "score": 0.9560887619783968
+            }
+          ],
+          "targetTitle": "Dodgers versus Reds September 14 2026: lead after five innings?"
+        },
+        {
+          "query": "Cape Town highest temperature on September 15, 2026: 18 degrees Celsius",
+          "targetId": "similar-4:0",
+          "rank": 3,
+          "margin": -0.03817960220907657,
+          "top": [
+            {
+              "id": "similar-4:2",
+              "title": "Cape Town highest temperature September 16 2026: 18 C",
+              "score": 0.9860120126243709
+            },
+            {
+              "id": "similar-4:1",
+              "title": "Cape Town lowest temperature September 15 2026: 18 C",
+              "score": 0.9707210026825452
+            },
+            {
+              "id": "similar-4:0",
+              "title": "Cape Town maximum temperature 15 September 2026 equals 18 C?",
+              "score": 0.9478324104152943
+            }
+          ],
+          "targetTitle": "Cape Town maximum temperature 15 September 2026 equals 18 C?"
+        },
+        {
+          "query": "Will SpaceX launch Starship before October 1, 2026?",
+          "targetId": "similar-5:0",
+          "rank": 2,
+          "margin": -0.008282910286004586,
+          "top": [
+            {
+              "id": "similar-5:1",
+              "title": "Will SpaceX successfully land Starship before October 1 2026?",
+              "score": 0.9672861203065892
+            },
+            {
+              "id": "similar-5:0",
+              "title": "Starship liftoff before the start of October 2026?",
+              "score": 0.9590032100205846
+            },
+            {
+              "id": "similar-5:2",
+              "title": "Will Blue Origin launch New Glenn before October 1 2026?",
+              "score": 0.906237915034629
+            }
+          ],
+          "targetTitle": "Starship liftoff before the start of October 2026?"
+        },
+        {
+          "query": "Will US annual CPI inflation exceed 3 percent in August 2026?",
+          "targetId": "similar-6:0",
+          "rank": 1,
+          "margin": 0.026162050564955797,
+          "top": [
+            {
+              "id": "similar-6:0",
+              "title": "August 2026 United States year-over-year consumer inflation above 3%?",
+              "score": 0.9558241801233229
+            },
+            {
+              "id": "similar-6:1",
+              "title": "US August 2026 core CPI year-over-year above 3%",
+              "score": 0.9296621295583671
+            },
+            {
+              "id": "similar-6:2",
+              "title": "US August 2026 monthly CPI above 0.3%",
+              "score": 0.9156051002658502
+            }
+          ],
+          "targetTitle": "August 2026 United States year-over-year consumer inflation above 3%?"
+        },
+        {
+          "query": "Will the UK hold a general election before 2028?",
+          "targetId": "similar-7:0",
+          "rank": 3,
+          "margin": -0.06553099956640229,
+          "top": [
+            {
+              "id": "similar-7:2",
+              "title": "Will France hold a general election before 2028?",
+              "score": 0.9379015769644474
+            },
+            {
+              "id": "similar-7:1",
+              "title": "Who wins the next UK general election?",
+              "score": 0.88054341597088
+            },
+            {
+              "id": "similar-7:0",
+              "title": "British parliamentary general election during 2026 or 2027?",
+              "score": 0.8723705773980451
+            }
+          ],
+          "targetTitle": "British parliamentary general election during 2026 or 2027?"
+        },
+        {
+          "query": "Will Ethereum ETF net inflows exceed $1 billion in September 2026?",
+          "targetId": "similar-8:0",
+          "rank": 4,
+          "margin": -0.02308800616163742,
+          "top": [
+            {
+              "id": "similar-8:1",
+              "title": "Bitcoin ETF net inflows above $1 billion September 2026",
+              "score": 0.932416052342681
+            },
+            {
+              "id": "similar-8:2",
+              "title": "Ethereum ETF assets under management above $1 billion September 2026",
+              "score": 0.9274178385107642
+            },
+            {
+              "id": "similar-1:2",
+              "title": "Will Ethereum close above $5,000 on September 30, 2026?",
+              "score": 0.9229910331717515
+            }
+          ],
+          "targetTitle": "ETH exchange traded funds September 2026 net subscriptions greater than one billion dollars?"
+        },
+        {
+          "query": "Will the US government shut down on October 1, 2026?",
+          "targetId": "similar-9:0",
+          "rank": 3,
+          "margin": -0.0761832370654314,
+          "top": [
+            {
+              "id": "similar-9:2",
+              "title": "Will the government shut down on October 1 2027?",
+              "score": 0.971266013082838
+            },
+            {
+              "id": "similar-9:1",
+              "title": "Will the US default on its debt in October 2026?",
+              "score": 0.9433367224850157
+            },
+            {
+              "id": "similar-9:0",
+              "title": "Federal government funding lapse at the start of October 2026?",
+              "score": 0.8950827760174066
+            }
+          ],
+          "targetTitle": "Federal government funding lapse at the start of October 2026?"
+        },
+        {
+          "query": "Will Nvidia report quarterly revenue above $50 billion in Q3 fiscal 2027?",
+          "targetId": "similar-10:0",
+          "rank": 2,
+          "margin": -0.01182429814381214,
+          "top": [
+            {
+              "id": "similar-10:1",
+              "title": "Nvidia Q3 fiscal 2027 net income above $50 billion",
+              "score": 0.9468823090680774
+            },
+            {
+              "id": "similar-10:0",
+              "title": "NVDA fiscal 2027 third quarter sales exceed fifty billion dollars?",
+              "score": 0.9350580109242652
+            },
+            {
+              "id": "similar-10:2",
+              "title": "Nvidia Q4 fiscal 2027 revenue above $50 billion",
+              "score": 0.9317006030970679
+            }
+          ],
+          "targetTitle": "NVDA fiscal 2027 third quarter sales exceed fifty billion dollars?"
+        },
+        {
+          "query": "Will Japan raise its policy interest rate at the October 2026 meeting?",
+          "targetId": "similar-11:0",
+          "rank": 1,
+          "margin": 0.05856382597745691,
+          "top": [
+            {
+              "id": "similar-11:0",
+              "title": "Bank of Japan October 2026 monetary policy meeting rate hike?",
+              "score": 0.9618838164601355
+            },
+            {
+              "id": "similar-11:1",
+              "title": "Bank of Japan December 2026 rate increase",
+              "score": 0.9033199904826786
+            },
+            {
+              "id": "similar-11:2",
+              "title": "Bank of Korea October 2026 interest rate hike",
+              "score": 0.8981907909278461
+            }
+          ],
+          "targetTitle": "Bank of Japan October 2026 monetary policy meeting rate hike?"
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Frozen public titles plus representative outcomes, not full production descriptions.",
+    "Exact target-ID ranks can penalize equivalent cross-venue event titles; inspect top-three results.",
+    "Controlled Similar fixtures are synthetic, not user history.",
+    "This measures format+prefix changes on E5, not Qwen quality or trading/settlement equivalence."
+  ]
+}

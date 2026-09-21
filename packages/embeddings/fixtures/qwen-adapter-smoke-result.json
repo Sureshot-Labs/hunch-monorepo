@@ -1,0 +1,36 @@
+{
+  "testedAtDate": "2026-09-21",
+  "endpoint": "https://openrouter.ai/api/v1/embeddings",
+  "requestedModel": "qwen/qwen3-embedding-8b",
+  "requestedDimensions": 1024,
+  "text": "Market: Bitcoin above $100,000 on September 30, 2026?",
+  "probes": [
+    {
+      "purpose": "Verify actual response identity before accepting aliases",
+      "httpStatus": 200,
+      "responseModel": "Qwen/Qwen3-Embedding-8B",
+      "returnedDimensions": 1024,
+      "inputTokens": 25,
+      "attempts": 1,
+      "costUsd": 0.00000025,
+      "validated": false,
+      "errorCode": "model_mismatch"
+    },
+    {
+      "purpose": "Confirm shared adapter after adding only the observed exact alias",
+      "httpStatus": 200,
+      "responseModel": "Qwen/Qwen3-Embedding-8B",
+      "returnedDimensions": 1024,
+      "inputTokens": 25,
+      "attempts": 1,
+      "costUsd": 0.00000025,
+      "validated": true
+    }
+  ],
+  "qwenTotalCostUsd": 0.0000005,
+  "cumulativeE5AndQwenCostUsd": 0.00101693,
+  "budgetCapUsd": 0.05,
+  "policyChanged": false,
+  "productionTouched": false,
+  "qualityComparison": false
+}

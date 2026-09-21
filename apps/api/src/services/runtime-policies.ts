@@ -5,6 +5,12 @@ import {
 } from "@hunch/shared";
 import { z } from "zod";
 import {
+  DEFAULT_EMBEDDING_POLICY,
+  embeddingPolicyOverrideSchema,
+  embeddingPolicySchema,
+  type EmbeddingPolicy,
+} from "@hunch/embeddings";
+import {
   buildVenueLifecyclePolicyRevision,
   DEFAULT_VENUE_LIFECYCLE_POLICY,
   venueLifecyclePolicySchema,
@@ -65,6 +71,7 @@ export const INTEL_POLICY_KEYS = [
   "api_cache_warm",
   "ai_whale_profiles",
   "ai_clusters",
+  "ai_embeddings",
   "market_map",
   "map_search",
   "map_signals",
@@ -84,6 +91,7 @@ type PolicySource<K extends IntelPolicyKey> = K extends
   | "telegram_notifications"
   | "venue_lifecycle"
   | "market_matching"
+  | "ai_embeddings"
   ? "default" | "db"
   : "env" | "db";
 
@@ -643,6 +651,7 @@ type IntelPolicyMap = {
   api_cache_warm: ApiCacheWarmPolicy;
   ai_whale_profiles: AiWhaleProfilesPolicy;
   ai_clusters: AiClustersPolicy;
+  ai_embeddings: EmbeddingPolicy;
   market_map: MarketMapPolicy;
   map_search: MapSearchPolicy;
   map_signals: MapSignalsPolicy;
@@ -1403,6 +1412,7 @@ const policySchemas = {
   api_cache_warm: apiCacheWarmSchema,
   ai_whale_profiles: aiWhaleProfilesSchema,
   ai_clusters: aiClustersSchema,
+  ai_embeddings: embeddingPolicyOverrideSchema,
   market_map: marketMapSchema,
   map_search: mapSearchSchema,
   map_signals: mapSignalsSchema,
@@ -1637,6 +1647,7 @@ function getDefaults(): IntelPolicyMap {
       onchainStateErrorStaleHours: env.walletIntelOnchainStateErrorStaleHours,
     },
     wallet_intel_attribution: getWalletIntelAttributionDefaults(),
+    ai_embeddings: { ...DEFAULT_EMBEDDING_POLICY },
     api_cache_warm: {
       enabled: false,
       pollIntervalSec: 30,
@@ -3265,6 +3276,8 @@ function normalizeMerged<K extends IntelPolicyKey>(
       return normalizeAiClustersPolicy(
         merged as AiClustersPolicy,
       ) as IntelPolicyMap[K];
+    case "ai_embeddings":
+      return embeddingPolicySchema.parse(merged) as IntelPolicyMap[K];
     case "market_map":
       return normalizeMarketMapPolicy(
         merged as MarketMapPolicy,
@@ -3410,7 +3423,8 @@ function resolveFromRow<K extends IntelPolicyKey>(
   if (!row) {
     return {
       key,
-      source: (key === "market_matching" ||
+      source: (key === "ai_embeddings" ||
+      key === "market_matching" ||
       key === "venue_lifecycle" ||
       key === "telegram_notifications" ||
       key === "signal_post_copy"
@@ -3434,13 +3448,16 @@ function resolveFromRow<K extends IntelPolicyKey>(
     if (!warnedInvalidOverrides.has(warnKey)) {
       warnedInvalidOverrides.add(warnKey);
       console.warn(
-        "[runtime-policies] Invalid policy override payload; falling back to defaults",
+        key === "ai_embeddings"
+          ? "[runtime-policies] Invalid embedding policy; generation transitions are blocked"
+          : "[runtime-policies] Invalid policy override payload; falling back to defaults",
         { policyKey: key, effectiveAt: effectiveAt?.toISOString() ?? null },
       );
     }
     return {
       key,
-      source: (key === "market_matching" ||
+      source: (key === "ai_embeddings" ||
+      key === "market_matching" ||
       key === "venue_lifecycle" ||
       key === "telegram_notifications" ||
       key === "signal_post_copy"
@@ -3511,6 +3528,10 @@ export async function resolveAllIntelPolicies(
     ai_clusters: resolveFromRow(
       "ai_clusters",
       byKey.get("ai_clusters") ?? null,
+    ),
+    ai_embeddings: resolveFromRow(
+      "ai_embeddings",
+      byKey.get("ai_embeddings") ?? null,
     ),
     market_map: resolveFromRow("market_map", byKey.get("market_map") ?? null),
     map_search: resolveFromRow("map_search", byKey.get("map_search") ?? null),

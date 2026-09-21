@@ -113,11 +113,6 @@ export function getEmbedStreamKey(): string {
   return process.env.AI_EMBED_STREAM_KEY || DEFAULT_STREAM_KEY;
 }
 
-function toFieldValue(value: EmbedQueueItem[keyof EmbedQueueItem]): string {
-  if (value instanceof Date) return value.toISOString();
-  return String(value);
-}
-
 export async function enqueueEmbedItems(
   redis: RedisClientType,
   items: EmbedQueueItem[],
@@ -126,12 +121,19 @@ export async function enqueueEmbedItems(
   if (!items.length) return;
   const pipeline = redis.multi();
   for (const item of items) {
-    const fields: Record<string, string> = {};
-    for (const [key, value] of Object.entries(item)) {
-      if (value == null) continue;
-      fields[key] = toFieldValue(value as EmbedQueueItem[keyof EmbedQueueItem]);
-    }
-    pipeline.xAdd(streamKey, "*", fields);
+    const id = item.entity_type === "market" ? item.market_id : item.event_id;
+    if (!id) continue;
+    // The queue is a bounded invalidation log, not a second database of stale text.
+    // Overflow is recoverable by the worker's canonical DB reconciliation sweep.
+    pipeline.eval(
+      `if redis.call('XLEN',KEYS[1]) >= 200000 then
+      redis.call('INCR',KEYS[2]); return false end
+      return redis.call('XADD',KEYS[1],'*','entity_type',ARGV[1],'entity_id',ARGV[2])`,
+      {
+        keys: [streamKey, "ai:embed:control:reconcile"],
+        arguments: [item.entity_type, id],
+      },
+    );
   }
   await pipeline.exec();
 }

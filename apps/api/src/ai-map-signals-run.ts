@@ -1,6 +1,20 @@
 import { readFile, writeFile } from "fs/promises";
+import {
+  embeddingKey,
+  generationForSnapshot,
+  acquireEmbeddingGenerationPin,
+  readActiveGeneration,
+  parseEmbeddingVector,
+  buildNewsEmbeddingText,
+  type EmbeddingGeneration,
+} from "@hunch/embeddings";
+import { RESP_TYPES } from "redis";
+import {
+  fetchConsumerEmbeddings,
+  resolveConsumerEmbeddingModel,
+} from "./lib/embedding-consumer.js";
 import { aiCompletionError } from "./lib/ai-completion-diagnostics.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createRedisClient, ensureRedis } from "@hunch/infra";
 import { pool } from "./db.js";
@@ -162,7 +176,8 @@ type EmbeddingCallResult = {
 
 type EvidenceEmbeddingInput = {
   evidenceId: string;
-  text: string;
+  headline: string;
+  summary: string;
 };
 
 type MarketEmbeddingInput = {
@@ -533,7 +548,7 @@ Model:
   --model <id>                   OpenRouter model (default: openai/gpt-5.4)
   --reasoning-effort <effort>     Optional reasoning override (legacy default: low)
   --temperature <0..2>           Legacy sampling temperature; omitted for modern OpenAI reasoning models
-  --embed-model <id>             OpenRouter embeddings model (default: OPENROUTER_EMBED_MODEL or AI_EMBED_MODEL or intfloat/e5-large-v2)
+  --embed-model <id>             Compatibility check only; must match the map snapshot generation
   --max-output-tokens <n>        Max output tokens per node call (default: 900)
   --timeout-sec <n>              Request timeout seconds (default: 90)
   --max-retries <n>              Transient retry count per OpenRouter call (default: 1)
@@ -691,22 +706,6 @@ function sortEvidenceByQuality(
     deduped.push(item);
   }
   return deduped;
-}
-
-function normalizeVector(values: readonly number[]): number[] {
-  let norm = 0;
-  for (const value of values) norm += value * value;
-  if (!Number.isFinite(norm) || norm <= 0) return Array.from(values, () => 0);
-  const mag = Math.sqrt(norm);
-  return values.map((value) => value / mag);
-}
-
-function parseEmbeddingBuffer(buffer: Buffer): number[] | null {
-  if (!buffer || buffer.length === 0 || buffer.length % 4 !== 0) return null;
-  const aligned = new ArrayBuffer(buffer.byteLength);
-  new Uint8Array(aligned).set(buffer);
-  const view = new Float32Array(aligned);
-  return normalizeVector(Array.from(view));
 }
 
 function dot(a: readonly number[], b: readonly number[]): number {
@@ -965,13 +964,20 @@ async function runParallel<T, R>(
 ): Promise<R[]> {
   const out: R[] = new Array(items.length);
   let next = 0;
+  let failed = false;
+  let failure: unknown;
 
   async function worker() {
-    while (true) {
+    while (!failed) {
       const idx = next;
       next += 1;
       if (idx >= items.length) return;
-      out[idx] = await fn(items[idx], idx);
+      try {
+        out[idx] = await fn(items[idx], idx);
+      } catch (error) {
+        failed = true;
+        failure = error;
+      }
     }
   }
 
@@ -979,7 +985,9 @@ async function runParallel<T, R>(
     { length: Math.min(Math.max(concurrency, 1), items.length) },
     () => worker(),
   );
+  // Keep the generation lease until other already-started work has settled.
   await Promise.all(workers);
+  if (failed) throw failure;
   return out;
 }
 
@@ -987,10 +995,13 @@ async function callOpenRouter(
   args: Args,
   systemPrompt: string,
   userPrompt: string,
+  assertGenerationPin?: () => void,
 ): Promise<OpenRouterCallResult> {
   if (!env.openRouterKey) throw new Error("OPENROUTER_API_KEY missing");
   const totalAttempts = args.maxRetries + 1;
   for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
+    // Keep lease errors outside the provider catch/retry path.
+    assertGenerationPin?.();
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(),
@@ -1110,6 +1121,8 @@ async function callOpenRouter(
 async function callOpenRouterEmbeddings(
   args: Args,
   texts: readonly string[],
+  generation: EmbeddingGeneration,
+  assertGenerationPin?: () => void,
 ): Promise<EmbeddingCallResult> {
   if (texts.length === 0) {
     return {
@@ -1137,109 +1150,65 @@ async function callOpenRouterEmbeddings(
     };
   }
   if (!env.openRouterKey) throw new Error("OPENROUTER_API_KEY missing");
-  const totalAttempts = args.maxRetries + 1;
-  for (let attempt = 0; attempt < totalAttempts; attempt += 1) {
-    const controller = new AbortController();
-    const timeout = setTimeout(
-      () => controller.abort(),
-      args.timeoutSec * 1000,
-    );
-    try {
-      const response = await fetch("https://openrouter.ai/api/v1/embeddings", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${env.openRouterKey}`,
-          "Content-Type": "application/json",
-          "X-Title": "Hunch AI Map Signals",
-        },
-        body: JSON.stringify({
-          model: args.embedModel,
-          input: texts,
-          encoding_format: "float",
-        }),
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(
-          `OpenRouter embeddings failed: ${response.status} ${body}`,
-        );
-      }
-      const json = (await response.json()) as {
-        data?: Array<{ embedding?: number[]; index?: number }>;
-        usage?: {
-          prompt_tokens?: unknown;
-          completion_tokens?: unknown;
-          total_tokens?: unknown;
-          completion_tokens_details?: { reasoning_tokens?: unknown } | null;
-        };
-      };
-      if (!Array.isArray(json.data))
-        throw new Error("OpenRouter embeddings missing data");
-      const out: Array<number[] | null> = new Array(texts.length).fill(null);
-      for (const item of json.data) {
-        const idx = typeof item.index === "number" ? item.index : -1;
-        if (idx < 0 || idx >= texts.length) continue;
-        if (!Array.isArray(item.embedding)) continue;
-        out[idx] = normalizeVector(item.embedding);
-      }
-      const promptTokens = safeNumber(json.usage?.prompt_tokens) ?? 0;
-      const completionTokens = safeNumber(json.usage?.completion_tokens) ?? 0;
-      const totalTokens =
-        safeNumber(json.usage?.total_tokens) ?? promptTokens + completionTokens;
-      const reasoningTokens =
-        safeNumber(json.usage?.completion_tokens_details?.reasoning_tokens) ??
-        0;
-      const providerCost = extractProviderCostUsd(json);
-      const resolvedCost = resolveAiCost({
-        inputTokens: promptTokens,
-        outputTokens: completionTokens,
-        priceInputPerM: args.embedPriceInputPerM,
-        priceOutputPerM: args.embedPriceOutputPerM,
-        providerCostUsd: providerCost.providerCostUsd,
-        providerCostField: providerCost.providerCostField,
-        providerCostUsdTicks: providerCost.providerCostUsdTicks,
-      });
-      return {
-        vectors: out,
-        usage: {
-          promptTokens,
-          completionTokens,
-          totalTokens,
-          reasoningTokens,
-          providerCostUsd: providerCost.providerCostUsd,
-          providerCostField: providerCost.providerCostField,
-          providerCostUsdTicks: providerCost.providerCostUsdTicks,
-        },
-        cost: {
-          inputCostUsd: resolvedCost.inputCostUsd,
-          outputCostUsd: resolvedCost.outputCostUsd,
-          tokenCostUsd: resolvedCost.tokenCostUsd,
-          estimatedCostUsd: resolvedCost.estimatedCostUsd,
-          chargedCostUsd: resolvedCost.chargedCostUsd,
-          providerCostUsd: resolvedCost.providerCostUsd,
-          providerCostField: resolvedCost.providerCostField,
-          providerCostUsdTicks: resolvedCost.providerCostUsdTicks,
-          costSource: resolvedCost.costSource,
-        },
-      };
-    } catch (error) {
-      const canRetry =
-        attempt + 1 < totalAttempts && isTransientOpenRouterError(error);
-      if (!canRetry) throw error;
-      const backoffMs = computeBackoffMs(args.retryBaseMs, attempt);
-      if (args.verbose) {
-        const message = error instanceof Error ? error.message : String(error);
-        console.log(
-          `${logPrefix()} openrouter_embed_retry attempt=${attempt + 1}/${totalAttempts - 1} backoff_ms=${backoffMs} err=${preview(message, 140)}`,
-        );
-      }
-      await sleep(backoffMs);
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-  throw new Error("openrouter_embeddings_retry_exhausted");
+  const result = await fetchConsumerEmbeddings({
+    generation,
+    texts: [...texts],
+    apiKey: env.openRouterKey,
+    timeoutMs: Math.min(args.timeoutSec * 1000, 30_000),
+    maxAttempts: Math.min(4, args.maxRetries + 1),
+    beforeAttempt: async () => assertGenerationPin?.(),
+  });
+  const out = result.embeddings;
+  const promptTokens =
+    result.usage.inputTokens ?? Math.ceil(texts.join("").length / 4);
+  const completionTokens = 0;
+  const totalTokens = promptTokens;
+  const reasoningTokens = 0;
+  const providerCost = {
+    providerCostUsd: result.usage.costUsd,
+    providerCostField: result.usage.costUsd == null ? null : "usage.cost",
+    providerCostUsdTicks: null,
+  };
+  const resolvedCost = resolveAiCost({
+    inputTokens: promptTokens,
+    outputTokens: completionTokens,
+    priceInputPerM: args.embedPriceInputPerM,
+    priceOutputPerM: args.embedPriceOutputPerM,
+    providerCostUsd: providerCost.providerCostUsd,
+    providerCostField: providerCost.providerCostField,
+    providerCostUsdTicks: providerCost.providerCostUsdTicks,
+  });
+  return {
+    vectors: out,
+    usage: {
+      promptTokens,
+      completionTokens,
+      totalTokens,
+      reasoningTokens,
+      providerCostUsd: providerCost.providerCostUsd,
+      providerCostField: providerCost.providerCostField,
+      providerCostUsdTicks: providerCost.providerCostUsdTicks,
+    },
+    cost: {
+      inputCostUsd: resolvedCost.inputCostUsd,
+      outputCostUsd: resolvedCost.outputCostUsd,
+      tokenCostUsd: resolvedCost.tokenCostUsd,
+      estimatedCostUsd: resolvedCost.estimatedCostUsd,
+      chargedCostUsd: resolvedCost.chargedCostUsd,
+      providerCostUsd: resolvedCost.providerCostUsd,
+      providerCostField: resolvedCost.providerCostField,
+      providerCostUsdTicks: resolvedCost.providerCostUsdTicks,
+      costSource: resolvedCost.costSource,
+    },
+  };
+}
+
+async function drainPromises<T>(promises: readonly Promise<T>[]): Promise<T[]> {
+  const results = await Promise.allSettled(promises);
+  return results.map((result) => {
+    if (result.status === "rejected") throw result.reason;
+    return result.value;
+  });
 }
 
 async function toMarketCandidates(
@@ -1310,10 +1279,11 @@ async function toMarketCandidates(
 
   const evidenceRows = evidence.map((item) => ({
     evidenceId: item.id,
-    text: `${item.headline} ${item.summary}`,
+    headline: item.headline,
+    summary: item.summary,
   }));
 
-  const [evidenceEmbeddings, marketEmbeddings] = await Promise.all([
+  const [evidenceEmbeddings, marketEmbeddings] = await drainPromises([
     options.includeSemanticAffinity
       ? options.getEvidenceEmbeddings(evidenceRows)
       : Promise.resolve(new Map<string, number[] | null>()),
@@ -1514,8 +1484,9 @@ async function evaluateNodeWithModel(params: {
   runId: string;
   bucket: NodeBucket;
   candidateMarkets: MarketCandidate[];
+  assertGenerationPin?: () => void;
 }): Promise<SignalCandidate> {
-  const { args, runId, bucket, candidateMarkets } = params;
+  const { args, runId, bucket, candidateMarkets, assertGenerationPin } = params;
   const evidence = bucket.evidence.slice(0, args.maxEvidencePerNode);
   const evidenceCount = evidence.length;
   const confirmedCount = evidence.filter(
@@ -1675,7 +1646,12 @@ async function evaluateNodeWithModel(params: {
       }
     };
 
-    const raw = await callOpenRouter(args, systemPrompt, userPrompt);
+    const raw = await callOpenRouter(
+      args,
+      systemPrompt,
+      userPrompt,
+      assertGenerationPin,
+    );
     addCallCost(raw);
     if (raw.completionError) throw new Error(raw.completionError);
     const firstParsed = parsePossibleJson(raw.content);
@@ -1691,6 +1667,7 @@ async function evaluateNodeWithModel(params: {
           args,
           systemPrompt,
           buildRepairPrompt(raw.content, toParseErrorMessage(parseError)),
+          assertGenerationPin,
         );
         addCallCost(repairRaw);
         if (repairRaw.completionError)
@@ -1717,6 +1694,7 @@ async function evaluateNodeWithModel(params: {
     usage.providerCostField = providerCostField;
     usage.providerCostUsdTicks = providerCostUsdTicksTotal;
   } catch (error) {
+    assertGenerationPin?.();
     const message = error instanceof Error ? error.message : String(error);
     const providerCostUsd =
       providerReportedCostCalls > 0
@@ -2111,10 +2089,17 @@ function buildMarkdown(
   return lines.join("\n");
 }
 
+export type MapSignalsRunResult = {
+  status: "skipped";
+  reason: "stale_embedding_generation";
+  runId: string;
+  embeddingGeneration: string;
+} | void;
+
 export async function runMapSignals(
   argv: string[] = process.argv.slice(2),
   context: Partial<MapSignalsRunContext> = {},
-): Promise<void> {
+): Promise<MapSignalsRunResult> {
   activeRunContext = { ...DEFAULT_RUN_CONTEXT, ...context };
   if (hasFlag(argv, "--help") || hasFlag(argv, "-h"))
     usage(activeRunContext, 0);
@@ -2129,18 +2114,72 @@ export async function runMapSignals(
     logLabel: activeRunContext.scriptTag,
   });
 
+  let generationPin: Awaited<ReturnType<typeof acquireEmbeddingGenerationPin>> =
+    null;
   try {
     const startedAt = Date.now();
+    const [metaRaw, nodesRaw] = await Promise.all([
+      redis.get(marketMapRunMetaKey(runId)),
+      redis.get(marketMapRunNodesGlobalKey(runId)),
+    ]);
+
+    const meta = safeJsonParse<MarketMapMeta>(metaRaw);
+    const nodes = safeJsonParse<MarketMapNode[]>(nodesRaw) ?? [];
+    if (!meta) {
+      throw new Error(`missing_market_map_meta_for_run:${runId}`);
+    }
+    const generation = generationForSnapshot(meta);
+    generationPin = args.dryRun
+      ? null
+      : await acquireEmbeddingGenerationPin(
+          redis,
+          generation,
+          `map-signals:${runId}:${randomUUID()}`,
+        );
+    const generationAvailable = args.dryRun
+      ? (await readActiveGeneration(redis)).id === generation.id
+      : generationPin !== null;
+    if (!generationAvailable) {
+      const result = {
+        status: "skipped",
+        reason: "stale_embedding_generation",
+        runId,
+        embeddingGeneration: generation.id,
+      } as const;
+      console.log(`${logPrefix()} skipped`, result);
+      return result;
+    }
     if (!args.dryRun) {
       await refreshOpenRouterModelPricing(redis);
       args = resolveArgs(argv);
     }
+    if (args.embedModel !== generation.model) {
+      console.warn(
+        `${logPrefix()} deprecated embedModel ignored; using snapshot generation`,
+        { generation: generation.id },
+      );
+    }
+    args.embedModel = resolveConsumerEmbeddingModel(
+      generation,
+      parseFlag(argv, "--embed-model"),
+    );
+    const embedPricing = getOpenRouterEmbeddingPricingPerM(generation.model);
+    if (parseFlag(argv, "--embed-price-input-per-m") == null)
+      args.embedPriceInputPerM =
+        embedPricing?.inputPerM ?? args.embedPriceInputPerM;
+    if (parseFlag(argv, "--embed-price-output-per-m") == null)
+      args.embedPriceOutputPerM =
+        embedPricing?.outputPerM ?? args.embedPriceOutputPerM;
+    const bufferRedis = redis.withTypeMapping({
+      [RESP_TYPES.BLOB_STRING]: Buffer,
+    });
 
     console.log(`${logPrefix()} start`, {
       runId,
       mapGeneratedAt: input.run.mapGeneratedAt,
       model: args.model,
       embedModel: args.embedModel,
+      embeddingGeneration: generation.id,
       maxNodes: args.maxNodes,
       maxSignals: args.maxSignals,
       maxEvidencePerNode: args.maxEvidencePerNode,
@@ -2160,17 +2199,6 @@ export async function runMapSignals(
       embedPriceOutputPerM: args.embedPriceOutputPerM,
       dryRun: args.dryRun,
     });
-
-    const [metaRaw, nodesRaw] = await Promise.all([
-      redis.get(marketMapRunMetaKey(runId)),
-      redis.get(marketMapRunNodesGlobalKey(runId)),
-    ]);
-
-    const meta = safeJsonParse<MarketMapMeta>(metaRaw);
-    const nodes = safeJsonParse<MarketMapNode[]>(nodesRaw) ?? [];
-    if (!meta) {
-      throw new Error(`missing_market_map_meta_for_run:${runId}`);
-    }
 
     const nodeLabelById = new Map(
       nodes.map((node) => [
@@ -2208,7 +2236,6 @@ export async function runMapSignals(
     const evidenceEmbeddingCache = new Map<string, number[] | null>();
     const marketEmbeddingCache = new Map<string, number[] | null>();
     const eventEmbeddingCache = new Map<string, number[] | null>();
-    const textEmbeddingCache = new Map<string, number[] | null>();
     const marketTitleCache = new Map<string, string | null>();
     const embeddingCostTotals = {
       calls: 0,
@@ -2358,10 +2385,15 @@ export async function runMapSignals(
     async function getEventEmbedding(
       eventId: string,
     ): Promise<number[] | null> {
+      generationPin?.assertHeld();
       if (eventEmbeddingCache.has(eventId))
         return eventEmbeddingCache.get(eventId) ?? null;
-      const raw = await redis.hGet(`ai:embed:event:${eventId}`, "embedding");
-      const vec = Buffer.isBuffer(raw) ? parseEmbeddingBuffer(raw) : null;
+      const raw = await bufferRedis.hGet(
+        embeddingKey(generation, "event", eventId),
+        "embedding",
+      );
+      generationPin?.assertHeld();
+      const vec = parseEmbeddingVector(raw, generation);
       eventEmbeddingCache.set(eventId, vec);
       return vec;
     }
@@ -2369,33 +2401,20 @@ export async function runMapSignals(
     async function getMarketEmbedding(
       marketId: string,
       eventId: string,
-      fallbackText: string,
     ): Promise<number[] | null> {
+      generationPin?.assertHeld();
       if (marketEmbeddingCache.has(marketId))
         return marketEmbeddingCache.get(marketId) ?? null;
 
       let vec: number[] | null = null;
-      const raw = await redis.hGet(`ai:embed:market:${marketId}`, "embedding");
-      if (Buffer.isBuffer(raw)) {
-        vec = parseEmbeddingBuffer(raw);
-      }
+      const raw = await bufferRedis.hGet(
+        embeddingKey(generation, "market", marketId),
+        "embedding",
+      );
+      generationPin?.assertHeld();
+      vec = parseEmbeddingVector(raw, generation);
       if (!vec && eventId) {
         vec = await getEventEmbedding(eventId);
-      }
-      if (!vec) {
-        const textHash = createHash("sha1").update(fallbackText).digest("hex");
-        if (textEmbeddingCache.has(textHash)) {
-          vec = textEmbeddingCache.get(textHash) ?? null;
-        } else {
-          try {
-            const result = await callOpenRouterEmbeddings(args, [fallbackText]);
-            accountEmbeddingCost(result);
-            vec = result.vectors[0] ?? null;
-          } catch {
-            vec = null;
-          }
-          textEmbeddingCache.set(textHash, vec);
-        }
       }
 
       marketEmbeddingCache.set(marketId, vec);
@@ -2405,6 +2424,7 @@ export async function runMapSignals(
     async function getEvidenceEmbeddings(
       rows: EvidenceEmbeddingInput[],
     ): Promise<Map<string, number[] | null>> {
+      generationPin?.assertHeld();
       const out = new Map<string, number[] | null>();
       const missing: EvidenceEmbeddingInput[] = [];
       for (const row of rows) {
@@ -2421,7 +2441,11 @@ export async function runMapSignals(
         try {
           const result = await callOpenRouterEmbeddings(
             args,
-            missing.map((item) => item.text),
+            missing.map((item) =>
+              buildNewsEmbeddingText(item.headline, item.summary, generation),
+            ),
+            generation,
+            generationPin?.assertHeld,
           );
           accountEmbeddingCost(result);
           for (let i = 0; i < missing.length; i += 1) {
@@ -2437,6 +2461,7 @@ export async function runMapSignals(
           }
         }
       }
+      generationPin?.assertHeld();
       return out;
     }
 
@@ -2444,13 +2469,9 @@ export async function runMapSignals(
       rows: MarketEmbeddingInput[],
     ): Promise<Map<string, number[] | null>> {
       const out = new Map<string, number[] | null>();
-      await Promise.all(
+      await drainPromises(
         rows.map(async (row) => {
-          const vec = await getMarketEmbedding(
-            row.marketId,
-            row.eventId,
-            row.text,
-          );
+          const vec = await getMarketEmbedding(row.marketId, row.eventId);
           out.set(row.marketId, vec);
         }),
       );
@@ -2521,6 +2542,7 @@ export async function runMapSignals(
       buckets,
       args.concurrency,
       async (bucket, idx) => {
+        generationPin?.assertHeld();
         const callIndex = idx + 1;
         inFlight += 1;
         console.log(
@@ -2549,6 +2571,7 @@ export async function runMapSignals(
         }
 
         let signal: SignalCandidate;
+        generationPin?.assertHeld();
         if (args.dryRun) {
           signal = summarizeDeterministic(
             bucket,
@@ -2562,8 +2585,10 @@ export async function runMapSignals(
             runId,
             bucket,
             candidateMarkets,
+            assertGenerationPin: generationPin?.assertHeld,
           });
         }
+        generationPin?.assertHeld();
 
         completed += 1;
         inFlight = Math.max(0, inFlight - 1);
@@ -2652,7 +2677,9 @@ export async function runMapSignals(
       }
     }
 
+    generationPin?.assertHeld();
     const payload = {
+      embeddingGeneration: generation,
       qaContract: {
         version: QA_CONTRACT_VERSION,
         script: activeRunContext.qaScriptName,
@@ -2764,11 +2791,22 @@ export async function runMapSignals(
       `${logPrefix()} done signals=${limitedSignals.length} publish=${payload.totals.publishCandidates} context_only=${payload.totals.contextOnly} skipped=${payload.totals.skipped} model_publish=${payload.totals.modelPublishCount} downgraded=${payload.totals.downgradedPublishCount} charged_cost_usd=$${payload.totals.chargedCostUsd.toFixed(6)} est_cost_usd=$${payload.totals.estimatedCostUsd.toFixed(6)} duration_ms=${durationMs}`,
     );
   } finally {
-    await redis.quit();
+    try {
+      await generationPin?.release();
+    } finally {
+      await redis.quit();
+    }
   }
 }
 
-export const mapSignalsModelTestHooks = { resolveArgs, callOpenRouter };
+export const mapSignalsModelTestHooks = {
+  resolveArgs,
+  callOpenRouter,
+  callOpenRouterEmbeddings,
+  evaluateNodeWithModel,
+  drainPromises,
+  toMarketCandidates,
+};
 
 const isDirectRun = (() => {
   const entry = process.argv[1];

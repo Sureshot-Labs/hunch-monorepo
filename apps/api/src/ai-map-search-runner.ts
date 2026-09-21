@@ -721,7 +721,11 @@ async function main() {
     addArgIfMissing(searchArgs, "--model", config.model);
     if (config.reasoningEffort != null)
       addArgIfMissing(searchArgs, "--reasoning-effort", config.reasoningEffort);
-    addArgIfMissing(searchArgs, "--embed-model", config.embedModel);
+    // The persisted map owns its vector space; only a genuine CLI override
+    // is passed through and validated by the job against that snapshot.
+    console.warn(
+      "[map-search-runner] deprecated embedModel policy ignored; using snapshot generation",
+    );
     addArgIfMissing(searchArgs, "--tool-mode", config.toolMode);
     addBoolArgIfMissing(searchArgs, "--strict-schema", config.strictSchema);
     addBoolArgIfMissing(
@@ -957,11 +961,24 @@ async function main() {
         latestSearchForMapRunKey(activeMapRunIdForSignal),
       );
 
-      await runMapSearch(searchArgs, {
+      const outcome = await runMapSearch(searchArgs, {
         commandName: "ai:map-search:run",
         scriptTag: "ai-map-search-runner",
         qaScriptName: "ai-map-search-runner",
       });
+      if (outcome?.status === "skipped") {
+        const status = {
+          state: "skipped",
+          reason: outcome.reason,
+          runnerRunId,
+          mapRunId: outcome.runId,
+          at: new Date().toISOString(),
+        };
+        await setStatus(redis, config.statusTtlSec, status);
+        await setRunStatus(redis, outcome.runId, config.statusTtlSec, status);
+        console.log("[map-search-runner] skipped", outcome);
+        return;
+      }
 
       const outputRaw = await readFile(outPath, "utf8");
       const report = extractSearchReport(outputRaw);

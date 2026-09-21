@@ -41,6 +41,15 @@ const url = process.env.MATCHING_TEST_DATABASE_URL;
 const integration = test; // No implicit default database.
 const testSchema = `matching_test_${randomUUID().replaceAll("-", "")}`;
 let pool: Pool;
+// Load API-only configuration only when a real integration case uses it.
+const enrichExecutions: Parameters<typeof getMatchedClusters>[2] = async (
+  db,
+  items,
+) => {
+  const { enrichClusterExecutions } =
+    await import("../../../apps/api/src/services/cluster-execution-enrichment.js");
+  return enrichClusterExecutions(db, items);
+};
 const eq = {
   choice: "equivalent",
   confidence: 0.99,
@@ -591,14 +600,22 @@ integration(
         );
       },
     } as unknown as Pool;
-    const clusters = await getMatchedClusters(counted, { limit: 100 });
+    const clusters = await getMatchedClusters(
+      counted,
+      { limit: 100 },
+      enrichExecutions,
+    );
     assert(
       clusters.items.some((cluster) =>
         cluster.markets.some((market) => market.marketId === a.id),
       ),
     );
     assert(reads <= 9, `Expected bounded batch reads, got ${reads}`);
-    const filtered = await getMatchedClusters(pool, { venues: "polymarket" });
+    const filtered = await getMatchedClusters(
+      pool,
+      { venues: "polymarket" },
+      enrichExecutions,
+    );
     assert.deepEqual(filtered.items, []);
     assert(
       clusters.items.find((c) => c.markets.some((m) => m.marketId === a.id))
@@ -1662,7 +1679,11 @@ integration(
         .candidates[0]?.mappedSide,
       "YES",
     );
-    const clusters = await getMatchedClusters(pool, { limit: 100 });
+    const clusters = await getMatchedClusters(
+      pool,
+      { limit: 100 },
+      enrichExecutions,
+    );
     const cluster = clusters.items.find((c) =>
       c.markets.some((m) => m.marketId === a.id),
     );

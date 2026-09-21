@@ -1249,7 +1249,10 @@ async function main() {
       addArgIfMissing(searchArgs, "--reasoning-effort", config.reasoningEffort);
     if (config.temperature != null)
       addArgIfMissing(searchArgs, "--temperature", String(config.temperature));
-    addArgIfMissing(searchArgs, "--embed-model", config.embedModel);
+    // The persisted map owns its vector space, not this legacy policy field.
+    console.warn(
+      "[map-signals-runner] deprecated embedModel policy ignored; using snapshot generation",
+    );
     addArgIfMissing(searchArgs, "--max-nodes", String(config.maxNodes));
     addArgIfMissing(searchArgs, "--max-signals", String(config.maxSignals));
     addArgIfMissing(
@@ -1305,11 +1308,24 @@ async function main() {
     }
 
     try {
-      await runMapSignals(searchArgs, {
+      const outcome = await runMapSignals(searchArgs, {
         commandName: "ai:map-signals:run",
         scriptTag: "ai-map-signals-runner",
         qaScriptName: "ai-map-signals-runner",
       });
+      if (outcome?.status === "skipped") {
+        const status = {
+          state: "skipped",
+          reason: outcome.reason,
+          runnerRunId,
+          mapRunId: outcome.runId,
+          at: new Date().toISOString(),
+        };
+        await setStatus(redis, config.statusTtlSec, status);
+        await setRunStatus(redis, outcome.runId, config.statusTtlSec, status);
+        console.log("[map-signals-runner] skipped", outcome);
+        return;
+      }
 
       const outputRaw = await readFile(tmpOutPath, "utf8");
       const report = extractSignalsReport(outputRaw);

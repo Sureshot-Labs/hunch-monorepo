@@ -4576,6 +4576,13 @@ const tests: TestCase[] = [
         "signal-bot-runner runtime imports must not transitively reach env.ts",
       );
       assert.equal(
+        graph.has(
+          resolve(apiSrcDir, "services/cluster-execution-enrichment.ts"),
+        ),
+        false,
+        "shared matched-market reads must leave API execution verification to the API caller",
+      );
+      assert.equal(
         graph.has(resolve(apiSrcDir, "services/api-trading-service.ts")),
         false,
         "signal-bot-runner runtime imports must not transitively reach API trading execution",

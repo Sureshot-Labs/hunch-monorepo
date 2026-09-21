@@ -1,4 +1,15 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyRequest } from "fastify";
+import {
+  embeddingKey,
+  embeddingIndex,
+  embeddingCachePrefix,
+  readActiveGeneration,
+  parseEmbeddingVector,
+} from "@hunch/embeddings";
+import {
+  validEmbeddingBuffer,
+  withEmbeddingPinScope,
+} from "../lib/embedding-consumer.js";
 import { z as zod } from "zod";
 import {
   enabledConsumer,
@@ -6,7 +17,7 @@ import {
 } from "../services/matched-markets.js";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { buildObservedCanonicalMarketTop } from "@hunch/shared";
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { RESP_TYPES } from "redis";
 import { getRedis } from "../redis.js";
 import { pool } from "../db.js";
@@ -117,13 +128,6 @@ type SimilarEventMarketSummary = {
   topAsOf: { YES: string | null; NO: string | null };
   lastPrice: number | null;
 };
-
-function parseEmbeddingBuffer(buffer: Buffer): Float32Array | null {
-  if (buffer.byteLength % 4 !== 0) return null;
-  const aligned = new ArrayBuffer(buffer.byteLength);
-  new Uint8Array(aligned).set(buffer);
-  return new Float32Array(aligned);
-}
 
 function parseTimestampSeconds(value: unknown): number | null {
   if (value == null) return null;
@@ -865,7 +869,12 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         querystring: eventSimilarQuerySchema,
       },
     },
-    async (request, reply) => {
+    withEmbeddingPinScope<
+      FastifyRequest<{
+        Params: zod.infer<typeof eventParamsSchema>;
+        Querystring: zod.infer<typeof eventSimilarQuerySchema>;
+      }>
+    >(async (acquirePin, request, reply) => {
       const { eventId } = request.params;
       const {
         limit,
@@ -905,13 +914,24 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       const bufferClient = redis.withTypeMapping({
         [RESP_TYPES.BLOB_STRING]: Buffer,
       });
+      const generation = await readActiveGeneration(redis);
+      const pin = await acquirePin(
+        redis,
+        generation,
+        `similar-event:${eventId}:${randomUUID()}`,
+      );
+      if (!pin) {
+        return reply.send({ items: [], cache_status: "miss" as const });
+      }
+      pin.assertHeld();
       const [embeddingRaw, textHashRaw, embedVersionRaw] =
-        await bufferClient.hmGet(`ai:embed:event:${eventId}`, [
+        await bufferClient.hmGet(embeddingKey(generation, "event", eventId), [
           "embedding",
           "text_hash",
           "embedding_version",
         ]);
-      const embedding = Buffer.isBuffer(embeddingRaw) ? embeddingRaw : null;
+      pin.assertHeld();
+      const embedding = validEmbeddingBuffer(embeddingRaw, generation);
       if (!embedding) {
         return reply.send({ items: [], cache_status: "miss" as const });
       }
@@ -963,10 +983,12 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         )
         .digest("hex")
         .slice(0, 16);
-      const cacheKey = `ai:similar:event:${eventId}:${cacheHash}`;
+      const cacheKey = `${embeddingCachePrefix(generation)}:similar:event:${eventId}:${cacheHash}`;
 
       if (cacheTtlSec > 0) {
+        pin.assertHeld();
         const cached = await redis.get(cacheKey);
+        pin.assertHeld();
         if (cached) {
           try {
             const parsed = JSON.parse(cached) as
@@ -998,19 +1020,22 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
+        pin.assertHeld();
         const baseMarketEmbeddingRaw =
           marketId != null
             ? (
-                await bufferClient.hmGet(`ai:embed:market:${marketId}`, [
-                  "embedding",
-                ])
+                await bufferClient.hmGet(
+                  embeddingKey(generation, "market", marketId),
+                  ["embedding"],
+                )
               )[0]
             : null;
+        pin.assertHeld();
         const baseMarketBuffer = Buffer.isBuffer(baseMarketEmbeddingRaw)
           ? baseMarketEmbeddingRaw
           : null;
         const baseMarketVector = baseMarketBuffer
-          ? parseEmbeddingBuffer(baseMarketBuffer)
+          ? parseEmbeddingVector(baseMarketBuffer, generation)
           : null;
 
         if (marketId && baseMarketBuffer && baseMarketVector) {
@@ -1024,9 +1049,10 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           );
           const query = `${filterClause}=>[KNN ${marketSearchLimit} @embedding $vec AS score]`;
 
+          pin.assertHeld();
           const raw = (await redis.sendCommand([
             "FT.SEARCH",
-            "idx:ai:embed:market",
+            embeddingIndex(generation, "market"),
             query,
             "PARAMS",
             "2",
@@ -1043,12 +1069,15 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             "DIALECT",
             "2",
           ])) as unknown[];
+          pin.assertHeld();
 
           const marketHits: Array<{ marketId: string; score: number }> = [];
           for (let i = 1; i < raw.length; i += 2) {
             const key = raw[i];
             const fields = raw[i + 1] as unknown[];
-            const id = String(key).replace("ai:embed:market:", "");
+            const prefix = embeddingKey(generation, "market", "");
+            if (!String(key).startsWith(prefix)) continue;
+            const id = String(key).slice(prefix.length);
             let score = Number.POSITIVE_INFINITY;
             for (let j = 0; j < fields.length; j += 2) {
               if (String(fields[j]) === "score") {
@@ -1205,9 +1234,11 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                     markets,
                   }
                 : responseItems;
+              pin.assertHeld();
               await redis.set(cacheKey, JSON.stringify(payload), {
                 EX: cacheTtlSec,
               });
+              pin.assertHeld();
             }
 
             return reply.send({
@@ -1237,9 +1268,10 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           const filterClause = filters.length ? `(${filters.join(" ")})` : "*";
           const query = `${filterClause}=>[KNN ${perVenueLimit} @embedding $vec AS score]`;
 
+          pin.assertHeld();
           const raw = (await redis.sendCommand([
             "FT.SEARCH",
-            "idx:ai:embed:event",
+            embeddingIndex(generation, "event"),
             query,
             "PARAMS",
             "2",
@@ -1256,11 +1288,14 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             "DIALECT",
             "2",
           ])) as unknown[];
+          pin.assertHeld();
 
           for (let i = 1; i < raw.length; i += 2) {
             const key = raw[i];
             const fields = raw[i + 1] as unknown[];
-            const id = String(key).replace("ai:embed:event:", "");
+            const prefix = embeddingKey(generation, "event", "");
+            if (!String(key).startsWith(prefix)) continue;
+            const id = String(key).slice(prefix.length);
             if (excludeEventSet.has(id)) continue;
             let score = Number.POSITIVE_INFINITY;
             for (let j = 0; j < fields.length; j += 2) {
@@ -1415,13 +1450,20 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             marketVectorSql,
             marketVectorParams,
           );
-          const embeddings = await Promise.all(
+          pin.assertHeld();
+          const embeddingReads = await Promise.allSettled(
             rows.map((row) =>
-              bufferClient.hmGet(`ai:embed:market:${row.market_id}`, [
-                "embedding",
-              ]),
+              bufferClient.hmGet(
+                embeddingKey(generation, "market", row.market_id),
+                ["embedding"],
+              ),
             ),
           );
+          pin.assertHeld();
+          const embeddings = embeddingReads.map((result) => {
+            if (result.status === "rejected") throw result.reason;
+            return result.value;
+          });
 
           const bestByEvent = new Map<
             string,
@@ -1432,7 +1474,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             const res = embeddings[i] as Array<unknown> | null | undefined;
             const embeddingRaw = res?.[0];
             if (!Buffer.isBuffer(embeddingRaw)) continue;
-            const vector = parseEmbeddingBuffer(embeddingRaw);
+            const vector = parseEmbeddingVector(embeddingRaw, generation);
             if (!vector) continue;
             if (vector.length !== baseMarketVector.length) continue;
             let dot = 0;
@@ -1555,9 +1597,11 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                 markets,
               }
             : responseItems;
+          pin.assertHeld();
           await redis.set(cacheKey, JSON.stringify(payload), {
             EX: cacheTtlSec,
           });
+          pin.assertHeld();
         }
 
         return reply.send({
@@ -1570,7 +1614,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         app.log.warn({ err, eventId }, "Similar events lookup failed");
         return reply.send({ items: [], cache_status: "error" as const });
       }
-    },
+    }),
   );
 
   /**

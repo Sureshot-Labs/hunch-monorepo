@@ -1,4 +1,11 @@
 import { randomUUID } from "node:crypto";
+import {
+  embeddingKey,
+  readActiveGeneration,
+  parseEmbeddingVector,
+  acquireEmbeddingGenerationPin,
+  type EmbeddingGeneration,
+} from "@hunch/embeddings";
 import { pathToFileURL } from "node:url";
 import { createRedisClient, ensureRedis } from "@hunch/infra";
 import { PCA } from "ml-pca";
@@ -56,6 +63,15 @@ const DEFAULT_AI_LABEL_TIMEOUT_MS = 8_000;
 const DEFAULT_AI_LABEL_CONCURRENCY = 4;
 const DEFAULT_LABEL_PRICE_INPUT_PER_M = 0.05;
 const DEFAULT_LABEL_PRICE_OUTPUT_PER_M = 0.4;
+
+async function drainPromises<T>(promises: readonly Promise<T>[]): Promise<T[]> {
+  const results = await Promise.allSettled(promises);
+  return results.map((result) => {
+    if (result.status === "rejected") throw result.reason;
+    return result.value;
+  });
+}
+
 function buildMarketMapActivityVolumeSql(alias: "e" | "m"): string {
   // Limitless does not expose a true 24h volume metric on the public markets API.
   // Keep strict 24h semantics where venues provide it, and only fall back to total
@@ -405,14 +421,6 @@ function dot(a: readonly number[], b: readonly number[]): number {
 
 function cosineDistance(a: readonly number[], b: readonly number[]): number {
   return 1 - dot(a, b);
-}
-
-function parseEmbeddingBuffer(buffer: Buffer): number[] | null {
-  if (!buffer || buffer.length === 0 || buffer.length % 4 !== 0) return null;
-  const aligned = new ArrayBuffer(buffer.byteLength);
-  new Uint8Array(aligned).set(buffer);
-  const view = new Float32Array(aligned);
-  return normalizeVector(Array.from(view));
 }
 
 function mulberry32(seed: number): () => number {
@@ -2410,7 +2418,22 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
   const bufferClient = redis.withTypeMapping({
     [RESP_TYPES.BLOB_STRING]: Buffer,
   });
+  let generation: EmbeddingGeneration;
+  let generationPin: Awaited<ReturnType<typeof acquireEmbeddingGenerationPin>> =
+    null;
   try {
+    generation = await readActiveGeneration(redis);
+    if (!config.dryRun) {
+      generationPin = await acquireEmbeddingGenerationPin(
+        redis,
+        generation,
+        `map-build:${randomUUID()}`,
+      );
+      if (!generationPin)
+        throw new Error(
+          "Embedding generation changed before map build started",
+        );
+    }
     if (config.labelAiEnabled && !config.dryRun)
       await refreshOpenRouterModelPricing(redis);
     for (const venue of config.venues) {
@@ -2425,6 +2448,7 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
       const sampleCandidateIds = candidates
         .slice(0, 8)
         .map((row) => row.event_id);
+      generationPin?.assertHeld();
       let sampleKeyHits = 0;
       let sampleEmbeddingFieldHits = 0;
       let sampleEmbeddingBufferHits = 0;
@@ -2432,7 +2456,7 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
         const sampleExists = redis.multi();
         const sampleFields = redis.multi();
         for (const eventId of sampleCandidateIds) {
-          const key = `ai:embed:event:${eventId}`;
+          const key = embeddingKey(generation, "event", eventId);
           sampleExists.exists(key);
           sampleFields.hExists(key, "embedding");
         }
@@ -2440,9 +2464,12 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
           (await sampleExists.exec()) as unknown as Array<number>;
         const fieldRaw =
           (await sampleFields.exec()) as unknown as Array<number>;
-        const sampleRaw = await Promise.all(
+        const sampleRaw = await drainPromises(
           sampleCandidateIds.map((eventId) =>
-            bufferClient.hGet(`ai:embed:event:${eventId}`, "embedding"),
+            bufferClient.hGet(
+              embeddingKey(generation, "event", eventId),
+              "embedding",
+            ),
           ),
         );
         for (const value of existsRaw) {
@@ -2473,17 +2500,22 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
       };
       if (qualityCandidates.length === 0) continue;
 
-      const raw = await Promise.all(
+      generationPin?.assertHeld();
+      const raw = await drainPromises(
         qualityCandidates.map((row) =>
-          bufferClient.hGet(`ai:embed:event:${row.event_id}`, "embedding"),
+          bufferClient.hGet(
+            embeddingKey(generation, "event", row.event_id),
+            "embedding",
+          ),
         ),
       );
+      generationPin?.assertHeld();
       const points: EventPoint[] = [];
       for (let i = 0; i < qualityCandidates.length; i += 1) {
         const row = qualityCandidates[i];
         const embedding = raw[i];
         if (!embedding || !Buffer.isBuffer(embedding)) continue;
-        const vector = parseEmbeddingBuffer(embedding);
+        const vector = parseEmbeddingVector(embedding, generation);
         if (!vector) continue;
         points.push({
           eventId: row.event_id,
@@ -2551,7 +2583,13 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
       diagnostics[venue].selected = byVenuePoints[venue].length;
     }
   } finally {
-    await redis.quit();
+    // The remaining projection/labeling work uses copied vectors only. A
+    // published static map does not extend the generation's lifetime.
+    try {
+      await generationPin?.release();
+    } finally {
+      await redis.quit();
+    }
   }
 
   console.log("[market-map] candidate diagnostics", diagnostics);
@@ -2646,6 +2684,7 @@ async function buildSnapshot(config: BuildConfig): Promise<BuildResult> {
     byNodeEvents,
     labelCostSummary,
     meta: {
+      embeddingGeneration: generation,
       generatedAt: nowIso,
       version: MARKET_MAP_VERSION,
       venues: config.venues,
@@ -2893,7 +2932,11 @@ export async function runMarketMapBuild(
   };
 }
 
-export const marketMapModelTestHooks = { buildConfig, callOpenRouterLabel };
+export const marketMapModelTestHooks = {
+  buildConfig,
+  callOpenRouterLabel,
+  drainPromises,
+};
 
 const isDirectRun = (() => {
   const entry = process.argv[1];

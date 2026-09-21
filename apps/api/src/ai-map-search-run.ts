@@ -1,5 +1,19 @@
 import { writeFile } from "fs/promises";
-import { createHash } from "node:crypto";
+import {
+  embeddingKey,
+  embeddingCachePrefix,
+  generationForSnapshot,
+  acquireEmbeddingGenerationPin,
+  readActiveGeneration,
+  parseEmbeddingVector,
+  buildNewsEmbeddingText,
+  type EmbeddingGeneration,
+} from "@hunch/embeddings";
+import {
+  fetchConsumerEmbeddings,
+  resolveConsumerEmbeddingModel,
+} from "./lib/embedding-consumer.js";
+import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createRedisClient, ensureRedis } from "@hunch/infra";
 import { RESP_TYPES } from "redis";
@@ -75,8 +89,11 @@ function mapSearchEvidenceDocKey(evidenceId: string): string {
   return `${MAP_SEARCH_KEY_PREFIX}:evidence:${evidenceId}`;
 }
 
-function mapSearchNewsEmbeddingKey(evidenceId: string): string {
-  return `ai:embed:news:v1:${evidenceId}`;
+function mapSearchNewsEmbeddingKey(
+  generation: EmbeddingGeneration,
+  evidenceId: string,
+): string {
+  return `${embeddingCachePrefix(generation)}:news:${evidenceId}`;
 }
 
 type ReuseMode =
@@ -313,6 +330,7 @@ type PersistedEvidence = {
 };
 
 type ResumeStatePayload = {
+  embeddingGeneration?: EmbeddingGeneration;
   version: "map_search_resume_v1";
   runId: string;
   at: string;
@@ -792,7 +810,7 @@ Core:
   --run-id <id>                       Optional map snapshot run id (default: active)
   --model <id>                        xAI responses model (default: XAI_SEARCH_MODEL or grok-4-1-fast-reasoning)
   --reasoning-effort <level>          xAI effort: low, medium, high, xhigh; omitted keeps provider default
-  --embed-model <id>                  OpenRouter embeddings model (default: OPENROUTER_EMBED_MODEL or AI_EMBED_MODEL or intfloat/e5-large-v2)
+  --embed-model <id>                  Compatibility check only; must match the map snapshot generation
   --tool-mode <both|web|x|none>       Tool surface (default: both)
   --out <path>                        JSON report output path
   --report-out <path>                 Markdown report output path
@@ -1232,14 +1250,6 @@ function normalizeVector(values: readonly number[]): number[] {
   return values.map((value) => value / mag);
 }
 
-function parseEmbeddingBuffer(buffer: Buffer): number[] | null {
-  if (!buffer || buffer.length === 0 || buffer.length % 4 !== 0) return null;
-  const aligned = new ArrayBuffer(buffer.byteLength);
-  new Uint8Array(aligned).set(buffer);
-  const view = new Float32Array(aligned);
-  return normalizeVector(Array.from(view));
-}
-
 function dot(a: readonly number[], b: readonly number[]): number {
   const size = Math.min(a.length, b.length);
   let sum = 0;
@@ -1642,11 +1652,14 @@ async function callXaiWithRetry(
   apiKey: string,
   prompt: { system: string; user: string },
   tools: Array<Record<string, unknown>>,
+  assertGenerationPin?: () => void,
 ): Promise<XaiCallRaw> {
   let attempts = 0;
   let last: XaiCallRaw | null = null;
   const totalAttempts = args.maxRetries + 1;
   while (attempts < totalAttempts) {
+    // Lease failures must escape before the paid call, not become retries.
+    assertGenerationPin?.();
     const currentAttempt = attempts + 1;
     const raw = await callXaiOnce(args, apiKey, prompt, tools);
     attempts = currentAttempt;
@@ -1686,40 +1699,19 @@ async function callXaiWithRetry(
 
 async function fetchOpenRouterEmbeddings(
   openRouterKey: string,
-  model: string,
+  generation: EmbeddingGeneration,
   texts: string[],
+  assertGenerationPin?: () => void,
 ): Promise<number[][]> {
   if (texts.length === 0) return [];
-  const response = await fetch("https://openrouter.ai/api/v1/embeddings", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${openRouterKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      input: texts,
-    }),
+  const result = await fetchConsumerEmbeddings({
+    generation,
+    texts,
+    apiKey: openRouterKey,
+    timeoutMs: 30_000,
+    beforeAttempt: async () => assertGenerationPin?.(),
   });
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`OpenRouter embeddings failed: ${response.status} ${body}`);
-  }
-  const payload = (await response.json()) as {
-    data?: Array<{ embedding?: number[]; index?: number }>;
-  };
-  if (!payload.data || !Array.isArray(payload.data)) {
-    throw new Error("OpenRouter embeddings missing data");
-  }
-  const out: number[][] = [];
-  for (const item of payload.data) {
-    if (!item.embedding || !Array.isArray(item.embedding)) {
-      throw new Error("OpenRouter embedding missing vector");
-    }
-    const idx = typeof item.index === "number" ? item.index : out.length;
-    out[idx] = normalizeVector(item.embedding);
-  }
-  return out;
+  return result.embeddings;
 }
 
 function buildNodePathLabels(
@@ -1995,10 +1987,17 @@ async function setSearchStatus(
   await redis.expire(key, ttlSec);
 }
 
+export type MapSearchRunResult = {
+  status: "skipped";
+  reason: "stale_embedding_generation";
+  runId: string;
+  embeddingGeneration: string;
+} | void;
+
 export async function runMapSearch(
   argv: string[] = process.argv.slice(2),
   context: Partial<MapSearchRunContext> = {},
-): Promise<void> {
+): Promise<MapSearchRunResult> {
   activeRunContext = { ...DEFAULT_RUN_CONTEXT, ...context };
   if (hasFlag(argv, "--help")) usage(activeRunContext, 0);
   const args = resolveArgs(argv);
@@ -2006,19 +2005,6 @@ export async function runMapSearch(
   if (!env.redisUrl) {
     throw new Error("REDIS_URL is required");
   }
-  if (!args.dryRun && !process.env.XAI_API_KEY?.trim()) {
-    throw new Error("XAI_API_KEY is required when not dry-run");
-  }
-  if (
-    !args.dryRun &&
-    args.maxCalls > 0 &&
-    !process.env.OPENROUTER_API_KEY?.trim()
-  ) {
-    console.warn(
-      `${logPrefix()} OPENROUTER_API_KEY missing; semantic routing will fallback to lexical only`,
-    );
-  }
-
   const xaiApiKey = process.env.XAI_API_KEY?.trim() ?? "";
   const openRouterKey = process.env.OPENROUTER_API_KEY?.trim() ?? "";
   const redis = createRedisClient({ url: env.redisUrl });
@@ -2026,12 +2012,91 @@ export async function runMapSearch(
     waitForReady: true,
     logLabel: activeRunContext.scriptTag,
   });
+  const startedAt = Date.now();
+  let generationPin: Awaited<ReturnType<typeof acquireEmbeddingGenerationPin>> =
+    null;
+  try {
+    const snapshot = await loadSnapshot(redis, args.runId);
+    const generation = generationForSnapshot(snapshot.meta);
+    generationPin = args.dryRun
+      ? null
+      : await acquireEmbeddingGenerationPin(
+          redis,
+          generation,
+          `map-search:${snapshot.runId}:${randomUUID()}`,
+        );
+    const generationAvailable = args.dryRun
+      ? (await readActiveGeneration(redis)).id === generation.id
+      : generationPin !== null;
+    if (!generationAvailable) {
+      const result = {
+        status: "skipped",
+        reason: "stale_embedding_generation",
+        runId: snapshot.runId,
+        embeddingGeneration: generation.id,
+      } as const;
+      console.log(`${logPrefix()} skipped`, result);
+      return result;
+    }
+    if (!args.dryRun && !xaiApiKey) {
+      throw new Error("XAI_API_KEY is required when not dry-run");
+    }
+    if (!args.dryRun && args.maxCalls > 0 && !openRouterKey) {
+      console.warn(
+        `${logPrefix()} OPENROUTER_API_KEY missing; semantic routing will fallback to lexical only`,
+      );
+    }
+    if (args.embedModel !== generation.model) {
+      console.warn(
+        `${logPrefix()} deprecated embedModel ignored; using snapshot generation`,
+        { generation: generation.id },
+      );
+    }
+    args.embedModel = resolveConsumerEmbeddingModel(
+      generation,
+      parseFlag(argv, "--embed-model"),
+    );
+    await runMapSearchWithSnapshot({
+      args,
+      redis,
+      snapshot,
+      generation,
+      generationPin,
+      startedAt,
+      xaiApiKey,
+      openRouterKey,
+    });
+  } finally {
+    try {
+      await generationPin?.release();
+    } finally {
+      await redis.quit();
+    }
+  }
+}
+
+async function runMapSearchWithSnapshot({
+  args,
+  redis,
+  snapshot,
+  generation,
+  generationPin,
+  startedAt,
+  xaiApiKey,
+  openRouterKey,
+}: {
+  args: Args;
+  redis: ReturnType<typeof createRedisClient>;
+  snapshot: SnapshotContext;
+  generation: EmbeddingGeneration;
+  generationPin: Awaited<ReturnType<typeof acquireEmbeddingGenerationPin>>;
+  startedAt: number;
+  xaiApiKey: string;
+  openRouterKey: string;
+}): Promise<void> {
   const bufferRedis = redis.withTypeMapping({
     [RESP_TYPES.BLOB_STRING]: Buffer,
   });
-
-  const startedAt = Date.now();
-  const snapshot = await loadSnapshot(redis, args.runId);
   const runId = snapshot.runId;
   const nodes = snapshot.nodes;
   const nodeById = snapshot.nodeById;
@@ -2161,6 +2226,7 @@ export async function runMapSearch(
     if (
       resumed &&
       resumed.runId === runId &&
+      generationForSnapshot(resumed).id === generation.id &&
       resumed.resume &&
       resumed.state !== "completed" &&
       resumed.state !== "dry_run"
@@ -2253,15 +2319,16 @@ export async function runMapSearch(
     let assigned = 0;
     const rootById = new Map(rootNodes.map((node) => [node.id, node]));
     for (const prior of priorEvidence) {
+      generationPin?.assertHeld();
       const sourceText = `${prior.headline} ${prior.summary}`.trim();
       const cachedEmbeddingRaw = await redis.get(
-        mapSearchNewsEmbeddingKey(prior.id),
+        mapSearchNewsEmbeddingKey(generation, prior.id),
       );
+      generationPin?.assertHeld();
       const cachedEmbedding = (() => {
         if (!cachedEmbeddingRaw) return null;
         const parsed = safeJsonParse<number[]>(cachedEmbeddingRaw);
-        if (!Array.isArray(parsed) || parsed.length === 0) return null;
-        return normalizeVector(parsed);
+        return parseEmbeddingVector(parsed, generation);
       })();
       let bestRootId: string | null = null;
       let bestRootScore = 0;
@@ -2420,6 +2487,8 @@ export async function runMapSearch(
     runId,
     mapGeneratedAt: snapshot.meta.generatedAt,
     model: args.model,
+    embedModel: args.embedModel,
+    embeddingGeneration: generation.id,
     toolMode:
       args.includeWebTool && args.includeXTool
         ? "both"
@@ -2516,6 +2585,7 @@ export async function runMapSearch(
         ...toEvidencePreviewFromMapEvidence(item),
       }));
     const checkpoint = {
+      embeddingGeneration: generation,
       qaContract: {
         version: QA_CONTRACT_VERSION,
         script: activeRunContext.qaScriptName,
@@ -2609,6 +2679,7 @@ export async function runMapSearch(
     if (args.persistenceMode !== "normalized_keys") return;
 
     const resumePayload: ResumeStatePayload = {
+      embeddingGeneration: generation,
       version: "map_search_resume_v1",
       runId,
       at: nowIso(),
@@ -2906,14 +2977,16 @@ export async function runMapSearch(
   }
 
   async function getEventEmbedding(eventId: string): Promise<number[] | null> {
+    generationPin?.assertHeld();
     if (eventEmbeddingCache.has(eventId)) {
       return eventEmbeddingCache.get(eventId) ?? null;
     }
     const raw = await bufferRedis.hGet(
-      `ai:embed:event:${eventId}`,
+      embeddingKey(generation, "event", eventId),
       "embedding",
     );
-    const vec = Buffer.isBuffer(raw) ? parseEmbeddingBuffer(raw) : null;
+    generationPin?.assertHeld();
+    const vec = parseEmbeddingVector(raw, generation);
     eventEmbeddingCache.set(eventId, vec);
     return vec;
   }
@@ -2973,6 +3046,7 @@ export async function runMapSearch(
   await writeCheckpoint("started");
 
   while (queue.length > 0) {
+    generationPin?.assertHeld();
     const budgetStopBefore = evaluateBudgetStop(args, budgetState);
     if (budgetStopBefore) {
       console.log(
@@ -3124,6 +3198,7 @@ export async function runMapSearch(
           `${logPrefix()} call_start #${launchOrder} node="${nodeDisplayLabel(node)}" level=${node.level} queue=${queue.length} evidence=${evidenceById.size} in_flight=${inFlightAtLaunch}`,
         );
 
+        generationPin?.assertHeld();
         try {
           let rawCall: XaiCallRaw;
           if (args.dryRun) {
@@ -3162,6 +3237,7 @@ export async function runMapSearch(
               xaiApiKey,
               { system: systemPrompt, user: userPrompt },
               tools,
+              generationPin?.assertHeld,
             );
           }
           return {
@@ -3224,7 +3300,15 @@ export async function runMapSearch(
       continue;
     }
 
-    const results = await Promise.all(launches.map((launch) => launch.promise));
+    // Wait for every in-flight call before an error can release the job lease.
+    const settled = await Promise.allSettled(
+      launches.map((launch) => launch.promise),
+    );
+    const results = settled.map((result) => {
+      if (result.status === "rejected") throw result.reason;
+      return result.value;
+    });
+    generationPin?.assertHeld();
     let batchStopReason: string | null = null;
 
     for (const task of results) {
@@ -3350,15 +3434,20 @@ export async function runMapSearch(
       droppedByDomainPolicyTotal += droppedByDomainPolicyCount;
 
       if (newEvidence.length > 0 && openRouterKey) {
+        generationPin?.assertHeld();
         try {
-          const texts = newEvidence.map(
-            (evidence) =>
-              `${evidence.headline}\n${evidence.summary}\nconfirmation:${evidence.confirmation}\nsource_tier:${evidence.sourceTier}`,
+          const texts = newEvidence.map((evidence) =>
+            buildNewsEmbeddingText(
+              evidence.headline,
+              evidence.summary,
+              generation,
+            ),
           );
           const vectors = await fetchOpenRouterEmbeddings(
             openRouterKey,
-            args.embedModel,
+            generation,
             texts,
+            generationPin?.assertHeld,
           );
           for (let i = 0; i < newEvidence.length; i += 1) {
             newEvidence[i].embedding = vectors[i] ?? null;
@@ -3368,6 +3457,7 @@ export async function runMapSearch(
             err: error instanceof Error ? error.message : String(error),
           });
         }
+        generationPin?.assertHeld();
       }
 
       if (newEvidence.length > 0 && children.length > 0) {
@@ -3824,7 +3914,9 @@ export async function runMapSearch(
   }
   const markdownReport = markdownLines.join("\n");
 
+  generationPin?.assertHeld();
   const report = {
+    embeddingGeneration: generation,
     qaContract: {
       version: QA_CONTRACT_VERSION,
       script: activeRunContext.qaScriptName,
@@ -3965,6 +4057,7 @@ export async function runMapSearch(
 
   if (args.persistenceMode === "normalized_keys") {
     const finalResumePayload: ResumeStatePayload = {
+      embeddingGeneration: generation,
       version: "map_search_resume_v1",
       runId,
       at: nowIso(),
@@ -4037,6 +4130,7 @@ export async function runMapSearch(
     const evidenceItems = Array.from(evidenceById.values());
     if (evidenceItems.length > 0) {
       for (const evidence of evidenceItems) {
+        generationPin?.assertHeld();
         await redis.set(
           mapSearchEvidenceDocKey(evidence.id),
           JSON.stringify({
@@ -4059,7 +4153,7 @@ export async function runMapSearch(
         });
         if (evidence.embedding && evidence.embedding.length > 0) {
           await redis.set(
-            mapSearchNewsEmbeddingKey(evidence.id),
+            mapSearchNewsEmbeddingKey(generation, evidence.id),
             JSON.stringify(evidence.embedding),
             {
               EX: Math.max(
@@ -4114,7 +4208,6 @@ export async function runMapSearch(
       ),
     );
   }
-  await redis.quit();
 }
 
 const isDirectRun = (() => {
@@ -4127,7 +4220,12 @@ const isDirectRun = (() => {
   }
 })();
 
-export const mapSearchModelTestHooks = { resolveArgs, callXaiOnce };
+export const mapSearchModelTestHooks = {
+  resolveArgs,
+  callXaiOnce,
+  callXaiWithRetry,
+  fetchOpenRouterEmbeddings,
+};
 
 if (isDirectRun) {
   runMapSearch().catch(async (error) => {

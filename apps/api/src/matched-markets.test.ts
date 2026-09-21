@@ -1,4 +1,5 @@
 import type { DbQuery } from "./db.js";
+import type { Pool } from "@hunch/infra";
 import { DEFAULT_MARKET_MATCHING_POLICY } from "@hunch/shared";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -14,6 +15,7 @@ import {
   computeClusterMetrics,
 } from "./services/clusters.js";
 import type { AggMarketAlternativesResponse } from "./services/agg-market-clusters.js";
+import { getMatchedClusters } from "./services/matched-markets.js";
 
 const policyDb = {
   query: async <T>() => ({
@@ -33,6 +35,37 @@ const policyDb = {
     ] as T[],
   }),
 } as DbQuery;
+
+test("matched clusters require the API-owned verifier and propagate its failure", async () => {
+  const db = {
+    query: async () => ({ rows: [] }),
+  } as unknown as Pool;
+  let verificationCalls = 0;
+  const result = await getMatchedClusters(db, {}, async (receivedDb, items) => {
+    verificationCalls++;
+    assert.equal(receivedDb, db);
+    assert.deepEqual(items, []);
+    return items;
+  });
+  assert.equal(verificationCalls, 1);
+  assert.deepEqual(result.items, []);
+  assert.deepEqual(result.coverage, {
+    complete: true,
+    nextCursor: null,
+    pagesFetched: 1,
+    sourceMarkets: 0,
+  });
+
+  const failure = new Error("execution_verification_unavailable");
+  await assert.rejects(
+    getMatchedClusters(db, {}, async () => {
+      verificationCalls++;
+      throw failure;
+    }),
+    (error: unknown) => error === failure,
+  );
+  assert.equal(verificationCalls, 2);
+});
 
 test("public matching configuration follows runtime policy without restart and never exposes the budget", async () => {
   let payload: unknown = {};

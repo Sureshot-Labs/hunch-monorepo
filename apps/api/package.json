@@ -115,6 +115,7 @@
     "signal:post-copy:audit": "tsx src/signal-post-copy-audit.ts"
   },
   "dependencies": {
+    "@hunch/embeddings": "workspace:*",
     "@hunch/market-matching": "workspace:*",
     "@aws-sdk/client-s3": "^3.1096.0",
     "@aws-sdk/s3-request-presigner": "^3.1096.0",

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { embeddingIndex, readActiveGeneration } from "@hunch/embeddings";
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import {
@@ -77,6 +78,7 @@ import {
   signalPostCopyPolicySchema,
 } from "../services/signal-post-copy-policy.js";
 import { readApiCacheWarmStatus } from "../services/api-cache-warm.js";
+import { parseAdminEmbeddingStatus } from "../services/admin-embeddings-status.js";
 import { registerAdminFundingRoutes } from "./admin-funding.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
@@ -224,8 +226,6 @@ const ZERO_BYTES32 =
 const POLYGON_MULTICALL_ADDRESS =
   env.polygonMulticallAddress?.trim() ||
   "0xca11bde05977b3631167028862be2a173976ca11";
-const EMBED_INDEX_MARKET = "idx:ai:embed:market";
-const EMBED_INDEX_EVENT = "idx:ai:embed:event";
 const EMBED_DLQ_KEY = "ai:embed:dead";
 const SOLANA_LAMPORT_DECIMALS = 9;
 const ADMIN_SYSTEM_VENUES = ["polymarket", "dflow", "limitless"] as const;
@@ -2778,29 +2778,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       const groupName = process.env.AI_EMBED_GROUP ?? "ai-embedder";
       const generatedAt = new Date().toISOString();
 
-      const [{ rows: eventRows }, { rows: marketRows }] = await Promise.all([
-        pool.query<{ total: string; active: string }>(
-          `
-            select
-              count(*)::text as total,
-              count(*) filter (where status = 'ACTIVE')::text as active
-            from unified_events
-          `,
-        ),
-        pool.query<{ total: string; active: string }>(
-          `
-            select
-              count(*)::text as total,
-              count(*) filter (where status = 'ACTIVE')::text as active
-            from unified_markets
-          `,
-        ),
-      ]);
-
-      const eventDbTotal = Number(eventRows[0]?.total ?? 0);
-      const eventDbActive = Number(eventRows[0]?.active ?? 0);
-      const marketDbTotal = Number(marketRows[0]?.total ?? 0);
-      const marketDbActive = Number(marketRows[0]?.active ?? 0);
+      const policy = await resolveIntelPolicy(pool, "ai_embeddings");
+      let workerStatus = parseAdminEmbeddingStatus(null);
 
       const { redis, status, error: redisError } = await getRedisStatus();
       const redisStats: {
@@ -2854,24 +2833,43 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         redisStats.available = true;
         redisStats.error = null;
 
-        const [eventTotal, eventActive, marketTotal, marketActive] =
-          await Promise.all([
-            fetchIndexCount(redis, EMBED_INDEX_EVENT, "*"),
-            fetchIndexCount(redis, EMBED_INDEX_EVENT, "@status:{ACTIVE}"),
-            fetchIndexCount(redis, EMBED_INDEX_MARKET, "*"),
-            fetchIndexCount(redis, EMBED_INDEX_MARKET, "@status:{ACTIVE}"),
+        try {
+          const [generation, rawStatus] = await Promise.all([
+            readActiveGeneration(redis),
+            redis.get("ai:embed:control:status"),
           ]);
-
-        redisStats.indexes.event = {
-          total: eventTotal.count,
-          active: eventActive.count,
-          error: eventTotal.error ?? eventActive.error,
-        };
-        redisStats.indexes.market = {
-          total: marketTotal.count,
-          active: marketActive.count,
-          error: marketTotal.error ?? marketActive.error,
-        };
+          workerStatus = parseAdminEmbeddingStatus(rawStatus);
+          const [eventTotal, eventActive, marketTotal, marketActive] =
+            await Promise.all([
+              fetchIndexCount(redis, embeddingIndex(generation, "event"), "*"),
+              fetchIndexCount(
+                redis,
+                embeddingIndex(generation, "event"),
+                "@status:{ACTIVE}",
+              ),
+              fetchIndexCount(redis, embeddingIndex(generation, "market"), "*"),
+              fetchIndexCount(
+                redis,
+                embeddingIndex(generation, "market"),
+                "@status:{ACTIVE}",
+              ),
+            ]);
+          redisStats.indexes.event = {
+            total: eventTotal.count,
+            active: eventActive.count,
+            error: eventTotal.error ?? eventActive.error,
+          };
+          redisStats.indexes.market = {
+            total: marketTotal.count,
+            active: marketActive.count,
+            error: marketTotal.error ?? marketActive.error,
+          };
+        } catch {
+          workerStatus = {
+            status: null,
+            error: "Embedding generation/status lookup failed",
+          };
+        }
 
         try {
           const [streamLength, dlqLength] = await Promise.all([
@@ -2905,8 +2903,6 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const buildCoverage = (options: {
-        dbTotal: number;
-        dbActive: number;
         embeddedTotal: number | null;
         embeddedActive: number | null;
       }) => {
@@ -2914,17 +2910,16 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           options.embeddedTotal != null && options.embeddedActive != null
             ? Math.max(options.embeddedTotal - options.embeddedActive, 0)
             : null;
-        const coverageActive =
-          options.embeddedActive != null && options.dbActive > 0
-            ? options.embeddedActive / options.dbActive
-            : null;
         return {
-          dbTotal: options.dbTotal,
-          dbActive: options.dbActive,
+          // Keep the response compatible, but do not scan production tables or
+          // claim that Redis indexed status counts prove current DB coverage.
+          dbTotal: null,
+          dbActive: null,
           embeddedTotal: options.embeddedTotal,
           embeddedActive: options.embeddedActive,
           embeddedInactive,
-          coverageActive,
+          coverageActive: null,
+          approximate: true,
         };
       };
 
@@ -2933,19 +2928,24 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         generatedAt,
         coverage: {
           events: buildCoverage({
-            dbTotal: eventDbTotal,
-            dbActive: eventDbActive,
             embeddedTotal: redisStats.indexes.event.total,
             embeddedActive: redisStats.indexes.event.active,
           }),
           markets: buildCoverage({
-            dbTotal: marketDbTotal,
-            dbActive: marketDbActive,
             embeddedTotal: redisStats.indexes.market.total,
             embeddedActive: redisStats.indexes.market.active,
           }),
         },
         redis: redisStats,
+        embeddings: {
+          policy: {
+            source: policy.source,
+            effectiveAt: policy.effectiveAt,
+            effective: policy.invalidOverride ? null : policy.effective,
+            invalidOverride: policy.invalidOverride,
+          },
+          ...workerStatus,
+        },
       });
     },
   );
