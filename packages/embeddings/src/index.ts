@@ -3,7 +3,7 @@ export * from "./text.js";
 export * from "./provider.js";
 export {
   loadEmbeddingSources,
-  listEmbeddingSourceIds,
+  readEmbeddingSourcePage,
   countEmbeddingSources,
   type EmbeddingDb,
 } from "./source.js";

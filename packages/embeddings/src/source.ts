@@ -17,31 +17,58 @@ const eligibility = {
 };
 const table = { market: "unified_markets", event: "unified_events" };
 
-export async function listEmbeddingSourceIds(
+/** The cursor follows scanned rows, not matches. An empty eligible page is not EOF. */
+export async function readEmbeddingSourcePage(
   db: EmbeddingDb,
   kind: EmbeddingKind,
   after: string | null,
   venues: string[],
   limit = 500,
-): Promise<string[]> {
+): Promise<{ ids: string[]; after: string | null; done: boolean }> {
+  if (!venues.length) return { ids: [], after, done: true };
+  const pageSize = Math.min(500, Math.max(1, limit));
   const { rows } = await db.query(
-    `select entity.id from ${table[kind]} entity
-    where ${eligibility[kind]} and ($2::text is null or entity.id > $2::text)
-    order by entity.id limit $3`,
-    [venues, after, Math.min(500, Math.max(1, limit))],
+    // MATERIALIZED prevents the planner from moving eligibility below LIMIT.
+    // Separate first/resume shapes keep the keyset predicate indexable even in
+    // a generic prepared plan. No scan of an unbounded ineligible prefix.
+    `with embedding_page as materialized (
+      select id, status, venue from ${table[kind]}
+      ${after === null ? "" : "where id > $3::text"}
+      order by id limit $2
+    ) select entity.id, (${eligibility[kind]}) as eligible
+    from embedding_page entity order by entity.id`,
+    after === null ? [venues, pageSize] : [venues, pageSize, after],
   );
-  return rows.map((row) => String(row.id));
+  return {
+    ids: rows
+      .filter((row) => row.eligible === true)
+      .map((row) => String(row.id)),
+    after: rows.length ? String(rows[rows.length - 1].id) : after,
+    done: rows.length < pageSize,
+  };
 }
 
-export async function countEmbeddingSources(db: EmbeddingDb, venues: string[]) {
+export async function countEmbeddingSources(
+  db: EmbeddingDb,
+  venues: string[],
+  options: {
+    signal?: AbortSignal;
+    onProgress?: (counts: Record<EmbeddingKind, number>) => void;
+  } = {},
+) {
   const result = { event: 0, market: 0 };
   for (const kind of ["event", "market"] as const) {
-    const { rows } = await db.query(
-      `select count(*)::int as n from ${table[kind]} entity
-      where ${eligibility[kind]}`,
-      [venues],
-    );
-    result[kind] = Number(rows[0]?.n ?? 0);
+    let after: string | null = null;
+    for (;;) {
+      options.signal?.throwIfAborted();
+      const page = await readEmbeddingSourcePage(db, kind, after, venues);
+      result[kind] += page.ids.length;
+      options.onProgress?.({ ...result });
+      if (page.done) break;
+      after = page.after;
+      // CLI preview is read-only, but must not run a tight unthrottled DB sweep.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
   }
   return result;
 }

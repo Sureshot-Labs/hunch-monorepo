@@ -7,7 +7,7 @@ import {
   LEGACY_EMBEDDING_GENERATION,
   generationForPolicy,
   loadEmbeddingSources,
-  listEmbeddingSourceIds,
+  readEmbeddingSourcePage,
   countEmbeddingSources,
   embeddingKey,
   embeddingIndex,
@@ -37,7 +37,7 @@ const db = new Pool({
   connectionString:
     "postgres://postgres:embedding_test_local@127.0.0.1:55439/embedding_test",
   max: 2,
-  statement_timeout: 5000,
+  statement_timeout: 15000,
   connectionTimeoutMillis: 5000,
 });
 const redis = createClient({
@@ -94,6 +94,9 @@ type Checkpoint = {
 };
 function checkpoint(phase = "active", overrides: Record<string, unknown> = {}) {
   return {
+    scanVersion: 2,
+    countsReady: true,
+    probes: { event: "event:a", market: "market:a" },
     phase,
     kind: "event",
     after: null,
@@ -207,12 +210,12 @@ test("canonical SQL eligibility, stable pages and terminal rows", async () => {
     market: 1,
   });
   assert.deepEqual(
-    await listEmbeddingSourceIds(db, "event", null, ["polymarket"]),
-    ["event:a"],
+    await readEmbeddingSourcePage(db, "event", null, ["polymarket"]),
+    { ids: ["event:a"], after: "event:orphan", done: true },
   );
   assert.deepEqual(
-    await listEmbeddingSourceIds(db, "market", "market:a", ["polymarket"]),
-    [],
+    await readEmbeddingSourcePage(db, "market", "market:a", ["polymarket"]),
+    { ids: [], after: "market:closed", done: true },
   );
   const sources = await loadEmbeddingSources(
     db,
@@ -229,6 +232,189 @@ test("canonical SQL eligibility, stable pages and terminal rows", async () => {
 });
 test("stream IDs compare numerically", () =>
   assert.equal(compareStreamId("10-0", "9-100"), 1));
+test("raw pages bound ineligible prefixes, preserve exact boundaries and scan each ID once", async () => {
+  await db.query(`insert into unified_markets(id,venue,status,title)
+    select 'a:' || lpad(fixture_no::text,6,'0'),
+      case when fixture_no % 2 = 0 then 'kalshi' else 'polymarket' end,
+      case when fixture_no % 2 = 0 then 'ACTIVE' else 'CLOSED' end,'Excluded'
+    from generate_series(1,1000) as fixture_rows(fixture_no)`);
+  const first = await readEmbeddingSourcePage(db, "market", null, [
+    "polymarket",
+  ]);
+  assert.deepEqual(first, { ids: [], after: "a:000500", done: false });
+  const second = await readEmbeddingSourcePage(db, "market", first.after, [
+    "polymarket",
+  ]);
+  assert.deepEqual(second, { ids: [], after: "a:001000", done: false });
+  const third = await readEmbeddingSourcePage(db, "market", second.after, [
+    "polymarket",
+  ]);
+  assert.deepEqual(third, {
+    ids: ["market:a"],
+    after: "market:closed",
+    done: true,
+  });
+  assert.deepEqual(await countEmbeddingSources(db, ["polymarket"]), {
+    event: 1,
+    market: 1,
+  });
+  assert.deepEqual(
+    await readEmbeddingSourcePage(db, "market", third.after, ["polymarket"]),
+    { ids: [], after: "market:closed", done: true },
+  );
+  assert.deepEqual(await readEmbeddingSourcePage(db, "market", null, []), {
+    ids: [],
+    after: null,
+    done: true,
+  });
+});
+test("source census is bounded, shared, restartable and required before background inference", async () => {
+  await serve();
+  await db.query(`insert into unified_events(id,venue,status,title)
+    select 'a:' || lpad(fixture_no::text,6,'0'),'kalshi','ACTIVE','Excluded'
+    from generate_series(1,1000) as fixture_rows(fixture_no)`);
+  await store.put(
+    checkpointKey(generation),
+    checkpoint("building", {
+      countsReady: false,
+      gcDone: true,
+      coverage: {
+        events: { eligible: 0, verified: 0, missing: 0 },
+        markets: { eligible: 0, verified: 0, missing: 0 },
+      },
+    }),
+  );
+  await engine().tick();
+  const first = await store.get<{
+    after: string;
+    counts: { event: number };
+    completedAt: number | null;
+  }>(`${CONTROL}source-census`);
+  assert.equal(first?.after, "a:000500");
+  assert.equal(first?.counts.event, 0);
+  assert.equal(first?.completedAt, null);
+  assert.equal(
+    (await store.get<Checkpoint>(checkpointKey(generation)))?.countsReady,
+    false,
+  );
+  assert.equal(providerCalls.length, 0);
+  await store.release();
+  store = new EmbeddingStore(redis);
+  assert.equal(await store.acquire(), true);
+  await initializeEmbeddingWorker(store);
+  const restarted = engine();
+  await restarted.tick();
+  assert.equal(
+    (await store.get<{ after: string }>(`${CONTROL}source-census`))?.after,
+    "a:001000",
+  );
+  await restarted.tick();
+  await restarted.tick();
+  const completed = await store.get<{ counts: unknown; completedAt: number }>(
+    `${CONTROL}source-census`,
+  );
+  assert.deepEqual(completed?.counts, { event: 1, market: 1 });
+  assert.ok(completed?.completedAt);
+  assert.equal(
+    (await store.get<Checkpoint>(checkpointKey(generation)))?.countsReady,
+    true,
+  );
+  assert.equal(providerCalls.length, 0);
+});
+test("serving SQL timeout does not block live ACK, retry tightly or advance its cursor", async () => {
+  await serve();
+  let pageAttempts = 0;
+  const worker = new EmbeddingEngine({
+    store,
+    apiKey: "fixture",
+    provider,
+    availableMemory: async () => 8 * 1024 ** 3,
+    db: {
+      async query(sql, values) {
+        if (sql.includes("with embedding_page as materialized")) {
+          pageAttempts++;
+          throw Object.assign(
+            new Error("canceling statement due to statement timeout"),
+            { code: "57014" },
+          );
+        }
+        return db.query(sql, values);
+      },
+    },
+  });
+  await enqueueMarket();
+  await worker.tick();
+  assert.equal(await pendingCount(), 0);
+  assert.equal(pageAttempts, 1);
+  assert.equal(await store.get(`${CONTROL}maintenance:${generation.id}`), null);
+  await enqueueMarket();
+  await worker.tick();
+  assert.equal(await pendingCount(), 0);
+  assert.equal(
+    pageAttempts,
+    1,
+    "cooldown must not reissue the same failing page",
+  );
+  const status = await store.get<{ reason: string }>(`${CONTROL}status`);
+  assert.match(
+    status?.reason ?? "",
+    /background_sql_retry:serving_metadata:57014/,
+  );
+});
+test("empty verification pages do not skip later entities or weaken KNN admission", async () => {
+  await seedGeneration(legacy);
+  await seedGeneration(generation);
+  await store.put(`${CONTROL}generations`, [legacy, generation]);
+  await store.put(checkpointKey(legacy), checkpoint());
+  await db.query(`insert into unified_events(id,venue,status,title)
+    select 'a:' || lpad(fixture_no::text,6,'0'),'polymarket','CLOSED','Closed'
+    from generate_series(1,500) as fixture_rows(fixture_no)`);
+  await store.put(
+    checkpointKey(generation),
+    checkpoint("verifying", {
+      probes: {},
+      coverage: {
+        events: { eligible: 1, verified: 0, missing: 0 },
+        markets: { eligible: 1, verified: 0, missing: 0 },
+      },
+    }),
+  );
+  const worker = engine();
+  await worker.tick();
+  const first = await store.get<Checkpoint>(checkpointKey(generation));
+  assert.equal(first?.kind, "event");
+  assert.equal(first?.after, "a:000500");
+  assert.equal(first?.phase, "verifying");
+  await worker.tick();
+  await worker.tick();
+  const ready = await store.get<Checkpoint>(checkpointKey(generation));
+  assert.equal(ready?.phase, "ready");
+  assert.deepEqual(ready?.probes, { event: "event:a", market: "market:a" });
+  // Force a failed real KNN admission after verified coverage; never activate.
+  await redis.hDel(embeddingKey(generation, "event", "event:a"), "embedding");
+  await worker.tick();
+  assert.equal((await readActiveGeneration(redis)).id, legacy.id);
+});
+test("pre-fix ready checkpoints are reverified rather than skipping the new admission fields", async () => {
+  await seedGeneration(legacy);
+  await seedGeneration(generation);
+  await store.put(`${CONTROL}generations`, [legacy, generation]);
+  await store.put(checkpointKey(legacy), checkpoint());
+  await store.put(
+    checkpointKey(generation),
+    checkpoint("ready", {
+      scanVersion: undefined,
+      countsReady: undefined,
+      probes: undefined,
+    }),
+  );
+  await engine().tick();
+  assert.equal((await readActiveGeneration(redis)).id, legacy.id);
+  const restarted = await store.get<Checkpoint>(checkpointKey(generation));
+  assert.equal(restarted?.scanVersion, 2);
+  assert.equal(restarted?.phase, "building");
+  assert.equal(providerCalls.length, 0);
+});
 test("fence excludes second owner and stale publication after actual lease handoff", async () => {
   const stale = store,
     next = new EmbeddingStore(redis);

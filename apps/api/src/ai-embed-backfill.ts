@@ -143,6 +143,8 @@ export async function runEmbeddingBackfill(
     db: RuntimePolicyQuery;
     redis: BackfillRedis;
     log: (value: unknown) => void;
+    signal?: AbortSignal;
+    onProgress?: (counts: { event: number; market: number }) => void;
   },
 ): Promise<void> {
   const { db, redis, log } = dependencies;
@@ -176,7 +178,28 @@ export async function runEmbeddingBackfill(
     : eligibleVenues;
   const desiredGeneration = generationForPolicy(policy);
   const activeGeneration = await readActiveGeneration(redis);
-  const counts = await countEmbeddingSources(db, venues);
+  if (options.mode === "execute") {
+    if (!policy.enabled)
+      throw new Error(
+        "Embeddings are disabled by policy; no reconciliation requested",
+      );
+    dependencies.signal?.throwIfAborted();
+    const requestRevision = await redis.incr("ai:embed:control:reconcile");
+    log({
+      readOnly: false,
+      requested: true,
+      completed: false,
+      requestRevision,
+      activeGeneration,
+      desiredGeneration,
+      note: "Full reconciliation requested without a synchronous census. The worker owns bounded counting, checkpoints and budget. Use --status to inspect progress; this does not prove completion.",
+    });
+    return;
+  }
+  const counts = await countEmbeddingSources(db, venues, {
+    signal: dependencies.signal,
+    onProgress: dependencies.onProgress,
+  });
   const count = (value: number) => Math.min(value, options.limit ?? value);
   log({
     readOnly: true,
@@ -192,19 +215,6 @@ export async function runEmbeddingBackfill(
     },
     generationBudgetUsd: policy.generationBudgetUsd,
     note: "Eligible candidates are not a count of missing embeddings or a price quote. The worker skips unchanged content and verifies coverage separately.",
-  });
-  if (options.mode !== "execute") return;
-  if (!policy.enabled)
-    throw new Error(
-      "Embeddings are disabled by policy; no reconciliation requested",
-    );
-  const requestRevision = await redis.incr("ai:embed:control:reconcile");
-  log({
-    readOnly: false,
-    requested: true,
-    completed: false,
-    requestRevision,
-    note: "Full reconciliation requested. The worker owns execution, checkpoints and budget. Use --status to inspect progress; this does not prove completion.",
   });
 }
 
@@ -225,9 +235,11 @@ async function run(): Promise<void> {
     max: 1,
     connectionTimeoutMillis: 5000,
     options:
-      "-c default_transaction_read_only=on -c statement_timeout=5000 -c jit=off",
+      "-c default_transaction_read_only=on -c statement_timeout=15000 -c jit=off",
   });
   let timeout: ReturnType<typeof setTimeout> | undefined;
+  const controller = new AbortController();
+  let lastProgress = 0;
   try {
     await Promise.race([
       redis.connect(),
@@ -244,16 +256,29 @@ async function run(): Promise<void> {
         db,
         redis,
         log: (value) => console.log(JSON.stringify(value, null, 2)),
+        signal: controller.signal,
+        onProgress: (counts) => {
+          if (Date.now() - lastProgress < 10000) return;
+          lastProgress = Date.now();
+          console.log(
+            JSON.stringify({
+              readOnly: true,
+              stage: "counting_sources",
+              partialEligible: counts,
+            }),
+          );
+        },
       }),
       new Promise<never>((_, reject) => {
         timeout = setTimeout(
-          () =>
-            reject(
-              new Error(
-                "Backfill inspection/request timed out; inspect --status before retrying",
-              ),
-            ),
-          30_000,
+          () => {
+            const error = new Error(
+              "Backfill inspection/request timed out; inspect --status before retrying",
+            );
+            controller.abort(error);
+            reject(error);
+          },
+          options.mode === "preview" ? 30 * 60_000 : 30_000,
         );
       }),
     ]);

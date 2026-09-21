@@ -46,6 +46,17 @@ substitute a new-model vector into an old snapshot. No map rebuild is forced.
 - A full serving reconciliation runs at most once per six hours unless explicitly
   requested or invalidated. Checkpoints and conservative monetary reservations
   survive restarts. Live messages take priority over bounded DB pages.
+- Source scans limit **raw rows before eligibility**, at most 500 per SQL query.
+  Empty eligible pages advance the raw-ID cursor, not the end-of-scan marker.
+  The worker uses a shared resumable source census (cached for six hours), not
+  full-table startup COUNT queries. Background building waits for complete census
+  totals before applying the pilot's projected-memory admission.
+- Worker and CLI SQL have a 15-second safety timeout. Background PostgreSQL
+  timeout/lock/connection failures retry after 60 seconds without blocking live
+  queue ACKs; the status reason identifies the deferred stage and SQLSTATE.
+  Provider, budget, memory, lease and verification failures remain fail-closed.
+  On the first upgrade to bounded scans, old pass checkpoints are rechecked;
+  existing vectors and monetary reservations are retained, not reset/rebilled.
 - A provider request makes at most four attempts, reserving before each attempt.
   Exhausted failures are deduplicated per content hash and cooled down for six
   hours before reconciliation retries. Auth/credit errors open a five-minute

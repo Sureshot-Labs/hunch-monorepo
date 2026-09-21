@@ -18,9 +18,8 @@ import {
   EmbeddingProviderError,
   embeddingKey,
   embeddingIndex,
-  listEmbeddingSourceIds,
+  readEmbeddingSourcePage,
   loadEmbeddingSources,
-  countEmbeddingSources,
   type EmbeddingPolicy,
   type EmbeddingGeneration,
   type EmbeddingDb,
@@ -39,6 +38,9 @@ import {
 
 type Coverage = { eligible: number; verified: number; missing: number };
 type Pass = {
+  scanVersion: 2;
+  countsReady: boolean;
+  probes: Partial<Record<EmbeddingKind, string>>;
   phase: "building" | "verifying" | "ready" | "active";
   kind: EmbeddingKind;
   after: string | null;
@@ -56,6 +58,14 @@ type Pass = {
   eligibilityRevision: string;
   notBefore?: number;
 };
+type SourceCensus = {
+  revision: string;
+  kind: EmbeddingKind;
+  after: string | null;
+  counts: Record<EmbeddingKind, number>;
+  completedAt: number | null;
+};
+const CENSUS_KEY = `${CONTROL}source-census`;
 const emptyCoverage = () => ({
   events: { eligible: 0, verified: 0, missing: 0 },
   markets: { eligible: 0, verified: 0, missing: 0 },
@@ -111,6 +121,10 @@ export class EmbeddingEngine {
   private claimCursor = "0-0";
   private lastMaintenance = 0;
   private lastReport = 0;
+  private backgroundFailures = new Map<
+    string,
+    { code: string; retryAt: number }
+  >();
   constructor(readonly options: EngineOptions) {}
   private get store() {
     return this.options.store;
@@ -187,8 +201,43 @@ export class EmbeddingEngine {
       `${CONTROL}retired:${generation.id}`,
     ]);
   }
+  private async advanceCensus(): Promise<SourceCensus> {
+    const revision = [...this.venues].sort().join(",");
+    let census = await this.store.get<SourceCensus>(CENSUS_KEY);
+    if (
+      !census ||
+      census.revision !== revision ||
+      (census.completedAt != null &&
+        Date.now() - census.completedAt >= 6 * 3600000)
+    ) {
+      census = {
+        revision,
+        kind: "event",
+        after: null,
+        counts: { event: 0, market: 0 },
+        completedAt: null,
+      };
+    }
+    if (census.completedAt != null) return census;
+    const page = await readEmbeddingSourcePage(
+      this.options.db,
+      census.kind,
+      census.after,
+      this.venues,
+    );
+    census.counts[census.kind] += page.ids.length;
+    census.after = page.after;
+    if (page.done) {
+      if (census.kind === "event") {
+        census.kind = "market";
+        census.after = null;
+      } else census.completedAt = Date.now();
+    }
+    // Count and cursor commit together; a restart cannot double-count a page.
+    await this.store.put(CENSUS_KEY, census);
+    return census;
+  }
   private async newPass(phase: Pass["phase"] = "building"): Promise<Pass> {
-    const counts = await countEmbeddingSources(this.options.db, this.venues);
     const last = (await this.store.redis.sendCommand([
       "XREVRANGE",
       STREAM,
@@ -198,13 +247,13 @@ export class EmbeddingEngine {
       "1",
     ])) as unknown[][];
     return {
+      scanVersion: 2,
+      countsReady: false,
+      probes: {},
       phase,
       kind: "event",
       after: null,
-      coverage: {
-        events: { eligible: counts.event, verified: 0, missing: 0 },
-        markets: { eligible: counts.market, verified: 0, missing: 0 },
-      },
+      coverage: emptyCoverage(),
       watermark: last.length ? String(last[0][0]) : "0-0",
       overflow: String(
         (await this.store.redis.sendCommand(["GET", `${CONTROL}reconcile`])) ??
@@ -346,6 +395,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       retryAt: number;
     }[] = [];
     let verified = 0;
+    let verifiedId: string | undefined;
     let invalid = 0;
     for (const source of sources) {
       if (!source.eligible) {
@@ -381,6 +431,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       ) {
         await this.store.commit(generation, source, hash);
         verified++;
+        verifiedId ??= source.id;
         continue;
       }
       const failure = await this.store.get<{ hash: string; retryAt?: number }>(
@@ -397,6 +448,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       return {
         eligible: sources.filter((s) => s.eligible).length,
         verified,
+        verifiedId,
         missing: missing.length + invalid,
       };
     const policy = this.policy;
@@ -542,6 +594,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
     return {
       eligible: sources.filter((s) => s.eligible).length,
       verified,
+      verifiedId,
       missing: missing.length + invalid,
     };
   }
@@ -672,6 +725,9 @@ redis.call('SET',KEYS[3],'1'); return 1`,
   ) {
     let pass = await this.store.get<Pass>(stateKey(desired));
     const now = Date.now();
+    // Old ready checkpoints have no verified probe IDs. Recheck coverage, never
+    // admit them using an empty first raw page. Cached vectors/costs remain intact.
+    if (pass?.scanVersion !== 2) pass = null;
     if (pass && pass.eligibilityRevision !== [...this.venues].sort().join(","))
       pass = null;
     if (
@@ -698,6 +754,22 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       pass = await this.newPass();
     if ((pass.notBefore ?? 0) > now)
       throw new Error("embedding_coverage_retry_wait");
+    if (!pass.countsReady) {
+      const census = await this.background("source_census", () =>
+        this.advanceCensus(),
+      );
+      if (census?.completedAt != null) {
+        pass.coverage.events.eligible = census.counts.event;
+        pass.coverage.markets.eligible = census.counts.market;
+        pass.countsReady = true;
+        // Live work can grow Redis during a long census. Do not attribute that
+        // unrelated growth to the first 1,000 items of the background pilot.
+        if (pass.phase === "building" && pass.pilotItems === 0)
+          pass.pilotStartBytes = await this.usedMemory();
+      }
+      await this.store.put(stateKey(desired), pass);
+      if (!pass.countsReady) return pass;
+    }
     await this.memoryCheck(pass);
     if (!pass.gcDone) {
       await this.cleanTerminal(desired, pass);
@@ -753,21 +825,20 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       // A real search admission check, not document-count arithmetic.
       for (const kind of ["event", "market"] as const) {
         await this.store.ensureIndex(desired, kind);
-        const ids = await listEmbeddingSourceIds(
-          this.options.db,
-          kind,
-          null,
-          this.venues,
-          1,
-        );
-        if (ids.length) {
+        const probeId = pass.probes[kind];
+        if (
+          pass.coverage[kind === "event" ? "events" : "markets"].verified > 0 &&
+          !probeId
+        )
+          throw new Error("embedding_knn_probe_missing");
+        if (probeId) {
           // Redis Lua returns binary directly to FT.SEARCH without UTF-8 roundtripping.
           const result = (await this.store.fenced(
             `local vector=redis.call('HGET',KEYS[2],'embedding')
 if not vector then return redis.error_reply('embedding_probe_missing') end
 return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $vec]','PARAMS','2','vec',vector,'LIMIT','0','1','DIALECT','2')`,
             [
-              embeddingKey(desired, kind, ids[0]),
+              embeddingKey(desired, kind, probeId),
               embeddingIndex(desired, kind),
             ],
           )) as unknown[];
@@ -798,18 +869,22 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
       }
       return pass;
     }
-    const ids = await listEmbeddingSourceIds(
+    const page = await readEmbeddingSourcePage(
       this.options.db,
       pass.kind,
       pass.after,
       this.venues,
       500,
     );
-    if (ids.length) {
+    if (page.ids.length) {
+      // Empty/raw pages and terminal-vector GC can also take time after census.
+      // Start the pilot measurement immediately before its first actual page.
+      if (pass.phase === "building" && pass.pilotItems === 0)
+        pass.pilotStartBytes = await this.usedMemory();
       const stats = await this.process(
         desired,
         pass.kind,
-        ids,
+        page.ids,
         active.id !== desired.id,
         pass.phase === "verifying",
       );
@@ -817,9 +892,14 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
         pass.kind === "event" ? pass.coverage.events : pass.coverage.markets;
       bucket.verified += stats.verified;
       bucket.missing += stats.missing;
-      pass.after = ids[ids.length - 1];
+      if (
+        pass.phase === "verifying" &&
+        stats.verifiedId &&
+        !pass.probes[pass.kind]
+      )
+        pass.probes[pass.kind] = stats.verifiedId;
       if (pass.phase === "building") {
-        pass.pilotItems += ids.length;
+        pass.pilotItems += page.ids.length;
         if (pass.pilotItems >= 1000 && !pass.projectedBytes) {
           const used = await this.usedMemory();
           pass.projectedBytes =
@@ -829,6 +909,10 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
               1.25;
         }
       }
+    }
+    pass.after = page.after;
+    if (!page.done) {
+      // Empty eligible pages still advance; they must not finish verification.
     } else if (pass.kind === "event") {
       pass.kind = "market";
       pass.after = null;
@@ -863,6 +947,10 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
     if (Date.now() - this.lastReport < 10000) return;
     this.lastReport = Date.now();
     const pass = desired ? await this.store.get<Pass>(stateKey(desired)) : null;
+    const census =
+      pass && !pass.countsReady
+        ? await this.store.get<SourceCensus>(CENSUS_KEY)
+        : null;
     const pending = (await this.store.redis.sendCommand([
       "XPENDING",
       STREAM,
@@ -887,8 +975,19 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
       activeGeneration: active.id,
       desiredGeneration: desired?.id ?? null,
       state,
-      reason,
-      checkpoint: pass ? { entityType: pass.kind, afterId: pass.after } : null,
+      reason:
+        reason ??
+        (this.backgroundFailures.size
+          ? `background_sql_retry:${[...this.backgroundFailures].map(([stage, failure]) => `${stage}:${failure.code}`).join(",")}`
+          : census && census.completedAt == null
+            ? "counting_embedding_sources"
+            : null),
+      checkpoint:
+        census && census.completedAt == null
+          ? { entityType: census.kind, afterId: census.after }
+          : pass
+            ? { entityType: pass.kind, afterId: pass.after }
+            : null,
       coverage: pass?.coverage ?? emptyCoverage(),
       verifiedAt: pass?.verifiedAt ?? null,
       budget: {
@@ -1042,16 +1141,18 @@ return 0`,
     if (!pass || pass.revision !== revision)
       pass = { kind: "event", after: null, nextAt: 0, revision };
     if (pass.nextAt > Date.now()) return;
-    const ids = await listEmbeddingSourceIds(
+    const page = await readEmbeddingSourcePage(
       this.options.db,
       pass.kind,
       pass.after,
       this.venues,
       500,
     );
-    if (ids.length) {
-      await this.process(active, pass.kind, ids, false, true);
-      pass.after = ids[ids.length - 1];
+    if (page.ids.length)
+      await this.process(active, pass.kind, page.ids, false, true);
+    pass.after = page.after;
+    if (!page.done) {
+      // Keep traversing even when this raw page contains no eligible entities.
     } else if (pass.kind === "event") {
       pass.kind = "market";
       pass.after = null;
@@ -1061,6 +1162,44 @@ return 0`,
       pass.nextAt = Date.now() + 6 * 3600000;
     }
     await this.store.put(key, pass);
+  }
+  private async background<T>(
+    stage: string,
+    work: () => Promise<T>,
+  ): Promise<T | undefined> {
+    if ((this.backgroundFailures.get(stage)?.retryAt ?? 0) > Date.now()) return;
+    try {
+      const result = await work();
+      this.backgroundFailures.delete(stage);
+      return result;
+    } catch (error) {
+      // Only PostgreSQL timeout/lock/capacity/transient-connection errors are
+      // isolated. Lease loss and provider/budget/memory/verification errors keep
+      // their existing fail-closed path; no failed page checkpoint is advanced.
+      const code =
+        error && typeof error === "object" && "code" in error
+          ? String(error.code)
+          : "";
+      if (
+        !["57014", "55P03", "53300", "57P01", "40001", "40P01"].includes(
+          code,
+        ) &&
+        !/^08\d{3}$/.test(code)
+      )
+        throw error;
+      this.backgroundFailures.set(stage, { code, retryAt: Date.now() + 60000 });
+      console.warn("[ai-worker] background SQL deferred", {
+        stage,
+        code,
+        retryInMs: 60000,
+      });
+      return;
+    }
+  }
+  private async maintain(active: EmbeddingGeneration) {
+    await this.background("serving_metadata", () =>
+      this.maintainServingMetadata(active),
+    );
   }
   async tick() {
     await this.store.renew();
@@ -1072,9 +1211,11 @@ return 0`,
         await this.store.prune();
         this.lastMaintenance = Date.now();
       }
-      await this.retainPinned(active);
-      await this.maintainServingMetadata(active);
+      // Expired-pin cleanup precedes retirement admission: a concurrent renewal
+      // must be observed before generations() can mark an old generation deleting.
+      await this.background("pinned_metadata", () => this.retainPinned(active));
       if (this.policyError || !this.policy?.enabled || !desired) {
+        await this.maintain(active);
         await this.report(
           active,
           desired,
@@ -1091,13 +1232,28 @@ return 0`,
       const canBuild = await this.generations(active, desired);
       const circuit = await this.store.get<number>(`${CONTROL}circuit`);
       if (circuit && circuit > Date.now()) {
+        await this.maintain(active);
         await this.report(active, desired, "paused", "provider_circuit_open");
         return;
       }
-      const hadMessages = await this.processMessages(active, desired, canBuild);
-      if (active.id !== desired.id) await this.advance(active, active);
+      let hadMessages = false;
+      try {
+        hadMessages = await this.processMessages(active, desired, canBuild);
+      } finally {
+        // Live work gets the first DB slot; housekeeping still runs on provider
+        // failure, without turning one timeout into a tight retry loop.
+        await this.maintain(active);
+      }
+      if (active.id !== desired.id)
+        await this.background(`advance:${active.id}`, () =>
+          this.advance(active, active),
+        );
       // Bounded live priority: allow one background page after every message batch.
-      const pass = canBuild ? await this.advance(active, desired) : null;
+      const pass = canBuild
+        ? await this.background(`advance:${desired.id}`, () =>
+            this.advance(active, desired),
+          )
+        : null;
       await this.report(
         await readActiveGeneration(this.store.redis),
         desired,

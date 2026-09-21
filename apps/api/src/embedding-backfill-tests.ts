@@ -58,7 +58,11 @@ function fixture(policyPayload: unknown = {}) {
   const logs: unknown[] = [];
   const db = {
     query: async (sql: string, params?: unknown[]) => {
-      assert.match(sql.trim(), /^select\s/i, "preview may only read the DB");
+      assert.match(
+        sql.trim(),
+        /^(select\s|with embedding_page as materialized)/i,
+        "preview may only read the DB",
+      );
       queries.push({ sql, params });
       if (sql.includes("runtime_policies")) {
         return {
@@ -67,7 +71,10 @@ function fixture(policyPayload: unknown = {}) {
         };
       }
       return {
-        rows: [{ n: sql.includes("unified_events entity") ? 200 : 1000 }],
+        rows: Array.from(
+          { length: sql.includes("from unified_events") ? 200 : 300 },
+          (_, index) => ({ id: `fixture:${index}`, eligible: true }),
+        ),
       };
     },
   } as unknown as RuntimePolicyQuery;
@@ -122,13 +129,25 @@ await runEmbeddingBackfill(
   execute.dependencies,
 );
 assert.deepEqual(execute.writes, ["ai:embed:control:reconcile"]);
-assert.equal((execute.logs[1] as { completed: boolean }).completed, false);
-assert.deepEqual(
-  execute.queries.slice(2).map((query) => query.params?.[0]),
-  [
-    ["polymarket", "limitless"],
-    ["polymarket", "limitless"],
-  ],
+assert.equal((execute.logs[0] as { completed: boolean }).completed, false);
+assert.equal(
+  execute.queries.length,
+  2,
+  "execution must not wait on a full source census",
+);
+
+const canceled = fixture();
+await assert.rejects(
+  runEmbeddingBackfill(parseEmbeddingBackfillOptions([]), {
+    ...canceled.dependencies,
+    signal: AbortSignal.abort(new Error("fixture_canceled")),
+  }),
+  /fixture_canceled/,
+);
+assert.equal(
+  canceled.queries.length,
+  2,
+  "aborted preview must not issue a source page",
 );
 
 for (const payload of [{ enabled: false }, { model: "bad/model" }]) {

@@ -11,7 +11,7 @@ async function main() {
   const db = createPgPool({
     connectionString: DATABASE_URL,
     max: 2,
-    statement_timeout: 5000,
+    statement_timeout: 15000,
     application_name: "ai-embeddings",
   });
   const redis = createRedisClient({ url: REDIS_URL });
