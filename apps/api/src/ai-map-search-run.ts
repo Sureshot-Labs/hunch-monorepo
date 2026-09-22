@@ -52,6 +52,15 @@ import {
 import { isMarketMapUsable } from "./services/market-map-quality.js";
 import { resolveAiCost } from "./lib/ai-cost.js";
 import {
+  chooseMapSearchFocus,
+  MAP_SEARCH_FOCUS_RESERVE_USD,
+  normalizeMapSearchFocusQuestions,
+  rememberSelectedMapSearchFocus,
+  selectMapSearchFocusOptions,
+  type MapSearchFocusDecision,
+  type MapSearchFocusQuestion,
+} from "./services/map-search-focus.js";
+import {
   countAiCitations,
   countAiToolAttempts,
   EMPTY_AI_USAGE,
@@ -248,6 +257,14 @@ type NodeCallRecord = {
   budgetStop: string | null;
   returnedEvidence: EvidencePreview[];
   newEvidence: EvidencePreview[];
+  focus: {
+    marketId: string | null;
+    questions: string[];
+    selectedQuestion: string | null;
+    reason: string;
+    jev: MapSearchFocusDecision | null;
+  } | null;
+  generatedFocusQuestions: MapSearchFocusQuestion[];
 };
 
 type ParsedAgentOutput = {
@@ -292,6 +309,10 @@ type BudgetState = {
   totalChargedCostUsd: number;
   totalProviderReportedCostUsd: number;
   providerReportedCostCalls: number;
+  jevCalls: number;
+  jevChargedCostUsd: number;
+  jevProviderReportedCostUsd: number;
+  jevProviderReportedCostCalls: number;
   expectedNextInputTokens: number;
   expectedNextCallCostUsd: number;
   expectedNextOutputTokens: number;
@@ -373,6 +394,7 @@ type Args = {
   includeWebTool: boolean;
   includeXTool: boolean;
   strictSchema: boolean;
+  jevFocusEnabled: boolean;
   requireDistinctDomains: boolean;
   concurrency: number;
   maxCalls: number;
@@ -631,6 +653,7 @@ function resolveArgs(argv: string[]): Args {
     includeWebTool: toolMode === "both" || toolMode === "web",
     includeXTool: toolMode === "both" || toolMode === "x",
     strictSchema: parseBoolean(parseFlag(argv, "--strict-schema"), true),
+    jevFocusEnabled: parseBoolean(parseFlag(argv, "--jev-focus-enabled"), true),
     requireDistinctDomains: parseBoolean(
       parseFlag(argv, "--require-distinct-domains"),
       true,
@@ -843,6 +866,7 @@ Per-call controls:
   --max-retries <n>                   Retries on retriable provider failure (default: 1)
   --retry-base-ms <n>                 Retry backoff base ms (default: 1200)
   --strict-schema <bool>              Fail parse if output schema invalid (default: true)
+  --jev-focus-enabled <bool>          Let Jev prioritize concrete follow-up questions (default: true)
 
 Traversal and routing:
   --window-hours <n>                  Base recency window (default: 24, used for L3 if not overridden)
@@ -1077,6 +1101,7 @@ function salvageAgentOutput(parsed: unknown): {
       "Partial evidence recovered.",
     ),
     next_focus: record.next_focus,
+    focus_questions: record.focus_questions,
     evidence: keptEvidence,
   };
   if ("notes" in record) {
@@ -1170,6 +1195,7 @@ function buildLenientAgentOutput(
         : normalizedStatus,
     summary,
     next_focus: nextFocus,
+    focus_questions: record.focus_questions,
     evidence: keptEvidence,
   };
   if (notes) candidate.notes = notes;
@@ -1499,6 +1525,8 @@ function serializeCallRecord(
     toolCallCount: call.toolCallCount,
     costEstimate: call.costEstimate,
     budgetStop: call.budgetStop,
+    focus: call.focus,
+    generatedFocusQuestions: call.generatedFocusQuestions,
   };
   if (!args.leanOutput) {
     compactBase.usage = call.usage;
@@ -1805,6 +1833,14 @@ function popHighestPriority(queue: NodeQueueItem[]): NodeQueueItem | null {
   return item ?? null;
 }
 
+function peekHighestPriority(queue: NodeQueueItem[]): NodeQueueItem | null {
+  let best: NodeQueueItem | null = null;
+  for (const item of queue) {
+    if (!best || item.priority > best.priority) best = item;
+  }
+  return best;
+}
+
 function tokenizeLoose(text: string): Set<string> {
   return new Set(
     text
@@ -1906,17 +1942,26 @@ function updateBudgetState(
   state: BudgetState,
   call: XaiCallRaw,
   alpha: number,
+  jev: MapSearchFocusDecision | null = null,
 ): void {
   state.callsExecuted += 1;
   state.totalInputTokens += call.usage.inputTokens;
   state.totalOutputTokens += call.usage.outputTokens;
   state.totalToolAttempts += call.toolAttemptCount;
   state.totalEstimatedCostUsd += call.costEstimate.estimatedCostUsd;
-  state.totalChargedCostUsd += call.costEstimate.chargedCostUsd;
+  state.totalChargedCostUsd +=
+    call.costEstimate.chargedCostUsd + (jev?.chargedCostUsd ?? 0);
+  state.totalEstimatedCostUsd += jev?.chargedCostUsd ?? 0;
+  state.jevCalls += jev?.calls ?? 0;
+  state.jevChargedCostUsd += jev?.chargedCostUsd ?? 0;
+  state.jevProviderReportedCostUsd += jev?.providerCostUsd ?? 0;
+  state.jevProviderReportedCostCalls += jev?.providerCostCalls ?? 0;
   if (call.costEstimate.providerCostUsd != null) {
     state.totalProviderReportedCostUsd += call.costEstimate.providerCostUsd;
     state.providerReportedCostCalls += 1;
   }
+  state.totalProviderReportedCostUsd += jev?.providerCostUsd ?? 0;
+  state.providerReportedCostCalls += jev?.providerCostCalls ?? 0;
   const nextExpectedInput =
     state.callsExecuted === 1
       ? call.usage.inputTokens
@@ -2126,6 +2171,26 @@ async function runMapSearchWithSnapshot({
   const nodeCentroidCache = new Map<string, number[] | null>();
   const nodeRepresentativeEmbeddingCache = new Map<string, number[] | null>();
   const nodeEvidenceHeadlines = new Map<string, string[]>();
+  const nodeEvidenceBriefs = new Map<string, string[]>();
+  function pushNodeEvidenceContext(
+    nodeId: string,
+    evidence: Pick<
+      MapEvidence,
+      "headline" | "summary" | "publishedAt" | "confirmation" | "sourceDomain"
+    >,
+  ): void {
+    const headlines = nodeEvidenceHeadlines.get(nodeId) ?? [];
+    headlines.push(evidence.headline);
+    nodeEvidenceHeadlines.set(nodeId, headlines.slice(-20));
+    const briefs = nodeEvidenceBriefs.get(nodeId) ?? [];
+    briefs.push(
+      `[${evidence.publishedAt ?? "date unknown"}; ${evidence.confirmation}; ${evidence.sourceDomain}] ${evidence.headline.replace(/\s+/g, " ").trim().slice(0, 140)} — ${evidence.summary.replace(/\s+/g, " ").trim().slice(0, 180)}`,
+    );
+    nodeEvidenceBriefs.set(nodeId, briefs.slice(-20));
+  }
+  const focusSuggestionsByNode = new Map<string, MapSearchFocusQuestion[]>();
+  const focusedMarketIds = new Set<string>();
+  const askedFocusQuestionKeys = new Set<string>();
   const leafEvidenceIds = new Map<string, Set<string>>();
   const evidenceById = new Map<string, MapEvidence>();
   const callRecords: NodeCallRecord[] = [];
@@ -2136,6 +2201,7 @@ async function runMapSearchWithSnapshot({
   let droppedByDomainPolicyTotal = 0;
   let leafAssignmentFixesTotal = 0;
   let fallbackSuppressedTotal = 0;
+  let jevUnavailableForRun = false;
   const sourceAllowSet = new Set(args.sourceAllowDomains);
   const sourceDenySet = new Set(args.sourceDenyDomains);
   const nowIso = () => new Date().toISOString();
@@ -2155,6 +2221,10 @@ async function runMapSearchWithSnapshot({
     totalChargedCostUsd: 0,
     totalProviderReportedCostUsd: 0,
     providerReportedCostCalls: 0,
+    jevCalls: 0,
+    jevChargedCostUsd: 0,
+    jevProviderReportedCostUsd: 0,
+    jevProviderReportedCostCalls: 0,
     expectedNextInputTokens: args.bootstrapExpectedInputTokens,
     expectedNextCallCostUsd: args.bootstrapExpectedCallCostUsd,
     expectedNextOutputTokens: args.bootstrapExpectedOutputTokens,
@@ -2253,12 +2323,22 @@ async function runMapSearchWithSnapshot({
         const set = leafEvidenceIds.get(assignedNodeId) ?? new Set<string>();
         set.add(restored.id);
         leafEvidenceIds.set(assignedNodeId, set);
-        const headlines = nodeEvidenceHeadlines.get(restored.nodeId) ?? [];
-        headlines.push(restored.headline);
-        nodeEvidenceHeadlines.set(restored.nodeId, headlines.slice(-20));
+        pushNodeEvidenceContext(restored.nodeId, restored);
       }
       for (const record of resumed.resume.callRecords) {
         callRecords.push(record);
+        if (Array.isArray(record.generatedFocusQuestions)) {
+          focusSuggestionsByNode.set(
+            record.nodeId,
+            record.generatedFocusQuestions,
+          );
+        }
+        rememberSelectedMapSearchFocus({
+          marketId: record.focus?.marketId ?? null,
+          selectedQuestion: record.focus?.selectedQuestion ?? null,
+          focusedMarketIds,
+          askedQuestionKeys: askedFocusQuestionKeys,
+        });
       }
 
       budgetState.callsExecuted = resumed.resume.budgetState.callsExecuted ?? 0;
@@ -2276,6 +2356,13 @@ async function runMapSearchWithSnapshot({
         resumed.resume.budgetState.totalProviderReportedCostUsd ?? 0;
       budgetState.providerReportedCostCalls =
         resumed.resume.budgetState.providerReportedCostCalls ?? 0;
+      budgetState.jevCalls = resumed.resume.budgetState.jevCalls ?? 0;
+      budgetState.jevChargedCostUsd =
+        resumed.resume.budgetState.jevChargedCostUsd ?? 0;
+      budgetState.jevProviderReportedCostUsd =
+        resumed.resume.budgetState.jevProviderReportedCostUsd ?? 0;
+      budgetState.jevProviderReportedCostCalls =
+        resumed.resume.budgetState.jevProviderReportedCostCalls ?? 0;
       budgetState.expectedNextInputTokens =
         resumed.resume.budgetState.expectedNextInputTokens ??
         budgetState.expectedNextInputTokens;
@@ -2356,9 +2443,7 @@ async function runMapSearchWithSnapshot({
       const root = rootById.get(bestRootId);
       if (!root) continue;
 
-      const headlines = nodeEvidenceHeadlines.get(root.id) ?? [];
-      headlines.push(prior.headline);
-      nodeEvidenceHeadlines.set(root.id, headlines.slice(-20));
+      pushNodeEvidenceContext(root.id, prior);
       addQueueItem(queue, queued, {
         nodeId: root.id,
         priority: applySameRunNoveltyPriority(
@@ -2404,9 +2489,7 @@ async function runMapSearchWithSnapshot({
           ),
           reason: `${reasonPrefix}_child:${sourceId}`,
         });
-        const childHeadlines = nodeEvidenceHeadlines.get(bestChild.id) ?? [];
-        childHeadlines.push(prior.headline);
-        nodeEvidenceHeadlines.set(bestChild.id, childHeadlines.slice(-20));
+        pushNodeEvidenceContext(bestChild.id, prior);
       }
       assigned += 1;
     }
@@ -2621,6 +2704,11 @@ async function runMapSearchWithSnapshot({
           budgetState.totalProviderReportedCostUsd.toFixed(6),
         ),
         providerReportedCostCalls: budgetState.providerReportedCostCalls,
+        jevCalls: budgetState.jevCalls,
+        jevChargedCostUsd: Number(budgetState.jevChargedCostUsd.toFixed(6)),
+        jevProviderReportedCostUsd: Number(
+          budgetState.jevProviderReportedCostUsd.toFixed(6),
+        ),
         expectedNextInputTokens: Math.round(
           budgetState.expectedNextInputTokens,
         ),
@@ -3028,18 +3116,14 @@ async function runMapSearchWithSnapshot({
     leafEvidenceIds.set(nodeId, set);
   }
 
-  function pushNodeHeadline(nodeId: string, headline: string): void {
-    const list = nodeEvidenceHeadlines.get(nodeId) ?? [];
-    list.push(headline);
-    nodeEvidenceHeadlines.set(nodeId, list.slice(-20));
-  }
-
   type PreparedCallTask = {
     node: MarketMapNode;
     children: MarketMapNode[];
     systemPrompt: string;
     userPrompt: string;
     nodeWindowHours: number;
+    sampledMarketIds: string[];
+    focus: NonNullable<NodeCallRecord["focus"]>;
     rawCall: XaiCallRaw;
   };
 
@@ -3082,6 +3166,25 @@ async function runMapSearchWithSnapshot({
         budgetState.expectedNextInputTokens,
       );
       const reserveCostUsd = Math.max(0, budgetState.expectedNextCallCostUsd);
+      const nextNodeId = peekHighestPriority(queue)?.nodeId;
+      const nextParentId = nextNodeId
+        ? nodeById.get(nextNodeId)?.parentId
+        : null;
+      const reserveJev =
+        args.jevFocusEnabled &&
+        !jevUnavailableForRun &&
+        Boolean(openRouterKey) &&
+        Boolean(
+          nextParentId &&
+          (focusSuggestionsByNode.get(nextParentId)?.length ?? 0) >= 2,
+        ) &&
+        budgetState.totalChargedCostUsd +
+          batchReservedCostUsd +
+          reserveCostUsd +
+          MAP_SEARCH_FOCUS_RESERVE_USD <=
+          args.budgetUsd;
+      const totalReserveCostUsd =
+        reserveCostUsd + (reserveJev ? MAP_SEARCH_FOCUS_RESERVE_USD : 0);
       const reserveOutputTokens = Math.max(
         0,
         budgetState.expectedNextOutputTokens,
@@ -3091,7 +3194,9 @@ async function runMapSearchWithSnapshot({
         batchReservedInputTokens +
         reserveInputTokens;
       const projectedCost =
-        budgetState.totalChargedCostUsd + batchReservedCostUsd + reserveCostUsd;
+        budgetState.totalChargedCostUsd +
+        batchReservedCostUsd +
+        totalReserveCostUsd;
       const projectedOutput =
         budgetState.totalOutputTokens +
         batchReservedOutputTokens +
@@ -3138,19 +3243,88 @@ async function runMapSearchWithSnapshot({
           event.title.trim(),
         );
         const marketsByEvent = await getTopMarketsForEvents(sampledEvents);
-        const sampleEventMarketTitles = sampledEvents.map((event) => {
-          const eventTitle = event.title.trim();
-          const key = eventVenueKey(event.eventId, event.venue);
-          const markets = marketsByEvent.get(key) ?? [];
-          if (markets.length === 0) {
-            return eventTitle;
+        const sampledMarketRows: Array<{
+          event: MarketMapEventSummary;
+          market: RankedRepresentativeMarket;
+        }> = [];
+        for (
+          let rank = 0;
+          rank < args.topMarketsPerEvent && sampledMarketRows.length < 16;
+          rank += 1
+        ) {
+          for (const event of sampledEvents) {
+            const market = marketsByEvent.get(
+              eventVenueKey(event.eventId, event.venue),
+            )?.[rank];
+            if (market) sampledMarketRows.push({ event, market });
+            if (sampledMarketRows.length >= 16) break;
           }
-          const labels = markets
-            .slice(0, args.topMarketsPerEvent)
-            .map((market) => market.marketTitle?.trim() || market.marketId);
-          return `${eventTitle} | ${labels.join(" ; ")}`;
+        }
+        const sampledMarketIds = sampledMarketRows.map(
+          ({ market }) => market.marketId,
+        );
+        const sampleEventMarketTitles = sampledMarketRows.map(
+          ({ event, market }) =>
+            `${market.marketId} | trading_close ${market.closeTime ?? "-"} | contract ${market.marketTitle?.trim() || event.title.trim()} | event ${event.title.trim()}`,
+        );
+        const priorHeadlines = Array.from(
+          new Set([
+            ...(nodeEvidenceHeadlines.get(node.id) ?? []),
+            ...(node.parentId
+              ? (nodeEvidenceHeadlines.get(node.parentId) ?? [])
+              : []),
+          ]),
+        ).slice(-10);
+        const priorEvidenceBriefs = Array.from(
+          new Set([
+            ...(nodeEvidenceBriefs.get(node.id) ?? []),
+            ...(node.parentId
+              ? (nodeEvidenceBriefs.get(node.parentId) ?? [])
+              : []),
+          ]),
+        ).slice(-4);
+        const focusOptions = selectMapSearchFocusOptions({
+          suggestions: node.parentId
+            ? (focusSuggestionsByNode.get(node.parentId) ?? [])
+            : [],
+          marketIds: sampledMarketIds,
+          focusedMarketIds,
+          askedQuestionKeys: askedFocusQuestionKeys,
         });
-        const priorHeadlines = nodeEvidenceHeadlines.get(node.id) ?? [];
+        const focus: NonNullable<NodeCallRecord["focus"]> = {
+          marketId: focusOptions?.marketId ?? null,
+          questions: focusOptions?.questions ?? [],
+          selectedQuestion: null,
+          reason: focusOptions ? "not_selected" : "no_exact_question_pair",
+          jev: null,
+        };
+        if (focusOptions && !args.dryRun && reserveJev && openRouterKey) {
+          const selected = sampledMarketRows.find(
+            ({ market }) => market.marketId === focusOptions.marketId,
+          );
+          const jev = await chooseMapSearchFocus({
+            apiKey: openRouterKey,
+            options: focusOptions,
+            eventTitle: selected?.event.title ?? nodeDisplayLabel(node),
+            marketTitle: selected?.market.marketTitle ?? null,
+            closeTime: selected?.market.closeTime ?? null,
+            priorHeadlines,
+            priorEvidenceBriefs,
+          });
+          focus.jev = jev;
+          focus.reason = jev.reason;
+          focus.selectedQuestion = jev.selectedQuestion;
+          rememberSelectedMapSearchFocus({
+            marketId: focusOptions.marketId,
+            selectedQuestion: jev.selectedQuestion,
+            focusedMarketIds,
+            askedQuestionKeys: askedFocusQuestionKeys,
+          });
+        } else if (focusOptions) {
+          focus.reason = args.jevFocusEnabled
+            ? "jev_unavailable_or_budget"
+            : "jev_disabled";
+        }
         const nodeWindowHours = getWindowHoursForLevel(node.level, args);
         const softToolCapThisCall = Math.min(
           args.maxToolAttemptsPerCall,
@@ -3179,6 +3353,22 @@ async function runMapSearchWithSnapshot({
             sampleEventTitles,
             sampleEventMarketTitles,
             priorHeadlines,
+            priorEvidenceBriefs,
+            priorFocusedQuestions: callRecords
+              .filter(
+                (record) =>
+                  record.focus?.selectedQuestion &&
+                  record.focus.marketId &&
+                  sampledMarketIds.includes(record.focus.marketId),
+              )
+              .slice(-8)
+              .map((record) => record.focus?.selectedQuestion ?? ""),
+            focusedQuestion: focus.selectedQuestion
+              ? {
+                  marketId: focus.marketId ?? "",
+                  question: focus.selectedQuestion,
+                }
+              : null,
             softToolCapThisCall,
             windowHoursForThisCall: nodeWindowHours,
           },
@@ -3246,6 +3436,8 @@ async function runMapSearchWithSnapshot({
             systemPrompt,
             userPrompt,
             nodeWindowHours,
+            sampledMarketIds,
+            focus,
             rawCall,
           };
         } catch (error) {
@@ -3257,6 +3449,8 @@ async function runMapSearchWithSnapshot({
             systemPrompt,
             userPrompt,
             nodeWindowHours,
+            sampledMarketIds,
+            focus,
             rawCall: {
               ok: false,
               status: 0,
@@ -3281,12 +3475,12 @@ async function runMapSearchWithSnapshot({
 
       launches.push({
         reserveInputTokens,
-        reserveCostUsd,
+        reserveCostUsd: totalReserveCostUsd,
         reserveOutputTokens,
         promise,
       });
       batchReservedInputTokens += reserveInputTokens;
-      batchReservedCostUsd += reserveCostUsd;
+      batchReservedCostUsd += totalReserveCostUsd;
       batchReservedOutputTokens += reserveOutputTokens;
     }
 
@@ -3319,7 +3513,14 @@ async function runMapSearchWithSnapshot({
       const nodeWindowHours = task.nodeWindowHours;
       const rawCall = task.rawCall;
 
-      updateBudgetState(budgetState, rawCall, args.ewmaAlpha);
+      updateBudgetState(budgetState, rawCall, args.ewmaAlpha, task.focus.jev);
+      if (
+        task.focus.jev?.votes.some((vote) =>
+          /^http_(401|402|403)$/.test(vote.error ?? ""),
+        )
+      ) {
+        jevUnavailableForRun = true;
+      }
       if (rawCall.status === 0) {
         consecutiveTransportFailures += 1;
       } else {
@@ -3343,6 +3544,14 @@ async function runMapSearchWithSnapshot({
       let fallbackSuppressed = false;
 
       const agentData = parseResult.data;
+      const generatedFocusQuestions = normalizeMapSearchFocusQuestions(
+        agentData?.focus_questions.map((item) => ({
+          marketId: item.market_id,
+          question: item.question,
+        })) ?? [],
+        new Set(task.sampledMarketIds),
+      );
+      focusSuggestionsByNode.set(node.id, generatedFocusQuestions);
       const newEvidence: MapEvidence[] = [];
       if (agentData) {
         const callStartedMs = Date.now();
@@ -3426,7 +3635,7 @@ async function runMapSearchWithSnapshot({
           if (evidence.confirmation === "unconfirmed") {
             acceptedUnconfirmedCount += 1;
           }
-          pushNodeHeadline(node.id, evidence.headline);
+          pushNodeEvidenceContext(node.id, evidence);
         }
       }
       droppedByFreshnessTotal += droppedByFreshnessCount;
@@ -3769,6 +3978,8 @@ async function runMapSearchWithSnapshot({
           toEvidencePreviewFromAgent,
         ),
         newEvidence: newEvidence.map(toEvidencePreviewFromMapEvidence),
+        focus: task.focus,
+        generatedFocusQuestions,
       };
       callRecords.push(record);
 
@@ -3956,6 +4167,11 @@ async function runMapSearchWithSnapshot({
         budgetState.totalProviderReportedCostUsd.toFixed(6),
       ),
       providerReportedCostCalls: budgetState.providerReportedCostCalls,
+      jevCalls: budgetState.jevCalls,
+      jevChargedCostUsd: Number(budgetState.jevChargedCostUsd.toFixed(6)),
+      jevProviderReportedCostUsd: Number(
+        budgetState.jevProviderReportedCostUsd.toFixed(6),
+      ),
       expectedNextInputTokens: Math.round(budgetState.expectedNextInputTokens),
       expectedNextCallCostUsd: Number(
         budgetState.expectedNextCallCostUsd.toFixed(6),

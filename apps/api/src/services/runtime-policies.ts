@@ -438,6 +438,7 @@ export type MarketMapPolicy = {
 
 export type MapSearchPolicy = {
   enabled: boolean;
+  jevFocusEnabled: boolean;
   triggerMode: "interval" | "cron";
   pollIntervalSec: number;
   scheduleCron: string | null;
@@ -952,6 +953,7 @@ const mapSearchPersistenceModeSchema = z.enum([
 const mapSearchSchema = z
   .object({
     enabled: strictBoolean,
+    jevFocusEnabled: strictBoolean,
     triggerMode: z.enum(["interval", "cron"]),
     pollIntervalSec: positiveInt.max(60 * 60 * 24),
     scheduleCron: z.string().trim().min(1).max(200).nullable(),
@@ -1762,6 +1764,7 @@ function getDefaults(): IntelPolicyMap {
     },
     map_search: {
       enabled: env.aiMapSearchEnabled,
+      jevFocusEnabled: true,
       triggerMode: "interval",
       pollIntervalSec: 60 * 60,
       scheduleCron: null,
@@ -2620,6 +2623,7 @@ function normalizeMapSearchPolicy(policy: MapSearchPolicy): MapSearchPolicy {
   return {
     ...policy,
     enabled: Boolean(policy.enabled),
+    jevFocusEnabled: Boolean(policy.jevFocusEnabled),
     triggerMode:
       policy.triggerMode === "cron" || policy.triggerMode === "interval"
         ? policy.triggerMode

@@ -730,6 +730,11 @@ async function main() {
     addBoolArgIfMissing(searchArgs, "--strict-schema", config.strictSchema);
     addBoolArgIfMissing(
       searchArgs,
+      "--jev-focus-enabled",
+      config.jevFocusEnabled,
+    );
+    addBoolArgIfMissing(
+      searchArgs,
       "--require-distinct-domains",
       config.requireDistinctDomains,
     );

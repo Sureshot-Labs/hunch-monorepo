@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { MarketSignalQuoteContext } from "../services/map-signal-quote-context.js";
 
 export const mapSignalDirectionSchema = z.enum(["up", "down", "mixed"]);
 export const mapSignalTypeSchema = z.enum(["catalyst", "risk", "update"]);
@@ -151,6 +152,7 @@ export type MapSignalsPromptInput = {
     affinityScore: number;
     contractMatchScore: number;
     affinityRank: number;
+    quoteContext?: MarketSignalQuoteContext | null;
   }>;
 };
 
@@ -184,13 +186,16 @@ function formatMarketList(
         `  venue: ${item.venue}`,
         `  event_title: ${item.eventTitle}`,
         `  market_title: ${item.marketTitle ?? "-"}`,
-        `  close_time: ${item.closeTime ?? "-"}`,
+        `  trading_close_time: ${item.closeTime ?? "-"}`,
         `  activity_volume: ${item.activityVolume.toFixed(2)}`,
         `  depth_proxy: ${item.depthProxy.toFixed(2)}`,
         `  open_interest: ${item.openInterest == null ? "-" : item.openInterest.toFixed(2)}`,
         `  affinity_score: ${item.affinityScore.toFixed(6)}`,
         `  contract_match: ${item.contractMatchScore.toFixed(6)}`,
         `  affinity_rank: ${item.affinityRank}`,
+        `  quote_captured_at: ${item.quoteContext?.capturedAt ?? "-"}`,
+        `  yes_bid_ask: ${item.quoteContext?.yes.status === "fresh" ? `${item.quoteContext.yes.bid}/${item.quoteContext.yes.ask} at ${item.quoteContext.yes.observedAt}` : "unknown"}`,
+        `  no_bid_ask: ${item.quoteContext?.no.status === "fresh" ? `${item.quoteContext.no.bid}/${item.quoteContext.no.ask} at ${item.quoteContext.no.observedAt}` : "unknown"}`,
       ].join("\n"),
     )
     .join("\n");
@@ -215,6 +220,7 @@ export function buildMapSignalsSystemPromptV2(): string {
     "  - risk: downside/uncertainty or adverse development increasing tail risk.",
     "  - update: informative context with weaker directional edge.",
     "- Do not default to update when catalyst or risk is clearly supported.",
+    "- direction=up/down describes the selected contract's YES probability rising/falling, not the underlying asset price by itself.",
     "- PUBLISH: specific market-level implication with enough confidence and evidence quality.",
     "- CONTEXT: useful context but no single high-confidence market target.",
     "- SKIP: low-quality/noise/insufficient evidence.",
@@ -287,7 +293,11 @@ export function buildMapSignalsUserPromptV2(
     "- Consider affinity_score/affinity_rank strongly; when close, prefer higher depth_proxy/open_interest markets.",
     "- Consider contract_match strongly when several candidates belong to the same event.",
     "- When several candidates belong to the same event, prefer the contract whose wording, numbers, and timing best match the evidence instead of defaulting to the broadest or deepest sibling market.",
-    "- Use close_time to distinguish today/this week/this month or date-window contracts when the titles are otherwise similar.",
+    "- One fact can matter to several contracts, but assess the selected contract's exact threshold, direction, and deadline. Do not copy a directional conclusion from a neighboring contract with a different condition.",
+    "- Quotes are a time-stamped market context, not evidence that a news fact is true or a guaranteed execution price. Unknown means absent, invalid, or older than ten minutes; do not infer a price from last_price.",
+    "- For a YES-up read use the current YES ask to understand remaining upside; for YES-down use the YES bid to understand remaining downside. Small remaining room for a routine confirmation is context, not a hard ban. A new contradiction or reversal at 1%/99% can still matter.",
+    "- State the specific new fact relative to the known evidence. Do not claim mispricing or that news was already priced in without before/after price evidence.",
+    "- Use trading_close_time to disambiguate nearby contracts, but do not treat it as the resolution deadline or measurement window; verify those from exact contract terms.",
     "- If target is unclear or evidence weak, return CONTEXT or SKIP.",
     "- Write the visible copy as a short market read, not a news summary.",
     "- Make it clear in one glance what changed and why the target market matters now.",

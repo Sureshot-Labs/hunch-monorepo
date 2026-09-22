@@ -61,6 +61,10 @@ import {
   scoreSignalMarketContractMatch,
   scoreSignalTargetAnchorAlignment,
 } from "./services/map-signal-market-match.js";
+import {
+  buildMarketSignalQuoteContext,
+  type MarketSignalQuoteContext,
+} from "./services/map-signal-quote-context.js";
 
 const QA_CONTRACT_VERSION = "qa_contract_v1";
 
@@ -239,6 +243,13 @@ type MarketCandidate = {
   contractMatchScore: number;
   selectionScore: number;
   affinityRank: number;
+  quote: {
+    yesBid: number | null;
+    yesAsk: number | null;
+    noBid: number | null;
+    noAsk: number | null;
+    topAsOf: { YES: string | null; NO: string | null };
+  };
 };
 
 type EventTopMarket = {
@@ -251,6 +262,7 @@ type EventTopMarket = {
   liquidity: number;
   openInterest: number;
   rank: number;
+  quote: MarketCandidate["quote"];
 };
 
 type SignalDecision = "publish_candidate" | "context_only" | "skip";
@@ -275,6 +287,7 @@ type SignalCandidate = {
   targetMarketTitle: string | null;
   targetEventTitle: string | null;
   targetVenue: string | null;
+  quoteContext?: MarketSignalQuoteContext | null;
   reasonCodes: string[];
   metrics: {
     evidenceCount: number;
@@ -1265,6 +1278,7 @@ async function toMarketCandidates(
         contractMatchScore: 0,
         selectionScore: 0,
         affinityRank: 0,
+        quote: market.quote,
       });
     }
   }
@@ -1587,6 +1601,14 @@ async function evaluateNodeWithModel(params: {
   }
 
   const systemPrompt = buildMapSignalsSystemPromptV2();
+  const quoteCapturedAt = new Date();
+  const quotedCandidates = candidateMarkets.map((candidate) => ({
+    ...candidate,
+    quoteContext: buildMarketSignalQuoteContext(
+      candidate.quote,
+      quoteCapturedAt,
+    ),
+  }));
   const userPrompt = buildMapSignalsUserPromptV2({
     runId,
     nodeId: bucket.nodeId,
@@ -1604,7 +1626,7 @@ async function evaluateNodeWithModel(params: {
       relevance: item.relevance,
       confidence: item.confidence,
     })),
-    candidateMarkets,
+    candidateMarkets: quotedCandidates,
   });
 
   let parsed: MapSignalsAgentOutputV2;
@@ -1758,6 +1780,9 @@ async function evaluateNodeWithModel(params: {
   const marketById = new Map(
     candidateMarkets.map((item) => [item.marketId, item]),
   );
+  const quoteByMarketId = new Map(
+    quotedCandidates.map((item) => [item.marketId, item.quoteContext]),
+  );
   const evidenceById = new Map(evidence.map((item) => [item.id, item]));
   const selectedEvidenceIds = new Set(evidence.map((item) => item.id));
   const modelReasonCodes = [...baseReasonCodes];
@@ -1891,6 +1916,10 @@ async function evaluateNodeWithModel(params: {
         : null,
     targetVenue:
       decision === "publish_candidate" ? (selectedMarket?.venue ?? null) : null,
+    quoteContext:
+      decision === "publish_candidate" && targetMarketId
+        ? (quoteByMarketId.get(targetMarketId) ?? null)
+        : null,
     reasonCodes: modelReasonCodes.length > 0 ? modelReasonCodes : ["PASS"],
     metrics: {
       evidenceCount,
@@ -2364,6 +2393,13 @@ export async function runMapSignals(
             liquidity: row.liquidity,
             openInterest: row.openInterest,
             rank: row.rank,
+            quote: {
+              yesBid: row.yesBid,
+              yesAsk: row.yesAsk,
+              noBid: row.noBid,
+              noAsk: row.noAsk,
+              topAsOf: row.topAsOf,
+            },
           };
           const list = grouped.get(key);
           if (list) list.push(parsed);

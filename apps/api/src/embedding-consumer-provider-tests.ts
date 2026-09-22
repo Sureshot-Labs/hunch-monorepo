@@ -305,6 +305,13 @@ try {
           contractMatchScore: 1,
           selectionScore: 1,
           affinityRank: 1,
+          quote: {
+            yesBid: null,
+            yesAsk: null,
+            noBid: null,
+            noAsk: null,
+            topAsOf: { YES: null, NO: null },
+          },
         },
       ],
       assertGenerationPin: () => {

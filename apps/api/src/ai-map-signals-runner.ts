@@ -95,6 +95,24 @@ const signalsReportSignalSchema = z
     targetEventTitle: z.string().min(1).nullable(),
     targetVenue: z.string().min(1).nullable(),
     reasonCodes: z.array(z.string().min(1)).default([]),
+    quoteContext: z
+      .object({
+        capturedAt: z.string().min(1),
+        yes: z.object({
+          bid: z.number().finite().nullable(),
+          ask: z.number().finite().nullable(),
+          observedAt: z.string().nullable(),
+          status: z.enum(["fresh", "stale", "missing", "invalid"]),
+        }),
+        no: z.object({
+          bid: z.number().finite().nullable(),
+          ask: z.number().finite().nullable(),
+          observedAt: z.string().nullable(),
+          status: z.enum(["fresh", "stale", "missing", "invalid"]),
+        }),
+      })
+      .nullable()
+      .optional(),
     metrics: z.object({
       evidenceCount: z.coerce.number().finite(),
       confirmedCount: z.coerce.number().finite(),
@@ -511,6 +529,7 @@ async function persistSignalNotes(params: {
               estimated_cost_usd: signal.estimatedCostUsd,
               provider_cost_usd: signal.providerCostUsd,
               evidence_refs: buildModelEvidenceRefs(signal.evidenceRefs),
+              quote_context: signal.quoteContext ?? null,
             }),
           ],
         );
