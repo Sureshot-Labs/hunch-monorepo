@@ -8,6 +8,7 @@ import type { FundingPlanningSnapshot } from "./planning-types.js";
 import { maximumInternalFundingCapacityRaw } from "./composite-source-options.js";
 import { unavailableSessionSourceLocationIds } from "./session-source-account.js";
 import { effectiveFundingEconomicsLimits } from "./source-options.js";
+import { checkLimitlessBuyBudget } from "./limitless-buy-budget.js";
 
 /** Advisory only. Reuse frozen quotes; never discover, reserve, or execute funds here.
  * Undefined means no applicable smaller Buy; null means the check was unavailable.
@@ -18,21 +19,23 @@ export async function suggestSmallerMarketBuy(
   account: AccountValueReadModel,
   policy: FundingRuntimePolicy,
   findMax = findMaxPolymarketMarketBuyUsdForFunds,
+  checkExactInput = checkLimitlessBuyBudget,
 ): Promise<IntentLiquidityProjection["suggestedMarketBuy"] | null> {
   const { request, projection, destination } = snapshot;
   const original = request.marketBuyAmountUsdCents;
   if (
     !Number.isSafeInteger(original) ||
     !original ||
-    original <= 100 ||
+    original <= (request.consumerIntent?.venueId === "polymarket" ? 100 : 1) ||
     !Number.isInteger(request.marketBuySlippageBps) ||
     request.marketBuySlippageBps == null ||
     request.marketBuySlippageBps < 0 ||
     request.marketBuySlippageBps > 10_000 ||
     request.purpose !== "trade_shortfall" ||
-    request.consumerIntent?.venueId !== "polymarket" ||
+    !request.consumerIntent ||
+    !["polymarket", "limitless"].includes(request.consumerIntent.venueId) ||
     request.consumerIntent.side !== "BUY" ||
-    projection.venueId !== "polymarket" ||
+    projection.venueId !== request.consumerIntent.venueId ||
     projection.completeness !== "complete" ||
     projection.freshness !== "fresh" ||
     projection.errors.length !== 0 ||
@@ -49,6 +52,16 @@ export async function suggestSmallerMarketBuy(
     destination?.target.kind !== "owned_location" ||
     !request.marketContextId ||
     projection.collateralAsset.decimals !== 6
+  )
+    return undefined;
+
+  const consumerIntent = request.consumerIntent;
+  const exactInput = consumerIntent.venueId === "limitless";
+  // Do not infer exact-input economics from a venue name alone: the bound
+  // consumer debit must equal the original Limitless market BUY input.
+  if (
+    exactInput &&
+    request.consumerIntent.spend.raw !== (BigInt(original) * 10_000n).toString()
   )
     return undefined;
 
@@ -84,7 +97,8 @@ export async function suggestSmallerMarketBuy(
     });
   const available = BigInt(projection.availableNowRaw);
   const tokenId = request.marketContextId;
-  const deadlineMs = Math.min(expiresAtMs, Date.now() + 1_000);
+  const timeoutMs = exactInput ? 3_500 : 1_000;
+  const deadlineMs = Math.min(expiresAtMs, Date.now() + timeoutMs);
   // Market-data requests are singleflight/shared with real quotes: do not cancel
   // those consumers, but never delay the funding response for optional advice.
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -100,6 +114,36 @@ export async function suggestSmallerMarketBuy(
           if (capacity == null) return null;
           const budget = available + capacity;
           if (budget <= 0n) return undefined;
+          if (exactInput) {
+            // Never advise increasing the amount, even when route fee limits
+            // make the original request unavailable for a non-capacity reason.
+            const maximumSmallerRaw = BigInt(original - 1) * 10_000n;
+            const checked = await checkExactInput(pool, {
+              marketId: consumerIntent.marketId,
+              tokenId,
+              budgetRaw:
+                budget < maximumSmallerRaw ? budget : maximumSmallerRaw,
+            });
+            if (checked == null) return checked;
+            const verifiedCapacity = capacityFor(checked.amountRaw.toString());
+            const hintExpiry = Math.min(expiresAtMs, checked.expiresAtMs);
+            if (
+              verifiedCapacity == null ||
+              Date.now() >= deadlineMs ||
+              Date.now() >= hintExpiry
+            )
+              return null;
+            if (available + verifiedCapacity >= checked.amountRaw) {
+              return {
+                originalAmountUsdCents: original,
+                amountUsdCents: Number(checked.amountRaw / 10_000n),
+                expiresAt: new Date(hintExpiry).toISOString(),
+              };
+            }
+            if (verifiedCapacity >= capacity) return null;
+            capacity = verifiedCapacity;
+            continue;
+          }
           const result = await findMax(pool, {
             tokenId,
             executableFundsRaw: budget,
@@ -132,7 +176,7 @@ export async function suggestSmallerMarketBuy(
             liquidityProjectionId: projection.liquidityProjectionId,
           });
           resolve(null);
-        }, 1_000);
+        }, timeoutMs);
       }),
     ]);
   } catch {

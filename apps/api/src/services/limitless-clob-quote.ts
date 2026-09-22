@@ -27,6 +27,9 @@ export type LimitlessClobQuoteResult =
   | {
       status: "insufficient_depth" | "no_liquidity" | "unavailable";
       asOf: string | null;
+      minOrderNotionalUsd?: number;
+      tokenId?: string;
+      side?: LimitlessClobSide;
     };
 
 export type LimitlessClobQuoteInput = {
@@ -104,7 +107,15 @@ async function loadLimitlessClobQuote(
       tokenId: input.tokenId,
     });
     if (quote.status !== "ready") {
-      return { status: quote.status, asOf };
+      // Resting limit orders still need the observed market minimum even when
+      // immediate depth is insufficient. This does not make a market quote ready.
+      return {
+        status: quote.status,
+        asOf,
+        minOrderNotionalUsd: book.minOrderNotionalUsd,
+        tokenId: input.tokenId,
+        side: input.side,
+      };
     }
     return {
       status: "ready",

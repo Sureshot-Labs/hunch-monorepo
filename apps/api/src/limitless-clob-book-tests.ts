@@ -62,6 +62,25 @@ const book: LimitlessClobBook = {
   tokenId: "111",
 };
 
+await asyncTest(
+  "empty book preserves minimum metadata for resting limit advice without marking market BUY ready",
+  async () => {
+    const quote = await quoteLimitlessClobMarket(
+      { slug: "test", tokenId: "111", side: "BUY", amountUsd: 2 },
+      {
+        requestOrderbook: async () => ({
+          ok: true,
+          payload: { tokenId: "111", minSize: "1000000", asks: [], bids: [] },
+        }),
+      },
+    );
+    assert.equal(quote.status, "no_liquidity");
+    assert.equal(quote.minOrderNotionalUsd, 1);
+    assert.equal(quote.tokenId, "111");
+    assert.equal(quote.side, "BUY");
+  },
+);
+
 test("parser accepts nested Limitless orderbooks", () => {
   assert.deepEqual(
     parseLimitlessClobBook({

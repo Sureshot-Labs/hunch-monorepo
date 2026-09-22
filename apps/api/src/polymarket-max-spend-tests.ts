@@ -63,6 +63,9 @@ import type { PlannedSourceOption } from "./funding/planner/planning-types.js";
 import { env } from "./env.js";
 import { suggestSmallerMarketBuy } from "./funding/planner/market-buy-suggestion.js";
 import { classifyProvenCashShortfall } from "./funding/planner/proven-cash-shortfall.js";
+import { checkLimitlessBuyBudget } from "./funding/planner/limitless-buy-budget.js";
+import type { ApiTradeMarket } from "./services/api-trading-market-repo.js";
+import { quoteLimitlessClobMarket } from "./services/limitless-clob-quote.js";
 
 type TestCase = {
   name: string;
@@ -327,6 +330,138 @@ function accountMaxRelaySource(input: {
 }
 
 const tests: TestCase[] = [
+  {
+    name: "Limitless market reduction binds the outcome and rounds down without resting-order minima or Polymarket fees",
+    run: async () => {
+      const market: ApiTradeMarket = {
+        id: "limitless:1",
+        venue: "limitless",
+        venue_market_id: "1",
+        event_id: "event",
+        event_title: "Event",
+        event_end_time: null,
+        title: "Market",
+        slug: "market",
+        status: "ACTIVE",
+        accepting_orders: true,
+        close_time: null,
+        expiration_time: null,
+        outcomes: '["Yes","No"]',
+        metadata: {},
+        is_initialized: true,
+        token_yes: "limitless:101",
+        token_no: "limitless:102",
+        clob_token_ids: null,
+        best_ask: "0.5",
+        best_bid: "0.49",
+        last_price: "0.5",
+        updated_at: new Date(),
+      };
+      let calls = 0;
+      let minimum = 1;
+      const input = {
+        marketId: market.id,
+        tokenId: "limitless:101",
+        budgetRaw: 1_909_999n,
+      };
+      const dependencies: NonNullable<
+        Parameters<typeof checkLimitlessBuyBudget>[2]
+      > = {
+        findMarket: async () => market,
+        quoteClob: async (quoteInput) => {
+          calls++;
+          assert.equal(quoteInput.amountUsd, 1.9);
+          assert.equal(quoteInput.tokenId, "101");
+          return {
+            status: "ready",
+            tokenId: "101",
+            side: "BUY",
+            asOf: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 5_000).toISOString(),
+            averagePrice: 0.5,
+            worstPrice: 0.5,
+            executableShares: 3.8,
+            availableShares: 100,
+            minOrderNotionalUsd: minimum,
+            totalNotional: 1.9,
+          };
+        },
+        quoteAmm: async () => {
+          throw new Error("CLOB must not use AMM");
+        },
+      };
+      const result = await checkLimitlessBuyBudget(
+        {} as Pool,
+        input,
+        dependencies,
+      );
+      assert.equal(result?.amountRaw, 1_900_000n);
+      minimum = 100;
+      assert.equal(
+        (await checkLimitlessBuyBudget({} as Pool, input, dependencies))
+          ?.amountRaw,
+        1_900_000n,
+      );
+      const executableBelowRestingMinimum = await checkLimitlessBuyBudget(
+        {} as Pool,
+        input,
+        {
+          ...dependencies,
+          quoteClob: (quoteInput) =>
+            quoteLimitlessClobMarket(quoteInput, {
+              requestOrderbook: async () => ({
+                ok: true,
+                payload: {
+                  tokenId: "101",
+                  minSize: "100000000",
+                  asks: [{ price: 0.5, size: 100_000_000 }],
+                  bids: [],
+                },
+              }),
+            }),
+        },
+      );
+      assert.equal(executableBelowRestingMinimum?.amountRaw, 1_900_000n);
+      const before = calls;
+      assert.equal(
+        await checkLimitlessBuyBudget(
+          {} as Pool,
+          { ...input, tokenId: "limitless:999" },
+          dependencies,
+        ),
+        null,
+      );
+      assert.equal(calls, before);
+      market.status = "CLOSED";
+      assert.equal(
+        await checkLimitlessBuyBudget({} as Pool, input, dependencies),
+        null,
+      );
+      assert.equal(calls, before);
+      market.status = "ACTIVE";
+      market.metadata = { amm: true, marketAddress: DEPOSIT };
+      const amm = await checkLimitlessBuyBudget(
+        {} as Pool,
+        { ...input, tokenId: "limitless:102" },
+        {
+          ...dependencies,
+          quoteAmm: async (quoteInput) => {
+            assert.equal(quoteInput.outcomeIndex, 1);
+            assert.equal(quoteInput.amountUsdRaw, 1_900_000n);
+            return {
+              marketAddress: DEPOSIT,
+              side: "BUY",
+              outcomeIndex: 1,
+              sharesRaw: "3500000",
+              returnAmountRaw: null,
+            };
+          },
+        },
+      );
+      assert.equal(amm?.amountRaw, 1_900_000n);
+      assert.equal(calls, before);
+    },
+  },
   {
     name: "limit MAX includes fees at the chosen price and returns the largest normalized shares",
     run: () => {
@@ -626,6 +761,56 @@ const tests: TestCase[] = [
       const suggestion = await suggest();
       assert.ok(suggestion);
       assert.equal(suggestionBudget, 4_860_000n);
+      assert.ok(suggestionSnapshot.request.consumerIntent);
+      const limitlessSuggestionSnapshot = {
+        ...suggestionSnapshot,
+        request: {
+          ...suggestionSnapshot.request,
+          consumerIntent: {
+            ...suggestionSnapshot.request.consumerIntent,
+            venueId: "limitless",
+            marketId: "limitless:market-test",
+            spend: { asset: destinationAsset, raw: "9080000" },
+          },
+        },
+        projection: { ...suggestionSnapshot.projection, venueId: "limitless" },
+      };
+      let limitlessChecks = 0;
+      const smallerLimitless = await suggestSmallerMarketBuy(
+        {} as Pool,
+        limitlessSuggestionSnapshot,
+        account,
+        DEFAULT_FUNDING_RUNTIME_POLICY,
+        async () => {
+          throw new Error(
+            "Must not use Polymarket fee calculation for Limitless",
+          );
+        },
+        async (_pool, input) => {
+          limitlessChecks++;
+          assert.equal(input.marketId, "limitless:market-test");
+          assert.equal(input.budgetRaw, 4_860_000n);
+          return { amountRaw: 4_860_000n, expiresAtMs: Date.now() + 2_000 };
+        },
+      );
+      assert.equal(limitlessChecks, 1);
+      assert.equal(smallerLimitless?.amountUsdCents, 486);
+      assert.ok(smallerLimitless);
+      assert.ok(Date.parse(smallerLimitless.expiresAt) < Date.now() + 3_000);
+      const mismatchedVenue = await suggestSmallerMarketBuy(
+        {} as Pool,
+        {
+          ...limitlessSuggestionSnapshot,
+          projection: suggestionSnapshot.projection,
+        },
+        account,
+        DEFAULT_FUNDING_RUNTIME_POLICY,
+        quoteSuggestion,
+        async () => {
+          throw new Error("Cross-venue advice must not quote");
+        },
+      );
+      assert.equal(mismatchedVenue, undefined);
       const externalReservation = routeSource.commitPlan.reservations[0];
       assert.ok(externalReservation);
       const sessionSuggestionAccount = {
