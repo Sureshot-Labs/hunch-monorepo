@@ -615,6 +615,53 @@ function facts(
     ],
   });
   const result = deriveFundingLifecycle(partial);
+  const untouchedHandoff = action("untouched-handoff", {
+    safeInternalHandoff: true,
+    expiresAt: new Date(now.getTime() - 1),
+    ordinal: 1,
+  });
+  const partialWithHandoff = {
+    ...partial,
+    actions: [
+      completedAction,
+      untouchedHandoff,
+      {
+        ...omittedAction,
+        ordinal: 2,
+        dependsOnActionId: untouchedHandoff.actionId,
+      },
+    ],
+  };
+  assert.equal(
+    deriveFundingLifecycle(partialWithHandoff).status,
+    "failed",
+    "settled lane + expired never-started handoff lane must terminate without another transfer",
+  );
+  for (const unsafeHandoff of [
+    { ...untouchedHandoff, expiresAt: new Date(now.getTime() + 1) },
+    { ...untouchedHandoff, attempts: [attempt()] },
+    {
+      ...untouchedHandoff,
+      attempts: [
+        attempt({ outcome: "ambiguous", broadcastMayHaveOccurred: true }),
+      ],
+    },
+  ])
+    assert.equal(
+      deriveFundingLifecycle({
+        ...partialWithHandoff,
+        actions: [
+          completedAction,
+          unsafeHandoff,
+          {
+            ...omittedAction,
+            ordinal: 2,
+            dependsOnActionId: untouchedHandoff.actionId,
+          },
+        ],
+      }).safety.terminal,
+      false,
+    );
   const expiredPreparation = facts({
     plan: {
       ...partial.plan,

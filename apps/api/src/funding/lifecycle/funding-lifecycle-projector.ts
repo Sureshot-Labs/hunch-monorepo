@@ -745,10 +745,11 @@ function isSettledPartialBuy(facts: FundingLifecycleFacts): boolean {
             // either fully settled or untouched and expired below.
             (
               action.safeInternalHandoff === true &&
-              actionExecution(action) === "succeeded" &&
-              action.attempts.some((attempt) =>
-                hasCanonicalFinalReceipt(attempt.receipt),
-              ) &&
+              (expiredWithoutSourceExecution(action, facts.now) ||
+                (actionExecution(action) === "succeeded" &&
+                  action.attempts.some((attempt) =>
+                    hasCanonicalFinalReceipt(attempt.receipt),
+                  ))) &&
               facts.actions.some(
                 (dependent) =>
                   dependent.dependsOnActionId === action.actionId &&
@@ -1303,6 +1304,7 @@ export function deriveFundingLifecycle(
   const settledPartialBuy = isSettledPartialBuy(facts);
   const consumerMayRemainLinked =
     !settledPartialBuy &&
+    facts.consumer.settledWithoutConsumer !== true &&
     facts.cancellation == null &&
     facts.manualRecovery == null &&
     facts.terminalFailure == null &&

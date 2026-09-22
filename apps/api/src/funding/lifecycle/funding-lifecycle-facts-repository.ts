@@ -31,6 +31,7 @@ type LifecycleHeaderRow = Readonly<{
   user_id: string;
   requested_destination_amount: JsonRecord | null;
   support_metadata: JsonRecord;
+  expires_at: Date;
 }>;
 
 type LifecycleRouteLegRow = Readonly<{
@@ -531,7 +532,10 @@ function compileFundingLifecycleFacts(
       safeInternalHandoff: actionIsSafeInternalHandoff(row),
       requiresSourceDebitEvidence: actionRequiresSourceDebitEvidence(row),
       requiresVenueReadiness: row.step_kind === "venue_preparation",
-      authorization: actionAuthorization(row, telegramAuthorization),
+      authorization:
+        typeof header.support_metadata.evidenceOnlyRecoveryAt === "string"
+          ? "blocked"
+          : actionAuthorization(row, telegramAuthorization),
       attempts: attempt === null ? [] : [attempt],
     });
   }
@@ -603,7 +607,13 @@ function compileFundingLifecycleFacts(
     consumer: {
       required: header.purpose === "trade_shortfall",
       completed: consumerFacts.completed,
-      settledWithoutConsumer: consumerFacts.settled_without_consumer,
+      settledWithoutConsumer:
+        consumerFacts.settled_without_consumer ||
+        (header.purpose === "trade_shortfall" &&
+          (header.expires_at <= now ||
+            typeof header.support_metadata.evidenceOnlyRecoveryAt ===
+              "string") &&
+          !consumerFacts.unresolved),
       unresolved: consumerFacts.unresolved,
     },
     receive:
@@ -684,6 +694,7 @@ export async function loadFundingLifecycleFactsForOperationsInTransaction(
              operation_row.purpose,
              operation_row.requested_destination_amount,
              operation_row.support_metadata,
+             operation_row.expires_at,
              quote.plan_snapshot
         from funding_operations operation_row
         join funding_quotes quote on quote.id = operation_row.quote_id

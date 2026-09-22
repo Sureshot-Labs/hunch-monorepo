@@ -2493,7 +2493,50 @@ export async function listFundingObservationsForOperations(
       observation,
     ]);
   }
+  for (const [operationId, observations] of observationsByOperation) {
+    observationsByOperation.set(
+      operationId,
+      effectiveFundingObservations(observations),
+    );
+  }
   return observationsByOperation;
+}
+
+/** Balance-delta evidence and its exact Relay receipt describe the same credit,
+ * not two payments. Preserve stored audit rows and every reorg/conflict fact. */
+export function effectiveFundingObservations(
+  observations: readonly FundingObservationRow[],
+): readonly FundingObservationRow[] {
+  return observations.filter((candidate) => {
+    if (
+      candidate.kind !== "destination_credit" ||
+      !candidate.txHash.startsWith(`owned-route:${candidate.operationId}:`) ||
+      candidate.metadata.observerId !==
+        "relay_owned_destination_observation_v1" ||
+      !candidate.canonical ||
+      candidate.finalityStatus !== "finalized"
+    )
+      return true;
+    return !observations.some(
+      (exact) =>
+        exact.operationId === candidate.operationId &&
+        exact.segmentId === candidate.segmentId &&
+        exact.networkId === candidate.networkId &&
+        exact.assetId === candidate.assetId &&
+        exact.assetDecimals === candidate.assetDecimals &&
+        exact.toAddress === candidate.toAddress &&
+        exact.kind === "destination_credit" &&
+        (exact.networkId.startsWith("evm:")
+          ? /^0x[0-9a-f]{64}$/i.test(exact.txHash)
+          : exact.networkId === "solana:mainnet" &&
+            /^[1-9A-HJ-NP-Za-km-z]{64,88}$/.test(exact.txHash)) &&
+        exact.metadata.observerId ===
+          "relay_owned_destination_observation_v1" &&
+        exact.metadata.relayTransactionReferenceMatched === true &&
+        exact.canonical &&
+        exact.finalityStatus === "finalized",
+    );
+  });
 }
 
 export async function fetchFundingOperationForWorkerInTransaction(

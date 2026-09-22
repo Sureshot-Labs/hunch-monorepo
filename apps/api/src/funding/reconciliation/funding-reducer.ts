@@ -667,8 +667,9 @@ async function preflightSettledConsumerReservationExpiry(
   if (!beforeLockFacts) return null;
   const beforeLockLifecycle = deriveFundingLifecycle(beforeLockFacts);
   if (
-    beforeLockLifecycle.status !== "ready" ||
-    beforeLockLifecycle.progressStage !== "ready_for_consumer"
+    beforeLockLifecycle.status !== "completed" &&
+    (beforeLockLifecycle.status !== "ready" ||
+      beforeLockLifecycle.progressStage !== "ready_for_consumer")
   ) {
     return null;
   }
@@ -702,6 +703,7 @@ async function preflightSettledConsumerReservationExpiry(
   );
   if (!facts) return null;
   const lifecycle = deriveFundingLifecycle(facts);
+  if (lifecycle.status === "completed") return { initial, expired: null };
   if (
     lifecycle.status !== "ready" ||
     lifecycle.progressStage !== "ready_for_consumer"
@@ -1089,6 +1091,8 @@ export type FundingReconciliationBatchOptions = Readonly<{
   maxAttempts?: number;
   terminalTimeoutMs?: number;
   now?: Date;
+  /** Production worker only: evidence-only sweep of expired stopped jobs. */
+  recoverStopped?: boolean;
   providerPoll?: (
     operationId: string,
     now: Date,
@@ -2507,6 +2511,164 @@ async function processLease(
   }
 }
 
+/** No executor/consumer callbacks: this can only refresh evidence and accounting.
+ * Expired action consent cannot be revived by a repaired source receipt. */
+export async function recoverStoppedFundingOperations(
+  pool: Pool,
+  options: FundingReconciliationBatchOptions,
+): Promise<number> {
+  // Without a canonical receipt verifier, old persisted facts are insufficient.
+  if (!options.receiptPoll) return 0;
+  const now = options.now ?? new Date();
+  const claimed = await tx(pool, async (client) => {
+    const cursor = await client.query<{ last_operation_id: string | null }>(
+      `select last_operation_id from funding_recovery_scan_cursor
+       where cursor_name='stopped_evidence_v1' for update`,
+    );
+    if (!cursor.rows[0]) throw new Error("funding recovery cursor missing");
+    const page = await client.query<{ id: string }>(
+      `select id from funding_operations where id > coalesce($1::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
+       order by id limit 100`,
+      [cursor.rows[0].last_operation_id],
+    );
+    const result = await client.query<{
+      id: string;
+      operation_id: string;
+      lease_token: string;
+    }>(
+      `with source_page as materialized (
+       select id, expires_at, status from funding_operations
+        where status not in ('completed','refunded','failed','cancelled')
+          and id=any($3::uuid[])
+          and updated_at < $1::timestamptz - interval '5 minutes'
+     ), repair_candidate as (
+       select repair_job.id
+         from source_page
+         join funding_reconciliation_jobs repair_job
+           on repair_job.operation_id = source_page.id
+        where (source_page.expires_at <= $1 or (
+          exists (select 1 from funding_operation_steps repair_step
+                   where repair_step.operation_id=source_page.id)
+          and not exists (select 1 from funding_operation_steps repair_step
+                   where repair_step.operation_id=source_page.id
+                     and (repair_step.action_expires_at is null or repair_step.action_expires_at > $1))
+        ))
+          and (source_page.status='recovery_required' or source_page.expires_at <= $1
+            or exists (select 1 from balance_reservations repair_reservation
+              where repair_reservation.operation_id=source_page.id
+                and repair_reservation.mode='settled_for_consumer'
+                and repair_reservation.state='active'
+                and repair_reservation.expires_at <= $1))
+          and repair_job.status in ('completed','dead_letter')
+          and repair_job.updated_at < $1::timestamptz - interval '5 minutes'
+        order by source_page.id
+        for update of repair_job skip locked
+        limit 1
+     )
+     update funding_reconciliation_jobs repair_job
+        set status='leased', due_at='infinity'::timestamptz,
+            lease_owner=$2, lease_token=gen_random_uuid(),
+            lease_until=$1::timestamptz + interval '2 minutes',
+            completed_at=null, attempt_count=attempt_count+1
+       from repair_candidate
+      where repair_job.id=repair_candidate.id
+      returning repair_job.id, repair_job.operation_id, repair_job.lease_token`,
+      [now, options.workerId, page.rows.map((row) => row.id)],
+    );
+    await client.query(
+      `update funding_recovery_scan_cursor
+      set last_operation_id=$1, updated_at=$2 where cursor_name='stopped_evidence_v1'`,
+      [result.rows[0]?.operation_id ?? page.rows.at(-1)?.id ?? null, now],
+    );
+    return result;
+  });
+  const job = claimed.rows[0];
+  if (!job) return 0;
+  let failed = false;
+  try {
+    // Match intent -> operation lock order. Detach old purchase consent before
+    // evidence can turn a stopped route into ready; never start a historic Buy.
+    await tx(pool, async (client) => {
+      await client.query(
+        `select id from telegram_trade_intents
+        where funding_operation_id=$1 order by id for update`,
+        [job.operation_id],
+      );
+      const operation = await fetchFundingOperationForWorkerInTransaction(
+        client,
+        job.operation_id,
+      );
+      if (!operation) throw new Error("repair operation disappeared");
+      await writeFundingOperationSupportFactsInTransaction(client, {
+        operationId: operation.id,
+        expectedVersion: operation.version,
+        supportMetadataPatch: { evidenceOnlyRecoveryAt: now.toISOString() },
+        now,
+      });
+    });
+    // Sources may refresh independently, but unavailable canonical receipt
+    // verification must never permit reservation release from stale evidence.
+    let verificationUnavailable = false;
+    for (const poll of [
+      options.receiptPoll,
+      options.providerPoll,
+      options.postconditionPoll,
+      options.destinationPoll,
+    ]) {
+      try {
+        await poll?.(job.operation_id, now);
+      } catch {
+        failed = true;
+        if (poll !== options.providerPoll) verificationUnavailable = true;
+      }
+    }
+    if (verificationUnavailable)
+      throw new Error("canonical evidence verification unavailable");
+    const reduction = await reduceFundingOperation(pool, {
+      operationId: job.operation_id,
+      now,
+    });
+    await finishFundingReconciliationLeaseRaw(pool, {
+      jobId: job.id,
+      leaseOwner: options.workerId,
+      leaseToken: job.lease_token,
+      now,
+      result: reduction.terminal
+        ? {
+            // Let the ordinary worker retain its receipt/refund reorg watch.
+            kind: "requeue",
+            dueAt: new Date(now.getTime() + (options.pollDelayMs ?? 15_000)),
+          }
+        : {
+            kind: "error",
+            deadLetter: true,
+            dueAt: new Date(now.getTime() + 300_000),
+            errorCode: failed
+              ? "evidence_repair_poll_unavailable"
+              : "evidence_repair_unresolved",
+            errorSummary:
+              "Evidence-only repair remains unresolved; bounded background retry is enabled",
+          },
+    });
+  } catch {
+    await finishFundingReconciliationLeaseRaw(pool, {
+      jobId: job.id,
+      leaseOwner: options.workerId,
+      leaseToken: job.lease_token,
+      now,
+      result: {
+        kind: "error",
+        deadLetter: true,
+        dueAt: new Date(now.getTime() + 300_000),
+        errorCode: "evidence_repair_failed",
+        errorSummary:
+          "Evidence-only repair will retry; no transaction was sent",
+      },
+    });
+  }
+  return 1;
+}
+
 export async function runFundingReconciliationBatch(
   pool: Pool,
   options: FundingReconciliationBatchOptions,
@@ -2574,6 +2736,8 @@ export async function runFundingReconciliationBatch(
       else counts[outcome] += 1;
     }
   }
+  if (options.recoverStopped)
+    await recoverStoppedFundingOperations(pool, options);
   return {
     claimed: claimedLeases.length,
     ...counts,

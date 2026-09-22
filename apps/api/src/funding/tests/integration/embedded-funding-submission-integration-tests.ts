@@ -14,6 +14,7 @@ import {
 import {
   startFundingStepAttemptForUserInTransaction,
   finishFundingStepAttemptForUserInTransaction,
+  finishFundingStepAttemptInTransaction,
 } from "../../persistence/funding-evidence-repository.js";
 import {
   prepareEmbeddedFundingSubmissionInTransaction,
@@ -25,9 +26,11 @@ import {
 import {
   reduceFundingOperationInTransaction,
   runFundingReconciliationBatch,
+  recoverStoppedFundingOperations,
 } from "../../reconciliation/funding-reducer.js";
 import { createFundingTransactionReferenceCodec } from "../../execution/transaction-reference-codec.js";
 import { listFundingStepReceiptTargets } from "../../persistence/funding-step-receipt-repository.js";
+import { loadFundingLifecycleFactsForOperationInTransaction } from "../../lifecycle/funding-lifecycle-facts-repository.js";
 
 const id = () => crypto.randomUUID();
 const signer = "0x00000000000000000000000000000000000000a1";
@@ -512,3 +515,177 @@ assert.equal(
 console.log(
   "[embedded-funding-submission-integration-tests] prepare lease, exact binding, expiry, reservation release, admission race, durable result and legacy safety passed",
 );
+
+// Historical started cache, but a durable negative result was already known.
+// The evidence-only sweep must materialize completion without any executor.
+const stopped = await fixture(false);
+await tx(pool, (client) =>
+  finishFundingStepAttemptInTransaction(client, {
+    attemptId: stopped.context.attemptId,
+    outcome: "cancelled",
+    broadcastMayHaveOccurred: false,
+    referenceKind: null,
+    receiptRefCiphertext: null,
+    receiptRefLookupHmac: null,
+    lookupKeyVersion: null,
+    actualCosts: {},
+  }),
+);
+await pool.query(
+  `update funding_reconciliation_jobs set status='completed',completed_at=now(),
+  lease_owner=null,lease_token=null,lease_until=null where operation_id=$1`,
+  [stopped.context.operationId],
+);
+const previousUuid = (value: string) => {
+  const hex = (BigInt(`0x${value.replaceAll("-", "")}`) - 1n)
+    .toString(16)
+    .padStart(32, "0");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+};
+await pool.query(
+  "update funding_recovery_scan_cursor set last_operation_id=$1 where cursor_name='stopped_evidence_v1'",
+  [previousUuid(stopped.context.operationId)],
+);
+const repairNow = new Date(Date.now() + 8 * 86400_000);
+assert.equal(
+  await recoverStoppedFundingOperations(pool, {
+    workerId: "missing-verifier-test",
+    now: repairNow,
+  }),
+  0,
+  "missing canonical verifier must not claim stopped jobs",
+);
+let receipts = 0;
+assert.equal(
+  await recoverStoppedFundingOperations(pool, {
+    workerId: "stopped-recovery-test",
+    now: repairNow,
+    receiptPoll: async () => {
+      receipts++;
+      return { receiptsPolled: 0 };
+    },
+  }),
+  1,
+);
+assert.equal(receipts, 1);
+assert.equal(
+  (
+    await pool.query(
+      "select status from funding_reconciliation_jobs where operation_id=$1",
+      [stopped.context.operationId],
+    )
+  ).rows[0].status,
+  "scheduled",
+  "terminal repairs must return to ordinary receipt/refund reorg watch",
+);
+assert.equal(
+  (
+    await pool.query(
+      "select last_operation_id from funding_recovery_scan_cursor where cursor_name='stopped_evidence_v1'",
+    )
+  ).rows[0].last_operation_id,
+  stopped.context.operationId,
+);
+const repairedFacts = await loadFundingLifecycleFactsForOperationInTransaction(
+  pool,
+  { operationId: stopped.context.operationId, now: new Date() },
+);
+assert.equal(
+  repairedFacts?.actions[0]?.authorization,
+  "blocked",
+  "evidence-only recovery fences future execution even before the original deadline",
+);
+assert.equal(
+  (
+    await pool.query("select status from funding_operations where id=$1", [
+      stopped.context.operationId,
+    ])
+  ).rows[0].status,
+  "cancelled",
+);
+assert.equal(
+  (
+    await pool.query(
+      "select count(*)::int as total from balance_reservations where operation_id=$1 and state='active'",
+      [stopped.context.operationId],
+    )
+  ).rows[0].total,
+  0,
+);
+
+const rpcFailure = await fixture(false);
+await tx(pool, (client) =>
+  finishFundingStepAttemptInTransaction(client, {
+    attemptId: rpcFailure.context.attemptId,
+    outcome: "cancelled",
+    broadcastMayHaveOccurred: false,
+    referenceKind: null,
+    receiptRefCiphertext: null,
+    receiptRefLookupHmac: null,
+    lookupKeyVersion: null,
+    actualCosts: {},
+  }),
+);
+await pool.query(
+  `update funding_reconciliation_jobs set status='dead_letter',completed_at=now(),
+  lease_owner=null,lease_token=null,lease_until=null where operation_id=$1`,
+  [rpcFailure.context.operationId],
+);
+await pool.query(
+  "update funding_recovery_scan_cursor set last_operation_id=$1 where cursor_name='stopped_evidence_v1'",
+  [previousUuid(rpcFailure.context.operationId)],
+);
+await recoverStoppedFundingOperations(pool, {
+  workerId: "stopped-rpc-test",
+  now: repairNow,
+  receiptPoll: async () => {
+    throw new Error("RPC unavailable");
+  },
+});
+assert.equal(
+  (
+    await pool.query(
+      "select count(*)::int as total from balance_reservations where operation_id=$1 and state='active'",
+      [rpcFailure.context.operationId],
+    )
+  ).rows[0].total,
+  1,
+  "failed receipt verification must not release a reservation from stale evidence",
+);
+assert.equal(
+  (
+    await pool.query(
+      "select status from funding_reconciliation_jobs where operation_id=$1",
+      [rpcFailure.context.operationId],
+    )
+  ).rows[0].status,
+  "dead_letter",
+);
+
+for (const failingPoll of ["destinationPoll", "postconditionPoll"] as const) {
+  await pool.query(
+    "update funding_recovery_scan_cursor set last_operation_id=$1 where cursor_name='stopped_evidence_v1'",
+    [previousUuid(rpcFailure.context.operationId)],
+  );
+  await recoverStoppedFundingOperations(pool, {
+    workerId: `stopped-${failingPoll}-test`,
+    now: new Date(
+      repairNow.getTime() +
+        (failingPoll === "destinationPoll" ? 600_000 : 1200_000),
+    ),
+    receiptPoll: async () => ({ receiptsPolled: 0 }),
+    [failingPoll]: async () => {
+      throw new Error("canonical verification unavailable");
+    },
+  });
+  assert.equal(
+    (
+      await pool.query(
+        "select count(*)::int as total from balance_reservations where operation_id=$1 and state='active'",
+        [rpcFailure.context.operationId],
+      )
+    ).rows[0].total,
+    1,
+    `${failingPoll} failure must preserve the reservation`,
+  );
+}

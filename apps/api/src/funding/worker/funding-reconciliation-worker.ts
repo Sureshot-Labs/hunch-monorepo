@@ -201,6 +201,7 @@ export async function isFundingReconciliationSchemaReady(
         to_regclass('public.funding_operations') is not null
         and to_regclass('public.funding_observations') is not null
         and to_regclass('public.funding_reconciliation_jobs') is not null
+        and to_regclass('public.funding_recovery_scan_cursor') is not null
         and to_regclass('public.funding_receive_sessions') is not null
         and to_regclass('public.telegram_funding_sessions') is not null
         and to_regclass('public.telegram_funding_consents') is not null
@@ -598,6 +599,7 @@ export async function runFundingReconciliationJob(
   if (!relay) {
     result = await runFundingReconciliationBatch(pool, {
       ...options,
+      recoverStopped: true,
       ...evidencePollers,
       destinationPoll: pollDestination,
     });
@@ -620,6 +622,7 @@ export async function runFundingReconciliationJob(
     );
     result = await runFundingReconciliationBatch(pool, {
       ...options,
+      recoverStopped: true,
       ...evidencePollers,
       providerPoll: (operationId, now) =>
         driver.pollOperation(pool, operationId, now),

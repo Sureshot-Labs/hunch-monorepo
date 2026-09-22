@@ -1216,6 +1216,7 @@ async function polymarketRouterPreBroadcastDecisionInTransaction(
        from funding_operations
       where id = $1
         and user_id = $2
+        and not (support_metadata ? 'evidenceOnlyRecoveryAt')
       for update`,
     [input.claim.operationId, input.claim.userId],
   );
