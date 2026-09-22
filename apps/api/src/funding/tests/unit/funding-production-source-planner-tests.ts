@@ -2570,6 +2570,48 @@ const rejectedReasons = [
   "insufficient_liquidity",
 ] as const;
 const shortageAccount = account({ availableRaw: "1740002" });
+assert.ok(shortageRequest.consumerIntent);
+// Cash insufficiency depends on exact assets and evidence, not the trading venue.
+for (const [venueId, asset] of [
+  ["polymarket", POLYGON_PUSD],
+  ["limitless", BASE_USDC],
+  ["kalshi", SOLANA_USDC],
+] as const) {
+  const request: FundingDiscoveryRequest = {
+    ...shortageRequest,
+    consumerIntent: { ...shortageRequest.consumerIntent, venueId },
+    requestedDestinationAmount: { asset, raw: "5000000" },
+  };
+  assert.deepEqual(
+    classifyProvenCashShortfall(shortageAccount, request, rejectedReasons),
+    ["insufficient_liquidity"],
+  );
+  assert.deepEqual(
+    classifyProvenCashShortfall(
+      shortageAccount,
+      {
+        ...request,
+        consumerIntent: { ...request.consumerIntent, side: "SELL" },
+      } as unknown as FundingDiscoveryRequest,
+      rejectedReasons,
+    ),
+    rejectedReasons,
+  );
+  assert.deepEqual(
+    classifyProvenCashShortfall(
+      {
+        ...shortageAccount,
+        cashAvailability: {
+          ...shortageAccount.cashAvailability,
+          freshness: "stale",
+        },
+      },
+      request,
+      rejectedReasons,
+    ),
+    rejectedReasons,
+  );
+}
 assert.deepEqual(
   classifyProvenCashShortfall(
     shortageAccount,

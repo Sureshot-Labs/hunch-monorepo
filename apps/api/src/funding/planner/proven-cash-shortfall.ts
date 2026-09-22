@@ -17,7 +17,6 @@ export function classifyProvenCashShortfall(
   const required = request.requestedDestinationAmount;
   if (
     request.purpose !== "trade_shortfall" ||
-    request.consumerIntent?.venueId !== "polymarket" ||
     request.consumerIntent?.side !== "BUY" ||
     !required ||
     !resolveKnownAccountAsset(required.asset)?.exactStable ||
