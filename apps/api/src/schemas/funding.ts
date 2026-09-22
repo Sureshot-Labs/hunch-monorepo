@@ -1103,6 +1103,18 @@ export const fundingOperationActionParamsSchema = z
   })
   .strict();
 
+export const fundingOperationActionPrepareRequestSchema = z
+  .object({
+    submissionProtocols: z
+      .object({
+        safe: z.literal(1).optional(),
+        embedded: z.literal(1).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .nullish();
 export const fundingOperationActionPrepareResponseSchema = z
   .object({
     ok: z.literal(true),
@@ -1118,6 +1130,14 @@ export const fundingOperationActionPrepareResponseSchema = z
     ]),
     payerRequirement: z.enum(["user", "privy_sponsor", "provider"]),
     sponsorshipPolicyId: z.string().trim().min(2).max(160).nullable(),
+    safeSubmission: z
+      .object({ version: z.literal(1), expiresAt: z.string().datetime() })
+      .strict()
+      .optional(),
+    embeddedSubmission: z
+      .object({ version: z.literal(1), expiresAt: z.string().datetime() })
+      .strict()
+      .optional(),
     solanaSigningContext: z
       .object({
         blockhash: z.string().min(32).max(44),

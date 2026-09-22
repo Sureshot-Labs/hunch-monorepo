@@ -1009,10 +1009,12 @@ export async function executeEmbeddedEthereumTransactionRequests(inputs: {
     }>
   > = [];
   for (const request of inputs.requests) {
-    const postcondition = await buildTokenPostcondition(
-      inputs.chainId,
-      request,
-    );
+    // Accepted-reference callers reconcile durably elsewhere. A balance read
+    // is unused here and must not strand an admitted funding attempt before
+    // its first provider POST when an unrelated RPC is unavailable.
+    const postcondition = inputs.returnOnAccepted
+      ? null
+      : await buildTokenPostcondition(inputs.chainId, request);
     const authorizationSignature = findAuthorizationSignature(
       inputs.signatures,
       request.id,

@@ -90,6 +90,8 @@ export type FundingLifecycleActionAttempt = Readonly<{
   retryableAfterReorg?: boolean;
   /** Diagnostic only; never proves that a client did not broadcast. */
   clientExecutionFailed?: boolean;
+  /** Versioned server-owned Safe hash identity exists before submission. */
+  safeSubmissionRecoverable?: boolean;
   startedAt: Date;
   updatedAt: Date;
   receipt: FundingLifecycleActionReceipt | null;
@@ -467,7 +469,9 @@ function hasRecoverableBroadcastReference(
       attempt.broadcastMayHaveOccurred &&
       (attempt.referenceKind === "transaction" ||
         attempt.referenceKind === "signature" ||
-        attempt.referenceKind === "provider_receipt"),
+        attempt.referenceKind === "provider_receipt" ||
+        (attempt.referenceKind === "external_handoff" &&
+          attempt.safeSubmissionRecoverable === true)),
   );
 }
 

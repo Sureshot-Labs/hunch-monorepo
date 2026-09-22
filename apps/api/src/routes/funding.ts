@@ -44,6 +44,11 @@ import type { FundingReceiveOptionsResponse } from "../funding/receive/receive-o
 import { PreparationContractError } from "../funding/preparation/core-adapter.js";
 import type { FundingActionFailureCode } from "../funding/execution/action-report.js";
 import { WithdrawalDestinationError } from "../funding/execution/withdrawal-destination-runtime.js";
+import {
+  submitSafeFundingAction,
+  SafeFundingSubmissionUnknownError,
+  type SafeFundingSubmitInput,
+} from "../funding/execution/safe-funding-submission.js";
 import { cancelFundingOperationForUser } from "../funding/reconciliation/funding-operation-cancellation.js";
 import {
   FundingPersistenceError,
@@ -72,6 +77,7 @@ import {
   fundingOperationParamsSchema,
   fundingOperationActionParamsSchema,
   fundingOperationActionPrepareResponseSchema,
+  fundingOperationActionPrepareRequestSchema,
   fundingOperationActionReportRequestSchema,
   fundingOperationActionReportResponseSchema,
   fundingOperationResponseSchema,
@@ -268,7 +274,11 @@ export type FundingRouteDependencies = Readonly<{
   ): Promise<FundingOperationRow>;
   prepareOperationAction(
     userId: string,
-    input: Readonly<{ operationId: string; stepId: string }>,
+    input: Readonly<{
+      operationId: string;
+      stepId: string;
+      submissionProtocols?: { safe?: 1; embedded?: 1 };
+    }>,
   ): Promise<
     Readonly<{
       attemptId: string;
@@ -279,12 +289,18 @@ export type FundingRouteDependencies = Readonly<{
       executionMode: "web_client" | "privy_authorization" | "venue_relayer";
       payerRequirement: "user" | "privy_sponsor" | "provider";
       sponsorshipPolicyId: string | null;
+      safeSubmission?: Readonly<{ version: 1; expiresAt: string }>;
+      embeddedSubmission?: Readonly<{ version: 1; expiresAt: string }>;
       solanaSigningContext?: Readonly<{
         blockhash: string;
         lastValidBlockHeight: number;
       }>;
     }>
   >;
+  submitSafeOperationAction?(
+    userId: string,
+    input: SafeFundingSubmitInput,
+  ): Promise<{ transactionReference: string }>;
   reportOperationAction(
     userId: string,
     input: Readonly<{
@@ -1018,6 +1034,7 @@ export function registerFundingRoutes(
     {
       preHandler: dependencies.authenticate,
       schema: {
+        body: fundingOperationActionPrepareRequestSchema,
         params: fundingOperationActionParamsSchema,
         response: {
           200: fundingOperationActionPrepareResponseSchema,
@@ -1039,6 +1056,9 @@ export function registerFundingRoutes(
           const prepared = await dependencies.prepareOperationAction(userId, {
             operationId: request.params.id,
             stepId: request.params.stepId,
+            ...(request.body?.submissionProtocols
+              ? { submissionProtocols: request.body.submissionProtocols }
+              : {}),
           });
           return reply.send(
             fundingOperationActionPrepareResponseSchema.parse({
@@ -1046,6 +1066,66 @@ export function registerFundingRoutes(
               ...prepared,
             }),
           );
+        },
+      ),
+  );
+
+  z.post(
+    "/funding/operations/:id/actions/:stepId/safe-submit",
+    {
+      preHandler: dependencies.authenticate,
+      schema: {
+        params: fundingOperationActionParamsSchema,
+        body: schema
+          .object({
+            attemptId: schema.string().uuid(),
+            request: schema.record(schema.string(), schema.unknown()),
+          })
+          .strict(),
+        response: {
+          200: schema.object({ transactionReference: schema.string() }),
+          ...errors,
+          502: schema.object({
+            error: schema.string(),
+            code: schema.literal("RELAYER_SUBMISSION_UNKNOWN"),
+            retryable: schema.literal(false),
+          }),
+        },
+      },
+    },
+    (request, reply) =>
+      handleFundingRequest(
+        request,
+        reply,
+        dependencies,
+        {
+          endpoint: "operation-safe-submit",
+          logMessage: "Funding Safe submission failed",
+          publicError: "Safe funding transfer could not be submitted",
+        },
+        async (userId) => {
+          if (!dependencies.submitSafeOperationAction)
+            throw new FundingPersistenceError(
+              "quote_invalidated",
+              "Safe submission unavailable",
+            );
+          try {
+            return reply.send(
+              await dependencies.submitSafeOperationAction(userId, {
+                operationId: request.params.id,
+                stepId: request.params.stepId,
+                ...request.body,
+              }),
+            );
+          } catch (error) {
+            if (error instanceof SafeFundingSubmissionUnknownError)
+              return reply.code(502).send({
+                error: error.message,
+                code: "RELAYER_SUBMISSION_UNKNOWN" as const,
+                retryable: false as const,
+              });
+            throw error;
+          }
         },
       ),
   );
@@ -1602,6 +1682,23 @@ export const fundingRoutes: FastifyPluginAsync = async (app) => {
       cancelFundingOperationForUser(pool, { userId, operationId }),
     prepareOperationAction: (userId, input) =>
       runtime.prepareOperationAction(userId, input),
+    submitSafeOperationAction: (userId, input) => {
+      const {
+        polymarketBuilderApiKey: key,
+        polymarketBuilderApiSecret: secret,
+        polymarketBuilderApiPassphrase: passphrase,
+      } = env;
+      if (!key || !secret || !passphrase)
+        throw new FundingPersistenceError(
+          "quote_invalidated",
+          "Polymarket relayer signing is unavailable",
+        );
+      return submitSafeFundingAction(pool, userId, input, {
+        key,
+        secret,
+        passphrase,
+      });
+    },
     reportOperationAction: (userId, input) =>
       runtime.reportOperationAction(userId, input),
     openReceiveSession: (userId, request) =>

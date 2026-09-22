@@ -22,7 +22,7 @@ import type {
 } from "../domain/types.js";
 import {
   fetchFundingOperationStepForUser,
-  finishFundingStepAttemptForUser,
+  finishFundingStepAttemptForUserInTransaction,
   startFundingStepAttemptForUserInTransaction,
   type FundingOperationStep,
 } from "../persistence/funding-evidence-repository.js";
@@ -50,7 +50,13 @@ import {
 import { createFundingTransactionReferenceCodec } from "./transaction-reference-codec.js";
 import { WithdrawalDestinationRuntime } from "./withdrawal-destination-runtime.js";
 import { lockFundingControllerWallet } from "./funding-controller-wallet-lock.js";
-import { expireUnbroadcastActionWait } from "../reconciliation/funding-reducer.js";
+import {
+  expireUnbroadcastActionWait,
+  reduceFundingOperationInTransaction,
+} from "../reconciliation/funding-reducer.js";
+import { parseSafeFundingSubmission } from "./safe-funding-submission-contract.js";
+import { parseEmbeddedFundingSubmission } from "./embedded-funding-submission-contract.js";
+import { wakeFundingReconciliationInTransaction } from "../persistence/funding-operation-repository.js";
 import {
   isExternalHandoffFailureCode,
   isFundingActionFailureReportConsistent,
@@ -62,6 +68,28 @@ import {
   assertDirectWithdrawalActionMatchesRecipient,
   isDirectWithdrawalExecutionKind,
 } from "./direct-withdrawal-transfer.js";
+
+/** Publish a negative action acknowledgement only after its reservation effects. */
+export async function finishFundingActionReportAndReduce(
+  db: Pool,
+  input: Parameters<typeof finishFundingStepAttemptForUserInTransaction>[1],
+) {
+  return tx(db, async (client) => {
+    const finished = await finishFundingStepAttemptForUserInTransaction(
+      client,
+      input,
+    );
+    if (["failed", "cancelled"].includes(finished.attempt.outcome)) {
+      // The reducer owns the evidence decision; a negative sibling report must
+      // never release a reservation backing an already submitted action.
+      await reduceFundingOperationInTransaction(client, {
+        operationId: input.operationId,
+        now: input.now,
+      });
+    }
+    return finished;
+  });
+}
 
 const EXECUTOR_BY_ACTION_KIND = {
   evm_transaction: "wallet_profile_evm_v1",
@@ -278,7 +306,11 @@ export class FundingOperationActionRuntime {
 
   async prepare(
     userId: string,
-    input: Readonly<{ operationId: string; stepId: string }>,
+    input: Readonly<{
+      operationId: string;
+      stepId: string;
+      submissionProtocols?: { safe?: 1; embedded?: 1 };
+    }>,
   ): Promise<
     Readonly<{
       attemptId: string;
@@ -290,6 +322,8 @@ export class FundingOperationActionRuntime {
       payerRequirement: "user" | "privy_sponsor" | "provider";
       sponsorshipPolicyId: string | null;
       solanaSigningContext?: SolanaSigningContext;
+      safeSubmission?: Readonly<{ version: 1; expiresAt: string }>;
+      embeddedSubmission?: Readonly<{ version: 1; expiresAt: string }>;
     }>
   > {
     const [operation, step, account] = await Promise.all([
@@ -568,6 +602,21 @@ export class FundingOperationActionRuntime {
           canonicalActionFingerprint: fingerprint,
           executorId: step.executorId,
           solanaSigningContext,
+          ...(input.submissionProtocols?.embedded === 1 &&
+          execution.executionMode === "privy_authorization" &&
+          execution.payerRequirement !== "provider"
+            ? {
+                embeddedSubmissionProtocol: {
+                  signer: execution.controllerProfile.address,
+                  payer: execution.payerRequirement,
+                },
+              }
+            : {}),
+          ...(input.submissionProtocols?.safe === 1 &&
+          action.kind === "external_handoff" &&
+          action.handoffKind === "polymarket_safe_transfer"
+            ? { safeSubmissionProtocol: true as const }
+            : {}),
           ...(expectedPolicy ? { expectedPolicy } : {}),
         });
       // Policy-controlled actions lock operation/step before the wallet. The
@@ -580,6 +629,24 @@ export class FundingOperationActionRuntime {
         execution.controllerProfile,
       );
       const durableStart = started ?? (await start());
+      const storedSafeSubmission = parseSafeFundingSubmission(
+        durableStart.attempt.actualCosts.safeSubmission,
+      );
+      const safeSubmission = storedSafeSubmission
+        ? { version: 1 as const, expiresAt: storedSafeSubmission.expiresAt }
+        : undefined;
+      const storedEmbeddedSubmission = parseEmbeddedFundingSubmission(
+        durableStart.attempt.actualCosts.embeddedSubmission,
+      );
+      const embeddedSubmission = storedEmbeddedSubmission
+        ? { version: 1 as const, expiresAt: storedEmbeddedSubmission.expiresAt }
+        : undefined;
+      if (safeSubmission || embeddedSubmission) {
+        await wakeFundingReconciliationInTransaction(client, {
+          operationId: input.operationId,
+          dueAt: durableStart.attempt.startedAt,
+        });
+      }
       return {
         attemptId: durableStart.attempt.id,
         action,
@@ -590,6 +657,8 @@ export class FundingOperationActionRuntime {
         payerRequirement: execution.payerRequirement,
         sponsorshipPolicyId: execution.sponsorshipPolicyId,
         ...(solanaSigningContext ? { solanaSigningContext } : {}),
+        ...(safeSubmission ? { safeSubmission } : {}),
+        ...(embeddedSubmission ? { embeddedSubmission } : {}),
       };
     }).catch(async (error: unknown) => {
       if (
@@ -823,7 +892,7 @@ export class FundingOperationActionRuntime {
         ? { providerReferenceKind: "privy_transaction" }
         : {}),
     };
-    const finished = await finishFundingStepAttemptForUser(this.db, {
+    const finished = await finishFundingActionReportAndReduce(this.db, {
       userId,
       operationId: input.operationId,
       stepId: input.stepId,

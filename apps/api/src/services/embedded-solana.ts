@@ -416,6 +416,9 @@ function normalizeEmbeddedSolanaRpcErrorMessage(message: string): string {
 }
 
 export type EmbeddedPrivyAuthorizationRequest = {
+  /** Server cache metadata; not accepted from request JSON. */
+  fundingContext?: { operationId: string; stepId: string; attemptId: string };
+  fundingOriginalIdempotencyKey?: string;
   /** Cached server metadata, not part of the signed Privy request body. */
   fundingPayment?: SolanaFundingPaymentBinding;
   id: string;

@@ -16,6 +16,20 @@ import {
 } from "@solana/web3.js";
 
 import { createAuthMiddleware } from "../auth.js";
+import { FundingPersistenceError } from "../funding/persistence/funding-operation-repository.js";
+import {
+  assertEmbeddedExecutionScope,
+  assertEmbeddedFundingAuthorizationSignatures,
+  embeddedFundingExecutionKey,
+  type EmbeddedFundingPayload,
+} from "../funding/execution/embedded-funding-submission-contract.js";
+import {
+  EmbeddedFundingSubmissionUnknownError,
+  prepareEmbeddedFundingSubmission,
+  submitEmbeddedFundingAction,
+  readAdmittedEmbeddedFundingReference,
+  type EmbeddedFundingReference,
+} from "../funding/execution/embedded-funding-submission.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
@@ -81,6 +95,93 @@ import {
 
 const EMBEDDED_SOLANA_PREPARED_TTL_SEC = 300;
 const SOLANA_PREFUND_PREPARED_TTL_SEC = 300;
+function scopedEmbeddedError(error: unknown): {
+  status: number;
+  body: { error: string; code: string; retryable: false };
+} | null {
+  if (error instanceof EmbeddedFundingSubmissionUnknownError)
+    return {
+      status: 502,
+      body: {
+        error: error.message,
+        code: "EMBEDDED_SUBMISSION_UNKNOWN",
+        retryable: false,
+      },
+    };
+  if (error instanceof FundingPersistenceError)
+    return {
+      status:
+        error.code === "quote_expired"
+          ? 410
+          : error.code === "operation_not_found"
+            ? 404
+            : 409,
+      body: { error: error.message, code: error.code, retryable: false },
+    };
+  return null;
+}
+function embeddedEvmResult(
+  signer: string,
+  chainId: number,
+  reference: EmbeddedFundingReference,
+) {
+  return {
+    ok: true,
+    signer,
+    chainId,
+    confirmationPending: true,
+    transactionHashes:
+      reference.kind === "transaction" ? [reference.value] : [],
+    transactionReferences: [reference],
+  };
+}
+async function embeddedSolanaFundingPayload(
+  signer: string,
+  transactions: EmbeddedSolanaTransactionSpec[],
+): Promise<EmbeddedFundingPayload> {
+  if (transactions.length !== 1 || !transactions[0])
+    throw new FundingPersistenceError(
+      "quote_mismatch",
+      "Funding requires one Solana transaction",
+    );
+  const serialized = transactions[0].transaction;
+  if (serialized.length > 1644)
+    throw new FundingPersistenceError(
+      "quote_mismatch",
+      "Funding transaction is too large",
+    );
+  const message = VersionedTransaction.deserialize(
+    Buffer.from(serialized, "base64"),
+  ).message;
+  const addresses = message.addressTableLookups.map(
+    (lookup) => lookup.accountKey,
+  );
+  const lookupTables: AddressLookupTableAccount[] = [];
+  if (addresses.length) {
+    const rpcUrl = process.env.SOLANA_RPC_URL?.trim();
+    if (!rpcUrl)
+      throw new FundingPersistenceError(
+        "quote_invalidated",
+        "Solana lookup verification unavailable",
+      );
+    const connection = createSolanaRpcConnection(rpcUrl, {
+      commitment: "confirmed",
+      disableRetryOnRateLimit: true,
+      fetch: (url, init) =>
+        fetch(url, { ...init, signal: AbortSignal.timeout(10_000) }),
+    });
+    for (const address of addresses) {
+      const table = await connection.getAddressLookupTable(address);
+      if (!table.value)
+        throw new FundingPersistenceError(
+          "quote_invalidated",
+          "Solana lookup table unavailable",
+        );
+      lookupTables.push(table.value);
+    }
+  }
+  return { kind: "solana", signer, transactions, lookupTables };
+}
 const SOLANA_CHAIN_ID = "7565164";
 const SOLANA_NATIVE_ADDRESS = "11111111111111111111111111111111";
 const SOL_DECIMALS = 9;
@@ -2571,6 +2672,10 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
+        assertEmbeddedExecutionScope(
+          request.body.executionKey,
+          request.body.fundingContext,
+        );
         const context = await resolveEmbeddedEthereumWalletContext({
           user,
           signer,
@@ -2597,12 +2702,24 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
         const requests = prepareEmbeddedEthereumTransactionRequests({
           context,
           chainId: request.body.chainId,
-          executionKey: request.body.returnOnAccepted
-            ? request.body.executionKey
-            : undefined,
+          executionKey: request.body.fundingContext
+            ? embeddedFundingExecutionKey(request.body.fundingContext)
+            : request.body.returnOnAccepted
+              ? request.body.executionKey
+              : undefined,
           executionMode: request.body.executionMode,
           transactions: request.body.transactions,
         });
+        if (request.body.fundingContext)
+          await prepareEmbeddedFundingSubmission(pool, user.id, {
+            context: request.body.fundingContext,
+            payload: {
+              kind: "ethereum",
+              signer: context.signer,
+              ...request.body,
+            },
+            requests,
+          });
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
           ok: true,
@@ -2619,6 +2736,9 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           },
           "Failed to prepare embedded EVM transactions",
         );
+        const scopedError = scopedEmbeddedError(error);
+        if (scopedError)
+          return reply.code(scopedError.status).send(scopedError.body);
         reply.code(400);
         return reply.send({
           error:
@@ -2645,10 +2765,25 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
+        assertEmbeddedExecutionScope(
+          request.body.executionKey,
+          request.body.fundingContext,
+        );
         const context = await resolveEmbeddedEthereumWalletContext({
           user,
           signer,
         });
+        if (request.body.fundingContext) {
+          const prior = await readAdmittedEmbeddedFundingReference(
+            pool,
+            user.id,
+            request.body.fundingContext,
+          );
+          if (prior)
+            return reply.send(
+              embeddedEvmResult(context.signer, request.body.chainId, prior),
+            );
+        }
         const sponsorship = await assertEmbeddedEvmSponsorshipAllowed({
           userId: user.id,
           signer: context.signer,
@@ -2666,6 +2801,52 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
               userId: user.id,
             },
             "Executing previous-frontend sponsored withdrawal",
+          );
+        }
+        if (request.body.fundingContext) {
+          const requests = prepareEmbeddedEthereumTransactionRequests({
+            context,
+            chainId: request.body.chainId,
+            executionKey: embeddedFundingExecutionKey(
+              request.body.fundingContext,
+            ),
+            executionMode: request.body.executionMode,
+            transactions: request.body.transactions,
+          });
+          assertEmbeddedFundingAuthorizationSignatures(
+            requests,
+            request.body.signedRequests,
+          );
+          const reference = await submitEmbeddedFundingAction(
+            pool,
+            user.id,
+            {
+              context: request.body.fundingContext,
+              payload: {
+                kind: "ethereum",
+                signer: context.signer,
+                ...request.body,
+              },
+              requests,
+            },
+            async () => {
+              const execution =
+                await executeEmbeddedEthereumTransactionRequests({
+                  chainId: request.body.chainId,
+                  requests,
+                  returnOnAccepted: true,
+                  signatures: request.body.signedRequests,
+                });
+              if (
+                execution.transactionReferences.length !== 1 ||
+                !execution.transactionReferences[0]
+              )
+                throw new EmbeddedFundingSubmissionUnknownError();
+              return execution.transactionReferences[0];
+            },
+          );
+          return reply.send(
+            embeddedEvmResult(context.signer, request.body.chainId, reference),
           );
         }
         const transactionFingerprint = buildEmbeddedEvmTransactionFingerprint({
@@ -2729,6 +2910,9 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           },
           "Failed to execute embedded EVM transactions",
         );
+        const scopedError = scopedEmbeddedError(error);
+        if (scopedError)
+          return reply.code(scopedError.status).send(scopedError.body);
         reply.code(isEmbeddedExecutionInProgressError(error) ? 409 : 400);
         return reply.send({
           error:
@@ -2755,11 +2939,17 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
+        assertEmbeddedExecutionScope(
+          request.body.executionKey,
+          request.body.fundingContext,
+        );
         const context = await resolveEmbeddedSolanaWalletContext({
           user,
           signer,
         });
-        const executionKey = request.body.executionKey ?? null;
+        const executionKey = request.body.fundingContext
+          ? embeddedFundingExecutionKey(request.body.fundingContext)
+          : (request.body.executionKey ?? null);
         const sponsorshipPolicy =
           await applyEmbeddedSolanaBackendSponsorshipPolicy({
             user,
@@ -2783,6 +2973,23 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
         for (const prepared of requests) {
           const key = sponsorshipPolicy.relayIdempotencyKeys[prepared.id];
           if (key) prepared.input.headers["privy-idempotency-key"] = key;
+        }
+        if (request.body.fundingContext) {
+          for (const prepared of requests) {
+            prepared.fundingContext = request.body.fundingContext;
+            prepared.fundingOriginalIdempotencyKey =
+              prepared.input.headers["privy-idempotency-key"];
+            prepared.input.headers["privy-idempotency-key"] =
+              embeddedFundingExecutionKey(request.body.fundingContext);
+          }
+          await prepareEmbeddedFundingSubmission(pool, user.id, {
+            context: request.body.fundingContext,
+            payload: await embeddedSolanaFundingPayload(
+              context.signer,
+              sponsorshipPolicy.transactions,
+            ),
+            requests,
+          });
         }
         if (sponsorshipPolicy.fundingPayment && requests[0])
           app.log.info(
@@ -2822,6 +3029,9 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           },
           "Failed to prepare embedded Solana transactions",
         );
+        const scopedError = scopedEmbeddedError(error);
+        if (scopedError)
+          return reply.code(scopedError.status).send(scopedError.body);
         reply.code(400);
         return reply.send({
           error:
@@ -2851,10 +3061,109 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
       }
 
       try {
+        assertEmbeddedExecutionScope(
+          request.body.executionKey,
+          request.body.fundingContext,
+        );
         const context = await resolveEmbeddedSolanaWalletContext({
           user,
           signer,
         });
+        if (request.body.fundingContext) {
+          const fundingContext = request.body.fundingContext;
+          const prior = await readAdmittedEmbeddedFundingReference(
+            pool,
+            user.id,
+            fundingContext,
+          );
+          if (prior)
+            return reply.send({
+              ok: true,
+              signer: context.signer,
+              signatures: [prior.value],
+            });
+          const requests = await readCachedEmbeddedSolanaPreparedRequests({
+            signer: context.signer,
+            executionKey: embeddedFundingExecutionKey(fundingContext),
+            log: app.log,
+          });
+          if (
+            !requests ||
+            requests.length !== 1 ||
+            requests.some(
+              (entry) =>
+                entry.fundingContext?.attemptId !== fundingContext.attemptId ||
+                entry.fundingContext.operationId !==
+                  fundingContext.operationId ||
+                entry.fundingContext.stepId !== fundingContext.stepId,
+            )
+          )
+            throw new FundingPersistenceError(
+              "quote_invalidated",
+              "Prepared funding authorization expired; refresh funding",
+            );
+          // Existing sponsorship revalidation expects its own policy key. Only
+          // server cache metadata can supply this copy; signed bytes retain the
+          // scoped key and cannot be replayed through the generic endpoint.
+          await validateEmbeddedSolanaSponsorshipAtExecute({
+            user,
+            signer: context.signer,
+            requests: requests.map((entry) => ({
+              ...entry,
+              input: {
+                ...entry.input,
+                headers: {
+                  ...entry.input.headers,
+                  "privy-idempotency-key": entry.fundingOriginalIdempotencyKey,
+                },
+              },
+            })),
+          });
+          const transactions = requests.map((entry) => {
+            const transaction = readEmbeddedSolanaPreparedTransaction(entry);
+            if (!transaction)
+              throw new FundingPersistenceError(
+                "quote_mismatch",
+                "Funding transaction missing",
+              );
+            return {
+              id: entry.id,
+              label: entry.label,
+              transaction,
+              sponsor: isEmbeddedSolanaPreparedRequestSponsored(entry),
+              caip2: SOLANA_MAINNET_CAIP2,
+            };
+          });
+          assertEmbeddedFundingAuthorizationSignatures(
+            requests,
+            request.body.signedRequests,
+          );
+          const reference = await submitEmbeddedFundingAction(
+            pool,
+            user.id,
+            {
+              context: fundingContext,
+              payload: await embeddedSolanaFundingPayload(
+                context.signer,
+                transactions,
+              ),
+              requests,
+            },
+            async () => {
+              const signatures = await executeEmbeddedSolanaTransactionRequests(
+                { requests, signatures: request.body.signedRequests },
+              );
+              if (signatures.length !== 1 || !signatures[0])
+                throw new EmbeddedFundingSubmissionUnknownError();
+              return { kind: "transaction", value: signatures[0] };
+            },
+          );
+          return reply.send({
+            ok: true,
+            signer: context.signer,
+            signatures: [reference.value],
+          });
+        }
         const result = await runEmbeddedExecutionSingleFlight({
           key: buildEmbeddedExecutionSingleFlightKey(
             "embedded-wallets",
@@ -2874,6 +3183,11 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
                 "Prepared Solana authorization expired. Refresh quote and try again.",
               );
             }
+            if (requests.some((entry) => entry.fundingContext))
+              throw new FundingPersistenceError(
+                "quote_mismatch",
+                "Funding authorization requires its scoped submission context",
+              );
             const submit = async () => {
               await validateEmbeddedSolanaSponsorshipAtExecute({
                 user,
@@ -2942,6 +3256,9 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           },
           "Failed to execute embedded Solana transactions",
         );
+        const scopedError = scopedEmbeddedError(error);
+        if (scopedError)
+          return reply.code(scopedError.status).send(scopedError.body);
         reply.code(isEmbeddedExecutionInProgressError(error) ? 409 : 400);
         return reply.send({
           error:

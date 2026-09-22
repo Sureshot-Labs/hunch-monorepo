@@ -2,6 +2,11 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import type { JsonValue } from "../domain/types.js";
 import {
+  parseEmbeddedFundingSubmission,
+  EMBEDDED_FUNDING_PREPARATION_LEASE_MS,
+  type EmbeddedFundingSubmission,
+} from "../execution/embedded-funding-submission-contract.js";
+import {
   parseSolanaSigningContext,
   parseVerifiedSolanaSubmission,
   type SolanaSigningContext,
@@ -15,6 +20,11 @@ import {
 import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
 import { loadFundingLifecycleProjectionForOperation } from "../lifecycle/funding-lifecycle-read-model.js";
 import { canonicalJsonEqual, canonicalJsonHash } from "./canonical.js";
+import {
+  parseSafeFundingSubmission,
+  SAFE_FUNDING_PREPARATION_LEASE_MS,
+  type SafeFundingSubmission,
+} from "../execution/safe-funding-submission-contract.js";
 import {
   consumeFundingReservationInTransaction,
   fetchFundingOperationForUser,
@@ -1021,6 +1031,8 @@ export async function startFundingStepAttemptInTransaction(
     canonicalActionFingerprint: string;
     executorId: string;
     solanaSigningContext?: SolanaSigningContext;
+    safeSubmission?: SafeFundingSubmission;
+    embeddedSubmission?: EmbeddedFundingSubmission;
     now?: Date;
   }>,
 ): Promise<FundingStepAttempt> {
@@ -1053,6 +1065,31 @@ export async function startFundingStepAttemptInTransaction(
       "attempt does not match the immutable committed action",
     );
   }
+  if (
+    input.safeSubmission &&
+    (step.executor_id !== "polymarket_safe_relayer_v1" ||
+      step.action_kind !== "external_handoff" ||
+      parseSafeFundingSubmission(input.safeSubmission)?.phase !== "prepared")
+  )
+    throw new FundingPersistenceError(
+      "quote_mismatch",
+      "Safe submission lease requires the Safe handoff executor",
+    );
+  if (
+    input.embeddedSubmission &&
+    (!["wallet_profile_evm_v1", "wallet_profile_svm_v1"].includes(
+      step.executor_id,
+    ) ||
+      !["evm_transaction", "evm_transaction_batch", "svm_transaction"].includes(
+        step.action_kind ?? "",
+      ) ||
+      parseEmbeddedFundingSubmission(input.embeddedSubmission)?.phase !==
+        "prepared")
+  )
+    throw new FundingPersistenceError(
+      "quote_mismatch",
+      "Embedded submission lease requires a wallet transaction executor",
+    );
 
   const previousResult = await client.query<{
     attempt_number: number;
@@ -1146,7 +1183,15 @@ export async function startFundingStepAttemptInTransaction(
       input.canonicalActionFingerprint,
       input.executorId,
       input.now ?? new Date(),
-      signingContext ? { solanaSigningContext: signingContext } : {},
+      {
+        ...(signingContext ? { solanaSigningContext: signingContext } : {}),
+        ...(input.safeSubmission
+          ? { safeSubmission: input.safeSubmission }
+          : {}),
+        ...(input.embeddedSubmission
+          ? { embeddedSubmission: input.embeddedSubmission }
+          : {}),
+      },
     ],
   );
   const row = rows[0];
@@ -1163,6 +1208,11 @@ export async function startFundingStepAttemptForUserInTransaction(
     canonicalActionFingerprint: string;
     executorId: string;
     solanaSigningContext?: SolanaSigningContext;
+    safeSubmissionProtocol?: true;
+    embeddedSubmissionProtocol?: {
+      signer: string;
+      payer: "user" | "privy_sponsor";
+    };
     expectedPolicy?: Readonly<{ revision: string; version: number }>;
     now?: Date;
   }>,
@@ -1265,6 +1315,37 @@ export async function startFundingStepAttemptForUserInTransaction(
     canonicalActionFingerprint: input.canonicalActionFingerprint,
     executorId: input.executorId,
     solanaSigningContext: input.solanaSigningContext,
+    ...(input.embeddedSubmissionProtocol
+      ? {
+          embeddedSubmission: {
+            version: 1 as const,
+            phase: "prepared" as const,
+            ...input.embeddedSubmissionProtocol,
+            expiresAt: new Date(
+              Math.min(
+                now.getTime() + EMBEDDED_FUNDING_PREPARATION_LEASE_MS,
+                row.action_expires_at?.getTime() ?? Infinity,
+              ),
+            ).toISOString(),
+          },
+        }
+      : {}),
+    ...(input.safeSubmissionProtocol &&
+    row.executor_id === "polymarket_safe_relayer_v1" &&
+    row.normalized_action.handoffKind === "polymarket_safe_transfer"
+      ? {
+          safeSubmission: {
+            version: 1 as const,
+            phase: "prepared" as const,
+            expiresAt: new Date(
+              Math.min(
+                now.getTime() + SAFE_FUNDING_PREPARATION_LEASE_MS,
+                row.action_expires_at?.getTime() ?? Infinity,
+              ),
+            ).toISOString(),
+          },
+        }
+      : {}),
     now,
   });
   return {
@@ -1498,6 +1579,103 @@ export async function finishFundingStepAttemptForUserInTransaction(
     );
   }
   const priorAttempt = mapAttempt(priorAttemptRow);
+  const safeSubmission = parseSafeFundingSubmission(
+    priorAttempt.actualCosts.safeSubmission,
+  );
+  const embeddedSubmission = parseEmbeddedFundingSubmission(
+    priorAttempt.actualCosts.embeddedSubmission,
+  );
+  if (embeddedSubmission?.phase === "admitted") {
+    if (
+      input.receiptRefLookupHmac !== null &&
+      priorAttempt.receiptRefLookupHmac !== input.receiptRefLookupHmac
+    )
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "Embedded funding evidence is owned by the server",
+      );
+    return {
+      attempt: priorAttempt,
+      stepState:
+        priorAttempt.outcome === "submitted"
+          ? "submitted"
+          : "reconcile_required",
+    };
+  }
+  if (
+    embeddedSubmission?.phase === "closed" &&
+    input.receiptRefLookupHmac === null
+  )
+    return {
+      attempt: priorAttempt,
+      stepState: priorAttempt.outcome === "failed" ? "failed" : "cancelled",
+    };
+  if (embeddedSubmission && input.broadcastMayHaveOccurred) {
+    if (input.receiptRefLookupHmac !== null)
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "Embedded funding has no server admission",
+      );
+    return { attempt: priorAttempt, stepState: "reconcile_required" };
+  }
+  if (embeddedSubmission)
+    input = {
+      ...input,
+      actualCosts: {
+        ...input.actualCosts,
+        embeddedSubmission: { ...embeddedSubmission, phase: "closed" },
+      },
+    };
+  if (safeSubmission?.phase === "admitted") {
+    // Browser journals are advisory after server admission. A stale negative
+    // report must never undo a submitted/uncertain transfer; the server owns
+    // its reference and writes it even if the browser disconnected.
+    if (
+      input.receiptRefLookupHmac !== null &&
+      priorAttempt.receiptRefLookupHmac !== input.receiptRefLookupHmac
+    ) {
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "Safe submission evidence is owned by the server",
+      );
+    }
+    return {
+      attempt: priorAttempt,
+      stepState:
+        priorAttempt.outcome === "submitted"
+          ? "submitted"
+          : "reconcile_required",
+    };
+  }
+  if (
+    safeSubmission?.phase === "closed" &&
+    input.receiptRefLookupHmac === null
+  ) {
+    return {
+      attempt: priorAttempt,
+      stepState: priorAttempt.outcome === "failed" ? "failed" : "cancelled",
+    };
+  }
+  if (safeSubmission && input.broadcastMayHaveOccurred) {
+    // A browser can journal uncertainty immediately before its HTTP request.
+    // Only server admission establishes actual uncertainty for protocol v1:
+    // a disconnected pre-admission request must remain eligible for expiry.
+    if (input.receiptRefLookupHmac !== null)
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "Safe submission has no server admission",
+      );
+    return { attempt: priorAttempt, stepState: "reconcile_required" };
+  }
+  // Preserve server-only lease facts; client diagnostics never replace them.
+  if (safeSubmission)
+    input = {
+      ...input,
+      actualCosts: {
+        ...input.actualCosts,
+        safeSubmission: { ...safeSubmission, phase: "closed" },
+      },
+    };
   const priorSubmission = parseVerifiedSolanaSubmission(
     priorAttempt.actualCosts.verifiedSolanaSubmission,
   );

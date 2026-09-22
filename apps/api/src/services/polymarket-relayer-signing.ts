@@ -66,6 +66,17 @@ export function validatePolymarketRelayerSignRequestForWallet(input: {
   }
 
   const body = parsePolymarketRelayerSubmitBody(input.body);
+  // Existing funding Safe clients must upgrade to the operation-scoped
+  // server-owned submit endpoint. Never issue transferable builder headers
+  // for this flow, including after its signing lease has been closed.
+  if (
+    body.type === "SAFE" &&
+    body.metadata === "Hunch existing Safe funding transfer"
+  ) {
+    throw new Error(
+      "Funding Safe transfers require the operation-scoped submit endpoint",
+    );
+  }
   const normalizedFrom = getPolymarketRelayerSubmitFromAddress(input.body);
   let normalizedWallet: string;
   try {

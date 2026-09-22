@@ -2620,3 +2620,32 @@ function facts(
     { status: "recovery_required", terminal: false, requiresWorker: true },
   );
 }
+
+// A scoped Safe identity is inspectable even when the browser/relayer reply
+// disappears. Legacy reference-less or unversioned attempts keep old safety.
+for (const versioned of [true, false]) {
+  const projected = deriveFundingLifecycle(
+    facts({
+      actions: [
+        action("safe-handoff", {
+          executorId: "polymarket_safe_relayer_v1",
+          expiresAt: new Date(now.getTime() - 1),
+          attempts: [
+            attempt({
+              outcome: "ambiguous",
+              broadcastMayHaveOccurred: true,
+              referenceKind: "external_handoff",
+              safeSubmissionRecoverable: versioned,
+            }),
+          ],
+        }),
+      ],
+    }),
+  );
+  assert.equal(projected.status, "recovery_required");
+  assert.equal(
+    projected.recoveryMode,
+    versioned ? "automatic_evidence" : "manual_review",
+  );
+  assert.equal(projected.safety.reservationsMayRelease, false);
+}

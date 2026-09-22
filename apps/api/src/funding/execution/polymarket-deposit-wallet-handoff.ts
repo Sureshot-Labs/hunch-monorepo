@@ -245,5 +245,15 @@ export function normalizePolymarketDepositWalletTransactionReference(
   if (handoff && parsePolymarketRelayerTransactionReference(trimmed)) {
     return { kind: "external_handoff", reference: trimmed };
   }
+  // Versioned Safe hash identities are server-issued before the provider
+  // request; they are neither an EVM transaction hash nor a provider ID.
+  if (
+    handoff &&
+    action.kind === "external_handoff" &&
+    action.handoffKind === "polymarket_safe_transfer" &&
+    /^polymarket-safe:v1:0x[0-9a-f]{40}:0x[0-9a-f]{64}$/.test(trimmed)
+  ) {
+    return { kind: "external_handoff", reference: trimmed };
+  }
   return { kind: "transaction", reference };
 }

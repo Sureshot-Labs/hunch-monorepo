@@ -249,6 +249,65 @@ export type EvmErc20TransferLog = Readonly<{
   rawAmount: bigint;
 }>;
 
+export type EvmEventLog = Readonly<{
+  address: string;
+  topics: readonly string[];
+  data: string;
+  transactionHash: string;
+  blockNumber: bigint;
+  blockHash: string;
+}>;
+
+/** Address- and event-scoped discovery; callers bound and persist block windows. */
+export async function fetchEvmEventLogs(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  maxAttempts?: number;
+  contractAddress: string;
+  eventTopics: readonly string[];
+  fromBlock: bigint;
+  toBlock: bigint;
+}): Promise<readonly EvmEventLog[]> {
+  if (inputs.toBlock < inputs.fromBlock) return [];
+  const address = ethers.getAddress(inputs.contractAddress);
+  if (
+    !inputs.eventTopics.length ||
+    inputs.eventTopics.some((topic) => !/^0x[0-9a-fA-F]{64}$/.test(topic))
+  )
+    throw new Error("EVM event discovery topics are invalid");
+  const logs = await ethRpcRequest<readonly EvmRpcLog[]>({
+    rpcUrl: inputs.rpcUrl,
+    timeoutMs: inputs.timeoutMs,
+    maxAttempts: inputs.maxAttempts,
+    method: "eth_getLogs",
+    params: [
+      {
+        address,
+        fromBlock: rpcQuantity(inputs.fromBlock),
+        toBlock: rpcQuantity(inputs.toBlock),
+        topics: [[...inputs.eventTopics]],
+      },
+    ],
+  });
+  return logs
+    .filter(
+      (log) =>
+        !log.removed &&
+        log.address.toLowerCase() === address.toLowerCase() &&
+        inputs.eventTopics.some(
+          (topic) => topic.toLowerCase() === log.topics[0]?.toLowerCase(),
+        ),
+    )
+    .map((log) => ({
+      address: log.address,
+      topics: log.topics,
+      data: log.data,
+      transactionHash: log.transactionHash.toLowerCase(),
+      blockNumber: parseRpcQuantity(log.blockNumber, "block number"),
+      blockHash: log.blockHash.toLowerCase(),
+    }));
+}
+
 type EvmRpcLog = Readonly<{
   address: string;
   topics: readonly string[];

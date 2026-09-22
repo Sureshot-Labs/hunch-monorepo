@@ -936,7 +936,11 @@ export class FundingPlanningRuntime {
 
   prepareOperationAction(
     userId: string,
-    input: Readonly<{ operationId: string; stepId: string }>,
+    input: Readonly<{
+      operationId: string;
+      stepId: string;
+      submissionProtocols?: { safe?: 1; embedded?: 1 };
+    }>,
   ) {
     return this.actionRuntime.prepare(userId, input);
   }

@@ -7,6 +7,7 @@ import {
   type FundingOperationState,
 } from "../domain/transitions.js";
 import { relayEvmFundingProfileSpec } from "../execution/relay-evm-profile-specs.js";
+import { parseSafeFundingSubmission } from "../execution/safe-funding-submission-contract.js";
 import {
   listFundingObservationsForOperations,
   type FundingObservationRow,
@@ -492,6 +493,11 @@ function compileFundingLifecycleFacts(
             outcome: row.attempt_outcome,
             broadcastMayHaveOccurred: row.broadcast_may_have_occurred,
             referenceKind: row.attempt_reference_kind,
+            safeSubmissionRecoverable:
+              row.executor_id === "polymarket_safe_relayer_v1" &&
+              parseSafeFundingSubmission(
+                row.attempt_actual_costs?.safeSubmission,
+              )?.phase === "admitted",
             clientExecutionFailed:
               row.attempt_actual_costs?.reasonCode ===
               "client_execution_failed",

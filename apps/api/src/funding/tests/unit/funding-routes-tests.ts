@@ -30,6 +30,7 @@ import {
 import { fundingValidationErrorResponseSchema } from "../../../schemas/funding.js";
 import { buildFundingExecutionPreflight } from "../../execution/operation-execution-preflight.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
+import { SafeFundingSubmissionUnknownError } from "../../execution/safe-funding-submission.js";
 
 const USER_ID = "10000000-0000-4000-8000-000000000001";
 const NOW = new Date("2026-07-24T12:00:00.000Z");
@@ -2158,6 +2159,38 @@ await test("operation action prepare is owner-scoped and returns only the commit
   }
 });
 
+await test("operation action prepare negotiates scoped submission protocols explicitly", async () => {
+  let protocols: { safe?: 1; embedded?: 1 } | undefined;
+  const app = await buildApp({
+    prepareOperationAction: async (_userId, input) => {
+      protocols = input.submissionProtocols;
+      return {
+        attemptId: "attempt_id_12345678",
+        action: preparedAction(),
+        actionFingerprint: "c".repeat(64),
+        controllerWalletRef: USER_ID,
+        executorId: "wallet_profile_evm_v1",
+        executionMode: "privy_authorization",
+        payerRequirement: "privy_sponsor",
+        sponsorshipPolicyId: "privy_user_authorized_evm_sponsorship_v1",
+        embeddedSubmission: { version: 1, expiresAt: "2026-09-22T12:00:00Z" },
+      };
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/operations/operation_id_12345678/actions/step_id_12345678/prepare",
+      payload: { submissionProtocols: { safe: 1, embedded: 1 } },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(protocols, { safe: 1, embedded: 1 });
+    assert.equal(response.json().embeddedSubmission.version, 1);
+  } finally {
+    await app.close();
+  }
+});
+
 await test("operation action reports accept transaction references but no replacement action", async () => {
   const observed: Array<
     Readonly<{
@@ -2377,6 +2410,62 @@ await test("active funding reads have a polling-safe rate limit", () => {
   assert.equal(fundingRequestsPerMinute("operation"), 180);
   assert.equal(fundingRequestsPerMinute("receive-session-read"), 180);
   assert.equal(fundingRequestsPerMinute("quote"), 30);
+});
+
+await test("Safe submission is owner/operation/step/attempt scoped and hides credentials", async () => {
+  let submitted: unknown;
+  const requestBody = {
+    attemptId: "20000000-0000-4000-8000-000000000001",
+    request: { type: "SAFE", signature: "opaque-test-signature" },
+  };
+  const app = await buildApp({
+    submitSafeOperationAction: async (userId, input) => {
+      submitted = { userId, ...input };
+      return { transactionReference: "polymarket-relayer:v1:request-12345678" };
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/operations/operation_id_12345678/actions/action_id_12345678/safe-submit",
+      payload: requestBody,
+    });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(submitted, {
+      userId: USER_ID,
+      operationId: "operation_id_12345678",
+      stepId: "action_id_12345678",
+      ...requestBody,
+    });
+    assert.deepEqual(response.json(), {
+      transactionReference: "polymarket-relayer:v1:request-12345678",
+    });
+  } finally {
+    await app.close();
+  }
+});
+
+await test("Safe submission uncertainty is explicitly nonretryable", async () => {
+  const app = await buildApp({
+    submitSafeOperationAction: async () => {
+      throw new SafeFundingSubmissionUnknownError();
+    },
+  });
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/funding/operations/operation_id_12345678/actions/action_id_12345678/safe-submit",
+      payload: {
+        attemptId: "20000000-0000-4000-8000-000000000001",
+        request: {},
+      },
+    });
+    assert.equal(response.statusCode, 502);
+    assert.equal(response.json().code, "RELAYER_SUBMISSION_UNKNOWN");
+    assert.equal(response.json().retryable, false);
+  } finally {
+    await app.close();
+  }
 });
 
 console.log("[funding-routes-tests] complete");

@@ -1,5 +1,7 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 import { recordWithdrawalCompletionNotification } from "./withdrawal-completion-notification.js";
+import { closeExpiredSafeFundingPreparationsInTransaction } from "../execution/safe-funding-submission.js";
+import { closeExpiredEmbeddedFundingPreparationsInTransaction } from "../execution/embedded-funding-submission.js";
 
 import type {
   FundingOperationState,
@@ -2054,6 +2056,34 @@ async function processLease(
   destinationPoll?: FundingReconciliationBatchOptions["destinationPoll"],
 ): Promise<"completed" | "requeued" | "failed" | "dead_lettered"> {
   try {
+    await tx(pool, async (client) => {
+      const operation = await fetchFundingOperationForWorkerInTransaction(
+        client,
+        lease.operationId,
+      );
+      const safeClosed = operation
+        ? await closeExpiredSafeFundingPreparationsInTransaction(
+            client,
+            operation.id,
+            options.now,
+          )
+        : false;
+      const embeddedClosed = operation
+        ? await closeExpiredEmbeddedFundingPreparationsInTransaction(
+            client,
+            operation.id,
+            options.now,
+          )
+        : false;
+      if (operation && (safeClosed || embeddedClosed)) {
+        // A closed, never-admitted attempt is definitive cancellation evidence.
+        // Existing reduction detaches the old Buy and frees its reservations.
+        await reduceFundingOperationInTransaction(client, {
+          operationId: operation.id,
+          now: options.now,
+        });
+      }
+    });
     let operationBeforePoll = await loadFundingOperationState(
       pool,
       lease.operationId,

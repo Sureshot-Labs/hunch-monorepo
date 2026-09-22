@@ -3,6 +3,11 @@ import { PublicKey } from "@solana/web3.js";
 import { fetchSolanaFinalizedBlockHeight } from "../../services/solana-rpc.js";
 import { parseVerifiedSolanaSubmission } from "./signed-solana-submission.js";
 import bs58 from "bs58";
+import { parseSafeFundingTransactionReference } from "./safe-funding-submission-contract.js";
+import {
+  findSafeFundingExecution,
+  safeFundingExecutionOutcome,
+} from "./safe-funding-receipt.js";
 import { ethers } from "ethers";
 
 import {
@@ -856,6 +861,7 @@ export function evaluateEvmActionReceipt(
 
 export function evaluatePolymarketDepositWalletHandoffReceipt(
   input: Readonly<{
+    safeTransaction?: Readonly<{ safe: string; transactionHash: string }>;
     action: ExternalHandoffAction;
     actionValidationResult: JsonRecord;
     transaction: EvmReceiptTransaction | null;
@@ -975,7 +981,34 @@ export function evaluatePolymarketDepositWalletHandoffReceipt(
       evidence: evidence({ confirmations: input.receipt.confirmations }),
     };
   }
-  if (!input.receipt.succeeded) {
+  const safeOutcome = input.safeTransaction
+    ? safeFundingExecutionOutcome(
+        input.receipt.logs,
+        input.safeTransaction.safe,
+        input.safeTransaction.transactionHash,
+      )
+    : null;
+  if (
+    input.safeTransaction &&
+    (input.safeTransaction.safe.toLowerCase() !==
+      expectation.funderAddress.toLowerCase() ||
+      safeOutcome === null)
+  ) {
+    if (isReorgWatchReceipt(input.previous))
+      throw new Error(
+        "Safe execution event unavailable during terminal receipt verification",
+      );
+    return {
+      status: "pending",
+      actionMatch: null,
+      ledgerHeight: input.receipt.blockNumber.toString(),
+      blockHash: input.receipt.blockHash,
+      canonical: true,
+      failureCode: null,
+      evidence: evidence({ safeExecutionObserved: false }),
+    };
+  }
+  if (!input.receipt.succeeded || safeOutcome === "failure") {
     const confirmationPolicy = evmFundingFailureFinalityConfirmations(
       input.transaction.chainId,
     );
@@ -986,7 +1019,10 @@ export function evaluatePolymarketDepositWalletHandoffReceipt(
       ledgerHeight: input.receipt.blockNumber.toString(),
       blockHash: input.receipt.blockHash,
       canonical: true,
-      failureCode: "transaction_reverted",
+      failureCode:
+        safeOutcome === "failure"
+          ? "safe_execution_failed"
+          : "transaction_reverted",
       evidence: evidence({
         confirmationPolicy,
         confirmations: input.receipt.confirmations,
@@ -2055,6 +2091,7 @@ export async function findRecentPolymarketHandoffTransactionHash(
 }
 
 type PolymarketHandoffLookupDependencies = Readonly<{
+  findSafeExecution?: typeof findSafeFundingExecution;
   findTransactionScan: typeof findRecentPolymarketHandoffTransactionScan;
   resolveReference: typeof resolvePolymarketRelayerFundingReference;
 }>;
@@ -2091,7 +2128,102 @@ async function inspectEvmTargetEvidence(
     | "provider"
     | "reported" = "reported";
   let chainTransactionBlockTimestampMs: number | null = null;
-  if (target.action.kind === "external_handoff") {
+  const safeTransaction = parseSafeFundingTransactionReference(reference);
+  let safeScanEvidence: JsonRecord = {};
+  if (target.action.kind === "external_handoff" && safeTransaction) {
+    const expected = polymarketDepositWalletHandoffExpectation(
+      target.action,
+      target.actionValidationResult,
+    );
+    if (
+      target.action.handoffKind !== "polymarket_safe_transfer" ||
+      !expected ||
+      expected.funderAddress.toLowerCase() !== safeTransaction.safe
+    )
+      return {
+        status: "mismatch",
+        actionMatch: false,
+        ledgerHeight: null,
+        blockHash: null,
+        canonical: true,
+        failureCode: "safe_funding_reference_mismatch",
+        evidence: {},
+      };
+    const bound = target.previousReceipt?.evidence.transactionHash;
+    if (
+      target.previousReceipt?.status !== "reorged" &&
+      typeof bound === "string" &&
+      /^0x[0-9a-fA-F]{64}$/.test(bound)
+    ) {
+      transactionReference = bound;
+      transactionHashSource = "persisted";
+    } else {
+      const priorCandidateValue =
+        target.previousReceipt?.evidence.safeExecutionCandidateTransactionHash;
+      const priorCandidate =
+        target.previousReceipt?.status !== "reorged" &&
+        typeof priorCandidateValue === "string" &&
+        /^0x[0-9a-fA-F]{64}$/.test(priorCandidateValue)
+          ? priorCandidateValue
+          : null;
+      let providerHash: string | null = null;
+      if (target.safeSubmissionProviderReference) {
+        try {
+          const provider = await handoffLookup.resolveReference(
+            target.safeSubmissionProviderReference,
+          );
+          if (
+            provider.kind === "transaction" &&
+            /^0x[0-9a-fA-F]{64}$/.test(provider.reference)
+          )
+            providerHash = provider.reference;
+        } catch {
+          /* Exact on-chain event discovery remains independent of the provider. */
+        }
+      }
+      const scan = await (
+        handoffLookup.findSafeExecution ?? findSafeFundingExecution
+      )({
+        safe: safeTransaction.safe,
+        safeTransactionHash: safeTransaction.transactionHash,
+        attemptStartedAt: target.attemptStartedAt,
+        previousEvidence: target.previousReceipt?.evidence,
+        rpcUrl,
+        timeoutMs,
+      }).catch((error) => {
+        if (!providerHash && !priorCandidate) throw error;
+        return {
+          transactionHash: null,
+          conflictingTransactions: false,
+          evidence: target.previousReceipt?.evidence ?? {},
+        };
+      });
+      const candidate = scan.transactionHash ?? priorCandidate;
+      safeScanEvidence = {
+        ...scan.evidence,
+        ...(candidate
+          ? { safeExecutionCandidateTransactionHash: candidate }
+          : {}),
+      };
+      if (scan.conflictingTransactions || (!candidate && !providerHash))
+        return {
+          status: scan.conflictingTransactions ? "mismatch" : "pending",
+          actionMatch: scan.conflictingTransactions ? false : null,
+          ledgerHeight: null,
+          blockHash: null,
+          canonical: true,
+          failureCode: scan.conflictingTransactions
+            ? "safe_execution_multiple_transactions"
+            : null,
+          evidence: safeScanEvidence,
+        };
+      const discoveredHash = candidate ?? providerHash;
+      if (!discoveredHash)
+        throw new Error("Safe discovery returned no transaction");
+      transactionReference = discoveredHash;
+      transactionHashSource = candidate ? "chain_scan" : "provider";
+    }
+  } else if (target.action.kind === "external_handoff") {
     const relayerTransactionId =
       parsePolymarketRelayerTransactionReference(reference);
     const previouslyBoundHash =
@@ -2413,14 +2545,31 @@ async function inspectEvmTargetEvidence(
       }
     : null;
   if (target.action.kind === "external_handoff") {
+    const evaluated = evaluatePolymarketDepositWalletHandoffReceipt({
+      ...(safeTransaction ? { safeTransaction } : {}),
+      action: target.action,
+      actionValidationResult: target.actionValidationResult,
+      transaction: transactionRecord,
+      receipt: receiptRecord,
+      previous: target.previousReceipt,
+    });
+    if (
+      safeTransaction &&
+      (!receiptRecord ||
+        receiptRecord.canonicalBlockHash?.toLowerCase() !==
+          receiptRecord.blockHash.toLowerCase() ||
+        safeFundingExecutionOutcome(
+          receiptRecord.logs,
+          safeTransaction.safe,
+          safeTransaction.transactionHash,
+        ) === null)
+    )
+      return {
+        ...evaluated,
+        evidence: { ...safeScanEvidence, ...evaluated.evidence },
+      };
     return bindPolymarketRelayerTransactionHash({
-      evaluated: evaluatePolymarketDepositWalletHandoffReceipt({
-        action: target.action,
-        actionValidationResult: target.actionValidationResult,
-        transaction: transactionRecord,
-        receipt: receiptRecord,
-        previous: target.previousReceipt,
-      }),
+      evaluated,
       previous: target.previousReceipt,
       transactionHash: transactionReference,
       transactionHashSource,
@@ -2834,7 +2983,35 @@ export class FundingStepReceiptReconciliationDriver {
           target.action.kind === "external_handoff"
             ? await (this.dependencies.inspectEvm
                 ? this.dependencies.inspectEvm(target, reference)
-                : inspectEvmTarget(target, reference, inspectionContext))
+                : inspectEvmTarget(
+                    (() => {
+                      const result = target.safeSubmissionProviderResult;
+                      if (
+                        !result ||
+                        result.lookupKeyVersion !==
+                          this.referenceCodec.keyVersion
+                      )
+                        return target;
+                      try {
+                        const providerReference = this.referenceCodec.decrypt(
+                          result.referenceCiphertext,
+                        );
+                        return this.referenceCodec.fingerprint(
+                          providerReference,
+                        ) === result.referenceLookupHmac
+                          ? {
+                              ...target,
+                              safeSubmissionProviderReference:
+                                providerReference,
+                            }
+                          : target;
+                      } catch {
+                        return target;
+                      }
+                    })(),
+                    reference,
+                    inspectionContext,
+                  ))
             : await (this.dependencies.inspectSvm ?? inspectSvmTarget)(
                 target,
                 reference,

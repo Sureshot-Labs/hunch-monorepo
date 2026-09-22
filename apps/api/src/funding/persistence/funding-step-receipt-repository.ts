@@ -32,6 +32,12 @@ export type FundingStepReceiptStatus =
   | "reorged";
 
 export type FundingStepReceiptTarget = Readonly<{
+  safeSubmissionProviderResult?: Readonly<{
+    referenceCiphertext: string;
+    referenceLookupHmac: string;
+    lookupKeyVersion: number;
+  }>;
+  safeSubmissionProviderReference?: string;
   verifiedSolanaSubmission?: JsonRecord | null;
   userId: string;
   operationId: string;
@@ -312,7 +318,32 @@ export async function listFundingStepReceiptTargets(
             sourceAmount: sourceAmount.data,
           })
         : row.action_validation_result;
+    const safeResults = row.operation_support_metadata?.safeSubmissionResults;
+    const safeResult =
+      safeResults &&
+      typeof safeResults === "object" &&
+      !Array.isArray(safeResults)
+        ? (safeResults as JsonRecord)[row.attempt_id]
+        : null;
+    const resultRecord =
+      safeResult && typeof safeResult === "object" && !Array.isArray(safeResult)
+        ? (safeResult as JsonRecord)
+        : null;
+    const providerResult =
+      resultRecord &&
+      typeof resultRecord.referenceCiphertext === "string" &&
+      typeof resultRecord.referenceLookupHmac === "string" &&
+      typeof resultRecord.lookupKeyVersion === "number"
+        ? {
+            referenceCiphertext: resultRecord.referenceCiphertext,
+            referenceLookupHmac: resultRecord.referenceLookupHmac,
+            lookupKeyVersion: resultRecord.lookupKeyVersion,
+          }
+        : undefined;
     return {
+      ...(providerResult
+        ? { safeSubmissionProviderResult: providerResult }
+        : {}),
       userId: row.user_id,
       operationId: row.operation_id,
       stepId: row.step_id,

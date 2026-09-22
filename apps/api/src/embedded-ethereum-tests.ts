@@ -276,16 +276,25 @@ const tests: TestCase[] = [
     },
   },
   {
-    name: "accepted Privy EVM execution returns its durable provider reference without waiting",
+    name: "accepted Privy EVM execution skips unused ERC20 balance RPC and returns its durable reference",
     run: async () => {
       const originalFetch = globalThis.fetch;
-      globalThis.fetch = async () =>
-        new Response(
+      const originalSend = ethers.JsonRpcProvider.prototype.send;
+      let rpcReads = 0;
+      let providerPosts = 0;
+      ethers.JsonRpcProvider.prototype.send = async () => {
+        rpcReads++;
+        throw new Error("RPC unavailable");
+      };
+      globalThis.fetch = async () => {
+        providerPosts++;
+        return new Response(
           JSON.stringify({
             data: { transaction_id: "transaction_accepted_123" },
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
+      };
       try {
         const result = await executeEmbeddedEthereumTransactionRequests({
           chainId: 137,
@@ -298,7 +307,12 @@ const tests: TestCase[] = [
                 id: "withdrawal-transfer",
                 label: "Funding transaction",
                 to: "0x1111111111111111111111111111111111111111",
-                data: "0x",
+                data: new ethers.Interface([
+                  "function transfer(address,uint256)",
+                ]).encodeFunctionData("transfer", [
+                  "0x2222222222222222222222222222222222222222",
+                  7,
+                ]),
               },
             }),
           ],
@@ -317,8 +331,11 @@ const tests: TestCase[] = [
             },
           ],
         });
+        assert.equal(rpcReads, 0);
+        assert.equal(providerPosts, 1);
       } finally {
         globalThis.fetch = originalFetch;
+        ethers.JsonRpcProvider.prototype.send = originalSend;
       }
     },
   },

@@ -40,6 +40,13 @@ export const embeddedPrivyAuthorizationRequestSchema = z.object({
 });
 
 const embeddedExecutionKeySchema = z.string().trim().min(1).max(160);
+const embeddedFundingContextSchema = z
+  .object({
+    operationId: z.string().uuid(),
+    stepId: z.string().uuid(),
+    attemptId: z.string().uuid(),
+  })
+  .strict();
 const zSolanaBigintString = z.string().trim().regex(/^\d+$/).min(1).max(80);
 const zSolanaReadinessBlockingReason = z
   .enum([
@@ -68,6 +75,7 @@ export const solanaPrefundOperationSchema = z.enum([
 ]);
 
 export const embeddedEvmPrepareBodySchema = z.object({
+  fundingContext: embeddedFundingContextSchema.optional(),
   chainId: z.number().int().positive(),
   executionKey: embeddedExecutionKeySchema.optional(),
   returnOnAccepted: z.boolean().default(false),
@@ -92,6 +100,7 @@ export const embeddedSolanaTransactionSchema = z.object({
 });
 
 export const embeddedSolanaPrepareBodySchema = z.object({
+  fundingContext: embeddedFundingContextSchema.optional(),
   executionKey: embeddedExecutionKeySchema.optional(),
   transactions: z.array(embeddedSolanaTransactionSchema).min(1).max(8),
 });
