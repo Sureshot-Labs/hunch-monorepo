@@ -309,7 +309,7 @@ export class FundingOperationActionRuntime {
     input: Readonly<{
       operationId: string;
       stepId: string;
-      submissionProtocols?: { safe?: 1; embedded?: 1 };
+      submissionProtocols?: { safe?: 1; embedded?: 1; solana?: 1 };
     }>,
   ): Promise<
     Readonly<{
@@ -602,6 +602,11 @@ export class FundingOperationActionRuntime {
           canonicalActionFingerprint: fingerprint,
           executorId: step.executorId,
           solanaSigningContext,
+          ...(input.submissionProtocols?.solana === 1 &&
+          solanaSigningContext &&
+          execution.executionMode === "web_client"
+            ? { solanaSubmissionProtocol: true as const }
+            : {}),
           ...(input.submissionProtocols?.embedded === 1 &&
           execution.executionMode === "privy_authorization" &&
           execution.payerRequirement !== "provider"

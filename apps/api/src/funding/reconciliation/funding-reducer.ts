@@ -2,6 +2,7 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 import { recordWithdrawalCompletionNotification } from "./withdrawal-completion-notification.js";
 import { closeExpiredSafeFundingPreparationsInTransaction } from "../execution/safe-funding-submission.js";
 import { closeExpiredEmbeddedFundingPreparationsInTransaction } from "../execution/embedded-funding-submission.js";
+import { closeExpiredSolanaPreparationsInTransaction } from "../execution/solana-preparation.js";
 
 import type {
   FundingOperationState,
@@ -2091,7 +2092,14 @@ async function processLease(
             options.now,
           )
         : false;
-      if (operation && (safeClosed || embeddedClosed)) {
+      const solanaClosed = operation
+        ? await closeExpiredSolanaPreparationsInTransaction(
+            client,
+            operation.id,
+            options.now,
+          )
+        : false;
+      if (operation && (safeClosed || embeddedClosed || solanaClosed)) {
         // A closed, never-admitted attempt is definitive cancellation evidence.
         // Existing reduction detaches the old Buy and frees its reservations.
         await reduceFundingOperationInTransaction(client, {

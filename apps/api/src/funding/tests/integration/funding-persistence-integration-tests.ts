@@ -9,6 +9,7 @@ import { buildPolymarketPreRouteHandoffSteps } from "../../../funding-providers/
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 
 import { tx } from "@hunch/infra";
+import { closeExpiredSolanaPreparationsInTransaction } from "../../execution/solana-preparation.js";
 import type { PoolClient } from "pg";
 
 import "../../../integration-test-database-guard.js";
@@ -4427,12 +4428,14 @@ async function testDeadLetterPublishesManualRecovery(
   }
 }
 
-async function testSolanaSigningContextOnRealAttemptSchema(): Promise<void> {
+async function testSolanaSigningContextOnRealAttemptSchema(
+  negotiated = false,
+): Promise<void> {
   const client = await pool.connect();
   try {
     await client.query("begin");
     const userId = await insertUser(client);
-    const base = buildPlan({ includeReservation: false });
+    const base = buildPlan({ includeReservation: negotiated });
     const action = {
       kind: "svm_transaction",
       actionId: "solana-context-test",
@@ -4480,6 +4483,7 @@ async function testSolanaSigningContextOnRealAttemptSchema(): Promise<void> {
       canonicalActionFingerprint: canonicalJsonHash(action),
       executorId: "wallet_profile_svm_v1",
       solanaSigningContext: context,
+      ...(negotiated ? { solanaSubmissionProtocol: true as const } : {}),
     };
     await assert.rejects(
       () =>
@@ -4498,6 +4502,84 @@ async function testSolanaSigningContextOnRealAttemptSchema(): Promise<void> {
     assert.equal(started.attempt.outcome, "started");
     assert.equal(started.attempt.broadcastMayHaveOccurred, false);
     assert.deepEqual(started.attempt.actualCosts.solanaSigningContext, context);
+    const afterExpiry = new Date(Date.now() + 300_000);
+    assert.equal(
+      await closeExpiredSolanaPreparationsInTransaction(
+        client,
+        committed.operation.id,
+        new Date(0),
+      ),
+      false,
+    );
+    await client.query("savepoint close_solana_preparation");
+    assert.equal(
+      await closeExpiredSolanaPreparationsInTransaction(
+        client,
+        committed.operation.id,
+        afterExpiry,
+      ),
+      negotiated,
+    );
+    if (negotiated) {
+      await assert.rejects(
+        () =>
+          finishFundingStepAttemptForUserInTransaction(client, {
+            userId,
+            operationId: committed.operation.id,
+            stepId: persistedStep.id,
+            attemptId: started.attempt.id,
+            outcome: "ambiguous",
+            broadcastMayHaveOccurred: true,
+            referenceKind: "transaction",
+            receiptRefCiphertext: "ciphertext:late-solana",
+            receiptRefLookupHmac: hash("8"),
+            lookupKeyVersion: 1,
+            actualCosts: {
+              verifiedSolanaSubmission: {
+                version: 1,
+                signature: "late-signature",
+                ...context,
+              },
+            },
+          }),
+        (error: unknown) =>
+          error instanceof FundingPersistenceError &&
+          error.code === "solana_preparation_closed",
+      );
+      const lateCancellation =
+        await finishFundingStepAttemptForUserInTransaction(client, {
+          userId,
+          operationId: committed.operation.id,
+          stepId: persistedStep.id,
+          attemptId: started.attempt.id,
+          outcome: "failed",
+          broadcastMayHaveOccurred: false,
+          referenceKind: null,
+          receiptRefCiphertext: null,
+          receiptRefLookupHmac: null,
+          lookupKeyVersion: null,
+          actualCosts: {},
+        });
+      assert.equal(lateCancellation.stepState, "cancelled");
+      assert.equal(
+        await closeExpiredSolanaPreparationsInTransaction(
+          client,
+          committed.operation.id,
+          afterExpiry,
+        ),
+        false,
+      );
+      await reduceFundingOperationInTransaction(client, {
+        operationId: committed.operation.id,
+        now: afterExpiry,
+      });
+      const reservations = await client.query<{ count: string }>(
+        "select count(*) from balance_reservations where operation_id=$1 and state='active'",
+        [committed.operation.id],
+      );
+      assert.equal(reservations.rows[0]?.count, "0");
+    }
+    await client.query("rollback to savepoint close_solana_preparation");
     await assert.rejects(
       () =>
         startFundingStepAttemptForUserInTransaction(client, {
@@ -4544,6 +4626,14 @@ async function testSolanaSigningContextOnRealAttemptSchema(): Promise<void> {
       },
     );
     assert.equal(finished.attempt.outcome, "ambiguous");
+    assert.equal(
+      await closeExpiredSolanaPreparationsInTransaction(
+        client,
+        committed.operation.id,
+        afterExpiry,
+      ),
+      false,
+    );
   } finally {
     await client.query("rollback");
     client.release();
@@ -9215,6 +9305,7 @@ await testDeadLetterPublishesManualRecovery(true);
 await testConcurrentSourceReservationExclusion();
 await testConcurrentSourceReservationExclusion(true);
 await testSolanaSigningContextOnRealAttemptSchema();
+await testSolanaSigningContextOnRealAttemptSchema(true);
 console.log(
   "[funding-persistence-integration-tests] ok concurrent source reservation exclusion",
 );

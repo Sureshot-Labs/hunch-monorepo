@@ -1031,6 +1031,7 @@ export async function startFundingStepAttemptInTransaction(
     canonicalActionFingerprint: string;
     executorId: string;
     solanaSigningContext?: SolanaSigningContext;
+    solanaPreparation?: Readonly<{ version: 1; expiresAt: string }>;
     safeSubmission?: SafeFundingSubmission;
     embeddedSubmission?: EmbeddedFundingSubmission;
     now?: Date;
@@ -1185,6 +1186,9 @@ export async function startFundingStepAttemptInTransaction(
       input.now ?? new Date(),
       {
         ...(signingContext ? { solanaSigningContext: signingContext } : {}),
+        ...(signingContext && input.solanaPreparation
+          ? { solanaPreparation: input.solanaPreparation }
+          : {}),
         ...(input.safeSubmission
           ? { safeSubmission: input.safeSubmission }
           : {}),
@@ -1208,6 +1212,7 @@ export async function startFundingStepAttemptForUserInTransaction(
     canonicalActionFingerprint: string;
     executorId: string;
     solanaSigningContext?: SolanaSigningContext;
+    solanaSubmissionProtocol?: true;
     safeSubmissionProtocol?: true;
     embeddedSubmissionProtocol?: {
       signer: string;
@@ -1315,6 +1320,21 @@ export async function startFundingStepAttemptForUserInTransaction(
     canonicalActionFingerprint: input.canonicalActionFingerprint,
     executorId: input.executorId,
     solanaSigningContext: input.solanaSigningContext,
+    ...(input.solanaSubmissionProtocol &&
+    input.solanaSigningContext &&
+    row.executor_id === "wallet_profile_svm_v1"
+      ? {
+          solanaPreparation: {
+            version: 1 as const,
+            expiresAt: new Date(
+              Math.min(
+                now.getTime() + 120_000,
+                row.action_expires_at?.getTime() ?? Infinity,
+              ),
+            ).toISOString(),
+          },
+        }
+      : {}),
     ...(input.embeddedSubmissionProtocol
       ? {
           embeddedSubmission: {
@@ -1579,6 +1599,24 @@ export async function finishFundingStepAttemptForUserInTransaction(
     );
   }
   const priorAttempt = mapAttempt(priorAttemptRow);
+  if (
+    priorAttempt.outcome === "cancelled" &&
+    priorAttempt.actualCosts.solanaPreparation &&
+    priorAttempt.actualCosts.reasonCode === "solana_pre_submit_lease_expired" &&
+    !priorAttempt.broadcastMayHaveOccurred &&
+    priorAttempt.referenceKind === null &&
+    priorAttempt.receiptRefLookupHmac === null
+  ) {
+    // A successful signed-registration response permits broadcast. Never ACK it
+    // after expiry, even though a late no-send cancellation report is harmless.
+    if (input.broadcastMayHaveOccurred || input.receiptRefLookupHmac !== null) {
+      throw new FundingPersistenceError(
+        "solana_preparation_closed",
+        "Solana preparation expired before transaction registration; nothing was admitted",
+      );
+    }
+    return { attempt: priorAttempt, stepState: "cancelled" };
+  }
   const safeSubmission = parseSafeFundingSubmission(
     priorAttempt.actualCosts.safeSubmission,
   );

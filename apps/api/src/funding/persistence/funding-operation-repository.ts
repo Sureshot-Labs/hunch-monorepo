@@ -34,6 +34,7 @@ export type FundingPersistenceErrorCode =
   | "invalid_segment_transition"
   | "invalid_state_transition"
   | "lease_lost"
+  | "solana_preparation_closed"
   | "operation_not_found"
   | "operation_version_conflict"
   | "quote_consumed"

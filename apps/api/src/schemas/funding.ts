@@ -1109,6 +1109,7 @@ export const fundingOperationActionPrepareRequestSchema = z
       .object({
         safe: z.literal(1).optional(),
         embedded: z.literal(1).optional(),
+        solana: z.literal(1).optional(),
       })
       .strict()
       .optional(),
