@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import {
+  FUNDING_ACTION_FAILURE_CODES,
   isFundingActionFailureReportConsistent,
   isUnreferencedFundingActionAmbiguity,
   normalizeFundingActionReport,
 } from "../../execution/action-report.js";
+import { fundingOperationActionReportRequestSchema } from "../../../schemas/funding.js";
 
 const genericFailure = {
   outcome: "failed",
@@ -54,6 +56,52 @@ assert.equal(
   "a generic error must not override an independently supplied receipt",
 );
 console.log("Funding action report safety tests passed");
+
+for (const failureCode of FUNDING_ACTION_FAILURE_CODES.filter(
+  (code) =>
+    code.startsWith("external_handoff_") &&
+    ![
+      "external_handoff_submission_unknown",
+      "external_handoff_provider_response_invalid",
+      "external_handoff_provider_rejected",
+    ].includes(code),
+)) {
+  const report = { ...genericFailure, failureCode };
+  assert.equal(isFundingActionFailureReportConsistent(report), true);
+  assert.equal(isUnreferencedFundingActionAmbiguity(report), false);
+  const payload = {
+    ...report,
+    attemptId: "attempt_12345678",
+    actualCosts: { networkFeeRaw: null },
+  };
+  assert.equal(
+    fundingOperationActionReportRequestSchema.safeParse(payload).success,
+    true,
+  );
+  for (const outcome of ["submitted", "ambiguous"] as const) {
+    assert.equal(
+      fundingOperationActionReportRequestSchema.safeParse({
+        ...payload,
+        outcome,
+      }).success,
+      false,
+    );
+  }
+  assert.equal(
+    fundingOperationActionReportRequestSchema.safeParse({
+      ...payload,
+      transactionReference: "receipt_12345678",
+    }).success,
+    false,
+  );
+  assert.equal(
+    fundingOperationActionReportRequestSchema.safeParse({
+      ...payload,
+      outcome: "cancelled",
+    }).success,
+    failureCode === "external_handoff_signing_failed",
+  );
+}
 
 for (const failureCode of [
   "solana_signing_failed",

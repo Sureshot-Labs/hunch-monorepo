@@ -6,6 +6,13 @@ export const FUNDING_ACTION_FAILURE_CODES = [
   "external_handoff_provider_rejected",
   "external_handoff_provider_response_invalid",
   "external_handoff_submission_unknown",
+  "external_handoff_wallet_context_unavailable",
+  "external_handoff_payload_invalid",
+  "external_handoff_wallet_unavailable",
+  "external_handoff_safe_unavailable",
+  "external_handoff_deployed_lookup_failed",
+  "external_handoff_nonce_lookup_failed",
+  "external_handoff_signing_failed",
 ] as const;
 
 export type FundingActionFailureCode =
@@ -76,7 +83,10 @@ export function isFundingActionFailureReportConsistent(
   }
   // Sign-only failures have not crossed the send boundary. A wallet rejection
   // may retain its cancellation outcome without losing the diagnostic stage.
-  if (input.failureCode === "solana_signing_failed")
+  if (
+    input.failureCode === "solana_signing_failed" ||
+    input.failureCode === "external_handoff_signing_failed"
+  )
     return input.outcome === "failed" || input.outcome === "cancelled";
   return input.outcome === "failed";
 }
