@@ -9,6 +9,7 @@ import { canonicalJsonHash } from "../../persistence/canonical.js";
 import {
   createFundingQuoteInTransaction,
   commitFundingOperationInTransaction,
+  allocateFundingObservationInTransaction,
   type FundingCommitPlan,
 } from "../../persistence/funding-operation-repository.js";
 import {
@@ -29,7 +30,10 @@ import {
   recoverStoppedFundingOperations,
 } from "../../reconciliation/funding-reducer.js";
 import { createFundingTransactionReferenceCodec } from "../../execution/transaction-reference-codec.js";
-import { listFundingStepReceiptTargets } from "../../persistence/funding-step-receipt-repository.js";
+import {
+  listFundingStepReceiptTargets,
+  applyFundingStepReceiptEvidenceInTransaction,
+} from "../../persistence/funding-step-receipt-repository.js";
 import { loadFundingLifecycleFactsForOperationInTransaction } from "../../lifecycle/funding-lifecycle-facts-repository.js";
 
 const id = () => crypto.randomUUID();
@@ -52,7 +56,10 @@ const userRows = await pool.query<{ id: string }>(
 assert.ok(userRows.rows[0]);
 const userId = userRows.rows[0].id;
 
-async function fixture(versioned = true) {
+async function fixture(
+  versioned = true,
+  purpose: "add_funds" | "trade_shortfall" = "add_funds",
+) {
   return tx(pool, async (client) => {
     const walletId = id();
     const source = {
@@ -80,7 +87,7 @@ async function fixture(versioned = true) {
     const expiresAt = new Date(Date.now() + 600_000);
     const plan: FundingCommitPlan = {
       operation: {
-        purpose: "add_funds",
+        purpose,
         initialState: { status: "in_progress", stage: "committed" },
         experienceMode: "prepare_first",
         planKind: "wallet_route",
@@ -518,6 +525,151 @@ console.log(
 
 // Historical started cache, but a durable negative result was already known.
 // The evidence-only sweep must materialize completion without any executor.
+// A late exact receipt must replace the earlier owned-route estimate and
+// release an expired, unused Buy reservation in the same transaction.
+const estimated = await fixture(false, "trade_shortfall");
+await tx(pool, async (client) => {
+  const operationId = estimated.context.operationId;
+  const segmentId = (
+    await client.query(
+      "select segment_id from funding_operation_steps where id=$1",
+      [estimated.context.stepId],
+    )
+  ).rows[0].segment_id;
+  const reference = `0x${crypto.randomBytes(32).toString("hex")}`;
+  await finishFundingStepAttemptInTransaction(client, {
+    attemptId: estimated.context.attemptId,
+    outcome: "submitted",
+    broadcastMayHaveOccurred: true,
+    referenceKind: "transaction",
+    receiptRefCiphertext: codec.encrypt(reference),
+    receiptRefLookupHmac: codec.fingerprint(reference),
+    lookupKeyVersion: 1,
+    actualCosts: {},
+  });
+  const now = new Date();
+  const observation = {
+    operationId,
+    segmentId,
+    kind: "destination_credit" as const,
+    networkId: asset.networkId,
+    assetId: asset.assetId,
+    assetDecimals: asset.decimals,
+    txHash: `owned-route:${operationId}:revision`,
+    eventIndex: "0",
+    fromAddress: null,
+    toAddress: target,
+    rawAmount: "990000",
+    observedAt: now,
+    ledgerHeight: "1",
+    blockHash: `0x${"a".repeat(64)}`,
+    finalityStatus: "finalized" as const,
+    finalizedAt: now,
+    metadata: { observerId: "relay_owned_destination_observation_v1" },
+  };
+  await allocateFundingObservationInTransaction(client, observation);
+  const receipt = {
+    status: "finalized" as const,
+    actionMatch: true,
+    ledgerHeight: "1",
+    blockHash: observation.blockHash,
+    canonical: true,
+    failureCode: null,
+    evidence: { transactionHash: reference },
+  };
+  await applyFundingStepReceiptEvidenceInTransaction(client, {
+    ...estimated.context,
+    networkId: asset.networkId,
+    receipt,
+    now,
+  });
+  assert.equal(
+    (
+      await client.query("select status from funding_operations where id=$1", [
+        operationId,
+      ])
+    ).rows[0].status,
+    "ready",
+  );
+  await allocateFundingObservationInTransaction(client, {
+    ...observation,
+    txHash: `0x${crypto.randomBytes(32).toString("hex")}`,
+    rawAmount: "995051",
+    metadata: {
+      ...observation.metadata,
+      relayTransactionReferenceMatched: true,
+    },
+  });
+  const later = new Date(now.getTime() + 8 * 86400_000);
+  await client.query("SAVEPOINT invalid_actual_fixture");
+  await client.query(
+    "update funding_operations set version=version+1, actual_destination_amount=jsonb_set(actual_destination_amount,'{raw}','\"990001\"'::jsonb) where id=$1",
+    [operationId],
+  );
+  await client.query("SAVEPOINT rejected_repair");
+  await assert.rejects(
+    applyFundingStepReceiptEvidenceInTransaction(client, {
+      ...estimated.context,
+      networkId: asset.networkId,
+      receipt,
+      now: later,
+    }),
+    { code: "actual_amount_conflict" },
+  );
+  await client.query("ROLLBACK TO SAVEPOINT rejected_repair");
+  assert.equal(
+    (
+      await client.query(
+        "select count(*)::int as total from balance_reservations where operation_id=$1 and mode='settled_for_consumer' and state='active'",
+        [operationId],
+      )
+    ).rows[0].total,
+    1,
+    "rejected correction must roll back reservation release",
+  );
+  await client.query("ROLLBACK TO SAVEPOINT invalid_actual_fixture");
+  await applyFundingStepReceiptEvidenceInTransaction(client, {
+    ...estimated.context,
+    networkId: asset.networkId,
+    receipt,
+    now: later,
+  });
+  const corrected = (
+    await client.query(
+      "select status,actual_destination_amount,support_metadata from funding_operations where id=$1",
+      [operationId],
+    )
+  ).rows[0];
+  assert.equal(corrected.status, "completed");
+  assert.equal(corrected.actual_destination_amount.raw, "995051");
+  assert.equal(
+    corrected.support_metadata.destinationAmountCorrection.previous.raw,
+    "990000",
+  );
+  assert.equal(
+    (
+      await client.query(
+        "select count(*)::int as total from balance_reservations where operation_id=$1 and mode='settled_for_consumer' and state='active'",
+        [operationId],
+      )
+    ).rows[0].total,
+    0,
+  );
+  await reduceFundingOperationInTransaction(client, {
+    operationId,
+    now: later,
+  });
+  assert.equal(
+    (
+      await client.query(
+        "select actual_destination_amount from funding_operations where id=$1",
+        [operationId],
+      )
+    ).rows[0].actual_destination_amount.raw,
+    "995051",
+  );
+});
+
 const stopped = await fixture(false);
 await tx(pool, (client) =>
   finishFundingStepAttemptInTransaction(client, {

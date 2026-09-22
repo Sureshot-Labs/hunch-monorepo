@@ -1498,11 +1498,32 @@ export async function writeFundingOperationLifecycleProjectionCacheInTransaction
     current.actualSourceAmount,
     input.actualSourceAmount,
   );
-  assertActualAmountUpdate(
-    "destination",
-    current.actualDestinationAmount,
-    input.actualDestinationAmount,
-  );
+  let destinationEvidenceCorrection = false;
+  if (
+    current.actualDestinationAmount &&
+    input.actualDestinationAmount &&
+    !canonicalJsonEqual(
+      current.actualDestinationAmount,
+      input.actualDestinationAmount,
+    )
+  ) {
+    const evidence = await client.query<FundingObservationDbRow>(
+      `select ${observationColumns} from funding_observations
+       where operation_id = $1 order by observed_at, id`,
+      [input.operationId],
+    );
+    destinationEvidenceCorrection = verifiedOwnedDestinationCorrection(
+      current.actualDestinationAmount,
+      input.actualDestinationAmount,
+      evidence.rows.map(mapObservation),
+    );
+  }
+  if (!destinationEvidenceCorrection)
+    assertActualAmountUpdate(
+      "destination",
+      current.actualDestinationAmount,
+      input.actualDestinationAmount,
+    );
   const nextRecoveryMode =
     input.state.status === "recovery_required"
       ? (input.recoveryMode ?? current.recoveryMode ?? "manual_review")
@@ -1555,7 +1576,19 @@ export async function writeFundingOperationLifecycleProjectionCacheInTransaction
       input.actualDestinationAmount ?? null,
       input.errorCode !== undefined,
       input.errorCode ?? null,
-      input.supportMetadataPatch ?? {},
+      {
+        ...input.supportMetadataPatch,
+        ...(destinationEvidenceCorrection
+          ? {
+              destinationAmountCorrection: {
+                reason: "owned_estimate_replaced_by_exact_receipt",
+                previous: current.actualDestinationAmount,
+                corrected: input.actualDestinationAmount,
+                correctedAt: input.now.toISOString(),
+              },
+            }
+          : {}),
+      },
       terminal,
       input.now,
       input.expectedVersion,
@@ -2537,6 +2570,38 @@ export function effectiveFundingObservations(
         exact.finalityStatus === "finalized",
     );
   });
+}
+
+/** Narrow historical repair, not permission to rewrite arbitrary actuals.
+ * Both the old estimate and its exact replacement must remain in the audit. */
+export function verifiedOwnedDestinationCorrection(
+  stored: JsonRecord,
+  proposed: JsonRecord,
+  observations: readonly FundingObservationRow[],
+): boolean {
+  const credits = observations.filter(
+    (row) => row.kind === "destination_credit",
+  );
+  if (credits.length !== 2) return false;
+  const effective = effectiveFundingObservations(credits);
+  if (effective.length !== 1) return false;
+  const exact = effective[0];
+  const estimate = credits.find((row) => row !== exact);
+  if (!exact || !estimate) return false;
+  const asset = {
+    networkId: exact.networkId,
+    assetId: exact.assetId,
+    decimals: exact.assetDecimals,
+  };
+  if (!canonicalJsonEqual(proposed, { asset, raw: exact.rawAmount }))
+    return false;
+  return (
+    canonicalJsonEqual(stored, { asset, raw: estimate.rawAmount }) ||
+    canonicalJsonEqual(stored, {
+      asset,
+      raw: (BigInt(estimate.rawAmount) + BigInt(exact.rawAmount)).toString(),
+    })
+  );
 }
 
 export async function fetchFundingOperationForWorkerInTransaction(

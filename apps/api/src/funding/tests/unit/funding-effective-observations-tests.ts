@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   effectiveFundingObservations,
+  verifiedOwnedDestinationCorrection,
   type FundingObservationRow,
 } from "../../persistence/funding-operation-repository.js";
 const synthetic: FundingObservationRow = {
@@ -66,4 +67,60 @@ assert.deepEqual(
   effectiveFundingObservations([synthetic, { ...exact, rawAmount: "1" }]),
   [{ ...exact, rawAmount: "1" }],
   "partial exact evidence must not add to the aggregate estimate",
+);
+
+const amount = (raw: string) => ({
+  asset: {
+    networkId: exact.networkId,
+    assetId: exact.assetId,
+    decimals: exact.assetDecimals,
+  },
+  raw,
+});
+for (const oldRaw of ["500000", "1005051"]) {
+  assert.equal(
+    verifiedOwnedDestinationCorrection(amount(oldRaw), amount("505051"), [
+      synthetic,
+      exact,
+    ]),
+    true,
+  );
+}
+for (const rows of [
+  [exact],
+  [synthetic],
+  [synthetic, exact, second],
+  [synthetic, { ...exact, canonical: false }],
+  [synthetic, { ...exact, segmentId: "foreign" }],
+]) {
+  assert.equal(
+    verifiedOwnedDestinationCorrection(
+      amount("500000"),
+      amount("505051"),
+      rows,
+    ),
+    false,
+  );
+}
+assert.equal(
+  verifiedOwnedDestinationCorrection(amount("499999"), amount("505051"), [
+    synthetic,
+    exact,
+  ]),
+  false,
+);
+assert.equal(
+  verifiedOwnedDestinationCorrection(amount("500000"), amount("505052"), [
+    synthetic,
+    exact,
+  ]),
+  false,
+);
+assert.equal(
+  verifiedOwnedDestinationCorrection(
+    { ...amount("500000"), asset: { ...amount("500000").asset, decimals: 18 } },
+    amount("505051"),
+    [synthetic, exact],
+  ),
+  false,
 );

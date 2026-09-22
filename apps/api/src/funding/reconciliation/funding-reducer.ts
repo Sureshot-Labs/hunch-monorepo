@@ -36,7 +36,7 @@ import {
   writeFundingOperationSupportFactsInTransaction,
   type FundingObservationRow,
   type FundingOperationRow,
-  type FundingPersistenceError,
+  FundingPersistenceError,
   type FundingReconciliationLease,
   type FundingRecoveryMode,
 } from "../persistence/funding-operation-repository.js";
@@ -539,8 +539,9 @@ async function expireSettledConsumerReservation(
   now: Date,
 ): Promise<FundingOperationRow | null> {
   if (
-    lifecycle.status !== "ready" ||
-    lifecycle.progressStage !== "ready_for_consumer"
+    lifecycle.status !== "completed" &&
+    (lifecycle.status !== "ready" ||
+      lifecycle.progressStage !== "ready_for_consumer")
   ) {
     return null;
   }
@@ -703,7 +704,18 @@ async function preflightSettledConsumerReservationExpiry(
   );
   if (!facts) return null;
   const lifecycle = deriveFundingLifecycle(facts);
-  if (lifecycle.status === "completed") return { initial, expired: null };
+  if (lifecycle.status === "completed") {
+    // Terminal source evidence does not itself consume a Buy reservation.
+    // Release only an expired reservation with no unresolved trade attempt,
+    // then continue full reduction (including corrected actual amounts).
+    const released = await expireSettledConsumerReservation(
+      client,
+      initial,
+      lifecycle,
+      now,
+    );
+    return { initial: released ?? initial, expired: null };
+  }
   if (
     lifecycle.status !== "ready" ||
     lifecycle.progressStage !== "ready_for_consumer"
@@ -2511,6 +2523,19 @@ async function processLease(
   }
 }
 
+/** Persist only known internal codes, never provider messages/URLs/references. */
+export function fundingEvidenceRepairErrorCode(error: unknown): string {
+  if (error instanceof FundingPersistenceError)
+    return `evidence_repair_${error.code}`;
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) {
+      const code = fundingEvidenceRepairErrorCode(nested);
+      if (code !== "evidence_repair_failed") return code;
+    }
+  }
+  return "evidence_repair_failed";
+}
+
 /** No executor/consumer callbacks: this can only refresh evidence and accounting.
  * Expired action consent cannot be revived by a repaired source receipt. */
 export async function recoverStoppedFundingOperations(
@@ -2585,6 +2610,7 @@ export async function recoverStoppedFundingOperations(
   const job = claimed.rows[0];
   if (!job) return 0;
   let failed = false;
+  let repairStage = "mark_evidence_only";
   try {
     // Match intent -> operation lock order. Detach old purchase consent before
     // evidence can turn a stopped route into ready; never start a historic Buy.
@@ -2609,21 +2635,30 @@ export async function recoverStoppedFundingOperations(
     // Sources may refresh independently, but unavailable canonical receipt
     // verification must never permit reservation release from stale evidence.
     let verificationUnavailable = false;
-    for (const poll of [
-      options.receiptPoll,
-      options.providerPoll,
-      options.postconditionPoll,
-      options.destinationPoll,
-    ]) {
+    let verificationFailure: unknown;
+    let verificationStage = "verification";
+    for (const [stage, poll] of [
+      ["receipt", options.receiptPoll],
+      ["provider", options.providerPoll],
+      ["postcondition", options.postconditionPoll],
+      ["destination", options.destinationPoll],
+    ] as const) {
       try {
         await poll?.(job.operation_id, now);
-      } catch {
+      } catch (error) {
         failed = true;
-        if (poll !== options.providerPoll) verificationUnavailable = true;
+        if (stage !== "provider" && !verificationUnavailable) {
+          verificationUnavailable = true;
+          verificationFailure = error;
+          verificationStage = stage;
+        }
       }
     }
-    if (verificationUnavailable)
-      throw new Error("canonical evidence verification unavailable");
+    if (verificationUnavailable) {
+      repairStage = verificationStage;
+      throw verificationFailure;
+    }
+    repairStage = "reduce";
     const reduction = await reduceFundingOperation(pool, {
       operationId: job.operation_id,
       now,
@@ -2650,7 +2685,7 @@ export async function recoverStoppedFundingOperations(
               "Evidence-only repair remains unresolved; bounded background retry is enabled",
           },
     });
-  } catch {
+  } catch (error) {
     await finishFundingReconciliationLeaseRaw(pool, {
       jobId: job.id,
       leaseOwner: options.workerId,
@@ -2660,9 +2695,8 @@ export async function recoverStoppedFundingOperations(
         kind: "error",
         deadLetter: true,
         dueAt: new Date(now.getTime() + 300_000),
-        errorCode: "evidence_repair_failed",
-        errorSummary:
-          "Evidence-only repair will retry; no transaction was sent",
+        errorCode: fundingEvidenceRepairErrorCode(error),
+        errorSummary: `Evidence-only repair failed at ${repairStage}; will retry; no transaction was sent`,
       },
     });
   }
