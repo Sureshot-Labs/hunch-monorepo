@@ -72,6 +72,7 @@ import {
   getPrivyTerminalAuthMessage,
 } from "../lib/privy-auth-errors.js";
 import { reconcilePendingPrivyDeletions } from "../services/privy-deletion-reconciler.js";
+import { registerPolymarketSafeReadRoute } from "./polymarket-safe-read.js";
 
 const WALLET_TYPES = new Set(["ethereum", "solana"]);
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
@@ -345,6 +346,15 @@ function verifySolanaSignature(params: {
 }
 
 export const authRoutes: FastifyPluginAsync = async (app) => {
+  registerPolymarketSafeReadRoute(app, {
+    authenticate: createAuthMiddleware(),
+    getWalletAddresses: async (request) =>
+      request.user
+        ? (await AuthService.getUserWallets(request.user.id)).map(
+            (wallet) => wallet.walletAddress,
+          )
+        : null,
+  });
   const z = app.withTypeProvider<ZodTypeProvider>();
 
   /**
