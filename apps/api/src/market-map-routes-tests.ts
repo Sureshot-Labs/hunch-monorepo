@@ -62,6 +62,7 @@ type MarketMapPayload = {
   items: Array<{
     eventCount?: number;
     id: string;
+    signalCountSubtree?: number;
     venueBreakdown?: Partial<Record<MarketMapVenue, MarketMapNodeVenueMetrics>>;
     eventsPreview?: Array<{
       eventId: string;
@@ -70,6 +71,7 @@ type MarketMapPayload = {
       oddsSource?: string | null;
       marketBestBid?: number | null;
       marketBestAsk?: number | null;
+      signalCount?: number;
       marketsPreview?: Array<{
         marketId: string;
         marketBestBid: number | null;
@@ -813,6 +815,7 @@ async function main() {
   const qualityNode = buildNode(qualityNodeId, qualityEvents);
   const fallbackNode = buildNode(fallbackNodeId, fallbackEvents);
   const rootNodeId = `test-market-map-root-${suiteId}`;
+  const signalLeafNodeId = `test-market-map-signal-leaf-${suiteId}`;
   const rootNode: MarketMapNode = {
     ...node,
     id: rootNodeId,
@@ -829,9 +832,18 @@ async function main() {
     id: nodeId,
     level: 2,
     parentId: rootNodeId,
-    childIds: [],
+    childIds: [signalLeafNodeId],
     label: "Child node",
     labelRepresentative: "Child node",
+  };
+  const signalLeafNode: MarketMapNode = {
+    ...node,
+    id: signalLeafNodeId,
+    level: 3,
+    parentId: nodeId,
+    childIds: [],
+    label: "Signal leaf node",
+    labelRepresentative: "Signal leaf node",
   };
   const qualityRootNode: MarketMapNode = {
     ...qualityNode,
@@ -875,6 +887,11 @@ async function main() {
   };
   const nodeKey = marketMapRunNodeKey(runId, nodeId);
   const nodeEventsKey = marketMapRunNodeEventsKey(runId, nodeId);
+  const signalLeafNodeKey = marketMapRunNodeKey(runId, signalLeafNodeId);
+  const signalLeafEventsKey = marketMapRunNodeEventsKey(
+    runId,
+    signalLeafNodeId,
+  );
   const qualityRootNodeKey = marketMapRunNodeKey(runId, qualityRootNodeId);
   const qualityNodeKey = marketMapRunNodeKey(runId, qualityNodeId);
   const qualityNodeEventsKey = marketMapRunNodeEventsKey(runId, qualityNodeId);
@@ -890,6 +907,8 @@ async function main() {
     await redis.set(marketMapActiveKey(), runId);
     await redis.set(nodeKey, JSON.stringify(node));
     await redis.set(nodeEventsKey, JSON.stringify(events));
+    await redis.set(signalLeafNodeKey, JSON.stringify(signalLeafNode));
+    await redis.set(signalLeafEventsKey, JSON.stringify(events));
     await redis.set(qualityRootNodeKey, JSON.stringify(qualityRootNode));
     await redis.set(qualityNodeKey, JSON.stringify(qualityChildNode));
     await redis.set(qualityNodeEventsKey, JSON.stringify(qualityEvents));
@@ -901,6 +920,7 @@ async function main() {
       JSON.stringify([
         rootNode,
         previewChildNode,
+        signalLeafNode,
         qualityRootNode,
         qualityChildNode,
         fallbackRootNode,
@@ -1211,6 +1231,29 @@ async function main() {
       drilledMap.parentSignalsPreview?.[0]?.targetMarketId,
       signalMarketId,
     );
+    const signaledLeafPreview = await requestMarketMap({
+      app,
+      query: {
+        level: 3,
+        parent: nodeId,
+        includeEventsPreview: true,
+        eventsPreviewLimit: 1,
+      },
+    });
+    const signaledLeaf = signaledLeafPreview.items.find(
+      (item) => item.id === signalLeafNodeId,
+    );
+    assert.equal(signaledLeaf?.signalCountSubtree, 2);
+    assert.equal(
+      signaledLeaf?.eventsPreview?.[0]?.eventId,
+      `event-a-${suiteId}`,
+    );
+    assert.equal(signaledLeaf?.eventsPreview?.[0]?.signalCount, 2);
+    assert.equal(
+      signaledLeaf?.eventsPreview?.[0]?.representativeMarketId,
+      signalMarketId,
+      "the market named by the signal is shown even when its event has lower volume",
+    );
     const drilledMapRepeat = await requestMarketMap({
       app,
       query: { level: 3, parent: nodeId },
@@ -1367,6 +1410,8 @@ async function main() {
     await redis.del([
       nodeKey,
       nodeEventsKey,
+      signalLeafNodeKey,
+      signalLeafEventsKey,
       qualityRootNodeKey,
       qualityNodeKey,
       qualityNodeEventsKey,

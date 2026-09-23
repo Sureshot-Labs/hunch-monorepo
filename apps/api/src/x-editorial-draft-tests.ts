@@ -1857,6 +1857,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(capturedSql, /editorialComposerV1,outcome/);
       assert.match(capturedSql, /editorialDraftV1,status/);
+      assert.match(capturedSql, /sent_at >= now\(\) - interval '24 hours'/);
       assert.deepEqual(capturedParams, [
         "-100987654",
         "x_editorial_draft_v1",

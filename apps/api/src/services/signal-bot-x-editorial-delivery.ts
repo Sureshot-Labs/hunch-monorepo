@@ -388,6 +388,7 @@ export async function loadXEditorialInitialRecoveryNoteIds(input: {
   limit?: number;
 }): Promise<string[]> {
   try {
+    // Recover fresh failed posts, never publish historical signal copy.
     const { rows } = await input.db.query<{ note_id: string }>(
       `
         select note_id::text as note_id
@@ -395,6 +396,7 @@ export async function loadXEditorialInitialRecoveryNoteIds(input: {
         where chat_id = $1
           and telegram_message_id is null
           and message_kind in ('initial', 'research_update')
+          and sent_at >= now() - interval '24 hours'
           and metrics->>'contentProfile' = $2
           and coalesce(metrics->>'status', '') = 'skipped'
           and (
@@ -1236,7 +1238,8 @@ async function deliverDraft(input: {
   );
   const recoverTerminalSkip =
     existingStatus === "skipped" &&
-    (existingComposerFailure != null || persistedDraft?.status === "blocked");
+    (existingComposerFailure != null ||
+      asObject(existingMetrics.editorialDraftV1).status === "blocked");
   if (existingStatus === "delivery_unknown") {
     return { status: "delivery_unknown" };
   }

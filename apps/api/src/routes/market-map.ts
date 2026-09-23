@@ -43,6 +43,7 @@ import {
   parseMarketMapParentIdQuery,
   parseMarketMapSizeBy,
   parseMarketMapVenuesQuery,
+  prioritizeSignaledMapEvents,
   safeJsonParse,
   sortNodesByMetric,
 } from "../services/market-map.js";
@@ -1502,15 +1503,25 @@ async function loadLeafSignalSummaryByNodeId(params: {
   };
 }): Promise<{
   countByNodeId: Map<string, number>;
+  signaledEventIdsByNodeId: Map<string, Set<string>>;
+  preferredSignalMarketByEventId: Map<string, string>;
   signalsPreviewByNodeId: Map<string, MarketMapSignalSummary[]>;
   topSignalByNodeId: Map<string, MarketMapSignalSummary>;
 }> {
   const { runId, nodeIds, previewLimit = 1, redis } = params;
   const countByNodeId = new Map<string, number>();
+  const signaledEventIdsByNodeId = new Map<string, Set<string>>();
+  const preferredSignalMarketByEventId = new Map<string, string>();
   const signalsPreviewByNodeId = new Map<string, MarketMapSignalSummary[]>();
   const topSignalByNodeId = new Map<string, MarketMapSignalSummary>();
   if (nodeIds.length === 0) {
-    return { countByNodeId, signalsPreviewByNodeId, topSignalByNodeId };
+    return {
+      countByNodeId,
+      signaledEventIdsByNodeId,
+      preferredSignalMarketByEventId,
+      signalsPreviewByNodeId,
+      topSignalByNodeId,
+    };
   }
 
   const pipeline = redis.multi();
@@ -1537,7 +1548,13 @@ async function loadLeafSignalSummaryByNodeId(params: {
   }
 
   if (allEventIds.size === 0) {
-    return { countByNodeId, signalsPreviewByNodeId, topSignalByNodeId };
+    return {
+      countByNodeId,
+      signaledEventIdsByNodeId,
+      preferredSignalMarketByEventId,
+      signalsPreviewByNodeId,
+      topSignalByNodeId,
+    };
   }
 
   const byEventId = await loadEventSignalSummaryByEventId({
@@ -1549,14 +1566,21 @@ async function loadLeafSignalSummaryByNodeId(params: {
   for (const nodeId of nodeIds) {
     const eventIds = eventIdsByNodeId.get(nodeId) ?? [];
     let total = 0;
+    const signaledEventIds = new Set<string>();
     const mergedSignals: MarketMapSignalSummary[][] = [];
     for (const eventId of eventIds) {
       const summary = byEventId.get(eventId);
       if (!summary) continue;
       total += Math.max(0, Math.trunc(summary.signalCount ?? 0));
+      signaledEventIds.add(eventId);
+      const targetMarketId = summary.topSignal?.targetMarketId;
+      if (targetMarketId) {
+        preferredSignalMarketByEventId.set(eventId, targetMarketId);
+      }
       mergedSignals.push(summary.signalsPreview);
     }
     countByNodeId.set(nodeId, total);
+    signaledEventIdsByNodeId.set(nodeId, signaledEventIds);
     const signalsPreview = mergeSignalsPreviewLists({
       lists: mergedSignals,
       limit: Math.max(1, Math.trunc(previewLimit)),
@@ -1570,7 +1594,13 @@ async function loadLeafSignalSummaryByNodeId(params: {
     }
   }
 
-  return { countByNodeId, signalsPreviewByNodeId, topSignalByNodeId };
+  return {
+    countByNodeId,
+    signaledEventIdsByNodeId,
+    preferredSignalMarketByEventId,
+    signalsPreviewByNodeId,
+    topSignalByNodeId,
+  };
 }
 
 function applySignalSummaryToEvents(
@@ -1914,7 +1944,7 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         };
       }
       const cacheKey = [
-        "market-map:v7-observed-top",
+        "market-map:v8-signaled-preview",
         runId,
         lifecycle.revision,
         policyCacheVersion,
@@ -2080,41 +2110,37 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
           null,
       }));
 
-      const itemsWithLeafSignals =
+      const leafSignalSummary =
         level === 3 && itemsWithNodeSignalPreview.length > 0
-          ? await (async () => {
-              const leafSignalSummary = await timeColdPhase(
-                "signals.level3LeafSummary",
-                () =>
-                  loadLeafSignalSummaryByNodeId({
-                    runId,
-                    nodeIds: itemsWithNodeSignalPreview.map((node) => node.id),
-                    previewLimit: MARKET_MAP_SIGNALS_PREVIEW_LIMIT,
-                    redis,
-                  }),
-              );
-              return itemsWithNodeSignalPreview.map((node) => ({
-                ...node,
-                signalCountSubtree: Math.max(
-                  0,
-                  Math.max(
-                    Math.trunc(node.signalCountSubtree ?? 0),
-                    Math.trunc(
-                      leafSignalSummary.countByNodeId.get(node.id) ?? 0,
-                    ),
-                  ),
-                ),
-                signalsPreview:
-                  leafSignalSummary.signalsPreviewByNodeId.get(node.id) ??
-                  node.signalsPreview,
-                topSignal:
-                  leafSignalSummary.signalsPreviewByNodeId.get(node.id)?.[0] ??
-                  node.topSignal ??
-                  leafSignalSummary.topSignalByNodeId.get(node.id) ??
-                  null,
-              }));
-            })()
-          : itemsWithNodeSignalPreview;
+          ? await timeColdPhase("signals.level3LeafSummary", () =>
+              loadLeafSignalSummaryByNodeId({
+                runId,
+                nodeIds: itemsWithNodeSignalPreview.map((node) => node.id),
+                previewLimit: MARKET_MAP_SIGNALS_PREVIEW_LIMIT,
+                redis,
+              }),
+            )
+          : null;
+      const itemsWithLeafSignals = leafSignalSummary
+        ? itemsWithNodeSignalPreview.map((node) => ({
+            ...node,
+            signalCountSubtree: Math.max(
+              0,
+              Math.max(
+                Math.trunc(node.signalCountSubtree ?? 0),
+                Math.trunc(leafSignalSummary.countByNodeId.get(node.id) ?? 0),
+              ),
+            ),
+            signalsPreview:
+              leafSignalSummary.signalsPreviewByNodeId.get(node.id) ??
+              node.signalsPreview,
+            topSignal:
+              leafSignalSummary.signalsPreviewByNodeId.get(node.id)?.[0] ??
+              node.topSignal ??
+              leafSignalSummary.topSignalByNodeId.get(node.id) ??
+              null,
+          }))
+        : itemsWithNodeSignalPreview;
 
       const itemsWithPreview =
         includeChildrenPreview && level < 3
@@ -2212,24 +2238,58 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                 async () => pipeline.exec(),
               )) as unknown as Array<string | null>;
 
-              const eventsByNode = itemsWithPreviewSignals.map((_, index) => {
-                const nodeEvents = (
-                  safeJsonParse<MarketMapEventSummary[]>(rawEvents[index]) ?? []
-                )
-                  .filter((event) =>
-                    selectedVenueSet.size === 0
-                      ? true
-                      : selectedVenueSet.has(event.venue),
-                  )
-                  .sort(
-                    (a, b) =>
-                      metricForEvent(b, sizeBy) - metricForEvent(a, sizeBy) ||
-                      b.score - a.score ||
-                      a.eventId.localeCompare(b.eventId),
+              const preferredSignalMarketByNode = itemsWithPreviewSignals.map(
+                (node) => {
+                  const preferred = new Map<string, string>();
+                  for (const signal of node.signalsPreview ?? []) {
+                    if (
+                      signal.targetEventId &&
+                      signal.targetMarketId &&
+                      !preferred.has(signal.targetEventId)
+                    ) {
+                      preferred.set(
+                        signal.targetEventId,
+                        signal.targetMarketId,
+                      );
+                    }
+                  }
+                  return preferred;
+                },
+              );
+              const eventsByNode = itemsWithPreviewSignals.map(
+                (node, index) => {
+                  const signaledEventIds = new Set([
+                    ...(leafSignalSummary?.signaledEventIdsByNodeId.get(
+                      node.id,
+                    ) ?? []),
+                    ...(node.signalsPreview ?? []).flatMap((signal) =>
+                      signal.targetEventId ? [signal.targetEventId] : [],
+                    ),
+                  ]);
+                  const nodeEvents = prioritizeSignaledMapEvents(
+                    (
+                      safeJsonParse<MarketMapEventSummary[]>(
+                        rawEvents[index],
+                      ) ?? []
+                    )
+                      .filter((event) =>
+                        selectedVenueSet.size === 0
+                          ? true
+                          : selectedVenueSet.has(event.venue),
+                      )
+                      .sort(
+                        (a, b) =>
+                          metricForEvent(b, sizeBy) -
+                            metricForEvent(a, sizeBy) ||
+                          b.score - a.score ||
+                          a.eventId.localeCompare(b.eventId),
+                      ),
+                    signaledEventIds,
                   );
-                eventsPreviewRawCount += nodeEvents.length;
-                return nodeEvents;
-              });
+                  eventsPreviewRawCount += nodeEvents.length;
+                  return nodeEvents;
+                },
+              );
               const allPreviewEvents = eventsByNode.flat();
               const canonicalPreviewEventByVenue = new Map<
                 string,
@@ -2291,7 +2351,18 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
                     entry.event.eventId,
                     entry.event.venue,
                   );
-                  return canonicalPreviewEventByVenue.get(key) ?? entry.event;
+                  const event =
+                    canonicalPreviewEventByVenue.get(key) ?? entry.event;
+                  const preferredMarketId =
+                    preferredSignalMarketByNode[entry.nodeIndex].get(
+                      event.eventId,
+                    ) ??
+                    leafSignalSummary?.preferredSignalMarketByEventId.get(
+                      event.eventId,
+                    );
+                  return preferredMarketId
+                    ? { ...event, representativeMarketId: preferredMarketId }
+                    : event;
                 });
                 let hydratedCandidates = candidates;
                 const liveStartedAt = Date.now();

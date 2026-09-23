@@ -16458,6 +16458,79 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "X recovers a legacy blocked draft that no longer parses",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableFollowthroughTestChat(redis);
+      await updateSignalBotContentProfile({
+        chatId: "-100",
+        contentProfile: "x_editorial_draft_v1",
+        redis,
+      });
+      const db = new FakeFollowthroughDb();
+      db.runtimePayload = {
+        signalBotFollowthroughEnabled: true,
+        signalBotFollowthroughMinJoinedOrAdded: 1,
+        signalBotFollowthroughMinNetFlowUsd: 100_000,
+        signalBotFollowthroughMinPriceMoveCents: 100,
+        signalBotFollowthroughTypes: ["stats"],
+      };
+      db.candidateRows = [
+        followthroughCandidateRow({
+          root_metrics: { contentProfile: "x_editorial_draft_v1" },
+        }),
+      ];
+      db.flowRows = [followthroughFlowRow({ baseline_shares: "0" })];
+      const key =
+        "-100|00000000-0000-4000-8000-000000000101|followthrough_stats";
+      db.messageRows.set(key, {
+        id: "00000000-0000-4000-8000-000000000099",
+        messageId: null,
+        metrics: {
+          contentProfile: "x_editorial_draft_v1",
+          editorialDraftV1: { status: "blocked" },
+          status: "skipped",
+        },
+      });
+      const telegram = new FakeTelegram();
+      let composeCalls = 0;
+      const run = () =>
+        publishSignalBotFollowthroughTick({
+          config: parseSignalBotConfig({
+            HUNCH_SIGNAL_BOT_TOKEN: "token",
+            HUNCH_SIGNAL_BOT_X_EDITORIAL_ENABLED: "true",
+          }),
+          db,
+          now: new Date("2026-01-02T02:00:00.000Z"),
+          redis,
+          telegram,
+          xEditorialComposer: async () => {
+            composeCalls += 1;
+            throw new Error("legacy blocked draft must use fallback");
+          },
+        });
+
+      const first = await run();
+      const second = await run();
+      assert.equal(first.sent, 1);
+      assert.equal(second.sent, 0);
+      assert.equal(composeCalls, 0);
+      assert.equal(telegram.messages.length, 1);
+      const metrics = db.messageRows.get(key)?.metrics as
+        | {
+            editorialFallbackV1?: {
+              reason?: unknown;
+              recoveredTerminalSkip?: unknown;
+            };
+            status?: unknown;
+          }
+        | undefined;
+      assert.equal(metrics?.status, "sent");
+      assert.equal(metrics?.editorialFallbackV1?.reason, "model_blocked");
+      assert.equal(metrics?.editorialFallbackV1?.recoveredTerminalSkip, true);
+    },
+  },
+  {
     name: "an explicit X model block sends an audited editorial fallback",
     run: async () => {
       const redis = new FakeRedis();

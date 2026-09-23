@@ -534,6 +534,21 @@ export function safeJsonParse<T>(raw: string | null | undefined): T | null {
   }
 }
 
+// Preserve metric order within each group while moving signaled events ahead
+// of the bounded preview cutoff.
+export function prioritizeSignaledMapEvents<T extends { eventId: string }>(
+  metricSortedEvents: T[],
+  signaledEventIds: ReadonlySet<string>,
+): T[] {
+  if (signaledEventIds.size === 0) return metricSortedEvents;
+  const signaled: T[] = [];
+  const others: T[] = [];
+  for (const event of metricSortedEvents) {
+    (signaledEventIds.has(event.eventId) ? signaled : others).push(event);
+  }
+  return signaled.length > 0 ? signaled.concat(others) : metricSortedEvents;
+}
+
 export function buildMarketMapNodeId(input: {
   scope: string;
   level: number;
