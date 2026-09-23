@@ -12,18 +12,15 @@ const JEV_TIMEOUT_MS = 5_000;
 
 export function availableHolderResearchJevSlots(
   selectedCount: number,
-  policy: Pick<
-    HolderResearchPolicy,
-    "triageBatchSize" | "maxCandidatesPerRun" | "maxAgentCallsPerRun"
-  >,
+  policy: Pick<HolderResearchPolicy, "triageBatchSize" | "maxCandidatesPerRun">,
 ): number {
+  // The final-model call cap applies after triage, not to its input batch.
   return Math.max(
     0,
     Math.min(
       2,
       policy.triageBatchSize - selectedCount,
       policy.maxCandidatesPerRun - selectedCount,
-      policy.maxAgentCallsPerRun - selectedCount,
     ),
   );
 }

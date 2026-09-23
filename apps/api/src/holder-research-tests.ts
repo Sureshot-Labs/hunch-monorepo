@@ -1305,6 +1305,11 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         key: `${first.key}:second`,
         thesisKey: `${first.thesisKey}:second`,
       };
+      const third = {
+        ...first,
+        key: `${first.key}:third`,
+        thesisKey: `${first.thesisKey}:third`,
+      };
       const eligible = [
         {
           candidate: first,
@@ -1328,6 +1333,17 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
             legacyPriority: 0.9,
           },
         },
+        {
+          candidate: third,
+          decision: {
+            key: third.key,
+            action: "investigate" as const,
+            reason_codes: ["strong_actor" as const],
+            research_need: "none" as const,
+            reason: "Third candidate remains subject to the final-call cap.",
+            legacyPriority: 0.8,
+          },
+        },
       ];
       assert.deepEqual(
         selectHolderResearchTriageInvestigations(eligible, {
@@ -1341,7 +1357,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           limit: 2,
           useV2: false,
         }).map((entry) => entry.candidate.key),
-        [second.key, first.key],
+        [second.key, third.key],
       );
     },
   },
@@ -6132,10 +6148,15 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       );
       assert.equal(liveCapacity.dropped, 1);
       assert.equal(availableHolderResearchJevSlots(3, p), 2);
-      assert.equal(
-        availableHolderResearchJevSlots(3, { ...p, maxAgentCallsPerRun: 3 }),
-        0,
-      );
+      const productionLike = {
+        ...p,
+        triageBatchSize: 8,
+        maxCandidatesPerRun: 6,
+        maxAgentCallsPerRun: 2,
+      };
+      assert.equal(availableHolderResearchJevSlots(3, productionLike), 2);
+      assert.equal(availableHolderResearchJevSlots(5, productionLike), 1);
+      assert.equal(availableHolderResearchJevSlots(6, productionLike), 0);
       assert.equal(
         availableHolderResearchJevSlots(3, { ...p, maxCandidatesPerRun: 4 }),
         1,
