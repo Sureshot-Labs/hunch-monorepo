@@ -56,6 +56,7 @@ export type TelegramFundingProgressProjection = Readonly<{
   automaticConversionPaused?: boolean;
   sourceAssetSymbol?: string;
   sourceRawAmount?: string | null;
+  sourceUnavailable?: true;
   receiptBreakdown?: TelegramFundingReceiptBreakdown;
   minimumFundingUsd?: string;
   reviewContinuation?: FundingReceiveReviewContinuation;

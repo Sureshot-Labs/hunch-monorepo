@@ -69,6 +69,33 @@ import {
   assert.match(status.text, /on Solana/);
   assert.doesNotMatch(status.text, /solana:mainnet|not-for-status/);
 }
+{
+  const receipts: FundingReceiveReceipt[] = Array.from(
+    { length: 12 },
+    (_, index) => ({
+      receiptId: `receipt-${index}`,
+      receiveSessionId: "session",
+      variantId: "solana",
+      asset: { networkId: "solana:mainnet", assetId: "native", decimals: 9 },
+      destinationAddress: "must-not-disclose",
+      rawAmount: "1000000000",
+      observationRevision: "fixture",
+      observedAt: new Date(Date.UTC(2026, 8, 15, 12, index)).toISOString(),
+      status: index === 0 ? "recovery_required" : "ready",
+      ...(index === 0 ? { sourceUnavailable: true as const } : {}),
+      handling: "automatic_conversion",
+      childFundingOperationId: null,
+    }),
+  );
+  const status = buildTelegramFundingReceiptStatusMessage({
+    contextId: "fixture",
+    venue: "polymarket",
+    receipts,
+  });
+  assert.match(status.text, /1 earlier deposit was not converted/);
+  assert.match(status.text, /2 additional receipts are retained/);
+  assert.doesNotMatch(status.text, /must-not-disclose/);
+}
 import {
   parseTelegramFundingProgressProjection,
   projectTelegramFundingProgress,

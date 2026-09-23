@@ -12,6 +12,7 @@ import {
   parseTelegramFundingProgressProjection,
   projectTelegramFundingProgress,
   projectTelegramFundingUnavailable,
+  refineRetainedTerminalForUnavailableSource,
   resolveTelegramFundingRetainedTerminal,
   telegramFundingProgressFingerprint,
 } from "./telegram-funding-progress.js";
@@ -307,10 +308,20 @@ async function projectCandidate(
         context.addressRedactedRevision &&
       redactionPresentation != null &&
       latestProjection?.state !== "unavailable";
+    const terminalUnavailableRefinement =
+      !shouldRedactDeliveredAddress &&
+      !shouldDeleteQrPhoto &&
+      retainedTerminal.kind === "valid"
+        ? refineRetainedTerminalForUnavailableSource(
+            retainedTerminal.projection,
+            currentConsentProjection,
+          )
+        : null;
     if (
       !disclosureTargetIsCurrent &&
       !shouldRedactDeliveredAddress &&
-      !shouldDeleteQrPhoto
+      !shouldDeleteQrPhoto &&
+      !terminalUnavailableRefinement
     ) {
       await client.query(
         `
@@ -355,7 +366,7 @@ async function projectCandidate(
     if (retainedTerminal.kind !== "absent") {
       projection =
         retainedTerminal.kind === "valid"
-          ? retainedTerminal.projection
+          ? (terminalUnavailableRefinement ?? retainedTerminal.projection)
           : redactionPresentation
             ? projectTelegramFundingUnavailable(context, redactionPresentation)
             : null;
@@ -424,12 +435,14 @@ async function projectCandidate(
             progress_fingerprint = $3,
             latest_progress_projection = $4::jsonb,
             latest_terminal_revision = case
-              when $11::boolean or (latest_terminal_projection is null and $5)
+              when $11::boolean or $12::boolean
+                or (latest_terminal_projection is null and $5)
                 then $2
               else latest_terminal_revision
             end,
             latest_terminal_projection = case
-              when $11::boolean or (latest_terminal_projection is null and $5)
+              when $11::boolean or $12::boolean
+                or (latest_terminal_projection is null and $5)
                 then $4::jsonb
               else latest_terminal_projection
             end,
@@ -444,6 +457,7 @@ async function projectCandidate(
             latest_terminal_projection is null
             or latest_terminal_projection = $4::jsonb
             or $11::boolean
+            or $12::boolean
           )
         returning id
       `,
@@ -459,6 +473,7 @@ async function projectCandidate(
         policyRevision,
         now,
         retainedTerminal.kind === "invalid",
+        terminalUnavailableRefinement !== null,
       ],
     );
     if (!updated.rows[0]) return "skipped";

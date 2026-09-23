@@ -80,7 +80,13 @@ for (const asset of [
       ],
     }),
   };
-  const sources = [{ reservation, heldRaw: "1398210" }];
+  const sources = [
+    {
+      reservation,
+      heldRaw: "1398210",
+      projectedHeldRaw: "1398210",
+    },
+  ];
   const available = account.cashAvailability.components[0];
   assert.ok(available);
   if (asset === SOLANA_NATIVE_ASSET) {
@@ -113,6 +119,7 @@ for (const asset of [
         [
           {
             heldRaw: "1398210",
+            projectedHeldRaw: "1398210",
             reservation: { ...reservation, rawAmount: "384361" },
           },
         ],
@@ -137,15 +144,90 @@ for (const asset of [
     assertSharedFundingSourceCapacity(account, "owner", [
       {
         heldRaw: "1398210",
+        projectedHeldRaw: "1398210",
         reservation: { ...reservation, rawAmount: "384361" },
       },
     ]),
   );
   rejected(() =>
     assertSharedFundingSourceCapacity(account, "owner", [
-      { reservation, heldRaw: "1398211" },
+      { reservation, heldRaw: "1398211", projectedHeldRaw: "1398210" },
     ]),
   );
+  // Historical incident: a $2 receive-conversion hold and a $1.112645 trade
+  // used distinct component IDs for one physical Solana USDC wallet.
+  if (asset.networkId === "solana:mainnet" && asset.decimals === 6) {
+    const aliasedAccount = {
+      ...account,
+      projection: {
+        components: [{ ...component, amount: { asset, raw: "2000000" } }],
+      },
+      cashAvailability: {
+        ...account.cashAvailability,
+        components: [
+          {
+            ...available,
+            amount: { asset, raw: "2000000" },
+            availableRaw: "2000000",
+            reservedRaw: "0",
+          },
+        ],
+      },
+    };
+    rejected(() =>
+      assertSharedFundingSourceCapacity(aliasedAccount, "owner", [
+        {
+          reservation: { ...reservation, rawAmount: "1112645" },
+          heldRaw: "2000000",
+          projectedHeldRaw: "0",
+        },
+      ]),
+    );
+    assert.doesNotThrow(() =>
+      assertSharedFundingSourceCapacity(aliasedAccount, "owner", [
+        {
+          reservation: { ...reservation, rawAmount: "1000000" },
+          heldRaw: "1000000",
+          projectedHeldRaw: "0",
+        },
+      ]),
+    );
+    // Non-source reservations displayed on the selected component do not
+    // overlap a subtract hold attached to another alias of the same wallet.
+    const availabilityComponent = aliasedAccount.cashAvailability.components[0];
+    assert.ok(availabilityComponent);
+    const otherModeAccount = {
+      ...aliasedAccount,
+      cashAvailability: {
+        ...aliasedAccount.cashAvailability,
+        components: [
+          {
+            ...availabilityComponent,
+            availableRaw: "1000000",
+            reservedRaw: "1000000",
+          },
+        ],
+      },
+    };
+    rejected(() =>
+      assertSharedFundingSourceCapacity(otherModeAccount, "owner", [
+        {
+          reservation: { ...reservation, rawAmount: "1000000" },
+          heldRaw: "1000000",
+          projectedHeldRaw: "0",
+        },
+      ]),
+    );
+    rejected(() =>
+      assertSharedFundingSourceCapacity(otherModeAccount, "owner", [
+        {
+          reservation: { ...reservation, rawAmount: "1000000" },
+          heldRaw: "1000000",
+          projectedHeldRaw: "1000001",
+        },
+      ]),
+    );
+  }
   for (const changes of [
     { freshness: "stale" as const },
     { availableRaw: "0" },

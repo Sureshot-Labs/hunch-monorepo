@@ -24,6 +24,7 @@ import { lockFundingAuthorizationReservationScope } from "./funding-authorizatio
 import { canonicalJsonEqual } from "./canonical.js";
 import { telegramReceiveConsentWhereSql } from "./telegram-receive-consent-sql.js";
 import { reduceFundingOperationInTransaction } from "../reconciliation/funding-reducer.js";
+import { fundingReservationHoldSql } from "./source-reservation-hold.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 type ReceiveTargets = NonNullable<ExternalIngressInstruction["receiveTargets"]>;
@@ -173,6 +174,17 @@ function publicSession(row: ReceiveSessionRow): FundingReceiveSession {
 }
 
 function publicReceipt(row: ReceiveReceiptRow): FundingReceiveReceipt {
+  const reviewResolutionValue = row.evidence.reviewResolution;
+  const reviewResolution =
+    reviewResolutionValue !== null &&
+    typeof reviewResolutionValue === "object" &&
+    !Array.isArray(reviewResolutionValue)
+      ? (reviewResolutionValue as JsonRecord)
+      : null;
+  const sourceUnavailable =
+    row.status === "recovery_required" &&
+    reviewResolution?.reason ===
+      "finalized_source_debit_and_insufficient_balance";
   const reviewContinuation = parseFundingReceiveReviewContinuation(
     row.evidence.reviewContinuation,
   );
@@ -196,12 +208,15 @@ function publicReceipt(row: ReceiveReceiptRow): FundingReceiveReceipt {
     status: row.status,
     handling: row.handling,
     childFundingOperationId: row.child_funding_operation_id,
+    ...(sourceUnavailable ? { sourceUnavailable: true as const } : {}),
     ...(row.status === "recovery_required" &&
     row.child_funding_operation_id === null &&
     row.evidence.receiveAutomationReason === "receive_automation_not_consented"
       ? { automationReason: "receive_automation_not_consented" as const }
       : {}),
-    ...(reviewContinuation && reviewQuotePlan
+    ...(row.status === "review_required" &&
+    reviewContinuation &&
+    reviewQuotePlan
       ? { reviewContinuation, reviewQuotePlan }
       : {}),
   };
@@ -1268,6 +1283,103 @@ export async function claimObservableFundingReceiveSessions(
   });
   return rows.map(snapshot);
 }
+
+/** Old receive reviews need an independent, receipt-driven repair lane. */
+export async function claimExpiredFundingReceiveSpentReviews(
+  db: Pick<Pool, "query">,
+  input: Readonly<{ limit: number; minimumPollIntervalMs: number; now: Date }>,
+): Promise<readonly FundingReceiveSessionSnapshot[]> {
+  const { rows } = await db.query<ReceiveSessionRow>(
+    `with candidate_sessions as materialized (
+       select receive_session.id, receive_session.observe_until,
+              receive_session.last_spent_review_checked_at
+       from funding_receive_receipts receipt
+       join funding_receive_sessions receive_session
+         on receive_session.id = receipt.receive_session_id
+        and receive_session.user_id = receipt.user_id
+       where receipt.status = 'review_required'
+         and receipt.handling = 'automatic_conversion'
+         and receipt.child_funding_operation_id is null
+         and receipt.network_id = 'solana:mainnet'
+         and receipt.ledger_height is not null
+         and receipt.routing_last_error_code in (
+           'child_operation_failed_before_broadcast',
+           'automation_policy_exceeded',
+           'economic_review_required'
+         )
+         -- Do not let old reviews without any matching finalized source spend
+         -- consume the one expensive on-chain proof slot per worker run.
+         and exists (
+           select 1
+           from jsonb_array_elements(receive_session.observation_variants)
+                  as candidate_variant(value)
+           join balance_reservations spent_source
+             on spent_source.user_id = receipt.user_id
+            and spent_source.location_id =
+                candidate_variant.value ->> 'destinationLocationId'
+            and spent_source.network_id = receipt.network_id
+            and spent_source.asset_id = receipt.asset_id
+            and spent_source.mode = 'subtract_available'
+           join funding_operations spent_operation
+             on spent_operation.id = spent_source.operation_id
+            and spent_operation.user_id = receipt.user_id
+            and spent_operation.status = 'completed'
+           join funding_operation_steps spent_step
+             on spent_step.operation_id = spent_source.operation_id
+            and spent_step.segment_id = spent_source.segment_id
+            and spent_step.state = 'succeeded'
+            and spent_step.executor_id = 'wallet_profile_svm_v1'
+            and spent_step.normalized_action ->> 'kind' = 'svm_transaction'
+            and spent_step.normalized_action ->> 'networkId' = receipt.network_id
+            and spent_step.normalized_action #>> '{instructions,0,programId}'
+                  = '99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2'
+            and spent_step.action_validation_result ->> 'relayStepKind'
+                  = 'deposit'
+            and spent_step.action_validation_result ->> 'signerAddress'
+                  = receipt.destination_address
+           join funding_step_receipt_observations spent_receipt
+             on spent_receipt.step_id = spent_step.id
+            and spent_receipt.operation_id = spent_operation.id
+            and spent_receipt.status = 'finalized'
+            and spent_receipt.canonical
+            and spent_receipt.action_match
+            and spent_receipt.finalized_at is not null
+            and spent_receipt.network_id = receipt.network_id
+            and spent_receipt.evidence ->> 'transactionSignature' is not null
+           where candidate_variant.value ->> 'variantId' = receipt.variant_id
+             and spent_source.raw_amount ~ '^[1-9][0-9]*$'
+             and (${safeSpentReceiptLedgerSlotSql}) > receipt.ledger_height
+         )
+         and receive_session.status in (
+           'review_required', 'recovery_required', 'expired',
+           'cancelled', 'completed'
+         )
+         and receive_session.observe_until <= $1::timestamptz
+         and (
+           receive_session.last_spent_review_checked_at is null
+           or receive_session.last_spent_review_checked_at <=
+                $1::timestamptz - ($3::bigint * interval '1 millisecond')
+         )
+       order by receive_session.last_spent_review_checked_at asc nulls first,
+                receive_session.id asc, receipt.id asc
+       for update of receive_session skip locked
+       limit $2::integer
+     ), claimed as (
+       update funding_receive_sessions receive_session
+       set last_spent_review_checked_at = $1::timestamptz
+       from candidate_sessions candidate
+       where receive_session.id = candidate.id
+       returning receive_session.*
+     )
+     select ${sessionColumns} from claimed`,
+    [
+      input.now,
+      Math.max(1, Math.min(25, Math.trunc(input.limit))),
+      Math.max(1_000, Math.trunc(input.minimumPollIntervalMs)),
+    ],
+  );
+  return rows.map(snapshot);
+}
 export async function listFundingReceiveReceiptsForUser(
   db: Pick<Pool, "query">,
   input: Readonly<{ userId: string; receiveSessionId: string }>,
@@ -1305,6 +1417,467 @@ export async function listFundingReceiveReceiptsForUser(
     [input.receiveSessionId, input.userId],
   );
   return rows.map(publicReceipt);
+}
+
+export type FundingReceiveSpentReviewCandidate = Readonly<{
+  receiptId: string;
+  receiveSessionId: string;
+  userId: string;
+  locationId: string;
+  networkId: string;
+  assetId: string;
+  assetDecimals: number;
+  destinationAddress: string;
+  sourceRaw: string;
+  requiredFinalizedSlot: string;
+  spentReceiptId: string;
+  spentSignature: string;
+  spentRaw: string;
+  spentSlot: string;
+}>;
+
+// ledger_height is historical text, not a numeric-constrained column. A CASE
+// is required: PostgreSQL may evaluate a plain cast before an adjacent AND.
+const safeSpentReceiptLedgerSlotSql = `case
+  when spent_receipt.ledger_height ~ '^[0-9]{1,16}$'
+    then case
+      when spent_receipt.ledger_height::numeric <= 9007199254740991
+        then spent_receipt.ledger_height::numeric
+      else null
+    end
+  else null
+end`;
+
+function latestKnownSolanaWalletCreditSlotSql(
+  scope: "receipt" | "parameters",
+): string {
+  const networkId = scope === "receipt" ? "receipt.network_id" : "$5";
+  const assetId = scope === "receipt" ? "receipt.asset_id" : "$6";
+  const address = scope === "receipt" ? "receipt.destination_address" : "$7";
+  const userId = scope === "receipt" ? "receipt.user_id" : "$3";
+  return `
+    select max(known_credit.ledger_slot)
+    from (
+      select case
+        when canonical_event.ledger_height <= 9007199254740991
+          then canonical_event.ledger_height
+        else null
+      end as ledger_slot
+      from funding_receive_canonical_events canonical_event
+      where canonical_event.network_id = ${networkId}
+        and canonical_event.asset_id = ${assetId}
+        and canonical_event.destination_address = ${address}
+      union all
+      select case
+        when inbound_receipt.ledger_height <= 9007199254740991
+          then inbound_receipt.ledger_height
+        else null
+      end as ledger_slot
+      from funding_receive_receipts inbound_receipt
+      where inbound_receipt.user_id = ${userId}
+        and inbound_receipt.network_id = ${networkId}
+        and inbound_receipt.asset_id = ${assetId}
+        and inbound_receipt.destination_address = ${address}
+        and inbound_receipt.ledger_height is not null
+      union all
+      select case
+        when credit_observation.ledger_height ~ '^[0-9]{1,16}$'
+          then case
+            when credit_observation.ledger_height::numeric <= 9007199254740991
+              then credit_observation.ledger_height::numeric
+            else null
+          end
+        else null
+      end as ledger_slot
+      from funding_observations credit_observation
+      where credit_observation.network_id = ${networkId}
+        and credit_observation.asset_id = ${assetId}
+        and credit_observation.to_address = ${address}
+        and credit_observation.kind in (
+          'source_credit', 'destination_credit', 'refund_credit'
+        )
+        and credit_observation.canonical
+        and credit_observation.finality_status <> 'reorged'
+    ) known_credit
+  `;
+}
+
+/**
+ * A completed operation with a finalized source transaction from the exact
+ * receive wallet is only a reason
+ * to inspect current inventory. It never attributes fungible wallet funds to
+ * one deposit and never, by itself, closes a receipt.
+ */
+export async function listFundingReceiveSpentReviewCandidates(
+  db: Pick<Pool, "query">,
+  input: Readonly<{ userId: string; receiveSessionId: string; limit: number }>,
+): Promise<readonly FundingReceiveSpentReviewCandidate[]> {
+  const { rows } = await db.query<{
+    receipt_id: string;
+    location_id: string;
+    network_id: string;
+    asset_id: string;
+    asset_decimals: number;
+    destination_address: string;
+    source_raw: string;
+    required_finalized_slot: string;
+    spent_receipt_id: string;
+    spent_signature: string;
+    spent_raw: string;
+    spent_slot: string;
+  }>(
+    `
+      select receipt.id as receipt_id,
+             variant.value ->> 'destinationLocationId' as location_id,
+             receipt.network_id, receipt.asset_id, receipt.asset_decimals,
+             receipt.destination_address,
+             receipt.evidence #>> '{reviewQuotePlan,confirmedSourceAmount,raw}'
+               as source_raw,
+             greatest(
+               spent_proof.spent_slot,
+               coalesce(wallet_credit.latest_slot, 0)
+             )::text
+               as required_finalized_slot,
+             spent_proof.spent_receipt_id,
+             spent_proof.spent_signature,
+             spent_proof.spent_raw,
+             spent_proof.spent_slot::text as spent_slot
+      from funding_receive_receipts receipt
+      join funding_receive_sessions session
+        on session.id = receipt.receive_session_id
+       and session.user_id = receipt.user_id
+      join lateral jsonb_array_elements(session.observation_variants)
+        as variant(value)
+        on variant.value ->> 'variantId' = receipt.variant_id
+      join lateral (
+        select spent_receipt.id as spent_receipt_id,
+               spent_receipt.evidence ->> 'transactionSignature'
+                 as spent_signature,
+               spent_source.raw_amount::text as spent_raw,
+               (${safeSpentReceiptLedgerSlotSql}) as spent_slot
+        from balance_reservations spent_source
+        join funding_operations spent_operation
+          on spent_operation.id = spent_source.operation_id
+         and spent_operation.user_id = receipt.user_id
+         and spent_operation.status = 'completed'
+        join funding_operation_steps spent_step
+          on spent_step.operation_id = spent_source.operation_id
+         and spent_step.segment_id = spent_source.segment_id
+         and spent_step.state = 'succeeded'
+         and spent_step.executor_id = 'wallet_profile_svm_v1'
+         and spent_step.normalized_action ->> 'kind' = 'svm_transaction'
+         and spent_step.normalized_action ->> 'networkId' = receipt.network_id
+         and spent_step.normalized_action #>> '{instructions,0,programId}'
+               = '99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2'
+         and spent_step.action_validation_result ->> 'relayStepKind'
+               = 'deposit'
+         and spent_step.action_validation_result ->> 'signerAddress'
+               = receipt.destination_address
+        join funding_step_receipt_observations spent_receipt
+          on spent_receipt.step_id = spent_step.id
+         and spent_receipt.operation_id = spent_operation.id
+         and spent_receipt.status = 'finalized'
+         and spent_receipt.canonical
+         and spent_receipt.action_match
+         and spent_receipt.finalized_at is not null
+         and spent_receipt.network_id = receipt.network_id
+         and spent_receipt.evidence ->> 'transactionSignature' is not null
+         and (${safeSpentReceiptLedgerSlotSql}) > receipt.ledger_height
+        where spent_source.user_id = receipt.user_id
+          and spent_source.location_id =
+              variant.value ->> 'destinationLocationId'
+          and spent_source.network_id = receipt.network_id
+          and spent_source.asset_id = receipt.asset_id
+          and spent_source.mode = 'subtract_available'
+          and spent_source.raw_amount ~ '^[1-9][0-9]*$'
+        order by (${safeSpentReceiptLedgerSlotSql}) desc,
+                 spent_receipt.id desc
+        limit 1
+      ) spent_proof on true
+      join lateral (
+        ${latestKnownSolanaWalletCreditSlotSql("receipt")}
+      ) wallet_credit(latest_slot) on true
+      where receipt.user_id = $1
+        and receipt.receive_session_id = $2
+        and receipt.status = 'review_required'
+        and receipt.handling = 'automatic_conversion'
+        and receipt.network_id = 'solana:mainnet'
+        and receipt.ledger_height is not null
+        and receipt.ledger_height <= 9007199254740991
+        and receipt.child_funding_operation_id is null
+        and receipt.routing_last_error_code in (
+          'child_operation_failed_before_broadcast',
+          'automation_policy_exceeded',
+          'economic_review_required'
+        )
+        and receipt.evidence #>> '{reviewQuotePlan,confirmedSourceAmount,raw}'
+              ~ '^[1-9][0-9]*$'
+      order by receipt.last_spent_review_checked_at asc nulls first,
+               receipt.created_at, receipt.id
+      limit $3
+    `,
+    [input.userId, input.receiveSessionId, input.limit],
+  );
+  return rows.flatMap((row) =>
+    row.location_id &&
+    row.source_raw &&
+    row.required_finalized_slot &&
+    row.spent_receipt_id &&
+    row.spent_signature &&
+    row.spent_raw &&
+    row.spent_slot
+      ? [
+          {
+            receiptId: row.receipt_id,
+            receiveSessionId: input.receiveSessionId,
+            userId: input.userId,
+            locationId: row.location_id,
+            networkId: row.network_id,
+            assetId: row.asset_id,
+            assetDecimals: row.asset_decimals,
+            destinationAddress: row.destination_address,
+            sourceRaw: row.source_raw,
+            requiredFinalizedSlot: row.required_finalized_slot,
+            spentReceiptId: row.spent_receipt_id,
+            spentSignature: row.spent_signature,
+            spentRaw: row.spent_raw,
+            spentSlot: row.spent_slot,
+          },
+        ]
+      : [],
+  );
+}
+
+/** Advance only the selected receipts, so one unresolvable prefix cannot starve later deposits. */
+export async function markFundingReceiveSpentReviewCandidatesChecked(
+  db: Pick<Pool, "query">,
+  input: Readonly<{
+    userId: string;
+    receiveSessionId: string;
+    receiptIds: readonly string[];
+    now: Date;
+  }>,
+): Promise<void> {
+  if (input.receiptIds.length === 0) return;
+  await db.query(
+    `update funding_receive_receipts receipt
+        set last_spent_review_checked_at = $4
+      where receipt.user_id = $1
+        and receipt.receive_session_id = $2
+        and receipt.id = any($3::uuid[])
+        and receipt.status = 'review_required'
+        and receipt.handling = 'automatic_conversion'
+        and receipt.child_funding_operation_id is null`,
+    [input.userId, input.receiveSessionId, input.receiptIds, input.now],
+  );
+}
+
+export async function resolveFundingReceiveSpentReview(
+  db: Pool,
+  input: FundingReceiveSpentReviewCandidate &
+    Readonly<{
+      observedBalanceRaw: string;
+      observedSlot: string;
+      verifiedDebitRaw: string;
+      verifiedDebitSlot: string;
+      now: Date;
+    }>,
+): Promise<boolean> {
+  return tx(db, (client) =>
+    resolveFundingReceiveSpentReviewInTransaction(client, input),
+  );
+}
+
+export async function resolveFundingReceiveSpentReviewInTransaction(
+  client: PoolClient,
+  input: FundingReceiveSpentReviewCandidate &
+    Readonly<{
+      observedBalanceRaw: string;
+      observedSlot: string;
+      verifiedDebitRaw: string;
+      verifiedDebitSlot: string;
+      now: Date;
+    }>,
+): Promise<boolean> {
+  if (
+    !/^[1-9][0-9]*$/.test(input.sourceRaw) ||
+    !/^[1-9][0-9]*$/.test(input.spentRaw) ||
+    input.verifiedDebitRaw !== input.spentRaw ||
+    input.verifiedDebitSlot !== input.spentSlot ||
+    !/^[1-9][0-9]*$/.test(input.requiredFinalizedSlot) ||
+    !/^(0|[1-9][0-9]*)$/.test(input.observedBalanceRaw) ||
+    !/^[1-9][0-9]*$/.test(input.observedSlot) ||
+    BigInt(input.observedSlot) < BigInt(input.requiredFinalizedSlot) ||
+    BigInt(input.observedBalanceRaw) >= BigInt(input.sourceRaw)
+  ) {
+    return false;
+  }
+  const scope = await client.query<{
+    destination_option_id: string;
+    venue_binding_option_id: string;
+  }>(
+    `select destination_option_id, venue_binding_option_id
+         from funding_receive_sessions
+        where id = $1 and user_id = $2`,
+    [input.receiveSessionId, input.userId],
+  );
+  const session = scope.rows[0];
+  if (!session) return false;
+  await lockFundingReceiveSessionScope(client, {
+    userId: input.userId,
+    destinationOptionId: session.destination_option_id,
+    venueBindingOptionId: session.venue_binding_option_id,
+  });
+  // A user review may already hold this receipt while waiting for the scope
+  // lock. Never wait on that receipt while holding the scope lock ourselves.
+  const unlockedReceipt = await client.query<{ id: string }>(
+    `select id from funding_receive_receipts
+      where id = $1 and receive_session_id = $2 and user_id = $3
+        and status = 'review_required'
+      for update skip locked`,
+    [input.receiptId, input.receiveSessionId, input.userId],
+  );
+  if (!unlockedReceipt.rows[0]) return false;
+  const result = await client.query(
+    `
+        update funding_receive_receipts receipt
+        set status = 'recovery_required',
+            routing_disposition = 'recovery_required',
+            routing_last_error_code = 'review_source_spent_after_receipt',
+            evidence = jsonb_set(receipt.evidence, '{reviewResolution}',
+              jsonb_build_object(
+                'reason', 'finalized_source_debit_and_insufficient_balance',
+                'sourceRaw', $8::text,
+                'observedBalanceRaw', $9::text,
+                'observedSlot', $11::text,
+                'resolvedAt', $10::timestamptz
+              ), true),
+            updated_at = $10
+        from funding_receive_sessions session,
+             lateral jsonb_array_elements(session.observation_variants)
+               as variant(value)
+        where receipt.id = $1
+          and receipt.receive_session_id = $2
+          and receipt.user_id = $3
+          and session.id = receipt.receive_session_id
+          and session.user_id = receipt.user_id
+          and variant.value ->> 'variantId' = receipt.variant_id
+          and variant.value ->> 'destinationLocationId' = $4
+          and receipt.network_id = $5
+          and receipt.asset_id = $6
+          and receipt.destination_address = $7
+          and receipt.status = 'review_required'
+          and receipt.handling = 'automatic_conversion'
+          and receipt.network_id = 'solana:mainnet'
+          and receipt.ledger_height is not null
+          and receipt.child_funding_operation_id is null
+          and receipt.evidence #>> '{reviewQuotePlan,confirmedSourceAmount,raw}'
+                = $8
+          and receipt.routing_last_error_code in (
+            'child_operation_failed_before_broadcast',
+            'automation_policy_exceeded',
+            'economic_review_required'
+          )
+          and not exists (
+            select 1 from funding_quotes active_quote
+            where active_quote.id = receipt.review_quote_id
+              and active_quote.consumed_at is null
+              and active_quote.invalidated_at is null
+              and active_quote.expires_at > $10
+          )
+          and not exists (
+            select 1 from balance_reservations active_source
+            where active_source.user_id = receipt.user_id
+              and active_source.location_id = $4
+              and active_source.network_id = $5
+              and active_source.asset_id = $6
+              and active_source.mode = 'subtract_available'
+              and active_source.state = 'active'
+              and ${fundingReservationHoldSql("active_source")}
+              and not exists (
+                select 1 from funding_observations debit_observation
+                where debit_observation.operation_id = active_source.operation_id
+                  and debit_observation.segment_id is not distinct from
+                      active_source.segment_id
+                  and debit_observation.kind = 'source_debit'
+                  and debit_observation.canonical
+                  and debit_observation.finality_status = 'finalized'
+              )
+          )
+          and exists (
+            select 1
+            from balance_reservations spent_source
+            join funding_operations spent_operation
+              on spent_operation.id = spent_source.operation_id
+             and spent_operation.user_id = receipt.user_id
+             and spent_operation.status = 'completed'
+            join funding_operation_steps spent_step
+              on spent_step.operation_id = spent_source.operation_id
+             and spent_step.segment_id = spent_source.segment_id
+             and spent_step.state = 'succeeded'
+             and spent_step.executor_id = 'wallet_profile_svm_v1'
+             and spent_step.normalized_action ->> 'kind' = 'svm_transaction'
+             and spent_step.normalized_action ->> 'networkId' = $5
+             and spent_step.normalized_action #>> '{instructions,0,programId}'
+                   = '99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2'
+             and spent_step.action_validation_result ->> 'relayStepKind'
+                   = 'deposit'
+             and spent_step.action_validation_result ->> 'signerAddress'
+                   = $7
+            join funding_step_receipt_observations spent_receipt
+              on spent_receipt.step_id = spent_step.id
+             and spent_receipt.operation_id = spent_operation.id
+             and spent_receipt.status = 'finalized'
+             and spent_receipt.canonical
+             and spent_receipt.action_match
+             and spent_receipt.finalized_at is not null
+             and spent_receipt.network_id = $5
+             and spent_receipt.id = $12
+             and spent_receipt.evidence ->> 'transactionSignature' = $13
+             and spent_receipt.ledger_height = $15
+            where spent_source.user_id = receipt.user_id
+              and spent_source.location_id = $4
+              and spent_source.network_id = $5
+              and spent_source.asset_id = $6
+              and spent_source.mode = 'subtract_available'
+              and spent_source.raw_amount::text = $14
+             and (${safeSpentReceiptLedgerSlotSql}) > receipt.ledger_height
+             and $11::numeric >= (${safeSpentReceiptLedgerSlotSql})
+          )
+          and $11::numeric >= (
+            ${latestKnownSolanaWalletCreditSlotSql("parameters")}
+          )
+      `,
+    [
+      input.receiptId,
+      input.receiveSessionId,
+      input.userId,
+      input.locationId,
+      input.networkId,
+      input.assetId,
+      input.destinationAddress,
+      input.sourceRaw,
+      input.observedBalanceRaw,
+      input.now,
+      input.observedSlot,
+      input.spentReceiptId,
+      input.spentSignature,
+      input.spentRaw,
+      input.spentSlot,
+    ],
+  );
+  if (result.rowCount !== 1) return false;
+  // A closed session must stay closed, but its changed receipt still needs a
+  // new revision so durable Telegram projections can discover the outcome.
+  await client.query(
+    `update funding_receive_sessions
+        set version = version + 1, updated_at = $3
+      where id = $1 and user_id = $2
+        and status in ('expired', 'cancelled', 'completed')`,
+    [input.receiveSessionId, input.userId, input.now],
+  );
+  await refreshFundingReceiveSessionStatus(client, input);
+  return true;
 }
 
 export async function listFundingReceiveRoutingReceiptIdsAfterBroadcastBoundary(

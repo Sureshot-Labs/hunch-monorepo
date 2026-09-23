@@ -14,6 +14,7 @@ import {
 } from "./finance-jobs.js";
 import {
   closeFundingReconciliationPool,
+  runFundingReceiveSpentReviewJob,
   runFundingReconciliationJob,
 } from "./funding-reconciliation.js";
 import { env } from "./env.js";
@@ -170,6 +171,22 @@ export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
       jitterSec: 0,
       run: () => runFundingReconciliationJob(),
       isNoopResult: isFundingReconciliationNoop,
+    },
+    {
+      name: "funding_receive_spent_review",
+      enabled:
+        workerEnv.fundingReconciliationEnabled &&
+        Boolean(workerEnv.databaseUrl),
+      intervalSec: 60,
+      // This optional RPC repair has no scheduler timeout: a slow request
+      // cannot release the per-job running guard and start overlapping work.
+      timeoutSec: 0,
+      maxRetries: 0,
+      retryBackoffSec: workerEnv.retryBackoffSec,
+      jitterSec: 0,
+      run: () => runFundingReceiveSpentReviewJob(),
+      isNoopResult: (result) =>
+        !hasPositiveActivity(result, ["resolved", "retryableErrors"]),
     },
     {
       name: "api_cache_warm",

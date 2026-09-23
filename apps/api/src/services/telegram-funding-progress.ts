@@ -28,6 +28,50 @@ import {
   type TelegramFundingRoutePresentation,
 } from "./telegram-funding-route.js";
 
+/** Refine only the copy of a closed card; never revive its address or Buy. */
+export function refineRetainedTerminalForUnavailableSource(
+  retained: TelegramFundingProgressProjection,
+  current: TelegramFundingProgressProjection | null,
+): TelegramFundingProgressProjection | null {
+  if (
+    !current ||
+    !retained.terminal ||
+    retained.receiveAddress !== null ||
+    !["needs_attention", "expired", "cancelled"].includes(retained.state) ||
+    retained.reviewContinuation ||
+    current.state !== "needs_attention" ||
+    !current.terminal ||
+    current.receiveAddress !== null ||
+    current.sourceUnavailable !== true ||
+    current.reviewContinuation ||
+    current.fundingContextId !== retained.fundingContextId ||
+    current.presentation.routeKey !== retained.presentation.routeKey ||
+    retained.sourceUnavailable === true
+  ) {
+    return null;
+  }
+  return {
+    ...retained,
+    state: "needs_attention",
+    sourceUnavailable: true,
+    // A closed card owns its navigation and address redaction, but the newer
+    // receipt owns asset and amount facts. A cancelled pUSD receive may have
+    // received unconverted USDC during its observation grace window.
+    assetSymbol: current.assetSymbol,
+    rawAmount: current.rawAmount,
+    observedAt: current.observedAt,
+    ...(current.sourceAssetSymbol
+      ? {
+          sourceAssetSymbol: current.sourceAssetSymbol,
+          sourceRawAmount: current.sourceRawAmount,
+        }
+      : {}),
+    ...(current.receiptBreakdown
+      ? { receiptBreakdown: current.receiptBreakdown }
+      : {}),
+  };
+}
+
 function latestObservedAt(
   receipts: readonly FundingReceiveReceipt[],
 ): string | null {
@@ -163,6 +207,11 @@ function projection(input: {
           sourceAssetSymbol: input.sourceAssetSymbol,
           sourceRawAmount: input.sourceRawAmount ?? sumRaw(input.receipts),
         }
+      : {}),
+    ...(input.state === "needs_attention" &&
+    input.terminal &&
+    input.receipts.some((receipt) => receipt.sourceUnavailable === true)
+      ? { sourceUnavailable: true as const }
       : {}),
     ...(input.receiptBreakdown
       ? { receiptBreakdown: input.receiptBreakdown }
@@ -326,6 +375,7 @@ export function projectTelegramFundingProgress(input: {
   const attentionSource = sourceReceipts.filter(
     (receipt) =>
       receipt.status === "review_required" ||
+      receipt.sourceUnavailable === true ||
       (receipt.status !== "ready" &&
         receipt.status !== "recovery_required" &&
         receipt.status !== "routing" &&
@@ -831,6 +881,14 @@ export function parseTelegramFundingProgressProjection(
   ) {
     return null;
   }
+  if (
+    record.sourceUnavailable !== undefined &&
+    (record.sourceUnavailable !== true ||
+      state !== "needs_attention" ||
+      record.terminal !== true)
+  ) {
+    return null;
+  }
   const reviewValue = record.reviewContinuation;
   const review = parseFundingReceiveReviewContinuation(reviewValue);
   const reviewReceiptId = record.reviewReceiptId;
@@ -901,6 +959,9 @@ export function parseTelegramFundingProgressProjection(
       : {}),
     ...(record.returnToMarketAvailable === true
       ? { returnToMarketAvailable: true }
+      : {}),
+    ...(record.sourceUnavailable === true
+      ? { sourceUnavailable: true as const }
       : {}),
     ...(hasSourceSymbol
       ? {

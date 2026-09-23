@@ -2029,6 +2029,16 @@ assert.equal(
 );
 assert.equal(deriveActiveFundingReceiveSessionStatus([]), "open");
 assert.equal(
+  deriveActiveFundingReceiveSessionStatus(["recovery_required"]),
+  "recovery_required",
+  "old clients must recognize a non-ready unconverted source",
+);
+assert.equal(
+  deriveActiveFundingReceiveSessionStatus(["recovery_required", "routing"]),
+  "recovery_required",
+  "a known unconverted source remains a safe warning beside in-flight work",
+);
+assert.equal(
   deriveActiveFundingReceiveSessionStatus(["ready", "routing"]),
   "processing",
 );

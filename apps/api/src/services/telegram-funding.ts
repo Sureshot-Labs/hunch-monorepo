@@ -2154,7 +2154,8 @@ export class TelegramFundingService {
     }
     const receiptStatus = owned.receive.receipts.some(
       (receipt) =>
-        receipt.automationReason === "receive_automation_not_consented",
+        receipt.automationReason === "receive_automation_not_consented" ||
+        receipt.sourceUnavailable === true,
     )
       ? buildTelegramFundingReceiptStatusMessage({
           contextId: owned.context.id,

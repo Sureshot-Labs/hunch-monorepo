@@ -1,7 +1,10 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
-
 import type { RelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
 import { sameAccountAddress } from "../domain/asset-identity.js";
+import {
+  observeFinalizedSolanaOwnedAssetBalanceAfterSlot,
+  verifyFinalizedSolanaReceiveSourceDebit,
+} from "../reconciliation/owned-wallet-asset-balance.js";
 import { normalizedActionSchema } from "../domain/schemas.js";
 import type {
   FundingReceiveReceipt,
@@ -24,13 +27,17 @@ import {
 } from "../reconciliation/direct-ingress-observer.js";
 import {
   claimFundingReceiveCanonicalEventAllocation,
+  claimExpiredFundingReceiveSpentReviews,
   claimObservableFundingReceiveSessions,
   deriveEffectiveFundingReceiveSessionStatus,
   finalizeFundingReceiveCanonicalEventAllocation,
   insertFundingReceiveReceipt,
+  listFundingReceiveSpentReviewCandidates,
+  markFundingReceiveSpentReviewCandidatesChecked,
   listRecoverableFundingReceiveCanonicalEvents,
   lockFundingReceiveSessionScope,
   quarantineFundingReceiveCanonicalInternalEvent,
+  resolveFundingReceiveSpentReview,
   expireFundingReceiveSessions,
   updateClosedFundingReceiveSessionObservation,
   updateFundingReceiveSessionObservation,
@@ -567,6 +574,8 @@ export class FundingReceiveSessionObserver {
       scanCanonicalEvents?: typeof scanCanonicalFundingReceiveEvents;
       scanCanonicalEventsBatch?: typeof scanCanonicalFundingReceiveEventsBatch;
       listPotentialPolymarketHandoffs?: typeof listPotentialPolymarketHandoffsForCanonicalEvents;
+      readFinalizedSourceBalance?: typeof observeFinalizedSolanaOwnedAssetBalanceAfterSlot;
+      verifyFinalizedSourceDebit?: typeof verifyFinalizedSolanaReceiveSourceDebit;
     }> = {},
   ) {}
 
@@ -625,6 +634,7 @@ export class FundingReceiveSessionObserver {
     let batchScans: Awaited<
       ReturnType<typeof scanCanonicalFundingReceiveEventsBatch>
     > | null = null;
+    let batchScanFailed = false;
     if (
       !this.dependencies.scanCanonicalEvents ||
       this.dependencies.scanCanonicalEventsBatch
@@ -644,36 +654,33 @@ export class FundingReceiveSessionObserver {
         // An unexpected batch-level failure is retryable for every selected
         // session. Normal route failures are isolated in failedKeys below.
         retryableErrors += sessions.length;
-        return {
-          sessionsPolled: sessions.length,
-          receiptsRecorded: 0,
-          recoveriesRequired,
-          retryableErrors,
-        };
+        batchScanFailed = true;
       }
     }
     let receiptsRecorded = 0;
     for (const session of sessions) {
       const sessionKey = session.session.receiveSessionId;
-      if (batchScans?.failedKeys.has(sessionKey)) {
+      if (batchScanFailed) {
+        // The batch failure was already counted for every selected session.
+      } else if (batchScans?.failedKeys.has(sessionKey)) {
         retryableErrors += 1;
-        continue;
-      }
-      try {
-        const result = await this.pollSession(
-          pool,
-          session,
-          now,
-          batchScans
-            ? { canonicalEvents: batchScans.scans.get(sessionKey) ?? null }
-            : undefined,
-        );
-        receiptsRecorded += result.receiptsRecorded;
-        recoveriesRequired += result.recoveryRequired ? 1 : 0;
-      } catch {
-        // One RPC or venue observation failure must not stall unrelated
-        // receive sessions or the canonical funding reconciliation batch.
-        retryableErrors += 1;
+      } else {
+        try {
+          const result = await this.pollSession(
+            pool,
+            session,
+            now,
+            batchScans
+              ? { canonicalEvents: batchScans.scans.get(sessionKey) ?? null }
+              : undefined,
+          );
+          receiptsRecorded += result.receiptsRecorded;
+          recoveriesRequired += result.recoveryRequired ? 1 : 0;
+        } catch {
+          // One RPC or venue observation failure must not stall unrelated
+          // receive sessions or the canonical funding reconciliation batch.
+          retryableErrors += 1;
+        }
       }
     }
     return {
@@ -682,6 +689,114 @@ export class FundingReceiveSessionObserver {
       recoveriesRequired,
       retryableErrors,
     };
+  }
+
+  /** Optional historical repair runs in its own worker job, never ahead of live reconciliation. */
+  async pollSpentReviewBatch(
+    pool: Pool,
+    input: Readonly<{ now?: Date }> = {},
+  ): Promise<
+    Readonly<{
+      sessionsPolled: number;
+      resolved: number;
+      retryableErrors: number;
+    }>
+  > {
+    if (!(await isFundingReceiveSessionSchemaReady(pool))) {
+      return { sessionsPolled: 0, resolved: 0, retryableErrors: 0 };
+    }
+    const now = input.now ?? new Date();
+    const sessions = await claimExpiredFundingReceiveSpentReviews(pool, {
+      limit: 1,
+      minimumPollIntervalMs: 60_000,
+      now,
+    });
+    let resolved = 0;
+    let retryableErrors = 0;
+    for (const session of sessions) {
+      try {
+        resolved += await this.resolveSpentReviews(pool, session, now, 1);
+      } catch {
+        console.warn("[funding-receive] spent review retry required", {
+          receiveSessionId: session.session.receiveSessionId,
+        });
+        retryableErrors += 1;
+      }
+    }
+    return { sessionsPolled: sessions.length, resolved, retryableErrors };
+  }
+
+  private async resolveSpentReviews(
+    pool: Pool,
+    session: FundingReceiveSessionSnapshot,
+    now: Date,
+    candidateLimit: number,
+  ): Promise<number> {
+    const candidates = await listFundingReceiveSpentReviewCandidates(pool, {
+      userId: session.userId,
+      receiveSessionId: session.session.receiveSessionId,
+      limit: candidateLimit,
+    });
+    if (candidates.length === 0) return 0;
+    await markFundingReceiveSpentReviewCandidatesChecked(pool, {
+      userId: session.userId,
+      receiveSessionId: session.session.receiveSessionId,
+      receiptIds: candidates.map(({ receiptId }) => receiptId),
+      now,
+    });
+    const readBalance =
+      this.dependencies.readFinalizedSourceBalance ??
+      observeFinalizedSolanaOwnedAssetBalanceAfterSlot;
+    let retryRequired = false;
+    let resolved = 0;
+    for (const candidate of candidates) {
+      try {
+        const verifiedDebit = await (
+          this.dependencies.verifyFinalizedSourceDebit ??
+          verifyFinalizedSolanaReceiveSourceDebit
+        )({
+          signature: candidate.spentSignature,
+          destinationAddress: candidate.destinationAddress,
+          asset: {
+            networkId: candidate.networkId,
+            assetId: candidate.assetId,
+            decimals: candidate.assetDecimals,
+          },
+          expectedRaw: candidate.spentRaw,
+          expectedSlot: candidate.spentSlot,
+        });
+        if (!verifiedDebit) continue;
+        const observed = await readBalance({
+          asset: {
+            networkId: candidate.networkId,
+            assetId: candidate.assetId,
+            decimals: candidate.assetDecimals,
+          },
+          destinationAddress: candidate.destinationAddress,
+          minimumSlot: candidate.requiredFinalizedSlot,
+        });
+        if (
+          await resolveFundingReceiveSpentReview(pool, {
+            ...candidate,
+            observedBalanceRaw: observed.raw,
+            observedSlot: observed.slot,
+            verifiedDebitRaw: candidate.spentRaw,
+            verifiedDebitSlot: candidate.spentSlot,
+            now,
+          })
+        ) {
+          resolved += 1;
+          console.info("[funding-receive] exact review source unavailable", {
+            receiptId: candidate.receiptId,
+            receiveSessionId: candidate.receiveSessionId,
+          });
+        }
+      } catch {
+        retryRequired = true;
+      }
+    }
+    if (retryRequired) throw new Error("receive_spent_review_retry_required");
+    return resolved;
   }
 
   private async pollSession(

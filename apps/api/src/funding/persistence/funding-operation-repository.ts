@@ -269,6 +269,8 @@ export type FundingCommitInput = Readonly<{
 export type FundingSharedSourceReservation = Readonly<{
   reservation: FundingCommitReservation;
   heldRaw: string;
+  /** Subtract holds already included in this component's account availability. */
+  projectedHeldRaw: string;
 }>;
 
 export type FundingOperationRow = Readonly<{
@@ -954,57 +956,99 @@ async function lockCommitSourceReservations(
   verifySharedSourceCapacity: FundingCommitInput["verifySharedSourceCapacity"],
 ): Promise<void> {
   // commitReservations has already rejected duplicate component/mode pairs.
-  const subtractReservations = reservations
-    .filter((reservation) => reservation.mode === "subtract_available")
-    .sort((left, right) =>
-      left.componentId < right.componentId
-        ? -1
-        : left.componentId > right.componentId
-          ? 1
-          : 0,
-    );
-  const sharedSources: FundingSharedSourceReservation[] = [];
+  const subtractReservations = reservations.filter(
+    (reservation) => reservation.mode === "subtract_available",
+  );
+  const physicalSources = new Map<
+    string,
+    { assetId: string; reservations: FundingCommitReservation[] }
+  >();
   for (const reservation of subtractReservations) {
-    const componentId = reservation.componentId;
+    const assetId = canonicalAssetId({
+      networkId: reservation.networkId,
+      assetId: reservation.assetId,
+      decimals: reservation.assetDecimals,
+    });
+    const key = [
+      userId,
+      reservation.locationId,
+      reservation.networkId,
+      assetId,
+    ].join(":");
+    const source = physicalSources.get(key);
+    if (source) source.reservations.push(reservation);
+    else physicalSources.set(key, { assetId, reservations: [reservation] });
+  }
+  const sharedSources: FundingSharedSourceReservation[] = [];
+  for (const [key, source] of [...physicalSources].sort(([left], [right]) =>
+    left.localeCompare(right),
+  )) {
+    const reservation = source.reservations[0];
+    if (!reservation) continue;
     await client.query(
       `
         select pg_advisory_xact_lock(
           hashtextextended($1, 0)
         )
       `,
-      [["funding-source-reservation", userId, componentId].join(":")],
+      [["funding-source-reservation", key].join(":")],
     );
-    const conflict = await client.query<{ raw_amount: string }>(
+    const conflict = await client.query<{
+      raw_amount: string;
+      component_id: string;
+    }>(
       `
-        select raw_amount
+        select raw_amount, component_id
         from balance_reservations
         where user_id = $1
-          and component_id = $2
+          and location_id = $2
+          and network_id = $3
+          and asset_id = $4
           and mode = 'subtract_available'
           and state = 'active'
           and ${fundingReservationHoldSql("balance_reservations")}
+          and not exists (
+            select 1 from funding_observations observation
+            where observation.operation_id = balance_reservations.operation_id
+              and observation.segment_id is not distinct from
+                  balance_reservations.segment_id
+              and observation.kind = 'source_debit'
+              and observation.canonical
+              and observation.finality_status = 'finalized'
+          )
         order by id
         for update
       `,
-      [userId, componentId],
+      [userId, reservation.locationId, reservation.networkId, source.assetId],
     );
-    if (conflict.rows[0]) {
+    if (conflict.rows[0] || source.reservations.length > 1) {
       // Future credits are not present inventory. Preserve exclusive admission
       // for these fences, including a source input combined with a later credit.
       if (
         !verifySharedSourceCapacity ||
-        reservation.economicRole === "future_credit_fence" ||
-        (reservation.sourceInputRawAmount !== undefined &&
-          reservation.sourceInputRawAmount !== reservation.rawAmount)
+        source.reservations.some(
+          (entry) =>
+            entry.economicRole === "future_credit_fence" ||
+            (entry.sourceInputRawAmount !== undefined &&
+              entry.sourceInputRawAmount !== entry.rawAmount),
+        )
       ) {
         throw new FundingPersistenceError(
           "quote_invalidated",
           "source reservation requires exclusive capacity",
         );
       }
+      const requestedRaw = source.reservations.reduce(
+        (sum, entry) => sum + BigInt(entry.rawAmount),
+        0n,
+      );
       sharedSources.push({
-        reservation,
+        reservation: { ...reservation, rawAmount: requestedRaw.toString() },
         heldRaw: conflict.rows
+          .reduce((sum, row) => sum + BigInt(row.raw_amount), 0n)
+          .toString(),
+        projectedHeldRaw: conflict.rows
+          .filter((row) => row.component_id === reservation.componentId)
           .reduce((sum, row) => sum + BigInt(row.raw_amount), 0n)
           .toString(),
       });

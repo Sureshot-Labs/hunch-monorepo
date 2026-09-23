@@ -405,6 +405,7 @@ export const fundingReceiveReceiptPublicSchema = z
     ]),
     handling: z.enum(["direct", "automatic_conversion", "review_required"]),
     childFundingOperationId: z.string().uuid().nullable(),
+    sourceUnavailable: z.literal(true).optional(),
     reviewContinuation: z
       .object({
         version: z.literal(1),

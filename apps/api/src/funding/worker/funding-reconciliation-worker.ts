@@ -679,6 +679,15 @@ export async function runFundingReconciliationJob(
   };
 }
 
+/** Historical receive-review repair is optional and never blocks live funding work. */
+export async function runFundingReceiveSpentReviewJob(
+  pool: Pool,
+): Promise<
+  Awaited<ReturnType<FundingReceiveSessionObserver["pollSpentReviewBatch"]>>
+> {
+  return new FundingReceiveSessionObserver().pollSpentReviewBatch(pool);
+}
+
 export type {
   FundingReconciliationBatchOptions,
   FundingReconciliationBatchResult,

@@ -1608,7 +1608,10 @@ try {
       {
         acceptedAssets: [
           { asset: SOLANA_NATIVE_ASSET, handling: "direct" as const },
-          { asset: SOLANA_RETAINED_USDC_ASSET, handling: "direct" as const },
+          {
+            asset: SOLANA_RETAINED_USDC_ASSET,
+            handling: "direct" as const,
+          },
         ],
         destinationAddress: retainedSolWalletAddress,
         networkId: SOLANA_NATIVE_ASSET.networkId,
@@ -1998,6 +2001,186 @@ try {
     cancelledUsdc,
     "cancel retries must keep the same canonical network and navigation",
   );
+  // A later terminal receipt can correct the copy of an already-cancelled
+  // address-free card, but must not restore its address or Buy actions.
+  await runTelegramFundingProgressProjectionForContext(pool, {
+    contextId: retainedSolContext.context.id,
+    now: new Date(now.getTime() + 1_009),
+  });
+  const terminalBeforeUnavailable = await pool.query<{ state: string }>(
+    `select latest_terminal_projection->>'state' as state
+       from telegram_funding_sessions where id = $1`,
+    [retainedSolContext.context.id],
+  );
+  assert.equal(terminalBeforeUnavailable.rows[0]?.state, "cancelled");
+  let cancelledCardDelivered = false;
+  await deliverTelegramFundingActions({
+    pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async (message) => {
+        if (message.message_id === 3334) {
+          cancelledCardDelivered = true;
+          assert.match(message.text, /Receive cancelled/u);
+          assert.doesNotMatch(
+            message.text,
+            new RegExp(retainedSolWalletAddress, "u"),
+          );
+        }
+        return { ok: true, messageId: message.message_id };
+      },
+      sendMessage: async () => {
+        assert.fail("the cancelled retained card must be redacted in place");
+      },
+    },
+  });
+  assert.equal(cancelledCardDelivered, true);
+  const redactedRetainedCard = await pool.query<{
+    address_disclosure_attempt_revision: number;
+    address_redacted_revision: number;
+  }>(
+    `select address_disclosure_attempt_revision, address_redacted_revision
+       from telegram_funding_sessions where id = $1`,
+    [retainedSolContext.context.id],
+  );
+  assert.ok(
+    (redactedRetainedCard.rows[0]?.address_redacted_revision ?? 0) >=
+      (redactedRetainedCard.rows[0]?.address_disclosure_attempt_revision ?? 0),
+    "the repaired outcome must be a copy-only edit after redaction is acknowledged",
+  );
+  // This exercises durable Telegram redaction/relink delivery only; the
+  // production automatic-conversion classification is covered by the exact
+  // Solana spent-review integration and the route-shaped projection unit test.
+  await insertFundingReceiveReceipt(pool, {
+    receiveSessionId: retainedSolReceive.snapshot.session.receiveSessionId,
+    userId,
+    variantId: `retained-usdc-variant-${suffix}`,
+    asset: SOLANA_RETAINED_USDC_ASSET,
+    destinationAddress: retainedSolWalletAddress,
+    rawAmount: "2000000",
+    observationRevision: hash("retained-usdc-unavailable"),
+    canonicalEvent: {
+      transactionHash: `0x${hash("retained-usdc-unavailable-tx")}`,
+      eventIndex: "0",
+      ledgerHeight: "101",
+      blockHash: `0x${hash("retained-usdc-unavailable-block")}`,
+      sourceAddress: retainedSolWalletAddress,
+    },
+    observedAt: new Date(now.getTime() + 1_010),
+    handling: "automatic_conversion",
+    status: "recovery_required",
+    evidence: {
+      reviewResolution: {
+        reason: "finalized_source_debit_and_insufficient_balance",
+      },
+    },
+    now: new Date(now.getTime() + 1_010),
+  });
+  await pool.query(
+    `update funding_receive_sessions
+        set version = version + 1, updated_at = $2
+      where id = $1`,
+    [retainedSolReceive.snapshot.session.receiveSessionId, now],
+  );
+  assert.equal(
+    await runTelegramFundingProgressProjectionForContext(pool, {
+      contextId: retainedSolContext.context.id,
+      now: new Date(now.getTime() + 1_011),
+    }),
+    "created",
+  );
+  const terminalAfterUnavailable = await pool.query<{
+    address: string | null;
+    source_unavailable: string | null;
+    state: string;
+  }>(
+    `select latest_terminal_projection->>'receiveAddress' as address,
+            latest_terminal_projection->>'sourceUnavailable' as source_unavailable,
+            latest_terminal_projection->>'state' as state
+       from telegram_funding_sessions where id = $1`,
+    [retainedSolContext.context.id],
+  );
+  assert.deepEqual(terminalAfterUnavailable.rows[0], {
+    address: null,
+    source_unavailable: "true",
+    state: "needs_attention",
+  });
+  await pool.query(
+    `update user_wallets
+        set is_verified = false, updated_at = now()
+      where user_id = $1::uuid
+        and wallet_type = 'solana'
+        and wallet_address = $2`,
+    [userId, retainedSolWalletAddress],
+  );
+  await pool.query(
+    `update telegram_funding_sessions
+        set telegram_account_id = null
+      where id = $1`,
+    [retainedSolContext.context.id],
+  );
+  let unavailableTerminalDelivered = false;
+  try {
+    const unlinkedOutcome = await deliverTelegramFundingActions({
+      pool,
+      renderCoordinator,
+      telegram: {
+        editMessageText: async (message) => {
+          if (message.message_id === 3334) {
+            unavailableTerminalDelivered =
+              /not converted/u.test(message.text) &&
+              !message.text.includes(retainedSolWalletAddress);
+          }
+          return { ok: true, messageId: message.message_id };
+        },
+        sendMessage: async () => ({ ok: true, messageId: 9001 }),
+      },
+    });
+    assert.equal(
+      unavailableTerminalDelivered,
+      false,
+      "a new wallet-balance fact must not reach a chat after account and wallet unlink",
+    );
+    assert.ok(unlinkedOutcome.skipped >= 1);
+  } finally {
+    await pool.query(
+      `update telegram_funding_sessions
+          set telegram_account_id = $2
+        where id = $1`,
+      [retainedSolContext.context.id, telegramAccountId],
+    );
+    await pool.query(
+      `update user_wallets
+          set is_verified = true, updated_at = now()
+        where user_id = $1::uuid
+          and wallet_type = 'solana'
+          and wallet_address = $2`,
+      [userId, retainedSolWalletAddress],
+    );
+  }
+  assert.ok(
+    (await rearmTelegramFundingTerminalDelivery({ pool, telegramUserId })) >= 1,
+    "relinking the exact account may rearm the address-free terminal edit",
+  );
+  const relinkedOutcome = await deliverTelegramFundingActions({
+    pool,
+    renderCoordinator,
+    telegram: {
+      editMessageText: async (message) => {
+        if (message.message_id === 3334) {
+          unavailableTerminalDelivered =
+            /not converted/u.test(message.text) &&
+            !message.text.includes(retainedSolWalletAddress);
+        }
+        return { ok: true, messageId: message.message_id };
+      },
+      sendMessage: async () => {
+        assert.fail("relinked terminal repair must edit the existing card");
+      },
+    },
+  });
+  assert.equal(relinkedOutcome.sent >= 1, true);
+  assert.equal(unavailableTerminalDelivered, true);
 
   // Any USDC.e receives into the managed controller without execution authority.
   await pool.query(

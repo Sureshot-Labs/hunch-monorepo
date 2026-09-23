@@ -20,7 +20,7 @@ export function assertSharedFundingSourceCapacity(
   sources: readonly FundingSharedSourceReservation[],
   options: { directWithdrawal?: boolean } = {},
 ): void {
-  for (const { reservation, heldRaw } of sources) {
+  for (const { reservation, heldRaw, projectedHeldRaw } of sources) {
     const component = account.projection.components.find(
       (entry) => entry.componentId === reservation.componentId,
     );
@@ -39,6 +39,15 @@ export function assertSharedFundingSourceCapacity(
       sameAsset(nativeFee.asset, asset)
         ? BigInt(nativeFee.raw)
         : 0n;
+    // Account availability includes every reservation mode by component ID.
+    // Only same-component subtract holds without a finalized source debit
+    // overlap the physically locked source holds; other modes cannot hide an
+    // alias wallet's outstanding source reservation.
+    const unprojectedPhysicalHold = availability
+      ? BigInt(heldRaw) > BigInt(projectedHeldRaw)
+        ? BigInt(heldRaw) - BigInt(projectedHeldRaw)
+        : 0n
+      : 0n;
     if (
       !component ||
       !availability ||
@@ -53,11 +62,10 @@ export function assertSharedFundingSourceCapacity(
         ? withdrawalRawAvailabilityKnown(availability)
         : availability.freshness === "fresh") ||
       availability.reasonCodes.includes("cash_availability_unknown") ||
-      // A snapshot must include every locked hold. A concurrent debit/reduction
-      // may require a fresh retry; it must never silently enlarge capacity.
-      BigInt(availability.reservedRaw) < BigInt(heldRaw) ||
+      BigInt(projectedHeldRaw) > BigInt(heldRaw) ||
+      BigInt(projectedHeldRaw) > BigInt(availability.reservedRaw) ||
       BigInt(availability.availableRaw) <
-        BigInt(reservation.rawAmount) + gasReserve
+        BigInt(reservation.rawAmount) + gasReserve + unprojectedPhysicalHold
     ) {
       throw new FundingPersistenceError(
         "quote_invalidated",

@@ -19,6 +19,7 @@ import {
   limitlessFundingWorkerConfig,
   resetFundingWorkerModuleLoaderForTests,
   relayFundingWorkerConfig,
+  runFundingReceiveSpentReviewJob,
   runFundingReconciliationJob,
   setFundingWorkerModuleLoaderForTests,
 } from "./funding-reconciliation.js";
@@ -273,14 +274,17 @@ const tests: TestCase[] = [
   {
     name: "funding reconciliation remains enabled when finance execute is false",
     run: () => {
-      const job = buildJobs(
+      const jobs = buildJobs(
         buildTestEnv({
           databaseUrl: "postgresql://local/funding-test",
           executeEnabled: false,
           fundingReconciliationEnabled: true,
           fundingReconciliationIntervalSec: 17,
         }),
-      ).find((candidate) => candidate.name === "funding_reconciliation");
+      );
+      const job = jobs.find(
+        (candidate) => candidate.name === "funding_reconciliation",
+      );
       assert.ok(job);
       assert.equal(job.enabled, true);
       assert.equal(job.intervalSec, 17);
@@ -340,6 +344,21 @@ const tests: TestCase[] = [
             skipped: 0,
           },
         }),
+        false,
+      );
+      const review = jobs.find(
+        (candidate) => candidate.name === "funding_receive_spent_review",
+      );
+      assert.ok(review);
+      assert.equal(review.enabled, true);
+      assert.equal(review.timeoutSec, 0);
+      assert.equal(review.lockKey, undefined);
+      assert.equal(
+        review.isNoopResult?.({ resolved: 0, retryableErrors: 0 }),
+        true,
+      );
+      assert.equal(
+        review.isNoopResult?.({ resolved: 1, retryableErrors: 0 }),
         false,
       );
     },
@@ -539,6 +558,7 @@ const tests: TestCase[] = [
     run: async () => {
       const fakePool = {} as Pool;
       let observedPool: Pool | null = null;
+      let observedReviewPool: Pool | null = null;
       let observedOptions: Record<string, unknown> = {};
       setFundingWorkerModuleLoaderForTests(
         async () => ({
@@ -553,6 +573,10 @@ const tests: TestCase[] = [
               deadLettered: 0,
               operationIds: [],
             };
+          },
+          runFundingReceiveSpentReviewJob: async (pool) => {
+            observedReviewPool = pool;
+            return { sessionsPolled: 1, resolved: 1, retryableErrors: 0 };
           },
         }),
         fakePool,
@@ -583,6 +607,12 @@ const tests: TestCase[] = [
           env.fundingReconciliationTerminalTimeoutSec * 1_000,
         );
         assert.match(String(observedOptions.workerId), /:\d+$/);
+        assert.deepEqual(await runFundingReceiveSpentReviewJob(), {
+          sessionsPolled: 1,
+          resolved: 1,
+          retryableErrors: 0,
+        });
+        assert.equal(observedReviewPool, fakePool);
       } finally {
         resetFundingWorkerModuleLoaderForTests();
       }

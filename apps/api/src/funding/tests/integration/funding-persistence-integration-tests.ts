@@ -4882,6 +4882,127 @@ async function testConcurrentSourceReservationExclusion(
   }
 }
 
+async function testAliasedPhysicalSourceReservation(): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const userId = await insertUser(client);
+    const sourceLocationId = opaque("historical-shared-wallet");
+    const makePlan = (componentId: string, rawAmount: string) => {
+      const plan = buildPlan({
+        sourceComponentId: componentId,
+        sourceLocationId,
+      });
+      return {
+        ...plan,
+        reservations: plan.reservations.map((entry) => ({
+          ...entry,
+          rawAmount,
+        })),
+      };
+    };
+    const depositPlan = makePlan(opaque("receive-component"), "2000000");
+    const tradePlan = makePlan(opaque("trade-component"), "1112645");
+    const depositConsent = opaque("deposit-consent");
+    const tradeConsent = opaque("trade-consent");
+    const depositQuote = await createFundingQuoteInTransaction(
+      client,
+      quoteInput(userId, depositPlan, depositConsent),
+    );
+    const tradeQuote = await createFundingQuoteInTransaction(
+      client,
+      quoteInput(userId, tradePlan, tradeConsent),
+    );
+    const deposit = await commitFundingOperationInTransaction(
+      client,
+      commitInput(userId, depositQuote.id, depositConsent, depositPlan),
+    );
+    const tradeComponentId = tradePlan.reservations[0]?.componentId;
+    assert.ok(tradeComponentId);
+    await client.query(
+      `insert into balance_reservations (
+         user_id, operation_id, segment_id, component_id, location_id,
+         network_id, asset_id, asset_decimals, raw_amount, mode,
+         state, expires_at
+       )
+       select user_id, operation_id, null, $2, location_id,
+              network_id, asset_id, asset_decimals, '1000000',
+              'advisory_destination', 'active', expires_at
+       from balance_reservations
+       where operation_id = $1 and mode = 'subtract_available'
+       limit 1`,
+      [deposit.operation.id, tradeComponentId],
+    );
+    await client.query("savepoint alias_conflict");
+    await assert.rejects(
+      () =>
+        commitFundingOperationInTransaction(client, {
+          ...commitInput(userId, tradeQuote.id, tradeConsent, tradePlan),
+          verifySharedSourceCapacity: async (sources) => {
+            assert.equal(sources.length, 1);
+            assert.equal(sources[0]?.heldRaw, "2000000");
+            assert.equal(
+              sources[0]?.projectedHeldRaw,
+              "0",
+              "a non-source reservation on the trade component cannot mask an alias source hold",
+            );
+            throw new FundingPersistenceError(
+              "quote_invalidated",
+              "historical physical source has no free remainder",
+            );
+          },
+        }),
+      (error: unknown) =>
+        error instanceof FundingPersistenceError &&
+        error.code === "quote_invalidated",
+    );
+    await client.query("rollback to savepoint alias_conflict");
+    await client.query("savepoint finalized_debit_capacity");
+    await client.query(
+      `insert into funding_observations (
+         operation_id, segment_id, kind, network_id, asset_id, asset_decimals,
+         tx_hash, event_index, to_address, raw_amount,
+         observed_at, finality_status, finalized_at
+       )
+       select operation_id, segment_id, 'source_debit', network_id, asset_id,
+              asset_decimals,
+              $2, '0', 'synthetic-spent-destination', raw_amount,
+              now(), 'finalized', now()
+       from balance_reservations
+       where operation_id = $1 and mode = 'subtract_available'
+       limit 1`,
+      [deposit.operation.id, opaque("finalized-source-debit")],
+    );
+    const afterDebit = await commitFundingOperationInTransaction(client, {
+      ...commitInput(userId, tradeQuote.id, tradeConsent, tradePlan),
+      verifySharedSourceCapacity: async () => {
+        assert.fail(
+          "a finalized source debit is no longer an active physical hold",
+        );
+      },
+    });
+    assert.ok(afterDebit.operation.id);
+    await client.query("rollback to savepoint finalized_debit_capacity");
+    await client.query(
+      `update balance_reservations
+          set state = 'released', released_at = now(),
+              outcome_reason = 'synthetic_release'
+        where operation_id = $1 and mode = 'subtract_available'`,
+      [deposit.operation.id],
+    );
+    const trade = await commitFundingOperationInTransaction(client, {
+      ...commitInput(userId, tradeQuote.id, tradeConsent, tradePlan),
+      verifySharedSourceCapacity: async () => {
+        assert.fail("released physical-source hold must not block a new trade");
+      },
+    });
+    assert.equal(trade.operation.status, "in_progress");
+  } finally {
+    await client.query("rollback");
+    client.release();
+  }
+}
+
 async function readMergeUser(userId: string): Promise<MergeUserRow> {
   const { rows } = await pool.query<MergeUserRow>(
     `
@@ -9304,6 +9425,7 @@ await testDeadLetterPublishesManualRecovery();
 await testDeadLetterPublishesManualRecovery(true);
 await testConcurrentSourceReservationExclusion();
 await testConcurrentSourceReservationExclusion(true);
+await testAliasedPhysicalSourceReservation();
 await testSolanaSigningContextOnRealAttemptSchema();
 await testSolanaSigningContextOnRealAttemptSchema(true);
 console.log(

@@ -778,6 +778,8 @@ export type FundingReceiveReceipt = Readonly<{
     | "recovery_required";
   handling: FundingReceiveHandling;
   childFundingOperationId: string | null;
+  /** Finalized later spend made this exact unconverted source unavailable. */
+  sourceUnavailable?: true;
   automationReason?: "receive_automation_not_consented";
   reviewContinuation?: FundingReceiveReviewContinuation;
   reviewQuotePlan?: FundingReceiveQuotePlan;

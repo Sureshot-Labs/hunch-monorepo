@@ -7,7 +7,7 @@
  * Aliases are internal SQL identifiers, never request input.
  */
 export function fundingReservationHoldSql(
-  reservationAlias: "balance_reservations" | "reservation",
+  reservationAlias: "balance_reservations" | "reservation" | "active_source",
 ): string {
   return `(
     ${reservationAlias}.expires_at > now()

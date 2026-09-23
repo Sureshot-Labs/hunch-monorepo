@@ -503,6 +503,116 @@ export async function fetchSolanaParsedTransaction(inputs: {
   });
 }
 
+/** Exact finalized SPL-token loss from one owner in a persisted transaction. */
+export function parseFinalizedSolanaOwnedTokenDebit(
+  transaction: unknown,
+  input: Readonly<{ owner: string; mint: string; decimals: number }>,
+): Readonly<{ raw: string; slot: string }> | null {
+  if (!isRecord(transaction) || !Number.isSafeInteger(transaction.slot))
+    return null;
+  const slot = transaction.slot as number;
+  if (slot < 0 || !isRecord(transaction.meta) || transaction.meta.err !== null)
+    return null;
+  const meta = transaction.meta;
+  if (
+    !Array.isArray(meta.preTokenBalances) ||
+    !Array.isArray(meta.postTokenBalances) ||
+    !isRecord(transaction.transaction) ||
+    !isRecord(transaction.transaction.message) ||
+    !Array.isArray(transaction.transaction.message.accountKeys)
+  )
+    return null;
+  const accountCount = transaction.transaction.message.accountKeys.length;
+  const accounts = new Map<
+    number,
+    {
+      owner: string | null;
+      mint: string;
+      decimals: number;
+      pre: bigint;
+      post: bigint;
+    }
+  >();
+  const seenSides = new Set<string>();
+  for (const [side, entries] of [
+    ["pre", meta.preTokenBalances],
+    ["post", meta.postTokenBalances],
+  ] as const) {
+    for (const entry of entries) {
+      if (
+        !isRecord(entry) ||
+        !Number.isSafeInteger(entry.accountIndex) ||
+        (entry.accountIndex as number) < 0 ||
+        (entry.accountIndex as number) >= accountCount ||
+        typeof entry.mint !== "string" ||
+        !isRecord(entry.uiTokenAmount) ||
+        typeof entry.uiTokenAmount.amount !== "string" ||
+        !/^(0|[1-9][0-9]*)$/.test(entry.uiTokenAmount.amount) ||
+        !Number.isSafeInteger(entry.uiTokenAmount.decimals)
+      )
+        return null;
+      const index = entry.accountIndex as number;
+      const sideKey = `${side}:${index}`;
+      if (seenSides.has(sideKey)) return null;
+      seenSides.add(sideKey);
+      const amount = BigInt(entry.uiTokenAmount.amount);
+      const known = accounts.get(index);
+      if (
+        known &&
+        (known.mint !== entry.mint ||
+          known.decimals !== entry.uiTokenAmount.decimals ||
+          (typeof entry.owner === "string" &&
+            known.owner !== null &&
+            known.owner !== entry.owner))
+      )
+        return null;
+      accounts.set(index, {
+        owner:
+          typeof entry.owner === "string"
+            ? entry.owner
+            : (known?.owner ?? null),
+        mint: entry.mint,
+        decimals: entry.uiTokenAmount.decimals as number,
+        pre: side === "pre" ? amount : (known?.pre ?? 0n),
+        post: side === "post" ? amount : (known?.post ?? 0n),
+      });
+    }
+  }
+  let found = false;
+  let debit = 0n;
+  for (const account of accounts.values()) {
+    if (account.mint === input.mint && account.owner === null) return null;
+    if (account.owner !== input.owner || account.mint !== input.mint) continue;
+    if (account.decimals !== input.decimals) return null;
+    found = true;
+    debit += account.pre - account.post;
+  }
+  return found && debit > 0n
+    ? { raw: debit.toString(), slot: String(slot) }
+    : null;
+}
+
+export async function fetchFinalizedSolanaOwnedTokenDebit(
+  input: Readonly<{
+    rpcUrls: string[];
+    signature: string;
+    owner: string;
+    mint: string;
+    decimals: number;
+    timeoutMs: number;
+  }>,
+): Promise<Readonly<{ raw: string; slot: string }> | null> {
+  const transaction = await fetchSolanaParsedTransaction(input);
+  if (
+    !isRecord(transaction) ||
+    !isRecord(transaction.transaction) ||
+    !Array.isArray(transaction.transaction.signatures) ||
+    transaction.transaction.signatures[0] !== input.signature
+  )
+    return null;
+  return parseFinalizedSolanaOwnedTokenDebit(transaction, input);
+}
+
 export type SolanaSignatureReceiptStatus = Readonly<{
   confirmationStatus: "processed" | "confirmed" | "finalized";
   failed: boolean;
@@ -802,6 +912,92 @@ export async function fetchSolanaTokenBalanceByOwnerAndMint(inputs: {
     decimals,
     uiAmountString: formatUiAmount(total, decimals),
   };
+}
+
+/** A balance proof tied to a finalized Solana slot, including empty accounts. */
+export async function fetchFinalizedSolanaOwnedBalanceAtOrAfterSlot(inputs: {
+  rpcUrls: string[];
+  owner: string;
+  mint: string | null;
+  decimals: number;
+  minimumSlot: number;
+  timeoutMs: number;
+}): Promise<{ amount: bigint; slot: number }> {
+  if (!Number.isSafeInteger(inputs.minimumSlot) || inputs.minimumSlot < 0) {
+    throw new Error("Solana RPC: invalid minimum balance slot");
+  }
+  if (inputs.mint === null) {
+    if (inputs.decimals !== 9) {
+      throw new Error("Solana RPC: invalid native balance decimals");
+    }
+    const result = await solanaRpcRequest<{
+      context?: { slot?: number };
+      value?: number;
+    }>({
+      rpcUrls: inputs.rpcUrls,
+      timeoutMs: inputs.timeoutMs,
+      method: "getBalance",
+      params: [
+        inputs.owner,
+        { commitment: "finalized", minContextSlot: inputs.minimumSlot },
+      ],
+    });
+    const slot = result?.context?.slot;
+    const value = result?.value;
+    if (
+      typeof slot !== "number" ||
+      !Number.isSafeInteger(slot) ||
+      slot < inputs.minimumSlot ||
+      typeof value !== "number" ||
+      !Number.isSafeInteger(value) ||
+      value < 0
+    ) {
+      throw new Error("Solana RPC: unproven finalized native balance");
+    }
+    return { amount: BigInt(value), slot };
+  }
+
+  const result = await solanaRpcRequest<{
+    context?: { slot?: number };
+    value?: unknown[];
+  }>({
+    rpcUrls: inputs.rpcUrls,
+    timeoutMs: inputs.timeoutMs,
+    method: "getTokenAccountsByOwner",
+    params: [
+      inputs.owner,
+      { mint: inputs.mint },
+      {
+        encoding: "jsonParsed",
+        commitment: "finalized",
+        minContextSlot: inputs.minimumSlot,
+      },
+    ],
+  });
+  const slot = result?.context?.slot;
+  if (
+    typeof slot !== "number" ||
+    !Number.isSafeInteger(slot) ||
+    slot < inputs.minimumSlot ||
+    !Array.isArray(result?.value)
+  ) {
+    throw new Error("Solana RPC: unproven finalized token balance");
+  }
+  let amount = 0n;
+  for (const entry of result.value) {
+    const account = parseTokenAccount(entry);
+    if (
+      !account ||
+      account.owner !== inputs.owner ||
+      account.mint !== inputs.mint ||
+      account.decimals !== inputs.decimals ||
+      account.amount < 0n
+    ) {
+      throw new Error("Solana RPC: invalid finalized token account");
+    }
+    amount += account.amount;
+  }
+  return { amount, slot };
 }
 
 export async function fetchSolanaLatestBlockhash(inputs: {

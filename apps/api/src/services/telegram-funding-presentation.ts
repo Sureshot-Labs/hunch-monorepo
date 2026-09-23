@@ -427,7 +427,16 @@ export function buildTelegramFundingReceiptStatusMessage(input: {
   venue: string;
   receipts: readonly FundingReceiveReceipt[];
 }): TelegramFundingMessage {
-  const lines = input.receipts.slice(0, 10).map((receipt) => {
+  const recentReceipts = [...input.receipts].sort(
+    (left, right) =>
+      right.observedAt.localeCompare(left.observedAt) ||
+      right.receiptId.localeCompare(left.receiptId),
+  );
+  const visibleReceipts = recentReceipts.slice(0, 10);
+  const hiddenUnavailableCount = recentReceipts
+    .slice(10)
+    .filter((receipt) => receipt.sourceUnavailable === true).length;
+  const lines = visibleReceipts.map((receipt) => {
     const network =
       (
         {
@@ -441,13 +450,15 @@ export function buildTelegramFundingReceiptStatusMessage(input: {
       raw: receipt.rawAmount,
     });
     const status =
-      receipt.automationReason === "receive_automation_not_consented"
-        ? "Automatic conversion was not started."
-        : receipt.status === "ready"
-          ? "Receipt completed."
-          : receipt.status === "routing"
-            ? "Transfer is being reconciled."
-            : "Processing or review is pending.";
+      receipt.sourceUnavailable === true
+        ? "This deposit was not converted. The wallet now has less of this asset than the original conversion requires."
+        : receipt.automationReason === "receive_automation_not_consented"
+          ? "Automatic conversion was not started."
+          : receipt.status === "ready"
+            ? "Receipt completed."
+            : receipt.status === "routing"
+              ? "Transfer is being reconciled."
+              : "Processing or review is pending.";
     return escapeTelegramMarkdownV2(
       `Received ${amount} on ${network}. ${status}`,
     );
@@ -457,6 +468,13 @@ export function buildTelegramFundingReceiptStatusMessage(input: {
     text: joinTelegramMarkdownV2Lines([
       formatTelegramBoldMarkdownV2("Deposit status"),
       ...lines,
+      ...(hiddenUnavailableCount > 0
+        ? [
+            escapeTelegramMarkdownV2(
+              `${hiddenUnavailableCount} earlier deposit${hiddenUnavailableCount === 1 ? " was" : "s were"} not converted. Check wallet activity before trying again.`,
+            ),
+          ]
+        : []),
       ...(input.receipts.length > 10
         ? [
             escapeTelegramMarkdownV2(
@@ -920,14 +938,18 @@ function buildTelegramFundingProgressMessageInternal(
     },
     needs_attention: {
       icon: "⚠️",
-      title: hasReceiptEvidence
-        ? "Funds need attention"
-        : "Receive needs attention",
-      body: !hasReceiptEvidence
-        ? "This receive session could not continue. If you already sent a transfer, do not send it again. Otherwise, open Add funds again before sending."
-        : amount
-          ? `Automatic preparation of ${amount} did not complete. The transfer is preserved and needs review.`
-          : "Automatic preparation did not complete. The received funds are preserved and need review.",
+      title: projection.sourceUnavailable
+        ? "Deposit not converted"
+        : hasReceiptEvidence
+          ? "Funds need attention"
+          : "Receive needs attention",
+      body: projection.sourceUnavailable
+        ? "The wallet no longer has enough of this asset for the original conversion. Check deposit status and wallet activity before sending more."
+        : !hasReceiptEvidence
+          ? "This receive session could not continue. If you already sent a transfer, do not send it again. Otherwise, open Add funds again before sending."
+          : amount
+            ? `Automatic preparation of ${amount} did not complete. The transfer is preserved and needs review.`
+            : "Automatic preparation did not complete. The received funds are preserved and need review.",
     },
   };
   const copy = stateCopy[projection.state];
