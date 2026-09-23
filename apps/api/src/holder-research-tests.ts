@@ -25,11 +25,15 @@ import {
   assertHolderResearchEvidenceIdsAllowed,
   buildHolderResearchExternalSearchSystemPrompt,
   buildHolderResearchExternalSearchSystemPromptV2,
+  extractCitations,
+  extractMarkdownCitations,
+  orderHolderResearchTriageLookahead,
   parseHolderResearchRunArgs,
   parseHolderResearchTriageModelContent,
   parseHolderResearchTriageModelContentV2,
   selectHolderResearchTriageFallbackCandidates,
   selectHolderResearchTriageInvestigations,
+  withPolicyOverrides,
 } from "./ai-holder-research-run.js";
 import {
   holderResearchWalletNotesBodySchema,
@@ -37,6 +41,7 @@ import {
 } from "./schemas/signals.js";
 import {
   adaptHolderResearchFinalOutputV2,
+  applyHolderResearchCooldowns,
   applyHolderResearchLivePriceChecks,
   applyHolderResearchPublishQualityGate,
   assessHolderResearchHorizonException,
@@ -3279,6 +3284,67 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       );
       assert.match(externalSystemPrompt, /supports the holder side/i);
       assert.match(externalSystemPrompt, /supports the opposite side/i);
+      assert.match(externalSystemPrompt, /inline \[\[N\]\]\(URL\) citation/);
+      assert.deepEqual(
+        extractCitations({
+          citations: ["https://unused.example/article"],
+          output: [
+            {
+              content: [
+                {
+                  type: "output_text",
+                  text: "A cited claim.",
+                  annotations: [
+                    {
+                      type: "url_citation",
+                      url: "https://used.example/article",
+                      title: "1",
+                      start_index: 0,
+                      end_index: 13,
+                    },
+                    {
+                      type: "url_citation",
+                      url: "https://unused.example/article",
+                      title: "2",
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+        [
+          {
+            title: "https://used.example/article",
+            url: "https://used.example/article",
+            publishedAt: null,
+          },
+        ],
+      );
+      assert.deepEqual(
+        extractCitations({ citations: ["https://unused.example/article"] }),
+        [],
+      );
+      assert.deepEqual(
+        extractMarkdownCitations(
+          "A supported claim [[1]](https://used.example/article) and an unsupported one [[2]](https://invented.example/article).",
+          { citations: ["https://used.example/article"] },
+        ),
+        [
+          {
+            title: "https://used.example/article",
+            url: "https://used.example/article",
+            publishedAt: null,
+          },
+        ],
+      );
+      assert.deepEqual(
+        extractMarkdownCitations(
+          "An unverified claim [[1]](https://invented.example/article).",
+          { citations: [] },
+        ),
+        [],
+      );
 
       const internalInput = buildHolderResearchCandidatePromptJson(
         candidate,
@@ -3576,6 +3642,102 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(evaluation.action, "skip");
       assert.equal(evaluation.reason, "decision_cache");
       assert.deepEqual(evaluation.meaningfulDeltaReasons, []);
+    },
+  },
+  {
+    name: "market flow and related positions alone do not recycle a holder thesis",
+    run: () => {
+      const p = policy({ contextCooldownHours: 6 });
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market(),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(candidate);
+      const checkedAt = new Date("2026-01-01T00:30:00.000Z");
+      const previousSnapshot = buildHolderResearchDecisionSnapshot(candidate);
+      const relatedPosition = {
+        marketId: "polymarket:related",
+        marketTitle: "Related market",
+        eventTitle: "Related event",
+        side: "YES" as const,
+        positionUsd: p.minHolderPositionUsd * 2,
+        yesProbability: 0.4,
+        snapshotAt: "2026-01-01T02:00:00.000Z",
+      };
+      const current = {
+        ...candidate,
+        market: {
+          ...candidate.market,
+          recentActivityUsd: p.minRecentActivityUsd * 2,
+          recentActivityAt: "2026-01-01T02:00:00.000Z",
+          holders: candidate.market.holders.map((entry) => ({
+            ...entry,
+            relatedOpenPositions: [relatedPosition],
+          })),
+        },
+      };
+      assert.deepEqual(
+        diffHolderResearchDecisionSnapshots(
+          previousSnapshot,
+          buildHolderResearchDecisionSnapshot(current),
+          p,
+          checkedAt.toISOString(),
+        ),
+        ["fresh_flow", "related_position_changed"],
+      );
+      const cachedContext = buildHolderResearchDecisionCacheRecord({
+        candidate,
+        output: { status: "CONTEXT", rationale: "No new holder action." },
+        model: p.model,
+        policy: p,
+        now: checkedAt,
+      });
+      const evaluation = evaluateHolderResearchDecisionCache({
+        candidate: current,
+        cachedDecision: cachedContext,
+        policy: p,
+        now: new Date("2026-01-01T02:10:00.000Z"),
+      });
+      assert.equal(evaluation.action, "skip");
+      assert.deepEqual(evaluation.meaningfulDeltaReasons, []);
+
+      const withPreviousNote = {
+        ...current,
+        market: {
+          ...current.market,
+          previousNote: {
+            noteId: "00000000-0000-4000-8000-000000000001",
+            createdAt: checkedAt.toISOString(),
+            title: "Existing holder signal",
+            inputDigest: null,
+            cooldownUntil: null,
+            decisionSnapshot: previousSnapshot,
+            walletTargets: [],
+          },
+        },
+      };
+      const [cooled] = applyHolderResearchCooldowns([withPreviousNote], p);
+      assert.ok(cooled);
+      assert.deepEqual(cooled.meaningfulDeltaReasons, []);
+      assert.equal(
+        selectHolderResearchCandidates([cooled], p).selected.length,
+        0,
+      );
+
+      const priceMoved = {
+        ...current,
+        market: { ...current.market, yesProbability: 0.61 },
+      };
+      const materialEvaluation = evaluateHolderResearchDecisionCache({
+        candidate: priceMoved,
+        cachedDecision: cachedContext,
+        policy: p,
+        now: new Date("2026-01-01T02:10:00.000Z"),
+      });
+      assert.equal(materialEvaluation.reason, "meaningful_delta");
+      assert.deepEqual(materialEvaluation.meaningfulDeltaReasons, [
+        "odds_move",
+      ]);
     },
   },
   {
@@ -6154,9 +6316,82 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         maxCandidatesPerRun: 6,
         maxAgentCallsPerRun: 2,
       };
-      assert.equal(availableHolderResearchJevSlots(3, productionLike), 2);
+      const effective = withPolicyOverrides(
+        productionLike,
+        parseHolderResearchRunArgs(["--call-model"]),
+      );
+      assert.equal(effective.maxCandidatesPerRun, 6);
+      assert.equal(effective.maxAgentCallsPerRun, 2);
+      assert.equal(availableHolderResearchJevSlots(3, effective), 2);
       assert.equal(availableHolderResearchJevSlots(5, productionLike), 1);
       assert.equal(availableHolderResearchJevSlots(6, productionLike), 0);
+      const explicitLimit = withPolicyOverrides(
+        productionLike,
+        parseHolderResearchRunArgs([
+          "--call-model",
+          "--limit",
+          "3",
+          "--max-agent-calls",
+          "2",
+        ]),
+      );
+      assert.equal(explicitLimit.maxCandidatesPerRun, 3);
+      assert.equal(explicitLimit.maxAgentCallsPerRun, 2);
+      assert.equal(availableHolderResearchJevSlots(3, explicitLimit), 0);
+      const withoutTriage = withPolicyOverrides(
+        { ...productionLike, triageEnabled: false },
+        parseHolderResearchRunArgs(["--call-model"]),
+      );
+      assert.equal(withoutTriage.maxCandidatesPerRun, 2);
+      const plentiful = Array.from(
+        { length: 8 },
+        (_, index) => `base-${index}`,
+      );
+      const replenished = orderHolderResearchTriageLookahead(
+        plentiful,
+        [],
+        effective.maxCandidatesPerRun,
+      )
+        .filter((key) => key !== "base-0" && key !== "base-1")
+        .slice(0, effective.maxCandidatesPerRun);
+      assert.deepEqual(replenished, [
+        "base-2",
+        "base-3",
+        "base-4",
+        "base-5",
+        "base-6",
+        "base-7",
+      ]);
+      const firstBatch = orderHolderResearchTriageLookahead(
+        plentiful.slice(0, 3),
+        ["jev-0", "jev-1"],
+        effective.maxCandidatesPerRun,
+      );
+      assert.deepEqual(firstBatch, [
+        "base-0",
+        "base-1",
+        "base-2",
+        "jev-0",
+        "jev-1",
+      ]);
+      assert.equal(firstBatch.length, 5);
+      assert.equal(
+        selectHolderResearchTriageInvestigations(
+          firstBatch.map((key) => ({
+            candidate: { ...candidate, key },
+            decision: {
+              key,
+              action: "investigate" as const,
+              reason_codes: ["strong_actor" as const],
+              research_need: "none" as const,
+              reason: "Test candidate has enough evidence for research.",
+              legacyPriority: 1,
+            },
+          })),
+          { limit: effective.maxAgentCallsPerRun, useV2: true },
+        ).length,
+        2,
+      );
       assert.equal(
         availableHolderResearchJevSlots(3, { ...p, maxCandidatesPerRun: 4 }),
         1,

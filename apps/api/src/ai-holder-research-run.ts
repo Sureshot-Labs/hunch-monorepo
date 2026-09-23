@@ -460,14 +460,17 @@ export function parseHolderResearchRunArgs(
   };
 }
 
-function withPolicyOverrides(
+export function withPolicyOverrides(
   policy: HolderResearchPolicy,
   args: HolderResearchRunArgs,
 ): HolderResearchPolicy {
   const maxAgentCallsPerRun =
     args.maxAgentCalls ?? args.limit ?? policy.maxAgentCallsPerRun;
   const maxCandidatesPerRun =
-    args.limit ?? Math.min(policy.maxCandidatesPerRun, maxAgentCallsPerRun);
+    args.limit ??
+    (policy.triageEnabled
+      ? policy.maxCandidatesPerRun
+      : Math.min(policy.maxCandidatesPerRun, maxAgentCallsPerRun));
   return {
     ...policy,
     dryRun: args.dryRun ?? policy.dryRun,
@@ -541,62 +544,67 @@ function extractResponseText(payload: unknown): string {
   return chunks.join("\n").trim();
 }
 
-function extractCitations(
+export function extractCitations(
   payload: unknown,
 ): ExternalResearchResult["citations"] {
   if (!payload || typeof payload !== "object") return [];
   const citations: ExternalResearchResult["citations"] = [];
   const seen = new Set<string>();
-  const visit = (value: unknown, depth: number) => {
-    if (depth > 5 || value == null) return;
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item, depth + 1);
-      return;
-    }
-    if (typeof value !== "object") return;
-    const obj = value as Record<string, unknown>;
-    const url =
-      typeof obj.url === "string"
-        ? obj.url
-        : typeof obj.uri === "string"
-          ? obj.uri
+  const output = (payload as Record<string, unknown>).output;
+  for (const item of Array.isArray(output) ? output : []) {
+    const content =
+      item && typeof item === "object"
+        ? (item as Record<string, unknown>).content
+        : null;
+    for (const block of Array.isArray(content) ? content : []) {
+      const annotations =
+        block && typeof block === "object"
+          ? (block as Record<string, unknown>).annotations
           : null;
-    if (url && !seen.has(url)) {
-      seen.add(url);
-      citations.push({
-        title:
-          typeof obj.title === "string"
-            ? obj.title
-            : typeof obj.name === "string"
-              ? obj.name
+      for (const entry of Array.isArray(annotations) ? annotations : []) {
+        if (!entry || typeof entry !== "object") continue;
+        const annotation = entry as Record<string, unknown>;
+        const url = annotation.url;
+        if (
+          annotation.type !== "url_citation" ||
+          typeof url !== "string" ||
+          !/^https?:\/\//i.test(url) ||
+          !Number.isInteger(annotation.start_index) ||
+          !Number.isInteger(annotation.end_index) ||
+          Number(annotation.end_index) <= Number(annotation.start_index) ||
+          seen.has(url)
+        ) {
+          continue;
+        }
+        seen.add(url);
+        citations.push({
+          title:
+            typeof annotation.title === "string" &&
+            !/^\d+$/.test(annotation.title)
+              ? annotation.title
               : url,
-        url,
-        publishedAt:
-          typeof obj.published_at === "string"
-            ? obj.published_at
-            : typeof obj.publishedAt === "string"
-              ? obj.publishedAt
-              : null,
-      });
+          url,
+          publishedAt: null,
+        });
+      }
     }
-    for (const key of [
-      "citations",
-      "annotations",
-      "sources",
-      "output",
-      "content",
-      "results",
-    ]) {
-      visit(obj[key], depth + 1);
-    }
-  };
-  visit(payload, 0);
+  }
   return citations.slice(0, 3);
 }
 
-function extractMarkdownCitations(
+export function extractMarkdownCitations(
   text: string,
+  payload: unknown,
 ): ExternalResearchResult["citations"] {
+  const sourceUrls =
+    payload && typeof payload === "object"
+      ? (payload as Record<string, unknown>).citations
+      : null;
+  const encountered = new Set(
+    Array.isArray(sourceUrls)
+      ? sourceUrls.filter((url): url is string => typeof url === "string")
+      : [],
+  );
   const citations: ExternalResearchResult["citations"] = [];
   const seen = new Set<string>();
   for (const match of text.matchAll(
@@ -605,7 +613,7 @@ function extractMarkdownCitations(
     const rawTitle =
       match[1]?.replaceAll("[", "").replaceAll("]", "").trim() || null;
     const url = match[2]?.trim() || null;
-    if (!url || seen.has(url)) continue;
+    if (!url || !encountered.has(url) || seen.has(url)) continue;
     seen.add(url);
     citations.push({
       title: rawTitle && !/^\d+$/.test(rawTitle) ? rawTitle : url,
@@ -675,7 +683,8 @@ export function buildHolderResearchExternalSearchSystemPrompt(): string {
     "Answer only whether outside information supports the holder side, supports the opposite side, mostly shows the move was already public, does not explain the move, or is mixed.",
     HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
     "Do not start with phrases like 'Public info', 'Public context', or 'Public news'.",
-    "Do not use markdown, footnotes, bracket citations, or raw URLs in the text.",
+    "Cite each factual outside claim with an inline [[N]](URL) citation from the search tools. The citation markup is removed from the user-facing summary after verification.",
+    "Do not use footnotes, uncited claims, or raw URLs outside inline citations.",
     "Do not invent a catalyst.",
   ].join(" ");
 }
@@ -909,7 +918,7 @@ async function runExternalResearch(params: {
     }
     const summary = compactExternalResearchSummary(text);
     const payloadCitations = extractCitations(payload);
-    const markdownCitations = extractMarkdownCitations(text);
+    const markdownCitations = extractMarkdownCitations(text, payload);
     return {
       status:
         summary.length > 0 &&
@@ -1734,6 +1743,18 @@ function buildSelectionPolicy(
   };
 }
 
+export function orderHolderResearchTriageLookahead<T>(
+  ordinary: T[],
+  jevExtras: T[],
+  inputCap: number,
+): T[] {
+  return [
+    ...ordinary.slice(0, inputCap),
+    ...jevExtras,
+    ...ordinary.slice(inputCap),
+  ];
+}
+
 async function applyFreshPriceChecksToCandidates(params: {
   candidates: HolderResearchCandidate[];
   client: {
@@ -1957,6 +1978,12 @@ export async function runHolderResearch(
       candidates,
       selectionPolicy,
     );
+    // Reserve the first input-cap slots for ordinary candidates, while keeping
+    // the remaining lookahead candidates available to replace cache hits.
+    const baselineCandidates = selection.selected.slice(
+      0,
+      policy.maxCandidatesPerRun,
+    );
     const jevPreTriage: HolderResearchRunReport["jevPreTriage"] = {
       enabled: policy.jevPreTriageEnabled,
       considered: 0,
@@ -1967,7 +1994,7 @@ export async function runHolderResearch(
     };
     let extraCandidates: HolderResearchCandidate[] = [];
     const jevSlots = availableHolderResearchJevSlots(
-      selection.selected.length,
+      baselineCandidates.length,
       policy,
     );
     if (
@@ -2065,16 +2092,21 @@ export async function runHolderResearch(
         }
       }
     }
+    const selectedForEnrichment = orderHolderResearchTriageLookahead(
+      selection.selected,
+      extraCandidates,
+      policy.maxCandidatesPerRun,
+    );
     const selectedWithLive = await enrichHolderResearchLivePositions(
       client,
-      [...selection.selected, ...extraCandidates],
+      selectedForEnrichment,
       policy,
     );
     toolCalls.push({
       name: "live_position_check",
       count: Math.min(
         policy.maxLiveChecksPerRun,
-        [...selection.selected, ...extraCandidates].reduce(
+        selectedForEnrichment.reduce(
           (sum, candidate) => sum + candidate.market.holders.length,
           0,
         ),
@@ -2156,11 +2188,6 @@ export async function runHolderResearch(
           freshByThesis.get(entry.candidate.thesisKey) ?? entry.candidate,
       }));
     }
-    const selectionDiagnostics = buildHolderResearchSelectionDiagnostics(
-      candidates,
-      selectedWithFreshPrices,
-      selectionPolicy,
-    );
     if (observeV2 && !policy.dryRun) {
       try {
         const observationWrite =
@@ -2213,19 +2240,6 @@ export async function runHolderResearch(
     const calibrationMemo = policy.calibrationMemoEnabled
       ? await loadHolderResearchCalibrationMemo(client, policy)
       : [];
-    toolCalls.push({
-      name: "candidate_selection",
-      count: selectionDiagnostics.selectedForTriage,
-      status: "ok",
-      detail: [
-        `primary=${selectionDiagnostics.primaryEligible}/${selectionDiagnostics.loaded}`,
-        `supportOnly=${selectionDiagnostics.supportOnly}`,
-        `expiryBoosted=${selectionDiagnostics.expiryBoosted}`,
-        `blocked=${Object.entries(selectionDiagnostics.blockedByReason)
-          .map(([reason, count]) => `${reason}:${count}`)
-          .join(",")}`,
-      ].join(" "),
-    });
     toolCalls.push({
       name: "holder_context",
       count:
@@ -2348,12 +2362,34 @@ export async function runHolderResearch(
         applyHolderResearchPreviousDecisionContext(candidate, cacheEvaluation),
       );
     }
+    const triageInputCandidates = cacheEligibleCandidates.slice(
+      0,
+      policy.maxCandidatesPerRun,
+    );
+    const selectionDiagnostics = buildHolderResearchSelectionDiagnostics(
+      candidates,
+      triageInputCandidates,
+      selectionPolicy,
+    );
+    toolCalls.push({
+      name: "candidate_selection",
+      count: selectionDiagnostics.selectedForTriage,
+      status: "ok",
+      detail: [
+        `primary=${selectionDiagnostics.primaryEligible}/${selectionDiagnostics.loaded}`,
+        `supportOnly=${selectionDiagnostics.supportOnly}`,
+        `expiryBoosted=${selectionDiagnostics.expiryBoosted}`,
+        `blocked=${Object.entries(selectionDiagnostics.blockedByReason)
+          .map(([reason, count]) => `${reason}:${count}`)
+          .join(",")}`,
+      ].join(" "),
+    });
 
     const finalCandidates: HolderResearchCandidate[] = [];
     const triageCanRun =
       policy.triageEnabled &&
       args.callModel &&
-      cacheEligibleCandidates.length > 0;
+      triageInputCandidates.length > 0;
     if (triageCanRun) {
       triage.status = "ok";
       for (
@@ -2363,7 +2399,7 @@ export async function runHolderResearch(
         batchIndex += 1
       ) {
         const offset = batchIndex * policy.triageBatchSize;
-        const batch = cacheEligibleCandidates.slice(
+        const batch = triageInputCandidates.slice(
           offset,
           offset + policy.triageBatchSize,
         );
@@ -2510,7 +2546,7 @@ export async function runHolderResearch(
       }
     } else {
       finalCandidates.push(
-        ...cacheEligibleCandidates.slice(0, policy.maxAgentCallsPerRun),
+        ...triageInputCandidates.slice(0, policy.maxAgentCallsPerRun),
       );
     }
 

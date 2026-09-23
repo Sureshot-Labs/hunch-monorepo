@@ -2582,6 +2582,15 @@ export function diffHolderResearchDecisionSnapshots(
   return [...new Set(reasons)];
 }
 
+function researchUpdateDeltaReasons(reasons: string[]): string[] {
+  // Market-wide flow and positions in other markets inform context, but
+  // neither alone can produce a same-market holder-research update.
+  return reasons.filter(
+    (reason) =>
+      reason !== "fresh_flow" && reason !== "related_position_changed",
+  );
+}
+
 function isHolderResearchStatus(value: unknown): value is HolderResearchStatus {
   return value === "PUBLISH" || value === "CONTEXT" || value === "SKIP";
 }
@@ -2700,11 +2709,13 @@ export function evaluateHolderResearchDecisionCache(input: {
       meaningfulDeltaReasons: [],
     };
   }
-  let meaningfulDeltaReasons = diffHolderResearchDecisionSnapshots(
-    cached.snapshot,
-    snapshot,
-    input.policy,
-    cached.checkedAt,
+  const meaningfulDeltaReasons = researchUpdateDeltaReasons(
+    diffHolderResearchDecisionSnapshots(
+      cached.snapshot,
+      snapshot,
+      input.policy,
+      cached.checkedAt,
+    ),
   );
   const modelConfigChanged =
     cached.modelConfigSignature != null
@@ -2733,16 +2744,6 @@ export function evaluateHolderResearchDecisionCache(input: {
       nextEligibleAt: cached.nextEligibleAt,
       meaningfulDeltaReasons: [],
     };
-  }
-  const actionability = buildHolderResearchCandidateActionability(
-    input.candidate,
-    input.policy,
-  );
-  if (!actionability.isPrimaryResearchCandidate) {
-    meaningfulDeltaReasons = meaningfulDeltaReasons.filter(
-      (reason) =>
-        reason !== "fresh_flow" && reason !== "related_position_changed",
-    );
   }
   if (meaningfulDeltaReasons.length > 0) {
     const publishCooldownUntilMs = parseDateMs(cached.nextEligibleAt);
@@ -4510,11 +4511,13 @@ export function applyHolderResearchCooldowns(
     const previous = candidate.market.previousNote;
     if (!previous) return candidate;
     const meaningfulDeltaReasons = previous.decisionSnapshot
-      ? diffHolderResearchDecisionSnapshots(
-          previous.decisionSnapshot,
-          buildHolderResearchDecisionSnapshot(candidate),
-          policy,
-          previous.createdAt,
+      ? researchUpdateDeltaReasons(
+          diffHolderResearchDecisionSnapshots(
+            previous.decisionSnapshot,
+            buildHolderResearchDecisionSnapshot(candidate),
+            policy,
+            previous.createdAt,
+          ),
         )
       : ["legacy_note_without_snapshot"];
     return {
