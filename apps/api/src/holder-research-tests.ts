@@ -3356,13 +3356,28 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         });
         assert.equal(published.action, "skip");
       }
-      const legacyCache = { ...cachedSkip };
+      const legacyCache = { ...cachedSkip, model: "openai/gpt-5.5" };
       delete legacyCache.modelConfigSignature;
       assert.equal(
         evaluateHolderResearchDecisionCache({
           candidate,
           cachedDecision: legacyCache,
           policy: p,
+          now: new Date("2026-01-01T01:00:00.000Z"),
+        }).action,
+        "analyze",
+      );
+      assert.equal(
+        evaluateHolderResearchDecisionCache({
+          candidate,
+          cachedDecision: legacyCache,
+          policy: {
+            ...p,
+            model: "openai/gpt-5.5",
+            triageModel: "openai/gpt-5.4-mini",
+            reasoningEffort: null,
+            triageReasoningEffort: null,
+          },
           now: new Date("2026-01-01T01:00:00.000Z"),
         }).action,
         "skip",
@@ -5723,7 +5738,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     run: async () => {
       assert.equal(
         getIntelPolicyDefaults("holder_research").model,
-        "openai/gpt-5.5",
+        "openai/gpt-6-sol",
       );
 
       const db = {
@@ -5805,8 +5820,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.defaults.maxOutputTokens, 2_000);
       assert.equal(resolved.defaults.estimatedCallCostUsd, 0.08);
       assert.equal(resolved.defaults.estimatedTriageCallCostUsd, 0.01);
-      assert.equal(resolved.defaults.model, "openai/gpt-5.5");
-      assert.equal(resolved.defaults.triageModel, "openai/gpt-5.4-mini");
+      assert.equal(resolved.defaults.model, "openai/gpt-6-sol");
+      assert.equal(resolved.defaults.triageModel, "openai/gpt-6-luna");
       assert.equal(resolved.effective.externalSearchEnabled, true);
       assert.equal(resolved.effective.maxExternalSearchCallsPerRun, 5);
       assert.equal(

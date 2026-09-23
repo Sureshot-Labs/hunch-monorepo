@@ -97,6 +97,28 @@ for (const name of ["sol", "luna", "terra"]) {
       assert.ok(version.const.includes(useV2 ? "v2" : "v1"));
     }
 }
+for (const name of ["sol", "luna"]) {
+  const model = `openai/gpt-6-${name}`;
+  assert.ok(getOpenRouterModelPricingPerM(model)?.inputPerM);
+  assert.deepEqual(
+    buildOpenRouterReasoningOptions({ model, legacyTemperature: 0.1 }),
+    { provider: { require_parameters: true } },
+  );
+  assert.equal(
+    buildOpenRouterReasoningOptions({ model, effort: "none" }).reasoning
+      ?.effort,
+    "none",
+  );
+  for (const stage of ["triage", "final"] as const) {
+    const format = buildHolderResearchResponseFormat({
+      model,
+      stage,
+      useV2: true,
+    });
+    assert.equal(format.type, "json_schema");
+    assert.equal(format.json_schema?.strict, true);
+  }
+}
 const hr = getIntelPolicySchema("holder_research");
 assert.equal(
   hr.safeParse({ model: "openai/gpt-6-astra", reasoningEffort: "none" })
@@ -131,8 +153,14 @@ assert.ok(
   }).success,
 );
 assert.equal(hr.safeParse({ reasoningEffort: "ultra" }).success, false);
-assert.equal(getIntelPolicyDefaults("holder_research").reasoningEffort, null);
-assert.equal(getIntelPolicyDefaults("holder_research").model, legacy);
+assert.equal(
+  getIntelPolicyDefaults("holder_research").reasoningEffort,
+  "medium",
+);
+assert.equal(
+  getIntelPolicyDefaults("holder_research").model,
+  "openai/gpt-6-sol",
+);
 const base = {
   enabled: true,
   model: legacy,

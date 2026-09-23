@@ -550,7 +550,6 @@ return 0
 
 export const signalBotChatKey = (chatId: string): string =>
   `tg:signal_bot:v1:chat:${chatId}`;
-
 export const signalBotLockKey = (): string => LOCK_KEY;
 
 function signalBotPriceGuardDeferKey(chatId: string, noteId: string): string {
@@ -615,14 +614,15 @@ export function parseSignalBotConfig(
         2_000,
         parsePositiveInt(
           env.HUNCH_SIGNAL_BOT_X_EDITORIAL_MAX_OUTPUT_TOKENS,
-          700,
+          1_600,
         ),
       ),
       maxParagraphs: Math.min(
         12,
         parsePositiveInt(env.HUNCH_SIGNAL_BOT_X_EDITORIAL_MAX_PARAGRAPHS, 10),
       ),
-      model: env.HUNCH_SIGNAL_BOT_X_EDITORIAL_MODEL?.trim() || "openai/gpt-5.5",
+      model:
+        env.HUNCH_SIGNAL_BOT_X_EDITORIAL_MODEL?.trim() || "openai/gpt-6-sol",
     },
     xEditorialMedia: editorialMediaJobs.parseXEditorialMediaDeliveryConfig(env),
   };

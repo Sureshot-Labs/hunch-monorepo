@@ -368,7 +368,7 @@ const aiWhaleProfileSelectionSignalsWindowHours = optionalPositiveInt(
   24,
 );
 const aiWhaleProfileModel =
-  process.env.AI_WHALE_PROFILE_MODEL?.trim() || "openai/gpt-5.4";
+  process.env.AI_WHALE_PROFILE_MODEL?.trim() || "openai/gpt-6-luna";
 const aiMapSearchEnabled =
   parseOptionalBool(process.env.AI_MAP_SEARCH_ENABLED) ?? false;
 const aiMapSignalsEnabled =
@@ -1026,9 +1026,9 @@ export const env = {
   aiClusterAnalysisEnabled:
     parseOptionalBool(process.env.AI_CLUSTER_ANALYSIS_ENABLED) ?? false,
   aiClusterModelFast:
-    process.env.AI_CLUSTER_MODEL_FAST?.trim() || "openai/gpt-5.4-nano",
+    process.env.AI_CLUSTER_MODEL_FAST?.trim() || "openai/gpt-6-luna",
   aiClusterModelFinal:
-    process.env.AI_CLUSTER_MODEL_FINAL?.trim() || "openai/gpt-5.4",
+    process.env.AI_CLUSTER_MODEL_FINAL?.trim() || "openai/gpt-6-sol",
   aiClusterModelFallback:
     process.env.AI_CLUSTER_MODEL_FALLBACK?.trim() || "openai/gpt-4o-mini",
   aiClusterMaxStageB: optionalNonNegativeInt("AI_CLUSTER_MAX_STAGE_B", 50),
@@ -1115,7 +1115,7 @@ export const env = {
     "Neutral tone, short sentences, no hype, no speculation.",
   aiWhaleProfileMaxTokens: optionalPositiveInt(
     "AI_WHALE_PROFILE_MAX_TOKENS",
-    1000,
+    1_600,
   ),
   aiWhaleProfileMaxTokensFallback: optionalPositiveInt(
     "AI_WHALE_PROFILE_MAX_TOKENS_FALLBACK",

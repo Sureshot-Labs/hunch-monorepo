@@ -22,6 +22,7 @@ type SelectionRow = {
   event_venue: string;
   market_id: string;
   market_title: string | null;
+  market_outcomes: string | null;
   market_image: string | null;
   market_icon: string | null;
   market_trade_type: string | null;
@@ -74,6 +75,7 @@ export type RankedRepresentativeMarket = {
   venue: string;
   marketId: string;
   marketTitle: string | null;
+  marketOutcomes: string | null;
   marketImage: string | null;
   marketIcon: string | null;
   tradeType: string | null;
@@ -206,6 +208,7 @@ function normalizeRow(row: SelectionRow): RankedRepresentativeMarket {
     venue: row.event_venue,
     marketId: row.market_id,
     marketTitle: row.market_title?.trim() || null,
+    marketOutcomes: row.market_outcomes ?? null,
     marketImage: row.market_image ?? null,
     marketIcon: row.market_icon ?? null,
     tradeType: row.market_trade_type ?? null,
@@ -313,6 +316,7 @@ export async function selectPreferredRepresentativeMarketsForEvents(
       m.input_event_venue as event_venue,
       m.id as market_id,
       m.title as market_title,
+      m.outcomes as market_outcomes,
       m.image as market_image,
       m.icon as market_icon,
       m.metadata->>'tradeType' as market_trade_type,
@@ -557,6 +561,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
         m.input_event_venue as event_venue,
         m.id as market_id,
         m.title as market_title,
+        m.outcomes as market_outcomes,
         m.image as market_image,
         m.icon as market_icon,
         m.metadata->>'tradeType' as market_trade_type,
@@ -825,6 +830,7 @@ export async function selectRankedRepresentativeMarketsForEvents(
       event_venue,
       market_id,
       market_title,
+      market_outcomes,
       market_image,
       market_icon,
       market_trade_type,

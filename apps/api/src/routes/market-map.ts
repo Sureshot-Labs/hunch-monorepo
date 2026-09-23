@@ -283,6 +283,11 @@ function filterCachedMarketMapBody(
       allowed,
     );
   }
+  if (Array.isArray(parsed.parentSignalsPreview)) {
+    next.parentSignalsPreview = (
+      parsed.parentSignalsPreview as MarketMapSignalSummary[]
+    ).filter((signal) => signalSummaryAllowedForVenues(signal, allowed));
+  }
   if (isRecord(parsed.countsByVenue)) {
     next.countsByVenue = Object.fromEntries(
       Object.entries(parsed.countsByVenue).filter(([venue]) =>
@@ -2478,6 +2483,11 @@ export const marketMapRoutes: FastifyPluginAsync = async (app) => {
         limit,
         perVenueMin,
         countsByVenue,
+        parentSignalsPreview: parentNode
+          ? (parentNode.signalsPreview ?? []).filter((signal) =>
+              signalSummaryAllowedForVenues(signal, selectedVenueSet),
+            )
+          : [],
         items: itemsWithEventsPreview,
         defaults: {
           sizeBy: effective.sizeByDefault,

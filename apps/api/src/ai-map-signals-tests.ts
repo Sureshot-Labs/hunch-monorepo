@@ -1,8 +1,13 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
-import { buildMapSignalsUserPromptV2 } from "./schemas/ai-map-signals.js";
+import { mapSignalsModelTestHooks } from "./ai-map-signals-run.js";
+import {
+  buildMapSignalsSystemPromptV2,
+  buildMapSignalsUserPromptV2,
+} from "./schemas/ai-map-signals.js";
 import { normalizeAiMarketMetrics } from "./services/market-ai-metrics.js";
+import { eventVenueKey } from "./services/market-map-representative.js";
 import {
   scoreSignalMarketContractMatch,
   scoreSignalTargetAnchorAlignment,
@@ -10,10 +15,72 @@ import {
 
 type TestCase = {
   name: string;
-  run: () => void;
+  run: () => void | Promise<void>;
 };
 
 const tests: TestCase[] = [
+  {
+    name: "named market outcomes survive candidate selection without guessing generic sides",
+    run: async () => {
+      const events = [
+        {
+          eventId: "e-1",
+          title: "Jelena Ostapenko vs Taylah Preston",
+          venue: "polymarket" as const,
+          representativeMarketId: "m-1",
+          volume24h: 100,
+          liquidity: 100,
+          openInterest: 0,
+          score: 1,
+          x: 0,
+          y: 0,
+        },
+      ];
+      const market = {
+        marketId: "m-1",
+        marketTitle: "Jelena Ostapenko vs Taylah Preston",
+        marketOutcomes: '["Jelena Ostapenko","Taylah Preston"]',
+        closeTime: null,
+        venue: "polymarket",
+        volume24h: 100,
+        volumeTotal: 100,
+        liquidity: 100,
+        openInterest: 0,
+        rank: 1,
+        quote: {
+          yesBid: null,
+          yesAsk: null,
+          noBid: null,
+          noAsk: null,
+          topAsOf: { YES: null, NO: null },
+        },
+      };
+      const key = eventVenueKey("e-1", "polymarket");
+      const options = {
+        includeSemanticAffinity: false,
+        getEvidenceEmbeddings: async () => new Map(),
+        getMarketEmbeddings: async () => new Map(),
+      };
+      const named = await mapSignalsModelTestHooks.toMarketCandidates(
+        events,
+        new Map([[key, [market]]]),
+        1,
+        [],
+        options,
+      );
+      assert.equal(named[0]?.yesOutcomeLabel, "Jelena Ostapenko");
+      assert.equal(named[0]?.noOutcomeLabel, "Taylah Preston");
+      const generic = await mapSignalsModelTestHooks.toMarketCandidates(
+        events,
+        new Map([[key, [{ ...market, marketOutcomes: '["Yes","No"]' }]]]),
+        1,
+        [],
+        options,
+      );
+      assert.equal(generic[0]?.yesOutcomeLabel, null);
+      assert.equal(generic[0]?.noOutcomeLabel, null);
+    },
+  },
   {
     name: "normalizeAiMarketMetrics falls back to total volume for limitless only",
     run: () => {
@@ -110,6 +177,8 @@ const tests: TestCase[] = [
             eventId: "e-1",
             eventTitle: "Event",
             marketTitle: "Market",
+            yesOutcomeLabel: "Jelena Ostapenko",
+            noOutcomeLabel: "Taylah Preston",
             closeTime: "2026-03-22T23:59:00.000Z",
             venue: "limitless",
             activityVolume: 123.45,
@@ -127,6 +196,10 @@ const tests: TestCase[] = [
       assert.match(prompt, /depth_proxy: 67\.89/);
       assert.match(prompt, /open_interest: -/);
       assert.match(prompt, /contract_match: 0\.660000/);
+      assert.match(prompt, /yes_outcome: Jelena Ostapenko/);
+      assert.match(prompt, /no_outcome: Taylah Preston/);
+      assert.match(buildMapSignalsSystemPromptV2(), /never swap them/);
+      assert.match(buildMapSignalsSystemPromptV2(), /'YES contract'/);
       assert.doesNotMatch(prompt, /\n {2}score:/);
       assert.doesNotMatch(prompt, /volume_24h:/);
       assert.doesNotMatch(prompt, /\n {2}liquidity:/);
@@ -237,7 +310,7 @@ const tests: TestCase[] = [
 
 let passed = 0;
 for (const test of tests) {
-  test.run();
+  await test.run();
   passed += 1;
   console.log(`[ai-map-signals-tests] ok ${test.name}`);
 }

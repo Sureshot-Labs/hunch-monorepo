@@ -113,6 +113,20 @@ assert.equal(
   getOpenRouterModelPricingPerM("openai/gpt-6-astra", 300000)?.outputPerM,
   75,
 );
+assert.deepEqual(getOpenRouterModelPricingPerM("openai/gpt-6-luna"), {
+  inputPerM: 0.1,
+  outputPerM: 0.5,
+  webSearchPerCallUsd: 0.01,
+});
+assert.equal(
+  getOpenRouterModelPricingPerM("openai/gpt-6-luna", 300000)?.outputPerM,
+  0.75,
+);
+assert.equal(getOpenRouterModelPricingPerM("openai/gpt-6-sol")?.inputPerM, 2);
+assert.equal(
+  getOpenRouterModelPricingPerM("openai/gpt-6-sol", 300000)?.inputPerM,
+  4,
+);
 const originalFetch = globalThis.fetch;
 try {
   // A promotional/discounted catalog price cannot lower Astra's standard estimate.

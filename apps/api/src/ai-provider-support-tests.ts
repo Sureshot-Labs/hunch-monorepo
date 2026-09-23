@@ -46,6 +46,8 @@ for (const model of [
   "openai/gpt-5.6-sol",
   "openai/gpt-5.6-terra",
   "openai/gpt-6-astra",
+  "openai/gpt-6-luna",
+  "openai/gpt-6-sol",
   "openai/gpt-6-astra-pro",
   "openai/gpt-5.6-luna:batch",
 ]) {
@@ -84,7 +86,7 @@ for (const key of [
   );
 }
 assert.equal(getIntelPolicyDefaults("ai_clusters").maxTokensFast, 800);
-assert.equal(getIntelPolicyDefaults("ai_clusters").reasoningEffortFast, null);
+assert.equal(getIntelPolicyDefaults("ai_clusters").reasoningEffortFast, "low");
 assert.ok(
   getIntelPolicySchema("ai_clusters").safeParse({
     reasoningEffortFast: "low",

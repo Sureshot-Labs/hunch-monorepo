@@ -144,6 +144,8 @@ export type MapSignalsPromptInput = {
     eventId: string;
     eventTitle: string;
     marketTitle: string | null;
+    yesOutcomeLabel?: string | null;
+    noOutcomeLabel?: string | null;
     closeTime: string | null;
     venue: string;
     activityVolume: number;
@@ -186,6 +188,8 @@ function formatMarketList(
         `  venue: ${item.venue}`,
         `  event_title: ${item.eventTitle}`,
         `  market_title: ${item.marketTitle ?? "-"}`,
+        `  yes_outcome: ${item.yesOutcomeLabel ?? "-"}`,
+        `  no_outcome: ${item.noOutcomeLabel ?? "-"}`,
         `  trading_close_time: ${item.closeTime ?? "-"}`,
         `  activity_volume: ${item.activityVolume.toFixed(2)}`,
         `  depth_proxy: ${item.depthProxy.toFixed(2)}`,
@@ -221,6 +225,7 @@ export function buildMapSignalsSystemPromptV2(): string {
     "  - update: informative context with weaker directional edge.",
     "- Do not default to update when catalyst or risk is clearly supported.",
     "- direction=up/down describes the selected contract's YES probability rising/falling, not the underlying asset price by itself.",
+    "- YES/NO are internal side codes. yes_outcome/no_outcome, when present, name the actual outcomes; never swap them or infer a mapping from a 'vs' title alone.",
     "- PUBLISH: specific market-level implication with enough confidence and evidence quality.",
     "- CONTEXT: useful context but no single high-confidence market target.",
     "- SKIP: low-quality/noise/insufficient evidence.",
@@ -233,6 +238,7 @@ export function buildMapSignalsSystemPromptV2(): string {
     "- summary: aim for 18-40 words across 1-2 short sentences. Do not add filler to hit the count.",
     "- The headline should signal the market read, not just name the topic.",
     "- The summary should explain what changed and why traders should care now.",
+    "- In headline and summary, name the player, team, outcome, price threshold, or condition rather than saying 'YES contract', 'NO contract', or 'YES probability'. For named outcomes, describe that outcome's chances; if outcome labels are unavailable, use the full market question without guessing which competitor is YES.",
     "- Focus on: what changed, why it matters now, and what it does to the target market.",
     "- rationale: exactly 1 short sentence. Explain why this target market is the best fit versus the other candidates.",
     "- Prefer concrete triggers: price move, result, filing, poll, earnings, injury, deadline, official comment, macro release, or bracket change.",
@@ -305,6 +311,7 @@ export function buildMapSignalsUserPromptV2(
     "- Keep summary to 1-2 short sentences.",
     "- Name the concrete trigger when useful: company, team, player, result, price level, deadline, filing, official comment, poll, injury, or macro release.",
     "- Tie the trigger directly to the target contract.",
+    "- Use yes_outcome/no_outcome to make the selected side readable. Keep direction tied to YES even if the news also affects the named NO outcome in the opposite direction.",
     "- If the evidence is just a current price, score, standings line, or status check, describe that state directly instead of saying a site 'reported' it.",
     "- Keep rationale short and explicit.",
     "- Do not mention internal field names like affinity_score, affinity_rank, depth_proxy, candidate market, or confirmation labels in headline, summary, or rationale.",

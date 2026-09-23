@@ -295,6 +295,8 @@ try {
           eventId: "event",
           eventTitle: "Fixture",
           marketTitle: "Fixture",
+          yesOutcomeLabel: null,
+          noOutcomeLabel: null,
           closeTime: null,
           venue: "polymarket",
           activityVolume: 1,

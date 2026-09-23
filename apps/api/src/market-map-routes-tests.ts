@@ -54,6 +54,11 @@ type NodeEventsPayload = {
 };
 
 type MarketMapPayload = {
+  parentSignalsPreview?: Array<{
+    title: string;
+    targetEventId?: string | null;
+    targetMarketId?: string | null;
+  }>;
   items: Array<{
     eventCount?: number;
     id: string;
@@ -597,7 +602,8 @@ async function insertEventSignalNote(params: {
         target_meta
       ) values
         ($1, 'market', $2, true, 0, 0.72, $3::jsonb),
-        ($1, 'event', $4, false, 5, null, $5::jsonb)
+        ($1, 'event', $4, false, 5, null, $5::jsonb),
+        ($1, 'node', $6, false, 10, null, '{}'::jsonb)
     `,
     [
       params.noteId,
@@ -612,6 +618,7 @@ async function insertEventSignalNote(params: {
         target_event_title: params.eventTitle,
         target_venue: params.venue,
       }),
+      params.nodeId,
     ],
   );
 }
@@ -1190,6 +1197,33 @@ async function main() {
     assert.equal(previewSignals?.length, 2);
     assert.equal(previewSignals?.[0]?.title, "Alpha follow-up signal");
     assert.equal(previewSignals?.[1]?.title, "Alpha signal");
+
+    const drilledMap = await requestMarketMap({
+      app,
+      query: { level: 3, parent: nodeId },
+    });
+    assert.deepEqual(
+      drilledMap.parentSignalsPreview?.map((signal) => signal.title),
+      ["Alpha follow-up signal"],
+      "direct node signals remain accessible after drilling",
+    );
+    assert.equal(
+      drilledMap.parentSignalsPreview?.[0]?.targetMarketId,
+      signalMarketId,
+    );
+    const drilledMapRepeat = await requestMarketMap({
+      app,
+      query: { level: 3, parent: nodeId },
+    });
+    assert.equal(
+      drilledMapRepeat.parentSignalsPreview?.[0]?.targetMarketId,
+      signalMarketId,
+    );
+    const venueFilteredDrill = await requestMarketMap({
+      app,
+      query: { level: 3, parent: nodeId, venues: "limitless" },
+    });
+    assert.deepEqual(venueFilteredDrill.parentSignalsPreview, []);
 
     const qualityPreviewMap = await requestMarketMap({
       app,

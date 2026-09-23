@@ -52,6 +52,8 @@ try {
     "openai/gpt-5.6-luna",
     "openai/gpt-5.6-terra",
     "openai/gpt-6-astra",
+    "openai/gpt-6-luna",
+    "openai/gpt-6-sol",
   ]) {
     const policy = getIntelPolicyDefaults("market_map");
     const config = marketMapModelTestHooks.buildConfig([], {
@@ -106,7 +108,7 @@ assert.throws(() =>
   mapSignalsModelTestHooks.resolveArgs(["--reasoning-effort", "invalid"]),
 );
 assert.equal(getIntelPolicyDefaults("market_map").labelReasoningEffort, null);
-assert.equal(getIntelPolicyDefaults("map_signals").reasoningEffort, null);
+assert.equal(getIntelPolicyDefaults("map_signals").reasoningEffort, "low");
 assert.ok(
   getIntelPolicySchema("market_map").safeParse({
     labelModel: "openai/gpt-5.6-luna",

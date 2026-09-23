@@ -57,6 +57,7 @@ import {
 } from "./services/market-map-representative.js";
 import { isMarketMapUsable } from "./services/market-map-quality.js";
 import { normalizeAiMarketMetrics } from "./services/market-ai-metrics.js";
+import { outcomeLabelForSide } from "./services/wallet-intel-helpers.js";
 import {
   scoreSignalMarketContractMatch,
   scoreSignalTargetAnchorAlignment,
@@ -233,6 +234,8 @@ type MarketCandidate = {
   eventId: string;
   eventTitle: string;
   marketTitle: string | null;
+  yesOutcomeLabel: string | null;
+  noOutcomeLabel: string | null;
   closeTime: string | null;
   venue: string;
   activityVolume: number;
@@ -255,6 +258,7 @@ type MarketCandidate = {
 type EventTopMarket = {
   marketId: string;
   marketTitle: string | null;
+  marketOutcomes: string | null;
   closeTime: string | null;
   venue: string | null;
   volume24h: number;
@@ -465,7 +469,7 @@ function preview(value: string, maxChars: number): string {
 }
 
 function resolveArgs(argv: string[]): Args {
-  const model = parseFlag(argv, "--model") ?? "openai/gpt-5.4";
+  const model = parseFlag(argv, "--model") ?? "openai/gpt-6-sol";
   const embedModel =
     parseFlag(argv, "--embed-model") ??
     process.env.OPENROUTER_EMBED_MODEL ??
@@ -558,7 +562,7 @@ Input:
   --report-out <path>            Output markdown summary path
 
 Model:
-  --model <id>                   OpenRouter model (default: openai/gpt-5.4)
+  --model <id>                   OpenRouter model (default: openai/gpt-6-sol)
   --reasoning-effort <effort>     Optional reasoning override (legacy default: low)
   --temperature <0..2>           Legacy sampling temperature; omitted for modern OpenAI reasoning models
   --embed-model <id>             Compatibility check only; must match the map snapshot generation
@@ -1268,6 +1272,8 @@ async function toMarketCandidates(
         eventId: event.eventId,
         eventTitle: event.title,
         marketTitle: market.marketTitle ?? null,
+        yesOutcomeLabel: outcomeLabelForSide(market.marketOutcomes, "YES"),
+        noOutcomeLabel: outcomeLabelForSide(market.marketOutcomes, "NO"),
         closeTime: market.closeTime ?? null,
         venue: market.venue ?? event.venue,
         activityVolume: metrics.activityVolume,
@@ -2386,6 +2392,7 @@ export async function runMapSignals(
           const parsed: EventTopMarket = {
             marketId: row.marketId,
             marketTitle: row.marketTitle,
+            marketOutcomes: row.marketOutcomes,
             closeTime: row.closeTime,
             venue,
             volume24h: row.volume24h,
