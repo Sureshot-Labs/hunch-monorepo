@@ -12,6 +12,7 @@ import { pool } from "./db.js";
 import { env } from "./env.js";
 import { closeRedis } from "./redis.js";
 import { resolveHolderResearchPolicy } from "./services/runtime-policies.js";
+import { canReserveHolderResearchJev } from "./services/holder-research-jev.js";
 
 const KEY_PREFIX = "ai:holder_research:v1";
 const LOCK_KEY = `${KEY_PREFIX}:lock`;
@@ -33,6 +34,7 @@ type RunHistoryEntry = {
   externalSearchChargedCostUsd: number;
   triageEstimatedCostUsd?: number;
   triageChargedCostUsd?: number;
+  jevChargedCostUsd?: number;
   result: "ok" | "dry_run" | "skipped" | "error";
 };
 
@@ -157,6 +159,7 @@ export async function runHolderResearchRunner(
         : 0;
     const estimate =
       modelCallsEstimate + triageEstimate + externalSearchEstimate;
+    let jevBudgetAvailable = true;
     if (!args.ignoreBudget) {
       const now = Date.now();
       const history = (await readRunHistory(redis)).filter(
@@ -167,7 +170,8 @@ export async function runHolderResearchRunner(
           sum +
           entry.chargedCostUsd +
           entry.externalSearchChargedCostUsd +
-          (entry.triageChargedCostUsd ?? 0),
+          (entry.triageChargedCostUsd ?? 0) +
+          (entry.jevChargedCostUsd ?? 0),
         0,
       );
       if (history.length >= policy.maxRunsPerDay) {
@@ -198,6 +202,11 @@ export async function runHolderResearchRunner(
         console.log(JSON.stringify(payload, null, 2));
         return;
       }
+      jevBudgetAvailable = canReserveHolderResearchJev({
+        spentUsd: spent,
+        baseEstimateUsd: estimate,
+        dayBudgetUsd: policy.dayBudgetUsd,
+      });
     }
 
     lockValue = `${process.pid}:${randomUUID()}`;
@@ -218,10 +227,15 @@ export async function runHolderResearchRunner(
       return;
     }
 
+    let jevChargedCostUsd = 0;
     try {
       const report = await runHolderResearch(args, {
         decisionCacheRedis: redis,
         priceRefreshRedis: redis,
+        jevBudgetAvailable,
+        onJevCost: (costUsd) => {
+          jevChargedCostUsd = costUsd;
+        },
       });
       const entry: RunHistoryEntry = {
         runId: report.runId,
@@ -234,6 +248,7 @@ export async function runHolderResearchRunner(
           report.totals.externalSearchChargedCostUsd,
         triageEstimatedCostUsd: report.totals.triageEstimatedCostUsd,
         triageChargedCostUsd: report.totals.triageChargedCostUsd,
+        jevChargedCostUsd: report.totals.jevChargedCostUsd,
         result: report.dryRun ? "dry_run" : "ok",
       };
       await redis
@@ -251,8 +266,17 @@ export async function runHolderResearchRunner(
         chargedCostUsd: 0,
         externalSearchEstimatedCostUsd: 0,
         externalSearchChargedCostUsd: 0,
+        jevChargedCostUsd,
         result: "error",
       };
+      if (jevChargedCostUsd > 0) {
+        await redis
+          .multi()
+          .lPush(RUNS_KEY, JSON.stringify(entry))
+          .lTrim(RUNS_KEY, 0, 200)
+          .pExpire(RUNS_KEY, RUN_HISTORY_TTL_MS)
+          .exec();
+      }
       await redis.set(
         STATUS_KEY,
         JSON.stringify({

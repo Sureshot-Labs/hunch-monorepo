@@ -39,6 +39,7 @@ import {
   adaptHolderResearchFinalOutputV2,
   applyHolderResearchLivePriceChecks,
   applyHolderResearchPublishQualityGate,
+  assessHolderResearchHorizonException,
   buildHolderResearchActorSummary,
   buildDeterministicHolderResearchDecision,
   buildHolderResearchDecisionCacheRecord,
@@ -60,6 +61,7 @@ import {
   evaluateResolvedHolderResearchNotes,
   evaluateHolderResearchDecisionCache,
   enrichHolderResearchFirstObservedActivity,
+  enrichHolderResearchLivePositions,
   HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
   isSharpHolder,
   loadHolderResearchCandidateMarkets,
@@ -71,6 +73,14 @@ import {
   type HolderResearchSide,
 } from "./services/holder-research.js";
 import {
+  availableHolderResearchJevSlots,
+  canReserveHolderResearchJev,
+  chooseHolderResearchJevCandidates,
+  fitHolderResearchJevLiveCheckCapacity,
+  HOLDER_RESEARCH_JEV_MODEL,
+  selectHolderResearchJevShortlist,
+} from "./services/holder-research-jev.js";
+import {
   buildHolderResearchObservationCalibrationReport,
   buildHolderResearchObservationRankingTelemetryV2,
   loadHolderResearchObservationCalibration,
@@ -80,6 +90,7 @@ import {
 } from "./services/holder-research-observations.js";
 import {
   getIntelPolicyDefaults,
+  getIntelPolicySchema,
   resolveIntelPolicy,
   type HolderResearchPolicy,
 } from "./services/runtime-policies.js";
@@ -337,6 +348,20 @@ function sharpMinorityCandidate(
     p,
   ).find((entry) => entry.bucket === "sharp_minority");
   if (!candidate) throw new Error("sharp_minority fixture missing");
+  return candidate;
+}
+
+function longHorizonCandidate(p: HolderResearchPolicy) {
+  const candidate = buildHolderResearchCandidatesFromMarket(
+    market({
+      category: "Economics",
+      eventTitle: "Federal Reserve policy",
+      marketTitle: "Fed Decision in December?",
+      closeTime: new Date(Date.now() + 90 * 86_400_000).toISOString(),
+    }),
+    p,
+  ).find((item) => item.bucket === "sharp_side" && item.side === "NO");
+  assert.ok(candidate);
   return candidate;
 }
 
@@ -850,6 +875,63 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
+    name: "Jev horizon review requires an actual live row, not cached holder exposure",
+    run: async () => {
+      const p = policy();
+      const candidate = sharpMinorityCandidate(p);
+      const snapshotAt = new Date();
+      const queryFor = (present: boolean) =>
+        ({
+          query: async (sql: string) => ({
+            rows:
+              present && sql.includes("from wallet_position_snapshots ws")
+                ? candidate.market.holders.map((entry) => ({
+                    wallet_id: entry.walletId,
+                    venue: candidate.market.venue,
+                    market_id: candidate.market.marketId,
+                    outcome_side: entry.side,
+                    shares: "100",
+                    size_usd: "10000",
+                    price: "0.5",
+                    snapshot_at: snapshotAt,
+                    metadata: null,
+                    best_bid: "0.49",
+                    best_ask: "0.51",
+                    last_price: "0.5",
+                    resolved_outcome: null,
+                    resolved_outcome_pct: null,
+                  }))
+                : [],
+          }),
+        }) as unknown as import("pg").PoolClient;
+
+      const [missing] = await enrichHolderResearchLivePositions(
+        queryFor(false),
+        [candidate],
+        p,
+      );
+      assert.ok(missing);
+      assert.ok(missing.market.holders.some((entry) => entry.positionUsd > 0));
+      assert.ok(
+        missing.market.holders.every(
+          (entry) => entry.livePositionConfirmedAt == null,
+        ),
+      );
+
+      const [confirmed] = await enrichHolderResearchLivePositions(
+        queryFor(true),
+        [candidate],
+        p,
+      );
+      assert.ok(confirmed);
+      assert.ok(
+        confirmed.market.holders.every(
+          (entry) => entry.livePositionConfirmedAt === snapshotAt.toISOString(),
+        ),
+      );
+    },
+  },
+  {
     name: "V2 first activity enrichment uses exact hourly wallet-market-side pairs",
     run: async () => {
       const p = policy();
@@ -870,6 +952,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                 market_id: candidate.market.marketId,
                 outcome_side: candidate.side,
                 first_activity_at: firstActivityAt,
+                latest_activity_at: "2026-01-02T11:00:00.000Z",
               },
             ],
           };
@@ -886,6 +969,16 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
 
       assert.ok(enriched);
       assert.equal(enriched?.market.firstObservedActivityAt, firstActivityAt);
+      assert.equal(
+        enriched?.market.latestSharpSideActivityAt,
+        "2026-01-02T11:00:00.000Z",
+      );
+      assert.equal(
+        enriched?.market.holders.find(
+          (entry) => entry.walletId === primaryHolder.walletId,
+        )?.latestSupportingActivityAt,
+        "2026-01-02T11:00:00.000Z",
+      );
       const features = buildHolderResearchDecisionFeaturesV2(
         enriched,
         p,
@@ -904,6 +997,11 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         /activity\.outcome_side = requested\.outcome_side/i,
       );
       assert.match(capturedSql, /interval '30 days'/i);
+      assert.match(
+        capturedSql,
+        /last_change_action in \('OPENED', 'INCREASED'\)/i,
+      );
+      assert.match(capturedSql, /last_change_action is null/i);
       assert.deepEqual(capturedParams, [
         [primaryHolder.walletId],
         [candidate.market.marketId],
@@ -5180,6 +5278,21 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         selectHolderResearchTriageFallbackCandidates([mixed], 1).length,
         0,
       );
+      assert.equal(
+        selectHolderResearchTriageFallbackCandidates(
+          [
+            {
+              ...candidate,
+              jevPreTriage: {
+                model: HOLDER_RESEARCH_JEV_MODEL,
+                selectedAt: new Date().toISOString(),
+              },
+            },
+          ],
+          1,
+        ).length,
+        0,
+      );
     },
   },
   {
@@ -5834,6 +5947,14 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       );
       assert.equal(resolved.effective.externalSearchMinScore, 0.8);
       assert.equal(resolved.defaults.triageEnabled, true);
+      assert.equal(resolved.defaults.jevPreTriageEnabled, true);
+      assert.equal(resolved.effective.jevPreTriageEnabled, true);
+      assert.equal(
+        getIntelPolicySchema("holder_research").parse({
+          jevPreTriageEnabled: "false",
+        }).jevPreTriageEnabled,
+        false,
+      );
       assert.equal(resolved.defaults.triageBatchSize, 8);
       assert.equal(resolved.defaults.triageMaxOutputTokens, 2_000);
       assert.equal(resolved.effective.triageEnabled, true);
@@ -5933,6 +6054,664 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.effective.priceAgainstSignalBlockPp, 0.08);
       assert.equal(resolved.effective.maxAgentCallsPerRun, 100);
       assert.equal(resolved.effective.maxOutputTokens, 100);
+    },
+  },
+  {
+    name: "Fed macro is not a crypto-single blocker but Bitcoin still is",
+    run: () => {
+      const p = policy({
+        maxPublishHorizonHours: 720,
+        preTriageActionabilityEnabled: true,
+      });
+      const fed = longHorizonCandidate(p);
+      const fedQuality = buildHolderResearchQualityAssessment(fed, p);
+      assert.equal(fedQuality.marketSegment, "macro_rates");
+      assert.equal(
+        fedQuality.riskTags.includes("unsupported_crypto_single"),
+        false,
+      );
+      assert.deepEqual(
+        buildHolderResearchCandidateActionability(fed, p)
+          .likelyFinalGateBlockers,
+        ["publish_horizon_too_long"],
+      );
+      const bitcoin = {
+        ...fed,
+        market: {
+          ...fed.market,
+          category: "Crypto",
+          marketTitle: "Bitcoin above $100000 by December?",
+          eventTitle: "Bitcoin price targets",
+        },
+      };
+      assert.equal(
+        buildHolderResearchQualityAssessment(bitcoin, p).riskTags.includes(
+          "unsupported_crypto_single",
+        ),
+        true,
+      );
+    },
+  },
+  {
+    name: "Jev only considers horizon-only uncached candidates and does not leak wallets",
+    run: async () => {
+      const p = policy({
+        minScore: 0,
+        maxPublishHorizonHours: 720,
+        preTriageActionabilityEnabled: true,
+      });
+      const candidate = longHorizonCandidate(p);
+      const shortlist = selectHolderResearchJevShortlist({
+        candidates: [
+          candidate,
+          {
+            ...candidate,
+            key: "cooldown",
+            market: { ...candidate.market, marketId: "cooldown-market" },
+            cooldownUntil: new Date(Date.now() + 3_600_000).toISOString(),
+          },
+        ],
+        baseline: [],
+        policy: p,
+      });
+      assert.deepEqual(
+        shortlist.map((item) => item.key),
+        [candidate.key],
+      );
+      const liveCapacity = fitHolderResearchJevLiveCheckCapacity({
+        baseline: [candidate],
+        extras: [
+          { ...candidate, key: "extra-1" },
+          { ...candidate, key: "extra-2" },
+        ],
+        maxChecks: candidate.market.holders.length * 2,
+      });
+      assert.deepEqual(
+        liveCapacity.selected.map((item) => item.key),
+        ["extra-1"],
+      );
+      assert.equal(liveCapacity.dropped, 1);
+      assert.equal(availableHolderResearchJevSlots(3, p), 2);
+      assert.equal(
+        availableHolderResearchJevSlots(3, { ...p, maxAgentCallsPerRun: 3 }),
+        0,
+      );
+      assert.equal(
+        availableHolderResearchJevSlots(3, { ...p, maxCandidatesPerRun: 4 }),
+        1,
+      );
+      const calls: string[] = [];
+      const result = await chooseHolderResearchJevCandidates({
+        candidates: shortlist,
+        policy: p,
+        apiKey: "test-key",
+        fetchImpl: (async (_url, init) => {
+          calls.push(String(init?.body));
+          return new Response(
+            JSON.stringify({
+              model: HOLDER_RESEARCH_JEV_MODEL,
+              usage: { cost: 0.0003 },
+              answers: {
+                preselect: {
+                  type: "choice",
+                  choice: "A",
+                  confidence: 0.82,
+                  probabilities: { A: 0.8, none: 0.2 },
+                },
+              },
+            }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+      });
+      assert.deepEqual(result.selectedKeys, [candidate.key]);
+      assert.equal(result.votes[0]?.chargedCostUsd, 0.0003);
+      assert.equal(calls.length, 1);
+      assert.doesNotMatch(calls[0] ?? "", /walletId|publish_horizon_too_long/);
+      assert.equal(
+        canReserveHolderResearchJev({
+          spentUsd: 4.7,
+          baseEstimateUsd: 0.28,
+          dayBudgetUsd: 5,
+        }),
+        true,
+      );
+      assert.equal(
+        canReserveHolderResearchJev({
+          spentUsd: 4.71,
+          baseEstimateUsd: 0.28,
+          dayBudgetUsd: 5,
+        }),
+        false,
+      );
+      const failed = await chooseHolderResearchJevCandidates({
+        candidates: shortlist,
+        policy: p,
+        apiKey: "test-key",
+        fetchImpl: (async () =>
+          new Response("", { status: 502 })) as typeof fetch,
+      });
+      assert.deepEqual(failed.selectedKeys, []);
+      assert.equal(failed.votes[0]?.reason, "provider_error");
+      assert.equal(failed.votes[0]?.chargedCostUsd, 0.01);
+      const none = await chooseHolderResearchJevCandidates({
+        candidates: shortlist,
+        policy: p,
+        apiKey: "test-key",
+        fetchImpl: (async () =>
+          new Response(
+            JSON.stringify({
+              model: HOLDER_RESEARCH_JEV_MODEL,
+              answers: {
+                preselect: {
+                  type: "choice",
+                  choice: "none",
+                  confidence: 0.9,
+                  probabilities: { A: 0.1, none: 0.9 },
+                },
+              },
+            }),
+            { status: 200 },
+          )) as typeof fetch,
+      });
+      assert.deepEqual(none.selectedKeys, []);
+      assert.equal(none.votes[0]?.reason, "none");
+      const ambiguous = await chooseHolderResearchJevCandidates({
+        candidates: shortlist,
+        policy: p,
+        apiKey: "test-key",
+        fetchImpl: (async () =>
+          new Response(
+            JSON.stringify({
+              model: HOLDER_RESEARCH_JEV_MODEL,
+              answers: {
+                preselect: {
+                  type: "choice",
+                  choice: "A",
+                  confidence: 0.9,
+                  probabilities: { A: 0.49, none: 0.51 },
+                },
+              },
+            }),
+            { status: 200 },
+          )) as typeof fetch,
+      });
+      assert.deepEqual(ambiguous.selectedKeys, []);
+      assert.equal(ambiguous.votes[0]?.reason, "uncertain");
+    },
+  },
+  {
+    name: "Jev receives real aggregate features from two historical horizon-only groups",
+    run: async () => {
+      const p = policy({ maxPublishHorizonHours: 720 });
+      const base = longHorizonCandidate(p);
+      // Public contracts and aggregate selected-side facts from one observed run;
+      // no wallet identifiers or provider outcomes are retained in this fixture.
+      const historicalMarkets = [
+        [
+          "Will the U.S. invade Iran before 2027?",
+          "Will the U.S. invade Iran before 2027?",
+          "NO",
+          3,
+          228719.82,
+          0.1865,
+          1.6228,
+          11,
+          2392,
+        ],
+        [
+          "Fed Decision in October?",
+          "No change",
+          "NO",
+          1,
+          36086.68,
+          0.1698,
+          2.165,
+          23,
+          855,
+        ],
+        [
+          "Prime Minister of Israel after the next election?",
+          "Benjamin Netanyahu",
+          "NO",
+          1,
+          7684.5,
+          0.1143,
+          2.0677,
+          42,
+          827,
+        ],
+        [
+          "Which party will win the Senate in 2026?",
+          "Democratic Party",
+          "YES",
+          1,
+          8313.02,
+          0.2695,
+          1.9414,
+          11,
+          2488,
+        ],
+        [
+          "Next French Presidential Election",
+          "Marine Le Pen",
+          "YES",
+          1,
+          7670,
+          0.1577,
+          2.3959,
+          17,
+          11152,
+        ],
+        [
+          "US announces end of Iranian blockade by...?",
+          "October 31",
+          "YES",
+          1,
+          20434.31,
+          0.1636,
+          2.4625,
+          20,
+          927,
+        ],
+        [
+          "Bab el-Mandeb Strait effectively closed by...?",
+          "December 31",
+          "YES",
+          2,
+          16274.86,
+          0.5363,
+          4.5201,
+          11,
+          2392,
+        ],
+      ] as const;
+      const candidates = historicalMarkets.map(
+        (
+          [
+            eventTitle,
+            marketTitle,
+            sideName,
+            sharpHolders,
+            sharpUsd,
+            edge,
+            z,
+            samples,
+            hoursToClose,
+          ],
+          index,
+        ) => ({
+          ...base,
+          key: `historical-${index}`,
+          side: sideName,
+          direction: sideName === "YES" ? ("up" as const) : ("down" as const),
+          market: {
+            ...base.market,
+            marketId: `historical-market-${index}`,
+            marketTitle,
+            eventTitle,
+            closeTime: new Date(
+              Date.now() + hoursToClose * 3_600_000,
+            ).toISOString(),
+            sides: {
+              ...base.market.sides,
+              [sideName]: {
+                ...base.market.sides[sideName],
+                sharpHolders,
+                sharpUsd,
+                bestEdge: edge,
+                bestZScore: z,
+                bestSampleCount: samples,
+              },
+            },
+            holders: base.market.holders.map((holder) => ({
+              ...holder,
+              side: sideName,
+              positionUsd: sharpUsd,
+            })),
+          },
+        }),
+      );
+      let calls = 0;
+      const result = await chooseHolderResearchJevCandidates({
+        candidates,
+        policy: p,
+        apiKey: "test-key",
+        fetchImpl: (async (_url, init) => {
+          calls += 1;
+          const body = JSON.parse(String(init?.body)) as {
+            state: {
+              A: { contract: string; event: string; sharpSideUsd: number };
+            };
+          };
+          assert.ok(body.state.A.event);
+          const first = body.state.A.contract === historicalMarkets[0]?.[1];
+          assert.equal(body.state.A.sharpSideUsd, first ? 228719.82 : 7670);
+          return new Response(
+            JSON.stringify({
+              model: HOLDER_RESEARCH_JEV_MODEL,
+              usage: { cost: 0.0004 },
+              answers: {
+                preselect: {
+                  type: "choice",
+                  choice: first ? "A" : "B",
+                  confidence: 0.85,
+                  probabilities: first
+                    ? { A: 0.7, B: 0.1, C: 0.05, D: 0.05, none: 0.1 }
+                    : { A: 0.1, B: 0.75, C: 0.05, none: 0.1 },
+                },
+              },
+            }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+      });
+      assert.equal(calls, 2);
+      assert.deepEqual(result.selectedKeys, ["historical-0", "historical-5"]);
+      assert.equal(
+        result.votes.reduce((sum, vote) => sum + vote.chargedCostUsd, 0),
+        0.0008,
+      );
+    },
+  },
+  {
+    name: "Jev horizon review still needs exact fresh evidence and final safety gates",
+    run: () => {
+      const now = new Date();
+      const p = policy({
+        maxPublishHorizonHours: 720,
+        preTriageActionabilityEnabled: true,
+      });
+      const original = longHorizonCandidate(p);
+      const reviewed = {
+        ...original,
+        jevPreTriage: {
+          model: HOLDER_RESEARCH_JEV_MODEL,
+          selectedAt: now.toISOString(),
+        },
+        market: {
+          ...original.market,
+          holders: original.market.holders.map((entry) => ({
+            ...entry,
+            livePositionConfirmedAt:
+              entry.side === original.side ? now.toISOString() : null,
+          })),
+          livePriceCheck: {
+            blockersBySide: { YES: [], NO: [] },
+            checkedAt: now.toISOString(),
+            fresh: true,
+            sideBuyPrices: { YES: 0.55, NO: 0.45 },
+            tokenIds: ["yes-token", "no-token"],
+            yesProbability: 0.55,
+          },
+        },
+      };
+      const researchInput = buildHolderResearchExternalSearchInputV2(
+        reviewed,
+        p,
+        "news_timing",
+        now,
+      );
+      assert.match(
+        JSON.stringify(
+          buildHolderResearchTriageCandidatePromptJson(reviewed, p),
+        ),
+        /"jevHorizonReviewSelected":true/,
+      );
+      assert.match(
+        JSON.stringify(
+          buildHolderResearchTriageCandidatePromptJsonV2(reviewed, p),
+        ),
+        /"jevHorizonReviewSelected":true/,
+      );
+      assert.match(String(researchInput.instruction), /exact contract/);
+      assert.doesNotMatch(JSON.stringify(researchInput), /walletId/);
+      const noEvidence = {
+        status: "no_evidence" as const,
+        verdict: "unknown" as const,
+        timing: "unknown" as const,
+        summary: "",
+        citations: [],
+      };
+      assert.equal(
+        assessHolderResearchHorizonException({
+          candidate: reviewed,
+          policy: p,
+          externalResearch: noEvidence,
+          now,
+        }),
+        null,
+      );
+      assert.equal(
+        applyHolderResearchPublishQualityGate({
+          candidate: reviewed,
+          output: publishOutput(reviewed),
+          policy: p,
+        }).status,
+        "CONTEXT",
+      );
+      const fresh = {
+        ...reviewed,
+        market: {
+          ...reviewed.market,
+          latestSharpSideActivityAt: new Date(
+            now.getTime() - 3_600_000,
+          ).toISOString(),
+          holders: reviewed.market.holders.map((entry) => ({
+            ...entry,
+            latestSupportingActivityAt:
+              entry.side === reviewed.side
+                ? new Date(now.getTime() - 3_600_000).toISOString()
+                : null,
+          })),
+        },
+      };
+      const activeHolder = fresh.market.holders.find(
+        (entry) => entry.side === fresh.side,
+      );
+      assert.ok(activeHolder);
+      assert.equal(
+        assessHolderResearchHorizonException({
+          candidate: {
+            ...fresh,
+            market: {
+              ...fresh.market,
+              holders: fresh.market.holders.map((entry) => ({
+                ...entry,
+                livePositionConfirmedAt: null,
+              })),
+            },
+          },
+          policy: p,
+          now,
+        }),
+        null,
+      );
+      assert.equal(
+        assessHolderResearchHorizonException({
+          candidate: {
+            ...fresh,
+            market: {
+              ...fresh.market,
+              holders: [
+                { ...activeHolder, livePositionConfirmedAt: null },
+                {
+                  ...activeHolder,
+                  walletId: "00000000-0000-0000-0000-000000000099",
+                  latestSupportingActivityAt: null,
+                },
+              ],
+            },
+          },
+          policy: p,
+          now,
+        }),
+        null,
+      );
+      assert.equal(
+        assessHolderResearchHorizonException({
+          candidate: {
+            ...fresh,
+            market: {
+              ...fresh.market,
+              holders: [
+                {
+                  ...activeHolder,
+                  livePositionConfirmedAt: new Date(
+                    now.getTime() - 2 * 3_600_000,
+                  ).toISOString(),
+                },
+              ],
+            },
+          },
+          policy: p,
+          now,
+        }),
+        null,
+      );
+      assert.equal(
+        assessHolderResearchHorizonException({
+          candidate: {
+            ...reviewed,
+            market: {
+              ...reviewed.market,
+              holders: reviewed.market.holders.map((entry) => ({
+                ...entry,
+                livePositionConfirmedAt: new Date(
+                  now.getTime() - 25 * 3_600_000,
+                ).toISOString(),
+              })),
+            },
+          },
+          policy: p,
+          externalResearch: {
+            status: "ok",
+            verdict: "supports_holder_side",
+            timing: "unknown",
+            summary: "Recent relevant update",
+            citations: [
+              {
+                title: "Update",
+                url: "https://example.com/update",
+                publishedAt: now.toISOString(),
+              },
+            ],
+          },
+          now,
+        }),
+        null,
+      );
+      assert.equal(
+        assessHolderResearchHorizonException({
+          candidate: {
+            ...fresh,
+            market: {
+              ...fresh.market,
+              livePriceCheck: {
+                ...fresh.market.livePriceCheck,
+                checkedAt: new Date(now.getTime() - 11 * 60_000).toISOString(),
+              },
+            },
+          },
+          policy: p,
+          now,
+        }),
+        null,
+      );
+      assert.equal(
+        assessHolderResearchHorizonException({
+          candidate: fresh,
+          policy: p,
+          now,
+        }),
+        "holder_activity",
+      );
+      assert.equal(
+        applyHolderResearchPublishQualityGate({
+          candidate: fresh,
+          output: publishOutput(fresh),
+          policy: p,
+        }).status,
+        "PUBLISH",
+      );
+      const evidenceId = listHolderResearchPromptEvidenceIdsV2(fresh, p)[0];
+      assert.ok(evidenceId);
+      const v2 = adaptHolderResearchFinalOutputV2({
+        candidate: fresh,
+        output: parseHolderResearchFinalOutputV2({
+          version: "holder_research_v2",
+          verdict: "publish",
+          evidence_assessment: "adequate",
+          reason_codes: ["holder_evidence"],
+          rationale: "Recent exact-side holder activity merits review.",
+          evidence_ids: [evidenceId],
+          copy: {
+            headline: "Strong holder remains active on Fed decision",
+            why_now: "Exact-side holder activity is recent and still open.",
+            caveats: [],
+          },
+        }),
+        externalResearch: noEvidence,
+        policy: p,
+      });
+      assert.equal(v2.status, "PUBLISH");
+      const datedSource = {
+        status: "ok" as const,
+        verdict: "supports_holder_side" as const,
+        timing: "unknown" as const,
+        summary: "A dated relevant update supports the selected side.",
+        citations: [
+          {
+            title: "Official update",
+            url: "https://example.com/update",
+            publishedAt: new Date(now.getTime() - 3_600_000).toISOString(),
+          },
+        ],
+      };
+      assert.equal(
+        assessHolderResearchHorizonException({
+          candidate: reviewed,
+          policy: p,
+          externalResearch: datedSource,
+          now,
+        }),
+        "dated_source",
+      );
+      assert.equal(
+        assessHolderResearchHorizonException({
+          candidate: {
+            ...reviewed,
+            market: {
+              ...reviewed.market,
+              holders: reviewed.market.holders.map((entry) => ({
+                ...entry,
+                livePositionConfirmedAt: null,
+              })),
+            },
+          },
+          policy: p,
+          externalResearch: datedSource,
+          now,
+        }),
+        null,
+      );
+      assert.equal(
+        assessHolderResearchHorizonException({
+          candidate: {
+            ...fresh,
+            market: {
+              ...fresh.market,
+              livePriceCheck: {
+                ...fresh.market.livePriceCheck,
+                fresh: false,
+              },
+            },
+          },
+          policy: p,
+          now,
+        }),
+        null,
+      );
     },
   },
 ];

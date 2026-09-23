@@ -54,6 +54,8 @@ import {
   applyHolderResearchPreviousDecisionContext,
   applyHolderResearchLivePriceChecks,
   applyHolderResearchPublishQualityGate,
+  assessHolderResearchHorizonException,
+  buildHolderResearchCandidateActionability,
   buildDeterministicHolderResearchDecision,
   buildHolderResearchCandidatePromptJson,
   buildHolderResearchCandidatePromptJsonV2,
@@ -84,6 +86,14 @@ import {
   type HolderResearchObservationCandidate,
   type HolderResearchSelectionDiagnostics,
 } from "./services/holder-research.js";
+import {
+  availableHolderResearchJevSlots,
+  chooseHolderResearchJevCandidates,
+  fitHolderResearchJevLiveCheckCapacity,
+  HOLDER_RESEARCH_JEV_MODEL,
+  selectHolderResearchJevShortlist,
+  type HolderResearchJevVote,
+} from "./services/holder-research-jev.js";
 import {
   linkHolderResearchObservationNotes,
   loadHolderResearchSupplyHealth,
@@ -168,6 +178,8 @@ type HolderResearchDecisionCacheRedis = {
 export type HolderResearchRunOptions = {
   decisionCacheRedis?: HolderResearchDecisionCacheRedis | null;
   priceRefreshRedis?: PriceRefreshRedis | null;
+  jevBudgetAvailable?: boolean;
+  onJevCost?: (costUsd: number) => void;
 };
 
 const CLI_REDIS_CONNECT_TIMEOUT_MS = 5_000;
@@ -202,6 +214,7 @@ type HolderResearchRunReport = {
     maxExternalSearchCallsPerRun: number;
     forceExternalSearchForInvestigations: boolean;
     triageEnabled: boolean;
+    jevPreTriageEnabled: boolean;
     triageModel: string;
     decisionCacheEnabled: boolean;
   };
@@ -218,12 +231,34 @@ type HolderResearchRunReport = {
     externalSearchChargedCostUsd: number;
     triageEstimatedCostUsd: number;
     triageChargedCostUsd: number;
+    jevChargedCostUsd: number;
     totalEstimatedCostUsd: number;
     totalChargedCostUsd: number;
     providerReportedCostUsd: number | null;
     durationMs: number;
   };
   selection: HolderResearchSelectionDiagnostics;
+  candidateFunnel: {
+    loaded: number;
+    directional: number;
+    ordinaryEligible: number;
+    horizonOnly: number;
+    jevConsidered: number;
+    jevAdded: number;
+    lunaInvestigated: number;
+    finalPublished: number;
+    finalContext: number;
+    finalSkipped: number;
+    persistenceRejectedByReason: Record<string, number>;
+  };
+  jevPreTriage: {
+    enabled: boolean;
+    considered: number;
+    added: number;
+    liveCapacityDropped: number;
+    skippedReason: string | null;
+    votes: HolderResearchJevVote[];
+  };
   toolCalls: Array<{
     name: string;
     count: number;
@@ -651,7 +686,7 @@ export function buildHolderResearchExternalSearchSystemPromptV2(): string {
     "Use web_search and x_search, then return only one JSON object.",
     "The object must contain status, verdict, timing, summary, citations, and comparableOdds. comparableOdds must be null unless cited sources provide a probability range for the selected side with an asOf timestamp.",
     "Use at most three citations with title, url, and publishedAt (ISO datetime or null).",
-    "Compare dated evidence with the supplied first/last holder activity. Use after_holder only when the public evidence clearly appeared after holder activity.",
+    "Compare dated evidence with latestExactSideHolderActivityAt when supplied. General market activity and a position snapshot are not proof this holder acted; use after_holder only when the public evidence clearly appeared after exact-side holder activity.",
     "Do not infer wallet identity, skill, exposure, edge, PnL, or a trading recommendation.",
     HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
     "If evidence is absent or timing cannot be established, say so rather than inventing a catalyst.",
@@ -1222,7 +1257,9 @@ export function selectHolderResearchTriageFallbackCandidates(
   remaining: number,
 ): HolderResearchCandidate[] {
   if (remaining <= 0) return [];
-  const clearSide = candidates.filter(isClearSideCandidate);
+  const clearSide = candidates.filter(
+    (candidate) => isClearSideCandidate(candidate) && !candidate.jevPreTriage,
+  );
   const preferred = clearSide.filter((candidate) =>
     triageFallbackBucketRank.has(candidate.bucket),
   );
@@ -1920,16 +1957,124 @@ export async function runHolderResearch(
       candidates,
       selectionPolicy,
     );
+    const jevPreTriage: HolderResearchRunReport["jevPreTriage"] = {
+      enabled: policy.jevPreTriageEnabled,
+      considered: 0,
+      added: 0,
+      liveCapacityDropped: 0,
+      skippedReason: null,
+      votes: [],
+    };
+    let extraCandidates: HolderResearchCandidate[] = [];
+    const jevSlots = availableHolderResearchJevSlots(
+      selection.selected.length,
+      policy,
+    );
+    if (
+      !policy.jevPreTriageEnabled ||
+      !policy.triageEnabled ||
+      !args.callModel ||
+      policy.dryRun
+    ) {
+      jevPreTriage.skippedReason = "disabled_or_dry_run";
+    } else if (options.jevBudgetAvailable === false) {
+      jevPreTriage.skippedReason = "budget";
+    } else if (!env.openRouterKey) {
+      jevPreTriage.skippedReason = "provider_key_missing";
+    } else if (jevSlots === 0) {
+      jevPreTriage.skippedReason = "first_batch_full";
+    } else {
+      let shortlist = selectHolderResearchJevShortlist({
+        candidates,
+        baseline: selection.selected,
+        policy,
+        now: observedAt,
+      });
+      if (policy.decisionCacheEnabled && options.decisionCacheRedis) {
+        const cacheFiltered: HolderResearchCandidate[] = [];
+        for (const candidate of shortlist) {
+          try {
+            const raw = await options.decisionCacheRedis.get(
+              buildHolderResearchDecisionCacheKey(candidate.thesisKey),
+            );
+            const cached = parseHolderResearchCachedDecision(raw);
+            if (
+              evaluateHolderResearchDecisionCache({
+                candidate,
+                cachedDecision: cached,
+                policy,
+              }).action === "skip"
+            ) {
+              continue;
+            }
+          } catch {
+            // The normal post-price-check cache path remains authoritative.
+          }
+          cacheFiltered.push(candidate);
+        }
+        shortlist = cacheFiltered;
+      }
+      if (shortlist.length === 0) {
+        jevPreTriage.skippedReason = "no_soft_candidates";
+      } else {
+        try {
+          const withActivity = await enrichHolderResearchFirstObservedActivity(
+            client,
+            shortlist,
+            policy,
+            observedAt,
+          );
+          jevPreTriage.considered = withActivity.length;
+          const decision = await chooseHolderResearchJevCandidates({
+            candidates: withActivity,
+            policy,
+            apiKey: env.openRouterKey,
+          });
+          jevPreTriage.votes = decision.votes;
+          options.onJevCost?.(
+            decision.votes.reduce((sum, vote) => sum + vote.chargedCostUsd, 0),
+          );
+          const selectedKeys = new Set(
+            decision.selectedKeys.slice(0, jevSlots),
+          );
+          extraCandidates = withActivity
+            .filter((candidate) => selectedKeys.has(candidate.key))
+            .map((candidate) => ({
+              ...candidate,
+              jevPreTriage: {
+                model: HOLDER_RESEARCH_JEV_MODEL,
+                selectedAt: observedAt.toISOString(),
+              },
+            }));
+          const liveCapacity = fitHolderResearchJevLiveCheckCapacity({
+            baseline: selection.selected,
+            extras: extraCandidates,
+            maxChecks: policy.maxLiveChecksPerRun,
+          });
+          extraCandidates = liveCapacity.selected;
+          jevPreTriage.liveCapacityDropped = liveCapacity.dropped;
+          if (selectedKeys.size > 0 && extraCandidates.length === 0) {
+            jevPreTriage.skippedReason = "live_check_capacity";
+          }
+          jevPreTriage.added = extraCandidates.length;
+        } catch (error) {
+          jevPreTriage.skippedReason = "pretriage_error";
+          console.warn("[holder-research] Jev pretriage skipped", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
     const selectedWithLive = await enrichHolderResearchLivePositions(
       client,
-      selection.selected,
+      [...selection.selected, ...extraCandidates],
       policy,
     );
     toolCalls.push({
       name: "live_position_check",
       count: Math.min(
         policy.maxLiveChecksPerRun,
-        selection.selected.reduce(
+        [...selection.selected, ...extraCandidates].reduce(
           (sum, candidate) => sum + candidate.market.holders.length,
           0,
         ),
@@ -2439,7 +2584,9 @@ export async function runHolderResearch(
       if (
         policy.externalSearchEnabled &&
         externalSearchCalls < policy.maxExternalSearchCallsPerRun &&
-        (policy.forceExternalSearchForInvestigations || researchNeed !== "none")
+        (policy.forceExternalSearchForInvestigations ||
+          researchNeed !== "none" ||
+          candidate.jevPreTriage != null)
       ) {
         externalResearch = normalizeExternalResearchResult(
           await runExternalResearch({
@@ -2447,7 +2594,7 @@ export async function runHolderResearch(
             policy,
             dryRun: policy.dryRun,
             researchNeed,
-            useV2: useV2Research,
+            useV2: useV2Research || candidate.jevPreTriage != null,
           }),
         );
         if (
@@ -2478,18 +2625,31 @@ export async function runHolderResearch(
             output: decision.output,
           })),
       });
+      const horizonException = assessHolderResearchHorizonException({
+        candidate,
+        policy,
+        externalResearch: canonicalExternalResearchV2(externalResearch),
+      });
+      const modelMeta = {
+        ...rawDecision.modelMeta,
+        triage: triageDecision ?? null,
+        jev_pretriage: candidate.jevPreTriage
+          ? {
+              ...candidate.jevPreTriage,
+              latestExactSideHolderActivityAt:
+                candidate.market.latestSharpSideActivityAt ?? null,
+              horizonException,
+            }
+          : null,
+      };
       const decision: HolderResearchModelDecision = {
         ...rawDecision,
         output: gatedOutput,
         modelMeta:
           gatedOutput === rawDecision.output
-            ? {
-                ...rawDecision.modelMeta,
-                triage: triageDecision ?? null,
-              }
+            ? modelMeta
             : {
-                ...rawDecision.modelMeta,
-                triage: triageDecision ?? null,
+                ...modelMeta,
                 publish_quality_gate: {
                   originalStatus: rawDecision.output.status,
                   originalRationale: rawDecision.output.rationale,
@@ -2757,6 +2917,15 @@ export async function runHolderResearch(
     if (triageCost.providerCostUsd != null) {
       providerReportedCosts.push(triageCost.providerCostUsd);
     }
+    const jevChargedCostUsd = jevPreTriage.votes.reduce(
+      (sum, vote) => sum + vote.chargedCostUsd,
+      0,
+    );
+    providerReportedCosts.push(
+      ...jevPreTriage.votes.flatMap((vote) =>
+        vote.providerCostUsd == null ? [] : [vote.providerCostUsd],
+      ),
+    );
 
     const report: HolderResearchRunReport = {
       runId,
@@ -2777,6 +2946,7 @@ export async function runHolderResearch(
         forceExternalSearchForInvestigations:
           policy.forceExternalSearchForInvestigations,
         triageEnabled: policy.triageEnabled,
+        jevPreTriageEnabled: policy.jevPreTriageEnabled,
         triageModel: policy.triageModel,
         decisionCacheEnabled: policy.decisionCacheEnabled,
       },
@@ -2799,14 +2969,17 @@ export async function runHolderResearch(
         externalSearchChargedCostUsd,
         triageEstimatedCostUsd: triageCost.estimatedCostUsd,
         triageChargedCostUsd: args.callModel ? triageCost.chargedCostUsd : 0,
+        jevChargedCostUsd,
         totalEstimatedCostUsd:
           estimatedCostUsd +
           externalSearchEstimatedCostUsd +
-          triageCost.estimatedCostUsd,
+          triageCost.estimatedCostUsd +
+          jevChargedCostUsd,
         totalChargedCostUsd:
           chargedCostUsd +
           externalSearchChargedCostUsd +
-          (args.callModel ? triageCost.chargedCostUsd : 0),
+          (args.callModel ? triageCost.chargedCostUsd : 0) +
+          jevChargedCostUsd,
         providerReportedCostUsd:
           providerReportedCosts.length > 0
             ? providerReportedCosts.reduce((sum, cost) => sum + cost, 0)
@@ -2814,6 +2987,40 @@ export async function runHolderResearch(
         durationMs: Date.now() - startedAt,
       },
       selection: selectionDiagnostics,
+      candidateFunnel: {
+        loaded: candidates.length,
+        directional: candidates.filter(
+          (candidate) =>
+            candidate.side != null && candidate.direction !== "mixed",
+        ).length,
+        ordinaryEligible: selectionDiagnostics.primaryEligible,
+        horizonOnly: candidates.filter((candidate) => {
+          const blockers = buildHolderResearchCandidateActionability(
+            candidate,
+            policy,
+          ).likelyFinalGateBlockers;
+          return (
+            candidate.side != null &&
+            candidate.direction !== "mixed" &&
+            blockers.length === 1 &&
+            blockers[0] === "publish_horizon_too_long"
+          );
+        }).length,
+        jevConsidered: jevPreTriage.considered,
+        jevAdded: jevPreTriage.added,
+        lunaInvestigated: triage.investigate - triage.fallback,
+        finalPublished: decisions.filter(
+          (decision) => decision.output.status === "PUBLISH",
+        ).length,
+        finalContext: decisions.filter(
+          (decision) => decision.output.status === "CONTEXT",
+        ).length,
+        finalSkipped: decisions.filter(
+          (decision) => decision.output.status === "SKIP",
+        ).length,
+        persistenceRejectedByReason: persistence?.rejectedByReason ?? {},
+      },
+      jevPreTriage,
       toolCalls,
       decisionCache,
       decisionCacheSkipped,

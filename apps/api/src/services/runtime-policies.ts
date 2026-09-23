@@ -237,6 +237,7 @@ export type HolderResearchPolicy = {
   externalSearchMaxOutputTokens: number;
   estimatedExternalSearchCostUsd: number;
   triageEnabled: boolean;
+  jevPreTriageEnabled: boolean;
   triageModel: string;
   triageReasoningEffort?: OpenRouterReasoningEffort | null;
   reasoningEffort?: OpenRouterReasoningEffort | null;
@@ -1111,6 +1112,7 @@ const holderResearchSchema = z
     externalSearchMaxOutputTokens: positiveInt.max(8_000),
     estimatedExternalSearchCostUsd: nonNegativeNumber.max(10_000),
     triageEnabled: strictBoolean,
+    jevPreTriageEnabled: strictBoolean,
     triageModel: z.string().trim().min(1).max(200),
     triageReasoningEffort: openRouterReasoningEffortSchema.nullable(),
     reasoningEffort: openRouterReasoningEffortSchema.nullable(),
@@ -1920,6 +1922,7 @@ function getDefaults(): IntelPolicyMap {
       externalSearchMaxOutputTokens: 700,
       estimatedExternalSearchCostUsd: 0.03,
       triageEnabled: true,
+      jevPreTriageEnabled: true,
       triageModel: "openai/gpt-6-luna",
       triageReasoningEffort: "low",
       reasoningEffort: "medium",
@@ -2952,6 +2955,7 @@ function normalizeHolderResearchPolicy(
       10_000,
     ),
     triageEnabled: Boolean(policy.triageEnabled),
+    jevPreTriageEnabled: Boolean(policy.jevPreTriageEnabled),
     triageModel: policy.triageModel.trim() || "openai/gpt-6-luna",
     triageReasoningEffort: policy.triageReasoningEffort ?? null,
     reasoningEffort: policy.reasoningEffort ?? null,

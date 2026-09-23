@@ -164,6 +164,9 @@ export type HolderResearchHolder = {
   approxReliable: boolean | null;
   approxPnlSource: "activity" | "snapshot" | null;
   positionSnapshotAt: string | null;
+  firstObservedActivityAt?: string | null;
+  latestSupportingActivityAt?: string | null;
+  livePositionConfirmedAt?: string | null;
   pnl30dUsd: number | null;
   resolvedWinRateEdge30d: number | null;
   resolvedEdgeZScore30d: number | null;
@@ -224,6 +227,7 @@ export type HolderResearchMarketInput = {
   recentActivityUsd: number;
   recentActivityAt: string | null;
   firstObservedActivityAt?: string | null;
+  latestSharpSideActivityAt?: string | null;
   crossMarketWalletCount: number;
   previousNote: HolderResearchPreviousNote | null;
 };
@@ -255,6 +259,10 @@ export type HolderResearchCandidate = {
   evidence: HolderResearchEvidence[];
   cooldownUntil: string | null;
   meaningfulDeltaReasons: string[];
+  jevPreTriage?: {
+    selectedAt: string;
+    model: string;
+  };
 };
 
 export type HolderResearchActorMode =
@@ -414,6 +422,7 @@ export type HolderResearchDecisionFeaturesV2 = {
   timing: {
     firstActivityAt: string | null;
     lastActivityAt: string | null;
+    latestExactSideHolderActivityAt: string | null;
     positionSnapshotAt: string | null;
     firstActivityAgeHours: number | null;
     lastActivityAgeHours: number | null;
@@ -431,6 +440,7 @@ export type HolderResearchDecisionFeaturesV2 = {
   };
   gates: {
     publishEligible: boolean;
+    jevHorizonReviewSelected: boolean;
     supportOnly: boolean;
     blockers: HolderResearchActionabilityBlocker[];
     strengths: string[];
@@ -1557,9 +1567,9 @@ function isCryptoHolderResearchMarket(input: {
   category: string | null;
 }): boolean {
   return (
-    input.marketType === "crypto_macro" ||
     input.marketSegment.startsWith("crypto_") ||
-    input.category?.trim().toLowerCase() === "crypto"
+    (input.category?.trim().toLowerCase() === "crypto" &&
+      !input.marketSegment.startsWith("macro_"))
   );
 }
 
@@ -2045,6 +2055,110 @@ export function buildHolderResearchCandidateActionability(
   };
 }
 
+function isRecentHolderResearchTimestamp(
+  value: string | null | undefined,
+  hours: number,
+  nowMs: number,
+): boolean {
+  const atMs = value ? Date.parse(value) : Number.NaN;
+  return (
+    Number.isFinite(atMs) && atMs <= nowMs && nowMs - atMs <= hours * 3_600_000
+  );
+}
+
+function isConfirmedSharpSideHolder(
+  holder: HolderResearchHolder,
+  side: HolderResearchSideKey,
+  policy: HolderResearchPolicy,
+  nowMs: number,
+): boolean {
+  return (
+    holder.side === side &&
+    holder.positionUsd > 0 &&
+    isSharpHolder(holder, policy) &&
+    isRecentHolderResearchTimestamp(
+      holder.livePositionConfirmedAt,
+      Math.min(policy.candidateLookbackHours, policy.activityLookbackHours),
+      nowMs,
+    )
+  );
+}
+
+function hasConfirmedSupportingActivity(
+  holder: HolderResearchHolder,
+  policy: HolderResearchPolicy,
+  nowMs: number,
+): boolean {
+  const activityAt = holder.latestSupportingActivityAt;
+  return (
+    isRecentHolderResearchTimestamp(
+      activityAt,
+      policy.activityLookbackHours,
+      nowMs,
+    ) &&
+    Date.parse(holder.livePositionConfirmedAt ?? "") >=
+      Date.parse(activityAt ?? "")
+  );
+}
+
+/** Jev only nominates a review; this is the shared V1/V2 publication exception. */
+export function assessHolderResearchHorizonException(input: {
+  candidate: HolderResearchCandidate;
+  policy: HolderResearchPolicy;
+  externalResearch?: HolderResearchExternalResearchV2 | null;
+  now?: Date;
+}): "holder_activity" | "dated_source" | null {
+  const { candidate, policy } = input;
+  const side = candidate.side;
+  if (!candidate.jevPreTriage || !side) return null;
+  const blockers = buildHolderResearchCandidateActionability(
+    candidate,
+    policy,
+  ).likelyFinalGateBlockers;
+  if (blockers.length !== 1 || blockers[0] !== "publish_horizon_too_long") {
+    return null;
+  }
+  const livePrice = candidate.market.livePriceCheck;
+  const nowMs = (input.now ?? new Date()).getTime();
+  const priceCheckedAtMs = livePrice ? Date.parse(livePrice.checkedAt) : NaN;
+  const confirmedHolders = candidate.market.holders.filter((holder) =>
+    isConfirmedSharpSideHolder(holder, side, policy, nowMs),
+  );
+  if (
+    !livePrice?.fresh ||
+    !Number.isFinite(priceCheckedAtMs) ||
+    priceCheckedAtMs > nowMs ||
+    nowMs - priceCheckedAtMs > HOLDER_RESEARCH_SIGNAL_PRICE_MAX_AGE_MS ||
+    livePrice.sideBuyPrices[side] == null ||
+    livePrice.blockersBySide[side].length > 0 ||
+    confirmedHolders.length === 0
+  ) {
+    return null;
+  }
+  if (
+    confirmedHolders.some((holder) =>
+      hasConfirmedSupportingActivity(holder, policy, nowMs),
+    )
+  ) {
+    return "holder_activity";
+  }
+  const research = input.externalResearch;
+  if (
+    research?.status === "ok" &&
+    research.verdict === "supports_holder_side" &&
+    research.citations.some((citation) =>
+      isRecentHolderResearchTimestamp(
+        citation.publishedAt,
+        policy.externalSearchWindowHours,
+        nowMs,
+      ),
+    )
+  ) {
+    return "dated_source";
+  }
+  return null;
+}
+
 function ageHoursFromIso(value: string | null, now: Date): number | null {
   if (!value) return null;
   const timestamp = new Date(value).getTime();
@@ -2178,6 +2292,8 @@ export function buildHolderResearchDecisionFeaturesV2(
       // hourly window, not proof of the holder's lifetime first trade.
       firstActivityAt: candidate.market.firstObservedActivityAt ?? null,
       lastActivityAt: candidate.market.recentActivityAt,
+      latestExactSideHolderActivityAt:
+        candidate.market.latestSharpSideActivityAt ?? null,
       positionSnapshotAt,
       firstActivityAgeHours: ageHoursFromIso(
         candidate.market.firstObservedActivityAt ?? null,
@@ -2203,6 +2319,7 @@ export function buildHolderResearchDecisionFeaturesV2(
     },
     gates: {
       publishEligible: actionability.isPrimaryResearchCandidate,
+      jevHorizonReviewSelected: candidate.jevPreTriage != null,
       supportOnly: actionability.supportOnly,
       blockers: actionability.likelyFinalGateBlockers,
       strengths: actionability.selectionStrengths,
@@ -4432,6 +4549,7 @@ type HolderResearchFirstObservedActivityRow = {
   market_id: string;
   outcome_side: HolderResearchSideKey;
   first_activity_at: Date | string | null;
+  latest_activity_at: Date | string | null;
 };
 
 export async function enrichHolderResearchFirstObservedActivity(
@@ -4479,7 +4597,20 @@ export async function enrichHolderResearchFirstObservedActivity(
         requested.market_id,
         requested.outcome_side,
         min(coalesce(activity.last_occurred_at, activity.hour_bucket))
-          as first_activity_at
+          as first_activity_at,
+        case
+          when max(coalesce(activity.last_occurred_at, activity.hour_bucket))
+            filter (where activity.last_change_action in ('OPENED', 'INCREASED'))
+            > coalesce(
+              max(coalesce(activity.last_occurred_at, activity.hour_bucket))
+                filter (where activity.last_change_action is null
+                  or activity.last_change_action not in ('OPENED', 'INCREASED')),
+              '-infinity'::timestamptz
+            )
+          then max(coalesce(activity.last_occurred_at, activity.hour_bucket))
+            filter (where activity.last_change_action in ('OPENED', 'INCREASED'))
+          else null
+        end as latest_activity_at
       from requested_pairs requested
       join wallet_activity_hourly activity
         on activity.wallet_id = requested.wallet_id
@@ -4500,42 +4631,58 @@ export async function enrichHolderResearchFirstObservedActivity(
       observedAt.toISOString(),
     ],
   );
-  const firstActivityByPair = new Map(
-    rows.flatMap((row) => {
-      const firstActivityAt = toIso(row.first_activity_at);
-      return firstActivityAt
-        ? [
-            [
-              `${row.wallet_id}:${row.market_id}:${row.outcome_side}`,
-              firstActivityAt,
-            ] as const,
-          ]
-        : [];
-    }),
+  const activityByPair = new Map(
+    rows.map(
+      (row) =>
+        [
+          `${row.wallet_id}:${row.market_id}:${row.outcome_side}`,
+          {
+            first: toIso(row.first_activity_at),
+            latest: toIso(row.latest_activity_at),
+          },
+        ] as const,
+    ),
   );
 
   return candidates.map((candidate) => {
     if (!candidate.side) return candidate;
-    const firstObservedActivityAt = candidate.market.holders
+    const holders = candidate.market.holders.map((holder) => {
+      const activity = activityByPair.get(
+        `${holder.walletId}:${candidate.market.marketId}:${holder.side}`,
+      );
+      return {
+        ...holder,
+        firstObservedActivityAt: activity?.first ?? null,
+        latestSupportingActivityAt: activity?.latest ?? null,
+      };
+    });
+    const sideActivity = holders
       .filter(
         (holder) =>
           holder.side === candidate.side &&
           holder.positionUsd > 0 &&
           isSharpHolder(holder, policy),
       )
-      .map((holder) =>
-        firstActivityByPair.get(
-          `${holder.walletId}:${candidate.market.marketId}:${holder.side}`,
-        ),
-      )
+      .map((holder) => ({
+        first: holder.firstObservedActivityAt,
+        latest: holder.latestSupportingActivityAt,
+      }));
+    const firstObservedActivityAt = sideActivity
+      .map((value) => value.first)
       .filter((value): value is string => value != null)
       .sort()[0];
-    if (!firstObservedActivityAt) return candidate;
+    const latestSharpSideActivityAt = sideActivity
+      .map((value) => value.latest)
+      .filter((value): value is string => value != null)
+      .sort()
+      .at(-1);
     return {
       ...candidate,
       market: {
         ...candidate.market,
+        holders,
         firstObservedActivityAt,
+        latestSharpSideActivityAt,
       },
     };
   });
@@ -4564,6 +4711,7 @@ export async function enrichHolderResearchLivePositions(
   const liveByKey = await loadLatestWalletPositionNowMap(client, holderInputs);
 
   return candidates.map((candidate) => {
+    const selectedSide = candidate.side;
     const holders = candidate.market.holders.map((holder) => {
       const key = makeWalletPositionLedgerKey(
         holder.walletId,
@@ -4588,6 +4736,10 @@ export async function enrichHolderResearchLivePositions(
         approxPnlSource: live?.approxPnlSource ?? holder.approxPnlSource,
         positionSnapshotAt:
           toIso(live?.snapshotAt) ?? holder.positionSnapshotAt,
+        livePositionConfirmedAt:
+          live?.positionSizeUsd != null && live.positionSizeUsd > 0
+            ? toIso(live.snapshotAt)
+            : null,
       };
     });
 
@@ -4610,6 +4762,24 @@ export async function enrichHolderResearchLivePositions(
       ...candidate.market,
       holders,
       sides,
+      ...(candidate.jevPreTriage && selectedSide
+        ? {
+            latestSharpSideActivityAt: latestIso(
+              holders
+                .filter(
+                  (holder) =>
+                    isConfirmedSharpSideHolder(
+                      holder,
+                      selectedSide,
+                      policy,
+                      Date.now(),
+                    ) &&
+                    hasConfirmedSupportingActivity(holder, policy, Date.now()),
+                )
+                .map((holder) => holder.latestSupportingActivityAt ?? null),
+            ),
+          }
+        : {}),
     };
     const withoutDigest = {
       ...candidate,
@@ -4987,6 +5157,13 @@ export function buildHolderResearchCandidatePromptJson(
         : buildHolderEntryContext(candidate),
     actor,
     quality,
+    horizonReview: candidate.jevPreTriage
+      ? {
+          selectedForReview: true,
+          latestExactSideHolderActivityAt:
+            candidate.market.latestSharpSideActivityAt ?? null,
+        }
+      : null,
     presentation: contracts?.presentation.presentation ?? null,
     evidenceMetrics: contracts?.evidenceMetrics ?? [],
     sides: {
@@ -5483,6 +5660,9 @@ export function buildHolderResearchTriageCandidatePromptJson(
     quality,
     triageGate: {
       canLikelyPublish: actionability.isPrimaryResearchCandidate,
+      jevHorizonReviewSelected: candidate.jevPreTriage != null,
+      latestExactSideHolderActivityAt:
+        candidate.market.latestSharpSideActivityAt ?? null,
       supportOnly: actionability.supportOnly,
       actionPrice: actionability.estimatedActionPrice,
       hoursToClose: actionability.hoursToClose,
@@ -5566,6 +5746,8 @@ export function buildHolderResearchExternalSearchInput(
       topHolderOpenPnl: topTargetHolder?.openPnlUsd ?? null,
       recentUsd: candidate.market.recentActivityUsd,
       recentAt: candidate.market.recentActivityAt,
+      latestExactSideHolderActivityAt:
+        candidate.market.latestSharpSideActivityAt ?? null,
     },
     instruction: `Find outside information that could explain this holder positioning. Compare dated headlines/posts with holder activity/snapshot timing. Return one short sentence. Say whether outside information supports the holder side, supports the opposite side, mostly shows the move was already public, or does not explain the move. ${HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING} If headlines came after the holder activity, say later headlines may validate early positioning. If nothing relevant is found, say news does not explain it yet; do not accuse anyone of insider trading.`,
   };
@@ -5602,11 +5784,14 @@ export function buildHolderResearchExternalSearchInputV2(
     timing: {
       firstActivityAt: features.timing.firstActivityAt,
       lastActivityAt: features.timing.lastActivityAt,
+      latestExactSideHolderActivityAt:
+        features.timing.latestExactSideHolderActivityAt,
     },
     currentDate: now.toISOString(),
     researchNeed,
-    instruction:
-      "Determine whether dated outside information supports the holder side, supports the opposite side, was already public, does not explain the positioning, or is mixed. Do not infer holder timing when only a position snapshot is supplied.",
+    instruction: candidate.jevPreTriage
+      ? "For this distant-horizon review, count a dated outside fact as supporting the holder side only when the cited fact matches this exact contract's entity, outcome condition, deadline or stage, and selected side. Generic market-wide context is insufficient. Do not infer a new holder purchase from a position snapshot or general market activity."
+      : "Determine whether dated outside information supports the holder side, supports the opposite side, was already public, does not explain the positioning, or is mixed. Do not infer holder timing when only a position snapshot is supplied.",
   };
 }
 
@@ -5872,12 +6057,17 @@ export function adaptHolderResearchFinalOutputV2(input: {
     candidate.market.livePriceCheck.blockersBySide[features.identity.side]
       .length > 0;
   const publishRequested = input.output.verdict === "publish";
+  const horizonException = assessHolderResearchHorizonException({
+    candidate,
+    policy,
+    externalResearch,
+  });
   const publishable =
     publishRequested &&
     input.output.copy != null &&
     evidenceIds.length > 0 &&
     !evidenceSideBlocked &&
-    features.gates.publishEligible &&
+    (features.gates.publishEligible || horizonException != null) &&
     !evidenceBlocked &&
     !researchBlocked &&
     !timingClaimBlocked &&
@@ -5989,10 +6179,18 @@ export function applyHolderResearchPublishQualityGate(input: {
     }
   }
 
+  const horizonException = assessHolderResearchHorizonException({
+    candidate,
+    policy: input.policy,
+    externalResearch: input.externalResearch,
+  });
   const deterministicBlocker = evaluateHolderResearchPublishRiskGates({
     candidate,
     policy: input.policy,
-  })[0];
+  }).find(
+    (blocker) =>
+      blocker !== "publish_horizon_too_long" || horizonException == null,
+  );
   if (deterministicBlocker) {
     const rationaleByBlocker: Partial<
       Record<HolderResearchActionabilityBlocker, string>
