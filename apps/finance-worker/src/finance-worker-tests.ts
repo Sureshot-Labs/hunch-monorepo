@@ -19,6 +19,7 @@ import {
   limitlessFundingWorkerConfig,
   resetFundingWorkerModuleLoaderForTests,
   relayFundingWorkerConfig,
+  runFundingReceiveInventoryReviewJob,
   runFundingReceiveSpentReviewJob,
   runFundingReconciliationJob,
   setFundingWorkerModuleLoaderForTests,
@@ -361,6 +362,21 @@ const tests: TestCase[] = [
         review.isNoopResult?.({ resolved: 1, retryableErrors: 0 }),
         false,
       );
+      const inventory = jobs.find(
+        (candidate) => candidate.name === "funding_receive_inventory_review",
+      );
+      assert.ok(inventory);
+      assert.equal(inventory.enabled, true);
+      assert.equal(inventory.timeoutSec, 0);
+      assert.equal(inventory.lockKey, undefined);
+      assert.equal(
+        inventory.isNoopResult?.({ resolved: 0, retryableErrors: 0 }),
+        true,
+      );
+      assert.equal(
+        inventory.isNoopResult?.({ resolved: 1, retryableErrors: 0 }),
+        false,
+      );
     },
   },
   {
@@ -559,6 +575,7 @@ const tests: TestCase[] = [
       const fakePool = {} as Pool;
       let observedPool: Pool | null = null;
       let observedReviewPool: Pool | null = null;
+      let observedInventoryPool: Pool | null = null;
       let observedOptions: Record<string, unknown> = {};
       setFundingWorkerModuleLoaderForTests(
         async () => ({
@@ -577,6 +594,10 @@ const tests: TestCase[] = [
           runFundingReceiveSpentReviewJob: async (pool) => {
             observedReviewPool = pool;
             return { sessionsPolled: 1, resolved: 1, retryableErrors: 0 };
+          },
+          runFundingReceiveInventoryReviewJob: async (pool) => {
+            observedInventoryPool = pool;
+            return { sessionsPolled: 2, resolved: 1, retryableErrors: 0 };
           },
         }),
         fakePool,
@@ -613,6 +634,12 @@ const tests: TestCase[] = [
           retryableErrors: 0,
         });
         assert.equal(observedReviewPool, fakePool);
+        assert.deepEqual(await runFundingReceiveInventoryReviewJob(), {
+          sessionsPolled: 2,
+          resolved: 1,
+          retryableErrors: 0,
+        });
+        assert.equal(observedInventoryPool, fakePool);
       } finally {
         resetFundingWorkerModuleLoaderForTests();
       }

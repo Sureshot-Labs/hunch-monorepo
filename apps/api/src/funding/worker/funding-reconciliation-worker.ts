@@ -685,7 +685,18 @@ export async function runFundingReceiveSpentReviewJob(
 ): Promise<
   Awaited<ReturnType<FundingReceiveSessionObserver["pollSpentReviewBatch"]>>
 > {
-  return new FundingReceiveSessionObserver().pollSpentReviewBatch(pool);
+  const observer = new FundingReceiveSessionObserver();
+  return observer.pollSpentReviewBatch(pool);
+}
+
+/** Independent inventory repair must run even when spent-proof polling fails. */
+export async function runFundingReceiveInventoryReviewJob(
+  pool: Pool,
+): Promise<
+  Awaited<ReturnType<FundingReceiveSessionObserver["pollInventoryReviewBatch"]>>
+> {
+  const observer = new FundingReceiveSessionObserver();
+  return observer.pollInventoryReviewBatch(pool);
 }
 
 export type {

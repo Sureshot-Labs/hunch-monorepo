@@ -11,6 +11,7 @@ import crypto from "node:crypto";
 import { createIntegrationTestPool } from "../../../test-database-target.js";
 import { FundingReceiveSessionObserver } from "../../receive/receive-session-observer.js";
 import {
+  claimExpiredFundingReceiveInventoryReviews,
   claimExpiredFundingReceiveSpentReviews,
   listFundingReceiveSpentReviewCandidates,
   markFundingReceiveSpentReviewCandidatesChecked,
@@ -666,6 +667,18 @@ try {
     [userId, networkId, assetId, noSpendAddress, observedAt],
   );
   assert.equal(backlogReceipts.rowCount, 26);
+  await client.query("savepoint before_observation_grace_ends");
+  const earlyReviews = await claimExpiredFundingReceiveSpentReviews(client, {
+    limit: 5,
+    minimumPollIntervalMs: 300_000,
+    now: stamp(15),
+  });
+  assert.deepEqual(
+    earlyReviews.map((entry) => entry.session.receiveSessionId),
+    [sessionId],
+    "a proven source spend is eligible after expiry while late-deposit observation continues",
+  );
+  await client.query("rollback to savepoint before_observation_grace_ends");
   const oldReviews = await claimExpiredFundingReceiveSpentReviews(client, {
     limit: 5,
     minimumPollIntervalMs: 300_000,
@@ -709,6 +722,31 @@ try {
     verifiedCandidates,
     1,
     "the independent review job is bounded to one candidate per run",
+  );
+  await client.query(
+    `update funding_receive_receipts
+        set last_inventory_review_checked_at = $3
+      where user_id = $1 and destination_address = $2`,
+    [userId, noSpendAddress, new Date(now.getTime() + 2 * 60 * 60_000)],
+  );
+  const spentChecked = await client.query<{ id: string }>(
+    `select id from funding_receive_receipts
+      where id = any($1::uuid[])
+        and last_spent_review_checked_at >= $2`,
+    [receiptIds, new Date(now.getTime() + 61_000)],
+  );
+  assert.equal(spentChecked.rows.length, 1);
+  const inventoryAfterUnprovableSpend =
+    await claimExpiredFundingReceiveInventoryReviews(client, {
+      limit: 5,
+      minimumPollIntervalMs: 60 * 60_000,
+      now: new Date(now.getTime() + 61_000),
+    });
+  assert.ok(
+    inventoryAfterUnprovableSpend.some(
+      ({ receiptId }) => receiptId === spentChecked.rows[0]?.id,
+    ),
+    "an unprovable spent review cannot postpone finalized inventory repair",
   );
   await client.query("savepoint terminal_receive_revision");
   const terminalBefore = await client.query<{ version: string }>(

@@ -14,6 +14,7 @@ import {
 } from "./finance-jobs.js";
 import {
   closeFundingReconciliationPool,
+  runFundingReceiveInventoryReviewJob,
   runFundingReceiveSpentReviewJob,
   runFundingReconciliationJob,
 } from "./funding-reconciliation.js";
@@ -185,6 +186,22 @@ export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
       retryBackoffSec: workerEnv.retryBackoffSec,
       jitterSec: 0,
       run: () => runFundingReceiveSpentReviewJob(),
+      isNoopResult: (result) =>
+        !hasPositiveActivity(result, ["resolved", "retryableErrors"]),
+    },
+    {
+      name: "funding_receive_inventory_review",
+      enabled:
+        workerEnv.fundingReconciliationEnabled &&
+        Boolean(workerEnv.databaseUrl),
+      intervalSec: 60,
+      // This lane has its own per-job guard; failure in the spent-proof lane
+      // must not block read-only inventory evidence checks.
+      timeoutSec: 0,
+      maxRetries: 0,
+      retryBackoffSec: workerEnv.retryBackoffSec,
+      jitterSec: 0,
+      run: () => runFundingReceiveInventoryReviewJob(),
       isNoopResult: (result) =>
         !hasPositiveActivity(result, ["resolved", "retryableErrors"]),
     },

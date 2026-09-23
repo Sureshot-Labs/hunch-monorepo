@@ -183,8 +183,9 @@ function publicReceipt(row: ReceiveReceiptRow): FundingReceiveReceipt {
       : null;
   const sourceUnavailable =
     row.status === "recovery_required" &&
-    reviewResolution?.reason ===
-      "finalized_source_debit_and_insufficient_balance";
+    (reviewResolution?.reason ===
+      "finalized_source_debit_and_insufficient_balance" ||
+      reviewResolution?.reason === "finalized_source_balance_insufficient");
   const reviewContinuation = parseFundingReceiveReviewContinuation(
     row.evidence.reviewContinuation,
   );
@@ -1354,7 +1355,9 @@ export async function claimExpiredFundingReceiveSpentReviews(
            'review_required', 'recovery_required', 'expired',
            'cancelled', 'completed'
          )
-         and receive_session.observe_until <= $1::timestamptz
+         -- A proved source debit can be classified after the receive address
+         -- expires. The separate seven-day late-receipt observer still runs.
+         and receive_session.expires_at <= $1::timestamptz
          and (
            receive_session.last_spent_review_checked_at is null
            or receive_session.last_spent_review_checked_at <=
@@ -1380,6 +1383,139 @@ export async function claimExpiredFundingReceiveSpentReviews(
   );
   return rows.map(snapshot);
 }
+
+/** Claim one old review at a time without contending with the spent-proof lane. */
+export async function claimExpiredFundingReceiveInventoryReviews(
+  db: Pick<Pool, "query">,
+  input: Readonly<{ limit: number; minimumPollIntervalMs: number; now: Date }>,
+): Promise<readonly FundingReceiveInventoryReviewCandidate[]> {
+  const { rows } = await db.query<{
+    receipt_id: string;
+    receive_session_id: string;
+    user_id: string;
+    location_id: string | null;
+    network_id: string;
+    asset_id: string;
+    asset_decimals: number;
+    destination_address: string;
+    source_raw: string;
+    source_ledger_height: string;
+    tx_hash: string;
+    event_index: string;
+    block_hash: string;
+    source_address: string | null;
+    required_finalized_height: string;
+  }>(
+    `with candidate_receipts as materialized (
+       select receipt.id
+       from funding_receive_receipts receipt
+       join funding_receive_sessions receive_session
+         on receive_session.id = receipt.receive_session_id
+        and receive_session.user_id = receipt.user_id
+       where receipt.status = 'review_required'
+         and receipt.handling = 'automatic_conversion'
+         and receipt.child_funding_operation_id is null
+         and receipt.network_id in (
+           'solana:mainnet', 'evm:137', 'evm:8453'
+         )
+         and receipt.ledger_height between 0 and 9007199254740991
+         and receipt.evidence #>>
+               '{reviewQuotePlan,confirmedSourceAmount,raw}' =
+               receipt.raw_amount::text
+         and receipt.routing_last_error_code in (
+           'child_operation_failed_before_broadcast',
+           'automation_policy_exceeded',
+           'economic_review_required'
+         )
+         and receive_session.status in (
+           'review_required', 'recovery_required', 'expired',
+           'cancelled', 'completed'
+         )
+         and receive_session.observe_until <= $1::timestamptz
+         and exists (
+           select 1
+           from jsonb_array_elements(receive_session.observation_variants)
+                as candidate_variant(value)
+           where candidate_variant.value ->> 'variantId' = receipt.variant_id
+             and nullif(candidate_variant.value ->> 'destinationLocationId', '')
+                   is not null
+         )
+         and coalesce(receipt.last_inventory_review_checked_at,
+                      '-infinity'::timestamptz) <=
+               $1::timestamptz - ($3::bigint * interval '1 millisecond')
+       order by coalesce(receipt.last_inventory_review_checked_at,
+                         '-infinity'::timestamptz) asc,
+                receipt.id asc
+       for update of receipt skip locked
+       limit $2::integer
+     ), claimed as (
+       update funding_receive_receipts receipt
+       set last_inventory_review_checked_at = $1::timestamptz
+       from candidate_receipts candidate
+       where receipt.id = candidate.id
+       returning receipt.*
+     )
+     select receipt.id as receipt_id,
+            receipt.receive_session_id, receipt.user_id,
+            variant.value ->> 'destinationLocationId' as location_id,
+            receipt.network_id, receipt.asset_id, receipt.asset_decimals,
+            receipt.destination_address, receipt.raw_amount::text as source_raw,
+            receipt.ledger_height::text as source_ledger_height,
+            receipt.tx_hash, receipt.event_index, receipt.block_hash,
+            receipt.source_address,
+            greatest(receipt.ledger_height,
+                     coalesce(wallet_credit.latest_height, 0))::text
+              as required_finalized_height
+       from claimed receipt
+       join funding_receive_sessions receive_session
+         on receive_session.id = receipt.receive_session_id
+        and receive_session.user_id = receipt.user_id
+       join lateral jsonb_array_elements(receive_session.observation_variants)
+         as variant(value)
+         on variant.value ->> 'variantId' = receipt.variant_id
+       join lateral (
+         ${latestKnownWalletCreditHeightSql("receipt")}
+       ) wallet_credit(latest_height) on true
+      where receipt.ledger_height between 0 and 9007199254740991
+        and receipt.evidence #>>
+              '{reviewQuotePlan,confirmedSourceAmount,raw}' =
+              receipt.raw_amount::text
+        and receive_session.status in (
+          'review_required', 'recovery_required', 'expired',
+          'cancelled', 'completed'
+        )
+        and receive_session.observe_until <= $1::timestamptz`,
+    [
+      input.now,
+      Math.max(1, Math.min(25, Math.trunc(input.limit))),
+      Math.max(1_000, Math.trunc(input.minimumPollIntervalMs)),
+    ],
+  );
+  return rows.flatMap((row) =>
+    row.location_id
+      ? [
+          {
+            receiptId: row.receipt_id,
+            receiveSessionId: row.receive_session_id,
+            userId: row.user_id,
+            locationId: row.location_id,
+            networkId: row.network_id,
+            assetId: row.asset_id,
+            assetDecimals: row.asset_decimals,
+            destinationAddress: row.destination_address,
+            sourceRaw: row.source_raw,
+            sourceLedgerHeight: row.source_ledger_height,
+            txHash: row.tx_hash,
+            eventIndex: row.event_index,
+            blockHash: row.block_hash,
+            sourceAddress: row.source_address,
+            requiredFinalizedHeight: row.required_finalized_height,
+          },
+        ]
+      : [],
+  );
+}
+
 export async function listFundingReceiveReceiptsForUser(
   db: Pick<Pool, "query">,
   input: Readonly<{ userId: string; receiveSessionId: string }>,
@@ -1436,6 +1572,24 @@ export type FundingReceiveSpentReviewCandidate = Readonly<{
   spentSlot: string;
 }>;
 
+export type FundingReceiveInventoryReviewCandidate = Readonly<{
+  receiptId: string;
+  receiveSessionId: string;
+  userId: string;
+  locationId: string;
+  networkId: string;
+  assetId: string;
+  assetDecimals: number;
+  destinationAddress: string;
+  sourceRaw: string;
+  sourceLedgerHeight: string;
+  txHash: string;
+  eventIndex: string;
+  blockHash: string;
+  sourceAddress: string | null;
+  requiredFinalizedHeight: string;
+}>;
+
 // ledger_height is historical text, not a numeric-constrained column. A CASE
 // is required: PostgreSQL may evaluate a plain cast before an adjacent AND.
 const safeSpentReceiptLedgerSlotSql = `case
@@ -1448,13 +1602,23 @@ const safeSpentReceiptLedgerSlotSql = `case
   else null
 end`;
 
-function latestKnownSolanaWalletCreditSlotSql(
+function latestKnownWalletCreditHeightSql(
   scope: "receipt" | "parameters",
 ): string {
   const networkId = scope === "receipt" ? "receipt.network_id" : "$5";
   const assetId = scope === "receipt" ? "receipt.asset_id" : "$6";
   const address = scope === "receipt" ? "receipt.destination_address" : "$7";
   const userId = scope === "receipt" ? "receipt.user_id" : "$3";
+  const sameAsset = (candidate: string) => `
+    ${candidate}.network_id = ${networkId}
+    and (
+      (${networkId} = 'solana:mainnet'
+       and ${candidate}.asset_id = ${assetId}
+       and ${candidate}.destination_address = ${address})
+      or (${networkId} in ('evm:137', 'evm:8453')
+       and lower(${candidate}.asset_id) = lower(${assetId})
+       and lower(${candidate}.destination_address) = lower(${address}))
+    )`;
   return `
     select max(known_credit.ledger_slot)
     from (
@@ -1464,9 +1628,7 @@ function latestKnownSolanaWalletCreditSlotSql(
         else null
       end as ledger_slot
       from funding_receive_canonical_events canonical_event
-      where canonical_event.network_id = ${networkId}
-        and canonical_event.asset_id = ${assetId}
-        and canonical_event.destination_address = ${address}
+      where ${sameAsset("canonical_event")}
       union all
       select case
         when inbound_receipt.ledger_height <= 9007199254740991
@@ -1475,9 +1637,7 @@ function latestKnownSolanaWalletCreditSlotSql(
       end as ledger_slot
       from funding_receive_receipts inbound_receipt
       where inbound_receipt.user_id = ${userId}
-        and inbound_receipt.network_id = ${networkId}
-        and inbound_receipt.asset_id = ${assetId}
-        and inbound_receipt.destination_address = ${address}
+        and ${sameAsset("inbound_receipt")}
         and inbound_receipt.ledger_height is not null
       union all
       select case
@@ -1491,8 +1651,14 @@ function latestKnownSolanaWalletCreditSlotSql(
       end as ledger_slot
       from funding_observations credit_observation
       where credit_observation.network_id = ${networkId}
-        and credit_observation.asset_id = ${assetId}
-        and credit_observation.to_address = ${address}
+        and (
+          (${networkId} = 'solana:mainnet'
+           and credit_observation.asset_id = ${assetId}
+           and credit_observation.to_address = ${address})
+          or (${networkId} in ('evm:137', 'evm:8453')
+           and lower(credit_observation.asset_id) = lower(${assetId})
+           and lower(credit_observation.to_address) = lower(${address}))
+        )
         and credit_observation.kind in (
           'source_credit', 'destination_credit', 'refund_credit'
         )
@@ -1595,7 +1761,7 @@ export async function listFundingReceiveSpentReviewCandidates(
         limit 1
       ) spent_proof on true
       join lateral (
-        ${latestKnownSolanaWalletCreditSlotSql("receipt")}
+        ${latestKnownWalletCreditHeightSql("receipt")}
       ) wallet_credit(latest_slot) on true
       where receipt.user_id = $1
         and receipt.receive_session_id = $2
@@ -1845,7 +2011,7 @@ export async function resolveFundingReceiveSpentReviewInTransaction(
              and $11::numeric >= (${safeSpentReceiptLedgerSlotSql})
           )
           and $11::numeric >= (
-            ${latestKnownSolanaWalletCreditSlotSql("parameters")}
+            ${latestKnownWalletCreditHeightSql("parameters")}
           )
       `,
     [
@@ -1869,6 +2035,162 @@ export async function resolveFundingReceiveSpentReviewInTransaction(
   if (result.rowCount !== 1) return false;
   // A closed session must stay closed, but its changed receipt still needs a
   // new revision so durable Telegram projections can discover the outcome.
+  await client.query(
+    `update funding_receive_sessions
+        set version = version + 1, updated_at = $3
+      where id = $1 and user_id = $2
+        and status in ('expired', 'cancelled', 'completed')`,
+    [input.receiveSessionId, input.userId, input.now],
+  );
+  await refreshFundingReceiveSessionStatus(client, input);
+  return true;
+}
+
+/** A finalized inventory shortage is evidence about availability, not spend attribution. */
+export async function resolveFundingReceiveInventoryReview(
+  db: Pool,
+  input: FundingReceiveInventoryReviewCandidate &
+    Readonly<{ observedBalanceRaw: string; observedHeight: string; now: Date }>,
+): Promise<boolean> {
+  return tx(db, (client) =>
+    resolveFundingReceiveInventoryReviewInTransaction(client, input),
+  );
+}
+
+export async function resolveFundingReceiveInventoryReviewInTransaction(
+  client: PoolClient,
+  input: FundingReceiveInventoryReviewCandidate &
+    Readonly<{ observedBalanceRaw: string; observedHeight: string; now: Date }>,
+): Promise<boolean> {
+  if (
+    !/^[1-9][0-9]*$/.test(input.sourceRaw) ||
+    !/^(0|[1-9][0-9]*)$/.test(input.observedBalanceRaw) ||
+    !/^(0|[1-9][0-9]*)$/.test(input.requiredFinalizedHeight) ||
+    !/^[1-9][0-9]*$/.test(input.observedHeight) ||
+    BigInt(input.observedHeight) < BigInt(input.requiredFinalizedHeight) ||
+    BigInt(input.observedBalanceRaw) >= BigInt(input.sourceRaw)
+  ) {
+    return false;
+  }
+  const scope = await client.query<{
+    destination_option_id: string;
+    venue_binding_option_id: string;
+  }>(
+    `select destination_option_id, venue_binding_option_id
+       from funding_receive_sessions
+      where id = $1 and user_id = $2`,
+    [input.receiveSessionId, input.userId],
+  );
+  const session = scope.rows[0];
+  if (!session) return false;
+  await lockFundingReceiveSessionScope(client, {
+    userId: input.userId,
+    destinationOptionId: session.destination_option_id,
+    venueBindingOptionId: session.venue_binding_option_id,
+  });
+  const unlockedReceipt = await client.query<{ id: string }>(
+    `select id from funding_receive_receipts
+      where id = $1 and receive_session_id = $2 and user_id = $3
+        and status = 'review_required'
+      for update skip locked`,
+    [input.receiptId, input.receiveSessionId, input.userId],
+  );
+  if (!unlockedReceipt.rows[0]) return false;
+  const result = await client.query(
+    `update funding_receive_receipts receipt
+        set status = 'recovery_required',
+            routing_disposition = 'recovery_required',
+            routing_last_error_code = 'review_source_balance_insufficient',
+            evidence = jsonb_set(receipt.evidence, '{reviewResolution}',
+              jsonb_build_object(
+                'reason', 'finalized_source_balance_insufficient',
+                'sourceRaw', $8::text,
+                'observedBalanceRaw', $9::text,
+                'observedHeight', $11::text,
+                'resolvedAt', $10::timestamptz
+              ), true),
+            updated_at = $10
+       from funding_receive_sessions receive_session,
+            lateral jsonb_array_elements(receive_session.observation_variants)
+              as variant(value)
+      where receipt.id = $1
+        and receipt.receive_session_id = $2
+        and receipt.user_id = $3
+        and receive_session.id = receipt.receive_session_id
+        and receive_session.user_id = receipt.user_id
+        and receive_session.observe_until <= $10
+        and variant.value ->> 'variantId' = receipt.variant_id
+        and variant.value ->> 'destinationLocationId' = $4
+        and receipt.network_id = $5
+        and receipt.network_id in ('solana:mainnet', 'evm:137', 'evm:8453')
+        and (
+          (receipt.network_id = 'solana:mainnet'
+           and receipt.asset_id = $6 and receipt.destination_address = $7)
+          or (receipt.network_id in ('evm:137', 'evm:8453')
+              and lower(receipt.asset_id) = lower($6)
+              and lower(receipt.destination_address) = lower($7))
+        )
+        and receipt.status = 'review_required'
+        and receipt.handling = 'automatic_conversion'
+        and receipt.child_funding_operation_id is null
+        and receipt.raw_amount::text = $8
+        and receipt.ledger_height between 0 and 9007199254740991
+        and receipt.ledger_height <= $11::numeric
+        and receipt.evidence #>>
+              '{reviewQuotePlan,confirmedSourceAmount,raw}' = $8
+        and receipt.routing_last_error_code in (
+          'child_operation_failed_before_broadcast',
+          'automation_policy_exceeded',
+          'economic_review_required'
+        )
+        and not exists (
+          select 1 from funding_quotes active_quote
+          where active_quote.id = receipt.review_quote_id
+            and active_quote.consumed_at is null
+            and active_quote.invalidated_at is null
+            and active_quote.expires_at > $10
+        )
+        and not exists (
+          select 1 from balance_reservations active_source
+          where active_source.user_id = receipt.user_id
+            and active_source.location_id = $4
+            and active_source.network_id = $5
+            and (
+              ($5 = 'solana:mainnet' and active_source.asset_id = $6)
+              or ($5 in ('evm:137', 'evm:8453')
+                  and lower(active_source.asset_id) = lower($6))
+            )
+            and active_source.mode = 'subtract_available'
+            and active_source.state = 'active'
+            and ${fundingReservationHoldSql("active_source")}
+            and not exists (
+              select 1 from funding_observations debit_observation
+              where debit_observation.operation_id = active_source.operation_id
+                and debit_observation.segment_id is not distinct from
+                    active_source.segment_id
+                and debit_observation.kind = 'source_debit'
+                and debit_observation.canonical
+                and debit_observation.finality_status = 'finalized'
+            )
+        )
+        and $11::numeric >= (
+          ${latestKnownWalletCreditHeightSql("parameters")}
+        )`,
+    [
+      input.receiptId,
+      input.receiveSessionId,
+      input.userId,
+      input.locationId,
+      input.networkId,
+      input.assetId,
+      input.destinationAddress,
+      input.sourceRaw,
+      input.observedBalanceRaw,
+      input.now,
+      input.observedHeight,
+    ],
+  );
+  if (result.rowCount !== 1) return false;
   await client.query(
     `update funding_receive_sessions
         set version = version + 1, updated_at = $3

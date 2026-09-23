@@ -2,6 +2,7 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 import type { RelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
 import { sameAccountAddress } from "../domain/asset-identity.js";
 import {
+  observeFinalizedOwnedReceiveSourceBalance,
   observeFinalizedSolanaOwnedAssetBalanceAfterSlot,
   verifyFinalizedSolanaReceiveSourceDebit,
 } from "../reconciliation/owned-wallet-asset-balance.js";
@@ -27,6 +28,7 @@ import {
 } from "../reconciliation/direct-ingress-observer.js";
 import {
   claimFundingReceiveCanonicalEventAllocation,
+  claimExpiredFundingReceiveInventoryReviews,
   claimExpiredFundingReceiveSpentReviews,
   claimObservableFundingReceiveSessions,
   deriveEffectiveFundingReceiveSessionStatus,
@@ -38,6 +40,7 @@ import {
   lockFundingReceiveSessionScope,
   quarantineFundingReceiveCanonicalInternalEvent,
   resolveFundingReceiveSpentReview,
+  resolveFundingReceiveInventoryReview,
   expireFundingReceiveSessions,
   updateClosedFundingReceiveSessionObservation,
   updateFundingReceiveSessionObservation,
@@ -575,6 +578,7 @@ export class FundingReceiveSessionObserver {
       scanCanonicalEventsBatch?: typeof scanCanonicalFundingReceiveEventsBatch;
       listPotentialPolymarketHandoffs?: typeof listPotentialPolymarketHandoffsForCanonicalEvents;
       readFinalizedSourceBalance?: typeof observeFinalizedSolanaOwnedAssetBalanceAfterSlot;
+      readFinalizedInventoryBalance?: typeof observeFinalizedOwnedReceiveSourceBalance;
       verifyFinalizedSourceDebit?: typeof verifyFinalizedSolanaReceiveSourceDebit;
     }> = {},
   ) {}
@@ -724,6 +728,96 @@ export class FundingReceiveSessionObserver {
       }
     }
     return { sessionsPolled: sessions.length, resolved, retryableErrors };
+  }
+
+  /** Closed, unconverted receipts can be repaired from finalized inventory. */
+  async pollInventoryReviewBatch(
+    pool: Pool,
+    input: Readonly<{ now?: Date }> = {},
+  ): Promise<
+    Readonly<{
+      sessionsPolled: number;
+      resolved: number;
+      retryableErrors: number;
+    }>
+  > {
+    if (!(await isFundingReceiveSessionSchemaReady(pool))) {
+      return { sessionsPolled: 0, resolved: 0, retryableErrors: 0 };
+    }
+    const now = input.now ?? new Date();
+    const candidates = await claimExpiredFundingReceiveInventoryReviews(pool, {
+      limit: 1,
+      // Present inventory can legitimately require user consent; recheck it
+      // periodically without letting it crowd out older unexamined reviews.
+      minimumPollIntervalMs: 60 * 60_000,
+      now,
+    });
+    let resolved = 0;
+    let retryableErrors = 0;
+    for (const candidate of candidates) {
+      try {
+        const observed = await (
+          this.dependencies.readFinalizedInventoryBalance ??
+          observeFinalizedOwnedReceiveSourceBalance
+        )({
+          asset: {
+            networkId: candidate.networkId,
+            assetId: candidate.assetId,
+            decimals: candidate.assetDecimals,
+          },
+          destinationAddress: candidate.destinationAddress,
+          minimumHeight: candidate.requiredFinalizedHeight,
+          sourceEvent: {
+            sourceLedgerHeight: candidate.sourceLedgerHeight,
+            txHash: candidate.txHash,
+            eventIndex: candidate.eventIndex,
+            blockHash: candidate.blockHash,
+            sourceAddress: candidate.sourceAddress,
+            sourceRaw: candidate.sourceRaw,
+          },
+        });
+        if (BigInt(observed.raw) >= BigInt(candidate.sourceRaw)) {
+          console.info("[funding-receive] review source still available", {
+            receiptId: candidate.receiptId,
+            receiveSessionId: candidate.receiveSessionId,
+          });
+          continue;
+        }
+        if (
+          await resolveFundingReceiveInventoryReview(pool, {
+            ...candidate,
+            observedBalanceRaw: observed.raw,
+            observedHeight: observed.height,
+            now,
+          })
+        ) {
+          resolved += 1;
+          console.info(
+            "[funding-receive] review source inventory insufficient",
+            {
+              receiptId: candidate.receiptId,
+              receiveSessionId: candidate.receiveSessionId,
+            },
+          );
+        } else {
+          console.info("[funding-receive] inventory review state changed", {
+            receiptId: candidate.receiptId,
+            receiveSessionId: candidate.receiveSessionId,
+          });
+        }
+      } catch {
+        console.warn("[funding-receive] inventory review retry required", {
+          receiptId: candidate.receiptId,
+          receiveSessionId: candidate.receiveSessionId,
+        });
+        retryableErrors += 1;
+      }
+    }
+    return {
+      sessionsPolled: candidates.length,
+      resolved,
+      retryableErrors,
+    };
   }
 
   private async resolveSpentReviews(

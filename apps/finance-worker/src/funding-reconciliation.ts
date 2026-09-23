@@ -110,6 +110,13 @@ type FundingWorkerModule = {
       retryableErrors: number;
     }>
   >;
+  runFundingReceiveInventoryReviewJob: (pool: Pool) => Promise<
+    Readonly<{
+      sessionsPolled: number;
+      resolved: number;
+      retryableErrors: number;
+    }>
+  >;
 };
 
 type FundingWorkerModuleLoader = () => Promise<FundingWorkerModule>;
@@ -312,6 +319,17 @@ export async function runFundingReceiveSpentReviewJob(): Promise<
 > {
   const module = await getFundingWorkerModule();
   return module.runFundingReceiveSpentReviewJob(getFundingPool());
+}
+
+export async function runFundingReceiveInventoryReviewJob(): Promise<
+  Readonly<{
+    sessionsPolled: number;
+    resolved: number;
+    retryableErrors: number;
+  }>
+> {
+  const module = await getFundingWorkerModule();
+  return module.runFundingReceiveInventoryReviewJob(getFundingPool());
 }
 
 export async function closeFundingReconciliationPool(): Promise<void> {
