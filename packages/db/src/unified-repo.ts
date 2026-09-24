@@ -170,11 +170,15 @@ function clearPendingLatestTopTouch(pool: Pool, tokenId: string): void {
 
 export async function flushUnifiedBookTopLatestTouches(
   pool: Pool,
+  tokenIds?: readonly string[],
 ): Promise<number> {
   const state = latestTopTouchState(pool);
-  const rows = Array.from(state.pending.values());
+  const selected = tokenIds ? new Set(tokenIds) : null;
+  const rows = Array.from(state.pending.values()).filter(
+    (row) => !selected || selected.has(row.token_id),
+  );
   if (rows.length === 0) return 0;
-  state.pending.clear();
+  for (const row of rows) state.pending.delete(row.token_id);
 
   try {
     await pool.query(

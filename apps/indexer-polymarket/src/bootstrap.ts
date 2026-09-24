@@ -16,6 +16,7 @@ import {
   mapToUnifiedMarket,
 } from "./mappers.js";
 import {
+  flushUnifiedBookTopLatestTouches,
   writeResolvedTerminalTokenTops,
   upsertUnifiedTokens,
   writeUnifiedBookTops,
@@ -710,7 +711,10 @@ export async function syncHotWindow(): Promise<SyncCounters> {
   };
 }
 
-export async function snapshotBooks(tokenIds: string[]): Promise<{
+export async function snapshotBooks(
+  tokenIds: string[],
+  options: { persistLatestBeforeReturn?: boolean } = {},
+): Promise<{
   requested: number;
   failedTokenIds: string[];
   timings: Record<string, number>;
@@ -722,7 +726,7 @@ export async function snapshotBooks(tokenIds: string[]): Promise<{
   await pool.query("select 1");
 
   const snapIds = tokenIds.slice(0, env.topBookSnapshot);
-  const failedTokenIds: string[] = [];
+  const failedTokenIds = new Set<string>();
   const timings = createTimings();
   log.info(`Snapshotting ${snapIds.length} top books`);
 
@@ -738,6 +742,10 @@ export async function snapshotBooks(tokenIds: string[]): Promise<{
             () => postBooksOnce(group),
             { tokens: group.length },
           );
+          const returnedTokenIds = new Set(books.map((book) => book.asset_id));
+          for (const tokenId of group) {
+            if (!returnedTokenIds.has(tokenId)) failedTokenIds.add(tokenId);
+          }
           await timedPhase(
             timings,
             "snapshotBooks.persistBooks",
@@ -762,6 +770,13 @@ export async function snapshotBooks(tokenIds: string[]): Promise<{
                   touchLatestWhenUnchanged: true,
                 })),
               );
+
+              if (options.persistLatestBeforeReturn) {
+                await flushUnifiedBookTopLatestTouches(
+                  pool,
+                  bookTops.map((entry) => entry.book.asset_id),
+                );
+              }
 
               await Promise.all(
                 bookTops.map(async (entry) => {
@@ -789,13 +804,17 @@ export async function snapshotBooks(tokenIds: string[]): Promise<{
           );
         } catch (e) {
           if (isPgSetupIssue(e)) throw e;
-          failedTokenIds.push(...group);
+          for (const tokenId of group) failedTokenIds.add(tokenId);
           log.warn("book snapshot failed batch", group[0], String(e));
         }
       }),
     ),
   );
-  return { requested: snapIds.length, failedTokenIds, timings };
+  return {
+    requested: snapIds.length,
+    failedTokenIds: [...failedTokenIds],
+    timings,
+  };
 }
 
 async function fetchEventIdsForTokenIds(
@@ -1597,7 +1616,9 @@ export async function processPriceRefreshQueue(
       staleTokenIds.length - snapshotTokenIds.length,
     );
     if (snapshotTokenIds.length) {
-      const result = await snapshotBooks(snapshotTokenIds);
+      const result = await snapshotBooks(snapshotTokenIds, {
+        persistLatestBeforeReturn: true,
+      });
       bookTimings = result.timings;
       bookRefreshed = result.requested - result.failedTokenIds.length;
       failed = result.failedTokenIds.length;

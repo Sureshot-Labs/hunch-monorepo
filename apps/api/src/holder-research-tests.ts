@@ -30,8 +30,11 @@ import {
   assertHolderResearchEvidenceIdsAllowed,
   buildHolderResearchExternalSearchSystemPrompt,
   buildHolderResearchExternalSearchSystemPromptV2,
+  classifyHolderResearchPreTriagePriceIssue,
   extractCitations,
   extractMarkdownCitations,
+  extractExternalResearchFoundSources,
+  hasNewDatedHolderBackground,
   orderHolderResearchTriageLookahead,
   parseHolderResearchRunArgs,
   parseHolderResearchTriageModelContent,
@@ -39,7 +42,9 @@ import {
   selectHolderResearchTriageFallbackCandidates,
   selectMissingHolderResearchTriageFallback,
   withHolderResearchBackground,
+  verifiedHolderBackgroundSourceUrls,
   selectHolderResearchTriageInvestigations,
+  runExternalResearch,
   withPolicyOverrides,
 } from "./ai-holder-research-run.js";
 import {
@@ -97,6 +102,7 @@ import {
   parseHolderBackgroundJevProbabilities,
   rankHolderBackground,
   selectHolderBackgroundFromVote,
+  type HolderBackground,
 } from "./services/holder-research-background.js";
 import {
   buildHolderResearchObservationCalibrationReport,
@@ -1392,6 +1398,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       );
       assert.deepEqual(Object.keys(input).sort(), [
         "currentDate",
+        "freshEvidenceWindowHours",
         "instruction",
         "market",
         "researchNeed",
@@ -1881,7 +1888,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
-    name: "holder research performance audit uses exact signal snapshot before trade fallback",
+    name: "holder research performance audit prefers note-time price over older signal snapshot",
     run: async () => {
       const updates: Array<Record<string, unknown>> = [];
       let tradeFallbackQueried = false;
@@ -1898,6 +1905,13 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                   metrics: {
                     bucket: "sharp_side",
                     market: { yesProbability: 0.32 },
+                    signalPriceSnapshotV1: {
+                      version: 1,
+                      marketId: "polymarket:perf",
+                      asOf: "2026-01-01T00:00:00.000Z",
+                      YES: { ask: 0.56, bid: 0.54, mark: 0.55 },
+                      NO: { ask: 0.46, bid: 0.44, mark: 0.45 },
+                    },
                     signalSnapshot: {
                       version: 1,
                       recordedAt: "2026-01-01T00:00:00.000Z",
@@ -1966,10 +1980,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(result.evaluated, 1);
       assert.equal(result.written, 1);
       assert.equal(result.correct, 1);
-      assert.equal(updates[0]?.entryPrice, 0.35);
+      assert.equal(updates[0]?.entryPrice, 0.56);
       assert.equal(updates[0]?.executionPriority, "high_conviction");
       assert.equal(updates[0]?.entryPriceSource, "signal_snapshot");
-      assert.equal(updates[0]?.pnlPerDollar, (1 - 0.35) / 0.35);
+      assert.equal(updates[0]?.pnlPerDollar, (1 - 0.56) / 0.56);
       assert.equal(
         result.aggregates.byExecutionPriority.high_conviction.notes,
         1,
@@ -5723,17 +5737,43 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           original,
           background,
           "final",
+          new Set(
+            background.items
+              .map((item) => item.sourceUrl)
+              .filter((url): url is string => url != null),
+          ),
         );
         const finalContext = attached.backgroundContext as Record<
           string,
           unknown
         >;
-        assert.equal(finalContext.externalSourceCount, 5);
-        assert.equal(finalContext.priorAnalysisCount, 0);
-        assert.equal("items" in finalContext, false);
-        assert.equal(JSON.stringify(attached).includes("Context 0"), false);
-        assert.equal(JSON.stringify(attached).includes("x".repeat(100)), false);
+        const finalItems = finalContext.items as typeof background.items;
+        assert.equal(finalItems.length, 4);
+        assert.equal(finalItems[0]?.title, "Context 0");
+        assert.equal(finalItems[0]?.summary.length, 180);
+        assert.equal(
+          "backgroundContext" in
+            withHolderResearchBackground(original, background, "final"),
+          false,
+        );
       }
+      const failedSearch = parseHolderResearchExternalResearchV2({
+        status: "error",
+        verdict: "unknown",
+        timing: "unknown",
+        summary:
+          "Provider returned sources but the research result was unusable.",
+        citations: [
+          {
+            title: "A returned but unverified source",
+            url: background.items[0]?.sourceUrl,
+            publishedAt: "2026-09-24T00:00:00.000Z",
+          },
+        ],
+        comparableOdds: null,
+      });
+      assert.equal(failedSearch.citations.length, 1);
+      assert.equal(verifiedHolderBackgroundSourceUrls(failedSearch).size, 0);
       const researchContext = withHolderResearchBackground(
         {},
         background,
@@ -7270,6 +7310,21 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         }).status,
         "PUBLISH",
       );
+      assert.equal(
+        applyHolderResearchPublishQualityGate({
+          candidate: fresh,
+          output: publishOutput(fresh),
+          externalResearch: {
+            status: "error",
+            verdict: "unknown",
+            timing: "unknown",
+            summary: "Search provider was unavailable.",
+            citations: [],
+          },
+          policy: p,
+        }).status,
+        "PUBLISH",
+      );
       const evidenceId = listHolderResearchPromptEvidenceIdsV2(fresh, p)[0];
       assert.ok(evidenceId);
       const v2 = adaptHolderResearchFinalOutputV2({
@@ -7291,6 +7346,32 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         policy: p,
       });
       assert.equal(v2.status, "PUBLISH");
+      const v2WithoutSearch = adaptHolderResearchFinalOutputV2({
+        candidate: fresh,
+        output: parseHolderResearchFinalOutputV2({
+          version: "holder_research_v2",
+          verdict: "publish",
+          evidence_assessment: "adequate",
+          reason_codes: ["holder_evidence"],
+          rationale: "Exact-side holder activity is sufficient on its own.",
+          evidence_ids: [evidenceId],
+          copy: {
+            headline: "Strong holder remains active on Fed decision",
+            why_now: "The position remains active at an actionable price.",
+            caveats: [],
+          },
+        }),
+        externalResearch: {
+          status: "error",
+          verdict: "unknown",
+          timing: "unknown",
+          summary: "Search provider was unavailable.",
+          citations: [],
+          comparableOdds: null,
+        },
+        policy: p,
+      });
+      assert.equal(v2WithoutSearch.status, "PUBLISH");
       const datedSource = {
         status: "ok" as const,
         verdict: "supports_holder_side" as const,
@@ -7303,12 +7384,74 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
             publishedAt: new Date(now.getTime() - 3_600_000).toISOString(),
           },
         ],
+        freshFact: {
+          fact: "A specific new Fed decision changed the contract outlook.",
+          sourceUrl: "https://example.com/update",
+          eventAt: new Date(now.getTime() - 3_600_000).toISOString(),
+          matchesExactContract: true,
+          supportsSelectedSide: true,
+          trackerUpdateOnly: false,
+        },
       };
+      const finalEvidence = {
+        sourceUrl: "https://example.com/update",
+        matchesExactContract: true,
+        supportsSelectedSide: true,
+        factSupported: true,
+      };
+      const parsedV2 = parseHolderResearchFinalOutputV2({
+        version: "holder_research_v2",
+        verdict: "publish",
+        evidence_assessment: "adequate",
+        reason_codes: ["holder_evidence"],
+        rationale: "A dated exact-contract fact supports this side.",
+        evidence_ids: [evidenceId],
+        horizonEvidence: finalEvidence,
+        copy: {
+          headline: "Fresh Fed decision changes this market",
+          why_now: "The cited decision changes the selected contract outlook.",
+          caveats: [],
+        },
+      });
+      assert.deepEqual(parsedV2.horizonEvidence, finalEvidence);
       assert.equal(
         assessHolderResearchHorizonException({
           candidate: reviewed,
           policy: p,
           externalResearch: datedSource,
+          now,
+        }),
+        null,
+      );
+      assert.equal(
+        assessHolderResearchHorizonException({
+          candidate: reviewed,
+          policy: p,
+          externalResearch: {
+            ...datedSource,
+            freshFact: { ...datedSource.freshFact, trackerUpdateOnly: true },
+          },
+          finalEvidence,
+          now,
+        }),
+        null,
+      );
+      assert.equal(
+        assessHolderResearchHorizonException({
+          candidate: reviewed,
+          policy: p,
+          externalResearch: datedSource,
+          finalEvidence: { ...finalEvidence, supportsSelectedSide: false },
+          now,
+        }),
+        null,
+      );
+      assert.equal(
+        assessHolderResearchHorizonException({
+          candidate: reviewed,
+          policy: p,
+          externalResearch: datedSource,
+          finalEvidence: parsedV2.horizonEvidence,
           now,
         }),
         "dated_source",
@@ -7327,6 +7470,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           },
           policy: p,
           externalResearch: datedSource,
+          finalEvidence,
           now,
         }),
         null,
@@ -7347,6 +7491,295 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           now,
         }),
         null,
+      );
+    },
+  },
+  {
+    name: "external source discovery is separate from claim citations",
+    run: () => {
+      const payload = {
+        citations: ["https://example.com/a"],
+        output: [
+          {
+            type: "message",
+            content: [
+              {
+                annotations: [
+                  { type: "url_citation", url: "https://example.com/b" },
+                ],
+              },
+            ],
+          },
+        ],
+      };
+      assert.deepEqual(extractExternalResearchFoundSources(payload), [
+        "https://example.com/a",
+        "https://example.com/b",
+      ]);
+      assert.deepEqual(extractCitations(payload), []);
+    },
+  },
+  {
+    name: "forced structured search respects actual usage and excludes forged citations",
+    run: async () => {
+      const p = {
+        ...policy(),
+        externalSearchEnabled: true,
+        forceExternalSearchForInvestigations: true,
+        externalSearchMinScore: 1,
+        estimatedExternalSearchCostUsd: 0.03,
+      };
+      let calls = 0;
+      const result = await runExternalResearch({
+        candidate: sharpMinorityCandidate(p),
+        policy: p,
+        dryRun: false,
+        researchNeed: "news_timing",
+        researchQuestion: "Was the exact event postponed?",
+        useV2: true,
+        apiKey: "test-only",
+        fetchImpl: async (_url, init) => {
+          calls += 1;
+          const body = JSON.parse(String(init?.body));
+          assert.equal(body.max_turns, 4);
+          assert.equal(body.max_output_tokens, 1_600);
+          assert.match(
+            JSON.stringify(body.input),
+            /Was the exact event postponed/,
+          );
+          return new Response(
+            JSON.stringify({
+              output_text: JSON.stringify({
+                status: "ok",
+                verdict: "supports_holder_side",
+                timing: "unknown",
+                summary: "A cited update affects the selected side.",
+                citations: [
+                  {
+                    title: "Returned",
+                    url: "https://example.com/real",
+                    publishedAt: "2026-09-24T00:00:00.000Z",
+                  },
+                  {
+                    title: "Forged",
+                    url: "https://example.com/forged",
+                    publishedAt: "2026-09-24T00:00:00.000Z",
+                  },
+                ],
+                freshFact: {
+                  fact: "The specified event was postponed after a formal notice.",
+                  sourceUrl: "https://example.com/forged",
+                  eventAt: "2026-09-24T00:00:00.000Z",
+                  matchesExactContract: true,
+                  supportsSelectedSide: true,
+                  trackerUpdateOnly: false,
+                },
+                comparableOdds: null,
+              }),
+              citations: ["https://example.com/real"],
+              usage: {
+                num_server_side_tools_used: 2,
+                cost_in_usd_ticks: 200_000_000,
+              },
+            }),
+            { status: 200 },
+          );
+        },
+      });
+      assert.equal(calls, 1);
+      assert.equal(result.toolCalls, 2);
+      assert.equal(result.costUsd, 0.02);
+      assert.deepEqual(
+        result.citations.map((citation) => citation.url),
+        ["https://example.com/real"],
+      );
+      assert.equal(result.freshFact, null);
+    },
+  },
+  {
+    name: "search failure reserves cost and new dated background only wakes non-published decisions",
+    run: async () => {
+      const p = {
+        ...policy(),
+        externalSearchEnabled: true,
+        forceExternalSearchForInvestigations: true,
+        estimatedExternalSearchCostUsd: 0.03,
+      };
+      const failed = await runExternalResearch({
+        candidate: sharpMinorityCandidate(p),
+        policy: p,
+        dryRun: false,
+        researchNeed: "news_timing",
+        useV2: true,
+        apiKey: "test-only",
+        fetchImpl: async () => {
+          throw new Error("mock_timeout");
+        },
+      });
+      assert.equal(failed.status, "error");
+      assert.equal(failed.costUsd, 0.03);
+      assert.equal(failed.providerAttempted, true);
+      const background = {
+        role: "optional_context_not_holder_evidence" as const,
+        items: [
+          {
+            role: "external_source_summary" as const,
+            title: "Recent update",
+            summary: "Dated news",
+            sourceUrl: "https://example.com/recent",
+            publishedAt: "2026-09-24T08:00:00.000Z",
+            relation: "exact" as const,
+          },
+        ],
+      };
+      assert.equal(
+        hasNewDatedHolderBackground(
+          background,
+          "2026-09-24T07:00:00.000Z",
+          72,
+          new Date("2026-09-24T09:00:00.000Z"),
+        ),
+        true,
+      );
+      assert.equal(
+        hasNewDatedHolderBackground(
+          background,
+          "2026-09-24T08:30:00.000Z",
+          72,
+          new Date("2026-09-24T09:00:00.000Z"),
+        ),
+        false,
+      );
+      const priorBackground: HolderBackground = {
+        ...background,
+        items: [{ ...background.items[0], role: "prior_hunch_analysis" }],
+      };
+      assert.equal(
+        hasNewDatedHolderBackground(
+          priorBackground,
+          "2026-09-24T07:00:00.000Z",
+          72,
+          new Date("2026-09-24T09:00:00.000Z"),
+        ),
+        false,
+      );
+    },
+  },
+  {
+    name: "search adapter distinguishes skipped, HTTP failure, and malformed answer",
+    run: async () => {
+      const p = {
+        ...policy(),
+        externalSearchEnabled: true,
+        forceExternalSearchForInvestigations: false,
+        externalSearchMinScore: 1,
+        estimatedExternalSearchCostUsd: 0.03,
+      };
+      const candidate = sharpMinorityCandidate(p);
+      p.externalSearchMinScore = candidate.score + 1;
+      const base = {
+        candidate,
+        policy: p,
+        dryRun: false,
+        researchNeed: "market_context" as const,
+        useV2: true,
+        apiKey: "test-only",
+      };
+      const skipped = await runExternalResearch({
+        ...base,
+        fetchImpl: async () => {
+          throw new Error("should_not_be_called");
+        },
+      });
+      assert.equal(skipped.status, "skipped");
+      assert.equal(skipped.providerAttempted, false);
+      for (const status of [403, 429]) {
+        const failed = await runExternalResearch({
+          ...base,
+          policy: { ...p, forceExternalSearchForInvestigations: true },
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({ error: { message: "unavailable" } }),
+              { status },
+            ),
+        });
+        assert.equal(failed.status, "error");
+        assert.equal(failed.providerAttempted, true);
+        assert.equal(failed.costUsd, 0.03);
+      }
+      const malformed = await runExternalResearch({
+        ...base,
+        policy: { ...p, forceExternalSearchForInvestigations: true },
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              output_text: "not JSON",
+              usage: { num_server_side_tools_used: 1 },
+            }),
+            { status: 200 },
+          ),
+      });
+      assert.equal(malformed.status, "error");
+      assert.equal(malformed.toolCalls, 1);
+      const topLevelTools = await runExternalResearch({
+        ...base,
+        policy: { ...p, forceExternalSearchForInvestigations: true },
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              output_text: "not JSON",
+              usage: { input_tokens: 20, output_tokens: 10 },
+              num_server_side_tools_used: 2,
+              server_side_tool_usage_details: { web_search_calls: 2 },
+            }),
+            { status: 200 },
+          ),
+      });
+      assert.equal(topLevelTools.toolCalls, 2);
+    },
+  },
+  {
+    name: "unchecked cache lookahead remains eligible until mandatory final price refresh",
+    run: () => {
+      const candidate = sharpMinorityCandidate(policy());
+      const unchecked = {
+        ...candidate,
+        market: { ...candidate.market, livePriceCheck: null },
+      };
+      const lookahead = Array.from({ length: 20 }, (_, index) => ({
+        ...unchecked,
+        key: `lookahead-${index}`,
+        thesisKey: `lookahead-${index}`,
+      }));
+      const checkedKeys = new Set(
+        lookahead.slice(0, 16).map((item) => item.key),
+      );
+      const replacements = lookahead
+        .slice(16)
+        .filter(
+          (item) =>
+            classifyHolderResearchPreTriagePriceIssue(
+              item,
+              "ok",
+              checkedKeys.has(item.key),
+            ) === null,
+        );
+      assert.equal(replacements.length, 4);
+      const checked = lookahead[0];
+      const uncheckedCandidate = lookahead[16];
+      assert.ok(checked);
+      assert.ok(uncheckedCandidate);
+      assert.equal(
+        classifyHolderResearchPreTriagePriceIssue(checked, "ok", true),
+        "price_missing",
+      );
+      assert.equal(
+        classifyHolderResearchPreTriagePriceIssue(
+          uncheckedCandidate,
+          "error",
+          false,
+        ),
+        "price_refresh_error",
       );
     },
   },

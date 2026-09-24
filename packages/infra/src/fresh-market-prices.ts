@@ -127,6 +127,7 @@ function tokenTopIsFresh(
 }
 
 function finitePrice(value: string | number | null): number | null {
+  if (value == null) return null;
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : null;
 }

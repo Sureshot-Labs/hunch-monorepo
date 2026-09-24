@@ -240,6 +240,7 @@ export async function runHolderResearchRunner(
     }
 
     let jevChargedCostUsd = 0;
+    let externalSearchChargedCostUsd = 0;
     try {
       const report = await runHolderResearch(args, {
         decisionCacheRedis: redis,
@@ -249,6 +250,9 @@ export async function runHolderResearchRunner(
         backgroundBudgetAvailable,
         onJevCost: (costUsd) => {
           jevChargedCostUsd = costUsd;
+        },
+        onExternalSearchCost: (costUsd) => {
+          externalSearchChargedCostUsd = costUsd;
         },
       });
       const entry: RunHistoryEntry = {
@@ -279,11 +283,11 @@ export async function runHolderResearchRunner(
         estimatedCostUsd: 0,
         chargedCostUsd: 0,
         externalSearchEstimatedCostUsd: 0,
-        externalSearchChargedCostUsd: 0,
+        externalSearchChargedCostUsd,
         jevChargedCostUsd,
         result: "error",
       };
-      if (jevChargedCostUsd > 0) {
+      if (jevChargedCostUsd > 0 || externalSearchChargedCostUsd > 0) {
         await redis
           .multi()
           .lPush(RUNS_KEY, JSON.stringify(entry))

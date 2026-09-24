@@ -41,6 +41,16 @@ export const holderResearchAgentOutputV1Schema = z
         "unknown",
       ])
       .optional(),
+    horizonEvidence: z
+      .object({
+        sourceUrl: z.string().url().max(2_000),
+        matchesExactContract: z.boolean(),
+        supportsSelectedSide: z.boolean(),
+        factSupported: z.boolean(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
     execution_priority: holderResearchExecutionPrioritySchema.default("normal"),
     execution_priority_reason: z.string().trim().max(180).default(""),
     evidence_ids: z.array(z.string().trim().min(1).max(160)).min(1).max(6),
@@ -63,6 +73,17 @@ export const holderResearchTriageActionSchema = z.enum([
   "skip",
 ]);
 
+export const holderResearchTriageReasonCodeV2Schema = z.enum([
+  "strong_actor",
+  "early_position",
+  "aligned_flow",
+  "opposed_flow",
+  "already_priced",
+  "weak_credentials",
+  "insufficient_evidence",
+  "research_needed",
+]);
+
 export const holderResearchTriageOutputV1Schema = z
   .object({
     version: z.literal("holder_research_triage_v1"),
@@ -75,6 +96,11 @@ export const holderResearchTriageOutputV1Schema = z
             priority: z.coerce.number().min(0).max(1),
             needs_external_search: z.coerce.boolean(),
             reason: z.string().trim().min(4).max(220),
+            reason_codes: z
+              .array(holderResearchTriageReasonCodeV2Schema)
+              .max(6)
+              .optional(),
+            research_question: z.string().trim().max(220).nullable().optional(),
           })
           .strict(),
       )
@@ -89,17 +115,6 @@ export type HolderResearchTriageAction = z.infer<
 export type HolderResearchTriageOutputV1 = z.infer<
   typeof holderResearchTriageOutputV1Schema
 >;
-
-export const holderResearchTriageReasonCodeV2Schema = z.enum([
-  "strong_actor",
-  "early_position",
-  "aligned_flow",
-  "opposed_flow",
-  "already_priced",
-  "weak_credentials",
-  "insufficient_evidence",
-  "research_needed",
-]);
 
 export const holderResearchResearchNeedV2Schema = z.enum([
   "none",
@@ -122,6 +137,7 @@ export const holderResearchTriageOutputV2Schema = z
               .max(6),
             research_need: holderResearchResearchNeedV2Schema,
             reason: z.string().trim().min(4).max(220),
+            research_question: z.string().trim().max(220).nullable().optional(),
           })
           .strict(),
       )
@@ -138,7 +154,7 @@ export type HolderResearchTriageDecisionV2 =
 
 export const holderResearchExternalResearchV2Schema = z
   .object({
-    status: z.enum(["ok", "no_evidence", "error"]),
+    status: z.enum(["ok", "no_evidence", "error", "skipped", "not_requested"]),
     verdict: z.enum([
       "supports_holder_side",
       "supports_opposite_side",
@@ -165,6 +181,18 @@ export const holderResearchExternalResearchV2Schema = z
           .strict(),
       )
       .max(3),
+    freshFact: z
+      .object({
+        fact: z.string().trim().min(8).max(260),
+        sourceUrl: z.string().url().max(2_000),
+        eventAt: z.string().datetime().nullable(),
+        matchesExactContract: z.boolean(),
+        supportsSelectedSide: z.boolean(),
+        trackerUpdateOnly: z.boolean(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
     comparableOdds: z
       .object({
         side: z.enum(["YES", "NO"]),
@@ -208,6 +236,16 @@ export const holderResearchFinalOutputV2Schema = z
       "insufficient",
     ]),
     reason_codes: z.array(z.string().trim().min(1).max(80)).max(8),
+    horizonEvidence: z
+      .object({
+        sourceUrl: z.string().url().max(2_000),
+        matchesExactContract: z.boolean(),
+        supportsSelectedSide: z.boolean(),
+        factSupported: z.boolean(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
     rationale: z.string().trim().min(8).max(260),
     evidence_ids: z.array(z.string().trim().min(1).max(160)).min(1).max(6),
     copy: z
@@ -294,6 +332,7 @@ export function parseHolderResearchAgentOutputV1(
       260,
     ),
     public_context_risk: record.public_context_risk,
+    horizonEvidence: record.horizonEvidence ?? null,
     execution_priority: executionPriority,
     execution_priority_reason: "",
     evidence_ids: asStringArray(record.evidence_ids, 6, 160),
@@ -351,6 +390,20 @@ export function parseHolderResearchTriageOutputV1(
           priority,
           needs_external_search: needsExternalSearch,
           reason: asTrimmedString(base.item.reason, "No reason supplied.", 220),
+          reason_codes: (Array.isArray(base.item.reason_codes)
+            ? base.item.reason_codes
+            : []
+          )
+            .flatMap((reason) => {
+              const parsed =
+                holderResearchTriageReasonCodeV2Schema.safeParse(reason);
+              return parsed.success ? [parsed.data] : [];
+            })
+            .slice(0, 6),
+          research_question:
+            typeof base.item.research_question === "string"
+              ? asTrimmedString(base.item.research_question, "", 220) || null
+              : null,
         };
       })
       .filter((entry): entry is NonNullable<typeof entry> => entry !== null),
@@ -398,6 +451,10 @@ export function parseHolderResearchTriageOutputV2(
         reason_codes: Array.from(new Set(reasonCodes)).slice(0, 6),
         research_need: researchNeed.data,
         reason: asTrimmedString(base.item.reason, "No reason supplied.", 220),
+        research_question:
+          typeof base.item.research_question === "string"
+            ? asTrimmedString(base.item.research_question, "", 220) || null
+            : null,
       };
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
@@ -465,6 +522,7 @@ export function parseHolderResearchFinalOutputV2(
     verdict: record.verdict,
     evidence_assessment: record.evidence_assessment,
     reason_codes: asStringArray(record.reason_codes, 8, 80),
+    horizonEvidence: record.horizonEvidence ?? null,
     rationale: asTrimmedString(
       record.rationale,
       "The supplied evidence did not support publication.",
@@ -496,7 +554,7 @@ export function buildHolderResearchTriageSystemPrompt(): string {
     "Return exactly one JSON object matching holder_research_triage_v1.",
     "Your job is to choose which deterministic holder candidates deserve deeper research, not to write the final signal.",
     "Prefer candidates where a sharp holder or sharp cluster has a clear side, movement context suggests the holder was early or still useful, and the signal adds something beyond public news or raw odds.",
-    "Use candidate.triageGate as the pre-triage actionability baseline. Usually investigate only when canLikelyPublish=true; supportOnly facts are context for nearby directional candidates, not standalone reasons to spend final synthesis.",
+    "Use candidate.triageGate as the actionability baseline. Investigate strong directional candidates when a concrete unanswered question could change the final decision; do not demand a publication-ready answer before external research has run. supportOnly facts are context, not standalone reasons to spend final synthesis.",
     "A Jev-selected horizon review is only an extra research option, not permission to publish. Investigate it only if strong holder evidence and a specific current reason could justify reviewing the distant close; other blockers still apply.",
     "Nearer resolution can raise priority only after the holder evidence is actionable. Do not chase noisy near-close sports markets just because they expire soon.",
     "Use candidate.quality. Prefer exceptional_single or cluster actor strength. Downgrade weak_single, contradicted credentials, price_against_signal, already_priced, and cases where public news fully explains the positioning.",
@@ -504,7 +562,7 @@ export function buildHolderResearchTriageSystemPrompt(): string {
     "For single_game_sports, be stricter: investigate only sharp clusters or exceptional single holders. Weak one-wallet bets against the favorite, public-favorite confirmation, and conflicting same-event reads should be watch or skip.",
     "Use candidate.move to judge whether price moved with or ahead of the holder read. Use candidate.holderEntry to judge whether the holder is early, chasing, or still holding through a move.",
     "When candidate.holderEntry.sameType is present, treat it as same-type history for this market type. Prefer it when it reinforces overall credentials; downgrade when same-type evidence is absent or weaker.",
-    "Use investigate for candidates worth final synthesis. Use watch for interesting but not publishable candidates. Use skip for weak/noisy candidates.",
+    "Use investigate for candidates worth final synthesis, including a strong candidate with a checkable unknown. Missing or stale price is operational, not evidence the holder is weak. Use watch for interesting but not publishable candidates. Use skip for weak/noisy candidates.",
     "Do not invent candidate keys. Return one decision per supplied candidate.",
   ].join("\n");
 }
@@ -526,6 +584,10 @@ export function buildHolderResearchTriageUserPrompt(input: {
           needs_external_search:
             "true when outside/news context is likely needed before final synthesis",
           reason: "one short internal reason",
+          reason_codes:
+            "0-6 reason codes from strong_actor | early_position | aligned_flow | opposed_flow | already_priced | weak_credentials | insufficient_evidence | research_needed",
+          research_question:
+            "one concrete question external research should answer, or null",
         },
       ],
     },
@@ -534,14 +596,14 @@ export function buildHolderResearchTriageUserPrompt(input: {
       "Prefer clear single-side sharp holders or sharp clusters with credible credentials.",
       "Use candidate.quality as the deterministic quality baseline, including flowProfile, repeatProfile, and riskTags.",
       "Prefer candidates where odds moved in the holder direction but not so much that the signal is already obvious.",
-      "Use candidate.triageGate first: canLikelyPublish=false means watch/skip unless there is a very clear reason not captured by deterministic facts.",
+      "Use candidate.triageGate first; a strong candidate with a checkable unknown may still merit investigation, but no model can override deterministic publication gates.",
       "jevHorizonReviewSelected means one distant-horizon candidate was nominated for further review, never that its publication gate is cleared.",
       "Treat support-only buckets as supporting context, not independent investigation targets.",
       "Give a modest priority bump to actionable candidates resolving soon, but never let expiry rescue weak single-game sports singles.",
       "Downgrade mixed/opposed flow, risky repeats, concentration-only reads, stale positions, public-news-only moves, and single-game sports singles with weak or contradicted credentials.",
       "For single-game sports, investigate only sharp clusters or exceptional single holders unless the candidate is clearly unusual.",
       "Use watch when useful for memory/cooldown but not worth final synthesis now.",
-      `Return at most ${input.maxInvestigate} investigate decisions unless more are clearly exceptional.`,
+      `Choose at most ${input.maxInvestigate} investigate decisions; the runner owns the final-call cap.`,
     ],
     recent_calibration: input.calibrationMemo ?? [],
     candidates: input.candidates,
@@ -559,6 +621,7 @@ export function buildHolderResearchTriageSystemPromptV2(): string {
     "Use selectedSide and oppositeSide symmetrically. Edge is supporting evidence only with Z, samples, stake, and exposure.",
     "For opposed flow, already-priced movement, repeats, and weak credentials, prefer watch or skip unless a strong cluster remains clearly informative.",
     "Choose research_need only for the single unanswered question most likely to change the decision.",
+    "A strong candidate with a checkable unknown may merit investigation before search. Missing price is operational, not a holder-quality judgment.",
     "Do not include wallet identifiers, visible publication copy, probabilities of success, or model priority scores.",
   ].join("\n");
 }
@@ -580,6 +643,7 @@ export function buildHolderResearchTriageUserPromptV2(input: {
           research_need:
             "none | news_timing | market_context | resolution_context",
           reason: "one short internal reason",
+          research_question: "one concrete external research question, or null",
         },
       ],
     },
@@ -588,7 +652,7 @@ export function buildHolderResearchTriageUserPromptV2(input: {
       "Only jevHorizonReviewSelected may be investigated with the distant-horizon blocker pending; no other deterministic blocker can be overridden.",
       "Raw win rate is intentionally absent; use calibrated edge together with Z and sample size.",
       "Opposing sharp evidence is a conflict, not proof that either side is correct.",
-      `Mark no more than ${input.maxInvestigate} candidates investigate unless the caller supplied fewer candidates.`,
+      `Mark no more than ${input.maxInvestigate} candidates investigate; the runner owns the final-call cap.`,
     ],
     candidates: input.candidates,
   });
@@ -598,7 +662,7 @@ export function buildHolderResearchSystemPrompt(): string {
   return [
     "You write Hunch holder-research signals like a strong trader sharing a reason to look now in a private trading group.",
     "Return exactly one JSON object matching holder_research_v1.",
-    "Use supplied internal evidence for holder claims. Optional candidate.backgroundContext is an aggregate private relevance hint, not an outside fact or proof of a holder trade or outcome. Public outside facts require validated externalResearch citations. Do not invent markets, wallets, prices, balances, news, or evidence IDs.",
+    "Use supplied internal evidence for holder claims. Optional candidate.backgroundContext contains short private excerpts that may be indirect or imperfect, not proof of a holder trade or independent confirmation. Public outside facts require validated externalResearch citations. Prior Hunch notes repeating a news story are not a second source. Do not invent markets, wallets, prices, balances, news, or evidence IDs.",
     "Write for a prediction-market trader scanning a Telegram-style signal feed. They understand YES/NO prices, but they should understand the setup in 2 seconds.",
     "The primary editorial goal is truthful attention: make the reader stop, understand the tension, and want to inspect the market. Do not confuse attention with hype, certainty, or urgency that the evidence does not support.",
     "Choose exactly one story before writing: a profitable wallet against the market, several profitable wallets agreeing, persistence after a loss or price move, early holders changing behavior, unusual position size, or price and wallet flow diverging. Story first; numbers prove that story.",
@@ -619,7 +683,7 @@ export function buildHolderResearchSystemPrompt(): string {
     "Write credentials in normal language: say 'won recent trades' or 'beat market prices', not 'winRate', 'resolved edge', 'z-score', 'n=', or 'sample count'.",
     "Use 'is holding' or 'backs' by default. Only say 'entered' when supplied evidence explicitly proves a recent open or increase.",
     "Edge is supporting evidence only when sample count, stake, trades, and open exposure are strong. Never publish an edge-only claim.",
-    "When delegated web/X research is provided, use it as background. Do not summarize all search results. Say only the simple contrast: outside information supports the holder side, supports the opposite side, mostly shows the move was already public, does not explain it yet, or evidence is mixed.",
+    "When delegated web/X research was completed, use validated cited findings as background. Do not summarize all search results. Distinguish support for the holder side, the opposite side, already-public explanation, or mixed evidence. A failed or skipped search is not evidence that news does not explain the position.",
     "PUBLISH means the holder data adds a timely, feed-worthy reason to look now and has a concrete holder or cluster credential. It does not need to be unexplained by public news.",
     "Do not publish mixed, split, conflicted, concentration-only, or risk-only reads. Use CONTEXT for those unless there is a clear holder-backed side.",
     "Do not choose PUBLISH with direction=mixed. PUBLISH requires direction=up or direction=down and a plain-English side implication.",
@@ -633,7 +697,8 @@ export function buildHolderResearchSystemPrompt(): string {
     "Do not say public news explains the holder move unless the public information was available before or around the holder activity. Later headlines may validate an early holder signal.",
     "Choose CONTEXT when the candidate is interesting but not feed-worthy: holder data mostly repeats public news, the read is too balanced, the signal is too concentrated, the read is mixed, or the useful takeaway is weak.",
     "Choose SKIP when the evidence is weak, stale, untradeable, tiny, already obvious from odds alone, or mostly noise.",
-    "If outside information is missing, say 'news does not explain this yet' rather than making an insider accusation. You may say it could be private information or noise only as a caveat.",
+    "If outside research was unavailable or not requested, do not infer that no public explanation exists. Judge sufficiently strong holder evidence on its own, without inventing outside facts or implying insider information.",
+    "For a distant-horizon external-fact exception only, populate horizonEvidence with the exact cited source URL and independently assess whether that fact matches this contract and supports the selected side. Otherwise set it to null. A tracker page update is not a fresh event.",
     "Whale concentration is not an automatic rejection if it creates a useful risk signal; make the concentration clear as a caveat.",
     "Do not give trading advice. Describe what the holder signal suggests and why it may matter.",
     "Never use filler such as 'Holder activity is the primary evidence for this signal', 'worth noticing', 'worth a look', 'Cluster now', or 'Wallet edge'. If verified context cannot add a concrete sentence, keep the public summary minimal rather than inventing one.",
@@ -645,7 +710,7 @@ export function buildHolderResearchSystemPrompt(): string {
     "- For actor.mode=sharp_cluster, the headline may start with 'Strong wallets' or 'Smart wallets' when credentials are strong and it also says the trade/read: betting against a favorite, backing an underdog, still holding, taking the other side, or buying before the market moves.",
     "- For actor.mode=single_holder, use the supplied display name when it is clear; otherwise say 'a trader' or 'this trader'. Do not call a single person 'a wallet' in public prose.",
     "- Avoid generic headline nouns like 'backers', 'holders', or 'wallets' unless the headline also states the market tension. Avoid overusing 'serious buyer(s)'.",
-    "- summary: 2 short narrative sentences, normally 30-65 words. Sentence 1 states the setup or conflict. Sentence 2 explains why this combination matters now. The renderer may place them in separate paragraphs.",
+    "- summary: 2 short narrative sentences, normally 25-45 words and always at most 320 characters. Sentence 1 states the setup or conflict. Sentence 2 explains why this combination matters now. The renderer may place them in separate paragraphs.",
     "- Make each summary feel specific to the setup. Do not reuse the same sentence shape across signals.",
     "- Use simple trader language: smart wallets, strong wallets, trader conviction, not the obvious side, sees, believes, backs, holds, still holding, betting against, backing, prices risk, trades near Xc, market gives this about X%, has not backed off, minority bet. Never use fade/fades/faded/fading in public copy.",
     "- Avoid in headline/summary: informed, capable, holder read, directional confirmation, fresh catalyst, public context, incremental, may explain part, adds support, pro-deal, pro-favorite.",
@@ -685,10 +750,13 @@ export function buildHolderResearchUserPrompt(input: {
       direction: "up | down | mixed",
       headline:
         "normally <=12 words; may be longer for an essential performance figure or complete market proposition",
-      summary: "two short narrative sentences; normally 30-65 words",
+      summary:
+        "two short narrative sentences; normally 25-45 words, at most 320 characters",
       rationale: "one short sentence explaining the decision quality",
       public_context_risk:
         "confirms_holder | fully_explains_move | conflicts_holder | unknown",
+      horizonEvidence:
+        "null, or {sourceUrl, matchesExactContract, supportsSelectedSide, factSupported} for a verified distant-horizon external fact",
       evidence_ids: "subset of allowedEvidenceIds",
       caveats: "0-2 short important limitations",
     },
@@ -716,7 +784,7 @@ export function buildHolderResearchUserPrompt(input: {
       "For actor.mode=single_holder, use identityDisplayName when helpful; otherwise say 'a trader' or 'this trader'. Do not call a single person 'a wallet' in public prose.",
       "Use normal-user language for credentials; avoid analytics field names and jargon.",
       "Use candidate.quality.flowProfile, repeatProfile, and riskTags when deciding status. Treat unsupported_crypto_single and negative_single_minority as non-publishable.",
-      "Use delegated search only to answer whether outside information supports the holder side, supports the opposite side, mostly shows the move was already public, does not explain it, or is mixed.",
+      "Use delegated search only when actually completed. Error, skipped, or not requested is unknown context, not proof that news does not explain the position.",
       "Do not demote only because public information partly explains the move; ask whether wallets are still on a side the market is not fully pricing.",
       "Compare holder activity/snapshot timing against dated public headlines; early holder positioning can be a publishable signal even if later news supports it.",
       "Use same-market-type metrics only as supporting evidence. Do not overstate a wallet's skill when marketTypeMetrics30d is missing or weak.",
@@ -737,9 +805,10 @@ export function buildHolderResearchSystemPromptV2(): string {
     "You are the final evidence-assessment and copy stage for Hunch holder research.",
     "Return exactly one JSON object matching holder_research_v2.",
     "The backend owns side, direction, bucket, price, credentials, and publication safety. Do not restate or change those fields.",
-    "Use decisionFeatures, selected holder evidence, supplied internal evidence, and structured externalResearch. Optional candidate.backgroundContext is an aggregate private relevance hint, not a public outside fact, independent confirmation, or a publication override. Public outside facts require validated externalResearch citations.",
+    "Use decisionFeatures, selected holder evidence, supplied internal evidence, and structured externalResearch. Optional candidate.backgroundContext contains private short excerpts, possibly indirect or imperfect, not proof of a trade or independent confirmation. Prior Hunch notes repeating news are not another source. Public outside facts require validated externalResearch citations.",
     "Choose publish only when the holder evidence is strong or adequate, directional, timely, and not contradicted.",
     "jevHorizonReviewSelected is a research nomination, not a publication override. A distant-horizon candidate needs a verified fresh exact-side holder action or a relevant dated outside fact; otherwise choose context or skip.",
+    "For a distant-horizon external-fact exception only, populate horizonEvidence with the exact cited URL and independently assess contract, side and fact support. Otherwise set it to null. Page/tracker updates do not establish event dates.",
     "Mixed, contradicted, or insufficient evidence cannot be publish.",
     "External verdict supports_opposite_side cannot be publish. already_public needs a distinct holder-timing or persistence reason.",
     "Do not claim the holder acted before news unless externalResearch.timing is after_holder.",
@@ -772,6 +841,8 @@ export function buildHolderResearchUserPromptV2(input: {
       reason_codes: "short machine-readable reasons",
       rationale: "one short internal sentence",
       evidence_ids: "subset of allowedEvidenceIds",
+      horizonEvidence:
+        "null, or {sourceUrl, matchesExactContract, supportsSelectedSide, factSupported} for a verified distant-horizon external fact",
       copy: {
         headline:
           "normally <=12 words; a complete truthful thesis without wallet identifiers",

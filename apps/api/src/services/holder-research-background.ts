@@ -10,7 +10,10 @@ import {
 import { createRedisClient } from "@hunch/infra";
 import type { PoolClient } from "pg";
 import { RESP_TYPES } from "redis";
-import type { HolderResearchCandidate } from "./holder-research.js";
+import {
+  buildHolderResearchMarketSideCopy,
+  type HolderResearchCandidate,
+} from "./holder-research.js";
 
 const JEV_MODEL = "typesafe/jev-1.13-20260917";
 export const HOLDER_BACKGROUND_RESERVE_USD = 0.01;
@@ -172,6 +175,13 @@ export function selectHolderBackgroundFromVote(
   return {
     role: "optional_context_not_holder_evidence",
     items: selected
+      .sort((left, right) => {
+        const leftRank = probabilities?.[`d${items.indexOf(left)}`] ?? 0;
+        const rightRank = probabilities?.[`d${items.indexOf(right)}`] ?? 0;
+        return (
+          rightRank - leftRank || items.indexOf(left) - items.indexOf(right)
+        );
+      })
       .slice(0, 4)
       .map(({ id: _id, score: _score, exact: _exact, ...item }) => item),
   };
@@ -243,9 +253,21 @@ async function voteOnBackground(input: {
         body: JSON.stringify({
           model: "typesafe/jev-1.13",
           state: {
+            currentDate: new Date().toISOString(),
             contract: input.candidate.market.eventTitle,
             outcome: input.candidate.market.marketTitle,
             side: input.candidate.side,
+            selectedSide: input.candidate.side
+              ? buildHolderResearchMarketSideCopy(
+                  input.candidate.market,
+                  input.candidate.side,
+                ).plainPosition
+              : null,
+            contractDescription: (
+              input.candidate.market.marketDescription ??
+              input.candidate.market.eventDescription ??
+              ""
+            ).slice(0, 500),
             documents: Object.fromEntries(
               input.items.map((item, index) => [
                 `d${index}`,

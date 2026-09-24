@@ -66,6 +66,59 @@ await test("unchanged one-second ticks only queue one bulk latest touch", async 
   resetUnifiedBookTopWriteStateForTests(pool);
 });
 
+await test("explicit refresh flushes only requested unchanged latest tops", async () => {
+  const writes: Array<{ sql: string; payload: unknown }> = [];
+  const pool = {
+    query: async (sql: string, values?: unknown[]) => {
+      writes.push({ sql, payload: values?.[0] });
+      return { rows: [] };
+    },
+  } as unknown as Pool;
+  resetUnifiedBookTopWriteStateForTests(pool);
+  const startedAt = Date.parse("2026-07-17T12:00:00.000Z");
+  for (const tokenId of ["polymarket:a", "polymarket:b"]) {
+    await writeUnifiedBookTop(pool, tokenId, 0.4, 0.5, new Date(startedAt), {
+      touchLatestWhenUnchanged: true,
+    });
+    await writeUnifiedBookTop(
+      pool,
+      tokenId,
+      0.4,
+      0.5,
+      new Date(startedAt + 1_000),
+      {
+        touchLatestWhenUnchanged: true,
+      },
+    );
+  }
+  assert.equal(
+    await flushUnifiedBookTopLatestTouches(pool, ["polymarket:a"]),
+    1,
+  );
+  const explicit = writes.at(-1);
+  assert.match(explicit?.sql ?? "", /insert into unified_token_top_latest/);
+  assert.equal(
+    JSON.parse(String(explicit?.payload))[0].token_id,
+    "polymarket:a",
+  );
+  assert.equal(
+    await flushUnifiedBookTopLatestTouches(pool, ["polymarket:a"]),
+    0,
+  );
+  assert.equal(await flushUnifiedBookTopLatestTouches(pool), 1);
+  assert.equal(
+    JSON.parse(String(writes.at(-1)?.payload))[0].token_id,
+    "polymarket:b",
+  );
+  assert.equal(
+    writes.filter((entry) =>
+      entry.sql.includes("insert into unified_book_top("),
+    ).length,
+    2,
+  );
+  resetUnifiedBookTopWriteStateForTests(pool);
+});
+
 await test("authoritative empty top clears latest and records no history loop", async () => {
   const queries: string[] = [];
   const pool = {

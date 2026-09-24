@@ -235,6 +235,7 @@ export type HolderResearchPolicy = {
   externalSearchMinScore: number;
   externalSearchWindowHours: number;
   externalSearchMaxOutputTokens: number;
+  externalSearchMaxTurns: number;
   estimatedExternalSearchCostUsd: number;
   triageEnabled: boolean;
   jevPreTriageEnabled: boolean;
@@ -1111,6 +1112,7 @@ const holderResearchSchema = z
     externalSearchMinScore: ratio,
     externalSearchWindowHours: positiveInt.max(24 * 365),
     externalSearchMaxOutputTokens: positiveInt.max(8_000),
+    externalSearchMaxTurns: positiveInt.max(16),
     estimatedExternalSearchCostUsd: nonNegativeNumber.max(10_000),
     triageEnabled: strictBoolean,
     jevPreTriageEnabled: strictBoolean,
@@ -1921,7 +1923,8 @@ function getDefaults(): IntelPolicyMap {
       forceExternalSearchForInvestigations: true,
       externalSearchMinScore: 0.7,
       externalSearchWindowHours: 72,
-      externalSearchMaxOutputTokens: 700,
+      externalSearchMaxOutputTokens: 1_600,
+      externalSearchMaxTurns: 4,
       estimatedExternalSearchCostUsd: 0.03,
       triageEnabled: true,
       jevPreTriageEnabled: true,
@@ -2951,6 +2954,11 @@ function normalizeHolderResearchPolicy(
       Math.trunc(policy.externalSearchMaxOutputTokens),
       100,
       8_000,
+    ),
+    externalSearchMaxTurns: clamp(
+      Math.trunc(policy.externalSearchMaxTurns),
+      1,
+      16,
     ),
     estimatedExternalSearchCostUsd: clamp(
       policy.estimatedExternalSearchCostUsd,

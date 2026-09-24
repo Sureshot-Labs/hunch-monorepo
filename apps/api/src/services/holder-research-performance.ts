@@ -640,6 +640,18 @@ function readSignalSnapshot(
   };
 }
 
+function readPublishedSignalPriceSnapshot(
+  metrics: unknown,
+  marketId: string,
+  side: HolderResearchSignalSide | null,
+): number | null {
+  if (!side) return null;
+  const snapshot = objectRecord(objectRecord(metrics).signalPriceSnapshotV1);
+  if (toNumber(snapshot.version) !== 1 || snapshot.marketId !== marketId)
+    return null;
+  return normalizePrice(objectRecord(snapshot[side]).ask);
+}
+
 function readExistingPerformance(
   metrics: unknown,
 ): HolderResearchSignalPerformance | null {
@@ -878,6 +890,20 @@ function resolveEntryPrice(input: {
           entryQuality: "missing_entry",
           distanceMinutes: null,
         };
+  }
+  const publishedPrice = readPublishedSignalPriceSnapshot(
+    input.row.metrics,
+    input.row.market_id,
+    input.side,
+  );
+  if (publishedPrice != null) {
+    return {
+      price: publishedPrice,
+      source: "signal_snapshot",
+      distanceMinutes: null,
+      quality: "exact",
+      entryQuality: "exact_snapshot",
+    };
   }
   const frozenEntryPrice = normalizePrice(input.row.frozen_entry_price);
   if (frozenEntryPrice != null) {
@@ -1364,7 +1390,12 @@ export async function auditHolderResearchSignalPerformance(
     if (options.deliveredInitialOnly) return [];
     const side = resolveSignalSide(row);
     if (!side) return [];
-    if (normalizePrice(row.frozen_entry_price) != null) return [];
+    if (
+      readPublishedSignalPriceSnapshot(row.metrics, row.market_id, side) !=
+        null ||
+      normalizePrice(row.frozen_entry_price) != null
+    )
+      return [];
     const snapshot = readSignalSnapshot(row.metrics);
     if (
       snapshot &&

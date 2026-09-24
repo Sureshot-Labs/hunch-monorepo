@@ -772,6 +772,64 @@ await test("requestFreshMarketPrices does not treat unpriced tops as fresh", asy
   assert.deepEqual(result.freshTokenIds, []);
   assert.equal(result.timedOut, true);
   assert.equal(result.marketStates.get("polymarket:test")?.fresh, false);
+  assert.equal(result.marketStates.get("polymarket:test")?.tops.YES, null);
+  assert.equal(result.marketStates.get("polymarket:test")?.tops.NO, null);
+});
+
+await test("one-sided top preserves missing ask as null, not zero", async () => {
+  const db = {
+    async query<T = Record<string, unknown>>(sql: string) {
+      if (sql.includes("from unified_market_tokens"))
+        return {
+          rows: [
+            {
+              market_id: "polymarket:one-sided",
+              outcome_side: "YES",
+              token_id: "yes-token",
+              venue: "polymarket",
+            },
+            {
+              market_id: "polymarket:one-sided",
+              outcome_side: "NO",
+              token_id: "no-token",
+              venue: "polymarket",
+            },
+          ] as T[],
+        };
+      if (sql.includes("from unified_token_top_latest"))
+        return {
+          rows: [
+            {
+              token_id: "yes-token",
+              best_bid: "0.40",
+              best_ask: null,
+              ts: "2026-01-01T00:00:01.000Z",
+            },
+            {
+              token_id: "no-token",
+              best_bid: "0.50",
+              best_ask: null,
+              ts: "2026-01-01T00:00:01.000Z",
+            },
+          ] as T[],
+        };
+      return {
+        rows: [{ id: "polymarket:one-sided", venue: "polymarket" }] as T[],
+      };
+    },
+  };
+  const result = await requestFreshMarketPrices({
+    db,
+    enqueue: false,
+    marketIds: ["polymarket:one-sided"],
+    minFreshAt: new Date("2026-01-01T00:00:00.000Z"),
+    timeoutMs: 0,
+  });
+  const state = result.marketStates.get("polymarket:one-sided");
+  assert.equal(state?.fresh, true);
+  assert.equal(state.tops.YES?.ask, null);
+  assert.equal(state.tops.YES?.bid, 0.4);
+  assert.ok(state.priceState.yes.blockers.includes("missing_side_price"));
 });
 
 await test("requestFreshMarketPrices does not treat crossed tops as fresh", async () => {

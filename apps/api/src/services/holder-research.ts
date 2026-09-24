@@ -567,7 +567,8 @@ export type HolderResearchDecisionCacheEvaluation = {
     | "decision_cache"
     | "meaningful_delta"
     | "force_recheck"
-    | "cooldown_expired";
+    | "cooldown_expired"
+    | "new_external_context";
   snapshot: HolderResearchDecisionSnapshot;
   digest: string;
   cachedDecision: HolderResearchCachedDecision | null;
@@ -2106,6 +2107,7 @@ export function assessHolderResearchHorizonException(input: {
   candidate: HolderResearchCandidate;
   policy: HolderResearchPolicy;
   externalResearch?: HolderResearchExternalResearchV2 | null;
+  finalEvidence?: HolderResearchAgentOutputV1["horizonEvidence"] | null;
   now?: Date;
 }): "holder_activity" | "dated_source" | null {
   const { candidate, policy } = input;
@@ -2143,16 +2145,32 @@ export function assessHolderResearchHorizonException(input: {
     return "holder_activity";
   }
   const research = input.externalResearch;
+  const fact = research?.freshFact;
+  const confirmed = input.finalEvidence;
   if (
     research?.status === "ok" &&
     research.verdict === "supports_holder_side" &&
-    research.citations.some((citation) =>
-      isRecentHolderResearchTimestamp(
-        citation.publishedAt,
-        policy.externalSearchWindowHours,
-        nowMs,
-      ),
-    )
+    fact?.matchesExactContract === true &&
+    fact.supportsSelectedSide === true &&
+    fact.trackerUpdateOnly === false &&
+    isRecentHolderResearchTimestamp(
+      fact.eventAt,
+      policy.externalSearchWindowHours,
+      nowMs,
+    ) &&
+    research.citations.some(
+      (citation) =>
+        citation.url === fact.sourceUrl &&
+        isRecentHolderResearchTimestamp(
+          citation.publishedAt,
+          policy.externalSearchWindowHours,
+          nowMs,
+        ),
+    ) &&
+    confirmed?.sourceUrl === fact.sourceUrl &&
+    confirmed.matchesExactContract === true &&
+    confirmed.supportsSelectedSide === true &&
+    confirmed.factSupported === true
   ) {
     return "dated_source";
   }
@@ -2666,6 +2684,7 @@ function holderResearchModelConfigSignature(
   policy: HolderResearchPolicy,
 ): string {
   return JSON.stringify([
+    "holder_decision_contract_v3",
     policy.model,
     policy.reasoningEffort ?? null,
     policy.triageModel,
@@ -5404,7 +5423,7 @@ function compactPromptMovement(movement: HolderResearchMarketMovementContext) {
   };
 }
 
-function buildHolderResearchMarketSideCopy(
+export function buildHolderResearchMarketSideCopy(
   market: HolderResearchMarketInput,
   side: HolderResearchSideKey,
 ): MarketSideCopy {
@@ -5782,6 +5801,8 @@ export function buildHolderResearchExternalSearchInputV2(
         PROMPT_TEXT_RESOLUTION_MAX,
       ),
       sideLabel: features.market.sideLabel,
+      selectedSide: candidate.side,
+      closesAt: candidate.market.closeTime,
       entryPrice: features.market.entryPrice,
     },
     timing: {
@@ -5791,10 +5812,11 @@ export function buildHolderResearchExternalSearchInputV2(
         features.timing.latestExactSideHolderActivityAt,
     },
     currentDate: now.toISOString(),
+    freshEvidenceWindowHours: policy.externalSearchWindowHours,
     researchNeed,
     instruction: candidate.jevPreTriage
-      ? "For this distant-horizon review, count a dated outside fact as supporting the holder side only when the cited fact matches this exact contract's entity, outcome condition, deadline or stage, and selected side. Generic market-wide context is insufficient. Do not infer a new holder purchase from a position snapshot or general market activity."
-      : "Determine whether dated outside information supports the holder side, supports the opposite side, was already public, does not explain the positioning, or is mixed. Do not infer holder timing when only a position snapshot is supplied.",
+      ? "First check for a concrete event within the fresh window. For this distant-horizon review, only a cited fact matching the exact contract entity, outcome condition, deadline/stage and selected side may count as freshFact. Do not confuse event time, publication time and tracker update time. Generic market context is background, not a fresh fact. Do not infer a new holder purchase from a position snapshot or general market activity."
+      : "First check for a concrete event within the fresh window; older information is background. Distinguish event, publication and page-update times. Determine whether dated information supports the selected side, opposite side, was already public or is mixed. Do not infer holder timing when only a position snapshot is supplied.",
   };
 }
 
@@ -6064,6 +6086,7 @@ export function adaptHolderResearchFinalOutputV2(input: {
     candidate,
     policy,
     externalResearch,
+    finalEvidence: input.output.horizonEvidence,
   });
   const publishable =
     publishRequested &&
@@ -6124,6 +6147,7 @@ export function adaptHolderResearchFinalOutputV2(input: {
             .join(", ")}.`
         : input.output.rationale,
     public_context_risk: publicContextRisk,
+    horizonEvidence: input.output.horizonEvidence ?? null,
     execution_priority: "normal",
     execution_priority_reason: "",
     evidence_ids:
@@ -6186,6 +6210,7 @@ export function applyHolderResearchPublishQualityGate(input: {
     candidate,
     policy: input.policy,
     externalResearch: input.externalResearch,
+    finalEvidence: output.horizonEvidence,
   });
   const deterministicBlocker = evaluateHolderResearchPublishRiskGates({
     candidate,
