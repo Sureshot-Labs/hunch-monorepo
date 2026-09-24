@@ -570,10 +570,20 @@ export function normalizeHolderResearchExternalResearchV2(
       containsHolderResearchExternalClaim(value.summary));
   if (!hasUnsupportedClaim) return value;
   return {
-    status: "no_evidence",
+    status:
+      value.status === "error" ||
+      value.status === "skipped" ||
+      value.status === "not_requested"
+        ? value.status
+        : "no_evidence",
     verdict: "unknown",
     timing: "unknown",
-    summary: "No cited external evidence was available.",
+    summary:
+      value.status === "error"
+        ? "External research was unavailable."
+        : value.status === "skipped" || value.status === "not_requested"
+          ? "External research was not performed."
+        : "No cited external evidence was available.",
     citations: [],
     comparableOdds: null,
   };

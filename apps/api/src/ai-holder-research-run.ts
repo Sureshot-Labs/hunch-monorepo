@@ -22,7 +22,10 @@ import {
   resolveAiCost,
   type ResolvedCost,
 } from "./lib/ai-cost.js";
-import { extractAiUsageMetrics } from "./lib/ai-response.js";
+import {
+  countAiToolAttempts,
+  extractAiUsageMetrics,
+} from "./lib/ai-response.js";
 import {
   getOpenRouterModelPricingPerM,
   refreshOpenRouterModelPricing,
@@ -799,6 +802,7 @@ function extractServerToolCallCount(payload: unknown): number {
     Number.isFinite(topLevelCount) ? topLevelCount : 0,
     (Number.isFinite(topLevelWeb) ? topLevelWeb : 0) +
       (Number.isFinite(topLevelX) ? topLevelX : 0),
+    countAiToolAttempts(payload),
   );
 }
 
@@ -856,7 +860,7 @@ export function buildHolderResearchExternalSearchSystemPrompt(): string {
 export function buildHolderResearchExternalSearchSystemPromptV2(): string {
   return [
     "You investigate one bounded outside-information question for a prediction-market holder candidate.",
-    "Use web_search and x_search, then return only one JSON object.",
+    "Make at least one actual web_search or x_search tool call before answering; do not answer from memory. Then return only one JSON object.",
     "The object must contain status, verdict, timing, summary, citations, comparableOdds and freshFact. comparableOdds must be null unless cited sources provide a probability range for the selected side with an asOf timestamp.",
     "Use only these exact machine values: status=ok|no_evidence; verdict=supports_holder_side|supports_opposite_side|already_public|unexplained|mixed|unknown; timing=before_holder|around_holder|after_holder|unknown. Never invent descriptive enum values such as no_fresh_catalyst. Explain nuances in summary instead.",
     "Cited older context can have status=ok while freshFact=null; lack of a new 72-hour event does not by itself mean no_evidence. If holder/public timing is unproven, use timing=unknown and do not infer already_public solely from an old article.",
@@ -864,6 +868,7 @@ export function buildHolderResearchExternalSearchSystemPromptV2(): string {
     "Use at most three citations with title, url, and publishedAt (ISO datetime or null).",
     "Search for a change within the supplied 72-hour window first. Older articles are background, not a fresh reason. A tracker page update is not an event date. Distinguish the event date, article publication date, and page update date.",
     "Only cite URLs actually returned by your search tools. A supporting fact must match the selected outcome, side, deadline, entity and stage; never use a YES fact as support for a NO position.",
+    "For price-threshold contracts, verify the exact exchange, trading pair, candle/price field, market-creation boundary and deadline from the contract rules before assigning a directional verdict or freshFact. Prices from another exchange or before market creation are background only. If the creation boundary or qualifying observation cannot be verified, use verdict=unknown and freshFact=null; do not call the threshold already met.",
     "Compare dated evidence with latestExactSideHolderActivityAt when supplied. General market activity and a position snapshot are not proof this holder acted; use after_holder only when the public evidence clearly appeared after exact-side holder activity.",
     "Do not infer wallet identity, skill, exposure, edge, PnL, or a trading recommendation.",
     HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
@@ -1064,10 +1069,11 @@ export async function runExternalResearch(params: {
     const costUsd =
       usage.providerCostUsd ?? params.policy.estimatedExternalSearchCostUsd;
     const foundSources = extractExternalResearchFoundSources(payload);
+    const toolCalls = extractServerToolCallCount(payload);
     if (!response.ok) {
       return emptyExternalResearchResult({
         status: "error",
-        toolCalls: extractServerToolCallCount(payload),
+        toolCalls,
         costUsd,
         providerCostUsd: usage.providerCostUsd,
         providerAttempted: true,
@@ -1082,12 +1088,26 @@ export async function runExternalResearch(params: {
         ...emptyExternalResearchResult({
           status: "error",
           error: completionError,
-          toolCalls: extractServerToolCallCount(payload),
+          toolCalls,
         }),
         costUsd,
         providerCostUsd: usage.providerCostUsd,
         providerAttempted: true,
       };
+    if (toolCalls === 0 && foundSources.length === 0) {
+      return {
+        ...emptyExternalResearchResult({
+          status: "error",
+          error: "search_not_verified",
+          summary:
+            "External search could not be verified; this does not establish that relevant news is absent.",
+          costUsd,
+          toolCalls,
+          providerCostUsd: usage.providerCostUsd,
+          providerAttempted: true,
+        }),
+      };
+    }
     if (params.useV2) {
       let structured: HolderResearchExternalResearchV2;
       let parseFailure: "invalid_structured_research_json" | null = null;
@@ -1114,7 +1134,7 @@ export async function runExternalResearch(params: {
             costUsd,
             providerCostUsd: usage.providerCostUsd,
             providerAttempted: true,
-            toolCalls: extractServerToolCallCount(payload),
+            toolCalls,
             error: "unstructured_research_fallback",
           };
         }
@@ -1123,6 +1143,18 @@ export async function runExternalResearch(params: {
       const citations = structured.citations.filter((citation) =>
         allowedSources.has(citation.url),
       );
+      if (structured.status === "ok" && citations.length === 0) {
+        return emptyExternalResearchResult({
+          status: "error",
+          error: "search_sources_not_verified",
+          summary:
+            "External claims had no verified provider source; outside information is unknown.",
+          costUsd,
+          toolCalls,
+          providerCostUsd: usage.providerCostUsd,
+          providerAttempted: true,
+        });
+      }
       const rawResearch = structuredInput as Record<string, unknown> | null;
       const partialCoreFallback =
         structured.status === "ok" &&
@@ -1151,7 +1183,7 @@ export async function runExternalResearch(params: {
         costUsd,
         providerCostUsd: usage.providerCostUsd,
         providerAttempted: true,
-        toolCalls: extractServerToolCallCount(payload),
+        toolCalls,
         error:
           structured.status !== "error"
             ? partialCoreFallback
@@ -1182,7 +1214,7 @@ export async function runExternalResearch(params: {
       costUsd,
       providerCostUsd: usage.providerCostUsd,
       providerAttempted: true,
-      toolCalls: extractServerToolCallCount(payload),
+      toolCalls,
       error: null,
     };
   } catch (error) {
@@ -3610,6 +3642,8 @@ export async function runHolderResearch(
           if (error === "provider_reported_research_error") return error;
           if (error === "unstructured_research_fallback") return error;
           if (error === "partial_structured_research_fallback") return error;
+          if (error === "search_not_verified") return error;
+          if (error === "search_sources_not_verified") return error;
           const httpStatus = /^HTTP (\d{3}):/.exec(error)?.[1];
           return httpStatus ? `http_${httpStatus}` : "other_search_error";
         })(),

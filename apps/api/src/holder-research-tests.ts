@@ -1273,6 +1273,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         buildHolderResearchExternalSearchSystemPromptV2(),
         /status=ok\|no_evidence.*verdict=supports_holder_side.*timing=before_holder/s,
       );
+      assert.match(
+        buildHolderResearchExternalSearchSystemPromptV2(),
+        /exact exchange, trading pair, candle\/price field, market-creation boundary and deadline/,
+      );
     },
   },
   {
@@ -7868,7 +7872,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         policy: { ...p, forceExternalSearchForInvestigations: true },
         fetchImpl: async () =>
           new Response(
-            JSON.stringify({ output_text: JSON.stringify({ status: "ok" }) }),
+            JSON.stringify({
+              output_text: JSON.stringify({ status: "ok" }),
+              usage: { num_server_side_tools_used: 1 },
+            }),
             { status: 200 },
           ),
       });
@@ -7891,6 +7898,97 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           ),
       });
       assert.equal(topLevelTools.toolCalls, 2);
+    },
+  },
+  {
+    name: "search does not mistake an unverified response for absence of news",
+    run: async () => {
+      const p = {
+        ...policy(),
+        externalSearchEnabled: true,
+        forceExternalSearchForInvestigations: true,
+        estimatedExternalSearchCostUsd: 0.03,
+      };
+      const base = {
+        candidate: sharpMinorityCandidate(p),
+        policy: p,
+        dryRun: false,
+        researchNeed: "news_timing" as const,
+        useV2: true,
+        apiKey: "test-only",
+      };
+      const noEvidence = {
+        status: "no_evidence",
+        verdict: "unknown",
+        timing: "unknown",
+        summary: "No relevant reports were found.",
+        citations: [],
+        comparableOdds: null,
+      };
+      const unverified = await runExternalResearch({
+        ...base,
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({ output_text: JSON.stringify(noEvidence) }),
+            { status: 200 },
+          ),
+      });
+      assert.equal(unverified.status, "error");
+      assert.equal(unverified.error, "search_not_verified");
+      assert.equal(unverified.verdict, "unknown");
+      assert.equal(unverified.toolCalls, 0);
+      assert.equal(unverified.costUsd, 0.03);
+      assert.equal(unverified.providerAttempted, true);
+      const normalizedFailure = normalizeHolderResearchExternalResearchV2({
+        status: unverified.status,
+        verdict: unverified.verdict,
+        timing: unverified.timing,
+        summary: unverified.summary ?? "",
+        citations: unverified.citations,
+        comparableOdds: unverified.comparableOdds,
+      });
+      assert.equal(normalizedFailure.status, "error");
+      const normalizedSkip = normalizeHolderResearchExternalResearchV2({
+        ...normalizedFailure,
+        status: "skipped",
+        summary: "No news was checked.",
+      });
+      assert.equal(normalizedSkip.status, "skipped");
+      assert.equal(normalizedSkip.summary, "External research was not performed.");
+      const searched = await runExternalResearch({
+        ...base,
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              output_text: JSON.stringify(noEvidence),
+              output: [{ type: "web_search_call" }],
+            }),
+            { status: 200 },
+          ),
+      });
+      assert.equal(searched.status, "no_evidence");
+      assert.equal(searched.error, null);
+      assert.equal(searched.toolCalls, 1);
+      const unverifiedSource = await runExternalResearch({
+        ...base,
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              output_text: JSON.stringify({
+                ...noEvidence,
+                status: "ok",
+                verdict: "supports_holder_side",
+                summary: "A report supports the selected side.",
+                citations: ["https://example.com/model-only"],
+              }),
+              output: [{ type: "web_search_call" }],
+            }),
+            { status: 200 },
+          ),
+      });
+      assert.equal(unverifiedSource.status, "error");
+      assert.equal(unverifiedSource.error, "search_sources_not_verified");
+      assert.deepEqual(unverifiedSource.citations, []);
     },
   },
   {
