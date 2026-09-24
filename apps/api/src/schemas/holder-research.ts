@@ -583,7 +583,7 @@ export function normalizeHolderResearchExternalResearchV2(
         ? "External research was unavailable."
         : value.status === "skipped" || value.status === "not_requested"
           ? "External research was not performed."
-        : "No cited external evidence was available.",
+          : "No cited external evidence was available.",
     citations: [],
     comparableOdds: null,
   };
@@ -629,17 +629,17 @@ export function buildHolderResearchTriageSystemPrompt(): string {
   return [
     "You are a holder-research triage analyst for Hunch.",
     "Return exactly one JSON object matching holder_research_triage_v1.",
-    "Your job is to choose which deterministic holder candidates deserve deeper research, not to write the final signal.",
+    "Your job is to rank which deterministic holder candidates deserve deeper research, not to decide publication.",
     "Prefer candidates where a sharp holder or sharp cluster has a clear side, movement context suggests the holder was early or still useful, and the signal adds something beyond public news or raw odds.",
     "Use candidate.triageGate as the actionability baseline. Investigate strong directional candidates when a concrete unanswered question could change the final decision; do not demand a publication-ready answer before external research has run. supportOnly facts are context, not standalone reasons to spend final synthesis.",
     "A Jev-selected horizon review is only an extra research option, not permission to publish. Investigate it only if strong holder evidence and a specific current reason could justify reviewing the distant close; other blockers still apply.",
     "Nearer resolution can raise priority only after the holder evidence is actionable. Do not chase noisy near-close sports markets just because they expire soon.",
     "Use candidate.quality. Prefer exceptional_single or cluster actor strength. Downgrade weak_single, contradicted credentials, price_against_signal, already_priced, and cases where public news fully explains the positioning.",
     "Read candidate.quality.flowProfile, repeatProfile, and riskTags. unsupported_crypto_single and negative_single_minority are hard actionability blockers; mixed/opposed flow, risky repeats, public-priced high entry, and uncertain holder-entry context are penalties, not automatic skips for strong clusters.",
-    "For single_game_sports, be stricter: investigate only sharp clusters or exceptional single holders. Weak one-wallet bets against the favorite, public-favorite confirmation, and conflicting same-event reads should be watch or skip.",
+    "For single_game_sports, be stricter: investigate only sharp clusters or exceptional single holders. Weak one-wallet bets against the favorite, public-favorite confirmation, and conflicting same-event reads should be skipped unless there is a concrete question worth testing.",
     "Use candidate.move to judge whether price moved with or ahead of the holder read. Use candidate.holderEntry to judge whether the holder is early, chasing, or still holding through a move.",
     "When candidate.holderEntry.sameType is present, treat it as same-type history for this market type. Prefer it when it reinforces overall credentials; downgrade when same-type evidence is absent or weaker.",
-    "Use investigate for candidates worth final synthesis, including a strong candidate with a checkable unknown. Missing or stale price is operational, not evidence the holder is weak. Use watch for interesting but not publishable candidates. Use skip for weak/noisy candidates.",
+    "Use investigate when deeper research could establish or refute a useful holder thesis, including a strong candidate with a checkable unknown. Do not require a publication-ready thesis or predict whether final synthesis will publish. Missing or stale price is operational, not evidence the holder is weak. Use skip only when deeper research is unlikely to add value; do not output watch.",
     "Do not invent candidate keys. Return one decision per supplied candidate.",
   ].join("\n");
 }
@@ -650,13 +650,13 @@ export function buildHolderResearchTriageUserPrompt(input: {
   calibrationMemo?: string[];
 }): string {
   return JSON.stringify({
-    task: "Triage holder-research candidates before expensive final synthesis.",
+    task: "Rank holder-research candidates by value of deeper investigation before expensive final synthesis.",
     output_contract: {
       version: "holder_research_triage_v1",
       decisions: [
         {
           key: "one supplied candidate key",
-          action: "investigate | watch | skip",
+          action: "investigate | skip",
           priority: "0..1; higher means more worth final synthesis",
           needs_external_search:
             "true when outside/news context is likely needed before final synthesis",
@@ -679,8 +679,8 @@ export function buildHolderResearchTriageUserPrompt(input: {
       "Give a modest priority bump to actionable candidates resolving soon, but never let expiry rescue weak single-game sports singles.",
       "Downgrade mixed/opposed flow, risky repeats, concentration-only reads, stale positions, public-news-only moves, and single-game sports singles with weak or contradicted credentials.",
       "For single-game sports, investigate only sharp clusters or exceptional single holders unless the candidate is clearly unusual.",
-      "Use watch when useful for memory/cooldown but not worth final synthesis now.",
-      `Choose at most ${input.maxInvestigate} investigate decisions; the runner owns the final-call cap.`,
+      "Investigate a checkable uncertainty even if its current evidence would only justify CONTEXT. Final synthesis decides publication.",
+      `Rank all ${input.maxInvestigate} supplied candidates independently; the runner applies the final-call cap after comparing all triage batches.`,
     ],
     recent_calibration: input.calibrationMemo ?? [],
     candidates: input.candidates,
@@ -694,9 +694,9 @@ export function buildHolderResearchTriageSystemPromptV2(): string {
     "Candidates are already ordered by deterministic selection. Filter them; do not invent a second ranking.",
     "Use decisionFeatures for holder and market facts. If optional candidate.backgroundContext is present, use it only as potentially relevant outside background, never as proof of holder activity or a publication override. Missing values are unknown, never zero.",
     "Investigate a directional, publish-eligible candidate, or a Jev-selected horizon review with adequate holder credentials and a specific timely reason to look. The latter is not yet publishable.",
-    "Watch means useful context that is not ready for final synthesis. Skip means weak, stale, contradicted, or redundant evidence.",
+    "Investigate when additional research could materially test a holder thesis. Skip when deeper research is unlikely to add value. Do not output watch; final synthesis decides publication.",
     "Use selectedSide and oppositeSide symmetrically. Edge is supporting evidence only with Z, samples, stake, and exposure.",
-    "For opposed flow, already-priced movement, repeats, and weak credentials, prefer watch or skip unless a strong cluster remains clearly informative.",
+    "For opposed flow, already-priced movement, repeats, and weak credentials, ask whether specific deeper research could resolve the uncertainty. Investigate when it could; otherwise skip. Opposition is a caveat, not an automatic veto.",
     "Choose research_need only for the single unanswered question most likely to change the decision.",
     "A strong candidate with a checkable unknown may merit investigation before search. Missing price is operational, not a holder-quality judgment.",
     "Do not include wallet identifiers, visible publication copy, probabilities of success, or model priority scores.",
@@ -714,7 +714,7 @@ export function buildHolderResearchTriageUserPromptV2(input: {
       decisions: [
         {
           key: "one supplied key",
-          action: "investigate | watch | skip",
+          action: "investigate | skip",
           reason_codes:
             "subset of strong_actor | early_position | aligned_flow | opposed_flow | already_priced | weak_credentials | insufficient_evidence | research_needed",
           research_need:
@@ -729,7 +729,7 @@ export function buildHolderResearchTriageUserPromptV2(input: {
       "Only jevHorizonReviewSelected may be investigated with the distant-horizon blocker pending; no other deterministic blocker can be overridden.",
       "Raw win rate is intentionally absent; use calibrated edge together with Z and sample size.",
       "Opposing sharp evidence is a conflict, not proof that either side is correct.",
-      `Mark no more than ${input.maxInvestigate} candidates investigate; the runner owns the final-call cap.`,
+      `Assess all ${input.maxInvestigate} supplied candidates independently; the runner applies the final-call cap after triage.`,
     ],
     candidates: input.candidates,
   });
@@ -762,7 +762,7 @@ export function buildHolderResearchSystemPrompt(): string {
     "Edge is supporting evidence only when sample count, stake, trades, and open exposure are strong. Never publish an edge-only claim.",
     "When delegated web/X research was completed, use validated cited findings as background. Do not summarize all search results. Distinguish support for the holder side, the opposite side, already-public explanation, or mixed evidence. A failed or skipped search is not evidence that news does not explain the position.",
     "PUBLISH means the holder data adds a timely, feed-worthy reason to look now and has a concrete holder or cluster credential. It does not need to be unexplained by public news.",
-    "Do not publish mixed, split, conflicted, concentration-only, or risk-only reads. Use CONTEXT for those unless there is a clear holder-backed side.",
+    "Do not publish reads with no clear holder-backed side, or concentration-only and risk-only reads. Opposing strong holders are a caveat, not an automatic veto: weigh their evidence against the selected side and use CONTEXT only when the conflict leaves no useful directional takeaway at the current price.",
     "Do not choose PUBLISH with direction=mixed. PUBLISH requires direction=up or direction=down and a plain-English side implication.",
     "Do not require a clean catalyst for PUBLISH. Wallet conviction, early positioning, still holding after a move, or unusual side selection can be publishable when the wallet side is clear.",
     "High scores are selection hints, not publish instructions. Even a high-score candidate should be CONTEXT if the user-facing takeaway is mixed or mostly risk/context.",

@@ -13,7 +13,14 @@ import { pool } from "./db.js";
 import { env } from "./env.js";
 import { closeRedis } from "./redis.js";
 import { resolveHolderResearchPolicy } from "./services/runtime-policies.js";
-import { canReserveHolderResearchJev } from "./services/holder-research-jev.js";
+import {
+  releaseHolderResearchRunLock,
+  renewHolderResearchRunLock,
+} from "./services/holder-research-run-lock.js";
+import {
+  budgetedHolderResearchJevCalls,
+  HOLDER_RESEARCH_JEV_CALL_RESERVE_USD,
+} from "./services/holder-research-jev.js";
 import { HOLDER_BACKGROUND_RESERVE_USD } from "./services/holder-research-background.js";
 
 const KEY_PREFIX = "ai:holder_research:v1";
@@ -130,6 +137,7 @@ export async function runHolderResearchRunner(
     logLabel: "holder-research-runner",
   });
   let lockValue: string | null = null;
+  let heartbeatTimer: NodeJS.Timeout | null = null;
   try {
     const policyResult = await resolveHolderResearchPolicy(pool);
     const policy = withPolicyOverrides(policyResult.effective, args);
@@ -162,6 +170,7 @@ export async function runHolderResearchRunner(
     const estimate =
       modelCallsEstimate + triageEstimate + externalSearchEstimate;
     let jevBudgetAvailable = true;
+    let jevMaxCalls = policy.maxCandidatesPerRun;
     let backgroundBudgetAvailable = true;
     if (!args.ignoreBudget) {
       const now = Date.now();
@@ -205,16 +214,18 @@ export async function runHolderResearchRunner(
         console.log(JSON.stringify(payload, null, 2));
         return;
       }
-      jevBudgetAvailable = canReserveHolderResearchJev({
+      jevMaxCalls = budgetedHolderResearchJevCalls({
         spentUsd: spent,
         baseEstimateUsd: estimate,
         dayBudgetUsd: policy.dayBudgetUsd,
+        maxCalls: policy.maxCandidatesPerRun,
       });
+      jevBudgetAvailable = jevMaxCalls > 0;
       backgroundBudgetAvailable =
         spent +
           estimate +
           (policy.jevPreTriageEnabled && jevBudgetAvailable
-            ? 2 * HOLDER_BACKGROUND_RESERVE_USD
+            ? jevMaxCalls * HOLDER_RESEARCH_JEV_CALL_RESERVE_USD
             : 0) +
           Math.min(8, policy.maxCandidatesPerRun) *
             HOLDER_BACKGROUND_RESERVE_USD <=
@@ -222,8 +233,10 @@ export async function runHolderResearchRunner(
     }
 
     lockValue = `${process.pid}:${randomUUID()}`;
+    const owner = lockValue;
+    const lockTtlMs = policy.maxRuntimeSeconds * 1_000;
     const locked = await redis.set(LOCK_KEY, lockValue, {
-      PX: policy.maxRuntimeSeconds * 1_000,
+      PX: lockTtlMs,
       NX: true,
     });
     if (locked !== "OK") {
@@ -239,6 +252,36 @@ export async function runHolderResearchRunner(
       return;
     }
 
+    let lockLost = false;
+    let heartbeatRenewal: Promise<void> | null = null;
+    heartbeatTimer = setInterval(
+      () => {
+        if (heartbeatRenewal || lockLost) return;
+        heartbeatRenewal = renewHolderResearchRunLock({
+          redis,
+          key: LOCK_KEY,
+          owner,
+          ttlMs: lockTtlMs,
+        })
+          .then((renewed) => {
+            if (renewed) return;
+            lockLost = true;
+            if (heartbeatTimer) clearInterval(heartbeatTimer);
+            console.error("[holder-research-runner] lock ownership lost");
+          })
+          .catch((error) => {
+            console.warn("[holder-research-runner] lock renewal failed", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          })
+          .finally(() => {
+            heartbeatRenewal = null;
+          });
+      },
+      Math.max(250, Math.min(30_000, Math.floor(lockTtlMs / 3))),
+    );
+    heartbeatTimer.unref();
+
     let jevChargedCostUsd = 0;
     let externalSearchChargedCostUsd = 0;
     try {
@@ -247,7 +290,21 @@ export async function runHolderResearchRunner(
         priceRefreshRedis: redis,
         backgroundRedis: redis,
         jevBudgetAvailable,
+        jevMaxCalls,
         backgroundBudgetAvailable,
+        assertCanPersist: async () => {
+          if (lockLost) throw new Error("holder_research_lock_lost");
+          const renewed = await renewHolderResearchRunLock({
+            redis,
+            key: LOCK_KEY,
+            owner,
+            ttlMs: lockTtlMs,
+          });
+          if (!renewed) {
+            lockLost = true;
+            throw new Error("holder_research_lock_lost");
+          }
+        },
         onJevCost: (costUsd) => {
           jevChargedCostUsd = costUsd;
         },
@@ -305,9 +362,17 @@ export async function runHolderResearchRunner(
       );
       throw error;
     } finally {
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+      await heartbeatRenewal;
       if (lockValue) {
-        const current = await redis.get(LOCK_KEY);
-        if (current === lockValue) await redis.del(LOCK_KEY);
+        await releaseHolderResearchRunLock({
+          redis,
+          key: LOCK_KEY,
+          owner: lockValue,
+        });
       }
     }
   } finally {

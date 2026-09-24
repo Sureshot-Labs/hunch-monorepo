@@ -92,7 +92,6 @@ import {
 import {
   availableHolderResearchJevSlots,
   chooseHolderResearchJevCandidates,
-  fitHolderResearchJevLiveCheckCapacity,
   HOLDER_RESEARCH_JEV_MODEL,
   selectHolderResearchJevShortlist,
   type HolderResearchJevVote,
@@ -187,9 +186,11 @@ export type HolderResearchRunOptions = {
   priceRefreshRedis?: PriceRefreshRedis | null;
   backgroundRedis?: ReturnType<typeof createRedisClient> | null;
   jevBudgetAvailable?: boolean;
+  jevMaxCalls?: number;
   backgroundBudgetAvailable?: boolean;
   onJevCost?: (costUsd: number) => void;
   onExternalSearchCost?: (costUsd: number) => void;
+  assertCanPersist?: () => Promise<void>;
 };
 
 const CLI_REDIS_CONNECT_TIMEOUT_MS = 5_000;
@@ -1578,13 +1579,16 @@ export function selectHolderResearchTriageInvestigations(
   }>,
   input: { limit: number; useV2: boolean },
 ) {
-  const ordered = input.useV2
-    ? eligible
-    : [...eligible].sort(
-        (left, right) =>
-          (right.decision.legacyPriority ?? 0) -
-          (left.decision.legacyPriority ?? 0),
-      );
+  const ordered = [...eligible].sort((left, right) => {
+    const actionRank = (decision: HolderResearchTriageDecision) =>
+      decision.action === "investigate" ? 0 : 1;
+    const rank = actionRank(left.decision) - actionRank(right.decision);
+    if (rank !== 0) return rank;
+    return input.useV2
+      ? 0
+      : (right.decision.legacyPriority ?? 0) -
+          (left.decision.legacyPriority ?? 0);
+  });
   return ordered.slice(0, Math.max(0, input.limit));
 }
 
@@ -2069,7 +2073,7 @@ function buildSelectionPolicy(
   const lookaheadLimit = Math.min(
     policy.maxCandidatePool,
     Math.max(policy.maxCandidatesPerRun, triageLookahead) +
-      policy.maxAgentCallsPerRun * 2,
+      policy.maxCandidatesPerRun,
   );
   return {
     ...policy,
@@ -2345,11 +2349,11 @@ export async function runHolderResearch(
     } else if (!env.openRouterKey) {
       jevPreTriage.skippedReason = "provider_key_missing";
     } else if (jevSlots === 0) {
-      jevPreTriage.skippedReason = "first_batch_full";
+      jevPreTriage.skippedReason = "triage_input_full";
     } else {
       let shortlist = selectHolderResearchJevShortlist({
         candidates,
-        baseline: selection.selected,
+        baseline: baselineCandidates,
         policy,
         now: observedAt,
       });
@@ -2390,6 +2394,8 @@ export async function runHolderResearch(
           jevPreTriage.considered = withActivity.length;
           const decision = await chooseHolderResearchJevCandidates({
             candidates: withActivity,
+            maxSelections: jevSlots,
+            maxCalls: options.jevMaxCalls,
             policy,
             apiKey: env.openRouterKey,
           });
@@ -2409,16 +2415,6 @@ export async function runHolderResearch(
                 selectedAt: observedAt.toISOString(),
               },
             }));
-          const liveCapacity = fitHolderResearchJevLiveCheckCapacity({
-            baseline: selection.selected,
-            extras: extraCandidates,
-            maxChecks: policy.maxLiveChecksPerRun,
-          });
-          extraCandidates = liveCapacity.selected;
-          jevPreTriage.liveCapacityDropped = liveCapacity.dropped;
-          if (selectedKeys.size > 0 && extraCandidates.length === 0) {
-            jevPreTriage.skippedReason = "live_check_capacity";
-          }
           jevPreTriage.added = extraCandidates.length;
         } catch (error) {
           jevPreTriage.skippedReason = "pretriage_error";
@@ -2433,25 +2429,9 @@ export async function runHolderResearch(
       extraCandidates,
       policy.maxCandidatesPerRun,
     );
-    const selectedWithLive = await enrichHolderResearchLivePositions(
-      client,
-      selectedForEnrichment,
-      policy,
-    );
-    toolCalls.push({
-      name: "live_position_check",
-      count: Math.min(
-        policy.maxLiveChecksPerRun,
-        selectedForEnrichment.reduce(
-          (sum, candidate) => sum + candidate.market.holders.length,
-          0,
-        ),
-      ),
-      status: policy.maxLiveChecksPerRun > 0 ? "ok" : "skipped",
-    });
     const selectedWithContext = await enrichHolderResearchHolderContext(
       client,
-      selectedWithLive,
+      selectedForEnrichment,
       policy,
     );
     const selectedWithTypeMetrics = await enrichHolderResearchMarketTypeMetrics(
@@ -2871,7 +2851,10 @@ export async function runHolderResearch(
       ].join(" "),
     });
 
-    const finalCandidates: HolderResearchCandidate[] = [];
+    const rankedCandidates: Array<{
+      candidate: HolderResearchCandidate;
+      decision: HolderResearchTriageDecision;
+    }> = [];
     const triageCanRun =
       policy.triageEnabled &&
       args.callModel &&
@@ -2880,8 +2863,7 @@ export async function runHolderResearch(
       triage.status = "ok";
       for (
         let batchIndex = 0;
-        batchIndex < policy.triageMaxBatchesPerRun &&
-        finalCandidates.length < policy.maxAgentCallsPerRun;
+        batchIndex < policy.triageMaxBatchesPerRun;
         batchIndex += 1
       ) {
         const offset = batchIndex * policy.triageBatchSize;
@@ -2896,7 +2878,7 @@ export async function runHolderResearch(
           result = await callHolderResearchTriageModel({
             candidates: batch,
             policy,
-            maxInvestigate: policy.maxAgentCallsPerRun - finalCandidates.length,
+            maxInvestigate: batch.length,
             calibrationMemo,
             useV2: useV2Triage,
             backgroundByKey,
@@ -2913,10 +2895,7 @@ export async function runHolderResearch(
           triage.status = "error";
           triage.errors += 1;
           const fallbackCandidates =
-            selectHolderResearchTriageFallbackCandidates(
-              batch,
-              policy.maxAgentCallsPerRun - finalCandidates.length,
-            );
+            selectHolderResearchTriageFallbackCandidates(batch, batch.length);
           for (const candidate of fallbackCandidates) {
             const triageDecision: HolderResearchTriageDecision = {
               key: candidate.key,
@@ -2935,7 +2914,7 @@ export async function runHolderResearch(
               researchNeed: triageDecision.research_need,
               reason: triageDecision.reason,
             });
-            finalCandidates.push(candidate);
+            rankedCandidates.push({ candidate, decision: triageDecision });
             triage.investigate += 1;
             triage.fallback += 1;
           }
@@ -2989,47 +2968,35 @@ export async function runHolderResearch(
             researchNeed: triageDecision.research_need,
             reason: triageDecision.reason,
           });
-          if (
-            triageDecision.action === "investigate" &&
-            (useV2Triage ||
-              (triageDecision.legacyPriority ?? 0) >=
-                policy.minTriageInvestigatePriority)
-          ) {
+          if (triageDecision.action === "investigate") {
             eligibleInvestigations.push({
               candidate,
               decision: triageDecision,
             });
+            triage.investigate += 1;
             continue;
           }
           if (triageDecision.action === "skip") {
             triage.skip += 1;
+            await maybeWriteDecisionCache({
+              redis: options.decisionCacheRedis,
+              policy,
+              callModel: args.callModel,
+              candidate,
+              output: triageCacheOutput(triageDecision),
+              decisionCache,
+            });
           } else {
             triage.watch += 1;
+            // Legacy WATCH is a lower-ranked research option, not a six-hour
+            // editorial veto. New prompts ask for investigate or skip only.
+            eligibleInvestigations.push({
+              candidate,
+              decision: triageDecision,
+            });
           }
-          await maybeWriteDecisionCache({
-            redis: options.decisionCacheRedis,
-            policy,
-            callModel: args.callModel,
-            candidate,
-            output: triageCacheOutput(triageDecision),
-            decisionCache,
-          });
         }
-        const remainingBudget = Math.max(
-          0,
-          policy.maxAgentCallsPerRun - finalCandidates.length,
-        );
-        const selectedInvestigations = selectHolderResearchTriageInvestigations(
-          eligibleInvestigations,
-          {
-            limit: remainingBudget,
-            useV2: useV2Triage,
-          },
-        );
-        for (const { candidate } of selectedInvestigations) {
-          finalCandidates.push(candidate);
-          triage.investigate += 1;
-        }
+        rankedCandidates.push(...eligibleInvestigations);
         const missingCount = batch.length - decisionsByKey.size;
         if (missingCount > 0) {
           triage.status = "error";
@@ -3037,10 +3004,7 @@ export async function runHolderResearch(
           const fallbackCandidates = selectMissingHolderResearchTriageFallback({
             batch,
             decisions: result.decisions,
-            remaining: Math.max(
-              0,
-              policy.maxAgentCallsPerRun - finalCandidates.length,
-            ),
+            remaining: missingCount,
           });
           for (const candidate of fallbackCandidates) {
             const fallbackDecision: HolderResearchTriageDecision = {
@@ -3060,7 +3024,7 @@ export async function runHolderResearch(
               researchNeed: fallbackDecision.research_need,
               reason: fallbackDecision.reason,
             });
-            finalCandidates.push(candidate);
+            rankedCandidates.push({ candidate, decision: fallbackDecision });
             triage.investigate += 1;
             triage.fallback += 1;
           }
@@ -3074,18 +3038,32 @@ export async function runHolderResearch(
         }
       }
     } else {
-      finalCandidates.push(
-        ...triageInputCandidates.slice(0, policy.maxAgentCallsPerRun),
+      rankedCandidates.push(
+        ...triageInputCandidates.map((candidate) => ({
+          candidate,
+          decision: {
+            key: candidate.key,
+            action: "investigate" as const,
+            reason_codes: ["research_needed" as const],
+            research_need: "market_context" as const,
+            reason: "Triage disabled.",
+            legacyPriority: 1,
+          },
+        })),
       );
     }
 
+    const finalCandidates = selectHolderResearchTriageInvestigations(
+      rankedCandidates,
+      { limit: rankedCandidates.length, useV2: useV2Triage },
+    ).map(({ candidate }) => candidate);
+
     let publishCount = 0;
     let finalModelCalls = 0;
-    let consecutiveSkips = 0;
+    let remainingLiveChecks = policy.maxLiveChecksPerRun;
     for (const selectedCandidate of finalCandidates) {
       if (finalModelCalls >= policy.maxAgentCallsPerRun) break;
       if (publishCount >= policy.maxPublishPerRun) break;
-      if (consecutiveSkips >= policy.maxConsecutiveSkips) break;
 
       const finalPriceCheck = args.callModel
         ? await applyFreshPriceChecksToCandidates({
@@ -3105,7 +3083,7 @@ export async function runHolderResearch(
         status: finalPriceCheck.status,
         detail: finalPriceCheck.detail,
       });
-      const candidate = finalPriceCheck.candidates[0] ?? selectedCandidate;
+      let candidate = finalPriceCheck.candidates[0] ?? selectedCandidate;
       const finalPriceIssue = policy.livePriceCheckEnabled
         ? classifyHolderResearchPriceIssue(candidate, finalPriceCheck.status)
         : null;
@@ -3116,6 +3094,35 @@ export async function runHolderResearch(
           detail: finalPriceCheck.detail,
         });
         continue;
+      }
+
+      if (
+        args.callModel &&
+        remainingLiveChecks > 0 &&
+        candidate.market.holders.length <= remainingLiveChecks
+      ) {
+        // The candidate SQL retains at most eight holders per market. Check
+        // finalists only, after triage and fresh price, so a Jev nominee is
+        // never discarded because unrelated lookahead used the check budget.
+        const checked = await enrichHolderResearchLivePositions(
+          client,
+          [candidate],
+          policy,
+        );
+        candidate = checked[0] ?? candidate;
+        remainingLiveChecks -= candidate.market.holders.length;
+        toolCalls.push({
+          name: "live_position_final_check",
+          count: candidate.market.holders.length,
+          status: "ok",
+        });
+      } else if (args.callModel) {
+        toolCalls.push({
+          name: "live_position_final_check",
+          count: 0,
+          status: "skipped",
+          detail: "live_check_budget_exhausted; existing snapshot retained",
+        });
       }
 
       const triageDecision = triageByKey.get(candidate.key);
@@ -3226,11 +3233,6 @@ export async function runHolderResearch(
       });
       if (decision.output.status === "PUBLISH") {
         publishCount += 1;
-        consecutiveSkips = 0;
-      } else if (decision.output.status === "SKIP") {
-        consecutiveSkips += 1;
-      } else {
-        consecutiveSkips = 0;
       }
     }
     toolCalls.push({
@@ -3352,6 +3354,7 @@ export async function runHolderResearch(
     const shouldPersist =
       !policy.dryRun && policy.persistNotes && args.callModel;
     if (shouldPersist) {
+      await options.assertCanPersist?.();
       persistence = await persistHolderResearchNotes(client, {
         runnerRunId: runId,
         policy,

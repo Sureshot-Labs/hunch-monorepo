@@ -2684,7 +2684,7 @@ function holderResearchModelConfigSignature(
   policy: HolderResearchPolicy,
 ): string {
   return JSON.stringify([
-    "holder_decision_contract_v3",
+    "holder_decision_contract_v4",
     policy.model,
     policy.reasoningEffort ?? null,
     policy.triageModel,

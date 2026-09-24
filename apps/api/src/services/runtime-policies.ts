@@ -250,6 +250,7 @@ export type HolderResearchPolicy = {
   holderEntryContextEnabled: boolean;
   promptHoldersLimit: number;
   promptFormat: "compact_json";
+  /** Deprecated compatibility field: Luna priority now ranks, never vetoes. */
   minTriageInvestigatePriority: number;
   qualityGateEnabled: boolean;
   resolvedEvaluationEnabled: boolean;
@@ -309,6 +310,7 @@ export type HolderResearchPolicy = {
   maxLiveChecksPerRun: number;
   maxHolderContextHoldersPerCandidate: number;
   maxHolderContextPositionsPerHolder: number;
+  /** Deprecated compatibility field: the final-model call budget is the cap. */
   maxConsecutiveSkips: number;
   maxRuntimeSeconds: number;
   maxRunsPerDay: number;
@@ -1973,7 +1975,7 @@ function getDefaults(): IntelPolicyMap {
       livePriceCheckMaxCandidatesPerRun: 16,
       livePriceCheckTimeoutMs: 30_000,
       livePriceCheckPollMs: 1_000,
-      livePriceMaxBuyPrice: 0.95,
+      livePriceMaxBuyPrice: 0.97,
       livePriceTerminalPp: 0.01,
       singleGameSportsStrictMode: true,
       singleGameSportsMinHolderUsd: 25_000,
@@ -1999,7 +2001,7 @@ function getDefaults(): IntelPolicyMap {
       maxAgentCallsPerRun: 6,
       maxPublishPerRun: 3,
       maxCandidatePool: 80,
-      maxCandidatesPerRun: 6,
+      maxCandidatesPerRun: 8,
       maxLiveChecksPerRun: 24,
       maxHolderContextHoldersPerCandidate: 3,
       maxHolderContextPositionsPerHolder: 4,

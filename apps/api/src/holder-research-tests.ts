@@ -93,12 +93,15 @@ import {
 } from "./services/holder-research.js";
 import {
   availableHolderResearchJevSlots,
-  canReserveHolderResearchJev,
+  budgetedHolderResearchJevCalls,
   chooseHolderResearchJevCandidates,
-  fitHolderResearchJevLiveCheckCapacity,
   HOLDER_RESEARCH_JEV_MODEL,
   selectHolderResearchJevShortlist,
 } from "./services/holder-research-jev.js";
+import {
+  releaseHolderResearchRunLock,
+  renewHolderResearchRunLock,
+} from "./services/holder-research-run-lock.js";
 import {
   loadHolderResearchBackground,
   parseHolderBackgroundJevProbabilities,
@@ -955,6 +958,33 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           (entry) => entry.livePositionConfirmedAt === snapshotAt.toISOString(),
         ),
       );
+      let checkedCount = 0;
+      const countingDb = {
+        query: async (_sql: string, params?: readonly unknown[]) => {
+          const keys = JSON.parse(String(params?.[0] ?? "[]")) as unknown;
+          checkedCount = Array.isArray(keys) ? keys.length : 0;
+          return { rows: [] };
+        },
+      } as unknown as import("pg").PoolClient;
+      const restricted = { ...p, maxLiveChecksPerRun: 1 };
+      await enrichHolderResearchLivePositions(
+        countingDb,
+        [candidate],
+        restricted,
+      );
+      assert.equal(checkedCount, 1);
+      await assert.rejects(
+        enrichHolderResearchLivePositions(
+          {
+            query: async () => {
+              throw new Error("live_position_db_failed");
+            },
+          } as unknown as import("pg").PoolClient,
+          [candidate],
+          p,
+        ),
+        /live_position_db_failed/,
+      );
     },
   },
   {
@@ -1461,6 +1491,23 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           useV2: false,
         }).map((entry) => entry.candidate.key),
         [second.key, third.key],
+      );
+      const originalDecision = eligible[0]?.decision;
+      if (!originalDecision) throw new Error("missing triage fixture");
+      const legacyWatch = {
+        candidate: first,
+        decision: {
+          ...originalDecision,
+          action: "watch" as const,
+          legacyPriority: 1,
+        },
+      };
+      assert.deepEqual(
+        selectHolderResearchTriageInvestigations(
+          [legacyWatch, ...eligible.slice(1)],
+          { limit: 3, useV2: false },
+        ).map((entry) => entry.candidate.key),
+        [second.key, third.key, first.key],
       );
     },
   },
@@ -2938,6 +2985,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         maxAgentCallsPerRun: 1,
         maxCandidatesPerRun: 1,
         quotaRecentFlow: 10,
+        livePriceMaxBuyPrice: 0.95,
       });
       const recentFlow = buildHolderResearchCandidatesFromMarket(
         market({
@@ -2980,6 +3028,14 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         true,
       );
       assert.equal(highPriceActionability.isPrimaryResearchCandidate, false);
+      assert.equal(policy().livePriceMaxBuyPrice, 0.97);
+      assert.equal(
+        buildHolderResearchCandidateActionability(
+          highPrice,
+          policy(),
+        ).likelyFinalGateBlockers.includes("action_price_too_high"),
+        false,
+      );
 
       const liveBlocked = buildHolderResearchCandidatesFromMarket(
         market({
@@ -3701,6 +3757,33 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         });
         assert.equal(published.action, "skip");
       }
+      const currentSignature = cachedSkip.modelConfigSignature;
+      assert.ok(currentSignature);
+      const oldContract = {
+        ...cachedSkip,
+        modelConfigSignature: currentSignature.replace(
+          "holder_decision_contract_v4",
+          "holder_decision_contract_v3",
+        ),
+      };
+      assert.equal(
+        evaluateHolderResearchDecisionCache({
+          candidate,
+          cachedDecision: oldContract,
+          policy: p,
+          now: new Date("2026-01-01T01:00:00.000Z"),
+        }).reason,
+        "force_recheck",
+      );
+      assert.equal(
+        evaluateHolderResearchDecisionCache({
+          candidate,
+          cachedDecision: { ...oldContract, status: "PUBLISH" },
+          policy: p,
+          now: new Date("2026-01-01T01:00:00.000Z"),
+        }).action,
+        "skip",
+      );
       const legacyCache = { ...cachedSkip, model: "openai/gpt-5.5" };
       delete legacyCache.modelConfigSignature;
       assert.equal(
@@ -6829,6 +6912,62 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
+    name: "holder runner lock renews and releases only its own token",
+    run: async () => {
+      let currentOwner: string | null = "run-a";
+      let renewedTtlMs = 0;
+      const redis = {
+        eval: async (
+          script: string,
+          options: { keys: string[]; arguments: string[] },
+        ) => {
+          assert.deepEqual(options.keys, ["holder-test-lock"]);
+          assert.match(script, /redis\.call\('GET', KEYS\[1\]\)/);
+          if (options.arguments[0] !== currentOwner) return 0;
+          if (script.includes("PEXPIRE")) {
+            renewedTtlMs = Number(options.arguments[1]);
+            return 1;
+          }
+          assert.match(script, /redis\.call\('DEL', KEYS\[1\]\)/);
+          currentOwner = null;
+          return 1;
+        },
+      };
+      assert.equal(
+        await renewHolderResearchRunLock({
+          redis,
+          key: "holder-test-lock",
+          owner: "run-a",
+          ttlMs: 300_000,
+        }),
+        true,
+      );
+      assert.equal(renewedTtlMs, 300_000);
+      currentOwner = "run-b";
+      assert.equal(
+        await renewHolderResearchRunLock({
+          redis,
+          key: "holder-test-lock",
+          owner: "run-a",
+          ttlMs: 300_000,
+        }),
+        false,
+      );
+      await releaseHolderResearchRunLock({
+        redis,
+        key: "holder-test-lock",
+        owner: "run-a",
+      });
+      assert.equal(currentOwner, "run-b");
+      await releaseHolderResearchRunLock({
+        redis,
+        key: "holder-test-lock",
+        owner: "run-b",
+      });
+      assert.equal(currentOwner, null);
+    },
+  },
+  {
     name: "Jev only considers horizon-only uncached candidates and does not leak wallets",
     run: async () => {
       const p = policy({
@@ -6854,20 +6993,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         shortlist.map((item) => item.key),
         [candidate.key],
       );
-      const liveCapacity = fitHolderResearchJevLiveCheckCapacity({
-        baseline: [candidate],
-        extras: [
-          { ...candidate, key: "extra-1" },
-          { ...candidate, key: "extra-2" },
-        ],
-        maxChecks: candidate.market.holders.length * 2,
-      });
-      assert.deepEqual(
-        liveCapacity.selected.map((item) => item.key),
-        ["extra-1"],
+      assert.equal(
+        availableHolderResearchJevSlots(3, p),
+        p.maxCandidatesPerRun - 3,
       );
-      assert.equal(liveCapacity.dropped, 1);
-      assert.equal(availableHolderResearchJevSlots(3, p), 2);
       const productionLike = {
         ...p,
         triageBatchSize: 8,
@@ -6880,7 +7009,15 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       );
       assert.equal(effective.maxCandidatesPerRun, 6);
       assert.equal(effective.maxAgentCallsPerRun, 2);
-      assert.equal(availableHolderResearchJevSlots(3, effective), 2);
+      assert.equal(availableHolderResearchJevSlots(3, effective), 3);
+      assert.equal(
+        availableHolderResearchJevSlots(3, {
+          ...effective,
+          triageBatchSize: 2,
+          triageMaxBatchesPerRun: 3,
+        }),
+        3,
+      );
       assert.equal(availableHolderResearchJevSlots(5, productionLike), 1);
       assert.equal(availableHolderResearchJevSlots(6, productionLike), 0);
       const explicitLimit = withPolicyOverrides(
@@ -6982,21 +7119,138 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(result.votes[0]?.chargedCostUsd, 0.0003);
       assert.equal(calls.length, 1);
       assert.doesNotMatch(calls[0] ?? "", /walletId|publish_horizon_too_long/);
+      let groupCalls = 0;
+      const laterGroup = await chooseHolderResearchJevCandidates({
+        candidates: Array.from({ length: 12 }, (_, index) => ({
+          ...candidate,
+          key: `jev-${index}`,
+        })),
+        maxSelections: 2,
+        maxCalls: 3,
+        policy: p,
+        apiKey: "test-key",
+        fetchImpl: (async (_url, init) => {
+          groupCalls += 1;
+          const body = JSON.parse(String(init?.body)) as {
+            state: Record<string, unknown>;
+          };
+          const labels = Object.keys(body.state);
+          const choice = groupCalls === 3 ? "A" : "none";
+          return new Response(
+            JSON.stringify({
+              model: HOLDER_RESEARCH_JEV_MODEL,
+              usage: { cost: 0.0003 },
+              answers: {
+                preselect: {
+                  type: "choice",
+                  choice,
+                  confidence: 0.8,
+                  probabilities:
+                    choice === "A"
+                      ? { A: 0.65, B: 0.05, C: 0.05, D: 0.05, none: 0.2 }
+                      : Object.fromEntries([
+                          ...labels.map((label) => [label, 0.1]),
+                          ["none", 0.6],
+                        ]),
+                },
+              },
+            }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+      });
+      assert.equal(groupCalls, 3);
+      assert.deepEqual(laterGroup.selectedKeys, ["jev-8"]);
+      let activeCalls = 0;
+      let peakCalls = 0;
+      const pairedGroups = await chooseHolderResearchJevCandidates({
+        candidates: Array.from({ length: 16 }, (_, index) => ({
+          ...candidate,
+          key: `paired-${index}`,
+        })),
+        maxSelections: 2,
+        maxCalls: 4,
+        policy: p,
+        apiKey: "test-key",
+        fetchImpl: (async () => {
+          activeCalls += 1;
+          peakCalls = Math.max(peakCalls, activeCalls);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          activeCalls -= 1;
+          return new Response(
+            JSON.stringify({
+              model: HOLDER_RESEARCH_JEV_MODEL,
+              answers: {
+                preselect: {
+                  type: "choice",
+                  choice: "none",
+                  confidence: 0.8,
+                  probabilities: {
+                    A: 0.1,
+                    B: 0.1,
+                    C: 0.1,
+                    D: 0.1,
+                    none: 0.6,
+                  },
+                },
+              },
+            }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+      });
+      assert.equal(pairedGroups.votes.length, 4);
+      assert.equal(peakCalls, 2);
+      const oneSlot = await chooseHolderResearchJevCandidates({
+        candidates: Array.from({ length: 8 }, (_, index) => ({
+          ...candidate,
+          key: `one-slot-${index}`,
+        })),
+        maxSelections: 1,
+        maxCalls: 2,
+        policy: p,
+        apiKey: "test-key",
+        fetchImpl: (async () =>
+          new Response(
+            JSON.stringify({
+              model: HOLDER_RESEARCH_JEV_MODEL,
+              answers: {
+                preselect: {
+                  type: "choice",
+                  choice: "A",
+                  confidence: 0.8,
+                  probabilities: {
+                    A: 0.65,
+                    B: 0.05,
+                    C: 0.05,
+                    D: 0.05,
+                    none: 0.2,
+                  },
+                },
+              },
+            }),
+            { status: 200 },
+          )) as typeof fetch,
+      });
+      assert.equal(oneSlot.votes.length, 2);
+      assert.deepEqual(oneSlot.selectedKeys, ["one-slot-0"]);
       assert.equal(
-        canReserveHolderResearchJev({
+        budgetedHolderResearchJevCalls({
           spentUsd: 4.7,
           baseEstimateUsd: 0.28,
           dayBudgetUsd: 5,
+          maxCalls: 6,
         }),
-        true,
+        2,
       );
       assert.equal(
-        canReserveHolderResearchJev({
+        budgetedHolderResearchJevCalls({
           spentUsd: 4.71,
           baseEstimateUsd: 0.28,
           dayBudgetUsd: 5,
+          maxCalls: 6,
         }),
-        false,
+        1,
       );
       const failed = await chooseHolderResearchJevCandidates({
         candidates: shortlist,
@@ -7954,7 +8208,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         summary: "No news was checked.",
       });
       assert.equal(normalizedSkip.status, "skipped");
-      assert.equal(normalizedSkip.summary, "External research was not performed.");
+      assert.equal(
+        normalizedSkip.summary,
+        "External research was not performed.",
+      );
       const searched = await runExternalResearch({
         ...base,
         fetchImpl: async () =>
