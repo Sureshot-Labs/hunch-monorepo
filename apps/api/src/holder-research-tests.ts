@@ -1320,6 +1320,75 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
+    name: "external research keeps validated citations when optional fields are malformed",
+    run: () => {
+      const parsed = parseHolderResearchExternalResearchV2({
+        status: "ok",
+        verdict: "supports_holder_side",
+        timing: "unknown",
+        summary: "A dated report provides relevant context.",
+        citations: [
+          {
+            title: "Relevant report",
+            url: "https://example.com/report",
+            publishedAt: "2026-09-24", // Provider omitted the time.
+            extra: "ignored",
+          },
+          { title: "Bad source", url: "not-a-url", publishedAt: null },
+        ],
+        freshFact: {
+          fact: "A concrete event was reported during the review window.",
+          sourceUrl: "https://example.com/report",
+          eventAt: "2026-09-24", // Not enough to prove the 72h exception.
+          matchesExactContract: true,
+          supportsSelectedSide: true,
+          trackerUpdateOnly: false,
+        },
+        comparableOdds: { side: "NO", probabilityMin: "0.4" },
+        extra: "ignored",
+      });
+      assert.equal(parsed.status, "ok");
+      assert.deepEqual(parsed.citations, [
+        {
+          title: "Relevant report",
+          url: "https://example.com/report",
+          publishedAt: null,
+        },
+      ]);
+      assert.equal(parsed.freshFact, null);
+      assert.equal(parsed.comparableOdds, null);
+      const urlOnly = parseHolderResearchExternalResearchV2({
+        status: "ok",
+        verdict: "unknown",
+        timing: "unknown",
+        summary: "A source was found without reliable timing.",
+        citations: ["https://example.com/source"],
+      });
+      assert.equal(urlOnly.citations[0]?.url, "https://example.com/source");
+      const missingLabels = parseHolderResearchExternalResearchV2({
+        summary:
+          "The cited report supplies context, but its direction is unclear.",
+        citations: ["https://example.com/source"],
+        freshFact: {
+          fact: "A concrete event was reported in the current review window.",
+          sourceUrl: "https://example.com/source",
+          eventAt: "2026-09-24T08:00:00.000Z",
+          matchesExactContract: true,
+          supportsSelectedSide: true,
+          trackerUpdateOnly: false,
+        },
+      });
+      assert.equal(missingLabels.status, "ok");
+      assert.equal(missingLabels.verdict, "unknown");
+      assert.equal(missingLabels.timing, "unknown");
+      assert.equal(missingLabels.freshFact, null);
+      assert.equal(
+        parseHolderResearchExternalResearchV2({ status: "ok" }).status,
+        "error",
+      );
+    },
+  },
+  {
     name: "V2 triage filters deterministic order instead of model ranking",
     run: () => {
       const p = policy();
@@ -7414,6 +7483,12 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         },
       });
       assert.deepEqual(parsedV2.horizonEvidence, finalEvidence);
+      assert.throws(() =>
+        parseHolderResearchFinalOutputV2({
+          ...parsedV2,
+          horizonEvidence: { ...finalEvidence, sourceUrl: "not-a-url" },
+        }),
+      );
       assert.equal(
         assessHolderResearchHorizonException({
           candidate: reviewed,
@@ -7558,7 +7633,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                   {
                     title: "Returned",
                     url: "https://example.com/real",
-                    publishedAt: "2026-09-24T00:00:00.000Z",
+                    publishedAt: "2026-09-24",
                   },
                   {
                     title: "Forged",
@@ -7593,6 +7668,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         result.citations.map((citation) => citation.url),
         ["https://example.com/real"],
       );
+      assert.equal(result.citations[0]?.publishedAt, null);
       assert.equal(result.freshFact, null);
     },
   },
@@ -7721,6 +7797,20 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       });
       assert.equal(malformed.status, "error");
       assert.equal(malformed.toolCalls, 1);
+      assert.equal(malformed.error, "invalid_structured_research_json");
+      const incompleteContract = await runExternalResearch({
+        ...base,
+        policy: { ...p, forceExternalSearchForInvestigations: true },
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({ output_text: JSON.stringify({ status: "ok" }) }),
+            { status: 200 },
+          ),
+      });
+      assert.equal(
+        incompleteContract.error,
+        "invalid_structured_research_contract",
+      );
       const topLevelTools = await runExternalResearch({
         ...base,
         policy: { ...p, forceExternalSearchForInvestigations: true },
@@ -7736,6 +7826,143 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           ),
       });
       assert.equal(topLevelTools.toolCalls, 2);
+    },
+  },
+  {
+    name: "search adapter parses the assistant answer without mixing tool-page text",
+    run: async () => {
+      const p = {
+        ...policy(),
+        externalSearchEnabled: true,
+        forceExternalSearchForInvestigations: true,
+      };
+      const result = await runExternalResearch({
+        candidate: sharpMinorityCandidate(p),
+        policy: p,
+        dryRun: false,
+        researchNeed: "news_timing",
+        useV2: true,
+        apiKey: "test-only",
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              output: [
+                {
+                  type: "web_search_call",
+                  content: [{ type: "text", text: "Page {not model JSON}" }],
+                  action: { sources: [{ url: "https://example.com/report" }] },
+                },
+                {
+                  type: "message",
+                  role: "assistant",
+                  content: [
+                    {
+                      type: "output_text",
+                      text: JSON.stringify({
+                        status: "ok",
+                        verdict: "unknown",
+                        timing: "unknown",
+                        summary:
+                          "A relevant report was found without a reliable event date.",
+                        citations: ["https://example.com/report"],
+                      }),
+                    },
+                  ],
+                },
+              ],
+            }),
+            { status: 200 },
+          ),
+      });
+      assert.equal(result.status, "ok");
+      assert.equal(result.error, null);
+      assert.equal(result.citations[0]?.url, "https://example.com/report");
+    },
+  },
+  {
+    name: "search adapter preserves cited prose when structured JSON is missing",
+    run: async () => {
+      const p = {
+        ...policy(),
+        externalSearchEnabled: true,
+        forceExternalSearchForInvestigations: true,
+      };
+      const result = await runExternalResearch({
+        candidate: sharpMinorityCandidate(p),
+        policy: p,
+        dryRun: false,
+        researchNeed: "news_timing",
+        useV2: true,
+        apiKey: "test-only",
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              output_text:
+                "A dated report provides context [[1]](https://example.com/report). Direction remains uncertain.",
+              citations: ["https://example.com/report"],
+              usage: { num_server_side_tools_used: 1 },
+            }),
+            { status: 200 },
+          ),
+      });
+      assert.equal(result.status, "ok");
+      assert.equal(result.verdict, "unknown");
+      assert.equal(result.timing, "unknown");
+      assert.equal(result.freshFact, null);
+      assert.equal(result.citations[0]?.url, "https://example.com/report");
+      assert.equal(result.error, "unstructured_research_fallback");
+      const uncited = await runExternalResearch({
+        candidate: sharpMinorityCandidate(p),
+        policy: p,
+        dryRun: false,
+        researchNeed: "news_timing",
+        useV2: true,
+        apiKey: "test-only",
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              output_text:
+                "An uncited claim [[1]](https://example.com/invented).",
+              citations: ["https://example.com/report"],
+            }),
+            { status: 200 },
+          ),
+      });
+      assert.equal(uncited.status, "error");
+      assert.deepEqual(uncited.citations, []);
+    },
+  },
+  {
+    name: "search adapter preserves a cited summary with missing verdict fields",
+    run: async () => {
+      const p = {
+        ...policy(),
+        externalSearchEnabled: true,
+        forceExternalSearchForInvestigations: true,
+      };
+      const result = await runExternalResearch({
+        candidate: sharpMinorityCandidate(p),
+        policy: p,
+        dryRun: false,
+        researchNeed: "market_context",
+        useV2: true,
+        apiKey: "test-only",
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              output_text: JSON.stringify({
+                summary: "A relevant report supplies dated context.",
+                citations: ["https://example.com/report"],
+              }),
+              citations: ["https://example.com/report"],
+            }),
+            { status: 200 },
+          ),
+      });
+      assert.equal(result.status, "ok");
+      assert.equal(result.verdict, "unknown");
+      assert.equal(result.freshFact, null);
+      assert.equal(result.error, "partial_structured_research_fallback");
     },
   },
   {

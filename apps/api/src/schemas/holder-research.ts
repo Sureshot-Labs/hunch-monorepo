@@ -473,8 +473,75 @@ export function parseHolderResearchExternalResearchV2(
   value: unknown,
 ): HolderResearchExternalResearchV2 {
   const record = asRecord(value);
-  const parsed = holderResearchExternalResearchV2Schema.safeParse(record);
-  if (parsed.success) return parsed.data;
+  // Search providers often return a useful core answer with an invalid
+  // ancillary date or optional odds object. Do not discard verified sources
+  // because one optional field is malformed; never repair a fresh fact date.
+  const citations = (Array.isArray(record.citations) ? record.citations : [])
+    .flatMap((entry) => {
+      const source: Record<string, unknown> =
+        typeof entry === "string" ? { url: entry } : asRecord(entry);
+      const publishedAt = z.string().datetime().safeParse(source.publishedAt);
+      const citation =
+        holderResearchExternalResearchV2Schema.shape.citations.element.safeParse(
+          {
+            title:
+              typeof source.title === "string" && source.title.trim()
+                ? source.title
+                : source.url,
+            url: source.url,
+            publishedAt: publishedAt.success ? publishedAt.data : null,
+          },
+        );
+      return citation.success ? [citation.data] : [];
+    })
+    .slice(0, 3);
+  const freshFact =
+    holderResearchExternalResearchV2Schema.shape.freshFact.safeParse(
+      record.freshFact ?? null,
+    );
+  const comparableOdds =
+    holderResearchExternalResearchV2Schema.shape.comparableOdds.safeParse(
+      record.comparableOdds ?? null,
+    );
+  const status = holderResearchExternalResearchV2Schema.shape.status.safeParse(
+    record.status,
+  );
+  const verdict =
+    holderResearchExternalResearchV2Schema.shape.verdict.safeParse(
+      record.verdict,
+    );
+  const timing = holderResearchExternalResearchV2Schema.shape.timing.safeParse(
+    record.timing,
+  );
+  const hasSummary =
+    typeof record.summary === "string" && record.summary.trim().length > 0;
+  const usableAnswer = hasSummary && citations.length > 0;
+  const completeCore = status.success && verdict.success && timing.success;
+  const trustedStructuredFact = completeCore && status.data === "ok";
+  const parsed = holderResearchExternalResearchV2Schema.safeParse({
+    status: status.success ? status.data : usableAnswer ? "ok" : "error",
+    verdict: verdict.success ? verdict.data : "unknown",
+    timing: timing.success ? timing.data : "unknown",
+    summary: asTrimmedString(
+      record.summary,
+      "No external research summary was returned.",
+      320,
+    ),
+    citations,
+    freshFact:
+      trustedStructuredFact && freshFact.success ? freshFact.data : null,
+    comparableOdds:
+      trustedStructuredFact && comparableOdds.success
+        ? comparableOdds.data
+        : null,
+  });
+  if (
+    parsed.success &&
+    (usableAnswer ||
+      parsed.data.status !== "ok" ||
+      (verdict.success && timing.success && hasSummary))
+  )
+    return parsed.data;
   return {
     status: "error",
     verdict: "unknown",

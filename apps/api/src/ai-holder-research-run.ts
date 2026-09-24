@@ -463,6 +463,7 @@ type HolderResearchRunReport = {
     executionPriorityReason: string;
     externalSearchStatus: string;
     externalSearchSummary: string | null;
+    externalSearchFailureCode: string | null;
     externalSearchCitations: ExternalResearchResult["citations"];
     externalSearchFoundSources: string[];
     externalSearchToolCalls: number;
@@ -643,26 +644,36 @@ function extractResponseText(payload: unknown): string {
   if (!payload || typeof payload !== "object") return "";
   const record = payload as Record<string, unknown>;
   const direct = record.output_text ?? record.text;
-  if (typeof direct === "string") return direct;
+  if (typeof direct === "string" && direct.trim()) return direct;
   const chunks: string[] = [];
-  const visit = (value: unknown, depth: number) => {
-    if (depth > 5 || value == null) return;
-    if (typeof value === "string") {
-      if (value.trim().length > 0) chunks.push(value);
-      return;
+  // Tool-call output can contain arbitrary page text (including braces).
+  // Only the assistant's final message is the structured research answer.
+  for (const item of Array.isArray(record.output) ? record.output : []) {
+    if (!item || typeof item !== "object") continue;
+    const message = item as Record<string, unknown>;
+    if (
+      message.type !== "message" ||
+      (message.role != null && message.role !== "assistant")
+    )
+      continue;
+    for (const block of Array.isArray(message.content) ? message.content : []) {
+      if (!block || typeof block !== "object") continue;
+      const content = block as Record<string, unknown>;
+      if (
+        (content.type === "output_text" || content.type === "text") &&
+        typeof content.text === "string"
+      )
+        chunks.push(content.text);
     }
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item, depth + 1);
-      return;
-    }
-    if (typeof value !== "object") return;
-    const obj = value as Record<string, unknown>;
-    if (typeof obj.text === "string") chunks.push(obj.text);
-    if (typeof obj.content === "string") chunks.push(obj.content);
-    if (Array.isArray(obj.content)) visit(obj.content, depth + 1);
-    if (Array.isArray(obj.output)) visit(obj.output, depth + 1);
-  };
-  visit(record.output ?? record.choices ?? record, 0);
+  }
+  if (chunks.length === 0) {
+    const choices = Array.isArray(record.choices) ? record.choices : [];
+    const choice = choices[0] as
+      | { message?: { content?: unknown } }
+      | undefined;
+    if (typeof choice?.message?.content === "string")
+      chunks.push(choice.message.content);
+  }
   return chunks.join("\n").trim();
 }
 
@@ -718,15 +729,7 @@ export function extractMarkdownCitations(
   text: string,
   payload: unknown,
 ): ExternalResearchResult["citations"] {
-  const sourceUrls =
-    payload && typeof payload === "object"
-      ? (payload as Record<string, unknown>).citations
-      : null;
-  const encountered = new Set(
-    Array.isArray(sourceUrls)
-      ? sourceUrls.filter((url): url is string => typeof url === "string")
-      : [],
-  );
+  const encountered = new Set(extractExternalResearchFoundSources(payload));
   const citations: ExternalResearchResult["citations"] = [];
   const seen = new Set<string>();
   for (const match of text.matchAll(
@@ -1085,17 +1088,45 @@ export async function runExternalResearch(params: {
       };
     if (params.useV2) {
       let structured: HolderResearchExternalResearchV2;
+      let parseFailure: "invalid_structured_research_json" | null = null;
+      let structuredInput: unknown = null;
       try {
-        structured = parseHolderResearchExternalResearchV2(
-          parseModelJsonObject(text),
-        );
+        structuredInput = parseModelJsonObject(text);
+        structured = parseHolderResearchExternalResearchV2(structuredInput);
       } catch {
+        parseFailure = "invalid_structured_research_json";
         structured = parseHolderResearchExternalResearchV2(null);
+      }
+      if (parseFailure && !/[{}]/.test(text)) {
+        const citations = extractMarkdownCitations(text, payload);
+        if (citations.length > 0) {
+          return {
+            status: "ok",
+            verdict: "unknown",
+            timing: "unknown",
+            summary: compactExternalResearchSummary(text),
+            citations,
+            comparableOdds: null,
+            freshFact: null,
+            foundSources,
+            costUsd,
+            providerCostUsd: usage.providerCostUsd,
+            providerAttempted: true,
+            toolCalls: extractServerToolCallCount(payload),
+            error: "unstructured_research_fallback",
+          };
+        }
       }
       const allowedSources = new Set(foundSources);
       const citations = structured.citations.filter((citation) =>
         allowedSources.has(citation.url),
       );
+      const rawResearch = structuredInput as Record<string, unknown> | null;
+      const partialCoreFallback =
+        structured.status === "ok" &&
+        (rawResearch?.status !== structured.status ||
+          rawResearch?.verdict !== structured.verdict ||
+          rawResearch?.timing !== structured.timing);
       return {
         ...structured,
         citations,
@@ -1120,7 +1151,15 @@ export async function runExternalResearch(params: {
         providerAttempted: true,
         toolCalls: extractServerToolCallCount(payload),
         error:
-          structured.status === "error" ? "invalid_structured_research" : null,
+          structured.status !== "error"
+            ? partialCoreFallback
+              ? "partial_structured_research_fallback"
+              : null
+            : (parseFailure ??
+              ((structuredInput as { status?: unknown } | null)?.status ===
+              "error"
+                ? "provider_reported_research_error"
+                : "invalid_structured_research_contract")),
       };
     }
     const summary = compactExternalResearchSummary(text);
@@ -3556,6 +3595,18 @@ export async function runHolderResearch(
           "not_requested",
         externalSearchSummary:
           externalResearchByKey.get(decision.candidate.key)?.summary ?? null,
+        externalSearchFailureCode: (() => {
+          const error = externalResearchByKey.get(
+            decision.candidate.key,
+          )?.error;
+          if (!error) return null;
+          if (error.startsWith("invalid_structured_research_")) return error;
+          if (error === "provider_reported_research_error") return error;
+          if (error === "unstructured_research_fallback") return error;
+          if (error === "partial_structured_research_fallback") return error;
+          const httpStatus = /^HTTP (\d{3}):/.exec(error)?.[1];
+          return httpStatus ? `http_${httpStatus}` : "other_search_error";
+        })(),
         externalSearchCitations:
           externalResearchByKey.get(decision.candidate.key)?.citations ?? [],
         externalSearchFoundSources:

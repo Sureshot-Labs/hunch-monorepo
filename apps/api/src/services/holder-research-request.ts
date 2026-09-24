@@ -30,7 +30,11 @@ export function buildHolderResearchResponseFormat(input: {
     const source = value as Record<string, unknown>;
     const result = Object.fromEntries(
       Object.entries(source)
-        .filter(([key]) => key !== "$schema" && key !== "default")
+        // The provider's strict JSON-schema subset rejects Zod's URL
+        // `format: "uri"`. Keep format checks in the local Zod parser instead.
+        .filter(
+          ([key]) => key !== "$schema" && key !== "default" && key !== "format",
+        )
         .map(([key, entry]) => [key, strictSchema(entry)]),
     );
     if (source.type === "object" && source.properties) {

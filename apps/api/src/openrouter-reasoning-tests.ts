@@ -92,6 +92,9 @@ for (const name of ["sol", "luna", "terra"]) {
         schema.required,
         Object.keys(schema.properties as object),
       );
+      // Provider JSON Schema is deliberately less restrictive than local
+      // Zod validation: Azure rejects `format: "uri"` on sourceUrl.
+      assert.doesNotMatch(JSON.stringify(schema), /"format":/);
       const version = (schema.properties as Record<string, { const: string }>)
         .version;
       assert.ok(version.const.includes(useV2 ? "v2" : "v1"));
@@ -117,6 +120,10 @@ for (const name of ["sol", "luna"]) {
     });
     assert.equal(format.type, "json_schema");
     assert.equal(format.json_schema?.strict, true);
+    assert.doesNotMatch(
+      JSON.stringify(format.json_schema?.schema),
+      /"format":/,
+    );
   }
 }
 const hr = getIntelPolicySchema("holder_research");
