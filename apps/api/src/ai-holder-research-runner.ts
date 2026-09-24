@@ -6,6 +6,7 @@ import { createRedisClient, ensureRedis } from "@hunch/infra";
 
 import {
   runHolderResearch,
+  withPolicyOverrides,
   type HolderResearchRunArgs,
 } from "./ai-holder-research-run.js";
 import { pool } from "./db.js";
@@ -13,6 +14,7 @@ import { env } from "./env.js";
 import { closeRedis } from "./redis.js";
 import { resolveHolderResearchPolicy } from "./services/runtime-policies.js";
 import { canReserveHolderResearchJev } from "./services/holder-research-jev.js";
+import { HOLDER_BACKGROUND_RESERVE_USD } from "./services/holder-research-background.js";
 
 const KEY_PREFIX = "ai:holder_research:v1";
 const LOCK_KEY = `${KEY_PREFIX}:lock`;
@@ -130,7 +132,7 @@ export async function runHolderResearchRunner(
   let lockValue: string | null = null;
   try {
     const policyResult = await resolveHolderResearchPolicy(pool);
-    const policy = policyResult.effective;
+    const policy = withPolicyOverrides(policyResult.effective, args);
 
     if (!policy.enabled && !args.force) {
       const payload = {
@@ -160,6 +162,7 @@ export async function runHolderResearchRunner(
     const estimate =
       modelCallsEstimate + triageEstimate + externalSearchEstimate;
     let jevBudgetAvailable = true;
+    let backgroundBudgetAvailable = true;
     if (!args.ignoreBudget) {
       const now = Date.now();
       const history = (await readRunHistory(redis)).filter(
@@ -207,6 +210,15 @@ export async function runHolderResearchRunner(
         baseEstimateUsd: estimate,
         dayBudgetUsd: policy.dayBudgetUsd,
       });
+      backgroundBudgetAvailable =
+        spent +
+          estimate +
+          (policy.jevPreTriageEnabled && jevBudgetAvailable
+            ? 2 * HOLDER_BACKGROUND_RESERVE_USD
+            : 0) +
+          Math.min(8, policy.maxCandidatesPerRun) *
+            HOLDER_BACKGROUND_RESERVE_USD <=
+        policy.dayBudgetUsd;
     }
 
     lockValue = `${process.pid}:${randomUUID()}`;
@@ -232,7 +244,9 @@ export async function runHolderResearchRunner(
       const report = await runHolderResearch(args, {
         decisionCacheRedis: redis,
         priceRefreshRedis: redis,
+        backgroundRedis: redis,
         jevBudgetAvailable,
+        backgroundBudgetAvailable,
         onJevCost: (costUsd) => {
           jevChargedCostUsd = costUsd;
         },

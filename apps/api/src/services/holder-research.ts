@@ -4104,7 +4104,7 @@ async function loadHolderResearchCandidateMarketsFromPositionSource(
         from ranked_side_credentials
         where credential_rank = 1
       ),
-      recent_activity as (
+      recent_activity as materialized (
         select
           wa.market_id,
           sum(abs(coalesce(wa.size_usd, 0))) as recent_activity_usd,
@@ -4129,7 +4129,7 @@ async function loadHolderResearchCandidateMarketsFromPositionSource(
         join unified_markets um on um.id = op.market_id
         group by um.event_id, op.wallet_id
       ),
-      event_bridge as (
+      event_bridge as materialized (
         select
           event_id,
           count(*) filter (where market_count >= 2) as cross_market_wallet_count

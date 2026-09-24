@@ -238,6 +238,7 @@ export type HolderResearchPolicy = {
   estimatedExternalSearchCostUsd: number;
   triageEnabled: boolean;
   jevPreTriageEnabled: boolean;
+  backgroundContextEnabled: boolean;
   triageModel: string;
   triageReasoningEffort?: OpenRouterReasoningEffort | null;
   reasoningEffort?: OpenRouterReasoningEffort | null;
@@ -1113,6 +1114,7 @@ const holderResearchSchema = z
     estimatedExternalSearchCostUsd: nonNegativeNumber.max(10_000),
     triageEnabled: strictBoolean,
     jevPreTriageEnabled: strictBoolean,
+    backgroundContextEnabled: strictBoolean,
     triageModel: z.string().trim().min(1).max(200),
     triageReasoningEffort: openRouterReasoningEffortSchema.nullable(),
     reasoningEffort: openRouterReasoningEffortSchema.nullable(),
@@ -1923,6 +1925,7 @@ function getDefaults(): IntelPolicyMap {
       estimatedExternalSearchCostUsd: 0.03,
       triageEnabled: true,
       jevPreTriageEnabled: true,
+      backgroundContextEnabled: true,
       triageModel: "openai/gpt-6-luna",
       triageReasoningEffort: "low",
       reasoningEffort: "medium",
@@ -2956,6 +2959,7 @@ function normalizeHolderResearchPolicy(
     ),
     triageEnabled: Boolean(policy.triageEnabled),
     jevPreTriageEnabled: Boolean(policy.jevPreTriageEnabled),
+    backgroundContextEnabled: Boolean(policy.backgroundContextEnabled),
     triageModel: policy.triageModel.trim() || "openai/gpt-6-luna",
     triageReasoningEffort: policy.triageReasoningEffort ?? null,
     reasoningEffort: policy.reasoningEffort ?? null,

@@ -1,4 +1,9 @@
 import assert from "node:assert/strict";
+import {
+  embeddingKey,
+  embeddingVectorBuffer,
+  LEGACY_EMBEDDING_GENERATION,
+} from "@hunch/embeddings";
 import { buildMarketPriceState } from "@hunch/shared";
 import { buildHolderResearchPriceMovement } from "./services/holder-research-price-movement.js";
 
@@ -32,6 +37,8 @@ import {
   parseHolderResearchTriageModelContent,
   parseHolderResearchTriageModelContentV2,
   selectHolderResearchTriageFallbackCandidates,
+  selectMissingHolderResearchTriageFallback,
+  withHolderResearchBackground,
   selectHolderResearchTriageInvestigations,
   withPolicyOverrides,
 } from "./ai-holder-research-run.js";
@@ -85,6 +92,12 @@ import {
   HOLDER_RESEARCH_JEV_MODEL,
   selectHolderResearchJevShortlist,
 } from "./services/holder-research-jev.js";
+import {
+  loadHolderResearchBackground,
+  parseHolderBackgroundJevProbabilities,
+  rankHolderBackground,
+  selectHolderBackgroundFromVote,
+} from "./services/holder-research-background.js";
 import {
   buildHolderResearchObservationCalibrationReport,
   buildHolderResearchObservationRankingTelemetryV2,
@@ -5474,6 +5487,371 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
+    name: "partial triage preserves returned decisions and fills only missing keys",
+    run: () => {
+      const first = sharpMinorityCandidate();
+      const second = { ...first, key: `${first.key}:second` };
+      const third = { ...first, key: `${first.key}:third` };
+      const decision = {
+        key: first.key,
+        action: "watch" as const,
+        reason_codes: [] as Array<"research_needed">,
+        research_need: "none" as const,
+        reason: "Already examined by Luna.",
+      };
+      assert.deepEqual(
+        selectMissingHolderResearchTriageFallback({
+          batch: [first, second, third],
+          decisions: [decision],
+          remaining: 1,
+        }).map((item) => item.key),
+        [second.key],
+      );
+      assert.equal(
+        selectMissingHolderResearchTriageFallback({
+          batch: [first],
+          decisions: [decision],
+          remaining: 1,
+        }).length,
+        0,
+      );
+    },
+  },
+  {
+    name: "background combines semantic news and prior analysis without treating either as holder proof",
+    run: () => {
+      assert.match(
+        buildHolderResearchTriageSystemPromptV2(),
+        /backgroundContext/,
+      );
+      assert.match(buildHolderResearchSystemPromptV2(), /backgroundContext/);
+      assert.match(buildHolderResearchSystemPrompt(), /backgroundContext/);
+      const source = sharpMinorityCandidate();
+      const candidate = {
+        ...source,
+        market: {
+          ...source.market,
+          eventTitle: "Trump Iran negotiations",
+          marketTitle: "Will Trump announce an Iran agreement?",
+        },
+      };
+      const external = (title: string) => ({
+        role: "external_source_summary" as const,
+        title,
+        summary: title,
+        publishedAt: "2026-09-24T00:00:00.000Z",
+        sourceUrl: `https://example.com/${title}`,
+        relation: "semantic" as const,
+        confirmation: "confirmed" as const,
+        sourceTier: "wire" as const,
+      });
+      const prior = (title: string) => ({
+        role: "prior_hunch_analysis" as const,
+        title,
+        summary: title,
+        publishedAt: "2026-09-23T00:00:00.000Z",
+        sourceUrl: null,
+        relation: "semantic" as const,
+      });
+      const ranked = rankHolderBackground({
+        candidate,
+        marketVector: [1, 0, 0],
+        news: [
+          {
+            id: "direct",
+            item: external("Trump Iran negotiations continue"),
+            vector: [1, 0, 0],
+          },
+          {
+            id: "indirect",
+            item: external("Oil sanctions talks tighten"),
+            vector: [0.7, 0.7, 0],
+          },
+          {
+            id: "irrelevant",
+            item: external("Tennis final set"),
+            vector: [0, 1, 0],
+          },
+        ],
+        notes: [
+          {
+            id: "note:exact",
+            marketId: candidate.market.marketId,
+            direction: candidate.direction,
+            item: prior("Prior Iran holder note"),
+          },
+          {
+            id: "note:related",
+            marketId: "polymarket:related",
+            direction: "up",
+            item: prior("Related diplomacy note"),
+          },
+        ],
+      });
+      assert.equal(
+        ranked.some((item) => item.id === "irrelevant"),
+        false,
+      );
+      assert.equal(
+        ranked.some((item) => item.id === "indirect"),
+        true,
+      );
+      const duplicateHeavy = rankHolderBackground({
+        candidate,
+        marketVector: [1, 0, 0],
+        news: [
+          ...Array.from({ length: 6 }, (_, index) => ({
+            id: `duplicate-${index}`,
+            item: {
+              ...external("Trump Iran negotiations continue"),
+              sourceUrl: "https://example.org/repeated",
+            },
+            vector: [1, 0, 0],
+          })),
+          {
+            id: "distinct",
+            item: {
+              ...external("Oil sanctions talks tighten"),
+              sourceUrl: "https://example.org/distinct",
+            },
+            vector: [0.7, 0.7, 0],
+          },
+        ],
+        notes: [],
+      });
+      assert.equal(duplicateHeavy.length, 2);
+      assert.equal(
+        duplicateHeavy.some((item) => item.id === "distinct"),
+        true,
+      );
+      const selected = selectHolderBackgroundFromVote(
+        ranked,
+        Object.fromEntries(
+          ranked.map((item, index) => [
+            `d${index}`,
+            ["indirect", "note:exact"].includes(item.id) ? 0.8 : 0.2,
+          ]),
+        ),
+      );
+      assert.equal(selected.role, "optional_context_not_holder_evidence");
+      assert.equal(
+        selected.items.some(
+          (item) => item.title === "Oil sanctions talks tighten",
+        ),
+        true,
+      );
+      assert.equal(
+        selected.items.some((item) => item.title === "Prior Iran holder note"),
+        true,
+      );
+      assert.equal(
+        selected.items.some((item) => item.title === "Related diplomacy note"),
+        false,
+      );
+      assert.equal(
+        selectHolderBackgroundFromVote(ranked, null).items.some(
+          (item) => item.title === "Prior Iran holder note",
+        ),
+        true,
+      );
+      const unconfirmed = rankHolderBackground({
+        candidate,
+        marketVector: [1, 0, 0],
+        news: [
+          {
+            id: "rumor",
+            item: {
+              ...external("Trump Iran negotiations continue"),
+              confirmation: "unconfirmed",
+            },
+            vector: [1, 0, 0],
+          },
+        ],
+        notes: [],
+      });
+      assert.equal(
+        selectHolderBackgroundFromVote(unconfirmed, null).items.length,
+        0,
+      );
+      const oppositeNote = rankHolderBackground({
+        candidate,
+        marketVector: null,
+        news: [],
+        notes: [
+          {
+            id: "note:opposite",
+            marketId: candidate.market.marketId,
+            direction: candidate.direction === "up" ? "down" : "up",
+            item: prior("Opposite-side prior interpretation"),
+          },
+        ],
+      });
+      assert.equal(
+        selectHolderBackgroundFromVote(oppositeNote, null).items.length,
+        0,
+      );
+      const background = {
+        role: "optional_context_not_holder_evidence" as const,
+        items: Array.from({ length: 5 }, (_, index) => ({
+          ...external(`Context ${index}`),
+          summary: "x".repeat(400),
+        })),
+      };
+      for (const original of [
+        buildHolderResearchTriageCandidatePromptJson(candidate, policy()),
+        buildHolderResearchTriageCandidatePromptJsonV2(candidate, policy()),
+      ]) {
+        const attached = withHolderResearchBackground(
+          original,
+          background,
+          "triage",
+        );
+        const attachedContext = attached.backgroundContext as typeof background;
+        assert.equal(attachedContext.items.length, 2);
+        assert.equal(attachedContext.items[0]?.summary.length, 180);
+        assert.equal("backgroundContext" in original, false);
+      }
+      for (const original of [
+        buildHolderResearchCandidatePromptJson(candidate, policy()),
+        buildHolderResearchCandidatePromptJsonV2(
+          candidate,
+          policy(),
+          parseHolderResearchExternalResearchV2({}),
+        ),
+      ]) {
+        const attached = withHolderResearchBackground(
+          original,
+          background,
+          "final",
+        );
+        const finalContext = attached.backgroundContext as Record<
+          string,
+          unknown
+        >;
+        assert.equal(finalContext.externalSourceCount, 5);
+        assert.equal(finalContext.priorAnalysisCount, 0);
+        assert.equal("items" in finalContext, false);
+        assert.equal(JSON.stringify(attached).includes("Context 0"), false);
+        assert.equal(JSON.stringify(attached).includes("x".repeat(100)), false);
+      }
+      const researchContext = withHolderResearchBackground(
+        {},
+        background,
+        "research",
+      ).backgroundContext as typeof background;
+      assert.equal(researchContext.items.length, 4);
+      assert.equal(researchContext.items[0]?.summary.length, 250);
+      assert.deepEqual(
+        parseHolderBackgroundJevProbabilities(
+          {
+            model: "typesafe/jev-1.13-20260917",
+            answers: {
+              d0: {
+                type: "choice",
+                choice: "yes",
+                probabilities: { yes: 0.7, no: 0.3 },
+              },
+            },
+          },
+          1,
+        ),
+        { d0: 0.7 },
+      );
+      assert.equal(
+        parseHolderBackgroundJevProbabilities(
+          {
+            model: "typesafe/jev-1.13-20260917",
+            answers: {},
+          },
+          1,
+        ),
+        null,
+      );
+    },
+  },
+  {
+    name: "background loader pins one generation, reads cached vectors once and performs bounded notes lookup",
+    run: async () => {
+      const candidate = sharpMinorityCandidate();
+      const generation = LEGACY_EMBEDDING_GENERATION;
+      const vector = Array.from(
+        { length: generation.dimensions },
+        (_, index) => (index === 0 ? 1 : 0),
+      );
+      const binary = embeddingVectorBuffer(vector, generation);
+      let noteQueries = 0;
+      let pinReleased = false;
+      const redis = {
+        get: async () => null,
+        zRange: async () => ["news-1"],
+        mGet: async (keys: string[]) =>
+          keys.map((key) =>
+            key.includes(":evidence:")
+              ? JSON.stringify({
+                  headline: candidate.market.marketTitle,
+                  summary:
+                    candidate.market.eventTitle ?? candidate.market.marketTitle,
+                  sourceUrl: "https://example.org/story",
+                  publishedAt: new Date().toISOString(),
+                })
+              : JSON.stringify(vector),
+          ),
+        withTypeMapping: () => ({ hGet: async () => binary }),
+        sendCommand: async (args: string[]) => {
+          if (args[0] === "EVAL") return 1;
+          if (args[0] === "ZREM") {
+            pinReleased = true;
+            return 1;
+          }
+          if (args[0] === "FT.SEARCH")
+            return [
+              1,
+              embeddingKey(generation, "market", candidate.market.marketId),
+              ["score", "0"],
+            ];
+          throw new Error(`Unexpected Redis command ${args[0]}`);
+        },
+      } as unknown as Parameters<
+        typeof loadHolderResearchBackground
+      >[0]["redis"];
+      const client = {
+        query: async () => {
+          noteQueries += 1;
+          return {
+            rows: [
+              {
+                target_id: candidate.market.marketId,
+                id: "00000000-0000-4000-8000-000000000101",
+                title: "Previous holder interpretation",
+                description: "Prior internal analysis, not external news.",
+                direction: candidate.direction,
+                created_at: new Date(),
+              },
+            ],
+          };
+        },
+      } as unknown as Parameters<
+        typeof loadHolderResearchBackground
+      >[0]["client"];
+      const result = await loadHolderResearchBackground({
+        client,
+        redis,
+        candidates: [candidate],
+        apiKey: "",
+        maxJevCalls: 0,
+      });
+      assert.equal(noteQueries, 1);
+      assert.equal(pinReleased, true);
+      assert.equal(result.chargedUsd, 0);
+      assert.equal(
+        result.byKey
+          .get(candidate.key)
+          ?.items.some((item) => item.role === "prior_hunch_analysis"),
+        true,
+      );
+    },
+  },
+  {
     name: "holder research signal schemas accept wallet scope and batch wallet notes",
     run: () => {
       const query = signalsQuerySchema.parse({
@@ -6127,6 +6505,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.defaults.triageEnabled, true);
       assert.equal(resolved.defaults.jevPreTriageEnabled, true);
       assert.equal(resolved.effective.jevPreTriageEnabled, true);
+      assert.equal(resolved.defaults.backgroundContextEnabled, true);
+      assert.equal(resolved.effective.backgroundContextEnabled, true);
       assert.equal(
         getIntelPolicySchema("holder_research").parse({
           jevPreTriageEnabled: "false",
