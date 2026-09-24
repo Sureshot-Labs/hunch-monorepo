@@ -858,6 +858,8 @@ export function buildHolderResearchExternalSearchSystemPromptV2(): string {
     "You investigate one bounded outside-information question for a prediction-market holder candidate.",
     "Use web_search and x_search, then return only one JSON object.",
     "The object must contain status, verdict, timing, summary, citations, comparableOdds and freshFact. comparableOdds must be null unless cited sources provide a probability range for the selected side with an asOf timestamp.",
+    "Use only these exact machine values: status=ok|no_evidence; verdict=supports_holder_side|supports_opposite_side|already_public|unexplained|mixed|unknown; timing=before_holder|around_holder|after_holder|unknown. Never invent descriptive enum values such as no_fresh_catalyst. Explain nuances in summary instead.",
+    "Cited older context can have status=ok while freshFact=null; lack of a new 72-hour event does not by itself mean no_evidence. If holder/public timing is unproven, use timing=unknown and do not infer already_public solely from an old article.",
     "freshFact is null unless a specific cited event can be dated. Otherwise include fact, sourceUrl, eventAt, matchesExactContract, supportsSelectedSide and trackerUpdateOnly. Do not use a page update timestamp as eventAt.",
     "Use at most three citations with title, url, and publishedAt (ISO datetime or null).",
     "Search for a change within the supplied 72-hour window first. Older articles are background, not a fresh reason. A tracker page update is not an event date. Distinguish the event date, article publication date, and page update date.",

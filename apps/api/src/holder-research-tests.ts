@@ -1267,6 +1267,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         buildHolderResearchExternalSearchSystemPromptV2(),
         /JSON object/,
       );
+      assert.match(
+        buildHolderResearchExternalSearchSystemPromptV2(),
+        /status=ok\|no_evidence.*verdict=supports_holder_side.*timing=before_holder/s,
+      );
     },
   },
   {
