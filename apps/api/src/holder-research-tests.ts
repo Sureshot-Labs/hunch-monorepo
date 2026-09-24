@@ -35,6 +35,7 @@ import {
   extractMarkdownCitations,
   extractExternalResearchFoundSources,
   hasNewDatedHolderBackground,
+  maybeWriteDecisionCache,
   orderHolderResearchTriageLookahead,
   parseHolderResearchRunArgs,
   parseHolderResearchTriageModelContent,
@@ -83,6 +84,7 @@ import {
   isSharpHolder,
   loadHolderResearchCandidateMarkets,
   listHolderResearchPromptEvidenceIdsV2,
+  parseHolderResearchCachedDecision,
   persistHolderResearchNotes,
   selectHolderResearchCandidates,
   type HolderResearchHolder,
@@ -3582,6 +3584,65 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           "related_position_changed",
         ),
       );
+    },
+  },
+  {
+    name: "decision cache ignores model failures but keeps editorial skips",
+    run: async () => {
+      const p = policy({ decisionCacheEnabled: true, dryRun: false });
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market(),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(candidate);
+      const stored = new Map<string, string>();
+      const redis = {
+        get: async (key: string) => stored.get(key) ?? null,
+        set: async (key: string, value: string) => {
+          stored.set(key, value);
+          return "OK";
+        },
+      };
+      const decisionCache = {
+        enabled: true,
+        status: "ok" as const,
+        checked: 0,
+        skipped: 0,
+        rechecked: 0,
+        written: 0,
+        errors: 0,
+        dryRun: false,
+      };
+      await maybeWriteDecisionCache({
+        redis,
+        policy: p,
+        callModel: true,
+        candidate,
+        output: {
+          status: "SKIP",
+          rationale:
+            "Model synthesis failed; candidate skipped without publishing.",
+        },
+        modelMeta: { mode: "openrouter_error" },
+        decisionCache,
+      });
+      assert.equal(stored.size, 0);
+      assert.equal(decisionCache.written, 0);
+
+      await maybeWriteDecisionCache({
+        redis,
+        policy: p,
+        callModel: true,
+        candidate,
+        output: { status: "SKIP", rationale: "Insufficient holder evidence." },
+        modelMeta: { mode: "openrouter_v1" },
+        decisionCache,
+      });
+      assert.equal(stored.size, 1);
+      assert.equal(decisionCache.written, 1);
+      const cached = parseHolderResearchCachedDecision([...stored.values()][0]);
+      assert.equal(cached?.status, "SKIP");
+      assert.equal(cached?.rationale, "Insufficient holder evidence.");
     },
   },
   {

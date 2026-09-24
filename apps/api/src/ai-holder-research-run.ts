@@ -2167,19 +2167,22 @@ function decisionCacheReportEntry(
   };
 }
 
-async function maybeWriteDecisionCache(params: {
+export async function maybeWriteDecisionCache(params: {
   redis: HolderResearchDecisionCacheRedis | null | undefined;
   policy: HolderResearchPolicy;
   callModel: boolean;
   candidate: HolderResearchCandidate;
   output: Pick<HolderResearchAgentOutputV1, "rationale" | "status">;
+  modelMeta?: Record<string, unknown>;
   decisionCache: HolderResearchDecisionCacheStats;
 }): Promise<void> {
   if (
     !params.policy.decisionCacheEnabled ||
     !params.redis ||
     params.policy.dryRun ||
-    !params.callModel
+    !params.callModel ||
+    // A model/provider failure is not an editorial verdict; retry next run.
+    params.modelMeta?.mode === "openrouter_error"
   ) {
     return;
   }
@@ -3186,6 +3189,7 @@ export async function runHolderResearch(
         callModel: args.callModel,
         candidate,
         output: decision.output,
+        modelMeta: decision.modelMeta,
         decisionCache,
       });
       if (decision.output.status === "PUBLISH") {
