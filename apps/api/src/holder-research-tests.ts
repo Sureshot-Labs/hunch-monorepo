@@ -589,7 +589,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
-    name: "final V1 background retains prior interpretation without promoting unverified news",
+    name: "final background retains indirect leads without promoting them to verified facts",
     run: () => {
       const background: HolderBackground = {
         role: "optional_context_not_holder_evidence",
@@ -614,9 +614,136 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       };
       const context = withHolderResearchBackground({}, background, "final")
         .backgroundContext as { items: Array<{ role: string; use: string }> };
-      assert.equal(context.items.length, 1);
+      assert.equal(context.items.length, 2);
       assert.equal(context.items[0]?.role, "prior_hunch_analysis");
       assert.match(context.items[0]?.use ?? "", /not independent news/);
+      assert.equal(context.items[1]?.role, "external_source_summary");
+      assert.match(
+        context.items[1]?.use ?? "",
+        /not verified by this research/,
+      );
+      assert.match(context.items[1]?.use ?? "", /May inform hypotheses/);
+      for (const prompt of [
+        buildHolderResearchSystemPrompt(),
+        buildHolderResearchSystemPromptV2(),
+      ]) {
+        assert.match(prompt, /indirect cross-topic mechanisms/);
+        assert.match(prompt, /not established causation/);
+        assert.match(
+          prompt,
+          /validated externalResearch citations for public outside facts/,
+        );
+      }
+    },
+  },
+  {
+    name: "V1 and V2 receive cross-topic background even when search fails or cites another source",
+    run: () => {
+      const background: HolderBackground = {
+        role: "optional_context_not_holder_evidence",
+        items: [
+          {
+            role: "external_source_summary",
+            title: "Economic pressure and negotiation incentives",
+            summary:
+              "A possible economic mechanism to examine, not evidence of an agreement.",
+            sourceUrl: "https://example.com/economic-pressure",
+            publishedAt: "2026-09-24T00:00:00Z",
+            relation: "topic",
+            confirmation: "developing",
+            sourceTier: "wire",
+          },
+          {
+            role: "external_source_summary",
+            title: "Geopolitical risk and demand for liquidity",
+            summary:
+              "Possible cross-asset context, not proof that Bitcoin met a contract threshold.",
+            sourceUrl: null,
+            publishedAt: null,
+            relation: "semantic",
+            confirmation: "unconfirmed",
+          },
+        ],
+      };
+      const originalBackground = structuredClone(background);
+      const candidate = sharpMinorityCandidate();
+      for (const status of [
+        "ok",
+        "no_evidence",
+        "error",
+        "skipped",
+        "not_requested",
+      ]) {
+        const research = parseHolderResearchExternalResearchV2({
+          status,
+          verdict: "unknown",
+          timing: "unknown",
+          summary: "No conclusion about the background leads.",
+          citations: [
+            {
+              title: "An unrelated search source",
+              url: "https://example.com/other",
+              publishedAt: "2026-09-24T00:00:00Z",
+            },
+          ],
+        });
+        for (const original of [
+          {
+            ...buildHolderResearchCandidatePromptJson(candidate, policy()),
+            externalResearch: research,
+          },
+          buildHolderResearchCandidatePromptJsonV2(
+            candidate,
+            policy(),
+            research,
+          ),
+        ]) {
+          const originalJson = JSON.stringify(original);
+          const attached = withHolderResearchBackground(
+            original,
+            background,
+            "final",
+            verifiedHolderBackgroundSourceUrls(research),
+          );
+          const context = attached.backgroundContext as Omit<
+            HolderBackground,
+            "items"
+          > & {
+            items: Array<HolderBackground["items"][number] & { use: string }>;
+          };
+          assert.equal(context.items.length, 2);
+          for (const [index, item] of context.items.entries()) {
+            const { use, ...document } = item;
+            assert.deepEqual(document, background.items[index]);
+            assert.match(use, /not verified by this research/);
+            assert.match(use, /not establish public facts/);
+          }
+          assert.equal(attached.externalResearch, original.externalResearch);
+          assert.equal(JSON.stringify(original), originalJson);
+          assert.throws(
+            () =>
+              assertHolderResearchEvidenceIdsAllowed(
+                ["https://example.com/economic-pressure"],
+                candidate.evidence.map((item) => item.id),
+              ),
+            /unknown evidence ids/,
+          );
+        }
+      }
+      assert.deepEqual(background, originalBackground);
+      const original = { marker: "unchanged" };
+      assert.equal(
+        withHolderResearchBackground(original, undefined, "final"),
+        original,
+      );
+      assert.equal(
+        withHolderResearchBackground(
+          original,
+          { ...background, items: [] },
+          "final",
+        ),
+        original,
+      );
     },
   },
   {
@@ -4042,8 +4169,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const oldContract = {
         ...cachedSkip,
         modelConfigSignature: currentSignature.replace(
+          "holder_decision_contract_v6",
           "holder_decision_contract_v5",
-          "holder_decision_contract_v3",
         ),
       };
       assert.equal(
@@ -6359,11 +6486,21 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         assert.equal(finalItems.length, 4);
         assert.equal(finalItems[0]?.title, "Context 0");
         assert.equal(finalItems[0]?.summary.length, 180);
-        assert.equal(
-          "backgroundContext" in
-            withHolderResearchBackground(original, background, "final"),
-          false,
+        assert.match(
+          (finalContext.items as Array<{ use: string }>)[0]?.use ?? "",
+          /Source also returned by this research/,
         );
+        assert.equal("backgroundContext" in original, false);
+        const withoutRepeatSources = withHolderResearchBackground(
+          original,
+          background,
+          "final",
+        ).backgroundContext as { items: Array<{ title: string; use: string }> };
+        assert.deepEqual(
+          withoutRepeatSources.items.map((item) => item.title),
+          finalItems.map((item) => item.title),
+        );
+        assert.match(withoutRepeatSources.items[0]?.use ?? "", /not verified/);
       }
       const failedSearch = parseHolderResearchExternalResearchV2({
         status: "error",
