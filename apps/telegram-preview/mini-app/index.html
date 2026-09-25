@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hunch Preview</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 28px 22px;
+        background: var(--tg-theme-bg-color, #101827);
+        color: var(--tg-theme-text-color, #edf1f7);
+      }
+      main {
+        max-width: 460px;
+        margin: 0 auto;
+      }
+      .badge {
+        color: var(--tg-theme-hint-color, #aab6c9);
+        font-size: 13px;
+        letter-spacing: 0.1em;
+      }
+      h1 {
+        font-size: 32px;
+        margin: 18px 0 12px;
+      }
+      p {
+        line-height: 1.6;
+      }
+      dl {
+        background: var(--tg-theme-secondary-bg-color, #1b2638);
+        border-radius: 16px;
+        padding: 20px;
+        margin: 28px 0;
+      }
+      dt {
+        font-size: 13px;
+        color: var(--tg-theme-hint-color, #aab6c9);
+        margin-bottom: 8px;
+      }
+      dd {
+        margin: 0 0 20px;
+        overflow-wrap: anywhere;
+      }
+      dd:last-child {
+        margin-bottom: 0;
+      }
+      button {
+        width: 100%;
+        padding: 16px;
+        border: 0;
+        border-radius: 12px;
+        font: inherit;
+        cursor: pointer;
+        color: var(--tg-theme-button-text-color, #fff);
+        background: var(--tg-theme-button-color, #3d70ed);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <span class="badge">HUNCH · STATIC PREVIEW</span>
+      <h1>Mini App opened</h1>
+      <p>
+        This page previews the native Telegram button and Mini App window.
+        Balances, wallets and trades are not connected.
+      </p>
+      <dl>
+        <dt>Demo screen</dt>
+        <dd id="screen">Preview</dd>
+        <dt>Original route</dt>
+        <dd id="route">/</dd>
+      </dl>
+      <button id="close" type="button">Back to Telegram</button>
+    </main>
+    <script>
+      const params = new URLSearchParams(location.search);
+      document.getElementById("screen").textContent =
+        params.get("screen") || "Preview";
+      const original = params.get("target");
+      try {
+        const url = new URL(original);
+        document.getElementById("route").textContent =
+          url.pathname + url.search;
+      } catch {
+        /* No destination was supplied. */
+      }
+      const app = window.Telegram?.WebApp;
+      app?.ready();
+      app?.expand();
+      document.getElementById("close").addEventListener("click", () => {
+        if (app?.initData) app.close();
+        else
+          document.getElementById("close").textContent =
+            "Open this page from the preview bot";
+      });
+    </script>
+  </body>
+</html>

@@ -2924,6 +2924,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               [
                 {
                   icon_custom_emoji_id: TELEGRAM_CUSTOM_EMOJI.polymarket.id,
+                  style: "primary",
                   text: "Open on Hunch",
                   url: "https://t.me/hunch_bot/hunch",
                 },
@@ -2935,7 +2936,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         assert.deepEqual(sent, { messageId: 457, ok: true });
         assert.equal(bodies.length, 2);
         assert.equal(bodies[1]?.text, "🔵 Polymarket");
-        assert.doesNotMatch(JSON.stringify(bodies[1]), /icon_custom_emoji_id/);
+        assert.deepEqual(bodies[1]?.reply_markup, {
+          inline_keyboard: [
+            [
+              {
+                style: "primary",
+                text: "Open on Hunch",
+                url: "https://t.me/hunch_bot/hunch",
+              },
+            ],
+          ],
+        });
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -11413,7 +11424,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(telegram.edits.length, 1);
       assert.match(telegram.edits[0]?.text ?? "", /Deposit unavailable/u);
       assert.deepEqual(telegram.edits[0]?.reply_markup?.inline_keyboard, [
-        [{ callback_data: "hm:v1:deposit", text: "Open Deposit" }],
+        [
+          {
+            callback_data: "hm:v1:deposit",
+            text: "Open Deposit",
+          },
+        ],
         [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
       ]);
       const serialized = JSON.stringify({ deliveryEvents, operationEvents });

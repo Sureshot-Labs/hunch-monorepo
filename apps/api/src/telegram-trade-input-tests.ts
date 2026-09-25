@@ -384,6 +384,7 @@ const handoffConfirmButton =
 assert.deepEqual(
   handoffConfirmButton,
   {
+    style: "danger",
     text: "Confirm sell",
     url: "https://t.me/hunch_bot/app?startapp=handoff_th1_example",
   },

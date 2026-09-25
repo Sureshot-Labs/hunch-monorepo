@@ -50,6 +50,51 @@ Success means that a user can:
    and durable results may create new messages. Menu navigation edits the
    current menu message in place.
 
+## Button colors
+
+Use the native Bot API `style` field for inline buttons (available since
+[Bot API 9.4, February 9, 2026](https://core.telegram.org/bots/api-changelog#february-9-2026)).
+The shared `TelegramButtonAppearance` type covers both callback and Mini App
+buttons. Color describes what the button does, not a keyword in its label:
+
+- Omit `style` for navigation inside the bot: Balance's Add funds and Buy,
+  Deposit menus, network/token selection, opening a market or position, Review
+  Buy/conversion, Change amount, Back, Home, refresh, and settings.
+- `primary`: opening Hunch via `web_app` or a Mini App deep link, including
+  Deposit, Buy/Sell in Hunch, Redeem, wallet/account settings, and signal-post
+  links. The shared Mini App builders assign this color; callers do not choose it.
+  Links from a group/channel into the private bot are also blue.
+- `success`: native Buy presets and Custom Buy, Confirm buy, Confirm conversion,
+  Confirm redeem, and the selected token/network on the Add funds receive screen.
+- `danger`: native Sell presets and Custom Sell, Confirm sell, and explicit
+  cancellation of an active trade, preparation, or deposit.
+  Leaving a review via Back is neutral.
+
+A sealed Mini App **Confirm buy/sell** is the deliberate exception to blue:
+opening it authorizes execution. The confirmation renderer applies green/red
+to that consent button, just as it does for a callback confirmation.
+
+Buy and Sell reviews have three rows: the colored confirmation alone, neutral
+Change amount, then neutral `⬅️ Back` and `🏠 Home` together. Back keeps the
+existing guarded cancellation callback and returns to the market. It cannot
+undo a submitted trade. Conversion and redemption reviews use the same footer.
+
+Color follows the trade action rather than the YES/NO market outcome. Sell
+presets use the same grid as Buy: one row per outcome, with percentages side
+by side. Only preset labels omit "Sell" (`50% · YES`, `100% · YES`);
+`Custom Buy` and `Custom Sell` keep explicit action names. Emoji fallback
+preserves the button's style and destination.
+
+Deposit buttons use one custom token icon followed by the asset and network
+names separated by a middle dot, for example `[USDC icon] USDC · Solana`. Native
+[InlineKeyboardButton](https://core.telegram.org/bots/api#inlinekeyboardbutton)
+supports a single leading custom emoji; its label is plain text. The asset
+picker stays neutral; the chosen token on the Add funds receive screen is green,
+followed by the blue Mini App button and a neutral `⬅️ Back` / `🏠 Home` footer.
+Back opens the asset/network picker; it does not cancel a receive session.
+Funding fields use `⚙️ Settlement`, `⏳ Receive window`, and `🕒 Expires at`.
+Balance's Trading balances rows use the venue's custom emoji before its name.
+
 ## Research Notes
 
 Telegram supports native inline keyboards, reply keyboards, command scopes,
@@ -146,7 +191,7 @@ Useful existing primitives:
 - `buildSignalBotMiniAppEventUrl`
 - `buildSignalBotMiniAppTradeUrl`
 - `buildSignalBotMiniAppHolderUrl`
-- `buildSignalBotTelegramButton`
+- `buildHunchMiniAppChatButton`
 
 The start-param and Mini App URL layer already exists. The problem is that it
 is only consistently used by buttons, not by links rendered inside message

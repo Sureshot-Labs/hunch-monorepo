@@ -218,7 +218,7 @@ import {
   handleTelegramBotRewardsInput,
 } from "./telegram-bot-rewards-menu.js";
 import {
-  buildHunchMiniAppDeepLinkButton,
+  buildHunchMiniAppChatButton,
   buildHunchMiniAppWebButton,
 } from "./telegram-mini-app-buttons.js";
 import {
@@ -1096,37 +1096,6 @@ function isSignalBotPrivateChat(chatType: string | null | undefined): boolean {
   return chatType === "private";
 }
 
-function buildSignalBotTelegramButton(input: {
-  appBaseUrl: string;
-  chatType?: string | null;
-  iconCustomEmojiId?: string;
-  miniAppLinkBase?: string | null;
-  startParam: string | null | undefined;
-  text: string;
-}): TelegramInlineKeyboardButton | null {
-  if (
-    input.miniAppLinkBase &&
-    isSignalBotPrivateChat(input.chatType) &&
-    input.startParam
-  ) {
-    return buildHunchMiniAppWebButton({
-      appBaseUrl: input.appBaseUrl,
-      customEmojiEnabled: input.chatType !== "channel",
-      enabled: true,
-      iconCustomEmojiId: input.iconCustomEmojiId,
-      startParam: input.startParam,
-      text: input.text,
-    });
-  }
-  return buildHunchMiniAppDeepLinkButton({
-    customEmojiEnabled: input.chatType !== "channel",
-    iconCustomEmojiId: input.iconCustomEmojiId,
-    miniAppLinkBase: input.miniAppLinkBase,
-    startParam: input.startParam,
-    text: input.text,
-  });
-}
-
 function pushSignalBotButtonRow(
   rows: TelegramInlineKeyboard["inline_keyboard"],
   button: TelegramInlineKeyboardButton | null,
@@ -1460,7 +1429,7 @@ export function buildSignalBotMessage(input: {
         : tradeTarget.side;
     addedBuyButton = pushSignalBotButtonRow(
       keyboardRows,
-      buildSignalBotTelegramButton({
+      buildHunchMiniAppChatButton({
         appBaseUrl: input.appBaseUrl,
         chatType: input.chatType,
         iconCustomEmojiId: tradeTargetIcon,
@@ -1494,7 +1463,7 @@ export function buildSignalBotMessage(input: {
       );
       const addedCheaperButton = pushSignalBotButtonRow(
         keyboardRows,
-        buildSignalBotTelegramButton({
+        buildHunchMiniAppChatButton({
           appBaseUrl: input.appBaseUrl,
           chatType: input.chatType,
           iconCustomEmojiId: cheaperIcon,
@@ -1520,7 +1489,7 @@ export function buildSignalBotMessage(input: {
   if (!addedBuyButton && note.eventId) {
     pushSignalBotButtonRow(
       keyboardRows,
-      buildSignalBotTelegramButton({
+      buildHunchMiniAppChatButton({
         appBaseUrl: input.appBaseUrl,
         chatType: input.chatType,
         miniAppLinkBase: input.telegramMiniAppLinkBase,
@@ -1654,7 +1623,7 @@ function buildSignalBotFollowthroughKeyboard(input: {
       const targetIcon = telegramCustomEmojiIdForVenue(target.venue);
       addedBuyButton = pushSignalBotButtonRow(
         rows,
-        buildSignalBotTelegramButton({
+        buildHunchMiniAppChatButton({
           appBaseUrl: input.appBaseUrl,
           chatType: input.chatType,
           iconCustomEmojiId: targetIcon,
@@ -1686,7 +1655,7 @@ function buildSignalBotFollowthroughKeyboard(input: {
   if (!addedBuyButton) {
     pushSignalBotButtonRow(
       rows,
-      buildSignalBotTelegramButton({
+      buildHunchMiniAppChatButton({
         appBaseUrl: input.appBaseUrl,
         chatType: input.chatType,
         miniAppLinkBase: input.telegramMiniAppLinkBase,

@@ -240,7 +240,12 @@ const receiveTargetId = "receive_target_telegram_pusd_12345678";
 {
   const activeElsewhere = buildTelegramFundingActiveElsewhereMessage();
   assert.deepEqual(activeElsewhere.reply_markup?.inline_keyboard, [
-    [{ callback_data: "hm:v1:deposit", text: "Open Deposit" }],
+    [
+      {
+        callback_data: "hm:v1:deposit",
+        text: "Open Deposit",
+      },
+    ],
     [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
   ]);
   const cancellableElsewhere = buildTelegramFundingActiveElsewhereMessage({
@@ -249,6 +254,7 @@ const receiveTargetId = "receive_target_telegram_pusd_12345678";
   assert.deepEqual(cancellableElsewhere.reply_markup?.inline_keyboard[1], [
     {
       callback_data: "hm:v1:deposit_cancel_active",
+      style: "danger",
       text: "Cancel active Deposit",
     },
   ]);
@@ -4649,7 +4655,7 @@ for (const closedDestination of [
   assert.match(qrCaption, new RegExp(TELEGRAM_CUSTOM_EMOJI.hunch.id, "u"));
   assert.match(qrCaption, new RegExp(TELEGRAM_CUSTOM_EMOJI.polygon.id, "u"));
   assert.match(qrCaption, new RegExp(TELEGRAM_CUSTOM_EMOJI.usdc.id, "u"));
-  assert.match(qrCaption, /⏳ \*Expires at:\*/u);
+  assert.match(qrCaption, /🕒 \*Expires at:\*/u);
   assert.match(qrCaption, /Minimum to add:\* \$0\\\.37/u);
   assert.match(qrCaption, /Verified receive address/u);
   assert.ok(qrCaption.includes("`" + address + "`"));

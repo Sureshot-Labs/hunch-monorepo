@@ -1,3 +1,4 @@
+import type { TelegramButtonAppearance } from "./telegram-button-style.js";
 import { tx, type Pool } from "@hunch/infra";
 
 import { acquireRewardsUserAdvisoryXactLock } from "../lib/rewards-user-lock.js";
@@ -49,14 +50,15 @@ export type TelegramBotRewardsCallbackRoute =
   | { kind: "rewards_cancel_input" }
   | { kind: "rewards_view"; view: TelegramBotRewardsView };
 
-type RewardsInlineKeyboardButton =
+type RewardsInlineKeyboardButton = (
   | { callback_data: string; text: string }
-  | { icon_custom_emoji_id?: string; text: string; url: string }
+  | { text: string; url: string }
   | {
-      icon_custom_emoji_id?: string;
       text: string;
       web_app: { url: string };
-    };
+    }
+) &
+  TelegramButtonAppearance;
 
 export type TelegramBotRewardsMessage = {
   parse_mode: "MarkdownV2";
