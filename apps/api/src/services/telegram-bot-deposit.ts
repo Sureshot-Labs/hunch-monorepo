@@ -1,6 +1,6 @@
 import type { DbQuery } from "../db.js";
 import {
-  telegramDepositButtonLabel,
+  telegramDepositButtonAppearance,
   telegramDepositButtonRows,
 } from "./telegram-deposit-buttons.js";
 import { resolveFundingPolicy } from "../funding/policies/funding-policy-service.js";
@@ -159,7 +159,7 @@ async function resolveActiveTelegramDeposit(input: {
     : null;
 }
 
-function buildDepositVenueMenu(
+export function buildDepositVenueMenu(
   venues: readonly TelegramDepositVenue[],
   activeDeposit: ActiveTelegramDeposit | null,
 ): TelegramDepositMessage {
@@ -177,6 +177,7 @@ function buildDepositVenueMenu(
                     },
                     {
                       callback_data: "hm:v1:deposit_cancel_active",
+                      style: "danger" as const,
                       text: "Cancel active",
                     },
                   ]
@@ -270,7 +271,7 @@ export async function resolveTelegramSolanaReceiveChoices(input: {
   return choices;
 }
 
-function buildJustDepositMenu(input: {
+export function buildJustDepositMenu(input: {
   solReceiveChoiceToken: string | null;
   usdcReceiveChoiceToken: string | null;
 }): TelegramDepositMessage {
@@ -283,7 +284,7 @@ function buildJustDepositMenu(input: {
             ? [
                 {
                   callback_data: `hm:v1:deposit_route:${input.usdcReceiveChoiceToken}`,
-                  text: telegramDepositButtonLabel(["USDC"], "Solana"),
+                  ...telegramDepositButtonAppearance(["USDC"], "Solana"),
                 },
               ]
             : []),
@@ -291,21 +292,21 @@ function buildJustDepositMenu(input: {
             ? [
                 {
                   callback_data: `hm:v1:deposit_route:${input.solReceiveChoiceToken}`,
-                  text: telegramDepositButtonLabel(["SOL"], "Solana"),
+                  ...telegramDepositButtonAppearance(["SOL"], "Solana"),
                 },
               ]
             : []),
           {
             callback_data: "hm:v1:deposit_route:pd",
-            text: telegramDepositButtonLabel(["pUSD"], "Polygon"),
+            ...telegramDepositButtonAppearance(["pUSD"], "Polygon"),
           },
           {
             callback_data: "hm:v1:deposit_route:pw",
-            text: telegramDepositButtonLabel(["USDC.e"], "Polygon"),
+            ...telegramDepositButtonAppearance(["USDC.e"], "Polygon"),
           },
           {
             callback_data: "hm:v1:deposit_route:ld",
-            text: telegramDepositButtonLabel(["USDC"], "Base"),
+            ...telegramDepositButtonAppearance(["USDC"], "Base"),
           },
         ]),
         [

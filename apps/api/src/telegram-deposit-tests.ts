@@ -16,7 +16,7 @@ import { buildTelegramDepositMessage } from "./services/telegram-bot-deposit.js"
 import { TelegramFundingError } from "./services/telegram-funding.js";
 import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 import {
-  telegramDepositButtonLabel,
+  telegramDepositButtonAppearance,
   telegramDepositButtonRows,
 } from "./services/telegram-deposit-buttons.js";
 
@@ -65,7 +65,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           ["USDC", "Base"],
         ] as const
       ).map(([asset, network], index) => ({
-        text: telegramDepositButtonLabel([asset], network),
+        ...telegramDepositButtonAppearance([asset], network),
         callback_data: `route:${index}`,
       }));
       assert.deepEqual(

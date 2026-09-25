@@ -34,7 +34,7 @@ import { resolveKnownAccountAssetSymbol } from "../account-value/known-asset-cat
 import { buildHunchMiniAppWebButton } from "./telegram-mini-app-buttons.js";
 import { TELEGRAM_BACK_BUTTON_TEXT } from "./telegram-bot-navigation.js";
 import {
-  telegramDepositButtonLabel,
+  telegramDepositButtonAppearance,
   telegramDepositButtonRows,
 } from "./telegram-deposit-buttons.js";
 
@@ -50,6 +50,13 @@ function telegramFundingAppDepositRows() {
   return button ? [[button]] : [];
 }
 
+function fundingAssetPickerNavigationRow() {
+  return [
+    { callback_data: "hm:v1:deposit:any", text: TELEGRAM_BACK_BUTTON_TEXT },
+    { callback_data: "hm:v1:home", text: "🏠 Home" },
+  ];
+}
+
 function expiryLabel(value: string): string {
   const date = new Date(value);
   return Number.isFinite(date.getTime())
@@ -62,11 +69,11 @@ function expiryLabel(value: string): string {
 
 function receiveWindowFields(expiresAt: string): string[] {
   return [
-    formatTelegramFieldMarkdownV2(
+    `⏳ ${formatTelegramFieldMarkdownV2(
       "Receive window",
       `${FUNDING_RECEIVE_SESSION_TTL_HOURS} hours`,
-    ),
-    formatTelegramFieldMarkdownV2("Expires at", expiryLabel(expiresAt)),
+    )}`,
+    `🕒 ${formatTelegramFieldMarkdownV2("Expires at", expiryLabel(expiresAt))}`,
   ];
 }
 
@@ -120,6 +127,7 @@ export function buildTelegramFundingReviewQuoteMessage(input: {
               consentToken: input.quote.consentToken,
               kind: "confirm_conversion",
             }),
+            style: "success",
             text: "Confirm conversion",
           },
         ],
@@ -131,6 +139,7 @@ export function buildTelegramFundingReviewQuoteMessage(input: {
             }),
             text: TELEGRAM_BACK_BUTTON_TEXT,
           },
+          { callback_data: "hm:v1:home", text: "🏠 Home" },
         ],
       ],
     },
@@ -186,7 +195,7 @@ export function buildTelegramFundingTargetMessage(input: {
   presentation: TelegramFundingRoutePresentation;
 }): TelegramFundingMessage {
   const acceptedAssets = input.presentation.acceptedAssetSymbols.join(" / ");
-  const button = telegramDepositButtonLabel(
+  const button = telegramDepositButtonAppearance(
     input.presentation.acceptedAssetSymbols,
     input.presentation.networkLabel,
   );
@@ -219,19 +228,12 @@ export function buildTelegramFundingTargetMessage(input: {
               contextId: input.contextId,
               kind: "select",
             }),
-            text: button,
-          },
-        ],
-        [
-          {
-            callback_data: telegramFundingCallbackData({
-              contextId: input.contextId,
-              kind: "cancel",
-            }),
-            text: "Cancel receive",
+            style: "success",
+            ...button,
           },
         ],
         ...telegramFundingAppDepositRows(),
+        fundingAssetPickerNavigationRow(),
       ],
     },
     text: joinTelegramMarkdownV2Lines([
@@ -251,7 +253,7 @@ export function buildTelegramFundingTargetMessage(input: {
         "Asset",
         acceptedAssets,
       )}`,
-      formatTelegramFieldMarkdownV2("Settlement", settlement),
+      `⚙️ ${formatTelegramFieldMarkdownV2("Settlement", settlement)}`,
       "",
       ...instructions.map(escapeTelegramMarkdownV2),
       ...receiveWindowFields(input.expiresAt),
@@ -294,7 +296,7 @@ export function buildTelegramFundingTargetChoicesMessage(input: {
         contextId: input.contextId,
         kind: "select",
       }),
-      text: telegramDepositButtonLabel(
+      ...telegramDepositButtonAppearance(
         target.presentation.acceptedAssetSymbols,
         target.presentation.networkLabel,
       ),
@@ -308,15 +310,7 @@ export function buildTelegramFundingTargetChoicesMessage(input: {
       inline_keyboard: [
         ...targetRows,
         ...telegramFundingAppDepositRows(),
-        [
-          {
-            callback_data: telegramFundingCallbackData({
-              contextId: input.contextId,
-              kind: "cancel",
-            }),
-            text: "Cancel",
-          },
-        ],
+        fundingAssetPickerNavigationRow(),
       ],
     },
     text: joinTelegramMarkdownV2Lines([
@@ -391,6 +385,7 @@ export function buildTelegramFundingActiveElsewhereMessage(
               [
                 {
                   callback_data: "hm:v1:deposit_cancel_active",
+                  style: "danger" as const,
                   text: "Cancel active Deposit",
                 },
               ],
@@ -531,7 +526,12 @@ export function buildTelegramFundingCancelledMessage(): TelegramFundingMessage {
     parse_mode: "MarkdownV2",
     reply_markup: {
       inline_keyboard: [
-        [{ callback_data: "hm:v1:deposit:any", text: "💳 Add funds" }],
+        [
+          {
+            callback_data: "hm:v1:deposit:any",
+            text: "💳 Add funds",
+          },
+        ],
       ],
     },
     text: formatTelegramCalloutMarkdownV2({
@@ -620,7 +620,7 @@ export async function buildTelegramFundingQrPhoto(
       "",
       `📍 ${formatTelegramBoldMarkdownV2("Verified receive address")}`,
       formatTelegramCodeMarkdownV2(projection.receiveAddress),
-      `⏳ ${formatTelegramFieldMarkdownV2(
+      `🕒 ${formatTelegramFieldMarkdownV2(
         "Expires at",
         expiryLabel(projection.expiresAt),
       )}`,
@@ -655,7 +655,12 @@ function fundingProgressReplyMarkup(
   if (projection.terminal) {
     return {
       inline_keyboard: [
-        [{ callback_data: "hm:v1:deposit:any", text: "💳 Add funds" }],
+        [
+          {
+            callback_data: "hm:v1:deposit:any",
+            text: "💳 Add funds",
+          },
+        ],
         ...(projection.returnToMarketAvailable
           ? [
               [
@@ -722,6 +727,7 @@ function fundingProgressReplyMarkup(
             contextId: projection.fundingContextId,
             kind: "cancel",
           }),
+          style: "danger",
           text: "Cancel",
         };
   return {

@@ -1,3 +1,4 @@
+import type { TelegramButtonAppearance } from "./telegram-button-style.js";
 import crypto from "node:crypto";
 import { telegramMarketDepositCallback } from "./telegram-funding-navigation.js";
 import { loadTelegramPositions } from "./telegram-bot-positions.js";
@@ -654,7 +655,8 @@ export type TelegramBotTradingButton = (
   | { text: string; copy_text: { text: string } }
   | { text: string; web_app: { url: string } }
   | { text: string; url: string }
-) & { icon_custom_emoji_id?: string };
+) &
+  TelegramButtonAppearance;
 
 export type TelegramBotTradingReplyMarkup = {
   inline_keyboard: TelegramBotTradingButton[][];
@@ -2969,6 +2971,7 @@ async function resolveTelegramExecutableSellOptions(input: {
   maxSlippageBps: number;
   side: TelegramBotTradingSide;
   trading: ApiBotTradingExecutor;
+  resolveAvailablePosition?: typeof resolveTelegramAvailablePositionRaw;
 }): Promise<TelegramExecutableSellResolution> {
   const empty = { availableRaw: 0n, options: [], side: input.side };
   if (
@@ -2982,7 +2985,9 @@ async function resolveTelegramExecutableSellOptions(input: {
   if (!tokenId) return empty;
   let availability: Readonly<{ availableRaw: bigint }> | null;
   try {
-    availability = await resolveTelegramAvailablePositionRaw({
+    availability = await (
+      input.resolveAvailablePosition ?? resolveTelegramAvailablePositionRaw
+    )({
       pool: input.db,
       signer: input.authorization.wallet_address,
       tokenId,
@@ -3151,16 +3156,18 @@ function buildTelegramTradeConfirmButton(input: {
   override?: TelegramBotTradingButton;
   venue: TelegramBotTradingVenue;
 }): TelegramBotTradingButton {
-  return (
-    input.override ?? {
+  // This is consent to the trade, including when a sealed Mini App link executes it.
+  return {
+    ...(input.override ?? {
       callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:confirm:${input.intentId}`,
       icon_custom_emoji_id: formatTelegramVenueButtonIcon(input.venue),
       text: input.action === "BUY" ? "Confirm buy" : "Confirm sell",
-    }
-  );
+    }),
+    style: input.action === "SELL" ? "danger" : "success",
+  };
 }
 
-function buildTelegramTradeConfirmationMessage(input: {
+export function buildTelegramTradeConfirmationMessage(input: {
   appHandoffFundingReviewLines?: readonly string[];
   authorization: TelegramBotTradingAuthorizationRow;
   confirmButton?: TelegramBotTradingButton;
@@ -3228,22 +3235,20 @@ function buildTelegramTradeConfirmationMessage(input: {
             override: input.confirmButton,
             venue: input.intent.venue,
           }),
+        ],
+        [
           {
-            callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${input.intent.id}`,
-            text: "❌ Cancel",
+            callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:change_amount:${input.intent.id}`,
+            text: "Change amount",
           },
         ],
-        ...(action === "BUY"
-          ? [
-              [
-                {
-                  callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:change_amount:${input.intent.id}`,
-                  text: "Change amount",
-                },
-              ],
-            ]
-          : []),
-        [{ callback_data: "hm:v1:home", text: "🏠 Home" }],
+        [
+          {
+            callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${input.intent.id}`,
+            text: TELEGRAM_BACK_BUTTON_TEXT,
+          },
+          { callback_data: "hm:v1:home", text: "🏠 Home" },
+        ],
       ],
     },
     text: joinTelegramMarkdownV2Lines(
@@ -6106,6 +6111,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   telegramMiniAppEnabled?: boolean;
   telegramUserId: string | number;
   trading?: ApiBotTradingExecutor;
+  resolveAvailablePosition?: typeof resolveTelegramAvailablePositionRaw;
   writeTradeInputContext?: (
     input: TelegramBotTradeInputContext,
   ) => Promise<boolean>;
@@ -6493,6 +6499,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
                 maxSlippageBps: policy.maxSlippageBps,
                 side,
                 trading: input.trading as ApiBotTradingExecutor,
+                resolveAvailablePosition: input.resolveAvailablePosition,
               }),
             ),
         )
@@ -6820,6 +6827,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       icon_custom_emoji_id:
         decoration.iconCustomEmojiId ??
         formatTelegramVenueButtonIcon(market.venue),
+      style: action === "sell" ? "danger" : "success",
       text: telegramCustomTradeInputButtonText({
         action,
         origin: input.context?.origin,
@@ -6851,6 +6859,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
         ...(buyButtonDecoration.iconCustomEmojiId
           ? { icon_custom_emoji_id: buyButtonDecoration.iconCustomEmojiId }
           : {}),
+        style: "success",
         text: `${buyButtonDecoration.textPrefix}${formatUsd(option.amountUsd)} · ${sideLabel(market, option.side)}`,
       });
     }
@@ -6863,6 +6872,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   if (customBuyRow.length > 0) keyboard.push(customBuyRow);
   const customSellRow: TelegramBotTradingButton[] = [];
   for (const side of ["YES", "NO"] as const) {
+    const row: TelegramBotTradingButton[] = [];
     for (const option of sellOptions.filter(
       (candidate) => candidate.side === side,
     )) {
@@ -6882,18 +6892,18 @@ export async function buildTelegramBotTradingMarketMessage(input: {
         telegramMessageId: input.telegramMessageId,
         telegramUserId,
       });
-      keyboard.push([
-        {
-          callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:sell:${intentId}`,
-          icon_custom_emoji_id:
-            sellButtonDecoration.iconCustomEmojiId ??
-            formatTelegramVenueButtonIcon(market.venue),
-          text: isPositionContext
-            ? `${sellButtonDecoration.textPrefix}Sell ${option.sellPercent}%`
-            : `${sellButtonDecoration.textPrefix}Sell ${option.sellPercent}% · ${sideLabel(market, option.side)}`,
-        },
-      ]);
+      row.push({
+        callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:sell:${intentId}`,
+        icon_custom_emoji_id:
+          sellButtonDecoration.iconCustomEmojiId ??
+          formatTelegramVenueButtonIcon(market.venue),
+        style: "danger",
+        text: isPositionContext
+          ? `${sellButtonDecoration.textPrefix}${option.sellPercent}%`
+          : `${sellButtonDecoration.textPrefix}${option.sellPercent}% · ${sideLabel(market, option.side)}`,
+      });
     }
+    if (row.length > 0) keyboard.push(row);
     if (canBuildCustomSell && customSellSides.includes(side)) {
       const customButton = await createCustomInputButton("sell", side);
       if (customButton) customSellRow.push(customButton);
@@ -6966,6 +6976,7 @@ export async function buildTelegramBotTradingMarketMessage(input: {
       keyboard.push([
         {
           callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${unresolvedIntent.id}`,
+          style: "danger",
           text: `❌ Cancel ${unresolvedIntent.action === "sell" ? "Sell" : "Buy"}`,
         },
       ]);
@@ -10353,12 +10364,16 @@ async function handleTelegramRedeemCallback(input: {
             {
               callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:confirm:${intent.id}`,
               icon_custom_emoji_id: telegramCustomEmojiId("usdc"),
+              style: "success",
               text: "Confirm redeem",
             },
+          ],
+          [
             {
               callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${intent.id}`,
-              text: "❌ Cancel",
+              text: TELEGRAM_BACK_BUTTON_TEXT,
             },
+            { callback_data: "hm:v1:home", text: "🏠 Home" },
           ],
         ],
       },
@@ -13771,14 +13786,16 @@ export async function handleTelegramBotTradingCallback(
         intent.action === "buy" &&
         intent.status === "funding" &&
         intent.submit_started_at == null;
-      const cancelButton = canCancelPreparation
+      const cancelButton: TelegramBotTradingButton | null = canCancelPreparation
         ? {
             callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${intent.id}`,
+            style: "danger",
             text: "❌ Cancel preparation",
           }
         : canCancelBuy
           ? {
               callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${intent.id}`,
+              style: "danger",
               text: "❌ Cancel Buy",
             }
           : null;
@@ -14308,7 +14325,7 @@ export async function handleTelegramBotTradingCallback(
         callbackQueryId: input.callbackQuery.id,
         text: "✅ Internal funding started.",
       });
-      const startingMessage = {
+      const startingMessage: TelegramBotTradingMessage = {
         parse_mode: "MarkdownV2" as const,
         reply_markup: {
           inline_keyboard: [
@@ -14319,6 +14336,7 @@ export async function handleTelegramBotTradingCallback(
               },
               {
                 callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:cancel:${intent.id}`,
+                style: "danger",
                 text: "❌ Cancel preparation",
               },
             ],
@@ -14995,7 +15013,7 @@ export async function handleTelegramBotTradingCallback(
     // deliberately a callback—not a Mini App link—so it restores the market
     // card with its live quote, presets, position context, and Back/Home rows.
     // The Mini App is reserved for an explicit sealed-handoff continuation.
-    const filledMarketButton =
+    const filledMarketButton: TelegramBotTradingButton | null =
       resolution.intentStatus === "filled" && !postSubmitError
         ? {
             callback_data: `${TELEGRAM_BOT_TRADING_CALLBACK_PREFIX}:open_market:${intent.id}`,
