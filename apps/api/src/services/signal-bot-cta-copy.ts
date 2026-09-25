@@ -49,6 +49,33 @@ export function formatSignalBotCheaperButtonText(input: {
 
 export function formatSignalBotOpenButtonText(input?: {
   channel?: boolean;
+  snapshot?: {
+    asOf: string;
+    price: number;
+    side: "NO" | "YES";
+    sideLabel: string;
+  } | null;
 }): string {
-  return `${input?.channel ? "🟠 " : ""}Open on Hunch`;
+  const prefix = input?.channel ? "🟠 " : "";
+  const snapshot = input?.snapshot;
+  if (!snapshot) return `${prefix}Open on Hunch`;
+  const snapshotMs = Date.parse(snapshot.asOf);
+  if (
+    !Number.isFinite(snapshotMs) ||
+    !Number.isFinite(snapshot.price) ||
+    snapshot.price < 0 ||
+    snapshot.price > 1
+  ) {
+    return `${prefix}Open on Hunch`;
+  }
+  const time = new Date(snapshotMs).toISOString().slice(11, 16);
+  const fullSideLabel =
+    snapshot.sideLabel.trim().replace(/\s+/g, " ") || snapshot.side;
+  // Leave room for the price and its timestamp on narrow Telegram buttons.
+  const labelChars = Array.from(fullSideLabel);
+  const sideLabel =
+    labelChars.length > 24
+      ? `${labelChars.slice(0, 23).join("").trimEnd()}…`
+      : fullSideLabel;
+  return `${prefix}Open ${sideLabel} · ${formatCents(snapshot.price)} as of ${time} UTC`;
 }

@@ -129,6 +129,10 @@ import {
   enqueueTelegramPositionSignals,
 } from "./services/telegram-notification-delivery.js";
 import {
+  enqueueTelegramInterestHunches,
+  parseRelatedHunchEventIds,
+} from "./services/telegram-hunch-interests.js";
+import {
   ensureTelegramNotificationPreferences,
   setTelegramNotificationTopic,
 } from "./services/telegram-notification-preferences.js";
@@ -139,6 +143,7 @@ import {
   SIGNAL_BOT_NOTIFICATION_SNAPSHOT_MAX_AGE_MS,
   SIGNAL_BOT_QUOTE_MAX_AGE_MS,
 } from "./services/signal-bot-delivery-policy.js";
+import { formatSignalBotOpenButtonText } from "./services/signal-bot-cta-copy.js";
 import { withSignalBotNotificationSnapshotContext } from "./services/signal-bot-notification-snapshot.js";
 import {
   hasHolderResearchPublicationDecisionV1,
@@ -2408,6 +2413,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         payoutsRewards: false,
         positionResolved: true,
         positionSignals: true,
+        interestSignals: false,
         reachable: true,
         userId: "user-1",
       };
@@ -3280,8 +3286,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             assert.match(sql, /ut\.market_id = \$1/);
             assert.match(sql, /p\.position_scope = 'own'/);
             assert.match(sql, /p\.size > 0/);
-            assert.match(sql, /root_delivery\.status = 'sent'/);
-            assert.match(sql, /root_delivery\.telegram_message_id is not null/);
+            assert.match(
+              sql,
+              /root_delivery\.status in \('pending', 'retry', 'sending', 'sent'\)/,
+            );
+            assert.match(sql, /root_delivery\.id is not null/);
             return { rows: [{ held_sides: ["YES"], user_id: "user-1" }] };
           }
           if (sql.includes("insert into telegram_notification_outbox")) {
@@ -3305,17 +3314,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         pool: { connect: async () => client } as never,
       });
       assert.deepEqual(result, { enqueued: 1, notes: 1 });
-      assert.match(
-        String((insertedPayloads[0] as { text?: unknown })?.text ?? ""),
-        /supports your YES position/,
+      assert.equal(
+        (insertedPayloads[0] as { text?: unknown })?.text,
+        undefined,
       );
-      assert.match(
-        String((insertedPayloads[0] as { text?: unknown })?.text ?? ""),
-        /^💰 \*\$12\\\.3K backs YES on “Will test resolve Yes”/,
-      );
-      assert.doesNotMatch(
-        String((insertedPayloads[0] as { text?: unknown })?.text ?? ""),
-        /New signal|Research update for a market/,
+      assert.equal(
+        (insertedPayloads[0] as { phase?: unknown })?.phase,
+        "preparing",
       );
       assert.equal(
         (insertedPayloads[0] as { actionText?: unknown })?.actionText,
@@ -3329,6 +3334,266 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         insertedEventKeys[0],
         "position-signal:00000000-0000-4000-8000-000000000001:initial:00000000-0000-4000-8000-000000000001",
       );
+    },
+  },
+  {
+    name: "interest Hunch semantic neighbors require a real close score and stay bounded",
+    run: () => {
+      const prefix = "ai:embed:g-test:event:";
+      assert.deepEqual(
+        parseRelatedHunchEventIds(
+          [
+            4,
+            `${prefix}original`,
+            ["score", "0"],
+            `${prefix}related`,
+            ["score", "0.229"],
+            `${prefix}unrelated`,
+            ["score", "0.31"],
+            `${prefix}malformed`,
+            ["other", "0.01"],
+          ],
+          prefix,
+          "original",
+        ),
+        ["related"],
+      );
+    },
+  },
+  {
+    name: "interest Hunch exact delivery survives semantic outage without advancing semantic cursor",
+    run: async () => {
+      const advanced: string[] = [];
+      let released = false;
+      const client = {
+        query: async (sql: string, params: unknown[] = []) => {
+          if (/^\s*(?:begin|commit|rollback)\s*$/i.test(sql))
+            return { rows: [] };
+          if (sql.includes("pg_try_advisory_lock"))
+            return { rows: [{ acquired: true }] };
+          if (sql.includes("pg_advisory_unlock"))
+            return { rows: [{ pg_advisory_unlock: true }] };
+          if (sql.includes("insert into telegram_notification_cursors"))
+            return { rows: [] };
+          if (sql.includes("as subscribed"))
+            return { rows: [{ subscribed: true }] };
+          if (sql.includes("from telegram_notification_cursors")) {
+            return {
+              rows: [
+                {
+                  cursor_created_at: "2025-12-31T00:00:00.000Z",
+                  cursor_id: "00000000-0000-0000-0000-000000000000",
+                },
+              ],
+            };
+          }
+          if (sql.includes("from telegram_interest_semantic_repair")) {
+            return { rows: [] };
+          }
+          if (sql.includes("from ai_notes n"))
+            return {
+              rows: [noteRow({ created_at: new Date(Date.now() - 60_000) })],
+            };
+          if (sql.includes("with scoped_markets")) {
+            assert.deepEqual(params[1], ["polymarket:event-1"]);
+            return { rows: [{ inserted_count: "1" }] };
+          }
+          if (sql.includes("update telegram_notification_cursors")) {
+            advanced.push(String(params[0]));
+            return { rows: [] };
+          }
+          throw new Error(`Unexpected SQL: ${sql}`);
+        },
+        release: () => {
+          released = true;
+        },
+      };
+      const result = await enqueueTelegramInterestHunches({
+        limit: 1,
+        pool: { connect: async () => client } as never,
+        redis: null,
+      });
+      assert.deepEqual(result, { enqueued: 1, notes: 1, semanticErrors: 1 });
+      assert.deepEqual(advanced, ["telegram_interest_exact_v1"]);
+      assert.equal(released, true);
+    },
+  },
+  {
+    name: "old semantic Hunch backlog advances without related delivery while active watchlists stay fresh",
+    run: async () => {
+      const advanced: string[] = [];
+      let recipientQueries = 0;
+      const client = {
+        query: async (sql: string, params: unknown[] = []) => {
+          if (/^\s*(?:begin|commit|rollback)\s*$/i.test(sql))
+            return { rows: [] };
+          if (sql.includes("pg_try_advisory_lock"))
+            return { rows: [{ acquired: true }] };
+          if (sql.includes("pg_advisory_unlock")) return { rows: [] };
+          if (sql.includes("insert into telegram_notification_cursors"))
+            return { rows: [] };
+          if (sql.includes("as subscribed"))
+            return { rows: [{ subscribed: true }] };
+          if (sql.includes("from telegram_notification_cursors"))
+            return {
+              rows: [
+                {
+                  cursor_created_at: "2025-12-31T00:00:00.000Z",
+                  cursor_id: "00000000-0000-0000-0000-000000000000",
+                },
+              ],
+            };
+          if (sql.includes("from ai_notes n"))
+            return {
+              rows: [
+                noteRow({
+                  created_at: new Date(Date.now() - 25 * 60 * 60_000),
+                }),
+              ],
+            };
+          if (sql.includes("with scoped_markets")) {
+            recipientQueries += 1;
+            assert.match(sql, /now\(\) as observed_at, 3\.0 as base_weight/);
+            assert.match(
+              sql,
+              /o\.posted_at as observed_at, 2\.0 as base_weight/,
+            );
+            assert.match(
+              sql,
+              /p\.last_updated_at as observed_at, 1\.0 as base_weight/,
+            );
+            assert.match(
+              sql,
+              /where i\.observed_at >= now\(\) - interval '90 days'/,
+            );
+            return { rows: [{ inserted_count: "1" }] };
+          }
+          if (sql.includes("update telegram_notification_cursors")) {
+            advanced.push(String(params[0]));
+            return { rows: [], rowCount: 1 };
+          }
+          if (sql.includes("from telegram_interest_semantic_repair"))
+            return { rows: [] };
+          throw new Error(`Unexpected SQL: ${sql}`);
+        },
+        release: () => undefined,
+      };
+      const result = await enqueueTelegramInterestHunches({
+        limit: 1,
+        pool: { connect: async () => client } as never,
+        redis: null,
+      });
+      assert.deepEqual(result, { enqueued: 1, notes: 1, semanticErrors: 0 });
+      assert.equal(recipientQueries, 1);
+      assert.deepEqual(advanced, [
+        "telegram_interest_exact_v1",
+        "telegram_interest_semantic_v1",
+      ]);
+    },
+  },
+  {
+    name: "interest Hunch catches up stale semantic cursor when no subscribers remain",
+    run: async () => {
+      const exactCreatedAt = "2026-01-01T12:00:00.000Z";
+      const exactId = "00000000-0000-4000-8000-000000000099";
+      let catchUpParams: unknown[] | null = null;
+      const client = {
+        query: async (sql: string, params: unknown[] = []) => {
+          if (sql.includes("pg_try_advisory_lock"))
+            return { rows: [{ acquired: true }] };
+          if (sql.includes("pg_advisory_unlock")) return { rows: [] };
+          if (sql.includes("insert into telegram_notification_cursors"))
+            return { rows: [] };
+          if (sql.includes("as subscribed"))
+            return { rows: [{ subscribed: false }] };
+          if (sql.includes("from telegram_notification_cursors"))
+            return {
+              rows: [{ cursor_created_at: exactCreatedAt, cursor_id: exactId }],
+            };
+          if (sql.includes("from ai_notes n")) return { rows: [] };
+          if (sql.includes("update telegram_notification_cursors")) {
+            catchUpParams = params;
+            return { rows: [], rowCount: 1 };
+          }
+          throw new Error(`Unexpected SQL: ${sql}`);
+        },
+        release: () => undefined,
+      };
+      const result = await enqueueTelegramInterestHunches({
+        limit: 1,
+        pool: { connect: async () => client } as never,
+        redis: null,
+      });
+      assert.deepEqual(result, { enqueued: 0, notes: 0, semanticErrors: 0 });
+      assert.deepEqual(catchUpParams, [
+        "telegram_interest_semantic_v1",
+        exactCreatedAt,
+        exactId,
+      ]);
+    },
+  },
+  {
+    name: "missing event vector schedules durable semantic repair while exact delivery advances",
+    run: async () => {
+      const advanced: string[] = [];
+      const repairIds: string[] = [];
+      const client = {
+        query: async (sql: string, params: unknown[] = []) => {
+          if (/^\s*(?:begin|commit|rollback)\s*$/i.test(sql))
+            return { rows: [] };
+          if (sql.includes("pg_try_advisory_lock"))
+            return { rows: [{ acquired: true }] };
+          if (sql.includes("pg_advisory_unlock")) return { rows: [] };
+          if (sql.includes("insert into telegram_notification_cursors"))
+            return { rows: [] };
+          if (sql.includes("as subscribed"))
+            return { rows: [{ subscribed: true }] };
+          if (sql.includes("from telegram_notification_cursors")) {
+            return {
+              rows: [
+                {
+                  cursor_created_at: "2025-12-31T00:00:00.000Z",
+                  cursor_id: "00000000-0000-0000-0000-000000000000",
+                },
+              ],
+            };
+          }
+          if (sql.includes("from telegram_interest_semantic_repair"))
+            return { rows: [] };
+          if (sql.includes("insert into telegram_interest_semantic_repair")) {
+            repairIds.push(String(params[0]));
+            return { rows: [], rowCount: 1 };
+          }
+          if (sql.includes("from ai_notes n"))
+            return {
+              rows: [noteRow({ created_at: new Date(Date.now() - 60_000) })],
+            };
+          if (sql.includes("with scoped_markets"))
+            return { rows: [{ inserted_count: "1" }] };
+          if (sql.includes("update telegram_notification_cursors")) {
+            advanced.push(String(params[0]));
+            return { rows: [], rowCount: 1 };
+          }
+          throw new Error(`Unexpected SQL: ${sql}`);
+        },
+        release: () => undefined,
+      };
+      const redis = {
+        get: async () => null,
+        sendCommand: async (args: string[]) => (args[0] === "EVAL" ? 1 : 1),
+        withTypeMapping: () => ({ hmGet: async () => [null, null] }),
+      };
+      const result = await enqueueTelegramInterestHunches({
+        limit: 1,
+        pool: { connect: async () => client } as never,
+        redis: redis as never,
+      });
+      assert.deepEqual(result, { enqueued: 1, notes: 1, semanticErrors: 1 });
+      assert.deepEqual(advanced, [
+        "telegram_interest_exact_v1",
+        "telegram_interest_semantic_v1",
+      ]);
+      assert.deepEqual(repairIds, ["00000000-0000-4000-8000-000000000001"]);
     },
   },
   {
@@ -12690,7 +12955,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(message.text, /confidence/i);
       assert.deepEqual(
         message.richMessage.blocks.map((block) => block.type),
-        ["paragraph", "table"],
+        ["paragraph", "table", "footer"],
       );
       const lead = message.richMessage.blocks[0];
       assert.equal(lead?.type, "paragraph");
@@ -13009,6 +13274,21 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         message.text,
         /\[TestWallet\]\(https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=wt_/,
       );
+      assert.match(
+        message.text,
+        /\[Full research ↗\]\(https:\/\/t\.me\/hunch_signal_bot\/hunch\?startapp=h_/,
+      );
+      const reportUrl = message.text.match(
+        /\[Full research ↗\]\((https:\/\/t\.me\/[^)]+)\)/,
+      )?.[1];
+      assert.equal(
+        decodeStartAppPayload(readStartAppParam(reportUrl)),
+        "polymarket:event-1|polymarket:market-1|00000000-0000-4000-8000-000000000001",
+      );
+      assert.match(
+        JSON.stringify(message.richMessage.blocks),
+        /Full research ↗/,
+      );
       assert.doesNotMatch(message.text, /Market details|Wallet context/);
       assert.doesNotMatch(message.text.split("\n")[0] ?? "", /\]\(/);
       assert.equal(
@@ -13034,6 +13314,22 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(rows.length, 0);
       assert.doesNotMatch(message.text, /https:\/\/app\.hunch\.trade/);
       assert.doesNotMatch(message.text, /https:\/\/t\.me/);
+    },
+  },
+  {
+    name: "research report link is absent for invalid note identity",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({ id: "not-a-uuid" }),
+        telegramMiniAppLinkBase: "https://t.me/hunch_signal_bot/hunch",
+      });
+      assert.doesNotMatch(message.text, /Full research/);
+      assert.doesNotMatch(
+        JSON.stringify(message.richMessage.blocks),
+        /Full research/,
+      );
     },
   },
   {
@@ -13442,7 +13738,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         }),
       });
 
-      assert.doesNotMatch(message.text, /📰|Public previews|https?:/);
+      assert.doesNotMatch(
+        message.text,
+        /📰|Public previews|cbssports\.com|usatoday\.com/,
+      );
       assert.match(message.text, />\*Why it matters\*/);
     },
   },
@@ -13718,7 +14017,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.match(
         message.text,
-        /Since the original call, YES has climbed 7¢ to 94¢/,
+        /Since the original call, YES has risen from 87¢ to 94¢/,
       );
       assert.match(message.text, /👤 __\[the trader\]\(/);
       assert.match(message.text, /continues to hold \$8\\\.6K on YES/);
@@ -15190,7 +15489,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "publish removes Buy from terminal-price notes and keeps Open on Hunch",
+    name: "publish removes Buy from terminal-price notes and labels the Open snapshot",
     run: async () => {
       const redis = new FakeRedis();
       await enableSignalBotChat({
@@ -15244,9 +15543,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(result.priceGuardSkipped, 0);
       assert.equal(result.priceGuardTerminalPrice, 1);
       assert.equal(telegram.messages.length, 1);
-      assert.equal(
-        telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.text,
-        "Open on Hunch",
+      assert.match(
+        telegram.messages[0]?.reply_markup?.inline_keyboard[0]?.[0]?.text ?? "",
+        /^Open YES · 31¢ as of \d{2}:\d{2} UTC$/,
       );
     },
   },
@@ -15650,7 +15949,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         false,
       );
       assert.equal(
-        updateButtons.some((button) => button.text === "Open on Hunch"),
+        updateButtons.some((button) =>
+          /^Open YES · 31¢ as of \d{2}:\d{2} UTC$/.test(button.text),
+        ),
         true,
       );
       const delivery = db.queries
@@ -18218,6 +18519,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         type: "footer",
         text: "Price snapshot as of 2026/09/25 08:00 UTC",
       });
+      const labeledOpen = withSignalBotNotificationSnapshotContext(
+        rendered,
+        asOf,
+        new Date("2026-09-25T08:05:00.000Z"),
+        true,
+      );
+      assert.equal(
+        labeledOpen.text,
+        "YES is 50¢ now.\n\nPrice snapshot as of 2026/09/25 08:00 UTC",
+      );
     },
   },
   {
@@ -18263,6 +18574,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             /Price snapshot as of/,
           );
           assert.doesNotMatch(prepared.text, /¢ (?:now|live)\b/);
+          assert.match(
+            prepared.keyboard?.inline_keyboard[0]?.[0]?.text ?? "",
+            /^Open YES · 31¢ as of \d{2}:\d{2} UTC$/,
+          );
         }
       }
     },
@@ -18298,6 +18613,146 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "eleven-minute research snapshot keeps price and timestamp on navigation CTA without Buy",
+    run: async () => {
+      const asOf = "2026-09-25T14:21:00.000Z";
+      const snapshot = {
+        ...testSignalPriceSnapshot("YES"),
+        asOf,
+        displayPrice: 0.96,
+        NO: { ask: 0.05, bid: 0.03, mark: 0.04 },
+        YES: { ask: 0.97, bid: 0.95, mark: 0.96 },
+      };
+      const prepared = await prepareSignalBotDelivery({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        db: new FakeDb(),
+        messageKind: "research_update",
+        note: note({
+          meaningfulDeltaReasons: ["holder_position_move:YES"],
+          revisionKind: "research_update",
+          signalPriceSnapshotV1: snapshot,
+        }),
+        now: new Date("2026-09-25T14:32:00.000Z"),
+        telegramMiniAppLinkBase: "https://t.me/hunch_bot/hunch",
+      });
+      assert.equal(prepared.status, "ready");
+      if (prepared.status !== "ready") return;
+      assert.equal(prepared.audit.ctaIntent, "open_market");
+      assert.equal(prepared.deliveryTarget, null);
+      assert.equal(
+        prepared.keyboard?.inline_keyboard[0]?.[0]?.text,
+        "Open YES · 96¢ as of 14:21 UTC",
+      );
+      assert.match(
+        prepared.text,
+        /Price snapshot as of 2026\/09\/25 14:21 UTC/,
+      );
+      assert.match(
+        readStartAppParam(prepared.keyboard?.inline_keyboard[0]?.[0]?.url),
+        /^m_/,
+      );
+    },
+  },
+  {
+    name: "Open CTA uses the persisted short outcome label instead of raw YES",
+    run: async () => {
+      const asOf = "2026-09-25T14:21:00.000Z";
+      const prepared = await prepareSignalBotDelivery({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        db: new FakeDb(),
+        forceOpenMarket: true,
+        messageKind: "initial",
+        note: note({
+          marketTitle: "Will the Fed cut rates?",
+          metrics: {
+            telegramPresentation: {
+              version: 1,
+              source: "approved_override",
+              subject: "The Fed",
+              predicate: "cuts rates",
+              threshold: null,
+              deadline: null,
+              positions: {
+                YES: {
+                  canonicalLabel: "Rate cut",
+                  shortLabel: "Cut",
+                  aliases: [],
+                },
+                NO: {
+                  canonicalLabel: "No rate cut",
+                  shortLabel: "No cut",
+                  aliases: [],
+                },
+              },
+            },
+          },
+          signalPriceSnapshotV1: {
+            ...testSignalPriceSnapshot("YES"),
+            asOf,
+          },
+        }),
+        now: new Date("2026-09-25T14:32:00.000Z"),
+        telegramMiniAppLinkBase: "https://t.me/hunch_bot/hunch",
+      });
+      assert.equal(prepared.status, "ready");
+      if (prepared.status !== "ready") return;
+      assert.equal(prepared.audit.ctaIntent, "open_market");
+      assert.equal(
+        prepared.keyboard?.inline_keyboard[0]?.[0]?.text,
+        "Open Cut · 31¢ as of 14:21 UTC",
+      );
+    },
+  },
+  {
+    name: "Open CTA falls back safely for a malformed informational snapshot",
+    run: () => {
+      assert.equal(
+        formatSignalBotOpenButtonText({
+          snapshot: {
+            asOf: "not-a-date",
+            price: 0.31,
+            side: "YES",
+            sideLabel: "Cut",
+          },
+        }),
+        "Open on Hunch",
+      );
+      assert.equal(
+        formatSignalBotOpenButtonText({
+          snapshot: {
+            asOf: "2026-09-25T14:21:00.000Z",
+            price: Number.NaN,
+            side: "YES",
+            sideLabel: "Cut",
+          },
+        }),
+        "Open on Hunch",
+      );
+    },
+  },
+  {
+    name: "long named outcome keeps the informational Open button compact",
+    run: () => {
+      const buttonText = formatSignalBotOpenButtonText({
+        channel: true,
+        snapshot: {
+          asOf: "2026-09-25T14:21:00.000Z",
+          price: 0.96,
+          side: "YES",
+          sideLabel:
+            "A rate cut of at least 100 basis points before December 2026",
+        },
+      });
+      assert.match(
+        buttonText,
+        /^🟠 Open A rate cut of at least… · 96¢ as of 14:21 UTC$/,
+      );
+      assert.ok(Array.from(buttonText).length <= 56);
+    },
+  },
+  {
     name: "older notification snapshots without live quote access remain Open market only",
     run: async () => {
       const now = new Date();
@@ -18319,13 +18774,52 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       if (prepared.status === "ready") {
         assert.equal(prepared.audit.ctaIntent, "open_market");
         assert.equal(prepared.deliveryTarget, null);
-        assert.deepEqual(
-          prepared.keyboard?.inline_keyboard
-            .flat()
-            .map((button) => button.text),
-          ["Open on Hunch"],
+        assert.match(
+          prepared.keyboard?.inline_keyboard[0]?.[0]?.text ?? "",
+          /^Open YES · 31¢ as of \d{2}:\d{2} UTC$/,
         );
       }
+    },
+  },
+  {
+    name: "Open CTA does not attach the source snapshot price to another market",
+    run: async () => {
+      const now = new Date("2026-09-25T14:32:00.000Z");
+      const prepared = await prepareSignalBotDelivery({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        db: new FakeDb(),
+        forceOpenMarket: true,
+        messageKind: "initial",
+        note: note({
+          signalPriceSnapshotV1: {
+            ...testSignalPriceSnapshot("YES"),
+            asOf: "2026-09-25T14:21:00.000Z",
+          },
+        }),
+        now,
+        resolvedDelivery: {
+          allowBuyCta: false,
+          target: {
+            eventId: "limitless:event-2",
+            marketId: "limitless:market-2",
+            price: 0.29,
+            side: "YES",
+            venue: "limitless",
+          },
+        },
+        telegramMiniAppLinkBase: "https://t.me/hunch_bot/hunch",
+      });
+      assert.equal(prepared.status, "ready");
+      if (prepared.status !== "ready") return;
+      assert.equal(
+        prepared.keyboard?.inline_keyboard[0]?.[0]?.text,
+        "Open on Hunch",
+      );
+      assert.match(
+        prepared.text,
+        /Price snapshot as of 2026\/09\/25 14:21 UTC/,
+      );
     },
   },
   {

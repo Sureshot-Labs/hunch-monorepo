@@ -2022,7 +2022,7 @@ function getDefaults(): IntelPolicyMap {
       dayBudgetUsd: 10,
       estimatedCallCostUsd: 0.08,
       estimatedTriageCallCostUsd: 0.01,
-      maxOutputTokens: 2_000,
+      maxOutputTokens: 3_600,
       candidateLookbackHours: 72,
       activityLookbackHours: 24,
       noteCooldownHours: 24,

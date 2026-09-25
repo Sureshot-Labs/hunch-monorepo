@@ -1208,7 +1208,7 @@ const tests: Array<{ name: string; run: () => void }> = [
           sideLabel: "YES",
         }),
         [
-          "Since the original call, YES has climbed 7¢ to 94¢.",
+          "Since the original call, YES has risen from 87¢ to 94¢.",
           "Rather than locking in gains, the trader continues to hold $8.6K on YES, with +$3.2K in open profit after making $247.7K over the last 30 days.",
         ],
       );
@@ -1236,7 +1236,7 @@ const tests: Array<{ name: string; run: () => void }> = [
           sideLabel: "NO",
         }),
         [
-          "Since the original call, NO has climbed 7¢ to 94¢.",
+          "Since the original call, NO has risen from 87¢ to 94¢.",
           "Rather than locking in gains, the trader continues to hold $8.6K on NO, with +$3.2K in open profit after making $247.7K over the last 30 days.",
         ],
       );

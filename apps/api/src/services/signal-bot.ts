@@ -148,6 +148,7 @@ import {
   buildSignalBotHolderTrackingUrl,
   buildSignalBotMiniAppUrl,
   buildSignalBotMarketStartParam,
+  buildSignalBotResearchStartParam,
   normalizeTelegramMiniAppLinkBase,
   SIGNAL_BOT_TELEGRAM_WEB_APP_ENTRY_PATH,
   SIGNAL_BOT_TELEGRAM_WEB_APP_ONBOARDING_ENTRY_PATH,
@@ -267,6 +268,7 @@ import {
 } from "./signal-delivery.js";
 import {
   telegramRichBold,
+  telegramRichFooter,
   telegramRichItalic,
   telegramRichMetricsTable,
   telegramRichParagraph,
@@ -1147,6 +1149,11 @@ export function buildSignalBotMessage(input: {
   forceOpenMarket?: boolean;
   messageKind?: "initial" | "research_update";
   note: SignalBotNote;
+  openPriceSnapshot?: {
+    asOf: string;
+    price: number;
+    side: "NO" | "YES";
+  } | null;
   copyPolicy?: ResolvedSignalPostCopyPolicy;
   telegramMiniAppLinkBase?: string | null;
 }): {
@@ -1236,6 +1243,17 @@ export function buildSignalBotMessage(input: {
     base: input.telegramMiniAppLinkBase,
     startParam: deliveryMarketStartParam,
   });
+  const researchMiniAppUrl =
+    note.eventId && note.marketId
+      ? buildSignalBotMiniAppUrl({
+          base: input.telegramMiniAppLinkBase,
+          startParam: buildSignalBotResearchStartParam({
+            eventId: note.eventId,
+            marketId: note.marketId,
+            noteId: note.id,
+          }),
+        })
+      : null;
   const tableMarketLabel = normalizeTelegramPresentationAliases(
     neutralSignalBotMarketLabel(notificationCopy.marketLabel),
     presentation,
@@ -1420,6 +1438,13 @@ export function buildSignalBotMessage(input: {
         ]
       : []),
     ...(richInitialPositionTable ? [richInitialPositionTable] : []),
+    ...(researchMiniAppUrl
+      ? [
+          telegramRichFooter(
+            telegramRichUrl("Full research ↗", researchMiniAppUrl),
+          ),
+        ]
+      : []),
     ...(!input.telegramMiniAppLinkBase
       ? [
           telegramRichParagraph(
@@ -1437,6 +1462,9 @@ export function buildSignalBotMessage(input: {
         ]
       : []),
     credentialBlock,
+    ...(researchMiniAppUrl
+      ? [formatTelegramLink("Full research ↗", researchMiniAppUrl)]
+      : []),
     ...(!input.telegramMiniAppLinkBase
       ? [escapeTelegramMarkdownV2("Mini App temporarily unavailable.")]
       : []),
@@ -1527,6 +1555,14 @@ export function buildSignalBotMessage(input: {
         startParam: deliveryMarketStartParam,
         text: formatSignalBotOpenButtonText({
           channel: input.chatType === "channel",
+          snapshot: input.openPriceSnapshot
+            ? {
+                ...input.openPriceSnapshot,
+                sideLabel:
+                  presentation.positions[input.openPriceSnapshot.side]
+                    .shortLabel,
+              }
+            : null,
         }),
       }),
     );
@@ -2325,6 +2361,15 @@ export function buildSignalBotMenuScreen(input: {
               ),
             ),
           ],
+          [
+            callback(
+              toggleRoute("ntf:interest_signals", preferences.interestSignals),
+              toggleLabel(
+                preferences.interestSignals,
+                "Hunches for my interests",
+              ),
+            ),
+          ],
           buildSignalBotMenuNavRow({
             includeHome: true,
             parent: "settings",
@@ -2518,6 +2563,7 @@ function parseSignalBotMenuCallback(
       issues: "order_issues",
       payout: "payouts_rewards",
       position_signals: "position_signals",
+      interest_signals: "interest_signals",
       resolution: "position_resolved",
     };
     const topic = topics[notificationParts[1] ?? ""];
@@ -2577,7 +2623,8 @@ function parseSignalBotMenuCallback(
 function signalBotMenuScreenForNotificationTopic(
   topic: TelegramNotificationTopic,
 ): SignalBotMenuScreenName {
-  if (topic === "position_signals") return "signals";
+  if (topic === "position_signals" || topic === "interest_signals")
+    return "signals";
   if (
     topic === "deposit_received" ||
     topic === "bridge_updates" ||
@@ -4876,6 +4923,20 @@ export async function prepareSignalBotDelivery(input: {
           venue: input.note.marketVenue ?? "unknown",
         }
       : null);
+  const openPriceSnapshot =
+    !allowBuyCta &&
+    !stalePriceSnapshot &&
+    (!deliveryTarget ||
+      (deliveryTarget.eventId === input.note.eventId &&
+        deliveryTarget.marketId === input.note.marketId &&
+        deliveryTarget.side === buySide &&
+        deliveryTarget.venue === input.note.marketVenue))
+      ? {
+          asOf: priceSnapshot.asOf,
+          price: priceSnapshot.displayPrice,
+          side: buySide,
+        }
+      : null;
   const rendered = withSignalBotNotificationSnapshotContext(
     buildSignalBotMessage({
       allowBuyCta,
@@ -4886,11 +4947,13 @@ export async function prepareSignalBotDelivery(input: {
       deliveryTarget,
       messageKind: input.messageKind,
       note: input.note,
+      openPriceSnapshot,
       copyPolicy: input.copyPolicy,
       telegramMiniAppLinkBase: input.telegramMiniAppLinkBase,
     }),
     priceSnapshot.asOf,
     now,
+    openPriceSnapshot != null,
   );
   if (!rendered.publishable) {
     return {
@@ -8280,6 +8343,7 @@ export async function loadSignalBotNotes(
     limit: number;
     noteId?: string | null;
     revisionKind?: "initial" | "research_update" | null;
+    includeSuperseded?: boolean;
   },
 ): Promise<SignalBotNote[]> {
   const order = input.descending ? "desc" : "asc";
@@ -8367,7 +8431,7 @@ export async function loadSignalBotNotes(
         limit 1
       ) holder on true
       where n.note_type = 'signal'
-        and n.status = 'active'
+        and (n.status = 'active' or ($6::boolean and n.status = 'superseded'))
         and n.producer_type = 'holder_research'
         and n.direction in ('up', 'down')
         and ${HOLDER_RESEARCH_PUBLICATION_DECISION_SQL}
@@ -8389,6 +8453,7 @@ export async function loadSignalBotNotes(
       input.limit,
       input.noteId ?? null,
       input.revisionKind ?? null,
+      input.includeSuperseded === true,
     ],
   );
   return rows.map(rowToSignalBotNote);

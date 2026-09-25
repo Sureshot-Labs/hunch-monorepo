@@ -40,6 +40,7 @@ import {
   parseHolderResearchRunArgs,
   parseHolderResearchTriageModelContent,
   parseHolderResearchTriageModelContentV2,
+  resolveVerifiedExternalSourceUrl,
   selectHolderResearchTriageFallbackCandidates,
   selectMissingHolderResearchTriageFallback,
   withHolderResearchBackground,
@@ -88,6 +89,7 @@ import {
   listHolderResearchPromptEvidenceIdsV2,
   parseHolderResearchCachedDecision,
   persistHolderResearchNotes,
+  persistHolderResearchPublicContext,
   selectHolderResearchCandidates,
   type HolderResearchHolder,
   type HolderResearchMarketInput,
@@ -7156,6 +7158,152 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
+    name: "optional public Context is accepted only when complete and does not invalidate the main decision",
+    run: () => {
+      const base = {
+        version: "holder_research_v1",
+        status: "CONTEXT",
+        bucket: "sharp_side",
+        confidence: 0.65,
+        signal_type: "update",
+        direction: "mixed",
+        headline: "Holder positioning remains divided",
+        summary:
+          "Two holder groups disagree on the same contract and the result is still uncertain.",
+        rationale:
+          "The available evidence supports monitoring rather than a directional claim.",
+        evidence_ids: ["market:1"],
+        caveats: [],
+      };
+      const complete = parseHolderResearchAgentOutputV1({
+        ...base,
+        public_context: {
+          headline: "Holders disagree on this market",
+          summary:
+            "Strong holders occupy both sides of the contract, leaving a useful but non-directional observation.",
+          caveats: ["This does not identify who will win."],
+          reason: "holder_disagreement",
+          evidence_ids: ["market:1"],
+          source_urls: [],
+        },
+      });
+      assert.equal(complete.status, "CONTEXT");
+      assert.equal(complete.public_context?.reason, "holder_disagreement");
+      const malformed = parseHolderResearchAgentOutputV1({
+        ...base,
+        public_context: { headline: "Incomplete" },
+      });
+      assert.equal(malformed.status, "CONTEXT");
+      assert.equal(malformed.public_context, null);
+    },
+  },
+  {
+    name: "public explanation context requires a verified source while holder-only context does not",
+    run: async () => {
+      const candidate = sharpMinorityCandidate();
+      const evidenceId = candidate.evidence[0]?.id;
+      assert.ok(evidenceId);
+      const sourceUrl = "https://twitter.com/i/web/status/123456789";
+      const context: NonNullable<
+        HolderResearchAgentOutputV1["public_context"]
+      > = {
+        headline: "A public update explains the market move",
+        summary:
+          "A reported update may explain this market move, but the contract outcome remains uncertain.",
+        caveats: ["The outcome is not settled."],
+        reason: "public_explanation",
+        evidence_ids: [evidenceId],
+        source_urls: [],
+      };
+      const modelMeta = {
+        external_research: {
+          status: "ok",
+          verdict: "unknown",
+          timing: "unknown",
+          summary: "A source was checked.",
+          citations: [
+            { title: "Verified report", url: sourceUrl, publishedAt: null },
+          ],
+          comparableOdds: null,
+        },
+      };
+      let queries = 0;
+      const storedContexts: Record<string, unknown>[] = [];
+      const client = {
+        query: async (sql: string, params: unknown[] = []) => {
+          queries += 1;
+          if (sql.includes("insert into ai_notes")) {
+            const storedContext = (
+              JSON.parse(String(params[6])) as {
+                publicContextV1: Record<string, unknown>;
+              }
+            ).publicContextV1;
+            storedContexts.push(storedContext);
+          }
+          return { rows: [], rowCount: 0 };
+        },
+      };
+      const persist = (publicContext: typeof context) =>
+        persistHolderResearchPublicContext(client as never, {
+          runnerRunId: "holder-context-citations-test",
+          decision: {
+            candidate,
+            modelMeta,
+            output: publishOutput(candidate, {
+              status: "CONTEXT",
+              public_context: publicContext,
+            }),
+          },
+        });
+
+      assert.equal(await persist(context), "invalid");
+      assert.equal(queries, 0);
+      assert.equal(
+        await persist({ ...context, source_urls: [sourceUrl] }),
+        "unchanged",
+      );
+      assert.equal(queries > 0, true);
+      assert.deepEqual(storedContexts.at(-1)?.source_urls, [sourceUrl]);
+      queries = 0;
+      assert.equal(
+        await persist({
+          ...context,
+          source_urls: ["https://x.com/hunch/status/123456789"],
+        }),
+        "unchanged",
+      );
+      assert.equal(queries > 0, true);
+      assert.deepEqual(storedContexts.at(-1)?.source_urls, [sourceUrl]);
+      queries = 0;
+      assert.equal(
+        await persist({
+          ...context,
+          source_urls: ["https://x.com/hunch/status/987654321"],
+        }),
+        "invalid",
+      );
+      assert.equal(queries, 0);
+      assert.equal(
+        await persist({
+          ...context,
+          source_urls: ["https://example.com/hunch/status/123456789"],
+        }),
+        "invalid",
+      );
+      assert.equal(queries, 0);
+      queries = 0;
+      assert.equal(
+        await persist({
+          ...context,
+          reason: "holder_disagreement",
+          headline: "Holders disagree on this market",
+        }),
+        "unchanged",
+      );
+      assert.equal(queries > 0, true);
+    },
+  },
+  {
     name: "model output parser ignores legacy high-conviction execution priority",
     run: () => {
       const parsed = parseHolderResearchAgentOutputV1({
@@ -7484,7 +7632,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.effective.dryRun, false);
       assert.equal(resolved.defaults.pipelineV2Mode, "shadow");
       assert.equal(resolved.effective.pipelineV2Mode, "research");
-      assert.equal(resolved.defaults.maxOutputTokens, 2_000);
+      assert.equal(resolved.defaults.maxOutputTokens, 3_600);
       assert.equal(resolved.defaults.estimatedCallCostUsd, 0.08);
       assert.equal(resolved.defaults.estimatedTriageCallCostUsd, 0.01);
       assert.equal(resolved.defaults.model, "openai/gpt-6-sol");
@@ -8799,6 +8947,79 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         ),
         false,
       );
+    },
+  },
+  {
+    name: "X status citations accept provider-verified host aliases without trusting spoofed URLs",
+    run: async () => {
+      const providerUrl = "https://x.com/official/status/123456789?s=20";
+      const modelUrl = "https://twitter.com/official/status/123456789";
+      assert.equal(
+        resolveVerifiedExternalSourceUrl(modelUrl, [providerUrl]),
+        providerUrl,
+      );
+      assert.equal(
+        resolveVerifiedExternalSourceUrl(
+          "https://x.com.evil.test/official/status/123456789",
+          [providerUrl],
+        ),
+        null,
+      );
+      assert.equal(
+        resolveVerifiedExternalSourceUrl(
+          "https://twitter.com/official/status/987654321",
+          [providerUrl],
+        ),
+        null,
+      );
+      const p = {
+        ...policy(),
+        externalSearchEnabled: true,
+        forceExternalSearchForInvestigations: true,
+      };
+      const result = await runExternalResearch({
+        candidate: sharpMinorityCandidate(p),
+        policy: p,
+        dryRun: false,
+        researchNeed: "news_timing",
+        useV2: true,
+        apiKey: "test-only",
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              citations: [providerUrl],
+              usage: {
+                num_server_side_tools_used: 1,
+                server_side_tool_usage_details: { x_search_calls: 1 },
+              },
+              output_text: JSON.stringify({
+                status: "ok",
+                verdict: "unknown",
+                timing: "unknown",
+                summary:
+                  "A dated official post supplies relevant outside context.",
+                citations: [
+                  { title: "Official post", url: modelUrl, publishedAt: null },
+                ],
+                comparableOdds: null,
+                freshFact: {
+                  fact: "An official announcement changed the relevant schedule.",
+                  sourceUrl: modelUrl,
+                  eventAt: "2026-09-24T12:00:00.000Z",
+                  matchesExactContract: true,
+                  supportsSelectedSide: true,
+                  trackerUpdateOnly: false,
+                },
+              }),
+            }),
+            { status: 200 },
+          ),
+      });
+      assert.equal(result.status, "ok");
+      assert.equal(result.citations[0]?.url, providerUrl);
+      assert.equal(result.freshFact?.sourceUrl, providerUrl);
+      assert.equal(result.webSearchCalls, 0);
+      assert.equal(result.xSearchCalls, 1);
     },
   },
   {

@@ -123,6 +123,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
             deliveryEnabled: false,
             positionResolutionProducerEnabled: true,
             positionSignalEnqueueEnabled: false,
+            interestSignalEnqueueEnabled: true,
             version: 1,
           },
           source: "db",

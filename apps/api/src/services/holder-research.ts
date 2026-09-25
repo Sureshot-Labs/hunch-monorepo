@@ -73,6 +73,7 @@ import {
 } from "./holder-research-performance.js";
 import { parseMarketOutcomes } from "./wallet-intel-helpers.js";
 import { resolveHolderResearchPublishHorizon } from "./holder-research-horizon.js";
+import { resolveVerifiedExternalSourceUrl } from "./holder-research-source-url.js";
 import {
   resolveWalletTrackingSubjectsEnabled,
   upsertWalletTrackingSubjects,
@@ -1828,10 +1829,12 @@ export function buildHolderResearchQualityAssessment(
   candidate: HolderResearchCandidate,
   policy: HolderResearchPolicy,
   publicContextRisk: HolderResearchPublicContextRisk = "unknown",
+  selectedEvidenceIds?: string[],
 ): HolderResearchQualityAssessment {
   const actor = buildHolderResearchActorSummary({
     candidate,
-    evidenceIds: candidate.evidence.map((evidence) => evidence.id),
+    evidenceIds:
+      selectedEvidenceIds ?? candidate.evidence.map((evidence) => evidence.id),
     policy,
   });
   const marketType = classifyHolderResearchMarketType(candidate.market);
@@ -1942,6 +1945,30 @@ function estimatedHolderResearchActionPrice(
   return candidate.side === "YES"
     ? candidate.market.yesProbability
     : 1 - candidate.market.yesProbability;
+}
+
+export function classifyHolderResearchHunchStrength(input: {
+  candidate: HolderResearchCandidate;
+  output: HolderResearchAgentOutputV1;
+  policy: HolderResearchPolicy;
+}): { version: 1; grade: "strong" | "good"; reasons: string[] } {
+  const quality = buildHolderResearchQualityAssessment(
+    input.candidate,
+    input.policy,
+    normalizePublicContextRisk(input.output.public_context_risk),
+    input.output.evidence_ids,
+  );
+  const strong =
+    quality.credentialStrength === "strong" &&
+    (quality.actorStrength === "cluster" ||
+      quality.actorStrength === "exceptional_single") &&
+    quality.flowProfile === "aligned" &&
+    quality.publicContextRisk !== "conflicts_holder";
+  return {
+    version: 1,
+    grade: strong ? "strong" : "good",
+    reasons: strong ? ["strong_credentials", "aligned_positioning"] : [],
+  };
 }
 
 export function evaluateHolderResearchPublishRiskGates(input: {
@@ -6524,6 +6551,19 @@ export function adaptHolderResearchFinalOutputV2(input: {
         ? evidenceIds
         : candidate.evidence.slice(0, 1).map((evidence) => evidence.id),
     caveats: input.output.copy?.caveats ?? [],
+    public_context:
+      input.output.verdict === "context"
+        ? input.output.public_context
+          ? {
+              ...input.output.public_context,
+              evidence_ids: input.output.public_context.evidence_ids
+                .map((id) => evidenceAliases.get(id) ?? id)
+                .filter((id) =>
+                  candidate.evidence.some((entry) => entry.id === id),
+                ),
+            }
+          : null
+        : null,
   };
   return applyHolderResearchPublishQualityGate({
     candidate,
@@ -7058,6 +7098,11 @@ export async function persistHolderResearchNotes(
             signalEvidence,
             signalEvidenceVersion: 1,
             publicationDecisionV1: HOLDER_RESEARCH_PUBLICATION_DECISION_V1,
+            hunchStrengthV1: classifyHolderResearchHunchStrength({
+              candidate,
+              output: decision.output,
+              policy: params.policy,
+            }),
             quality: buildHolderResearchQualityAssessment(
               candidate,
               params.policy,
@@ -7283,6 +7328,191 @@ export async function persistHolderResearchNotes(
   }
 
   return stats;
+}
+
+export async function persistHolderResearchPublicContext(
+  client: PoolClient,
+  input: {
+    runnerRunId: string;
+    decision: HolderResearchPersistDecision;
+  },
+): Promise<"persisted" | "unchanged" | "invalid"> {
+  const { candidate, output, modelMeta } = input.decision;
+  const publicContext = output.public_context;
+  if (output.status !== "CONTEXT" || !publicContext) return "invalid";
+  const allowedEvidence = new Set(candidate.evidence.map((item) => item.id));
+  if (
+    (publicContext.evidence_ids.length === 0 &&
+      publicContext.source_urls.length === 0) ||
+    (publicContext.reason === "public_explanation" &&
+      publicContext.source_urls.length === 0) ||
+    publicContext.evidence_ids.some((id) => !allowedEvidence.has(id))
+  )
+    return "invalid";
+  const research = normalizeHolderResearchExternalResearchV2(
+    parseHolderResearchExternalResearchV2(modelMeta.external_research),
+  );
+  const citedUrls = research.citations.map((item) => item.url);
+  const verifiedSourceUrls = publicContext.source_urls.map((url) =>
+    /^https?:\/\//i.test(url)
+      ? resolveVerifiedExternalSourceUrl(url, citedUrls)
+      : null,
+  );
+  if (verifiedSourceUrls.some((url) => url === null)) {
+    return "invalid";
+  }
+  const canonicalPublicContext = {
+    ...publicContext,
+    source_urls: [...new Set(verifiedSourceUrls as string[])],
+  };
+  const publicPayload = {
+    headline: canonicalPublicContext.headline,
+    summary: canonicalPublicContext.summary,
+    caveats: canonicalPublicContext.caveats,
+    reason: canonicalPublicContext.reason,
+    evidenceIds: [...canonicalPublicContext.evidence_ids].sort(),
+    sourceUrls: [...canonicalPublicContext.source_urls].sort(),
+    side: candidate.side,
+  };
+  const fingerprint = createHash("sha256")
+    .update(JSON.stringify(publicPayload))
+    .digest("hex");
+  const publicEvidenceRefs = candidate.evidence
+    .filter((evidence) => publicContext.evidence_ids.includes(evidence.id))
+    .map((evidence) => ({
+      evidence_id: evidence.id,
+      headline: evidence.title,
+      relevance: evidence.relevance,
+    }));
+  const noteKey = `holder_context:v1:${createHash("sha256")
+    .update(`${input.runnerRunId}:${candidate.key}`)
+    .digest("hex")}`;
+  try {
+    await client.query("begin");
+    await client.query(
+      `select pg_advisory_xact_lock(hashtextextended($1::text, 0))`,
+      [`holder_context:${candidate.market.marketId}`],
+    );
+    const { rows: latestRows } = await client.query<{
+      id: string;
+      note_type: string;
+      status: string;
+      fingerprint: string | null;
+    }>(
+      `select id, note_type, status,
+              metrics->>'publicFingerprint' as fingerprint
+       from ai_notes
+       where producer_type = 'holder_research'
+         and source_kind = 'market'
+         and source_id = $1
+         and note_type in ('signal', 'context')
+         and status <> 'retracted'
+         and (note_type = 'context' or (
+           metrics #>> '{publicationDecisionV1,status}' = 'PUBLISH'
+           and metrics #>> '{publicationDecisionV1,authority}' = 'holder_research_quality_gate'
+         ))
+       order by created_at desc, id desc
+       limit 1`,
+      [candidate.market.marketId],
+    );
+    const latest = latestRows[0];
+    if (latest?.note_type === "context" && latest.fingerprint === fingerprint) {
+      await client.query("commit");
+      return "unchanged";
+    }
+    const { rows: inserted } = await client.query<{ id: string }>(
+      `insert into ai_notes (
+         note_key, note_type, status, title, description, rationale,
+         source_kind, source_id, producer_type, producer_run_id,
+         lineage, signal_type, direction, confidence, reason_codes, metrics, model_meta
+       ) values (
+         $1, 'context', 'active', $2, $3, null,
+         'market', $4, 'holder_research', $5,
+         $6::jsonb, null, null, null, '[]'::jsonb, $7::jsonb, $8::jsonb
+       ) on conflict (note_key) do nothing returning id`,
+      [
+        noteKey,
+        publicContext.headline,
+        publicContext.summary,
+        candidate.market.marketId,
+        input.runnerRunId,
+        JSON.stringify({ candidate_key: candidate.key, side: candidate.side }),
+        JSON.stringify({
+          publicContextV1: canonicalPublicContext,
+          publicFingerprint: fingerprint,
+          market: {
+            id: candidate.market.marketId,
+            venue: candidate.market.venue,
+            eventId: candidate.market.eventId,
+          },
+        }),
+        JSON.stringify({
+          caveats: publicContext.caveats,
+          evidence_refs: publicEvidenceRefs,
+        }),
+      ],
+    );
+    const noteId = inserted[0]?.id;
+    if (!noteId) {
+      await client.query("commit");
+      return "unchanged";
+    }
+    await client.query(
+      `insert into ai_note_targets
+       (note_id, target_kind, target_id, is_primary, target_rank, affinity_score, target_meta)
+       values ($1, 'market', $2, true, 0, null, $3::jsonb)`,
+      [
+        noteId,
+        candidate.market.marketId,
+        JSON.stringify({ side: candidate.side, venue: candidate.market.venue }),
+      ],
+    );
+    for (const target of buildHolderResearchWalletTargets(
+      candidate,
+      publicContext.evidence_ids,
+    ).slice(0, 5)) {
+      await client.query(
+        `insert into ai_note_targets
+         (note_id, target_kind, target_id, is_primary, target_rank,
+          affinity_score, target_meta)
+         values ($1, 'wallet', $2, false, $3, $4, $5::jsonb)
+         on conflict (note_id, target_kind, target_id) do nothing`,
+        [
+          noteId,
+          target.walletId,
+          target.rank,
+          target.affinityScore,
+          JSON.stringify(target.meta),
+        ],
+      );
+    }
+    for (const evidenceId of publicContext.evidence_ids) {
+      await client.query(
+        `insert into ai_note_evidence (note_id, evidence_id, relevance)
+         values ($1, $2, null) on conflict do nothing`,
+        [noteId, evidenceId],
+      );
+    }
+    const { rows: previousContexts } = await client.query<{ id: string }>(
+      `update ai_notes set status = 'superseded', updated_at = now()
+       where producer_type = 'holder_research'
+         and source_kind = 'market' and source_id = $1
+         and note_type = 'context' and status = 'active' and id <> $2
+       returning id`,
+      [candidate.market.marketId, noteId],
+    );
+    if (previousContexts[0]) {
+      await client.query(
+        `update ai_notes set supersedes_note_id = $1 where id = $2`,
+        [previousContexts[0].id, noteId],
+      );
+    }
+    await client.query("commit");
+    return "persisted";
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    throw error;
+  }
 }
 
 function objectRecord(value: unknown): Record<string, unknown> {

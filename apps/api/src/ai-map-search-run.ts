@@ -1343,6 +1343,7 @@ function normalizeEvidenceReliability(
 ): Pick<MapEvidence, "sourceTier" | "confirmation"> {
   const isSocialDomain =
     hostMatchesDomain(sourceDomain, "x.com") ||
+    hostMatchesDomain(sourceDomain, "twitter.com") ||
     hostMatchesDomain(sourceDomain, "instagram.com") ||
     hostMatchesDomain(sourceDomain, "facebook.com") ||
     hostMatchesDomain(sourceDomain, "tiktok.com");
@@ -3557,6 +3558,7 @@ async function runMapSearchWithSnapshot({
         const callStartedMs = Date.now();
         const freshnessCutoffMs = callStartedMs - nodeWindowHours * 3_600_000;
         const acceptedDomainCounts = new Map<string, number>();
+        let acceptedXCount = 0;
         let acceptedUnconfirmedCount = 0;
         for (const itemEvidence of agentData.evidence.slice(
           0,
@@ -3574,10 +3576,10 @@ async function runMapSearchWithSnapshot({
             }
           }
           const domainCount = acceptedDomainCounts.get(sourceDomain) ?? 0;
-          if (
-            sourceDomain === "x.com" &&
-            domainCount >= args.maxXEvidencePerCall
-          ) {
+          const xSource =
+            hostMatchesDomain(sourceDomain, "x.com") ||
+            hostMatchesDomain(sourceDomain, "twitter.com");
+          if (xSource && acceptedXCount >= args.maxXEvidencePerCall) {
             droppedBySourceCapCount += 1;
             continue;
           }
@@ -3605,6 +3607,7 @@ async function runMapSearchWithSnapshot({
           });
           if (evidenceById.has(evidenceId)) continue;
           acceptedDomainCounts.set(sourceDomain, domainCount + 1);
+          if (xSource) acceptedXCount += 1;
           const evidence: MapEvidence = {
             id: evidenceId,
             headline: itemEvidence.headline,
@@ -3985,7 +3988,7 @@ async function runMapSearchWithSnapshot({
 
       if (!args.verbose) {
         console.log(
-          `${logPrefix()} call_done #${record.callIndex} status=${record.statusCode} parse=${record.parseStatus} new_ev=${record.newEvidenceCount} drop_fresh=${record.droppedByFreshnessCount} drop_src=${record.droppedBySourceCapCount} drop_dom=${record.droppedByDomainPolicyCount} tools=${record.toolAttemptCount} cost=${formatUsd(record.costEstimate.chargedCostUsd)} src=${record.costEstimate.costSource} stop=${record.budgetStop ?? "-"} err=${record.error ? preview(record.error, 120) : "-"}`,
+          `${logPrefix()} call_done #${record.callIndex} status=${record.statusCode} parse=${record.parseStatus} new_ev=${record.newEvidenceCount} drop_fresh=${record.droppedByFreshnessCount} drop_src=${record.droppedBySourceCapCount} drop_dom=${record.droppedByDomainPolicyCount} tools=${record.toolAttemptCount} reported_web=${record.usage.toolUsageDetails.web_search_calls} reported_x=${record.usage.toolUsageDetails.x_search_calls} cost=${formatUsd(record.costEstimate.chargedCostUsd)} src=${record.costEstimate.costSource} stop=${record.budgetStop ?? "-"} err=${record.error ? preview(record.error, 120) : "-"}`,
         );
       }
 

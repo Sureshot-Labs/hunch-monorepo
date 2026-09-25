@@ -57,12 +57,10 @@ function snapshotRichText(
 
 export function withSignalBotNotificationSnapshotContext<
   T extends { richMessage: TelegramInputRichMessage; text: string },
->(rendered: T, asOf: string, now: Date): T {
+>(rendered: T, asOf: string, now: Date, forceNotice = false): T {
   const snapshotMs = Date.parse(asOf);
-  if (
-    !Number.isFinite(snapshotMs) ||
-    now.getTime() - snapshotMs <= SIGNAL_BOT_QUOTE_MAX_AGE_MS
-  ) {
+  const aged = now.getTime() - snapshotMs > SIGNAL_BOT_QUOTE_MAX_AGE_MS;
+  if (!Number.isFinite(snapshotMs) || (!aged && !forceNotice)) {
     return rendered;
   }
   const timestamp = new Date(snapshotMs)
@@ -73,10 +71,11 @@ export function withSignalBotNotificationSnapshotContext<
   const notice = `Price snapshot as of ${timestamp} UTC`;
   return {
     ...rendered,
-    text: `${snapshotPriceLanguage(rendered.text)}\n\n${notice}`,
+    text: `${aged ? snapshotPriceLanguage(rendered.text) : rendered.text}\n\n${notice}`,
     richMessage: {
       blocks: [
         ...rendered.richMessage.blocks.map((block) => {
+          if (!aged) return block;
           if ("text" in block) {
             return { ...block, text: snapshotRichText(block.text) };
           }

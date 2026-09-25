@@ -33,6 +33,26 @@ const holderResearchUpdateEvidenceSchema = z
   .nullable()
   .optional();
 
+export const holderResearchPublicContextSchema = z
+  .object({
+    headline: z.string().trim().min(8).max(140),
+    summary: z.string().trim().min(24).max(320),
+    caveats: z.array(z.string().trim().min(1).max(180)).max(3),
+    reason: z.enum([
+      "holder_disagreement",
+      "positioning",
+      "public_explanation",
+      "conditional_thesis",
+    ]),
+    evidence_ids: z.array(z.string().trim().min(1).max(160)).max(6),
+    source_urls: z.array(z.string().url().max(2_000)).max(6),
+  })
+  .strict();
+
+export type HolderResearchPublicContext = z.infer<
+  typeof holderResearchPublicContextSchema
+>;
+
 export const holderResearchAgentOutputV1Schema = z
   .object({
     version: z.literal("holder_research_v1"),
@@ -67,6 +87,7 @@ export const holderResearchAgentOutputV1Schema = z
     execution_priority_reason: z.string().trim().max(180).default(""),
     evidence_ids: z.array(z.string().trim().min(1).max(160)).min(1).max(6),
     caveats: z.array(z.string().trim().min(1).max(180)).max(3),
+    public_context: holderResearchPublicContextSchema.nullable().optional(),
   })
   .strict();
 
@@ -269,6 +290,7 @@ export const holderResearchFinalOutputV2Schema = z
       })
       .strict()
       .nullable(),
+    public_context: holderResearchPublicContextSchema.nullable().optional(),
   })
   .strict();
 
@@ -351,6 +373,10 @@ export function parseHolderResearchAgentOutputV1(
     execution_priority_reason: "",
     evidence_ids: asStringArray(record.evidence_ids, 6, 160),
     caveats: asStringArray(record.caveats, 3, 180),
+    public_context:
+      holderResearchPublicContextSchema.safeParse(record.public_context).success
+        ? holderResearchPublicContextSchema.parse(record.public_context)
+        : null,
   };
   return holderResearchAgentOutputV1Schema.parse(repaired);
 }
@@ -637,6 +663,10 @@ export function parseHolderResearchFinalOutputV2(
             ),
             caveats: asStringArray(copy.caveats, 2, 180),
           },
+    public_context:
+      holderResearchPublicContextSchema.safeParse(record.public_context).success
+        ? holderResearchPublicContextSchema.parse(record.public_context)
+        : null,
   });
 }
 
@@ -801,6 +831,7 @@ export function buildHolderResearchSystemPrompt(): string {
     ...HOLDER_RESEARCH_PUBLIC_COPY_RULES,
     "Summary: two short narrative sentences, normally 25-45 words, always at most 320 characters. Explain the outcome thesis and its decisive evidence/tension; make the reader understand the setup in 2 seconds. A current position can be meaningful without proving a new action.",
     "Rationale: exactly one short internal sentence explaining why this evidence supports the chosen status. confidence is a research-support judgment, never a calibrated probability of the outcome.",
+    "For CONTEXT, public_context may contain one independently useful public observation: exact contract, observed holder positioning, concrete uncertainty, and a caveat. It must not be an internal rejection reason or imply a trade recommendation. Use null for PUBLISH or SKIP, and when no supported observation exists. Cite only supplied evidence IDs and external source URLs actually returned by research.",
   ].join("\n");
 }
 
@@ -831,6 +862,8 @@ export function buildHolderResearchUserPrompt(input: {
         "null, or {sourceUrl, matchesExactContract, factSupported, factMaterialToThesis} for a genuinely new dated fact since the previous note",
       evidence_ids: "subset of allowedEvidenceIds supporting the assessment",
       caveats: "0-2 short material limitations",
+      public_context:
+        "null, or {headline,summary,caveats,reason,evidence_ids,source_urls} only for a useful CONTEXT observation; reason is holder_disagreement | positioning | public_explanation | conditional_thesis",
     },
     rules: [
       "Apply the shared investigation, assessment and public-copy rules. Use supplied candidate.mkt.sideCopy and labels for exact outcome meaning.",
@@ -855,6 +888,7 @@ export function buildHolderResearchSystemPromptV2(): string {
     ...HOLDER_RESEARCH_PUBLIC_COPY_RULES,
     "why_now: one or two concise sentences, always at most 260 characters, explaining the concrete outcome thesis and its present relevance. Name a verified update when available; do not require or invent a new event. The product renders the exact market side, executable price and credential table separately.",
     "If verdict is context or skip, copy must be null. Rationale is one short internal sentence, not a probability forecast.",
+    "For verdict=context, public_context may contain a standalone useful observation about the exact contract with supported evidence and material uncertainty. Use null when it would merely explain a rejection. For publish or skip use null. Cite only supplied evidence IDs and external URLs actually returned by research.",
   ].join("\n");
 }
 
@@ -883,6 +917,8 @@ export function buildHolderResearchUserPromptV2(input: {
           "one or two concise sentences; at most 260 characters; the thesis and its present relevance, including a verified change only when supported",
         caveats: "0-2 material limitations",
       },
+      public_context:
+        "null, or {headline,summary,caveats,reason,evidence_ids,source_urls} only for a useful context observation; reason is holder_disagreement | positioning | public_explanation | conditional_thesis",
     },
     rules: [
       "Apply the shared investigation, assessment and public-copy rules. Use null copy for context or skip.",

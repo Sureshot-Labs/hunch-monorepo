@@ -8,7 +8,8 @@ export type TelegramNotificationTopic =
   | "order_issues"
   | "payouts_rewards"
   | "position_resolved"
-  | "position_signals";
+  | "position_signals"
+  | "interest_signals";
 
 export type TelegramNotificationPreferences = {
   bridgeUpdates: boolean;
@@ -18,6 +19,7 @@ export type TelegramNotificationPreferences = {
   payoutsRewards: boolean;
   positionResolved: boolean;
   positionSignals: boolean;
+  interestSignals: boolean;
   reachable: boolean;
   userId: string;
 };
@@ -31,6 +33,7 @@ type TelegramNotificationPreferencesRow = {
   payouts_rewards: boolean;
   position_resolved: boolean;
   position_signals: boolean;
+  interest_signals: boolean;
   reachable: boolean;
 };
 
@@ -45,6 +48,7 @@ function rowToPreferences(
     payoutsRewards: row.payouts_rewards,
     positionResolved: row.position_resolved,
     positionSignals: row.position_signals,
+    interestSignals: row.interest_signals,
     reachable: row.reachable,
     userId: row.user_id,
   };
@@ -121,6 +125,13 @@ export async function ensureTelegramNotificationPreferences(input: {
             then now()
           else telegram_notification_preferences.position_signals_enabled_at
         end,
+        interest_signals_enabled_at = case
+          when $2::boolean
+            and telegram_notification_preferences.reachable = false
+            and telegram_notification_preferences.interest_signals = true
+            then now()
+          else telegram_notification_preferences.interest_signals_enabled_at
+        end,
         reachable = case
           when $2::boolean then true
           else telegram_notification_preferences.reachable
@@ -143,6 +154,7 @@ export async function ensureTelegramNotificationPreferences(input: {
         bridge_updates,
         payouts_rewards,
         position_signals,
+        interest_signals,
         reachable
     `,
     [String(input.telegramUserId), input.markStarted === true],
@@ -189,6 +201,10 @@ const topicColumns: Record<
     enabled: "position_signals",
     enabledAt: "position_signals_enabled_at",
   },
+  interest_signals: {
+    enabled: "interest_signals",
+    enabledAt: "interest_signals_enabled_at",
+  },
 };
 
 export async function setTelegramNotificationTopic(input: {
@@ -224,6 +240,7 @@ export async function setTelegramNotificationTopic(input: {
         bridge_updates,
         payouts_rewards,
         position_signals,
+        interest_signals,
         reachable
     `,
     [preferences.userId, input.enabled],

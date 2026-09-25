@@ -7,6 +7,8 @@ export const SIGNAL_BOT_TELEGRAM_WEB_APP_ONBOARDING_ENTRY_PATH =
 const TELEGRAM_WEB_APP_START_PARAM_QUERY = "tgWebAppStartParam";
 const SIGNAL_BOT_ROUTE_ID_RE = /^[A-Za-z0-9:_-]{1,160}$/;
 const SIGNAL_BOT_SAFE_ROUTE_ID_RE = /^[A-Za-z0-9_-]{1,58}$/;
+const SIGNAL_BOT_NOTE_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SIGNAL_BOT_WALLET_ADDRESS_RE = /^[A-Za-z0-9]{3,64}$/;
 const SIGNAL_BOT_CHAIN_RE = /^[a-z0-9-]{1,16}$/;
 
@@ -136,6 +138,28 @@ export function buildSignalBotMarketStartParam(input: {
   }
   return fitSignalBotStartParam(
     `m_${encodeSignalBotStartAppPayload(payload.join("|"))}`,
+  );
+}
+
+export function buildSignalBotResearchStartParam(input: {
+  eventId: string;
+  marketId: string;
+  noteId: string;
+}): string | null {
+  const eventId = input.eventId.trim();
+  const marketId = input.marketId.trim();
+  const noteId = input.noteId.trim();
+  if (
+    !isSignalBotRouteId(eventId) ||
+    !isSignalBotRouteId(marketId) ||
+    !SIGNAL_BOT_NOTE_ID_RE.test(noteId)
+  ) {
+    return null;
+  }
+  return fitSignalBotStartParam(
+    `h_${encodeSignalBotStartAppPayload(
+      [eventId, marketId, noteId].join("|"),
+    )}`,
   );
 }
 
