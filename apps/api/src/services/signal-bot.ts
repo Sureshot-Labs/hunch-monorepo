@@ -51,9 +51,15 @@ import {
 import { loadClusterMarketNativeQuotes } from "./cluster-execution-quotes.js";
 import { buildSignalPublicationSnapshot } from "./signal-publication-snapshot.js";
 import {
+  isSignalBotQuoteFresh,
   normalizeTestSignalOutcome,
+  SIGNAL_BOT_NOTIFICATION_SNAPSHOT_MAX_AGE_MS,
   SIGNAL_BOT_QUOTE_MAX_AGE_MS,
 } from "./signal-bot-delivery-policy.js";
+import {
+  signalBotPositionPriceLabel,
+  withSignalBotNotificationSnapshotContext,
+} from "./signal-bot-notification-snapshot.js";
 import {
   HOLDER_RESEARCH_PUBLICATION_DECISION_V1_METRICS_JSON,
   parseHolderResearchUpdateV1,
@@ -672,21 +678,6 @@ function cleanSignalBotDisplayText(
 
 function neutralSignalBotMarketLabel(value: string): string {
   return value.replace(/^(?:YES|NO)\s+on\s+/i, "").trim();
-}
-
-function signalBotPositionPriceLabel(input: {
-  side: "NO" | "YES";
-  sideLabel: string;
-}): string {
-  const sideLabel = input.sideLabel.trim();
-  if (
-    !sideLabel ||
-    sideLabel.toUpperCase() === input.side ||
-    /^(?:YES|NO)\s+on\b|^against\b/i.test(sideLabel)
-  ) {
-    return `${input.side} price`;
-  }
-  return `${sideLabel} price`;
 }
 
 export function resolveSignalBotBuySide(
@@ -4804,7 +4795,7 @@ export async function prepareSignalBotDelivery(input: {
     !Number.isFinite(priceAsOfMs) || priceAsOfMs > now.getTime();
   const stalePriceSnapshot =
     !invalidPriceSnapshotTime &&
-    now.getTime() - priceAsOfMs > SIGNAL_BOT_QUOTE_MAX_AGE_MS;
+    now.getTime() - priceAsOfMs > SIGNAL_BOT_NOTIFICATION_SNAPSHOT_MAX_AGE_MS;
   if (
     invalidPriceSnapshotTime ||
     (stalePriceSnapshot && !input.allowStalePriceSnapshot)
@@ -4826,6 +4817,9 @@ export async function prepareSignalBotDelivery(input: {
     stalePriceSnapshot && input.allowStalePriceSnapshot === true;
   const requestedBuy =
     !input.forceOpenMarket &&
+    (input.redis != null ||
+      input.resolvedDelivery != null ||
+      isSignalBotQuoteFresh(priceAsOfMs, now.getTime())) &&
     (!stalePriceSnapshotBypassed ||
       (input.allowStaleBuyCtaForTest === true && input.redis != null)) &&
     (input.messageKind === "initial" || update?.ctaIntent === "buy");
@@ -4888,18 +4882,22 @@ export async function prepareSignalBotDelivery(input: {
           venue: input.note.marketVenue ?? "unknown",
         }
       : null);
-  const rendered = buildSignalBotMessage({
-    allowBuyCta,
-    appBaseUrl: input.appBaseUrl,
-    buyAmountUsd: input.buyAmountUsd,
-    chatType: input.chatType,
-    deliveryRef: input.deliveryRef,
-    deliveryTarget,
-    messageKind: input.messageKind,
-    note: input.note,
-    copyPolicy: input.copyPolicy,
-    telegramMiniAppLinkBase: input.telegramMiniAppLinkBase,
-  });
+  const rendered = withSignalBotNotificationSnapshotContext(
+    buildSignalBotMessage({
+      allowBuyCta,
+      appBaseUrl: input.appBaseUrl,
+      buyAmountUsd: input.buyAmountUsd,
+      chatType: input.chatType,
+      deliveryRef: input.deliveryRef,
+      deliveryTarget,
+      messageKind: input.messageKind,
+      note: input.note,
+      copyPolicy: input.copyPolicy,
+      telegramMiniAppLinkBase: input.telegramMiniAppLinkBase,
+    }),
+    priceSnapshot.asOf,
+    now,
+  );
   if (!rendered.publishable) {
     return {
       audit: {

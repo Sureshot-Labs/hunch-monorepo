@@ -56,6 +56,7 @@ import {
   adaptHolderResearchFinalOutputV2,
   applyHolderResearchCooldowns,
   applyHolderResearchLivePriceChecks,
+  applyHolderResearchPreviousDecisionContext,
   applyHolderResearchPublishQualityGate,
   assessHolderResearchHorizonException,
   buildHolderResearchActorSummary,
@@ -79,6 +80,7 @@ import {
   evaluateResolvedHolderResearchNotes,
   evaluateHolderResearchDecisionCache,
   enrichHolderResearchFirstObservedActivity,
+  enrichHolderResearchHolderContext,
   enrichHolderResearchLivePositions,
   HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
   isSharpHolder,
@@ -396,6 +398,228 @@ function longHorizonCandidate(p: HolderResearchPolicy) {
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
   {
+    name: "V1 triage receives contract and opposing holder without inventing entry or bankroll",
+    run: () => {
+      const p = policy({ promptHoldersLimit: 2 });
+      const candidate = sharpMinorityCandidate(p, {
+        marketDescription:
+          "Only the official second-round result before the deadline counts.",
+        resolutionSource: "Official election commission",
+        holders: [
+          holder("NO", { walletUsdLikeBalance: 0, ownerUsdLikeBalance: null }),
+          holder("YES", { positionUsd: 8_000, resolvedWinRateEdge30d: 0.22 }),
+        ],
+      });
+      const input = buildHolderResearchTriageCandidatePromptJson(
+        candidate,
+        p,
+        new Date("2026-01-02T00:00:00.000Z"),
+      );
+      assert.equal(input.currentDate, "2026-01-02T00:00:00.000Z");
+      assert.match(JSON.stringify(input.mkt), /second-round/);
+      const holders = input.holders as Array<Record<string, unknown>>;
+      assert.deepEqual(
+        holders.map((entry) => entry.side),
+        ["NO", "YES"],
+      );
+      assert.equal(holders[0]?.entry, null);
+      assert.equal(holders[0]?.positionSnapshotAt, null);
+      assert.equal(holders[1]?.edgeZ30d, 2.1);
+      const cash = holders[0]?.observedCash as Record<string, unknown>;
+      assert.equal(cash.walletUsdLike, 0);
+      assert.equal(cash.ownerUsdLike, null);
+      assert.match(String(cash.scope), /not total wealth/);
+      const final = buildHolderResearchCandidatePromptJson(candidate, p);
+      assert.deepEqual(
+        (final.holders as Array<Record<string, unknown>>).map(
+          (entry) => entry.side,
+        ),
+        ["NO", "YES"],
+      );
+    },
+  },
+  {
+    name: "cross-candidate related holdings are restored with one bounded existing query",
+    run: async () => {
+      const p = policy({ maxHolderContextPositionsPerHolder: 2 });
+      const first = sharpMinorityCandidate(p, {
+        marketId: "polymarket:first",
+        holders: [holder("NO", { positionUsd: 10_000 })],
+      });
+      const second = sharpMinorityCandidate(p, {
+        marketId: "polymarket:second",
+        holders: [holder("NO", { positionUsd: 20_000 })],
+      });
+      let queries = 0;
+      const db = {
+        query: async () => {
+          queries++;
+          return { rows: [] };
+        },
+      } as unknown as import("pg").PoolClient;
+      const result = await enrichHolderResearchHolderContext(
+        db,
+        [first, second, second],
+        p,
+      );
+      assert.equal(queries, 1);
+      assert.deepEqual(
+        result[0]?.market.holders[0]?.relatedOpenPositions.map(
+          (position) => position.marketId,
+        ),
+        ["polymarket:second"],
+      );
+      assert.deepEqual(
+        result[1]?.market.holders[0]?.relatedOpenPositions.map(
+          (position) => position.marketId,
+        ),
+        ["polymarket:first"],
+      );
+      assert.equal(
+        result[0]?.market.holders[0]?.relatedOpenPositions[0]?.snapshotAt,
+        null,
+      );
+      assert.equal(first.market.holders[0]?.relatedOpenPositions.length, 0);
+    },
+  },
+  {
+    name: "opposing evidence is a caveat not a buy target or automatic V2 veto",
+    run: () => {
+      const p = policy({ publishMinScore: 0 });
+      const candidate = sharpMinorityCandidate(p, {
+        holders: [holder("NO"), holder("YES", { positionUsd: 20_000 })],
+        livePriceCheck: {
+          blockersBySide: { YES: [], NO: [] },
+          checkedAt: new Date().toISOString(),
+          fresh: true,
+          sideBuyPrices: { YES: 0.55, NO: 0.45 },
+          tokenIds: ["yes", "no"],
+          yesProbability: 0.55,
+        },
+      });
+      candidate.evidence.push({
+        id: `holder:${holder("YES").walletId}:YES`,
+        kind: "holder",
+        title: "Opposing holder",
+        summary: "A strong opposite-side position.",
+        relevance: 0.8,
+      });
+      const payload = buildHolderResearchCandidatePromptJsonV2(
+        candidate,
+        p,
+        parseHolderResearchExternalResearchV2({}),
+      );
+      const evidence = payload.evidence as Array<{
+        id: string;
+        side: "YES" | "NO" | null;
+      }>;
+      const selectedId = evidence.find((entry) => entry.side === "NO")?.id;
+      const opposingId = evidence.find((entry) => entry.side === "YES")?.id;
+      assert.ok(selectedId);
+      assert.ok(opposingId);
+      const output = parseHolderResearchFinalOutputV2({
+        version: "holder_research_v2",
+        verdict: "publish",
+        evidence_assessment: "adequate",
+        reason_codes: ["holder_evidence"],
+        rationale:
+          "The specific selected-side thesis survives the stated disagreement.",
+        evidence_ids: [selectedId, opposingId],
+        copy: {
+          headline: "Credible trader backs the less obvious outcome",
+          why_now:
+            "The observed position supports a specific alternative to the consensus.",
+          caveats: ["A strong opposing holder disagrees."],
+        },
+      });
+      const externalResearch = parseHolderResearchExternalResearchV2({
+        status: "ok",
+        verdict: "supports_opposite_side",
+        timing: "unknown",
+        summary:
+          "A dated report favors the other outcome but does not resolve the contract.",
+        citations: [
+          {
+            title: "Contrary report",
+            url: "https://example.com/contrary",
+            publishedAt: null,
+          },
+        ],
+      });
+      const adapted = adaptHolderResearchFinalOutputV2({
+        candidate,
+        output,
+        externalResearch,
+        policy: p,
+      });
+      assert.equal(adapted.status, "PUBLISH");
+      assert.equal(adapted.public_context_risk, "conflicts_holder");
+      const targets = buildHolderResearchWalletTargets(
+        candidate,
+        adapted.evidence_ids,
+        p,
+      );
+      assert.deepEqual(
+        targets.map((target) => target.meta.side),
+        ["NO"],
+      );
+      assert.equal(
+        adaptHolderResearchFinalOutputV2({
+          candidate,
+          output: { ...output, evidence_ids: [opposingId] },
+          externalResearch,
+          policy: p,
+        }).status,
+        "CONTEXT",
+      );
+      for (const assessment of [
+        "mixed",
+        "contradicted",
+        "insufficient",
+      ] as const)
+        assert.equal(
+          adaptHolderResearchFinalOutputV2({
+            candidate,
+            output: { ...output, evidence_assessment: assessment },
+            externalResearch,
+            policy: p,
+          }).status,
+          "CONTEXT",
+        );
+    },
+  },
+  {
+    name: "final V1 background retains prior interpretation without promoting unverified news",
+    run: () => {
+      const background: HolderBackground = {
+        role: "optional_context_not_holder_evidence",
+        items: [
+          {
+            role: "prior_hunch_analysis",
+            title: "Prior thesis",
+            summary: "An earlier interpretation, not an independent fact.",
+            publishedAt: "2026-01-01T00:00:00Z",
+            sourceUrl: null,
+            relation: "exact",
+          },
+          {
+            role: "external_source_summary",
+            title: "Unverified news",
+            summary: "Do not promote this into public fact.",
+            publishedAt: "2026-01-01T00:00:00Z",
+            sourceUrl: "https://example.com/unverified",
+            relation: "semantic",
+          },
+        ],
+      };
+      const context = withHolderResearchBackground({}, background, "final")
+        .backgroundContext as { items: Array<{ role: string; use: string }> };
+      assert.equal(context.items.length, 1);
+      assert.equal(context.items[0]?.role, "prior_hunch_analysis");
+      assert.match(context.items[0]?.use ?? "", /not independent news/);
+    },
+  },
+  {
     name: "24h relative YES returns never become probability points or a price-against gate",
     run: () => {
       const now = new Date("2026-09-06T12:30:00Z");
@@ -507,7 +731,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           policy: p,
           now,
         }).action,
-        "skip",
+        "analyze",
       );
     },
   },
@@ -1193,7 +1417,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
-    name: "V2 prompts remove model priority and are smaller than V1 payloads",
+    name: "V1 and V2 prompts share outcome reasoning without V2 model priority",
     run: () => {
       const p = policy();
       const candidate = sharpMinorityCandidate(p);
@@ -1215,7 +1439,13 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           maxInvestigate: 1,
         });
       assert.doesNotMatch(v2Triage, /numeric priority|priority.*0\.\.1/i);
-      assert.ok(v2Triage.length <= v1Triage.length * 0.75);
+      for (const prompt of [v1Triage, v2Triage]) {
+        assert.match(prompt, /not.*publication|publication-ready/i);
+        assert.match(
+          prompt,
+          /Missing same-type history.*unknown, not negative/i,
+        );
+      }
 
       const external = parseHolderResearchExternalResearchV2({
         status: "no_evidence",
@@ -1243,16 +1473,25 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
             p,
           ),
         });
-      assert.match(v2Final, /never use ambiguous phrases/i);
-      assert.match(v2Final, /never expose internal review language/i);
-      assert.match(v2Final, /do not turn a no_evidence or error/i);
-      assert.match(v2Final, /do not dump the full current snapshot/i);
-      assert.match(
-        v2Final,
-        /repeat the one decisive holding, price, flow, or PnL/i,
-      );
-      assert.match(v2Final, /meaningfulDeltaReasons/i);
-      assert.ok(v2Final.length <= v1Final.length * 0.85);
+      for (const prompt of [v1Final, v2Final]) {
+        assert.match(
+          prompt,
+          /meaningfulDeltaReasons.*not before\/after evidence/i,
+        );
+        assert.match(
+          prompt,
+          /Mixed inputs can support an adequate final thesis/i,
+        );
+        assert.match(prompt, /not.*trader's stated belief/i);
+        assert.match(
+          prompt,
+          /Never turn no_evidence or error search status into a public sentence/i,
+        );
+        assert.doesNotMatch(
+          prompt,
+          /supports_opposite_side cannot be publish/i,
+        );
+      }
     },
   },
   {
@@ -1608,6 +1847,30 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         policy: p,
       });
       assert.equal(publishable.status, "PUBLISH");
+
+      const publiclyExplained = adaptHolderResearchFinalOutputV2({
+        candidate: freshCandidate,
+        output,
+        externalResearch: {
+          status: "ok",
+          verdict: "already_public",
+          timing: "before_holder",
+          summary: "Public reporting already explains the price move.",
+          citations: [
+            {
+              title: "Prior report",
+              url: "https://example.com/prior-report",
+              publishedAt: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        },
+        policy: p,
+      });
+      assert.equal(publiclyExplained.status, "PUBLISH");
+      assert.equal(
+        publiclyExplained.public_context_risk,
+        "fully_explains_move",
+      );
 
       const uncitedClaimOutput = parseHolderResearchFinalOutputV2({
         ...output,
@@ -3431,7 +3694,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.doesNotMatch(serializedExternal, /ownerUsdLikeBalance/i);
       assert.doesNotMatch(serializedExternal, /Other hidden bet/i);
       assert.match(serializedExternal, /one short sentence/i);
-      assert.match(serializedExternal, /supports the holder side/i);
+      assert.match(serializedExternal, /selected-outcome hypothesis/i);
       assert.match(
         serializedExternal,
         new RegExp(HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING),
@@ -3444,8 +3707,11 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         externalSystemPrompt,
         new RegExp(HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING),
       );
-      assert.match(externalSystemPrompt, /supports the holder side/i);
-      assert.match(externalSystemPrompt, /supports the opposite side/i);
+      assert.match(
+        externalSystemPrompt,
+        /both supporting and contrary dated facts/i,
+      );
+      assert.match(externalSystemPrompt, /not decide.*publication/i);
       assert.match(externalSystemPrompt, /inline \[\[N\]\]\(URL\) citation/);
       assert.deepEqual(
         extractCitations({
@@ -3703,6 +3969,18 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const cached = parseHolderResearchCachedDecision([...stored.values()][0]);
       assert.equal(cached?.status, "SKIP");
       assert.equal(cached?.rationale, "Insufficient holder evidence.");
+
+      await maybeWriteDecisionCache({
+        redis,
+        policy: p,
+        callModel: true,
+        candidate,
+        output: { status: "PUBLISH", rationale: "Model wants to publish." },
+        modelMeta: { mode: "openrouter_v1" },
+        decisionCache,
+      });
+      assert.equal(stored.size, 1);
+      assert.equal(decisionCache.written, 1);
     },
   },
   {
@@ -3755,14 +4033,16 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           policy: { ...p, ...change },
           now: new Date("2026-01-01T01:00:00.000Z"),
         });
-        assert.equal(published.action, "skip");
+        assert.equal(published.action, "analyze");
+        assert.equal(published.reason, "no_cache");
+        assert.equal(published.cachedDecision, null);
       }
       const currentSignature = cachedSkip.modelConfigSignature;
       assert.ok(currentSignature);
       const oldContract = {
         ...cachedSkip,
         modelConfigSignature: currentSignature.replace(
-          "holder_decision_contract_v4",
+          "holder_decision_contract_v5",
           "holder_decision_contract_v3",
         ),
       };
@@ -3782,7 +4062,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
           policy: p,
           now: new Date("2026-01-01T01:00:00.000Z"),
         }).action,
-        "skip",
+        "analyze",
       );
       const legacyCache = { ...cachedSkip, model: "openai/gpt-5.5" };
       delete legacyCache.modelConfigSignature;
@@ -4176,6 +4456,125 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         policy: p,
       });
       assert.equal(gated.status, "PUBLISH");
+    },
+  },
+  {
+    name: "adverse price and public explanation inform but do not veto a holder forecast",
+    run: () => {
+      const p = policy();
+      const candidate = sharpMinorityCandidate(p, {
+        marketMovementContext: {
+          ...market().marketMovementContext,
+          yesProbabilityNow: 0.55,
+          yesDeltaProbability24h: 0.1,
+        },
+      });
+      assert.equal(
+        buildHolderResearchQualityAssessment(candidate, p).priceContext,
+        "against_signal",
+      );
+      const output = publishOutput(candidate, {
+        public_context_risk: "fully_explains_move",
+      });
+      const gated = applyHolderResearchPublishQualityGate({
+        candidate,
+        output,
+        policy: p,
+      });
+      assert.equal(gated.status, "PUBLISH");
+      assert.equal(gated, output);
+
+      const unpublished = buildHolderResearchDecisionCacheRecord({
+        candidate,
+        output: { status: "PUBLISH", rationale: "Unpublished model verdict." },
+        model: p.model,
+        policy: p,
+        now: new Date(),
+      });
+      const evaluation = evaluateHolderResearchDecisionCache({
+        candidate,
+        cachedDecision: unpublished,
+        policy: p,
+      });
+      assert.equal(evaluation.action, "analyze");
+      assert.equal(evaluation.cachedDecision, null);
+    },
+  },
+  {
+    name: "unpublished Iran-style PUBLISH cache cannot create an adverse-price veto",
+    run: () => {
+      const p = policy();
+      const quoteAt = new Date().toISOString();
+      const current = sharpMinorityCandidate(p, {
+        marketId: "polymarket:iran-fixture",
+        marketTitle: "Will a deal with Iran happen?",
+        yesProbability: 0.095,
+        marketMovementContext: {
+          ...market().marketMovementContext,
+          yesProbabilityNow: 0.095,
+          yesDeltaProbability24h: 0.0225,
+        },
+        sides: {
+          YES: side("YES", {
+            usd: 32_000,
+            wallets: 1,
+            sharpHolders: 1,
+            sharpUsd: 10_000,
+            bestEdge: 0.16,
+            bestZScore: 2.1,
+            bestSampleCount: 24,
+            bestResolvedStakeUsd: 6_000,
+            bestTrades30d: 18,
+          }),
+          NO: side("NO", { usd: 120_000, wallets: 5 }),
+        },
+        holders: [holder("YES")],
+        livePriceCheck: {
+          blockersBySide: { YES: [], NO: [] },
+          checkedAt: quoteAt,
+          fresh: true,
+          sideBuyPrices: { YES: 0.1, NO: 0.91 },
+          tokenIds: ["yes-token", "no-token"],
+          tops: {
+            YES: { ask: 0.1, asOf: quoteAt, bid: 0.09, tokenId: "yes-token" },
+            NO: { ask: 0.91, asOf: quoteAt, bid: 0.9, tokenId: "no-token" },
+          },
+          yesProbability: 0.095,
+        },
+      });
+      const cachedUnpublished = buildHolderResearchDecisionCacheRecord({
+        candidate: {
+          ...current,
+          market: { ...current.market, yesProbability: 0.175 },
+        },
+        output: { status: "PUBLISH", rationale: "Not committed to the DB." },
+        model: p.model,
+        policy: p,
+      });
+      const evaluation = evaluateHolderResearchDecisionCache({
+        candidate: current,
+        cachedDecision: cachedUnpublished,
+        policy: p,
+      });
+      assert.equal(evaluation.action, "analyze");
+      assert.equal(evaluation.cachedDecision, null);
+      const candidate = applyHolderResearchPreviousDecisionContext(
+        current,
+        evaluation,
+      );
+      assert.equal(candidate, current);
+      assert.equal(
+        buildHolderResearchQualityAssessment(candidate, p).priceContext,
+        "flat",
+      );
+      assert.equal(
+        applyHolderResearchPublishQualityGate({
+          candidate,
+          output: publishOutput(candidate),
+          policy: p,
+        }).status,
+        "PUBLISH",
+      );
     },
   },
   {
@@ -4980,7 +5379,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
-    name: "holder research quality gate blocks conflicting public context only for weak single reads",
+    name: "holder research quality gate leaves opposition weighing to final synthesis for singles and clusters",
     run: () => {
       const p = policy();
       const singleMinority = buildHolderResearchCandidatesFromMarket(
@@ -4996,8 +5395,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         }),
         policy: p,
       });
-      assert.equal(singleGated.status, "CONTEXT");
-      assert.match(singleGated.rationale, /Public context conflicts/);
+      assert.equal(singleGated.status, "PUBLISH");
 
       const clusterMinority = buildHolderResearchCandidatesFromMarket(
         market({
@@ -5252,11 +5650,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
-    name: "holder research prompt writes one attention-first story with verified proof",
+    name: "holder research prompt supports bounded outcome hypotheses with truthful public copy",
     run: () => {
       const prompt = buildHolderResearchSystemPrompt();
-      assert.match(prompt, /do not repeat the bullets verbatim/i);
-      assert.match(prompt, /do not invent credentials/i);
+      assert.match(prompt, /Do not invent facts, identities, credentials/i);
       assert.match(prompt, /candidate\.move/i);
       assert.match(prompt, /candidate\.holderEntry/i);
       assert.match(prompt, /candidate\.mkt\.sideCopy/i);
@@ -5269,38 +5666,28 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.match(prompt, /sameType/i);
       assert.match(prompt, /private trading group/i);
       assert.match(prompt, /understand the setup in 2 seconds/i);
-      assert.match(prompt, /which side the wallet\(s\) are on/i);
-      assert.match(prompt, /compressed signal thesis/i);
       assert.match(prompt, /Do not repeat the headline/i);
-      assert.match(prompt, /summary sentence 1 must add new information/i);
-      assert.match(prompt, /same actor\/action from the headline/i);
-      assert.match(prompt, /Lead with what strong wallets are doing/i);
       assert.match(
         prompt,
-        /Use 'smart wallets' only when credentials are strong/i,
+        /Smart, strong, skilled or proven requires supporting credential quality/i,
       );
-      assert.match(prompt, /Choose exactly one story before writing/i);
-      assert.match(prompt, /Story first; numbers prove that story/i);
+      assert.match(prompt, /one concrete outcome thesis or tension/i);
       assert.match(prompt, /(?:2|two) short narrative sentences/i);
-      assert.match(prompt, /table then verifies it/i);
-      assert.match(prompt, /Avoid overusing 'serious buyer\(s\)'/i);
-      assert.match(prompt, /Do not reuse the same sentence shape/i);
-      assert.match(prompt, /Avoid in headline\/summary/i);
-      assert.match(prompt, /Market signal detected/i);
+      assert.match(prompt, /Vary sentence shape/i);
       assert.match(
         prompt,
-        /Strong wallets are still backing Spain"; summary "Strong wallets are backing Spain/i,
+        /A position snapshot proves observed exposure.*not a new purchase/i,
       );
       assert.match(
         prompt,
-        /Spain trades near 19c, and the wallet side has not backed off/i,
+        /It need not have fresh news, early entry, favorable momentum/i,
       );
-      assert.match(prompt, /Mentionmarket has kept the full position/i);
-      assert.match(prompt, /The price of NO fell by 11¢ to 61¢/i);
+      assert.match(prompt, /strongest plausible alternative explanation/i);
+      assert.match(prompt, /not.*calibrated event probability/i);
+      assert.doesNotMatch(prompt, /Good story example|Good compact summary/i);
       assert.doesNotMatch(prompt, /pick articles/i);
       assert.doesNotMatch(prompt, /\bpreviews\b/i);
       assert.doesNotMatch(prompt, /@/);
-      assert.match(prompt, /Bad headline examples/i);
       assert.doesNotMatch(
         prompt,
         /Prefer simple phrases like 'informed wallets'/i,
@@ -5474,7 +5861,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       >;
       assert.equal(holders.length, 2);
       assert.equal(holders[0]?.addr, "0xprimary");
-      assert.equal(holders[1]?.addr, "0xsecondary");
+      assert.equal(holders[1]?.addr, "0xopposing");
       const serialized = JSON.stringify(promptJson);
       assert.match(serialized, /"addr"/);
       assert.match(
@@ -6253,6 +6640,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
 
         assert.equal(stats.persisted, 1);
         assert.equal(stats.rejected, 0);
+        assert.equal(stats.outcomesByKey[candidate.key]?.status, "persisted");
         assert.equal(
           hasHolderResearchPublicationDecisionV1(insertedMetrics),
           true,
@@ -6308,6 +6696,48 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(stats.persisted, 0);
       assert.equal(stats.rejected, 1);
       assert.equal(stats.rejectedByReason.missing_price_snapshot, 1);
+      assert.deepEqual(stats.outcomesByKey[candidate.key], {
+        status: "rejected",
+        reason: "missing_price_snapshot",
+      });
+      assert.equal(insertAttempted, false);
+    },
+  },
+  {
+    name: "holder research persistence still rejects a stale side quote",
+    run: async () => {
+      const p = policy();
+      const staleAt = new Date(Date.now() - 11 * 60_000).toISOString();
+      const candidate = sharpMinorityCandidate(p, {
+        livePriceCheck: {
+          blockersBySide: { YES: [], NO: [] },
+          checkedAt: staleAt,
+          fresh: false,
+          sideBuyPrices: { YES: 0.55, NO: 0.45 },
+          tokenIds: ["yes-token", "no-token"],
+          tops: {
+            YES: { ask: 0.56, asOf: staleAt, bid: 0.54, tokenId: "yes-token" },
+            NO: { ask: 0.46, asOf: staleAt, bid: 0.44, tokenId: "no-token" },
+          },
+          yesProbability: 0.55,
+        },
+      });
+      let insertAttempted = false;
+      const client = {
+        query: async (sql: string) => {
+          if (sql.includes("insert into ai_notes")) insertAttempted = true;
+          return { rows: [], rowCount: 0 };
+        },
+      };
+      const stats = await persistHolderResearchNotes(client as never, {
+        decisions: [
+          { candidate, modelMeta: {}, output: publishOutput(candidate) },
+        ],
+        policy: p,
+        runnerRunId: "holder-research-stale-price",
+      });
+      assert.equal(stats.rejectedByReason.stale_price_snapshot, 1);
+      assert.equal(stats.outcomesByKey[candidate.key]?.status, "rejected");
       assert.equal(insertAttempted, false);
     },
   },
@@ -6389,6 +6819,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(stats.persisted, 0);
       assert.equal(stats.rejected, 1);
       assert.equal(stats.rejectedByReason.duplicate_delta, 1);
+      assert.deepEqual(stats.outcomesByKey[candidate.key], {
+        status: "rejected",
+        reason: "duplicate_delta",
+      });
       assert.equal(insertAttempted, false);
     },
   },

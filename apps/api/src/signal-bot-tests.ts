@@ -136,8 +136,10 @@ import type { PrivyServerSignerStatus } from "./services/api-trading-wallet-sign
 import { resolveSignalDeliveryTarget } from "./services/signal-delivery-target.js";
 import {
   isSignalBotQuoteFresh,
+  SIGNAL_BOT_NOTIFICATION_SNAPSHOT_MAX_AGE_MS,
   SIGNAL_BOT_QUOTE_MAX_AGE_MS,
 } from "./services/signal-bot-delivery-policy.js";
+import { withSignalBotNotificationSnapshotContext } from "./services/signal-bot-notification-snapshot.js";
 import {
   hasHolderResearchPublicationDecisionV1,
   type HolderResearchUpdateReason,
@@ -18048,6 +18050,227 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const preview = await prepareSignalBotDelivery(input);
       assert.deepEqual(preview, publisher);
       assert.equal(publisher.status, "ready");
+    },
+  },
+  {
+    name: "aged snapshot annotations preserve formatting and replace price now across rich text nodes",
+    run: () => {
+      const rendered = {
+        text: "YES is 50¢ now.",
+        richMessage: {
+          blocks: [
+            {
+              type: "paragraph" as const,
+              text: [
+                "YES is ",
+                { type: "bold" as const, text: "50¢" },
+                " now.",
+              ],
+            },
+          ],
+        },
+      };
+      const asOf = "2026-09-25T08:00:00.000Z";
+      const fresh = withSignalBotNotificationSnapshotContext(
+        rendered,
+        asOf,
+        new Date("2026-09-25T08:10:00.000Z"),
+      );
+      assert.equal(fresh, rendered);
+      const aged = withSignalBotNotificationSnapshotContext(
+        rendered,
+        asOf,
+        new Date("2026-09-25T08:20:00.000Z"),
+      );
+      assert.equal(
+        aged.text,
+        "YES is 50¢ at snapshot.\n\nPrice snapshot as of 2026/09/25 08:00 UTC",
+      );
+      assert.deepEqual(aged.richMessage.blocks[0], {
+        type: "paragraph",
+        text: ["YES is ", { type: "bold", text: "50¢" }, " at snapshot."],
+      });
+      assert.deepEqual(aged.richMessage.blocks[1], {
+        type: "footer",
+        text: "Price snapshot as of 2026/09/25 08:00 UTC",
+      });
+    },
+  },
+  {
+    name: "notification snapshots allow twelve minutes through the inclusive one hour boundary",
+    run: async () => {
+      const now = new Date("2026-09-25T09:00:00.000Z");
+      assert.equal(SIGNAL_BOT_NOTIFICATION_SNAPSHOT_MAX_AGE_MS, 3_600_000);
+      for (const messageKind of ["initial", "research_update"] as const) {
+        for (const ageMs of [12 * 60_000, 20 * 60_000, 3_599_999, 3_600_000]) {
+          const asOf = new Date(now.getTime() - ageMs).toISOString();
+          const notificationNote = note({
+            meaningfulDeltaReasons:
+              messageKind === "research_update" ? ["odds_move"] : [],
+            revisionKind: messageKind,
+            signalPriceSnapshotV1: {
+              ...testSignalPriceSnapshot("YES"),
+              asOf,
+            },
+          });
+          const prepared = await prepareSignalBotDelivery({
+            appBaseUrl: "https://app.hunch.trade",
+            buyAmountUsd: 10,
+            db: new FakeDb(),
+            forceOpenMarket: true,
+            messageKind,
+            note: notificationNote,
+            now,
+            telegramMiniAppLinkBase: "https://t.me/hunch_bot/hunch",
+          });
+          assert.equal(prepared.status, "ready", `${messageKind}: ${ageMs}`);
+          if (prepared.status !== "ready") continue;
+          assert.equal(prepared.audit.priceSnapshotAsOf, asOf);
+          assert.equal(prepared.audit.stalePriceSnapshotBypassed, false);
+          assert.equal(notificationNote.signalPriceSnapshotV1?.asOf, asOf);
+          assert.equal(prepared.audit.ctaIntent, "open_market");
+          assert.equal(prepared.deliveryTarget, null);
+          assert.match(
+            prepared.text,
+            /Price snapshot as of 2026\/09\/25 .* UTC/,
+          );
+          assert.match(
+            JSON.stringify(prepared.richMessage),
+            /Price snapshot as of/,
+          );
+          assert.doesNotMatch(prepared.text, /¢ (?:now|live)\b/);
+        }
+      }
+    },
+  },
+  {
+    name: "notification snapshots reject over one hour and invalid or future timestamps",
+    run: async () => {
+      const now = new Date("2026-09-25T09:00:00.000Z");
+      for (const asOf of [
+        new Date(now.getTime() - 3_600_001).toISOString(),
+        new Date(now.getTime() + 1).toISOString(),
+        "invalid",
+      ]) {
+        const prepared = await prepareSignalBotDelivery({
+          appBaseUrl: "https://app.hunch.trade",
+          buyAmountUsd: 10,
+          db: new FakeDb(),
+          messageKind: "initial",
+          note: note({
+            signalPriceSnapshotV1: {
+              ...testSignalPriceSnapshot("YES"),
+              asOf,
+            },
+          }),
+          now,
+        });
+        assert.equal(prepared.status, "skipped", asOf);
+        if (prepared.status === "skipped") {
+          assert.equal(prepared.reason, "stale_price_snapshot");
+          assert.equal(prepared.audit.priceSnapshotAsOf, asOf);
+        }
+      }
+    },
+  },
+  {
+    name: "older notification snapshots without live quote access remain Open market only",
+    run: async () => {
+      const now = new Date();
+      const prepared = await prepareSignalBotDelivery({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        db: new FakeDb(),
+        messageKind: "initial",
+        note: note({
+          signalPriceSnapshotV1: {
+            ...testSignalPriceSnapshot("YES"),
+            asOf: new Date(now.getTime() - 20 * 60_000).toISOString(),
+          },
+        }),
+        now,
+        telegramMiniAppLinkBase: "https://t.me/hunch_bot/hunch",
+      });
+      assert.equal(prepared.status, "ready");
+      if (prepared.status === "ready") {
+        assert.equal(prepared.audit.ctaIntent, "open_market");
+        assert.equal(prepared.deliveryTarget, null);
+        assert.deepEqual(
+          prepared.keyboard?.inline_keyboard
+            .flat()
+            .map((button) => button.text),
+          ["Open on Hunch"],
+        );
+      }
+    },
+  },
+  {
+    name: "older analytical snapshot uses a separately refreshed quote for Buy",
+    run: async () => {
+      const now = new Date();
+      const snapshot = {
+        ...testSignalPriceSnapshot("YES"),
+        asOf: new Date(now.getTime() - 20 * 60_000).toISOString(),
+      };
+      const prepared = await prepareSignalBotDelivery({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        db: new FakeDb(),
+        messageKind: "initial",
+        note: note({ signalPriceSnapshotV1: snapshot }),
+        now,
+        redis: new FakeRedis(),
+        telegramMiniAppLinkBase: "https://t.me/hunch_bot/hunch",
+      });
+      assert.equal(prepared.status, "ready");
+      if (prepared.status === "ready") {
+        assert.equal(prepared.audit.ctaIntent, "buy");
+        assert.equal(prepared.deliveryTarget?.price, 0.41);
+        assert.equal(prepared.audit.priceSnapshotAsOf, snapshot.asOf);
+        assert.equal(snapshot.YES.ask, 0.32);
+        assert.deepEqual(
+          prepared.keyboard?.inline_keyboard
+            .flat()
+            .map((button) => button.text),
+          ["Buy YES · Poly 41¢"],
+        );
+        assert.match(prepared.text, /Price snapshot as of/);
+      }
+    },
+  },
+  {
+    name: "older notification snapshots do not loosen executable quote freshness",
+    run: async () => {
+      const now = new Date();
+      const db = new FakeDb();
+      db.tokenTopRows = db.tokenTopRows.map((row) => ({
+        ...(row as Record<string, unknown>),
+        ts: new Date(now.getTime() - 11 * 60_000).toISOString(),
+      }));
+      const prepared = await prepareSignalBotDelivery({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        db,
+        messageKind: "initial",
+        note: note({
+          signalPriceSnapshotV1: {
+            ...testSignalPriceSnapshot("YES"),
+            asOf: new Date(now.getTime() - 20 * 60_000).toISOString(),
+          },
+        }),
+        now,
+        redis: new FakeRedis(),
+      });
+      assert.equal(prepared.status, "deferred");
+      if (prepared.status === "deferred") {
+        assert.equal(prepared.reason, "quote_refresh");
+        assert.ok(prepared.blockers.includes("live_price_stale"));
+      }
+      assert.equal(SIGNAL_BOT_QUOTE_MAX_AGE_MS, 600_000);
+      assert.equal(
+        isSignalBotQuoteFresh(now.getTime() - 601_000, now.getTime()),
+        false,
+      );
     },
   },
   {

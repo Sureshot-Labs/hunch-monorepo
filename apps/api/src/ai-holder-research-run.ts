@@ -160,6 +160,8 @@ type HolderResearchModelDecision = {
   output: HolderResearchAgentOutputV1;
   modelMeta: Record<string, unknown>;
   cost: ResolvedCost;
+  rawStatus?: HolderResearchAgentOutputV1["status"];
+  qualityGateReason?: string | null;
 };
 
 type HolderResearchTriageDecision = HolderResearchTriageDecisionV2 & {
@@ -218,19 +220,24 @@ export function withHolderResearchBackground(
 ): Record<string, unknown> {
   if (!background?.items.length) return candidateJson;
   if (stage === "final") {
-    const verifiedItems = background.items.filter(
+    const contextualItems = background.items.filter(
       (item) =>
-        item.role === "external_source_summary" &&
-        item.sourceUrl != null &&
-        verifiedSourceUrls.has(item.sourceUrl),
+        item.role === "prior_hunch_analysis" ||
+        (item.role === "external_source_summary" &&
+          item.sourceUrl != null &&
+          verifiedSourceUrls.has(item.sourceUrl)),
     );
-    if (!verifiedItems.length) return candidateJson;
+    if (!contextualItems.length) return candidateJson;
     return {
       ...candidateJson,
       backgroundContext: {
         role: background.role,
-        items: verifiedItems.slice(0, 4).map((item) => ({
+        items: contextualItems.slice(0, 4).map((item) => ({
           ...item,
+          use:
+            item.role === "prior_hunch_analysis"
+              ? "Earlier Hunch interpretation only, not independent news or proof of this thesis. May be obsolete."
+              : "Source also returned by this research; verify each claim against externalResearch, not the old summary.",
           summary: item.summary.slice(0, 180),
         })),
       },
@@ -452,7 +459,17 @@ type HolderResearchRunReport = {
   }>;
   decisions: Array<{
     key: string;
+    rawStatus: string;
     status: string;
+    qualityGateReason: string | null;
+    persistenceOutcome:
+      | "persisted"
+      | "rejected"
+      | "skipped_existing"
+      | "error"
+      | "not_attempted"
+      | "not_applicable";
+    persistenceReason: string | null;
     confidence: number;
     userCard: {
       headline: string;
@@ -845,11 +862,12 @@ export function extractExternalResearchFoundSources(
 export function buildHolderResearchExternalSearchSystemPrompt(): string {
   return [
     "You investigate outside information for prediction-market holder signals.",
+    "Your job is to retrieve and verify information, not decide investigation priority, predict a winner or decide publication.",
     "Use web_search and x_search.",
     "The holder data is intentionally redacted; do not ask for wallet identities.",
     "Return one short, plain sentence for a signal feed, not a news memo.",
-    "Compare dated headlines/posts to the supplied holder activity/snapshot timing.",
-    "Answer only whether outside information supports the holder side, supports the opposite side, mostly shows the move was already public, does not explain the move, or is mixed.",
+    "Test the exact contract outcome and the supplied research question against both supporting and contrary dated facts. A plausible outcome hypothesis is not a known holder motive. A position snapshot does not prove entry time.",
+    "Summarize the decisive support, contradiction or unresolved fact. A public explanation of price movement does not settle the contract outcome. An unsuccessful search does not prove that no public explanation exists.",
     HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
     "Do not start with phrases like 'Public info', 'Public context', or 'Public news'.",
     "Cite each factual outside claim with an inline [[N]](URL) citation from the search tools. The citation markup is removed from the user-facing summary after verification.",
@@ -861,15 +879,16 @@ export function buildHolderResearchExternalSearchSystemPrompt(): string {
 export function buildHolderResearchExternalSearchSystemPromptV2(): string {
   return [
     "You investigate one bounded outside-information question for a prediction-market holder candidate.",
+    "Your job is information gathering and verification, not final judgment. Report facts for and against the exact condition and the remaining unknowns. verdict describes the bearing of retrieved evidence on the selected side, not your forecast, holder quality, trade value or a publish/skip decision.",
     "Make at least one actual web_search or x_search tool call before answering; do not answer from memory. Then return only one JSON object.",
     "The object must contain status, verdict, timing, summary, citations, comparableOdds and freshFact. comparableOdds must be null unless cited sources provide a probability range for the selected side with an asOf timestamp.",
     "Use only these exact machine values: status=ok|no_evidence; verdict=supports_holder_side|supports_opposite_side|already_public|unexplained|mixed|unknown; timing=before_holder|around_holder|after_holder|unknown. Never invent descriptive enum values such as no_fresh_catalyst. Explain nuances in summary instead.",
-    "Cited older context can have status=ok while freshFact=null; lack of a new 72-hour event does not by itself mean no_evidence. If holder/public timing is unproven, use timing=unknown and do not infer already_public solely from an old article.",
+    "Cited older context can have status=ok while freshFact=null; lack of an event within freshEvidenceWindowHours does not by itself mean no_evidence. If holder/public timing is unproven, use timing=unknown and do not infer already_public solely from an old article.",
     "freshFact is null unless a specific cited event can be dated. Otherwise include fact, sourceUrl, eventAt, matchesExactContract, supportsSelectedSide and trackerUpdateOnly. Do not use a page update timestamp as eventAt.",
     "Use at most three citations with title, url, and publishedAt (ISO datetime or null).",
-    "Search for a change within the supplied 72-hour window first. Older articles are background, not a fresh reason. A tracker page update is not an event date. Distinguish the event date, article publication date, and page update date.",
+    "Use the supplied research question to test the selected-outcome hypothesis and its strongest plausible alternative. Prioritize dated changes within freshEvidenceWindowHours, but retain older structural facts when they bear on the outcome. Publicly known does not mean irrelevant or already priced correctly. A tracker page update is not an event date. Distinguish event, publication and page-update dates.",
     "Only cite URLs actually returned by your search tools. A supporting fact must match the selected outcome, side, deadline, entity and stage; never use a YES fact as support for a NO position.",
-    "For price-threshold contracts, verify the exact exchange, trading pair, candle/price field, market-creation boundary and deadline from the contract rules before assigning a directional verdict or freshFact. Prices from another exchange or before market creation are background only. If the creation boundary or qualifying observation cannot be verified, use verdict=unknown and freshFact=null; do not call the threshold already met.",
+    "For a claim that a price threshold has already been met or resolved, verify the exact exchange, trading pair, candle/price field, market-creation boundary and deadline from the contract rules. Prices from another exchange or before market creation cannot establish that claim. If a qualifying observation cannot be verified, report that specific question as unknown and do not call the threshold already met. Separately verified facts about future outcome drivers may provide qualified directional background, not proof of resolution. freshFact must match the exact contract and selected side.",
     "Compare dated evidence with latestExactSideHolderActivityAt when supplied. General market activity and a position snapshot are not proof this holder acted; use after_holder only when the public evidence clearly appeared after exact-side holder activity.",
     "Do not infer wallet identity, skill, exposure, edge, PnL, or a trading recommendation.",
     HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
@@ -1895,6 +1914,21 @@ async function callHolderResearchModel(params: {
       candidate: params.candidate,
       output,
       cost,
+      rawStatus:
+        params.useV2 && "verdict" in parsedOutput
+          ? parsedOutput.verdict === "publish"
+            ? "PUBLISH"
+            : parsedOutput.verdict === "context"
+              ? "CONTEXT"
+              : "SKIP"
+          : output.status,
+      qualityGateReason:
+        params.useV2 &&
+        "verdict" in parsedOutput &&
+        parsedOutput.verdict === "publish" &&
+        output.status !== "PUBLISH"
+          ? output.rationale
+          : null,
       modelMeta: {
         model: params.policy.model,
         reasoningEffort: params.policy.reasoningEffort ?? null,
@@ -2217,6 +2251,8 @@ export async function maybeWriteDecisionCache(params: {
     !params.redis ||
     params.policy.dryRun ||
     !params.callModel ||
+    // A PUBLISH decision is not a publication until the note commits.
+    params.output.status === "PUBLISH" ||
     // A model/provider failure is not an editorial verdict; retry next run.
     params.modelMeta?.mode === "openrouter_error"
   ) {
@@ -2713,7 +2749,6 @@ export async function runHolderResearch(
           }
           if (
             cacheEvaluation.action === "skip" &&
-            cachedDecision?.status !== "PUBLISH" &&
             hasNewDatedHolderBackground(
               backgroundByKey.get(candidate.key),
               cachedDecision?.checkedAt ?? null,
@@ -3104,16 +3139,17 @@ export async function runHolderResearch(
         // The candidate SQL retains at most eight holders per market. Check
         // finalists only, after triage and fresh price, so a Jev nominee is
         // never discarded because unrelated lookahead used the check budget.
+        const checkedHolderCount = candidate.market.holders.length;
         const checked = await enrichHolderResearchLivePositions(
           client,
           [candidate],
           policy,
         );
         candidate = checked[0] ?? candidate;
-        remainingLiveChecks -= candidate.market.holders.length;
+        remainingLiveChecks -= checkedHolderCount;
         toolCalls.push({
           name: "live_position_final_check",
-          count: candidate.market.holders.length,
+          count: checkedHolderCount,
           status: "ok",
         });
       } else if (args.callModel) {
@@ -3208,6 +3244,11 @@ export async function runHolderResearch(
       const decision: HolderResearchModelDecision = {
         ...rawDecision,
         output: gatedOutput,
+        rawStatus: rawDecision.rawStatus ?? rawDecision.output.status,
+        qualityGateReason:
+          gatedOutput === rawDecision.output
+            ? (rawDecision.qualityGateReason ?? null)
+            : gatedOutput.rationale,
         modelMeta:
           gatedOutput === rawDecision.output
             ? modelMeta
@@ -3616,7 +3657,16 @@ export async function runHolderResearch(
       })),
       decisions: decisions.map((decision) => ({
         key: decision.candidate.key,
+        rawStatus: decision.rawStatus ?? decision.output.status,
         status: decision.output.status,
+        qualityGateReason: decision.qualityGateReason ?? null,
+        persistenceOutcome:
+          decision.output.status !== "PUBLISH"
+            ? "not_applicable"
+            : (persistence?.outcomesByKey[decision.candidate.key]?.status ??
+              "not_attempted"),
+        persistenceReason:
+          persistence?.outcomesByKey[decision.candidate.key]?.reason ?? null,
         confidence: decision.output.confidence,
         userCard: {
           headline: decision.output.headline,
