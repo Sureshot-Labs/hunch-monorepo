@@ -1,3 +1,4 @@
+import type { TelegramButtonAppearance } from "./telegram-button-style.js";
 import type { SignalBotFollowthroughDataQuality } from "./signal-bot-followthrough-policy.js";
 import type {
   HolderResearchUpdateV1,
@@ -33,7 +34,8 @@ export type TelegramInlineKeyboardButton = (
       url?: never;
       web_app?: never;
     }
-) & { icon_custom_emoji_id?: string };
+) &
+  TelegramButtonAppearance;
 
 export type TelegramInlineKeyboard = {
   inline_keyboard: Array<Array<TelegramInlineKeyboardButton>>;

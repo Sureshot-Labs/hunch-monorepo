@@ -92,10 +92,9 @@ import {
 } from "../services/telegram-bot-positions.js";
 import { buildTelegramTradeHistoryMessage } from "../services/telegram-bot-trade-history.js";
 import {
+  buildTelegramTradeInputPrompt,
   escapeTelegramMarkdownV2,
-  formatTelegramBoldMarkdownV2,
   formatTelegramCalloutMarkdownV2,
-  joinTelegramMarkdownV2Lines,
 } from "../services/telegram-bot-trading-presentation.js";
 import { buildTelegramAccountValueMessage } from "../services/telegram-account-value.js";
 import { buildTelegramAccountValueUnavailableMessage } from "../services/telegram-account-value-contract.js";
@@ -1952,38 +1951,11 @@ async function registerTelegramBotTradingRoutes(
       ) {
         return reply.code(409).send({ error: "custom_trade_input_disabled" });
       }
-      const instruction =
-        context.action === "buy"
-          ? "Send the USD amount to buy. Examples: 2, 2.50, or $2.50."
-          : "Send exact shares, an explicit percentage, or all. Examples: 1.25, 25%, or all. A bare number always means shares.";
       return reply.send({
         action: context.action,
         contextId: context.id,
         expiresAt: context.expiresAt,
-        message: {
-          parse_mode: "MarkdownV2" as const,
-          text: joinTelegramMarkdownV2Lines([
-            `✍️ ${formatTelegramBoldMarkdownV2(
-              context.action === "buy" ? "Custom buy" : "Custom sell",
-            )}`,
-            "",
-            escapeTelegramMarkdownV2(instruction),
-            "",
-            escapeTelegramMarkdownV2(
-              "Use Cancel below or another menu action to stop this input.",
-            ),
-          ]),
-          reply_markup: {
-            inline_keyboard: [
-              [
-                {
-                  callback_data: `hbt:cancel_input:${context.id}`,
-                  text: "✖️ Cancel input",
-                },
-              ],
-            ],
-          },
-        },
+        message: buildTelegramTradeInputPrompt(context),
       });
     },
   );

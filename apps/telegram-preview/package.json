@@ -1,0 +1,19 @@
+{
+  "name": "telegram-preview",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node --import tsx src/main.ts",
+    "snapshots": "node scripts/generate.mjs",
+    "snapshots:check": "node scripts/generate.mjs --check",
+    "mini-app": "node --import tsx src/mini-app-server.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "node scripts/generate.mjs --check && node --import tsx --test src/preview.test.ts"
+  }
+}

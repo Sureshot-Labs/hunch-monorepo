@@ -12,6 +12,7 @@ import {
   buildTelegramAccountValueUnavailableMessage,
 } from "./telegram-account-value-contract.js";
 import type { TelegramBotTradingClientMessage } from "./telegram-bot-trading-client.js";
+import { telegramCustomEmojiMarkdownV2ForVenue } from "./telegram-custom-emoji.js";
 import {
   escapeTelegramMarkdownV2,
   formatTelegramBoldMarkdownV2,
@@ -606,9 +607,9 @@ export function buildTelegramAccountValueMessage(input: {
       venue?.totalPortfolioEstimatedUsd ?? "0",
     )} ${portfolioPartial ? "known portfolio" : "portfolio"}`;
     lines.push(
-      escapeTelegramMarkdownV2(
-        `• ${venueLabel(venueId)} — ${[routable, legacy, portfolio].filter(Boolean).join(" · ")}`,
-      ),
+      `${telegramCustomEmojiMarkdownV2ForVenue(venueId)} ${escapeTelegramMarkdownV2(
+        `${venueLabel(venueId)} — ${[routable, legacy, portfolio].filter(Boolean).join(" · ")}`,
+      )}`,
     );
   }
 

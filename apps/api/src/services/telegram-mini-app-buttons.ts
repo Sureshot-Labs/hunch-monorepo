@@ -1,3 +1,4 @@
+import type { TelegramButtonAppearance } from "./telegram-button-style.js";
 import {
   buildSignalBotMiniAppUrl,
   buildSignalBotTelegramWebAppUrl,
@@ -7,7 +8,37 @@ import { telegramCustomEmojiId } from "./telegram-custom-emoji.js";
 export type TelegramHunchMiniAppButton = (
   | { text: string; url: string }
   | { text: string; web_app: { url: string } }
-) & { icon_custom_emoji_id?: string };
+) &
+  TelegramButtonAppearance;
+
+/** Mini App navigation is blue. web_app is private-chat only; groups use deep links. */
+export function buildHunchMiniAppChatButton(input: {
+  appBaseUrl: string;
+  chatType?: string | null;
+  iconCustomEmojiId?: string;
+  miniAppLinkBase?: string | null;
+  startParam: string | null | undefined;
+  text: string;
+}): TelegramHunchMiniAppButton | null {
+  const button = {
+    customEmojiEnabled: input.chatType !== "channel",
+    iconCustomEmojiId: input.iconCustomEmojiId,
+    startParam: input.startParam,
+    text: input.text,
+  };
+  return input.miniAppLinkBase &&
+    input.chatType === "private" &&
+    input.startParam
+    ? buildHunchMiniAppWebButton({
+        ...button,
+        appBaseUrl: input.appBaseUrl,
+        enabled: true,
+      })
+    : buildHunchMiniAppDeepLinkButton({
+        ...button,
+        miniAppLinkBase: input.miniAppLinkBase,
+      });
+}
 
 export function buildHunchMiniAppWebButton(input: {
   appBaseUrl: string;
@@ -39,6 +70,7 @@ export function buildHunchMiniAppWebButton(input: {
               icon_custom_emoji_id:
                 input.iconCustomEmojiId ?? telegramCustomEmojiId("hunch"),
             }),
+        style: "primary",
         text: input.text,
         web_app: { url },
       }
@@ -67,6 +99,7 @@ export function buildHunchMiniAppDeepLinkButton(input: {
                 icon_custom_emoji_id:
                   input.iconCustomEmojiId ?? telegramCustomEmojiId("hunch"),
               }),
+          style: "primary",
           text: input.text,
           url: parsed.toString(),
         }

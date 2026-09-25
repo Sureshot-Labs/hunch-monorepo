@@ -16,7 +16,10 @@ export function buildTelegramAccountValueKeyboard(): NonNullable<
     inline_keyboard: [
       [{ callback_data: `${CALLBACK_PREFIX}balance`, text: "🔄 Refresh" }],
       [
-        { callback_data: `${CALLBACK_PREFIX}deposit`, text: "➕ Add funds" },
+        {
+          callback_data: `${CALLBACK_PREFIX}deposit`,
+          text: "➕ Add funds",
+        },
         {
           callback_data: `${CALLBACK_PREFIX}trading:market_input`,
           text: "💸 Buy",

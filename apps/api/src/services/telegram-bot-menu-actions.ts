@@ -1,3 +1,4 @@
+import type { TelegramButtonAppearance } from "./telegram-button-style.js";
 import {
   buildSignalBotMarketUnavailableResultScreen,
   buildSignalBotMarketSearchScreen,
@@ -275,11 +276,13 @@ export function signalBotFundingMenuAction(
                         : null;
 }
 
-type MenuButton =
+type MenuButton = (
   | { callback_data: string; text: string }
   | { copy_text: { text: string }; text: string }
   | { text: string; url: string }
-  | { text: string; web_app: { url: string } };
+  | { text: string; web_app: { url: string } }
+) &
+  TelegramButtonAppearance;
 
 type MenuMessage = {
   durableFundingDeliveryRequired?: boolean;

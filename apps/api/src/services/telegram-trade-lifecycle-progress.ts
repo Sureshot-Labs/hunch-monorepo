@@ -1727,6 +1727,7 @@ function progressKeyboard(
       rows.push([
         {
           callback_data: `${CALLBACK_PREFIX}:cancel:${progress.intentId}`,
+          style: "danger",
           text: `❌ Cancel ${progress.action === "sell" ? "Sell" : "Buy"}`,
         },
       ]);
@@ -1769,6 +1770,7 @@ function progressKeyboard(
     rows.push([
       {
         callback_data: `${CALLBACK_PREFIX}:cancel:${progress.intentId}`,
+        style: "danger",
         text: "❌ Cancel preparation",
       },
     ]);
@@ -1777,6 +1779,7 @@ function progressKeyboard(
     rows.push([
       {
         callback_data: `${CALLBACK_PREFIX}:cancel:${progress.intentId}`,
+        style: "danger",
         text: "❌ Cancel Buy",
       },
     ]);

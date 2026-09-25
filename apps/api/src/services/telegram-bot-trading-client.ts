@@ -1,3 +1,4 @@
+import type { TelegramButtonAppearance } from "./telegram-button-style.js";
 import {
   buildTelegramTradeProgressMessage,
   formatTelegramCalloutMarkdownV2,
@@ -11,7 +12,8 @@ export type TelegramBotTradingClientButton = (
   | { text: string; copy_text: { text: string } }
   | { text: string; web_app: { url: string } }
   | { text: string; url: string }
-) & { icon_custom_emoji_id?: string };
+) &
+  TelegramButtonAppearance;
 
 export type TelegramBotTradingClientReplyMarkup = {
   inline_keyboard: TelegramBotTradingClientButton[][];

@@ -164,6 +164,7 @@ function notificationButton(input: {
               icon_custom_emoji_id:
                 telegramCustomEmojiIdForVenue(input.venue) ??
                 telegramCustomEmojiId("hunch"),
+              style: "primary",
               text: input.text,
               url,
             },

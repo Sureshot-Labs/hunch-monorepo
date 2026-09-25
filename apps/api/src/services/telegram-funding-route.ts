@@ -1613,6 +1613,25 @@ type TelegramRetainedRouteSpec = Readonly<{
   venueId: "limitless" | "polymarket";
 }>;
 
+export const TELEGRAM_POLYGON_USDCE_RETAINED_PRESENTATION: TelegramFundingRoutePresentation =
+  {
+    version: 1,
+    routeKey: CONTROLLER_USDCE_RECEIVE_ROUTE,
+    venueId: "polymarket",
+    venueLabel: "Hunch wallet",
+    networkId: "evm:137",
+    networkLabel: "Polygon",
+    destinationAssetSymbol: "USDC.e",
+    acceptedAssetSymbols: ["USDC.e"],
+    selectionButtonLabel: "USDC.e · Polygon",
+    settlementLabel: "Kept as USDC.e in Hunch",
+    instructions: [
+      "Send only USDC.e on Polygon to this verified Hunch wallet address.",
+      "No automatic conversion. Use this balance for a later purchase in Hunch.",
+    ],
+    decimals: 6,
+  };
+
 const TELEGRAM_RETAINED_ROUTE_SPECS: readonly TelegramRetainedRouteSpec[] =
   Object.freeze([
     {
@@ -1624,23 +1643,7 @@ const TELEGRAM_RETAINED_ROUTE_SPECS: readonly TelegramRetainedRouteSpec[] =
       },
       mode: "polymarket_polygon_usdce_retained",
       venueId: "polymarket",
-      presentation: {
-        version: 1,
-        routeKey: CONTROLLER_USDCE_RECEIVE_ROUTE,
-        venueId: "polymarket",
-        venueLabel: "Hunch wallet",
-        networkId: "evm:137",
-        networkLabel: "Polygon",
-        destinationAssetSymbol: "USDC.e",
-        acceptedAssetSymbols: ["USDC.e"],
-        selectionButtonLabel: "USDC.e · Polygon",
-        settlementLabel: "Kept as USDC.e in Hunch",
-        instructions: [
-          "Send only USDC.e on Polygon to this verified Hunch wallet address.",
-          "No automatic conversion. Use this balance for a later purchase in Hunch.",
-        ],
-        decimals: 6,
-      },
+      presentation: TELEGRAM_POLYGON_USDCE_RETAINED_PRESENTATION,
     },
     {
       sourceAsset: SOLANA_NATIVE_ASSET,

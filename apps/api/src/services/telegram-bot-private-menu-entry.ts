@@ -31,6 +31,7 @@ export function buildSignalBotPrivateMenuEntry(input: {
                     : {
                         icon_custom_emoji_id: telegramCustomEmojiId("hunch"),
                       }),
+                  style: "primary" as const,
                   text:
                     input.chatType === "channel"
                       ? "🟠 Open bot menu"

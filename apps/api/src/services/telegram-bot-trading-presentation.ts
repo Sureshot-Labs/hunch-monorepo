@@ -135,3 +135,35 @@ export function buildTelegramTradeProgressMessage(
     ? "⏳ *Processing trade*\n\nThe bot is submitting and checking the result\\. Do not retry this market\\."
     : "⏳ *Still resolving*\n\nThe bot is checking automatically\\. Do not retry this market\\.";
 }
+
+export function buildTelegramTradeInputPrompt(input: {
+  action: "buy" | "sell";
+  id: string;
+}) {
+  const instruction =
+    input.action === "buy"
+      ? "Send the USD amount to buy. Examples: 2, 2.50, or $2.50."
+      : "Send exact shares, an explicit percentage, or all. Examples: 1.25, 25%, or all. A bare number always means shares.";
+  return {
+    parse_mode: "MarkdownV2" as const,
+    text: joinTelegramMarkdownV2Lines([
+      `✍️ ${formatTelegramBoldMarkdownV2(input.action === "buy" ? "Custom buy" : "Custom sell")}`,
+      "",
+      escapeTelegramMarkdownV2(instruction),
+      "",
+      escapeTelegramMarkdownV2(
+        "Use Cancel below or another menu action to stop this input.",
+      ),
+    ]),
+    reply_markup: {
+      inline_keyboard: [
+        [
+          {
+            callback_data: `hbt:cancel_input:${input.id}`,
+            text: "✖️ Cancel input",
+          },
+        ],
+      ],
+    },
+  };
+}
