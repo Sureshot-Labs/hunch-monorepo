@@ -1150,6 +1150,11 @@ export function buildSignalBotMessage(input: {
   copyPolicy?: ResolvedSignalPostCopyPolicy;
   telegramMiniAppLinkBase?: string | null;
 }): {
+  copyDiagnostics: {
+    reason: string | null;
+    subject: string;
+    templateKey: string;
+  };
   keyboard: TelegramInlineKeyboard | undefined;
   publishable: boolean;
   richMessage: TelegramInputRichMessage;
@@ -1178,8 +1183,18 @@ export function buildSignalBotMessage(input: {
     !isSignalBotPrivateChat(input.chatType) &&
     notificationCopy.headline.templateKey === "initial_watch_v7";
   const publishable = notificationCopy.publishable && !weakPublicInitial;
+  const copyDiagnostics = {
+    reason: !notificationCopy.publishable
+      ? "incomplete_subject_or_update"
+      : weakPublicInitial
+        ? "missing_initial_evidence"
+        : null,
+    subject: notificationCopy.subject.text,
+    templateKey: notificationCopy.headline.templateKey,
+  };
   if (!publishable) {
     return {
+      copyDiagnostics,
       keyboard: undefined,
       publishable: false,
       richMessage: { blocks: [] },
@@ -1518,6 +1533,7 @@ export function buildSignalBotMessage(input: {
   }
 
   return {
+    copyDiagnostics,
     keyboard:
       keyboardRows.length > 0 ? { inline_keyboard: keyboardRows } : undefined,
     publishable: true,
@@ -4880,6 +4896,7 @@ export async function prepareSignalBotDelivery(input: {
     return {
       audit: {
         ...baseAudit,
+        copy: rendered.copyDiagnostics,
         identitySource: identity.source,
         priceSnapshotAsOf: priceSnapshot.asOf,
         updateFingerprint: update?.fingerprint ?? null,

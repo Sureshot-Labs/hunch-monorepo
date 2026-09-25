@@ -72,50 +72,63 @@ assert.match(observedMarket, /1 -/i);
 assert.doesNotMatch(observedMarket, /m\.best_bid|m\.best_ask/i);
 console.log("ok - feed probability uses observed canonical token tops");
 
-for (const directTokenLookup of [false, true]) {
-  let captured = "";
-  const client = {
-    query: async (sql: string) => {
-      if (sql.trim().startsWith("with ")) captured = sql;
-      return { rows: [] };
-    },
-    release() {},
-  };
-  await fetchFeedMarkets(
-    { connect: async () => client } as unknown as Pool,
-    {
-      limit: 25,
-      offset: 100,
-      minVol: 0,
-      minLiquidity: 0,
-      view: "events",
-      sortDir: "desc",
-      nowParam: "2026-09-21T12:00:00Z",
-      sevenDaysAgo: "2026-09-14T12:00:00Z",
-      sevenDaysFromNow: "2026-09-28T12:00:00Z",
-    },
-    ["polymarket:example"],
-    { directTokenLookup },
-  );
-  assert.match(captured, /market_rank <= \$\d+/);
-  if (directTokenLookup) {
-    assert.doesNotMatch(captured, /latest_book as|book_24h as|token_set as/);
-    assert.match(captured, /left join unified_token_top_latest yes_top/);
-    assert.match(captured, /left join unified_token_top_latest no_top/);
-    assert.equal(
-      (
-        captured.match(
-          /from unified_token_change_24h where avg_mid_24h is not null/g,
-        ) ?? []
-      ).length,
-      2,
+for (const directTokenLookup of [undefined, false, true]) {
+  for (const cachedChange of [false, true]) {
+    let captured = "";
+    const client = {
+      query: async (sql: string) => {
+        if (sql.trim().startsWith("with ")) captured = sql;
+        return { rows: [] };
+      },
+      release() {},
+    };
+    await fetchFeedMarkets(
+      { connect: async () => client } as unknown as Pool,
+      {
+        limit: 25,
+        offset: 100,
+        minVol: 0,
+        minLiquidity: 0,
+        view: "events",
+        sort: cachedChange ? "change24h" : "trending_v2",
+        sortDir: "desc",
+        nowParam: "2026-09-21T12:00:00Z",
+        sevenDaysAgo: "2026-09-14T12:00:00Z",
+        sevenDaysFromNow: "2026-09-28T12:00:00Z",
+      },
+      ["polymarket:example"],
+      { directTokenLookup, useCachedChange24h: cachedChange },
     );
-  } else {
-    assert.match(captured, /latest_book as materialized/);
-    assert.match(captured, /book_24h as materialized/);
+    assert.match(captured, /market_rank <= \$\d+/);
+    assert.match(captured, /market_base as materialized/);
+    if (directTokenLookup !== false) {
+      assert.doesNotMatch(captured, /latest_book as|book_24h as|token_set as/);
+      assert.match(captured, /left join unified_token_top_latest yes_top/);
+      assert.match(captured, /left join unified_token_top_latest no_top/);
+      assert.equal(
+        (
+          captured.match(
+            /from unified_token_change_24h where avg_mid_24h is not null/g,
+          ) ?? []
+        ).length,
+        cachedChange ? 0 : 2,
+      );
+    } else {
+      assert.match(captured, /latest_book as materialized/);
+      if (!cachedChange) assert.match(captured, /book_24h as materialized/);
+    }
+    if (cachedChange) {
+      assert.doesNotMatch(
+        captured,
+        /unified_token_change_24h|book_24h|yes_24h|no_24h/,
+      );
+      assert.match(captured, /cached_change\.calculation_version = 2/);
+    }
   }
 }
-console.log("ok - For You direct token lookups preserve the default feed path");
+console.log(
+  "ok - event hydration defaults to indexed token lookups and skips unused history",
+);
 
 const predicate = buildObservedCanonicalMarketProbabilityPredicateSql({
   marketAlias: "m",

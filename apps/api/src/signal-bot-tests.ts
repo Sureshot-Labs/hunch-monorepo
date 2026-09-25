@@ -1229,6 +1229,63 @@ function note(overrides: Partial<SignalBotNote> = {}): SignalBotNote {
   return result;
 }
 
+function fedNoChangeSignalNote(): SignalBotNote {
+  const asOf = "2026-09-25T10:30:22.000Z";
+  return note({
+    direction: "down",
+    eventTitle: "Fed Decision in October?",
+    holderActorMode: "single_holder",
+    holderDisplayName: "ethBELIVER",
+    holderIdentityDisplayName: "ethBELIVER",
+    holderPositionUsd: 54_294,
+    holderSide: "NO",
+    marketId: "polymarket:2589812",
+    marketTitle: "No change",
+    metrics: {
+      signalEvidenceVersion: 1,
+      signalEvidence: [
+        {
+          asOf,
+          context: null,
+          horizonDays: 30,
+          id: "representative_wallet:track_record:30d",
+          kind: "track_record",
+          measurement: { kind: "scalar", unit: "usd", value: 401_369 },
+          quality: "verified",
+          sampleSize: 41,
+          scope: "representative_wallet",
+          source: {
+            kind: "hunch_wallet_intel",
+            label: "Representative wallet",
+            url: null,
+          },
+        },
+      ],
+      telegramPresentation: {
+        version: 1,
+        source: "derived_market_side_copy",
+        subject: "Fed Decision in October?",
+        predicate: "No change",
+        threshold: null,
+        deadline: null,
+        positions: {
+          YES: { canonicalLabel: "YES", shortLabel: "YES", aliases: [] },
+          NO: { canonicalLabel: "NO", shortLabel: "NO", aliases: [] },
+        },
+      },
+    },
+    outcomes: ["Yes", "No"],
+    signalPriceSnapshotV1: {
+      ...testSignalPriceSnapshot("NO"),
+      asOf,
+      displayPrice: 0.675,
+      marketId: "polymarket:2589812",
+      NO: { ask: 0.68, bid: 0.67, mark: 0.675 },
+      YES: { ask: 0.33, bid: 0.32, mark: 0.325 },
+    },
+  });
+}
+
 function noteRow(overrides: Record<string, unknown> = {}) {
   const row: Record<string, unknown> = {
     id: "00000000-0000-4000-8000-000000000001",
@@ -14045,6 +14102,10 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.equal(privateMessage.publishable, true);
       assert.equal(publicMessage.publishable, false);
+      assert.equal(
+        publicMessage.copyDiagnostics.reason,
+        "missing_initial_evidence",
+      );
       assert.equal(publicMessage.text, "");
     },
   },
@@ -14276,6 +14337,31 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.match(message.text, /▸ PnL.*122K.*30d/);
       assert.match(message.text, /▸ Wallets.*2 on the same side/);
       assert.doesNotMatch(message.text, /\$38K backs NO|▸ Tracked position/);
+    },
+  },
+  {
+    name: "ordinary channel publishes grouped Fed no-change signal with its event context and NO side",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        chatType: "channel",
+        note: fedNoChangeSignalNote(),
+      });
+      assert.equal(message.publishable, true);
+      assert.equal(message.copyDiagnostics.reason, null);
+      assert.equal(
+        message.copyDiagnostics.subject,
+        "NO on No change in Fed Decision in October?",
+      );
+      const headline = message.text.split("\n")[0] ?? "";
+      assert.match(headline, /Fed Decision in October/);
+      assert.match(headline, /No change/i);
+      assert.match(headline, /betting against/i);
+      assert.match(
+        message.keyboard?.inline_keyboard.flat()[0]?.text ?? "",
+        /Buy NO\b/,
+      );
     },
   },
   {
@@ -18029,6 +18115,44 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         await refreshSignalBotLock({ owner: "owner-2", redis }),
         true,
       );
+    },
+  },
+  {
+    name: "ordinary delivery preparation accepts grouped Fed no-change signal without losing the NO trade target",
+    run: async () => {
+      const signal = fedNoChangeSignalNote();
+      assert.ok(signal.eventId);
+      assert.ok(signal.marketId);
+      const prepared = await prepareSignalBotDelivery({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        chatType: "channel",
+        db: new FakeDb(),
+        messageKind: "initial",
+        note: signal,
+        now: new Date("2026-09-25T10:31:12.000Z"),
+        resolvedDelivery: {
+          allowBuyCta: true,
+          target: {
+            eventId: signal.eventId,
+            marketId: signal.marketId,
+            price: 0.68,
+            side: "NO",
+            venue: "polymarket",
+          },
+        },
+        telegramMiniAppLinkBase: TEST_TELEGRAM_MINI_APP_LINK_BASE,
+      });
+      assert.equal(prepared.status, "ready");
+      if (prepared.status !== "ready") return;
+      assert.equal(prepared.buySide, "NO");
+      assert.equal(prepared.deliveryTarget?.side, "NO");
+      assert.equal(prepared.deliveryTarget?.marketId, "polymarket:2589812");
+      assert.equal(prepared.audit.ctaIntent, "buy");
+      const headline = prepared.text.split("\n")[0] ?? "";
+      assert.match(headline, /Fed Decision in October/);
+      assert.match(headline, /No change/i);
+      assert.match(headline, /betting against/i);
     },
   },
   {

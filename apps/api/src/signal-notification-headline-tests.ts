@@ -57,6 +57,55 @@ function trackRecordEvidence(value: number): SignalEvidenceMetricV1[] {
 
 const tests: Array<{ name: string; run: () => void }> = [
   {
+    name: "persisted grouped presentations retain the parent instead of rejecting No change",
+    run: () => {
+      for (const side of ["YES", "NO"] as const) {
+        for (const [eventTitle, marketTitle] of [
+          ["Fed Decision in October?", "No change"],
+          ["ECB Decision in October?", "Decrease"],
+          ["US recession in 2026?", "September"],
+        ] as const) {
+          const input = {
+            eventTitle,
+            marketTitle,
+            side,
+            outcomes: ["Yes", "No"],
+          };
+          const sideCopy = buildMarketSideCopy(input);
+          const presentation =
+            resolveTelegramMarketPresentation(input).presentation;
+          const result = buildSignalNotificationSubject({
+            ...input,
+            sideCopy,
+            presentation,
+          });
+          assert.ok(result.text.includes(eventTitle));
+          assert.ok(result.text.includes(marketTitle));
+          assert.equal(
+            isSignalNotificationSubjectComplete(result.text, side),
+            true,
+          );
+          assert.match(result.text, new RegExp(`^${side} on `));
+        }
+      }
+      const input = {
+        eventTitle: "No change",
+        marketTitle: "No change",
+        side: "NO" as const,
+        outcomes: ["Yes", "No"],
+      };
+      const incomplete = buildSignalNotificationSubject({
+        ...input,
+        sideCopy: buildMarketSideCopy(input),
+        presentation: resolveTelegramMarketPresentation(input).presentation,
+      });
+      assert.equal(
+        isSignalNotificationSubjectComplete(incomplete.text, "NO"),
+        false,
+      );
+    },
+  },
+  {
     name: "approved presentation normalizes exact esports aliases",
     run: () => {
       const resolved = resolveTelegramMarketPresentation({

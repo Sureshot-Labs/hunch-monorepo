@@ -3031,9 +3031,9 @@ function buildFeedBookSnapshotCtes(args: {
   const tokenYesColumn = args.tokenYesColumn ?? "resolved_token_yes";
   const tokenNoColumn = args.tokenNoColumn ?? "resolved_token_no";
   if (args.directTokenLookup) {
-    // Personalized candidates can contain thousands of markets. Joining their
-    // materialized price sets repeatedly becomes quadratic under row-count
-    // underestimation; use the same token-keyed tables directly instead.
+    // Event pages (including personalized candidates) can contain thousands
+    // of markets. Repeated joins to unindexed materialized price sets become
+    // quadratic when cardinality is underestimated; use token-keyed tables.
     const history = `(select token_id, avg_mid_24h as best_bid, avg_mid_24h as best_ask
       from unified_token_change_24h where avg_mid_24h is not null)`;
     return {
@@ -4022,8 +4022,8 @@ export async function fetchFeedMarkets(
   `;
   const bookSnapshot = buildFeedBookSnapshotCtes({
     nowParam,
-    include24h: true,
-    directTokenLookup: options?.directTokenLookup,
+    include24h: !useCachedChange24h,
+    directTokenLookup: options?.directTokenLookup ?? true,
   });
   const limitlessAmmFallbackAllowedExpr = buildLimitlessAmmFallbackAllowedExpr(
     nowParam,
@@ -4043,7 +4043,9 @@ export async function fetchFeedMarkets(
   const withParts: string[] = [];
   if (directMarketSearchCtes.length) withParts.push(...directMarketSearchCtes);
   withParts.push(`event_order as (${eventOrderSql})`);
-  withParts.push(`market_base as (${marketBaseSql})`);
+  // Resolve canonical token IDs once per selected market. Direct price joins
+  // otherwise inline this CTE and repeat the correlated mapping lookups.
+  withParts.push(`market_base as materialized (${marketBaseSql})`);
   withParts.push(...bookSnapshot.ctes);
   const withClause = `with ${withParts.join(",\n")}`;
   const marketSql = `

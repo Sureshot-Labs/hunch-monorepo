@@ -320,6 +320,20 @@ export function buildSignalNotificationSubject(input: {
   if (input.presentation) {
     const position = input.presentation.positions[input.side];
     const subject = cleanText(input.presentation.subject) ?? "this market";
+    const predicate = cleanText(input.presentation.predicate) ?? subject;
+    // A grouped outcome ("No change", a month, a company) is not the
+    // contract by itself. Keep its parent even when a presentation exists.
+    const subjectKey = subject.toLocaleLowerCase("en-US");
+    const predicateKey = predicate.toLocaleLowerCase("en-US");
+    const proposition =
+      isSignalNotificationSubjectComplete(
+        `${input.side} on ${predicate}`,
+        input.side,
+      ) || predicateKey.includes(subjectKey)
+        ? predicate
+        : subjectKey.includes(predicateKey)
+          ? subject
+          : `${predicate} in ${subject}`;
     const text =
       input.presentation.source === "approved_override"
         ? subject
@@ -328,7 +342,7 @@ export function buildSignalNotificationSubject(input: {
               .toLocaleLowerCase("en-US")
               .includes(position.canonicalLabel.toLocaleLowerCase("en-US"))
           ? `${position.canonicalLabel} in ${subject}`
-          : `${input.side} on ${input.presentation.predicate}`;
+          : `${input.side} on ${proposition}`;
     return {
       preservedFields: [
         "predicate",
