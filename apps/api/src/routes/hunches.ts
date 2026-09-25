@@ -2,6 +2,10 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { pool } from "../db.js";
+import {
+  publicHolderDisplayName,
+  publicHunchSources,
+} from "../services/hunch-public-presentation.js";
 
 const querySchema = z
   .object({
@@ -47,7 +51,6 @@ type PublicHunchRow = {
   market_image: string | null;
   event_id: string | null;
   event_title: string | null;
-  selected_evidence_ids: string[];
 };
 
 function record(value: unknown): Record<string, unknown> {
@@ -93,34 +96,12 @@ function toPublicHunch(row: PublicHunchRow) {
   const strength = publicStrength(row);
   const side =
     typeof lineage.side === "string" ? lineage.side.toUpperCase() : null;
-  const signalEvidence = Array.isArray(meta.evidence_refs)
-    ? meta.evidence_refs.map(record)
-    : [];
-  const selectedEvidenceIds = new Set(row.selected_evidence_ids);
-  const evidence = signalEvidence
-    .filter(
-      (item) =>
-        typeof item.evidence_id === "string" &&
-        selectedEvidenceIds.has(item.evidence_id),
-    )
-    .map((item) => ({
-      id: item.evidence_id as string,
-      headline: typeof item.headline === "string" ? item.headline : null,
-    }))
-    .filter((item) => item.headline);
-  const urls =
-    row.note_type === "context"
-      ? context.source_urls
-      : record(meta.external_research).citations;
-  const sources = Array.isArray(urls)
-    ? urls
-        .map((item) => (typeof item === "string" ? item : record(item).url))
-        .filter(
-          (item): item is string =>
-            typeof item === "string" && /^https?:\/\//i.test(item),
-        )
-        .slice(0, 6)
-    : [];
+  const evidence = publicHunchSources({
+    kind: row.note_type === "context" ? "context" : "signal",
+    metrics,
+    modelMeta: meta,
+  });
+  const sources = evidence.map((item) => item.url);
   const caveats = row.note_type === "context" ? context.caveats : meta.caveats;
   return {
     noteId: row.id,
@@ -196,12 +177,7 @@ const HUNCH_COLUMNS = `
   n.source_id, n.lineage, n.metrics, n.model_meta,
   m.title as market_title, m.venue as market_venue,
   m.outcomes as market_outcomes, coalesce(m.image, e.image) as market_image,
-  m.event_id, e.title as event_title,
-  array(select selected_evidence.evidence_id
-        from ai_note_evidence selected_evidence
-        where selected_evidence.note_id = n.id
-        order by selected_evidence.relevance desc nulls last,
-                 selected_evidence.evidence_id) as selected_evidence_ids
+  m.event_id, e.title as event_title
 `;
 
 export const hunchesRoutes: FastifyPluginAsync = async (app) => {
@@ -309,8 +285,12 @@ export const hunchesRoutes: FastifyPluginAsync = async (app) => {
           chain: holder.chain,
           side,
           outcomeLabel: outcomeLabel(row, side),
-          descriptor: nonEmptyString(meta.holderDescriptor),
-          displayName: nonEmptyString(meta.identityDisplayName),
+          descriptor: null,
+          displayName: publicHolderDisplayName({
+            identityDisplayName: meta.identityDisplayName,
+            identityDisplayNameSource: meta.identityDisplayNameSource,
+            address: holder.address,
+          }),
           positionUsd: finiteNumber(meta.positionUsd),
           pnl30dUsd: finiteNumber(meta.pnl30dUsd),
           resolvedWinRateEdge30d: finiteNumber(meta.resolvedWinRateEdge30d),

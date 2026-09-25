@@ -7365,6 +7365,9 @@ export async function persistHolderResearchPublicContext(
     ...publicContext,
     source_urls: [...new Set(verifiedSourceUrls as string[])],
   };
+  const publicSourceCitations = research.citations.filter((citation) =>
+    canonicalPublicContext.source_urls.includes(citation.url),
+  );
   const publicPayload = {
     headline: canonicalPublicContext.headline,
     summary: canonicalPublicContext.summary,
@@ -7417,6 +7420,22 @@ export async function persistHolderResearchPublicContext(
     );
     const latest = latestRows[0];
     if (latest?.note_type === "context" && latest.fingerprint === fingerprint) {
+      if (latest.status === "active" && publicSourceCitations.length > 0) {
+        // Source titles/dates can be filled in without publishing a new note or
+        // changing its updated_at, revision identity, or read state.
+        await client.query(
+          `update ai_notes
+           set model_meta = jsonb_set(
+             model_meta, '{public_source_citations}', $2::jsonb, true
+           )
+           where id = $1::uuid
+             and status = 'active'
+             and note_type = 'context'
+             and metrics->>'publicFingerprint' = $3
+             and model_meta->'public_source_citations' is distinct from $2::jsonb`,
+          [latest.id, JSON.stringify(publicSourceCitations), fingerprint],
+        );
+      }
       await client.query("commit");
       return "unchanged";
     }
@@ -7449,6 +7468,7 @@ export async function persistHolderResearchPublicContext(
         JSON.stringify({
           caveats: publicContext.caveats,
           evidence_refs: publicEvidenceRefs,
+          public_source_citations: publicSourceCitations,
         }),
       ],
     );
