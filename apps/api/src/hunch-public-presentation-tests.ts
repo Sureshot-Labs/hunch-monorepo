@@ -117,6 +117,16 @@ assert.equal(
 );
 assert.equal(
   publicHolderDisplayName({
+    profileLabel: "Plain-Apparatus-Acre",
+    identityDisplayName: "@mr.ozi",
+    identityDisplayNameSource: "polymarket",
+    address: walletAddress,
+  }),
+  "Plain-Apparatus-Acre",
+  "the public AI trader title takes priority over a venue handle",
+);
+assert.equal(
+  publicHolderDisplayName({
     identityDisplayName: "@mr.ozi",
     identityDisplayNameSource: "polymarket",
     address: walletAddress,
@@ -138,10 +148,20 @@ assert.equal(
     identityDisplayNameSource: null,
     address: walletAddress,
     walletLabel: "Private desk annotation",
-    profileLabel: "AI title influenced by private annotation",
+    profileLabel: "Plain-Apparatus-Acre",
   } as Parameters<typeof publicHolderDisplayName>[0]),
-  null,
-  "private wallet and AI-profile labels are ignored even if provided",
+  "Plain-Apparatus-Acre",
+  "public AI titles are shown without exposing a private wallet annotation",
+);
+assert.equal(
+  publicHolderDisplayName({
+    identityDisplayName: "@mr.ozi",
+    identityDisplayNameSource: "polymarket",
+    address: walletAddress,
+    profileLabel: `Trader ${walletAddress}`,
+  }),
+  "mr.ozi",
+  "an address-bearing AI label falls back to the public venue handle",
 );
 const hunchRouteSource = readFileSync(
   new URL("./routes/hunches.ts", import.meta.url),
@@ -149,8 +169,9 @@ const hunchRouteSource = readFileSync(
 );
 assert.doesNotMatch(
   hunchRouteSource,
-  /\bw\.label\b|wallet_label|wallet_profiles|profile_label/,
+  /\bw\.label\b|wallet_label|wallet_user_names/,
 );
+assert.match(hunchRouteSource, /wp\.profile->>'label_short'/);
 assert.doesNotMatch(hunchRouteSource, /meta\.holderDescriptor/);
 assert.equal(publicHolderLabel(walletAddress, walletAddress), null);
 assert.equal(

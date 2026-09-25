@@ -266,11 +266,15 @@ export const hunchesRoutes: FastifyPluginAsync = async (app) => {
       const { rows: holderRows } = await pool.query<{
         address: string | null;
         chain: string | null;
+        profile_label: string | null;
         target_meta: unknown;
       }>(
-        `select w.address, w.chain, target_row.target_meta
+        `select w.address, w.chain,
+                wp.profile->>'label_short' as profile_label,
+                target_row.target_meta
          from ai_note_targets target_row
          left join wallets w on w.id = target_row.target_id::uuid
+         left join wallet_profiles wp on wp.wallet_id = w.id
          where target_row.note_id = $1::uuid
            and target_row.target_kind = 'wallet'
          order by target_row.target_rank, target_row.target_id
@@ -287,6 +291,7 @@ export const hunchesRoutes: FastifyPluginAsync = async (app) => {
           outcomeLabel: outcomeLabel(row, side),
           descriptor: null,
           displayName: publicHolderDisplayName({
+            profileLabel: holder.profile_label,
             identityDisplayName: meta.identityDisplayName,
             identityDisplayNameSource: meta.identityDisplayNameSource,
             address: holder.address,

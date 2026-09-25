@@ -137,6 +137,7 @@ export function publicHolderLabel(
   if (!label || genericWalletLabel.test(label)) return null;
   if (address && label.toLowerCase() === address.toLowerCase()) return null;
   if (/^0x[0-9a-f]{8,}(?:-\d+)?$/i.test(label)) return null;
+  if (/0x[0-9a-f]{40}/i.test(label)) return null;
   if (/^0x[0-9a-f]{4,}(?:\.\.\.|…)[0-9a-f]{4,}(?:-\d+)?$/i.test(label))
     return null;
   if (
@@ -150,10 +151,13 @@ export function publicHolderLabel(
 }
 
 export function publicHolderDisplayName(input: {
+  profileLabel?: unknown;
   identityDisplayName: unknown;
   identityDisplayNameSource: unknown;
   address: string | null;
 }): string | null {
+  const profileLabel = publicHolderLabel(input.profileLabel, input.address);
+  if (profileLabel) return profileLabel;
   return input.identityDisplayNameSource === "polymarket" ||
     input.identityDisplayNameSource === "ens"
     ? publicHolderLabel(input.identityDisplayName, input.address)
