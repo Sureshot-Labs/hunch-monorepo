@@ -41,6 +41,7 @@ import {
   enqueueTelegramActivityNotifications,
   enqueueTelegramPositionSignals,
 } from "./services/telegram-notification-delivery.js";
+import { enqueueTelegramInterestHunches } from "./services/telegram-hunch-interests.js";
 import {
   cleanupTelegramBotActionOutbox,
   deliverTelegramBotOnboardingActions,
@@ -1072,11 +1073,30 @@ export async function runSignalBotRunner(): Promise<void> {
                   pool: db,
                 })
               : { enqueued: 0, notes: 0 };
+            let interestSignals = {
+              enqueued: 0,
+              notes: 0,
+              semanticErrors: 0,
+            };
+            if (resolvedPolicy.policy.interestSignalEnqueueEnabled) {
+              try {
+                interestSignals = await enqueueTelegramInterestHunches({
+                  limit: config.maxSignalsPerTick,
+                  pool: db,
+                  redis,
+                });
+              } catch (error) {
+                log("signal_bot_interest_hunch_enqueue_error", {
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              }
+            }
             const delivery = resolvedPolicy.policy.deliveryEnabled
               ? await deliverTelegramNotificationOutbox({
                   db,
                   limit: 25,
                   miniAppLinkBase: config.telegramMiniAppLinkBase,
+                  signalConfig: config,
                   telegram,
                 })
               : {
@@ -1091,6 +1111,8 @@ export async function runSignalBotRunner(): Promise<void> {
             if (
               activityEnqueued > 0 ||
               positionSignals.enqueued > 0 ||
+              interestSignals.enqueued > 0 ||
+              interestSignals.semanticErrors > 0 ||
               delivery.claimed > 0 ||
               delivery.quarantined > 0 ||
               cleaned > 0 ||
@@ -1103,6 +1125,8 @@ export async function runSignalBotRunner(): Promise<void> {
                 fundingCleaned,
                 onboardingCleaned,
                 positionSignalEnqueued: positionSignals.enqueued,
+                interestSignalEnqueued: interestSignals.enqueued,
+                interestSignalSemanticErrors: interestSignals.semanticErrors,
                 positionSignalNotes: positionSignals.notes,
                 ...delivery,
               });

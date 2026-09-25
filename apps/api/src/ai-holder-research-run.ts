@@ -32,6 +32,8 @@ import {
 } from "./lib/ai-pricing.js";
 import { buildOpenRouterReasoningOptions } from "./lib/openrouter-reasoning.js";
 import { buildHolderResearchResponseFormat } from "./services/holder-research-request.js";
+import { resolveVerifiedExternalSourceUrl } from "./services/holder-research-source-url.js";
+export { resolveVerifiedExternalSourceUrl } from "./services/holder-research-source-url.js";
 import {
   createHolderResearchPublicationProgress,
   holderResearchCacheOutputAfterPersistence,
@@ -86,6 +88,7 @@ import {
   listHolderResearchPromptEvidenceIdsV2,
   parseHolderResearchCachedDecision,
   persistHolderResearchNotes,
+  persistHolderResearchPublicContext,
   selectHolderResearchCandidates,
   type HolderResearchCandidate,
   type HolderResearchDecisionCacheEvaluation,
@@ -314,6 +317,8 @@ type ExternalResearchResult = Omit<
   foundSources: string[];
   providerCostUsd: number | null;
   providerAttempted: boolean;
+  webSearchCalls: number | null;
+  xSearchCalls: number | null;
 };
 
 type HolderResearchRunReport = {
@@ -491,6 +496,8 @@ type HolderResearchRunReport = {
     externalSearchCitations: ExternalResearchResult["citations"];
     externalSearchFoundSources: string[];
     externalSearchToolCalls: number;
+    externalSearchWebCalls: number | null;
+    externalSearchXCalls: number | null;
   }>;
   persistence: Awaited<ReturnType<typeof persistHolderResearchNotes>> | null;
   resolvedEvaluation: Awaited<
@@ -753,7 +760,7 @@ export function extractMarkdownCitations(
   text: string,
   payload: unknown,
 ): ExternalResearchResult["citations"] {
-  const encountered = new Set(extractExternalResearchFoundSources(payload));
+  const encountered = extractExternalResearchFoundSources(payload);
   const citations: ExternalResearchResult["citations"] = [];
   const seen = new Set<string>();
   for (const match of text.matchAll(
@@ -762,11 +769,14 @@ export function extractMarkdownCitations(
     const rawTitle =
       match[1]?.replaceAll("[", "").replaceAll("]", "").trim() || null;
     const url = match[2]?.trim() || null;
-    if (!url || !encountered.has(url) || seen.has(url)) continue;
-    seen.add(url);
+    const verifiedUrl = url
+      ? resolveVerifiedExternalSourceUrl(url, encountered)
+      : null;
+    if (!verifiedUrl || seen.has(verifiedUrl)) continue;
+    seen.add(verifiedUrl);
     citations.push({
-      title: rawTitle && !/^\d+$/.test(rawTitle) ? rawTitle : url,
-      url,
+      title: rawTitle && !/^\d+$/.test(rawTitle) ? rawTitle : verifiedUrl,
+      url: verifiedUrl,
       publishedAt: null,
     });
     if (citations.length >= 3) break;
@@ -825,6 +835,55 @@ function extractServerToolCallCount(payload: unknown): number {
       (Number.isFinite(topLevelX) ? topLevelX : 0),
     countAiToolAttempts(payload),
   );
+}
+
+function extractSearchToolBreakdown(
+  payload: unknown,
+): Pick<ExternalResearchResult, "webSearchCalls" | "xSearchCalls"> {
+  const root =
+    payload && typeof payload === "object"
+      ? (payload as Record<string, unknown>)
+      : {};
+  const usageRecord =
+    root.usage && typeof root.usage === "object"
+      ? (root.usage as Record<string, unknown>)
+      : {};
+  const rawDetails =
+    usageRecord.server_side_tool_usage_details ??
+    root.server_side_tool_usage_details;
+  const details =
+    rawDetails && typeof rawDetails === "object"
+      ? (rawDetails as Record<string, unknown>)
+      : null;
+  if (
+    details &&
+    (details.web_search_calls != null ||
+      details.x_search_calls != null ||
+      details.SERVER_SIDE_TOOL_WEB_SEARCH != null ||
+      details.SERVER_SIDE_TOOL_X_SEARCH != null)
+  ) {
+    const usage = extractAiUsageMetrics(payload);
+    return {
+      webSearchCalls: usage.toolUsageDetails.web_search_calls,
+      xSearchCalls: usage.toolUsageDetails.x_search_calls,
+    };
+  }
+  const output = Array.isArray(root.output) ? root.output : [];
+  const webAttempts = output.filter(
+    (item) =>
+      item &&
+      typeof item === "object" &&
+      (item as { type?: unknown }).type === "web_search_call",
+  ).length;
+  const xAttempts = output.filter(
+    (item) =>
+      item &&
+      typeof item === "object" &&
+      (item as { type?: unknown }).type === "x_search_call",
+  ).length;
+  return webAttempts + xAttempts > 0
+    ? { webSearchCalls: webAttempts, xSearchCalls: xAttempts }
+    : { webSearchCalls: null, xSearchCalls: null };
 }
 
 export function extractExternalResearchFoundSources(
@@ -907,6 +966,8 @@ function emptyExternalResearchResult(input: {
   toolCalls?: number;
   providerCostUsd?: number | null;
   providerAttempted?: boolean;
+  webSearchCalls?: number | null;
+  xSearchCalls?: number | null;
 }): ExternalResearchResult {
   return {
     status: input.status,
@@ -921,6 +982,8 @@ function emptyExternalResearchResult(input: {
     foundSources: [],
     providerCostUsd: input.providerCostUsd ?? null,
     providerAttempted: input.providerAttempted ?? false,
+    webSearchCalls: input.webSearchCalls ?? null,
+    xSearchCalls: input.xSearchCalls ?? null,
   };
 }
 
@@ -1093,8 +1156,10 @@ export async function runExternalResearch(params: {
       usage.providerCostUsd ?? params.policy.estimatedExternalSearchCostUsd;
     const foundSources = extractExternalResearchFoundSources(payload);
     const toolCalls = extractServerToolCallCount(payload);
+    const toolBreakdown = extractSearchToolBreakdown(payload);
     if (!response.ok) {
       return emptyExternalResearchResult({
+        ...toolBreakdown,
         status: "error",
         toolCalls,
         costUsd,
@@ -1109,6 +1174,7 @@ export async function runExternalResearch(params: {
     if (completionError)
       return {
         ...emptyExternalResearchResult({
+          ...toolBreakdown,
           status: "error",
           error: completionError,
           toolCalls,
@@ -1120,6 +1186,7 @@ export async function runExternalResearch(params: {
     if (toolCalls === 0 && foundSources.length === 0) {
       return {
         ...emptyExternalResearchResult({
+          ...toolBreakdown,
           status: "error",
           error: "search_not_verified",
           summary:
@@ -1146,6 +1213,7 @@ export async function runExternalResearch(params: {
         const citations = extractMarkdownCitations(text, payload);
         if (citations.length > 0) {
           return {
+            ...toolBreakdown,
             status: "ok",
             verdict: "unknown",
             timing: "unknown",
@@ -1162,12 +1230,16 @@ export async function runExternalResearch(params: {
           };
         }
       }
-      const allowedSources = new Set(foundSources);
-      const citations = structured.citations.filter((citation) =>
-        allowedSources.has(citation.url),
-      );
+      const citations = structured.citations.flatMap((citation) => {
+        const verifiedUrl = resolveVerifiedExternalSourceUrl(
+          citation.url,
+          foundSources,
+        );
+        return verifiedUrl ? [{ ...citation, url: verifiedUrl }] : [];
+      });
       if (structured.status === "ok" && citations.length === 0) {
         return emptyExternalResearchResult({
+          ...toolBreakdown,
           status: "error",
           error: "search_sources_not_verified",
           summary:
@@ -1185,23 +1257,32 @@ export async function runExternalResearch(params: {
           rawResearch?.verdict !== structured.verdict ||
           rawResearch?.timing !== structured.timing);
       return {
+        ...toolBreakdown,
         ...structured,
         citations,
-        comparableOdds:
-          structured.comparableOdds &&
-          structured.comparableOdds.side === params.candidate.side &&
-          structured.comparableOdds.sources.every((source) =>
-            allowedSources.has(source.url),
-          )
-            ? structured.comparableOdds
-            : null,
-        freshFact:
-          structured.freshFact &&
-          citations.some(
-            (citation) => citation.url === structured.freshFact?.sourceUrl,
-          )
-            ? structured.freshFact
-            : null,
+        comparableOdds: (() => {
+          const odds = structured.comparableOdds;
+          if (!odds || odds.side !== params.candidate.side) return null;
+          const sources = odds.sources.map((source) => {
+            const verifiedUrl = resolveVerifiedExternalSourceUrl(
+              source.url,
+              foundSources,
+            );
+            return verifiedUrl ? { ...source, url: verifiedUrl } : null;
+          });
+          return sources.every((source) => source !== null)
+            ? { ...odds, sources: sources as typeof odds.sources }
+            : null;
+        })(),
+        freshFact: (() => {
+          const fact = structured.freshFact;
+          if (!fact) return null;
+          const verifiedUrl = resolveVerifiedExternalSourceUrl(
+            fact.sourceUrl,
+            citations.map((citation) => citation.url),
+          );
+          return verifiedUrl ? { ...fact, sourceUrl: verifiedUrl } : null;
+        })(),
         foundSources,
         costUsd,
         providerCostUsd: usage.providerCostUsd,
@@ -1223,6 +1304,7 @@ export async function runExternalResearch(params: {
     const payloadCitations = extractCitations(payload);
     const markdownCitations = extractMarkdownCitations(text, payload);
     return {
+      ...toolBreakdown,
       status:
         summary.length > 0 &&
         !summary.toLowerCase().includes("no public context")
@@ -3119,6 +3201,13 @@ export async function runHolderResearch(
         : null,
     });
     let finalModelCalls = 0;
+    const publicContextPersistence = {
+      considered: 0,
+      persisted: 0,
+      unchanged: 0,
+      invalid: 0,
+      errors: 0,
+    };
     let remainingLiveChecks = policy.maxLiveChecksPerRun;
     for (const selectedCandidate of finalCandidates) {
       if (finalModelCalls >= policy.maxAgentCallsPerRun) break;
@@ -3285,6 +3374,31 @@ export async function runHolderResearch(
       // Persist before spending the publication slot or evaluating the next
       // candidate. A rejected/duplicate note must not starve other finalists.
       await publicationProgress.record(decision);
+      if (
+        shouldPersist &&
+        decision.rawStatus === "CONTEXT" &&
+        decision.output.status === "CONTEXT" &&
+        decision.output.public_context
+      ) {
+        publicContextPersistence.considered += 1;
+        try {
+          await options.assertCanPersist?.();
+          const contextResult = await persistHolderResearchPublicContext(
+            client,
+            {
+              runnerRunId: runId,
+              decision,
+            },
+          );
+          publicContextPersistence[contextResult] += 1;
+        } catch (error) {
+          publicContextPersistence.errors += 1;
+          console.warn("[holder-research] public context persistence failed", {
+            candidateKey: candidate.key,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
       await maybeWriteDecisionCache({
         redis: options.decisionCacheRedis,
         policy,
@@ -3326,7 +3440,7 @@ export async function runHolderResearch(
           ? "ok"
           : "skipped",
       detail: policy.externalSearchEnabled
-        ? `executed=${externalSearchCalls} ok=${[...externalResearchByKey.values()].filter((result) => result.status === "ok").length} no_evidence=${[...externalResearchByKey.values()].filter((result) => result.status === "no_evidence").length} error=${[...externalResearchByKey.values()].filter((result) => result.status === "error").length} skipped=${[...externalResearchByKey.values()].filter((result) => result.status === "skipped").length} provider_tools=${[...externalResearchByKey.values()].reduce((sum, result) => sum + result.toolCalls, 0)}`
+        ? `executed=${externalSearchCalls} ok=${[...externalResearchByKey.values()].filter((result) => result.status === "ok").length} no_evidence=${[...externalResearchByKey.values()].filter((result) => result.status === "no_evidence").length} error=${[...externalResearchByKey.values()].filter((result) => result.status === "error").length} skipped=${[...externalResearchByKey.values()].filter((result) => result.status === "skipped").length} provider_tools=${[...externalResearchByKey.values()].reduce((sum, result) => sum + result.toolCalls, 0)} reported_web=${[...externalResearchByKey.values()].reduce((sum, result) => sum + (result.webSearchCalls ?? 0), 0)} reported_x=${[...externalResearchByKey.values()].reduce((sum, result) => sum + (result.xSearchCalls ?? 0), 0)} metered=${[...externalResearchByKey.values()].filter((result) => result.webSearchCalls !== null || result.xSearchCalls !== null).length}`
         : "policy disabled",
     });
     toolCalls.push({
@@ -3342,6 +3456,12 @@ export async function runHolderResearch(
       count: decisions.length,
       status: "ok",
       detail: args.callModel ? "OpenRouter" : "no network call",
+    });
+    toolCalls.push({
+      name: "public_context_persistence",
+      count: publicContextPersistence.considered,
+      status: publicContextPersistence.errors ? "error" : "ok",
+      detail: JSON.stringify(publicContextPersistence),
     });
 
     if (observeV2 && !policy.dryRun) {
@@ -3720,6 +3840,12 @@ export async function runHolderResearch(
           externalResearchByKey.get(decision.candidate.key)?.foundSources ?? [],
         externalSearchToolCalls:
           externalResearchByKey.get(decision.candidate.key)?.toolCalls ?? 0,
+        externalSearchWebCalls:
+          externalResearchByKey.get(decision.candidate.key)?.webSearchCalls ??
+          null,
+        externalSearchXCalls:
+          externalResearchByKey.get(decision.candidate.key)?.xSearchCalls ??
+          null,
       })),
       persistence,
       resolvedEvaluation,

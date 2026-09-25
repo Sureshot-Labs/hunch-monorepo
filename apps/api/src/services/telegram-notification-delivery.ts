@@ -41,6 +41,7 @@ import {
 
 type TelegramNotificationOutboxRow = {
   attempt_count: number;
+  claim_token: string;
   id: string;
   payload: unknown;
   topic: TelegramNotificationTopic;
@@ -650,6 +651,7 @@ type PositionSignalRecipientRow = {
   held_sides: string[] | null;
   position_snapshot_at: string | null;
   root_telegram_message_id: string | number | null;
+  root_delivery_id: string | null;
   user_id: string;
 };
 
@@ -730,6 +732,7 @@ export async function enqueueTelegramPositionSignals(input: {
                   filter (where upper(ut.side) in ('YES', 'NO')) as held_sides,
                 max(coalesce(p.last_updated_at, p.updated_at))::text as position_snapshot_at,
                 root_delivery.telegram_message_id as root_telegram_message_id
+                ,root_delivery.id as root_delivery_id
               from positions p
               join unified_tokens ut
                 on ut.token_id = p.token_id
@@ -743,18 +746,19 @@ export async function enqueueTelegramPositionSignals(input: {
                 on account.user_id = p.user_id
               left join telegram_notification_outbox root_delivery
                 on root_delivery.user_id = p.user_id
-               and root_delivery.topic = 'position_signals'
+               and root_delivery.topic in ('position_signals', 'interest_signals')
                and root_delivery.note_id = $3::uuid
-               and root_delivery.status = 'sent'
+               and root_delivery.status in ('pending', 'retry', 'sending', 'sent')
               where ut.market_id = $1
                 and p.position_scope = 'own'
                 and p.size > 0
                 and coalesce(p.is_hidden, false) = false
                 and (
                   $4::text = 'initial'
-                  or root_delivery.telegram_message_id is not null
+                  or root_delivery.id is not null
                 )
-              group by p.user_id, root_delivery.telegram_message_id
+              group by p.user_id, root_delivery.telegram_message_id,
+                       root_delivery.id
             `,
             [
               note.marketId,
@@ -763,29 +767,6 @@ export async function enqueueTelegramPositionSignals(input: {
               note.revisionKind,
             ],
           );
-        const preparation = await prepareSignalBotDelivery({
-          appBaseUrl: input.config.appBaseUrl,
-          buyAmountUsd: input.config.buyAmountUsd,
-          chatType: "private",
-          db: client,
-          forceOpenMarket: true,
-          messageKind: note.revisionKind,
-          note,
-          telegramMiniAppLinkBase: input.config.telegramMiniAppLinkBase,
-        });
-        if (preparation.status !== "ready") {
-          await client.query(
-            `
-              update telegram_notification_cursors
-              set cursor_created_at = $2::timestamptz,
-                  cursor_id = $3::uuid,
-                  updated_at = now()
-              where consumer_key = $1
-            `,
-            [POSITION_SIGNAL_CURSOR_KEY, note.createdAt, note.id],
-          );
-          continue;
-        }
         const signalSide = resolveSignalBotBuySide(note);
 
         for (const recipient of recipients) {
@@ -825,6 +806,7 @@ export async function enqueueTelegramPositionSignals(input: {
               JSON.stringify({
                 eventId: note.eventId,
                 kind: "position_signal",
+                noteId: note.id,
                 marketId: note.marketId,
                 venue: note.marketVenue,
                 messageKind: note.revisionKind,
@@ -836,14 +818,16 @@ export async function enqueueTelegramPositionSignals(input: {
                   note.revisionKind === "research_update"
                     ? Number(recipient.root_telegram_message_id)
                     : null,
-                text: addPositionSignalContext(
-                  preparation.text,
-                  relationshipContext,
-                ),
+                phase: "preparing",
+                relationshipContext,
                 holdingEvidence: "cached_position",
                 positionSnapshotAt: recipient.position_snapshot_at,
                 thesisKey: note.thesisKey,
                 thesisRootNoteId: note.thesisRootNoteId,
+                rootDeliveryId:
+                  note.revisionKind === "research_update"
+                    ? recipient.root_delivery_id
+                    : null,
               }),
             ],
           );
@@ -895,6 +879,7 @@ async function claimTelegramNotificationOutbox(input: {
       update telegram_notification_outbox outbox
       set status = 'sending',
           attempt_count = outbox.attempt_count + 1,
+          claim_token = gen_random_uuid(),
           updated_at = now()
       from candidates
       where outbox.id = candidates.id
@@ -903,7 +888,8 @@ async function claimTelegramNotificationOutbox(input: {
         outbox.user_id,
         outbox.topic,
         outbox.payload,
-        outbox.attempt_count
+        outbox.attempt_count,
+        outbox.claim_token
     `,
     [input.limit],
   );
@@ -916,8 +902,17 @@ async function quarantineStaleTelegramNotificationOutbox(input: {
   const result = await input.db.query(
     `
       update telegram_notification_outbox
-      set status = 'delivery_unknown',
-          last_error = 'stale_sending_delivery_unknown',
+      set status = case
+            when topic in ('position_signals', 'interest_signals')
+              and payload->>'phase' in ('preparing', 'ready') then 'retry'
+            else 'delivery_unknown'
+          end,
+          last_error = case
+            when topic in ('position_signals', 'interest_signals')
+              and payload->>'phase' in ('preparing', 'ready')
+              then 'stale_preparation_retry'
+            else 'stale_sending_delivery_unknown'
+          end,
           updated_at = now()
       where status = 'sending'
         and updated_at <= now() - interval '5 minutes'
@@ -1147,7 +1142,10 @@ async function loadTelegramNotificationDestination(input: {
           when 'deposit_received' then preference.deposit_received
           when 'bridge_updates' then preference.bridge_updates
           when 'payouts_rewards' then preference.payouts_rewards
-          when 'position_signals' then preference.position_signals
+          when 'position_signals' then
+            coalesce(preference.position_signals, false)
+            or coalesce(preference.interest_signals, false)
+          when 'interest_signals' then preference.interest_signals
           else false
         end as enabled,
         outbox.event_occurred_at >= case outbox.topic
@@ -1157,7 +1155,17 @@ async function loadTelegramNotificationDestination(input: {
           when 'deposit_received' then preference.deposit_received_enabled_at
           when 'bridge_updates' then preference.bridge_updates_enabled_at
           when 'payouts_rewards' then preference.payouts_rewards_enabled_at
-          when 'position_signals' then preference.position_signals_enabled_at
+          when 'position_signals' then
+            case
+              when coalesce(preference.position_signals, false)
+                and outbox.event_occurred_at >= preference.position_signals_enabled_at
+                then outbox.event_occurred_at
+              when coalesce(preference.interest_signals, false)
+                and outbox.event_occurred_at >= preference.interest_signals_enabled_at
+                then outbox.event_occurred_at
+              else now() + interval '1 second'
+            end
+          when 'interest_signals' then preference.interest_signals_enabled_at
           else now()
         end as enabled_since_event
       from telegram_notification_outbox outbox
@@ -1254,6 +1262,7 @@ function buildPositionSignalMessage(input: {
 }
 
 async function markOutboxSkipped(input: {
+  claimToken: string;
   db: DbQuery;
   id: string;
   reason: string;
@@ -1262,14 +1271,15 @@ async function markOutboxSkipped(input: {
     `
       update telegram_notification_outbox
       set status = 'skipped', last_error = $2, updated_at = now()
-      where id = $1 and status = 'sending'
+      where id = $1 and status = 'sending' and claim_token = $3::uuid
     `,
-    [input.id, input.reason],
+    [input.id, input.reason, input.claimToken],
   );
   return result.rowCount !== 0;
 }
 
 async function markOutboxSent(input: {
+  claimToken: string;
   db: DbQuery;
   id: string;
   messageId: number | null;
@@ -1282,15 +1292,16 @@ async function markOutboxSent(input: {
           last_error = null,
           sent_at = now(),
           updated_at = now()
-      where id = $1 and status = 'sending'
+      where id = $1 and status = 'sending' and claim_token = $3::uuid
     `,
-    [input.id, input.messageId],
+    [input.id, input.messageId, input.claimToken],
   );
   return result.rowCount !== 0;
 }
 
 async function markOutboxFailed(input: {
   attemptCount: number;
+  claimToken: string;
   db: DbQuery;
   id: string;
   message: string;
@@ -1310,15 +1321,28 @@ async function markOutboxFailed(input: {
       set status = $2,
           last_error = $3,
           next_attempt_at = now() + ($4::int * interval '1 second'),
+          payload = case
+            when topic in ('position_signals', 'interest_signals')
+              and payload->>'phase' = 'send_started'
+              then jsonb_set(payload, '{phase}', '"ready"'::jsonb, true)
+            else payload
+          end,
           updated_at = now()
-      where id = $1 and status = 'sending'
+      where id = $1 and status = 'sending' and claim_token = $5::uuid
     `,
-    [input.id, dead ? "dead" : "retry", input.message, retryAfterSec],
+    [
+      input.id,
+      dead ? "dead" : "retry",
+      input.message,
+      retryAfterSec,
+      input.claimToken,
+    ],
   );
   return result.rowCount !== 0;
 }
 
 async function markOutboxDeliveryUnknown(input: {
+  claimToken: string;
   db: DbQuery;
   id: string;
   message: string;
@@ -1330,14 +1354,15 @@ async function markOutboxDeliveryUnknown(input: {
           last_error = $2,
           updated_at = now()
       where id = $1
-        and status = 'sending'
+        and status = 'sending' and claim_token = $3::uuid
     `,
-    [input.id, input.message],
+    [input.id, input.message, input.claimToken],
   );
   return result.rowCount !== 0;
 }
 
 async function deferOutboxForChatRate(input: {
+  claimToken: string;
   db: DbQuery;
   id: string;
 }): Promise<boolean> {
@@ -1349,14 +1374,15 @@ async function deferOutboxForChatRate(input: {
           last_error = 'Deferred to respect the per-chat Telegram rate limit.',
           next_attempt_at = now() + interval '1 second',
           updated_at = now()
-      where id = $1 and status = 'sending'
+      where id = $1 and status = 'sending' and claim_token = $2::uuid
     `,
-    [input.id],
+    [input.id, input.claimToken],
   );
   return result.rowCount !== 0;
 }
 
 async function persistStandaloneNotificationFallback(input: {
+  claimToken: string;
   db: DbQuery;
   id: string;
 }): Promise<boolean> {
@@ -1365,9 +1391,9 @@ async function persistStandaloneNotificationFallback(input: {
       update telegram_notification_outbox
       set payload = jsonb_set(payload, '{replyToMessageId}', 'null'::jsonb, true),
           updated_at = now()
-      where id = $1 and status = 'sending'
+      where id = $1 and status = 'sending' and claim_token = $2::uuid
     `,
-    [input.id],
+    [input.id, input.claimToken],
   );
   return result.rowCount !== 0;
 }
@@ -1401,10 +1427,79 @@ export async function cleanupTelegramNotificationOutbox(input: {
   return result.rowCount ?? 0;
 }
 
+export type TelegramSignalRepairRow = {
+  id: string;
+  note_id: string | null;
+  topic: string;
+  status: string;
+  phase: string | null;
+  attempt_count: number;
+  last_error: string | null;
+  telegram_message_id: string | null;
+  sent_at: string | null;
+};
+
+export function canRepairTelegramSignalDelivery(
+  row: TelegramSignalRepairRow,
+): boolean {
+  return (
+    (row.topic === "position_signals" || row.topic === "interest_signals") &&
+    (row.status === "dead" || row.status === "skipped") &&
+    (row.phase === "preparing" || row.phase === "ready") &&
+    row.telegram_message_id == null &&
+    row.sent_at == null
+  );
+}
+
+export async function inspectTelegramSignalDeliveryRepair(input: {
+  db: DbQuery;
+  selector: { kind: "note" | "outbox"; id: string };
+}): Promise<TelegramSignalRepairRow[]> {
+  const selectorSql =
+    input.selector.kind === "note"
+      ? "outbox.note_id = $1::uuid"
+      : "outbox.id = $1::uuid";
+  const { rows } = await input.db.query<TelegramSignalRepairRow>(
+    `select outbox.id, outbox.note_id, outbox.topic, outbox.status,
+            outbox.payload->>'phase' as phase, outbox.attempt_count,
+            outbox.last_error, outbox.telegram_message_id::text,
+            outbox.sent_at::text
+     from telegram_notification_outbox outbox
+     where ${selectorSql}
+     order by outbox.created_at, outbox.id`,
+    [input.selector.id],
+  );
+  return rows;
+}
+
+export async function executeTelegramSignalDeliveryRepair(input: {
+  db: DbQuery;
+  ids: string[];
+}): Promise<number> {
+  if (input.ids.length === 0) return 0;
+  const result = await input.db.query(
+    `update telegram_notification_outbox
+     set status = 'retry', attempt_count = 0,
+         next_attempt_at = now(), last_error = null,
+         claim_token = null, updated_at = now()
+     where id = any($1::uuid[])
+       and topic in ('position_signals', 'interest_signals')
+       and status in ('dead', 'skipped')
+       and payload->>'phase' in ('preparing', 'ready')
+       and telegram_message_id is null and sent_at is null`,
+    [input.ids],
+  );
+  return result.rowCount ?? 0;
+}
+
 export async function deliverTelegramNotificationOutbox(input: {
   db: DbQuery;
   limit?: number;
   miniAppLinkBase: string | null;
+  signalConfig?: Pick<
+    SignalBotConfig,
+    "appBaseUrl" | "buyAmountUsd" | "telegramMiniAppLinkBase"
+  >;
   telegram: Pick<SignalBotTelegramClient, "sendMessage">;
 }): Promise<{
   blocked: number;
@@ -1430,6 +1525,7 @@ export async function deliverTelegramNotificationOutbox(input: {
   const attemptedChats = new Set<string>();
 
   for (const row of rows) {
+    let deliveryPayload = row.payload;
     // Destination and topic preference are part of generic-delivery
     // eligibility. Never transfer a terminal trade away from its lifecycle
     // card to an outbox row that is about to be skipped.
@@ -1445,6 +1541,7 @@ export async function deliverTelegramNotificationOutbox(input: {
     ) {
       if (
         await markOutboxSkipped({
+          claimToken: row.claim_token,
           db: input.db,
           id: row.id,
           reason:
@@ -1479,18 +1576,158 @@ export async function deliverTelegramNotificationOutbox(input: {
       if (ownership === "stale_claim") continue;
     }
     if (attemptedChats.has(destination.telegram_user_id)) {
-      if (await deferOutboxForChatRate({ db: input.db, id: row.id })) {
+      if (
+        await deferOutboxForChatRate({
+          claimToken: row.claim_token,
+          db: input.db,
+          id: row.id,
+        })
+      ) {
         deferred += 1;
       }
       continue;
     }
     attemptedChats.add(destination.telegram_user_id);
 
+    if (
+      (row.topic === "position_signals" || row.topic === "interest_signals") &&
+      isRecord(deliveryPayload)
+    ) {
+      if (readString(deliveryPayload, "phase") === "preparing") {
+        const noteId = readString(deliveryPayload, "noteId");
+        if (!noteId || !input.signalConfig) {
+          if (
+            await markOutboxFailed({
+              attemptCount: row.attempt_count,
+              claimToken: row.claim_token,
+              db: input.db,
+              id: row.id,
+              message: "Signal preparation configuration unavailable.",
+            })
+          )
+            failed += 1;
+          continue;
+        }
+        try {
+          const notes = await loadSignalBotNotes(input.db, {
+            afterCreatedAt: "1970-01-01T00:00:00Z",
+            afterId: ZERO_UUID,
+            noteId,
+            limit: 1,
+            includeSuperseded: true,
+          });
+          const note = notes[0];
+          if (!note) {
+            if (
+              await markOutboxSkipped({
+                claimToken: row.claim_token,
+                db: input.db,
+                id: row.id,
+                reason: "Approved signal note is unavailable.",
+              })
+            )
+              skipped += 1;
+            continue;
+          }
+          const preparation = await prepareSignalBotDelivery({
+            allowStalePriceSnapshot: true,
+            appBaseUrl: input.signalConfig.appBaseUrl,
+            buyAmountUsd: input.signalConfig.buyAmountUsd,
+            chatType: "private",
+            db: input.db,
+            forceOpenMarket: true,
+            messageKind: note.revisionKind,
+            note,
+            telegramMiniAppLinkBase: input.signalConfig.telegramMiniAppLinkBase,
+          });
+          if (preparation.status !== "ready") {
+            if (
+              await markOutboxFailed({
+                attemptCount: row.attempt_count,
+                claimToken: row.claim_token,
+                db: input.db,
+                id: row.id,
+                message: `Signal preparation: ${preparation.reason}`,
+              })
+            )
+              failed += 1;
+            continue;
+          }
+          const text = addPositionSignalContext(
+            preparation.text,
+            readString(deliveryPayload, "relationshipContext") ??
+              "Related Hunch research",
+          );
+          const frozen = await input.db.query<{ payload: unknown }>(
+            `update telegram_notification_outbox
+             set payload = jsonb_set(
+                   jsonb_set(payload, '{text}', to_jsonb($2::text), true),
+                   '{phase}', '"ready"'::jsonb, true
+                 ), updated_at = now()
+             where id = $1 and status = 'sending' and claim_token = $3::uuid
+             returning payload`,
+            [row.id, text, row.claim_token],
+          );
+          if (!frozen.rows[0]) continue;
+          deliveryPayload = frozen.rows[0].payload;
+        } catch (error) {
+          if (
+            await markOutboxFailed({
+              attemptCount: row.attempt_count,
+              claimToken: row.claim_token,
+              db: input.db,
+              id: row.id,
+              message: `Signal preparation: ${error instanceof Error ? error.message : String(error)}`,
+            })
+          )
+            failed += 1;
+          continue;
+        }
+      }
+      const rootDeliveryId = isRecord(deliveryPayload)
+        ? readString(deliveryPayload, "rootDeliveryId")
+        : null;
+      if (rootDeliveryId) {
+        const { rows: roots } = await input.db.query<{
+          status: string;
+          telegram_message_id: string | number | null;
+        }>(
+          `select status, telegram_message_id
+           from telegram_notification_outbox
+           where id = $1::uuid and user_id = $2::uuid`,
+          [rootDeliveryId, row.user_id],
+        );
+        const root = roots[0];
+        if (
+          root &&
+          root.status !== "sent" &&
+          !["dead", "skipped", "delivery_unknown"].includes(root.status)
+        ) {
+          if (
+            await deferOutboxForChatRate({
+              claimToken: row.claim_token,
+              db: input.db,
+              id: row.id,
+            })
+          ) {
+            deferred += 1;
+          }
+          continue;
+        }
+        if (root?.status === "sent" && root.telegram_message_id) {
+          deliveryPayload = {
+            ...(isRecord(deliveryPayload) ? deliveryPayload : {}),
+            replyToMessageId: Number(root.telegram_message_id),
+          };
+        }
+      }
+    }
+
     const message =
-      row.topic === "position_signals"
+      row.topic === "position_signals" || row.topic === "interest_signals"
         ? buildPositionSignalMessage({
             miniAppLinkBase: input.miniAppLinkBase,
-            payload: row.payload,
+            payload: deliveryPayload,
           })
         : buildTelegramActivityNotificationMessage({
             market: await loadTelegramNotificationMarket({
@@ -1498,11 +1735,12 @@ export async function deliverTelegramNotificationOutbox(input: {
               payload: row.payload,
             }),
             miniAppLinkBase: input.miniAppLinkBase,
-            payload: row.payload,
+            payload: deliveryPayload,
           });
     if (!message) {
       if (
         await markOutboxSkipped({
+          claimToken: row.claim_token,
           db: input.db,
           id: row.id,
           reason: "Notification payload could not be rendered.",
@@ -1512,10 +1750,25 @@ export async function deliverTelegramNotificationOutbox(input: {
       continue;
     }
 
+    if (
+      isRecord(deliveryPayload) &&
+      readString(deliveryPayload, "phase") === "ready"
+    ) {
+      const started = await input.db.query(
+        `update telegram_notification_outbox
+         set payload = jsonb_set(payload, '{phase}', '"send_started"'::jsonb, true),
+             updated_at = now()
+         where id = $1 and status = 'sending' and claim_token = $2::uuid`,
+        [row.id, row.claim_token],
+      );
+      if (started.rowCount !== 1) continue;
+    }
+
     const result = await sendTelegramMessageWithReplyFallback({
       beforeStandaloneFallback: message.replyToMessageId
         ? () =>
             persistStandaloneNotificationFallback({
+              claimToken: row.claim_token,
               db: input.db,
               id: row.id,
             })
@@ -1537,6 +1790,7 @@ export async function deliverTelegramNotificationOutbox(input: {
     if (result.ok) {
       if (
         await markOutboxSent({
+          claimToken: row.claim_token,
           db: input.db,
           id: row.id,
           messageId: result.messageId,
@@ -1550,9 +1804,9 @@ export async function deliverTelegramNotificationOutbox(input: {
         `
           update telegram_notification_outbox
           set status = 'dead', last_error = $2, updated_at = now()
-          where id = $1 and status = 'sending'
+          where id = $1 and status = 'sending' and claim_token = $3::uuid
         `,
-        [row.id, result.message],
+        [row.id, result.message, row.claim_token],
       );
       if (transition.rowCount !== 0) {
         blocked += 1;
@@ -1566,6 +1820,7 @@ export async function deliverTelegramNotificationOutbox(input: {
     if (result.error === "ambiguous") {
       if (
         await markOutboxDeliveryUnknown({
+          claimToken: row.claim_token,
           db: input.db,
           id: row.id,
           message: result.message,
@@ -1577,6 +1832,7 @@ export async function deliverTelegramNotificationOutbox(input: {
     if (
       await markOutboxFailed({
         attemptCount: row.attempt_count,
+        claimToken: row.claim_token,
         db: input.db,
         id: row.id,
         message: result.message,

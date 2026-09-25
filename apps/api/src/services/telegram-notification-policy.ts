@@ -9,6 +9,7 @@ export const telegramNotificationsPolicySchema = z
     positionResolutionProducerEnabled: z.boolean().default(false),
     activityEnqueueEnabled: z.boolean(),
     positionSignalEnqueueEnabled: z.boolean(),
+    interestSignalEnqueueEnabled: z.boolean().default(true),
     deliveryEnabled: z.boolean(),
   })
   .strict();
@@ -23,6 +24,7 @@ export const DEFAULT_TELEGRAM_NOTIFICATIONS_POLICY: TelegramNotificationsPolicyV
     positionResolutionProducerEnabled: false,
     activityEnqueueEnabled: false,
     positionSignalEnqueueEnabled: false,
+    interestSignalEnqueueEnabled: true,
     deliveryEnabled: false,
   });
 

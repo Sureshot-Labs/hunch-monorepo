@@ -8,9 +8,12 @@ import {
 } from "./services/signal-bot.js";
 import {
   buildTelegramActivityNotificationMessage,
+  canRepairTelegramSignalDelivery,
   cleanupTelegramNotificationOutbox,
   deliverTelegramNotificationOutbox,
   enqueueTelegramActivityNotifications,
+  executeTelegramSignalDeliveryRepair,
+  inspectTelegramSignalDeliveryRepair,
 } from "./services/telegram-notification-delivery.js";
 import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 import {
@@ -677,14 +680,17 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
     name: "late notification success cannot overwrite delivery quarantine",
     run: async () => {
+      const claimToken = "00000000-0000-4000-8000-000000000142";
+      const sentTransitions: Array<{ sql: string; params: unknown[] }> = [];
       const result = await deliverTelegramNotificationOutbox({
         db: {
-          query: async (sql: string) => {
+          query: async (sql: string, params?: unknown[]) => {
             if (sql.includes("with candidates")) {
               return {
                 rows: [
                   {
                     attempt_count: 1,
+                    claim_token: claimToken,
                     id: "outbox-cas-loser",
                     payload: {
                       body: "2 pUSD received",
@@ -710,6 +716,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               };
             }
             if (sql.includes("set status = 'sent'")) {
+              sentTransitions.push({ sql, params: params ?? [] });
               return { rowCount: 0, rows: [] };
             }
             return { rowCount: 0, rows: [] };
@@ -722,6 +729,135 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.equal(result.claimed, 1);
       assert.equal(result.sent, 0);
+      const sentTransition = sentTransitions[0];
+      assert.ok(sentTransition);
+      assert.match(sentTransition.sql, /claim_token = \$3::uuid/);
+      assert.equal(sentTransition.params[2], claimToken);
+    },
+  },
+  {
+    name: "prepared signal records send start with a fenced contiguous SQL binding",
+    run: async () => {
+      const claimToken = "00000000-0000-4000-8000-000000000143";
+      const transitions: Array<{ sql: string; params: unknown[] }> = [];
+      const result = await deliverTelegramNotificationOutbox({
+        db: {
+          query: async (sql: string, params: unknown[] = []) => {
+            if (sql.includes("with candidates")) {
+              return {
+                rows: [
+                  {
+                    attempt_count: 1,
+                    claim_token: claimToken,
+                    id: "00000000-0000-4000-8000-000000000144",
+                    payload: {
+                      kind: "position_signal",
+                      phase: "ready",
+                      text: "Prepared research",
+                    },
+                    topic: "position_signals",
+                    user_id: "user-1",
+                  },
+                ],
+              };
+            }
+            if (sql.includes("case outbox.topic")) {
+              return {
+                rows: [
+                  {
+                    enabled: true,
+                    enabled_since_event: true,
+                    reachable: true,
+                    telegram_user_id: "99",
+                  },
+                ],
+              };
+            }
+            transitions.push({ sql, params });
+            return { rowCount: 1, rows: [] };
+          },
+        } as never,
+        miniAppLinkBase: null,
+        telegram: {
+          sendMessage: async () => ({ messageId: 9, ok: true }),
+        },
+      });
+      assert.equal(result.sent, 1);
+      const started = transitions.find(({ sql }) =>
+        sql.includes("'{phase}', '\"send_started\"'::jsonb"),
+      );
+      assert.ok(started);
+      assert.match(started.sql, /claim_token = \$2::uuid/);
+      assert.deepEqual(started.params, [
+        "00000000-0000-4000-8000-000000000144",
+        claimToken,
+      ]);
+    },
+  },
+  {
+    name: "definite signal send failure restores ready phase for the next fenced attempt",
+    run: async () => {
+      const queries: Array<{ sql: string; params: unknown[] }> = [];
+      const result = await deliverTelegramNotificationOutbox({
+        db: {
+          query: async (sql: string, params: unknown[] = []) => {
+            queries.push({ sql, params });
+            if (sql.includes("with candidates")) {
+              return {
+                rows: [
+                  {
+                    attempt_count: 1,
+                    claim_token: "00000000-0000-4000-8000-000000000147",
+                    id: "00000000-0000-4000-8000-000000000148",
+                    payload: {
+                      kind: "position_signal",
+                      phase: "ready",
+                      text: "Prepared research",
+                    },
+                    topic: "position_signals",
+                    user_id: "user-1",
+                  },
+                ],
+              };
+            }
+            if (sql.includes("case outbox.topic")) {
+              return {
+                rows: [
+                  {
+                    enabled: true,
+                    enabled_since_event: true,
+                    reachable: true,
+                    telegram_user_id: "99",
+                  },
+                ],
+              };
+            }
+            return { rowCount: 1, rows: [] };
+          },
+        } as never,
+        miniAppLinkBase: null,
+        telegram: {
+          sendMessage: async () => ({
+            error: "other",
+            message: "Telegram refused before acceptance",
+            ok: false,
+            retryAfterSec: 2,
+          }),
+        },
+      });
+      assert.equal(result.failed, 1);
+      const preferenceSql = queries.find(({ sql }) =>
+        sql.includes("case outbox.topic"),
+      )?.sql;
+      assert.match(preferenceSql ?? "", /preference.interest_signals/);
+      const failedSql = queries.find(({ sql }) =>
+        sql.includes("next_attempt_at = now() +"),
+      )?.sql;
+      assert.match(failedSql ?? "", /payload->>'phase' = 'send_started'/);
+      assert.match(
+        failedSql ?? "",
+        /jsonb_set\(payload, '\{phase\}', '"ready"'::jsonb/,
+      );
     },
   },
   {
@@ -821,6 +957,76 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       );
       assert.doesNotMatch(capturedSql, /status in \('pending'/);
       assert.deepEqual(capturedParams, [90, 1000]);
+    },
+  },
+  {
+    name: "exact signal repair previews and retries only proven pre-send rows",
+    run: async () => {
+      const noteId = "00000000-0000-4000-8000-000000000145";
+      const safeRow = {
+        id: "00000000-0000-4000-8000-000000000146",
+        note_id: noteId,
+        topic: "position_signals",
+        status: "dead",
+        phase: "ready",
+        attempt_count: 8,
+        last_error: "preparation failed",
+        telegram_message_id: null,
+        sent_at: null,
+      };
+      assert.equal(canRepairTelegramSignalDelivery(safeRow), true);
+      assert.equal(
+        canRepairTelegramSignalDelivery({
+          ...safeRow,
+          phase: "send_started",
+        }),
+        false,
+      );
+      assert.equal(
+        canRepairTelegramSignalDelivery({
+          ...safeRow,
+          status: "delivery_unknown",
+        }),
+        false,
+      );
+      assert.equal(
+        canRepairTelegramSignalDelivery({
+          ...safeRow,
+          telegram_message_id: "12",
+        }),
+        false,
+      );
+      const captured: Array<{ sql: string; params: unknown[] }> = [];
+      const db = {
+        query: async (sql: string, params: unknown[] = []) => {
+          captured.push({ sql, params });
+          return sql.includes("select outbox.id")
+            ? { rows: [safeRow] }
+            : { rowCount: 1, rows: [] };
+        },
+      } as never;
+      const preview = await inspectTelegramSignalDeliveryRepair({
+        db,
+        selector: { kind: "note", id: noteId },
+      });
+      assert.equal(preview.length, 1);
+      assert.match(captured[0]?.sql ?? "", /outbox.note_id = \$1::uuid/);
+      assert.deepEqual(captured[0]?.params, [noteId]);
+      const repaired = await executeTelegramSignalDeliveryRepair({
+        db,
+        ids: [safeRow.id],
+      });
+      assert.equal(repaired, 1);
+      assert.match(captured[1]?.sql ?? "", /status in \('dead', 'skipped'\)/);
+      assert.match(
+        captured[1]?.sql ?? "",
+        /payload->>'phase' in \('preparing', 'ready'\)/,
+      );
+      assert.match(
+        captured[1]?.sql ?? "",
+        /telegram_message_id is null and sent_at is null/,
+      );
+      assert.deepEqual(captured[1]?.params, [[safeRow.id]]);
     },
   },
   {

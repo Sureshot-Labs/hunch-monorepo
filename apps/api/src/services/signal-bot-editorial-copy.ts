@@ -272,7 +272,10 @@ export function buildSignalBotStructuredNarrative(input: {
     input.note.holderOpenPnlUsd != null &&
     input.note.holderOpenPnlUsd > 0
   ) {
-    const move = `${Math.max(1, Math.round(input.researchDelta.priceMoveCents))}¢`;
+    const beforePrice = Math.max(
+      0,
+      Math.min(1, input.price - input.researchDelta.priceMoveCents / 100),
+    );
     const position = formatSignalBotPreciseCompactUsd(
       input.note.holderPositionUsd,
     );
@@ -289,7 +292,7 @@ export function buildSignalBotStructuredNarrative(input: {
             ? `${sentenceActor(holderName)} has added after the move and now holds ${position}`
             : `${sentenceActor(holderName)} is still holding ${position}`;
     return [
-      `Since the original call, ${input.side} has climbed ${move} to ${formatCents(input.price)}.`,
+      `Since the original call, ${input.side} has risen from ${formatCents(beforePrice)} to ${formatCents(input.price)}.`,
       `${traderState} on ${input.side}, with ${openProfit} in open profit after making ${formatSignalBotPreciseCompactUsd(trackRecordUsd)} over the last ${horizonDays} days.`,
     ];
   }
