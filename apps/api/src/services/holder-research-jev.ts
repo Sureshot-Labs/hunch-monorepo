@@ -1,6 +1,7 @@
 import {
   buildHolderResearchCandidateActionability,
   buildHolderResearchDecisionFeaturesV2,
+  isUnchangedHolderResearchPublication,
   type HolderResearchCandidate,
 } from "./holder-research.js";
 import type { HolderResearchPolicy } from "./runtime-policies.js";
@@ -73,7 +74,10 @@ export function selectHolderResearchJevShortlist(input: {
   const shortlist: HolderResearchCandidate[] = [];
   const sorted = [...input.candidates].sort(
     (left, right) =>
-      right.score - left.score || left.key.localeCompare(right.key),
+      Number(isUnchangedHolderResearchPublication(left)) -
+        Number(isUnchangedHolderResearchPublication(right)) ||
+      right.score - left.score ||
+      left.key.localeCompare(right.key),
   );
   for (const candidate of sorted) {
     if (shortlist.length >= input.policy.maxCandidatesPerRun * 4) break;
@@ -83,12 +87,6 @@ export function selectHolderResearchJevShortlist(input: {
     if (
       candidate.cooldownUntil &&
       Date.parse(candidate.cooldownUntil) > nowMs
-    ) {
-      continue;
-    }
-    if (
-      candidate.market.previousNote?.decisionSnapshot &&
-      candidate.meaningfulDeltaReasons.length === 0
     ) {
       continue;
     }

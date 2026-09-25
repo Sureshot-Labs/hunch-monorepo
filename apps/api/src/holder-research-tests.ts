@@ -151,6 +151,7 @@ function policy(overrides: Partial<HolderResearchPolicy> = {}) {
   return {
     ...getIntelPolicyDefaults("holder_research"),
     maxPublishHorizonHours: 24 * 365 * 10,
+    maxPublishHorizonHoursByCategory: {},
     minPublishEntryPrice: 0,
     sportsOutrightPublishMode: "enabled" as const,
     ...overrides,
@@ -1037,6 +1038,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.deepEqual(second, first);
       if (!first.ok) return;
       assert.equal(first.value.primaryReason.kind, "price_moved_with_thesis");
+      if (first.value.primaryReason.kind !== "price_moved_with_thesis") return;
       assert.equal(first.value.primaryReason.delta, 0.08);
       assert.equal(first.value.ctaIntent, "buy");
       assert.equal(first.value.reasons.length, 3);
@@ -1889,6 +1891,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         new Date("2026-01-02T00:00:00.000Z"),
       );
       assert.deepEqual(Object.keys(input).sort(), [
+        "contract",
         "currentDate",
         "freshEvidenceWindowHours",
         "instruction",
@@ -4111,6 +4114,167 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
+    name: "publish recommendation clears an older editorial cache without caching provisional publication",
+    run: async () => {
+      const p = policy({ decisionCacheEnabled: true, dryRun: false });
+      const candidate = sharpMinorityCandidate(p);
+      const stored = new Map<string, string>();
+      const stats = {
+        enabled: true,
+        status: "ok" as const,
+        checked: 0,
+        skipped: 0,
+        rechecked: 0,
+        written: 0,
+        errors: 0,
+        dryRun: false,
+      };
+      const redis = {
+        get: async (key: string) => stored.get(key) ?? null,
+        set: async (key: string, value: string) => {
+          stored.set(key, value);
+        },
+        del: async (key: string) => stored.delete(key),
+      };
+      await maybeWriteDecisionCache({
+        redis,
+        policy: p,
+        callModel: true,
+        candidate,
+        output: { status: "CONTEXT", rationale: "Old research." },
+        decisionCache: stats,
+      });
+      assert.equal(stored.size, 1);
+      await maybeWriteDecisionCache({
+        redis,
+        policy: p,
+        callModel: true,
+        candidate,
+        output: { status: "PUBLISH", rationale: "New thesis." },
+        decisionCache: stats,
+      });
+      assert.equal(stored.size, 0);
+      assert.equal(stats.written, 1);
+    },
+  },
+  {
+    name: "category horizons agree in selection features and final V1/V2 prompt gates",
+    run: () => {
+      const p = getIntelPolicyDefaults("holder_research");
+      const closeTime = new Date(
+        Date.now() + 35 * 24 * 3_600_000,
+      ).toISOString();
+      for (const test of [
+        {
+          marketTitle: "Fed interest rate decision in October",
+          category: "Economics",
+          expected: 1440,
+          blocked: false,
+        },
+        {
+          marketTitle: "Will the US and Iran reach a ceasefire?",
+          category: "Politics",
+          expected: 1440,
+          blocked: false,
+        },
+        {
+          marketTitle: "Will Bitcoin reach $100000?",
+          category: "Crypto",
+          expected: 720,
+          blocked: true,
+        },
+      ]) {
+        const c = sharpMinorityCandidate(p, {
+          marketTitle: test.marketTitle,
+          category: test.category,
+          closeTime,
+        });
+        const features = buildHolderResearchDecisionFeaturesV2(c, p);
+        assert.equal(
+          features.market.publicationHorizon.maxHours,
+          test.expected,
+        );
+        assert.equal(
+          features.gates.blockers.includes("publish_horizon_too_long"),
+          test.blocked,
+        );
+        const v1 = buildHolderResearchCandidatePromptJson(c, p) as {
+          quality: { publicationHorizon: { maxHours: number } };
+        };
+        assert.equal(v1.quality.publicationHorizon.maxHours, test.expected);
+      }
+    },
+  },
+  {
+    name: "cooled unchanged publications can reach research without displacing fresh candidates or bypassing cooldown",
+    run: () => {
+      const p = policy({
+        minScore: 0,
+        selectionEventDiversityEnabled: false,
+        maxCandidatesPerRun: 6,
+        maxAgentCallsPerRun: 4,
+      });
+      const fresh = sharpMinorityCandidate(p, { marketId: "polymarket:fresh" });
+      fresh.score = 0.7;
+      const repeat = sharpMinorityCandidate(p, {
+        marketId: "polymarket:repeat",
+      });
+      repeat.score = 0.99;
+      repeat.market.previousNote = {
+        noteId: "previous",
+        createdAt: new Date(Date.now() - 48 * 3_600_000).toISOString(),
+        title: "Prior thesis",
+        inputDigest: repeat.inputDigest,
+        cooldownUntil: null,
+        walletTargets: [],
+        decisionSnapshot: buildHolderResearchDecisionSnapshot(repeat),
+      };
+      repeat.meaningfulDeltaReasons = [];
+      const selected = selectHolderResearchCandidates(
+        [repeat, fresh],
+        p,
+      ).selected;
+      assert.equal(selected[0]?.key, fresh.key);
+      assert.ok(selected.some((item) => item.key === repeat.key));
+      const freshSecond = sharpMinorityCandidate(p, {
+        marketId: "polymarket:fresh-second",
+      });
+      freshSecond.score = 0.65;
+      const otherBucketRepeat = { ...repeat, bucket: "sharp_side" as const };
+      const acrossQuotas = selectHolderResearchCandidates(
+        [otherBucketRepeat, fresh, freshSecond],
+        {
+          ...p,
+          maxAgentCallsPerRun: 2,
+          quotaSharpMinority: 1,
+          quotaSharpSide: 1,
+        },
+      ).selected;
+      assert.deepEqual(
+        acrossQuotas.map((item) => item.key),
+        [fresh.key, freshSecond.key],
+      );
+      repeat.cooldownUntil = new Date(Date.now() + 3_600_000).toISOString();
+      assert.ok(
+        !selectHolderResearchCandidates([repeat, fresh], p).selected.some(
+          (item) => item.key === repeat.key,
+        ),
+      );
+      repeat.cooldownUntil = null;
+      repeat.market.closeTime = new Date(
+        Date.now() + 98 * 24 * 3_600_000,
+      ).toISOString();
+      const horizonPolicy = { ...p, maxPublishHorizonHours: 720 };
+      assert.ok(
+        selectHolderResearchJevShortlist({
+          candidates: [repeat],
+          baseline: [],
+          policy: horizonPolicy,
+        }).some((item) => item.key === repeat.key),
+      );
+    },
+  },
+  {
     name: "decision cache suppresses skip/context before cooldown and bypasses on delta or force",
     run: () => {
       const p = policy({
@@ -4145,6 +4309,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         { reasoningEffort: "low" as const },
         { triageModel: "openai/gpt-5.6-luna" },
         { triageReasoningEffort: "medium" as const },
+        { maxPublishHorizonHours: 1440 },
+        { maxPublishHorizonHoursByCategory: { politics_geo: 1440 } },
       ]) {
         const changed = evaluateHolderResearchDecisionCache({
           candidate,
@@ -4169,8 +4335,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const oldContract = {
         ...cachedSkip,
         modelConfigSignature: currentSignature.replace(
+          "holder_decision_contract_v7",
           "holder_decision_contract_v6",
-          "holder_decision_contract_v5",
         ),
       };
       assert.equal(
@@ -4300,7 +4466,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
-    name: "market flow and related positions alone do not recycle a holder thesis",
+    name: "market flow and related positions alone do not prove a publishable holder update",
     run: () => {
       const p = policy({ contextCooldownHours: 6 });
       const candidate = buildHolderResearchCandidatesFromMarket(
@@ -4376,7 +4542,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.deepEqual(cooled.meaningfulDeltaReasons, []);
       assert.equal(
         selectHolderResearchCandidates([cooled], p).selected.length,
-        0,
+        1,
       );
 
       const priceMoved = {

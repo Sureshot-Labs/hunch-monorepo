@@ -66,6 +66,28 @@ export type SignalNotificationResearchDelta =
       beforeWallets: number;
       kind: "wallet_count_change";
       walletChange: number;
+    }
+  | {
+      afterUsd: number;
+      beforeUsd: number;
+      kind: "opposing_position_change";
+      observedSide: "NO" | "YES";
+      positionChangeUsd: number;
+    }
+  | {
+      afterWallets: number;
+      beforeWallets: number;
+      kind: "opposing_wallet_count_change";
+      observedSide: "NO" | "YES";
+      walletChange: number;
+    }
+  | {
+      eventAt: string;
+      fact: string;
+      kind: "new_external_fact";
+      sourcePublishedAt: string;
+      sourceTitle: string;
+      sourceUrl: string;
     };
 
 function cleanText(value: string | null | undefined): string | null {
@@ -1277,6 +1299,26 @@ export function buildSignalNotificationHeadline(input: {
         continuation = `Strong-wallet support for ${input.subject.text} has ${
           added ? "grown" : "thinned"
         }.`;
+      } else if (delta?.kind === "opposing_wallet_count_change") {
+        const added = delta.walletChange > 0;
+        const wallets = Math.abs(delta.walletChange);
+        templateKey = "research_opposing_wallets_changed_v1";
+        emoji = "🔎";
+        primaryMetric = `${added ? "+" : "−"}${wallets}`;
+        hook = `${wallets} ${added ? "more" : "fewer"} opposing strong ${wallets === 1 ? "wallet" : "wallets"}.`;
+        continuation = `Opposition to ${input.subject.text} has ${added ? "grown" : "thinned"}.`;
+      } else if (delta?.kind === "opposing_position_change") {
+        templateKey = "research_opposing_position_changed_v1";
+        emoji = "🔎";
+        primaryMetric = `${delta.positionChangeUsd > 0 ? "+" : "−"}${formatCompactUsd(Math.abs(delta.positionChangeUsd))}`;
+        hook = `Opposing positions ${delta.positionChangeUsd > 0 ? "grew" : "shrank"} ${formatCompactUsd(Math.abs(delta.positionChangeUsd))}.`;
+        continuation = `The opposing side of ${input.subject.text} has changed.`;
+      } else if (delta?.kind === "new_external_fact") {
+        templateKey = "research_new_external_fact_v1";
+        emoji = "🔎";
+        primaryMetric = null;
+        hook = "New dated evidence.";
+        continuation = input.subject.text;
       } else {
         templateKey = "research_update_suppressed_v7";
         emoji = "🔎";

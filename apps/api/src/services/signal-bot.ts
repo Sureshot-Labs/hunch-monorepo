@@ -65,9 +65,12 @@ import {
   parseHolderResearchUpdateV1,
   parseSignalPriceSnapshotV1,
   parseTelegramMarketIdentityV1,
-  resolveHolderResearchPositionState,
   type TelegramMarketIdentityV1,
 } from "./signal-publication-contract.js";
+import {
+  resolveSignalBotResearchDelta,
+  type SignalBotResearchDelta,
+} from "./signal-bot-research-update.js";
 import {
   auditHolderResearchSignalPerformance,
   HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_AFTER_HOURS,
@@ -446,31 +449,6 @@ type SignalBotNoteRow = {
   holder_wallet_id: string | null;
   holder_target_meta: unknown;
 };
-
-type SignalBotResearchDelta =
-  | {
-      currentPrice: number;
-      kind: "price_move";
-      holderPositionState: "increased" | "reduced" | "unchanged" | "unknown";
-      priceMoveCents: number;
-      supportsBuy: boolean;
-    }
-  | {
-      afterUsd: number;
-      beforeUsd: number;
-      kind: "position_change";
-      positionChangeUsd: number;
-      scope: "representative_wallet" | "selected_side_cluster";
-      supportsBuy: boolean;
-      walletId: string | null;
-    }
-  | {
-      afterWallets: number;
-      beforeWallets: number;
-      kind: "wallet_count_change";
-      supportsBuy: boolean;
-      walletChange: number;
-    };
 
 type SignalBotEligibilityCountRow = {
   non_directional: string | number | null;
@@ -8620,64 +8598,6 @@ function asStringArray(value: unknown, maxItems: number): string[] {
     .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
     .filter((entry) => entry.length > 0)
     .slice(0, maxItems);
-}
-
-function resolveSignalBotResearchDelta(
-  note: SignalBotNote,
-  side: "NO" | "YES" | null,
-): SignalBotResearchDelta | null {
-  const contract = note.holderResearchUpdateV1;
-  if (
-    note.revisionKind !== "research_update" ||
-    !side ||
-    !contract ||
-    contract.selectedSide !== side
-  ) {
-    return null;
-  }
-  const reason = contract.primaryReason;
-  if (
-    reason.kind === "price_moved_with_thesis" ||
-    reason.kind === "price_moved_against_thesis"
-  ) {
-    return {
-      currentPrice: reason.after,
-      holderPositionState: resolveHolderResearchPositionState({
-        current: note.decisionSnapshot,
-        previous: note.previousDecisionSnapshot,
-        side,
-        update: contract,
-        walletId: note.holderWalletId,
-      }),
-      kind: "price_move",
-      priceMoveCents: reason.delta * 100,
-      supportsBuy: contract.ctaIntent === "buy",
-    };
-  }
-  if (
-    reason.kind === "position_increased" ||
-    reason.kind === "position_reduced"
-  ) {
-    return {
-      afterUsd: reason.after,
-      beforeUsd: reason.before,
-      kind: "position_change",
-      positionChangeUsd: reason.delta,
-      scope: reason.scope,
-      supportsBuy: contract.ctaIntent === "buy",
-      walletId: reason.walletId,
-    };
-  }
-  if (reason.kind === "wallet_confluence_changed") {
-    return {
-      afterWallets: reason.after,
-      beforeWallets: reason.before,
-      kind: "wallet_count_change",
-      supportsBuy: contract.ctaIntent === "buy",
-      walletChange: reason.delta,
-    };
-  }
-  return null;
 }
 
 function toIso(value: Date | string): string {

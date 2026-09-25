@@ -667,6 +667,85 @@ const tests: Array<{ name: string; run: () => void }> = [
     },
   },
   {
+    name: "opposing-side and external-fact updates render without selected-side support claims",
+    run: () => {
+      const marketSubject = subject({
+        eventTitle: "World Cup Winner",
+        marketTitle: "Spain",
+        side: "YES",
+      });
+      const wallets = buildSignalNotificationHeadline({
+        currentPrice: 0.5,
+        kind: "research_update",
+        subject: marketSubject,
+        researchDelta: {
+          kind: "opposing_wallet_count_change",
+          beforeWallets: 0,
+          afterWallets: 1,
+          walletChange: 1,
+          observedSide: "NO",
+        },
+      });
+      assert.equal(wallets.templateKey, "research_opposing_wallets_changed_v1");
+      assert.match(wallets.text, /1 more opposing strong wallet/);
+      assert.match(
+        wallets.text,
+        /Opposition to Spain to win the World Cup has grown/,
+      );
+      assert.doesNotMatch(wallets.text, /now aligned|support for .* grown/i);
+      const position = buildSignalNotificationHeadline({
+        currentPrice: 0.5,
+        kind: "research_update",
+        subject: marketSubject,
+        researchDelta: {
+          kind: "opposing_position_change",
+          beforeUsd: 0,
+          afterUsd: 2_000,
+          positionChangeUsd: 2_000,
+          observedSide: "NO",
+        },
+      });
+      assert.equal(
+        position.templateKey,
+        "research_opposing_position_changed_v1",
+      );
+      assert.match(position.text, /Opposing positions grew \$2K/);
+      const fact = {
+        kind: "new_external_fact" as const,
+        fact: "Spain confirmed a new squad on September 24.",
+        eventAt: "2026-09-24T12:00:00.000Z",
+        sourcePublishedAt: "2026-09-24T13:00:00.000Z",
+        sourceTitle: "Official squad",
+        sourceUrl: "https://example.com/squad",
+      };
+      const external = buildSignalNotificationHeadline({
+        currentPrice: 0.5,
+        kind: "research_update",
+        subject: marketSubject,
+        researchDelta: fact,
+      });
+      assert.equal(external.templateKey, "research_new_external_fact_v1");
+      assert.match(external.text, /New dated evidence/);
+      const narrative = buildSignalBotStructuredNarrative({
+        editorialProbability: 0.5,
+        evidenceRows: [],
+        headlineTemplateKey: external.templateKey,
+        marketLabel: marketSubject.text,
+        messageKind: "research_update",
+        note: { holderOpenPnlUsd: null, holderPositionUsd: null },
+        price: 0.5,
+        researchDelta: fact,
+        side: "YES",
+        sideLabel: "Spain",
+      });
+      assert.equal(narrative?.[0], fact.fact);
+      assert.match(
+        narrative?.[1] ?? "",
+        /2026-09-24.*Official squad.*https:\/\/example.com\/squad/,
+      );
+    },
+  },
+  {
     name: "research deltas preserve actor scope and current wallet count",
     run: () => {
       const marketSubject = subject({

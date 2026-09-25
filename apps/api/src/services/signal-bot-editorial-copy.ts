@@ -26,7 +26,17 @@ type EditorialResearchDelta =
       kind: "price_move";
       priceMoveCents: number;
     }
-  | { kind: "wallet_count_change" };
+  | { kind: "wallet_count_change" }
+  | { kind: "opposing_wallet_count_change" }
+  | { kind: "opposing_position_change" }
+  | {
+      kind: "new_external_fact";
+      fact: string;
+      eventAt: string;
+      sourceTitle: string;
+      sourcePublishedAt: string;
+      sourceUrl: string;
+    };
 
 export function isRepresentativeTraderResearchDelta(
   value: EditorialResearchDelta | null,
@@ -150,6 +160,16 @@ export function buildSignalBotStructuredNarrative(input: {
   side: "NO" | "YES" | null;
   sideLabel: string | null;
 }): string[] | null {
+  if (
+    input.messageKind === "research_update" &&
+    input.researchDelta?.kind === "new_external_fact"
+  ) {
+    const fact = input.researchDelta;
+    return [
+      fact.fact,
+      `Event: ${fact.eventAt.slice(0, 10)}. Source: ${fact.sourceTitle} (${fact.sourcePublishedAt.slice(0, 10)}). ${fact.sourceUrl}`,
+    ];
+  }
   const trackRecord = scalarEvidenceValue(
     input.evidenceRows,
     "track_record",

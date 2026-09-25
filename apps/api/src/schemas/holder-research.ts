@@ -22,6 +22,17 @@ export const holderResearchExecutionPrioritySchema = z.enum([
   "high_conviction",
 ]);
 
+const holderResearchUpdateEvidenceSchema = z
+  .object({
+    sourceUrl: z.string().url().max(2_000),
+    matchesExactContract: z.boolean(),
+    factSupported: z.boolean(),
+    factMaterialToThesis: z.boolean(),
+  })
+  .strict()
+  .nullable()
+  .optional();
+
 export const holderResearchAgentOutputV1Schema = z
   .object({
     version: z.literal("holder_research_v1"),
@@ -51,6 +62,7 @@ export const holderResearchAgentOutputV1Schema = z
       .strict()
       .nullable()
       .optional(),
+    updateEvidence: holderResearchUpdateEvidenceSchema,
     execution_priority: holderResearchExecutionPrioritySchema.default("normal"),
     execution_priority_reason: z.string().trim().max(180).default(""),
     evidence_ids: z.array(z.string().trim().min(1).max(160)).min(1).max(6),
@@ -246,6 +258,7 @@ export const holderResearchFinalOutputV2Schema = z
       .strict()
       .nullable()
       .optional(),
+    updateEvidence: holderResearchUpdateEvidenceSchema,
     rationale: z.string().trim().min(8).max(260),
     evidence_ids: z.array(z.string().trim().min(1).max(160)).min(1).max(6),
     copy: z
@@ -333,6 +346,7 @@ export function parseHolderResearchAgentOutputV1(
     ),
     public_context_risk: record.public_context_risk,
     horizonEvidence: record.horizonEvidence ?? null,
+    updateEvidence: record.updateEvidence ?? null,
     execution_priority: executionPriority,
     execution_priority_reason: "",
     evidence_ids: asStringArray(record.evidence_ids, 6, 160),
@@ -600,6 +614,7 @@ export function parseHolderResearchFinalOutputV2(
     evidence_assessment: record.evidence_assessment,
     reason_codes: asStringArray(record.reason_codes, 8, 80),
     horizonEvidence: record.horizonEvidence ?? null,
+    updateEvidence: record.updateEvidence ?? null,
     rationale: asTrimmedString(
       record.rationale,
       "The supplied evidence did not support publication.",
@@ -626,6 +641,8 @@ export function parseHolderResearchFinalOutputV2(
 }
 
 const HOLDER_RESEARCH_OUTCOME_INVESTIGATION_RULES = [
+  "Preserve the supplied full outcome mapping (candidate.contract.outcomeMapping in V2, candidate.mkt side labels in V1). Internal YES/NO keys are identifiers, not a license to reinterpret named outcomes as ordinary yes/no answers. Check both sides against the exact market rules, resolution source, deadline and stage; do not substitute a related contract.",
+  "For an existing-note update with a genuinely new dated external fact, populate updateEvidence={sourceUrl,matchesExactContract,factSupported,factMaterialToThesis} only after independently checking the cited freshFact against the exact contract and prior note (candidate.contract.priorNote in V2; candidate.mkt.prevNote in V1). Compare the actual event, not source URLs or summary wording. A new URL, reworded story, tracker timestamp or rediscovered old event is not a new fact. Material facts may support or challenge the selected-side thesis; updateEvidence does not override the final publication assessment. Otherwise set updateEvidence=null.",
   "Start with the exact contract: entity, outcome condition, selected side, threshold, deadline and resolution stage. A credible trader's observed position is an investigative lead. Form the strongest specific, plausible outcome thesis supported by the positioning, calibrated credentials, opposition and available context; do not invent a mechanism when the evidence supports only a directional position.",
   "Distinguish observations from interpretation. An inferred thesis is your hypothesis, not the trader's stated belief, intent or private knowledge. Be bold about a plausible scenario and explicit about uncertainty; never imply insider information, certainty or a guaranteed winner.",
   "Compare the strongest opposing evidence and the strongest plausible alternative explanation. Related positions can inform the thesis or suggest hedging, but incomplete portfolio coverage proves neither an unhedged bet nor a hedge. Do not assume different wallets are independent people. Disagreement is evidence to weigh, not an automatic veto.",
@@ -810,6 +827,8 @@ export function buildHolderResearchUserPrompt(input: {
         "confirms_holder | fully_explains_move | conflicts_holder | unknown",
       horizonEvidence:
         "null, or {sourceUrl, matchesExactContract, supportsSelectedSide, factSupported} for a verified distant-horizon external fact",
+      updateEvidence:
+        "null, or {sourceUrl, matchesExactContract, factSupported, factMaterialToThesis} for a genuinely new dated fact since the previous note",
       evidence_ids: "subset of allowedEvidenceIds supporting the assessment",
       caveats: "0-2 short material limitations",
     },
@@ -855,6 +874,8 @@ export function buildHolderResearchUserPromptV2(input: {
       evidence_ids: "subset of allowedEvidenceIds supporting the assessment",
       horizonEvidence:
         "null, or {sourceUrl, matchesExactContract, supportsSelectedSide, factSupported} for a verified distant-horizon external fact",
+      updateEvidence:
+        "null, or {sourceUrl, matchesExactContract, factSupported, factMaterialToThesis} for a genuinely new dated fact since the previous note",
       copy: {
         headline:
           "normally <=12 words; a complete truthful outcome thesis or tension without wallet identifiers",

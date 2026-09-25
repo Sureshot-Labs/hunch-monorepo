@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { holderResearchExternalResearchV2Schema } from "../schemas/holder-research.js";
 
 export const HOLDER_RESEARCH_PUBLICATION_DECISION_V1 = {
   authority: "holder_research_quality_gate",
@@ -82,10 +83,41 @@ export type HolderResearchUpdateReason =
       asOf: string;
       before: number;
       delta: number;
+      kind: "opposing_position_increased" | "opposing_position_reduced";
+      observedSide: PublicationSide;
+      side: PublicationSide;
+      unit: "usd";
+    }
+  | {
+      after: number;
+      asOf: string;
+      before: number;
+      delta: number;
       direction: "decreased" | "increased";
       kind: "wallet_confluence_changed";
       side: PublicationSide;
       unit: "wallets";
+    }
+  | {
+      after: number;
+      asOf: string;
+      before: number;
+      delta: number;
+      direction: "decreased" | "increased";
+      kind: "opposing_wallet_confluence_changed";
+      observedSide: PublicationSide;
+      side: PublicationSide;
+      unit: "wallets";
+    }
+  | {
+      asOf: string;
+      eventAt: string;
+      fact: string;
+      kind: "new_external_fact";
+      side: PublicationSide;
+      sourcePublishedAt: string;
+      sourceTitle: string;
+      sourceUrl: string;
     };
 
 export type HolderResearchUpdateV1 = {
@@ -581,15 +613,100 @@ function holderAt(
   );
 }
 
+function httpUrl(value: unknown): string | null {
+  const text = cleanString(value);
+  if (!text || text.length > 2_000) return null;
+  try {
+    const url = new URL(text);
+    return (url.protocol === "https:" || url.protocol === "http:") &&
+      !url.username &&
+      !url.password
+      ? text
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizedFact(value: unknown): string | null {
+  return (
+    cleanString(value)
+      ?.normalize("NFKC")
+      .toLocaleLowerCase("en-US")
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim() || null
+  );
+}
+
+function newExternalFactReason(input: {
+  baselineAsOf: string;
+  changedAt: string;
+  externalFactEvidence?: unknown;
+  externalResearch?: unknown;
+  previousExternalResearch?: unknown;
+  selectedSide: PublicationSide;
+}): Extract<HolderResearchUpdateReason, { kind: "new_external_fact" }> | null {
+  const parsed = holderResearchExternalResearchV2Schema.safeParse(
+    input.externalResearch,
+  );
+  if (!parsed.success || parsed.data.status !== "ok") return null;
+  const research = parsed.data;
+  const fact = research.freshFact;
+  const confirmation = asRecord(input.externalFactEvidence);
+  const eventAt = validIso(fact?.eventAt);
+  const citation = research.citations.find(
+    (source) => source.url === fact?.sourceUrl,
+  );
+  const sourcePublishedAt = validIso(citation?.publishedAt);
+  const previous = asRecord(input.previousExternalResearch);
+  const previousFact = normalizedFact(asRecord(previous?.freshFact)?.fact);
+  const currentFact = normalizedFact(fact?.fact);
+  if (
+    !fact ||
+    !eventAt ||
+    !citation ||
+    !sourcePublishedAt ||
+    !httpUrl(fact.sourceUrl) ||
+    fact.matchesExactContract !== true ||
+    fact.trackerUpdateOnly !== false ||
+    confirmation?.sourceUrl !== fact.sourceUrl ||
+    confirmation.matchesExactContract !== true ||
+    confirmation.factSupported !== true ||
+    confirmation.factMaterialToThesis !== true ||
+    Date.parse(eventAt) <= Date.parse(input.baselineAsOf) ||
+    Date.parse(eventAt) > Date.parse(input.changedAt) ||
+    Date.parse(sourcePublishedAt) < Date.parse(eventAt) ||
+    Date.parse(sourcePublishedAt) > Date.parse(input.changedAt) ||
+    !currentFact ||
+    currentFact === previousFact ||
+    normalizedFact(previous?.summary)?.includes(currentFact)
+  )
+    return null;
+  return {
+    asOf: input.changedAt,
+    eventAt,
+    fact: fact.fact,
+    kind: "new_external_fact",
+    side: input.selectedSide,
+    sourcePublishedAt,
+    sourceTitle: citation.title,
+    sourceUrl: fact.sourceUrl,
+  };
+}
+
 export function buildHolderResearchUpdateV1(input: {
   baselineAsOf: string;
   baselineNoteId: string;
   candidateMeaningfulReasons?: string[];
   current: HolderResearchUpdateSnapshot;
   currentPrice: SignalPriceSnapshotV1;
+  evaluatedAt?: string;
+  externalFactEvidence?: unknown;
+  externalResearch?: unknown;
   holderWalletId?: string | null;
   materiality: HolderResearchUpdateMateriality;
   previous: HolderResearchUpdateSnapshot;
+  previousExternalResearch?: unknown;
   selectedSide: PublicationSide;
   thesisKey: string;
 }):
@@ -634,7 +751,7 @@ export function buildHolderResearchUpdateV1(input: {
       after: round(currentPrice, 4),
       asOf: input.currentPrice.asOf,
       before: round(previousPrice, 4),
-      delta: round(priceDelta, 4),
+      delta: round(round(currentPrice, 4) - round(previousPrice, 4), 4),
       kind:
         priceDelta >= 0
           ? "price_moved_with_thesis"
@@ -652,7 +769,15 @@ export function buildHolderResearchUpdateV1(input: {
   const currentHolder = holderWalletId
     ? holderAt(input.current, holderWalletId, input.selectedSide)
     : null;
-  const representative = previousHolder && currentHolder;
+  const representative =
+    previousHolder &&
+    currentHolder &&
+    Math.abs(currentHolder.positionUsd - previousHolder.positionUsd) + 1e-9 >=
+      Math.max(
+        input.materiality.minMeaningfulHolderUsdDelta,
+        Math.abs(previousHolder.positionUsd) *
+          input.materiality.minMeaningfulHolderPctDelta,
+      );
   const beforePosition = representative
     ? previousHolder.positionUsd
     : input.previous.sides[input.selectedSide].usd;
@@ -676,7 +801,7 @@ export function buildHolderResearchUpdateV1(input: {
       after: round(afterPosition, 2),
       asOf: input.currentPrice.asOf,
       before: round(beforePosition, 2),
-      delta: round(positionDelta, 2),
+      delta: round(round(afterPosition, 2) - round(beforePosition, 2), 2),
       kind: positionDelta >= 0 ? "position_increased" : "position_reduced",
       scope: representative ? "representative_wallet" : "selected_side_cluster",
       side: input.selectedSide,
@@ -704,6 +829,66 @@ export function buildHolderResearchUpdateV1(input: {
     reasons.push(walletReason);
   }
 
+  const oppositeSide = input.selectedSide === "YES" ? "NO" : "YES";
+  const beforeOpposite = input.previous.sides[oppositeSide];
+  const afterOpposite = input.current.sides[oppositeSide];
+  const opposingPositionDelta = afterOpposite.usd - beforeOpposite.usd;
+  let opposingPositionReason: HolderResearchUpdateReason | null = null;
+  if (
+    Math.abs(opposingPositionDelta) + 1e-9 >=
+    Math.max(
+      input.materiality.minMeaningfulSideUsdDelta,
+      Math.abs(beforeOpposite.usd) *
+        input.materiality.minMeaningfulSidePctDelta,
+    )
+  ) {
+    opposingPositionReason = {
+      after: round(afterOpposite.usd, 2),
+      asOf: input.currentPrice.asOf,
+      before: round(beforeOpposite.usd, 2),
+      delta: round(
+        round(afterOpposite.usd, 2) - round(beforeOpposite.usd, 2),
+        2,
+      ),
+      kind:
+        opposingPositionDelta > 0
+          ? "opposing_position_increased"
+          : "opposing_position_reduced",
+      observedSide: oppositeSide,
+      side: input.selectedSide,
+      unit: "usd",
+    };
+    reasons.push(opposingPositionReason);
+  }
+  const opposingWalletDelta =
+    afterOpposite.sharpHolders - beforeOpposite.sharpHolders;
+  let opposingWalletReason: HolderResearchUpdateReason | null = null;
+  if (opposingWalletDelta !== 0) {
+    opposingWalletReason = {
+      after: afterOpposite.sharpHolders,
+      asOf: input.currentPrice.asOf,
+      before: beforeOpposite.sharpHolders,
+      delta: opposingWalletDelta,
+      direction: opposingWalletDelta > 0 ? "increased" : "decreased",
+      kind: "opposing_wallet_confluence_changed",
+      observedSide: oppositeSide,
+      side: input.selectedSide,
+      unit: "wallets",
+    };
+    reasons.push(opposingWalletReason);
+  }
+  const externalReason = newExternalFactReason({
+    ...input,
+    baselineAsOf,
+    changedAt: validIso(input.evaluatedAt) ?? input.currentPrice.asOf,
+  });
+  if (externalReason) reasons.push(externalReason);
+
+  // Never publish malformed numeric observations or unsupported side mappings.
+  if (reasons.some((reason) => !parseUpdateReason(reason))) {
+    return { ok: false, reason: "non_renderable_delta" };
+  }
+
   if (reasons.length === 0) {
     const unsupported = (input.candidateMeaningfulReasons ?? []).some(
       (reason) =>
@@ -725,7 +910,13 @@ export function buildHolderResearchUpdateV1(input: {
       ? priceReason
       : null;
   const primaryReason =
-    strongPrice ?? positionReason ?? priceReason ?? walletReason;
+    strongPrice ??
+    positionReason ??
+    priceReason ??
+    walletReason ??
+    opposingPositionReason ??
+    opposingWalletReason ??
+    externalReason;
   if (!primaryReason) return { ok: false, reason: "non_renderable_delta" };
   const ctaIntent =
     primaryReason.kind === "position_increased" ||
@@ -742,8 +933,12 @@ export function buildHolderResearchUpdateV1(input: {
   );
   const fingerprintPayload = {
     baselineNoteId: input.baselineNoteId,
-    before: primaryReason.before,
-    after: primaryReason.after,
+    ...(primaryReason.kind === "new_external_fact"
+      ? {
+          eventAt: primaryReason.eventAt,
+          fact: normalizedFact(primaryReason.fact),
+        }
+      : { before: primaryReason.before, after: primaryReason.after }),
     kind: primaryReason.kind,
     selectedSide: input.selectedSide,
     thesisKey: input.thesisKey,
@@ -756,7 +951,7 @@ export function buildHolderResearchUpdateV1(input: {
     value: {
       baselineAsOf,
       baselineNoteId: input.baselineNoteId,
-      changedAt: input.currentPrice.asOf,
+      changedAt: validIso(input.evaluatedAt) ?? input.currentPrice.asOf,
       ctaIntent,
       fingerprint,
       materialityPolicy: {
@@ -775,10 +970,42 @@ export function buildHolderResearchUpdateV1(input: {
 function parseUpdateReason(value: unknown): HolderResearchUpdateReason | null {
   const record = asRecord(value);
   const side = publicationSide(record?.side);
+  const asOf = validIso(record?.asOf);
+  if (record?.kind === "new_external_fact") {
+    const eventAt = validIso(record.eventAt);
+    const sourcePublishedAt = validIso(record.sourcePublishedAt);
+    const fact = cleanString(record.fact);
+    const sourceTitle = cleanString(record.sourceTitle);
+    const sourceUrl = httpUrl(record.sourceUrl);
+    if (
+      !side ||
+      !asOf ||
+      !eventAt ||
+      !sourcePublishedAt ||
+      !fact ||
+      fact.length < 8 ||
+      fact.length > 260 ||
+      !sourceTitle ||
+      sourceTitle.length > 200 ||
+      !sourceUrl ||
+      Date.parse(sourcePublishedAt) < Date.parse(eventAt) ||
+      Date.parse(sourcePublishedAt) > Date.parse(asOf)
+    )
+      return null;
+    return {
+      asOf,
+      eventAt,
+      fact,
+      kind: "new_external_fact",
+      side,
+      sourcePublishedAt,
+      sourceTitle,
+      sourceUrl,
+    };
+  }
   const before = finiteNumber(record?.before);
   const after = finiteNumber(record?.after);
   const delta = finiteNumber(record?.delta);
-  const asOf = validIso(record?.asOf);
   if (
     !record ||
     !side ||
@@ -834,7 +1061,31 @@ function parseUpdateReason(value: unknown): HolderResearchUpdateReason | null {
     };
   }
   if (
-    record.kind === "wallet_confluence_changed" &&
+    (record.kind === "opposing_position_increased" ||
+      record.kind === "opposing_position_reduced") &&
+    record.unit === "usd" &&
+    publicationSide(record.observedSide) != null &&
+    record.observedSide !== side &&
+    before >= 0 &&
+    after >= 0 &&
+    approximatelyEqual(delta, after - before) &&
+    ((record.kind === "opposing_position_increased" && delta > 0) ||
+      (record.kind === "opposing_position_reduced" && delta < 0))
+  ) {
+    return {
+      after,
+      asOf,
+      before,
+      delta,
+      kind: record.kind,
+      observedSide: record.observedSide as PublicationSide,
+      side,
+      unit: "usd",
+    };
+  }
+  if (
+    (record.kind === "wallet_confluence_changed" ||
+      record.kind === "opposing_wallet_confluence_changed") &&
     record.unit === "wallets" &&
     (record.direction === "increased" || record.direction === "decreased") &&
     Number.isInteger(before) &&
@@ -846,6 +1097,21 @@ function parseUpdateReason(value: unknown): HolderResearchUpdateReason | null {
     ((record.direction === "increased" && delta > 0) ||
       (record.direction === "decreased" && delta < 0))
   ) {
+    if (record.kind === "opposing_wallet_confluence_changed") {
+      const observedSide = publicationSide(record.observedSide);
+      if (!observedSide || observedSide === side) return null;
+      return {
+        after,
+        asOf,
+        before,
+        delta,
+        direction: record.direction,
+        kind: record.kind,
+        observedSide,
+        side,
+        unit: "wallets",
+      };
+    }
     return {
       after,
       asOf,
@@ -899,6 +1165,17 @@ export function parseHolderResearchUpdateV1(
     ) ||
     !baselineAsOf ||
     !changedAt ||
+    parsedReasons.some(
+      (reason) =>
+        reason.kind === "new_external_fact" &&
+        (Date.parse(reason.eventAt) <= Date.parse(baselineAsOf) ||
+          Date.parse(reason.asOf) > Date.parse(changedAt)),
+    ) ||
+    ((primaryReason.kind === "new_external_fact" ||
+      primaryReason.kind === "opposing_wallet_confluence_changed" ||
+      primaryReason.kind === "opposing_position_increased" ||
+      primaryReason.kind === "opposing_position_reduced") &&
+      record.ctaIntent !== "open_market") ||
     !cleanString(record.baselineNoteId) ||
     !cleanString(record.fingerprint) ||
     (record.ctaIntent !== "buy" && record.ctaIntent !== "open_market") ||

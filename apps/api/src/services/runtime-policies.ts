@@ -39,6 +39,11 @@ import {
   type RuntimePolicyRow,
 } from "../repos/runtime-policies.js";
 import { normalizeMarketMapVenues } from "./market-map.js";
+import {
+  DEFAULT_HOLDER_RESEARCH_CATEGORY_HORIZONS,
+  holderResearchCategoryHorizonsSchema,
+  type HolderResearchCategoryHorizons,
+} from "./holder-research-horizon.js";
 import { DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES } from "./signal-bot-followthrough-policy.js";
 import {
   getDefaultSignalBotPolicy,
@@ -291,6 +296,8 @@ export type HolderResearchPolicy = {
   priceAgainstSignalBlockPp: number;
   minPublishEntryPrice: number;
   maxPublishHorizonHours: number;
+  /** Complete category rule set; {} makes every category use the scalar. */
+  maxPublishHorizonHoursByCategory: HolderResearchCategoryHorizons;
   sportsOutrightPublishMode: "context_only" | "enabled";
   decisionCacheEnabled: boolean;
   decisionCacheTtlHours: number;
@@ -1169,6 +1176,7 @@ const holderResearchSchema = z
     priceAgainstSignalBlockPp: ratio,
     minPublishEntryPrice: ratio,
     maxPublishHorizonHours: positiveInt.max(24 * 365 * 10),
+    maxPublishHorizonHoursByCategory: holderResearchCategoryHorizonsSchema,
     sportsOutrightPublishMode: z.enum(["context_only", "enabled"]),
     decisionCacheEnabled: strictBoolean,
     decisionCacheTtlHours: positiveInt.max(24 * 365),
@@ -1986,6 +1994,9 @@ function getDefaults(): IntelPolicyMap {
       priceAgainstSignalBlockPp: 0.05,
       minPublishEntryPrice: 0.1,
       maxPublishHorizonHours: 24 * 30,
+      maxPublishHorizonHoursByCategory: {
+        ...DEFAULT_HOLDER_RESEARCH_CATEGORY_HORIZONS,
+      },
       sportsOutrightPublishMode: "context_only",
       decisionCacheEnabled: true,
       decisionCacheTtlHours: 336,
@@ -3114,6 +3125,9 @@ function normalizeHolderResearchPolicy(
       1,
       24 * 365 * 10,
     ),
+    maxPublishHorizonHoursByCategory: {
+      ...policy.maxPublishHorizonHoursByCategory,
+    },
     sportsOutrightPublishMode:
       policy.sportsOutrightPublishMode === "enabled"
         ? "enabled"
@@ -3505,6 +3519,17 @@ function resolveFromRow<K extends IntelPolicyKey>(
   }
 
   const merged = deepMerge(defaults, parsed.value ?? {}) as IntelPolicyMap[K];
+  if (key === "holder_research") {
+    const horizonRules = (parsed.value as Partial<HolderResearchPolicy>)
+      .maxPublishHorizonHoursByCategory;
+    if (horizonRules !== undefined) {
+      // A category map is a complete rule set, not a recursive patch: an
+      // explicit {} disables every category override and restores the scalar.
+      (merged as HolderResearchPolicy).maxPublishHorizonHoursByCategory = {
+        ...horizonRules,
+      };
+    }
+  }
   const effective = normalizeMerged(key, merged);
 
   return {

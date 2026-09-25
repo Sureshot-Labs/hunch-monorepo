@@ -20,6 +20,7 @@ const policy = {
   minSidePositionUsd: 10_000,
   minPublishEntryPrice: 0,
   maxPublishHorizonHours: 24 * 365,
+  maxPublishHorizonHoursByCategory: {},
 };
 const snapshotAt = new Date();
 

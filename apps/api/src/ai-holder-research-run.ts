@@ -32,6 +32,10 @@ import {
 } from "./lib/ai-pricing.js";
 import { buildOpenRouterReasoningOptions } from "./lib/openrouter-reasoning.js";
 import { buildHolderResearchResponseFormat } from "./services/holder-research-request.js";
+import {
+  createHolderResearchPublicationProgress,
+  holderResearchCacheOutputAfterPersistence,
+} from "./services/holder-research-publication-progress.js";
 import { stripSourceMarkup } from "./lib/source-markup.js";
 import {
   buildHolderResearchSystemPrompt,
@@ -85,7 +89,6 @@ import {
   selectHolderResearchCandidates,
   type HolderResearchCandidate,
   type HolderResearchDecisionCacheEvaluation,
-  type HolderResearchPersistDecision,
   type HolderResearchObservationCandidate,
   type HolderResearchSelectionDiagnostics,
 } from "./services/holder-research.js";
@@ -176,6 +179,7 @@ type HolderResearchTriageModelResult = {
 
 type HolderResearchDecisionCacheRedis = {
   get(key: string): Promise<string | null>;
+  del?(key: string): Promise<unknown>;
   set(
     key: string,
     value: string,
@@ -325,6 +329,8 @@ type HolderResearchRunReport = {
     pipelineV2Mode: HolderResearchPolicy["pipelineV2Mode"];
     maxAgentCallsPerRun: number;
     maxPublishPerRun: number;
+    maxPublishHorizonHours: number;
+    maxPublishHorizonHoursByCategory: HolderResearchPolicy["maxPublishHorizonHoursByCategory"];
     maxCandidatePool: number;
     externalSearchEnabled: boolean;
     maxExternalSearchCallsPerRun: number;
@@ -339,6 +345,7 @@ type HolderResearchRunReport = {
     candidatesLoaded: number;
     selected: number;
     published: number;
+    publishDecisions: number;
     context: number;
     skipped: number;
     persisted: number;
@@ -884,7 +891,7 @@ export function buildHolderResearchExternalSearchSystemPromptV2(): string {
     "Use at most three citations with title, url, and publishedAt (ISO datetime or null).",
     "Use the supplied research question to test the selected-outcome hypothesis and its strongest plausible alternative. Prioritize dated changes within freshEvidenceWindowHours, but retain older structural facts when they bear on the outcome. Publicly known does not mean irrelevant or already priced correctly. A tracker page update is not an event date. Distinguish event, publication and page-update dates.",
     "Only cite URLs actually returned by your search tools. A supporting fact must match the selected outcome, side, deadline, entity and stage; never use a YES fact as support for a NO position.",
-    "For a claim that a price threshold has already been met or resolved, verify the exact exchange, trading pair, candle/price field, market-creation boundary and deadline from the contract rules. Prices from another exchange or before market creation cannot establish that claim. If a qualifying observation cannot be verified, report that specific question as unknown and do not call the threshold already met. Separately verified facts about future outcome drivers may provide qualified directional background, not proof of resolution. freshFact must match the exact contract and selected side.",
+    "For a claim that a price threshold has already been met or resolved, verify the exact exchange, trading pair, candle/price field, market-creation boundary and deadline from the contract rules. Prices from another exchange or before market creation cannot establish that claim. If a qualifying observation cannot be verified, report that specific question as unknown and do not call the threshold already met. Separately verified facts about future outcome drivers may provide qualified directional background, not proof of resolution. freshFact must match the exact contract; set supportsSelectedSide truthfully. An adverse new fact is useful too, but cannot establish a supporting distant-horizon exception.",
     "Compare dated evidence with latestExactSideHolderActivityAt when supplied. General market activity and a position snapshot are not proof this holder acted; use after_holder only when the public evidence clearly appeared after exact-side holder activity.",
     "Do not infer wallet identity, skill, exposure, edge, PnL, or a trading recommendation.",
     HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
@@ -2247,8 +2254,6 @@ export async function maybeWriteDecisionCache(params: {
     !params.redis ||
     params.policy.dryRun ||
     !params.callModel ||
-    // A PUBLISH decision is not a publication until the note commits.
-    params.output.status === "PUBLISH" ||
     // A model/provider failure is not an editorial verdict; retry next run.
     params.modelMeta?.mode === "openrouter_error"
   ) {
@@ -2256,6 +2261,15 @@ export async function maybeWriteDecisionCache(params: {
   }
 
   try {
+    if (params.output.status === "PUBLISH") {
+      // Publication cooldown comes only from committed Postgres notes. A
+      // prior CONTEXT/SKIP must not survive a newer publish recommendation,
+      // including a technical save failure. Never cache a provisional publish.
+      await params.redis.del?.(
+        buildHolderResearchDecisionCacheKey(params.candidate.thesisKey),
+      );
+      return;
+    }
     const cacheRecord = buildHolderResearchDecisionCacheRecord({
       candidate: params.candidate,
       output: params.output,
@@ -3089,12 +3103,26 @@ export async function runHolderResearch(
       { limit: rankedCandidates.length, useV2: useV2Triage },
     ).map(({ candidate }) => candidate);
 
-    let publishCount = 0;
+    const shouldPersist =
+      !policy.dryRun && policy.persistNotes && args.callModel;
+    const publicationProgress = createHolderResearchPublicationProgress({
+      maxPublishPerRun: policy.maxPublishPerRun,
+      persist: shouldPersist
+        ? async (decision) => {
+            await options.assertCanPersist?.();
+            return persistHolderResearchNotes(client, {
+              runnerRunId: runId,
+              policy,
+              decisions: [decision],
+            });
+          }
+        : null,
+    });
     let finalModelCalls = 0;
     let remainingLiveChecks = policy.maxLiveChecksPerRun;
     for (const selectedCandidate of finalCandidates) {
       if (finalModelCalls >= policy.maxAgentCallsPerRun) break;
-      if (publishCount >= policy.maxPublishPerRun) break;
+      if (publicationProgress.stopped) break;
 
       const finalPriceCheck = args.callModel
         ? await applyFreshPriceChecksToCandidates({
@@ -3202,12 +3230,7 @@ export async function runHolderResearch(
         externalResearch: canonicalExternalResearchV2(externalResearch),
         output: rawDecision.output,
         policy,
-        publishedRunDecisions: decisions
-          .filter((decision) => decision.output.status === "PUBLISH")
-          .map((decision) => ({
-            candidate: decision.candidate,
-            output: decision.output,
-          })),
+        publishedRunDecisions: publicationProgress.publishedDecisions,
       });
       const horizonException = assessHolderResearchHorizonException({
         candidate,
@@ -3259,18 +3282,21 @@ export async function runHolderResearch(
               },
       };
       decisions.push(decision);
+      // Persist before spending the publication slot or evaluating the next
+      // candidate. A rejected/duplicate note must not starve other finalists.
+      await publicationProgress.record(decision);
       await maybeWriteDecisionCache({
         redis: options.decisionCacheRedis,
         policy,
         callModel: args.callModel,
         candidate,
-        output: decision.output,
+        output: holderResearchCacheOutputAfterPersistence(
+          decision,
+          publicationProgress.stats?.outcomesByKey[candidate.key],
+        ),
         modelMeta: decision.modelMeta,
         decisionCache,
       });
-      if (decision.output.status === "PUBLISH") {
-        publishCount += 1;
-      }
     }
     toolCalls.push({
       name: "decision_cache",
@@ -3387,20 +3413,8 @@ export async function runHolderResearch(
       }
     }
 
-    let persistence: HolderResearchRunReport["persistence"] = null;
-    const shouldPersist =
-      !policy.dryRun && policy.persistNotes && args.callModel;
+    const persistence = publicationProgress.stats;
     if (shouldPersist) {
-      await options.assertCanPersist?.();
-      persistence = await persistHolderResearchNotes(client, {
-        runnerRunId: runId,
-        policy,
-        decisions: decisions.map<HolderResearchPersistDecision>((decision) => ({
-          candidate: decision.candidate,
-          output: decision.output,
-          modelMeta: decision.modelMeta,
-        })),
-      });
       if (observeV2) {
         try {
           await linkHolderResearchObservationNotes(client, runId);
@@ -3549,6 +3563,9 @@ export async function runHolderResearch(
         pipelineV2Mode: policy.pipelineV2Mode,
         maxAgentCallsPerRun: policy.maxAgentCallsPerRun,
         maxPublishPerRun: policy.maxPublishPerRun,
+        maxPublishHorizonHours: policy.maxPublishHorizonHours,
+        maxPublishHorizonHoursByCategory:
+          policy.maxPublishHorizonHoursByCategory,
         maxCandidatePool: policy.maxCandidatePool,
         externalSearchEnabled: policy.externalSearchEnabled,
         maxExternalSearchCallsPerRun: policy.maxExternalSearchCallsPerRun,
@@ -3563,7 +3580,8 @@ export async function runHolderResearch(
       totals: {
         candidatesLoaded: candidates.length,
         selected: selectedWithTypeMetrics.length,
-        published: decisions.filter(
+        published: persistence?.persisted ?? 0,
+        publishDecisions: decisions.filter(
           (decision) => decision.output.status === "PUBLISH",
         ).length,
         context: decisions.filter(

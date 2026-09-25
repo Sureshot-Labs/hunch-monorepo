@@ -72,6 +72,7 @@ import {
   loadHolderResearchPerformanceCalibrationMemo,
 } from "./holder-research-performance.js";
 import { parseMarketOutcomes } from "./wallet-intel-helpers.js";
+import { resolveHolderResearchPublishHorizon } from "./holder-research-horizon.js";
 import {
   resolveWalletTrackingSubjectsEnabled,
   upsertWalletTrackingSubjects,
@@ -236,6 +237,8 @@ export type HolderResearchPreviousNote = {
   noteId: string;
   createdAt: string;
   title: string;
+  summary?: string | null;
+  externalResearch?: HolderResearchExternalResearchV2 | null;
   inputDigest: string | null;
   cooldownUntil: string | null;
   decisionSnapshot?: HolderResearchDecisionSnapshot | null;
@@ -337,6 +340,7 @@ export type HolderResearchQualityAssessment = {
   marketType: HolderResearchMarketType;
   marketSegment: HolderResearchMarketSegment;
   hoursToClose: number | null;
+  publicationHorizon: ReturnType<typeof resolveHolderResearchPublishHorizon>;
   actorStrength: HolderResearchActorStrength;
   credentialStrength: HolderResearchCredentialStrength;
   priceContext: HolderResearchPriceContext;
@@ -410,6 +414,7 @@ export type HolderResearchDecisionFeaturesV2 = {
     oppositeEntryPrice: number | null;
     priceCheckedAt: string | null;
     hoursToClose: number | null;
+    publicationHorizon: ReturnType<typeof resolveHolderResearchPublishHorizon>;
   };
   selectedSide: HolderResearchSideDecisionFacts | null;
   oppositeSide: HolderResearchSideDecisionFacts | null;
@@ -872,33 +877,42 @@ function buildBaseEvidence(
   const yes = market.sides.YES;
   const no = market.sides.NO;
   const total = yes.usd + no.usd;
+  const sideCopies = buildHolderResearchSideCopies(market);
+  const yesLabel = holderResearchPromptOutcome(sideCopies.YES).outcomeLabel;
+  const noLabel = holderResearchPromptOutcome(sideCopies.NO).outcomeLabel;
   return [
     {
       id: `market:${market.marketId}`,
       kind: "market",
       title: market.marketTitle,
-      summary: `${formatUsd(total)} tracked across YES ${formatUsd(yes.usd)} / NO ${formatUsd(no.usd)}.`,
+      summary: `${formatUsd(total)} tracked across ${yesLabel} ${formatUsd(yes.usd)} / ${noLabel} ${formatUsd(no.usd)}.`,
       relevance: 1,
     },
     {
       id: `side:${market.marketId}:YES`,
       kind: "side",
-      title: "YES side",
+      title: `${yesLabel} side`,
       summary: `${formatUsd(yes.usd)}, ${yes.wallets} wallets, ${yes.sharpHolders} sharp holders.`,
       relevance: 0.8,
     },
     {
       id: `side:${market.marketId}:NO`,
       kind: "side",
-      title: "NO side",
+      title: `${noLabel} side`,
       summary: `${formatUsd(no.usd)}, ${no.wallets} wallets, ${no.sharpHolders} sharp holders.`,
       relevance: 0.8,
     },
   ];
 }
 
-function holderEvidence(holder: HolderResearchHolder): HolderResearchEvidence {
+function holderEvidence(
+  holder: HolderResearchHolder,
+  market: HolderResearchMarketInput,
+): HolderResearchEvidence {
   const label = holderPromptDisplayName(holder) ?? holder.address;
+  const outcomeLabel = holderResearchPromptOutcome(
+    buildHolderResearchMarketSideCopy(market, holder.side),
+  ).outcomeLabel;
   const facts: string[] = [`${formatUsd(holder.positionUsd)} open`];
   const resolvedEdge = holder.resolvedWinRateEdge30d;
   const resolvedEdgeSamples = holder.resolvedEdgeSampleCount30d;
@@ -919,7 +933,7 @@ function holderEvidence(holder: HolderResearchHolder): HolderResearchEvidence {
   return {
     id: buildHolderEvidenceId(holder),
     kind: "holder",
-    title: `${label} ${holder.side}`,
+    title: `${label} ${outcomeLabel}`,
     summary: `${facts.join(", ")}.`,
     relevance: 0.9,
   };
@@ -1163,6 +1177,20 @@ function compactPromptRelatedPosition(position: HolderResearchRelatedPosition) {
   };
 }
 
+function holderResearchPromptActivityContext(holder: HolderResearchHolder) {
+  return {
+    averageObservedActivityEventsPerDay30d:
+      holder.trades30d != null && holder.trades30d >= 0
+        ? Math.round((holder.trades30d / 30) * 100) / 100
+        : null,
+    firstObservedExactSideActivityAt: holder.firstObservedActivityAt ?? null,
+    latestSupportingActivityAt: holder.latestSupportingActivityAt ?? null,
+    livePositionConfirmedAt: holder.livePositionConfirmedAt ?? null,
+    scope:
+      "30-day observed activity includes trades and snapshot deltas, not exact filled orders. First observation is not entry; a live-position check is not activity. Continuous holding duration and trading style are unknown.",
+  };
+}
+
 function compactPromptHolder(
   holder: HolderResearchHolder,
   mode: "holder" | "entry",
@@ -1190,6 +1218,7 @@ function compactPromptHolder(
     positionSnapshotAt: holder.positionSnapshotAt,
     firstObservedActivityAt: holder.firstObservedActivityAt ?? null,
     latestSupportingActivityAt: holder.latestSupportingActivityAt ?? null,
+    activityContext: holderResearchPromptActivityContext(holder),
     observedCash: {
       walletUsdLike: holder.walletUsdLikeBalance,
       ownerUsdLike: holder.ownerUsdLikeBalance,
@@ -1887,6 +1916,10 @@ export function buildHolderResearchQualityAssessment(
     marketType,
     marketSegment,
     hoursToClose,
+    publicationHorizon: resolveHolderResearchPublishHorizon({
+      policy,
+      marketSegment,
+    }),
     actorStrength,
     credentialStrength,
     priceContext,
@@ -1929,7 +1962,7 @@ export function evaluateHolderResearchPublishRiskGates(input: {
   }
   if (quality.hoursToClose == null) {
     pushUnique(blockers, "publish_horizon_unknown");
-  } else if (quality.hoursToClose > input.policy.maxPublishHorizonHours) {
+  } else if (quality.hoursToClose > quality.publicationHorizon.maxHours) {
     pushUnique(blockers, "publish_horizon_too_long");
   }
   if (
@@ -2299,11 +2332,14 @@ export function buildHolderResearchDecisionFeaturesV2(
       eventTitle: candidate.market.eventTitle,
       marketType: quality.marketType,
       marketSegment: quality.marketSegment,
-      sideLabel: side ? sideCopies[side].sideLabel : null,
+      sideLabel: side
+        ? holderResearchPromptOutcome(sideCopies[side]).outcomeLabel
+        : null,
       entryPrice,
       oppositeEntryPrice,
       priceCheckedAt: candidate.market.livePriceCheck?.checkedAt ?? null,
       hoursToClose: quality.hoursToClose,
+      publicationHorizon: quality.publicationHorizon,
     },
     selectedSide: side
       ? buildHolderResearchSideDecisionFacts(candidate, side, policy)
@@ -2703,11 +2739,15 @@ function holderResearchModelConfigSignature(
   policy: HolderResearchPolicy,
 ): string {
   return JSON.stringify([
-    "holder_decision_contract_v6",
+    "holder_decision_contract_v7",
     policy.model,
     policy.reasoningEffort ?? null,
     policy.triageModel,
     policy.triageReasoningEffort ?? null,
+    policy.maxPublishHorizonHours,
+    Object.entries(policy.maxPublishHorizonHoursByCategory ?? {}).sort(
+      ([a], [b]) => a.localeCompare(b),
+    ),
   ]);
 }
 
@@ -3036,8 +3076,8 @@ export function buildHolderResearchCandidatesFromMarket(
         market,
         evidence: [
           ...baseEvidence,
-          ...(yesHolder ? [holderEvidence(yesHolder)] : []),
-          ...(noHolder ? [holderEvidence(noHolder)] : []),
+          ...(yesHolder ? [holderEvidence(yesHolder, market)] : []),
+          ...(noHolder ? [holderEvidence(noHolder, market)] : []),
         ],
         cooldownUntil: null,
       }),
@@ -3064,7 +3104,7 @@ export function buildHolderResearchCandidatesFromMarket(
         market,
         evidence: [
           ...baseEvidence,
-          ...(holder ? [holderEvidence(holder)] : []),
+          ...(holder ? [holderEvidence(holder, market)] : []),
         ],
         cooldownUntil: null,
       }),
@@ -3085,7 +3125,7 @@ export function buildHolderResearchCandidatesFromMarket(
         market,
         evidence: [
           ...baseEvidence,
-          ...(holder ? [holderEvidence(holder)] : []),
+          ...(holder ? [holderEvidence(holder, market)] : []),
         ],
         cooldownUntil: null,
       }),
@@ -3327,6 +3367,15 @@ function adjustedSelectionScore(
   return score;
 }
 
+export function isUnchangedHolderResearchPublication(
+  candidate: HolderResearchCandidate,
+): boolean {
+  return (
+    candidate.market.previousNote?.decisionSnapshot != null &&
+    candidate.meaningfulDeltaReasons.length === 0
+  );
+}
+
 function compareHolderResearchCandidates(
   policy: HolderResearchPolicy,
 ): (a: HolderResearchCandidate, b: HolderResearchCandidate) => number {
@@ -3539,13 +3588,9 @@ export function selectHolderResearchCandidates(
       skipped.push({ candidate, reason: "cooldown" });
       return false;
     }
-    if (
-      candidate.market.previousNote?.decisionSnapshot &&
-      candidate.meaningfulDeltaReasons.length === 0
-    ) {
-      skipped.push({ candidate, reason: "cooldown" });
-      return false;
-    }
+    // A cooled published thesis may have new outside facts before positions
+    // change. Research is bounded by ordinary candidate/cache/call budgets;
+    // only a verified material update can pass the commit-time contract.
     if (usedMarkets.has(candidate.market.marketId)) {
       skipped.push({ candidate, reason: "duplicate_market" });
       return false;
@@ -3553,56 +3598,70 @@ export function selectHolderResearchCandidates(
     return true;
   };
 
-  for (const candidate of sorted) {
-    if (selected.length >= maxSelected) break;
-    if (!isEligible(candidate)) continue;
-    const quota = quotaForBucket(candidate.bucket, policy);
-    const used = quotaUsed.get(candidate.bucket) ?? 0;
-    if (quota <= 0 || used >= quota) {
-      skipped.push({ candidate, reason: "quota" });
-      continue;
+  // Exhaust quota and diversity refill for new/materially changed candidates
+  // before a cooled unchanged thesis may consume otherwise unused capacity.
+  const selectionPhases = [
+    sorted.filter(
+      (candidate) => !isUnchangedHolderResearchPublication(candidate),
+    ),
+    sorted.filter(isUnchangedHolderResearchPublication),
+  ];
+  for (const phase of selectionPhases) {
+    for (const candidate of phase) {
+      if (selected.length >= maxSelected) break;
+      if (!isEligible(candidate)) continue;
+      const quota = quotaForBucket(candidate.bucket, policy);
+      const used = quotaUsed.get(candidate.bucket) ?? 0;
+      if (quota <= 0 || used >= quota) {
+        skipped.push({ candidate, reason: "quota" });
+        continue;
+      }
+      if (
+        !canSelectWithinEventSoftCap(candidate, selectedEventCounts, policy)
+      ) {
+        continue;
+      }
+      selected.push(candidate);
+      usedKeys.add(candidate.key);
+      usedMarkets.add(candidate.market.marketId);
+      markSelectedEvent(candidate, selectedEventCounts);
+      quotaUsed.set(candidate.bucket, used + 1);
     }
-    if (!canSelectWithinEventSoftCap(candidate, selectedEventCounts, policy)) {
-      continue;
-    }
-    selected.push(candidate);
-    usedKeys.add(candidate.key);
-    usedMarkets.add(candidate.market.marketId);
-    markSelectedEvent(candidate, selectedEventCounts);
-    quotaUsed.set(candidate.bucket, used + 1);
-  }
 
-  const refillWithinEventCap = sorted;
-  for (const candidate of refillWithinEventCap) {
-    if (selected.length >= maxSelected) break;
-    if (usedKeys.has(candidate.key)) continue;
-    if (quotaForBucket(candidate.bucket, policy) <= 0) {
-      skipped.push({ candidate, reason: "quota" });
-      continue;
+    const refillWithinEventCap = phase;
+    for (const candidate of refillWithinEventCap) {
+      if (selected.length >= maxSelected) break;
+      if (usedKeys.has(candidate.key)) continue;
+      if (quotaForBucket(candidate.bucket, policy) <= 0) {
+        skipped.push({ candidate, reason: "quota" });
+        continue;
+      }
+      if (!isEligible(candidate)) continue;
+      if (
+        !canSelectWithinEventSoftCap(candidate, selectedEventCounts, policy)
+      ) {
+        continue;
+      }
+      selected.push(candidate);
+      usedKeys.add(candidate.key);
+      usedMarkets.add(candidate.market.marketId);
+      markSelectedEvent(candidate, selectedEventCounts);
     }
-    if (!isEligible(candidate)) continue;
-    if (!canSelectWithinEventSoftCap(candidate, selectedEventCounts, policy)) {
-      continue;
-    }
-    selected.push(candidate);
-    usedKeys.add(candidate.key);
-    usedMarkets.add(candidate.market.marketId);
-    markSelectedEvent(candidate, selectedEventCounts);
-  }
 
-  const unrestrictedRefill = sorted;
-  for (const candidate of unrestrictedRefill) {
-    if (selected.length >= maxSelected) break;
-    if (usedKeys.has(candidate.key)) continue;
-    if (quotaForBucket(candidate.bucket, policy) <= 0) {
-      skipped.push({ candidate, reason: "quota" });
-      continue;
+    const unrestrictedRefill = phase;
+    for (const candidate of unrestrictedRefill) {
+      if (selected.length >= maxSelected) break;
+      if (usedKeys.has(candidate.key)) continue;
+      if (quotaForBucket(candidate.bucket, policy) <= 0) {
+        skipped.push({ candidate, reason: "quota" });
+        continue;
+      }
+      if (!isEligible(candidate)) continue;
+      selected.push(candidate);
+      usedKeys.add(candidate.key);
+      usedMarkets.add(candidate.market.marketId);
+      markSelectedEvent(candidate, selectedEventCounts);
     }
-    if (!isEligible(candidate)) continue;
-    selected.push(candidate);
-    usedKeys.add(candidate.key);
-    usedMarkets.add(candidate.market.marketId);
-    markSelectedEvent(candidate, selectedEventCounts);
   }
 
   for (const candidate of candidates) {
@@ -4431,6 +4490,8 @@ export async function attachHolderResearchCandidateHistory(
     side: HolderResearchSideKey;
     note_id: string;
     title: string;
+    description: string | null;
+    external_research: unknown;
     created_at: Date | string;
     input_digest: string | null;
     decision_snapshot: unknown;
@@ -4445,6 +4506,8 @@ export async function attachHolderResearchCandidateHistory(
         upper(coalesce(n.lineage->>'side', t.target_meta->>'side')) as side,
         n.id as note_id,
         n.title,
+        n.description,
+        n.model_meta->'external_research' as external_research,
         n.created_at,
         n.lineage->>'input_digest' as input_digest,
         n.lineage->'decision_snapshot' as decision_snapshot,
@@ -4483,6 +4546,10 @@ export async function attachHolderResearchCandidateHistory(
       {
         noteId: row.note_id,
         title: row.title,
+        summary: row.description ?? null,
+        externalResearch: parseHolderResearchExternalResearchV2(
+          row.external_research,
+        ),
         createdAt: toIso(row.created_at) ?? now.toISOString(),
         inputDigest: row.input_digest,
         cooldownUntil: null,
@@ -4928,7 +4995,7 @@ export async function enrichHolderResearchLivePositions(
     const refreshedEvidence = new Map(
       [
         ...buildBaseEvidence(market),
-        ...holders.map(holderEvidence),
+        ...holders.map((holder) => holderEvidence(holder, market)),
         ...currentSupportEvidence,
       ].map((evidence) => [evidence.id, evidence]),
     );
@@ -5467,6 +5534,7 @@ function compactPromptHolderV2(
         "Partial observed USD-like liquidity, not total wealth or portfolio value; amounts may overlap and are not additive.",
     },
     positionSnapshotAt: holder.positionSnapshotAt,
+    activityContext: holderResearchPromptActivityContext(holder),
     specialization: compactHolderResearchSpecializationV2(holder, policy),
     relatedPositions: holder.relatedOpenPositions
       .slice(0, 2)
@@ -5525,14 +5593,110 @@ export function listHolderResearchPromptEvidenceIdsV2(
   );
 }
 
+function holderResearchPromptOutcome(copy: MarketSideCopy) {
+  // UI labels may be abbreviated (for example NYG). Research needs the full
+  // outcome identity, while YES/NO remains only the canonical internal key.
+  const plainPosition =
+    copy.copyKind === "named_outcome"
+      ? copy.rawOutcomeLabel
+      : copy.plainPosition;
+  return {
+    internalSide: copy.side,
+    outcomeLabel: plainPosition,
+    plainPosition,
+    winCondition: copy.winCondition,
+  };
+}
+
+function holderResearchPreviousPublicationPrompt(
+  previousNote: HolderResearchPreviousNote | null,
+) {
+  if (!previousNote) return null;
+  const externalResearch = previousNote.externalResearch;
+  return {
+    at: previousNote.createdAt,
+    title: previousNote.title,
+    summary: clipPromptText(previousNote.summary, PROMPT_TEXT_MARKET_MAX),
+    cooldownUntil: previousNote.cooldownUntil,
+    externalResearch: externalResearch
+      ? {
+          status: externalResearch.status,
+          summary: externalResearch.summary,
+          citations: externalResearch.citations.slice(0, 3),
+          freshFact: externalResearch.freshFact ?? null,
+        }
+      : null,
+    role: "Previously published research for comparison, not new or independent evidence.",
+  };
+}
+
+function buildHolderResearchPromptContractV2(
+  candidate: HolderResearchCandidate,
+  mode: HolderResearchPromptMode,
+) {
+  const market = candidate.market;
+  const sideCopies = buildHolderResearchSideCopies(market);
+  const outcomeMapping = {
+    YES: holderResearchPromptOutcome(sideCopies.YES),
+    NO: holderResearchPromptOutcome(sideCopies.NO),
+  };
+  return {
+    title: market.marketTitle,
+    eventTitle: market.eventTitle,
+    description: clipPromptText(
+      market.marketDescription,
+      mode === "triage" ? 400 : PROMPT_TEXT_MARKET_MAX,
+    ),
+    eventDescription: clipPromptText(
+      market.eventDescription,
+      mode === "triage" ? 400 : PROMPT_TEXT_MARKET_MAX,
+    ),
+    resolutionSource: clipPromptText(
+      market.resolutionSource,
+      PROMPT_TEXT_RESOLUTION_MAX,
+    ),
+    closesAt: market.closeTime,
+    expiresAt: market.expirationTime,
+    selectedSide: candidate.side,
+    oppositeSide: candidate.side ? oppositeSideKey(candidate.side) : null,
+    outcomeMapping,
+    priorNote: holderResearchPreviousPublicationPrompt(market.previousNote),
+    meaningfulDeltaReasons: candidate.meaningfulDeltaReasons,
+    changeLabelMeaning:
+      "Change labels identify what to compare; they do not establish direction, magnitude, a new purchase or a newly occurring outside fact.",
+    sideKeyMeaning:
+      "YES and NO are internal outcome keys, not public labels. Use the mapped full outcome wording; internal direction up/down does not identify a market outcome named Up/Down.",
+  };
+}
+
 export function buildHolderResearchTriageCandidatePromptJsonV2(
   candidate: HolderResearchCandidate,
   policy: HolderResearchPolicy,
 ): Record<string, unknown> {
   const contracts = buildHolderResearchPromptContracts({ candidate, policy });
+  const holders = selectPromptHoldersV2(candidate, policy);
+  const holderContext = [
+    holders.find((holder) => holder.side === candidate.side),
+    holders.find((holder) => holder.side !== candidate.side),
+  ].flatMap((holder) =>
+    holder
+      ? [
+          {
+            side: holder.side,
+            specialization: compactHolderResearchSpecializationV2(
+              holder,
+              policy,
+            ),
+            activityContext: holderResearchPromptActivityContext(holder),
+          },
+        ]
+      : [],
+  );
   return {
     key: candidate.key,
+    contract: buildHolderResearchPromptContractV2(candidate, "triage"),
     decisionFeatures: contracts.features,
+    holderContext,
     presentation: contracts.presentation.presentation,
     evidenceMetrics: contracts.evidenceMetrics,
   };
@@ -5550,6 +5714,7 @@ export function buildHolderResearchCandidatePromptJsonV2(
   });
   return {
     key: candidate.key,
+    contract: buildHolderResearchPromptContractV2(candidate, "final"),
     decisionFeatures: contracts.features,
     presentation: contracts.presentation.presentation,
     evidenceMetrics: contracts.evidenceMetrics,
@@ -5639,6 +5804,16 @@ function compactHolderResearchSideCopy(copy: MarketSideCopy) {
   };
 }
 
+function compactHolderResearchPromptSideCopy(copy: MarketSideCopy) {
+  const outcome = holderResearchPromptOutcome(copy);
+  return {
+    ...compactHolderResearchSideCopy(copy),
+    label: outcome.outcomeLabel,
+    plainPosition: outcome.plainPosition,
+    priceLabel: outcome.outcomeLabel,
+  };
+}
+
 function buildHolderResearchSideCopies(market: HolderResearchMarketInput) {
   return buildMarketSideCopyPair({
     eventDescription: market.eventDescription,
@@ -5713,15 +5888,15 @@ function compactPromptMarket(
     evt: market.eventTitle,
     series: market.seriesTitle,
     labels: {
-      YES: sideCopies.YES.sideLabel,
-      NO: sideCopies.NO.sideLabel,
+      YES: holderResearchPromptOutcome(sideCopies.YES).outcomeLabel,
+      NO: holderResearchPromptOutcome(sideCopies.NO).outcomeLabel,
     },
     sideCopy: targetSideCopy
-      ? compactHolderResearchSideCopy(targetSideCopy)
+      ? compactHolderResearchPromptSideCopy(targetSideCopy)
       : null,
     sideCopies: {
-      YES: compactHolderResearchSideCopy(sideCopies.YES),
-      NO: compactHolderResearchSideCopy(sideCopies.NO),
+      YES: compactHolderResearchPromptSideCopy(sideCopies.YES),
+      NO: compactHolderResearchPromptSideCopy(sideCopies.NO),
     },
     cat: market.category,
     close: market.closeTime,
@@ -5758,11 +5933,10 @@ function compactPromptMarket(
     );
   }
   if (market.previousNote) {
-    result.prevNote = {
-      at: market.previousNote.createdAt,
-      title: market.previousNote.title,
-      cooldownUntil: market.previousNote.cooldownUntil,
-    };
+    result.prevNote = holderResearchPreviousPublicationPrompt(
+      market.previousNote,
+    );
+    result.meaningfulDeltaReasons = candidate.meaningfulDeltaReasons;
   }
   return result;
 }
@@ -5927,15 +6101,15 @@ export function buildHolderResearchExternalSearchInput(
       cat: candidate.market.category,
       series: candidate.market.seriesTitle,
       labels: {
-        YES: sideCopies.YES.sideLabel,
-        NO: sideCopies.NO.sideLabel,
+        YES: holderResearchPromptOutcome(sideCopies.YES).outcomeLabel,
+        NO: holderResearchPromptOutcome(sideCopies.NO).outcomeLabel,
       },
       sideCopy: targetSideCopy
-        ? compactHolderResearchSideCopy(targetSideCopy)
+        ? compactHolderResearchPromptSideCopy(targetSideCopy)
         : null,
       sideCopies: {
-        YES: compactHolderResearchSideCopy(sideCopies.YES),
-        NO: compactHolderResearchSideCopy(sideCopies.NO),
+        YES: compactHolderResearchPromptSideCopy(sideCopies.YES),
+        NO: compactHolderResearchPromptSideCopy(sideCopies.NO),
       },
       close: candidate.market.closeTime,
       pYes: candidate.market.yesProbability,
@@ -5986,6 +6160,7 @@ export function buildHolderResearchExternalSearchInputV2(
 ): Record<string, unknown> {
   const features = buildHolderResearchDecisionFeaturesV2(candidate, policy);
   return {
+    contract: buildHolderResearchPromptContractV2(candidate, "final"),
     market: {
       title: candidate.market.marketTitle,
       eventTitle: candidate.market.eventTitle,
@@ -6341,6 +6516,7 @@ export function adaptHolderResearchFinalOutputV2(input: {
         : input.output.rationale,
     public_context_risk: publicContextRisk,
     horizonEvidence: input.output.horizonEvidence ?? null,
+    updateEvidence: input.output.updateEvidence ?? null,
     execution_priority: "normal",
     execution_priority_reason: "",
     evidence_ids:
@@ -6588,7 +6764,7 @@ export async function persistHolderResearchNotes(
   for (const decision of params.decisions) {
     if (decision.output.status !== "PUBLISH") continue;
     const candidate = decision.candidate;
-    const noteKey = buildHolderResearchNoteKey(candidate);
+    let noteKey = buildHolderResearchNoteKey(candidate);
     const actorSummary = buildHolderResearchActorSummary({
       candidate,
       evidenceIds: decision.output.evidence_ids,
@@ -6612,6 +6788,8 @@ export async function persistHolderResearchNotes(
       features: decisionFeatures,
     });
 
+    let commitStarted = false;
+    let supersededPrevious = false;
     try {
       await client.query("begin");
       await client.query(
@@ -6672,6 +6850,7 @@ export async function persistHolderResearchNotes(
         revision_number: number;
         root_note_id: string;
         status: string;
+        external_research: unknown;
       }>(
         `
           select
@@ -6684,6 +6863,7 @@ export async function persistHolderResearchNotes(
             end as revision_number,
             coalesce(n.lineage->>'thesis_root_note_id', n.id::text) as root_note_id,
             n.lineage->'decision_snapshot' as decision_snapshot,
+            n.model_meta->'external_research' as external_research,
             n.status
           from ai_notes n
           where n.note_type = 'signal'
@@ -6702,10 +6882,9 @@ export async function persistHolderResearchNotes(
         : Number.NaN;
       if (
         previousNote &&
-        (candidate.meaningfulDeltaReasons.length === 0 ||
-          (Number.isFinite(previousCreatedAtMs) &&
-            Date.now() - previousCreatedAtMs <
-              params.policy.noteCooldownHours * 3_600_000))
+        Number.isFinite(previousCreatedAtMs) &&
+        Date.now() - previousCreatedAtMs <
+          params.policy.noteCooldownHours * 3_600_000
       ) {
         stats.skippedExisting += 1;
         stats.outcomesByKey[candidate.key] = { status: "skipped_existing" };
@@ -6737,6 +6916,7 @@ export async function persistHolderResearchNotes(
           candidateMeaningfulReasons: candidate.meaningfulDeltaReasons,
           current: currentDecisionSnapshot,
           currentPrice: signalPriceSnapshot,
+          evaluatedAt: publicationNow.toISOString(),
           holderWalletId: actorSummary.primaryHolder?.walletId ?? null,
           materiality: {
             minMeaningfulHolderPctDelta:
@@ -6751,6 +6931,9 @@ export async function persistHolderResearchNotes(
           previous: previousDecisionSnapshot,
           selectedSide: telegramMarketIdentity.selectedSide,
           thesisKey: candidate.thesisKey,
+          externalResearch,
+          externalFactEvidence: decision.output.updateEvidence,
+          previousExternalResearch: previousNote.external_research,
         });
         if (!updateResult.ok) {
           recordHolderResearchPublicationRejection(
@@ -6784,6 +6967,9 @@ export async function persistHolderResearchNotes(
           continue;
         }
         holderResearchUpdate = updateResult.value;
+        // Two genuinely different updates can share an unchanged position
+        // digest; the verified update identity, not model prose, deduplicates.
+        noteKey = `${noteKey}:update:${holderResearchUpdate.fingerprint}`;
       }
       const holderResearchPublicationAudit: HolderResearchPublicationAuditV1 = {
         baselineNoteId: holderResearchUpdate?.baselineNoteId ?? null,
@@ -7074,16 +7260,21 @@ export async function persistHolderResearchNotes(
           `update ai_notes set supersedes_note_id = $1, updated_at = now() where id = $2 and supersedes_note_id is null`,
           [previousId, noteId],
         );
-        stats.superseded += 1;
+        supersededPrevious = true;
       }
 
+      commitStarted = true;
       await client.query("commit");
       stats.persisted += 1;
+      if (supersededPrevious) stats.superseded += 1;
       stats.outcomesByKey[candidate.key] = { status: "persisted" };
     } catch (error) {
       await client.query("rollback").catch(() => undefined);
       stats.errors += 1;
-      stats.outcomesByKey[candidate.key] = { status: "error" };
+      stats.outcomesByKey[candidate.key] = {
+        status: "error",
+        ...(commitStarted ? { reason: "commit_outcome_unknown" } : {}),
+      };
       console.warn("[holder-research] failed to persist note", {
         error: error instanceof Error ? error.message : String(error),
         candidateKey: decision.candidate.key,
