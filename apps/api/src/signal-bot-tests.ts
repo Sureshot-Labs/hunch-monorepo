@@ -743,6 +743,7 @@ class FakeDb {
   ];
   marketTokenRows: unknown[] = [];
   rows: unknown[] = [];
+  opposingContextRows: unknown[] = [];
   threadContextRows: unknown[] = [];
   tokenTopRows: unknown[] = [
     {
@@ -830,6 +831,15 @@ class FakeDb {
         oid: 0,
         rowCount: rows.length,
         rows: rows as unknown as T[],
+      };
+    }
+    if (sql.includes("from ai_note_targets market_target")) {
+      return {
+        command: "SELECT",
+        fields: [],
+        oid: 0,
+        rowCount: this.opposingContextRows.length,
+        rows: this.opposingContextRows as T[],
       };
     }
     if (sql.includes("from signal_bot_messages prior")) {
@@ -13373,6 +13383,30 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "opposing signal context appears in both Telegram rich and Markdown renderers",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        note: note({
+          direction: "down",
+          holderPositionUsd: 125_000,
+          holderSide: "NO",
+        }),
+        opposingInitial: true,
+      });
+      assert.equal(message.publishable, true);
+      assert.match(message.text, /Opposing view/);
+      assert.match(message.text, /NO vs earlier YES/);
+      assert.match(message.text, /not proof the earlier trader changed sides/);
+      assert.equal(message.richMessage.blocks[0]?.type, "paragraph");
+      assert.match(
+        JSON.stringify(message.richMessage.blocks[0]),
+        /Opposing view.*Separate holder thesis/,
+      );
+    },
+  },
+  {
     name: "message includes cheaper alternative button when provided",
     run: () => {
       const message = buildSignalBotMessage({
@@ -15456,7 +15490,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "producer initial remains standalone when the channel has an old thesis thread",
+    name: "producer initial remains standalone without a delivered opposite-side message in the same chat",
     run: async () => {
       const redis = new FakeRedis();
       await enableSignalBotChat({
@@ -15467,13 +15501,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       const db = new FakeDb();
       db.rows = [noteRow({ revision_kind: "initial" })];
-      db.threadContextRows = [
-        {
-          baseline_at: "2025-12-01T00:00:00.000Z",
-          reply_to_message_id: "77",
-          thread_root_note_id: "00000000-0000-4000-8000-000000000099",
-        },
-      ];
       const telegram = new FakeTelegram();
       const result = await publishSignalBotTick({
         config: parseSignalBotConfig({
@@ -15487,11 +15514,88 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
 
       assert.equal(result.sent, 1);
       assert.equal(telegram.messages[0]?.reply_parameters, undefined);
-      assert.equal(
-        db.queries.some((query) =>
-          query.sql.includes("from signal_bot_messages prior"),
-        ),
-        false,
+      const opposingLookup = db.queries.find((query) =>
+        query.sql.includes("from ai_note_targets market_target"),
+      );
+      assert.ok(opposingLookup);
+      assert.deepEqual(opposingLookup.params, [
+        "-100",
+        "polymarket:market-1",
+        "00000000-0000-4000-8000-000000000001",
+        "down",
+      ]);
+      assert.match(opposingLookup.sql, /prior\.chat_id = \$1/);
+      assert.match(opposingLookup.sql, /market_target\.target_id = \$2/);
+      assert.match(opposingLookup.sql, /prior_note\.status <> 'retracted'/);
+      assert.doesNotMatch(opposingLookup.sql, /prior_note\.status = 'active'/);
+      assert.match(
+        opposingLookup.sql,
+        /prior\.telegram_message_id is not null/,
+      );
+      assert.doesNotMatch(telegram.messages[0]?.text ?? "", /Opposing view/);
+      const delivery = db.queries
+        .filter((query) =>
+          query.sql.includes("insert into signal_bot_messages"),
+        )
+        .at(-1);
+      assert.ok(delivery);
+      const recorded = readSignalBotMessageInsert(delivery);
+      assert.equal(recorded.messageKind, "initial");
+      assert.equal(recorded.threadRootNoteId, recorded.noteId);
+    },
+  },
+  {
+    name: "opposite-side initial replies within its chat and remains a separate thesis thread",
+    run: async () => {
+      const redis = new FakeRedis();
+      await enableSignalBotChat({
+        chat: { id: "-100", title: "Signals", type: "channel" },
+        enabledBy: 123,
+        now: new Date("2025-12-31T00:00:00.000Z"),
+        redis,
+      });
+      const db = new FakeDb();
+      db.rows = [
+        noteRow({
+          direction: "down",
+          holder_target_meta: {
+            actorMode: "single_holder",
+            positionUsd: 125_000,
+            side: "NO",
+          },
+          primary_target_meta: { side: "NO" },
+          thesis_key: "holder_research:v2:polymarket:market-1:NO",
+        }),
+      ];
+      db.opposingContextRows = [{ reply_to_message_id: "77" }];
+      const telegram = new FakeTelegram();
+      const result = await publishSignalBotTick({
+        config: parseSignalBotConfig({
+          HUNCH_SIGNAL_BOT_ADMIN_USER_IDS: "123",
+          HUNCH_SIGNAL_BOT_TOKEN: "token",
+        }),
+        db,
+        redis,
+        telegram,
+      });
+
+      assert.equal(result.sent, 1);
+      const opposingLookup = db.queries.find((query) =>
+        query.sql.includes("from ai_note_targets market_target"),
+      );
+      assert.ok(opposingLookup);
+      assert.deepEqual(opposingLookup.params, [
+        "-100",
+        "polymarket:market-1",
+        "00000000-0000-4000-8000-000000000001",
+        "up",
+      ]);
+      assert.match(opposingLookup.sql, /prior_note\.status <> 'retracted'/);
+      assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
+      assert.match(telegram.messages[0]?.text ?? "", /Opposing view/);
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /not proof the earlier trader changed sides/,
       );
       const delivery = db.queries
         .filter((query) =>
@@ -15502,6 +15606,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const recorded = readSignalBotMessageInsert(delivery);
       assert.equal(recorded.messageKind, "initial");
       assert.equal(recorded.threadRootNoteId, recorded.noteId);
+      assert.equal(recorded.replyToMessageId, 77);
     },
   },
   {

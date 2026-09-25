@@ -159,6 +159,10 @@ import {
   type TelegramDeliverySendResult,
 } from "./telegram-delivery-safety.js";
 import {
+  buildSignalBotOpposingView,
+  loadSignalBotOpposingMessageId,
+} from "./signal-bot-opposing-context.js";
+import {
   ensureTelegramNotificationPreferences,
   setTelegramNotificationTopic,
   type TelegramNotificationPreferences,
@@ -401,6 +405,7 @@ export type TelegramBotMenuButton =
     };
 type SignalBotThreadContext = {
   baselineAt: string;
+  opposingInitial: boolean;
   replyToMessageId: number | null;
   threadRootNoteId: string;
 };
@@ -1118,6 +1123,7 @@ export function buildSignalBotMessage(input: {
   forceOpenMarket?: boolean;
   messageKind?: "initial" | "research_update";
   note: SignalBotNote;
+  opposingInitial?: boolean;
   openPriceSnapshot?: {
     asOf: string;
     price: number;
@@ -1393,7 +1399,12 @@ export function buildSignalBotMessage(input: {
   const richHeadline = formatSignalNotificationHeadlineRichText(
     notificationCopy.headline,
   );
+  const opposingView =
+    messageKind === "initial" && input.opposingInitial && buySide
+      ? buildSignalBotOpposingView(buySide)
+      : null;
   const richBlocks: TelegramInputRichMessage["blocks"] = [
+    ...(opposingView ? [opposingView.richBlock] : []),
     telegramRichParagraph(
       richSummary
         ? telegramRichText(richHeadline, "\n\n", richSummary)
@@ -1423,6 +1434,7 @@ export function buildSignalBotMessage(input: {
       : []),
   ];
   const blocks = [
+    opposingView?.markdown,
     titleLine,
     summary,
     ...(renderedResearchPosition && researchPosition
@@ -4720,6 +4732,7 @@ export async function prepareSignalBotDelivery(input: {
   forceOpenMarket?: boolean;
   messageKind: "initial" | "research_update";
   note: SignalBotNote;
+  opposingInitial?: boolean;
   now?: Date;
   redis?: SignalBotRedisLike;
   resolvedDelivery?: {
@@ -4916,6 +4929,7 @@ export async function prepareSignalBotDelivery(input: {
       deliveryTarget,
       messageKind: input.messageKind,
       note: input.note,
+      opposingInitial: input.opposingInitial,
       openPriceSnapshot,
       copyPolicy: input.copyPolicy,
       telegramMiniAppLinkBase: input.telegramMiniAppLinkBase,
@@ -5338,13 +5352,27 @@ async function loadSignalBotThreadContext(input: {
 }): Promise<SignalBotThreadContext> {
   const initial: SignalBotThreadContext = {
     baselineAt: new Date().toISOString(),
+    opposingInitial: false,
     replyToMessageId: null,
     threadRootNoteId: input.note.id,
   };
-  if (input.note.revisionKind !== "research_update" || !input.note.marketId) {
-    return initial;
-  }
+  if (!input.note.marketId) return initial;
   try {
+    if (input.note.revisionKind === "initial") {
+      const side = resolveSignalBotBuySide(input.note);
+      if (!side) return initial;
+      const replyToMessageId = await loadSignalBotOpposingMessageId({
+        chatId: input.chatId,
+        db: input.db,
+        marketId: input.note.marketId,
+        noteId: input.note.id,
+        selectedSide: side,
+      });
+      return replyToMessageId != null
+        ? { ...initial, opposingInitial: true, replyToMessageId }
+        : initial;
+    }
+    if (input.note.revisionKind !== "research_update") return initial;
     const { rows } = await input.db.query<{
       baseline_at: Date | string | null;
       reply_to_message_id: string | number | null;
@@ -5417,6 +5445,7 @@ async function loadSignalBotThreadContext(input: {
         row.baseline_at instanceof Date
           ? row.baseline_at.toISOString()
           : row.baseline_at || initial.baselineAt,
+      opposingInitial: false,
       replyToMessageId: toInteger(row.reply_to_message_id),
       threadRootNoteId: row.thread_root_note_id,
     };
@@ -5953,6 +5982,7 @@ export async function publishSignalBotTick(input: {
         deliveryRef,
         messageKind,
         note,
+        opposingInitial: thread.opposingInitial,
         redis: input.redis,
         resolvedDelivery: {
           allowBuyCta: routing.allowBuyCta,

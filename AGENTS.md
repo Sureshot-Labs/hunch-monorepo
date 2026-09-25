@@ -14,6 +14,18 @@
 - Test recovery as well as rejection; a safeguard without a practical recovery
   path is incomplete. Do not remove unrelated safeguards to fix one bad guard.
 
+## Build verification
+
+- Before giving a commit/deploy GO for backend changes, complete the full workspace
+  build and check its exit code; targeted API typecheck does not cover every build
+  input and is not a substitute.
+- In a network-restricted local workspace, `pnpm build` may try to download the
+  pinned pnpm version. From this repository root, the non-installing fallback is:
+  `PNPM_CONFIG_PM_ON_FAIL=ignore PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=warn ./node_modules/.bin/turbo run build --env-mode=loose`
+- Turbo needs `--env-mode=loose` so child `pnpm` processes inherit those settings.
+  Check any dependency-state warning; never claim GO if the build failed or did
+  not finish. Do not run an automatic install/purge merely to satisfy the check.
+
 ## SQL verification
 
 This is a production database with millions of rows. Small fixtures, typechecks,

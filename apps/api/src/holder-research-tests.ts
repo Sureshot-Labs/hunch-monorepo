@@ -7229,6 +7229,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       };
       let queries = 0;
       const storedContexts: Record<string, unknown>[] = [];
+      const storedSourceCitations: unknown[] = [];
       const client = {
         query: async (sql: string, params: unknown[] = []) => {
           queries += 1;
@@ -7239,6 +7240,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
               }
             ).publicContextV1;
             storedContexts.push(storedContext);
+            storedSourceCitations.push(
+              (JSON.parse(String(params[7])) as Record<string, unknown>)
+                .public_source_citations,
+            );
           }
           return { rows: [], rowCount: 0 };
         },
@@ -7264,6 +7269,9 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       );
       assert.equal(queries > 0, true);
       assert.deepEqual(storedContexts.at(-1)?.source_urls, [sourceUrl]);
+      assert.deepEqual(storedSourceCitations.at(-1), [
+        { title: "Verified report", url: sourceUrl, publishedAt: null },
+      ]);
       queries = 0;
       assert.equal(
         await persist({
@@ -7301,6 +7309,103 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         "unchanged",
       );
       assert.equal(queries > 0, true);
+    },
+  },
+  {
+    name: "unchanged public Context enriches only selected source metadata without a new revision",
+    run: async () => {
+      const candidate = sharpMinorityCandidate();
+      const evidenceId = candidate.evidence[0]?.id;
+      assert.ok(evidenceId);
+      const sourceUrl = "https://example.com/selected-report";
+      const publicContext: NonNullable<
+        HolderResearchAgentOutputV1["public_context"]
+      > = {
+        headline: "Public report adds market context",
+        summary:
+          "The report provides context while the outcome stays uncertain.",
+        caveats: [],
+        reason: "public_explanation",
+        evidence_ids: [evidenceId],
+        source_urls: [sourceUrl],
+      };
+      const modelMeta = {
+        external_research: {
+          status: "ok",
+          verdict: "unknown",
+          timing: "unknown",
+          summary: "Reports were checked.",
+          citations: [
+            {
+              title: "Selected report",
+              url: sourceUrl,
+              publishedAt: "2026-09-25T12:00:00.000Z",
+            },
+            {
+              title: "Unselected report",
+              url: "https://example.com/other-report",
+              publishedAt: null,
+            },
+          ],
+          comparableOdds: null,
+        },
+      };
+      let storedFingerprint: string | null = null;
+      const metadataUpdates: Array<{ sql: string; params: unknown[] }> = [];
+      const client = {
+        query: async (sql: string, params: unknown[] = []) => {
+          if (sql.includes("metrics->>'publicFingerprint' as fingerprint")) {
+            return {
+              rows: storedFingerprint
+                ? [
+                    {
+                      id: "be2387fa-9f17-4c03-a802-0ccb7f20a617",
+                      note_type: "context",
+                      status: "active",
+                      fingerprint: storedFingerprint,
+                    },
+                  ]
+                : [],
+            };
+          }
+          if (sql.includes("insert into ai_notes")) {
+            storedFingerprint = (
+              JSON.parse(String(params[6])) as { publicFingerprint: string }
+            ).publicFingerprint;
+            return { rows: [] };
+          }
+          if (sql.includes("set model_meta = jsonb_set")) {
+            metadataUpdates.push({ sql, params });
+          }
+          return { rows: [] };
+        },
+      };
+      const persist = () =>
+        persistHolderResearchPublicContext(client as never, {
+          runnerRunId: "holder-context-metadata-enrichment-test",
+          decision: {
+            candidate,
+            modelMeta,
+            output: publishOutput(candidate, {
+              status: "CONTEXT",
+              public_context: publicContext,
+            }),
+          },
+        });
+
+      assert.equal(await persist(), "unchanged");
+      assert.equal(metadataUpdates.length, 0);
+      assert.equal(await persist(), "unchanged");
+      assert.equal(metadataUpdates.length, 1);
+      assert.ok(metadataUpdates[0]);
+      assert.doesNotMatch(metadataUpdates[0].sql, /updated_at|revision/i);
+      assert.deepEqual(JSON.parse(String(metadataUpdates[0].params[1])), [
+        {
+          title: "Selected report",
+          url: sourceUrl,
+          publishedAt: "2026-09-25T12:00:00.000Z",
+        },
+      ]);
     },
   },
   {
