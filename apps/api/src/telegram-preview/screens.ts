@@ -111,6 +111,7 @@ export async function buildScreens() {
     payoutsRewards: true,
     positionResolved: true,
     positionSignals: true,
+    interestSignals: false,
     reachable: true,
     userId: ID,
   };
