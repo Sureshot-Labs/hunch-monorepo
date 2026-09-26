@@ -596,7 +596,6 @@ type HolderResearchPromptPolicy = HolderResearchPolicy;
 type HolderResearchPromptMode = "final" | "triage" | "search";
 
 const PROMPT_TEXT_MARKET_MAX = 700;
-const PROMPT_TEXT_RESOLUTION_MAX = 500;
 const PROMPT_TEXT_EVIDENCE_MAX = 320;
 
 type HolderResearchMarketRow = {
@@ -728,24 +727,6 @@ function safeText(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
-}
-
-function compactText(value: unknown, maxChars: number): string | null {
-  const text = safeText(value);
-  if (!text) return null;
-  const normalized = text.replace(/\s+/g, " ");
-  if (normalized.length <= maxChars) return normalized;
-  const clipped = normalized.slice(0, maxChars);
-  const sentenceEnd = Math.max(
-    clipped.lastIndexOf(". "),
-    clipped.lastIndexOf("? "),
-    clipped.lastIndexOf("! "),
-  );
-  if (sentenceEnd >= Math.floor(maxChars * 0.55)) {
-    return clipped.slice(0, sentenceEnd + 1);
-  }
-  const space = clipped.lastIndexOf(" ");
-  return `${clipped.slice(0, space > 0 ? space : maxChars - 3).trimEnd()}...`;
 }
 
 function normalizeSide(value: unknown): HolderResearchSideKey | null {
@@ -3861,15 +3842,15 @@ function rowToMarket(row: HolderResearchMarketRow): HolderResearchMarketInput {
     venue: row.venue,
     marketTitle: row.market_title ?? row.market_id,
     marketSlug: safeText(row.market_slug),
-    marketDescription: compactText(row.market_description, 1_200),
+    marketDescription: safeText(row.market_description),
     metadata: row.market_metadata,
     outcomes: parseMarketOutcomes(row.outcomes),
     eventTitle: row.event_title,
     eventSlug: safeText(row.event_slug),
-    eventDescription: compactText(row.event_description, 1_200),
+    eventDescription: safeText(row.event_description),
     seriesKey: safeText(row.series_key),
     seriesTitle: safeText(row.series_title),
-    resolutionSource: compactText(row.resolution_source, 600),
+    resolutionSource: safeText(row.resolution_source),
     category: row.category,
     closeTime: toIso(row.close_time),
     expirationTime: toIso(row.expiration_time),
@@ -5649,7 +5630,7 @@ function holderResearchPreviousPublicationPrompt(
       ? {
           status: externalResearch.status,
           summary: externalResearch.summary,
-          citations: externalResearch.citations.slice(0, 3),
+          citations: externalResearch.citations,
           freshFact: externalResearch.freshFact ?? null,
         }
       : null,
@@ -5659,7 +5640,6 @@ function holderResearchPreviousPublicationPrompt(
 
 function buildHolderResearchPromptContractV2(
   candidate: HolderResearchCandidate,
-  mode: HolderResearchPromptMode,
 ) {
   const market = candidate.market;
   const sideCopies = buildHolderResearchSideCopies(market);
@@ -5670,18 +5650,9 @@ function buildHolderResearchPromptContractV2(
   return {
     title: market.marketTitle,
     eventTitle: market.eventTitle,
-    description: clipPromptText(
-      market.marketDescription,
-      mode === "triage" ? 400 : PROMPT_TEXT_MARKET_MAX,
-    ),
-    eventDescription: clipPromptText(
-      market.eventDescription,
-      mode === "triage" ? 400 : PROMPT_TEXT_MARKET_MAX,
-    ),
-    resolutionSource: clipPromptText(
-      market.resolutionSource,
-      PROMPT_TEXT_RESOLUTION_MAX,
-    ),
+    description: market.marketDescription,
+    eventDescription: market.eventDescription,
+    resolutionSource: market.resolutionSource,
     closesAt: market.closeTime,
     expiresAt: market.expirationTime,
     selectedSide: candidate.side,
@@ -5721,7 +5692,7 @@ export function buildHolderResearchTriageCandidatePromptJsonV2(
   );
   return {
     key: candidate.key,
-    contract: buildHolderResearchPromptContractV2(candidate, "triage"),
+    contract: buildHolderResearchPromptContractV2(candidate),
     decisionFeatures: contracts.features,
     holderContext,
     presentation: contracts.presentation.presentation,
@@ -5741,7 +5712,7 @@ export function buildHolderResearchCandidatePromptJsonV2(
   });
   return {
     key: candidate.key,
-    contract: buildHolderResearchPromptContractV2(candidate, "final"),
+    contract: buildHolderResearchPromptContractV2(candidate),
     decisionFeatures: contracts.features,
     presentation: contracts.presentation.presentation,
     evidenceMetrics: contracts.evidenceMetrics,
@@ -5945,19 +5916,9 @@ function compactPromptMarket(
   // Triage also needs the contract, not only a headline that can hide a
   // threshold, event stage or resolution condition. Reuse loaded text only.
   {
-    result.desc = clipPromptText(
-      market.marketDescription,
-      mode === "triage" ? 400 : PROMPT_TEXT_MARKET_MAX,
-    );
-    if (mode !== "triage")
-      result.evtDesc = clipPromptText(
-        market.eventDescription,
-        PROMPT_TEXT_MARKET_MAX,
-      );
-    result.resolve = clipPromptText(
-      market.resolutionSource,
-      PROMPT_TEXT_RESOLUTION_MAX,
-    );
+    result.desc = market.marketDescription;
+    result.evtDesc = market.eventDescription;
+    result.resolve = market.resolutionSource;
   }
   if (market.previousNote) {
     result.prevNote = holderResearchPreviousPublicationPrompt(
@@ -6140,16 +6101,9 @@ export function buildHolderResearchExternalSearchInput(
       },
       close: candidate.market.closeTime,
       pYes: candidate.market.yesProbability,
-      desc: clipPromptText(
-        candidate.market.marketDescription ??
-          candidate.market.eventDescription ??
-          null,
-        PROMPT_TEXT_MARKET_MAX,
-      ),
-      resolve: clipPromptText(
-        candidate.market.resolutionSource,
-        PROMPT_TEXT_RESOLUTION_MAX,
-      ),
+      desc: candidate.market.marketDescription,
+      evtDesc: candidate.market.eventDescription,
+      resolve: candidate.market.resolutionSource,
     },
     signal: {
       bucket: candidate.bucket,
@@ -6187,20 +6141,11 @@ export function buildHolderResearchExternalSearchInputV2(
 ): Record<string, unknown> {
   const features = buildHolderResearchDecisionFeaturesV2(candidate, policy);
   return {
-    contract: buildHolderResearchPromptContractV2(candidate, "final"),
+    contract: buildHolderResearchPromptContractV2(candidate),
     market: {
       title: candidate.market.marketTitle,
       eventTitle: candidate.market.eventTitle,
-      description: clipPromptText(
-        candidate.market.marketDescription ??
-          candidate.market.eventDescription ??
-          null,
-        PROMPT_TEXT_MARKET_MAX,
-      ),
-      resolution: clipPromptText(
-        candidate.market.resolutionSource,
-        PROMPT_TEXT_RESOLUTION_MAX,
-      ),
+      // Full rules are in contract; avoid a second, formerly truncated copy.
       sideLabel: features.market.sideLabel,
       selectedSide: candidate.side,
       closesAt: candidate.market.closeTime,

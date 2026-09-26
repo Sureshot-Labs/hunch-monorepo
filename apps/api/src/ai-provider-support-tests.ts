@@ -263,6 +263,11 @@ try {
     ).ok,
   );
   assert.deepEqual(requests.at(-1)?.reasoning, { effort: "low" });
+  assert.equal(
+    (requests.at(-1)?.text as { format?: { type?: string } })?.format?.type,
+    "json_schema",
+  );
+  assert.deepEqual(requests.at(-1)?.include, ["no_inline_citations"]);
   reply = {
     status: "incomplete",
     incomplete_details: { reason: "max_output_tokens" },

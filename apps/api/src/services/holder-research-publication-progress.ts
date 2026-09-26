@@ -3,6 +3,20 @@ import type {
   HolderResearchPersistStats,
 } from "./holder-research.js";
 
+/** Persisted content includes directional signals AND informational context. */
+export function holderResearchPersistenceTotals(
+  published: { persisted: number } | null,
+  context: { persisted: number },
+) {
+  const persistedPublished = published?.persisted ?? 0;
+  const persistedContext = context.persisted;
+  return {
+    persistedPublished,
+    persistedContext,
+    persisted: persistedPublished + persistedContext,
+  };
+}
+
 /** A content-duplicate is a completed check; transport/price failures aren't. */
 export function holderResearchCacheOutputAfterPersistence(
   decision: Pick<HolderResearchPersistDecision, "output">,

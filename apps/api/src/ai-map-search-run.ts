@@ -22,6 +22,13 @@ import { pool } from "./db.js";
 import { env } from "./env.js";
 import { aiCompletionError } from "./lib/ai-completion-diagnostics.js";
 import {
+  buildXaiSearchResponseFormat,
+  searchSchemaIssues,
+  xaiSearchDiagnostics,
+  type XaiSearchDiagnostics,
+} from "./lib/xai-search-contract.js";
+import { resolveVerifiedExternalSourceUrl } from "./services/holder-research-source-url.js";
+import {
   buildXaiReasoningOptions,
   xaiReasoningEffortSchema,
   type XaiReasoningEffort,
@@ -30,6 +37,7 @@ import {
   buildMapSearchSystemPromptV2,
   buildMapSearchUserPromptV2,
   mapSearchEvidenceItemV2Schema,
+  mapSearchAgentOutputV2Schema,
   parseMapSearchAgentOutputV2,
   type MapSearchAgentOutputV2,
   type MapSearchEvidenceItemV2,
@@ -62,6 +70,7 @@ import {
 } from "./services/map-search-focus.js";
 import {
   countAiCitations,
+  extractAiSourceUrls,
   countAiToolAttempts,
   EMPTY_AI_USAGE,
   extractAiOutputText,
@@ -220,6 +229,7 @@ type EvidencePreview = {
 };
 
 type NodeCallRecord = {
+  diagnostics?: XaiSearchDiagnostics;
   callIndex: number;
   nodeId: string;
   nodeLabel: string;
@@ -274,6 +284,7 @@ type ParsedAgentOutput = {
 };
 
 type XaiCallRaw = {
+  diagnostics?: XaiSearchDiagnostics;
   ok: boolean;
   status: number;
   durationMs: number;
@@ -1137,7 +1148,8 @@ function buildLenientAgentOutput(
     const fallbackCandidate = {
       headline: clampStringValue(candidateRecord.headline, 240, ""),
       summary: clampStringValue(candidateRecord.summary, 300, ""),
-      source_url: clampStringValue(candidateRecord.source_url, 1024, ""),
+      // A truncated URL can point at a different resource. Validate it intact.
+      source_url: candidateRecord.source_url,
       source_domain: clampStringValue(candidateRecord.source_domain, 120, ""),
       published_at:
         typeof candidateRecord.published_at === "string"
@@ -1497,6 +1509,7 @@ function serializeCallRecord(
   args: Args,
 ): Record<string, unknown> {
   const compactBase: Record<string, unknown> = {
+    diagnostics: call.diagnostics,
     callIndex: call.callIndex,
     nodeId: call.nodeId,
     nodeLabel: call.nodeLabel,
@@ -1594,6 +1607,10 @@ async function callXaiOnce(
       },
       body: JSON.stringify({
         model: args.model,
+        ...buildXaiSearchResponseFormat(
+          "map_search_v2",
+          mapSearchAgentOutputV2Schema,
+        ),
         ...buildXaiReasoningOptions({ effort: args.reasoningEffort }),
         max_output_tokens: args.maxOutputTokens,
         max_turns: args.maxTurns,
@@ -1625,6 +1642,34 @@ async function callXaiOnce(
       aiCompletionError(payload) ??
       (outputText.trim() ? null : "AI response missing content");
     const usage = extractAiUsageMetrics(payload);
+    const diagnostics = xaiSearchDiagnostics(payload, response);
+    if (outputText.trim()) {
+      try {
+        const output: unknown = JSON.parse(
+          extractJsonCandidate(outputText) ?? outputText,
+        );
+        diagnostics.schemaIssues = searchSchemaIssues(
+          mapSearchAgentOutputV2Schema,
+          output,
+        );
+        const record = asRecord(output);
+        const evidence = Array.isArray(record?.evidence) ? record.evidence : [];
+        diagnostics.rawCitationCount = evidence.length;
+        diagnostics.summaryChars =
+          typeof record?.summary === "string" ? record.summary.length : 0;
+        const parsed = parseAgentOutput(outputText, args.strictSchema);
+        diagnostics.parsedCitationCount = parsed.data?.evidence.length ?? 0;
+        const foundSources = extractAiSourceUrls(payload);
+        diagnostics.verifiedCitationCount =
+          parsed.data?.evidence.filter(
+            (item) =>
+              resolveVerifiedExternalSourceUrl(item.source_url, foundSources) !=
+              null,
+          ).length ?? 0;
+      } catch {
+        diagnostics.schemaIssues = [{ path: "", code: "invalid_json" }];
+      }
+    }
     const costEstimate = computeEstimatedCost(args, usage);
     const serverSideUsage = extractAiServerSideToolUsage(payload);
     const toolCallCount = Math.max(
@@ -1633,6 +1678,7 @@ async function callXaiOnce(
     );
     return {
       ok: response.ok && !completionError,
+      diagnostics,
       status: response.status,
       durationMs: Date.now() - startedAt,
       prompt: `${prompt.system}\n\n${prompt.user}`,
@@ -1649,7 +1695,7 @@ async function callXaiOnce(
       rawResponse: payload,
       error: response.ok
         ? completionError
-        : `HTTP ${response.status}: ${preview(stringifyPayload(payload), 400)}`,
+        : `HTTP ${response.status}${diagnostics.providerErrorCode ? `: ${diagnostics.providerErrorCode}` : ""}`,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -2185,7 +2231,7 @@ async function runMapSearchWithSnapshot({
     nodeEvidenceHeadlines.set(nodeId, headlines.slice(-20));
     const briefs = nodeEvidenceBriefs.get(nodeId) ?? [];
     briefs.push(
-      `[${evidence.publishedAt ?? "date unknown"}; ${evidence.confirmation}; ${evidence.sourceDomain}] ${evidence.headline.replace(/\s+/g, " ").trim().slice(0, 140)} — ${evidence.summary.replace(/\s+/g, " ").trim().slice(0, 180)}`,
+      `[${evidence.publishedAt ?? "date unknown"}; ${evidence.confirmation}; ${evidence.sourceDomain}] ${evidence.headline} — ${evidence.summary}`,
     );
     nodeEvidenceBriefs.set(nodeId, briefs.slice(-20));
   }
@@ -2731,6 +2777,7 @@ async function runMapSearchWithSnapshot({
         warmStartAssigned,
       },
       callsCompact: callRecords.map((call) => ({
+        diagnostics: call.diagnostics,
         callIndex: call.callIndex,
         nodeId: call.nodeId,
         nodeLabel: call.nodeLabel,
@@ -3975,6 +4022,7 @@ async function runMapSearchWithSnapshot({
         promptChars: systemPrompt.length + userPrompt.length,
         outputPreview: rawCall.outputPreview,
         finishReason: rawCall.finishReason,
+        diagnostics: rawCall.diagnostics,
         error: rawCall.error,
         budgetStop: budgetStopAfter,
         returnedEvidence: (agentData?.evidence ?? []).map(
@@ -4196,6 +4244,7 @@ async function runMapSearchWithSnapshot({
       topLeaves: topLeaves.length,
     },
     callsCompact: callRecords.map((call) => ({
+      diagnostics: call.diagnostics,
       callIndex: call.callIndex,
       nodeId: call.nodeId,
       nodeLabel: call.nodeLabel,
@@ -4440,6 +4489,7 @@ const isDirectRun = (() => {
 })();
 
 export const mapSearchModelTestHooks = {
+  parseAgentOutput,
   resolveArgs,
   callXaiOnce,
   callXaiWithRetry,

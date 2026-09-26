@@ -25,6 +25,25 @@ export function resolveVerifiedExternalSourceUrl(
   providerSources: readonly string[],
 ): string | null {
   if (providerSources.includes(candidateUrl)) return candidateUrl;
+  // A fragment identifies a passage on the same page. Do not equate different
+  // query strings, hosts or paths (they can identify different articles).
+  const pageUrl = (value: string): string | null => {
+    try {
+      const url = new URL(value);
+      if (!["http:", "https:"].includes(url.protocol)) return null;
+      url.hash = "";
+      return url.href;
+    } catch {
+      return null;
+    }
+  };
+  const candidatePage = pageUrl(candidateUrl);
+  if (candidatePage) {
+    const pageMatch = providerSources.find(
+      (source) => pageUrl(source) === candidatePage,
+    );
+    if (pageMatch) return pageMatch;
+  }
   const candidateStatusId = xStatusId(candidateUrl);
   if (!candidateStatusId) return null;
   return (

@@ -202,18 +202,18 @@ export const holderResearchExternalResearchV2Schema = z
       "after_holder",
       "unknown",
     ]),
-    summary: z.string().trim().max(320),
-    citations: z
-      .array(
-        z
-          .object({
-            title: z.string().trim().min(1).max(200),
-            url: z.string().url().max(2_000),
-            publishedAt: z.string().datetime().nullable(),
-          })
-          .strict(),
-      )
-      .max(3),
+    // Internal research brief, not the 320-character public signal copy.
+    // Preserve returned evidence/counterevidence even for legacy responses.
+    summary: z.string().trim(),
+    citations: z.array(
+      z
+        .object({
+          title: z.string().trim().min(1),
+          url: z.string().url().max(2_000),
+          publishedAt: z.string().datetime().nullable(),
+        })
+        .strict(),
+    ),
     freshFact: z
       .object({
         fact: z.string().trim().min(8).max(260),
@@ -256,6 +256,24 @@ export const holderResearchExternalResearchV2Schema = z
 export type HolderResearchExternalResearchV2 = z.infer<
   typeof holderResearchExternalResearchV2Schema
 >;
+
+// Generation limits belong at the provider boundary. The ingestion schema
+// above must not silently cut an older/overlong brief or discard its sources.
+export const holderResearchExternalSearchResponseSchema =
+  holderResearchExternalResearchV2Schema.extend({
+    status: z.enum(["ok", "no_evidence"]),
+    summary: z.string().trim().max(2_048),
+    citations: z
+      .array(
+        holderResearchExternalResearchV2Schema.shape.citations.element.extend({
+          title: z.string().trim().min(1).max(200),
+        }),
+      )
+      .max(3),
+    freshFact: holderResearchExternalResearchV2Schema.shape.freshFact.unwrap(),
+    comparableOdds:
+      holderResearchExternalResearchV2Schema.shape.comparableOdds.unwrap(),
+  });
 
 export const holderResearchFinalOutputV2Schema = z
   .object({
@@ -373,10 +391,11 @@ export function parseHolderResearchAgentOutputV1(
     execution_priority_reason: "",
     evidence_ids: asStringArray(record.evidence_ids, 6, 160),
     caveats: asStringArray(record.caveats, 3, 180),
-    public_context:
-      holderResearchPublicContextSchema.safeParse(record.public_context).success
-        ? holderResearchPublicContextSchema.parse(record.public_context)
-        : null,
+    public_context: holderResearchPublicContextSchema.safeParse(
+      record.public_context,
+    ).success
+      ? holderResearchPublicContextSchema.parse(record.public_context)
+      : null,
   };
   return holderResearchAgentOutputV1Schema.parse(repaired);
 }
@@ -516,25 +535,23 @@ export function parseHolderResearchExternalResearchV2(
   // Search providers often return a useful core answer with an invalid
   // ancillary date or optional odds object. Do not discard verified sources
   // because one optional field is malformed; never repair a fresh fact date.
-  const citations = (Array.isArray(record.citations) ? record.citations : [])
-    .flatMap((entry) => {
-      const source: Record<string, unknown> =
-        typeof entry === "string" ? { url: entry } : asRecord(entry);
-      const publishedAt = z.string().datetime().safeParse(source.publishedAt);
-      const citation =
-        holderResearchExternalResearchV2Schema.shape.citations.element.safeParse(
-          {
-            title:
-              typeof source.title === "string" && source.title.trim()
-                ? source.title
-                : source.url,
-            url: source.url,
-            publishedAt: publishedAt.success ? publishedAt.data : null,
-          },
-        );
-      return citation.success ? [citation.data] : [];
-    })
-    .slice(0, 3);
+  const citations = (
+    Array.isArray(record.citations) ? record.citations : []
+  ).flatMap((entry) => {
+    const source: Record<string, unknown> =
+      typeof entry === "string" ? { url: entry } : asRecord(entry);
+    const publishedAt = z.string().datetime().safeParse(source.publishedAt);
+    const citation =
+      holderResearchExternalResearchV2Schema.shape.citations.element.safeParse({
+        title:
+          typeof source.title === "string" && source.title.trim()
+            ? source.title
+            : source.url,
+        url: source.url,
+        publishedAt: publishedAt.success ? publishedAt.data : null,
+      });
+    return citation.success ? [citation.data] : [];
+  });
   const freshFact =
     holderResearchExternalResearchV2Schema.shape.freshFact.safeParse(
       record.freshFact ?? null,
@@ -562,11 +579,9 @@ export function parseHolderResearchExternalResearchV2(
     status: status.success ? status.data : usableAnswer ? "ok" : "error",
     verdict: verdict.success ? verdict.data : "unknown",
     timing: timing.success ? timing.data : "unknown",
-    summary: asTrimmedString(
-      record.summary,
-      "No external research summary was returned.",
-      320,
-    ),
+    summary: hasSummary
+      ? (record.summary as string).trim()
+      : "No external research summary was returned.",
     citations,
     freshFact:
       trustedStructuredFact && freshFact.success ? freshFact.data : null,
@@ -663,10 +678,11 @@ export function parseHolderResearchFinalOutputV2(
             ),
             caveats: asStringArray(copy.caveats, 2, 180),
           },
-    public_context:
-      holderResearchPublicContextSchema.safeParse(record.public_context).success
-        ? holderResearchPublicContextSchema.parse(record.public_context)
-        : null,
+    public_context: holderResearchPublicContextSchema.safeParse(
+      record.public_context,
+    ).success
+      ? holderResearchPublicContextSchema.parse(record.public_context)
+      : null,
   });
 }
 

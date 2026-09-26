@@ -274,7 +274,7 @@ async function voteOnBackground(input: {
                 {
                   role: item.role,
                   title: item.title,
-                  summary: item.summary.slice(0, 240),
+                  summary: item.summary,
                   publishedAt: item.publishedAt,
                   confirmation: item.confirmation ?? null,
                   sourceTier: item.sourceTier ?? null,
@@ -425,7 +425,7 @@ export async function loadHolderResearchBackground(input: {
             item: {
               role: "external_source_summary",
               title: String(doc.headline ?? "").slice(0, 160),
-              summary: String(doc.summary ?? "").slice(0, 320),
+              summary: String(doc.summary ?? ""),
               publishedAt: new Date(date).toISOString(),
               sourceUrl:
                 typeof doc.sourceUrl === "string" ? doc.sourceUrl : null,

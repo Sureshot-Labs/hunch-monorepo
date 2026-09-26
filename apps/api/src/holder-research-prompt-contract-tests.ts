@@ -110,6 +110,31 @@ function promptVariants(input: HolderResearchCandidate) {
   ];
 }
 
+// Rules near the tail used to disappear at the 400/700/1200-char boundaries.
+const fullRules =
+  "Background contract wording. ".repeat(130) +
+  "TAIL_RULE: A later reversal does not invalidate a qualifying declaration.";
+const fullEventRules =
+  "Event conditions. ".repeat(100) + "TAIL_EVENT_EXCEPTION";
+const fullResolutionSource =
+  "Resolution source description. ".repeat(30) + "TAIL_SOURCE";
+const longRulesCandidate = candidate({
+  marketDescription: fullRules,
+  eventDescription: fullEventRules,
+  resolutionSource: fullResolutionSource,
+});
+for (const prompt of [
+  ...promptVariants(longRulesCandidate),
+  buildHolderResearchTriageCandidatePromptJson(longRulesCandidate, policy),
+  buildHolderResearchCandidatePromptJson(longRulesCandidate, policy),
+  buildHolderResearchExternalSearchInput(longRulesCandidate),
+]) {
+  const serialized = JSON.stringify(prompt);
+  assert.ok(serialized.includes(fullRules));
+  assert.ok(serialized.includes(fullEventRules));
+  assert.ok(serialized.includes(fullResolutionSource));
+}
+
 const cases = [
   {
     title: "NFL matchup",

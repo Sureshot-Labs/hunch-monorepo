@@ -93,32 +93,38 @@ export function extractAiOutputText(payload: unknown): string {
   return parts.join("\n\n");
 }
 
-export function countAiCitations(payload: unknown): number {
+export function extractAiSourceUrls(payload: unknown): string[] {
   const urls = new Set<string>();
+  const add = (value: unknown) => {
+    const url = typeof value === "string" ? value.trim() : "";
+    if (/^https?:\/\//i.test(url)) urls.add(url);
+  };
   const citations = asRecord(payload)?.citations;
   if (Array.isArray(citations)) {
     for (const citation of citations) {
-      const url = asRecord(citation)?.url;
-      if (typeof url === "string" && url.trim().length > 0) {
-        urls.add(url.trim());
-      }
+      add(typeof citation === "string" ? citation : asRecord(citation)?.url);
     }
   }
 
   for (const item of extractOutputItems(payload)) {
+    const sources = asRecord(item.action)?.sources;
+    for (const source of Array.isArray(sources) ? sources : []) {
+      add(typeof source === "string" ? source : asRecord(source)?.url);
+    }
     if (item.type !== "message" || !Array.isArray(item.content)) continue;
     for (const block of item.content) {
       const annotations = asRecord(block)?.annotations;
       if (!Array.isArray(annotations)) continue;
       for (const annotation of annotations) {
-        const url = asRecord(annotation)?.url;
-        if (typeof url === "string" && url.trim().length > 0) {
-          urls.add(url.trim());
-        }
+        add(asRecord(annotation)?.url);
       }
     }
   }
-  return urls.size;
+  return [...urls];
+}
+
+export function countAiCitations(payload: unknown): number {
+  return extractAiSourceUrls(payload).length;
 }
 
 export function extractAiServerSideToolUsage(

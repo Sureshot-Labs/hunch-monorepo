@@ -2,7 +2,30 @@ import assert from "node:assert/strict";
 import {
   createHolderResearchPublicationProgress,
   holderResearchCacheOutputAfterPersistence,
+  holderResearchPersistenceTotals,
 } from "./services/holder-research-publication-progress.js";
+
+assert.deepEqual(
+  holderResearchPersistenceTotals({ persisted: 0 }, { persisted: 1 }),
+  {
+    persistedPublished: 0,
+    persistedContext: 1,
+    persisted: 1,
+  },
+);
+assert.deepEqual(
+  holderResearchPersistenceTotals({ persisted: 2 }, { persisted: 1 }),
+  {
+    persistedPublished: 2,
+    persistedContext: 1,
+    persisted: 3,
+  },
+);
+assert.deepEqual(holderResearchPersistenceTotals(null, { persisted: 0 }), {
+  persistedPublished: 0,
+  persistedContext: 0,
+  persisted: 0,
+});
 import type {
   HolderResearchPersistDecision,
   HolderResearchPersistStats,

@@ -47,6 +47,7 @@ import {
   verifiedHolderBackgroundSourceUrls,
   selectHolderResearchTriageInvestigations,
   runExternalResearch,
+  holderResearchModelTestHooks,
   withPolicyOverrides,
 } from "./ai-holder-research-run.js";
 import {
@@ -400,6 +401,212 @@ function longHorizonCandidate(p: HolderResearchPolicy) {
 }
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
+  {
+    name: "legacy caller also preserves the structured brief and verifies citations before any display cap",
+    run: async () => {
+      const p = {
+        ...policy(),
+        externalSearchEnabled: true,
+        forceExternalSearchForInvestigations: true,
+      };
+      const summary =
+        "Dated supporting observation. ".repeat(95) +
+        "However the exact-contract exception contradicts this thesis.";
+      const title = "Long original source title ".repeat(12);
+      const result = await runExternalResearch({
+        candidate: sharpMinorityCandidate(p),
+        policy: p,
+        dryRun: false,
+        researchNeed: "resolution_context",
+        useV2: false,
+        apiKey: "test-only",
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              id: "test-response",
+              model: "grok-test",
+              status: "completed",
+              citations: ["https://example.com/verified"],
+              output_text: JSON.stringify({
+                status: "ok",
+                verdict: "mixed",
+                timing: "unknown",
+                summary,
+                citations: ["a", "b", "c"]
+                  .map((id) => ({
+                    title: id,
+                    url: `https://example.com/${id}`,
+                    publishedAt: null,
+                  }))
+                  .concat([
+                    {
+                      title,
+                      url: "https://example.com/verified#passage",
+                      publishedAt: null,
+                    },
+                  ]),
+                freshFact: null,
+                comparableOdds: null,
+              }),
+            }),
+            { headers: { "x-request-id": "test-request" } },
+          ),
+      });
+      assert.equal(result.status, "ok");
+      assert.equal(result.summary, summary);
+      assert.equal(result.citations.length, 1);
+      assert.equal(result.citations[0]?.title, title.trim());
+      assert.equal(result.citations[0]?.url, "https://example.com/verified");
+      assert.equal(result.diagnostics?.rawCitationCount, 4);
+      assert.equal(result.diagnostics?.verifiedCitationCount, 1);
+      assert.equal(result.diagnostics?.model, "grok-test");
+      assert.equal(result.diagnostics?.requestId, "test-request");
+      assert.ok(
+        result.diagnostics?.schemaIssues.some(
+          (issue) => issue.path === "summary",
+        ),
+      );
+      const canonical = parseHolderResearchExternalResearchV2(result);
+      const final = buildHolderResearchCandidatePromptJsonV2(
+        sharpMinorityCandidate(p),
+        p,
+        canonical,
+      );
+      assert.ok(JSON.stringify(final).includes(summary));
+      const originalFetch = globalThis.fetch;
+      const originalKey = env.openRouterKey;
+      try {
+        env.openRouterKey = "test-only";
+        const candidate = sharpMinorityCandidate(p);
+        globalThis.fetch = (async (_url, init) => {
+          const body = JSON.parse(String(init?.body));
+          assert.ok(
+            body.messages.some((message: { content: string }) =>
+              message.content.includes(summary),
+            ),
+          );
+          return new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  finish_reason: "stop",
+                  message: {
+                    content: JSON.stringify(publishOutput(candidate)),
+                  },
+                },
+              ],
+              usage: { cost: 0.001 },
+            }),
+          );
+        }) as typeof fetch;
+        const decision =
+          await holderResearchModelTestHooks.callHolderResearchModel({
+            candidate,
+            policy: p,
+            externalResearch: result,
+            useV2: false,
+          });
+        assert.equal(
+          (decision.modelMeta.external_research as { summary: string }).summary,
+          summary,
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.openRouterKey = originalKey;
+      }
+      assert.equal(
+        resolveVerifiedExternalSourceUrl(
+          "https://example.com/verified?different=article",
+          result.foundSources,
+        ),
+        null,
+      );
+    },
+  },
+  {
+    name: "failed search preserves provider sources and exact completion/schema diagnostics",
+    run: async () => {
+      const p = {
+        ...policy(),
+        externalSearchEnabled: true,
+        forceExternalSearchForInvestigations: true,
+      };
+      for (const example of [
+        {
+          http: 500,
+          payload: {
+            error: {
+              code: "upstream_error",
+              message: "never log this raw body",
+            },
+          },
+          error: /HTTP 500/,
+        },
+        {
+          http: 200,
+          payload: {
+            status: "incomplete",
+            incomplete_details: { reason: "max_output_tokens" },
+          },
+          error: /incomplete/,
+        },
+        {
+          http: 200,
+          payload: { status: "completed", output_text: "{broken" },
+          error: /invalid_structured_research_json/,
+        },
+        {
+          http: 200,
+          payload: {
+            status: "completed",
+            output_text: JSON.stringify({
+              status: "ok",
+              verdict: "mixed",
+              timing: "unknown",
+              summary: "Claim with a non-provider source.",
+              citations: [
+                {
+                  title: "Forged",
+                  url: "https://example.com/forged",
+                  publishedAt: null,
+                },
+              ],
+              freshFact: null,
+              comparableOdds: null,
+            }),
+          },
+          error: /search_sources_not_verified/,
+        },
+      ]) {
+        const result = await runExternalResearch({
+          candidate: sharpMinorityCandidate(p),
+          policy: p,
+          dryRun: false,
+          researchNeed: "market_context",
+          useV2: true,
+          apiKey: "test-only",
+          fetchImpl: async () =>
+            new Response(
+              JSON.stringify({
+                id: "diagnostic-response",
+                citations: ["https://example.com/discovered"],
+                ...example.payload,
+              }),
+              { status: example.http },
+            ),
+        });
+        assert.equal(result.status, "error");
+        assert.match(result.error ?? "", example.error);
+        assert.doesNotMatch(result.error ?? "", /never log/);
+        assert.deepEqual(result.foundSources, [
+          "https://example.com/discovered",
+        ]);
+        assert.equal(result.diagnostics?.responseId, "diagnostic-response");
+        assert.equal(result.diagnostics?.httpStatus, example.http);
+        assert.equal(result.diagnostics?.foundSourceCount, 1);
+      }
+    },
+  },
   {
     name: "V1 triage receives contract and opposing holder without inventing entry or bankroll",
     run: () => {
@@ -3098,7 +3305,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
-    name: "holder research loader keeps holder 30d pnl",
+    name: "holder research loader keeps holder 30d pnl and full contract rules",
     run: async () => {
       const p = policy();
       let querySql = "";
@@ -3121,13 +3328,16 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                 venue: "polymarket",
                 market_title: "Pnl market",
                 market_slug: null,
-                market_description: null,
+                market_description:
+                  "Rule clause. ".repeat(300) + "TAIL_MARKET_EXCEPTION",
                 event_title: "Pnl event",
                 event_slug: null,
-                event_description: null,
+                event_description:
+                  "Event clause. ".repeat(200) + "TAIL_EVENT_EXCEPTION",
                 series_key: null,
                 series_title: null,
-                resolution_source: null,
+                resolution_source:
+                  "Official source. ".repeat(80) + "TAIL_RESOLUTION_SOURCE",
                 category: null,
                 close_time: null,
                 expiration_time: null,
@@ -3194,6 +3404,13 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         { whaleUsd: 100_000, whaleUsdSolana: 50_000 },
       );
       assert.equal(markets[0]?.holders[0]?.pnl30dUsd, 12_345);
+      assert.ok(
+        markets[0]?.marketDescription?.endsWith("TAIL_MARKET_EXCEPTION"),
+      );
+      assert.ok(markets[0]?.eventDescription?.endsWith("TAIL_EVENT_EXCEPTION"));
+      assert.ok(
+        markets[0]?.resolutionSource?.endsWith("TAIL_RESOLUTION_SOURCE"),
+      );
       assert.match(querySql, /candidate_wallets as materialized/);
       assert.match(querySql, /from wallet_intel_selector_snapshot sel/);
       assert.match(querySql, /join lateral/);
@@ -6625,7 +6842,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         );
         const attachedContext = attached.backgroundContext as typeof background;
         assert.equal(attachedContext.items.length, 2);
-        assert.equal(attachedContext.items[0]?.summary.length, 180);
+        assert.equal(
+          attachedContext.items[0]?.summary,
+          background.items[0]?.summary,
+        );
         assert.equal("backgroundContext" in original, false);
       }
       for (const original of [
@@ -6653,7 +6873,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         const finalItems = finalContext.items as typeof background.items;
         assert.equal(finalItems.length, 4);
         assert.equal(finalItems[0]?.title, "Context 0");
-        assert.equal(finalItems[0]?.summary.length, 180);
+        assert.equal(finalItems[0]?.summary, background.items[0]?.summary);
         assert.match(
           (finalContext.items as Array<{ use: string }>)[0]?.use ?? "",
           /Source also returned by this research/,
@@ -6693,7 +6913,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         "research",
       ).backgroundContext as typeof background;
       assert.equal(researchContext.items.length, 4);
-      assert.equal(researchContext.items[0]?.summary.length, 250);
+      assert.equal(
+        researchContext.items[0]?.summary,
+        background.items[0]?.summary,
+      );
       assert.deepEqual(
         parseHolderBackgroundJevProbabilities(
           {
@@ -7744,6 +7967,10 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(resolved.defaults.triageModel, "openai/gpt-6-luna");
       assert.equal(resolved.effective.externalSearchEnabled, true);
       assert.equal(resolved.effective.maxExternalSearchCallsPerRun, 5);
+      assert.equal(resolved.defaults.externalSearchMaxTurns, 8);
+      assert.equal(resolved.defaults.externalSearchMaxOutputTokens, 2_400);
+      assert.equal(resolved.effective.externalSearchMaxTurns, 8);
+      assert.equal(resolved.effective.externalSearchMaxOutputTokens, 2_400);
       assert.equal(
         resolved.defaults.forceExternalSearchForInvestigations,
         true,
@@ -8929,8 +9156,15 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         fetchImpl: async (_url, init) => {
           calls += 1;
           const body = JSON.parse(String(init?.body));
-          assert.equal(body.max_turns, 4);
-          assert.equal(body.max_output_tokens, 1_600);
+          assert.equal(body.max_turns, 8);
+          assert.equal(body.max_output_tokens, 2_400);
+          assert.equal(body.text.format.type, "json_schema");
+          assert.equal(body.text.format.strict, true);
+          assert.equal(
+            body.text.format.schema.properties.summary.maxLength,
+            2048,
+          );
+          assert.deepEqual(body.include, ["no_inline_citations"]);
           assert.match(
             JSON.stringify(body.input),
             /Was the exact event postponed/,
