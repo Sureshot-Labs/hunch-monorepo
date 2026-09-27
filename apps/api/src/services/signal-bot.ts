@@ -1167,7 +1167,7 @@ export function buildSignalBotMessage(input: {
   const publishable = notificationCopy.publishable && !weakPublicInitial;
   const copyDiagnostics = {
     reason: !notificationCopy.publishable
-      ? "incomplete_subject_or_update"
+      ? "missing_supported_update"
       : weakPublicInitial
         ? "missing_initial_evidence"
         : null,
@@ -4668,6 +4668,7 @@ async function loadSignalBotPriceGuardBlockers(input: {
 type SignalBotDeliverySkipReason =
   | SignalBotDeliveryPreparationReason
   | Exclude<SignalDeliveryTargetResolution["reason"], null>
+  | "editorial_blocked"
   | "quote_refresh_expired"
   | "source_disabled";
 
@@ -4948,7 +4949,10 @@ export async function prepareSignalBotDelivery(input: {
         updateFingerprint: update?.fingerprint ?? null,
       },
       blockers: priceGuard.blockers,
-      reason: "unpublishable_copy",
+      reason:
+        rendered.copyDiagnostics.reason === "missing_initial_evidence"
+          ? "missing_initial_evidence"
+          : "missing_update_contract",
       status: "skipped",
     };
   }
@@ -5891,7 +5895,7 @@ export async function publishSignalBotTick(input: {
             blockedChats += 1;
             await disableSignalBotChat(input.redis, chatId);
           }
-          countDeliverySkip("unpublishable_copy");
+          countDeliverySkip("editorial_blocked");
         }
         if (editorial.status === "compose_failed") {
           countDeliverySkip("editorial_compose_failed");
@@ -6284,7 +6288,7 @@ export async function sendLatestSignalBotTestSignal(input: {
     telegram: input.telegram,
   });
   return {
-    reason: result.ok ? null : "unpublishable_copy",
+    reason: result.ok ? null : "telegram_send_failed",
     sent: result.ok,
   };
 }
@@ -9144,9 +9148,6 @@ function buildSignalBotInitialNotificationCopy(input: {
     input.note.holderActorMode === "sharp_cluster"
       ? input.note.holderClusterOpenPnlUsd
       : input.note.holderOpenPnlUsd;
-  const subjectComplete = input.side
-    ? isSignalNotificationSubjectComplete(subject.text, input.side)
-    : false;
   return {
     editorialProbability,
     headline: buildSignalNotificationHeadline({
@@ -9184,7 +9185,7 @@ function buildSignalBotInitialNotificationCopy(input: {
     }),
     marketLabel: editorialSubject,
     publishable:
-      subjectComplete &&
+      input.side != null &&
       (input.messageKind === "initial" || researchDelta != null),
     researchDelta,
     subject,

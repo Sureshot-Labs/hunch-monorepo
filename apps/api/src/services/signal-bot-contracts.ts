@@ -300,12 +300,13 @@ export type SignalBotDeliveryPreparationReason =
   | "editorial_compose_failed"
   | "identity_mismatch"
   | "missing_market_identity"
+  | "missing_initial_evidence"
   | "missing_price_snapshot"
   | "missing_update_contract"
   | "non_directional"
   | "quote_refresh"
   | "stale_price_snapshot"
-  | "unpublishable_copy";
+  | "telegram_send_failed";
 
 export type SignalBotTestSignalOutcome = {
   reason: SignalBotDeliveryPreparationReason | "no_eligible_note" | null;

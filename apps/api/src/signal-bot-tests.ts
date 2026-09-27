@@ -14689,6 +14689,50 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "ordinary channel publishes Norway versus Portugal holder signal instead of blocking bare YES copy",
+    run: () => {
+      const message = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        chatType: "channel",
+        note: note({
+          bestAsk: 0.42,
+          bestBid: 0.41,
+          eventTitle: "Norway vs. Portugal",
+          holderPositionUsd: 61_089,
+          marketDescription: 'If Norway wins, this market resolves to "Yes".',
+          marketTitle: "Norway",
+          outcomes: ["Yes", "No"],
+        }),
+      });
+      assert.equal(message.publishable, true);
+      assert.equal(message.copyDiagnostics.reason, null);
+      assert.equal(message.copyDiagnostics.subject, "Norway to beat Portugal");
+      assert.match(
+        message.text.split("\n")[0] ?? "",
+        /Norway to beat Portugal/,
+      );
+
+      const opposingMessage = buildSignalBotMessage({
+        appBaseUrl: "https://app.hunch.trade",
+        buyAmountUsd: 10,
+        chatType: "channel",
+        note: note({
+          direction: "down",
+          eventTitle: "Norway vs. Portugal",
+          holderSide: "NO",
+          marketTitle: "Norway",
+          outcomes: ["Yes", "No"],
+        }),
+      });
+      assert.equal(opposingMessage.publishable, true);
+      assert.equal(
+        opposingMessage.copyDiagnostics.subject,
+        "NO on Norway beating Portugal",
+      );
+    },
+  },
+  {
     name: "ordinary channel publishes grouped Fed no-change signal with its event context and NO side",
     run: () => {
       const message = buildSignalBotMessage({
@@ -14714,7 +14758,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
-    name: "incomplete bare NO subject is suppressed until winner context is available",
+    name: "bare NO subject does not suppress an otherwise publishable initial signal",
     run: () => {
       const incomplete = buildSignalBotMessage({
         appBaseUrl: "https://app.hunch.trade",
@@ -14727,8 +14771,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           telegramMarketIdentityV1: null,
         }),
       });
-      assert.equal(incomplete.publishable, false);
-      assert.equal(incomplete.text, "");
+      assert.equal(incomplete.publishable, true);
+      assert.equal(incomplete.copyDiagnostics.reason, null);
+      assert.notEqual(incomplete.text, "");
 
       const complete = buildSignalBotMessage({
         appBaseUrl: "https://app.hunch.trade",

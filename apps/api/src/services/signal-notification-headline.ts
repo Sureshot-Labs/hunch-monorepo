@@ -186,6 +186,31 @@ function buildNaturalSubject(input: {
       .replace(/^will\s+/i, "")
       .replace(/\s+win[?]?$/i, "")
       .trim();
+    const matchup = eventTitle?.match(/^(.+?)\s+vs\.?\s+(.+)$/i);
+    const opponent = matchup
+      ? [matchup[1], matchup[2]]
+          .map((participant) => participant?.trim() ?? "")
+          .find(
+            (participant) =>
+              participant &&
+              participant.toLocaleLowerCase("en-US") !==
+                team.toLocaleLowerCase("en-US"),
+          )
+      : null;
+    if (
+      team &&
+      matchup &&
+      [matchup[1], matchup[2]].some(
+        (participant) =>
+          participant?.trim().toLocaleLowerCase("en-US") ===
+          team.toLocaleLowerCase("en-US"),
+      ) &&
+      opponent
+    ) {
+      return input.side === "YES"
+        ? `${team} to beat ${opponent}`
+        : `NO on ${team} beating ${opponent}`;
+    }
     const eventWinner = eventTitle?.match(/^(.+?)\s+winner$/i)?.[1]?.trim();
     if (team && eventWinner) {
       const winObject = formatWinMarketObject(eventWinner);
@@ -297,7 +322,7 @@ export function buildSignalNotificationSubject(input: {
     natural &&
     (input.sideCopy.copyKind === "total" ||
       (input.sideCopy.copyKind === "team_yes_no" &&
-        /\b(?:to win|winning)\b/i.test(natural))) &&
+        /\b(?:to win|winning|to beat|beating)\b/i.test(natural))) &&
     (!input.presentation || input.presentation.source !== "approved_override")
   ) {
     const preservedFields: SignalNotificationSubject["preservedFields"] = [
