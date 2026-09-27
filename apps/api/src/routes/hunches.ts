@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { pool } from "../db.js";
+import { publicHunchPricePresentation } from "../services/hunch-price-presentation.js";
 import {
   publicHolderDisplayName,
   publicHunchSources,
@@ -61,6 +62,8 @@ type PublicHunchRow = {
   event_title: string | null;
   accepting_orders: boolean | null;
   resolved_outcome: string | null;
+  market_metadata: unknown;
+  market_updated_at: Date | string | null;
   current_price: string | number | null;
   current_price_as_of: Date | string | null;
 };
@@ -109,14 +112,21 @@ function toPublicHunch(row: PublicHunchRow) {
   const strength = publicStrength(row);
   const side =
     typeof lineage.side === "string" ? lineage.side.toUpperCase() : null;
-  const resolvedSide = row.resolved_outcome?.toUpperCase() ?? null;
   const researchedPrice = finiteNumber(snapshot.displayPrice);
-  const currentPrice = finiteNumber(row.current_price);
-  const researchedAt =
-    typeof snapshot.asOf === "string" ? Date.parse(snapshot.asOf) : NaN;
-  const currentAt = row.current_price_as_of
-    ? new Date(row.current_price_as_of).getTime()
-    : NaN;
+  const prices = publicHunchPricePresentation({
+    kind: row.note_type,
+    side,
+    researchedSide: snapshot.displaySide,
+    researchedPrice,
+    researchedAt: snapshot.asOf,
+    acceptingOrders: row.accepting_orders === true,
+    venue: row.market_venue,
+    metadata: row.market_metadata,
+    marketUpdatedAt: row.market_updated_at,
+    resolvedOutcome: row.resolved_outcome,
+    quotePrice: row.current_price,
+    quoteAsOf: row.current_price_as_of,
+  });
   const evidence = publicHunchSources({
     kind: row.note_type === "context" ? "context" : "signal",
     metrics,
@@ -155,15 +165,9 @@ function toPublicHunch(row: PublicHunchRow) {
       side,
       outcomeLabel: outcomeLabel(row, side),
       acceptingOrders: row.accepting_orders === true,
+      resolutionStatus: prices.resolutionStatus,
     },
-    selectedSideResult:
-      row.note_type === "signal" &&
-      (side === "YES" || side === "NO") &&
-      (resolvedSide === "YES" || resolvedSide === "NO")
-        ? side === resolvedSide
-          ? "WIN"
-          : "LOSS"
-        : null,
+    selectedSideResult: prices.selectedSideResult,
     priceSnapshot:
       typeof snapshot.asOf === "string" && researchedPrice !== null
         ? {
@@ -172,20 +176,7 @@ function toPublicHunch(row: PublicHunchRow) {
             side: snapshot.displaySide,
           }
         : null,
-    latestPriceSnapshot:
-      row.note_type === "signal" &&
-      snapshot.displaySide === side &&
-      researchedPrice !== null &&
-      currentPrice !== null &&
-      currentPrice >= 0 &&
-      currentPrice <= 1 &&
-      Number.isFinite(researchedAt) &&
-      Number.isFinite(currentAt) &&
-      currentAt >= researchedAt &&
-      currentAt <= Date.now() + 5 * 60_000 &&
-      Date.now() - currentAt <= 2 * 60 * 60_000
-        ? { asOf: new Date(currentAt).toISOString(), price: currentPrice, side }
-        : null,
+    latestPriceSnapshot: prices.latestPriceSnapshot,
     evidence,
     sources,
   };
@@ -256,6 +247,12 @@ const HUNCH_COLUMNS = `
   m.title as market_title, m.venue as market_venue,
   m.outcomes as market_outcomes, coalesce(m.image, e.image) as market_image,
   m.event_id, e.title as event_title, m.resolved_outcome,
+  jsonb_build_object(
+    'outcomePrices', m.metadata->'outcomePrices',
+    'umaResolutionStatus', m.metadata->'umaResolutionStatus',
+    'umaResolutionStatuses', m.metadata->'umaResolutionStatuses'
+  ) as market_metadata,
+  m.updated_at as market_updated_at,
   ${buildWalletIntelAcceptingOrdersSql({ marketAlias: "m", eventAlias: "e" })} as accepting_orders,
   latest_quote.current_price, latest_quote.current_price_as_of
 `;
