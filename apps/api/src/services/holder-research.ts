@@ -84,7 +84,7 @@ type Queryable = Pick<PoolClient, "query">;
 export type HolderResearchSideKey = "YES" | "NO";
 
 export const HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING =
-  "For sports, say whether known odds, team news, betting coverage, or public news supports the holder side, supports the opposite side, or mostly shows the move was already public. Do not say previews or pick articles.";
+  "For sports and esports, verify the exact fixture, competition, season, team category, start time and pre-match or live state. Seek official team, federation or tournament updates and reliable beat reporters on X when live injuries, suspensions, roster changes or lineups need checking. Separate confirmed absences and announced starters from doubtful players, predicted lineups and betting previews. A preview's pick or fan poll is opinion, not team news. Resolve availability conflicts using the exact fixture, source authority and timing; a later official lineup or correction can supersede an earlier report. Attribute any remaining disagreement. Never present a player as both unavailable and a confirmed starter for the same fixture at the same time. Distinguish regulation-time results from qualification, extra time or series outcomes.";
 
 export type HolderResearchMmThresholds = {
   whaleUsd: number;
@@ -6161,8 +6161,8 @@ export function buildHolderResearchExternalSearchInputV2(
     freshEvidenceWindowHours: policy.externalSearchWindowHours,
     researchNeed,
     instruction: candidate.jevPreTriage
-      ? "First check for a concrete event within the fresh window. For this distant-horizon review, only a cited fact matching the exact contract entity, outcome condition, deadline/stage and selected side may count as freshFact. Do not confuse event time, publication time and tracker update time. Generic market context is background, not a fresh fact. Do not infer a new holder purchase from a position snapshot or general market activity."
-      : "Test the supplied research question and the strongest counterhypothesis for this exact contract. Prioritize concrete events within the fresh window; retain older structural information as background rather than discarding it for being public. Distinguish event, publication and page-update times. Separate support for the outcome from explanation of a price move. Do not infer holder timing or motives from a position snapshot.",
+      ? "Establish the current situation and check for a concrete event within the fresh window. For this distant-horizon review, assess a cited event against the exact contract entity, condition and deadline or stage; preserve adverse facts as well as favorable ones and set supportsSelectedSide truthfully. Retain useful structural context even if freshFact is null. Separate event time, publication time and tracker updates. Provide the sourced context and verification limits for the final analyst; do not decide the outcome or infer a new holder purchase."
+      : "Use the research question as a lead to understand the current situation for this exact contract. Collect relevant developments, background and conflicting accounts, with source attribution and concrete verification gaps. Prioritize recent events while retaining useful older context. Separate event, publication and page-update times. Leave outcome forecasts and trading conclusions to the final analyst; do not infer holder timing or motives from a position snapshot.",
   };
 }
 
