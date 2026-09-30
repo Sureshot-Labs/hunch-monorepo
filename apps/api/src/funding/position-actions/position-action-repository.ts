@@ -1,6 +1,9 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
+import { isRecord } from "../../lib/type-guards.js";
 import type { JsonObject, JsonValue } from "../domain/types.js";
+import { parsePrivyFundingTransactionReference } from "../execution/privy-transaction-reference.js";
+import { canonicalRedemptionIdentity } from "./canonical-redemption-evidence.js";
 
 export type PositionActionStatus =
   | "prepared"
@@ -361,6 +364,7 @@ export async function claimPositionActionSubmission(
     operationId: string;
     canonicalActionFingerprint: string;
     executorId: string;
+    embeddedDispatchProtocol?: "privy_position_v1";
   }>,
 ): Promise<PositionActionSubmissionClaim> {
   return tx(pool, async (client) => {
@@ -408,15 +412,21 @@ export async function claimPositionActionSubmission(
       `
         insert into position_action_attempts (
           action_operation_id, attempt_number, canonical_action_fingerprint,
-          executor_id
+          executor_id, receipt_evidence
         )
-        values ($1, $2, $3, $4)
+        values ($1, $2, $3, $4, $5::jsonb)
       `,
       [
         operation.id,
         attemptNumber,
         input.canonicalActionFingerprint,
         input.executorId,
+        JSON.stringify(
+          operation.executionMode === "privy_authorization" &&
+            input.embeddedDispatchProtocol
+            ? { embeddedDispatchProtocol: input.embeddedDispatchProtocol }
+            : {},
+        ),
       ],
     );
     await client.query(
@@ -489,6 +499,58 @@ async function finishAttempt(
   }
 }
 
+async function assertPositionReferenceAttribution(
+  client: Pick<PoolClient, "query">,
+  operation: StoredPositionAction,
+  reference: string,
+): Promise<void> {
+  const normalized = reference.toLowerCase();
+  await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [
+    `position-submission:${normalized}`,
+  ]);
+  const peers = await client.query<PositionActionRow>(
+    `select ${COLUMNS} from position_action_operations
+      where lower(submission_fingerprint) = $1 and id <> $2`,
+    [normalized, operation.id],
+  );
+  const exactIdentity = (candidate: StoredPositionAction) => {
+    const plan = candidate.planSnapshot.plan;
+    return isRecord(plan) && typeof plan.targetAddress === "string"
+      ? canonicalRedemptionIdentity(candidate, plan.targetAddress)
+      : null;
+  };
+  const expected = /^0x[0-9a-f]{64}$/i.test(reference)
+    ? exactIdentity(operation)
+    : null;
+  const conflict = peers.rows.some((row) => {
+    const peer = mapRow(row);
+    const identity = exactIdentity(peer);
+    // Shared hashes require exact CTF settlement for both actions. Keep the
+    // original exclusive fence for adapter/other unsupported receipt shapes.
+    if (!expected || !identity) return true;
+    if (
+      peer.ownerAddress.toLowerCase() !== operation.ownerAddress.toLowerCase()
+    )
+      return false;
+    return (
+      (peer.venueId === operation.venueId &&
+        identity.tokenId === expected.tokenId) ||
+      (identity.ctf.toLowerCase() === expected.ctf.toLowerCase() &&
+        identity.conditionId === expected.conditionId &&
+        identity.parentId === expected.parentId &&
+        identity.indexSets.length === expected.indexSets.length &&
+        identity.indexSets.every(
+          (value, index) => value === expected.indexSets[index],
+        ))
+    );
+  });
+  if (conflict)
+    throw new PositionActionPersistenceError(
+      "submission_conflict",
+      "Position submission reference is already attributed to another action",
+    );
+}
+
 export async function recordPositionActionSubmission(
   pool: Pool,
   input: Readonly<{
@@ -506,6 +568,34 @@ export async function recordPositionActionSubmission(
       input.userId,
       input.operationId,
     );
+    // A server-observed authorization denial is terminal. A late weak browser
+    // report may read it, but cannot turn it back into broadcast ambiguity.
+    if (
+      operation.status === "failed" &&
+      operation.lastErrorCode === "position_action_authorization_rejected" &&
+      input.submissionFingerprint === null
+    ) {
+      const denied = await client.query(
+        `select 1 from position_action_attempts
+          where action_operation_id = $1 and attempt_number = $2
+            and outcome = 'not_broadcast' and not broadcast_may_have_occurred
+            and error_code = 'position_action_authorization_rejected'`,
+        [operation.id, input.attemptNumber],
+      );
+      if (denied.rowCount === 1) return operation;
+    }
+    // Once the API durably claimed the provider POST, a disconnected browser
+    // cannot prove non-broadcast or overwrite its recovery marker. Only an
+    // exact positive reference can strengthen the journal at this boundary.
+    if (
+      operation.executionMode === "privy_authorization" &&
+      operation.status === "reconcile_required" &&
+      operation.broadcastMayHaveOccurred &&
+      operation.lastErrorCode === POSITION_ACTION_MISSING_REFERENCE_CODE &&
+      operation.submissionFingerprint === null &&
+      input.submissionFingerprint === null
+    )
+      return operation;
     // A stale client claim remains open to a late positive submission report.
     // Never turn the recovery marker into permission for another broadcast.
     const lateUncertainSubmission =
@@ -514,6 +604,24 @@ export async function recordPositionActionSubmission(
       operation.submissionFingerprint === null &&
       (input.outcome === "submitted" || input.outcome === "ambiguous");
     if (operation.status !== "submitting" && !lateUncertainSubmission) {
+      // The server already journaled provider acceptance. A late browser
+      // cancellation/report cannot erase it or replace it with an unverified
+      // hash; the existing resolver binds the canonical transaction instead.
+      if (
+        operation.executionMode === "privy_authorization" &&
+        operation.submissionFingerprint
+      ) {
+        const acceptedAttempt = await client.query<{
+          submission_fingerprint: string | null;
+        }>(
+          `select submission_fingerprint from position_action_attempts
+            where action_operation_id = $1 and attempt_number = $2`,
+          [operation.id, input.attemptNumber],
+        );
+        const original = acceptedAttempt.rows[0]?.submission_fingerprint;
+        if (original && parsePrivyFundingTransactionReference(original))
+          return operation;
+      }
       if (
         operation.submissionFingerprint &&
         operation.submissionFingerprint === input.submissionFingerprint
@@ -523,6 +631,15 @@ export async function recordPositionActionSubmission(
       throw new PositionActionPersistenceError(
         "invalid_state",
         "position action is not awaiting a submission result",
+      );
+    }
+    if (input.submissionFingerprint) {
+      // Share the receipt fence with both late client reports and background
+      // discovery. A read-only precheck outside this transaction would race.
+      await assertPositionReferenceAttribution(
+        client,
+        operation,
+        input.submissionFingerprint,
       );
     }
     const broadcast =
@@ -570,6 +687,187 @@ export async function recordPositionActionSubmission(
 
 export const POSITION_ACTION_MISSING_REFERENCE_CODE =
   "position_action_submission_reference_missing";
+export const POSITION_ACTION_SUBMISSION_REPORT_GRACE_MS = 5 * 60_000;
+
+/** Only the server's exact single-POST authorization denial can clear this fence. */
+export async function recordPositionActionAuthorizationRejection(
+  pool: Pool,
+  input: Readonly<{
+    userId: string;
+    operationId: string;
+    attemptNumber: number;
+    httpStatus: 401 | 403;
+  }>,
+): Promise<StoredPositionAction> {
+  return tx(pool, async (client) => {
+    const operation = await fetchForUpdate(
+      client,
+      input.userId,
+      input.operationId,
+    );
+    if (
+      operation.executionMode !== "privy_authorization" ||
+      operation.status !== "reconcile_required" ||
+      operation.submissionFingerprint ||
+      operation.lastErrorCode !== POSITION_ACTION_MISSING_REFERENCE_CODE
+    )
+      return operation;
+    const attempt = await client.query<{
+      attempt_number: number;
+      outcome: string;
+      submission_fingerprint: string | null;
+    }>(
+      `select attempt_number, outcome, submission_fingerprint from position_action_attempts
+        where action_operation_id = $1 order by attempt_number desc limit 1`,
+      [operation.id],
+    );
+    const latest = attempt.rows[0];
+    if (
+      latest?.attempt_number !== input.attemptNumber ||
+      !["started", "ambiguous"].includes(latest.outcome) ||
+      latest.submission_fingerprint
+    )
+      return operation;
+    const errorCode = "position_action_authorization_rejected";
+    await finishAttempt(client, {
+      operationId: operation.id,
+      attemptNumber: input.attemptNumber,
+      outcome: "not_broadcast",
+      broadcastMayHaveOccurred: false,
+      submissionFingerprint: null,
+      errorCode,
+      allowUnreferencedAmbiguity: true,
+      receiptEvidence: {
+        provider: "privy",
+        httpStatus: input.httpStatus,
+        definitiveNoBroadcast: true,
+      },
+    });
+    await client.query(
+      `update position_action_operations set status = 'failed',
+          broadcast_may_have_occurred = false, receipt_status = 'unobserved',
+          receipt_observed_at = null, submitted_at = null, completed_at = now(), last_error_code = $2
+        where id = $1`,
+      [operation.id, errorCode],
+    );
+    return refetch(client, operation.id);
+  });
+}
+
+function isUndispatchedEmbeddedAttempt(attempt: {
+  outcome: string;
+  broadcast_may_have_occurred: boolean;
+  receipt_evidence: JsonObject;
+}): boolean {
+  // Only an explicitly opted-in new client uses the API's durable POST
+  // boundary. Historical/client-owned submissions cannot inherit this proof.
+  return (
+    attempt.outcome === "started" &&
+    !attempt.broadcast_may_have_occurred &&
+    attempt.receipt_evidence.embeddedDispatchProtocol === "privy_position_v1"
+  );
+}
+
+async function closeExpiredUndispatchedAttempt(
+  client: Pick<PoolClient, "query">,
+  operation: StoredPositionAction,
+  attemptNumber: number,
+): Promise<void> {
+  const errorCode = "position_action_claim_expired_before_dispatch";
+  await finishAttempt(client, {
+    operationId: operation.id,
+    attemptNumber,
+    outcome: "not_broadcast",
+    broadcastMayHaveOccurred: false,
+    submissionFingerprint: null,
+    errorCode,
+  });
+  await client.query(
+    `update position_action_operations set status = 'failed', last_error_code = $2,
+        completed_at = now() where id = $1`,
+    [operation.id, errorCode],
+  );
+}
+
+async function markUnreferencedAttemptForRecovery(
+  client: Pick<PoolClient, "query">,
+  operationId: string,
+  attemptId: string,
+): Promise<void> {
+  await client.query(
+    `update position_action_attempts
+        set broadcast_may_have_occurred = true, error_code = $2
+      where id = $1 and outcome in ('started', 'ambiguous')`,
+    [attemptId, POSITION_ACTION_MISSING_REFERENCE_CODE],
+  );
+  await client.query(
+    `update position_action_operations
+        set status = 'reconcile_required', broadcast_may_have_occurred = true,
+            last_error_code = $2
+      where id = $1`,
+    [operationId, POSITION_ACTION_MISSING_REFERENCE_CODE],
+  );
+}
+
+/** One provider dispatch per client claim, even when its response is lost. */
+export async function claimPositionActionEmbeddedDispatch(
+  pool: Pool,
+  input: Readonly<{
+    userId: string;
+    operationId: string;
+    attemptNumber: number;
+  }>,
+): Promise<boolean> {
+  return tx(pool, async (client) => {
+    const operation = await fetchForUpdate(
+      client,
+      input.userId,
+      input.operationId,
+    );
+    if (
+      operation.executionMode !== "privy_authorization" ||
+      operation.status !== "submitting" ||
+      operation.broadcastMayHaveOccurred ||
+      operation.submissionFingerprint
+    )
+      return false;
+    const attempt = (
+      await client.query<{
+        id: string;
+        attempt_number: number;
+        outcome: string;
+        broadcast_may_have_occurred: boolean;
+        receipt_evidence: JsonObject;
+        fresh: boolean;
+      }>(
+        `select id, attempt_number, outcome, broadcast_may_have_occurred, receipt_evidence,
+          started_at > clock_timestamp() - ($2::integer * interval '1 millisecond') as fresh
+        from position_action_attempts where action_operation_id = $1
+        order by attempt_number desc limit 1 for update`,
+        [operation.id, POSITION_ACTION_SUBMISSION_REPORT_GRACE_MS],
+      )
+    ).rows[0];
+    if (
+      !attempt ||
+      attempt.attempt_number !== input.attemptNumber ||
+      attempt.outcome !== "started" ||
+      attempt.broadcast_may_have_occurred
+    )
+      return false;
+    if (!attempt.fresh && isUndispatchedEmbeddedAttempt(attempt)) {
+      await closeExpiredUndispatchedAttempt(
+        client,
+        operation,
+        attempt.attempt_number,
+      );
+      return false;
+    }
+    // Legacy unmarked claims are uncertain; new first sends record the POST
+    // boundary. Neither interrupted dispatch can authorize a second send.
+    await markUnreferencedAttemptForRecovery(client, operation.id, attempt.id);
+    return attempt.fresh;
+  });
+}
 
 /** An abandoned claim is uncertainty, never proof that signing did not occur. */
 export async function markStalePositionActionClaimForRecovery(
@@ -593,8 +891,14 @@ export async function markStalePositionActionClaimForRecovery(
     ) {
       return operation;
     }
-    const pending = await client.query<{ id: string }>(
-      `select id
+    const pending = await client.query<{
+      id: string;
+      attempt_number: number;
+      outcome: string;
+      broadcast_may_have_occurred: boolean;
+      receipt_evidence: JsonObject;
+    }>(
+      `select id, attempt_number, outcome, broadcast_may_have_occurred, receipt_evidence
          from position_action_attempts
         where action_operation_id = $1
           and outcome in ('started', 'ambiguous')
@@ -606,21 +910,18 @@ export async function markStalePositionActionClaimForRecovery(
     );
     const attempt = pending.rows[0];
     if (!attempt) return operation;
-    await client.query(
-      `update position_action_attempts
-          set broadcast_may_have_occurred = true,
-              error_code = $2
-        where id = $1 and outcome in ('started', 'ambiguous')`,
-      [attempt.id, POSITION_ACTION_MISSING_REFERENCE_CODE],
-    );
-    await client.query(
-      `update position_action_operations
-          set status = 'reconcile_required',
-              broadcast_may_have_occurred = true,
-              last_error_code = $2
-        where id = $1`,
-      [operation.id, POSITION_ACTION_MISSING_REFERENCE_CODE],
-    );
+    if (
+      operation.executionMode === "privy_authorization" &&
+      isUndispatchedEmbeddedAttempt(attempt)
+    ) {
+      await closeExpiredUndispatchedAttempt(
+        client,
+        operation,
+        attempt.attempt_number,
+      );
+      return refetch(client, operation.id);
+    }
+    await markUnreferencedAttemptForRecovery(client, operation.id, attempt.id);
     return refetch(client, operation.id);
   });
 }
@@ -661,6 +962,11 @@ export async function bindPositionActionSubmissionTransactionHash(
         "position action provider reference no longer matches",
       );
     }
+    await assertPositionReferenceAttribution(
+      client,
+      operation,
+      transactionHash,
+    );
     await client.query(
       `
         update position_action_operations
@@ -848,6 +1154,57 @@ export async function recordPositionActionPostconditions(
     await maybeCompleteConfirmedAction(client, operation.id);
     return refetch(client, operation.id);
   });
+}
+
+export async function fetchPositionActionNotificationFacts(
+  db: Pick<Pool, "query">,
+  userId: string,
+  operationId: string,
+): Promise<{
+  existingDedupeKey: string | null;
+  actualPayoutRaw: string | null;
+}> {
+  const result = await db.query<{
+    dedupe_key: string | null;
+    actual_payout: string | null;
+  }>(
+    `select coalesce(
+        case when notification_effect.status = 'completed' then
+          coalesce(notification_effect.evidence->>'dedupeKey', 'redemption:position-action:' || operation_row.id::text)
+        end, notification_row.dedupe_key) as dedupe_key,
+        collateral_effect.evidence->>'actualPayoutRaw' as actual_payout
+      from position_action_operations operation_row
+      left join position_action_effects notification_effect
+        on notification_effect.action_operation_id = operation_row.id
+        and notification_effect.effect_kind = 'notification'
+      left join position_action_effects collateral_effect
+        on collateral_effect.action_operation_id = operation_row.id
+        and collateral_effect.effect_kind = 'collateral_refresh' and collateral_effect.status = 'completed'
+      left join notifications notification_row
+        on notification_row.user_id = operation_row.user_id
+        and notification_row.type = 'redemption_completed'
+        and lower(notification_row.dedupe_key) = lower('redemption:' || operation_row.submission_fingerprint)
+        and notification_row.data->>'venue' = operation_row.venue_id
+        and lower(notification_row.data->>'walletAddress') = lower(operation_row.owner_address)
+        and notification_row.data->>'tokenId' = operation_row.plan_snapshot->>'tokenId'
+      where operation_row.user_id = $1 and operation_row.id = $2 limit 1`,
+    [userId, operationId],
+  );
+  return {
+    existingDedupeKey: result.rows[0]?.dedupe_key ?? null,
+    actualPayoutRaw: result.rows[0]?.actual_payout ?? null,
+  };
+}
+
+export async function hasCompletedPositionActionNotification(
+  db: Pick<Pool, "query">,
+  userId: string,
+  operationId: string,
+): Promise<boolean> {
+  return (
+    (await fetchPositionActionNotificationFacts(db, userId, operationId))
+      .existingDedupeKey !== null
+  );
 }
 
 export async function completePositionActionEffect(

@@ -364,6 +364,38 @@ export async function fetchEvmBlockNumber(inputs: {
   );
 }
 
+/** Canonical finalized height for evidence-only historical recovery. */
+export async function fetchEvmFinalizedBlockNumber(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  maxAttempts?: number;
+}): Promise<bigint> {
+  const block = await ethRpcRequest<unknown>({
+    ...inputs,
+    method: "eth_getBlockByNumber",
+    params: ["finalized", false],
+  });
+  if (!isRecord(block) || typeof block.number !== "string")
+    throw new Error("Finalized EVM block unavailable");
+  return parseRpcQuantity(block.number, "finalized block number");
+}
+
+/** Read-only execution trace; unavailable tracing remains unknown evidence. */
+export async function fetchEvmCallTrace(inputs: {
+  rpcUrl: string;
+  timeoutMs: number;
+  maxAttempts?: number;
+  transactionHash: string;
+}): Promise<unknown> {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(inputs.transactionHash))
+    throw new Error("Trace transaction hash is invalid");
+  return ethRpcRequest({
+    ...inputs,
+    method: "debug_traceTransaction",
+    params: [inputs.transactionHash, { tracer: "callTracer", timeout: "3s" }],
+  });
+}
+
 export type EvmRpcTransactionByHash = Readonly<{
   chainId: bigint;
   from: string;

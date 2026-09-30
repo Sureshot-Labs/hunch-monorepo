@@ -84,6 +84,8 @@ import {
 } from "../../persistence/funding-step-receipt-repository.js";
 import {
   claimFundingTradeAttemptInTransaction,
+  claimAmbiguousPolymarketTradeAttemptsForReconciliation,
+  attachRecoveredPolymarketAttemptOrderInTransaction,
   claimLimitlessTradeAttemptForReconciliation,
   FundingTradeAttemptError,
   markFundingTradeAttemptSubmissionStartedInTransaction,
@@ -9461,4 +9463,216 @@ await testTelegramAppHandoffV2CommittedCancellationStopsLinkedBuy();
 console.log(
   "[funding-persistence-integration-tests] ok committed v2 handoff cancellation stops its linked future Buy",
 );
+async function testPolymarketEvidenceOnlyOrphanRecovery(): Promise<void> {
+  const setup = await pool.connect();
+  let userId = "",
+    quoteId = "",
+    operationId = "",
+    eventId = "",
+    marketId = "";
+  try {
+    await setup.query("begin");
+    userId = await insertUser(setup);
+    eventId = opaque("orphan-event");
+    const venueMarketId = opaque("orphan-market");
+    marketId = `polymarket:${venueMarketId}`;
+    await setup.query(
+      `insert into unified_events (id, venue, venue_event_id, title, status) values ($1, 'polymarket', $2, 'Orphan fixture', 'ACTIVE')`,
+      [eventId, opaque("event")],
+    );
+    await setup.query(
+      `insert into unified_markets (id, venue, venue_market_id, event_id, title, status, market_type) values ($1, 'polymarket', $2, $3, 'Orphan fixture', 'ACTIVE', 'binary')`,
+      [marketId, venueMarketId, eventId],
+    );
+    const owner = "0x00000000000000000000000000000000000000b1",
+      tokenId =
+        "50862799703982327636174441241062907649998751737045006653560124656563256528691";
+    const base = buildPlan({
+      purpose: "trade_shortfall",
+      venueId: "polymarket",
+      marketId,
+      planKind: "already_available",
+      includeStep: false,
+    });
+    const plan = {
+      ...base,
+      operation: {
+        ...base.operation,
+        destinationTargetSnapshot: {
+          location: { details: { address: owner } },
+        },
+        walletExecutionSnapshot: { address: owner },
+        marketContextSnapshot: {
+          marketContextId: tokenId,
+          marketId,
+          venueId: "polymarket",
+          side: "BUY",
+          collateralAsset: ASSET,
+          requestedCollateralRaw: "1049962",
+        },
+      },
+    };
+    const consent = opaque("consent");
+    const quote = await createFundingQuoteInTransaction(
+      setup,
+      quoteInput(userId, plan, consent),
+    );
+    quoteId = quote.id;
+    const committed = await commitFundingOperationInTransaction(
+      setup,
+      commitInput(userId, quoteId, consent, plan),
+    );
+    operationId = committed.operation.id;
+    const reservation = await setup.query<{ id: string }>(
+      `insert into balance_reservations (user_id, operation_id, component_id, location_id, network_id, asset_id, asset_decimals, raw_amount, mode, expires_at)
+      values ($1, $2, 'owned-orphan-component', 'owned-orphan-location', $3, $4, 6, '1049962', 'settled_for_consumer', now() - interval '1 minute') returning id`,
+      [userId, operationId, ASSET.networkId, ASSET.assetId],
+    );
+    const reservationId = reservation.rows[0]?.id;
+    assert.ok(reservationId);
+    const intent = buildFundingTradeConsumerIntent({
+      venueId: "polymarket",
+      marketId,
+      marketContextId: tokenId,
+      spend: money("1049962"),
+    });
+    const reference = `0x${crypto.randomBytes(32).toString("hex")}`;
+    await setup.query(
+      `insert into funding_trade_attempts (user_id, operation_id, reservation_id, attempt_number, venue_id, market_id, execution_path, idempotency_key, canonical_fingerprint, consumer_intent, consumer_intent_fingerprint,
+      state, broadcast_may_have_occurred, external_reference, claim_lease_until)
+      values ($1, $2, $3, 1, 'polymarket', $4, 'polymarket_clob', $5, $6, $7::jsonb, $8, 'submission_started', true, $9, now() - interval '1 minute')`,
+      [
+        userId,
+        operationId,
+        reservationId,
+        marketId,
+        opaque("attempt"),
+        hash("e"),
+        JSON.stringify(intent),
+        intent.fingerprint,
+        reference,
+      ],
+    );
+    await setup.query("commit");
+    const claims = (
+      await Promise.all([
+        claimAmbiguousPolymarketTradeAttemptsForReconciliation(pool),
+        claimAmbiguousPolymarketTradeAttemptsForReconciliation(pool),
+      ])
+    )
+      .flat()
+      .filter((attempt) => attempt.operationId === operationId);
+    assert.equal(
+      claims.length,
+      1,
+      "one worker holds the exact historical attempt",
+    );
+    const attempt = claims[0];
+    assert.ok(attempt);
+    const orderInput = {
+      fundingRecoveryMode: "explicit_only" as const,
+      userId,
+      walletAddress: owner,
+      signerAddress: owner,
+      venue: "polymarket",
+      venueOrderId: reference,
+      orderHash: reference,
+      tokenId,
+      side: "BUY",
+      price: 0.5,
+      size: 2,
+      status: "unconfirmed",
+      errorMessage: null,
+      rawError: null,
+    };
+    await assert.rejects(
+      () =>
+        tx(pool, async (client) => {
+          const stored = await storeOrderInTransaction(client, orderInput);
+          await attachRecoveredPolymarketAttemptOrderInTransaction(client, {
+            attempt: { ...attempt, claimToken: crypto.randomUUID() },
+            orderId: stored.order.id,
+          });
+        }),
+      /lease changed/,
+    );
+    assert.equal(
+      (await pool.query("select id from orders where user_id = $1", [userId]))
+        .rows.length,
+      0,
+      "stale evidence worker rolls back its order too",
+    );
+    await assert.rejects(
+      () =>
+        tx(pool, async (client) => {
+          const stored = await storeOrderInTransaction(client, {
+            ...orderInput,
+            walletAddress: "0x00000000000000000000000000000000000000b2",
+          });
+          await attachRecoveredPolymarketAttemptOrderInTransaction(client, {
+            attempt,
+            orderId: stored.order.id,
+          });
+        }),
+      /immutable funding destination/,
+    );
+    await tx(pool, async (client) => {
+      const stored = await storeOrderInTransaction(client, orderInput);
+      await attachRecoveredPolymarketAttemptOrderInTransaction(client, {
+        attempt,
+        orderId: stored.order.id,
+      });
+    });
+    const observed = await pool.query<{
+      state: string;
+      consumer_kind: string | null;
+      status: string;
+    }>(
+      `select reservation_row.state, reservation_row.consumer_kind, operation_row.status
+      from balance_reservations reservation_row join funding_operations operation_row on operation_row.id = reservation_row.operation_id where reservation_row.id = $1`,
+      [reservationId],
+    );
+    assert.equal(
+      observed.rows[0]?.state,
+      "active",
+      "expired-but-active reservation is not consumed by status-only repair",
+    );
+    assert.equal(observed.rows[0]?.consumer_kind, null);
+    assert.equal(observed.rows[0]?.status, "completed");
+    const accepted = await pool.query<{ state: string; consumer_kind: string }>(
+      "select state, consumer_kind from funding_trade_attempts where id = $1",
+      [attempt.id],
+    );
+    assert.equal(accepted.rows[0]?.state, "accepted");
+    assert.equal(accepted.rows[0]?.consumer_kind, "web_order");
+    assert.equal(
+      (
+        await pool.query("select id from positions where user_id = $1", [
+          userId,
+        ])
+      ).rows.length,
+      0,
+      "CLOB acceptance does not invent fills or positions",
+    );
+    console.log(
+      "[funding-persistence-integration-tests] ok exact Polymarket orphan lease, atomic rollback, owner fence, and evidence-only expired-reservation recovery",
+    );
+  } finally {
+    await setup.query("rollback").catch(() => undefined);
+    setup.release();
+    if (userId) {
+      await pool.query("delete from orders where user_id = $1", [userId]);
+      await pool.query(
+        "delete from funding_trade_attempts where user_id = $1",
+        [userId],
+      );
+      await cleanupCommittedOperation(operationId || null, quoteId, userId);
+    }
+    if (marketId)
+      await pool.query("delete from unified_markets where id = $1", [marketId]);
+    if (eventId)
+      await pool.query("delete from unified_events where id = $1", [eventId]);
+  }
+}
+await testPolymarketEvidenceOnlyOrphanRecovery();
 console.log("[funding-persistence-integration-tests] complete");

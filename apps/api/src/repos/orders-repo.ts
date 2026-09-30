@@ -309,6 +309,8 @@ export type StoreOrderInput = {
   }> | null;
   fundingTradeAttemptId?: string | null;
   fundingTradeReconciliationClaimToken?: string | null;
+  /** Evidence repair links funding separately under its immutable claim fence. */
+  fundingRecoveryMode?: "explicit_only";
   /**
    * A direct v2 Mini App trade has no FundingOperation. Its sealed Telegram
    * handoff is instead linked atomically when this ordinary order is stored.
@@ -378,6 +380,7 @@ export async function storeOrderInTransaction(
   );
   if (
     !resolvedFundingReservation &&
+    inputs.fundingRecoveryMode !== "explicit_only" &&
     !resolvedFundingTradeAttemptId &&
     !directHandoffTrade &&
     (preflightOutcome == null || preflightOutcome === "filled") &&

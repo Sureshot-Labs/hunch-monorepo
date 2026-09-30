@@ -12,6 +12,7 @@ import {
 } from "../services/limitless-client.js";
 import {
   buildLimitlessRequestAuthInputs,
+  isLimitlessAuthUnavailable,
   loadLimitlessProfileForWallet,
   resolveLimitlessAuthContext,
   verifyLimitlessAuthContext,
@@ -461,6 +462,15 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
             authContext,
             walletAddress: signer,
           });
+          if (!verification.ok && isLimitlessAuthUnavailable(verification)) {
+            reply.code(503);
+            return reply.send({
+              error:
+                verification.message ??
+                "Limitless connection could not be checked. Try again.",
+              code: "limitless_auth_status_unavailable",
+            });
+          }
           connected = verification.ok;
         }
 

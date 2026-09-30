@@ -1221,6 +1221,33 @@ async function createRelayFixture(
       .digest("hex"),
     subjectLookupKeyVersion: 1,
     now,
+    // The fixture has multiple canonical deposits in one source account.
+    // Exercise the real shared-capacity guard instead of bypassing it.
+    verifySharedSourceCapacity: async (sources) => {
+      const inventory = await pool.query<{ raw: string }>(
+        `select (
+           coalesce((select sum(raw_amount) from funding_receive_receipts
+             where user_id = $1 and network_id = 'evm:8453' and asset_id = $2
+               and lower(destination_address) = lower($3)), 0)
+           - coalesce((select sum(raw_amount::numeric) from funding_observations
+             where network_id = 'evm:8453' and asset_id = $2 and kind = 'source_debit'
+               and canonical and finality_status = 'finalized'
+               and lower(from_address) = lower($3)), 0)
+         )::text as raw`,
+        [base.userId, BASE_USDC, identity.wallet_address],
+      );
+      const available = inventory.rows[0];
+      assert.ok(available);
+      for (const source of sources) {
+        assert.equal(source.reservation.locationId, walletId);
+        assert.equal(source.reservation.networkId, "evm:8453");
+        assert.equal(source.reservation.assetId, BASE_USDC);
+        assert.ok(
+          BigInt(available.raw) >=
+            BigInt(source.heldRaw) + BigInt(source.reservation.rawAmount),
+        );
+      }
+    },
   });
   relayArtifactOperationIds.push(committed.operation.id);
   const beforeLink = await pool.query<{ ordinal: number; state: string }>(

@@ -167,6 +167,50 @@ async function test(name: string, run: () => Promise<void>) {
   console.log(`[position-action-routes-tests] ok ${name}`);
 }
 
+await test("optional durable submission protocol reaches the claim; legacy empty body is unchanged", async () => {
+  const protocols: Array<string | undefined> = [];
+  const app = await buildApp({
+    claim: async (_userId, _operationId, protocol) => {
+      protocols.push(protocol);
+      return {
+        claimed: true,
+        attemptNumber: 1,
+        reason: "claimed",
+        operation: operation({ status: "submitting" }),
+      };
+    },
+  });
+  try {
+    const url = `/position-actions/${OPERATION_ID}/submission/claim`;
+    assert.equal((await app.inject({ method: "POST", url })).statusCode, 200);
+    assert.equal(
+      (
+        await app.inject({
+          method: "POST",
+          url,
+          headers: {
+            "x-hunch-position-dispatch-protocol": "privy_position_v1",
+          },
+        })
+      ).statusCode,
+      200,
+    );
+    assert.equal(
+      (
+        await app.inject({
+          method: "POST",
+          url,
+          headers: { "x-hunch-position-dispatch-protocol": "unknown-version" },
+        })
+      ).statusCode,
+      400,
+    );
+    assert.deepEqual(protocols, [undefined, "privy_position_v1"]);
+  } finally {
+    await app.close();
+  }
+});
+
 await test("inspection derives account ownership from the session", async () => {
   let observedUserId: string | null = null;
   const app = await buildApp({

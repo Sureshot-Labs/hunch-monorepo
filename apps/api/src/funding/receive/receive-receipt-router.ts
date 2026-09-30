@@ -15,7 +15,7 @@ import { sameAccountAddress } from "../domain/asset-identity.js";
 import { delegatedFundingProfile } from "../execution/delegated-funding-profiles.js";
 import type { DelegatedFundingPreBroadcastDecision } from "../execution/delegated-funding-capability.js";
 import { lockFundingPolicyForTransaction } from "../policies/funding-policy-service.js";
-import { sameAsset } from "../planner/money.js";
+import { FundingPlannerError, sameAsset } from "../planner/money.js";
 import type { FundingPlanningRuntime } from "../planner/runtime-service.js";
 import { lockFundingAuthorizationReservationScope } from "../persistence/funding-authorization-reservation-lock.js";
 import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
@@ -337,6 +337,7 @@ export async function quoteFundingReceiveReceipt(
   input: Readonly<{
     quotePlan: FundingReceiveQuotePlan;
     serverExecutionProfileId?: string;
+    explainUnavailable?: boolean;
   }>,
 ): Promise<FundingQuoteSummary | null> {
   if (target.receipt.rawAmount === "0") return null;
@@ -364,8 +365,7 @@ export async function quoteFundingReceiveReceipt(
       : target.automationPolicy.maximumSlippageBps,
     deadline: null,
   });
-  const sources = liquidity.sourceOptions.filter((option) => {
-    if (!option.selectable) return false;
+  const matchingSources = liquidity.sourceOptions.filter((option) => {
     if (
       option.kind === "venue_preparation" &&
       option.source.kind === "venue_preparation"
@@ -392,6 +392,35 @@ export async function quoteFundingReceiveReceipt(
       )
     );
   });
+  const sources = matchingSources.filter((option) => option.selectable);
+  if (
+    input.explainUnavailable &&
+    sources.length === 0 &&
+    matchingSources.length > 0 &&
+    matchingSources.every((option) =>
+      option.reasonCodes.some(
+        (code) =>
+          code === "minimum_output_not_met" || code === "fee_limit_exceeded",
+      ),
+    )
+  ) {
+    // Use only the exact receipt's routes. A fee/minimum failure on another
+    // wallet is not evidence that this received balance cannot be converted.
+    const outputLimited = matchingSources.every((option) =>
+      option.reasonCodes.includes("minimum_output_not_met"),
+    );
+    const feeLimited = matchingSources.every((option) =>
+      option.reasonCodes.includes("fee_limit_exceeded"),
+    );
+    throw new FundingPlannerError(
+      outputLimited
+        ? "receive_conversion_output_limit"
+        : feeLimited
+          ? "receive_conversion_fee_limit"
+          : "receive_conversion_economic_limit",
+      "the exact received balance cannot satisfy conversion economics",
+    );
+  }
   if (sources.length !== 1) return null;
   const source = sources[0];
   if (!source) return null;

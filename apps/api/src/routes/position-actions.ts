@@ -36,6 +36,7 @@ import {
   positionActionPrepareResponseSchema,
   positionActionReconcileResponseSchema,
   positionActionSubmissionClaimResponseSchema,
+  positionActionSubmissionClaimHeadersSchema,
   positionActionSubmissionReportSchema,
 } from "../schemas/position-actions.js";
 
@@ -51,6 +52,7 @@ export type PositionActionRouteDependencies = Readonly<{
   claim(
     userId: string,
     operationId: string,
+    embeddedDispatchProtocol?: "privy_position_v1",
   ): Promise<PositionActionSubmissionClaim>;
   inspect(
     userId: string,
@@ -273,6 +275,7 @@ export function registerPositionActionRoutes(
       preHandler: dependencies.authenticate,
       schema: {
         params: positionActionOperationParamsSchema,
+        headers: positionActionSubmissionClaimHeadersSchema,
         response: {
           200: positionActionSubmissionClaimResponseSchema,
           ...errors,
@@ -281,7 +284,11 @@ export function registerPositionActionRoutes(
     },
     (request, reply) =>
       handle(request, reply, dependencies, "claim", async (userId) => {
-        const claim = await dependencies.claim(userId, request.params.id);
+        const claim = await dependencies.claim(
+          userId,
+          request.params.id,
+          request.headers["x-hunch-position-dispatch-protocol"],
+        );
         return reply.send(
           positionActionSubmissionClaimResponseSchema.parse({
             ok: true,
@@ -352,8 +359,8 @@ export const positionActionRoutes: FastifyPluginAsync = async (app) => {
     inspect: (userId, input) => runtime.inspect(userId, input),
     prepare: (userId, input) => runtime.prepare(userId, input),
     operation: (userId, operationId) => runtime.operation(userId, operationId),
-    claim: (userId, operationId) =>
-      runtime.claimSubmission(userId, operationId),
+    claim: (userId, operationId, embeddedDispatchProtocol) =>
+      runtime.claimSubmission(userId, operationId, embeddedDispatchProtocol),
     report: (userId, input) => runtime.reportSubmission(userId, input),
     reconcile: (userId, operationId) => runtime.reconcile(userId, operationId),
   });

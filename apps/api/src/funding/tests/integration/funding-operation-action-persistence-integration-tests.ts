@@ -308,15 +308,20 @@ try {
     consentToken,
     expiresAt: new Date(Date.now() + 60_000),
   });
-  const committed = await commitFundingOperationInTransaction(client, {
-    userId,
-    quoteId: quote.id,
-    consentToken,
-    idempotencyKey: opaque("idempotency"),
-    plan,
-    subjectLookupHmac: hash("user"),
-    subjectLookupKeyVersion: 1,
-  });
+  // Independent action scenarios must not retain each other's source holds.
+  // Keep the real exclusive-capacity guard, including future-credit fences.
+  await client.query("savepoint independent_action_scenarios");
+  const commitInitialPlan = () =>
+    commitFundingOperationInTransaction(client, {
+      userId,
+      quoteId: quote.id,
+      consentToken,
+      idempotencyKey: opaque("idempotency"),
+      plan,
+      subjectLookupHmac: hash("user"),
+      subjectLookupKeyVersion: 1,
+    });
+  let committed = await commitInitialPlan();
   const firstCommittedStep = await client.query<{ id: string }>(
     `select id
        from funding_operation_steps
@@ -347,6 +352,7 @@ try {
     ["action_required", "action_required"],
   );
   await client.query("rollback to savepoint projected_step_state_read");
+  await client.query("rollback to savepoint independent_action_scenarios");
 
   // A Mini App first claims its funding attempt and then asks the embedded
   // wallet endpoint to prepare the exact sponsored calls. The claimed attempt
@@ -539,6 +545,7 @@ try {
     false,
     "a submitted attempt must never be re-admitted for another sponsored call",
   );
+  await client.query("rollback to savepoint independent_action_scenarios");
 
   const preRouteRelayAction = {
     ...secondAction,
@@ -1008,6 +1015,7 @@ try {
     true,
     "the controller handoff fixture must satisfy its declared Router v1 contract",
   );
+  await client.query("savepoint standalone_controller_scenario");
   const controllerHandoffQuote = await createFundingQuoteInTransaction(client, {
     userId,
     discoveryProjectionId: opaque("projection"),
@@ -1111,6 +1119,7 @@ try {
     ),
     "both sides of the Deposit Wallet handoff must stay fenced through the full operation lifetime",
   );
+  await client.query("rollback to savepoint standalone_controller_scenario");
   await client.query("set constraints all deferred");
 
   const compositeRouterPlan: FundingCommitPlan = {
@@ -1183,6 +1192,18 @@ try {
       plan: compositeRouterPlan,
       subjectLookupHmac: hash("composite-router-handoff-user"),
       subjectLookupKeyVersion: 1,
+      // This fixture has two present-input legs in the same source account.
+      // Verify their exact aggregate; future credits remain exclusive below.
+      verifySharedSourceCapacity: async (sources) => {
+        assert.equal(sources.length, 1);
+        const source = sources[0];
+        assert.ok(source);
+        assert.equal(source.reservation.locationId, sourceLocation.locationId);
+        assert.equal(source.reservation.networkId, ASSET.networkId);
+        assert.equal(source.reservation.assetId, ASSET.assetId);
+        assert.equal(source.heldRaw, "0");
+        assert.equal(source.reservation.rawAmount, "2000000");
+      },
     },
   );
   await client.query("set constraints all immediate");
@@ -1678,7 +1699,9 @@ try {
     "quote_mismatch",
   );
   await client.query("rollback to savepoint unrelated_venue_router_shape");
+  await client.query("rollback to savepoint independent_action_scenarios");
   await client.query("set constraints all deferred");
+  committed = await commitInitialPlan();
 
   const stepResult = await client.query<{
     id: string;

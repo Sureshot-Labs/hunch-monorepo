@@ -16,6 +16,7 @@ import {
 } from "./limitless-client.js";
 import {
   buildLimitlessRequestAuthInputs,
+  buildLimitlessWalletRequestAuthInputs,
   type LimitlessAuthContext,
 } from "./limitless-auth.js";
 import { normalizeLimitlessHistoryAmount } from "./limitless-order-normalization.js";
@@ -419,15 +420,13 @@ export async function syncLimitlessHistoryForWallet(
   const params = new URLSearchParams({ limit: String(inputs.limit) });
   if (inputs.cursor?.trim()) params.set("cursor", inputs.cursor.trim());
 
-  const profileId = inputs.authContext.storedProfile?.id;
-  const headers =
-    profileId != null ? { "x-on-behalf-of": String(profileId) } : undefined;
-
   const upstream = await limitlessRequest({
     method: "GET",
     requestPath: `/portfolio/history?${params.toString()}`,
-    ...buildLimitlessRequestAuthInputs(inputs.authContext),
-    headers,
+    ...buildLimitlessWalletRequestAuthInputs(
+      inputs.authContext,
+      inputs.walletAddress,
+    ),
   });
 
   if (!upstream.ok) {

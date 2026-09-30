@@ -31,6 +31,12 @@ import {
   type EmbeddedFundingReference,
 } from "../funding/execution/embedded-funding-submission.js";
 import { pool } from "../db.js";
+import {
+  admitEmbeddedPositionSubmission,
+  beginEmbeddedPositionDispatch,
+  journalEmbeddedPositionAcceptance,
+  journalEmbeddedPositionAuthorizationRejection,
+} from "../funding/position-actions/embedded-submission.js";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
 import { SOLANA_MAINNET_CAIP2 } from "../lib/chain-identifiers.js";
@@ -2849,6 +2855,25 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             embeddedEvmResult(context.signer, request.body.chainId, reference),
           );
         }
+        const positionSubmission = await admitEmbeddedPositionSubmission(
+          pool,
+          user.id,
+          request.body.executionKey,
+          {
+            kind: "ethereum",
+            signer: context.signer,
+            ...request.body,
+          },
+        );
+        if (positionSubmission?.acceptedReference) {
+          return reply.send(
+            embeddedEvmResult(
+              context.signer,
+              request.body.chainId,
+              positionSubmission.acceptedReference,
+            ),
+          );
+        }
         const transactionFingerprint = buildEmbeddedEvmTransactionFingerprint({
           signer: context.signer,
           chainId: request.body.chainId,
@@ -2856,13 +2881,17 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
           transactions: request.body.transactions,
         });
         const result = await runEmbeddedExecutionSingleFlight({
-          key: buildEmbeddedExecutionSingleFlightKey(
-            "embedded-wallets",
-            "ethereum",
-            context.signer,
-            request.body.chainId,
-            transactionFingerprint,
-          ),
+          key:
+            buildEmbeddedExecutionSingleFlightKey(
+              "embedded-wallets",
+              "ethereum",
+              context.signer,
+              request.body.chainId,
+              transactionFingerprint,
+            ) +
+            (positionSubmission
+              ? `:position:${positionSubmission.operationId}:${positionSubmission.attemptNumber}`
+              : ""),
           redis: await getRedis(),
           run: async () => {
             const requests = prepareEmbeddedEthereumTransactionRequests({
@@ -2874,12 +2903,38 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
               executionMode: request.body.executionMode,
               transactions: request.body.transactions,
             });
+            if (positionSubmission) {
+              assertEmbeddedFundingAuthorizationSignatures(
+                requests,
+                request.body.signedRequests,
+              );
+              await beginEmbeddedPositionDispatch(
+                pool,
+                user.id,
+                positionSubmission,
+              );
+            }
             const execution = await executeEmbeddedEthereumTransactionRequests({
               chainId: request.body.chainId,
               requests,
               returnOnAccepted: request.body.returnOnAccepted,
               signatures: request.body.signedRequests,
+            }).catch(async (error: unknown) => {
+              await journalEmbeddedPositionAuthorizationRejection(
+                pool,
+                user.id,
+                positionSubmission,
+                requests.length,
+                error,
+              );
+              throw error;
             });
+            await journalEmbeddedPositionAcceptance(
+              pool,
+              user.id,
+              positionSubmission,
+              execution.transactionReferences,
+            );
             return {
               ok: true,
               signer: context.signer,
@@ -2888,6 +2943,14 @@ export const embeddedWalletRoutes: FastifyPluginAsync = async (app) => {
             };
           },
         });
+        // Single-flight may return a cached provider acceptance. Journal that
+        // result too, before a client can lose the response again.
+        await journalEmbeddedPositionAcceptance(
+          pool,
+          user.id,
+          positionSubmission,
+          result.transactionReferences,
+        );
         if (!request.body.returnOnAccepted && result.confirmationPending) {
           const transactionHashes = await confirmEmbeddedEthereumExecution(
             request.body.chainId,

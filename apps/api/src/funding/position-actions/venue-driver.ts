@@ -9,6 +9,8 @@ import type {
   PreparationExecutionMode,
 } from "../domain/types.js";
 import { sumErc20TransfersTo } from "../execution/evm-erc20-receipt.js";
+import type { StoredPositionAction } from "./position-action-repository.js";
+import { canonicalRedemptionPayout } from "./canonical-redemption-evidence.js";
 
 export type StoredPositionContext = Readonly<{
   id: string;
@@ -85,6 +87,8 @@ export interface PositionActionVenueDriver {
       ownerAddress: string;
       plan: RedemptionPlan;
       transactionHash: string;
+      operation?: StoredPositionAction;
+      conditionalTokensAddress?: string;
     }>,
   ): Promise<PositionActionReceiptObservation | null>;
 
@@ -151,14 +155,28 @@ export function createEvmPositionActionReceiptObserver(
       typeof input.plan.payoutTokenAddress === "string"
         ? input.plan.payoutTokenAddress
         : null;
-    const actual =
-      receipt.succeeded && expected != null && payoutToken
-        ? sumErc20TransfersTo({
-            logs: receipt.logs,
-            recipient: input.ownerAddress,
-            tokenAddress: payoutToken,
-          })
-        : null;
+    let actual: bigint | null;
+    if (
+      input.operation &&
+      input.conditionalTokensAddress &&
+      input.plan.targetAddress?.toLowerCase() ===
+        input.conditionalTokensAddress.toLowerCase()
+    ) {
+      actual = canonicalRedemptionPayout(
+        input.operation,
+        input.conditionalTokensAddress,
+        receipt,
+      );
+    } else {
+      actual =
+        receipt.succeeded && expected != null && payoutToken
+          ? sumErc20TransfersTo({
+              logs: receipt.logs,
+              recipient: input.ownerAddress,
+              tokenAddress: payoutToken,
+            })
+          : null;
+    }
     return {
       succeeded: receipt.succeeded,
       expectedPayoutRaw: expected?.toString() ?? null,

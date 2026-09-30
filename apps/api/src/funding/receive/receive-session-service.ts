@@ -602,13 +602,18 @@ export class FundingReceiveSessionService {
         "receive capability lacks observable variants",
       );
     }
-    const variants = rawVariants.map(parseDirectIngressObservationVariant).map((variant) =>
-      ownerChannel === "telegram" &&
-      sameAsset(variant.asset, SOLANA_RETAINED_USDC_ASSET) &&
-      variant.completion.kind === "child_funding_operation"
-        ? { ...variant, completion: { kind: "retained_owned_source_credit" as const } }
-        : variant,
-    );
+    const variants = rawVariants
+      .map(parseDirectIngressObservationVariant)
+      .map((variant) =>
+        ownerChannel === "telegram" &&
+        sameAsset(variant.asset, SOLANA_RETAINED_USDC_ASSET) &&
+        variant.completion.kind === "child_funding_operation"
+          ? {
+              ...variant,
+              completion: { kind: "retained_owned_source_credit" as const },
+            }
+          : variant,
+      );
     const selectedReceiveAsset = resolvedRequest.selectedReceiveAsset;
     const selectedReceiveTarget = resolvedRequest.selectedReceiveTarget;
     const selectedVariants = selectedReceiveAsset
@@ -947,7 +952,7 @@ export class FundingReceiveSessionService {
           ),
       },
       target,
-      { quotePlan: target.receipt.reviewQuotePlan },
+      { quotePlan: target.receipt.reviewQuotePlan, explainUnavailable: true },
     );
     if (
       !quote ||

@@ -2364,7 +2364,12 @@ try {
     await resumeTelegramFundingBuyContinuation(quoteFailureInput);
   const replayedQuoteFailure =
     await resumeTelegramFundingBuyContinuation(quoteFailureInput);
-  assert.match(firstQuoteFailure.text, /Unable to build a safe current quote/u);
+  assert.match(firstQuoteFailure.text, /Could not check the current price/u);
+  assert.match(firstQuoteFailure.text, /Nothing was submitted/u);
+  assert.match(
+    firstQuoteFailure.text,
+    /adding funds is not a verified solution/u,
+  );
   assert.match(replayedQuoteFailure.text, /already processed/u);
   assert.equal(
     /retry_buy|Deposit to continue/u.test(

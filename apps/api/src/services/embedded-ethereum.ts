@@ -18,6 +18,17 @@ import {
 
 const PRIVY_WALLET_API_BASE_URL = "https://api.privy.io";
 
+/** A structured denial from the wallet POST, not a browser/network error. */
+export class EmbeddedEvmAuthorizationRejectedError extends Error {
+  constructor(
+    message: string,
+    readonly status: 401 | 403,
+  ) {
+    super(message);
+    this.name = "EmbeddedEvmAuthorizationRejectedError";
+  }
+}
+
 export type EmbeddedPrivyAuthorizationRequest = {
   id: string;
   label: string;
@@ -278,6 +289,14 @@ async function executePreparedPrivyAuthorizationRequest(
         payload.message.trim().length > 0 &&
         payload.message) ||
       `Privy wallet request failed (${response.status})`;
+    if (
+      (response.status === 401 || response.status === 403) &&
+      payload &&
+      payload.data == null &&
+      ((typeof payload.error === "string" && payload.error.trim()) ||
+        (typeof payload.message === "string" && payload.message.trim()))
+    )
+      throw new EmbeddedEvmAuthorizationRejectedError(message, response.status);
     throw new Error(message);
   }
   return payload ?? {};

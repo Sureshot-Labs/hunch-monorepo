@@ -38,11 +38,13 @@ import {
   bindPositionActionSubmissionTransactionHash,
   claimPositionActionSubmission,
   completePositionActionEffect,
+  fetchPositionActionNotificationFacts,
   createOrReplayPositionAction,
   failPositionActionEffect,
   fetchPositionActionByIdempotencyKey,
   fetchPositionActionForUser,
   markStalePositionActionClaimForRecovery,
+  POSITION_ACTION_SUBMISSION_REPORT_GRACE_MS,
   recordPositionActionPostconditions,
   recordPositionActionReceipt,
   recordPositionActionSubmission,
@@ -64,9 +66,10 @@ import {
   type StoredPositionContext,
 } from "./venue-driver.js";
 import { preparedPositionActionFromStoredOperation } from "./position-action-replay.js";
+import { recoverMissingPositionSubmission } from "./canonical-redemption-recovery.js";
 
 const POSITION_ACTION_TTL_MS = 45_000;
-export const POSITION_ACTION_SUBMISSION_REPORT_GRACE_MS = 5 * 60_000;
+export { POSITION_ACTION_SUBMISSION_REPORT_GRACE_MS } from "./position-action-repository.js";
 const ZERO_POSITION_RE = /^0(?:\.0+)?$/;
 
 type CollectedRedemptionEvidence = Readonly<{
@@ -487,6 +490,7 @@ export class PositionActionRuntimeService {
   async claimSubmission(
     userId: string,
     operationId: string,
+    embeddedDispatchProtocol?: "privy_position_v1",
   ): Promise<PositionActionSubmissionClaim> {
     const operation = await fetchPositionActionForUser(this.db, {
       userId,
@@ -505,6 +509,7 @@ export class PositionActionRuntimeService {
         operation.normalizedActions,
       ),
       executorId: `position-action:${operation.executionMode}`,
+      embeddedDispatchProtocol,
     });
   }
 
@@ -582,31 +587,49 @@ export class PositionActionRuntimeService {
         transactionHash: current.submissionFingerprint,
       },
     });
+    // Preserve completed legacy notifications across a retry/rollout without
+    // skipping a still-incomplete activity projection.
+    const notificationFacts = await fetchPositionActionNotificationFacts(
+      this.db,
+      current.userId,
+      current.id,
+    );
+    if (notificationFacts.existingDedupeKey) {
+      return completePositionActionEffect(this.db, {
+        userId: current.userId,
+        operationId: current.id,
+        effectKind: "notification",
+        evidence: { dedupeKey: notificationFacts.existingDedupeKey },
+      });
+    }
     const plan = isRecord(current.planSnapshot.plan)
       ? current.planSnapshot.plan
       : null;
     const payoutRaw =
-      typeof plan?.expectedPayoutRaw === "string"
+      notificationFacts.actualPayoutRaw ??
+      (typeof plan?.expectedPayoutRaw === "string"
         ? plan.expectedPayoutRaw
-        : null;
+        : null);
+    const notificationInput = buildRedemptionNotification({
+      userId: current.userId,
+      positionActionId: current.id,
+      venue: current.venueId,
+      amountUsd:
+        payoutRaw && /^(0|[1-9][0-9]*)$/.test(payoutRaw)
+          ? Number(payoutRaw) / 1_000_000
+          : null,
+      marketId: current.marketId,
+      tokenId:
+        typeof current.planSnapshot.tokenId === "string"
+          ? current.planSnapshot.tokenId
+          : null,
+      txHash: current.submissionFingerprint,
+      walletAddress: current.ownerAddress,
+    });
     const notification = await createNotificationSafe(
       this.db,
       {
-        ...buildRedemptionNotification({
-          userId: current.userId,
-          venue: current.venueId,
-          amountUsd:
-            payoutRaw && /^(0|[1-9][0-9]*)$/.test(payoutRaw)
-              ? Number(payoutRaw) / 1_000_000
-              : null,
-          marketId: current.marketId,
-          tokenId:
-            typeof current.planSnapshot.tokenId === "string"
-              ? current.planSnapshot.tokenId
-              : null,
-          txHash: current.submissionFingerprint,
-          walletAddress: current.ownerAddress,
-        }),
+        ...notificationInput,
         replaceExisting: true,
       },
       undefined,
@@ -625,7 +648,7 @@ export class PositionActionRuntimeService {
       operationId: current.id,
       effectKind: "notification",
       evidence: {
-        dedupeKey: `redemption:${current.submissionFingerprint}`,
+        dedupeKey: notificationInput.dedupeKey ?? null,
       },
     });
   }
@@ -663,6 +686,17 @@ export class PositionActionRuntimeService {
           this.clock().getTime() - POSITION_ACTION_SUBMISSION_REPORT_GRACE_MS,
         ),
       });
+      if (operation.status === "failed") return publicResult(operation);
+      if (
+        !operation.submissionFingerprint &&
+        operation.broadcastMayHaveOccurred
+      ) {
+        operation = await recoverMissingPositionSubmission(
+          this.db,
+          operation,
+          this.venueDriver(operation.venueId).conditionalTokensAddress(),
+        );
+      }
     }
     const submissionReference = operation.submissionFingerprint;
     let txHash = transactionHash(submissionReference);
@@ -720,6 +754,8 @@ export class PositionActionRuntimeService {
       ownerAddress: operation.ownerAddress,
       plan,
       transactionHash: txHash,
+      operation,
+      conditionalTokensAddress: driver.conditionalTokensAddress(),
     });
     if (!receipt) return publicResult(operation);
     operation = await recordPositionActionReceipt(this.db, {

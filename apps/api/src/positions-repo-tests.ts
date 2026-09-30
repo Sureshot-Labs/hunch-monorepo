@@ -868,6 +868,62 @@ await test("polymarket position reads sort recent order activity before sync-dis
   }
 });
 
+await test("partial portfolio sync preserves missing positions and a successful retry can flatten them", async () => {
+  const walletAddress = randomEvmAddress();
+  const tokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;
+  const marketId = `limitless-test:${crypto.randomUUID()}`;
+  const userId = await createTestUser();
+  try {
+    await insertLimitlessToken(tokenId, marketId);
+    await insertLimitlessPosition({
+      userId,
+      walletAddress,
+      tokenId,
+      size: 2.5,
+      averagePrice: 0.4,
+    });
+    const partial = await syncWalletPositionsFromTokenBalances(pool, {
+      userId,
+      walletAddress,
+      venue: "limitless",
+      tokenBalances: [],
+      tokenIdLike: "limitless:%",
+      flattenMissing: false,
+    });
+    assert.equal(partial.flattenedPositions, 0);
+    const preserved = await pool.query<{ size: string; side: string }>(
+      "select size::text, side from positions where user_id = $1 and token_id = $2",
+      [userId, tokenId],
+    );
+    assert.equal(Number(preserved.rows[0]?.size), 2.5);
+    assert.equal(preserved.rows[0]?.side, "LONG");
+    const unobserved = await syncWalletPositionsFromTokenBalances(pool, {
+      userId,
+      walletAddress,
+      venue: "limitless",
+      tokenBalances: [],
+      tokenIdLike: "limitless:%",
+      flattenMissingTokenIds: ["limitless:0"],
+    });
+    assert.equal(
+      unobserved.flattenedPositions,
+      0,
+      "a successful bounded RPC batch cannot flatten tokens outside its coverage",
+    );
+    const complete = await syncWalletPositionsFromTokenBalances(pool, {
+      userId,
+      walletAddress,
+      venue: "limitless",
+      tokenBalances: [],
+      tokenIdLike: "limitless:%",
+      flattenMissingTokenIds: [tokenId],
+    });
+    assert.equal(complete.flattenedPositions, 1);
+  } finally {
+    await cleanupPositionTest(userId, [tokenId]);
+  }
+});
+
 await test("position sync protection does not extend stale-balance grace forever", async () => {
   const walletAddress = randomEvmAddress();
   const tokenId = `limitless:${crypto.randomInt(1_000_000, 9_999_999)}`;

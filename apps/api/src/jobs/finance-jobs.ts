@@ -41,18 +41,25 @@ import {
 import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
 import { PositionActionRuntimeService } from "../funding/position-actions/runtime-service.js";
 import { runStandaloneReconciliationBatch } from "../funding/worker/standalone-reconciliation-worker.js";
+import { reconcileOrphanPolymarketAttempts } from "../funding/reconciliation/polymarket-orphan-attempt-reconciler.js";
+import { reconcileLegacyDebridgeEvidence } from "../funding/legacy/debridge-evidence-reconciler.js";
 
 // This module is already API-owned and requires the API secret bundle. Keep
 // these imports out of the independently bootable funding worker entrypoint.
 export async function runStandaloneFinancialReconciliationJob() {
   const preparation = new FundingPlanningRuntime(pool);
   const positions = new PositionActionRuntimeService(pool);
-  return runStandaloneReconciliationBatch(pool, {
+  const standalone = await runStandaloneReconciliationBatch(pool, {
     preparation: (userId, runId) =>
       preparation.reconcilePreparationRun(userId, runId),
     positionAction: (userId, operationId) =>
       positions.reconcile(userId, operationId),
   });
+  return {
+    ...standalone,
+    polymarketOrphans: await reconcileOrphanPolymarketAttempts(pool),
+    legacyDebridge: await reconcileLegacyDebridgeEvidence(pool),
+  };
 }
 
 export type ReconcileTelegramTradeIntentsOptions = {

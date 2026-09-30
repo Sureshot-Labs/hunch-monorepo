@@ -285,6 +285,7 @@ export function buildTradeNotification(input: {
 
 export function buildRedemptionNotification(input: {
   userId: string;
+  positionActionId?: string;
   venue: string;
   amountUsd?: number | null;
   marketId?: string | null;
@@ -297,11 +298,13 @@ export function buildRedemptionNotification(input: {
   const bodyParts = [formatVenue(input.venue), "redemption"];
   if (amount) bodyParts.push(amount);
   const body = bodyParts.join(" ").trim() || "Redemption completed";
-  const dedupeKey = input.txHash
-    ? `redemption:${input.txHash}`
-    : input.marketId && input.walletAddress
-      ? `redemption:${input.venue}:${input.marketId}:${input.walletAddress}`
-      : null;
+  const dedupeKey = input.positionActionId
+    ? `redemption:position-action:${input.positionActionId}`
+    : input.txHash
+      ? `redemption:${input.txHash}`
+      : input.marketId && input.walletAddress
+        ? `redemption:${input.venue}:${input.marketId}:${input.walletAddress}`
+        : null;
 
   return {
     userId: input.userId,

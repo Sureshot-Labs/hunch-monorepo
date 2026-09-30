@@ -1079,6 +1079,7 @@ async function markMissingPositionsFlatInTx(
     venue: Position["venue"];
     positionScope: PositionScope;
     heldTokenIds: string[];
+    observedTokenIds?: readonly string[];
     tokenIdLike?: string;
     flattenGraceSec?: number;
   },
@@ -1104,6 +1105,12 @@ async function markMissingPositionsFlatInTx(
   paramCount += 1;
   whereClause += ` and not (p.token_id = any($${paramCount}::text[]))`;
   params.push(inputs.heldTokenIds);
+
+  if (inputs.observedTokenIds !== undefined) {
+    paramCount += 1;
+    whereClause += ` and p.token_id = any($${paramCount}::text[])`;
+    params.push([...inputs.observedTokenIds]);
+  }
 
   if (
     inputs.flattenGraceSec != null &&
@@ -1173,6 +1180,9 @@ export async function syncWalletPositionsFromTokenBalances(
     tokenIdLike?: string;
     flattenGraceSec?: number;
     protectRecentFlatsSec?: number;
+    /** Partial reads may upsert known balances, but cannot prove missing holdings. */
+    flattenMissing?: boolean;
+    flattenMissingTokenIds?: readonly string[];
   },
 ): Promise<SyncWalletPositionsResult> {
   const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
@@ -1213,15 +1223,19 @@ export async function syncWalletPositionsFromTokenBalances(
         protectRecentFlatsSec: inputs.protectRecentFlatsSec,
       });
 
-      const flattenedPositions = await markMissingPositionsFlatInTx(client, {
-        userId: inputs.userId,
-        walletAddress,
-        venue: inputs.venue,
-        positionScope,
-        heldTokenIds,
-        tokenIdLike: inputs.tokenIdLike,
-        flattenGraceSec: inputs.flattenGraceSec,
-      });
+      const flattenedPositions =
+        inputs.flattenMissing === false
+          ? 0
+          : await markMissingPositionsFlatInTx(client, {
+              userId: inputs.userId,
+              walletAddress,
+              venue: inputs.venue,
+              positionScope,
+              heldTokenIds,
+              observedTokenIds: inputs.flattenMissingTokenIds,
+              tokenIdLike: inputs.tokenIdLike,
+              flattenGraceSec: inputs.flattenGraceSec,
+            });
 
       return { upsertedPositions, flattenedPositions };
     },

@@ -59,6 +59,14 @@ export const positionActionSubmissionReportSchema = z
   })
   .strict();
 
+export const positionActionSubmissionClaimHeadersSchema = z
+  .object({
+    "x-hunch-position-dispatch-protocol": z
+      .literal("privy_position_v1")
+      .optional(),
+  })
+  .passthrough();
+
 const preparationCheckEvidenceSchema = z
   .object({
     checkId: z.string().trim().min(1).max(160),

@@ -7,7 +7,12 @@ import { AuthService, createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { fetchActiveDebridgeConfig } from "../repos/debridge-config.js";
+import { syncPendingDebridgeOrderStatus } from "../repos/bridge-orders.js";
 import { isRecord } from "../lib/type-guards.js";
+import {
+  extractDebridgeOrderIds,
+  uniqueDebridgeSourceOrderId,
+} from "../services/debridge-order-identity.js";
 import { fetchEvmTransactionReceipt } from "../services/polygon-rpc.js";
 import { fetchSolanaSignatureStatus } from "../services/solana-rpc.js";
 import { resolveLegacyCreationAdapterVersion } from "../funding/legacy/bridge-adapter-classifier.js";
@@ -2521,14 +2526,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
         }
 
         txLookup = lookup.payload;
-        if (
-          isRecord(lookup.payload) &&
-          Array.isArray(lookup.payload.orderIds)
-        ) {
-          orderIds = lookup.payload.orderIds
-            .map((id) => (typeof id === "string" ? id : null))
-            .filter((id): id is string => Boolean(id));
-        }
+        orderIds = [...extractDebridgeOrderIds(lookup.payload)];
       }
 
       if (orderId) orderIds = [orderId];
@@ -2869,36 +2867,12 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
           id: string,
           payload?: Record<string, unknown> | null,
         ) => {
-          if (payload) {
-            await pool.query(
-              `
-                update bridge_orders
-                set status = $1,
-                    metadata = jsonb_set(
-                      coalesce(metadata, '{}'::jsonb),
-                      '{debridge}',
-                      coalesce(metadata->'debridge', '{}'::jsonb)
-                        || jsonb_strip_nulls(jsonb_build_object(
-                          'statusPayload', $2::jsonb,
-                          'lastStatusSyncedAt', to_jsonb(now())
-                        )),
-                      true
-                    ),
-                    updated_at = now()
-                where id = $3
-              `,
-              [status, JSON.stringify(payload), id],
-            );
-            return;
-          }
-          await pool.query(
-            `
-              update bridge_orders
-              set status = $1, updated_at = now()
-              where id = $2
-            `,
-            [status, id],
-          );
+          await syncPendingDebridgeOrderStatus(pool, {
+            status,
+            operationId: id,
+            userId: user.id,
+            payload,
+          });
         };
         const toCanonicalReceiptStatus = (
           status: string | null | undefined,
@@ -3021,7 +2995,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
               }
 
               let resolvedOrderId = row.order_id;
-              if (!resolvedOrderId && row.tx_hash_src) {
+              if (row.tx_hash_src) {
                 const lookup = await debridgeRequest({
                   baseUrl: debridgeConfig.statsBase,
                   timeoutMs: 15_000,
@@ -3029,23 +3003,33 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                   requestPath: `/Transaction/${row.tx_hash_src}/orderIds`,
                 });
                 if (lookup.ok) {
-                  const ids =
-                    isRecord(lookup.payload) &&
-                    Array.isArray(lookup.payload.orderIds)
-                      ? lookup.payload.orderIds
-                          .map((id) => (typeof id === "string" ? id : null))
-                          .filter((id): id is string => Boolean(id))
-                      : [];
-                  if (ids[0]) {
-                    resolvedOrderId = ids[0];
-                    await pool.query(
+                  const sourceOrderId = uniqueDebridgeSourceOrderId(
+                    lookup.payload,
+                  );
+                  // A quote's old ID is not evidence of source association.
+                  // Empty, malformed or multiple source orders remain unknown.
+                  if (!sourceOrderId) continue;
+                  if (sourceOrderId && sourceOrderId !== resolvedOrderId) {
+                    resolvedOrderId = sourceOrderId;
+                    const repaired = await pool.query(
                       `
                       update bridge_orders
                       set order_id = $1, updated_at = now()
                       where id = $2
+                        and user_id = $3
+                        and tx_hash_src = $4
+                        and order_id is not distinct from $5
+                        and status in ('created', 'submitted')
                     `,
-                      [resolvedOrderId, row.id],
+                      [
+                        resolvedOrderId,
+                        row.id,
+                        user.id,
+                        row.tx_hash_src,
+                        row.order_id,
+                      ],
                     );
+                    if (repaired.rowCount !== 1) continue;
                   }
                 } else {
                   const failure = await resolveDebridgeSourceFailure(row);
@@ -3055,6 +3039,7 @@ export const bridgeRoutes: FastifyPluginAsync = async (app) => {
                       row.id,
                       failure.payload,
                     );
+                    continue;
                   }
                   continue;
                 }

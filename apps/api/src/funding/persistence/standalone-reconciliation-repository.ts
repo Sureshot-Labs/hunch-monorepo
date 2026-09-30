@@ -18,11 +18,7 @@ const CANDIDATES = {
   preparation: "candidate_row.status in ('submitted', 'ambiguous')",
   position_action: `candidate_row.action = 'redeem' and (
     candidate_row.status in ('submitting', 'submitted', 'confirmed')
-    or (candidate_row.status = 'reconcile_required' and (
-      candidate_row.submission_fingerprint is not null
-      or candidate_row.last_error_code is distinct from
-        'position_action_submission_reference_missing'
-    ))
+    or candidate_row.status = 'reconcile_required'
     or (candidate_row.status = 'completed' and exists (
       select 1 from position_action_effects pending_effect
        where pending_effect.action_operation_id = candidate_row.id

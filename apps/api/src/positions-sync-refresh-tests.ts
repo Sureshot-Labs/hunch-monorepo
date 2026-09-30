@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { Interface } from "ethers";
 
 import {
+  assertCompleteTokenBalanceRead,
   extractLimitlessTokenBalances,
   fetchPolymarketDataApiSnapshotsForOwnersForTests,
   isLimitlessPublicPortfolioUserNotFound,
@@ -11,6 +12,15 @@ import {
   prefetchPolymarketOwnerBalancesForWallets,
   resetPolymarketDataApiSnapshotCachesForTests,
 } from "./services/positions-sync.js";
+
+assert.doesNotThrow(() =>
+  assertCompleteTokenBalanceRead(["17"], new Map([["17", 0n]])),
+);
+assert.throws(
+  () => assertCompleteTokenBalanceRead(["17", "70"], new Map([["17", 1n]])),
+  /does not cover/,
+  "an omitted RPC token is unavailable, not a zero balance",
+);
 
 async function test(name: string, fn: () => void | Promise<void>) {
   try {

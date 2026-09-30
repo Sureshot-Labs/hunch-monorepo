@@ -6,9 +6,13 @@ export function sumErc20TransfersTo(input: {
   logs: readonly { address: string; data: string; topics: readonly string[] }[];
   recipient: string;
   tokenAddress: string;
+  sender?: string;
 }): bigint {
   const recipient = ethers.getAddress(input.recipient).toLowerCase();
   const token = ethers.getAddress(input.tokenAddress).toLowerCase();
+  const sender = input.sender
+    ? ethers.getAddress(input.sender).toLowerCase()
+    : null;
   let total = 0n;
   for (const log of input.logs) {
     if (
@@ -19,6 +23,12 @@ export function sumErc20TransfersTo(input: {
       continue;
     }
     try {
+      if (
+        sender &&
+        ethers.getAddress(`0x${log.topics[1]?.slice(-40)}`).toLowerCase() !==
+          sender
+      )
+        continue;
       const to = ethers.getAddress(`0x${log.topics[2]?.slice(-40)}`);
       if (to.toLowerCase() === recipient) total += BigInt(log.data);
     } catch {

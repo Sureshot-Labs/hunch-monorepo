@@ -142,7 +142,10 @@ await test("syncLimitlessHistoryForWallet updates canonical order instead of sto
       authContext: {
         authMode: "partner_hmac",
         creds: {} as never,
-        storedProfile: null,
+        storedProfile: {
+          id: 17,
+          account: "0x17cac6e4b08c8d95a2890a8df7cb0e7d83711387",
+        },
       },
       limit: 25,
       userId: "user-1",

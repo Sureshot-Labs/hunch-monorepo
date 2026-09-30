@@ -280,6 +280,17 @@ try {
     ).claimed,
     false,
   );
+  const missingReferenceLeases = await claimStandaloneReconciliation(pool, {
+    kind: "position_action",
+    limit: 1,
+    now: new Date(Date.now() + 1_000),
+    leaseMs: 5_000,
+  });
+  assert.equal(
+    missingReferenceLeases[0]?.id,
+    stale.id,
+    "missing references receive evidence-only background recovery",
+  );
   assert.equal(
     (
       await claimStandaloneReconciliation(pool, {
@@ -290,8 +301,14 @@ try {
       })
     ).length,
     0,
-    "missing-reference manual recovery must not hot-loop",
+    "a recovery lease prevents concurrent scans",
   );
+  const missingReferenceLease = missingReferenceLeases[0];
+  assert.ok(missingReferenceLease);
+  await finishStandaloneReconciliation(pool, {
+    lease: missingReferenceLease,
+    retryAt: new Date(0),
+  });
   assert.equal(
     (await fetchUserFinancialLifecycleSummary(pool, [positionUser]))
       .activeMovement,

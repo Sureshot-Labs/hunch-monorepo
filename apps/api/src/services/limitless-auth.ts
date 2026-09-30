@@ -1,7 +1,9 @@
 import { AuthService, type VenueCredentials } from "../auth.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
+  extractLimitlessMessage,
   isLimitlessPartnerHmacConfigured,
+  limitlessRequest,
   type LimitlessRequestAuthInputs,
 } from "./limitless-client.js";
 
@@ -23,6 +25,13 @@ export type LimitlessAuthContext = {
 export type LimitlessAuthVerification =
   | { ok: true; profile: LimitlessProfile | null; payload: unknown }
   | { ok: false; status: number; payload: unknown; message: string | null };
+
+/** An unavailable lookup does not prove that the wallet delegation was revoked. */
+export function isLimitlessAuthUnavailable(
+  verification: LimitlessAuthVerification,
+): boolean {
+  return !verification.ok && verification.status >= 500;
+}
 
 function normalizeAddress(value: string): string {
   return value.trim().toLowerCase();
@@ -193,7 +202,34 @@ export function extractLimitlessPartnerAccountProfiles(
 }
 
 function isValidLimitlessProfileId(id: number | undefined): id is number {
-  return typeof id === "number" && Number.isFinite(id) && id > 0;
+  return typeof id === "number" && Number.isSafeInteger(id) && id > 0;
+}
+
+/** Private portfolio calls must never fall back to the partner's own account. */
+export function buildLimitlessWalletRequestAuthInputs(
+  authContext: Pick<LimitlessAuthContext, "authMode" | "storedProfile">,
+  walletAddress: string,
+): LimitlessRequestAuthInputs & { headers: Record<string, string> } {
+  const profile = authContext.storedProfile;
+  if (
+    !isValidLimitlessProfileId(profile?.id) ||
+    !profile?.account ||
+    normalizeAddress(profile.account) !== normalizeAddress(walletAddress)
+  ) {
+    throw new Error("Connect Limitless for the selected wallet first.");
+  }
+  return {
+    ...buildLimitlessRequestAuthInputs(authContext),
+    headers: { "x-on-behalf-of": String(profile.id) },
+  };
+}
+
+function isCompletePartnerAccountLookup(payload: unknown): boolean {
+  if (Array.isArray(payload)) return true;
+  if (!isRecord(payload)) return false;
+  return LIMITLESS_PROFILE_COLLECTION_KEYS.some((key) =>
+    Array.isArray(payload[key]),
+  );
 }
 
 export function extractLimitlessPartnerAccountProfile(
@@ -266,6 +302,13 @@ export async function loadLimitlessProfileForWallet(inputs: {
   baseProfile?: LimitlessProfile | null;
 }): Promise<LimitlessProfile | null> {
   const storedProfile = extractLimitlessProfile(inputs.additionalData ?? null);
+  if (
+    inputs.baseProfile?.id != null &&
+    storedProfile?.id != null &&
+    inputs.baseProfile.id !== storedProfile.id
+  ) {
+    return inputs.baseProfile;
+  }
   return mergeLimitlessProfiles(inputs.baseProfile ?? null, storedProfile);
 }
 
@@ -326,9 +369,61 @@ export async function verifyLimitlessAuthContext(inputs: {
     };
   }
 
+  // A stored profile is only a hint: partner delegation can be revoked or its
+  // ID can change without the local credential row being updated.
+  let lookup: Awaited<ReturnType<typeof limitlessRequest>>;
+  try {
+    lookup = await limitlessRequest({
+      method: "GET",
+      requestPath: `/profiles/partner-accounts?account=${encodeURIComponent(walletAddress)}`,
+      auth: "partner_hmac",
+      allowRetry: false,
+    });
+  } catch {
+    return {
+      ok: false,
+      status: 503,
+      payload: { code: "limitless_auth_status_unavailable" },
+      message: "Limitless connection could not be checked. Try again.",
+    };
+  }
+  if (!lookup.ok) {
+    return {
+      ok: false,
+      status: 503,
+      payload: {
+        code: "limitless_auth_status_unavailable",
+        upstreamStatus: lookup.status,
+      },
+      message:
+        extractLimitlessMessage(lookup.payload) ??
+        "Limitless connection could not be checked. Try again.",
+    };
+  }
+  const currentProfile = extractLimitlessPartnerAccountProfile(
+    lookup.payload,
+    walletAddress,
+  );
+  if (currentProfile) {
+    inputs.authContext.storedProfile = currentProfile;
+    return {
+      ok: true,
+      profile: currentProfile,
+      payload: { profile: currentProfile },
+    };
+  }
+  if (!isCompletePartnerAccountLookup(lookup.payload)) {
+    return {
+      ok: false,
+      status: 503,
+      payload: { code: "limitless_auth_status_unavailable" },
+      message: "Limitless connection could not be checked. Try again.",
+    };
+  }
   return {
-    ok: true,
-    profile,
-    payload: { profile },
+    ok: false,
+    status: 403,
+    payload: { code: "limitless_reconnect_required" },
+    message: "Reconnect Limitless for this wallet before trading.",
   };
 }

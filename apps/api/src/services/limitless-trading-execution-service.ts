@@ -118,6 +118,7 @@ import {
   extractLimitlessPartnerAccountProfile,
   extractLimitlessPartnerAccountProfiles,
   extractLimitlessProfile,
+  isLimitlessAuthUnavailable,
   loadLimitlessProfileForWallet,
   resolveLimitlessAuthContext,
   type LimitlessProfile,
@@ -817,19 +818,6 @@ export async function connectLimitlessPartnerAccountRoute(input: {
     userId: input.userId,
     walletAddress: checksumAccount,
     run: async () => {
-      const storedProfile = await loadStoredLimitlessProfileForAccount({
-        userId: input.userId,
-        account: checksumAccount,
-        clientType: input.clientType,
-      });
-      if (storedProfile && !input.forceReconnect) {
-        return {
-          ok: true,
-          authMode: "partner_hmac",
-          profile: storedProfile,
-        };
-      }
-
       const persistAndReturnProfile = async (
         profile: LimitlessProfile,
         logMessage: string,
@@ -860,6 +848,51 @@ export async function connectLimitlessPartnerAccountRoute(input: {
           profile,
         };
       };
+
+      if (!input.forceReconnect) {
+        const authContext = await resolveLimitlessAuthContext(
+          input.userId,
+          checksumAccount,
+        );
+        if (authContext) {
+          const previousProfileId = authContext.storedProfile?.id;
+          const verification = await verifyLimitlessAuthContext({
+            authContext,
+            walletAddress: checksumAccount,
+          });
+          if (!verification.ok && isLimitlessAuthUnavailable(verification)) {
+            return {
+              ok: false,
+              httpStatus: 503,
+              error:
+                verification.message ?? "Limitless is temporarily unavailable.",
+              payload: verification.payload,
+            };
+          }
+          if (verification.ok && verification.profile) {
+            const currentProfile = normalizeLimitlessProfileForAccount({
+              account: checksumAccount,
+              clientType: input.clientType,
+              profile: verification.profile,
+            });
+            if (currentProfile) {
+              if (currentProfile.id !== previousProfileId) {
+                return persistAndReturnProfile(
+                  currentProfile,
+                  "Failed to store the current authorized Limitless profile",
+                );
+              }
+              return {
+                ok: true,
+                authMode: "partner_hmac",
+                profile: currentProfile,
+              };
+            }
+          }
+          // A definitive missing delegation uses the signed connect request
+          // below. A temporary lookup failure never starts reauthorization.
+        }
+      }
 
       const encodedSigningMessage = encodeLimitlessSigningMessageHeader(
         input.signingMessage,
@@ -1889,6 +1922,18 @@ export async function fetchLimitlessAccountRoute(input: {
       authContext,
       walletAddress: signer,
     });
+    if (!verification.ok && isLimitlessAuthUnavailable(verification)) {
+      return {
+        ok: false,
+        statusCode: 503,
+        payload: {
+          error:
+            verification.message ??
+            "Limitless connection could not be checked.",
+          code: "limitless_auth_status_unavailable",
+        },
+      };
+    }
     hasCredentials = verification.ok;
     if (verification.ok) {
       verifiedProfileBase = verification.profile;
@@ -5994,6 +6039,14 @@ async function getReadiness(
     walletAddress: input.walletAddress,
   });
   if (!verification.ok) {
+    if (isLimitlessAuthUnavailable(verification)) {
+      return readiness("limitless", capabilities, {
+        ok: false,
+        code: "limitless_auth_status_unavailable",
+        message:
+          verification.message ?? "Limitless connection could not be checked.",
+      });
+    }
     const code = "limitless_reconnect_required";
     const message = verification.message ?? "Limitless account is not ready.";
     const autoRepairable = Boolean(

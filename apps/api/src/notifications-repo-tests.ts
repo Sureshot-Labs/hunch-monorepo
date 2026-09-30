@@ -9,6 +9,7 @@ import {
 } from "./repos/notifications-repo.js";
 import {
   buildOrderNotification,
+  buildRedemptionNotification,
   createNotificationSafe,
 } from "./services/notifications.js";
 
@@ -21,6 +22,32 @@ async function test(name: string, fn: () => Promise<void>) {
     throw error;
   }
 }
+
+await test("bundled redemption notifications retain action identity and legacy keys", async () => {
+  const common = {
+    userId: "user-1",
+    venue: "limitless",
+    txHash: `0x${"a".repeat(64)}`,
+  };
+  const first = buildRedemptionNotification({
+    ...common,
+    positionActionId: "action-1",
+  });
+  const second = buildRedemptionNotification({
+    ...common,
+    positionActionId: "action-2",
+  });
+  assert.notEqual(first.dedupeKey, second.dedupeKey);
+  assert.equal(
+    first.dedupeKey,
+    buildRedemptionNotification({ ...common, positionActionId: "action-1" })
+      .dedupeKey,
+  );
+  assert.equal(
+    buildRedemptionNotification(common).dedupeKey,
+    `redemption:${common.txHash}`,
+  );
+});
 
 await test("order notifications replace by logical order id", async () => {
   const notification = buildOrderNotification({

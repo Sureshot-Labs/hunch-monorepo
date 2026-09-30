@@ -33,10 +33,8 @@ import {
   extractLimitlessMessage,
   limitlessRequest,
 } from "./limitless-client.js";
-import {
-  buildLimitlessRequestAuthInputs,
-  resolveLimitlessAuthContext,
-} from "./limitless-auth.js";
+import { resolveLimitlessAuthContext } from "./limitless-auth.js";
+import { fetchLimitlessWalletPortfolio } from "./limitless-wallet-portfolio.js";
 import { syncLimitlessHistoryForWallet } from "./limitless-history.js";
 import {
   buildPolymarketBuilderFeeAccrual,
@@ -413,6 +411,7 @@ async function fetchErc1155OwnerTokenBalances(inputs: {
   owner: string;
   tokenIds: string[];
   onRpcCall?: (() => void) | null;
+  requireComplete?: boolean;
 }): Promise<WalletTokenBalance[]> {
   const tokenIds = normalizeNumericTokenIds(inputs.tokenIds);
   if (tokenIds.length === 0) return [];
@@ -429,6 +428,8 @@ async function fetchErc1155OwnerTokenBalances(inputs: {
       owner: inputs.owner,
       tokenIds: chunk,
     });
+    if (inputs.requireComplete)
+      assertCompleteTokenBalanceRead(chunk, chunkBalances);
 
     for (const tokenId of chunk) {
       const balance = chunkBalances.get(tokenId) ?? 0n;
@@ -441,6 +442,17 @@ async function fetchErc1155OwnerTokenBalances(inputs: {
   }
 
   return balances;
+}
+
+export function assertCompleteTokenBalanceRead(
+  tokenIds: readonly string[],
+  balances: ReadonlyMap<string, bigint>,
+): void {
+  if (tokenIds.some((id) => !balances.has(id))) {
+    throw new Error(
+      "ERC1155 balance response does not cover the requested tokens",
+    );
+  }
 }
 
 async function fetchErc1155OwnerTokenBalancesForOwners(inputs: {
@@ -1702,14 +1714,16 @@ async function fetchLimitlessCandidateTokenIds(
 async function fetchLimitlessOnchainTokenBalances(
   pool: Pool,
   inputs: { userId: string; walletAddress: string; limit?: number },
-): Promise<WalletTokenBalance[]> {
+): Promise<
+  Readonly<{ balances: WalletTokenBalance[]; observedTokenIds: string[] }>
+> {
   const tokenIds = await fetchLimitlessCandidateTokenIds(pool, {
     userId: inputs.userId,
     walletAddresses: [inputs.walletAddress],
     limit: inputs.limit ?? 1000,
   });
 
-  if (tokenIds.length === 0) return [];
+  if (tokenIds.length === 0) return { balances: [], observedTokenIds: [] };
 
   const balances = await fetchErc1155OwnerTokenBalances({
     rpcUrl: env.baseRpcUrl,
@@ -1717,18 +1731,25 @@ async function fetchLimitlessOnchainTokenBalances(
     contractAddress: env.limitlessConditionalTokensAddress,
     owner: inputs.walletAddress,
     tokenIds,
+    requireComplete: true,
   });
 
-  return balances
-    .map((balance) => {
-      const scopedTokenId = normalizeLimitlessScopedTokenId(balance.tokenId);
-      if (!scopedTokenId) return null;
-      return {
-        tokenId: scopedTokenId,
-        size: balance.size,
-      };
-    })
-    .filter((balance): balance is WalletTokenBalance => balance != null);
+  return {
+    observedTokenIds: tokenIds.flatMap((id) => {
+      const scoped = normalizeLimitlessScopedTokenId(id);
+      return scoped ? [scoped] : [];
+    }),
+    balances: balances
+      .map((balance) => {
+        const scopedTokenId = normalizeLimitlessScopedTokenId(balance.tokenId);
+        if (!scopedTokenId) return null;
+        return {
+          tokenId: scopedTokenId,
+          size: balance.size,
+        };
+      })
+      .filter((balance): balance is WalletTokenBalance => balance != null),
+  };
 }
 
 async function fetchPolymarketFunderAddress(
@@ -2677,48 +2698,28 @@ async function syncLimitlessPositionsFromPortfolio(
 ): Promise<PositionsSyncResult> {
   const totalStartedAt = Date.now();
   const authStartedAt = Date.now();
-  const creds = await AuthService.getVenueCredentials(
-    inputs.userId,
-    "limitless",
-    inputs.walletAddress,
-  );
   const authContext = await resolveLimitlessAuthContext(
     inputs.userId,
     inputs.walletAddress,
   );
   const authMs = Date.now() - authStartedAt;
-  if (!authContext || !creds) {
-    throw new Error(
-      "Connect Limitless for this wallet before syncing positions.",
-    );
-  }
-
   const positionsApiStartedAt = Date.now();
-  const upstream = await limitlessRequest({
-    method: "GET",
-    requestPath: "/portfolio/positions",
-    ...buildLimitlessRequestAuthInputs(authContext),
+  const snapshot = await fetchLimitlessWalletPortfolio({
+    authContext,
+    walletAddress: inputs.walletAddress,
   });
   const positionsApiMs = Date.now() - positionsApiStartedAt;
-
-  if (!upstream.ok) {
-    const message = extractLimitlessMessage(upstream.payload);
-    throw new Error(
-      message
-        ? `Limitless positions sync failed: ${message}`
-        : "Limitless positions sync failed.",
-    );
-  }
 
   let historyMs = 0;
   const historyStartedAt = Date.now();
   try {
-    await syncLimitlessHistoryForWallet(pool, {
-      userId: inputs.userId,
-      walletAddress: inputs.walletAddress,
-      authContext,
-      limit: 50,
-    });
+    if (authContext)
+      await syncLimitlessHistoryForWallet(pool, {
+        userId: inputs.userId,
+        walletAddress: inputs.walletAddress,
+        authContext,
+        limit: 50,
+      });
     historyMs = Date.now() - historyStartedAt;
   } catch (error) {
     historyMs = Date.now() - historyStartedAt;
@@ -2732,15 +2733,20 @@ async function syncLimitlessPositionsFromPortfolio(
     }
   }
 
-  const snapshotTokenBalances = extractLimitlessTokenBalances(upstream.payload);
+  const snapshotTokenBalances = extractLimitlessTokenBalances(snapshot);
   let onchainTokenBalances: WalletTokenBalance[] = [];
+  let onchainAvailable = false;
+  let observedOnchainTokenIds: string[] = [];
   let onchainMs = 0;
   const onchainStartedAt = Date.now();
   try {
-    onchainTokenBalances = await fetchLimitlessOnchainTokenBalances(pool, {
+    const observed = await fetchLimitlessOnchainTokenBalances(pool, {
       userId: inputs.userId,
       walletAddress: inputs.walletAddress,
     });
+    onchainTokenBalances = observed.balances;
+    observedOnchainTokenIds = observed.observedTokenIds;
+    onchainAvailable = true;
     onchainMs = Date.now() - onchainStartedAt;
   } catch (error) {
     onchainMs = Date.now() - onchainStartedAt;
@@ -2775,6 +2781,8 @@ async function syncLimitlessPositionsFromPortfolio(
     venue: "limitless",
     positionScope: inputs.positionScope,
     tokenBalances,
+    flattenMissing: onchainAvailable,
+    flattenMissingTokenIds: observedOnchainTokenIds,
     tokenIdLike: "limitless:%",
     flattenGraceSec: env.limitlessPositionsSyncFlattenGraceSec,
     protectRecentFlatsSec: env.limitlessPositionsSyncFlattenGraceSec,

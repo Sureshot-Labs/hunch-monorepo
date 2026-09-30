@@ -893,6 +893,121 @@ export async function claimAmbiguousLimitlessTradeAttemptsForReconciliation(
   return claimed;
 }
 
+/** Evidence-only leases. Empty CLOB lookups must never close these attempts. */
+export async function claimAmbiguousPolymarketTradeAttemptsForReconciliation(
+  pool: Pool,
+  now = new Date(),
+): Promise<readonly FundingTradeAttempt[]> {
+  const candidates = await pool.query<{ id: string; user_id: string }>(
+    `select attempt.id, attempt.user_id from funding_trade_attempts attempt
+      where attempt.execution_path = 'polymarket_clob' and attempt.state in ('submission_started', 'ambiguous')
+        and attempt.broadcast_may_have_occurred and attempt.external_reference ~ '^0x[0-9a-fA-F]{64}$'
+        and attempt.claim_lease_until <= $1
+        and not exists (select 1 from orders stored_order where stored_order.user_id = attempt.user_id
+          and stored_order.venue = 'polymarket' and stored_order.funding_trade_attempt_id = attempt.id)
+      order by attempt.claim_lease_until, attempt.id limit 4`,
+    [now],
+  );
+  const claimed: FundingTradeAttempt[] = [];
+  for (const candidate of candidates.rows) {
+    const leased = await tx(pool, async (client) => {
+      await lockFundingOperationForAttempt(client, {
+        attemptId: candidate.id,
+        userId: candidate.user_id,
+      });
+      const current = await fetchAttemptForUpdate(client, {
+        attemptId: candidate.id,
+        userId: candidate.user_id,
+      });
+      if (
+        current.executionPath !== "polymarket_clob" ||
+        !["submission_started", "ambiguous"].includes(current.state) ||
+        !current.broadcastMayHaveOccurred ||
+        !current.externalReference ||
+        current.claimLeaseUntil > now
+      )
+        return null;
+      const result = await client.query<FundingTradeAttemptRow>(
+        `update funding_trade_attempts set claim_token = gen_random_uuid(), claim_lease_until = $3::timestamptz + interval '5 minutes', updated_at = $3
+          where id = $1 and user_id = $2 and state in ('submission_started', 'ambiguous') and claim_lease_until <= $3
+          returning ${ATTEMPT_COLUMNS}`,
+        [candidate.id, candidate.user_id, now],
+      );
+      return result.rows[0] ? mapAttempt(result.rows[0]) : null;
+    });
+    if (leased) claimed.push(leased);
+  }
+  return claimed;
+}
+
+/** Link positive exact-key evidence without reviving or re-locking an expired Buy. */
+export async function attachRecoveredPolymarketAttemptOrderInTransaction(
+  client: PoolClient,
+  input: { attempt: FundingTradeAttempt; orderId: string },
+): Promise<void> {
+  const expected = input.attempt;
+  await lockFundingOperationForAttempt(client, {
+    attemptId: expected.id,
+    userId: expected.userId,
+  });
+  const current = await fetchAttemptForUpdate(client, {
+    attemptId: expected.id,
+    userId: expected.userId,
+  });
+  if (current.state === "accepted" && current.consumerRef === input.orderId)
+    return;
+  if (
+    current.executionPath !== "polymarket_clob" ||
+    !["submission_started", "ambiguous"].includes(current.state) ||
+    current.claimToken !== expected.claimToken ||
+    !current.externalReference ||
+    current.externalReference !== expected.externalReference ||
+    current.claimLeaseUntil.getTime() <= Date.now()
+  )
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "Polymarket evidence lease changed",
+    );
+  const linked = await client.query<{ id: string }>(
+    `update orders stored_order set funding_operation_id = $2, funding_reservation_id = $3, funding_trade_attempt_id = $4
+        from funding_operations operation_row
+        where stored_order.id = $1 and stored_order.user_id = $5 and stored_order.venue = 'polymarket'
+          and stored_order.side = 'BUY' and stored_order.order_hash = $6
+          and operation_row.id = $2 and operation_row.user_id = $5
+          and lower(stored_order.wallet_address) = lower(operation_row.destination_target_snapshot #>> '{location,details,address}')
+          and stored_order.token_id = operation_row.market_context_snapshot ->> 'marketContextId'
+          and (stored_order.funding_operation_id is null or stored_order.funding_operation_id = $2)
+          and (stored_order.funding_reservation_id is null or stored_order.funding_reservation_id = $3)
+          and (stored_order.funding_trade_attempt_id is null or stored_order.funding_trade_attempt_id = $4)
+        returning stored_order.id`,
+    [
+      input.orderId,
+      current.operationId,
+      current.reservationId,
+      current.id,
+      current.userId,
+      current.externalReference,
+    ],
+  );
+  if (linked.rowCount !== 1)
+    throw new FundingTradeAttemptError(
+      "attempt_conflict",
+      "Polymarket order does not match its immutable funding destination",
+    );
+  await acceptFundingTradeAttemptInTransaction(client, {
+    userId: current.userId,
+    operationId: current.operationId,
+    reservationId: current.reservationId,
+    attemptId: current.id,
+    expectedReconciliationClaimToken: current.claimToken,
+    externalReference: current.externalReference,
+    consumerKind: "web_order",
+    consumerRef: input.orderId,
+  });
+  // Intentionally do not consume/reopen released reservations, prepare a
+  // replacement trade, or credit positions from this status-only observation.
+}
+
 export async function claimLimitlessTradeAttemptForReconciliation(
   pool: Pool,
   input: Readonly<{

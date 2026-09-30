@@ -487,10 +487,14 @@ export async function fetchSolanaParsedTransaction(inputs: {
   rpcUrls: string[];
   timeoutMs: number;
   signature: string;
+  maxAttempts?: number;
+  totalTimeoutMs?: number;
 }): Promise<unknown | null> {
   return solanaRpcRequest<unknown | null>({
     rpcUrls: inputs.rpcUrls,
     timeoutMs: inputs.timeoutMs,
+    maxAttempts: inputs.maxAttempts,
+    totalTimeoutMs: inputs.totalTimeoutMs,
     method: "getTransaction",
     params: [
       inputs.signature,
@@ -501,6 +505,38 @@ export async function fetchSolanaParsedTransaction(inputs: {
       },
     ],
   });
+}
+
+export async function fetchSolanaFinalizedSerializedTransaction(inputs: {
+  rpcUrls: string[];
+  timeoutMs: number;
+  signature: string;
+}): Promise<string | null> {
+  const result = await solanaRpcRequest<unknown>({
+    ...inputs,
+    maxAttempts: 1,
+    totalTimeoutMs: inputs.timeoutMs,
+    method: "getTransaction",
+    params: [
+      inputs.signature,
+      {
+        encoding: "base64",
+        commitment: "finalized",
+        maxSupportedTransactionVersion: 0,
+      },
+    ],
+  });
+  if (result === null) return null;
+  if (
+    !isRecord(result) ||
+    !isRecord(result.meta) ||
+    result.meta.err !== null ||
+    !Array.isArray(result.transaction) ||
+    result.transaction[1] !== "base64" ||
+    typeof result.transaction[0] !== "string"
+  )
+    return null;
+  return result.transaction[0];
 }
 
 /** Exact finalized SPL-token loss from one owner in a persisted transaction. */

@@ -22,6 +22,7 @@ import {
   type PolymarketFunderCandidate,
 } from "../services/polymarket-funder.js";
 import {
+  isLimitlessAuthUnavailable,
   resolveLimitlessAuthContext,
   verifyLimitlessAuthContext,
 } from "../services/limitless-auth.js";
@@ -1778,9 +1779,17 @@ export const walletsRoutes: FastifyPluginAsync = async (app) => {
                           authContext,
                           walletAddress,
                         });
-                        hasCredentials = verification.ok;
+                        const authUnavailable =
+                          isLimitlessAuthUnavailable(verification);
+                        // Keep existing credentials during an outage, but never
+                        // advertise readiness without a verified connection.
+                        hasCredentials = verification.ok || authUnavailable;
                         if (!verification.ok) {
-                          reasons.push("invalid_credentials");
+                          reasons.push(
+                            authUnavailable
+                              ? "service_unavailable"
+                              : "invalid_credentials",
+                          );
                         }
                       }
                       if (snapshot.usdcBalance <= 0n) {

@@ -15,6 +15,7 @@ import type {
   FundingQuoteSummary,
 } from "../../domain/types.js";
 import { SOLANA_NATIVE_EXECUTION_RESERVE_LAMPORTS } from "../../domain/network-fees.js";
+import { FundingPlannerError } from "../../planner/money.js";
 import {
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
@@ -827,6 +828,108 @@ assert.equal(
   expectedOutputReceiptQuoted,
   false,
   "a received exact source amount must never select an exact-output plan",
+);
+
+// Historical shape: a canonical $0.10 stablecoin receipt has no child
+// operation, while all exact-input routes fail the configured output floor.
+// Identity is synthetic; never combine it with another wallet's larger balance.
+const tinyReceiptTarget = {
+  ...routedReceiptTarget,
+  receipt: { ...routedReceiptTarget.receipt, rawAmount: "100000" },
+};
+const tinyReceiptPlan = relayReceiveQuotePlan({
+  receiptAsset: tinyReceiptTarget.receipt.asset,
+  destinationAsset: tinyReceiptTarget.destinationAsset,
+  rawAmount: "100000",
+});
+assert.ok(tinyReceiptPlan);
+function unavailableReceiptSource(
+  reasonCodes: readonly string[],
+  locationId = tinyReceiptTarget.receiptDestinationLocationId,
+) {
+  return {
+    sourceOptionId: "source_receive_tiny_12345678",
+    selectable: false,
+    reasonCodes,
+    amountMode: "exact_input",
+    kind: "wallet_asset",
+    source: {
+      kind: "owned_location",
+      location: {
+        locationId,
+        asset: tinyReceiptTarget.receipt.asset,
+        details: { address: tinyReceiptTarget.receipt.destinationAddress },
+      },
+    },
+  };
+}
+async function explainTinyReceipt(
+  sourceOptions: readonly unknown[],
+  explainUnavailable = true,
+) {
+  assert.ok(tinyReceiptPlan);
+  return quoteFundingReceiveReceipt(
+    {
+      async liquidity() {
+        return {
+          liquidityProjectionId: "projection_receive_tiny_12345678",
+          sourceOptions,
+        } as never;
+      },
+      async quote() {
+        throw new Error("unavailable receipt must never quote or submit");
+      },
+    },
+    tinyReceiptTarget,
+    { quotePlan: tinyReceiptPlan, explainUnavailable },
+  );
+}
+for (const [reasons, code] of [
+  [["minimum_output_not_met"], "receive_conversion_output_limit"],
+  [["fee_limit_exceeded"], "receive_conversion_fee_limit"],
+] as const) {
+  await assert.rejects(
+    explainTinyReceipt([unavailableReceiptSource(reasons)]),
+    (error: unknown) =>
+      error instanceof FundingPlannerError && error.code === code,
+  );
+  assert.equal(
+    await explainTinyReceipt([unavailableReceiptSource(reasons)], false),
+    null,
+    "automatic receipt routing retains its existing null/review disposition",
+  );
+}
+await assert.rejects(
+  explainTinyReceipt([
+    unavailableReceiptSource(["minimum_output_not_met"]),
+    unavailableReceiptSource(["fee_limit_exceeded"]),
+  ]),
+  (error: unknown) =>
+    error instanceof FundingPlannerError &&
+    error.code === "receive_conversion_economic_limit",
+);
+assert.equal(
+  await explainTinyReceipt([
+    unavailableReceiptSource(["provider_status_unknown"]),
+  ]),
+  null,
+  "temporary provider uncertainty must remain refreshable",
+);
+assert.equal(
+  await explainTinyReceipt([
+    unavailableReceiptSource(
+      ["minimum_output_not_met"],
+      "location_other_wallet_12345678",
+    ),
+    unavailableReceiptSource(["provider_status_unknown"]),
+  ]),
+  null,
+  "another location's minimum cannot diagnose the exact receipt",
+);
+assert.equal(
+  await explainTinyReceipt([]),
+  null,
+  "absence of quote evidence is not a proven economic refusal",
 );
 
 function variant(
