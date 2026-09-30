@@ -112,6 +112,29 @@ function isContentWorkerNoop(result: unknown): boolean {
   ]);
 }
 
+function isStandaloneFinancialReconciliationNoop(result: unknown): boolean {
+  if (typeof result !== "object" || result === null) return false;
+  const record = result as Record<string, unknown>;
+  return (
+    !hasPositiveActivity(record, [
+      "claimed",
+      "reconciled",
+      "retryableErrors",
+      "timedOut",
+    ]) &&
+    !hasPositiveActivity(record.polymarketOrphans, [
+      "claimed",
+      "found",
+      "unknown",
+    ]) &&
+    !hasPositiveActivity(record.legacyDebridge, [
+      "claimed",
+      "fulfilled",
+      "unknown",
+    ])
+  );
+}
+
 type FinanceWorkerEnv = typeof env;
 
 export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
@@ -133,12 +156,7 @@ export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
       retryBackoffSec: workerEnv.retryBackoffSec,
       jitterSec: 0,
       run: () => runStandaloneFinancialReconciliationJob(),
-      isNoopResult: (result) =>
-        !hasPositiveActivity(result, [
-          "claimed",
-          "retryableErrors",
-          "timedOut",
-        ]),
+      isNoopResult: isStandaloneFinancialReconciliationNoop,
     },
     {
       name: "content",

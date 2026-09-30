@@ -4,12 +4,15 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { mock } from "node:test";
+import { setImmediate } from "node:timers/promises";
 import type { Pool } from "@hunch/infra";
 
 import { env, parseFundingReferenceLookupKeyVersion } from "./env.js";
 import {
   loadFinanceJobsModuleForSmoke,
   resetFinanceJobsModuleLoaderForTests,
+  runStandaloneFinancialReconciliationJob,
   runTelegramTradeIntentReconcileJob,
   setFinanceJobsModuleLoaderForTests,
 } from "./finance-jobs.js";
@@ -25,6 +28,8 @@ import {
   setFundingWorkerModuleLoaderForTests,
 } from "./funding-reconciliation.js";
 import { buildJobs } from "./main.js";
+import { InMemoryLockManager } from "./locks.js";
+import { IntervalScheduler } from "./scheduler.js";
 
 type TestCase = {
   name: string;
@@ -72,6 +77,36 @@ function buildTestEnv(overrides: Partial<typeof env> = {}): typeof env {
   };
 }
 
+type FinanceJobsFixture = Awaited<
+  ReturnType<typeof loadFinanceJobsModuleForSmoke>
+>;
+
+function buildFinanceJobsFixture(
+  overrides: Partial<FinanceJobsFixture> = {},
+): FinanceJobsFixture {
+  const noop = async () => null;
+  return {
+    runStandaloneFinancialReconciliationJob: noop,
+    runApiCacheWarmJob: noop,
+    runFeesCollectJob: async () => ({
+      collected: 0,
+      dryRunCount: 0,
+      skippedError: 0,
+      skippedLive: 0,
+      skippedNoCharge: 0,
+      skippedNothing: 0,
+    }),
+    runFeesReconcileJob: noop,
+    runKalshiExecutionReconcileJob: noop,
+    runPositionResolutionNotificationJob: noop,
+    runPrivyDeletionReconcileJob: noop,
+    runRewardsPayoutJob: noop,
+    runTelegramTradeIntentReconcileJob: noop,
+    runTreasurySweepJob: noop,
+    ...overrides,
+  };
+}
+
 const tests: TestCase[] = [
   {
     name: "standalone recovery is scheduled independently of submission authority",
@@ -89,6 +124,152 @@ const tests: TestCase[] = [
       assert.equal(job?.maxRetries, 0);
       assert.equal(job?.intervalSec, 60);
       assert.equal(job?.timeoutSec, 90);
+    },
+  },
+  {
+    name: "standalone recovery logs nested evidence progress, not only journal counters",
+    run: () => {
+      const job = buildJobs(buildTestEnv()).find(
+        (candidate) => candidate.name === "standalone_financial_reconciliation",
+      );
+      assert.ok(job?.isNoopResult);
+      const empty = {
+        claimed: 0,
+        reconciled: 0,
+        retryableErrors: 0,
+        timedOut: 0,
+      };
+      assert.equal(
+        job.isNoopResult(empty),
+        true,
+        "old summary stays compatible",
+      );
+      assert.equal(
+        job.isNoopResult({
+          ...empty,
+          polymarketOrphans: { claimed: 0, found: 0, unknown: 0 },
+          legacyDebridge: { claimed: 0, fulfilled: 0, unknown: 0 },
+        }),
+        true,
+      );
+      for (const nested of [
+        { polymarketOrphans: { claimed: 1, found: 1, unknown: 0 } },
+        { polymarketOrphans: { claimed: 1, found: 0, unknown: 1 } },
+        { legacyDebridge: { claimed: 1, fulfilled: 1, unknown: 0 } },
+        { legacyDebridge: { claimed: 1, fulfilled: 0, unknown: 1 } },
+      ]) {
+        assert.equal(job.isNoopResult({ ...empty, ...nested }), false);
+      }
+      for (const counter of [
+        "claimed",
+        "reconciled",
+        "retryableErrors",
+        "timedOut",
+      ]) {
+        assert.equal(job.isNoopResult({ ...empty, [counter]: 1 }), false);
+      }
+      assert.equal(job.isNoopResult(null), false);
+    },
+  },
+  {
+    name: "scheduler timeout cannot start an overlapping standalone recovery batch",
+    run: async () => {
+      let calls = 0;
+      let settle: (() => void) | undefined;
+      const pending = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      const summary = {
+        claimed: 1,
+        reconciled: 1,
+        retryableErrors: 0,
+        timedOut: 0,
+      };
+      const events: string[] = [];
+      const scheduler = new IntervalScheduler(
+        (event) => events.push(event),
+        new InMemoryLockManager(),
+      );
+      setFinanceJobsModuleLoaderForTests(async () =>
+        buildFinanceJobsFixture({
+          runStandaloneFinancialReconciliationJob: async () => {
+            calls += 1;
+            if (calls === 1) await pending;
+            return summary;
+          },
+        }),
+      );
+      mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+      try {
+        const job = buildJobs(
+          buildTestEnv({
+            databaseUrl: "postgres://localhost/disposable",
+            standaloneFinancialReconciliationEnabled: true,
+          }),
+        ).find(
+          (candidate) =>
+            candidate.name === "standalone_financial_reconciliation",
+        );
+        assert.ok(job);
+        scheduler.schedule(job);
+        await setImmediate();
+        assert.equal(calls, 1);
+        mock.timers.tick(90_000);
+        await setImmediate();
+        assert.ok(
+          events.includes("job_error"),
+          "90-second scheduler timeout is preserved",
+        );
+        mock.timers.tick(60_000);
+        await setImmediate();
+        assert.equal(calls, 1, "the late evidence read still owns the batch");
+        settle?.();
+        await setImmediate();
+        assert.ok(
+          events.includes("job_done"),
+          "the next waiter receives late progress",
+        );
+        mock.timers.tick(60_000);
+        await setImmediate();
+        assert.equal(
+          calls,
+          2,
+          "recovery resumes after the original batch finishes",
+        );
+      } finally {
+        settle?.();
+        await setImmediate();
+        scheduler.shutdown();
+        mock.timers.reset();
+        resetFinanceJobsModuleLoaderForTests();
+      }
+    },
+  },
+  {
+    name: "a failed standalone batch releases single-flight without hiding the error",
+    run: async () => {
+      let calls = 0;
+      setFinanceJobsModuleLoaderForTests(async () =>
+        buildFinanceJobsFixture({
+          runStandaloneFinancialReconciliationJob: async () => {
+            calls += 1;
+            if (calls === 1) throw new Error("fixture evidence read failed");
+            return { claimed: 0 };
+          },
+        }),
+      );
+      try {
+        await assert.rejects(
+          runStandaloneFinancialReconciliationJob(),
+          /fixture evidence read failed/,
+        );
+        assert.deepEqual(await runStandaloneFinancialReconciliationJob(), {
+          claimed: 0,
+        });
+        assert.equal(calls, 2);
+      } finally {
+        resetFinanceJobsModuleLoaderForTests();
+      }
     },
   },
   {
@@ -520,28 +701,12 @@ const tests: TestCase[] = [
       let reconcileArgs: unknown = null;
       setFinanceJobsModuleLoaderForTests(async () => {
         loadCount += 1;
-        return {
-          runStandaloneFinancialReconciliationJob: async () => null,
-          runApiCacheWarmJob: async () => null,
-          runFeesCollectJob: async () => ({
-            collected: 0,
-            dryRunCount: 0,
-            skippedError: 0,
-            skippedLive: 0,
-            skippedNoCharge: 0,
-            skippedNothing: 0,
-          }),
-          runFeesReconcileJob: async () => null,
-          runKalshiExecutionReconcileJob: async () => null,
-          runPositionResolutionNotificationJob: async () => null,
-          runPrivyDeletionReconcileJob: async () => null,
-          runRewardsPayoutJob: async () => null,
+        return buildFinanceJobsFixture({
           runTelegramTradeIntentReconcileJob: async (overrides) => {
             reconcileArgs = overrides;
             return { ok: true };
           },
-          runTreasurySweepJob: async () => null,
-        };
+        });
       });
       try {
         const first = await runTelegramTradeIntentReconcileJob({

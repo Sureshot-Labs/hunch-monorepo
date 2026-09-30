@@ -86,6 +86,7 @@ type FinanceJobsModule = {
 type FinanceJobsModuleLoader = () => Promise<FinanceJobsModule>;
 
 let modulePromise: Promise<FinanceJobsModule> | null = null;
+let standaloneJobPromise: Promise<unknown> | null = null;
 let financeJobsModuleLoader: FinanceJobsModuleLoader =
   loadFinanceJobsModuleDefault;
 
@@ -126,9 +127,15 @@ export async function loadFinanceJobsModuleForSmoke(): Promise<FinanceJobsModule
   return getFinanceJobsModule();
 }
 
-export async function runStandaloneFinancialReconciliationJob(): Promise<unknown> {
-  const jobs = await getFinanceJobsModule();
-  return jobs.runStandaloneFinancialReconciliationJob();
+export function runStandaloneFinancialReconciliationJob(): Promise<unknown> {
+  // A scheduler timeout stops waiting, not the underlying evidence reads.
+  // Retain single-flight ownership until the actual batch settles.
+  standaloneJobPromise ??= getFinanceJobsModule()
+    .then((jobs) => jobs.runStandaloneFinancialReconciliationJob())
+    .finally(() => {
+      standaloneJobPromise = null;
+    });
+  return standaloneJobPromise;
 }
 
 export async function runFeesCollectJob(

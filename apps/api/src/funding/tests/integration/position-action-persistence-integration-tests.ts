@@ -1022,6 +1022,30 @@ try {
   });
   assert.ok(duplicateState?.submissionFingerprint);
   const duplicateReference = duplicateState.submissionFingerprint;
+  const caseVariant = await createOrReplayPositionAction(pool, {
+    ...freshAttempt(embeddedInput, "reference-case-variant"),
+    positionRef: "position_reference-case-variant",
+    ownerBindingId: "binding_case_variant_12345678",
+  });
+  operationIds.push(caseVariant.operation.id);
+  await claimPositionActionSubmission(pool, {
+    userId,
+    operationId: caseVariant.operation.id,
+    canonicalActionFingerprint: "e".repeat(64),
+    executorId: "privy-authorization-evm-v1",
+  });
+  await assert.rejects(
+    () =>
+      recordPositionActionSubmission(pool, {
+        userId,
+        operationId: caseVariant.operation.id,
+        attemptNumber: 1,
+        outcome: "submitted",
+        submissionFingerprint: duplicateReference.toUpperCase(),
+      }),
+    /already attributed/,
+    "indexed lookup must preserve case-insensitive provider attribution",
+  );
   await assert.rejects(
     () =>
       bindPositionActionSubmissionTransactionHash(pool, {

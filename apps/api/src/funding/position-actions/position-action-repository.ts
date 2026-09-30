@@ -510,7 +510,8 @@ async function assertPositionReferenceAttribution(
   ]);
   const peers = await client.query<PositionActionRow>(
     `select ${COLUMNS} from position_action_operations
-      where lower(submission_fingerprint) = $1 and id <> $2`,
+      where submission_fingerprint is not null
+        and lower(submission_fingerprint) = $1 and id <> $2`,
     [normalized, operation.id],
   );
   const exactIdentity = (candidate: StoredPositionAction) => {
