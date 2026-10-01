@@ -2,12 +2,13 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { pool } from "../db.js";
+import { readDflowNativeAcceptingOrders } from "../lib/market-availability.js";
+import { publicHunchAcceptingOrders } from "../services/hunch-market-availability.js";
 import { publicHunchPricePresentation } from "../services/hunch-price-presentation.js";
 import {
   publicHolderDisplayName,
   publicHunchSources,
 } from "../services/hunch-public-presentation.js";
-import { buildWalletIntelAcceptingOrdersSql } from "../services/wallet-intel-market-eligibility.js";
 import { loadLatestWalletPositionNowMap } from "../services/wallet-position-approx.js";
 import { makeWalletPositionLedgerKey } from "../services/wallet-position-ledger.js";
 
@@ -60,7 +61,12 @@ type PublicHunchRow = {
   market_image: string | null;
   event_id: string | null;
   event_title: string | null;
-  accepting_orders: boolean | null;
+  market_status: string | null;
+  close_time: Date | string | null;
+  expiration_time: Date | string | null;
+  event_status: string | null;
+  event_end_time: Date | string | null;
+  pm_accepting_orders: boolean | null;
   resolved_outcome: string | null;
   market_metadata: unknown;
   market_updated_at: Date | string | null;
@@ -113,13 +119,26 @@ function toPublicHunch(row: PublicHunchRow) {
   const side =
     typeof lineage.side === "string" ? lineage.side.toUpperCase() : null;
   const researchedPrice = finiteNumber(snapshot.displayPrice);
+  const acceptingOrders = publicHunchAcceptingOrders({
+    venue: row.market_venue,
+    status: row.market_status,
+    closeTime: row.close_time,
+    expirationTime: row.expiration_time,
+    eventEndTime: row.event_end_time,
+    eventStatus: row.event_status,
+    resolvedOutcome: row.resolved_outcome,
+    pmAcceptingOrders: row.pm_accepting_orders,
+    dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
+      row.market_metadata,
+    ),
+  });
   const prices = publicHunchPricePresentation({
     kind: row.note_type,
     side,
     researchedSide: snapshot.displaySide,
     researchedPrice,
     researchedAt: snapshot.asOf,
-    acceptingOrders: row.accepting_orders === true,
+    acceptingOrders,
     venue: row.market_venue,
     metadata: row.market_metadata,
     marketUpdatedAt: row.market_updated_at,
@@ -164,7 +183,7 @@ function toPublicHunch(row: PublicHunchRow) {
       eventTitle: row.event_title,
       side,
       outcomeLabel: outcomeLabel(row, side),
-      acceptingOrders: row.accepting_orders === true,
+      acceptingOrders,
       resolutionStatus: prices.resolutionStatus,
     },
     selectedSideResult: prices.selectedSideResult,
@@ -247,19 +266,23 @@ const HUNCH_COLUMNS = `
   m.title as market_title, m.venue as market_venue,
   m.outcomes as market_outcomes, coalesce(m.image, e.image) as market_image,
   m.event_id, e.title as event_title, m.resolved_outcome,
+  m.status as market_status, m.close_time, m.expiration_time,
+  e.status as event_status, e.end_date as event_end_time,
+  pm.accepting_orders as pm_accepting_orders,
   jsonb_build_object(
     'outcomePrices', m.metadata->'outcomePrices',
     'umaResolutionStatus', m.metadata->'umaResolutionStatus',
-    'umaResolutionStatuses', m.metadata->'umaResolutionStatuses'
+    'umaResolutionStatuses', m.metadata->'umaResolutionStatuses',
+    'dflowNativeAcceptingOrders', m.metadata->'dflowNativeAcceptingOrders'
   ) as market_metadata,
   m.updated_at as market_updated_at,
-  ${buildWalletIntelAcceptingOrdersSql({ marketAlias: "m", eventAlias: "e" })} as accepting_orders,
   latest_quote.current_price, latest_quote.current_price_as_of
 `;
 
 const HUNCH_JOINS = `
   left join unified_markets m on m.id = n.source_id
   left join unified_events e on e.id = m.event_id
+  left join polymarket_markets pm on pm.id = m.venue_market_id and m.venue = 'polymarket'
   left join lateral (
     select coalesce(quote_row.mid, (quote_row.best_bid + quote_row.best_ask) / 2) as current_price,
            quote_row.ts as current_price_as_of
