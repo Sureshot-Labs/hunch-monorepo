@@ -26,7 +26,10 @@ export function isLimitlessPortfolioSnapshot(payload: unknown): boolean {
 export async function fetchLimitlessWalletPortfolio(input: {
   walletAddress: string;
   authContext: LimitlessAuthContext | null;
-}): Promise<unknown> {
+}): Promise<{
+  snapshot: unknown;
+  privateAuthContext: LimitlessAuthContext | null;
+}> {
   let authInputs: ReturnType<
     typeof buildLimitlessWalletRequestAuthInputs
   > | null = null;
@@ -47,10 +50,14 @@ export async function fetchLimitlessWalletPortfolio(input: {
         ...authInputs,
       })
     : null;
+  let privateAuthContext = authInputs ? input.authContext : null;
   if (
     !result ||
     (!result.ok && (result.status === 401 || result.status === 403))
   ) {
+    // Public positions do not prove access to private history. Keep this
+    // decision local to this read: a later refresh can retry the credentials.
+    privateAuthContext = null;
     result = await limitlessRequest({
       method: "GET",
       requestPath: `/portfolio/${encodeURIComponent(input.walletAddress)}/positions`,
@@ -66,5 +73,5 @@ export async function fetchLimitlessWalletPortfolio(input: {
   if (!isLimitlessPortfolioSnapshot(result.payload)) {
     throw new Error("Limitless returned an incomplete portfolio snapshot.");
   }
-  return result.payload;
+  return { snapshot: result.payload, privateAuthContext };
 }

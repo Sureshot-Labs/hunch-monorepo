@@ -2704,7 +2704,7 @@ async function syncLimitlessPositionsFromPortfolio(
   );
   const authMs = Date.now() - authStartedAt;
   const positionsApiStartedAt = Date.now();
-  const snapshot = await fetchLimitlessWalletPortfolio({
+  const { snapshot, privateAuthContext } = await fetchLimitlessWalletPortfolio({
     authContext,
     walletAddress: inputs.walletAddress,
   });
@@ -2713,11 +2713,11 @@ async function syncLimitlessPositionsFromPortfolio(
   let historyMs = 0;
   const historyStartedAt = Date.now();
   try {
-    if (authContext)
+    if (privateAuthContext)
       await syncLimitlessHistoryForWallet(pool, {
         userId: inputs.userId,
         walletAddress: inputs.walletAddress,
-        authContext,
+        authContext: privateAuthContext,
         limit: 50,
       });
     historyMs = Date.now() - historyStartedAt;
