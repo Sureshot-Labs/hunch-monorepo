@@ -33,7 +33,8 @@ export type Job = {
   policy_version: string;
 };
 const marketSelect = `select m.id,m.event_id,m.venue,m.title,m.description,m.status,m.outcomes,m.close_time,m.expiration_time,e.end_date as event_end_date,
-  jsonb_build_object('question',m.metadata->>'question','rulesPrimary',m.metadata->>'rulesPrimary','rulesSecondary',m.metadata->>'rulesSecondary') as metadata,
+  jsonb_build_object('question',m.metadata->>'question','rulesPrimary',m.metadata->>'rulesPrimary','rulesSecondary',m.metadata->>'rulesSecondary',
+    'outcomes',m.metadata->'outcomes','clobTokenIds',m.metadata->'clobTokenIds') as metadata,
   e.title as event_title, e.description as event_description,
   case when e.end_date<=now() then 'CLOSED' else e.status::text end as event_status,
   case when m.resolved_outcome is not null or m.close_time<=now() or m.expiration_time<=now() then 'CLOSED' else m.status::text end as matching_status,

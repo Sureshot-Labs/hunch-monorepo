@@ -437,6 +437,88 @@ test("multi-outcome array position never supplies stable identity", () => {
   );
   assert(a.blockers.includes("ambiguous_outcome_identity"));
 });
+test("captured Colts outcomes recover native instrument IDs, never a Limitless payout mapping", async () => {
+  const captured = JSON.parse(
+    await readFile(
+      new URL("../fixtures/named-sports-outcomes.json", import.meta.url),
+      "utf8",
+    ),
+  ) as { contracts: MarketRow[] };
+  const row = captured.contracts.find((c) => c.venue === "polymarket");
+  const targetRow = captured.contracts.find((c) => c.venue === "limitless");
+  assert(row && targetRow);
+  const source = normalizeContract(row);
+  const target = normalizeContract(targetRow);
+  const metadata = row.metadata as { outcomes: string; clobTokenIds: string[] };
+  const tokens = row.tokens as { token_id: string; outcome_side: string }[];
+  assert(!source.blockers.includes("ambiguous_outcome_identity"));
+  assert.deepEqual(
+    source.outcomes.map((o) => o.tokenId),
+    metadata.clobTokenIds,
+  );
+  assert.deepEqual(
+    source.outcomes.map((o) => o.label),
+    ["Colts", "Commanders"],
+  );
+  assert(source.outcomes.every((o) => o.side === null));
+  assert.equal(
+    source.fingerprint,
+    normalizeContract({ ...row, tokens: [...tokens].reverse() }).fingerprint,
+  );
+  // Matching titles/rules and a positive model relation do not bind teams to
+  // Limitless YES/NO. No guessed complement or automatic approval is allowed.
+  assert.deepEqual(outcomeCandidates(source, target), []);
+  assert(!approveContract(source, target, answer, EXPECTED_MODEL).approved);
+  for (const changed of [
+    { ...row, metadata: {} },
+    { ...row, metadata: { ...metadata, outcomes: '["Commanders","Colts"]' } },
+    {
+      ...row,
+      metadata: { ...metadata, clobTokenIds: [metadata.clobTokenIds[0]] },
+    },
+    {
+      ...row,
+      metadata: {
+        ...metadata,
+        clobTokenIds: ["unknown", metadata.clobTokenIds[1]],
+      },
+    },
+    {
+      ...row,
+      metadata: {
+        ...metadata,
+        clobTokenIds: [metadata.clobTokenIds[0], metadata.clobTokenIds[0]],
+      },
+    },
+    { ...row, tokens: [tokens[0]] },
+    { ...row, tokens: [tokens[0], tokens[0]] },
+    { ...row, venue: "limitless" },
+    { ...row, outcomes: '["Colts","Commanders","Draw"]' },
+  ]) {
+    assert(
+      normalizeContract(changed).blockers.includes(
+        "ambiguous_outcome_identity",
+      ),
+      JSON.stringify(changed),
+    );
+  }
+  const binary = fixture("polymarket:binary-native", {
+    tokens: [
+      { token_id: "yes-token", outcome_side: "YES" },
+      { token_id: "no-token", outcome_side: "NO" },
+    ],
+  });
+  assert.equal(
+    normalizeContract(binary).fingerprint,
+    normalizeContract({
+      ...binary,
+      metadata: {
+        outcomes: '["YES","NO"]',
+        clobTokenIds: ["yes-token", "no-token"],
+      },
+    }).fingerprint,
+  );
+});
 test("request contains independent typed outcome checks", () => {
   const a = normalizeContract(fixture()),
     b = normalizeContract(fixture("limitless:a"));

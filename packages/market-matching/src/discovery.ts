@@ -179,6 +179,25 @@ export async function warmInterest(pool: Pool) {
     await db.query(
       "delete from market_matching_interest where status='done' and requested_at<now()-interval '7 days'",
     );
+    // Recently visited but retired markets also consume the bounded registry.
+    // Release only completed, cooldown-due demand; retain queued/running work,
+    // matching evidence and job history. PK probes keep this off the full catalog.
+    const retiredInterests = await db.query(
+      `with completed_interests as materialized (
+        select market_id from market_matching_interest where status='done' and next_attempt_at<=now()
+      ), retired_interests as (
+        select completed.market_id from completed_interests completed
+        join lateral (
+          select m.id,m.event_id,m.status,m.resolved_outcome,m.close_time,m.expiration_time
+          from unified_markets m where m.id=completed.market_id offset 0
+        ) m on true
+        join unified_events e on e.id=m.event_id
+        where not (${liveSql})
+        order by completed.market_id limit $1
+      ) delete from market_matching_interest interest_row using retired_interests retired
+      where interest_row.market_id=retired.market_id and interest_row.status='done' and interest_row.next_attempt_at<=now()`,
+      [matching.warmBatchSize],
+    );
     const prefix = await db.query(
       `with prefix_rows as materialized (
       select id,venue,(coalesce(case when volume_total is not null and volume_total>0 then volume_total else null end,0)*0.4 + coalesce(coalesce(nullif(liquidity,0),nullif(open_interest,0)),0)*0.3) as warm_score from unified_markets where status='ACTIVE'
@@ -310,6 +329,7 @@ export async function warmInterest(pool: Pool) {
             ]),
           ),
           queued,
+          retiredInterestsPruned: retiredInterests.rowCount ?? 0,
           product: {
             counts: product.counts,
             unavailable: product.unavailable,

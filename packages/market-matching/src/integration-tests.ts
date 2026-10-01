@@ -1611,6 +1611,238 @@ integration(
 );
 
 integration(
+  "PG16: bounded cleanup frees full storage from retired completed demand, preserving live and in-flight work",
+  { skip: !url },
+  async () => {
+    const base = (await seed("retired-registry")).find(
+      (c) => c.venue === "polymarket",
+    );
+    assert(base);
+    const prefix = `polymarket:retired-${randomUUID()}-`;
+    const retired = Array.from({ length: 6 }, (_, i) => prefix + i);
+    const kept = ["queued", "running", "cooling", "live"].map(
+      (s) => prefix + s,
+    );
+    const unseen = ["new-a", "new-b", "new-c"].map((s) => prefix + s);
+    const ids = [...retired, ...kept, ...unseen];
+    const retiredEvents = [base.eventId + ":closed", base.eventId + ":ended"];
+    await pool.query(
+      "update market_matching_interest set status='done',next_attempt_at=now()+interval '6 hours'",
+    );
+    await pool.query(
+      `insert into unified_events(id,venue,title,status,end_date) values($1,'polymarket','Closed event','CLOSED',null),($2,'polymarket','Ended event','ACTIVE',now()-interval '1 hour')`,
+      retiredEvents,
+    );
+    await pool.query(
+      `insert into unified_markets(id,event_id,venue,title,status,volume_total)
+      select item_id,$2,'polymarket','Retired registry','ACTIVE',0 from unnest($1::text[]) item_rows(item_id)`,
+      [ids, base.eventId],
+    );
+    await pool.query(
+      "update unified_markets set status='CLOSED' where id=any($1::text[])",
+      [[retired[0], ...kept.slice(0, 3)]],
+    );
+    await pool.query(
+      "update unified_markets set resolved_outcome='YES' where id=$1",
+      [retired[1]],
+    );
+    await pool.query(
+      "update unified_markets set close_time=now()-interval '1 hour' where id=$1",
+      [retired[2]],
+    );
+    await pool.query(
+      "update unified_markets set expiration_time=now()-interval '1 hour' where id=$1",
+      [retired[3]],
+    );
+    await pool.query("update unified_markets set event_id=$2 where id=$1", [
+      retired[4],
+      retiredEvents[0],
+    ]);
+    await pool.query("update unified_markets set event_id=$2 where id=$1", [
+      retired[5],
+      retiredEvents[1],
+    ]);
+    await pool.query(
+      "update unified_markets set volume_total=1e30 where id=any($1::text[])",
+      [unseen],
+    );
+    await pool.query(
+      `insert into market_matching_interest(market_id,source,status,next_attempt_at)
+      select item_id,'warm','done',now()-interval '1 hour' from unnest($1::text[]) item_rows(item_id)`,
+      [[...retired, ...kept]],
+    );
+    await pool.query(
+      "update market_matching_interest set status='queued' where market_id=$1",
+      [kept[0]],
+    );
+    await pool.query(
+      "update market_matching_interest set status='running',lease_token=$2,lease_until=now()+interval '30 seconds' where market_id=$1",
+      [kept[1], randomUUID()],
+    );
+    await pool.query(
+      "update market_matching_interest set next_attempt_at=now()+interval '1 hour' where market_id=$1",
+      [kept[2]],
+    );
+    const keptBefore = (
+      await pool.query(
+        "select * from market_matching_interest where market_id=any($1::text[]) order by market_id",
+        [kept],
+      )
+    ).rows;
+    const stored = (
+      await pool.query(
+        "select count(*)::int as total from market_matching_interest",
+      )
+    ).rows[0].total;
+    const historyCounts = async () =>
+      (
+        await pool.query(
+          `select (select count(*) from market_links) as links,(select count(*) from matching_evaluations) as evaluations,(select count(*) from market_matching_jobs) as jobs`,
+        )
+      ).rows;
+    const historyBefore = await historyCounts();
+    await matchingOverride({
+      warmBatchSize: 3,
+      warmTrendingCount: 3,
+      warmPrefixCount: 3,
+      warmLimitlessCount: 0,
+      seedFeedCount: 0,
+      seedMapCount: 0,
+      seedWhalesCount: 0,
+      storedInterests: stored,
+      pendingInterests: 5,
+      lazyStoredInterests: 0,
+      lazyPendingInterests: 0,
+    });
+    try {
+      await pool.query(
+        "delete from market_matching_state where state_key='warm'",
+      );
+      assert.equal(await warmInterest(pool), 3);
+      assert.equal(
+        (
+          await pool.query(
+            "select payload from market_matching_state where state_key='warm'",
+          )
+        ).rows[0].payload.retiredInterestsPruned,
+        3,
+      );
+      assert.equal(
+        (
+          await pool.query(
+            "select count(*)::int as total from market_matching_interest where market_id=any($1::text[])",
+            [retired],
+          )
+        ).rows[0].total,
+        3,
+      );
+      assert.equal(
+        (
+          await pool.query(
+            "select count(*)::int as total from market_matching_interest",
+          )
+        ).rows[0].total,
+        stored,
+      );
+      assert.deepEqual(
+        (
+          await pool.query(
+            "select * from market_matching_interest where market_id=any($1::text[]) order by market_id",
+            [kept],
+          )
+        ).rows,
+        keptBefore,
+      );
+      assert.deepEqual(
+        (
+          await pool.query(
+            "select market_id,status from market_matching_interest where market_id=any($1::text[]) order by market_id",
+            [unseen],
+          )
+        ).rows,
+        unseen.map((market_id) => ({ market_id, status: "queued" })),
+      );
+      assert.deepEqual(await historyCounts(), historyBefore);
+      await pool.query(
+        "delete from market_matching_state where state_key='warm'",
+      );
+      assert.equal(await warmInterest(pool), 0);
+      assert.equal(
+        (
+          await pool.query(
+            "select count(*)::int as total from market_matching_interest where market_id=any($1::text[])",
+            [retired],
+          )
+        ).rows[0].total,
+        0,
+      );
+      assert.deepEqual(
+        (
+          await pool.query(
+            "select * from market_matching_interest where market_id=any($1::text[]) order by market_id",
+            [kept],
+          )
+        ).rows,
+        keptBefore,
+      );
+    } finally {
+      await pool.query(
+        "delete from market_matching_interest where market_id=any($1::text[])",
+        [ids],
+      );
+      await pool.query("delete from unified_markets where id=any($1::text[])", [
+        ids,
+      ]);
+      await pool.query("delete from unified_events where id=any($1::text[])", [
+        retiredEvents,
+      ]);
+      await pool.query(
+        "delete from market_matching_state where state_key='warm'",
+      );
+    }
+  },
+);
+
+integration(
+  "PG16: native named Polymarket token metadata survives contract loading",
+  { skip: !url },
+  async () => {
+    const captured = JSON.parse(
+      await readFile(
+        new URL("../fixtures/named-sports-outcomes.json", import.meta.url),
+        "utf8",
+      ),
+    ) as { contracts: Record<string, unknown>[] };
+    const row = captured.contracts.find((c) => c.venue === "polymarket");
+    assert(row);
+    const base = (await seed("native-named-token")).find(
+      (c) => c.venue === "polymarket",
+    );
+    assert(base);
+    await pool.query(
+      "update unified_markets set outcomes=$2,metadata=$3 where id=$1",
+      [base.id, row.outcomes, row.metadata],
+    );
+    for (const token of row.tokens as {
+      token_id: string;
+      outcome_side: string;
+    }[]) {
+      await pool.query(
+        "insert into unified_market_tokens(market_id,token_id,outcome_side) values($1,$2,$3)",
+        [base.id, token.token_id, token.outcome_side],
+      );
+    }
+    const [loaded] = await loadContracts(pool, [base.id]);
+    assert(!loaded.blockers.includes("ambiguous_outcome_identity"));
+    assert.deepEqual(
+      loaded.outcomes.map((o) => o.tokenId),
+      (row.metadata as { clobTokenIds: string[] }).clobTokenIds,
+    );
+    assert(loaded.outcomes.every((o) => o.side === null));
+  },
+);
+
+integration(
   "PG16: partial outcome links expose native prices but authorize only the verified side",
   { skip: !url },
   async () => {

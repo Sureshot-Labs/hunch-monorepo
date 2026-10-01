@@ -253,6 +253,23 @@ export function normalizeContract(row: MarketRow): Contract {
     ),
   ];
   const labels = array(row.outcomes).map(clean);
+  const nativeLabels = array(metadata.outcomes).map(clean);
+  const nativeIds = array(metadata.clobTokenIds).map(clean);
+  // Polymarket supplies paired native outcomes/token IDs. Do not derive identity
+  // from the ordering of unified tokens, or turn named payouts into YES/NO claims.
+  const nativeNamedPair =
+    row.venue === "polymarket" &&
+    labels.length === 2 &&
+    labels.every((label) => !/^(YES|NO)$/i.test(label)) &&
+    nativeLabels.length === labels.length &&
+    nativeLabels.every((label, index) => label === labels[index]) &&
+    new Set(nativeLabels).size === labels.length &&
+    nativeIds.length === labels.length &&
+    new Set(nativeIds).size === labels.length &&
+    tokens.length === labels.length &&
+    nativeIds.every(
+      (id) => id && tokens.filter((t) => clean(t.token_id) === id).length === 1,
+    );
   const outcomes: Outcome[] = labels.map((label) => {
     const upper = label.toUpperCase();
     const side = upper === "YES" || upper === "NO" ? upper : null;
@@ -260,7 +277,12 @@ export function normalizeContract(row: MarketRow): Contract {
     const matches = tokens.filter(
       (t) => clean(t.outcome_side).toUpperCase() === (side ?? upper),
     );
-    const tokenId = matches.length === 1 ? clean(matches[0].token_id) : null;
+    const tokenId =
+      matches.length === 1
+        ? clean(matches[0].token_id)
+        : matches.length === 0 && nativeNamedPair
+          ? nativeIds[nativeLabels.indexOf(label)]
+          : null;
     return {
       id: tokenId
         ? `${row.id}:token:${tokenId}`
