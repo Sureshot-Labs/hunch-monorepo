@@ -128,6 +128,25 @@ assert.equal(
   4,
 );
 const originalFetch = globalThis.fetch;
+// Before any catalog refresh, an offline process must still have a bounded,
+// context-aware estimate for the new model and supported snapshot ID shape.
+for (const model of [
+  "openai/gpt-6.1-sol",
+  "openai/gpt-6.1-sol-20260929",
+  " OPENAI/GPT-6.1-SOL ",
+]) {
+  assert.deepEqual(getOpenRouterModelPricingPerM(model, 272000), {
+    inputPerM: 2,
+    outputPerM: 10,
+    webSearchPerCallUsd: 0.01,
+  });
+  assert.deepEqual(getOpenRouterModelPricingPerM(model, 272001), {
+    inputPerM: 4,
+    outputPerM: 15,
+    webSearchPerCallUsd: 0.01,
+  });
+}
+assert.equal(getOpenRouterModelPricingPerM("openai/gpt-6.1-luna"), null);
 try {
   // A promotional/discounted catalog price cannot lower Astra's standard estimate.
   globalThis.fetch = async () =>
@@ -137,6 +156,10 @@ try {
           {
             id: "openai/gpt-6-astra",
             pricing: { prompt: "0.000005", completion: "0.000025" },
+          },
+          {
+            id: "openai/gpt-6.1-sol",
+            pricing: { prompt: "0.000001", completion: "0.000005" },
           },
         ],
       }),
@@ -149,6 +172,20 @@ try {
   assert.equal(
     getOpenRouterModelPricingPerM("openai/gpt-6-astra")?.outputPerM,
     50,
+  );
+  assert.deepEqual(
+    getOpenRouterModelPricingPerM("openai/gpt-6.1-sol", 272000),
+    {
+      inputPerM: 2,
+      outputPerM: 10,
+    },
+  );
+  assert.deepEqual(
+    getOpenRouterModelPricingPerM("openai/gpt-6.1-sol", 272001),
+    {
+      inputPerM: 4,
+      outputPerM: 15,
+    },
   );
 } finally {
   globalThis.fetch = originalFetch;

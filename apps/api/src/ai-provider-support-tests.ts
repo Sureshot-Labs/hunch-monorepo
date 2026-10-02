@@ -5,6 +5,7 @@ import { whaleProfileModelTestHooks } from "./services/whale-profiles.js";
 import { mapSearchModelTestHooks } from "./ai-map-search-run.js";
 import { marketMapModelTestHooks } from "./ai-map-build-run.js";
 import { mapSignalsModelTestHooks } from "./ai-map-signals-run.js";
+import { synthesisModelTestHooks } from "./ai-synthesis-smoke.js";
 import { buildOpenRouterReasoningOptions } from "./lib/openrouter-reasoning.js";
 import {
   buildXaiReasoningOptions,
@@ -48,6 +49,7 @@ for (const model of [
   "openai/gpt-6-astra",
   "openai/gpt-6-luna",
   "openai/gpt-6-sol",
+  "openai/gpt-6.1-sol",
   "openai/gpt-6-astra-pro",
   "openai/gpt-5.6-luna:batch",
 ]) {
@@ -196,7 +198,12 @@ try {
     requests.push(JSON.parse(String(init?.body)));
     return new Response(JSON.stringify(reply));
   };
-  for (const model of ["openai/gpt-5.6-luna", "openai/gpt-5.4"]) {
+  for (const model of [
+    "openai/gpt-5.6-luna",
+    "openai/gpt-5.4",
+    "openai/gpt-6-sol",
+    "openai/gpt-6.1-sol",
+  ]) {
     await clusterModelTestHooks.callOpenRouter(
       model,
       [],
@@ -292,6 +299,112 @@ try {
     [],
   );
   assert.equal("reasoning" in (requests.at(-1) ?? {}), false);
+
+  // Historical A/B usage fixtures (2026-10-02), with no market or wallet data.
+  // The CLI must account provider cost, cache charges and schema repair per call.
+  const explicitSynthesisPrices = synthesisModelTestHooks.parseArgs([
+    "--topics-file",
+    "offline-fixture.json",
+    "--price-input-per-m",
+    "0",
+    "--price-output-per-m",
+    "12",
+  ]);
+  assert.equal(explicitSynthesisPrices.priceInputPerM, 0);
+  assert.equal(explicitSynthesisPrices.priceOutputPerM, 12);
+  for (const [model, completionTokens, providerCostUsd] of [
+    ["openai/gpt-6-sol", 482, 0.010461],
+    ["openai/gpt-6.1-sol", 677, 0.012411],
+  ] as const) {
+    const synthesisArgs = synthesisModelTestHooks.parseArgs([
+      "--topics-file",
+      "offline-fixture.json",
+      "--model",
+      model,
+    ]);
+    assert.equal(synthesisArgs.priceInputPerM, null);
+    assert.equal(synthesisArgs.priceOutputPerM, null);
+    const payload = {
+      choices: [{ finish_reason: "stop", message: { content: "{}" } }],
+      usage: {
+        prompt_tokens: 2257,
+        completion_tokens: completionTokens,
+        cost: providerCostUsd,
+      },
+    };
+    reply = payload;
+    const reported = await synthesisModelTestHooks.callOpenRouter(
+      synthesisArgs,
+      "system",
+      "user",
+    );
+    assert.equal(reported.usage.chargedCostUsd, providerCostUsd);
+    assert.equal(requests.at(-1)?.model, model);
+    assert.equal("temperature" in (requests.at(-1) ?? {}), false);
+    assert.deepEqual(requests.at(-1)?.reasoning, {
+      effort: "low",
+      exclude: true,
+    });
+    assert.deepEqual(requests.at(-1)?.provider, { require_parameters: true });
+    reply = { ...payload, usage: { ...payload.usage, cost: undefined } };
+    const estimated = await synthesisModelTestHooks.callOpenRouter(
+      synthesisArgs,
+      "system",
+      "user",
+    );
+    assert.equal(
+      estimated.usage.chargedCostUsd,
+      (2257 / 1_000_000) * 2 + (completionTokens / 1_000_000) * 10,
+    );
+    assert.equal(
+      synthesisModelTestHooks.mergeUsage(reported.usage, estimated.usage)
+        .chargedCostUsd,
+      providerCostUsd + estimated.usage.chargedCostUsd,
+    );
+
+    // A real zero is not treated as missing; explicit prices only override estimates.
+    reply = { ...payload, usage: { ...payload.usage, cost: 0 } };
+    const overrideArgs = {
+      ...synthesisArgs,
+      priceInputPerM: 3,
+      priceOutputPerM: 12,
+    };
+    assert.equal(
+      (
+        await synthesisModelTestHooks.callOpenRouter(
+          overrideArgs,
+          "system",
+          "user",
+        )
+      ).usage.chargedCostUsd,
+      0,
+    );
+    reply = { ...payload, usage: { ...payload.usage, cost: -1 } };
+    assert.equal(
+      (
+        await synthesisModelTestHooks.callOpenRouter(
+          overrideArgs,
+          "system",
+          "user",
+        )
+      ).usage.chargedCostUsd,
+      (2257 / 1_000_000) * 3 + (completionTokens / 1_000_000) * 12,
+    );
+    reply = {
+      ...payload,
+      usage: { ...payload.usage, prompt_tokens: 272001, cost: undefined },
+    };
+    assert.equal(
+      (
+        await synthesisModelTestHooks.callOpenRouter(
+          synthesisArgs,
+          "system",
+          "user",
+        )
+      ).usage.chargedCostUsd,
+      (272001 / 1_000_000) * 4 + (completionTokens / 1_000_000) * 15,
+    );
+  }
 } finally {
   globalThis.fetch = originalFetch;
   env.openRouterKey = originalKey;

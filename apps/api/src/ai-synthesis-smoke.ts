@@ -1,9 +1,13 @@
 import { readFile, writeFile } from "fs/promises";
 import { resolve } from "path";
 import { createHash } from "crypto";
+import { pathToFileURL } from "node:url";
 import { pool } from "./db.js";
 import { env } from "./env.js";
 import { buildOpenRouterReasoningOptions } from "./lib/openrouter-reasoning.js";
+import { getOpenRouterModelPricingPerM } from "./lib/ai-pricing.js";
+import { resolveAiCost } from "./lib/ai-cost.js";
+import { extractAiUsageMetrics } from "./lib/ai-response.js";
 import {
   buildSynthesisSystemPromptV1,
   buildSynthesisUserPromptV1,
@@ -172,8 +176,8 @@ type Args = {
   concurrency: number;
   maxOutputTokens: number;
   timeoutSec: number;
-  priceInputPerM: number;
-  priceOutputPerM: number;
+  priceInputPerM: number | null;
+  priceOutputPerM: number | null;
   dryRun: boolean;
   verbose: boolean;
 };
@@ -183,6 +187,7 @@ type OpenRouterUsage = {
   completionTokens: number;
   totalTokens: number;
   reasoningTokens: number;
+  chargedCostUsd: number;
 };
 
 type OpenRouterCallResult = {
@@ -211,6 +216,7 @@ function mergeUsage(a: OpenRouterUsage, b: OpenRouterUsage): OpenRouterUsage {
     completionTokens: a.completionTokens + b.completionTokens,
     totalTokens: a.totalTokens + b.totalTokens,
     reasoningTokens: a.reasoningTokens + b.reasoningTokens,
+    chargedCostUsd: a.chargedCostUsd + b.chargedCostUsd,
   };
 }
 
@@ -353,14 +359,14 @@ function parseArgs(argv: string[]): Args {
       1200,
     ),
     timeoutSec: parsePositiveInt(parseFlag(argv, "--timeout-sec"), 120),
-    priceInputPerM: parseNonNegativeFloat(
-      parseFlag(argv, "--price-input-per-m"),
-      0.2,
-    ),
-    priceOutputPerM: parseNonNegativeFloat(
-      parseFlag(argv, "--price-output-per-m"),
-      0.5,
-    ),
+    priceInputPerM:
+      parseFlag(argv, "--price-input-per-m") == null
+        ? null
+        : parseNonNegativeFloat(parseFlag(argv, "--price-input-per-m"), 0.2),
+    priceOutputPerM:
+      parseFlag(argv, "--price-output-per-m") == null
+        ? null
+        : parseNonNegativeFloat(parseFlag(argv, "--price-output-per-m"), 0.5),
     dryRun: hasFlag(argv, "--dry-run"),
     verbose: hasFlag(argv, "--verbose"),
   };
@@ -379,12 +385,13 @@ Optional:
   --max-topics <n>               Max topics to synthesize (default: 3)
   --max-context-markets <n>      Max market snapshots per event context (default: 5, max: 10)
   --max-sample-market-age-hours <n>  Skip topics whose sample market is older than N hours (default: 24, 0 disables)
-  --model <id>                   OpenRouter model (default: openai/gpt-5.4)
+  --model <id>                   OpenRouter model (default: AI_CLUSTER_MODEL_FINAL, otherwise openai/gpt-6-sol)
   --concurrency <n>              Parallel synthesis calls (default: 2)
   --max-output-tokens <n>        Max completion tokens (default: 1200)
   --timeout-sec <n>              HTTP timeout per call (default: 120)
-  --price-input-per-m <usd>      Input token price per 1M (default: 0.2)
-  --price-output-per-m <usd>     Output token price per 1M (default: 0.5)
+  --price-input-per-m <usd>      Fallback estimate override per 1M input tokens (default: model tariff)
+  --price-output-per-m <usd>     Fallback estimate override per 1M output tokens (default: model tariff)
+                                Reported provider cost takes precedence; unknown-model fallback: 0.2 / 0.5
   --out <path>                   Write full JSON results
   --dry-run                      Build and validate inputs only, skip model call
   --verbose                      Print per-topic details
@@ -447,12 +454,6 @@ function normalizeEvidenceItems(
       (item): item is SynthesisInputV1["external_evidence"]["items"][number] =>
         item != null,
     );
-}
-
-function safeNumber(value: unknown): number | null {
-  if (value == null) return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
 }
 
 function deriveImpliedMid(
@@ -695,22 +696,27 @@ async function callOpenRouter(
     };
 
     const content = parseMessageContent(payload.choices?.[0]?.message?.content);
-    const promptTokens = safeNumber(payload.usage?.prompt_tokens) ?? 0;
-    const completionTokens = safeNumber(payload.usage?.completion_tokens) ?? 0;
-    const totalTokens =
-      safeNumber(payload.usage?.total_tokens) ??
-      promptTokens + completionTokens;
-    const reasoningTokens =
-      safeNumber(payload.usage?.completion_tokens_details?.reasoning_tokens) ??
-      0;
+    const metrics = extractAiUsageMetrics(payload);
+    const pricing = getOpenRouterModelPricingPerM(
+      args.model,
+      metrics.inputTokens,
+    );
+    const cost = resolveAiCost({
+      inputTokens: metrics.inputTokens,
+      outputTokens: metrics.outputTokens,
+      priceInputPerM: args.priceInputPerM ?? pricing?.inputPerM ?? 0.2,
+      priceOutputPerM: args.priceOutputPerM ?? pricing?.outputPerM ?? 0.5,
+      providerCostUsd: metrics.providerCostUsd,
+    });
 
     return {
       content,
       usage: {
-        promptTokens,
-        completionTokens,
-        totalTokens,
-        reasoningTokens,
+        promptTokens: metrics.inputTokens,
+        completionTokens: metrics.outputTokens,
+        totalTokens: metrics.totalTokens,
+        reasoningTokens: metrics.reasoningTokens,
+        chargedCostUsd: cost.chargedCostUsd,
       },
     };
   } finally {
@@ -1315,9 +1321,7 @@ async function runOne(
       }
     }
     const gate = evaluatePublishGate(synthesisInput, synthesisOutput);
-    const tokenCostUsd =
-      (usage.promptTokens * args.priceInputPerM) / 1_000_000 +
-      (usage.completionTokens * args.priceOutputPerM) / 1_000_000;
+    const tokenCostUsd = usage.chargedCostUsd;
 
     return {
       topicKey: context.topicKey,
@@ -1344,9 +1348,7 @@ async function runOne(
     const message = error instanceof Error ? error.message : String(error);
     const promptTokens = usageForError?.promptTokens ?? 0;
     const completionTokens = usageForError?.completionTokens ?? 0;
-    const tokenCostUsd =
-      (promptTokens * args.priceInputPerM) / 1_000_000 +
-      (completionTokens * args.priceOutputPerM) / 1_000_000;
+    const tokenCostUsd = usageForError?.chargedCostUsd ?? 0;
     const parseLikeError =
       message.includes("SynthesisOutputV1") ||
       message.includes("summary_hygiene_violation") ||
@@ -1561,11 +1563,22 @@ async function main() {
   );
 }
 
-main()
-  .catch((error) => {
-    console.error("[ai-synthesis-smoke] failed", error);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await pool.end().catch(() => undefined);
-  });
+export const synthesisModelTestHooks = {
+  parseArgs,
+  callOpenRouter,
+  mergeUsage,
+};
+const directRunArg = process.argv[1];
+if (
+  typeof directRunArg === "string" &&
+  import.meta.url === pathToFileURL(directRunArg).href
+) {
+  main()
+    .catch((error) => {
+      console.error("[ai-synthesis-smoke] failed", error);
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await pool.end().catch(() => undefined);
+    });
+}

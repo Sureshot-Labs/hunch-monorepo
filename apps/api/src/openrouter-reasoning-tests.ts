@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { buildOpenRouterReasoningOptions } from "./lib/openrouter-reasoning.js";
+import {
+  buildOpenRouterReasoningOptions,
+  isModernOpenAIReasoningModel,
+  supportsOpenRouterReasoningEffort,
+} from "./lib/openrouter-reasoning.js";
 import { getOpenRouterModelPricingPerM } from "./lib/ai-pricing.js";
 import { buildHolderResearchResponseFormat } from "./services/holder-research-request.js";
 import {
@@ -127,6 +131,71 @@ for (const name of ["sol", "luna"]) {
   }
 }
 const hr = getIntelPolicySchema("holder_research");
+// Sol 6.1 shares the strict-output path, but unlike Sol 6 cannot disable
+// reasoning. Legacy `minimal` is normalized to `low`, never sent upstream.
+for (const model of [
+  "openai/gpt-6.1-sol",
+  "openai/gpt-6.1-sol-pro",
+  "openai/gpt-6.1-sol-20260929",
+  "openai/gpt-6.1-sol:batch",
+]) {
+  assert.equal(isModernOpenAIReasoningModel(model), true);
+  assert.equal(supportsOpenRouterReasoningEffort(model, "none"), false);
+  assert.throws(
+    () => buildOpenRouterReasoningOptions({ model, effort: "none" }),
+    /unsupported effort: none/,
+  );
+  assert.throws(
+    () => buildOpenRouterReasoningOptions({ model, legacyEffort: "none" }),
+    /unsupported effort: none/,
+  );
+  for (const effort of ["low", "medium", "high", "xhigh", "max"] as const) {
+    assert.deepEqual(
+      buildOpenRouterReasoningOptions({ model, effort, legacyTemperature: 0 }),
+      {
+        reasoning: { effort, exclude: true },
+        provider: { require_parameters: true },
+      },
+    );
+  }
+  for (const effort of [undefined, null, "minimal"] as const) {
+    assert.deepEqual(
+      buildOpenRouterReasoningOptions({
+        model,
+        effort,
+        legacyEffort: "minimal",
+        legacyTemperature: 0,
+      }),
+      {
+        reasoning: { effort: "low", exclude: true },
+        provider: { require_parameters: true },
+      },
+    );
+  }
+  for (const stage of ["triage", "final"] as const)
+    for (const useV2 of [false, true]) {
+      const format = buildHolderResearchResponseFormat({ model, stage, useV2 });
+      assert.equal(format.type, "json_schema");
+      assert.equal(format.json_schema?.strict, true);
+      const schema = format.json_schema?.schema as Record<string, unknown>;
+      assert.equal(schema.additionalProperties, false);
+      assert.deepEqual(
+        schema.required,
+        Object.keys(schema.properties as object),
+      );
+      assert.doesNotMatch(JSON.stringify(schema), /"format":/);
+    }
+  assert.equal(hr.safeParse({ model, reasoningEffort: "none" }).success, false);
+  assert.equal(hr.safeParse({ model, reasoningEffort: "low" }).success, true);
+  assert.equal(
+    signalBotSchema.safeParse({
+      xEditorialModel: model,
+      xEditorialReasoningEffort: "none",
+    }).success,
+    false,
+  );
+}
+assert.equal(isModernOpenAIReasoningModel("openai/gpt-6.1-luna"), false);
 assert.equal(
   hr.safeParse({ model: "openai/gpt-6-astra", reasoningEffort: "none" })
     .success,
@@ -201,6 +270,9 @@ const originalFetch = globalThis.fetch;
 const requests: Array<{
   model: string;
   reasoning: { effort: string; exclude: boolean };
+  temperature?: number;
+  provider: { require_parameters: boolean };
+  response_format: { type: string; json_schema: { strict: boolean } };
 }> = [];
 let resolutions = 0;
 const source: XEditorialDraftSource = {
@@ -242,7 +314,12 @@ try {
       resolutions += 1;
       return {
         ...base,
-        model: resolutions === 1 ? "openai/gpt-5.6-luna" : legacy,
+        model:
+          resolutions === 1
+            ? "openai/gpt-5.6-luna"
+            : resolutions === 2
+              ? legacy
+              : "openai/gpt-6.1-sol",
         reasoningEffort: resolutions === 1 ? "low" : null,
         maxOutputTokens: 2000,
       };
@@ -258,6 +335,17 @@ try {
   assert.equal(resolutions, 2);
   assert.equal(requests[2]?.model, legacy);
   assert.equal(requests[2]?.reasoning.effort, "low");
+  await composer({ source });
+  assert.equal(resolutions, 3);
+  assert.equal(requests.length, 6);
+  for (const request of requests.slice(-2)) {
+    assert.equal(request.model, "openai/gpt-6.1-sol");
+    assert.equal(request.temperature, undefined);
+    assert.deepEqual(request.reasoning, { effort: "low", exclude: true });
+    assert.deepEqual(request.provider, { require_parameters: true });
+    assert.equal(request.response_format.type, "json_schema");
+    assert.equal(request.response_format.json_schema.strict, true);
+  }
 } finally {
   globalThis.fetch = originalFetch;
 }

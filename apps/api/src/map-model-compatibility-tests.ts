@@ -54,6 +54,7 @@ try {
     "openai/gpt-6-astra",
     "openai/gpt-6-luna",
     "openai/gpt-6-sol",
+    "openai/gpt-6.1-sol",
   ]) {
     const policy = getIntelPolicyDefaults("market_map");
     const config = marketMapModelTestHooks.buildConfig([], {
@@ -137,6 +138,15 @@ assert.equal(
   }).success,
   false,
 );
+for (const [key, payload] of [
+  [
+    "market_map",
+    { labelModel: "openai/gpt-6.1-sol", labelReasoningEffort: "none" },
+  ],
+  ["map_signals", { model: "openai/gpt-6.1-sol", reasoningEffort: "none" }],
+] as const) {
+  assert.equal(getIntelPolicySchema(key).safeParse(payload).success, false);
+}
 console.log(
   "✓ Market Map labels and macro signals: actual request builders, policy/CLI plumbing, legacy compatibility, reasoning and temperature",
 );

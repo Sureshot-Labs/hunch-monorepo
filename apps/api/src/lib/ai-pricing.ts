@@ -77,6 +77,12 @@ const OPENROUTER_MODEL_PRICING_PER_M: Record<
     outputPerM: 10,
     webSearchPerCallUsd: 0.01,
   },
+  // Standard tariff verified against OpenAI/OpenRouter 2026-10-02.
+  "openai/gpt-6.1-sol": {
+    inputPerM: 2,
+    outputPerM: 10,
+    webSearchPerCallUsd: 0.01,
+  },
   // Standard, non-promotional Astra tariff (OpenAI + OpenRouter, 2026-09-06).
   "openai/gpt-6-astra": {
     inputPerM: 10,
@@ -123,7 +129,7 @@ export function getOpenRouterModelPricingPerM(
         inputPerM: inputTokens > 272000 ? 0.2 : 0.1,
         outputPerM: inputTokens > 272000 ? 0.75 : 0.5,
       }
-    : /^openai\/gpt-6-sol(?:-\d{8})?$/.test(normalized)
+    : /^openai\/gpt-6(?:\.1)?-sol(?:-\d{8})?$/.test(normalized)
       ? {
           inputPerM: inputTokens > 272000 ? 4 : 2,
           outputPerM: inputTokens > 272000 ? 15 : 10,

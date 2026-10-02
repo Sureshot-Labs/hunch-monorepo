@@ -19,7 +19,7 @@ export const openRouterTemperatureSchema = z.coerce
   .max(2);
 
 export function isModernOpenAIReasoningModel(model: string): boolean {
-  return /^openai\/(?:gpt-5\.6(?:-(?:sol|luna|terra))?|gpt-6-(?:astra|sol|luna))(?:-pro)?(?:-\d{8})?(?::[\w-]+)?$/.test(
+  return /^openai\/(?:gpt-5\.6(?:-(?:sol|luna|terra))?|gpt-6-(?:astra|sol|luna)|gpt-6\.1-sol)(?:-pro)?(?:-\d{8})?(?::[\w-]+)?$/.test(
     model.trim(),
   );
 }
@@ -56,7 +56,7 @@ export function supportsOpenRouterReasoningEffort(
     return false;
   return !(
     model &&
-    /^openai\/gpt-6-astra(?:-pro)?(?:-\d{8})?(?::[\w-]+)?$/.test(
+    /^openai\/(?:gpt-6-astra|gpt-6\.1-sol)(?:-pro)?(?:-\d{8})?(?::[\w-]+)?$/.test(
       model.trim(),
     ) &&
     effort === "none"
