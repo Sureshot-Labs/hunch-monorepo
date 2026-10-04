@@ -760,7 +760,8 @@ function buildWalletActivitySummaryStatsParams(
   return [walletIds, options.windowHours, options.baselineDays];
 }
 
-const FETCH_WALLET_ACTIVITY_BASE_SQL = `
+function buildWalletActivityBaseSql(topChangesOnly = false): string {
+  return `
   with wallet_set as (
     select unnest($1::uuid[]) as wallet_id
   ),
@@ -812,7 +813,7 @@ const FETCH_WALLET_ACTIVITY_BASE_SQL = `
     join wallet_set ws on ws.wallet_id = wb.wallet_id
     where wb.window_days = $3::int
   ),
-  events_window as (
+  ${topChangesOnly ? "events_window_all" : "events_window"} as (
     select
       wah.wallet_id,
       wah.venue,
@@ -836,6 +837,22 @@ const FETCH_WALLET_ACTIVITY_BASE_SQL = `
       and wah.hour_bucket >= now() - ($2::text || ' hours')::interval
     group by wah.wallet_id, wah.venue, wah.market_id, wah.outcome_side
   ),
+  ${
+    topChangesOnly
+      ? `-- Keep every boundary tie eligible for the existing final row_number;
+  -- metadata and classification do not participate in the top-change order.
+  ranked_window as (
+    select ew.*, rank() over (
+      partition by ew.wallet_id
+      order by ew.gross_abs_delta_usd desc nulls last, ew.last_occurred_at desc nulls last
+    ) as enrichment_rank
+    from events_window_all ew
+  ),
+  events_window as materialized (
+    select * from ranked_window where enrichment_rank <= $4
+  ),`
+      : ""
+  }
   enriched as (
     select
       ew.*,
@@ -896,6 +913,9 @@ const FETCH_WALLET_ACTIVITY_BASE_SQL = `
     left join profiles p on p.wallet_id = e.wallet_id
   )
 `;
+}
+
+const FETCH_WALLET_ACTIVITY_BASE_SQL = buildWalletActivityBaseSql();
 
 const FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL = `,
   ranked_changes as (
@@ -1172,11 +1192,15 @@ ${FETCH_WALLET_ACTIVITY_SUMMARY_CTE_SQL}
   left join top_changes tc on tc.wallet_id = s.wallet_id
 `;
 
-const FETCH_WALLET_ACTIVITY_SUMMARY_STATS_SQL = `
+function buildWalletActivitySummaryStatsSql(paged = false): string {
+  return `
   with wallet_set as (
     select unnest($1::uuid[]) as wallet_id
   ),
-  baseline as (
+  ${
+    paged
+      ? ""
+      : `baseline as (
     select
       wb.wallet_id,
       wb.p90_usd,
@@ -1184,7 +1208,8 @@ const FETCH_WALLET_ACTIVITY_SUMMARY_STATS_SQL = `
     from wallet_activity_baseline wb
     join wallet_set ws on ws.wallet_id = wb.wallet_id
     where wb.window_days = $3::int
-  ),
+  ),`
+  }
   summary as (
     select
       wah.wallet_id,
@@ -1216,6 +1241,20 @@ const FETCH_WALLET_ACTIVITY_SUMMARY_STATS_SQL = `
       and wah.hour_bucket >= now() - ($2::text || ' hours')::interval
     group by wah.wallet_id
   )
+  ${
+    paged
+      ? `, paged_summary as materialized (
+    select * from summary
+    where last_activity_at is not null
+    -- pg dates and numerics are mapped to JS Date/Number before the legacy
+    -- comparator. Preserve its millisecond precision and double rounding.
+    order by date_trunc('milliseconds', last_activity_at) desc,
+      case when net_change_usd::text in ('NaN', 'Infinity', '-Infinity') then 0
+        else abs(net_change_usd::double precision) end desc, wallet_id
+    limit $4::int offset $5::int
+  )`
+      : ""
+  }
   select
     s.wallet_id,
     s.last_activity_at,
@@ -1229,7 +1268,7 @@ const FETCH_WALLET_ACTIVITY_SUMMARY_STATS_SQL = `
     s.counts_flip,
     s.max_abs_delta_usd_window,
     b.p90_usd as baseline_p90_usd,
-    b.baseline_sample_count::int as baseline_sample_count,
+    ${paged ? "nullif(to_jsonb(b)->>'sample_count', '')::int" : "b.baseline_sample_count::int"} as baseline_sample_count,
     wis.metrics_pnl_30d,
     wis.metrics_roi_30d,
     wis.metrics_trades_30d,
@@ -1239,13 +1278,19 @@ const FETCH_WALLET_ACTIVITY_SUMMARY_STATS_SQL = `
     wis.metrics_resolved_win_rate_edge_30d,
     wis.metrics_resolved_edge_z_score_30d,
     wis.metrics_resolved_stake_usd_30d
-  from summary s
-  left join baseline b on b.wallet_id = s.wallet_id
+  from ${paged ? "paged_summary" : "summary"} s
+  ${paged ? "left join wallet_activity_baseline b on b.wallet_id = s.wallet_id and b.window_days = $3::int" : "left join baseline b on b.wallet_id = s.wallet_id"}
   left join wallet_intel_selector_snapshot wis on wis.wallet_id = s.wallet_id
 `;
+}
+
+const FETCH_WALLET_ACTIVITY_SUMMARY_STATS_SQL =
+  buildWalletActivitySummaryStatsSql();
+const FETCH_WALLET_ACTIVITY_SUMMARY_STATS_PAGE_SQL =
+  buildWalletActivitySummaryStatsSql(true);
 
 const FETCH_WALLET_ACTIVITY_SUMMARY_TOP_CHANGES_SQL = `
-${FETCH_WALLET_ACTIVITY_BASE_SQL}
+${buildWalletActivityBaseSql(true)}
 ${FETCH_WALLET_ACTIVITY_RANKED_CLASSIFIED_SQL}
 ${FETCH_WALLET_ACTIVITY_TOP_CHANGES_CTE_SQL}
   select
@@ -1976,12 +2021,20 @@ export async function fetchWalletActivitySummaryStats(
   client: PoolClient,
   walletIds: string[],
   options: WalletActivityQueryOptions,
+  lastActivityPage?: { limit: number; offset: number },
 ): Promise<Map<string, WalletActivitySummaryStats>> {
   if (walletIds.length === 0) return new Map();
   const resolved = resolveWalletActivityQuery(options);
   const result = await client.query<WalletActivitySummaryStatsDbRow>(
-    FETCH_WALLET_ACTIVITY_SUMMARY_STATS_SQL,
-    buildWalletActivitySummaryStatsParams(walletIds, resolved),
+    lastActivityPage
+      ? FETCH_WALLET_ACTIVITY_SUMMARY_STATS_PAGE_SQL
+      : FETCH_WALLET_ACTIVITY_SUMMARY_STATS_SQL,
+    [
+      ...buildWalletActivitySummaryStatsParams(walletIds, resolved),
+      ...(lastActivityPage
+        ? [lastActivityPage.limit, lastActivityPage.offset]
+        : []),
+    ],
   );
   const map = new Map<string, WalletActivitySummaryStats>();
   for (const row of result.rows) {

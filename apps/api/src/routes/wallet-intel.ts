@@ -10478,21 +10478,25 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
               !needsAttributionForFilters ||
               !requiresSummaryForAttributionFilters
             ) {
+              const sortMode = query.sort as WalletActivitySummarySortMode;
+              const lastActivityPage =
+                sortMode === "last_activity"
+                  ? { limit: query.limit, offset: query.offset }
+                  : undefined;
               const summaryStatsMap = await fetchWalletActivitySummaryStats(
                 client,
                 workingWalletIds,
                 summaryOptions,
+                lastActivityPage,
               );
-              const sortMode = query.sort as WalletActivitySummarySortMode;
               const sortedStats = Array.from(summaryStatsMap.values())
                 .filter((row) => Boolean(row.lastActivityAt))
                 .sort((a, b) =>
                   compareWalletActivitySummaryStats(a, b, sortMode),
                 );
-              const pagedStats = sortedStats.slice(
-                query.offset,
-                query.offset + query.limit,
-              );
+              const pagedStats = lastActivityPage
+                ? sortedStats
+                : sortedStats.slice(query.offset, query.offset + query.limit);
               const pagedIds = pagedStats.map((row) => row.walletId);
               if (pagedIds.length === 0) {
                 return { ok: true, items: [] };
