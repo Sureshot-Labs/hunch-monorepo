@@ -1,6 +1,7 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import type { JsonValue } from "../domain/types.js";
+import { legacyEvidencePollingPausedSql } from "../legacy/evidence-polling-control.js";
 import {
   deriveFundingLifecycle,
   type FundingLifecycleProjection,
@@ -903,6 +904,9 @@ export async function claimAmbiguousPolymarketTradeAttemptsForReconciliation(
       where attempt.execution_path = 'polymarket_clob' and attempt.state in ('submission_started', 'ambiguous')
         and attempt.broadcast_may_have_occurred and attempt.external_reference ~ '^0x[0-9a-fA-F]{64}$'
         and attempt.claim_lease_until <= $1
+        and not exists (select 1 from funding_operations operation_row
+          where operation_row.id = attempt.operation_id and operation_row.user_id = attempt.user_id
+            and ${legacyEvidencePollingPausedSql("operation_row.support_metadata", "attempt.id", "polymarket_orphan_attempt")})
         and not exists (select 1 from orders stored_order where stored_order.user_id = attempt.user_id
           and stored_order.venue = 'polymarket' and stored_order.funding_trade_attempt_id = attempt.id)
       order by attempt.claim_lease_until, attempt.id limit 4`,
@@ -930,6 +934,9 @@ export async function claimAmbiguousPolymarketTradeAttemptsForReconciliation(
       const result = await client.query<FundingTradeAttemptRow>(
         `update funding_trade_attempts set claim_token = gen_random_uuid(), claim_lease_until = $3::timestamptz + interval '5 minutes', updated_at = $3
           where id = $1 and user_id = $2 and state in ('submission_started', 'ambiguous') and claim_lease_until <= $3
+            and not exists (select 1 from funding_operations operation_row
+              where operation_row.id = funding_trade_attempts.operation_id and operation_row.user_id = funding_trade_attempts.user_id
+                and ${legacyEvidencePollingPausedSql("operation_row.support_metadata", "funding_trade_attempts.id", "polymarket_orphan_attempt")})
           returning ${ATTEMPT_COLUMNS}`,
         [candidate.id, candidate.user_id, now],
       );

@@ -21,6 +21,7 @@ import {
   parseFinalizedSolanaOwnedTokenDebit,
 } from "../../services/solana-rpc.js";
 import { sumErc20TransfersTo } from "../execution/evm-erc20-receipt.js";
+import { legacyEvidencePollingPausedSql } from "./evidence-polling-control.js";
 
 export type LegacyDebridgeRow = {
   id: string;
@@ -402,6 +403,7 @@ export async function claimLegacyDebridgeEvidence(
         and metadata #>> '{legacyEvidenceRecovery,evidence}' is distinct from 'canonical_destination_receipt_v1'
         and adapter_version in ('debridge_dln_create_tx_v1', 'debridge_same_chain_v1', 'debridge_same_chain_tx_v0')
         and jsonb_typeof(coalesce(metadata, '{}'::jsonb)) = 'object'
+        and not ${legacyEvidencePollingPausedSql("metadata", "id", "legacy_debridge")}
         and case when metadata #>> '{legacyEvidenceRecovery,nextAttemptAt}' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$'
           then metadata #>> '{legacyEvidenceRecovery,nextAttemptAt}' else '' end <= $1
       order by updated_at, id limit 4 for update skip locked
