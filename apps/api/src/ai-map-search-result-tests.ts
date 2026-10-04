@@ -2,8 +2,40 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   getMapSearchFailureReason,
+  mapSearchStatusFields,
   restoreMapSearchValues,
 } from "./ai-map-search-result.js";
+
+test("map search clears a previous 403 on subsequent status transitions", () => {
+  for (const state of [
+    "running",
+    "completed",
+    "skipped",
+    "dry_run",
+    "aborted",
+  ]) {
+    const hash = {
+      state: "failed",
+      error: "map_search_failed:hard_fail_http_403",
+      callsExecuted: 44,
+    };
+    Object.assign(hash, mapSearchStatusFields({ state, reason: "ok" }));
+    assert.equal(hash.state, state);
+    assert.equal(hash.error, "");
+    assert.equal(hash.callsExecuted, 44);
+  }
+});
+
+test("map search preserves a current failure and normalizes null fields", () => {
+  assert.deepEqual(
+    mapSearchStatusFields({
+      state: "failed",
+      error: "current_403",
+      mapRunId: null,
+    }),
+    { state: "failed", error: "current_403", mapRunId: "" },
+  );
+});
 
 test("map search reports provider permission failures", () => {
   assert.equal(

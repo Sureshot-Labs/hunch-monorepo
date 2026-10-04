@@ -8,6 +8,7 @@ import { pool } from "./db.js";
 import { env } from "./env.js";
 import {
   getMapSearchFailureReason,
+  mapSearchStatusFields,
   restoreMapSearchValues,
 } from "./ai-map-search-result.js";
 import { runMapSearch } from "./lib/map-news/map-search-core.js";
@@ -306,10 +307,7 @@ async function setStatus(
   ttlSec: number,
   payload: Record<string, string | number | null>,
 ): Promise<void> {
-  const cleaned = Object.fromEntries(
-    Object.entries(payload).map(([key, value]) => [key, value ?? ""]),
-  );
-  await redis.hSet(STATUS_KEY, cleaned);
+  await redis.hSet(STATUS_KEY, mapSearchStatusFields(payload));
   await redis.expire(STATUS_KEY, ttlSec);
 }
 
@@ -320,10 +318,7 @@ async function setRunStatus(
   payload: Record<string, string | number | null>,
 ): Promise<void> {
   const key = runStatusKey(mapRunId);
-  const cleaned = Object.fromEntries(
-    Object.entries(payload).map(([k, v]) => [k, v ?? ""]),
-  );
-  await redis.hSet(key, cleaned);
+  await redis.hSet(key, mapSearchStatusFields(payload));
   await redis.expire(key, ttlSec);
 }
 

@@ -1264,6 +1264,8 @@ async function deliverDraft(input: {
       failureCode: reason,
       source: input.source,
     });
+    if (persistedDraft?.modelUsage)
+      draft.modelUsage = persistedDraft.modelUsage;
     composerMetrics = {
       ...existingComposerMetrics,
       fallbackUsed: true,
@@ -1312,6 +1314,7 @@ async function deliverDraft(input: {
         failureCode: failure.code,
         source: input.source,
       });
+      if (failure.modelUsage) draft.modelUsage = failure.modelUsage;
       composerMetrics = buildComposerMetrics({
         attemptCount,
         existing: existingComposerMetrics,
@@ -1341,6 +1344,7 @@ async function deliverDraft(input: {
           failureCode: "model_blocked",
           source: input.source,
         });
+        if (blockedDraft.modelUsage) draft.modelUsage = blockedDraft.modelUsage;
         fallbackMetrics = {
           reason: "model_blocked",
           safetyFlags: blockedDraft.safetyFlags,

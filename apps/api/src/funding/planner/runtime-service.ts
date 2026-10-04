@@ -88,6 +88,7 @@ import { sameAsset } from "../domain/asset-identity.js";
 import {
   verifyAdaptedFundingSourceCommit,
   type FundingSourceAdapter,
+  type FundingSourcePlanningInput,
 } from "./source-adapter.js";
 import { lockFundingControllerWallet } from "../execution/funding-controller-wallet-lock.js";
 import type {
@@ -217,6 +218,8 @@ export class FundingPlanningRuntime {
   private readonly actionRuntime: FundingOperationActionRuntime;
   private readonly withdrawalRuntime: WithdrawalDestinationRuntime;
   private readonly liquiditySingleflight = new FundingLiquiditySingleflight();
+  private readonly receiveCatalogSingleflight =
+    new FundingLiquiditySingleflight();
 
   private readonly opportunisticPreparationReconcileTimeoutMs: number;
   private readonly preparationReceiptReader: PreparationReceiptReader;
@@ -598,7 +601,21 @@ export class FundingPlanningRuntime {
   liquidity(
     userId: string,
     request: FundingDiscoveryRequest,
+    /** Server-owned scope, never populated from the public discovery request. */
+    options?: Readonly<{ sourceScope: "receive_catalog" }>,
   ): Promise<IntentLiquidityProjection> {
+    if (options?.sourceScope === "receive_catalog") {
+      // The catalog consumes only receive/card ingress. Its one-raw-unit
+      // placeholder is not an economic swap request and must neither quote
+      // owned balances nor persist a client-quotable liquidity projection.
+      // Keep this isolated from the full-source singleflight cache as well.
+      return this.receiveCatalogSingleflight.run(userId, request, () =>
+        this.discoverLiquidity(userId, request, {
+          sourceScope: "receive_catalog",
+          store: new CapturingFundingPlanningStore(),
+        }),
+      );
+    }
     return this.liquiditySingleflight.run(userId, request, () =>
       this.discoverLiquidity(userId, request),
     );
@@ -637,12 +654,13 @@ export class FundingPlanningRuntime {
     userId: string,
     request: FundingDiscoveryRequest,
     preview?: Readonly<{
-      account: AccountValueReadModel;
+      account?: AccountValueReadModel;
       store: FundingPlanningStore;
+      sourceScope?: "receive_catalog";
     }>,
   ): Promise<IntentLiquidityProjection> {
     let resolvedMarketForPreparation: ApiTradeMarket | null = null;
-    const accountPromise = preview
+    const accountPromise = preview?.account
       ? Promise.resolve(preview.account)
       : buildAccountValueReadModel({ pool: this.db, userId });
     // Discovery can resolve the market and inspect its exact destination while
@@ -650,14 +668,14 @@ export class FundingPlanningRuntime {
     // same account snapshot for source selection and ownership persistence;
     // only remove the former sequential wait between these independent reads.
     void accountPromise.catch(() => undefined);
-    const previewRuntimePolicy = preview?.account.runtimePolicy;
-    if (preview && !previewRuntimePolicy) {
+    const previewRuntimePolicy = preview?.account?.runtimePolicy;
+    if (preview?.account && !previewRuntimePolicy) {
       throw new Error("account value runtime policy snapshot is unavailable");
     }
     const resolvedPolicy = previewRuntimePolicy
       ? {
           runtime: previewRuntimePolicy,
-          revision: preview?.account.policy.revision ?? "",
+          revision: preview?.account?.policy.revision ?? "",
         }
       : await resolveFundingPolicy(this.db);
     const sourcePlannerPromise = accountPromise.then((account) => {
@@ -665,6 +683,18 @@ export class FundingPlanningRuntime {
         account,
         request.connectedExternalWalletRefs,
       );
+      if (preview?.sourceScope === "receive_catalog") {
+        const receiveIngress = new DirectIngressFundingSourceAdapter(sources);
+        return {
+          list: (sourceInput: FundingSourcePlanningInput) =>
+            receiveIngress.list(sourceInput),
+          discover: async (sourceInput: FundingSourcePlanningInput) => ({
+            sources: await receiveIngress.list(sourceInput),
+            reasonCodes: [],
+          }),
+          listBlockingReasonCodes: async () => [],
+        };
+      }
       return new ProductionFundingSourcePlanner(
         this.db,
         sources,

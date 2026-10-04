@@ -1461,6 +1461,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         return new Response(
           JSON.stringify({
             choices: [{ message: { content: JSON.stringify(content) } }],
+            usage: {
+              prompt_tokens: 1000,
+              completion_tokens: 200,
+              cost: requests.length === 1 ? 0.01 : 0.02,
+            },
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
@@ -1474,6 +1479,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         assert.equal(requests.length, 2);
         assert.equal(draft.status, "ready");
         assert.equal(draft.storyFamily, "trader_profile");
+        assert.equal(draft.modelUsage?.calls.length, 2);
+        assert.equal(draft.modelUsage?.chargedCostUsd, 0.03);
+        assert.equal(draft.modelUsage?.unknownCostCalls, 0);
         assert.match(draft.postText ?? "", /\$56\.4K/);
         assert.deepEqual(draft.usedFactIds, ["market", "actor"]);
         assert.equal(draft.sourceDigest, buildXEditorialSourceDigest(source));
@@ -1580,6 +1588,9 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           (error: unknown) => {
             assert.ok(error instanceof XEditorialComposerError);
             assert.equal(error.code, "schema_mismatch");
+            assert.equal(error.modelUsage?.calls.length, 2);
+            assert.equal(error.modelUsage?.chargedCostUsd, null);
+            assert.equal(error.modelUsage?.unknownCostCalls, 2);
             assert.ok(
               error.issues.some((issue) =>
                 issue.startsWith("formatting.0.text:"),
@@ -1749,6 +1760,52 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         const draft = await compose({ source });
         assert.equal(draft.status, "blocked");
         assert.deepEqual(draft.safetyFlags, ["model_blocked"]);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  },
+  {
+    name: "OpenRouter composer accounts HTTP errors and transport uncertainty without repair calls",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      try {
+        for (const transportError of [false, true]) {
+          let calls = 0;
+          globalThis.fetch = (async () => {
+            calls += 1;
+            if (transportError) throw new Error("connection lost");
+            return new Response(
+              JSON.stringify({
+                error: { message: "unavailable" },
+                usage: { cost: 0.01 },
+              }),
+              { status: 502 },
+            );
+          }) as typeof fetch;
+          const compose = createOpenRouterXEditorialDraftComposer({
+            apiKey: "test-key",
+            config,
+          });
+          await assert.rejects(
+            () => compose({ source }),
+            (error: unknown) => {
+              assert.ok(error instanceof XEditorialComposerError);
+              assert.equal(error.code, "provider_error");
+              assert.equal(error.modelUsage?.calls.length, 1);
+              assert.equal(
+                error.modelUsage?.chargedCostUsd,
+                transportError ? null : 0.01,
+              );
+              assert.equal(
+                error.modelUsage?.unknownCostCalls,
+                transportError ? 1 : 0,
+              );
+              return true;
+            },
+          );
+          assert.equal(calls, 1);
+        }
       } finally {
         globalThis.fetch = originalFetch;
       }

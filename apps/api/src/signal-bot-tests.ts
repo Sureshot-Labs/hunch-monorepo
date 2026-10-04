@@ -165,6 +165,24 @@ import {
   XEditorialComposerError,
   type XEditorialDraftComposer,
 } from "./services/x-editorial-draft.js";
+import type { XEditorialUsage } from "./services/x-editorial-usage.js";
+
+const TEST_X_EDITORIAL_USAGE: XEditorialUsage = {
+  calls: [
+    {
+      model: "test/editorial-model",
+      inputTokens: 1000,
+      outputTokens: 200,
+      reasoningTokens: 0,
+      providerCostUsd: 0.01,
+      chargedCostUsd: 0.01,
+      costSource: "provider_reported",
+    },
+  ],
+  chargedCostUsd: 0.01,
+  knownCostUsd: 0.01,
+  unknownCostCalls: 0,
+};
 
 const FULL_FUNDING_POLICY: FundingIntentPolicy = {
   version: 2,
@@ -16787,9 +16805,12 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           now: new Date(now),
           redis,
           telegram,
-          xEditorialComposer: createTestXEditorialComposer({
-            calls,
-            text: editorialText,
+          xEditorialComposer: async (composerInput) => ({
+            ...(await createTestXEditorialComposer({
+              calls,
+              text: editorialText,
+            })(composerInput)),
+            modelUsage: TEST_X_EDITORIAL_USAGE,
           }),
         });
 
@@ -16809,6 +16830,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(telegram.messages[0]?.text ?? "", /```|🎨/);
       assert.equal(telegram.messages[0]?.parse_mode, "MarkdownV2");
       assert.equal(telegram.messages[1]?.parse_mode, "MarkdownV2");
+      assert.deepEqual(
+        (
+          [...db.messageRows.values()][0]?.metrics as {
+            editorialDraftV1?: { modelUsage?: XEditorialUsage };
+          }
+        )?.editorialDraftV1?.modelUsage,
+        TEST_X_EDITORIAL_USAGE,
+      );
     },
   },
   {
@@ -16839,11 +16868,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       let composeCalls = 0;
       const composer: XEditorialDraftComposer = async () => {
         composeCalls += 1;
-        throw new XEditorialComposerError({
+        const failure = new XEditorialComposerError({
           code: "schema_mismatch",
           issues: ["formatting.0.text"],
           message: "schema_mismatch",
         });
+        failure.modelUsage = TEST_X_EDITORIAL_USAGE;
+        throw failure;
       };
       const config = parseSignalBotConfig({
         HUNCH_SIGNAL_BOT_TOKEN: "token",
@@ -16906,6 +16937,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(metrics?.editorialComposerV1?.terminal, false);
       assert.equal(metrics?.editorialFallbackV1?.reason, "schema_mismatch");
       assert.equal(metrics?.editorialFallbackV1?.used, true);
+      assert.equal(
+        (
+          stored?.metrics as {
+            editorialDraftV1?: {
+              modelUsage?: { chargedCostUsd?: number | null };
+            };
+          }
+        )?.editorialDraftV1?.modelUsage?.chargedCostUsd,
+        0.01,
+      );
       assert.ok(
         db.queries.some((query) =>
           query.sql.includes("{editorialComposerV1,terminal}"),
@@ -17112,6 +17153,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         marketId: source.marketId,
         model: "test/editorial-model",
         postText: null,
+        modelUsage: TEST_X_EDITORIAL_USAGE,
         promptVersion: X_EDITORIAL_PROMPT_VERSION,
         safetyFlags: ["model_blocked"],
         selectedSide: source.selectedSide,
@@ -17156,6 +17198,14 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.equal(metrics?.editorialComposerV1?.terminal, false);
       assert.equal(metrics?.editorialFallbackV1?.reason, "model_blocked");
       assert.equal(metrics?.editorialFallbackV1?.used, true);
+      assert.deepEqual(
+        (
+          [...db.messageRows.values()][0]?.metrics as {
+            editorialDraftV1?: { modelUsage?: XEditorialUsage };
+          }
+        )?.editorialDraftV1?.modelUsage,
+        TEST_X_EDITORIAL_USAGE,
+      );
     },
   },
   {

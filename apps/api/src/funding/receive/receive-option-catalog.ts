@@ -305,21 +305,25 @@ export async function listFundingReceiveOptions(input: {
   const discoveries = await Promise.all(
     destinationAccess.options.map(async (destination) => {
       try {
-        const liquidity = await input.runtime.liquidity(input.userId, {
-          purpose: "add_funds",
-          marketContextId: null,
-          confirmedSourceAmount: null,
-          requestedDestinationAmount: {
-            asset: destination.requiredAsset,
-            raw: "1",
+        const liquidity = await input.runtime.liquidity(
+          input.userId,
+          {
+            purpose: "add_funds",
+            marketContextId: null,
+            confirmedSourceAmount: null,
+            requestedDestinationAmount: {
+              asset: destination.requiredAsset,
+              raw: "1",
+            },
+            destinationOptionId: destination.destinationOptionId,
+            venueBindingOptionId: destination.venueBindingOptionId,
+            withdrawalRecipientId: null,
+            maxFeeUsd: null,
+            maxSlippageBps: null,
+            deadline: null,
           },
-          destinationOptionId: destination.destinationOptionId,
-          venueBindingOptionId: destination.venueBindingOptionId,
-          withdrawalRecipientId: null,
-          maxFeeUsd: null,
-          maxSlippageBps: null,
-          deadline: null,
-        });
+          { sourceScope: "receive_catalog" },
+        );
         return manualReceiveCandidates(destination, liquidity.sourceOptions);
       } catch (error) {
         // A partial provider outage must not hide independently usable assets.

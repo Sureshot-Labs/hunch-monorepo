@@ -3,6 +3,18 @@ export type MapSearchCallResult = {
   budgetStop?: string | null;
 };
 
+/** HSET merges fields: every status transition must replace the prior error. */
+export function mapSearchStatusFields(
+  payload: Record<string, string | number | null>,
+): Record<string, string | number> {
+  return Object.fromEntries(
+    Object.entries({ error: "", ...payload }).map(([key, value]) => [
+      key,
+      value ?? "",
+    ]),
+  );
+}
+
 export function getMapSearchFailureReason(input: {
   callsCompact?: MapSearchCallResult[];
 }): string | null {

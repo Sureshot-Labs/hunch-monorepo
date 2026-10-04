@@ -188,8 +188,10 @@ await test("collapses duplicate assets to the policy-preferred destination", asy
     liquidity: async (
       _userId: string,
       request: { destinationOptionId: string | null },
-    ) =>
-      liquidity(
+      options: { sourceScope: "receive_catalog" },
+    ) => {
+      assert.deepEqual(options, { sourceScope: "receive_catalog" });
+      return liquidity(
         request.destinationOptionId === polymarket.destinationOptionId
           ? [
               manualReceiveOption({
@@ -205,7 +207,8 @@ await test("collapses duplicate assets to the policy-preferred destination", asy
                 assets: [POLYGON_USDC],
               }),
             ],
-      ),
+      );
+    },
   };
   const catalog = await listFundingReceiveOptions({
     runtime: runtime as never,

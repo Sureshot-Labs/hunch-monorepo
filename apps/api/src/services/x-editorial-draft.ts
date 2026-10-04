@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
 import { assertAiCompletionComplete } from "../lib/ai-completion-diagnostics.js";
+import {
+  readXEditorialCallUsage,
+  summarizeXEditorialUsage,
+  xEditorialUsageSchema,
+  type XEditorialCallUsage,
+  type XEditorialUsage,
+} from "./x-editorial-usage.js";
 
 import { z } from "zod";
 import {
@@ -18,6 +25,7 @@ export type XEditorialComposerFailureCode =
 export class XEditorialComposerError extends Error {
   readonly code: XEditorialComposerFailureCode;
   readonly issues: string[];
+  modelUsage?: XEditorialUsage;
 
   constructor(input: {
     code: XEditorialComposerFailureCode;
@@ -35,12 +43,14 @@ export function readXEditorialComposerFailure(error: unknown): {
   code: XEditorialComposerFailureCode;
   issues: string[];
   message: string;
+  modelUsage?: XEditorialUsage;
 } {
   if (error instanceof XEditorialComposerError) {
     return {
       code: error.code,
       issues: error.issues,
       message: error.message,
+      ...(error.modelUsage ? { modelUsage: error.modelUsage } : {}),
     };
   }
   return {
@@ -90,6 +100,7 @@ export type XEditorialDraftV1 = {
   generatedAt: string;
   marketId: string;
   model: string;
+  modelUsage?: XEditorialUsage;
   postText: string | null;
   promptVersion: typeof X_EDITORIAL_PROMPT_VERSION;
   safetyFlags: string[];
@@ -190,6 +201,7 @@ const persistedDraftSchema = z
     generatedAt: z.string().datetime(),
     marketId: z.string().trim().min(1).max(500),
     model: z.string().trim().min(1).max(200),
+    modelUsage: xEditorialUsageSchema.optional(),
     postText: z.string().min(1).max(4_096).nullable(),
     promptVersion: z.literal(X_EDITORIAL_PROMPT_VERSION),
     safetyFlags: z.array(z.string()).max(20),
@@ -927,9 +939,11 @@ async function callOpenRouter(input: {
   maxTokens: number;
   systemPrompt: string;
   userPrompt: string;
+  recordUsage: (usage: XEditorialCallUsage) => void;
 }): Promise<{ content: string; finishReason: string | null }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 90_000);
+  let responsePayload: unknown = null;
   try {
     const response = await fetch(
       "https://openrouter.ai/api/v1/chat/completions",
@@ -967,6 +981,7 @@ async function callOpenRouter(input: {
     const payload = (await response
       .json()
       .catch(() => ({}))) as OpenRouterResponse;
+    responsePayload = payload;
     if (!response.ok) {
       throw new Error(
         `OpenRouter ${response.status}: ${JSON.stringify(payload).slice(0, 500)}`,
@@ -1019,6 +1034,9 @@ async function callOpenRouter(input: {
     return { content, finishReason: choice?.finish_reason ?? null };
   } finally {
     clearTimeout(timeout);
+    input.recordUsage(
+      readXEditorialCallUsage(responsePayload, input.config.model),
+    );
   }
 }
 
@@ -1040,112 +1058,145 @@ export function createOpenRouterXEditorialDraftComposer(input: {
     const systemPrompt = buildXEditorialDraftSystemPrompt(config);
     let previousAttempt: unknown = null;
     let repairIssues: string[] | undefined;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      let raw: unknown;
-      try {
-        const response = await callOpenRouter({
-          apiKey,
-          config,
-          maxTokens: repairIssues?.includes("missing_content")
-            ? Math.max(
-                config.maxOutputTokens,
-                Math.min(4_000, Math.max(1_400, config.maxOutputTokens * 2)),
-              )
-            : config.maxOutputTokens,
-          systemPrompt,
-          userPrompt: buildUserPrompt({
-            previousAttempt,
-            repairIssues,
-            source,
-          }),
-        });
-        raw = normalizeXEditorialModelOutput(
-          extractJsonObject(response.content),
-        );
-      } catch (error) {
-        const repairableFailure =
-          error instanceof SyntaxError
-            ? new XEditorialComposerError({
-                code: "schema_mismatch",
-                issues: ["invalid_json"],
-                message: "OpenRouter editorial response was not valid JSON",
-              })
-            : error instanceof XEditorialComposerError
-              ? error
-              : null;
-        if (
-          attempt === 0 &&
-          repairableFailure &&
-          (repairableFailure.code === "missing_content" ||
-            repairableFailure.code === "schema_mismatch")
-        ) {
-          previousAttempt = null;
-          repairIssues = [repairableFailure.code, ...repairableFailure.issues];
-          continue;
+    const usageCalls: XEditorialCallUsage[] = [];
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let raw: unknown;
+        try {
+          const response = await callOpenRouter({
+            apiKey,
+            config,
+            maxTokens: repairIssues?.includes("missing_content")
+              ? Math.max(
+                  config.maxOutputTokens,
+                  Math.min(4_000, Math.max(1_400, config.maxOutputTokens * 2)),
+                )
+              : config.maxOutputTokens,
+            systemPrompt,
+            userPrompt: buildUserPrompt({
+              previousAttempt,
+              repairIssues,
+              source,
+            }),
+            recordUsage: (usage) => {
+              usageCalls.push(usage);
+              // Keep evidence even if persistence/delivery subsequently fails.
+              console.log(
+                JSON.stringify({
+                  event: "x_editorial_model_usage",
+                  at: new Date().toISOString(),
+                  noteId: source.noteId,
+                  attempt: usageCalls.length,
+                  ...usage,
+                }),
+              );
+            },
+          });
+          raw = normalizeXEditorialModelOutput(
+            extractJsonObject(response.content),
+          );
+        } catch (error) {
+          const repairableFailure =
+            error instanceof SyntaxError
+              ? new XEditorialComposerError({
+                  code: "schema_mismatch",
+                  issues: ["invalid_json"],
+                  message: "OpenRouter editorial response was not valid JSON",
+                })
+              : error instanceof XEditorialComposerError
+                ? error
+                : null;
+          if (
+            attempt === 0 &&
+            repairableFailure &&
+            (repairableFailure.code === "missing_content" ||
+              repairableFailure.code === "schema_mismatch")
+          ) {
+            previousAttempt = null;
+            repairIssues = [
+              repairableFailure.code,
+              ...repairableFailure.issues,
+            ];
+            continue;
+          }
+          throw repairableFailure ?? error;
         }
-        throw repairableFailure ?? error;
-      }
-      previousAttempt = raw;
-      const parsed = modelOutputSchema.safeParse(raw);
-      if (!parsed.success) {
-        repairIssues = parsed.error.issues.map(
-          (issue) => `${issue.path.join(".") || "output"}:${issue.message}`,
-        );
-        if (attempt === 0) continue;
-        throw new XEditorialComposerError({
-          code: "schema_mismatch",
-          issues: repairIssues,
-          message: `OpenRouter editorial output failed schema validation: ${repairIssues.join("; ")}`,
-        });
-      }
-      const validated = validateXEditorialModelOutput({
-        config,
-        output: parsed.data,
-        source,
-      });
-      if (validated.issues.length > 0) {
-        repairIssues = validated.issues;
-        if (attempt === 0) continue;
-        throw new XEditorialComposerError({
-          code: "schema_mismatch",
-          issues: validated.issues,
-          message: `OpenRouter editorial output failed contract validation: ${validated.issues.join("; ")}`,
-        });
-      }
-      if (parsed.data.status === "blocked" || !validated.postText) {
-        return blockedDraft({
-          flags:
-            parsed.data.safetyFlags.length > 0
-              ? parsed.data.safetyFlags
-              : ["model_blocked"],
-          generatedAt,
-          model: config.model,
+        previousAttempt = raw;
+        const parsed = modelOutputSchema.safeParse(raw);
+        if (!parsed.success) {
+          repairIssues = parsed.error.issues.map(
+            (issue) => `${issue.path.join(".") || "output"}:${issue.message}`,
+          );
+          if (attempt === 0) continue;
+          throw new XEditorialComposerError({
+            code: "schema_mismatch",
+            issues: repairIssues,
+            message: `OpenRouter editorial output failed schema validation: ${repairIssues.join("; ")}`,
+          });
+        }
+        const validated = validateXEditorialModelOutput({
+          config,
+          output: parsed.data,
           source,
-          storyFamily: parsed.data.storyFamily,
         });
+        if (validated.issues.length > 0) {
+          repairIssues = validated.issues;
+          if (attempt === 0) continue;
+          throw new XEditorialComposerError({
+            code: "schema_mismatch",
+            issues: validated.issues,
+            message: `OpenRouter editorial output failed contract validation: ${validated.issues.join("; ")}`,
+          });
+        }
+        if (parsed.data.status === "blocked" || !validated.postText) {
+          return {
+            ...blockedDraft({
+              flags:
+                parsed.data.safetyFlags.length > 0
+                  ? parsed.data.safetyFlags
+                  : ["model_blocked"],
+              generatedAt,
+              model: config.model,
+              source,
+              storyFamily: parsed.data.storyFamily,
+            }),
+            modelUsage: summarizeXEditorialUsage(usageCalls),
+          };
+        }
+        return {
+          characterCount: visibleCharacterCount(validated.postText),
+          formatting: parsed.data.formatting,
+          generatedAt,
+          marketId: source.marketId,
+          model: config.model,
+          modelUsage: summarizeXEditorialUsage(usageCalls),
+          postText: validated.postText,
+          promptVersion: X_EDITORIAL_PROMPT_VERSION,
+          safetyFlags: parsed.data.safetyFlags,
+          selectedSide: source.selectedSide,
+          sourceDigest: sourceDigest(source),
+          status: "ready",
+          storyFamily: parsed.data.storyFamily,
+          usedFactIds: [...new Set(parsed.data.usedFactIds)],
+          version: 1,
+        };
       }
-      return {
-        characterCount: visibleCharacterCount(validated.postText),
-        formatting: parsed.data.formatting,
-        generatedAt,
-        marketId: source.marketId,
-        model: config.model,
-        postText: validated.postText,
-        promptVersion: X_EDITORIAL_PROMPT_VERSION,
-        safetyFlags: parsed.data.safetyFlags,
-        selectedSide: source.selectedSide,
-        sourceDigest: sourceDigest(source),
-        status: "ready",
-        storyFamily: parsed.data.storyFamily,
-        usedFactIds: [...new Set(parsed.data.usedFactIds)],
-        version: 1,
-      };
+      throw new XEditorialComposerError({
+        code: "schema_mismatch",
+        issues: ["unexpected_composer_exit"],
+        message: "OpenRouter editorial composer exhausted its repair loop",
+      });
+    } catch (error) {
+      const failure =
+        error instanceof XEditorialComposerError
+          ? error
+          : new XEditorialComposerError({
+              code: "provider_error",
+              message: error instanceof Error ? error.message : String(error),
+            });
+      failure.modelUsage = summarizeXEditorialUsage(usageCalls);
+      throw failure;
     }
-    throw new XEditorialComposerError({
-      code: "schema_mismatch",
-      issues: ["unexpected_composer_exit"],
-      message: "OpenRouter editorial composer exhausted its repair loop",
-    });
   };
 }
 
