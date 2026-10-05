@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 import { ethers } from "ethers";
+import { POLYMARKET_PROTOCOL_CONTRACTS as CONTRACTS } from "@hunch/shared";
 
 import { env } from "./env.js";
 import {
@@ -60,6 +61,86 @@ const denyDynamicDependencies: EmbeddedEvmSponsorshipDependencies = {
 const TEST_USER_ID = "00000000-0000-0000-0000-000000000001";
 
 const tests: TestCase[] = [
+  {
+    name: "V2 sponsored approvals remain chain/token/operator exact; redemption needs its durable journal",
+    run: async () => {
+      const approvals = new ethers.Interface([
+        "function approve(address,uint256)",
+        "function setApprovalForAll(address,bool)",
+      ]);
+      const transactions = [
+        {
+          id: "v3-allowance",
+          label: "V3 allowance",
+          to: CONTRACTS.collateral,
+          data: approvals.encodeFunctionData("approve", [
+            CONTRACTS.exchangeV3,
+            1n,
+          ]),
+        },
+        {
+          id: "pm-operator",
+          label: "PM operator",
+          to: CONTRACTS.positionManager,
+          data: approvals.encodeFunctionData("setApprovalForAll", [
+            CONTRACTS.router,
+            true,
+          ]),
+        },
+      ];
+      const firstTransaction = transactions[0];
+      assert.ok(firstTransaction);
+      const run = (chainId: number, to: string, data: string, value = "0") =>
+        assertEmbeddedEvmSponsorshipAllowed({
+          userId: TEST_USER_ID,
+          signer: walletContext.signer,
+          chainId,
+          transactions: [{ ...firstTransaction, to, data, value }],
+          dependencies: denyDynamicDependencies,
+        });
+      for (const tx of transactions) await run(137, tx.to, tx.data);
+      await assert.rejects(() =>
+        run(8453, firstTransaction.to, firstTransaction.data),
+      );
+      await assert.rejects(() =>
+        run(
+          137,
+          CONTRACTS.positionManager,
+          approvals.encodeFunctionData("setApprovalForAll", [
+            walletContext.signer,
+            true,
+          ]),
+        ),
+      );
+      await assert.rejects(() =>
+        run(
+          137,
+          CONTRACTS.positionManager,
+          approvals.encodeFunctionData("setApprovalForAll", [
+            CONTRACTS.router,
+            false,
+          ]),
+        ),
+      );
+      await assert.rejects(() =>
+        run(137, firstTransaction.to, firstTransaction.data, "1"),
+      );
+      const router = new ethers.Interface([
+        "function redeem(bytes31,uint256,uint256)",
+      ]);
+      await assert.rejects(() =>
+        run(
+          137,
+          CONTRACTS.router,
+          router.encodeFunctionData("redeem", [
+            `0x01${"00".repeat(30)}`,
+            1n,
+            1n,
+          ]),
+        ),
+      );
+    },
+  },
   {
     name: "embedded ethereum transaction request uses sponsored Privy RPC payload",
     run: () => {

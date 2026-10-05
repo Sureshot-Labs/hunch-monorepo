@@ -6,6 +6,7 @@ import crypto from "node:crypto";
 
 import { buildApp } from "./app.js";
 import { pool } from "./db.js";
+import { env } from "./env.js";
 import {
   COUNT_TRADES_BY_TOKEN_SQL,
   RECENT_TRADES_BY_TOKEN_SQL,
@@ -39,6 +40,76 @@ async function main() {
   assert.doesNotMatch(COUNT_TRADES_BY_TOKEN_SQL, /count_capped/i);
 
   const app = await buildApp();
+  const originalFetch = globalThis.fetch;
+  try {
+    let calls = 0;
+    globalThis.fetch = (async (url) => {
+      const requestUrl = new URL(String(url));
+      assert.equal(requestUrl.pathname, "/v2/trades");
+      assert.equal(requestUrl.searchParams.get("event_id"), "123");
+      assert.equal(requestUrl.searchParams.has("offset"), false);
+      calls++;
+      return Response.json({
+        data: [
+          {
+            token_id: "123",
+            side: "SELL",
+            timestamp: 1791220000,
+            price: 0.4,
+            size: 2,
+            transaction_hash: "0xsynthetic",
+          },
+        ],
+        pagination: { next_cursor: calls === 1 ? "opaque+/=" : null },
+      });
+    }) as typeof fetch;
+    const first = await app.inject({
+      method: "GET",
+      url: "/trades?eventId=polymarket:123&paginationMode=cursor&limit=50",
+    });
+    assert.equal(first.statusCode, 200, first.body);
+    assert.equal(first.json().pagination.nextCursor, "opaque+/=");
+    assert.equal(first.json().pagination.total, null);
+    assert.equal(
+      first.json().pagination.hasMore,
+      true,
+      "short page with cursor is not terminal",
+    );
+    const second = await app.inject({
+      method: "GET",
+      url: "/trades?eventId=polymarket:123&paginationMode=cursor&limit=50&cursor=opaque%2B%2F%3D",
+    });
+    assert.equal(second.statusCode, 200, second.body);
+    assert.equal(second.json().pagination.hasMore, false);
+    for (const query of [
+      "eventId=limitless:123&paginationMode=cursor",
+      "eventId=polymarket:123&paginationMode=cursor&offset=50",
+      "eventId=polymarket:123&cursor=next",
+    ]) {
+      const invalid = await app.inject({
+        method: "GET",
+        url: `/trades?${query}`,
+      });
+      assert.equal(invalid.statusCode, 400, invalid.body);
+    }
+    globalThis.fetch = (async () =>
+      Response.json(
+        { code: "temporary", retryable: true },
+        { status: 503 },
+      )) as typeof fetch;
+    const failed = await app.inject({
+      method: "GET",
+      url: "/trades?eventId=polymarket:123&paginationMode=cursor&cursor=next",
+    });
+    assert.equal(failed.statusCode, 503, failed.body);
+    assert.equal(
+      failed.json().code,
+      "polymarket_trades_unavailable",
+      "no local timeline fallback after cursor failure",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
   const boundedSqlTokenId = `bounded-sql-test-token-${crypto.randomUUID()}`;
   try {
     await pool.query(
@@ -164,7 +235,12 @@ async function main() {
       pagination: { total: number; limit: number; offset: number };
     }>();
     assert.deepEqual(body.trades, []);
-    assert.deepEqual(body.pagination, { total: 0, limit: 8, offset: 0 });
+    assert.deepEqual(body.pagination, {
+      total: 0,
+      limit: 8,
+      offset: 0,
+      hasMore: false,
+    });
     assert.equal(tokenRegistryQueries, registryQueriesBeforeMissingToken + 1);
     assert.equal(rawTradeQueries, 0);
   } finally {
@@ -173,4 +249,18 @@ async function main() {
   }
 }
 
-await main();
+// Route fixtures must not inherit sidecars, Redis or separate content pools
+// from the developer's .env. Only the guarded disposable DB is in scope.
+const runtimeSettings = {
+  redisUrl: env.redisUrl,
+  contentEnabled: env.contentEnabled,
+  telegramVenueReconcileEnabled: env.telegramVenueReconcileEnabled,
+};
+try {
+  env.redisUrl = "";
+  env.contentEnabled = false;
+  env.telegramVenueReconcileEnabled = false;
+  await main();
+} finally {
+  Object.assign(env, runtimeSettings);
+}

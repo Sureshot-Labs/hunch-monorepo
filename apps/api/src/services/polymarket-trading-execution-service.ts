@@ -1,5 +1,22 @@
 import crypto from "node:crypto";
+import type { Pool } from "@hunch/infra";
+import { selectPolymarketTradeAsset } from "./polymarket-trade-asset-selection.js";
 import { isRpcRateLimit } from "@hunch/shared";
+import {
+  POLYMARKET_PROTOCOL_CONTRACTS,
+  normalizePolymarketAssetId,
+  parsePolymarketAssetContext,
+  type PolymarketAssetContext,
+  type PolymarketOrderDomainVersion,
+  type PolymarketProtocolVersion,
+} from "@hunch/shared";
+import {
+  resolvePolymarketAssetContext,
+  resolvePolymarketOrderAssetContext,
+  readPolymarketStoredOrderContext,
+  polymarketContextFromMarketInfo,
+  PolymarketAssetContextError,
+} from "./polymarket-asset-context.js";
 import { ethers } from "ethers";
 
 import {
@@ -16,7 +33,10 @@ import {
   fetchFundingConsumerReservationForUser,
   releaseFundingReservationForDefinitiveTradeFailure,
 } from "../funding/persistence/funding-evidence-repository.js";
-import { canonicalJsonHash } from "../funding/persistence/canonical.js";
+import {
+  canonicalJsonHash,
+  canonicalJsonEqual,
+} from "../funding/persistence/canonical.js";
 import {
   buildFundingTradeConsumerIntent,
   compareFundingTradeConsumerIntentToConfirmedBound,
@@ -128,6 +148,7 @@ import {
   executeEmbeddedSignerApprovalRequests,
   prepareEmbeddedPolymarketSignerApprovalRequests,
   prepareEmbeddedPolymarketSignerApprovalTransactions,
+  embeddedPolymarketAutomationApprovalsReady,
   resolveEmbeddedPolymarketWalletContext,
   type DepositWalletBatchPurpose,
   type EmbeddedPolymarketTypedData,
@@ -216,6 +237,7 @@ import type {
   TradeIntent,
   TradeQuote,
   TradeQuoteInput,
+  TradeSide,
   TradingReadiness,
   TradingReadinessInput,
 } from "./trading-types.js";
@@ -255,6 +277,7 @@ type PolymarketPreparedPayload = PreparedPayloadBase & {
   requiredSpendRaw: string | null;
   size: number | null;
   tokenId: string | null;
+  assetContext?: PolymarketAssetContext | null;
 };
 
 type PolymarketBotQuoteRaw = PolymarketQuoteResult & {
@@ -292,6 +315,7 @@ function requiredWarnLogger(
 }
 
 type PolymarketClientOrderBody = {
+  assetContext?: PolymarketAssetContext;
   deferExec?: boolean;
   exchangeAddress?: string | null;
   negRisk?: boolean | null;
@@ -313,6 +337,7 @@ type PolymarketOpenOrdersQuery = {
 };
 
 type PolymarketBalanceAllowanceSyncBody = {
+  assetContext?: PolymarketAssetContext;
   assetType: string;
   signatureType?: number | null;
   tokenId?: string | null;
@@ -323,6 +348,7 @@ type PolymarketCancelOrderBody = {
 };
 
 type PolymarketOrderHashBody = {
+  assetContext?: PolymarketAssetContext;
   exchangeAddress?: string | null;
   negRisk?: boolean | null;
   order: Record<string, unknown>;
@@ -353,6 +379,7 @@ type PolymarketFunderDeriveBatchBody = {
 };
 
 type PolymarketQuoteBody = {
+  assetContext?: PolymarketAssetContext;
   strictSlippage?: boolean;
   amount?: number | null;
   amountType?: "usd" | "shares" | null;
@@ -396,6 +423,7 @@ type PolymarketMarketInfoQuery = {
   conditionId?: string | null;
   marketId?: string | null;
   tokenId?: string | null;
+  positionContract?: string;
 };
 
 type PolymarketOrderParamsQuery = {
@@ -604,6 +632,8 @@ export async function resolveEmbeddedPolymarketEnsureReadyState(
   input: {
     requestedFunder?: string | null;
     signer: string;
+    protocolVersion?: PolymarketProtocolVersion;
+    action?: TradeSide;
   } & EmbeddedPolymarketEnsureReadyIdentity,
 ) {
   const userId = input.user?.id ?? input.userId?.trim() ?? "";
@@ -703,6 +733,7 @@ export async function resolveEmbeddedPolymarketEnsureReadyState(
     signer: input.signer,
     funder: effectiveFunder,
     includeFeeCollectorNonce: false,
+    includeProtocolV2: input.protocolVersion === "v2",
     negRiskAdapterAddress: env.polymarketNegRiskAdapterAddress,
     ctfCollateralAdapterAddress: env.polymarketCtfCollateralAdapterAddress,
     negRiskCollateralAdapterAddress:
@@ -736,19 +767,35 @@ export async function resolveEmbeddedPolymarketEnsureReadyState(
         )
       : true,
     feeCollectorAllowanceOk: true,
+    ...(input.protocolVersion === "v2"
+      ? {
+          v3ExchangeApproved: snapshot.protocolV2?.okExchange === true,
+          v3ExchangeAllowanceOk: approvalSatisfiesEmbeddedAutomation(
+            snapshot.protocolV2?.allowanceExchange ?? null,
+          ),
+        }
+      : {}),
   };
   const approvalRequests = prepareEmbeddedPolymarketSignerApprovalRequests({
     context,
     funder: effectiveFunder,
+    protocolVersion: input.protocolVersion,
+    action: input.action,
     currentApprovals,
   });
   const approvalTransactions =
     prepareEmbeddedPolymarketSignerApprovalTransactions({
       signer: context.signer,
       funder: effectiveFunder,
+      protocolVersion: input.protocolVersion,
+      action: input.action,
       currentApprovals,
     });
-  const setupApprovalsReady = Object.values(currentApprovals).every(Boolean);
+  const setupApprovalsReady = embeddedPolymarketAutomationApprovalsReady({
+    protocolVersion: input.protocolVersion,
+    action: input.action,
+    currentApprovals,
+  });
 
   if (approvalRequests.length !== approvalTransactions.length) {
     throw new Error("Polymarket approval plan is inconsistent.");
@@ -1508,6 +1555,7 @@ export async function reconcilePolymarketTerminalOrder(inputs: {
   ) {
     const exchangeAddress = await resolvePolymarketOrderExchangeAddress({
       tokenId: row.token_id?.trim() || null,
+      orderPayload: row.order_payload,
     });
     executionSummary = await fetchPolymarketExecutionSummary({
       exchangeAddress,
@@ -2494,7 +2542,7 @@ async function reconcileUnconfirmedOrders(inputs: {
   let cancelledCount = 0;
   let unmatchedCount = 0;
   let expiredCount = 0;
-  const exchangeAddressByTokenId = new Map<string, string>();
+  const exchangeAddressByContext = new Map<string, string>();
   const tradeSyncAfterSecOverride =
     resolvePolymarketUnconfirmedTradeSyncAfterSecOverride(rows);
   let tradeSyncForFillPromise: Promise<void> | null = null;
@@ -2521,16 +2569,21 @@ async function reconcileUnconfirmedOrders(inputs: {
     try {
       if (orderHash && makerAmount != null && makerAmount > 0n) {
         const tokenId = row.token_id?.trim() || null;
+        const storedContext = readPolymarketStoredOrderContext(
+          row.order_payload,
+        );
+        const contextKey = `${storedContext?.positionContract ?? "legacy"}:${tokenId ?? ""}`;
         let exchangeAddress =
           tokenId != null
-            ? (exchangeAddressByTokenId.get(tokenId) ?? null)
+            ? (exchangeAddressByContext.get(contextKey) ?? null)
             : null;
         if (!exchangeAddress) {
           exchangeAddress = await resolvePolymarketOrderExchangeAddress({
             tokenId,
+            orderPayload: row.order_payload,
           });
           if (tokenId) {
-            exchangeAddressByTokenId.set(tokenId, exchangeAddress);
+            exchangeAddressByContext.set(contextKey, exchangeAddress);
           }
         }
 
@@ -3270,7 +3323,18 @@ export async function fetchPolymarketMarketInfoRoute(input: {
       }
     }
 
-    const negRisk = info.neg_risk != null ? Boolean(info.neg_risk) : null;
+    const assetContext = input.query.tokenId
+      ? await resolvePolymarketAssetContext(
+          input.pool,
+          input.query.tokenId,
+          info,
+          undefined,
+          input.query.positionContract,
+        )
+      : null;
+    const negRisk =
+      assetContext?.negRisk ??
+      (info.neg_risk != null ? Boolean(info.neg_risk) : null);
     const takerFeeBps = normalizeFeeBps(info.taker_fee_bps);
     const makerFeeBps = normalizeFeeBps(info.maker_fee_bps);
 
@@ -3287,7 +3351,9 @@ export async function fetchPolymarketMarketInfoRoute(input: {
         tokenYes: clobTokenIds?.[0] ?? null,
         tokenNo: clobTokenIds?.[1] ?? null,
         negRisk,
-        exchangeAddress: exchangeAddressForNegRisk(negRisk),
+        exchangeAddress:
+          assetContext?.exchangeAddress ?? exchangeAddressForNegRisk(negRisk),
+        ...(assetContext ? { assetContext } : {}),
         orderPriceMinTickSize:
           info.order_price_min_tick_size != null
             ? Number(info.order_price_min_tick_size)
@@ -3343,6 +3409,11 @@ export async function buildPolymarketOrderParamsRoute(input: {
   }
 
   const marketInfo = await fetchPolymarketMarketInfo(input.pool, { tokenId });
+  const assetContext = await resolvePolymarketAssetContext(
+    input.pool,
+    tokenId,
+    marketInfo,
+  );
   const takerFeeBps = normalizeFeeBps(marketInfo?.taker_fee_bps);
   const makerFeeBps = normalizeFeeBps(marketInfo?.maker_fee_bps);
   const feePolicySnapshot = await resolvePolymarketFeePolicySnapshot(
@@ -3358,10 +3429,12 @@ export async function buildPolymarketOrderParamsRoute(input: {
       timestamp: Date.now().toString(),
       metadata: ZERO_BYTES32,
       builder: feePolicySnapshot.builderCode,
+      assetContext,
       exchangeAddress:
-        marketInfo?.neg_risk === true
+        assetContext?.exchangeAddress ??
+        (marketInfo?.neg_risk === true
           ? env.polymarketNegRiskExchangeAddress
-          : env.polymarketExchangeAddress,
+          : env.polymarketExchangeAddress),
       collateralAddress: env.polymarketUsdcAddress,
       takerFeeBps,
       makerFeeBps,
@@ -3429,6 +3502,7 @@ export async function quotePolymarketOrderRoute(input: {
       quotePolymarketOrder(input.pool, {
         tokenId,
         side: body.side,
+        assetContext: body.assetContext,
         orderType,
         amountType,
         amountUsdInput,
@@ -3741,6 +3815,15 @@ export async function prepareEmbeddedPolymarketOrderSignatureRoute(input: {
   user: User;
 }): Promise<PolymarketRouteOperationResult> {
   try {
+    const market = await fetchPolymarketMarketInfo(pool, {
+      tokenId: String(input.body.order.tokenId),
+    });
+    const assetContext = await resolvePolymarketOrderAssetContext(
+      pool,
+      String(input.body.order.tokenId),
+      market,
+      input.body,
+    );
     const context = await resolveEmbeddedPolymarketWalletContext({
       user: input.user,
       signer: input.signer,
@@ -3749,6 +3832,7 @@ export async function prepareEmbeddedPolymarketOrderSignatureRoute(input: {
       context,
       payload: input.body.order,
       exchangeAddress: input.body.exchangeAddress,
+      orderDomainVersion: assetContext?.orderDomainVersion,
     });
     return {
       ok: true,
@@ -3774,6 +3858,15 @@ export async function executeEmbeddedPolymarketOrderSignatureRoute(input: {
   user: User;
 }): Promise<PolymarketRouteOperationResult> {
   try {
+    const market = await fetchPolymarketMarketInfo(pool, {
+      tokenId: String(input.body.order.tokenId),
+    });
+    const assetContext = await resolvePolymarketOrderAssetContext(
+      pool,
+      String(input.body.order.tokenId),
+      market,
+      input.body,
+    );
     const context = await resolveEmbeddedPolymarketWalletContext({
       user: input.user,
       signer: input.signer,
@@ -3782,6 +3875,7 @@ export async function executeEmbeddedPolymarketOrderSignatureRoute(input: {
       context,
       payload: input.body.order,
       exchangeAddress: input.body.exchangeAddress,
+      orderDomainVersion: assetContext?.orderDomainVersion,
     });
     const signature = await executeEmbeddedPolymarketOrderRequest({
       request: authorizationRequest,
@@ -3938,15 +4032,25 @@ export async function computePolymarketOrderHashRoute(input: {
     };
   }
 
-  const exchangeAddress =
-    (typeof body.exchangeAddress === "string" && body.exchangeAddress) ||
-    exchangeAddressForNegRisk(body.negRisk ?? null) ||
-    env.polymarketExchangeAddress;
-
   try {
+    const market = await fetchPolymarketMarketInfo(pool, {
+      tokenId: normalizedForHash.tokenId,
+    });
+    const assetContext = await resolvePolymarketOrderAssetContext(
+      pool,
+      normalizedForHash.tokenId,
+      market,
+      body,
+    );
+    const exchangeAddress =
+      assetContext?.exchangeAddress ??
+      body.exchangeAddress ??
+      exchangeAddressForNegRisk(body.negRisk ?? null) ??
+      env.polymarketExchangeAddress;
     const orderHash = computePolymarketOrderHashV2({
       exchangeAddress,
       order: normalizedForHash,
+      orderDomainVersion: assetContext?.orderDomainVersion,
     });
 
     return {
@@ -3955,9 +4059,20 @@ export async function computePolymarketOrderHashRoute(input: {
         ok: true,
         orderHash,
         exchangeAddress,
+        ...(assetContext ? { assetContext } : {}),
       },
     };
   } catch (error) {
+    if (error instanceof PolymarketAssetContextError)
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error:
+            "Polymarket asset identity changed or is unavailable. Refresh before signing.",
+          code: error.code,
+        },
+      };
     input.log?.error?.(
       { err: error, userId: input.userId, signer },
       "Failed to compute Polymarket order hash",
@@ -4363,6 +4478,7 @@ export async function fetchPolymarketAccountRoute(input: {
           feeCollectorAddress: null,
           fundingRouterAddress: env.polymarketFundingRouterAddress || null,
           forceFresh: refresh,
+          includeProtocolV2: true,
         }),
       ]);
 
@@ -4425,6 +4541,17 @@ export async function fetchPolymarketAccountRoute(input: {
         funderSource,
         funderUpdatedAt: credsInfo?.funderUpdatedAt ?? null,
         funderIsContract: isContract,
+        protocolV2: snapshot.protocolV2
+          ? {
+              positionContract: POLYMARKET_PROTOCOL_CONTRACTS.positionManager,
+              exchangeAddress: POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3,
+              routerAddress: POLYMARKET_PROTOCOL_CONTRACTS.router,
+              allowanceRaw:
+                snapshot.protocolV2.allowanceExchange?.toString() ?? null,
+              exchangeApproved: snapshot.protocolV2.okExchange,
+              routerApproved: snapshot.protocolV2.okRouter,
+            }
+          : null,
         negRiskAdapterAddress: negRiskAdapterAddress || null,
         ctfCollateralAdapterAddress: ctfCollateralAdapterAddress || null,
         negRiskCollateralAdapterAddress:
@@ -4812,6 +4939,38 @@ export async function syncPolymarketBalanceAllowanceRoute(input: {
     };
   }
 
+  if (input.body.assetType !== "COLLATERAL" && input.body.tokenId) {
+    try {
+      const market = await fetchPolymarketMarketInfo(pool, {
+        tokenId: input.body.tokenId,
+      });
+      const assetContext = await resolvePolymarketOrderAssetContext(
+        pool,
+        input.body.tokenId,
+        market,
+        input.body,
+      );
+      if (
+        input.body.assetType !==
+        (assetContext?.conditionalAssetType ?? "CONDITIONAL")
+      )
+        throw new PolymarketAssetContextError(
+          "Polymarket balance cache does not match the asset ledger. Refresh before signing.",
+        );
+    } catch (error) {
+      if (error instanceof PolymarketAssetContextError)
+        return {
+          ok: false,
+          statusCode: 409,
+          payload: {
+            error:
+              "Polymarket asset identity changed or is unavailable. Refresh before signing.",
+            code: error.code,
+          },
+        };
+      throw error;
+    }
+  }
   const creds = await AuthService.getVenueCredentials(
     input.userId,
     "polymarket",
@@ -5618,6 +5777,39 @@ function readPolymarketFeePolicySnapshot(
   return value as PolymarketFeePolicySnapshot;
 }
 
+function inspectPolymarketBotQuoteAssetContext(input: {
+  action: PolymarketSide;
+  marketId: string;
+  outcomeIndex: 0 | 1;
+  tokenId: string;
+  rawQuote: unknown;
+}): PolymarketAssetContext | null {
+  if (
+    !isRecord(input.rawQuote) ||
+    (input.rawQuote.tokenId != null &&
+      input.rawQuote.tokenId !== input.tokenId) ||
+    (input.rawQuote.side != null && input.rawQuote.side !== input.action)
+  ) {
+    throw new PolymarketAssetContextError(
+      "Polymarket quote targets a different asset; refresh before funding.",
+    );
+  }
+  const context = readPolymarketStoredOrderContext({
+    tokenId: input.tokenId,
+    assetContext: input.rawQuote.assetContext,
+  });
+  if (
+    context &&
+    (context.marketId !== input.marketId ||
+      context.outcomeIndex !== input.outcomeIndex)
+  ) {
+    throw new PolymarketAssetContextError(
+      "Polymarket quote targets a different market or outcome; refresh before funding.",
+    );
+  }
+  return context;
+}
+
 function parseBigIntValue(
   value: string | number | bigint | null | undefined,
 ): bigint | null {
@@ -5997,6 +6189,8 @@ function readPolymarketSharesAmountRaw(intent: TradeIntent): bigint {
 }
 
 export const polymarketTradingExecutionTestHooks = {
+  resolveReadinessAssetContext,
+  resolveReadinessOutcome,
   assertPreparedFunds: assertPolymarketPreparedFunds,
   buildSignedOrderPayloads: buildPolymarketSignedOrderPayloads,
   evaluateCredentialReadiness: evaluatePolymarketCredentialReadiness,
@@ -6005,6 +6199,7 @@ export const polymarketTradingExecutionTestHooks = {
   isCanonicalDistinctFunder: isCanonicalPolymarketFunderCandidate,
   shouldPersistFunderBinding: shouldPersistEmbeddedPolymarketFunderBinding,
   inspectPreparedQuote: inspectPolymarketPreparedQuote,
+  inspectBotQuoteAssetContext: inspectPolymarketBotQuoteAssetContext,
   inspectFunderReadiness: inspectPolymarketFunderReadiness,
   normalizeOrderForPayload,
   normalizeOrderForPrivyPolicy: normalizePolymarketOrderForPrivyPolicy,
@@ -6061,6 +6256,7 @@ export async function resolvePolymarketAvailablePositionRaw(inputs: {
   signer: string;
   tokenId: string;
   userId: string;
+  assetContext?: PolymarketAssetContext | null;
 }): Promise<{
   availableRaw: bigint;
   balanceRaw: bigint;
@@ -6075,6 +6271,16 @@ export async function resolvePolymarketAvailablePositionRaw(inputs: {
       venue: "polymarket",
     });
   }
+  const marketInfo = await fetchPolymarketMarketInfo(inputs.pool as Pool, {
+    tokenId: inputs.tokenId,
+  });
+  const assetContext = await resolvePolymarketAssetContext(
+    inputs.pool as Pool,
+    inputs.tokenId,
+    marketInfo,
+    inputs.assetContext ??
+      polymarketContextFromMarketInfo(marketInfo, inputs.tokenId),
+  );
   const creds = await AuthService.getVenueCredentials(
     inputs.userId,
     "polymarket",
@@ -6110,13 +6316,19 @@ export async function resolvePolymarketAvailablePositionRaw(inputs: {
     fetchErc1155BalancesByOwner({
       rpcUrl: env.polygonRpcUrl,
       timeoutMs: env.polygonRpcTimeoutMs,
-      contractAddress: env.polymarketConditionalTokensAddress,
+      contractAddress:
+        assetContext?.positionContract ??
+        env.polymarketConditionalTokensAddress,
       owner: funder,
       tokenIds: [inputs.tokenId],
     }),
     fetchPolymarketOpenOrderPositionLocks(inputs.pool, {
       userId: inputs.userId,
       wallet: funder,
+      positionContract:
+        assetContext?.assetKind === "position_manager"
+          ? assetContext.positionContract.toLowerCase()
+          : "",
     }),
     polymarketL2Request({
       baseUrl: env.polymarketClobBase,
@@ -6166,6 +6378,7 @@ export type PolymarketMaxSpendOnchainSnapshot = Readonly<{
   fundingRouterNonce: bigint | null;
   fundingRouterPusdAllowance: bigint | null;
   fundingRouterUsdceAllowance: bigint | null;
+  protocolV2?: Readonly<{ allowanceExchange: bigint | null }> | null;
 }>;
 
 export async function resolvePolymarketMaxSpendFunds(inputs: {
@@ -6181,6 +6394,7 @@ export async function resolvePolymarketMaxSpendFunds(inputs: {
   fundingCapRaw?: bigint | null;
   liveCollateralLocks?: ReadonlyMap<string, bigint>;
   negRisk?: boolean | null;
+  protocolVersion?: "v1" | "v2";
   onchainSnapshot?: PolymarketMaxSpendOnchainSnapshot;
   pool: ApiTradingApplicationServiceInput["pool"];
   signer: string;
@@ -6225,6 +6439,7 @@ export async function resolvePolymarketMaxSpendFunds(inputs: {
           funder: funderNormalized,
           includeSignerUsdc,
           includeFeeCollectorNonce: false,
+          includeProtocolV2: inputs.protocolVersion === "v2",
           negRiskAdapterAddress,
           feeCollectorAddress: null,
           fundingRouterAddress:
@@ -6301,13 +6516,25 @@ export async function resolvePolymarketMaxSpendFunds(inputs: {
     executableFundsRaw:
       funds.funderPusdAvailableRaw +
       (funds.usesSignerTopUp ? cappedRouterTopUpRaw : 0n),
-    buyApproval: evaluatePolymarketBuyApprovalReadiness({
-      allowanceExchange: snapshot.allowanceExchange,
-      allowanceNegRisk: snapshot.allowanceNegRisk,
-      allowanceNegRiskAdapter: snapshot.allowanceNegRiskAdapter,
-      negRisk: inputs.negRisk,
-      negRiskAdapterConfigured: Boolean(negRiskAdapterAddress),
-    }),
+    buyApproval:
+      inputs.protocolVersion === "v2"
+        ? {
+            ok: polymarketAllowanceSatisfiesBuyApproval(
+              snapshot.protocolV2?.allowanceExchange,
+            ),
+            missing: polymarketAllowanceSatisfiesBuyApproval(
+              snapshot.protocolV2?.allowanceExchange,
+            )
+              ? []
+              : ["exchangeV3"],
+          }
+        : evaluatePolymarketBuyApprovalReadiness({
+            allowanceExchange: snapshot.allowanceExchange,
+            allowanceNegRisk: snapshot.allowanceNegRisk,
+            allowanceNegRiskAdapter: snapshot.allowanceNegRiskAdapter,
+            negRisk: inputs.negRisk,
+            negRiskAdapterConfigured: Boolean(negRiskAdapterAddress),
+          }),
     fundingRouterNonce: snapshot.fundingRouterNonce,
     fundingCapRaw,
     fundingRouterPusdAllowance: snapshot.fundingRouterPusdAllowance,
@@ -6510,7 +6737,22 @@ function resolvePolymarketOrderPayloadVersion(orderPayload: unknown): string {
 async function resolvePolymarketOrderExchangeAddress(inputs: {
   explicitExchangeAddress?: string | null;
   tokenId?: string | null;
+  orderPayload?: unknown;
 }): Promise<string> {
+  const storedContext = readPolymarketStoredOrderContext(inputs.orderPayload);
+  if (storedContext) {
+    if (
+      (inputs.tokenId &&
+        normalizePolymarketAssetId(inputs.tokenId) !== storedContext.assetId) ||
+      (inputs.explicitExchangeAddress &&
+        inputs.explicitExchangeAddress.toLowerCase() !==
+          storedContext.exchangeAddress.toLowerCase())
+    )
+      throw new PolymarketAssetContextError(
+        "Stored Polymarket order does not match its recovery scope.",
+      );
+    return storedContext.exchangeAddress;
+  }
   const explicit = inputs.explicitExchangeAddress?.trim();
   if (explicit) return explicit;
 
@@ -6767,11 +7009,15 @@ async function signPolymarketOrder(input: {
   action: PolymarketSide;
   candidate: PolymarketFunderCandidate;
   exchangeAddress: string;
+  orderDomainVersion?: PolymarketOrderDomainVersion;
   order: Record<string, unknown>;
   signer: string;
   walletId: string;
 }): Promise<string> {
-  const appDomain = buildPolymarketOrderDomain(input.exchangeAddress);
+  const appDomain = buildPolymarketOrderDomain(
+    input.exchangeAddress,
+    input.orderDomainVersion,
+  );
   const signingOrder = normalizePolymarketOrderForPrivyPolicy(input.order);
   const walletClient = createServerWalletClient();
 
@@ -7010,6 +7256,27 @@ export async function submitPolymarketClientSignedOrder(input: {
   const marketInfo = orderTokenId
     ? await fetchPolymarketMarketInfo(input.pool, { tokenId: orderTokenId })
     : null;
+  let assetContext: PolymarketAssetContext | null;
+  try {
+    assetContext = await resolvePolymarketOrderAssetContext(
+      input.pool,
+      orderTokenId ?? "",
+      marketInfo,
+      input.body,
+    );
+  } catch (error) {
+    if (error instanceof PolymarketAssetContextError)
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error:
+            "Polymarket asset identity changed or is unavailable. Refresh before signing.",
+          code: error.code,
+        },
+      };
+    throw error;
+  }
   const normalizedOrder = normalizeOrderForPayload(order, side);
   const normalizedForHash = normalizeOrderForHash(order, side);
   if (normalizedOrder.expiration == null) {
@@ -7018,8 +7285,9 @@ export async function submitPolymarketClientSignedOrder(input: {
   const orderPayload = normalizedForHash ?? normalizedOrder;
 
   const exchangeAddress =
-    (typeof input.body.exchangeAddress === "string" &&
-      input.body.exchangeAddress.trim()) ||
+    (assetContext?.exchangeAddress ??
+      (typeof input.body.exchangeAddress === "string" &&
+        input.body.exchangeAddress.trim())) ||
     exchangeAddressForNegRisk(
       input.body.negRisk ?? marketInfo?.neg_risk ?? null,
     ) ||
@@ -7034,11 +7302,13 @@ export async function submitPolymarketClientSignedOrder(input: {
       },
     };
   }
-  const fundingMarketId = marketInfo?.unified_market_id ?? null;
+  const fundingMarketId =
+    assetContext?.marketId ?? marketInfo?.unified_market_id ?? null;
   // Persist this canonical lookup key before a direct provider call. A
   // transport loss is then reconcilable instead of becoming an unbound intent.
   const orderHash = computePolymarketOrderHashV2({
     exchangeAddress,
+    orderDomainVersion: assetContext?.orderDomainVersion,
     order: normalizedForHash,
   });
   if (directHandoffBinding && orderType !== "FOK") {
@@ -7067,6 +7337,7 @@ export async function submitPolymarketClientSignedOrder(input: {
         signer,
         tokenId: sellTokenId,
         userId: input.userId,
+        assetContext,
       });
       if (availability.availableRaw < requestedSharesRaw) {
         return {
@@ -7093,6 +7364,7 @@ export async function submitPolymarketClientSignedOrder(input: {
     try {
       limitValidationContext = await loadPolymarketQuoteContext(input.pool, {
         tokenId: normalizedForHash.tokenId,
+        assetContext: assetContext ?? undefined,
       });
       const validation = validatePolymarketLimitBuy({
         orderType,
@@ -7153,6 +7425,7 @@ export async function submitPolymarketClientSignedOrder(input: {
       };
     }
     directHandoffSubmission = {
+      ...(assetContext ? { assetContext } : {}),
       action: side === "SELL" ? "sell" : "buy",
       executionKind: "clob",
       marketId: fundingMarketId,
@@ -7172,6 +7445,7 @@ export async function submitPolymarketClientSignedOrder(input: {
           binding: directHandoffBinding,
           reconcileKeys: { orderHash, tradeType: "clob" },
           recoveryPayload: {
+            assetContext,
             action: side,
             exchangeAddress,
             feePolicySnapshot,
@@ -7196,6 +7470,7 @@ export async function submitPolymarketClientSignedOrder(input: {
                       signer,
                       tokenId: normalizedForHash.tokenId,
                       userId: input.userId,
+                      assetContext,
                     })
                   ).availableRaw.toString(),
               }
@@ -7235,6 +7510,7 @@ export async function submitPolymarketClientSignedOrder(input: {
         limitValidationContext ??
         (await loadPolymarketQuoteContext(input.pool, {
           tokenId: normalizedForHash.tokenId,
+          assetContext: assetContext ?? undefined,
           logWarn: (details) =>
             input.log?.warn?.(
               details,
@@ -7339,6 +7615,7 @@ export async function submitPolymarketClientSignedOrder(input: {
       };
     }
     const canonicalFingerprint = canonicalJsonHash({
+      ...(assetContext?.protocolVersion === "v2" ? { assetContext } : {}),
       exchangeAddress: exchangeAddress.toLowerCase(),
       executionPath: "polymarket_clob",
       marketId,
@@ -7735,7 +8012,9 @@ export async function submitPolymarketClientSignedOrder(input: {
     status,
     errorMessage: null,
     rawError: null,
-    orderPayload,
+    orderPayload: assetContext
+      ? { ...orderPayload, assetContext }
+      : orderPayload,
     orderPayloadVersion: resolvePolymarketOrderPayloadVersion(orderPayload),
     orderHash,
     feeBps: null,
@@ -7800,6 +8079,7 @@ export async function submitPolymarketClientSignedOrder(input: {
         side,
         shares: immediateFill.shares,
         notionalUsd: immediateFill.notionalUsd,
+        assetContext: assetContext ?? undefined,
       });
     } catch (error) {
       input.log?.warn?.(
@@ -7828,6 +8108,7 @@ export async function submitPolymarketClientSignedOrder(input: {
       orderId: venueOrderId,
       tokenId,
       walletAddress: funder,
+      assetContext: assetContext ?? undefined,
     }),
     input.log as never,
   );
@@ -7845,6 +8126,42 @@ export async function submitPolymarketClientSignedOrder(input: {
       payload: upstream.payload,
     },
   };
+}
+
+async function resolveReadinessAssetContext(
+  db: DbQuery,
+  requested: unknown,
+  targetRequested?: unknown,
+) {
+  const direct = parsePolymarketAssetContext(requested);
+  const target = parsePolymarketAssetContext(targetRequested);
+  if (
+    (requested != null && !direct) ||
+    (targetRequested != null && !target) ||
+    (direct && target && !canonicalJsonEqual(direct, target))
+  )
+    throw new PolymarketAssetContextError(
+      "Invalid or inconsistent reviewed asset context.",
+    );
+  const context = direct ?? target;
+  if (!context) return null;
+  return resolvePolymarketAssetContext(
+    db as Pool,
+    context.assetId,
+    await fetchPolymarketMarketInfo(db as Pool, { tokenId: context.assetId }),
+    context,
+  );
+}
+
+function resolveReadinessOutcome(
+  target: NonNullable<TradingReadinessInput["target"]>,
+  assetContext?: PolymarketAssetContext | null,
+) {
+  const context =
+    parsePolymarketAssetContext(target.assetContext) ?? assetContext;
+  return normalizeSide(
+    target.outcome ?? (context?.outcomeIndex === 1 ? "NO" : "YES"),
+  );
 }
 
 async function getReadiness(
@@ -7896,6 +8213,23 @@ async function getReadiness(
   }
   let targetMarket: Awaited<ReturnType<typeof loadMarketForVenue>> | null =
     null;
+  let targetAssetContext: PolymarketAssetContext | null = null;
+  if (input.assetContext != null) {
+    try {
+      targetAssetContext = await resolveReadinessAssetContext(
+        ctx.pool,
+        input.assetContext,
+        input.target?.assetContext,
+      );
+    } catch {
+      return readiness("polymarket", capabilities, {
+        ok: false,
+        code: "polymarket_protocol_setup_required",
+        message: "Refresh the reviewed trade or position before wallet setup.",
+        setupRequired: true,
+      });
+    }
+  }
   if (input.target?.marketId) {
     targetMarket = await loadMarketForVenue(
       ctx.pool,
@@ -7907,6 +8241,39 @@ async function getReadiness(
         ok: false,
         code: "market_not_orderable",
         message: "Market is not currently open for orders.",
+      });
+    }
+    try {
+      const outcome = resolveReadinessOutcome(input.target, targetAssetContext);
+      const selected = selectPolymarketTradeAsset({
+        action: input.action ?? "BUY",
+        assetContext: input.target.assetContext ?? targetAssetContext,
+        currentTokenId: tokenForSide(targetMarket, outcome),
+        marketId: targetMarket.id,
+        outcomeIndex: outcome === "YES" ? 0 : 1,
+        targetTokenId: input.target.tokenId,
+      });
+      const targetTokenId = selected.tokenId;
+      const marketInfo = await fetchPolymarketMarketInfo(ctx.pool, {
+        tokenId: targetTokenId,
+      });
+      targetAssetContext = await resolvePolymarketAssetContext(
+        ctx.pool,
+        targetTokenId,
+        marketInfo,
+        selected.assetContext ??
+          polymarketContextFromMarketInfo(marketInfo, targetTokenId),
+      );
+      if (targetAssetContext?.protocolVersion === "v2") {
+        await resolvePolymarketBotPolicyFundingCapability("v2");
+      }
+    } catch {
+      return readiness("polymarket", capabilities, {
+        ok: false,
+        code: "polymarket_protocol_setup_required",
+        message:
+          "Refresh this market or complete its protocol-specific wallet setup in the app.",
+        setupRequired: true,
       });
     }
   }
@@ -7925,6 +8292,8 @@ async function getReadiness(
   try {
     setupState = await resolveEmbeddedPolymarketEnsureReadyState({
       signer,
+      protocolVersion: targetAssetContext?.protocolVersion,
+      action: input.action ?? "BUY",
       userId: input.actor.userId,
       walletId,
     });
@@ -7959,6 +8328,8 @@ async function getReadiness(
         { error, userId: input.actor.userId, walletAddress: signer },
         "Polymarket bot funder readiness check failed",
       ),
+    // Legacy approvals are not authority for PM/V3. The selected generation's
+    // exact allowance/operator checks run below before readiness is granted.
     setupApprovalsReady: setupState.setupApprovalsReady,
     storedFunder,
   });
@@ -8001,16 +8372,16 @@ async function getReadiness(
       return readiness("polymarket", capabilities, { ok: true });
     }
     try {
-      const tokenId = tokenForSide(
-        targetMarket,
-        normalizeSide(input.target.outcome),
-      );
+      const tokenId =
+        targetAssetContext?.assetId ??
+        tokenForSide(targetMarket, normalizeSide(input.target.outcome));
       const [availability, approvalSnapshot] = await Promise.all([
         resolvePolymarketAvailablePositionRaw({
           pool: ctx.pool,
           signer,
           tokenId,
           userId: input.actor.userId,
+          assetContext: targetAssetContext,
         }),
         fetchPolymarketOnchainSnapshot({
           rpcUrl: env.polygonRpcUrl,
@@ -8019,16 +8390,24 @@ async function getReadiness(
           funder: funderCandidate.funder,
           includeSignerUsdc: false,
           includeFeeCollectorNonce: false,
+          includeProtocolV2: targetAssetContext?.protocolVersion === "v2",
         }),
       ]);
-      const negRisk = readPolymarketNegRiskFromMarket(targetMarket) === true;
+      const negRisk =
+        (targetAssetContext?.negRisk ??
+          readPolymarketNegRiskFromMarket(targetMarket)) === true;
       if (
-        negRisk ? !approvalSnapshot.okNegRisk : !approvalSnapshot.okExchange
+        targetAssetContext?.protocolVersion === "v2"
+          ? !approvalSnapshot.protocolV2?.okExchange
+          : negRisk
+            ? !approvalSnapshot.okNegRisk
+            : !approvalSnapshot.okExchange
       ) {
         return readiness("polymarket", capabilities, {
           ok: false,
           code: "polymarket_sell_approval_missing",
-          message: "DepositWallet CTF approval is missing for this exchange.",
+          message:
+            "DepositWallet position approval is missing for this exchange.",
           setupRequired: true,
         });
       }
@@ -8054,7 +8433,9 @@ async function getReadiness(
   }
   try {
     const fundingRouterPolicy =
-      await resolvePolymarketBotPolicyFundingCapability();
+      await resolvePolymarketBotPolicyFundingCapability(
+        targetAssetContext?.protocolVersion,
+      );
     const funds = await resolvePolymarketMaxSpendFunds({
       allowMissingRouterPusdApproval:
         input.actor.kind === "telegram_bot" &&
@@ -8063,9 +8444,10 @@ async function getReadiness(
       funder: funderCandidate.funder,
       funderExecutionKind,
       fundingCapRaw: fundingRouterPolicy.fundingMaxRaw,
-      negRisk: targetMarket
-        ? readPolymarketNegRiskFromMarket(targetMarket)
-        : null,
+      protocolVersion: targetAssetContext?.protocolVersion,
+      negRisk:
+        targetAssetContext?.negRisk ??
+        (targetMarket ? readPolymarketNegRiskFromMarket(targetMarket) : null),
       pool: ctx.pool,
       signer,
       userId: input.actor.userId,
@@ -8124,13 +8506,21 @@ const polymarketCredentialRepairDependencies: PolymarketCredentialRepairDependen
   };
 
 async function repairPolymarketCredentials(
-  input: { signer: string; userId: string; walletId: string },
+  input: {
+    signer: string;
+    userId: string;
+    walletId: string;
+    protocolVersion?: PolymarketProtocolVersion;
+    action?: TradeSide;
+  },
   dependencies: PolymarketCredentialRepairDependencies = polymarketCredentialRepairDependencies,
 ): Promise<{ sideEffects: EnsureReadinessResult["sideEffects"] }> {
   const state = await dependencies.resolveState({
     signer: input.signer,
     userId: input.userId,
     walletId: input.walletId,
+    protocolVersion: input.protocolVersion,
+    action: input.action,
   });
   const funders = await dependencies.deriveFunders({
     signer: input.signer,
@@ -8214,8 +8604,45 @@ async function ensureReadiness(
   const sideEffects: EnsureReadinessResult["sideEffects"] = [];
   let repairError: unknown = null;
   try {
+    let protocolVersion: PolymarketProtocolVersion | undefined = (
+      await resolveReadinessAssetContext(
+        ctx.pool,
+        input.assetContext,
+        input.target?.assetContext,
+      )
+    )?.protocolVersion;
+    if (input.target?.marketId) {
+      const market = await loadMarketForVenue(
+        ctx.pool,
+        input.target.marketId,
+        "polymarket",
+      );
+      const outcome = resolveReadinessOutcome(input.target, input.assetContext);
+      const selected = selectPolymarketTradeAsset({
+        action: input.action ?? "BUY",
+        assetContext: input.target.assetContext ?? input.assetContext,
+        currentTokenId: tokenForSide(market, outcome),
+        marketId: market.id,
+        outcomeIndex: outcome === "YES" ? 0 : 1,
+        targetTokenId: input.target.tokenId,
+      });
+      const tokenId = selected.tokenId;
+      const marketInfo = await fetchPolymarketMarketInfo(ctx.pool, { tokenId });
+      protocolVersion = (
+        await resolvePolymarketAssetContext(
+          ctx.pool,
+          tokenId,
+          marketInfo,
+          selected.assetContext ??
+            polymarketContextFromMarketInfo(marketInfo, tokenId),
+        )
+      )?.protocolVersion;
+      if (!protocolVersion)
+        throw new Error("Polymarket protocol context is unavailable.");
+    }
     await assertServerEvmWalletAuthorization({
       action: input.action ?? "BUY",
+      protocolVersion,
       privyUserId: input.executionAuthorization?.privyUserId,
       signer,
       venue: "polymarket",
@@ -8230,6 +8657,8 @@ async function ensureReadiness(
       run: () =>
         repairPolymarketCredentials({
           signer,
+          protocolVersion,
+          action: input.action ?? "BUY",
           userId: input.actor.userId,
           walletId,
         }),
@@ -8270,7 +8699,15 @@ async function quote(
     "polymarket",
   );
   const side = normalizeSide(intent.outcome ?? intent.target.outcome);
-  const tokenId = tokenForSide(market, side);
+  const selected = selectPolymarketTradeAsset({
+    action: intent.action,
+    assetContext: intent.target.assetContext,
+    currentTokenId: tokenForSide(market, side),
+    marketId: market.id,
+    outcomeIndex: side === "YES" ? 0 : 1,
+    targetTokenId: intent.target.tokenId,
+  });
+  const tokenId = selected.tokenId;
   if (!isOrderable(market)) {
     throw tradingError({
       code: "invalid_trade_request",
@@ -8280,6 +8717,7 @@ async function quote(
   }
   const quoteContext = await loadPolymarketQuoteContext(ctx.pool, {
     tokenId,
+    assetContext: selected.assetContext,
     logWarn: (args) =>
       ctx.logger?.warn?.(args, "Polymarket bot quote context warning"),
   });
@@ -8307,6 +8745,7 @@ async function quote(
             signer: intent.walletAddress,
             tokenId,
             userId: intent.actor.userId,
+            assetContext: quoteContext.assetContext,
           })
       : null;
   const requestedSharesRaw =
@@ -8368,7 +8807,14 @@ async function quote(
   };
   return {
     venue: "polymarket",
-    target: { ...intent.target, tokenId, raw: { market } },
+    target: {
+      ...intent.target,
+      tokenId,
+      ...(quoteContext.assetContext
+        ? { assetContext: quoteContext.assetContext }
+        : {}),
+      raw: { market },
+    },
     action,
     amount:
       budgetUsd == null
@@ -8413,7 +8859,6 @@ async function prepareTrade(
     "polymarket",
   );
   const side = normalizeSide(intent.outcome ?? intent.target.outcome);
-  const tokenId = tokenForSide(market, side);
   const signer = toChecksumAddress(intent.walletAddress);
   if (!signer) {
     throw tradingError({
@@ -8487,11 +8932,55 @@ async function prepareTrade(
       venue: "polymarket",
     });
   }
+  const selected = selectPolymarketTradeAsset({
+    action,
+    assetContext: intent.target.assetContext ?? rawQuote.assetContext,
+    currentTokenId: tokenForSide(market, side),
+    marketId: market.id,
+    outcomeIndex: side === "YES" ? 0 : 1,
+    targetTokenId: intent.target.tokenId ?? readString(rawQuote.tokenId),
+  });
+  const tokenId = selected.tokenId;
+  const quoteAssetContext = inspectPolymarketBotQuoteAssetContext({
+    action,
+    marketId: market.id,
+    tokenId,
+    outcomeIndex: side === "YES" ? 0 : 1,
+    rawQuote,
+  });
+  const assetContext = await resolvePolymarketOrderAssetContext(
+    ctx.pool,
+    tokenId,
+    await fetchPolymarketMarketInfo(ctx.pool, { tokenId }),
+    {
+      assetContext:
+        quoteAssetContext ??
+        (selected.assetContext?.protocolVersion === "v1"
+          ? selected.assetContext
+          : undefined),
+      exchangeAddress: readString(rawQuote.exchangeAddress),
+      negRisk: readPolymarketNegRisk({ market, quote: rawQuote }),
+    },
+  );
   const exchangeAddress =
-    readString(rawQuote.exchangeAddress) ??
+    assetContext?.exchangeAddress ??
     (readPolymarketNegRisk({ market, quote: rawQuote }) === true
       ? env.polymarketNegRiskExchangeAddress
       : env.polymarketExchangeAddress);
+  if (
+    selected.assetContext &&
+    !canonicalJsonEqual(selected.assetContext, assetContext)
+  )
+    throw tradingError({
+      code: "invalid_trade_request",
+      message: "Polymarket quote changed its selected position ledger.",
+      venue: "polymarket",
+    });
+  // Check V3 SELL signing coverage before signing; legacy SELL keeps its
+  // existing independent path and does not acquire new funding requirements.
+  if (action === "SELL" && assetContext?.protocolVersion === "v2") {
+    await resolvePolymarketBotPolicyFundingCapability("v2");
+  }
   const builderValidation = validatePolymarketOrderBuilderCodeForConfig(
     feePolicySnapshot.builderCode,
     {
@@ -8519,7 +9008,9 @@ async function prepareTrade(
     const { funderExecutionKind, requiredSpendRaw } = preparedQuote;
     requiredSpendRawForFunding = requiredSpendRaw;
     const fundingRouterPolicy =
-      await resolvePolymarketBotPolicyFundingCapability();
+      await resolvePolymarketBotPolicyFundingCapability(
+        assetContext?.protocolVersion,
+      );
     const canPrepareControllerPusdApproval =
       intent.actor.kind === "telegram_bot" && !intent.fundingReservation;
     // A durable Telegram FundingOperation proves the exact on-chain Deposit
@@ -8547,6 +9038,7 @@ async function prepareTrade(
       funder: candidate.funder,
       funderExecutionKind,
       fundingCapRaw: fundingRouterPolicy.fundingMaxRaw,
+      protocolVersion: assetContext?.protocolVersion,
       negRisk: readPolymarketNegRisk({ market, quote: rawQuote }),
       pool: ctx.pool,
       signer,
@@ -8585,6 +9077,7 @@ async function prepareTrade(
       }`.slice(0, 64);
       await assertServerEvmWalletAuthorization({
         action: "BUY",
+        protocolVersion: assetContext?.protocolVersion,
         privyUserId: intent.executionAuthorization?.privyUserId,
         signer,
         venue: "polymarket",
@@ -8614,6 +9107,7 @@ async function prepareTrade(
         funder: candidate.funder,
         funderExecutionKind,
         fundingCapRaw: fundingRouterPolicy.fundingMaxRaw,
+        protocolVersion: assetContext?.protocolVersion,
         negRisk: readPolymarketNegRisk({ market, quote: rawQuote }),
         pool: ctx.pool,
         signer,
@@ -8662,6 +9156,7 @@ async function prepareTrade(
       }`.slice(0, 64);
       await assertServerEvmWalletAuthorization({
         action: "BUY",
+        protocolVersion: assetContext?.protocolVersion,
         privyUserId: intent.executionAuthorization?.privyUserId,
         signer,
         venue: "polymarket",
@@ -8696,6 +9191,7 @@ async function prepareTrade(
         funder: candidate.funder,
         funderExecutionKind,
         fundingCapRaw: fundingRouterPolicy.fundingMaxRaw,
+        protocolVersion: assetContext?.protocolVersion,
         negRisk: readPolymarketNegRisk({ market, quote: rawQuote }),
         pool: ctx.pool,
         signer,
@@ -8728,6 +9224,7 @@ async function prepareTrade(
       signer,
       tokenId,
       userId: intent.actor.userId,
+      assetContext,
     });
     if (availability.funder.toLowerCase() !== candidate.funder.toLowerCase()) {
       throw tradingError({
@@ -8750,17 +9247,26 @@ async function prepareTrade(
       funder: candidate.funder,
       includeSignerUsdc: false,
       includeFeeCollectorNonce: false,
+      includeProtocolV2: assetContext?.protocolVersion === "v2",
     });
     const negRisk = readPolymarketNegRisk({ market, quote: rawQuote }) === true;
-    if (negRisk ? !approvalSnapshot.okNegRisk : !approvalSnapshot.okExchange) {
+    if (
+      assetContext?.protocolVersion === "v2"
+        ? !approvalSnapshot.protocolV2?.okExchange
+        : negRisk
+          ? !approvalSnapshot.okNegRisk
+          : !approvalSnapshot.okExchange
+    ) {
       throw tradingError({
         code: "insufficient_readiness",
-        message: "DepositWallet CTF approval is missing for this exchange.",
+        message:
+          "DepositWallet position approval is missing for this exchange.",
         venue: "polymarket",
       });
     }
     await assertServerEvmWalletAuthorization({
       action: "SELL",
+      protocolVersion: assetContext?.protocolVersion,
       privyUserId: intent.executionAuthorization?.privyUserId,
       signer,
       venue: "polymarket",
@@ -8787,6 +9293,7 @@ async function prepareTrade(
   const signature = await signPolymarketOrder({
     candidate,
     exchangeAddress,
+    orderDomainVersion: assetContext?.orderDomainVersion,
     order,
     signer,
     action,
@@ -8800,6 +9307,7 @@ async function prepareTrade(
     });
   const orderHash = computePolymarketOrderHashV2({
     exchangeAddress,
+    orderDomainVersion: assetContext?.orderDomainVersion,
     order: hashOrder,
   });
 
@@ -8811,6 +9319,7 @@ async function prepareTrade(
     authorizationMode: "embedded_privy_evm",
     authorizationRequests: [],
     reconcileKeys: {
+      ...(assetContext ? { assetContext } : {}),
       funder: candidate.funder,
       idempotencyKey: intent.idempotencyKey,
       intentId: intent.id ?? null,
@@ -8824,6 +9333,7 @@ async function prepareTrade(
       action,
       kind: "polymarket",
       exchangeAddress,
+      assetContext,
       orderPayload,
       orderHash,
       orderType: "FOK",
@@ -8859,6 +9369,51 @@ async function submitPreparedTrade(
     prepared,
     "polymarket",
   );
+  // Never infer a stored prepared order's generation from the current market.
+  // Its quote/signing identity and EIP-712 hash are the broadcast authority.
+  const storedContext = readPolymarketStoredOrderContext({
+    tokenId: payload.tokenId,
+    assetContext: payload.assetContext,
+  });
+  if (
+    storedContext &&
+    ((prepared.intent.target.marketId != null &&
+      storedContext.marketId !== prepared.intent.target.marketId) ||
+      storedContext.exchangeAddress.toLowerCase() !==
+        payload.exchangeAddress.toLowerCase())
+  ) {
+    throw new PolymarketAssetContextError(
+      "Prepared Polymarket order identity is inconsistent.",
+    );
+  }
+  const normalizedHashOrder = normalizeOrderForHash(
+    payload.orderPayload,
+    payload.action,
+  );
+  if (
+    !normalizedHashOrder ||
+    normalizedHashOrder.tokenId !== payload.tokenId ||
+    normalizeOrderSide(payload.orderPayload.side) !== payload.action ||
+    !validatePolymarketOrderWallets({
+      order: payload.orderPayload,
+      selectedSigner: prepared.intent.walletAddress,
+      configuredFunder: payload.positionWalletAddress,
+    }).ok
+  ) {
+    throw new PolymarketAssetContextError(
+      "Prepared Polymarket order payload is inconsistent.",
+    );
+  }
+  const recomputedHash = computePolymarketOrderHashV2({
+    exchangeAddress: payload.exchangeAddress,
+    orderDomainVersion: storedContext?.orderDomainVersion,
+    order: normalizedHashOrder,
+  });
+  if (recomputedHash.toLowerCase() !== payload.orderHash.toLowerCase()) {
+    throw new PolymarketAssetContextError(
+      "Prepared Polymarket order hash does not match its signed identity.",
+    );
+  }
   const signer = prepared.intent.walletAddress;
   const creds = await AuthService.getVenueCredentials(
     prepared.intent.actor.userId,
@@ -9050,6 +9605,7 @@ async function persistTrade(
     rawError: null,
     orderPayload: {
       ...payload.orderPayload,
+      ...(payload.assetContext ? { assetContext: payload.assetContext } : {}),
       ...buildTelegramTradeSourceMetadata(input),
     },
     orderPayloadVersion: "polymarket_clob_v2",
@@ -9072,6 +9628,7 @@ async function persistTrade(
       stored,
       tokenId: payload.tokenId,
       walletAddress: payload.positionWalletAddress,
+      ...(payload.assetContext ? { assetContext: payload.assetContext } : {}),
     },
   };
 }

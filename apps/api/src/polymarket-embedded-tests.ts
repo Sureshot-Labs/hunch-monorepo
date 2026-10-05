@@ -2,13 +2,16 @@
 
 import assert from "node:assert/strict";
 import { Interface } from "ethers";
+import { POLYMARKET_PROTOCOL_CONTRACTS as CONTRACTS } from "@hunch/shared";
 import { env } from "./env.js";
 import {
   buildEmbeddedPolymarketConnectPayload,
   buildEmbeddedPolymarketConnectRequest,
+  buildEmbeddedPolymarketOrderRequest,
   buildEmbeddedPolymarketTypedDataRequest,
   prepareEmbeddedPolymarketSignerApprovalRequests,
   prepareEmbeddedPolymarketSignerApprovalTransactions,
+  embeddedPolymarketAutomationApprovalsReady,
   type EmbeddedPolymarketTypedData,
   type EmbeddedPolymarketWalletContext,
 } from "./services/polymarket-embedded.js";
@@ -76,6 +79,241 @@ function buildDepositWalletBatchTypedData(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "V2 signer setup requires only exact pUSD/V3 and PM/V3 approvals",
+    run: () => {
+      const approvals = {
+        exchangeApproved: false,
+        negRiskExchangeApproved: false,
+        negRiskAdapterApproved: false,
+        ctfCollateralAdapterApproved: false,
+        negRiskCollateralAdapterApproved: false,
+        feeCollectorApproved: false,
+        exchangeAllowanceOk: false,
+        negRiskExchangeAllowanceOk: false,
+        negRiskAdapterAllowanceOk: false,
+        feeCollectorAllowanceOk: false,
+      };
+      const transactions = prepareEmbeddedPolymarketSignerApprovalTransactions({
+        signer: walletContext.signer,
+        funder: walletContext.signer,
+        protocolVersion: "v2",
+        currentApprovals: approvals,
+      });
+      assert.deepEqual(
+        transactions.map((tx) => tx.to.toLowerCase()),
+        [CONTRACTS.collateral, CONTRACTS.positionManager].map((address) =>
+          address.toLowerCase(),
+        ),
+      );
+      for (const action of ["BUY", "SELL"] as const) {
+        const input = {
+          protocolVersion: "v2" as const,
+          action,
+          currentApprovals: {
+            ...approvals,
+            v3ExchangeAllowanceOk: action === "BUY",
+            v3ExchangeApproved: action === "SELL",
+          },
+        };
+        assert.equal(embeddedPolymarketAutomationApprovalsReady(input), true);
+        assert.equal(
+          embeddedPolymarketAutomationApprovalsReady({
+            ...input,
+            action: undefined,
+          }),
+          false,
+        );
+        assert.deepEqual(
+          prepareEmbeddedPolymarketSignerApprovalTransactions({
+            ...input,
+            signer: walletContext.signer,
+            funder: walletContext.signer,
+          }),
+          [],
+        );
+        assert.equal(
+          embeddedPolymarketAutomationApprovalsReady({
+            ...input,
+            protocolVersion: "v1",
+          }),
+          false,
+        );
+        assert.equal(
+          embeddedPolymarketAutomationApprovalsReady({
+            ...input,
+            currentApprovals: approvals,
+          }),
+          false,
+        );
+      }
+      for (const transaction of transactions) {
+        const call = tokenInterface.parseTransaction({
+          data: transaction.data,
+        });
+        assert.equal(
+          String(call?.args[0]).toLowerCase(),
+          CONTRACTS.exchangeV3.toLowerCase(),
+        );
+        assert.doesNotThrow(() =>
+          buildEmbeddedPolymarketTypedDataRequest({
+            context: walletContext,
+            typedData: buildDepositWalletBatchTypedData({
+              target: transaction.to,
+              value: "0",
+              data: transaction.data,
+            }),
+          }),
+        );
+      }
+      assert.deepEqual(
+        prepareEmbeddedPolymarketSignerApprovalTransactions({
+          signer: walletContext.signer,
+          funder: walletContext.signer,
+          protocolVersion: "v2",
+          currentApprovals: {
+            ...approvals,
+            v3ExchangeApproved: true,
+            v3ExchangeAllowanceOk: true,
+          },
+        }),
+        [],
+      );
+    },
+  },
+  {
+    name: "V2 Deposit redemption accepts only canonical exact-amount Router calls and its PM approval",
+    run: () => {
+      const router = new Interface([
+        "function redeem(bytes31 conditionId,uint256 outcome,uint256 amount)",
+      ]);
+      const condition = (1n << 248n) | (42n << 120n);
+      const conditionId = `0x${condition.toString(16).padStart(64, "0").slice(0, -2)}`;
+      const validData = router.encodeFunctionData("redeem", [
+        conditionId,
+        1n,
+        1_000_000n,
+      ]);
+      const build = (target: string, data: string, value = "0") =>
+        buildEmbeddedPolymarketTypedDataRequest({
+          context: walletContext,
+          depositWalletBatchPurpose: "redeem",
+          typedData: buildDepositWalletBatchTypedData({ target, data, value }),
+        });
+      assert.doesNotThrow(() => build(CONTRACTS.router, validData));
+      assert.doesNotThrow(() =>
+        build(
+          CONTRACTS.positionManager,
+          tokenInterface.encodeFunctionData("setApprovalForAll", [
+            CONTRACTS.router,
+            true,
+          ]),
+        ),
+      );
+      for (const [target, data, value] of [
+        [CONTRACTS.binaryModule, validData, "0"],
+        [CONTRACTS.router, `${validData}00`, "0"],
+        [CONTRACTS.router, validData, "1"],
+        [
+          CONTRACTS.router,
+          router.encodeFunctionData("redeem", [conditionId, 2n, 1n]),
+          "0",
+        ],
+        [
+          CONTRACTS.router,
+          router.encodeFunctionData("redeem", [conditionId, 1n, 0n]),
+          "0",
+        ],
+        [
+          CONTRACTS.router,
+          router.encodeFunctionData("redeem", [
+            `0x03${conditionId.slice(4)}`,
+            1n,
+            1n,
+          ]),
+          "0",
+        ],
+        [
+          CONTRACTS.positionManager,
+          tokenInterface.encodeFunctionData("setApprovalForAll", [
+            CONTRACTS.exchangeV3,
+            true,
+          ]),
+          "0",
+        ],
+        [
+          CONTRACTS.collateral,
+          tokenInterface.encodeFunctionData("approve", [
+            CONTRACTS.exchangeV3,
+            1n,
+          ]),
+          "0",
+        ],
+      ]) {
+        assert.ok(target && data && value);
+        assert.throws(() => build(target, data, value));
+      }
+      assert.throws(() =>
+        buildEmbeddedPolymarketTypedDataRequest({
+          context: walletContext,
+          typedData: buildDepositWalletBatchTypedData({
+            target: CONTRACTS.router,
+            data: validData,
+            value: "0",
+          }),
+        }),
+      );
+    },
+  },
+  {
+    name: "embedded Safe order keeps the shared legacy signing domain and eleven fields",
+    run: () => {
+      const exchangeAddress = "0xE111180000d2663C0091e4f400237545B87B996B";
+      const payload = {
+        salt: "1",
+        maker: "0x0000000000000000000000000000000000000020",
+        signer: walletContext.signer,
+        tokenId: "1",
+        makerAmount: "1000000",
+        takerAmount: "2000000",
+        side: 0,
+        signatureType: 2,
+        timestamp: "1791220000",
+        metadata: `0x${"0".repeat(64)}`,
+        builder: `0x${"0".repeat(64)}`,
+      };
+      const request = buildEmbeddedPolymarketOrderRequest({
+        context: walletContext,
+        payload,
+        exchangeAddress,
+      });
+      const body = request.input.body as {
+        params: {
+          typed_data: {
+            domain: Record<string, unknown>;
+            types: { Order: unknown[] };
+          };
+        };
+      };
+      assert.deepEqual(body.params.typed_data.domain, {
+        name: "Polymarket CTF Exchange",
+        version: "2",
+        chainId: 137,
+        verifyingContract: exchangeAddress,
+      });
+      assert.equal(body.params.typed_data.types.Order.length, 11);
+      assert.throws(
+        () =>
+          buildEmbeddedPolymarketOrderRequest({
+            context: walletContext,
+            payload,
+            exchangeAddress: "0xe3333700cA9d93003F00f0F71f8515005F6c00Aa",
+          }),
+        /does not match/,
+        "legacy embedded capability must not imply V3 readiness",
+      );
+    },
+  },
   {
     name: "embedded polymarket connect payload uses auth domain without verifyingContract",
     run: () => {

@@ -1,4 +1,5 @@
 import { Interface, ethers } from "ethers";
+import { POLYMARKET_PROTOCOL_CONTRACTS } from "@hunch/shared";
 import { env } from "../env.js";
 import { POLYGON_NATIVE_USDC_ADDRESS } from "../account-value/known-asset-catalog.js";
 import { fetchEvmMulticall } from "./polygon-rpc.js";
@@ -26,6 +27,11 @@ const POLYGON_MULTICALL_ADDRESS =
   env.polygonMulticallAddress?.trim() ||
   "0xca11bde05977b3631167028862be2a173976ca11";
 type Snapshot = {
+  protocolV2: {
+    allowanceExchange: bigint | null;
+    okExchange: boolean | null;
+    okRouter: boolean | null;
+  } | null;
   pusdBalance: bigint;
   usdcBalance: bigint;
   usdceBalance: bigint;
@@ -92,6 +98,7 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
   fundingRouterAddress?: string | null;
   extraConditionalOperatorAddresses?: string[];
   forceFresh?: boolean;
+  includeProtocolV2?: boolean;
 }): Promise<Snapshot> {
   const signer = ethers.getAddress(inputs.signer);
   const funder = ethers.getAddress(inputs.funder);
@@ -279,6 +286,32 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
     );
   }
 
+  const protocolV2Start = entries.length;
+  if (inputs.includeProtocolV2) {
+    entries.push({
+      target: env.polymarketUsdcAddress,
+      callData: erc20Iface.encodeFunctionData("allowance", [
+        funder,
+        POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3,
+      ]),
+      decode: (data) => decodeBigInt(erc20Iface, "allowance", data),
+      fallback: null,
+    });
+    for (const operator of [
+      POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3,
+      POLYMARKET_PROTOCOL_CONTRACTS.router,
+    ]) {
+      entries.push({
+        target: POLYMARKET_PROTOCOL_CONTRACTS.positionManager,
+        callData: erc1155Iface.encodeFunctionData("isApprovedForAll", [
+          funder,
+          operator,
+        ]),
+        decode: (data) => decodeBool(erc1155Iface, "isApprovedForAll", data),
+        fallback: null,
+      });
+    }
+  }
   const results = await fetchEvmMulticall({
     rpcUrl: inputs.rpcUrl,
     timeoutMs: inputs.timeoutMs,
@@ -350,6 +383,13 @@ export async function fetchPolymarketOnchainSnapshot(inputs: {
     : null;
 
   return {
+    protocolV2: inputs.includeProtocolV2
+      ? {
+          allowanceExchange: decoded[protocolV2Start] as bigint | null,
+          okExchange: decoded[protocolV2Start + 1] as boolean | null,
+          okRouter: decoded[protocolV2Start + 2] as boolean | null,
+        }
+      : null,
     pusdBalance,
     usdcBalance: pusdBalance,
     usdceBalance,

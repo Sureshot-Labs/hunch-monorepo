@@ -1,4 +1,5 @@
 import type { Pool } from "@hunch/infra";
+import type { PolymarketAssetContext } from "@hunch/shared";
 
 import {
   calculatePolymarketQuote,
@@ -21,6 +22,7 @@ export async function quotePolymarketOrder(
   pool: Pool,
   input: {
     tokenId: string;
+    assetContext?: PolymarketAssetContext;
     side: PolymarketSide;
     orderType: PolymarketClobOrderType;
     amountType: PolymarketAmountType;
@@ -35,6 +37,7 @@ export async function quotePolymarketOrder(
 ): Promise<PolymarketQuoteResult> {
   const context = await loadPolymarketQuoteContext(pool, {
     tokenId: input.tokenId,
+    assetContext: input.assetContext,
     logWarn: input.logWarn,
   });
   return calculatePolymarketQuote({

@@ -8,6 +8,11 @@ import { fileURLToPath } from "node:url";
 
 import type { Pool } from "@hunch/infra";
 import { ethers } from "ethers";
+import {
+  POLYMARKET_PROTOCOL_CONTRACTS,
+  buildPolymarketAssetContext,
+  resolvePolymarketMarketAssets,
+} from "@hunch/shared";
 import { env } from "./env.js";
 
 import {
@@ -642,6 +647,230 @@ function sourceSlice(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "server quote context is exact before setup or funding and survives numeric-ledger collisions",
+    run: () => {
+      const condition = (1n << 248n) | (17n << 120n);
+      const protocol = resolvePolymarketMarketAssets({
+        version: "v2",
+        conditionId: ethers.toBeHex(condition, 32),
+        positionIds: [condition.toString(), (condition | 1n).toString()],
+        outcomes: ["Yes", "No"],
+        negRisk: false,
+      });
+      const context = buildPolymarketAssetContext(
+        "polymarket:bot-fixture",
+        protocol,
+        protocol.assets[0],
+      );
+      const input = {
+        action: "BUY" as const,
+        marketId: context.marketId,
+        outcomeIndex: 0 as const,
+        tokenId: context.assetId,
+        rawQuote: {
+          side: "BUY",
+          tokenId: context.assetId,
+          assetContext: context,
+        },
+      };
+      assert.deepEqual(
+        polymarketTradingExecutionTestHooks.inspectBotQuoteAssetContext(input),
+        context,
+      );
+      for (const patch of [
+        { side: "SELL" },
+        { tokenId: protocol.assets[1] },
+        { assetContext: { ...context, marketId: "polymarket:another" } },
+        { assetContext: { ...context, outcomeIndex: 1 } },
+        {
+          assetContext: {
+            ...context,
+            positionContract: POLYMARKET_PROTOCOL_CONTRACTS.conditionalTokens,
+          },
+        },
+      ])
+        assert.throws(() =>
+          polymarketTradingExecutionTestHooks.inspectBotQuoteAssetContext({
+            ...input,
+            rawQuote: { ...input.rawQuote, ...patch },
+          }),
+        );
+      assert.equal(
+        polymarketTradingExecutionTestHooks.inspectBotQuoteAssetContext({
+          ...input,
+          rawQuote: { side: "BUY", tokenId: context.assetId },
+        }),
+        null,
+        "old quote absence is explicit, not a guessed V3 context",
+      );
+    },
+  },
+  {
+    name: "server policy coverage separates legacy from V3 domains without widening rule families",
+    run: () => {
+      const exchanges = [
+        ...policyExchangeAddresses,
+        POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3,
+      ];
+      const validate = (
+        policy: PrivyPolicyMetadata,
+        requiredExchangeAddresses: readonly string[],
+      ) =>
+        validateCombinedPolymarketRelayPolicy({
+          builderCode: policyBuilderCode,
+          exchangeAddresses: exchanges,
+          requiredExchangeAddresses,
+          fundingRouterAddress: policyFundingRouterAddress,
+          maxBuyUsd: 2,
+          policy,
+          profile: "buy_sell",
+          relayMaxSourceRaw: relayPolicyCapRaw,
+        });
+      const legacy = buildCombinedPolicyWithRelay();
+      assert.equal(validate(legacy, policyExchangeAddresses).valid, true);
+      assert.equal(
+        validate(legacy, [POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3]).valid,
+        false,
+      );
+      const dual = structuredClone(legacy);
+      for (const rule of dual.rules) {
+        for (const condition of rule.conditions as Record<string, unknown>[]) {
+          if (
+            condition.field === "verifying_contract" &&
+            condition.field_source === "ethereum_typed_data_domain"
+          ) {
+            condition.value = exchanges;
+          }
+        }
+      }
+      assert.equal(validate(dual, exchanges).valid, true);
+      const v2Pinned = structuredClone(dual);
+      for (const rule of v2Pinned.rules) {
+        if (
+          (rule.conditions as Record<string, unknown>[]).some(
+            (condition) => condition.field === "verifying_contract",
+          )
+        ) {
+          (rule.conditions as Record<string, unknown>[]).push({
+            field: "version",
+            field_source: "ethereum_typed_data_domain",
+            operator: "eq",
+            value: "2",
+          });
+        }
+      }
+      assert.equal(validate(v2Pinned, policyExchangeAddresses).valid, true);
+      assert.equal(
+        validate(v2Pinned, [POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3]).valid,
+        false,
+      );
+      assert.equal(validate(dual, []).valid, false);
+      const extraExchange = "0x0000000000000000000000000000000000000099";
+      assert.equal(validate(dual, [extraExchange]).valid, false);
+      // An unrelated target added to the rule is never excused by requesting
+      // only one generation, and Relay's exact amount/ABI checks stay active.
+      const unsafe = structuredClone(dual);
+      const target = unsafe.rules
+        .flatMap((rule) => rule.conditions as Record<string, unknown>[])
+        .find((condition) => condition.field === "verifying_contract");
+      assert.ok(target);
+      target.value = [...exchanges, extraExchange];
+      assert.equal(
+        validate(unsafe, [POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3]).valid,
+        false,
+      );
+    },
+  },
+  {
+    name: "server signer accepts only the canonical V3 domain for Safe and DepositWallet",
+    run: () => {
+      const signer = "0x0000000000000000000000000000000000000010";
+      const deposit = "0x0000000000000000000000000000000000000020";
+      const exchangeAddresses = [
+        ...policyExchangeAddresses,
+        POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3,
+      ];
+      const contents = {
+        builder: policyBuilderCode,
+        maker: signer,
+        makerAmount: "1000000",
+        metadata: `0x${"0".repeat(64)}`,
+        salt: "1",
+        side: 0,
+        signatureType: 2,
+        signer,
+        takerAmount: "2000000",
+        timestamp: "0",
+        tokenId: "1",
+      };
+      const domain = {
+        chainId: 137,
+        name: "Polymarket CTF Exchange",
+        verifyingContract: POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3,
+        version: "3",
+      };
+      const direct = {
+        domain,
+        message: contents,
+        primaryType: "Order",
+        types: POLYMARKET_ORDER_TYPES,
+      };
+      const validate = (
+        typedData: Parameters<
+          typeof validatePolymarketBotTypedData
+        >[0]["typedData"],
+      ) =>
+        validatePolymarketBotTypedData({
+          exchangeAddresses,
+          signer,
+          typedData,
+          maxBuyUsd: 2,
+        }).valid;
+      assert.equal(validate(direct), true);
+      assert.equal(
+        validate({ ...direct, domain: { ...domain, version: "2" } }),
+        false,
+      );
+      assert.equal(
+        validate({
+          ...direct,
+          domain: { ...domain, verifyingContract: policyExchangeAddresses[0] },
+        }),
+        false,
+      );
+      assert.equal(
+        validate({
+          ...direct,
+          message: { ...contents, makerAmount: "2000001" },
+        }),
+        false,
+      );
+      const wrapped = {
+        domain,
+        message: {
+          contents: {
+            ...contents,
+            maker: deposit,
+            signer: deposit,
+            signatureType: 3,
+          },
+          name: "DepositWallet",
+          version: "1",
+          chainId: 137,
+          verifyingContract: deposit,
+          salt: `0x${"0".repeat(64)}`,
+        },
+        primaryType: "TypedDataSign",
+        types: POLYMARKET_TYPED_DATA_SIGN_TYPES,
+      };
+      assert.equal(validate(wrapped), true);
+      assert.equal(
+        validate({ ...wrapped, message: { ...wrapped.message, version: "3" } }),
+        false,
+      );
+    },
+  },
   {
     name: "Polymarket account contains concurrent RPC failures",
     run: async () => {
@@ -1893,6 +2122,7 @@ const tests: TestCase[] = [
       const inspect = (
         authorizationEnabled: boolean,
         requiredActions: Array<"BUY" | "SELL"> = ["BUY"],
+        protocolVersion?: "v1" | "v2",
       ) =>
         inspectServerEvmWalletAuthorization({
           authorizationEnabled,
@@ -1900,6 +2130,7 @@ const tests: TestCase[] = [
           dependencies,
           privyUserId: "user-1",
           requiredActions,
+          protocolVersion,
           signer: walletAddress,
           walletId: "wallet-1",
         });
@@ -1955,6 +2186,34 @@ const tests: TestCase[] = [
       assert.equal((await inspect(true, ["BUY", "SELL"])).state, "ready");
       assert.equal((await inspect(true, ["SELL"])).state, "ready");
       assert.equal((await inspect(true, ["BUY"])).state, "ready");
+      configuration.exchangeAddresses = [
+        ...policyExchangeAddresses,
+        POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3,
+      ];
+      configuration.requiredExchangeAddresses = [...policyExchangeAddresses];
+      assert.equal(
+        (await inspect(true, ["BUY"], "v2")).state,
+        "policy_invalid",
+        "an attached legacy policy cannot authorize the V3 generation",
+      );
+      const v3Only = buildValidPolymarketBuySellPolicy();
+      for (const rule of v3Only.rules) {
+        for (const condition of rule.conditions as Record<string, unknown>[]) {
+          if (
+            condition.field === "verifying_contract" &&
+            condition.field_source === "ethereum_typed_data_domain"
+          )
+            condition.value = [POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3];
+        }
+      }
+      policies.set("buy-sell-policy", v3Only);
+      configuration.policyFingerprint = knownPrivyPolicyFingerprint(v3Only);
+      assert.equal((await inspect(true, ["BUY", "SELL"], "v2")).state, "ready");
+      assert.equal(
+        (await inspect(true, ["BUY"], "v1")).state,
+        "policy_invalid",
+        "a V3-only policy cannot authorize legacy exchanges",
+      );
       const revisedCombinedPolicy = buildCombinedPolicyWithRelay();
       policies.set("buy-sell-policy", revisedCombinedPolicy);
       configuration.policyFingerprint = knownPrivyPolicyFingerprint(

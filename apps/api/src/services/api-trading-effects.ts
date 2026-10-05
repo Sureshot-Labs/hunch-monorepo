@@ -8,6 +8,7 @@ import {
   createNotificationSafe,
 } from "./notifications.js";
 import { applyOptimisticPositionTradeOnce } from "./positions-optimistic.js";
+import { readPolymarketStoredOrderContext } from "./polymarket-asset-context.js";
 import type {
   ApplyTradeEffectsInput,
   TradeEffectsResult,
@@ -57,6 +58,10 @@ export async function applyOrderTradeEffects(
     readPersistedRawField(input, "walletAddress") ?? input.intent.walletAddress;
   const status = input.persisted.status;
   const venue = input.intent.venue as SupportedBotTradingVenue;
+  const assetContext =
+    venue === "polymarket"
+      ? (readPolymarketStoredOrderContext(input.persisted.raw) ?? undefined)
+      : undefined;
   const storedOrder = readPersistedStoredOrder(input);
   let referralFirstTrade = null;
   if (
@@ -127,6 +132,7 @@ export async function applyOrderTradeEffects(
         orderId: input.submitResult.venueOrderId,
         tokenId,
         walletAddress,
+        assetContext,
         marketId: input.intent.target.marketId,
         source:
           input.intent.actor.kind === "telegram_bot" ? "telegram_bot" : null,

@@ -1,4 +1,5 @@
 import type { Pool } from "@hunch/infra";
+import { POSITION_MARKET_JOIN_SQL } from "../lib/pnl-sql.js";
 
 import type { NotificationRow } from "../repos/notifications-repo.js";
 import {
@@ -234,16 +235,13 @@ export async function notifyResolvedPositions(
         p.token_id,
         p.wallet_address,
         p.venue,
-        ut.market_id,
-        ut.side as outcome_side,
+        m.id as market_id,
+        umt.outcome_side,
         m.resolved_outcome,
         m.resolved_outcome_pct,
         coalesce(p.last_updated_at, p.updated_at) as position_snapshot_at
       from positions p
-      join unified_tokens ut
-        on ut.token_id = p.token_id and ut.venue = p.venue
-      join unified_markets m
-        on m.id = ut.market_id and m.venue = p.venue
+      ${POSITION_MARKET_JOIN_SQL}
       where p.user_id = $1
         and lower(p.wallet_address) = lower($2)
         and p.venue = $3

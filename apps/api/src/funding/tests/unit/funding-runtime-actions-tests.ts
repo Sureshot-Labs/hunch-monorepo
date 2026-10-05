@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 import { Interface } from "ethers";
+import { POLYMARKET_PROTOCOL_CONTRACTS } from "@hunch/shared";
 
 import type { UserWallet } from "../../../auth.js";
 import { env } from "../../../env.js";
@@ -148,6 +149,77 @@ await test("Polymarket connect preparation is deterministic and contains no secr
   const encoded = JSON.stringify(first);
   assert.doesNotMatch(encoded, /apiSecret|privateKey|authorizationSignature/i);
   assert.match(encoded, /polymarket-connect/i);
+});
+
+await test("V2 actions target canonical pUSD/V3 and PM/V3 or Router across wallet envelopes", async () => {
+  const exactBinding = binding("polymarket");
+  const erc1155 = new Interface([
+    "function setApprovalForAll(address operator,bool approved)",
+  ]);
+  const cases = [
+    {
+      check: "erc20_v3_exchange_allowance",
+      token: POLYMARKET_PROTOCOL_CONTRACTS.collateral,
+      spender: POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3,
+      erc20: true,
+    },
+    {
+      check: "position_manager_v3_approval",
+      token: POLYMARKET_PROTOCOL_CONTRACTS.positionManager,
+      spender: POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3,
+      erc20: false,
+    },
+    {
+      check: "redemption_operator_approval",
+      token: POLYMARKET_PROTOCOL_CONTRACTS.positionManager,
+      spender: POLYMARKET_PROTOCOL_CONTRACTS.router,
+      erc20: false,
+    },
+  ];
+  for (const topology of [
+    "signer",
+    "deposit_wallet",
+    "safe_1_1",
+    "magic_proxy",
+  ] as const) {
+    const materialize = createPolymarketRuntimeActionMaterializer({
+      wallet: wallet(true),
+      topology,
+      funder: exactBinding.accountRef,
+      redemptionOperator: POLYMARKET_PROTOCOL_CONTRACTS.router,
+    });
+    for (const row of cases) {
+      const [result] = await materialize(
+        materializerInput(exactBinding, [
+          requirement(
+            `approve-${row.check}`,
+            topology === "signer" ? "evm_transaction" : "external_handoff",
+          ),
+        ]),
+      );
+      const action = result?.action;
+      assert.ok(action);
+      const call =
+        action.kind === "evm_transaction"
+          ? { target: action.to, data: action.data }
+          : action.kind === "external_handoff"
+            ? (
+                action.payload.calls as Array<{ target: string; data: string }>
+              )[0]
+            : null;
+      assert.ok(call);
+      assert.equal(call.target, row.token);
+      const decoded = (row.erc20 ? erc20Interface : erc1155).decodeFunctionData(
+        row.erc20 ? "approve" : "setApprovalForAll",
+        call.data,
+      );
+      assert.equal(decoded[0].toLowerCase(), row.spender.toLowerCase());
+      assert.equal(decoded[1], row.erc20 ? (1n << 256n) - 1n : true);
+      // DepositWallet remains a relayer handoff, never a sponsored direct call.
+      if (topology === "deposit_wallet")
+        assert.equal(action.kind, "external_handoff");
+    }
+  }
 });
 
 await test("Polymarket signer and contract approvals preserve distinct execution envelopes", async () => {

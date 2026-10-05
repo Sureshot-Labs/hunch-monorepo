@@ -1,4 +1,7 @@
 import type { Pool, PoolClient } from "@hunch/infra";
+import type { PolymarketAssetContext } from "@hunch/shared";
+import { positionStorageContract } from "../lib/position-asset-context.js";
+import { readPolymarketStoredOrderContext } from "./polymarket-asset-context.js";
 import { MIN_POSITION_SIZE } from "../lib/positions-constants.js";
 import {
   isEvmAddress,
@@ -27,6 +30,7 @@ export type OptimisticPositionTradeInput = {
   walletAddress: string;
   venue: SupportedVenue;
   tokenId: string;
+  assetContext?: PolymarketAssetContext;
   side: TradeSide;
   shares: number;
   notionalUsd: number;
@@ -47,6 +51,7 @@ export type ReconcileExactPositionBalanceInput = {
   walletAddress: string;
   venue: SupportedVenue;
   tokenId: string;
+  assetContext?: PolymarketAssetContext;
   size: number;
   averagePrice?: number | null;
 };
@@ -80,6 +85,7 @@ async function selectPositionForUpdate(
     walletAddress: string;
     venue: SupportedVenue;
     tokenId: string;
+    assetContext?: PolymarketAssetContext;
   },
 ): Promise<PositionRow | null> {
   const walletClause = isEthAddress(inputs.walletAddress)
@@ -93,11 +99,18 @@ async function selectPositionForUpdate(
         and ${walletClause}
         and venue = $3
         and token_id = $4
+        and position_contract = $5
         and position_scope = 'own'
       order by token_id, id
       for update
     `,
-    [inputs.userId, inputs.walletAddress, inputs.venue, inputs.tokenId],
+    [
+      inputs.userId,
+      inputs.walletAddress,
+      inputs.venue,
+      inputs.tokenId,
+      positionStorageContract(inputs),
+    ],
   );
   return rows[0] ?? null;
 }
@@ -109,6 +122,7 @@ async function insertLongPosition(
     walletAddress: string;
     venue: SupportedVenue;
     tokenId: string;
+    assetContext?: PolymarketAssetContext;
     size: number;
     averagePrice: number;
   },
@@ -122,6 +136,8 @@ async function insertLongPosition(
         venue,
         position_scope,
         token_id,
+        position_contract,
+        asset_context,
         side,
         size,
         average_price,
@@ -136,13 +152,14 @@ async function insertLongPosition(
       )
       values (
         gen_random_uuid(),
-        $1, $2, $3, 'own', $4, 'LONG',
+        $1, $2, $3, 'own', $4, $7, $8::jsonb, 'LONG',
         $5, $6, 0, 0, false, null, null, now(), now(), now()
       )
       on conflict on constraint positions_user_id_wallet_address_venue_token_id_key
       do update set
         side = 'LONG',
         size = excluded.size,
+        asset_context = coalesce(positions.asset_context, excluded.asset_context),
         average_price = excluded.average_price,
         is_hidden = false,
         hidden_reason = null,
@@ -157,6 +174,8 @@ async function insertLongPosition(
       inputs.tokenId,
       inputs.size,
       inputs.averagePrice,
+      positionStorageContract(inputs),
+      inputs.assetContext ? JSON.stringify(inputs.assetContext) : null,
     ],
   );
 }
@@ -177,6 +196,7 @@ async function applyBuy(
       walletAddress: inputs.walletAddress,
       venue: inputs.venue,
       tokenId: inputs.tokenId,
+      assetContext: inputs.assetContext,
       size: inputs.shares,
       averagePrice: tradePrice,
     });
@@ -356,9 +376,11 @@ export async function applyOptimisticPositionTradeOnce(
       const order = await client.query<{
         context_matches: boolean;
         position_delta_applied: boolean;
+        order_payload: unknown;
       }>(
         `
           select
+            order_payload,
             ${positionDeltaAppliedSqlExpression()} as position_delta_applied,
             coalesce((
               user_id = $2
@@ -390,6 +412,13 @@ export async function applyOptimisticPositionTradeOnce(
       if (!order.rows[0].context_matches) {
         return { applied: false, reason: "order_context_mismatch" };
       }
+      // The persisted order is authoritative even when an old caller omits
+      // context. Never apply a V2 fill to the legacy CTF namespace.
+      const storedContext =
+        tradeInput.venue === "polymarket"
+          ? readPolymarketStoredOrderContext(order.rows[0].order_payload)
+          : null;
+      if (storedContext) tradeInput.assetContext = storedContext;
       if (order.rows[0].position_delta_applied) {
         return {
           applied: false,
@@ -466,6 +495,7 @@ export async function reconcileExactPositionBalance(
         walletAddress,
         venue: input.venue,
         tokenId,
+        assetContext: input.assetContext,
       });
 
       if (exactSize < MIN_POSITION_SIZE) {
@@ -493,6 +523,8 @@ export async function reconcileExactPositionBalance(
               venue,
               position_scope,
               token_id,
+              position_contract,
+              asset_context,
               side,
               size,
               average_price,
@@ -507,13 +539,14 @@ export async function reconcileExactPositionBalance(
             )
             values (
               gen_random_uuid(),
-              $1, $2, $3, 'own', $4, 'LONG',
+              $1, $2, $3, 'own', $4, $7, $8::jsonb, 'LONG',
               $5, $6, 0, 0, false, null, null, now(), now(), now()
             )
             on conflict on constraint positions_user_id_wallet_address_venue_token_id_key
             do update set
               side = 'LONG',
               size = excluded.size,
+              asset_context = coalesce(positions.asset_context, excluded.asset_context),
               average_price = coalesce(positions.average_price, excluded.average_price),
               is_hidden = case
                 when positions.side = 'FLAT' or positions.size <= 0 then false
@@ -542,6 +575,8 @@ export async function reconcileExactPositionBalance(
             tokenId,
             exactSize,
             averagePrice,
+            positionStorageContract(input),
+            input.assetContext ? JSON.stringify(input.assetContext) : null,
           ],
         );
         return { applied: true };

@@ -5,6 +5,7 @@ import { usdcMicroToDecimalString } from "../lib/usdc.js";
 import { withRewardsChainLocks } from "../lib/rewards-locks.js";
 import { fetchActiveFeePolicy } from "../repos/fee-policy.js";
 import { createEvmRpcProvider } from "./rpc-client-factory.js";
+import { readPolymarketStoredOrderContext } from "./polymarket-asset-context.js";
 import {
   unlockVenueFeeAccruals,
   upsertVenueFeeAccruals,
@@ -619,7 +620,29 @@ type BuilderFeeAccrualRow = {
   fee_amount_raw: string;
   fee_asset: string;
   filled_at: Date;
+  order_payload: unknown;
 };
+
+/** Verify against the order's frozen generation, not today's market map. */
+export function polymarketBuilderFeeExchangeAddresses(
+  orderPayload: unknown,
+  tokenId: string | null,
+): Set<string> {
+  const context = readPolymarketStoredOrderContext(orderPayload);
+  if (context && tokenId != null && context.assetId !== tokenId) {
+    throw new Error(
+      "Builder fee asset does not match the stored order context.",
+    );
+  }
+  return new Set(
+    (context
+      ? [context.exchangeAddress]
+      : [env.polymarketExchangeAddress, env.polymarketNegRiskExchangeAddress]
+    )
+      .map((address) => normalizeAddress(address).toLowerCase())
+      .filter(Boolean),
+  );
+}
 
 function parseOrderFilledLog(log: ethers.Log): null | {
   orderHash: string;
@@ -669,16 +692,14 @@ export async function verifyPolymarketBuilderFeeAccruals(
   const limit = Math.max(1, Math.min(Math.trunc(options.limit ?? 25), 250));
   const { rows } = await pool.query<BuilderFeeAccrualRow>(
     `
-      select id, user_id, wallet_address, venue, fee_program, chain_id,
-             order_hash, venue_fill_id, venue_trade_id, tx_hash, token_id, side,
-             attribution_code, fee_rate_bps, fee_amount, fee_amount_raw, fee_asset,
-             filled_at
-      from venue_fee_accruals
-      where venue = 'polymarket'
-        and fee_program = 'builder'
-        and status = 'accrued'
-        and tx_hash is not null
-      order by filled_at asc, created_at asc
+      select fee_row.*, order_row.order_payload
+      from venue_fee_accruals fee_row
+      left join orders order_row on order_row.id = fee_row.order_id
+      where fee_row.venue = 'polymarket'
+        and fee_row.fee_program = 'builder'
+        and fee_row.status = 'accrued'
+        and fee_row.tx_hash is not null
+      order by fee_row.filled_at asc, fee_row.created_at asc
       limit $1
     `,
     [limit],
@@ -692,15 +713,13 @@ export async function verifyPolymarketBuilderFeeAccruals(
   let verified = 0;
   let failed = 0;
   let skipped = 0;
-  const exchangeAddresses = new Set(
-    [env.polymarketExchangeAddress, env.polymarketNegRiskExchangeAddress]
-      .map((address) => normalizeAddress(address).toLowerCase())
-      .filter(Boolean),
-  );
-
   for (const row of rows) {
     checked += 1;
     try {
+      const exchangeAddresses = polymarketBuilderFeeExchangeAddresses(
+        row.order_payload,
+        row.token_id,
+      );
       const txHash = normalizeHash(row.tx_hash);
       if (!txHash) {
         skipped += 1;

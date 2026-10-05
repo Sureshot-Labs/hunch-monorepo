@@ -15,7 +15,6 @@ import {
   type SolanaTokenBalance,
 } from "./solana-rpc.js";
 import {
-  fetchErc1155BalancesByOwner,
   fetchErc1155BalancesByOwners,
   fetchErc1155BalancesForOwnerTokenPairs,
 } from "./polygon-rpc.js";
@@ -42,13 +41,22 @@ import {
   upsertPolymarketBuilderFeeAccruals,
 } from "./polymarket-builder-fees.js";
 import { isAbortError } from "@hunch/shared";
+import {
+  loadPolymarketHoldingLedgers,
+  readPolymarketStoredOrderContext,
+  type PolymarketHoldingLedger,
+} from "./polymarket-asset-context.js";
+import { positionStorageContract } from "../lib/position-asset-context.js";
+import {
+  fetchPolymarketDataApiV2Pages,
+  parsePolymarketDataApiV2Position,
+  polymarketDataApiV2PositionParams,
+} from "./polymarket-data-api-v2.js";
 
 const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 type PositionRefreshVenue = "polymarket" | "dflow" | "limitless";
 const POSITION_REFRESH_STALE_MARKET_MINUTES = 15;
 const POLYMARKET_BALANCE_BATCH_MAX_PAIRS = 1000;
-const POLYMARKET_DATA_API_POSITIONS_LIMIT = 500;
-const POLYMARKET_DATA_API_POSITIONS_SIZE_THRESHOLD = "0.01";
 const POLYMARKET_RECENT_ORDER_CANDIDATE_HOURS = 24;
 const LIMITLESS_HISTORY_SYNC_WARN_TTL_MS = 5 * 60 * 1000;
 const limitlessHistorySyncWarnAt = new Map<string, number>();
@@ -404,46 +412,6 @@ export function estimateErc1155OwnerTokenPairRpcCalls(
   return Math.ceil((owners * normalizedTokenIds.length) / safeMaxPairsPerCall);
 }
 
-async function fetchErc1155OwnerTokenBalances(inputs: {
-  rpcUrl: string;
-  timeoutMs: number;
-  contractAddress: string;
-  owner: string;
-  tokenIds: string[];
-  onRpcCall?: (() => void) | null;
-  requireComplete?: boolean;
-}): Promise<WalletTokenBalance[]> {
-  const tokenIds = normalizeNumericTokenIds(inputs.tokenIds);
-  if (tokenIds.length === 0) return [];
-
-  const balances: WalletTokenBalance[] = [];
-  const chunkSize = 200;
-  for (let i = 0; i < tokenIds.length; i += chunkSize) {
-    const chunk = tokenIds.slice(i, i + chunkSize);
-    inputs.onRpcCall?.();
-    const chunkBalances = await fetchErc1155BalancesByOwner({
-      rpcUrl: inputs.rpcUrl,
-      timeoutMs: inputs.timeoutMs,
-      contractAddress: inputs.contractAddress,
-      owner: inputs.owner,
-      tokenIds: chunk,
-    });
-    if (inputs.requireComplete)
-      assertCompleteTokenBalanceRead(chunk, chunkBalances);
-
-    for (const tokenId of chunk) {
-      const balance = chunkBalances.get(tokenId) ?? 0n;
-      if (balance <= 0n) continue;
-      balances.push({
-        tokenId,
-        size: ethers.formatUnits(balance, 6),
-      });
-    }
-  }
-
-  return balances;
-}
-
 export function assertCompleteTokenBalanceRead(
   tokenIds: readonly string[],
   balances: ReadonlyMap<string, bigint>,
@@ -507,6 +475,7 @@ async function fetchErc1155OwnerTokenBalancesForOwners(inputs: {
 
   for (const owner of owners) {
     const rawBalances = balancesByOwner.get(owner.toLowerCase()) ?? new Map();
+    assertCompleteTokenBalanceRead(tokenIds, rawBalances);
     const balances: WalletTokenBalance[] = [];
     for (const tokenId of tokenIds) {
       const balance = rawBalances.get(tokenId) ?? 0n;
@@ -520,6 +489,41 @@ async function fetchErc1155OwnerTokenBalancesForOwners(inputs: {
   }
 
   return output;
+}
+
+export async function fetchPolymarketOwnerBalancesByLedger(
+  db: Pick<Pool, "query">,
+  inputs: Omit<
+    Parameters<typeof fetchErc1155OwnerTokenBalancesForOwners>[0],
+    "contractAddress"
+  > & { ledgers?: PolymarketHoldingLedger[] },
+): Promise<{
+  balancesByOwner: Map<string, WalletTokenBalance[]>;
+  ledgers: PolymarketHoldingLedger[];
+}> {
+  const ledgers =
+    inputs.ledgers ?? (await loadPolymarketHoldingLedgers(db, inputs.tokenIds));
+  const balancesByOwner = new Map(
+    inputs.owners.map((owner) => [
+      owner.toLowerCase(),
+      [] as WalletTokenBalance[],
+    ]),
+  );
+  for (const ledger of ledgers) {
+    const balances = await fetchErc1155OwnerTokenBalancesForOwners({
+      ...inputs,
+      contractAddress: ledger.contractAddress,
+      tokenIds: [...ledger.tokenContexts.keys()],
+    });
+    for (const [owner, held] of balances)
+      balancesByOwner.get(owner)?.push(
+        ...held.map((balance) => ({
+          ...balance,
+          assetContext: ledger.tokenContexts.get(balance.tokenId) ?? undefined,
+        })),
+      );
+  }
+  return { balancesByOwner, ledgers };
 }
 
 function erc1155BalanceCacheKey(inputs: {
@@ -613,7 +617,7 @@ const polymarketDataApiSnapshotCache = new Map<
 >();
 const polymarketDataApiSnapshotFailureCache = new Map<
   string,
-  PolymarketDataApiCacheEntry
+  { expiresAt: number; error: unknown }
 >();
 const polymarketDataApiSnapshotInflight = new Map<
   string,
@@ -636,114 +640,32 @@ function sweepPolymarketDataApiSnapshotCache(now: number) {
   }
 }
 
-function normalizePolymarketDataApiPrice(value: unknown): string | null {
-  if (typeof value === "number") {
-    return Number.isFinite(value) && value >= 0 ? value.toString() : null;
-  }
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    const parsed = Number(trimmed);
-    return Number.isFinite(parsed) && parsed >= 0 ? trimmed : null;
-  }
-  return null;
-}
-
-function normalizePolymarketDataApiTokenId(value: unknown): string | null {
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    return trimmed.length > 0 && /^[0-9]+$/.test(trimmed) ? trimmed : null;
-  }
-  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
-    return String(value);
-  }
-  if (typeof value === "bigint" && value >= 0n) {
-    return value.toString();
-  }
-  return null;
-}
-
-function extractPolymarketDataApiPositionEntries(payload: unknown): unknown[] {
-  if (Array.isArray(payload)) return payload;
-  if (!isRecord(payload)) return [];
-
-  const output: unknown[] = [];
-  const roots = [payload, payload.data].filter(Boolean);
-  for (const root of roots) {
-    if (Array.isArray(root)) {
-      output.push(...root);
-      continue;
-    }
-    if (!isRecord(root)) continue;
-    for (const key of ["positions", "data", "results", "items"]) {
-      const value = root[key];
-      if (Array.isArray(value)) {
-        output.push(...value);
-      }
-    }
-  }
-  return output;
-}
-
-function extractPolymarketDataApiPositionSnapshots(
-  payload: unknown,
-): PolymarketDataApiPositionSnapshot[] {
-  const snapshots: PolymarketDataApiPositionSnapshot[] = [];
-  for (const entry of extractPolymarketDataApiPositionEntries(payload)) {
-    if (!isRecord(entry)) continue;
-    const tokenId =
-      normalizePolymarketDataApiTokenId(entry.asset) ??
-      normalizePolymarketDataApiTokenId(entry.tokenId) ??
-      normalizePolymarketDataApiTokenId(entry.token_id) ??
-      normalizePolymarketDataApiTokenId(entry.asset_id) ??
-      normalizePolymarketDataApiTokenId(entry.outcomeTokenId);
-    if (!tokenId) continue;
-    snapshots.push({
-      tokenId,
-      averagePrice:
-        normalizePolymarketDataApiPrice(entry.avgPrice) ??
-        normalizePolymarketDataApiPrice(entry.averagePrice) ??
-        normalizePolymarketDataApiPrice(entry.avg_price) ??
-        normalizePolymarketDataApiPrice(entry.average_price),
-    });
-  }
-  return Array.from(
-    new Map(snapshots.map((snapshot) => [snapshot.tokenId, snapshot])).values(),
-  );
-}
-
 export async function fetchPolymarketDataApiPositionSnapshots(
   owner: string,
 ): Promise<PolymarketDataApiPositionSnapshot[]> {
-  const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(),
-    env.polymarketDataApiPositionsTimeoutMs,
-  );
-  try {
-    const url = new URL("/positions", env.polymarketDataApiBase);
-    url.searchParams.set("user", owner);
-    url.searchParams.set(
-      "sizeThreshold",
-      POLYMARKET_DATA_API_POSITIONS_SIZE_THRESHOLD,
-    );
-    url.searchParams.set("limit", String(POLYMARKET_DATA_API_POSITIONS_LIMIT));
-
-    const response = await fetch(url, {
-      method: "GET",
-      headers: { accept: "application/json" },
-      signal: controller.signal,
-    });
-    if (!response.ok) {
+  const positions = await fetchPolymarketDataApiV2Pages({
+    baseUrl: env.polymarketDataApiBase,
+    endpoint: "positions",
+    params: polymarketDataApiV2PositionParams(owner),
+    timeoutMs: env.polymarketDataApiPositionsTimeoutMs,
+    parseRow: parsePolymarketDataApiV2Position,
+  });
+  const snapshots = new Map<string, PolymarketDataApiPositionSnapshot>();
+  for (const position of positions) {
+    if (position.proxyWallet.toLowerCase() !== owner.toLowerCase())
       throw new Error(
-        `Polymarket Data API positions failed: ${response.status}`,
+        "Polymarket positions do not match the requested wallet.",
       );
-    }
-    const payload = (await response.json()) as unknown;
-    return extractPolymarketDataApiPositionSnapshots(payload);
-  } finally {
-    clearTimeout(timeout);
+    if (!snapshots.has(position.tokenId))
+      snapshots.set(position.tokenId, {
+        tokenId: position.tokenId,
+        averagePrice:
+          position.averagePrice == null
+            ? null
+            : position.averagePrice.toString(),
+      });
   }
+  return [...snapshots.values()];
 }
 
 async function fetchCachedPolymarketDataApiPositionSnapshots(
@@ -762,7 +684,7 @@ async function fetchCachedPolymarketDataApiPositionSnapshots(
   if (env.polymarketDataApiPositionsFailureCacheTtlMs > 0) {
     const cachedFailure = polymarketDataApiSnapshotFailureCache.get(key);
     if (cachedFailure && cachedFailure.expiresAt > now) {
-      return cachedFailure.snapshots;
+      throw cachedFailure.error;
     }
   }
 
@@ -780,6 +702,10 @@ async function fetchCachedPolymarketDataApiPositionSnapshots(
       return snapshots;
     })
     .catch((error) => {
+      console.warn("Polymarket Data API position token discovery failed", {
+        owner,
+        error: error instanceof Error ? error.message : String(error),
+      });
       if (
         isAbortError(error) &&
         env.polymarketDataApiPositionsFailureCacheTtlMs > 0
@@ -787,7 +713,7 @@ async function fetchCachedPolymarketDataApiPositionSnapshots(
         polymarketDataApiSnapshotFailureCache.set(key, {
           expiresAt:
             Date.now() + env.polymarketDataApiPositionsFailureCacheTtlMs,
-          snapshots: [],
+          error,
         });
       }
       throw error;
@@ -835,11 +761,7 @@ async function fetchPolymarketDataApiSnapshotsForOwners(
           owner,
           snapshots: await fetchCachedPolymarketDataApiPositionSnapshots(owner),
         };
-      } catch (error) {
-        console.warn("Polymarket Data API position token discovery failed", {
-          owner,
-          error: error instanceof Error ? error.message : String(error),
-        });
+      } catch {
         return { owner, snapshots: [] };
       }
     },
@@ -872,12 +794,19 @@ function applyPolymarketDataApiAveragePrices(
     | Map<string, Map<string, PolymarketDataApiPositionSnapshot>>
     | null
     | undefined,
+  holdingLedgers?: readonly PolymarketHoldingLedger[],
 ): WalletTokenBalance[] {
   const snapshots = snapshotsByOwner?.get(owner.toLowerCase());
   if (!snapshots?.size) return balances;
   return balances.map((balance) => ({
     ...balance,
-    averagePrice: snapshots.get(balance.tokenId)?.averagePrice ?? null,
+    averagePrice:
+      holdingLedgers &&
+      holdingLedgers.filter((ledger) =>
+        ledger.tokenContexts.has(balance.tokenId),
+      ).length > 1
+        ? null
+        : (snapshots.get(balance.tokenId)?.averagePrice ?? null),
   }));
 }
 
@@ -902,6 +831,11 @@ async function fetchAutoHiddenPolymarketTokenIds(
         and is_hidden = true
         and hidden_reason = 'auto_lost'
         and token_id = any($3::text[])
+        and not exists (
+          select 1 from polymarket_asset_bindings other_binding
+          where other_binding.chain_id = 137 and other_binding.asset_id = positions.token_id
+            and other_binding.position_contract <> coalesce(nullif(positions.position_contract, ''), '0x4d97dcd97ec945f40cf65f87097ace5ea0476045')
+        )
     `,
     [inputs.userId, wallets, tokenIds],
   );
@@ -935,6 +869,7 @@ export type PrefetchedPolymarketOwnerBalances = {
   rpcBalanceCacheHits?: number;
   rpcBalanceCacheMisses?: number;
   balancesByOwner: Map<string, WalletTokenBalance[]>;
+  holdingLedgers?: PolymarketHoldingLedger[];
   sourceCounts?: {
     dbCandidateTokenCount: number;
     dataApiTokenCount: number;
@@ -1038,22 +973,37 @@ export async function prefetchFollowedPolymarketOwnerBalances(
     );
 
     const balancesByOwner = new Map<string, WalletTokenBalance[]>();
+    const holdingLedgers = await loadPolymarketHoldingLedgers(
+      pool,
+      unionTokenIds,
+    );
+    rpcCallEstimate = holdingLedgers.reduce(
+      (total, ledger) =>
+        total +
+        estimateErc1155BalanceRpcCalls(owners.length, [
+          ...ledger.tokenContexts.keys(),
+        ]),
+      0,
+    );
     if (unionTokenIds.length > 0) {
-      const conditionalTokensAddress = env.polymarketConditionalTokensAddress;
       const ownerResults = await Promise.all(
-        owners.map(async (owner) => ({
-          owner,
-          balances: await fetchErc1155OwnerTokenBalances({
+        owners.map(async (owner) => {
+          const result = await fetchPolymarketOwnerBalancesByLedger(pool, {
             rpcUrl: env.polygonRpcUrl,
             timeoutMs: env.polygonRpcTimeoutMs,
-            contractAddress: conditionalTokensAddress,
-            owner,
+            owners: [owner],
             tokenIds: unionTokenIds,
+            ledgers: holdingLedgers,
+            maxPairsPerCall: 200,
             onRpcCall: () => {
               rpcCallCount += 1;
             },
-          }),
-        })),
+          });
+          return {
+            owner,
+            balances: result.balancesByOwner.get(owner.toLowerCase()) ?? [],
+          };
+        }),
       );
 
       for (const { owner, balances } of ownerResults) {
@@ -1070,6 +1020,7 @@ export async function prefetchFollowedPolymarketOwnerBalances(
       rpcCallEstimate,
       rpcCallCount,
       balancesByOwner,
+      holdingLedgers,
     };
   } catch (error) {
     throw attachPrefetchRpcTelemetry(error, {
@@ -1157,27 +1108,40 @@ export async function prefetchPolymarketOwnerBalancesForWallets(
       unionTokenIds,
     );
 
+    const holdingLedgers = await loadPolymarketHoldingLedgers(
+      pool,
+      unionTokenIds,
+    );
+    rpcCallEstimate = holdingLedgers.reduce(
+      (total, ledger) =>
+        total +
+        estimateErc1155OwnerTokenPairRpcCalls(owners.length, [
+          ...ledger.tokenContexts.keys(),
+        ]),
+      0,
+    );
     const balancesByOwner = new Map<string, WalletTokenBalance[]>();
     const rpcStartedAt = Date.now();
     if (unionTokenIds.length > 0 && owners.length > 0) {
-      const ownerBalances = await fetchErc1155OwnerTokenBalancesForOwners({
-        rpcUrl: env.polygonRpcUrl,
-        timeoutMs: env.polygonRpcTimeoutMs,
-        contractAddress: env.polymarketConditionalTokensAddress,
-        owners,
-        tokenIds: unionTokenIds,
-        maxPairsPerCall: POLYMARKET_BALANCE_BATCH_MAX_PAIRS,
-        balanceCache: inputs.balanceCache,
-        onRpcCall: () => {
-          rpcCallCount += 1;
-        },
-        onCacheHit: () => {
-          rpcBalanceCacheHits += 1;
-        },
-        onCacheMiss: () => {
-          rpcBalanceCacheMisses += 1;
-        },
-      });
+      const { balancesByOwner: ownerBalances } =
+        await fetchPolymarketOwnerBalancesByLedger(pool, {
+          rpcUrl: env.polygonRpcUrl,
+          timeoutMs: env.polygonRpcTimeoutMs,
+          ledgers: holdingLedgers,
+          owners,
+          tokenIds: unionTokenIds,
+          maxPairsPerCall: POLYMARKET_BALANCE_BATCH_MAX_PAIRS,
+          balanceCache: inputs.balanceCache,
+          onRpcCall: () => {
+            rpcCallCount += 1;
+          },
+          onCacheHit: () => {
+            rpcBalanceCacheHits += 1;
+          },
+          onCacheMiss: () => {
+            rpcBalanceCacheMisses += 1;
+          },
+        });
 
       for (const owner of owners) {
         balancesByOwner.set(
@@ -1186,6 +1150,7 @@ export async function prefetchPolymarketOwnerBalancesForWallets(
             ownerBalances.get(owner.toLowerCase()) ?? [],
             owner,
             dataApiSnapshotsByOwner,
+            holdingLedgers,
           ),
         );
       }
@@ -1203,6 +1168,7 @@ export async function prefetchPolymarketOwnerBalancesForWallets(
       rpcBalanceCacheHits,
       rpcBalanceCacheMisses,
       balancesByOwner,
+      holdingLedgers,
       sourceCounts: {
         dbCandidateTokenCount: dbCandidateTokenIds.length,
         dataApiTokenCount: dataApiTokenIds.length,
@@ -1725,14 +1691,15 @@ async function fetchLimitlessOnchainTokenBalances(
 
   if (tokenIds.length === 0) return { balances: [], observedTokenIds: [] };
 
-  const balances = await fetchErc1155OwnerTokenBalances({
+  const balancesByOwner = await fetchErc1155OwnerTokenBalancesForOwners({
     rpcUrl: env.baseRpcUrl,
     timeoutMs: env.baseRpcTimeoutMs,
     contractAddress: env.limitlessConditionalTokensAddress,
-    owner: inputs.walletAddress,
+    owners: [inputs.walletAddress],
     tokenIds,
-    requireComplete: true,
   });
+  const balances =
+    balancesByOwner.get(inputs.walletAddress.toLowerCase()) ?? [];
 
   return {
     observedTokenIds: tokenIds.flatMap((id) => {
@@ -1868,12 +1835,12 @@ async function syncPolymarketStoredPositionsFromPolygon(
     };
   }
 
-  const heldByOwner = new Map<
-    string,
-    Array<{ tokenId: string; size: string }>
-  >();
+  const heldByOwner = new Map<string, WalletTokenBalance[]>();
   const allHeldTokens = new Set<string>();
 
+  const holdingLedgers =
+    prefetched?.holdingLedgers ??
+    (await loadPolymarketHoldingLedgers(pool, tokenIds));
   const balanceStartedAt = Date.now();
   const ownerHeldResults =
     prefetched != null
@@ -1883,22 +1850,22 @@ async function syncPolymarketStoredPositionsFromPolygon(
           tokenIds,
         })
       : await (async () => {
-          const balancesByOwner = await fetchErc1155OwnerTokenBalancesForOwners(
-            {
+          const { balancesByOwner } =
+            await fetchPolymarketOwnerBalancesByLedger(pool, {
               rpcUrl: env.polygonRpcUrl,
               timeoutMs: env.polygonRpcTimeoutMs,
-              contractAddress: env.polymarketConditionalTokensAddress,
+              ledgers: holdingLedgers,
               owners,
               tokenIds,
               maxPairsPerCall: POLYMARKET_BALANCE_BATCH_MAX_PAIRS,
-            },
-          );
+            });
           return owners.map((owner) => ({
             owner,
             held: applyPolymarketDataApiAveragePrices(
               balancesByOwner.get(owner.toLowerCase()) ?? [],
               owner,
               dataApiSnapshotsByOwner,
+              holdingLedgers,
             ),
           }));
         })();
@@ -1928,19 +1895,43 @@ async function syncPolymarketStoredPositionsFromPolygon(
   for (const owner of owners) {
     const held = heldByOwner.get(owner) ?? [];
     const persistStartedAt = Date.now();
-    const result = await syncWalletPositionsFromTokenBalances(pool, {
-      userId: inputs.userId,
-      walletAddress: owner,
-      venue: "polymarket",
-      positionScope: inputs.positionScope,
-      tokenBalances: held,
-      // Short grace avoids flattening fresh matched BUYs before Polygon state
-      // catches up, while still converging quickly.
-      flattenGraceSec: env.positionsSyncFlattenGraceSec,
-      // Prevent immediate stale RPC snapshots from reopening freshly flattened
-      // rows right after matched sells.
-      protectRecentFlatsSec: env.positionsSyncFlattenGraceSec,
-    });
+    const results = [];
+    for (const ledger of holdingLedgers)
+      results.push(
+        await syncWalletPositionsFromTokenBalances(pool, {
+          userId: inputs.userId,
+          walletAddress: owner,
+          venue: "polymarket",
+          positionScope: inputs.positionScope,
+          tokenBalances: held.filter(
+            (balance) =>
+              positionStorageContract({ venue: "polymarket", ...balance }) ===
+              ledger.storageContract,
+          ),
+          positionContract: ledger.storageContract,
+          flattenMissingTokenIds: [...ledger.tokenContexts.keys()],
+          // Short grace avoids flattening fresh matched BUYs before Polygon state
+          // catches up, while still converging quickly.
+          flattenGraceSec: env.positionsSyncFlattenGraceSec,
+          // Prevent immediate stale RPC snapshots from reopening freshly flattened
+          // rows right after matched sells.
+          protectRecentFlatsSec: env.positionsSyncFlattenGraceSec,
+        }),
+      );
+    const result = results.reduce(
+      (total, item) => ({
+        heldTokens: total.heldTokens + item.heldTokens,
+        knownTokens: total.knownTokens + item.knownTokens,
+        upsertedPositions: total.upsertedPositions + item.upsertedPositions,
+        flattenedPositions: total.flattenedPositions + item.flattenedPositions,
+      }),
+      {
+        heldTokens: 0,
+        knownTokens: 0,
+        upsertedPositions: 0,
+        flattenedPositions: 0,
+      },
+    );
     persistMs += Date.now() - persistStartedAt;
     heldTokens += result.heldTokens;
     knownTokens += result.knownTokens;
@@ -2494,14 +2485,8 @@ export async function syncPolymarketTradesForSigner(
       token_id: string | null;
       side: string | null;
       wallet_address: string | null;
-    }>(
-      `
-        select id, venue_order_id, token_id, side, wallet_address
-        from orders
-        where id = any($1::uuid[])
-      `,
-      [orderIds],
-    );
+      order_payload: unknown;
+    }>(POLYMARKET_FILL_NOTIFICATION_ORDERS_SQL, [orderIds]);
 
     const fillStats = new Map<
       string,
@@ -2537,6 +2522,8 @@ export async function syncPolymarketTradesForSigner(
           price: avgPrice,
           orderId: order.venue_order_id ?? order.id,
           tokenId: order.token_id ?? null,
+          assetContext:
+            readPolymarketStoredOrderContext(order.order_payload) ?? undefined,
           walletAddress: order.wallet_address ?? inputs.signerAddress,
         }),
       );
@@ -2549,6 +2536,12 @@ export async function syncPolymarketTradesForSigner(
     positionsRecomputed,
   };
 }
+
+export const POLYMARKET_FILL_NOTIFICATION_ORDERS_SQL = `
+  select id, venue_order_id, token_id, side, wallet_address, order_payload
+  from orders
+  where id = any($1::uuid[])
+`;
 
 export type PositionsSyncResult = {
   venue: Position["venue"];

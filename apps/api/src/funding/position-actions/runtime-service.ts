@@ -1,5 +1,12 @@
 import type { Pool } from "@hunch/infra";
 import { ethers } from "ethers";
+import {
+  parsePolymarketAssetContext,
+  POLYMARKET_PROTOCOL_CONTRACTS,
+} from "@hunch/shared";
+import { positionStorageContract } from "../../lib/position-asset-context.js";
+import { fetchPolymarketAssetBindings } from "@hunch/db";
+import { polymarketContextFromBinding } from "../../services/polymarket-asset-context.js";
 import { parsePrivyFundingTransactionReference } from "../execution/privy-transaction-reference.js";
 import {
   positionActionPrivyReference,
@@ -27,7 +34,10 @@ import type {
   JsonValue,
   NormalizedAction,
 } from "../domain/types.js";
-import { canonicalJsonHash } from "../persistence/canonical.js";
+import {
+  canonicalJsonEqual,
+  canonicalJsonHash,
+} from "../persistence/canonical.js";
 import {
   PreparationContractError,
   type PreparationFactCheck,
@@ -206,6 +216,8 @@ export class PositionActionRuntimeService {
       token_id: string;
       venue: string;
       wallet_address: string | null;
+      position_contract: string;
+      asset_context: unknown;
     }>(
       `
         select
@@ -213,7 +225,9 @@ export class PositionActionRuntimeService {
           size::text as size_raw,
           token_id,
           venue,
-          wallet_address
+          wallet_address,
+          position_contract,
+          asset_context
         from positions
         where user_id = $1
           and id = $2
@@ -230,12 +244,54 @@ export class PositionActionRuntimeService {
       );
     }
     this.venueDriver(row.venue);
+    let assetContext = parsePolymarketAssetContext(row.asset_context);
+    if (row.venue === "polymarket") {
+      if (row.asset_context != null && !assetContext)
+        throw new PositionActionRuntimeError(
+          "unsupported_position_action",
+          "Position asset context is malformed. Refresh the position.",
+        );
+      if (!assetContext) {
+        const bindings = await fetchPolymarketAssetBindings(
+          this.db,
+          row.token_id,
+          row.position_contract ||
+            POLYMARKET_PROTOCOL_CONTRACTS.conditionalTokens,
+        );
+        if (bindings.length > 1)
+          throw new PositionActionRuntimeError(
+            "unsupported_position_action",
+            "Position ledger has conflicting asset bindings.",
+          );
+        assetContext = bindings[0]
+          ? polymarketContextFromBinding(bindings[0])
+          : null;
+        if (bindings.length && !assetContext)
+          throw new PositionActionRuntimeError(
+            "unsupported_position_action",
+            "Position asset binding is malformed. Refresh the position.",
+          );
+      }
+      if (
+        positionStorageContract({
+          venue: row.venue,
+          tokenId: row.token_id,
+          assetContext,
+        }) !== (row.position_contract ?? "")
+      )
+        throw new PositionActionRuntimeError(
+          "unsupported_position_action",
+          "Position ledger does not match its canonical asset context.",
+        );
+    }
     return {
       id: row.id,
       sizeRaw: row.size_raw,
       tokenId: row.token_id,
       venueId: row.venue,
       walletAddress: ethers.getAddress(row.wallet_address),
+      positionContract: row.position_contract ?? "",
+      assetContext,
     };
   }
 
@@ -246,6 +302,17 @@ export class PositionActionRuntimeService {
       tokenIds: [position.tokenId],
       venue: position.venueId,
       includeTop: false,
+      ...(position.assetContext
+        ? {
+            marketAssetBinding: {
+              marketId: position.assetContext.marketId,
+              side:
+                position.assetContext.outcomeIndex === 0
+                  ? ("YES" as const)
+                  : ("NO" as const),
+            },
+          }
+        : {}),
     });
     const exact = rows.filter(
       (row) =>
@@ -274,7 +341,13 @@ export class PositionActionRuntimeService {
       );
     }
     return this.venueDriver(position.venueId).buildMarketContext(
-      exactMarket,
+      position.assetContext
+        ? {
+            ...exactMarket,
+            condition_id: position.assetContext.conditionId,
+            pm_neg_risk: position.assetContext.negRisk,
+          }
+        : exactMarket,
       outcome,
     );
   }
@@ -317,7 +390,8 @@ export class PositionActionRuntimeService {
       executionAddress: ownerPreparation.wallet.walletAddress,
       executionMode: preparation.executionMode,
       evidence: {
-        conditionalTokensAddress: driver.conditionalTokensAddress(),
+        conditionalTokensAddress:
+          plan.positionContract ?? driver.conditionalTokensAddress(),
         expiresAt: new Date(
           now.getTime() + POSITION_ACTION_TTL_MS,
         ).toISOString(),
@@ -462,6 +536,9 @@ export class PositionActionRuntimeService {
         marketId: collected.market.marketId,
         outcome: collected.market.outcome,
         tokenId: collected.position.tokenId,
+        positionContract: collected.position.positionContract ?? "",
+        assetContext: collected.position.assetContext ?? null,
+        positionSize: collected.position.sizeRaw,
       }),
       evidenceSnapshot: jsonObject({
         ...facts.evidence,
@@ -613,6 +690,11 @@ export class PositionActionRuntimeService {
     const notificationInput = buildRedemptionNotification({
       userId: current.userId,
       positionActionId: current.id,
+      positionId: current.positionRef,
+      positionContract:
+        typeof plan?.positionContract === "string"
+          ? plan.positionContract.toLowerCase()
+          : undefined,
       venue: current.venueId,
       amountUsd:
         payoutRaw && /^(0|[1-9][0-9]*)$/.test(payoutRaw)
@@ -694,7 +776,11 @@ export class PositionActionRuntimeService {
         operation = await recoverMissingPositionSubmission(
           this.db,
           operation,
-          this.venueDriver(operation.venueId).conditionalTokensAddress(),
+          operation.venueId === "polymarket" &&
+            isRecord(operation.planSnapshot.plan) &&
+            operation.planSnapshot.plan.executionKind === "protocol_router"
+            ? POLYMARKET_PROTOCOL_CONTRACTS.positionManager
+            : this.venueDriver(operation.venueId).conditionalTokensAddress(),
         );
       }
     }
@@ -755,7 +841,8 @@ export class PositionActionRuntimeService {
       plan,
       transactionHash: txHash,
       operation,
-      conditionalTokensAddress: driver.conditionalTokensAddress(),
+      conditionalTokensAddress:
+        plan.positionContract ?? driver.conditionalTokensAddress(),
     });
     if (!receipt) return publicResult(operation);
     operation = await recordPositionActionReceipt(this.db, {
@@ -826,13 +913,25 @@ export class PositionActionRuntimeService {
       },
     });
     const refreshed = await this.loadPosition(userId, operation.positionRef);
+    // Exact V2 consumption is proven by the receipt, not by total owner balance
+    // becoming zero: other fills can legitimately remain after this redemption.
+    const positionReconciled =
+      plan.executionKind === "protocol_router"
+        ? receipt.evidence.positionConsumptionVerified === true &&
+          refreshed.tokenId === operation.planSnapshot.tokenId &&
+          refreshed.positionContract ===
+            (plan.positionContract?.toLowerCase() ?? "") &&
+          refreshed.assetContext != null &&
+          canonicalJsonEqual(
+            refreshed.assetContext,
+            parsePolymarketAssetContext(plan.assetContext),
+          )
+        : ZERO_POSITION_RE.test(refreshed.sizeRaw);
     operation = await recordPositionActionPostconditions(this.db, {
       userId,
       operationId,
-      status: ZERO_POSITION_RE.test(refreshed.sizeRaw)
-        ? "satisfied"
-        : "unavailable",
-      errorCode: ZERO_POSITION_RE.test(refreshed.sizeRaw)
+      status: positionReconciled ? "satisfied" : "unavailable",
+      errorCode: positionReconciled
         ? null
         : "redemption_position_not_reconciled",
     });

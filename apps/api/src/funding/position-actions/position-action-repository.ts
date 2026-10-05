@@ -4,6 +4,7 @@ import { isRecord } from "../../lib/type-guards.js";
 import type { JsonObject, JsonValue } from "../domain/types.js";
 import { parsePrivyFundingTransactionReference } from "../execution/privy-transaction-reference.js";
 import { canonicalRedemptionIdentity } from "./canonical-redemption-evidence.js";
+import { polymarketV2RedemptionIdentity } from "./polymarket-v2-redemption-evidence.js";
 
 export type PositionActionStatus =
   | "prepared"
@@ -525,6 +526,18 @@ async function assertPositionReferenceAttribution(
     : null;
   const conflict = peers.rows.some((row) => {
     const peer = mapRow(row);
+    const expectedV2 = /^0x[0-9a-f]{64}$/i.test(reference)
+      ? polymarketV2RedemptionIdentity(operation)
+      : null;
+    const peerV2 = polymarketV2RedemptionIdentity(peer);
+    // V2 exact-amount receipts independently attribute each position in a
+    // bundle. Same owner/asset cannot be reused by another operation.
+    if (expectedV2 && peerV2)
+      return (
+        peer.ownerAddress.toLowerCase() ===
+          operation.ownerAddress.toLowerCase() &&
+        peerV2.positionId === expectedV2.positionId
+      );
     const identity = exactIdentity(peer);
     // Shared hashes require exact CTF settlement for both actions. Keep the
     // original exclusive fence for adapter/other unsupported receipt shapes.

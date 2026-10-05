@@ -1,4 +1,5 @@
 import type { Pool } from "@hunch/infra";
+import type { PolymarketAssetContext } from "@hunch/shared";
 
 import type { MarketByTokenRow } from "../../repos/unified-read.js";
 import { fetchEmbeddedEthereumTransactionReceipt } from "../../services/embedded-ethereum.js";
@@ -11,6 +12,7 @@ import type {
 import { sumErc20TransfersTo } from "../execution/evm-erc20-receipt.js";
 import type { StoredPositionAction } from "./position-action-repository.js";
 import { canonicalRedemptionPayout } from "./canonical-redemption-evidence.js";
+import { polymarketV2RedemptionPayout } from "./polymarket-v2-redemption-evidence.js";
 
 export type StoredPositionContext = Readonly<{
   id: string;
@@ -18,6 +20,8 @@ export type StoredPositionContext = Readonly<{
   tokenId: string;
   venueId: string;
   walletAddress: string;
+  positionContract?: string;
+  assetContext?: PolymarketAssetContext | null;
 }>;
 
 export type RedemptionMarketContext = Readonly<{
@@ -156,7 +160,11 @@ export function createEvmPositionActionReceiptObserver(
         ? input.plan.payoutTokenAddress
         : null;
     let actual: bigint | null;
-    if (
+    if (input.plan.executionKind === "protocol_router") {
+      actual = input.operation
+        ? polymarketV2RedemptionPayout(input.operation, receipt)
+        : null;
+    } else if (
       input.operation &&
       input.conditionalTokensAddress &&
       input.plan.targetAddress?.toLowerCase() ===
@@ -184,6 +192,9 @@ export function createEvmPositionActionReceiptObserver(
       evidence: {
         blockNumber: receipt.blockNumber,
         transactionHash: receipt.transactionHash,
+        ...(input.plan.executionKind === "protocol_router"
+          ? { positionConsumptionVerified: actual != null }
+          : {}),
       },
     };
   };

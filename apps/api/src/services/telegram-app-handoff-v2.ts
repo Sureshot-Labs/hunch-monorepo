@@ -1,4 +1,5 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import { parsePolymarketAssetContext } from "@hunch/shared";
 
 import type {
   FundingDiscoveryRequest,
@@ -734,6 +735,20 @@ function parseV2Plan(snapshot: JsonObject): TelegramAppHandoffV2Plan {
   }
   const trade = snapshot.trade;
   const action = trade.action;
+  const assetContext = parsePolymarketAssetContext(trade.assetContext);
+  if (
+    trade.assetContext != null &&
+    (!assetContext ||
+      trade.venue !== "polymarket" ||
+      assetContext.assetId !== trade.outcomeTokenId ||
+      assetContext.marketId !== trade.marketId ||
+      assetContext.outcomeIndex !==
+        (trade.side === "YES" ? 0 : trade.side === "NO" ? 1 : -1))
+  )
+    throw new TelegramAppHandoffV2Error(
+      "plan_invalid",
+      "sealed Polymarket asset context is malformed",
+    );
   if (
     (action !== "buy" && action !== "sell") ||
     !isTelegramAppHandoffV2TradeVenue(trade.venue) ||

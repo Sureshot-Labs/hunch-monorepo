@@ -1,4 +1,10 @@
 import type { Pool } from "@hunch/infra";
+import { POLYMARKET_PROTOCOL_CONTRACTS } from "@hunch/shared";
+import { POLYMARKET_V2_ROUTER_ABI } from "../../services/polymarket-v2-redemption-plan.js";
+import {
+  polymarketV2RedemptionIdentity,
+  POLYMARKET_V2_REDEMPTION_TOPIC,
+} from "./polymarket-v2-redemption-evidence.js";
 import { env } from "../../env.js";
 import { isRecord } from "../../lib/type-guards.js";
 import {
@@ -58,7 +64,8 @@ export async function discoverCanonicalRedemption(
   ctfAddress: string,
   rpc: RedemptionRecoveryRpc,
 ): Promise<string | null> {
-  if (!identity(operation, ctfAddress)) return null;
+  const v2Identity = polymarketV2RedemptionIdentity(operation);
+  if (!v2Identity && !identity(operation, ctfAddress)) return null;
   const deadline = Date.now() + 18_000;
   const budgeted =
     <T extends unknown[], R>(read: (...args: T) => Promise<R>) =>
@@ -86,14 +93,20 @@ export async function discoverCanonicalRedemption(
     const logs = await rpc.logs(
       cursor,
       cursor + 199n > end ? end : cursor + 199n,
-      ctfAddress,
+      v2Identity ? POLYMARKET_PROTOCOL_CONTRACTS.router : ctfAddress,
     );
     for (const log of logs) {
       try {
-        const parsed = CTF.parseLog(log);
+        const parsed = (v2Identity ? POLYMARKET_V2_ROUTER_ABI : CTF).parseLog(
+          log,
+        );
         if (
-          parsed?.name === "PayoutRedemption" &&
-          eq(parsed.args.redeemer, operation.ownerAddress)
+          v2Identity
+            ? parsed?.name === "RouterPositionRedeemed" &&
+              eq(parsed.args.initiator, operation.ownerAddress) &&
+              parsed.args.positionId === v2Identity.positionId
+            : parsed?.name === "PayoutRedemption" &&
+              eq(parsed.args.redeemer, operation.ownerAddress)
         )
           candidates.add(log.transactionHash);
       } catch {
@@ -166,7 +179,11 @@ export async function recoverMissingPositionSubmission(
         fromBlock,
         toBlock,
         contractAddress,
-        eventTopics: [PAYOUT_TOPIC],
+        eventTopics: [
+          polymarketV2RedemptionIdentity(operation)
+            ? POLYMARKET_V2_REDEMPTION_TOPIC
+            : PAYOUT_TOPIC,
+        ],
       }),
     receipt: (transactionHash) =>
       fetchEvmTransactionReceipt({ ...network, transactionHash }),

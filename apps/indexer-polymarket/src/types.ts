@@ -46,6 +46,9 @@ export const GammaMarket = z
 
     // This is the troublemaker: sometimes a JSON string
     clobTokenIds: strArrayOrJSONString.optional().default([]),
+    version: z.unknown().optional(),
+    positionIds: z.unknown().optional(),
+    resolutionStatus: z.unknown().optional(),
 
     // We don't care about the rest right now; keep loose
   })
@@ -98,7 +101,13 @@ export const PolymarketMarket = z
     image: z.string().optional().nullable(),
     icon: z.string().optional().nullable(),
     description: z.string().optional().nullable(),
-    outcomes: z.string().optional().nullable(), // JSON string
+    outcomes: z
+      .union([
+        z.string(),
+        z.array(z.string()).transform((outcomes) => JSON.stringify(outcomes)),
+      ])
+      .optional()
+      .nullable(),
     outcomePrices: z.string().optional().nullable(), // JSON string
     volume: num.optional().nullable(), // Can be number or string
     active: z.boolean().optional(),
@@ -128,6 +137,10 @@ export const PolymarketMarket = z
     volume1mo: num.optional().nullable(),
     volume1yr: num.optional().nullable(),
     clobTokenIds: strArrayOrJSONString.optional().default([]), // Can be array or JSON string
+    // Unknown generations remain indexable diagnostics, never legacy trades.
+    version: z.unknown().optional(),
+    positionIds: z.unknown().optional(),
+    resolutionStatus: z.unknown().optional(),
     umaBond: z.string().optional().nullable(),
     umaReward: z.string().optional().nullable(),
     volume24hrClob: num.optional().nullable(),

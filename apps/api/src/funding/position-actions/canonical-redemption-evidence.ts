@@ -3,6 +3,7 @@ import { isRecord } from "../../lib/type-guards.js";
 import { sumErc20TransfersTo } from "../execution/evm-erc20-receipt.js";
 import type { EvmRpcTransactionReceipt } from "../../services/polygon-rpc.js";
 import type { StoredPositionAction } from "./position-action-repository.js";
+import { polymarketV2RedemptionPayout } from "./polymarket-v2-redemption-evidence.js";
 
 // Standard CTF ABI, also verified against the historical finalized Base receipt.
 export const CANONICAL_CTF_ABI = new ethers.Interface([
@@ -174,5 +175,10 @@ export function matchesCanonicalRedemption(
   ctfAddress: string,
   receipt: Pick<EvmRpcTransactionReceipt, "succeeded" | "logs">,
 ): boolean {
+  if (
+    isRecord(operation.planSnapshot.plan) &&
+    operation.planSnapshot.plan.executionKind === "protocol_router"
+  )
+    return polymarketV2RedemptionPayout(operation, receipt) !== null;
   return canonicalRedemptionPayout(operation, ctfAddress, receipt) !== null;
 }

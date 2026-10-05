@@ -1,6 +1,14 @@
 import type { Pool, PoolClient } from "@hunch/infra";
 import { tx } from "@hunch/infra";
 import {
+  parsePolymarketAssetContext,
+  type PolymarketAssetContext,
+} from "@hunch/shared";
+import {
+  positionAssetKey,
+  positionStorageContract,
+} from "../lib/position-asset-context.js";
+import {
   EFFECTIVE_PNL_SQL,
   POSITION_MARKET_JOIN_SQL,
   RESOLVED_MARKET_SQL,
@@ -21,6 +29,8 @@ type PositionRow = {
   wallet_address: string | null;
   venue: string;
   token_id: string;
+  position_contract?: string;
+  asset_context?: unknown;
   side: string;
   size: string;
   average_price: string | null;
@@ -86,6 +96,7 @@ export type PositionMetricsInput = {
   venue: Position["venue"];
   metrics: Array<{
     tokenId: string;
+    positionContract?: string;
     averagePrice: number | null;
     realizedPnl: number;
     unrealizedPnl: number;
@@ -195,6 +206,7 @@ const POSITION_WALLET_CASE_RANK_SQL = `
       p.venue,
       p.position_scope,
       p.token_id,
+      p.position_contract,
       case
         when p.wallet_address ~* '^0x[0-9a-f]{40}$' then lower(p.wallet_address)
         else coalesce(p.wallet_address, '')
@@ -348,6 +360,8 @@ function mapPositionRow(row: PositionRow): Position {
     walletAddress: row.wallet_address,
     venue: row.venue as Position["venue"],
     tokenId: row.token_id,
+    positionContract: row.position_contract || undefined,
+    assetContext: parsePolymarketAssetContext(row.asset_context) ?? undefined,
     side: row.side as Position["side"],
     size,
     sizeRaw: row.size,
@@ -420,7 +434,21 @@ function sortTokenIds(tokenIds: string[]): string[] {
 function sortTokenBalances(
   balances: WalletTokenBalance[],
 ): WalletTokenBalance[] {
-  return [...balances].sort((a, b) => a.tokenId.localeCompare(b.tokenId));
+  return [...balances].sort((a, b) =>
+    positionAssetKey(
+      a.tokenId,
+      a.assetContext?.assetKind === "position_manager"
+        ? a.assetContext.positionContract
+        : "",
+    ).localeCompare(
+      positionAssetKey(
+        b.tokenId,
+        b.assetContext?.assetKind === "position_manager"
+          ? b.assetContext.positionContract
+          : "",
+      ),
+    ),
+  );
 }
 
 function sortPositionMetrics(
@@ -428,7 +456,10 @@ function sortPositionMetrics(
 ): PositionMetricsInput["metrics"] {
   const byToken = new Map<string, PositionMetricsInput["metrics"][number]>();
   for (const metric of metrics) {
-    byToken.set(metric.tokenId, metric);
+    byToken.set(
+      positionAssetKey(metric.tokenId, metric.positionContract),
+      metric,
+    );
   }
   return [...byToken.values()].sort((a, b) =>
     a.tokenId.localeCompare(b.tokenId),
@@ -661,6 +692,8 @@ export async function fetchPositionsForUserWallet(
         p.wallet_address,
         p.venue,
         p.token_id,
+        p.position_contract,
+        p.asset_context,
         p.side,
         p.size,
         p.average_price,
@@ -774,6 +807,8 @@ export async function fetchPositionsForUserWalletByTokenIds(
         p.wallet_address,
         p.venue,
         p.token_id,
+        p.position_contract,
+        p.asset_context,
         p.side,
         p.size,
         p.average_price,
@@ -912,6 +947,7 @@ export type WalletTokenBalance = {
   tokenId: string;
   size: string;
   averagePrice?: string | null;
+  assetContext?: PolymarketAssetContext;
 };
 
 type PositionScope = "own" | "followed";
@@ -977,6 +1013,12 @@ async function upsertLongPositionsInTx(
   const tokenIds = inputs.positions.map((p) => p.tokenId);
   const sizes = inputs.positions.map((p) => p.size);
   const averagePrices = inputs.positions.map((p) => p.averagePrice ?? null);
+  const positionContracts = inputs.positions.map((p) =>
+    positionStorageContract({ venue: inputs.venue, ...p }),
+  );
+  const assetContexts = inputs.positions.map((p) =>
+    p.assetContext ? JSON.stringify(p.assetContext) : null,
+  );
   const protectRecentFlatsSec =
     inputs.protectRecentFlatsSec != null &&
     Number.isFinite(inputs.protectRecentFlatsSec) &&
@@ -993,6 +1035,8 @@ async function upsertLongPositionsInTx(
         venue,
         position_scope,
         token_id,
+        position_contract,
+        asset_context,
         side,
         size,
         average_price,
@@ -1009,6 +1053,8 @@ async function upsertLongPositionsInTx(
         $3,
         $4,
         v.token_id,
+        v.position_contract,
+        v.asset_context::jsonb,
         'LONG',
         v.size::numeric,
         v.average_price,
@@ -1018,14 +1064,15 @@ async function upsertLongPositionsInTx(
         now(),
         now()
       from (
-        select token_id, size, average_price
-        from unnest($5::text[], $6::text[], $7::numeric[]) as v(token_id, size, average_price)
-        order by token_id
+        select token_id, size, average_price, position_contract, asset_context
+        from unnest($5::text[], $6::text[], $7::numeric[], $9::text[], $10::text[]) as v(token_id, size, average_price, position_contract, asset_context)
+        order by token_id, position_contract
       ) as v
       on conflict on constraint positions_user_id_wallet_address_venue_token_id_key
       do update set
         side = 'LONG',
         size = excluded.size,
+        asset_context = coalesce(positions.asset_context, excluded.asset_context),
         average_price = coalesce(excluded.average_price, positions.average_price),
         position_scope = case
           when positions.position_scope = 'own' or excluded.position_scope = 'own'
@@ -1065,6 +1112,8 @@ async function upsertLongPositionsInTx(
       sizes,
       averagePrices,
       protectRecentFlatsSec,
+      positionContracts,
+      assetContexts,
     ],
   );
 
@@ -1080,6 +1129,7 @@ async function markMissingPositionsFlatInTx(
     positionScope: PositionScope;
     heldTokenIds: string[];
     observedTokenIds?: readonly string[];
+    positionContract?: string;
     tokenIdLike?: string;
     flattenGraceSec?: number;
   },
@@ -1091,6 +1141,9 @@ async function markMissingPositionsFlatInTx(
   let whereClause = `where p.user_id = $1 and ${walletClause} and p.venue = $3`;
   const params: PgParams = [inputs.userId, walletAddress, inputs.venue];
   let paramCount = 3;
+  params.push(inputs.positionContract ?? "");
+  paramCount += 1;
+  whereClause += ` and p.position_contract = $${paramCount}`;
 
   paramCount += 1;
   whereClause += ` and p.position_scope = $${paramCount}`;
@@ -1183,6 +1236,8 @@ export async function syncWalletPositionsFromTokenBalances(
     /** Partial reads may upsert known balances, but cannot prove missing holdings. */
     flattenMissing?: boolean;
     flattenMissingTokenIds?: readonly string[];
+    /** Exact ledger namespace whose complete RPC read permits flattening. */
+    positionContract?: string;
   },
 ): Promise<SyncWalletPositionsResult> {
   const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
@@ -1197,10 +1252,9 @@ export async function syncWalletPositionsFromTokenBalances(
 
   const { rows: knownRows } = await pool.query<{ token_id: string }>(
     `
-      select token_id
-      from unified_tokens
-      where venue = $1
-        and token_id = any($2::text[])
+      select token_id from unified_tokens where venue = $1 and token_id = any($2::text[])
+      union
+      select asset_id as token_id from polymarket_asset_bindings where $1 = 'polymarket' and asset_id = any($2::text[])
     `,
     [inputs.venue, heldTokenIds],
   );
@@ -1233,6 +1287,7 @@ export async function syncWalletPositionsFromTokenBalances(
               positionScope,
               heldTokenIds,
               observedTokenIds: inputs.flattenMissingTokenIds,
+              positionContract: inputs.positionContract,
               tokenIdLike: inputs.tokenIdLike,
               flattenGraceSec: inputs.flattenGraceSec,
             });
@@ -1279,6 +1334,9 @@ export async function updatePositionMetricsInTx(
   const averagePrices = metrics.map((metric) => metric.averagePrice);
   const realizedPnls = metrics.map((metric) => metric.realizedPnl);
   const unrealizedPnls = metrics.map((metric) => metric.unrealizedPnl);
+  const positionContracts = metrics.map(
+    (metric) => metric.positionContract ?? "",
+  );
 
   await client.query(
     `
@@ -1287,13 +1345,15 @@ export async function updatePositionMetricsInTx(
           token_id,
           average_price,
           realized_pnl,
-          unrealized_pnl
+          unrealized_pnl,
+          position_contract
         from unnest(
           $1::text[],
           $2::numeric[],
           $3::numeric[],
-          $4::numeric[]
-        ) as v(token_id, average_price, realized_pnl, unrealized_pnl)
+          $4::numeric[],
+          $8::text[]
+        ) as v(token_id, average_price, realized_pnl, unrealized_pnl, position_contract)
         order by token_id
       ),
       target as (
@@ -1306,6 +1366,7 @@ export async function updatePositionMetricsInTx(
         from positions p
         join metric_values v
           on v.token_id = p.token_id
+         and v.position_contract = p.position_contract
         ${POSITION_MARKET_JOIN_SQL}
         where p.user_id = $5
           and (p.wallet_address is null or p.wallet_address = $6)
@@ -1343,6 +1404,7 @@ export async function updatePositionMetricsInTx(
       inputs.userId,
       walletAddress,
       inputs.venue,
+      positionContracts,
     ],
   );
 }

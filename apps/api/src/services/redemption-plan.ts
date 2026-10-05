@@ -1,4 +1,5 @@
 import { SafeEvmReadError } from "./safe-evm-read.js";
+import type { PolymarketAssetContext } from "@hunch/shared";
 
 export type RedemptionPlanReason =
   | "ready"
@@ -26,7 +27,11 @@ export type RedemptionPlan = {
   payoutTokenAddress?: string | null;
   operatorApprovalAddress?: string | null;
   payoutAmountRaw?: string | null;
-  executionKind?: "external_adapter" | null;
+  executionKind?: "external_adapter" | "protocol_router" | null;
+  assetContext?: PolymarketAssetContext;
+  positionContract?: string;
+  redeemAmountRaw?: string;
+  moduleAddress?: string;
   yesBalanceRaw?: string | null;
   noBalanceRaw?: string | null;
   expectedPayoutRaw?: string | null;
@@ -75,7 +80,11 @@ export function buildReadyRedemptionPlan(inputs: {
   payoutTokenAddress?: string | null;
   operatorApprovalAddress?: string | null;
   payoutAmountRaw?: string | null;
-  executionKind?: "external_adapter" | null;
+  executionKind?: "external_adapter" | "protocol_router" | null;
+  assetContext?: PolymarketAssetContext;
+  positionContract?: string;
+  redeemAmountRaw?: string;
+  moduleAddress?: string;
   yesBalanceRaw?: string | null;
   noBalanceRaw?: string | null;
   expectedPayoutRaw?: string | null;
@@ -92,6 +101,14 @@ export function buildReadyRedemptionPlan(inputs: {
     reasonMessage: null,
     targetAddress: inputs.targetAddress,
     data: inputs.data,
+    ...(inputs.assetContext ? { assetContext: inputs.assetContext } : {}),
+    ...(inputs.positionContract
+      ? { positionContract: inputs.positionContract }
+      : {}),
+    ...(inputs.redeemAmountRaw
+      ? { redeemAmountRaw: inputs.redeemAmountRaw }
+      : {}),
+    ...(inputs.moduleAddress ? { moduleAddress: inputs.moduleAddress } : {}),
     ...(inputs.collateralTokenAddress !== undefined
       ? { collateralTokenAddress: inputs.collateralTokenAddress }
       : {}),

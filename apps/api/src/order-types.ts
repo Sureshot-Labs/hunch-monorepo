@@ -1,4 +1,5 @@
 // Order Management Types and Interfaces
+import type { PolymarketAssetContext } from "@hunch/shared";
 // This file defines the core types and interfaces for order management
 
 export interface Order {
@@ -49,6 +50,8 @@ export interface Position {
   walletAddress: string | null;
   venue: "polymarket" | "kalshi" | "limitless";
   tokenId: string;
+  positionContract?: string;
+  assetContext?: PolymarketAssetContext;
 
   side: "LONG" | "SHORT" | "FLAT";
   size: number;

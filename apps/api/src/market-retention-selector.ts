@@ -167,6 +167,7 @@ function protectedRefsSql(
     includeTelegramFundingBuyReturns?: boolean;
     includeTelegramFundingSessions?: boolean;
     includeTelegramTradeIntents?: boolean;
+    includePolymarketAssetBindings?: boolean;
   } = {},
 ): string {
   const fundingOperationsRef = options.includeFundingOperations
@@ -409,6 +410,7 @@ function candidateCte(
     includePositionActionOperations?: boolean;
     includeTelegramFundingSessions?: boolean;
     includeTelegramTradeIntents?: boolean;
+    includePolymarketAssetBindings?: boolean;
   } = {},
 ): string {
   return `
@@ -466,6 +468,15 @@ function candidateCte(
     select distinct event_id from candidate_pool
   ),
   candidate_tokens as materialized (
+    ${
+      options.includePolymarketAssetBindings
+        ? `
+    select binding_row.market_id, binding_row.asset_id as token_id
+    from candidate_pool candidate_row
+    join polymarket_asset_bindings binding_row on binding_row.market_id = candidate_row.market_id
+    union`
+        : ""
+    }
     select distinct c.market_id, umt.token_id
     from candidate_pool c
     join unified_market_tokens umt on umt.market_id = c.market_id
@@ -641,6 +652,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
   includeTelegramFundingSessions: boolean;
   includeTelegramFundingBuyReturns: boolean;
   includeTelegramTradeIntents: boolean;
+  includePolymarketAssetBindings: boolean;
 }> {
   const [
     includeMatchingHistory,
@@ -651,6 +663,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     includeTelegramFundingSessions,
     includeTelegramFundingBuyReturns,
     includeTelegramTradeIntents,
+    includePolymarketAssetBindings,
   ] = await Promise.all([
     relationExists(client, "public.market_contract_versions"),
     relationExists(client, "public.funding_operations"),
@@ -660,6 +673,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     relationExists(client, "public.telegram_funding_sessions"),
     relationExists(client, "public.telegram_funding_buy_return_revisions"),
     relationExists(client, "public.telegram_trade_intents"),
+    relationExists(client, "public.polymarket_asset_bindings"),
   ]);
   return {
     includeMatchingHistory,
@@ -670,6 +684,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     includeTelegramFundingSessions,
     includeTelegramFundingBuyReturns,
     includeTelegramTradeIntents,
+    includePolymarketAssetBindings,
   };
 }
 
@@ -690,6 +705,15 @@ async function queryBatchSummary(
     `
       ${candidateCte(options)},
       derived_refs as materialized (
+        ${
+          options.includePolymarketAssetBindings
+            ? `
+        select 'polymarket_asset_bindings' as label, count(distinct binding_row.market_id)::text as markets, count(*)::text as rows
+        from polymarket_asset_bindings binding_row
+        join candidate_pool candidate_row on candidate_row.market_id = binding_row.market_id
+        union all`
+            : ""
+        }
         ${options.includeMatchingHistory ? `${matchingDerivedReferences("candidate_pool")} union all` : ""}
         select 'unified_market_tokens' as label, count(distinct x.market_id)::text as markets, count(*)::text as rows
         from unified_market_tokens x
@@ -1014,6 +1038,15 @@ async function materializeDeletionSet(
   await client.query(
     `
       create temp table tmp_market_retention_removable_tokens on commit drop as
+      ${
+        options.includePolymarketAssetBindings
+          ? `
+      select binding_row.market_id, binding_row.asset_id as token_id
+      from tmp_market_retention_removable_markets removable_row
+      join polymarket_asset_bindings binding_row on binding_row.market_id = removable_row.market_id
+      union`
+          : ""
+      }
       select distinct r.market_id, umt.token_id
       from tmp_market_retention_removable_markets r
       join unified_market_tokens umt on umt.market_id = r.market_id
@@ -1181,6 +1214,19 @@ async function runMarketDeletes(client: PoolClient): Promise<DeleteCountRow[]> {
       `,
     ),
   );
+  if (await relationExists(client, "public.polymarket_asset_bindings")) {
+    counts.push(
+      await deleteAndCount(
+        client,
+        "polymarket_asset_bindings",
+        `
+      delete from polymarket_asset_bindings binding_row
+      using tmp_market_retention_removable_markets removable_row
+      where binding_row.market_id = removable_row.market_id
+    `,
+      ),
+    );
+  }
   if (includeTelegramTradeIntents) {
     counts.push(
       await deleteAndCount(
@@ -1347,6 +1393,15 @@ async function queryPostDeleteValidation(
       select 'remaining_unified_markets' as label, count(*)::text as rows
       from unified_markets x
       join tmp_market_retention_removable_markets r on r.market_id = x.id
+      ${
+        options.includePolymarketAssetBindings
+          ? `
+      union all
+      select 'remaining_polymarket_asset_bindings' as label, count(*)::text as rows
+      from polymarket_asset_bindings binding_row
+      join tmp_market_retention_removable_markets removable_row on removable_row.market_id = binding_row.market_id`
+          : ""
+      }
       union all
       select 'remaining_unified_market_tokens' as label, count(*)::text as rows
       from unified_market_tokens x

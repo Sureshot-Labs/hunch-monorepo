@@ -25,6 +25,7 @@ export function validateCombinedPolymarketRelayPolicy(
   input: Readonly<{
     builderCode: string;
     exchangeAddresses: readonly string[];
+    requiredExchangeAddresses?: readonly string[];
     fundingRouterAddress: string;
     maxBuyUsd: number;
     policy: PrivyPolicyMetadata;
@@ -38,6 +39,7 @@ export function validateCombinedPolymarketRelayPolicy(
   const polymarketValidation = validatePolymarketBotPolicyProfile({
     builderCode: input.builderCode,
     exchangeAddresses: input.exchangeAddresses,
+    requiredExchangeAddresses: input.requiredExchangeAddresses,
     fundingRouterAddress: input.fundingRouterAddress,
     maxBuyUsd: input.maxBuyUsd,
     policy: {

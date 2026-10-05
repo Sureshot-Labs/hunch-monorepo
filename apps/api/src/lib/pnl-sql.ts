@@ -1,9 +1,20 @@
+const POSITION_ASSET_BINDING_JOIN_SQL = `
+  left join polymarket_asset_bindings position_binding
+    on p.venue = 'polymarket'
+   and position_binding.chain_id = 137
+   and position_binding.asset_id = p.token_id
+   and position_binding.position_contract = coalesce(nullif(p.position_contract, ''), '0x4d97dcd97ec945f40cf65f87097ace5ea0476045')
+`;
+
 const POSITION_MARKET_CONTEXT_SQL = `
   left join unified_markets m
     on m.id = umt.market_id
   left join unified_market_tokens market_token_yes
     on market_token_yes.market_id = m.id
    and market_token_yes.outcome_side = 'YES'
+  left join unified_market_tokens market_token_selected
+    on market_token_selected.market_id = m.id
+   and market_token_selected.outcome_side = upper(umt.outcome_side)
   left join lateral (
     select
       case
@@ -20,15 +31,20 @@ const POSITION_MARKET_CONTEXT_SQL = `
     limit 1
   ) yes_top on true
   left join lateral (
-    select best_bid, best_ask
+    select best_bid, best_ask, mid
     from unified_token_top_latest
-    where token_id = p.token_id
+    where token_id = case
+      when p.venue = 'polymarket' then coalesce(m.clob_token_ids::jsonb->>(case upper(umt.outcome_side) when 'YES' then 0 when 'NO' then 1 end), market_token_selected.token_id,
+        case upper(umt.outcome_side) when 'YES' then m.token_yes when 'NO' then m.token_no end)
+      else p.token_id
+    end
       and ts > now() - interval '7 days'
     limit 1
   ) selected_top on true
 `;
 
 export const POSITION_MARKET_JOIN_SQL = `
+  ${POSITION_ASSET_BINDING_JOIN_SQL}
   left join lateral (
     select
       token_market.market_id,
@@ -124,7 +140,7 @@ export const POSITION_MARKET_JOIN_SQL = `
       join unified_markets m_no
         on m_no.token_no = token_lookup.token_id
     ) token_market
-    where token_market.outcome_side in ('YES', 'NO')
+    where position_binding.market_id is null and token_market.outcome_side in ('YES', 'NO')
     order by
       token_market.lookup_rank asc,
       token_market.venue_rank asc,
@@ -132,11 +148,16 @@ export const POSITION_MARKET_JOIN_SQL = `
       token_market.source_rank asc,
       token_market.market_id asc
     limit 1
-  ) umt on true
+  ) projected_market_token on true
+  cross join lateral (
+    select coalesce(position_binding.market_id, projected_market_token.market_id) as market_id,
+      coalesce(case position_binding.outcome_index when 0 then 'YES' when 1 then 'NO' end, projected_market_token.outcome_side) as outcome_side
+  ) umt
   ${POSITION_MARKET_CONTEXT_SQL}
 `;
 
 export const CANONICAL_POSITION_MARKET_JOIN_SQL = `
+  ${POSITION_ASSET_BINDING_JOIN_SQL}
   left join lateral (
     select
       umt_candidate.market_id,
@@ -154,7 +175,7 @@ export const CANONICAL_POSITION_MARKET_JOIN_SQL = `
     ) token_lookup
     join unified_market_tokens umt_candidate
       on umt_candidate.token_id = token_lookup.token_id
-    where upper(umt_candidate.outcome_side) in ('YES', 'NO')
+    where position_binding.market_id is null and upper(umt_candidate.outcome_side) in ('YES', 'NO')
     order by
       token_lookup.lookup_rank asc,
       case when umt_candidate.venue = p.venue then 0 else 1 end asc,
@@ -218,7 +239,7 @@ export const CANONICAL_POSITION_MARKET_JOIN_SQL = `
     -- Canonical mappings are the hot path. PostgreSQL turns this correlated
     -- predicate into a one-time filter, so legacy indexes are touched only for
     -- historical positions that have no unified_market_tokens row.
-    where canonical_market_token.market_id is null
+    where position_binding.market_id is null and canonical_market_token.market_id is null
       and legacy_candidate.outcome_side in ('YES', 'NO')
     order by
       legacy_candidate.lookup_rank asc,
@@ -231,10 +252,12 @@ export const CANONICAL_POSITION_MARKET_JOIN_SQL = `
   cross join lateral (
     select
       coalesce(
+        position_binding.market_id,
         canonical_market_token.market_id,
         legacy_market_token.market_id
       ) as market_id,
       coalesce(
+        case position_binding.outcome_index when 0 then 'YES' when 1 then 'NO' end,
         canonical_market_token.outcome_side,
         legacy_market_token.outcome_side
       ) as outcome_side

@@ -39,6 +39,10 @@ import {
 } from "./polymarket-automation-policy.js";
 import { validateCombinedPolymarketRelayPolicy } from "../funding/execution/combined-privy-policy.js";
 import { loadRelayEvmExecutionConfiguration } from "../funding/execution/delegated-funding-config.js";
+import {
+  POLYMARKET_PROTOCOL_CONTRACTS,
+  type PolymarketProtocolVersion,
+} from "@hunch/shared";
 
 export {
   validatePolymarketBotPolicy,
@@ -95,7 +99,8 @@ export type PrivySignerInspectorDependencies = {
 export type PrivyServerSignerConfiguration = {
   authorizationId: string;
   authorizationKey: string;
-  exchangeAddresses: [string, string];
+  exchangeAddresses: readonly string[];
+  requiredExchangeAddresses?: readonly string[];
   policyId: string;
   policyFingerprint: string;
   policyMaxBuyUsd: number;
@@ -159,14 +164,21 @@ let policyFundingCapabilityCache: {
   value: Promise<PolymarketFundingRouterPolicyCapability>;
 } | null = null;
 
-export async function resolvePolymarketBotPolicyFundingCapability(): Promise<PolymarketFundingRouterPolicyCapability> {
+export async function resolvePolymarketBotPolicyFundingCapability(
+  protocolVersion: PolymarketProtocolVersion = "v1",
+): Promise<PolymarketFundingRouterPolicyCapability> {
   const policyId = env.privyPolymarketBotBuySellPolicyId.trim();
   const fundingRouterAddress = env.polymarketFundingRouterAddress.trim();
   const policyMaxBuyUsd = env.privyPolymarketBotBuyPolicyMaxUsd;
   const exchangeAddresses = [
     env.polymarketExchangeAddress,
     env.polymarketNegRiskExchangeAddress,
+    POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3,
   ] as const;
+  const requiredExchangeAddresses =
+    protocolVersion === "v2"
+      ? [POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3]
+      : [env.polymarketExchangeAddress, env.polymarketNegRiskExchangeAddress];
   if (!policyId || !fundingRouterAddress || policyMaxBuyUsd <= 0) {
     throw new Error("Polymarket bot policy configuration is incomplete.");
   }
@@ -174,6 +186,7 @@ export async function resolvePolymarketBotPolicyFundingCapability(): Promise<Pol
     policyId,
     fundingRouterAddress.toLowerCase(),
     String(policyMaxBuyUsd),
+    protocolVersion,
     ...exchangeAddresses.map((address) => address.toLowerCase()),
   ].join("|");
   const now = Date.now();
@@ -190,6 +203,7 @@ export async function resolvePolymarketBotPolicyFundingCapability(): Promise<Pol
     const validation = validateCombinedPolymarketRelayPolicy({
       builderCode: env.polymarketBuilderCode,
       exchangeAddresses,
+      requiredExchangeAddresses,
       fundingRouterAddress,
       maxBuyUsd: policyMaxBuyUsd,
       policy,
@@ -247,6 +261,7 @@ function signerStatus(
 
 export async function inspectServerEvmWalletAuthorization(input: {
   action?: TradeSide;
+  protocolVersion?: PolymarketProtocolVersion;
   requiredActions?: Array<TradeSide | "REDEEM">;
   authorizationEnabled: boolean;
   configuration?: PrivyServerSignerConfiguration;
@@ -264,7 +279,12 @@ export async function inspectServerEvmWalletAuthorization(input: {
     exchangeAddresses: [
       env.polymarketExchangeAddress,
       env.polymarketNegRiskExchangeAddress,
+      POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3,
     ],
+    requiredExchangeAddresses:
+      input.protocolVersion === "v2"
+        ? [POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3]
+        : [env.polymarketExchangeAddress, env.polymarketNegRiskExchangeAddress],
     policyId: env.privyPolymarketBotBuySellPolicyId,
     policyFingerprint: env.privyPolymarketBotBuySellPolicyFingerprint,
     policyMaxBuyUsd: env.privyPolymarketBotBuyPolicyMaxUsd,
@@ -275,6 +295,10 @@ export async function inspectServerEvmWalletAuthorization(input: {
     relayMaxSourceRaw: relayConfiguration?.maxSourceRaw,
   };
   const signerId = configuration.authorizationId.trim();
+  const requiredExchangeAddresses =
+    input.protocolVersion === "v2"
+      ? [POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3]
+      : configuration.requiredExchangeAddresses;
   const combinedPolicyId = configuration.policyId.trim();
   const combinedPolicyFingerprint = configuration.policyFingerprint.trim();
   const legacyBuyPolicyId = configuration.legacyBuyPolicyId?.trim() ?? "";
@@ -520,6 +544,7 @@ export async function inspectServerEvmWalletAuthorization(input: {
         ? validateCombinedPolymarketRelayPolicy({
             builderCode: configuration.builderCode?.trim() ?? "",
             exchangeAddresses: configuration.exchangeAddresses,
+            requiredExchangeAddresses,
             fundingRouterAddress: configuration.fundingRouterAddress,
             maxBuyUsd: policyMaxBuyUsd,
             policy,
@@ -529,6 +554,7 @@ export async function inspectServerEvmWalletAuthorization(input: {
         : validatePolymarketBotPolicyProfile({
             builderCode: configuration.builderCode?.trim() ?? "",
             exchangeAddresses: configuration.exchangeAddresses,
+            requiredExchangeAddresses,
             fundingRouterAddress: configuration.fundingRouterAddress,
             maxBuyUsd: policyMaxBuyUsd,
             policy,
@@ -670,6 +696,7 @@ export async function assertServerEvmWalletOwnership(input: {
 
 export async function assertServerEvmWalletAuthorization(input: {
   action?: TradeSide;
+  protocolVersion?: PolymarketProtocolVersion;
   requiredActions?: Array<TradeSide | "REDEEM">;
   privyUserId: string | null | undefined;
   signer: string;
@@ -685,6 +712,7 @@ export async function assertServerEvmWalletAuthorization(input: {
   }
   const status = await inspectServerEvmWalletAuthorization({
     action: input.action,
+    protocolVersion: input.protocolVersion,
     requiredActions: input.requiredActions,
     authorizationEnabled: true,
     privyUserId: input.privyUserId,
@@ -718,6 +746,7 @@ export async function signEvmTypedData(input: {
     exchangeAddresses: [
       env.polymarketExchangeAddress,
       env.polymarketNegRiskExchangeAddress,
+      POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3,
     ],
     maxBuyUsd: env.privyPolymarketBotBuyPolicyMaxUsd,
     signer: input.signer,

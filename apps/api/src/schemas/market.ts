@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { zCsvString, zRequiredString, zVenue } from "./common.js";
+import { polymarketAssetContextSchema } from "./polymarket-private.js";
 
 export const marketParamsSchema = z.object({
   marketId: zRequiredString("marketId parameter is required"),
@@ -44,11 +45,32 @@ const zOptionalCsv = z.union([z.string(), z.undefined()]).transform((value) => {
   return list.length ? list : undefined;
 });
 
-export const marketsByTokenQuerySchema = z.object({
-  tokenIds: zCsvString("tokenIds is required"),
-  venue: zVenueOptional,
-  includeTop: zOptionalBool.optional(),
-});
+export const marketsByTokenQuerySchema = z
+  .object({
+    assetContext: z
+      .string()
+      .max(8192)
+      .transform((value) => {
+        try {
+          return JSON.parse(value) as unknown;
+        } catch {
+          return null;
+        }
+      })
+      .pipe(polymarketAssetContextSchema)
+      .optional(),
+    tokenIds: zCsvString("tokenIds is required"),
+    venue: zVenueOptional,
+    includeTop: zOptionalBool.optional(),
+  })
+  .refine(
+    (value) =>
+      !value.assetContext ||
+      ((value.venue == null || value.venue === "polymarket") &&
+        value.tokenIds.length === 1 &&
+        value.tokenIds[0] === value.assetContext.assetId),
+    "Asset context requires its exact single Polymarket token",
+  );
 
 export const marketSimilarQuerySchema = z.object({
   limit: zOptionalInt.optional(),

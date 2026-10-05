@@ -13,7 +13,8 @@ import {
   fetchPositionsForUserWalletByTokenIds,
   setPositionHidden,
 } from "../repos/positions-repo.js";
-import { fetchMarketsByTokenIds as fetchMarketRowsByTokenIds } from "../repos/unified-read.js";
+import { fetchPositionMarketRows } from "../services/position-market-rows.js";
+import { positionAssetKey } from "../lib/position-asset-context.js";
 import { mapMarketsByTokenRows } from "../services/markets-by-token-response.js";
 import {
   prefetchPolymarketOwnerBalancesForWallets,
@@ -391,11 +392,14 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           );
           if (tokenIds.length) {
             try {
-              const marketRows = await fetchMarketRowsByTokenIds(pool, {
-                tokenIds,
-                venue: responseVenue,
-                includeTop: true,
-              });
+              const marketRows = await fetchPositionMarketRows(
+                pool,
+                positions,
+                {
+                  venue: responseVenue,
+                  includeTop: true,
+                },
+              );
               marketsByToken = mapMarketsByTokenRows(marketRows, {
                 polymarketOrderabilityMode: "trust_accepting_orders",
               });
@@ -404,12 +408,20 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
               );
               if (query.q) {
                 const entriesByToken = new Map(
-                  marketsByToken.map((entry) => [entry.tokenId, entry]),
+                  marketsByToken.map((entry) => [
+                    positionAssetKey(entry.tokenId, entry.positionContract),
+                    entry,
+                  ]),
                 );
                 positions = positions.filter((position) =>
                   positionMatchesSearch(
                     position,
-                    entriesByToken.get(position.tokenId),
+                    entriesByToken.get(
+                      positionAssetKey(
+                        position.tokenId,
+                        position.positionContract,
+                      ),
+                    ),
                     query.q,
                   ),
                 );
@@ -421,8 +433,10 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                 );
               }
               if (query.includeMarkets) {
-                positions = positions.filter((position) =>
-                  mappedTokenIds.has(position.tokenId),
+                positions = positions.filter(
+                  (position) =>
+                    position.venue === "polymarket" ||
+                    mappedTokenIds.has(position.tokenId),
                 );
               }
             } catch (marketError) {

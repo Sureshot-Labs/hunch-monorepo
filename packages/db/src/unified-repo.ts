@@ -1,5 +1,9 @@
 import { chunkArray, normalizePriceValue } from "@hunch/shared";
 import { Pool } from "pg";
+import {
+  buildPolymarketAssetBindings,
+  preservePolymarketAssetBindings,
+} from "./polymarket-asset-bindings.js";
 
 type Queryable = Pick<Pool, "query">;
 
@@ -830,6 +834,10 @@ export async function upsertUnifiedMarket(
     marketRow.id,
   ]);
   const existingTokenSource = existingTokenSources.get(marketRow.id);
+  await preservePolymarketAssetBindings(pool, [
+    ...(existingTokenSource ? [existingTokenSource] : []),
+    marketRow,
+  ]);
   const query = `
     INSERT INTO unified_markets (
       id, venue, venue_market_id, event_id, title, description, category, status,
@@ -1349,6 +1357,10 @@ export async function upsertUnifiedMarkets(
       changedBatch.map((row: UnifiedMarketRow) => row.id),
     );
     timings.loadTokenSourcesMs += Date.now() - loadTokenSourcesStartedAt;
+    await preservePolymarketAssetBindings(pool, [
+      ...existingTokenSources.values(),
+      ...changedBatch,
+    ]);
     const upsertStartedAt = Date.now();
     if (changedBatchResult.existingMetricsOnlyRows.length > 0) {
       const updateStartedAt = Date.now();
@@ -1692,7 +1704,14 @@ type UnifiedMarketTokenRow = {
 
 type MarketTokenSource = Pick<
   UnifiedMarketRow,
-  "id" | "venue" | "token_yes" | "token_no" | "clob_token_ids"
+  | "id"
+  | "venue"
+  | "token_yes"
+  | "token_no"
+  | "clob_token_ids"
+  | "condition_id"
+  | "outcomes"
+  | "metadata"
 >;
 
 function parseClobTokenIds(raw?: string | null): string[] {
@@ -1750,7 +1769,7 @@ async function loadUnifiedMarketTokenSources(
 
   const { rows } = await pool.query<MarketTokenSource>(
     `
-      select id, venue, token_yes, token_no, clob_token_ids
+      select id, venue, token_yes, token_no, clob_token_ids, condition_id, outcomes, metadata
       from unified_markets
       where id = any($1::text[])
     `,
@@ -1784,6 +1803,9 @@ function resolvePersistedMarketTokenSource(
     token_yes,
     token_no,
     clob_token_ids: next.clob_token_ids,
+    condition_id: next.condition_id,
+    outcomes: next.outcomes,
+    metadata: next.metadata,
   };
 }
 
@@ -1800,6 +1822,11 @@ function shouldSyncUnifiedMarketTokens(
   current?: MarketTokenSource,
 ): boolean {
   if (!current) return true;
+  if (
+    JSON.stringify(buildPolymarketAssetBindings(current)) !==
+    JSON.stringify(buildPolymarketAssetBindings(next))
+  )
+    return true;
 
   const currentSignature = buildMarketTokenSignature(current);
   const nextSignature = buildMarketTokenSignature(
@@ -1830,7 +1857,7 @@ export async function syncUnifiedMarketTokens(
       await client.query("begin");
       const markets = await client.query<MarketTokenSource>(
         `
-          select id, venue, token_yes, token_no, clob_token_ids
+          select id, venue, token_yes, token_no, clob_token_ids, condition_id, outcomes, metadata
           from unified_markets
           where id = any($1::text[])
           order by id
@@ -1841,6 +1868,7 @@ export async function syncUnifiedMarketTokens(
       // Keep sources stable until their canonical mapping is replaced. The
       // same PK order also serializes overlapping batches without lock inversion.
       const tokenRows = markets.rows.flatMap(buildMarketTokenRows);
+      await preservePolymarketAssetBindings(client, markets.rows);
       await client.query(
         `
           delete from unified_market_tokens
@@ -1868,6 +1896,38 @@ export async function syncUnifiedMarketTokens(
           [JSON.stringify(tokenRows)],
         );
       }
+      // Both current projections change under the same market locks. A later
+      // independent token upsert could otherwise restore an obsolete generation.
+      await client.query(
+        `
+        delete from unified_tokens token_row
+        using unified_markets market_row
+        where market_row.id = any($1::text[]) and market_row.venue = 'polymarket'
+          and token_row.market_id = market_row.id
+          and not exists (
+            select 1 from unified_market_tokens current_token
+            where current_token.market_id = token_row.market_id
+              and current_token.token_id = token_row.token_id
+              and current_token.outcome_side = token_row.side
+          )
+      `,
+        [batch],
+      );
+      await client.query(
+        `
+        insert into unified_tokens (token_id, venue, market_id, side)
+        select current_token.token_id, current_token.venue,
+          current_token.market_id, current_token.outcome_side
+        from unified_market_tokens current_token
+        where current_token.market_id = any($1::text[])
+          and current_token.venue = 'polymarket'
+          and current_token.outcome_side in ('YES', 'NO')
+        order by current_token.market_id, current_token.outcome_side
+        on conflict (market_id, side) do update
+          set token_id = excluded.token_id, venue = excluded.venue
+      `,
+        [batch],
+      );
       await client.query("commit");
     } catch (err) {
       try {

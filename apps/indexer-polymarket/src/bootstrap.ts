@@ -1,4 +1,4 @@
-import { chunkArray } from "@hunch/shared";
+import { chunkArray, readPolymarketIndexedAssets } from "@hunch/shared";
 import { ensureRedis, redis } from "./redis.js";
 import { env } from "./env.js";
 import {
@@ -11,14 +11,12 @@ import { postBooksOnce } from "./clobClient.js";
 import {
   mapPolymarketEventRow,
   mapPolymarketMarketRow,
-  mapTokens,
   mapToUnifiedEvent,
   mapToUnifiedMarket,
 } from "./mappers.js";
 import {
   flushUnifiedBookTopLatestTouches,
   writeResolvedTerminalTokenTops,
-  upsertUnifiedTokens,
   writeUnifiedBookTops,
   type UnifiedEventRow,
   type UnifiedMarketRow,
@@ -93,21 +91,8 @@ function clobTokenPair(market: TPolymarketMarket): {
   yes: string | null;
   no: string | null;
 } {
-  const raw = market.clobTokenIds;
-  if (Array.isArray(raw)) {
-    return { yes: raw[0] ?? null, no: raw[1] ?? null };
-  }
-  if (typeof raw !== "string") return { yes: null, no: null };
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return { yes: null, no: null };
-    return {
-      yes: typeof parsed[0] === "string" ? parsed[0] : null,
-      no: typeof parsed[1] === "string" ? parsed[1] : null,
-    };
-  } catch {
-    return { yes: null, no: null };
-  }
+  const assets = readPolymarketIndexedAssets(market).assetIds;
+  return { yes: assets[0] ?? null, no: assets[1] ?? null };
 }
 
 function publishedMarketStatus(
@@ -368,14 +353,6 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
   const unifiedMarketRows = parsedEvents.flatMap((event) =>
     event.markets.map((market) => mapToUnifiedMarket(market, event.id, event)),
   );
-  const unifiedTokenRows = parsedEvents.flatMap((event) =>
-    event.markets.flatMap((market) => {
-      const [yes, no] = Array.isArray(market.clobTokenIds)
-        ? market.clobTokenIds
-        : [];
-      return mapTokens(`polymarket:${market.id}`, yes ?? null, no ?? null);
-    }),
-  );
 
   const eventUpsertResult = await timedPhase(
     timings,
@@ -438,25 +415,6 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
     unifiedMarketRows.length,
     marketUpsertResult,
   );
-
-  if (unifiedTokenRows.length) {
-    const tokenUpsertResult = await timedPhase(
-      timings,
-      "processEvents.tokenUpsert",
-      () => upsertUnifiedTokens(pool, unifiedTokenRows),
-      { tokens: unifiedTokenRows.length },
-    );
-    log.info("Polymarket token upsert stats", {
-      context: "processEvents",
-      tokens: unifiedTokenRows.length,
-      inputRows: tokenUpsertResult.inputRows,
-      dedupedRows: tokenUpsertResult.dedupedRows,
-      changedRows: tokenUpsertResult.changedRows,
-      skippedRows: tokenUpsertResult.skippedRows,
-      upsertedRows: tokenUpsertResult.upsertedRows,
-      batches: tokenUpsertResult.batches,
-    });
-  }
 
   try {
     const eventById = new Map(unifiedEventRows.map((row) => [row.id, row]));
@@ -1302,12 +1260,6 @@ async function refreshMarketRefs(
           ] as const,
       ),
   );
-  const unifiedTokenRows = parsedWithEventDependencies.flatMap(({ market }) => {
-    const [yes, no] = Array.isArray(market.clobTokenIds)
-      ? market.clobTokenIds
-      : [];
-    return mapTokens(`polymarket:${market.id}`, yes ?? null, no ?? null);
-  });
 
   const marketUpsertResult = await timedPhase(
     timings,
@@ -1330,25 +1282,6 @@ async function refreshMarketRefs(
     unifiedMarketRows.length,
     marketUpsertResult,
   );
-
-  if (unifiedTokenRows.length) {
-    const tokenUpsertResult = await timedPhase(
-      timings,
-      "refreshMarketRefs.tokenUpsert",
-      () => upsertUnifiedTokens(pool, unifiedTokenRows),
-      { tokens: unifiedTokenRows.length },
-    );
-    log.info("Polymarket token upsert stats", {
-      context: "refreshMarketRefs",
-      tokens: unifiedTokenRows.length,
-      inputRows: tokenUpsertResult.inputRows,
-      dedupedRows: tokenUpsertResult.dedupedRows,
-      changedRows: tokenUpsertResult.changedRows,
-      skippedRows: tokenUpsertResult.skippedRows,
-      upsertedRows: tokenUpsertResult.upsertedRows,
-      batches: tokenUpsertResult.batches,
-    });
-  }
 
   const refreshedMarketPairs = parsedWithEventDependencies.flatMap(
     (row, index) => {

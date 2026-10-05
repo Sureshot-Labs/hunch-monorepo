@@ -57,6 +57,7 @@ export const POLYMARKET_PREPARATION_REQUIREMENTS = {
   fund: {
     standard: FUND,
     neg_risk: FUND,
+    protocol_v2: FUND,
   },
   buy: {
     standard: [...BUY_COMMON, "erc20_exchange_allowance"],
@@ -65,6 +66,7 @@ export const POLYMARKET_PREPARATION_REQUIREMENTS = {
       "erc20_neg_risk_exchange_allowance",
       "erc20_neg_risk_adapter_allowance",
     ],
+    protocol_v2: [...BUY_COMMON, "erc20_v3_exchange_allowance"],
   },
   sell: {
     standard: [...SELL_COMMON, "ctf_exchange_approval"],
@@ -73,10 +75,12 @@ export const POLYMARKET_PREPARATION_REQUIREMENTS = {
       "ctf_neg_risk_exchange_approval",
       "ctf_neg_risk_adapter_approval",
     ],
+    protocol_v2: [...SELL_COMMON, "position_manager_v3_approval"],
   },
   redeem: {
     standard: REDEEM_COMMON,
     neg_risk: REDEEM_COMMON,
+    protocol_v2: REDEEM_COMMON,
   },
   withdraw: {
     standard: [
@@ -86,6 +90,12 @@ export const POLYMARKET_PREPARATION_REQUIREMENTS = {
       "withdrawal_call_validated",
     ],
     neg_risk: [
+      ...COMMON,
+      "withdrawal_asset_supported",
+      "withdrawal_recipient_valid",
+      "withdrawal_call_validated",
+    ],
+    protocol_v2: [
       ...COMMON,
       "withdrawal_asset_supported",
       "withdrawal_recipient_valid",
@@ -103,7 +113,11 @@ const resolvePolymarketRequirements: PreparationRequirementResolver = (
   ) {
     return POLYMARKET_PREPARATION_REQUIREMENTS[input.purpose].standard;
   }
-  if (input.marketClass !== "standard" && input.marketClass !== "neg_risk") {
+  if (
+    input.marketClass !== "standard" &&
+    input.marketClass !== "neg_risk" &&
+    input.marketClass !== "protocol_v2"
+  ) {
     return null;
   }
   return POLYMARKET_PREPARATION_REQUIREMENTS[input.purpose][input.marketClass];

@@ -114,6 +114,8 @@ export type PolymarketRuntimeEvidence = Readonly<{
   standardExchangeApproval: boolean;
   negRiskExchangeApproval: boolean;
   negRiskAdapterApproval: boolean;
+  v3ExchangeAllowance?: boolean;
+  v3PositionManagerApproval?: boolean;
   observedAt: string;
   expiresAt: string;
   safeEvidence: JsonObject;
@@ -725,6 +727,20 @@ export function buildPolymarketRuntimeFacts(
           "Fresh trade quote guard is unavailable",
           "quote_slippage_exceeded",
         ),
+    approvalCheck({
+      actionKind: approvalActionKind,
+      checkId: "erc20_v3_exchange_allowance",
+      approved: evidence.v3ExchangeAllowance === true,
+      internal,
+      safeLabel: "Approve pUSD for ExchangeV3",
+    }),
+    approvalCheck({
+      actionKind: approvalActionKind,
+      checkId: "position_manager_v3_approval",
+      approved: evidence.v3PositionManagerApproval === true,
+      internal,
+      safeLabel: "Approve PositionManager shares for ExchangeV3",
+    }),
     approvalCheck({
       actionKind: approvalActionKind,
       checkId: "erc20_exchange_allowance",

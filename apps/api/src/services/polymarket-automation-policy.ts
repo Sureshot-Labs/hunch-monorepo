@@ -15,6 +15,7 @@ import {
 } from "./polymarket-signing-schema.js";
 import { POLYMARKET_DEPOSIT_WALLET_BATCH_TYPES } from "./polymarket-deposit-wallet-relayer.js";
 import type { TradeSide } from "./trading-types.js";
+import { POLYMARKET_PROTOCOL_CONTRACTS } from "@hunch/shared";
 
 export type PrivyBotPolicyProfile = "buy" | "sell" | "buy_sell";
 
@@ -234,7 +235,50 @@ function coveredExchangeAddresses(input: {
   ) {
     return null;
   }
-  return new Set(values);
+  // Privy conditions are conjunctive. An address in the allowlist is not
+  // usable by V3 if the same rule still pins the outer domain to version 2.
+  const versionConditions = input.conditions.filter(
+    (condition) =>
+      condition.field_source === "ethereum_typed_data_domain" &&
+      condition.field === "version",
+  );
+  if (
+    versionConditions.some(
+      (condition) =>
+        !["eq", "in"].includes(String(condition.operator)) ||
+        stringValues(condition.value).length === 0,
+    )
+  )
+    return null;
+  return new Set(
+    values.filter((address) => {
+      const version =
+        address === POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3.toLowerCase()
+          ? "3"
+          : "2";
+      return versionConditions.every((condition) =>
+        stringValues(condition.value).includes(version),
+      );
+    }),
+  );
+}
+
+function requiredExchangeCoverage(
+  allowed: Set<string>,
+  requested: readonly string[] | undefined,
+  issues: string[],
+): Set<string> {
+  const required =
+    requested == null ? allowed : canonicalEvmAddressSet(requested);
+  if (
+    required.size === 0 ||
+    [...required].some((address) => !allowed.has(address))
+  ) {
+    issues.push(
+      "Required exchange coverage must be a nonempty subset of the allowlist.",
+    );
+  }
+  return required;
 }
 
 function hasExactFundingAbi(condition: Record<string, unknown>): boolean {
@@ -432,6 +476,7 @@ function readExactFundingRouterControllerApprovalRule(input: {
 
 export function validatePolymarketBotPolicy(input: {
   exchangeAddresses: readonly string[];
+  requiredExchangeAddresses?: readonly string[];
   fundingRouterAddress: string;
   maxBuyUsd: number;
   policy: PrivyPolicyMetadata;
@@ -457,9 +502,17 @@ export function validatePolymarketBotPolicy(input: {
   const allowedExchangeAddresses = canonicalEvmAddressSet(
     input.exchangeAddresses,
   );
-  if (allowedExchangeAddresses.size !== 2) {
+  if (
+    allowedExchangeAddresses.size !== 2 &&
+    allowedExchangeAddresses.size !== 3
+  ) {
     issues.push("Both regular and neg-risk Polymarket exchanges are required.");
   }
+  const requiredExchanges = requiredExchangeCoverage(
+    allowedExchangeAddresses,
+    input.requiredExchangeAddresses,
+    issues,
+  );
   const maxMakerAmountMicros = BigInt(
     Math.round(Math.max(0, input.maxBuyUsd) * 1_000_000),
   );
@@ -618,7 +671,7 @@ export function validatePolymarketBotPolicy(input: {
 
   if (!clobAuthCovered) issues.push("Canonical ClobAuth rule is missing.");
   if (!fundingCovered) issues.push("Canonical funding router rule is missing.");
-  for (const exchangeAddress of allowedExchangeAddresses) {
+  for (const exchangeAddress of requiredExchanges) {
     if (!directCoverage.has(exchangeAddress)) {
       issues.push(`Direct Order rule does not cover ${exchangeAddress}.`);
     }
@@ -640,11 +693,17 @@ export function validatePolymarketBotPolicy(input: {
 export function validatePolymarketBotSellPolicy(input: {
   builderCode: string;
   exchangeAddresses: readonly string[];
+  requiredExchangeAddresses?: readonly string[];
   policy: PrivyPolicyMetadata;
 }): PolicyValidationResult {
   const issues: string[] = [];
   const allowedExchangeAddresses = canonicalEvmAddressSet(
     input.exchangeAddresses,
+  );
+  const requiredExchanges = requiredExchangeCoverage(
+    allowedExchangeAddresses,
+    input.requiredExchangeAddresses,
+    issues,
   );
   const builderCode = normalizeScalar(input.builderCode);
   if (!/^0x[a-f0-9]{64}$/.test(builderCode)) {
@@ -752,7 +811,7 @@ export function validatePolymarketBotSellPolicy(input: {
   if (!clobAuthCovered) {
     issues.push("Canonical ClobAuth rule is missing from the SELL policy.");
   }
-  for (const exchange of allowedExchangeAddresses) {
+  for (const exchange of requiredExchanges) {
     if (!coverage.has(exchange)) {
       issues.push(`Deposit-wallet SELL rule does not cover ${exchange}.`);
     }
@@ -832,6 +891,7 @@ function classifyPolymarketPolicyAllowRule(
 export function validatePolymarketBotPolicyProfile(input: {
   builderCode: string;
   exchangeAddresses: readonly string[];
+  requiredExchangeAddresses?: readonly string[];
   fundingRouterAddress: string;
   maxBuyUsd: number;
   policy: PrivyPolicyMetadata;
@@ -910,6 +970,7 @@ export function validatePolymarketBotPolicyProfile(input: {
       ? [
           validatePolymarketBotPolicy({
             exchangeAddresses: input.exchangeAddresses,
+            requiredExchangeAddresses: input.requiredExchangeAddresses,
             fundingRouterAddress: input.fundingRouterAddress,
             maxBuyUsd: input.maxBuyUsd,
             policy: input.policy,
@@ -920,12 +981,14 @@ export function validatePolymarketBotPolicyProfile(input: {
             validatePolymarketBotSellPolicy({
               builderCode: input.builderCode,
               exchangeAddresses: input.exchangeAddresses,
+              requiredExchangeAddresses: input.requiredExchangeAddresses,
               policy: input.policy,
             }),
           ]
         : [
             validatePolymarketBotPolicy({
               exchangeAddresses: input.exchangeAddresses,
+              requiredExchangeAddresses: input.requiredExchangeAddresses,
               fundingRouterAddress: input.fundingRouterAddress,
               maxBuyUsd: input.maxBuyUsd,
               policy: selectRules(
@@ -942,6 +1005,7 @@ export function validatePolymarketBotPolicyProfile(input: {
             validatePolymarketBotSellPolicy({
               builderCode: input.builderCode,
               exchangeAddresses: input.exchangeAddresses,
+              requiredExchangeAddresses: input.requiredExchangeAddresses,
               policy: selectRules(new Set(["clob_auth", "deposit_sell"])),
             }),
           ];
@@ -1122,7 +1186,11 @@ export function validatePolymarketBotTypedData(input: {
   );
   if (
     domain.name !== "Polymarket CTF Exchange" ||
-    String(domain.version) !== "2" ||
+    String(domain.version) !==
+      (verifyingContract ===
+      POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3.toLowerCase()
+        ? "3"
+        : "2") ||
     !verifyingContract ||
     !allowedExchanges.has(verifyingContract)
   ) {

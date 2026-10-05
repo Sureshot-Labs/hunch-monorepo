@@ -1,4 +1,5 @@
 import { Interface } from "ethers";
+import { POLYMARKET_PROTOCOL_CONTRACTS } from "@hunch/shared";
 
 import type { UserWallet } from "../../auth.js";
 import { buildEmbeddedPersonalSignRequest } from "../../services/embedded-privy.js";
@@ -68,6 +69,18 @@ function spenderForPolymarketCheck(
   checkId: string,
   redemptionOperator: string | null,
 ): { token: string; spender: string; kind: "erc20" | "erc1155" } | null {
+  if (checkId === "erc20_v3_exchange_allowance")
+    return {
+      token: POLYMARKET_PROTOCOL_CONTRACTS.collateral,
+      spender: POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3,
+      kind: "erc20",
+    };
+  if (checkId === "position_manager_v3_approval")
+    return {
+      token: POLYMARKET_PROTOCOL_CONTRACTS.positionManager,
+      spender: POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3,
+      kind: "erc1155",
+    };
   if (checkId === "erc20_exchange_allowance") {
     return {
       token: fundingSidecarRuntimeConfig.polymarketUsdcAddress,
@@ -116,7 +129,11 @@ function spenderForPolymarketCheck(
   }
   if (checkId === "redemption_operator_approval" && redemptionOperator) {
     return {
-      token: fundingSidecarRuntimeConfig.polymarketConditionalTokensAddress,
+      token:
+        redemptionOperator.toLowerCase() ===
+        POLYMARKET_PROTOCOL_CONTRACTS.router.toLowerCase()
+          ? POLYMARKET_PROTOCOL_CONTRACTS.positionManager
+          : fundingSidecarRuntimeConfig.polymarketConditionalTokensAddress,
       spender: redemptionOperator,
       kind: "erc1155",
     };

@@ -39,6 +39,7 @@ export {
   isMissingRuntimePoliciesTable,
   listActiveRuntimePolicies,
 } from "./runtime-policies.js";
+export * from "./polymarket-asset-bindings.js";
 export type {
   RuntimePolicyQuery,
   RuntimePolicyRow,

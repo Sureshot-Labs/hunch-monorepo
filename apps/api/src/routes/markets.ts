@@ -92,6 +92,11 @@ import {
   shouldUseDbCandlestickFallback,
 } from "../services/candlestick-history.js";
 import { mapMarketsByTokenRows } from "../services/markets-by-token-response.js";
+import {
+  resolvePolymarketAssetContext,
+  PolymarketAssetContextError,
+} from "../services/polymarket-asset-context.js";
+import { fetchPolymarketMarketInfo } from "../repos/polymarket-markets.js";
 import { polymarketClient } from "../services/polymarket-client.js";
 import { normalizeRedemptionStatus } from "../services/redemption-status.js";
 import { filterVenuesForLifecycleCapability } from "../services/venue-lifecycle.js";
@@ -223,7 +228,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
     "/markets/by-token",
     { schema: { querystring: marketsByTokenQuerySchema } },
     async (request, reply) => {
-      const { tokenIds, venue, includeTop } = request.query;
+      const { tokenIds, venue, includeTop, assetContext } = request.query;
 
       if (tokenIds.length > 200) {
         reply.code(400);
@@ -235,10 +240,23 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
 
       try {
         const startedAt = Date.now();
+        const verifiedAssetContext = assetContext
+          ? await resolvePolymarketAssetContext(
+              pool,
+              assetContext.assetId,
+              await fetchPolymarketMarketInfo(pool, {
+                tokenId: assetContext.assetId,
+              }),
+              assetContext,
+            )
+          : null;
         const rows = await fetchMarketsByTokenIds(pool, {
           tokenIds,
           venue,
           includeTop,
+          ...(verifiedAssetContext
+            ? { marketAssetContexts: [verifiedAssetContext] }
+            : {}),
         });
         const durationMs = Date.now() - startedAt;
         if (durationMs > 2000) {
@@ -264,6 +282,11 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({ data: response });
       } catch (error) {
+        if (error instanceof PolymarketAssetContextError) {
+          return reply
+            .code(409)
+            .send({ error: error.code, message: error.message });
+        }
         const err = error as { code?: unknown } | null;
         const timeout = err?.code === "57014";
         app.log.error(

@@ -817,6 +817,7 @@ export async function mergeUsers(
             and s.wallet_address is not distinct from t.wallet_address
             and s.venue = t.venue
             and s.token_id is not distinct from t.token_id
+            and s.position_contract = t.position_contract
         `,
           [target.id, source.id],
         )
