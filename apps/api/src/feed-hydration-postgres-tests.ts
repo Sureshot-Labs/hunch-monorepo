@@ -28,6 +28,35 @@ const fixturePool = {
   query: fixtureQuery,
   connect: async () => ({ query: fixtureQuery, release() {} }),
 } as unknown as InfraPool;
+// Reference the former wide projection and second raw-market join, rather than
+// comparing two executions that both use the optimized hydration SQL.
+const legacyFixtureQuery = (sql: string, params: unknown[] = []) => {
+  if (sql.includes("pm_filter.accepting_orders as pm_accepting_orders")) {
+    sql = sql
+      .replace(
+        /m\.id, m\.event_id, m\.venue,[\s\S]*?pm_filter\.accepting_orders as pm_accepting_orders,/,
+        "m.*,",
+      )
+      .replace(
+        "m.pm_accepting_orders,",
+        "pm.accepting_orders as pm_accepting_orders,",
+      )
+      .replace(
+        "join market_base m on m.event_id = e.id",
+        `join market_base m on m.event_id = e.id
+        left join polymarket_markets pm on pm.id = m.venue_market_id and m.venue = 'polymarket'`,
+      );
+    assert.ok(sql.includes("pm.accepting_orders as pm_accepting_orders"));
+    assert.ok(
+      !sql.includes("pm_filter.accepting_orders as pm_accepting_orders"),
+    );
+  }
+  return fixtureQuery(sql, params);
+};
+const legacyFixturePool = {
+  query: legacyFixtureQuery,
+  connect: async () => ({ query: legacyFixtureQuery, release() {} }),
+} as unknown as InfraPool;
 const baseInputs: FeedInputs = {
   limit: 100,
   offset: 0,
@@ -82,6 +111,7 @@ try {
   await client.query(`
     create table unified_events (
       id text primary key, title text, duration_minutes integer default 60,
+      venue text default 'polymarket', status text default 'ACTIVE',
       category text default 'politics', start_date timestamptz default '2026-09-24T12:00:00Z',
       end_date timestamptz default '2026-10-01T12:00:00Z', liquidity numeric,
       volume_total numeric, volume_24h numeric default 7, open_interest numeric,
@@ -120,6 +150,9 @@ try {
     create table unified_token_change_24h (token_id text primary key, avg_mid_24h numeric);
     create table unified_market_change_24h (
       market_id text primary key, change_24h numeric, calculation_version integer
+    );
+    create table unified_event_trade_24h (
+      event_id text primary key, volume_24h numeric, updated_at timestamptz
     );
 
     insert into unified_events(id, title, liquidity, volume_total, open_interest)
@@ -234,14 +267,15 @@ try {
 
   // Dynamic import occurs only after verifying the explicit target. The repo
   // helper receives the fixture pool; runtime db.ts/app.ts are never imported.
-  const { fetchFeedMarkets } = await import("./repos/unified-read.js");
+  const { fetchFeedMarkets, fetchFeedEventIds } =
+    await import("./repos/unified-read.js");
   async function assertEquivalent(
     label: string,
     input: FeedInputs,
     eventIds: string[],
     useCachedChange24h = false,
   ): Promise<FeedMarketRow[]> {
-    const legacy = await fetchFeedMarkets(fixturePool, input, eventIds, {
+    const legacy = await fetchFeedMarkets(legacyFixturePool, input, eventIds, {
       directTokenLookup: false,
       useCachedChange24h,
     });
@@ -453,6 +487,82 @@ try {
   );
   console.log(
     `ok - ${equivalenceCases} PostgreSQL 16 feed hydration equivalence cases`,
+  );
+
+  // The first 100 ranked events have no orderable child. A smaller prefix must
+  // expand, not silently become an empty/partial feed page.
+  await client.query(`
+    insert into unified_events(id,title,category,volume_total,liquidity)
+      select 'prefix-' || lpad(child_no::text,3,'0'),'Prefix fixture','prefix-fixture',floor(child_no/2.0)+1,10
+      from generate_series(0,209) children(child_no);
+    insert into unified_markets(id,event_id,venue_market_id,title)
+      select id || ':market',id,id || ':raw','Orderable fixture' from unified_events
+      where category='prefix-fixture' and id<'prefix-100';
+    insert into polymarket_markets(id) select venue_market_id from unified_markets where id like 'prefix-%';
+    insert into unified_event_trade_24h(event_id,volume_24h,updated_at)
+      select id,volume_total,'2026-09-25T11:00:00Z' from unified_events where category='prefix-fixture';
+  `);
+  const prefixCases: Array<[string, Partial<FeedInputs>]> = [
+    ["sparse first", {}],
+    ["resumed", { offset: 50 }],
+    ["empty tail", { offset: 100 }],
+    ["ascending ties", { sortDir: "asc" }],
+    ["empty filter", { venues: [] }],
+  ];
+  for (const sort of ["trending", "trending_v2"] as const) {
+    for (const [label, extra] of prefixCases) {
+      // Ascending metric sort uses the existing exact fallback, outside this
+      // optimization; tested separately by the pre-existing feed SQL suites.
+      if (sort === "trending_v2" && "sortDir" in extra) continue;
+      const input: FeedInputs = {
+        ...baseInputs,
+        limit: 25,
+        sort,
+        category: "prefix-fixture",
+        ...extra,
+      };
+      const bounds: number[] = [];
+      const prefixQuery =
+        (legacy: boolean) =>
+        async (sql: string, params: unknown[] = []) => {
+          const boundMatch = sql.match(
+            /ranked_event_candidates as materialized\s*\([\s\S]*?limit \$(\d+)/,
+          );
+          if (!boundMatch) return fixtureQuery(sql, params);
+          const boundIndex = Number(boundMatch[1]) - 1;
+          const values = [...params];
+          assert.equal(typeof values[boundIndex], "number");
+          if (legacy)
+            values[boundIndex] = Math.max(
+              1000,
+              (input.limit + input.offset) * 20,
+            );
+          else bounds.push(Number(values[boundIndex]));
+          return fixtureQuery(sql, values);
+        };
+      const prefixPool = (legacy: boolean) => {
+        const query = prefixQuery(legacy);
+        return {
+          query,
+          connect: async () => ({ query, release() {} }),
+        } as unknown as InfraPool;
+      };
+      const legacy = await fetchFeedEventIds(prefixPool(true), input);
+      const actual = await fetchFeedEventIds(prefixPool(false), input);
+      assert.deepEqual(
+        actual,
+        legacy,
+        `${sort} ${label}: prefix changed the ordered page`,
+      );
+      if (label === "sparse first") {
+        assert.deepEqual(bounds, [100, 400]);
+        assert.equal(actual.length, 25);
+      }
+      if (label.startsWith("empty")) assert.deepEqual(actual, []);
+    }
+  }
+  console.log(
+    "ok - PostgreSQL 16 event prefixes preserve sparse, resumed, empty and tied pages",
   );
 } finally {
   try {

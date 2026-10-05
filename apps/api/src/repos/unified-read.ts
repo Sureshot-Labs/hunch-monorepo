@@ -2251,8 +2251,20 @@ function buildFeedEventJoinHaving(args: {
 
 function feedEventFastCandidateLimit(
   inputs: Pick<FeedInputs, "limit" | "offset" | "sort">,
+  preservesRank: boolean,
 ): number {
   const pageTarget = inputs.limit + inputs.offset;
+  // Filtering preserves this prefix's order; the existing expansion loop still
+  // visits later candidates when orderable events are sparse. Qualification
+  // reranking and other sorts retain their existing starting allocation.
+  if (
+    preservesRank &&
+    (inputs.sort == null ||
+      inputs.sort === "trending" ||
+      inputs.sort === "trending_v2")
+  ) {
+    return Math.max(100, pageTarget * 4);
+  }
   const minCandidates =
     inputs.sort === "liquidity"
       ? FEED_EVENT_FAST_MAX_CANDIDATES
@@ -2468,7 +2480,7 @@ async function fetchFeedEventIdsFast(
   const boundedPartialMetricPage = options?.acceptPartialMetricPage === true;
   let candidateLimit = boundedPartialMetricPage
     ? pageTarget * FEED_EVENT_BOUNDED_CANDIDATE_FACTOR
-    : feedEventFastCandidateLimit(inputs);
+    : feedEventFastCandidateLimit(inputs, !useQualificationFastPath);
 
   const { params, add } = createParamBuilder();
   const expressions = buildFeedSqlExpressions();
@@ -3976,7 +3988,13 @@ export async function fetchFeedMarkets(
     : "";
   const rankedMarketSql = `
     select
-      m.*,
+      m.id, m.event_id, m.venue, m.venue_market_id, m.title, m.market_type,
+      m.duration_minutes, m.status, m.open_time, m.close_time, m.expiration_time,
+      m.volume_24h, m.volume_total, m.open_interest, m.liquidity,
+      m.best_bid, m.best_ask, m.last_price, m.resolved_outcome, m.resolved_outcome_pct,
+      m.outcomes, m.clob_token_ids, m.condition_id, m.slug, m.category,
+      m.image, m.icon, m.metadata, m.updated_at, m.created_at,
+      pm_filter.accepting_orders as pm_accepting_orders,
       ${marketRankExpr}
     from unified_markets m
     left join polymarket_markets pm_filter
@@ -4073,7 +4091,7 @@ export async function fetchFeedMarkets(
       m.market_type as market_type,
       m.duration_minutes as market_duration_minutes,
       m.status as market_status,
-      pm.accepting_orders as pm_accepting_orders,
+      m.pm_accepting_orders,
       m.open_time as market_open_time,
       m.close_time as market_close_time,
       m.expiration_time as market_expiration_time,
@@ -4114,8 +4132,6 @@ export async function fetchFeedMarkets(
     from event_order eo
     join unified_events e on e.id = eo.event_id
     join market_base m on m.event_id = e.id
-    left join polymarket_markets pm
-      on pm.id = m.venue_market_id and m.venue = 'polymarket'
     ${bookSnapshot.yesTopJoin}
     ${bookSnapshot.yes24hJoin}
     ${bookSnapshot.noTopJoin}

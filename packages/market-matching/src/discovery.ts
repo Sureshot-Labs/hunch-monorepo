@@ -147,6 +147,52 @@ async function putInterest(
   return "pending";
 }
 
+/** Caller holds the demand transaction lock; cursor and deletions commit together. */
+export async function pruneRetiredInterests(
+  db: Db,
+  batchSize: number,
+): Promise<number> {
+  const state = await db.query(
+    "select payload->>'afterMarketId' as after_market_id from market_matching_state where state_key='retired-interest-scan'",
+  );
+  const afterMarketId = state.rows[0]?.after_market_id ?? null;
+  const result = await db.query<{
+    scanned: number;
+    last_market_id: string | null;
+    pruned: number;
+  }>(
+    `with completed_interests as materialized (
+      select market_id from market_matching_interest
+      where status='done' and next_attempt_at<=now()
+        and ($2::text is null or market_id>$2)
+      order by market_id limit $1
+    ), retired_interests as (
+      select completed.market_id from completed_interests completed
+      join lateral (
+        select m.id,m.event_id,m.status,m.resolved_outcome,m.close_time,m.expiration_time
+        from unified_markets m where m.id=completed.market_id offset 0
+      ) m on true
+      join unified_events e on e.id=m.event_id
+      where not (${liveSql})
+    ), pruned_interests as (
+      delete from market_matching_interest interest_row using retired_interests retired
+      where interest_row.market_id=retired.market_id and interest_row.status='done' and interest_row.next_attempt_at<=now()
+      returning interest_row.market_id
+    ) select (select count(*)::int from completed_interests) as scanned,
+      (select max(market_id) from completed_interests) as last_market_id,
+      (select count(*)::int from pruned_interests) as pruned`,
+    [batchSize, afterMarketId],
+  );
+  const page = result.rows[0];
+  // Advance even if every inspected market is still live. Reset at the end so
+  // newly due/retired entries before the cursor are revisited on the next sweep.
+  await db.query(
+    "insert into market_matching_state(state_key,payload) values('retired-interest-scan',$1) on conflict(state_key) do update set payload=excluded.payload,updated_at=now()",
+    [{ afterMarketId: page.scanned < batchSize ? null : page.last_market_id }],
+  );
+  return page.pruned;
+}
+
 /** Small source list; the existing trending-prefix index bounds the broad venue read. */
 export async function warmInterest(pool: Pool) {
   const initial = await readMatchingPolicy(pool);
@@ -179,24 +225,11 @@ export async function warmInterest(pool: Pool) {
     await db.query(
       "delete from market_matching_interest where status='done' and requested_at<now()-interval '7 days'",
     );
-    // Recently visited but retired markets also consume the bounded registry.
-    // Release only completed, cooldown-due demand; retain queued/running work,
-    // matching evidence and job history. PK probes keep this off the full catalog.
-    const retiredInterests = await db.query(
-      `with completed_interests as materialized (
-        select market_id from market_matching_interest where status='done' and next_attempt_at<=now()
-      ), retired_interests as (
-        select completed.market_id from completed_interests completed
-        join lateral (
-          select m.id,m.event_id,m.status,m.resolved_outcome,m.close_time,m.expiration_time
-          from unified_markets m where m.id=completed.market_id offset 0
-        ) m on true
-        join unified_events e on e.id=m.event_id
-        where not (${liveSql})
-        order by completed.market_id limit $1
-      ) delete from market_matching_interest interest_row using retired_interests retired
-      where interest_row.market_id=retired.market_id and interest_row.status='done' and interest_row.next_attempt_at<=now()`,
-      [matching.warmBatchSize],
+    // Bound source probes, not just deletions. Preserve in-flight/cooling work,
+    // matching evidence and job history; resume across live-only source pages.
+    const retiredInterestsPruned = await pruneRetiredInterests(
+      db,
+      matching.warmBatchSize,
     );
     const prefix = await db.query(
       `with prefix_rows as materialized (
@@ -329,7 +362,7 @@ export async function warmInterest(pool: Pool) {
             ]),
           ),
           queued,
-          retiredInterestsPruned: retiredInterests.rowCount ?? 0,
+          retiredInterestsPruned,
           product: {
             counts: product.counts,
             unavailable: product.unavailable,

@@ -1340,3 +1340,70 @@ console.log("ok - exhausted trending v2 market pages hydrate partial results");
   assert.equal(capturedParams[0]?.includes(24_000), false);
 }
 console.log("ok - bounded event probes do not expand past their page target");
+
+for (const sort of ["trending", "trending_v2"] as const) {
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  const pool = createCapturePool({
+    capturedSql,
+    capturedParams,
+    candidateRows: [
+      [{ ids: [], candidate_count: 100 }],
+      [
+        {
+          ids: ["event-1", "event-2", "event-3", "event-4"],
+          candidate_count: 400,
+        },
+      ],
+    ],
+  });
+  assert.deepEqual(
+    await fetchFeedEventIds(pool, {
+      ...baseInputs,
+      view: "events",
+      sort,
+      limit: 2,
+      offset: 2,
+    }),
+    [{ id: "event-3" }, { id: "event-4" }],
+  );
+  assert.equal(capturedSql.length, 2);
+  assert.ok(capturedParams[0].includes(100));
+  assert.ok(capturedParams[1].includes(400));
+  assert.match(capturedSql[0], /null::numeric as filtered_sort_value/);
+}
+console.log(
+  "ok - smaller event prefixes expand across sparse first pages and preserve offsets",
+);
+
+for (const input of [
+  { sort: "trending" as const, offset: 100 },
+  { sort: "trending" as const, sortDir: "asc" as const },
+  { sort: "trending" as const, maxSpread: 0.1 },
+  { sort: "liquidity" as const },
+  { sort: "totalvol" as const },
+]) {
+  const capturedSql: string[] = [];
+  const capturedParams: unknown[][] = [];
+  await fetchFeedEventIds(
+    createCapturePool({
+      capturedSql,
+      capturedParams,
+      candidateRows: [[{ ids: [], candidate_count: 0 }]],
+    }),
+    { ...baseInputs, view: "events", limit: 25, ...input },
+  );
+  const expected =
+    input.sort === "liquidity"
+      ? 10_000
+      : input.sort === "totalvol" || "maxSpread" in input
+        ? 1_000
+        : input.offset
+          ? 500
+          : 100;
+  assert.ok(capturedParams[0].includes(expected), JSON.stringify(input));
+  assert.equal(capturedSql.length, 1);
+}
+console.log(
+  "ok - resumed/ascending empty pages stay bounded; reranked and liquidity paths retain their allocation",
+);

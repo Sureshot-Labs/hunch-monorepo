@@ -16,7 +16,14 @@ import {
   DEFAULT_MARKET_MATCHING_POLICY,
   DEFAULT_VENUE_LIFECYCLE_POLICY,
 } from "@hunch/shared";
-import { EXPECTED_MODEL, hash, type Contract } from "./contracts.js";
+import {
+  EXPECTED_MODEL,
+  hash,
+  normalizeContract,
+  normalizeEvent,
+  type MarketRow,
+  type Contract,
+} from "./contracts.js";
 import {
   enqueue,
   claim,
@@ -31,6 +38,7 @@ import {
   warmInterest,
   revalidateLinks,
   discover,
+  pruneRetiredInterests,
 } from "./discovery.js";
 import { runJob } from "./worker.js";
 import { resolveMarketLinks, resolveEventLinks } from "./resolver.js";
@@ -305,6 +313,162 @@ async function clearJobs() {
     "update market_matching_jobs set status='error',lease_token=null where status in ('running','queued')",
   );
 }
+
+integration(
+  "PG16: shared event membership preserves legacy contracts and event fingerprints",
+  { skip: !url },
+  async () => {
+    const pair = await seed("shared-membership");
+    const parentId = pair[0].eventId;
+    await pool.query(
+      `insert into unified_markets(id,event_id,venue,title,status,outcomes,metadata)
+      select $1 || child_no::text,$2,'polymarket','Selection ' || child_no::text,
+        case when child_no % 2 = 0 then 'CLOSED' else 'DRAFT' end,'["Yes","No"]','{}'::jsonb
+      from generate_series(1,320) children(child_no)`,
+      [parentId + ":child-", parentId],
+    );
+    await pool.query(
+      "insert into unified_market_tokens(market_id,token_id,outcome_side) values($1,'token-z','NO'),($1,'token-a','YES')",
+      [pair[0].id],
+    );
+    // Frozen pre-optimization projection: compare normalization and complete
+    // fingerprint inputs, including siblings not requested or not eligible.
+    const legacySelect = `select m.id,m.event_id,m.venue,m.title,m.description,m.status,m.outcomes,m.close_time,m.expiration_time,e.end_date as event_end_date,
+      jsonb_build_object('question',m.metadata->>'question','rulesPrimary',m.metadata->>'rulesPrimary','rulesSecondary',m.metadata->>'rulesSecondary',
+        'outcomes',m.metadata->'outcomes','clobTokenIds',m.metadata->'clobTokenIds') as metadata,
+      e.title as event_title,e.description as event_description,
+      case when e.end_date<=now() then 'CLOSED' else e.status::text end as event_status,
+      case when m.resolved_outcome is not null or m.close_time<=now() or m.expiration_time<=now() then 'CLOSED' else m.status::text end as matching_status,
+      coalesce((select jsonb_agg(jsonb_build_object('id',sibling.id,'selection',sibling.title) order by sibling.id) from unified_markets sibling where sibling.event_id=m.event_id),'[]'::jsonb) as event_members,
+      coalesce((select jsonb_agg(jsonb_build_object('token_id',mt.token_id,'outcome_side',mt.outcome_side) order by mt.token_id) from unified_market_tokens mt where mt.market_id=m.id),'[]'::jsonb) as tokens
+      from unified_markets m join unified_events e on e.id=m.event_id`;
+    const requested = [
+      pair[0].id,
+      pair[1].id,
+      parentId + ":child-1",
+      pair[0].id,
+      "missing",
+    ];
+    const sortContracts = (contracts: Contract[]) =>
+      contracts.sort((a, b) => a.id.localeCompare(b.id));
+    const legacyBatch = await pool.query<MarketRow>(
+      legacySelect + " where m.id=any($1::text[])",
+      [requested],
+    );
+    assert.deepEqual(
+      sortContracts(await loadContracts(pool, requested)),
+      sortContracts(legacyBatch.rows.map(normalizeContract)),
+    );
+    const legacyChildren = await pool.query<MarketRow>(
+      legacySelect + " where m.event_id=$1",
+      [parentId],
+    );
+    const parent = await pool.query(
+      "select *,case when end_date<=now() then 'CLOSED' else status::text end as matching_status from unified_events where id=$1",
+      [parentId],
+    );
+    assert.deepEqual(
+      await loadEvent(pool, parentId),
+      normalizeEvent(
+        parent.rows[0],
+        legacyChildren.rows.map(normalizeContract),
+      ),
+    );
+    assert.deepEqual(await loadContracts(pool, ["missing"]), []);
+    assert.equal(await loadEvent(pool, "missing"), null);
+    await pool.query(
+      "insert into unified_events(id,venue,title,status) values($1,'polymarket','Empty event','ACTIVE')",
+      [parentId + ":empty"],
+    );
+    assert.deepEqual(
+      await loadEvent(pool, parentId + ":empty"),
+      normalizeEvent(
+        {
+          id: parentId + ":empty",
+          venue: "polymarket",
+          title: "Empty event",
+          description: null,
+          status: "ACTIVE",
+          matching_status: "ACTIVE",
+        },
+        [],
+      ),
+    );
+  },
+);
+
+integration(
+  "PG16: retired demand cursor crosses live-only pages, wraps and rolls back atomically",
+  { skip: !url },
+  async () => {
+    const base = (await seed("cursor-retired"))[0];
+    const ids = Array.from({ length: 8 }, (_, i) => base.id + ":cursor-" + i);
+    await pool.query(
+      "update market_matching_interest set next_attempt_at=now()+interval '1 day'",
+    );
+    await pool.query(
+      "delete from market_matching_state where state_key='retired-interest-scan'",
+    );
+    await pool.query(
+      `insert into unified_markets(id,event_id,venue,title,status)
+      select item_id,$2,'polymarket','Cursor fixture',case when item_id=any($3::text[]) then 'CLOSED' else 'ACTIVE' end
+      from unnest($1::text[]) item_rows(item_id)`,
+      [ids, base.eventId, ids.slice(4)],
+    );
+    await pool.query(
+      `insert into market_matching_interest(market_id,source,status,next_attempt_at)
+      select item_id,'warm',case when item_id=$2 then 'queued' else 'done' end,
+        case when item_id=$3 then now()+interval '1 day' else now()-interval '1 hour' end
+      from unnest($1::text[]) item_rows(item_id)`,
+      [ids, ids[6], ids[7]],
+    );
+    assert.equal(await pruneRetiredInterests(pool, 2), 0);
+    assert.equal(await pruneRetiredInterests(pool, 2), 0);
+    const cursorBefore = (
+      await pool.query(
+        "select payload from market_matching_state where state_key='retired-interest-scan'",
+      )
+    ).rows;
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      assert.equal(await pruneRetiredInterests(client, 2), 2);
+      await client.query("rollback");
+    } finally {
+      await client.query("rollback");
+      client.release();
+    }
+    assert.deepEqual(
+      (
+        await pool.query(
+          "select payload from market_matching_state where state_key='retired-interest-scan'",
+        )
+      ).rows,
+      cursorBefore,
+    );
+    assert.equal(await pruneRetiredInterests(pool, 2), 2);
+    assert.equal(await pruneRetiredInterests(pool, 2), 0); // Empty tail resets cursor.
+    await pool.query("update unified_markets set status='CLOSED' where id=$1", [
+      ids[0],
+    ]);
+    assert.equal(await pruneRetiredInterests(pool, 2), 1); // Revisit the start.
+    assert.deepEqual(
+      (
+        await pool.query(
+          "select market_id,status from market_matching_interest where market_id=any($1::text[]) order by market_id",
+          [ids.slice(6)],
+        )
+      ).rows,
+      [
+        { market_id: ids[6], status: "queued" },
+        { market_id: ids[7], status: "done" },
+      ],
+    );
+    await pool.query(
+      "delete from market_matching_state where state_key='retired-interest-scan'",
+    );
+  },
+);
 
 integration(
   "PG16: same-venue discovery is opt-in, excludes self, and is rechecked before inference/publication/read",

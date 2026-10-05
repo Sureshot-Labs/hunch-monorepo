@@ -32,23 +32,40 @@ export type Job = {
   candidate_source: string;
   policy_version: string;
 };
-const marketSelect = `select m.id,m.event_id,m.venue,m.title,m.description,m.status,m.outcomes,m.close_time,m.expiration_time,e.end_date as event_end_date,
+// Scope before aggregating: a batch can contain several children of the same
+// event, but its complete membership is needed only once. Do not filter siblings
+// by eligibility; their selections participate in the contract fingerprint.
+const marketSelect = (predicate: "m.id=any($1::text[])" | "m.event_id=$1") => `
+  with selected_markets as materialized (
+    select m.id,m.event_id,m.venue,m.title,m.description,m.status,m.outcomes,
+      m.close_time,m.expiration_time,m.resolved_outcome,m.metadata
+    from unified_markets m where ${predicate}
+  ), selected_event_members as materialized (
+    select selected_event.event_id,members.event_members
+    from (select distinct event_id from selected_markets) selected_event
+    cross join lateral (
+      select coalesce(jsonb_agg(jsonb_build_object('id',sibling.id,'selection',sibling.title) order by sibling.id),'[]'::jsonb) as event_members
+      from unified_markets sibling where sibling.event_id=selected_event.event_id
+    ) members
+  )
+  select m.id,m.event_id,m.venue,m.title,m.description,m.status,m.outcomes,m.close_time,m.expiration_time,e.end_date as event_end_date,
   jsonb_build_object('question',m.metadata->>'question','rulesPrimary',m.metadata->>'rulesPrimary','rulesSecondary',m.metadata->>'rulesSecondary',
     'outcomes',m.metadata->'outcomes','clobTokenIds',m.metadata->'clobTokenIds') as metadata,
   e.title as event_title, e.description as event_description,
   case when e.end_date<=now() then 'CLOSED' else e.status::text end as event_status,
   case when m.resolved_outcome is not null or m.close_time<=now() or m.expiration_time<=now() then 'CLOSED' else m.status::text end as matching_status,
-  coalesce((select jsonb_agg(jsonb_build_object('id',sibling.id,'selection',sibling.title) order by sibling.id) from unified_markets sibling where sibling.event_id=m.event_id),'[]'::jsonb) as event_members,
+  members.event_members,
   coalesce((select jsonb_agg(jsonb_build_object('token_id',mt.token_id,'outcome_side',mt.outcome_side) order by mt.token_id)
     from unified_market_tokens mt where mt.market_id=m.id),'[]'::jsonb) as tokens
-  from unified_markets m join unified_events e on e.id=m.event_id`;
+  from selected_markets m join unified_events e on e.id=m.event_id
+  join selected_event_members members on members.event_id=m.event_id`;
 export async function loadContracts(
   db: Db,
   ids: string[],
 ): Promise<Contract[]> {
   if (!ids.length) return [];
   const { rows } = await db.query<MarketRow>(
-    `${marketSelect} where m.id=any($1::text[])`,
+    marketSelect("m.id=any($1::text[])"),
     [ids],
   );
   return rows.map(normalizeContract);
@@ -62,10 +79,9 @@ export async function loadEvent(
     [id],
   );
   if (!rows[0]) return null;
-  const markets = await db.query<MarketRow>(
-    `${marketSelect} where m.event_id=$1`,
-    [id],
-  );
+  const markets = await db.query<MarketRow>(marketSelect("m.event_id=$1"), [
+    id,
+  ]);
   return normalizeEvent(rows[0], markets.rows.map(normalizeContract));
 }
 export async function loadSnapshot(

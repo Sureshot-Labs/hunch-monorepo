@@ -1822,20 +1822,26 @@ export async function syncUnifiedMarketTokens(
 
   const batches = chunkArray(ids, 1000);
   for (const batch of batches) {
-    const markets = await pool.query<MarketTokenSource>(
-      `
-        select id, venue, token_yes, token_no, clob_token_ids
-        from unified_markets
-        where id = any($1::text[])
-      `,
-      [batch],
-    );
-
-    const tokenRows = markets.rows.flatMap(buildMarketTokenRows);
-
-    await pool.query("begin");
+    // Pool.query does not pin a connection: splitting BEGIN/COMMIT across
+    // backends can commit the deletion and leave the insertion uncommitted.
+    const client = await pool.connect();
+    let discardClient = false;
     try {
-      await pool.query(
+      await client.query("begin");
+      const markets = await client.query<MarketTokenSource>(
+        `
+          select id, venue, token_yes, token_no, clob_token_ids
+          from unified_markets
+          where id = any($1::text[])
+          order by id
+          for update
+        `,
+        [batch],
+      );
+      // Keep sources stable until their canonical mapping is replaced. The
+      // same PK order also serializes overlapping batches without lock inversion.
+      const tokenRows = markets.rows.flatMap(buildMarketTokenRows);
+      await client.query(
         `
           delete from unified_market_tokens
           where market_id = any($1::text[])
@@ -1844,7 +1850,7 @@ export async function syncUnifiedMarketTokens(
       );
 
       if (tokenRows.length > 0) {
-        await pool.query(
+        await client.query(
           `
             insert into unified_market_tokens (market_id, token_id, venue, outcome_side)
             select x.market_id, x.token_id, x.venue, x.outcome_side
@@ -1862,10 +1868,18 @@ export async function syncUnifiedMarketTokens(
           [JSON.stringify(tokenRows)],
         );
       }
-      await pool.query("commit");
+      await client.query("commit");
     } catch (err) {
-      await pool.query("rollback");
+      try {
+        await client.query("rollback");
+      } catch {
+        // Never return a connection with an unknown transaction to the pool,
+        // and preserve the original write failure for the caller's recovery.
+        discardClient = true;
+      }
       throw err;
+    } finally {
+      client.release(discardClient);
     }
   }
 }
