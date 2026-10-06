@@ -140,9 +140,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
     );
   };
 
-  const escapeSqlLikePattern = (value: string): string =>
-    value.replace(/[\\%_]/g, "\\$&");
-
   type MappedMarketByTokenEntry = ReturnType<
     typeof mapMarketsByTokenRows
   >[number];
@@ -195,117 +192,6 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
     return searchable.includes(needle);
   };
 
-  const resolveTokenIdsForFilter = async (inputs: {
-    marketId?: string;
-    eventId?: string;
-    q?: string;
-    venue?: string;
-    venues?: string[];
-  }): Promise<string[] | null> => {
-    const { eventId, marketId, q, venue, venues } = inputs;
-    const search = q?.trim();
-    const venueList =
-      venues && venues.length > 0 ? venues : venue ? [venue] : undefined;
-
-    if (marketId) {
-      const params: Array<string | string[]> = [marketId];
-      let where = "where m.id = $1";
-      if (venueList?.length) {
-        params.push(venueList);
-        where += ` and m.venue = any($${params.length}::text[])`;
-      }
-      if (search) {
-        params.push(`%${escapeSqlLikePattern(search)}%`);
-        const idx = params.length;
-        where += `
-          and (
-            coalesce(m.title, '') ilike $${idx} escape '\\'
-            or coalesce(e.title, '') ilike $${idx} escape '\\'
-            or coalesce(m.outcomes::text, '') ilike $${idx} escape '\\'
-            or coalesce(m.id, '') ilike $${idx} escape '\\'
-            or coalesce(m.event_id, '') ilike $${idx} escape '\\'
-          )
-        `;
-      }
-      const { rows } = await pool.query<{ token_id: string }>(
-        `
-        with matched_markets as (
-          select m.id
-          from unified_markets m
-          left join unified_events e
-            on e.id = m.event_id
-          ${where}
-        ),
-        token_links as (
-          select ut.token_id
-          from matched_markets mm
-          join unified_tokens ut
-            on ut.market_id = mm.id
-          union
-          select umt.token_id
-          from matched_markets mm
-          join unified_market_tokens umt
-            on umt.market_id = mm.id
-        )
-        select distinct token_id
-        from token_links
-      `,
-        params,
-      );
-      return rows.map((row) => row.token_id);
-    }
-
-    if (eventId) {
-      const params: Array<string | string[]> = [eventId];
-      let where = "where m.event_id = $1";
-      if (venueList?.length) {
-        params.push(venueList);
-        where += ` and m.venue = any($${params.length}::text[])`;
-      }
-      if (search) {
-        params.push(`%${escapeSqlLikePattern(search)}%`);
-        const idx = params.length;
-        where += `
-          and (
-            coalesce(m.title, '') ilike $${idx} escape '\\'
-            or coalesce(e.title, '') ilike $${idx} escape '\\'
-            or coalesce(m.outcomes::text, '') ilike $${idx} escape '\\'
-            or coalesce(m.id, '') ilike $${idx} escape '\\'
-            or coalesce(m.event_id, '') ilike $${idx} escape '\\'
-          )
-        `;
-      }
-      const { rows } = await pool.query<{ token_id: string }>(
-        `
-        with matched_markets as (
-          select m.id
-          from unified_markets m
-          left join unified_events e
-            on e.id = m.event_id
-          ${where}
-        ),
-        token_links as (
-          select ut.token_id
-          from matched_markets mm
-          join unified_tokens ut
-            on ut.market_id = mm.id
-          union
-          select umt.token_id
-          from matched_markets mm
-          join unified_market_tokens umt
-            on umt.market_id = mm.id
-        )
-        select distinct token_id
-        from token_links
-      `,
-        params,
-      );
-      return rows.map((row) => row.token_id);
-    }
-
-    return null;
-  };
-
   /**
    * GET /positions
    * Get user positions
@@ -346,38 +232,19 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({ error: "No wallets available to query." });
         }
 
-        const tokenIds = await resolveTokenIdsForFilter({
-          marketId: query.marketId,
-          eventId: query.eventId,
-          q: query.q,
-          venue,
-          venues,
-        });
         const effectiveMinSize = query.minSize ?? MIN_POSITION_SIZE;
 
-        let positions =
-          tokenIds != null
-            ? tokenIds.length === 0
-              ? []
-              : await fetchPositionsForUserWalletByTokenIds(pool, {
-                  userId: user.id,
-                  walletAddresses,
-                  tokenIds,
-                  venue,
-                  venues,
-                  includeHidden: query.includeHidden,
-                  includeResolved: query.includeResolved,
-                  minSize: effectiveMinSize,
-                })
-            : await fetchPositionsForUserWallet(pool, {
-                userId: user.id,
-                walletAddresses,
-                venue,
-                venues,
-                includeHidden: query.includeHidden,
-                includeResolved: query.includeResolved,
-                minSize: effectiveMinSize,
-              });
+        let positions = await fetchPositionsForUserWallet(pool, {
+          userId: user.id,
+          walletAddresses,
+          venue,
+          venues,
+          marketId: query.marketId,
+          eventId: query.eventId,
+          includeHidden: query.includeHidden,
+          includeResolved: query.includeResolved,
+          minSize: effectiveMinSize,
+        });
 
         let marketsByToken: MappedMarketByTokenEntry[] | undefined;
         const shouldLoadMarketsForPositions =
@@ -425,11 +292,18 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                     query.q,
                   ),
                 );
-                const matchingPositionTokenIds = new Set(
-                  positions.map((position) => position.tokenId),
+                const matchingPositionKeys = new Set(
+                  positions.map((position) =>
+                    positionAssetKey(
+                      position.tokenId,
+                      position.positionContract,
+                    ),
+                  ),
                 );
                 marketsByToken = marketsByToken.filter((entry) =>
-                  matchingPositionTokenIds.has(entry.tokenId),
+                  matchingPositionKeys.has(
+                    positionAssetKey(entry.tokenId, entry.positionContract),
+                  ),
                 );
               }
               if (query.includeMarkets) {

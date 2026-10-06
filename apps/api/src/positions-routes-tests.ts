@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import "./integration-test-database-guard.js";
 import crypto from "node:crypto";
+import { Interface } from "ethers";
 
 import { AuthService, resetAuthDbFeatureCachesForTests } from "./auth.js";
 import { buildApp } from "./app.js";
@@ -262,8 +263,38 @@ async function main() {
   const limitlessRawTokenId =
     "61711868900925654003691703232709639114710342992998180827784061778851356977594";
   const polymarketFunderTokenId = `poly-hide-${crypto.randomUUID()}`;
+  const originalFetch = globalThis.fetch;
+  const balanceInterface = new Interface([
+    "function balanceOfBatch(address[] accounts,uint256[] ids) view returns(uint256[])",
+  ]);
 
   try {
+    // These random test wallets must never depend on live venue/RPC state.
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "POST") {
+        const request = JSON.parse(String(init.body));
+        assert.equal(request.method, "eth_call");
+        const [, ids] = balanceInterface.decodeFunctionData(
+          "balanceOfBatch",
+          request.params[0].data,
+        );
+        return Response.json({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: balanceInterface.encodeFunctionResult("balanceOfBatch", [
+            Array.from(ids, () => 0n),
+          ]),
+        });
+      }
+      if (url.pathname === "/v2/positions")
+        return Response.json({ data: [], pagination: { next_cursor: null } });
+      if (
+        url.pathname === `/portfolio/${limitlessContext.signerWallet}/positions`
+      )
+        return Response.json({ clob: [], amm: [] });
+      throw new Error(`Unexpected test request path: ${url.pathname}`);
+    };
     await insertLimitlessPosition(limitlessContext, limitlessRawTokenId);
     await insertPolymarketPosition(
       persistedContext,
@@ -301,7 +332,12 @@ async function main() {
 
     assert.equal(orphanIncludeMarketsResponse.statusCode, 200);
     const orphanIncludeMarketsPayload = orphanIncludeMarketsResponse.json();
-    assert.deepEqual(orphanIncludeMarketsPayload.positions, []);
+    assert.equal(orphanIncludeMarketsPayload.positions.length, 1);
+    assert.equal(
+      orphanIncludeMarketsPayload.positions[0]?.tokenId,
+      polymarketFunderTokenId,
+      "a stored Polymarket holding must not disappear merely because metadata is unavailable",
+    );
     assert.deepEqual(orphanIncludeMarketsPayload.marketsByToken, []);
 
     const persistedResponse = await app.inject({
@@ -405,22 +441,31 @@ async function main() {
       normalizeLimitlessScopedTokenId(limitlessRawTokenId),
     );
 
-    const limitlessSyncSkipResponse = await app.inject({
+    const limitlessSyncResponse = await app.inject({
       method: "POST",
       url: "/positions/sync?venue=limitless&force=true",
       headers: limitlessContext.authHeaders,
     });
 
-    assert.equal(limitlessSyncSkipResponse.statusCode, 200);
-    const limitlessSyncSkipPayload = limitlessSyncSkipResponse.json();
-    assert.equal(limitlessSyncSkipPayload.message, "Positions synced");
     assert.equal(
-      limitlessSyncSkipPayload.walletAddress,
+      limitlessSyncResponse.statusCode,
+      200,
+      limitlessSyncResponse.body,
+    );
+    const limitlessSyncPayload = limitlessSyncResponse.json();
+    assert.equal(limitlessSyncPayload.message, "Positions synced");
+    assert.equal(
+      limitlessSyncPayload.walletAddress,
       limitlessContext.signerWallet,
     );
-    assert.equal(limitlessSyncSkipPayload.venue, "limitless");
-    assert.equal(limitlessSyncSkipPayload.status, "skipped");
-    assert.equal(limitlessSyncSkipPayload.skippedReason, "connect_first");
+    assert.equal(limitlessSyncPayload.venue, "limitless");
+    assert.equal(
+      limitlessSyncPayload.heldTokens,
+      0,
+      "public wallet-scoped portfolio reads do not require private trading credentials",
+    );
+    assert.equal(limitlessSyncPayload.upsertedPositions, 0);
+    assert.equal(limitlessSyncPayload.skippedReason, undefined);
 
     const kalshiHideResponse = await app.inject({
       method: "POST",
@@ -440,6 +485,7 @@ async function main() {
       closeLoss: { skippedReason: "non_embedded_wallet" },
     });
   } finally {
+    globalThis.fetch = originalFetch;
     await cleanup(persistedContext);
     await cleanup(derivedContext);
     await cleanup(limitlessContext);

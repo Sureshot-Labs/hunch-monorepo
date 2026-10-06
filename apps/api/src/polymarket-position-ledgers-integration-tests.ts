@@ -24,6 +24,7 @@ import { positionAssetKey } from "./lib/position-asset-context.js";
 import { fetchMarketsByTokenIds } from "./repos/unified-read.js";
 import {
   collectAutoTrackedWalletSnapshotRows,
+  loadAutoTrackedPreviousOpenPositions,
   snapshotFollowedWalletHoldingsEvm,
   snapshotInternalHunchWalletPositions,
   backfillInternalHunchOrderFillActivity,
@@ -508,20 +509,26 @@ try {
   ]);
   let incompleteRpc = false;
   let rpcCalls = 0;
+  let emptyDataApi = false;
+  let zeroPm = false;
+  let zeroCtf = false;
+  const rpcAssets: Array<{ contract: string; ids: string[] }> = [];
   env.priceRefreshQueueEnabled = false;
   globalThis.fetch = async (_input, init) => {
     if (init?.method !== "POST")
       return new Response(
         JSON.stringify({
-          data: [tokenId, sibling].map((id, outcomeIndex) => ({
-            token_id: id,
-            proxy_wallet: wallet,
-            condition_id: conditionId,
-            current_size: 2,
-            avg_price: 0.4,
-            outcome_index: outcomeIndex,
-            redeemable: false,
-          })),
+          data: (emptyDataApi ? [] : [tokenId, sibling]).map(
+            (id, outcomeIndex) => ({
+              token_id: id,
+              proxy_wallet: wallet,
+              condition_id: conditionId,
+              current_size: 2,
+              avg_price: 0.4,
+              outcome_index: outcomeIndex,
+              redeemable: false,
+            }),
+          ),
           pagination: { next_cursor: null },
         }),
         { status: 200 },
@@ -536,17 +543,23 @@ try {
     );
     const isPm =
       body.params[0].to.toLowerCase() === next.positionContract.toLowerCase();
+    rpcAssets.push({
+      contract: body.params[0].to.toLowerCase(),
+      ids: [...ids].map(String),
+    });
     const balances = incompleteRpc
       ? []
-      : [...ids].map((id: bigint) =>
-          isPm
-            ? id.toString() === tokenId
-              ? 2_000_000n
-              : 7_000_000n
-            : id.toString() === tokenId
-              ? 3_000_000n
-              : 0n,
-        );
+      : [...ids]
+          .map((id: bigint) =>
+            isPm
+              ? id.toString() === tokenId
+                ? 2_000_000n
+                : 7_000_000n
+              : id.toString() === tokenId
+                ? 3_000_000n
+                : 0n,
+          )
+          .map((amount) => ((isPm ? zeroPm : zeroCtf) ? 0n : amount));
     return new Response(
       JSON.stringify({
         jsonrpc: "2.0",
@@ -596,6 +609,66 @@ try {
       ["YES", 10],
     ],
   );
+  await db.query(
+    `insert into wallet_position_exposure(wallet_id,as_of,open_positions_version,open_positions)
+    values($1,$2,1,$3::jsonb)`,
+    [
+      trackedWalletId,
+      autoAt,
+      JSON.stringify([
+        { venue: "polymarket", marketId, outcomeSide: "YES", price: "0.7" },
+      ]),
+    ],
+  );
+  const previousOpenPositions = await loadAutoTrackedPreviousOpenPositions(db, {
+    wallets: autoInputs(autoAt).autoTrackedWallets,
+  });
+  assert.deepEqual(
+    new Set(previousOpenPositions.map((row) => row.token_id)),
+    new Set([tokenId, sibling]),
+    "previous-open inventory includes durable CTF and current PM assets after projection replacement",
+  );
+  emptyDataApi = true;
+  zeroPm = true;
+  rpcAssets.length = 0;
+  const inactiveAt = new Date(autoAt.getTime() + 200);
+  const inactive = await collectAutoTrackedWalletSnapshotRows(db, {
+    ...autoInputs(inactiveAt),
+    previousOpenPositions,
+  });
+  assert.equal(inactive.refreshedWallets.length, 1);
+  assert.ok(
+    rpcAssets.some(
+      (request) =>
+        request.contract === legacy.positionContract.toLowerCase() &&
+        request.ids.includes(tokenId),
+    ),
+    "an API-inactive CTF asset is actually read on-chain, never replaced by the current PM ID",
+  );
+  assert.deepEqual(
+    (await readSnapshots(inactiveAt)).map((row) => [
+      row.outcome_side,
+      Number(row.shares),
+    ]),
+    [["YES", 3]],
+    "a positive legacy balance prevents a synthetic zero/SELL snapshot",
+  );
+  zeroCtf = true;
+  const exitedAt = new Date(autoAt.getTime() + 400);
+  const exited = await collectAutoTrackedWalletSnapshotRows(db, {
+    ...autoInputs(exitedAt),
+    previousOpenPositions,
+  });
+  assert.equal(exited.refreshedWallets.length, 1);
+  assert.equal(
+    exited.previousOpenMarketKeys.length,
+    1,
+    "proven zero on every historical ledger still permits a real closure",
+  );
+  assert.equal((await readSnapshots(exitedAt)).length, 0);
+  emptyDataApi = false;
+  zeroPm = false;
+  zeroCtf = false;
   const partialAt = new Date(autoAt.getTime() + 500);
   const partialIndexDb = {
     query: async (sql: string, params: unknown[]) => {

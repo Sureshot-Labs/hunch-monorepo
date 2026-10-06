@@ -2642,9 +2642,19 @@ export async function loadAutoTrackedPreviousOpenPositions(
         "outcomeSide" text,
         price text
       )
-      join unified_tokens token
-        on token.market_id = position."marketId"
-       and token.side = position."outcomeSide"
+      join lateral (
+        select current_token.token_id
+        from unified_tokens current_token
+        where current_token.market_id = position."marketId"
+          and current_token.side = position."outcomeSide"
+          and current_token.venue = subject.venue
+        union
+        select binding_row.asset_id as token_id
+        from polymarket_asset_bindings binding_row
+        where subject.venue = 'polymarket' and binding_row.chain_id = 137
+          and binding_row.market_id = position."marketId"
+          and binding_row.outcome_index = case position."outcomeSide" when 'YES' then 0 when 'NO' then 1 end
+      ) token on true
       where position.venue = subject.venue
         and position."outcomeSide" in ('YES', 'NO')
     `,

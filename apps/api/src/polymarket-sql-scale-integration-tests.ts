@@ -12,6 +12,10 @@ import { createIntegrationTestPool } from "./test-database-target.js";
 import { loadPolymarketHoldingMarkRows } from "./services/polymarket-holding-marks.js";
 import { fetchMarketsByTokenIds } from "./repos/unified-read.js";
 import { polymarketContextFromBinding } from "./services/polymarket-asset-context.js";
+import { fetchPositionMarketRows } from "./services/position-market-rows.js";
+import { fetchPositionsForUserWallet } from "./repos/positions-repo.js";
+import { loadAutoTrackedPreviousOpenPositions } from "./wallet-intel-refresh.js";
+import { runPositionResolutionNotificationProducer } from "./services/position-resolution-producer.js";
 
 const db = await createIntegrationTestPool({
   max: 1,
@@ -34,23 +38,38 @@ try {
     version >= 160000 && version < 170000,
     "parse migrations on PostgreSQL 16",
   );
-  // Run the unmodified migration on representative old rows in a separate
-  // transaction-local schema. Even malformed optional legacy JSON is tolerated.
+  // Run the actual migration on the production legacy identity constraint in a
+  // transaction-local schema. Optional malformed JSON must remain harmless.
   await client.query("savepoint migration_fixture");
   await client.query(`create schema ${fixtureSchema}`);
   await client.query(`set local search_path to ${fixtureSchema}, public`);
   await client.query(`create table positions (
-    user_id uuid not null, wallet_address text, venue text not null, token_id text,
+    user_id uuid not null, wallet_address text, venue text not null, token_id text not null,
     side text, size numeric, legacy_payload jsonb,
     constraint positions_user_id_wallet_address_venue_token_id_key
-      unique (user_id, wallet_address, venue, token_id)
+      unique nulls not distinct (user_id, wallet_address, venue, token_id)
   )`);
   await client.query(
     `insert into positions values
     ($1,'wallet','polymarket','17','LONG',2,'{"assetContext":"malformed"}'),
     ($1,'wallet','limitless','17','FLAT',0,'{}'),
-    ($1,null,'polymarket',null,'LONG',0.000002,'null')`,
+    ($1,null,'polymarket','18','LONG',0.000002,'null')`,
     [suffix],
+  );
+  const nullWalletUpsert = `insert into positions(user_id,wallet_address,venue,token_id,size)
+    values($1,null,'polymarket','18',$2)
+    on conflict on constraint positions_user_id_wallet_address_venue_token_id_key
+    do update set size = excluded.size`;
+  await client.query(nullWalletUpsert, [suffix, 4]);
+  assert.equal(
+    (
+      await client.query(
+        "select count(*)::int as row_count from positions where user_id=$1 and wallet_address is null and venue='polymarket' and token_id='18'",
+        [suffix],
+      )
+    ).rows[0].row_count,
+    1,
+    "the real pre-migration NULL-wallet key is idempotent",
   );
   await client.query(
     await readFile(
@@ -80,6 +99,59 @@ try {
     migrated.every(
       (row) => row.position_contract === "" && row.asset_context === null,
     ),
+  );
+  const migratedConstraint = await client.query<{
+    indnullsnotdistinct: boolean;
+  }>(
+    `select index_row.indnullsnotdistinct
+     from pg_constraint constraint_row
+     join pg_index index_row on index_row.indexrelid = constraint_row.conindid
+     where constraint_row.conrelid = 'positions'::regclass
+       and constraint_row.conname = 'positions_user_id_wallet_address_venue_token_id_key'`,
+  );
+  assert.equal(migratedConstraint.rows[0]?.indnullsnotdistinct, true);
+  await client.query(nullWalletUpsert, [suffix, 5]);
+  await client.query(nullWalletUpsert, [suffix, 6]);
+  assert.deepEqual(
+    (
+      await client.query(
+        "select position_contract, count(*)::int as row_count, sum(size)::text as shares from positions where user_id=$1 and wallet_address is null and venue='polymarket' and token_id='18' group by position_contract order by position_contract",
+        [suffix],
+      )
+    ).rows,
+    [{ position_contract: "", row_count: 1, shares: "6" }],
+    "post-migration legacy upserts update, never duplicate or inflate the holding",
+  );
+  const pmNullWalletUpsert = `insert into positions(user_id,wallet_address,venue,token_id,size,position_contract)
+    values($1,null,'polymarket','18',$2,$3)
+    on conflict on constraint positions_user_id_wallet_address_venue_token_id_key
+    do update set size = excluded.size`;
+  await client.query(pmNullWalletUpsert, [
+    suffix,
+    3,
+    C.positionManager.toLowerCase(),
+  ]);
+  await client.query(pmNullWalletUpsert, [
+    suffix,
+    7,
+    C.positionManager.toLowerCase(),
+  ]);
+  assert.deepEqual(
+    (
+      await client.query(
+        "select position_contract, count(*)::int as row_count, sum(size)::text as shares from positions where user_id=$1 and wallet_address is null and venue='polymarket' and token_id='18' group by position_contract order by position_contract",
+        [suffix],
+      )
+    ).rows,
+    [
+      { position_contract: "", row_count: 1, shares: "6" },
+      {
+        position_contract: C.positionManager.toLowerCase(),
+        row_count: 1,
+        shares: "7",
+      },
+    ],
+    "NULL-wallet deduplication remains independent for colliding CTF and PM identities",
   );
   await client.query(
     "insert into positions(user_id,wallet_address,venue,token_id,size,position_contract) values($1,'wallet','polymarket','17',3,$2)",
@@ -124,6 +196,17 @@ try {
   );
   await client.query("analyze polymarket_asset_bindings");
   await client.query("analyze unified_markets");
+  await client.query("insert into users(id,email) values($1,$2)", [
+    suffix,
+    `sql-scale-${suffix}@example.com`,
+  ]);
+  await client.query(
+    `insert into positions(user_id,wallet_address,venue,token_id,side,size)
+    select $1,'scale-wallet','polymarket',($2::numeric + fixture_row.ordinality)::text,'LONG',2
+    from generate_series(1,1000) as fixture_row(ordinality)`,
+    [suffix, assetBase.toString()],
+  );
+  await client.query("analyze positions");
   const tokens = [1n, 501n, 99999n].map((index) =>
     (assetBase + index).toString(),
   );
@@ -151,7 +234,13 @@ try {
   assert.ok(
     frozenRows.every((row) => row.asset_context?.assetId === row.token_id),
   );
-  const plans: { name: string; executionMs: number; scans: string[] }[] = [];
+  const plans: {
+    name: string;
+    executionMs: number;
+    bufferHits: number;
+    bufferReads: number;
+    scans: string[];
+  }[] = [];
   const explainDb = (name: string) =>
     ({
       query: async (sql: string, params: unknown[]) => {
@@ -165,14 +254,20 @@ try {
         const walk = (node: Record<string, unknown>) => {
           if (typeof node["Relation Name"] === "string")
             scans.push(
-              `${node["Node Type"]}:${node["Relation Name"]}:${node["Actual Rows"]}`,
+              `${node["Node Type"]}:${node["Relation Name"]}:${node["Actual Rows"]}x${node["Actual Loops"]}`,
             );
           for (const child of (node.Plans ?? []) as Record<string, unknown>[])
             walk(child);
         };
         walk(plan.Plan);
-        plans.push({ name, executionMs: plan["Execution Time"], scans });
-        return { rows: [] };
+        plans.push({
+          name,
+          executionMs: plan["Execution Time"],
+          bufferHits: plan.Plan["Shared Hit Blocks"],
+          bufferReads: plan.Plan["Shared Read Blocks"],
+          scans,
+        });
+        return client.query(sql, params);
       },
     }) as unknown as Pick<Pool, "query">;
   await fetchPolymarketAssetBindings(
@@ -193,8 +288,110 @@ try {
     venue: "polymarket",
     marketAssetContexts: contexts,
   });
+  const positionInputs = {
+    userId: suffix,
+    walletAddresses: ["scale-wallet"],
+    venue: "polymarket",
+    minSize: 0,
+  };
+  const filteredPositions = await fetchPositionsForUserWallet(
+    explainDb("position-market-filter") as Pool,
+    {
+      ...positionInputs,
+      marketId: `${marketPrefix}1`,
+    },
+  );
+  assert.equal(filteredPositions.length, 2);
+  await fetchPositionsForUserWallet(
+    explainDb("position-event-filter") as Pool,
+    {
+      ...positionInputs,
+      eventId,
+    },
+  );
+  const absentPositions = await fetchPositionsForUserWallet(
+    explainDb("position-empty-filter") as Pool,
+    {
+      ...positionInputs,
+      marketId: "polymarket:missing-scale-market",
+    },
+  );
+  assert.equal(absentPositions.length, 0);
+  const legacyMetadata = await fetchPositionMarketRows(
+    explainDb("legacy-position-metadata") as Pool,
+    filteredPositions,
+    { venue: "polymarket", includeTop: false },
+  );
+  assert.equal(legacyMetadata.length, 2);
+  await client.query(
+    "insert into wallets(id,address,chain) values($1,$2,'polygon')",
+    [suffix, `scale-${suffix}`],
+  );
+  await client.query(
+    `insert into wallet_position_exposure(wallet_id,as_of,open_positions_version,open_positions)
+    values($1,now(),1,$2::jsonb)`,
+    [
+      suffix,
+      JSON.stringify([
+        {
+          venue: "polymarket",
+          marketId: `${marketPrefix}1`,
+          outcomeSide: "YES",
+          price: "0.5",
+        },
+      ]),
+    ],
+  );
+  const previous = await loadAutoTrackedPreviousOpenPositions(
+    explainDb("previous-open-assets"),
+    {
+      wallets: [
+        {
+          wallet_id: suffix,
+          address: `scale-${suffix}`,
+          chain: "polygon",
+          venue: "polymarket",
+          sources: [],
+          priority: 1,
+        },
+      ],
+    },
+  );
+  assert.equal(previous.length, 1);
+  assert.equal(previous[0]?.token_id, (assetBase + 1n).toString());
+  await client.query(
+    "update unified_markets set resolved_outcome='YES' where id=any($1::text[])",
+    [Array.from({ length: 10 }, (_, index) => `${marketPrefix}${index + 1}`)],
+  );
+  const producer = await runPositionResolutionNotificationProducer({
+    pool: {
+      connect: async () => ({
+        query: (sql: string, params: unknown[]) =>
+          sql.includes("resolved_asset")
+            ? explainDb("resolution-producer").query(sql, params)
+            : client.query(sql, params),
+        release: () => undefined,
+      }),
+    } as unknown as Pool,
+    resolvePolicy: async () => ({
+      effectiveAt: new Date(0).toISOString(),
+      invalidOverride: false,
+      source: "db",
+      policy: {
+        version: 1,
+        positionResolutionProducerEnabled: true,
+        activityEnqueueEnabled: false,
+        positionSignalEnqueueEnabled: false,
+        interestSignalEnqueueEnabled: false,
+        deliveryEnabled: false,
+      },
+    }),
+    createNotification: async () => null,
+  });
+  assert.equal(producer.candidates, 20);
+  assert.equal(producer.notificationsCreated, 0);
   console.log(
-    "[polymarket-sql-scale] PG16 unchanged migrations tolerate legacy rows; 100k bindings/50k markets",
+    "[polymarket-sql-scale] PG16 actual migrations tolerate legacy rows; 100k bindings/50k markets/1k holdings",
     JSON.stringify(plans),
   );
 } finally {

@@ -636,6 +636,8 @@ export async function fetchPositionsForUserWallet(
     walletAddresses: string[];
     venue?: string;
     venues?: string[];
+    marketId?: string;
+    eventId?: string;
     includeHidden?: boolean;
     includeResolved?: boolean;
     minSize?: number;
@@ -684,6 +686,17 @@ export async function fetchPositionsForUserWallet(
     ? `and ((${activePositionSql}) or (${RESOLVED_FLAT_POSITION_SQL}))`
     : "";
 
+  // Resolve filters against the holding's durable market join, not replaceable
+  // token projections. Numeric IDs can be shared by different asset ledgers.
+  let marketReadFilterSql = "";
+  if (inputs.marketId) {
+    params.push(inputs.marketId);
+    marketReadFilterSql = `and m.id = $${params.length}`;
+  } else if (inputs.eventId) {
+    params.push(inputs.eventId);
+    marketReadFilterSql = `and m.event_id = $${params.length}`;
+  }
+
   const { rows } = await pool.query<PositionRow>(
     `
       select
@@ -720,6 +733,7 @@ export async function fetchPositionsForUserWallet(
       ${POSITION_MARKET_JOIN_SQL}
       where p.wallet_case_rank = 1
         ${positionReadFilterSql}
+        ${marketReadFilterSql}
       order by
         position_order_activity.latest_order_at desc nulls last,
         p.last_updated_at desc nulls last,
