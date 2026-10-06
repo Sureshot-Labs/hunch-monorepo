@@ -961,9 +961,11 @@ export async function upsertUnifiedMarket(
 
   const result = await pool.query(query, values);
   const id = result.rows[0].id as string;
-  if (shouldSyncUnifiedMarketTokens(marketRow, existingTokenSource)) {
-    await syncUnifiedMarketTokens(pool, [id]);
-  }
+  await syncChangedOrStaleMarketTokens(
+    pool,
+    [marketRow],
+    shouldSyncUnifiedMarketTokens(marketRow, existingTokenSource) ? [id] : [],
+  );
   return id;
 }
 
@@ -1349,88 +1351,90 @@ export async function upsertUnifiedMarkets(
         changedBatchResult.changeReasons.primary,
       );
     }
-    if (changedBatch.length === 0) continue;
-
-    const loadTokenSourcesStartedAt = Date.now();
-    const existingTokenSources = await loadUnifiedMarketTokenSources(
+    let changedMarketIds: string[] = [];
+    if (changedBatch.length > 0) {
+      const loadTokenSourcesStartedAt = Date.now();
+      const existingTokenSources = await loadUnifiedMarketTokenSources(
+        pool,
+        changedBatch.map((row: UnifiedMarketRow) => row.id),
+      );
+      timings.loadTokenSourcesMs += Date.now() - loadTokenSourcesStartedAt;
+      await preservePolymarketAssetBindings(pool, [
+        ...existingTokenSources.values(),
+        ...changedBatch,
+      ]);
+      const upsertStartedAt = Date.now();
+      if (changedBatchResult.existingMetricsOnlyRows.length > 0) {
+        const updateStartedAt = Date.now();
+        const metricsRows = changedBatchResult.existingMetricsOnlyRows.map(
+          (row) => ({
+            venue: row.venue,
+            venue_market_id: row.venue_market_id,
+            best_bid: row.best_bid,
+            best_ask: row.best_ask,
+            last_price: row.last_price,
+            volume_total: row.volume_total,
+            volume_24h: row.volume_24h,
+            open_interest: row.open_interest,
+            liquidity: row.liquidity,
+            updated_at: row.updated_at,
+            preserve_null_amm_prices: shouldPreserveLimitlessAmmPrices(row),
+          }),
+        );
+        await runWithPgWriteConflictRetry(
+          "updateUnifiedMarketMetrics",
+          metricsRows.length,
+          async () => {
+            const result = await pool.query(metricsUpdateQuery, [
+              JSON.stringify(metricsRows),
+            ]);
+            upsertedRows += result.rowCount ?? 0;
+          },
+        );
+        timings.updateMs += Date.now() - updateStartedAt;
+      }
+      if (changedBatchResult.existingWideRows.length > 0) {
+        const updateStartedAt = Date.now();
+        await runWithPgWriteConflictRetry(
+          "updateUnifiedMarkets",
+          changedBatchResult.existingWideRows.length,
+          async () => {
+            const result = await pool.query(updateQuery, [
+              JSON.stringify(changedBatchResult.existingWideRows),
+            ]);
+            upsertedRows += result.rowCount ?? 0;
+          },
+        );
+        timings.updateMs += Date.now() - updateStartedAt;
+      }
+      if (changedBatchResult.newRows.length > 0) {
+        const insertStartedAt = Date.now();
+        await runWithPgWriteConflictRetry(
+          "insertUnifiedMarkets",
+          changedBatchResult.newRows.length,
+          async () => {
+            const result = await pool.query(insertQuery, [
+              JSON.stringify(changedBatchResult.newRows),
+            ]);
+            upsertedRows += result.rowCount ?? 0;
+          },
+        );
+        timings.insertMs += Date.now() - insertStartedAt;
+      }
+      timings.upsertMs += Date.now() - upsertStartedAt;
+      changedMarketIds = changedBatch
+        .filter((row: UnifiedMarketRow) =>
+          shouldSyncUnifiedMarketTokens(row, existingTokenSources.get(row.id)),
+        )
+        .map((row: UnifiedMarketRow) => row.id);
+    }
+    const tokenSyncStartedAt = Date.now();
+    tokenSyncMarketCount += await syncChangedOrStaleMarketTokens(
       pool,
-      changedBatch.map((row: UnifiedMarketRow) => row.id),
+      batch,
+      changedMarketIds,
     );
-    timings.loadTokenSourcesMs += Date.now() - loadTokenSourcesStartedAt;
-    await preservePolymarketAssetBindings(pool, [
-      ...existingTokenSources.values(),
-      ...changedBatch,
-    ]);
-    const upsertStartedAt = Date.now();
-    if (changedBatchResult.existingMetricsOnlyRows.length > 0) {
-      const updateStartedAt = Date.now();
-      const metricsRows = changedBatchResult.existingMetricsOnlyRows.map(
-        (row) => ({
-          venue: row.venue,
-          venue_market_id: row.venue_market_id,
-          best_bid: row.best_bid,
-          best_ask: row.best_ask,
-          last_price: row.last_price,
-          volume_total: row.volume_total,
-          volume_24h: row.volume_24h,
-          open_interest: row.open_interest,
-          liquidity: row.liquidity,
-          updated_at: row.updated_at,
-          preserve_null_amm_prices: shouldPreserveLimitlessAmmPrices(row),
-        }),
-      );
-      await runWithPgWriteConflictRetry(
-        "updateUnifiedMarketMetrics",
-        metricsRows.length,
-        async () => {
-          const result = await pool.query(metricsUpdateQuery, [
-            JSON.stringify(metricsRows),
-          ]);
-          upsertedRows += result.rowCount ?? 0;
-        },
-      );
-      timings.updateMs += Date.now() - updateStartedAt;
-    }
-    if (changedBatchResult.existingWideRows.length > 0) {
-      const updateStartedAt = Date.now();
-      await runWithPgWriteConflictRetry(
-        "updateUnifiedMarkets",
-        changedBatchResult.existingWideRows.length,
-        async () => {
-          const result = await pool.query(updateQuery, [
-            JSON.stringify(changedBatchResult.existingWideRows),
-          ]);
-          upsertedRows += result.rowCount ?? 0;
-        },
-      );
-      timings.updateMs += Date.now() - updateStartedAt;
-    }
-    if (changedBatchResult.newRows.length > 0) {
-      const insertStartedAt = Date.now();
-      await runWithPgWriteConflictRetry(
-        "insertUnifiedMarkets",
-        changedBatchResult.newRows.length,
-        async () => {
-          const result = await pool.query(insertQuery, [
-            JSON.stringify(changedBatchResult.newRows),
-          ]);
-          upsertedRows += result.rowCount ?? 0;
-        },
-      );
-      timings.insertMs += Date.now() - insertStartedAt;
-    }
-    timings.upsertMs += Date.now() - upsertStartedAt;
-    const changedMarketIds = changedBatch
-      .filter((row: UnifiedMarketRow) =>
-        shouldSyncUnifiedMarketTokens(row, existingTokenSources.get(row.id)),
-      )
-      .map((row: UnifiedMarketRow) => row.id);
-    if (changedMarketIds.length > 0) {
-      tokenSyncMarketCount += changedMarketIds.length;
-      const tokenSyncStartedAt = Date.now();
-      await syncUnifiedMarketTokens(pool, changedMarketIds);
-      timings.tokenSyncMs += Date.now() - tokenSyncStartedAt;
-    }
+    timings.tokenSyncMs += Date.now() - tokenSyncStartedAt;
   }
 
   timings.totalMs = Date.now() - startedAt;
@@ -1714,6 +1718,12 @@ type MarketTokenSource = Pick<
   | "metadata"
 >;
 
+type MarketTokenProjectionSource = Pick<MarketTokenSource, "id" | "venue"> & {
+  token_yes?: string | null;
+  token_no?: string | null;
+  clob_token_ids?: string | null;
+};
+
 function parseClobTokenIds(raw?: string | null): string[] {
   if (!raw) return [];
   try {
@@ -1726,7 +1736,7 @@ function parseClobTokenIds(raw?: string | null): string[] {
 }
 
 function buildMarketTokenRows(
-  market: MarketTokenSource,
+  market: MarketTokenProjectionSource,
 ): UnifiedMarketTokenRow[] {
   const tokens: UnifiedMarketTokenRow[] = [];
   const seen = new Set<string>();
@@ -1810,7 +1820,11 @@ function resolvePersistedMarketTokenSource(
 }
 
 function buildMarketTokenSignature(source: MarketTokenSource): string[] {
-  return buildMarketTokenRows(source)
+  return buildMarketTokenRowSignature(buildMarketTokenRows(source));
+}
+
+function buildMarketTokenRowSignature(rows: UnifiedMarketTokenRow[]): string[] {
+  return rows
     .map(
       (row) => `${row.venue}:${row.token_id}:${row.outcome_side ?? "__NULL__"}`,
     )
@@ -1838,6 +1852,72 @@ function shouldSyncUnifiedMarketTokens(
     if (currentSignature[index] !== nextSignature[index]) return true;
   }
   return false;
+}
+
+async function syncChangedOrStaleMarketTokens(
+  pool: Pool,
+  batch: MarketTokenSource[],
+  changedMarketIds: string[],
+): Promise<number> {
+  const syncIds = new Set(changedMarketIds);
+  const probeIds = batch
+    .filter((row) => row.venue === "polymarket" && !syncIds.has(row.id))
+    .map((row) => row.id);
+  if (probeIds.length > 0) {
+    // Source writes and projection replacement are separate commits. A failed
+    // sync must be repairable even when the next source payload is identical
+    // or only changes prices. Read both projections by the incoming market IDs;
+    // healthy/no-op refreshes must not rewrite them or scan unrelated tokens.
+    const { rows } = await pool.query<
+      MarketTokenProjectionSource & {
+        market_tokens: UnifiedMarketTokenRow[];
+        tokens: UnifiedMarketTokenRow[];
+      }
+    >(
+      `
+        select market_row.id, market_row.venue, market_row.token_yes,
+          market_row.token_no, market_row.clob_token_ids,
+          market_projection.market_tokens, side_projection.tokens
+        from unified_markets market_row
+        cross join lateral (
+          select coalesce(jsonb_agg(jsonb_build_object(
+            'market_id', token_row.market_id, 'token_id', token_row.token_id,
+            'venue', token_row.venue, 'outcome_side', token_row.outcome_side
+          )), '[]'::jsonb) as market_tokens
+          from unified_market_tokens token_row
+          where token_row.market_id = market_row.id
+        ) market_projection
+        cross join lateral (
+          select coalesce(jsonb_agg(jsonb_build_object(
+            'market_id', token_row.market_id, 'token_id', token_row.token_id,
+            'venue', token_row.venue, 'outcome_side', token_row.side
+          )), '[]'::jsonb) as tokens
+          from unified_tokens token_row
+          where token_row.market_id = market_row.id
+        ) side_projection
+        where market_row.id = any($1::text[]) and market_row.venue = 'polymarket'
+      `,
+      [probeIds],
+    );
+    for (const row of rows) {
+      const expected = buildMarketTokenRows(row);
+      const expectedSides = expected.filter(
+        (token) => token.outcome_side != null,
+      );
+      if (
+        JSON.stringify(buildMarketTokenRowSignature(expected)) !==
+          JSON.stringify(buildMarketTokenRowSignature(row.market_tokens)) ||
+        JSON.stringify(buildMarketTokenRowSignature(expectedSides)) !==
+          JSON.stringify(buildMarketTokenRowSignature(row.tokens))
+      ) {
+        syncIds.add(row.id);
+      }
+    }
+  }
+  // The existing locked sync re-reads current sources; a concurrent update
+  // cannot turn a stale diagnostic snapshot into a generation-reverting write.
+  await syncUnifiedMarketTokens(pool, [...syncIds]);
+  return syncIds.size;
 }
 
 export async function syncUnifiedMarketTokens(

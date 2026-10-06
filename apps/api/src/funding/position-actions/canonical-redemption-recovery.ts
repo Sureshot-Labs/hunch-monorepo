@@ -17,6 +17,7 @@ import {
 } from "../../services/polygon-rpc.js";
 import {
   canonicalRedemptionIdentity as identity,
+  positionActionSubmissionStartSeconds,
   matchesCanonicalRedemption,
   CANONICAL_CTF_ABI as CTF,
   CANONICAL_CTF_PAYOUT_TOPIC as PAYOUT_TOPIC,
@@ -82,8 +83,8 @@ export async function discoverCanonicalRedemption(
     blockHash: budgeted(rpc.blockHash),
   };
   const finalized = await rpc.finalizedBlock();
-  const start = BigInt(Math.floor(startedAt.getTime() / 1000));
-  if (start < 60n) return null;
+  const start = positionActionSubmissionStartSeconds(operation, startedAt);
+  if (start == null || start < 60n) return null;
   const from = await lowerBlock(rpc, finalized, start - 60n);
   const end = await lowerBlock(rpc, finalized, start + 10n * 60n);
   if (from === null || end === null || end < from || end - from > 5000n)
@@ -126,6 +127,9 @@ export async function discoverCanonicalRedemption(
     )
       return null;
     if (!matchesCanonicalRedemption(operation, ctfAddress, receipt)) continue;
+    const timestamp = await rpc.timestamp(BigInt(receipt.blockNumber));
+    if (timestamp == null) return null;
+    if (timestamp < start) continue;
     const canonicalHash = await rpc.blockHash(receipt.blockNumber);
     if (!canonicalHash || !eq(canonicalHash, receipt.blockHash)) return null;
     matches.push(hash);

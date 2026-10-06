@@ -1,14 +1,14 @@
 import type { Pool } from "@hunch/infra";
 import type { PgParams } from "../server-types.js";
-import { POLYMARKET_PROTOCOL_CONTRACTS } from "@hunch/shared";
-import { polymarketOrderStorageContractSql } from "../lib/polymarket-order-ledger-sql.js";
+import {
+  polymarketOrderBindingJoinSql,
+  polymarketOrderMarketIdSql,
+  polymarketOrderOutcomeSideSql,
+} from "../lib/polymarket-order-ledger-sql.js";
 
-const ORDER_MARKET_ID_SQL = `(case when o.venue = 'polymarket' then coalesce(nullif(o.order_payload->'assetContext'->>'marketId', ''), order_binding.market_id, ut.market_id) else ut.market_id end)`;
+const ORDER_MARKET_ID_SQL = polymarketOrderMarketIdSql("o", "ut.market_id");
 const ORDER_MARKET_JOIN_SQL = `
-  left join polymarket_asset_bindings order_binding
-    on o.venue = 'polymarket' and order_binding.chain_id = 137
-   and order_binding.asset_id = o.token_id
-   and order_binding.position_contract = coalesce(nullif(${polymarketOrderStorageContractSql("o")}, ''), '${POLYMARKET_PROTOCOL_CONTRACTS.conditionalTokens.toLowerCase()}')
+  ${polymarketOrderBindingJoinSql("o")}
   left join unified_tokens ut on ut.token_id = o.token_id and ut.venue = o.venue
 `;
 
@@ -328,10 +328,7 @@ const buildOrdersSelect = (whereClause: string): string => `
     select
       o.*,
       ${ORDER_MARKET_ID_SQL} as market_id,
-      case when o.venue = 'polymarket' then coalesce(
-        case o.order_payload->'assetContext'->>'outcomeIndex' when '0' then 'YES' when '1' then 'NO' end,
-        case order_binding.outcome_index when 0 then 'YES' when 1 then 'NO' end,
-        upper(ut.side)) else null end as resolved_outcome_side,
+      case when o.venue = 'polymarket' then ${polymarketOrderOutcomeSideSql("o", "upper(ut.side)")} else null end as resolved_outcome_side,
       row_number() over (
         partition by o.user_id, o.venue, o.venue_order_id
         order by

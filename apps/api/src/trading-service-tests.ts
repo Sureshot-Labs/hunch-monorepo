@@ -2051,6 +2051,75 @@ const tests: TestCase[] = [
     },
   },
   {
+    name: "Polymarket live SELL locks keep frozen condition identity across CTF/PM token collisions",
+    run: () => {
+      const wallet = "0x0000000000000000000000000000000000000010";
+      const ctfCondition = `0x${"a".repeat(64)}`;
+      const pmCondition = `0x${"b".repeat(64)}`;
+      const orders = [
+        {
+          asset_id: "123",
+          maker_address: wallet,
+          market: ctfCondition,
+          original_size: "7",
+          size_matched: "0",
+          side: "SELL",
+          type: "GTC",
+        },
+        {
+          asset_id: "123",
+          maker_address: wallet,
+          market: pmCondition.toUpperCase().replace("0X", "0x"),
+          original_size: "3",
+          size_matched: "1",
+          side: "SELL",
+          type: "GTD",
+        },
+      ];
+      const key = polymarketPositionLockKey(wallet, "123");
+      assert.equal(
+        computePolymarketClobOpenPositionLocks({
+          orders,
+          wallet,
+          conditionId: pmCondition,
+        }).get(key),
+        2_000_000n,
+      );
+      assert.equal(
+        computePolymarketClobOpenPositionLocks({
+          orders,
+          wallet,
+          conditionId: ctfCondition,
+        }).get(key),
+        7_000_000n,
+      );
+      assert.equal(
+        computePolymarketClobOpenPositionLocks({ orders, wallet }).get(key),
+        9_000_000n,
+        "contextless legacy behavior is unchanged",
+      );
+      for (const market of [undefined, "", "unknown"])
+        assert.equal(
+          computePolymarketClobOpenPositionLocks({
+            wallet,
+            conditionId: pmCondition,
+            orders: [...orders, { ...orders[0], market, original_size: "1" }],
+          }).get(key),
+          3_000_000n,
+          "unknown upstream provenance must not free a possible selected-asset lock",
+        );
+      assert.equal(
+        computePolymarketClobOpenPositionLocks({
+          orders: [{ ...orders[0], market: pmCondition }],
+          wallet,
+          conditionId: pmCondition,
+        }).get(key),
+        7_000_000n,
+        "matching condition locks are never bypassed",
+      );
+    },
+  },
+  {
     name: "Privy server signer inspector enforces quorum, policy, grant and revoke lifecycle",
     run: async () => {
       const keyPair = crypto.generateKeyPairSync("ec", {

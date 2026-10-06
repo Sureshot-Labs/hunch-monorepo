@@ -13,6 +13,18 @@ export const POSITION_BOUND_OR_PROJECTED_MARKET_SQL = `
   ) umt
 `;
 
+/** Lightweight identity lookup for readers that do not need price/PnL joins. */
+export const POSITION_TOKEN_MARKET_JOIN_SQL = `
+  ${POSITION_ASSET_BINDING_JOIN_SQL}
+  left join unified_tokens projected_market_token
+    on projected_market_token.token_id = p.token_id
+   and projected_market_token.venue = p.venue
+  cross join lateral (
+    select coalesce(position_binding.market_id, projected_market_token.market_id) as market_id,
+      coalesce(case position_binding.outcome_index when 0 then 'YES' when 1 then 'NO' end, projected_market_token.side) as outcome_side
+  ) umt
+`;
+
 const POSITION_MARKET_CONTEXT_SQL = `
   left join unified_markets m
     on m.id = umt.market_id

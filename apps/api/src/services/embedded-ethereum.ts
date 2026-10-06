@@ -5,6 +5,11 @@ import type { User } from "../auth.js";
 import { env } from "../env.js";
 import { createEvmRpcProvider } from "./rpc-client-factory.js";
 import {
+  fetchEvmFinalizedBlockNumber,
+  fetchEvmBlockHash,
+  fetchEvmBlockTimestamp,
+} from "./polygon-rpc.js";
+import {
   type PrivyWalletApiClient,
   type PrivyWalletApiRequestSignatureInput,
   type PrivyWalletProfile,
@@ -728,18 +733,62 @@ export async function waitForEmbeddedEthereumTransactionReceipt(inputs: {
 export async function fetchEmbeddedEthereumTransactionReceipt(inputs: {
   chainId: number;
   txHash: string;
+  requireFinalized?: boolean;
 }): Promise<{
   blockNumber: number;
+  blockHash: string;
+  blockTimestamp: bigint | null;
   logs: Array<{ address: string; data: string; topics: readonly string[] }>;
   succeeded: boolean;
   transactionHash: string;
 } | null> {
-  const receipt = await evmProviderForChain(
-    inputs.chainId,
-  ).getTransactionReceipt(inputs.txHash);
+  const provider = evmProviderForChain(inputs.chainId);
+  const receipt = await provider.getTransactionReceipt(inputs.txHash);
   if (!receipt) return null;
+  let blockTimestamp: bigint | null = null;
+  if (inputs.requireFinalized) {
+    if (
+      !Number.isSafeInteger(receipt.blockNumber) ||
+      receipt.blockNumber < 0 ||
+      typeof receipt.blockHash !== "string" ||
+      !/^0x[0-9a-fA-F]{64}$/.test(receipt.blockHash) ||
+      receipt.hash.toLowerCase() !== inputs.txHash.toLowerCase()
+    )
+      return null;
+    const rpcUrl = resolveEvmRpcUrl(inputs.chainId);
+    if (!rpcUrl) return null;
+    const configuredTimeout =
+      inputs.chainId === 137
+        ? env.polygonRpcTimeoutMs
+        : inputs.chainId === 8453
+          ? env.baseRpcTimeoutMs
+          : 4000;
+    const network = {
+      rpcUrl,
+      timeoutMs: Math.min(configuredTimeout, 4000),
+      maxAttempts: 1,
+    };
+    const finalized = await fetchEvmFinalizedBlockNumber(network);
+    if (BigInt(receipt.blockNumber) > finalized) return null;
+    const [canonicalHash, timestamp] = await Promise.all([
+      fetchEvmBlockHash({ ...network, blockNumber: receipt.blockNumber }),
+      fetchEvmBlockTimestamp({
+        ...network,
+        blockNumber: BigInt(receipt.blockNumber),
+      }),
+    ]);
+    if (
+      !canonicalHash ||
+      timestamp == null ||
+      canonicalHash.toLowerCase() !== receipt.blockHash.toLowerCase()
+    )
+      return null;
+    blockTimestamp = timestamp;
+  }
   return {
     blockNumber: receipt.blockNumber,
+    blockHash: receipt.blockHash,
+    blockTimestamp,
     logs: receipt.logs.map((log) => ({
       address: log.address,
       data: log.data,

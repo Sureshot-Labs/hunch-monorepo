@@ -17,6 +17,20 @@ export const CANONICAL_CTF_PAYOUT_TOPIC = ethers.id(
 );
 const eq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
+/** Claims are journaled before wallet dispatch. Legacy recovery already has
+ * the durable attempt time; old actions without an attempt fall back to creation.
+ * Block timestamps have whole-second precision and there is no expiry bound.
+ */
+export function positionActionSubmissionStartSeconds(
+  operation: StoredPositionAction,
+  attemptStartedAt?: Date,
+): bigint | null {
+  const started = (attemptStartedAt ?? operation.createdAt)?.getTime();
+  return typeof started === "number" && Number.isFinite(started) && started >= 0
+    ? BigInt(Math.floor(started / 1000))
+    : null;
+}
+
 type RecoveryIdentity = {
   owner: string;
   ctf: string;

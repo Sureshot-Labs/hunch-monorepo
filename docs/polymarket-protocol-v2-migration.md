@@ -382,11 +382,18 @@ incoming-after-claim fixtures for postconditions and frontend cache effects.
 - Read balances from the ledger of each binding. Old CTF zero does not mean a
   PositionManager holding vanished. Partial/error/dust-filtered Data API pages
   are never complete evidence for flattening holdings.
-- Index PositionManager ERC-1155 `TransferSingle`/`TransferBatch`, including
-  mint/burn, with ledger/chain/transaction/log identity and reorg-safe replay.
-  Exchange/Router/module events add operation attribution, not a second balance
-  credit. Protocol unsafe transfers/mints do not invoke receiver callbacks;
-  callback hooks cannot be the sole deposit/position detector.
+- Reconcile PositionManager ERC-1155 `TransferSingle`/`TransferBatch`, including
+  mint/burn, in operation receipts with exact ledger/transaction/log identity
+  and the existing canonical receipt/reorg lifecycle. Exchange/Router/module
+  events add operation attribution, not a second balance credit. Holdings
+  discovery uses complete Data API pages plus per-ledger RPC balance reads,
+  including retained historical bindings. Protocol unsafe transfers/mints do
+  not invoke receiver callbacks; callback hooks cannot be the sole detector.
+  A standalone, full-chain ERC-1155 transfer/replay indexer is not implemented
+  by the current Hunch indexer (which ingests Gamma/CLOB), for either ledger.
+  The initial plan overstated that implementation requirement: it is a separate
+  architecture extension, not evidence supplied by the receipt parser and not
+  a prerequisite for the existing interactive holdings/reconciliation paths.
 - Native Binary/NegRisk conditions have no legacy `ConditionPreparation` event.
   Combo and registration events have their own context. Keep module type and
   condition/event binding; a legacy CTF event parser cannot discover all V2.
@@ -811,13 +818,132 @@ transfer paths omit receiver callbacks but emit TransferSingle/TransferBatch.
 Do not mistake this for removal of every inherited safe-transfer selector.
 See the [pinned PositionManager implementation](https://github.com/Polymarket/polymarket-v2-external/blob/741f8bbe88c3f29a1c55d1248a3dd411f622f111/src/positionManager/PositionManager.sol).
 
+## 13. Historical-reader review follow-up (2026-10-06)
+
+The review scope is interactive web and Telegram Mini App/web App Handoff with
+user signatures. New server/delegated signing and policy provisioning remain
+outside this acceptance. Local code readiness does not establish real relayer
+allowlist acceptance, a Privy user signature, or V2 CLOB settlement.
+
+After current CTF token projections are replaced, durable historical bindings
+must remain the identity source for every historical reader, not just the
+portfolio. The follow-up covers Telegram history, position/interest recipients,
+notification market/outcome labels, linked-order recovery, both For You routes
+and stale holding price refresh. Orders use the existing frozen-context-first
+rule through shared SQL fragments; positions use the exact ledger binding.
+Interest matching retains scoped-market-first joins and notification consent,
+revision and deduplication checks. Recovery only recognizes the already stored
+order: it does not submit or revive a Buy.
+
+Live SELL locks also use the selected frozen condition ID: a canonically
+different upstream market cannot lock an identically numbered asset in this
+holding. Missing/malformed upstream market provenance remains conservatively
+locked. The CTF SELL 7 / PM SELL 2 fixture keeps PM locked at 2, not 9, while
+contextless legacy lock behavior is unchanged.
+
+Recipient selection and notification identity lookup are bounded market/asset
+first. PostgreSQL 16 EXPLAIN regression fixtures include 20,000 unrelated
+holdings and 10,000 unrelated markets, counting scanned and filtered rows rather
+than relying on an absolute timing threshold. These are local synthetic
+plan checks, not production latency measurements.
+
+Wallet-intel visibility uses the actual ledger-qualified snapshot assets, not
+the current pricing token. A hidden PM asset cannot suppress a visible CTF
+asset; all-hidden assets stay hidden, with legacy/malformed metadata handled
+without a SQL exception. No financial rows are rewritten by these readers.
+
+`polymarket-historical-readers-integration-tests.ts` executes actual production
+SQL on PostgreSQL 16 with a CTF YES / PM NO numeric-ID collision across two
+markets. It verifies labels, feed weights, recipient ownership/consent,
+linked-order recognition, pricing refresh and snapshot visibility. Financial
+and outbox fixtures are rolled back; only local synthetic market ingress is
+committed and then exactly cleaned up. No message delivery, signatures,
+transfers, remote calls or historical-order continuation occurs in this test.
+
+The frontend portfolio fallback PNL algorithm is shared by desktop/mobile;
+the extraction preserves resolved/empty/unknown/flat semantics and ledger-aware
+marks. Its fixture executes both actual consumer callbacks and checks mixed
+CTF/PM, Limitless and Kalshi cases. Remaining desktop/mobile presentation
+duplication and independent protocol validation across repositories must not
+be removed merely to obtain a cosmetic zero-duplication score.
+
+### Known-hash receipt finality follow-up
+
+The common EVM position-action observer now opts into finalized receipt reads.
+Before any terminal success or revert transition it verifies the exact returned
+transaction hash, finalized height and canonical block hash using bounded RPC
+reads. Block identity and finality are preserved in receipt evidence. A mined,
+missing, orphaned or RPC-unavailable receipt cannot produce a completed action
+or redemption notification; the existing standalone reconciliation queue retries
+the same operation/reference without another submission. Positive/zero payout
+and legitimate residual holdings complete only after canonical finalized proof.
+
+The opt-in protects both Polymarket and Limitless EVM position actions. Other
+consumers of the shared transaction-receipt reader retain their original mode.
+Fixtures cover pre-final success/revert, orphan, missing receipt, temporary RPC
+failure, canonical re-inclusion, final revert and recovery with unchanged
+submission-attempt count. This is a prevention/verification change in local
+code, not a production rewrite of previously completed historical operations.
+
+Known-hash receipts also retain canonical block time and must not predate the
+durable submission claim. The existing attempt start is captured with database
+`clock_timestamp()` at journal insertion after the row lock, before wallet dispatch, with
+whole-second chain timestamp precision and no maximum mining/reporting age.
+Old actions without an attempt fall back to action creation. The same pure temporal rule applies to direct observation and
+missing-reference discovery; the discovery search buffer is not permission to
+accept an earlier receipt.
+
+A proven pre-claim hash is quarantined with its diagnostic evidence, not treated
+as a success or revert of the new action. The broadcast fence remains active;
+the same attempt accepts a late correct report or automatically discovers its
+current canonical receipt. It never dispatches a replacement transaction.
+PG16 fixtures cover historical positive/zero receipts, stale observer fencing,
+automatic repair with both old/current candidates, nonzero residuals and an
+unchanged submission-attempt count. Claims are not refreshed during a replay.
+
+The broad follow-up run passed all 262 ordinary unit-selected files and 103
+Node subtests. The remaining four unit-selected files were run separately:
+the module-mocking route fixture with its documented Node flag, and three
+legacy PostgreSQL fixtures with their exact guarded local database names.
+All four passed. Updated intel/signal assertions now check scoped current and
+historical identity instead of obsolete SQL spelling; the legacy market-info
+schema fixture includes the existing nullable outcome columns. No production
+schema, SQL guard, test assertion or operational automation was weakened.
+The 24 guarded PG16 integration groups and frontend 1655-test suite also pass.
+These counts are not a claim that every unrelated integration suite ran.
+
+### Interrupted projection follow-up
+
+Source-market writes and current token projections are separate transactions.
+Both single and bulk ingress now detect missing/stale Polymarket projections
+even when the incoming source is identical or only updates metrics. Detection
+uses the same canonical token builder as replacement, scoped to incoming market
+IDs and both token tables; only mismatched markets enter the existing locked
+replacement transaction. Healthy no-op/metrics-only refreshes perform no token
+writes. Replacement re-reads the source under ordered locks, so a concurrent
+source update cannot make a stale diagnostic snapshot restore an old generation.
+Historical bindings stay append-only; other venues retain their existing paths.
+
+The PG16 interrupted-transition fixture commits the source update, injects a
+projection-checkout failure, then proves identical and metrics-only retries
+repair both tables. It also covers single ingress, independent missing/wrong-side
+projections and an indexed EXPLAIN with 20,000 unrelated markets/tokens. This is
+retry repair on the next ingestion refresh, not a claim of source/projection
+atomicity or a new perpetual repair worker. The older token-sync fixture now uses
+the actual binding migration and current source/side projection schema; an
+early replacement error terminates its concurrency wait instead of hanging.
+All eight token-sync/Timescale regressions and the indexer bulk-upsert telemetry
+fixture passed after this change, alongside the repeated 262-file unit suite
+and full workspace build/lint.
+
 Frontend standard Turbopack builds on available Node 26.8.1 and bundled Node
 24.19.0 fail with an environment `EPERM` when a CSS/PostCSS worker creates a
 process/binds a port. Node 26 webpack compilation/prerender/build completed;
 its transitive Privy optional-module and dynamic-require warnings are not proof
 of new migration failure. The user chose available Node verification without
 downloading Node 20. The actual Node 20/Turbopack deploy build therefore remains
-unverified; neither webpack success nor unit tests are a deployment GO.
+unverified. The user explicitly waived that parity gate for this code-release
+review; this is not a claim of deploy-equivalent verification or live execution.
 
 The authenticated CLOB `CONDITIONAL-V2` call, actual V2 Safe/Deposit Wallet
 signature/relayer acceptance and BUY/SELL/cancel/redeem settlement still require
@@ -838,5 +964,5 @@ The primary implementation was reviewed against these invariants and corrected
 iteratively; the independent reviews cited in section 11 were documentation
 reviews only. Do not describe them as fresh independent implementation GO.
 Commit/readiness review must include all added files, not only `git diff` of
-tracked files. A final execution GO requires the outstanding build and live
+tracked files. A final live execution GO requires separately authorized live
 acceptance checks above, with no implicit authorization for funds or policies.

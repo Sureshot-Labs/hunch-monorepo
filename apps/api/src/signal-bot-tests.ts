@@ -3321,10 +3321,23 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           if (sql.includes("from ai_notes n")) {
             return { rows: [noteRow()] };
           }
-          if (sql.includes("from positions p")) {
-            assert.match(sql, /ut\.market_id = \$1/);
+          if (
+            sql.includes("from scoped_tokens scoped_token") &&
+            sql.includes("join positions p")
+          ) {
+            assert.match(sql, /from unified_markets where id = \$1::text/);
+            assert.match(sql, /join polymarket_asset_bindings binding/);
+            assert.match(sql, /binding\.market_id = m\.id/);
+            assert.match(sql, /p\.token_id = scoped_token\.token_id/);
+            assert.match(sql, /p\.venue = scoped_token\.venue/);
+            assert.match(
+              sql,
+              /p\.position_contract = scoped_token\.position_contract/,
+            );
             assert.match(sql, /p\.position_scope = 'own'/);
             assert.match(sql, /p\.size > 0/);
+            assert.match(sql, /coalesce\(p\.is_hidden, false\) = false/);
+            assert.match(sql, /preference\.reachable = true/);
             assert.match(
               sql,
               /root_delivery\.status in \('pending', 'retry', 'sending', 'sent'\)/,

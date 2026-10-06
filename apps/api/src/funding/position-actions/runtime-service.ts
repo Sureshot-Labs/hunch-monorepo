@@ -49,12 +49,14 @@ import {
   claimPositionActionSubmission,
   completePositionActionEffect,
   fetchPositionActionNotificationFacts,
+  fetchPositionActionSubmissionStartedAt,
   createOrReplayPositionAction,
   failPositionActionEffect,
   fetchPositionActionByIdempotencyKey,
   fetchPositionActionForUser,
   markStalePositionActionClaimForRecovery,
   POSITION_ACTION_SUBMISSION_REPORT_GRACE_MS,
+  quarantinePreClaimPositionActionReference,
   recordPositionActionPostconditions,
   recordPositionActionReceipt,
   recordPositionActionSubmission,
@@ -841,10 +843,24 @@ export class PositionActionRuntimeService {
       plan,
       transactionHash: txHash,
       operation,
+      submissionStartedAt:
+        (await fetchPositionActionSubmissionStartedAt(this.db, {
+          userId,
+          operationId,
+        })) ?? undefined,
       conditionalTokensAddress:
         plan.positionContract ?? driver.conditionalTokensAddress(),
     });
     if (!receipt) return publicResult(operation);
+    if (receipt.evidence.receiptPrecedesClaim === true) {
+      operation = await quarantinePreClaimPositionActionReference(this.db, {
+        userId,
+        operationId,
+        expectedTransactionHash: txHash,
+        receiptEvidence: receipt.evidence,
+      });
+      return publicResult(operation);
+    }
     operation = await recordPositionActionReceipt(this.db, {
       userId,
       operationId,

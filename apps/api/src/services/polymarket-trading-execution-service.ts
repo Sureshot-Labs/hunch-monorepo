@@ -6407,6 +6407,7 @@ export async function resolvePolymarketAvailablePositionRaw(inputs: {
   const liveLocks = computePolymarketClobOpenPositionLocks({
     orders: extractOrderArray(upstream.payload),
     wallet: funder,
+    conditionId: assetContext?.conditionId,
   });
   const lockedRaw = maxRaw(localLocks.get(key), liveLocks.get(key));
   const balanceRaw = balances.get(inputs.tokenId) ?? 0n;

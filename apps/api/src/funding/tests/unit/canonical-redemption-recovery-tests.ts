@@ -239,6 +239,15 @@ assert.equal(
 assert.equal(
   await discoverCanonicalRedemption(operation, start, ctf, {
     ...rpc,
+    timestamp: async (block) =>
+      block === 1250n ? 1_001_199n : rpc.timestamp(block),
+  }),
+  null,
+  "the search buffer cannot attribute a receipt predating the claim",
+);
+assert.equal(
+  await discoverCanonicalRedemption(operation, start, ctf, {
+    ...rpc,
     blockHash: async () => ethers.ZeroHash,
   }),
   null,

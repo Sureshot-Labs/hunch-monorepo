@@ -1,4 +1,8 @@
 import type { DbQuery } from "../db.js";
+import {
+  polymarketOrderBindingJoinSql,
+  polymarketOrderMarketIdSql,
+} from "../lib/polymarket-order-ledger-sql.js";
 import { sumErc20TransfersTo } from "../funding/execution/evm-erc20-receipt.js";
 import { isRecord } from "../lib/type-guards.js";
 import { persistedTradeTerminalOutcome } from "../funding/persistence/funding-trade-consumer-status.js";
@@ -624,19 +628,17 @@ async function inspectLinkedLocalOrder(
             stored_order.size,
             stored_order.filled_size
        from orders stored_order
+       ${polymarketOrderBindingJoinSql("stored_order")}
+       left join unified_tokens market_token
+         on market_token.venue = stored_order.venue
+        and market_token.token_id = stored_order.token_id
       where stored_order.id = $1::uuid
         and stored_order.user_id = $2::uuid
         and stored_order.venue = $3::text
         and stored_order.side = $4::text
         and ($6::uuid is null or stored_order.funding_operation_id = $6::uuid)
         and ($7::uuid is null or stored_order.funding_reservation_id = $7::uuid)
-        and exists (
-          select 1
-            from unified_tokens market_token
-           where market_token.market_id = $5::text
-             and market_token.venue = stored_order.venue
-             and market_token.token_id = stored_order.token_id
-        )
+        and ${polymarketOrderMarketIdSql("stored_order", "market_token.market_id")} = $5::text
       limit 1`,
     [
       row.order_id,

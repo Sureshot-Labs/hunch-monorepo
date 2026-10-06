@@ -1,4 +1,6 @@
 import type { Pool } from "@hunch/infra";
+import { POLYMARKET_PROTOCOL_CONTRACTS } from "@hunch/shared";
+import { SCOPED_MARKET_HOLDING_ASSETS_SQL } from "../lib/market-holding-assets-sql.js";
 
 import type { DbQuery } from "../db.js";
 import {
@@ -726,17 +728,20 @@ export async function enqueueTelegramPositionSignals(input: {
         const { rows: recipients } =
           await client.query<PositionSignalRecipientRow>(
             `
+              with scoped_markets as materialized (
+                select id, event_id, venue from unified_markets where id = $1::text
+              ), ${SCOPED_MARKET_HOLDING_ASSETS_SQL}
               select
                 p.user_id,
-                array_agg(distinct upper(ut.side))
-                  filter (where upper(ut.side) in ('YES', 'NO')) as held_sides,
+                array_agg(distinct upper(scoped_token.outcome_side))
+                  filter (where upper(scoped_token.outcome_side) in ('YES', 'NO')) as held_sides,
                 max(coalesce(p.last_updated_at, p.updated_at))::text as position_snapshot_at,
                 root_delivery.telegram_message_id as root_telegram_message_id
                 ,root_delivery.id as root_delivery_id
-              from positions p
-              join unified_tokens ut
-                on ut.token_id = p.token_id
-               and ut.venue = p.venue
+              from scoped_tokens scoped_token
+              join positions p on p.token_id = scoped_token.token_id
+                and p.venue = scoped_token.venue
+                and p.position_contract = scoped_token.position_contract
               join telegram_notification_preferences preference
                 on preference.user_id = p.user_id
                and preference.reachable = true
@@ -749,8 +754,7 @@ export async function enqueueTelegramPositionSignals(input: {
                and root_delivery.topic in ('position_signals', 'interest_signals')
                and root_delivery.note_id = $3::uuid
                and root_delivery.status in ('pending', 'retry', 'sending', 'sent')
-              where ut.market_id = $1
-                and p.position_scope = 'own'
+              where p.position_scope = 'own'
                 and p.size > 0
                 and coalesce(p.is_hidden, false) = false
                 and (
@@ -1192,6 +1196,9 @@ async function loadTelegramNotificationMarket(input: {
   const marketId = readString(data, "marketId");
   const tokenId = readString(data, "tokenId");
   const venue = readString(data, "venue");
+  const positionContract =
+    readString(data, "positionContract")?.toLowerCase() ||
+    POLYMARKET_PROTOCOL_CONTRACTS.conditionalTokens.toLowerCase();
   if (!marketId && !tokenId) return null;
 
   const { rows } = await input.db.query<{
@@ -1201,27 +1208,39 @@ async function loadTelegramNotificationMarket(input: {
     title: string | null;
   }>(
     `
+      with token_context as materialized (
+        select binding.market_id,
+          case binding.outcome_index when 0 then 'YES' when 1 then 'NO' end as side,
+          0 as identity_rank
+        from polymarket_asset_bindings binding
+        where binding.chain_id = 137 and binding.asset_id = $2::text
+          and binding.position_contract = $4::text
+          and ($3::text is null or $3 = 'polymarket')
+        union all
+        select token.market_id, token.side, 1
+        from unified_tokens token
+        where token.token_id = $2::text and ($3::text is null or token.venue = $3)
+          and (token.venue <> 'polymarket' or not exists (
+            select 1 from polymarket_asset_bindings binding
+            where binding.chain_id = 137 and binding.asset_id = $2::text
+          ))
+      )
       select
         market.id as market_id,
         market.event_id,
         market.title,
-        token.side
-      from unified_markets market
-      left join unified_tokens token
-        on token.market_id = market.id
-       and $2::text is not null
-       and token.token_id = $2
-       and ($3::text is null or token.venue = $3)
-      where ($1::text is not null and market.id = $1)
-         or (
-           $2::text is not null
-           and token.token_id = $2
-           and ($3::text is null or token.venue = $3)
-         )
-      order by case when market.id = $1 then 0 else 1 end
+        token_context.side
+      from (
+        select $1::text as market_id, 0 as target_rank where $1::text is not null
+        union all
+        select market_id, 1 from token_context
+      ) notification_target
+      join unified_markets market on market.id = notification_target.market_id
+      left join token_context on token_context.market_id = market.id
+      order by notification_target.target_rank, token_context.identity_rank nulls last, market.id
       limit 1
     `,
-    [marketId, tokenId, venue?.toLowerCase() ?? null],
+    [marketId, tokenId, venue?.toLowerCase() ?? null, positionContract],
   );
   const row = rows[0];
   return row

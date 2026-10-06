@@ -47,6 +47,7 @@ import {
   type PolymarketHoldingLedger,
 } from "./polymarket-asset-context.js";
 import { positionStorageContract } from "../lib/position-asset-context.js";
+import { POSITION_TOKEN_MARKET_JOIN_SQL } from "../lib/pnl-sql.js";
 import {
   fetchPolymarketDataApiV2Pages,
   parsePolymarketDataApiV2Position,
@@ -303,13 +304,13 @@ async function fetchOpenPositionTokenIdsForRefresh(
 
   const { rows } = await pool.query<{ token_id: string | null }>(
     `
-      select distinct p.token_id
+      select distinct case when p.venue = 'polymarket'
+        then coalesce(m.clob_token_ids::jsonb->>(case upper(umt.outcome_side) when 'YES' then 0 when 'NO' then 1 end), p.token_id)
+        else p.token_id end as token_id
       from positions p
-      left join unified_tokens t
-        on t.venue = p.venue
-       and t.token_id = p.token_id
+      ${POSITION_TOKEN_MARKET_JOIN_SQL}
       left join unified_markets m
-        on m.id = t.market_id
+        on m.id = umt.market_id
        and m.venue = p.venue
       where p.user_id = $1
         and ${walletClause.replaceAll("wallet_address", "p.wallet_address")}

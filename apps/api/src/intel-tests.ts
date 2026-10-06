@@ -4600,7 +4600,23 @@ const tests: TestCase[] = [
       assert.match(queries[0]?.sql ?? "", /wallet_position_exposure/);
       assert.match(queries[0]?.sql ?? "", /open_positions_version = 1/);
       assert.match(queries[0]?.sql ?? "", /jsonb_to_recordset/);
-      assert.match(queries[0]?.sql ?? "", /join unified_tokens/);
+      const sql = queries[0]?.sql ?? "";
+      assert.match(sql, /join lateral/);
+      assert.match(sql, /from unified_tokens current_token/);
+      assert.match(sql, /current_token\.market_id = position\."marketId"/);
+      assert.match(sql, /current_token\.side = position\."outcomeSide"/);
+      assert.match(sql, /current_token\.venue = subject\.venue/);
+      assert.match(sql, /union\s+select binding_row\.asset_id as token_id/);
+      assert.match(sql, /from polymarket_asset_bindings binding_row/);
+      assert.match(
+        sql,
+        /subject\.venue = 'polymarket' and binding_row\.chain_id = 137/,
+      );
+      assert.match(sql, /binding_row\.market_id = position\."marketId"/);
+      assert.match(
+        sql,
+        /binding_row\.outcome_index = case position\."outcomeSide" when 'YES' then 0 when 'NO' then 1 end/,
+      );
       assert.doesNotMatch(
         queries[0]?.sql ?? "",
         /wallet_position_snapshots|metadata->>|snapshot_at/,

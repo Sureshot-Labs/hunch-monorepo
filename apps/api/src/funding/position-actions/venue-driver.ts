@@ -11,7 +11,10 @@ import type {
 } from "../domain/types.js";
 import { sumErc20TransfersTo } from "../execution/evm-erc20-receipt.js";
 import type { StoredPositionAction } from "./position-action-repository.js";
-import { canonicalRedemptionPayout } from "./canonical-redemption-evidence.js";
+import {
+  canonicalRedemptionPayout,
+  positionActionSubmissionStartSeconds,
+} from "./canonical-redemption-evidence.js";
 import { polymarketV2RedemptionPayout } from "./polymarket-v2-redemption-evidence.js";
 
 export type StoredPositionContext = Readonly<{
@@ -92,6 +95,7 @@ export interface PositionActionVenueDriver {
       plan: RedemptionPlan;
       transactionHash: string;
       operation?: StoredPositionAction;
+      submissionStartedAt?: Date;
       conditionalTokensAddress?: string;
     }>,
   ): Promise<PositionActionReceiptObservation | null>;
@@ -152,8 +156,34 @@ export function createEvmPositionActionReceiptObserver(
     const receipt = await fetchEmbeddedEthereumTransactionReceipt({
       chainId,
       txHash: input.transactionHash,
+      requireFinalized: true,
     });
     if (!receipt) return null;
+    const evidence: JsonObject = {
+      blockNumber: receipt.blockNumber,
+      blockHash: receipt.blockHash,
+      blockTimestamp: receipt.blockTimestamp?.toString() ?? null,
+      finality: "finalized",
+      chainId,
+      transactionHash: receipt.transactionHash,
+    };
+    if (input.operation) {
+      const started = positionActionSubmissionStartSeconds(
+        input.operation,
+        input.submissionStartedAt,
+      );
+      if (started == null || receipt.blockTimestamp == null) return null;
+      // Chain timestamps have second precision. Do not impose an upper bound:
+      // a valid transaction can be mined or reported long after the claim.
+      if (receipt.blockTimestamp < started) {
+        return {
+          succeeded: false,
+          expectedPayoutRaw: null,
+          actualPayoutRaw: null,
+          evidence: { ...evidence, receiptPrecedesClaim: true },
+        };
+      }
+    }
     const expected = expectedPayout(input.plan);
     const payoutToken =
       typeof input.plan.payoutTokenAddress === "string"
@@ -190,8 +220,7 @@ export function createEvmPositionActionReceiptObserver(
       expectedPayoutRaw: expected?.toString() ?? null,
       actualPayoutRaw: actual?.toString() ?? null,
       evidence: {
-        blockNumber: receipt.blockNumber,
-        transactionHash: receipt.transactionHash,
+        ...evidence,
         ...(input.plan.executionKind === "protocol_router"
           ? { positionConsumptionVerified: actual != null }
           : {}),

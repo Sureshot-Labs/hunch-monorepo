@@ -413,9 +413,9 @@ export async function claimPositionActionSubmission(
       `
         insert into position_action_attempts (
           action_operation_id, attempt_number, canonical_action_fingerprint,
-          executor_id, receipt_evidence
+          executor_id, receipt_evidence, started_at
         )
-        values ($1, $2, $3, $4, $5::jsonb)
+        values ($1, $2, $3, $4, $5::jsonb, clock_timestamp())
       `,
       [
         operation.id,
@@ -472,7 +472,7 @@ async function finishAttempt(
       set outcome = $3,
           broadcast_may_have_occurred = $4,
           submission_fingerprint = $5,
-          receipt_evidence = $6::jsonb,
+          receipt_evidence = $6::jsonb || jsonb_build_object('quarantinedSubmission', receipt_evidence->'quarantinedSubmission'),
           error_code = $7,
           finished_at = now()
       where action_operation_id = $1
@@ -702,6 +702,75 @@ export async function recordPositionActionSubmission(
 export const POSITION_ACTION_MISSING_REFERENCE_CODE =
   "position_action_submission_reference_missing";
 export const POSITION_ACTION_SUBMISSION_REPORT_GRACE_MS = 5 * 60_000;
+
+export async function fetchPositionActionSubmissionStartedAt(
+  db: Pick<Pool, "query">,
+  input: Readonly<{ userId: string; operationId: string }>,
+): Promise<Date | null> {
+  const { rows } = await db.query<{ started_at: Date }>(
+    `select attempt_row.started_at
+     from position_action_operations operation_row
+     join position_action_attempts attempt_row on attempt_row.action_operation_id = operation_row.id
+     where operation_row.user_id = $1 and operation_row.id = $2
+       and attempt_row.broadcast_may_have_occurred
+     order by attempt_row.attempt_number desc limit 1`,
+    [input.userId, input.operationId],
+  );
+  return rows[0]?.started_at ?? null;
+}
+
+/** A proven pre-claim hash is not evidence of this send. Keep the broadcast
+ * fence and same attempt; quarantine the unrelated reference so canonical
+ * discovery or a late positive report can repair attribution without resending.
+ */
+export async function quarantinePreClaimPositionActionReference(
+  pool: Pool,
+  input: Readonly<{
+    userId: string;
+    operationId: string;
+    expectedTransactionHash: string;
+    receiptEvidence: JsonObject;
+  }>,
+): Promise<StoredPositionAction> {
+  return tx(pool, async (client) => {
+    const operation = await fetchForUpdate(
+      client,
+      input.userId,
+      input.operationId,
+    );
+    if (
+      !operation.broadcastMayHaveOccurred ||
+      operation.submissionFingerprint !== input.expectedTransactionHash ||
+      ["completed", "failed", "cancelled"].includes(operation.status)
+    )
+      return operation;
+    const evidence = {
+      ...input.receiptEvidence,
+      rejectedSubmissionFingerprint: input.expectedTransactionHash,
+    };
+    await client.query(
+      `update position_action_attempts
+       set outcome = 'ambiguous', submission_fingerprint = null,
+           receipt_evidence = receipt_evidence || jsonb_build_object('quarantinedSubmission', $2::jsonb),
+           error_code = $3, finished_at = coalesce(finished_at, now())
+       where id = (
+         select id from position_action_attempts
+         where action_operation_id = $1 and broadcast_may_have_occurred
+         order by attempt_number desc limit 1
+       )`,
+      [operation.id, evidence, POSITION_ACTION_MISSING_REFERENCE_CODE],
+    );
+    await client.query(
+      `update position_action_operations
+       set status = 'reconcile_required', submission_fingerprint = null,
+           receipt_status = 'unknown', receipt_observed_at = now(),
+           postcondition_status = 'unavailable', last_error_code = $2
+       where id = $1`,
+      [operation.id, POSITION_ACTION_MISSING_REFERENCE_CODE],
+    );
+    return refetch(client, operation.id);
+  });
+}
 
 /** Only the server's exact single-POST authorization denial can clear this fence. */
 export async function recordPositionActionAuthorizationRejection(
@@ -1056,7 +1125,7 @@ export async function recordPositionActionReceipt(
       `
         update position_action_attempts
         set outcome = $2,
-            receipt_evidence = $3::jsonb,
+            receipt_evidence = $3::jsonb || jsonb_build_object('quarantinedSubmission', receipt_evidence->'quarantinedSubmission'),
             error_code = $4,
             finished_at = coalesce(finished_at, now())
         where id = (

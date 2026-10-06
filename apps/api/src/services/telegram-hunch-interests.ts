@@ -9,6 +9,8 @@ import {
 } from "@hunch/embeddings";
 import { createRedisClient, type Pool, type PoolClient } from "@hunch/infra";
 import { RESP_TYPES } from "redis";
+import { SCOPED_MARKET_HOLDING_ASSETS_SQL } from "../lib/market-holding-assets-sql.js";
+import { polymarketOrderStorageContractSql } from "../lib/polymarket-order-ledger-sql.js";
 import { loadSignalBotNotes } from "./signal-bot.js";
 
 const EXACT_CURSOR_KEY = "telegram_interest_exact_v1";
@@ -189,11 +191,7 @@ async function insertInterestRecipients(
        select m.id, m.event_id, m.venue
        from unified_markets m
        where m.event_id = any($2::text[]) and m.status = 'ACTIVE'
-     ), scoped_tokens as materialized (
-       select t.token_id, t.venue, m.event_id, m.id as market_id
-       from scoped_markets m
-       join unified_tokens t on t.market_id = m.id and t.venue = m.venue
-     ), interactions as (
+     ), ${SCOPED_MARKET_HOLDING_ASSETS_SQL}, interactions as (
        -- A current watchlist entry remains an active interest; only historical
        -- fills and position observations decay or expire below.
        select w.user_id, m.event_id, m.id as market_id,
@@ -205,12 +203,14 @@ async function insertInterestRecipients(
               o.posted_at as observed_at, 2.0 as base_weight
        from scoped_tokens t
        join orders o on o.token_id = t.token_id and o.venue = t.venue
+         and ${polymarketOrderStorageContractSql("o")} = t.position_contract
        where o.filled_size > 0
        union all
        select p.user_id, t.event_id, t.market_id,
               p.last_updated_at as observed_at, 1.0 as base_weight
        from scoped_tokens t
        join positions p on p.token_id = t.token_id and p.venue = t.venue
+         and p.position_contract = t.position_contract
        where p.position_scope = 'own' and p.size > 0
          and coalesce(p.is_hidden, false) = false
      ), eligible as (

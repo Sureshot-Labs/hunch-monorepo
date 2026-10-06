@@ -9,6 +9,7 @@ import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { isPgStatementTimeoutError } from "../lib/postgres-errors.js";
+import { buildHiddenOwnPositionSnapshotSuppressionSql } from "../lib/hidden-own-position-snapshot-sql.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
   collectMarketRefreshMarketIdsFromPayload,
@@ -212,35 +213,6 @@ type WalletPrivateMetaRow = {
   user_label: string | null;
   user_label_color: WalletLabelColor | null;
 };
-
-function buildHiddenOwnPositionSnapshotSuppressionSql(inputs: {
-  snapshotAlias: string;
-  walletAlias: string;
-}): string {
-  const { snapshotAlias, walletAlias } = inputs;
-  return `
-    not exists (
-      select 1
-      from positions hp
-      where hp.position_scope = 'own'
-        and coalesce(hp.is_hidden, false) = true
-        and hp.venue = ${snapshotAlias}.venue
-        and hp.token_id = ${snapshotAlias}.metadata->>'tokenId'
-        and hp.wallet_address is not null
-        and btrim(hp.wallet_address) <> ''
-        and (
-          (
-            ${walletAlias}.chain = 'solana'
-            and hp.wallet_address = ${walletAlias}.address
-          )
-          or (
-            ${walletAlias}.chain <> 'solana'
-            and lower(hp.wallet_address) = lower(${walletAlias}.address)
-          )
-        )
-    )
-  `;
-}
 
 type WalletMetricsRow = {
   period: string;

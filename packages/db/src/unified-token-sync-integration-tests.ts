@@ -1,6 +1,7 @@
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
 import {
   syncUnifiedMarketTokens,
@@ -49,11 +50,21 @@ before(async () => {
   schemaCreated = true;
   await pool.query(`
     create table unified_events(id text primary key);
-    create table unified_markets(id text primary key,event_id text references unified_events(id),venue text,token_yes text,token_no text,clob_token_ids text);
+    create table unified_markets(id text primary key,event_id text references unified_events(id),venue text,token_yes text,token_no text,clob_token_ids text,condition_id text,outcomes text,metadata jsonb);
     create table unified_market_tokens(market_id text references unified_markets(id),token_id text unique,venue text,outcome_side text,primary key(market_id,token_id));
+    create table unified_tokens(token_id text primary key,venue text not null,market_id text not null,side text not null check(side in ('YES','NO')),unique(market_id,side));
     create table unified_token_top_latest(token_id text primary key,venue text,ts timestamptz,best_bid numeric,best_ask numeric,mid numeric,spread numeric,updated_at timestamptz default now());
     create table unified_book_top(token_id text,venue text,ts timestamptz,best_bid numeric,best_ask numeric,mid numeric,spread numeric,primary key(token_id,ts));
   `);
+  await pool.query(
+    await readFile(
+      new URL(
+        "../migrations/0270_polymarket_asset_bindings.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
   await pool.query(
     "select public.create_hypertable($1::regclass,'ts',chunk_time_interval=>interval '1 day')",
     [`${schema}.unified_book_top`],
@@ -230,7 +241,14 @@ test("PG16: token source stays locked until replacement commits and a competing 
   } as unknown as Pool;
   const replacement = syncUnifiedMarketTokens(pinned, [id]);
   try {
-    await locked;
+    await Promise.race([
+      locked,
+      replacement.then(() => {
+        throw new Error(
+          "replacement completed before reaching the fixture lock",
+        );
+      }),
+    ]);
     await updater.query("set statement_timeout='100ms'");
     await assert.rejects(
       updater.query(
