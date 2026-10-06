@@ -18,6 +18,8 @@ import {
   polymarketContextFromMarketInfo,
   polymarketContextFromBinding,
   PolymarketAssetContextError,
+  loadPolymarketHoldingLedgers,
+  selectPolymarketSyncedOrderContext,
 } from "./polymarket-asset-context.js";
 import { ethers } from "ethers";
 
@@ -438,6 +440,8 @@ type PolymarketAccountQuery = {
 };
 
 type PolymarketRedemptionPlanQuery = {
+  positionContract?: string | null;
+  positionSize?: string | null;
   conditionId?: string | null;
   funderAddress?: string | null;
   negRisk?: boolean | null;
@@ -2844,6 +2848,7 @@ type PolymarketOrdersSyncStats = {
   storedNew: number;
   alreadyKnown: number;
   skippedNoId: number;
+  skippedContextUnavailable: number;
   sampleVenueOrderIds: string[];
   tradeSync: {
     insertedFillCount: number;
@@ -2890,6 +2895,7 @@ function emptyPolymarketOrdersSyncStats(): PolymarketOrdersSyncStats {
     storedNew: 0,
     alreadyKnown: 0,
     skippedNoId: 0,
+    skippedContextUnavailable: 0,
     sampleVenueOrderIds: [],
     tradeSync: {
       insertedFillCount: 0,
@@ -2926,6 +2932,8 @@ function mergePolymarketOrdersSyncStats(
     storedNew: base.storedNew + next.storedNew,
     alreadyKnown: base.alreadyKnown + next.alreadyKnown,
     skippedNoId: base.skippedNoId + next.skippedNoId,
+    skippedContextUnavailable:
+      base.skippedContextUnavailable + next.skippedContextUnavailable,
     sampleVenueOrderIds: [
       ...base.sampleVenueOrderIds,
       ...next.sampleVenueOrderIds,
@@ -3034,10 +3042,18 @@ async function syncPolymarketOrdersForSigner(inputs: {
 
   const ordersRaw = extractOrderArray(upstream.payload);
   const funder = inputs.creds.funderAddress ?? inputs.signer;
+  const orderLedgers = await loadPolymarketHoldingLedgers(
+    pool,
+    ordersRaw.flatMap((order) => {
+      const token = normalizeOpenOrder(order)?.assetId ?? extractTokenId(order);
+      return token ? [token] : [];
+    }),
+  );
 
   let storedNew = 0;
   let alreadyKnown = 0;
   let skippedNoId = 0;
+  let skippedContextUnavailable = 0;
   let existingOpenMarkedLive = 0;
   let openOrderExecutionEvidenceCount = 0;
   let openOrderExecutionAfterSecOverride: number | null = null;
@@ -3077,6 +3093,24 @@ async function syncPolymarketOrdersForSigner(inputs: {
         ? derivedAmounts
         : derivePriceAndSizeFromOpenOrder(normalizedOpenOrder, side);
     const orderWalletAddress = normalizedOpenOrder?.makerAddress ?? funder;
+    let assetContext: PolymarketAssetContext | null = null;
+    try {
+      if (tokenId)
+        assetContext = selectPolymarketSyncedOrderContext(
+          orderLedgers,
+          tokenId,
+          normalizedOpenOrder?.market ?? null,
+        );
+    } catch {
+      // Keep the upstream ID in openVenueOrderIds: incomplete derived identity
+      // must not be mistaken for evidence that the venue order disappeared.
+      skippedContextUnavailable += 1;
+      inputs.log.warn(
+        { userId: inputs.userId, venueOrderId, tokenId },
+        "Polymarket order sync skipped ambiguous ledger identity",
+      );
+      continue;
+    }
 
     const result = await storeOrder(pool, {
       userId: inputs.userId,
@@ -3092,7 +3126,7 @@ async function syncPolymarketOrdersForSigner(inputs: {
       status: "live",
       errorMessage: null,
       rawError: null,
-      orderPayload: o,
+      orderPayload: assetContext && record ? { ...record, assetContext } : o,
     });
 
     if (result.kind === "stored") storedNew += 1;
@@ -3229,6 +3263,7 @@ async function syncPolymarketOrdersForSigner(inputs: {
     storedNew,
     alreadyKnown,
     skippedNoId,
+    skippedContextUnavailable,
     sampleVenueOrderIds: orderIds.slice(0, 10),
     tradeSync,
     delayedSync: {
@@ -3766,7 +3801,26 @@ export async function buildPolymarketRedemptionPlanRoute(input: {
     );
     const funder =
       input.query.funderAddress ?? credsInfo?.funderAddress ?? input.signer;
+    // Compatibility clients without a ledger retain the CTF path. V2 must
+    // select its ledger explicitly; only durable/canonical backend bindings
+    // may supply its Router condition and outcome, never client market hints.
+    const assetContext =
+      input.query.positionContract &&
+      input.query.positionContract.toLowerCase() !==
+        POLYMARKET_PROTOCOL_CONTRACTS.conditionalTokens.toLowerCase()
+        ? await resolvePolymarketAssetContext(
+            input.pool,
+            input.query.tokenId,
+            await fetchPolymarketMarketInfo(input.pool, {
+              tokenId: input.query.tokenId,
+            }),
+            undefined,
+            input.query.positionContract,
+          )
+        : null;
     const plan = await buildPolymarketRedemptionPlan({
+      assetContext,
+      positionSize: input.query.positionSize,
       rpcUrl: env.polygonRpcUrl,
       timeoutMs: env.polygonRpcTimeoutMs,
       funder,

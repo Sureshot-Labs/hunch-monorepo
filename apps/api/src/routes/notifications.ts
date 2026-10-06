@@ -122,6 +122,8 @@ export const notificationsRoutes: FastifyPluginAsync = async (app) => {
           amountUsd: payload.amountUsd ?? null,
           marketId: payload.marketId ?? null,
           tokenId: payload.tokenId ?? null,
+          positionId: payload.positionId,
+          positionContract: payload.positionContract,
           txHash: payload.txHash ?? null,
           walletAddress: payload.walletAddress ?? null,
         }),

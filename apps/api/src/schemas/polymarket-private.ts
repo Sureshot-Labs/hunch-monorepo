@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  POLYMARKET_PROTOCOL_CONTRACTS,
   parsePolymarketAssetContext,
   normalizePolymarketAssetId,
 } from "@hunch/shared";
@@ -236,6 +237,22 @@ export const polymarketAccountQuerySchema = z.object({
 });
 
 export const polymarketRedemptionPlanQuerySchema = z.object({
+  positionContract: zEthAddress
+    .optional()
+    .refine(
+      (value) =>
+        !value ||
+        [
+          POLYMARKET_PROTOCOL_CONTRACTS.conditionalTokens,
+          POLYMARKET_PROTOCOL_CONTRACTS.positionManager,
+        ].some((ledger) => ledger.toLowerCase() === value.toLowerCase()),
+      "Unsupported Polymarket position ledger",
+    ),
+  positionSize: z
+    .string()
+    .max(86)
+    .regex(/^(0|[1-9]\d*)(\.\d{1,6})?$/)
+    .optional(),
   outcome: zOutcome,
   tokenId: zRequiredString("tokenId is required"),
   negRisk: zOptionalBool.optional(),

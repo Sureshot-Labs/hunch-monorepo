@@ -14,6 +14,14 @@ import { fetchMarketsByTokenIds } from "./repos/unified-read.js";
 import { polymarketContextFromBinding } from "./services/polymarket-asset-context.js";
 import { fetchPositionMarketRows } from "./services/position-market-rows.js";
 import { fetchPositionsForUserWallet } from "./repos/positions-repo.js";
+import {
+  fetchPositionShareSourceById,
+  fetchTopPositionShareSource,
+} from "./repos/shares.js";
+import {
+  fetchUnifiedOrders,
+  fetchUnifiedOrderById,
+} from "./repos/unified-orders.js";
 import { loadAutoTrackedPreviousOpenPositions } from "./wallet-intel-refresh.js";
 import { runPositionResolutionNotificationProducer } from "./services/position-resolution-producer.js";
 
@@ -207,6 +215,18 @@ try {
     [suffix, assetBase.toString()],
   );
   await client.query("analyze positions");
+  const unrelatedUserId = randomUUID();
+  await client.query("insert into users(id,email) values($1,$2)", [
+    unrelatedUserId,
+    `sql-scale-background-${suffix}@example.com`,
+  ]);
+  await client.query(
+    `insert into orders(user_id,wallet_address,venue,venue_order_id,token_id,side,order_type,price,size,status)
+    select case when fixture_row.ordinality <= 1000 then $1::uuid else $4::uuid end,'scale-wallet','polymarket',$3 || fixture_row.ordinality,($2::numeric + fixture_row.ordinality)::text,'SELL','GTC',0.5,1,'live'
+    from generate_series(1,100000) as fixture_row(ordinality)`,
+    [suffix, assetBase.toString(), `scale-order-${suffix}-`, unrelatedUserId],
+  );
+  await client.query("analyze orders");
   const tokens = [1n, 501n, 99999n].map((index) =>
     (assetBase + index).toString(),
   );
@@ -302,6 +322,64 @@ try {
     },
   );
   assert.equal(filteredPositions.length, 2);
+  const sharePositionId = filteredPositions[0]?.id;
+  assert.ok(sharePositionId);
+  assert.ok(
+    await fetchPositionShareSourceById(explainDb("share-by-position"), {
+      userId: suffix,
+      positionId: sharePositionId,
+      walletAddresses: ["scale-wallet"],
+      venue: "polymarket",
+    }),
+  );
+  assert.ok(
+    await fetchTopPositionShareSource(explainDb("share-top-position") as Pool, {
+      userId: suffix,
+      walletAddresses: ["scale-wallet"],
+      venue: "polymarket",
+    }),
+  );
+  const orderInputs = {
+    userId: suffix,
+    type: "order" as const,
+    venue: "polymarket",
+    marketId: `${marketPrefix}1`,
+    limit: 10,
+    offset: 0,
+  };
+  const filteredOrders = await fetchUnifiedOrders(
+    explainDb("orders-durable-market") as Pool,
+    orderInputs,
+  );
+  assert.equal(filteredOrders.rows.length, 2);
+  assert.equal(filteredOrders.total, 2);
+  const firstOrderId = filteredOrders.rows[0]?.id;
+  assert.ok(firstOrderId);
+  assert.ok(
+    await fetchUnifiedOrderById(explainDb("order-by-id") as Pool, {
+      ...orderInputs,
+      id: firstOrderId,
+    }),
+  );
+  const firstPage = await fetchUnifiedOrders(
+    explainDb("orders-first-page") as Pool,
+    { ...orderInputs, marketId: undefined },
+  );
+  assert.equal(firstPage.rows.length, 10);
+  const resumedPage = await fetchUnifiedOrders(
+    explainDb("orders-resumed-page") as Pool,
+    { ...orderInputs, marketId: undefined, offset: 100 },
+  );
+  assert.equal(resumedPage.rows.length, 10);
+  assert.equal(
+    (
+      await fetchUnifiedOrders(explainDb("orders-empty-tail") as Pool, {
+        ...orderInputs,
+        offset: 2,
+      })
+    ).rows.length,
+    0,
+  );
   await fetchPositionsForUserWallet(
     explainDb("position-event-filter") as Pool,
     {
@@ -391,7 +469,7 @@ try {
   assert.equal(producer.candidates, 20);
   assert.equal(producer.notificationsCreated, 0);
   console.log(
-    "[polymarket-sql-scale] PG16 actual migrations tolerate legacy rows; 100k bindings/50k markets/1k holdings",
+    "[polymarket-sql-scale] PG16 actual migrations tolerate legacy rows; 100k bindings/50k markets/1k holdings/100k orders",
     JSON.stringify(plans),
   );
 } finally {

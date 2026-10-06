@@ -1,5 +1,9 @@
 import type { Pool, PoolClient } from "@hunch/infra";
 import {
+  normalizePolymarketAssetId,
+  parsePolymarketAssetContext,
+} from "@hunch/shared";
+import {
   isEvmAddress,
   normalizeOptionalWalletForStorage,
   normalizeWalletForStorage,
@@ -411,6 +415,7 @@ export async function storeOrderInTransaction(
   }
   const existingOrder = await client.query<{
     id: string;
+    token_id: string | null;
     wallet_address: string | null;
     signer_address: string | null;
     price: number | null;
@@ -424,7 +429,7 @@ export async function storeOrderInTransaction(
     funding_reservation_id: string | null;
     funding_trade_attempt_id: string | null;
   }>(
-    `SELECT id, wallet_address, signer_address, price, size, status, posted_at, order_payload, order_payload_version, fee_policy_snapshot,
+    `SELECT id, token_id, wallet_address, signer_address, price, size, status, posted_at, order_payload, order_payload_version, fee_policy_snapshot,
             funding_operation_id, funding_reservation_id, funding_trade_attempt_id
      FROM orders
      WHERE venue = $1 AND venue_order_id = $2 AND user_id = $3
@@ -502,7 +507,48 @@ export async function storeOrderInTransaction(
       updates.push(`size = $${paramCount}`);
       params.push(inputs.size);
     }
-    if (!existing.order_payload && inputs.orderPayload != null) {
+    const incomingPayload =
+      inputs.orderPayload &&
+      typeof inputs.orderPayload === "object" &&
+      !Array.isArray(inputs.orderPayload)
+        ? (inputs.orderPayload as Record<string, unknown>)
+        : null;
+    const existingPayload =
+      existing.order_payload &&
+      typeof existing.order_payload === "object" &&
+      !Array.isArray(existing.order_payload)
+        ? (existing.order_payload as Record<string, unknown>)
+        : null;
+    const incomingContext =
+      inputs.venue === "polymarket"
+        ? parsePolymarketAssetContext(incomingPayload?.assetContext)
+        : null;
+    const existingContext =
+      inputs.venue === "polymarket"
+        ? parsePolymarketAssetContext(existingPayload?.assetContext)
+        : null;
+    if (
+      incomingContext &&
+      (normalizePolymarketAssetId(inputs.tokenId) !== incomingContext.assetId ||
+        normalizePolymarketAssetId(existing.token_id) !==
+          incomingContext.assetId ||
+        (existingPayload?.assetContext != null && !existingContext) ||
+        (existingContext &&
+          JSON.stringify(existingContext) !== JSON.stringify(incomingContext)))
+    )
+      throw new Error(
+        "Polymarket order ledger identity conflicts with its stored context",
+      );
+    if (existingPayload && incomingContext && !existingContext) {
+      // Sync can win the race with signed-submit persistence. Enrich only the
+      // missing immutable identity under this row lock; preserve original
+      // upstream facts and optimistic-delta markers, never replace a ledger.
+      paramCount += 1;
+      updates.push(
+        `order_payload = order_payload || jsonb_build_object('assetContext', $${paramCount}::jsonb)`,
+      );
+      params.push(JSON.stringify(incomingContext));
+    } else if (!existing.order_payload && inputs.orderPayload != null) {
       paramCount += 1;
       updates.push(positionDeltaPreservingPayloadUpdateSql(`$${paramCount}`));
       params.push(JSON.stringify(inputs.orderPayload));

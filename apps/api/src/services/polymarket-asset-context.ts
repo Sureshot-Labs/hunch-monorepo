@@ -228,6 +228,34 @@ export type PolymarketHoldingLedger = {
   tokenContexts: Map<string, PolymarketAssetContext | null>;
 };
 
+/** CLOB order objects do not carry Hunch's signed context. Select only a
+ * canonical binding whose condition matches the upstream order; never infer
+ * a ledger from the numeric ID or silently pick one side of a collision. */
+export function selectPolymarketSyncedOrderContext(
+  ledgers: readonly PolymarketHoldingLedger[],
+  tokenId: string,
+  conditionId: string | null,
+): PolymarketAssetContext | null {
+  const assetId = normalizePolymarketAssetId(tokenId);
+  if (!assetId) return null;
+  const candidates = ledgers.flatMap((ledger) => {
+    const context = ledger.tokenContexts.get(assetId);
+    return context ? [context] : [];
+  });
+  if (!candidates.length) return null; // retain contextless historical CTF behavior
+  const matching = conditionId
+    ? candidates.filter(
+        (context) =>
+          context.conditionId.toLowerCase() === conditionId.toLowerCase(),
+      )
+    : candidates;
+  if (matching.length !== 1)
+    throw new PolymarketAssetContextError(
+      "CLOB order identity requires an unambiguous canonical ledger binding.",
+    );
+  return matching[0] ?? null;
+}
+
 /** One bounded batch lookup. Current maps bootstrap pre-migration identities;
  * frozen bindings and stored holding contexts survive generation replacement.
  * Missing legacy provenance stays on its original CTF read path, never PM by

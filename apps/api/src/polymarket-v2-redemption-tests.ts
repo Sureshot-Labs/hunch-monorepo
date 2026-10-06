@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { Pool } from "@hunch/infra";
 import { ethers, Interface } from "ethers";
 import {
   buildPolymarketAssetContext,
@@ -12,6 +13,8 @@ import {
   POLYMARKET_V2_POSITION_ABI as P,
   POLYMARKET_V2_ROUTER_ABI as R,
 } from "./services/polymarket-v2-redemption-plan.js";
+import { buildPolymarketRedemptionPlan } from "./services/polymarket-redemption-plan.js";
+import { polymarketRedemptionPlanQuerySchema } from "./schemas/polymarket-private.js";
 import {
   polymarketV2RedemptionIdentity,
   polymarketV2RedemptionPayout,
@@ -60,6 +63,7 @@ type State = {
 async function plan(
   state: State = {},
   assetContext = context(),
+  interactive: boolean | "route" = false,
 ): Promise<RedemptionPlan> {
   const originalFetch = globalThis.fetch;
   const id = polymarketV2PositionIdentity(assetContext);
@@ -134,6 +138,85 @@ async function plan(
     );
   };
   try {
+    if (interactive === "route") {
+      const { AuthService } = await import("./auth.js");
+      const { buildPolymarketRedemptionPlanRoute } =
+        await import("./services/polymarket-trading-execution-service.js");
+      const originalCredentials = AuthService.getVenueCredentialsInfo;
+      AuthService.getVenueCredentialsInfo = async () => null;
+      const reads: string[] = [];
+      const db = {
+        query: async (sql: string, params: unknown[]) => {
+          assert.match(sql.trim(), /^select/i, "plan endpoint only reads");
+          reads.push(sql);
+          if (!sql.includes("from polymarket_asset_bindings"))
+            return { rows: [] };
+          assert.deepEqual(params, [
+            137,
+            assetContext.assetId,
+            C.positionManager.toLowerCase(),
+          ]);
+          return {
+            rows: [
+              {
+                chain_id: 137,
+                position_contract: C.positionManager,
+                asset_id: assetContext.assetId,
+                market_id: assetContext.marketId,
+                protocol_version: "v2",
+                asset_kind: "position_manager",
+                condition_id: assetContext.conditionId,
+                outcome_index: assetContext.outcomeIndex,
+                neg_risk: assetContext.negRisk,
+                exchange_address: C.exchangeV3,
+                order_domain_version: "3",
+                conditional_asset_type: "CONDITIONAL-V2",
+              },
+            ],
+          };
+        },
+      } as unknown as Pool;
+      try {
+        const result = await buildPolymarketRedemptionPlanRoute({
+          userId: "interactive-fixture",
+          signer: owner,
+          pool: db,
+          query: {
+            funderAddress: owner,
+            tokenId: assetContext.assetId,
+            outcome: assetContext.outcomeIndex === 0 ? "YES" : "NO",
+            positionContract: C.positionManager,
+            positionSize: "1.000001",
+            conditionId: `0x${"ff".repeat(32)}`,
+            negRisk: !assetContext.negRisk,
+          },
+        });
+        assert.equal(result.ok, true);
+        assert.ok(
+          reads.some((sql) => sql.includes("from polymarket_asset_bindings")),
+          "archived token uses durable ledger binding",
+        );
+        return result.payload as RedemptionPlan;
+      } finally {
+        AuthService.getVenueCredentialsInfo = originalCredentials;
+      }
+    }
+    if (interactive)
+      return await buildPolymarketRedemptionPlan({
+        rpcUrl: `mock://interactive-poly-v2-${Math.random()}`,
+        timeoutMs: 300,
+        funder: owner,
+        assetContext,
+        positionSize: "1.000001",
+        positionTokenId: assetContext.assetId,
+        outcome: assetContext.outcomeIndex === 0 ? "YES" : "NO",
+        // Stale legacy market hints must not cause the V2 path to read CTF.
+        conditionalTokensAddress: C.conditionalTokens,
+        collateralTokenAddress: C.collateral,
+        negRiskAdapterAddress: null,
+        isNegRisk: false,
+        conditionId: `0x${"ff".repeat(32)}`,
+      });
     return await buildPolymarketV2RedemptionPlan({
       rpcUrl: `mock://poly-v2-${Math.random()}`,
       timeoutMs: 300,
@@ -204,6 +287,72 @@ function mint(value: bigint, sender = ethers.ZeroAddress) {
   return event(transfer, C.collateral, "Transfer", [sender, owner, value]);
 }
 const ready = await plan();
+for (const negRisk of [false, true])
+  for (const outcome of [0, 1] as const) {
+    const assetContext = context(negRisk, outcome);
+    const interactive = await plan({}, assetContext, true);
+    assert.equal(interactive.redeemable, true);
+    assert.equal(interactive.positionContract, C.positionManager);
+    assert.equal(interactive.targetAddress, C.router);
+    assert.equal(interactive.operatorApprovalAddress, C.router);
+    assert.equal(interactive.assetContext?.assetId, assetContext.assetId);
+    assert.equal(interactive.redeemAmountRaw, amount.toString());
+    const endpoint = await plan({}, assetContext, "route");
+    assert.equal(endpoint.redeemable, true);
+    assert.equal(endpoint.positionContract, C.positionManager);
+    assert.equal(endpoint.assetContext?.assetId, assetContext.assetId);
+    assert.equal(endpoint.redeemAmountRaw, amount.toString());
+  }
+for (const positionSize of [undefined, "0", "-1", "1.0000001", "1e6"]) {
+  const assetContext = context();
+  const unavailable = await buildPolymarketRedemptionPlan({
+    rpcUrl: "mock://no-read",
+    timeoutMs: 300,
+    funder: owner,
+    assetContext,
+    positionSize,
+    positionTokenId: assetContext.assetId,
+    outcome: "YES",
+    conditionalTokensAddress: C.conditionalTokens,
+    collateralTokenAddress: C.collateral,
+    negRiskAdapterAddress: null,
+    isNegRisk: false,
+  });
+  assert.equal(unavailable.redeemable, false);
+  assert.equal(unavailable.reason, "no_redeemable_balance");
+}
+const v2Query = {
+  tokenId: context().assetId,
+  outcome: "YES",
+  positionContract: C.positionManager,
+  positionSize: "1.000001",
+};
+assert.equal(
+  polymarketRedemptionPlanQuerySchema.safeParse(v2Query).success,
+  true,
+);
+assert.equal(
+  polymarketRedemptionPlanQuerySchema.safeParse({
+    tokenId: "1",
+    outcome: "YES",
+  }).success,
+  true,
+);
+for (const value of ["-1", "1e6", "1.0000001", "NaN"])
+  assert.equal(
+    polymarketRedemptionPlanQuerySchema.safeParse({
+      ...v2Query,
+      positionSize: value,
+    }).success,
+    false,
+  );
+assert.equal(
+  polymarketRedemptionPlanQuerySchema.safeParse({
+    ...v2Query,
+    positionContract: C.exchangeV3,
+  }).success,
+  false,
+);
 assert.equal(ready.redeemable, true);
 assert.equal(ready.redeemAmountRaw, amount.toString());
 assert.equal(ready.operatorApprovalAddress, C.router);

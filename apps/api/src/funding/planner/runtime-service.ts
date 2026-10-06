@@ -1,4 +1,9 @@
 import type { Pool, PoolClient } from "@hunch/infra";
+import {
+  buildPolymarketAssetContext,
+  parsePolymarketMarketAssets,
+} from "@hunch/shared";
+import { isRecord } from "../../lib/type-guards.js";
 import { AuthService } from "../../auth.js";
 import {
   readPreparationReceipt,
@@ -767,7 +772,16 @@ export class FundingPlanningRuntime {
           ? [explicitBindingOptionId]
           : [];
         const now = new Date();
+        const protocol =
+          market.venue === "polymarket" && isRecord(market.metadata)
+            ? parsePolymarketMarketAssets(market.metadata.polymarketProtocol)
+            : null;
+        const positionAssetContext =
+          protocol && protocol.assets.includes(marketContextId)
+            ? buildPolymarketAssetContext(market.id, protocol, marketContextId)
+            : null;
         return {
+          ...(positionAssetContext ? { positionAssetContext } : {}),
           marketContextId,
           venueId: market.venue,
           marketId: market.id,

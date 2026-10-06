@@ -62,7 +62,7 @@ const TEST_USER_ID = "00000000-0000-0000-0000-000000000001";
 
 const tests: TestCase[] = [
   {
-    name: "V2 sponsored approvals remain chain/token/operator exact; redemption needs its durable journal",
+    name: "V2 interactive sponsored approvals and compatibility redemption remain canonical and caller-bound",
     run: async () => {
       const approvals = new ethers.Interface([
         "function approve(address,uint256)",
@@ -128,17 +128,49 @@ const tests: TestCase[] = [
       const router = new ethers.Interface([
         "function redeem(bytes31,uint256,uint256)",
       ]);
-      await assert.rejects(() =>
-        run(
+      const redemption = router.encodeFunctionData("redeem", [
+        `0x01${"00".repeat(30)}`,
+        1n,
+        1n,
+      ]);
+      await run(137, CONTRACTS.router, redemption);
+      for (const [chain, target, data, value] of [
+        [8453, CONTRACTS.router, redemption, "0"],
+        [137, walletContext.signer, redemption, "0"],
+        [137, CONTRACTS.router, redemption, "1"],
+        [137, CONTRACTS.router, `${redemption}00`, "0"],
+        [
+          137,
+          CONTRACTS.router,
+          router.encodeFunctionData("redeem", [
+            `0x03${"00".repeat(30)}`,
+            1n,
+            1n,
+          ]),
+          "0",
+        ],
+        [
+          137,
+          CONTRACTS.router,
+          router.encodeFunctionData("redeem", [
+            `0x01${"00".repeat(30)}`,
+            2n,
+            1n,
+          ]),
+          "0",
+        ],
+        [
           137,
           CONTRACTS.router,
           router.encodeFunctionData("redeem", [
             `0x01${"00".repeat(30)}`,
             1n,
-            1n,
+            0n,
           ]),
-        ),
-      );
+          "0",
+        ],
+      ] as const)
+        await assert.rejects(() => run(chain, target, data, value));
     },
   },
   {

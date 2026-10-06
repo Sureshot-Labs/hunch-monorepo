@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { polymarketAssetContextSchema } from "../../schemas/polymarket-private.js";
 import {
   isCanonicalUnifiedMarketId,
   isVenueLocalMarketContextId,
@@ -278,6 +279,7 @@ export const fundingCommitRequestSchema = z
 
 export const marketContextBindingSchema = z
   .object({
+    positionAssetContext: polymarketAssetContextSchema.optional(),
     marketContextId: marketReferenceSchema,
     venueId: canonicalIdSchema,
     marketId: marketReferenceSchema,

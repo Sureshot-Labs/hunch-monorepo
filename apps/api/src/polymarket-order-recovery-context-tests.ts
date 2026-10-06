@@ -7,6 +7,10 @@ import {
 } from "@hunch/shared";
 import { buildPolymarketAssetBindings } from "@hunch/db";
 import { env } from "./env.js";
+import {
+  selectPolymarketSyncedOrderContext,
+  type PolymarketHoldingLedger,
+} from "./services/polymarket-asset-context.js";
 import { polymarketTradingExecutionTestHooks as hooks } from "./services/polymarket-trading-execution-service.js";
 
 const marketId = "polymarket:order-recovery-fixture";
@@ -26,6 +30,60 @@ const current = resolvePolymarketMarketAssets({
   outcomes: ["Yes", "No"],
   negRisk: false,
 });
+const v1 = buildPolymarketAssetContext(marketId, legacy, legacy.assets[0]);
+const v2 = buildPolymarketAssetContext(marketId, current, current.assets[0]);
+const ledger = (context: typeof v1): PolymarketHoldingLedger => ({
+  contractAddress: context.positionContract,
+  storageContract:
+    context.protocolVersion === "v1"
+      ? ""
+      : context.positionContract.toLowerCase(),
+  tokenContexts: new Map([[context.assetId, context]]),
+});
+assert.equal(
+  selectPolymarketSyncedOrderContext([ledger(v2)], v2.assetId, v2.conditionId),
+  v2,
+);
+assert.equal(
+  selectPolymarketSyncedOrderContext([ledger(v1)], v1.assetId, null),
+  v1,
+);
+assert.equal(selectPolymarketSyncedOrderContext([], "7", null), null);
+assert.throws(
+  () =>
+    selectPolymarketSyncedOrderContext(
+      [ledger(v1), ledger(v2)],
+      v2.assetId,
+      v2.conditionId,
+    ),
+  /unambiguous/,
+);
+assert.throws(
+  () =>
+    selectPolymarketSyncedOrderContext(
+      [ledger(v2)],
+      v2.assetId,
+      `0x${"ff".repeat(32)}`,
+    ),
+  /unambiguous/,
+);
+const oldCondition = { ...v1, conditionId: `0x${"aa".repeat(32)}` };
+assert.equal(
+  selectPolymarketSyncedOrderContext(
+    [ledger(oldCondition), ledger(v2)],
+    v2.assetId,
+    oldCondition.conditionId,
+  ),
+  oldCondition,
+);
+assert.equal(
+  selectPolymarketSyncedOrderContext(
+    [ledger(oldCondition), ledger(v2)],
+    v2.assetId,
+    v2.conditionId,
+  ),
+  v2,
+);
 const [binding] = buildPolymarketAssetBindings({
   id: marketId,
   venue: "polymarket",

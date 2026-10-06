@@ -6,6 +6,10 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 
 import { tx } from "@hunch/infra";
+import {
+  buildPolymarketAssetContext,
+  resolvePolymarketMarketAssets,
+} from "@hunch/shared";
 
 import "../../../integration-test-database-guard.js";
 import { pool } from "../../../db.js";
@@ -261,7 +265,23 @@ console.log(
 {
   const venueMarketId = opaque("venue_market");
   const marketId = `polymarket:${venueMarketId}`;
-  const marketContextId = opaque("market_context");
+  const marketContextId = BigInt(
+    `0x${crypto.randomBytes(32).toString("hex")}`,
+  ).toString();
+  const assetContext = buildPolymarketAssetContext(
+    marketId,
+    resolvePolymarketMarketAssets({
+      version: "v1",
+      conditionId: `0x${"01".repeat(32)}`,
+      clobTokenIds: [
+        marketContextId,
+        (BigInt(marketContextId) + 1n).toString(),
+      ],
+      outcomes: ["Yes", "No"],
+      negRisk: false,
+    }),
+    marketContextId,
+  );
   const venueOrderId = opaque("venue_order");
   const handoffId = crypto.randomUUID();
   const intentId = crypto.randomUUID();
@@ -300,6 +320,7 @@ console.log(
       venueId: "polymarket",
       marketId,
       marketContextSnapshot: {
+        positionAssetContext: assetContext,
         marketContextId,
         marketId,
         venueId: "polymarket",
@@ -655,6 +676,7 @@ console.log(
     rawError: null,
     orderHash: venueOrderId,
     filledAt: new Date(),
+    orderPayload: { assetContext },
   };
   const ambiguousAttempt = await pool.query<{ id: string }>(
     `select id
@@ -666,6 +688,30 @@ console.log(
   );
   const ambiguousAttemptId = ambiguousAttempt.rows[0]?.id;
   assert.ok(ambiguousAttemptId);
+  await assert.rejects(
+    tx(pool, (client) =>
+      storeOrderInTransaction(client, {
+        ...orderInput,
+        orderPayload: {
+          assetContext: {
+            ...assetContext,
+            marketId: "polymarket:foreign-fixture",
+          },
+        },
+        fundingReservation: { operationId, reservationId },
+        fundingTradeAttemptId: ambiguousAttemptId,
+      }),
+    ),
+    /consumer/i,
+    "even the current token projection cannot override a frozen ledger context",
+  );
+
+  const replacedToken = opaque("replacement_generation_token");
+  const remapped = await pool.query(
+    "update unified_tokens set token_id=$3 where venue='polymarket' and market_id=$1 and token_id=$2 returning token_id",
+    [marketId, marketContextId, replacedToken],
+  );
+  assert.equal(remapped.rowCount, 1);
 
   const sealedRetryClient = await pool.connect();
   const historyStoreClient = await pool.connect();
@@ -753,6 +799,10 @@ console.log(
     explicitStoreClient.release();
     implicitStoreClient.release();
   }
+  await pool.query(
+    "update unified_tokens set token_id=$3 where venue='polymarket' and market_id=$1 and token_id=$2",
+    [marketId, replacedToken, marketContextId],
+  );
 
   // This fixture exercises a real Telegram-funded trade attempt, but it does
   // not exercise the global Telegram lifecycle worker. Remove only its card

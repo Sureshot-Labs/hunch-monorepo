@@ -1,5 +1,16 @@
 import type { Pool } from "@hunch/infra";
 import type { PgParams } from "../server-types.js";
+import { POLYMARKET_PROTOCOL_CONTRACTS } from "@hunch/shared";
+import { polymarketOrderStorageContractSql } from "../lib/polymarket-order-ledger-sql.js";
+
+const ORDER_MARKET_ID_SQL = `(case when o.venue = 'polymarket' then coalesce(nullif(o.order_payload->'assetContext'->>'marketId', ''), order_binding.market_id, ut.market_id) else ut.market_id end)`;
+const ORDER_MARKET_JOIN_SQL = `
+  left join polymarket_asset_bindings order_binding
+    on o.venue = 'polymarket' and order_binding.chain_id = 137
+   and order_binding.asset_id = o.token_id
+   and order_binding.position_contract = coalesce(nullif(${polymarketOrderStorageContractSql("o")}, ''), '${POLYMARKET_PROTOCOL_CONTRACTS.conditionalTokens.toLowerCase()}')
+  left join unified_tokens ut on ut.token_id = o.token_id and ut.venue = o.venue
+`;
 
 export type UnifiedOrderRow = {
   id: string;
@@ -292,7 +303,7 @@ const buildOrdersSelect = (whereClause: string): string => `
     o.venue_order_id,
     o.token_id,
     o.side,
-    null::text as outcome,
+    o.resolved_outcome_side as outcome,
     o.order_type,
     o.price::text as price,
     o.size::text as size,
@@ -316,7 +327,11 @@ const buildOrdersSelect = (whereClause: string): string => `
   from (
     select
       o.*,
-      ut.market_id,
+      ${ORDER_MARKET_ID_SQL} as market_id,
+      case when o.venue = 'polymarket' then coalesce(
+        case o.order_payload->'assetContext'->>'outcomeIndex' when '0' then 'YES' when '1' then 'NO' end,
+        case order_binding.outcome_index when 0 then 'YES' when 1 then 'NO' end,
+        upper(ut.side)) else null end as resolved_outcome_side,
       row_number() over (
         partition by o.user_id, o.venue, o.venue_order_id
         order by
@@ -327,9 +342,7 @@ const buildOrdersSelect = (whereClause: string): string => `
           id desc
       ) as row_rank
     from orders o
-    left join unified_tokens ut
-      on ut.token_id = o.token_id
-      and ut.venue = o.venue
+    ${ORDER_MARKET_JOIN_SQL}
     ${whereClause}
   ) o
   where o.row_rank = 1
@@ -382,7 +395,7 @@ export async function fetchUnifiedOrders(
 
   const filterParams = buildFilterParams(inputs);
   const baseOrderWhere = buildWhereClause("o", filterParams, true, {
-    market: "ut.market_id",
+    market: ORDER_MARKET_ID_SQL,
     token: "o.token_id",
     createdAt: "coalesce(o.posted_at, o.last_update)",
   });
@@ -441,7 +454,11 @@ export async function fetchUnifiedOrderById(
   inputs: FilterInputs & { id: string },
 ): Promise<UnifiedOrderRow | null> {
   const filterParams = buildFilterParams(inputs);
-  const orderWhere = buildWhereClause("o", filterParams, true);
+  const orderWhere = buildWhereClause("o", filterParams, true, {
+    market: ORDER_MARKET_ID_SQL,
+    token: "o.token_id",
+    createdAt: "coalesce(o.posted_at, o.last_update)",
+  });
   const execWhere = buildWhereClause("e", filterParams, false);
 
   const params = [...filterParams.params];

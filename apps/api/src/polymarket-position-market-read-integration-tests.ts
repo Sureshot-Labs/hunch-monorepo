@@ -12,6 +12,9 @@ import { env } from "./env.js";
 import { createIntegrationTestPool } from "./test-database-target.js";
 import { runPositionResolutionNotificationProducer } from "./services/position-resolution-producer.js";
 import type { ResolvedPositionRow } from "./services/positions-notifications.js";
+import { fetchPositionShareSourceById } from "./repos/shares.js";
+import { fetchUnifiedOrders } from "./repos/unified-orders.js";
+import { storeOrder } from "./repos/orders-repo.js";
 
 const db = await createIntegrationTestPool({
   max: 1,
@@ -154,6 +157,88 @@ try {
       }),
     ],
   );
+  const sharePositions = (
+    await db.query<{ id: string; position_contract: string; token_id: string }>(
+      "select id, position_contract, token_id from positions where user_id=$1",
+      [userId],
+    )
+  ).rows;
+  for (const position of sharePositions) {
+    const share = await fetchPositionShareSourceById(db, {
+      userId,
+      positionId: position.id,
+    });
+    assert.ok(share);
+    assert.equal(
+      share.market_id,
+      position.position_contract ? marketIds[1] : marketIds[0],
+    );
+    assert.equal(
+      share.outcome_side,
+      position.position_contract || position.token_id === oldTokens[1]
+        ? "NO"
+        : "YES",
+    );
+  }
+  for (const [index, orderToken] of [
+    oldTokens[0],
+    oldTokens[1],
+    collisionToken,
+  ].entries()) {
+    assert.ok(orderToken);
+    await storeOrder(db, {
+      userId,
+      walletAddress: wallet,
+      venue: "polymarket",
+      venueOrderId: `history-${suffix}-${index}`,
+      tokenId: orderToken,
+      side: "SELL",
+      orderType: "GTC",
+      price: 0.5,
+      size: 1,
+      status: "live",
+      errorMessage: null,
+      rawError: null,
+      orderPayload: index === 2 ? { assetContext: pmContext } : null,
+    });
+  }
+  const historicalMarketId = marketIds[0];
+  assert.ok(historicalMarketId);
+  for (const filter of [
+    { marketId: historicalMarketId },
+    { marketIds: [historicalMarketId] },
+    { q: "Historical event A" },
+  ]) {
+    const history = await fetchUnifiedOrders(db, {
+      userId,
+      type: "order",
+      limit: 10,
+      offset: 0,
+      ...filter,
+    });
+    assert.equal(
+      history.total,
+      2,
+      "CTF history survives projection replacement and a cross-market token collision",
+    );
+    assert.ok(
+      history.rows.every((row) => row.unified_market_id === marketIds[0]),
+    );
+    assert.deepEqual(history.rows.map((row) => row.outcome).sort(), [
+      "NO",
+      "YES",
+    ]);
+  }
+  const pmHistory = await fetchUnifiedOrders(db, {
+    userId,
+    type: "order",
+    marketId: marketIds[1],
+    openOnly: true,
+    limit: 10,
+    offset: 0,
+  });
+  assert.equal(pmHistory.total, 1);
+  assert.equal(pmHistory.rows[0]?.outcome, "NO");
   const read = async (extra: string) => {
     const response = await app.inject({
       method: "GET",
@@ -289,6 +374,7 @@ try {
   env.hotTokensMax = originalHotTokensMax;
   env.priceRefreshQueueEnabled = originalPriceRefresh;
   if (userId) {
+    await db.query("delete from orders where user_id=$1", [userId]);
     await db.query("delete from notifications where user_id=$1", [userId]);
     await db.query("delete from positions where user_id=$1", [userId]);
     await db.query("delete from user_sessions where user_id=$1", [userId]);

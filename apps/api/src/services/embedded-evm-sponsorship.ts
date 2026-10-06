@@ -8,7 +8,10 @@ import { env } from "../env.js";
 import { deriveFundingLifecycleBeforeActionBroadcast } from "../funding/lifecycle/funding-lifecycle-projector.js";
 import { loadFundingLifecycleProjectionForOperation } from "../funding/lifecycle/funding-lifecycle-read-model.js";
 import type { EmbeddedEthereumTransactionSpec } from "./embedded-ethereum.js";
-import { isPolymarketV2ApprovalCall } from "./polymarket-v2-call-validation.js";
+import {
+  isPolymarketV2ApprovalCall,
+  isPolymarketV2RedemptionCall,
+} from "./polymarket-v2-call-validation.js";
 
 const POLYGON_CHAIN_ID = 137;
 const BASE_CHAIN_ID = 8453;
@@ -1077,7 +1080,15 @@ export async function assertEmbeddedEvmSponsorshipAllowed(input: {
     const allowed =
       (input.chainId === POLYGON_CHAIN_ID &&
         isNonPayable(transaction) &&
-        isPolymarketV2ApprovalCall(transaction.to, transaction.data ?? "0x")) ||
+        (isPolymarketV2ApprovalCall(transaction.to, transaction.data ?? "0x") ||
+          // Compatibility redemption has the generic embedded execution
+          // journal plus user authorization, not a normalized PositionAction.
+          // Router can only redeem to its caller. Preserve exact canonical
+          // packed identity, positive amount, chain and zero-native-value checks.
+          isPolymarketV2RedemptionCall(
+            transaction.to,
+            transaction.data ?? "0x",
+          ))) ||
       (await validateErc20Call({
         chainId: input.chainId,
         dependencies,

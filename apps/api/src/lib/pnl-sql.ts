@@ -1,9 +1,16 @@
-const POSITION_ASSET_BINDING_JOIN_SQL = `
+export const POSITION_ASSET_BINDING_JOIN_SQL = `
   left join polymarket_asset_bindings position_binding
     on p.venue = 'polymarket'
    and position_binding.chain_id = 137
    and position_binding.asset_id = p.token_id
    and position_binding.position_contract = coalesce(nullif(p.position_contract, ''), '0x4d97dcd97ec945f40cf65f87097ace5ea0476045')
+`;
+
+export const POSITION_BOUND_OR_PROJECTED_MARKET_SQL = `
+  cross join lateral (
+    select coalesce(position_binding.market_id, projected_market_token.market_id) as market_id,
+      coalesce(case position_binding.outcome_index when 0 then 'YES' when 1 then 'NO' end, projected_market_token.outcome_side) as outcome_side
+  ) umt
 `;
 
 const POSITION_MARKET_CONTEXT_SQL = `
@@ -149,10 +156,7 @@ export const POSITION_MARKET_JOIN_SQL = `
       token_market.market_id asc
     limit 1
   ) projected_market_token on true
-  cross join lateral (
-    select coalesce(position_binding.market_id, projected_market_token.market_id) as market_id,
-      coalesce(case position_binding.outcome_index when 0 then 'YES' when 1 then 'NO' end, projected_market_token.outcome_side) as outcome_side
-  ) umt
+  ${POSITION_BOUND_OR_PROJECTED_MARKET_SQL}
   ${POSITION_MARKET_CONTEXT_SQL}
 `;
 

@@ -1,7 +1,6 @@
 import { env } from "../../env.js";
 import type { MarketByTokenRow } from "../../repos/unified-read.js";
 import { buildPolymarketRedemptionPlan } from "../../services/polymarket-redemption-plan.js";
-import { buildPolymarketV2RedemptionPlan } from "../../services/polymarket-v2-redemption-plan.js";
 import { fetchPolymarketAccountRoute } from "../../services/polymarket-trading-execution-service.js";
 import {
   fetchPolymarketRelayerTransaction,
@@ -67,22 +66,18 @@ async function buildPlan(input: {
   market: RedemptionMarketContext;
   position: StoredPositionContext;
 }): Promise<RedemptionPlan> {
-  if (input.position.assetContext?.protocolVersion === "v2") {
-    return buildPolymarketV2RedemptionPlan({
-      rpcUrl: env.polygonRpcUrl,
-      timeoutMs: env.polygonRpcTimeoutMs,
-      funder: input.position.walletAddress,
-      assetContext: input.position.assetContext,
-      positionSize: input.position.sizeRaw,
-    });
-  }
-  if (!input.market.conditionId) {
+  if (
+    !input.market.conditionId &&
+    input.position.assetContext?.protocolVersion !== "v2"
+  ) {
     return unavailablePlan({ reason: "missing_condition_id" });
   }
   if (!input.position.tokenId.trim()) {
     return unavailablePlan({ reason: "missing_token_id" });
   }
   return buildPolymarketRedemptionPlan({
+    assetContext: input.position.assetContext,
+    positionSize: input.position.sizeRaw,
     rpcUrl: env.polygonRpcUrl,
     timeoutMs: env.polygonRpcTimeoutMs,
     funder: input.position.walletAddress,

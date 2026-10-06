@@ -8,6 +8,8 @@ import {
 } from "@hunch/shared";
 
 import { createIntegrationTestPool } from "./test-database-target.js";
+import { storeOrder, storeOrderInTransaction } from "./repos/orders-repo.js";
+import { polymarketOrderStorageContractSql } from "./lib/polymarket-order-ledger-sql.js";
 import {
   fetchPositionsForUserWallet,
   fetchPositionPnlSummaryForUserWallet,
@@ -116,6 +118,138 @@ try {
       )
     ).rows[0]?.id ?? null;
   assert.ok(userId);
+  const orderClient = await db.connect();
+  try {
+    await orderClient.query("begin");
+    const orderInput = {
+      userId,
+      walletAddress: wallet,
+      signerAddress: wallet,
+      venue: "polymarket",
+      venueOrderId: `sync-first-${suffix}`,
+      tokenId,
+      side: "SELL",
+      orderType: "GTC" as const,
+      price: 0.4,
+      size: 1,
+      status: "live",
+      errorMessage: null,
+      rawError: null,
+      fundingRecoveryMode: "explicit_only" as const,
+    };
+    const raw = {
+      asset_id: tokenId,
+      market: conditionId,
+      original_size: "1",
+      _hunchPositionDeltaAppliedAt: "fixture-marker",
+    };
+    await storeOrderInTransaction(orderClient, {
+      ...orderInput,
+      orderPayload: raw,
+    });
+    await storeOrderInTransaction(orderClient, {
+      ...orderInput,
+      orderPayload: { tokenId, maker: wallet, assetContext: nextContext },
+    });
+    const saved = (
+      await orderClient.query<{ order_payload: Record<string, unknown> }>(
+        "select order_payload from orders where user_id=$1 and venue_order_id=$2",
+        [userId, orderInput.venueOrderId],
+      )
+    ).rows[0]?.order_payload;
+    assert.deepEqual(
+      saved?.assetContext,
+      nextContext,
+      "sync-first raw payload acquires its exact PM context",
+    );
+    assert.equal(
+      saved?.original_size,
+      "1",
+      "enrichment preserves upstream facts",
+    );
+    assert.equal(
+      saved?._hunchPositionDeltaAppliedAt,
+      "fixture-marker",
+      "enrichment preserves replay fence",
+    );
+    const selectedLedger = (
+      await orderClient.query<{ ledger: string }>(
+        `select ${polymarketOrderStorageContractSql("order_row")} as ledger
+       from orders order_row where order_row.user_id=$1 and order_row.venue_order_id=$2`,
+        [userId, orderInput.venueOrderId],
+      )
+    ).rows[0]?.ledger;
+    assert.equal(
+      selectedLedger,
+      nextContext.positionContract.toLowerCase(),
+      "actual fills/metrics SQL selects PM after sync-first repair",
+    );
+    await storeOrderInTransaction(orderClient, {
+      ...orderInput,
+      orderPayload: raw,
+    });
+    const replay = (
+      await orderClient.query<{ order_payload: Record<string, unknown> }>(
+        "select order_payload from orders where user_id=$1 and venue_order_id=$2",
+        [userId, orderInput.venueOrderId],
+      )
+    ).rows[0]?.order_payload;
+    assert.deepEqual(
+      replay?.assetContext,
+      nextContext,
+      "later raw sync never erases context",
+    );
+    await assert.rejects(
+      () =>
+        storeOrderInTransaction(orderClient, {
+          ...orderInput,
+          orderPayload: { tokenId, assetContext: legacyContext },
+        }),
+      /ledger identity conflicts/,
+    );
+  } finally {
+    await orderClient.query("rollback");
+    orderClient.release();
+  }
+  const raceInput = {
+    userId,
+    walletAddress: wallet,
+    signerAddress: wallet,
+    venue: "polymarket",
+    venueOrderId: `sync-concurrent-${suffix}`,
+    tokenId,
+    side: "SELL",
+    orderType: "GTC" as const,
+    price: 0.4,
+    size: 1,
+    status: "live",
+    errorMessage: null,
+    rawError: null,
+    fundingRecoveryMode: "explicit_only" as const,
+  };
+  await Promise.all([
+    storeOrder(db, { ...raceInput, orderPayload: { asset_id: tokenId } }),
+    storeOrder(db, {
+      ...raceInput,
+      orderPayload: { tokenId, assetContext: nextContext },
+    }),
+  ]);
+  const raced = (
+    await db.query<{ order_payload: Record<string, unknown> }>(
+      "select order_payload from orders where user_id=$1 and venue_order_id=$2",
+      [userId, raceInput.venueOrderId],
+    )
+  ).rows;
+  assert.equal(raced.length, 1);
+  assert.deepEqual(
+    raced[0]?.order_payload.assetContext,
+    nextContext,
+    "both concurrent writer orders preserve PM identity",
+  );
+  await db.query("delete from orders where user_id=$1 and venue_order_id=$2", [
+    userId,
+    raceInput.venueOrderId,
+  ]);
   walletId =
     (
       await db.query<{ id: string }>(
