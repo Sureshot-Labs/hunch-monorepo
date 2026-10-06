@@ -4,7 +4,9 @@ import {
   parsePolymarketMarketAssets,
   readPolymarketIndexedAssets,
   POLYMARKET_PROTOCOL_CONTRACTS,
+  type PolymarketAssetContext,
 } from "@hunch/shared";
+import { loadOwnedPolymarketPositionSelection } from "../../services/polymarket-position-selection.js";
 
 import {
   AuthService,
@@ -123,6 +125,7 @@ type RuntimeVenue = "limitless" | "polymarket";
 type UserWalletLoader = (accountId: string) => Promise<readonly UserWallet[]>;
 
 type RuntimeMarketContext = Readonly<{
+  assetContext?: PolymarketAssetContext;
   market: ApiTradeMarket | null;
   marketClass: string | null;
   evidence: RuntimeMarketEvidence;
@@ -553,22 +556,32 @@ function runtimeMarketContextFromMarket(input: {
   venue: RuntimeVenue;
   market: ApiTradeMarket;
   requestedMarketClass: string | null;
+  assetContext?: PolymarketAssetContext;
 }): RuntimeMarketContext {
-  const marketClass = classForMarket(input.venue, input.market);
+  const context = input.assetContext;
+  const negRisk = context?.negRisk ?? isNegRisk(input.market);
+  const marketClass = context
+    ? context.protocolVersion === "v2"
+      ? "protocol_v2"
+      : negRisk
+        ? "neg_risk"
+        : "standard"
+    : classForMarket(input.venue, input.market);
   const v2 = input.venue === "polymarket" && marketClass === "protocol_v2";
   const metadata = isRecord(input.market.metadata) ? input.market.metadata : {};
-  const protocol = v2
-    ? metadata.polymarketProtocol != null
-      ? parsePolymarketMarketAssets(metadata.polymarketProtocol)
-      : readPolymarketIndexedAssets({
-          version: metadata.version,
-          conditionId: input.market.condition_id,
-          positionIds: metadata.positionIds,
-          clobTokenIds: input.market.clob_token_ids,
-          outcomes: input.market.outcomes,
-          negRisk: input.market.neg_risk ?? undefined,
-        }).protocol
-    : null;
+  const protocol =
+    v2 && !context
+      ? metadata.polymarketProtocol != null
+        ? parsePolymarketMarketAssets(metadata.polymarketProtocol)
+        : readPolymarketIndexedAssets({
+            version: metadata.version,
+            conditionId: input.market.condition_id,
+            positionIds: metadata.positionIds,
+            clobTokenIds: input.market.clob_token_ids,
+            outcomes: input.market.outcomes,
+            negRisk: input.market.neg_risk ?? undefined,
+          }).protocol
+      : null;
   const classMatches =
     input.requestedMarketClass == null ||
     input.requestedMarketClass === marketClass;
@@ -595,25 +608,28 @@ function runtimeMarketContextFromMarket(input: {
         )
       : v2
         ? POLYMARKET_PROTOCOL_CONTRACTS.router
-        : isNegRisk(input.market)
+        : negRisk
           ? fundingSidecarRuntimeConfig.polymarketNegRiskAdapterAddress || null
           : fundingSidecarRuntimeConfig.polymarketConditionalTokensAddress;
-  const exchangeAddress = v2
-    ? POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3
-    : input.venue === "limitless" && marketClass.startsWith("clob")
-      ? extractLimitlessMarketExchangeAddress(input.market.metadata)
-      : null;
+  const exchangeAddress =
+    context?.exchangeAddress ??
+    (v2
+      ? POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3
+      : input.venue === "limitless" && marketClass.startsWith("clob")
+        ? extractLimitlessMarketExchangeAddress(input.market.metadata)
+        : null);
   const contracts = limitlessPreparationContracts({
     marketClass,
     marketExchangeAddress: exchangeAddress,
   });
   const routeResolved =
     input.venue === "polymarket"
-      ? v2
-        ? protocol?.protocolVersion === "v2" &&
-          protocol.assets[0] === input.market.token_yes &&
-          protocol.assets[1] === input.market.token_no
-        : Boolean(input.market.token_yes && input.market.token_no)
+      ? context != null ||
+        (v2
+          ? protocol?.protocolVersion === "v2" &&
+            protocol.assets[0] === input.market.token_yes &&
+            protocol.assets[1] === input.market.token_no
+          : Boolean(input.market.token_yes && input.market.token_no))
       : marketClass.startsWith("amm")
         ? Boolean(ammAddress && input.market.token_yes && input.market.token_no)
         : Boolean(
@@ -623,13 +639,14 @@ function runtimeMarketContextFromMarket(input: {
           );
   const exchangeResolved =
     input.venue === "polymarket"
-      ? v2
-        ? protocol?.protocolVersion === "v2"
-        : Boolean(
-            isNegRisk(input.market)
-              ? fundingSidecarRuntimeConfig.polymarketNegRiskExchangeAddress
-              : fundingSidecarRuntimeConfig.polymarketExchangeAddress,
-          )
+      ? context != null ||
+        (v2
+          ? protocol?.protocolVersion === "v2"
+          : Boolean(
+              negRisk
+                ? fundingSidecarRuntimeConfig.polymarketNegRiskExchangeAddress
+                : fundingSidecarRuntimeConfig.polymarketExchangeAddress,
+            ))
       : marketClass.startsWith("amm")
         ? Boolean(ammAddress)
         : Boolean(
@@ -638,6 +655,7 @@ function runtimeMarketContextFromMarket(input: {
               : contracts.negRiskAddress,
           );
   return {
+    ...(context ? { assetContext: context } : {}),
     market: input.market,
     marketClass,
     exchangeAddress,
@@ -1232,6 +1250,7 @@ export class WalletPreparationRuntimeService {
         input.canonicalMarketContextId ?? input.request.marketContextId,
       marketClass: input.request.marketClass,
       positionActionRef: input.request.positionActionRef ?? null,
+      assetContext: input.resolvedMarketContext?.assetContext ?? null,
     });
     const inflightKey = input.forceFresh ? `fresh:${key}` : key;
     const now = this.clock().getTime();
@@ -1616,6 +1635,9 @@ export class WalletPreparationRuntimeService {
           rawAt(payload, ["fundingRouter", "nonce"]) ?? "unknown",
         reservedRaw,
         marketRef: marketContext.evidence.safeMarketRef,
+        ...(marketContext.assetContext
+          ? { positionAssetContext: { ...marketContext.assetContext } }
+          : {}),
       },
     };
     const inspectionInput: PreparationInspectionInput = {
@@ -1900,12 +1922,34 @@ export class WalletPreparationRuntimeService {
       targetVenueId === "polymarket" || targetVenueId === "limitless"
         ? targetVenueId
         : null;
+    // SELL preparation follows the authenticated holding, not the replaceable
+    // current market generation. BUY continues to prepare the current market.
+    let sellAssetContext: PolymarketAssetContext | undefined;
+    if (
+      input.purpose === "sell" &&
+      targetRuntimeVenue === "polymarket" &&
+      targetMarket &&
+      input.positionActionRef
+    ) {
+      const selected = await loadOwnedPolymarketPositionSelection(this.db, {
+        userId: input.accountId,
+        positionRef: input.positionActionRef,
+        marketId: targetMarket.id,
+      });
+      if (!selected)
+        throw new PreparationContractError(
+          "evidence_invalid",
+          "SELL preparation requires the owned position's canonical market and ledger",
+        );
+      sellAssetContext = selected.assetContext;
+    }
     const resolvedMarketContext =
       targetMarket && targetRuntimeVenue
         ? runtimeMarketContextFromMarket({
             venue: targetRuntimeVenue,
             market: targetMarket,
             requestedMarketClass: input.marketClass,
+            assetContext: sellAssetContext,
           })
         : input.marketContextId
           ? unavailableRuntimeMarketContext(

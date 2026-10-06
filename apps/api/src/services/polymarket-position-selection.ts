@@ -43,7 +43,10 @@ export async function loadOwnedPolymarketPositionSelection(
   const context = await resolvePolymarketAssetContext(
     db as Pool,
     row.token_id,
-    await fetchPolymarketMarketInfo(db as Pool, { tokenId: row.token_id }),
+    // The caller supplies an exact canonical market. Use its indexed identity,
+    // not a token-only JSON fallback scan for old IDs removed from current maps.
+    // The immutable binding still validates the holding's ledger/market below.
+    await fetchPolymarketMarketInfo(db as Pool, { marketId: input.marketId }),
     stored,
     row.position_contract || POLYMARKET_PROTOCOL_CONTRACTS.conditionalTokens,
   );

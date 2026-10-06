@@ -19,6 +19,7 @@ import {
   readPolymarketStoredOrderContext,
 } from "./services/polymarket-asset-context.js";
 import { createIntegrationTestPool } from "./test-database-target.js";
+import { polymarketTradingExecutionTestHooks as executionHooks } from "./services/polymarket-trading-execution-service.js";
 
 const db = await createIntegrationTestPool({
   max: 4,
@@ -40,7 +41,7 @@ const legacy = resolvePolymarketMarketAssets({
   conditionId,
   clobTokenIds: ids,
   outcomes: '["Yes","No"]',
-  negRisk: false,
+  negRisk: true,
 });
 const next = resolvePolymarketMarketAssets({
   version: "v2",
@@ -93,7 +94,7 @@ try {
     [eventId, "Source fixture"],
   );
   await db.query(
-    "insert into polymarket_markets(id,event_id,question,condition_id,clob_token_ids,outcomes,neg_risk,raw) values($1,$2,$3,$4,$5,$6,false,$7::jsonb)",
+    "insert into polymarket_markets(id,event_id,question,condition_id,clob_token_ids,outcomes,neg_risk,raw) values($1,$2,$3,$4,$5,$6,true,$7::jsonb)",
     [
       market.venue_market_id,
       eventId,
@@ -112,7 +113,7 @@ try {
     marketId,
   ]);
   await db.query(
-    "update unified_markets set metadata = '{}'::jsonb where id=$1",
+    "update unified_markets set metadata = '{\"negRisk\":true}'::jsonb where id=$1",
     [marketId],
   );
   const nextMarket = {
@@ -148,6 +149,15 @@ try {
   assert.deepEqual(
     await currentIds("unified_market_tokens"),
     [...nextIds].sort(),
+  );
+  assert.equal(await fetchPolymarketMarketInfo(db, { tokenId: firstId }), null);
+  assert.equal(
+    await executionHooks.resolveOrderExchangeAddress(
+      { tokenId: firstId, orderPayload: { tokenId: firstId } },
+      db,
+    ),
+    legacy.exchangeAddress,
+    "contextless neg-risk recovery keeps its exchange after V2 token replacement",
   );
   const oldBinding = await fetchPolymarketAssetBindings(db, firstId);
   assert.equal(oldBinding[0]?.protocol_version, "v1");
@@ -243,6 +253,15 @@ try {
   const collisionInfo = await fetchPolymarketMarketInfo(db, {
     tokenId: firstId,
   });
+  assert.equal(collisionInfo?.neg_risk, false);
+  assert.equal(
+    await executionHooks.resolveOrderExchangeAddress(
+      { tokenId: firstId, orderPayload: { tokenId: firstId } },
+      db,
+    ),
+    legacy.exchangeAddress,
+    "a colliding current PM ID cannot change the legacy neg-risk exchange",
+  );
   assert.equal(
     (
       await resolvePolymarketAssetContext(

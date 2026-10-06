@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   POLYMARKET_PROTOCOL_CONTRACTS,
   resolvePolymarketMarketAssets,
+  buildPolymarketAssetContext,
 } from "@hunch/shared";
 
 import type { Pool } from "@hunch/infra";
@@ -472,6 +473,39 @@ await test("V2 preparation selects PM/V3 and never downgrades malformed V2 metad
   assert.equal(malformed.marketClass, "protocol_v2");
   assert.equal(malformed.evidence.resolved, false);
   assert.equal(malformed.evidence.exchangeResolved, false);
+  for (const negRisk of [false, true]) {
+    const legacy = resolvePolymarketMarketAssets({
+      version: "v1",
+      conditionId: protocol.conditionId,
+      clobTokenIds: ["7", "8"],
+      outcomes: ["Yes", "No"],
+      negRisk,
+    });
+    const context = buildPolymarketAssetContext(v2Market.id, legacy, "7");
+    const historical =
+      walletPreparationRuntimeTestHooks.runtimeMarketContextFromMarket({
+        venue: "polymarket",
+        market: v2Market,
+        requestedMarketClass: null,
+        assetContext: context,
+      });
+    assert.equal(historical.marketClass, negRisk ? "neg_risk" : "standard");
+    assert.equal(historical.exchangeAddress, context.exchangeAddress);
+    assert.equal(historical.evidence.resolved, true);
+    assert.equal(historical.evidence.exchangeResolved, true);
+    assert.equal(historical.evidence.quoteGuardAvailable, true);
+    assert.deepEqual(historical.assetContext, context);
+    assert.equal(
+      walletPreparationRuntimeTestHooks.runtimeMarketContextFromMarket({
+        venue: "polymarket",
+        market: v2Market,
+        requestedMarketClass: "protocol_v2",
+        assetContext: context,
+      }).evidence.resolved,
+      false,
+      "a contradictory requested class cannot widen the position's approvals",
+    );
+  }
 });
 
 await test("owner-bound redemption inspects the canonical historical owner", async () => {

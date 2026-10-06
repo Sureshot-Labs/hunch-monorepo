@@ -40,6 +40,13 @@ import { mapMarketsByTokenRows } from "./services/markets-by-token-response.js";
 import { buildTelegramPositionDetail } from "./services/telegram-bot-positions.js";
 import { loadOwnedPolymarketPositionSelection } from "./services/polymarket-position-selection.js";
 import { polymarketTradingExecutionTestHooks } from "./services/polymarket-trading-execution-service.js";
+import {
+  WalletPreparationRuntimeService,
+  type RuntimeVenueInspectionInput,
+  type PreparedRuntimeDestination,
+} from "./funding/preparation/runtime-service.js";
+import type { UserWallet } from "./auth.js";
+import type { DestinationOptionsInput } from "./funding/domain/contracts.js";
 
 const db = await createIntegrationTestPool({
   max: 4,
@@ -184,6 +191,136 @@ try {
   assert.deepEqual(
     positions.map((row) => row.assetContext?.outcomeIndex).sort(),
     [0, 1],
+  );
+  const inspections: RuntimeVenueInspectionInput[] = [];
+  const preparedClasses: string[] = [];
+  assert.ok(walletId);
+  const fixtureWalletId = walletId;
+  const fixtureUserId = userId;
+  const firstPosition = positions[0];
+  assert.ok(firstPosition);
+  const preparationService = new WalletPreparationRuntimeService(
+    db,
+    () => new Date(),
+    [
+      {
+        venueId: "polymarket",
+        supportedMarketClasses: ["standard", "neg_risk", "protocol_v2"],
+        supportsWallet: () => true,
+        matchesAccountRef: () => true,
+        ownerCandidates: async ({ wallets }) => ({
+          candidateWallets: wallets,
+          ownershipHinted: true,
+        }),
+        inspect: async (input) => {
+          inspections.push(input);
+          const marketClass = input.resolvedMarketContext?.marketClass;
+          assert.ok(marketClass);
+          return {
+            wallet: input.wallet,
+            inspectionInput: {
+              accountId: userId,
+              purpose: input.purpose,
+              marketClass,
+              marketContextId: marketId,
+            },
+            frozen: {
+              bindingOption: {
+                venueBindingOptionId: "ledger-preparation-fixture",
+              },
+              preparation: {
+                status: "ready",
+                marketClass,
+                expiresAt: new Date(Date.now() + 45_000).toISOString(),
+              },
+            },
+            adapter: {
+              prepare: async (requested: { marketClass: string }) => {
+                preparedClasses.push(requested.marketClass);
+                return [];
+              },
+            },
+          } as unknown as PreparedRuntimeDestination;
+        },
+      },
+    ],
+    async () => [
+      {
+        id: fixtureWalletId,
+        userId: fixtureUserId,
+        walletAddress: wallet,
+        walletType: "ethereum",
+        isVerified: true,
+        isInternalWallet: false,
+        walletSource: "external",
+      } as UserWallet,
+    ],
+  );
+  for (const position of positions) {
+    const request: DestinationOptionsInput = {
+      accountId: userId,
+      controllerWalletRef: walletId,
+      purpose: "sell" as const,
+      marketContextId: marketId,
+      marketClass: null,
+      compatibleVenueBindingOptionIds: null,
+      positionActionRef: position.id,
+    };
+    const expectedClass =
+      position.assetContext?.protocolVersion === "v2"
+        ? "protocol_v2"
+        : "standard";
+    await preparationService.frozenDestinations(request); // discovery
+    const option: DestinationOptionsInput & { venueBindingOptionId: string } = {
+      ...request,
+      venueBindingOptionId: "ledger-preparation-fixture",
+    };
+    assert.equal(
+      (await preparationService.inspectBindingOption(option)).marketClass,
+      expectedClass,
+    );
+    await preparationService.prepareBindingOption({
+      ...option,
+      operationId: randomUUID(),
+      expectedInspectionRevision: "fixture",
+    });
+    assert.equal(preparedClasses.at(-1), expectedClass);
+    assert.deepEqual(
+      inspections.at(-1)?.resolvedMarketContext?.assetContext,
+      position.assetContext,
+    );
+    assert.equal(
+      inspections.at(-1)?.resolvedMarketContext?.exchangeAddress,
+      position.assetContext?.exchangeAddress,
+    );
+  }
+  await assert.rejects(
+    preparationService.frozenDestinations({
+      accountId: randomUUID(),
+      purpose: "sell",
+      marketContextId: marketId,
+      marketClass: null,
+      compatibleVenueBindingOptionIds: null,
+      positionActionRef: firstPosition.id,
+    }),
+    /owned position/,
+  );
+  await preparationService.frozenDestinations({
+    accountId: userId,
+    purpose: "buy",
+    marketContextId: marketId,
+    marketClass: null,
+    compatibleVenueBindingOptionIds: null,
+    positionActionRef: null,
+  });
+  assert.equal(
+    inspections.at(-1)?.resolvedMarketContext?.marketClass,
+    "protocol_v2",
+    "BUY still follows the current generation",
+  );
+  assert.equal(
+    inspections.at(-1)?.resolvedMarketContext?.assetContext,
+    undefined,
   );
   const frozenMarkets = mapMarketsByTokenRows(
     await fetchPositionMarketRows(db, positions),

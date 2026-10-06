@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { Pool } from "@hunch/infra";
+import { fetchPolymarketAssetBindings } from "@hunch/db";
 import { selectPolymarketTradeAsset } from "./polymarket-trade-asset-selection.js";
 import { isRpcRateLimit } from "@hunch/shared";
 import {
@@ -15,6 +16,7 @@ import {
   resolvePolymarketOrderAssetContext,
   readPolymarketStoredOrderContext,
   polymarketContextFromMarketInfo,
+  polymarketContextFromBinding,
   PolymarketAssetContextError,
 } from "./polymarket-asset-context.js";
 import { ethers } from "ethers";
@@ -6189,6 +6191,7 @@ function readPolymarketSharesAmountRaw(intent: TradeIntent): bigint {
 }
 
 export const polymarketTradingExecutionTestHooks = {
+  resolveOrderExchangeAddress: resolvePolymarketOrderExchangeAddress,
   resolveReadinessAssetContext,
   resolveReadinessOutcome,
   assertPreparedFunds: assertPolymarketPreparedFunds,
@@ -6734,11 +6737,14 @@ function resolvePolymarketOrderPayloadVersion(orderPayload: unknown): string {
     : "polymarket_clob_v1";
 }
 
-async function resolvePolymarketOrderExchangeAddress(inputs: {
-  explicitExchangeAddress?: string | null;
-  tokenId?: string | null;
-  orderPayload?: unknown;
-}): Promise<string> {
+async function resolvePolymarketOrderExchangeAddress(
+  inputs: {
+    explicitExchangeAddress?: string | null;
+    tokenId?: string | null;
+    orderPayload?: unknown;
+  },
+  db: Pool = pool,
+): Promise<string> {
   const storedContext = readPolymarketStoredOrderContext(inputs.orderPayload);
   if (storedContext) {
     if (
@@ -6758,7 +6764,26 @@ async function resolvePolymarketOrderExchangeAddress(inputs: {
 
   const tokenId = inputs.tokenId?.trim();
   if (tokenId) {
-    const marketInfo = await fetchPolymarketMarketInfo(pool, { tokenId });
+    // Contextless historical orders predate PositionManager. Their CTF binding
+    // survives replacement of the current token maps; a numeric ID alone must
+    // never select a colliding PositionManager binding or its V3 exchange.
+    const assetId = normalizePolymarketAssetId(tokenId);
+    if (assetId) {
+      const [binding] = await fetchPolymarketAssetBindings(
+        db,
+        assetId,
+        POLYMARKET_PROTOCOL_CONTRACTS.conditionalTokens,
+      );
+      if (binding) {
+        const context = polymarketContextFromBinding(binding);
+        if (!context)
+          throw new PolymarketAssetContextError(
+            "Stored legacy Polymarket asset binding is inconsistent.",
+          );
+        return context.exchangeAddress;
+      }
+    }
+    const marketInfo = await fetchPolymarketMarketInfo(db, { tokenId });
     const marketExchangeAddress = exchangeAddressForNegRisk(
       marketInfo?.neg_risk ?? null,
     );
