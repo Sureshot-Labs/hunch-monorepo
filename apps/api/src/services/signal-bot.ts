@@ -1,5 +1,7 @@
 import { requestFreshMarketPrices, type PriceRefreshRedis } from "@hunch/infra";
 import { enabledConsumer } from "./matched-markets.js";
+import { buildSignalBotStatsReport } from "./signal-bot-stats-report.js";
+export { buildSignalBotStatsReport } from "./signal-bot-stats-report.js";
 import { loadMatchedSignalCandidates } from "./signal-matching.js";
 import {
   DEFAULT_VENUE_LIFECYCLE_POLICY,
@@ -77,12 +79,10 @@ import {
   HOLDER_RESEARCH_PERFORMANCE_APPROX_ENTRY_BEFORE_HOURS,
   resolveHolderResearchFinalYesProbability,
   resolveHolderResearchSignalQuote,
-  type HolderResearchPerformanceAuditResult,
 } from "./holder-research-performance.js";
 import {
   classifyMarketSegment,
   formatMarketSegmentLabel,
-  formatMarketTypeLabel,
 } from "./market-type-classifier.js";
 import {
   buildMarketSideCopy,
@@ -633,10 +633,6 @@ function signalBotStatsPeriodHours(period: SignalBotStatsPeriod): number {
   if (period === "24h") return 24;
   if (period === "30d") return 24 * 30;
   return 24 * 7;
-}
-
-function formatSignalBotStatsPeriodLabel(period: SignalBotStatsPeriod): string {
-  return period.toUpperCase();
 }
 
 export function isSignalBotAdmin(
@@ -8148,162 +8144,6 @@ export async function publishSignalBotFollowthroughTick(input: {
   };
 }
 
-export function buildSignalBotStatsReport(input: {
-  buyAmountUsd: number;
-  detail?: boolean;
-  period: SignalBotStatsPeriod;
-  result: HolderResearchPerformanceAuditResult;
-}): string {
-  const periodLabel = formatSignalBotStatsPeriodLabel(input.period);
-  const overall = input.result.aggregates.overall;
-  if (input.result.evaluated === 0 || overall.notes === 0) {
-    return `No bot-eligible signals for ${periodLabel} yet.`;
-  }
-
-  const measuredSignals = overall.withEntry;
-  const totalPnlUsd = overall.totalPnlPerDollar * input.buyAmountUsd;
-  const totalStakeUsd = measuredSignals * input.buyAmountUsd;
-  const roi = totalStakeUsd > 0 ? totalPnlUsd / totalStakeUsd : null;
-  const knownResolved = overall.correct + overall.wrong;
-  const resolvedLine =
-    knownResolved > 0
-      ? `🎯 Resolved: ${overall.correct}W / ${overall.wrong}L (${formatPercent(overall.correct / knownResolved)})`
-      : "🎯 Resolved: not enough yet";
-  const pnlLine =
-    measuredSignals > 0
-      ? `💰 $${input.buyAmountUsd} each: ${formatSignedUsd(totalPnlUsd)} (${formatSignedPercent(roi)})`
-      : `💰 $${input.buyAmountUsd} each: waiting for price data`;
-  const lines = [
-    `📊 Hunch signals · ${periodLabel}`,
-    "",
-    pnlLine,
-    resolvedLine,
-    `📈 Marked up: ${overall.positive} · down: ${overall.negative}`,
-    `⏳ Open: ${overall.open} · 🏁 Resolved: ${overall.resolved}`,
-  ];
-
-  if (input.detail) {
-    const detailLines = buildSignalBotStatsDetailLines(input.result, {
-      buyAmountUsd: input.buyAmountUsd,
-    });
-    if (detailLines.length > 0) {
-      lines.push("", ...detailLines);
-    }
-  }
-
-  lines.push("", "Open signals use current market marks.");
-  return lines.join("\n");
-}
-
-function buildSignalBotStatsDetailLines(
-  result: HolderResearchPerformanceAuditResult,
-  input: { buyAmountUsd: number },
-): string[] {
-  const lines: string[] = ["Details"];
-  const segmentLines = formatStatsAggregateGroup({
-    amountUsd: input.buyAmountUsd,
-    formatter: formatMarketSegmentLabel,
-    group: result.aggregates.byMarketSegment,
-    title: "By category",
-  });
-  if (segmentLines.length > 0) lines.push(...segmentLines);
-  const typeLines = formatStatsAggregateGroup({
-    amountUsd: input.buyAmountUsd,
-    formatter: formatMarketTypeLabel,
-    group: result.aggregates.byMarketType,
-    title: "By market type",
-  });
-  if (typeLines.length > 0) lines.push(...typeLines);
-  const bucketLines = formatStatsAggregateGroup({
-    amountUsd: input.buyAmountUsd,
-    formatter: formatStatsBucketLabel,
-    group: result.aggregates.byBucket,
-    title: "By setup",
-  });
-  if (bucketLines.length > 0) lines.push(...bucketLines);
-  const actorLines = formatStatsAggregateGroup({
-    amountUsd: input.buyAmountUsd,
-    formatter: formatStatsActorLabel,
-    group: result.aggregates.byActorMode,
-    title: "By wallet read",
-  });
-  if (actorLines.length > 0) lines.push(...actorLines);
-  return lines.length > 1 ? lines : [];
-}
-
-function formatStatsAggregateGroup(input: {
-  amountUsd: number;
-  formatter: (key: string) => string;
-  group: Record<
-    string,
-    HolderResearchPerformanceAuditResult["aggregates"]["overall"]
-  >;
-  title: string;
-}): string[] {
-  const rows = Object.entries(input.group)
-    .filter(([, aggregate]) => aggregate.notes > 0)
-    .sort((left, right) => {
-      const leftPnl = Math.abs(left[1].totalPnlPerDollar);
-      const rightPnl = Math.abs(right[1].totalPnlPerDollar);
-      if (leftPnl !== rightPnl) return rightPnl - leftPnl;
-      return right[1].notes - left[1].notes;
-    })
-    .slice(0, 4);
-  if (rows.length === 0) return [];
-  return [
-    input.title,
-    ...rows.map(([key, aggregate]) => {
-      const pnlUsd = aggregate.totalPnlPerDollar * input.amountUsd;
-      const knownResolved = aggregate.correct + aggregate.wrong;
-      const resolved =
-        knownResolved > 0
-          ? `${aggregate.correct}W / ${aggregate.wrong}L`
-          : "open only";
-      return `• ${input.formatter(key)}: ${formatSignedUsd(pnlUsd)} · ${resolved} · ${aggregate.notes} signals`;
-    }),
-  ];
-}
-
-function formatStatsBucketLabel(value: string): string {
-  switch (value) {
-    case "followup_existing":
-      return "Follow-ups";
-    case "sharp_side":
-      return "Strong same-side wallets";
-    case "sharp_minority":
-      return "Minority wallet reads";
-    case "sharp_split":
-      return "Split strong wallets";
-    case "clean_disagreement":
-      return "Clean disagreement";
-    case "recent_flow":
-      return "Recent flow";
-    case "event_bridge":
-      return "Event bridge";
-    case "concentration_risk":
-      return "Concentration risk";
-    case "unknown":
-      return "Unknown setup";
-    default:
-      return value.replace(/_/g, " ");
-  }
-}
-
-function formatStatsActorLabel(value: string): string {
-  switch (value) {
-    case "sharp_cluster":
-      return "Wallet clusters";
-    case "single_holder":
-      return "Single wallets";
-    case "none":
-      return "No clear wallet";
-    case "unknown":
-      return "Unknown read";
-    default:
-      return value.replace(/_/g, " ");
-  }
-}
-
 export async function sendSignalBotStatsReport(input: {
   chatId: string;
   config: SignalBotConfig;
@@ -9396,21 +9236,6 @@ function buildSignalBotFollowthroughCopyAudit(input: {
       NO: compactSignalBotCopyAudit(noCopy),
     },
   };
-}
-
-function formatPercent(value: number): string {
-  return `${Math.max(0, Math.min(100, Math.round(value * 100)))}%`;
-}
-
-function formatSignedPercent(value: number | null): string {
-  if (value == null || !Number.isFinite(value)) return "n/a";
-  const sign = value > 0 ? "+" : "";
-  return `${sign}${(value * 100).toFixed(1)}%`;
-}
-
-function formatSignedUsd(value: number): string {
-  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
-  return `${sign}$${Math.abs(value).toFixed(2)}`;
 }
 
 function formatCompactUsd(value: number): string {

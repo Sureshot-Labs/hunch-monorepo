@@ -70,6 +70,7 @@ import { makeWalletPositionLedgerKey } from "./wallet-position-ledger.js";
 import {
   buildHolderResearchSignalSnapshot,
   loadHolderResearchPerformanceCalibrationMemo,
+  resolveHolderResearchFinalYesProbability,
 } from "./holder-research-performance.js";
 import { parseMarketOutcomes } from "./wallet-intel-helpers.js";
 import { resolveHolderResearchPublishHorizon } from "./holder-research-horizon.js";
@@ -480,6 +481,17 @@ export type HolderResearchSelectionResult = {
 export type HolderResearchObservationCandidate = {
   candidate: HolderResearchCandidate;
   candidateRank: number;
+  selectionTelemetry?: {
+    version: 2;
+    clusterBonus: number;
+    baselineClusterBonus: 0.18;
+    liveRank: number;
+    baselineRank: number;
+    liveScore: number;
+    baselineScore: number;
+    rankSnapshot: "initial_scan";
+    outcomeCoverage: "observed_pool_only";
+  };
 };
 
 export type HolderResearchPersistDecision = {
@@ -780,18 +792,6 @@ function calculateYesProbability(row: {
   }
   const last = toNumber(row.last_price);
   return last != null ? clamp01(last) : null;
-}
-
-function terminalYesProbabilityFromPrice(row: {
-  best_bid: string | number | null;
-  best_ask: string | number | null;
-  last_price: string | number | null;
-}): number | null {
-  const yesProbability = calculateYesProbability(row);
-  if (yesProbability == null) return null;
-  if (yesProbability <= 0.01) return 0;
-  if (yesProbability >= 0.99) return 1;
-  return null;
 }
 
 function isExtremeOdds(
@@ -2747,7 +2747,9 @@ function holderResearchModelConfigSignature(
   policy: HolderResearchPolicy,
 ): string {
   return JSON.stringify([
-    "holder_decision_contract_v7",
+    "holder_decision_contract_v8",
+    policy.selectionClusterBonus,
+    policy.eventPublicationHistoryEnabled,
     policy.model,
     policy.reasoningEffort ?? null,
     policy.triageModel,
@@ -3324,7 +3326,7 @@ function bucketPriority(bucket: HolderResearchBucket): number {
   }
 }
 
-function adjustedSelectionScore(
+export function adjustedHolderResearchSelectionScore(
   candidate: HolderResearchCandidate,
   policy: HolderResearchPolicy,
 ): number {
@@ -3334,7 +3336,8 @@ function adjustedSelectionScore(
     candidate,
     policy,
   );
-  if (quality.actorStrength === "cluster") score += 0.18;
+  if (quality.actorStrength === "cluster")
+    score += policy.selectionClusterBonus;
   if (quality.actorStrength === "exceptional_single") score += 0.08;
   if (candidate.bucket === "sharp_side") score += 0.06;
   if (candidate.bucket === "sharp_minority") score -= 0.08;
@@ -3389,7 +3392,8 @@ function compareHolderResearchCandidates(
 ): (a: HolderResearchCandidate, b: HolderResearchCandidate) => number {
   return (a, b) => {
     const scoreDelta =
-      adjustedSelectionScore(b, policy) - adjustedSelectionScore(a, policy);
+      adjustedHolderResearchSelectionScore(b, policy) -
+      adjustedHolderResearchSelectionScore(a, policy);
     if (Math.abs(scoreDelta) > 0.0001) return scoreDelta;
     const priorityDelta = bucketPriority(a.bucket) - bucketPriority(b.bucket);
     if (priorityDelta !== 0) return priorityDelta;
@@ -3422,6 +3426,12 @@ export function buildHolderResearchObservationPool(input: {
   const rankByThesis = new Map(
     ranked.map((candidate, index) => [candidate.thesisKey, index + 1]),
   );
+  const baselinePolicy = { ...input.policy, selectionClusterBonus: 0.18 };
+  const baselineRanks = new Map(
+    [...ranked]
+      .sort(compareHolderResearchCandidates(baselinePolicy))
+      .map((candidate, index) => [candidate.thesisKey, index + 1]),
+  );
   const requiredByThesis = new Map<string, HolderResearchCandidate>();
   for (const candidate of input.requiredCandidates) {
     if (
@@ -3449,6 +3459,24 @@ export function buildHolderResearchObservationPool(input: {
     .map((candidate) => ({
       candidate,
       candidateRank: rankByThesis.get(candidate.thesisKey) ?? ranked.length + 1,
+      selectionTelemetry: {
+        version: 2 as const,
+        clusterBonus: input.policy.selectionClusterBonus,
+        baselineClusterBonus: 0.18 as const,
+        liveRank: rankByThesis.get(candidate.thesisKey) ?? ranked.length + 1,
+        baselineRank:
+          baselineRanks.get(candidate.thesisKey) ?? ranked.length + 1,
+        liveScore: adjustedHolderResearchSelectionScore(
+          rankedByThesis.get(candidate.thesisKey) ?? candidate,
+          input.policy,
+        ),
+        baselineScore: adjustedHolderResearchSelectionScore(
+          rankedByThesis.get(candidate.thesisKey) ?? candidate,
+          baselinePolicy,
+        ),
+        rankSnapshot: "initial_scan" as const,
+        outcomeCoverage: "observed_pool_only" as const,
+      },
     }))
     .sort((left, right) => left.candidateRank - right.candidateRank)
     .slice(0, limit);
@@ -6463,6 +6491,7 @@ export function adaptHolderResearchFinalOutputV2(input: {
           : "unknown";
   const adapted: HolderResearchAgentOutputV1 = {
     version: "holder_research_v1",
+    editorial_duplicate: input.output.editorial_duplicate === true,
     status,
     bucket: candidate.bucket,
     confidence: clamp01(candidate.score),
@@ -7496,12 +7525,7 @@ function finalYesProbabilityFromResolvedRow(
     | "last_price"
   >,
 ): number | null {
-  const resolved = normalizeSide(row.resolved_outcome);
-  if (resolved === "YES") return 1;
-  if (resolved === "NO") return 0;
-  const pct = toNumber(row.resolved_outcome_pct);
-  if (pct != null) return clamp01(pct / 10_000);
-  return terminalYesProbabilityFromPrice(row);
+  return resolveHolderResearchFinalYesProbability(row).finalYesProbability;
 }
 
 function noteYesProbability(metrics: unknown): number | null {
@@ -7535,7 +7559,7 @@ function evaluateResolvedSignalRow(
         : -priceDelta
       : null;
   const outcome =
-    side == null || finalYes == null
+    side == null || finalYes == null || (finalYes !== 0 && finalYes !== 1)
       ? "unknown"
       : side === "YES"
         ? finalYes >= 0.5
@@ -7559,7 +7583,7 @@ function evaluateResolvedSignalRow(
   });
 
   return {
-    version: 1,
+    version: 2,
     evaluatedAt: new Date().toISOString(),
     outcome,
     signalSide: side,
@@ -7665,6 +7689,7 @@ export async function evaluateResolvedHolderResearchNotes(
         and n.created_at >= now() - ($1::numeric * interval '1 hour')
         and (
           not (coalesce(n.metrics, '{}'::jsonb) ? 'resolvedEvaluation')
+          or n.metrics #>> '{resolvedEvaluation,version}' is distinct from '2'
           or (
             n.metrics #>> '{resolvedEvaluation,outcome}' = 'unknown'
             and n.updated_at <= now() - interval '24 hours'

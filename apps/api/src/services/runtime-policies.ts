@@ -276,6 +276,8 @@ export type HolderResearchPolicy = {
   supportOnlyBuckets: HolderResearchBucket[];
   selectionEventDiversityEnabled: boolean;
   selectionEventSoftCapPerEvent: number;
+  selectionClusterBonus: number;
+  eventPublicationHistoryEnabled: boolean;
   selectionExpiryBoostEnabled: boolean;
   selectionExpirySoonHours: number;
   selectionExpiryNearHours: number;
@@ -1156,6 +1158,8 @@ const holderResearchSchema = z
     supportOnlyBuckets: z.array(holderResearchBucketSchema).max(8),
     selectionEventDiversityEnabled: strictBoolean,
     selectionEventSoftCapPerEvent: positiveInt.max(20),
+    selectionClusterBonus: ratio,
+    eventPublicationHistoryEnabled: strictBoolean,
     selectionExpiryBoostEnabled: strictBoolean,
     selectionExpirySoonHours: positiveInt.max(24 * 365),
     selectionExpiryNearHours: positiveInt.max(24 * 365),
@@ -1974,6 +1978,8 @@ function getDefaults(): IntelPolicyMap {
       ],
       selectionEventDiversityEnabled: true,
       selectionEventSoftCapPerEvent: 2,
+      selectionClusterBonus: 0.28,
+      eventPublicationHistoryEnabled: true,
       selectionExpiryBoostEnabled: true,
       selectionExpirySoonHours: 72,
       selectionExpiryNearHours: 168,
@@ -3063,6 +3069,10 @@ function normalizeHolderResearchPolicy(
     supportOnlyBuckets: [...new Set(policy.supportOnlyBuckets)],
     selectionEventDiversityEnabled: Boolean(
       policy.selectionEventDiversityEnabled,
+    ),
+    selectionClusterBonus: clamp(policy.selectionClusterBonus, 0, 1),
+    eventPublicationHistoryEnabled: Boolean(
+      policy.eventPublicationHistoryEnabled,
     ),
     selectionEventSoftCapPerEvent: clamp(
       Math.trunc(policy.selectionEventSoftCapPerEvent),

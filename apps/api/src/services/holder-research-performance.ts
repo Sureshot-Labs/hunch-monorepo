@@ -13,6 +13,7 @@ import {
 } from "./market-type-classifier.js";
 import type { HolderResearchPolicy } from "./runtime-policies.js";
 import { buildWalletIntelAcceptingOrdersSql } from "./wallet-intel-market-eligibility.js";
+import { loadDeliveredHolderResearchCohort } from "./holder-research-delivered-cohort.js";
 
 export type HolderResearchSignalSide = "YES" | "NO";
 export type HolderResearchExecutionPriority = "normal" | "high_conviction";
@@ -65,12 +66,13 @@ export type HolderResearchMarkPriceSource =
   | "missing";
 
 export type HolderResearchSignalPerformance = {
-  version: 1;
+  version: 2;
   evaluatedAt: string;
   noteId: string;
   thesisKey: string;
   tradeKey: string;
   marketId: string;
+  eventId: string | null;
   venue: string;
   bucket: string | null;
   marketType: MarketType;
@@ -143,6 +145,7 @@ export type HolderResearchPerformanceAggregate = {
 };
 
 export type HolderResearchPerformanceAuditResult = {
+  truncated?: boolean;
   considered: number;
   evaluated: number;
   written: number;
@@ -183,9 +186,10 @@ export type HolderResearchPerformanceAuditOptions = {
   approxEntryBeforeHours?: number;
   approxEntryAfterHours?: number;
   deliveredInitialOnly?: boolean;
+  asOf?: Date;
 };
 
-type HolderResearchPerformanceNoteRow = {
+export type HolderResearchPerformanceNoteRow = {
   observation_id?: string | null;
   note_id: string;
   direction: string | null;
@@ -363,18 +367,6 @@ export function resolveHolderResearchYesProbability(row: {
   return normalizePrice(row.last_price);
 }
 
-function terminalYesProbabilityFromPrice(row: {
-  best_bid: unknown;
-  best_ask: unknown;
-  last_price: unknown;
-}): number | null {
-  const yesProbability = resolveHolderResearchYesProbability(row);
-  if (yesProbability == null) return null;
-  if (yesProbability <= 0.01) return 0;
-  if (yesProbability >= 0.99) return 1;
-  return null;
-}
-
 export function resolveHolderResearchFinalYesProbability(row: {
   resolved_outcome?: unknown;
   resolvedOutcome?: unknown;
@@ -397,15 +389,11 @@ export function resolveHolderResearchFinalYesProbability(row: {
   if (resolved === "NO")
     return { finalYesProbability: 0, source: "resolved_outcome" };
   const pct = toNumber(row.resolved_outcome_pct ?? row.resolvedOutcomePct);
-  if (pct != null) {
+  if (pct != null && pct >= 0 && pct <= 10_000) {
     return {
-      finalYesProbability: clamp01(pct / 10_000),
+      finalYesProbability: pct / 10_000,
       source: "resolved_outcome_pct",
     };
-  }
-  const terminal = terminalYesProbabilityFromPrice(row);
-  if (terminal != null) {
-    return { finalYesProbability: terminal, source: "terminal_price" };
   }
   return { finalYesProbability: null, source: "missing" };
 }
@@ -656,7 +644,7 @@ function readExistingPerformance(
   metrics: unknown,
 ): HolderResearchSignalPerformance | null {
   const performance = objectRecord(objectRecord(metrics).signalPerformance);
-  return toNumber(performance.version) === 1
+  return toNumber(performance.version) === 2
     ? (performance as HolderResearchSignalPerformance)
     : null;
 }
@@ -1026,7 +1014,9 @@ function buildPerformanceForRow(input: {
   const outcome: HolderResearchSignalPerformance["outcome"] =
     state === "open"
       ? "open"
-      : side == null || final.finalYesProbability == null
+      : side == null ||
+          final.finalYesProbability == null ||
+          (final.finalYesProbability !== 0 && final.finalYesProbability !== 1)
         ? "unknown"
         : side === "YES"
           ? final.finalYesProbability >= 0.5
@@ -1043,12 +1033,13 @@ function buildPerformanceForRow(input: {
     input.row.thesis_key?.trim() ||
     `holder_research:v2:${input.row.market_id}:${side ?? "MIXED"}`;
   return {
-    version: 1,
+    version: 2,
     evaluatedAt: new Date().toISOString(),
     noteId: input.row.note_id,
     thesisKey,
-    tradeKey: `${thesisKey}:${input.row.market_id}:${side ?? "MIXED"}`,
+    tradeKey: `${input.row.note_id}:${input.row.market_id}:${side ?? "MIXED"}`,
     marketId: input.row.market_id,
+    eventId: input.row.event_id,
     venue: input.row.venue,
     bucket: metricBucket(input.row.metrics, input.row.target_meta),
     marketType,
@@ -1139,6 +1130,7 @@ function addAggregateItem(
   else if (item.outcome === "wrong") aggregate.wrong += 1;
   if (
     item.state === "resolved" &&
+    (item.outcome === "correct" || item.outcome === "wrong") &&
     item.entryPrice != null &&
     item.excessProbability != null
   ) {
@@ -1146,7 +1138,7 @@ function addAggregateItem(
     aggregate.excessProbability += item.excessProbability;
     aggregate.excessVariance += item.entryPrice * (1 - item.entryPrice);
   }
-  if (item.pnlPerDollar != null) {
+  if (item.pnlPerDollar != null && Number.isFinite(item.pnlPerDollar)) {
     aggregate.rois.push(item.pnlPerDollar);
     aggregate.totalPnlPerDollar += item.pnlPerDollar;
     if (item.pnlPerDollar > 0.000001) aggregate.positive += 1;
@@ -1255,6 +1247,9 @@ export async function auditHolderResearchSignalPerformance(
     "n.note_type = 'signal'",
     "n.producer_type = 'holder_research'",
   ];
+  if (options.deliveredInitialOnly) {
+    where.push("coalesce(n.lineage->>'revision_kind', 'initial') = 'initial'");
+  }
   if (options.activeOnly) {
     where.push("n.status = 'active'");
   }
@@ -1264,7 +1259,7 @@ export async function auditHolderResearchSignalPerformance(
   if (noteIds.length > 0) {
     params.push(noteIds);
     where.push(`n.id = any($${params.length}::uuid[])`);
-  } else {
+  } else if (!options.deliveredInitialOnly) {
     params.push(Math.max(1, Math.trunc(options.lookbackHours)));
     where.push(
       `n.created_at >= now() - ($${params.length}::numeric * interval '1 hour')`,
@@ -1274,7 +1269,7 @@ export async function auditHolderResearchSignalPerformance(
     params.push(Math.max(0, Math.min(1, options.minConfidence)));
     where.push(`n.confidence >= $${params.length}::numeric`);
   }
-  params.push(limit);
+  params.push(limit + 1);
   const limitParam = params.length;
   const acceptingSql = buildWalletIntelAcceptingOrdersSql({
     marketAlias: "m",
@@ -1288,7 +1283,8 @@ export async function auditHolderResearchSignalPerformance(
           target_side,
           target_price,
           publication_snapshot,
-          sent_at
+          sent_at,
+          delivery_id
         from (
           select
             coalesce(nullif(sbm.metrics #>> '{publicationSnapshotV1,marketId}', ''),
@@ -1299,7 +1295,8 @@ export async function auditHolderResearchSignalPerformance(
               case n.direction when 'up' then 'YES' when 'down' then 'NO' end)) as target_side,
             nullif(sbm.metrics #>> '{delivery,view,target,price}', '') as target_price,
             sbm.metrics->'publicationSnapshotV1' as publication_snapshot,
-            sbm.sent_at
+            sbm.sent_at,
+            sbm.id as delivery_id
           from signal_bot_messages sbm
           where sbm.note_id = n.id
             and sbm.message_kind = 'initial'
@@ -1307,15 +1304,32 @@ export async function auditHolderResearchSignalPerformance(
         ) delivered
         where target_market_id is not null
           and target_side in ('YES', 'NO')
-        order by target_market_id, target_side, sent_at asc
+        order by target_market_id, target_side, sent_at asc, delivery_id asc
       ) delivery on true
     `
     : "";
   const marketJoin = options.deliveredInitialOnly
     ? "join unified_markets m on m.id = delivery.target_market_id"
     : "join unified_markets m on m.id = t.target_id";
-  const { rows } = await client.query<HolderResearchPerformanceNoteRow>(
-    `
+  const cohortEnd = options.asOf ?? new Date();
+  const cohortStart = new Date(
+    cohortEnd.getTime() -
+      Math.max(1, Math.trunc(options.lookbackHours)) * 3_600_000,
+  );
+  const loadRows = async (pageNoteIds?: string[]) => {
+    const queryParams = [...params];
+    const queryWhere = [...where];
+    if (pageNoteIds) {
+      queryParams.push(pageNoteIds);
+      queryWhere.push(`n.id = any($${queryParams.length}::uuid[])`);
+      queryParams.push(cohortStart.toISOString(), cohortEnd.toISOString());
+      queryWhere.push(
+        `delivery.sent_at >= $${queryParams.length - 1}::timestamptz and delivery.sent_at < $${queryParams.length}::timestamptz`,
+      );
+    }
+    return (
+      await client.query<HolderResearchPerformanceNoteRow>(
+        `
       select
         n.id as note_id,
         n.id::text || ':' || m.id || ':' || coalesce(
@@ -1329,7 +1343,7 @@ export async function auditHolderResearchSignalPerformance(
         ${options.deliveredInitialOnly ? "delivery.target_side" : "null::text"} as frozen_side,
         ${options.deliveredInitialOnly ? "delivery.target_price" : "null::numeric"} as frozen_entry_price,
         ${options.deliveredInitialOnly ? "delivery.publication_snapshot" : "null::jsonb"} as publication_snapshot,
-        ${options.deliveredInitialOnly ? "delivery.sent_at" : "null::timestamptz"} as published_at,
+        ${options.deliveredInitialOnly ? "delivery.sent_at::text" : "null::text"} as published_at,
         ${options.deliveredInitialOnly ? "true" : "false"} as delivered_initial,
         n.direction,
         n.confidence,
@@ -1379,12 +1393,31 @@ export async function auditHolderResearchSignalPerformance(
         order by token_id
         limit 1
       ) token_no on true
-      where ${where.join("\n        and ")}
-      order by n.created_at desc, n.id desc, m.id, frozen_side
+      where ${queryWhere.join("\n        and ")}
+      order by ${options.deliveredInitialOnly ? "delivery.sent_at" : "n.created_at"} desc, n.id desc, m.id, frozen_side
       limit $${limitParam}::int
     `,
-    params,
-  );
+        queryParams,
+      )
+    ).rows;
+  };
+  let rows: HolderResearchPerformanceNoteRow[];
+  let truncated: boolean;
+  if (options.deliveredInitialOnly && noteIds.length === 0) {
+    ({ rows, truncated } = await loadDeliveredHolderResearchCohort(client, {
+      start: cohortStart,
+      end: cohortEnd,
+      limit,
+      activeOnly: options.activeOnly,
+      directionalOnly: options.directionalOnly,
+      minConfidence: options.minConfidence,
+      loadFirstDeliveries: loadRows,
+    }));
+  } else {
+    const loaded = await loadRows();
+    truncated = loaded.length > limit;
+    rows = loaded.slice(0, limit);
+  }
 
   const fallbackRequests = rows.flatMap((row) => {
     if (options.deliveredInitialOnly) return [];
@@ -1491,6 +1524,7 @@ export async function auditHolderResearchSignalPerformance(
 
   return {
     ...stats,
+    truncated,
     aggregates: aggregateItems(items),
     items,
   };
@@ -1516,6 +1550,7 @@ export function buildHolderResearchCalibrationMemoFromItems(
   const items = dedupeDeliveredPerformanceTrades(rawItems).filter(
     (item) =>
       item.state === "resolved" &&
+      (item.outcome === "correct" || item.outcome === "wrong") &&
       item.entryPrice != null &&
       item.pnlPerDollar != null &&
       item.excessProbability != null,
@@ -1571,7 +1606,7 @@ export function buildHolderResearchCalibrationMemoFromItems(
       aggregate.excessZ >= HOLDER_RESEARCH_CALIBRATION_SIGNIFICANCE_Z
     ) {
       positive.push(
-        `Positive calibrated pattern: ${group.label} has ${group.items.length} independent trades, mean ROI ${(aggregate.averageRoi * 100).toFixed(1)}%, excess z=${aggregate.excessZ.toFixed(2)}, and ${aggregate.correct} actual wins versus ${(aggregate.expectedWins ?? 0).toFixed(1)} expected at entry.`,
+        `Observed positive pattern: ${group.label} has ${group.items.length} market-side trades across ${new Set(group.items.map((item) => item.eventId).filter(Boolean)).size} known events, mean ROI ${(aggregate.averageRoi * 100).toFixed(1)}%, and ${aggregate.correct} actual wins versus ${(aggregate.expectedWins ?? 0).toFixed(1)} expected at entry. Related events and holders may be dependent; this is not proof of positive edge.`,
       );
       continue;
     }
@@ -1580,13 +1615,8 @@ export function buildHolderResearchCalibrationMemoFromItems(
       aggregate.averageRoi != null &&
       aggregate.averageRoi < 0
     ) {
-      const evidence =
-        aggregate.excessZ != null &&
-        aggregate.excessZ <= -HOLDER_RESEARCH_CALIBRATION_SIGNIFICANCE_Z
-          ? "statistically supported negative edge"
-          : "observed losses, not yet statistically proven negative edge";
       caution.push(
-        `Calibration caution: ${group.label} has ${group.items.length} independent trades and mean ROI ${(aggregate.averageRoi * 100).toFixed(1)}% (${evidence}; excess z=${aggregate.excessZ?.toFixed(2) ?? "n/a"}).`,
+        `Calibration caution: ${group.label} has ${group.items.length} market-side trades across ${new Set(group.items.map((item) => item.eventId).filter(Boolean)).size} known events and mean ROI ${(aggregate.averageRoi * 100).toFixed(1)}%. Observed losses are not proof of negative edge; related events and holders may be dependent.`,
       );
     }
   }
@@ -1621,10 +1651,7 @@ export async function loadLegacyHolderResearchPerformanceCalibrationMemo(
       select
         n.id as note_id,
         n.created_at,
-        coalesce(
-          n.metrics #>> '{signalPerformance,outcome}',
-          n.metrics #>> '{resolvedEvaluation,outcome}'
-        ) as outcome,
+        n.metrics #>> '{signalPerformance,outcome}' as outcome,
         coalesce(
           n.metrics #>> '{signalPerformance,marketType}',
           n.metrics #>> '{resolvedEvaluation,marketType}'
@@ -1679,8 +1706,7 @@ export async function loadLegacyHolderResearchPerformanceCalibrationMemo(
       where n.note_type = 'signal'
         and n.producer_type = 'holder_research'
         and (
-          n.metrics ? 'signalPerformance'
-          or n.metrics ? 'resolvedEvaluation'
+          n.metrics #>> '{signalPerformance,version}' = '2'
         )
         and n.created_at >= now() - ($1::numeric * interval '1 hour')
       order by n.updated_at desc, n.created_at desc

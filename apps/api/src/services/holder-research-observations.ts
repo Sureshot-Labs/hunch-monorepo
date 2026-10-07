@@ -59,6 +59,8 @@ export type HolderResearchObservationCalibrationSample = {
 
 export type HolderResearchObservationCalibrationAggregate = {
   samples: number;
+  binarySamples: number;
+  fractionalSamples: number;
   actualWins: number;
   expectedWins: number;
   meanRoi: number | null;
@@ -207,13 +209,19 @@ function median(values: number[]): number {
 function calibrationAggregate(
   samples: HolderResearchObservationCalibrationSample[],
 ): HolderResearchObservationCalibrationAggregate {
-  const actualWins = samples.reduce((sum, sample) => sum + sample.payout, 0);
-  const expectedWins = samples.reduce(
+  const binarySamples = samples.filter(
+    (sample) => sample.payout === 0 || sample.payout === 1,
+  );
+  const actualWins = binarySamples.reduce(
+    (sum, sample) => sum + sample.payout,
+    0,
+  );
+  const expectedWins = binarySamples.reduce(
     (sum, sample) => sum + sample.entryPrice,
     0,
   );
   const excessProbability = actualWins - expectedWins;
-  const variance = samples.reduce(
+  const variance = binarySamples.reduce(
     (sum, sample) => sum + sample.entryPrice * (1 - sample.entryPrice),
     0,
   );
@@ -224,6 +232,8 @@ function calibrationAggregate(
   const excessZ = variance > 0 ? excessProbability / Math.sqrt(variance) : null;
   return {
     samples: samples.length,
+    binarySamples: binarySamples.length,
+    fractionalSamples: samples.length - binarySamples.length,
     actualWins,
     expectedWins,
     meanRoi,
@@ -233,7 +243,8 @@ function calibrationAggregate(
     excessProbability,
     excessZ,
     positivePattern:
-      samples.length >= HOLDER_RESEARCH_CALIBRATION_POSITIVE_MIN_SAMPLES &&
+      binarySamples.length >=
+        HOLDER_RESEARCH_CALIBRATION_POSITIVE_MIN_SAMPLES &&
       (meanRoi ?? 0) > 0 &&
       (excessZ ?? Number.NEGATIVE_INFINITY) >=
         HOLDER_RESEARCH_CALIBRATION_SIGNIFICANCE_Z,
@@ -241,7 +252,7 @@ function calibrationAggregate(
       samples.length >= HOLDER_RESEARCH_CALIBRATION_CAUTION_MIN_SAMPLES &&
       (meanRoi ?? 0) < 0,
     statisticallySupportedNegative:
-      samples.length >= HOLDER_RESEARCH_CALIBRATION_CAUTION_MIN_SAMPLES &&
+      binarySamples.length >= HOLDER_RESEARCH_CALIBRATION_CAUTION_MIN_SAMPLES &&
       (excessZ ?? Number.POSITIVE_INFINITY) <=
         -HOLDER_RESEARCH_CALIBRATION_SIGNIFICANCE_Z,
   };
@@ -348,7 +359,7 @@ export async function persistHolderResearchCandidateObservations(
   },
 ): Promise<{ written: number }> {
   const observations = input.observations
-    .map(({ candidate, candidateRank }) => {
+    .map(({ candidate, candidateRank, selectionTelemetry }) => {
       const features = buildHolderResearchDecisionFeaturesV2(
         candidate,
         input.policy,
@@ -357,6 +368,7 @@ export async function persistHolderResearchCandidateObservations(
       return {
         candidate,
         candidateRank,
+        selectionTelemetry,
         features,
         shadowScore: scoreHolderResearchCandidateShadowV2(
           features,
@@ -391,11 +403,14 @@ export async function persistHolderResearchCandidateObservations(
     feature_version: entry.features.version,
     decision_features: {
       ...entry.features,
-      telemetryOnly: buildHolderResearchObservationRankingTelemetryV2(
-        entry.candidate,
-        input.policy,
-        entry.features,
-      ),
+      telemetryOnly: {
+        ...buildHolderResearchObservationRankingTelemetryV2(
+          entry.candidate,
+          input.policy,
+          entry.features,
+        ),
+        selection: entry.selectionTelemetry ?? null,
+      },
     },
     candidate_rank: entry.candidateRank,
     shadow_score: entry.shadowScore,

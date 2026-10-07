@@ -11,6 +11,14 @@ import {
 import { holderResearchExternalSearchResponseSchema } from "./schemas/holder-research.js";
 import { holderResearchPersistenceTotals } from "./services/holder-research-publication-progress.js";
 import {
+  applyEditorialDuplicate,
+  buildEventPublicationHistory,
+  loadEventPublications,
+  withEventPublicationHistory,
+  type EventPublication,
+  type EventPublicationHistory,
+} from "./services/holder-research-event-publications.js";
+import {
   assertAiCompletionComplete,
   aiCompletionError,
 } from "./lib/ai-completion-diagnostics.js";
@@ -83,6 +91,9 @@ import {
   buildHolderResearchExternalSearchInputV2,
   buildHolderResearchSelectionDiagnostics,
   buildHolderResearchObservationPool,
+  buildHolderResearchMarketSideCopy,
+  buildHolderResearchWalletTargets,
+  isSharpHolder,
   buildHolderResearchTriageCandidatePromptJson,
   buildHolderResearchTriageCandidatePromptJsonV2,
   enrichHolderResearchHolderContext,
@@ -355,6 +366,9 @@ type HolderResearchRunReport = {
     backgroundContextEnabled: boolean;
     triageModel: string;
     decisionCacheEnabled: boolean;
+    selectionClusterBonus: number;
+    selectionVersion: 2;
+    eventPublicationHistoryEnabled: boolean;
   };
   totals: {
     candidatesLoaded: number;
@@ -379,6 +393,10 @@ type HolderResearchRunReport = {
     durationMs: number;
   };
   selection: HolderResearchSelectionDiagnostics;
+  selectionRanks: Array<{
+    thesisKey: string;
+    telemetry: HolderResearchObservationCandidate["selectionTelemetry"];
+  }>;
   candidateFunnel: {
     loaded: number;
     directional: number;
@@ -482,6 +500,13 @@ type HolderResearchRunReport = {
     rawStatus: string;
     status: string;
     qualityGateReason: string | null;
+    editorialDuplicate: boolean;
+    eventPublicationHistory: {
+      status: EventPublicationHistory["status"];
+      hasMore: boolean;
+      comparedTheses: number;
+      modelFlag: boolean;
+    } | null;
     persistenceOutcome:
       | "persisted"
       | "rejected"
@@ -1907,6 +1932,7 @@ async function callHolderResearchModel(params: {
   externalResearch: ExternalResearchResult | null;
   useV2: boolean;
   backgroundContext?: HolderBackground;
+  eventPublicationHistory?: EventPublicationHistory;
 }): Promise<HolderResearchModelDecision> {
   if (!env.openRouterKey) {
     throw new Error("OPENROUTER_API_KEY missing");
@@ -1928,11 +1954,14 @@ async function callHolderResearchModel(params: {
         ),
         externalResearch: params.externalResearch,
       };
-  const candidateJson = withHolderResearchBackground(
-    originalCandidateJson,
-    params.backgroundContext,
-    "final",
-    verifiedHolderBackgroundSourceUrls(externalResearchV2),
+  const candidateJson = withEventPublicationHistory(
+    withHolderResearchBackground(
+      originalCandidateJson,
+      params.backgroundContext,
+      "final",
+      verifiedHolderBackgroundSourceUrls(externalResearchV2),
+    ),
+    params.eventPublicationHistory,
   );
   const allowedEvidenceIds = params.useV2
     ? listHolderResearchPromptEvidenceIdsV2(params.candidate, params.policy)
@@ -2129,6 +2158,7 @@ async function synthesizeCandidate(params: {
   externalResearch: ExternalResearchResult | null;
   useV2: boolean;
   backgroundContext?: HolderBackground;
+  eventPublicationHistory?: EventPublicationHistory;
 }): Promise<HolderResearchModelDecision> {
   if (params.callModel) {
     try {
@@ -2138,6 +2168,7 @@ async function synthesizeCandidate(params: {
         externalResearch: params.externalResearch,
         useV2: params.useV2,
         backgroundContext: params.backgroundContext,
+        eventPublicationHistory: params.eventPublicationHistory,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2177,11 +2208,14 @@ async function synthesizeCandidate(params: {
         ),
         externalResearch: params.externalResearch,
       };
-  const candidateJson = withHolderResearchBackground(
-    originalCandidateJson,
-    params.backgroundContext,
-    "final",
-    verifiedHolderBackgroundSourceUrls(externalResearchV2),
+  const candidateJson = withEventPublicationHistory(
+    withHolderResearchBackground(
+      originalCandidateJson,
+      params.backgroundContext,
+      "final",
+      verifiedHolderBackgroundSourceUrls(externalResearchV2),
+    ),
+    params.eventPublicationHistory,
   );
   const systemPrompt =
     (params.useV2
@@ -2333,6 +2367,23 @@ async function applyFreshPriceChecksToCandidates(params: {
         `enqueued=${result.enqueued}`,
         `blocked=${priceGuardBlocked}`,
         `timedOut=${result.timedOut ? 1 : 0}`,
+        `sideQuoteAgesMs=${JSON.stringify(
+          [...result.marketStates.values()].map((state) => ({
+            marketId: state.marketId,
+            fresh: state.fresh,
+            YES: state.tops.YES
+              ? Math.max(0, Date.now() - Date.parse(state.tops.YES.asOf))
+              : null,
+            NO: state.tops.NO
+              ? Math.max(0, Date.now() - Date.parse(state.tops.NO.asOf))
+              : null,
+            refresh: result.timedOut
+              ? "timed_out"
+              : state.fresh
+                ? "fresh"
+                : "incomplete",
+          })),
+        )}`,
       ].join(" "),
       status: "ok",
     };
@@ -2382,7 +2433,10 @@ export async function maybeWriteDecisionCache(params: {
   }
 
   try {
-    if (params.output.status === "PUBLISH") {
+    if (
+      params.output.status === "PUBLISH" ||
+      params.modelMeta?.editorial_duplicate === true
+    ) {
       // Publication cooldown comes only from committed Postgres notes. A
       // prior CONTEXT/SKIP must not survive a newer publish recommendation,
       // including a technical save failure. Never cache a provisional publish.
@@ -2637,15 +2691,15 @@ export async function runHolderResearch(
         );
       }
       const rankByThesis = new Map(
-        observationPool.map((entry) => [
-          entry.candidate.thesisKey,
-          entry.candidateRank,
-        ]),
+        observationPool.map((entry) => [entry.candidate.thesisKey, entry]),
       );
       observationPool = observationCandidates.map((candidate) => ({
         candidate,
         candidateRank:
-          rankByThesis.get(candidate.thesisKey) ?? Number.MAX_SAFE_INTEGER,
+          rankByThesis.get(candidate.thesisKey)?.candidateRank ??
+          Number.MAX_SAFE_INTEGER,
+        selectionTelemetry: rankByThesis.get(candidate.thesisKey)
+          ?.selectionTelemetry,
       }));
       priceCheckCandidates = observationCandidates;
     }
@@ -3224,6 +3278,37 @@ export async function runHolderResearch(
       { limit: rankedCandidates.length, useV2: useV2Triage },
     ).map(({ candidate }) => candidate);
 
+    let eventPublications: EventPublication[] = [];
+    let eventHistoryAvailable = true;
+    if (policy.eventPublicationHistoryEnabled) {
+      try {
+        eventPublications = await loadEventPublications(
+          client,
+          finalCandidates.flatMap((candidate) =>
+            candidate.market.eventId ? [candidate.market.eventId] : [],
+          ),
+          new Date(),
+        );
+      } catch (error) {
+        eventHistoryAvailable = false;
+        console.warn(
+          "[holder-research] event publication history unavailable; continuing",
+          { error: error instanceof Error ? error.message : String(error) },
+        );
+      }
+    }
+    const committedEventPublications: EventPublication[] = [];
+    toolCalls.push({
+      name: "event_publication_history",
+      count: eventPublications.length,
+      status: !policy.eventPublicationHistoryEnabled
+        ? "skipped"
+        : eventHistoryAvailable
+          ? "ok"
+          : "error",
+      detail: `enabled=${policy.eventPublicationHistoryEnabled} windowDays=7 distinctThesesPerEvent=6 sentinel=1`,
+    });
+
     const shouldPersist =
       !policy.dryRun && policy.persistNotes && args.callModel;
     const publicationProgress = createHolderResearchPublicationProgress({
@@ -3344,6 +3429,19 @@ export async function runHolderResearch(
         externalResearchByKey.set(candidate.key, externalResearch);
       }
 
+      const eventPublicationHistory = buildEventPublicationHistory({
+        enabled: policy.eventPublicationHistoryEnabled,
+        available: eventHistoryAvailable,
+        eventId: candidate.market.eventId,
+        loaded: eventPublications,
+        committed: committedEventPublications,
+        selectedHolderIds: candidate.market.holders
+          .filter(
+            (holder) =>
+              holder.side === candidate.side && isSharpHolder(holder, policy),
+          )
+          .map((holder) => holder.walletId),
+      });
       const rawDecision = await synthesizeCandidate({
         candidate,
         policy,
@@ -3351,12 +3449,18 @@ export async function runHolderResearch(
         externalResearch,
         useV2: useV2Final,
         backgroundContext: backgroundByKey.get(candidate.key),
+        eventPublicationHistory,
       });
       finalModelCalls += 1;
+      const duplicateCheckedOutput = applyEditorialDuplicate(
+        rawDecision.output,
+        eventPublicationHistory,
+      );
+      const editorialDuplicate = duplicateCheckedOutput !== rawDecision.output;
       const gatedOutput = applyHolderResearchPublishQualityGate({
         candidate,
         externalResearch: canonicalExternalResearchV2(externalResearch),
-        output: rawDecision.output,
+        output: duplicateCheckedOutput,
         policy,
         publishedRunDecisions: publicationProgress.publishedDecisions,
       });
@@ -3368,6 +3472,13 @@ export async function runHolderResearch(
       });
       const modelMeta = {
         ...rawDecision.modelMeta,
+        editorial_duplicate: editorialDuplicate,
+        event_publication_history: {
+          status: eventPublicationHistory.status,
+          hasMore: eventPublicationHistory.hasMore,
+          comparedTheses: eventPublicationHistory.items.length,
+          modelFlag: rawDecision.output.editorial_duplicate === true,
+        },
         external_research: canonicalExternalResearchV2(externalResearch),
         external_research_diagnostics: externalResearch,
         triage: triageDecision ?? null,
@@ -3413,6 +3524,31 @@ export async function runHolderResearch(
       // Persist before spending the publication slot or evaluating the next
       // candidate. A rejected/duplicate note must not starve other finalists.
       await publicationProgress.record(decision);
+      if (
+        publicationProgress.stats?.outcomesByKey[candidate.key]?.status ===
+          "persisted" &&
+        candidate.side &&
+        candidate.market.eventId
+      ) {
+        committedEventPublications.push({
+          event_id: candidate.market.eventId,
+          market_id: candidate.market.marketId,
+          side: candidate.side,
+          note_id: null,
+          published_at: new Date().toISOString(),
+          title: decision.output.headline,
+          summary: decision.output.summary,
+          win_condition: buildHolderResearchMarketSideCopy(
+            candidate.market,
+            candidate.side,
+          ).winCondition,
+          holder_ids: buildHolderResearchWalletTargets(
+            candidate,
+            decision.output.evidence_ids,
+            policy,
+          ).map((target) => target.walletId),
+        });
+      }
       if (
         shouldPersist &&
         decision.rawStatus === "CONTEXT" &&
@@ -3735,6 +3871,9 @@ export async function runHolderResearch(
         backgroundContextEnabled: policy.backgroundContextEnabled,
         triageModel: policy.triageModel,
         decisionCacheEnabled: policy.decisionCacheEnabled,
+        selectionClusterBonus: policy.selectionClusterBonus,
+        selectionVersion: 2,
+        eventPublicationHistoryEnabled: policy.eventPublicationHistoryEnabled,
       },
       totals: {
         candidatesLoaded: candidates.length,
@@ -3777,6 +3916,15 @@ export async function runHolderResearch(
         durationMs: Date.now() - startedAt,
       },
       selection: selectionDiagnostics,
+      selectionRanks: buildHolderResearchObservationPool({
+        candidates,
+        requiredCandidates: [],
+        policy,
+        limit: policy.maxCandidatePool,
+      }).map((entry) => ({
+        thesisKey: entry.candidate.thesisKey,
+        telemetry: entry.selectionTelemetry,
+      })),
       candidateFunnel: {
         loaded: candidates.length,
         directional: candidates.filter(
@@ -3836,6 +3984,11 @@ export async function runHolderResearch(
         rawStatus: decision.rawStatus ?? decision.output.status,
         status: decision.output.status,
         qualityGateReason: decision.qualityGateReason ?? null,
+        editorialDuplicate: decision.modelMeta.editorial_duplicate === true,
+        eventPublicationHistory:
+          (decision.modelMeta
+            .event_publication_history as HolderResearchRunReport["decisions"][number]["eventPublicationHistory"]) ??
+          null,
         persistenceOutcome:
           decision.output.status !== "PUBLISH"
             ? "not_applicable"

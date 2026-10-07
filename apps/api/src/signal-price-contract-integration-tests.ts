@@ -210,6 +210,7 @@ try {
     },
   });
   const result = await auditHolderResearchSignalPerformance(db, {
+    asOf: new Date(delayed.getTime() + 1),
     lookbackHours: 24,
     limit: 100,
     deliveredInitialOnly: true,
