@@ -38,6 +38,7 @@ export type FreshMarketPriceMarketState = {
   marketId: string;
   priceState: MarketPriceState;
   tops: Record<MarketPriceSide, FreshMarketPriceTop | null>;
+  observedTops?: Record<MarketPriceSide, FreshMarketPriceTop | null>;
   tokenIds: string[];
   venue: string | null;
 };
@@ -357,6 +358,11 @@ function buildMarketStates(input: {
       tops: {
         YES: normalizedTop(yesToken, yesTop),
         NO: normalizedTop(noToken, noTop),
+      },
+      // Diagnostics only: stale/invalid books stay excluded from priceState.
+      observedTops: {
+        YES: normalizedTop(yesToken, yesTopRaw),
+        NO: normalizedTop(noToken, noTopRaw),
       },
       tokenIds,
       venue: market.venue,

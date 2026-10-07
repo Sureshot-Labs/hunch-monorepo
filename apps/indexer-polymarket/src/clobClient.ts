@@ -46,7 +46,10 @@ export async function postBooks(tokenIds: string[]): Promise<Book[]> {
   return out;
 }
 
-export async function postBooksOnce(tokenIds: string[]): Promise<Book[]> {
+export async function postBooksOnce(
+  tokenIds: string[],
+  options: { timeoutMs?: number } = {},
+): Promise<Book[]> {
   const body = JSON.stringify(toBookParams(tokenIds));
   const r = await fetch(`${env.clobBase}/books`, {
     method: "POST",
@@ -55,6 +58,10 @@ export async function postBooksOnce(tokenIds: string[]): Promise<Book[]> {
       accept: "application/json",
     },
     body,
+    signal:
+      options.timeoutMs == null
+        ? undefined
+        : AbortSignal.timeout(options.timeoutMs),
   });
   if (!r.ok) {
     const text = await r.text();

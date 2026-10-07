@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { holderResearchPriceCheckDiagnostics } from "./services/holder-research-price-check-diagnostics.js";
 
 import {
   claimDueSortedSetQueueItems,
@@ -113,11 +114,15 @@ class FakeRedis implements PriceRefreshRedis {
       return added;
     }
     const maxScore = Number(options.arguments[0]);
+    const minScore =
+      options.arguments[3] == null || options.arguments[3] === "-inf"
+        ? Number.NEGATIVE_INFINITY
+        : Number(options.arguments[3]);
     const limit = Number(options.arguments[1]);
     const side = options.arguments[2] === "newest" ? "newest" : "oldest";
     const set = this.getSet(key);
     const tokens = Array.from(set.entries())
-      .filter(([, score]) => score <= maxScore)
+      .filter(([, score]) => score <= maxScore && score >= minScore)
       .sort((a, b) =>
         side === "newest"
           ? b[1] - a[1] || b[0].localeCompare(a[0])
@@ -211,6 +216,118 @@ await test("inferPriceRefreshVenue recognizes active venue token shapes", () => 
   assert.equal(inferPriceRefreshVenue("sol:mint"), "dflow");
   assert.equal(inferPriceRefreshVenue("limitless:abc"), "limitless");
   assert.equal(inferPriceRefreshVenue("kalshi:legacy"), null);
+});
+
+await test("urgent and normal consumers claim disjoint work with legacy rollback", async () => {
+  const redis = new FakeRedis();
+  await enqueuePriceRefreshTokens(redis, {
+    venue: "polymarket",
+    tokenIds: ["urgent"],
+    priority: "high",
+    nowMs: 10_000,
+  });
+  await enqueuePriceRefreshTokens(redis, {
+    venue: "polymarket",
+    tokenIds: ["normal"],
+    nowMs: 10_000,
+  });
+  assert.deepEqual(
+    await claimDuePriceRefreshTokens(redis, {
+      venue: "polymarket",
+      limit: 100,
+      nowMs: 10_001,
+      priority: "normal",
+    }),
+    ["normal"],
+  );
+  assert.deepEqual(
+    await claimDuePriceRefreshTokens(redis, {
+      venue: "polymarket",
+      limit: 20,
+      nowMs: 10_001,
+      priority: "high",
+    }),
+    ["urgent"],
+  );
+  await enqueuePriceRefreshTokens(redis, {
+    venue: "polymarket",
+    tokenIds: ["retry"],
+    priority: "high",
+    nowMs: 10_002,
+  });
+  const claimed = await claimDuePriceRefreshTokens(redis, {
+    venue: "polymarket",
+    limit: 20,
+    nowMs: 10_003,
+    priority: "high",
+  });
+  await requeuePriceRefreshTokens(redis, {
+    venue: "polymarket",
+    tokenIds: claimed,
+    nowMs: 10_004,
+    delayMs: 0,
+  });
+  assert.deepEqual(
+    await claimDuePriceRefreshTokens(redis, {
+      venue: "polymarket",
+      limit: 20,
+      nowMs: 10_005,
+      priority: "high",
+    }),
+    [],
+  );
+  assert.deepEqual(
+    await claimDuePriceRefreshTokens(redis, {
+      venue: "polymarket",
+      limit: 100,
+      nowMs: 10_005,
+      priority: "normal",
+    }),
+    ["retry"],
+  );
+  await enqueuePriceRefreshTokens(redis, {
+    venue: "polymarket",
+    tokenIds: ["legacy-high"],
+    priority: "high",
+    nowMs: 10_006,
+  });
+  assert.deepEqual(
+    await claimDuePriceRefreshTokens(redis, {
+      venue: "polymarket",
+      limit: 100,
+      nowMs: 10_007,
+    }),
+    ["legacy-high"],
+  );
+});
+
+await test("stale raw quote ages remain diagnostic-only and batch timeout does not relabel fresh market", async () => {
+  const db = new SingleClientFreshPriceDb();
+  const result = await requestFreshMarketPrices({
+    db,
+    enqueue: false,
+    marketIds: ["polymarket:test"],
+    minFreshAt: new Date("2026-01-01T00:20:00Z"),
+    timeoutMs: 0,
+  });
+  const state = result.marketStates.get("polymarket:test");
+  assert.ok(state);
+  assert.equal(state.fresh, false);
+  assert.equal(state.tops.YES, null);
+  assert.equal(state.observedTops?.YES?.asOf, "2026-01-01T00:00:01.000Z");
+  const diagnostic = holderResearchPriceCheckDiagnostics(
+    state,
+    true,
+    Date.parse("2026-01-01T00:20:00Z"),
+  );
+  assert.equal(diagnostic.YES, 1_199_000);
+  assert.equal(diagnostic.usable.YES, true);
+  assert.equal(diagnostic.refresh, "timed_out");
+  assert.equal(
+    holderResearchPriceCheckDiagnostics({ ...state, fresh: true }, true)
+      .refresh,
+    "fresh",
+  );
 });
 
 await test("enqueuePriceRefreshTokens dedupes and groups by inferred venue", async () => {

@@ -10,6 +10,7 @@ import {
 } from "./lib/xai-search-contract.js";
 import { holderResearchExternalSearchResponseSchema } from "./schemas/holder-research.js";
 import { holderResearchPersistenceTotals } from "./services/holder-research-publication-progress.js";
+import { holderResearchPriceCheckDiagnostics } from "./services/holder-research-price-check-diagnostics.js";
 import {
   applyEditorialDuplicate,
   buildEventPublicationHistory,
@@ -2368,21 +2369,9 @@ async function applyFreshPriceChecksToCandidates(params: {
         `blocked=${priceGuardBlocked}`,
         `timedOut=${result.timedOut ? 1 : 0}`,
         `sideQuoteAgesMs=${JSON.stringify(
-          [...result.marketStates.values()].map((state) => ({
-            marketId: state.marketId,
-            fresh: state.fresh,
-            YES: state.tops.YES
-              ? Math.max(0, Date.now() - Date.parse(state.tops.YES.asOf))
-              : null,
-            NO: state.tops.NO
-              ? Math.max(0, Date.now() - Date.parse(state.tops.NO.asOf))
-              : null,
-            refresh: result.timedOut
-              ? "timed_out"
-              : state.fresh
-                ? "fresh"
-                : "incomplete",
-          })),
+          [...result.marketStates.values()].map((state) =>
+            holderResearchPriceCheckDiagnostics(state, result.timedOut),
+          ),
         )}`,
       ].join(" "),
       status: "ok",

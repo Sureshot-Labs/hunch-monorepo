@@ -47,6 +47,7 @@ export type ClaimPriceRefreshInputs = {
   nowMs?: number;
   limit: number;
   side?: PriceRefreshQueueClaimSide;
+  priority?: PriceRefreshPriority;
 };
 
 export type RequeuePriceRefreshInputs = {
@@ -94,6 +95,7 @@ export type ClaimSortedSetQueueItemsInputs = {
   nowMs?: number;
   limit: number;
   side?: PriceRefreshQueueClaimSide;
+  minScore?: number;
 };
 
 export type RequeueSortedSetQueueItemsInputs = {
@@ -114,11 +116,12 @@ export const LIMITLESS_PRICE_REFRESH_HTTP_FALLBACK_QUEUE_KEY =
 
 const CLAIM_DUE_PRICE_REFRESH_TOKENS_SCRIPT = `
 local side = ARGV[3]
+local minScore = ARGV[4] or '-inf'
 local tokens
 if side == 'newest' then
-  tokens = redis.call('ZREVRANGEBYSCORE', KEYS[1], ARGV[1], '-inf', 'LIMIT', 0, tonumber(ARGV[2]))
+  tokens = redis.call('ZREVRANGEBYSCORE', KEYS[1], ARGV[1], minScore, 'LIMIT', 0, tonumber(ARGV[2]))
 else
-  tokens = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, tonumber(ARGV[2]))
+  tokens = redis.call('ZRANGEBYSCORE', KEYS[1], minScore, ARGV[1], 'LIMIT', 0, tonumber(ARGV[2]))
 end
 if #tokens > 0 then
   redis.call('ZREM', KEYS[1], unpack(tokens))
@@ -286,7 +289,12 @@ export async function claimDueSortedSetQueueItems(
   const side = inputs.side === "newest" ? "newest" : "oldest";
   const result = await redis.eval(CLAIM_DUE_PRICE_REFRESH_TOKENS_SCRIPT, {
     keys: [inputs.key],
-    arguments: [String(inputs.nowMs ?? Date.now()), String(limit), side],
+    arguments: [
+      String(inputs.nowMs ?? Date.now()),
+      String(limit),
+      side,
+      inputs.minScore == null ? "-inf" : String(inputs.minScore),
+    ],
   });
   if (!Array.isArray(result)) return [];
   return result.filter((value): value is string => typeof value === "string");
@@ -373,9 +381,12 @@ export async function claimDuePriceRefreshTokens(
   redis: PriceRefreshRedis,
   inputs: ClaimPriceRefreshInputs,
 ): Promise<string[]> {
+  const nowMs = inputs.nowMs ?? Date.now();
+  const highPriorityCutoff = nowMs - HIGH_PRIORITY_SCORE_BIAS_MS;
   return claimDueSortedSetQueueItems(redis, {
     key: getPriceRefreshQueueKey(inputs.venue),
-    nowMs: inputs.nowMs,
+    nowMs: inputs.priority === "high" ? highPriorityCutoff : nowMs,
+    minScore: inputs.priority === "normal" ? highPriorityCutoff + 1 : undefined,
     limit: inputs.limit,
     side: inputs.side,
   });

@@ -42,6 +42,7 @@ export {
   enqueueSortedSetQueueItems,
   enqueuePriceRefreshTokens,
   filterStalePriceRefreshTokens,
+  hasUsableTopOfBook,
   getPriceRefreshQueueBacklog,
   getPriceRefreshQueueKey,
   getSortedSetQueueBacklog,

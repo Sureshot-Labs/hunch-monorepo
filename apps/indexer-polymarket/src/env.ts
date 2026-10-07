@@ -220,6 +220,10 @@ const priceRefreshQueueEnabled = parseBoolean(
   process.env.PRICE_REFRESH_QUEUE_ENABLED,
   true,
 );
+const urgentPriceRefreshEnabled = parseBoolean(
+  process.env.POLYMARKET_URGENT_PRICE_REFRESH_ENABLED,
+  true,
+);
 const priceRefreshQueueBatch = clampInt(
   parseOptionalInt(
     process.env.POLYMARKET_PRICE_REFRESH_QUEUE_BATCH ??
@@ -323,6 +327,7 @@ export const env = {
   hotStreamTokensTtlSec,
   hotStreamTokensMax,
   priceRefreshQueueEnabled,
+  urgentPriceRefreshEnabled,
   priceRefreshQueueBatch,
   priceRefreshQueueConsumers,
   priceRefreshQueueIntervalMs,

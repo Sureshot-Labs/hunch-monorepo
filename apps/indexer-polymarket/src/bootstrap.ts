@@ -42,6 +42,7 @@ import {
   type EmbedQueueItem,
   type PriceRefreshQueueClaimSide,
   type PriceRefreshRedis,
+  type PriceRefreshPriority,
 } from "@hunch/infra";
 import { pool } from "./db.js";
 import {
@@ -669,9 +670,24 @@ export async function syncHotWindow(): Promise<SyncCounters> {
   };
 }
 
+export function createBookSnapshotQueue(
+  options: { intervalMs?: number; intervalCap?: number } = {},
+) {
+  return new PQueue({
+    interval: options.intervalMs ?? 10_000,
+    intervalCap: options.intervalCap ?? 45,
+  });
+}
+// All HTTP snapshots share the existing /books budget, including hot/WS/urgent.
+const bookSnapshotQueue = createBookSnapshotQueue();
+
 export async function snapshotBooks(
   tokenIds: string[],
-  options: { persistLatestBeforeReturn?: boolean } = {},
+  options: {
+    persistLatestBeforeReturn?: boolean;
+    fetchTimeoutMs?: number;
+    priority?: PriceRefreshPriority;
+  } = {},
 ): Promise<{
   requested: number;
   failedTokenIds: string[];
@@ -689,83 +705,88 @@ export async function snapshotBooks(
   log.info(`Snapshotting ${snapIds.length} top books`);
 
   const batches = chunkArray(snapIds, 20);
-  const q = new PQueue({ interval: 10_000, intervalCap: 45 }); // safe under /books 50/10s
+  const q = bookSnapshotQueue;
   await Promise.all(
     batches.map((group) =>
-      q.add(async () => {
-        try {
-          const books = await timedPhase(
-            timings,
-            "snapshotBooks.fetchBooks",
-            () => postBooksOnce(group),
-            { tokens: group.length },
-          );
-          const returnedTokenIds = new Set(books.map((book) => book.asset_id));
-          for (const tokenId of group) {
-            if (!returnedTokenIds.has(tokenId)) failedTokenIds.add(tokenId);
-          }
-          await timedPhase(
-            timings,
-            "snapshotBooks.persistBooks",
-            async () => {
-              // /books timestamps can reflect last book-change time. For HTTP
-              // snapshots, freshness should mean when we verified the top.
-              const observedAt = new Date();
-              const bookTops = books.map((b) => {
-                const bb = bestBid(b.bids);
-                const ba = bestAsk(b.asks);
-                const ts = observedAt;
-                return { book: b, bestBid: bb, bestAsk: ba, ts };
-              });
+      q.add(
+        async () => {
+          try {
+            const books = await timedPhase(
+              timings,
+              "snapshotBooks.fetchBooks",
+              () => postBooksOnce(group, { timeoutMs: options.fetchTimeoutMs }),
+              { tokens: group.length },
+            );
+            const returnedTokenIds = new Set(
+              books.map((book) => book.asset_id),
+            );
+            for (const tokenId of group) {
+              if (!returnedTokenIds.has(tokenId)) failedTokenIds.add(tokenId);
+            }
+            await timedPhase(
+              timings,
+              "snapshotBooks.persistBooks",
+              async () => {
+                // /books timestamps can reflect last book-change time. For HTTP
+                // snapshots, freshness should mean when we verified the top.
+                const observedAt = new Date();
+                const bookTops = books.map((b) => {
+                  const bb = bestBid(b.bids);
+                  const ba = bestAsk(b.asks);
+                  const ts = observedAt;
+                  return { book: b, bestBid: bb, bestAsk: ba, ts };
+                });
 
-              await writeUnifiedBookTops(
-                pool,
-                bookTops.map((entry) => ({
-                  tokenId: entry.book.asset_id,
-                  bestBid: entry.bestBid,
-                  bestAsk: entry.bestAsk,
-                  ts: entry.ts,
-                  touchLatestWhenUnchanged: true,
-                })),
-              );
-
-              if (options.persistLatestBeforeReturn) {
-                await flushUnifiedBookTopLatestTouches(
+                await writeUnifiedBookTops(
                   pool,
-                  bookTops.map((entry) => entry.book.asset_id),
+                  bookTops.map((entry) => ({
+                    tokenId: entry.book.asset_id,
+                    bestBid: entry.bestBid,
+                    bestAsk: entry.bestAsk,
+                    ts: entry.ts,
+                    touchLatestWhenUnchanged: true,
+                  })),
                 );
-              }
 
-              await Promise.all(
-                bookTops.map(async (entry) => {
-                  const tickJson = JSON.stringify({
-                    token_id: entry.book.asset_id,
-                    best_bid: entry.bestBid,
-                    best_ask: entry.bestAsk,
-                    ts: entry.ts.getTime(),
-                  });
-                  await Promise.all([
-                    redis.set(
-                      `book:${entry.book.asset_id}`,
-                      JSON.stringify(entry.book),
-                      { EX: 5 },
-                    ),
-                    redis.set(`top:${entry.book.asset_id}`, tickJson, {
-                      EX: 60,
-                    }),
-                    redis.publish(`prices:${entry.book.asset_id}`, tickJson),
-                  ]);
-                }),
-              );
-            },
-            { tokens: books.length },
-          );
-        } catch (e) {
-          if (isPgSetupIssue(e)) throw e;
-          for (const tokenId of group) failedTokenIds.add(tokenId);
-          log.warn("book snapshot failed batch", group[0], String(e));
-        }
-      }),
+                if (options.persistLatestBeforeReturn) {
+                  await flushUnifiedBookTopLatestTouches(
+                    pool,
+                    bookTops.map((entry) => entry.book.asset_id),
+                  );
+                }
+
+                await Promise.all(
+                  bookTops.map(async (entry) => {
+                    const tickJson = JSON.stringify({
+                      token_id: entry.book.asset_id,
+                      best_bid: entry.bestBid,
+                      best_ask: entry.bestAsk,
+                      ts: entry.ts.getTime(),
+                    });
+                    await Promise.all([
+                      redis.set(
+                        `book:${entry.book.asset_id}`,
+                        JSON.stringify(entry.book),
+                        { EX: 5 },
+                      ),
+                      redis.set(`top:${entry.book.asset_id}`, tickJson, {
+                        EX: 60,
+                      }),
+                      redis.publish(`prices:${entry.book.asset_id}`, tickJson),
+                    ]);
+                  }),
+                );
+              },
+              { tokens: books.length },
+            );
+          } catch (e) {
+            if (isPgSetupIssue(e)) throw e;
+            for (const tokenId of group) failedTokenIds.add(tokenId);
+            log.warn("book snapshot failed batch", group[0], String(e));
+          }
+        },
+        { priority: options.priority === "high" ? 1 : 0 },
+      ),
     ),
   );
   return {
@@ -1367,12 +1388,14 @@ async function refreshMarketRefs(
   };
 }
 
-async function fetchTradableTokenIdsForSnapshot(
+export async function fetchTradableTokenIdsForSnapshot(
   tokenIds: string[],
+  canonicalOnly = false,
+  db: Pick<typeof pool, "query"> = pool,
 ): Promise<string[]> {
   if (!tokenIds.length) return [];
 
-  const { rows } = await pool.query<{ token_id: string }>(
+  const { rows } = await db.query<{ token_id: string }>(
     `
       with requested_tokens as (
         select token_id, ord::int as ord
@@ -1398,6 +1421,7 @@ async function fetchTradableTokenIdsForSnapshot(
           on m.id = t.market_id
          and m.venue = 'polymarket'
         where m.status = 'ACTIVE'
+          and not $2::boolean
       )
       select distinct on (tm.token_id) tm.token_id
       from token_markets tm
@@ -1409,7 +1433,7 @@ async function fetchTradableTokenIdsForSnapshot(
         and coalesce(pm.accepting_orders, true) = true
       order by tm.token_id, tm.ord
     `,
-    [tokenIds],
+    [tokenIds, canonicalOnly],
   );
 
   const requestedOrder = new Map<string, number>();
@@ -1430,6 +1454,9 @@ export async function processPriceRefreshQueue(
   options: {
     side?: PriceRefreshQueueClaimSide;
     logSuccess?: boolean;
+    priority?: PriceRefreshPriority;
+    topOnly?: boolean;
+    limit?: number;
   } = {},
 ): Promise<{
   claimed: number;
@@ -1453,8 +1480,12 @@ export async function processPriceRefreshQueue(
   const redisClient = redis as unknown as PriceRefreshRedis;
   const tokenIds = await claimDuePriceRefreshTokens(redisClient, {
     venue: "polymarket",
-    limit: env.priceRefreshQueueBatch,
+    limit: Math.min(
+      options.limit ?? env.priceRefreshQueueBatch,
+      env.priceRefreshQueueBatch,
+    ),
     side,
+    priority: options.priority,
   });
   if (!tokenIds.length) {
     return { claimed: 0, refreshed: 0, failed: 0, backlog: 0, side };
@@ -1524,23 +1555,29 @@ export async function processPriceRefreshQueue(
       };
     }
 
-    const refs = await timedPhase(
-      timings,
-      "priceRefresh.fetchMarketRefs",
-      () => fetchMarketRefsForTokenIds(staleTokenIds),
-      { tokens: staleTokenIds.length },
-    );
-    const marketResult = await refreshMarketRefs(refs);
-    marketRefs = marketResult.requestedMarkets;
-    marketRefreshed = marketResult.refreshed;
-    eventsFetched = marketResult.eventsFetched;
-    fallbackMarketFetches = marketResult.fallbackMarketFetches;
-    refreshTimings = marketResult.timings;
+    if (!options.topOnly) {
+      const refs = await timedPhase(
+        timings,
+        "priceRefresh.fetchMarketRefs",
+        () => fetchMarketRefsForTokenIds(staleTokenIds),
+        { tokens: staleTokenIds.length },
+      );
+      const marketResult = await refreshMarketRefs(refs);
+      marketRefs = marketResult.requestedMarkets;
+      marketRefreshed = marketResult.refreshed;
+      eventsFetched = marketResult.eventsFetched;
+      fallbackMarketFetches = marketResult.fallbackMarketFetches;
+      refreshTimings = marketResult.timings;
+    }
 
     const snapshotTokenIds = await timedPhase(
       timings,
       "priceRefresh.fetchTradableSnapshotTokens",
-      () => fetchTradableTokenIdsForSnapshot(staleTokenIds),
+      () =>
+        fetchTradableTokenIdsForSnapshot(
+          staleTokenIds,
+          options.topOnly === true,
+        ),
       { tokens: staleTokenIds.length },
     );
     snapshotTokens = snapshotTokenIds.length;
@@ -1551,6 +1588,9 @@ export async function processPriceRefreshQueue(
     if (snapshotTokenIds.length) {
       const result = await snapshotBooks(snapshotTokenIds, {
         persistLatestBeforeReturn: true,
+        // Bound HTTP independently; DB/Redis persistence is not an HTTP deadline.
+        fetchTimeoutMs: options.topOnly ? 10_000 : undefined,
+        priority: options.topOnly ? "high" : undefined,
       });
       bookTimings = result.timings;
       bookRefreshed = result.requested - result.failedTokenIds.length;
@@ -1563,6 +1603,17 @@ export async function processPriceRefreshQueue(
           maxQueueSize: env.priceRefreshQueueMax,
         });
       }
+    }
+    if (options.topOnly && skippedBookTokens > 0) {
+      const tradable = new Set(snapshotTokenIds);
+      // Unknown/closed/obsolete mappings need normal metadata repair, not an
+      // urgent busy loop. Preserve them in the existing queue without delay.
+      await requeuePriceRefreshTokens(redisClient, {
+        venue: "polymarket",
+        tokenIds: staleTokenIds.filter((tokenId) => !tradable.has(tokenId)),
+        delayMs: 0,
+        maxQueueSize: env.priceRefreshQueueMax,
+      });
     }
     refreshed = marketRefreshed + bookRefreshed;
   } catch (error) {
