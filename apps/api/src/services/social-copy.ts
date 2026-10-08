@@ -11,7 +11,11 @@ import { resolveSocialPolicy } from "./social-policy.js";
 import { SocialError } from "./social-primitives.js";
 import type { PersistedTrade, PreparedTrade } from "./trading-types.js";
 import { isRecord } from "../lib/type-guards.js";
+import { normalizeLimitlessScopedTokenId } from "../lib/limitless-token.js";
 import type { PolymarketAssetContext } from "@hunch/shared";
+import { copyPurchaseIsTimelySql } from "./copy-purchase-timing.js";
+import type { LimitlessClobSubmissionContext } from "./limitless-clob-evidence-identity.js";
+import { retainLimitlessCopySubmission } from "./limitless-copy-submission.js";
 
 type Db = Pick<Pool, "query">;
 type Instrument = VerifiedBuyFacts["instrument"];
@@ -44,6 +48,8 @@ export async function retainClientCopyBeforeSubmission(
     marketAddress?: string;
     positionOwner?: string;
     limitlessPositionContract?: string;
+    limitlessClobOrder?: Record<string, unknown>;
+    limitlessClobSubmissionContext?: LimitlessClobSubmissionContext;
     onRetained?: (attempt: RetainedCopyAttempt) => void;
   },
 ): Promise<string> {
@@ -60,6 +66,8 @@ export async function retainClientCopyBeforeSubmission(
       assetContext: input.assetContext,
       marketAddress: input.marketAddress,
       positionWalletAddress: input.positionOwner,
+      orderPayload: input.limitlessClobOrder,
+      submissionContext: input.limitlessClobSubmissionContext,
     },
     intent: {
       actor: { kind: "web_app", userId: input.userId },
@@ -265,6 +273,21 @@ export async function authorizeCopySource(
   )
     throw new SocialError("copy_expiry_mismatch", 409);
   const payload = isRecord(prepared.venuePayload) ? prepared.venuePayload : {};
+  const limitlessClob =
+    instrument.venue === "limitless" && payload.submissionContext !== undefined
+      ? retainLimitlessCopySubmission({
+          order: payload.orderPayload,
+          context: payload.submissionContext,
+          walletAddress: prepared.intent.walletAddress,
+          tokenId: instrument.tokenId,
+        })
+      : null;
+  if (
+    instrument.venue === "limitless" &&
+    payload.submissionContext !== undefined &&
+    !limitlessClob
+  )
+    throw new SocialError("copy_submission_identity_unavailable", 409);
   return {
     sourceRef,
     instrument,
@@ -280,6 +303,7 @@ export async function authorizeCopySource(
             : prepared.intent.walletAddress,
         assetContext: payload.assetContext ?? null,
         marketAddress: payload.marketAddress ?? null,
+        ...(limitlessClob ? { limitlessClob } : {}),
       },
     },
   };
@@ -357,14 +381,23 @@ export async function retainCopyBeforeSubmission(
           saved.state !== "failed" && saved.submission_started_at !== null,
       };
     }
+    // Only an already-retained attempt may recover a prior local submission.
+    // New source attribution cannot be added to an existing economic identity,
+    // even when chain timestamps put both events within the same second.
+    const priorPurchase = await findCopyPurchase(client, {
+      userId,
+      providerReference: input.providerReference,
+    });
+    if (priorPurchase.orderId || priorPurchase.executionId)
+      throw new SocialError("copy_purchase_already_submitted", 409);
     const source = await authorizeCopySource(client, input.prepared, input);
     const inserted = await client.query<{
       id: string;
       submission_attempt_token: string;
     }>(
       `insert into copy_attributions
-      (copier_user_id,source_thesis_id,source_ai_note_id,source_snapshot,instrument,idempotency_key,payload_hash,prepared_fingerprint,provider_reference)
-      values ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9) returning id,submission_attempt_token`,
+      (copier_user_id,source_thesis_id,source_ai_note_id,source_snapshot,instrument,idempotency_key,payload_hash,prepared_fingerprint,provider_reference,created_at)
+      values ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,clock_timestamp()) returning id,submission_attempt_token`,
       [
         userId,
         source.sourceRef.kind === "thesis" ? source.sourceRef.id : null,
@@ -482,9 +515,15 @@ export async function reconcileCopyFacts(
     return;
   }
   if (!input.facts) return;
+  const timelyPurchase = copyPurchaseIsTimelySql(
+    "$6::timestamptz",
+    "copy_row.created_at",
+  );
   await db.query(
-    `update copy_attributions set state='confirmed',canonical_purchase_key=$3,facts_revision=$4,
-      confirmed_at=coalesce(confirmed_at,now()),updated_at=now()
+    `update copy_attributions copy_row
+    set state=case when ${timelyPurchase} then 'confirmed' else 'revoked' end,
+      canonical_purchase_key=$3,facts_revision=$4,
+      confirmed_at=case when ${timelyPurchase} then coalesce(confirmed_at,now()) else confirmed_at end,updated_at=now()
     where ${column}=$1 and copier_user_id=$2 and instrument=$5::jsonb
       and exists(select 1 from ${table} purchase_row where purchase_row.id=$1 and purchase_row.user_id=$2
         and purchase_row.verified_buy_state='verified' and purchase_row.verified_buy_facts->>'evidenceRevision'=$4)`,
@@ -494,8 +533,61 @@ export async function reconcileCopyFacts(
       input.facts.canonicalPurchaseKey,
       input.facts.evidenceRevision,
       JSON.stringify(input.facts.instrument),
+      input.facts.purchasedAt,
     ],
   );
+}
+
+async function findCopyPurchase(
+  db: Db,
+  input: { userId: string; providerReference: string },
+): Promise<{ orderId: string | null; executionId: string | null }> {
+  const poly = input.providerReference.match(
+    /^polymarket:137:(0x[0-9a-f]{40}):(0x[0-9a-f]{64})$/i,
+  );
+  const dflow = input.providerReference.match(
+    /^dflow:mainnet:([^:]+):([^:]+)$/,
+  );
+  const clob = input.providerReference.match(/^limitless:clob:8453:(.+)$/);
+  const amm = input.providerReference.match(
+    /^limitless:amm:8453:(0x[0-9a-f]{64}):(\d+)$/i,
+  );
+  let orderId: string | null = null;
+  let executionId: string | null = null;
+  if (poly?.[1] && poly[2]) {
+    const found = await db.query<{ id: string }>(
+      `select id from orders where user_id=$1 and venue='polymarket'
+      and lower(order_hash)=$2 and lower(order_payload->'assetContext'->>'exchangeAddress')=$3 order by id limit 1`,
+      [input.userId, poly[2].toLowerCase(), poly[1].toLowerCase()],
+    );
+    orderId = found.rows[0]?.id ?? null;
+  } else if (dflow?.[1] && dflow[2]) {
+    const found = await db.query<{ id: string }>(
+      `select id from executions where user_id=$1 and venue='kalshi'
+      and tx_signature=$2 and wallet_address=$3 order by created_at,id limit 1`,
+      [input.userId, dflow[1], dflow[2]],
+    );
+    executionId = found.rows[0]?.id ?? null;
+  } else if (clob?.[1]) {
+    const found = await db.query<{ id: string }>(
+      `select id from orders where user_id=$1 and venue='limitless'
+      and coalesce(order_payload->>'clientOrderId',order_payload->'submitted'->>'clientOrderId',order_payload->'_hunchSubmitted'->>'clientOrderId')=$2
+      order by id limit 1`,
+      [input.userId, clob[1]],
+    );
+    orderId = found.rows[0]?.id ?? null;
+  } else if (amm?.[1] && amm[2]) {
+    // The retained provider key uses the raw token; the AMM order recorder
+    // persists its scoped token spelling, regardless of the request's alias.
+    const tokenId = normalizeLimitlessScopedTokenId(amm[2]);
+    const found = await db.query<{ id: string }>(
+      `select id from orders where user_id=$1 and venue='limitless'
+      and venue_order_id=$2 order by id limit 1`,
+      [input.userId, `amm:${amm[1].toLowerCase()}:${tokenId}`],
+    );
+    orderId = found.rows[0]?.id ?? null;
+  }
+  return { orderId, executionId };
 }
 
 /** Bounded identity-only recovery; never amount/time proximity or resubmission. */
@@ -517,48 +609,10 @@ export async function recoverCopyPurchaseLinks(
   );
   let linked = 0;
   for (const row of pending.rows) {
-    let orderId: string | null = null,
-      executionId: string | null = null;
-    const poly = row.provider_reference.match(
-      /^polymarket:137:(0x[0-9a-f]{40}):(0x[0-9a-f]{64})$/i,
-    );
-    const dflow = row.provider_reference.match(
-      /^dflow:mainnet:([^:]+):([^:]+)$/,
-    );
-    const clob = row.provider_reference.match(/^limitless:clob:8453:(.+)$/);
-    const amm = row.provider_reference.match(
-      /^limitless:amm:8453:(0x[0-9a-f]{64}):(\d+)$/i,
-    );
-    if (poly?.[1] && poly[2]) {
-      const found = await db.query<{ id: string }>(
-        `select id from orders where user_id=$1 and venue='polymarket'
-        and lower(order_hash)=$2 and lower(order_payload->'assetContext'->>'exchangeAddress')=$3 order by id limit 1`,
-        [row.copier_user_id, poly[2].toLowerCase(), poly[1].toLowerCase()],
-      );
-      orderId = found.rows[0]?.id ?? null;
-    } else if (dflow?.[1] && dflow[2]) {
-      const found = await db.query<{ id: string }>(
-        `select id from executions where user_id=$1 and venue='kalshi'
-        and tx_signature=$2 and wallet_address=$3 order by created_at,id limit 1`,
-        [row.copier_user_id, dflow[1], dflow[2]],
-      );
-      executionId = found.rows[0]?.id ?? null;
-    } else if (clob?.[1]) {
-      const found = await db.query<{ id: string }>(
-        `select id from orders where user_id=$1 and venue='limitless'
-        and coalesce(order_payload->>'clientOrderId',order_payload->'submitted'->>'clientOrderId',order_payload->'_hunchSubmitted'->>'clientOrderId')=$2
-        order by id limit 1`,
-        [row.copier_user_id, clob[1]],
-      );
-      orderId = found.rows[0]?.id ?? null;
-    } else if (amm?.[1] && amm[2]) {
-      const found = await db.query<{ id: string }>(
-        `select id from orders where user_id=$1 and venue='limitless'
-        and venue_order_id=$2 order by id limit 1`,
-        [row.copier_user_id, `amm:${amm[1].toLowerCase()}:${amm[2]}`],
-      );
-      orderId = found.rows[0]?.id ?? null;
-    }
+    const { orderId, executionId } = await findCopyPurchase(db, {
+      userId: row.copier_user_id,
+      providerReference: row.provider_reference,
+    });
     await db.query(
       `update copy_attributions set order_id=$2,execution_id=$3,updated_at=now()
       where id=$1 and order_id is null and execution_id is null`,

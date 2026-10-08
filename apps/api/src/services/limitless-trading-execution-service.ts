@@ -163,6 +163,10 @@ import {
   normalizeLimitlessRawAmount,
 } from "./limitless-order-normalization.js";
 import {
+  buildLimitlessClobSubmissionContext,
+  type LimitlessClobSubmissionContext,
+} from "./limitless-clob-evidence-identity.js";
+import {
   fetchOpenOrderCollateralLocks,
   fetchOpenOrderPositionLocks,
   normalizeCollateralWalletKey,
@@ -214,6 +218,7 @@ type LimitlessClobPreparedPayload = PreparedPayloadBase & {
   kind: "limitless";
   marketSlug: string;
   orderPayload: Record<string, unknown>;
+  submissionContext?: LimitlessClobSubmissionContext;
   orderType: "FOK";
   ownerId: number;
   price: number | null;
@@ -4184,6 +4189,7 @@ export async function submitLimitlessClientSignedOrder(input: {
   let upstream: Awaited<ReturnType<typeof submitLimitlessClobOrderToVenue>>;
   let copyKey: string | null = null;
   let copyAttempt: RetainedCopyAttempt | null = null;
+  let copySubmissionContext: LimitlessClobSubmissionContext | undefined;
   if (input.body.sourceRef && !reconciledExactStatus) {
     if (!fundingMarketId || !tokenId)
       return {
@@ -4195,6 +4201,23 @@ export async function submitLimitlessClientSignedOrder(input: {
         },
       };
     try {
+      // Resolve the exact market/token domain on the server before retaining
+      // Copy uncertainty. Client order extras are not exchange authority.
+      const signingContext = await resolveLimitlessEmbeddedOrderSigningContext({
+        marketSlug: input.body.marketSlug,
+        ownerId,
+        payload: {
+          side,
+          tokenId: requestedRawTokenId,
+        },
+        pool: input.pool,
+        requestAuth,
+        signer,
+      });
+      copySubmissionContext = buildLimitlessClobSubmissionContext(
+        signingContext.exchangeAddress,
+        orderForUpstream,
+      );
       copyKey = await retainClientCopyBeforeSubmission(input.pool, {
         sourceRef: input.body.sourceRef,
         userId: input.userId,
@@ -4210,6 +4233,8 @@ export async function submitLimitlessClientSignedOrder(input: {
         preparedFingerprint: orderFingerprint,
         orderType: input.body.orderType,
         limitlessPositionContract: env.limitlessConditionalTokensAddress,
+        limitlessClobOrder: orderForUpstream,
+        limitlessClobSubmissionContext: copySubmissionContext,
         onRetained: (attempt) => {
           copyAttempt = attempt;
         },
@@ -4574,6 +4599,7 @@ export async function submitLimitlessClientSignedOrder(input: {
     errorMessage: null,
     rawError: null,
     orderPayload: storedOrderPayload,
+    limitlessClobSubmissionContext: copySubmissionContext,
     orderHash: parsedResult.txHash,
     fundingReservation,
     fundingTradeAttemptId,
@@ -6793,6 +6819,10 @@ async function prepareTrade(
       kind: "limitless",
       marketSlug: market.slug,
       orderPayload: { ...order, signature },
+      submissionContext: buildLimitlessClobSubmissionContext(
+        exchangeAddress,
+        order,
+      ),
       orderType: "FOK",
       ownerId: verification.profile.id,
       price,
@@ -7229,8 +7259,10 @@ async function persistTrade(
     orderPayload: {
       ...payload.orderPayload,
       ...buildTelegramTradeSourceMetadata(input),
+      clientOrderId: payload.clientOrderId,
       _hunchUpstream: upstreamPayload,
     },
+    limitlessClobSubmissionContext: payload.submissionContext,
     orderHash: input.submitResult.orderHash,
     fundingReservation:
       input.submitResult.status === "no_fill"

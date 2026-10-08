@@ -20,7 +20,10 @@ import {
 } from "./services/verified-buy-evidence.js";
 import { verifySocialSolanaSubmission } from "./services/social-signed-solana.js";
 import { buildSocialInstrument } from "./services/social-instrument.js";
-import { resolvePolymarketMarketAssets } from "@hunch/shared";
+import {
+  buildPolymarketAssetContext,
+  resolvePolymarketMarketAssets,
+} from "@hunch/shared";
 import { socialSourceRefSchema } from "./schemas/social-trade.js";
 import { requireSameInstrument } from "./services/social-copy.js";
 import type { PreparedTrade } from "./services/trading-types.js";
@@ -414,6 +417,272 @@ test("Copy rejects changed Limitless ledger generation while preserving exact on
         limitlessPositionContract: exchange,
       }),
     /copy_generation_mismatch/,
+  );
+});
+const partialTxHash = `0x${"c".repeat(64)}`;
+const polymarketContext = buildPolymarketAssetContext(
+  instrument.marketId,
+  resolvePolymarketMarketAssets({
+    version: "v1",
+    conditionId: zero,
+    clobTokenIds: ["123", "456"],
+    outcomes: ["Yes", "No"],
+    negRisk: false,
+  }),
+  "123",
+);
+const polymarketFill = new Interface([
+  "event OrderFilled(bytes32 indexed orderHash,address indexed maker,address indexed taker,uint256 makerAssetId,uint256 takerAssetId,uint256 makerAmountFilled,uint256 takerAmountFilled,uint256 fee)",
+]);
+function polymarketReceipt(receiptHash: string, notionalRaw = 10000000n) {
+  return {
+    hash: receiptHash,
+    status: 1,
+    logs: [
+      {
+        address: polymarketContext.exchangeAddress,
+        index: 0,
+        ...polymarketFill.encodeEventLog("OrderFilled", [
+          hash,
+          owner,
+          polymarketContext.exchangeAddress,
+          0,
+          123,
+          notionalRaw,
+          notionalRaw * 2n,
+          100000,
+        ]),
+      },
+      {
+        address: polymarketContext.positionContract,
+        index: 1,
+        ...transfer.encodeEventLog("TransferSingle", [
+          polymarketContext.exchangeAddress,
+          polymarketContext.exchangeAddress,
+          owner,
+          123,
+          notionalRaw * 2n - 100000n,
+        ]),
+      },
+    ],
+  };
+}
+type PolymarketFill = Awaited<
+  ReturnType<VerifiedBuyObserverDependencies["readPolymarketFills"]>
+>[number];
+const confirmedFill = (receiptHash: string): PolymarketFill => ({
+  provider_tx_hash: receiptHash,
+  provider_status: "CONFIRMED",
+});
+async function observePolymarketFixture(
+  fills: PolymarketFill[],
+  receipts: Record<string, unknown>,
+) {
+  const receiptReads: string[] = [];
+  const db = {
+    query: async (sql: string) => {
+      assert.match(sql, /from order_fills/);
+      return { rows: fills };
+    },
+  } as unknown as Pick<Pool, "query">;
+  const row: VerifiedBuySourceRow = {
+    id: "polymarket-row",
+    user_id: "user",
+    venue: "polymarket",
+    wallet_address: owner,
+    order_hash: hash,
+    venue_order_id: hash,
+    token_id: "123",
+    side: "BUY",
+    order_payload: { assetContext: polymarketContext },
+    client_order_id: null,
+    tx_signature: null,
+    market_id: instrument.marketId,
+    outcome: "YES",
+    expiration_time: null,
+    market_metadata: {},
+    input_mint: null,
+    output_mint: null,
+  };
+  const deps: VerifiedBuyObserverDependencies = {
+    maxEvidenceItems: 10,
+    limitlessPositionContract: position,
+    limitlessExchangeAddress: exchange,
+    solanaCollateralMint: "usd",
+    readEvmReceipt: async (chainId, receiptHash) => {
+      assert.equal(chainId, 137);
+      assert.ok(
+        Object.hasOwn(receipts, receiptHash),
+        "Unexpected receipt read",
+      );
+      receiptReads.push(receiptHash);
+      return receipts[receiptHash] === null
+        ? null
+        : { receipt: receipts[receiptHash], timestamp: base.purchasedAt };
+    },
+    readPolymarketFills: async () => fills,
+    readLimitlessOrder: async () => null,
+    readDflowOrder: async () => null,
+    readFinalizedSolanaTransaction: async () => null,
+  };
+  return {
+    observation: await observeVerifiedBuySource(db, deps, row),
+    receiptReads,
+  };
+}
+test("Polymarket successful fills survive another provider-failed attempt", async () => {
+  for (const failedHash of [null, partialTxHash]) {
+    const { observation, receiptReads } = await observePolymarketFixture(
+      [
+        confirmedFill(txHash),
+        { provider_tx_hash: failedHash, provider_status: "FAILED" },
+      ],
+      { [txHash]: polymarketReceipt(txHash) },
+    );
+    assert.equal(observation.state, "verified");
+    if (observation.state !== "verified")
+      throw new Error("Expected proven partial buy");
+    assert.equal(observation.facts.grossNotionalUsd, "10");
+    assert.equal(observation.facts.grossShares, "20");
+    assert.equal(observation.facts.netShares, "19.9");
+    assert.deepEqual(observation.facts.evidenceIds, [`137:${txHash}:0`]);
+    assert.deepEqual(receiptReads, [txHash]);
+  }
+});
+test("Polymarket finalized reverted fills do not revoke successful fills", async () => {
+  const fills = [confirmedFill(txHash), confirmedFill(partialTxHash)];
+  for (const orderedFills of [fills, [...fills].reverse()]) {
+    const { observation } = await observePolymarketFixture(orderedFills, {
+      [txHash]: polymarketReceipt(txHash),
+      [partialTxHash]: { hash: partialTxHash, status: "0x0", logs: [] },
+    });
+    assert.equal(observation.state, "verified");
+    if (observation.state !== "verified")
+      throw new Error("Expected proven partial buy");
+    assert.equal(observation.facts.grossNotionalUsd, "10");
+    assert.equal(observation.facts.netShares, "19.9");
+    assert.deepEqual(observation.facts.evidenceIds, [`137:${txHash}:0`]);
+  }
+});
+test("Polymarket all failed attempts revoke without treating status as purchase proof", async () => {
+  assert.deepEqual(
+    (
+      await observePolymarketFixture(
+        [
+          { provider_tx_hash: null, provider_status: "FAILED" },
+          { provider_tx_hash: txHash, provider_status: "failed" },
+        ],
+        {},
+      )
+    ).observation,
+    { state: "revoked", reason: "provider_fill_failed" },
+  );
+  for (const secondFill of [
+    confirmedFill(partialTxHash),
+    {
+      provider_tx_hash: null,
+      provider_status: "FAILED",
+    },
+  ]) {
+    assert.deepEqual(
+      (
+        await observePolymarketFixture([confirmedFill(txHash), secondFill], {
+          [txHash]: { hash: txHash, status: 0, logs: [] },
+          [partialTxHash]: { hash: partialTxHash, status: 0, logs: [] },
+        })
+      ).observation,
+      { state: "revoked", reason: "finalized_receipt_failed" },
+    );
+  }
+});
+test("Polymarket lost partial-fill proof corrects facts and revision below publication minimum", async () => {
+  const full = (
+    await observePolymarketFixture(
+      [confirmedFill(txHash), confirmedFill(partialTxHash)],
+      {
+        [txHash]: polymarketReceipt(txHash, 6000000n),
+        [partialTxHash]: polymarketReceipt(partialTxHash),
+      },
+    )
+  ).observation;
+  assert.equal(full.state, "verified");
+  if (full.state !== "verified") throw new Error("Expected complete buy proof");
+  assert.equal(full.facts.grossNotionalUsd, "16");
+  for (const secondFill of [
+    confirmedFill(partialTxHash),
+    {
+      provider_tx_hash: partialTxHash,
+      provider_status: "FAILED",
+    },
+  ]) {
+    const partial = (
+      await observePolymarketFixture([confirmedFill(txHash), secondFill], {
+        [txHash]: polymarketReceipt(txHash, 6000000n),
+        [partialTxHash]: { hash: partialTxHash, status: 0, logs: [] },
+      })
+    ).observation;
+    assert.equal(partial.state, "verified");
+    if (partial.state !== "verified")
+      throw new Error("Expected remaining buy proof");
+    assert.equal(partial.facts.grossNotionalUsd, "6");
+    assert.equal(partial.facts.grossShares, "12");
+    assert.equal(partial.facts.netShares, "11.9");
+    assert.equal(
+      partial.facts.canonicalPurchaseKey,
+      full.facts.canonicalPurchaseKey,
+    );
+    assert.notEqual(
+      partial.facts.evidenceRevision,
+      full.facts.evidenceRevision,
+    );
+    assert.deepEqual(partial.facts.evidenceIds, [`137:${txHash}:0`]);
+  }
+});
+test("Polymarket incomplete partial-fill evidence stays pending alongside proven fills", async () => {
+  for (const [secondFill, secondReceipt, reason] of [
+    [
+      { provider_tx_hash: null, provider_status: "CONFIRMED" },
+      null,
+      "fill_transaction_identity_missing",
+    ],
+    [
+      { provider_tx_hash: partialTxHash, provider_status: "MINED" },
+      null,
+      "provider_settlement_pending",
+    ],
+    [confirmedFill(partialTxHash), null, "receipt_pending"],
+    [
+      confirmedFill(partialTxHash),
+      { hash: partialTxHash, status: 1, logs: [] },
+      "receipt_exact_fill_unavailable",
+    ],
+    [
+      confirmedFill(partialTxHash),
+      { hash: txHash, status: 0, logs: [] },
+      "receipt_exact_fill_unavailable",
+    ],
+  ] as const) {
+    assert.deepEqual(
+      (
+        await observePolymarketFixture([confirmedFill(txHash), secondFill], {
+          [txHash]: polymarketReceipt(txHash),
+          [partialTxHash]: secondReceipt,
+        })
+      ).observation,
+      { state: "pending", reason },
+    );
+  }
+  assert.deepEqual(
+    (
+      await observePolymarketFixture(
+        [
+          { provider_tx_hash: null, provider_status: "FAILED" },
+          { provider_tx_hash: partialTxHash, provider_status: "MINED" },
+        ],
+        {},
+      )
+    ).observation,
+    { state: "pending", reason: "provider_settlement_pending" },
   );
 });
 test("provider confirmed status cannot override a finalized reverted receipt", async () => {

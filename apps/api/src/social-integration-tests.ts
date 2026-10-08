@@ -418,6 +418,65 @@ try {
     ).items[0]?.revisionAvailable,
     false,
   );
+  const reportRetractedRevision = await service.report(author, {
+    targetKind: "comment",
+    targetId: aiComment.id,
+    reason: "Visible comment, unavailable revision",
+  });
+  assert.ok(reportRetractedRevision.id);
+  // The canonical root may itself be retracted while a sibling still exposes
+  // the same discussion. Reports follow the thread's access, not one revision.
+  await client.query(`update ai_notes set status='retracted' where id=$1`, [
+    aiRoot,
+  ]);
+  await client.query(`update ai_notes set status='active' where id=$1`, [
+    aiUpdate,
+  ]);
+  assert.equal(
+    (
+      await service.listComments(author, {
+        targetKind: "hunch",
+        targetId: aiUpdate,
+      })
+    ).items[0]?.id,
+    aiComment.id,
+  );
+  assert.equal(
+    (
+      await service.report(author, {
+        targetKind: "comment",
+        targetId: aiComment.id,
+        reason: "Still visible",
+      })
+    ).id,
+    reportRetractedRevision.id,
+  );
+  await service.setBlock(outsider, reader, true);
+  await assert.rejects(
+    () =>
+      service.report(outsider, {
+        targetKind: "comment",
+        targetId: aiComment.id,
+        reason: "Blocked author",
+      }),
+    /comment_not_found/,
+  );
+  await service.setBlock(outsider, reader, false);
+  await client.query(`update ai_notes set status='retracted' where id=$1`, [
+    aiUpdate,
+  ]);
+  await assert.rejects(
+    () =>
+      service.report(author, {
+        targetKind: "comment",
+        targetId: aiComment.id,
+        reason: "No accessible thread",
+      }),
+    /hunch_not_found/,
+  );
+  await client.query(`update ai_notes set status='superseded' where id=$1`, [
+    aiRoot,
+  ]);
   await client.query(
     "update user_theses set published_at='2026-10-08 12:00:00.123456+00' where id=$1",
     [thesis.id],
@@ -536,12 +595,62 @@ try {
     await client.query("analyze user_theses");
     await client.query("analyze users");
     await client.query(
-      `insert into ai_notes(note_key,note_type,title,description,source_kind,source_id,producer_type,producer_run_id,created_at)
-      select 'scale-ai:'||$1::text||':'||g.seq,'context','Not public','Fixture','market',$2,'other_producer','fixture',now()-g.seq*interval '1 microsecond'
+      `insert into ai_notes(note_key,note_type,title,description,source_kind,source_id,producer_type,producer_run_id,lineage,metrics,created_at)
+      select 'scale-ai:'||$1::text||':'||g.seq,'signal','Public fixture','Fixture','market',$2,'holder_research','fixture',
+        jsonb_build_object('thesis_key','scale-ai:'||$1::text||':'||g.seq,'side','NO'),$4::jsonb,now()-g.seq*interval '1 microsecond'
       from generate_series(1,$3::int) as g(seq)`,
-      [key, marketId, scale],
+      [key, marketId, scale, JSON.stringify(publicationMetrics)],
     );
     await client.query("analyze ai_notes");
+    const threadLookup = calls.find((call) =>
+      call.text.includes("where valid_root.id=$1"),
+    );
+    assert.ok(threadLookup);
+    // Exercise both UNION branches and an empty thread at representative size,
+    // including PostgreSQL's generic prepared plan rather than only literals.
+    for (const visibility of ["root", "sibling", "unavailable"] as const) {
+      await client.query("update ai_notes set status=$2 where id=$1", [
+        aiRoot,
+        visibility === "root" ? "superseded" : "retracted",
+      ]);
+      await client.query("update ai_notes set status=$2 where id=$1", [
+        aiUpdate,
+        visibility === "sibling" ? "active" : "retracted",
+      ]);
+      for (const generic of [false, true]) {
+        let explained;
+        if (generic) {
+          await client.query("set local plan_cache_mode=force_generic_plan");
+          await client.query(
+            `prepare social_report_thread_fixture(uuid) as ${threadLookup.text}`,
+          );
+          const literal = await client.query(
+            "select quote_literal($1::uuid) as id",
+            [aiRoot],
+          );
+          explained = await client.query(
+            `explain (analyze,buffers,format json) execute social_report_thread_fixture(${literal.rows[0].id})`,
+          );
+          await client.query("deallocate social_report_thread_fixture");
+          await client.query("set local plan_cache_mode=auto");
+        } else
+          explained = await client.query(
+            `explain (analyze,buffers,format json) ${threadLookup.text}`,
+            [aiRoot],
+          );
+        console.log(
+          JSON.stringify({
+            scenario: `report_thread_${visibility}`,
+            generic,
+            fixtureRows: scale,
+            plan: explained.rows[0]["QUERY PLAN"][0],
+          }),
+        );
+      }
+    }
+    await client.query("update ai_notes set status='superseded' where id=$1", [
+      aiRoot,
+    ]);
     const emptyMarketId = `empty:${key}`;
     await client.query(
       `insert into unified_markets(id,venue,venue_market_id,event_id,title,status,market_type) values($1,'limitless',$1,$2,'Empty fixture','ACTIVE','binary')`,

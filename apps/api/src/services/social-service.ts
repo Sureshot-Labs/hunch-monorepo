@@ -60,6 +60,7 @@ type Row = {
 };
 type PurchaseRef = { kind: "order" | "execution"; id: string };
 type Target = { kind: "thesis" | "hunch"; id: string };
+type LikeTarget = { kind: "thesis" | "hunch" | "comment"; id: string };
 type Page = { cursor?: string; limit?: number };
 export type SocialFeedInput = Page & {
   mode: "all" | "following";
@@ -75,6 +76,27 @@ const profileColumns = `u.id, u.handle, u.display_name, u.bio, coalesce(a.public
   exists(select 1 from user_blocks b where b.blocker_user_id=$1::uuid and b.blocked_user_id=u.id) as is_blocked,
   (select count(*)::int from user_follows f where f.followed_user_id=u.id) as follower_count,
   (select count(*)::int from user_follows f where f.follower_user_id=u.id) as following_count`;
+
+const likeTargetColumns = {
+  thesis: "thesis_id",
+  hunch: "ai_note_id",
+  comment: "comment_id",
+} as const;
+
+// Only called by bounded item hydration, never by feed candidate selection.
+// Target-first indexes bound these aggregates to each selected post/comment.
+function likeColumns(kind: LikeTarget["kind"], targetId: string): string {
+  const column = likeTargetColumns[kind];
+  // Preserve target-index order before the author join even when a popular
+  // unrelated target dominates estimates. Otherwise a correlated count can
+  // choose a whole-likes-table scan once per selected item.
+  return `(select count(*)::int from (
+      select liked.user_id from social_likes liked where liked.${column}=${targetId}
+      order by liked.${column},liked.user_id offset 0
+    ) target_likes where (select liker.is_active and liker.social_suspended_at is null
+      from users liker where liker.id=target_likes.user_id)) as like_count,
+    exists(select 1 from social_likes liked where liked.${column}=${targetId} and liked.user_id=$1::uuid) as is_liked`;
+}
 
 function profile(row: Row) {
   return {
@@ -169,7 +191,7 @@ export class SocialService {
     private readonly checkWrite: (
       userId: string,
       policy: SocialPolicy,
-      kind: "write" | "comment" | "report",
+      kind: "write" | "comment" | "report" | "like",
     ) => Promise<void> = async () => {},
     private readonly options: { limitlessPositionContract?: string } = {},
   ) {}
@@ -489,6 +511,51 @@ export class SocialService {
     return { ok: true as const };
   }
 
+  async setLike(userId: string, target: LikeTarget, liked: boolean) {
+    const targetColumn = likeTargetColumns[target.kind];
+    await tx(this.db, async (db) => {
+      // Shared with block/account lifecycle operations: a new like must observe
+      // blocks committed before this actor lock, or finish before the block.
+      await actor(db, userId, true);
+      if (!liked) {
+        await db.query(
+          `delete from social_likes where user_id=$1 and ${targetColumn}=$2`,
+          [userId, target.id],
+        );
+        return;
+      }
+      const existing = await db.query(
+        `select 1 from social_likes where user_id=$1 and ${targetColumn}=$2`,
+        [userId, target.id],
+      );
+      // Safe retries and removal do not depend on current content or policy.
+      if (existing.rows.length) return;
+      await actor(db, userId);
+      const { policy } = await resolveSocialPolicy(db);
+      if (!policy.enabled || !policy.likesEnabled)
+        throw new SocialError("likes_disabled", 503);
+      await this.checkWrite(userId, policy, "like");
+      if (target.kind === "comment")
+        await this.visibleComment(db, userId, target.id);
+      else if (target.kind === "thesis")
+        await this.commentTarget(db, userId, { kind: "thesis", id: target.id });
+      else {
+        // Unlike comments, likes belong to this exact public revision, not its
+        // canonical discussion root. Public context notes are also likeable.
+        const visible = await db.query(
+          `select n.id from ai_notes n where n.id=$1 and ${SOCIAL_PUBLIC_AI}`,
+          [target.id],
+        );
+        if (!visible.rows[0]) throw new SocialError("hunch_not_found", 404);
+      }
+      await db.query(
+        `insert into social_likes(user_id,${targetColumn}) values($1,$2) on conflict do nothing`,
+        [userId, target.id],
+      );
+    });
+    return { ok: true as const };
+  }
+
   async listProfiles(
     viewerId: string | null,
     input: Page & {
@@ -712,7 +779,7 @@ export class SocialService {
       `select t.*,t.id as thesis_id,t.published_at::text as published_at,${profileColumns},
       m.title,m.outcomes,coalesce(m.image,e.image) as image,m.status,m.venue,m.resolved_outcome,m.resolved_outcome_pct::text,m.close_time,m.expiration_time,m.metadata,
       e.status as event_status,e.end_date as event_end_time,pm.accepting_orders as pm_accepting_orders,
-      current_token.token_id as current_token_id,
+      current_token.token_id as current_token_id,${likeColumns("thesis", "t.id")},
       case when q.ts<=now() and q.ts>=now()-($4::int*interval '1 second') then coalesce(q.mid,(q.best_bid+q.best_ask)/2)::text end as mark,
       (select count(*)::int from social_comments c join users cu on cu.id=c.author_id where c.thesis_id=t.id and c.author_hidden_at is null and c.moderation_hidden_at is null and cu.is_active and cu.social_suspended_at is null
         and not exists(select 1 from user_blocks b where (b.blocker_user_id=$1::uuid and b.blocked_user_id=cu.id) or (b.blocked_user_id=$1::uuid and b.blocker_user_id=cu.id))) as comment_count,
@@ -763,6 +830,8 @@ export class SocialService {
           mark: row.mark,
         }),
         commentCount: row.comment_count,
+        likeCount: row.like_count,
+        isLiked: Boolean(row.is_liked),
         copyCount: row.copy_count,
         canCopy:
           Boolean(policy?.enabled && policy.copyEnabled) &&
@@ -802,6 +871,9 @@ export class SocialService {
     // Separate query shapes keep generic plans selective; nullable-OR filters can scan an entire empty market tail.
     const thesisFilters = `${input.marketId ? "and t.market_id=$2::text" : ""} ${input.eventId ? "and t.event_id=$3::text" : ""} ${input.authorId ? "and t.author_id=$4::uuid" : ""}
       ${cursor ? "and (t.published_at,'thesis'::text,t.id)<($5::timestamptz,$6::text,$7::uuid)" : ""}`;
+    // Following keeps scope equality alongside its author ANY/order prefix so
+    // the author+market/event public indexes constrain both keys. A second ANY
+    // scope can become a residual filter on PG16, scanning unrelated history.
     // ANY(single scope) retains the leading market/event ordering key in generic plans.
     // With plain equality PG can discard that key and scan the global time index for a sparse/empty scope.
     const thesisBranch =
@@ -810,9 +882,9 @@ export class SocialService {
       from (select $1::uuid as author_id union select followed_user_id from user_follows where follower_user_id=$1::uuid) followed
       join users u on u.id=followed.author_id
       cross join lateral (
-        select t.id,t.published_at as sort_at from user_theses t where t.author_id=followed.author_id and ${publicThesis}
+        select t.id,t.published_at as sort_at from user_theses t where t.author_id=any(array[followed.author_id]) and ${publicThesis}
           ${thesisFilters}
-        order by t.published_at desc,t.id desc limit $8
+        order by t.author_id,t.published_at desc,t.id desc limit $8
       ) candidate order by candidate.sort_at desc,candidate.id desc limit $8`
         : input.marketId
           ? `select candidate.id,candidate.sort_at,'thesis'::text as item_kind from unified_markets scoped_market
@@ -895,7 +967,7 @@ export class SocialService {
     const { rows } = await this.db.query(
       `select n.id,n.note_type,n.title,n.description,n.created_at::text as published_at,n.source_id,m.event_id,n.lineage->>'side' as side,n.metrics #>> '{hunchStrengthV1,grade}' as strength,
       n.metrics->'socialInstrumentV1' as instrument_snapshot,m.venue,m.status,m.metadata,m.expiration_time,m.close_time,m.resolved_outcome,
-      e.status as event_status,e.end_date as event_end_time,pm.accepting_orders as pm_accepting_orders,current_token.token_id as current_token_id,
+      e.status as event_status,e.end_date as event_end_time,pm.accepting_orders as pm_accepting_orders,current_token.token_id as current_token_id,${likeColumns("hunch", "n.id")},
       (select count(distinct ca.copier_user_id)::int from copy_attributions ca where ca.source_ai_note_id=n.id and ca.state='confirmed') as copy_count,
       (select count(*)::int from social_comments c join users u on u.id=c.author_id where c.ai_note_id=coalesce(valid_root.id,n.id)
         and c.author_hidden_at is null and c.moderation_hidden_at is null and ${publicAuthor} and ${noBlock}) as comment_count
@@ -928,6 +1000,8 @@ export class SocialService {
               ? ("strong" as const)
               : ("good" as const),
         commentCount: row.comment_count,
+        likeCount: row.like_count,
+        isLiked: Boolean(row.is_liked),
         copyCount: row.copy_count,
         canCopy:
           copyEnabled &&
@@ -1026,7 +1100,7 @@ export class SocialService {
     ]);
     const cursor = decodeSocialCursor(input.cursor, scope);
     const { rows } = await this.db.query(
-      `select c.id as comment_id,c.body,c.created_at::text as comment_created_at,c.observed_ai_note_id,(${SOCIAL_PUBLIC_AI}) as revision_available,${profileColumns}
+      `select c.id as comment_id,c.body,c.created_at::text as comment_created_at,c.observed_ai_note_id,(${SOCIAL_PUBLIC_AI}) as revision_available,${profileColumns},${likeColumns("comment", "c.id")}
       from social_comments c join users u on u.id=c.author_id left join content_assets a on a.id=u.avatar_asset_id and a.status='ready'
       left join ai_notes n on n.id=c.observed_ai_note_id
       where (${target.thesisId ? "c.thesis_id=$2::uuid" : "c.ai_note_id=$2::uuid"}) and c.author_hidden_at is null and c.moderation_hidden_at is null and ${publicAuthor} and ${noBlock}
@@ -1050,6 +1124,8 @@ export class SocialService {
         observedRevisionId: row.observed_ai_note_id,
         revisionAvailable:
           !row.observed_ai_note_id || Boolean(row.revision_available),
+        likeCount: row.like_count,
+        isLiked: Boolean(row.is_liked),
       })),
       nextCursor:
         rows.length > limit && last
@@ -1070,6 +1146,42 @@ export class SocialService {
     );
     if (!rows[0]) throw new SocialError("comment_not_found", 404);
     return { ok: true as const };
+  }
+
+  private async visibleComment(
+    db: DbQuery,
+    viewerId: string,
+    commentId: string,
+  ) {
+    const { rows } = await db.query(
+      `select c.thesis_id,c.ai_note_id from social_comments c join users u on u.id=c.author_id where c.id=$2 and c.author_hidden_at is null and c.moderation_hidden_at is null and ${publicAuthor} and ${noBlock}`,
+      [viewerId, commentId],
+    );
+    if (!rows[0]) throw new SocialError("comment_not_found", 404);
+    if (rows[0].thesis_id) {
+      await this.commentTarget(db, viewerId, {
+        kind: "thesis",
+        id: rows[0].thesis_id,
+      });
+      return;
+    }
+    // A visible discussion can outlive the particular revision observed by
+    // this comment. Share this indexed canonical-thread check across likes
+    // and reports, without exposing a retracted or unrelated legacy payload.
+    const thread = await db.query(
+      `with thread_revisions as materialized (
+        select * from ai_notes where note_type='signal' and producer_type='holder_research'
+          and lineage ? 'thesis_key'
+          and lineage->>'thesis_key'=(select lineage->>'thesis_key' from ai_notes where id=$1)
+      )
+      select n.id from ai_notes n where n.id=$1 and ${SOCIAL_PUBLIC_AI}
+      union all
+      select n.id from thread_revisions n ${SOCIAL_VALID_ROOT_JOIN}
+      where valid_root.id=$1 and ${SOCIAL_PUBLIC_AI}
+      limit 1`,
+      [rows[0].ai_note_id],
+    );
+    if (!thread.rows[0]) throw new SocialError("hunch_not_found", 404);
   }
 
   async report(
@@ -1098,17 +1210,7 @@ export class SocialService {
           kind: "thesis",
           id: input.targetId,
         });
-      else {
-        const { rows } = await db.query(
-          `select c.thesis_id,c.observed_ai_note_id from social_comments c join users u on u.id=c.author_id where c.id=$2 and c.author_hidden_at is null and c.moderation_hidden_at is null and ${publicAuthor} and ${noBlock}`,
-          [userId, input.targetId],
-        );
-        if (!rows[0]) throw new SocialError("comment_not_found", 404);
-        await this.commentTarget(db, userId, {
-          kind: rows[0].thesis_id ? "thesis" : "hunch",
-          id: rows[0].thesis_id ?? rows[0].observed_ai_note_id,
-        });
-      }
+      else await this.visibleComment(db, userId, input.targetId);
       const targetColumn = {
         profile: "target_profile_id",
         thesis: "thesis_id",

@@ -30,6 +30,7 @@ import {
 import {
   contentActorAdminId,
   normalizeContentActor,
+  userContentActor,
   type ContentActor,
   type ContentActorInput,
 } from "./content-actor.js";
@@ -601,6 +602,8 @@ async function failAssetVerification(
   });
 }
 
+class AssetVerificationOwnerChanged extends Error {}
+
 export async function completeContentAssetUpload(
   pool: Pool,
   assetId: string,
@@ -807,6 +810,18 @@ export async function completeContentAssetUpload(
       throw new Error("Promoted object failed immutable copy verification");
     }
     return await tx(pool, async (db) => {
+      // Lifecycle operations lock users before assets. Follow that order, and
+      // resolve the current owner after the remote copy: a merge may have
+      // transferred this upload and removed the requesting account meanwhile.
+      let readyActor = actor;
+      if (actor.kind === "user") {
+        const { rows: owners } = await db.query<{ id: string }>(
+          `select id from users where id=(select owner_user_id from content_assets where id=$1) for key share`,
+          [assetId],
+        );
+        if (!owners[0]) throw new AssetVerificationOwnerChanged();
+        readyActor = userContentActor(owners[0].id);
+      }
       const { rows: updatedRows } = await db.query<AssetRow>(
         `
           update content_assets
@@ -823,6 +838,7 @@ export async function completeContentAssetUpload(
             deleted_at = null,
             metadata = metadata - 'verificationTargetKey' - 'completionIssues'
           where id = $1 and status = 'verifying'
+            and ($8::uuid is null or owner_user_id=$8)
           returning ${ASSET_COLUMNS}
         `,
         [
@@ -833,9 +849,11 @@ export async function completeContentAssetUpload(
           checksumSha256,
           verifiedWidth,
           verifiedHeight,
+          readyActor.kind === "user" ? readyActor.id : null,
         ],
       );
       if (!updatedRows[0]) {
+        if (actor.kind === "user") throw new AssetVerificationOwnerChanged();
         throw new ContentError(
           "content_asset_busy",
           "Content asset changed while verification was in progress",
@@ -850,11 +868,29 @@ export async function completeContentAssetUpload(
       await insertContentAssetAudit(db, {
         action: "asset.ready",
         assetId,
-        actor,
+        actor: readyActor,
       });
       return assetFromRow(updatedRows[0]);
     });
   } catch (error) {
+    if (error instanceof AssetVerificationOwnerChanged) {
+      // Ownership can change while waiting for the user lock. Preserve the
+      // verified bytes and let the current owner retry instead of permanently
+      // failing/erasing a valid transferred avatar. Deleted assets still take
+      // the normal late-copy cleanup path below.
+      const reset = await pool.query(
+        `update content_assets set status='pending' where id=$1 and status='verifying'
+          and storage_key=$2 and metadata->>'verificationTargetKey'=$3 returning id`,
+        [assetId, existing.storage_key, targetKey],
+      );
+      if (reset.rowCount) {
+        throw new ContentError(
+          "content_asset_busy",
+          "Asset ownership changed; retry completion from the current account",
+          409,
+        );
+      }
+    }
     await failAssetVerification(
       pool,
       assetId,
@@ -863,6 +899,12 @@ export async function completeContentAssetUpload(
       ["asset promotion failed"],
       true,
     );
+    if (error instanceof AssetVerificationOwnerChanged)
+      throw new ContentError(
+        "content_asset_busy",
+        "Content asset changed while verification was in progress",
+        409,
+      );
     if (error instanceof ContentError) throw error;
     throw new ContentError(
       "content_asset_not_ready",

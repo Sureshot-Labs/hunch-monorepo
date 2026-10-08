@@ -8,6 +8,7 @@ import {
   type RetainedCopyAttempt,
 } from "./social-copy.js";
 import { rawDecimal } from "./verified-buy.js";
+import { notifyPolymarketDefinitiveRejection } from "./polymarket-order-rejection.js";
 import { fetchPolymarketAssetBindings } from "@hunch/db";
 import { selectPolymarketTradeAsset } from "./polymarket-trade-asset-selection.js";
 import { isRpcRateLimit } from "@hunch/shared";
@@ -7864,6 +7865,14 @@ export async function submitPolymarketClientSignedOrder(input: {
     throw error;
   }
 
+  await notifyPolymarketDefinitiveRejection(upstream, async () => {
+    if (copyAttempt)
+      await markCopyDefinitiveProviderRejection(
+        input.pool,
+        input.userId,
+        copyAttempt,
+      );
+  });
   if (!upstream.ok) {
     if (
       await invalidatePolymarketCredentialsForInvalidApiKey({
@@ -7874,12 +7883,6 @@ export async function submitPolymarketClientSignedOrder(input: {
         log: input.log,
       })
     ) {
-      if (copyAttempt && upstream.submissionAttempts === 1)
-        await markCopyDefinitiveProviderRejection(
-          input.pool,
-          input.userId,
-          copyAttempt,
-        );
       if (
         directHandoffBinding &&
         directHandoffSubmission &&
@@ -9636,6 +9639,10 @@ async function submitPreparedTrade(
       orderHash: payload.orderHash,
     },
   });
+  await notifyPolymarketDefinitiveRejection(
+    upstream,
+    input.onDefinitiveTradeRejection,
+  );
   if (!upstream.ok) {
     if (
       await invalidatePolymarketCredentialsForInvalidApiKey({
@@ -9646,8 +9653,6 @@ async function submitPreparedTrade(
         log: ctx.logger,
       })
     ) {
-      if (upstream.submissionAttempts === 1)
-        await input.onDefinitiveTradeRejection?.();
       throw tradingError({
         code: POLYMARKET_CREDENTIALS_INVALID_CODE,
         message: "Reconnect Polymarket to refresh trading credentials.",

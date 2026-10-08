@@ -10,6 +10,7 @@ const socialPolicyFields = {
   publicationsEnabled: z.boolean(),
   copyEnabled: z.boolean(),
   commentsEnabled: z.boolean(),
+  likesEnabled: z.boolean(),
   minimumNotionalUsd: z
     .string()
     .regex(/^(?:0|[1-9]\d*)(?:\.\d{1,18})?$/)
@@ -30,6 +31,7 @@ const socialPolicyFields = {
   rateLimitWindowSeconds: seconds.refine((v) => v > 0),
   writeRateLimit: count,
   commentRateLimit: count,
+  likeRateLimit: count,
   reportRateLimit: count,
   avatarRateLimit: count,
   reportMaxGraphemes: count,
@@ -68,6 +70,7 @@ export const DEFAULT_SOCIAL_POLICY: Readonly<SocialPolicy> = Object.freeze({
   publicationsEnabled: true,
   copyEnabled: true,
   commentsEnabled: true,
+  likesEnabled: true,
   minimumNotionalUsd: "10.00",
   thesisMaxGraphemes: 450,
   commentMaxGraphemes: 450,
@@ -85,6 +88,7 @@ export const DEFAULT_SOCIAL_POLICY: Readonly<SocialPolicy> = Object.freeze({
   rateLimitWindowSeconds: 60,
   writeRateLimit: 60,
   commentRateLimit: 20,
+  likeRateLimit: 120,
   reportRateLimit: 10,
   avatarRateLimit: 5,
   reportMaxGraphemes: 1_000,

@@ -5,6 +5,7 @@ import {
   type PurchaseRef,
   type VerifiedBuyFacts,
 } from "../schemas/social-trade.js";
+import { copyPurchaseIsTimelySql } from "./copy-purchase-timing.js";
 
 export type { PurchaseRef, VerifiedBuyFacts } from "../schemas/social-trade.js";
 type Db = Pick<Pool, "query">;
@@ -199,6 +200,7 @@ export async function repairVerifiedBuys(
 }> {
   for (const value of [
     input.batchSize,
+    input.concurrency ?? 1,
     input.leaseSeconds,
     input.retrySeconds,
     input.verifiedRecheckSeconds,
@@ -213,7 +215,23 @@ export async function repairVerifiedBuys(
     leaseLost: 0,
     budgetExhausted: 0,
   };
-  for (const kind of ["order", "execution"] as const) {
+  const kinds = ["order", "execution"] as const;
+  const drainedKinds = new Set<(typeof kinds)[number]>();
+  const seenIds: Record<(typeof kinds)[number], string[]> = {
+    order: [],
+    execution: [],
+  };
+  // Alternate bounded chunks so a large order queue cannot consume the whole
+  // batch before executions get a turn. Never re-claim a retry during this run.
+  for (
+    let turn = 0;
+    summary.claimed < input.batchSize &&
+    drainedKinds.size < kinds.length &&
+    summary.budgetExhausted === 0;
+    turn++
+  ) {
+    const kind = turn % kinds.length === 0 ? "order" : "execution";
+    if (drainedKinds.has(kind)) continue;
     const table = tableFor({ kind, id: "" });
     const remaining = Math.min(
       input.batchSize - summary.claimed,
@@ -230,6 +248,7 @@ export async function repairVerifiedBuys(
       with due_purchase as (
         select id from ${table}
         where verified_buy_due_at <= now()
+          and not (id = any($3::uuid[]))
           and (verified_buy_lease_until is null or verified_buy_lease_until < now())
         order by verified_buy_due_at, id limit $1 for update skip locked
       ) update ${table} purchase_row
@@ -239,8 +258,13 @@ export async function repairVerifiedBuys(
         from due_purchase where purchase_row.id = due_purchase.id
         returning purchase_row.id, purchase_row.user_id, purchase_row.verified_buy_lease_token, purchase_row.verified_buy_attempts
     `,
-      [remaining, input.leaseSeconds],
+      [remaining, input.leaseSeconds, seenIds[kind]],
     );
+    if (!claims.rows.length) {
+      drainedKinds.add(kind);
+      continue;
+    }
+    seenIds[kind].push(...claims.rows.map((claim) => claim.id));
     await Promise.all(
       claims.rows.map(async (claim) => {
         summary.claimed++;
@@ -264,6 +288,10 @@ export async function repairVerifiedBuys(
         else if (observation.reason.startsWith("evidence_budget_exhausted:"))
           summary.budgetExhausted++;
         const referenceColumn = kind === "order" ? "order_id" : "execution_id";
+        const timelyPurchase = copyPurchaseIsTimelySql(
+          "(stored_purchase.verified_buy_facts->>'purchasedAt')::timestamptz",
+          "copy_row.created_at",
+        );
         const result = await db.query(
           `with stored_purchase as (update ${table}
         set verified_buy_state = case when $2 = 'pending' and ($4 = 'observation_unavailable' or $4 like 'evidence_budget_exhausted:%') then verified_buy_state
@@ -276,25 +304,26 @@ export async function repairVerifiedBuys(
           and verified_buy_lease_until > now() returning id,verified_buy_state,verified_buy_facts),
         projected_theses as (
           update user_theses thesis_row set proof_invalidated_at=case
-            when stored_purchase.verified_buy_state='revoked' then coalesce(thesis_row.proof_invalidated_at,now())
+            when stored_purchase.verified_buy_state='revoked'
+              or not ((thesis_row.buy_snapshot->'evidenceIds') <@ (stored_purchase.verified_buy_facts->'evidenceIds'))
+              then coalesce(thesis_row.proof_invalidated_at,now())
             else null end
           from stored_purchase
           where thesis_row.author_id=$6 and (thesis_row.${referenceColumn}=stored_purchase.id
             or thesis_row.canonical_purchase_key=stored_purchase.verified_buy_facts->>'canonicalPurchaseKey')
-            and (stored_purchase.verified_buy_state='revoked' or
-              (stored_purchase.verified_buy_state='verified'
-                and thesis_row.buy_snapshot->>'evidenceRevision'=stored_purchase.verified_buy_facts->>'evidenceRevision'))
+            and stored_purchase.verified_buy_state in ('revoked','verified')
           returning thesis_row.id
         ), projected_copies as (
           update copy_attributions copy_row set
-            state=case when stored_purchase.verified_buy_state='revoked' then 'revoked' else 'confirmed' end,
+            state=case when stored_purchase.verified_buy_state='verified' and ${timelyPurchase}
+              then 'confirmed' else 'revoked' end,
             canonical_purchase_key=case when stored_purchase.verified_buy_state='verified'
               then stored_purchase.verified_buy_facts->>'canonicalPurchaseKey' else copy_row.canonical_purchase_key end,
             facts_revision=case when stored_purchase.verified_buy_state='verified'
               then stored_purchase.verified_buy_facts->>'evidenceRevision' else copy_row.facts_revision end,
             execution_facts=case when stored_purchase.verified_buy_state='verified'
               then stored_purchase.verified_buy_facts else copy_row.execution_facts end,
-            confirmed_at=case when stored_purchase.verified_buy_state='verified'
+            confirmed_at=case when stored_purchase.verified_buy_state='verified' and ${timelyPurchase}
               then coalesce(copy_row.confirmed_at,now()) else copy_row.confirmed_at end,updated_at=now()
           from stored_purchase where copy_row.copier_user_id=$6 and copy_row.${referenceColumn}=stored_purchase.id
             and (stored_purchase.verified_buy_state='revoked' or (stored_purchase.verified_buy_state='verified'
@@ -307,8 +336,7 @@ export async function repairVerifiedBuys(
               ? JSON.stringify(observation.facts)
               : null,
             observation.state === "verified" ? null : observation.reason,
-            observation.state === "verified" ||
-            observation.reason.startsWith("evidence_budget_exhausted:")
+            observation.state === "verified"
               ? input.verifiedRecheckSeconds
               : input.retrySeconds,
             claim.user_id,

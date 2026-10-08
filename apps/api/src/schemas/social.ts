@@ -7,6 +7,10 @@ const timestamp = z.string();
 export const socialErrorSchema = z.object({ error: z.string() });
 export const socialOkSchema = z.object({ ok: z.literal(true) });
 export const socialIdParams = z.object({ id: uuid });
+export const socialLikeParams = z.object({
+  targetKind: z.enum(["thesis", "hunch", "comment"]),
+  targetId: uuid,
+});
 export const socialHandleParams = z.object({ handle: z.string() });
 export const socialPageQuery = z.object({
   cursor: z.string().optional(),
@@ -135,6 +139,8 @@ export const socialThesisSchema = z.object({
   netShares: decimal,
   position: socialPositionSchema,
   commentCount: z.number().int(),
+  likeCount: z.number().int().nonnegative(),
+  isLiked: z.boolean(),
   copyCount: z.number().int(),
   canCopy: z.boolean(),
   visibility: z.enum([
@@ -156,6 +162,8 @@ export const socialHunchSchema = z.object({
   side: z.enum(["YES", "NO"]).nullable(),
   strength: z.enum(["good", "strong", "neutral"]),
   commentCount: z.number().int(),
+  likeCount: z.number().int().nonnegative(),
+  isLiked: z.boolean(),
   copyCount: z.number().int(),
   canCopy: z.boolean(),
 });
@@ -187,6 +195,8 @@ export const socialCommentSchema = z.object({
   createdAt: timestamp,
   observedRevisionId: uuid.nullable(),
   revisionAvailable: z.boolean(),
+  likeCount: z.number().int().nonnegative(),
+  isLiked: z.boolean(),
 });
 export const socialCommentsResponse = z.object({
   items: z.array(socialCommentSchema),

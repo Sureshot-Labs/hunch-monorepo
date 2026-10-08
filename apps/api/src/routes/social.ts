@@ -39,9 +39,11 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
       const maximum =
         kind === "comment"
           ? policy.commentRateLimit
-          : kind === "report"
-            ? policy.reportRateLimit
-            : policy.writeRateLimit;
+          : kind === "like"
+            ? policy.likeRateLimit
+            : kind === "report"
+              ? policy.reportRateLimit
+              : policy.writeRateLimit;
       if (
         !(await checkRateLimit(
           `social:${kind}:${userId}`,
@@ -373,6 +375,38 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     },
     async (request) =>
       service.listComments(request.user?.id ?? null, request.query),
+  );
+  typed.put(
+    "/social/likes/:targetKind/:targetId",
+    {
+      preHandler: required,
+      schema: {
+        params: schema.socialLikeParams,
+        response: { 200: schema.socialOkSchema, ...errors },
+      },
+    },
+    async (request) =>
+      service.setLike(
+        requireUserId(request),
+        { kind: request.params.targetKind, id: request.params.targetId },
+        true,
+      ),
+  );
+  typed.delete(
+    "/social/likes/:targetKind/:targetId",
+    {
+      preHandler: required,
+      schema: {
+        params: schema.socialLikeParams,
+        response: { 200: schema.socialOkSchema, ...errors },
+      },
+    },
+    async (request) =>
+      service.setLike(
+        requireUserId(request),
+        { kind: request.params.targetKind, id: request.params.targetId },
+        false,
+      ),
   );
   typed.post(
     "/social/comments",

@@ -23,6 +23,7 @@ export async function clearUserSocialData(
     `update social_comments set author_hidden_at=coalesce(author_hidden_at,now()),body='' where author_id=$1`,
     [userId],
   );
+  await db.query(`delete from social_likes where user_id=$1`, [userId]);
   await db.query(
     `delete from user_follows where follower_user_id=$1 or followed_user_id=$1`,
     [userId],
@@ -90,6 +91,15 @@ export async function mergeUserSocialData(
     from users source_row where target_row.id=$2 and source_row.id=$1`,
     [sourceId, targetId],
   );
+  // Exact typed targets do not change when their authors merge. Unlike follow
+  // edges, likes may become self-likes and must survive that ownership transfer.
+  await db.query(
+    `insert into social_likes(user_id,thesis_id,ai_note_id,comment_id,created_at)
+    select $2::uuid,thesis_id,ai_note_id,comment_id,created_at from social_likes where user_id=$1
+    on conflict do nothing`,
+    [sourceId, targetId],
+  );
+  await db.query(`delete from social_likes where user_id=$1`, [sourceId]);
   for (const [table, left, right] of [
     ["user_follows", "follower_user_id", "followed_user_id"],
     ["user_blocks", "blocker_user_id", "blocked_user_id"],

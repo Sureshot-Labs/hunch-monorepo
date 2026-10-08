@@ -9,6 +9,13 @@ import {
 } from "./services/social-policy.js";
 
 assert.equal(mergeSocialPolicy({}).minimumNotionalUsd, "10.00");
+assert.equal(mergeSocialPolicy({}).likesEnabled, true);
+assert.equal(mergeSocialPolicy({}).likeRateLimit, 120);
+assert.equal(mergeSocialPolicy({ likesEnabled: false }).likesEnabled, false);
+assert.equal(mergeSocialPolicy({ likeRateLimit: 3 }).likeRateLimit, 3);
+assert.throws(() => mergeSocialPolicy({ likesEnabled: "true" }));
+assert.throws(() => mergeSocialPolicy({ likeRateLimit: 0 }));
+assert.throws(() => mergeSocialPolicy({ likeRateLimit: 1.5 }));
 assert.equal(
   mergeSocialPolicy({ minimumNotionalUsd: "9.99" }).minimumNotionalUsd,
   "9.99",
@@ -49,4 +56,4 @@ await assert.rejects(
   resolveSocialPolicy(invalidDb),
   SocialPolicyUnavailableError,
 );
-console.log("Social policy: 13 assertions passed");
+console.log("Social policy: validated defaults, overrides and safe failure");

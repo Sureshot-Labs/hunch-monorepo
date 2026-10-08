@@ -1,5 +1,4 @@
 import type { Pool } from "@hunch/infra";
-import { TypedDataEncoder } from "ethers";
 import { parsePolymarketAssetContext } from "@hunch/shared";
 import { isRecord } from "../lib/type-guards.js";
 import type {
@@ -18,11 +17,7 @@ import {
   parseLimitlessOrderResult,
   isLimitlessTerminalRejectedStatus,
 } from "./limitless-order-result.js";
-import {
-  LIMITLESS_CLOB_ORDER_TYPES,
-  LIMITLESS_CLOB_EIP712_NAME,
-  LIMITLESS_CLOB_EIP712_VERSION,
-} from "./limitless-order-contract.js";
+import { resolveLimitlessClobEvidenceIdentity } from "./limitless-clob-evidence-identity.js";
 type Db = Pick<Pool, "query">;
 export type VerifiedBuyObserverDependencies = {
   maxEvidenceItems: number;
@@ -229,23 +224,24 @@ export async function observeVerifiedBuySource(
       );
     if (fills.rows.length === 1 && fills.rows[0]?.provider_status === "NO_FILL")
       return { state: "revoked", reason: "provider_terminal_zero_fill" };
-    if (
-      fills.rows.some(
-        (fill) => fill.provider_status?.toUpperCase() === "FAILED",
-      )
-    )
+    // A failed settlement attempt is not evidence against another actual fill
+    // of the same order. Only surviving candidates contribute purchase proof.
+    const candidates = fills.rows.filter(
+      (fill) => fill.provider_status?.toUpperCase() !== "FAILED",
+    );
+    if (fills.rows.length && !candidates.length)
       return { state: "revoked", reason: "provider_fill_failed" };
-    if (!fills.rows.length || fills.rows.some((fill) => !fill.provider_tx_hash))
+    if (!candidates.length || candidates.some((fill) => !fill.provider_tx_hash))
       return pending("fill_transaction_identity_missing");
     if (
-      fills.rows.some(
+      candidates.some(
         (fill) => fill.provider_status?.toUpperCase() !== "CONFIRMED",
       )
     )
       return pending("provider_settlement_pending");
     const parts: VerifiedPurchaseEvidence[] = [];
     const hashes = new Set(
-      fills.rows.flatMap((fill) =>
+      candidates.flatMap((fill) =>
         fill.provider_tx_hash ? [fill.provider_tx_hash] : [],
       ),
     );
@@ -253,8 +249,7 @@ export async function observeVerifiedBuySource(
     for (const hash of hashes) {
       const observed = await deps.readEvmReceipt(context.chainId, hash);
       if (!observed) return pending("receipt_pending");
-      if (failedReceipt(observed.receipt, hash))
-        return { state: "revoked", reason: "finalized_receipt_failed" };
+      if (failedReceipt(observed.receipt, hash)) continue;
       const evidence = parseEvmClobBuyEvidence({
         receipt: observed.receipt,
         txHash: hash,
@@ -270,6 +265,8 @@ export async function observeVerifiedBuySource(
       if (!evidence) return pending("receipt_exact_fill_unavailable");
       parts.push(evidence);
     }
+    if (!parts.length)
+      return { state: "revoked", reason: "finalized_receipt_failed" };
     const facts = combinePurchaseEvidence(parts);
     return facts
       ? { state: "verified", facts }
@@ -350,30 +347,15 @@ export async function observeVerifiedBuySource(
     )
       return { state: "revoked", reason: "provider_settlement_failed" };
     const hash = text(execution.txHash);
-    let orderHash = text(order.orderHash ?? order.hash);
-    if (!orderHash) {
-      try {
-        orderHash = TypedDataEncoder.hash(
-          {
-            name: LIMITLESS_CLOB_EIP712_NAME,
-            version: LIMITLESS_CLOB_EIP712_VERSION,
-            chainId: 8453,
-            verifyingContract: deps.limitlessExchangeAddress,
-          },
-          {
-            Order: LIMITLESS_CLOB_ORDER_TYPES.Order.map((field) => ({
-              ...field,
-            })),
-          },
-          order,
-        );
-      } catch {
-        return pending("signed_order_identity_missing");
-      }
-    }
+    const identity = resolveLimitlessClobEvidenceIdentity({
+      orderPayload: payload,
+      marketMetadata: row.market_metadata,
+      legacyExchangeAddress: deps.limitlessExchangeAddress,
+      providerOrder: order,
+    });
+    if (!identity) return pending("signed_order_identity_missing");
     if (
       !hash ||
-      !orderHash ||
       !["MINED", "CONFIRMED"].includes(
         String(execution.settlementStatus).toUpperCase(),
       )
@@ -387,9 +369,9 @@ export async function observeVerifiedBuySource(
       receipt: observed.receipt,
       txHash: hash,
       owner: row.wallet_address,
-      orderHash,
+      orderHash: identity.orderHash,
       providerOrderId,
-      exchangeAddress: deps.limitlessExchangeAddress,
+      exchangeAddress: identity.exchangeAddress,
       positionContract: deps.limitlessPositionContract,
       tokenId: tokenId.replace(/^limitless:/, ""),
       chainId: 8453,

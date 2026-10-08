@@ -34,6 +34,7 @@ import {
   markCopyDefinitiveProviderRejection,
 } from "./services/social-copy.js";
 import type { PreparedTrade } from "./services/trading-types.js";
+import { notifyPolymarketDefinitiveRejection } from "./services/polymarket-order-rejection.js";
 
 const pool = await createIntegrationTestPool({ max: 1 });
 const client = await pool.connect();
@@ -67,7 +68,7 @@ const key = randomUUID(),
   sourceOrder = randomUUID();
 const eventId = `verified-event:${key}`,
   marketId = `verified-market:${key}`,
-  tokenId = `limitless:${key}`;
+  tokenId = `limitless:${BigInt(`0x${key.replaceAll("-", "")}`)}`;
 const owner = `0x${"1".repeat(40)}`,
   exchange = `0x${"2".repeat(40)}`,
   position = `0x${"3".repeat(40)}`;
@@ -113,7 +114,7 @@ const receipt = {
         owner,
         exchange,
         0,
-        123,
+        tokenId.replace(/^limitless:/, ""),
         10000000,
         20000000,
         0,
@@ -128,7 +129,7 @@ const receipt = {
         exchange,
         exchange,
         owner,
-        123,
+        tokenId.replace(/^limitless:/, ""),
         19900000,
       ]),
     },
@@ -259,6 +260,15 @@ try {
   };
   const attemptA = await retainCopyBeforeSubmission(db, retained);
   assert.equal(attemptA.created, true);
+  assert.equal(
+    (
+      await client.query(
+        "select created_at > transaction_timestamp() as retained_after_transaction_start from copy_attributions where id=$1",
+        [attemptA.id],
+      )
+    ).rows[0].retained_after_transaction_start,
+    true,
+  );
   await markCopyDefinitelyNotBroadcast(db, copier, attemptA);
   assert.equal(
     (await getCopyAttributionStatus(db, copier, key))?.state,
@@ -331,6 +341,74 @@ try {
     "update copy_attributions set repair_due_at=now()+interval '1 day' where id=$1",
     [firstRejected.id],
   );
+  for (const rejectedResponse of [
+    {
+      ok: false,
+      status: 400,
+      submissionAttempts: 1,
+      payload: { error: "not enough balance / allowance" },
+    },
+    {
+      ok: true,
+      submissionAttempts: 1,
+      payload: { success: false, errorMsg: "INVALID_ORDER_MIN_SIZE" },
+    },
+  ]) {
+    const callbackKey = randomUUID();
+    const callbackInput = {
+      ...retained,
+      prepared: {
+        ...prepared,
+        intent: { ...prepared.intent, idempotencyKey: callbackKey },
+      },
+      providerReference: `limitless:clob:8453:${callbackKey}`,
+    };
+    const firstCallbackAttempt = await retainCopyBeforeSubmission(
+      db,
+      callbackInput,
+    );
+    await markCopySubmissionStarted(db, copier, firstCallbackAttempt);
+    await notifyPolymarketDefinitiveRejection(rejectedResponse, () =>
+      markCopyDefinitiveProviderRejection(db, copier, firstCallbackAttempt),
+    );
+    assert.equal(
+      (await getCopyAttributionStatus(db, copier, callbackKey))?.state,
+      "failed",
+      "known first-attempt rejection must finish Copy recovery",
+    );
+    const lostResponseAttempt = await retainCopyBeforeSubmission(
+      db,
+      callbackInput,
+    );
+    await markCopySubmissionStarted(db, copier, lostResponseAttempt);
+    await notifyPolymarketDefinitiveRejection(
+      { ...rejectedResponse, status: 408 },
+      () =>
+        markCopyDefinitiveProviderRejection(db, copier, lostResponseAttempt),
+    );
+    assert.equal(
+      (await getCopyAttributionStatus(db, copier, callbackKey))?.state,
+      "pending",
+      "timeout must retain Copy uncertainty",
+    );
+    const afterLostResponseAttempt = await retainCopyBeforeSubmission(
+      db,
+      callbackInput,
+    );
+    await markCopySubmissionStarted(db, copier, afterLostResponseAttempt);
+    await notifyPolymarketDefinitiveRejection(rejectedResponse, () =>
+      markCopyDefinitiveProviderRejection(db, copier, afterLostResponseAttempt),
+    );
+    assert.equal(
+      (await getCopyAttributionStatus(db, copier, callbackKey))?.state,
+      "pending",
+      "a later rejection cannot erase an earlier lost response",
+    );
+    await client.query(
+      "update copy_attributions set repair_due_at=now()+interval '1 day' where id=$1",
+      [firstCallbackAttempt.id],
+    );
+  }
   assert.equal(await getCopyAttributionStatus(db, author, key), null);
   await client.query(
     "update user_theses set author_hidden_at=now() where id=$1",
@@ -358,15 +436,11 @@ try {
   );
 
   // No local order exists: exact provider clientOrderId + finalized receipt recovers.
-  // Synthetic token must be a real ERC1155 uint; retained source binding remains exact.
-  const recoveryInstrument = {
-    ...instrument,
-    tokenId: "limitless:123",
-    generation: `8453:${position}:limitless:123`,
-  };
+  // Keep the retained real ERC1155 token bound to the exact persisted market.
+  const recoveryInstrument = instrument;
   await client.query(
-    `update copy_attributions set instrument=$2::jsonb where copier_user_id=$1`,
-    [copier, JSON.stringify(recoveryInstrument)],
+    `update copy_attributions set instrument=$2::jsonb,created_at=$3::timestamptz-interval '1 second' where copier_user_id=$1`,
+    [copier, JSON.stringify(recoveryInstrument), facts.purchasedAt],
   );
   assert.equal(
     (await repairUnrecordedCopies(db, deps, repairPolicy)).confirmed,
@@ -421,8 +495,8 @@ try {
     1,
   );
 
-  // Atomic invalidation and exact-revision reinstatement preserve immutable snapshot.
-  const run = async (state: "verified" | "revoked") => {
+  // Atomic invalidation and evidence-subset reinstatement preserve immutable snapshot.
+  const run = async (state: "verified" | "revoked", observedFacts = facts) => {
     await requestVerifiedBuyRefresh(db, {
       userId: author,
       purchaseRef: { kind: "order", id: sourceOrder },
@@ -435,7 +509,7 @@ try {
       verifiedRecheckSeconds: 300,
       observe: async () =>
         state === "verified"
-          ? { state, facts }
+          ? { state, facts: observedFacts }
           : { state, reason: "fixture_revoked" },
     });
   };
@@ -467,6 +541,55 @@ try {
       )
     ).rows[0].proof_invalidated_at,
     null,
+  );
+  const revisedFacts = (evidenceIds: string[]) =>
+    factsFromEvidence({
+      canonicalPurchaseKey: facts.canonicalPurchaseKey,
+      instrument,
+      owner,
+      notionalRaw: 10000000n * BigInt(evidenceIds.length),
+      grossSharesRaw: 20000000n * BigInt(evidenceIds.length),
+      netSharesRaw: 19900000n * BigInt(evidenceIds.length),
+      collateralDecimals: 6,
+      shareDecimals: 6,
+      feesUsdRaw: null,
+      purchasedAt: facts.purchasedAt,
+      evidenceIds,
+    });
+  const proofIsInvalid = async () =>
+    Boolean(
+      (
+        await client.query(
+          "select proof_invalidated_at from user_theses where id=$1",
+          [thesis],
+        )
+      ).rows[0].proof_invalidated_at,
+    );
+  const addedFillFacts = revisedFacts([...facts.evidenceIds, `later:${key}`]);
+  assert.equal((await run("verified", addedFillFacts)).verified, 1);
+  assert.equal(
+    await proofIsInvalid(),
+    false,
+    "new fills do not invalidate an unchanged frozen proof",
+  );
+  const survivingFillFacts = revisedFacts([`later:${key}`]);
+  assert.equal((await run("verified", survivingFillFacts)).verified, 1);
+  assert.equal(
+    await proofIsInvalid(),
+    true,
+    "removing a snapshot fill invalidates proof even while another fill remains verified",
+  );
+  assert.equal((await run("verified", addedFillFacts)).verified, 1);
+  assert.equal(
+    await proofIsInvalid(),
+    false,
+    "restored snapshot fills reinstate proof even with additional later fills",
+  );
+  assert.equal((await run("verified")).verified, 1);
+  assert.equal(
+    await proofIsInvalid(),
+    false,
+    "exact restored evidence reinstates proof",
   );
   await requestVerifiedBuyRefresh(db, {
     userId: author,
@@ -680,6 +803,278 @@ try {
   assert.equal(full.facts?.grossNotionalUsd, "340");
   assert.equal(full.facts?.grossShares, "680");
   assert.equal(full.facts?.evidenceIds.length, 34);
+
+  // Reposting an old signed BUY with a fresh source cannot count as Copy,
+  // whether its local order already exists or only its chain receipt survives.
+  assert.ok(full.facts);
+  const polyThesis = (
+    await client.query(
+      `insert into user_theses(author_id,canonical_purchase_key,order_id,market_id,event_id,token_id,outcome,
+      instrument_generation,body,buy_snapshot,policy_revision,qualifying_notional,idempotency_key,payload_hash)
+      values($1,$2,$3,$4,$5,$6,'YES',$7,'Copy timing fixture',$8::jsonb,'defaults','10',$9,$9) returning id`,
+      [
+        author,
+        full.facts.canonicalPurchaseKey,
+        heavyOrder,
+        polyMarket,
+        polyEvent,
+        polyToken,
+        full.facts.instrument.generation,
+        JSON.stringify(full.facts),
+        randomUUID(),
+      ],
+    )
+  ).rows[0].id as string;
+  const authorizedAt = "2026-10-08T12:00:00.750Z";
+  for (const scenario of [
+    {
+      name: "existing local submission cannot gain a new Copy source",
+      linked: true,
+      knownLocal: true,
+      times: ["2026-10-08T12:00:00.000Z"],
+      expected: "revoked",
+    },
+    {
+      name: "linked old purchase",
+      linked: true,
+      times: ["2026-10-08T11:59:59.000Z"],
+      expected: "revoked",
+    },
+    {
+      name: "unrecorded old receipt",
+      linked: false,
+      times: ["2026-10-08T11:59:59.000Z"],
+      expected: "revoked",
+    },
+    {
+      name: "old earliest fill despite newer fill",
+      linked: false,
+      times: ["2026-10-08T12:00:01.000Z", "2026-10-08T11:59:59.000Z"],
+      expected: "revoked",
+    },
+    {
+      name: "linked late recovery",
+      linked: true,
+      times: ["2026-10-08T12:00:01.000Z"],
+      expected: "confirmed",
+    },
+    {
+      name: "unrecorded late recovery",
+      linked: false,
+      times: ["2026-10-08T12:00:01.000Z"],
+      expected: "confirmed",
+    },
+    {
+      name: "linked same-second receipt",
+      linked: true,
+      times: ["2026-10-08T12:00:00.000Z"],
+      expected: "confirmed",
+    },
+    {
+      name: "unrecorded same-second receipt",
+      linked: false,
+      times: ["2026-10-08T12:00:00.000Z"],
+      expected: "confirmed",
+    },
+  ]) {
+    const copyKey = randomUUID();
+    const replayHash = `0x${randomUUID().replaceAll("-", "").repeat(2)}`;
+    const receiptHashes = scenario.times.map(
+      () => `0x${randomUUID().replaceAll("-", "").repeat(2)}`,
+    );
+    const copyOrder = scenario.linked ? randomUUID() : null;
+    const persistTimingOrder = async () => {
+      if (copyOrder)
+        await client.query(
+          `insert into orders(id,user_id,venue,side,status,token_id,wallet_address,order_hash,order_payload)
+          values($1,$2,'polymarket','BUY','filled',$3,$4,$5,$6::jsonb)`,
+          [
+            copyOrder,
+            copier,
+            polyToken,
+            owner,
+            replayHash,
+            JSON.stringify({ assetContext: context }),
+          ],
+        );
+    };
+    const timingPrepared: PreparedTrade = {
+      ...prepared,
+      venue: "polymarket",
+      venuePayload: { assetContext: context },
+      intent: {
+        ...prepared.intent,
+        venue: "polymarket",
+        idempotencyKey: copyKey,
+        sourceRef: { kind: "thesis", id: polyThesis },
+        target: {
+          ...prepared.intent.target,
+          venue: "polymarket",
+          marketId: polyMarket,
+          tokenId: polyToken,
+          eventId: polyEvent,
+          assetContext: context,
+        },
+      },
+    };
+    const timingRetained = {
+      prepared: timingPrepared,
+      providerReference: `polymarket:137:${context.exchangeAddress}:${replayHash}`,
+      preparedFingerprint: replayHash,
+    };
+    if ("knownLocal" in scenario && scenario.knownLocal) {
+      await persistTimingOrder();
+      await assert.rejects(
+        () => retainCopyBeforeSubmission(db, timingRetained),
+        /copy_purchase_already_submitted/,
+      );
+      assert.equal(await getCopyAttributionStatus(db, copier, copyKey), null);
+      await client.query(
+        "update orders set verified_buy_due_at=null where id=$1",
+        [copyOrder],
+      );
+      continue;
+    }
+    const timingAttempt = await retainCopyBeforeSubmission(db, timingRetained);
+    await markCopySubmissionStarted(db, copier, timingAttempt);
+    // Persistence may arrive late, after authorization. Its authoritative fill
+    // timestamp, not local insertion time, must still reject an old purchase.
+    await persistTimingOrder();
+    await client.query(
+      "update copy_attributions set created_at=$2 where id=$1",
+      [timingAttempt.id, authorizedAt],
+    );
+    await client.query(
+      "update user_theses set author_hidden_at=now() where id=$1",
+      [polyThesis],
+    );
+    assert.equal(
+      (await retainCopyBeforeSubmission(db, timingRetained)).created,
+      false,
+    );
+    assert.equal(
+      (await getCopyAttributionStatus(db, copier, copyKey))?.createdAt,
+      authorizedAt,
+    );
+    const timingDeps: VerifiedBuyObserverDependencies = {
+      ...deps,
+      readPolymarketFills: async () =>
+        receiptHashes.map((hash) => ({
+          provider_tx_hash: hash,
+          provider_status: "CONFIRMED",
+        })),
+      readEvmReceipt: async (_chain, hash) => {
+        const timestamp = scenario.times[receiptHashes.indexOf(hash)];
+        assert.ok(timestamp, "receipt identity must match the timing fixture");
+        return {
+          timestamp,
+          receipt: {
+            hash,
+            status: 1,
+            logs: [
+              {
+                address: context.exchangeAddress,
+                index: 0,
+                ...fill.encodeEventLog("OrderFilled", [
+                  replayHash,
+                  owner,
+                  exchange,
+                  0,
+                  polyToken,
+                  10000000,
+                  20000000,
+                  0,
+                  zero,
+                  zero,
+                ]),
+              },
+              {
+                address: context.positionContract,
+                index: 1,
+                ...transfer.encodeEventLog("TransferSingle", [
+                  context.exchangeAddress,
+                  context.exchangeAddress,
+                  owner,
+                  polyToken,
+                  19900000,
+                ]),
+              },
+            ],
+          },
+        };
+      },
+    };
+    if (copyOrder) {
+      await recoverCopyPurchaseLinks(db, 10);
+      assert.deepEqual(
+        (await getCopyAttributionStatus(db, copier, copyKey))?.purchaseRef,
+        { kind: "order", id: copyOrder },
+      );
+      // A bad attribution that was previously confirmed must actively lose its count.
+      await client.query(
+        "update copy_attributions set state='confirmed' where id=$1",
+        [timingAttempt.id],
+      );
+      assert.equal(
+        (
+          await repairVerifiedBuys(db, {
+            batchSize: 1,
+            leaseSeconds: 60,
+            retrySeconds: 30,
+            verifiedRecheckSeconds: 300,
+            observe: createVerifiedBuyObserver(db, timingDeps),
+          })
+        ).verified,
+        1,
+      );
+      assert.equal(
+        (await getCopyAttributionStatus(db, copier, copyKey))?.state,
+        scenario.expected,
+        scenario.name,
+      );
+      const observedCopy = await readVerifiedBuy(db, {
+        userId: copier,
+        purchaseRef: { kind: "order", id: copyOrder },
+      });
+      assert.equal(observedCopy.state, "verified");
+      await client.query(
+        "update copy_attributions set state='confirmed' where id=$1",
+        [timingAttempt.id],
+      );
+      await reconcileCopyFacts(db, {
+        userId: copier,
+        purchaseRef: { kind: "order", id: copyOrder },
+        state: "verified",
+        facts: observedCopy.facts,
+      });
+    } else {
+      await client.query(
+        "update copy_attributions set state='confirmed' where id=$1",
+        [timingAttempt.id],
+      );
+      const recovered = await repairUnrecordedCopies(
+        db,
+        timingDeps,
+        repairPolicy,
+      );
+      assert.equal(
+        scenario.expected === "confirmed"
+          ? recovered.confirmed
+          : recovered.revoked,
+        1,
+        scenario.name,
+      );
+    }
+    assert.equal(
+      (await getCopyAttributionStatus(db, copier, copyKey))?.state,
+      scenario.expected,
+      scenario.name,
+    );
+    await client.query(
+      "update user_theses set author_hidden_at=null where id=$1",
+      [polyThesis],
+    );
+  }
   // Every new execution enqueues observation, without trusting fulfilled status.
   const execution = randomUUID();
   await client.query(
@@ -770,7 +1165,7 @@ try {
   }
   assert.equal(copyPayloadHash(prepared), copyPayloadHash(prepared));
   console.log(
-    `Verified buy PG16: Copy identity/recovery, frozen proof revocation/reinstatement, lease loss, trigger, backfill; ${statements.length} SQL calls explained`,
+    `Verified buy PG16: Copy timing/identity/recovery, frozen proof fill-subset revocation/reinstatement, lease loss, trigger, backfill; ${statements.length} SQL calls explained`,
   );
 } finally {
   await client.query("rollback");

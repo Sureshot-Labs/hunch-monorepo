@@ -14,6 +14,8 @@ import {
 import {
   socialCopyStatusResponse,
   socialFeedResponse,
+  socialLikeParams,
+  socialHunchSchema,
   socialPublishBody,
 } from "./schemas/social.js";
 import {
@@ -24,6 +26,28 @@ import {
 import type { DbQuery } from "./db.js";
 
 const id = "00000000-0000-4000-8000-000000000001";
+for (const targetKind of ["thesis", "hunch", "comment"])
+  assert.equal(
+    socialLikeParams.parse({ targetKind, targetId: id }).targetKind,
+    targetKind,
+  );
+assert.equal(
+  socialLikeParams.safeParse({ targetKind: "profile", targetId: id }).success,
+  false,
+);
+const likeFields = socialHunchSchema.pick({ likeCount: true, isLiked: true });
+assert.deepEqual(
+  likeFields.parse({ likeCount: 0, isLiked: false, likerIds: [id] }),
+  { likeCount: 0, isLiked: false },
+);
+assert.equal(
+  likeFields.safeParse({ likeCount: -1, isLiked: true }).success,
+  false,
+);
+assert.equal(
+  likeFields.safeParse({ likeCount: 0.5, isLiked: true }).success,
+  false,
+);
 const cursor = {
   scope: "feed-filter",
   timestamp: "2026-10-08 11:12:13.123456+00",

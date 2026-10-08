@@ -15,10 +15,13 @@ import { fetchLimitlessOrderStatusBatch } from "./limitless-order-status.js";
 import { fetchKalshiNormalizedOrderStatus } from "./kalshi-executions.js";
 import { recoverCopyPurchaseLinks } from "./social-copy.js";
 import { AuthService } from "../auth.js";
+import { createVerifiedRepairLaneRunner } from "./verified-repair-lanes.js";
 import {
   fetchPolymarketOrderByHash,
   fetchPolymarketTrades,
 } from "./polymarket-clob-l2.js";
+
+const runRepairLanes = createVerifiedRepairLaneRunner();
 
 export async function runVerifiedBuyRepairJob(pool: Pool) {
   const { policy, revision } = await resolveSocialPolicy(pool);
@@ -186,24 +189,44 @@ export async function runVerifiedBuyRepairJob(pool: Pool) {
   };
   const observer = createVerifiedBuyObserver(pool, dependencies);
   try {
-    const purchases = await repairVerifiedBuys(pool, {
-      batchSize: policy.repairBatchSize,
-      leaseSeconds: policy.repairLeaseSeconds,
-      concurrency: policy.repairConcurrency,
-      retrySeconds: policy.repairRetrySeconds,
-      verifiedRecheckSeconds: policy.repairMaxRetrySeconds,
-      observe: observer,
-    });
-    const copies = await repairUnrecordedCopies(pool, dependencies, {
-      batchSize: policy.repairBatchSize,
-      concurrency: policy.repairConcurrency,
-      leaseSeconds: policy.repairLeaseSeconds,
-      retrySeconds: policy.repairRetrySeconds,
-      recheckSeconds: policy.repairMaxRetrySeconds,
+    const { purchases, copies, firstLane } = await runRepairLanes({
+      hasBudget: () => budget > 0,
+      purchases: () =>
+        repairVerifiedBuys(pool, {
+          batchSize: policy.repairBatchSize,
+          leaseSeconds: policy.repairLeaseSeconds,
+          concurrency: policy.repairConcurrency,
+          retrySeconds: policy.repairRetrySeconds,
+          verifiedRecheckSeconds: policy.repairMaxRetrySeconds,
+          observe: observer,
+        }),
+      copies: () =>
+        repairUnrecordedCopies(pool, dependencies, {
+          batchSize: policy.repairBatchSize,
+          concurrency: policy.repairConcurrency,
+          leaseSeconds: policy.repairLeaseSeconds,
+          retrySeconds: policy.repairRetrySeconds,
+          recheckSeconds: policy.repairMaxRetrySeconds,
+        }),
     });
     return {
-      ...purchases,
-      copies,
+      ...(purchases ?? {
+        claimed: 0,
+        verified: 0,
+        pending: 0,
+        revoked: 0,
+        leaseLost: 0,
+        budgetExhausted: 0,
+      }),
+      copies: copies ?? {
+        checked: 0,
+        confirmed: 0,
+        revoked: 0,
+        pending: 0,
+        leaseLost: 0,
+        budgetExhausted: 0,
+      },
+      firstLane,
       revision,
       nextIntervalSeconds: policy.repairIntervalSeconds,
     };

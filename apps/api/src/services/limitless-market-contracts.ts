@@ -13,12 +13,27 @@ import { isRecord } from "../lib/type-guards.js";
 export function extractLimitlessMarketExchangeAddress(
   payload: unknown,
 ): string | null {
+  return firstAddress(marketExchangeCandidates(payload));
+}
+
+/** Missing legacy metadata may fall back; malformed explicit metadata may not. */
+export function resolveLimitlessMarketExchangeAddress(
+  payload: unknown,
+  legacyAddress: string,
+): string | null {
+  const candidates = marketExchangeCandidates(payload);
+  return candidates.some((candidate) => candidate != null && candidate !== "")
+    ? firstAddress(candidates)
+    : firstAddress([legacyAddress]);
+}
+
+function marketExchangeCandidates(payload: unknown): unknown[] {
   const marketRecord = isRecord(payload)
     ? isRecord(payload.market)
       ? payload.market
       : payload
     : null;
-  if (!marketRecord) return null;
+  if (!marketRecord) return [];
 
   const directCandidates = [
     marketRecord.negRiskExchange,
@@ -29,12 +44,10 @@ export function extractLimitlessMarketExchangeAddress(
     marketRecord.venueExchange,
     marketRecord.venue_exchange,
   ];
-  const direct = firstAddress(directCandidates);
-  if (direct) return direct;
-
   const venue = marketRecord.venue;
-  if (!isRecord(venue)) return null;
-  return firstAddress([
+  if (!isRecord(venue)) return directCandidates;
+  return [
+    ...directCandidates,
     venue.negRiskExchange,
     venue.neg_risk_exchange,
     venue.exchangeAddress,
@@ -42,7 +55,7 @@ export function extractLimitlessMarketExchangeAddress(
     venue.exchange,
     venue.venueExchange,
     venue.venue_exchange,
-  ]);
+  ];
 }
 
 function firstAddress(candidates: readonly unknown[]): string | null {

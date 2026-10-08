@@ -7,7 +7,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { tx, type Pool } from "@hunch/infra";
+import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import {
   configureContentTestRuntime,
@@ -171,6 +171,57 @@ try {
 
   const testPool = await createContentTestPool(2);
   pool = testPool;
+  const verificationStatements = new Map<string, unknown[]>();
+  let onVerificationOwnerQuery: (() => void) | null = null;
+  const verificationConnect = testPool.connect.bind(testPool);
+  const connectWithVerification = async () => {
+    const client = await verificationConnect();
+    const originalQuery = client.query.bind(client);
+    const originalRelease = client.release.bind(client);
+    client.query = (async (...args: unknown[]) => {
+      const sql = typeof args[0] === "string" ? args[0] : "";
+      if (
+        /^(select|update)\b/i.test(sql.trim()) &&
+        (sql.startsWith(
+          "select id from users where id=(select owner_user_id",
+        ) ||
+          sql.includes("and ($8::uuid is null or owner_user_id=$8)") ||
+          sql.includes(
+            "update content_assets set status='pending' where id=$1",
+          ))
+      ) {
+        verificationStatements.set(sql, (args[1] ?? []) as unknown[]);
+      }
+      const pending = Reflect.apply(originalQuery, client, args);
+      if (sql.includes("select owner_user_id from content_assets where id=$1"))
+        onVerificationOwnerQuery?.();
+      return pending;
+    }) as typeof client.query;
+    client.release = ((error?: Error | boolean) => {
+      client.query = originalQuery as typeof client.query;
+      client.release = originalRelease;
+      originalRelease(error);
+    }) as typeof client.release;
+    return client;
+  };
+  // Pool.query uses callback-style connect, while tx uses its Promise form.
+  testPool.connect = ((
+    callback?: (
+      error: Error | null,
+      client?: PoolClient,
+      release?: PoolClient["release"],
+    ) => void,
+  ) => {
+    if (typeof callback === "function") {
+      void connectWithVerification().then(
+        (client) => callback(null, client, client.release),
+        (error: unknown) =>
+          callback(error instanceof Error ? error : new Error(String(error))),
+      );
+      return;
+    }
+    return connectWithVerification();
+  }) as typeof testPool.connect;
   const logger = {
     info: () => undefined,
     warn: () => undefined,
@@ -475,8 +526,204 @@ try {
       Date.parse(abandonedExpiry) + 60_000,
   );
 
-  const { clearUserSocialData } =
+  const { clearUserSocialData, mergeUserSocialData } =
     await import("./services/social-lifecycle.js");
+  for (const keepSource of [false, true]) {
+    const sourceId = randomUUID();
+    const targetId = randomUUID();
+    userIds.push(sourceId, targetId);
+    await testPool.query(`insert into users(id) values($1),($2)`, [
+      sourceId,
+      targetId,
+    ]);
+    const merging = await createContentAssetUpload(
+      testPool,
+      avatarBody,
+      userContentActor(sourceId),
+      snapshot,
+    );
+    assetIds.push(merging.asset.id);
+    storageKeys.add(merging.asset.storageKey);
+    assert.equal(
+      (
+        await fetch(merging.upload.url, {
+          method: "PUT",
+          headers: merging.upload.headers,
+          body: png,
+        })
+      ).ok,
+      true,
+    );
+    beforeCopyObject = async () => {
+      await tx(testPool, async (db) => {
+        await db.query(
+          `select id from users where id=any($1::uuid[]) order by id for update`,
+          [[sourceId, targetId]],
+        );
+        await mergeUserSocialData(db, sourceId, targetId, keepSource);
+        if (!keepSource)
+          await db.query(`delete from users where id=$1`, [sourceId]);
+      });
+    };
+    let transferred;
+    try {
+      transferred = await completeContentAssetUpload(
+        testPool,
+        merging.asset.id,
+        completion,
+        userContentActor(sourceId),
+      );
+    } finally {
+      beforeCopyObject = null;
+    }
+    storageKeys.add(transferred.storageKey);
+    assert.equal(transferred.status, "ready");
+    assert.equal(objects.has(transferred.storageKey), true);
+    assert.deepEqual(
+      (
+        await testPool.query(
+          `select owner_user_id,(select actor_user_id from content_audit_events where asset_id=a.id and action='asset.ready') as ready_actor
+       from content_assets a where id=$1`,
+          [transferred.id],
+        )
+      ).rows[0],
+      { owner_user_id: targetId, ready_actor: targetId },
+    );
+    assert.equal(
+      (
+        await testPool.query(
+          `select count(*)::int as count from content_storage_deletion_jobs where storage_key=$1`,
+          [transferred.storageKey],
+        )
+      ).rows[0].count,
+      0,
+    );
+    await assert.rejects(
+      completeContentAssetUpload(
+        testPool,
+        transferred.id,
+        completion,
+        userContentActor(sourceId),
+      ),
+      (error: unknown) =>
+        error instanceof ContentError &&
+        error.code === "content_asset_not_found",
+    );
+    assert.equal(
+      (
+        await completeContentAssetUpload(
+          testPool,
+          transferred.id,
+          completion,
+          userContentActor(targetId),
+        )
+      ).status,
+      "ready",
+    );
+  }
+  console.log(
+    "ok - in-flight avatar merge preserves ready media and current-owner audit with and without source account",
+  );
+  // A merge can also commit after the owner lookup's statement snapshot while
+  // that lookup waits on the lifecycle user lock. Retry must remain possible.
+  {
+    const sourceId = randomUUID();
+    const targetId = randomUUID();
+    userIds.push(sourceId, targetId);
+    await testPool.query(`insert into users(id) values($1),($2)`, [
+      sourceId,
+      targetId,
+    ]);
+    const racing = await createContentAssetUpload(
+      testPool,
+      avatarBody,
+      userContentActor(sourceId),
+      snapshot,
+    );
+    assetIds.push(racing.asset.id);
+    storageKeys.add(racing.asset.storageKey);
+    assert.equal(
+      (
+        await fetch(racing.upload.url, {
+          method: "PUT",
+          headers: racing.upload.headers,
+          body: png,
+        })
+      ).ok,
+      true,
+    );
+    const lifecycle = await testPool.connect();
+    try {
+      await lifecycle.query("begin");
+      await lifecycle.query(
+        `select id from users where id=any($1::uuid[]) order by id for update`,
+        [[sourceId, targetId]],
+      );
+      let ownerQueryStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        ownerQueryStarted = resolve;
+      });
+      onVerificationOwnerQuery = ownerQueryStarted;
+      const completionRejected = assert.rejects(
+        completeContentAssetUpload(
+          testPool,
+          racing.asset.id,
+          completion,
+          userContentActor(sourceId),
+        ),
+        (error: unknown) =>
+          error instanceof ContentError && error.code === "content_asset_busy",
+      );
+      await started;
+      let blocked = false;
+      const deadline = Date.now() + 5_000;
+      while (!blocked && Date.now() < deadline) {
+        blocked = (
+          await lifecycle.query(
+            `select exists(select 1 from pg_stat_activity where datname=current_database() and pid<>pg_backend_pid()
+            and wait_event_type='Lock' and query like '%select owner_user_id from content_assets where id=$1%') as blocked`,
+          )
+        ).rows[0].blocked;
+      }
+      assert.equal(
+        blocked,
+        true,
+        "promotion waits on the lifecycle lock before locking the asset",
+      );
+      await mergeUserSocialData(lifecycle, sourceId, targetId, false);
+      await lifecycle.query(`delete from users where id=$1`, [sourceId]);
+      await lifecycle.query("commit");
+      await completionRejected;
+    } finally {
+      onVerificationOwnerQuery = null;
+      await lifecycle.query("rollback");
+      lifecycle.release();
+    }
+    const retryRow = (
+      await testPool.query(
+        `select status,owner_user_id,metadata from content_assets where id=$1`,
+        [racing.asset.id],
+      )
+    ).rows[0];
+    assert.equal(retryRow.status, "pending");
+    assert.equal(retryRow.owner_user_id, targetId);
+    storageKeys.add(retryRow.metadata.verificationTargetKey);
+    assert.equal(objects.has(retryRow.metadata.verificationTargetKey), true);
+    assert.equal(
+      (
+        await completeContentAssetUpload(
+          testPool,
+          racing.asset.id,
+          completion,
+          userContentActor(targetId),
+        )
+      ).status,
+      "ready",
+    );
+    console.log(
+      "ok - merge during owner-lock wait preserves bytes and current owner can retry completion",
+    );
+  }
   for (const removeAssetRow of [false, true]) {
     const deletingUser = randomUUID();
     userIds.push(deletingUser);
@@ -757,6 +1004,83 @@ try {
   );
   assert.equal(objects.has(invalidIntent.asset.storageKey), false);
 
+  assert.equal(verificationStatements.size, 3);
+  const plans = await testPool.connect();
+  try {
+    await plans.query("begin");
+    await plans.query("set local statement_timeout='60s'");
+    await plans.query(
+      `insert into users(id) select gen_random_uuid() from generate_series(1,50000)`,
+    );
+    await plans.query(
+      `insert into content_assets(kind,storage_key,original_filename,mime_type,checksum_sha256)
+      select 'image',$1||sequence_row::text,'fixture.png','image/png',$2 from generate_series(1,50000) sequence_row`,
+      [`media-scale:${randomUUID()}:`, pngChecksum],
+    );
+    await plans.query("analyze users");
+    await plans.query("analyze content_assets");
+    let planNumber = 0;
+    for (const [sql, params] of verificationStatements) {
+      const name = `avatar_verification_${planNumber++}`;
+      await plans.query(`prepare ${name} as ${sql}`);
+      const literals = params
+        .map((value) =>
+          value == null
+            ? "NULL"
+            : typeof value === "number"
+              ? String(value)
+              : `'${String(value).replaceAll("'", "''")}'`,
+        )
+        .join(",");
+      for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+        await plans.query(`set local plan_cache_mode=${mode}`);
+        await plans.query("savepoint avatar_plan");
+        const explained = await plans.query(
+          `explain(analyze,buffers,format json) execute ${name}(${literals})`,
+        );
+        const plan = explained.rows[0]["QUERY PLAN"][0];
+        const nodes: Record<string, unknown>[] = [];
+        const walk = (node: Record<string, unknown>) => {
+          nodes.push(node);
+          for (const child of (node.Plans ?? []) as Record<string, unknown>[])
+            walk(child);
+        };
+        walk(plan.Plan);
+        assert.ok(
+          nodes.some((node) => node["Index Name"] === "content_assets_pkey"),
+        );
+        assert.equal(
+          nodes.some(
+            (node) =>
+              node["Node Type"] === "Seq Scan" &&
+              ["users", "content_assets"].includes(
+                String(node["Relation Name"]),
+              ),
+          ),
+          false,
+        );
+        console.log(
+          "[avatar-verification-plan]",
+          JSON.stringify({
+            name,
+            mode,
+            unrelatedRows: 50000,
+            timeMs: plan["Execution Time"],
+            hits: plan.Plan["Shared Hit Blocks"],
+            reads: plan.Plan["Shared Read Blocks"],
+            indexes: nodes.flatMap((node) =>
+              node["Index Name"] ? [node["Index Name"]] : [],
+            ),
+          }),
+        );
+        await plans.query("rollback to savepoint avatar_plan");
+      }
+      await plans.query(`deallocate ${name}`);
+    }
+  } finally {
+    await plans.query("rollback");
+    plans.release();
+  }
   console.log("[content-media-integration-tests] passed");
 } finally {
   try {

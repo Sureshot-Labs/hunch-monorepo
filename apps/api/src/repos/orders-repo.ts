@@ -8,6 +8,13 @@ import {
   normalizeOptionalWalletForStorage,
   normalizeWalletForStorage,
 } from "../lib/wallet-address.js";
+import { isRecord } from "../lib/type-guards.js";
+import {
+  buildLimitlessClobSubmissionContext,
+  limitlessClobFrozenContext,
+  limitlessClobSubmittedOrder,
+  type LimitlessClobSubmissionContext,
+} from "../services/limitless-clob-evidence-identity.js";
 import { consumeFundingReservationForLinkedConsumerInTransaction } from "../funding/persistence/funding-evidence-repository.js";
 import { persistedTradeTerminalOutcome } from "../funding/persistence/funding-trade-consumer-status.js";
 import { recoverFundingTradeAttemptForOrderInTransaction } from "../funding/persistence/funding-trade-attempt-repository.js";
@@ -18,6 +25,7 @@ import {
 import type { OrderHistoryRow, OrderRow, PgParams } from "../server-types.js";
 
 const POSITION_DELTA_APPLIED_MARKER = "_hunchPositionDeltaAppliedAt";
+const LIMITLESS_CLOB_CONTEXT_KEY = "_hunchLimitlessClob";
 const LIMITLESS_HISTORY_FALLBACK_STATUSES = [
   "submitted",
   "open",
@@ -32,6 +40,56 @@ const LIMITLESS_HISTORY_FALLBACK_STATUSES = [
   "partial_filled",
   "partially_filled",
 ];
+
+/** Provider/client payloads cannot grant themselves server-owned provenance. */
+function withoutIncomingLimitlessClobContext(payload: unknown): unknown {
+  if (!isRecord(payload)) return payload;
+  const sanitized = { ...payload };
+  delete sanitized[LIMITLESS_CLOB_CONTEXT_KEY];
+  for (const key of [
+    "_hunchSubmitted",
+    "submitted",
+    "payload",
+    "order",
+    "_hunchUpstream",
+    "data",
+    "history",
+  ]) {
+    if (isRecord(sanitized[key]))
+      sanitized[key] = withoutIncomingLimitlessClobContext(sanitized[key]);
+  }
+  return sanitized;
+}
+
+function validatedLimitlessClobContext(
+  payload: unknown,
+  context: unknown,
+): {
+  context: LimitlessClobSubmissionContext;
+  signedOrder: Record<string, unknown>;
+} {
+  const signedOrder = isRecord(payload)
+    ? limitlessClobSubmittedOrder(payload)
+    : null;
+  if (
+    !signedOrder ||
+    !isRecord(context) ||
+    context.contextVersion !== 1 ||
+    context.chainId !== 8453 ||
+    typeof context.exchangeAddress !== "string" ||
+    typeof context.orderHash !== "string"
+  )
+    throw new Error("Invalid server-owned Limitless CLOB submission context");
+  const expected = buildLimitlessClobSubmissionContext(
+    context.exchangeAddress,
+    signedOrder,
+  );
+  if (expected.orderHash !== context.orderHash.toLowerCase())
+    throw new Error(
+      "Limitless CLOB submission context does not match signed order",
+    );
+  return { context: expected, signedOrder };
+}
 
 function limitlessStoredUpstreamPayloadSqlExpression(
   payloadExpression = "order_payload",
@@ -306,6 +364,8 @@ export type StoreOrderInput = {
   feeDeadline?: number | null;
   feePolicySnapshot?: unknown | null;
   orderPayload?: unknown | null;
+  /** Only the server-prepared CLOB submission may supply this, never request/history JSON. */
+  limitlessClobSubmissionContext?: LimitlessClobSubmissionContext;
   orderPayloadVersion?: string | null;
   fundingReservation?: Readonly<{
     operationId: string;
@@ -330,6 +390,27 @@ export async function storeOrderInTransaction(
   client: PoolClient,
   inputs: StoreOrderInput,
 ): Promise<StoreOrderResult> {
+  const incomingOrderPayload =
+    inputs.venue === "limitless"
+      ? withoutIncomingLimitlessClobContext(inputs.orderPayload)
+      : inputs.orderPayload;
+  if (inputs.limitlessClobSubmissionContext && inputs.venue !== "limitless")
+    throw new Error(
+      "Limitless CLOB submission context requires a Limitless order",
+    );
+  const limitlessSubmission = inputs.limitlessClobSubmissionContext
+    ? validatedLimitlessClobContext(
+        incomingOrderPayload,
+        inputs.limitlessClobSubmissionContext,
+      )
+    : null;
+  const incomingPersistedPayload = limitlessSubmission
+    ? {
+        ...(incomingOrderPayload as Record<string, unknown>),
+        [LIMITLESS_CLOB_CONTEXT_KEY]: limitlessSubmission.context,
+        _hunchSubmitted: limitlessSubmission.signedOrder,
+      }
+    : incomingOrderPayload;
   const payloadMaker = extractPayloadAddress(inputs.orderPayload, "maker");
   const payloadSigner = extractPayloadAddress(inputs.orderPayload, "signer");
   const inputWalletAddress = normalizeWalletForStorage(inputs.walletAddress);
@@ -508,10 +589,10 @@ export async function storeOrderInTransaction(
       params.push(inputs.size);
     }
     const incomingPayload =
-      inputs.orderPayload &&
-      typeof inputs.orderPayload === "object" &&
-      !Array.isArray(inputs.orderPayload)
-        ? (inputs.orderPayload as Record<string, unknown>)
+      incomingPersistedPayload &&
+      typeof incomingPersistedPayload === "object" &&
+      !Array.isArray(incomingPersistedPayload)
+        ? (incomingPersistedPayload as Record<string, unknown>)
         : null;
     const existingPayload =
       existing.order_payload &&
@@ -527,6 +608,22 @@ export async function storeOrderInTransaction(
       inputs.venue === "polymarket"
         ? parsePolymarketAssetContext(existingPayload?.assetContext)
         : null;
+    const existingLimitlessContext = existingPayload
+      ? limitlessClobFrozenContext(existingPayload)
+      : undefined;
+    if (limitlessSubmission && existingLimitlessContext !== undefined) {
+      const stored = validatedLimitlessClobContext(
+        existingPayload,
+        existingLimitlessContext,
+      );
+      if (
+        JSON.stringify(stored.context) !==
+        JSON.stringify(limitlessSubmission.context)
+      )
+        throw new Error(
+          "Limitless order conflicts with its stored CLOB submission context",
+        );
+    }
     if (
       incomingContext &&
       (normalizePolymarketAssetId(inputs.tokenId) !== incomingContext.assetId ||
@@ -539,7 +636,36 @@ export async function storeOrderInTransaction(
       throw new Error(
         "Polymarket order ledger identity conflicts with its stored context",
       );
-    if (existingPayload && incomingContext && !existingContext) {
+    if (
+      limitlessSubmission &&
+      existing.order_payload != null &&
+      existingLimitlessContext === undefined
+    ) {
+      const localClientOrderId = limitlessSubmission.signedOrder.clientOrderId;
+      if (
+        typeof localClientOrderId === "string" &&
+        existingPayload?.clientOrderId != null &&
+        existingPayload.clientOrderId !== localClientOrderId
+      )
+        throw new Error(
+          "Limitless order conflicts with its stored client order ID",
+        );
+      // History sync may have inserted this order first. Keep every upstream
+      // fact/marker and freeze the original local signed order under the same
+      // row lock as its exchange/hash; history must never become its authority.
+      paramCount += 1;
+      updates.push(positionDeltaPreservingPayloadUpdateSql(`$${paramCount}`));
+      params.push(
+        JSON.stringify({
+          ...(existingPayload ?? { payload: existing.order_payload }),
+          ...(typeof localClientOrderId === "string"
+            ? { clientOrderId: localClientOrderId }
+            : {}),
+          [LIMITLESS_CLOB_CONTEXT_KEY]: limitlessSubmission.context,
+          _hunchSubmitted: limitlessSubmission.signedOrder,
+        }),
+      );
+    } else if (existingPayload && incomingContext && !existingContext) {
       // Sync can win the race with signed-submit persistence. Enrich only the
       // missing immutable identity under this row lock; preserve original
       // upstream facts and optimistic-delta markers, never replace a ledger.
@@ -548,10 +674,10 @@ export async function storeOrderInTransaction(
         `order_payload = order_payload || jsonb_build_object('assetContext', $${paramCount}::jsonb)`,
       );
       params.push(JSON.stringify(incomingContext));
-    } else if (!existing.order_payload && inputs.orderPayload != null) {
+    } else if (!existing.order_payload && incomingPersistedPayload != null) {
       paramCount += 1;
       updates.push(positionDeltaPreservingPayloadUpdateSql(`$${paramCount}`));
-      params.push(JSON.stringify(inputs.orderPayload));
+      params.push(JSON.stringify(incomingPersistedPayload));
     }
     if (!existing.order_payload_version && inputs.orderPayloadVersion) {
       paramCount += 1;
@@ -644,7 +770,7 @@ export async function storeOrderInTransaction(
       inputs.status,
       inputs.errorMessage,
       inputs.rawError,
-      inputs.orderPayload ?? null,
+      incomingPersistedPayload ?? null,
       inputs.orderPayloadVersion ?? null,
       inputs.orderHash ?? null,
       inputs.feeBps ?? null,
@@ -1073,7 +1199,11 @@ export async function updateOrderFromHistory(
       inputs.filledAt,
       inputs.lastUpdate,
       inputs.orderHash,
-      inputs.orderPayload == null ? null : JSON.stringify(inputs.orderPayload),
+      inputs.orderPayload == null
+        ? null
+        : JSON.stringify(
+            withoutIncomingLimitlessClobContext(inputs.orderPayload),
+          ),
     ],
   );
 }
