@@ -62,6 +62,12 @@ import {
   signalPostCopyPolicySchema,
   type SignalPostCopyPolicyV1,
 } from "./signal-post-copy-policy.js";
+import {
+  DEFAULT_SOCIAL_POLICY,
+  socialPolicyOverrideSchema,
+  socialPolicySchema,
+  type SocialPolicy,
+} from "./social-policy.js";
 
 export type {
   SignalBotPolicy,
@@ -85,6 +91,7 @@ export const INTEL_POLICY_KEYS = [
   "arbitrage_defaults",
   "signal_bot",
   "signal_post_copy",
+  "social",
   "telegram_notifications",
   "venue_lifecycle",
   "market_matching",
@@ -94,6 +101,7 @@ export type IntelPolicyKey = (typeof INTEL_POLICY_KEYS)[number];
 
 type PolicySource<K extends IntelPolicyKey> = K extends
   | "signal_post_copy"
+  | "social"
   | "telegram_notifications"
   | "venue_lifecycle"
   | "market_matching"
@@ -678,6 +686,7 @@ type IntelPolicyMap = {
   arbitrage_defaults: ArbitrageDefaultsPolicy;
   signal_bot: SignalBotPolicy;
   signal_post_copy: SignalPostCopyPolicyV1;
+  social: SocialPolicy;
   telegram_notifications: TelegramNotificationsPolicyV1;
   venue_lifecycle: VenueLifecyclePolicy;
   market_matching: MarketMatchingPolicy;
@@ -1449,6 +1458,7 @@ const policySchemas = {
   arbitrage_defaults: arbitrageDefaultsSchema,
   signal_bot: signalBotSchema,
   signal_post_copy: signalPostCopyPolicySchema,
+  social: socialPolicyOverrideSchema,
   telegram_notifications: telegramNotificationsPolicySchema,
   venue_lifecycle: venueLifecyclePolicySchema,
   market_matching: marketMatchingPolicySchema,
@@ -2072,6 +2082,7 @@ function getDefaults(): IntelPolicyMap {
     },
     signal_bot: getDefaultSignalBotPolicy(),
     signal_post_copy: DEFAULT_SIGNAL_POST_COPY_POLICY,
+    social: DEFAULT_SOCIAL_POLICY,
     telegram_notifications: DEFAULT_TELEGRAM_NOTIFICATIONS_POLICY,
     venue_lifecycle: DEFAULT_VENUE_LIFECYCLE_POLICY,
     market_matching: DEFAULT_MARKET_MATCHING_POLICY,
@@ -3360,6 +3371,8 @@ function normalizeMerged<K extends IntelPolicyKey>(
       ) as IntelPolicyMap[K];
     case "signal_post_copy":
       return signalPostCopyPolicySchema.parse(merged) as IntelPolicyMap[K];
+    case "social":
+      return socialPolicySchema.parse(merged) as IntelPolicyMap[K];
     case "telegram_notifications":
       return telegramNotificationsPolicySchema.parse(
         merged,
@@ -3483,7 +3496,8 @@ function resolveFromRow<K extends IntelPolicyKey>(
       key === "market_matching" ||
       key === "venue_lifecycle" ||
       key === "telegram_notifications" ||
-      key === "signal_post_copy"
+      key === "signal_post_copy" ||
+      key === "social"
         ? "default"
         : "env") as PolicySource<K>,
       effectiveAt: null,
@@ -3516,7 +3530,8 @@ function resolveFromRow<K extends IntelPolicyKey>(
       key === "market_matching" ||
       key === "venue_lifecycle" ||
       key === "telegram_notifications" ||
-      key === "signal_post_copy"
+      key === "signal_post_copy" ||
+      key === "social"
         ? "default"
         : "env") as PolicySource<K>,
       effectiveAt,
@@ -3619,6 +3634,7 @@ export async function resolveAllIntelPolicies(
       "signal_post_copy",
       byKey.get("signal_post_copy") ?? null,
     ),
+    social: resolveFromRow("social", byKey.get("social") ?? null),
     telegram_notifications: resolveFromRow(
       "telegram_notifications",
       byKey.get("telegram_notifications") ?? null,

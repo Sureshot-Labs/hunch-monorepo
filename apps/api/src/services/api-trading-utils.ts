@@ -94,6 +94,8 @@ export async function executePreparedTradeLifecycle(input: {
     now: input.executeInput.now,
     onBroadcastSubmitted: input.executeInput.onBroadcastSubmitted,
     onBeforeBroadcast: input.executeInput.onBeforeBroadcast,
+    onBeforeTradeSubmission: input.executeInput.onBeforeTradeSubmission,
+    onDefinitiveTradeRejection: input.executeInput.onDefinitiveTradeRejection,
     onSetupTransactionSubmitted: input.executeInput.onSetupTransactionSubmitted,
     prepared: input.executeInput.prepared,
     signatures: input.executeInput.signatures,

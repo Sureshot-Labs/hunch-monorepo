@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { socialSourceRefSchema } from "./social-trade.js";
 import { zRequiredString } from "./common.js";
 
 const zNumberish = z.union([z.string(), z.number()]);
@@ -47,6 +48,8 @@ export const dflowSwapBodySchema = z.object({
 });
 
 export const dflowSubmitBodySchema = z.object({
+  sourceRef: socialSourceRefSchema.optional(),
+  copyIdempotencyKey: z.string().uuid().optional(),
   signedTransaction: zRequiredString("signedTransaction is required"),
   marketId: z.string().trim().min(1).optional(),
   skipPreflight: z.boolean().optional(),

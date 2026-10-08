@@ -3,6 +3,10 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { publishMarketState } from "@hunch/infra";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
+import { retainClientCopyBeforeSubmission } from "../services/social-copy.js";
+import { verifySocialSolanaSubmission } from "../services/social-signed-solana.js";
+import { rawDecimal } from "../services/verified-buy.js";
+import { createHash } from "node:crypto";
 import { env } from "../env.js";
 import { getRedis } from "../redis.js";
 import { markHotTokens } from "../lib/hot-tokens.js";
@@ -952,6 +956,59 @@ export const dflowPrivateRoutes: FastifyPluginAsync<
         }
       }
 
+      if (body.sourceRef) {
+        if (
+          !context ||
+          !body.marketId ||
+          context.inputMint !== env.solanaUsdcMint ||
+          !context.outputMint
+        ) {
+          return reply.code(409).send({
+            error: "Copy requires an exact BUY market context",
+            code: "copy_instrument_mismatch",
+          });
+        }
+        try {
+          const token = await pool.query<{
+            token_id: string;
+            side: "YES" | "NO";
+          }>(
+            `select token_id,side from unified_tokens
+            where market_id=$1 and token_id=$2 and venue='kalshi'`,
+            [body.marketId, `sol:${context.outputMint}`],
+          );
+          if (!token.rows[0]) throw new Error("instrument_binding_missing");
+          const identity = verifySocialSolanaSubmission({
+            signedTransaction: body.signedTransaction,
+            owner: walletAddress,
+          });
+          await retainClientCopyBeforeSubmission(pool, {
+            sourceRef: body.sourceRef,
+            userId: user.id,
+            walletAddress,
+            venue: "kalshi",
+            marketId: body.marketId,
+            tokenId: token.rows[0].token_id,
+            outcome: token.rows[0].side,
+            action: "BUY",
+            amount: rawDecimal(BigInt(context.amountInRaw), 6),
+            idempotencyKey: body.copyIdempotencyKey,
+            providerReference: `dflow:mainnet:${identity.signature}:${walletAddress}`,
+            preparedFingerprint: createHash("sha256")
+              .update(identity.messageDigestBytes)
+              .digest("hex"),
+            orderType: "market",
+          });
+        } catch (error) {
+          return reply.code(409).send({
+            error: "Copy could not be authorized",
+            code:
+              error instanceof Error && "code" in error
+                ? String(error.code)
+                : "copy_authorization_failed",
+          });
+        }
+      }
       const result = await submitKalshiDflowSignedTransactionRoute({
         body,
       });

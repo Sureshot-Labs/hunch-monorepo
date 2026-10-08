@@ -1,6 +1,7 @@
 export type ContentActor =
   | { kind: "admin"; id: string; label: string }
   | { kind: "service"; id: string; label: string }
+  | { kind: "user"; id: string; label: string }
   | { kind: "system"; id: null; label: string };
 
 export type ContentActorInput = ContentActor | string | null;
@@ -21,6 +22,10 @@ export function adminContentActor(
 
 export function serviceContentActor(id: string, label: string): ContentActor {
   return { kind: "service", id, label: actorLabel(label, `service:${id}`) };
+}
+
+export function userContentActor(id: string): ContentActor {
+  return { kind: "user", id, label: "user" };
 }
 
 export function normalizeContentActor(input: ContentActorInput): ContentActor {

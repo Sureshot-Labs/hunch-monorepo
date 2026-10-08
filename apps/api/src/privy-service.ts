@@ -161,6 +161,9 @@ export type PrivyWalletApiClient = {
       ): Promise<{ signature: string }>;
     };
     solana: {
+      signTransaction?(
+        input: Omit<PrivySolanaSignAndSendTransactionInput, "caip2">,
+      ): Promise<{ signedTransaction: string }>;
       signAndSendTransaction(
         input: PrivySolanaSignAndSendTransactionInput,
       ): Promise<{ hash: string }>;
@@ -514,6 +517,16 @@ export class PrivyService {
           },
         },
         solana: {
+          async signTransaction(input) {
+            const result = await privyClient
+              .wallets()
+              .solana()
+              .signTransaction(requireWalletId(input.walletId), {
+                transaction: input.transaction,
+                ...(authorization_context ? { authorization_context } : {}),
+              });
+            return { signedTransaction: result.signed_transaction };
+          },
           async signAndSendTransaction(input) {
             return await privyClient
               .wallets()

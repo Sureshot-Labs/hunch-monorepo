@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { pathToFileURL } from "node:url";
 import {
   matchingProtectedReferences,
   matchingDerivedReferences,
@@ -155,7 +156,7 @@ function assertExecutionFlags(args: Args): void {
   );
 }
 
-function protectedRefsSql(
+export function protectedRefsSql(
   candidatePoolTable: string,
   candidateRefTokensTable: string,
   options: {
@@ -264,6 +265,26 @@ function protectedRefsSql(
     select distinct c.market_id, 'executions' as reason
     from ${candidatePoolTable} c
     join executions ex on ex.unified_market_id = c.market_id
+    union
+    select distinct c.market_id, 'user_theses_market' as reason
+    from ${candidatePoolTable} c join user_theses social_thesis on social_thesis.market_id=c.market_id
+    union
+    select distinct c.market_id, 'user_theses_event' as reason
+    from ${candidatePoolTable} c join user_theses social_thesis on social_thesis.event_id=c.event_id
+    union
+    select distinct ct.market_id, 'user_theses_token' as reason
+    from ${candidateRefTokensTable} ct join user_theses social_thesis on social_thesis.token_id=ct.token_id
+    union
+    select distinct c.market_id, 'social_copy_source' as reason
+    from ${candidatePoolTable} c join copy_attributions attribution_row on attribution_row.instrument->>'marketId'=c.market_id
+    union
+    select distinct c.market_id, 'social_hunch_comments' as reason
+    from ${candidatePoolTable} c join ai_notes social_note on social_note.source_id=c.market_id
+    join social_comments social_comment on social_comment.ai_note_id=social_note.id or social_comment.observed_ai_note_id=social_note.id
+    union
+    select distinct c.market_id, 'social_hunch_copy' as reason
+    from ${candidatePoolTable} c join ai_notes social_note on social_note.source_id=c.market_id
+    join copy_attributions attribution_row on attribution_row.source_ai_note_id=social_note.id
     ${fundingOperationsRef}
     ${options.includeMatchingHistory ? `union ${matchingProtectedReferences(candidatePoolTable)}` : ""}
     ${fundingLiquidityProjectionsRef}
@@ -1572,11 +1593,12 @@ async function main(): Promise<void> {
   });
 }
 
-main()
-  .catch((error) => {
-    console.error("[market:retention:select] failed", error);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await pool.end().catch(() => {});
-  });
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
+  void main()
+    .catch((error) => {
+      console.error("[market:retention:select] failed", error);
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await pool.end().catch(() => {});
+    });

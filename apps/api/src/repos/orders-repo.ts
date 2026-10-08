@@ -1,4 +1,4 @@
-import type { Pool, PoolClient } from "@hunch/infra";
+import { tx, type Pool, type PoolClient } from "@hunch/infra";
 import {
   normalizePolymarketAssetId,
   parsePolymarketAssetContext,
@@ -980,18 +980,40 @@ export async function deleteHistoryOrder(
     userId: string;
     venue: string;
     venueOrderId: string;
+    replacementOrderId?: string;
   },
 ): Promise<void> {
-  await pool.query(
-    `
+  await tx(pool, async (db) => {
+    if (inputs.replacementOrderId) {
+      for (const table of ["user_theses", "copy_attributions"] as const)
+        await db.query(
+          `update ${table} social_reference set order_id=target_order.id
+      from orders source_order join orders target_order on target_order.id=$4 and target_order.user_id=source_order.user_id
+        and source_order.verified_buy_facts->>'canonicalPurchaseKey'=target_order.verified_buy_facts->>'canonicalPurchaseKey'
+        and source_order.verified_buy_state='verified' and target_order.verified_buy_state='verified'
+      where source_order.user_id=$1 and source_order.venue=$2 and source_order.venue_order_id=$3
+        and source_order.venue_order_id like 'history:%' and social_reference.order_id=source_order.id`,
+          [
+            inputs.userId,
+            inputs.venue,
+            inputs.venueOrderId,
+            inputs.replacementOrderId,
+          ],
+        );
+    }
+    await db.query(
+      `
       delete from orders
       where user_id = $1
         and venue = $2
         and venue_order_id = $3
         and venue_order_id like 'history:%'
+        and not exists(select 1 from user_theses social_thesis where social_thesis.order_id=orders.id)
+        and not exists(select 1 from copy_attributions attribution_row where attribution_row.order_id=orders.id)
     `,
-    [inputs.userId, inputs.venue, inputs.venueOrderId],
-  );
+      [inputs.userId, inputs.venue, inputs.venueOrderId],
+    );
+  });
 }
 
 export async function updateOrderFromHistory(

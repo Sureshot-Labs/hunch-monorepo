@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 import { resolveContentRuntimeConfig } from "@hunch/config/content";
 import { resolveAggMarketCredential } from "./lib/agg-market-credentials.js";
 import { parseUsdcToMicro, usdcMicroToDecimalString } from "./lib/usdc.js";
+import { resolveLimitlessPositionContract } from "./services/limitless-protocol-config.js";
 
 const envPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -1436,9 +1437,7 @@ export const env = {
   limitlessUsdcAddress:
     process.env.LIMITLESS_USDC_ADDRESS?.trim() ||
     "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-  limitlessConditionalTokensAddress:
-    process.env.LIMITLESS_CONDITIONAL_TOKENS_ADDRESS?.trim() ||
-    "0xc9c98965297bc527861c898329ee280632b76e18",
+  limitlessConditionalTokensAddress: resolveLimitlessPositionContract(),
   limitlessClobAddress:
     process.env.LIMITLESS_CLOB_ADDRESS?.trim() ||
     "0x05c748E2f4DcDe0ec9Fa8DDc40DE6b867f923fa5",

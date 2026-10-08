@@ -15,6 +15,8 @@ import { feesRoutes } from "./fees.js";
 import { feedRoutes } from "./feed.js";
 import { healthRoutes } from "./health.js";
 import { hunchesRoutes } from "./hunches.js";
+import { socialRoutes } from "./social.js";
+import { socialAssetsRoutes } from "./social-assets.js";
 import { holdersRoutes } from "./holders.js";
 import { marketRoutes } from "./markets.js";
 import { marketMapRoutes } from "./market-map.js";
@@ -70,6 +72,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(feesRoutes);
   await app.register(bridgeRoutes);
   await app.register(authRoutes);
+  await app.register(socialRoutes);
+  await app.register(socialAssetsRoutes);
   await app.register(telegramRoutes);
   await app.register(telegramBotTradingRoutes);
   await app.register(embeddedWalletRoutes);

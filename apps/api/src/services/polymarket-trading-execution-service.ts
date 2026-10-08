@@ -1,5 +1,13 @@
 import crypto from "node:crypto";
 import type { Pool } from "@hunch/infra";
+import type { SocialSourceRef } from "../schemas/social-trade.js";
+import {
+  retainClientCopyBeforeSubmission,
+  linkPersistedCopy,
+  markCopyDefinitiveProviderRejection,
+  type RetainedCopyAttempt,
+} from "./social-copy.js";
+import { rawDecimal } from "./verified-buy.js";
 import { fetchPolymarketAssetBindings } from "@hunch/db";
 import { selectPolymarketTradeAsset } from "./polymarket-trade-asset-selection.js";
 import { isRpcRateLimit } from "@hunch/shared";
@@ -319,6 +327,8 @@ function requiredWarnLogger(
 }
 
 type PolymarketClientOrderBody = {
+  sourceRef?: SocialSourceRef;
+  copyIdempotencyKey?: string;
   assetContext?: PolymarketAssetContext;
   deferExec?: boolean;
   exchangeAddress?: string | null;
@@ -5750,7 +5760,7 @@ async function submitPolymarketClobOrderWithRetry(input: {
   creds: PolymarketL2Credentials;
   log?: PolymarketRouteLogger | null;
   logContext?: Record<string, unknown>;
-}): Promise<PolymarketL2RequestResult> {
+}): Promise<PolymarketL2RequestResult & { submissionAttempts: number }> {
   const submitOrder = () =>
     polymarketL2Request({
       baseUrl: env.polymarketClobBase,
@@ -5762,6 +5772,7 @@ async function submitPolymarketClobOrderWithRetry(input: {
       body: input.body,
     });
 
+  let submissionAttempts = 1;
   let upstream = await submitOrder();
   for (
     let attempt = 0;
@@ -5782,9 +5793,10 @@ async function submitPolymarketClobOrderWithRetry(input: {
       "Polymarket order service not ready; retrying same signed order",
     );
     await sleep(delayMs);
+    submissionAttempts++;
     upstream = await submitOrder();
   }
-  return upstream;
+  return { ...upstream, submissionAttempts };
 }
 
 function exchangeAddressForNegRisk(negRisk: boolean | null): string | null {
@@ -7768,6 +7780,62 @@ export async function submitPolymarketClientSignedOrder(input: {
   }
 
   let upstream: Awaited<ReturnType<typeof submitPolymarketClobOrderWithRetry>>;
+  let copyKey: string | null = null;
+  let copyAttempt: RetainedCopyAttempt | null = null;
+  if (input.body.sourceRef) {
+    if (!assetContext || !fundingMarketId || !normalizedForHash)
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error: "Copy instrument identity is unavailable",
+          code: "source_instrument_unavailable",
+        },
+      };
+    try {
+      copyKey = await retainClientCopyBeforeSubmission(input.pool, {
+        sourceRef: input.body.sourceRef,
+        userId: input.userId,
+        walletAddress: signer,
+        venue: "polymarket",
+        marketId: fundingMarketId,
+        tokenId: assetContext.assetId,
+        outcome: assetContext.outcomeIndex === 0 ? "YES" : "NO",
+        action: side,
+        amount: rawDecimal(BigInt(normalizedForHash.makerAmount), 6),
+        idempotencyKey: input.body.copyIdempotencyKey,
+        providerReference: `polymarket:137:${exchangeAddress.toLowerCase()}:${orderHash.toLowerCase()}`,
+        preparedFingerprint: orderHash.toLowerCase(),
+        assetContext,
+        orderType,
+        positionOwner: funder,
+        onRetained: (attempt) => {
+          copyAttempt = attempt;
+        },
+      });
+    } catch (error) {
+      if (fundingReservation && fundingTradeAttemptId)
+        await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
+          userId: input.userId,
+          link: fundingReservation,
+          tradeAttemptId: fundingTradeAttemptId,
+          outcomeReason: "copy_pre_submit_rejected",
+          errorCode: "copy_authorization_failed",
+          broadcastMayHaveOccurred: false,
+        });
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error: "Copy could not be authorized",
+          code:
+            error instanceof Error && "code" in error
+              ? String(error.code)
+              : "copy_authorization_failed",
+        },
+      };
+    }
+  }
   try {
     upstream = await submitPolymarketClobOrderWithRetry({
       address: signer,
@@ -7806,6 +7874,12 @@ export async function submitPolymarketClientSignedOrder(input: {
         log: input.log,
       })
     ) {
+      if (copyAttempt && upstream.submissionAttempts === 1)
+        await markCopyDefinitiveProviderRejection(
+          input.pool,
+          input.userId,
+          copyAttempt,
+        );
       if (
         directHandoffBinding &&
         directHandoffSubmission &&
@@ -8141,6 +8215,25 @@ export async function submitPolymarketClientSignedOrder(input: {
           logger: input.log,
         })
       : null;
+
+  if (copyKey && stored.kind === "stored") {
+    await linkPersistedCopy(input.pool, {
+      userId: input.userId,
+      idempotencyKey: copyKey,
+      persisted: {
+        venue: "polymarket",
+        orderId: stored.order.id,
+        executionId: null,
+        venueOrderId,
+        status,
+      },
+    }).catch(() =>
+      input.log?.warn?.(
+        { userId: input.userId, code: "copy_link_pending" },
+        "Copy linkage requires reconciliation",
+      ),
+    );
+  }
 
   if (
     stored.kind === "stored" &&
@@ -9518,6 +9611,18 @@ async function submitPreparedTrade(
     apiSecret: creds.apiSecret,
     apiPassphrase: creds.apiPassphrase,
   };
+  if (prepared.intent.sourceRef) {
+    if (!input.onBeforeTradeSubmission)
+      throw tradingError({
+        code: "copy_submission_identity_unavailable",
+        message: "Copy requires durable order identity.",
+        venue: "polymarket",
+      });
+    await input.onBeforeTradeSubmission({
+      providerReference: `polymarket:137:${payload.exchangeAddress.toLowerCase()}:${payload.orderHash.toLowerCase()}`,
+      preparedFingerprint: payload.orderHash.toLowerCase(),
+    });
+  }
   await input.onBeforeBroadcast?.();
   const upstream = await submitPolymarketClobOrderWithRetry({
     address: signer,
@@ -9541,6 +9646,8 @@ async function submitPreparedTrade(
         log: ctx.logger,
       })
     ) {
+      if (upstream.submissionAttempts === 1)
+        await input.onDefinitiveTradeRejection?.();
       throw tradingError({
         code: POLYMARKET_CREDENTIALS_INVALID_CODE,
         message: "Reconnect Polymarket to refresh trading credentials.",

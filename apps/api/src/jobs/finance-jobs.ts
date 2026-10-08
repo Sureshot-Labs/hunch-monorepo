@@ -43,6 +43,11 @@ import { PositionActionRuntimeService } from "../funding/position-actions/runtim
 import { runStandaloneReconciliationBatch } from "../funding/worker/standalone-reconciliation-worker.js";
 import { reconcileOrphanPolymarketAttempts } from "../funding/reconciliation/polymarket-orphan-attempt-reconciler.js";
 import { reconcileLegacyDebridgeEvidence } from "../funding/legacy/debridge-evidence-reconciler.js";
+import { runVerifiedBuyRepairJob as repairVerifiedBuyFacts } from "../services/verified-buy-runtime.js";
+
+export async function runVerifiedBuyRepairJob() {
+  return repairVerifiedBuyFacts(pool);
+}
 
 // This module is already API-owned and requires the API secret bundle. Keep
 // these imports out of the independently bootable funding worker entrypoint.

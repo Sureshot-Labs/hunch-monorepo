@@ -80,6 +80,7 @@ import {
 import { readApiCacheWarmStatus } from "../services/api-cache-warm.js";
 import { parseAdminEmbeddingStatus } from "../services/admin-embeddings-status.js";
 import { registerAdminFundingRoutes } from "./admin-funding.js";
+import { registerAdminSocialRoutes } from "./admin-social.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
 import { createEvmRpcProvider } from "../services/rpc-client-factory.js";
@@ -180,6 +181,11 @@ import {
   searchAdminMarketPresentations,
 } from "../services/admin-market-presentations.js";
 
+import {
+  buildSocialPolicyRevision,
+  socialPolicySchema,
+} from "../services/social-policy.js";
+
 function resolvedAdminIntelPolicyRevision(input: {
   effective: unknown;
   effectiveAt: Date | string | null;
@@ -194,6 +200,12 @@ function resolvedAdminIntelPolicyRevision(input: {
     const parsed = signalPostCopyPolicySchema.safeParse(input.effective);
     return parsed.success
       ? buildSignalPostCopyPolicyRevision(parsed.data)
+      : null;
+  }
+  if (input.key === "social") {
+    const parsed = socialPolicySchema.safeParse(input.effective);
+    return parsed.success && !input.invalidOverride
+      ? buildSocialPolicyRevision(parsed.data)
       : null;
   }
   return null;
@@ -1855,6 +1867,16 @@ function loadSolanaKeypair(secret: string): Keypair {
 
 export const adminRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+
+  registerAdminSocialRoutes(app, {
+    db: pool,
+    authorize: (permission) =>
+      createAdminMiddleware({
+        requiredAdminPermission: permission,
+        allowLegacyFallback: false,
+      }),
+    transact: (work) => tx(pool, (client: PoolClient) => work(client)),
+  });
 
   registerAdminFundingRoutes(app, {
     db: pool,

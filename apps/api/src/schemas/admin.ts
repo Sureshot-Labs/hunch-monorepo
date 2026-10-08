@@ -675,6 +675,7 @@ export const adminIntelPolicyKeySchema = z.enum([
   "arbitrage_defaults",
   "signal_bot",
   "signal_post_copy",
+  "social",
   "telegram_notifications",
   "venue_lifecycle",
 ]);

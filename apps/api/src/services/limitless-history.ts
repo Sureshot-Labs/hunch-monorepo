@@ -662,6 +662,7 @@ export async function syncLimitlessHistoryForWallet(
           userId: inputs.userId,
           venue: "limitless",
           venueOrderId,
+          replacementOrderId: match.id,
         });
         if (shouldApplyPositionFill) {
           try {

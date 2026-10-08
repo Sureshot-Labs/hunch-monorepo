@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { socialSourceRefSchema } from "./social-trade.js";
 import {
   POLYMARKET_PROTOCOL_CONTRACTS,
   parsePolymarketAssetContext,
@@ -127,6 +128,8 @@ const polymarketFeeAuthSchema = z.union([
 
 export const polymarketPlaceOrderBodySchema = z
   .object({
+    sourceRef: socialSourceRefSchema.optional(),
+    copyIdempotencyKey: z.string().uuid().optional(),
     assetContext: polymarketAssetContextSchema.optional(),
     order: polymarketOrderSchema,
     orderType: zOrderType.default("GTC"),

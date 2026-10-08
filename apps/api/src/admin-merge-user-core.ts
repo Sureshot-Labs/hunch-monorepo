@@ -3,6 +3,10 @@ import type { Pool, PoolClient } from "pg";
 import { pool } from "./db.js";
 import { reduceFundingOperationInTransaction } from "./funding/reconciliation/funding-reducer.js";
 import { fetchUserFinancialLifecycleSummary } from "./services/user-financial-lifecycle.js";
+import {
+  mergeUserSocialData,
+  reparentMergedSocialExecutions,
+} from "./services/social-lifecycle.js";
 
 export type UserRow = {
   id: string;
@@ -782,6 +786,7 @@ export async function mergeUsers(
         )
       ).rowCount ?? 0;
 
+    await reparentMergedSocialExecutions(client, source.id, target.id);
     summary.executionsDeduped =
       (
         await client.query(
@@ -1257,6 +1262,7 @@ export async function mergeUsers(
         )
       ).rowCount ?? 0;
 
+    await mergeUserSocialData(client, source.id, target.id, options.keepSource);
     if (!options.keepSource) {
       summary.sourceUserDeleted =
         (await client.query(`delete from users where id = $1`, [source.id]))
@@ -1269,8 +1275,8 @@ export async function mergeUsers(
             update users
             set email = coalesce(email, $2),
                 username = coalesce(username, $3),
-                display_name = coalesce(display_name, $4),
-                avatar_url = coalesce(avatar_url, $5),
+                display_name = case when profile_name_edited_at is null then coalesce(display_name, $4) else display_name end,
+                avatar_url = case when profile_avatar_edited_at is null then coalesce(avatar_url, $5) else avatar_url end,
                 privy_user_id = coalesce(privy_user_id, $6),
                 referral_code = coalesce(referral_code, $7),
                 is_admin = is_admin or $8,

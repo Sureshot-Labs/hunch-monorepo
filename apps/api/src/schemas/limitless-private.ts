@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { socialSourceRefSchema } from "./social-trade.js";
 import { embeddedPrivyAuthorizationSignatureSchema } from "./embedded-wallets.js";
 import {
   zBytes32,
@@ -89,6 +90,8 @@ export const limitlessEmbeddedSignOrderExecuteBodySchema = z.object({
 
 export const limitlessOrderBodySchema = z
   .object({
+    sourceRef: socialSourceRefSchema.optional(),
+    copyIdempotencyKey: z.string().uuid().optional(),
     order: limitlessOrderSchema,
     orderType: zOrderType.default("GTC"),
     postOnly: z.boolean().optional(),
@@ -238,6 +241,8 @@ export const limitlessAmmFundingClaimBodySchema = z
  * hash before any RPC submission; the value is never stored in Postgres.
  */
 export const limitlessAmmHandoffBroadcastBodySchema = z.object({
+  sourceRef: socialSourceRefSchema.optional(),
+  copyIdempotencyKey: z.string().uuid().optional(),
   telegramAppHandoffId: z.string().uuid(),
   // Telegram plan fingerprints are SHA-256 hex without the EVM `0x` prefix.
   telegramAppHandoffPlanFingerprint: z

@@ -1,5 +1,13 @@
 import crypto from "node:crypto";
 import type { Pool } from "@hunch/infra";
+import type { SocialSourceRef } from "../schemas/social-trade.js";
+import {
+  retainClientCopyBeforeSubmission,
+  linkPersistedCopy,
+  markCopyDefinitiveProviderRejection,
+  type RetainedCopyAttempt,
+} from "./social-copy.js";
+import { rawDecimal } from "./verified-buy.js";
 import { ethers } from "ethers";
 
 import { AuthService } from "../auth.js";
@@ -242,6 +250,8 @@ type LimitlessRouteLogger = {
 };
 
 type LimitlessClientOrderBody = {
+  sourceRef?: SocialSourceRef;
+  copyIdempotencyKey?: string;
   marketSlug: string;
   order: Record<string, unknown>;
   orderType: "FOK" | "GTC";
@@ -340,6 +350,8 @@ type LimitlessAmmOrderBody = {
 };
 
 type LimitlessAmmHandoffBroadcastBody = {
+  sourceRef?: SocialSourceRef;
+  copyIdempotencyKey?: string;
   marketSlug?: string | null;
   telegramAppHandoffId: string;
   telegramAppHandoffPlanFingerprint: string;
@@ -3682,6 +3694,12 @@ export async function submitLimitlessClientSignedOrder(input: {
   // never treat that deterministic id as authority to resend changed signed
   // FOK bytes. Persist the canonical signed-order fingerprint with the claim.
   const orderFingerprint = canonicalJsonHash(orderForUpstream);
+  if (input.body.sourceRef && !directHandoffBinding) {
+    clientOrderId = deterministicLimitlessClientOrderId(
+      `social-copy:${input.userId}:${input.body.copyIdempotencyKey ?? orderFingerprint}`,
+    );
+    orderPayload = { ...orderPayload, clientOrderId };
+  }
   const fundingMarketId = marketTokens?.marketId ?? null;
   let fundingConsumerIntent: ReturnType<
     typeof buildFundingTradeConsumerIntent
@@ -4164,6 +4182,61 @@ export async function submitLimitlessClientSignedOrder(input: {
     });
 
   let upstream: Awaited<ReturnType<typeof submitLimitlessClobOrderToVenue>>;
+  let copyKey: string | null = null;
+  let copyAttempt: RetainedCopyAttempt | null = null;
+  if (input.body.sourceRef && !reconciledExactStatus) {
+    if (!fundingMarketId || !tokenId)
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error: "Copy instrument identity is unavailable",
+          code: "source_instrument_unavailable",
+        },
+      };
+    try {
+      copyKey = await retainClientCopyBeforeSubmission(input.pool, {
+        sourceRef: input.body.sourceRef,
+        userId: input.userId,
+        walletAddress: signer,
+        venue: "limitless",
+        marketId: fundingMarketId,
+        tokenId,
+        outcome: requestedRawTokenId === marketTokens?.tokenYes ? "YES" : "NO",
+        action: side,
+        amount: rawDecimal(BigInt(makerAmount), 6),
+        idempotencyKey: input.body.copyIdempotencyKey,
+        providerReference: `limitless:clob:8453:${clientOrderId}`,
+        preparedFingerprint: orderFingerprint,
+        orderType: input.body.orderType,
+        limitlessPositionContract: env.limitlessConditionalTokensAddress,
+        onRetained: (attempt) => {
+          copyAttempt = attempt;
+        },
+      });
+    } catch (error) {
+      if (fundingReservation && fundingTradeAttemptId)
+        await releaseFundingReservationForDefinitiveTradeFailure(input.pool, {
+          userId: input.userId,
+          link: fundingReservation,
+          tradeAttemptId: fundingTradeAttemptId,
+          outcomeReason: "copy_pre_submit_rejected",
+          errorCode: "copy_authorization_failed",
+          broadcastMayHaveOccurred: false,
+        });
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error: "Copy could not be authorized",
+          code:
+            error instanceof Error && "code" in error
+              ? String(error.code)
+              : "copy_authorization_failed",
+        },
+      };
+    }
+  }
   try {
     upstream =
       reconciledUpstreamPayload !== undefined
@@ -4227,6 +4300,12 @@ export async function submitLimitlessClientSignedOrder(input: {
       explicitFokNoFill: isLimitlessFokUnmatchedMessage(upstreamMessage),
       orderType: input.body.orderType,
     });
+    if (copyAttempt && decision.disposition !== "ambiguous")
+      await markCopyDefinitiveProviderRejection(
+        input.pool,
+        input.userId,
+        copyAttempt,
+      );
     const operationSupportMetadataPatch =
       buildLimitlessTradeSubmissionEvidencePatch({
         clientOrderId,
@@ -4418,6 +4497,12 @@ export async function submitLimitlessClientSignedOrder(input: {
   }
 
   if (input.body.orderType === "FOK" && parsedResult.explicitNoFill) {
+    if (copyAttempt)
+      await markCopyDefinitiveProviderRejection(
+        input.pool,
+        input.userId,
+        copyAttempt,
+      );
     const noFill = await finalizeCurrentFokNoFill(
       upstream.payload,
       venueOrderId,
@@ -4513,6 +4598,23 @@ export async function submitLimitlessClientSignedOrder(input: {
     throw error;
   });
 
+  if (copyKey)
+    await linkPersistedCopy(input.pool, {
+      userId: input.userId,
+      idempotencyKey: copyKey,
+      persisted: {
+        venue: "limitless",
+        orderId: stored.order.id,
+        executionId: null,
+        venueOrderId,
+        status,
+      },
+    }).catch(() =>
+      input.log?.warn?.(
+        { userId: input.userId, code: "copy_link_pending" },
+        "Copy linkage requires reconciliation",
+      ),
+    );
   if (confirmedFillAt && confirmedImmediateFill) {
     await updateOrderFromHistory(input.pool, {
       id: stored.order.id,
@@ -5272,6 +5374,36 @@ export async function broadcastLimitlessAmmTelegramAppHandoffTrade(input: {
     };
   }
 
+  if (input.body.sourceRef) {
+    try {
+      await retainClientCopyBeforeSubmission(input.pool, {
+        sourceRef: input.body.sourceRef,
+        userId: input.userId,
+        walletAddress: signer,
+        venue: "limitless",
+        marketId,
+        tokenId,
+        outcome: expectedOutcomeIndex === 0 ? "YES" : "NO",
+        action,
+        amount: rawDecimal(sourceRaw, 6),
+        idempotencyKey: input.body.copyIdempotencyKey,
+        providerReference: `limitless:amm:8453:${txHash.toLowerCase()}:${rawTokenId}`,
+        preparedFingerprint: txHash.toLowerCase(),
+        orderType: "market",
+        marketAddress,
+        limitlessPositionContract: env.limitlessConditionalTokensAddress,
+      });
+    } catch {
+      return {
+        ok: false,
+        statusCode: 409,
+        payload: {
+          error:
+            "Copy could not be authorized; inspect its existing submission status.",
+        },
+      };
+    }
+  }
   try {
     const provider = createEvmRpcProvider(env.baseRpcUrl, 8453);
     const broadcast = await provider.broadcastTransaction(
@@ -6803,6 +6935,12 @@ async function submitPreparedTrade(
   const prepared = input.prepared;
   const payload = parseLimitlessPreparedPayload(prepared);
   if (isLimitlessAmmPreparedPayload(payload)) {
+    if (prepared.intent.sourceRef)
+      throw tradingError({
+        code: "copy_unsupported_execution_path",
+        message: "Use the signed AMM handoff to copy this market.",
+        venue: "limitless",
+      });
     return submitLimitlessAmmPreparedTrade({
       onBroadcastSubmitted: input.onBroadcastSubmitted,
       onBeforeBroadcast: input.onBeforeBroadcast,
@@ -6862,6 +7000,21 @@ async function submitPreparedTrade(
       };
     }
   }
+  if (prepared.intent.sourceRef) {
+    if (!input.onBeforeTradeSubmission || !payload.clientOrderId)
+      throw tradingError({
+        code: "copy_submission_identity_unavailable",
+        message: "Copy requires durable order identity.",
+        venue: "limitless",
+      });
+    await input.onBeforeTradeSubmission({
+      providerReference: `limitless:clob:8453:${payload.clientOrderId}`,
+      preparedFingerprint: crypto
+        .createHash("sha256")
+        .update(JSON.stringify(payload.orderPayload))
+        .digest("hex"),
+    });
+  }
   await input.onBeforeBroadcast?.();
   const upstream = await submitLimitlessClobOrderToVenue({
     requestAuth: payload.requestAuth,
@@ -6886,6 +7039,7 @@ async function submitPreparedTrade(
       orderType: payload.orderType,
     });
     if (decision.disposition === "fok_no_fill") {
+      await input.onDefinitiveTradeRejection?.();
       return {
         venue: "limitless",
         status: "no_fill",
@@ -6902,6 +7056,8 @@ async function submitPreparedTrade(
         },
       };
     }
+    if (decision.disposition === "definitive_failure")
+      await input.onDefinitiveTradeRejection?.();
     throw tradingError({
       code:
         decision.disposition === "definitive_failure"
@@ -6920,6 +7076,7 @@ async function submitPreparedTrade(
   const parsedResult = parseLimitlessOrderResult(upstream.payload);
   const venueOrderId = submittedOrder.venueOrderId;
   if (parsedResult.explicitNoFill) {
+    await input.onDefinitiveTradeRejection?.();
     return {
       venue: "limitless",
       status: "no_fill",

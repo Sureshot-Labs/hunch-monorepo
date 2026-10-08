@@ -86,6 +86,7 @@ function buildFinanceJobsFixture(
 ): FinanceJobsFixture {
   const noop = async () => null;
   return {
+    runVerifiedBuyRepairJob: noop,
     runStandaloneFinancialReconciliationJob: noop,
     runApiCacheWarmJob: noop,
     runFeesCollectJob: async () => ({
@@ -108,6 +109,42 @@ function buildFinanceJobsFixture(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "verified buy repair follows runtime cadence without enabling submission",
+    run: async () => {
+      setFinanceJobsModuleLoaderForTests(async () =>
+        buildFinanceJobsFixture({
+          runVerifiedBuyRepairJob: async () => ({
+            skipped: true,
+            nextIntervalSeconds: 117,
+          }),
+        }),
+      );
+      try {
+        const job = buildJobs(
+          buildTestEnv({
+            databaseUrl: "postgresql://local/thesis-test",
+            executeEnabled: false,
+          }),
+        ).find((candidate) => candidate.name === "verified_buy_repair");
+        assert.ok(job?.enabled);
+        await job.run();
+        assert.equal(job.intervalSec, 117);
+        assert.equal(job.maxRetries, 0);
+        assert.equal(job.isNoopResult?.({ skipped: true }), true);
+        assert.equal(job.isNoopResult?.({ revoked: 1 }), false);
+        assert.equal(job.isNoopResult?.({ copies: { confirmed: 1 } }), false);
+        assert.equal(
+          job.isNoopResult?.({ copies: { budgetExhausted: 1 } }),
+          false,
+        );
+        assert.equal(job.isNoopResult?.({ copies: { checked: 0 } }), true);
+        assert.equal(job.isNoopResult?.(null), false);
+      } finally {
+        resetFinanceJobsModuleLoaderForTests();
+      }
+    },
+  },
   {
     name: "standalone recovery is scheduled independently of submission authority",
     run: () => {

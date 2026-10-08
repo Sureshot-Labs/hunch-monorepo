@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { buildSocialInstrument } from "./social-instrument.js";
+import { resolveLimitlessPositionContract } from "./limitless-protocol-config.js";
 import {
   buildHolderResearchPriceMovement,
   loadHolderResearchPriceBaselines,
@@ -7067,6 +7069,18 @@ export async function persistHolderResearchNotes(
             telegramPresentationDiagnostics: presentation.diagnostics,
             telegramMarketIdentityV1: telegramMarketIdentity,
             signalPriceSnapshotV1: signalPriceSnapshot,
+            socialInstrumentV1: buildSocialInstrument({
+              marketId: candidate.market.marketId,
+              venue: candidate.market.venue,
+              outcome: telegramMarketIdentity.selectedSide,
+              tokenId:
+                candidate.market.livePriceCheck?.tops?.[
+                  telegramMarketIdentity.selectedSide
+                ]?.tokenId ?? null,
+              expiry: candidate.market.expirationTime,
+              metadata: candidate.market.metadata,
+              limitlessPositionContract: resolveLimitlessPositionContract(),
+            }),
             holderResearchUpdateV1: holderResearchUpdate,
             holderResearchPublicationAuditV1: holderResearchPublicationAudit,
             signalEvidence,
