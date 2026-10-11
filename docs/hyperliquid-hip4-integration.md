@@ -2,19 +2,24 @@
 
 ## Status, scope, and evidence
 
-This is the backend source-of-truth specification for `hip-next`, researched on
-2026-10-05. It is a development plan, not an assertion that HIP trading, funding,
-matching, or wallet intelligence is implemented or production-ready.
+This is the backend source-of-truth specification for `hip-next`, updated and
+rechecked on 2026-10-11. It is a development plan, not an assertion that HIP
+trading, funding, matching, or wallet intelligence is implemented or production-ready.
 
-| Repository             | Branch / immutable reference                                         |
-| ---------------------- | -------------------------------------------------------------------- |
-| Backend baseline       | `main` / `origin/main`: `2ade5f71c3131a6b758c24e308dd4e8ddd11f571`   |
-| Frontend baseline      | `main` / `origin/main`: `3321fc06dc0889e045f9fe57882a11496c26522b`   |
-| Old backend prototype  | `hip`: `dce2d7cd`, June 2026                                         |
-| Old frontend prototype | `hip`: `d29c056d`, June 2026                                         |
-| New work               | Both repositories: `hip-next`, created from the above main baselines |
+Start with section 12 for evidence gates, section 11 for implementation order,
+then the owned domain section and companion client contract. P0 and passive P1
+can begin; enabling financial capabilities requires their listed proof, not a
+second redesign of the integration.
 
-Read the companion [frontend specification](../../Hunch_App/docs/hyperliquid-hip4-integration.md)
+| Repository             | Branch / immutable reference                                                |
+| ---------------------- | --------------------------------------------------------------------------- |
+| Backend baseline       | `main` / `origin/main`: `a430729ed5ac028b8124198b4dec758221dbb0fc`          |
+| Frontend baseline      | `main` / `origin/main`: `044163ba060620512ceb8ba2affd2b9cd5a00b92`          |
+| Old backend prototype  | `hip`: `dce2d7cd`, June 2026                                                |
+| Old frontend prototype | `hip`: `d29c056d`, June 2026                                                |
+| Synchronized branches  | Backend `hip-next`: merge `7b3ed928`; frontend `hip-next`: merge `537910fb` |
+
+Read the companion [frontend specification](https://github.com/AmritKumar/Hunch_App/blob/hip-next/docs/hyperliquid-hip4-integration.md)
 for client contracts, product surfaces, and user interaction tests. Paths in this
 document refer to this repository unless another repository is named. Historical
 paths prefixed with `hip:` exist on the pinned old branch, not necessarily here.
@@ -34,10 +39,11 @@ Evidence labels used below:
 - **Required design:** proposed Hunch behavior, to implement and test.
 - **Unverified:** needs a bounded, separately authorized read-only probe, fixture, or implementation test.
 
-Only documentation is changed in this task. No application code, schema, secrets,
-policies, production records, transactions, paid requests, commits, or deployment
-are included. Public documentation was read; no live quote, exchange action, or
-production financial inspection was performed for this specification.
+The feature diff against these baselines is documentation only. The June `hip`
+implementation remains reference material. Documentation commits and branch
+synchronization do not enable HIP. Public documentation can establish wire
+contracts, not current account eligibility, executable routes or financial
+readiness; those require the scoped evidence in section 12.
 
 ### Product boundary
 
@@ -151,7 +157,10 @@ protocol amounts the ERC20 USDC six-decimal unit.
 [Spot info endpoints](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/spot)
 
 Price/size formatting must obey spot precision and significant-figure rules,
-using metadata `szDecimals`. Strip invalid trailing zeros before signing.
+using metadata `szDecimals`: at most five significant price figures and at most
+`8 - szDecimals` price decimal places, with the documented integer-price exception.
+Do not confuse size precision with token `weiDecimals` or Relay amount units.
+Strip invalid trailing zeros before signing.
 [Tick and lot size](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/tick-and-lot-size)
 
 Required quote math uses exact decimal strings/integer units. Quantize first,
@@ -189,6 +198,10 @@ to reconcile it. Requoting an uncertain transfer/order must not replace that
 nonce or `cloid`. User rejection before submission, proved by the current lease
 and submission boundary, is terminal non-submission; unknown external/provider
 submission is not. An unknown order lookup by itself cannot release exposure.
+Hunch's allocator coordinates Hunch processes, not unrelated external apps using
+the same signer. Test externally advanced nonce state and classify definitive
+rejection separately from a response lost after acceptance; never automatically
+sign a replacement action for an uncertain original.
 
 ### Account modes and fees
 
@@ -197,6 +210,10 @@ behavior. In unified modes, legacy perp account views are not interchangeable
 with complete spot cash information. Do not change a user's account mode to
 make an integration simpler.
 [Account abstraction modes](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/account-abstraction-modes)
+
+Discontinued DEX abstraction and unknown modes must not fall through as Standard.
+Preserve qualified reads and explicitly unsupported write capabilities until the
+actual mode-specific cash contract is established.
 
 Generic builder documentation requires master authorization for builder fee
 approval and describes eligibility and rate units. This does not prove that a
@@ -242,6 +259,12 @@ Deposit Wallet. Check activation and forwarding costs per actual path; do not
 apply one fee/minimum to all deposits.
 [Circle HyperCore integration](https://developers.circle.com/cctp/concepts/cctp-on-hypercore)
 
+The current Circle guide places the one-time account activation charge on the
+first outbound action, not an automatic haircut to the first credited deposit.
+Represent activation liability separately from observed incoming credit and
+forwarding fees. Test new-account withdrawal capacity and small deposits; do
+not resurrect the legacy bridge's minimum in the CCTP receive flow.
+
 Circle's Arbitrum example selects perp destination `0` versus spot
 `4294967295`; its sample forwarding charge is not a Hunch-wide fixed fee.
 This illustrates why a destination account address alone is insufficient.
@@ -269,6 +292,9 @@ requests with a referrer also require authentication. Keep the key server-side.
 | Hunch AssetRef / AssetLocation | New native network/account identity required                         | Keep metadata precision and amount units attached through every step |
 
 The provider guide is evidence for these formats, not proof of a live route.
+Its legacy `clearinghouseState.withdrawable` balance example does not supersede
+Hyperliquid's mode-specific balance contract in section 5. Also keep Relay's
+8-decimal quote example distinct from human-readable `SendAsset.amount`.
 Use its chain-override example only for signing-domain consistency; never change
 an immutable action after review to satisfy a wallet chain prompt.
 
@@ -321,30 +347,32 @@ Each row is a required development touchpoint, not permission to widen every
 enum indiscriminately. Distinguish public reads, interactive writes, maintenance
 and autonomous execution.
 
-| Domain              | Current owners / gap                                                                                                    | HIP requirement                                                                                |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Lifecycle           | `packages/shared/src/venue-lifecycle.ts`; HIP unreleased/off; active enables automation                                 | Interactive capability plus independent autonomous exclusion; exit-only preserves reads/repair |
-| API schema          | `apps/api/src/schemas/common.ts`, `order-types.ts`                                                                      | Add public/account/trade types only when their implementation exists                           |
-| Public discovery    | `repos/unified-read.ts`, `routes/events.ts`, `routes/markets.ts`                                                        | Remove explicit HIP exclusion in proven read paths; correct ranking units and coverage         |
-| Live data           | `lib/hot-tokens.ts`, routes prices/SSE, shared writers                                                                  | Register HIP hot keys/stream keys and inferVenue; maintain bounded fanout                      |
-| Charts/trades       | Event/market candles and `routes/trades.ts`                                                                             | Real source-labelled historical series and trade normalization; validate event/token IDs       |
-| Account value       | `account-value/known-asset-catalog.ts`, `runtime-service.ts`, `ownership-resolver.ts`, `cash-availability-projector.ts` | HyperCore account binding, mode-aware locks/cash, freshness/completeness                       |
-| Positions           | `repos/positions-repo.ts`, `order-types.ts`, collectors                                                                 | Storage allowance exists; read/valuation/settlement support does not                           |
-| Orders/executions   | `repos/orders-repo.ts`, `repos/executions-repo.ts`, `repos/unified-orders.ts`, `routes/positions.ts`                    | Venue schemas, scoped IDs, replay-safe fills, cancellation and recovery                        |
-| Funding policy      | `funding/policies/funding-policy.ts`, `funding-policy-v2.ts`                                                            | Core locations/routes/signers/observers; compile only supported capabilities                   |
-| Preparation         | `funding/preparation/runtime-service.ts`, `core-adapter.ts`                                                             | HIP trading destination and non-money readiness; class transfer is explicit funding            |
-| Shortfall / Max     | `funding/planner/market-buy-suggestion.ts`, `trade-shortfall-preflight.ts`, `source-reservation-capacity.ts`            | HIP fee-inclusive budget adapter and exact destination units; bidirectional capacity           |
-| Relay               | `funding-providers/relay/`                                                                                              | Native Core currency/DEX/signature contracts, not relaxed EVM validation                       |
-| Durable execution   | `funding/execution/operation-action-runtime.ts`, `operation-execution-preflight.ts`                                     | Exact signed-action executor/lease/report/evidence protocol                                    |
-| Trade attempts      | `funding/persistence/funding-trade-attempt-repository.ts`                                                               | New scoped HIP execution path, DB constraint, same attempt/consumer lifecycle                  |
-| Settlement/actions  | `funding/position-actions/venue-driver.ts`                                                                              | No fake conditional-token driver; automatic settlement observer/accounting                     |
-| Fees/rewards        | `repos/fee-policy.ts`, `services/rewards.ts`, fees/reconciliation                                                       | Supported builder collection and observed charged fees; no unearned rewards                    |
-| Matching            | `packages/market-matching/`, `apps/market-matcher/`, shared matching policy                                             | Current Jev pipeline and explicit venue allowlists; exact resolution semantics                 |
-| Intel/research      | `wallet-intel-refresh.ts`, `services/wallet-intel-*`, `services/holder-research*.ts`                                    | Known-wallet data first; coverage-qualified holder/trader intelligence                         |
-| Signals/map         | `services/signal-matching.ts`, `services/signal-bot-*`, `ai-map-*`                                                      | Source and delivery capability distinct from automated execution                               |
-| Telegram            | `services/telegram-app-handoff-v2*`, repository, Mini App links                                                         | Explicit user web handoff; reject HIP execution for autonomous `telegram_bot` actors           |
-| Retention/admin/ops | retention selectors, admin schemas, compose/build, cron                                                                 | Protect new raw/ledger references; operational visibility and safe cleanup                     |
-| Public tools        | Separate `hunch-agent-tools-public` client/schema                                                                       | Extend read-only venue schemas after actual API support; never expose execution                |
+| Domain                 | Current owners / gap                                                                                                    | HIP requirement                                                                                |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Lifecycle              | `packages/shared/src/venue-lifecycle.ts`; HIP unreleased/off; active enables automation                                 | Interactive capability plus independent autonomous exclusion; exit-only preserves reads/repair |
+| API schema             | `apps/api/src/schemas/common.ts`, `order-types.ts`                                                                      | Add public/account/trade types only when their implementation exists                           |
+| Public discovery       | `repos/unified-read.ts`, `routes/events.ts`, `routes/markets.ts`                                                        | Remove explicit HIP exclusion in proven read paths; correct ranking units and coverage         |
+| Live data              | `lib/hot-tokens.ts`, routes prices/SSE, shared writers                                                                  | Register HIP hot keys/stream keys and inferVenue; maintain bounded fanout                      |
+| Charts/trades          | Event/market candles and `routes/trades.ts`                                                                             | Real source-labelled historical series and trade normalization; validate event/token IDs       |
+| Account value          | `account-value/known-asset-catalog.ts`, `runtime-service.ts`, `ownership-resolver.ts`, `cash-availability-projector.ts` | HyperCore account binding, mode-aware locks/cash, freshness/completeness                       |
+| Positions              | `repos/positions-repo.ts`, `order-types.ts`, collectors                                                                 | Storage allowance exists; read/valuation/settlement support does not                           |
+| Orders/executions      | `repos/orders-repo.ts`, `repos/executions-repo.ts`, `repos/unified-orders.ts`, `routes/positions.ts`                    | Venue schemas, scoped IDs, replay-safe fills, cancellation and recovery                        |
+| Funding policy         | `funding/policies/funding-policy.ts`, `funding-policy-v2.ts`                                                            | Core locations/routes/signers/observers; compile only supported capabilities                   |
+| Preparation            | `funding/preparation/runtime-service.ts`, `core-adapter.ts`                                                             | HIP trading destination and non-money readiness; class transfer is explicit funding            |
+| Shortfall / Max        | `funding/planner/market-buy-suggestion.ts`, `trade-shortfall-preflight.ts`, `source-reservation-capacity.ts`            | HIP fee-inclusive budget adapter and exact destination units; bidirectional capacity           |
+| Relay                  | `funding-providers/relay/`                                                                                              | Native Core currency/DEX/signature contracts, not relaxed EVM validation                       |
+| Durable execution      | `funding/execution/operation-action-runtime.ts`, `operation-execution-preflight.ts`                                     | Exact signed-action executor/lease/report/evidence protocol                                    |
+| Trade attempts         | `funding/persistence/funding-trade-attempt-repository.ts`                                                               | New scoped HIP execution path, DB constraint, same attempt/consumer lifecycle                  |
+| Settlement/actions     | `funding/position-actions/venue-driver.ts`                                                                              | No fake conditional-token driver; automatic settlement observer/accounting                     |
+| Fees/rewards           | `repos/fee-policy.ts`, `services/rewards.ts`, fees/reconciliation                                                       | Supported builder collection and observed charged fees; no unearned rewards                    |
+| Matching               | `packages/market-matching/`, `apps/market-matcher/`, shared matching policy                                             | Current Jev pipeline and explicit venue allowlists; exact resolution semantics                 |
+| Intel/research         | `wallet-intel-refresh.ts`, `services/wallet-intel-*`, `services/holder-research*.ts`                                    | Known-wallet data first; coverage-qualified holder/trader intelligence                         |
+| Signals/map            | `services/signal-matching.ts`, `services/signal-bot-*`, `ai-map-*`                                                      | Source and delivery capability distinct from automated execution                               |
+| Theses and Copy        | `schemas/social-trade.ts`, `services/social-instrument.ts`, `social-copy.ts`, `verified-buy*.ts`                        | HIP instrument/evidence adapter and pre-submit attribution; see section 7 social contract      |
+| Social reads/lifecycle | `routes/social.ts`, `services/social-service.ts`, `social-policy.ts`, `social-lifecycle.ts`                             | Existing feed/likes/comments/stats and deletion/merge semantics, not a HIP social fork         |
+| Telegram               | `services/telegram-app-handoff-v2*`, repository, Mini App links                                                         | Explicit user web handoff; reject HIP execution for autonomous `telegram_bot` actors           |
+| Retention/admin/ops    | retention selectors, admin schemas, compose/build, cron                                                                 | Protect new raw/ledger references; operational visibility and safe cleanup                     |
+| Public tools           | Separate `hunch-agent-tools-public` client/schema                                                                       | Extend read-only venue schemas after actual API support; never expose execution                |
 
 The matrix is grounded in current source searches, not an assumption that adding
 `hyperliquid` to the shared venue list automatically updates every consumer.
@@ -445,9 +473,14 @@ ledger/history references. Validate SQL on disposable PostgreSQL matching the
 deployment major; production-scale plans matter beyond empty fixtures.
 
 Use new migration numbers and tolerant historical backfills. No data-dependent
-`RAISE EXCEPTION` rollout guards: production stops services before migrations.
-Read-only production facts, if later authorized, must establish migration scope
-before deployment, not discover it while the API is stopped.
+`RAISE EXCEPTION` rollout guards. At this baseline, `ops/deploy-ec2.sh` and
+`ops/deploy-ec2-prebuilt.sh` migrate before replacing live app containers. Use
+expand/contract changes compatible with both old running readers/writers and
+the new image; do not drop a constraint/field that the old image still needs.
+Verify the actual deployed script before rollout. Migration locks and partial
+schema changes remain availability risks even when old containers stay up.
+Authorized read-only production facts or representative restores must establish
+legacy-row handling and migration scope before deployment.
 
 ## 5. Account ownership and spendable cash
 
@@ -629,8 +662,9 @@ is not a canonical destination receipt.
 
 Implement automatic bounded evidence polling/repair for lost reports and
 accepted-but-unobserved outcomes using the current lease/job model. A signing
-lease can expire to proven non-submission; an expired quote alone cannot prove
-that submitted money never moved. No indefinite manual-review dead end for
+lease may be retired as non-submitted only with proof that its submission boundary
+was never crossed; lease or quote expiry alone cannot prove that money never moved.
+No indefinite manual-review dead end for
 recoverable deterministic facts; no blind reservation release on unknown results.
 
 ## 7. Orders, durable recovery, executions, settlement and PnL
@@ -673,10 +707,26 @@ must be idempotent. Never count both a primary and equivalent dual record twice.
 
 ### Position and PnL accounting
 
+The merged baseline includes `0271_positions_asset_ledger.sql`,
+`services/position-market-rows.ts` and ledger-aware position reads. Legacy and
+non-Polymarket positions use the empty `position_contract` namespace; Polymarket
+V2 uses an actual contract plus frozen `asset_context`. Do not store a HyperCore
+account/DEX in that EVM contract field or manufacture a Polymarket asset context.
+Agree an additive HIP identity projection, including environment and exact
+outcome instance, before altering position uniqueness/read keys. Preserve frozen
+position identity when overlaying current prices, resolving a sell, or rolling
+to the next recurring market. Round-trip it through authenticated market rows,
+portfolio, event positions and share/PnL projections; test legacy Poly and V2
+positions with the same token identifier alongside HIP rows.
+
 Canonical fills require environment, account, order reference, `tid`/provider
 identity, timestamp, token side, signed size/price, cost/proceeds, fee asset/raw
 amount and source payload fingerprint. Transaction hash is supporting evidence,
 not necessarily a unique execution key.
+The public WS contract defines trade identity using time + coin + `tid`, not
+`tid` alone; add environment and account/order scope for private economic fills,
+then apply proven primary/dual alias normalization. A repeated WS snapshot and
+REST replay must not add to position, verified purchase or rewards twice.
 
 Documented `WsFill.builderFee` is already included in `fee`. Store both for
 attribution but subtract the charged fee once. Add an explicit builder-present
@@ -731,6 +781,96 @@ declining it must have a defined product path, not hidden permission escalation.
 Rewards follow recorded eligible executions and actual fee economics, not quote
 generation, repeated syncs, cancelled orders or internal class transfers. Replayed
 fills and settlement credits must not issue duplicate rewards/notifications.
+
+### Theses, verified purchases and attributed Copy
+
+HIP ordinary trading and HIP social eligibility are separate capabilities.
+Current `schemas/social-trade.ts` accepts only Polymarket, Limitless and Kalshi;
+`social-instrument.ts`, `verified-buy-observer.ts` and the exact-reference lookup
+in `social-copy.ts` have no HIP path. Adding a venue enum or an order adapter
+does not make a purchase publishable or a Copy recoverable.
+
+Extend the existing owners rather than creating another social API:
+
+| Boundary               | Required HIP integration                                                                                                                                              |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Instrument             | `social-instrument.ts`, both social schemas, and `social-service.ts` instrument matching; exact environment, outcome token/side, instance generation and expiry       |
+| Execution proof        | `verified-buy-evidence.ts`, `verified-buy-observer.ts`, `verified-buy-runtime.ts`; normalize observed economic BUY fills, never quote/request size or HTTP acceptance |
+| Pre-submit attribution | `social-copy.ts` and the actual direct/funded submission driver; retain source, idempotency key, prepared fingerprint and scoped `cloid` before submission            |
+| Repair                 | `findCopyPurchase`, `recoverCopyPurchaseLinks`, verified-buy leases/backfill; exact references and observation only, no new signature/order                           |
+| Read models            | `social-service.ts`, `social-primitives.ts`, `routes/social.ts`; eligibility, thesis snapshot, Copy count, feed and profile statistics                                |
+| Lifecycle              | `social-lifecycle.ts`, account delete/merge and retention; preserve economic identity and proof references without retaining private identity unnecessarily           |
+
+**Purchase identity.** Use environment + economic account owner + authoritative
+primary order identity as the canonical purchase key; `oid` alone is insufficient.
+Before an `oid` exists, retain environment + owner + Hunch `cloid` and the immutable
+action fingerprint. Prove their association from provider/order observations.
+Primary/dual history records and execution rows are aliases of one economic
+order only when the provider evidence establishes that relationship. Never merge
+by equal amount/time, transaction hash alone, a Hunch user ID, or title. Pin the
+exact serialized key/alias representation in P0 fixtures before schema work.
+
+Aggregate all confirmed partial fills of that one purchase using exact
+quantities, gross notional excluding fees/funding, net received shares, charged
+fees (unknown remains null), evidence IDs and verifier revision. Normalize dual
+book representations to the originally bought instrument; a raw dual-side SELL
+is not an unrelated purchase. A later fill revises evidence but not an already
+published thesis snapshot. Different orders are never summed to meet eligibility.
+Cancelled remainder does not erase sufficient executed BUY notional. Revoked
+evidence invalidates the corresponding thesis proof and Copy count through the
+existing worker; a transient read failure does not revoke confirmed money.
+
+Do not pass HIP through the existing generic CLOB fallback: its non-Polymarket
+canonical key is Limitless-specific. Extend it explicitly or add a small HIP
+evidence normalizer feeding `factsFromEvidence`. Those facts currently assume
+USD-valued collateral and payout. Support only a proven quote-asset valuation
+mapping for publication; a non-USD token amount must not be relabelled USD.
+Keep reads/trading available independently of unsupported social valuation.
+
+**Copy contract.** Reuse `sourceRef: { kind: "thesis" | "hunch", id }` and the
+existing direct HTTP `copyIdempotencyKey` convention, explicitly mapped to the
+internal admitted trade/attribution identity. A Hunch source is the exact published
+signal revision, not CONTEXT or the latest note for a market. Copy buys the same
+instrument/outcome/generation with a user-selected amount and fresh quote; it
+does not copy leverage, account mode, standing permission or the original amount.
+Never silently discard `sourceRef` when a path lacks attributed Copy support.
+
+Persist the attribution and submission boundary before broadcasting. The exact
+reference remains reserved in all attribution states; lost response, replay and
+unknown commit reconcile the same purchase, never place another. Carry the source
+and Copy key through shortfall planning, consumer intent, refresh, signing and
+final submit in both direct and funded paths. The current funding continuation
+must not be assumed to propagate them. A changed source/instrument/amount is a
+new consented intent, not an idempotent retry with a reused key.
+
+Source hide/block/suspension before admission prevents new Copy. A later hide
+does not prevent observation of an already authorized purchase. Self-Copy is
+forbidden; repeated confirmed purchases by the same other user still count as
+one copier. Eligibility is indexed and refresh is an explicit bounded job, not
+a synchronous scan of wallet history.
+
+Use `social-policy.ts` for the effective revision, publication threshold, text
+limits and repair budgets. The initial publication threshold is $10, not a HIP
+trade/Copy minimum; handlers, SQL and UI must not duplicate it. Preserve policy
+failure, replay-before-new-limits and safe read/hide semantics. Add per-venue
+capability checks to `canCopy`, eligibility and admission; global `copyEnabled`
+alone cannot advertise a HIP path that is still unimplemented.
+
+Reuse the existing chronological social feed, profiles, likes on theses/Hunches/
+comments and flat comments. Preserve typed targets, AI thread root versus viewed
+revision, visibility/block filtering, precise cursors and batch hydration. No
+new HIP feed, comment tree or inferred historical Copy attribution is needed.
+Snapshot thesis return remains separate from author wallet PnL and uses the
+existing `feeTreatment: excluded` contract; full portfolio accounting includes
+actual fees. Official fractional payout is not two binary wins, and a closed
+market without settlement proof stays pending.
+
+Test account merge/keepSource, hard delete/deactivation, ownership reparenting,
+unique copier recount, invalidation and retention of market/token/order/fill/AI
+references. Keep economic keys independent of mutable Hunch user IDs. Social
+disablement must preserve observation of admitted purchases and safe existing
+reads; no evidence-repair job may revive an old trade. Reuse the sidecar-safe
+policy module without importing API-wide env into the finance worker.
 
 ## 8. Telegram: web handoff, not policy-driven HIP trading
 
@@ -825,6 +965,9 @@ fees, fractional settlement and history completeness. Retain hedge/market-maker
 filters and evidence freshness. Add HIP to `services/holder-research-jev.ts` and
 research data loaders only when those data prerequisites exist. Missing research
 evidence should not block unrelated valid user-authorized trading.
+Feed canonical official settlement into `services/holder-research-performance.ts`
+and calibration, preserving v2 evaluation/coverage semantics. A 0/100-cent mark,
+expired contract or absent entry is not an invented binary result or zero return.
 
 ## 10. Schema, dependencies, admin, tools and operations
 
@@ -889,16 +1032,17 @@ because discovery or matching is disabled.
 
 ## 11. Implementation sequence and proof obligations
 
-| Phase | Deliverable                                               | Exit evidence                                                                                                        |
-| ----- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| P0    | Read-only protocol fixtures and capability decisions      | Mainnet/testnet differences, exact token units, mode/fee/minimum contracts, Relay routes and receipt fields verified |
-| P1    | Public indexer/read contracts                             | Isolated canary; stable identities; correct trades/metrics; terminal lifecycle; bounded performance                  |
-| P2    | Owned account and ledger projection                       | Mode-aware available cash; zero/partial snapshots; settlement and PnL; no duplicate value                            |
-| P3    | Durable Core funding/withdrawals                          | Both directions, both signatures, exact debit/credit, cancel/unknown recovery; no manual dead end                    |
-| P4    | Interactive trade adapter and server submission           | Direct/funded GTC/IOC/ALO supported subset, fees, nonce/cloid concurrency, fills/cancel/settlement                   |
-| P5    | Web/MiniApp handoff and all public surfaces               | Three device contexts, explicit signing, autonomous HIP remains excluded                                             |
-| P6    | Matching, tracked-wallet intelligence and signal delivery | Rule-equivalence fixtures, bounded coverage/budgets, truthful holder limitations and web CTA                         |
-| P7    | Gradual activation                                        | Full build/tests, migration compatibility, exit-only recovery and observed canary before production exposure         |
+| Phase | Deliverable                                               | Exit evidence                                                                                                             |
+| ----- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| P0    | Read-only protocol fixtures and capability decisions      | Mainnet/testnet differences, exact token units, mode/fee/minimum contracts, Relay routes and receipt fields verified      |
+| P1    | Public indexer/read contracts                             | Isolated canary; stable identities; correct trades/metrics; terminal lifecycle; bounded performance                       |
+| P2    | Owned account and ledger projection                       | Mode-aware available cash; zero/partial snapshots; settlement and PnL; no duplicate value                                 |
+| P3    | Durable Core funding/withdrawals                          | Both directions, both signatures, exact debit/credit, cancel/unknown recovery; no manual dead end                         |
+| P4    | Interactive trade adapter and server submission           | Direct/funded GTC/IOC/ALO supported subset, fees, nonce/cloid concurrency, fills/cancel/settlement                        |
+| P4S   | Verified theses and attributed Copy                       | Exact purchase/dual aliases, source retained before submit, direct/funded recovery, lifecycle and social read-model tests |
+| P5    | Web/MiniApp handoff and all public surfaces               | Three device contexts, explicit signing, autonomous HIP remains excluded                                                  |
+| P6    | Matching, tracked-wallet intelligence and signal delivery | Rule-equivalence fixtures, bounded coverage/budgets, truthful holder limitations and web CTA                              |
+| P7    | Gradual activation                                        | Full build/tests, migration compatibility, exit-only recovery and observed canary before production exposure              |
 
 P0 read-only evidence cannot demonstrate actual signing/submission recovery.
 Use deterministic local/provider-response fixtures plus authorized testnet execution
@@ -942,7 +1086,106 @@ documented local Turbo fallback, not an automatic install/purge. See workspace
 AGENTS for deployment-equivalent verification. These are future code gates,
 not checks claimed to have passed for an unimplemented feature.
 
+### Policy and cross-repository acceptance
+
+Product thresholds, enabled capabilities, freshness budgets, retry/backfill
+limits and rate budgets belong in their existing runtime policy owners with
+validated defaults and an effective revision. Venue protocol constants (asset
+encoding, signature field types) and financial identity/consent invariants are
+not disableable product knobs. Do not put a second $10 publication threshold or
+a guessed trade minimum into HIP SQL, handlers, UI presets or admin forms.
+
+P4S extends `social-tests.ts`, `verified-buy-tests.ts`, the verified-buy integration
+and batch suites, `social-copy-concurrency-integration-tests.ts`, social
+lifecycle/maintenance/likes suites and finance-worker tests. Add fixtures for
+pending-to-verified-to-revoked evidence, partial/cancelled fills, duplicate aliases,
+late fills after publication, Copy timeout before/after broadcast, hidden source,
+self/repeated copier, mismatched expiry, merge and exact-reference recovery.
+No additional tables or a second worker framework are prescribed when the
+existing evidence/lease/attribution owners suffice.
+
+Backend owns native identity, exact decimals, capabilities, normalized signatures,
+attempt status and social proof. Frontend consumes generated DTOs and owns review,
+signing prompts and scoped report replay. Agree these contracts as one versioned
+fixture bundle before parallel adapter work. Include error/reason codes and
+unknown-field handling; reject only the unsupported write rather than losing an
+existing balance. Existing clients and existing-venue regression cases must pass.
+
+P4S may remain disabled while ordinary HIP trading is enabled; this must be
+visible in server `canCopy`/eligibility and all client CTAs. P5's social controls
+depend on P4S, while ordinary navigation/handoff does not. Research remains a
+separate P6 capability and never blocks otherwise safe trading.
+
 ## 12. Open decisions and verification record
+
+### Official evidence rechecked on October 11, 2026
+
+The following primary sources were reopened for this revision. Their scope
+must travel with fixtures; an example payload is not proof of a live route.
+
+- Market availability and settlement:
+  [HIP-4 overview](https://hyperliquid.gitbook.io/hyperliquid-docs/hyperliquid-improvement-proposals-hips/hip-4-outcome-markets),
+  [contract specifications](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/contract-specifications),
+  [deployer actions](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/hip-4-deployer-actions).
+  Preserve mainnet versus testnet scope.
+- Metadata and units:
+  [Asset IDs](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/asset-ids),
+  [spot info](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/spot),
+  [precision](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/tick-and-lot-size).
+  Separate coin, token, order asset and amount units.
+- Signing and execution:
+  [signing](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/signing),
+  [nonces](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets),
+  [exchange](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint),
+  [order types](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/order-types).
+  Separate L1/user-signed actions and uncertain/terminal status.
+- Cash and fees:
+  [account modes](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/account-abstraction-modes),
+  [portfolio margin](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/portfolio-margin),
+  [fees](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees),
+  [builders](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/builder-codes).
+  No global zero-fee or no-borrow assumption.
+- Streams and history:
+  [subscriptions](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions),
+  [info](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint),
+  [limits](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits).
+  Distinguish replay/snapshot, bounded history and fee inclusion.
+- Funding:
+  [USDC](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/usdc),
+  [Circle concepts](https://developers.circle.com/cctp/concepts/cctp-on-hypercore),
+  [Circle forwarding](https://developers.circle.com/cctp/howtos/transfer-usdc-from-arbitrum-to-hypercore),
+  [Relay Core](https://docs.relay.link/references/api/api_guides/hyperliquid-support).
+  Credit, activation, forwarding and withdrawal are distinct.
+- Relay API lifecycle:
+  [API keys](https://docs.relay.link/references/api/api-keys),
+  [Requests migration](https://docs.relay.link/references/api/api_guides/migrating-to-requests-v3),
+  [changelog](https://docs.relay.link/changelog).
+  Upgrade the actual wire parser, not only an endpoint suffix.
+
+### Implementation start and evidence gates
+
+The package is sufficient to start P0 contract/fixture work and the passive P1
+indexer slice. It is not a claim that every financial adapter can be implemented
+from example values, or that production activation is approved. Open items below
+have localized owners and acceptance evidence; they do not block unrelated work.
+
+| Decision                                                    | Owner and first artifact                                                                                                    | Gate                                                                                                              |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Canonical Core identity and exact units                     | Shared/API schema owner: versioned identity fixtures, mapping to DB and generated clients                                   | Before persistent HIP rows or financial DTOs                                                                      |
+| Outcome metadata, orderability, settlement and fee envelope | Protocol/indexer owner: dated mainnet/testnet metadata and settlement fixtures plus exact validation cases                  | Before enabling that market/environment for writes                                                                |
+| Signatures and account-mode safety                          | Trading/funding owners: pinned SDK version/commit goldens, signer/domain/action matrix, nonce and mode-change tests         | Before accepting signatures or submitting; portfolio-margin writes remain off without enforceable no-borrow proof |
+| Routes and canonical credit                                 | Relay owner: v3 wire fixtures, quote/actions for each advertised direction, receipt attribution and ambiguous recovery      | Before each source/destination capability is enabled                                                              |
+| Ledger and social proof                                     | Account/social owners: fill/dual-order/settlement fixtures, canonical key and aliases, immutable publication/Copy lifecycle | Before complete PnL claims or P4S enablement                                                                      |
+| Client parity                                               | Web owner: generated contracts and deterministic desktop/mobile/MiniApp scenarios                                           | Before the corresponding CTA becomes actionable                                                                   |
+| Operations                                                  | API/indexer owners: disposable PostgreSQL 16 migrations/plans, mixed-version compatibility, full builds and staged rollback | Before deployment; no production DDL/backfill/live signing implied                                                |
+
+Each fixture records source URL or sanitized provider endpoint, collection date,
+environment, SDK/protocol revision if available, semantic scope, expected normalized
+output and missing coverage. Revalidate stale dynamic metadata at quote/admission;
+do not make October 11 examples permanent runtime constants. Obtain separate
+authorization for account-specific/provider-key probes, signed test transactions,
+production data, deployment or financial backfills. Public documentation research
+in this revision used no keys, account calls or live quotes.
 
 Before financial activation, resolve:
 
@@ -964,7 +1207,7 @@ Before financial activation, resolve:
 These are localized capability prerequisites. They are not permission to add
 unrelated blocking guards or to rewrite all working venue paths.
 
-### Completed documentation verification — October 5, 2026
+### Historical documentation verification — October 5, 2026
 
 - Root inspection verified the current/pinned historical source references,
   repository-relative paths and companion links, and checked material protocol
@@ -984,10 +1227,40 @@ unrelated blocking guards or to rewrite all working venue paths.
   frontend Markdown command still reports the pre-existing second H1 in
   `Hunch_App/AGENTS.md` (`MD025`); that unrelated file was not changed.
 
-At completion of the documentation review, only these two documentation files
-were added, unstaged, on `hip-next` based on the recorded main refs. No
-application code, dependency, schema, production setting or operational
+At completion of the October 5 review, only these two documentation files
+were added, unstaged, on `hip-next` based on backend `2ade5f71` and frontend
+`3321fc06`. No application code, dependency, schema, production setting or operational
 automation was changed during that review; no commit/push/deploy occurred.
 No live route, signing, financial execution, migration or build was performed.
 This record verifies the specification, **not implementation or deployment
 readiness**. The open decisions and future test/build requirements remain real.
+
+### Revision review on October 11, 2026
+
+Three sequential review passes were performed against the synchronized baselines;
+these were author reviews, not new independent-agent approvals.
+
+1. Code compatibility: added the missing social proof/Copy boundary, exact aliases,
+   current position-ledger owners, lifecycle and policy integration. Kept HIP
+   ordinary trading independent of the optional social slice.
+2. Provider and operations evidence: rechecked the primary-source register;
+   clarified amount precision, first-outbound activation, mode-specific balances,
+   external nonce use and mixed-version migration ordering. Conflicting protocol
+   fee envelopes remain explicit capability gates rather than guessed defaults.
+3. Cross-package consistency: aligned source/key propagation, social recovery,
+   labels, shared-versus-snapshot PnL, safe lease expiry, phase dependencies and
+   read-only versus financial readiness. Replaced workspace-only companion links
+   with repository links and pinned the separate social handoff.
+
+Verdict: **GO to begin implementation with P0 and passive P1**. No unresolved
+document contradiction was found in the final pass. Live minima, exact route
+availability, signed-action goldens and settlement/economic-fill fixtures remain
+the scoped implementation evidence gates above, not claimed completed tests.
+
+Validation: both specifications pass scoped Markdown lint, Prettier and diff
+whitespace checks. Existing source paths and local links were checked; proposed
+modules are labelled as such. The full backend workspace build passed, 16/16
+tasks from cache, on the unchanged application baseline. Full frontend Markdown
+lint still reports only the pre-existing `AGENTS.md` second H1 (MD025). No SQL,
+application code or runtime policy was changed; no financial/live execution
+tests are claimed by this documentation revision.
