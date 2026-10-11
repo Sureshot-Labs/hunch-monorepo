@@ -1,0 +1,450 @@
+{
+  "version": 1,
+  "origin": "sanitized-public-read",
+  "collectedAt": "2026-10-11T22:17:25.162Z",
+  "observations": [
+    {
+      "environment": "mainnet",
+      "endpoint": "https://api.hyperliquid.xyz/info",
+      "metadata": {
+        "outcomes": [
+          {
+            "outcome": 11117,
+            "name": "template:sportsContestParticipant2",
+            "description": "participant:FK Bodo/Glimt",
+            "sideSpecs": [
+              {
+                "name": "Yes"
+              },
+              {
+                "name": "No"
+              }
+            ],
+            "quoteToken": "USDC",
+            "venue": "out",
+            "deployerFeeScale": "1.0"
+          },
+          {
+            "outcome": 8775,
+            "name": "template:sportsContestWinner",
+            "description": "competition:NFL|contestType:game|countedPlay:regulation time and any overtime|officialSource:ESPN|participantA:Detroit Lions|participantB:Arizona Cardinals|resolutionDeadline:20261012-0225|scheduledStart:20261011-2025|season:2026|shortNameA:Lions|shortNameB:Cardinals|sport:football|stage:Regular Season",
+            "sideSpecs": [
+              {
+                "name": "template:{shortNameA}"
+              },
+              {
+                "name": "template:{shortNameB}"
+              }
+            ],
+            "quoteToken": "USDC",
+            "venue": "txyz"
+          },
+          {
+            "outcome": 11116,
+            "name": "template fallback",
+            "description": "other",
+            "sideSpecs": [
+              {
+                "name": "Yes"
+              },
+              {
+                "name": "No"
+              }
+            ],
+            "quoteToken": "USDC",
+            "venue": "out",
+            "deployerFeeScale": "1.0"
+          }
+        ],
+        "questions": [
+          {
+            "question": 418,
+            "name": "template:sportsContestResult",
+            "description": "competition:UEFA Champions League|contestType:Match|countedPlay:regulation time, 90 minutes plus stoppage time|officialSource:Union of European Football Associations|participantA:FK Bodo/Glimt|participantB:Borussia Dortmund|resolutionDeadline:20261015-1900|scheduledStart:20261014-1900|season:2026/27|sport:Soccer|stage:Matchday 2",
+            "fallbackOutcome": 11116,
+            "namedOutcomes": [
+              11117,
+              11118,
+              11119
+            ],
+            "settledNamedOutcomes": []
+          }
+        ],
+        "feeScale": "1.0"
+      },
+      "spotMetadata": {
+        "tokens": [
+          {
+            "name": "USDC",
+            "szDecimals": 8,
+            "weiDecimals": 8,
+            "index": 0,
+            "tokenId": "0x6d1e7cde53ba9467b783cb7c530ce054",
+            "isCanonical": true,
+            "evmContract": {
+              "address": "0x6b9e773128f453f5c2c60935ee2de2cbc5390a24",
+              "evm_extra_wei_decimals": -2
+            },
+            "fullName": null,
+            "deployerTradingFeeShare": "0.0"
+          }
+        ]
+      },
+      "book": {
+        "coin": "#111170",
+        "time": 1791757046419,
+        "levels": [
+          [
+            {
+              "px": "0.29397",
+              "sz": "882.0",
+              "n": 2
+            },
+            {
+              "px": "0.29391",
+              "sz": "1147.0",
+              "n": 3
+            },
+            {
+              "px": "0.2939",
+              "sz": "275.0",
+              "n": 3
+            },
+            {
+              "px": "0.29371",
+              "sz": "56.0",
+              "n": 1
+            },
+            {
+              "px": "0.2937",
+              "sz": "56.0",
+              "n": 1
+            },
+            {
+              "px": "0.29348",
+              "sz": "171.0",
+              "n": 1
+            },
+            {
+              "px": "0.29347",
+              "sz": "255.0",
+              "n": 1
+            },
+            {
+              "px": "0.2917",
+              "sz": "200.0",
+              "n": 1
+            },
+            {
+              "px": "0.29023",
+              "sz": "110.0",
+              "n": 1
+            },
+            {
+              "px": "0.25002",
+              "sz": "200.0",
+              "n": 1
+            },
+            {
+              "px": "0.25001",
+              "sz": "100.0",
+              "n": 1
+            },
+            {
+              "px": "0.01001",
+              "sz": "500.0",
+              "n": 1
+            },
+            {
+              "px": "0.01",
+              "sz": "1000.0",
+              "n": 1
+            },
+            {
+              "px": "0.00333",
+              "sz": "1204.0",
+              "n": 4
+            },
+            {
+              "px": "0.00028",
+              "sz": "7142.0",
+              "n": 1
+            },
+            {
+              "px": "0.00025",
+              "sz": "16000.0",
+              "n": 4
+            },
+            {
+              "px": "0.00002",
+              "sz": "50000.0",
+              "n": 1
+            },
+            {
+              "px": "0.00001",
+              "sz": "100000.0",
+              "n": 1
+            }
+          ],
+          [
+            {
+              "px": "0.29505",
+              "sz": "332.0",
+              "n": 2
+            },
+            {
+              "px": "0.29511",
+              "sz": "478.0",
+              "n": 3
+            },
+            {
+              "px": "0.29517",
+              "sz": "108.0",
+              "n": 3
+            },
+            {
+              "px": "0.29526",
+              "sz": "56.0",
+              "n": 1
+            },
+            {
+              "px": "0.29555",
+              "sz": "106.0",
+              "n": 1
+            },
+            {
+              "px": "0.29621",
+              "sz": "50.0",
+              "n": 1
+            },
+            {
+              "px": "0.29685",
+              "sz": "46.0",
+              "n": 1
+            },
+            {
+              "px": "0.2973",
+              "sz": "400.0",
+              "n": 1
+            },
+            {
+              "px": "0.29999",
+              "sz": "72.0",
+              "n": 1
+            },
+            {
+              "px": "0.3",
+              "sz": "14.0",
+              "n": 1
+            },
+            {
+              "px": "0.32999",
+              "sz": "75.0",
+              "n": 1
+            },
+            {
+              "px": "0.40999",
+              "sz": "100.0",
+              "n": 1
+            },
+            {
+              "px": "0.98999",
+              "sz": "500.0",
+              "n": 1
+            },
+            {
+              "px": "0.99",
+              "sz": "1000.0",
+              "n": 1
+            },
+            {
+              "px": "0.99667",
+              "sz": "1204.0",
+              "n": 4
+            },
+            {
+              "px": "0.99972",
+              "sz": "7142.0",
+              "n": 1
+            },
+            {
+              "px": "0.99975",
+              "sz": "16000.0",
+              "n": 4
+            },
+            {
+              "px": "0.99998",
+              "sz": "50000.0",
+              "n": 1
+            },
+            {
+              "px": "0.99999",
+              "sz": "100000.0",
+              "n": 1
+            }
+          ]
+        ]
+      },
+      "trades": [
+        {
+          "coin": "#111170",
+          "side": "B",
+          "px": "0.29505",
+          "sz": "70.0",
+          "time": 1791735797271,
+          "hash": "0xdcad9fe09fe3dba5de270446566d7302020700c63ae6fa7780764b335ee7b590",
+          "tid": 676344123565525
+        },
+        {
+          "coin": "#111170",
+          "side": "A",
+          "px": "0.29397",
+          "sz": "84.0",
+          "time": 1791735795960,
+          "hash": "0x650e7c1b7b3f6d0566880446566d60020223000116328bd708d7276e3a3346f0",
+          "tid": 85142294833294
+        },
+        {
+          "coin": "#111170",
+          "side": "A",
+          "px": "0.29398",
+          "sz": "3.0",
+          "time": 1791735795960,
+          "hash": "0x650e7c1b7b3f6d0566880446566d60020223000116328bd708d7276e3a3346f0",
+          "tid": 599221277790480
+        }
+      ],
+      "settlement": {
+        "spec": {
+          "outcome": 95,
+          "name": "Recurring",
+          "description": "class:priceBinary|underlying:BTC|expiry:20260526-0600|targetPrice:77363|period:1d",
+          "sideSpecs": [
+            {
+              "name": "Yes"
+            },
+            {
+              "name": "No"
+            }
+          ],
+          "quoteToken": "USDC"
+        },
+        "settleFraction": "0.0",
+        "details": "price:76876.9"
+      },
+      "coverage": {
+        "metadata": "selected subset",
+        "trades": "first three; participants removed",
+        "tokenPrecision": "spotMeta has no outcome tokens; unknown",
+        "fees": "scales only; not charged fees"
+      }
+    },
+    {
+      "environment": "testnet",
+      "endpoint": "https://api.hyperliquid-testnet.xyz/info",
+      "metadata": {
+        "outcomes": [
+          {
+            "outcome": 10225,
+            "name": "June Fed rate change",
+            "description": "The market resolves to Change if the upper bound of the target federal funds rate range in the Federal Open Market Committee (FOMC) statement for the meeting currently scheduled for June 16-17, 2026 differs from the upper bound of the target range set by the most recent prior FOMC statement. Otherwise, the market resolves to No Change. The market also resolves to No Change if the June 16-17, 2026 meeting is canceled, or if no FOMC statement containing a rate decision for that meeting is released by 23:59 ET on July 29, 2026. The target range stated in the FOMC statement for the June 16-17, 2026 meeting determines the result. If that statement is unavailable or does not clearly state the target range, the post-meeting target range upper bound shown on the Federal Reserve's open market operations page determines the result. Resolution uses the initially released decision; later revisions after resolution are not considered. Scheduled meeting dates and source references are provided for convenience and are not binding terms of resolution.",
+            "sideSpecs": [
+              {
+                "name": "Change"
+              },
+              {
+                "name": "No Change"
+              }
+            ],
+            "quoteToken": "USDC"
+          }
+        ],
+        "questions": [],
+        "feeScale": "1.0"
+      },
+      "spotMetadata": {
+        "tokens": [
+          {
+            "name": "USDC",
+            "szDecimals": 8,
+            "weiDecimals": 8,
+            "index": 0,
+            "tokenId": "0xeb62eee3685fc4c43992febcd9e75443",
+            "isCanonical": true,
+            "evmContract": {
+              "address": "0x0b80659a4076e9e93c7dbe0f10675a16a3e5c206",
+              "evm_extra_wei_decimals": -2
+            },
+            "fullName": null,
+            "deployerTradingFeeShare": "0.0"
+          }
+        ]
+      },
+      "book": {
+        "coin": "#102250",
+        "time": 1791757050238,
+        "levels": [
+          [
+            {
+              "px": "0.45",
+              "sz": "7.0",
+              "n": 1
+            },
+            {
+              "px": "0.425",
+              "sz": "47.0",
+              "n": 1
+            },
+            {
+              "px": "0.27",
+              "sz": "246.0",
+              "n": 1
+            },
+            {
+              "px": "0.05",
+              "sz": "246.0",
+              "n": 1
+            }
+          ],
+          []
+        ]
+      },
+      "trades": [
+        {
+          "coin": "#102250",
+          "side": "A",
+          "px": "0.45",
+          "sz": "1.0",
+          "time": 1791388240984,
+          "hash": "0x32bd6eb2987da4fd3437042b21b56401030086983370c3cfd6861a0557717ee7",
+          "tid": 374999581464431
+        },
+        {
+          "coin": "#102250",
+          "side": "A",
+          "px": "0.45",
+          "sz": "11.0",
+          "time": 1791388228336,
+          "hash": "0x671170c4d3555a60688b042b21b48301060088aa6e5879320ada1c179259344b",
+          "tid": 166726681380303
+        },
+        {
+          "coin": "#102250",
+          "side": "A",
+          "px": "0.45",
+          "sz": "11.0",
+          "time": 1791388226592,
+          "hash": "0x473e8a91e209a1ff48b8042b21b464010400a2777d0cc0d1eb0735e4a10d7be9",
+          "tid": 578124244131912
+        }
+      ],
+      "settlement": null,
+      "coverage": {
+        "metadata": "selected subset",
+        "trades": "first three; participants removed",
+        "tokenPrecision": "spotMeta has no outcome tokens; unknown",
+        "fees": "scales only; not charged fees"
+      }
+    }
+  ]
+}

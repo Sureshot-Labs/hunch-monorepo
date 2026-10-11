@@ -89,6 +89,8 @@ export function computeAcceptingOrders(
 
   const venue =
     typeof input.venue === "string" ? input.venue.toLowerCase() : null;
+  // P1 has a public read contract, not an implemented trading adapter.
+  if (venue === "hyperliquid") return false;
   if (venue === "kalshi") {
     if (!activeByUnified) return false;
     return input.dflowNativeAcceptingOrders === true;

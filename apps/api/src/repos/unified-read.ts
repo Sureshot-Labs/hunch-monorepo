@@ -1,6 +1,7 @@
 import type { Pool } from "@hunch/infra";
 import {
   buildObservedCanonicalMarketTop,
+  isHip4CanaryId,
   type PolymarketAssetContext,
 } from "@hunch/shared";
 import { createHash } from "node:crypto";
@@ -6953,6 +6954,8 @@ export async function fetchMarketDetails(
   pool: Pool,
   marketId: string,
 ): Promise<MarketDetailsRow[]> {
+  // Passive HIP-4 snapshots have a separate authorized read contract in P1.
+  if (isHip4CanaryId(marketId)) return [];
   // Query for market details with event information
   const marketSql = `
     SELECT
@@ -7147,6 +7150,7 @@ export async function fetchEventDetails(
   eventId: string,
   selectedMarketId?: string | null,
 ): Promise<EventDetailsRow[]> {
+  if (isHip4CanaryId(eventId)) return [];
   // Query for event details with all associated markets
   const supportedLimitlessMarketExpr = "true";
   const eventSql = `
@@ -7407,9 +7411,12 @@ export async function fetchMarketsByTokenIds(
     marketAssetContexts?: readonly PolymarketAssetContext[];
   },
 ): Promise<MarketByTokenRow[]> {
-  if (inputs.tokenIds.length === 0) return [];
+  // Passive HIP rows are available only through the scoped read-canary DTO.
+  // Do not hydrate them as executable legacy binary markets via token lookup.
+  const tokenIds = inputs.tokenIds.filter((id) => !isHip4CanaryId(id));
+  if (tokenIds.length === 0) return [];
 
-  const params: PgParams = [inputs.tokenIds];
+  const params: PgParams = [tokenIds];
   const rawLimitlessLookupSql =
     inputs.venue === "limitless"
       ? `

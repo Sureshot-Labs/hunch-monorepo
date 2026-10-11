@@ -135,7 +135,12 @@ export function getVenueLifecycleCapabilities(
 ): VenueLifecycleCapabilities | null {
   const normalized = normalizeHunchVenue(venue);
   if (!normalized) return null;
-  return CAPABILITIES_BY_LIFECYCLE[policy.venues[normalized].lifecycle];
+  const capabilities =
+    CAPABILITIES_BY_LIFECYCLE[policy.venues[normalized].lifecycle];
+  // HIP is user-interactive only, even after a future lifecycle activation.
+  return normalized === "hyperliquid"
+    ? { ...capabilities, automation: false }
+    : capabilities;
 }
 
 export function venueHasLifecycleCapability(

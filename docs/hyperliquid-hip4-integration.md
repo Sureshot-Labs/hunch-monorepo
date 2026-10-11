@@ -7,9 +7,9 @@ rechecked on 2026-10-11. It is a development plan, not an assertion that HIP
 trading, funding, matching, or wallet intelligence is implemented or production-ready.
 
 Start with section 12 for evidence gates, section 11 for implementation order,
-then the owned domain section and companion client contract. P0 and passive P1
-can begin; enabling financial capabilities requires their listed proof, not a
-second redesign of the integration.
+then the owned domain section and companion client contract. Section 13 records
+the implemented P0 read-contract foundation and passive P1 canary. Financial
+capabilities remain off and require their listed proof.
 
 | Repository             | Branch / immutable reference                                                |
 | ---------------------- | --------------------------------------------------------------------------- |
@@ -39,9 +39,9 @@ Evidence labels used below:
 - **Required design:** proposed Hunch behavior, to implement and test.
 - **Unverified:** needs a bounded, separately authorized read-only probe, fixture, or implementation test.
 
-The feature diff against these baselines is documentation only. The June `hip`
-implementation remains reference material. Documentation commits and branch
-synchronization do not enable HIP. Public documentation can establish wire
+The feature now includes a disabled-by-default passive read implementation;
+the June `hip` implementation remains reference material. Documentation and
+branch synchronization do not enable HIP. Public documentation can establish wire
 contracts, not current account eligibility, executable routes or financial
 readiness; those require the scoped evidence in section 12.
 
@@ -1264,3 +1264,123 @@ tasks from cache, on the unchanged application baseline. Full frontend Markdown
 lint still reports only the pre-existing `AGENTS.md` second H1 (MD025). No SQL,
 application code or runtime policy was changed; no financial/live execution
 tests are claimed by this documentation revision.
+
+## 13. Implemented passive slice — October 11–12, 2026
+
+This is an implementation record, distinct from the earlier documentation review.
+P0's public read-contract foundation and a passive P1 canary are implemented in
+the working tree. This is **not** financial activation or a complete P0 financial
+evidence sign-off. No commit, push, deployment or production policy change was
+performed for this slice.
+
+### Evidence and contracts
+
+- Sanitized public reads are in `apps/api/src/fixtures/hip4/public-reads.json`.
+  Collection: `2026-10-11T22:17:25.162Z`; mainnet/testnet `outcomeMeta`,
+  `spotMeta`, selected `l2Book`/`recentTrades`, and mainnet `settledOutcome`.
+  No account requests, credentials, signatures or participant addresses are kept.
+- Mainnet contains sports templates, standalone outcomes, question members and
+  fallback outcomes. Testnet also has custom side labels. The mapper does not
+  assume recurring BTC binaries or overwrite native labels with YES/NO.
+- The observed USDC metadata has `weiDecimals=8`. Outcome `+...` entries were
+  absent from these spot metadata responses: outcome precision remains `null`,
+  not a guessed trading size. Binary zero settlement is observed; one/fractional
+  settlement and precision boundaries are explicitly synthetic test cases.
+- `packages/shared/src/hip4.ts` owns environment-scoped identities, exact units,
+  schema version 1, read DTOs and `hip4_read` policy defaults. Full contracts are
+  generated offline by `apps/api/src/hip4-openapi.ts` for the canary endpoint.
+- Market IDs are `hyperliquid:<environment>:outcome:<index>`; grouped event IDs
+  use `question:<index>`. Token IDs retain the environment and encoded side;
+  provider coins use `#`, token names use `+`, asset IDs use the protocol offset.
+  Legacy identities are not silently reinterpreted.
+
+### Runtime and storage
+
+`apps/api/src/hip4-indexer.ts` is a sidecar-safe entrypoint in the existing API
+build artifact, with public protocol code under `services/hip4-*`. It requires
+explicit `--database-url` and `--expect-database`, verifies the target, and holds
+one session lock per canary DB. `--once` performs one bounded cycle. No service
+or deployment automation starts it implicitly.
+
+The existing admin policy API validates the same `hip4_read` schema. Defaults:
+disabled, empty outcome allowlist, 60-second polling, six outcomes per cycle,
+600 request-weight units per rolling minute, 20 read rows per page. Request
+timeout/bytes, freshness, page size, rotation and stream retry/heartbeat limits
+are policy-owned. Bad configuration stops provider requests, reports failure,
+and is retried; it does not activate fallback defaults. Disable via `enabled:false`.
+
+Admission is atomic in PostgreSQL and shared across environments/processes using
+that DB; this is not a claim of coordination across unrelated databases or
+services bypassing the client. An eventual deployment must allocate the shared
+egress-IP budget across those consumers. Testnet remains a separate canary DB,
+never a policy switch against production financial storage.
+
+REST generations repair metadata after coalesced `outcomeMetaUpdates` hints and
+reconnects. Stream hints never publish authoritative state. Periodic REST also
+works if the stream is unavailable; retry/backoff, heartbeats and bounded
+refresh intervals prevent a busy stream from driving unbounded requests.
+Cycle diagnostics include policy revision, fetch/map/write duration, oldest
+snapshot age, indexed/skipped outcomes, failure reasons and stream state.
+
+Migration `0281_hip4_passive_reads.sql` adds raw/read snapshots, a collision-safe
+public-trade ledger, a rotation cursor and request admission state. Publication
+atomically includes the event, market and both side mappings. Older generations
+cannot replace newer ones; replay is idempotent. Only the primary side's merged
+trade stream is ingested; dual records are not summed into fabricated volume.
+Expiry triggers an official settlement lookup even while metadata still lists
+the outcome. Missing settlement is pending, not LOSS; near-0/1 fractional payouts
+are not rounded into binary results. Group-event status remains conservative
+when only some members are observed; canary DTOs expose each outcome's state.
+
+### Exposure and remaining coverage
+
+`GET /markets/hyperliquid/canary` requires administrator `analytics:read`, is
+`private, no-store`, and only serves the effective environment/allowlist. It
+returns policy revision and refresh interval; disabled/config-error/empty states
+are distinct. All trade, Copy, funding and automation capabilities are false.
+Ordinary discovery stays unreleased; new canary identities do not leak through
+legacy market/event/token detail contracts. Existing venue behavior and legacy
+owned-record identities are retained.
+
+Books distinguish fresh, stale, empty and failed observations. Recent trades
+have observation/window coverage, not a promise of gap-free history. Candles,
+aggregate ranking, USD volume and OI are unavailable, not zero. This slice does
+not wire HIP into public SSE/hot-token acquisition, charts, research, account
+value or financial execution. Those broader surfaces remain gated by their
+later phase contracts; there is no inference of P2–P7 readiness.
+
+The frontend companion records generated clients and provider-free desktop/mobile
+fixtures. Public financial prerequisites in section 12 (exact executable units,
+minimums, mode/fee contracts, Relay receipts and signed-action goldens) remain
+localized open evidence gates, not completed tests.
+
+### Verification and review record
+
+- Fifteen protocol/client/route/stream tests pass (`pnpm -F api test:hip4`).
+  They include wrong identities, native labels, exact decimals, payout boundaries,
+  stale/empty/crossed books, off-policy behavior, coalescing and reconnect repair.
+- All migrations through 0281 ran on fresh disposable PostgreSQL 16.2.
+  `hip4-integration-tests.ts` covers atomic rollback, replay/ties, frozen official
+  results, pagination, malformed policy, rolling shared-budget concurrency and
+  recovery, expired-but-listed settlement and cascading derived-data cleanup.
+- `hip4-sql-plan-tests.ts` executed generic first/resumed/empty pages against
+  20,000 markets and a million-trade ledger. Index scans read 0–4 market rows or
+  21 trade rows; observed execution times were below 0.1 ms, not production SLAs.
+  The full retention selector and exact disposable delete path also executed.
+- A live public mainnet cycle for outcome 11117 succeeded into the disposable DB:
+  one market, no failures, 2.45 seconds. No financial requests were made.
+- Scoped backend lint/typecheck and the complete 16-package workspace build pass.
+  API, finance-worker and matching portions of `test:fast` pass; its final
+  Telegram snapshot freshness check fails on pre-existing renderer/snapshot drift
+  (interest-signal menu and research footer). The 14 preview behavior tests pass.
+  Unrelated snapshots were not regenerated to disguise this limitation.
+- Sequential author reviews corrected participant titles, per-trade SQL writes,
+  rolling-budget recovery, expired metadata settlement lookup, canary isolation,
+  numeric payout rounding, failed-refresh display and provider-free fixtures.
+  No independent-agent approval is claimed.
+
+Reproduce DB suites only with explicit `DATABASE_URL` and matching
+`HUNCH_TEST_EXPECT_DATABASE` pointing at a disposable PG16 database. Migration
+commands must use `--database-url` and `--expect-database`; never rely on a shell
+URL override alone. Financial calls, production backfills and rollout still
+require separate authorization. See the frontend record for its build limitation.

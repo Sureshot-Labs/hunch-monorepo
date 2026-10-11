@@ -44,6 +44,8 @@ const DEFAULT_CUTOFF_DAYS = 90;
 const DEFAULT_LIMIT = 50_000;
 const DEFAULT_SAMPLE_LIMIT = 20;
 const ALLOWED_VENUES = new Set(["polymarket", "limitless"]);
+// HIP-4 source/observation rows have real cascading unified-market FKs and
+// are counted/deleted by market-retention-selector, never orphan-source scans.
 
 function normalizeVenues(values: string[]): string[] {
   const venues = values.map((entry) => entry.toLowerCase());

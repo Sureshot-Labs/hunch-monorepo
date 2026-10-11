@@ -3,6 +3,7 @@ import pino from "pino";
 export { chunkArray } from "./array.js";
 export { sleep } from "./async.js";
 export * from "./polymarket-protocol.js";
+export * from "./hip4.js";
 export {
   isAbortError,
   isRetryableHttpStatus,

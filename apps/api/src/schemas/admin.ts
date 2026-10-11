@@ -678,6 +678,7 @@ export const adminIntelPolicyKeySchema = z.enum([
   "social",
   "telegram_notifications",
   "venue_lifecycle",
+  "hip4_read",
 ]);
 
 export const adminIntelPolicyParamsSchema = z.object({

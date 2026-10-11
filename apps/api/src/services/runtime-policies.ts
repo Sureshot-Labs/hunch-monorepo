@@ -2,6 +2,9 @@ import {
   DEFAULT_MARKET_MATCHING_POLICY,
   marketMatchingPolicySchema,
   type MarketMatchingPolicy,
+  DEFAULT_HIP4_READ_POLICY,
+  hip4ReadPolicySchema,
+  type Hip4ReadPolicy,
 } from "@hunch/shared";
 import { z } from "zod";
 import { DEFAULT_SEMANTIC_REVIEW_MAX_PAIRS } from "./market-map-semantic-review.js";
@@ -92,6 +95,7 @@ export const INTEL_POLICY_KEYS = [
   "signal_bot",
   "signal_post_copy",
   "social",
+  "hip4_read",
   "telegram_notifications",
   "venue_lifecycle",
   "market_matching",
@@ -102,6 +106,7 @@ export type IntelPolicyKey = (typeof INTEL_POLICY_KEYS)[number];
 type PolicySource<K extends IntelPolicyKey> = K extends
   | "signal_post_copy"
   | "social"
+  | "hip4_read"
   | "telegram_notifications"
   | "venue_lifecycle"
   | "market_matching"
@@ -687,6 +692,7 @@ type IntelPolicyMap = {
   signal_bot: SignalBotPolicy;
   signal_post_copy: SignalPostCopyPolicyV1;
   social: SocialPolicy;
+  hip4_read: Hip4ReadPolicy;
   telegram_notifications: TelegramNotificationsPolicyV1;
   venue_lifecycle: VenueLifecyclePolicy;
   market_matching: MarketMatchingPolicy;
@@ -1461,6 +1467,7 @@ const policySchemas = {
   social: socialPolicyOverrideSchema,
   telegram_notifications: telegramNotificationsPolicySchema,
   venue_lifecycle: venueLifecyclePolicySchema,
+  hip4_read: hip4ReadPolicySchema,
   market_matching: marketMatchingPolicySchema,
 } as const;
 
@@ -2085,6 +2092,7 @@ function getDefaults(): IntelPolicyMap {
     social: DEFAULT_SOCIAL_POLICY,
     telegram_notifications: DEFAULT_TELEGRAM_NOTIFICATIONS_POLICY,
     venue_lifecycle: DEFAULT_VENUE_LIFECYCLE_POLICY,
+    hip4_read: DEFAULT_HIP4_READ_POLICY,
     market_matching: DEFAULT_MARKET_MATCHING_POLICY,
   };
 }
@@ -3381,6 +3389,8 @@ function normalizeMerged<K extends IntelPolicyKey>(
       return marketMatchingPolicySchema.parse(merged) as IntelPolicyMap[K];
     case "venue_lifecycle":
       return venueLifecyclePolicySchema.parse(merged) as IntelPolicyMap[K];
+    case "hip4_read":
+      return hip4ReadPolicySchema.parse(merged) as IntelPolicyMap[K];
     default:
       return merged;
   }
@@ -3497,7 +3507,8 @@ function resolveFromRow<K extends IntelPolicyKey>(
       key === "venue_lifecycle" ||
       key === "telegram_notifications" ||
       key === "signal_post_copy" ||
-      key === "social"
+      key === "social" ||
+      key === "hip4_read"
         ? "default"
         : "env") as PolicySource<K>,
       effectiveAt: null,
@@ -3531,7 +3542,8 @@ function resolveFromRow<K extends IntelPolicyKey>(
       key === "venue_lifecycle" ||
       key === "telegram_notifications" ||
       key === "signal_post_copy" ||
-      key === "social"
+      key === "social" ||
+      key === "hip4_read"
         ? "default"
         : "env") as PolicySource<K>,
       effectiveAt,
@@ -3635,6 +3647,7 @@ export async function resolveAllIntelPolicies(
       byKey.get("signal_post_copy") ?? null,
     ),
     social: resolveFromRow("social", byKey.get("social") ?? null),
+    hip4_read: resolveFromRow("hip4_read", byKey.get("hip4_read") ?? null),
     telegram_notifications: resolveFromRow(
       "telegram_notifications",
       byKey.get("telegram_notifications") ?? null,

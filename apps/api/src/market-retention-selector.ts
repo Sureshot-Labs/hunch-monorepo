@@ -6,6 +6,10 @@ import {
 } from "./services/matching-retention.js";
 import { pool } from "./db.js";
 import {
+  hip4DerivedReferencesSql,
+  hip4DerivedDeleteSql,
+} from "./services/hip4-retention.js";
+import {
   hasCliFlag as hasFlag,
   readCliValues as readValues,
   readPositiveInt,
@@ -759,6 +763,9 @@ export async function queryBatchSummary(
   args: Args,
 ): Promise<BatchSummaryRow[]> {
   const options = await protectedRefOptions(client);
+  const hip4Derived = (await relationExists(client, "public.hip4_read_markets"))
+    ? `${hip4DerivedReferencesSql("candidate_pool")} union all`
+    : "";
   const telegramTradeIntentsEphemeralDerived =
     options.includeTelegramTradeIntents
       ? telegramTradeIntentEphemeralDerivedSql("candidate_pool")
@@ -771,6 +778,7 @@ export async function queryBatchSummary(
     `
       ${candidateCte(options)},
       derived_refs as materialized (
+        ${hip4Derived}
         ${socialLikesDerivedRefsSql("candidate_pool")}
         union all
         ${
@@ -1188,6 +1196,13 @@ async function materializeDeletionSet(
 
 async function runMarketDeletes(client: PoolClient): Promise<DeleteCountRow[]> {
   const counts: DeleteCountRow[] = [];
+  if (await relationExists(client, "public.hip4_read_markets")) {
+    for (const table of ["hip4_public_trades", "hip4_read_markets"] as const) {
+      counts.push(
+        await deleteAndCount(client, table, hip4DerivedDeleteSql(table)),
+      );
+    }
+  }
   const [includeFundingLiquidityProjections, includeTelegramTradeIntents] =
     await Promise.all([
       relationExists(client, "public.funding_liquidity_projections"),
