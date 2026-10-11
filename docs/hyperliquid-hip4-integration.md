@@ -19,7 +19,7 @@ second redesign of the integration.
 | Old frontend prototype | `hip`: `d29c056d`, June 2026                                                |
 | Synchronized branches  | Backend `hip-next`: merge `7b3ed928`; frontend `hip-next`: merge `537910fb` |
 
-Read the companion [frontend specification](https://github.com/AmritKumar/Hunch_App/blob/hip-next/docs/hyperliquid-hip4-integration.md)
+Read the companion [frontend specification](https://github.com/Sureshot-Labs/Hunch_App/blob/hip-next/docs/hyperliquid-hip4-integration.md)
 for client contracts, product surfaces, and user interaction tests. Paths in this
 document refer to this repository unless another repository is named. Historical
 paths prefixed with `hip:` exist on the pinned old branch, not necessarily here.
