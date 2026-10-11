@@ -24,8 +24,13 @@ import {
 } from "../schemas/content.js";
 import { ContentError } from "./content-errors.js";
 import {
+  enqueueContentStorageDeletion as enqueueStorageDeletion,
+  stagingDeletionAvailableAt as computeStagingDeletionAvailableAt,
+} from "./content-asset-deletion.js";
+import {
   contentActorAdminId,
   normalizeContentActor,
+  userContentActor,
   type ContentActor,
   type ContentActorInput,
 } from "./content-actor.js";
@@ -51,6 +56,7 @@ type AssetRow = {
   focal_y: string | number | null;
   metadata: Record<string, unknown>;
   created_by_admin_id: string | null;
+  owner_user_id?: string | null;
   created_at: Date | string;
   updated_at: Date | string;
   ready_at: Date | string | null;
@@ -98,7 +104,7 @@ const ASSET_COLUMNS = `
   id, status, kind, storage_key, public_url, original_filename, mime_type,
   byte_size, width, height, duration_ms, checksum_sha256, default_alt,
   default_caption, credit_name, credit_url, focal_x, focal_y, metadata,
-  created_by_admin_id, created_at, updated_at, ready_at, deleted_at
+  created_by_admin_id, owner_user_id, created_at, updated_at, ready_at, deleted_at
 `;
 
 const ALLOWED_MIME_BY_KIND: Record<ContentAsset["kind"], Set<string>> = {
@@ -223,8 +229,8 @@ async function insertContentAssetAudit(
     `
       insert into content_audit_events (
         action, asset_id, actor_admin_id, actor_kind,
-        actor_service_principal_id, actor_label, metadata
-      ) values ($1, $2, $3, $4, $5, $6, $7::jsonb)
+        actor_service_principal_id, actor_label, metadata, actor_user_id
+      ) values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
     `,
     [
       input.action,
@@ -234,6 +240,7 @@ async function insertContentAssetAudit(
       input.actor.kind === "service" ? input.actor.id : null,
       input.actor.label,
       JSON.stringify(input.metadata ?? {}),
+      input.actor.kind === "user" ? input.actor.id : null,
     ],
   );
 }
@@ -295,7 +302,10 @@ function publicUrl(key: string): string {
     .join("/")}`;
 }
 
-function assertUploadPolicy(body: ContentAssetCreateBody) {
+function assertUploadPolicy(
+  body: ContentAssetCreateBody,
+  maximumBytes = MAX_BYTES_BY_KIND[body.kind],
+) {
   if (!ALLOWED_MIME_BY_KIND[body.kind].has(body.mimeType.toLowerCase())) {
     throw new ContentError(
       "content_asset_kind_mismatch",
@@ -303,10 +313,10 @@ function assertUploadPolicy(body: ContentAssetCreateBody) {
       422,
     );
   }
-  if (body.expectedByteSize > MAX_BYTES_BY_KIND[body.kind]) {
+  if (body.expectedByteSize > maximumBytes) {
     throw new ContentError(
       "content_asset_kind_mismatch",
-      `${body.kind} exceeds the ${MAX_BYTES_BY_KIND[body.kind]} byte limit`,
+      `${body.kind} exceeds the ${maximumBytes} byte limit`,
       413,
     );
   }
@@ -316,11 +326,22 @@ export async function createContentAssetUpload(
   pool: Pool,
   rawBody: ContentAssetCreateBody,
   actorInput: ContentActorInput,
+  userPolicy?: { maximumBytes: number; revision: string },
 ): Promise<ContentAssetUploadIntent> {
   const actor = normalizeContentActor(actorInput);
   const config = getContentServiceRuntime();
   const body = contentAssetCreateBodySchema.parse(rawBody);
-  assertUploadPolicy(body);
+  if (actor.kind === "user" && (!userPolicy || body.kind !== "image")) {
+    throw new ContentError(
+      "content_asset_kind_mismatch",
+      "A user image upload requires its policy",
+      400,
+    );
+  }
+  assertUploadPolicy(
+    body,
+    actor.kind === "user" ? userPolicy?.maximumBytes : undefined,
+  );
   const client = requireStorage();
   const assetId = randomUUID();
   const key = stagingStorageKey(assetId, body.mimeType);
@@ -344,15 +365,27 @@ export async function createContentAssetUpload(
     unhoistableHeaders: new Set([CONTENT_CHECKSUM_HEADER]),
   });
   const asset = await tx(pool, async (db) => {
+    if (actor.kind === "user") {
+      const owner = await db.query(
+        `select id from users where id=$1 and is_active and social_suspended_at is null for share`,
+        [actor.id],
+      );
+      if (!owner.rows[0])
+        throw new ContentError(
+          "content_asset_not_found",
+          "Profile unavailable",
+          403,
+        );
+    }
     const { rows } = await db.query<AssetRow>(
       `
         insert into content_assets (
           id, status, kind, storage_key, public_url, original_filename, mime_type,
           byte_size, checksum_sha256, default_alt, default_caption, credit_name,
-          credit_url, metadata, created_by_admin_id
+          credit_url, metadata, created_by_admin_id, owner_user_id
         ) values (
           $1, 'pending', $2, $3, null, $4, $5, $6, $7, $8, $9, $10, $11,
-          $12::jsonb, $13
+          $12::jsonb, $13, $14
         )
         returning ${ASSET_COLUMNS}
       `,
@@ -368,8 +401,14 @@ export async function createContentAssetUpload(
         body.defaultCaption ?? null,
         body.creditName ?? null,
         body.creditUrl ?? null,
-        JSON.stringify(body.metadata ?? {}),
+        JSON.stringify({
+          ...(actor.kind === "user"
+            ? { socialUploadPolicy: userPolicy }
+            : (body.metadata ?? {})),
+          uploadExpiresAt: expiresAt.toISOString(),
+        }),
         contentActorAdminId(actor),
+        actor.kind === "user" ? actor.id : null,
       ],
     );
     await insertContentAssetAudit(db, {
@@ -393,35 +432,11 @@ export async function createContentAssetUpload(
   };
 }
 
-async function enqueueStorageDeletion(
-  db: DbQuery,
-  key: string,
-  availableAt: Date = new Date(),
-): Promise<void> {
-  await db.query(
-    `
-      insert into content_storage_deletion_jobs (storage_key, available_at)
-      values ($1, $2)
-      on conflict (storage_key) do update
-      set
-        status = case
-          when content_storage_deletion_jobs.status = 'completed' then 'completed'
-          else 'pending'
-        end,
-        available_at = least(content_storage_deletion_jobs.available_at, excluded.available_at),
-        locked_at = null,
-        locked_by = null
-    `,
-    [key, availableAt],
-  );
-}
-
-function stagingDeletionAvailableAt(): Date {
-  // A presigned PUT is reusable until it expires. Deleting only immediately
-  // would let a holder recreate an orphaned staging object afterwards.
-  return new Date(
-    Date.now() + (getContentServiceRuntime().assetUploadTtlSec + 60) * 1_000,
-  );
+function stagingDeletionAvailableAt(metadata?: Record<string, unknown>): Date {
+  return computeStagingDeletionAvailableAt({
+    uploadTtlSec: getContentServiceRuntime().assetUploadTtlSec,
+    uploadExpiresAt: metadata?.uploadExpiresAt,
+  });
 }
 
 function encodedChecksum(checksumSha256: string): string {
@@ -528,14 +543,18 @@ async function failAssetVerification(
   stagingKey: string,
   targetKey: string,
   issues: string[],
+  promotionAttempted = false,
 ): Promise<void> {
   await tx(pool, async (db) => {
-    const { rows } = await db.query<{ id: string }>(
+    const { rows } = await db.query<{
+      id: string;
+      metadata: Record<string, unknown>;
+    }>(
       `
         update content_assets
         set status = 'failed', metadata = metadata || $2::jsonb
         where id = $1 and status = 'verifying'
-        returning id
+        returning id,metadata
       `,
       [assetId, JSON.stringify({ completionIssues: issues })],
     );
@@ -543,15 +562,19 @@ async function failAssetVerification(
       await enqueueStorageDeletion(
         db,
         stagingKey,
-        stagingDeletionAvailableAt(),
+        stagingDeletionAvailableAt(rows[0].metadata),
       );
-      await enqueueStorageDeletion(db, targetKey);
+      await enqueueStorageDeletion(db, targetKey, new Date(), {
+        reopenAfterPossibleWrite: promotionAttempted,
+      });
       return;
     }
-    const { rows: currentRows } = await db.query<{ status: string }>(
-      "select status from content_assets where id = $1",
-      [assetId],
-    );
+    const { rows: currentRows } = await db.query<{
+      status: string;
+      metadata: Record<string, unknown>;
+    }>("select status,metadata from content_assets where id = $1 for update", [
+      assetId,
+    ]);
     // A COMMIT acknowledgement can be lost after the database has already
     // made the asset ready. Never delete the promoted public object in that
     // ambiguous state; deleting the staging source remains safe/idempotent.
@@ -559,11 +582,27 @@ async function failAssetVerification(
       await enqueueStorageDeletion(
         db,
         stagingKey,
-        stagingDeletionAvailableAt(),
+        stagingDeletionAvailableAt(currentRows[0].metadata),
+      );
+      return;
+    }
+    if (promotionAttempted) {
+      // Account deletion/stale reclaim can remove this object while CopyObject
+      // is still in flight. A later completed copy needs a fresh cleanup even
+      // when the earlier deletion job completed, or the asset row is gone.
+      await enqueueStorageDeletion(db, targetKey, new Date(), {
+        reopenAfterPossibleWrite: true,
+      });
+      await enqueueStorageDeletion(
+        db,
+        stagingKey,
+        stagingDeletionAvailableAt(currentRows[0]?.metadata),
       );
     }
   });
 }
+
+class AssetVerificationOwnerChanged extends Error {}
 
 export async function completeContentAssetUpload(
   pool: Pool,
@@ -580,7 +619,11 @@ export async function completeContentAssetUpload(
       [assetId],
     );
     const existing = rows[0];
-    if (!existing || existing.status === "deleted") {
+    if (
+      !existing ||
+      existing.status === "deleted" ||
+      (actor.kind === "user" && existing.owner_user_id !== actor.id)
+    ) {
       throw new ContentError(
         "content_asset_not_found",
         "Content asset not found",
@@ -767,6 +810,18 @@ export async function completeContentAssetUpload(
       throw new Error("Promoted object failed immutable copy verification");
     }
     return await tx(pool, async (db) => {
+      // Lifecycle operations lock users before assets. Follow that order, and
+      // resolve the current owner after the remote copy: a merge may have
+      // transferred this upload and removed the requesting account meanwhile.
+      let readyActor = actor;
+      if (actor.kind === "user") {
+        const { rows: owners } = await db.query<{ id: string }>(
+          `select id from users where id=(select owner_user_id from content_assets where id=$1) for key share`,
+          [assetId],
+        );
+        if (!owners[0]) throw new AssetVerificationOwnerChanged();
+        readyActor = userContentActor(owners[0].id);
+      }
       const { rows: updatedRows } = await db.query<AssetRow>(
         `
           update content_assets
@@ -783,6 +838,7 @@ export async function completeContentAssetUpload(
             deleted_at = null,
             metadata = metadata - 'verificationTargetKey' - 'completionIssues'
           where id = $1 and status = 'verifying'
+            and ($8::uuid is null or owner_user_id=$8)
           returning ${ASSET_COLUMNS}
         `,
         [
@@ -793,9 +849,11 @@ export async function completeContentAssetUpload(
           checksumSha256,
           verifiedWidth,
           verifiedHeight,
+          readyActor.kind === "user" ? readyActor.id : null,
         ],
       );
       if (!updatedRows[0]) {
+        if (actor.kind === "user") throw new AssetVerificationOwnerChanged();
         throw new ContentError(
           "content_asset_busy",
           "Content asset changed while verification was in progress",
@@ -805,23 +863,48 @@ export async function completeContentAssetUpload(
       await enqueueStorageDeletion(
         db,
         existing.storage_key,
-        stagingDeletionAvailableAt(),
+        stagingDeletionAvailableAt(existing.metadata),
       );
       await insertContentAssetAudit(db, {
         action: "asset.ready",
         assetId,
-        actor,
+        actor: readyActor,
       });
       return assetFromRow(updatedRows[0]);
     });
   } catch (error) {
+    if (error instanceof AssetVerificationOwnerChanged) {
+      // Ownership can change while waiting for the user lock. Preserve the
+      // verified bytes and let the current owner retry instead of permanently
+      // failing/erasing a valid transferred avatar. Deleted assets still take
+      // the normal late-copy cleanup path below.
+      const reset = await pool.query(
+        `update content_assets set status='pending' where id=$1 and status='verifying'
+          and storage_key=$2 and metadata->>'verificationTargetKey'=$3 returning id`,
+        [assetId, existing.storage_key, targetKey],
+      );
+      if (reset.rowCount) {
+        throw new ContentError(
+          "content_asset_busy",
+          "Asset ownership changed; retry completion from the current account",
+          409,
+        );
+      }
+    }
     await failAssetVerification(
       pool,
       assetId,
       existing.storage_key,
       targetKey,
       ["asset promotion failed"],
+      true,
     );
+    if (error instanceof AssetVerificationOwnerChanged)
+      throw new ContentError(
+        "content_asset_busy",
+        "Content asset changed while verification was in progress",
+        409,
+      );
     if (error instanceof ContentError) throw error;
     throw new ContentError(
       "content_asset_not_ready",
@@ -989,7 +1072,10 @@ export async function deleteContentAsset(
       [assetId],
     );
     const existing = rows[0];
-    if (!existing) {
+    if (
+      !existing ||
+      (actor.kind === "user" && existing.owner_user_id !== actor.id)
+    ) {
       throw new ContentError(
         "content_asset_not_found",
         "Content asset not found",
@@ -1005,13 +1091,14 @@ export async function deleteContentAsset(
       );
     }
     const { rows: usageRows } = await db.query<{ count: string }>(
-      "select count(*)::text as count from content_asset_usages where asset_id = $1",
+      `select ((select count(*) from content_asset_usages where asset_id = $1)
+        + (select count(*) from users where avatar_asset_id = $1))::text as count`,
       [assetId],
     );
     if (Number(usageRows[0]?.count ?? 0) > 0) {
       throw new ContentError(
         "content_asset_in_use",
-        "Content asset is referenced by an article draft or version",
+        "Content asset is referenced by an article or profile",
         409,
       );
     }
@@ -1028,7 +1115,7 @@ export async function deleteContentAsset(
       db,
       existing.storage_key,
       existing.storage_key.startsWith("content-staging/")
-        ? stagingDeletionAvailableAt()
+        ? stagingDeletionAvailableAt(existing.metadata)
         : new Date(),
     );
     const verificationTarget = existing.metadata.verificationTargetKey;
@@ -1091,7 +1178,13 @@ export async function reclaimStaleContentAssetUploads(
         `,
         [row.id],
       );
-      await enqueueStorageDeletion(db, row.storage_key);
+      await enqueueStorageDeletion(
+        db,
+        row.storage_key,
+        row.storage_key.startsWith("content-staging/")
+          ? stagingDeletionAvailableAt(row.metadata)
+          : new Date(),
+      );
       const target = row.metadata.verificationTargetKey;
       if (typeof target === "string" && target) {
         await enqueueStorageDeletion(db, target);

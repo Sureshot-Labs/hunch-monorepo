@@ -2,6 +2,7 @@ import {
   isAbortError,
   isRpcRateLimit,
   normalizeHunchVenue,
+  parsePolymarketMarketAssets,
   type HunchVenue,
 } from "@hunch/shared";
 import { ethers } from "ethers";
@@ -19,6 +20,13 @@ import {
   fetchWithWalletIntelRetry,
   type WalletIntelRetryTelemetry,
 } from "./wallet-intel-retry.js";
+import {
+  fetchPolymarketDataApiV2Page,
+  parsePolymarketDataApiV2HolderGroup,
+  polymarketDataApiV2HolderParams,
+  type PolymarketDataApiPage,
+  type PolymarketDataApiV2HolderGroup,
+} from "./polymarket-data-api-v2.js";
 
 export type MarketRow = {
   id: string;
@@ -32,6 +40,7 @@ export type MarketRow = {
   best_bid: string | null;
   best_ask: string | null;
   last_price: string | null;
+  metadata?: Record<string, unknown> | null;
 };
 
 export type TokenRow = {
@@ -197,54 +206,74 @@ function parseNumber(value: unknown): number | null {
   return null;
 }
 
-async function fetchPolymarketHolders(inputs: {
+export async function fetchPolymarketHolders(inputs: {
   conditionId: string;
   limit: number;
+  tokenIds: string[];
   telemetry?: WalletIntelRetryTelemetry | null;
-}): Promise<{ wallet: string; outcomeIndex: number; shares: number }[]> {
-  const url = new URL("/holders", env.polymarketDataApiBase);
-  url.searchParams.set("limit", String(inputs.limit));
-  url.searchParams.set("minBalance", "1");
-  url.searchParams.set("market", inputs.conditionId);
-
-  const response = await fetchWithWalletIntelRetry({
-    url: url.toString(),
-    init: { method: "GET" },
-    timeoutMs: HOLDERS_TIMEOUT_MS,
-    allowRetry: true,
-    telemetry: inputs.telemetry,
-  });
-  if (!response.ok) {
-    throw new Error(`Polymarket holders failed: ${response.status}`);
-  }
-  const payload = (await response.json()) as unknown;
-  const entries = Array.isArray(payload) ? payload : [];
-  const results: {
-    wallet: string;
-    outcomeIndex: number;
-    shares: number;
-  }[] = [];
-
-  for (const token of entries) {
-    if (!isRecord(token)) continue;
-    const holders = Array.isArray(token.holders) ? token.holders : [];
-    for (const holder of holders) {
-      if (!isRecord(holder)) continue;
-      const wallet = pickHolderWallet(holder);
-      if (!wallet) continue;
-      const shares = parseNumber(holder.amount);
-      if (shares == null || shares <= 0) continue;
-      const outcomeIndex = parseNumber(holder.outcomeIndex);
-      if (outcomeIndex == null) continue;
-      results.push({
-        wallet,
-        outcomeIndex: Math.round(outcomeIndex),
-        shares,
+}): Promise<
+  { tokenId: string; wallet: string; outcomeIndex: number; shares: number }[]
+> {
+  // Intentional top-N ranking, not a claim of complete wallet inventory.
+  const params = polymarketDataApiV2HolderParams(
+    inputs.conditionId,
+    Math.min(100, inputs.limit),
+  );
+  const signal = AbortSignal.timeout(HOLDERS_TIMEOUT_MS);
+  const deadline = Date.now() + HOLDERS_TIMEOUT_MS;
+  let cursor: string | null = null;
+  const seenCursors = new Set<string>();
+  const results = new Map<
+    string,
+    { tokenId: string; wallet: string; outcomeIndex: number; shares: number }
+  >();
+  const counts = new Map<string, number>();
+  // The serving board is not an atomic snapshot. Deduplicate repeated rows;
+  // a bounded incomplete walk is an error, never a fabricated empty ranking.
+  for (let pageNumber = 0; pageNumber < 20; pageNumber++) {
+    const page: PolymarketDataApiPage<PolymarketDataApiV2HolderGroup> =
+      await fetchPolymarketDataApiV2Page({
+        baseUrl: env.polymarketDataApiBase,
+        endpoint: "holders",
+        params,
+        cursor,
+        signal,
+        parseRow: parsePolymarketDataApiV2HolderGroup,
+        timeoutMs: Math.max(1, deadline - Date.now()),
+        fetchImpl: (url, init) =>
+          fetchWithWalletIntelRetry({
+            url: String(url),
+            init: init ?? {},
+            timeoutMs: Math.max(1, deadline - Date.now()),
+            allowRetry: false,
+            telemetry: inputs.telemetry,
+          }),
       });
-    }
+    for (const group of page.data)
+      for (const holder of group.holders) {
+        if (
+          !inputs.tokenIds.includes(group.tokenId) ||
+          holder.shares <= 0 ||
+          (counts.get(group.tokenId) ?? 0) >= inputs.limit
+        )
+          continue;
+        const key = `${group.tokenId}:${holder.wallet.toLowerCase()}`;
+        if (!results.has(key)) {
+          results.set(key, { tokenId: group.tokenId, ...holder });
+          counts.set(group.tokenId, (counts.get(group.tokenId) ?? 0) + 1);
+        }
+      }
+    if (
+      page.nextCursor === null ||
+      inputs.tokenIds.every((token) => (counts.get(token) ?? 0) >= inputs.limit)
+    )
+      return [...results.values()];
+    if (seenCursors.has(page.nextCursor))
+      throw new Error("Polymarket holders repeated a cursor.");
+    seenCursors.add(page.nextCursor);
+    cursor = page.nextCursor;
   }
-
-  return results;
+  throw new Error("Polymarket holders exceeded its bounded top-N walk.");
 }
 
 async function fetchAlchemyOwners(inputs: {
@@ -447,7 +476,7 @@ async function loadMarketHolderContexts(
   const { rows: markets } = await db.query<MarketRow>(
     `
       select id, venue, title, outcomes, condition_id, token_yes, token_no, clob_token_ids,
-             best_bid, best_ask, last_price
+             best_bid, best_ask, last_price, metadata
       from unified_markets
       where id = any($1::text[])
     `,
@@ -690,7 +719,7 @@ export async function fetchMarketHolderData(inputs: {
   const { rows: markets } = await db.query<MarketRow>(
     `
       select id, venue, title, outcomes, condition_id, token_yes, token_no, clob_token_ids,
-             best_bid, best_ask, last_price
+             best_bid, best_ask, last_price, metadata
       from unified_markets
       where id = $1
     `,
@@ -822,12 +851,21 @@ export async function fetchMarketHolderData(inputs: {
       const holders = await fetchPolymarketHolders({
         conditionId: market.condition_id,
         limit: Math.min(inputs.limit, POLYMARKET_HOLDER_LIMIT_MAX),
+        tokenIds,
         telemetry: inputs.telemetry?.holdersPolymarket ?? null,
       });
       for (const holder of holders) {
         let side: "YES" | "NO" | null = null;
-        if (holder.outcomeIndex === 0) side = "YES";
-        if (holder.outcomeIndex === 1) side = "NO";
+        if (
+          holder.tokenId === yesToken &&
+          (holder.outcomeIndex === 0 || holder.outcomeIndex === 999)
+        )
+          side = "YES";
+        if (
+          holder.tokenId === noToken &&
+          (holder.outcomeIndex === 1 || holder.outcomeIndex === 999)
+        )
+          side = "NO";
         if (!side) continue;
         holderEntries.push({
           wallet: holder.wallet,
@@ -850,7 +888,12 @@ export async function fetchMarketHolderData(inputs: {
           : env.alchemyBaseNftBaseUrl;
       const contractAddress =
         market.venue === "polymarket"
-          ? env.polymarketConditionalTokensAddress
+          ? (parsePolymarketMarketAssets(market.metadata?.polymarketProtocol)
+              ?.positionContract ??
+            (market.metadata?.version != null &&
+            market.metadata.version !== "v1"
+              ? null
+              : env.polymarketConditionalTokensAddress))
           : env.limitlessConditionalTokensAddress;
       if (baseUrl && contractAddress) {
         source = "alchemy";

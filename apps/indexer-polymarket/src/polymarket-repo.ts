@@ -83,6 +83,9 @@ function eventRawBusinessProjectionSql(alias: string): string {
 
 function marketRawBusinessProjectionSql(alias: string): string {
   return `jsonb_build_object(
+    'version', ${alias}.raw->'version',
+    'positionIds', ${alias}.raw->'positionIds',
+    'resolutionStatus', ${alias}.raw->'resolutionStatus',
     'makerBaseFee', ${alias}.raw->'makerBaseFee',
     'takerBaseFee', ${alias}.raw->'takerBaseFee',
     'maker_fee_bps', ${alias}.raw->'maker_fee_bps',

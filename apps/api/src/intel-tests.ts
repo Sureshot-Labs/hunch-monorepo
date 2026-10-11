@@ -3110,6 +3110,12 @@ const tests: TestCase[] = [
               rows: [{ token_id: "1" }, { token_id: "10" }],
             };
           }
+          if (
+            sql.includes("from polymarket_asset_bindings") ||
+            sql.includes("join unified_tokens token_row") ||
+            sql.includes("position_contract, asset_context from positions")
+          )
+            return { rows: [] };
           throw new Error(`Unexpected query in test: ${sql.slice(0, 60)}`);
         },
       } as unknown as import("@hunch/infra").Pool;
@@ -4594,7 +4600,23 @@ const tests: TestCase[] = [
       assert.match(queries[0]?.sql ?? "", /wallet_position_exposure/);
       assert.match(queries[0]?.sql ?? "", /open_positions_version = 1/);
       assert.match(queries[0]?.sql ?? "", /jsonb_to_recordset/);
-      assert.match(queries[0]?.sql ?? "", /join unified_tokens/);
+      const sql = queries[0]?.sql ?? "";
+      assert.match(sql, /join lateral/);
+      assert.match(sql, /from unified_tokens current_token/);
+      assert.match(sql, /current_token\.market_id = position\."marketId"/);
+      assert.match(sql, /current_token\.side = position\."outcomeSide"/);
+      assert.match(sql, /current_token\.venue = subject\.venue/);
+      assert.match(sql, /union\s+select binding_row\.asset_id as token_id/);
+      assert.match(sql, /from polymarket_asset_bindings binding_row/);
+      assert.match(
+        sql,
+        /subject\.venue = 'polymarket' and binding_row\.chain_id = 137/,
+      );
+      assert.match(sql, /binding_row\.market_id = position\."marketId"/);
+      assert.match(
+        sql,
+        /binding_row\.outcome_index = case position\."outcomeSide" when 'YES' then 0 when 'NO' then 1 end/,
+      );
       assert.doesNotMatch(
         queries[0]?.sql ?? "",
         /wallet_position_snapshots|metadata->>|snapshot_at/,
@@ -4664,6 +4686,22 @@ const tests: TestCase[] = [
       const client = {
         query: async (sql: string, params: unknown[] = []) => {
           queries.push({ params, sql });
+          if (sql.includes("from resolved_assets resolved_asset"))
+            return {
+              rows: [
+                {
+                  token_id: "token-1",
+                  position_contract: "",
+                  current_token_id: "token-1",
+                  market_id: "polymarket:market-1",
+                  outcome_side: "YES",
+                  best_bid: "0.5",
+                  best_ask: "0.5",
+                  mid: null,
+                  last_price: null,
+                },
+              ],
+            };
           if (
             sql.includes("from wallets w") &&
             sql.includes("join positions hp")
@@ -4858,7 +4896,20 @@ const tests: TestCase[] = [
         const url = new URL(String(input));
         if (url.hostname === "poly-data.example") {
           return new Response(
-            JSON.stringify([{ asset: "123", avgPrice: "0.42" }]),
+            JSON.stringify({
+              data: [
+                {
+                  token_id: "123",
+                  proxy_wallet: "0x1111111111111111111111111111111111111111",
+                  condition_id: `0x${"ab".repeat(32)}`,
+                  current_size: 5,
+                  avg_price: 0.42,
+                  outcome_index: 0,
+                  redeemable: false,
+                },
+              ],
+              pagination: { next_cursor: null },
+            }),
             { status: 200, headers: { "content-type": "application/json" } },
           );
         }
@@ -4881,13 +4932,15 @@ const tests: TestCase[] = [
             assert.deepEqual(params[0], ["123"]);
             return { rows: [], rowCount: 1 };
           }
-          if (sql.includes("unified_tokens ut")) {
+          if (sql.includes("from resolved_assets resolved_asset")) {
             return {
               rows: [
                 {
                   token_id: "123",
+                  position_contract: "",
+                  current_token_id: "123",
                   market_id: "polymarket:outside-market",
-                  side: "YES",
+                  outcome_side: "YES",
                   best_bid: "0.2",
                   best_ask: "0.4",
                   mid: null,
@@ -5381,20 +5434,26 @@ const tests: TestCase[] = [
       let requestedLimit: string | null = null;
       globalThis.fetch = async (input) => {
         const url = new URL(String(input));
-        assert.equal(url.pathname, "/holders");
+        assert.equal(url.pathname, "/v2/holders");
+        assert.equal(url.searchParams.get("include_pnl"), "true");
         requestedLimit = url.searchParams.get("limit");
         return new Response(
-          JSON.stringify([
-            {
-              holders: [
-                {
-                  proxyWallet: "0x1111111111111111111111111111111111111111",
-                  outcomeIndex: 0,
-                  amount: "10",
-                },
-              ],
-            },
-          ]),
+          JSON.stringify({
+            data: [
+              {
+                token_id: "123",
+                holders: [
+                  {
+                    token_id: "123",
+                    proxy_wallet: "0x1111111111111111111111111111111111111111",
+                    outcome_index: 0,
+                    amount: "10",
+                  },
+                ],
+              },
+            ],
+            pagination: { next_cursor: null },
+          }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       };
@@ -5411,9 +5470,9 @@ const tests: TestCase[] = [
                   title: "Test market",
                   outcomes: JSON.stringify(["YES", "NO"]),
                   condition_id: "condition-1",
-                  token_yes: "yes-token",
-                  token_no: "no-token",
-                  clob_token_ids: null,
+                  token_yes: "123",
+                  token_no: "456",
+                  clob_token_ids: '["123","456"]',
                   best_bid: "0.45",
                   best_ask: "0.55",
                   last_price: "0.5",
@@ -5425,8 +5484,8 @@ const tests: TestCase[] = [
           if (queryCount === 3) {
             return {
               rows: [
-                { token_id: "yes-token", best_bid: "0.45", best_ask: "0.55" },
-                { token_id: "no-token", best_bid: "0.45", best_ask: "0.55" },
+                { token_id: "123", best_bid: "0.45", best_ask: "0.55" },
+                { token_id: "456", best_bid: "0.45", best_ask: "0.55" },
               ],
             };
           }
@@ -5455,21 +5514,26 @@ const tests: TestCase[] = [
       let requestedLimit: string | null = null;
       globalThis.fetch = async (input) => {
         const url = new URL(String(input));
-        if (url.pathname === "/holders") {
+        if (url.pathname === "/v2/holders") {
           requestedLimit = url.searchParams.get("limit");
         }
         return new Response(
-          JSON.stringify([
-            {
-              holders: [
-                {
-                  proxyWallet: "0x1111111111111111111111111111111111111111",
-                  outcomeIndex: 0,
-                  amount: "10",
-                },
-              ],
-            },
-          ]),
+          JSON.stringify({
+            data: [
+              {
+                token_id: "123",
+                holders: [
+                  {
+                    token_id: "123",
+                    proxy_wallet: "0x1111111111111111111111111111111111111111",
+                    outcome_index: 0,
+                    amount: "10",
+                  },
+                ],
+              },
+            ],
+            pagination: { next_cursor: null },
+          }),
           {
             status: 200,
             headers: { "content-type": "application/json" },
@@ -5489,9 +5553,9 @@ const tests: TestCase[] = [
                   title: "Test market",
                   outcomes: JSON.stringify(["YES", "NO"]),
                   condition_id: "condition-1",
-                  token_yes: "yes-token",
-                  token_no: "no-token",
-                  clob_token_ids: null,
+                  token_yes: "123",
+                  token_no: "456",
+                  clob_token_ids: '["123","456"]',
                   best_bid: "0.45",
                   best_ask: "0.55",
                   last_price: "0.5",
@@ -5503,8 +5567,8 @@ const tests: TestCase[] = [
           if (queryCount === 3) {
             return {
               rows: [
-                { token_id: "yes-token", best_bid: "0.45", best_ask: "0.55" },
-                { token_id: "no-token", best_bid: "0.45", best_ask: "0.55" },
+                { token_id: "123", best_bid: "0.45", best_ask: "0.55" },
+                { token_id: "456", best_bid: "0.45", best_ask: "0.55" },
               ],
             };
           }
@@ -5519,7 +5583,10 @@ const tests: TestCase[] = [
           liveVenues: ["polymarket"],
           client: client as never,
         });
-        assert.equal(requestedLimit, String(POLYMARKET_HOLDER_LIMIT_MAX));
+        assert.equal(
+          requestedLimit,
+          String(Math.min(POLYMARKET_HOLDER_LIMIT_MAX, 100)),
+        );
       } finally {
         globalThis.fetch = originalFetch;
       }

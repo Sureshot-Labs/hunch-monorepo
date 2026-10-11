@@ -13,6 +13,8 @@ export const tradesQuerySchema = z
       .optional()
       .transform((v) => (v && v.length ? v : undefined)),
     tokenIds: zCsvString("tokenIds is required").optional(),
+    paginationMode: z.enum(["offset", "cursor"]).default("offset"),
+    cursor: z.string().min(1).max(8192).optional(),
     limit: z.coerce
       .number()
       .int()
@@ -26,4 +28,19 @@ export const tradesQuerySchema = z
   })
   .refine((v) => Boolean(v.eventId || v.marketId || v.tokenIds?.length), {
     message: "eventId, marketId, or tokenIds is required",
-  });
+  })
+  .refine((v) => v.cursor == null || v.paginationMode === "cursor", {
+    message: "cursor requires cursor pagination",
+  })
+  .refine(
+    (v) =>
+      v.paginationMode !== "cursor" ||
+      (v.offset === 0 &&
+        !v.tokenIds?.length &&
+        (!v.eventId || v.eventId.startsWith("polymarket:")) &&
+        (!v.marketId || v.marketId.startsWith("polymarket:"))),
+    {
+      message:
+        "cursor pagination requires a Polymarket event/market scope without offset or tokenIds",
+    },
+  );

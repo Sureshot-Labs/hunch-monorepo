@@ -1,4 +1,10 @@
 import type { Pool, PoolClient } from "@hunch/infra";
+import {
+  positionAssetKey,
+  positionStorageContract,
+} from "../lib/position-asset-context.js";
+import { readPolymarketStoredOrderContext } from "./polymarket-asset-context.js";
+import { loadPolymarketHoldingMarkRows } from "./polymarket-holding-marks.js";
 import { normalizeWalletForStorage } from "../lib/wallet-address.js";
 import type { PgParams } from "../server-types.js";
 import {
@@ -23,11 +29,13 @@ const COMPLETED_EXECUTION_STATUS_SET = new Set<string>(
 
 type PositionSnapshot = {
   tokenId: string;
+  positionContract?: string;
   size: number;
 };
 
 type TradeFill = {
   tokenId: string;
+  positionContract?: string;
   side: "BUY" | "SELL";
   shares: number;
   usdc: number;
@@ -260,6 +268,11 @@ function buildPolymarketFill(row: {
 
   return {
     tokenId: row.token_id,
+    positionContract: positionStorageContract({
+      venue: "polymarket",
+      tokenId: row.token_id,
+      assetContext: readPolymarketStoredOrderContext(row.order_payload),
+    }),
     side,
     shares,
     usdc,
@@ -528,9 +541,13 @@ async function fetchPositionSnapshots(
   inputs: { userId: string; walletAddress: string; venue: string },
 ): Promise<PositionSnapshot[]> {
   const walletAddress = normalizeWalletForStorage(inputs.walletAddress);
-  const { rows } = await db.query<{ token_id: string; size: string }>(
+  const { rows } = await db.query<{
+    token_id: string;
+    size: string;
+    position_contract?: string;
+  }>(
     `
-      select token_id, size
+      select token_id, size, position_contract
       from positions
       where user_id = $1
         and (wallet_address is null or wallet_address = $2)
@@ -543,6 +560,7 @@ async function fetchPositionSnapshots(
 
   return rows.map((row) => ({
     tokenId: row.token_id,
+    positionContract: row.position_contract,
     size: parseNumber(row.size) ?? 0,
   }));
 }
@@ -795,7 +813,20 @@ export async function recomputePositionMetricsForWalletInTx(
   if (positions.length === 0) return;
 
   const tokenIds = positions.map((pos) => pos.tokenId);
-  const marks = await fetchMarksByToken(db, tokenIds);
+  const marks =
+    inputs.venue === "polymarket"
+      ? new Map(
+          [
+            ...(await loadPolymarketHoldingMarkRows(db, positions)).entries(),
+          ].map(([key, row]) => [
+            key,
+            resolveResolvedMark(row) ??
+              parseNumber(row.best_bid) ??
+              parseNumber(row.mid) ??
+              parseNumber(row.best_ask),
+          ]),
+        )
+      : await fetchMarksByToken(db, tokenIds);
   const fills =
     inputs.venue === "polymarket"
       ? await fetchPolymarketFills(db, {
@@ -817,14 +848,23 @@ export async function recomputePositionMetricsForWalletInTx(
 
   const fillsByToken = new Map<string, TradeFill[]>();
   for (const fill of fills) {
-    const list = fillsByToken.get(fill.tokenId) ?? [];
+    const key = positionAssetKey(fill.tokenId, fill.positionContract);
+    const list = fillsByToken.get(key) ?? [];
     list.push(fill);
-    fillsByToken.set(fill.tokenId, list);
+    fillsByToken.set(key, list);
   }
 
   const metrics = positions.map((position) => {
-    const tokenFills = fillsByToken.get(position.tokenId) ?? [];
-    const markPrice = marks.get(position.tokenId) ?? null;
+    const tokenFills =
+      fillsByToken.get(
+        positionAssetKey(position.tokenId, position.positionContract),
+      ) ?? [];
+    const markPrice =
+      marks.get(
+        inputs.venue === "polymarket"
+          ? positionAssetKey(position.tokenId, position.positionContract)
+          : position.tokenId,
+      ) ?? null;
     const {
       averagePrice,
       realizedPnl,
@@ -843,6 +883,7 @@ export async function recomputePositionMetricsForWalletInTx(
 
     return {
       tokenId: position.tokenId,
+      positionContract: position.positionContract,
       averagePrice: averagePriceValue,
       realizedPnl: reliable ? realizedPnl : 0,
       unrealizedPnl: reliable ? unrealizedPnl : 0,

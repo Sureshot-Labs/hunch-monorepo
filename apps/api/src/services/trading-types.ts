@@ -1,3 +1,6 @@
+import type { PolymarketAssetContext } from "@hunch/shared";
+import type { SocialSourceRef } from "../schemas/social-trade.js";
+
 export type TradingVenue = "kalshi" | "limitless" | "polymarket";
 export type ExternalTradingVenue = string & {
   readonly __externalTradingVenue: unique symbol;
@@ -40,6 +43,7 @@ export type VenueTradingCapabilities = {
 };
 
 export type TradeTarget = {
+  assetContext?: PolymarketAssetContext;
   venue: TradingVenue;
   marketId: string | null;
   venueMarketId: string | null;
@@ -51,6 +55,9 @@ export type TradeTarget = {
 };
 
 export type TradingReadinessInput = {
+  /** Frozen generation for a reviewed trade whose balance check is deferred
+   * to prepare (notably Telegram SELL). This is not submission authority. */
+  assetContext?: PolymarketAssetContext;
   actor: TradeActor;
   venue: TradingVenue;
   executionAuthorization?: TradeExecutionAuthorization | null;
@@ -111,6 +118,7 @@ export type EnsureReadinessResult = {
 };
 
 export type TradeIntent = {
+  sourceRef?: SocialSourceRef;
   id?: string | null;
   actor: TradeActor;
   venue: TradingVenue;
@@ -200,6 +208,13 @@ export type PreparedTrade = {
 };
 
 export type TradeSubmitLifecycleCallbacks = {
+  /** Provider explicitly rejected the first request before accepting this order. */
+  onDefinitiveTradeRejection?: () => Promise<void> | void;
+  /** Exact, verified identity. Runs before bytes/order are submitted. */
+  onBeforeTradeSubmission?: (input: {
+    providerReference: string;
+    preparedFingerprint: string;
+  }) => Promise<void> | void;
   onBroadcastSubmitted?: (submitResult: SubmitResult) => Promise<void> | void;
   onBeforeBroadcast?: () => Promise<void> | void;
   onSetupTransactionSubmitted?: (input: {

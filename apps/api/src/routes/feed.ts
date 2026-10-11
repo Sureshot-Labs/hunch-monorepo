@@ -50,6 +50,10 @@ import {
 } from "../repos/unified-read.js";
 import { filterVenuesForLifecycleCapability } from "../services/venue-lifecycle.js";
 import { selectDiscoveryIds } from "../services/discovery-selection.js";
+import {
+  fetchUserMarketInteractions,
+  type UserMarketInteractionRow as ForYouInteractionRow,
+} from "../repos/user-market-interactions.js";
 
 const FOR_YOU_MIN_VOLUME_24H = 100;
 const FOR_YOU_MIN_LIQUIDITY = 1000;
@@ -75,16 +79,6 @@ function applyFeedCacheHeaders(input: {
   input.reply.header("x-cache-layer", input.hit ? "redis" : "none");
   input.reply.header("x-cache-status", input.cacheStatus);
 }
-
-type ForYouInteractionRow = {
-  market_id: string;
-  ts: Date | string | number | null;
-  weight: number;
-  event_id: string;
-  market_status: string | null;
-  event_status: string | null;
-  end_date: Date | string | number | null;
-};
 
 type ForYouEventFilterMode = "volume_or_liquidity" | "volume_only" | "none";
 
@@ -1116,39 +1110,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const nowMs = Date.now();
-      const { rows: interactionRows } = await pool.query<ForYouInteractionRow>(
-        `
-        with interactions as (
-          select w.user_id, w.market_id, w.created_at as ts, 3 as weight
-          from user_watchlist w
-          where w.user_id = $1
-          union all
-          select o.user_id, ut.market_id, o.posted_at as ts, 2 as weight
-          from orders o
-          join unified_tokens ut on ut.token_id = o.token_id
-          where o.user_id = $1
-          union all
-          select p.user_id, ut.market_id, p.last_updated_at as ts, 1 as weight
-          from positions p
-          join unified_tokens ut on ut.token_id = p.token_id
-          where p.user_id = $1
-            and p.position_scope = 'own'
-        )
-        select
-          i.market_id,
-          i.ts,
-          i.weight,
-          m.event_id,
-          m.status as market_status,
-          e.status as event_status,
-          e.end_date
-        from interactions i
-        join unified_markets m on m.id = i.market_id
-        join unified_events e on e.id = m.event_id
-        where i.ts is not null;
-        `,
-        [user.id],
-      );
+      const interactionRows = await fetchUserMarketInteractions(pool, user.id);
 
       const activeInteractions: ForYouInteractionRow[] = [];
       const activeEventIds = new Set<string>();
@@ -1255,39 +1217,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const ageWithinHours = query.age_within_hours;
       const search = query.q;
 
-      const { rows: interactionRows } = await pool.query<ForYouInteractionRow>(
-        `
-        with interactions as (
-          select w.user_id, w.market_id, w.created_at as ts, 3 as weight
-          from user_watchlist w
-          where w.user_id = $1
-          union all
-          select o.user_id, ut.market_id, o.posted_at as ts, 2 as weight
-          from orders o
-          join unified_tokens ut on ut.token_id = o.token_id
-          where o.user_id = $1
-          union all
-          select p.user_id, ut.market_id, p.last_updated_at as ts, 1 as weight
-          from positions p
-          join unified_tokens ut on ut.token_id = p.token_id
-          where p.user_id = $1
-            and p.position_scope = 'own'
-        )
-        select
-          i.market_id,
-          i.ts,
-          i.weight,
-          m.event_id,
-          m.status as market_status,
-          e.status as event_status,
-          e.end_date
-        from interactions i
-        join unified_markets m on m.id = i.market_id
-        join unified_events e on e.id = m.event_id
-        where i.ts is not null;
-        `,
-        [user.id],
-      );
+      const interactionRows = await fetchUserMarketInteractions(pool, user.id);
 
       const activeInteractions: ForYouInteractionRow[] = [];
       const interactedEventIds = new Set<string>();

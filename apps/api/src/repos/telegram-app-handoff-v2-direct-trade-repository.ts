@@ -1,5 +1,11 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 import {
+  parsePolymarketAssetContext,
+  POLYMARKET_PROTOCOL_CONTRACTS,
+  type PolymarketAssetContext,
+} from "@hunch/shared";
+import { canonicalJsonEqual } from "../funding/persistence/canonical.js";
+import {
   claimFundingTradeAttempt,
   claimFundingTradeAttemptInTransaction,
   type FundingTradeExecutionPath,
@@ -21,6 +27,7 @@ export type TelegramAppHandoffV2DirectTradeBinding = Readonly<{
 }>;
 
 export type TelegramAppHandoffV2DirectTradeSubmission = Readonly<{
+  assetContext?: PolymarketAssetContext;
   /**
    * Older Buy callers did not persist this field.  Its absence deliberately
    * means Buy so existing sealed v2 rows remain replayable.
@@ -107,6 +114,7 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 type SealedBuyDirectTradeScope = Readonly<{
+  assetContext?: PolymarketAssetContext;
   action: "buy";
   amountUsd: number;
   controllerWalletAddress: string;
@@ -118,6 +126,7 @@ type SealedBuyDirectTradeScope = Readonly<{
 }>;
 
 type SealedSellDirectTradeScope = Readonly<{
+  assetContext?: PolymarketAssetContext;
   action: "sell";
   controllerWalletAddress: string;
   marketId: string;
@@ -224,6 +233,17 @@ function parseSealedTradeScope(
   const venue = trade.venue;
   const marketId = requiredString(trade.marketId);
   const outcomeTokenId = requiredString(trade.outcomeTokenId);
+  const assetContext = parsePolymarketAssetContext(trade.assetContext);
+  if (
+    trade.assetContext != null &&
+    (!assetContext ||
+      venue !== "polymarket" ||
+      assetContext.marketId !== marketId ||
+      assetContext.assetId !== outcomeTokenId ||
+      assetContext.outcomeIndex !==
+        (trade.side === "YES" ? 0 : trade.side === "NO" ? 1 : -1))
+  )
+    throw new TelegramAppHandoffV2DirectTradeError("plan_changed");
   const controllerWalletAddress = requiredString(trade.controllerWalletAddress);
   if (trade.action === "sell") {
     const maximumSharesRaw =
@@ -249,6 +269,7 @@ function parseSealedTradeScope(
     }
     return {
       action: "sell",
+      ...(assetContext ? { assetContext } : {}),
       controllerWalletAddress: controllerWalletAddress.toLowerCase(),
       marketId,
       maximumSharesRaw,
@@ -283,6 +304,7 @@ function parseSealedTradeScope(
   }
   return {
     action: "buy",
+    ...(assetContext ? { assetContext } : {}),
     amountUsd,
     controllerWalletAddress: controllerWalletAddress.toLowerCase(),
     marketId,
@@ -368,6 +390,9 @@ async function lockDirectSellLaneInTransaction(input: {
         input.scope.venue,
         input.scope.controllerWalletAddress,
         input.scope.outcomeTokenId,
+        ...(input.scope.assetContext?.assetKind === "position_manager"
+          ? [input.scope.assetContext.positionContract.toLowerCase()]
+          : []),
       ].join(":"),
     ],
   );
@@ -408,11 +433,18 @@ async function reserveUnpersistedDirectSellCapacityInTransaction(input: {
         and handoff_row.plan_snapshot ->> 'version' = '2'
         and handoff_row.plan_snapshot ->> 'kind' = 'direct_trade'
         and lower(handoff_row.plan_snapshot -> 'trade' ->> 'controllerWalletAddress') = $2
-        and handoff_row.plan_snapshot -> 'trade' ->> 'outcomeTokenId' = $3`,
+        and handoff_row.plan_snapshot -> 'trade' ->> 'outcomeTokenId' = $3
+        and intent.venue = $4
+        and ($4 <> 'polymarket' or lower(coalesce(nullif(
+          handoff_row.plan_snapshot -> 'trade' -> 'assetContext' ->> 'positionContract', ''),
+          '${POLYMARKET_PROTOCOL_CONTRACTS.conditionalTokens.toLowerCase()}')) = $5)`,
     [
       input.currentIntentId,
       input.scope.controllerWalletAddress,
       input.scope.outcomeTokenId,
+      input.scope.venue,
+      input.scope.assetContext?.positionContract.toLowerCase() ??
+        POLYMARKET_PROTOCOL_CONTRACTS.conditionalTokens.toLowerCase(),
     ],
   );
   const reservedRaw = BigInt(pending.rows[0]?.reserved_raw ?? "0");
@@ -445,6 +477,15 @@ function validateSubmission(
   submission: TelegramAppHandoffV2DirectTradeSubmission,
 ): void {
   const action = submission.action ?? "buy";
+  const context = parsePolymarketAssetContext(submission.assetContext);
+  if (
+    (submission.assetContext != null && !context) ||
+    (scope.assetContext
+      ? !canonicalJsonEqual(scope.assetContext, context)
+      : context?.protocolVersion === "v2") ||
+    (context && submission.venue !== "polymarket")
+  )
+    throw new TelegramAppHandoffV2DirectTradeError("order_out_of_scope");
   if (
     scope.venue !== submission.venue ||
     scope.marketId !== submission.marketId ||

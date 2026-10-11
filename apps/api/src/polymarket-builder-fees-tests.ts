@@ -3,6 +3,11 @@
 import assert from "node:assert/strict";
 
 import type { Pool } from "@hunch/infra";
+import {
+  buildPolymarketAssetContext,
+  resolvePolymarketMarketAssets,
+  POLYMARKET_PROTOCOL_CONTRACTS,
+} from "@hunch/shared";
 
 import {
   buildPolymarketBuilderFeeAccrual,
@@ -14,6 +19,7 @@ import {
   type PolymarketBuilderFeeConfig,
   type PolymarketFeePolicySnapshot,
   validatePolymarketOrderBuilderCodeForConfig,
+  polymarketBuilderFeeExchangeAddresses,
 } from "./services/polymarket-builder-fees.js";
 
 async function test(name: string, fn: () => void | Promise<void>) {
@@ -50,6 +56,52 @@ const builderSnapshot: PolymarketFeePolicySnapshot = {
 
 const policyBuilderCode =
   "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+await test("builder verification follows frozen V2 emitter and never guesses V3 for legacy fees", () => {
+  const condition = (1n << 248n) | (0xabn << 120n);
+  const assets = resolvePolymarketMarketAssets({
+    version: "v2",
+    conditionId: `0x${condition.toString(16).padStart(64, "0")}`,
+    positionIds: [condition.toString(), (condition | 1n).toString()],
+    outcomes: ["Yes", "No"],
+    negRisk: false,
+  });
+  assert.ok(assets);
+  const assetContext = buildPolymarketAssetContext(
+    "polymarket:fee-v2",
+    assets,
+    condition.toString(),
+  );
+  const payload = { tokenId: condition.toString(), assetContext };
+  assert.deepEqual(
+    [...polymarketBuilderFeeExchangeAddresses(payload, condition.toString())],
+    [POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3.toLowerCase()],
+  );
+  assert.equal(
+    polymarketBuilderFeeExchangeAddresses(null, "123").has(
+      POLYMARKET_PROTOCOL_CONTRACTS.exchangeV3.toLowerCase(),
+    ),
+    false,
+  );
+  assert.throws(
+    () => polymarketBuilderFeeExchangeAddresses(payload, "123"),
+    /does not match/,
+  );
+  assert.throws(
+    () =>
+      polymarketBuilderFeeExchangeAddresses(
+        {
+          ...payload,
+          assetContext: {
+            ...assetContext,
+            positionContract: "0x0000000000000000000000000000000000000001",
+          },
+        },
+        condition.toString(),
+      ),
+    /inconsistent/,
+  );
+});
 
 function fakePolicyPool(): Pool {
   return {

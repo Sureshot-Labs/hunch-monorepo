@@ -3,6 +3,7 @@ import { isRecord } from "../../lib/type-guards.js";
 import { sumErc20TransfersTo } from "../execution/evm-erc20-receipt.js";
 import type { EvmRpcTransactionReceipt } from "../../services/polygon-rpc.js";
 import type { StoredPositionAction } from "./position-action-repository.js";
+import { polymarketV2RedemptionPayout } from "./polymarket-v2-redemption-evidence.js";
 
 // Standard CTF ABI, also verified against the historical finalized Base receipt.
 export const CANONICAL_CTF_ABI = new ethers.Interface([
@@ -15,6 +16,20 @@ export const CANONICAL_CTF_PAYOUT_TOPIC = ethers.id(
   "PayoutRedemption(address,address,bytes32,bytes32,uint256[],uint256)",
 );
 const eq = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+/** Claims are journaled before wallet dispatch. Legacy recovery already has
+ * the durable attempt time; old actions without an attempt fall back to creation.
+ * Block timestamps have whole-second precision and there is no expiry bound.
+ */
+export function positionActionSubmissionStartSeconds(
+  operation: StoredPositionAction,
+  attemptStartedAt?: Date,
+): bigint | null {
+  const started = (attemptStartedAt ?? operation.createdAt)?.getTime();
+  return typeof started === "number" && Number.isFinite(started) && started >= 0
+    ? BigInt(Math.floor(started / 1000))
+    : null;
+}
 
 type RecoveryIdentity = {
   owner: string;
@@ -174,5 +189,10 @@ export function matchesCanonicalRedemption(
   ctfAddress: string,
   receipt: Pick<EvmRpcTransactionReceipt, "succeeded" | "logs">,
 ): boolean {
+  if (
+    isRecord(operation.planSnapshot.plan) &&
+    operation.planSnapshot.plan.executionKind === "protocol_router"
+  )
+    return polymarketV2RedemptionPayout(operation, receipt) !== null;
   return canonicalRedemptionPayout(operation, ctfAddress, receipt) !== null;
 }

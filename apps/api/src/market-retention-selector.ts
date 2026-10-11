@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { pathToFileURL } from "node:url";
 import {
   matchingProtectedReferences,
   matchingDerivedReferences,
@@ -155,7 +156,7 @@ function assertExecutionFlags(args: Args): void {
   );
 }
 
-function protectedRefsSql(
+export function protectedRefsSql(
   candidatePoolTable: string,
   candidateRefTokensTable: string,
   options: {
@@ -167,8 +168,11 @@ function protectedRefsSql(
     includeTelegramFundingBuyReturns?: boolean;
     includeTelegramFundingSessions?: boolean;
     includeTelegramTradeIntents?: boolean;
+    includePolymarketAssetBindings?: boolean;
   } = {},
 ): string {
+  // Likes deliberately do not protect markets: they are removable derived edges.
+  // Their thesis/comment parents remain protected by the history references below.
   const fundingOperationsRef = options.includeFundingOperations
     ? `
     union
@@ -263,6 +267,26 @@ function protectedRefsSql(
     select distinct c.market_id, 'executions' as reason
     from ${candidatePoolTable} c
     join executions ex on ex.unified_market_id = c.market_id
+    union
+    select distinct c.market_id, 'user_theses_market' as reason
+    from ${candidatePoolTable} c join user_theses social_thesis on social_thesis.market_id=c.market_id
+    union
+    select distinct c.market_id, 'user_theses_event' as reason
+    from ${candidatePoolTable} c join user_theses social_thesis on social_thesis.event_id=c.event_id
+    union
+    select distinct ct.market_id, 'user_theses_token' as reason
+    from ${candidateRefTokensTable} ct join user_theses social_thesis on social_thesis.token_id=ct.token_id
+    union
+    select distinct c.market_id, 'social_copy_source' as reason
+    from ${candidatePoolTable} c join copy_attributions attribution_row on attribution_row.instrument->>'marketId'=c.market_id
+    union
+    select distinct c.market_id, 'social_hunch_comments' as reason
+    from ${candidatePoolTable} c join ai_notes social_note on social_note.source_kind='market' and social_note.source_id=c.market_id
+    join social_comments social_comment on social_comment.ai_note_id=social_note.id or social_comment.observed_ai_note_id=social_note.id
+    union
+    select distinct c.market_id, 'social_hunch_copy' as reason
+    from ${candidatePoolTable} c join ai_notes social_note on social_note.source_kind='market' and social_note.source_id=c.market_id
+    join copy_attributions attribution_row on attribution_row.source_ai_note_id=social_note.id
     ${fundingOperationsRef}
     ${options.includeMatchingHistory ? `union ${matchingProtectedReferences(candidatePoolTable)}` : ""}
     ${fundingLiquidityProjectionsRef}
@@ -326,6 +350,49 @@ function protectedRefsSql(
     from ${candidateRefTokensTable} ct
     join venue_fee_accruals vf on vf.token_id = ct.token_id
   `;
+}
+
+/** Candidate-scoped counts include likes on protected thesis/comment parents. */
+export function socialLikesDerivedRefsSql(candidatePoolTable: string): string {
+  return `
+    select * from (
+    with social_like_note_refs as materialized (
+      select candidate_row.market_id,note_row.id
+      from ${candidatePoolTable} candidate_row
+      join ai_notes note_row on note_row.source_kind='market' and note_row.source_id=candidate_row.market_id
+    )
+    select 'social_likes_thesis' as label,count(distinct candidate_row.market_id)::text as markets,count(*)::text as "rows"
+    from ${candidatePoolTable} candidate_row
+    join user_theses thesis_row on thesis_row.market_id=candidate_row.market_id
+    join social_likes like_row on like_row.thesis_id=thesis_row.id
+    union all
+    select 'social_likes_hunch' as label,count(distinct note_ref.market_id) filter(where like_totals.like_count>0)::text as markets,coalesce(sum(like_totals.like_count),0)::text as "rows"
+    from social_like_note_refs note_ref
+    cross join lateral (
+      select count(*) as like_count from social_likes like_row where like_row.ai_note_id=note_ref.id
+    ) like_totals
+    union all
+    select 'social_likes_comment' as label,count(distinct comment_ref.market_id)::text as markets,count(*)::text as "rows"
+    from (
+      select candidate_row.market_id,comment_row.id
+      from ${candidatePoolTable} candidate_row
+      join user_theses thesis_row on thesis_row.market_id=candidate_row.market_id
+      join social_comments comment_row on comment_row.thesis_id=thesis_row.id
+      union
+      select note_ref.market_id,comment_row.id
+      from social_like_note_refs note_ref
+      join social_comments comment_row on comment_row.ai_note_id=note_ref.id or comment_row.observed_ai_note_id=note_ref.id
+    ) comment_ref
+    join social_likes like_row on like_row.comment_id=comment_ref.id
+    ) social_like_report
+  `;
+}
+
+/** AI notes use a logical market reference, so remove their derived likes explicitly. */
+export function socialLikesMarketDeleteSql(candidatePoolTable: string): string {
+  return `delete from social_likes like_row
+    using ai_notes note_row,${candidatePoolTable} candidate_row
+    where like_row.ai_note_id=note_row.id and note_row.source_kind='market' and note_row.source_id=candidate_row.market_id`;
 }
 
 function telegramTradeIntentEphemeralPredicate(alias: string): string {
@@ -409,6 +476,7 @@ function candidateCte(
     includePositionActionOperations?: boolean;
     includeTelegramFundingSessions?: boolean;
     includeTelegramTradeIntents?: boolean;
+    includePolymarketAssetBindings?: boolean;
   } = {},
 ): string {
   return `
@@ -466,6 +534,15 @@ function candidateCte(
     select distinct event_id from candidate_pool
   ),
   candidate_tokens as materialized (
+    ${
+      options.includePolymarketAssetBindings
+        ? `
+    select binding_row.market_id, binding_row.asset_id as token_id
+    from candidate_pool candidate_row
+    join polymarket_asset_bindings binding_row on binding_row.market_id = candidate_row.market_id
+    union`
+        : ""
+    }
     select distinct c.market_id, umt.token_id
     from candidate_pool c
     join unified_market_tokens umt on umt.market_id = c.market_id
@@ -641,6 +718,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
   includeTelegramFundingSessions: boolean;
   includeTelegramFundingBuyReturns: boolean;
   includeTelegramTradeIntents: boolean;
+  includePolymarketAssetBindings: boolean;
 }> {
   const [
     includeMatchingHistory,
@@ -651,6 +729,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     includeTelegramFundingSessions,
     includeTelegramFundingBuyReturns,
     includeTelegramTradeIntents,
+    includePolymarketAssetBindings,
   ] = await Promise.all([
     relationExists(client, "public.market_contract_versions"),
     relationExists(client, "public.funding_operations"),
@@ -660,6 +739,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     relationExists(client, "public.telegram_funding_sessions"),
     relationExists(client, "public.telegram_funding_buy_return_revisions"),
     relationExists(client, "public.telegram_trade_intents"),
+    relationExists(client, "public.polymarket_asset_bindings"),
   ]);
   return {
     includeMatchingHistory,
@@ -670,10 +750,11 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     includeTelegramFundingSessions,
     includeTelegramFundingBuyReturns,
     includeTelegramTradeIntents,
+    includePolymarketAssetBindings,
   };
 }
 
-async function queryBatchSummary(
+export async function queryBatchSummary(
   client: PoolClient,
   args: Args,
 ): Promise<BatchSummaryRow[]> {
@@ -690,6 +771,17 @@ async function queryBatchSummary(
     `
       ${candidateCte(options)},
       derived_refs as materialized (
+        ${socialLikesDerivedRefsSql("candidate_pool")}
+        union all
+        ${
+          options.includePolymarketAssetBindings
+            ? `
+        select 'polymarket_asset_bindings' as label, count(distinct binding_row.market_id)::text as markets, count(*)::text as rows
+        from polymarket_asset_bindings binding_row
+        join candidate_pool candidate_row on candidate_row.market_id = binding_row.market_id
+        union all`
+            : ""
+        }
         ${options.includeMatchingHistory ? `${matchingDerivedReferences("candidate_pool")} union all` : ""}
         select 'unified_market_tokens' as label, count(distinct x.market_id)::text as markets, count(*)::text as rows
         from unified_market_tokens x
@@ -1014,6 +1106,15 @@ async function materializeDeletionSet(
   await client.query(
     `
       create temp table tmp_market_retention_removable_tokens on commit drop as
+      ${
+        options.includePolymarketAssetBindings
+          ? `
+      select binding_row.market_id, binding_row.asset_id as token_id
+      from tmp_market_retention_removable_markets removable_row
+      join polymarket_asset_bindings binding_row on binding_row.market_id = removable_row.market_id
+      union`
+          : ""
+      }
       select distinct r.market_id, umt.token_id
       from tmp_market_retention_removable_markets r
       join unified_market_tokens umt on umt.market_id = r.market_id
@@ -1092,6 +1193,14 @@ async function runMarketDeletes(client: PoolClient): Promise<DeleteCountRow[]> {
       relationExists(client, "public.funding_liquidity_projections"),
       relationExists(client, "public.telegram_trade_intents"),
     ]);
+
+  counts.push(
+    await deleteAndCount(
+      client,
+      "social_likes_hunch",
+      socialLikesMarketDeleteSql("tmp_market_retention_removable_markets"),
+    ),
+  );
 
   counts.push(
     await deleteAndCount(
@@ -1181,6 +1290,19 @@ async function runMarketDeletes(client: PoolClient): Promise<DeleteCountRow[]> {
       `,
     ),
   );
+  if (await relationExists(client, "public.polymarket_asset_bindings")) {
+    counts.push(
+      await deleteAndCount(
+        client,
+        "polymarket_asset_bindings",
+        `
+      delete from polymarket_asset_bindings binding_row
+      using tmp_market_retention_removable_markets removable_row
+      where binding_row.market_id = removable_row.market_id
+    `,
+      ),
+    );
+  }
   if (includeTelegramTradeIntents) {
     counts.push(
       await deleteAndCount(
@@ -1310,7 +1432,7 @@ async function runEventDeletes(client: PoolClient): Promise<DeleteCountRow[]> {
   return counts;
 }
 
-async function queryPostDeleteValidation(
+export async function queryPostDeleteValidation(
   client: PoolClient,
 ): Promise<DeleteCountRow[]> {
   const options = await protectedRefOptions(client);
@@ -1347,6 +1469,20 @@ async function queryPostDeleteValidation(
       select 'remaining_unified_markets' as label, count(*)::text as rows
       from unified_markets x
       join tmp_market_retention_removable_markets r on r.market_id = x.id
+      union all
+      select 'remaining_social_likes_hunch' as label,count(*)::text as "rows"
+      from tmp_market_retention_removable_markets removable_row
+      join ai_notes note_row on note_row.source_kind='market' and note_row.source_id=removable_row.market_id
+      join social_likes like_row on like_row.ai_note_id=note_row.id
+      ${
+        options.includePolymarketAssetBindings
+          ? `
+      union all
+      select 'remaining_polymarket_asset_bindings' as label, count(*)::text as rows
+      from polymarket_asset_bindings binding_row
+      join tmp_market_retention_removable_markets removable_row on removable_row.market_id = binding_row.market_id`
+          : ""
+      }
       union all
       select 'remaining_unified_market_tokens' as label, count(*)::text as rows
       from unified_market_tokens x
@@ -1517,11 +1653,12 @@ async function main(): Promise<void> {
   });
 }
 
-main()
-  .catch((error) => {
-    console.error("[market:retention:select] failed", error);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await pool.end().catch(() => {});
-  });
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
+  void main()
+    .catch((error) => {
+      console.error("[market:retention:select] failed", error);
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await pool.end().catch(() => {});
+    });

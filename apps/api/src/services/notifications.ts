@@ -1,4 +1,5 @@
 import type { DbQuery } from "../db.js";
+import type { PolymarketAssetContext } from "@hunch/shared";
 import { getRedis } from "../redis.js";
 import type { NotificationSeverity } from "../repos/notifications-repo.js";
 import { insertNotification } from "../repos/notifications-repo.js";
@@ -154,6 +155,7 @@ export function buildOrderNotification(input: {
   walletAddress?: string | null;
   source?: string | null;
   sourceIntentId?: string | null;
+  assetContext?: PolymarketAssetContext;
 }): NotificationInput {
   const status = input.status?.toLowerCase() ?? "";
   let type = "order_created";
@@ -241,6 +243,12 @@ export function buildOrderNotification(input: {
       walletAddress: input.walletAddress ?? null,
       source: input.source ?? null,
       sourceIntentId: input.sourceIntentId ?? null,
+      ...(input.assetContext
+        ? {
+            assetContext: input.assetContext,
+            positionContract: input.assetContext.positionContract,
+          }
+        : {}),
     },
     dedupeKey,
     replaceExisting: Boolean(dedupeKey),
@@ -286,6 +294,8 @@ export function buildTradeNotification(input: {
 export function buildRedemptionNotification(input: {
   userId: string;
   positionActionId?: string;
+  positionId?: string;
+  positionContract?: string;
   venue: string;
   amountUsd?: number | null;
   marketId?: string | null;
@@ -319,6 +329,10 @@ export function buildRedemptionNotification(input: {
       tokenId: input.tokenId ?? null,
       txHash: input.txHash ?? null,
       walletAddress: input.walletAddress ?? null,
+      ...(input.positionId ? { positionId: input.positionId } : {}),
+      ...(input.positionContract
+        ? { positionContract: input.positionContract }
+        : {}),
     },
     dedupeKey,
   };

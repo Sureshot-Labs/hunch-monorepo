@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import "./integration-test-database-guard.js";
 import type { PoolClient } from "pg";
 import {
@@ -15,6 +16,7 @@ import {
 import { resolveRemoveWalletPrivyContext } from "./routes/auth.js";
 import { pool } from "./db.js";
 import { parseJwtExpiresInToMs } from "./env.js";
+import { encryptCredentialsString } from "./lib/credentials-encryption.js";
 import {
   PrivyService,
   PrivyTelegramIdentityMismatchError,
@@ -1635,6 +1637,9 @@ const tests: TestCase[] = [
           if (/INSERT INTO telegram_bot_trading_preferences/i.test(sql)) {
             return { rows: [] };
           }
+          if (/FROM runtime_policies/i.test(sql)) {
+            return { rows: [] };
+          }
           if (/INSERT INTO analytics_server_events/i.test(sql)) {
             return { rows: [] };
           }
@@ -1902,6 +1907,9 @@ const tests: TestCase[] = [
           if (/INSERT INTO telegram_bot_trading_preferences/i.test(sql)) {
             return { rows: [] };
           }
+          if (/FROM runtime_policies/i.test(sql)) {
+            return { rows: [] };
+          }
           if (/UPDATE telegram_bot_trading_preferences p/i.test(sql)) {
             return { rows: [] };
           }
@@ -2024,6 +2032,212 @@ const tests: TestCase[] = [
     },
   },
 ];
+
+tests.push({
+  name: "PG16 exact evidence access preserves inactive credentials and explicit profile identity",
+  run: async () => {
+    const client = await pool.connect();
+    const originalQuery = pool.query;
+    const originalConnect = pool.connect;
+    const originalEncryptionKey = process.env.CREDENTIALS_ENCRYPTION_KEY;
+    const key = Buffer.alloc(32, 17);
+    const ownerId = randomUUID();
+    const otherId = randomUUID();
+    const wallet = `0x${"ab".repeat(20)}`;
+    const otherWallet = `0x${"cd".repeat(20)}`;
+    const orderHash = `0x${"12".repeat(32)}`;
+    const legacyHash = `0x${"34".repeat(32)}`;
+    const copyHash = `0x${"56".repeat(32)}`;
+    const unrelatedHash = `0x${"78".repeat(32)}`;
+    try {
+      assert.equal(
+        Math.floor(
+          Number(
+            (await client.query("show server_version_num")).rows[0]
+              .server_version_num,
+          ) / 10000,
+        ),
+        16,
+      );
+      await client.query("begin");
+      await client.query(`
+        create temporary table user_venue_credentials(id uuid default gen_random_uuid(),user_id uuid,wallet_address text,venue text,api_key text,
+          api_secret text,api_secret_enc text,api_passphrase_enc text,additional_data jsonb,funder_address text,funder_updated_at timestamptz,
+          is_active boolean default false,created_at timestamptz default now(),updated_at timestamptz default now(),last_used_at timestamptz);
+        create temporary table orders(user_id uuid,venue text,order_hash text,signer_address text,wallet_address text);
+        create temporary table copy_attributions(copier_user_id uuid,provider_reference text,source_snapshot jsonb);
+        create temporary table users(like public.users including defaults);
+        create temporary table user_wallets(user_id uuid,wallet_address text,wallet_type text);
+      `);
+      await client.query(
+        `insert into user_venue_credentials(user_id,wallet_address,venue,api_key,api_secret_enc,api_passphrase_enc)
+        values($1,$2,'polymarket','fixture-key',$4,$5),($1,$3,'polymarket','fixture-key',$4,$5),($6,$2,'polymarket','fixture-key',$4,$5)`,
+        [
+          ownerId,
+          wallet,
+          otherWallet,
+          encryptCredentialsString("fixture-secret", key),
+          encryptCredentialsString("fixture-passphrase", key),
+          otherId,
+        ],
+      );
+      await client.query(
+        `insert into orders(user_id,venue,order_hash,signer_address,wallet_address)
+        values($1,'polymarket',$2,$3,$4),($1,'polymarket',$5,null,$3)`,
+        [ownerId, orderHash, wallet, otherWallet, legacyHash],
+      );
+      await client.query(
+        `insert into copy_attributions(copier_user_id,provider_reference,source_snapshot) values($1,$2,$3)`,
+        [
+          ownerId,
+          `polymarket:137:${otherWallet}:${copyHash}`,
+          { submission: { walletAddress: wallet } },
+        ],
+      );
+      process.env.CREDENTIALS_ENCRYPTION_KEY = key.toString("base64");
+      resetAuthDbFeatureCachesForTests();
+      const observedQueries: string[] = [];
+      pool.query = (async (sql: string, values?: unknown[]) => {
+        observedQueries.push(sql);
+        return client.query(sql, values);
+      }) as typeof pool.query;
+      assert.equal(
+        await AuthService.getPolymarketCredentials(ownerId, wallet),
+        null,
+      );
+      const evidence = await AuthService.getPolymarketCredentialsForEvidence(
+        ownerId,
+        wallet.toUpperCase().replace("0X", "0x"),
+        orderHash,
+      );
+      assert.equal(evidence?.apiSecret, "fixture-secret");
+      assert.equal(evidence?.apiPassphrase, "fixture-passphrase");
+      assert.equal(evidence?.isActive, false);
+      assert.ok(
+        await AuthService.getPolymarketCredentialsForEvidence(
+          ownerId,
+          wallet,
+          legacyHash,
+        ),
+      );
+      assert.ok(
+        await AuthService.getPolymarketCredentialsForEvidence(
+          ownerId,
+          wallet,
+          copyHash,
+        ),
+      );
+      for (const [userId, walletAddress, hash] of [
+        [ownerId, otherWallet, orderHash],
+        [otherId, wallet, orderHash],
+        [ownerId, wallet, unrelatedHash],
+        [ownerId, otherWallet, copyHash],
+        [otherId, wallet, copyHash],
+        [ownerId, wallet, `${copyHash}:suffix`],
+      ])
+        assert.equal(
+          await AuthService.getPolymarketCredentialsForEvidence(
+            userId,
+            walletAddress,
+            hash,
+          ),
+          null,
+        );
+      await client.query(
+        `update copy_attributions set provider_reference=$2 where copier_user_id=$1`,
+        [ownerId, `polymarket:8453:${otherWallet}:${copyHash}`],
+      );
+      assert.equal(
+        await AuthService.getPolymarketCredentialsForEvidence(
+          ownerId,
+          wallet,
+          copyHash,
+        ),
+        null,
+      );
+      await client.query(
+        `update copy_attributions set provider_reference=$2 where copier_user_id=$1`,
+        [ownerId, `polymarket:137:not-an-exchange:${copyHash}`],
+      );
+      assert.equal(
+        await AuthService.getPolymarketCredentialsForEvidence(
+          ownerId,
+          wallet,
+          copyHash,
+        ),
+        null,
+      );
+      await client.query(
+        `update user_venue_credentials set is_active=true where user_id=$1 and wallet_address=$2`,
+        [ownerId, wallet],
+      );
+      assert.ok(await AuthService.getPolymarketCredentials(ownerId, wallet));
+      assert.equal(
+        await AuthService.getPolymarketCredentialsForEvidence(
+          ownerId,
+          wallet,
+          unrelatedHash,
+        ),
+        null,
+      );
+      assert.ok(
+        observedQueries.every((sql) => /^\s*select\b/i.test(sql)),
+        "Evidence access must not write or reactivate credentials",
+      );
+
+      // Execute the legacy refresh SQL while keeping all fixtures rollback-only.
+      await client.query(
+        `insert into users(id,display_name,avatar_url,profile_name_edited_at,profile_avatar_edited_at)
+        values($1,'Explicit name',null,now(),now()),($2,'Legacy name',null,null,null)`,
+        [ownerId, otherId],
+      );
+      await client.query(
+        `insert into user_wallets(user_id,wallet_address,wallet_type) values($1,$3,'ethereum'),($2,$4,'ethereum')`,
+        [ownerId, otherId, wallet, otherWallet],
+      );
+      pool.connect = (async () => ({
+        query: async (sql: string, values?: unknown[]) =>
+          client.query(
+            sql === "BEGIN"
+              ? "savepoint auth_refresh"
+              : sql === "COMMIT"
+                ? "release savepoint auth_refresh"
+                : sql === "ROLLBACK"
+                  ? "rollback to savepoint auth_refresh"
+                  : sql,
+            values,
+          ),
+        release: () => {},
+      })) as typeof pool.connect;
+      const refresh = {
+        displayName: "Provider name",
+        avatarUrl: "https://example.test/provider-avatar.png",
+      };
+      const saved = await AuthService.createOrUpdateUser(wallet, refresh);
+      assert.equal(saved.displayName, "Explicit name");
+      assert.equal(
+        saved.avatarUrl,
+        undefined,
+        "Explicit avatar removal must survive auth refresh",
+      );
+      const unsaved = await AuthService.createOrUpdateUser(
+        otherWallet,
+        refresh,
+      );
+      assert.equal(unsaved.displayName, refresh.displayName);
+      assert.equal(unsaved.avatarUrl, refresh.avatarUrl);
+    } finally {
+      pool.query = originalQuery;
+      pool.connect = originalConnect;
+      if (originalEncryptionKey === undefined)
+        delete process.env.CREDENTIALS_ENCRYPTION_KEY;
+      else process.env.CREDENTIALS_ENCRYPTION_KEY = originalEncryptionKey;
+      resetAuthDbFeatureCachesForTests();
+      await client.query("rollback");
+      client.release();
+    }
+  },
+});
 
 let passed = 0;
 for (const test of tests) {

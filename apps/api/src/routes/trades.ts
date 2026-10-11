@@ -3,6 +3,10 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { tradesQuerySchema } from "../schemas/trades.js";
+import {
+  fetchPolymarketDataApiV2Page,
+  parsePolymarketDataApiV2Trade,
+} from "../services/polymarket-data-api-v2.js";
 
 type TradeRow = {
   token_id: string;
@@ -12,15 +16,6 @@ type TradeRow = {
   size: string;
   side: "BUY" | "SELL";
   tx_hash: string | null;
-};
-
-type PolymarketDataTrade = {
-  asset?: string;
-  side?: "BUY" | "SELL";
-  price?: number;
-  size?: number;
-  timestamp?: number;
-  transactionHash?: string;
 };
 
 export const RECENT_TRADES_BY_TOKEN_SQL = `
@@ -94,15 +89,12 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
   const POLY_TRADE_TIMEOUT_MS = 12_000;
 
-  const isPolymarketId = (value: string | undefined): boolean =>
-    typeof value === "string" && value.startsWith("polymarket:");
-
   const resolvePolymarketEventId = async (
     eventId: string,
   ): Promise<number | null> => {
     const raw = eventId.split(":")[1];
     const parsed = Number(raw);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
 
     const { rows } = await pool.query<{ venue_event_id: number | null }>(
       `
@@ -131,69 +123,6 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
     );
     const conditionId = rows[0]?.condition_id ?? null;
     return conditionId && conditionId.trim().length ? conditionId.trim() : null;
-  };
-
-  const fetchPolymarketDataTrades = async (inputs: {
-    eventId?: string;
-    marketId?: string;
-    limit: number;
-    offset: number;
-  }): Promise<TradeRow[] | null> => {
-    const params = new URLSearchParams();
-    if (inputs.eventId) params.set("eventId", inputs.eventId);
-    if (inputs.marketId) params.set("market", inputs.marketId);
-    params.set("limit", String(inputs.limit));
-    params.set("offset", String(inputs.offset));
-
-    const url = new URL("/trades", env.polymarketDataApiBase);
-    url.search = params.toString();
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), POLY_TRADE_TIMEOUT_MS);
-
-    try {
-      const response = await fetch(url.toString(), {
-        method: "GET",
-        signal: controller.signal,
-      });
-      if (!response.ok) return null;
-      const payload = (await response.json()) as unknown;
-      if (!Array.isArray(payload)) return null;
-
-      const trades: TradeRow[] = [];
-      for (const entry of payload as PolymarketDataTrade[]) {
-        if (!entry || typeof entry !== "object") continue;
-        if (typeof entry.asset !== "string" || !entry.asset.trim()) continue;
-        const price =
-          typeof entry.price === "number" ? entry.price : Number(entry.price);
-        const size =
-          typeof entry.size === "number" ? entry.size : Number(entry.size);
-        const timestamp =
-          typeof entry.timestamp === "number"
-            ? entry.timestamp
-            : Number(entry.timestamp);
-        if (!Number.isFinite(price) || !Number.isFinite(size)) continue;
-        if (!Number.isFinite(timestamp)) continue;
-
-        trades.push({
-          token_id: entry.asset.trim(),
-          venue: "polymarket",
-          ts: new Date(timestamp * 1000),
-          price: price.toString(),
-          size: size.toString(),
-          side: entry.side === "SELL" ? "SELL" : "BUY",
-          tx_hash:
-            typeof entry.transactionHash === "string"
-              ? entry.transactionHash
-              : null,
-        });
-      }
-      return trades;
-    } catch {
-      return null;
-    } finally {
-      clearTimeout(timeout);
-    }
   };
 
   const resolveTokenIdsForFilter = async (
@@ -258,40 +187,68 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
     async (request, reply) => {
       const query = request.query;
 
-      if (isPolymarketId(query.eventId) || isPolymarketId(query.marketId)) {
+      // V2 cursors cannot be translated into offsets. Old clients retain the
+      // bounded local-index contract on every page; new clients opt into one
+      // upstream page and repeat the same filter with its opaque cursor.
+      if (query.paginationMode === "cursor") {
         const polyEventId = query.eventId
           ? await resolvePolymarketEventId(query.eventId)
           : null;
         const polyMarketId = query.marketId
           ? await resolvePolymarketConditionId(query.marketId)
           : null;
-        if (polyEventId || polyMarketId) {
-          const polyTrades = await fetchPolymarketDataTrades({
-            eventId: polyEventId ? String(polyEventId) : undefined,
-            marketId: polyMarketId ?? undefined,
-            limit: query.limit,
-            offset: query.offset,
+        if (
+          (query.eventId && !polyEventId) ||
+          (query.marketId && !polyMarketId)
+        )
+          return reply
+            .code(404)
+            .send({ error: "Polymarket trade scope not found" });
+        try {
+          const params: Record<string, string> = {
+            limit: String(Math.min(query.limit, 1000)),
+            taker_only: "true",
+          };
+          if (polyEventId) params.event_id = String(polyEventId);
+          if (polyMarketId) params.condition = polyMarketId;
+          const page = await fetchPolymarketDataApiV2Page({
+            baseUrl: env.polymarketDataApiBase,
+            endpoint: "trades",
+            params,
+            cursor: query.cursor,
+            timeoutMs: POLY_TRADE_TIMEOUT_MS,
+            parseRow: parsePolymarketDataApiV2Trade,
           });
-          if (polyTrades) {
-            const trades = polyTrades.map((row) => ({
-              tokenId: row.token_id,
-              venue: row.venue,
-              ts: row.ts,
-              price: Number(row.price),
-              size: Number(row.size),
-              side: row.side,
-              txHash: row.tx_hash,
-            }));
-            return {
-              trades,
-              pagination: {
-                total: query.offset + trades.length,
-                limit: query.limit,
-                offset: query.offset,
-                hasMore: trades.length === query.limit,
-              },
-            };
-          }
+          const trades = page.data.map((row) => ({
+            tokenId: row.tokenId,
+            venue: "polymarket",
+            ts: new Date(row.timestamp * 1000),
+            price: row.price,
+            size: row.size,
+            side: row.side,
+            txHash: row.transactionHash,
+          }));
+          return {
+            trades,
+            pagination: {
+              total: null,
+              totalIsExact: false,
+              limit: query.limit,
+              offset: 0,
+              nextCursor: page.nextCursor,
+              hasMore: page.nextCursor !== null,
+            },
+          };
+        } catch (error) {
+          request.log.warn(
+            { errorName: error instanceof Error ? error.name : "unknown" },
+            "Polymarket cursor trades unavailable",
+          );
+          return reply.code(503).send({
+            code: "polymarket_trades_unavailable",
+            retryable: true,
+            message: "Trade history is temporarily unavailable. Try again.",
+          });
         }
       }
 
@@ -316,7 +273,12 @@ export const tradesRoutes: FastifyPluginAsync = async (app) => {
       if (tokenIds.length === 0) {
         return {
           trades: [],
-          pagination: { total: 0, limit: query.limit, offset: query.offset },
+          pagination: {
+            total: 0,
+            limit: query.limit,
+            offset: query.offset,
+            hasMore: false,
+          },
         };
       }
 

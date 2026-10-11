@@ -1,6 +1,7 @@
 import type { Pool } from "@hunch/infra";
 
 import { normalizeLimitlessRawTokenId } from "../lib/limitless-token.js";
+import { polymarketOrderStorageContractSql } from "../lib/polymarket-order-ledger-sql.js";
 
 const MICRO_SCALE = 1_000_000n;
 
@@ -30,6 +31,7 @@ type OpenOrderPositionRow = {
   venue: Venue;
   wallet_key: string | null;
   token_id: string | null;
+  position_contract?: string;
   size: string | number | null;
   filled_size: string | number | null;
   order_payload: unknown | null;
@@ -254,7 +256,7 @@ export async function fetchOpenOrderCollateralLocks(
 
 export async function fetchPolymarketOpenOrderPositionLocks(
   pool: Pick<Pool, "query">,
-  inputs: { userId: string; wallet: string },
+  inputs: { userId: string; wallet: string; positionContract?: string },
 ): Promise<Map<string, bigint>> {
   return fetchOpenOrderPositionLocks(pool, {
     ...inputs,
@@ -269,7 +271,12 @@ export async function fetchPolymarketOpenOrderPositionLocks(
  */
 export async function fetchOpenOrderPositionLocks(
   pool: Pick<Pool, "query">,
-  inputs: { userId: string; venue: Venue; wallet: string },
+  inputs: {
+    userId: string;
+    venue: Venue;
+    wallet: string;
+    positionContract?: string;
+  },
 ): Promise<Map<string, bigint>> {
   const wallet = normalizeCollateralWalletKey(inputs.wallet);
   const locks = new Map<string, bigint>();
@@ -289,6 +296,7 @@ export async function fetchOpenOrderPositionLocks(
          nullif(o.order_payload->'order'->>'tokenId', ''),
          o.token_id
        ) AS token_id,
+       ${polymarketOrderStorageContractSql("o")} AS position_contract,
        o.size,
        o.filled_size,
        o.order_payload
@@ -319,6 +327,13 @@ export async function fetchOpenOrderPositionLocks(
     const filled = parseDecimalToMicro(row.filled_size) ?? 0n;
     const remaining = original > filled ? original - filled : 0n;
     if (remaining <= 0n) continue;
+    if (
+      inputs.venue === "polymarket" &&
+      inputs.positionContract != null &&
+      (row.position_contract ?? "").toLowerCase() !==
+        inputs.positionContract.toLowerCase()
+    )
+      continue;
     const key = `${wallet}:${tokenId}`;
     locks.set(key, (locks.get(key) ?? 0n) + remaining);
   }

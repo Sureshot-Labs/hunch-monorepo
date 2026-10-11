@@ -5,7 +5,8 @@ import { telegramPositionStatusLabel } from "./telegram-position-presentation.js
 import type { Position } from "../order-types.js";
 import { getRedis } from "../redis.js";
 import { fetchPositionsForUserWallet } from "../repos/positions-repo.js";
-import { fetchMarketsByTokenIds } from "../repos/unified-read.js";
+import { fetchPositionMarketRows } from "./position-market-rows.js";
+import { positionAssetKey } from "../lib/position-asset-context.js";
 import { mapMarketsByTokenRows } from "./markets-by-token-response.js";
 import {
   escapeTelegramMarkdownV2,
@@ -216,12 +217,11 @@ async function runBounded<T>(
 }
 
 function positionMarkPrice(
-  position: Position,
+  side: "YES" | "NO" | null,
   marketEntry: MappedMarketEntry | undefined,
 ): number | null {
   const market = marketEntry?.market;
   if (!market) return null;
-  const side = marketEntry.side?.trim().toUpperCase();
   if (side === "YES") return market.bestBidYes ?? market.bestBid ?? null;
   if (side === "NO") return market.bestBidNo ?? null;
   return market.bestBid ?? null;
@@ -232,7 +232,17 @@ export function buildTelegramPositionDetail(
   marketEntry: MappedMarketEntry | undefined,
   canonicalSide?: string | null,
 ): TelegramPositionDetail {
-  const normalizedSide = (marketEntry?.side ?? canonicalSide ?? position.side)
+  const frozenSide = position.assetContext
+    ? position.assetContext.outcomeIndex === 0
+      ? "YES"
+      : "NO"
+    : null;
+  const normalizedSide = (
+    frozenSide ??
+    marketEntry?.side ??
+    canonicalSide ??
+    position.side
+  )
     ?.trim()
     .toUpperCase();
   const side =
@@ -242,7 +252,7 @@ export function buildTelegramPositionDetail(
       ? position.averagePrice
       : null;
   const cost = averagePrice == null ? null : position.size * averagePrice;
-  const mark = positionMarkPrice(position, marketEntry);
+  const mark = positionMarkPrice(side, marketEntry);
   const currentValue = mark != null ? position.size * mark : null;
   const pnl = cost != null && currentValue != null ? currentValue - cost : null;
   if (!marketEntry) {
@@ -474,10 +484,13 @@ export async function loadTelegramPositions(input: {
   );
   const marketRows =
     tokenIds.length > 0
-      ? await fetchMarketsByTokenIds(input.pool, { tokenIds })
+      ? await fetchPositionMarketRows(input.pool, positions)
       : [];
   const marketByToken = new Map(
-    mapMarketsByTokenRows(marketRows).map((entry) => [entry.tokenId, entry]),
+    mapMarketsByTokenRows(marketRows).map((entry) => [
+      positionAssetKey(entry.tokenId, entry.positionContract),
+      entry,
+    ]),
   );
   let tokenSideRows: Array<{
     outcome_side: string | null;
@@ -508,7 +521,9 @@ export async function loadTelegramPositions(input: {
       positions: positions.map((position) =>
         buildTelegramPositionDetail(
           position,
-          marketByToken.get(position.tokenId),
+          marketByToken.get(
+            positionAssetKey(position.tokenId, position.positionContract),
+          ),
           sideByToken.get(position.tokenId),
         ),
       ),

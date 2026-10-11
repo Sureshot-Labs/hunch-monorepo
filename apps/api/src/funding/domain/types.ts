@@ -1,3 +1,5 @@
+import type { PolymarketAssetContext } from "@hunch/shared";
+
 export type UserId = string;
 export type AccountId = UserId;
 export type WalletId = string;
@@ -549,6 +551,7 @@ export type FundingQuoteSummary = Readonly<{
 }>;
 
 export type MarketContextBinding = Readonly<{
+  positionAssetContext?: PolymarketAssetContext;
   marketContextId: string;
   venueId: VenueId;
   marketId: string;

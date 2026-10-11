@@ -2,31 +2,20 @@ import { ethers } from "ethers";
 
 import { fetchLimitlessAmmQuote } from "./limitless-onchain.js";
 
-export const LIMITLESS_CLOB_EIP712_NAME = "Limitless CTF Exchange";
-export const LIMITLESS_CLOB_EIP712_VERSION = "1";
-export const LIMITLESS_CLOB_CHAIN_ID = 8453;
-export const LIMITLESS_CLOB_ORDER_TYPES = {
-  Order: [
-    { name: "salt", type: "uint256" },
-    { name: "maker", type: "address" },
-    { name: "signer", type: "address" },
-    { name: "taker", type: "address" },
-    { name: "tokenId", type: "uint256" },
-    { name: "makerAmount", type: "uint256" },
-    { name: "takerAmount", type: "uint256" },
-    { name: "expiration", type: "uint256" },
-    { name: "nonce", type: "uint256" },
-    { name: "feeRateBps", type: "uint256" },
-    { name: "side", type: "uint8" },
-    { name: "signatureType", type: "uint8" },
-  ],
-} as const;
-export const LIMITLESS_CLOB_DOMAIN_TYPES = [
-  { name: "name", type: "string" },
-  { name: "version", type: "string" },
-  { name: "chainId", type: "uint256" },
-  { name: "verifyingContract", type: "address" },
-] as const;
+import {
+  LIMITLESS_CLOB_EIP712_NAME,
+  LIMITLESS_CLOB_EIP712_VERSION,
+  LIMITLESS_CLOB_CHAIN_ID,
+  LIMITLESS_CLOB_ORDER_TYPES,
+  LIMITLESS_CLOB_DOMAIN_TYPES,
+} from "./limitless-order-contract.js";
+export {
+  LIMITLESS_CLOB_EIP712_NAME,
+  LIMITLESS_CLOB_EIP712_VERSION,
+  LIMITLESS_CLOB_CHAIN_ID,
+  LIMITLESS_CLOB_ORDER_TYPES,
+  LIMITLESS_CLOB_DOMAIN_TYPES,
+} from "./limitless-order-contract.js";
 
 export type LimitlessEmbeddedOrderPayload = {
   salt: string | number;

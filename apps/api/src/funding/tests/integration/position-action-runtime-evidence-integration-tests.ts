@@ -27,6 +27,7 @@ const owner = "0x0000000000000000000000000000000000000017";
 const ctf = "0x00000000000000000000000000000000000000c7";
 const collateral = "0x00000000000000000000000000000000000000c1";
 const hash = `0x${"e".repeat(64)}`;
+const blockHash = ethers.id("legacy-position-action-finalized-block");
 const raw = 1_000_000n;
 const actions: StoredPositionAction[] = [];
 const originalReceipt = ethers.JsonRpcProvider.prototype.getTransactionReceipt;
@@ -149,13 +150,31 @@ try {
       submissionFingerprint: hash,
     });
   }
-  globalThis.fetch = async () => {
-    throw new Error("Network forbidden in runtime fixture");
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    assert.equal(
+      body.method,
+      "eth_getBlockByNumber",
+      "no network allowed outside mocked finality reads",
+    );
+    return new Response(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: {
+          number: "0x64",
+          hash: blockHash,
+          timestamp: ethers.toBeHex(Math.floor(Date.now() / 1000) + 1),
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
   };
   ethers.JsonRpcProvider.prototype.getTransactionReceipt = async () =>
     ({
       status: 1,
       blockNumber: 100,
+      blockHash,
       hash,
       logs,
     }) as unknown as ethers.TransactionReceipt;

@@ -124,7 +124,7 @@ await test("detects empty Limitless public portfolio responses", () => {
   );
 });
 
-await test("caches aborted Polymarket Data API owner lookups as empty", async () => {
+await test("caches aborted enrichment failures without repeated RPCs or claiming API completeness", async () => {
   const owner = "0xa5ef39c3d3e10d0b270233af41cac69796b12966";
   const originalFetch = globalThis.fetch;
   const originalWarn = console.warn;
@@ -168,7 +168,20 @@ await test("caches successful Polymarket Data API owner lookups", async () => {
   globalThis.fetch = (async () => {
     calls += 1;
     return new Response(
-      JSON.stringify([{ asset: "123", averagePrice: "0.42" }]),
+      JSON.stringify({
+        data: [
+          {
+            token_id: "123",
+            proxy_wallet: owner,
+            condition_id: `0x${"11".repeat(32)}`,
+            current_size: 2,
+            avg_price: 0.42,
+            outcome_index: 0,
+            redeemable: false,
+          },
+        ],
+        pagination: { next_cursor: null },
+      }),
       {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -201,6 +214,12 @@ await test("reuses run-local Polymarket ERC1155 balance cache", async () => {
 
   const pool = {
     query: async (sql: string) => {
+      if (
+        sql.includes("from polymarket_asset_bindings where") ||
+        sql.includes("join unified_tokens token_row") ||
+        sql.includes("position_contract, asset_context from positions")
+      )
+        return { rows: [] };
       if (sql.includes("with current_funders")) {
         return { rows: [] };
       }
@@ -216,10 +235,13 @@ await test("reuses run-local Polymarket ERC1155 balance cache", async () => {
 
   globalThis.fetch = (async (input, init) => {
     if (input instanceof URL || String(input).includes("/positions")) {
-      return new Response(JSON.stringify([]), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({ data: [], pagination: { next_cursor: null } }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
     }
 
     const body = JSON.parse(String(init?.body ?? "{}")) as {
@@ -290,6 +312,12 @@ await test("run-local Polymarket balance cache does not bypass hidden token filt
 
   const pool = {
     query: async (sql: string, params?: unknown[]) => {
+      if (
+        sql.includes("from polymarket_asset_bindings where") ||
+        sql.includes("join unified_tokens token_row") ||
+        sql.includes("position_contract, asset_context from positions")
+      )
+        return { rows: [] };
       if (sql.includes("with current_funders")) {
         return { rows: [] };
       }
@@ -307,10 +335,13 @@ await test("run-local Polymarket balance cache does not bypass hidden token filt
 
   globalThis.fetch = (async (input, init) => {
     if (input instanceof URL || String(input).includes("/positions")) {
-      return new Response(JSON.stringify([]), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({ data: [], pagination: { next_cursor: null } }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
     }
 
     const body = JSON.parse(String(init?.body ?? "{}")) as {

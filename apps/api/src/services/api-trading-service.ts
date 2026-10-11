@@ -39,6 +39,15 @@ import type {
   TradingVenue,
 } from "./trading-types.js";
 import { venueLifecycleAllowsTradingAction } from "./venue-lifecycle.js";
+import {
+  authorizeCopySource,
+  linkPersistedCopy,
+  retainCopyBeforeSubmission,
+  markCopySubmissionStarted,
+  markCopyDefinitelyNotBroadcast,
+  markCopyDefinitiveProviderRejection,
+  type RetainedCopyAttempt,
+} from "./social-copy.js";
 
 export type {
   ApiBotTradingExecutor,
@@ -293,12 +302,33 @@ export function createApiTradingApplicationService(
       await assertReadyIntent(intent);
       let attemptId: string | null = null;
       let attemptClaimToken: string | null = null;
+      let copyAttempt: RetainedCopyAttempt | null = null;
       try {
         const executed = await executorFor(
           executeInput.prepared.venue,
         ).executePreparedTrade({
           ...executeInput,
           prepared,
+          onDefinitiveTradeRejection: async () => {
+            if (copyAttempt)
+              await markCopyDefinitiveProviderRejection(
+                input.pool,
+                intent.actor.userId,
+                copyAttempt,
+              );
+            await executeInput.onDefinitiveTradeRejection?.();
+          },
+          onBeforeTradeSubmission: async (identity) => {
+            if (intent.sourceRef) {
+              copyAttempt = await retainCopyBeforeSubmission(input.pool, {
+                prepared,
+                ...identity,
+                limitlessPositionContract:
+                  env.limitlessConditionalTokensAddress,
+              });
+            }
+            await executeInput.onBeforeTradeSubmission?.(identity);
+          },
           onBeforeBroadcast: async () => {
             if (intent.fundingReservation) {
               if (!intent.target.marketId) {
@@ -417,6 +447,12 @@ export function createApiTradingApplicationService(
                 });
               });
             }
+            if (copyAttempt)
+              await markCopySubmissionStarted(
+                input.pool,
+                intent.actor.userId,
+                copyAttempt,
+              );
           },
         });
         if (
@@ -453,8 +489,30 @@ export function createApiTradingApplicationService(
             broadcastMayHaveOccurred: true,
           });
         }
+        if (intent.sourceRef && executed.persisted) {
+          try {
+            await linkPersistedCopy(input.pool, {
+              userId: intent.actor.userId,
+              idempotencyKey: intent.idempotencyKey,
+              persisted: executed.persisted,
+            });
+          } catch {
+            executed.postSubmitError ??= {
+              code: "copy_reconcile_required",
+              message:
+                "Trade submitted; Copy attribution is awaiting reconciliation.",
+              statusCode: 409,
+            };
+          }
+        }
         return executed;
       } catch (error) {
+        if (copyAttempt)
+          await markCopyDefinitelyNotBroadcast(
+            input.pool,
+            intent.actor.userId,
+            copyAttempt,
+          ).catch(() => {});
         if (intent.fundingReservation && attemptId) {
           await recordFundingTradeAttemptOutcome(input.pool, {
             userId: intent.actor.userId,
@@ -501,7 +559,14 @@ export function createApiTradingApplicationService(
       executorFor(persistInput.intent.venue).persistTrade(persistInput),
     prepareTrade: async (prepareInput) => {
       await assertReadyIntent(prepareInput.intent);
-      return executorFor(prepareInput.intent.venue).prepareTrade(prepareInput);
+      const prepared = await executorFor(
+        prepareInput.intent.venue,
+      ).prepareTrade(prepareInput);
+      if (prepared.intent.sourceRef)
+        await authorizeCopySource(input.pool, prepared, {
+          limitlessPositionContract: env.limitlessConditionalTokensAddress,
+        });
+      return prepared;
     },
     quote: async (quoteInput) => {
       // Quotes do not sign or submit. Telegram also quotes user-signed Mini
@@ -513,9 +578,51 @@ export function createApiTradingApplicationService(
     },
     submitPreparedTrade: async (submitInput) => {
       await assertReadyIntent(submitInput.prepared.intent);
-      return executorFor(submitInput.prepared.venue).submitPreparedTrade(
-        submitInput,
-      );
+      let copyAttempt: RetainedCopyAttempt | null = null;
+      try {
+        return await executorFor(
+          submitInput.prepared.venue,
+        ).submitPreparedTrade({
+          ...submitInput,
+          onBeforeTradeSubmission: async (identity) => {
+            if (submitInput.prepared.intent.sourceRef) {
+              copyAttempt = await retainCopyBeforeSubmission(input.pool, {
+                prepared: submitInput.prepared,
+                ...identity,
+                limitlessPositionContract:
+                  env.limitlessConditionalTokensAddress,
+              });
+            }
+            await submitInput.onBeforeTradeSubmission?.(identity);
+          },
+          onDefinitiveTradeRejection: async () => {
+            if (copyAttempt)
+              await markCopyDefinitiveProviderRejection(
+                input.pool,
+                submitInput.prepared.intent.actor.userId,
+                copyAttempt,
+              );
+            await submitInput.onDefinitiveTradeRejection?.();
+          },
+          onBeforeBroadcast: async () => {
+            await submitInput.onBeforeBroadcast?.();
+            if (copyAttempt)
+              await markCopySubmissionStarted(
+                input.pool,
+                submitInput.prepared.intent.actor.userId,
+                copyAttempt,
+              );
+          },
+        });
+      } catch (error) {
+        if (copyAttempt)
+          await markCopyDefinitelyNotBroadcast(
+            input.pool,
+            submitInput.prepared.intent.actor.userId,
+            copyAttempt,
+          ).catch(() => {});
+        throw error;
+      }
     },
   };
 }

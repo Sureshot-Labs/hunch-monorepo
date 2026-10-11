@@ -1,4 +1,5 @@
 import { v4 as uuid } from "uuid";
+import { readPolymarketIndexedAssets } from "@hunch/shared";
 import type {
   TEvent,
   TMarket,
@@ -662,9 +663,9 @@ export function mapPolymarketMarketRow(eventId: string, m: TPolymarketMarket) {
     volume1wk: n(m.volume1wk),
     volume1mo: n(m.volume1mo),
     volume1yr: n(m.volume1yr),
-    clob_token_ids: Array.isArray(m.clobTokenIds)
-      ? JSON.stringify(m.clobTokenIds)
-      : m.clobTokenIds,
+    // This SQL column is the current asset projection; raw retains both
+    // Gamma fields so historical CTF IDs are not mistaken for V2 positions.
+    clob_token_ids: JSON.stringify(readPolymarketIndexedAssets(m).assetIds),
     uma_bond: m.umaBond,
     uma_reward: m.umaReward,
     volume24hr_clob: n(m.volume24hrClob),
@@ -1018,6 +1019,7 @@ export function mapToUnifiedMarket(
   options: { existingDurationMinutes?: number | null } = {},
 ): UnifiedMarketRow {
   const extra = m as Record<string, unknown>;
+  const indexedAssets = readPolymarketIndexedAssets(m);
   const eventSeriesKey = resolvePolymarketSeriesKey(
     event as Record<string, unknown> | undefined,
   );
@@ -1027,21 +1029,20 @@ export function mapToUnifiedMarket(
 
   if (m.archived) {
     status = "ARCHIVED";
-  } else if (m.closed || m.active === false || m.acceptingOrders === false) {
+  } else if (m.version === "v2" && m.resolutionStatus === "resolved") {
+    status = "SETTLED";
+  } else if (
+    m.closed ||
+    m.active === false ||
+    m.acceptingOrders === false ||
+    (m.version === "v2" && m.resolutionStatus === "inactive")
+  ) {
     // Prefer explicit source lifecycle flags over endDate. Polymarket can
     // expose inactive candidate/placeholder slots while acceptingOrders=true.
     status = "CLOSED";
   }
 
-  // Handle clob_token_ids - convert to JSON string if it's an array
-  let clobTokenIds: string | undefined = undefined;
-  if (m.clobTokenIds) {
-    if (Array.isArray(m.clobTokenIds)) {
-      clobTokenIds = JSON.stringify(m.clobTokenIds);
-    } else {
-      clobTokenIds = m.clobTokenIds;
-    }
-  }
+  const clobTokenIds = JSON.stringify(indexedAssets.assetIds);
 
   const title = (() => {
     const groupItemTitle =
@@ -1054,9 +1055,17 @@ export function mapToUnifiedMarket(
     m.outcomePrices ?? extra.outcomePrices,
   );
   const resolvedOutcome =
-    status !== "ACTIVE" ? resolveBinaryOutcome(outcomePrices) : undefined;
+    status !== "ACTIVE" &&
+    (m.version !== "v2" || m.resolutionStatus === "resolved")
+      ? resolveBinaryOutcome(outcomePrices)
+      : undefined;
 
   const metadata = compactMetadata({
+    version: m.version,
+    positionIds: m.positionIds,
+    resolutionStatus: m.resolutionStatus,
+    polymarketProtocol: indexedAssets.protocol,
+    polymarketProtocolIncomplete: indexedAssets.protocol == null,
     question: s(extra.question),
     resolutionSource: s(extra.resolutionSource),
     outcomes: s(extra.outcomes),
@@ -1119,7 +1128,10 @@ export function mapToUnifiedMarket(
       description: m.description,
     }),
     status,
-    market_type: "binary", // Polymarket markets are binary
+    market_type:
+      m.version === "v2" && indexedAssets.protocol == null
+        ? "unsupported"
+        : "binary",
     duration_minutes:
       derivePolymarketDurationMinutes(eventSeriesKey) ??
       options.existingDurationMinutes ??

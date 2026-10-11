@@ -66,13 +66,18 @@ async function buildPlan(input: {
   market: RedemptionMarketContext;
   position: StoredPositionContext;
 }): Promise<RedemptionPlan> {
-  if (!input.market.conditionId) {
+  if (
+    !input.market.conditionId &&
+    input.position.assetContext?.protocolVersion !== "v2"
+  ) {
     return unavailablePlan({ reason: "missing_condition_id" });
   }
   if (!input.position.tokenId.trim()) {
     return unavailablePlan({ reason: "missing_token_id" });
   }
   return buildPolymarketRedemptionPlan({
+    assetContext: input.position.assetContext,
+    positionSize: input.position.sizeRaw,
     rpcUrl: env.polygonRpcUrl,
     timeoutMs: env.polygonRpcTimeoutMs,
     funder: input.position.walletAddress,
@@ -112,6 +117,8 @@ export function createPolymarketPositionActionVenueDriver(): PositionActionVenue
         query: { funderAddress: input.ownerAddress, refresh: true },
       });
       if (!result.ok) return null;
+      if (input.plan.executionKind === "protocol_router")
+        return readBoolean(result.payload, ["protocolV2", "routerApproved"]);
       return readBoolean(result.payload, [
         "conditionalTokens",
         "isApprovedForAll",

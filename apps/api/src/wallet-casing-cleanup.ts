@@ -135,7 +135,7 @@ async function queryDuplicateSummary(
           select user_id, venue, lower(wallet_address) as wallet_key, token_id, count(*) as row_count
           from positions
           where wallet_address ~ $1
-          group by user_id, venue, lower(wallet_address), token_id
+          group by user_id, venue, lower(wallet_address), token_id, position_contract
           having count(*) > 1 and count(distinct position_scope) > 1
         ) g
         union all
@@ -156,7 +156,7 @@ async function queryDuplicateSummary(
             count(*) as row_count
           from positions
           where wallet_address ~ $1
-          group by user_id, venue, position_scope, lower(wallet_address), token_id
+          group by user_id, venue, position_scope, lower(wallet_address), token_id, position_contract
           having count(*) > 1
         ) g
         union all
@@ -248,7 +248,7 @@ async function queryDuplicateSamples(
           count(*)::text
         from positions
         where wallet_address ~ $1
-        group by user_id, venue, position_scope, lower(wallet_address), token_id
+        group by user_id, venue, position_scope, lower(wallet_address), token_id, position_contract
         having count(*) > 1
         union all
         select
@@ -340,13 +340,15 @@ async function materializePositionMergeSet(client: Queryable): Promise<void> {
         p.wallet_address as original_wallet_address,
         lower(p.wallet_address) as canonical_wallet_address,
         p.token_id,
+        p.position_contract,
         row_number() over (
           partition by
             p.user_id,
             p.venue,
             p.position_scope,
             lower(p.wallet_address),
-            p.token_id
+            p.token_id,
+            p.position_contract
           order by
             case when p.side <> 'FLAT' and p.size > 0 then 1 else 0 end desc,
             case when p.position_scope = 'own' then 1 else 0 end desc,
@@ -361,7 +363,8 @@ async function materializePositionMergeSet(client: Queryable): Promise<void> {
             p.venue,
             p.position_scope,
             lower(p.wallet_address),
-            p.token_id
+            p.token_id,
+            p.position_contract
         ) as group_rows
       from positions p
       where p.wallet_address ~ $1
@@ -382,7 +385,7 @@ async function materializePositionMergeSet(client: Queryable): Promise<void> {
         count(*) as rows
       from positions p
       where p.wallet_address ~ $1
-      group by p.user_id, p.venue, lower(p.wallet_address), p.token_id
+      group by p.user_id, p.venue, lower(p.wallet_address), p.token_id, p.position_contract
       having count(*) > 1 and count(distinct p.position_scope) > 1
     `,
     [EVM_SQL],

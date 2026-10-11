@@ -186,10 +186,15 @@ export function polymarketPositionLockKey(
 export function computePolymarketClobOpenPositionLocks(inputs: {
   orders: unknown[];
   wallet: string;
+  conditionId?: string | null;
 }): Map<string, bigint> {
   const wallet = normalizeCollateralWalletKey(inputs.wallet);
   const locks = new Map<string, bigint>();
   if (!wallet) return locks;
+  const selectedCondition = inputs.conditionId?.trim().toLowerCase();
+  const hasSelectedCondition = Boolean(
+    selectedCondition && /^0x[0-9a-f]{64}$/.test(selectedCondition),
+  );
   for (const rawOrder of inputs.orders) {
     const order = normalizeOpenOrder(rawOrder);
     if (!order || order.side?.toUpperCase() !== "SELL" || !order.assetId) {
@@ -201,6 +206,17 @@ export function computePolymarketClobOpenPositionLocks(inputs: {
       order.makerAddress ?? order.owner,
     );
     if (maker !== wallet) continue;
+    // CLOB market is the condition ID. A proven different market cannot lock
+    // this frozen holding, even when CTF and PM share a numeric asset ID.
+    // Missing/malformed provenance remains conservative, as for legacy reads.
+    const orderCondition = order.market?.trim().toLowerCase();
+    if (
+      hasSelectedCondition &&
+      orderCondition &&
+      /^0x[0-9a-f]{64}$/.test(orderCondition) &&
+      orderCondition !== selectedCondition
+    )
+      continue;
     const original = decimalToRaw(order.originalSize);
     const filled = decimalToRaw(order.sizeMatched);
     const remaining = original > filled ? original - filled : 0n;

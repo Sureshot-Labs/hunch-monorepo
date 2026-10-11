@@ -1420,13 +1420,16 @@ export async function recoverFundingTradeAttemptForOrderInTransaction(
           'submission_started',
           'ambiguous'
         )
-        and exists (
+        and (exists (
           select 1
           from unified_tokens token
           where token.market_id = attempt.market_id
             and token.venue = attempt.venue_id
             and token.token_id = $3
-        )
+        ) or (attempt.venue_id = 'polymarket'
+          and attempt.consumer_intent->>'marketContextId' = $3
+          and attempt.consumer_intent->>'marketId' = attempt.market_id
+          and attempt.consumer_intent->>'venueId' = attempt.venue_id))
         and (
           attempt.external_reference = any($4::text[])
           or (
@@ -1492,13 +1495,16 @@ export async function recoverFundingTradeAttemptForOrderInTransaction(
           'submission_started',
           'ambiguous'
         )
-        and exists (
+        and (exists (
           select 1
           from unified_tokens token
           where token.market_id = attempt.market_id
             and token.venue = attempt.venue_id
             and token.token_id = $6
-        )
+        ) or (attempt.venue_id = 'polymarket'
+          and attempt.consumer_intent->>'marketContextId' = $6
+          and attempt.consumer_intent->>'marketId' = attempt.market_id
+          and attempt.consumer_intent->>'venueId' = attempt.venue_id))
         and (
           attempt.external_reference = any($7::text[])
           or (

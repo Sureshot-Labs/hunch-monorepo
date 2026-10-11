@@ -137,6 +137,11 @@ await test("syncLimitlessHistoryForWallet updates canonical order instead of sto
     },
   } as unknown as Pool;
 
+  pool.connect = (async () => ({
+    query: pool.query.bind(pool),
+    release: () => {},
+  })) as unknown as Pool["connect"];
+
   try {
     const stats = await syncLimitlessHistoryForWallet(pool, {
       authContext: {

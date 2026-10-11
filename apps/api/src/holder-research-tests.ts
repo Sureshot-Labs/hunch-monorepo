@@ -6,6 +6,13 @@ import {
 } from "@hunch/embeddings";
 import { buildMarketPriceState } from "@hunch/shared";
 import { buildHolderResearchPriceMovement } from "./services/holder-research-price-movement.js";
+import {
+  applyEditorialDuplicate,
+  buildEventPublicationHistory,
+  withEventPublicationHistory,
+  type EventPublication,
+} from "./services/holder-research-event-publications.js";
+import { buildHolderResearchResponseFormat } from "./services/holder-research-request.js";
 
 import { env } from "./env.js";
 import {
@@ -56,6 +63,7 @@ import {
 } from "./schemas/signals.js";
 import {
   adaptHolderResearchFinalOutputV2,
+  adjustedHolderResearchSelectionScore,
   applyHolderResearchCooldowns,
   applyHolderResearchLivePriceChecks,
   applyHolderResearchPreviousDecisionContext,
@@ -64,6 +72,7 @@ import {
   buildHolderResearchActorSummary,
   buildDeterministicHolderResearchDecision,
   buildHolderResearchDecisionCacheRecord,
+  buildHolderResearchDecisionCacheKey,
   buildHolderResearchDecisionSnapshot,
   buildHolderResearchDecisionFeaturesV2,
   buildHolderResearchCandidatePromptJson,
@@ -168,12 +177,13 @@ function performanceItem(
   const outcome = overrides.outcome ?? "wrong";
   const payout = outcome === "correct" ? 1 : 0;
   return {
-    version: 1,
+    version: 2,
     evaluatedAt: "2026-01-02T00:00:00.000Z",
     noteId: "00000000-0000-4000-8000-000000000100",
     thesisKey: "holder_research:v2:polymarket:test:YES",
     tradeKey: "holder_research:v2:polymarket:test:YES:polymarket:test:YES",
     marketId: "polymarket:test",
+    eventId: "polymarket:event-test",
     venue: "polymarket",
     bucket: "sharp_side",
     marketType: "politics_geo",
@@ -2492,6 +2502,15 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(report.byPriceBand["0.20-0.40"]?.samples, 30);
       assert.equal(report.byHorizon["1-7d"]?.samples, 30);
       assert.equal(report.byActor.cluster?.samples, 30);
+      const sample = samples[0];
+      assert.ok(sample);
+      const fractional = buildHolderResearchObservationCalibrationReport([
+        { ...sample, payout: 0.25, roi: 0.25, excessProbability: 0.05 },
+      ]);
+      assert.equal(fractional.overall.fractionalSamples, 1);
+      assert.equal(fractional.overall.actualWins, 0);
+      assert.equal(fractional.overall.expectedWins, 0);
+      assert.equal(fractional.overall.meanRoi, 0.25);
       assert.equal(report.byBucket.sharp_side?.samples, 30);
     },
   },
@@ -2838,7 +2857,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       );
       assert.equal(memo.length, 1);
       assert.match(memo[0] ?? "", /mean ROI -20\.0%/);
-      assert.match(memo[0] ?? "", /not yet statistically proven/);
+      assert.match(memo[0] ?? "", /not proof of negative edge/);
     },
   },
   {
@@ -2898,7 +2917,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         }),
       );
       assert.equal(memo.length, 1);
-      assert.match(memo[0] ?? "", /Positive calibrated pattern/);
+      assert.match(memo[0] ?? "", /Observed positive pattern/);
       assert.match(memo[0] ?? "", /actual wins versus 15\.0 expected/);
     },
   },
@@ -4530,6 +4549,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         { triageReasoningEffort: "medium" as const },
         { maxPublishHorizonHours: 1440 },
         { maxPublishHorizonHoursByCategory: { politics_geo: 1440 } },
+        { selectionClusterBonus: 0.18 },
+        { eventPublicationHistoryEnabled: false },
       ]) {
         const changed = evaluateHolderResearchDecisionCache({
           candidate,
@@ -4554,8 +4575,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const oldContract = {
         ...cachedSkip,
         modelConfigSignature: currentSignature.replace(
+          "holder_decision_contract_v8",
           "holder_decision_contract_v7",
-          "holder_decision_contract_v6",
         ),
       };
       assert.equal(
@@ -7749,7 +7770,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                   metrics: {
                     market: { yesProbability: 0.52 },
                     resolvedEvaluation: {
-                      version: 1,
+                      version: 2,
                       evaluatedAt: "2026-01-02T00:00:00.000Z",
                       outcome: "wrong",
                       signalSide: "NO",
@@ -9725,6 +9746,269 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         ),
         "price_refresh_error",
       );
+    },
+  },
+  {
+    name: "cluster bonus rollback and counterfactual ranks use exactly the same candidates",
+    run: () => {
+      const p = policy({ selectionClusterBonus: 0.18 });
+      const cluster = buildHolderResearchCandidatesFromMarket(
+        market({
+          marketId: "cluster-rank",
+          sides: {
+            YES: side("YES", {
+              usd: 55_000,
+              wallets: 2,
+              sharpHolders: 2,
+              sharpUsd: 55_000,
+              bestEdge: 0.18,
+              bestZScore: 2.4,
+              bestSampleCount: 28,
+              bestResolvedStakeUsd: 8_000,
+              bestTrades30d: 18,
+            }),
+            NO: side("NO", { usd: 45_000, wallets: 3 }),
+          },
+          holders: [
+            holder("YES", {
+              walletId: "first",
+              positionUsd: 30_000,
+              pnl30dUsd: 12_000,
+            }),
+            holder("YES", {
+              walletId: "second",
+              positionUsd: 25_000,
+              pnl30dUsd: 8_000,
+            }),
+          ],
+        }),
+        p,
+      ).find((item) => item.side === "YES" && item.bucket === "sharp_side");
+      const single = sharpMinorityCandidate(p);
+      assert.ok(cluster);
+      assert.equal(
+        buildHolderResearchQualityAssessment(cluster, p).actorStrength,
+        "cluster",
+      );
+      const before = adjustedHolderResearchSelectionScore(cluster, p);
+      const next = { ...p, selectionClusterBonus: 0.28 };
+      assert.ok(
+        Math.abs(
+          adjustedHolderResearchSelectionScore(cluster, next) - before - 0.1,
+        ) < 1e-9,
+      );
+      assert.equal(
+        adjustedHolderResearchSelectionScore(single, next),
+        adjustedHolderResearchSelectionScore(single, p),
+      );
+      single.score +=
+        before + 0.05 - adjustedHolderResearchSelectionScore(single, p);
+      const input = {
+        candidates: [single, cluster],
+        requiredCandidates: [],
+        limit: 2,
+      };
+      const baseline = buildHolderResearchObservationPool({
+        ...input,
+        policy: p,
+      });
+      const live = buildHolderResearchObservationPool({
+        ...input,
+        policy: next,
+      });
+      assert.equal(baseline[0]?.candidate.thesisKey, single.thesisKey);
+      assert.equal(live[0]?.candidate.thesisKey, cluster.thesisKey);
+      assert.equal(live[0]?.selectionTelemetry?.baselineRank, 2);
+      assert.equal(live[0]?.selectionTelemetry?.liveRank, 1);
+      assert.equal(
+        getIntelPolicyDefaults("holder_research").selectionClusterBonus,
+        0.28,
+      );
+      assert.equal(
+        getIntelPolicySchema("holder_research").safeParse({
+          selectionClusterBonus: 1.1,
+        }).success,
+        false,
+      );
+    },
+  },
+  {
+    name: "final editorial memory preserves siblings, diagnoses missing/partial history and repairs old V1/V2 responses",
+    run: () => {
+      const candidate = sharpMinorityCandidate(policy());
+      const publication: EventPublication = {
+        event_id: "event",
+        market_id: "team-win",
+        side: "YES",
+        note_id: "old",
+        published_at: "2026-10-07T12:00:00Z",
+        title: "Team win",
+        summary: "Team could win in regulation",
+        win_condition: "Team wins in regulation",
+        holder_ids: ["shared"],
+      };
+      const build = (
+        loaded: EventPublication[],
+        enabled = true,
+        available = true,
+      ) =>
+        buildEventPublicationHistory({
+          enabled,
+          available,
+          eventId: "event",
+          loaded,
+          committed: [],
+          selectedHolderIds: ["shared"],
+        });
+      const history = build([publication]);
+      assert.equal(history.items[0]?.supportingHolderOverlap, 1);
+      const normal = publishOutput(candidate, { editorial_duplicate: false });
+      assert.equal(applyEditorialDuplicate(normal, history), normal); // distinct no-draw/new substantive facts allowed
+      const duplicate = publishOutput(candidate, { editorial_duplicate: true });
+      assert.equal(applyEditorialDuplicate(duplicate, history).status, "SKIP");
+      assert.equal(
+        applyEditorialDuplicate(duplicate, history).public_context,
+        null,
+      );
+      assert.equal(applyEditorialDuplicate(duplicate, build([])), duplicate);
+      assert.equal(
+        applyEditorialDuplicate(duplicate, build([publication], false)),
+        duplicate,
+      );
+      assert.equal(build([], true, false).status, "unavailable");
+      assert.equal(
+        build(
+          Array.from({ length: 7 }, (_, i) => ({
+            ...publication,
+            market_id: `market${i}`,
+          })),
+        ).hasMore,
+        true,
+      );
+      assert.equal(
+        build(
+          Array.from({ length: 7 }, (_, i) => ({
+            ...publication,
+            market_id: `market${i}`,
+          })),
+        ).items.length,
+        6,
+      );
+      const latest = buildEventPublicationHistory({
+        enabled: true,
+        available: true,
+        eventId: "event",
+        loaded: [publication],
+        committed: [
+          {
+            ...publication,
+            note_id: null,
+            title: "Latest",
+            published_at: "2026-10-07T13:00:00Z",
+          },
+        ],
+        selectedHolderIds: [],
+      });
+      assert.equal(latest.items[0]?.title, "Latest");
+      assert.equal(
+        parseHolderResearchAgentOutputV1(normal).editorial_duplicate,
+        false,
+      );
+      const v2 = parseHolderResearchFinalOutputV2({
+        version: "holder_research_v2",
+        verdict: "skip",
+        evidence_assessment: "mixed",
+        reason_codes: [],
+        rationale: "Legacy answer without flag",
+        evidence_ids: [candidate.evidence[0]?.id],
+        copy: null,
+      });
+      assert.equal(v2.editorial_duplicate, false);
+      const externalResearch = parseHolderResearchExternalResearchV2({
+        status: "not_requested",
+        verdict: "unknown",
+        timing: "unknown",
+        summary: "No external search performed",
+        citations: [],
+      });
+      const adapted = adaptHolderResearchFinalOutputV2({
+        candidate,
+        policy: policy(),
+        output: { ...v2, editorial_duplicate: true },
+        externalResearch,
+      });
+      assert.equal(adapted.editorial_duplicate, true);
+      for (const useV2 of [true, false]) {
+        const wire = buildHolderResearchResponseFormat({
+          model: "openai/gpt-6-sol",
+          stage: "final",
+          useV2,
+        }) as { json_schema: { schema: { required: string[] } } };
+        assert.ok(
+          wire.json_schema.schema.required.includes("editorial_duplicate"),
+        );
+      }
+      assert.equal(
+        "eventPublicationHistory" in withEventPublicationHistory({}, history),
+        true,
+      );
+      assert.equal(
+        "eventPublicationHistory" in
+          withEventPublicationHistory({}, build([], false)),
+        false,
+      );
+      assert.equal(
+        "eventPublicationHistory" in
+          buildHolderResearchExternalSearchInputV2(
+            candidate,
+            policy(),
+            "market_context",
+          ),
+        false,
+      );
+      assert.equal(
+        "eventPublicationHistory" in
+          buildHolderResearchTriageCandidatePromptJsonV2(candidate, policy()),
+        false,
+      );
+    },
+  },
+  {
+    name: "editorial duplicate deletes exact old cache and never starts cooldown",
+    run: async () => {
+      const candidate = sharpMinorityCandidate(policy());
+      const key = buildHolderResearchDecisionCacheKey(candidate.thesisKey);
+      const stored = new Map([
+        [key, "old-context"],
+        ["other-key", "other-thesis"],
+      ]);
+      const stats = {
+        enabled: true,
+        status: "ok" as const,
+        checked: 0,
+        skipped: 0,
+        rechecked: 0,
+        written: 0,
+        errors: 0,
+        dryRun: false,
+      };
+      await maybeWriteDecisionCache({
+        redis: {
+          get: async (key) => stored.get(key) ?? null,
+          set: async (key, value) => {
+            stored.set(key, value);
+          },
+          del: async (key) => stored.delete(key),
+        },
+        candidate,
+        policy: policy({ decisionCacheEnabled: true, dryRun: false }),
+        callModel: true,
+        output: { status: "SKIP", rationale: "Editorial duplicate" },
+        modelMeta: { editorial_duplicate: true },
+        decisionCache: stats,
+      });
+      assert.deepEqual([...stored.keys()], ["other-key"]);
+      assert.equal(stats.written, 0);
     },
   },
 ];

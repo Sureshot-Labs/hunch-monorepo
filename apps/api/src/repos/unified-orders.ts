@@ -1,5 +1,16 @@
 import type { Pool } from "@hunch/infra";
 import type { PgParams } from "../server-types.js";
+import {
+  polymarketOrderBindingJoinSql,
+  polymarketOrderMarketIdSql,
+  polymarketOrderOutcomeSideSql,
+} from "../lib/polymarket-order-ledger-sql.js";
+
+const ORDER_MARKET_ID_SQL = polymarketOrderMarketIdSql("o", "ut.market_id");
+const ORDER_MARKET_JOIN_SQL = `
+  ${polymarketOrderBindingJoinSql("o")}
+  left join unified_tokens ut on ut.token_id = o.token_id and ut.venue = o.venue
+`;
 
 export type UnifiedOrderRow = {
   id: string;
@@ -292,7 +303,7 @@ const buildOrdersSelect = (whereClause: string): string => `
     o.venue_order_id,
     o.token_id,
     o.side,
-    null::text as outcome,
+    o.resolved_outcome_side as outcome,
     o.order_type,
     o.price::text as price,
     o.size::text as size,
@@ -316,7 +327,8 @@ const buildOrdersSelect = (whereClause: string): string => `
   from (
     select
       o.*,
-      ut.market_id,
+      ${ORDER_MARKET_ID_SQL} as market_id,
+      case when o.venue = 'polymarket' then ${polymarketOrderOutcomeSideSql("o", "upper(ut.side)")} else null end as resolved_outcome_side,
       row_number() over (
         partition by o.user_id, o.venue, o.venue_order_id
         order by
@@ -327,9 +339,7 @@ const buildOrdersSelect = (whereClause: string): string => `
           id desc
       ) as row_rank
     from orders o
-    left join unified_tokens ut
-      on ut.token_id = o.token_id
-      and ut.venue = o.venue
+    ${ORDER_MARKET_JOIN_SQL}
     ${whereClause}
   ) o
   where o.row_rank = 1
@@ -382,7 +392,7 @@ export async function fetchUnifiedOrders(
 
   const filterParams = buildFilterParams(inputs);
   const baseOrderWhere = buildWhereClause("o", filterParams, true, {
-    market: "ut.market_id",
+    market: ORDER_MARKET_ID_SQL,
     token: "o.token_id",
     createdAt: "coalesce(o.posted_at, o.last_update)",
   });
@@ -441,7 +451,11 @@ export async function fetchUnifiedOrderById(
   inputs: FilterInputs & { id: string },
 ): Promise<UnifiedOrderRow | null> {
   const filterParams = buildFilterParams(inputs);
-  const orderWhere = buildWhereClause("o", filterParams, true);
+  const orderWhere = buildWhereClause("o", filterParams, true, {
+    market: ORDER_MARKET_ID_SQL,
+    token: "o.token_id",
+    createdAt: "coalesce(o.posted_at, o.last_update)",
+  });
   const execWhere = buildWhereClause("e", filterParams, false);
 
   const params = [...filterParams.params];

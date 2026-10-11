@@ -15,6 +15,11 @@ export const notificationRedemptionSchema = z.object({
   amountUsd: z.coerce.number().nullable().optional(),
   marketId: z.string().nullable().optional(),
   tokenId: z.string().nullable().optional(),
+  positionId: z.string().uuid().optional(),
+  positionContract: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{40}$/)
+    .optional(),
   txHash: z.string().nullable().optional(),
   walletAddress: z.string().nullable().optional(),
 });

@@ -3321,10 +3321,23 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           if (sql.includes("from ai_notes n")) {
             return { rows: [noteRow()] };
           }
-          if (sql.includes("from positions p")) {
-            assert.match(sql, /ut\.market_id = \$1/);
+          if (
+            sql.includes("from scoped_tokens scoped_token") &&
+            sql.includes("join positions p")
+          ) {
+            assert.match(sql, /from unified_markets where id = \$1::text/);
+            assert.match(sql, /join polymarket_asset_bindings binding/);
+            assert.match(sql, /binding\.market_id = m\.id/);
+            assert.match(sql, /p\.token_id = scoped_token\.token_id/);
+            assert.match(sql, /p\.venue = scoped_token\.venue/);
+            assert.match(
+              sql,
+              /p\.position_contract = scoped_token\.position_contract/,
+            );
             assert.match(sql, /p\.position_scope = 'own'/);
             assert.match(sql, /p\.size > 0/);
+            assert.match(sql, /coalesce\(p\.is_hidden, false\) = false/);
+            assert.match(sql, /preference\.reachable = true/);
             assert.match(
               sql,
               /root_delivery\.status in \('pending', 'retry', 'sending', 'sent'\)/,
@@ -15175,6 +15188,16 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       const db = {
         query: async (sql: string, params?: unknown[]) => {
           queries.push({ params: params ?? [], sql });
+          if (sql.includes("as cursor_at"))
+            return {
+              rows: [
+                {
+                  id: "00000000-0000-4000-8000-000000000301",
+                  note_id: performanceNoteRow().note_id,
+                  cursor_at: new Date(Date.now() - 1000).toISOString(),
+                },
+              ],
+            };
           if (/from\s+ai_notes\s+n/i.test(sql)) {
             return {
               rows: [
@@ -15209,7 +15232,13 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
                   note_id: "00000000-0000-4000-8000-000000000202",
                   resolved_outcome: "YES",
                 }),
-              ],
+              ].map((row) => ({
+                ...row,
+                published_at: new Date(Date.now() - 1000).toISOString(),
+                delivered_initial: true,
+                frozen_side: "YES",
+                frozen_entry_price: 0.5,
+              })),
             };
           }
           if (/from\s+jsonb_to_recordset/i.test(sql)) return { rows: [] };
@@ -15243,7 +15272,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       assert.doesNotMatch(queries[0]?.sql ?? "", /n\.confidence >=/);
       assert.doesNotMatch(queries[0]?.sql ?? "", /n\.status = 'active'/);
       assert.match(queries[0]?.sql ?? "", /sbm\.message_kind = 'initial'/);
-      assert.match(queries[0]?.sql ?? "", /n\.direction in \('up', 'down'\)/);
+      assert.match(
+        queries.find((query) => /from\s+ai_notes\s+n/i.test(query.sql))?.sql ??
+          "",
+        /n\.direction in \('up', 'down'\)/,
+      );
       assert.equal(queries[0]?.params.includes(0.7), false);
     },
   },

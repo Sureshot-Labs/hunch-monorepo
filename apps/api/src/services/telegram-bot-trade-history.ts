@@ -1,4 +1,9 @@
 import type { Pool } from "@hunch/infra";
+import {
+  polymarketOrderBindingJoinSql,
+  polymarketOrderMarketIdSql,
+  polymarketOrderOutcomeSideSql,
+} from "../lib/polymarket-order-ledger-sql.js";
 
 import {
   escapeTelegramMarkdownV2,
@@ -146,8 +151,8 @@ export async function loadTelegramTradeHistory(input: {
               o.venue,
               o.venue_order_id,
               o.side as action,
-              coalesce(market_token.market_id, legacy_token.market_id) as market_id,
-              coalesce(market_token.outcome_side, legacy_token.side) as outcome_side,
+              ${polymarketOrderMarketIdSql("o", "coalesce(market_token.market_id, legacy_token.market_id)")} as market_id,
+              ${polymarketOrderOutcomeSideSql("o", "coalesce(market_token.outcome_side, legacy_token.side)")} as outcome_side,
               case
                 when coalesce(o.filled_size, 0) > 0 then o.filled_size
                 when lower(coalesce(o.status, '')) = any($2::text[]) then o.size
@@ -165,6 +170,7 @@ export async function loadTelegramTradeHistory(input: {
                          o.id desc
               ) as row_rank
          from orders o
+         ${polymarketOrderBindingJoinSql("o")}
          left join unified_market_tokens market_token
            on market_token.token_id = o.token_id
           and market_token.venue = o.venue

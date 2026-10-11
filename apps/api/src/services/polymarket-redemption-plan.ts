@@ -1,4 +1,6 @@
 import { Interface, ethers } from "ethers";
+import type { PolymarketAssetContext } from "@hunch/shared";
+import { buildPolymarketV2RedemptionPlan } from "./polymarket-v2-redemption-plan.js";
 
 import {
   buildPreflightFailurePlan,
@@ -37,6 +39,8 @@ const legacyNegRiskIface = new Interface([
   "function wcol() view returns (address)",
 ]);
 type Inputs = {
+  assetContext?: PolymarketAssetContext | null;
+  positionSize?: string | null;
   rpcUrl: string;
   timeoutMs: number;
   funder: string;
@@ -310,6 +314,25 @@ async function inspectCondition(input: {
 export async function buildPolymarketRedemptionPlan(
   inputs: Inputs,
 ): Promise<RedemptionPlan> {
+  if (inputs.assetContext?.protocolVersion === "v2") {
+    if (
+      inputs.assetContext.assetId !== inputs.positionTokenId ||
+      inputs.assetContext.outcomeIndex !== (inputs.outcome === "YES" ? 0 : 1)
+    )
+      return buildUnavailableRedemptionPlan({
+        venue: "polymarket",
+        chainId: POLY_CHAIN_ID,
+        reason: "missing_token_id",
+        reasonMessage: "Position identity changed. Refresh before redeeming.",
+      });
+    return buildPolymarketV2RedemptionPlan({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.timeoutMs,
+      funder: inputs.funder,
+      assetContext: inputs.assetContext,
+      positionSize: inputs.positionSize ?? "",
+    });
+  }
   try {
     const usdce = address(inputs.legacyCollateralTokenAddress);
     const collateral = address(inputs.collateralTokenAddress);

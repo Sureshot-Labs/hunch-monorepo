@@ -7,6 +7,7 @@ export type InternalHunchFillActivityInput = {
   marketId: string;
   outcomeSide: string | null;
   tokenId: string;
+  positionContract?: string;
   orderId: string;
   orderFillId: string;
   venueFillId: string | null;
@@ -34,6 +35,7 @@ export type InternalHunchFillInitialShares = {
   walletId: string;
   venue: string;
   tokenId: string;
+  positionContract?: string;
   shares: number;
 };
 
@@ -95,8 +97,12 @@ function fillShareKey(inputs: {
   walletId: string;
   venue: string;
   tokenId: string;
+  positionContract?: string;
 }): string {
-  return `${inputs.walletId}:${inputs.venue}:${inputs.tokenId}`;
+  const legacyKey = `${inputs.walletId}:${inputs.venue}:${inputs.tokenId}`;
+  return inputs.positionContract
+    ? `${legacyKey}:${inputs.positionContract.toLowerCase()}`
+    : legacyKey;
 }
 
 export function selectNewestInternalHunchFillReplayInputs<
@@ -167,6 +173,9 @@ export function buildInternalHunchFillActivityEvents(
       metadata: {
         source: "hunch_order_fill",
         tokenId: row.tokenId,
+        ...(row.positionContract
+          ? { positionContract: row.positionContract }
+          : {}),
         orderId: row.orderId,
         orderFillId: row.orderFillId,
         venueFillId: row.venueFillId,

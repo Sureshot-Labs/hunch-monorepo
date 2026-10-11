@@ -1,4 +1,10 @@
 import { z } from "zod";
+import { socialSourceRefSchema } from "./social-trade.js";
+import {
+  POLYMARKET_PROTOCOL_CONTRACTS,
+  parsePolymarketAssetContext,
+  normalizePolymarketAssetId,
+} from "@hunch/shared";
 import {
   zBytes32,
   zEthAddress,
@@ -7,6 +13,41 @@ import {
 } from "./common.js";
 
 const zNumberish = z.union([z.string(), z.number()]);
+const zPolymarketAssetId = z
+  .union([
+    z
+      .string()
+      .max(78)
+      .regex(/^[0-9]+$/),
+    z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  ])
+  .transform(String)
+  .refine(
+    (asset) => normalizePolymarketAssetId(asset) != null,
+    "Invalid uint256 asset ID",
+  );
+
+export const polymarketAssetContextSchema = z
+  .object({
+    contextVersion: z.literal(1),
+    chainId: z.literal(137),
+    marketId: z.string().startsWith("polymarket:"),
+    assetId: z.string(),
+    protocolVersion: z.enum(["v1", "v2"]),
+    assetKind: z.enum(["ctf", "position_manager"]),
+    conditionId: zBytes32,
+    outcomeIndex: z.union([z.literal(0), z.literal(1)]),
+    negRisk: z.boolean(),
+    positionContract: zEthAddressRequired,
+    exchangeAddress: zEthAddressRequired,
+    orderDomainVersion: z.enum(["2", "3"]),
+    conditionalAssetType: z.enum(["CONDITIONAL", "CONDITIONAL-V2"]),
+  })
+  .strict()
+  .refine(
+    (context) => parsePolymarketAssetContext(context) != null,
+    "Invalid Polymarket asset context",
+  );
 
 const zOrderType = z.preprocess(
   (v) => (typeof v === "string" ? v.toUpperCase() : v),
@@ -28,7 +69,7 @@ const polymarketOrderSchemaV2 = z
     salt: zNumberish,
     maker: zEthAddressRequired,
     signer: zEthAddressRequired,
-    tokenId: zNumberish,
+    tokenId: zPolymarketAssetId,
     makerAmount: zNumberish,
     takerAmount: zNumberish,
     side: zNumberish,
@@ -46,7 +87,7 @@ const polymarketUnsignedOrderSchemaV2 = z
     salt: zNumberish,
     maker: zEthAddressRequired,
     signer: zEthAddressRequired,
-    tokenId: zNumberish,
+    tokenId: zPolymarketAssetId,
     makerAmount: zNumberish,
     takerAmount: zNumberish,
     side: zNumberish,
@@ -87,6 +128,9 @@ const polymarketFeeAuthSchema = z.union([
 
 export const polymarketPlaceOrderBodySchema = z
   .object({
+    sourceRef: socialSourceRefSchema.optional(),
+    copyIdempotencyKey: z.string().uuid().optional(),
+    assetContext: polymarketAssetContextSchema.optional(),
     order: polymarketOrderSchema,
     orderType: zOrderType.default("GTC"),
     postOnly: z.boolean().optional(),
@@ -138,6 +182,7 @@ export const polymarketPlaceOrderBodySchema = z
 
 export const polymarketOrderHashBodySchema = z
   .object({
+    assetContext: polymarketAssetContextSchema.optional(),
     order: polymarketOrderSchema,
     exchangeAddress: zEthAddress.optional(),
     negRisk: z.boolean().optional(),
@@ -157,15 +202,16 @@ export const polymarketOpenOrdersQuerySchema = z.object({
 
 export const polymarketBalanceAllowanceSyncBodySchema = z
   .object({
+    assetContext: polymarketAssetContextSchema.optional(),
     assetType: z.preprocess(
       (v) => (typeof v === "string" ? v.toUpperCase() : v),
-      z.enum(["COLLATERAL", "CONDITIONAL"]),
+      z.enum(["COLLATERAL", "CONDITIONAL", "CONDITIONAL-V2"]),
     ),
     signatureType: z.coerce.number().int().min(0).max(3).optional(),
     tokenId: z.string().trim().min(1).optional(),
   })
   .superRefine((value, ctx) => {
-    if (value.assetType === "CONDITIONAL" && !value.tokenId) {
+    if (value.assetType !== "COLLATERAL" && !value.tokenId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "tokenId is required for conditional balance sync",
@@ -177,11 +223,15 @@ export const polymarketBalanceAllowanceSyncBodySchema = z
 export const polymarketMarketInfoQuerySchema = z
   .object({
     tokenId: z.string().optional(),
+    positionContract: zEthAddressRequired.optional(),
     marketId: z.string().optional(),
     conditionId: z.string().optional(),
   })
   .refine((v) => Boolean(v.tokenId || v.marketId || v.conditionId), {
     message: "tokenId, marketId, or conditionId is required",
+  })
+  .refine((v) => !v.positionContract || Boolean(v.tokenId), {
+    message: "tokenId is required to select a position ledger",
   });
 
 export const polymarketAccountQuerySchema = z.object({
@@ -190,6 +240,22 @@ export const polymarketAccountQuerySchema = z.object({
 });
 
 export const polymarketRedemptionPlanQuerySchema = z.object({
+  positionContract: zEthAddress
+    .optional()
+    .refine(
+      (value) =>
+        !value ||
+        [
+          POLYMARKET_PROTOCOL_CONTRACTS.conditionalTokens,
+          POLYMARKET_PROTOCOL_CONTRACTS.positionManager,
+        ].some((ledger) => ledger.toLowerCase() === value.toLowerCase()),
+      "Unsupported Polymarket position ledger",
+    ),
+  positionSize: z
+    .string()
+    .max(86)
+    .regex(/^(0|[1-9]\d*)(\.\d{1,6})?$/)
+    .optional(),
   outcome: zOutcome,
   tokenId: zRequiredString("tokenId is required"),
   negRisk: zOptionalBool.optional(),
@@ -226,6 +292,7 @@ export const polymarketFunderDeriveBatchBodySchema = z.object({
 
 export const polymarketQuoteBodySchema = z
   .object({
+    assetContext: polymarketAssetContextSchema.optional(),
     tokenId: zRequiredString("tokenId is required"),
     side: z.enum(["BUY", "SELL"], {
       message: "Valid side (BUY/SELL) is required",
@@ -316,6 +383,7 @@ export const polymarketEmbeddedEnsureReadyExecuteBodySchema = z.object({
 
 export const polymarketEmbeddedSignOrderBodySchema = z
   .object({
+    assetContext: polymarketAssetContextSchema.optional(),
     order: polymarketUnsignedOrderSchema,
     exchangeAddress: zEthAddressRequired,
     authorizationSignature: zRequiredString(

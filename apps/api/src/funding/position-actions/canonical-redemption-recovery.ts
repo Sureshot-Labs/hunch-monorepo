@@ -1,4 +1,10 @@
 import type { Pool } from "@hunch/infra";
+import { POLYMARKET_PROTOCOL_CONTRACTS } from "@hunch/shared";
+import { POLYMARKET_V2_ROUTER_ABI } from "../../services/polymarket-v2-redemption-plan.js";
+import {
+  polymarketV2RedemptionIdentity,
+  POLYMARKET_V2_REDEMPTION_TOPIC,
+} from "./polymarket-v2-redemption-evidence.js";
 import { env } from "../../env.js";
 import { isRecord } from "../../lib/type-guards.js";
 import {
@@ -11,6 +17,7 @@ import {
 } from "../../services/polygon-rpc.js";
 import {
   canonicalRedemptionIdentity as identity,
+  positionActionSubmissionStartSeconds,
   matchesCanonicalRedemption,
   CANONICAL_CTF_ABI as CTF,
   CANONICAL_CTF_PAYOUT_TOPIC as PAYOUT_TOPIC,
@@ -58,7 +65,8 @@ export async function discoverCanonicalRedemption(
   ctfAddress: string,
   rpc: RedemptionRecoveryRpc,
 ): Promise<string | null> {
-  if (!identity(operation, ctfAddress)) return null;
+  const v2Identity = polymarketV2RedemptionIdentity(operation);
+  if (!v2Identity && !identity(operation, ctfAddress)) return null;
   const deadline = Date.now() + 18_000;
   const budgeted =
     <T extends unknown[], R>(read: (...args: T) => Promise<R>) =>
@@ -75,8 +83,8 @@ export async function discoverCanonicalRedemption(
     blockHash: budgeted(rpc.blockHash),
   };
   const finalized = await rpc.finalizedBlock();
-  const start = BigInt(Math.floor(startedAt.getTime() / 1000));
-  if (start < 60n) return null;
+  const start = positionActionSubmissionStartSeconds(operation, startedAt);
+  if (start == null || start < 60n) return null;
   const from = await lowerBlock(rpc, finalized, start - 60n);
   const end = await lowerBlock(rpc, finalized, start + 10n * 60n);
   if (from === null || end === null || end < from || end - from > 5000n)
@@ -86,14 +94,20 @@ export async function discoverCanonicalRedemption(
     const logs = await rpc.logs(
       cursor,
       cursor + 199n > end ? end : cursor + 199n,
-      ctfAddress,
+      v2Identity ? POLYMARKET_PROTOCOL_CONTRACTS.router : ctfAddress,
     );
     for (const log of logs) {
       try {
-        const parsed = CTF.parseLog(log);
+        const parsed = (v2Identity ? POLYMARKET_V2_ROUTER_ABI : CTF).parseLog(
+          log,
+        );
         if (
-          parsed?.name === "PayoutRedemption" &&
-          eq(parsed.args.redeemer, operation.ownerAddress)
+          v2Identity
+            ? parsed?.name === "RouterPositionRedeemed" &&
+              eq(parsed.args.initiator, operation.ownerAddress) &&
+              parsed.args.positionId === v2Identity.positionId
+            : parsed?.name === "PayoutRedemption" &&
+              eq(parsed.args.redeemer, operation.ownerAddress)
         )
           candidates.add(log.transactionHash);
       } catch {
@@ -113,6 +127,9 @@ export async function discoverCanonicalRedemption(
     )
       return null;
     if (!matchesCanonicalRedemption(operation, ctfAddress, receipt)) continue;
+    const timestamp = await rpc.timestamp(BigInt(receipt.blockNumber));
+    if (timestamp == null) return null;
+    if (timestamp < start) continue;
     const canonicalHash = await rpc.blockHash(receipt.blockNumber);
     if (!canonicalHash || !eq(canonicalHash, receipt.blockHash)) return null;
     matches.push(hash);
@@ -166,7 +183,11 @@ export async function recoverMissingPositionSubmission(
         fromBlock,
         toBlock,
         contractAddress,
-        eventTopics: [PAYOUT_TOPIC],
+        eventTopics: [
+          polymarketV2RedemptionIdentity(operation)
+            ? POLYMARKET_V2_REDEMPTION_TOPIC
+            : PAYOUT_TOPIC,
+        ],
       }),
     receipt: (transactionHash) =>
       fetchEvmTransactionReceipt({ ...network, transactionHash }),

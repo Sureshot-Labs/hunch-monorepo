@@ -1,6 +1,8 @@
 import type { Pool } from "@hunch/infra";
 import {
   EFFECTIVE_PNL_SQL,
+  POSITION_ASSET_BINDING_JOIN_SQL,
+  POSITION_BOUND_OR_PROJECTED_MARKET_SQL,
   UNREALIZED_PNL_COMPONENT_SQL,
 } from "../lib/pnl-sql.js";
 import type { DbQuery } from "../db.js";
@@ -54,6 +56,7 @@ export type PositionShareSourceRow = {
 };
 
 export const POSITION_MARKET_JOIN_SQL = `
+  ${POSITION_ASSET_BINDING_JOIN_SQL}
   left join lateral (
     select
       token_market.market_id,
@@ -77,13 +80,14 @@ export const POSITION_MARKET_JOIN_SQL = `
       from unified_market_tokens umt
       where umt.token_id = p.token_id
     ) token_market
-    where token_market.outcome_side in ('YES', 'NO')
+    where position_binding.market_id is null and token_market.outcome_side in ('YES', 'NO')
     order by
       token_market.venue_rank asc,
       token_market.updated_at desc nulls last,
       token_market.market_id asc
     limit 1
-  ) umt on true
+  ) projected_market_token on true
+  ${POSITION_BOUND_OR_PROJECTED_MARKET_SQL}
   left join unified_markets m
     on m.id = umt.market_id
   left join unified_events e
@@ -127,7 +131,12 @@ export const POSITION_MARKET_JOIN_SQL = `
   left join lateral (
     select top.best_bid, top.best_ask
     from unified_token_top_latest top
-    where top.token_id = p.token_id
+    where top.token_id = case
+      when p.venue = 'polymarket' then coalesce(
+        nullif(m.clob_token_ids, '')::jsonb->>(case upper(umt.outcome_side) when 'YES' then 0 when 'NO' then 1 end),
+        case upper(umt.outcome_side) when 'YES' then m.token_yes when 'NO' then m.token_no end)
+      else p.token_id
+    end
       and top.ts > now() - interval '7 days'
     limit 1
   ) selected_top on true

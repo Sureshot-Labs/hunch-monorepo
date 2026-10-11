@@ -10,6 +10,16 @@ import {
 import type { EmbeddedEthereumTransactionSpec } from "./embedded-ethereum.js";
 import type { PolymarketFunderCandidate } from "./polymarket-funder.js";
 import { POLYGON_NATIVE_USDC_ADDRESS } from "./polymarket-onchain.js";
+import { buildPolymarketOrderDomain } from "./polymarket-order-hash.js";
+import {
+  POLYMARKET_PROTOCOL_CONTRACTS as CONTRACTS,
+  type PolymarketOrderDomainVersion,
+  type PolymarketProtocolVersion,
+} from "@hunch/shared";
+import {
+  isPolymarketV2ApprovalCall,
+  isPolymarketV2RedemptionCall,
+} from "./polymarket-v2-call-validation.js";
 import { createEvmRpcProvider } from "./rpc-client-factory.js";
 import {
   POLYMARKET_AUTH_MESSAGE,
@@ -873,6 +883,20 @@ function validateDepositWalletBatchCall(
     throw new Error("Deposit wallet approval calls cannot send native value.");
   }
 
+  if (purpose === "redeem" && isPolymarketV2RedemptionCall(target, data))
+    return;
+  // Redemption plans may contain a preceding PM->Router approval, never an
+  // unrelated exchange approval. Ordinary setup batches allow only V3/Router.
+  if (
+    purpose !== "withdraw" &&
+    isPolymarketV2ApprovalCall(
+      target,
+      data,
+      purpose === "redeem" ? "redeem" : "setup",
+    )
+  )
+    return;
+
   let decoded: ethers.TransactionDescription | null = null;
   try {
     decoded = TOKEN_APPROVAL_ABI.parseTransaction({ data, value: 0n });
@@ -1326,6 +1350,7 @@ function buildEmbeddedPolymarketOrderTypedData(inputs: {
   signer: string;
   payload: PolymarketOrderPayload;
   exchangeAddress: string;
+  orderDomainVersion?: PolymarketOrderDomainVersion;
 }) {
   const exchangeAddress = requireAddress(
     inputs.exchangeAddress,
@@ -1347,12 +1372,10 @@ function buildEmbeddedPolymarketOrderTypedData(inputs: {
     throw new Error("Polymarket embedded orders must use CLOB V2 payloads.");
   }
   return {
-    domain: {
-      name: "Polymarket CTF Exchange",
-      version: "2",
-      chainId: POLY_CHAIN_ID,
-      verifyingContract: exchangeAddress,
-    },
+    domain: buildPolymarketOrderDomain(
+      exchangeAddress,
+      inputs.orderDomainVersion,
+    ),
     types: {
       EIP712Domain: POLYMARKET_DOMAIN_TYPES,
       Order: POLYMARKET_ORDER_TYPES.Order,
@@ -1366,11 +1389,13 @@ export function buildEmbeddedPolymarketOrderRequest(inputs: {
   context: EmbeddedPolymarketWalletContext;
   payload: PolymarketOrderPayload;
   exchangeAddress: string;
+  orderDomainVersion?: PolymarketOrderDomainVersion;
 }): EmbeddedPrivyAuthorizationRequest {
   const typedData = buildEmbeddedPolymarketOrderTypedData({
     signer: inputs.context.signer,
     payload: inputs.payload,
     exchangeAddress: inputs.exchangeAddress,
+    orderDomainVersion: inputs.orderDomainVersion,
   });
   return createPrivyWalletRpcRequest({
     id: "polymarket-order-signature",
@@ -1611,6 +1636,7 @@ export async function signEmbeddedPolymarketOrder(inputs: {
   context: EmbeddedPolymarketContext;
   payload: PolymarketOrderPayload;
   exchangeAddress: string;
+  orderDomainVersion?: PolymarketOrderDomainVersion;
 }) {
   const exchangeAddress = requireAddress(
     inputs.exchangeAddress,
@@ -1632,12 +1658,10 @@ export async function signEmbeddedPolymarketOrder(inputs: {
     walletId: inputs.context.walletId,
     signer: inputs.context.signer,
     typedData: {
-      domain: {
-        name: "Polymarket CTF Exchange",
-        version: "2",
-        chainId: POLY_CHAIN_ID,
-        verifyingContract: exchangeAddress,
-      },
+      domain: buildPolymarketOrderDomain(
+        exchangeAddress,
+        inputs.orderDomainVersion,
+      ),
       types: {
         EIP712Domain: POLYMARKET_DOMAIN_TYPES,
         Order: POLYMARKET_ORDER_TYPES.Order,
@@ -1736,22 +1760,48 @@ export async function deployEmbeddedPolymarketSafe(inputs: {
   });
 }
 
+type EmbeddedPolymarketCurrentApprovals = {
+  exchangeApproved: boolean;
+  negRiskExchangeApproved: boolean;
+  negRiskAdapterApproved: boolean;
+  ctfCollateralAdapterApproved: boolean;
+  negRiskCollateralAdapterApproved: boolean;
+  feeCollectorApproved: boolean;
+  exchangeAllowanceOk: boolean;
+  negRiskExchangeAllowanceOk: boolean;
+  negRiskAdapterAllowanceOk: boolean;
+  feeCollectorAllowanceOk: boolean;
+  v3ExchangeApproved?: boolean;
+  v3ExchangeAllowanceOk?: boolean;
+};
+
 function buildApprovalTasks(inputs: {
   funder: string;
-  currentApprovals: {
-    exchangeApproved: boolean;
-    negRiskExchangeApproved: boolean;
-    negRiskAdapterApproved: boolean;
-    ctfCollateralAdapterApproved: boolean;
-    negRiskCollateralAdapterApproved: boolean;
-    feeCollectorApproved: boolean;
-    exchangeAllowanceOk: boolean;
-    negRiskExchangeAllowanceOk: boolean;
-    negRiskAdapterAllowanceOk: boolean;
-    feeCollectorAllowanceOk: boolean;
-  };
+  protocolVersion?: PolymarketProtocolVersion;
+  action?: "BUY" | "SELL";
+  currentApprovals: EmbeddedPolymarketCurrentApprovals;
 }): ApprovalTask[] {
   const tasks: ApprovalTask[] = [];
+  if (inputs.protocolVersion === "v2") {
+    if (
+      inputs.action !== "SELL" &&
+      !inputs.currentApprovals.v3ExchangeAllowanceOk
+    )
+      tasks.push({
+        kind: "erc20_approve",
+        target: CONTRACTS.collateral,
+        data: encodeApprove(CONTRACTS.exchangeV3),
+        description: "pUSD V3 exchange approval",
+      });
+    if (inputs.action !== "BUY" && !inputs.currentApprovals.v3ExchangeApproved)
+      tasks.push({
+        kind: "erc1155_approve_all",
+        target: CONTRACTS.positionManager,
+        data: encodeSetApprovalForAll(CONTRACTS.exchangeV3),
+        description: "PositionManager V3 exchange approval",
+      });
+    return tasks;
+  }
   if (!inputs.currentApprovals.exchangeAllowanceOk) {
     tasks.push({
       kind: "erc20_approve",
@@ -1833,21 +1883,27 @@ function buildApprovalTasks(inputs: {
   return tasks;
 }
 
+export function embeddedPolymarketAutomationApprovalsReady(inputs: {
+  protocolVersion?: PolymarketProtocolVersion;
+  action?: "BUY" | "SELL";
+  currentApprovals: EmbeddedPolymarketCurrentApprovals;
+}): boolean {
+  if (inputs.protocolVersion !== "v2")
+    return Object.values(inputs.currentApprovals).every(Boolean);
+  return (
+    (inputs.action === "SELL" ||
+      inputs.currentApprovals.v3ExchangeAllowanceOk === true) &&
+    (inputs.action === "BUY" ||
+      inputs.currentApprovals.v3ExchangeApproved === true)
+  );
+}
+
 export function prepareEmbeddedPolymarketSignerApprovalTransactions(inputs: {
   signer: string;
   funder: string;
-  currentApprovals: {
-    exchangeApproved: boolean;
-    negRiskExchangeApproved: boolean;
-    negRiskAdapterApproved: boolean;
-    ctfCollateralAdapterApproved: boolean;
-    negRiskCollateralAdapterApproved: boolean;
-    feeCollectorApproved: boolean;
-    exchangeAllowanceOk: boolean;
-    negRiskExchangeAllowanceOk: boolean;
-    negRiskAdapterAllowanceOk: boolean;
-    feeCollectorAllowanceOk: boolean;
-  };
+  protocolVersion?: PolymarketProtocolVersion;
+  action?: "BUY" | "SELL";
+  currentApprovals: EmbeddedPolymarketCurrentApprovals;
 }): EmbeddedPolymarketSignerApprovalTransaction[] {
   const funder = requireAddress(inputs.funder, "Invalid Polymarket funder.");
   const signer = requireAddress(inputs.signer, "Invalid Polymarket signer.");
@@ -1856,6 +1912,8 @@ export function prepareEmbeddedPolymarketSignerApprovalTransactions(inputs: {
   }
   return buildApprovalTasks({
     funder,
+    protocolVersion: inputs.protocolVersion,
+    action: inputs.action,
     currentApprovals: inputs.currentApprovals,
   }).map((task, index) => ({
     data: requireHex(task.data, "Invalid approval transaction data."),
@@ -1869,6 +1927,8 @@ export function prepareEmbeddedPolymarketSignerApprovalTransactions(inputs: {
 export function prepareEmbeddedPolymarketSignerApprovalRequests(inputs: {
   context: EmbeddedPolymarketWalletReference;
   funder: string;
+  protocolVersion?: PolymarketProtocolVersion;
+  action?: "BUY" | "SELL";
   currentApprovals: Parameters<
     typeof prepareEmbeddedPolymarketSignerApprovalTransactions
   >[0]["currentApprovals"];
@@ -1876,6 +1936,8 @@ export function prepareEmbeddedPolymarketSignerApprovalRequests(inputs: {
   return prepareEmbeddedPolymarketSignerApprovalTransactions({
     signer: inputs.context.signer,
     funder: inputs.funder,
+    protocolVersion: inputs.protocolVersion,
+    action: inputs.action,
     currentApprovals: inputs.currentApprovals,
   }).map((transaction) =>
     buildEmbeddedSignerApprovalRequest({
@@ -2121,23 +2183,14 @@ export async function ensureEmbeddedPolymarketApprovals(inputs: {
   context: EmbeddedPolymarketContext;
   funder: string;
   funderCandidate: PolymarketFunderCandidate | null;
-  currentApprovals: {
-    exchangeApproved: boolean;
-    negRiskExchangeApproved: boolean;
-    negRiskAdapterApproved: boolean;
-    ctfCollateralAdapterApproved: boolean;
-    negRiskCollateralAdapterApproved: boolean;
-    feeCollectorApproved: boolean;
-    exchangeAllowanceOk: boolean;
-    negRiskExchangeAllowanceOk: boolean;
-    negRiskAdapterAllowanceOk: boolean;
-    feeCollectorAllowanceOk: boolean;
-  };
+  protocolVersion?: PolymarketProtocolVersion;
+  currentApprovals: EmbeddedPolymarketCurrentApprovals;
 }): Promise<EmbeddedPolymarketExecutionSummary | null> {
   const funder = requireAddress(inputs.funder, "Invalid Polymarket funder.");
   const signer = inputs.context.signer;
   const tasks = buildApprovalTasks({
     funder,
+    protocolVersion: inputs.protocolVersion,
     currentApprovals: inputs.currentApprovals,
   });
   if (tasks.length === 0) return null;

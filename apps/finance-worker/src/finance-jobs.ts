@@ -55,6 +55,7 @@ type PrivyDeletionReconcileOptions = {
 };
 
 type FinanceJobsModule = {
+  runVerifiedBuyRepairJob: () => Promise<unknown>;
   runStandaloneFinancialReconciliationJob: () => Promise<unknown>;
   runFeesCollectJob: (
     overrides?: Partial<CollectFeesOptions>,
@@ -87,6 +88,7 @@ type FinanceJobsModuleLoader = () => Promise<FinanceJobsModule>;
 
 let modulePromise: Promise<FinanceJobsModule> | null = null;
 let standaloneJobPromise: Promise<unknown> | null = null;
+let verifiedBuyJobPromise: Promise<unknown> | null = null;
 let financeJobsModuleLoader: FinanceJobsModuleLoader =
   loadFinanceJobsModuleDefault;
 
@@ -136,6 +138,16 @@ export function runStandaloneFinancialReconciliationJob(): Promise<unknown> {
       standaloneJobPromise = null;
     });
   return standaloneJobPromise;
+}
+
+export function runVerifiedBuyRepairJob(): Promise<unknown> {
+  // Do not release single-flight on scheduler timeout; observation may still run.
+  verifiedBuyJobPromise ??= getFinanceJobsModule()
+    .then((jobs) => jobs.runVerifiedBuyRepairJob())
+    .finally(() => {
+      verifiedBuyJobPromise = null;
+    });
+  return verifiedBuyJobPromise;
 }
 
 export async function runFeesCollectJob(

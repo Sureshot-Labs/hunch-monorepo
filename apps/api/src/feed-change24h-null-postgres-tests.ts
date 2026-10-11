@@ -77,14 +77,14 @@ try {
       updated_at timestamptz default '2026-09-15T11:59:00Z', metadata jsonb default '{}',
       volume_total numeric default 10, volume_24h numeric default 10, liquidity numeric default 10,
       open_interest numeric default 0, best_bid numeric default 0.49, best_ask numeric default 0.51,
-      last_price numeric default 0.5, clob_token_ids text, condition_id text, title text,
+      last_price numeric default 0.5, clob_token_ids text, condition_id text, title text, outcomes text,
       token_yes text, token_no text
     );
     create index on unified_markets(event_id);
     create table polymarket_markets (
       id text primary key, accepting_orders boolean default true, active boolean default true,
       closed boolean default false, archived boolean default false, condition_id text,
-      clob_token_ids text, neg_risk boolean, order_price_min_tick_size numeric,
+      clob_token_ids text, outcomes text, neg_risk boolean, order_price_min_tick_size numeric,
       order_min_size numeric, raw jsonb default '{}'
     );
     create table unified_tokens (token_id text, market_id text, venue text);
@@ -235,7 +235,14 @@ try {
     { marketId: "m1" },
     { marketId: "pm1" },
   ]) {
-    await fetchPolymarketMarketInfo(pool, lookup);
+    const info = await fetchPolymarketMarketInfo(pool, lookup);
+    assert.ok(
+      info,
+      "legacy market lookup remains available for every supported identifier",
+    );
+    assert.equal(info.protocol_version, null);
+    assert.equal(info.position_ids, null);
+    assert.equal(info.outcomes, null);
   }
   await pool.query(
     "update unified_markets set status='CLOSED' where id='m1'; update polymarket_markets set accepting_orders=false, closed=true where id='pm1'",

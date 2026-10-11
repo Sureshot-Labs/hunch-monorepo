@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {
+  POLYMARKET_PROTOCOL_CONTRACTS,
+  resolvePolymarketMarketAssets,
+  buildPolymarketAssetContext,
+} from "@hunch/shared";
 
 import type { Pool } from "@hunch/infra";
 
@@ -426,6 +431,81 @@ await test("one destination discovery resolves and shares one immutable market c
   assert.ok(contexts.every(Boolean));
   assert.equal(new Set(contexts).size, 1);
   assert.equal(contexts[0]?.market, market);
+});
+
+await test("V2 preparation selects PM/V3 and never downgrades malformed V2 metadata", () => {
+  const condition = (1n << 248n) | (7n << 120n);
+  const protocol = resolvePolymarketMarketAssets({
+    version: "v2",
+    conditionId: `0x${condition.toString(16).padStart(64, "0")}`,
+    positionIds: [condition.toString(), (condition | 1n).toString()],
+    outcomes: ["Yes", "No"],
+    negRisk: false,
+  });
+  const v2Market = {
+    ...market,
+    condition_id: protocol.conditionId,
+    token_yes: protocol.assets[0],
+    token_no: protocol.assets[1],
+    metadata: {
+      version: "v2",
+      positionIds: protocol.assets,
+      polymarketProtocol: protocol,
+    },
+  };
+  const resolve = (row: ApiTradeMarket) =>
+    walletPreparationRuntimeTestHooks.runtimeMarketContextFromMarket({
+      venue: "polymarket",
+      market: row,
+      requestedMarketClass: null,
+    });
+  const selected = resolve(v2Market);
+  assert.equal(selected.marketClass, "protocol_v2");
+  assert.equal(selected.adapterAddress, POLYMARKET_PROTOCOL_CONTRACTS.router);
+  assert.equal(selected.evidence.resolved, true);
+  const malformed = resolve({
+    ...v2Market,
+    metadata: {
+      version: "v2",
+      polymarketProtocol: { ...protocol, assets: ["1", "2"] },
+    },
+  });
+  assert.equal(malformed.marketClass, "protocol_v2");
+  assert.equal(malformed.evidence.resolved, false);
+  assert.equal(malformed.evidence.exchangeResolved, false);
+  for (const negRisk of [false, true]) {
+    const legacy = resolvePolymarketMarketAssets({
+      version: "v1",
+      conditionId: protocol.conditionId,
+      clobTokenIds: ["7", "8"],
+      outcomes: ["Yes", "No"],
+      negRisk,
+    });
+    const context = buildPolymarketAssetContext(v2Market.id, legacy, "7");
+    const historical =
+      walletPreparationRuntimeTestHooks.runtimeMarketContextFromMarket({
+        venue: "polymarket",
+        market: v2Market,
+        requestedMarketClass: null,
+        assetContext: context,
+      });
+    assert.equal(historical.marketClass, negRisk ? "neg_risk" : "standard");
+    assert.equal(historical.exchangeAddress, context.exchangeAddress);
+    assert.equal(historical.evidence.resolved, true);
+    assert.equal(historical.evidence.exchangeResolved, true);
+    assert.equal(historical.evidence.quoteGuardAvailable, true);
+    assert.deepEqual(historical.assetContext, context);
+    assert.equal(
+      walletPreparationRuntimeTestHooks.runtimeMarketContextFromMarket({
+        venue: "polymarket",
+        market: v2Market,
+        requestedMarketClass: "protocol_v2",
+        assetContext: context,
+      }).evidence.resolved,
+      false,
+      "a contradictory requested class cannot widen the position's approvals",
+    );
+  }
 });
 
 await test("owner-bound redemption inspects the canonical historical owner", async () => {

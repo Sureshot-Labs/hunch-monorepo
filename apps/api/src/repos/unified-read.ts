@@ -1,5 +1,8 @@
 import type { Pool } from "@hunch/infra";
-import { buildObservedCanonicalMarketTop } from "@hunch/shared";
+import {
+  buildObservedCanonicalMarketTop,
+  type PolymarketAssetContext,
+} from "@hunch/shared";
 import { createHash } from "node:crypto";
 import type { QueryResultRow } from "pg";
 import { env } from "../env.js";
@@ -7322,6 +7325,7 @@ export async function fetchMarketSignalPricingByIds(
 
 export type MarketByTokenRow = {
   token_id: string;
+  asset_context?: PolymarketAssetContext | null;
   side: string | null;
   market_id: string;
   venue: string;
@@ -7393,7 +7397,15 @@ export type MarketByTokenRow = {
 
 export async function fetchMarketsByTokenIds(
   pool: Pool,
-  inputs: { tokenIds: string[]; venue?: string; includeTop?: boolean },
+  inputs: {
+    tokenIds: string[];
+    venue?: string;
+    includeTop?: boolean;
+    /** Only an already verified durable holding context may supply this. */
+    marketAssetBinding?: { marketId: string; side: "YES" | "NO" };
+    /** Server-resolved durable position contexts, never raw client metadata. */
+    marketAssetContexts?: readonly PolymarketAssetContext[];
+  },
 ): Promise<MarketByTokenRow[]> {
   if (inputs.tokenIds.length === 0) return [];
 
@@ -7418,6 +7430,34 @@ export async function fetchMarketsByTokenIds(
   }
   const venueRankSql = (alias: string) =>
     inputs.venue ? `case when ${alias}.venue = $2 then 0 else 1 end` : "0";
+  const frozenBindingSql = inputs.marketAssetContexts
+    ? (() => {
+        params.push(JSON.stringify(inputs.marketAssetContexts));
+        return `select frozen_row.asset_context->>'assetId' as token_id,
+          case frozen_row.asset_context->>'outcomeIndex' when '0' then 'YES' else 'NO' end as side,
+          market_row.id as market_id, frozen_row.ordinality,
+          0 as lookup_rank, 0 as venue_rank, market_row.updated_at, 0 as source_rank,
+          frozen_row.asset_context,
+          frozen_row.asset_context->>'positionContract' as position_contract
+          from jsonb_array_elements($${params.length}::jsonb) with ordinality
+            as frozen_row(asset_context, ordinality)
+          join unified_markets market_row on market_row.id = frozen_row.asset_context->>'marketId'
+          where market_row.venue = 'polymarket'
+            and frozen_row.asset_context->>'assetId' = any($1::text[])`;
+      })()
+    : inputs.marketAssetBinding
+      ? (() => {
+          params.push(
+            inputs.marketAssetBinding.marketId,
+            inputs.marketAssetBinding.side,
+          );
+          return `select input_row.token_id, $${params.length}::text as side,
+          market_row.id as market_id, input_row.ordinality,
+          0 as lookup_rank, 0 as venue_rank, market_row.updated_at, 0 as source_rank
+          from input_tokens input_row join unified_markets market_row
+            on market_row.id = $${params.length - 1}`;
+        })()
+      : null;
 
   const includeTop = inputs.includeTop ?? true;
   const topSelect = includeTop
@@ -7480,6 +7520,9 @@ export async function fetchMarketsByTokenIds(
       ${rawLimitlessLookupSql}
     ),
     token_matches as (
+      ${
+        frozenBindingSql ??
+        `
       select
         lt.token_id,
         upper(umt.outcome_side) as side,
@@ -7539,6 +7582,8 @@ export async function fetchMarketsByTokenIds(
       from lookup_tokens lt
       join unified_markets m_no
         on m_no.token_no = lt.lookup_token_id
+      `
+      }
     ),
     ranked_token_matches as (
       select *
@@ -7546,7 +7591,7 @@ export async function fetchMarketsByTokenIds(
         select
           token_matches.*,
           row_number() over (
-            partition by token_matches.token_id
+            partition by token_matches.token_id${inputs.marketAssetContexts ? ", token_matches.position_contract" : ""}
             order by
               token_matches.lookup_rank asc,
               token_matches.venue_rank asc,
@@ -7562,6 +7607,7 @@ export async function fetchMarketsByTokenIds(
     select
       tm.token_id,
       tm.side,
+      ${inputs.marketAssetContexts ? "tm.asset_context" : "null::jsonb"} as asset_context,
       m.id as market_id,
       m.venue,
       m.venue_market_id,
@@ -7590,7 +7636,14 @@ export async function fetchMarketsByTokenIds(
       m.outcomes,
       token_yes.token_id as token_yes,
       token_no.token_id as token_no,
-      m.clob_token_ids,
+      ${
+        inputs.marketAssetContexts
+          ? `jsonb_build_array(
+        coalesce(frozen_yes.asset_id, case when tm.side = 'YES' then tm.token_id end),
+        coalesce(frozen_no.asset_id, case when tm.side = 'NO' then tm.token_id end)
+      )::text`
+          : "m.clob_token_ids"
+      } as clob_token_ids,
       coalesce(m.condition_id, pm.condition_id) as condition_id,
       m.market_ledger,
       m.settlement_mint,
@@ -7625,6 +7678,26 @@ export async function fetchMarketsByTokenIds(
       e.metadata as event_metadata
     from ranked_token_matches tm
     join unified_markets m on m.id = tm.market_id
+    ${
+      inputs.marketAssetContexts
+        ? `left join lateral (
+      select binding_row.asset_id from polymarket_asset_bindings binding_row
+      where binding_row.chain_id = 137 and binding_row.market_id = m.id
+        and binding_row.position_contract = lower(tm.position_contract)
+        and binding_row.condition_id = lower(tm.asset_context->>'conditionId')
+        and binding_row.outcome_index = 0
+      limit 1
+    ) frozen_yes on true
+    left join lateral (
+      select binding_row.asset_id from polymarket_asset_bindings binding_row
+      where binding_row.chain_id = 137 and binding_row.market_id = m.id
+        and binding_row.position_contract = lower(tm.position_contract)
+        and binding_row.condition_id = lower(tm.asset_context->>'conditionId')
+        and binding_row.outcome_index = 1
+      limit 1
+    ) frozen_no on true`
+        : ""
+    }
     left join lateral (
       select umt.token_id
       from unified_market_tokens umt

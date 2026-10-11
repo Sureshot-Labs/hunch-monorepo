@@ -21,6 +21,7 @@ let running = false;
 let wsStarted = false;
 let wsRefreshRunning = false;
 let priceRefreshRunning = false;
+let urgentPriceRefreshRunning = false;
 
 type PriceRefreshResult = Awaited<ReturnType<typeof processPriceRefreshQueue>>;
 
@@ -191,6 +192,7 @@ async function periodicPriceRefresh() {
         processPriceRefreshQueue({
           side: priceRefreshSideForConsumer(consumerIndex),
           logSuccess: false,
+          priority: env.urgentPriceRefreshEnabled ? "normal" : undefined,
         }),
       ),
     );
@@ -246,8 +248,44 @@ async function periodicPriceRefresh() {
   }
 }
 
+async function periodicUrgentPriceRefresh() {
+  if (
+    !env.priceRefreshQueueEnabled ||
+    !env.urgentPriceRefreshEnabled ||
+    urgentPriceRefreshRunning
+  )
+    return;
+  urgentPriceRefreshRunning = true;
+  const startedAt = Date.now();
+  try {
+    const result = await processPriceRefreshQueue({
+      priority: "high",
+      topOnly: true,
+      side: "oldest",
+      limit: Math.min(20, env.topBookSnapshot),
+      logSuccess: false,
+    });
+    if (result.claimed > 0) {
+      log.info("Polymarket urgent price refresh processed", result);
+      await writeStats({
+        priceRefreshHttpFallback: {
+          mode: "urgent_book_only",
+          lastRunAt: new Date(startedAt).toISOString(),
+          durationMs: Date.now() - startedAt,
+          ...result,
+        },
+      });
+    }
+  } catch (error) {
+    log.warn("Polymarket urgent price refresh failed", { error });
+  } finally {
+    urgentPriceRefreshRunning = false;
+  }
+}
+
 async function main() {
   void periodicBootstrap();
+  void periodicUrgentPriceRefresh();
   void periodicPriceRefresh();
   void periodicWsRefresh();
   void syncCatchUpFromCursor().catch((e) => {
@@ -263,6 +301,12 @@ async function main() {
   setInterval(periodicBootstrap, env.refreshMinutes * 60 * 1000);
   // Refresh WS desired subscriptions independently from HTTP refresh cadence.
   setInterval(periodicWsRefresh, env.wsRefreshSec * 1000);
+  // Urgent canonical books never wait behind a full metadata-refresh wave.
+  // One bounded batch per tick; all snapshot lanes share the /books limiter.
+  setInterval(
+    periodicUrgentPriceRefresh,
+    Math.min(env.priceRefreshQueueIntervalMs, 1_000),
+  );
   setInterval(periodicPriceRefresh, env.priceRefreshQueueIntervalMs);
 }
 

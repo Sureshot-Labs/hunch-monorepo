@@ -1,6 +1,5 @@
 import {
   writeResolvedTerminalTokenTops,
-  upsertUnifiedTokens,
   writeUnifiedBookTop,
   writeUnifiedLastTrade,
 } from "@hunch/db";
@@ -13,7 +12,6 @@ import { log } from "./log.js";
 import {
   mapPolymarketEventRow,
   mapPolymarketMarketRow,
-  mapTokens,
   mapToUnifiedEvent,
   mapToUnifiedMarket,
 } from "./mappers.js";
@@ -1060,18 +1058,6 @@ function enqueueEventRefresh(eventId: string): void {
             mapToUnifiedMarket(market, event.id, event),
           ),
         );
-        const unifiedTokenRows = parsedEvents.flatMap((event) =>
-          event.markets.flatMap((market) => {
-            const [yes, no] = Array.isArray(market.clobTokenIds)
-              ? market.clobTokenIds
-              : [];
-            return mapTokens(
-              `polymarket:${market.id}`,
-              yes ?? null,
-              no ?? null,
-            );
-          }),
-        );
 
         await upsertEventsConsistently(pool, {
           unified: unifiedEventRows,
@@ -1087,9 +1073,6 @@ function enqueueEventRefresh(eventId: string): void {
             unifiedBatchSize: env.marketUpsertBatchSize,
           },
         );
-        if (unifiedTokenRows.length) {
-          await upsertUnifiedTokens(pool, unifiedTokenRows);
-        }
       } catch (error) {
         log.warn("Event refresh from WS hint failed", { eventId, error });
       } finally {

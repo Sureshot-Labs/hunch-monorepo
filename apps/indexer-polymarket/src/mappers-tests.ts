@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   deriveCategoryFromTags,
   mapPolymarketEventRow,
+  mapPolymarketMarketRow,
   mapToUnifiedEvent,
   mapToUnifiedMarket,
   resolvePolymarketEventCategory,
@@ -9,6 +10,7 @@ import {
   resolvePolymarketMarketCategory,
 } from "./mappers.js";
 import type { TPolymarketEvent, TPolymarketMarket } from "./types.js";
+import { PolymarketMarket } from "./types.js";
 
 function test(name: string, fn: () => void) {
   try {
@@ -19,6 +21,66 @@ function test(name: string, fn: () => void) {
     throw error;
   }
 }
+
+test("V2 selects position IDs, retains raw legacy IDs and binds the PM ledger", () => {
+  const condition = (1n << 248n) | (0xabn << 120n);
+  const positionIds = [condition.toString(), (condition | 1n).toString()];
+  const market = PolymarketMarket.parse({
+    id: "v2-synthetic",
+    question: "V2?",
+    version: "v2",
+    conditionId: `0x${condition.toString(16).padStart(64, "0")}`,
+    clobTokenIds: '["11","12"]',
+    positionIds,
+    outcomes: ["Yes", "No"],
+    active: true,
+    resolutionStatus: "active",
+  });
+  const unified = mapToUnifiedMarket(market, "v2-event");
+  const source = mapPolymarketMarketRow("v2-event", market);
+  assert.equal(unified.clob_token_ids, JSON.stringify(positionIds));
+  assert.equal(source.clob_token_ids, JSON.stringify(positionIds));
+  assert.deepEqual(source.raw.clobTokenIds, ["11", "12"]);
+  assert.equal(
+    (unified.metadata as { polymarketProtocol: { assetKind: string } })
+      .polymarketProtocol.assetKind,
+    "position_manager",
+  );
+  assert.equal(unified.status, "ACTIVE");
+  assert.equal(
+    mapToUnifiedMarket(
+      { ...market, resolutionStatus: "inactive", outcomePrices: '["1","0"]' },
+      "v2-event",
+    ).resolved_outcome,
+    undefined,
+  );
+  assert.equal(
+    mapToUnifiedMarket(
+      { ...market, resolutionStatus: "resolved", outcomePrices: '["1","0"]' },
+      "v2-event",
+    ).resolved_outcome,
+    "YES",
+  );
+});
+
+test("unknown or incomplete V2 cannot activate legacy IDs", () => {
+  const market = PolymarketMarket.parse({
+    id: "v2-unknown",
+    question: "Unknown?",
+    version: "v2",
+    clobTokenIds: '["11","12"]',
+    positionIds: ["21", "22"],
+    outcomes: '["Yes","No"]',
+  });
+  for (const version of ["v2", "v3", undefined]) {
+    const row = mapToUnifiedMarket({ ...market, version }, "v2-event");
+    assert.equal(row.clob_token_ids, "[]");
+    assert.equal(
+      (row.metadata as Record<string, unknown>).polymarketProtocolIncomplete,
+      true,
+    );
+  }
+});
 
 test("deriveCategoryFromTags prefers politics/geopolitics tags", () => {
   const category = deriveCategoryFromTags([

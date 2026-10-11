@@ -1,4 +1,8 @@
 import { ethers } from "ethers";
+import {
+  validatePolymarketOrderDomainVersion,
+  type PolymarketOrderDomainVersion,
+} from "@hunch/shared";
 
 import {
   POLYMARKET_ORDER_TYPES,
@@ -19,10 +23,14 @@ export type PolymarketOrderHashV2Input = {
   builder: string;
 };
 
-export function buildPolymarketOrderDomain(exchangeAddress: string) {
+export function buildPolymarketOrderDomain(
+  exchangeAddress: string,
+  domainVersion: PolymarketOrderDomainVersion = "2",
+) {
+  validatePolymarketOrderDomainVersion(exchangeAddress, domainVersion);
   return {
     name: "Polymarket CTF Exchange",
-    version: "2",
+    version: domainVersion,
     chainId: POLYMARKET_POLYGON_CHAIN_ID,
     verifyingContract: ethers.getAddress(exchangeAddress),
   } as const;
@@ -30,10 +38,12 @@ export function buildPolymarketOrderDomain(exchangeAddress: string) {
 
 export function computePolymarketOrderHashV2(input: {
   exchangeAddress: string;
+  // V2 here describes the eleven-field payload, not the market protocol.
+  orderDomainVersion?: PolymarketOrderDomainVersion;
   order: PolymarketOrderHashV2Input;
 }): string {
   return ethers.TypedDataEncoder.hash(
-    buildPolymarketOrderDomain(input.exchangeAddress),
+    buildPolymarketOrderDomain(input.exchangeAddress, input.orderDomainVersion),
     POLYMARKET_ORDER_TYPES as unknown as Record<
       string,
       Array<{ name: string; type: string }>

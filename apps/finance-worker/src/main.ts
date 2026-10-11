@@ -11,6 +11,7 @@ import {
   runStandaloneFinancialReconciliationJob,
   runTelegramTradeIntentReconcileJob,
   runTreasurySweepJob,
+  runVerifiedBuyRepairJob,
 } from "./finance-jobs.js";
 import {
   closeFundingReconciliationPool,
@@ -139,12 +140,66 @@ type FinanceWorkerEnv = typeof env;
 
 export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
   const allowExecute = workerEnv.executeEnabled;
+  const verifiedBuyJob: ScheduledJob = {
+    name: "verified_buy_repair",
+    // Observational repair never signs or submits purchases. It must continue
+    // when new social operations/trade submission are disabled.
+    enabled: Boolean(workerEnv.databaseUrl),
+    // Existing worker retry cadence is only a bootstrap/config-error fallback.
+    // Successful policy reads supply the actual cadence, including disabled runs.
+    intervalSec: workerEnv.retryBackoffSec,
+    timeoutSec: workerEnv.jobTimeoutSec,
+    maxRetries: 0,
+    retryBackoffSec: workerEnv.retryBackoffSec,
+    jitterSec: 0,
+    run: async () => {
+      const result = await runVerifiedBuyRepairJob();
+      if (
+        typeof result === "object" &&
+        result !== null &&
+        "nextIntervalSeconds" in result
+      ) {
+        const interval = result.nextIntervalSeconds;
+        if (
+          typeof interval === "number" &&
+          Number.isSafeInteger(interval) &&
+          interval > 0
+        ) {
+          verifiedBuyJob.intervalSec = interval;
+        }
+      }
+      return result;
+    },
+    isNoopResult: (result) => {
+      if (typeof result !== "object" || result === null) return false;
+      return (
+        !hasPositiveActivity(result, [
+          "claimed",
+          "verified",
+          "revoked",
+          "pending",
+          "recovered",
+          "errors",
+          "budgetExhausted",
+        ]) &&
+        !hasPositiveActivity("copies" in result ? result.copies : null, [
+          "checked",
+          "confirmed",
+          "revoked",
+          "pending",
+          "leaseLost",
+          "budgetExhausted",
+        ])
+      );
+    },
+  };
   if (workerEnv.telegramTradeIntentsExplicitWriteOverride) {
     console.warn(
       "HUNCH_FINANCE_TELEGRAM_TRADE_INTENTS_ENABLED enables DB writes while HUNCH_FINANCE_EXECUTE=false.",
     );
   }
   return [
+    verifiedBuyJob,
     {
       name: "standalone_financial_reconciliation",
       enabled:

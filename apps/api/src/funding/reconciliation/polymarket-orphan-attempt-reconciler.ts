@@ -2,6 +2,11 @@ import { tx, type Pool } from "@hunch/infra";
 import { AuthService } from "../../auth.js";
 import { env } from "../../env.js";
 import { isRecord } from "../../lib/type-guards.js";
+import { parsePolymarketAssetContext } from "@hunch/shared";
+import {
+  loadPolymarketHoldingLedgers,
+  selectPolymarketSyncedOrderContext,
+} from "../../services/polymarket-asset-context.js";
 import { storeOrderInTransaction } from "../../repos/orders-repo.js";
 import {
   fetchPolymarketOrderByHash,
@@ -19,6 +24,60 @@ type Scope = {
   tokenId: string;
   spendRaw: string;
 };
+
+/** Repair metadata only from the immutable funding snapshot or canonical
+ * ledger binding. Raw CLOB JSON alone cannot identify a V2 position ledger. */
+export async function buildOrphanPolymarketOrderPayload(input: {
+  db: Pool;
+  marketId: string;
+  marketSnapshot: Record<string, unknown>;
+  order: PolymarketOpenOrder;
+  payload: unknown;
+}): Promise<unknown> {
+  const frozen = input.marketSnapshot.positionAssetContext;
+  const context =
+    frozen != null
+      ? parsePolymarketAssetContext(frozen)
+      : input.order.assetId
+        ? selectPolymarketSyncedOrderContext(
+            (
+              await loadPolymarketHoldingLedgers(input.db, [
+                input.order.assetId,
+              ])
+            ).map((ledger) => ({
+              ...ledger,
+              tokenContexts: new Map(
+                [...ledger.tokenContexts].filter(
+                  ([, candidate]) =>
+                    !candidate || candidate.marketId === input.marketId,
+                ),
+              ),
+            })),
+            input.order.assetId,
+            input.order.market,
+          )
+        : null;
+  if (
+    (frozen != null && !context) ||
+    (context &&
+      (context.marketId !== input.marketId ||
+        context.assetId !== input.order.assetId ||
+        (input.order.market != null &&
+          context.conditionId.toLowerCase() !==
+            input.order.market.toLowerCase())))
+  )
+    throw new Error(
+      "Recovered Polymarket order conflicts with its frozen ledger scope",
+    );
+  return context
+    ? {
+        ...(isRecord(input.payload)
+          ? input.payload
+          : { _hunchUpstream: input.payload }),
+        assetContext: context,
+      }
+    : input.payload;
+}
 export function matchesOrphanPolymarketOrder(
   hash: string,
   scope: Scope,
@@ -129,6 +188,13 @@ async function reconcileOne(
     return false;
   const order = response.order,
     reference = attempt.externalReference;
+  const orderPayload = await buildOrphanPolymarketOrderPayload({
+    db,
+    marketId: attempt.marketId,
+    marketSnapshot: market,
+    order,
+    payload: response.payload,
+  });
   // Even a historical matched CLOB status does not manufacture fills, fees,
   // or token balances. Existing canonical fill sync owns those projections.
   const status = ["live", "open"].includes(
@@ -155,7 +221,7 @@ async function reconcileOne(
       status,
       errorMessage: null,
       rawError: null,
-      orderPayload: response.payload,
+      orderPayload,
       postedAt: attempt.claimedAt,
     });
     await attachRecoveredPolymarketAttemptOrderInTransaction(client, {

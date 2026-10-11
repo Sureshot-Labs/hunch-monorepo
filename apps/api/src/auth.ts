@@ -4,6 +4,7 @@ import type { SignOptions } from "jsonwebtoken";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
+import { clearUserSocialData } from "./services/social-lifecycle.js";
 import { env } from "./env.js";
 import {
   PrivyService,
@@ -55,6 +56,10 @@ export interface User {
   username?: string;
   displayName?: string;
   avatarUrl?: string;
+  handle?: string;
+  bio?: string;
+  avatarAssetId?: string;
+  handleChangedAt?: Date;
   isAdmin: boolean;
   kalshiProofBypass: boolean;
   isActive: boolean;
@@ -78,6 +83,10 @@ type UserRow = {
   username: string | null;
   display_name: string | null;
   avatar_url: string | null;
+  handle?: string | null;
+  bio?: string | null;
+  avatar_asset_id?: string | null;
+  handle_changed_at?: Date | null;
   is_admin: boolean | null;
   kalshi_proof_bypass: boolean | null;
   is_active: boolean;
@@ -95,6 +104,10 @@ function mapUserRow(row: UserRow): User {
     username: row.username ?? undefined,
     displayName: row.display_name ?? undefined,
     avatarUrl: row.avatar_url ?? undefined,
+    handle: row.handle ?? undefined,
+    bio: row.bio ?? undefined,
+    avatarAssetId: row.avatar_asset_id ?? undefined,
+    handleChangedAt: row.handle_changed_at ?? undefined,
     isAdmin: Boolean(row.is_admin),
     kalshiProofBypass: Boolean(row.kalshi_proof_bypass),
     isActive: row.is_active,
@@ -1429,7 +1442,7 @@ export class AuthService {
 
     // Get the user data
     const userResult = await client.query<UserRow>(
-      "SELECT id, privy_user_id, email, username, display_name, avatar_url, is_admin, kalshi_proof_bypass, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
+      "SELECT id, privy_user_id, email, username, display_name, avatar_url, handle, bio, avatar_asset_id, handle_changed_at, is_admin, kalshi_proof_bypass, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
       [userId],
     );
 
@@ -1509,11 +1522,15 @@ export class AuthService {
             updateValues.push(userData.username);
           }
           if (userData.displayName) {
-            updateFields.push(`display_name = $${paramIndex++}`);
+            updateFields.push(
+              `display_name = case when profile_name_edited_at is null then $${paramIndex++} else display_name end`,
+            );
             updateValues.push(userData.displayName);
           }
           if (userData.avatarUrl) {
-            updateFields.push(`avatar_url = $${paramIndex++}`);
+            updateFields.push(
+              `avatar_url = case when profile_avatar_edited_at is null then $${paramIndex++} else avatar_url end`,
+            );
             updateValues.push(userData.avatarUrl);
           }
 
@@ -1565,7 +1582,7 @@ export class AuthService {
 
       // Get the user data
       const userResult = await client.query<UserRow>(
-        "SELECT id, privy_user_id, email, username, display_name, avatar_url, is_admin, kalshi_proof_bypass, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
+        "SELECT id, privy_user_id, email, username, display_name, avatar_url, handle, bio, avatar_asset_id, handle_changed_at, is_admin, kalshi_proof_bypass, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
         [userId],
       );
 
@@ -1585,7 +1602,7 @@ export class AuthService {
    */
   static async getUserById(userId: string): Promise<User | null> {
     const result = await pool.query<UserRow>(
-      "SELECT id, privy_user_id, email, username, display_name, avatar_url, is_admin, kalshi_proof_bypass, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
+      "SELECT id, privy_user_id, email, username, display_name, avatar_url, handle, bio, avatar_asset_id, handle_changed_at, is_admin, kalshi_proof_bypass, is_active, is_verified, created_at, updated_at, last_login_at FROM users WHERE id = $1",
       [userId],
     );
 
@@ -1633,6 +1650,8 @@ export class AuthService {
       ]);
       const activeMovement = lifecycle.activeMovement;
       const protectedReasons = lifecycle.protectedReasons;
+
+      await clearUserSocialData(client, userId);
 
       if (protectedReasons.length === 0 && !user.privy_user_id) {
         await client.query("delete from users where id = $1", [userId]);
@@ -2252,6 +2271,36 @@ export class AuthService {
     venue: "polymarket" | "kalshi" | "limitless",
     walletAddress: string,
   ): Promise<VenueCredentials | null> {
+    return this.loadVenueCredentials(userId, venue, walletAddress);
+  }
+
+  /**
+   * Observation-only access for an already-authorized exact Polymarket purchase.
+   * Retained inactive credentials are never reactivated. Callers may only read
+   * that order and its associated trade evidence, not sign or submit operations.
+   */
+  static async getPolymarketCredentialsForEvidence(
+    userId: string,
+    walletAddress: string,
+    orderHash: string,
+  ): Promise<PolymarketCredentials | null> {
+    const normalizedWallet = normalizeWalletForStorage(walletAddress);
+    if (!isEvmAddress(normalizedWallet) || !/^0x[0-9a-f]{64}$/i.test(orderHash))
+      return null;
+    return this.loadVenueCredentials(
+      userId,
+      "polymarket",
+      normalizedWallet,
+      orderHash.toLowerCase(),
+    );
+  }
+
+  private static async loadVenueCredentials(
+    userId: string,
+    venue: "polymarket" | "kalshi" | "limitless",
+    walletAddress: string,
+    evidenceOrderHash?: string,
+  ): Promise<VenueCredentials | null> {
     const dbFeatures = await getVenueCredentialsDbFeatures();
     const selectedColumns = [
       "id",
@@ -2283,13 +2332,35 @@ export class AuthService {
        WHERE user_id = $1
          AND venue = $2
          AND ${walletClause}
-         AND is_active = true
+         AND ${
+           evidenceOrderHash
+             ? `venue = 'polymarket' AND (
+           exists (
+             select 1 from orders owned_order
+             where owned_order.user_id=$1 and owned_order.venue='polymarket'
+               and lower(owned_order.order_hash)=$4
+               and funding_account_identifier_equal('ethereum',coalesce(owned_order.signer_address,owned_order.wallet_address),$3)
+           ) or exists (
+             select 1 from copy_attributions copy_row
+             where copy_row.copier_user_id=$1
+               and copy_row.provider_reference ~* '^polymarket:137:0x[0-9a-f]{40}:0x[0-9a-f]{64}$'
+               and lower(split_part(copy_row.provider_reference,':',4))=$4
+               and funding_account_identifier_equal('ethereum',copy_row.source_snapshot->'submission'->>'walletAddress',$3)
+           )
+         )`
+             : "is_active = true"
+         }
        ORDER BY
          last_used_at DESC NULLS LAST,
          updated_at DESC,
          created_at DESC
        LIMIT 1`,
-      [userId, venue, normalizedWallet],
+      [
+        userId,
+        venue,
+        normalizedWallet,
+        ...(evidenceOrderHash ? [evidenceOrderHash] : []),
+      ],
     );
 
     if (result.rows.length === 0) {

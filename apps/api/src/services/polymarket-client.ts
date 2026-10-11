@@ -4,6 +4,10 @@ import type {
   PriceHistoryPoint,
 } from "../server-types.js";
 import { isRecord } from "../lib/type-guards.js";
+import {
+  fetchPolymarketPriceHistory,
+  polymarketPriceHistoryParams,
+} from "./polymarket-price-history.js";
 
 /** Preserve upstream classification without retaining credentials or query strings. */
 export class PolymarketHttpError extends Error {
@@ -164,18 +168,26 @@ export class PolymarketRateLimiter {
           request.requestData.body,
           timeoutMs,
         );
+      } else if (
+        request.requestData.endpoint === "/prices-history" ||
+        !request.requestData.endpoint
+      ) {
+        const params =
+          request.requestData.params ??
+          new URLSearchParams(polymarketPriceHistoryParams(request.key, {}));
+        result = await fetchPolymarketPriceHistory({
+          baseUrl:
+            process.env.POLYMARKET_DATA_API_BASE?.trim() ||
+            "https://data-api.polymarket.com",
+          params: Object.fromEntries(params),
+          timeoutMs,
+        });
       } else if (request.requestData.endpoint) {
         result = await this.makeRequest(
           request.requestData.endpoint,
           request.requestData.params,
           timeoutMs,
         );
-      } else {
-        const params = new URLSearchParams({
-          market: request.key,
-          interval: "max",
-        });
-        result = await this.makeRequest("/prices-history", params, timeoutMs);
       }
 
       request.resolve(result);
@@ -415,6 +427,10 @@ class PriceHistoryProcessor {
       }
     }
 
+    // Preserve the terminal real tick/settlement, even between bucket edges.
+    const lastPoint = history.at(-1);
+    if (lastPoint && downsampled.at(-1) !== lastPoint)
+      downsampled.push(lastPoint);
     return downsampled;
   }
 }
@@ -447,9 +463,10 @@ export class PolymarketClient {
       fidelity?: number;
     } = {},
   ): Promise<PriceHistoryData> {
-    // Always use the same cache key for max data (tokenId only)
-    // This ensures we fetch max data once and slice it for different requests
-    const maxDataKey = `max-data:${tokenId}`;
+    const params = new URLSearchParams(
+      polymarketPriceHistoryParams(tokenId, options),
+    );
+    const maxDataKey = `data-api-v2:history:${params.toString()}`;
 
     // If max data is already being fetched for this token, wait for it
     const existingPromise = this.pendingRequests.get(maxDataKey);
@@ -468,10 +485,10 @@ export class PolymarketClient {
 
     // Create new request promise for max data
     const requestPromise = this.rateLimiter.queueRequest<PriceHistoryData>(
-      tokenId,
+      maxDataKey,
       {
         endpoint: "/prices-history",
-        params: new URLSearchParams({ market: tokenId, interval: "max" }),
+        params,
       },
     );
 

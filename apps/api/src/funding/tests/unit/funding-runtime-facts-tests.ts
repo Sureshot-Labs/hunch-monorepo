@@ -424,6 +424,47 @@ function limitlessEvidence(
   };
 }
 
+await test("protocol V2 requires only its own V3 exchange and PM permissions", async () => {
+  const exactBinding = binding("polymarket");
+  for (const purpose of ["buy", "sell"] as const) {
+    let evidence = polymarketEvidence({ binding: exactBinding });
+    const inspect = () =>
+      new PolymarketWalletPreparationAdapter(
+        async (request) => buildPolymarketRuntimeFacts(request, evidence),
+        () => NOW,
+      ).inspect(input(exactBinding, purpose, "protocol_v2"));
+    const missing = await inspect();
+    assert.equal(missing.status, "setup_required");
+    assert.ok(missing.requiredActions.length > 0);
+    assert.ok(
+      missing.evidence.checks.some(
+        (check) =>
+          check.checkId ===
+            (purpose === "buy"
+              ? "erc20_v3_exchange_allowance"
+              : "position_manager_v3_approval") &&
+          check.status === "action_required",
+      ),
+    );
+    evidence = {
+      ...evidence,
+      v3ExchangeAllowance: true,
+      v3PositionManagerApproval: true,
+      standardExchangeAllowance: false,
+      negRiskExchangeAllowance: false,
+      negRiskAdapterAllowance: false,
+      standardExchangeApproval: false,
+      negRiskExchangeApproval: false,
+      negRiskAdapterApproval: false,
+    };
+    assert.equal(
+      (await inspect()).status,
+      "ready",
+      "legacy CTF permissions do not gate V3",
+    );
+  }
+});
+
 await test("Polymarket runtime facts produce ready rows for every purpose", async () => {
   for (const purpose of [
     "fund",

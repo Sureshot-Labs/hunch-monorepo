@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { verifySocialSolanaSubmission } from "./social-signed-solana.js";
 
 import { env } from "../env.js";
 import { SOLANA_MAINNET_CAIP2 } from "../lib/chain-identifiers.js";
@@ -895,13 +896,53 @@ async function submitPreparedTrade(
       venue: "kalshi",
     });
   }
-  await input.onBeforeBroadcast?.();
-  const result =
-    await createServerWalletClient().walletApi.solana.signAndSendTransaction({
+  let result: { hash: string };
+  if (prepared.intent.sourceRef) {
+    const signer = createServerWalletClient().walletApi.solana.signTransaction;
+    if (!signer || !input.onBeforeTradeSubmission)
+      throw tradingError({
+        code: "copy_submission_identity_unavailable",
+        message: "Copy requires durable signed transaction identity.",
+        venue: "kalshi",
+      });
+    const signed = await signer({
       walletId: getPrivyWalletId(prepared.intent),
       transaction: payload.transaction,
-      caip2: SOLANA_MAINNET_CAIP2,
     });
+    const identity = verifySocialSolanaSubmission({
+      preparedTransaction: payload.transaction,
+      signedTransaction: signed.signedTransaction,
+      owner: prepared.intent.walletAddress,
+    });
+    await input.onBeforeTradeSubmission({
+      providerReference: `dflow:mainnet:${identity.signature}:${prepared.intent.walletAddress}`,
+      preparedFingerprint: crypto
+        .createHash("sha256")
+        .update(identity.messageDigestBytes)
+        .digest("hex"),
+    });
+    await input.onBeforeBroadcast?.();
+    const hash = await submitDflowSignedTransaction({
+      rpcUrls: env.solanaRpcUrls,
+      timeoutMs: env.solanaRpcTimeoutMs,
+      signedTransaction: signed.signedTransaction,
+    });
+    if (hash !== identity.signature)
+      throw tradingError({
+        code: "copy_submission_identity_mismatch",
+        message: "Submitted transaction requires reconciliation.",
+        venue: "kalshi",
+      });
+    result = { hash };
+  } else {
+    await input.onBeforeBroadcast?.();
+    result =
+      await createServerWalletClient().walletApi.solana.signAndSendTransaction({
+        walletId: getPrivyWalletId(prepared.intent),
+        transaction: payload.transaction,
+        caip2: SOLANA_MAINNET_CAIP2,
+      });
+  }
   if (!result.hash) {
     throw tradingError({
       code: "trade_submission_failed",

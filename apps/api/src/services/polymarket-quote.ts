@@ -1,4 +1,5 @@
 import type { Pool } from "@hunch/infra";
+import type { PolymarketAssetContext } from "@hunch/shared";
 import { env } from "../env.js";
 import { isRecord } from "../lib/type-guards.js";
 import {
@@ -12,6 +13,10 @@ import {
   type PolymarketFeePolicySnapshot,
 } from "./polymarket-builder-fees.js";
 import { polymarketClient, PolymarketHttpError } from "./polymarket-client.js";
+import {
+  resolvePolymarketAssetContext,
+  PolymarketAssetContextError,
+} from "./polymarket-asset-context.js";
 
 export type PolymarketSide = "BUY" | "SELL";
 export type PolymarketOrderType = "GTC" | "GTD" | "FAK" | "FOK";
@@ -41,6 +46,7 @@ export type PolymarketQuoteContext = {
   feePolicySnapshot: PolymarketFeePolicySnapshot;
   platformFeeCurve: PlatformFeeCurve;
   platformFeeCurveUnavailable?: boolean;
+  assetContext?: PolymarketAssetContext | null;
 };
 
 export type PolymarketQuoteResult = {
@@ -75,6 +81,7 @@ export type PolymarketQuoteResult = {
   limitOrderValidation?: PolymarketLimitOrderValidation;
   negRisk: boolean | null;
   exchangeAddress: string | null;
+  assetContext?: PolymarketAssetContext;
   estimatedPayout: number;
   estimatedProfit: number;
   slippageBps: number | null;
@@ -172,7 +179,8 @@ export class PolymarketQuoteError extends Error {
       | "missing_amount"
       | "amount_too_small"
       | "no_liquidity"
-      | "fee_unavailable",
+      | "fee_unavailable"
+      | "polymarket_asset_context_unavailable",
   ) {
     super(publicMessage);
     this.name = "PolymarketQuoteError";
@@ -801,6 +809,7 @@ export async function loadPolymarketQuoteContext(
   pool: Pool,
   inputs: {
     tokenId: string;
+    assetContext?: PolymarketAssetContext;
     logWarn?: (args: {
       error: unknown;
       tokenId: string;
@@ -829,7 +838,20 @@ export async function loadPolymarketQuoteContext(
   }
 
   let platformFeeCurve: PlatformFeeCurve = null;
-  const conditionId = marketInfo?.condition_id;
+  let assetContext: PolymarketAssetContext | null;
+  try {
+    assetContext = await resolvePolymarketAssetContext(
+      pool,
+      inputs.tokenId,
+      marketInfo,
+      inputs.assetContext,
+    );
+  } catch (error) {
+    if (error instanceof PolymarketAssetContextError)
+      throw new PolymarketQuoteError(409, error.message, error.code);
+    throw error;
+  }
+  const conditionId = assetContext?.conditionId ?? marketInfo?.condition_id;
   let platformFeeCurveUnavailable = !conditionId;
   if (conditionId) {
     try {
@@ -850,6 +872,7 @@ export async function loadPolymarketQuoteContext(
     feePolicySnapshot,
     platformFeeCurve,
     platformFeeCurveUnavailable,
+    assetContext,
   };
 }
 
@@ -870,6 +893,16 @@ export function calculatePolymarketQuote(inputs: {
 }): PolymarketQuoteResult {
   const { orderbook, marketInfo, feePolicySnapshot, platformFeeCurve } =
     inputs.context;
+  if (
+    inputs.context.assetContext &&
+    inputs.context.assetContext.assetId !== inputs.tokenId
+  ) {
+    throw new PolymarketQuoteError(
+      409,
+      "Polymarket quote asset context does not match the requested token.",
+      "polymarket_asset_context_unavailable",
+    );
+  }
   const bestBid = findBestBid(orderbook.bids);
   const bestAsk = findBestAsk(orderbook.asks);
   const bestPrice = inputs.side === "BUY" ? bestAsk : bestBid;
@@ -1198,6 +1231,7 @@ export function calculatePolymarketQuote(inputs: {
       : amountUsdUsed - estimatedPayout;
 
   const negRisk =
+    inputs.context.assetContext?.negRisk ??
     orderbook.negRisk ??
     (marketInfo?.neg_risk != null ? Boolean(marketInfo.neg_risk) : null);
 
@@ -1239,7 +1273,12 @@ export function calculatePolymarketQuote(inputs: {
       context: inputs.context,
     }),
     negRisk,
-    exchangeAddress: exchangeAddressForNegRisk(negRisk),
+    exchangeAddress:
+      inputs.context.assetContext?.exchangeAddress ??
+      exchangeAddressForNegRisk(negRisk),
+    ...(inputs.context.assetContext
+      ? { assetContext: inputs.context.assetContext }
+      : {}),
     estimatedPayout,
     estimatedProfit,
     slippageBps,

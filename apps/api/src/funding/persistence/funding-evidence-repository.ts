@@ -2633,13 +2633,28 @@ export async function consumeFundingReservationForLinkedConsumerInTransaction(
           and funding_reservation_id = $4
           and venue = $5
           and side = 'BUY'
-          and exists (
+          and (exists (
             select 1
             from unified_tokens token
             where token.market_id = $6
               and token.venue = $5
               and token.token_id = orders.token_id
-          )
+          ) or ($5 = 'polymarket' and exists (
+            select 1 from funding_operations funded_operation
+             where funded_operation.id = $3 and funded_operation.user_id = $2
+               and funded_operation.venue_id = $5 and funded_operation.market_id = $6
+               and funded_operation.market_context_snapshot->>'marketContextId' = orders.token_id
+               and funded_operation.market_context_snapshot->>'marketId' = $6
+               and funded_operation.market_context_snapshot->>'venueId' = $5
+          )))
+          and ($5 <> 'polymarket' or not exists (
+            select 1 from funding_operations funded_operation
+             where funded_operation.id = $3 and funded_operation.user_id = $2
+               and funded_operation.market_context_snapshot->'positionAssetContext' is not null
+               and funded_operation.market_context_snapshot->'positionAssetContext' <> 'null'::jsonb
+               and funded_operation.market_context_snapshot->'positionAssetContext'
+                 is distinct from orders.order_payload->'assetContext'
+          ))
       `,
       [
         consumerRef,

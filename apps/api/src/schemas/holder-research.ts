@@ -57,6 +57,7 @@ export const holderResearchAgentOutputV1Schema = z
   .object({
     version: z.literal("holder_research_v1"),
     status: holderResearchStatusSchema,
+    editorial_duplicate: z.boolean().optional(),
     bucket: holderResearchBucketSchema,
     confidence: z.coerce.number().min(0).max(1),
     signal_type: z.enum(["catalyst", "risk", "update"]),
@@ -279,6 +280,7 @@ export const holderResearchFinalOutputV2Schema = z
   .object({
     version: z.literal("holder_research_v2"),
     verdict: z.enum(["publish", "context", "skip"]),
+    editorial_duplicate: z.boolean().optional(),
     evidence_assessment: z.enum([
       "strong",
       "adequate",
@@ -369,6 +371,7 @@ export function parseHolderResearchAgentOutputV1(
   const repaired = {
     version: record.version,
     status: record.status,
+    editorial_duplicate: record.editorial_duplicate === true,
     bucket: record.bucket,
     confidence: record.confidence,
     signal_type: record.signal_type,
@@ -652,6 +655,7 @@ export function parseHolderResearchFinalOutputV2(
   return holderResearchFinalOutputV2Schema.parse({
     version: record.version,
     verdict: record.verdict,
+    editorial_duplicate: record.editorial_duplicate === true,
     evidence_assessment: record.evidence_assessment,
     reason_codes: asStringArray(record.reason_codes, 8, 80),
     horizonEvidence: record.horizonEvidence ?? null,
@@ -701,6 +705,8 @@ const HOLDER_RESEARCH_OUTCOME_INVESTIGATION_RULES = [
 ] as const;
 
 const HOLDER_RESEARCH_FINAL_ASSESSMENT_RULES = [
+  "When eventPublicationHistory is supplied, compare this exact outcome thesis with those prior Hunch publications. They are editorial history, never independent factual evidence. A different market/side key, new URL, changed wording or another position of the same holder alone is not a distinct thesis. Preserve genuinely distinct sibling contracts (for example an independently supported no-draw thesis versus a team-win thesis), substantive new facts and materially changed interpretations. Set editorial_duplicate=true only when the supplied history establishes a substantively redundant publication; otherwise false. No supplied history means false. Explain the comparison in rationale, not public copy.",
+  "For single holders and clusters, explain the contract-specific relevance of the observed evidence after weighing the strongest plausible alternative. Credentials, stake and agreeing addresses do not establish independent people or attractive trading value. Distinguish support for an outcome thesis from evidence about today's price; do not invent a probability, mechanism or positive expected return, and do not require fresh news for a useful current thesis.",
   "Publish a clear, useful, grounded directional outcome thesis backed by adequate or strong holder evidence, subject to deterministic publication gates. It need not have fresh news, early entry, favorable momentum, unexplained positioning or novelty. Present relevance can come from the current credible position and its outcome implication; do not manufacture urgency.",
   "Weigh contrary holders and externalResearch.verdict=supports_opposite_side against the exact thesis. Mixed inputs can support an adequate final thesis with a material caveat. Reject a thesis when verified exact-contract facts falsify it; contrary pricing, unfavorable news or a plausible opposing case is not automatically falsification.",
   "Use context when the evidence leaves no useful directional conclusion, or only concentration/risk/background without a holder-backed outcome thesis. Use skip for unsupported, materially stale or unusable evidence. High scores are selection hints, not publication instructions; strong credentials are not proof the current thesis is correct.",
@@ -860,6 +866,8 @@ export function buildHolderResearchUserPrompt(input: {
     output_contract: {
       version: "holder_research_v1",
       status: "PUBLISH | CONTEXT | SKIP",
+      editorial_duplicate:
+        "boolean; true only for substantive repetition established by supplied eventPublicationHistory",
       bucket: "one supplied bucket",
       confidence:
         "0..1 research-support judgment; not calibrated event probability or trading edge",
@@ -920,6 +928,8 @@ export function buildHolderResearchUserPromptV2(input: {
       evidence_assessment:
         "strong | adequate | mixed | contradicted | insufficient; support for the final thesis, not an event probability or a count of agreeing sources",
       reason_codes: "short machine-readable reasons",
+      editorial_duplicate:
+        "boolean; true only for substantive repetition established by supplied eventPublicationHistory",
       rationale: "one short internal sentence",
       evidence_ids: "subset of allowedEvidenceIds supporting the assessment",
       horizonEvidence:

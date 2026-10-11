@@ -9,6 +9,7 @@ type FinancialLifecycleDbRow = {
   active_receive_session: boolean;
   active_telegram_funding_context: boolean;
   active_telegram_intent: boolean;
+  active_copy_observation: boolean;
   deposit_evidence: boolean;
   funding_evidence: boolean;
   legacy_bridge_evidence: boolean;
@@ -181,6 +182,10 @@ export async function fetchUserFinancialLifecycleSummary(
             )
         ) as active_telegram_intent,
         exists (
+          select 1 from copy_attributions
+          where copier_user_id = any($1::uuid[]) and state = 'pending'
+        ) as active_copy_observation,
+        exists (
           select 1 from funding_quotes where user_id = any($1::uuid[])
           union all
           select 1 from funding_withdrawal_destinations
@@ -241,6 +246,9 @@ export async function fetchUserFinancialLifecycleSummary(
           select 1 from positions where user_id = any($1::uuid[])
           union all
           select 1 from executions where user_id = any($1::uuid[])
+          union all
+          select 1 from copy_attributions where copier_user_id = any($1::uuid[])
+            and state in ('pending', 'confirmed', 'revoked')
           limit 1
         ) as trading_evidence
     `,
@@ -295,6 +303,7 @@ export async function fetchUserFinancialLifecycleSummary(
   const activeFundingMovement =
     row.active_funding_movement || nonTerminalOperationIds.size > 0;
   const activeReasons = [
+    row.active_copy_observation ? "active_copy_observation" : null,
     activeFundingMovement ? "active_funding_movement" : null,
     row.active_preparation ? "active_funding_preparation" : null,
     row.active_position_action ? "active_position_action" : null,

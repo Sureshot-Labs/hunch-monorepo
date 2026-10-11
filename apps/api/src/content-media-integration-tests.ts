@@ -1,13 +1,13 @@
 // @requires-db
 
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   createServer,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import type { Pool } from "@hunch/infra";
+import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import {
   configureContentTestRuntime,
@@ -22,6 +22,7 @@ type StoredObject = {
 
 const bucket = "content-media-test";
 const objects = new Map<string, StoredObject>();
+let beforeCopyObject: ((key: string) => Promise<void>) | null = null;
 
 function checksumHex(body: Buffer): string {
   return createHash("sha256").update(body).digest("hex");
@@ -62,6 +63,7 @@ const server = createServer(async (request, response) => {
       const sourceKey = sourcePath.slice(sourcePath.indexOf("/") + 1);
       const source = objects.get(sourceKey);
       if (!source) return sendS3Error(response, 404, "NoSuchKey");
+      await beforeCopyObject?.(key);
       objects.set(key, { ...source, body: Buffer.from(source.body) });
       response.statusCode = 200;
       response.setHeader("content-type", "application/xml");
@@ -134,6 +136,7 @@ const server = createServer(async (request, response) => {
 
 let pool: Pool | null = null;
 const assetIds: string[] = [];
+const userIds: string[] = [];
 const storageKeys = new Set<string>();
 
 try {
@@ -168,6 +171,57 @@ try {
 
   const testPool = await createContentTestPool(2);
   pool = testPool;
+  const verificationStatements = new Map<string, unknown[]>();
+  let onVerificationOwnerQuery: (() => void) | null = null;
+  const verificationConnect = testPool.connect.bind(testPool);
+  const connectWithVerification = async () => {
+    const client = await verificationConnect();
+    const originalQuery = client.query.bind(client);
+    const originalRelease = client.release.bind(client);
+    client.query = (async (...args: unknown[]) => {
+      const sql = typeof args[0] === "string" ? args[0] : "";
+      if (
+        /^(select|update)\b/i.test(sql.trim()) &&
+        (sql.startsWith(
+          "select id from users where id=(select owner_user_id",
+        ) ||
+          sql.includes("and ($8::uuid is null or owner_user_id=$8)") ||
+          sql.includes(
+            "update content_assets set status='pending' where id=$1",
+          ))
+      ) {
+        verificationStatements.set(sql, (args[1] ?? []) as unknown[]);
+      }
+      const pending = Reflect.apply(originalQuery, client, args);
+      if (sql.includes("select owner_user_id from content_assets where id=$1"))
+        onVerificationOwnerQuery?.();
+      return pending;
+    }) as typeof client.query;
+    client.release = ((error?: Error | boolean) => {
+      client.query = originalQuery as typeof client.query;
+      client.release = originalRelease;
+      originalRelease(error);
+    }) as typeof client.release;
+    return client;
+  };
+  // Pool.query uses callback-style connect, while tx uses its Promise form.
+  testPool.connect = ((
+    callback?: (
+      error: Error | null,
+      client?: PoolClient,
+      release?: PoolClient["release"],
+    ) => void,
+  ) => {
+    if (typeof callback === "function") {
+      void connectWithVerification().then(
+        (client) => callback(null, client, client.release),
+        (error: unknown) =>
+          callback(error instanceof Error ? error : new Error(String(error))),
+      );
+      return;
+    }
+    return connectWithVerification();
+  }) as typeof testPool.connect;
   const logger = {
     info: () => undefined,
     warn: () => undefined,
@@ -197,6 +251,7 @@ try {
       expectedByteSize: png.length,
       checksumSha256: pngChecksum,
       defaultAlt: "One pixel",
+      metadata: { uploadExpiresAt: "2000-01-01T00:00:00.000Z" },
     },
     null,
   );
@@ -218,6 +273,7 @@ try {
   assert.equal(signedHeaders.has("x-amz-checksum-sha256"), true);
   assert.equal(signedHeaders.has("content-length"), false);
   assetIds.push(intent.asset.id);
+  assert.equal(intent.asset.metadata.uploadExpiresAt, intent.upload.expiresAt);
   storageKeys.add(intent.asset.storageKey);
   const rejectedPayload = await fetch(intent.upload.url, {
     method: intent.upload.method,
@@ -287,6 +343,586 @@ try {
     logger,
   );
   assert.equal(objects.has(ready.storageKey), false);
+
+  // Social avatars reuse verified immutable storage, but are strictly owner-scoped.
+  const { userContentActor } = await import("./services/content-actor.js");
+  const { SocialService } = await import("./services/social-service.js");
+  const ownerId = randomUUID();
+  const strangerId = randomUUID();
+  userIds.push(ownerId, strangerId);
+  await testPool.query(`insert into users(id) values($1),($2)`, [
+    ownerId,
+    strangerId,
+  ]);
+  const ownerActor = userContentActor(ownerId);
+  const strangerActor = userContentActor(strangerId);
+  const avatarBody = {
+    kind: "image" as const,
+    originalFilename: "avatar.png",
+    mimeType: "image/png",
+    expectedByteSize: png.length,
+    checksumSha256: pngChecksum,
+  };
+  const snapshot = { maximumBytes: png.length, revision: "test-frozen-policy" };
+  await assert.rejects(
+    () =>
+      createContentAssetUpload(testPool, avatarBody, ownerActor, {
+        ...snapshot,
+        maximumBytes: png.length - 1,
+      }),
+    (error: unknown) =>
+      error instanceof ContentError && error.statusCode === 413,
+  );
+  const avatar = await createContentAssetUpload(
+    testPool,
+    avatarBody,
+    ownerActor,
+    snapshot,
+  );
+  assetIds.push(avatar.asset.id);
+  storageKeys.add(avatar.asset.storageKey);
+  assert.deepEqual(avatar.asset.metadata.socialUploadPolicy, snapshot);
+  assert.equal(avatar.asset.metadata.uploadExpiresAt, avatar.upload.expiresAt);
+  const completion = { byteSize: png.length, checksumSha256: pngChecksum };
+  await assert.rejects(
+    () =>
+      completeContentAssetUpload(
+        testPool,
+        avatar.asset.id,
+        completion,
+        strangerActor,
+      ),
+    (error: unknown) =>
+      error instanceof ContentError && error.code === "content_asset_not_found",
+  );
+  await assert.rejects(
+    () => deleteContentAsset(testPool, avatar.asset.id, strangerActor),
+    (error: unknown) =>
+      error instanceof ContentError && error.code === "content_asset_not_found",
+  );
+  assert.equal(
+    (
+      await fetch(avatar.upload.url, {
+        method: "PUT",
+        headers: avatar.upload.headers,
+        body: png,
+      })
+    ).ok,
+    true,
+  );
+  // A deployment may reduce the configured TTL after this URL has been issued.
+  configureContentTestRuntime({
+    ...process.env,
+    CONTENT_ASSET_UPLOAD_TTL_SEC: "60",
+  });
+  const readyAvatar = await completeContentAssetUpload(
+    testPool,
+    avatar.asset.id,
+    completion,
+    ownerActor,
+  );
+  storageKeys.add(readyAvatar.storageKey);
+  assert.equal(readyAvatar.status, "ready");
+  const avatarDeletion = (
+    await testPool.query(
+      `select available_at from content_storage_deletion_jobs where storage_key=$1`,
+      [avatar.asset.storageKey],
+    )
+  ).rows[0];
+  assert.ok(
+    new Date(avatarDeletion.available_at).getTime() >=
+      Date.parse(avatar.upload.expiresAt) + 60_000,
+  );
+  const avatarAudit = (
+    await testPool.query(
+      `select actor_kind,actor_user_id,actor_admin_id from content_audit_events where asset_id=$1 and action='asset.ready'`,
+      [avatar.asset.id],
+    )
+  ).rows[0];
+  assert.deepEqual(avatarAudit, {
+    actor_kind: "user",
+    actor_user_id: ownerId,
+    actor_admin_id: null,
+  });
+  const social = new SocialService(testPool);
+  await assert.rejects(
+    () => social.updateProfile(strangerId, { avatarAssetId: readyAvatar.id }),
+    (error: unknown) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "avatar_unavailable",
+  );
+  await social.updateProfile(ownerId, { avatarAssetId: readyAvatar.id });
+  await assert.rejects(
+    () => deleteContentAsset(testPool, readyAvatar.id, ownerActor),
+    (error: unknown) =>
+      error instanceof ContentError && error.code === "content_asset_in_use",
+  );
+  await social.updateProfile(ownerId, { avatarAssetId: null });
+  const race = await Promise.allSettled([
+    social.updateProfile(ownerId, { avatarAssetId: readyAvatar.id }),
+    deleteContentAsset(testPool, readyAvatar.id, ownerActor),
+  ]);
+  assert.equal(
+    race.filter((result) => result.status === "fulfilled").length,
+    1,
+  );
+  const postRace = (
+    await testPool.query(
+      `select a.status,u.avatar_asset_id from content_assets a join users u on u.id=$2 where a.id=$1`,
+      [readyAvatar.id, ownerId],
+    )
+  ).rows[0];
+  assert.ok(
+    (postRace.status === "ready" &&
+      postRace.avatar_asset_id === readyAvatar.id) ||
+      (postRace.status === "deleted" && postRace.avatar_asset_id === null),
+  );
+  if (postRace.status === "ready") {
+    await social.updateProfile(ownerId, { avatarAssetId: null });
+    await deleteContentAsset(testPool, readyAvatar.id, ownerActor);
+  }
+  await testPool.query(
+    `update users set social_suspended_at=now() where id=$1`,
+    [ownerId],
+  );
+  await assert.rejects(
+    () => createContentAssetUpload(testPool, avatarBody, ownerActor, snapshot),
+    (error: unknown) =>
+      error instanceof ContentError && error.statusCode === 403,
+  );
+
+  // Abandoned verification can be reclaimed without allowing an unexpired URL
+  // to recreate a staging orphan after cleanup has already finished.
+  const abandonedId = randomUUID();
+  const abandonedKey = `content-staging/${abandonedId}/avatar.png`;
+  const abandonedExpiry = new Date(Date.now() + 600_000).toISOString();
+  assetIds.push(abandonedId);
+  storageKeys.add(abandonedKey);
+  await testPool.query(
+    `insert into content_assets(id,status,kind,storage_key,original_filename,mime_type,byte_size,checksum_sha256,metadata,updated_at)
+    values($1,'verifying','image',$2,'avatar.png','image/png',$3,$4,$5,now()-interval '11 minutes')`,
+    [
+      abandonedId,
+      abandonedKey,
+      png.length,
+      pngChecksum,
+      { uploadExpiresAt: abandonedExpiry },
+    ],
+  );
+  configureContentTestRuntime({
+    ...process.env,
+    CONTENT_ASSET_UPLOAD_TTL_SEC: "60",
+  });
+  await assetsModule.reclaimStaleContentAssetUploads(testPool, 1);
+  const abandonedDeletion = (
+    await testPool.query(
+      `select available_at from content_storage_deletion_jobs where storage_key=$1`,
+      [abandonedKey],
+    )
+  ).rows[0];
+  assert.ok(
+    new Date(abandonedDeletion.available_at).getTime() >=
+      Date.parse(abandonedExpiry) + 60_000,
+  );
+
+  const { clearUserSocialData, mergeUserSocialData } =
+    await import("./services/social-lifecycle.js");
+  for (const keepSource of [false, true]) {
+    const sourceId = randomUUID();
+    const targetId = randomUUID();
+    userIds.push(sourceId, targetId);
+    await testPool.query(`insert into users(id) values($1),($2)`, [
+      sourceId,
+      targetId,
+    ]);
+    const merging = await createContentAssetUpload(
+      testPool,
+      avatarBody,
+      userContentActor(sourceId),
+      snapshot,
+    );
+    assetIds.push(merging.asset.id);
+    storageKeys.add(merging.asset.storageKey);
+    assert.equal(
+      (
+        await fetch(merging.upload.url, {
+          method: "PUT",
+          headers: merging.upload.headers,
+          body: png,
+        })
+      ).ok,
+      true,
+    );
+    beforeCopyObject = async () => {
+      await tx(testPool, async (db) => {
+        await db.query(
+          `select id from users where id=any($1::uuid[]) order by id for update`,
+          [[sourceId, targetId]],
+        );
+        await mergeUserSocialData(db, sourceId, targetId, keepSource);
+        if (!keepSource)
+          await db.query(`delete from users where id=$1`, [sourceId]);
+      });
+    };
+    let transferred;
+    try {
+      transferred = await completeContentAssetUpload(
+        testPool,
+        merging.asset.id,
+        completion,
+        userContentActor(sourceId),
+      );
+    } finally {
+      beforeCopyObject = null;
+    }
+    storageKeys.add(transferred.storageKey);
+    assert.equal(transferred.status, "ready");
+    assert.equal(objects.has(transferred.storageKey), true);
+    assert.deepEqual(
+      (
+        await testPool.query(
+          `select owner_user_id,(select actor_user_id from content_audit_events where asset_id=a.id and action='asset.ready') as ready_actor
+       from content_assets a where id=$1`,
+          [transferred.id],
+        )
+      ).rows[0],
+      { owner_user_id: targetId, ready_actor: targetId },
+    );
+    assert.equal(
+      (
+        await testPool.query(
+          `select count(*)::int as count from content_storage_deletion_jobs where storage_key=$1`,
+          [transferred.storageKey],
+        )
+      ).rows[0].count,
+      0,
+    );
+    await assert.rejects(
+      completeContentAssetUpload(
+        testPool,
+        transferred.id,
+        completion,
+        userContentActor(sourceId),
+      ),
+      (error: unknown) =>
+        error instanceof ContentError &&
+        error.code === "content_asset_not_found",
+    );
+    assert.equal(
+      (
+        await completeContentAssetUpload(
+          testPool,
+          transferred.id,
+          completion,
+          userContentActor(targetId),
+        )
+      ).status,
+      "ready",
+    );
+  }
+  console.log(
+    "ok - in-flight avatar merge preserves ready media and current-owner audit with and without source account",
+  );
+  // A merge can also commit after the owner lookup's statement snapshot while
+  // that lookup waits on the lifecycle user lock. Retry must remain possible.
+  {
+    const sourceId = randomUUID();
+    const targetId = randomUUID();
+    userIds.push(sourceId, targetId);
+    await testPool.query(`insert into users(id) values($1),($2)`, [
+      sourceId,
+      targetId,
+    ]);
+    const racing = await createContentAssetUpload(
+      testPool,
+      avatarBody,
+      userContentActor(sourceId),
+      snapshot,
+    );
+    assetIds.push(racing.asset.id);
+    storageKeys.add(racing.asset.storageKey);
+    assert.equal(
+      (
+        await fetch(racing.upload.url, {
+          method: "PUT",
+          headers: racing.upload.headers,
+          body: png,
+        })
+      ).ok,
+      true,
+    );
+    const lifecycle = await testPool.connect();
+    try {
+      await lifecycle.query("begin");
+      await lifecycle.query(
+        `select id from users where id=any($1::uuid[]) order by id for update`,
+        [[sourceId, targetId]],
+      );
+      let ownerQueryStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        ownerQueryStarted = resolve;
+      });
+      onVerificationOwnerQuery = ownerQueryStarted;
+      const completionRejected = assert.rejects(
+        completeContentAssetUpload(
+          testPool,
+          racing.asset.id,
+          completion,
+          userContentActor(sourceId),
+        ),
+        (error: unknown) =>
+          error instanceof ContentError && error.code === "content_asset_busy",
+      );
+      await started;
+      let blocked = false;
+      const deadline = Date.now() + 5_000;
+      while (!blocked && Date.now() < deadline) {
+        blocked = (
+          await lifecycle.query(
+            `select exists(select 1 from pg_stat_activity where datname=current_database() and pid<>pg_backend_pid()
+            and wait_event_type='Lock' and query like '%select owner_user_id from content_assets where id=$1%') as blocked`,
+          )
+        ).rows[0].blocked;
+      }
+      assert.equal(
+        blocked,
+        true,
+        "promotion waits on the lifecycle lock before locking the asset",
+      );
+      await mergeUserSocialData(lifecycle, sourceId, targetId, false);
+      await lifecycle.query(`delete from users where id=$1`, [sourceId]);
+      await lifecycle.query("commit");
+      await completionRejected;
+    } finally {
+      onVerificationOwnerQuery = null;
+      await lifecycle.query("rollback");
+      lifecycle.release();
+    }
+    const retryRow = (
+      await testPool.query(
+        `select status,owner_user_id,metadata from content_assets where id=$1`,
+        [racing.asset.id],
+      )
+    ).rows[0];
+    assert.equal(retryRow.status, "pending");
+    assert.equal(retryRow.owner_user_id, targetId);
+    storageKeys.add(retryRow.metadata.verificationTargetKey);
+    assert.equal(objects.has(retryRow.metadata.verificationTargetKey), true);
+    assert.equal(
+      (
+        await completeContentAssetUpload(
+          testPool,
+          racing.asset.id,
+          completion,
+          userContentActor(targetId),
+        )
+      ).status,
+      "ready",
+    );
+    console.log(
+      "ok - merge during owner-lock wait preserves bytes and current owner can retry completion",
+    );
+  }
+  for (const removeAssetRow of [false, true]) {
+    const deletingUser = randomUUID();
+    userIds.push(deletingUser);
+    await testPool.query(`insert into users(id) values($1)`, [deletingUser]);
+    const delayed = await createContentAssetUpload(
+      testPool,
+      avatarBody,
+      userContentActor(deletingUser),
+      snapshot,
+    );
+    assetIds.push(delayed.asset.id);
+    storageKeys.add(delayed.asset.storageKey);
+    assert.equal(
+      (
+        await fetch(delayed.upload.url, {
+          method: "PUT",
+          headers: delayed.upload.headers,
+          body: png,
+        })
+      ).ok,
+      true,
+    );
+    let copyStarted!: (key: string) => void;
+    let resumeCopy!: () => void;
+    const started = new Promise<string>((resolve) => {
+      copyStarted = resolve;
+    });
+    const paused = new Promise<void>((resolve) => {
+      resumeCopy = resolve;
+    });
+    beforeCopyObject = async (key) => {
+      copyStarted(key);
+      await paused;
+    };
+    // Attach the rejection handler before unblocking the provider response.
+    const completionRejected = assert.rejects(
+      completeContentAssetUpload(
+        testPool,
+        delayed.asset.id,
+        completion,
+        userContentActor(deletingUser),
+      ),
+      (error: unknown) =>
+        error instanceof ContentError && error.code === "content_asset_busy",
+    );
+    let targetKey: string;
+    try {
+      targetKey = await started;
+      storageKeys.add(targetKey);
+      await tx(testPool, async (db) => {
+        await db.query(`select id from users where id=$1 for update`, [
+          deletingUser,
+        ]);
+        await clearUserSocialData(db, deletingUser);
+        await db.query(`delete from users where id=$1`, [deletingUser]);
+        if (removeAssetRow)
+          await db.query(`delete from content_assets where id=$1`, [
+            delayed.asset.id,
+          ]);
+      });
+      await prioritizeStorageDeletion(targetKey);
+      await dispatchContentStorageDeletions(
+        testPool,
+        1,
+        `pre-copy-delete-${removeAssetRow}`,
+        logger,
+      );
+      const completedDeletion = (
+        await testPool.query(
+          `select status from content_storage_deletion_jobs where storage_key=$1`,
+          [targetKey],
+        )
+      ).rows[0];
+      assert.equal(completedDeletion.status, "completed");
+      assert.equal(objects.has(targetKey), false);
+    } finally {
+      beforeCopyObject = null;
+      resumeCopy();
+    }
+    await completionRejected;
+    assert.equal(
+      objects.has(targetKey),
+      true,
+      "The paused provider copy completed after the first cleanup",
+    );
+    const reopened = (
+      await testPool.query(
+        `select status,completed_at,attempts from content_storage_deletion_jobs where storage_key=$1`,
+        [targetKey],
+      )
+    ).rows[0];
+    assert.deepEqual(reopened, {
+      status: "pending",
+      completed_at: null,
+      attempts: 0,
+    });
+    const retainedStaging = (
+      await testPool.query(
+        `select available_at from content_storage_deletion_jobs where storage_key=$1`,
+        [delayed.asset.storageKey],
+      )
+    ).rows[0];
+    assert.ok(
+      new Date(retainedStaging.available_at).getTime() >=
+        Date.parse(delayed.upload.expiresAt) + 60_000,
+    );
+    await prioritizeStorageDeletion(targetKey);
+    await dispatchContentStorageDeletions(
+      testPool,
+      1,
+      `post-copy-delete-${removeAssetRow}`,
+      logger,
+    );
+    assert.equal(
+      objects.has(targetKey),
+      false,
+      "Late public object must be removed by the reopened cleanup",
+    );
+  }
+
+  // Losing the COMMIT acknowledgement is different: the ready public object
+  // must survive the same failure cleanup path.
+  const ambiguous = await createContentAssetUpload(testPool, avatarBody, null);
+  assetIds.push(ambiguous.asset.id);
+  storageKeys.add(ambiguous.asset.storageKey);
+  assert.equal(
+    (
+      await fetch(ambiguous.upload.url, {
+        method: "PUT",
+        headers: ambiguous.upload.headers,
+        body: png,
+      })
+    ).ok,
+    true,
+  );
+  const originalConnect = testPool.connect.bind(testPool);
+  let lostAcknowledgement = false;
+  testPool.connect = (async () => {
+    const client = await originalConnect();
+    const originalQuery = client.query.bind(client);
+    const originalRelease = client.release.bind(client);
+    let promoted = false;
+    client.query = (async (...args: unknown[]) => {
+      const result = await Reflect.apply(originalQuery, client, args);
+      const sql = typeof args[0] === "string" ? args[0] : "";
+      if (/update content_assets\s+set\s+status = 'ready'/i.test(sql))
+        promoted = true;
+      if (
+        sql.trim().toLowerCase() === "commit" &&
+        promoted &&
+        !lostAcknowledgement
+      ) {
+        lostAcknowledgement = true;
+        throw new Error("Fixture: commit acknowledgement lost after success");
+      }
+      return result;
+    }) as typeof client.query;
+    client.release = ((error?: Error | boolean) => {
+      client.query = originalQuery as typeof client.query;
+      client.release = originalRelease;
+      originalRelease(error);
+    }) as typeof client.release;
+    return client;
+  }) as typeof testPool.connect;
+  try {
+    await assert.rejects(
+      completeContentAssetUpload(
+        testPool,
+        ambiguous.asset.id,
+        completion,
+        null,
+      ),
+      (error: unknown) =>
+        error instanceof ContentError &&
+        error.code === "content_asset_not_ready",
+    );
+  } finally {
+    testPool.connect = originalConnect as typeof testPool.connect;
+  }
+  assert.equal(lostAcknowledgement, true);
+  const committed = (
+    await testPool.query(
+      `select status,storage_key from content_assets where id=$1`,
+      [ambiguous.asset.id],
+    )
+  ).rows[0];
+  storageKeys.add(committed.storage_key);
+  assert.equal(committed.status, "ready");
+  assert.equal(objects.has(committed.storage_key), true);
+  assert.equal(
+    (
+      await testPool.query(
+        `select 1 from content_storage_deletion_jobs where storage_key=$1`,
+        [committed.storage_key],
+      )
+    ).rows.length,
+    0,
+  );
+  await deleteContentAsset(testPool, ambiguous.asset.id, null);
 
   const missingIntent = await createContentAssetUpload(
     testPool,
@@ -368,6 +1004,83 @@ try {
   );
   assert.equal(objects.has(invalidIntent.asset.storageKey), false);
 
+  assert.equal(verificationStatements.size, 3);
+  const plans = await testPool.connect();
+  try {
+    await plans.query("begin");
+    await plans.query("set local statement_timeout='60s'");
+    await plans.query(
+      `insert into users(id) select gen_random_uuid() from generate_series(1,50000)`,
+    );
+    await plans.query(
+      `insert into content_assets(kind,storage_key,original_filename,mime_type,checksum_sha256)
+      select 'image',$1||sequence_row::text,'fixture.png','image/png',$2 from generate_series(1,50000) sequence_row`,
+      [`media-scale:${randomUUID()}:`, pngChecksum],
+    );
+    await plans.query("analyze users");
+    await plans.query("analyze content_assets");
+    let planNumber = 0;
+    for (const [sql, params] of verificationStatements) {
+      const name = `avatar_verification_${planNumber++}`;
+      await plans.query(`prepare ${name} as ${sql}`);
+      const literals = params
+        .map((value) =>
+          value == null
+            ? "NULL"
+            : typeof value === "number"
+              ? String(value)
+              : `'${String(value).replaceAll("'", "''")}'`,
+        )
+        .join(",");
+      for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+        await plans.query(`set local plan_cache_mode=${mode}`);
+        await plans.query("savepoint avatar_plan");
+        const explained = await plans.query(
+          `explain(analyze,buffers,format json) execute ${name}(${literals})`,
+        );
+        const plan = explained.rows[0]["QUERY PLAN"][0];
+        const nodes: Record<string, unknown>[] = [];
+        const walk = (node: Record<string, unknown>) => {
+          nodes.push(node);
+          for (const child of (node.Plans ?? []) as Record<string, unknown>[])
+            walk(child);
+        };
+        walk(plan.Plan);
+        assert.ok(
+          nodes.some((node) => node["Index Name"] === "content_assets_pkey"),
+        );
+        assert.equal(
+          nodes.some(
+            (node) =>
+              node["Node Type"] === "Seq Scan" &&
+              ["users", "content_assets"].includes(
+                String(node["Relation Name"]),
+              ),
+          ),
+          false,
+        );
+        console.log(
+          "[avatar-verification-plan]",
+          JSON.stringify({
+            name,
+            mode,
+            unrelatedRows: 50000,
+            timeMs: plan["Execution Time"],
+            hits: plan.Plan["Shared Hit Blocks"],
+            reads: plan.Plan["Shared Read Blocks"],
+            indexes: nodes.flatMap((node) =>
+              node["Index Name"] ? [node["Index Name"]] : [],
+            ),
+          }),
+        );
+        await plans.query("rollback to savepoint avatar_plan");
+      }
+      await plans.query(`deallocate ${name}`);
+    }
+  } finally {
+    await plans.query("rollback");
+    plans.release();
+  }
   console.log("[content-media-integration-tests] passed");
 } finally {
   try {
@@ -397,6 +1110,8 @@ try {
         [assetIds],
       );
     }
+    if (pool && userIds.length > 0)
+      await pool.query(`delete from users where id=any($1::uuid[])`, [userIds]);
   } finally {
     try {
       if (pool) await pool.end();

@@ -1,4 +1,8 @@
-import { buildObservedCanonicalMarketTop } from "@hunch/shared";
+import {
+  buildObservedCanonicalMarketTop,
+  parsePolymarketAssetContext,
+} from "@hunch/shared";
+import { positionStorageContract } from "../lib/position-asset-context.js";
 import {
   type PolymarketOrderabilityMode,
   computeAcceptingOrders,
@@ -26,6 +30,16 @@ export function mapMarketsByTokenRows(
   const now = options.now ?? new Date();
 
   return rows.map((row) => {
+    const assetContext = parsePolymarketAssetContext(row.asset_context);
+    if (
+      row.asset_context != null &&
+      (!assetContext ||
+        assetContext.assetId !== row.token_id ||
+        assetContext.marketId !== row.market_id)
+    )
+      throw new Error(
+        "Position market metadata conflicts with its frozen context.",
+      );
     const marketMetadata = parseMetadata(row.market_metadata);
     const eventMetadata = parseMetadata(row.event_metadata);
     const limitlessMeta =
@@ -84,8 +98,11 @@ export function mapMarketsByTokenRows(
     const marketAddress =
       row.venue === "limitless" ? (limitlessMeta?.marketAddress ?? null) : null;
 
-    const outcomeSide =
-      row.token_id === tokens.yes
+    const outcomeSide = assetContext
+      ? assetContext.outcomeIndex === 0
+        ? "YES"
+        : "NO"
+      : row.token_id === tokens.yes
         ? "YES"
         : row.token_id === tokens.no
           ? "NO"
@@ -109,6 +126,16 @@ export function mapMarketsByTokenRows(
 
     return {
       tokenId: row.token_id,
+      ...(assetContext
+        ? {
+            assetContext,
+            positionContract: positionStorageContract({
+              venue: row.venue,
+              tokenId: row.token_id,
+              assetContext,
+            }),
+          }
+        : {}),
       side: outcomeSide,
       market: {
         marketId: row.market_id,
@@ -141,7 +168,10 @@ export function mapMarketsByTokenRows(
         lastPrice: row.last_price != null ? Number(row.last_price) : null,
         outcomes,
         tokens,
-        conditionId: row.condition_id || null,
+        ...(assetContext
+          ? { priceTokens: { yes: row.token_yes, no: row.token_no } }
+          : {}),
+        conditionId: assetContext?.conditionId ?? row.condition_id ?? null,
         questionId: row.pm_question_id || null,
         marketSlug: row.slug || null,
         marketImage: row.market_image || null,

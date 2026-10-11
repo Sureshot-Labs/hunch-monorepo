@@ -75,11 +75,22 @@ export async function safeEvmReadContract<T>(inputs: {
     });
   }
 
-  const code = await fetchEvmCode({
-    rpcUrl: inputs.rpcUrl,
-    timeoutMs: inputs.timeoutMs,
-    address: targetAddress,
-  });
+  let code: string;
+  try {
+    code = await fetchEvmCode({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.timeoutMs,
+      address: targetAddress,
+    });
+  } catch (error) {
+    throw new SafeEvmReadError({
+      reason: classifyReadFailure(error),
+      message: `Unable to read contract code for ${inputs.functionName}.`,
+      targetAddress,
+      functionName: inputs.functionName,
+      cause: error,
+    });
+  }
   if (!code || code === "0x" || code === "0x0") {
     throw new SafeEvmReadError({
       reason: "no_code",

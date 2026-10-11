@@ -13,6 +13,10 @@ export type PolymarketMarketInfoRow = {
   market_status?: string | null;
   taker_fee_bps: string | null;
   maker_fee_bps: string | null;
+  protocol_version?: unknown;
+  position_ids?: unknown;
+  protocol_metadata?: unknown;
+  outcomes?: string | null;
 };
 
 async function queryPolymarketMarketInfo(
@@ -25,9 +29,15 @@ async function queryPolymarketMarketInfo(
       select
         pm.id as polymarket_id,
         m.id as unified_market_id,
-        pm.condition_id,
-        pm.clob_token_ids,
-        pm.neg_risk,
+        coalesce(m.condition_id, pm.condition_id) as condition_id,
+        coalesce(m.clob_token_ids, pm.clob_token_ids) as clob_token_ids,
+        case when jsonb_typeof(m.metadata->'polymarketProtocol'->'negRisk') = 'boolean'
+          then (m.metadata->'polymarketProtocol'->>'negRisk')::boolean
+          else pm.neg_risk end as neg_risk,
+        m.metadata as protocol_metadata,
+        pm.raw->>'version' as protocol_version,
+        pm.raw->'positionIds' as position_ids,
+        coalesce(m.outcomes, pm.outcomes) as outcomes,
         pm.order_price_min_tick_size,
         pm.order_min_size,
         pm.accepting_orders,
