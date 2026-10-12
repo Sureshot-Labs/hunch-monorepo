@@ -198,7 +198,8 @@ try {
   const cycle = await runHip4ReadCycle(pool, async (request) => {
     calls++;
     if (request.type === "outcomeMeta") return futureMetadata;
-    if (request.type === "spotMeta") return main.spotMetadata;
+    if (request.type === "spotMetaAndAssetCtxs")
+      return [main.spotMetadata, [{ coin: "#87750", dayNtlVlm: "24.30617" }]];
     if (request.type === "l2Book")
       return { coin: request.coin, time: Date.now(), levels: [[], []] };
     if (request.type === "recentTrades") return [];
@@ -210,6 +211,7 @@ try {
   assert.equal(observed?.market.coverage.trades, "recent_window");
   assert.equal(observed?.market.coverage.tradeWindowStart, null);
   assert.ok(observed?.market.coverage.tradeObservedAt);
+  assert.equal(observed?.market.volume24h?.usd, "24.30617");
   const expiredMetadata = {
     ...futureMetadata,
     outcomes: futureMetadata.outcomes.map(
@@ -221,7 +223,7 @@ try {
   };
   const expiredRead = async (request: { type: string }) => {
     if (request.type === "outcomeMeta") return expiredMetadata;
-    if (request.type === "spotMeta") return main.spotMetadata;
+    if (request.type === "spotMetaAndAssetCtxs") return [main.spotMetadata, []];
     if (request.type === "settledOutcome")
       return {
         spec: expiredMetadata.outcomes.find(
@@ -297,5 +299,8 @@ try {
     "HIP4 PostgreSQL 16: replay/ties, atomic rollback, frozen settlement, paging, budget concurrency, policy failure and cascading retention passed",
   );
 } finally {
+  await pool.query("delete from unified_markets where id=any($1::text[])", [
+    ["hyperliquid:mainnet:outcome:8775", "hyperliquid:mainnet:outcome:95"],
+  ]);
   await pool.end();
 }

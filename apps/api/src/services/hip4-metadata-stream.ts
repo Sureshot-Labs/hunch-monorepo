@@ -1,5 +1,9 @@
 import WebSocket from "ws";
-import { hip4Identity, type Hip4ReadPolicy } from "@hunch/shared";
+import {
+  hip4Identity,
+  hip4ReadOutcomeAllowed,
+  type Hip4ReadPolicy,
+} from "@hunch/shared";
 
 // This stream is a repair hint, never authoritative metadata or a trade ledger.
 // Reconnect/duplicates/gaps all converge through the same bounded REST cycle.
@@ -104,7 +108,7 @@ export function watchHip4Metadata(
   if (
     policy.enabled &&
     (policy.metadataStreamEnabled || policy.liveEnabled) &&
-    policy.outcomeAllowlist.length
+    (policy.catalogMode === "all" || policy.outcomeAllowlist.length)
   )
     connect();
   return {
@@ -116,7 +120,7 @@ export function watchHip4Metadata(
       >();
       if (policy.liveEnabled)
         for (const outcome of [...new Set(outcomes)]
-          .filter((id) => policy.outcomeAllowlist.includes(id))
+          .filter((id) => hip4ReadOutcomeAllowed(policy, id))
           .slice(0, policy.maxLiveOutcomes)) {
           const identity = hip4Identity(policy.environment, outcome);
           for (const side of identity.sides)

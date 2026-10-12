@@ -2,12 +2,8 @@
 import { createClient } from "redis";
 import type { Pool } from "pg";
 import { DEFAULT_HIP4_READ_POLICY, type Hip4ReadMarket } from "@hunch/shared";
-import { readHip4Policy, readHip4SettledOutcomes } from "./hip4-repository.js";
-import {
-  createHip4LiveBuffer,
-  flushHip4Live,
-  selectHip4HotOutcomes,
-} from "./hip4-live.js";
+import { readHip4Policy, readHip4LiveOutcomes } from "./hip4-repository.js";
+import { createHip4LiveBuffer, flushHip4Live } from "./hip4-live.js";
 import { watchHip4Metadata } from "./hip4-metadata-stream.js";
 
 export function startHip4LiveRuntime(
@@ -83,7 +79,10 @@ export function startHip4LiveRuntime(
         buffer = undefined;
         revision = current.revision;
         selectedAt = 0;
-        if (policy.enabled && policy.outcomeAllowlist.length) {
+        if (
+          policy.enabled &&
+          (policy.catalogMode === "all" || policy.outcomeAllowlist.length)
+        ) {
           buffer = createHip4LiveBuffer(policy, wake, interruptedSince);
           if (interruptedSince !== undefined) buffer.gap("flush_error");
           stream = watchHip4Metadata(policy, wake, undefined, buffer);
@@ -123,12 +122,7 @@ export function startHip4LiveRuntime(
       }
       if (stopped) return;
       if (Date.now() - selectedAt >= policy.subscriptionRefreshMs) {
-        const settled = await readHip4SettledOutcomes(
-          pool,
-          policy.environment,
-          policy.outcomeAllowlist,
-        );
-        const selected = selectHip4HotOutcomes(policy, hot, settled);
+        const selected = await readHip4LiveOutcomes(pool, policy, hot);
         buffer?.select(selected);
         stream?.setOutcomes(selected);
         selectedAt = Date.now();

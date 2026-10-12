@@ -9,9 +9,11 @@ import {
   type Hip4Environment,
   type Hip4ReadMarket,
   type Hip4Attempt,
+  type Hip4ReadPolicy,
 } from "@hunch/shared";
 import type { Pool } from "pg";
 import type { z } from "zod";
+import { mergeHip4Volume } from "./hip4-volume.js";
 import {
   insertHip4Trades,
   insertHip4Intervals,
@@ -115,22 +117,67 @@ export async function readHip4Cursor(
   return Number(result.rows[0]?.after_outcome ?? -1);
 }
 
+export const HIP4_CATALOG_READ_SQL = `select read_model from hip4_read_markets
+     where environment=$1 and outcome>$2 order by outcome limit $3`;
+
 export async function readHip4Markets(
   db: Pick<Pool, "query">,
   environment: Hip4Environment,
-  allowlist: number[],
+  allowlist: number[] | null,
   after: number,
   limit: number,
 ) {
-  const result = await db.query(
-    `
+  const result =
+    allowlist === null
+      ? await db.query(HIP4_CATALOG_READ_SQL, [environment, after, limit])
+      : await db.query(
+          `
     select read_model from hip4_read_markets
     where environment = $1 and outcome = any($2::bigint[]) and outcome > $3
     order by outcome limit $4
   `,
-    [environment, allowlist, after, limit],
-  );
+          [environment, allowlist, after, limit],
+        );
   return result.rows.map((row) => hip4ReadMarketSchema.parse(row.read_model));
+}
+
+// Only choose a bounded live subset. Catalog breadth never multiplies WS
+// subscriptions or REST book/trade requests.
+export async function readHip4LiveOutcomes(
+  db: Pick<Pool, "query">,
+  policy: Hip4ReadPolicy,
+  hotTokens: string[],
+): Promise<number[]> {
+  const result = await db.query(
+    `select outcome from hip4_read_markets
+     where environment=$1 and read_model->>'status'<>'settled'
+     and ($2::bigint[] is null or outcome=any($2))
+     order by (('hyperliquid:' || environment || ':' || (outcome*10)::text)=any($3::text[])
+       or ('hyperliquid:' || environment || ':' || (outcome*10+1)::text)=any($3::text[])) desc, outcome
+     limit $4`,
+    [
+      policy.environment,
+      policy.catalogMode === "all" ? null : policy.outcomeAllowlist,
+      hotTokens,
+      policy.maxLiveOutcomes,
+    ],
+  );
+  return result.rows.map((row) => Number(row.outcome));
+}
+
+export async function readHip4PendingOutcomes(
+  db: Pick<Pool, "query">,
+  environment: Hip4Environment,
+  after: number,
+  limit: number,
+): Promise<number[]> {
+  const result = await db.query(
+    `select outcome from hip4_read_markets where environment=$1
+     and read_model->>'status'<>'settled'
+     order by (outcome>$2) desc, outcome limit $3`,
+    [environment, after, limit],
+  );
+  return result.rows.map((row) => Number(row.outcome));
 }
 
 export async function readHip4StoredMarket(
@@ -206,6 +253,7 @@ export async function persistHip4Market(
     );
     let raw = olderMetadata ? stored.raw : input.raw;
     if (stored) {
+      market = { ...market, ...mergeHip4Volume(stored.market, input.market) };
       const latestAttempt = <T extends { at: string }>(
         previous: T | null | undefined,
         incoming: T | null | undefined,

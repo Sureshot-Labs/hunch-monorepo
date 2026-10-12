@@ -16,6 +16,10 @@ import { readHip4Trades, readHip4Candles } from "./services/hip4-history.js";
 import { runHip4ReadCycle } from "./services/hip4-indexer.js";
 import { createHip4ReadClient } from "./services/hip4-client.js";
 import { createHip4LiveBuffer, flushHip4Live } from "./services/hip4-live.js";
+import {
+  applyHip4Volume,
+  indexHip4AssetContexts,
+} from "./services/hip4-volume.js";
 
 const pool = await createIntegrationTestPool({
   max: 4,
@@ -82,6 +86,12 @@ try {
     now,
     60000,
   );
+  mapped.market = applyHip4Volume(
+    mapped.market,
+    indexHip4AssetContexts([{ coin: "#87750", dayNtlVlm: "24.30617" }]),
+    new Date(now - 50).toISOString(),
+    300000,
+  );
   const bucket = Math.floor((now - 10000) / 60000) * 60000;
   const trade = {
     coin: "#87750",
@@ -109,6 +119,46 @@ try {
     60000,
   );
   await persistHip4Market(pool, { ...older, trades: [trade] });
+  assert.deepEqual(
+    (await readHip4StoredMarket(pool, "mainnet", 8775))?.market.volume24h,
+    mapped.market.volume24h,
+  );
+  // New metadata with an older context, or a failed refresh, must not erase
+  // the last good volume observation. The last attempt remains independently visible.
+  older.market = applyHip4Volume(
+    older.market,
+    indexHip4AssetContexts([{ coin: "#87750", dayNtlVlm: "1" }]),
+    new Date(now - 100).toISOString(),
+    300000,
+  );
+  await persistHip4Market(pool, { ...older, trades: [] });
+  assert.equal(
+    (await readHip4StoredMarket(pool, "mainnet", 8775))?.market.volume24h?.usd,
+    "24.30617",
+  );
+  older.market = applyHip4Volume(
+    older.market,
+    null,
+    new Date(now).toISOString(),
+    300000,
+  );
+  await persistHip4Market(pool, { ...older, trades: [] });
+  const failedVolumeRow = await readHip4StoredMarket(pool, "mainnet", 8775);
+  assert.ok(failedVolumeRow);
+  const failedVolume = failedVolumeRow.market;
+  assert.equal(failedVolume.volume24h?.usd, "24.30617");
+  assert.equal(failedVolume.volumeAttempt?.result, "invalid_response");
+  older.market = applyHip4Volume(
+    older.market,
+    indexHip4AssetContexts([{ coin: "#87750", dayNtlVlm: "25" }]),
+    new Date(now + 1).toISOString(),
+    300000,
+  );
+  await persistHip4Market(pool, { ...older, trades: [] });
+  assert.equal(
+    (await readHip4StoredMarket(pool, "mainnet", 8775))?.market.volume24h?.usd,
+    "25",
+  );
   assert.equal(
     (await readHip4StoredMarket(pool, "mainnet", 8775))?.market.sides[0].bid,
     "0.6",
@@ -151,6 +201,10 @@ try {
   assert.equal(
     (await readHip4StoredMarket(pool, "mainnet", 8775))?.market.sides[0].bid,
     "0.7",
+  );
+  assert.equal(
+    (await readHip4StoredMarket(pool, "mainnet", 8775))?.market.volume24h?.usd,
+    "25",
   );
   const candles = await readHip4Candles(
     pool,
@@ -281,8 +335,8 @@ try {
         return Response.json(
           request.type === "outcomeMeta"
             ? futureMeta
-            : request.type === "spotMeta"
-              ? main.spotMetadata
+            : request.type === "spotMetaAndAssetCtxs"
+              ? [main.spotMetadata, [{ coin: "#87750", dayNtlVlm: "24.30617" }]]
               : request.type === "l2Book"
                 ? { ...book(Date.now(), "0.5"), coin: request.coin }
                 : [trade, { ...trade, tid: 5 }],
@@ -291,6 +345,11 @@ try {
     );
     const cycle = await runHip4ReadCycle(pool, reader);
     assert.equal(cycle.indexed, 1, JSON.stringify(cycle));
+    assert.equal(
+      (await readHip4StoredMarket(pool, "mainnet", 8775))?.market.volume24h
+        ?.usd,
+      "24.30617",
+    );
     assert.ok(spent <= budget);
     if (budget < 600)
       assert.ok(
@@ -388,8 +447,8 @@ try {
           const request = JSON.parse(String(options?.body));
           if (request.type === "outcomeMeta")
             return Response.json(rotationMetadata);
-          if (request.type === "spotMeta")
-            return Response.json(main.spotMetadata);
+          if (request.type === "spotMetaAndAssetCtxs")
+            return Response.json([main.spotMetadata, []]);
           if (request.type === "l2Book")
             return Response.json({
               coin: request.coin,

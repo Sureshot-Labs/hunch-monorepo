@@ -9,6 +9,7 @@ import {
 } from "@hunch/shared";
 import type { Pool } from "pg";
 import { applyHip4Book, ageHip4Market, mapHip4Market } from "./hip4-mapping.js";
+import { applyHip4Volume, indexHip4AssetContexts } from "./hip4-volume.js";
 import {
   createHip4ReadClient,
   Hip4ReadError,
@@ -23,6 +24,7 @@ import {
   readHip4Policy,
   readHip4StoredMarket,
   recordHip4MetadataFailure,
+  readHip4PendingOutcomes,
 } from "./hip4-repository.js";
 
 export function selectHip4Outcomes(policy: Hip4ReadPolicy, after: number) {
@@ -48,6 +50,8 @@ export async function runHip4ReadCycle(
     revision,
     environment: policy.environment,
     indexed: 0,
+    catalogDiscovered: 0,
+    catalogPublished: 0,
     skipped: 0,
     failures: [] as { outcome: number; reason: string }[],
     pollMs: policy.pollMs,
@@ -56,9 +60,13 @@ export async function runHip4ReadCycle(
     writeMs: 0,
     oldestSnapshotAgeMs: 0,
   };
-  if (!policy.enabled || !policy.outcomeAllowlist.length) return diagnostics;
+  if (
+    !policy.enabled ||
+    (policy.catalogMode !== "all" && !policy.outcomeAllowlist.length)
+  )
+    return diagnostics;
   const after = await readHip4Cursor(pool, policy.environment);
-  const selected = selectHip4Outcomes(policy, after);
+  let selected = selectHip4Outcomes(policy, after);
   // Reserve the mandatory pair atomically. Never spend half a pair forever.
   let metadataCredits = 0;
   if (!readOverride) {
@@ -105,10 +113,17 @@ export async function runHip4ReadCycle(
   };
   let metadata;
   let spotMetadata;
+  let assetContexts: ReturnType<typeof indexHip4AssetContexts> = null;
+  let volumeObservedAt: string;
   try {
     metadata = hip4MetadataSchema.parse(await read({ type: "outcomeMeta" }));
+    volumeObservedAt = new Date().toISOString();
+    const spotResponse = await read({ type: "spotMetaAndAssetCtxs" });
     spotMetadata = hip4SpotMetadataSchema.parse(
-      await read({ type: "spotMeta" }),
+      Array.isArray(spotResponse) ? spotResponse[0] : null,
+    );
+    assetContexts = indexHip4AssetContexts(
+      Array.isArray(spotResponse) ? spotResponse[1] : null,
     );
   } catch (error) {
     await recordHip4MetadataFailure(pool, policy.environment, selected, {
@@ -119,6 +134,77 @@ export async function runHip4ReadCycle(
   }
   const generation = randomUUID();
   const fetchedAt = new Date().toISOString();
+  if (policy.catalogMode === "all") {
+    const catalogIds = metadata.outcomes.map((row) => row.outcome);
+    diagnostics.catalogDiscovered = catalogIds.length;
+    selected = selectHip4Outcomes(
+      {
+        ...policy,
+        outcomeAllowlist: [
+          ...catalogIds,
+          ...(await readHip4PendingOutcomes(
+            pool,
+            policy.environment,
+            after,
+            policy.maxOutcomesPerCycle,
+          )),
+        ],
+      },
+      after,
+    );
+    // Metadata/contexts already arrived in two bulk requests. Publish the
+    // catalog separately from the small, budgeted depth/history repair batch.
+    const catalogBatch = selectHip4Outcomes(
+      {
+        ...policy,
+        outcomeAllowlist: catalogIds,
+        maxOutcomesPerCycle: policy.catalogBatchSize,
+      },
+      after,
+    );
+    for (const outcome of catalogBatch) {
+      try {
+        const previous = await readHip4StoredMarket(
+          pool,
+          policy.environment,
+          outcome,
+        );
+        const mapped = mapHip4Market({
+          environment: policy.environment,
+          outcome,
+          metadata,
+          spotMetadata,
+          fetchedAt,
+          generation,
+          previous,
+          settlement: previous?.raw.settlement,
+        });
+        mapped.market.metadataAttempt = { at: fetchedAt, result: "ok" };
+        mapped.market = applyHip4Volume(
+          mapped.market,
+          assetContexts,
+          volumeObservedAt,
+          policy.volumeMaxAgeMs,
+          policy.bookMaxAgeMs,
+        );
+        const current = await readHip4Policy(pool);
+        if (!current.policy.enabled || current.revision !== revision) break;
+        if (
+          await persistHip4Market(pool, {
+            ...mapped,
+            trades: [],
+            advanceCursor: false,
+          })
+        )
+          diagnostics.catalogPublished++;
+      } catch (error) {
+        diagnostics.failures.push({
+          outcome,
+          reason: `catalog_${hip4Failure(error)}`,
+        });
+      }
+    }
+  }
   for (const outcome of selected) {
     try {
       const stored = await readHip4StoredMarket(
@@ -195,6 +281,18 @@ export async function runHip4ReadCycle(
         result: active ? "ok" : "metadata_missing",
       };
       mapped.market.settlementAttempt = settlementAttempt;
+      mapped.market = applyHip4Volume(
+        mapped.market,
+        assetContexts,
+        volumeObservedAt,
+        policy.volumeMaxAgeMs,
+        policy.bookMaxAgeMs,
+      );
+      if (mapped.market.volumeAttempt?.result !== "ok")
+        diagnostics.failures.push({
+          outcome,
+          reason: `volume_${mapped.market.volumeAttempt?.result}`,
+        });
       diagnostics.mapMs += Date.now() - mapStart;
       const trades = [];
       if (!settlement) {

@@ -49,6 +49,27 @@ test("errors, oversized and invalid payloads do not become an empty metadata gen
     await assert.rejects(read({ type: "outcomeMeta" }));
   }
 });
+test("combined spot metadata and contexts costs one metadata request, independent of local processing limits", async () => {
+  const weights: number[] = [];
+  const read = createHip4ReadClient(
+    DEFAULT_HIP4_READ_POLICY,
+    async (weight) => {
+      weights.push(weight);
+      return true;
+    },
+    async (_url, options) => {
+      assert.deepEqual(JSON.parse(String(options?.body)), {
+        type: "spotMetaAndAssetCtxs",
+      });
+      return Response.json([
+        { tokens: [] },
+        [{ coin: "#87750", dayNtlVlm: "1" }],
+      ]);
+    },
+  );
+  assert.ok(Array.isArray(await read({ type: "spotMetaAndAssetCtxs" })));
+  assert.deepEqual(weights, [20]);
+});
 test("bounded cursor rotation covers old/missing outcomes without starving later instances", () => {
   const policy = {
     ...DEFAULT_HIP4_READ_POLICY,

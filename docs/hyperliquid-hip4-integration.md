@@ -2062,3 +2062,73 @@ Before any proposed testnet experiment, note the [official faucet requirement](h
 the same address must previously have deposited on mainnet. A fresh throwaway
 wallet is not a proven free-funding path. No faucet claim, test order or real
 deposit was made; do not create a mainnet deposit to work around this requirement.
+
+### 24-hour volume in the home feed
+
+The indexer uses `spotMetaAndAssetCtxs` instead of `spotMeta`, retaining the
+metadata pair's 40-unit request weight. Contexts are matched by exact coin;
+outcome contexts are not positionally aligned with the spot universe. `volume24h`
+contains the primary outcome (side 0) `dayNtlVlm`, its coin, source, observation
+time and expiry. The legacy lifetime `volumeUsd` remains null; OI is unavailable.
+
+The public observation `volume-observations-20261012.json` retains complementary
+YES/NO trades with the same time/size but different trade IDs. Their notionals
+are $24.30617 and $6.69383 for 31 shares. We show $24.30617, matching the official
+outcome-list convention and our primary-side trade ledger; summing mirrored
+shares or adding both books would change the metric. This is quote turnover,
+not lifetime volume or the full collateral represented by complementary books.
+
+`hip4_read.volumeMaxAgeMs` defaults to 300000. Failed/missing/ambiguous context
+refreshes retain the last good observation without extending its freshness.
+Atomic persistence merges volume and last-attempt timestamps separately from
+metadata/books, so an older REST or WS snapshot cannot regress volume. A later
+good refresh recovers normally; a reported zero is valid, absence is not zero.
+
+The native home volume column and mobile card explicitly label the value `24h`.
+Volume filters use that same displayed metric. Volume alone does not enable
+public discovery or invent volume-based global rankings. The subsequent catalog
+change below replaces the local four-outcome selection.
+
+Verification for this change: 88 HIP tests and both HIP integration suites on
+an isolated PostgreSQL 16 schema passed, including stale volume, failed refresh,
+recovery and REST/WS snapshot races. Full workspace build/typecheck/lint passed
+47/47 tasks. The local live indexer/API and signed-in desktop/mobile home showed
+the observed $24.31 value with a 24h label; absent settled-market contexts stayed
+unknown. Frontend typecheck/lint, 1674 tests, generated-contract agreement and
+the exact Node 20 Turbopack build passed. No production policy was changed.
+
+### Full read-only catalog and native labels (October 12 follow-up)
+
+`hip4_read.catalogMode` supports `allowlist` (backward-compatible default) and
+`all`. In `all` mode the metadata response determines the catalog, not the old
+four-outcome sample. `catalogBatchSize` (default 500) bounds local writes per
+cycle, not total catalog size. Rotation eventually covers larger catalogs.
+Depth, trade repair and live subscriptions retain their separate policy budgets;
+metadata and 24h context ingestion still use only the two bulk requests.
+
+Admin authorization and environment checks remain mandatory. List requests use
+the existing environment/outcome index and bounded cursor pages. SSE checks that
+requested identities exist in the indexed catalog before cache access or hot
+demand. Disabling the feature or restoring `allowlist` remains reversible.
+
+Cold rows can show exact-coin `midPx` from the bulk contexts as explicitly
+indicative prices with observation expiry. They are not executable quotes,
+official results, or synthetic books; null midpoints remain unavailable.
+Native template fields map to readable competition/season, participant, award,
+policy-decision and IPO titles. Unknown templates use a readable identifier,
+never the serialized contract description. Full terms remain in detail.
+
+Local validation discovered 321 current provider outcomes (324 stored including
+three historical settled rows). Only local `hip4_local` enables `catalogMode: all`;
+production policy is unchanged. Synthetic PG16 coverage checks 120 outcomes,
+first/next/empty pages, continuation, exact SSE identities and bounded provider
+work. SQL plans also cover the unfiltered catalog using the existing index.
+The home feed pages remain provider-ordered; global ranking/search and financial
+capabilities are not implied by catalog coverage.
+
+Verification: 91 HIP tests, all four PG16 suites and full workspace
+build/typecheck/lint (47/47) passed. The live catalog contains no serialized
+field strings in event/market headings. Desktop first/next pages and 390px mobile
+cards/details were inspected through the real local session, including recorded
+trades/chart and 24h volume. The disposable database was removed after testing;
+the local indexer/API remain running. No production or trading action occurred.

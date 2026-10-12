@@ -9,7 +9,7 @@ import {
 export const HIP4_RECENT_TRADES_RESPONSE_BOUND = 2000;
 
 export type Hip4InfoRequest =
-  | { type: "outcomeMeta" | "spotMeta" }
+  | { type: "outcomeMeta" | "spotMeta" | "spotMetaAndAssetCtxs" }
   | { type: "settledOutcome"; outcome: number }
   | { type: "l2Book" | "recentTrades"; coin: string };
 
@@ -41,6 +41,7 @@ export function createHip4ReadClient(
       ![
         "outcomeMeta",
         "spotMeta",
+        "spotMetaAndAssetCtxs",
         "settledOutcome",
         "l2Book",
         "recentTrades",

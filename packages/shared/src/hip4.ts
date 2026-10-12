@@ -187,9 +187,17 @@ export const hip4ReadPolicySchema = z
     enabled: z.boolean().default(false),
     environment: hip4EnvironmentSchema.default("mainnet"),
     outcomeAllowlist: z.array(indexSchema).max(100).default([]),
+    catalogMode: z.enum(["allowlist", "all"]).default("allowlist"),
+    catalogBatchSize: z.number().int().min(1).max(5000).default(500),
     pollMs: z.number().int().min(1_000).max(3_600_000).default(60_000),
     bookMaxAgeMs: z.number().int().min(1_000).max(3_600_000).default(60_000),
     metadataMaxAgeMs: z
+      .number()
+      .int()
+      .min(1_000)
+      .max(86_400_000)
+      .default(300_000),
+    volumeMaxAgeMs: z
       .number()
       .int()
       .min(1_000)
@@ -238,6 +246,16 @@ export const hip4ReadPolicySchema = z
   );
 export type Hip4ReadPolicy = z.infer<typeof hip4ReadPolicySchema>;
 export const DEFAULT_HIP4_READ_POLICY = hip4ReadPolicySchema.parse({});
+
+export function hip4ReadOutcomeAllowed(
+  policy: Hip4ReadPolicy,
+  outcome: number,
+) {
+  return (
+    indexSchema.safeParse(outcome).success &&
+    (policy.catalogMode === "all" || policy.outcomeAllowlist.includes(outcome))
+  );
+}
 
 export const hip4ReadMarketSchema = z.object({
   version: z.literal(1),
@@ -303,6 +321,30 @@ export const hip4ReadMarketSchema = z.object({
     candles: z.literal("unavailable"),
   }),
   volumeUsd: z.null(),
+  // volumeUsd remains unavailable lifetime volume for older readers.
+  volume24h: z
+    .object({
+      usd: hip4DecimalSchema,
+      source: z.literal("spotMetaAndAssetCtxs"),
+      basis: z.literal("primary_outcome"),
+      coin: z.string(),
+      observedAt: z.string().datetime(),
+      validUntil: z.string().datetime(),
+    })
+    .nullable()
+    .optional(),
+  volumeAttempt: hip4AttemptSchema.nullable().optional(),
+  indicativePrices: z
+    .object({
+      source: z.literal("spotMetaAndAssetCtxs"),
+      prices: z
+        .array(z.object({ coin: z.string(), price: hip4ProbabilitySchema }))
+        .max(2),
+      observedAt: z.string().datetime(),
+      validUntil: z.string().datetime(),
+    })
+    .nullable()
+    .optional(),
   openInterest: z.null(),
   capabilities: z.object({
     read: z.literal(true),
@@ -356,6 +398,7 @@ export const hip4CandlePageSchema = z.object({
 });
 export type Hip4ReadMarket = z.infer<typeof hip4ReadMarketSchema>;
 export const hip4ReadResponseSchema = z.object({
+  catalogMode: z.enum(["allowlist", "all"]).optional(),
   version: z.literal(1),
   refreshAfterMs: z.number().int().positive(),
   policyRevision: z.string(),

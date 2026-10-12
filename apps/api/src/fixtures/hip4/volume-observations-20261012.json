@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "origin": "public-read-only-mainnet",
+  "observedDate": "2026-10-12",
+  "source": "https://api.hyperliquid.xyz/info",
+  "requests": ["spotMetaAndAssetCtxs", "recentTrades"],
+  "outcome": 11529,
+  "name": "Benfica",
+  "contexts": [
+    { "coin": "#115290", "dayNtlVlm": "24.30617", "dayBaseVlm": "31.0" },
+    { "coin": "#115291", "dayNtlVlm": "6.69383", "dayBaseVlm": "31.0" }
+  ],
+  "trades": [
+    {
+      "coin": "#115290",
+      "side": "B",
+      "px": "0.78407",
+      "sz": "31.0",
+      "time": 1791803099512,
+      "tid": 727547862233034
+    },
+    {
+      "coin": "#115291",
+      "side": "A",
+      "px": "0.21593",
+      "sz": "31.0",
+      "time": 1791803099512,
+      "tid": 87305306420169
+    }
+  ],
+  "semantics": {
+    "basis": "primary_outcome",
+    "primarySide": 0,
+    "usd24h": "24.30617",
+    "notLifetimeVolume": true,
+    "explanation": "The two streams represent the same execution with complementary prices, opposite directions and different tids. Do not sum side quantities, count two executions, or add both quote notionals into primary-book turnover.",
+    "firstPartyUi": "https://app.hyperliquid.xyz/assets/index-BBe39C6L.js",
+    "firstPartyConvention": "Outcome-list rows select token.outcomeTokens[0].dayNtlVlm. A selected side's trading view uses its own context.dayNtlVlm. Hunch market rows consistently use side 0, matching the canonical_primary_trades ledger."
+  }
+}

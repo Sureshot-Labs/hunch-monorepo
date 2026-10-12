@@ -18,7 +18,7 @@ export function hip4DescriptionFields(
   const entries = description.split("|").flatMap((part) => {
     const separator = part.indexOf(":");
     return separator > 0
-      ? [[part.slice(0, separator), part.slice(separator + 1)]]
+      ? [[part.slice(0, separator).trim(), part.slice(separator + 1).trim()]]
       : [];
   });
   return Object.fromEntries(entries);
@@ -26,7 +26,13 @@ export function hip4DescriptionFields(
 
 function expiryFromFields(fields: Record<string, string>): string | null {
   // Deadline is NOT proof that orders were closed or that an outcome settled.
-  const value = fields.expiry ?? fields.time ?? fields.resolutionDeadline;
+  const value =
+    fields.expiry ??
+    fields.time ??
+    fields.resolutionDeadline ??
+    fields.decisionDeadline ??
+    fields.listingDeadline ??
+    fields.dateTime;
   if (!value || !/^\d{8}(?:-\d{4})?$/.test(value)) return null;
   const dateOnly = value.length === 8;
   const iso = `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}T${dateOnly ? "00:00" : `${value.slice(9, 11)}:${value.slice(11, 13)}`}:00.000Z`;
@@ -45,14 +51,27 @@ function label(value: string, fields: Record<string, string>): string {
     .replace(/\{([^}]+)\}/g, (whole, field: string) => fields[field] ?? whole);
 }
 
-function title(
-  name: string,
-  fields: Record<string, string>,
-  description: string,
-): string {
+function title(name: string, fields: Record<string, string>): string {
   if (fields.participant) return fields.participant;
+  if (fields.candidate) return fields.candidate;
+  if (name === "template:awardOther") return "Other candidate";
+  if (name === "template:sportsContestDraw2") return "Draw";
+  if (name === "template:policyRateDecrease") return "Rate decrease";
+  if (name === "template:policyRateIncrease") return "Rate increase";
+  if (name === "template:policyRateNoChange") return "No rate change";
+  if (name === "template:companyIpoConfirmed" && fields.company)
+    return `${fields.company} · IPO confirmation`;
+  if (name === "template:companyIpoFirstDayMarketCap" && fields.company)
+    return [
+      `${fields.company} · IPO first-day market cap`,
+      fields.marketCapThresholdB ? `$${fields.marketCapThresholdB}B` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
   if (fields.participantA && fields.participantB) {
     const matchup = `${fields.participantA} vs ${fields.participantB}`;
+    if (fields.spread)
+      return `${matchup} · ${fields.participantA} ${fields.spread}`;
     return fields.line
       ? `${matchup} · ${fields.measure ?? "Total"} ${fields.line}`
       : matchup;
@@ -60,8 +79,33 @@ function title(
   const underlying = fields.underlying ?? fields.perp ?? fields.shortName;
   const threshold = fields.targetPrice ?? fields.threshold ?? fields.target;
   if (underlying && threshold) return `${underlying} · ${threshold}`;
+  if (fields.competition)
+    return [
+      fields.competition,
+      fields.season,
+      name === "template:sportsTournamentWinner" ? "Winner" : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  if (fields.award)
+    return [fields.award, fields.period].filter(Boolean).join(" · ");
+  if (fields.institution)
+    return [fields.institution, fields.decisionLabel]
+      .filter(Boolean)
+      .join(" · ");
+  if (underlying)
+    return [
+      underlying,
+      fields.period,
+      fields.index == null ? null : `Bucket ${fields.index}`,
+    ]
+      .filter(Boolean)
+      .join(" · ");
   if (!name.startsWith("template:")) return name;
-  return description || name.slice(9);
+  // Unknown templates retain a readable identifier. Serialized contract fields
+  // belong in the preserved description, never in a table/card heading.
+  const templateName = name.slice(9).replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+  return templateName.charAt(0).toUpperCase() + templateName.slice(1);
 }
 
 export function mapHip4Market(input: {
@@ -125,7 +169,7 @@ export function mapHip4Market(input: {
   const identity = hip4Identity(input.environment, outcome.outcome);
   const quote = spot.tokens.find((token) => token.name === outcome.quoteToken);
   const expiry = expiryFromFields(fields);
-  const marketTitle = title(outcome.name, fields, outcome.description);
+  const marketTitle = title(outcome.name, fields);
   const eventId = question
     ? `hyperliquid:${input.environment}:question:${question.question}`
     : identity.marketId;
@@ -141,11 +185,7 @@ export function mapHip4Market(input: {
     title:
       question?.fallbackOutcome === outcome.outcome ? "Other" : marketTitle,
     eventTitle: question
-      ? title(
-          question.name,
-          hip4DescriptionFields(question.description),
-          question.description,
-        )
+      ? title(question.name, hip4DescriptionFields(question.description))
       : marketTitle,
     description: [question?.description, outcome.description]
       .filter(Boolean)
@@ -206,6 +246,9 @@ export function mapHip4Market(input: {
       candles: "unavailable",
     },
     volumeUsd: null,
+    volume24h: input.previous?.market.volume24h ?? null,
+    volumeAttempt: input.previous?.market.volumeAttempt,
+    indicativePrices: input.previous?.market.indicativePrices ?? null,
     openInterest: null,
     capabilities: {
       read: true,
@@ -324,6 +367,30 @@ export function ageHip4Market(
 ): Hip4ReadMarket {
   return {
     ...market,
+    // Metadata freshness does not refresh either context observation.
+    volume24h: market.volume24h
+      ? {
+          ...market.volume24h,
+          validUntil: new Date(
+            Math.min(
+              Date.parse(market.volume24h.validUntil),
+              Date.parse(market.volume24h.observedAt) + policy.volumeMaxAgeMs,
+            ),
+          ).toISOString(),
+        }
+      : null,
+    indicativePrices: market.indicativePrices
+      ? {
+          ...market.indicativePrices,
+          validUntil: new Date(
+            Math.min(
+              Date.parse(market.indicativePrices.validUntil),
+              Date.parse(market.indicativePrices.observedAt) +
+                policy.bookMaxAgeMs,
+            ),
+          ).toISOString(),
+        }
+      : null,
     metadataValidUntil: new Date(
       Date.parse(market.fetchedAt) + policy.metadataMaxAgeMs,
     ).toISOString(),

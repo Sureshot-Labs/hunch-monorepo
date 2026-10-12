@@ -3,6 +3,7 @@ import {
   hip4TradeSchema,
   parseHip4Coin,
   hip4Identity,
+  hip4ReadOutcomeAllowed,
   type Hip4ReadPolicy,
   type Hip4ReadMarket,
 } from "@hunch/shared";
@@ -40,7 +41,7 @@ export function createHip4LiveBuffer(
     select: (outcomes: number[]) => {
       selected = new Set(
         outcomes
-          .filter((id) => policy.outcomeAllowlist.includes(id))
+          .filter((id) => hip4ReadOutcomeAllowed(policy, id))
           .slice(0, policy.maxLiveOutcomes),
       );
       // Keep the retiring hot set until its accepted observations and gaps

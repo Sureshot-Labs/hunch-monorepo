@@ -9,6 +9,7 @@ import {
   hip4TradePageSchema,
   hip4CandlePageSchema,
   hip4Identity,
+  hip4ReadOutcomeAllowed,
   type Hip4ReadMarket,
   type Hip4ReadPolicy,
 } from "@hunch/shared";
@@ -26,7 +27,7 @@ export type Hip4ReadDependencies = {
   policy: () => Promise<{ policy: Hip4ReadPolicy; revision: string }>;
   markets: (
     environment: Hip4ReadPolicy["environment"],
-    allowlist: number[],
+    allowlist: number[] | null,
     after: number,
     limit: number,
   ) => Promise<Hip4ReadMarket[]>;
@@ -77,13 +78,14 @@ export function registerHip4ReadRoutes(
           return reply.code(404).send({ error: "hip4_read_disabled" });
         const rows = await dependencies.markets(
           policy.environment,
-          policy.outcomeAllowlist,
+          policy.catalogMode === "all" ? null : policy.outcomeAllowlist,
           request.query.afterOutcome,
           policy.pageSize + 1,
         );
         const selected = rows.slice(0, policy.pageSize);
         return {
           version: 1 as const,
+          catalogMode: policy.catalogMode,
           refreshAfterMs: Math.floor(
             Math.min(
               policy.pollMs,
@@ -162,10 +164,12 @@ export function registerHip4ReadRoutes(
         try {
           const { policy, revision } = await dependencies.policy();
           const marketId = request.params.marketId;
-          const outcome = policy.outcomeAllowlist.find(
-            (id) => hip4Identity(policy.environment, id).marketId === marketId,
-          );
-          if (!policy.enabled || outcome === undefined)
+          const outcome = Number(marketId.split(":").at(-1));
+          if (
+            !policy.enabled ||
+            !hip4ReadOutcomeAllowed(policy, outcome) ||
+            hip4Identity(policy.environment, outcome).marketId !== marketId
+          )
             return reply.code(404).send({ error: "hip4_market_unavailable" });
           if (
             request.query.policyRevision &&
@@ -183,6 +187,7 @@ export function registerHip4ReadRoutes(
           if (kind === "detail")
             return {
               version: 1 as const,
+              catalogMode: policy.catalogMode,
               refreshAfterMs: Math.floor(
                 Math.min(
                   policy.pollMs,

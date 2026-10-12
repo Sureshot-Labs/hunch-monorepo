@@ -413,3 +413,107 @@ test("a null settlement check cannot refresh an absent outcome spec", () => {
     "stale",
   );
 });
+
+test("full catalog templates use public names instead of serialized condition fields", () => {
+  for (const [
+    questionName,
+    description,
+    outcomeName,
+    outcomeDescription,
+    expectedEvent,
+    expectedTitle,
+  ] of [
+    [
+      "template:sportsTournamentWinner",
+      "competition:NBA |season:2026/2027|resolutionDeadline:20270630-2359",
+      "template:sportsTournamentParticipant",
+      "participant:Chicago Bulls",
+      "NBA · 2026/2027 · Winner",
+      "Chicago Bulls",
+    ],
+    [
+      "template:companyIpoConfirmed",
+      "company:Anthropic|dateTime:20261031-2359",
+      "template:companyIpoConfirmed",
+      "",
+      "Anthropic · IPO confirmation",
+      "Anthropic · IPO confirmation",
+    ],
+    [
+      "template:companyIpoFirstDayMarketCap",
+      "company:Anthropic|listingDeadline:20261231-2359|marketCapThresholdB:2000",
+      "template:companyIpoFirstDayMarketCap",
+      "",
+      "Anthropic · IPO first-day market cap · $2000B",
+      "Anthropic · IPO first-day market cap · $2000B",
+    ],
+    [
+      "template:unrecognizedContract",
+      "unknown:value|officialSource:Source",
+      "template:unrecognizedContract",
+      "",
+      "Unrecognized Contract",
+      "Unrecognized Contract",
+    ],
+    [
+      "template:awardWinner",
+      "award:Ballon d'Or|period:2026",
+      "template:awardCandidate",
+      "candidate:Kylian Mbappe |subject:Kylian Mbappe (Real Madrid, France)",
+      "Ballon d'Or · 2026",
+      "Kylian Mbappe",
+    ],
+    [
+      "template:policyRateDecision",
+      "institution:Federal Reserve|decisionLabel:October 2026 FOMC|decisionDeadline:20261104-1800",
+      "template:policyRateNoChange",
+      "",
+      "Federal Reserve · October 2026 FOMC",
+      "No rate change",
+    ],
+    [
+      "template:sportsContestResult",
+      "participantA:Benfica|participantB:Celtic FC",
+      "template:sportsContestDraw2",
+      "",
+      "Benfica vs Celtic FC",
+      "Draw",
+    ],
+  ]) {
+    const spec = {
+      ...main.metadata.outcomes[0],
+      outcome: 8775,
+      name: outcomeName,
+      description: outcomeDescription,
+    };
+    const result = mapHip4Market({
+      ...main,
+      outcome: 8775,
+      settlement: null,
+      fetchedAt: date,
+      generation: "catalog-template",
+      metadata: {
+        ...main.metadata,
+        outcomes: [spec],
+        questions: [
+          {
+            question: 999,
+            name: questionName,
+            description,
+            fallbackOutcome: 999999,
+            namedOutcomes: [8775],
+          },
+        ],
+      },
+    });
+    assert.equal(result.market.eventTitle, expectedEvent);
+    assert.equal(result.market.title, expectedTitle);
+    if (questionName === "template:policyRateDecision")
+      assert.equal(result.market.expiry, "2026-11-04T18:00:00.000Z");
+    if (questionName === "template:companyIpoConfirmed")
+      assert.equal(result.market.expiry, "2026-10-31T23:59:00.000Z");
+    assert.ok(!result.market.eventTitle.includes("|"));
+    assert.ok(!result.market.title.includes("|"));
+    assert.ok(result.market.description.includes(description));
+  }
+});

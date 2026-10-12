@@ -1,6 +1,7 @@
 // @requires-db
 import assert from "node:assert/strict";
 import { createIntegrationTestPool } from "./test-database-target.js";
+import { HIP4_CATALOG_READ_SQL } from "./services/hip4-repository.js";
 import {
   hip4TradesReadSql,
   HIP4_CANDLES_READ_SQL,
@@ -32,6 +33,27 @@ try {
   await client.query("analyze hip4_read_markets");
   await client.query("analyze hip4_public_trades");
   await client.query("set local plan_cache_mode=force_generic_plan");
+  await client.query(
+    `prepare hip4_catalog_page(text,bigint,int) as ${HIP4_CATALOG_READ_SQL}`,
+  );
+  for (const after of [-1, 110000, 999999]) {
+    const result = await client.query(
+      `explain(analyze,buffers,format json) execute hip4_catalog_page('mainnet',${after},21)`,
+    );
+    const plan = result.rows[0]["QUERY PLAN"][0];
+    assert.match(JSON.stringify(plan), /Index/);
+    assert.doesNotMatch(
+      JSON.stringify(plan),
+      /"Node Type":"(?:Incremental )?Sort"/,
+    );
+    console.log(
+      JSON.stringify({
+        case: `catalog-${after}`,
+        executionMs: plan["Execution Time"],
+        plan: plan.Plan,
+      }),
+    );
+  }
   await client.query(`prepare hip4_page(text,bigint[],bigint,int) as select read_model from hip4_read_markets
     where environment=$1 and outcome=any($2) and outcome>$3 order by outcome limit $4`);
   for (const after of [-1, 100001, 999999]) {

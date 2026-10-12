@@ -184,3 +184,56 @@ test("disabled, unavailable and empty canary responses remain distinct", async (
   );
   await app.close();
 });
+
+test("full catalog uses indexed pagination without the canary allowlist; details remain environment-bound", async () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL("./fixtures/hip4/public-reads.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  const market = mapHip4Market({
+    ...fixture.observations[0],
+    outcome: 8775,
+    settlement: null,
+    fetchedAt: fixture.collectedAt,
+    generation: "test",
+  }).market;
+  const app = await buildHip4ContractApp();
+  const selections: (number[] | null)[] = [];
+  registerHip4ReadRoutes(app, {
+    authorize: async () => {},
+    policy: async () => ({
+      policy: {
+        ...DEFAULT_HIP4_READ_POLICY,
+        enabled: true,
+        catalogMode: "all",
+        pageSize: 1,
+      },
+      revision: "all",
+    }),
+    markets: async (_env, allowed, after) => {
+      selections.push(allowed);
+      return after < 8775 ? [market, { ...market, outcome: 8776 }] : [];
+    },
+  });
+  const first = await app.inject("/markets/hyperliquid/canary");
+  assert.equal(first.statusCode, 200);
+  assert.equal(first.json().nextOutcome, 8775);
+  assert.equal(selections[0], null);
+  assert.equal(
+    (await app.inject(`/markets/hyperliquid/canary/${market.marketId}`))
+      .statusCode,
+    200,
+  );
+  assert.deepEqual(selections[1], [8775]);
+  assert.equal(
+    (
+      await app.inject(
+        "/markets/hyperliquid/canary/hyperliquid:testnet:outcome:8775",
+      )
+    ).statusCode,
+    404,
+  );
+  await app.close();
+});
