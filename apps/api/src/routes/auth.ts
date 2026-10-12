@@ -425,6 +425,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           });
         }
 
+        let newAccount = false;
         let user: Awaited<
           ReturnType<typeof AuthService.createOrUpdateUserFromPrivy>
         >;
@@ -439,6 +440,9 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
             client,
             privyUser,
             claims,
+            (isNewAccount) => {
+              newAccount = isNewAccount;
+            },
           );
 
           const referralCode =
@@ -496,6 +500,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
           user: buildAuthUserPayload(user),
+          isNewUser: newAccount,
           session: {
             token: sessionToken,
             expiresAt: session.expiresAt.toISOString(),

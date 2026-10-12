@@ -734,13 +734,22 @@ export class PrivyService {
   }
 
   static getPrimaryEmailAddress(privyUser: PrivyUser): string | null {
-    for (const accountRaw of readLinkedAccounts(privyUser)) {
+    const linkedAccounts = readLinkedAccounts(privyUser);
+    for (const accountRaw of linkedAccounts) {
       if (!isRecord(accountRaw)) continue;
       if (readString(accountRaw, "type") !== "email") continue;
       const address = readString(accountRaw, "address");
       if (address) return address;
     }
-    return readTopLevelEmail(privyUser);
+    const primaryEmail = readTopLevelEmail(privyUser);
+    if (primaryEmail) return primaryEmail;
+    for (const accountRaw of linkedAccounts) {
+      if (!isRecord(accountRaw)) continue;
+      if (readString(accountRaw, "type") !== "google_oauth") continue;
+      const address = readString(accountRaw, "email");
+      if (address) return address;
+    }
+    return null;
   }
 
   static extractTelegramAccount(
