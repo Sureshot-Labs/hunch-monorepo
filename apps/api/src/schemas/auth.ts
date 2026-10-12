@@ -79,6 +79,7 @@ export const authPolymarketCredentialsInfoSchema = z.object({
 
 export const authPrivySuccessResponseSchema = z.object({
   user: authUserSchema,
+  isNewUser: z.boolean(),
   session: z.object({
     token: z.string(),
     expiresAt: z.string(),
