@@ -2,6 +2,12 @@
 import assert from "node:assert/strict";
 import { createIntegrationTestPool } from "./test-database-target.js";
 import {
+  hip4TradesReadSql,
+  HIP4_CANDLES_READ_SQL,
+  HIP4_COVERAGE_READ_SQL,
+  HIP4_OLDER_CANDLE_SQL,
+} from "./services/hip4-history.js";
+import {
   hip4DerivedDeleteSql,
   hip4DerivedReferencesSql,
 } from "./services/hip4-retention.js";
@@ -55,6 +61,63 @@ try {
       plan: tradePlan.rows[0]["QUERY PLAN"],
     }),
   );
+  await client.query(`insert into hip4_candles(market_id,bucket_ms,open_price,high_price,low_price,close_price,volume,trade_count,first_time_ms,first_tid,last_time_ms,last_tid)
+    select 'hip4-plan-100000',1790000000000+fixture_id::bigint*60000,0.5,0.6,0.4,0.5,10,1,1790000000000+fixture_id::bigint*60000,fixture_id,1790000000000+fixture_id::bigint*60000,fixture_id from generate_series(1,100000) fixture_id`);
+  await client.query(`insert into hip4_observation_intervals(market_id,bucket_ms,start_ms,end_ms,kind,reason)
+    select 'hip4-plan-100000',1790000000000+fixture_id::bigint*60000,1790000000000+fixture_id::bigint*60000,1790000000000+fixture_id::bigint*60000+1000,'observed','ws_partial' from generate_series(1,100000) fixture_id`);
+  await client.query("analyze hip4_candles");
+  await client.query("analyze hip4_observation_intervals");
+  await client.query(
+    `prepare hip4_trade_cursor(text,int,bigint,text,bigint) as ${hip4TradesReadSql(true)}`,
+  );
+  await client.query(
+    `prepare hip4_trade_first(text,int) as ${hip4TradesReadSql(false)}`,
+  );
+  await client.query(
+    `prepare hip4_candle_page(text,bigint,bigint,int) as ${HIP4_CANDLES_READ_SQL}`,
+  );
+  await client.query(
+    `prepare hip4_coverage_page(text,bigint,bigint,int) as ${HIP4_COVERAGE_READ_SQL}`,
+  );
+  await client.query(
+    `prepare hip4_older_candle(text,bigint) as ${HIP4_OLDER_CANDLE_SQL}`,
+  );
+  for (const market of ["hip4-plan-100000", "hip4-plan-100001"])
+    for (const edge of [1790001000000, 1790000000000, 1796000000001]) {
+      for (const [label, call] of [
+        [
+          "trades",
+          `hip4_trade_cursor('${market}',21,${edge},'#1000000',999999)`,
+        ],
+        ["trades-first", `hip4_trade_first('${market}',21)`],
+        [
+          "candles",
+          `hip4_candle_page('${market}',${edge - 86400000},${edge},121)`,
+        ],
+        [
+          "coverage",
+          `hip4_coverage_page('${market}',${edge - 86400000},${edge},121)`,
+        ],
+        ["older-candle", `hip4_older_candle('${market}',${edge})`],
+      ]) {
+        const result = await client.query(
+          `explain(analyze,buffers,format json) execute ${call}`,
+        );
+        const plan = result.rows[0]["QUERY PLAN"][0];
+        assert.match(JSON.stringify(plan), /Index/);
+        assert.doesNotMatch(
+          JSON.stringify(plan),
+          /"Node Type":"(?:Incremental )?Sort"/,
+        );
+        console.log(
+          JSON.stringify({
+            case: `${label}-${market}-${edge}`,
+            executionMs: plan["Execution Time"],
+            plan: plan.Plan,
+          }),
+        );
+      }
+    }
   await client.query(
     "create temp table candidate_pool(market_id text primary key) on commit drop",
   );
@@ -70,6 +133,8 @@ try {
     "create temp table tmp_market_retention_removable_markets as select market_id from candidate_pool",
   );
   await client.query(hip4DerivedDeleteSql("hip4_public_trades"));
+  await client.query(hip4DerivedDeleteSql("hip4_candles"));
+  await client.query(hip4DerivedDeleteSql("hip4_observation_intervals"));
   assert.equal(
     (await client.query(hip4DerivedDeleteSql("hip4_read_markets"))).rowCount,
     1,

@@ -4,10 +4,8 @@ import { Pool } from "pg";
 import { DEFAULT_HIP4_READ_POLICY } from "@hunch/shared";
 import { runHip4ReadCycle } from "./services/hip4-indexer.js";
 import { readHip4Policy } from "./services/hip4-repository.js";
-import {
-  createHip4Wakeup,
-  watchHip4Metadata,
-} from "./services/hip4-metadata-stream.js";
+import { startHip4LiveRuntime } from "./services/hip4-live-runtime.js";
+import { createHip4Wakeup } from "./services/hip4-metadata-stream.js";
 
 const argument = (name: string) => process.argv[process.argv.indexOf(name) + 1];
 if (
@@ -19,14 +17,13 @@ if (
   );
 const pool = new Pool({
   connectionString: argument("--database-url"),
-  max: 2,
+  max: 3,
   statement_timeout: 15_000,
 });
 let stopping = false;
 const shutdown = new AbortController();
 const wakeup = createHip4Wakeup();
-let stream: ReturnType<typeof watchHip4Metadata> | undefined;
-let streamRevision: string | undefined;
+let stream: ReturnType<typeof startHip4LiveRuntime> | undefined;
 process.on("SIGINT", () => {
   stopping = true;
   shutdown.abort();
@@ -39,7 +36,7 @@ const owner = await pool.connect();
 owner.on("error", () => {
   stopping = true;
   shutdown.abort();
-  stream?.close();
+  void stream?.close();
 });
 try {
   const result = await owner.query(
@@ -53,6 +50,14 @@ try {
   );
   if (!lock.rows[0].acquired)
     throw new Error("hip4_read_worker_already_running");
+  if (!process.argv.includes("--once"))
+    stream = startHip4LiveRuntime(
+      pool,
+      wakeup.request,
+      process.argv.includes("--redis-url")
+        ? argument("--redis-url")
+        : process.env.REDIS_URL,
+    );
   do {
     const start = Date.now();
     // Config errors disable requests, but a repaired policy recovers on the
@@ -60,14 +65,9 @@ try {
     let pollMs = DEFAULT_HIP4_READ_POLICY.pollMs;
     let minRefreshMs = DEFAULT_HIP4_READ_POLICY.minRefreshMs;
     try {
-      const { policy, revision } = await readHip4Policy(pool);
+      const { policy } = await readHip4Policy(pool);
       pollMs = policy.pollMs;
       minRefreshMs = policy.minRefreshMs;
-      if (streamRevision !== revision && !process.argv.includes("--once")) {
-        stream?.close();
-        stream = watchHip4Metadata(policy, wakeup.request);
-        streamRevision = revision;
-      }
       console.log(
         JSON.stringify({
           component: "hip4-read",
@@ -77,9 +77,6 @@ try {
         }),
       );
     } catch {
-      stream?.close();
-      stream = undefined;
-      streamRevision = undefined;
       if (process.argv.includes("--once")) process.exitCode = 1;
       console.error(
         JSON.stringify({
@@ -93,7 +90,7 @@ try {
     await wakeup.wait(Math.min(minRefreshMs, pollMs), pollMs, shutdown.signal);
   } while (!stopping);
 } finally {
-  stream?.close();
+  await stream?.close();
   owner.release(true); // closes the session and releases its advisory lock
   await pool.end();
 }

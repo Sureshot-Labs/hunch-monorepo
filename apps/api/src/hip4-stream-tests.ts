@@ -81,3 +81,59 @@ test("wake hints coalesce without bypassing minimum interval, and shutdown inter
   shutdown.abort();
   await idle;
 });
+test("one connection carries both books and primary trades, repairs reconnect and unsubscribes hot changes", async () => {
+  const sockets: FakeSocket[] = [];
+  const gaps: string[] = [];
+  const data: string[] = [];
+  const stream = watchHip4Metadata(
+    {
+      ...DEFAULT_HIP4_READ_POLICY,
+      enabled: true,
+      outcomeAllowlist: [1, 2],
+      maxLiveOutcomes: 1,
+      streamRetryMs: 1,
+    },
+    () => {},
+    () => {
+      const socket = new FakeSocket();
+      socket.readyState = 0;
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    },
+    {
+      data: (channel) => data.push(channel),
+      gap: (reason) => gaps.push(reason),
+    },
+  );
+  stream.setOutcomes([1, 2, 999]);
+  sockets[0].readyState = 1;
+  sockets[0].emit("open");
+  assert.deepEqual(
+    sockets[0].sent.map((s) => JSON.parse(s).subscription),
+    [
+      { type: "outcomeMetaUpdates" },
+      { type: "l2Book", coin: "#10" },
+      { type: "l2Book", coin: "#11" },
+      { type: "trades", coin: "#10" },
+    ],
+  );
+  sockets[0].emit(
+    "message",
+    Buffer.from(JSON.stringify({ channel: "trades", data: [] })),
+  );
+  assert.deepEqual(data, ["trades"]);
+  stream.setOutcomes([2]);
+  assert.equal(
+    sockets[0].sent
+      .map((s) => JSON.parse(s))
+      .filter((row) => row.method === "unsubscribe").length,
+    3,
+  );
+  sockets[0].terminate();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  sockets[1].emit("open");
+  assert.equal(sockets[1].sent.length, 4);
+  assert.equal(JSON.parse(sockets[1].sent[3]).subscription.coin, "#20");
+  assert.ok(gaps.includes("disconnect"));
+  stream.close();
+});

@@ -764,7 +764,7 @@ export async function queryBatchSummary(
 ): Promise<BatchSummaryRow[]> {
   const options = await protectedRefOptions(client);
   const hip4Derived = (await relationExists(client, "public.hip4_read_markets"))
-    ? `${hip4DerivedReferencesSql("candidate_pool")} union all`
+    ? `${hip4DerivedReferencesSql("candidate_pool", await relationExists(client, "public.hip4_candles"))} union all`
     : "";
   const telegramTradeIntentsEphemeralDerived =
     options.includeTelegramTradeIntents
@@ -1197,7 +1197,13 @@ async function materializeDeletionSet(
 async function runMarketDeletes(client: PoolClient): Promise<DeleteCountRow[]> {
   const counts: DeleteCountRow[] = [];
   if (await relationExists(client, "public.hip4_read_markets")) {
-    for (const table of ["hip4_public_trades", "hip4_read_markets"] as const) {
+    for (const table of [
+      "hip4_candles",
+      "hip4_observation_intervals",
+      "hip4_public_trades",
+      "hip4_read_markets",
+    ] as const) {
+      if (!(await relationExists(client, `public.${table}`))) continue;
       counts.push(
         await deleteAndCount(client, table, hip4DerivedDeleteSql(table)),
       );

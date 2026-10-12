@@ -243,8 +243,19 @@ try {
       throw new Error("provider unavailable");
     }),
   );
+  const afterFailure = await readHip4StoredMarket(pool, "mainnet", 8775);
+  assert.equal(
+    afterFailure?.market.metadataAttempt?.result,
+    "invalid_response",
+  );
   assert.deepEqual(
-    await readHip4StoredMarket(pool, "mainnet", 8775),
+    afterFailure && {
+      ...afterFailure,
+      market: {
+        ...afterFailure.market,
+        metadataAttempt: beforeFailure?.market.metadataAttempt,
+      },
+    },
     beforeFailure,
   );
   await pool.query(

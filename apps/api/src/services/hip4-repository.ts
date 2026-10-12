@@ -5,11 +5,18 @@ import {
   hip4BinaryPayout,
   hip4ReadPolicySchema,
   hip4TradeSchema,
+  hip4RawSnapshotSchema,
   type Hip4Environment,
   type Hip4ReadMarket,
+  type Hip4Attempt,
 } from "@hunch/shared";
 import type { Pool } from "pg";
 import type { z } from "zod";
+import {
+  insertHip4Trades,
+  insertHip4Intervals,
+  type Hip4Interval,
+} from "./hip4-history.js";
 
 export async function readHip4Policy(db: Pick<Pool, "query">) {
   const row = await fetchActiveRuntimePolicy(db, "hip4_read");
@@ -60,6 +67,43 @@ export async function advanceHip4Cursor(
   );
 }
 
+export async function recordHip4MetadataFailure(
+  pool: Pool,
+  environment: Hip4Environment,
+  outcomes: number[],
+  attempt: Hip4Attempt,
+) {
+  const client = await pool.connect();
+  let discard = false;
+  try {
+    await client.query("begin");
+    for (const outcome of [...new Set(outcomes)].sort((a, b) => a - b)) {
+      const marketId = hip4Identity(environment, outcome).marketId;
+      // Same serialization boundary as REST/WS snapshot writes. A direct
+      // jsonb update can otherwise be lost after a concurrent reader's SELECT.
+      await client.query(
+        "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [marketId],
+      );
+      await client.query(
+        `update hip4_read_markets set read_model=jsonb_set(read_model,'{metadataAttempt}',$2::jsonb)
+         where market_id=$1 and coalesce(read_model->'metadataAttempt'->>'at','') < $3`,
+        [marketId, JSON.stringify(attempt), attempt.at],
+      );
+    }
+    await client.query("commit");
+  } catch (error) {
+    try {
+      await client.query("rollback");
+    } catch {
+      discard = true;
+    }
+    throw error;
+  } finally {
+    client.release(discard);
+  }
+}
+
 export async function readHip4Cursor(
   db: Pick<Pool, "query">,
   environment: Hip4Environment,
@@ -100,8 +144,23 @@ export async function readHip4StoredMarket(
   );
   const row = result.rows[0];
   return row
-    ? { market: hip4ReadMarketSchema.parse(row.read_model), raw: row.raw }
+    ? {
+        market: hip4ReadMarketSchema.parse(row.read_model),
+        raw: hip4RawSnapshotSchema.parse(row.raw),
+      }
     : null;
+}
+
+export async function readHip4SettledOutcomes(
+  db: Pick<Pool, "query">,
+  environment: Hip4Environment,
+  allowlist: number[],
+): Promise<number[]> {
+  const result = await db.query(
+    "select outcome from hip4_read_markets where environment=$1 and outcome=any($2::bigint[]) and read_model->>'status'='settled'",
+    [environment, allowlist],
+  );
+  return result.rows.map((row) => Number(row.outcome));
 }
 
 export async function persistHip4Market(
@@ -110,6 +169,8 @@ export async function persistHip4Market(
     market: Hip4ReadMarket;
     raw: unknown;
     trades: z.infer<typeof hip4TradeSchema>[];
+    advanceCursor?: boolean;
+    intervals?: Hip4Interval[];
   },
 ): Promise<boolean> {
   const identity = hip4Identity(input.market.environment, input.market.outcome);
@@ -137,15 +198,98 @@ export async function persistHip4Market(
       input.market.environment,
       input.market.outcome,
     );
-    if (
+    const olderMetadata =
       stored &&
-      Date.parse(stored.market.fetchedAt) > Date.parse(input.market.fetchedAt)
-    ) {
-      await client.query("rollback");
-      return false;
+      Date.parse(stored.market.fetchedAt) > Date.parse(input.market.fetchedAt);
+    let market = hip4ReadMarketSchema.parse(
+      olderMetadata ? stored.market : input.market,
+    );
+    let raw = olderMetadata ? stored.raw : input.raw;
+    if (stored) {
+      const latestAttempt = <T extends { at: string }>(
+        previous: T | null | undefined,
+        incoming: T | null | undefined,
+      ) => ((previous?.at ?? "") >= (incoming?.at ?? "") ? previous : incoming);
+      market.metadataAttempt = latestAttempt(
+        stored.market.metadataAttempt,
+        input.market.metadataAttempt,
+      );
+      market.settlementAttempt = latestAttempt(
+        stored.market.settlementAttempt,
+        input.market.settlementAttempt,
+      );
+      const previous = stored.market.coverage;
+      const incoming = input.market.coverage;
+      const observed =
+        (previous.tradeObservedAt ?? "") >= (incoming.tradeObservedAt ?? "")
+          ? previous
+          : incoming;
+      market.coverage = {
+        ...market.coverage,
+        trades: observed.trades,
+        tradeObservedAt: observed.tradeObservedAt,
+        tradeWindowStart: observed.tradeWindowStart,
+        tradeWindowEnd: observed.tradeWindowEnd,
+        tradeAttempt: latestAttempt(
+          previous.tradeAttempt,
+          incoming.tradeAttempt,
+        ),
+      };
     }
-    let market = hip4ReadMarketSchema.parse(input.market);
-    if (stored?.market.settlement && !market.settlement) {
+    // Metadata age cannot order quotes. Serialize per-side provider times under
+    // the same lock as publication (REST and WS may race). Ties are idempotent.
+    if (stored)
+      market.sides = market.sides.map((side, index) => {
+        const incoming = input.market.sides[index];
+        const previous = stored.market.sides[index];
+        const winner =
+          stored.market.settlement ||
+          (previous.bookAt &&
+            (!incoming.bookAt || previous.bookAt >= incoming.bookAt))
+            ? previous
+            : incoming;
+        const attempt =
+          (previous.bookAttempt?.at ?? "") > (incoming.bookAttempt?.at ?? "")
+            ? previous.bookAttempt
+            : incoming.bookAttempt;
+        return {
+          ...side,
+          bid: winner.bid,
+          ask: winner.ask,
+          bookAt: winner.bookAt,
+          bookState: winner.bookState,
+          bookAttempt: attempt,
+        };
+      });
+    if (
+      input.market.settlement &&
+      (!stored?.market.settlement ||
+        (input.market.settlement.checkedAt ??
+          input.market.settlement.observedAt) >=
+          (stored.market.settlement.checkedAt ??
+            stored.market.settlement.observedAt))
+    ) {
+      market = {
+        ...market,
+        settlement: input.market.settlement,
+        status: "settled",
+        sides: market.sides.map((side, index) => ({
+          ...side,
+          payout: input.market.sides[index].payout,
+        })),
+      };
+      raw = {
+        ...hip4RawSnapshotSchema.parse(raw),
+        settlement: hip4RawSnapshotSchema.parse(input.raw).settlement,
+      };
+    }
+    if (
+      stored?.market.settlement &&
+      (!market.settlement ||
+        (stored.market.settlement.checkedAt ??
+          stored.market.settlement.observedAt) >
+          (market.settlement.checkedAt ?? market.settlement.observedAt))
+    ) {
       market = {
         ...market,
         status: "settled",
@@ -155,6 +299,13 @@ export async function persistHip4Market(
           payout: stored.market.sides[index].payout,
         })),
       };
+      raw = {
+        ...hip4RawSnapshotSchema.parse(raw),
+        settlement: stored.raw.settlement,
+      };
+    }
+    if (stored?.market.settlement && market.settlement) {
+      market.settlement.observedAt = stored.market.settlement.observedAt;
     }
     const status =
       market.status === "settled"
@@ -244,25 +395,15 @@ export async function persistHip4Market(
         market.fetchedAt,
         market.generation,
         JSON.stringify(market),
-        JSON.stringify(input.raw),
+        JSON.stringify(raw),
       ],
     );
-    const trades = input.trades.map((tradeInput) => {
-      const trade = hip4TradeSchema.parse(tradeInput);
-      if (!market.sides.some((side) => side.coin === trade.coin))
-        throw new Error("trade_identity_mismatch");
-      return { ...trade, time_ms: trade.time };
-    });
-    await client.query(
-      `insert into hip4_public_trades(environment,coin,time_ms,tid,market_id,side,price,size,transaction_hash)
-      select $1, trade_row.coin, trade_row.time_ms, trade_row.tid, $2, trade_row.side, trade_row.px::numeric, trade_row.sz::numeric, trade_row.hash
-      from jsonb_to_recordset($3::jsonb) as trade_row(coin text, time_ms bigint, tid bigint, side text, px text, sz text, hash text)
-      on conflict (environment,coin,time_ms,tid) do nothing`,
-      [market.environment, market.marketId, JSON.stringify(trades)],
-    );
-    await advanceHip4Cursor(client, market.environment, market.outcome);
+    await insertHip4Trades(client, market, input.trades);
+    await insertHip4Intervals(client, market.marketId, input.intervals ?? []);
+    if (input.advanceCursor !== false)
+      await advanceHip4Cursor(client, market.environment, market.outcome);
     await client.query("commit");
-    return true;
+    return !olderMetadata;
   } catch (error) {
     try {
       await client.query("rollback");

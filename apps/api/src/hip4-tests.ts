@@ -185,3 +185,144 @@ test("canary is off by default and policy does not admit financial switches", ()
     hip4ReadPolicySchema.parse({ requestWeightPerMinute: 1201 }),
   );
 });
+
+test("settled and incomplete question membership retain confirmed contract context", () => {
+  const previous = mapped(11117);
+  const metadata = structuredClone(main.metadata);
+  metadata.outcomes = metadata.outcomes.filter(
+    (row: { outcome: number }) => row.outcome !== 11117,
+  );
+  const question = metadata.questions.find(
+    (row: { question: number }) => row.question === 418,
+  );
+  question.namedOutcomes = question.namedOutcomes.filter(
+    (id: number) => id !== 11117,
+  );
+  question.settledNamedOutcomes = [11117];
+  const settlement = {
+    spec: previous.raw.outcome,
+    settleFraction: "1",
+    details: "official",
+  };
+  for (const partial of [false, true]) {
+    if (partial) question.settledNamedOutcomes = [];
+    const next = mapHip4Market({
+      ...main,
+      metadata,
+      previous,
+      outcome: 11117,
+      fetchedAt: date,
+      generation: "next",
+      settlement,
+    });
+    assert.equal(next.market.eventId, previous.market.eventId);
+    assert.equal(next.market.expiry, previous.market.expiry);
+    assert.equal(next.market.description, previous.market.description);
+  }
+  question.settledNamedOutcomes = [11117];
+  question.description = "";
+  const partial = mapHip4Market({
+    ...main,
+    metadata,
+    previous,
+    outcome: 11117,
+    fetchedAt: date,
+    generation: "partial",
+    settlement,
+  });
+  assert.equal(partial.market.expiry, previous.market.expiry);
+  assert.equal(partial.market.description, previous.market.description);
+});
+test("mapping preserves book order and cached settlement provenance", () => {
+  const previous = mapped();
+  const now = Date.parse(date);
+  const book = {
+    coin: previous.market.sides[0].coin,
+    time: now,
+    levels: [[{ px: "0.6", sz: "1", n: 1 }], []],
+  };
+  previous.market = applyHip4Book(previous.market, 0, book, now, 1000);
+  const next = mapHip4Market({
+    ...main,
+    outcome: 8775,
+    previous,
+    settlement: null,
+    fetchedAt: new Date(now + 100).toISOString(),
+    generation: "new",
+  });
+  for (const time of [now - 4000, now]) {
+    const result = applyHip4Book(
+      next.market,
+      0,
+      { ...book, time, levels: [[{ px: "0.4", sz: "1", n: 1 }], []] },
+      now + 100,
+      1000,
+    );
+    assert.equal(result.sides[0].bid, "0.6");
+    assert.equal(result.sides[0].bookAttempt?.result, "stale_observation");
+  }
+  const settled = mapHip4Market({
+    ...main,
+    outcome: 95,
+    fetchedAt: date,
+    generation: "one",
+  });
+  const cached = mapHip4Market({
+    ...main,
+    outcome: 95,
+    previous: settled,
+    fetchedAt: new Date(now + 60000).toISOString(),
+    generation: "two",
+  });
+  assert.equal(
+    cached.market.settlement?.observedAt,
+    settled.market.settlement?.observedAt,
+  );
+  assert.equal(
+    cached.market.settlement?.checkedAt,
+    settled.market.settlement?.checkedAt,
+  );
+  assert.equal(cached.market.fetchedAt, settled.market.fetchedAt);
+});
+test("metadata pair budget minimum, freshness deadlines and policy recovery", () => {
+  assert.throws(() =>
+    hip4ReadPolicySchema.parse({ requestWeightPerMinute: 20 }),
+  );
+  for (const budget of [40, 42, 600])
+    assert.equal(
+      hip4ReadPolicySchema.parse({ requestWeightPerMinute: budget })
+        .requestWeightPerMinute,
+      budget,
+    );
+  const aged = ageHip4Market(
+    mapped().market,
+    Date.parse(date) + 300001,
+    DEFAULT_HIP4_READ_POLICY,
+  );
+  assert.equal(aged.coverage.metadata, "stale");
+  assert.equal(
+    aged.metadataValidUntil,
+    new Date(Date.parse(date) + 300000).toISOString(),
+  );
+});
+test("a null settlement check cannot refresh an absent outcome spec", () => {
+  const previous = mapped();
+  const later = new Date(Date.parse(date) + 600000).toISOString();
+  const missing = mapHip4Market({
+    ...main,
+    metadata: { ...main.metadata, outcomes: [] },
+    outcome: 8775,
+    previous,
+    settlement: null,
+    settlementCheckedAt: later,
+    fetchedAt: later,
+    generation: "null-settlement-check",
+  });
+  assert.equal(missing.market.fetchedAt, previous.market.fetchedAt);
+  assert.equal(missing.market.generation, previous.market.generation);
+  assert.equal(
+    ageHip4Market(missing.market, Date.parse(later), DEFAULT_HIP4_READ_POLICY)
+      .coverage.metadata,
+    "stale",
+  );
+});

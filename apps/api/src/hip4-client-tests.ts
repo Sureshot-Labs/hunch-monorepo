@@ -59,3 +59,26 @@ test("bounded cursor rotation covers old/missing outcomes without starving later
   assert.deepEqual(selectHip4Outcomes(policy, 7), [9, 2]);
   assert.deepEqual(selectHip4Outcomes(policy, 9), [2, 7]);
 });
+test("processing limit cannot reduce provider admission for a 1000-row response", async () => {
+  const weights: number[] = [];
+  const read = createHip4ReadClient(
+    { ...DEFAULT_HIP4_READ_POLICY, maxTradesPerResponse: 1 },
+    async (weight) => {
+      weights.push(weight);
+      return true;
+    },
+    async (_url, options) => {
+      assert.deepEqual(JSON.parse(String(options?.body)), {
+        type: "recentTrades",
+        coin: "#87750",
+      });
+      return Response.json(Array(1000).fill({}));
+    },
+  );
+  assert.equal(
+    ((await read({ type: "recentTrades", coin: "#87750" })) as unknown[])
+      .length,
+    1000,
+  );
+  assert.equal(weights[0], 120);
+});

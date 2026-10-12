@@ -1,4 +1,9 @@
 import type { FastifyPluginAsync } from "fastify";
+import { isHip4CanaryId } from "@hunch/shared";
+import { createAdminMiddleware } from "../auth.js";
+import { pool } from "../db.js";
+import { readHip4Policy } from "../services/hip4-repository.js";
+import { hip4StreamTokensAllowed } from "../services/hip4-stream-access.js";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { env } from "../env.js";
 import { getRedisStatus } from "../redis.js";
@@ -24,6 +29,13 @@ import {
  */
 export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+  const authorizeHip = createAdminMiddleware({
+    requiredAdminPermission: "analytics:read",
+  });
+  const contexts = new WeakMap<
+    object,
+    Awaited<ReturnType<typeof readHip4Policy>>
+  >();
 
   const parseJson = (raw: string): unknown | null => {
     try {
@@ -35,7 +47,23 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
 
   z.get(
     "/prices/stream",
-    { schema: { querystring: pricesStreamQuerySchema } },
+    {
+      schema: { querystring: pricesStreamQuerySchema },
+      preHandler: async (request, reply) => {
+        if (!request.query.token_id.some(isHip4CanaryId)) return;
+        reply.header("Cache-Control", "private, no-store");
+        await authorizeHip(request, reply);
+        if (reply.sent) return;
+        try {
+          const context = await readHip4Policy(pool);
+          if (!hip4StreamTokensAllowed(request.query.token_id, context.policy))
+            return reply.code(404).send({ error: "hip4_stream_unavailable" });
+          contexts.set(request, context);
+        } catch {
+          return reply.code(503).send({ error: "hip4_read_unavailable" });
+        }
+      },
+    },
     async (request, reply) => {
       const clientIp = resolveSecurityClientIp(request);
       const maxDurationSec = Math.max(30, env.pricesSseMaxDurationSec);
@@ -84,6 +112,9 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       let hb: NodeJS.Timeout | null = null;
       let sticky: NodeJS.Timeout | null = null;
       let sessionTimeout: NodeJS.Timeout | null = null;
+      let hipPolicyTimer: NodeJS.Timeout | null = null;
+      let hipAllowed = true;
+      const hipContext = contexts.get(request);
       let unsubscribeTicks: (() => void) | null = null;
       let unsubscribeMarketState: (() => void) | null = null;
       let unsubscribeMarketUpdate: (() => void) | null = null;
@@ -94,6 +125,7 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
         if (hb) clearInterval(hb);
         if (sticky) clearInterval(sticky);
         if (sessionTimeout) clearTimeout(sessionTimeout);
+        if (hipPolicyTimer) clearTimeout(hipPolicyTimer);
         unsubscribeTicks?.();
         unsubscribeMarketState?.();
         unsubscribeMarketUpdate?.();
@@ -109,13 +141,16 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
 
       // SSE headers
       reply.raw.setHeader("Content-Type", "text/event-stream");
-      reply.raw.setHeader("Cache-Control", "no-cache");
+      reply.raw.setHeader(
+        "Cache-Control",
+        hipContext ? "private, no-store" : "no-cache",
+      );
       reply.raw.setHeader("Connection", "keep-alive");
       reply.raw.flushHeaders();
 
       let writable = true;
       const send = (evt: string, data: unknown) => {
-        if (request.raw.destroyed) return;
+        if (request.raw.destroyed || !hipAllowed) return;
         if (!writable) return;
         try {
           const ok =
@@ -131,6 +166,31 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
           /* client closed mid-write */
         }
       };
+
+      if (hipContext) {
+        const checkHipPolicy = async () => {
+          try {
+            const latest = await readHip4Policy(pool);
+            hipAllowed =
+              latest.revision === hipContext.revision &&
+              hip4StreamTokensAllowed(ids, latest.policy);
+          } catch {
+            hipAllowed = false;
+          }
+          if (!hipAllowed) {
+            reply.raw.end();
+            cleanup();
+          } else if (!cleanedUp)
+            hipPolicyTimer = setTimeout(
+              () => void checkHipPolicy(),
+              hipContext.policy.policyCheckMs,
+            );
+        };
+        hipPolicyTimer = setTimeout(
+          () => void checkHipPolicy(),
+          hipContext.policy.policyCheckMs,
+        );
+      }
 
       // Send current cached tops/snapshots if present.
       await Promise.all(
@@ -211,6 +271,11 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       } catch (err) {
         request.log.warn({ err }, "market-update SSE subscribe failed");
       }
+
+      // Flush a body byte after subscriptions are ready. With an empty cache,
+      // streaming proxies otherwise wait for the first 20-second heartbeat
+      // before the browser observes an open canary connection.
+      if (hipContext && !cleanedUp) reply.raw.write(":hip4-connected\n\n");
 
       // heartbeat so proxies don’t kill idle streams
       hb = setInterval(() => {

@@ -1267,6 +1267,9 @@ tests are claimed by this documentation revision.
 
 ## 13. Implemented passive slice — October 11–12, 2026
 
+Historical record of the first slice. Section 14 supersedes its read/live/history
+coverage and acceptance status; its financial exclusions still apply.
+
 This is an implementation record, distinct from the earlier documentation review.
 P0's public read-contract foundation and a passive P1 canary are implemented in
 the working tree. This is **not** financial activation or a complete P0 financial
@@ -1384,3 +1387,171 @@ Reproduce DB suites only with explicit `DATABASE_URL` and matching
 commands must use `--database-url` and `--expect-database`; never rely on a shell
 URL override alone. Financial calls, production backfills and rollout still
 require separate authorization. See the frontend record for its build limitation.
+
+## 14. Read-only P1 completion patch — October 12, 2026
+
+Implemented on `hip-next`, without commit/push/deploy or production policy writes.
+This is read-only infrastructure, **not** completion of financial P0 or P2–P7.
+
+### Correctness and recovery
+
+- Question membership includes named, settled and fallback members. Missing
+  membership and incomplete same-ID question context retain the last confirmed
+  description/expiry. Cached specs do not refresh metadata provenance.
+- REST and WS publication merge book observations independently per side under
+  the market transaction lock. Older/equal provider timestamps cannot overwrite
+  an accepted book. Trade observations, attempts and official settlement checks
+  are also ordered independently of metadata time. Settlement `observedAt`
+  remains its first observation; `checkedAt` only advances on a provider check.
+- Metadata pair admission is atomic (40 weight units); valid policies start at 40. Optional book/trade failures no longer discard valid metadata. Diagnostics
+  distinguish admission denial, HTTP/transport/timeout, invalid identity/payload,
+  stale observations and local trade truncation. Last-good values and last
+  attempts are separate; ordinary later cycles recover after policy repair.
+- `recentTrades` admission no longer depends on the processing limit: reserve
+  120 units for the supported 2,000-row response envelope. The official weight
+  rule is 20 plus one unit per 20 returned items. This envelope is conservative,
+  **not a documented provider maximum**; a response exceeding it is a protocol
+  drift diagnostic. Do not use the processing cap as a provider request limit.
+  [Official rate limits](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits)
+
+### Bounded live path
+
+One existing Hyperliquid socket carries metadata hints, L2 for both sides and
+primary-side trades. Admin hot demand selects within the effective allowlist;
+settled markets do not consume hot slots. REST bootstraps and repairs reconnects,
+overflow and invalid messages. No connection per market is created.
+
+New `hip4_read` defaults: `liveEnabled:true` (still subordinate to `enabled:false`),
+`maxLiveOutcomes:6`, `streamQueueSize:2000`, `streamFlushMs:1000`,
+`subscriptionRefreshMs:15000`, `policyCheckMs:5000`, `hotDemandMaxAgeMs:120000`,
+`historyMaxRangeMs:86400000`, `candlePageSize:120`. Subscription rotation is
+validated against its maximum hot-set size to bound churn. Existing provider
+retry/heartbeat and shared SSE resource limits remain active.
+
+The sidecar accepts optional explicit `--redis-url` (or its own `REDIS_URL`).
+Without Redis it still indexes but cannot fan out or read hot demand. Redis
+operations have deadlines. DB commit precedes publication; each idle live flush
+re-reads committed snapshots to repair lost publication. Failed flushes retain
+a gap origin, wake REST repair, and reconnect on the next normal policy check.
+Disable closes HIP subscriptions and prevents new provider requests; it does
+not delete stored history. Revision/environment changes rebuild the live context.
+
+Existing `/prices/stream` checks `analytics:read` and the effective allowlist for
+canary token IDs before cache reads, hot marking or subscribing. Its policy timer
+closes invalidated canary streams. Non-HIP streams retain their existing access
+rules. Canary response `streamTokenIds` respects the existing SSE token limit.
+
+### History, migration and compatibility
+
+- Protected prefix `/markets/hyperliquid/canary`: list, `/:marketId`,
+  `/:marketId/trades`, `/:marketId/candles`. Optional history `policyRevision`
+  rejects stale context with 409; market IDs bind environment/outcome/allowlist.
+- Trade cursor is versioned and market-bound, ordered by the full descending
+  `(time_ms, coin, tid)` tuple. Prices/quantities stay decimal strings.
+- `0282_hip4_read_history.sql` adds minute OHLC/share-volume aggregates and
+  bounded minute observation/gap buckets. Only newly inserted canonical primary
+  trades contribute: replay cannot double volume, late/tied trades order OHLC
+  correctly. `0283_hip4_trade_cursor_index.sql` builds the full-tuple index
+  concurrently. Published 0281 is unchanged. Both derived tables participate in
+  retention counts/deletion and cascade with the read market.
+- History explicitly says `source:canonical_primary_trades`, `complete:false`,
+  and reports truncated coverage. Missing intervals are unknown, never synthetic
+  zero-volume candles. No opposite-side trades are invented. Existing pre-0282
+  trades remain readable; this patch does not backfill their missing candles.
+- The old snapshot `coverage.candles:"unavailable"` refers to ordinary unified
+  candle availability, kept for old-reader compatibility. The new protected
+  candles response separately exposes partial native-ledger history. Ranking,
+  aggregate USD volume and OI remain unavailable. Public discovery stays off.
+
+### Verification and acceptance limits
+
+- HIP protocol/client/route/stream tests: 27 passing; adjacent admin-auth,
+  admin-route, hot selection and trading-static suites: 10/10 files passing.
+- Fresh disposable PostgreSQL 16.2: every migration through 0283 applied;
+  original and new P1 integration suites pass, including concurrent budget
+  admission, metadata/quote ordering, frozen settlement provenance, replay/late
+  candles, full-key pagination, gaps, policy disable and commit-before-publish.
+- Generic/sparse/resumed/empty SQL plans execute against 20,000 markets,
+  1,000,000 trades and 100,000 candle/coverage rows using indexes. Retention SQL
+  and deletion execute on disposable fixtures. Measured timings are local only.
+- Full workspace build: 16/16; workspace typecheck/lint: 31/31 tasks passing.
+- One authorized public read-only WS probe: four subscriptions, four book
+  messages and 30 primary trades in eight seconds, no invalid payloads or
+  subscription errors. No accounts, credentials or financial actions used.
+- Browser → real Next proxy → actual backend admin middleware → isolated
+  PG16/Redis: anonymous 401, member 403, admin list/detail/trades/candles 200,
+  wrong environment 404, actual SSE open/tick. This used synthetic sessions,
+  not a real Privy sign-in. Desktop/mobile fixture visuals were checked twice.
+- Sequential author reviews corrected additional component-ordering races,
+  settled hot-slot starvation, flush-gap recovery and empty-cache SSE startup.
+  These initial passes were not independent-agent approvals. See section 15
+  below for subsequent independent review, and frontend section 15 for the
+  exact Turbopack gate and remaining full-app authenticated acceptance.
+
+Reproduce with `pnpm -F api test:hip4` and `pnpm -F api test:hip4:db`; use a clean
+disposable PG16 target with matching `DATABASE_URL` / `HUNCH_TEST_EXPECT_DATABASE`.
+For migrations always pass explicit `--database-url` and `--expect-database`.
+The optional `hip4-browser-fixture.ts` is a standalone loopback-only acceptance
+harness, not registered in the deployed API. Run with explicit disposable PG16
+and Redis URLs, Next proxy target `http://127.0.0.1:3015`, frontend port 3014.
+It creates only synthetic test users/policy/market observations. Never expose it
+or run it against an ordinary local database. Cleanup the disposable services.
+
+## 15. Independent implementation review — October 12, 2026
+
+Three read-only reviewers started without conversation history. They covered
+backend core/SQL, live/auth/recovery, and frontend/contracts respectively,
+including committed HIP changes from each branch merge-base and all modified
+and untracked implementation files. Corrections were re-reviewed until all
+three reported no remaining concrete findings in their scopes. These are code
+review verdicts, not deployment authorization or complete P1 acceptance.
+
+Corrected findings:
+
+| Area                     | Defect and correction                                                                                                                                                                                   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Metadata provenance      | A successful null settlement response refreshed a cached absent spec. Only an actual returned spec can renew that provenance.                                                                           |
+| REST fairness            | Six outcomes at the default budget repeatedly denied trade repair to the same tail. The next cycle leads with budget-deferred work; metadata still publishes and a zero-optional-budget cycle advances. |
+| Failure diagnostics      | A direct metadata-attempt update raced full snapshot publication. Both writers now use the same per-market lock with monotonic attempt timestamps.                                                      |
+| Live rotation            | Retiring hot outcomes lost accepted queue entries. They remain in the drain set through the next flush.                                                                                                 |
+| Terminal races           | Settlement could drop queued historical trades or allow an in-flight writer to change terminal books. Trades persist idempotently; the locked repository freezes settled books.                         |
+| Sparse history           | Older candles outside the latest time window were unreachable. An indexed nearest-older-bucket lookup makes them pageable without scanning empty windows.                                               |
+| Numeric pagination       | Text-cast output labels hijacked unqualified ordering and could skip tied trade IDs such as 9/10. Numeric ordering is qualified; plan tests reuse the exact production SQL.                             |
+| Response contract        | Odd freshness limits produced fractional detail refresh intervals and a serialization 500. Detail uses the same integer rounding as list.                                                               |
+| Frontend recovery/layout | Closed SSE handshakes recover on successful REST observations; mobile content reserves navigation and safe-area clearance.                                                                              |
+
+Reverification: fresh disposable PostgreSQL 16.2 migrations through 0283;
+original and P1 integration suites; actual concurrency barrier for failed
+metadata writes; two-cycle budget fairness; numeric tied-ID pagination;
+settlement/live interleavings; sparse history. Exact history query plans were
+checked with one million trades and 100,000 candles/coverage rows, including
+generic, first/resumed/empty and full-history edges. They use index traversal
+without Sort nodes; local history-query execution was 0.014–0.078 ms with 3–8
+shared buffer hits. Those synthetic timings are not a production SLA.
+
+Full workspace build/typecheck/lint: 47/47 tasks pass. Pure HIP tests: 27 pass;
+adjacent regression selection: 10/10 files. Frontend has 1,663 passing tests;
+see its section 16 for build/browser acceptance limits. No production reads or
+writes, financial calls, commit, push, merge or deploy occurred during this
+review.
+
+### Consolidated implementation status and next sequence
+
+| Phase            | Implemented                                                                                                                                                | Remaining                                                                                           |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| P0 read protocol | Public fixtures, scoped native identities, exact conversions, labels and official/fractional payout mapping                                                | Financial precision/minimum, fee/mode, route/receipt and signing capability evidence                |
+| P1 backend       | Policy-controlled indexer, atomic storage, bounded live/REST recovery, protected reads/SSE, native trades/candles, explicit incomplete coverage, retention | Operational canary acceptance; no claim of exhaustive history, ranking, aggregate USD volume or OI  |
+| P1 frontend      | Internal desktop/mobile cards, local freshness, live quotes, chart/trades, scoped cache/recovery, generated fixture/DTO agreement                          | Exact Turbopack build and real authenticated full-app desktop/mobile acceptance                     |
+| P2               | Existing generic Hunch infrastructure is available for reuse                                                                                               | HIP owned-account/position/balance projection, fills/transfers/settlement ledger and reconciliation |
+| P3               | Funding/signature contracts documented                                                                                                                     | HIP Core funding/withdrawal implementation and durable ambiguous-result recovery                    |
+| P4               | Interactive trade contract documented; capabilities remain false                                                                                           | Prepare/sign/submit, nonce/cloid concurrency, order lifecycle and fill/cancel recovery              |
+| P4S              | Existing generic social/verified-buy foundations                                                                                                           | HIP verified purchases, aliases and pre-submit Copy attribution                                     |
+| P5               | Internal canary only                                                                                                                                       | Public discovery/event/portfolio and web/MiniApp handoff surfaces                                   |
+| P6               | Coverage limitations documented                                                                                                                            | Matching, bounded tracked-wallet research, intelligence and signal delivery                         |
+| P7               | Disabled-by-default policy and reversible read controls                                                                                                    | Operational activation, observing the canary and approved rollout                                   |
+
+Next: complete P1 acceptance without enabling public exposure; close the financial
+P0 evidence contract; implement P2 read/accounting projection first. Then proceed
+P3 → P4 → P4S/P5, with P6 a separate research capability and P7 an explicitly
+authorized rollout. Do not infer authority for signatures, production funding,
+policy changes or deployment from a code-review GO.

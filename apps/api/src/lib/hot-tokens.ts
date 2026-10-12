@@ -1,9 +1,15 @@
 import { env } from "../env.js";
 import { getRedis } from "../redis.js";
 
-export type HotVenue = "polymarket" | "kalshi" | "dflow" | "limitless";
+export type HotVenue =
+  | "polymarket"
+  | "kalshi"
+  | "dflow"
+  | "limitless"
+  | "hyperliquid";
 
 const HOT_KEYS: Record<HotVenue, string> = {
+  hyperliquid: "hot:tokens:hyperliquid",
   polymarket: "hot:tokens:polymarket",
   kalshi: "hot:tokens:kalshi",
   dflow: "hot:tokens:dflow",
@@ -11,6 +17,7 @@ const HOT_KEYS: Record<HotVenue, string> = {
 };
 
 const HOT_STREAM_KEYS: Record<HotVenue, string> = {
+  hyperliquid: "hot:tokens:stream:hyperliquid",
   polymarket: "hot:tokens:stream:polymarket",
   kalshi: "hot:tokens:stream:kalshi",
   dflow: "hot:tokens:stream:dflow",
@@ -23,6 +30,7 @@ function normalizeTokenId(value: string): string | null {
 }
 
 function inferVenue(tokenId: string): HotVenue | null {
+  if (/^hyperliquid:(mainnet|testnet):\d+$/.test(tokenId)) return "hyperliquid";
   if (tokenId.startsWith("sol:")) return "dflow";
   if (tokenId.startsWith("kalshi:")) return "kalshi";
   if (tokenId.startsWith("limitless:")) return "limitless";

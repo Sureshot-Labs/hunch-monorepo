@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import type { Hip4ReadPolicy } from "@hunch/shared";
+import { hip4Identity, type Hip4ReadPolicy } from "@hunch/shared";
 
 // This stream is a repair hint, never authoritative metadata or a trade ledger.
 // Reconnect/duplicates/gaps all converge through the same bounded REST cycle.
@@ -12,17 +12,27 @@ export function watchHip4Metadata(
       maxPayload: policy.responseMaxBytes,
       perMessageDeflate: false,
     }),
+  events: {
+    data?: (channel: "l2Book" | "trades", payload: unknown) => void;
+    gap?: (reason: string) => void;
+  } = {},
 ) {
   let stopped = false;
   let socket: WebSocket | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let retryMs = policy.streamRetryMs;
+  let subscriptions = new Map<
+    string,
+    { type: "l2Book" | "trades"; coin: string }
+  >();
   const diagnostics = {
     connected: false,
     reconnects: 0,
     hints: 0,
     lastMessageAt: null as string | null,
+    subscriptionErrors: 0,
+    subscriptions: 0,
   };
   const connect = () => {
     if (stopped) return;
@@ -35,12 +45,15 @@ export function watchHip4Metadata(
     let lastMessage = Date.now();
     current.on("open", () => {
       diagnostics.connected = true;
-      current.send(
-        JSON.stringify({
-          method: "subscribe",
-          subscription: { type: "outcomeMetaUpdates" },
-        }),
-      );
+      if (policy.metadataStreamEnabled)
+        current.send(
+          JSON.stringify({
+            method: "subscribe",
+            subscription: { type: "outcomeMetaUpdates" },
+          }),
+        );
+      for (const subscription of subscriptions.values())
+        current.send(JSON.stringify({ method: "subscribe", subscription }));
       wake(); // An authoritative generation repair follows every connection.
       heartbeat = setInterval(() => {
         if (Date.now() - lastMessage >= policy.streamIdleMs)
@@ -54,6 +67,17 @@ export function watchHip4Metadata(
       diagnostics.lastMessageAt = new Date(lastMessage).toISOString();
       try {
         const message = JSON.parse(payload.toString());
+        if (message.channel === "error") {
+          diagnostics.subscriptionErrors++;
+          events.gap?.("subscription_error");
+          current.terminate();
+          return;
+        }
+        if (message.channel === "l2Book" || message.channel === "trades") {
+          retryMs = policy.streamRetryMs;
+          events.data?.(message.channel, message.data);
+          return;
+        }
         if (
           message.channel === "pong" ||
           message.channel === "outcomeMetaUpdates"
@@ -69,6 +93,7 @@ export function watchHip4Metadata(
     current.on("error", () => current.terminate());
     current.on("close", () => {
       diagnostics.connected = false;
+      events.gap?.("disconnect");
       clearInterval(heartbeat);
       if (stopped) return;
       diagnostics.reconnects++;
@@ -78,12 +103,48 @@ export function watchHip4Metadata(
   };
   if (
     policy.enabled &&
-    policy.metadataStreamEnabled &&
+    (policy.metadataStreamEnabled || policy.liveEnabled) &&
     policy.outcomeAllowlist.length
   )
     connect();
   return {
     diagnostics,
+    setOutcomes: (outcomes: number[]) => {
+      const next = new Map<
+        string,
+        { type: "l2Book" | "trades"; coin: string }
+      >();
+      if (policy.liveEnabled)
+        for (const outcome of [...new Set(outcomes)]
+          .filter((id) => policy.outcomeAllowlist.includes(id))
+          .slice(0, policy.maxLiveOutcomes)) {
+          const identity = hip4Identity(policy.environment, outcome);
+          for (const side of identity.sides)
+            next.set(`l2Book:${side.coin}`, {
+              type: "l2Book",
+              coin: side.coin,
+            });
+          next.set(`trades:${identity.sides[0].coin}`, {
+            type: "trades",
+            coin: identity.sides[0].coin,
+          });
+        }
+      if (socket?.readyState === WebSocket.OPEN) {
+        for (const [key, subscription] of subscriptions)
+          if (!next.has(key))
+            socket.send(
+              JSON.stringify({ method: "unsubscribe", subscription }),
+            );
+        for (const [key, subscription] of next)
+          if (!subscriptions.has(key))
+            socket.send(JSON.stringify({ method: "subscribe", subscription }));
+      }
+      if ([...subscriptions.keys()].join() !== [...next.keys()].join())
+        events.gap?.("subscription_change");
+      subscriptions = next;
+      diagnostics.subscriptions =
+        next.size + Number(policy.metadataStreamEnabled);
+    },
     close: () => {
       stopped = true;
       clearTimeout(retry);

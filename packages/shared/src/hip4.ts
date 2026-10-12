@@ -96,7 +96,7 @@ export const hip4QuestionSchema = z
     description: z.string(),
     fallbackOutcome: indexSchema,
     namedOutcomes: z.array(indexSchema),
-    settledNamedOutcomes: z.array(z.unknown()).optional(),
+    settledNamedOutcomes: z.array(indexSchema).optional(),
   })
   .passthrough();
 
@@ -153,6 +153,33 @@ export const hip4TradeSchema = z.object({
   hash: z.string(),
 }); // Strips participants: public read models do not need wallet addresses.
 
+export const hip4RawSnapshotSchema = z.object({
+  outcome: hip4OutcomeSchema,
+  question: hip4QuestionSchema.nullable(),
+  settlement: hip4SettlementSchema.nullable(),
+  quote: hip4SpotMetadataSchema.shape.tokens.element.nullable(),
+  feeScale: hip4DecimalSchema.nullable(),
+  deployers: z.array(z.unknown()),
+});
+export type Hip4RawSnapshot = z.infer<typeof hip4RawSnapshotSchema>;
+export const hip4AttemptSchema = z.object({
+  at: z.string(),
+  result: z.enum([
+    "ok",
+    "budget_exhausted",
+    "timeout",
+    "http_error",
+    "transport_error",
+    "invalid_response",
+    "wrong_identity",
+    "stale_observation",
+    "response_too_large",
+    "processing_limit",
+    "metadata_missing",
+  ]),
+});
+export type Hip4Attempt = z.infer<typeof hip4AttemptSchema>;
+
 // One flat policy can be merged and validated by API and sidecar without API env.
 export const hip4ReadPolicySchema = z
   .object({
@@ -175,7 +202,7 @@ export const hip4ReadPolicySchema = z
       .min(1024)
       .max(16_777_216)
       .default(4_194_304),
-    requestWeightPerMinute: z.number().int().min(20).max(1200).default(600),
+    requestWeightPerMinute: z.number().int().min(40).max(1200).default(600),
     maxOutcomesPerCycle: z.number().int().min(1).max(100).default(6),
     maxTradesPerResponse: z.number().int().min(1).max(2000).default(1000),
     pageSize: z.number().int().min(1).max(100).default(20),
@@ -185,8 +212,30 @@ export const hip4ReadPolicySchema = z
     streamRetryMs: z.number().int().min(100).max(60_000).default(1_000),
     streamRetryMaxMs: z.number().int().min(60_000).max(300_000).default(60_000),
     minRefreshMs: z.number().int().min(1_000).max(60_000).default(10_000),
+    liveEnabled: z.boolean().default(true),
+    maxLiveOutcomes: z.number().int().min(1).max(30).default(6),
+    streamQueueSize: z.number().int().min(1).max(10000).default(2000),
+    streamFlushMs: z.number().int().min(100).max(10000).default(1000),
+    subscriptionRefreshMs: z.number().int().min(1000).max(60000).default(15000),
+    policyCheckMs: z.number().int().min(100).max(30000).default(5000),
+    hotDemandMaxAgeMs: z.number().int().min(1000).max(3600000).default(120000),
+    historyMaxRangeMs: z
+      .number()
+      .int()
+      .min(60000)
+      .max(2592000000)
+      .default(86400000),
+    candlePageSize: z.number().int().min(1).max(1440).default(120),
   })
-  .strict();
+  .strict()
+  .refine(
+    (policy) => policy.subscriptionRefreshMs >= policy.maxLiveOutcomes * 200,
+    {
+      path: ["subscriptionRefreshMs"],
+      message:
+        "Subscription rotation must leave room within the provider message budget",
+    },
+  );
 export type Hip4ReadPolicy = z.infer<typeof hip4ReadPolicySchema>;
 export const DEFAULT_HIP4_READ_POLICY = hip4ReadPolicySchema.parse({});
 
@@ -206,6 +255,9 @@ export const hip4ReadMarketSchema = z.object({
   status: z.enum(["observed", "expired", "settled"]),
   fetchedAt: z.string(),
   generation: z.string(),
+  metadataValidUntil: z.string().optional(),
+  metadataAttempt: hip4AttemptSchema.nullable().optional(),
+  settlementAttempt: hip4AttemptSchema.nullable().optional(),
   quoteToken: z.string().nullable(),
   quoteTokenId: z.string().nullable(),
   quoteWeiDecimals: z.number().int().nullable(),
@@ -226,6 +278,8 @@ export const hip4ReadMarketSchema = z.object({
         bid: hip4ProbabilitySchema.nullable(),
         ask: hip4ProbabilitySchema.nullable(),
         bookAt: z.string().nullable(),
+        bookValidUntil: z.string().nullable().optional(),
+        bookAttempt: hip4AttemptSchema.nullable().optional(),
         bookState: z.enum(["missing", "fresh", "stale", "empty", "error"]),
       }),
     )
@@ -234,6 +288,7 @@ export const hip4ReadMarketSchema = z.object({
     .object({
       source: z.literal("settledOutcome"),
       observedAt: z.string(),
+      checkedAt: z.string().optional(),
       details: z.string(),
     })
     .nullable(),
@@ -243,6 +298,7 @@ export const hip4ReadMarketSchema = z.object({
     tradeObservedAt: z.string().nullable(),
     tradeWindowStart: z.string().nullable(),
     tradeWindowEnd: z.string().nullable(),
+    tradeAttempt: hip4AttemptSchema.nullable().optional(),
     ranking: z.literal("unavailable"),
     candles: z.literal("unavailable"),
   }),
@@ -256,6 +312,48 @@ export const hip4ReadMarketSchema = z.object({
     automation: z.literal(false),
   }),
 });
+
+export const hip4HistoryCoverageSchema = z.object({
+  source: z.literal("canonical_primary_trades"),
+  complete: z.literal(false),
+  intervals: z.array(
+    z.object({
+      start: z.number(),
+      end: z.number(),
+      kind: z.enum(["observed", "gap"]),
+      reason: z.string(),
+    }),
+  ),
+  truncated: z.boolean(),
+});
+export const hip4TradePageSchema = z.object({
+  policyRevision: z.string(),
+  environment: hip4EnvironmentSchema,
+  marketId: z.string(),
+  source: z.literal("canonical_primary_trades"),
+  trades: z.array(hip4TradeSchema),
+  nextCursor: z.string().nullable(),
+});
+export const hip4CandlePageSchema = z.object({
+  policyRevision: z.string(),
+  environment: hip4EnvironmentSchema,
+  marketId: z.string(),
+  intervalMs: z.literal(60000),
+  candles: z.array(
+    z.object({
+      time: z.number(),
+      open: hip4ProbabilitySchema,
+      high: hip4ProbabilitySchema,
+      low: hip4ProbabilitySchema,
+      close: hip4ProbabilitySchema,
+      volume: hip4DecimalSchema,
+      trades: z.number().int(),
+      complete: z.literal(false),
+    }),
+  ),
+  coverage: hip4HistoryCoverageSchema,
+  nextBefore: z.number().nullable(),
+});
 export type Hip4ReadMarket = z.infer<typeof hip4ReadMarketSchema>;
 export const hip4ReadResponseSchema = z.object({
   version: z.literal(1),
@@ -264,4 +362,5 @@ export const hip4ReadResponseSchema = z.object({
   environment: hip4EnvironmentSchema,
   markets: z.array(hip4ReadMarketSchema),
   nextOutcome: z.number().int().nullable(),
+  streamTokenIds: z.array(z.string()).default([]),
 });

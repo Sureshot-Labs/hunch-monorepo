@@ -9,6 +9,7 @@ import {
   type Hip4Environment,
   type Hip4ReadMarket,
   type Hip4ReadPolicy,
+  type Hip4RawSnapshot,
 } from "@hunch/shared";
 
 export function hip4DescriptionFields(
@@ -68,7 +69,9 @@ export function mapHip4Market(input: {
   fetchedAt: string;
   generation: string;
   settlement?: unknown;
-}): { market: Hip4ReadMarket; raw: unknown } {
+  previous?: { market: Hip4ReadMarket; raw: Hip4RawSnapshot } | null;
+  settlementCheckedAt?: string;
+}): { market: Hip4ReadMarket; raw: Hip4RawSnapshot } {
   const metadata = hip4MetadataSchema.parse(input.metadata);
   const spot = hip4SpotMetadataSchema.parse(input.spotMetadata);
   const settlement =
@@ -79,16 +82,39 @@ export function mapHip4Market(input: {
     throw new Error("settlement_identity_mismatch");
   const outcome =
     metadata.outcomes.find((row) => row.outcome === input.outcome) ??
-    settlement?.spec;
+    settlement?.spec ??
+    input.previous?.raw.outcome;
   if (!outcome) throw new Error("outcome_metadata_missing");
   hip4OutcomeSchema.parse(outcome);
   const groups = metadata.questions.filter(
     (q) =>
       q.fallbackOutcome === outcome.outcome ||
-      q.namedOutcomes.includes(outcome.outcome),
+      q.namedOutcomes.includes(outcome.outcome) ||
+      q.settledNamedOutcomes?.includes(outcome.outcome),
   );
   if (groups.length > 1) throw new Error("ambiguous_question_membership");
-  const question = groups[0];
+  // An incomplete generation is not evidence that membership was removed.
+  // Reuse the last confirmed question as a whole, not a partial same-ID row.
+  let question = groups[0] ?? input.previous?.raw.question;
+  const previousQuestion = input.previous?.raw.question;
+  if (question && previousQuestion?.question === question.question) {
+    // Partial QuestionSpec updates must not erase known expiry/contract fields.
+    const previousFields = hip4DescriptionFields(previousQuestion.description);
+    const currentFields = hip4DescriptionFields(question.description);
+    const missing = Object.entries(previousFields).filter(
+      ([key]) => !currentFields[key],
+    );
+    question = {
+      ...question,
+      name: question.name || previousQuestion.name,
+      description: question.description
+        ? [
+            question.description,
+            ...missing.map(([key, value]) => `${key}:${value}`),
+          ].join("|")
+        : previousQuestion.description,
+    };
+  }
   const fields = {
     ...hip4DescriptionFields(question?.description ?? ""),
     ...hip4DescriptionFields(outcome.description),
@@ -155,7 +181,15 @@ export function mapHip4Market(input: {
     settlement: settlement
       ? {
           source: "settledOutcome",
-          observedAt: input.fetchedAt,
+          observedAt:
+            input.previous?.market.settlement?.observedAt ??
+            input.settlementCheckedAt ??
+            input.fetchedAt,
+          checkedAt:
+            input.settlementCheckedAt ??
+            input.previous?.market.settlement?.checkedAt ??
+            input.previous?.market.settlement?.observedAt ??
+            input.fetchedAt,
           details: settlement.details,
         }
       : null,
@@ -178,6 +212,27 @@ export function mapHip4Market(input: {
       automation: false,
     },
   };
+  if (input.previous) {
+    const previous = input.previous.market;
+    market.sides = market.sides.map((side, index) => ({
+      ...side,
+      bid: previous.sides[index].bid,
+      ask: previous.sides[index].ask,
+      bookAt: previous.sides[index].bookAt,
+      bookState: previous.sides[index].bookState,
+      bookAttempt: previous.sides[index].bookAttempt,
+    }));
+    market.coverage = { ...previous.coverage, metadata: "fresh" };
+    market.settlementAttempt = previous.settlementAttempt;
+    // A cached outcome spec does not refresh metadata provenance.
+    if (
+      !metadata.outcomes.some((row) => row.outcome === input.outcome) &&
+      !(settlement && input.settlementCheckedAt)
+    ) {
+      market.fetchedAt = previous.fetchedAt;
+      market.generation = previous.generation;
+    }
+  }
   return {
     market,
     raw: {
@@ -200,8 +255,8 @@ export function applyHip4Book(
 ): Hip4ReadMarket {
   const side = market.sides[sideIndex];
   const parsed = hip4BookSchema.safeParse(payload);
-  if (!parsed.success || parsed.data.coin !== side.coin)
-    throw new Error("invalid_hip4_book");
+  if (!parsed.success) throw new Error("invalid_response");
+  if (parsed.data.coin !== side.coin) throw new Error("wrong_identity");
   const book = parsed.data;
   if (book.time > now) throw new Error("future_hip4_book");
   const bids = book.levels[0].filter((level) => Number(level.sz) > 0);
@@ -218,7 +273,22 @@ export function applyHip4Book(
   );
   if (bid != null && ask != null && Number(bid) > Number(ask))
     throw new Error("crossed_hip4_book");
-  if (side.bookAt && Date.parse(side.bookAt) > book.time) return market;
+  // First accepted value wins ties; arrival order cannot rewrite an observation.
+  if (side.bookAt && Date.parse(side.bookAt) >= book.time)
+    return {
+      ...market,
+      sides: market.sides.map((entry) =>
+        entry.sideIndex === sideIndex
+          ? {
+              ...entry,
+              bookAttempt: {
+                at: new Date(now).toISOString(),
+                result: "stale_observation",
+              },
+            }
+          : entry,
+      ),
+    };
   return {
     ...market,
     sides: market.sides.map((entry) =>
@@ -228,6 +298,10 @@ export function applyHip4Book(
             bid,
             ask,
             bookAt: new Date(book.time).toISOString(),
+            bookAttempt: {
+              at: new Date(now).toISOString(),
+              result: now - book.time > maxAgeMs ? "stale_observation" : "ok",
+            },
             bookState:
               now - book.time > maxAgeMs
                 ? "stale"
@@ -247,6 +321,9 @@ export function ageHip4Market(
 ): Hip4ReadMarket {
   return {
     ...market,
+    metadataValidUntil: new Date(
+      Date.parse(market.fetchedAt) + policy.metadataMaxAgeMs,
+    ).toISOString(),
     status: market.settlement
       ? "settled"
       : market.expiry && Date.parse(market.expiry) <= now
@@ -259,12 +336,15 @@ export function ageHip4Market(
           ? "stale"
           : "fresh",
     },
-    sides: market.sides.map((side) =>
-      side.bookAt &&
-      now - Date.parse(side.bookAt) > policy.bookMaxAgeMs &&
-      side.bookState !== "error"
-        ? { ...side, bookState: "stale" }
-        : side,
-    ),
+    sides: market.sides.map((side) => ({
+      ...side,
+      bookValidUntil: side.bookAt
+        ? new Date(Date.parse(side.bookAt) + policy.bookMaxAgeMs).toISOString()
+        : null,
+      bookState:
+        side.bookAt && now - Date.parse(side.bookAt) > policy.bookMaxAgeMs
+          ? "stale"
+          : side.bookState,
+    })),
   };
 }
