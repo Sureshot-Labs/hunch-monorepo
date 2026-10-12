@@ -1,0 +1,443 @@
+{
+  "version": 1,
+  "origin": "sanitized-public-original-order-minimum-read",
+  "environment": "mainnet",
+  "collectedAt": "2026-10-12T14:32:17.546Z",
+  "requests": 14,
+  "maxRequests": 14,
+  "failures": [],
+  "marketProbes": [
+    {
+      "outcome": 11382,
+      "count": 10,
+      "quoteToken": "USDC"
+    },
+    {
+      "outcome": 11383,
+      "count": 10,
+      "quoteToken": "USDC"
+    },
+    {
+      "outcome": 11385,
+      "count": 10,
+      "quoteToken": "USDC"
+    }
+  ],
+  "accounts": [
+    {
+      "accountAlias": "sample-2",
+      "returned": 2000,
+      "providerMaximumPossiblyReached": true,
+      "hipRows": 68,
+      "minimumRejections": 0,
+      "orders": [
+        {
+          "status": "filled",
+          "statusTimestamp": 1791731130331,
+          "order": {
+            "coin": "#109970",
+            "side": "B",
+            "limitPx": "0.57541",
+            "sz": "0.0",
+            "origSz": "2.0",
+            "timestamp": 1791731130331,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 1,
+            "cloid": null
+          },
+          "notionalScaled16": "11508200000000000"
+        },
+        {
+          "status": "open",
+          "statusTimestamp": 1791731130331,
+          "order": {
+            "coin": "#109970",
+            "side": "B",
+            "limitPx": "0.57541",
+            "sz": "2.0",
+            "origSz": "2.0",
+            "timestamp": 1791731130331,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 1,
+            "cloid": null
+          },
+          "notionalScaled16": "11508200000000000"
+        },
+        {
+          "status": "filled",
+          "statusTimestamp": 1791730699815,
+          "order": {
+            "coin": "#109970",
+            "side": "B",
+            "limitPx": "0.57631",
+            "sz": "0.0",
+            "origSz": "2.0",
+            "timestamp": 1791730699815,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 2,
+            "cloid": null
+          },
+          "notionalScaled16": "11526200000000000"
+        },
+        {
+          "status": "open",
+          "statusTimestamp": 1791730699815,
+          "order": {
+            "coin": "#109970",
+            "side": "B",
+            "limitPx": "0.57631",
+            "sz": "2.0",
+            "origSz": "2.0",
+            "timestamp": 1791730699815,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 2,
+            "cloid": null
+          },
+          "notionalScaled16": "11526200000000000"
+        },
+        {
+          "status": "filled",
+          "statusTimestamp": 1791729533978,
+          "order": {
+            "coin": "#109970",
+            "side": "B",
+            "limitPx": "0.58643",
+            "sz": "0.0",
+            "origSz": "2.0",
+            "timestamp": 1791729533978,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 3,
+            "cloid": null
+          },
+          "notionalScaled16": "11728600000000000"
+        },
+        {
+          "status": "open",
+          "statusTimestamp": 1791729533978,
+          "order": {
+            "coin": "#109970",
+            "side": "B",
+            "limitPx": "0.58643",
+            "sz": "2.0",
+            "origSz": "2.0",
+            "timestamp": 1791729533978,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 3,
+            "cloid": null
+          },
+          "notionalScaled16": "11728600000000000"
+        }
+      ]
+    },
+    {
+      "accountAlias": "sample-6",
+      "returned": 902,
+      "providerMaximumPossiblyReached": false,
+      "hipRows": 26,
+      "minimumRejections": 0,
+      "orders": [
+        {
+          "status": "iocCancelRejected",
+          "statusTimestamp": 1791796360004,
+          "order": {
+            "coin": "#113850",
+            "side": "A",
+            "limitPx": "0.29282",
+            "sz": "5.0",
+            "origSz": "5.0",
+            "timestamp": 1791796360004,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 21,
+            "cloid": null
+          },
+          "notionalScaled16": "14641000000000000"
+        },
+        {
+          "status": "filled",
+          "statusTimestamp": 1791796416245,
+          "order": {
+            "coin": "#113850",
+            "side": "A",
+            "limitPx": "0.29568",
+            "sz": "0.0",
+            "origSz": "5.0",
+            "timestamp": 1791796416245,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 22,
+            "cloid": null
+          },
+          "notionalScaled16": "14784000000000000"
+        },
+        {
+          "status": "open",
+          "statusTimestamp": 1791796416245,
+          "order": {
+            "coin": "#113850",
+            "side": "A",
+            "limitPx": "0.29568",
+            "sz": "5.0",
+            "origSz": "5.0",
+            "timestamp": 1791796416245,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 22,
+            "cloid": null
+          },
+          "notionalScaled16": "14784000000000000"
+        },
+        {
+          "status": "iocCancelRejected",
+          "statusTimestamp": 1791796345579,
+          "order": {
+            "coin": "#113850",
+            "side": "A",
+            "limitPx": "0.30259",
+            "sz": "5.0",
+            "origSz": "5.0",
+            "timestamp": 1791796345579,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 23,
+            "cloid": null
+          },
+          "notionalScaled16": "15129500000000000"
+        },
+        {
+          "status": "iocCancelRejected",
+          "statusTimestamp": 1791796062646,
+          "order": {
+            "coin": "#113850",
+            "side": "A",
+            "limitPx": "0.30577",
+            "sz": "5.0",
+            "origSz": "5.0",
+            "timestamp": 1791796062646,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 24,
+            "cloid": null
+          },
+          "notionalScaled16": "15288500000000000"
+        },
+        {
+          "status": "iocCancelRejected",
+          "statusTimestamp": 1791796052538,
+          "order": {
+            "coin": "#113850",
+            "side": "A",
+            "limitPx": "0.30577",
+            "sz": "5.0",
+            "origSz": "5.0",
+            "timestamp": 1791796052538,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 25,
+            "cloid": null
+          },
+          "notionalScaled16": "15288500000000000"
+        }
+      ]
+    },
+    {
+      "accountAlias": "sample-7",
+      "returned": 94,
+      "providerMaximumPossiblyReached": false,
+      "hipRows": 39,
+      "minimumRejections": 0,
+      "orders": [
+        {
+          "status": "filled",
+          "statusTimestamp": 1791796634713,
+          "order": {
+            "coin": "#113860",
+            "side": "A",
+            "limitPx": "0.3864",
+            "sz": "0.0",
+            "origSz": "4.0",
+            "timestamp": 1791796634713,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 31,
+            "cloid": "0x00000000000000000000000000000020"
+          },
+          "notionalScaled16": "15456000000000000"
+        },
+        {
+          "status": "open",
+          "statusTimestamp": 1791796634713,
+          "order": {
+            "coin": "#113860",
+            "side": "A",
+            "limitPx": "0.3864",
+            "sz": "4.0",
+            "origSz": "4.0",
+            "timestamp": 1791796634713,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 31,
+            "cloid": "0x00000000000000000000000000000020"
+          },
+          "notionalScaled16": "15456000000000000"
+        },
+        {
+          "status": "filled",
+          "statusTimestamp": 1791796182368,
+          "order": {
+            "coin": "#113860",
+            "side": "A",
+            "limitPx": "0.40532",
+            "sz": "0.0",
+            "origSz": "4.0",
+            "timestamp": 1791796182368,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 33,
+            "cloid": "0x00000000000000000000000000000022"
+          },
+          "notionalScaled16": "16212800000000000"
+        },
+        {
+          "status": "open",
+          "statusTimestamp": 1791796182368,
+          "order": {
+            "coin": "#113860",
+            "side": "A",
+            "limitPx": "0.40532",
+            "sz": "4.0",
+            "origSz": "4.0",
+            "timestamp": 1791796182368,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 33,
+            "cloid": "0x00000000000000000000000000000022"
+          },
+          "notionalScaled16": "16212800000000000"
+        },
+        {
+          "status": "filled",
+          "statusTimestamp": 1791796487628,
+          "order": {
+            "coin": "#113850",
+            "side": "A",
+            "limitPx": "0.28521",
+            "sz": "0.0",
+            "origSz": "6.0",
+            "timestamp": 1791796487628,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 35,
+            "cloid": "0x00000000000000000000000000000024"
+          },
+          "notionalScaled16": "17112600000000000"
+        },
+        {
+          "status": "open",
+          "statusTimestamp": 1791796487628,
+          "order": {
+            "coin": "#113850",
+            "side": "A",
+            "limitPx": "0.28521",
+            "sz": "6.0",
+            "origSz": "6.0",
+            "timestamp": 1791796487628,
+            "orderType": "Market",
+            "reduceOnly": false,
+            "isTrigger": false,
+            "triggerCondition": "N/A",
+            "triggerPx": "0.0",
+            "isPositionTpsl": false,
+            "oid": 35,
+            "cloid": "0x00000000000000000000000000000024"
+          },
+          "notionalScaled16": "17112600000000000"
+        }
+      ]
+    }
+  ],
+  "coverage": {
+    "queriedAccounts": 10,
+    "preservedAccounts": 3,
+    "completeHistory": false,
+    "currentOpenOrders": false,
+    "exactMinimumBoundaryObserved": false,
+    "minimumRejectionsInReturnedSample": 0,
+    "statusEventIdentity": "oid + statusTimestamp + status",
+    "selection": "Small original native orders, including both open and filled events. Not selected partial executions; addresses remain in collector memory, IDs local aliases."
+  }
+}

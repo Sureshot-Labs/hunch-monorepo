@@ -1,0 +1,1688 @@
+{
+  "version": 1,
+  "origin": "sanitized-public-multichain-relay-evidence",
+  "observedAt": "2026-10-12T15:00:18.809Z",
+  "requestLimit": 76,
+  "requests": 70,
+  "failures": [],
+  "routes": [
+    {
+      "name": "polygon-usdc-to-core-spot",
+      "origin": 137,
+      "destination": 1337,
+      "currencyIn": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+      "currencyOut": "0x6d1e7cde53ba9467b783cb7c530ce054",
+      "history": {
+        "httpStatus": 200,
+        "rows": 1,
+        "selected": true
+      },
+      "receipt": {
+        "createdAt": "2026-09-22T18:58:00.320Z",
+        "requestId": "ref-1",
+        "nativeHash": "ref-2",
+        "otherHash": "ref-3",
+        "nativeOwner": "ref-4",
+        "otherOwner": "ref-5",
+        "nativeAction": {
+          "type": "sendAsset",
+          "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+          "amount": "199.949391",
+          "sourceDex": "",
+          "destinationDex": "spot",
+          "nonce": "ref-6"
+        },
+        "nativeLedger": {
+          "type": "send",
+          "token": "USDC",
+          "amount": "199.949391",
+          "sourceDex": "",
+          "destinationDex": "spot",
+          "fee": "0.0",
+          "nativeTokenFee": "0.0",
+          "nonce": "ref-6",
+          "user": "ref-7",
+          "destination": "ref-4"
+        },
+        "actual": {
+          "origin": {
+            "amount": "200000000",
+            "minimumAmount": "200000000",
+            "currency": {
+              "chainId": 137,
+              "address": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+              "symbol": "USDC",
+              "decimals": 6
+            }
+          },
+          "destination": {
+            "amount": "19994939100",
+            "minimumAmount": "19595046100",
+            "currency": {
+              "chainId": 1337,
+              "address": "0x6d1e7cde53ba9467b783cb7c530ce054",
+              "symbol": "USDC",
+              "decimals": 8
+            }
+          }
+        },
+        "checks": {
+          "relaySuccess": true,
+          "nativeReference": true,
+          "otherReference": true,
+          "nativeUniqueLedger": true,
+          "nativeActionIdentity": true,
+          "nativeOwner": true,
+          "nativeNonce": true,
+          "nativeToken": true,
+          "nativeDex": true,
+          "nativeAmount": true,
+          "otherTransaction": true,
+          "otherSucceeded": true,
+          "otherFinalized": true,
+          "otherCanonicalBlock": true,
+          "otherAmount": true
+        },
+        "external": {
+          "kind": "evm-transfer-logs",
+          "blockNumber": "0x59e60f4",
+          "token": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+          "transfers": [
+            {
+              "from": "ref-5",
+              "to": "ref-8",
+              "amount": "200000000",
+              "removed": false,
+              "logIndex": "0x298"
+            }
+          ]
+        }
+      },
+      "quote": {
+        "httpStatus": 200,
+        "schemaAccepted": true,
+        "errorCode": null,
+        "currencyIn": {
+          "amount": "10000000",
+          "minimumAmount": "10000000",
+          "currency": {
+            "chainId": 137,
+            "address": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+            "symbol": "USDC",
+            "decimals": 6
+          }
+        },
+        "currencyOut": {
+          "amount": "997899700",
+          "minimumAmount": "977941700",
+          "currency": {
+            "chainId": 1337,
+            "address": "0x6d1e7cde53ba9467b783cb7c530ce054",
+            "symbol": "USDC",
+            "decimals": 8
+          }
+        },
+        "steps": [
+          {
+            "id": "approve",
+            "kind": "transaction"
+          },
+          {
+            "id": "deposit",
+            "kind": "transaction"
+          }
+        ],
+        "issues": [],
+        "depositShape": {
+          "keys": [
+            "from",
+            "to",
+            "data",
+            "value",
+            "chainId",
+            "gas",
+            "maxFeePerGas",
+            "maxPriorityFeePerGas"
+          ],
+          "nativeActionType": null,
+          "sourceDex": null,
+          "instructionCount": null
+        }
+      }
+    },
+    {
+      "name": "core-spot-to-polygon-usdc",
+      "origin": 1337,
+      "destination": 137,
+      "currencyIn": "0x6d1e7cde53ba9467b783cb7c530ce054",
+      "currencyOut": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+      "history": {
+        "httpStatus": 200,
+        "rows": 3,
+        "selected": true
+      },
+      "receipt": {
+        "createdAt": "2026-10-11T15:54:10.748Z",
+        "requestId": "ref-9",
+        "nativeHash": "ref-10",
+        "otherHash": "ref-11",
+        "nativeOwner": "ref-12",
+        "otherOwner": "ref-12",
+        "nativeAction": {
+          "type": "sendAsset",
+          "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+          "amount": "29.356083",
+          "sourceDex": "spot",
+          "destinationDex": "",
+          "nonce": "ref-13"
+        },
+        "nativeLedger": {
+          "type": "send",
+          "token": "USDC",
+          "amount": "29.356083",
+          "sourceDex": "spot",
+          "destinationDex": "",
+          "fee": "0.0",
+          "nativeTokenFee": "0.0",
+          "nonce": "ref-13",
+          "user": "ref-12",
+          "destination": "ref-14"
+        },
+        "actual": {
+          "origin": {
+            "amount": "2935608300",
+            "minimumAmount": "2935608300",
+            "currency": {
+              "chainId": 1337,
+              "address": "0x6d1e7cde53ba9467b783cb7c530ce054",
+              "symbol": "USDC",
+              "decimals": 8
+            }
+          },
+          "destination": {
+            "amount": "29031803",
+            "minimumAmount": "29031803",
+            "currency": {
+              "chainId": 137,
+              "address": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+              "symbol": "USDC",
+              "decimals": 6
+            }
+          }
+        },
+        "checks": {
+          "relaySuccess": true,
+          "nativeReference": true,
+          "otherReference": true,
+          "nativeUniqueLedger": true,
+          "nativeActionIdentity": true,
+          "nativeOwner": true,
+          "nativeNonce": true,
+          "nativeToken": true,
+          "nativeDex": true,
+          "nativeAmount": true,
+          "otherTransaction": true,
+          "otherSucceeded": true,
+          "otherFinalized": true,
+          "otherCanonicalBlock": true,
+          "otherAmount": true
+        },
+        "external": {
+          "kind": "evm-transfer-logs",
+          "blockNumber": "0x5aef6ca",
+          "token": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+          "transfers": [
+            {
+              "from": "ref-7",
+              "to": "ref-12",
+              "amount": "29031803",
+              "removed": false,
+              "logIndex": "0x43b"
+            }
+          ]
+        }
+      },
+      "quote": {
+        "httpStatus": 200,
+        "schemaAccepted": true,
+        "errorCode": null,
+        "currencyIn": {
+          "amount": "1000000000",
+          "minimumAmount": "1000000000",
+          "currency": {
+            "chainId": 1337,
+            "address": "0x6d1e7cde53ba9467b783cb7c530ce054",
+            "symbol": "USDC",
+            "decimals": 8
+          }
+        },
+        "currencyOut": {
+          "amount": "9974198",
+          "minimumAmount": "9774715",
+          "currency": {
+            "chainId": 137,
+            "address": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+            "symbol": "USDC",
+            "decimals": 6
+          }
+        },
+        "steps": [
+          {
+            "id": "authorize",
+            "kind": "signature"
+          },
+          {
+            "id": "deposit",
+            "kind": "transaction"
+          }
+        ],
+        "issues": [],
+        "depositShape": {
+          "keys": ["action", "nonce", "eip712Types", "eip712PrimaryType"],
+          "nativeActionType": "sendAsset",
+          "sourceDex": "spot",
+          "instructionCount": null
+        }
+      }
+    },
+    {
+      "name": "polygon-usdc-to-core-perps",
+      "origin": 137,
+      "destination": 1337,
+      "currencyIn": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+      "currencyOut": "0x00000000000000000000000000000000",
+      "history": {
+        "httpStatus": 200,
+        "rows": 3,
+        "selected": true
+      },
+      "receipt": {
+        "createdAt": "2026-10-12T12:41:41.403Z",
+        "requestId": "ref-15",
+        "nativeHash": "ref-16",
+        "otherHash": "ref-17",
+        "nativeOwner": "ref-18",
+        "otherOwner": "ref-18",
+        "nativeAction": {
+          "type": "sendAsset",
+          "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+          "amount": "959.883997",
+          "sourceDex": "",
+          "destinationDex": "",
+          "nonce": "ref-19"
+        },
+        "nativeLedger": {
+          "type": "send",
+          "token": "USDC",
+          "amount": "959.883997",
+          "sourceDex": "",
+          "destinationDex": "",
+          "fee": "0.0",
+          "nativeTokenFee": "0.0",
+          "nonce": "ref-19",
+          "user": "ref-7",
+          "destination": "ref-18"
+        },
+        "actual": {
+          "origin": {
+            "amount": "960000000",
+            "minimumAmount": "960000000",
+            "currency": {
+              "chainId": 137,
+              "address": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+              "symbol": "USDC",
+              "decimals": 6
+            }
+          },
+          "destination": {
+            "amount": "95988399700",
+            "minimumAmount": "95508457700",
+            "currency": {
+              "chainId": 1337,
+              "address": "0x00000000000000000000000000000000",
+              "symbol": "USDC",
+              "decimals": 8
+            }
+          }
+        },
+        "checks": {
+          "relaySuccess": true,
+          "nativeReference": true,
+          "otherReference": true,
+          "nativeUniqueLedger": true,
+          "nativeActionIdentity": true,
+          "nativeOwner": true,
+          "nativeNonce": true,
+          "nativeToken": true,
+          "nativeDex": true,
+          "nativeAmount": true,
+          "otherTransaction": true,
+          "otherSucceeded": true,
+          "otherFinalized": true,
+          "otherCanonicalBlock": true,
+          "otherAmount": true
+        },
+        "external": {
+          "kind": "evm-transfer-logs",
+          "blockNumber": "0x5afb9a8",
+          "token": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+          "transfers": [
+            {
+              "from": "ref-18",
+              "to": "ref-8",
+              "amount": "960000000",
+              "removed": false,
+              "logIndex": "0x16f"
+            }
+          ]
+        }
+      },
+      "quote": {
+        "httpStatus": 200,
+        "schemaAccepted": true,
+        "errorCode": null,
+        "currencyIn": {
+          "amount": "10000000",
+          "minimumAmount": "10000000",
+          "currency": {
+            "chainId": 137,
+            "address": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+            "symbol": "USDC",
+            "decimals": 6
+          }
+        },
+        "currencyOut": {
+          "amount": "997899700",
+          "minimumAmount": "977941700",
+          "currency": {
+            "chainId": 1337,
+            "address": "0x00000000000000000000000000000000",
+            "symbol": "USDC",
+            "decimals": 8
+          }
+        },
+        "steps": [
+          {
+            "id": "approve",
+            "kind": "transaction"
+          },
+          {
+            "id": "deposit",
+            "kind": "transaction"
+          }
+        ],
+        "issues": [],
+        "depositShape": {
+          "keys": [
+            "from",
+            "to",
+            "data",
+            "value",
+            "chainId",
+            "gas",
+            "maxFeePerGas",
+            "maxPriorityFeePerGas"
+          ],
+          "nativeActionType": null,
+          "sourceDex": null,
+          "instructionCount": null
+        }
+      }
+    },
+    {
+      "name": "core-perps-to-polygon-usdc",
+      "origin": 1337,
+      "destination": 137,
+      "currencyIn": "0x00000000000000000000000000000000",
+      "currencyOut": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+      "history": {
+        "httpStatus": 200,
+        "rows": 3,
+        "selected": true
+      },
+      "receipt": {
+        "createdAt": "2026-10-06T07:28:19.116Z",
+        "requestId": "ref-20",
+        "nativeHash": "ref-21",
+        "otherHash": "ref-22",
+        "nativeOwner": "ref-23",
+        "otherOwner": "ref-24",
+        "nativeAction": {
+          "type": "sendAsset",
+          "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+          "amount": "3.000000",
+          "sourceDex": "",
+          "destinationDex": "",
+          "nonce": "ref-25"
+        },
+        "nativeLedger": {
+          "type": "send",
+          "token": "USDC",
+          "amount": "3.0",
+          "sourceDex": "",
+          "destinationDex": "",
+          "fee": "0.0",
+          "nativeTokenFee": "0.0",
+          "nonce": "ref-25",
+          "user": "ref-23",
+          "destination": "ref-14"
+        },
+        "actual": {
+          "origin": {
+            "amount": "300000000",
+            "minimumAmount": "300000000",
+            "currency": {
+              "chainId": 1337,
+              "address": "0x00000000000000000000000000000000",
+              "symbol": "USDC",
+              "decimals": 8
+            }
+          },
+          "destination": {
+            "amount": "2975373",
+            "minimumAmount": "2975373",
+            "currency": {
+              "chainId": 137,
+              "address": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+              "symbol": "USDC",
+              "decimals": 6
+            }
+          }
+        },
+        "checks": {
+          "relaySuccess": true,
+          "nativeReference": true,
+          "otherReference": true,
+          "nativeUniqueLedger": true,
+          "nativeActionIdentity": true,
+          "nativeOwner": true,
+          "nativeNonce": true,
+          "nativeToken": true,
+          "nativeDex": true,
+          "nativeAmount": true,
+          "otherTransaction": true,
+          "otherSucceeded": true,
+          "otherFinalized": true,
+          "otherCanonicalBlock": true,
+          "otherAmount": true
+        },
+        "external": {
+          "kind": "evm-transfer-logs",
+          "blockNumber": "0x5aa430d",
+          "token": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+          "transfers": [
+            {
+              "from": "ref-7",
+              "to": "ref-24",
+              "amount": "2975373",
+              "removed": false,
+              "logIndex": "0x120"
+            }
+          ]
+        }
+      },
+      "quote": {
+        "httpStatus": 200,
+        "schemaAccepted": true,
+        "errorCode": null,
+        "currencyIn": {
+          "amount": "1000000000",
+          "minimumAmount": "1000000000",
+          "currency": {
+            "chainId": 1337,
+            "address": "0x00000000000000000000000000000000",
+            "symbol": "USDC",
+            "decimals": 8
+          }
+        },
+        "currencyOut": {
+          "amount": "9974086",
+          "minimumAmount": "9774605",
+          "currency": {
+            "chainId": 137,
+            "address": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+            "symbol": "USDC",
+            "decimals": 6
+          }
+        },
+        "steps": [
+          {
+            "id": "authorize",
+            "kind": "signature"
+          },
+          {
+            "id": "deposit",
+            "kind": "transaction"
+          }
+        ],
+        "issues": [],
+        "depositShape": {
+          "keys": ["action", "nonce", "eip712Types", "eip712PrimaryType"],
+          "nativeActionType": "sendAsset",
+          "sourceDex": "",
+          "instructionCount": null
+        }
+      }
+    },
+    {
+      "name": "polygon-pusd-to-core-spot",
+      "origin": 137,
+      "destination": 1337,
+      "currencyIn": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+      "currencyOut": "0x6d1e7cde53ba9467b783cb7c530ce054",
+      "history": {
+        "httpStatus": 200,
+        "rows": 3,
+        "selected": true
+      },
+      "receipt": {
+        "createdAt": "2026-10-11T07:56:21.442Z",
+        "requestId": "ref-26",
+        "nativeHash": "ref-27",
+        "otherHash": "ref-28",
+        "nativeOwner": "ref-29",
+        "otherOwner": "ref-30",
+        "nativeAction": {
+          "type": "sendAsset",
+          "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+          "amount": "204.887211",
+          "sourceDex": "",
+          "destinationDex": "spot",
+          "nonce": "ref-31"
+        },
+        "nativeLedger": {
+          "type": "send",
+          "token": "USDC",
+          "amount": "204.887211",
+          "sourceDex": "",
+          "destinationDex": "spot",
+          "fee": "0.0",
+          "nativeTokenFee": "0.0",
+          "nonce": "ref-31",
+          "user": "ref-7",
+          "destination": "ref-29"
+        },
+        "actual": {
+          "origin": {
+            "amount": "205000000",
+            "minimumAmount": "205000000",
+            "currency": {
+              "chainId": 137,
+              "address": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+              "symbol": "pUSD",
+              "decimals": 6
+            }
+          },
+          "destination": {
+            "amount": "20488721100",
+            "minimumAmount": "20468437500",
+            "currency": {
+              "chainId": 1337,
+              "address": "0x6d1e7cde53ba9467b783cb7c530ce054",
+              "symbol": "USDC",
+              "decimals": 8
+            }
+          }
+        },
+        "checks": {
+          "relaySuccess": true,
+          "nativeReference": true,
+          "otherReference": true,
+          "nativeUniqueLedger": true,
+          "nativeActionIdentity": true,
+          "nativeOwner": true,
+          "nativeNonce": true,
+          "nativeToken": true,
+          "nativeDex": true,
+          "nativeAmount": true,
+          "otherTransaction": true,
+          "otherSucceeded": true,
+          "otherFinalized": true,
+          "otherCanonicalBlock": true,
+          "otherAmount": true
+        },
+        "external": {
+          "kind": "evm-transfer-logs",
+          "blockNumber": "0x5aeac20",
+          "token": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+          "transfers": [
+            {
+              "from": "ref-30",
+              "to": "ref-8",
+              "amount": "205000000",
+              "removed": false,
+              "logIndex": "0x2b1"
+            }
+          ]
+        }
+      },
+      "quote": {
+        "httpStatus": 200,
+        "schemaAccepted": true,
+        "errorCode": null,
+        "currencyIn": {
+          "amount": "10000000",
+          "minimumAmount": "10000000",
+          "currency": {
+            "chainId": 137,
+            "address": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+            "symbol": "pUSD",
+            "decimals": 6
+          }
+        },
+        "currencyOut": {
+          "amount": "997584900",
+          "minimumAmount": "977633200",
+          "currency": {
+            "chainId": 1337,
+            "address": "0x6d1e7cde53ba9467b783cb7c530ce054",
+            "symbol": "USDC",
+            "decimals": 8
+          }
+        },
+        "steps": [
+          {
+            "id": "approve",
+            "kind": "transaction"
+          },
+          {
+            "id": "deposit",
+            "kind": "transaction"
+          }
+        ],
+        "issues": [],
+        "depositShape": {
+          "keys": [
+            "from",
+            "to",
+            "data",
+            "value",
+            "chainId",
+            "gas",
+            "maxFeePerGas",
+            "maxPriorityFeePerGas"
+          ],
+          "nativeActionType": null,
+          "sourceDex": null,
+          "instructionCount": null
+        }
+      }
+    },
+    {
+      "name": "core-spot-to-polygon-pusd",
+      "origin": 1337,
+      "destination": 137,
+      "currencyIn": "0x6d1e7cde53ba9467b783cb7c530ce054",
+      "currencyOut": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+      "history": {
+        "httpStatus": 200,
+        "rows": 3,
+        "selected": true
+      },
+      "receipt": {
+        "createdAt": "2026-10-12T11:06:06.226Z",
+        "requestId": "ref-32",
+        "nativeHash": "ref-33",
+        "otherHash": "ref-34",
+        "nativeOwner": "ref-35",
+        "otherOwner": "ref-36",
+        "nativeAction": {
+          "type": "sendAsset",
+          "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+          "amount": "1010.000000",
+          "sourceDex": "spot",
+          "destinationDex": "",
+          "nonce": "ref-37"
+        },
+        "nativeLedger": {
+          "type": "send",
+          "token": "USDC",
+          "amount": "1010.0",
+          "sourceDex": "spot",
+          "destinationDex": "",
+          "fee": "0.0",
+          "nativeTokenFee": "0.0",
+          "nonce": "ref-37",
+          "user": "ref-35",
+          "destination": "ref-14"
+        },
+        "actual": {
+          "origin": {
+            "amount": "101000000000",
+            "minimumAmount": "101000000000",
+            "currency": {
+              "chainId": 1337,
+              "address": "0x6d1e7cde53ba9467b783cb7c530ce054",
+              "symbol": "USDC",
+              "decimals": 8
+            }
+          },
+          "destination": {
+            "amount": "1009433526",
+            "minimumAmount": "1009433526",
+            "currency": {
+              "chainId": 137,
+              "address": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+              "symbol": "pUSD",
+              "decimals": 6
+            }
+          }
+        },
+        "checks": {
+          "relaySuccess": true,
+          "nativeReference": true,
+          "otherReference": true,
+          "nativeUniqueLedger": true,
+          "nativeActionIdentity": true,
+          "nativeOwner": true,
+          "nativeNonce": true,
+          "nativeToken": true,
+          "nativeDex": true,
+          "nativeAmount": true,
+          "otherTransaction": true,
+          "otherSucceeded": true,
+          "otherFinalized": true,
+          "otherCanonicalBlock": true,
+          "otherAmount": true
+        },
+        "external": {
+          "kind": "evm-transfer-logs",
+          "blockNumber": "0x5afaaba",
+          "token": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+          "transfers": [
+            {
+              "from": "ref-38",
+              "to": "ref-36",
+              "amount": "1009433526",
+              "removed": false,
+              "logIndex": "0xe3"
+            }
+          ]
+        }
+      },
+      "quote": {
+        "httpStatus": 200,
+        "schemaAccepted": true,
+        "errorCode": null,
+        "currencyIn": {
+          "amount": "1000000000",
+          "minimumAmount": "1000000000",
+          "currency": {
+            "chainId": 1337,
+            "address": "0x6d1e7cde53ba9467b783cb7c530ce054",
+            "symbol": "USDC",
+            "decimals": 8
+          }
+        },
+        "currencyOut": {
+          "amount": "9951565",
+          "minimumAmount": "9752534",
+          "currency": {
+            "chainId": 137,
+            "address": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+            "symbol": "pUSD",
+            "decimals": 6
+          }
+        },
+        "steps": [
+          {
+            "id": "authorize",
+            "kind": "signature"
+          },
+          {
+            "id": "deposit",
+            "kind": "transaction"
+          }
+        ],
+        "issues": [],
+        "depositShape": {
+          "keys": ["action", "nonce", "eip712Types", "eip712PrimaryType"],
+          "nativeActionType": "sendAsset",
+          "sourceDex": "spot",
+          "instructionCount": null
+        }
+      }
+    },
+    {
+      "name": "polygon-pusd-to-core-perps",
+      "origin": 137,
+      "destination": 1337,
+      "currencyIn": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+      "currencyOut": "0x00000000000000000000000000000000",
+      "history": {
+        "httpStatus": 200,
+        "rows": 3,
+        "selected": true
+      },
+      "receipt": {
+        "createdAt": "2026-10-11T15:42:52.862Z",
+        "requestId": "ref-39",
+        "nativeHash": "ref-40",
+        "otherHash": "ref-41",
+        "nativeOwner": "ref-42",
+        "otherOwner": "ref-42",
+        "nativeAction": {
+          "type": "sendAsset",
+          "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+          "amount": "6.04937",
+          "sourceDex": "",
+          "destinationDex": "",
+          "nonce": "ref-43"
+        },
+        "nativeLedger": {
+          "type": "send",
+          "token": "USDC",
+          "amount": "6.04937",
+          "sourceDex": "",
+          "destinationDex": "",
+          "fee": "0.0",
+          "nativeTokenFee": "0.0",
+          "nonce": "ref-43",
+          "user": "ref-7",
+          "destination": "ref-42"
+        },
+        "actual": {
+          "origin": {
+            "amount": "6071812",
+            "minimumAmount": "6071812",
+            "currency": {
+              "chainId": 137,
+              "address": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+              "symbol": "pUSD",
+              "decimals": 6
+            }
+          },
+          "destination": {
+            "amount": "604937000",
+            "minimumAmount": "601912300",
+            "currency": {
+              "chainId": 1337,
+              "address": "0x00000000000000000000000000000000",
+              "symbol": "USDC",
+              "decimals": 8
+            }
+          }
+        },
+        "checks": {
+          "relaySuccess": true,
+          "nativeReference": true,
+          "otherReference": true,
+          "nativeUniqueLedger": true,
+          "nativeActionIdentity": true,
+          "nativeOwner": true,
+          "nativeNonce": true,
+          "nativeToken": true,
+          "nativeDex": true,
+          "nativeAmount": true,
+          "otherTransaction": true,
+          "otherSucceeded": true,
+          "otherFinalized": true,
+          "otherCanonicalBlock": true,
+          "otherAmount": true
+        },
+        "external": {
+          "kind": "evm-transfer-logs",
+          "blockNumber": "0x5aef505",
+          "token": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+          "transfers": [
+            {
+              "from": "ref-42",
+              "to": "ref-8",
+              "amount": "6071812",
+              "removed": false,
+              "logIndex": "0x82"
+            }
+          ]
+        }
+      },
+      "quote": {
+        "httpStatus": 200,
+        "schemaAccepted": true,
+        "errorCode": null,
+        "currencyIn": {
+          "amount": "10000000",
+          "minimumAmount": "10000000",
+          "currency": {
+            "chainId": 137,
+            "address": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+            "symbol": "pUSD",
+            "decimals": 6
+          }
+        },
+        "currencyOut": {
+          "amount": "997585000",
+          "minimumAmount": "977633300",
+          "currency": {
+            "chainId": 1337,
+            "address": "0x00000000000000000000000000000000",
+            "symbol": "USDC",
+            "decimals": 8
+          }
+        },
+        "steps": [
+          {
+            "id": "approve",
+            "kind": "transaction"
+          },
+          {
+            "id": "deposit",
+            "kind": "transaction"
+          }
+        ],
+        "issues": [],
+        "depositShape": {
+          "keys": [
+            "from",
+            "to",
+            "data",
+            "value",
+            "chainId",
+            "gas",
+            "maxFeePerGas",
+            "maxPriorityFeePerGas"
+          ],
+          "nativeActionType": null,
+          "sourceDex": null,
+          "instructionCount": null
+        }
+      }
+    },
+    {
+      "name": "core-perps-to-polygon-pusd",
+      "origin": 1337,
+      "destination": 137,
+      "currencyIn": "0x00000000000000000000000000000000",
+      "currencyOut": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+      "history": {
+        "httpStatus": 200,
+        "rows": 3,
+        "selected": true
+      },
+      "receipt": {
+        "createdAt": "2026-10-07T08:43:10.259Z",
+        "requestId": "ref-44",
+        "nativeHash": "ref-45",
+        "otherHash": "ref-46",
+        "nativeOwner": "ref-47",
+        "otherOwner": "ref-48",
+        "nativeAction": {
+          "type": "sendAsset",
+          "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+          "amount": "18.400000",
+          "sourceDex": "",
+          "destinationDex": "",
+          "nonce": "ref-49"
+        },
+        "nativeLedger": {
+          "type": "send",
+          "token": "USDC",
+          "amount": "18.4",
+          "sourceDex": "",
+          "destinationDex": "",
+          "fee": "0.0",
+          "nativeTokenFee": "0.0",
+          "nonce": "ref-49",
+          "user": "ref-47",
+          "destination": "ref-14"
+        },
+        "actual": {
+          "origin": {
+            "amount": "1840000000",
+            "minimumAmount": "1840000000",
+            "currency": {
+              "chainId": 1337,
+              "address": "0x00000000000000000000000000000000",
+              "symbol": "USDC",
+              "decimals": 8
+            }
+          },
+          "destination": {
+            "amount": "18350331",
+            "minimumAmount": "18350331",
+            "currency": {
+              "chainId": 137,
+              "address": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+              "symbol": "pUSD",
+              "decimals": 6
+            }
+          }
+        },
+        "checks": {
+          "relaySuccess": true,
+          "nativeReference": true,
+          "otherReference": true,
+          "nativeUniqueLedger": true,
+          "nativeActionIdentity": true,
+          "nativeOwner": true,
+          "nativeNonce": true,
+          "nativeToken": true,
+          "nativeDex": true,
+          "nativeAmount": true,
+          "otherTransaction": true,
+          "otherSucceeded": true,
+          "otherFinalized": true,
+          "otherCanonicalBlock": true,
+          "otherAmount": true
+        },
+        "external": {
+          "kind": "evm-transfer-logs",
+          "blockNumber": "0x5ab2fab",
+          "token": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+          "transfers": [
+            {
+              "from": "ref-38",
+              "to": "ref-48",
+              "amount": "18350331",
+              "removed": false,
+              "logIndex": "0x5e8"
+            }
+          ]
+        }
+      },
+      "quote": {
+        "httpStatus": 200,
+        "schemaAccepted": true,
+        "errorCode": null,
+        "currencyIn": {
+          "amount": "1000000000",
+          "minimumAmount": "1000000000",
+          "currency": {
+            "chainId": 1337,
+            "address": "0x00000000000000000000000000000000",
+            "symbol": "USDC",
+            "decimals": 8
+          }
+        },
+        "currencyOut": {
+          "amount": "9951962",
+          "minimumAmount": "9752923",
+          "currency": {
+            "chainId": 137,
+            "address": "0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb",
+            "symbol": "pUSD",
+            "decimals": 6
+          }
+        },
+        "steps": [
+          {
+            "id": "authorize",
+            "kind": "signature"
+          },
+          {
+            "id": "deposit",
+            "kind": "transaction"
+          }
+        ],
+        "issues": [],
+        "depositShape": {
+          "keys": ["action", "nonce", "eip712Types", "eip712PrimaryType"],
+          "nativeActionType": "sendAsset",
+          "sourceDex": "",
+          "instructionCount": null
+        }
+      }
+    },
+    {
+      "name": "solana-usdc-to-core-spot",
+      "origin": 792703809,
+      "destination": 1337,
+      "currencyIn": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "currencyOut": "0x6d1e7cde53ba9467b783cb7c530ce054",
+      "history": {
+        "httpStatus": 200,
+        "rows": 3,
+        "selected": true
+      },
+      "receipt": {
+        "createdAt": "2026-10-12T13:35:48.622Z",
+        "requestId": "ref-50",
+        "nativeHash": "ref-51",
+        "otherHash": "ref-52",
+        "nativeOwner": "ref-53",
+        "otherOwner": "ref-54",
+        "nativeAction": {
+          "type": "sendAsset",
+          "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+          "amount": "3672.713273",
+          "sourceDex": "",
+          "destinationDex": "spot",
+          "nonce": "ref-55"
+        },
+        "nativeLedger": {
+          "type": "send",
+          "token": "USDC",
+          "amount": "3672.713273",
+          "sourceDex": "",
+          "destinationDex": "spot",
+          "fee": "0.0",
+          "nativeTokenFee": "0.0",
+          "nonce": "ref-55",
+          "user": "ref-7",
+          "destination": "ref-53"
+        },
+        "actual": {
+          "origin": {
+            "amount": "3673559828",
+            "minimumAmount": "3673559828",
+            "currency": {
+              "chainId": 792703809,
+              "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+              "symbol": "USDC",
+              "decimals": 6
+            }
+          },
+          "destination": {
+            "amount": "367271327300",
+            "minimumAmount": "359925900700",
+            "currency": {
+              "chainId": 1337,
+              "address": "0x6d1e7cde53ba9467b783cb7c530ce054",
+              "symbol": "USDC",
+              "decimals": 8
+            }
+          }
+        },
+        "checks": {
+          "relaySuccess": true,
+          "nativeReference": true,
+          "otherReference": true,
+          "nativeUniqueLedger": true,
+          "nativeActionIdentity": true,
+          "nativeOwner": true,
+          "nativeNonce": true,
+          "nativeToken": true,
+          "nativeDex": true,
+          "nativeAmount": true,
+          "otherTransaction": true,
+          "otherSucceeded": true,
+          "otherFinalized": true,
+          "otherAmount": true,
+          "otherDecimals": true
+        },
+        "external": {
+          "kind": "solana-owner-token-delta",
+          "slot": 456065334,
+          "commitment": "finalized",
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "owner": "ref-54",
+          "pre": [
+            {
+              "accountIndex": 2,
+              "amount": "3673574447",
+              "decimals": 6
+            }
+          ],
+          "post": [
+            {
+              "accountIndex": 2,
+              "amount": "14619",
+              "decimals": 6
+            }
+          ],
+          "signedChange": "-3673559828",
+          "rpcErrorCode": null
+        }
+      },
+      "quote": {
+        "httpStatus": 200,
+        "schemaAccepted": true,
+        "errorCode": null,
+        "currencyIn": {
+          "amount": "10000000",
+          "minimumAmount": "10000000",
+          "currency": {
+            "chainId": 792703809,
+            "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            "symbol": "USDC",
+            "decimals": 6
+          }
+        },
+        "currencyOut": {
+          "amount": "997774700",
+          "minimumAmount": "977819200",
+          "currency": {
+            "chainId": 1337,
+            "address": "0x6d1e7cde53ba9467b783cb7c530ce054",
+            "symbol": "USDC",
+            "decimals": 8
+          }
+        },
+        "steps": [
+          {
+            "id": "deposit",
+            "kind": "transaction"
+          }
+        ],
+        "issues": [],
+        "depositShape": {
+          "keys": ["instructions", "addressLookupTableAddresses"],
+          "nativeActionType": null,
+          "sourceDex": null,
+          "instructionCount": 1
+        }
+      }
+    },
+    {
+      "name": "core-spot-to-solana-usdc",
+      "origin": 1337,
+      "destination": 792703809,
+      "currencyIn": "0x6d1e7cde53ba9467b783cb7c530ce054",
+      "currencyOut": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "history": {
+        "httpStatus": 200,
+        "rows": 3,
+        "selected": true
+      },
+      "receipt": {
+        "createdAt": "2026-10-12T13:42:54.877Z",
+        "requestId": "ref-56",
+        "nativeHash": "ref-57",
+        "otherHash": "ref-58",
+        "nativeOwner": "ref-59",
+        "otherOwner": "ref-60",
+        "nativeAction": {
+          "type": "sendAsset",
+          "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+          "amount": "5.000000",
+          "sourceDex": "spot",
+          "destinationDex": "",
+          "nonce": "ref-61"
+        },
+        "nativeLedger": {
+          "type": "send",
+          "token": "USDC",
+          "amount": "5.0",
+          "sourceDex": "spot",
+          "destinationDex": "",
+          "fee": "0.0",
+          "nativeTokenFee": "0.0",
+          "nonce": "ref-61",
+          "user": "ref-59",
+          "destination": "ref-14"
+        },
+        "actual": {
+          "origin": {
+            "amount": "500000000",
+            "minimumAmount": "500000000",
+            "currency": {
+              "chainId": 1337,
+              "address": "0x6d1e7cde53ba9467b783cb7c530ce054",
+              "symbol": "USDC",
+              "decimals": 8
+            }
+          },
+          "destination": {
+            "amount": "4977998",
+            "minimumAmount": "4878439",
+            "currency": {
+              "chainId": 792703809,
+              "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+              "symbol": "USDC",
+              "decimals": 6
+            }
+          }
+        },
+        "checks": {
+          "relaySuccess": true,
+          "nativeReference": true,
+          "otherReference": true,
+          "nativeUniqueLedger": true,
+          "nativeActionIdentity": true,
+          "nativeOwner": true,
+          "nativeNonce": true,
+          "nativeToken": true,
+          "nativeDex": true,
+          "nativeAmount": true,
+          "otherTransaction": true,
+          "otherSucceeded": true,
+          "otherFinalized": true,
+          "otherAmount": true,
+          "otherDecimals": true
+        },
+        "external": {
+          "kind": "solana-owner-token-delta",
+          "slot": 456067285,
+          "commitment": "finalized",
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "owner": "ref-60",
+          "pre": [
+            {
+              "accountIndex": 2,
+              "amount": "1469950",
+              "decimals": 6
+            }
+          ],
+          "post": [
+            {
+              "accountIndex": 2,
+              "amount": "6447948",
+              "decimals": 6
+            }
+          ],
+          "signedChange": "4977998",
+          "rpcErrorCode": null
+        }
+      },
+      "quote": {
+        "httpStatus": 200,
+        "schemaAccepted": true,
+        "errorCode": null,
+        "currencyIn": {
+          "amount": "1000000000",
+          "minimumAmount": "1000000000",
+          "currency": {
+            "chainId": 1337,
+            "address": "0x6d1e7cde53ba9467b783cb7c530ce054",
+            "symbol": "USDC",
+            "decimals": 8
+          }
+        },
+        "currencyOut": {
+          "amount": "9975972",
+          "minimumAmount": "9776453",
+          "currency": {
+            "chainId": 792703809,
+            "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            "symbol": "USDC",
+            "decimals": 6
+          }
+        },
+        "steps": [
+          {
+            "id": "authorize",
+            "kind": "signature"
+          },
+          {
+            "id": "deposit",
+            "kind": "transaction"
+          }
+        ],
+        "issues": [],
+        "depositShape": {
+          "keys": ["action", "nonce", "eip712Types", "eip712PrimaryType"],
+          "nativeActionType": "sendAsset",
+          "sourceDex": "spot",
+          "instructionCount": null
+        }
+      }
+    },
+    {
+      "name": "solana-usdc-to-core-perps",
+      "origin": 792703809,
+      "destination": 1337,
+      "currencyIn": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "currencyOut": "0x00000000000000000000000000000000",
+      "history": {
+        "httpStatus": 200,
+        "rows": 3,
+        "selected": true
+      },
+      "receipt": {
+        "createdAt": "2026-10-12T13:42:52.635Z",
+        "requestId": "ref-62",
+        "nativeHash": "ref-63",
+        "otherHash": "ref-64",
+        "nativeOwner": "ref-65",
+        "otherOwner": "ref-66",
+        "nativeAction": {
+          "type": "sendAsset",
+          "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+          "amount": "120.093453",
+          "sourceDex": "",
+          "destinationDex": "",
+          "nonce": "ref-67"
+        },
+        "nativeLedger": {
+          "type": "send",
+          "token": "USDC",
+          "amount": "120.093453",
+          "sourceDex": "",
+          "destinationDex": "",
+          "fee": "0.0",
+          "nativeTokenFee": "0.0",
+          "nonce": "ref-67",
+          "user": "ref-7",
+          "destination": "ref-65"
+        },
+        "actual": {
+          "origin": {
+            "amount": "120140486",
+            "minimumAmount": "120140486",
+            "currency": {
+              "chainId": 792703809,
+              "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+              "symbol": "USDC",
+              "decimals": 6
+            }
+          },
+          "destination": {
+            "amount": "12009345300",
+            "minimumAmount": "12003340600",
+            "currency": {
+              "chainId": 1337,
+              "address": "0x00000000000000000000000000000000",
+              "symbol": "USDC",
+              "decimals": 8
+            }
+          }
+        },
+        "checks": {
+          "relaySuccess": true,
+          "nativeReference": true,
+          "otherReference": true,
+          "nativeUniqueLedger": true,
+          "nativeActionIdentity": true,
+          "nativeOwner": true,
+          "nativeNonce": true,
+          "nativeToken": true,
+          "nativeDex": true,
+          "nativeAmount": true,
+          "otherTransaction": false,
+          "otherSucceeded": false,
+          "otherFinalized": false,
+          "otherAmount": false,
+          "otherDecimals": true
+        },
+        "external": {
+          "kind": "solana-owner-token-delta",
+          "slot": null,
+          "commitment": "finalized",
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "owner": "ref-66",
+          "pre": [],
+          "post": [],
+          "signedChange": "0",
+          "rpcErrorCode": -32015
+        }
+      },
+      "quote": {
+        "httpStatus": 200,
+        "schemaAccepted": true,
+        "errorCode": null,
+        "currencyIn": {
+          "amount": "10000000",
+          "minimumAmount": "10000000",
+          "currency": {
+            "chainId": 792703809,
+            "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            "symbol": "USDC",
+            "decimals": 6
+          }
+        },
+        "currencyOut": {
+          "amount": "997774700",
+          "minimumAmount": "977819200",
+          "currency": {
+            "chainId": 1337,
+            "address": "0x00000000000000000000000000000000",
+            "symbol": "USDC",
+            "decimals": 8
+          }
+        },
+        "steps": [
+          {
+            "id": "deposit",
+            "kind": "transaction"
+          }
+        ],
+        "issues": [],
+        "depositShape": {
+          "keys": ["instructions", "addressLookupTableAddresses"],
+          "nativeActionType": null,
+          "sourceDex": null,
+          "instructionCount": 1
+        }
+      }
+    },
+    {
+      "name": "core-perps-to-solana-usdc",
+      "origin": 1337,
+      "destination": 792703809,
+      "currencyIn": "0x00000000000000000000000000000000",
+      "currencyOut": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "history": {
+        "httpStatus": 200,
+        "rows": 3,
+        "selected": true
+      },
+      "receipt": {
+        "createdAt": "2026-10-12T07:18:45.725Z",
+        "requestId": "ref-68",
+        "nativeHash": "ref-69",
+        "otherHash": "ref-70",
+        "nativeOwner": "ref-71",
+        "otherOwner": "ref-72",
+        "nativeAction": {
+          "type": "sendAsset",
+          "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+          "amount": "3.000000",
+          "sourceDex": "",
+          "destinationDex": "",
+          "nonce": "ref-73"
+        },
+        "nativeLedger": {
+          "type": "send",
+          "token": "USDC",
+          "amount": "3.0",
+          "sourceDex": "",
+          "destinationDex": "",
+          "fee": "0.0",
+          "nativeTokenFee": "0.0",
+          "nonce": "ref-73",
+          "user": "ref-71",
+          "destination": "ref-14"
+        },
+        "actual": {
+          "origin": {
+            "amount": "300000000",
+            "minimumAmount": "300000000",
+            "currency": {
+              "chainId": 1337,
+              "address": "0x00000000000000000000000000000000",
+              "symbol": "USDC",
+              "decimals": 8
+            }
+          },
+          "destination": {
+            "amount": "2978585",
+            "minimumAmount": "2963693",
+            "currency": {
+              "chainId": 792703809,
+              "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+              "symbol": "USDC",
+              "decimals": 6
+            }
+          }
+        },
+        "checks": {
+          "relaySuccess": true,
+          "nativeReference": true,
+          "otherReference": true,
+          "nativeUniqueLedger": true,
+          "nativeActionIdentity": true,
+          "nativeOwner": true,
+          "nativeNonce": true,
+          "nativeToken": true,
+          "nativeDex": true,
+          "nativeAmount": true,
+          "otherTransaction": true,
+          "otherSucceeded": true,
+          "otherFinalized": true,
+          "otherAmount": true,
+          "otherDecimals": true
+        },
+        "external": {
+          "kind": "solana-owner-token-delta",
+          "slot": 455961685,
+          "commitment": "finalized",
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "owner": "ref-72",
+          "pre": [
+            {
+              "accountIndex": 2,
+              "amount": "0",
+              "decimals": 6
+            }
+          ],
+          "post": [
+            {
+              "accountIndex": 2,
+              "amount": "2978585",
+              "decimals": 6
+            }
+          ],
+          "signedChange": "2978585",
+          "rpcErrorCode": null
+        }
+      },
+      "quote": {
+        "httpStatus": 200,
+        "schemaAccepted": true,
+        "errorCode": null,
+        "currencyIn": {
+          "amount": "1000000000",
+          "minimumAmount": "1000000000",
+          "currency": {
+            "chainId": 1337,
+            "address": "0x00000000000000000000000000000000",
+            "symbol": "USDC",
+            "decimals": 8
+          }
+        },
+        "currencyOut": {
+          "amount": "9975972",
+          "minimumAmount": "9776453",
+          "currency": {
+            "chainId": 792703809,
+            "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            "symbol": "USDC",
+            "decimals": 6
+          }
+        },
+        "steps": [
+          {
+            "id": "authorize",
+            "kind": "signature"
+          },
+          {
+            "id": "deposit",
+            "kind": "transaction"
+          }
+        ],
+        "issues": [],
+        "depositShape": {
+          "keys": ["action", "nonce", "eip712Types", "eip712PrimaryType"],
+          "nativeActionType": "sendAsset",
+          "sourceDex": "",
+          "instructionCount": null
+        }
+      }
+    }
+  ],
+  "scope": "Public completed transfers only; only selected anonymized evidence is persisted. No user wallet or private fields. URLs with credentials and transport errors never logged.",
+  "limitations": "Selected historical transfers and current hypothetical quotes, not Hunch execution, wallet eligibility, or proof of generic recovery. No fees inferred from amounts.",
+  "finality": {
+    "polygon": "0x5afcf50",
+    "solana": 456088467
+  }
+}

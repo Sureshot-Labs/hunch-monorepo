@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "observedAt": "2026-10-12T15:02:32.336Z",
+  "route": "solana-usdc-to-core-perps",
+  "createdAt": "2026-10-12T13:42:52.635Z",
+  "requests": 4,
+  "attempts": [
+    {
+      "maxSupportedTransactionVersion": 0,
+      "errorCode": -32015,
+      "reportedVersion": 1,
+      "resultPresent": false
+    },
+    {
+      "maxSupportedTransactionVersion": 1,
+      "errorCode": null,
+      "reportedVersion": null,
+      "resultPresent": true
+    }
+  ],
+  "receipt": {
+    "version": 1,
+    "slot": 456067272,
+    "finalizedSlot": 456089066,
+    "pre": [
+      {
+        "accountIndex": 1,
+        "amount": "11140930600",
+        "decimals": 6
+      }
+    ],
+    "post": [
+      {
+        "accountIndex": 1,
+        "amount": "11020790114",
+        "decimals": 6
+      }
+    ],
+    "debit": "120140486",
+    "expectedDebit": "120140486",
+    "checks": {
+      "exactSignature": true,
+      "succeeded": true,
+      "finalized": true,
+      "amount": true,
+      "decimals": true
+    }
+  }
+}

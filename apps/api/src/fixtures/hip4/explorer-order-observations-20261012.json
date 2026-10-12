@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "origin": "sanitized-official-explorer-native-order-actions",
+  "collectedAt": "2026-10-12T14:51:52.675Z",
+  "environment": "mainnet",
+  "requests": 15,
+  "sources": {
+    "transport": "https://app.hyperliquid.xyz/assets/config-BCWVmVrl.js",
+    "request": "https://app.hyperliquid.xyz/assets/UserDetails-B_pListN.js",
+    "endpoint": "https://rpc.hyperliquid.xyz/explorer"
+  },
+  "coverage": {
+    "participants": 12,
+    "minimumErrors": 0,
+    "completeHistory": false,
+    "perOrderExecutionResult": false,
+    "exactMinimumBoundaryObserved": false,
+    "scope": "Selected original single-order actions from official userDetails explorer responses. Null explorer error does not independently establish per-order admission/fill or the native minimum predicate. Wallets/hashes are aliases local to this file."
+  },
+  "observations": [
+    {
+      "accountAlias": "participant-1",
+      "time": 1791809026545,
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000009",
+      "error": null,
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 100115510,
+            "b": true,
+            "p": "0.01",
+            "s": "100",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            }
+          }
+        ]
+      },
+      "singleHipOrder": true
+    },
+    {
+      "accountAlias": "participant-1",
+      "time": 1791814503084,
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "error": null,
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 100115700,
+            "b": false,
+            "p": "0.00023",
+            "s": "40",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Ioc"
+              }
+            }
+          }
+        ]
+      },
+      "singleHipOrder": true
+    }
+  ]
+}

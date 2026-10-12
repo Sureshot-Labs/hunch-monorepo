@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "origin": "sanitized-public-read",
+  "requests": ["outcomeMeta", "spotMeta"],
+  "scope": "Selected public metadata only. No account requests, signatures, orders or quotes. Observed multipliers are not fee rates or execution proof. Empty outcomeTokens is an actual spotMeta lookup result, not evidence of zero decimals.",
+  "observations": [
+    {
+      "environment": "mainnet",
+      "endpoint": "https://api.hyperliquid.xyz/info",
+      "collectedAt": "2026-10-12T12:32:51.553Z",
+      "feeScale": "1.0",
+      "outcome": {
+        "outcome": 11553,
+        "name": "template:binaryPrice",
+        "description": "perp:HYPE|priceDescription:HYPE-USDC perp mark|seconds:60|threshold:85.469|time:20261012-1245",
+        "sideSpecs": [{ "name": "template:Yes" }, { "name": "template:No" }],
+        "quoteToken": "USDC",
+        "venue": "out",
+        "deployerFeeScale": "1.0"
+      },
+      "quote": {
+        "name": "USDC",
+        "szDecimals": 8,
+        "weiDecimals": 8,
+        "index": 0,
+        "tokenId": "0x6d1e7cde53ba9467b783cb7c530ce054",
+        "isCanonical": true,
+        "evmContract": {
+          "address": "0x6b9e773128f453f5c2c60935ee2de2cbc5390a24",
+          "evm_extra_wei_decimals": -2
+        },
+        "fullName": null,
+        "deployerTradingFeeShare": "0.0"
+      },
+      "outcomeTokens": []
+    },
+    {
+      "environment": "testnet",
+      "endpoint": "https://api.hyperliquid-testnet.xyz/info",
+      "collectedAt": "2026-10-12T12:32:54.423Z",
+      "feeScale": "1.0",
+      "outcome": {
+        "outcome": 23694,
+        "name": "template:binaryPriceExternal",
+        "description": "feed:CF Benchmarks BRTI|instrument:Bitcoin BTC/USD|priceDescription:BRTI 1s [E-60s,E); ref=83074.84 at 20261012-1230 [-70s,-10s); strike=ref-0.005001; TEST|seconds:60|shortName:BTCtest|threshold:83074.834999|time:20261012-1300",
+        "sideSpecs": [{ "name": "template:Yes" }, { "name": "template:No" }],
+        "quoteToken": "USDC",
+        "venue": "at",
+        "deployerFeeScale": "1.0"
+      },
+      "quote": {
+        "name": "USDC",
+        "szDecimals": 8,
+        "weiDecimals": 8,
+        "index": 0,
+        "tokenId": "0xeb62eee3685fc4c43992febcd9e75443",
+        "isCanonical": true,
+        "evmContract": {
+          "address": "0x0b80659a4076e9e93c7dbe0f10675a16a3e5c206",
+          "evm_extra_wei_decimals": -2
+        },
+        "fullName": null,
+        "deployerTradingFeeShare": "0.0"
+      },
+      "outcomeTokens": []
+    }
+  ]
+}

@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "origin": "authorized-unsigned-third-party-preflight",
+  "collectedAt": "2026-10-12T13:31:05.836Z",
+  "endpoint": "https://send.hyperliquidapi.com/preflight",
+  "scope": "Eight unsigned requests; only public outcome ID and synthetic order values, no wallet, key, signature or exchange submission. Selected responses prove gateway behavior only. valid is not exchange admission, minimum/capacity validation or an exact fee quote.",
+  "environment": "mainnet",
+  "outcome": 11566,
+  "market": "perp:ETH|priceDescription:ETH-USDC perp mark|seconds:60|threshold:2527.7|time:20261012-1345",
+  "action": "order",
+  "side": "buy",
+  "tif": "gtc",
+  "allResponses": {
+    "httpStatus": 200,
+    "szDecimals": 0,
+    "isSpot": false,
+    "estimatedFee": "0.04%",
+    "priorityFee": null
+  },
+  "cases": [
+    {
+      "name": "whole-size-at-ten",
+      "coin": "#115660",
+      "asset": 100115660,
+      "price": "0.5",
+      "size": "20",
+      "valid": true,
+      "errorField": null
+    },
+    {
+      "name": "below-ten",
+      "coin": "#115660",
+      "asset": 100115660,
+      "price": "0.5",
+      "size": "19",
+      "valid": true,
+      "errorField": null
+    },
+    {
+      "name": "fractional-size",
+      "coin": "#115660",
+      "asset": 100115660,
+      "price": "0.5",
+      "size": "20.5",
+      "valid": false,
+      "errorField": "size"
+    },
+    {
+      "name": "five-significant-figures",
+      "coin": "#115660",
+      "asset": 100115660,
+      "price": "0.50001",
+      "size": "20",
+      "valid": true,
+      "errorField": null
+    },
+    {
+      "name": "six-significant-figures",
+      "coin": "#115660",
+      "asset": 100115660,
+      "price": "0.500001",
+      "size": "20",
+      "valid": false,
+      "errorField": "price"
+    },
+    {
+      "name": "eight-decimal-price",
+      "coin": "#115660",
+      "asset": 100115660,
+      "price": "0.00000001",
+      "size": "1000000000",
+      "valid": false,
+      "errorField": "price"
+    },
+    {
+      "name": "nine-decimal-price",
+      "coin": "#115660",
+      "asset": 100115660,
+      "price": "0.000000001",
+      "size": "10000000000",
+      "valid": false,
+      "errorField": "price"
+    },
+    {
+      "name": "other-outcome-side",
+      "coin": "#115661",
+      "asset": 100115661,
+      "price": "0.5",
+      "size": "20",
+      "valid": true,
+      "errorField": null
+    }
+  ]
+}

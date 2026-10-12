@@ -80,6 +80,8 @@ export type RelayQuoteRequest = Readonly<{
   strict?: boolean;
   refundTo?: string;
   slippageTolerance?: string;
+  // Opt-in only. Native Core withdrawals require v2; existing routes keep their defaults.
+  protocolVersion?: "v2";
 }>;
 
 export type RelayClientConfig = Readonly<{

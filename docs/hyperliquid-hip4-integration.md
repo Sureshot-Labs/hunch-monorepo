@@ -3,13 +3,14 @@
 ## Status, scope, and evidence
 
 This is the backend source-of-truth specification for `hip-next`, updated and
-rechecked on 2026-10-11. It is a development plan, not an assertion that HIP
+rechecked on 2026-10-12. It is a development plan, not an assertion that HIP
 trading, funding, matching, or wallet intelligence is implemented or production-ready.
 
 Start with section 12 for evidence gates, section 11 for implementation order,
 then the owned domain section and companion client contract. Section 13 records
 the implemented P0 read-contract foundation and passive P1 canary. Financial
-capabilities remain off and require their listed proof.
+capabilities remain off and require their listed proof. Sections 16–18 record
+P1 acceptance and the latest P0 evidence; earlier acceptance notes are dated history.
 
 | Repository             | Branch / immutable reference                                                |
 | ---------------------- | --------------------------------------------------------------------------- |
@@ -156,19 +157,31 @@ provides settlement information. Read token decimals instead of assigning all
 protocol amounts the ERC20 USDC six-decimal unit.
 [Spot info endpoints](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/spot)
 
-Price/size formatting must obey spot precision and significant-figure rules,
-using metadata `szDecimals`: at most five significant price figures and at most
-`8 - szDecimals` price decimal places, with the documented integer-price exception.
-Do not confuse size precision with token `weiDecimals` or Relay amount units.
-Strip invalid trailing zeros before signing.
+General spot formatting documents at most five significant price figures and
+`8 - szDecimals` price decimal places, with an integer-price exception. Outcome
+formatting is different: the pinned official application in section 18 uses
+`szDecimals=0`, fixed **five price decimal places**, and outcome-token
+`weiDecimals=5`. These are separate from quote-token raw units (observed USDC: 8).
+Preserve the dated source of these terms rather than inventing fields in a
+`spotMeta` response that does not contain outcome tokens. Strip invalid trailing
+zeros before signing; native boundary acceptance is a separate test.
 [Tick and lot size](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/tick-and-lot-size)
 
 Required quote math uses exact decimal strings/integer units. Quantize first,
 then validate actual signed notional/size. Buy fee-inclusive debit and sell
 token debit must reflect those final quantities. Do not inherit Polymarket's
 five-share or marketable-buy minimum, Limitless fee math, or a universal `$10`
-HIP minimum. Actual outcome minimum and supported precision remain a live-fixture
-requirement.
+HIP minimum. The official error reference documents a 10-quote-unit spot minimum;
+the HIP-specific accepted/rejected boundary remains unobserved. Section 18 now
+contains native original BUY orders below $10, not merely partial fills. Do not
+apply that generic spot floor to outcomes or infer a new exact floor from the
+smallest selected order.
+
+The required minimum proof must identify the tested original order, its exact
+integer size and price, the native per-order acceptance/rejection, and the rule's
+valuation basis (limit versus reference price, side, opening versus closing).
+An explorer transaction's top-level success, an IOC sell floor or the smallest
+returned fill cannot establish that predicate.
 
 GTC, IOC and ALO are documented time-in-force modes. IOC may partially fill;
 it must not be presented or retried as FOK. Conditional/perp-only order types
@@ -1537,6 +1550,9 @@ review.
 
 ### Consolidated implementation status and next sequence
 
+This table records the independent-review checkpoint. The subsequent real-login
+acceptance and offline P0 evidence are recorded in section 16.
+
 | Phase            | Implemented                                                                                                                                                | Remaining                                                                                           |
 | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | P0 read protocol | Public fixtures, scoped native identities, exact conversions, labels and official/fractional payout mapping                                                | Financial precision/minimum, fee/mode, route/receipt and signing capability evidence                |
@@ -1555,3 +1571,494 @@ P0 evidence contract; implement P2 read/accounting projection first. Then procee
 P3 → P4 → P4S/P5, with P6 a separate research capability and P7 an explicitly
 authorized rollout. Do not infer authority for signatures, production funding,
 policy changes or deployment from a code-review GO.
+
+## 16. Real-login P1 acceptance and offline P0 evidence — October 12, 2026
+
+This follow-up starts from backend `51c0fec8` and frontend `f8c40df1` on
+`hip-next`. Changes remain uncommitted. No production policy, account mode,
+funding, order submission or live signing was changed.
+
+### Implemented and exercised
+
+- The full app now passed real Privy-authenticated inspection through
+  `localhost:3000` → Next proxy → local API → isolated PG16/Redis → public
+  mainnet data. The user-requested local admin flag stays enabled for continued
+  testing; production permissions are untouched. The fixture query flag is absent.
+- Desktop and 390/320 px mobile display current bid/ask observations, official
+  settlement, recorded trades and minute OHLC. During this acceptance a new
+  allowlisted HYPE outcome showed changing quotes without a manual refresh.
+  A market with no recorded fills correctly showed empty history, not invented
+  candles. Its later official settlement appeared as YES LOSS / NO WIN, after
+  the pending interval. New trade arrival itself was not observed in that market.
+- Fixed a live-history gap: the latest expanded trades/chart panel now refreshes
+  at the server-provided cadence. Collapsed panels do not mount queries; background
+  polling is disabled. Older pages do not auto-poll or jump back. User, revision,
+  environment and market changes isolate cache and cancel obsolete requests.
+- With temporary local page sizes of five trades and two candles, the real BTC
+  ledger paged **5 → 5 → 1** without dropping equal-timestamp trades. OHLC and
+  share volumes matched SQL. Earlier chart pages remained reachable. Restoring
+  normal sizes used a new policy revision; the UI reset its old page context.
+- The earlier real-login fault probe stopped only the local indexer, observed
+  stale quotes disappear, then resumed it and observed fresh recovery with no
+  flush errors. Combined with the current actual-history checks, this closes the
+  prior real-Privy/full-app acceptance gap. The separate production-build gate
+  subsequently passed in the user's terminal (see the verification table).
+- Fixed date-only template deadlines: `YYYYMMDD` is parsed as the exclusive next
+  UTC midnight, with calendar validation and no inferred settlement. Date-time
+  semantics are unchanged. This follows the provider's
+  [date hint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/hip-4-deployer-actions#templates).
+
+### Reproducible P0 evidence
+
+`apps/api/src/fixtures/hip4/protocol-observations-20261012.json` contains four
+public `outcomeMeta`/`spotMeta` reads, selected and sanitized at 12:32 UTC.
+Mainnet outcome 11553 and testnet 23694 retain different native USDC token IDs,
+eight raw-unit decimals and observed fee multipliers. Outcome tokens were absent
+from those spot metadata responses: executable outcome precision stays unknown.
+Neither a multiplier of 1 nor missing outcome metadata proves a zero fee or an
+integer lot size. These are observations, not a forever-current capability cache.
+
+`apps/api/src/fixtures/hip4/signing-sdk-0.24.0.json` adds twenty **offline** goldens
+from the [official Python SDK](https://github.com/hyperliquid-dex/hyperliquid-python-sdk/tree/2fdb18f9517675ea03695a0962bd19eece9c83f0):
+L1 direct/expiry/vault/vault-with-expiry, IOC sell, ALO, two-side batch,
+cancel-by-OID, cancel-by-cloid and user-signed SendAsset, on both environments.
+The generator pins SDK 0.24.0, its release commit and signing-source SHA-256,
+plus the signing dependencies. It uses only the SDK's published example key,
+synthetic actions and dummy recipients; never fund that key. No request is sent.
+
+Regenerate from the repository root (requires the pinned packages in the uv cache):
+
+```sh
+uv run --offline --no-project apps/api/src/fixtures/hip4/generate-signing.py
+```
+
+This prints JSON only. Regeneration was compared to the checked-in fixture and
+was identical. `hip4-signing-contract-tests.ts`, included in `test:hip4`, independently
+verifies digests, signatures, recovered signer, environment and amount sensitivity
+with the existing ethers dependency. SDK-produced MessagePack is the oracle;
+the old prototype serializer is not used. The `421614` user-signature domain is
+not mistaken for the Core environment. This is encoding evidence, **not** a
+production signer, executable order, fee/minimum test or Privy-role approval.
+
+### Verification and remaining boundaries
+
+| Check                                         | Result                                                                                                                                                                             |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pure HIP regression + SDK and route contracts | 56/56 pass                                                                                                                                                                         |
+| Full backend build/typecheck/lint             | 47/47 workspace tasks pass                                                                                                                                                         |
+| Fresh isolated PG16.2                         | Migrations through 0283, original/P1 integration suites pass                                                                                                                       |
+| SQL/load checks                               | 20,000 markets, one million trades, 100,000 candles/coverage rows; generic/sparse/first/resumed/empty pages and retention pass                                                     |
+| Frontend                                      | 1,668 tests, typecheck, lint and generated contract/fixture agreement pass                                                                                                         |
+| Full-app live UI                              | Actual Privy session, desktop/mobile, prices/SSE, history, pagination and scoped policy recovery verified                                                                          |
+| Supplemental frontend build                   | Node 20 Webpack passes, with existing Privy/viem dependency warnings                                                                                                               |
+| Exact frontend production build               | PASS, user-executed in the normal terminal: Node 20.11.1, Next 16.3.4 Turbopack; compiled in 20.5 s, all 42 pages generated. Supersedes the earlier agent-sandbox `EPERM` failures |
+
+Both changed documents pass Markdown lint. Repository-wide frontend Markdown
+lint still reports the pre-existing second H1 in `AGENTS.md`; it was not edited.
+
+The new changes received author review and regression checks, not a new independent
+agent verdict. Prior history-free reviews apply to the preceding implementation.
+
+| Phase / evidence                         | Current status                                                                                                     | Concrete next step                                                                                                                        |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| P0 read contract                         | Implemented and tested, including date-only expiry                                                                 | Retain dated fixtures and unknown precision explicitly                                                                                    |
+| P0 offline signing                       | Twenty independently checked SDK goldens                                                                           | Reuse these as the oracle for the later production adapter; execution/error recovery remains a separate P3/P4 obligation                  |
+| P0 executable precision/minimum and fees | First-party formatting/rate contracts and native fee samples captured in section 18; minimum boundary not observed | Verify the native boundary; do not substitute unsigned gateway acceptance for exchange acceptance                                         |
+| P0 account mode / routes / receipt       | Funded unified snapshots and all four exact Relay/native/Base receipt correlations captured in sections 17–18      | Preserve cash/hold/risk capacity separately; owned-cash projection is P2, production credit attribution and recovery are P3/P4            |
+| P1 read-only runtime                     | Local acceptance complete, including exact build                                                                   | Keep the canary internal; public activation/deploy remains a separate decision                                                            |
+| P2–P7                                    | Not implemented by this patch                                                                                      | Begin owned-account/ledger projection only after its P0 contracts are settled; subsequent writes and activation need their own acceptance |
+
+P1's internal read-only acceptance is complete; P0 financial execution terms are
+not fully closed. Trade/Copy/funding capabilities remain false. No additional
+migrations, financial SDK runtime or background account scan was introduced.
+The scoped, explicitly authorized account/quote follow-up is recorded below.
+
+## 17. Authorized account and Relay contract evidence — October 12, 2026
+
+The user authorized reads for the one connected embedded EVM wallet in the
+isolated `hip4_local` database. Five mainnet `/info` reads and eight `/quote/v2`
+requests were made, including two pairs clarifying withdrawal wire fields.
+The local Relay key stayed server-side. Quote requests can create provider quote
+records; no deposit-address mode, signature, transaction broadcast, account-mode
+change or money movement occurred. No production database was queried.
+
+`apps/api/src/fixtures/hip4/relay-core-observations-20261012.json` retains selected
+wire fields, units and identity-equality results only. User addresses, balances,
+request IDs, nonces, transaction calldata and keys are omitted. Tests reconstruct
+synthetic aliases from these observations; they are not executable live quotes.
+
+### Findings and implemented compatibility
+
+- `userRole` returned `missing`, while `userAbstraction` returned `default`.
+  This is an unregistered account observation, not proof of funded Standard-mode
+  behavior. Generic `userFees` returned spot/perp rates but no outcome-specific
+  fee fields. Do not derive an outcome fee from those generic rates or promote
+  `default` to a confirmed cash mode. The earlier public token observations
+  likewise do not prove executable outcome lots/minimums.
+- All four Base USDC ↔ Core spot/perps routes returned HTTP 200 and passed the
+  existing Relay response schema. Source/destination decimals are 6 ↔ 8. A
+  10-USDC Base input quoted 8.778997 Core USDC, with a minimum of 8.603417;
+  this is a dated quote, not a fixed fee or a $10 usable trading balance.
+  Reverse quotes were available even without funded Core capacity. Quote
+  availability must never authorize a debit or substitute for a credit receipt.
+- Live nonce mapping uses domain `RelayNonceMapping`, version `2`, EIP-712
+  domain chain `1`, and message `chainId: "hyperliquid"`. Do not synthesize that
+  message field from the numeric Relay routing chain `1337`.
+- The native transaction envelope is `action: { type: "sendAsset", parameters }`,
+  not EVM calldata and not an already flattened SDK action. Its envelope nonce,
+  parameter nonce and preceding authorization nonce agreed. Spot source uses
+  `sourceDex: "spot"`; perps source uses `""`. Both use the actual native USDC
+  token ID, with a human decimal amount `"10.000000"`, not raw `1000000000`.
+  The observed authorization depositor and SendAsset destination are different
+  concepts; do not invent an equality guard between them.
+- The transport request type now allows explicit `protocolVersion: "v2"`.
+  Existing callers do not acquire a new default. Six offline contract tests
+  cover the four observed route shapes, raw/human amounts, SDK EIP-712 field
+  compatibility, preservation of native payloads and unchanged legacy requests.
+  They neither sign nor execute returned actions. Ordinary Relay runtime,
+  fixture and Solana-rehearsal regression suites also pass.
+- The pinned SDK's low-level signing helpers pass twenty independent ethers
+  goldens. Its high-level `Info` name/asset lookup does not implement outcome
+  discovery; adopting `Exchange.order(name)` unchanged is not a HIP adapter.
+
+The live envelope is compared against the [Relay Core guide](https://docs.relay.link/references/api/api_guides/hyperliquid-support)
+and the pinned [official SDK](https://github.com/hyperliquid-dex/hyperliquid-python-sdk/tree/2fdb18f9517675ea03695a0962bd19eece9c83f0).
+Current responses take precedence over illustrative guide values for wire fields;
+any later mismatch must be diagnosed, not silently signed with guessed values.
+
+### Remaining work, without reopening P1
+
+| Item                       | Evidence still needed / implementation boundary                                                                                                                          |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Outcome precision/minimums | Formatting contract now pinned in section 18; native minimum boundary remains unobserved                                                                                 |
+| Outcome fees               | Base formula and selected native settlement arithmetic verified in section 18; ordinary maker sells, rounding and builder execution are later financial acceptance cases |
+| Funded account modes       | Funded unified wire snapshots captured in section 18; mode-aware owned-cash projection remains P2, portfolio-margin write support stays disabled                         |
+| Core funding receipts      | Four actual route receipt fixtures verified in section 18; production operation attribution, ambiguous recovery and owned-cash projection remain P2/P3                   |
+| Live signing/execution     | Separate explicit authorization for testnet signing/submission, with no implicit mainnet funding or permission change                                                    |
+
+P2 can be designed from these concrete contracts, but no native finance route is
+enabled by this patch. New P0 findings must not be used as an unrelated blocker
+for the already verified internal read-only P1. Both branches stay `hip-next`,
+with no commit, push, merge or deployment in this follow-up.
+
+## 18. P0 contract audit and unsigned gateway check — October 12, 2026
+
+### What the preflight actually proved
+
+With separate user permission, eight unsigned requests were sent to QuickNode's
+public `/preflight`, using public mainnet outcome 11566 and synthetic prices and
+sizes only. No wallet, key, signature or `/exchange` request was used. The selected
+responses are in `fixtures/hip4/preflight-observations-20261012.json` under API src.
+
+| Case                                              | Gateway response                             |
+| ------------------------------------------------- | -------------------------------------------- |
+| 20 units at 0.5; either side                      | Valid; native asset IDs agree with Hunch     |
+| 19 units at 0.5 ($9.50)                           | Valid, despite the guide's $10 minimum claim |
+| 20.5 units at 0.5                                 | Invalid size; reported `szDecimals: 0`       |
+| Price 0.50001 / 0.500001                          | Valid / invalid price                        |
+| Price 0.00000001 / 0.000000001, each $10 notional | Both invalid price                           |
+
+Every response reports `isSpot: false` and `estimatedFee: "0.04%"`. These cannot
+establish native outcome fee/minimum rules. A successful gateway preflight is
+neither an exchange acceptance nor a capacity check without an account.
+The [gateway guide](https://www.quicknode.com/guides/hyperliquid/trade-hip-4-prediction-markets-on-hyperliquid)
+and its actual validation disagree on the minimum. The request allowance was
+exhausted at eight; no automatic retries or signed follow-up were performed.
+
+The existing read mapper retains unknown metadata-supplied outcome precision
+and disabled financial capabilities. No runtime dependency on this gateway was
+added. Subsequent first-party source inspection and native fills below resolve
+the formatting and base-fee questions independently of this gateway.
+
+### First-party precision and fee evidence
+
+`fixtures/hip4/official-ui-contract-20261012.json` records factual rules from the
+public [official application asset](https://app.hyperliquid.xyz/assets/config-BCWVmVrl.js),
+SHA-256 `0d91d8cf518444ca4be1b210666478f873cd8c1eab6bdd35a9e60aadf4255a51`.
+The source was read as text, never executed, without cookies or an account.
+The bundle itself is not copied into this repository. Minified function names
+identify this exact dated source, not a stable API to import or call.
+
+- `h3` uses integer executable size for `#` coins; `R3` uses five **decimal
+  places**, not generic spot significant figures. `vce` uses five outcome-token
+  raw-unit decimals. Quote USDC still uses its own metadata precision.
+- `m8` selects the user's spot maker/taker rates for outcomes. `h8` applies the
+  active referral discount to positive rates; the returned rates already include
+  tier/staking. Reapplying the staking discount would understate fees.
+- `_8` charges zero on opening. For closing, the combined multiplier is
+  `feeScale * (deployerFeeScale + max(1, deployerFeeScale))`. Positive rates receive
+  the referral discount; negative maker rates become zero, not rebates.
+- If the quote is aligned, the taker protocol share receives the 20% discount,
+  not the deployer share. The inspected mainnet aligned list was empty; neither
+  that list nor fee multipliers should become permanent application constants.
+- Do not copy the UI's missing-multiplier-to-zero fallback into a financial
+  adapter. Missing terms mean unknown fees. This is a rate contract, not proof
+  of rounded debit, builder fees, supported signing permissions or spendability.
+
+The [native error reference](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/error-responses)
+documents `MinTradeSpotNtl` at 10 quote units. It does not establish a HIP floor:
+the fresh original-order sample below contains smaller native BUY orders.
+Scale-order validation in the UI, partial fills and the unsigned gateway are
+not substitutes for native boundary evidence. Existing P1 reads remain available
+while this financial boundary is investigated.
+
+### Native public fills and transfer evidence
+
+With explicit permission for at most 20 requests and three public participants,
+17 requests captured bounded fills/ledger, current fee rates and two official
+settlements. `fixtures/hip4/public-account-observations-20261012.json` retains
+selected examples, with wallet addresses, hashes and order/trade/client IDs
+replaced consistently. No private Hunch account data or complete histories are
+stored. Three requests remain unused; there is no automatic account scan.
+
+| Observed case                                                                                       | Consequence for the later financial adapter                                                                                                                            |
+| --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Buy` fills charged zero; `Settlement` charged 0.14% or 0.12768% of payout in the selected accounts | Exact integer arithmetic matches the official UI formula using current spot rates, referral discount and observed fee/deployer scales of 1; do not use a universal fee |
+| `Settlement` fills exist even when the non-funding ledger response is empty                         | Reconcile settlement through native fills plus official payout/balance evidence, not a ledger-only search                                                              |
+| `Merge Outcome` produces two legs with the same hash/time but different coins and trade IDs         | Do not interpret the transformation as two independent sales or deduplicate only by hash                                                                               |
+| One order has two fills of 6 and 7 shares, the same order/client ID, and different trade IDs        | Preserve both partial executions; neither one establishes the original order minimum                                                                                   |
+| A `send` has nonzero `nativeTokenFee` but empty `feeToken`                                          | Preserve the unknown denomination; do not reject the record or invent USDC fees                                                                                        |
+
+Opening, settlement and merge are observed; ordinary maker sells, fee rounding
+boundaries and builder execution are not. The public transfers establish native
+wire shapes, not a correlated Relay destination receipt or this user's funded
+capacity. No signature, order, cancellation or transfer was sent.
+
+### Fresh funded snapshots and original orders
+
+The original sample's `recentTrades` seed subsequently returned HTTP 500 twice.
+Its scrubbed addresses were not reconstructable, so no account follow-up was
+attempted against guessed participants. The user separately authorized a new
+sample of at most three public participants and twelve reads. One pass made
+**11 requests**: metadata, recent trades, then mode, spot state and historical
+orders for each participant. No signatures, private account, faucet or money
+movement was involved. Account aliases are local to each fixture, not shared
+between the old and new samples.
+
+`fixtures/hip4/public-account-state-20261012.json` preserves selected original
+fields from this second sample, collection time, response/selection counts and
+the 2,000-history-row cap where reached. All three accounts were funded
+`unifiedAccount`. The fixture is deliberately not a full portfolio/history.
+
+- Native original BUY `origSz=22`, `limitPx=0.1539`, `reduceOnly=false` gives
+  **$3.3858**, with an `open` historical event. A second original BUY is $4.812.
+  This disproves using $10 as a universal HIP floor; it does not establish an
+  exact $1 boundary or the currently resting/terminal state of those orders.
+- One USDC snapshot reports total `29.9145116`, hold `6.446`, and available
+  after maintenance `26.6915116`. Total minus hold is `23.4685116`, a third
+  quantity. Do not substitute risk capacity for owned unheld cash. Another
+  snapshot has maintenance capacity equal to total despite nonzero hold.
+- One client ID occurs on three different native order IDs with different
+  timestamps/prices. Preserve native order identities and replacement lineage;
+  client ID alone cannot deduplicate all executions.
+- The bounded capture selected one event per native order and can retain an
+  earlier `open` event. Tests and fixture coverage explicitly disallow treating
+  it as current open orders or complete terminal history. A future collector
+  must retain distinct `(oid, statusTimestamp, status)` events before reducing
+  to latest state; provider truncation must remain explicit.
+
+The pure historical-order parser preserves status time, `origSz` versus remaining
+`sz`, native identity and nullable client ID. It does not implement a state
+reducer, minimum-order gate or spendable-cash projection. Tests distinguish
+actual original-order evidence from partial-fill notional and synthetic examples.
+
+A further 14-read public sample across ten participants found an original
+non-reduce-only BUY of **2 shares at 0.57541 ($1.15082)**, with both its `open`
+and `filled` events. `fixtures/hip4/original-order-minimum-20261012.json`
+retains distinct status events, original size and remaining size; an IOC liquidity
+rejection is not relabelled a minimum rejection. No `minTradeNtlRejected` appeared
+in that capped sample. A nine-read follow-up using a different recent-trade seed
+and seven participants also found no minimum rejection. These are selected,
+possibly overlapping samples, not a proof that sub-$1 orders are allowed or
+that $1 is the exact current floor. No frontend minimum or backend admission
+constant is inferred from the smallest observed order.
+
+`fixtures/hip4/explorer-order-observations-20261012.json` additionally preserves
+two original single-order actions from the official public explorer: a BUY of
+100 at 0.01 ($1 limit input), and an IOC SELL of 40 at 0.00023 ($0.0092 limit
+floor). Their top-level `error` is null, but the response has no per-order
+execution result. Neither proves exact admission at $1 or below; the sell can
+execute at bids above its limit floor. Tests preserve this distinction and native
+asset identities. This evidence narrows the next test, not the minimum constant.
+
+### Correlated completed Relay receipts
+
+`fixtures/hip4/relay-receipts-20261012.json` contains four actual completed public
+routes, captured by 22 read-only calls to Relay Requests v3/status, native
+`userNonFundingLedgerUpdates`/`spotMeta`, and Base JSON-RPC. This is separate
+from the earlier hypothetical quotes. Wallets, hashes and nonces are consistent
+aliases within this fixture; public token identities and exact amounts remain.
+No signatures, quote submissions, transactions or account changes were made.
+
+| Observed route    | Origin USDC | Destination USDC | Native source/destination DEX |
+| ----------------- | ----------: | ---------------: | ----------------------------- |
+| Base → Core spot  |      41.952 |        41.923828 | empty → `spot`                |
+| Base → Core perps |       14.07 |        14.048591 | empty → empty                 |
+| Core spot → Base  |   97.347106 |        97.306611 | `spot` → empty                |
+| Core perps → Base |    9.962411 |         9.939005 | empty → empty                 |
+
+For every route, the original native `sendAsset` action matches **one** ledger
+record by exact transaction hash, sender, destination, nonce, token, source and
+destination DEX, and decimal amount. The amount independently equals Relay's
+actual native-side raw amount at eight decimals. The perps route alias remains
+the 16-byte zero currency ID; the native action still names the canonical USDC
+token. Neither is an EVM address or an interchangeable spot-route identifier.
+
+The Base leg matches the expected owner and exact USDC contract/Transfer topic,
+raw amount at six decimals, successful receipt, canonical block hash and a block
+height at or below the separately read finalized head. Both Relay status hash
+lists are checked with their direction (`inTxHashes` source, `txHashes`
+destination). `failReason: "N/A"` does not contradict successful execution.
+The first recent sample was not yet Base-finalized; it was not promoted as
+finalized evidence. The retained sample deliberately uses older completed
+transfers, including the most recent matching spot deposit five days earlier.
+
+The fixture acceptance oracle in `hip4-route-contract-tests.ts` recomputes these
+relationships from preserved fields, rather than trusting recorded check booleans.
+Counterexamples cover wrong owner/token/amount/nonce/hash/DEX, ambiguous duplicate
+ledger records, duplicate/removed Base logs, reverted receipts, non-canonical or
+unfinalized blocks, wrong precision and reversed status references. This is a P0
+contract oracle, **not** a production funding confirmer or recovery worker.
+
+All four observed native transfers have zero native transfer fees. Do not
+extrapolate their amount equality to unknown nonzero-fee cases or count a
+correlated transfer as proof of current owned/spendable cash. P2/P3 must still
+bind trusted operation/environment/owner context, support recovery, preserve
+fees with unknown denomination, and prevent repeated credit. No nearest-time
+transaction match or provider `success` shortcut is permitted.
+
+### Account and ledger wire contracts
+
+The broader Polygon/Solana route follow-up below supplements the initial Base
+sample; no financial runtime is enabled by any of these evidence collectors.
+
+`services/hip4-account-contract.ts` adds pure, sidecar-safe parsers, exercised by
+`hip4-account-contract-tests.ts`. They do not fetch accounts, grant ownership,
+compute spendable cash, confirm a receipt, or enable a financial path. Synthetic
+`fixtures/hip4/account-contracts.json` is explicitly separate from the actual
+unregistered-account observation in section 17.
+
+- Roles preserve agent `data.user` and subaccount `data.master` separately.
+  The five documented abstraction values are retained, including legacy
+  `dexAbstraction`; `default` is not renamed Standard.
+- Spot observations preserve ordinary token-index balances, outcome `+N`/`oN`
+  rows without an ordinary token index, escrow, borrowing, and risk-capacity
+  fields. Large and signed balances remain decimal strings. Escrow and
+  available-after-maintenance are not added to cash or mistaken for permission
+  to borrow. An `oN` row does not itself prove a cash payout.
+- Ledger parsing distinguishes `send`, `spotTransfer`, `internalTransfer`,
+  account-class transfer, deposit and withdraw. Human amounts, source/destination
+  DEX, fee fields and nullable legacy nonce remain intact. Unknown event kinds
+  remain observable as unsupported; malformed known kinds fail parsing and can
+  recover immediately with a complete observation, without a cooldown.
+- Fill parsing preserves decimal amounts, native `Settlement` / `Merge Outcome`
+  directions, both coin/trade identity and nullable client/TWAP IDs. Unknown future
+  directions stay observable; parsing alone never classifies an economic sale.
+- Empty fee denomination is accepted as actually observed, even with a nonzero
+  native-token fee. It remains unknown rather than becoming a fabricated zero.
+- Author review reproduced a schema-union fallback accepting malformed known
+  fields on outcome balances (`token: -1`, string token index, numeric `spotHold`,
+  negative borrowed amount). One shared balance schema now validates supplied
+  fields before allowing the outcome-only absence of a token index. Negative
+  cases reject and a corrected observation immediately recovers; genuine tokenless
+  outcome rows and unknown extra fields remain readable.
+
+The [official info reference](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint)
+defines roles/modes; the [account-mode guide](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/account-abstraction-modes)
+explains why unified/portfolio balances belong to the spot view. Extended wire
+fields are cross-checked against the pinned [nktkas SDK source](https://github.com/nktkas/hyperliquid/tree/db80d598f6e4672edc090fe69994ecec97ebc980/src/api/info/_methods),
+not presented as live receipt observations. Selected fills/ledger shapes are now
+also checked against the sanitized native samples above. The official mode enum additionally
+contains `dexAbstraction`, absent from that SDK revision; the parser follows
+the official reference instead of copying that omission.
+
+Parsing is not receipt confirmation. The real route fixtures above establish
+the selected transfer contracts, not a runtime confirmer. P2/P3 still must bind
+the trusted query's owner/environment, resolve a ledger token symbol using exact
+native metadata, and correlate the specific action/hash and route. `fee` and
+`nativeTokenFee` are not assumed additive; nonzero/unknown transfer-fee treatment
+needs explicit evidence before that case can be credited automatically. Source
+SendAsset fields and destination receipt fields are distinct. The synthetic
+fixtures deliberately do not invent credited-net-amount semantics.
+
+### Polygon and Solana bidirectional evidence
+
+An additional user-authorized read-only pass made 70 bounded requests, followed
+by four narrowly scoped receipt-version diagnostic reads. The sanitized results
+are `fixtures/hip4/relay-multichain-observations-20261012.json` and
+`fixtures/hip4/relay-solana-version-observations-20261012.json`.
+
+| External asset      | Core spot, both directions | Core perps, both directions                 |
+| ------------------- | -------------------------- | ------------------------------------------- |
+| Polygon native USDC | Quote + completed receipt  | Quote + completed receipt                   |
+| Polygon pUSD        | Quote + completed receipt  | Quote + completed receipt                   |
+| Solana USDC         | Quote + completed receipt  | Quote + completed receipt after v1 RPC read |
+
+All twelve hypothetical 10-unit EXACT_INPUT quotes returned HTTP 200 and passed
+the existing Relay response schema. Selected successful public transfers were
+queried over a bounded 30-day window, at most three history rows per route, with
+one matching transfer independently inspected per route. Polygon USDC and pUSD
+remain distinct exact contracts; Solana USDC uses its canonical mint. Six-place
+external raw amounts must not be mistaken for eight-place Core quote units.
+Core spot/perps currency IDs and native DEX fields remain distinct.
+
+Each native leg was correlated by exact transaction hash to one ledger update,
+owner, nonce, token, DEX and amount. Polygon legs matched successful canonical
+finalized receipts and exact-owner ERC-20 logs for the selected token/amount.
+Solana legs matched the exact finalized signature and owner/mint-specific raw
+pre/post token balance delta; provider `success` alone was not accepted.
+The fixtures retain selected fields and capture diagnostics, not the complete
+RPC payload; offline tests recompute retained unit/DEX/amount relationships.
+These tests supplement, not replace, the fuller Base receipt acceptance oracle.
+
+One Solana → Core perps transfer initially returned RPC `-32015`: its native
+transaction version was **1**, unsupported by `maxSupportedTransactionVersion: 0`.
+A separate read of that exact public transfer with version 1 returned a finalized
+successful receipt and the exact `120140486` raw USDC debit. Both failure and
+recovery are retained. An unsupported-version response is missing evidence, not
+a zero transfer or a failed funding operation. Later P3 receipt adapters must
+cover observed transaction versions with parser/SDK tests; this diagnostic does
+not silently widen existing Solana signing, decoding or broadcast capabilities.
+
+Quotes used public sample identities and were never signed or submitted. No
+user wallet, Telegram, account permissions or production policy were touched.
+These are provider-route and historical-receipt observations, not an end-to-end
+Hunch funding test or proof of this user's signer eligibility/current cash.
+For Polymarket Deposit Wallet sources the separate supported exact pUSD return
+to the controller is still required; Relay route availability does not bypass
+the wallet's factory-only execution or the relayer allowlist.
+
+### Protected main-page read integration
+
+The web home now composes the existing admin-only HIP read API into All Markets:
+native desktop table rows and mobile market-card primitives, venue filter/URL
+state, live prices and details with recorded chart/trades. The source remains
+bounded, allowlisted and visibly unranked; absent metrics stay unavailable.
+Ordinary public backend discovery still excludes HIP. No public capability,
+trading, Copy, funding or production policy is enabled by this frontend change.
+Global discovery ranking/search and native event routes remain later P5 work;
+P7 activation requires separate authorization. Frontend acceptance is recorded
+in its paired integration document.
+
+### Acceptance boundary
+
+P1 remains accepted. Formatting and base-fee rules now have pinned first-party
+evidence, selected fee arithmetic is checked against native fills, and funded
+unified account/order shapes have actual public observations. All four Base/Core
+routes plus twelve Polygon USDC/pUSD and Solana USDC/Core routes have correlated
+historical receipt evidence, including the observed Solana v1 recovery. P0 is
+not yet fully closed: the exact native minimum boundary remains outstanding.
+Implementing owned-cash projection is P2, not an extra P1 gate;
+unsupported portfolio-margin writes remain off. Native signing/receipt experiments
+require suitable separate permission; additional gateway preflights would not settle this.
+No P2 worker, financial endpoint, migration or public DTO changed in this audit.
+
+The expanded HIP suite passes **83/83** tests. Full backend workspace build,
+typecheck and lint pass **47/47** tasks after the account-parser review. Both updated
+documents pass scoped Markdown lint/format checks. No SQL changed in this audit;
+the preceding PG16 acceptance is not replaced by a TypeScript-only assertion.
+
+Before any proposed testnet experiment, note the [official faucet requirement](https://hyperliquid.gitbook.io/hyperliquid-docs/onboarding/testnet-faucet):
+the same address must previously have deposited on mainnet. A fresh throwaway
+wallet is not a proven free-funding path. No faucet claim, test order or real
+deposit was made; do not create a mainnet deposit to work around this requirement.

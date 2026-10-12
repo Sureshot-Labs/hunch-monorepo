@@ -27,12 +27,15 @@ export function hip4DescriptionFields(
 function expiryFromFields(fields: Record<string, string>): string | null {
   // Deadline is NOT proof that orders were closed or that an outcome settled.
   const value = fields.expiry ?? fields.time ?? fields.resolutionDeadline;
-  if (!value || !/^\d{8}-\d{4}$/.test(value)) return null;
-  const iso = `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}T${value.slice(9, 11)}:${value.slice(11, 13)}:00.000Z`;
+  if (!value || !/^\d{8}(?:-\d{4})?$/.test(value)) return null;
+  const dateOnly = value.length === 8;
+  const iso = `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}T${dateOnly ? "00:00" : `${value.slice(9, 11)}:${value.slice(11, 13)}`}:00.000Z`;
   const parsed = new Date(iso);
-  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === iso
-    ? iso
-    : null;
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== iso)
+    return null;
+  // The provider's `date` template hint means end of day UTC; it must not
+  // expire at that day's start. Use the exclusive next-midnight boundary.
+  return dateOnly ? new Date(parsed.getTime() + 86_400_000).toISOString() : iso;
 }
 
 function label(value: string, fields: Record<string, string>): string {

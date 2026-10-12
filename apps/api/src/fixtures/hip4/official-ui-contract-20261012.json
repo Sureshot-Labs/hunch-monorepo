@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "origin": "first-party-public-ui-source-inspection-not-exchange-validation",
+  "observedAt": "2026-10-12T13:52:47Z",
+  "source": {
+    "url": "https://app.hyperliquid.xyz/assets/config-BCWVmVrl.js",
+    "sha256": "0d91d8cf518444ca4be1b210666478f873cd8c1eab6bdd35a9e60aadf4255a51",
+    "bytes": 2145904,
+    "method": "Read public static source as text only; no code execution, account, cookies or signing. Function names identify this exact content hash, not a stable provider API. No bundle copied into this repository."
+  },
+  "precision": {
+    "sizeDecimals": 0,
+    "priceDecimalPlaces": 5,
+    "outcomeTokenWeiDecimals": 5,
+    "functions": ["h3", "R3", "F3", "vce"],
+    "scope": "Outcome-specific branch; fixed decimal places, not generic spot significant figures. This does not prove order price endpoints or a native minimum."
+  },
+  "fees": {
+    "functions": ["m8", "h8", "g8", "_8", "Rle", "Tle"],
+    "base": "userSpotCrossRate/userSpotAddRate; tier/staking already reflected",
+    "opening": "0",
+    "closingScale": "feeScale * (deployerFeeScale + max(1, deployerFeeScale))",
+    "positiveRateDiscount": "1 - activeReferralDiscount",
+    "alignedTakerScale": "(1 - deployerShare) * 0.8 + deployerShare",
+    "deployerShare": "deployerFeeScale / (deployerFeeScale + max(1, deployerFeeScale))",
+    "negativeMakerRate": "clamp to zero; no outcome rebates",
+    "mainnetAlignedNamesAtObservation": [],
+    "limitations": "UI rate contract, not a rounded debit calculator. Do not copy UI missing-scale zero fallbacks, reapply staking discounts, assume future aligned membership, include builder fees, or infer a credited balance."
+  },
+  "minimum": {
+    "nativeBoundaryObserved": false,
+    "documentedSpotMinimum": "10",
+    "unit": "quote token",
+    "source": "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/error-responses",
+    "errorType": "MinTradeSpotNtl",
+    "limitations": "The generic native error reference documents this rejection. No HIP-specific accepted/rejected boundary observed; public partial fills are not original order sizes. UI scale-order checks and third-party preflight are insufficient."
+  }
+}

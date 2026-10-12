@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "origin": "synthetic-wire-contract-not-live-account-or-receipt",
+  "asOf": "2026-10-12",
+  "sources": {
+    "rolesAndModes": "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint",
+    "balanceModes": "https://hyperliquid.gitbook.io/hyperliquid-docs/trading/account-abstraction-modes",
+    "wireTypeReference": "https://github.com/nktkas/hyperliquid/tree/db80d598f6e4672edc090fe69994ecec97ebc980/src/api/info/_methods"
+  },
+  "scope": "Documented field shapes with made-up amounts and addresses. SDK reference is not venue execution proof. Request environment/owner, canonical token resolution, exact route correlation and finality must be established separately. No observed wallet balances or transfers are included.",
+  "spot": {
+    "balances": [
+      {
+        "coin": "USDC",
+        "token": 0,
+        "total": "9007199254740993.12345678",
+        "hold": "3.00000001",
+        "entryNtl": "0.0"
+      },
+      { "coin": "+115660", "total": "20.0", "hold": "2.0", "entryNtl": "10.0" },
+      { "coin": "o11566", "total": "20.0", "hold": "0.0", "entryNtl": "10.0" }
+    ],
+    "evmEscrows": [{ "coin": "USDC", "token": 0, "total": "1.0" }]
+  },
+  "portfolio": {
+    "portfolioMarginEnabled": true,
+    "balances": [
+      {
+        "coin": "USDC",
+        "token": 0,
+        "total": "100.0",
+        "hold": "10.0",
+        "spotHold": "5.0",
+        "entryNtl": "0.0",
+        "borrowed": "20.0",
+        "supplied": "0.0",
+        "ltv": "1.0"
+      }
+    ],
+    "tokenToAvailableAfterMaintenance": [[0, "45.0"]],
+    "tokenToPortfolioBorrowRatio": [[0, "0.25"]],
+    "tokenToPortfolioSupplyRatio": [[0, "0.0"]],
+    "portfolioMarginRatio": "0.5"
+  },
+  "borrowLend": {
+    "tokenToState": [
+      [
+        0,
+        {
+          "borrow": { "basis": "20.0", "value": "20.1" },
+          "supply": { "basis": "0.0", "value": "0.0" }
+        }
+      ]
+    ],
+    "health": "healthy",
+    "healthFactor": null
+  },
+  "ledger": [
+    {
+      "time": 1791806400000,
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "delta": {
+        "type": "send",
+        "user": "0x0000000000000000000000000000000000000001",
+        "destination": "0x0000000000000000000000000000000000000002",
+        "sourceDex": "spot",
+        "destinationDex": "",
+        "token": "USDC",
+        "amount": "10.00000000",
+        "usdcValue": "10.0",
+        "fee": "0.02",
+        "nativeTokenFee": "0.02",
+        "feeToken": "USDC",
+        "nonce": 1791806400000
+      }
+    },
+    {
+      "time": 1791806400001,
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000002",
+      "delta": {
+        "type": "spotTransfer",
+        "user": "0x0000000000000000000000000000000000000001",
+        "destination": "0x0000000000000000000000000000000000000002",
+        "token": "USDC",
+        "amount": "8.603417",
+        "usdcValue": "8.603417",
+        "fee": "0.0",
+        "nativeTokenFee": "0.0",
+        "feeToken": "USDC",
+        "nonce": null
+      }
+    },
+    {
+      "time": 1791806400002,
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000003",
+      "delta": {
+        "type": "accountClassTransfer",
+        "usdc": "10.0",
+        "toPerp": false
+      }
+    },
+    {
+      "time": 1791806400003,
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000004",
+      "delta": { "type": "deposit", "usdc": "10.0" }
+    },
+    {
+      "time": 1791806400004,
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000005",
+      "delta": {
+        "type": "withdraw",
+        "usdc": "10.0",
+        "nonce": 1791806400004,
+        "fee": "1.0"
+      }
+    },
+    {
+      "time": 1791806400005,
+      "hash": "0x0000000000000000000000000000000000000000000000000000000000000006",
+      "delta": {
+        "type": "internalTransfer",
+        "usdc": "10.0",
+        "fee": "0.0",
+        "user": "0x0000000000000000000000000000000000000001",
+        "destination": "0x0000000000000000000000000000000000000002"
+      }
+    }
+  ]
+}

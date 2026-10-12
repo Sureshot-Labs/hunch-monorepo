@@ -1,0 +1,1542 @@
+{
+  "version": 1,
+  "origin": "official-sdk-offline-synthetic-input",
+  "sdk": {
+    "package": "hyperliquid-python-sdk",
+    "version": "0.24.0",
+    "commit": "2fdb18f9517675ea03695a0962bd19eece9c83f0",
+    "source": "https://github.com/hyperliquid-dex/hyperliquid-python-sdk/tree/2fdb18f9517675ea03695a0962bd19eece9c83f0",
+    "signingSourceSha256": "938ec0a1f9611874b423ca946696e19a71d32d14709f521ea5d526f4398c0b85",
+    "dependencies": {
+      "eth-account": "0.13.7",
+      "msgpack": "1.2.3",
+      "eth-utils": "5.3.1"
+    }
+  },
+  "signer": "0x14791697260E4c9A71f18484C9f997B308e59325",
+  "scope": "Offline serialization and signing goldens only. No network, wallet access, submission, minimum/precision validation, receipt or Privy-role evidence.",
+  "vectors": [
+    {
+      "name": "l1-mainnet-direct",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "a",
+          "connectionId": "0x0d17e3fd2727f6f6ac19a60c8b52568fe64d7b2183429021787df9ff221d0ebc"
+        }
+      },
+      "digest": "0x806bc2d04b042d42bea5cfceca6bcd5969c9f33fa73e356d26a10ea63c34d3b6",
+      "signature": {
+        "r": "0xb4a49b60727d1b37125403630c9734acbb2950534491fd11115a64ecde700ab0",
+        "s": "0x5d512ddd86415bc15a355fe768ee2bd5ca56fb81a3f9cf5c4d9de6c77f0be547",
+        "v": 28
+      },
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 100115530,
+            "b": true,
+            "p": "0.4225",
+            "s": "25",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x00000000000000000000000000000001"
+          }
+        ],
+        "grouping": "na"
+      },
+      "packedAction": "0x83a474797065a56f72646572a66f72646572739187a161ce05f7a44aa162c3a170a6302e34323235a173a23235a172c2a17481a56c696d697481a3746966a3477463a163d92230783030303030303030303030303030303030303030303030303030303030303031a867726f7570696e67a26e61",
+      "nonce": 1791806400000,
+      "vault": null,
+      "expiresAfter": null,
+      "connectionId": "0x0d17e3fd2727f6f6ac19a60c8b52568fe64d7b2183429021787df9ff221d0ebc"
+    },
+    {
+      "name": "l1-mainnet-expiry",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "a",
+          "connectionId": "0xa781103ae37539331426629bde7574a203057a2c511993466b05a0389fc88d65"
+        }
+      },
+      "digest": "0x94b668145340d028911496f07385b46464e99fc9514bcaab651af251529e80bc",
+      "signature": {
+        "r": "0x453386e06682f2cb01b9dd14dbf41cc40deacadced0cd89fd6f07e4034016509",
+        "s": "0xe30229a8045b0def3f389fd43c035a7391b04e47483efa3b4cbd1b618cfe040",
+        "v": 27
+      },
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 100115530,
+            "b": true,
+            "p": "0.4225",
+            "s": "25",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x00000000000000000000000000000001"
+          }
+        ],
+        "grouping": "na"
+      },
+      "packedAction": "0x83a474797065a56f72646572a66f72646572739187a161ce05f7a44aa162c3a170a6302e34323235a173a23235a172c2a17481a56c696d697481a3746966a3477463a163d92230783030303030303030303030303030303030303030303030303030303030303031a867726f7570696e67a26e61",
+      "nonce": 1791806400000,
+      "vault": null,
+      "expiresAfter": 1791806460000,
+      "connectionId": "0xa781103ae37539331426629bde7574a203057a2c511993466b05a0389fc88d65"
+    },
+    {
+      "name": "l1-mainnet-vault",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "a",
+          "connectionId": "0xbb9a8ca8d5c06f96973b392bb8c1e93f5e0dee00f7feff70ae6ed79a79839f10"
+        }
+      },
+      "digest": "0xdd9f9fb312599276bc1563375b07f7b9f57ef88be8471a0e6624c07262bfd7e2",
+      "signature": {
+        "r": "0x279e7d23a6fa755f399090a3c72a4e05fd59af55e3699b0e3f611233512f876",
+        "s": "0x74a6760fc2e8368db6230d97a46b61427a1300d1e7c42db2c03b01be523080d3",
+        "v": 27
+      },
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 100115530,
+            "b": true,
+            "p": "0.4225",
+            "s": "25",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x00000000000000000000000000000001"
+          }
+        ],
+        "grouping": "na"
+      },
+      "packedAction": "0x83a474797065a56f72646572a66f72646572739187a161ce05f7a44aa162c3a170a6302e34323235a173a23235a172c2a17481a56c696d697481a3746966a3477463a163d92230783030303030303030303030303030303030303030303030303030303030303031a867726f7570696e67a26e61",
+      "nonce": 1791806400000,
+      "vault": "0x0000000000000000000000000000000000000001",
+      "expiresAfter": null,
+      "connectionId": "0xbb9a8ca8d5c06f96973b392bb8c1e93f5e0dee00f7feff70ae6ed79a79839f10"
+    },
+    {
+      "name": "l1-mainnet-vault-expiry",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "a",
+          "connectionId": "0x4b9f3c055de209c9e225e3401bbcbb73205df3e6504712f46ec869517ec1f1e7"
+        }
+      },
+      "digest": "0x308b63bc07a20a3c7b41db43c4efc689e0ba655a196ad77b8c515c100158edc3",
+      "signature": {
+        "r": "0xac49eb31217c528a2ca96e10872de193b81f46a54d7000e82429fa896703385b",
+        "s": "0x3946e21dd54155ded40dc054b979f76e46a053189ec2b0f1601c365c7bb12f22",
+        "v": 28
+      },
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 100115530,
+            "b": true,
+            "p": "0.4225",
+            "s": "25",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x00000000000000000000000000000001"
+          }
+        ],
+        "grouping": "na"
+      },
+      "packedAction": "0x83a474797065a56f72646572a66f72646572739187a161ce05f7a44aa162c3a170a6302e34323235a173a23235a172c2a17481a56c696d697481a3746966a3477463a163d92230783030303030303030303030303030303030303030303030303030303030303031a867726f7570696e67a26e61",
+      "nonce": 1791806400000,
+      "vault": "0x0000000000000000000000000000000000000001",
+      "expiresAfter": 1791806460000,
+      "connectionId": "0x4b9f3c055de209c9e225e3401bbcbb73205df3e6504712f46ec869517ec1f1e7"
+    },
+    {
+      "name": "l1-mainnet-ioc-sell",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "a",
+          "connectionId": "0xf6f73968c6d273549b183372149384a4b9076a9f68c8d3bf376af1088a6be563"
+        }
+      },
+      "digest": "0x6367986d429f85d4e204ae275e0b801c7ff3811cbdc7300181f61aef9dccedcf",
+      "signature": {
+        "r": "0xe7fd0469c414820760ecb4058ef972af2f0a056c8d8d077a545f230d822826c6",
+        "s": "0x72a3726f62a030efbf1ba80b03f567d2593574170c1ebfc79ae3716fe5afc9c8",
+        "v": 28
+      },
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 100115530,
+            "b": false,
+            "p": "0.4225",
+            "s": "25",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Ioc"
+              }
+            },
+            "c": "0x00000000000000000000000000000001"
+          }
+        ],
+        "grouping": "na"
+      },
+      "packedAction": "0x83a474797065a56f72646572a66f72646572739187a161ce05f7a44aa162c2a170a6302e34323235a173a23235a172c2a17481a56c696d697481a3746966a3496f63a163d92230783030303030303030303030303030303030303030303030303030303030303031a867726f7570696e67a26e61",
+      "nonce": 1791806400000,
+      "vault": null,
+      "expiresAfter": null,
+      "connectionId": "0xf6f73968c6d273549b183372149384a4b9076a9f68c8d3bf376af1088a6be563"
+    },
+    {
+      "name": "l1-mainnet-alo",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "a",
+          "connectionId": "0xe51335fc798fe52f70d493d8bfc0ea0d6bd9104df3b2a095e4729d63201f4fab"
+        }
+      },
+      "digest": "0x077977c0a5d8e5ccb11ff50ec7171bbd31f568df987a2cc9dba093c21c4b9fc7",
+      "signature": {
+        "r": "0xc92bb00cabc30d6d2af33b674b578dfc64bec16bb9d0c6df586f327d805eb51f",
+        "s": "0x64925755cfc48e75a918c08adb1b106cb253b0ce5f6cf628e55eb3e9dd220f60",
+        "v": 27
+      },
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 100115530,
+            "b": true,
+            "p": "0.4225",
+            "s": "25",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            },
+            "c": "0x00000000000000000000000000000001"
+          }
+        ],
+        "grouping": "na"
+      },
+      "packedAction": "0x83a474797065a56f72646572a66f72646572739187a161ce05f7a44aa162c3a170a6302e34323235a173a23235a172c2a17481a56c696d697481a3746966a3416c6fa163d92230783030303030303030303030303030303030303030303030303030303030303031a867726f7570696e67a26e61",
+      "nonce": 1791806400000,
+      "vault": null,
+      "expiresAfter": null,
+      "connectionId": "0xe51335fc798fe52f70d493d8bfc0ea0d6bd9104df3b2a095e4729d63201f4fab"
+    },
+    {
+      "name": "l1-mainnet-batch",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "a",
+          "connectionId": "0xc612f1ca58baa36f33d72c8aa7cdd19e4bc3d7772f43d4ae19cece58e928ae2d"
+        }
+      },
+      "digest": "0x2b03b6b5fdd64f1b2ff475317a9eb80ae1c78caa1518991910ddcc84a4f12d3a",
+      "signature": {
+        "r": "0x655a237b9951945f2eadb67c8b5d926bc82c74ab4f82f3aaa372dd2b72d84bf0",
+        "s": "0x5715aaf8bb8ff74be0344e23727112be48d4d630f04510bc97fd7e3c07f58d27",
+        "v": 28
+      },
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 100115530,
+            "b": true,
+            "p": "0.4225",
+            "s": "25",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x00000000000000000000000000000001"
+          },
+          {
+            "a": 100115531,
+            "b": true,
+            "p": "0.5775",
+            "s": "25",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x00000000000000000000000000000002"
+          }
+        ],
+        "grouping": "na"
+      },
+      "packedAction": "0x83a474797065a56f72646572a66f72646572739287a161ce05f7a44aa162c3a170a6302e34323235a173a23235a172c2a17481a56c696d697481a3746966a3477463a163d9223078303030303030303030303030303030303030303030303030303030303030303187a161ce05f7a44ba162c3a170a6302e35373735a173a23235a172c2a17481a56c696d697481a3746966a3477463a163d92230783030303030303030303030303030303030303030303030303030303030303032a867726f7570696e67a26e61",
+      "nonce": 1791806400000,
+      "vault": null,
+      "expiresAfter": null,
+      "connectionId": "0xc612f1ca58baa36f33d72c8aa7cdd19e4bc3d7772f43d4ae19cece58e928ae2d"
+    },
+    {
+      "name": "l1-mainnet-cancel-oid",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "a",
+          "connectionId": "0xc24abd7e609fab3c6887efe19c3a341d44f904da02668d1ed711a81472a2b476"
+        }
+      },
+      "digest": "0xadfac00fb1837f914422a53dcb7f90ef605b3316bf8bbad5e3fc8662c96ad90d",
+      "signature": {
+        "r": "0xcfc7c6e7055ef7c1ec01ece192cb94212a6e8bf321fccf104f09f7039d63004a",
+        "s": "0x51395d6a944c13f5d83b0c0ed924168648f079f7a8295e6945b522287fc09bfe",
+        "v": 28
+      },
+      "action": {
+        "type": "cancel",
+        "cancels": [
+          {
+            "a": 100115530,
+            "o": 123456789
+          }
+        ]
+      },
+      "packedAction": "0x82a474797065a663616e63656ca763616e63656c739182a161ce05f7a44aa16fce075bcd15",
+      "nonce": 1791806400000,
+      "vault": null,
+      "expiresAfter": null,
+      "connectionId": "0xc24abd7e609fab3c6887efe19c3a341d44f904da02668d1ed711a81472a2b476"
+    },
+    {
+      "name": "l1-mainnet-cancel-cloid",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "a",
+          "connectionId": "0x20261b70ba67e94172dff6b1e831cb7216a1942c163d7eefd8c4d14072515c27"
+        }
+      },
+      "digest": "0xbdbe12084b1524d165cc4bb5eec7e34c24465b8056926705daf882381574e1aa",
+      "signature": {
+        "r": "0x3e9d6c5e850b5b6fe4e8be94baacbf09956e2d80bab3e8e5983eaf0a1ddff2ef",
+        "s": "0x229928624d887e2cc80e93e55667325e2e80e78832f3d495ad5d1610691c7a2d",
+        "v": 28
+      },
+      "action": {
+        "type": "cancelByCloid",
+        "cancels": [
+          {
+            "asset": 100115530,
+            "cloid": "0x00000000000000000000000000000001"
+          }
+        ]
+      },
+      "packedAction": "0x82a474797065ad63616e63656c4279436c6f6964a763616e63656c739182a56173736574ce05f7a44aa5636c6f6964d92230783030303030303030303030303030303030303030303030303030303030303031",
+      "nonce": 1791806400000,
+      "vault": null,
+      "expiresAfter": null,
+      "connectionId": "0x20261b70ba67e94172dff6b1e831cb7216a1942c163d7eefd8c4d14072515c27"
+    },
+    {
+      "name": "send-asset-mainnet",
+      "typedData": {
+        "domain": {
+          "name": "HyperliquidSignTransaction",
+          "version": "1",
+          "chainId": 421614,
+          "verifyingContract": "0x0000000000000000000000000000000000000000"
+        },
+        "types": {
+          "HyperliquidTransaction:SendAsset": [
+            {
+              "name": "hyperliquidChain",
+              "type": "string"
+            },
+            {
+              "name": "destination",
+              "type": "string"
+            },
+            {
+              "name": "sourceDex",
+              "type": "string"
+            },
+            {
+              "name": "destinationDex",
+              "type": "string"
+            },
+            {
+              "name": "token",
+              "type": "string"
+            },
+            {
+              "name": "amount",
+              "type": "string"
+            },
+            {
+              "name": "fromSubAccount",
+              "type": "string"
+            },
+            {
+              "name": "nonce",
+              "type": "uint64"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "HyperliquidTransaction:SendAsset",
+        "message": {
+          "type": "sendAsset",
+          "destination": "0x0000000000000000000000000000000000000002",
+          "sourceDex": "spot",
+          "destinationDex": "",
+          "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+          "amount": "1.00000001",
+          "fromSubAccount": "",
+          "nonce": 1791806400000,
+          "signatureChainId": "0x66eee",
+          "hyperliquidChain": "Mainnet"
+        }
+      },
+      "digest": "0xcf372c87ed89d19babb4bb326add83a7e943fb7b95a1c649b867b6704f41573d",
+      "signature": {
+        "r": "0xb17f5c244495050e5873a5f6b7b71da99d85ffd97873351b5dc35b764d906802",
+        "s": "0x6c2466ded13843bb61f5780e06ff2d7ef6f36ef78bdf91e49a34e26be1a04a25",
+        "v": 27
+      }
+    },
+    {
+      "name": "l1-testnet-direct",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "b",
+          "connectionId": "0x0d17e3fd2727f6f6ac19a60c8b52568fe64d7b2183429021787df9ff221d0ebc"
+        }
+      },
+      "digest": "0xa19781214dcdcb00b4e8fa524df9d2f4fae671a9c47025c7a503c1c03d416006",
+      "signature": {
+        "r": "0x6b4097f0fbc1222c1b2bbe16456d11ad7876f6dc0739dde9591a5b56489d6d59",
+        "s": "0x703d033d87ea0d0d6467e73b1d1e5adfee0b0d415a34963c3760c38afbb2eb0",
+        "v": 27
+      },
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 100115530,
+            "b": true,
+            "p": "0.4225",
+            "s": "25",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x00000000000000000000000000000001"
+          }
+        ],
+        "grouping": "na"
+      },
+      "packedAction": "0x83a474797065a56f72646572a66f72646572739187a161ce05f7a44aa162c3a170a6302e34323235a173a23235a172c2a17481a56c696d697481a3746966a3477463a163d92230783030303030303030303030303030303030303030303030303030303030303031a867726f7570696e67a26e61",
+      "nonce": 1791806400000,
+      "vault": null,
+      "expiresAfter": null,
+      "connectionId": "0x0d17e3fd2727f6f6ac19a60c8b52568fe64d7b2183429021787df9ff221d0ebc"
+    },
+    {
+      "name": "l1-testnet-expiry",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "b",
+          "connectionId": "0xa781103ae37539331426629bde7574a203057a2c511993466b05a0389fc88d65"
+        }
+      },
+      "digest": "0x6338939cded2740f3bb34f5b998599b176f558d6c108925cf372b4e3bab3bb63",
+      "signature": {
+        "r": "0xd718efdff12ed7627ff0552a57a718876855c4e2766608ae5dfc304bfbbe9950",
+        "s": "0x5f6e1625fbb042590319acdd712c675ca9d3c4ed0427baa59306746268830974",
+        "v": 27
+      },
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 100115530,
+            "b": true,
+            "p": "0.4225",
+            "s": "25",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x00000000000000000000000000000001"
+          }
+        ],
+        "grouping": "na"
+      },
+      "packedAction": "0x83a474797065a56f72646572a66f72646572739187a161ce05f7a44aa162c3a170a6302e34323235a173a23235a172c2a17481a56c696d697481a3746966a3477463a163d92230783030303030303030303030303030303030303030303030303030303030303031a867726f7570696e67a26e61",
+      "nonce": 1791806400000,
+      "vault": null,
+      "expiresAfter": 1791806460000,
+      "connectionId": "0xa781103ae37539331426629bde7574a203057a2c511993466b05a0389fc88d65"
+    },
+    {
+      "name": "l1-testnet-vault",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "b",
+          "connectionId": "0xbb9a8ca8d5c06f96973b392bb8c1e93f5e0dee00f7feff70ae6ed79a79839f10"
+        }
+      },
+      "digest": "0x52244cf64804c2a0085462dfcb27784cea62bd3a29b051aea8dc4b8b85bc0a75",
+      "signature": {
+        "r": "0x502f63bd6692417d19ef4781115e17a27725d1d68e2755df682cfaf946bee226",
+        "s": "0x6b87630c27e6a3844f7772b5e9468024d4557c4316590f2bfa56529d107f10af",
+        "v": 28
+      },
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 100115530,
+            "b": true,
+            "p": "0.4225",
+            "s": "25",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x00000000000000000000000000000001"
+          }
+        ],
+        "grouping": "na"
+      },
+      "packedAction": "0x83a474797065a56f72646572a66f72646572739187a161ce05f7a44aa162c3a170a6302e34323235a173a23235a172c2a17481a56c696d697481a3746966a3477463a163d92230783030303030303030303030303030303030303030303030303030303030303031a867726f7570696e67a26e61",
+      "nonce": 1791806400000,
+      "vault": "0x0000000000000000000000000000000000000001",
+      "expiresAfter": null,
+      "connectionId": "0xbb9a8ca8d5c06f96973b392bb8c1e93f5e0dee00f7feff70ae6ed79a79839f10"
+    },
+    {
+      "name": "l1-testnet-vault-expiry",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "b",
+          "connectionId": "0x4b9f3c055de209c9e225e3401bbcbb73205df3e6504712f46ec869517ec1f1e7"
+        }
+      },
+      "digest": "0xbfd0e11ab28c84cbcc0b27ffad1433a1ab6b2d249cfb02625cd04c93d6abb34a",
+      "signature": {
+        "r": "0xf952d75589b139402bb21ccdb22f59a6e1d22389f525cbd12283aec5cc453715",
+        "s": "0x22c31408f47556fbeaacce97f4043e7367cdcc5975d5567f7c6d055558b15a10",
+        "v": 28
+      },
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 100115530,
+            "b": true,
+            "p": "0.4225",
+            "s": "25",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x00000000000000000000000000000001"
+          }
+        ],
+        "grouping": "na"
+      },
+      "packedAction": "0x83a474797065a56f72646572a66f72646572739187a161ce05f7a44aa162c3a170a6302e34323235a173a23235a172c2a17481a56c696d697481a3746966a3477463a163d92230783030303030303030303030303030303030303030303030303030303030303031a867726f7570696e67a26e61",
+      "nonce": 1791806400000,
+      "vault": "0x0000000000000000000000000000000000000001",
+      "expiresAfter": 1791806460000,
+      "connectionId": "0x4b9f3c055de209c9e225e3401bbcbb73205df3e6504712f46ec869517ec1f1e7"
+    },
+    {
+      "name": "l1-testnet-ioc-sell",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "b",
+          "connectionId": "0xf6f73968c6d273549b183372149384a4b9076a9f68c8d3bf376af1088a6be563"
+        }
+      },
+      "digest": "0x8ec00f8a80900eab3bc7e7ad4d35185d5cd788ace994daebb416c90490a6721a",
+      "signature": {
+        "r": "0xdf2a0952e9cda24e068c7c25215f3fa7a7653983c32bedb5ad2a60b2a68191bc",
+        "s": "0x20e836181129925c87013eb1e8311b7cb14c15c2bf725c01fac9004a1c386ea",
+        "v": 27
+      },
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 100115530,
+            "b": false,
+            "p": "0.4225",
+            "s": "25",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Ioc"
+              }
+            },
+            "c": "0x00000000000000000000000000000001"
+          }
+        ],
+        "grouping": "na"
+      },
+      "packedAction": "0x83a474797065a56f72646572a66f72646572739187a161ce05f7a44aa162c2a170a6302e34323235a173a23235a172c2a17481a56c696d697481a3746966a3496f63a163d92230783030303030303030303030303030303030303030303030303030303030303031a867726f7570696e67a26e61",
+      "nonce": 1791806400000,
+      "vault": null,
+      "expiresAfter": null,
+      "connectionId": "0xf6f73968c6d273549b183372149384a4b9076a9f68c8d3bf376af1088a6be563"
+    },
+    {
+      "name": "l1-testnet-alo",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "b",
+          "connectionId": "0xe51335fc798fe52f70d493d8bfc0ea0d6bd9104df3b2a095e4729d63201f4fab"
+        }
+      },
+      "digest": "0x440d4d6839954b21fc687fc451b454f22b0708914667960ade4be20b0ca64775",
+      "signature": {
+        "r": "0x36a00860c80e3b33996146ba88cb2e1758406c5b4d4f841e9afb18806bbd4c1a",
+        "s": "0x317dcdca163a4d30e81b155d01c440e6f0064683bd5948ed897acce9ba8b5194",
+        "v": 28
+      },
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 100115530,
+            "b": true,
+            "p": "0.4225",
+            "s": "25",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Alo"
+              }
+            },
+            "c": "0x00000000000000000000000000000001"
+          }
+        ],
+        "grouping": "na"
+      },
+      "packedAction": "0x83a474797065a56f72646572a66f72646572739187a161ce05f7a44aa162c3a170a6302e34323235a173a23235a172c2a17481a56c696d697481a3746966a3416c6fa163d92230783030303030303030303030303030303030303030303030303030303030303031a867726f7570696e67a26e61",
+      "nonce": 1791806400000,
+      "vault": null,
+      "expiresAfter": null,
+      "connectionId": "0xe51335fc798fe52f70d493d8bfc0ea0d6bd9104df3b2a095e4729d63201f4fab"
+    },
+    {
+      "name": "l1-testnet-batch",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "b",
+          "connectionId": "0xc612f1ca58baa36f33d72c8aa7cdd19e4bc3d7772f43d4ae19cece58e928ae2d"
+        }
+      },
+      "digest": "0xd80d0a40159aa8a73c208a2323de230b7b923e3dfa5751dfdd8a86ffea762eba",
+      "signature": {
+        "r": "0xf65297ad786fc67e4d1a7458f387bdd81eba07a8f6653fc9ea68ed17659b1421",
+        "s": "0x70344ef7b72488c5460b2c9d497bf05161101f4a3db3c04848f0216ddcda6236",
+        "v": 28
+      },
+      "action": {
+        "type": "order",
+        "orders": [
+          {
+            "a": 100115530,
+            "b": true,
+            "p": "0.4225",
+            "s": "25",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x00000000000000000000000000000001"
+          },
+          {
+            "a": 100115531,
+            "b": true,
+            "p": "0.5775",
+            "s": "25",
+            "r": false,
+            "t": {
+              "limit": {
+                "tif": "Gtc"
+              }
+            },
+            "c": "0x00000000000000000000000000000002"
+          }
+        ],
+        "grouping": "na"
+      },
+      "packedAction": "0x83a474797065a56f72646572a66f72646572739287a161ce05f7a44aa162c3a170a6302e34323235a173a23235a172c2a17481a56c696d697481a3746966a3477463a163d9223078303030303030303030303030303030303030303030303030303030303030303187a161ce05f7a44ba162c3a170a6302e35373735a173a23235a172c2a17481a56c696d697481a3746966a3477463a163d92230783030303030303030303030303030303030303030303030303030303030303032a867726f7570696e67a26e61",
+      "nonce": 1791806400000,
+      "vault": null,
+      "expiresAfter": null,
+      "connectionId": "0xc612f1ca58baa36f33d72c8aa7cdd19e4bc3d7772f43d4ae19cece58e928ae2d"
+    },
+    {
+      "name": "l1-testnet-cancel-oid",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "b",
+          "connectionId": "0xc24abd7e609fab3c6887efe19c3a341d44f904da02668d1ed711a81472a2b476"
+        }
+      },
+      "digest": "0xa13c0bf5e588252cfd26f07677cace523fcfc441adcfba95f1e99e22281a5c0f",
+      "signature": {
+        "r": "0x8d48b9030eb70f893c893327dbf6a20ec2df53ac48b1e917c911ded22862be49",
+        "s": "0x3a6c7601132ff7443053a87bf16f11005c710bcb80af99d274c4b26d83977f58",
+        "v": 27
+      },
+      "action": {
+        "type": "cancel",
+        "cancels": [
+          {
+            "a": 100115530,
+            "o": 123456789
+          }
+        ]
+      },
+      "packedAction": "0x82a474797065a663616e63656ca763616e63656c739182a161ce05f7a44aa16fce075bcd15",
+      "nonce": 1791806400000,
+      "vault": null,
+      "expiresAfter": null,
+      "connectionId": "0xc24abd7e609fab3c6887efe19c3a341d44f904da02668d1ed711a81472a2b476"
+    },
+    {
+      "name": "l1-testnet-cancel-cloid",
+      "typedData": {
+        "domain": {
+          "chainId": 1337,
+          "name": "Exchange",
+          "verifyingContract": "0x0000000000000000000000000000000000000000",
+          "version": "1"
+        },
+        "types": {
+          "Agent": [
+            {
+              "name": "source",
+              "type": "string"
+            },
+            {
+              "name": "connectionId",
+              "type": "bytes32"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "Agent",
+        "message": {
+          "source": "b",
+          "connectionId": "0x20261b70ba67e94172dff6b1e831cb7216a1942c163d7eefd8c4d14072515c27"
+        }
+      },
+      "digest": "0x5f8cfefea3df6047a192da7519a1c89caf139e515ad72056f83d13fe30285aed",
+      "signature": {
+        "r": "0x7bc6544032f9a656de27f8d5453f53c8a38d849dc4fad6b315b506daa4cf9091",
+        "s": "0x169564a3e66eb8f598c033f7802478723e4e5c43d729ccf6c2315eb6d119a4ff",
+        "v": 27
+      },
+      "action": {
+        "type": "cancelByCloid",
+        "cancels": [
+          {
+            "asset": 100115530,
+            "cloid": "0x00000000000000000000000000000001"
+          }
+        ]
+      },
+      "packedAction": "0x82a474797065ad63616e63656c4279436c6f6964a763616e63656c739182a56173736574ce05f7a44aa5636c6f6964d92230783030303030303030303030303030303030303030303030303030303030303031",
+      "nonce": 1791806400000,
+      "vault": null,
+      "expiresAfter": null,
+      "connectionId": "0x20261b70ba67e94172dff6b1e831cb7216a1942c163d7eefd8c4d14072515c27"
+    },
+    {
+      "name": "send-asset-testnet",
+      "typedData": {
+        "domain": {
+          "name": "HyperliquidSignTransaction",
+          "version": "1",
+          "chainId": 421614,
+          "verifyingContract": "0x0000000000000000000000000000000000000000"
+        },
+        "types": {
+          "HyperliquidTransaction:SendAsset": [
+            {
+              "name": "hyperliquidChain",
+              "type": "string"
+            },
+            {
+              "name": "destination",
+              "type": "string"
+            },
+            {
+              "name": "sourceDex",
+              "type": "string"
+            },
+            {
+              "name": "destinationDex",
+              "type": "string"
+            },
+            {
+              "name": "token",
+              "type": "string"
+            },
+            {
+              "name": "amount",
+              "type": "string"
+            },
+            {
+              "name": "fromSubAccount",
+              "type": "string"
+            },
+            {
+              "name": "nonce",
+              "type": "uint64"
+            }
+          ],
+          "EIP712Domain": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "string"
+            },
+            {
+              "name": "chainId",
+              "type": "uint256"
+            },
+            {
+              "name": "verifyingContract",
+              "type": "address"
+            }
+          ]
+        },
+        "primaryType": "HyperliquidTransaction:SendAsset",
+        "message": {
+          "type": "sendAsset",
+          "destination": "0x0000000000000000000000000000000000000002",
+          "sourceDex": "spot",
+          "destinationDex": "",
+          "token": "USDC:0xeb62eee3685fc4c43992febcd9e75443",
+          "amount": "1.00000001",
+          "fromSubAccount": "",
+          "nonce": 1791806400000,
+          "signatureChainId": "0x66eee",
+          "hyperliquidChain": "Testnet"
+        }
+      },
+      "digest": "0x5e5adb3d082b0a99fe549ca0c89e4f5e1e10589eba3e7916e4879dcb1d48f5ae",
+      "signature": {
+        "r": "0xe95e4fbd3711c29ec0ab8c15b7f6313eaf4ce1684cb040aff0c573b0ae30640e",
+        "s": "0xf87d5c14fd24a4d57567390e35af2a0a8154025176ee382c52d8b2876f594f0",
+        "v": 27
+      }
+    }
+  ]
+}

@@ -1,0 +1,532 @@
+{
+  "version": 1,
+  "origin": "sanitized-authorized-read-only-quote",
+  "observedAt": "2026-10-12T13:12:30.084Z",
+  "scope": "Hypothetical 10 USDC quotes, not execution or receipt proof. No user addresses, provider request IDs, nonces, transaction calldata, account balances or keys retained. Fields and relationships selected from live JSON; no returned action was signed or submitted.",
+  "accountReadContract": {
+    "observedAt": "2026-10-12T13:10:44.208Z",
+    "role": "missing",
+    "abstraction": "default",
+    "outcomeSpecificFeeFields": [],
+    "userFeesFields": [
+      "dailyUserVlm",
+      "feeSchedule",
+      "userCrossRate",
+      "userAddRate",
+      "userSpotCrossRate",
+      "userSpotAddRate",
+      "activeReferralDiscount",
+      "trial",
+      "feeTrialEscrow",
+      "nextTrialAvailableTimestamp",
+      "stakingLink",
+      "activeStakingDiscount"
+    ],
+    "interpretation": "No registered Core account. This does not establish standard/unified funded capacity. Generic user rates do not prove outcome opening/closing fee semantics."
+  },
+  "request": {
+    "endpoint": "https://api.relay.link/quote/v2",
+    "tradeType": "EXACT_INPUT",
+    "protocolVersion": "v2",
+    "useDepositAddress": false,
+    "requestedUiAmount": "10",
+    "wallet": "omitted",
+    "recipient": "same wallet, omitted"
+  },
+  "deposits": [
+    {
+      "name": "base-to-core-spot",
+      "observedAt": "2026-10-12T13:10:44.208Z",
+      "httpStatus": 200,
+      "schemaAccepted": true,
+      "origin": {
+        "chainId": 8453,
+        "currency": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        "decimals": 6,
+        "amount": "10000000"
+      },
+      "destination": {
+        "chainId": 1337,
+        "currency": "0x6d1e7cde53ba9467b783cb7c530ce054",
+        "decimals": 8,
+        "amount": "877899700",
+        "minimumAmount": "860341700"
+      },
+      "steps": [
+        {
+          "id": "approve",
+          "kind": "transaction"
+        },
+        {
+          "id": "deposit",
+          "kind": "transaction"
+        }
+      ],
+      "relayerFee": {
+        "decimals": 6,
+        "amount": "1221003"
+      },
+      "statusPath": "/intents/status/v3"
+    },
+    {
+      "name": "base-to-core-perps",
+      "observedAt": "2026-10-12T13:10:44.208Z",
+      "httpStatus": 200,
+      "schemaAccepted": true,
+      "origin": {
+        "chainId": 8453,
+        "currency": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        "decimals": 6,
+        "amount": "10000000"
+      },
+      "destination": {
+        "chainId": 1337,
+        "currency": "0x00000000000000000000000000000000",
+        "decimals": 8,
+        "amount": "877899700",
+        "minimumAmount": "860341700"
+      },
+      "steps": [
+        {
+          "id": "approve",
+          "kind": "transaction"
+        },
+        {
+          "id": "deposit",
+          "kind": "transaction"
+        }
+      ],
+      "relayerFee": {
+        "decimals": 6,
+        "amount": "1221003"
+      },
+      "statusPath": "/intents/status/v3"
+    }
+  ],
+  "withdrawals": [
+    {
+      "name": "core-spot-to-base",
+      "httpStatus": 200,
+      "schemaAccepted": true,
+      "schemaIssues": [],
+      "steps": [
+        {
+          "id": "authorize",
+          "kind": "signature",
+          "items": [
+            {
+              "status": "incomplete",
+              "dataKeys": ["sign", "post"],
+              "typedData": {
+                "signatureKind": "eip712",
+                "primaryType": "NonceMapping",
+                "domain": {
+                  "name": "RelayNonceMapping",
+                  "version": "2",
+                  "chainId": 1
+                },
+                "types": {
+                  "NonceMapping": [
+                    {
+                      "name": "chainId",
+                      "type": "string"
+                    },
+                    {
+                      "name": "wallet",
+                      "type": "address"
+                    },
+                    {
+                      "name": "depositor",
+                      "type": "address"
+                    },
+                    {
+                      "name": "id",
+                      "type": "bytes32"
+                    },
+                    {
+                      "name": "nonce",
+                      "type": "uint256"
+                    }
+                  ]
+                },
+                "messageKeys": [
+                  "chainId",
+                  "wallet",
+                  "nonce",
+                  "id",
+                  "depositor"
+                ],
+                "safeFields": {
+                  "chainId": "hyperliquid"
+                }
+              },
+              "check": null
+            }
+          ]
+        },
+        {
+          "id": "deposit",
+          "kind": "transaction",
+          "items": [
+            {
+              "status": "incomplete",
+              "dataKeys": [
+                "action",
+                "nonce",
+                "eip712Types",
+                "eip712PrimaryType"
+              ],
+              "typedData": null,
+              "check": {
+                "method": "GET",
+                "path": "/intents/status/v3"
+              }
+            }
+          ]
+        }
+      ],
+      "details": {
+        "operation": "swap",
+        "currencyIn": {
+          "currency": {
+            "chainId": 1337,
+            "address": "0x6d1e7cde53ba9467b783cb7c530ce054",
+            "symbol": "USDC",
+            "decimals": 8
+          },
+          "amount": "1000000000",
+          "minimumAmount": "1000000000",
+          "amountUsd": "9.998580"
+        },
+        "currencyOut": {
+          "currency": {
+            "chainId": 8453,
+            "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "symbol": "USDC",
+            "decimals": 6
+          },
+          "amount": "9976955",
+          "minimumAmount": "9777416",
+          "amountUsd": "9.975538"
+        },
+        "timeEstimate": 2
+      },
+      "fees": {
+        "gas": {
+          "amount": "0",
+          "amountUsd": "0",
+          "symbol": "USDC",
+          "decimals": 8
+        },
+        "relayer": {
+          "amount": "2304500",
+          "amountUsd": "0.023042",
+          "symbol": "USDC",
+          "decimals": 8
+        },
+        "relayerGas": {
+          "amount": "104200",
+          "amountUsd": "0.001042",
+          "symbol": "USDC",
+          "decimals": 8
+        },
+        "relayerService": {
+          "amount": "2200200",
+          "amountUsd": "0.021999",
+          "symbol": "USDC",
+          "decimals": 8
+        },
+        "app": {
+          "amount": "0",
+          "amountUsd": "0",
+          "symbol": "USDC",
+          "decimals": 8
+        },
+        "subsidized": {
+          "amount": "0",
+          "amountUsd": "0",
+          "symbol": "USDC",
+          "decimals": 8
+        }
+      },
+      "protocolKeys": ["v2"],
+      "withdrawal": {
+        "envelopeType": "sendAsset",
+        "actionKeys": [
+          "hyperliquidChain",
+          "destination",
+          "sourceDex",
+          "destinationDex",
+          "token",
+          "amount",
+          "fromSubAccount",
+          "nonce"
+        ],
+        "action": {
+          "hyperliquidChain": "Mainnet",
+          "sourceDex": "spot",
+          "destinationDex": "",
+          "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+          "amount": "10.000000",
+          "fromSubAccount": ""
+        },
+        "eip712Types": {
+          "HyperliquidTransaction:SendAsset": [
+            {
+              "name": "hyperliquidChain",
+              "type": "string"
+            },
+            {
+              "name": "destination",
+              "type": "string"
+            },
+            {
+              "name": "sourceDex",
+              "type": "string"
+            },
+            {
+              "name": "destinationDex",
+              "type": "string"
+            },
+            {
+              "name": "token",
+              "type": "string"
+            },
+            {
+              "name": "amount",
+              "type": "string"
+            },
+            {
+              "name": "fromSubAccount",
+              "type": "string"
+            },
+            {
+              "name": "nonce",
+              "type": "uint64"
+            }
+          ]
+        },
+        "eip712PrimaryType": "HyperliquidTransaction:SendAsset",
+        "relationships": {
+          "authorizeWalletMatchesUser": true,
+          "authorizeDepositorMatchesActionDestination": false,
+          "authorizationMatchesEnvelopeNonce": true,
+          "parameterNoncePresent": true,
+          "parameterNonceMatchesEnvelope": true
+        }
+      }
+    },
+    {
+      "name": "core-perps-to-base",
+      "httpStatus": 200,
+      "schemaAccepted": true,
+      "schemaIssues": [],
+      "steps": [
+        {
+          "id": "authorize",
+          "kind": "signature",
+          "items": [
+            {
+              "status": "incomplete",
+              "dataKeys": ["sign", "post"],
+              "typedData": {
+                "signatureKind": "eip712",
+                "primaryType": "NonceMapping",
+                "domain": {
+                  "name": "RelayNonceMapping",
+                  "version": "2",
+                  "chainId": 1
+                },
+                "types": {
+                  "NonceMapping": [
+                    {
+                      "name": "chainId",
+                      "type": "string"
+                    },
+                    {
+                      "name": "wallet",
+                      "type": "address"
+                    },
+                    {
+                      "name": "depositor",
+                      "type": "address"
+                    },
+                    {
+                      "name": "id",
+                      "type": "bytes32"
+                    },
+                    {
+                      "name": "nonce",
+                      "type": "uint256"
+                    }
+                  ]
+                },
+                "messageKeys": [
+                  "chainId",
+                  "wallet",
+                  "nonce",
+                  "id",
+                  "depositor"
+                ],
+                "safeFields": {
+                  "chainId": "hyperliquid"
+                }
+              },
+              "check": null
+            }
+          ]
+        },
+        {
+          "id": "deposit",
+          "kind": "transaction",
+          "items": [
+            {
+              "status": "incomplete",
+              "dataKeys": [
+                "action",
+                "nonce",
+                "eip712Types",
+                "eip712PrimaryType"
+              ],
+              "typedData": null,
+              "check": {
+                "method": "GET",
+                "path": "/intents/status/v3"
+              }
+            }
+          ]
+        }
+      ],
+      "details": {
+        "operation": "swap",
+        "currencyIn": {
+          "currency": {
+            "chainId": 1337,
+            "address": "0x00000000000000000000000000000000",
+            "symbol": "USDC",
+            "decimals": 8
+          },
+          "amount": "1000000000",
+          "minimumAmount": "1000000000",
+          "amountUsd": "9.998580"
+        },
+        "currencyOut": {
+          "currency": {
+            "chainId": 8453,
+            "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "symbol": "USDC",
+            "decimals": 6
+          },
+          "amount": "9976955",
+          "minimumAmount": "9777416",
+          "amountUsd": "9.975538"
+        },
+        "timeEstimate": 2
+      },
+      "fees": {
+        "gas": {
+          "amount": "0",
+          "amountUsd": "0",
+          "symbol": "USDC",
+          "decimals": 8
+        },
+        "relayer": {
+          "amount": "2304500",
+          "amountUsd": "0.023042",
+          "symbol": "USDC",
+          "decimals": 8
+        },
+        "relayerGas": {
+          "amount": "104200",
+          "amountUsd": "0.001042",
+          "symbol": "USDC",
+          "decimals": 8
+        },
+        "relayerService": {
+          "amount": "2200200",
+          "amountUsd": "0.021999",
+          "symbol": "USDC",
+          "decimals": 8
+        },
+        "app": {
+          "amount": "0",
+          "amountUsd": "0",
+          "symbol": "USDC",
+          "decimals": 8
+        },
+        "subsidized": {
+          "amount": "0",
+          "amountUsd": "0",
+          "symbol": "USDC",
+          "decimals": 8
+        }
+      },
+      "protocolKeys": ["v2"],
+      "withdrawal": {
+        "envelopeType": "sendAsset",
+        "actionKeys": [
+          "hyperliquidChain",
+          "destination",
+          "sourceDex",
+          "destinationDex",
+          "token",
+          "amount",
+          "fromSubAccount",
+          "nonce"
+        ],
+        "action": {
+          "hyperliquidChain": "Mainnet",
+          "sourceDex": "",
+          "destinationDex": "",
+          "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+          "amount": "10.000000",
+          "fromSubAccount": ""
+        },
+        "eip712Types": {
+          "HyperliquidTransaction:SendAsset": [
+            {
+              "name": "hyperliquidChain",
+              "type": "string"
+            },
+            {
+              "name": "destination",
+              "type": "string"
+            },
+            {
+              "name": "sourceDex",
+              "type": "string"
+            },
+            {
+              "name": "destinationDex",
+              "type": "string"
+            },
+            {
+              "name": "token",
+              "type": "string"
+            },
+            {
+              "name": "amount",
+              "type": "string"
+            },
+            {
+              "name": "fromSubAccount",
+              "type": "string"
+            },
+            {
+              "name": "nonce",
+              "type": "uint64"
+            }
+          ]
+        },
+        "eip712PrimaryType": "HyperliquidTransaction:SendAsset",
+        "relationships": {
+          "authorizeWalletMatchesUser": true,
+          "authorizeDepositorMatchesActionDestination": false,
+          "authorizationMatchesEnvelopeNonce": true,
+          "parameterNoncePresent": true,
+          "parameterNonceMatchesEnvelope": true
+        }
+      }
+    }
+  ]
+}

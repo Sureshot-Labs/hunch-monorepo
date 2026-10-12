@@ -1,0 +1,543 @@
+{
+  "version": 1,
+  "origin": "sanitized-public-participant-read",
+  "collectedAt": "2026-10-12T13:40:48.130Z",
+  "environment": "mainnet",
+  "scope": {
+    "endpoint": "https://api.hyperliquid.xyz/info",
+    "maxRequests": 20,
+    "maxAccounts": 3,
+    "fillWindowHours": 1,
+    "ledgerWindowHours": 24,
+    "redaction": "Wallet addresses, hashes, order/trade/client IDs replaced consistently; numeric fields retained. Selected samples, not complete account history or Relay route proof.",
+    "requestTypes": [
+      "outcomeMeta",
+      "recentTrades",
+      "userFillsByTime",
+      "userNonFundingLedgerUpdates",
+      "userFees",
+      "settledOutcome"
+    ]
+  },
+  "marketProbes": [
+    {
+      "outcome": 11566,
+      "count": 0,
+      "latestTradeAt": null
+    },
+    {
+      "outcome": 11565,
+      "count": 1,
+      "latestTradeAt": 1791812406509
+    },
+    {
+      "outcome": 11564,
+      "count": 9,
+      "latestTradeAt": 1791812387589
+    }
+  ],
+  "requests": 17,
+  "accounts": [
+    {
+      "accountAlias": "participant-1",
+      "counts": {
+        "fills": 13,
+        "hipFills": 13,
+        "ledger": 0
+      },
+      "fillTypes": ["Settlement", "Buy"],
+      "feeTokens": ["USDC"],
+      "ledgerTypes": {},
+      "fills": [
+        {
+          "coin": "#115511",
+          "px": "1.0",
+          "sz": "20.0",
+          "side": "A",
+          "time": 1791809115437,
+          "startPosition": "20.0",
+          "dir": "Settlement",
+          "closedPnl": "6.04",
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+          "oid": 1,
+          "crossed": true,
+          "fee": "0.028",
+          "tid": 1,
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        {
+          "coin": "#115551",
+          "px": "1.0",
+          "sz": "36.0",
+          "side": "A",
+          "time": 1791810008415,
+          "startPosition": "36.0",
+          "dir": "Settlement",
+          "closedPnl": "11.8",
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000002",
+          "oid": 2,
+          "crossed": true,
+          "fee": "0.0504",
+          "tid": 2,
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        {
+          "coin": "#115571",
+          "px": "1.0",
+          "sz": "180.0",
+          "side": "A",
+          "time": 1791810915244,
+          "startPosition": "180.0",
+          "dir": "Settlement",
+          "closedPnl": "91.19069",
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000003",
+          "oid": 3,
+          "crossed": true,
+          "fee": "0.252",
+          "tid": 3,
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        {
+          "coin": "#115570",
+          "px": "0.0",
+          "sz": "20.0",
+          "side": "A",
+          "time": 1791810915244,
+          "startPosition": "20.0",
+          "dir": "Settlement",
+          "closedPnl": "-6.68",
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000003",
+          "oid": 4,
+          "crossed": true,
+          "fee": "0.0",
+          "tid": 4,
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        {
+          "coin": "#115650",
+          "px": "0.5",
+          "sz": "24.0",
+          "side": "B",
+          "time": 1791812406509,
+          "startPosition": "0.0",
+          "dir": "Buy",
+          "closedPnl": "0.0",
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000004",
+          "oid": 5,
+          "crossed": true,
+          "fee": "0.0",
+          "tid": 5,
+          "feeToken": "USDC",
+          "twapId": null
+        }
+      ],
+      "ledger": [],
+      "userFees": {
+        "userCrossRate": "0.00045",
+        "userAddRate": "0.00015",
+        "userSpotCrossRate": "0.0007",
+        "userSpotAddRate": "0.0004",
+        "activeReferralDiscount": "0.0"
+      }
+    },
+    {
+      "accountAlias": "participant-2",
+      "counts": {
+        "fills": 7,
+        "hipFills": 6,
+        "ledger": 5
+      },
+      "fillTypes": ["Buy", "Settlement"],
+      "feeTokens": ["USDC"],
+      "ledgerTypes": {
+        "send": 2,
+        "spotTransfer": 2,
+        "vaultDeposit": 1
+      },
+      "fills": [
+        {
+          "coin": "#115611",
+          "px": "1.0",
+          "sz": "23.0",
+          "side": "A",
+          "time": 1791811808399,
+          "startPosition": "23.0",
+          "dir": "Settlement",
+          "closedPnl": "5.159",
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000005",
+          "oid": 6,
+          "crossed": true,
+          "fee": "0.0293664",
+          "tid": 6,
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        {
+          "coin": "#115611",
+          "px": "0.79",
+          "sz": "16.0",
+          "side": "B",
+          "time": 1791811036054,
+          "startPosition": "7.0",
+          "dir": "Buy",
+          "closedPnl": "0.0",
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000006",
+          "oid": 7,
+          "crossed": true,
+          "fee": "0.0",
+          "tid": 7,
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        {
+          "coin": "#115651",
+          "px": "0.5",
+          "sz": "24.0",
+          "side": "B",
+          "time": 1791812406509,
+          "startPosition": "0.0",
+          "dir": "Buy",
+          "closedPnl": "0.0",
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000004",
+          "oid": 8,
+          "crossed": false,
+          "fee": "0.0",
+          "tid": 8,
+          "feeToken": "USDC",
+          "twapId": null
+        }
+      ],
+      "ledger": [
+        {
+          "time": 1791730377589,
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000007",
+          "delta": {
+            "type": "send",
+            "user": "0x0000000000000000000000000000000000000001",
+            "destination": "0x0000000000000000000000000000000000000002",
+            "sourceDex": "spot",
+            "destinationDex": "spot",
+            "token": "USDC",
+            "amount": "80.0",
+            "usdcValue": "80.0",
+            "fee": "0.0",
+            "nativeTokenFee": "0.0",
+            "nonce": 1791730368808,
+            "feeToken": ""
+          }
+        },
+        {
+          "time": 1791736777931,
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000008",
+          "delta": {
+            "type": "send",
+            "user": "0x0000000000000000000000000000000000000001",
+            "destination": "0x0000000000000000000000000000000000000002",
+            "sourceDex": "spot",
+            "destinationDex": "spot",
+            "token": "USDC",
+            "amount": "70.0",
+            "usdcValue": "70.0",
+            "fee": "0.0",
+            "nativeTokenFee": "0.0",
+            "nonce": 1791736752807,
+            "feeToken": ""
+          }
+        },
+        {
+          "time": 1791732575361,
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000009",
+          "delta": {
+            "type": "spotTransfer",
+            "token": "USDC",
+            "amount": "70.0",
+            "usdcValue": "70.0",
+            "user": "0x0000000000000000000000000000000000000003",
+            "destination": "0x0000000000000000000000000000000000000001",
+            "fee": "0.0",
+            "nativeTokenFee": "0.0",
+            "nonce": 4069987,
+            "feeToken": ""
+          }
+        },
+        {
+          "time": 1791809301028,
+          "hash": "0x000000000000000000000000000000000000000000000000000000000000000a",
+          "delta": {
+            "type": "spotTransfer",
+            "token": "HYPE",
+            "amount": "1.5",
+            "usdcValue": "128.415",
+            "user": "0x0000000000000000000000000000000000000004",
+            "destination": "0x0000000000000000000000000000000000000001",
+            "fee": "0.0",
+            "nativeTokenFee": "0.0",
+            "nonce": 4095682,
+            "feeToken": ""
+          }
+        },
+        {
+          "time": 1791809366743,
+          "hash": "0x000000000000000000000000000000000000000000000000000000000000000b",
+          "delta": {
+            "type": "vaultDeposit",
+            "vault": "0x0000000000000000000000000000000000000005",
+            "usdc": "130.0"
+          }
+        }
+      ],
+      "userFees": {
+        "userCrossRate": "0.0004275",
+        "userAddRate": "0.0001425",
+        "userSpotCrossRate": "0.000665",
+        "userSpotAddRate": "0.00038",
+        "activeReferralDiscount": "0.04"
+      }
+    },
+    {
+      "accountAlias": "participant-3",
+      "counts": {
+        "fills": 19,
+        "hipFills": 19,
+        "ledger": 10
+      },
+      "fillTypes": ["Settlement", "Buy", "Merge Outcome"],
+      "feeTokens": ["USDC"],
+      "ledgerTypes": {
+        "send": 10
+      },
+      "fills": [
+        {
+          "coin": "#115570",
+          "px": "0.5",
+          "sz": "19.0",
+          "side": "A",
+          "time": 1791810405871,
+          "startPosition": "20.0",
+          "dir": "Merge Outcome",
+          "closedPnl": "-0.41819",
+          "hash": "0x000000000000000000000000000000000000000000000000000000000000000c",
+          "oid": 9,
+          "crossed": true,
+          "fee": "0.0121296",
+          "tid": 9,
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        {
+          "coin": "#115571",
+          "px": "0.5",
+          "sz": "19.0",
+          "side": "A",
+          "time": 1791810405871,
+          "startPosition": "19.0",
+          "dir": "Merge Outcome",
+          "closedPnl": "-0.64619",
+          "hash": "0x000000000000000000000000000000000000000000000000000000000000000c",
+          "oid": 10,
+          "crossed": true,
+          "fee": "0.0121296",
+          "tid": 10,
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        {
+          "coin": "#115570",
+          "px": "0.5",
+          "sz": "2.0",
+          "side": "A",
+          "time": 1791810548782,
+          "startPosition": "42.0",
+          "dir": "Merge Outcome",
+          "closedPnl": "0.49874191",
+          "hash": "0x000000000000000000000000000000000000000000000000000000000000000d",
+          "oid": 11,
+          "crossed": true,
+          "fee": "0.0012768",
+          "tid": 11,
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        {
+          "coin": "#115571",
+          "px": "0.5",
+          "sz": "2.0",
+          "side": "A",
+          "time": 1791810548782,
+          "startPosition": "2.0",
+          "dir": "Merge Outcome",
+          "closedPnl": "-0.36902",
+          "hash": "0x000000000000000000000000000000000000000000000000000000000000000d",
+          "oid": 12,
+          "crossed": true,
+          "fee": "0.0012768",
+          "tid": 12,
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        {
+          "coin": "#115640",
+          "px": "0.5",
+          "sz": "13.0",
+          "side": "A",
+          "time": 1791812388534,
+          "startPosition": "13.0",
+          "dir": "Merge Outcome",
+          "closedPnl": "-3.82863",
+          "hash": "0x000000000000000000000000000000000000000000000000000000000000000e",
+          "oid": 13,
+          "crossed": true,
+          "fee": "0.0082992",
+          "tid": 13,
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        {
+          "coin": "#115641",
+          "px": "0.5",
+          "sz": "13.0",
+          "side": "A",
+          "time": 1791812388534,
+          "startPosition": "18.0",
+          "dir": "Merge Outcome",
+          "closedPnl": "-0.97513",
+          "hash": "0x000000000000000000000000000000000000000000000000000000000000000e",
+          "oid": 14,
+          "crossed": true,
+          "fee": "0.0082992",
+          "tid": 14,
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        {
+          "coin": "#115640",
+          "px": "0.79451",
+          "sz": "6.0",
+          "side": "B",
+          "time": 1791812387589,
+          "startPosition": "0.0",
+          "dir": "Buy",
+          "closedPnl": "0.0",
+          "hash": "0x000000000000000000000000000000000000000000000000000000000000000f",
+          "oid": 15,
+          "crossed": false,
+          "fee": "0.0",
+          "tid": 15,
+          "cloid": "0x00000000000000000000000000000001",
+          "feeToken": "USDC",
+          "twapId": null
+        },
+        {
+          "coin": "#115640",
+          "px": "0.79451",
+          "sz": "7.0",
+          "side": "B",
+          "time": 1791812387589,
+          "startPosition": "6.0",
+          "dir": "Buy",
+          "closedPnl": "0.0",
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000010",
+          "oid": 15,
+          "crossed": false,
+          "fee": "0.0",
+          "tid": 16,
+          "cloid": "0x00000000000000000000000000000001",
+          "feeToken": "USDC",
+          "twapId": null
+        }
+      ],
+      "ledger": [
+        {
+          "time": 1791807699256,
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000011",
+          "delta": {
+            "type": "send",
+            "user": "0x0000000000000000000000000000000000000006",
+            "destination": "0x0000000000000000000000000000000000000007",
+            "sourceDex": "spot",
+            "destinationDex": "spot",
+            "token": "USDC",
+            "amount": "0.259222",
+            "usdcValue": "0.259222",
+            "fee": "0.0",
+            "nativeTokenFee": "0.0",
+            "nonce": 1791807698719,
+            "feeToken": ""
+          }
+        },
+        {
+          "time": 1791808450093,
+          "hash": "0x0000000000000000000000000000000000000000000000000000000000000012",
+          "delta": {
+            "type": "send",
+            "user": "0x0000000000000000000000000000000000000007",
+            "destination": "0x0000000000000000000000000000000000000008",
+            "sourceDex": "spot",
+            "destinationDex": "spot",
+            "token": "USDC",
+            "amount": "250.0",
+            "usdcValue": "250.0",
+            "fee": "0.0",
+            "nativeTokenFee": "0.00050675",
+            "nonce": 1791808421214,
+            "feeToken": ""
+          }
+        }
+      ],
+      "userFees": {
+        "userCrossRate": "0.0004275",
+        "userAddRate": "0.0001425",
+        "userSpotCrossRate": "0.000665",
+        "userSpotAddRate": "0.00038",
+        "activeReferralDiscount": "0.04"
+      }
+    }
+  ],
+  "settledOutcomes": [
+    {
+      "spec": {
+        "outcome": 11557,
+        "name": "template:binaryPrice",
+        "description": "perp:BTC|priceDescription:BTC-USDC perp mark|seconds:60|threshold:82721|time:20261012-1315",
+        "sideSpecs": [
+          {
+            "name": "template:Yes"
+          },
+          {
+            "name": "template:No"
+          }
+        ],
+        "quoteToken": "USDC",
+        "venue": "out",
+        "deployerFeeScale": "1.0"
+      },
+      "settleFraction": "0.0",
+      "details": "template"
+    },
+    {
+      "spec": {
+        "outcome": 11561,
+        "name": "template:binaryPrice",
+        "description": "perp:HYPE|priceDescription:HYPE-USDC perp mark|seconds:60|threshold:85.492|time:20261012-1330",
+        "sideSpecs": [
+          {
+            "name": "template:Yes"
+          },
+          {
+            "name": "template:No"
+          }
+        ],
+        "quoteToken": "USDC",
+        "venue": "out",
+        "deployerFeeScale": "1.0"
+      },
+      "settleFraction": "0.0",
+      "details": "template"
+    }
+  ],
+  "followupAt": "2026-10-12T13:42:47.303Z"
+}

@@ -1,0 +1,541 @@
+{
+  "version": 1,
+  "origin": "sanitized-public-relay-native-receipt-correlation",
+  "environment": "mainnet",
+  "collectedAt": "2026-10-12T14:34:22.844Z",
+  "requests": 22,
+  "requestLimit": 22,
+  "failures": [],
+  "routes": [
+    {
+      "name": "base-to-core-spot",
+      "requestId": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "createdAt": "2026-10-07T13:55:15.895Z",
+      "updatedAt": "2026-10-07T13:55:21.021Z",
+      "status": "success",
+      "owner": "0x0000000000000000000000000000000000000002",
+      "baseOwner": "0x0000000000000000000000000000000000000003",
+      "incoming": true,
+      "requestPageRows": 3,
+      "nativeTx": {
+        "txHash": "0x0000000000000000000000000000000000000000000000000000000000000004",
+        "timestamp": 1791381318,
+        "status": "success",
+        "chainId": 1337,
+        "block": 1175117028
+      },
+      "nativeAction": {
+        "type": "sendAsset",
+        "hyperliquidChain": "Mainnet",
+        "amount": "41.923828",
+        "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+        "destination": "0x0000000000000000000000000000000000000002",
+        "sourceDex": "",
+        "destinationDex": "spot",
+        "fromSubAccount": "",
+        "nonce": 1
+      },
+      "nativeActionUser": "0x0000000000000000000000000000000000000005",
+      "nativeLedger": {
+        "returned": 1,
+        "matches": [
+          {
+            "time": 1791381318231,
+            "hash": "0x0000000000000000000000000000000000000000000000000000000000000004",
+            "delta": {
+              "type": "send",
+              "user": "0x0000000000000000000000000000000000000005",
+              "destination": "0x0000000000000000000000000000000000000002",
+              "sourceDex": "",
+              "destinationDex": "spot",
+              "token": "USDC",
+              "amount": "41.923828",
+              "usdcValue": "41.923828",
+              "fee": "0.0",
+              "nativeTokenFee": "0.0",
+              "nonce": 1,
+              "feeToken": ""
+            }
+          }
+        ]
+      },
+      "baseReceipt": {
+        "transactionHash": "0x0000000000000000000000000000000000000000000000000000000000000006",
+        "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000007",
+        "blockNumber": "0x31df931",
+        "status": "0x1",
+        "from": "0x0000000000000000000000000000000000000003",
+        "to": "0x0000000000000000000000000000000000000008"
+      },
+      "baseCanonicalBlock": {
+        "number": "0x31df931",
+        "hash": "0x0000000000000000000000000000000000000000000000000000000000000007"
+      },
+      "baseTransfers": [
+        {
+          "logIndex": "0xf4",
+          "from": "0x0000000000000000000000000000000000000003",
+          "to": "0x0000000000000000000000000000000000000008",
+          "amount": "41952000",
+          "removed": false
+        }
+      ],
+      "relayStatus": {
+        "status": "success",
+        "inTxHashes": [
+          "0x0000000000000000000000000000000000000000000000000000000000000006"
+        ],
+        "txHashes": [
+          "0x0000000000000000000000000000000000000000000000000000000000000004"
+        ],
+        "failReason": "N/A",
+        "refundFailReason": "N/A"
+      },
+      "routeActual": {
+        "origin": {
+          "amount": "41952000",
+          "currency": {
+            "chainId": 8453,
+            "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "symbol": "USDC",
+            "decimals": 6
+          }
+        },
+        "destination": {
+          "amount": "4192382800",
+          "currency": {
+            "chainId": 1337,
+            "address": "0x6d1e7cde53ba9467b783cb7c530ce054",
+            "symbol": "USDC",
+            "decimals": 8
+          }
+        }
+      },
+      "checks": {
+        "nativeHashMatchesLedger": true,
+        "nativeActionHashAgrees": true,
+        "nativeActionNoError": true,
+        "baseReceiptHashAgrees": true,
+        "baseSucceeded": true,
+        "baseFinalized": true,
+        "baseOwnerTransferFound": true,
+        "statusNativeReferenceMatches": true,
+        "ownerMatchesLedger": true,
+        "nonceMatches": true,
+        "sourceDexMatches": true,
+        "destinationDexMatches": true,
+        "amountMatchesAction": true,
+        "amountMatchesRelayActual": true,
+        "baseCanonicalBlockMatches": true,
+        "baseTransfersNotRemoved": true,
+        "baseAmountMatchesRelayActual": true,
+        "statusBaseReferenceMatches": true
+      }
+    },
+    {
+      "name": "base-to-core-perps",
+      "requestId": "0x0000000000000000000000000000000000000000000000000000000000000009",
+      "createdAt": "2026-10-12T13:27:49.833Z",
+      "updatedAt": "2026-10-12T13:27:55.522Z",
+      "status": "success",
+      "owner": "0x000000000000000000000000000000000000000a",
+      "baseOwner": "0x000000000000000000000000000000000000000a",
+      "incoming": true,
+      "requestPageRows": 3,
+      "nativeTx": {
+        "txHash": "0x000000000000000000000000000000000000000000000000000000000000000b",
+        "timestamp": 1791811672,
+        "status": "success",
+        "chainId": 1337,
+        "block": 1181130503
+      },
+      "nativeAction": {
+        "type": "sendAsset",
+        "hyperliquidChain": "Mainnet",
+        "amount": "14.048591",
+        "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+        "destination": "0x000000000000000000000000000000000000000a",
+        "sourceDex": "",
+        "destinationDex": "",
+        "fromSubAccount": "",
+        "nonce": 2
+      },
+      "nativeActionUser": "0x0000000000000000000000000000000000000005",
+      "nativeLedger": {
+        "returned": 2,
+        "matches": [
+          {
+            "time": 1791811672090,
+            "hash": "0x000000000000000000000000000000000000000000000000000000000000000b",
+            "delta": {
+              "type": "send",
+              "user": "0x0000000000000000000000000000000000000005",
+              "destination": "0x000000000000000000000000000000000000000a",
+              "sourceDex": "",
+              "destinationDex": "",
+              "token": "USDC",
+              "amount": "14.048591",
+              "usdcValue": "14.048591",
+              "fee": "0.0",
+              "nativeTokenFee": "0.0",
+              "nonce": 2,
+              "feeToken": ""
+            }
+          }
+        ]
+      },
+      "baseReceipt": {
+        "transactionHash": "0x000000000000000000000000000000000000000000000000000000000000000c",
+        "blockHash": "0x000000000000000000000000000000000000000000000000000000000000000d",
+        "blockNumber": "0x32141ba",
+        "status": "0x1",
+        "from": "0x000000000000000000000000000000000000000e",
+        "to": "0x000000000000000000000000000000000000000f"
+      },
+      "baseCanonicalBlock": {
+        "number": "0x32141ba",
+        "hash": "0x000000000000000000000000000000000000000000000000000000000000000d"
+      },
+      "baseTransfers": [
+        {
+          "logIndex": "0x168",
+          "from": "0x000000000000000000000000000000000000000a",
+          "to": "0x0000000000000000000000000000000000000008",
+          "amount": "14070000",
+          "removed": false
+        }
+      ],
+      "relayStatus": {
+        "status": "success",
+        "inTxHashes": [
+          "0x000000000000000000000000000000000000000000000000000000000000000c"
+        ],
+        "txHashes": [
+          "0x000000000000000000000000000000000000000000000000000000000000000b"
+        ],
+        "failReason": "N/A",
+        "refundFailReason": "N/A"
+      },
+      "routeActual": {
+        "origin": {
+          "amount": "14070000",
+          "currency": {
+            "chainId": 8453,
+            "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "symbol": "USDC",
+            "decimals": 6
+          }
+        },
+        "destination": {
+          "amount": "1404859100",
+          "currency": {
+            "chainId": 1337,
+            "address": "0x00000000000000000000000000000000",
+            "symbol": "USDC",
+            "decimals": 8
+          }
+        }
+      },
+      "checks": {
+        "nativeHashMatchesLedger": true,
+        "nativeActionHashAgrees": true,
+        "nativeActionNoError": true,
+        "baseReceiptHashAgrees": true,
+        "baseSucceeded": true,
+        "baseFinalized": true,
+        "baseOwnerTransferFound": true,
+        "statusNativeReferenceMatches": true,
+        "ownerMatchesLedger": true,
+        "nonceMatches": true,
+        "sourceDexMatches": true,
+        "destinationDexMatches": true,
+        "amountMatchesAction": true,
+        "amountMatchesRelayActual": true,
+        "baseCanonicalBlockMatches": true,
+        "baseTransfersNotRemoved": true,
+        "baseAmountMatchesRelayActual": true,
+        "statusBaseReferenceMatches": true
+      }
+    },
+    {
+      "name": "core-spot-to-base",
+      "requestId": "0x0000000000000000000000000000000000000000000000000000000000000010",
+      "createdAt": "2026-10-12T13:11:48.880Z",
+      "updatedAt": "2026-10-12T13:12:21.338Z",
+      "status": "success",
+      "owner": "0x0000000000000000000000000000000000000011",
+      "baseOwner": "0x0000000000000000000000000000000000000011",
+      "incoming": false,
+      "requestPageRows": 3,
+      "nativeTx": {
+        "txHash": "0x0000000000000000000000000000000000000000000000000000000000000012",
+        "timestamp": 1791810708,
+        "status": "success",
+        "chainId": 1337,
+        "block": 1181116954
+      },
+      "nativeAction": {
+        "type": "sendAsset",
+        "hyperliquidChain": "Mainnet",
+        "amount": "97.347106",
+        "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+        "destination": "0x0000000000000000000000000000000000000013",
+        "sourceDex": "spot",
+        "destinationDex": "",
+        "fromSubAccount": "",
+        "nonce": 3
+      },
+      "nativeActionUser": "0x0000000000000000000000000000000000000011",
+      "nativeLedger": {
+        "returned": 1,
+        "matches": [
+          {
+            "time": 1791810708325,
+            "hash": "0x0000000000000000000000000000000000000000000000000000000000000012",
+            "delta": {
+              "type": "send",
+              "user": "0x0000000000000000000000000000000000000011",
+              "destination": "0x0000000000000000000000000000000000000013",
+              "sourceDex": "spot",
+              "destinationDex": "",
+              "token": "USDC",
+              "amount": "97.347106",
+              "usdcValue": "97.347106",
+              "fee": "0.0",
+              "nativeTokenFee": "0.0",
+              "nonce": 3,
+              "feeToken": ""
+            }
+          }
+        ]
+      },
+      "baseReceipt": {
+        "transactionHash": "0x0000000000000000000000000000000000000000000000000000000000000014",
+        "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000015",
+        "blockNumber": "0x3213fda",
+        "status": "0x1",
+        "from": "0x0000000000000000000000000000000000000016",
+        "to": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+      },
+      "baseCanonicalBlock": {
+        "number": "0x3213fda",
+        "hash": "0x0000000000000000000000000000000000000000000000000000000000000015"
+      },
+      "baseTransfers": [
+        {
+          "logIndex": "0xa4",
+          "from": "0x0000000000000000000000000000000000000005",
+          "to": "0x0000000000000000000000000000000000000011",
+          "amount": "97306611",
+          "removed": false
+        }
+      ],
+      "relayStatus": {
+        "status": "success",
+        "inTxHashes": [
+          "0x0000000000000000000000000000000000000000000000000000000000000012"
+        ],
+        "txHashes": [
+          "0x0000000000000000000000000000000000000000000000000000000000000014"
+        ],
+        "failReason": "N/A",
+        "refundFailReason": "N/A"
+      },
+      "routeActual": {
+        "origin": {
+          "amount": "9734710600",
+          "currency": {
+            "chainId": 1337,
+            "address": "0x6d1e7cde53ba9467b783cb7c530ce054",
+            "symbol": "USDC",
+            "decimals": 8
+          }
+        },
+        "destination": {
+          "amount": "97306611",
+          "currency": {
+            "chainId": 8453,
+            "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "symbol": "USDC",
+            "decimals": 6
+          }
+        }
+      },
+      "checks": {
+        "nativeHashMatchesLedger": true,
+        "nativeActionHashAgrees": true,
+        "nativeActionNoError": true,
+        "baseReceiptHashAgrees": true,
+        "baseSucceeded": true,
+        "baseFinalized": true,
+        "baseOwnerTransferFound": true,
+        "statusNativeReferenceMatches": true,
+        "ownerMatchesLedger": true,
+        "nonceMatches": true,
+        "sourceDexMatches": true,
+        "destinationDexMatches": true,
+        "amountMatchesAction": true,
+        "amountMatchesRelayActual": true,
+        "baseCanonicalBlockMatches": true,
+        "baseTransfersNotRemoved": true,
+        "baseAmountMatchesRelayActual": true,
+        "statusBaseReferenceMatches": true
+      }
+    },
+    {
+      "name": "core-perps-to-base",
+      "requestId": "0x0000000000000000000000000000000000000000000000000000000000000017",
+      "createdAt": "2026-10-12T07:37:17.650Z",
+      "updatedAt": "2026-10-12T07:37:49.316Z",
+      "status": "success",
+      "owner": "0x0000000000000000000000000000000000000018",
+      "baseOwner": "0x0000000000000000000000000000000000000018",
+      "incoming": false,
+      "requestPageRows": 3,
+      "nativeTx": {
+        "txHash": "0x0000000000000000000000000000000000000000000000000000000000000019",
+        "timestamp": 1791790636,
+        "status": "success",
+        "chainId": 1337,
+        "block": 1180836312
+      },
+      "nativeAction": {
+        "type": "sendAsset",
+        "hyperliquidChain": "Mainnet",
+        "amount": "9.962411",
+        "token": "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+        "destination": "0x0000000000000000000000000000000000000013",
+        "sourceDex": "",
+        "destinationDex": "",
+        "fromSubAccount": "",
+        "nonce": 4
+      },
+      "nativeActionUser": "0x0000000000000000000000000000000000000018",
+      "nativeLedger": {
+        "returned": 1,
+        "matches": [
+          {
+            "time": 1791790636843,
+            "hash": "0x0000000000000000000000000000000000000000000000000000000000000019",
+            "delta": {
+              "type": "send",
+              "user": "0x0000000000000000000000000000000000000018",
+              "destination": "0x0000000000000000000000000000000000000013",
+              "sourceDex": "",
+              "destinationDex": "",
+              "token": "USDC",
+              "amount": "9.962411",
+              "usdcValue": "9.962411",
+              "fee": "0.0",
+              "nativeTokenFee": "0.0",
+              "nonce": 4,
+              "feeToken": ""
+            }
+          }
+        ]
+      },
+      "baseReceipt": {
+        "transactionHash": "0x000000000000000000000000000000000000000000000000000000000000001a",
+        "blockHash": "0x000000000000000000000000000000000000000000000000000000000000001b",
+        "blockNumber": "0x32118a6",
+        "status": "0x1",
+        "from": "0x000000000000000000000000000000000000001c",
+        "to": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+      },
+      "baseCanonicalBlock": {
+        "number": "0x32118a6",
+        "hash": "0x000000000000000000000000000000000000000000000000000000000000001b"
+      },
+      "baseTransfers": [
+        {
+          "logIndex": "0x246",
+          "from": "0x0000000000000000000000000000000000000005",
+          "to": "0x0000000000000000000000000000000000000018",
+          "amount": "9939005",
+          "removed": false
+        }
+      ],
+      "relayStatus": {
+        "status": "success",
+        "inTxHashes": [
+          "0x0000000000000000000000000000000000000000000000000000000000000019"
+        ],
+        "txHashes": [
+          "0x000000000000000000000000000000000000000000000000000000000000001a"
+        ],
+        "failReason": "N/A",
+        "refundFailReason": "N/A"
+      },
+      "routeActual": {
+        "origin": {
+          "amount": "996241100",
+          "currency": {
+            "chainId": 1337,
+            "address": "0x00000000000000000000000000000000",
+            "symbol": "USDC",
+            "decimals": 8
+          }
+        },
+        "destination": {
+          "amount": "9939005",
+          "currency": {
+            "chainId": 8453,
+            "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "symbol": "USDC",
+            "decimals": 6
+          }
+        }
+      },
+      "checks": {
+        "nativeHashMatchesLedger": true,
+        "nativeActionHashAgrees": true,
+        "nativeActionNoError": true,
+        "baseReceiptHashAgrees": true,
+        "baseSucceeded": true,
+        "baseFinalized": true,
+        "baseOwnerTransferFound": true,
+        "statusNativeReferenceMatches": true,
+        "ownerMatchesLedger": true,
+        "nonceMatches": true,
+        "sourceDexMatches": true,
+        "destinationDexMatches": true,
+        "amountMatchesAction": true,
+        "amountMatchesRelayActual": true,
+        "baseCanonicalBlockMatches": true,
+        "baseTransfersNotRemoved": true,
+        "baseAmountMatchesRelayActual": true,
+        "statusBaseReferenceMatches": true
+      }
+    }
+  ],
+  "redaction": "Wallets, transaction/request identifiers and nonces aliased within this file only. Public token identities retained. Selected observations, no complete wallet history or personal account.",
+  "quoteToken": {
+    "name": "USDC",
+    "index": 0,
+    "tokenId": "0x6d1e7cde53ba9467b783cb7c530ce054",
+    "weiDecimals": 8,
+    "szDecimals": 8
+  },
+  "baseFinalizedBlock": "0x321466f",
+  "sources": {
+    "relay": "https://api.relay.link/requests/v3",
+    "status": "https://api.relay.link/intents/status/v3",
+    "native": "https://api.hyperliquid.xyz/info",
+    "base": "https://mainnet.base.org"
+  },
+  "coverage": {
+    "routeCount": 4,
+    "completeWalletHistory": false,
+    "ownedCashOrRiskCapacity": false,
+    "confirmationWorkerImplemented": false,
+    "nonzeroNativeTransferFees": false,
+    "collection": "One pass, at most three historical success candidates per direction over 30 days, excluding the last hour. Exact hash lookup, not nearest-time matching. Native owner, action user, destination, DEX, token, nonce and amounts checked independently. Base receipt canonical block hash and finalized block height cross-checked at collection."
+  },
+  "baseTransferFilter": {
+    "chainId": 8453,
+    "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+    "topicCount": 3,
+    "scope": "Only original receipt logs matching this exact USDC Transfer filter and expected source/destination owner were retained; token and topic identity were checked before redaction."
+  }
+}

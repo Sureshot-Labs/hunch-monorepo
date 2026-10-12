@@ -81,6 +81,58 @@ test("observed mainnet templates resolve side labels and preserve unknown token 
   assert.equal(market.volumeUsd, null);
   assert.equal(market.capabilities.trade, false);
 });
+test("dated mainnet/testnet metadata preserves native units and fee multipliers without inventing execution terms", () => {
+  const current = JSON.parse(
+    readFileSync(
+      new URL(
+        "./fixtures/hip4/protocol-observations-20261012.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const markets = current.observations.map(
+    (observation: {
+      environment: "mainnet" | "testnet";
+      collectedAt: string;
+      feeScale: string;
+      outcome: { outcome: number };
+      quote: { tokenId: string };
+      outcomeTokens: unknown[];
+    }) => {
+      const { market, raw } = mapHip4Market({
+        environment: observation.environment,
+        outcome: observation.outcome.outcome,
+        metadata: {
+          outcomes: [observation.outcome],
+          feeScale: observation.feeScale,
+        },
+        spotMetadata: {
+          tokens: [observation.quote, ...observation.outcomeTokens],
+        },
+        fetchedAt: observation.collectedAt,
+        generation: "public-protocol-observation",
+      });
+      assert.equal(market.feeScale, "1.0");
+      assert.equal(market.deployerFeeScale, "1.0");
+      assert.equal(raw.feeScale, "1.0");
+      assert.equal(market.quoteWeiDecimals, 8);
+      assert.equal(market.quoteTokenId, observation.quote.tokenId);
+      assert.deepEqual(
+        market.sides.map((side) => [side.szDecimals, side.weiDecimals]),
+        [
+          [null, null],
+          [null, null],
+        ],
+      );
+      assert.equal(market.capabilities.trade, false);
+      assert.equal(market.capabilities.funding, false);
+      assert.ok(market.expiry);
+      return market;
+    },
+  );
+  assert.notEqual(markets[0].quoteTokenId, markets[1].quoteTokenId);
+});
 test("question fallback belongs to the same event, not a standalone market", () => {
   const fallback = mapped(11116).market;
   const named = mapped(11117).market;
@@ -89,6 +141,41 @@ test("question fallback belongs to the same event, not a standalone market", () 
   assert.notEqual(fallback.marketId, named.marketId);
   assert.equal(named.title, "FK Bodo/Glimt");
   assert.equal(fallback.title, "Other");
+});
+test("date-only template deadlines end at the next UTC midnight, never imply settlement", () => {
+  for (const [expiry, expected] of [
+    ["20261012", "2026-10-13T00:00:00.000Z"],
+    ["20261231", "2027-01-01T00:00:00.000Z"],
+    ["20280229", "2028-03-01T00:00:00.000Z"],
+    ["20260229", null],
+    ["20261301", null],
+    ["20261012-1245", "2026-10-12T12:45:00.000Z"],
+    ["20261012-2500", null],
+  ]) {
+    const outcome = {
+      ...main.metadata.outcomes[0],
+      description: `expiry:${expiry}`,
+    };
+    const { market } = mapHip4Market({
+      ...main,
+      metadata: { ...main.metadata, outcomes: [outcome], questions: [] },
+      settlement: null,
+      outcome: outcome.outcome,
+      fetchedAt: "2026-10-12T23:59:59.999Z",
+      generation: "date-hint",
+    });
+    assert.equal(market.expiry, expected);
+    assert.equal(market.sides[0].payout, null);
+    if (expiry === "20261012") {
+      assert.ok(expected);
+      assert.equal(market.status, "observed");
+      assert.equal(
+        ageHip4Market(market, Date.parse(expected), DEFAULT_HIP4_READ_POLICY)
+          .status,
+        "expired",
+      );
+    }
+  }
 });
 test("expiry and 0/1 books cannot produce an official outcome; fractional payouts stay fractional", () => {
   const expired = ageHip4Market(
