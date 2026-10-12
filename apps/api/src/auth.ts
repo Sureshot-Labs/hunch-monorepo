@@ -1158,6 +1158,7 @@ export class AuthService {
     client: Pick<PoolClient, "query">,
     privyUser: PrivyUser,
     _privyClaims: PrivyClaims,
+    onAccountResolved?: (isNewAccount: boolean) => void,
   ): Promise<User> {
     // Extract user data from Privy
     const email = PrivyService.getPrimaryEmailAddress(privyUser);
@@ -1181,6 +1182,7 @@ export class AuthService {
         email,
       });
     let userId = resolvedExistingUser.userId;
+    const isNewAccount = userId === null;
 
     if (
       !userId &&
@@ -1446,7 +1448,9 @@ export class AuthService {
       [userId],
     );
 
-    return mapUserRow(userResult.rows[0]);
+    const user = mapUserRow(userResult.rows[0]);
+    onAccountResolved?.(isNewAccount);
+    return user;
   }
 
   static async createOrUpdateUserFromPrivy(
