@@ -120,15 +120,39 @@ export async function readHip4Cursor(
 export const HIP4_CATALOG_READ_SQL = `select read_model from hip4_read_markets
      where environment=$1 and outcome>$2 order by outcome limit $3`;
 
+// Keep the event index as the driving relation. A normal ordered join can
+// scan the whole catalog before finding a sparse event under a generic plan.
+// The per-member LIMIT is cardinality-one by market_id, not a product limit.
+export const HIP4_EVENT_READ_SQL = `select scoped_read.read_model
+  from unified_markets market_row
+  join lateral (
+    select read_row.read_model, read_row.outcome
+    from hip4_read_markets read_row
+    where read_row.market_id=market_row.id and read_row.environment=$2
+      and read_row.outcome>$3
+      and ($4::bigint[] is null or read_row.outcome=any($4))
+    limit 1
+  ) scoped_read on true
+  where market_row.event_id=$1
+  order by scoped_read.outcome limit $5`;
+
 export async function readHip4Markets(
   db: Pick<Pool, "query">,
   environment: Hip4Environment,
   allowlist: number[] | null,
   after: number,
   limit: number,
+  eventId?: string,
 ) {
-  const result =
-    allowlist === null
+  const result = eventId
+    ? await db.query(HIP4_EVENT_READ_SQL, [
+        eventId,
+        environment,
+        after,
+        allowlist,
+        limit,
+      ])
+    : allowlist === null
       ? await db.query(HIP4_CATALOG_READ_SQL, [environment, after, limit])
       : await db.query(
           `

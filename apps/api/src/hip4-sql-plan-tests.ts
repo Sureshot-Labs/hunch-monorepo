@@ -1,7 +1,10 @@
 // @requires-db
 import assert from "node:assert/strict";
 import { createIntegrationTestPool } from "./test-database-target.js";
-import { HIP4_CATALOG_READ_SQL } from "./services/hip4-repository.js";
+import {
+  HIP4_CATALOG_READ_SQL,
+  HIP4_EVENT_READ_SQL,
+} from "./services/hip4-repository.js";
 import {
   hip4TradesReadSql,
   HIP4_CANDLES_READ_SQL,
@@ -21,8 +24,11 @@ try {
   await client.query(
     "insert into unified_events(id,venue,venue_event_id,title,status) values('hip4-plan-event','hyperliquid','hip4-plan-event','Plan fixture','ACTIVE')",
   );
+  await client.query(`insert into unified_events(id,venue,venue_event_id,title,status)
+    select 'hip4-event-' || fixture_id, 'hyperliquid', 'hip4-event-' || fixture_id, 'Plan fixture', 'ACTIVE'
+    from generate_series(100000,119999) fixture_id`);
   await client.query(`insert into unified_markets(id,venue,venue_market_id,event_id,title,status,market_type)
-    select 'hip4-plan-' || fixture_id, 'hyperliquid', 'hip4-plan-' || fixture_id, 'hip4-plan-event', 'Plan fixture', 'ACTIVE', 'binary'
+    select 'hip4-plan-' || fixture_id, 'hyperliquid', 'hip4-plan-' || fixture_id, 'hip4-event-' || fixture_id, 'Plan fixture', 'ACTIVE', 'binary'
     from generate_series(100000,119999) fixture_id`);
   await client.query(`insert into hip4_read_markets(market_id,environment,outcome,fetched_at,generation,read_model,raw)
     select 'hip4-plan-' || fixture_id,'mainnet',fixture_id,now(),gen_random_uuid(),'{}'::jsonb,'{}'::jsonb
@@ -33,6 +39,47 @@ try {
   await client.query("analyze hip4_read_markets");
   await client.query("analyze hip4_public_trades");
   await client.query("set local plan_cache_mode=force_generic_plan");
+  await client.query(
+    "insert into unified_events(id,venue,venue_event_id,title,status) values('hip4-sparse-event','hyperliquid','hip4-sparse-event','Sparse fixture','ACTIVE')",
+  );
+  await client.query(
+    "update unified_markets set event_id='hip4-sparse-event' where id in ('hip4-plan-119990','hip4-plan-119998','hip4-plan-119999')",
+  );
+  await client.query("analyze unified_markets");
+  await client.query(
+    `prepare hip4_event_page(text,text,bigint,bigint[],int) as ${HIP4_EVENT_READ_SQL}`,
+  );
+  for (const after of [-1, 119990, 119999]) {
+    const result = await client.query(
+      `explain(analyze,buffers,format json) execute hip4_event_page('hip4-sparse-event','mainnet',${after},NULL,2)`,
+    );
+    const plan = result.rows[0]["QUERY PLAN"][0];
+    assert.match(JSON.stringify(plan), /idx_unified_markets_event_id/);
+    type PlanNode = {
+      "Relation Name"?: string;
+      "Actual Loops": number;
+      "Actual Rows": number;
+      Plans?: PlanNode[];
+    };
+    const inspect = (node: PlanNode) => {
+      if (node["Relation Name"] === "hip4_read_markets") {
+        assert.ok(
+          node["Actual Loops"] <= 3,
+          "read work must scale with event members, not the catalog",
+        );
+        assert.ok(node["Actual Rows"] <= 1);
+      }
+      for (const child of node.Plans ?? []) inspect(child);
+    };
+    inspect(plan.Plan);
+    console.log(
+      JSON.stringify({
+        case: `event-sparse-${after}`,
+        executionMs: plan["Execution Time"],
+        plan: plan.Plan,
+      }),
+    );
+  }
   await client.query(
     `prepare hip4_catalog_page(text,bigint,int) as ${HIP4_CATALOG_READ_SQL}`,
   );

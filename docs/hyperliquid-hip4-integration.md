@@ -2132,3 +2132,27 @@ field strings in event/market headings. Desktop first/next pages and 390px mobil
 cards/details were inspected through the real local session, including recorded
 trades/chart and 24h volume. The disposable database was removed after testing;
 the local indexer/API remain running. No production or trading action occurred.
+
+### Event-scoped read pages (October 12 follow-up)
+
+The protected HIP list accepts an optional canonical `eventId`, preserving the
+same environment, policy revision, allowlist and bounded outcome cursor checks.
+Wrong-environment event IDs are rejected before repository access. Frontend event
+pages use this filter plus the existing exact-market detail endpoint; no public
+event or trading API is implicitly enabled.
+
+The event query starts from the existing unified-market event index and uses a
+cardinality-one lateral lookup by canonical market ID. A normal ordered join was
+rejected after EXPLAIN showed a sparse event scanning nearly the full HIP catalog.
+The final PostgreSQL 16 forced-generic plans, with 20,000 unrelated event markets,
+perform three indexed read-model lookups and 12 shared-buffer hits on first,
+resumed and empty-tail pages (observed 0.074/0.061/0.037 ms). The inner LIMIT 1
+expresses unique market identity, not a product or paging limit. No migration is
+required. Existing retention and read-only authorization remain unchanged.
+
+Verification: 92 non-DB HIP tests, the event/catalog integration suite and SQL
+plan suite passed against disposable PostgreSQL 16; full workspace build passed
+16/16. Both native frontend surfaces were checked with live prices/history and
+all eight trading presentation combinations. Final Buy/Sell only shows unavailable;
+financial preparation, signing and execution remain absent. This is event/read UI
+completion, not a claim that financial P2 is implemented. No production changes.

@@ -87,6 +87,33 @@ try {
   );
   assert.equal(all[90].volume24h?.usd, "10");
   assert.equal(all[90].indicativePrices?.prices[0].price, "0.4");
+  const scoped = await readHip4Markets(
+    pool,
+    "mainnet",
+    null,
+    -1,
+    20,
+    all[90].eventId,
+  );
+  assert.deepEqual(
+    scoped.map((row) => row.outcome),
+    [ids[90]],
+  );
+  assert.equal(
+    (await readHip4Markets(pool, "mainnet", null, ids[90], 20, all[90].eventId))
+      .length,
+    0,
+  );
+  assert.equal(
+    (await readHip4Markets(pool, "mainnet", [ids[0]], -1, 20, all[90].eventId))
+      .length,
+    0,
+  );
+  assert.equal(
+    (await readHip4Markets(pool, "testnet", null, -1, 20, all[90].eventId))
+      .length,
+    0,
+  );
   assert.equal(
     (await readHip4Markets(pool, "testnet", null, -1, 20)).length,
     0,

@@ -22,6 +22,48 @@ export async function buildHip4ContractApp() {
   });
   return app;
 }
+test("event reads preserve scope, page bound and allowlist; wrong environment never reaches DB", async () => {
+  const app = await buildHip4ContractApp();
+  const calls: unknown[][] = [];
+  registerHip4ReadRoutes(app, {
+    authorize: async () => {},
+    policy: async () => ({
+      policy: {
+        ...DEFAULT_HIP4_READ_POLICY,
+        enabled: true,
+        outcomeAllowlist: [1, 2],
+        pageSize: 2,
+      },
+      revision: "event-test",
+    }),
+    markets: async (...args) => {
+      calls.push(args);
+      return [];
+    },
+  });
+  const eventId = "hyperliquid:mainnet:question:418";
+  const first = await app.inject(
+    `/markets/hyperliquid/canary?eventId=${encodeURIComponent(eventId)}&afterOutcome=1`,
+  );
+  assert.equal(first.statusCode, 200);
+  assert.deepEqual(calls, [["mainnet", [1, 2], 1, 3, eventId]]);
+  assert.equal(first.headers["cache-control"], "private, no-store");
+  assert.equal(
+    (
+      await app.inject(
+        "/markets/hyperliquid/canary?eventId=hyperliquid:testnet:question:418",
+      )
+    ).statusCode,
+    404,
+  );
+  assert.equal(
+    (await app.inject("/markets/hyperliquid/canary?eventId=other:418"))
+      .statusCode,
+    400,
+  );
+  assert.equal(calls.length, 1);
+  await app.close();
+});
 test("read canary checks authorization before policy/DB and does not grant writes", async () => {
   const app = await buildHip4ContractApp();
   let reads = 0;

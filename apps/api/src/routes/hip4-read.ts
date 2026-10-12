@@ -30,6 +30,7 @@ export type Hip4ReadDependencies = {
     allowlist: number[] | null,
     after: number,
     limit: number,
+    eventId?: string,
   ) => Promise<Hip4ReadMarket[]>;
   trades?: (
     ...args: Parameters<typeof readHip4Trades> extends [unknown, ...infer Rest]
@@ -56,6 +57,13 @@ export function registerHip4ReadRoutes(
         description:
           "Internal passive HIP-4 canary. Requires administrator read permission; never grants trade, funding or automation capability.",
         querystring: z.object({
+          eventId: z
+            .string()
+            .regex(
+              /^hyperliquid:(mainnet|testnet):(question|outcome):(0|[1-9]\d*)$/,
+            )
+            .max(80)
+            .optional(),
           afterOutcome: z.coerce
             .number()
             .int()
@@ -76,11 +84,19 @@ export function registerHip4ReadRoutes(
         const { policy, revision } = await dependencies.policy();
         if (!policy.enabled)
           return reply.code(404).send({ error: "hip4_read_disabled" });
+        if (
+          request.query.eventId &&
+          !request.query.eventId.startsWith(
+            `hyperliquid:${policy.environment}:`,
+          )
+        )
+          return reply.code(404).send({ error: "hip4_event_unavailable" });
         const rows = await dependencies.markets(
           policy.environment,
           policy.catalogMode === "all" ? null : policy.outcomeAllowlist,
           request.query.afterOutcome,
           policy.pageSize + 1,
+          request.query.eventId,
         );
         const selected = rows.slice(0, policy.pageSize);
         return {
