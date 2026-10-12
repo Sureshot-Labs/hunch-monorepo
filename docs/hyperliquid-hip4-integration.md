@@ -10,7 +10,9 @@ Start with section 12 for evidence gates, section 11 for implementation order,
 then the owned domain section and companion client contract. Section 13 records
 the implemented P0 read-contract foundation and passive P1 canary. Financial
 capabilities remain off and require their listed proof. Sections 16–18 record
-P1 acceptance and the latest P0 evidence; earlier acceptance notes are dated history.
+P1 acceptance and earlier P0 evidence. Section 19 supersedes their unresolved
+BUY-minimum status with the official $1 rule and correlated native execution;
+earlier acceptance notes and fixtures remain dated history.
 
 | Repository             | Branch / immutable reference                                                |
 | ---------------------- | --------------------------------------------------------------------------- |
@@ -39,6 +41,13 @@ Evidence labels used below:
 - **Protocol documentation:** official provider documentation inspected on the research date; not a live route or account test.
 - **Required design:** proposed Hunch behavior, to implement and test.
 - **Unverified:** needs a bounded, separately authorized read-only probe, fixture, or implementation test.
+
+Current financial-plan decision: ordinary HIP BUY minimum is **1 USDC ($1),
+inclusive**, excluding fees. The proposed financial runtime-policy default is
+`minimumBuyNotionalUsd: "1.00"`; this is not an implemented trading setting or
+a change to `hip4_read`. Whole-contract rounding can make the smallest purchase
+larger than $1. Do not apply this BUY floor to all SELL/close operations. Sections
+2, 11 and 19 define calculation, policy and acceptance requirements.
 
 The feature now includes a disabled-by-default passive read implementation;
 the June `hip` implementation remains reference material. Documentation and
@@ -170,18 +179,31 @@ zeros before signing; native boundary acceptance is a separate test.
 Required quote math uses exact decimal strings/integer units. Quantize first,
 then validate actual signed notional/size. Buy fee-inclusive debit and sell
 token debit must reflect those final quantities. Do not inherit Polymarket's
-five-share or marketable-buy minimum, Limitless fee math, or a universal `$10`
-HIP minimum. The official error reference documents a 10-quote-unit spot minimum;
-the HIP-specific accepted/rejected boundary remains unobserved. Section 18 now
-contains native original BUY orders below $10, not merely partial fills. Do not
-apply that generic spot floor to outcomes or infer a new exact floor from the
-smallest selected order.
+five-share or marketable-buy minimum, Limitless fee math, or the generic spot
+10-quote-unit floor. The [official outcome announcement](https://t.me/hyperliquid_api/366)
+reduced the normal outcome-order minimum to **1 USDC**. Section 19 corroborates
+an original 100-contract BUY at 0.01 with its filled order and exact native fill;
+this is not an inference from the smallest partial fill or top-level success.
 
-The required minimum proof must identify the tested original order, its exact
-integer size and price, the native per-order acceptance/rejection, and the rule's
-valuation basis (limit versus reference price, side, opening versus closing).
-An explorer transaction's top-level success, an IOC sell floor or the smallest
-returned fill cannot establish that predicate.
+For ordinary BUY, require final normalized gross order notional of at least
+`max(protocolMinimumBuyNotional, effectivePolicy.minimumBuyNotionalUsd)`;
+the initial values are both `"1.00"` USDC. Fees, gas and funding costs do not
+count toward it. Validate the actual signed order after lot/tick normalization,
+not the requested budget or a displayed midpoint. For a limit BUY at price `p`,
+the minimum whole-contract quantity is `ceil(effectiveMinimum / p)` using exact
+decimal arithmetic. Thus 0.50 needs 2 contracts ($1), 0.415 needs 3 ($1.245), and
+0.01 needs 100 ($1). Show that minimum as advice; never increase the user's
+budget or order silently. An IOC's final limit/size and bounded debit come from
+the executable server quote; do not require every later partial fill or resting
+remainder to independently reach $1.
+
+SELL is a separate capability, not the BUY guard with the side flipped. A native
+full close below $1 executed with `reduceOnly=false` (section 19); that flag alone
+cannot classify close eligibility. Use verified owned quantity, current book,
+normalized order and provider result. Do not invent a blanket `$1` SELL floor,
+promise all sub-$1 sells will be accepted, or misclassify a minimum rejection as
+insufficient funds. Exact negative-boundary and close-exemption cases belong in
+P4 admission/recovery tests; they do not block P2 account projection.
 
 GTC, IOC and ALO are documented time-in-force modes. IOC may partially fill;
 it must not be presented or retried as FOK. Conditional/perp-only order types
@@ -250,6 +272,17 @@ builder fee if supported/authorized, funding provider fee, forwarding fee,
 source gas/sponsorship and account activation. Keep trading fee and transfer
 fee separate. Persist charged fill fees; do not compute realized PnL from a
 quote estimate or charge a fallback fee a second time.
+
+For outcomes, zero opening **base** fee does not guarantee a zero-cost BUY:
+an authorized builder fee can apply on opening, and funding is separate. The
+closing rate uses current user spot maker/taker terms, referral discount and
+market scales; tier/staking is already reflected in the user rates. Clamp
+negative outcome maker rates to zero, not rebates. Section 19 records maker,
+taker and settlement evidence and the remaining rounding limitation.
+`WsFill.fee` already includes `builderFee`; retain the breakdown without adding
+the builder amount twice. Realized accounting uses observed native fees, not
+recomputed estimates. A one-atom rounding discrepancy in historical evidence is
+not permission to relax a user's maximum debit or silently increase a signed cap.
 
 Initially keep builder fees disabled unless mainnet support and exact approval/
 charged-fee semantics are proved. Preserve reported fee and builder-fee fields
@@ -691,7 +724,13 @@ Regenerate OpenAPI consumers only after the server contract is validated.
 
 Quote includes environment/market revision, token/side, rounded size/price,
 TIF/orderability, debit asset/raw cap, fee breakdown, balance/context revision,
-expiry, depth/staleness and exact validation reason. Prepare binds signer/owner,
+expiry, depth/staleness and exact validation reason. Include the effective
+financial policy revision, protocol and product BUY minimums, their quote-token
+units, effective minimum, integer lot, price tick and price-dependent minimum
+quantity. Unknown SELL exemptions remain explicit; no fabricated numeric SELL
+floor. Prepare revalidates current terms before immutable admission; policy
+changes do not mutate or resubmit an already admitted uncertain action.
+Prepare binds signer/owner,
 nonce, `cloid`, action fingerprint, market and funding consumer.
 
 Use current `funding-trade-attempt-repository.ts` states (`claimed`,
@@ -1065,23 +1104,23 @@ working bounded features; block only a concretely unsafe financial path.
 
 ### Required fixture/test matrix
 
-| Category         | Cases that must be exercised                                                                                                                   |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| Metadata         | Legacy/new templates; standalone/no question; question fallback; fractional settlement; recurring rollover; unknown quote token                |
-| Identity         | Mainnet/testnet collisions; coin `#` vs token `+`; account case; raw provider currency vs ERC20; same timestamp different trades               |
-| Market data      | Fresh/stale/empty/error book; depth shortage; WS gap/replay; candle history limit; absent metrics not zero                                     |
-| Amounts          | Rounded exact min boundary; one raw unit below; five significant figures; lot dust; 6↔8 conversions; fee-inclusive cap; no input increase      |
-| Account modes    | Standard spot/perp; unified; portfolio-margin unsupported capacity; no automatic mode change; open-order holds; concurrent transfers           |
-| Funding          | Every activated source/destination family; no route; wrong currency/DEX/owner; provider expiry; partial composite funding; source fee/gas      |
-| Core signatures  | Nonce mapping then SendAsset; rejection/close at each stage; inconsistent domains; foreign payload; lease expiry; late signature               |
-| Trade recovery   | Duplicate tabs/processes; accepted response lost; definitive nested reject; unknown order; same nonce/cloid replay; direct and funded paths    |
-| Orders/fills     | IOC no fill/partial/full; GTC resting/partial/cancel; fill/cancel race; dual records; one hash multiple tids; reward dedup                     |
-| Settlement/PnL   | Automatic payout credit; fractional payouts; complete-zero position; partial snapshot; historical gaps; transfers not profit; fees not doubled |
-| Receive/withdraw | First account activation; destination credit lag; ingress paid then downstream failed; wrong/multiple/late receipt; no second payment          |
-| Telegram         | Exact user/TG/account scope; expiry; launch duplicates; review without consent; MiniApp closes after signing; no HIP autonomous profile        |
-| Matching/intel   | Same topic different oracle/time; side inversion; new recurrence; no public holder source; partial-history qualification; budget skip          |
-| Operations       | Exit-only repair; stale jobs; restart/missing report; bounded polling; token/membership generations; retention protects user history           |
-| Existing venues  | All existing EVM/Safe/Deposit Wallet/Solana funding and Polymarket/Limitless trading paths unchanged; Kalshi exit-only preserved               |
+| Category         | Cases that must be exercised                                                                                                                              |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Metadata         | Legacy/new templates; standalone/no question; question fallback; fractional settlement; recurring rollover; unknown quote token                           |
+| Identity         | Mainnet/testnet collisions; coin `#` vs token `+`; account case; raw provider currency vs ERC20; same timestamp different trades                          |
+| Market data      | Fresh/stale/empty/error book; depth shortage; WS gap/replay; candle history limit; absent metrics not zero                                                |
+| Amounts          | $0.99/$1 BUY; one raw unit below; whole lots and five price decimal places; $0.333 full SELL close; 6↔8 conversions; fee-inclusive cap; no input increase |
+| Account modes    | Standard spot/perp; unified; portfolio-margin unsupported capacity; no automatic mode change; open-order holds; concurrent transfers                      |
+| Funding          | Every activated source/destination family; no route; wrong currency/DEX/owner; provider expiry; partial composite funding; source fee/gas                 |
+| Core signatures  | Nonce mapping then SendAsset; rejection/close at each stage; inconsistent domains; foreign payload; lease expiry; late signature                          |
+| Trade recovery   | Duplicate tabs/processes; accepted response lost; definitive nested reject; unknown order; same nonce/cloid replay; direct and funded paths               |
+| Orders/fills     | IOC no fill/partial/full; GTC resting/partial/cancel; fill/cancel race; dual records; one hash multiple tids; reward dedup                                |
+| Settlement/PnL   | Automatic payout credit; fractional payouts; complete-zero position; partial snapshot; historical gaps; transfers not profit; fees not doubled            |
+| Receive/withdraw | First account activation; destination credit lag; ingress paid then downstream failed; wrong/multiple/late receipt; no second payment                     |
+| Telegram         | Exact user/TG/account scope; expiry; launch duplicates; review without consent; MiniApp closes after signing; no HIP autonomous profile                   |
+| Matching/intel   | Same topic different oracle/time; side inversion; new recurrence; no public holder source; partial-history qualification; budget skip                     |
+| Operations       | Exit-only repair; stale jobs; restart/missing report; bounded polling; token/membership generations; retention protects user history                      |
+| Existing venues  | All existing EVM/Safe/Deposit Wallet/Solana funding and Polymarket/Limitless trading paths unchanged; Kalshi exit-only preserved                          |
 
 Fixtures must identify their origin: official SDK golden, sanitized actual read-only
 payload, synthetic boundary or historical Hunch request. Do not label synthetic
@@ -1107,6 +1146,24 @@ validated defaults and an effective revision. Venue protocol constants (asset
 encoding, signature field types) and financial identity/consent invariants are
 not disableable product knobs. Do not put a second $10 publication threshold or
 a guessed trade minimum into HIP SQL, handlers, UI presets or admin forms.
+
+The agreed ordinary HIP BUY product default is `minimumBuyNotionalUsd: "1.00"`,
+represented as an exact decimal string in the future financial policy
+owner. Validate positive finite decimal values and resolve one effective policy
+revision server-side. A product override can raise the threshold, but cannot
+lower the protocol floor; return the effective maximum in the quote. Keep the
+protocol rule and its dated provenance separate from the product setting.
+Do not add a financial threshold to the read-indexer policy `hip4_read` or a
+second client constant. Desktop/mobile, amount advice, Copy, prepare and admin
+validation must share that one resolved contract.
+
+Apply this to ordinary BUY and enabled Copy purchases, not deposits/withdrawals,
+SELL/close, or partial-fill reconciliation. Social publication still uses the
+existing `social` policy (initial $10 executed notional); a valid $1 purchase
+does not automatically qualify as a published thesis. No policy override means
+the validated default, not an error. Failed policy resolution or an invalid
+active revision must produce a recoverable quote/configuration error, not a
+silent fallback; reads and reconciliation of existing attempts remain available.
 
 P4S extends `social-tests.ts`, `verified-buy-tests.ts`, the verified-buy integration
 and batch suites, `social-copy-concurrency-integration-tests.ts`, social
@@ -1202,8 +1259,10 @@ in this revision used no keys, account calls or live quotes.
 
 Before financial activation, resolve:
 
-1. Exact mainnet outcome metadata, minimum notional/lot precision, fee and builder
-   capability, and zero/one/fractional settlement payloads.
+1. Revalidate current mainnet outcome metadata and the section 19 ordinary $1
+   BUY / integer-lot contract at implementation. Exercise normalization, negative
+   boundary and close exceptions in P4; prove the selected fee/builder capability
+   and zero/one/fractional settlement handling before enabling the affected writes.
 2. Core USDC raw units/token IDs for each activated spot/perp/unified route,
    mode-aware withdrawable capacity and exact account activation cost semantics.
 3. Actual Relay route availability, amount limits/fees and signer contracts for
@@ -1659,17 +1718,18 @@ lint still reports the pre-existing second H1 in `AGENTS.md`; it was not edited.
 The new changes received author review and regression checks, not a new independent
 agent verdict. Prior history-free reviews apply to the preceding implementation.
 
-| Phase / evidence                         | Current status                                                                                                     | Concrete next step                                                                                                                        |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| P0 read contract                         | Implemented and tested, including date-only expiry                                                                 | Retain dated fixtures and unknown precision explicitly                                                                                    |
-| P0 offline signing                       | Twenty independently checked SDK goldens                                                                           | Reuse these as the oracle for the later production adapter; execution/error recovery remains a separate P3/P4 obligation                  |
-| P0 executable precision/minimum and fees | First-party formatting/rate contracts and native fee samples captured in section 18; minimum boundary not observed | Verify the native boundary; do not substitute unsigned gateway acceptance for exchange acceptance                                         |
-| P0 account mode / routes / receipt       | Funded unified snapshots and all four exact Relay/native/Base receipt correlations captured in sections 17–18      | Preserve cash/hold/risk capacity separately; owned-cash projection is P2, production credit attribution and recovery are P3/P4            |
-| P1 read-only runtime                     | Local acceptance complete, including exact build                                                                   | Keep the canary internal; public activation/deploy remains a separate decision                                                            |
-| P2–P7                                    | Not implemented by this patch                                                                                      | Begin owned-account/ledger projection only after its P0 contracts are settled; subsequent writes and activation need their own acceptance |
+| Phase / evidence                         | Current status                                                                                                                  | Concrete next step                                                                                                                        |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| P0 read contract                         | Implemented and tested, including date-only expiry                                                                              | Retain dated fixtures and unknown precision explicitly                                                                                    |
+| P0 offline signing                       | Twenty independently checked SDK goldens                                                                                        | Reuse these as the oracle for the later production adapter; execution/error recovery remains a separate P3/P4 obligation                  |
+| P0 executable precision/minimum and fees | Section 19 supersedes the initial gap: documented $1 BUY and correlated execution, integer lots, maker/taker/settlement samples | Implement policy-owned minimum; P4 must test negative/close boundaries, fee debit caps and optional builder execution                     |
+| P0 account mode / routes / receipt       | Funded unified snapshots and all four exact Relay/native/Base receipt correlations captured in sections 17–18                   | Preserve cash/hold/risk capacity separately; owned-cash projection is P2, production credit attribution and recovery are P3/P4            |
+| P1 read-only runtime                     | Local acceptance complete, including exact build                                                                                | Keep the canary internal; public activation/deploy remains a separate decision                                                            |
+| P2–P7                                    | Not implemented by this patch                                                                                                   | Begin owned-account/ledger projection only after its P0 contracts are settled; subsequent writes and activation need their own acceptance |
 
-P1's internal read-only acceptance is complete; P0 financial execution terms are
-not fully closed. Trade/Copy/funding capabilities remain false. No additional
+P1's internal read-only acceptance is complete. Section 19 closes the ordinary
+BUY-minimum evidence gap, not financial execution acceptance. Trade/Copy/funding
+capabilities remain false. No additional
 migrations, financial SDK runtime or background account scan was introduced.
 The scoped, explicitly authorized account/quote follow-up is recorded below.
 
@@ -1728,13 +1788,13 @@ any later mismatch must be diagnosed, not silently signed with guessed values.
 
 ### Remaining work, without reopening P1
 
-| Item                       | Evidence still needed / implementation boundary                                                                                                                          |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Outcome precision/minimums | Formatting contract now pinned in section 18; native minimum boundary remains unobserved                                                                                 |
-| Outcome fees               | Base formula and selected native settlement arithmetic verified in section 18; ordinary maker sells, rounding and builder execution are later financial acceptance cases |
-| Funded account modes       | Funded unified wire snapshots captured in section 18; mode-aware owned-cash projection remains P2, portfolio-margin write support stays disabled                         |
-| Core funding receipts      | Four actual route receipt fixtures verified in section 18; production operation attribution, ambiguous recovery and owned-cash projection remain P2/P3                   |
-| Live signing/execution     | Separate explicit authorization for testnet signing/submission, with no implicit mainnet funding or permission change                                                    |
+| Item                       | Evidence still needed / implementation boundary                                                                                                        |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Outcome precision/minimums | Section 19: $1 ordinary BUY and whole lots established; P4 tests negative boundary, normalized IOC admission and sub-$1 closing behavior               |
+| Outcome fees               | Section 19 adds ordinary maker/taker evidence; exact rounding and nonzero builder execution remain scoped P4 acceptance, not P2 blockers               |
+| Funded account modes       | Funded unified wire snapshots captured in section 18; mode-aware owned-cash projection remains P2, portfolio-margin write support stays disabled       |
+| Core funding receipts      | Four actual route receipt fixtures verified in section 18; production operation attribution, ambiguous recovery and owned-cash projection remain P2/P3 |
+| Live signing/execution     | Separate explicit authorization for testnet signing/submission, with no implicit mainnet funding or permission change                                  |
 
 P2 can be designed from these concrete contracts, but no native finance route is
 enabled by this patch. New P0 findings must not be used as an unrelated blocker
@@ -1819,8 +1879,10 @@ stored. Three requests remain unused; there is no automatic account scan.
 | One order has two fills of 6 and 7 shares, the same order/client ID, and different trade IDs        | Preserve both partial executions; neither one establishes the original order minimum                                                                                   |
 | A `send` has nonzero `nativeTokenFee` but empty `feeToken`                                          | Preserve the unknown denomination; do not reject the record or invent USDC fees                                                                                        |
 
-Opening, settlement and merge are observed; ordinary maker sells, fee rounding
-boundaries and builder execution are not. The public transfers establish native
+In this initial sample, opening, settlement and merge are observed; ordinary
+maker sells, fee rounding boundaries and builder execution are not. Section 19
+adds maker/taker evidence and preserves an observed rounding counterexample.
+The public transfers establish native
 wire shapes, not a correlated Relay destination receipt or this user's funded
 capacity. No signature, order, cancellation or transfer was sent.
 
@@ -1879,7 +1941,8 @@ two original single-order actions from the official public explorer: a BUY of
 floor). Their top-level `error` is null, but the response has no per-order
 execution result. Neither proves exact admission at $1 or below; the sell can
 execute at bids above its limit floor. Tests preserve this distinction and native
-asset identities. This evidence narrows the next test, not the minimum constant.
+asset identities. That initial capture alone does not establish the minimum;
+section 19 adds the official announcement and exact order/fill corroboration.
 
 ### Correlated completed Relay receipts
 
@@ -2046,8 +2109,11 @@ P1 remains accepted. Formatting and base-fee rules now have pinned first-party
 evidence, selected fee arithmetic is checked against native fills, and funded
 unified account/order shapes have actual public observations. All four Base/Core
 routes plus twelve Polygon USDC/pUSD and Solana USDC/Core routes have correlated
-historical receipt evidence, including the observed Solana v1 recovery. P0 is
-not yet fully closed: the exact native minimum boundary remains outstanding.
+historical receipt evidence, including the observed Solana v1 recovery. At this
+earlier checkpoint the native minimum was unresolved; section 19 supersedes that
+gap with the documented $1 ordinary BUY and correlated execution. Negative
+boundary/close exceptions, exact fee caps and optional builder execution remain
+targeted financial implementation tests, not reasons to reopen read-only P1.
 Implementing owned-cash projection is P2, not an extra P1 gate;
 unsupported portfolio-margin writes remain off. Native signing/receipt experiments
 require suitable separate permission; additional gateway preflights would not settle this.
@@ -2156,3 +2222,102 @@ plan suite passed against disposable PostgreSQL 16; full workspace build passed
 all eight trading presentation combinations. Final Buy/Sell only shows unavailable;
 financial preparation, signing and execution remain absent. This is event/read UI
 completion, not a claim that financial P2 is implemented. No production changes.
+
+## 19. Agreed $1 BUY minimum and fee evidence — October 12, 2026
+
+This follow-up supersedes earlier statements that the ordinary HIP minimum is
+unknown. It updates the financial plan, not a deployed policy or trading runtime.
+No signature, order, cancellation, transfer, permission or production change was
+performed. Historical fixtures retain their original observation scope; they are
+not retroactively relabelled as stronger evidence.
+
+### Minimum and precision decision
+
+The [official API announcement of September 4](https://t.me/hyperliquid_api/366)
+announced a reduction of outcome minimum order notional from $10 to $1. Public
+mainnet history now corroborates an original BUY at that exact amount:
+
+| Evidence                                               | Correlated native facts                                                                                                      | Interpretation                                                                                                                |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| BUY, block `1176569440`, October 8 at `18:44:53.898Z`  | Coin `#99991`, asset `100099991`, GTC BUY, price `0.01`, original size `100`, `reduceOnly=false`, filled size `100`, fee `0` | Original $1 order and its execution agree, not a $1 fragment of a larger order                                                |
+| SELL, block `1176569527`, October 8 at `18:45:00.397Z` | Same coin, IOC SELL, size/start position `100`, limit `0.00304`, executed at `0.00333`, `reduceOnly=false`                   | Full close produced `$0.333` gross, fee `0.00044755`, net `0.33255245`; blanket $1 SELL validation would reject a valid close |
+
+The checks matched transaction/fill hash, asset/coin, direction, original size,
+time and order history identity. Top-level explorer success alone was not used.
+No controlled negative `0.99999` order was sent, and the universal eligibility
+predicate for every sub-$1 close is not proved. Do not invent it from one case.
+
+Use the pinned official-UI precision evidence in section 18: whole executable
+contracts, price tick `0.00001` USDC, five outcome-token raw decimals and eight
+USDC raw decimals. Raw balance decimals do not permit fractional order lots;
+price tick does not prove that endpoint prices zero/one are executable. The
+policy/quote calculation is defined once in sections 2 and 11, not in a UI preset.
+
+### Fee contract and limitations
+
+Primary references are the [fees specification](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees),
+[HIP-4 deployer actions](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/hip-4-deployer-actions),
+[builder units](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/builder-codes)
+and [native fill schema](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions).
+The dated official UI source and its SHA-256 are pinned in section 18.
+
+- Opening base fee is zero; authorized builder and funding costs are separate.
+- Closing uses user spot maker/taker rates, already tier/staking-adjusted,
+  positive-rate referral discount, and
+  `feeScale * (deployerFeeScale + max(1, deployerFeeScale))`. Negative maker rates
+  clamp to zero. An aligned quote discounts only the taker protocol share, not
+  the deployer share; check current metadata instead of assuming alignment.
+- With both scales equal to 1, tier-zero rates and no discounts, the examples
+  are maker SELL **0.08%**, taker SELL **0.14%**, and observed settlement **0.14%**
+  of gross payout, not profit. These are conditional examples, not policy defaults.
+- Missing deployer scale remains unknown. Some sampled deployments omit it and
+  have different fees; neither zero nor a universal 2x factor is a safe fallback.
+- `builder.f` is in tenths of a basis point (`10` = `0.01%`). Outcome-specific
+  builder rules can include BUY; generic spot BUY exclusions are not a substitute.
+  The selected fills contain no nonzero builder fee, so builder remains disabled
+  until its approval, debit and observed collection path are verified.
+- `WsFill.fee` includes `builderFee`. Preserve both fields for attribution but
+  count the charged total once. Funding/withdrawal/activation charges stay in the
+  route quote, not in the trading rate or the $1 notional.
+
+The bounded public sample used 78 requests across capture/follow-up, 16 public
+participants and 23,736 history **status rows** (20,625 HIP rows), not that many
+independent orders. Seven histories reached the provider's 2,000-row cap;
+511 fills were selected. No private Hunch account payload is part of this evidence.
+
+Of 231 eligible records with known fee terms/scales, exact-decimal floor to eight
+USDC places matched 230: 23 BUY, 109 maker SELL, 93 of 94 taker SELL and five
+settlements. One taker SELL charged `0.01691711` versus the calculated
+`0.01691712`, a one-atom difference. Another 224 records lacked a usable market
+snapshot or deployer scale. Current user rates were compared to preceding-day
+fills, not frozen historical fee revisions. Therefore this sample does **not**
+prove a universal floor-rounding algorithm. Preserve actual fees for accounting;
+prove conservative pre-submit debit bounds in P4 without arbitrary buffers or
+relaxing consent caps. Source inspection and selected records are evidence, not
+production execution/recovery acceptance.
+
+### Actionable next steps and acceptance
+
+1. **P2 first:** implement mode-aware owned cash, positions and settlement ledger
+   from the existing proven identities/units. The old unknown-BUY-minimum blocker
+   is closed; optional builder and SELL-exemption research do not block reads.
+2. **P3:** implement exact route funding/withdrawal and receipt recovery. A $1
+   purchase does not imply a $1 bridge route; use each current provider quote's
+   minimum, fees and net destination amount without silently enlarging the buy.
+3. **P4 shared policy and quote:** implement `minimumBuyNotionalUsd: "1.00"` in
+   the financial policy owner, separate protocol provenance, normalized integer
+   size/tick, fees, scoped configuration errors and generated client fields.
+   Do not change `hip4_read`, social publication thresholds or other venues.
+4. **P4 tests:** $0.99 invalid/$1 inclusive; one raw unit below; normalization
+   moving notional below $1; prices 0.50/0.415/0.01; policy override/revision;
+   fees not satisfying the floor; no silent Max/Half/Copy budget increase;
+   partial fills/remainders below $1; the actual $0.333 close with
+   `reduceOnly=false`; provider rejection and ambiguous-submit recovery;
+   builder included once, missing scales and the one-atom discrepancy.
+5. **Web contract:** both surfaces consume the same server policy/quote, show
+   the actual price-dependent minimum, preserve normal input editing and unknown
+   fees, and retain unavailable final Buy/Sell until financial acceptance.
+
+This update changes only the two planning documents. Financial P2/P3/P4, live
+signing and production activation are still unimplemented/unapproved; the $1
+decision alone is not a claim that all P0 financial behavior or P2 is complete.
