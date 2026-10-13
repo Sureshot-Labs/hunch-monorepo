@@ -15706,7 +15706,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "-100",
         "polymarket:market-1",
         "00000000-0000-4000-8000-000000000001",
-        "down",
       ]);
       assert.match(opposingLookup.sql, /prior\.chat_id = \$1/);
       assert.match(opposingLookup.sql, /market_target\.target_id = \$2/);
@@ -15751,7 +15750,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           thesis_key: "holder_research:v2:polymarket:market-1:NO",
         }),
       ];
-      db.opposingContextRows = [{ reply_to_message_id: "77" }];
+      db.opposingContextRows = [{ messageId: "77", side: "YES" }];
       const telegram = new FakeTelegram();
       const result = await publishSignalBotTick({
         config: parseSignalBotConfig({
@@ -15772,7 +15771,6 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         "-100",
         "polymarket:market-1",
         "00000000-0000-4000-8000-000000000001",
-        "up",
       ]);
       assert.match(opposingLookup.sql, /prior_note\.status <> 'retracted'/);
       assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
@@ -16210,22 +16208,34 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         redis,
       });
       const db = new FakeDb();
-      db.rows = [
-        noteRow({
-          decision_snapshot: researchSnapshot({
-            side: "YES",
-            yesProbability: 0.32,
-          }),
-          id: "00000000-0000-4000-8000-000000000002",
-          meaningful_delta_reasons: ["odds_move"],
-          previous_decision_snapshot: researchSnapshot({
-            side: "YES",
-            yesProbability: 0.28,
-          }),
-          revision_kind: "research_update",
-          title: "Fresh update",
+      const updateRow = noteRow({
+        decision_snapshot: researchSnapshot({
+          side: "YES",
+          yesProbability: 0.32,
         }),
-      ];
+        id: "00000000-0000-4000-8000-000000000002",
+        meaningful_delta_reasons: ["odds_move"],
+        previous_decision_snapshot: researchSnapshot({
+          side: "YES",
+          yesProbability: 0.28,
+        }),
+        revision_kind: "research_update",
+        title: "Fresh update",
+      });
+      updateRow.metrics = {
+        ...(updateRow.metrics as Record<string, unknown>),
+        holderPublicationComparisonV1: {
+          comparison: {
+            baselineNoteId: "00000000-0000-4000-8000-000000000003",
+            kind: "opposing",
+            reason: "The team announced a new injury after our earlier view.",
+            materialChange: true,
+            evidenceIds: ["external:https://example.org/injury"],
+          },
+        },
+      };
+      db.rows = [updateRow];
+      db.opposingContextRows = [{ messageId: "88", side: "NO" }];
       db.threadContextRows = [
         {
           baseline_at: "2026-01-01T00:00:00.000Z",
@@ -16247,6 +16257,11 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
       });
       assert.equal(result.sent, 1);
       assert.equal(telegram.messages[0]?.reply_parameters?.message_id, 77);
+      assert.match(telegram.messages[0]?.text ?? "", /Opposing view/);
+      assert.match(
+        telegram.messages[0]?.text ?? "",
+        /What changed: The team announced a new injury/,
+      );
       const updateButtons =
         telegram.messages[0]?.reply_markup?.inline_keyboard.flat() ?? [];
       assert.equal(

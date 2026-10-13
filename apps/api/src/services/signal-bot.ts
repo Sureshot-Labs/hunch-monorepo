@@ -169,8 +169,14 @@ import {
 } from "./telegram-delivery-safety.js";
 import {
   buildSignalBotOpposingView,
-  loadSignalBotOpposingMessageId,
+  loadSignalBotLatestPublicThesis,
 } from "./signal-bot-opposing-context.js";
+import {
+  loadHolderPublicationPolicy,
+  validatePendingHolderPublication,
+} from "./holder-publication-policy.js";
+import { loadHolderPublicHistory } from "./holder-research-publication-history.js";
+import { holderPublicationComparisonSchema } from "../schemas/holder-publication-comparison.js";
 import {
   ensureTelegramNotificationPreferences,
   setTelegramNotificationTopic,
@@ -1403,9 +1409,28 @@ export function buildSignalBotMessage(input: {
   const richHeadline = formatSignalNotificationHeadlineRichText(
     notificationCopy.headline,
   );
+  const publicComparison = holderPublicationComparisonSchema.safeParse(
+    asObject(note.metrics?.holderPublicationComparisonV1).comparison,
+  );
   const opposingView =
-    messageKind === "initial" && input.opposingInitial && buySide
-      ? buildSignalBotOpposingView(buySide)
+    input.opposingInitial && buySide
+      ? buildSignalBotOpposingView(
+          buySide,
+          {
+            current: currentSideLabel ?? buySide,
+            previous: resolveSignalBotCurrentSideLabel({
+              presentation,
+              side: buySide === "YES" ? "NO" : "YES",
+              sideCopy: null,
+            }),
+          },
+          publicComparison.success && publicComparison.data?.kind === "opposing"
+            ? normalizeTelegramPresentationAliases(
+                publicComparison.data.reason,
+                presentation,
+              )
+            : undefined,
+        )
       : null;
   const richBlocks: TelegramInputRichMessage["blocks"] = [
     ...(opposingView ? [opposingView.richBlock] : []),
@@ -4674,6 +4699,7 @@ type SignalBotDeliverySkipReason =
   | Exclude<SignalDeliveryTargetResolution["reason"], null>
   | "editorial_blocked"
   | "quote_refresh_expired"
+  | "publication_policy_rejected"
   | "source_disabled";
 
 export type SignalBotDeliveryPreparation =
@@ -5366,19 +5392,22 @@ async function loadSignalBotThreadContext(input: {
   };
   if (!input.note.marketId) return initial;
   try {
+    const side = resolveSignalBotBuySide(input.note);
+    const lastPublic = await loadSignalBotLatestPublicThesis({
+      chatId: input.chatId,
+      db: input.db,
+      marketId: input.note.marketId,
+      noteId: input.note.id,
+    });
+    initial.opposingInitial =
+      lastPublic != null && side != null && lastPublic.side !== side;
     if (input.note.revisionKind === "initial") {
-      const side = resolveSignalBotBuySide(input.note);
-      if (!side) return initial;
-      const replyToMessageId = await loadSignalBotOpposingMessageId({
-        chatId: input.chatId,
-        db: input.db,
-        marketId: input.note.marketId,
-        noteId: input.note.id,
-        selectedSide: side,
-      });
-      return replyToMessageId != null
-        ? { ...initial, opposingInitial: true, replyToMessageId }
-        : initial;
+      return {
+        ...initial,
+        replyToMessageId: initial.opposingInitial
+          ? (lastPublic?.messageId ?? null)
+          : null,
+      };
     }
     if (input.note.revisionKind !== "research_update") return initial;
     const { rows } = await input.db.query<{
@@ -5453,7 +5482,7 @@ async function loadSignalBotThreadContext(input: {
         row.baseline_at instanceof Date
           ? row.baseline_at.toISOString()
           : row.baseline_at || initial.baselineAt,
-      opposingInitial: false,
+      opposingInitial: initial.opposingInitial,
       replyToMessageId: toInteger(row.reply_to_message_id),
       threadRootNoteId: row.thread_root_note_id,
     };
@@ -5720,6 +5749,7 @@ export async function publishSignalBotTick(input: {
     createSignalBotTelegramTransport(input.telegram);
   const lifecycle = await resolveSignalBotVenueLifecycle(input.db);
   const copyPolicy = await resolveSignalPostCopyPolicy(input.db);
+  const publicationPolicy = await loadHolderPublicationPolicy(input.db);
   let sent = 0;
   let blockedChats = 0;
   let cheaperAlternatives = 0;
@@ -5847,6 +5877,32 @@ export async function publishSignalBotTick(input: {
       const buySide = resolveSignalBotBuySide(note);
       if (!buySide) {
         await skipDelivery("non_directional");
+        continue;
+      }
+      const publicHistory =
+        publicationPolicy.sideChangeRequiresEvidence && note.marketId
+          ? ((
+              await loadHolderPublicHistory(
+                input.db,
+                [note.marketId],
+                new Date(),
+                note.id,
+              )
+            ).get(note.marketId) ?? {
+              status: "unavailable" as const,
+              items: [],
+            })
+          : { status: "ok" as const, items: [] };
+      const publicationCheck = validatePendingHolderPublication({
+        note,
+        policy: publicationPolicy,
+        history: publicHistory,
+        side: buySide,
+      });
+      if (!publicationCheck.allowed) {
+        await skipDelivery("publication_policy_rejected", {
+          reason: publicationCheck.reason,
+        });
         continue;
       }
       if (state.contentProfile === X_EDITORIAL_CONTENT_PROFILE) {
@@ -8150,6 +8206,7 @@ export async function loadSignalBotNotes(
         n.confidence,
         n.model_meta,
         n.metrics,
+        n.lineage->'decision_snapshot' as decision_snapshot,
         n.created_at::text as created_at,
         coalesce(nullif(n.lineage->>'revision_kind', ''), 'initial')
           as revision_kind,
@@ -8480,17 +8537,19 @@ function rowToSignalBotNote(row: SignalBotNoteRow): SignalBotNote {
   const metrics = asObject(row.metrics);
   const holderSide = String(holderMeta.side ?? "").toUpperCase();
   const holderActorMode = String(holderMeta.actorMode ?? "");
+  const currentMarketSegment = classifyMarketSegment({
+    category: row.category ?? row.event_category,
+    closeTime: row.close_time,
+    eventTitle: row.event_title,
+    expirationTime: row.expiration_time,
+    marketTitle: row.market_title,
+    seriesKey: row.series_key,
+    seriesTitle: row.series_title,
+  });
   const marketSegment =
-    row.market_segment ??
-    classifyMarketSegment({
-      category: row.category ?? row.event_category,
-      closeTime: row.close_time,
-      eventTitle: row.event_title,
-      expirationTime: row.expiration_time,
-      marketTitle: row.market_title,
-      seriesKey: row.series_key,
-      seriesTitle: row.series_title,
-    });
+    currentMarketSegment !== "other"
+      ? currentMarketSegment
+      : (row.market_segment ?? currentMarketSegment);
   return {
     id: row.id,
     noteKey: row.note_key,

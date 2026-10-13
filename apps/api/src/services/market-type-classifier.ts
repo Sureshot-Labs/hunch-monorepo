@@ -128,16 +128,15 @@ function sportsGameSegment(text: string): MarketSegment {
   return "sports_other_game";
 }
 
-function classifySportsTaxonomy(
-  text: string,
-  hoursToClose: number | null,
-): MarketTaxonomy {
+function classifySportsTaxonomy(text: string): MarketTaxonomy {
   const looksHeadToHead =
     /\b(vs\.?|v\.?|versus)\b/.test(text) ||
     /\b(spread|handicap|moneyline|match winner|game [1-5] winner|total goals|over\/under|o\/u|bo3|bo5)\b/.test(
       text,
     );
-  if (looksHeadToHead || (hoursToClose != null && hoursToClose <= 72)) {
+  // A short deadline is not evidence of a single match (e.g. Super Bowl or
+  // group/season winner). Require an actual matchup or game-level condition.
+  if (looksHeadToHead) {
     return {
       marketType: "single_game_sports",
       marketSegment: sportsGameSegment(text),
@@ -163,14 +162,14 @@ function classifySportsTaxonomy(
 
 export function classifyMarketTaxonomyFromText(
   text: string,
-  hoursToClose: number | null,
+  _hoursToClose: number | null,
 ): MarketTaxonomy {
   const looksSports =
     /\b(sports?|soccer|football|baseball|basketball|tennis|hockey|cricket|mma|boxing|esports?|counter-strike|counter strike|league of legends|dota|valorant|fifa|world cup|nba|nfl|mlb|nhl|wta|atp|bo3|bo5)\b/.test(
       text,
     );
   if (looksSports) {
-    return classifySportsTaxonomy(text, hoursToClose);
+    return classifySportsTaxonomy(text);
   }
 
   if (

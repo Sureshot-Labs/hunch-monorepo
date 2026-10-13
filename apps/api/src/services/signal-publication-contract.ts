@@ -151,6 +151,11 @@ export type HolderResearchPublicationRejectionReason =
   | "missing_baseline"
   | "missing_market_identity"
   | "missing_price_snapshot"
+  | "publication_history_unavailable"
+  | "publication_baseline_changed"
+  | "side_change_comparison_missing"
+  | "side_change_no_verified_change"
+  | "single_game_sports_cluster_required"
   | "no_meaningful_delta"
   | "non_renderable_delta"
   | "price_side_mismatch"
@@ -638,7 +643,7 @@ function normalizedFact(value: unknown): string | null {
   );
 }
 
-function newExternalFactReason(input: {
+export function buildHolderResearchExternalFactReason(input: {
   baselineAsOf: string;
   changedAt: string;
   externalFactEvidence?: unknown;
@@ -877,7 +882,7 @@ export function buildHolderResearchUpdateV1(input: {
     };
     reasons.push(opposingWalletReason);
   }
-  const externalReason = newExternalFactReason({
+  const externalReason = buildHolderResearchExternalFactReason({
     ...input,
     baselineAsOf,
     changedAt: validIso(input.evaluatedAt) ?? input.currentPrice.asOf,
