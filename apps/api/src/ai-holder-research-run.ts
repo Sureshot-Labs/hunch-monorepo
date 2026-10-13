@@ -391,6 +391,9 @@ type HolderResearchRunReport = {
     totalEstimatedCostUsd: number;
     totalChargedCostUsd: number;
     providerReportedCostUsd: number | null;
+    editorialDuplicates: number;
+    duplicateFinalCostUsd: number;
+    duplicateSearchCostUsd: number;
     durationMs: number;
   };
   selection: HolderResearchSelectionDiagnostics;
@@ -1780,13 +1783,31 @@ async function callHolderResearchTriageModel(params: {
   calibrationMemo: string[];
   useV2: boolean;
   backgroundByKey?: Map<string, HolderBackground>;
+  eventPublications?: EventPublication[];
+  eventHistoryAvailable?: boolean;
 }): Promise<HolderResearchTriageModelResult> {
   const candidateJson = params.candidates.map((candidate) => {
     const original = params.useV2
       ? buildHolderResearchTriageCandidatePromptJsonV2(candidate, params.policy)
       : buildHolderResearchTriageCandidatePromptJson(candidate, params.policy);
     return withHolderResearchBackground(
-      original,
+      withEventPublicationHistory(
+        original,
+        buildEventPublicationHistory({
+          enabled: params.policy.eventPublicationHistoryEnabled,
+          available: params.eventHistoryAvailable ?? false,
+          eventId: candidate.market.eventId,
+          loaded: params.eventPublications ?? [],
+          committed: [],
+          selectedHolderIds: candidate.market.holders
+            .filter(
+              (holder) =>
+                holder.side === candidate.side &&
+                isSharpHolder(holder, params.policy),
+            )
+            .map((holder) => holder.walletId),
+        }),
+      ),
       params.backgroundByKey?.get(candidate.key),
       "triage",
     );
@@ -2422,10 +2443,7 @@ export async function maybeWriteDecisionCache(params: {
   }
 
   try {
-    if (
-      params.output.status === "PUBLISH" ||
-      params.modelMeta?.editorial_duplicate === true
-    ) {
+    if (params.output.status === "PUBLISH") {
       // Publication cooldown comes only from committed Postgres notes. A
       // prior CONTEXT/SKIP must not survive a newer publish recommendation,
       // including a technical save failure. Never cache a provisional publish.
@@ -3060,6 +3078,37 @@ export async function runHolderResearch(
       ].join(" "),
     });
 
+    let eventPublications: EventPublication[] = [];
+    let eventHistoryAvailable = true;
+    if (policy.eventPublicationHistoryEnabled) {
+      try {
+        eventPublications = await loadEventPublications(
+          client,
+          triageInputCandidates.flatMap((candidate) =>
+            candidate.market.eventId ? [candidate.market.eventId] : [],
+          ),
+          new Date(),
+        );
+      } catch (error) {
+        eventHistoryAvailable = false;
+        console.warn(
+          "[holder-research] event publication history unavailable; continuing",
+          { error: error instanceof Error ? error.message : String(error) },
+        );
+      }
+    }
+    const committedEventPublications: EventPublication[] = [];
+    toolCalls.push({
+      name: "event_publication_history",
+      count: eventPublications.length,
+      status: !policy.eventPublicationHistoryEnabled
+        ? "skipped"
+        : eventHistoryAvailable
+          ? "ok"
+          : "error",
+      detail: `enabled=${policy.eventPublicationHistoryEnabled} windowDays=7 distinctThesesPerEvent=6 sentinel=1`,
+    });
+
     const rankedCandidates: Array<{
       candidate: HolderResearchCandidate;
       decision: HolderResearchTriageDecision;
@@ -3091,6 +3140,8 @@ export async function runHolderResearch(
             calibrationMemo,
             useV2: useV2Triage,
             backgroundByKey,
+            eventPublications,
+            eventHistoryAvailable,
           });
         } catch (error) {
           const message =
@@ -3266,37 +3317,6 @@ export async function runHolderResearch(
       rankedCandidates,
       { limit: rankedCandidates.length, useV2: useV2Triage },
     ).map(({ candidate }) => candidate);
-
-    let eventPublications: EventPublication[] = [];
-    let eventHistoryAvailable = true;
-    if (policy.eventPublicationHistoryEnabled) {
-      try {
-        eventPublications = await loadEventPublications(
-          client,
-          finalCandidates.flatMap((candidate) =>
-            candidate.market.eventId ? [candidate.market.eventId] : [],
-          ),
-          new Date(),
-        );
-      } catch (error) {
-        eventHistoryAvailable = false;
-        console.warn(
-          "[holder-research] event publication history unavailable; continuing",
-          { error: error instanceof Error ? error.message : String(error) },
-        );
-      }
-    }
-    const committedEventPublications: EventPublication[] = [];
-    toolCalls.push({
-      name: "event_publication_history",
-      count: eventPublications.length,
-      status: !policy.eventPublicationHistoryEnabled
-        ? "skipped"
-        : eventHistoryAvailable
-          ? "ok"
-          : "error",
-      detail: `enabled=${policy.eventPublicationHistoryEnabled} windowDays=7 distinctThesesPerEvent=6 sentinel=1`,
-    });
 
     const shouldPersist =
       !policy.dryRun && policy.persistNotes && args.callModel;
@@ -3865,6 +3885,24 @@ export async function runHolderResearch(
         eventPublicationHistoryEnabled: policy.eventPublicationHistoryEnabled,
       },
       totals: {
+        editorialDuplicates: decisions.filter(
+          (decision) => decision.modelMeta.editorial_duplicate === true,
+        ).length,
+        duplicateFinalCostUsd: decisions
+          .filter((decision) => decision.modelMeta.editorial_duplicate === true)
+          .reduce(
+            (sum, decision) =>
+              sum + (args.callModel ? decision.cost.chargedCostUsd : 0),
+            0,
+          ),
+        duplicateSearchCostUsd: decisions
+          .filter((decision) => decision.modelMeta.editorial_duplicate === true)
+          .reduce(
+            (sum, decision) =>
+              sum +
+              (externalResearchByKey.get(decision.candidate.key)?.costUsd ?? 0),
+            0,
+          ),
         candidatesLoaded: candidates.length,
         selected: selectedWithTypeMetrics.length,
         published: persistence?.persisted ?? 0,
@@ -4053,7 +4091,10 @@ export async function runHolderResearch(
   }
 }
 
-export const holderResearchModelTestHooks = { callHolderResearchModel };
+export const holderResearchModelTestHooks = {
+  callHolderResearchModel,
+  callHolderResearchTriageModel,
+};
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   let redis: ReturnType<typeof createRedisClient> | null = null;

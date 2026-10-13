@@ -26,7 +26,7 @@ try {
   );
   await client.query("begin");
   await client.query(`
-    create temporary table unified_events (id text primary key,title text,category text,status text,end_date timestamptz);
+    create temporary table unified_events (id text primary key,title text,category text,status text,end_date timestamptz,metadata jsonb);
     create temporary table unified_markets (id text primary key,event_id text,venue text,status text,title text,category text,
       close_time timestamptz,expiration_time timestamptz,best_bid numeric,best_ask numeric,last_price numeric,
       resolved_outcome text,resolved_outcome_pct numeric,token_yes text,token_no text,clob_token_ids text,metadata jsonb);
@@ -41,7 +41,7 @@ try {
     create index on signal_bot_messages(note_id,sent_at);
     create index on ai_note_targets(target_kind,target_id,created_at desc);
     create index on ai_note_targets(note_id,is_primary desc);
-    insert into unified_events values ('event','Test',null,'ACTIVE',null);
+    insert into unified_events values ('event','Test',null,'ACTIVE',null,'{}');
     insert into unified_markets(id,event_id,venue,status,title,best_bid,best_ask,last_price,resolved_outcome,resolved_outcome_pct) values
       ('win','event','polymarket','RESOLVED','Win',0,0,0,'YES',null),
       ('loss','event','polymarket','RESOLVED','Loss',1,1,1,'NO',null),

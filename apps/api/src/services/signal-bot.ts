@@ -52,6 +52,15 @@ import {
 } from "./cluster-execution.js";
 import { loadClusterMarketNativeQuotes } from "./cluster-execution-quotes.js";
 import { buildSignalPublicationSnapshot } from "./signal-publication-snapshot.js";
+import { readFrozenPublicationEntry } from "./signal-publication-snapshot.js";
+import {
+  followthroughCursorKey,
+  parseFollowthroughCursor,
+  loadFollowthroughPage,
+  FOLLOWTHROUGH_SOURCE_PAGE_SIZE,
+  type FollowthroughLane,
+  type FollowthroughScanRow,
+} from "./signal-bot-followthrough-scan.js";
 import {
   isSignalBotQuoteFresh,
   normalizeTestSignalOutcome,
@@ -168,7 +177,6 @@ import {
   type TelegramNotificationPreferences,
   type TelegramNotificationTopic,
 } from "./telegram-notification-preferences.js";
-import { buildWalletIntelAcceptingOrdersSql } from "./wallet-intel-market-eligibility.js";
 import { parseMarketOutcomes } from "./wallet-intel-helpers.js";
 import {
   resolveSignalDeliveryTarget,
@@ -6326,7 +6334,7 @@ export async function sendSignalBotFollowthroughPreview(input: {
   };
   const now = input.now ?? new Date();
   const expectedKind = signalBotFollowthroughMessageKindForPreview(input.kind);
-  const candidates = await loadSignalBotFollowthroughCandidates({
+  const candidates = loadSignalBotFollowthroughCandidates({
     chatIds: [input.chatId],
     db: input.db,
     mode: "preview",
@@ -6339,7 +6347,7 @@ export async function sendSignalBotFollowthroughPreview(input: {
   const latestSnapshotMaxAgeMs = await resolveSignalBotLatestSnapshotMaxAgeMs(
     input.db,
   );
-  for (const candidate of candidates) {
+  for await (const candidate of candidates) {
     const stats = await buildSignalBotFollowthroughStats({
       asOf: now,
       candidate,
@@ -6457,184 +6465,100 @@ function explicitFinalYesProbability(input: {
     : final;
 }
 
-function readSignalBotEntryPrice(input: {
-  direction: "down" | "mixed" | "up" | null;
-  metrics: unknown;
-  side: "NO" | "YES" | null;
-  targetMeta: unknown;
-}): number | null {
-  const side = input.side ?? sideFromSignalBotDirection(input.direction);
-  if (!side) return null;
-  const metrics = asObject(input.metrics);
-  const snapshot = asObject(metrics.signalSnapshot);
-  const quote = asObject(snapshot.quote);
-  const snapshotSide = String(snapshot.side ?? "").toUpperCase();
-  const snapshotPrice = toNumber(quote.buyPrice);
-  if (snapshotPrice != null && snapshotSide === side) return snapshotPrice;
-  const market = asObject(metrics.market);
-  const yesProbability = toNumber(market.yesProbability);
-  return signalBotStatsSidePrice(yesProbability, side);
+function readSignalBotEntryPrice(
+  candidate: SignalBotFollowthroughCandidateRow,
+  side: "YES" | "NO" | null,
+) {
+  const root = asObject(candidate.root_metrics);
+  const target = asObject(asObject(asObject(root.delivery).view).target);
+  return readFrozenPublicationEntry({
+    snapshot: root.publicationSnapshotV1,
+    legacyPrice: target.price,
+    marketId: candidate.market_id,
+    venue: candidate.venue,
+    side,
+    sentAt: candidate.initial_sent_at ?? null,
+  });
 }
 
-async function loadSignalBotFollowthroughCandidates(input: {
+async function* loadSignalBotFollowthroughCandidates(input: {
   chatIds: string[];
   db: DbQuery;
   mode: "preview" | "publish";
   policy: SignalBotFollowthroughPolicy;
   now: Date;
-}): Promise<SignalBotFollowthroughCandidateRow[]> {
-  if (!input.policy.enabled) return [];
-  if (input.chatIds.length === 0) return [];
-  const statsEnabled = input.policy.types.includes("stats");
-  const resolvedEnabled =
-    input.policy.terminalInitialCutoff != null &&
-    (input.policy.types.includes("resolved_win") ||
-      input.policy.types.includes("resolved_loss"));
-  if (!statsEnabled && !resolvedEnabled) return [];
-  const acceptingSql = buildWalletIntelAcceptingOrdersSql({
-    eventAlias: "e",
-    marketAlias: "m",
-  });
-  const statsCutoff = new Date(
-    input.now.getTime() - input.policy.minAgeHours * 3_600_000,
-  ).toISOString();
-  try {
-    const { rows } = await input.db.query<SignalBotFollowthroughCandidateRow>(
-      `
-        select
-          root.chat_id,
-          root.thread_root_note_id::text,
-          root.telegram_message_id::text as reply_to_message_id,
-          root.baseline_at::text as baseline_at,
-          n.title,
-          n.direction,
-          n.metrics,
-          root.metrics as root_metrics,
-          pt.target_meta,
-          holder.address as holder_address,
-          holder.chain as holder_chain,
-          holder.target_meta as holder_target_meta,
-          m.id as market_id,
-          m.event_id,
-          m.title as market_title,
-          m.slug as market_slug,
-          m.description as market_description,
-          e.title as event_title,
-          e.description as event_description,
-          m.outcomes,
-          m.venue,
-          m.best_bid,
-          m.best_ask,
-          m.last_price,
-          m.resolved_outcome,
-          m.resolved_outcome_pct::text as resolved_outcome_pct,
-          nullif(
-            coalesce(
-              nullif(m.metadata->>'resolutionSource', ''),
-              nullif(e.metadata->>'resolutionSource', '')
-            ),
-            ''
-          ) as resolution_source,
-          ${acceptingSql} as accepting_orders
-        from signal_bot_messages root
-        join ai_notes n on n.id = root.thread_root_note_id
-        join ai_note_targets pt
-          on pt.note_id = n.id
-         and pt.target_kind = 'market'
-         and pt.is_primary = true
-        join unified_markets m on m.id = pt.target_id
-        left join unified_events e on e.id = m.event_id
-        left join lateral (
-          select w.address, w.chain, t.target_meta
-          from ai_note_targets t
-          join wallets w on w.id = t.target_id::uuid
-          where t.note_id = n.id
-            and t.target_kind = 'wallet'
-          order by t.target_rank asc, t.target_id asc
-          limit 1
-        ) holder on true
-        where root.message_kind = 'initial'
-          and (
-            root.telegram_message_id is not null
-            or (
-              root.metrics->>'contentProfile' = $9
-              and (
-                coalesce(root.metrics->>'status', '') = 'skipped'
-                or root.metrics #>> '{deliveryStateV2,status}' = 'skipped'
-                or root.metrics #>> '{editorialDraftV1,status}' = 'blocked'
-                or root.metrics #>> '{editorialComposerV1,terminal}' = 'true'
-              )
-            )
-          )
-          and root.chat_id = any($5::text[])
-          and (
-            (
-              $1::boolean
-              and root.sent_at <= $3::timestamptz
-              and ${acceptingSql}
-              and (
-                $7::boolean
-                or not exists (
-                  select 1
-                  from signal_bot_messages sent
-                  where sent.chat_id = root.chat_id
-                    and sent.note_id = root.thread_root_note_id
-                    and sent.message_kind = 'followthrough_stats'
-                    and (
-                      coalesce(sent.metrics->>'status', 'sent') in (
-                        'blocked', 'delivery_unknown', 'sent'
-                      )
-                      or sent.sent_at > $6::timestamptz
-                    )
-                )
-              )
-            )
-            or (
-              $2::boolean
-              and root.sent_at >= $8::timestamptz
-              and (
-                $7::boolean
-                or not exists (
-                  select 1
-                  from signal_bot_messages sent
-                  where sent.chat_id = root.chat_id
-                    and sent.note_id = root.thread_root_note_id
-                    and sent.message_kind in ('resolved_win', 'resolved_loss')
-                    and (
-                      coalesce(sent.metrics->>'status', 'sent') in (
-                        'blocked', 'delivery_unknown', 'sent'
-                      )
-                      or sent.sent_at > $6::timestamptz
-                    )
-                )
-              )
-              and (
-                m.resolved_outcome is not null
-                or m.resolved_outcome_pct is not null
-              )
-            )
-          )
-        order by root.sent_at asc
-        limit $4
-      `,
-      [
-        statsEnabled,
-        resolvedEnabled,
-        statsCutoff,
-        Math.max(1, input.policy.maxPerTick * 4),
-        input.chatIds,
-        new Date(
-          input.now.getTime() - FOLLOWTHROUGH_RETRY_COOLDOWN_MS,
-        ).toISOString(),
-        input.mode === "preview",
-        input.policy.terminalInitialCutoff,
-        X_EDITORIAL_CONTENT_PROFILE,
-      ],
-    );
-    return rows;
-  } catch (error) {
-    if (isMissingSignalBotMessagesTable(error)) return [];
-    throw error;
+  redis?: SignalBotRedisLike;
+}): AsyncGenerator<SignalBotFollowthroughCandidateRow> {
+  if (!input.policy.enabled || input.chatIds.length === 0) return;
+  const lanes: FollowthroughLane[] = [];
+  if (
+    input.policy.types.some(
+      (type) => type === "resolved_win" || type === "resolved_loss",
+    )
+  )
+    lanes.push("terminal");
+  if (input.policy.types.includes("stats")) lanes.push("stats");
+  for (const lane of lanes) {
+    const cursorKey = followthroughCursorKey({ ...input, lane });
+    const persistent = input.mode === "publish" ? input.redis : undefined;
+    let cursor = persistent
+      ? parseFollowthroughCursor(await persistent.get(cursorKey))
+      : null;
+    let checked = 0;
+    // A manual preview may look beyond page one; it never moves the live cursor.
+    // Scheduled publication processes at most one source page per lane/tick.
+    for (;;) {
+      let rows: FollowthroughScanRow[];
+      try {
+        rows = await loadFollowthroughPage(input.db, {
+          ...input,
+          lane,
+          cursor,
+          preview: input.mode === "preview",
+          retryCooldownMs: FOLLOWTHROUGH_RETRY_COOLDOWN_MS,
+          editorialProfile: X_EDITORIAL_CONTENT_PROFILE,
+        });
+      } catch (error) {
+        if (isMissingSignalBotMessagesTable(error)) return;
+        throw error;
+      }
+      let processed = 0;
+      for (const row of rows) {
+        if (row.eligible) {
+          if (lane === "stats" && checked >= input.policy.maxPerTick * 4) break;
+          checked += 1;
+          yield row;
+        }
+        // Runs only after the caller finishes handling the yielded row. A throw
+        // or a shared delivery-budget break leaves that row available next tick.
+        if (persistent)
+          await persistent.set(
+            cursorKey,
+            JSON.stringify({
+              sentAt: row.initial_sent_at,
+              id: row.initial_id,
+            }),
+          );
+        processed += 1;
+      }
+      if (
+        persistent &&
+        processed === rows.length &&
+        rows.length < FOLLOWTHROUGH_SOURCE_PAGE_SIZE
+      ) {
+        // Wrap on the NEXT tick: never loop over the same source page in one tick.
+        await persistent.del(cursorKey);
+      }
+      if (
+        input.mode !== "preview" ||
+        processed < rows.length ||
+        rows.length < FOLLOWTHROUGH_SOURCE_PAGE_SIZE
+      )
+        break;
+      const last = rows[rows.length - 1];
+      if (!last) break;
+      cursor = { sentAt: last.initial_sent_at, id: last.initial_id };
+    }
   }
 }
 
@@ -6744,8 +6668,15 @@ async function buildSignalBotFollowthroughStats(input: {
   db: DbQuery;
   latestSnapshotMaxAgeMs: number;
 }): Promise<SignalBotFollowthroughStats> {
+  const root = asObject(input.candidate.root_metrics);
+  const deliveredTarget = asObject(
+    asObject(asObject(root.delivery).view).target,
+  );
   const sideRaw = String(
-    asObject(input.candidate.target_meta).side ?? "",
+    asObject(root.publicationSnapshotV1).side ??
+      deliveredTarget.side ??
+      asObject(input.candidate.target_meta).side ??
+      "",
   ).toUpperCase();
   const side = sideRaw === "YES" || sideRaw === "NO" ? sideRaw : null;
   const signalSide =
@@ -6762,12 +6693,8 @@ async function buildSignalBotFollowthroughStats(input: {
   const quote = signalSide
     ? resolveHolderResearchSignalQuote(input.candidate, signalSide)
     : null;
-  const entryPrice = readSignalBotEntryPrice({
-    direction: input.candidate.direction,
-    metrics: input.candidate.metrics,
-    side: signalSide,
-    targetMeta: input.candidate.target_meta,
-  });
+  const entry = readSignalBotEntryPrice(input.candidate, signalSide);
+  const entryPrice = entry.price;
   const finalSidePrice =
     final.finalYesProbability != null
       ? signalBotStatsSidePrice(final.finalYesProbability, signalSide)
@@ -6782,13 +6709,16 @@ async function buildSignalBotFollowthroughStats(input: {
       ? input.candidate.baseline_at.toISOString()
       : input.candidate.baseline_at;
   const asOf = input.asOf.toISOString();
-  const flows = await loadSignalBotFollowthroughFlows({
-    asOf,
-    baselineAt,
-    db: input.db,
-    marketId: input.candidate.market_id,
-    venue: input.candidate.venue,
-  });
+  const flows =
+    state === "open"
+      ? await loadSignalBotFollowthroughFlows({
+          asOf,
+          baselineAt,
+          db: input.db,
+          marketId: input.candidate.market_id,
+          venue: input.candidate.venue,
+        })
+      : [];
   let joinedWallets = 0;
   let addedWallets = 0;
   let earlyWalletsCut = 0;
@@ -6863,6 +6793,8 @@ async function buildSignalBotFollowthroughStats(input: {
     }
   }
   const dataQualityTags: string[] = [];
+  if (entry.quality === "legacy_display")
+    dataQualityTags.push("legacy_display_entry");
   if (flows.length === 0) dataQualityTags.push("no_wallet_flow");
   if (entryPrice == null) dataQualityTags.push("missing_entry_price");
   if (markPrice == null) dataQualityTags.push("missing_mark_price");
@@ -6889,12 +6821,10 @@ async function buildSignalBotFollowthroughStats(input: {
   let outcome: SignalBotFollowthroughStats["outcome"] =
     state === "open" ? "open" : "unknown";
   if (state === "resolved" && signalSide && finalSidePrice != null) {
-    if (entryPrice != null) {
-      const move = finalSidePrice - entryPrice;
-      outcome = move > 1e-9 ? "win" : move < -1e-9 ? "loss" : "unknown";
-    } else if (finalSidePrice >= 0.999) {
+    // Refunds/fractional settlements are not winning or losing contracts.
+    if (finalSidePrice === 1) {
       outcome = "win";
-    } else if (finalSidePrice <= 0.001) {
+    } else if (finalSidePrice === 0) {
       outcome = "loss";
     }
   }
@@ -7147,6 +7077,18 @@ function formatSignalBotFollowthroughRead(input: {
       return `The buying was not enough to offset the selling pressure. ${currentPrice}${exits}.`;
     }
     return `${marketLabel} is down ${move} since the original signal as wallets reduce their positions.`;
+  }
+  if (priceMoveCents == null) {
+    const flow =
+      input.stats.netSignalSideFlowUsd > 0
+        ? input.stats.exitedWallets > 0 ||
+          input.stats.trimmedWallets > input.stats.joinedOrAddedWallets
+          ? "Net buying is positive, but tracked wallet participation is mixed."
+          : "Tracked wallets added net buying support."
+        : input.stats.netSignalSideFlowUsd < 0
+          ? "Tracked wallet support cooled."
+          : "Tracked wallet flow has not materially changed.";
+    return `${flow} A reliable price comparison with the original signal is unavailable.`;
   }
   if (input.stats.netSignalSideFlowUsd > 0) {
     if (
@@ -7849,12 +7791,13 @@ export async function publishSignalBotFollowthroughTick(input: {
     createSignalBotTelegramTransport(input.telegram);
   const now = input.now ?? new Date();
   const chatIds = await input.redis.sMembers(CHAT_SET_KEY);
-  const candidates = await loadSignalBotFollowthroughCandidates({
+  const candidates = loadSignalBotFollowthroughCandidates({
     chatIds,
     db: input.db,
     mode: "publish",
     now,
     policy,
+    redis: input.redis,
   });
   const latestSnapshotMaxAgeMs = await resolveSignalBotLatestSnapshotMaxAgeMs(
     input.db,
@@ -7865,8 +7808,10 @@ export async function publishSignalBotFollowthroughTick(input: {
   let sentStats = 0;
   let queued = 0;
   let skipped = 0;
-  for (const candidate of candidates) {
+  let candidateCount = 0;
+  for await (const candidate of candidates) {
     if (sent + queued >= policy.maxPerTick) break;
+    candidateCount += 1;
     const stats = await buildSignalBotFollowthroughStats({
       asOf: now,
       candidate,
@@ -7966,6 +7911,7 @@ export async function publishSignalBotFollowthroughTick(input: {
       messageKind: kind,
       noteId: candidate.thread_root_note_id,
       now,
+      recoverTerminalSkip: kind === "followthrough_stats",
       replyToMessageId,
       threadRootNoteId: candidate.thread_root_note_id,
     });
@@ -8134,7 +8080,7 @@ export async function publishSignalBotFollowthroughTick(input: {
     }
   }
   return {
-    candidates: candidates.length,
+    candidates: candidateCount,
     policyEnabled: true,
     sent,
     sentResolvedLoss,

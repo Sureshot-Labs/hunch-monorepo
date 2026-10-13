@@ -124,3 +124,41 @@ export function parseSignalPublicationSnapshot(
     return null;
   return row;
 }
+
+/** Prices at delivery, shared by outcome messages and performance reports.
+ * A malformed/stale frozen quote never falls back to a research/current price. */
+export function readFrozenPublicationEntry(input: {
+  snapshot: unknown;
+  legacyPrice: unknown;
+  marketId: string;
+  venue: string | null;
+  side: "YES" | "NO" | null;
+  sentAt: string | Date | null;
+}): {
+  price: number | null;
+  quality: "quoted_ask" | "legacy_display" | "missing_entry";
+} {
+  if (input.snapshot != null) {
+    const snapshot = parseSignalPublicationSnapshot(input.snapshot);
+    if (
+      snapshot &&
+      snapshot.marketId === input.marketId &&
+      snapshot.venue === input.venue &&
+      snapshot.side === input.side &&
+      input.sentAt &&
+      publicationQuoteQuality(snapshot, new Date(input.sentAt)) === "quoted_ask"
+    ) {
+      return { price: snapshot.ask, quality: "quoted_ask" };
+    }
+    return { price: null, quality: "missing_entry" };
+  }
+  const price =
+    typeof input.legacyPrice === "number"
+      ? input.legacyPrice
+      : typeof input.legacyPrice === "string" && input.legacyPrice.trim()
+        ? Number(input.legacyPrice)
+        : null;
+  return price != null && Number.isFinite(price) && price > 0 && price < 1
+    ? { price, quality: "legacy_display" }
+    : { price: null, quality: "missing_entry" };
+}

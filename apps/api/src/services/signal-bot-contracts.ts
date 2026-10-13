@@ -266,6 +266,7 @@ export type SignalBotFollowthroughStats = {
 };
 
 export type SignalBotFollowthroughCandidateRow = {
+  initial_sent_at?: string;
   chat_id: string;
   thread_root_note_id: string;
   reply_to_message_id: string | number | null;

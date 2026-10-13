@@ -1,5 +1,6 @@
 import type { HolderResearchPerformanceAuditResult } from "./holder-research-performance.js";
 import type { SignalBotStatsPeriod } from "./signal-bot-command-parsers.js";
+import { formatHolderReportCategory } from "./holder-research-report-category.js";
 import {
   formatMarketSegmentLabel,
   formatMarketTypeLabel,
@@ -94,8 +95,10 @@ function buildSignalBotStatsDetailLines(
     );
   const segmentLines = formatStatsAggregateGroup({
     amountUsd: input.buyAmountUsd,
-    formatter: formatMarketSegmentLabel,
-    group: result.aggregates.byMarketSegment,
+    formatter: (value) =>
+      formatHolderReportCategory(value) ?? formatMarketSegmentLabel(value),
+    group:
+      result.aggregates.byReportCategory ?? result.aggregates.byMarketSegment,
     title: "By category",
   });
   if (segmentLines.length > 0) lines.push(...segmentLines);
