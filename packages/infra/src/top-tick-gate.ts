@@ -19,6 +19,8 @@ export type TopTickGateInputs = {
   bestAsk: NullablePrice;
   tsMs: number;
   nowMs?: number;
+  /** Publish authoritative state immediately; cancel older deferred ticks. */
+  forcePublish?: boolean;
 };
 
 type DeferredPublishPayload = {
@@ -262,6 +264,7 @@ export function createTopTickGate(
       bestAsk,
       tsMs,
       nowMs,
+      forcePublish = false,
     }: TopTickGateInputs): boolean => {
       if (!tokenId) return false;
       if (!allowEmpty && bestBid == null && bestAsk == null) return false;
@@ -287,8 +290,12 @@ export function createTopTickGate(
         !isEqualPrice(prev.publishedAsk, bestAsk, epsilon);
       const elapsedSincePublishMs = now - prev.lastPublishedAtMs;
 
-      if (changedVsPublished) {
-        if (minIntervalMs > 0 && elapsedSincePublishMs < minIntervalMs) {
+      if (changedVsPublished || forcePublish) {
+        if (
+          !forcePublish &&
+          minIntervalMs > 0 &&
+          elapsedSincePublishMs < minIntervalMs
+        ) {
           prev.pendingBid = bestBid;
           prev.pendingAsk = bestAsk;
           prev.pendingTsMs = ts;
