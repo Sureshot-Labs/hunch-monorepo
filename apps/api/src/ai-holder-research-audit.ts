@@ -4,6 +4,7 @@ import { pool } from "./db.js";
 import { auditHolderResearchSignalPerformance } from "./services/holder-research-performance.js";
 import { resolveHolderResearchPolicy } from "./services/runtime-policies.js";
 import { loadHolderDeliveryActivity } from "./services/holder-research-delivery-report.js";
+import { loadHolderSideChronologyReport } from "./services/holder-side-chronology-report.js";
 
 type AuditArgs = {
   execute: boolean;
@@ -111,6 +112,11 @@ async function main() {
     from: new Date(asOf.getTime() - lookbackHours * 3_600_000),
     to: asOf,
   });
+  const publicChronology = await loadHolderSideChronologyReport(pool, {
+    noteIds: result.items.map((item) => item.noteId),
+    from: new Date(asOf.getTime() - lookbackHours * 3_600_000),
+    to: asOf,
+  });
   if (args.json) {
     console.log(
       JSON.stringify(
@@ -118,6 +124,7 @@ async function main() {
           dryRun: !args.execute,
           result,
           deliveryActivity,
+          publicChronology,
           cohort: args.delivered ? "initial_deliveries" : "research_notes",
         },
         null,
@@ -134,6 +141,14 @@ async function main() {
       "[holder-research:audit] reporting categories",
       result.aggregates.byReportCategory,
     );
+    console.log("[holder-research:audit] public side chronology", {
+      notes: publicChronology.notes,
+      markets: publicChronology.markets,
+      sideChanges: publicChronology.sideChanges,
+      returns: publicChronology.returns,
+      groups: publicChronology.groups,
+      interpretation: publicChronology.interpretation,
+    });
     if (!args.execute) {
       console.log(
         "[holder-research:audit] dry-run; pass --execute to persist metrics.signalPerformance",
