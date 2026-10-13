@@ -1,6 +1,9 @@
 import { z } from "zod";
+import { HUNCH_VENUES } from "@hunch/shared";
 
 export const zVenue = z.enum(["polymarket", "kalshi", "limitless"]);
+// Read support does not imply that an execution adapter exists.
+export const zReadVenue = z.enum(HUNCH_VENUES);
 
 export const zEthAddress = z
   .string()

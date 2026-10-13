@@ -33,6 +33,7 @@ export type FeedInputs = {
   view?: "events" | "markets";
   eventScope?: "grouped" | "single";
   venues?: string[];
+  hip4Environment?: "mainnet" | "testnet" | null;
   category?: string;
   categories?: string[];
   filter?: string;
@@ -642,7 +643,12 @@ type FeedSearchPlan = {
 
 type FeedSearchEarlyFilterInputs = Pick<
   FeedInputs,
-  "venues" | "category" | "categories" | "endWithin" | "ageSince"
+  | "venues"
+  | "hip4Environment"
+  | "category"
+  | "categories"
+  | "endWithin"
+  | "ageSince"
 >;
 
 type FeedSearchEarlyFilterSql = {
@@ -668,6 +674,7 @@ export type FeedSearchResultWindow = {
 type FeedEventFilterInputs = Pick<
   FeedInputs,
   | "venues"
+  | "hip4Environment"
   | "category"
   | "categories"
   | "filter"
@@ -677,6 +684,24 @@ type FeedEventFilterInputs = Pick<
   | "sevenDaysAgo"
   | "sevenDaysFromNow"
 >;
+
+export function buildFeedEnvironmentSql(
+  alias: string,
+  inputs: Pick<FeedInputs, "venues" | "hip4Environment">,
+  add: PgParamAdder,
+): string | null {
+  if (inputs.venues && !inputs.venues.includes("hyperliquid")) return null;
+  // Older internal readers without an explicit environment retain their
+  // previous scope. Mainnet/testnet are never merged into one discovery feed.
+  if (!inputs.hip4Environment) return `${alias}.venue <> 'hyperliquid'`;
+  const networkPredicate = `${alias}.id like ${add(`hyperliquid:${inputs.hip4Environment}:%`)}::text`;
+  // In HIP-only scope the venue is a known constant, not an unknown ANY($n)
+  // cardinality. Expose that fact to generic plans so they can select the
+  // existing venue index instead of walking every other venue's score prefix.
+  if (inputs.venues?.length === 1)
+    return `(${alias}.venue = 'hyperliquid' and ${networkPredicate})`;
+  return `(${alias}.venue <> 'hyperliquid' or ${networkPredicate})`;
+}
 
 function buildFeedSqlExpressions(
   marketAlias = "m",
@@ -948,6 +973,7 @@ type ProbabilityMarketFilterInputs = Pick<
   | "maxProb"
   | "view"
   | "venues"
+  | "hip4Environment"
   | "category"
   | "categories"
   | "filter"
@@ -1114,6 +1140,7 @@ function probabilityMarketCacheKey(
   return JSON.stringify({
     view: inputs.view ?? "events",
     venues: inputs.venues ? [...inputs.venues].sort() : null,
+    hip4Environment: inputs.hip4Environment ?? null,
     category: inputs.category?.toLowerCase() ?? null,
     categories: inputs.categories
       ? [...inputs.categories].map((value) => value.toLowerCase()).sort()
@@ -1478,6 +1505,8 @@ function buildFeedMarketCandidateExtraSql(args: {
   const clauses: string[] = marketOnly
     ? []
     : [supportedLimitlessMarketExpr, renderableMarketExpr];
+  const environmentSql = buildFeedEnvironmentSql(marketAlias, inputs, add);
+  if (environmentSql) clauses.push(environmentSql);
 
   if (!marketOnly && requireNamedCategory) {
     clauses.push(
@@ -1685,6 +1714,15 @@ function buildFeedSearchEarlyFilterSql(args: {
       hasDeferredFallbackFilters = true;
     }
   };
+
+  const eventEnvironment = buildFeedEnvironmentSql("e", inputs, add);
+  const marketEnvironment = buildFeedEnvironmentSql(
+    venueTarget === "market" ? "m" : "e",
+    inputs,
+    add,
+  );
+  if (eventEnvironment && marketEnvironment)
+    pushFilter(eventEnvironment, marketEnvironment);
 
   if (inputs.venues) {
     if (inputs.venues.length) {
@@ -2108,6 +2146,8 @@ function buildFeedEventWhere(args: {
     searchFilterExpr = "e.id in (select id from search_events)",
   } = args;
   const where: string[] = ["e.status = 'ACTIVE'"];
+  const environmentSql = buildFeedEnvironmentSql("e", inputs, add);
+  if (environmentSql) where.push(environmentSql);
   if (includeOrderableExists) {
     where.push(buildOrderableEventFreshnessSql({ eventAlias: "e", nowParam }));
     where.push(buildEventHasOrderableMarketSql({ eventAlias: "e", nowParam }));
@@ -3766,6 +3806,8 @@ export async function fetchFeedMarkets(
     supportedLimitlessMarketExpr,
     renderableMarketExpr,
   ];
+  const environmentSql = buildFeedEnvironmentSql("m", inputs, add);
+  if (environmentSql) marketWhere.push(environmentSql);
   if (marketIdsParam) {
     marketWhere.push(`m.id = ANY(${marketIdsParam}::text[])`);
   }
@@ -5636,16 +5678,31 @@ async function fetchFeedMarketIdsFast(
   const liveDurationSql = useLiveTrendingPrefix
     ? buildMarketDurationSql(inputs, add, "m")
     : null;
-  const livePrefixCte = useLiveTrendingPrefix
-    ? `live_trending_prefix as materialized (
-        select m.id as market_id, ${liveBaseScoreSql} as base_score
-        from unified_markets m
-        where m.status = 'ACTIVE'
+  const liveEnvironmentSql = useLiveTrendingPrefix
+    ? buildFeedEnvironmentSql("m", inputs, add)
+    : null;
+  const livePrefixWhere = `m.status = 'ACTIVE'
           and ${buildNativeTradableMarketSql("m")}
           and ${renderableMarketExpr}
           ${liveVenueParam ? `and m.venue = any(${liveVenueParam}::text[])` : ""}
           ${inputs.venues?.length === 0 ? "and false" : ""}
           ${liveDurationSql ? `and ${liveDurationSql}` : ""}
+          ${liveEnvironmentSql ? `and ${liveEnvironmentSql}` : ""}`;
+  // HIP has no lifetime-volume/interest rank yet. Under an unknown generic
+  // LIMIT, its tied low-score rows otherwise make PG walk the global score
+  // index past every other venue. Fence the narrow active venue/network read
+  // (numeric projection only) so the existing venue index remains selectable.
+  // Mixed and existing-venue feeds keep their original indexed score prefix.
+  const hipOnlyPrefix =
+    inputs.venues?.length === 1 && inputs.venues[0] === "hyperliquid";
+  const livePrefixSource = hipOnlyPrefix
+    ? `(select m.id, m.volume_total, m.liquidity, m.open_interest
+        from unified_markets m where ${livePrefixWhere} offset 0) m`
+    : `unified_markets m where ${livePrefixWhere}`;
+  const livePrefixCte = useLiveTrendingPrefix
+    ? `live_trending_prefix as materialized (
+        select m.id as market_id, ${liveBaseScoreSql} as base_score
+        from ${livePrefixSource}
         order by ${liveBaseScoreSql} desc nulls last, m.id
         limit ${livePrefixLimitParam}
       ),
@@ -6644,6 +6701,7 @@ export async function fetchFavoriteFeedEventPage(
     venueFilterTarget: "market",
   });
   const favoriteDurationSql = buildMarketDurationSql(inputs, add);
+  const favoriteEnvironmentSql = buildFeedEnvironmentSql("m", inputs, add);
   const marketCountCte = `
     market_count as (
       select m.event_id, count(*) as market_count
@@ -6664,6 +6722,7 @@ export async function fetchFavoriteFeedEventPage(
         and ${supportedLimitlessMarketExpr}
         and ${renderableMarketExpr}
         ${favoriteDurationSql ? `and ${favoriteDurationSql}` : ""}
+        ${favoriteEnvironmentSql ? `and ${favoriteEnvironmentSql}` : ""}
       group by m.event_id
     )
   `;
@@ -6709,6 +6768,7 @@ export async function fetchFavoriteFeedEventPage(
   if (favoriteDurationSql) {
     where.push(favoriteDurationSql);
   }
+  if (favoriteEnvironmentSql) where.push(favoriteEnvironmentSql);
 
   if (inputs.venues) {
     where.push(

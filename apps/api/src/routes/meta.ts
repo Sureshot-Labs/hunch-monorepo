@@ -20,6 +20,10 @@ import {
 } from "../schemas/feed.js";
 import { resolveVenueLifecyclePolicy } from "../services/runtime-policies.js";
 import {
+  venueMetadataRouteSchema,
+  venueMetadataSchema,
+} from "../schemas/venue-metadata.js";
+import {
   createVenueCoverageCache,
   VENUE_COVERAGE_STALE_SECONDS,
   type VenueCoverageRow,
@@ -508,98 +512,98 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
       ),
   });
 
-  z.get("/meta/venues", async (_req, reply) => {
-    const lifecycle = await resolveVenueLifecyclePolicy(pool);
-    const discoverableVenues = HUNCH_VENUES.filter((venue) =>
-      venueHasLifecycleCapability(lifecycle.effective, venue, "discovery"),
-    );
-    const coverageSnapshot = venueCoverage.get(discoverableVenues);
-    const rows = coverageSnapshot.rows;
+  z.get(
+    "/meta/venues",
+    { schema: venueMetadataRouteSchema },
+    async (_req, reply) => {
+      const lifecycle = await resolveVenueLifecyclePolicy(pool);
+      const discoverableVenues = HUNCH_VENUES.filter((venue) =>
+        venueHasLifecycleCapability(lifecycle.effective, venue, "discovery"),
+      );
+      const coverageSnapshot = venueCoverage.get(discoverableVenues);
+      const rows = coverageSnapshot.rows;
 
-    const venues = discoverableVenues.map((venue) => {
-      const row = rows?.find((row) => row.venue === venue);
-      const activeMarkets = row?.active_markets ?? null;
-      const withVolume = row?.markets_with_volume ?? null;
-      const withLiquidity = row?.markets_with_liquidity ?? null;
-      const withPrice = row?.markets_with_price ?? null;
-      const volumeCoverage = row
-        ? row.active_markets > 0
-          ? row.markets_with_volume / row.active_markets
-          : 0
-        : null;
-      const liquidityCoverage = row
-        ? row.active_markets > 0
-          ? row.markets_with_liquidity / row.active_markets
-          : 0
-        : null;
-      const priceCoverage = row
-        ? row.active_markets > 0
-          ? row.markets_with_price / row.active_markets
-          : 0
-        : null;
-      const score =
-        volumeCoverage == null ||
-        liquidityCoverage == null ||
-        priceCoverage == null
-          ? null
-          : (volumeCoverage + liquidityCoverage + priceCoverage) / 3;
+      const venues = discoverableVenues.map((venue) => {
+        const row = rows?.find((row) => row.venue === venue);
+        const activeMarkets = row?.active_markets ?? null;
+        const withVolume = row?.markets_with_volume ?? null;
+        const withLiquidity = row?.markets_with_liquidity ?? null;
+        const withPrice = row?.markets_with_price ?? null;
+        const volumeCoverage = row
+          ? row.active_markets > 0
+            ? row.markets_with_volume / row.active_markets
+            : 0
+          : null;
+        const liquidityCoverage = row
+          ? row.active_markets > 0
+            ? row.markets_with_liquidity / row.active_markets
+            : 0
+          : null;
+        const priceCoverage = row
+          ? row.active_markets > 0
+            ? row.markets_with_price / row.active_markets
+            : 0
+          : null;
+        const score =
+          volumeCoverage == null ||
+          liquidityCoverage == null ||
+          priceCoverage == null
+            ? null
+            : (volumeCoverage + liquidityCoverage + priceCoverage) / 3;
 
-      return {
-        venue,
-        activeMarkets,
-        counts: {
-          withVolume,
-          withLiquidity,
-          withPrice,
+        return {
+          venue,
+          activeMarkets,
+          counts: {
+            withVolume,
+            withLiquidity,
+            withPrice,
+          },
+          coverage: {
+            volume: volumeCoverage,
+            liquidity: liquidityCoverage,
+            price: priceCoverage,
+            score,
+          },
+        };
+      });
+
+      const policyVenues = Object.fromEntries(
+        HUNCH_VENUES.map((venue) => [
+          venue,
+          {
+            ...lifecycle.effective.venues[venue],
+            capabilities: getVenueLifecycleCapabilities(
+              lifecycle.effective,
+              venue,
+            ),
+          },
+        ]),
+      );
+
+      const payload = venueMetadataSchema.parse({
+        total: venues.length,
+        generatedAt: new Date().toISOString(),
+        coverageStatus: coverageSnapshot.status,
+        coverageAsOf: coverageSnapshot.measuredAt,
+        venues,
+        policy: {
+          source: lifecycle.source,
+          effectiveAt: lifecycle.effectiveAt?.toISOString() ?? null,
+          invalidOverride: lifecycle.invalidOverride,
+          revision: lifecycle.revision,
+          venues: policyVenues,
         },
-        coverage: {
-          volume: volumeCoverage,
-          liquidity: liquidityCoverage,
-          price: priceCoverage,
-          score,
-        },
-      };
-    });
+      });
 
-    const policyVenues = Object.fromEntries(
-      HUNCH_VENUES.map((venue) => [
-        venue,
-        {
-          ...lifecycle.effective.venues[venue],
-          capabilities: getVenueLifecycleCapabilities(
-            lifecycle.effective,
-            venue,
-          ),
-        },
-      ]),
-    );
+      reply.header(
+        "x-cache",
+        coverageSnapshot.status === "ready" ? "hit" : coverageSnapshot.status,
+      );
 
-    const payload = {
-      total: venues.length,
-      generatedAt: new Date().toISOString(),
-      coverageStatus: coverageSnapshot.status,
-      coverageAsOf: coverageSnapshot.measuredAt,
-      venues,
-      policy: {
-        source: lifecycle.source,
-        effectiveAt: lifecycle.effectiveAt?.toISOString() ?? null,
-        invalidOverride: lifecycle.invalidOverride,
-        revision: lifecycle.revision,
-        venues: policyVenues,
-      },
-    };
-    const body = JSON.stringify(payload);
-
-    reply.header(
-      "x-cache",
-      coverageSnapshot.status === "ready" ? "hit" : coverageSnapshot.status,
-    );
-
-    reply.header("Content-Type", "application/json; charset=utf-8");
-    reply.header(
-      "Cache-Control",
-      "public, max-age=30, stale-while-revalidate=60",
-    );
-    return reply.send(body);
-  });
+      reply.header("Content-Type", "application/json; charset=utf-8");
+      reply.header("Cache-Control", "no-store");
+      return reply.send(payload);
+    },
+  );
 };

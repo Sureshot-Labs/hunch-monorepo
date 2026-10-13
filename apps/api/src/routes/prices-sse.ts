@@ -1,6 +1,5 @@
 import type { FastifyPluginAsync } from "fastify";
 import { isHip4CanaryId } from "@hunch/shared";
-import { createAdminMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { readHip4Policy } from "../services/hip4-repository.js";
 import { hip4KnownStreamTokensAllowed } from "../services/hip4-stream-access.js";
@@ -29,9 +28,6 @@ import {
  */
 export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
-  const authorizeHip = createAdminMiddleware({
-    requiredAdminPermission: "analytics:read",
-  });
   const contexts = new WeakMap<
     object,
     Awaited<ReturnType<typeof readHip4Policy>>
@@ -52,8 +48,8 @@ export const pricesSseRoutes: FastifyPluginAsync = async (app) => {
       preHandler: async (request, reply) => {
         if (!request.query.token_id.some(isHip4CanaryId)) return;
         reply.header("Cache-Control", "private, no-store");
-        await authorizeHip(request, reply);
-        if (reply.sent) return;
+        // Public market streams use the same access model as other venues.
+        // Validate effective policy and exact instrument before cache/subscribe.
         try {
           const context = await readHip4Policy(pool);
           if (

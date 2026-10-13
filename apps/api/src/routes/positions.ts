@@ -26,10 +26,19 @@ import {
   positionVisibilitySchema,
   positionVisibilityErrorResponseSchema,
   positionVisibilityResponseSchema,
-  positionsByTokenQuerySchema,
-  positionsPnlSummaryQuerySchema,
   positionsQuerySchema,
 } from "../schemas/positions.js";
+import {
+  positionReadRouteSchemas,
+  positionReadSchema,
+} from "../schemas/position-read.js";
+import { readHip4PortfolioPositions } from "../services/hip4-portfolio-positions.js";
+import {
+  positionReadScope,
+  unavailableHip4PositionRead,
+  mergePositionPnlSummary,
+  EMPTY_LEGACY_POSITION_PNL,
+} from "../services/position-read-scope.js";
 import {
   buildKalshiLossCloseTransaction,
   normalizeKalshiSolanaPositionMint,
@@ -45,6 +54,18 @@ type AuthenticatedUser = NonNullable<FastifyRequest["user"]>;
 
 export const positionsRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+  const readHip4 = async (
+    input: Parameters<typeof readHip4PortfolioPositions>[1],
+  ) => {
+    try {
+      return await readHip4PortfolioPositions(pool, input);
+    } catch {
+      // One venue's missing facts/configuration must not erase other holdings.
+      // The coverage flag prevents an empty HIP result being read as zero.
+      app.log.warn({ userId: input.userId }, "HIP portfolio read unavailable");
+      return unavailableHip4PositionRead();
+    }
+  };
 
   const ETH_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
@@ -200,7 +221,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
     "/positions",
     {
       preHandler: createAuthMiddleware(),
-      schema: { querystring: positionsQuerySchema },
+      schema: positionReadRouteSchemas["/positions"],
     },
     async (request, reply) => {
       const user = request.user;
@@ -233,18 +254,20 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         }
 
         const effectiveMinSize = query.minSize ?? MIN_POSITION_SIZE;
+        const scope = positionReadScope(query);
 
-        let positions = await fetchPositionsForUserWallet(pool, {
-          userId: user.id,
-          walletAddresses,
-          venue,
-          venues,
-          marketId: query.marketId,
-          eventId: query.eventId,
-          includeHidden: query.includeHidden,
-          includeResolved: query.includeResolved,
-          minSize: effectiveMinSize,
-        });
+        let positions = scope.legacyVenues.length
+          ? await fetchPositionsForUserWallet(pool, {
+              userId: user.id,
+              walletAddresses,
+              venues: scope.legacyVenues,
+              marketId: query.marketId,
+              eventId: query.eventId,
+              includeHidden: query.includeHidden,
+              includeResolved: query.includeResolved,
+              minSize: effectiveMinSize,
+            })
+          : [];
 
         let marketsByToken: MappedMarketByTokenEntry[] | undefined;
         const shouldLoadMarketsForPositions =
@@ -263,7 +286,8 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
                 pool,
                 positions,
                 {
-                  venue: responseVenue,
+                  venue:
+                    responseVenue === "hyperliquid" ? undefined : responseVenue,
                   includeTop: true,
                 },
               );
@@ -345,8 +369,23 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         }
 
         reply.header("Content-Type", "application/json; charset=utf-8");
+        reply.header("Cache-Control", "private, no-store");
+        const hip4 = scope.hyperliquid
+          ? await readHip4({
+              userId: user.id,
+              walletAddresses,
+              marketId: query.marketId,
+              eventId: query.eventId,
+              search: query.q,
+              minSize: effectiveMinSize,
+            })
+          : undefined;
         return reply.send({
-          positions,
+          positions: [
+            ...positions.map((position) => positionReadSchema.parse(position)),
+            ...(hip4?.positions ?? []),
+          ],
+          ...(hip4 ? { coverage: { hyperliquid: hip4.coverage } } : {}),
           ...(query.includeMarkets && marketsByToken ? { marketsByToken } : {}),
           ...(responseVenue ? { venue: responseVenue } : {}),
         });
@@ -371,7 +410,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
     "/positions/pnl",
     {
       preHandler: createAuthMiddleware(),
-      schema: { querystring: positionsPnlSummaryQuerySchema },
+      schema: positionReadRouteSchemas["/positions/pnl"],
     },
     async (request, reply) => {
       const user = request.user;
@@ -403,16 +442,26 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({ error: "No wallets available to query." });
         }
 
-        const summary = await fetchPositionPnlSummaryForUserWallet(pool, {
-          userId: user.id,
-          walletAddresses,
-          venue,
-          venues,
-        });
+        const scope = positionReadScope(query);
+        const legacy = scope.legacyVenues.length
+          ? await fetchPositionPnlSummaryForUserWallet(pool, {
+              userId: user.id,
+              walletAddresses,
+              venues: scope.legacyVenues,
+            })
+          : EMPTY_LEGACY_POSITION_PNL;
+        const hip4 = scope.hyperliquid
+          ? await readHip4({ userId: user.id, walletAddresses })
+          : undefined;
+        const summary = mergePositionPnlSummary(legacy, hip4);
 
         reply.header("Content-Type", "application/json; charset=utf-8");
-        if (responseVenue) return reply.send({ summary, venue: responseVenue });
-        return reply.send({ summary });
+        reply.header("Cache-Control", "private, no-store");
+        return reply.send({
+          summary,
+          ...(responseVenue ? { venue: responseVenue } : {}),
+          ...(hip4 ? { coverage: { hyperliquid: hip4.coverage } } : {}),
+        });
       } catch (error) {
         app.log.error(
           { error, userId: user.id, walletAddress },
@@ -434,7 +483,7 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
     "/positions/by-token",
     {
       preHandler: createAuthMiddleware(),
-      schema: { querystring: positionsByTokenQuerySchema },
+      schema: positionReadRouteSchemas["/positions/by-token"],
     },
     async (request, reply) => {
       const user = request.user;
@@ -467,16 +516,18 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         }
 
         const effectiveMinSize = query.minSize ?? MIN_POSITION_SIZE;
-        const positions = await fetchPositionsForUserWalletByTokenIds(pool, {
-          userId: user.id,
-          walletAddresses,
-          tokenIds: query.tokenIds,
-          venue,
-          venues,
-          includeHidden: query.includeHidden,
-          includeResolved: query.includeResolved,
-          minSize: effectiveMinSize,
-        });
+        const scope = positionReadScope(query);
+        const positions = scope.legacyVenues.length
+          ? await fetchPositionsForUserWalletByTokenIds(pool, {
+              userId: user.id,
+              walletAddresses,
+              tokenIds: query.tokenIds,
+              venues: scope.legacyVenues,
+              includeHidden: query.includeHidden,
+              includeResolved: query.includeResolved,
+              minSize: effectiveMinSize,
+            })
+          : [];
 
         if (positions.length) {
           const tokenIds = positions.map((position) => position.tokenId);
@@ -487,9 +538,23 @@ export const positionsRoutes: FastifyPluginAsync = async (app) => {
         }
 
         reply.header("Content-Type", "application/json; charset=utf-8");
-        if (responseVenue)
-          return reply.send({ positions, venue: responseVenue });
-        return reply.send({ positions });
+        reply.header("Cache-Control", "private, no-store");
+        const hip4 = scope.hyperliquid
+          ? await readHip4({
+              userId: user.id,
+              walletAddresses,
+              tokenIds: query.tokenIds,
+              minSize: effectiveMinSize,
+            })
+          : undefined;
+        return reply.send({
+          positions: [
+            ...positions.map((position) => positionReadSchema.parse(position)),
+            ...(hip4?.positions ?? []),
+          ],
+          ...(responseVenue ? { venue: responseVenue } : {}),
+          ...(hip4 ? { coverage: { hyperliquid: hip4.coverage } } : {}),
+        });
       } catch (error) {
         app.log.error(
           { error, userId: user.id, walletAddress, tokenIds: query.tokenIds },

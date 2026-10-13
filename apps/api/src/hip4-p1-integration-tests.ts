@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { DEFAULT_HIP4_READ_POLICY } from "@hunch/shared";
 import { createIntegrationTestPool } from "./test-database-target.js";
+import { installHip4TestLifecycle } from "./hip4-test-lifecycle.js";
 import { mapHip4Market, applyHip4Book } from "./services/hip4-mapping.js";
 import {
   persistHip4Market,
@@ -11,6 +12,7 @@ import {
   recordHip4MetadataFailure,
   advanceHip4Cursor,
   readHip4Cursor,
+  readHip4Policy,
 } from "./services/hip4-repository.js";
 import { readHip4Trades, readHip4Candles } from "./services/hip4-history.js";
 import { runHip4ReadCycle } from "./services/hip4-indexer.js";
@@ -37,14 +39,17 @@ const now = Date.now();
 const rotationOutcomes = [500001, 500002, 500003, 500004, 500005, 500006];
 const futureMeta = {
   ...main.metadata,
-  outcomes: main.metadata.outcomes.map((row: { description: string }) => ({
-    ...row,
-    description: row.description.replace(
-      /resolutionDeadline:\d{8}-\d{4}/,
-      "resolutionDeadline:20990101-0000",
-    ),
-  })),
+  outcomes: main.metadata.outcomes
+    .filter((row: { outcome: number }) => row.outcome === 8775)
+    .map((row: { description: string }) => ({
+      ...row,
+      description: row.description.replace(
+        /resolutionDeadline:\d{8}-\d{4}/,
+        "resolutionDeadline:20990101-0000",
+      ),
+    })),
 };
+const lifecycleFixture = await installHip4TestLifecycle(pool);
 try {
   assert.equal(
     Math.floor(
@@ -103,6 +108,24 @@ try {
     hash: "fixture",
   };
   await persistHip4Market(pool, { ...mapped, trades: [trade] });
+  const readCatalog = async () =>
+    (
+      await pool.query(
+        `select volume_24h::text, volume_total::text, best_bid::text, best_ask::text,
+         last_price::text, liquidity::text, open_interest::text
+       from unified_markets where id=$1`,
+        [mapped.market.marketId],
+      )
+    ).rows[0];
+  assert.deepEqual(await readCatalog(), {
+    volume_24h: "24.30617",
+    volume_total: null,
+    best_bid: "0.6",
+    best_ask: null,
+    last_price: null,
+    liquidity: null,
+    open_interest: null,
+  });
   const older = mapHip4Market({
     ...main,
     metadata: futureMeta,
@@ -148,6 +171,8 @@ try {
   const failedVolume = failedVolumeRow.market;
   assert.equal(failedVolume.volume24h?.usd, "24.30617");
   assert.equal(failedVolume.volumeAttempt?.result, "invalid_response");
+  assert.equal((await readCatalog()).volume_24h, "24.30617");
+  assert.equal((await readCatalog()).best_bid, "0.6");
   older.market = applyHip4Volume(
     older.market,
     indexHip4AssetContexts([{ coin: "#87750", dayNtlVlm: "25" }]),
@@ -163,6 +188,7 @@ try {
     (await readHip4StoredMarket(pool, "mainnet", 8775))?.market.sides[0].bid,
     "0.6",
   );
+  assert.equal((await readCatalog()).volume_24h, "25");
   // Old metadata must not discard a newer book or new trades during a REST/WS race.
   mapped.market = applyHip4Book(mapped.market, 0, book(now, "0.7"), now, 60000);
   mapped.market.coverage = {
@@ -465,7 +491,11 @@ try {
       assert.ok(spent <= budget);
       assert.notEqual(await readHip4Cursor(pool, "mainnet"), cursorBefore);
     }
-    assert.equal(serviced.size, budget === 600 ? 6 : 0);
+    assert.deepEqual(
+      serviced,
+      new Set(budget === 600 ? [...rotationOutcomes, 8775] : []),
+      "full catalog repairs the prior pending outcome as well as newly listed outcomes within the same request budget",
+    );
   }
   await pool.query("update runtime_policies set payload=$2 where id=$1", [
     policyId,
@@ -488,15 +518,20 @@ try {
       ).trades.some((row) => row.tid === 90),
     );
   };
-  await flushHip4Live(pool, policy, `db-${policyId}`, buffer.take(), publish);
+  const liveRevision = (await readHip4Policy(pool, "indexer")).revision;
+  await flushHip4Live(pool, policy, liveRevision, buffer.take(), publish);
   assert.equal(published, 1);
-  await flushHip4Live(pool, policy, `db-${policyId}`, buffer.take(), publish);
+  await flushHip4Live(pool, policy, liveRevision, buffer.take(), publish);
   assert.equal(published, 2, "idle snapshot repairs failed Redis publication");
-  await pool.query("update runtime_policies set payload='{}' where id=$1", [
-    policyId,
-  ]);
+  await pool.query(
+    "update runtime_policies set payload=jsonb_set(payload,'{venues,hyperliquid}',$2::jsonb) where id=$1",
+    [
+      lifecycleFixture.id,
+      JSON.stringify({ lifecycle: "unreleased", indexerMode: "off" }),
+    ],
+  );
   buffer.data("trades", [{ ...trade, tid: 91 }]);
-  await flushHip4Live(pool, policy, `db-${policyId}`, buffer.take(), publish);
+  await flushHip4Live(pool, policy, liveRevision, buffer.take(), publish);
   assert.equal(published, 2);
   assert.equal(
     (
@@ -553,17 +588,24 @@ try {
     JSON.stringify(policy),
   ]);
   const terminalBatch = settlementQueue.take();
+  await pool.query(
+    "update runtime_policies set payload=jsonb_set(payload,'{venues,hyperliquid}',$2::jsonb) where id=$1",
+    [
+      lifecycleFixture.id,
+      JSON.stringify({ lifecycle: "active", indexerMode: "full" }),
+    ],
+  );
   await flushHip4Live(
     pool,
     policy,
-    `db-${policyId}`,
+    liveRevision,
     terminalBatch,
     async () => {},
   );
   await flushHip4Live(
     pool,
     policy,
-    `db-${policyId}`,
+    liveRevision,
     terminalBatch,
     async () => {},
   );
@@ -598,6 +640,7 @@ try {
     "HIP4 P1 PG16: monotonic REST/WS publication, replay/late/tied candles, full tuple pages, gaps, low-budget progress and recovery, disable and publish-after-commit passed",
   );
 } finally {
+  await lifecycleFixture.close();
   await pool.query("delete from runtime_policies where id=$1", [policyId]);
   await pool.query(
     "delete from unified_markets where id='hyperliquid:mainnet:outcome:8775'",

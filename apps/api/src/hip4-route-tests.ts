@@ -104,6 +104,64 @@ test("read canary checks authorization before policy/DB and does not grant write
   );
   await app.close();
 });
+test("ordinary public market reads require policy, not administrator identity; canary alias stays private", async () => {
+  const app = await buildHip4ContractApp();
+  let enabled = true;
+  let reads = 0;
+  const dependencies = {
+    authorize: async (
+      _request: unknown,
+      reply: import("fastify").FastifyReply,
+    ) => {
+      reply.code(403).send({ error: "forbidden" });
+    },
+    policy: async () => ({
+      policy: {
+        ...DEFAULT_HIP4_READ_POLICY,
+        enabled,
+        catalogMode: "all" as const,
+      },
+      revision: "public",
+    }),
+    markets: async () => {
+      reads++;
+      return [];
+    },
+  };
+  registerHip4ReadRoutes(app, { ...dependencies, surface: "public" });
+  registerHip4ReadRoutes(app, { ...dependencies, surface: "canary" });
+  try {
+    assert.equal((await app.inject("/markets/hyperliquid")).statusCode, 200);
+    assert.equal(reads, 1);
+    assert.equal(
+      (await app.inject("/markets/hyperliquid/canary")).statusCode,
+      403,
+    );
+    enabled = false;
+    assert.equal((await app.inject("/markets/hyperliquid")).statusCode, 404);
+    for (const suffix of ["", "/trades", "/candles"]) {
+      assert.equal(
+        (
+          await app.inject(
+            `/markets/hyperliquid/hyperliquid:mainnet:outcome:1${suffix}`,
+          )
+        ).statusCode,
+        404,
+      );
+    }
+    assert.equal(reads, 1, "disabled requests must not read persisted data");
+    enabled = true;
+    assert.equal((await app.inject("/markets/hyperliquid")).statusCode, 200);
+    assert.equal(reads, 2, "normal next request recovers after re-enable");
+    assert.equal(
+      (await app.inject({ method: "POST", url: "/markets/hyperliquid" }))
+        .statusCode,
+      404,
+    );
+  } finally {
+    await app.close();
+  }
+});
 test("history is allowlist/revision-bound, bounded, and separates malformed cursors from service errors", async () => {
   const fixture = JSON.parse(
     readFileSync(

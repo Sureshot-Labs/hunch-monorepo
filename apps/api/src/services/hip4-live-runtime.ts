@@ -70,7 +70,7 @@ export function startHip4LiveRuntime(
   const tick = async () => {
     let nextMs = DEFAULT_HIP4_READ_POLICY.policyCheckMs;
     try {
-      const current = await readHip4Policy(pool);
+      const current = await readHip4Policy(pool, "indexer");
       const { policy } = current;
       nextMs = Math.min(policy.streamFlushMs, policy.policyCheckMs);
       if (revision !== current.revision) {
@@ -129,7 +129,7 @@ export function startHip4LiveRuntime(
       }
       const publish = async (market: Hip4ReadMarket) => {
         if (!client?.isReady) return;
-        const latest = await readHip4Policy(pool);
+        const latest = await readHip4Policy(pool, "indexer");
         if (stopped || !latest.policy.enabled || latest.revision !== revision)
           return;
         const multi = client.multi();

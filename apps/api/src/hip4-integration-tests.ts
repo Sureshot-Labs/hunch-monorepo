@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { createIntegrationTestPool } from "./test-database-target.js";
+import { installHip4TestLifecycle } from "./hip4-test-lifecycle.js";
 import { mapHip4Market } from "./services/hip4-mapping.js";
 import {
   admitHip4Request,
@@ -26,13 +27,19 @@ const pool = await createIntegrationTestPool({
   max: 4,
   options: "-c statement_timeout=15000",
 });
+const lifecycleFixture = await installHip4TestLifecycle(pool);
+const policyId = randomUUID();
 try {
   const version = await pool.query("show server_version_num");
   assert.equal(
     Math.floor(Number(version.rows[0].server_version_num) / 10000),
     16,
   );
-  assert.equal((await readHip4Policy(pool)).policy.enabled, false);
+  assert.equal(
+    (await readHip4Policy(pool)).policy.enabled,
+    true,
+    "the installed active lifecycle enables reads without a separate canary switch",
+  );
   const mapped = mapHip4Market({
     ...main,
     outcome: 8775,
@@ -175,7 +182,6 @@ try {
     outcomeAllowlist: [8775],
     requestWeightPerMinute: 120,
   };
-  const policyId = randomUUID();
   await pool.query(
     "insert into runtime_policies(id,policy_key,effective_at,payload) values($1,'hip4_read',$3,$2::jsonb)",
     // Effective time is in the application clock domain, matching the reader.
@@ -185,15 +191,15 @@ try {
   let calls = 0;
   const futureMetadata = {
     ...main.metadata,
-    outcomes: main.metadata.outcomes.map(
-      (row: { outcome: number; description: string }) => ({
+    outcomes: main.metadata.outcomes
+      .filter((row: { outcome: number }) => row.outcome === 8775)
+      .map((row: { outcome: number; description: string }) => ({
         ...row,
         description: row.description.replace(
           /resolutionDeadline:\d{8}-\d{4}/,
           "resolutionDeadline:20990101-0000",
         ),
-      }),
-    ),
+      })),
   };
   const cycle = await runHip4ReadCycle(pool, async (request) => {
     calls++;
@@ -212,6 +218,18 @@ try {
   assert.equal(observed?.market.coverage.tradeWindowStart, null);
   assert.ok(observed?.market.coverage.tradeObservedAt);
   assert.equal(observed?.market.volume24h?.usd, "24.30617");
+  await assert.rejects(
+    runHip4ReadCycle(pool, async () => {
+      throw new Error("provider unavailable during open-market refresh");
+    }),
+  );
+  const openFailure = await readHip4StoredMarket(pool, "mainnet", 8775);
+  assert.equal(openFailure?.market.metadataAttempt?.result, "invalid_response");
+  assert.deepEqual(
+    openFailure?.market.sides,
+    observed?.market.sides,
+    "a failed full-catalog fetch preserves the last valid book",
+  );
   const expiredMetadata = {
     ...futureMetadata,
     outcomes: futureMetadata.outcomes.map(
@@ -248,7 +266,7 @@ try {
   const afterFailure = await readHip4StoredMarket(pool, "mainnet", 8775);
   assert.equal(
     afterFailure?.market.metadataAttempt?.result,
-    "invalid_response",
+    beforeFailure?.market.metadataAttempt?.result,
   );
   assert.deepEqual(
     afterFailure && {
@@ -265,12 +283,9 @@ try {
     [policyId],
   );
   assert.equal(
-    (
-      await runHip4ReadCycle(pool, async () => {
-        throw new Error("must not fetch");
-      })
-    ).indexed,
-    0,
+    (await readHip4Policy(pool)).policy.enabled,
+    true,
+    "removing provider overrides cannot disable the venue's active lifecycle",
   );
   await pool.query(
     'update runtime_policies set payload=\'{"enabled":"invalid"}\'::jsonb where id=$1',
@@ -299,6 +314,8 @@ try {
     "HIP4 PostgreSQL 16: replay/ties, atomic rollback, frozen settlement, paging, budget concurrency, policy failure and cascading retention passed",
   );
 } finally {
+  await pool.query("delete from runtime_policies where id=$1", [policyId]);
+  await lifecycleFixture.close();
   await pool.query("delete from unified_markets where id=any($1::text[])", [
     ["hyperliquid:mainnet:outcome:8775", "hyperliquid:mainnet:outcome:95"],
   ]);

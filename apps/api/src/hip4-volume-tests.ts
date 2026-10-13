@@ -12,6 +12,7 @@ import {
   mergeHip4Volume,
 } from "./services/hip4-volume.js";
 import { mapHip4Market, ageHip4Market } from "./services/hip4-mapping.js";
+import { hip4CatalogProjection } from "./services/hip4-catalog-projection.js";
 const read = (name: string) =>
   JSON.parse(
     readFileSync(new URL(`./fixtures/hip4/${name}`, import.meta.url), "utf8"),
@@ -28,6 +29,59 @@ const market = mapHip4Market({
 }).market;
 const ctx = (value: string) =>
   indexHip4AssetContexts([{ coin: "#87750", dayNtlVlm: value }]);
+
+test("the common catalog receives primary-side 24h notional, never summed YES/NO or invented lifetime volume", () => {
+  const observed = applyHip4Volume(
+    market,
+    indexHip4AssetContexts([
+      { coin: "#87750", dayNtlVlm: "24.30617", midPx: "0.4" },
+      { coin: "#87751", dayNtlVlm: "35.69383", midPx: "0.6" },
+    ]),
+    at,
+    300000,
+  );
+  assert.deepEqual(hip4CatalogProjection(observed), {
+    volume24h: "24.30617",
+    bestBid: null,
+    bestAsk: null,
+    priceObservedAt: null,
+  });
+  assert.equal(hip4CatalogProjection(market).volume24h, null);
+  assert.equal(
+    hip4CatalogProjection({ ...observed, quoteToken: "USDH" }).volume24h,
+    null,
+  );
+  assert.equal(
+    hip4CatalogProjection({
+      ...observed,
+      volume24h: { ...observed.volume24h!, coin: "#87751" },
+    }).volume24h,
+    null,
+  );
+  assert.equal(
+    hip4CatalogProjection(applyHip4Volume(market, ctx("0"), at, 300000))
+      .volume24h,
+    "0",
+  );
+});
+
+test("the common catalog preserves the actual primary book and its observation time", () => {
+  const observed = {
+    ...market,
+    sides: market.sides.map((side) => ({
+      ...side,
+      bid: side.sideIndex === 0 ? "0.35" : "0.6",
+      ask: side.sideIndex === 0 ? "0.4" : "0.65",
+      bookAt: at,
+    })),
+  };
+  assert.deepEqual(hip4CatalogProjection(observed), {
+    volume24h: null,
+    bestBid: "0.35",
+    bestAsk: "0.4",
+    priceObservedAt: at,
+  });
+});
 
 test("bulk indicative midpoints are exact-side observations, never executable books or settlement", () => {
   const result = applyHip4Volume(

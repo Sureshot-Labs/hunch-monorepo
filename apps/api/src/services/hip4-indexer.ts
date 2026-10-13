@@ -45,9 +45,15 @@ export async function runHip4ReadCycle(
   pool: Pool,
   readOverride?: (request: Hip4InfoRequest) => Promise<unknown>,
 ) {
-  const { policy, revision } = await readHip4Policy(pool);
+  const { policy, revision, lifecycle, disabledReason } = await readHip4Policy(
+    pool,
+    "indexer",
+  );
+  const maintenance = lifecycle.indexerMode === "maintenance";
   const diagnostics = {
     revision,
+    indexerMode: lifecycle.indexerMode,
+    disabledReason,
     environment: policy.environment,
     indexed: 0,
     catalogDiscovered: 0,
@@ -62,11 +68,22 @@ export async function runHip4ReadCycle(
   };
   if (
     !policy.enabled ||
-    (policy.catalogMode !== "all" && !policy.outcomeAllowlist.length)
+    (!maintenance &&
+      policy.catalogMode !== "all" &&
+      !policy.outcomeAllowlist.length)
   )
     return diagnostics;
   const after = await readHip4Cursor(pool, policy.environment);
   let selected = selectHip4Outcomes(policy, after);
+  if (maintenance) {
+    selected = await readHip4PendingOutcomes(
+      pool,
+      policy.environment,
+      after,
+      policy.maxOutcomesPerCycle,
+    );
+    if (!selected.length) return diagnostics;
+  }
   // Reserve the mandatory pair atomically. Never spend half a pair forever.
   let metadataCredits = 0;
   if (!readOverride) {
@@ -101,7 +118,7 @@ export async function runHip4ReadCycle(
       );
     });
   const read = async (request: Hip4InfoRequest) => {
-    const current = await readHip4Policy(pool);
+    const current = await readHip4Policy(pool, "indexer");
     if (!current.policy.enabled || current.revision !== revision)
       throw new Error("policy_changed");
     const start = Date.now();
@@ -126,7 +143,18 @@ export async function runHip4ReadCycle(
       Array.isArray(spotResponse) ? spotResponse[1] : null,
     );
   } catch (error) {
-    await recordHip4MetadataFailure(pool, policy.environment, selected, {
+    // Full-catalog selection normally happens after metadata. If that fetch
+    // fails, record the attempt for a bounded set of previously indexed open
+    // outcomes instead of silently leaving every previous attempt "ok".
+    const failedOutcomes = selected.length
+      ? selected
+      : await readHip4PendingOutcomes(
+          pool,
+          policy.environment,
+          after,
+          policy.maxOutcomesPerCycle,
+        );
+    await recordHip4MetadataFailure(pool, policy.environment, failedOutcomes, {
       at: new Date().toISOString(),
       result: hip4Failure(error),
     });
@@ -134,7 +162,7 @@ export async function runHip4ReadCycle(
   }
   const generation = randomUUID();
   const fetchedAt = new Date().toISOString();
-  if (policy.catalogMode === "all") {
+  if (!maintenance && policy.catalogMode === "all") {
     const catalogIds = metadata.outcomes.map((row) => row.outcome);
     diagnostics.catalogDiscovered = catalogIds.length;
     selected = selectHip4Outcomes(
@@ -187,7 +215,7 @@ export async function runHip4ReadCycle(
           policy.volumeMaxAgeMs,
           policy.bookMaxAgeMs,
         );
-        const current = await readHip4Policy(pool);
+        const current = await readHip4Policy(pool, "indexer");
         if (!current.policy.enabled || current.revision !== revision) break;
         if (
           await persistHip4Market(pool, {
@@ -367,7 +395,7 @@ export async function runHip4ReadCycle(
           diagnostics.failures.push({ outcome, reason: `trades_${result}` });
         }
       }
-      const current = await readHip4Policy(pool);
+      const current = await readHip4Policy(pool, "indexer");
       if (!current.policy.enabled || current.revision !== revision) break;
       const writeStart = Date.now();
       mapped.market = ageHip4Market(mapped.market, Date.now(), policy);
@@ -408,7 +436,7 @@ export async function runHip4ReadCycle(
     ),
   );
   if (deferredIndex >= 0) {
-    const current = await readHip4Policy(pool);
+    const current = await readHip4Policy(pool, "indexer");
     if (current.policy.enabled && current.revision === revision)
       await advanceHip4Cursor(
         pool,

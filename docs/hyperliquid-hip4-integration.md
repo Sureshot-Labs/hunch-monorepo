@@ -13,6 +13,7 @@ capabilities remain off and require their listed proof. Sections 16–18 record
 P1 acceptance and earlier P0 evidence. Section 19 supersedes their unresolved
 BUY-minimum status with the official $1 rule and correlated native execution;
 earlier acceptance notes and fixtures remain dated history.
+Section 20 records the initial P2 owned-account read implementation on October 13.
 
 | Repository             | Branch / immutable reference                                                |
 | ---------------------- | --------------------------------------------------------------------------- |
@@ -2321,3 +2322,325 @@ production execution/recovery acceptance.
 This update changes only the two planning documents. Financial P2/P3/P4, live
 signing and production activation are still unimplemented/unapproved; the $1
 decision alone is not a claim that all P0 financial behavior or P2 is complete.
+
+## 20. Initial P2 owned-account reads — October 13, 2026
+
+Implemented an internal account read slice on `hip-next`: actual native balances,
+current side-token holdings and a durable journal of observed executions and
+non-funding ledger events. This begins P2; global account-value/portfolio inclusion,
+complete historical basis and economic transformation/dual alias accounting
+remain unfinished. Financial prepare/sign/submit and funding remain unavailable.
+
+### Contracts and storage
+
+- `GET /markets/hyperliquid/canary/account` reads the selected verified linked
+  Ethereum-shaped wallet. Existing admin `analytics:read` authorization and exact
+  ownership precede every snapshot/history read. Arbitrary addresses, agents,
+  vaults and subaccounts are not promoted to owned master accounts.
+- `?refresh=1` starts a bounded refresh immediately if no current lease exists.
+  A failed refresh releases its lease; late completion cannot overwrite a newer
+  claim. Last good observations survive transport/configuration errors.
+- `GET /markets/hyperliquid/canary/account/executions` returns decimal strings
+  and a full `(time, coin, tid, oid)` keyset cursor, bound to environment, address
+  and optional canonical `marketId`. No private provider passthrough payload is
+  exposed. It includes transaction hash, reported provider PnL, charged fee and
+  builder breakdown; reported PnL is not asserted to be Hunch cost-basis PnL.
+- Additive migration `0284` stores account snapshots, current positions,
+  executions and ledger observations. Economic owner is environment/address;
+  mutable Hunch user IDs are not execution identity. Current wallet ownership
+  is rechecked on access. Known markets have real restrictive FKs; unavailable
+  metadata keeps canonical identity and can acquire its FK on replay.
+- Additive migration `0285` preserves original provider fill JSON and its
+  fingerprint alongside normalized facts. Client ID, initial position, maker/
+  taker and future fields are retained for later accounting/recovery, without
+  exposing a raw passthrough payload. Older facts can remain explicitly without
+  source evidence until replay enriches them; no synthetic backfill is applied.
+- Retention protects current positions and durable executions by canonical
+  market ID, including facts captured before the market was indexed. These
+  are protected financial references, not disposable public read derivatives.
+
+Unified/portfolio-margin cash uses `spotClearinghouseState` once. It does not add
+legacy perps equity or maintenance/borrow capacity. Total, hold, unheld cash,
+reported debt/supply and maintenance capacity remain separate. `ownedCash` is
+nullable when the account-mode/debt facts are insufficient; `spendable` is null
+and `canTrade` is false throughout this slice. Only a successful complete spot
+snapshot replaces current positions. Missing history never seeds a position;
+failed refresh never flattens one. Unsupported `oN` bookkeeping balances remain
+explicitly unresolved rather than being guessed into a side token.
+
+Recent fills are requested unaggregated (`userFills`, maximum 2,000 responses)
+to keep the live tail advancing. The policy lookback limits ingestion; earlier
+already captured executions remain in the journal. Ledger range reads are
+bounded independently. Provider caps and last successful observation times are
+reported; `allTimeComplete: false` is intentional. Fill replay does not duplicate
+records. Conflicting identity facts retain the first fact and produce a diagnostic
+without dropping valid balance updates. Builder fees are included once in
+observed quote cash; unknown fee denomination/transformation semantics stay null.
+
+### Runtime policy and recovery
+
+Pure `hip4_account` policy is registered in the existing administrative policy API:
+
+| Field               | Default     | Purpose                                                                 |
+| ------------------- | ----------- | ----------------------------------------------------------------------- |
+| `enabled`           | `false`     | Internal account read activation; public HIP reads must also be enabled |
+| `snapshotMaxAgeMs`  | `60000`     | Observation freshness and normal polling cadence                        |
+| `historyLookbackMs` | `604800000` | Seven-day provider ingestion window, not all-time completeness          |
+| `pageSize`          | `30`        | Bounded execution-history pages                                         |
+| `leaseMs`           | `120000`    | Recoverable cross-process refresh admission                             |
+
+Account reads use the existing shared IP admission and transport bounds. Role
+costs 60, spot-state 2, user fills reserve 120 independently of local filtering,
+and the other requests cost 20. One refresh costs at most 242; the one-minute
+default leaves capacity for public reads under the local 600-weight policy.
+Explicit refresh is not delayed by freshness housekeeping. Effective policies
+are rechecked before every provider request, including environment/disable
+changes; a malformed active policy produces a configuration failure, not silent
+activation with defaults. No product trade minimum is added to this read policy.
+
+### Verification and remaining P2 work
+
+The initial package passes 102 HIP tests, frontend 1,700 tests, typecheck/lint,
+full backend workspace tasks and exact Node 20 Turbopack build. PostgreSQL 16
+checks cover clean migrations, leases/late completion, replay and conflicts,
+failure versus explicit zero, tied timestamps, first/resumed/empty pages,
+retention protection and generic indexed plans on 20,000 execution rows.
+An additional disposable test uses the real admin middleware, session storage
+and linked-wallet lookup: the verified selected wallet succeeds; unauthenticated,
+foreign and unverified wallet requests are rejected before the data read.
+Recorded public funded snapshots also pass the new projection: both nonzero
+side-token holdings survive, while maintenance capacity and unheld cash remain
+different values and absent debt facts keep `ownedCash` unknown. This is recorded
+wire evidence, not new live funded-account acceptance.
+
+Live local reads of the linked admin account returned `role: missing`,
+`mode: default`, cash zero, no positions, and successfully observed empty fills/
+ledger. Those are real provider observations. A supplemental public-participant
+probe failed at `recentTrades` with a provider HTTP error, so no new nonzero live
+account acceptance is claimed. Deterministic browser checks now cover desktop
+balance/positions and the mobile execution journal at 390 by 844. They exposed
+and fixed a chart SVG-title hydration mismatch and an initially clipped selected
+execution tab. History timestamps use explicit UTC, independent of host locale.
+The local Next server's self-proxy failure recovered after binding it to
+`localhost`; the live account page now requires a renewed Privy session.
+Authenticated live desktop/mobile acceptance remains pending. Deterministic
+fresh/stale/empty/unavailable presenters and the private API contract are tested.
+
+Next P2 slices: indexed historical repair with gap/watermark accounting; proven
+transfer/split/merge/negate/settlement basis and dual economic aliases; global
+account-value and portfolio projections; complete current open-order reads;
+unlink/delete cache cleanup and linked-owner lifecycle acceptance;
+then funded-account live/visual acceptance. Do not declare P2 complete from this
+initial read slice or enable P3/P4 actions as a side effect. Local `hip4_account`
+was enabled only in `hip4_local`; production remains unchanged. No commit/push.
+
+### Bounded execution-history repair — October 13
+
+Account refresh now reads a bounded `userFillsByTime` page after the existing
+live-tail and ledger reads. `hip4_account.historyRepairPagesPerRefresh` defaults
+to one (zero pauses only repair; maximum four). Each page reserves the complete
+120-weight provider envelope before requesting it. The existing shared budget,
+account ownership, native-role check and venue lifecycle remain authoritative.
+Base account refresh costs at most 242 weight; the default repair adds up to 120.
+Insufficient budget defers repair without erasing a valid balance observation.
+
+The fixed range and inclusive next timestamp persist in the existing account
+snapshot's `history.fillRepair`, atomically with accepted executions under the
+refresh lease. Restart/retry does not move the range end or skip tied timestamps.
+All provider rows determine the page boundary, including non-HIP fills. Replays
+use the existing exact execution identity and cannot add phantom positions.
+Malformed HIP fills or unordered/out-of-range rows cannot advance the cursor.
+Once a range is exhausted, the next scan overlaps its end; changing the lookback
+starts a bounded rescan without deleting captured records. Damaged derived
+cursors also restart a bounded scan, with a reset counter rather than a permanent
+manual-repair requirement.
+
+A full 2,000-row page confined to one millisecond is not pageable by this API.
+That millisecond is recorded as `timestamp_saturated` before moving forward.
+`historyRepairMaxGapDetails` bounds stored detail (default 32, maximum 100);
+the cumulative count and truncation flag survive detail trimming. Transport,
+validation and admission failures preserve the retry boundary and last successful
+observation. These are provider-observation diagnostics, not cost-basis coverage.
+
+The [official fills-by-time contract](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint#retrieve-a-users-fills-by-time)
+exposes at most 2,000 fills per page and only the latest 10,000 fills overall.
+An exhausted or empty range therefore never establishes all-time completeness.
+The web execution list retains limited-history wording and distinguishes pending
+repair, failed updates and known gaps, without a new layout.
+
+PG16 tests cover the persisted overlapping boundary, mixed HIP/non-HIP pages,
+HTTP failure/recovery, duplicate replay, pause/resume, malformed fills,
+timestamp saturation, budget denial/recovery, per-refresh page bounds and native
+role rejection. Work currently runs with owned-account refresh, not an autonomous
+all-account backfill worker. Non-funding ledger pagination, durable idle-account
+scheduling, economic alias/basis accounting and Portfolio integration remain P2
+work; this change does not close P2.
+
+### Withdrawal fees and funding integration
+
+Two unsigned Relay quotes on October 13 at 08:45 UTC, Core spot/perps USDC to
+Base USDC with exact input 10, returned expected output `9.976977` and minimum
+output `9.777438`. The relayer fee was `0.023023` USDC; its gas/service breakdown
+was `0.001020` and `0.022002`, respectively. Their sum differs from the total by
+`0.000001` USDC (100 raw units at eight decimals). Quoted source gas and app
+fees were zero. The
+expected/minimum difference is the quote's output floor, not another fee.
+These are hypothetical quotes, not submissions or balance-funded execution.
+Their `sendAsset` route is distinct from the legacy `withdraw3` bridge, whose
+[API documentation](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#initiate-a-withdrawal-request)
+still lists a $1 withdrawal fee. Do not add that $1 to every Relay route.
+
+The existing Relay normalizer counts `gas`, `relayer` and `app`, and validates
+that `relayerGas + relayerService = relayer`; breakdown fields are not additional
+charges. The new quote's tiny discrepancy needs a specific normalization decision
+and tests before enabling Core, rather than an arbitrary fee buffer or a claim
+that the existing exact check accepts it. The normalizer currently accepts only
+the implemented EVM/Solana network mappings,
+not Core 1337. P3 must extend the native asset/action/receipt boundary rather than
+pretend the current normalizer already supports HIP funding.
+
+For shortfall, use verified executable destination cash plus the conservative
+net route output to cover the rounded order debit and applicable trading fee.
+Funding 3 USDC means crediting at least 3 after transfer costs, not submitting
+3 at the source and ignoring a smaller arrival. Reserve the exact source debit
+and separately charged costs once, within user consent and policy fee caps.
+Max/Reduce use net route capacity; the $1 BUY floor remains notional only and
+does not impose a $1 bridge minimum or authorize increasing the user's Buy.
+Account activation and forwarding costs are path-dependent quote/account facts,
+not a permanent haircut to each displayed cash balance.
+
+### October 13: common venue policy and native account surfaces
+
+The earlier canary bypass of `venue_lifecycle` is removed. `readHip4Policy`
+uses the existing shared venue schema/defaults/capabilities without importing
+API-wide environment configuration into the indexer. HIP operational settings
+remain subordinate: they control environment, freshness, budgets and bounded
+work, but cannot enable an operation denied by the common venue policy.
+
+- Public HIP read routes and their SSE authorization require `discovery`.
+- Owned balance and execution reads require `accountRead`, including in
+  `exit-only`. Wallet no longer fetches the discovery catalog to authorize an
+  account read.
+- The REST/WS indexer obeys `indexerMode`. `off` closes its live connection and
+  stops new work; `maintenance` repairs existing unresolved markets without
+  importing new catalog members; `full` retains catalog ingestion.
+- A bounded digest of operational and lifecycle context is the shared revision
+  for snapshots, history and SSE. Policy repair recovers on ordinary polling;
+  no manual cache purge or refresh-lease reset is required.
+- HIP financial and signal capabilities remain false even when lifecycle is
+  `active`: Buy/Sell/cancel/redeem and signals are not implemented yet.
+  Automation remains unsupported. Other venues' capability behavior is unchanged.
+
+Account polling uses the smaller of snapshot freshness and the existing policy
+check interval; it refreshes provider facts only when stale or explicitly
+requested. The frontend now uses native Events headers/charts/market rows and
+native Wallet presenters. The Core card exposes observed total/held/unheld
+amounts without adding them to ready-to-trade or funding totals. P2 basis,
+Portfolio aggregation, historical repair and open orders remain outstanding.
+
+Verification on October 13: fresh disposable PG16 migrations through 0285;
+the complete HIP database suite, including generic plans, ownership and recovery;
+102 HIP unit tests; 1,707 frontend tests; frontend typecheck/lint; exact Node 20
+Turbopack build (42 pages); full backend build (16/16). A length-contract test
+also covers history requests under `active/maintenance`. Auth integration needs
+an explicitly configured isolated Redis as well as its disposable PostgreSQL.
+
+Only the local `hip4_local` venue was switched to `active/full` to preserve
+the authorized read testing under the common policy. Its financial capabilities
+remain disabled. The live worker observed 327 catalog outcomes and an active
+shared stream after restart. Production policy and deployment were not changed.
+The renewed browser acceptance could not run because the browser tool refused
+navigation from its internal `data:` error page; HTTP availability and PG16
+route tests do not substitute for that visual/session check. P2 is not complete.
+
+### October 13: shared Portfolio read API
+
+The ordinary authenticated `GET /positions`, `/positions/by-token` and
+`/positions/pnl` paths now accept Hyperliquid in their read venue scope. The
+adapter reads the existing account snapshots and current linked, verified EVM
+wallet ownership; it does not create a second position ledger, require admin
+status, or synchronously request provider history. Shared `accountRead` policy
+still applies, including `exit-only`. Mutation/sync venue schemas are unchanged.
+
+- Exact quantities and per-side valuations are decimal strings. Numeric `size`
+  remains a compatibility/display field. No complementary-side bid or provider
+  `entryNtl` is promoted to verified valuation/basis.
+- Missing market metadata preserves the holding with nullable summary/value.
+  Stale snapshots retain the observed quantity but not a current valuation.
+  Official fractional/zero payouts are values of still-observed holdings, not
+  proof of settlement cash arrival or realized PnL.
+- Unknown basis and PnL remain `null`. Mixed-venue summary PnL is not presented
+  as complete when HIP accounting is missing. A fresh zero current balance does
+  not establish zero all-time realized PnL.
+- Response coverage distinguishes disabled, ready, partial and unavailable HIP
+  reads. A HIP policy/fact error does not erase other venues' positions. A
+  Solana-only scope does not depend on HIP policy. Responses are private/no-store.
+- The common read schema is separate from execution contracts. HIP records
+  explicitly disable Sell/redeem/hide and never acquire a fabricated Polymarket
+  asset context. Existing venue-list precedence and legacy frozen fields remain.
+
+Verification: `test:hip4` passes 119 tests; `test:hip4:portfolio:db` passes on
+disposable PostgreSQL 16 with real ordinary authentication, current ownership,
+lifecycle transitions, invalid-policy recovery responses and OpenAPI schemas.
+Owned/empty/market lookups and a generic owned lookup use indexes against 10,000
+irrelevant account and market fixtures (14/2/3/9 shared hit blocks in the final
+run). Fixture writes in the projection/plan suite roll back. Existing positions
+route/repository and metrics/refresh regressions pass; targeted lint and the full
+backend workspace build pass (16/16).
+
+This is backend integration, not Portfolio UI acceptance. Frontend generated
+contracts, nullable-summary handling, native Portfolio rows/actions and shared
+account-value integration must be completed before restarting the local API for
+full-app acceptance or releasing this patch. Owned-account refresh scheduling,
+non-funding ledger history, open orders and economic basis accounting remain
+unfinished P2 work. No production policy, commit, push or deployment was changed.
+
+### October 13: shared Portfolio frontend contract follow-through
+
+The frontend now generates the three position GET contracts from the same
+`positionReadRouteSchemas` registered by the real routes and offline OpenAPI.
+Venue selection remains optional in both runtime validation and generated
+OpenAPI; an added test covers that boundary. Existing mutation contracts are
+unchanged. There is no additional SQL or migration in this follow-through.
+
+Native desktop/mobile Portfolio rows consume owned HIP metadata, exact per-side
+values and observation deadlines. Unknown PnL remains null through the headline
+and cannot be published as a zero-valued share. HIP financial actions remain
+disabled. The default All scope includes HIP; dedicated position filtering,
+shared account value and ordinary-user refresh scheduling are not complete.
+
+Verification: 120 HIP/backend unit tests and the complete 16-package workspace
+build pass. Frontend passes 1,713 tests, typecheck, full ESLint, generated-contract
+check and exact Node 20 Turbopack build. Live/visual Portfolio acceptance remains
+pending because browser control rejected the current local tab. The API was not
+restarted, and no financial action, commit, push or deployment was performed.
+These checks do not close P2 or establish funded-account accounting correctness.
+
+### October 13: shared venue and discovery checkpoint
+
+Common venue capabilities now have a typed `/meta/venues` contract. Public HIP
+reads, owned-account reads, streams and ingestion use `venue_lifecycle`; the
+legacy canary route is retained for compatibility. Protocol/environment and
+resource limits remain HIP-specific, not a second product enablement switch.
+The frontend consumes this shared policy for its current Wallet and action
+integration. Buy, funding and other financial mutations remain unavailable.
+
+Discovery groundwork adds environment-scoped HIP reads and catalogue projection
+of existing book and 24-hour volume facts. It does not yet replace the separate
+homepage HIP section with the ordinary unified feed end to end. Existing venue
+ranking formulas, candidate bounds and indexes are preserved. A HIP-only query
+boundary avoids scanning other venues through the global ranking index under a
+generic plan; mixed and legacy paths keep their existing fast path.
+
+Disposable PG16 verification covers feed hydration, search, timeout regressions
+and 12 custom/generic first/next/empty-page plans. In the representative fixture,
+the HIP-only generic plan visits 1,200 HIP rows instead of all 23,309 market rows.
+This is bounded local regression evidence, not a production latency guarantee.
+Policy-scope tests cover concurrent-read coalescing, expiry and error recovery.
+
+This checkpoint remains incomplete P2 work: full unified homepage integration,
+remaining static frontend venue gates, shared account value, normal-user refresh
+scheduling, complete ledger/history, verified basis, open orders and renewed
+authenticated browser acceptance remain outstanding. Migrations 0284/0285 are
+additive and were tested on disposable PG16; no production migration or policy
+change is part of this checkpoint.

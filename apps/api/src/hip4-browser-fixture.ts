@@ -1,6 +1,7 @@
 // Local acceptance harness, never imported by the API or deployed worker.
 // Requires explicit disposable targets; no remote credentials/provider calls.
 import { randomUUID } from "node:crypto";
+import { installHip4TestLifecycle } from "./hip4-test-lifecycle.js";
 import { readFileSync } from "node:fs";
 import Fastify from "fastify";
 import {
@@ -61,6 +62,7 @@ for (const role of ["admin", "member"]) {
   sessions.set(role, token);
 }
 const policyId = randomUUID();
+const lifecycleFixture = await installHip4TestLifecycle(pool);
 await pool.query(
   "insert into runtime_policies(id,policy_key,effective_at,payload) values($1,'hip4_read',$2,$3)",
   [
@@ -178,6 +180,7 @@ const stop = async () => {
   if (stopping) return;
   stopping = true;
   await app.close();
+  await lifecycleFixture.close();
   await pool.query("delete from runtime_policies where id=$1", [policyId]);
   await pool.query("delete from users where id=any($1::uuid[])", [users]);
   await pool.end();

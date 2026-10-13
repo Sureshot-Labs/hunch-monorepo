@@ -11,22 +11,26 @@ export type HunchVenue = (typeof HUNCH_VENUES)[number];
 export type VenueLifecycleMode = "active" | "exit-only" | "unreleased";
 export type VenueIndexerMode = "full" | "maintenance" | "off";
 
-export type VenueLifecycleCapability =
-  | "accountRead"
-  | "automation"
-  | "cancel"
-  | "discovery"
-  | "increaseExposure"
-  | "reconciliation"
-  | "redeem"
-  | "reduceExposure"
-  | "signalDelivery"
-  | "signalSource";
-
-export type VenueLifecycleCapabilities = Record<
-  VenueLifecycleCapability,
-  boolean
+export const venueLifecycleCapabilitiesSchema = z.object({
+  accountRead: z.boolean(),
+  automation: z.boolean(),
+  cancel: z.boolean(),
+  discovery: z.boolean(),
+  fundMaintenance: z.boolean(),
+  fundTrading: z.boolean(),
+  increaseExposure: z.boolean(),
+  reconciliation: z.boolean(),
+  redeem: z.boolean(),
+  reduceExposure: z.boolean(),
+  signalDelivery: z.boolean(),
+  signalSource: z.boolean(),
+  walletAccess: z.boolean(),
+  walletWithdrawal: z.boolean(),
+});
+export type VenueLifecycleCapabilities = z.infer<
+  typeof venueLifecycleCapabilitiesSchema
 >;
+export type VenueLifecycleCapability = keyof VenueLifecycleCapabilities;
 
 export type VenueLifecyclePolicyEntry = {
   lifecycle: VenueLifecycleMode;
@@ -80,36 +84,48 @@ const CAPABILITIES_BY_LIFECYCLE: Record<
     automation: true,
     cancel: true,
     discovery: true,
+    fundMaintenance: true,
+    fundTrading: true,
     increaseExposure: true,
     reconciliation: true,
     redeem: true,
     reduceExposure: true,
     signalDelivery: true,
     signalSource: true,
+    walletAccess: true,
+    walletWithdrawal: true,
   },
   "exit-only": {
     accountRead: true,
     automation: false,
     cancel: true,
     discovery: false,
+    fundMaintenance: true,
+    fundTrading: false,
     increaseExposure: false,
     reconciliation: true,
     redeem: true,
     reduceExposure: true,
     signalDelivery: false,
     signalSource: false,
+    walletAccess: true,
+    walletWithdrawal: true,
   },
   unreleased: {
     accountRead: false,
     automation: false,
     cancel: false,
     discovery: false,
+    fundMaintenance: false,
+    fundTrading: false,
     increaseExposure: false,
     reconciliation: false,
     redeem: false,
     reduceExposure: false,
     signalDelivery: false,
     signalSource: false,
+    walletAccess: false,
+    walletWithdrawal: false,
   },
 };
 
@@ -137,10 +153,53 @@ export function getVenueLifecycleCapabilities(
   if (!normalized) return null;
   const capabilities =
     CAPABILITIES_BY_LIFECYCLE[policy.venues[normalized].lifecycle];
-  // HIP is user-interactive only, even after a future lifecycle activation.
+  // Lifecycle activation enables the implemented read surfaces. Financial and
+  // signal integrations are not implemented yet; an admin policy toggle cannot
+  // grant those capabilities ahead of their execution/accounting contracts.
+  // Automation remains unsupported even after future interactive trading.
   return normalized === "hyperliquid"
-    ? { ...capabilities, automation: false }
+    ? {
+        ...capabilities,
+        automation: false,
+        increaseExposure: false,
+        reduceExposure: false,
+        cancel: false,
+        redeem: false,
+        signalDelivery: false,
+        signalSource: false,
+        fundMaintenance: false,
+        fundTrading: false,
+        walletWithdrawal: false,
+      }
     : capabilities;
+}
+
+// Admin draft previews and public capability DTOs use the same implementation
+// ceiling as request authorization, not a second client-owned lifecycle table.
+export function getVenueLifecycleCapabilityMatrix() {
+  return Object.fromEntries(
+    HUNCH_VENUES.map((venue) => [
+      venue,
+      Object.fromEntries(
+        (["active", "exit-only", "unreleased"] as const).map((lifecycle) => [
+          lifecycle,
+          getVenueLifecycleCapabilities(
+            {
+              ...DEFAULT_VENUE_LIFECYCLE_POLICY,
+              venues: {
+                ...DEFAULT_VENUE_LIFECYCLE_POLICY.venues,
+                [venue]: { lifecycle, indexerMode: "off" },
+              },
+            },
+            venue,
+          )!,
+        ]),
+      ),
+    ]),
+  ) as Record<
+    HunchVenue,
+    Record<VenueLifecycleMode, VenueLifecycleCapabilities>
+  >;
 }
 
 export function venueHasLifecycleCapability(

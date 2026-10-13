@@ -1,4 +1,13 @@
 // Only derived public data: finance/history protection stays on unified parents.
+export function hip4AccountProtectedRefsSql(candidateTable: string) {
+  return `select distinct candidate_row.market_id,'hip4_account_executions' as reason
+    from ${candidateTable} candidate_row join hip4_account_executions execution_row
+      on execution_row.canonical_market_id=candidate_row.market_id
+    union
+    select distinct candidate_row.market_id,'hip4_account_positions' as reason
+    from ${candidateTable} candidate_row join hip4_account_positions position_row
+      on position_row.canonical_market_id=candidate_row.market_id`;
+}
 export function hip4DerivedReferencesSql(
   candidateTable: "candidate_pool",
   history = true,

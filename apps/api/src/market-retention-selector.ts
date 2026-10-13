@@ -8,6 +8,7 @@ import { pool } from "./db.js";
 import {
   hip4DerivedReferencesSql,
   hip4DerivedDeleteSql,
+  hip4AccountProtectedRefsSql,
 } from "./services/hip4-retention.js";
 import {
   hasCliFlag as hasFlag,
@@ -173,6 +174,7 @@ export function protectedRefsSql(
     includeTelegramFundingSessions?: boolean;
     includeTelegramTradeIntents?: boolean;
     includePolymarketAssetBindings?: boolean;
+    includeHip4Accounts?: boolean;
   } = {},
 ): string {
   // Likes deliberately do not protect markets: they are removable derived edges.
@@ -255,6 +257,9 @@ export function protectedRefsSql(
       or (buy_return.event_id is not null and buy_return.event_id = c.event_id)
   `
     : "";
+  const hip4AccountReferences = options.includeHip4Accounts
+    ? `union ${hip4AccountProtectedRefsSql(candidatePoolTable)}`
+    : "";
   return `
     select distinct ct.market_id, 'orders' as reason
     from ${candidateRefTokensTable} ct
@@ -271,6 +276,7 @@ export function protectedRefsSql(
     select distinct c.market_id, 'executions' as reason
     from ${candidatePoolTable} c
     join executions ex on ex.unified_market_id = c.market_id
+    ${hip4AccountReferences}
     union
     select distinct c.market_id, 'user_theses_market' as reason
     from ${candidatePoolTable} c join user_theses social_thesis on social_thesis.market_id=c.market_id
@@ -481,6 +487,7 @@ function candidateCte(
     includeTelegramFundingSessions?: boolean;
     includeTelegramTradeIntents?: boolean;
     includePolymarketAssetBindings?: boolean;
+    includeHip4Accounts?: boolean;
   } = {},
 ): string {
   return `
@@ -723,6 +730,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
   includeTelegramFundingBuyReturns: boolean;
   includeTelegramTradeIntents: boolean;
   includePolymarketAssetBindings: boolean;
+  includeHip4Accounts: boolean;
 }> {
   const [
     includeMatchingHistory,
@@ -734,6 +742,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     includeTelegramFundingBuyReturns,
     includeTelegramTradeIntents,
     includePolymarketAssetBindings,
+    includeHip4Accounts,
   ] = await Promise.all([
     relationExists(client, "public.market_contract_versions"),
     relationExists(client, "public.funding_operations"),
@@ -744,6 +753,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     relationExists(client, "public.telegram_funding_buy_return_revisions"),
     relationExists(client, "public.telegram_trade_intents"),
     relationExists(client, "public.polymarket_asset_bindings"),
+    relationExists(client, "public.hip4_account_executions"),
   ]);
   return {
     includeMatchingHistory,
@@ -755,6 +765,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     includeTelegramFundingBuyReturns,
     includeTelegramTradeIntents,
     includePolymarketAssetBindings,
+    includeHip4Accounts,
   };
 }
 

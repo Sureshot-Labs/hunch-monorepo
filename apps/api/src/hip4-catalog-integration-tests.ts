@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { DEFAULT_HIP4_READ_POLICY, hip4Identity } from "@hunch/shared";
 import { createIntegrationTestPool } from "./test-database-target.js";
+import { installHip4TestLifecycle } from "./hip4-test-lifecycle.js";
 import { runHip4ReadCycle } from "./services/hip4-indexer.js";
 import {
   readHip4Markets,
@@ -41,6 +42,7 @@ const metadata = {
   })),
 };
 let requests = 0;
+const lifecycleFixture = await installHip4TestLifecycle(pool);
 try {
   assert.equal(
     Math.floor(
@@ -181,6 +183,7 @@ try {
     "HIP4 catalog PG16: full discovery, bounded provider work, paging, batch continuation, hot demand, environment and SSE access passed",
   );
 } finally {
+  await lifecycleFixture.close();
   await pool.query("delete from runtime_policies where id=$1", [policyId]);
   await pool.query("delete from unified_markets where id=any($1::text[])", [
     ids.map((id) => hip4Identity("mainnet", id).marketId),

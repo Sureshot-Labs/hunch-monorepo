@@ -113,7 +113,7 @@ export async function flushHip4Live(
   publish: (market: Hip4ReadMarket) => Promise<void>,
   now = Date.now(),
 ) {
-  const current = await readHip4Policy(pool);
+  const current = await readHip4Policy(pool, "indexer");
   if (!current.policy.enabled || current.revision !== revision) return;
   for (const outcome of batch.outcomes) {
     const stored = await readHip4StoredMarket(
@@ -174,7 +174,7 @@ export async function flushHip4Live(
         ).toISOString(),
       };
     if (entries.length || intervals.length) {
-      const latest = await readHip4Policy(pool);
+      const latest = await readHip4Policy(pool, "indexer");
       if (!latest.policy.enabled || latest.revision !== revision) return;
       await persistHip4Market(pool, {
         market: ageHip4Market(market, now, policy),

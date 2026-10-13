@@ -459,6 +459,191 @@ try {
       `ok - shared probability sources equal strict/grace oracle: ${JSON.stringify(variant)}`,
     );
   }
+
+  // The public mixed feed uses the SAME indexed rank path, not a full-table
+  // UNION/hydration of HIP rows. Give HIP honest unknown lifetime volume and
+  // coexistence of both networks; a current 24h volume is not lifetime volume.
+  const venueIndexMigration = await readFile(
+    new URL(
+      "../../../packages/db/migrations/0036_add_feed_active_venue_indexes.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  await client.query(venueIndexMigration);
+  await client.query(`
+    insert into unified_events(id,venue,status,start_date,end_date,category)
+    values ('hyperliquid:mainnet:question:1','hyperliquid','ACTIVE','2026-09-11','2026-09-13','test'),
+      ('hyperliquid:testnet:question:1','hyperliquid','ACTIVE','2026-09-11','2026-09-13','test');
+    insert into unified_markets(id,event_id,venue,venue_market_id,status,duration_minutes,
+      volume_total,volume_24h,liquidity,open_interest,best_bid,best_ask,close_time,expiration_time,metadata)
+    select 'hyperliquid:' || network || ':outcome:' || lpad(sample_row::text,4,'0'),
+      'hyperliquid:' || network || ':question:1','hyperliquid',
+      'hyperliquid:' || network || ':outcome:' || lpad(sample_row::text,4,'0'),
+      'ACTIVE',60,null,123,null,null,0.4,0.6,'2026-09-14','2026-09-14','{}'
+    from unnest(array['mainnet','testnet']) as fixture_network(network)
+    cross join generate_series(1,600) as fixture_samples(sample_row);
+  `);
+  await client.query("vacuum analyze unified_markets");
+  await client.query("analyze unified_events");
+
+  type PlanNode = { [key: string]: unknown; Plans?: PlanNode[] };
+  const nodes = (plan: PlanNode): PlanNode[] => [
+    plan,
+    ...(plan.Plans ?? []).flatMap(nodes),
+  ];
+  const oldVenues = ["polymarket", "limitless", "kalshi"];
+  for (const variant of [
+    { name: "legacy", venues: oldVenues, hip4Environment: null, offset: 0 },
+    {
+      name: "mixed-first",
+      venues: [...oldVenues, "hyperliquid"],
+      hip4Environment: "mainnet",
+      offset: 0,
+    },
+    {
+      name: "mixed-next",
+      venues: [...oldVenues, "hyperliquid"],
+      hip4Environment: "mainnet",
+      offset: 10,
+    },
+    {
+      name: "hip-mainnet",
+      venues: ["hyperliquid"],
+      hip4Environment: "mainnet",
+      offset: 0,
+    },
+    {
+      name: "hip-testnet-next",
+      venues: ["hyperliquid"],
+      hip4Environment: "testnet",
+      offset: 10,
+    },
+    {
+      name: "hip-empty-tail",
+      venues: ["hyperliquid"],
+      hip4Environment: "mainnet",
+      offset: 700,
+    },
+  ] as const) {
+    const input: FeedInputs = {
+      ...base,
+      venues: [...variant.venues],
+      hip4Environment: variant.hip4Environment,
+      endWithin: undefined,
+      offset: variant.offset,
+    };
+    captured.length = 0;
+    const page = await fetchFeedMarketIdsForProbabilityProbe(pool, input);
+    if (variant.venues.length === 1) {
+      const expectedIds = Array.from(
+        { length: 600 },
+        (_, i) =>
+          `hyperliquid:${variant.hip4Environment}:outcome:${String(i + 1).padStart(4, "0")}`,
+      ).slice(input.offset, input.offset + input.limit);
+      assert.deepEqual(page.marketIds, expectedIds, variant.name);
+    } else {
+      assert.ok(
+        page.marketIds.every((id) => !id.startsWith("hyperliquid:")),
+        "unknown lifetime volume cannot artificially outrank known high-volume markets",
+      );
+    }
+    const first = captured[0];
+    assert.ok(first.sql.includes("live_trending_prefix as materialized"));
+    if (variant.hip4Environment) {
+      assert.match(
+        first.sql,
+        /live_trending_prefix as materialized[\s\S]*?m\.id like \$\d+::text[\s\S]*?limit \$\d+/i,
+        "network scope is applied before LIMIT, never after pagination",
+      );
+    }
+    // Run the actual generated query with both custom and generic plans. Only
+    // synthetic values are converted to SQL literals, by PostgreSQL itself.
+    const literals: string[] = [];
+    for (const value of first.params)
+      literals.push(
+        (
+          await client.query(
+            "select quote_nullable($1::text) as parameter_literal",
+            [value],
+          )
+        ).rows[0].parameter_literal,
+      );
+    await client.query(`prepare fixture_hip4_feed_plan as ${first.sql}`);
+    try {
+      for (const planMode of [
+        "force_custom_plan",
+        "force_generic_plan",
+      ] as const) {
+        await client.query(`set plan_cache_mode=${planMode}`);
+        const explained =
+          await client.query(`explain (analyze,buffers,format json)
+          execute fixture_hip4_feed_plan(${literals.join(",")})`);
+        const result = explained.rows[0]["QUERY PLAN"][0];
+        const planNodes = nodes(result.Plan);
+        const prefix = planNodes.find(
+          (node) => node["Subplan Name"] === "CTE live_trending_prefix",
+        );
+        assert.ok(prefix, variant.name);
+        assert.equal(prefix["Node Type"], "Limit");
+        const prefixNodes = nodes(prefix);
+        assert.ok(
+          prefixNodes.some(
+            (node) =>
+              node["Index Name"] ===
+                "idx_unified_markets_live_trending_prefix" ||
+              node["Index Name"] ===
+                "idx_unified_markets_active_venue_exp_close" ||
+              node["Index Name"] === "idx_unified_markets_active_coverage",
+          ),
+          `${variant.name}/${planMode}: keep the production score/venue indexes without hints: ${JSON.stringify(prefix)}`,
+        );
+        assert.ok(
+          !prefixNodes.some(
+            (node) =>
+              node["Node Type"] === "Seq Scan" &&
+              node["Relation Name"] === "unified_markets",
+          ),
+          "the bounded prefix must not scan/sort the entire market relation",
+        );
+        const marketRowsVisited = prefixNodes
+          .filter((node) => node["Relation Name"] === "unified_markets")
+          .reduce(
+            (sum, node) =>
+              sum +
+              (Number(node["Actual Rows"] ?? 0) +
+                Number(node["Rows Removed by Filter"] ?? 0)) *
+                Number(node["Actual Loops"] ?? 0),
+            0,
+          );
+        if (variant.venues.length === 1)
+          assert.ok(
+            marketRowsVisited <= 1200,
+            `${variant.name}/${planMode}: must not scan other venues (${marketRowsVisited} rows)`,
+          );
+        else
+          assert.equal(
+            marketRowsVisited,
+            1000,
+            "mixed/legacy top pages keep the original bounded prefix",
+          );
+        console.log(
+          `ok - feed plan ${variant.name}/${planMode}: ${JSON.stringify({
+            ms: result["Execution Time"],
+            prefixRows: prefix["Actual Rows"],
+            indexes: prefixNodes
+              .map((node) => node["Index Name"])
+              .filter(Boolean),
+            prefixMarketRowsVisited: marketRowsVisited,
+            sharedHits: result.Plan["Shared Hit Blocks"],
+          })}`,
+        );
+      }
+    } finally {
+      await client.query("reset plan_cache_mode");
+      await client.query("deallocate fixture_hip4_feed_plan");
+    }
+  }
 } finally {
   await client.query("rollback");
   if (schemaCreated) await client.query(`drop schema ${schema} cascade`);

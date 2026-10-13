@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { env } from "../env.js";
-import { zVenue } from "./common.js";
+import { zReadVenue } from "./common.js";
 
 const zVenueQuery = z
   .preprocess((v) => {
@@ -23,12 +23,12 @@ const zVenueQuery = z
 
     const parts = toParts(v);
     return parts.length ? parts : undefined;
-  }, z.array(zVenue).optional())
+  }, z.array(zReadVenue).optional())
   .transform((venues) => {
     if (!venues?.length) return undefined;
     const unique = Array.from(new Set(venues)).sort();
     // Treat selecting all venues the same as omitting the filter.
-    return unique.length === zVenue.options.length ? undefined : unique;
+    return unique.length === zReadVenue.options.length ? undefined : unique;
   });
 
 const zCategoriesQuery = z

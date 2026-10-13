@@ -65,7 +65,7 @@ try {
     let pollMs = DEFAULT_HIP4_READ_POLICY.pollMs;
     let minRefreshMs = DEFAULT_HIP4_READ_POLICY.minRefreshMs;
     try {
-      const { policy } = await readHip4Policy(pool);
+      const { policy } = await readHip4Policy(pool, "indexer");
       pollMs = policy.pollMs;
       minRefreshMs = policy.minRefreshMs;
       console.log(

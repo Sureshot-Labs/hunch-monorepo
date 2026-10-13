@@ -1,4 +1,5 @@
 import { fetchActiveRuntimePolicy } from "@hunch/db";
+import { createHash } from "node:crypto";
 import {
   hip4ReadMarketSchema,
   hip4Identity,
@@ -6,6 +7,9 @@ import {
   hip4ReadPolicySchema,
   hip4TradeSchema,
   hip4RawSnapshotSchema,
+  DEFAULT_VENUE_LIFECYCLE_POLICY,
+  venueLifecyclePolicySchema,
+  venueHasLifecycleCapability,
   type Hip4Environment,
   type Hip4ReadMarket,
   type Hip4Attempt,
@@ -14,18 +18,57 @@ import {
 import type { Pool } from "pg";
 import type { z } from "zod";
 import { mergeHip4Volume } from "./hip4-volume.js";
+import { hip4CatalogProjection } from "./hip4-catalog-projection.js";
 import {
   insertHip4Trades,
   insertHip4Intervals,
   type Hip4Interval,
 } from "./hip4-history.js";
 
-export async function readHip4Policy(db: Pick<Pool, "query">) {
-  const row = await fetchActiveRuntimePolicy(db, "hip4_read");
+export async function readHip4Policy(
+  db: Pick<Pool, "query">,
+  scope: "discovery" | "accountRead" | "indexer" = "discovery",
+) {
+  const [row, lifecycleRow] = await Promise.all([
+    fetchActiveRuntimePolicy(db, "hip4_read"),
+    fetchActiveRuntimePolicy(db, "venue_lifecycle"),
+  ]);
   // Unlike an absent override, broken policy/configuration is not permission
   // to poll a provider. No API env import, including through dependencies.
-  const policy = hip4ReadPolicySchema.parse(row ? row.payload : {});
-  return { policy, revision: row ? `db-${row.id}` : "defaults-v1" };
+  const configured = hip4ReadPolicySchema.parse(row ? row.payload : {});
+  const lifecyclePolicy = venueLifecyclePolicySchema.parse(
+    lifecycleRow?.payload ?? DEFAULT_VENUE_LIFECYCLE_POLICY,
+  );
+  const lifecycle = lifecyclePolicy.venues.hyperliquid;
+  const allowed =
+    scope === "indexer"
+      ? lifecycle.indexerMode !== "off"
+      : venueHasLifecycleCapability(lifecyclePolicy, "hyperliquid", scope);
+  // Compatibility: accept old canary fields but no longer use them as product
+  // switches. Venue lifecycle owns access; HIP policy owns protocol/resource
+  // settings. A stale test allowlist must not truncate an activated catalog.
+  const policy: Hip4ReadPolicy = {
+    ...configured,
+    enabled: allowed,
+    catalogMode: "all" as const,
+    outcomeAllowlist: [],
+  };
+  const revision = `hip4-v3-${createHash("sha256")
+    .update(
+      JSON.stringify([
+        row?.id ?? null,
+        policy,
+        lifecycleRow?.id ?? null,
+        lifecycle,
+      ]),
+    )
+    .digest("hex")}`;
+  return {
+    policy,
+    revision,
+    lifecycle,
+    disabledReason: !allowed ? "venue_lifecycle" : null,
+  };
 }
 
 export async function admitHip4Request(
@@ -386,7 +429,8 @@ export async function persistHip4Market(
           ? "CLOSED"
           : "ACTIVE";
     // Publish event, both tokens, source snapshot and membership in one commit.
-    // Shared discovery still excludes HIP; this projection is not activation.
+    // Discovery activation remains owned by venue_lifecycle, not publication.
+    const catalog = hip4CatalogProjection(market);
     await client.query(
       `
       insert into unified_events(id,venue,venue_event_id,title,description,status,metadata)
@@ -411,11 +455,12 @@ export async function persistHip4Market(
     await client.query(
       `
       insert into unified_markets(id,venue,venue_market_id,event_id,title,description,status,market_type,
-        expiration_time,token_yes,token_no,outcomes,metadata,resolved_outcome)
-      values ($1,'hyperliquid',$1,$2,$3,$4,$5,'binary',$6,$7,$8,$9,$10::jsonb,$11)
+        expiration_time,token_yes,token_no,outcomes,metadata,resolved_outcome,volume_24h,best_bid,best_ask)
+      values ($1,'hyperliquid',$1,$2,$3,$4,$5,'binary',$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14)
       on conflict (id) do update set event_id=excluded.event_id,title=excluded.title,description=excluded.description,
         status=excluded.status,expiration_time=excluded.expiration_time,outcomes=excluded.outcomes,
-        metadata=excluded.metadata,resolved_outcome=excluded.resolved_outcome
+        metadata=excluded.metadata,resolved_outcome=excluded.resolved_outcome,
+        volume_24h=excluded.volume_24h,best_bid=excluded.best_bid,best_ask=excluded.best_ask
     `,
       [
         market.marketId,
@@ -435,6 +480,9 @@ export async function persistHip4Market(
               ? "NO"
               : null
           : null,
+        catalog.volume24h,
+        catalog.bestBid,
+        catalog.bestAsk,
       ],
     );
     for (const side of market.sides) {

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { getVenueLifecycleCapabilityMatrix } from "@hunch/shared";
 import { embeddingIndex, readActiveGeneration } from "@hunch/embeddings";
 import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
@@ -6163,6 +6164,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
           effective: item.effective,
           invalidOverride: item.invalidOverride,
           revision: resolvedAdminIntelPolicyRevision(item),
+          ...(key === "venue_lifecycle"
+            ? { capabilityMatrix: getVenueLifecycleCapabilityMatrix() }
+            : {}),
         };
       });
       reply.header("Content-Type", "application/json; charset=utf-8");
@@ -6196,6 +6200,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
         effective: item.effective,
         invalidOverride: item.invalidOverride,
         revision: resolvedAdminIntelPolicyRevision(item),
+        ...(key === "venue_lifecycle"
+          ? { capabilityMatrix: getVenueLifecycleCapabilityMatrix() }
+          : {}),
       });
     },
   );
@@ -6277,6 +6284,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
             effective: resolved.effective,
             invalidOverride: resolved.invalidOverride,
             revision: resolvedAdminIntelPolicyRevision(resolved),
+            ...(key === "venue_lifecycle"
+              ? { capabilityMatrix: getVenueLifecycleCapabilityMatrix() }
+              : {}),
           },
         });
       } catch (error) {

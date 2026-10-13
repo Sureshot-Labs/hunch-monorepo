@@ -22,6 +22,7 @@ import {
 } from "../services/hip4-history.js";
 
 export type Hip4ReadDependencies = {
+  surface?: "public" | "canary";
   maxStreamTokens?: number;
   authorize: preHandlerHookHandler;
   policy: () => Promise<{ policy: Hip4ReadPolicy; revision: string }>;
@@ -48,14 +49,20 @@ export function registerHip4ReadRoutes(
   app: FastifyInstance,
   dependencies: Hip4ReadDependencies,
 ) {
+  const isCanary = dependencies.surface !== "public";
+  const prefix = isCanary
+    ? "/markets/hyperliquid/canary"
+    : "/markets/hyperliquid";
+  const preHandler = isCanary ? dependencies.authorize : undefined;
   app.withTypeProvider<ZodTypeProvider>().get(
-    "/markets/hyperliquid/canary",
+    prefix,
     {
-      preHandler: dependencies.authorize,
+      preHandler,
       schema: {
         tags: ["Markets"],
-        description:
-          "Internal passive HIP-4 canary. Requires administrator read permission; never grants trade, funding or automation capability.",
+        description: isCanary
+          ? "Legacy administrator canary alias. Never grants financial capabilities."
+          : "Public Hyperliquid market data governed by venue_lifecycle. Provider observations include freshness and coverage; no financial actions.",
         querystring: z.object({
           eventId: z
             .string()
@@ -134,9 +141,9 @@ export function registerHip4ReadRoutes(
 
   for (const kind of ["detail", "trades", "candles"] as const) {
     app.withTypeProvider<ZodTypeProvider>().get(
-      `/markets/hyperliquid/canary/:marketId${kind === "detail" ? "" : `/${kind}`}`,
+      `${prefix}/:marketId${kind === "detail" ? "" : `/${kind}`}`,
       {
-        preHandler: dependencies.authorize,
+        preHandler,
         schema: {
           tags: ["Markets"],
           params: z.object({
@@ -275,14 +282,16 @@ export const hip4ReadRoutes: FastifyPluginAsync = async (app) => {
       import("../services/hip4-history.js"),
       import("../env.js"),
     ]);
-  registerHip4ReadRoutes(app, {
-    maxStreamTokens: env.pricesSseMaxTokens,
-    authorize: createAdminMiddleware({
-      requiredAdminPermission: "analytics:read",
-    }),
-    policy: () => repository.readHip4Policy(pool),
-    markets: (...args) => repository.readHip4Markets(pool, ...args),
-    trades: (...args) => history.readHip4Trades(pool, ...args),
-    candles: (...args) => history.readHip4Candles(pool, ...args),
-  });
+  for (const surface of ["public", "canary"] as const)
+    registerHip4ReadRoutes(app, {
+      surface,
+      maxStreamTokens: env.pricesSseMaxTokens,
+      authorize: createAdminMiddleware({
+        requiredAdminPermission: "analytics:read",
+      }),
+      policy: () => repository.readHip4Policy(pool),
+      markets: (...args) => repository.readHip4Markets(pool, ...args),
+      trades: (...args) => history.readHip4Trades(pool, ...args),
+      candles: (...args) => history.readHip4Candles(pool, ...args),
+    });
 };

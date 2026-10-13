@@ -184,6 +184,8 @@ export type Hip4Attempt = z.infer<typeof hip4AttemptSchema>;
 export const hip4ReadPolicySchema = z
   .object({
     version: z.literal(1).default(1),
+    // Legacy canary controls, retained to parse stored revisions/fixtures.
+    // readHip4Policy derives enabled/catalog access from venue_lifecycle.
     enabled: z.boolean().default(false),
     environment: hip4EnvironmentSchema.default("mainnet"),
     outcomeAllowlist: z.array(indexSchema).max(100).default([]),

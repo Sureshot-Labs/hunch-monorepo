@@ -48,7 +48,7 @@ import {
   fetchObservedCanonicalProbabilityMarketIds,
   type FeedMarketRow,
 } from "../repos/unified-read.js";
-import { filterVenuesForLifecycleCapability } from "../services/venue-lifecycle.js";
+import { resolveDiscoveryVenueScope } from "../services/discovery-venue-scope.js";
 import { selectDiscoveryIds } from "../services/discovery-selection.js";
 import {
   fetchUserMarketInteractions,
@@ -431,11 +431,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           : q.event_scope === "single"
             ? "single"
             : undefined;
-      const lifecycle = await filterVenuesForLifecycleCapability(
-        pool,
-        q.venue,
-        "discovery",
-      );
+      const lifecycle = await resolveDiscoveryVenueScope(pool, q.venue);
       const { venues } = lifecycle;
       const category = q.category;
       const categories = q.categories;
@@ -547,6 +543,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         view,
         eventScope,
         venues,
+        hip4Environment: lifecycle.hip4Environment,
         category,
         categories,
         filter,
@@ -917,10 +914,9 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           : q.event_scope === "single"
             ? "single"
             : undefined;
-      const { venues } = await filterVenuesForLifecycleCapability(
+      const { venues, hip4Environment } = await resolveDiscoveryVenueScope(
         pool,
         q.venue,
-        "discovery",
       );
       const category = q.category;
       const categories = q.categories;
@@ -991,6 +987,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         view,
         eventScope,
         venues,
+        hip4Environment,
         category,
         categories,
         filter,
@@ -1191,10 +1188,9 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const nowMs = Date.now();
       const minVol = resolveMinTotalVolumeFilter(query);
       const minLiquidity = query.min_liquidity;
-      const { venues } = await filterVenuesForLifecycleCapability(
+      const { venues, hip4Environment } = await resolveDiscoveryVenueScope(
         pool,
         query.venue,
-        "discovery",
       );
       if (venues.length === 0) {
         return reply.send({
@@ -1458,6 +1454,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           fallbackThreshold: searchWindow.fallbackThreshold,
           earlyFilterInputs: {
             venues,
+            hip4Environment,
             categories,
             endWithin,
             ageSince,
@@ -1533,6 +1530,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         view: "events" as const,
         eventScope: "grouped" as const,
         venues,
+        hip4Environment,
         category: undefined,
         categories,
         filter: undefined,

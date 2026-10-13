@@ -7,6 +7,11 @@ import {
   type Hip4ReadPolicy,
 } from "@hunch/shared";
 import { z } from "zod";
+import {
+  DEFAULT_HIP4_ACCOUNT_POLICY,
+  hip4AccountPolicySchema,
+  type Hip4AccountPolicy,
+} from "./hip4-account-policy.js";
 import { DEFAULT_SEMANTIC_REVIEW_MAX_PAIRS } from "./market-map-semantic-review.js";
 import {
   DEFAULT_EMBEDDING_POLICY,
@@ -96,6 +101,7 @@ export const INTEL_POLICY_KEYS = [
   "signal_post_copy",
   "social",
   "hip4_read",
+  "hip4_account",
   "telegram_notifications",
   "venue_lifecycle",
   "market_matching",
@@ -107,6 +113,7 @@ type PolicySource<K extends IntelPolicyKey> = K extends
   | "signal_post_copy"
   | "social"
   | "hip4_read"
+  | "hip4_account"
   | "telegram_notifications"
   | "venue_lifecycle"
   | "market_matching"
@@ -693,6 +700,7 @@ type IntelPolicyMap = {
   signal_post_copy: SignalPostCopyPolicyV1;
   social: SocialPolicy;
   hip4_read: Hip4ReadPolicy;
+  hip4_account: Hip4AccountPolicy;
   telegram_notifications: TelegramNotificationsPolicyV1;
   venue_lifecycle: VenueLifecyclePolicy;
   market_matching: MarketMatchingPolicy;
@@ -1468,6 +1476,7 @@ const policySchemas = {
   telegram_notifications: telegramNotificationsPolicySchema,
   venue_lifecycle: venueLifecyclePolicySchema,
   hip4_read: hip4ReadPolicySchema,
+  hip4_account: hip4AccountPolicySchema,
   market_matching: marketMatchingPolicySchema,
 } as const;
 
@@ -2093,6 +2102,7 @@ function getDefaults(): IntelPolicyMap {
     telegram_notifications: DEFAULT_TELEGRAM_NOTIFICATIONS_POLICY,
     venue_lifecycle: DEFAULT_VENUE_LIFECYCLE_POLICY,
     hip4_read: DEFAULT_HIP4_READ_POLICY,
+    hip4_account: DEFAULT_HIP4_ACCOUNT_POLICY,
     market_matching: DEFAULT_MARKET_MATCHING_POLICY,
   };
 }
@@ -3391,6 +3401,8 @@ function normalizeMerged<K extends IntelPolicyKey>(
       return venueLifecyclePolicySchema.parse(merged) as IntelPolicyMap[K];
     case "hip4_read":
       return hip4ReadPolicySchema.parse(merged) as IntelPolicyMap[K];
+    case "hip4_account":
+      return hip4AccountPolicySchema.parse(merged) as IntelPolicyMap[K];
     default:
       return merged;
   }
@@ -3508,7 +3520,8 @@ function resolveFromRow<K extends IntelPolicyKey>(
       key === "telegram_notifications" ||
       key === "signal_post_copy" ||
       key === "social" ||
-      key === "hip4_read"
+      key === "hip4_read" ||
+      key === "hip4_account"
         ? "default"
         : "env") as PolicySource<K>,
       effectiveAt: null,
@@ -3543,7 +3556,8 @@ function resolveFromRow<K extends IntelPolicyKey>(
       key === "telegram_notifications" ||
       key === "signal_post_copy" ||
       key === "social" ||
-      key === "hip4_read"
+      key === "hip4_read" ||
+      key === "hip4_account"
         ? "default"
         : "env") as PolicySource<K>,
       effectiveAt,
@@ -3648,6 +3662,10 @@ export async function resolveAllIntelPolicies(
     ),
     social: resolveFromRow("social", byKey.get("social") ?? null),
     hip4_read: resolveFromRow("hip4_read", byKey.get("hip4_read") ?? null),
+    hip4_account: resolveFromRow(
+      "hip4_account",
+      byKey.get("hip4_account") ?? null,
+    ),
     telegram_notifications: resolveFromRow(
       "telegram_notifications",
       byKey.get("telegram_notifications") ?? null,
@@ -3715,7 +3733,7 @@ export async function resolveSignalBotPolicy(pool: DbQuery) {
   return resolveIntelPolicy(pool, "signal_bot");
 }
 
-const VENUE_LIFECYCLE_CACHE_TTL_MS = 15_000;
+export const VENUE_LIFECYCLE_CACHE_TTL_MS = 15_000;
 let venueLifecyclePolicyCache = new WeakMap<
   object,
   {

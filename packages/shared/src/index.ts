@@ -42,6 +42,7 @@ export {
   filterVenuesByIndexerMode,
   filterVenuesByLifecycleCapability,
   getVenueLifecycleCapabilities,
+  getVenueLifecycleCapabilityMatrix,
   getVenuesWithLifecycleCapability,
   HUNCH_VENUES,
   normalizeHunchVenue,
@@ -49,6 +50,7 @@ export {
   venueHasIndexerMode,
   venueHasLifecycleCapability,
   venueLifecyclePolicySchema,
+  venueLifecycleCapabilitiesSchema,
 } from "./venue-lifecycle.js";
 export type {
   HunchVenue,

@@ -6,32 +6,20 @@ const zVenueOptional = z.preprocess(
   zVenue.optional(),
 );
 
-const zVenueListOptional = z
-  .preprocess((v) => {
-    const toParts = (value: unknown): string[] => {
-      if (Array.isArray(value)) {
-        return value
-          .filter((part): part is string => typeof part === "string")
-          .flatMap((part) => part.split(","))
-          .map((part) => part.trim().toLowerCase())
-          .filter(Boolean);
-      }
-      if (typeof value === "string") {
-        return value
-          .split(",")
-          .map((part) => part.trim().toLowerCase())
-          .filter(Boolean);
-      }
-      return [];
-    };
-
-    const parts = toParts(v);
-    return parts.length ? parts : undefined;
-  }, z.array(zVenue).optional())
-  .transform((venues) => {
-    if (!venues?.length) return undefined;
-    return Array.from(new Set(venues)).sort();
-  });
+const normalizeVenueList = (value: unknown) => {
+  const parts = (
+    Array.isArray(value) ? value : typeof value === "string" ? [value] : []
+  )
+    .filter((part): part is string => typeof part === "string")
+    .flatMap((part) => part.split(","))
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+  return parts.length ? [...new Set(parts)].sort() : undefined;
+};
+const zVenueListOptional = z.preprocess(
+  normalizeVenueList,
+  z.array(zVenue).optional(),
+);
 
 const zOptionalNumber = z
   .union([z.number(), z.string()])
@@ -110,6 +98,30 @@ export const positionsPnlSummaryQuerySchema = positionsQuerySchema.pick({
   venues: true,
   wallets: true,
 });
+
+// Read support must not implicitly enable order managers, visibility mutations
+// or legacy sync paths for a venue whose execution is not implemented.
+export const positionReadVenueSchema = z.enum([
+  ...zVenue.options,
+  "hyperliquid",
+]);
+const readVenueFields = {
+  venue: z
+    .preprocess(
+      (value) => (typeof value === "string" ? value.toLowerCase() : value),
+      positionReadVenueSchema.optional(),
+    )
+    .optional(),
+  venues: z
+    .preprocess(normalizeVenueList, z.array(positionReadVenueSchema).optional())
+    .optional(),
+};
+export const positionsReadQuerySchema =
+  positionsQuerySchema.extend(readVenueFields);
+export const positionsByTokenReadQuerySchema =
+  positionsByTokenQuerySchema.extend(readVenueFields);
+export const positionsPnlReadQuerySchema =
+  positionsPnlSummaryQuerySchema.extend(readVenueFields);
 
 export const positionVisibilitySchema = z.object({
   venue: zVenue,
