@@ -49,6 +49,10 @@ import {
   type FeedMarketRow,
 } from "../repos/unified-read.js";
 import { resolveDiscoveryVenueScope } from "../services/discovery-venue-scope.js";
+import {
+  applyFeedReadPresentation,
+  type FeedReadContext,
+} from "../services/feed-read-presentation.js";
 import { selectDiscoveryIds } from "../services/discovery-selection.js";
 import {
   fetchUserMarketInteractions,
@@ -127,6 +131,7 @@ function enqueueFeedMarketRefreshForBody(body: string): void {
 function filterCachedFeedBodyForVenues(
   body: string,
   allowedVenues: ReadonlySet<string>,
+  context: FeedReadContext,
 ): string | null {
   try {
     const parsed = JSON.parse(body) as unknown;
@@ -137,12 +142,23 @@ function filterCachedFeedBodyForVenues(
         changed = true;
         return [];
       }
-      const markets = event.markets.filter(
+      const allowedMarkets = event.markets.filter(
         (market) =>
           isRecord(market) &&
           typeof market.venue === "string" &&
           allowedVenues.has(market.venue),
       );
+      const markets = allowedMarkets.map((market) => {
+        if (market.venue !== "hyperliquid") return market;
+        const current = applyFeedReadPresentation(
+          market as FeedEvent["markets"][number],
+          String(event.eventId),
+          market.marketMetadata,
+          context,
+        );
+        if (JSON.stringify(current) !== JSON.stringify(market)) changed = true;
+        return current;
+      });
       if (markets.length !== event.markets.length) changed = true;
       if (markets.length === 0) {
         changed = true;
@@ -240,7 +256,10 @@ function vectorToBuffer(vec: Float32Array): Buffer {
   return Buffer.from(slice);
 }
 
-function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
+function buildFeedMarket(
+  rRow: FeedMarketRow,
+  context: FeedReadContext,
+): FeedEvent["markets"][number] {
   const tokens: TokenPair = {
     yes: rRow.token_yes != null ? String(rRow.token_yes) : null,
     no: rRow.token_no != null ? String(rRow.token_no) : null,
@@ -290,7 +309,7 @@ function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
     },
   });
 
-  return {
+  const market: FeedEvent["markets"][number] = {
     venue: String(rRow.venue),
     marketId: String(rRow.venue_market_id),
     marketTitle: rRow.market_title ?? "",
@@ -335,9 +354,17 @@ function buildFeedMarket(rRow: FeedMarketRow): FeedEvent["markets"][number] {
     startAt: rRow.market_open_time ?? null,
     lastUpdate: rRow.last_update,
   };
+  return applyFeedReadPresentation(
+    market,
+    String(rRow.event_id),
+    rRow.market_metadata,
+    context,
+  );
 }
 
 function buildFeedEvent(rRow: FeedMarketRow): FeedEvent {
+  const metric = (value: unknown) =>
+    rRow.venue === "hyperliquid" ? null : value != null ? Number(value) : 0;
   return {
     eventId: String(rRow.event_id),
     eventTitle: rRow.event_title ?? null,
@@ -345,19 +372,13 @@ function buildFeedEvent(rRow: FeedMarketRow): FeedEvent {
     category: rRow.category ?? null,
     startTime: rRow.start_date,
     endTime: rRow.end_date,
-    eventLiquidity:
-      rRow.event_liquidity != null ? Number(rRow.event_liquidity) : 0,
-    eventLiquidityDisplay:
-      rRow.event_liquidity_display != null
-        ? Number(rRow.event_liquidity_display)
-        : 0,
-    eventVolume: rRow.event_volume != null ? Number(rRow.event_volume) : 0,
-    eventVolume24h:
-      rRow.event_volume_24h != null ? Number(rRow.event_volume_24h) : 0,
-    eventVolumeDisplay:
-      rRow.event_volume_display != null ? Number(rRow.event_volume_display) : 0,
-    eventOpenInterest:
-      rRow.event_open_interest != null ? Number(rRow.event_open_interest) : 0,
+    // A bounded subset of siblings is not a complete event aggregate.
+    eventLiquidity: metric(rRow.event_liquidity),
+    eventLiquidityDisplay: metric(rRow.event_liquidity_display),
+    eventVolume: metric(rRow.event_volume),
+    eventVolume24h: metric(rRow.event_volume_24h),
+    eventVolumeDisplay: metric(rRow.event_volume_display),
+    eventOpenInterest: metric(rRow.event_open_interest),
     eventSlug: rRow.event_slug ?? null,
     image: rRow.event_image ?? null,
     icon: rRow.event_icon ?? null,
@@ -369,11 +390,12 @@ function buildFeedData(input: {
   eventIds: string[];
   rows: FeedMarketRow[];
   view: "events" | "markets";
+  context: FeedReadContext;
 }): FeedEvent[] {
   if (input.view === "markets") {
     return input.rows.map((row) => ({
       ...buildFeedEvent(row),
-      markets: [buildFeedMarket(row)],
+      markets: [buildFeedMarket(row, input.context)],
     }));
   }
 
@@ -381,7 +403,7 @@ function buildFeedData(input: {
   for (const row of input.rows) {
     const eventId = String(row.event_id);
     if (!eventMap[eventId]) eventMap[eventId] = buildFeedEvent(row);
-    eventMap[eventId].markets.push(buildFeedMarket(row));
+    eventMap[eventId].markets.push(buildFeedMarket(row, input.context));
   }
   return input.eventIds.flatMap((eventId) => {
     const event = eventMap[eventId];
@@ -469,7 +491,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       // Create cache key with all parameters normalized
       const venueKey = venues?.length ? venues.join(",") : "";
-      const cacheKey = `feed:v35:${lifecycle.revision}:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
+      const cacheKey = `feed:v36:${lifecycle.revision}:${view}:${eventScope ?? ""}:${limit}:${offset}:${minVol}:${minLiquidity}:${search ?? ""}:${venueKey}:${categoriesKey}:${minProb ?? ""}:${maxProb ?? ""}:${maxSpread ?? ""}:${durationKey}:${endWithinHours ?? ""}:${ageWithinHours ?? ""}:${filter ?? ""}:${sort ?? ""}:${sortDir ?? ""}`;
       const redisContext = await getRedisStatus();
       const r = redisContext.redis;
       const redisStatus = redisContext.status;
@@ -478,7 +500,10 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       if (cacheEnabled && r) {
         const rawCachedBody = await r.get(cacheKey);
         const cachedBody = rawCachedBody
-          ? filterCachedFeedBodyForVenues(rawCachedBody, new Set(venues))
+          ? filterCachedFeedBodyForVenues(rawCachedBody, new Set(venues), {
+              hip4Policy: lifecycle.hip4Policy,
+              now: Date.now(),
+            })
           : null;
         if (cachedBody) {
           const etag = `W/"${crypto
@@ -696,7 +721,12 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
                   setFeedQueryPhase(phase);
                 },
               });
-          data = buildFeedData({ rows, eventIds: [], view });
+          data = buildFeedData({
+            rows,
+            eventIds: [],
+            view,
+            context: { hip4Policy: lifecycle.hip4Policy, now: Date.now() },
+          });
         } else {
           setFeedQueryPhase("candidate");
           const eventRows =
@@ -712,7 +742,12 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
                 useCachedChange24h,
               })
             : [];
-          data = buildFeedData({ rows, eventIds, view });
+          data = buildFeedData({
+            rows,
+            eventIds,
+            view,
+            context: { hip4Policy: lifecycle.hip4Policy, now: Date.now() },
+          });
         }
       } catch (error) {
         if (isPgStatementTimeoutError(error)) {
@@ -914,10 +949,8 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           : q.event_scope === "single"
             ? "single"
             : undefined;
-      const { venues, hip4Environment } = await resolveDiscoveryVenueScope(
-        pool,
-        q.venue,
-      );
+      const { venues, hip4Environment, hip4Policy } =
+        await resolveDiscoveryVenueScope(pool, q.venue);
       const category = q.category;
       const categories = q.categories;
       const filter = q.filter;
@@ -1030,7 +1063,7 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           });
         }
         data = rows.map((rRow) => {
-          const market = buildFeedMarket(rRow);
+          const market = buildFeedMarket(rRow, { hip4Policy, now: Date.now() });
           return { ...buildFeedEvent(rRow), markets: [market] };
         });
         responseCount = totalMarkets;
@@ -1070,7 +1103,9 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           if (!eventMap[eventId]) {
             eventMap[eventId] = buildFeedEvent(rRow);
           }
-          eventMap[eventId].markets.push(buildFeedMarket(rRow));
+          eventMap[eventId].markets.push(
+            buildFeedMarket(rRow, { hip4Policy, now: Date.now() }),
+          );
         }
         data = summary.eventIds
           .map((eventId) => eventMap[eventId])
@@ -1188,10 +1223,8 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
       const nowMs = Date.now();
       const minVol = resolveMinTotalVolumeFilter(query);
       const minLiquidity = query.min_liquidity;
-      const { venues, hip4Environment } = await resolveDiscoveryVenueScope(
-        pool,
-        query.venue,
-      );
+      const { venues, hip4Environment, hip4Policy } =
+        await resolveDiscoveryVenueScope(pool, query.venue);
       if (venues.length === 0) {
         return reply.send({
           count: 0,
@@ -1566,7 +1599,9 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
         if (!eventMap[eid]) {
           eventMap[eid] = buildFeedEvent(rRow);
         }
-        eventMap[eid].markets.push(buildFeedMarket(rRow));
+        eventMap[eid].markets.push(
+          buildFeedMarket(rRow, { hip4Policy, now: Date.now() }),
+        );
       }
 
       const orderedEvents = filterFeedByObservedProbability({
@@ -1580,17 +1615,21 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
 
       const pickRepresentative = (event: FeedEvent) => {
         const candidates = event.markets.filter(
-          (market) => market.acceptingOrders,
+          (market) =>
+            market.acceptingOrders ||
+            (market.venue === "hyperliquid" && market.status === "ACTIVE"),
         );
         if (!candidates.length) return null;
+        const descending = (a: number | null, b: number | null) =>
+          a == null ? (b == null ? 0 : 1) : b == null ? -1 : b - a;
         candidates.sort((a, b) => {
-          const byVol24h = b.volume24h - a.volume24h;
+          const byVol24h = descending(a.volume24h, b.volume24h);
           if (byVol24h) return byVol24h;
-          const byVolTotal = b.volumeTotal - a.volumeTotal;
+          const byVolTotal = descending(a.volumeTotal, b.volumeTotal);
           if (byVolTotal) return byVolTotal;
-          const byLiquidity = b.liquidity - a.liquidity;
+          const byLiquidity = descending(a.liquidity, b.liquidity);
           if (byLiquidity) return byLiquidity;
-          const byOpenInterest = b.openInterest - a.openInterest;
+          const byOpenInterest = descending(a.openInterest, b.openInterest);
           if (byOpenInterest) return byOpenInterest;
           return a.marketId.localeCompare(b.marketId);
         });
@@ -1617,10 +1656,14 @@ export const feedRoutes: FastifyPluginAsync = async (app) => {
           let qualityOk = true;
           if (mode === "volume_or_liquidity") {
             qualityOk =
-              event.eventVolume24h >= FOR_YOU_MIN_VOLUME_24H ||
-              event.eventLiquidity >= FOR_YOU_MIN_LIQUIDITY;
+              (event.eventVolume24h != null &&
+                event.eventVolume24h >= FOR_YOU_MIN_VOLUME_24H) ||
+              (event.eventLiquidity != null &&
+                event.eventLiquidity >= FOR_YOU_MIN_LIQUIDITY);
           } else if (mode === "volume_only") {
-            qualityOk = event.eventVolume24h >= FOR_YOU_MIN_VOLUME_24H;
+            qualityOk =
+              event.eventVolume24h != null &&
+              event.eventVolume24h >= FOR_YOU_MIN_VOLUME_24H;
           }
           if (!qualityOk) continue;
 
