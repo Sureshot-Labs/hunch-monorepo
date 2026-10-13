@@ -7,9 +7,12 @@ import { createTopTickGate } from "@hunch/infra";
 import PQueue from "p-queue";
 import WebSocket from "ws";
 import { monitorEventLoopDelay } from "node:perf_hooks";
+import { createHash } from "node:crypto";
 import {
   LatestQuoteQueue,
   MarketSubscriptions,
+  MarketSubscriptionShards,
+  MarketEventDeduper,
   reconnectAttempt,
   mergeMarketQuote,
   type MarketQuote,
@@ -67,11 +70,38 @@ const tokenMarketRefCache = new Map<
 
 let redisBound = false;
 let shutdownBound = false;
-let currentWs: WebSocket | null = null;
-let subscriptions: MarketSubscriptions | null = null;
+type SocketShard = {
+  id: number;
+  desired: string[];
+  ws: WebSocket | null;
+  subscriptions: MarketSubscriptions | null;
+  reconnectTimer: NodeJS.Timeout | null;
+  reportFlow?: () => void;
+};
+const socketShards = new Map<number, SocketShard>();
+const subscriptionShards = new MarketSubscriptionShards(
+  env.wsTokensPerSocket ?? 500,
+);
+const marketEvents = new MarketEventDeduper();
 let stopping = false;
-let reconnectTimer: NodeJS.Timeout | null = null;
-let desiredTokenIds: string[] = [];
+// Bun's event-loop histograms share native sampling state: resetting/disabling
+// one per socket also resets/disables the others. Own one monitor per pool.
+const eventLoop = monitorEventLoopDelay({ resolution: 20 });
+let flowInterval: NodeJS.Timeout | null = null;
+function subscriptionCoverage() {
+  let desiredTokens = 0;
+  let connectedTokens = 0;
+  let connectedSockets = 0;
+  for (const shard of socketShards.values()) {
+    desiredTokens += shard.desired.length;
+    if (shard.ws?.readyState !== WebSocket.OPEN) continue;
+    connectedSockets++;
+    for (const token of shard.desired) {
+      if (shard.subscriptions?.subscribed.has(token)) connectedTokens++;
+    }
+  }
+  return { desiredTokens, connectedTokens, connectedSockets };
+}
 const quoteQueue = new LatestQuoteQueue<MarketQuote>(
   Number(env.wsConcurrency || 8),
   async (tick) => {
@@ -675,13 +705,13 @@ async function publishResolvedTerminalTopTicks(input: {
   }
 }
 
-async function publishTopTick(
+function publishTopTick(
   tokenId: string,
   bestBidValue: number | null,
   bestAskValue: number | null,
   tsMs: number,
   bookPayload?: unknown,
-): Promise<void> {
+): void {
   if (bestBidValue == null && bestAskValue == null) return;
   if (
     !topTickGate.shouldPublish({
@@ -792,11 +822,11 @@ function parsePriceChangeEntries(
   );
 }
 
-async function handleBookMessage(
+function handleBookMessage(
   message: Record<string, unknown>,
   rawMessage: unknown,
   tsMs: number,
-): Promise<void> {
+): void {
   const tokenId = pickTokenId(message);
   if (!tokenId) return;
 
@@ -805,13 +835,13 @@ async function handleBookMessage(
   const bb = bestBid(bids);
   const ba = bestAsk(asks);
 
-  await publishTopTick(tokenId, bb, ba, tsMs, rawMessage);
+  publishTopTick(tokenId, bb, ba, tsMs, rawMessage);
 }
 
-async function handlePriceChangeMessage(
+function handlePriceChangeMessage(
   message: Record<string, unknown>,
   tsMs: number,
-): Promise<void> {
+): void {
   const entries = parsePriceChangeEntries(message);
 
   if (entries.length) {
@@ -821,14 +851,11 @@ async function handlePriceChangeMessage(
       if (!tokenId) continue;
       dedupedByToken.set(tokenId, entry);
     }
-    await Promise.all(
-      Array.from(dedupedByToken.entries()).map(async ([tokenId, entry]) => {
-        const bb = parsePrice(entry.best_bid ?? entry.bestBid);
-        const ba = parsePrice(entry.best_ask ?? entry.bestAsk);
-        if (bb == null && ba == null) return;
-        await publishTopTick(tokenId, bb, ba, tsMs);
-      }),
-    );
+    for (const [tokenId, entry] of dedupedByToken) {
+      const bb = parsePrice(entry.best_bid ?? entry.bestBid);
+      const ba = parsePrice(entry.best_ask ?? entry.bestAsk);
+      publishTopTick(tokenId, bb, ba, tsMs);
+    }
     return;
   }
 
@@ -837,7 +864,7 @@ async function handlePriceChangeMessage(
   const directBb = parsePrice(message.best_bid ?? message.bestBid);
   const directBa = parsePrice(message.best_ask ?? message.bestAsk);
   if (directBb != null || directBa != null) {
-    await publishTopTick(tokenId, directBb, directBa, tsMs);
+    publishTopTick(tokenId, directBb, directBa, tsMs);
     return;
   }
 
@@ -845,18 +872,18 @@ async function handlePriceChangeMessage(
   const asks = parseLevels(message.asks ?? message.sells);
   const bb = bestBid(bids);
   const ba = bestAsk(asks);
-  await publishTopTick(tokenId, bb, ba, tsMs);
+  publishTopTick(tokenId, bb, ba, tsMs);
 }
 
-async function handleBestBidAskMessage(
+function handleBestBidAskMessage(
   message: Record<string, unknown>,
   tsMs: number,
-): Promise<void> {
+): void {
   const tokenId = pickTokenId(message);
   if (!tokenId) return;
   const bb = parsePrice(message.best_bid ?? message.bestBid);
   const ba = parsePrice(message.best_ask ?? message.bestAsk);
-  await publishTopTick(tokenId, bb, ba, tsMs);
+  publishTopTick(tokenId, bb, ba, tsMs);
 }
 
 async function handleLastTradePrice(
@@ -1133,6 +1160,22 @@ async function handleNewMarket(
   if (venueMarketId) enqueueMarketRefresh(venueMarketId);
 }
 
+// The hot quote path only normalizes/gates/enqueues. It must not create an
+// async task (and several microtasks) for every discarded price delta.
+function handleQuoteMessage(message: Record<string, unknown>): boolean {
+  const eventType = String(
+    message.event_type ?? message.type ?? "",
+  ).toLowerCase();
+  if (!["book", "price_change", "best_bid_ask"].includes(eventType))
+    return false;
+  const tsMs = parseTimestampMs(message.timestamp);
+  if (eventType === "book") handleBookMessage(message, message, tsMs);
+  else if (eventType === "price_change")
+    handlePriceChangeMessage(message, tsMs);
+  else handleBestBidAskMessage(message, tsMs);
+  return true;
+}
+
 async function handleWsMessage(rawMessage: unknown): Promise<void> {
   if (!isRecord(rawMessage)) return;
   const message = rawMessage as Record<string, unknown>;
@@ -1141,18 +1184,6 @@ async function handleWsMessage(rawMessage: unknown): Promise<void> {
   const eventType = evtRaw.toLowerCase();
   const tsMs = parseTimestampMs(message.timestamp);
 
-  if (eventType === "book") {
-    await handleBookMessage(message, rawMessage, tsMs);
-    return;
-  }
-  if (eventType === "price_change") {
-    await handlePriceChangeMessage(message, tsMs);
-    return;
-  }
-  if (eventType === "best_bid_ask") {
-    await handleBestBidAskMessage(message, tsMs);
-    return;
-  }
   if (eventType === "last_trade_price") {
     await handleLastTradePrice(message, tsMs);
     return;
@@ -1187,55 +1218,62 @@ async function handleWsMessage(rawMessage: unknown): Promise<void> {
   );
 }
 
-export function startMarketWS(initialTokenIds: string[], attempt = 0) {
-  desiredTokenIds = initialTokenIds;
+function connectMarketShard(shard: SocketShard, attempt = 0) {
+  if (stopping || socketShards.get(shard.id) !== shard || !shard.desired.length)
+    return;
   const ws = new WebSocket(env.wsUrl, { perMessageDeflate: true });
-  currentWs = ws;
+  shard.ws = ws;
+  shard.reconnectTimer = null;
+  const isCurrent = () =>
+    !stopping && socketShards.get(shard.id) === shard && shard.ws === ws;
   const pump = new MarketSubscriptions({
     chunkSize: env.wsSubChunkSize,
     customFeature: env.wsCustomFeatureEnabled,
-    isOpen: () =>
-      !stopping && currentWs === ws && ws.readyState === WebSocket.OPEN,
+    isOpen: () => isCurrent() && ws.readyState === WebSocket.OPEN,
     send: (payload) =>
       new Promise<void>((resolve, reject) =>
         ws.send(payload, (error) => (error ? reject(error) : resolve())),
       ),
     onError: (error) => {
-      log.warn("WS subscription failed", { error: String(error) });
+      log.warn("WS subscription failed", {
+        shard: shard.id,
+        error: String(error),
+      });
       ws.terminate();
     },
   });
-  subscriptions = pump;
+  shard.subscriptions = pump;
 
   let pingInterval: NodeJS.Timeout | null = null;
-  let resubscribeInterval: NodeJS.Timeout | null = null;
-  let lastMessageAt = Date.now();
+  let lastMarketMessageAt = Date.now();
   let openedAt = 0;
   let receivedFrames = 0;
   let receivedBytes = 0;
-  const eventLoop = monitorEventLoopDelay({ resolution: 20 });
-
-  if (!shutdownBound) {
-    shutdownBound = true;
-    const shutdown = () => {
-      stopping = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      topTickGate.clear();
-      currentWs?.terminate();
-      void mq
-        .onIdle()
-        .then(() => quoteQueue.idle())
-        .finally(() => redis.quit().catch(() => redis.disconnect()));
-    };
-    process.once("SIGINT", shutdown);
-    process.once("SIGTERM", shutdown);
-  }
+  let receivedMarketFrames = 0;
+  let parseErrors = 0;
+  const flowMetrics = () => ({
+    shard: shard.id,
+    sockets: socketShards.size,
+    ...subscriptionCoverage(),
+    receivedFrames,
+    receivedBytes,
+    receivedMarketFrames,
+    parseErrors,
+    subscribed: pump.subscribed.size,
+    desired: shard.desired.length,
+    marketIdleMs: Date.now() - lastMarketMessageAt,
+    quotes: quoteQueue.metrics(),
+    eventsPending: mq.size,
+    eventsRunning: mq.pending,
+    eventLoopP99Ms: eventLoop.percentile(99) / 1e6,
+    eventLoopMaxMs: eventLoop.max / 1e6,
+  });
 
   ws.on("open", async () => {
     openedAt = Date.now();
-    eventLoop.enable();
     log.info("WS open", {
-      tokens: Math.min(desiredTokenIds.length, env.wsSubset),
+      shard: shard.id,
+      tokens: shard.desired.length,
     });
     bindRedisErrorOnce();
     try {
@@ -1245,10 +1283,9 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
       ws.terminate();
       return;
     }
-    if (stopping || currentWs !== ws || ws.readyState !== WebSocket.OPEN)
-      return;
-    pump.update(desiredTokenIds.slice(0, env.wsSubset));
-    lastMessageAt = Date.now();
+    if (!isCurrent() || ws.readyState !== WebSocket.OPEN) return;
+    pump.update(shard.desired);
+    lastMarketMessageAt = Date.now();
 
     pingInterval = setInterval(() => {
       try {
@@ -1260,35 +1297,32 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
       }
     }, 10_000);
 
-    resubscribeInterval = setInterval(() => {
+    shard.reportFlow = () => {
+      if (!isCurrent() || ws.readyState !== WebSocket.OPEN) return;
       try {
-        log.info("WS flow", {
-          receivedFrames,
-          receivedBytes,
-          subscribed: pump.subscribed.size,
-          quotes: quoteQueue.metrics(),
-          eventsPending: mq.size,
-          eventsRunning: mq.pending,
-          eventLoopP99Ms: eventLoop.percentile(99) / 1e6,
-        });
+        log.info("WS flow", flowMetrics());
         receivedFrames = 0;
         receivedBytes = 0;
-        eventLoop.reset();
-        const staleForMs = Date.now() - lastMessageAt;
+        receivedMarketFrames = 0;
+        parseErrors = 0;
+        const staleForMs = Date.now() - lastMarketMessageAt;
         if (staleForMs < env.wsResubscribeSec * 1000) return;
         log.info("WS periodic full resubscribe", {
+          shard: shard.id,
           staleMs: staleForMs,
         });
         pump.reset();
       } catch {
         // ignore
       }
-    }, env.wsResubscribeSec * 1000);
+    };
   });
 
-  ws.on("message", (raw) => {
-    if (stopping || currentWs !== ws) return;
-    lastMessageAt = Date.now();
+  // The EventTarget API returns text directly. Bun's ws.on('message') shim
+  // encodes each text frame to a Buffer; String(raw) would decode it again.
+  // At thousands of price changes/sec that is pure allocation/GC overhead.
+  ws.addEventListener("message", ({ data: raw }) => {
+    if (!isCurrent()) return;
     const text = String(raw);
     receivedFrames++;
     receivedBytes += Buffer.byteLength(text);
@@ -1298,20 +1332,22 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
     try {
       msg = JSON.parse(text);
     } catch {
+      parseErrors++;
       return;
     }
+    if (!isRecord(msg) && !Array.isArray(msg)) return;
+    lastMarketMessageAt = Date.now();
+    receivedMarketFrames++;
 
     // Quotes are normalized/coalesced before asynchronous DB/Redis work.
-    // Trades and lifecycle events remain lossless tasks, never coalesced.
+    // Trades remain lossless tasks. Only exact market-wide lifecycle copies
+    // broadcast to multiple sockets share work; quotes share the existing gate.
     const orderedEvents: unknown[] = [];
     for (const entry of Array.isArray(msg) ? msg : [msg]) {
-      const type = isRecord(entry)
-        ? String(entry.event_type ?? entry.type ?? "").toLowerCase()
-        : "";
-      if (["book", "price_change", "best_bid_ask"].includes(type)) {
-        void handleWsMessage(entry).catch((error) =>
-          log.warn("WS quote handler error", error),
-        );
+      try {
+        if (isRecord(entry) && handleQuoteMessage(entry)) continue;
+      } catch (error) {
+        log.warn("WS quote handler error", error);
         continue;
       }
       orderedEvents.push(entry);
@@ -1319,10 +1355,26 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
     if (orderedEvents.length)
       void mq
         .add(async () => {
-          try {
-            for (const entry of orderedEvents) await handleWsMessage(entry);
-          } catch (error) {
-            log.warn("WS message handler error", error);
+          for (const entry of orderedEvents) {
+            try {
+              const type = isRecord(entry)
+                ? String(entry.event_type ?? entry.type ?? "").toLowerCase()
+                : "";
+              if (
+                ["new_market", "market_resolved", "tick_size_change"].includes(
+                  type,
+                )
+              ) {
+                const key = createHash("sha256")
+                  .update(JSON.stringify(entry))
+                  .digest("hex");
+                await marketEvents.run(key, () => handleWsMessage(entry));
+              } else await handleWsMessage(entry);
+            } catch (error) {
+              // A failed lifecycle operation must not discard later trades in
+              // the same provider frame. The failed event is not cached.
+              log.warn("WS message handler error", error);
+            }
           }
         })
         .catch((error) => {
@@ -1332,16 +1384,15 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
 
   ws.on("close", (code, reason) => {
     if (pingInterval) clearInterval(pingInterval);
-    if (resubscribeInterval) clearInterval(resubscribeInterval);
-    eventLoop.disable();
+    if (shard.ws === ws) shard.reportFlow = undefined;
     log.warn("WS closed", {
       code,
       reason: reason.toString(),
       connectedMs: openedAt ? Date.now() - openedAt : 0,
-      quotes: quoteQueue.metrics(),
-      eventsPending: mq.size,
+      // Short failing connections never reach the periodic flow log.
+      ...flowMetrics(),
     });
-    if (stopping || currentWs !== ws) return;
+    if (!isCurrent()) return;
 
     const max = 30_000;
     const nextAttempt = reconnectAttempt(
@@ -1350,8 +1401,8 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
     );
     const base = 1000 * 2 ** Math.min(nextAttempt, 5);
     const delay = Math.min(max, base) + Math.floor(Math.random() * 500);
-    reconnectTimer = setTimeout(
-      () => startMarketWS(desiredTokenIds, nextAttempt),
+    shard.reconnectTimer = setTimeout(
+      () => connectMarketShard(shard, nextAttempt),
       delay,
     );
   });
@@ -1360,10 +1411,64 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
   return ws;
 }
 
+export function startMarketWS(initialTokenIds: string[]) {
+  if (!shutdownBound) {
+    shutdownBound = true;
+    eventLoop.enable();
+    flowInterval = setInterval(() => {
+      for (const shard of socketShards.values()) shard.reportFlow?.();
+      eventLoop.reset();
+    }, env.wsResubscribeSec * 1000);
+    const shutdown = () => {
+      stopping = true;
+      if (flowInterval) clearInterval(flowInterval);
+      eventLoop.disable();
+      for (const shard of socketShards.values()) {
+        if (shard.reconnectTimer) clearTimeout(shard.reconnectTimer);
+        shard.ws?.terminate();
+      }
+      topTickGate.clear();
+      void mq
+        .onIdle()
+        .then(() => quoteQueue.idle())
+        .finally(() => redis.quit().catch(() => redis.disconnect()));
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+  }
+  updateMarketWSSubscriptions(initialTokenIds);
+  return socketShards.values().next().value?.ws;
+}
+
 export function updateMarketWSSubscriptions(nextTokenIds: string[]): void {
-  desiredTokenIds = nextTokenIds;
-  const ws = currentWs;
-  if (!ws) return;
-  if (ws.readyState !== WebSocket.OPEN) return;
-  subscriptions?.update(desiredTokenIds.slice(0, env.wsSubset));
+  if (stopping) return;
+  // Cap once globally, never once per connection. Reordering ranks does not
+  // churn established subscriptions or move a token to another socket.
+  const groups = subscriptionShards.update(
+    [...new Set(nextTokenIds)].slice(0, env.wsSubset),
+  );
+  for (const [id, shard] of socketShards) {
+    if (groups.has(id)) continue;
+    socketShards.delete(id);
+    if (shard.reconnectTimer) clearTimeout(shard.reconnectTimer);
+    shard.ws?.terminate();
+  }
+  for (const [id, desired] of groups) {
+    let shard = socketShards.get(id);
+    if (!shard) {
+      shard = {
+        id,
+        desired,
+        ws: null,
+        subscriptions: null,
+        reconnectTimer: null,
+      };
+      socketShards.set(id, shard);
+      connectMarketShard(shard);
+    } else {
+      shard.desired = desired;
+      if (shard.ws?.readyState === WebSocket.OPEN)
+        shard.subscriptions?.update(desired);
+    }
+  }
 }

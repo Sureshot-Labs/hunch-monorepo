@@ -4,6 +4,8 @@ import { setImmediate as yieldLoop } from "node:timers/promises";
 import {
   LatestQuoteQueue,
   MarketSubscriptions,
+  MarketSubscriptionShards,
+  MarketEventDeduper,
   reconnectAttempt,
   mergeMarketQuote,
   type MarketQuote,
@@ -219,4 +221,79 @@ test("healthy reconnect resets penalty; repeatedly failing sockets retain bounde
   assert.equal(reconnectAttempt(5, 60000), 0);
   assert.equal(reconnectAttempt(5, 11000), 5);
   assert.equal(reconnectAttempt(0, 0), 1);
+});
+
+test("shards cover exactly 2,000 tokens, retain owners on reorder and fill vacancies", () => {
+  const partition = new MarketSubscriptionShards(500);
+  const ids = Array.from({ length: 2000 }, (_, i) => String(i));
+  const original = partition.update(ids);
+  assert.equal(original.size, 4);
+  assert.deepEqual(
+    [...original.values()],
+    [
+      ids.slice(0, 500),
+      ids.slice(500, 1000),
+      ids.slice(1000, 1500),
+      ids.slice(1500),
+    ],
+  );
+  assert.deepEqual(partition.update([...ids].reverse()), original);
+  const next = partition.update([
+    ...ids.slice(20),
+    ...Array.from({ length: 20 }, (_, i) => `new-${i}`),
+    "new-0",
+  ]);
+  assert.equal(next.size, 4);
+  assert.ok([...next.values()].every((group) => group.length === 500));
+  const union = [...next.values()].flat();
+  assert.equal(new Set(union).size, 2000);
+  for (const [owner, tokens] of next)
+    for (const token of tokens) {
+      if (!token.startsWith("new-"))
+        assert.ok(original.get(owner)?.includes(token));
+    }
+  assert.equal(partition.update([]).size, 0);
+  assert.equal([...partition.update(ids).values()].flat().length, 2000);
+});
+
+test("market-wide duplicate work shares in-flight completion; trades need not use deduper", async () => {
+  const dedupe = new MarketEventDeduper();
+  let writes = 0;
+  let release!: () => void;
+  const work = async () => {
+    writes++;
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+  };
+  const tasks = Array.from({ length: 4 }, () =>
+    dedupe.run("resolved-exact-payload", work),
+  );
+  await yieldLoop();
+  assert.equal(writes, 1);
+  release();
+  await Promise.all(tasks);
+  await dedupe.run("resolved-exact-payload", work);
+  assert.equal(writes, 1);
+});
+
+test("lifecycle failures are not cached and bounded completion cache can expire/evict", async () => {
+  const dedupe = new MarketEventDeduper(60_000, 1);
+  await assert.rejects(
+    dedupe.run("a", async () => {
+      throw new Error("fixture");
+    }),
+  );
+  let writes = 0;
+  const work = async () => {
+    writes++;
+  };
+  await dedupe.run("a", work);
+  await dedupe.run("b", work);
+  await dedupe.run("a", work);
+  assert.equal(writes, 3);
+  const expired = new MarketEventDeduper(0);
+  await expired.run("a", work);
+  await expired.run("a", work);
+  assert.equal(writes, 5);
 });

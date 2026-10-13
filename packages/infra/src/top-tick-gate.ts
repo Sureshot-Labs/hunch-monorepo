@@ -206,7 +206,10 @@ export function createTopTickGate(
     entry: GateEntry,
     delayMs: number,
   ): void => {
-    clearTimer(entry);
+    // The deadline is relative to the last publication, not the latest delta.
+    // Keep that timer and let it read the newest pending value. Rescheduling on
+    // every hot-token delta creates timer churn without changing the deadline.
+    if (entry.flushTimer) return;
     entry.flushTimer = setTimeout(
       () => {
         entry.flushTimer = null;
