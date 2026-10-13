@@ -2644,3 +2644,48 @@ scheduling, complete ledger/history, verified basis, open orders and renewed
 authenticated browser acceptance remain outstanding. Migrations 0284/0285 are
 additive and were tested on disposable PG16; no production migration or policy
 change is part of this checkpoint.
+
+### October 14: shared Account Value read integration (in progress)
+
+The earlier homepage checkpoint is superseded by the shared-feed changes on
+`hip-next`: desktop/mobile home use the ordinary paginated feed and common
+server policy, not an injected admin-only HIP section. Native side deadlines
+and 24-hour volume labels are preserved without inventing lifetime volume.
+
+`/account/value` and `/account/assets` now consume the same verified owned
+snapshots and side valuation projection as `/positions`. The internal shared
+reader retains account facts; the public position response still contains only
+positions and coverage. The ownership/market SQL and its bounds are unchanged;
+Account Value performs no additional provider requests or wallet-history scans.
+
+- Mainnet owned USDC total includes held cash once. `ownedCash` is an unheld
+  ownership fact, not total cash: the collector checks the total/held/unheld
+  equation and mode/debt evidence before including a USD estimate.
+- Borrowed, margin, ambiguous mode, missing, stale and unsupported native assets
+  remain explicitly incomplete, not spendable dollars or synthetic zero PnL.
+  Testnet balances and positions never enter real-dollar totals.
+- Exact side bids and official fractional/zero payouts share Portfolio logic.
+  A still-observed position is not proof of settlement cash arrival. Unknown
+  basis and realized PnL remain unknown.
+- Native cash is a read-only `venue_account` component. It is not inserted into
+  executable wallet inventory, cash availability, source bindings or funding
+  preferences. Read-only positions have `positionActionRef: null`, not a fake
+  actionable UUID; redemption selection explicitly rejects them.
+- Account Value/Assets query keys participate in venue-policy invalidation.
+  Retryable failures from another wallet cannot restore removed read-only
+  balances or replace changed native facts with an old whole-account snapshot.
+
+Verification: disposable PostgreSQL 16 covers ownership, duplicate addresses,
+common lifecycle off/exit-only recovery and the public/internal DTO boundary.
+On 10,000 irrelevant account and market fixtures, owned/empty/market/generic
+lookups use indexes (14/2/3/9 shared hit blocks; 0.083/0.028/0.018/0.070 ms in the
+recorded run). This is local regression evidence, not production latency proof.
+Backend account/HIP tests, full 16-package build, frontend 1,738 tests, typecheck,
+offline contract generation and exact Node 20 Turbopack build pass.
+
+P2 is not closed. Wallet still needs to consume the canonical account components
+instead of its separate HIP presentation overlay; normal-user snapshot refresh,
+remaining static filters, common execution/ledger history, open orders, verified
+basis and authenticated desktop/mobile acceptance remain outstanding. No layout
+redesign, migration, commit, push, production change or financial action is part
+of this Account Value checkpoint.

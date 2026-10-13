@@ -45,6 +45,7 @@ import {
   type CashAvailabilityProjection,
 } from "./cash-availability-projector.js";
 import { addUnsignedDecimals } from "./decimal.js";
+import { collectHip4AccountValue } from "./hip4-account-value.js";
 import {
   ExistingFactsOwnershipResolver,
   type ExistingVenueBindingFact,
@@ -397,7 +398,23 @@ function summarizeVenues(inputs: {
       entry.venueId,
     ]),
   );
-  const venues = ["polymarket", "limitless", "kalshi"];
+  const venueForAsset = (component: ValuedAssetComponent) =>
+    (component.location.kind === "venue_account"
+      ? component.location.details.venueId
+      : null) ??
+    catalogVenueByAsset.get(canonicalAssetKey(component.amount.asset));
+  const venues = [
+    ...new Set([
+      "polymarket",
+      "limitless",
+      "kalshi",
+      ...inputs.positions.map((component) => component.venueId),
+      ...inputs.assets.flatMap((component) => {
+        const venue = venueForAsset(component);
+        return typeof venue === "string" ? [venue] : [];
+      }),
+    ]),
+  ];
   return Object.fromEntries(
     venues.map((venueId) => {
       const cashEstimatedUsd = addUnsignedDecimals(
@@ -406,9 +423,7 @@ function summarizeVenues(inputs: {
             (component) =>
               component.category === "cash" &&
               component.valuationEligibility === "included" &&
-              catalogVenueByAsset.get(
-                canonicalAssetKey(component.amount.asset),
-              ) === venueId,
+              venueForAsset(component) === venueId,
           )
           .flatMap((component) =>
             component.estimatedUsd ? [component.estimatedUsd.value] : [],
@@ -738,6 +753,26 @@ export async function buildAccountValueReadModel(inputs: {
     });
   }
   const positionComponents = positionGroups.flat();
+  try {
+    const hip4 = await collectHip4AccountValue({
+      pool: inputs.pool,
+      userId: inputs.userId,
+      walletAddresses: linkedWalletAddresses,
+      now,
+    });
+    projectedAssets.push(...hip4.assets);
+    positionComponents.push(...hip4.positions);
+    positionErrors.push(...hip4.errors);
+    // Deliberately not added to valuedAssets: that is executable wallet
+    // inventory used for cash availability, preferences and funding sources.
+    // Native venue balances remain valuation-only until funding is supported.
+  } catch {
+    positionErrors.push({
+      collectorId: "hyperliquid-account-position-value",
+      code: "account_value_collection_failed",
+      retryable: true,
+    });
+  }
 
   let locks = {
     polymarket: new Map<string, bigint>(),

@@ -10,6 +10,7 @@ import { registerHip4ReadRoutes } from "./routes/hip4-read.js";
 import { registerHip4AccountRoutes } from "./routes/hip4-account.js";
 import { positionReadRouteSchemas } from "./schemas/position-read.js";
 import { venueMetadataRouteSchema } from "./schemas/venue-metadata.js";
+import { accountValueReadRouteSchemas } from "./schemas/account-value.js";
 
 const app = Fastify();
 app.setValidatorCompiler(validatorCompiler);
@@ -55,7 +56,10 @@ for (const surface of ["owned", "canary"] as const)
       throw new Error("schema_only");
     },
   });
-for (const [path, schema] of Object.entries(positionReadRouteSchemas)) {
+for (const [path, schema] of Object.entries({
+  ...positionReadRouteSchemas,
+  ...accountValueReadRouteSchemas,
+})) {
   app.get(path, { schema }, async () => {
     throw new Error("schema_only");
   });

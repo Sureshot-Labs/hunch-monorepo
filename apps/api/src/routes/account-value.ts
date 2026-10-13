@@ -12,11 +12,11 @@ import {
   accountAssetPreferenceBodySchema,
   accountAssetPreferenceParamsSchema,
   accountAssetPreferenceResponseSchema,
-  accountAssetsQuerySchema,
   accountAssetsResponseSchema,
   accountValueAuthErrorResponseSchema,
   accountValueErrorResponseSchema,
   accountValueResponseSchema,
+  accountValueReadRouteSchemas,
 } from "../schemas/account-value.js";
 import { upsertAssetFundingPreference } from "../account-value/asset-preferences.js";
 import { accountValueReadService } from "../account-value/runtime-read-service.js";
@@ -60,14 +60,7 @@ export function registerAccountValueRoutes(
     "/account/value",
     {
       preHandler: dependencies.authenticate,
-      schema: {
-        response: {
-          200: accountValueResponseSchema,
-          401: accountValueAuthErrorResponseSchema,
-          403: accountValueAuthErrorResponseSchema,
-          502: accountValueErrorResponseSchema,
-        },
-      },
+      schema: accountValueReadRouteSchemas["/account/value"],
     },
     async (request, reply) => {
       if (!request.user) {
@@ -101,15 +94,7 @@ export function registerAccountValueRoutes(
     "/account/assets",
     {
       preHandler: dependencies.authenticate,
-      schema: {
-        querystring: accountAssetsQuerySchema,
-        response: {
-          200: accountAssetsResponseSchema,
-          401: accountValueAuthErrorResponseSchema,
-          403: accountValueAuthErrorResponseSchema,
-          502: accountValueErrorResponseSchema,
-        },
-      },
+      schema: accountValueReadRouteSchemas["/account/assets"],
     },
     async (request, reply) => {
       if (!request.user) {

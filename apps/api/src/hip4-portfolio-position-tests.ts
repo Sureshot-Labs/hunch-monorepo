@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { projectHip4AccountValue } from "./account-value/hip4-account-value.js";
+import { projectAccountValue } from "./account-value/account-value-projector.js";
+import { accountAssetsResponseSchema } from "./schemas/account-value.js";
 import { hip4Identity } from "@hunch/shared";
 import { projectHip4Account } from "./services/hip4-account-projection.js";
 import { mapHip4Market } from "./services/hip4-mapping.js";
 import {
   projectHip4PortfolioPositions,
   readHip4PortfolioPositions,
+  type Hip4OwnedPortfolioRead,
 } from "./services/hip4-portfolio-positions.js";
 
 const now = Date.parse("2026-10-13T10:00:00.000Z");
@@ -210,4 +214,174 @@ test("non-EVM scopes do not depend on HIP policy or erase other venue PnL", asyn
   assert.equal(result.coverage.state, "ready");
   assert.equal(result.coverage.accounts, 0);
   assert.equal(result.coverage.policyRevision, null);
+});
+
+function accountRead(observed = observation, at = now): Hip4OwnedPortfolioRead {
+  return {
+    environment: "mainnet",
+    snapshotMaxAgeMs: 60000,
+    accounts: [{ address: input.address, observation: observed }],
+    positions: projectHip4PortfolioPositions({
+      ...input,
+      observation: observed,
+      now: at,
+    }),
+    coverage: {
+      state: "ready",
+      policyRevision: "test",
+      accounts: 1,
+      missingAccounts: 0,
+      staleAccounts: 0,
+      unresolvedBalances: 0,
+      missingCostBasis: 2,
+      unpricedPositions: 0,
+    },
+  };
+}
+
+test("Account Value shares native side marks and counts held cash once without funding authority", () => {
+  const observed = structuredClone(observation);
+  Object.assign(observed.cash, {
+    total: "23.00000001",
+    held: "3",
+    unheld: "20.00000001",
+    ownedCash: "20.00000001",
+  });
+  const result = projectHip4AccountValue({
+    userId: input.userId,
+    read: accountRead(observed),
+    now,
+  });
+  assert.equal(result.assets[0].amount.raw, "2300000001");
+  assert.equal(result.assets[0].estimatedUsd?.value, "23.00000001");
+  assert.equal(result.assets[0].executionEligibility, "ineligible");
+  assert.equal(result.assets[0].location.kind, "venue_account");
+  assert.equal(
+    result.assets[0].location.asset.networkId,
+    "hyperliquid:mainnet",
+  );
+  assert.equal(result.assets[0].location.details.controllerWalletId, null);
+  assert.equal(result.positions[0].estimatedUsd?.value, "12.000006");
+  assert.equal(result.positions[1].estimatedUsd?.value, "3");
+  assert.ok(result.positions.every((row) => row.positionActionRef === null));
+  const projected = projectAccountValue({
+    accountId: input.userId,
+    headlineMode: "liquid_plus_positions",
+    components: result.assets,
+    positionComponents: result.positions,
+    collectorErrors: result.errors,
+    asOf: observation.observedAt,
+  });
+  assert.equal(projected.totalPortfolioEstimatedUsd, "38.00000601");
+  assert.equal(projected.valuationCompleteness, "complete");
+  accountAssetsResponseSchema.parse({
+    ok: true,
+    asOf: projected.asOf,
+    valuationCompleteness: projected.valuationCompleteness,
+    valuationFreshness: projected.valuationFreshness,
+    collectorErrors: result.errors,
+    items: [...result.assets, ...result.positions],
+    total: 3,
+    nextCursor: null,
+  });
+});
+
+test("Account Value excludes testnet and disabled reads, then recovers on the next snapshot", () => {
+  const read = accountRead();
+  const project = () =>
+    projectHip4AccountValue({ userId: input.userId, read, now });
+  read.environment = "testnet";
+  assert.deepEqual(project(), { assets: [], positions: [], errors: [] });
+  read.environment = "mainnet";
+  read.coverage.state = "disabled";
+  assert.equal(project().positions.length, 0);
+  read.coverage.state = "ready";
+  assert.equal(project().positions[0].estimatedUsd?.value, "12.000006");
+});
+
+test("Account Value never turns stale, missing, margin or borrowed facts into net owned dollars", () => {
+  for (const at of [now - 1, now + 60000]) {
+    const result = projectHip4AccountValue({
+      userId: input.userId,
+      read: accountRead(observation, at),
+      now: at,
+    });
+    assert.equal(result.assets[0].estimatedUsd, null);
+    assert.ok(result.positions.every((row) => row.estimatedUsd === null));
+  }
+  for (const mutate of [
+    (row: typeof observation) => {
+      row.mode = "portfolioMargin";
+    },
+    (row: typeof observation) => {
+      row.mode = "default";
+    },
+    (row: typeof observation) => {
+      row.mode = "dexAbstraction";
+    },
+    (row: typeof observation) => {
+      row.mode = "unifiedAccount";
+      row.cash.borrowed = null;
+    },
+    (row: typeof observation) => {
+      row.cash.borrowed = "1";
+    },
+    (row: typeof observation) => {
+      row.cash.total = "-1";
+    },
+    (row: typeof observation) => {
+      row.cash.ownedCash = "999";
+    },
+    (row: typeof observation) => {
+      row.cash.held = "1";
+    },
+  ]) {
+    const observed = structuredClone(observation);
+    mutate(observed);
+    const result = projectHip4AccountValue({
+      userId: input.userId,
+      read: accountRead(observed),
+      now,
+    });
+    assert.ok(result.assets.every((row) => row.estimatedUsd === null));
+    assert.ok(result.positions.every((row) => row.estimatedUsd === null));
+    assert.ok(
+      result.errors.some((error) => error.code === "owned_cash_unverified"),
+    );
+  }
+  const missing = accountRead();
+  missing.accounts[0].observation = null;
+  missing.positions = [];
+  const result = projectHip4AccountValue({
+    userId: input.userId,
+    read: missing,
+    now,
+  });
+  assert.ok(
+    result.errors.some((error) => error.code === "position_inventory_unknown"),
+  );
+});
+
+test("zero, unified debt-free cash and official fractional payouts are not missing valuations", () => {
+  const observed = structuredClone(observation);
+  observed.mode = "unifiedAccount";
+  observed.cash.borrowed = "0";
+  const read = accountRead(observed);
+  read.positions[0].valuation = {
+    markPrice: "0.25",
+    marketValue: "5.0000025",
+    source: "official_payout",
+    observedAt: observation.observedAt,
+    validUntil: new Date(now + 30000).toISOString(),
+  };
+  read.positions[1].valuation = {
+    ...read.positions[0].valuation,
+    markPrice: "0",
+    marketValue: "0",
+  };
+  const result = projectHip4AccountValue({ userId: input.userId, read, now });
+  assert.equal(result.assets[0].estimatedUsd?.value, "0");
+  assert.equal(result.positions[0].estimatedUsd?.value, "5.0000025");
+  assert.equal(result.positions[1].estimatedUsd?.value, "0");
+  assert.equal(result.positions[1].valuationEligibility, "included");
 });

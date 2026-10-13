@@ -52,7 +52,7 @@ const valuedPositionComponentSchema = z
     venueId: z.string().min(1).max(160),
     venueBindingId: z.string().min(8).max(192),
     positionRef: z.string().min(1).max(512),
-    positionActionRef: z.string().uuid(),
+    positionActionRef: z.string().uuid().nullable(),
     estimatedUsd: usdEstimateSchema.nullable(),
     valuationMethod: z.string().min(1).max(160),
     observedAt: z.string().datetime(),
@@ -229,6 +229,26 @@ export const accountValueAuthErrorResponseSchema = z
     code: z.string().min(1).optional(),
   })
   .strict();
+
+export const accountValueReadRouteSchemas = {
+  "/account/value": {
+    response: {
+      200: accountValueResponseSchema,
+      401: accountValueAuthErrorResponseSchema,
+      403: accountValueAuthErrorResponseSchema,
+      502: accountValueErrorResponseSchema,
+    },
+  },
+  "/account/assets": {
+    querystring: accountAssetsQuerySchema,
+    response: {
+      200: accountAssetsResponseSchema,
+      401: accountValueAuthErrorResponseSchema,
+      403: accountValueAuthErrorResponseSchema,
+      502: accountValueErrorResponseSchema,
+    },
+  },
+} as const;
 
 export const accountAssetPreferenceParamsSchema = z
   .object({

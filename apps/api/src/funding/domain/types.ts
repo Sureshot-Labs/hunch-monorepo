@@ -274,7 +274,8 @@ export type ValuedPositionComponent = Readonly<{
   venueId: VenueId;
   venueBindingId: VenueBindingId;
   positionRef: string;
-  positionActionRef: string;
+  /** Null when a venue holding has no supported Hunch sell/redeem action. */
+  positionActionRef: string | null;
   estimatedUsd: UsdEstimate | null;
   valuationMethod: string;
   observedAt: string;

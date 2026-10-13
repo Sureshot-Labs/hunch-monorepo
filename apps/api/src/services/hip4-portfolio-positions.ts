@@ -7,7 +7,10 @@ import {
   type Hip4Environment,
   type Hip4ReadMarket,
 } from "@hunch/shared";
-import { hip4AccountObservationSchema } from "../schemas/hip4-account.js";
+import {
+  hip4AccountObservationSchema,
+  type Hip4AccountObservation,
+} from "../schemas/hip4-account.js";
 import {
   compareUnsignedDecimals,
   multiplyUnsignedDecimals,
@@ -188,10 +191,17 @@ export type Hip4PortfolioRead = {
   coverage: z.infer<typeof hip4PortfolioCoverageSchema>;
 };
 
+/** Internal shared facts for Portfolio and Account Value, never a public DTO. */
+export type Hip4OwnedPortfolioRead = Hip4PortfolioRead & {
+  environment: Hip4Environment | null;
+  snapshotMaxAgeMs: number;
+  accounts: { address: string; observation: Hip4AccountObservation | null }[];
+};
+
 /** Call only after the route's read-access authorization. SQL independently
  * rechecks current ownership: funder aliases and caller-supplied wallets cannot
  * read an account merely because another venue accepted that address. */
-export async function readHip4PortfolioPositions(
+export async function readHip4OwnedPortfolio(
   db: Pick<Pool, "query">,
   input: {
     userId: string;
@@ -203,8 +213,11 @@ export async function readHip4PortfolioPositions(
     minSize?: number;
     search?: string;
   },
-): Promise<Hip4PortfolioRead> {
-  const result: Hip4PortfolioRead = {
+): Promise<Hip4OwnedPortfolioRead> {
+  const result: Hip4OwnedPortfolioRead = {
+    environment: null,
+    snapshotMaxAgeMs: 0,
+    accounts: [],
     positions: [],
     coverage: {
       state: "ready",
@@ -234,6 +247,8 @@ export async function readHip4PortfolioPositions(
     result.coverage.state = "disabled";
     return result;
   }
+  result.environment = read.policy.environment;
+  result.snapshotMaxAgeMs = account.policy.snapshotMaxAgeMs;
   const rows = await db.query<{
     account_address: string;
     observation: unknown;
@@ -249,6 +264,7 @@ export async function readHip4PortfolioPositions(
         ? null
         : hip4AccountObservationSchema.parse(row.observation),
   }));
+  result.accounts = observed;
   const ids = [
     ...new Set(
       observed.flatMap(
@@ -324,4 +340,13 @@ export async function readHip4PortfolioPositions(
   )
     result.coverage.state = "partial";
   return result;
+}
+
+export async function readHip4PortfolioPositions(
+  db: Pick<Pool, "query">,
+  input: Parameters<typeof readHip4OwnedPortfolio>[1],
+): Promise<Hip4PortfolioRead> {
+  const { positions, coverage } = await readHip4OwnedPortfolio(db, input);
+  // Do not expose the other native balances via a position read endpoint.
+  return { positions, coverage };
 }

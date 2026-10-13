@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { DEFAULT_VENUE_LIFECYCLE_POLICY } from "@hunch/shared";
 import { createIntegrationTestPool } from "./test-database-target.js";
+import { collectHip4AccountValue } from "./account-value/hip4-account-value.js";
 import { installHip4TestLifecycle } from "./hip4-test-lifecycle.js";
 import { projectHip4Account } from "./services/hip4-account-projection.js";
 import { mapHip4Market } from "./services/hip4-mapping.js";
@@ -40,6 +41,7 @@ const observation = projectHip4Account({
   quote: { tokenId: "USDC", index: 0, weiDecimals: 8 },
   state: {
     balances: [
+      { coin: "USDC", token: 0, total: "21", hold: "3", entryNtl: "0" },
       { coin: "+87750", total: "20.00001", hold: "1", entryNtl: "999" },
       { coin: "+87751", total: "10", hold: "0", entryNtl: "123" },
     ],
@@ -121,6 +123,33 @@ try {
   await saveMarket();
 
   const first = await readHip4PortfolioPositions(pool, input);
+  assert.equal("accounts" in first, false);
+  const valueInput = { pool, ...input, now: new Date(now) };
+  const sharedValue = await collectHip4AccountValue(valueInput);
+  assert.equal(sharedValue.assets.length, 1);
+  assert.equal(sharedValue.assets[0].estimatedUsd?.value, "21");
+  assert.equal(sharedValue.positions[0].estimatedUsd?.value, "10.000005");
+  assert.ok(
+    sharedValue.errors.some((row) => row.code === "account_snapshot_missing"),
+  );
+  assert.equal(
+    (
+      await collectHip4AccountValue({
+        ...valueInput,
+        walletAddresses: [address, address.toUpperCase().replace("0X", "0x")],
+      })
+    ).assets.length,
+    1,
+  );
+  assert.equal(
+    (
+      await collectHip4AccountValue({
+        ...valueInput,
+        walletAddresses: [otherAddress],
+      })
+    ).assets.length,
+    0,
+  );
   assert.equal(first.positions.length, 2);
   assert.equal(first.coverage.accounts, 2);
   assert.equal(first.coverage.missingAccounts, 1);
@@ -224,11 +253,20 @@ try {
       },
     ]);
   await setLifecycle("unreleased");
+  assert.deepEqual(await collectHip4AccountValue(valueInput), {
+    assets: [],
+    positions: [],
+    errors: [],
+  });
   assert.equal(
     (await readHip4PortfolioPositions(pool, input)).coverage.state,
     "disabled",
   );
   await setLifecycle("exit-only");
+  assert.equal(
+    (await collectHip4AccountValue(valueInput)).assets[0].estimatedUsd?.value,
+    "21",
+  );
   assert.equal(
     (await readHip4PortfolioPositions(pool, input)).positions.length,
     2,
@@ -238,9 +276,11 @@ try {
     policyIds[1],
     { enabled: false },
   ]);
+  // The old HIP-specific switch is compatibility data, not a second product
+  // policy. Common venue_lifecycle above is the authoritative off/recovery gate.
   assert.equal(
-    (await readHip4PortfolioPositions(pool, input)).coverage.state,
-    "disabled",
+    (await readHip4PortfolioPositions(pool, input)).positions.length,
+    2,
   );
   await pool.query("update runtime_policies set payload=$2 where id=$1", [
     policyIds[1],
