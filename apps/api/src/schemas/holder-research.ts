@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { holderPublicationComparisonSchema } from "./holder-publication-comparison.js";
 
 export const holderResearchBucketSchema = z.enum([
   "followup_existing",
@@ -56,6 +57,7 @@ export type HolderResearchPublicContext = z.infer<
 export const holderResearchAgentOutputV1Schema = z
   .object({
     version: z.literal("holder_research_v1"),
+    publicationComparison: holderPublicationComparisonSchema,
     status: holderResearchStatusSchema,
     editorial_duplicate: z.boolean().optional(),
     bucket: holderResearchBucketSchema,
@@ -279,6 +281,7 @@ export const holderResearchExternalSearchResponseSchema =
 export const holderResearchFinalOutputV2Schema = z
   .object({
     version: z.literal("holder_research_v2"),
+    publicationComparison: holderPublicationComparisonSchema,
     verdict: z.enum(["publish", "context", "skip"]),
     editorial_duplicate: z.boolean().optional(),
     evidence_assessment: z.enum([
@@ -391,6 +394,7 @@ export function parseHolderResearchAgentOutputV1(
     horizonEvidence: record.horizonEvidence ?? null,
     updateEvidence: record.updateEvidence ?? null,
     execution_priority: executionPriority,
+    publicationComparison: record.publicationComparison ?? null,
     execution_priority_reason: "",
     evidence_ids: asStringArray(record.evidence_ids, 6, 160),
     caveats: asStringArray(record.caveats, 3, 180),
@@ -655,6 +659,7 @@ export function parseHolderResearchFinalOutputV2(
   return holderResearchFinalOutputV2Schema.parse({
     version: record.version,
     verdict: record.verdict,
+    publicationComparison: record.publicationComparison ?? null,
     editorial_duplicate: record.editorial_duplicate === true,
     evidence_assessment: record.evidence_assessment,
     reason_codes: asStringArray(record.reason_codes, 8, 80),
@@ -691,6 +696,8 @@ export function parseHolderResearchFinalOutputV2(
 }
 
 const HOLDER_RESEARCH_OUTCOME_INVESTIGATION_RULES = [
+  "publicThesisHistory is the delivered chronology of THIS exact contract, oldest to newest, across both directions. Compare against latestNoteId and the last public thesis, not only the older same-side priorNote. Event-level history is separate editorial context and can include saved, not yet delivered notes. Never infer a trader switched sides from Hunch publishing another view.",
+  "For an individual match, obey publicationPolicy.singleGameSportsClusterOnly: when true a same-side strong-holder cluster is required, even for an exceptional single holder. When false use the existing strict-sports requirements. Assess available sport/segment specialization, match stage, current price and the strongest opposing holders; several addresses do not prove independent people. News is not mandatory.",
   "Preserve the supplied full outcome mapping (candidate.contract.outcomeMapping in V2, candidate.mkt side labels in V1). Internal YES/NO keys are identifiers, not a license to reinterpret named outcomes as ordinary yes/no answers. Check both sides against the exact market rules, resolution source, deadline and stage; do not substitute a related contract.",
   "For an existing-note update with a genuinely new dated external fact, populate updateEvidence={sourceUrl,matchesExactContract,factSupported,factMaterialToThesis} only after independently checking the cited freshFact against the exact contract and prior note (candidate.contract.priorNote in V2; candidate.mkt.prevNote in V1). Compare the actual event, not source URLs or summary wording. A new URL, reworded story, tracker timestamp or rediscovered old event is not a new fact. Material facts may support or challenge the selected-side thesis; updateEvidence does not override the final publication assessment. Otherwise set updateEvidence=null.",
   "Start with the exact contract: entity, outcome condition, selected side, threshold, deadline and resolution stage. A credible trader's observed position is an investigative lead. Form the strongest specific, plausible outcome thesis supported by the positioning, calibrated credentials, opposition and available context; do not invent a mechanism when the evidence supports only a directional position.",
@@ -705,9 +712,11 @@ const HOLDER_RESEARCH_OUTCOME_INVESTIGATION_RULES = [
 ] as const;
 
 const HOLDER_RESEARCH_FINAL_ASSESSMENT_RULES = [
+  "Return publicationComparison={baselineNoteId,kind,reason,materialChange,evidenceIds}: use publicThesisHistory.latestNoteId (null for first), kind first/update/opposing/repeat. Explain exactly what changed relative to the LAST delivered thesis. reason is one short PUBLIC sentence describing the verified change and its bearing on the selected side; no wallet IDs, internal gate names or model reasoning. An opposing message renders this sentence even when other copy uses a template. For a first thesis fresh news is not mandatory. A repeat or reversal needs more than renamed credentials, a new model, price drift or rewording.",
+  "When publicationPolicy.sideChangeRequiresEvidence is true, an opposing publication requires verified material change: choose IDs from publicThesisHistory.verifiedPositionChanges, or external:<freshFact.sourceUrl> after verifying the cited fact and completing updateEvidence. A newly reported, dated injury/lineup/score/stage or other exact-contract development may qualify; a tracker timestamp or an old public fact does not. Weigh whether the change actually supports the selected side at today's price. The code's evidence check is necessary, not proof of investment value. Same-share USD repricing, missing holders and newly qualifying credentials are NOT proof of a position change. Unknown entry remains unknown. If no material change is verified, use CONTEXT, not a contrary public call.",
   "When eventPublicationHistory is supplied, compare this exact outcome thesis with those prior Hunch publications. They are editorial history, never independent factual evidence. A different market/side key, new URL, changed wording or another position of the same holder alone is not a distinct thesis. Preserve genuinely distinct sibling contracts (for example an independently supported no-draw thesis versus a team-win thesis), substantive new facts and materially changed interpretations. Set editorial_duplicate=true only when the supplied history establishes a substantively redundant publication; otherwise false. No supplied history means false. Explain the comparison in rationale, not public copy.",
   "For single holders and clusters, explain the contract-specific relevance of the observed evidence after weighing the strongest plausible alternative. Credentials, stake and agreeing addresses do not establish independent people or attractive trading value. Distinguish support for an outcome thesis from evidence about today's price; do not invent a probability, mechanism or positive expected return, and do not require fresh news for a useful current thesis.",
-  "Publish a clear, useful, grounded directional outcome thesis backed by adequate or strong holder evidence, subject to deterministic publication gates. It need not have fresh news, early entry, favorable momentum, unexplained positioning or novelty. Present relevance can come from the current credible position and its outcome implication; do not manufacture urgency.",
+  "Publish a clear, useful, grounded directional outcome thesis backed by adequate or strong holder evidence, subject to deterministic publication gates. A first thesis need not have fresh news, early entry, favorable momentum, unexplained positioning or novelty. Updates and reversals must still satisfy the public-thesis comparison and applicable material-change policy above. Present relevance can come from the current credible position and its outcome implication; do not manufacture urgency.",
   "Weigh contrary holders and externalResearch.verdict=supports_opposite_side against the exact thesis. Mixed inputs can support an adequate final thesis with a material caveat. Reject a thesis when verified exact-contract facts falsify it; contrary pricing, unfavorable news or a plausible opposing case is not automatically falsification.",
   "Use context when the evidence leaves no useful directional conclusion, or only concentration/risk/background without a holder-backed outcome thesis. Use skip for unsupported, materially stale or unusable evidence. High scores are selection hints, not publication instructions; strong credentials are not proof the current thesis is correct.",
   "Respect deterministic quality, price, side, credential and horizon gates; do not override them. A Jev horizon nomination is research permission, not publication permission. A distant-horizon exception needs the supplied verified fresh exact-side holder action or qualifying dated outside fact. Market-wide activity and tracker-page updates do not satisfy that requirement.",
@@ -730,11 +739,15 @@ const HOLDER_RESEARCH_PUBLIC_COPY_RULES = [
   "Never use filler such as Holder activity is the primary evidence, worth noticing, worth a look, Cluster now, Wallet edge or No cited external evidence was available. Keep copy concise when no additional grounded sentence helps; do not fill space with an invented catalyst.",
 ] as const;
 
+const HOLDER_TRIAGE_PUBLICATION_CONTEXT =
+  "Read eventPublicationHistory as earlier Hunch interpretations, not independent evidence. Identify the new, checkable question left after those publications. Repeating the same unchanged thesis is low-value research; a strong candidate with a specific unanswered development may still merit investigation without a ready answer. For the opposite side of a prior call, compare its exact condition and explain what new circumstance could support the opposing view. Do not assume the earlier holder switched sides or require agreement with the earlier call. Missing or partial history is unknown, not grounds for a veto.";
+
 export function buildHolderResearchTriageSystemPrompt(): string {
   return [
     "You are a holder-research triage analyst for Hunch.",
     "Return exactly one JSON object matching holder_research_triage_v1.",
     "Your job is to rank which deterministic holder candidates deserve deeper research, not to decide publication.",
+    HOLDER_TRIAGE_PUBLICATION_CONTEXT,
     "Any thesis you form here is provisional and only helps select a question. Do not settle the outcome or require the answer before choosing investigate.",
     ...HOLDER_RESEARCH_OUTCOME_INVESTIGATION_RULES,
     "Prefer credible single holders or sharp clusters whose positioning supports a specific outcome question worth investigating, including a non-obvious scenario or a credible disagreement with current pricing.",
@@ -793,6 +806,7 @@ export function buildHolderResearchTriageSystemPromptV2(): string {
     "You are the bounded triage stage for Hunch holder research.",
     "Return exactly one JSON object matching holder_research_triage_v2 and one decision per supplied key.",
     "Candidates are already ordered by deterministic selection. Filter them; do not invent a second ranking.",
+    HOLDER_TRIAGE_PUBLICATION_CONTEXT,
     ...HOLDER_RESEARCH_OUTCOME_INVESTIGATION_RULES,
     "Use decisionFeatures for holder and market facts; missing values are unknown, never zero. Deterministic gates control eligibility. A Jev-selected horizon review is an extra research option with the distant-horizon gate pending, not publication approval.",
     "Investigate when additional research could materially test a holder thesis. Skip when deeper research is unlikely to add value. Do not output watch; final synthesis decides publication.",
@@ -865,6 +879,8 @@ export function buildHolderResearchUserPrompt(input: {
     task: "Investigate the outcome thesis suggested by this credible holder positioning, assess the strongest alternative, and write a concise signal only when the grounded directional read is useful.",
     output_contract: {
       version: "holder_research_v1",
+      publicationComparison:
+        "{baselineNoteId:null|string,kind:first|update|opposing|repeat,reason:8..320 characters,materialChange:boolean,evidenceIds:[]}; compare the last delivered thesis, not just the same-side prior note",
       status: "PUBLISH | CONTEXT | SKIP",
       editorial_duplicate:
         "boolean; true only for substantive repetition established by supplied eventPublicationHistory",
@@ -924,6 +940,8 @@ export function buildHolderResearchUserPromptV2(input: {
     task: "Assess the outcome thesis suggested by holder positioning against its strongest alternative, then write concise copy only for a useful grounded directional conclusion.",
     output_contract: {
       version: "holder_research_v2",
+      publicationComparison:
+        "{baselineNoteId:null|string,kind:first|update|opposing|repeat,reason:8..320 characters,materialChange:boolean,evidenceIds:[]}; compare the last delivered thesis, not just the same-side prior note",
       verdict: "publish | context | skip",
       evidence_assessment:
         "strong | adequate | mixed | contradicted | insufficient; support for the final thesis, not an event probability or a count of agreeing sources",

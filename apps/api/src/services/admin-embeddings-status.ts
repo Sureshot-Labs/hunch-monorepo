@@ -2,6 +2,14 @@ import { z } from "zod";
 
 const count = z.number().int().nonnegative();
 const timestamp = z.string().datetime({ offset: true });
+const cost = z.number().finite().nonnegative();
+const costScope = z.object({
+  spentUsd: cost,
+  reservedUsd: cost,
+  actualUsd: cost.nullable(),
+  knownActualUsd: cost,
+  unknownUsd: cost,
+});
 const entityCoverage = z.object({
   eligible: count,
   verified: count,
@@ -16,6 +24,16 @@ const statusSchema = z.object({
   activeGeneration: z.string().nullable().optional(),
   state: z.enum(["building", "verifying", "active", "paused", "failed"]),
   reason: z.string().nullable().optional(),
+  reconciliation: z
+    .object({
+      state: z.enum(["building", "verifying", "active", "paused", "failed"]),
+      reason: z.string().nullable(),
+      startedAt: timestamp.nullable(),
+    })
+    .optional(),
+  live: z
+    .object({ completed: z.boolean(), pending: count, lag: count.nullable() })
+    .optional(),
   checkpoint: z
     .object({
       entityType: z.enum(["event", "market"]),
@@ -37,6 +55,18 @@ const statusSchema = z.object({
       reservedUsd: z.number().finite().nonnegative(),
       actualUsd: z.number().finite().nonnegative().nullable().optional(),
       remainingUsd: z.number().finite().nonnegative().optional(),
+      accountingVersion: z.literal(2).optional(),
+      knownActualUsd: cost.optional(),
+      unknownUsd: cost.optional(),
+      maintenance: costScope.optional(),
+      legacy: z
+        .object({
+          estimatedUsd: cost,
+          knownActualUsd: cost,
+          hasUnknown: z.boolean(),
+          attributedToBuildUsd: cost,
+        })
+        .optional(),
     })
     .optional(),
   retries: count.optional(),

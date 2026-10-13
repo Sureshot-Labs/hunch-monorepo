@@ -19,6 +19,8 @@ export type TopTickGateInputs = {
   bestAsk: NullablePrice;
   tsMs: number;
   nowMs?: number;
+  /** Publish authoritative state immediately; cancel older deferred ticks. */
+  forcePublish?: boolean;
 };
 
 type DeferredPublishPayload = {
@@ -204,7 +206,10 @@ export function createTopTickGate(
     entry: GateEntry,
     delayMs: number,
   ): void => {
-    clearTimer(entry);
+    // The deadline is relative to the last publication, not the latest delta.
+    // Keep that timer and let it read the newest pending value. Rescheduling on
+    // every hot-token delta creates timer churn without changing the deadline.
+    if (entry.flushTimer) return;
     entry.flushTimer = setTimeout(
       () => {
         entry.flushTimer = null;
@@ -262,6 +267,7 @@ export function createTopTickGate(
       bestAsk,
       tsMs,
       nowMs,
+      forcePublish = false,
     }: TopTickGateInputs): boolean => {
       if (!tokenId) return false;
       if (!allowEmpty && bestBid == null && bestAsk == null) return false;
@@ -287,8 +293,12 @@ export function createTopTickGate(
         !isEqualPrice(prev.publishedAsk, bestAsk, epsilon);
       const elapsedSincePublishMs = now - prev.lastPublishedAtMs;
 
-      if (changedVsPublished) {
-        if (minIntervalMs > 0 && elapsedSincePublishMs < minIntervalMs) {
+      if (changedVsPublished || forcePublish) {
+        if (
+          !forcePublish &&
+          minIntervalMs > 0 &&
+          elapsedSincePublishMs < minIntervalMs
+        ) {
           prev.pendingBid = bestBid;
           prev.pendingAsk = bestAsk;
           prev.pendingTsMs = ts;

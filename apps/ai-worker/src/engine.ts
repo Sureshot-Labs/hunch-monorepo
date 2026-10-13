@@ -1,5 +1,6 @@
 import { freemem } from "node:os";
 import { readFile } from "node:fs/promises";
+import type { CostReservation } from "./costs.js";
 import {
   EmbeddingMemoryError,
   embeddingBytesPerItem,
@@ -166,13 +167,17 @@ export class EmbeddingEngine {
     const info = String(await this.store.redis.sendCommand(["INFO", "memory"]));
     return Number(/^used_memory:(\d+)/m.exec(info)?.[1] ?? NaN);
   }
-  private async memoryCheck(generation: EmbeddingGeneration, pass?: Pass) {
+  private async memoryCheck(
+    generation: EmbeddingGeneration,
+    pass?: Pass,
+    newItems = 0,
+  ) {
     const used = await this.usedMemory();
     const available = await (
       this.options.availableMemory ?? workerAvailableMemory
     )();
-    let remaining = 0;
-    let perItem = 0;
+    let remaining = newItems;
+    let perItem = newItems ? 12288 : 0;
     if (pass && pass.pilotItems >= 1000 && pass.phase === "building") {
       remaining = Math.max(
         0,
@@ -180,6 +185,8 @@ export class EmbeddingEngine {
           pass.coverage.markets.eligible -
           pass.pilotItems,
       );
+    }
+    if (remaining > 0) {
       let sample = this.memorySamples.get(generation.id);
       if (!sample || Date.now() - sample.at >= 60000) {
         sample = {
@@ -409,6 +416,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       text: string;
       hash: string;
       retryAt: number;
+      newVector: boolean;
     }[] = [];
     let verified = 0;
     let repaired = 0;
@@ -458,6 +466,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
         source,
         text,
         hash,
+        newVector: bytes !== generation.dimensions * 4,
         retryAt: failure?.hash === hash ? (failure.retryAt ?? 0) : 0,
       });
     }
@@ -481,6 +490,17 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       offset < payable.length;
       offset += policy.batchSize * policy.concurrency
     ) {
+      const wave = payable.slice(
+        offset,
+        offset + policy.batchSize * policy.concurrency,
+      );
+      // Existing cache hits/TTL refreshes above never need new vector capacity.
+      // Admission applies to live ingestion too, not only the background pass.
+      await this.memoryCheck(
+        generation,
+        undefined,
+        wave.filter((item) => item.newVector).length,
+      );
       const slices = [];
       for (
         let j = offset;
@@ -495,7 +515,7 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       // Every sibling settles before moving on, even if one fails or a policy changes.
       const results = await Promise.allSettled(
         slices.map(async (batch) => {
-          let reserved = 0;
+          let reservation: CostReservation | null = null;
           let response;
           try {
             response = await (this.options.provider ?? fetchEmbeddingBatch)({
@@ -504,27 +524,28 @@ redis.call('SET',KEYS[3],'1'); return 1`,
               apiKey: this.options.apiKey,
               timeoutMs: policy.requestTimeoutMs,
               beforeAttempt: async ({ attempt, estimatedCostUsd }) => {
-                if (attempt > 1) {
-                  this.retries++;
-                  await this.store.put(
-                    `${CONTROL}unknown-cost:${generation.id}`,
-                    true,
-                  );
+                if (attempt > 1) this.retries++;
+                if (reservation) {
+                  await this.store.costs.settle(generation, reservation, null);
+                  reservation = null;
                 }
-                await this.store.reserve(
+                // Retry backoff can outlive resource headroom. Admit every
+                // paid attempt, not just the first wave or the final write.
+                await this.memoryCheck(
+                  generation,
+                  undefined,
+                  wave.filter((item) => item.newVector).length,
+                );
+                reservation = await this.store.reserve(
                   generation,
                   estimatedCostUsd,
                   building ? policy.generationBudgetUsd : null,
                 );
-                reserved += estimatedCostUsd;
               },
             });
           } catch (error) {
-            if (reserved > 0)
-              await this.store.put(
-                `${CONTROL}unknown-cost:${generation.id}`,
-                true,
-              );
+            if (reservation)
+              await this.store.costs.settle(generation, reservation, null);
             if (error instanceof EmbeddingProviderError && !error.breaker) {
               // Record once per content revision, not on every stream delivery/restart.
               for (const item of batch) {
@@ -541,26 +562,18 @@ redis.call('SET',KEYS[3],'1'); return 1`,
             }
             throw error;
           }
-          if (response.usage.costUsd != null)
-            await this.store.fenced(
-              "return redis.call('INCRBYFLOAT',KEYS[2],ARGV[2])",
-              [`${CONTROL}actual-cost:${generation.id}`],
-              [String(response.usage.costUsd)],
-            );
-          else
-            await this.store.put(
-              `${CONTROL}unknown-cost:${generation.id}`,
-              true,
-            );
+          const completed = reservation as CostReservation | null;
+          if (!completed) throw new Error("embedding_missing_cost_reservation");
+          await this.store.costs.settle(
+            generation,
+            completed,
+            response.usage.costUsd,
+          );
+          const reserved = completed.amount;
           if (
             response.usage.costUsd != null &&
             response.usage.costUsd > reserved + 1e-9
           ) {
-            await this.store.reserve(
-              generation,
-              response.usage.costUsd - reserved,
-              null,
-            );
             await this.store.put(`${CONTROL}cost-drift:${generation.id}`, {
               at: Date.now(),
               charged: response.usage.costUsd,
@@ -568,6 +581,13 @@ redis.call('SET',KEYS[3],'1'); return 1`,
             });
             throw new Error("embedding_provider_cost_drift");
           }
+          // Memory can change while HTTP is in flight; do not publish into
+          // actual pressure. Paid work remains accounted for if admission fails.
+          await this.memoryCheck(
+            generation,
+            undefined,
+            batch.filter((item) => item.newVector).length,
+          );
           const current = await loadEmbeddingSources(
             this.options.db,
             kind,
@@ -772,6 +792,9 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       (pass.phase === "active" && now - pass.startedAt >= 6 * 3600000)
     )
       pass = await this.newPass();
+    // A serving reconciliation is not a second full generation build. Reuse
+    // its cursor and derive coverage from checked rows; no census barrier.
+    if (active.id === desired.id) pass.countsReady = true;
     // Legacy coverage retries persisted a six-hour hold. Coverage gaps are
     // diagnostic, not a reason to suspend reconciliation or explicit requests.
     delete pass.notBefore;
@@ -791,12 +814,12 @@ redis.call('SET',KEYS[3],'1'); return 1`,
       await this.store.put(stateKey(desired), pass);
       if (!pass.countsReady) return pass;
     }
-    await this.memoryCheck(desired, pass);
     if (!pass.gcDone) {
       await this.cleanTerminal(desired, pass);
       await this.store.put(stateKey(desired), pass);
       return pass;
     }
+    if (active.id !== desired.id) await this.memoryCheck(desired, pass);
     if (pass.phase === "ready") {
       if (!this.policy?.autoActivate && active.id !== desired.id) return pass;
       await this.refreshPolicy(true);
@@ -943,6 +966,7 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
     desired: EmbeddingGeneration | null,
     state: string,
     reason: string | null,
+    liveCompleted = false,
   ) {
     if (Date.now() - this.lastReport < 10000) return;
     this.lastReport = Date.now();
@@ -957,13 +981,22 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
       GROUP,
     ])) as unknown[];
     const circuit = await this.store.get<number>(`${CONTROL}circuit`);
-    const spent = desired ? await this.store.spent(desired) : 0;
-    const actual = desired
-      ? Number(
-          (await this.store.redis.get(`${CONTROL}actual-cost:${desired.id}`)) ??
-            0,
-        )
-      : 0;
+    const costs = desired
+      ? await this.store.costs.read(desired, active.id === desired.id)
+      : null;
+    const build = costs?.build ?? {
+      spentUsd: 0,
+      reservedUsd: 0,
+      knownActualUsd: 0,
+      actualUsd: 0,
+      unknownUsd: 0,
+    };
+    const groups = (await this.store.redis.sendCommand([
+      "XINFO",
+      "GROUPS",
+      STREAM,
+    ])) as unknown[][];
+    const group = groups.map(record).find((item) => item.name === GROUP);
     const memoryInfo = String(
       await this.store.redis.sendCommand(["INFO", "memory"]),
     );
@@ -974,7 +1007,17 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
       updatedAt: new Date().toISOString(),
       activeGeneration: active.id,
       desiredGeneration: desired?.id ?? null,
-      state,
+      state: active.id === desired?.id && liveCompleted ? "active" : state,
+      reconciliation: {
+        state,
+        reason,
+        startedAt: pass ? new Date(pass.startedAt).toISOString() : null,
+      },
+      live: {
+        completed: liveCompleted,
+        pending: Number(pending[0]),
+        lag: group?.lag == null ? null : Number(group.lag),
+      },
       reason:
         reason ??
         (this.backgroundFailures.size
@@ -992,20 +1035,22 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
       verifiedAt: pass?.verifiedAt ?? null,
       budget: {
         limitUsd: this.policy?.generationBudgetUsd ?? 5,
-        spentUsd: spent,
-        reservedUsd: 0,
-        actualUsd:
-          desired &&
-          (await this.store.redis.get(`${CONTROL}unknown-cost:${desired.id}`))
-            ? null
-            : actual,
+        ...build,
+        accountingVersion: 2,
+        maintenance: costs?.maintenance,
+        legacy: costs?.legacy,
         remainingUsd: Math.max(
           0,
-          (this.policy?.generationBudgetUsd ?? 5) - spent,
+          (this.policy?.generationBudgetUsd ?? 5) -
+            build.spentUsd -
+            build.reservedUsd,
         ),
       },
       retries: this.retries,
-      circuitUntil: circuit ? new Date(circuit).toISOString() : null,
+      circuitUntil:
+        circuit && circuit > Date.now()
+          ? new Date(circuit).toISOString()
+          : null,
       oldestPendingAgeMs:
         Number(pending[0]) > 0
           ? Date.now() - Number(String(pending[1]).split("-")[0])
@@ -1021,7 +1066,7 @@ return redis.call('FT.SEARCH',KEYS[3],'(@status:{ACTIVE})=>[KNN 1 @embedding $ve
           (desired
             ? this.memoryPauses.get(desired.id)?.projectedBytes
             : null) ??
-          pass?.projectedBytes ??
+          (active.id === desired?.id ? null : pass?.projectedBytes) ??
           null,
         workerRssBytes: process.memoryUsage().rss,
         redisRssBytes: Number(
@@ -1212,6 +1257,10 @@ return 0`,
     await this.refreshPolicy();
     const active = await readActiveGeneration(this.store.redis);
     const desired = this.policy ? generationForPolicy(this.policy) : null;
+    let liveCompleted = false;
+    // Current serving admission failures are recorded again below. An old
+    // projection or recovered pressure must not linger after a cache-only tick.
+    this.memoryPauses.delete(active.id);
     for (const id of this.memoryPauses.keys())
       if (id !== active.id && id !== desired?.id) this.memoryPauses.delete(id);
     try {
@@ -1247,6 +1296,7 @@ return 0`,
       let hadMessages = false;
       try {
         hadMessages = await this.processMessages(active, desired, canBuild);
+        liveCompleted = true;
       } finally {
         // Live work gets the first DB slot; housekeeping still runs on provider
         // failure, without turning one timeout into a tight retry loop.
@@ -1282,6 +1332,7 @@ return 0`,
             ? `background_memory_paused:${active.id}:${this.memoryPauses.get(active.id)?.blockedBy}`
             : null
           : "previous_generation_retained",
+        liveCompleted,
       );
       if (!hadMessages) await sleep(200);
     } catch (error) {
@@ -1297,7 +1348,13 @@ return 0`,
         );
       }
       if (/lease_lost/.test(reason)) throw error;
-      await this.report(active, desired, "paused", reason.slice(0, 200));
+      await this.report(
+        active,
+        desired,
+        "paused",
+        reason.slice(0, 200),
+        liveCompleted,
+      );
       console.warn("[ai-worker] paused", { reason: reason.slice(0, 200) });
       await sleep(1000);
     }

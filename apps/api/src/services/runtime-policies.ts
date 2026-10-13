@@ -310,6 +310,8 @@ export type HolderResearchPolicy = {
   livePriceMaxBuyPrice: number;
   livePriceTerminalPp: number;
   singleGameSportsStrictMode: boolean;
+  singleGameSportsClusterOnly: boolean;
+  sideChangeRequiresEvidence: boolean;
   singleGameSportsMinHolderUsd: number;
   singleGameSportsMinEdge: number;
   singleGameSportsMinSamples: number;
@@ -1195,6 +1197,8 @@ const holderResearchSchema = z
     livePriceMaxBuyPrice: ratio,
     livePriceTerminalPp: ratio,
     singleGameSportsStrictMode: strictBoolean,
+    singleGameSportsClusterOnly: strictBoolean,
+    sideChangeRequiresEvidence: strictBoolean,
     singleGameSportsMinHolderUsd: nonNegativeNumber,
     singleGameSportsMinEdge: ratio,
     singleGameSportsMinSamples: nonNegativeInt.max(100_000),
@@ -1946,7 +1950,7 @@ function getDefaults(): IntelPolicyMap {
       dryRun: true,
       persistNotes: false,
       pipelineV2Mode: "shadow",
-      signalBotFollowthroughEnabled: false,
+      signalBotFollowthroughEnabled: true,
       signalBotFollowthroughTypes: DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES,
       signalBotFollowthroughMinAgeHours: 24,
       signalBotFollowthroughMaxPerTick: 3,
@@ -2018,6 +2022,8 @@ function getDefaults(): IntelPolicyMap {
       livePriceMaxBuyPrice: 0.97,
       livePriceTerminalPp: 0.01,
       singleGameSportsStrictMode: true,
+      singleGameSportsClusterOnly: true,
+      sideChangeRequiresEvidence: true,
       singleGameSportsMinHolderUsd: 25_000,
       singleGameSportsMinEdge: 0.15,
       singleGameSportsMinSamples: 20,
@@ -2940,10 +2946,9 @@ function normalizeHolderResearchPolicy(
     signalBotFollowthroughEnabled: Boolean(
       policy.signalBotFollowthroughEnabled,
     ),
-    signalBotFollowthroughTypes:
-      policy.signalBotFollowthroughTypes.length > 0
-        ? Array.from(new Set(policy.signalBotFollowthroughTypes))
-        : DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES,
+    signalBotFollowthroughTypes: Array.from(
+      new Set(policy.signalBotFollowthroughTypes),
+    ),
     signalBotFollowthroughMinAgeHours: clamp(
       Math.trunc(policy.signalBotFollowthroughMinAgeHours),
       1,
@@ -3144,6 +3149,8 @@ function normalizeHolderResearchPolicy(
     livePriceMaxBuyPrice: clamp(policy.livePriceMaxBuyPrice, 0, 1),
     livePriceTerminalPp: clamp(policy.livePriceTerminalPp, 0, 1),
     singleGameSportsStrictMode: Boolean(policy.singleGameSportsStrictMode),
+    singleGameSportsClusterOnly: policy.singleGameSportsClusterOnly !== false,
+    sideChangeRequiresEvidence: policy.sideChangeRequiresEvidence !== false,
     singleGameSportsMinHolderUsd: Math.max(
       0,
       policy.singleGameSportsMinHolderUsd,

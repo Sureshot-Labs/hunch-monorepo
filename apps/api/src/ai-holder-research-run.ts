@@ -83,6 +83,9 @@ import {
   applyHolderResearchLivePriceChecks,
   applyHolderResearchPublishQualityGate,
   assessHolderResearchHorizonException,
+  assessHolderCandidateSideChange,
+  asContextHolderResearchOutput,
+  withHolderPublicComparison,
   buildHolderResearchCandidateActionability,
   buildDeterministicHolderResearchDecision,
   buildHolderResearchCandidatePromptJson,
@@ -103,6 +106,7 @@ import {
   enrichHolderResearchMarketTypeMetrics,
   evaluateResolvedHolderResearchNotes,
   evaluateHolderResearchDecisionCache,
+  enrichHolderPublicComparison,
   HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
   loadHolderResearchCalibrationMemo,
   loadHolderResearchCandidates,
@@ -370,6 +374,8 @@ type HolderResearchRunReport = {
     selectionClusterBonus: number;
     selectionVersion: 2;
     eventPublicationHistoryEnabled: boolean;
+    singleGameSportsClusterOnly: boolean;
+    sideChangeRequiresEvidence: boolean;
   };
   totals: {
     candidatesLoaded: number;
@@ -391,6 +397,9 @@ type HolderResearchRunReport = {
     totalEstimatedCostUsd: number;
     totalChargedCostUsd: number;
     providerReportedCostUsd: number | null;
+    editorialDuplicates: number;
+    duplicateFinalCostUsd: number;
+    duplicateSearchCostUsd: number;
     durationMs: number;
   };
   selection: HolderResearchSelectionDiagnostics;
@@ -502,6 +511,7 @@ type HolderResearchRunReport = {
     status: string;
     qualityGateReason: string | null;
     editorialDuplicate: boolean;
+    publicThesisComparison: Record<string, unknown> | null;
     eventPublicationHistory: {
       status: EventPublicationHistory["status"];
       hasMore: boolean;
@@ -1780,13 +1790,31 @@ async function callHolderResearchTriageModel(params: {
   calibrationMemo: string[];
   useV2: boolean;
   backgroundByKey?: Map<string, HolderBackground>;
+  eventPublications?: EventPublication[];
+  eventHistoryAvailable?: boolean;
 }): Promise<HolderResearchTriageModelResult> {
   const candidateJson = params.candidates.map((candidate) => {
     const original = params.useV2
       ? buildHolderResearchTriageCandidatePromptJsonV2(candidate, params.policy)
       : buildHolderResearchTriageCandidatePromptJson(candidate, params.policy);
     return withHolderResearchBackground(
-      original,
+      withEventPublicationHistory(
+        withHolderPublicComparison(original, candidate, params.policy),
+        buildEventPublicationHistory({
+          enabled: params.policy.eventPublicationHistoryEnabled,
+          available: params.eventHistoryAvailable ?? false,
+          eventId: candidate.market.eventId,
+          loaded: params.eventPublications ?? [],
+          committed: [],
+          selectedHolderIds: candidate.market.holders
+            .filter(
+              (holder) =>
+                holder.side === candidate.side &&
+                isSharpHolder(holder, params.policy),
+            )
+            .map((holder) => holder.walletId),
+        }),
+      ),
       params.backgroundByKey?.get(candidate.key),
       "triage",
     );
@@ -1957,7 +1985,11 @@ async function callHolderResearchModel(params: {
       };
   const candidateJson = withEventPublicationHistory(
     withHolderResearchBackground(
-      originalCandidateJson,
+      withHolderPublicComparison(
+        originalCandidateJson,
+        params.candidate,
+        params.policy,
+      ),
       params.backgroundContext,
       "final",
       verifiedHolderBackgroundSourceUrls(externalResearchV2),
@@ -2211,7 +2243,11 @@ async function synthesizeCandidate(params: {
       };
   const candidateJson = withEventPublicationHistory(
     withHolderResearchBackground(
-      originalCandidateJson,
+      withHolderPublicComparison(
+        originalCandidateJson,
+        params.candidate,
+        params.policy,
+      ),
       params.backgroundContext,
       "final",
       verifiedHolderBackgroundSourceUrls(externalResearchV2),
@@ -2410,22 +2446,31 @@ export async function maybeWriteDecisionCache(params: {
   modelMeta?: Record<string, unknown>;
   decisionCache: HolderResearchDecisionCacheStats;
 }): Promise<void> {
+  const latestPublicSide = params.candidate.publicationHistory?.items[0]?.side;
+  const externalResearch = params.modelMeta?.external_research;
+  const reversalSearchFailed =
+    latestPublicSide != null &&
+    latestPublicSide !== params.candidate.side &&
+    externalResearch != null &&
+    typeof externalResearch === "object" &&
+    "status" in externalResearch &&
+    externalResearch.status === "error";
   if (
     !params.policy.decisionCacheEnabled ||
     !params.redis ||
     params.policy.dryRun ||
     !params.callModel ||
+    params.candidate.comparisonPositionsUnavailable ||
+    (reversalSearchFailed && params.output.status !== "PUBLISH") ||
     // A model/provider failure is not an editorial verdict; retry next run.
-    params.modelMeta?.mode === "openrouter_error"
+    params.modelMeta?.mode === "openrouter_error" ||
+    params.output.rationale === "side_change_comparison_missing"
   ) {
     return;
   }
 
   try {
-    if (
-      params.output.status === "PUBLISH" ||
-      params.modelMeta?.editorial_duplicate === true
-    ) {
+    if (params.output.status === "PUBLISH") {
       // Publication cooldown comes only from committed Postgres notes. A
       // prior CONTEXT/SKIP must not survive a newer publish recommendation,
       // including a technical save failure. Never cache a provisional publish.
@@ -2569,6 +2614,12 @@ export async function runHolderResearch(
       });
       if (policy.decisionCacheEnabled && options.decisionCacheRedis) {
         const cacheFiltered: HolderResearchCandidate[] = [];
+        try {
+          await enrichHolderPublicComparison(client, shortlist, policy);
+        } catch {
+          // The authoritative post-price path will retry; do not trust an
+          // editorial cache without its current public/quantity baseline.
+        }
         for (const candidate of shortlist) {
           try {
             const raw = await options.decisionCacheRedis.get(
@@ -2580,7 +2631,9 @@ export async function runHolderResearch(
                 candidate,
                 cachedDecision: cached,
                 policy,
-              }).action === "skip"
+              }).action === "skip" &&
+              candidate.publicationHistory?.status === "ok" &&
+              !candidate.comparisonPositionsUnavailable
             ) {
               continue;
             }
@@ -2840,6 +2893,30 @@ export async function runHolderResearch(
     let externalSearchCalls = 0;
     let externalSearchCostOnFailureUsd = 0;
     const technicalSkips: HolderResearchRunReport["technicalSkips"] = [];
+    try {
+      await enrichHolderPublicComparison(
+        client,
+        selectedWithFreshPrices,
+        policy,
+      );
+      toolCalls.push({
+        name: "public_thesis_history",
+        count: selectedWithFreshPrices.length,
+        status: "ok",
+        detail:
+          "last 4 actual deliveries and exact-key quantity snapshots; shared by cache and models",
+      });
+    } catch (error) {
+      for (const candidate of selectedWithFreshPrices)
+        if (!candidate.publicationHistory)
+          candidate.publicationHistory = { status: "unavailable", items: [] };
+      toolCalls.push({
+        name: "public_thesis_history",
+        count: 0,
+        status: "error",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
 
     const backgroundContext: HolderResearchRunReport["backgroundContext"] = {
       enabled: policy.backgroundContextEnabled,
@@ -2850,10 +2927,13 @@ export async function runHolderResearch(
       selectedByKey: [],
     };
     let backgroundByKey = new Map<string, HolderBackground>();
-    const backgroundCandidates = selectedWithFreshPrices.slice(
-      0,
-      policy.maxCandidatesPerRun,
-    );
+    const backgroundCandidates = selectedWithFreshPrices
+      .filter(
+        (candidate) =>
+          !policy.sideChangeRequiresEvidence ||
+          candidate.publicationHistory?.status === "ok",
+      )
+      .slice(0, policy.maxCandidatesPerRun);
     if (!policy.backgroundContextEnabled || !args.callModel || policy.dryRun) {
       backgroundContext.skippedReason = "disabled_or_dry_run";
     } else if (!options.backgroundRedis) {
@@ -2900,8 +2980,23 @@ export async function runHolderResearch(
 
     const cacheEligibleCandidates: HolderResearchCandidate[] = [];
     for (const candidate of selectedWithFreshPrices) {
+      if (
+        policy.sideChangeRequiresEvidence &&
+        candidate.publicationHistory?.status !== "ok"
+      ) {
+        technicalSkips.push({
+          key: candidate.key,
+          reason: "publication_history_unavailable",
+          detail: "Retry next scheduled run without caching a rejection.",
+        });
+        continue;
+      }
       let cacheEvaluation: HolderResearchDecisionCacheEvaluation | null = null;
-      if (policy.decisionCacheEnabled && options.decisionCacheRedis) {
+      if (
+        policy.decisionCacheEnabled &&
+        options.decisionCacheRedis &&
+        !candidate.comparisonPositionsUnavailable
+      ) {
         decisionCache.checked += 1;
         const cacheKey = buildHolderResearchDecisionCacheKey(
           candidate.thesisKey,
@@ -3060,6 +3155,37 @@ export async function runHolderResearch(
       ].join(" "),
     });
 
+    let eventPublications: EventPublication[] = [];
+    let eventHistoryAvailable = true;
+    if (policy.eventPublicationHistoryEnabled) {
+      try {
+        eventPublications = await loadEventPublications(
+          client,
+          triageInputCandidates.flatMap((candidate) =>
+            candidate.market.eventId ? [candidate.market.eventId] : [],
+          ),
+          new Date(),
+        );
+      } catch (error) {
+        eventHistoryAvailable = false;
+        console.warn(
+          "[holder-research] event publication history unavailable; continuing",
+          { error: error instanceof Error ? error.message : String(error) },
+        );
+      }
+    }
+    const committedEventPublications: EventPublication[] = [];
+    toolCalls.push({
+      name: "event_publication_history",
+      count: eventPublications.length,
+      status: !policy.eventPublicationHistoryEnabled
+        ? "skipped"
+        : eventHistoryAvailable
+          ? "ok"
+          : "error",
+      detail: `enabled=${policy.eventPublicationHistoryEnabled} windowDays=7 distinctThesesPerEvent=6 sentinel=1`,
+    });
+
     const rankedCandidates: Array<{
       candidate: HolderResearchCandidate;
       decision: HolderResearchTriageDecision;
@@ -3091,6 +3217,8 @@ export async function runHolderResearch(
             calibrationMemo,
             useV2: useV2Triage,
             backgroundByKey,
+            eventPublications,
+            eventHistoryAvailable,
           });
         } catch (error) {
           const message =
@@ -3267,37 +3395,6 @@ export async function runHolderResearch(
       { limit: rankedCandidates.length, useV2: useV2Triage },
     ).map(({ candidate }) => candidate);
 
-    let eventPublications: EventPublication[] = [];
-    let eventHistoryAvailable = true;
-    if (policy.eventPublicationHistoryEnabled) {
-      try {
-        eventPublications = await loadEventPublications(
-          client,
-          finalCandidates.flatMap((candidate) =>
-            candidate.market.eventId ? [candidate.market.eventId] : [],
-          ),
-          new Date(),
-        );
-      } catch (error) {
-        eventHistoryAvailable = false;
-        console.warn(
-          "[holder-research] event publication history unavailable; continuing",
-          { error: error instanceof Error ? error.message : String(error) },
-        );
-      }
-    }
-    const committedEventPublications: EventPublication[] = [];
-    toolCalls.push({
-      name: "event_publication_history",
-      count: eventPublications.length,
-      status: !policy.eventPublicationHistoryEnabled
-        ? "skipped"
-        : eventHistoryAvailable
-          ? "ok"
-          : "error",
-      detail: `enabled=${policy.eventPublicationHistoryEnabled} windowDays=7 distinctThesesPerEvent=6 sentinel=1`,
-    });
-
     const shouldPersist =
       !policy.dryRun && policy.persistNotes && args.callModel;
     const publicationProgress = createHolderResearchPublicationProgress({
@@ -3325,6 +3422,18 @@ export async function runHolderResearch(
     for (const selectedCandidate of finalCandidates) {
       if (finalModelCalls >= policy.maxAgentCallsPerRun) break;
       if (publicationProgress.stopped) break;
+      if (
+        policy.sideChangeRequiresEvidence &&
+        selectedCandidate.publicationHistory?.status !== "ok"
+      ) {
+        technicalSkips.push({
+          key: selectedCandidate.key,
+          reason: "publication_history_unavailable",
+          detail:
+            "Retry on the next scheduled run; no editorial decision cached.",
+        });
+        continue;
+      }
 
       const finalPriceCheck = args.callModel
         ? await applyFreshPriceChecksToCandidates({
@@ -3446,13 +3555,25 @@ export async function runHolderResearch(
         eventPublicationHistory,
       );
       const editorialDuplicate = duplicateCheckedOutput !== rawDecision.output;
-      const gatedOutput = applyHolderResearchPublishQualityGate({
+      let gatedOutput = applyHolderResearchPublishQualityGate({
         candidate,
         externalResearch: canonicalExternalResearchV2(externalResearch),
         output: duplicateCheckedOutput,
         policy,
         publishedRunDecisions: publicationProgress.publishedDecisions,
       });
+      const publicComparison = assessHolderCandidateSideChange(
+        candidate,
+        gatedOutput,
+        policy,
+        canonicalExternalResearchV2(externalResearch),
+      );
+      if (gatedOutput.status === "PUBLISH" && !publicComparison.allowed) {
+        gatedOutput = asContextHolderResearchOutput(
+          gatedOutput,
+          publicComparison.reason,
+        );
+      }
       const horizonException = assessHolderResearchHorizonException({
         candidate,
         policy,
@@ -3461,6 +3582,13 @@ export async function runHolderResearch(
       });
       const modelMeta = {
         ...rawDecision.modelMeta,
+        public_thesis_comparison: {
+          ...publicComparison,
+          comparison: rawDecision.output.publicationComparison ?? null,
+          comparedNoteIds:
+            candidate.publicationHistory?.items.map((note) => note.noteId) ??
+            [],
+        },
         editorial_duplicate: editorialDuplicate,
         event_publication_history: {
           status: eventPublicationHistory.status,
@@ -3863,8 +3991,28 @@ export async function runHolderResearch(
         selectionClusterBonus: policy.selectionClusterBonus,
         selectionVersion: 2,
         eventPublicationHistoryEnabled: policy.eventPublicationHistoryEnabled,
+        singleGameSportsClusterOnly: policy.singleGameSportsClusterOnly,
+        sideChangeRequiresEvidence: policy.sideChangeRequiresEvidence,
       },
       totals: {
+        editorialDuplicates: decisions.filter(
+          (decision) => decision.modelMeta.editorial_duplicate === true,
+        ).length,
+        duplicateFinalCostUsd: decisions
+          .filter((decision) => decision.modelMeta.editorial_duplicate === true)
+          .reduce(
+            (sum, decision) =>
+              sum + (args.callModel ? decision.cost.chargedCostUsd : 0),
+            0,
+          ),
+        duplicateSearchCostUsd: decisions
+          .filter((decision) => decision.modelMeta.editorial_duplicate === true)
+          .reduce(
+            (sum, decision) =>
+              sum +
+              (externalResearchByKey.get(decision.candidate.key)?.costUsd ?? 0),
+            0,
+          ),
         candidatesLoaded: candidates.length,
         selected: selectedWithTypeMetrics.length,
         published: persistence?.persisted ?? 0,
@@ -3974,6 +4122,11 @@ export async function runHolderResearch(
         status: decision.output.status,
         qualityGateReason: decision.qualityGateReason ?? null,
         editorialDuplicate: decision.modelMeta.editorial_duplicate === true,
+        publicThesisComparison:
+          (decision.modelMeta.public_thesis_comparison as Record<
+            string,
+            unknown
+          >) ?? null,
         eventPublicationHistory:
           (decision.modelMeta
             .event_publication_history as HolderResearchRunReport["decisions"][number]["eventPublicationHistory"]) ??
@@ -4053,7 +4206,10 @@ export async function runHolderResearch(
   }
 }
 
-export const holderResearchModelTestHooks = { callHolderResearchModel };
+export const holderResearchModelTestHooks = {
+  callHolderResearchModel,
+  callHolderResearchTriageModel,
+};
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   let redis: ReturnType<typeof createRedisClient> | null = null;

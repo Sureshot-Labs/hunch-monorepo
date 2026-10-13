@@ -21,21 +21,12 @@ export type SignalBotFollowthroughPolicy = {
 };
 
 export const DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES: SignalBotFollowthroughType[] =
-  ["stats", "resolved_win", "resolved_loss"];
+  ["stats", "resolved_win"];
 
 function normalizeSignalBotFollowthroughTypes(
   input: SignalBotFollowthroughType[],
 ): SignalBotFollowthroughType[] {
   const types = Array.from(new Set(input.filter(isSignalBotFollowthroughType)));
-  if (types.length === 0) return DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES;
-
-  // Terminal outcomes are an atomic track-record feature. Legacy runtime
-  // policies commonly enabled only resolved_win; preserving that shape would
-  // selectively publish winners and silently suppress losses.
-  if (types.includes("resolved_win") || types.includes("resolved_loss")) {
-    if (!types.includes("resolved_win")) types.push("resolved_win");
-    if (!types.includes("resolved_loss")) types.push("resolved_loss");
-  }
   return types;
 }
 
@@ -142,7 +133,7 @@ export function defaultSignalBotFollowthroughPolicy(
   env: NodeJS.ProcessEnv = process.env,
 ): SignalBotFollowthroughPolicy {
   return normalizeSignalBotFollowthroughPolicy({
-    enabled: parseBool(env.HUNCH_SIGNAL_BOT_FOLLOWTHROUGH_ENABLED, false),
+    enabled: parseBool(env.HUNCH_SIGNAL_BOT_FOLLOWTHROUGH_ENABLED, true),
     types: parseSignalBotFollowthroughTypes(
       env.HUNCH_SIGNAL_BOT_FOLLOWTHROUGH_TYPES,
       DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES,

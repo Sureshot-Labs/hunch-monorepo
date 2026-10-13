@@ -93,6 +93,8 @@ import {
   enrichHolderResearchFirstObservedActivity,
   enrichHolderResearchHolderContext,
   enrichHolderResearchLivePositions,
+  holderResearchPublicPositions,
+  enrichHolderPublicComparison,
   HOLDER_RESEARCH_EXTERNAL_SEARCH_SPORTS_WORDING,
   isSharpHolder,
   loadHolderResearchCandidateMarkets,
@@ -166,6 +168,10 @@ function policy(overrides: Partial<HolderResearchPolicy> = {}) {
     maxPublishHorizonHoursByCategory: {},
     minPublishEntryPrice: 0,
     sportsOutrightPublishMode: "enabled" as const,
+    // Legacy quality fixtures; dedicated publication-history tests exercise
+    // the new defaults and policy rollback independently.
+    singleGameSportsClusterOnly: false,
+    sideChangeRequiresEvidence: false,
     ...overrides,
   };
 }
@@ -1481,7 +1487,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const p = policy();
       const candidate = sharpMinorityCandidate(p);
       const snapshotAt = new Date();
-      const queryFor = (present: boolean) =>
+      const queryFor = (present: boolean, shares: string | null = "100") =>
         ({
           query: async (sql: string) => ({
             rows:
@@ -1491,7 +1497,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
                     venue: candidate.market.venue,
                     market_id: candidate.market.marketId,
                     outcome_side: entry.side,
-                    shares: "100",
+                    shares,
                     size_usd: "10000",
                     price: "0.5",
                     snapshot_at: snapshotAt,
@@ -1528,6 +1534,43 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.ok(
         confirmed.market.holders.every(
           (entry) => entry.livePositionConfirmedAt === snapshotAt.toISOString(),
+        ),
+      );
+      const originalAt = new Date(snapshotAt.getTime() - 3600000).toISOString();
+      const withOldQuantity = {
+        ...candidate,
+        market: {
+          ...candidate.market,
+          holders: candidate.market.holders.map((holder) => ({
+            ...holder,
+            positionShares: 40000,
+            positionSnapshotAt: originalAt,
+          })),
+        },
+      };
+      const [usdOnly] = await enrichHolderResearchLivePositions(
+        queryFor(true, null),
+        [withOldQuantity],
+        p,
+      );
+      assert.ok(usdOnly);
+      assert.ok(
+        holderResearchPublicPositions(usdOnly, p).every(
+          (position) => position.observedAt === originalAt,
+        ),
+      );
+      const [zero] = await enrichHolderResearchLivePositions(
+        queryFor(true, "0"),
+        [withOldQuantity],
+        p,
+      );
+      assert.ok(zero);
+      assert.equal(zero.market.holders.length, 0);
+      assert.ok(
+        holderResearchPublicPositions(zero, p).every(
+          (position) =>
+            position.positionShares === 0 &&
+            position.observedAt === snapshotAt.toISOString(),
         ),
       );
       let checkedCount = 0;
@@ -4323,6 +4366,39 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(stored.size, 0);
       assert.equal(decisionCache.written, 0);
 
+      const previousPublicThesis = {
+        noteId: "20000000-0000-4000-8000-000000000001",
+        marketId: candidate.market.marketId,
+        side: candidate.side === "YES" ? ("NO" as const) : ("YES" as const),
+        publishedAt: "2026-10-12T12:00:00Z",
+        title: "Previous public thesis",
+        summary: "Previously supported the other side.",
+        sideLabel: null,
+        priceSnapshot: null,
+        decisionSnapshot: null,
+        externalResearch: null,
+      };
+      await maybeWriteDecisionCache({
+        redis,
+        policy: p,
+        callModel: true,
+        candidate: {
+          ...candidate,
+          publicationHistory: { status: "ok", items: [previousPublicThesis] },
+        },
+        output: {
+          status: "CONTEXT",
+          rationale: "side_change_no_verified_change",
+        },
+        modelMeta: {
+          mode: "openrouter_v1",
+          external_research: { status: "error", error: "request_timeout" },
+        },
+        decisionCache,
+      });
+      assert.equal(stored.size, 0, "reversal search failure retries next run");
+      assert.equal(decisionCache.written, 0);
+
       await maybeWriteDecisionCache({
         redis,
         policy: p,
@@ -4575,8 +4651,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const oldContract = {
         ...cachedSkip,
         modelConfigSignature: currentSignature.replace(
+          "holder_decision_contract_v10",
           "holder_decision_contract_v8",
-          "holder_decision_contract_v7",
         ),
       };
       assert.equal(
@@ -4662,6 +4738,168 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       });
       assert.equal(contextBeforeCooldown.action, "skip");
       assert.equal(contextBeforeCooldown.cachedStatus, "CONTEXT");
+    },
+  },
+  {
+    name: "public chronology and observed quantity changes reopen editorial cache without USD repricing",
+    run: () => {
+      const p = policy();
+      const candidate = buildHolderResearchCandidatesFromMarket(
+        market(),
+        p,
+      ).find((item) => item.bucket === "sharp_minority");
+      assert.ok(candidate);
+      const before = {
+        walletId: "comparison-holder",
+        side: "YES" as const,
+        positionShares: 1000000,
+        currentPrice: 0.15,
+        observedAt: "2026-01-01T00:00:00Z",
+        strong: true,
+      };
+      candidate.publicationHistory = { status: "ok", items: [] };
+      candidate.comparisonPositions = [before];
+      const cached = buildHolderResearchDecisionCacheRecord({
+        candidate,
+        output: { status: "CONTEXT", rationale: "No verified change" },
+        model: p.model,
+        policy: p,
+        now: new Date("2026-01-01T00:30:00Z"),
+      });
+      const evaluate = () =>
+        evaluateHolderResearchDecisionCache({
+          candidate,
+          cachedDecision: cached,
+          policy: p,
+          now: new Date("2026-01-01T01:30:00Z"),
+        });
+      candidate.comparisonPositions = [
+        {
+          ...before,
+          positionShares: 1250000,
+          currentPrice: 0.12,
+          observedAt: "2026-01-01T01:00:00Z",
+        },
+      ];
+      assert.ok(
+        evaluate().meaningfulDeltaReasons.includes(
+          "holder_quantity_changed:YES",
+        ),
+      );
+      candidate.comparisonPositions = [
+        {
+          ...before,
+          positionShares: 1250000,
+          currentPrice: 0.12,
+          observedAt: "2026-01-01T00:20:00Z",
+        },
+      ];
+      assert.ok(
+        evaluate().meaningfulDeltaReasons.includes(
+          "holder_quantity_changed:YES",
+        ),
+      ); // delayed ingestion predates cache write
+      candidate.comparisonPositions = [
+        { ...before, currentPrice: 0.12, observedAt: "2026-01-01T01:00:00Z" },
+      ];
+      assert.equal(evaluate().action, "skip");
+      candidate.comparisonPositions = [
+        {
+          ...before,
+          positionShares: 0,
+          strong: false,
+          observedAt: "2026-01-01T01:00:00Z",
+        },
+      ];
+      assert.ok(
+        evaluate().meaningfulDeltaReasons.includes(
+          "holder_quantity_changed:YES",
+        ),
+      );
+      candidate.comparisonPositions = [];
+      assert.equal(evaluate().action, "skip");
+      candidate.publicationHistory.items = [
+        { noteId: "new-public-note" } as never,
+      ];
+      assert.ok(
+        evaluate().meaningfulDeltaReasons.includes("public_baseline_changed"),
+      );
+    },
+  },
+  {
+    name: "comparison snapshots stay bounded and optional quantity failure preserves usable history",
+    run: async () => {
+      const p = policy();
+      const candidate = sharpMinorityCandidate(p);
+      const makePrior = (
+        walletId: string,
+        strong: boolean,
+        positionShares = 100000,
+      ) => ({
+        walletId,
+        side: "NO",
+        strong,
+        positionShares,
+        currentPrice: 0.5,
+        observedAt: "2026-01-01",
+      });
+      let keys: Array<{ wallet_id: string }> = [];
+      const db = {
+        query: async (sql: string, params: unknown[]) => {
+          if (sql.includes("from unnest"))
+            return {
+              rows: [
+                {
+                  marketId: candidate.market.marketId,
+                  noteId: "public",
+                  side: "YES",
+                  decisionSnapshot: {
+                    publicComparisonPositions: [
+                      makePrior("prior-strong", true),
+                      makePrior("older-exited", false, 0),
+                      makePrior("older-weak", false),
+                    ],
+                  },
+                },
+              ],
+            };
+          keys = JSON.parse(String(params[0]));
+          throw Error("quantity_lookup_unavailable");
+        },
+      } as unknown as import("pg").PoolClient;
+      await assert.rejects(
+        enrichHolderPublicComparison(db, [candidate], p),
+        /quantity_lookup_unavailable/,
+      );
+      assert.equal(candidate.publicationHistory?.status, "ok");
+      assert.equal(candidate.comparisonPositionsUnavailable, true);
+      assert.ok(keys.some((key) => key.wallet_id === "prior-strong"));
+      assert.ok(!keys.some((key) => key.wallet_id.startsWith("older-")));
+      let writes = 0;
+      await maybeWriteDecisionCache({
+        redis: {
+          get: async () => null,
+          set: async () => {
+            writes++;
+            return "OK";
+          },
+        },
+        policy: { ...p, decisionCacheEnabled: true, dryRun: false },
+        callModel: true,
+        candidate,
+        output: { status: "CONTEXT", rationale: "No quantity available" },
+        decisionCache: {
+          enabled: true,
+          status: "ok",
+          checked: 0,
+          skipped: 0,
+          rechecked: 0,
+          written: 0,
+          errors: 0,
+          dryRun: false,
+        },
+      });
+      assert.equal(writes, 0);
     },
   },
   {
@@ -5136,6 +5374,28 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       assert.equal(quality.credentialStrength, "contradicted");
       assert.equal(quality.actorStrength, "weak_single");
       assert.equal(quality.reasons.includes("negative_30d_pnl"), true);
+      const strictPolicy = {
+        ...p,
+        singleGameSportsClusterOnly: true,
+        qualityGateEnabled: false,
+        preTriageActionabilityEnabled: false,
+      };
+      assert.ok(
+        buildHolderResearchCandidateActionability(
+          candidate,
+          strictPolicy,
+        ).likelyFinalGateBlockers.includes(
+          "single_game_sports_cluster_required",
+        ),
+      );
+      assert.equal(
+        applyHolderResearchPublishQualityGate({
+          candidate,
+          output: publishOutput(candidate),
+          policy: strictPolicy,
+        }).status,
+        "CONTEXT",
+      );
     },
   },
   {
@@ -6213,7 +6473,7 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       );
       assert.match(
         prompt,
-        /It need not have fresh news, early entry, favorable momentum/i,
+        /A first thesis need not have fresh news, early entry, favorable momentum/i,
       );
       assert.match(prompt, /strongest plausible alternative explanation/i);
       assert.match(prompt, /not.*calibrated event probability/i);
@@ -9974,7 +10234,101 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
-    name: "editorial duplicate deletes exact old cache and never starts cooldown",
+    name: "V1 and V2 triage receive dated same-side and opposing publication history before research",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalKey = env.openRouterKey;
+      const p = policy({ eventPublicationHistoryEnabled: true });
+      const candidate = sharpMinorityCandidate(p);
+      assert.ok(candidate.market.eventId);
+      const publication: EventPublication = {
+        event_id: candidate.market.eventId,
+        market_id: candidate.market.marketId,
+        side: candidate.side === "YES" ? "NO" : "YES",
+        note_id: "old-note",
+        published_at: "2026-10-07T12:00:00Z",
+        title: "Previous opposing thesis",
+        summary: "Earlier holder alignment supported the opposite outcome.",
+        win_condition: "The selected team wins this matchup",
+        holder_ids: [],
+      };
+      try {
+        env.openRouterKey = "test-only";
+        for (const useV2 of [false, true]) {
+          globalThis.fetch = (async (_url, init) => {
+            const body = JSON.parse(String(init?.body));
+            const user = body.messages.find(
+              (m: { role: string }) => m.role === "user",
+            ).content;
+            const system = body.messages.find(
+              (m: { role: string }) => m.role === "system",
+            ).content;
+            assert.ok(user.includes(publication.summary));
+            assert.ok(user.includes(publication.published_at));
+            assert.ok(user.includes("editorial_comparison_only"));
+            assert.match(system, /checkable/i);
+            const decisions = useV2
+              ? [
+                  {
+                    key: candidate.key,
+                    action: "investigate",
+                    reason_codes: ["research_needed"],
+                    research_need: "news_timing",
+                    reason:
+                      "Check the new circumstance against the earlier opposing view.",
+                  },
+                ]
+              : [
+                  {
+                    key: candidate.key,
+                    action: "investigate",
+                    priority: 0.8,
+                    needs_external_search: true,
+                    reason:
+                      "Check the new circumstance against the earlier opposing view.",
+                    research_question:
+                      "What changed since the earlier publication?",
+                  },
+                ];
+            return new Response(
+              JSON.stringify({
+                choices: [
+                  {
+                    finish_reason: "stop",
+                    message: {
+                      content: JSON.stringify({
+                        version: useV2
+                          ? "holder_research_triage_v2"
+                          : "holder_research_triage_v1",
+                        decisions,
+                      }),
+                    },
+                  },
+                ],
+                usage: { cost: 0.001 },
+              }),
+            );
+          }) as typeof fetch;
+          const result =
+            await holderResearchModelTestHooks.callHolderResearchTriageModel({
+              candidates: [candidate],
+              policy: p,
+              maxInvestigate: 1,
+              calibrationMemo: [],
+              useV2,
+              eventPublications: [publication],
+              eventHistoryAvailable: true,
+            });
+          assert.equal(result.decisions[0]?.action, "investigate");
+        }
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.openRouterKey = originalKey;
+      }
+    },
+  },
+  {
+    name: "editorial duplicate caches SKIP without suppressing material changes",
     run: async () => {
       const candidate = sharpMinorityCandidate(policy());
       const key = buildHolderResearchDecisionCacheKey(candidate.thesisKey);
@@ -10007,8 +10361,18 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         modelMeta: { editorial_duplicate: true },
         decisionCache: stats,
       });
-      assert.deepEqual([...stored.keys()], ["other-key"]);
-      assert.equal(stats.written, 0);
+      assert.equal(stored.get("other-key"), "other-thesis");
+      const cached = parseHolderResearchCachedDecision(stored.get(key) ?? null);
+      assert.equal(cached?.status, "SKIP");
+      assert.equal(stats.written, 1);
+      assert.equal(
+        evaluateHolderResearchDecisionCache({
+          candidate,
+          cachedDecision: cached,
+          policy: policy({ decisionCacheEnabled: true, dryRun: false }),
+        }).action,
+        "skip",
+      );
     },
   },
 ];

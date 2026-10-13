@@ -290,7 +290,7 @@ test("old global-growth projection is discarded without restarting the pass or b
   assert.equal(await store.spent(generation), 0.4);
   assert.equal(providerCalls.length, 0);
 });
-test("serving projection pause does not block replacement; real headroom still blocks it", async () => {
+test("serving reconciliation never projects a second full copy; real headroom still blocks inference", async () => {
   await serve(legacy);
   for (const kind of ["event", "market"] as const)
     await store.ensureIndex(generation, kind);
@@ -323,12 +323,8 @@ test("serving projection pause does not block replacement; real headroom still b
     };
   }>(`${CONTROL}status`);
   assert.equal(status?.state, "building");
-  assert.equal(
-    status?.reason,
-    `background_memory_paused:${legacy.id}:projection`,
-  );
-  assert.equal(status?.memory.pauses[0].generation, legacy.id);
-  assert.ok(Number(status?.memory.pauses[0].projectedBytes) > 6 * 1024 ** 3);
+  assert.equal(status?.reason, null);
+  assert.deepEqual(status?.memory.pauses, []);
   await store.put(checkpointKey(generation), start);
   const worker = new EmbeddingEngine({
     store,
@@ -354,6 +350,257 @@ test("serving projection pause does not block replacement; real headroom still b
 });
 test("stream IDs compare numerically", () =>
   assert.equal(compareStreamId("10-0", "9-100"), 1));
+
+test("September serving checkpoint resumes in place despite a full-copy projection above 6 GiB", async () => {
+  await serve(qwen);
+  await store.put(
+    checkpointKey(qwen),
+    checkpoint("building", {
+      startedAt: Date.parse("2026-09-22T03:37:37Z"),
+      pilotItems: 1141,
+      projectedBytes: 7.2 * 1024 ** 3,
+      after: JSON.stringify({ version: 3, venue: "polymarket", keys: null }),
+      coverage: {
+        events: { eligible: 27043, verified: 1141, missing: 0 },
+        markets: { eligible: 236766, verified: 0, missing: 0 },
+      },
+    }),
+  );
+  await engine().tick();
+  assert.equal(
+    (await store.get<Checkpoint>(checkpointKey(qwen)))?.kind,
+    "market",
+  );
+  assert.equal(providerCalls.length, 0);
+  const status = await store.get<{
+    state: string;
+    reconciliation: { state: string };
+    live: { completed: boolean };
+    memory: { projectedBytes: number | null };
+  }>(`${CONTROL}status`);
+  assert.equal(status?.state, "active");
+  assert.equal(status?.reconciliation.state, "building");
+  assert.equal(status?.live.completed, true);
+  assert.equal(status?.memory.projectedBytes, null);
+});
+
+test("real memory pressure blocks live allocations but cache hits ACK and renew TTL; recovery resumes", async () => {
+  await serve();
+  let available = 1024 ** 3;
+  const worker = new EmbeddingEngine({
+    store,
+    db,
+    apiKey: "fixture",
+    provider,
+    availableMemory: async () => available,
+  });
+  await redis.expire(embeddingKey(generation, "market", "market:a"), 60);
+  await enqueueMarket();
+  await worker.tick();
+  assert.equal(await pendingCount(), 0);
+  assert.ok(
+    (await redis.ttl(embeddingKey(generation, "market", "market:a"))) > 86000,
+  );
+  await redis.del(embeddingKey(generation, "market", "market:a"));
+  const id = await enqueueMarket();
+  await worker.tick();
+  assert.equal(providerCalls.length, 0);
+  assert.equal(await pendingCount(), 1);
+  available = 8 * 1024 ** 3;
+  await redis.sendCommand([
+    "XCLAIM",
+    STREAM,
+    GROUP,
+    "dead-owner",
+    "0",
+    id,
+    "IDLE",
+    "61000",
+  ]);
+  await worker.tick();
+  assert.equal(await pendingCount(), 0);
+  assert.equal(providerCalls.length, 1);
+});
+
+test("memory pressure between retries stops paid attempts and preserves unknown cost; recovery resumes", async () => {
+  await serve();
+  await redis.del(embeddingKey(generation, "market", "market:a"));
+  const id = await enqueueMarket();
+  let available = 8 * 1024 ** 3;
+  let calls = 0;
+  const retrying: Provider = async (options) => {
+    await options.beforeAttempt?.({ attempt: 1, estimatedCostUsd: 0.00001 });
+    calls++;
+    if (calls === 1) {
+      available = 1024 ** 3;
+      await options.beforeAttempt?.({ attempt: 2, estimatedCostUsd: 0.00001 });
+      assert.fail("retry must not pass admission after memory pressure");
+    }
+    return {
+      embeddings: options.texts.map(() => [...vector]),
+      usage: { inputTokens: 10, costUsd: 0.00001 },
+      attempts: 1,
+    };
+  };
+  const worker = new EmbeddingEngine({
+    store,
+    db,
+    apiKey: "fixture",
+    provider: retrying,
+    availableMemory: async () => available,
+  });
+  await worker.tick();
+  assert.equal(calls, 1);
+  assert.equal(await pendingCount(), 1);
+  const costs = await store.costs.read(generation, true);
+  assert.equal(costs.maintenance.unknownUsd, 0.00001);
+  assert.equal(costs.maintenance.reservedUsd, 0);
+  available = 8 * 1024 ** 3;
+  await redis.sendCommand([
+    "XCLAIM",
+    STREAM,
+    GROUP,
+    "dead-owner",
+    "0",
+    id,
+    "IDLE",
+    "61000",
+  ]);
+  await worker.tick();
+  assert.equal(calls, 2);
+  assert.equal(await pendingCount(), 0);
+  assert.equal(
+    (await store.costs.read(generation, true)).maintenance.knownActualUsd,
+    0.00001,
+  );
+});
+
+test("cost settlement refunds known overestimates; live costs do not exhaust the build budget", async () => {
+  const build = await store.reserve(generation, 0.8, 1);
+  await store.costs.settle(generation, build, 0.1);
+  await store.costs.settle(generation, build, 0.1); // idempotent
+  const live = await store.reserve(generation, 30, null);
+  await store.costs.settle(generation, live, 4);
+  const second = await store.reserve(generation, 0.8, 1);
+  await store.costs.settle(generation, second, null);
+  const costs = await store.costs.read(generation, true);
+  assert.equal(costs.build.spentUsd, 0.9);
+  assert.equal(costs.build.knownActualUsd, 0.1);
+  assert.equal(costs.build.unknownUsd, 0.8);
+  assert.equal(costs.build.actualUsd, null);
+  assert.equal(costs.maintenance.actualUsd, 4);
+  assert.equal(costs.build.reservedUsd, 0);
+  await assert.rejects(
+    () => store.reserve(generation, 0.2, 1),
+    /budget_exhausted/,
+  );
+});
+
+test("concurrent reservations cannot overspend and successful zero-cost calls release their entire reserve", async () => {
+  const reservations = await Promise.allSettled([
+    store.reserve(generation, 0.6, 1),
+    store.reserve(generation, 0.6, 1),
+  ]);
+  assert.equal(
+    reservations.filter((item) => item.status === "fulfilled").length,
+    1,
+  );
+  const success = reservations.find((item) => item.status === "fulfilled");
+  assert.ok(success?.status === "fulfilled");
+  await store.costs.settle(generation, success.value, 0);
+  assert.equal(await store.spent(generation), 0);
+  assert.equal((await store.costs.read(generation, false)).build.actualUsd, 0);
+});
+
+test("actual Redis limit protects live inference, not cache hits, and recovers without clearing the checkpoint", async () => {
+  await serve();
+  await store.release();
+  let measured = 7 * 1024 ** 3;
+  store = new EmbeddingStore({
+    get: (key) => redis.get(key),
+    sendCommand: (args) =>
+      args[0] === "INFO" && args[1] === "memory"
+        ? Promise.resolve(
+            `used_memory:${measured}\r\nused_memory_rss:${measured}\r\n`,
+          )
+        : redis.sendCommand(args as string[]),
+  });
+  assert.equal(await store.acquire(), true);
+  await enqueueMarket();
+  await engine().tick();
+  assert.equal(await pendingCount(), 0);
+  assert.equal(providerCalls.length, 0);
+  await redis.del(embeddingKey(generation, "market", "market:a"));
+  const id = await enqueueMarket();
+  await engine().tick();
+  assert.equal(await pendingCount(), 1);
+  assert.equal(providerCalls.length, 0);
+  const paused = await store.get<{ reason: string }>(`${CONTROL}status`);
+  assert.ok(paused);
+  assert.match(paused.reason, /redis_used/);
+  measured = 3.45 * 1024 ** 3;
+  measured = Math.floor(measured);
+  await redis.sendCommand([
+    "XCLAIM",
+    STREAM,
+    GROUP,
+    "dead-owner",
+    "0",
+    id,
+    "IDLE",
+    "61000",
+  ]);
+  await engine().tick();
+  assert.equal(await pendingCount(), 0);
+  assert.equal(providerCalls.length, 1);
+});
+
+test("legacy mixed counters are preserved; unfinished builds keep their conservative liability", async () => {
+  for (const g of [generation, qwen]) {
+    await redis.set(`${CONTROL}budget:${g.id}`, "29809651580");
+    await redis.set(`${CONTROL}actual-cost:${g.id}`, "4.26888332");
+    await redis.set(`${CONTROL}unknown-cost:${g.id}`, "true");
+  }
+  const serving = await store.costs.read(generation, true);
+  assert.equal(serving.build.spentUsd, 0);
+  assert.equal(serving.legacy.estimatedUsd, 29.80965158);
+  assert.equal(serving.legacy.knownActualUsd, 4.26888332);
+  assert.equal(serving.legacy.hasUnknown, true);
+  assert.equal(
+    await redis.get(`${CONTROL}budget:${generation.id}`),
+    "29809651580",
+  );
+  await assert.rejects(() => store.reserve(qwen, 0.1, 10), /budget_exhausted/);
+  assert.equal(
+    (await store.costs.read(qwen, false)).legacy.attributedToBuildUsd,
+    29.80965158,
+  );
+});
+
+test("interrupted reservations become unknown once after lease handoff, not free retries", async () => {
+  const reservation = await store.reserve(generation, 0.4, 0.5);
+  const old = store;
+  await store.release();
+  store = new EmbeddingStore(redis);
+  assert.equal(await store.acquire(), true);
+  let costs = await store.costs.read(generation, false);
+  assert.equal(costs.build.unknownUsd, 0.4);
+  assert.equal(costs.build.reservedUsd, 0);
+  await assert.rejects(
+    () => old.costs.settle(generation, reservation, 0),
+    /lease_lost/,
+  );
+  costs = await store.costs.read(generation, false);
+  assert.equal(costs.build.unknownUsd, 0.4);
+  assert.equal(
+    await redis.hLen(`${CONTROL}cost-v2-pending:${generation.id}`),
+    0,
+  );
+  await assert.rejects(
+    () => store.reserve(generation, 0.2, 0.5),
+    /budget_exhausted/,
+  );
+});
 test("ACTIVE pages skip terminal history and disabled venues entirely", async () => {
   await db.query(`insert into unified_markets(id,venue,status,title)
     select 'a:' || lpad(fixture_no::text,6,'0'),
@@ -448,7 +695,9 @@ test("time cursors preserve NULLs, tied dates and microseconds across small page
   }
 });
 test("source census is bounded, shared, restartable and required before background inference", async () => {
-  await serve();
+  await serve(legacy);
+  await seedGeneration(generation);
+  await store.put(`${CONTROL}generations`, [legacy, generation]);
   await db.query(`insert into unified_events(id,venue,status,title)
     select 'a:' || lpad(fixture_no::text,6,'0'),'polymarket','ACTIVE','Orphan'
     from generate_series(1,1000) as fixture_rows(fixture_no)`);

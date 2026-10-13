@@ -14,6 +14,7 @@ import {
 } from "./services/holder-research.js";
 import { parseHolderResearchUpdateV1 } from "./services/signal-publication-contract.js";
 import { getIntelPolicyDefaults } from "./services/runtime-policies.js";
+import { loadHolderPublicHistory } from "./services/holder-research-publication-history.js";
 
 const runId = `holder-publication-integration:${randomUUID()}`;
 const policy = {
@@ -51,6 +52,7 @@ function candidate(suffix: string): HolderResearchCandidate {
     evidence: [],
     cooldownUntil: null,
     meaningfulDeltaReasons: [],
+    publicationHistory: { status: "ok", items: [] },
     market: {
       marketId: id,
       eventId: null,
@@ -274,6 +276,53 @@ try {
     decisions: [report],
   });
   assert.equal(repeated.skippedExisting, 1);
+  const reversal = candidate("public-reversal");
+  const prior = {
+    ...reversal,
+    key: `${reversal.key}:prior`,
+    side: "NO" as const,
+    direction: "down" as const,
+    thesisKey: `holder_research:v2:${reversal.market.marketId}:NO`,
+  };
+  const priorId = await seed(prior);
+  await client.query(
+    `update ai_notes set direction='down',lineage=jsonb_set(lineage,'{side}','"NO"') where id=$1`,
+    [priorId],
+  );
+  await client.query(
+    `update ai_note_targets set is_primary=true,target_meta='{"side":"NO"}' where note_id=$1`,
+    [priorId],
+  );
+  await client.query(
+    `insert into signal_bot_messages(chat_id,note_id,thread_root_note_id,message_kind,telegram_message_id,baseline_at,sent_at,metrics) values('fixture',$1,$1,'initial',1,$2,$2,'{"status":"sent"}')`,
+    [priorId, ago(24)],
+  );
+  reversal.publicationHistory = (
+    await loadHolderPublicHistory(client, [reversal.market.marketId])
+  ).get(reversal.market.marketId);
+  const reversalDecision = decision(reversal);
+  const unproved = await persistHolderResearchNotes(client, {
+    runnerRunId: runId,
+    policy,
+    decisions: [reversalDecision],
+  });
+  assert.equal(unproved.rejectedByReason.side_change_comparison_missing, 1);
+  reversalDecision.modelMeta.external_research =
+    report.modelMeta.external_research;
+  reversalDecision.output.updateEvidence = report.output.updateEvidence;
+  reversalDecision.output.publicationComparison = {
+    baselineNoteId: priorId,
+    kind: "opposing",
+    reason: "The delegation has since announced a material change of plan.",
+    materialChange: true,
+    evidenceIds: ["external:https://example.com/meeting"],
+  };
+  const proved = await persistHolderResearchNotes(client, {
+    runnerRunId: runId,
+    policy,
+    decisions: [reversalDecision],
+  });
+  assert.equal(proved.persisted, 1);
   console.log(
     "[holder-research-publication-integration-tests] passed actual PG history/baseline SQL, opposite change, external-only unchanged digest, cooldown and concurrent thesis-lock publication",
   );

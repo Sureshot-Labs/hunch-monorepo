@@ -1,4 +1,16 @@
 import { createHash } from "node:crypto";
+import {
+  assessHolderSideChange,
+  compareHolderPositionQuantities,
+  holderPublicationPromptContext,
+  loadHolderComparisonPositions,
+  loadHolderPublicHistory,
+  latestHolderComparisonPositions,
+  publicHistoryBaselineMatches,
+  publicSnapshotPositions,
+  type HolderContractHistory,
+  type HolderPublicPosition,
+} from "./holder-research-publication-history.js";
 import { buildSocialInstrument } from "./social-instrument.js";
 import { resolveLimitlessPositionContract } from "./limitless-protocol-config.js";
 import {
@@ -253,6 +265,9 @@ export type HolderResearchPreviousNote = {
 };
 
 export type HolderResearchCandidate = {
+  publicationHistory?: HolderContractHistory;
+  comparisonPositions?: HolderPublicPosition[];
+  comparisonPositionsUnavailable?: boolean;
   key: string;
   thesisKey: string;
   inputDigest: string;
@@ -368,6 +383,7 @@ export type HolderResearchActionabilityBlocker =
   | "action_price_too_high"
   | "credential_contradicted"
   | "single_game_sports_weak_single"
+  | "single_game_sports_cluster_required"
   | "unsupported_crypto_single"
   | "negative_single_minority"
   | "entry_price_below_publish_floor"
@@ -537,6 +553,8 @@ const PUBLISHABLE_HOLDER_RESEARCH_BUCKETS = new Set<HolderResearchBucket>([
 ]);
 
 export type HolderResearchDecisionSnapshot = {
+  publicComparisonPositions?: HolderPublicPosition[];
+  publicBaselineNoteId?: string | null;
   version: 1;
   priceMovementVersion?: typeof HOLDER_RESEARCH_PRICE_MOVEMENT_VERSION;
   key: string;
@@ -1965,6 +1983,14 @@ export function evaluateHolderResearchPublishRiskGates(input: {
     input.policy,
   );
 
+  if (
+    input.policy.singleGameSportsClusterOnly &&
+    quality.marketType === "single_game_sports" &&
+    quality.actorStrength !== "cluster"
+  ) {
+    blockers.push("single_game_sports_cluster_required");
+  }
+
   if (input.candidate.side != null && price == null) {
     pushUnique(blockers, "live_price_missing_side");
   } else if (price != null && price < input.policy.minPublishEntryPrice) {
@@ -2101,7 +2127,8 @@ export function buildHolderResearchCandidateActionability(
 
   const actionabilityEnabled = Boolean(policy.preTriageActionabilityEnabled);
   const isPrimaryResearchCandidate =
-    !actionabilityEnabled || blockers.length === 0;
+    !blockers.includes("single_game_sports_cluster_required") &&
+    (!actionabilityEnabled || blockers.length === 0);
   const expiryBoost = isPrimaryResearchCandidate
     ? selectionExpiryBoostForHours(quality.hoursToClose, policy)
     : 0;
@@ -2112,7 +2139,11 @@ export function buildHolderResearchCandidateActionability(
     supportOnly,
     estimatedActionPrice,
     hoursToClose: quality.hoursToClose,
-    likelyFinalGateBlockers: actionabilityEnabled ? blockers : [],
+    likelyFinalGateBlockers: actionabilityEnabled
+      ? blockers
+      : blockers.filter(
+          (blocker) => blocker === "single_game_sports_cluster_required",
+        ),
     selectionStrengths: [...new Set(strengths)],
     expiryBoost,
   };
@@ -2453,8 +2484,139 @@ export function scoreHolderResearchCandidateShadowV2(
   );
 }
 
+export function holderResearchPublicPositions(
+  candidate: HolderResearchCandidate,
+  policy: HolderResearchPolicy,
+): HolderPublicPosition[] {
+  const current = candidate.market.holders.map((holder) => ({
+    walletId: holder.walletId,
+    side: holder.side,
+    positionShares: holder.positionShares,
+    observedAt: holder.positionSnapshotAt,
+    currentPrice: holder.currentPrice,
+    strong: isSharpHolder(holder, policy),
+  }));
+  return latestHolderComparisonPositions([
+    ...(candidate.comparisonPositions ?? []),
+    ...current,
+  ]);
+}
+
+/** Shared bounded input for cache, Luna and final; never changes eligibility. */
+export async function enrichHolderPublicComparison(
+  client: Queryable,
+  candidates: HolderResearchCandidate[],
+  policy: HolderResearchPolicy,
+): Promise<void> {
+  const pending = candidates.filter(
+    (candidate) => candidate.publicationHistory == null,
+  );
+  const histories = await loadHolderPublicHistory(
+    client,
+    pending.map((candidate) => candidate.market.marketId),
+  );
+  for (const candidate of pending)
+    candidate.publicationHistory = histories.get(candidate.market.marketId);
+  const keys = pending.flatMap((candidate) =>
+    [
+      ...candidate.market.holders.map((holder) => ({
+        walletId: holder.walletId,
+        side: holder.side,
+      })),
+      ...publicSnapshotPositions(
+        histories.get(candidate.market.marketId)?.items[0]?.decisionSnapshot,
+      ).filter(
+        (position) => position.strong && (position.positionShares ?? 0) > 0,
+      ),
+    ].map((position) => ({
+      walletId: position.walletId,
+      side: position.side,
+      venue: candidate.market.venue,
+      marketId: candidate.market.marketId,
+    })),
+  );
+  let positions: Map<string, HolderPublicPosition>;
+  try {
+    positions = await loadHolderComparisonPositions(client, keys);
+  } catch (error) {
+    for (const candidate of pending)
+      candidate.comparisonPositionsUnavailable = true;
+    throw error; // caller records operational failure; valid history stays usable
+  }
+  for (const candidate of pending) {
+    candidate.publicationHistory = histories.get(candidate.market.marketId);
+    candidate.comparisonPositions = keys
+      .filter((key) => key.marketId === candidate.market.marketId)
+      .flatMap((key) => {
+        const position = positions.get(
+          `${key.walletId}:${key.venue}:${key.marketId}:${key.side}`,
+        );
+        if (!position) return [];
+        const holder = candidate.market.holders.find(
+          (holder) =>
+            holder.walletId === key.walletId && holder.side === key.side,
+        );
+        return [
+          {
+            ...position,
+            strong:
+              holder != null &&
+              (position.positionShares ?? 0) > 0 &&
+              isSharpHolder(holder, policy),
+          },
+        ];
+      });
+  }
+}
+
+export function withHolderPublicComparison(
+  json: Record<string, unknown>,
+  candidate: HolderResearchCandidate,
+  policy: HolderResearchPolicy,
+): Record<string, unknown> {
+  return {
+    ...json,
+    publicationPolicy: {
+      singleGameSportsClusterOnly: policy.singleGameSportsClusterOnly,
+      sideChangeRequiresEvidence: policy.sideChangeRequiresEvidence,
+    },
+    publicThesisHistory: holderPublicationPromptContext({
+      history: candidate.publicationHistory ?? {
+        status: "unavailable",
+        items: [],
+      },
+      positions: holderResearchPublicPositions(candidate, policy),
+      minUsd: policy.minMeaningfulHolderUsdDelta,
+      minPct: policy.minMeaningfulHolderPctDelta,
+    }),
+  };
+}
+
+export function assessHolderCandidateSideChange(
+  candidate: HolderResearchCandidate,
+  output: HolderResearchAgentOutputV1,
+  policy: HolderResearchPolicy,
+  externalResearch: unknown,
+) {
+  return assessHolderSideChange({
+    enabled: policy.sideChangeRequiresEvidence,
+    side: candidate.side ?? "YES",
+    history: candidate.publicationHistory ?? {
+      status: "unavailable",
+      items: [],
+    },
+    comparison: output.publicationComparison,
+    positions: holderResearchPublicPositions(candidate, policy),
+    externalResearch,
+    externalFactEvidence: output.updateEvidence,
+    minUsd: policy.minMeaningfulHolderUsdDelta,
+    minPct: policy.minMeaningfulHolderPctDelta,
+  });
+}
+
 export function buildHolderResearchDecisionSnapshot(
   candidate: HolderResearchCandidate,
+  policy?: HolderResearchPolicy,
 ): HolderResearchDecisionSnapshot {
   const sideSnapshot = (side: HolderResearchSide) => ({
     usd: roundDecisionUsd(side.usd) ?? 0,
@@ -2465,6 +2627,13 @@ export function buildHolderResearchDecisionSnapshot(
   });
   return {
     version: 1,
+    publicComparisonPositions: policy
+      ? holderResearchPublicPositions(candidate, policy)
+      : undefined,
+    publicBaselineNoteId:
+      candidate.publicationHistory?.status === "ok"
+        ? (candidate.publicationHistory.items[0]?.noteId ?? null)
+        : undefined,
     priceMovementVersion: HOLDER_RESEARCH_PRICE_MOVEMENT_VERSION,
     key: candidate.thesisKey,
     bucket: candidate.bucket,
@@ -2581,6 +2750,22 @@ export function diffHolderResearchDecisionSnapshots(
   previousCheckedAt: string | null = null,
 ): string[] {
   const reasons: string[] = [];
+  if (
+    current.publicBaselineNoteId !== undefined &&
+    previous.publicBaselineNoteId !== undefined &&
+    current.publicBaselineNoteId !== previous.publicBaselineNoteId
+  )
+    reasons.push("public_baseline_changed");
+  if (previousCheckedAt) {
+    for (const change of compareHolderPositionQuantities({
+      previous: previous.publicComparisonPositions ?? [],
+      current: current.publicComparisonPositions ?? [],
+      minUsd: policy.minMeaningfulHolderUsdDelta,
+      minPct: policy.minMeaningfulHolderPctDelta,
+    })) {
+      reasons.push(`holder_quantity_changed:${change.side}`);
+    }
+  }
   if (
     previous.yesProbability != null &&
     current.yesProbability != null &&
@@ -2749,7 +2934,9 @@ function holderResearchModelConfigSignature(
   policy: HolderResearchPolicy,
 ): string {
   return JSON.stringify([
-    "holder_decision_contract_v8",
+    "holder_decision_contract_v10",
+    policy.singleGameSportsClusterOnly,
+    policy.sideChangeRequiresEvidence,
     policy.selectionClusterBonus,
     policy.eventPublicationHistoryEnabled,
     policy.model,
@@ -2770,7 +2957,10 @@ export function evaluateHolderResearchDecisionCache(input: {
   now?: Date;
 }): HolderResearchDecisionCacheEvaluation {
   const now = input.now ?? new Date();
-  const snapshot = buildHolderResearchDecisionSnapshot(input.candidate);
+  const snapshot = buildHolderResearchDecisionSnapshot(
+    input.candidate,
+    input.policy,
+  );
   const digest = buildHolderResearchDecisionDigest(snapshot);
   const cached = input.cachedDecision;
   // A model's PUBLISH is not a publication. Only a committed note in Postgres
@@ -2930,7 +3120,10 @@ export function buildHolderResearchDecisionCacheRecord(input: {
   now?: Date;
 }): HolderResearchCachedDecision {
   const now = input.now ?? new Date();
-  const snapshot = buildHolderResearchDecisionSnapshot(input.candidate);
+  const snapshot = buildHolderResearchDecisionSnapshot(
+    input.candidate,
+    input.policy,
+  );
   const cooldownHours =
     input.output.status === "SKIP"
       ? input.policy.skipCooldownHours
@@ -4943,8 +5136,12 @@ export async function enrichHolderResearchLivePositions(
             : holder.entryToCurrentDelta,
         approxReliable: live ? live.approxReliable : holder.approxReliable,
         approxPnlSource: live?.approxPnlSource ?? holder.approxPnlSource,
+        // Quantity and its observation time must come from the same row.
+        // A newer USD-only row cannot re-date old shares into fresh proof.
         positionSnapshotAt:
-          toIso(live?.snapshotAt) ?? holder.positionSnapshotAt,
+          live?.positionShares != null
+            ? toIso(live.snapshotAt)
+            : holder.positionSnapshotAt,
         livePositionConfirmedAt:
           live?.positionSizeUsd != null && positionUsd > 0
             ? toIso(live.snapshotAt)
@@ -5039,6 +5236,17 @@ export async function enrichHolderResearchLivePositions(
     );
     const withoutDigest = {
       ...candidate,
+      comparisonPositions: latestHolderComparisonPositions([
+        ...(candidate.comparisonPositions ?? []),
+        ...refreshedHolders.map((holder) => ({
+          walletId: holder.walletId,
+          side: holder.side,
+          positionShares: holder.positionShares,
+          observedAt: holder.positionSnapshotAt,
+          currentPrice: holder.currentPrice,
+          strong: isSharpHolder(holder, policy),
+        })),
+      ]),
       market,
       evidence: candidate.evidence.flatMap((evidence) => {
         const refreshed = refreshedEvidence.get(evidence.id);
@@ -6319,7 +6527,7 @@ export function buildHolderResearchWalletTargets(
   }));
 }
 
-function asContextHolderResearchOutput(
+export function asContextHolderResearchOutput(
   output: HolderResearchAgentOutputV1,
   rationale: string,
 ): HolderResearchAgentOutputV1 {
@@ -6493,6 +6701,7 @@ export function adaptHolderResearchFinalOutputV2(input: {
           : "unknown";
   const adapted: HolderResearchAgentOutputV1 = {
     version: "holder_research_v1",
+    publicationComparison: input.output.publicationComparison,
     editorial_duplicate: input.output.editorial_duplicate === true,
     status,
     bucket: candidate.bucket,
@@ -6618,6 +6827,8 @@ export function applyHolderResearchPublishQualityGate(input: {
         "The market resolves beyond the configured publish horizon, so this is context-only.",
       sports_outright_context_only:
         "Sports outright markets are configured as context-only.",
+      single_game_sports_cluster_required:
+        "Individual matches require a same-side strong-holder cluster under the current policy.",
     };
     return asContextHolderResearchOutput(
       output,
@@ -6813,8 +7024,72 @@ export async function persistHolderResearchNotes(
         [candidate.thesisKey],
       );
       const publicationNow = new Date();
-      const currentDecisionSnapshot =
-        buildHolderResearchDecisionSnapshot(candidate);
+      // A new delivery during model work changes the editorial baseline, not
+      // the price/position baseline of an existing same-side thread.
+      if (params.policy.sideChangeRequiresEvidence) {
+        const currentHistory = (
+          await loadHolderPublicHistory(
+            client,
+            [candidate.market.marketId],
+            publicationNow,
+          )
+        ).get(candidate.market.marketId) ?? {
+          status: "unavailable" as const,
+          items: [],
+        };
+        if (
+          !publicHistoryBaselineMatches(
+            candidate.publicationHistory ?? {
+              status: "unavailable",
+              items: [],
+            },
+            currentHistory,
+          )
+        ) {
+          recordHolderResearchPublicationRejection(
+            stats,
+            candidate.publicationHistory?.status === "ok"
+              ? "publication_baseline_changed"
+              : "publication_history_unavailable",
+            candidate,
+          );
+          await client.query("rollback");
+          continue;
+        }
+        const comparison = assessHolderCandidateSideChange(
+          candidate,
+          decision.output,
+          params.policy,
+          externalResearch,
+        );
+        if (!comparison.allowed) {
+          recordHolderResearchPublicationRejection(
+            stats,
+            comparison.reason as HolderResearchPublicationRejectionReason,
+            candidate,
+          );
+          await client.query("rollback");
+          continue;
+        }
+      }
+      if (
+        evaluateHolderResearchPublishRiskGates({
+          candidate,
+          policy: params.policy,
+        }).includes("single_game_sports_cluster_required")
+      ) {
+        recordHolderResearchPublicationRejection(
+          stats,
+          "single_game_sports_cluster_required",
+          candidate,
+        );
+        await client.query("rollback");
+        continue;
+      }
+      const currentDecisionSnapshot = buildHolderResearchDecisionSnapshot(
+        candidate,
+        params.policy,
+      );
       const telegramMarketIdentity: TelegramMarketIdentityV1 | null =
         candidate.side
           ? buildTelegramMarketIdentityV1({
@@ -7082,6 +7357,16 @@ export async function persistHolderResearchNotes(
               limitlessPositionContract: resolveLimitlessPositionContract(),
             }),
             holderResearchUpdateV1: holderResearchUpdate,
+            holderPublicationComparisonV1: {
+              version: 1,
+              comparison: decision.output.publicationComparison ?? null,
+              assessment: assessHolderCandidateSideChange(
+                candidate,
+                decision.output,
+                params.policy,
+                externalResearch,
+              ),
+            },
             holderResearchPublicationAuditV1: holderResearchPublicationAudit,
             signalEvidence,
             signalEvidenceVersion: 1,
@@ -7107,6 +7392,7 @@ export async function persistHolderResearchNotes(
           }),
           JSON.stringify({
             ...decision.modelMeta,
+            update_evidence: decision.output.updateEvidence ?? null,
             caveats: decision.output.caveats,
             primary_holder_credentials: actorSummary,
             evidence_refs: candidate.evidence.map((evidence) => ({
