@@ -317,6 +317,15 @@ export const env = {
   wsRefreshSec,
   wsResubscribeSec,
   wsSubChunkSize,
+  // Bound each failure domain, not total coverage (INDEXER_WS_SUBSET).
+  wsTokensPerSocket: clampInt(
+    parseOptionalInt(process.env.POLYMARKET_WS_TOKENS_PER_SOCKET),
+    {
+      min: 1,
+      max: 10_000,
+      fallback: 500,
+    },
+  ),
   hotLookbackMinutes,
   hotMaxPages,
   overlapPages,
