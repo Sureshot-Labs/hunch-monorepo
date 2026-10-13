@@ -79,8 +79,17 @@ substitute a new-model vector into an old snapshot. No map rebuild is forced.
   Exhausted failures are deduplicated per content hash and cooled down for six
   hours before reconciliation retries. Auth/credit errors open a five-minute
   circuit instead of flooding the DLQ. A longer Retry-After is respected.
-- Unknown charges remain conservatively reserved; they are not reported as
-  actual zero cost. An observed charge above its estimate pauses further calls
+- Cost accounting separates generation **build** from ongoing **maintenance**.
+  The generation budget caps build actuals + unknown estimates + in-flight
+  reservations. Maintenance is measured separately and has no new spending cap.
+  Successful known charges replace their reservations (unused estimates are
+  released). A retry/timeout stays as an unknown conservative estimate, never
+  zero. Lease handoff reclassifies interrupted reservations exactly once.
+  Existing mixed counters remain unchanged under `budget.legacy`; their true
+  build/live split cannot be reconstructed. An unfinished replacement retains
+  that legacy liability in its build budget; an already-serving generation does
+  not mislabel its lifetime costs as a new build. No historical spend is erased.
+  An observed charge above its estimate pauses further calls
   for that generation (`embedding_provider_cost_drift`), requiring a reviewed
   pricing correction, not blind automatic retries.
 - Raising `generationBudgetUsd` resumes a budget-limited build. A memory pause
@@ -92,10 +101,15 @@ substitute a new-model vector into an old snapshot. No map rebuild is forced.
   12 KiB/item floor and 25% margin. Global Redis usage is added once, never
   extrapolated as embedding growth. Old saved global-delta projections are
   recomputed without resetting the scan, vectors or monetary reservations.
-  A serving-generation memory pause does not block the desired generation's
-  independent admission. Real Redis/host limits still apply to both. Status
+  Serving reconciliation reuses the checkpoint and does **not** project a second
+  complete copy or wait for a source census. Coverage is measured as it scans.
+  Both live and background inference check actual headroom and the new-vector
+  growth of a bounded batch, before HTTP and again before writing. Cache-hit
+  metadata/TTL renewal and cleanup remain available under memory pressure.
+  Replacement builds retain their full-generation projection. Status
   `memory.pauses` identifies each blocked generation, measured values and cause;
-  a background-only pause also appears in `reason` without marking Qwen paused.
+  `live` and `reconciliation` distinguish ingestion health from the repair pass.
+  A background-only pause does not mark a healthy serving generation paused.
 - Retired generations have **no mandatory grace period**. Published snapshots
   do not retain their vectors; legacy `map:*` snapshot pins are removed in bounded
   batches. Cleanup starts once in-flight request/job pins have drained. Jobs use

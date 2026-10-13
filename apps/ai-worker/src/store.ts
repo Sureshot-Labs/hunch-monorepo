@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { EmbeddingCosts } from "./costs.js";
 import { getEmbedStreamKey } from "@hunch/infra";
 import {
   embeddingKey,
@@ -36,6 +37,7 @@ export function compareStreamId(a: string, b: string): number {
 /** Every worker mutation is fenced by the current unique lease value. */
 export class EmbeddingStore {
   readonly token = randomUUID();
+  readonly costs = new EmbeddingCosts(this);
   constructor(readonly redis: RedisCommands) {}
   async acquire() {
     return (
@@ -143,26 +145,11 @@ return 1`,
     amount: number,
     limit: number | null,
   ) {
-    const key = `${CONTROL}budget:${generation.id}`;
-    const micro = Math.max(1, Math.ceil(amount * 1e9));
-    const result = await this.fenced(
-      `local used=tonumber(redis.call('GET',KEYS[2]) or '0')
-if tonumber(ARGV[3])>=0 and used+tonumber(ARGV[2])>tonumber(ARGV[3]) then return 0 end
-redis.call('INCRBY',KEYS[2],ARGV[2]); return 1`,
-      [key],
-      [String(micro), String(limit === null ? -1 : Math.floor(limit * 1e9))],
-    );
-    if (Number(result) !== 1) throw new Error("generation_budget_exhausted");
+    return this.costs.reserve(generation, amount, limit);
   }
   async spent(generation: EmbeddingGeneration) {
-    return (
-      Number(
-        (await this.redis.sendCommand([
-          "GET",
-          `${CONTROL}budget:${generation.id}`,
-        ])) ?? 0,
-      ) / 1e9
-    );
+    const { build } = await this.costs.read(generation, false);
+    return build.spentUsd + build.reservedUsd;
   }
   async dead(
     kind: string,

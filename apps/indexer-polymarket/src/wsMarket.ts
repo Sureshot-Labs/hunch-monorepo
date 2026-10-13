@@ -6,6 +6,14 @@ import {
 import { createTopTickGate } from "@hunch/infra";
 import PQueue from "p-queue";
 import WebSocket from "ws";
+import { monitorEventLoopDelay } from "node:perf_hooks";
+import {
+  LatestQuoteQueue,
+  MarketSubscriptions,
+  reconnectAttempt,
+  mergeMarketQuote,
+  type MarketQuote,
+} from "./market-ws-flow.js";
 import { env } from "./env.js";
 import { fetchEventsByIds, fetchMarketById } from "./gammaClient.js";
 import { log } from "./log.js";
@@ -24,7 +32,6 @@ import { pool } from "./db.js";
 import { PolymarketEvent, type TPolymarketEvent } from "./types.js";
 
 type PriceLevel = { price: unknown };
-type SubState = { subscribed: Set<string> };
 type TokenMarketRef = {
   marketId: string;
   venueMarketId: string;
@@ -45,7 +52,6 @@ type ParsedMarketState = {
   ts: number;
 };
 
-const state: SubState = { subscribed: new Set() };
 const mq = new PQueue({ concurrency: Number(env.wsConcurrency || 8) });
 const refreshQueue = new PQueue({ concurrency: 1 });
 const pendingEventRefresh = new Set<string>();
@@ -62,15 +68,28 @@ const tokenMarketRefCache = new Map<
 let redisBound = false;
 let shutdownBound = false;
 let currentWs: WebSocket | null = null;
+let subscriptions: MarketSubscriptions | null = null;
+let stopping = false;
+let reconnectTimer: NodeJS.Timeout | null = null;
 let desiredTokenIds: string[] = [];
+const quoteQueue = new LatestQuoteQueue<MarketQuote>(
+  Number(env.wsConcurrency || 8),
+  async (tick) => {
+    await publishTopTickNow(
+      tick.tokenId,
+      tick.bestBid,
+      tick.bestAsk,
+      tick.tsMs,
+      tick.bookPayload,
+      tick.alreadyPersisted,
+    );
+  },
+  (error) => log.warn("Top tick publish failed", { error: String(error) }),
+  mergeMarketQuote,
+);
 const topTickGate = createTopTickGate({
   onDeferredPublish: ({ tokenId, bestBid, bestAsk, tsMs }) => {
-    void publishTopTickNow(tokenId, bestBid, bestAsk, tsMs).catch((error) => {
-      log.warn("Deferred top tick publish failed", {
-        tokenId,
-        error: String(error),
-      });
-    });
+    quoteQueue.push({ tokenId, bestBid, bestAsk, tsMs });
   },
 });
 
@@ -247,19 +266,6 @@ function bestAsk(levels: PriceLevel[]): number | null {
     if (best == null || p < best) best = p;
   }
   return best;
-}
-
-function diffSets(current: Set<string>, desired: Iterable<string>) {
-  const next = new Set(desired);
-  const toSub: string[] = [];
-  const toUnsub: string[] = [];
-  next.forEach((id) => {
-    if (!current.has(id)) toSub.push(id);
-  });
-  current.forEach((id) => {
-    if (!next.has(id)) toUnsub.push(id);
-  });
-  return { toSub, toUnsub, next };
 }
 
 function setTokenMarketRefCache(tokenId: string, ref: TokenMarketRef): void {
@@ -599,83 +605,13 @@ async function setResolvedByVenueMarketId(
   );
 }
 
-function sendInitialSubscribe(ws: WebSocket, ids: string[]) {
-  if (!ids.length) return;
-  for (let i = 0; i < ids.length; i += env.wsSubChunkSize) {
-    const chunk = ids.slice(i, i + env.wsSubChunkSize);
-    const payload = {
-      type: "market",
-      assets_ids: chunk,
-      asset_ids: chunk,
-      custom_feature_enabled: env.wsCustomFeatureEnabled,
-    };
-    ws.send(JSON.stringify(payload));
-  }
-}
-
-function sendSubscribe(ws: WebSocket, ids: string[]) {
-  if (!ids.length) return;
-  for (let i = 0; i < ids.length; i += env.wsSubChunkSize) {
-    const chunk = ids.slice(i, i + env.wsSubChunkSize);
-    const payload = {
-      operation: "subscribe",
-      assets_ids: chunk,
-      asset_ids: chunk,
-      custom_feature_enabled: env.wsCustomFeatureEnabled,
-    };
-    ws.send(JSON.stringify(payload));
-  }
-}
-
-function sendUnsubscribe(ws: WebSocket, ids: string[]) {
-  if (!ids.length) return;
-  for (let i = 0; i < ids.length; i += env.wsSubChunkSize) {
-    const chunk = ids.slice(i, i + env.wsSubChunkSize);
-    const payload = {
-      operation: "unsubscribe",
-      assets_ids: chunk,
-      asset_ids: chunk,
-      custom_feature_enabled: env.wsCustomFeatureEnabled,
-    };
-    ws.send(JSON.stringify(payload));
-  }
-}
-
-function fullResubscribe(ws: WebSocket): void {
-  const ids = desiredTokenIds.slice(0, env.wsSubset);
-  const prev = Array.from(state.subscribed);
-  if (prev.length) sendUnsubscribe(ws, prev);
-  sendInitialSubscribe(ws, ids);
-  state.subscribed = new Set(ids);
-  log.info("WS full resubscribe", {
-    previous: prev.length,
-    total: ids.length,
-    chunks: Math.ceil(ids.length / env.wsSubChunkSize),
-  });
-}
-
-function syncSubscriptions(ws: WebSocket, desiredIds: string[]) {
-  const ids = desiredIds.slice(0, env.wsSubset);
-  const { toSub, toUnsub, next } = diffSets(state.subscribed, ids);
-
-  sendUnsubscribe(ws, toUnsub);
-  sendSubscribe(ws, toSub);
-
-  state.subscribed = next;
-
-  log.info("WS sync", {
-    add: toSub.length,
-    remove: toUnsub.length,
-    total: next.size,
-  });
-}
-
 async function publishTopTickNow(
   tokenId: string,
   bestBidValue: number | null,
   bestAskValue: number | null,
   tsMs: number,
   bookPayload?: unknown,
+  alreadyPersisted = false,
 ): Promise<void> {
   const tick = {
     token_id: tokenId,
@@ -693,14 +629,16 @@ async function publishTopTickNow(
   multi.publish(`prices:${tokenId}`, tickJson);
 
   await Promise.all([
-    writeUnifiedBookTop(
-      pool,
-      tokenId,
-      bestBidValue,
-      bestAskValue,
-      new Date(tsMs),
-      { touchLatestWhenUnchanged: true },
-    ),
+    alreadyPersisted
+      ? Promise.resolve()
+      : writeUnifiedBookTop(
+          pool,
+          tokenId,
+          bestBidValue,
+          bestAskValue,
+          new Date(tsMs),
+          { touchLatestWhenUnchanged: true },
+        ),
     multi.exec(),
   ]);
 }
@@ -723,19 +661,18 @@ async function publishResolvedTerminalTopTicks(input: {
   });
   if (result.tokenPrices.length === 0) return;
 
-  const multi = redis.multi();
   for (const row of result.tokenPrices) {
+    // Cancel older deferred ticks and serialize Redis publication after any
+    // in-flight top write. The terminal DB write above must not be repeated.
     const tick = {
-      token_id: row.tokenId,
-      best_bid: row.price,
-      best_ask: row.price,
-      ts: input.observedAtMs,
+      tokenId: row.tokenId,
+      bestBid: row.price,
+      bestAsk: row.price,
+      tsMs: input.observedAtMs,
     };
-    const tickJson = JSON.stringify(tick);
-    multi.set(`top:${row.tokenId}`, tickJson, { EX: 60 });
-    multi.publish(`prices:${row.tokenId}`, tickJson);
+    topTickGate.shouldPublish({ ...tick, forcePublish: true });
+    quoteQueue.push({ ...tick, alreadyPersisted: true });
   }
-  await multi.exec();
 }
 
 async function publishTopTick(
@@ -757,13 +694,13 @@ async function publishTopTick(
     return;
   }
 
-  await publishTopTickNow(
+  quoteQueue.push({
     tokenId,
-    bestBidValue,
-    bestAskValue,
+    bestBid: bestBidValue,
+    bestAsk: bestAskValue,
     tsMs,
     bookPayload,
-  );
+  });
 }
 
 async function publishMarketState(
@@ -1252,39 +1189,65 @@ async function handleWsMessage(rawMessage: unknown): Promise<void> {
 
 export function startMarketWS(initialTokenIds: string[], attempt = 0) {
   desiredTokenIds = initialTokenIds;
-  state.subscribed = new Set();
   const ws = new WebSocket(env.wsUrl, { perMessageDeflate: true });
   currentWs = ws;
+  const pump = new MarketSubscriptions({
+    chunkSize: env.wsSubChunkSize,
+    customFeature: env.wsCustomFeatureEnabled,
+    isOpen: () =>
+      !stopping && currentWs === ws && ws.readyState === WebSocket.OPEN,
+    send: (payload) =>
+      new Promise<void>((resolve, reject) =>
+        ws.send(payload, (error) => (error ? reject(error) : resolve())),
+      ),
+    onError: (error) => {
+      log.warn("WS subscription failed", { error: String(error) });
+      ws.terminate();
+    },
+  });
+  subscriptions = pump;
 
   let pingInterval: NodeJS.Timeout | null = null;
   let resubscribeInterval: NodeJS.Timeout | null = null;
   let lastMessageAt = Date.now();
+  let openedAt = 0;
+  let receivedFrames = 0;
+  let receivedBytes = 0;
+  const eventLoop = monitorEventLoopDelay({ resolution: 20 });
 
   if (!shutdownBound) {
     shutdownBound = true;
     const shutdown = () => {
-      try {
-        if (pingInterval) clearInterval(pingInterval);
-        if (resubscribeInterval) clearInterval(resubscribeInterval);
-      } catch {
-        // ignore
-      }
-      try {
-        ws.close();
-      } catch {
-        // ignore
-      }
-      redis.quit().catch(() => redis.disconnect());
+      stopping = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      topTickGate.clear();
+      currentWs?.terminate();
+      void mq
+        .onIdle()
+        .then(() => quoteQueue.idle())
+        .finally(() => redis.quit().catch(() => redis.disconnect()));
     };
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);
   }
 
   ws.on("open", async () => {
-    log.info("WS open", env.wsUrl);
+    openedAt = Date.now();
+    eventLoop.enable();
+    log.info("WS open", {
+      tokens: Math.min(desiredTokenIds.length, env.wsSubset),
+    });
     bindRedisErrorOnce();
-    await ensureRedis();
-    fullResubscribe(ws);
+    try {
+      await ensureRedis();
+    } catch (error) {
+      log.err("WS Redis initialization failed", error);
+      ws.terminate();
+      return;
+    }
+    if (stopping || currentWs !== ws || ws.readyState !== WebSocket.OPEN)
+      return;
+    pump.update(desiredTokenIds.slice(0, env.wsSubset));
     lastMessageAt = Date.now();
 
     pingInterval = setInterval(() => {
@@ -1299,12 +1262,24 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
 
     resubscribeInterval = setInterval(() => {
       try {
+        log.info("WS flow", {
+          receivedFrames,
+          receivedBytes,
+          subscribed: pump.subscribed.size,
+          quotes: quoteQueue.metrics(),
+          eventsPending: mq.size,
+          eventsRunning: mq.pending,
+          eventLoopP99Ms: eventLoop.percentile(99) / 1e6,
+        });
+        receivedFrames = 0;
+        receivedBytes = 0;
+        eventLoop.reset();
         const staleForMs = Date.now() - lastMessageAt;
         if (staleForMs < env.wsResubscribeSec * 1000) return;
         log.info("WS periodic full resubscribe", {
           staleMs: staleForMs,
         });
-        fullResubscribe(ws);
+        pump.reset();
       } catch {
         // ignore
       }
@@ -1312,8 +1287,11 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
   });
 
   ws.on("message", (raw) => {
+    if (stopping || currentWs !== ws) return;
     lastMessageAt = Date.now();
     const text = String(raw);
+    receivedFrames++;
+    receivedBytes += Buffer.byteLength(text);
     if (text === "PONG" || text === "PING") return;
 
     let msg: unknown;
@@ -1323,34 +1301,59 @@ export function startMarketWS(initialTokenIds: string[], attempt = 0) {
       return;
     }
 
-    void mq
-      .add(async () => {
-        try {
-          if (Array.isArray(msg)) {
-            for (const entry of msg) {
-              await handleWsMessage(entry);
-            }
-            return;
+    // Quotes are normalized/coalesced before asynchronous DB/Redis work.
+    // Trades and lifecycle events remain lossless tasks, never coalesced.
+    const orderedEvents: unknown[] = [];
+    for (const entry of Array.isArray(msg) ? msg : [msg]) {
+      const type = isRecord(entry)
+        ? String(entry.event_type ?? entry.type ?? "").toLowerCase()
+        : "";
+      if (["book", "price_change", "best_bid_ask"].includes(type)) {
+        void handleWsMessage(entry).catch((error) =>
+          log.warn("WS quote handler error", error),
+        );
+        continue;
+      }
+      orderedEvents.push(entry);
+    }
+    if (orderedEvents.length)
+      void mq
+        .add(async () => {
+          try {
+            for (const entry of orderedEvents) await handleWsMessage(entry);
+          } catch (error) {
+            log.warn("WS message handler error", error);
           }
-          await handleWsMessage(msg);
-        } catch (error) {
-          log.warn("WS message handler error", error);
-        }
-      })
-      .catch((error) => {
-        log.warn("WS message task rejected", error);
-      });
+        })
+        .catch((error) => {
+          log.warn("WS message task rejected", error);
+        });
   });
 
   ws.on("close", (code, reason) => {
     if (pingInterval) clearInterval(pingInterval);
     if (resubscribeInterval) clearInterval(resubscribeInterval);
-    log.warn("WS closed", code, reason.toString());
+    eventLoop.disable();
+    log.warn("WS closed", {
+      code,
+      reason: reason.toString(),
+      connectedMs: openedAt ? Date.now() - openedAt : 0,
+      quotes: quoteQueue.metrics(),
+      eventsPending: mq.size,
+    });
+    if (stopping || currentWs !== ws) return;
 
     const max = 30_000;
-    const base = 1000 * 2 ** Math.min(attempt, 5);
+    const nextAttempt = reconnectAttempt(
+      attempt,
+      openedAt ? Date.now() - openedAt : 0,
+    );
+    const base = 1000 * 2 ** Math.min(nextAttempt, 5);
     const delay = Math.min(max, base) + Math.floor(Math.random() * 500);
-    setTimeout(() => startMarketWS(desiredTokenIds, attempt + 1), delay);
+    reconnectTimer = setTimeout(
+      () => startMarketWS(desiredTokenIds, nextAttempt),
+      delay,
+    );
   });
 
   ws.on("error", (error) => log.err("WS error", error));
@@ -1362,5 +1365,5 @@ export function updateMarketWSSubscriptions(nextTokenIds: string[]): void {
   const ws = currentWs;
   if (!ws) return;
   if (ws.readyState !== WebSocket.OPEN) return;
-  syncSubscriptions(ws, desiredTokenIds);
+  subscriptions?.update(desiredTokenIds.slice(0, env.wsSubset));
 }
