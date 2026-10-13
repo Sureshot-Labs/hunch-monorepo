@@ -7,6 +7,7 @@ import {
 const venueStateSchema =
   venueLifecyclePolicySchema.shape.venues.shape.polymarket.extend({
     capabilities: venueLifecycleCapabilitiesSchema,
+    readEnvironment: z.enum(["mainnet", "testnet"]).nullable().optional(),
   });
 export const venueMetadataSchema = z.object({
   total: z.number().int().nonnegative(),

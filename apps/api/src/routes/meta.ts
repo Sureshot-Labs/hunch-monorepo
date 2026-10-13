@@ -19,6 +19,7 @@ import {
   resolveMinTotalVolumeFilter,
 } from "../schemas/feed.js";
 import { resolveVenueLifecyclePolicy } from "../services/runtime-policies.js";
+import { resolveDiscoveryVenueScope } from "../services/discovery-venue-scope.js";
 import {
   venueMetadataRouteSchema,
   venueMetadataSchema,
@@ -517,9 +518,8 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
     { schema: venueMetadataRouteSchema },
     async (_req, reply) => {
       const lifecycle = await resolveVenueLifecyclePolicy(pool);
-      const discoverableVenues = HUNCH_VENUES.filter((venue) =>
-        venueHasLifecycleCapability(lifecycle.effective, venue, "discovery"),
-      );
+      const discovery = await resolveDiscoveryVenueScope(pool, undefined);
+      const discoverableVenues = discovery.venues;
       const coverageSnapshot = venueCoverage.get(discoverableVenues);
       const rows = coverageSnapshot.rows;
 
@@ -573,10 +573,13 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
           venue,
           {
             ...lifecycle.effective.venues[venue],
-            capabilities: getVenueLifecycleCapabilities(
-              lifecycle.effective,
-              venue,
-            ),
+            capabilities: {
+              ...getVenueLifecycleCapabilities(lifecycle.effective, venue),
+              discovery: discoverableVenues.includes(venue),
+            },
+            ...(venue === "hyperliquid"
+              ? { readEnvironment: discovery.hip4Environment }
+              : {}),
           },
         ]),
       );
@@ -591,7 +594,7 @@ export const metaRoutes: FastifyPluginAsync = async (app) => {
           source: lifecycle.source,
           effectiveAt: lifecycle.effectiveAt?.toISOString() ?? null,
           invalidOverride: lifecycle.invalidOverride,
-          revision: lifecycle.revision,
+          revision: discovery.revision,
           venues: policyVenues,
         },
       });

@@ -38,6 +38,7 @@ const [
   { AuthService },
   { getRedis },
   { feedRoutes },
+  { metaRoutes },
   { closeAcquiredRuntimeResources },
 ] = await Promise.all([
   import("./env.js"),
@@ -45,6 +46,7 @@ const [
   import("./auth.js"),
   import("./redis.js"),
   import("./routes/feed.js"),
+  import("./routes/meta.js"),
   import("./runtime-resource-cleanup.js"),
 ]);
 assert.equal(
@@ -168,7 +170,22 @@ try {
     [ownerId, ids],
   );
   await app.register(feedRoutes);
+  await app.register(metaRoutes);
   await app.ready();
+  const metadata = await app.inject("/meta/venues");
+  assert.equal(metadata.statusCode, 200, metadata.body);
+  assert.equal(
+    metadata.json().policy.venues.hyperliquid.readEnvironment,
+    "mainnet",
+  );
+  assert.equal(
+    metadata.json().policy.venues.hyperliquid.capabilities.discovery,
+    true,
+  );
+  assert.equal(
+    metadata.json().policy.venues.hyperliquid.capabilities.increaseExposure,
+    false,
+  );
   const query = `venue=hyperliquid&q=${tag}&view=markets&sort=trending&limit=2&min_total_volume=0`;
   const first = await app.inject(`/feed?${query}`);
   assert.equal(first.statusCode, 200, first.body);
@@ -235,6 +252,20 @@ try {
   assert.equal(favorites.json().data.length, 2);
   assert.equal(favorites.json().data[0].markets[0].volumeDisplayPeriod, "24h");
   await setLifecycle(false);
+  const hiddenMetadata = await app.inject("/meta/venues");
+  assert.equal(hiddenMetadata.statusCode, 200, hiddenMetadata.body);
+  assert.equal(
+    hiddenMetadata.json().policy.venues.hyperliquid.readEnvironment,
+    null,
+  );
+  assert.equal(
+    hiddenMetadata.json().policy.venues.hyperliquid.capabilities.discovery,
+    false,
+  );
+  assert.notEqual(
+    hiddenMetadata.json().policy.revision,
+    metadata.json().policy.revision,
+  );
   const disabled = await app.inject(`/feed?${query}`);
   assert.equal(disabled.statusCode, 200, disabled.body);
   assert.equal(
@@ -243,6 +274,16 @@ try {
     "policy off must not leak cached markets",
   );
   await setLifecycle(true);
+  const restoredMetadata = await app.inject("/meta/venues");
+  assert.equal(restoredMetadata.statusCode, 200, restoredMetadata.body);
+  assert.equal(
+    restoredMetadata.json().policy.venues.hyperliquid.readEnvironment,
+    "mainnet",
+  );
+  assert.equal(
+    restoredMetadata.json().policy.venues.hyperliquid.capabilities.discovery,
+    true,
+  );
   const restored = await app.inject(`/feed?${query}`);
   assert.equal(restored.statusCode, 200, restored.body);
   assert.equal(restored.json().data.length, 2);

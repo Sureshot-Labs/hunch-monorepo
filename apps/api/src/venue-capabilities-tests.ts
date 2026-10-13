@@ -74,6 +74,7 @@ test("public metadata serialization preserves the authoritative policy and capab
               DEFAULT_VENUE_LIFECYCLE_POLICY,
               venue,
             ),
+            ...(venue === "hyperliquid" ? { readEnvironment: "testnet" } : {}),
           },
         ]),
       ),
