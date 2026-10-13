@@ -4575,8 +4575,8 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
       const oldContract = {
         ...cachedSkip,
         modelConfigSignature: currentSignature.replace(
+          "holder_decision_contract_v9",
           "holder_decision_contract_v8",
-          "holder_decision_contract_v7",
         ),
       };
       assert.equal(
@@ -9974,7 +9974,101 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
     },
   },
   {
-    name: "editorial duplicate deletes exact old cache and never starts cooldown",
+    name: "V1 and V2 triage receive dated same-side and opposing publication history before research",
+    run: async () => {
+      const originalFetch = globalThis.fetch;
+      const originalKey = env.openRouterKey;
+      const p = policy({ eventPublicationHistoryEnabled: true });
+      const candidate = sharpMinorityCandidate(p);
+      assert.ok(candidate.market.eventId);
+      const publication: EventPublication = {
+        event_id: candidate.market.eventId,
+        market_id: candidate.market.marketId,
+        side: candidate.side === "YES" ? "NO" : "YES",
+        note_id: "old-note",
+        published_at: "2026-10-07T12:00:00Z",
+        title: "Previous opposing thesis",
+        summary: "Earlier holder alignment supported the opposite outcome.",
+        win_condition: "The selected team wins this matchup",
+        holder_ids: [],
+      };
+      try {
+        env.openRouterKey = "test-only";
+        for (const useV2 of [false, true]) {
+          globalThis.fetch = (async (_url, init) => {
+            const body = JSON.parse(String(init?.body));
+            const user = body.messages.find(
+              (m: { role: string }) => m.role === "user",
+            ).content;
+            const system = body.messages.find(
+              (m: { role: string }) => m.role === "system",
+            ).content;
+            assert.ok(user.includes(publication.summary));
+            assert.ok(user.includes(publication.published_at));
+            assert.ok(user.includes("editorial_comparison_only"));
+            assert.match(system, /checkable/i);
+            const decisions = useV2
+              ? [
+                  {
+                    key: candidate.key,
+                    action: "investigate",
+                    reason_codes: ["research_needed"],
+                    research_need: "news_timing",
+                    reason:
+                      "Check the new circumstance against the earlier opposing view.",
+                  },
+                ]
+              : [
+                  {
+                    key: candidate.key,
+                    action: "investigate",
+                    priority: 0.8,
+                    needs_external_search: true,
+                    reason:
+                      "Check the new circumstance against the earlier opposing view.",
+                    research_question:
+                      "What changed since the earlier publication?",
+                  },
+                ];
+            return new Response(
+              JSON.stringify({
+                choices: [
+                  {
+                    finish_reason: "stop",
+                    message: {
+                      content: JSON.stringify({
+                        version: useV2
+                          ? "holder_research_triage_v2"
+                          : "holder_research_triage_v1",
+                        decisions,
+                      }),
+                    },
+                  },
+                ],
+                usage: { cost: 0.001 },
+              }),
+            );
+          }) as typeof fetch;
+          const result =
+            await holderResearchModelTestHooks.callHolderResearchTriageModel({
+              candidates: [candidate],
+              policy: p,
+              maxInvestigate: 1,
+              calibrationMemo: [],
+              useV2,
+              eventPublications: [publication],
+              eventHistoryAvailable: true,
+            });
+          assert.equal(result.decisions[0]?.action, "investigate");
+        }
+      } finally {
+        globalThis.fetch = originalFetch;
+        env.openRouterKey = originalKey;
+      }
+    },
+  },
+  {
+    name: "editorial duplicate caches SKIP without suppressing material changes",
     run: async () => {
       const candidate = sharpMinorityCandidate(policy());
       const key = buildHolderResearchDecisionCacheKey(candidate.thesisKey);
@@ -10007,8 +10101,18 @@ const tests: Array<{ name: string; run: () => void | Promise<void> }> = [
         modelMeta: { editorial_duplicate: true },
         decisionCache: stats,
       });
-      assert.deepEqual([...stored.keys()], ["other-key"]);
-      assert.equal(stats.written, 0);
+      assert.equal(stored.get("other-key"), "other-thesis");
+      const cached = parseHolderResearchCachedDecision(stored.get(key) ?? null);
+      assert.equal(cached?.status, "SKIP");
+      assert.equal(stats.written, 1);
+      assert.equal(
+        evaluateHolderResearchDecisionCache({
+          candidate,
+          cachedDecision: cached,
+          policy: policy({ decisionCacheEnabled: true, dryRun: false }),
+        }).action,
+        "skip",
+      );
     },
   },
 ];

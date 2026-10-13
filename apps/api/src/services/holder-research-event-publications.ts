@@ -19,6 +19,7 @@ export type EventPublicationHistory = {
   items: Array<{
     marketId: string;
     side: string;
+    publishedAt: string;
     title: string;
     summary: string;
     selectedOutcomeCondition: string | null;
@@ -102,6 +103,7 @@ export function buildEventPublicationHistory(input: {
       ? retained.map((row) => ({
           marketId: row.market_id,
           side: row.side,
+          publishedAt: row.published_at,
           title: row.title,
           summary: row.summary,
           selectedOutcomeCondition: row.win_condition,

@@ -533,6 +533,12 @@
               }
             ],
             [
+              {
+                "callback_data": "hm:v1:ntf:interest_signals:on",
+                "text": "⬜ Hunches for my interests"
+              }
+            ],
+            [
               { "callback_data": "hm:v1:settings", "text": "⬅️ Back" },
               { "callback_data": "hm:v1:home", "text": "🏠 Home" }
             ]
@@ -551,6 +557,12 @@
               }
             ],
             [
+              {
+                "callback_data": "hm:v1:ntf:interest_signals:on",
+                "text": "⬜ Hunches for my interests"
+              }
+            ],
+            [
               { "callback_data": "hm:v1:settings", "text": "⬅️ Back" },
               { "callback_data": "hm:v1:home", "text": "🏠 Home" }
             ]
@@ -559,6 +571,7 @@
       },
       "routes": {
         "hm:v1:ntf:position_signals:off": "off_position_signals",
+        "hm:v1:ntf:interest_signals:on": "notification_trading",
         "hm:v1:settings": "settings",
         "hm:v1:home": "home"
       }
@@ -1120,6 +1133,12 @@
               }
             ],
             [
+              {
+                "callback_data": "hm:v1:ntf:interest_signals:on",
+                "text": "⬜ Hunches for my interests"
+              }
+            ],
+            [
               { "callback_data": "hm:v1:settings", "text": "⬅️ Back" },
               { "callback_data": "hm:v1:home", "text": "🏠 Home" }
             ]
@@ -1138,6 +1157,12 @@
               }
             ],
             [
+              {
+                "callback_data": "hm:v1:ntf:interest_signals:on",
+                "text": "⬜ Hunches for my interests"
+              }
+            ],
+            [
               { "callback_data": "hm:v1:settings", "text": "⬅️ Back" },
               { "callback_data": "hm:v1:home", "text": "🏠 Home" }
             ]
@@ -1146,6 +1171,7 @@
       },
       "routes": {
         "hm:v1:ntf:position_signals:on": "signals",
+        "hm:v1:ntf:interest_signals:on": "notification_trading",
         "hm:v1:settings": "settings",
         "hm:v1:home": "home"
       }
@@ -6451,7 +6477,7 @@
       "title": "Signal post · Markdown",
       "group": "Signals",
       "message": {
-        "text": "💰 *$12\\.3K backs YES on “Will the demo rocket launch this year”\\.* One tracked wallet holds this position at 41¢\\.\n⠀\nA fictional holder increased their YES position\\.\n⠀\n>*Why it matters*\n>⠀\n>▸ PnL  *\\+$2\\.5K* · 30d",
+        "text": "💰 *$12\\.3K backs YES on “Will the demo rocket launch this year”\\.* One tracked wallet holds this position at 41¢\\.\n⠀\nA fictional holder increased their YES position\\.\n⠀\n>*Why it matters*\n>⠀\n>▸ PnL  *\\+$2\\.5K* · 30d\n⠀\n__[Full research ↗](https://t.me/preview_invalid_bot/demo?startapp=h_cG9seW1hcmtldDpwcmV2aWV3LWV2ZW50fHBvbHltYXJrZXQ6cHJldmlldy1tYXJrZXR8MTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTEx)__",
         "parse_mode": "MarkdownV2",
         "reply_markup": {
           "inline_keyboard": [
@@ -6466,7 +6492,7 @@
         }
       },
       "fallback": {
-        "text": "💰 *$12\\.3K backs YES on “Will the demo rocket launch this year”\\.* One tracked wallet holds this position at 41¢\\.\n⠀\nA fictional holder increased their YES position\\.\n⠀\n>*Why it matters*\n>⠀\n>▸ PnL  *\\+$2\\.5K* · 30d",
+        "text": "💰 *$12\\.3K backs YES on “Will the demo rocket launch this year”\\.* One tracked wallet holds this position at 41¢\\.\n⠀\nA fictional holder increased their YES position\\.\n⠀\n>*Why it matters*\n>⠀\n>▸ PnL  *\\+$2\\.5K* · 30d\n⠀\n__[Full research ↗](https://t.me/preview_invalid_bot/demo?startapp=h_cG9seW1hcmtldDpwcmV2aWV3LWV2ZW50fHBvbHltYXJrZXQ6cHJldmlldy1tYXJrZXR8MTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTEx)__",
         "parse_mode": "MarkdownV2",
         "reply_markup": {
           "inline_keyboard": [
@@ -6487,7 +6513,7 @@
       "title": "Signal post · RichMessage",
       "group": "Signals",
       "message": {
-        "text": "💰 *$12\\.3K backs YES on “Will the demo rocket launch this year”\\.* One tracked wallet holds this position at 41¢\\.\n⠀\nA fictional holder increased their YES position\\.\n⠀\n>*Why it matters*\n>⠀\n>▸ PnL  *\\+$2\\.5K* · 30d",
+        "text": "💰 *$12\\.3K backs YES on “Will the demo rocket launch this year”\\.* One tracked wallet holds this position at 41¢\\.\n⠀\nA fictional holder increased their YES position\\.\n⠀\n>*Why it matters*\n>⠀\n>▸ PnL  *\\+$2\\.5K* · 30d\n⠀\n__[Full research ↗](https://t.me/preview_invalid_bot/demo?startapp=h_cG9seW1hcmtldDpwcmV2aWV3LWV2ZW50fHBvbHltYXJrZXQ6cHJldmlldy1tYXJrZXR8MTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTEx)__",
         "parse_mode": "MarkdownV2",
         "reply_markup": {
           "inline_keyboard": [
@@ -6565,12 +6591,20 @@
               "is_bordered": true,
               "is_striped": true,
               "type": "table"
+            },
+            {
+              "text": {
+                "text": { "text": "Full research ↗", "type": "underline" },
+                "type": "url",
+                "url": "https://t.me/preview_invalid_bot/demo?startapp=h_cG9seW1hcmtldDpwcmV2aWV3LWV2ZW50fHBvbHltYXJrZXQ6cHJldmlldy1tYXJrZXR8MTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTEx"
+              },
+              "type": "footer"
             }
           ]
         }
       },
       "fallback": {
-        "text": "💰 *$12\\.3K backs YES on “Will the demo rocket launch this year”\\.* One tracked wallet holds this position at 41¢\\.\n⠀\nA fictional holder increased their YES position\\.\n⠀\n>*Why it matters*\n>⠀\n>▸ PnL  *\\+$2\\.5K* · 30d",
+        "text": "💰 *$12\\.3K backs YES on “Will the demo rocket launch this year”\\.* One tracked wallet holds this position at 41¢\\.\n⠀\nA fictional holder increased their YES position\\.\n⠀\n>*Why it matters*\n>⠀\n>▸ PnL  *\\+$2\\.5K* · 30d\n⠀\n__[Full research ↗](https://t.me/preview_invalid_bot/demo?startapp=h_cG9seW1hcmtldDpwcmV2aWV3LWV2ZW50fHBvbHltYXJrZXQ6cHJldmlldy1tYXJrZXR8MTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTEx)__",
         "parse_mode": "MarkdownV2",
         "reply_markup": {
           "inline_keyboard": [
@@ -6648,6 +6682,14 @@
               "is_bordered": true,
               "is_striped": true,
               "type": "table"
+            },
+            {
+              "text": {
+                "text": { "text": "Full research ↗", "type": "underline" },
+                "type": "url",
+                "url": "https://t.me/preview_invalid_bot/demo?startapp=h_cG9seW1hcmtldDpwcmV2aWV3LWV2ZW50fHBvbHltYXJrZXQ6cHJldmlldy1tYXJrZXR8MTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTEx"
+              },
+              "type": "footer"
             }
           ]
         }

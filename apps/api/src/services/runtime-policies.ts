@@ -1930,7 +1930,7 @@ function getDefaults(): IntelPolicyMap {
       dryRun: true,
       persistNotes: false,
       pipelineV2Mode: "shadow",
-      signalBotFollowthroughEnabled: false,
+      signalBotFollowthroughEnabled: true,
       signalBotFollowthroughTypes: DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES,
       signalBotFollowthroughMinAgeHours: 24,
       signalBotFollowthroughMaxPerTick: 3,
@@ -2922,10 +2922,9 @@ function normalizeHolderResearchPolicy(
     signalBotFollowthroughEnabled: Boolean(
       policy.signalBotFollowthroughEnabled,
     ),
-    signalBotFollowthroughTypes:
-      policy.signalBotFollowthroughTypes.length > 0
-        ? Array.from(new Set(policy.signalBotFollowthroughTypes))
-        : DEFAULT_SIGNAL_BOT_FOLLOWTHROUGH_TYPES,
+    signalBotFollowthroughTypes: Array.from(
+      new Set(policy.signalBotFollowthroughTypes),
+    ),
     signalBotFollowthroughMinAgeHours: clamp(
       Math.trunc(policy.signalBotFollowthroughMinAgeHours),
       1,

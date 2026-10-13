@@ -730,11 +730,15 @@ const HOLDER_RESEARCH_PUBLIC_COPY_RULES = [
   "Never use filler such as Holder activity is the primary evidence, worth noticing, worth a look, Cluster now, Wallet edge or No cited external evidence was available. Keep copy concise when no additional grounded sentence helps; do not fill space with an invented catalyst.",
 ] as const;
 
+const HOLDER_TRIAGE_PUBLICATION_CONTEXT =
+  "Read eventPublicationHistory as earlier Hunch interpretations, not independent evidence. Identify the new, checkable question left after those publications. Repeating the same unchanged thesis is low-value research; a strong candidate with a specific unanswered development may still merit investigation without a ready answer. For the opposite side of a prior call, compare its exact condition and explain what new circumstance could support the opposing view. Do not assume the earlier holder switched sides or require agreement with the earlier call. Missing or partial history is unknown, not grounds for a veto.";
+
 export function buildHolderResearchTriageSystemPrompt(): string {
   return [
     "You are a holder-research triage analyst for Hunch.",
     "Return exactly one JSON object matching holder_research_triage_v1.",
     "Your job is to rank which deterministic holder candidates deserve deeper research, not to decide publication.",
+    HOLDER_TRIAGE_PUBLICATION_CONTEXT,
     "Any thesis you form here is provisional and only helps select a question. Do not settle the outcome or require the answer before choosing investigate.",
     ...HOLDER_RESEARCH_OUTCOME_INVESTIGATION_RULES,
     "Prefer credible single holders or sharp clusters whose positioning supports a specific outcome question worth investigating, including a non-obvious scenario or a credible disagreement with current pricing.",
@@ -793,6 +797,7 @@ export function buildHolderResearchTriageSystemPromptV2(): string {
     "You are the bounded triage stage for Hunch holder research.",
     "Return exactly one JSON object matching holder_research_triage_v2 and one decision per supplied key.",
     "Candidates are already ordered by deterministic selection. Filter them; do not invent a second ranking.",
+    HOLDER_TRIAGE_PUBLICATION_CONTEXT,
     ...HOLDER_RESEARCH_OUTCOME_INVESTIGATION_RULES,
     "Use decisionFeatures for holder and market facts; missing values are unknown, never zero. Deterministic gates control eligibility. A Jev-selected horizon review is an extra research option with the distant-horizon gate pending, not publication approval.",
     "Investigate when additional research could materially test a holder thesis. Skip when deeper research is unlikely to add value. Do not output watch; final synthesis decides publication.",

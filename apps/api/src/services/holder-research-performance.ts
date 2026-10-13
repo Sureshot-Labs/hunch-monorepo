@@ -1,7 +1,8 @@
 import type { DbQuery } from "../db.js";
+import { holderResearchReportCategory } from "./holder-research-report-category.js";
 import {
   parseSignalPublicationSnapshot,
-  publicationQuoteQuality,
+  readFrozenPublicationEntry,
 } from "./signal-publication-snapshot.js";
 import {
   buildMarketTypeText,
@@ -77,6 +78,7 @@ export type HolderResearchSignalPerformance = {
   bucket: string | null;
   marketType: MarketType;
   marketSegment: MarketSegment;
+  reportCategory?: string;
   actorMode: string | null;
   executionPriority: HolderResearchExecutionPriority;
   confidence: number | null;
@@ -163,6 +165,7 @@ export type HolderResearchPerformanceAuditResult = {
     byBucket: Record<string, HolderResearchPerformanceAggregate>;
     byMarketType: Record<string, HolderResearchPerformanceAggregate>;
     byMarketSegment: Record<string, HolderResearchPerformanceAggregate>;
+    byReportCategory?: Record<string, HolderResearchPerformanceAggregate>;
     byActorMode: Record<string, HolderResearchPerformanceAggregate>;
     byExecutionPriority: Record<string, HolderResearchPerformanceAggregate>;
     byConfidenceBand: Record<string, HolderResearchPerformanceAggregate>;
@@ -205,6 +208,8 @@ export type HolderResearchPerformanceNoteRow = {
   market_title: string | null;
   event_title: string | null;
   category: string | null;
+  market_metadata?: unknown;
+  event_metadata?: unknown;
   close_time: Date | string | null;
   expiration_time: Date | string | null;
   best_bid: string | number | null;
@@ -832,52 +837,26 @@ function resolveEntryPrice(input: {
   entryQuality: HolderResearchSignalPerformance["entryQuality"];
 } {
   if (input.row.delivered_initial) {
-    if (input.row.publication_snapshot != null) {
-      const snapshot = parseSignalPublicationSnapshot(
-        input.row.publication_snapshot,
-      );
-      if (
-        snapshot &&
-        snapshot.marketId === input.row.market_id &&
-        snapshot.side === input.side &&
-        snapshot.venue === input.row.venue &&
-        input.row.published_at &&
-        publicationQuoteQuality(snapshot, new Date(input.row.published_at)) ===
-          "quoted_ask"
-      ) {
-        return {
-          price: snapshot.ask,
-          source: "frozen_delivery",
-          quality: "exact",
-          entryQuality: "quoted_ask",
-          distanceMinutes: null,
-        };
-      }
-      // Never fall back to note-time or present-day prices for an unpriced delivery.
-      return {
-        price: null,
-        source: "missing",
-        quality: "missing",
-        entryQuality: "missing_entry",
-        distanceMinutes: null,
-      };
-    }
-    const legacyPrice = normalizePrice(input.row.frozen_entry_price);
-    return legacyPrice != null && legacyPrice > 0 && legacyPrice < 1
-      ? {
-          price: legacyPrice,
-          source: "frozen_delivery",
-          quality: "approximate",
-          entryQuality: "legacy_display",
-          distanceMinutes: null,
-        }
-      : {
-          price: null,
-          source: "missing",
-          quality: "missing",
-          entryQuality: "missing_entry",
-          distanceMinutes: null,
-        };
+    const entry = readFrozenPublicationEntry({
+      snapshot: input.row.publication_snapshot,
+      legacyPrice: input.row.frozen_entry_price,
+      marketId: input.row.market_id,
+      venue: input.row.venue,
+      side: input.side,
+      sentAt: input.row.published_at ?? null,
+    });
+    return {
+      price: entry.price,
+      source: entry.price == null ? "missing" : "frozen_delivery",
+      quality:
+        entry.quality === "quoted_ask"
+          ? "exact"
+          : entry.quality === "legacy_display"
+            ? "approximate"
+            : "missing",
+      entryQuality: entry.quality,
+      distanceMinutes: null,
+    };
   }
   const publishedPrice = readPublishedSignalPriceSnapshot(
     input.row.metrics,
@@ -1044,6 +1023,12 @@ function buildPerformanceForRow(input: {
     bucket: metricBucket(input.row.metrics, input.row.target_meta),
     marketType,
     marketSegment,
+    reportCategory: holderResearchReportCategory({
+      marketType,
+      marketSegment,
+      marketMetadata: input.row.market_metadata,
+      eventMetadata: input.row.event_metadata,
+    }),
     actorMode: actorMode(input.row.model_meta),
     executionPriority: executionPriority(input.row.model_meta),
     confidence,
@@ -1187,6 +1172,7 @@ function aggregateItems(items: HolderResearchSignalPerformance[]) {
   const byBucket = new Map<string, MutableAggregate>();
   const byMarketType = new Map<string, MutableAggregate>();
   const byMarketSegment = new Map<string, MutableAggregate>();
+  const byReportCategory = new Map<string, MutableAggregate>();
   const byActorMode = new Map<string, MutableAggregate>();
   const byExecutionPriority = new Map<string, MutableAggregate>();
   const byConfidenceBand = new Map<string, MutableAggregate>();
@@ -1206,6 +1192,10 @@ function aggregateItems(items: HolderResearchSignalPerformance[]) {
     addAggregateItem(addGroup(byBucket, item.bucket ?? "unknown"), item);
     addAggregateItem(addGroup(byMarketType, item.marketType), item);
     addAggregateItem(addGroup(byMarketSegment, item.marketSegment), item);
+    addAggregateItem(
+      addGroup(byReportCategory, item.reportCategory ?? item.marketSegment),
+      item,
+    );
     addAggregateItem(addGroup(byActorMode, item.actorMode ?? "unknown"), item);
     addAggregateItem(
       addGroup(byExecutionPriority, item.executionPriority),
@@ -1228,6 +1218,7 @@ function aggregateItems(items: HolderResearchSignalPerformance[]) {
     byBucket: finishMap(byBucket),
     byMarketType: finishMap(byMarketType),
     byMarketSegment: finishMap(byMarketSegment),
+    byReportCategory: finishMap(byReportCategory),
     byActorMode: finishMap(byActorMode),
     byExecutionPriority: finishMap(byExecutionPriority),
     byConfidenceBand: finishMap(byConfidenceBand),
@@ -1358,6 +1349,8 @@ export async function auditHolderResearchSignalPerformance(
         m.title as market_title,
         e.title as event_title,
         coalesce(m.category, e.category) as category,
+        m.metadata as market_metadata,
+        e.metadata as event_metadata,
         m.close_time,
         m.expiration_time,
         m.best_bid,

@@ -2749,7 +2749,7 @@ function holderResearchModelConfigSignature(
   policy: HolderResearchPolicy,
 ): string {
   return JSON.stringify([
-    "holder_decision_contract_v8",
+    "holder_decision_contract_v9",
     policy.selectionClusterBonus,
     policy.eventPublicationHistoryEnabled,
     policy.model,

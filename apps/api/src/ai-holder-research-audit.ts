@@ -3,9 +3,11 @@
 import { pool } from "./db.js";
 import { auditHolderResearchSignalPerformance } from "./services/holder-research-performance.js";
 import { resolveHolderResearchPolicy } from "./services/runtime-policies.js";
+import { loadHolderDeliveryActivity } from "./services/holder-research-delivery-report.js";
 
 type AuditArgs = {
   execute: boolean;
+  delivered: boolean;
   force: boolean;
   json: boolean;
   includeOpen: boolean;
@@ -57,6 +59,7 @@ export function parseHolderResearchAuditArgs(argv: string[]): AuditArgs {
       : null);
   return {
     execute: hasFlag(argv, "--execute"),
+    delivered: hasFlag(argv, "--delivered"),
     force: hasFlag(argv, "--force"),
     json: hasFlag(argv, "--json"),
     includeOpen: !hasFlag(argv, "--no-include-open"),
@@ -87,8 +90,13 @@ async function main() {
   const args = parseHolderResearchAuditArgs(process.argv.slice(2));
   const policyResult = await resolveHolderResearchPolicy(pool);
   const policy = policyResult.effective;
+  const asOf = new Date();
+  const lookbackHours =
+    args.lookbackHours ?? policy.performanceAuditLookbackHours;
   const result = await auditHolderResearchSignalPerformance(pool, {
-    lookbackHours: args.lookbackHours ?? policy.performanceAuditLookbackHours,
+    lookbackHours,
+    asOf,
+    deliveredInitialOnly: args.delivered,
     limit: args.limit ?? policy.performanceAuditMaxNotesPerRun,
     noteIds: args.noteIds,
     persist: args.execute,
@@ -98,12 +106,19 @@ async function main() {
     approxEntryBeforeHours: policy.performanceAuditApproxEntryBeforeHours,
     approxEntryAfterHours: policy.performanceAuditApproxEntryAfterHours,
   });
+  const deliveryActivity = await loadHolderDeliveryActivity(pool, {
+    noteIds: result.items.map((item) => item.noteId),
+    from: new Date(asOf.getTime() - lookbackHours * 3_600_000),
+    to: asOf,
+  });
   if (args.json) {
     console.log(
       JSON.stringify(
         {
           dryRun: !args.execute,
           result,
+          deliveryActivity,
+          cohort: args.delivered ? "initial_deliveries" : "research_notes",
         },
         null,
         2,
@@ -111,6 +126,14 @@ async function main() {
     );
   } else {
     console.log(formatResult(result));
+    console.log(
+      "[holder-research:audit] delivery activity for report notes",
+      deliveryActivity,
+    );
+    console.log(
+      "[holder-research:audit] reporting categories",
+      result.aggregates.byReportCategory,
+    );
     if (!args.execute) {
       console.log(
         "[holder-research:audit] dry-run; pass --execute to persist metrics.signalPerformance",
