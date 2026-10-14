@@ -19,6 +19,7 @@ type RawLedgerRow = {
   occurred_at: Date;
   created_at: Date | null;
   id: string;
+  source: string | null;
 };
 
 export type WalletPositionLedgerKeyInput = {
@@ -38,6 +39,7 @@ export type WalletPositionLedgerRow = {
   occurredAt: Date;
   createdAt: Date | null;
   id: string;
+  source?: string | null;
 };
 
 export type WalletPositionLedgerState = {
@@ -52,6 +54,8 @@ export type WalletPositionLedgerState = {
   hasIncompleteEvents: boolean;
   oversold: boolean;
   eventCount: number;
+  lastActivityAt?: Date;
+  hasSnapshotEvents?: boolean;
 };
 
 export type WalletOpenEntryResolution = {
@@ -139,6 +143,10 @@ export function replayWalletPositionLedgerRows(
   const state = emptyLedgerState();
 
   for (const row of rows) {
+    if (!state.lastActivityAt || row.occurredAt > state.lastActivityAt) {
+      state.lastActivityAt = row.occurredAt;
+    }
+    if (row.source === "snapshot_delta") state.hasSnapshotEvents = true;
     const price = parseNumber(row.price);
     let shares = parseNumber(row.deltaShares);
     let notionalUsd = parseNumber(row.sizeUsd);
@@ -409,7 +417,8 @@ export async function loadWalletPositionLedgerMap(
         wa.price::text as price,
         wa.occurred_at,
         wa.created_at,
-        wa.id
+        wa.id,
+        wa.source
       from input_keys k
       join market_bounds mb
         on mb.market_id = k.market_id
@@ -424,7 +433,8 @@ export async function loadWalletPositionLedgerMap(
           wa.price,
           wa.occurred_at,
           wa.created_at,
-          wa.id
+          wa.id,
+          wa.source
         from wallet_activity_events wa
         where wa.wallet_id = k.wallet_id
           and wa.market_id = k.market_id
@@ -486,6 +496,7 @@ export async function loadWalletPositionLedgerMap(
       occurredAt: row.occurred_at,
       createdAt: row.created_at,
       id: row.id,
+      source: row.source,
     });
     rowsByKey.set(key, existing);
   }
