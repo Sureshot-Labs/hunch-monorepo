@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import type { Pool } from "pg";
+import { OwnedRouteDestinationObserver } from "../../reconciliation/owned-route-destination-observer.js";
 
 import {
   fundingReconciliationDisposition,
@@ -8,6 +10,53 @@ import {
 } from "../../reconciliation/funding-reducer.js";
 
 const calls: string[] = [];
+{
+  let queryCount = 0;
+  let nativeProviderPolls = 0;
+  const db = {
+    query: async (sql: string) => {
+      queryCount++;
+      assert.ok(sql.includes("from funding_operations operation"));
+      assert.equal(
+        queryCount,
+        1,
+        "no legacy lifecycle/baseline lookup for native credit",
+      );
+      // Deliberately no legacy baseline: a native route must not need one.
+      return {
+        rows: [
+          {
+            destination_target_snapshot: {
+              location: { asset: { networkId: "hyperliquid:mainnet" } },
+            },
+          },
+        ],
+      };
+    },
+  } as unknown as Pool;
+  const observer = new OwnedRouteDestinationObserver({
+    observe: async () => {
+      throw new Error("native destination reached legacy balance reader");
+    },
+  });
+  await pollFundingReconciliationEvidence({
+    operationId: "00000000-0000-4000-8000-000000000001",
+    state: { status: "in_progress", stage: "routing" },
+    now: new Date(),
+    destinationPoll: (operationId, now) =>
+      observer.pollOperation(db, operationId, now),
+    providerPoll: async () => {
+      nativeProviderPolls++;
+      return { requestsPolled: 1 };
+    },
+  });
+  assert.equal(queryCount, 1);
+  assert.equal(
+    nativeProviderPolls,
+    1,
+    "native receipt lookup is reachable in the real worker poll order",
+  );
+}
 await pollFundingReconciliationEvidence({
   operationId: "00000000-0000-4000-8000-000000000001",
   state: { status: "in_progress", stage: "routing" },

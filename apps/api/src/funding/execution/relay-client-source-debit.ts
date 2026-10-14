@@ -1,11 +1,10 @@
-import {
-  canonicalAssetId,
-  sameAccountAddress,
-} from "../domain/asset-identity.js";
+import { sameAsset, sameAccountAddress } from "../domain/asset-identity.js";
 import { isPositiveRawAmount } from "../domain/raw-amount.js";
 import type { JsonValue, Money, NormalizedAction } from "../domain/types.js";
 import { RELAY_DEPOSITORY_V2 } from "../../funding-providers/relay/rehearsal.js";
 import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "./relay-evm-profile-specs.js";
+import { RELAY_ROUTE_SPECS } from "../../funding-providers/relay/mappings.js";
+import { Interface } from "ethers";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -18,11 +17,22 @@ export type RelayClientSourceDebitPostcondition = Readonly<{
   expectedSourceRaw: string;
 }>;
 
-const RELAY_EVM_ROUTE_SOURCE_ASSETS = new Map(
-  Object.values(RELAY_EVM_FUNDING_PROFILE_SPECS).flatMap((profile) =>
+const RELAY_EVM_ROUTE_SOURCE_ASSETS = new Map([
+  ...Object.values(RELAY_EVM_FUNDING_PROFILE_SPECS).flatMap((profile) =>
     profile.routeIds.map((routeId) => [routeId, profile.sourceAsset] as const),
   ),
-);
+  // Receipt requirements do not grant delegated execution authority. Native
+  // inbound routes use the ordinary user-controlled EVM executor, not a new
+  // Telegram profile or allowance lane.
+  ...Object.values(RELAY_ROUTE_SPECS)
+    .filter(
+      (spec) => spec.sourceVm === "evm" && spec.destinationVm === "hypercore",
+    )
+    .map((spec) => [spec.routeId, spec.source] as const),
+]);
+const ERC20_APPROVAL = new Interface([
+  "function approve(address spender,uint256 amount)",
+]);
 
 function relayDepositRecipient(action: NormalizedAction): string | null {
   if (action.kind === "evm_transaction") {
@@ -62,10 +72,59 @@ export function withRelayClientSourceDebitPostcondition(
     !routeSourceAsset ||
     !sourceAmount ||
     !isPositiveRawAmount(sourceAmount.raw) ||
-    canonicalAssetId(routeSourceAsset) !==
-      canonicalAssetId(sourceAmount.asset) ||
+    !sameAsset(routeSourceAsset, sourceAmount.asset) ||
     input.action.networkId !== sourceAmount.asset.networkId ||
-    typeof signerAddress !== "string" ||
+    typeof signerAddress !== "string"
+  ) {
+    return input.actionValidationResult;
+  }
+  const nativeDestination =
+    input.routeId &&
+    RELAY_ROUTE_SPECS[input.routeId]?.destinationVm === "hypercore"
+      ? RELAY_ROUTE_SPECS[input.routeId].destination.networkId
+      : null;
+  // A separate, exact approval only changes allowance. An atomic group that
+  // also contains deposit must never inherit this non-money classification.
+  if (
+    nativeDestination &&
+    input.action.kind === "evm_transaction" &&
+    input.action.actionId.endsWith(":approve") &&
+    input.actionValidationResult.relayStepKind === "approve" &&
+    input.action.valueRaw === "0" &&
+    sameAccountAddress(
+      input.action.networkId,
+      input.action.to,
+      sourceAmount.asset.assetId,
+    )
+  ) {
+    try {
+      const approval = ERC20_APPROVAL.decodeFunctionData(
+        "approve",
+        input.action.data,
+      );
+      if (
+        sameAccountAddress(
+          input.action.networkId,
+          approval[0],
+          RELAY_DEPOSITORY_V2,
+        ) &&
+        approval[1] === BigInt(sourceAmount.raw) &&
+        ERC20_APPROVAL.encodeFunctionData("approve", [
+          approval[0],
+          approval[1],
+        ]).toLowerCase() === input.action.data.toLowerCase()
+      ) {
+        return {
+          ...input.actionValidationResult,
+          relayNativeDestination: nativeDestination,
+          relayNativeApproval: "exact_erc20_approval_v1",
+        };
+      }
+    } catch {
+      /* An unrecognised action retains its conservative classification. */
+    }
+  }
+  if (
     !recipient ||
     !sameAccountAddress(input.action.networkId, recipient, RELAY_DEPOSITORY_V2)
   ) {
@@ -73,6 +132,7 @@ export function withRelayClientSourceDebitPostcondition(
   }
   return {
     ...input.actionValidationResult,
+    ...(nativeDestination ? { relayNativeDestination: nativeDestination } : {}),
     postconditionEvidenceKind: "exact_erc20_source_debit_v1",
     expectedSourceAssetId: sourceAmount.asset.assetId,
     expectedSourceAssetDecimals: sourceAmount.asset.decimals,

@@ -45,7 +45,14 @@ import {
   type CashAvailabilityProjection,
 } from "./cash-availability-projector.js";
 import { addUnsignedDecimals } from "./decimal.js";
-import { collectHip4AccountValue } from "./hip4-account-value.js";
+import {
+  collectHip4AccountValue,
+  type Hip4AccountValue,
+} from "./hip4-account-value.js";
+import {
+  HYPERCORE_MAINNET_USDC,
+  isHypercoreMainnetUsdc,
+} from "../funding/domain/hypercore-identity.js";
 import {
   ExistingFactsOwnershipResolver,
   type ExistingVenueBindingFact,
@@ -73,6 +80,7 @@ import {
   applyFundingSourceDebitSuppression,
   buildFundingInTransitObservations,
   loadFundingAccountValueFacts,
+  loadFundingNativeSnapshotDebits,
   type FundingAccountValueFacts,
 } from "./funding-movement-feed.js";
 import {
@@ -579,7 +587,25 @@ export async function buildAccountValueReadModel(inputs: {
   }
   const ownership = await new ExistingFactsOwnershipResolver({
     wallets: ownershipWallets,
-    venueBindings: bindingFacts,
+    venueBindings: [
+      ...bindingFacts,
+      ...linkedWallets
+        .filter(
+          (wallet) => wallet.walletType === "ethereum" && wallet.isVerified,
+        )
+        .map(
+          (wallet): ExistingVenueBindingFact => ({
+            venueId: "hyperliquid",
+            controllerAddress: wallet.walletAddress,
+            executionAddress: wallet.walletAddress,
+            accountRef: wallet.walletAddress,
+            settlementAsset: HYPERCORE_MAINNET_USDC,
+            signingMode: wallet.isInternalWallet
+              ? "privy_authorization"
+              : "web_client",
+          }),
+        ),
+    ],
     now: () => now,
   }).resolve(inputs.userId);
 
@@ -656,10 +682,9 @@ export async function buildAccountValueReadModel(inputs: {
     ],
     stableStates,
   });
-  const valuedAssets = await valuationService.value(
-    deduplicated.observations,
-    now,
-  );
+  const valuedAssets = [
+    ...(await valuationService.value(deduplicated.observations, now)),
+  ];
   let fundingFacts: FundingAccountValueFacts = {
     schemaReady: false,
     availability: [],
@@ -686,6 +711,21 @@ export async function buildAccountValueReadModel(inputs: {
       maximumObservationAgeMs: Number.MAX_SAFE_INTEGER,
     }),
   );
+  movementPolicies.push({
+    asset: HYPERCORE_MAINNET_USDC,
+    category: "in_transit",
+    executionEligibility: "ineligible",
+    maximumObservationAgeMs: Number.MAX_SAFE_INTEGER,
+    pricePolicyId: EXACT_STABLE_PRICE_POLICY_ID,
+  });
+  stableStates.set(
+    canonicalAssetKey(HYPERCORE_MAINNET_USDC),
+    resolveStableImpairmentState(
+      configuredCatalogByAsset.get(canonicalAssetKey(HYPERCORE_MAINNET_USDC))
+        ?.pricePolicyId ?? EXACT_STABLE_PRICE_POLICY_ID,
+      asOf,
+    ),
+  );
   const movementValuationService = new ValuationService({
     policies: movementPolicies,
     adapters: [
@@ -698,11 +738,6 @@ export async function buildAccountValueReadModel(inputs: {
     buildFundingInTransitObservations(inputs.userId, fundingFacts.inTransit),
     now,
   );
-  const projectedAssets = [
-    ...applyFundingSourceDebitSuppression(valuedAssets, fundingFacts.inTransit),
-    ...inTransitAssets,
-  ];
-
   const linkedWalletAddresses = linkedWallets.map(
     (wallet) => wallet.walletAddress,
   );
@@ -753,19 +788,24 @@ export async function buildAccountValueReadModel(inputs: {
     });
   }
   const positionComponents = positionGroups.flat();
+  let hip4: Hip4AccountValue = {
+    assets: [],
+    positions: [],
+    errors: [],
+    availability: [],
+  };
   try {
-    const hip4 = await collectHip4AccountValue({
+    hip4 = await collectHip4AccountValue({
       pool: inputs.pool,
       userId: inputs.userId,
       walletAddresses: linkedWalletAddresses,
       now,
+      wallets: ownership.wallets,
+      stableState: stableStates.get(canonicalAssetKey(HYPERCORE_MAINNET_USDC)),
     });
-    projectedAssets.push(...hip4.assets);
+    valuedAssets.push(...hip4.assets);
     positionComponents.push(...hip4.positions);
     positionErrors.push(...hip4.errors);
-    // Deliberately not added to valuedAssets: that is executable wallet
-    // inventory used for cash availability, preferences and funding sources.
-    // Native venue balances remain valuation-only until funding is supported.
   } catch {
     positionErrors.push({
       collectorId: "hyperliquid-account-position-value",
@@ -773,6 +813,46 @@ export async function buildAccountValueReadModel(inputs: {
       retryable: true,
     });
   }
+
+  let nativeSnapshotDebits: Awaited<
+    ReturnType<typeof loadFundingNativeSnapshotDebits>
+  > = [];
+  let nativeDebitUnavailable = false;
+  try {
+    nativeSnapshotDebits = await loadFundingNativeSnapshotDebits(
+      inputs.pool,
+      inputs.userId,
+      hip4.assets,
+    );
+  } catch {
+    nativeDebitUnavailable = true;
+    // Do not show restored cash after a fast destination receipt while the
+    // source snapshot still precedes the debit. A normal refresh retries this.
+    for (const asset of hip4.assets) {
+      const index = valuedAssets.indexOf(asset);
+      if (index >= 0)
+        valuedAssets[index] = {
+          ...asset,
+          estimatedUsd: null,
+          valuationEligibility: "unpriced",
+        };
+    }
+    positionErrors.push({
+      collectorId: "hyperliquid-source-debits",
+      code: "source_debit_collection_failed",
+      retryable: true,
+    });
+  }
+  const sourceDebits = [
+    ...fundingFacts.inTransit.filter(
+      (fact) => !isHypercoreMainnetUsdc(fact.amount.asset),
+    ),
+    ...nativeSnapshotDebits,
+  ];
+  const projectedAssets = [
+    ...applyFundingSourceDebitSuppression(valuedAssets, sourceDebits),
+    ...inTransitAssets,
+  ];
 
   let locks = {
     polymarket: new Map<string, bigint>(),
@@ -802,9 +882,29 @@ export async function buildAccountValueReadModel(inputs: {
   const fundingAvailabilityByComponent = new Map(
     fundingFacts.availability.map((fact) => [fact.componentId, fact]),
   );
+  const nativeAvailabilityByComponent = new Map(
+    hip4.availability.map((fact) => [fact.componentId, fact]),
+  );
   const adjustments: CashAvailabilityAdjustment[] = valuedAssets
     .filter((component) => component.category === "cash")
     .map((component) => {
+      const native = nativeAvailabilityByComponent.get(component.componentId);
+      if (native)
+        return {
+          ...native,
+          reservedRaw:
+            fundingAvailabilityByComponent.get(component.componentId)
+              ?.reservedRaw ?? "0",
+          submittedDebitRaw: nativeSnapshotDebits
+            .filter((fact) => fact.sourceComponentId === component.componentId)
+            .reduce((sum, fact) => sum + BigInt(fact.amount.raw), 0n)
+            .toString(),
+          availabilityKnown:
+            native.availabilityKnown &&
+            !nativeDebitUnavailable &&
+            fundingFacts.schemaReady &&
+            fundingFactErrors.length === 0,
+        };
       const entry = catalogByAsset.get(
         canonicalAssetKey(component.amount.asset),
       );

@@ -6,6 +6,12 @@ import {
   type RelayRequestListItem,
   type RelayStatusResponse,
 } from "./schemas.js";
+import {
+  parseRelayRequestEvidence,
+  type RelayRequestEvidence,
+} from "./request-evidence.js";
+import { resolveRelayHypercoreContracts } from "./hypercore-quote.js";
+import type { validateRelayHypercorePayloads } from "./hypercore-actions.js";
 
 const DEFAULT_RELAY_API_BASE_URL = "https://api.relay.link";
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -13,12 +19,17 @@ const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const RELAY_PROVIDER_ERROR_CODE = /^[A-Z][A-Z0-9_]{0,127}$/u;
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
+type NativeContractSnapshot = ReturnType<
+  typeof resolveRelayHypercoreContracts
+> & { observedAt: string };
 
 type RequestBudget = {
   active: number;
   nextStart: number;
   cooldownUntil: number;
   statusFlights: Map<string, Promise<RelayStatusResponse>>;
+  evidenceFlights: Map<string, Promise<RelayRequestEvidence | null>>;
+  nativeContractFlights: Map<number, Promise<NativeContractSnapshot>>;
 };
 // Shared across short-lived clients, but isolated by transport and API key.
 const budgets = new WeakMap<FetchLike, Map<string, RequestBudget>>();
@@ -32,6 +43,8 @@ function requestBudget(transport: FetchLike, key: string): RequestBudget {
       nextStart: 0,
       cooldownUntil: 0,
       statusFlights: new Map(),
+      evidenceFlights: new Map(),
+      nativeContractFlights: new Map(),
     };
     keys.set(key, budget);
   }
@@ -82,6 +95,7 @@ export type RelayQuoteRequest = Readonly<{
   slippageTolerance?: string;
   // Opt-in only. Native Core withdrawals require v2; existing routes keep their defaults.
   protocolVersion?: "v2";
+  includeProtocolData?: boolean;
 }>;
 
 export type RelayClientConfig = Readonly<{
@@ -131,6 +145,62 @@ export class RelayClient {
       );
     }
     return parsed.data;
+  }
+
+  /** Called only after durable native auth admission; no retries or redirects.
+   * Signature query placement and HTTP-success ACK follow Relay's documented
+   * signature-step protocol. The response is NOT proof of a native transfer.
+   * https://docs.relay.link/references/api/api_core_concepts/step-execution */
+  async authorizeHypercore(
+    body: ReturnType<
+      typeof validateRelayHypercorePayloads
+    >["authorization"]["post"]["body"],
+    signature: string,
+  ): Promise<void> {
+    if (
+      !/^0x[0-9a-f]{130}$/i.test(signature) ||
+      body.type !== "nonce-mapping" ||
+      body.walletChainId !== 1337 ||
+      body.signatureChainId !== 1
+    )
+      throw new Error("Invalid native authorization request");
+    await this.#request(
+      "POST",
+      "/authorize",
+      new URLSearchParams({ signature }),
+      body,
+    );
+  }
+
+  /** Read only provider contracts. The returned fact is independently frozen
+   * with a quote; completed/failing reads are not held as current indefinitely. */
+  async hypercoreContracts(destinationChainId: 137 | 8453) {
+    if (destinationChainId !== 137 && destinationChainId !== 8453)
+      throw new Error("Native Relay destination is unsupported");
+    const existing = this.#budget.nativeContractFlights.get(destinationChainId);
+    if (existing) return existing;
+    const flight = (async () => {
+      const observedAt = new Date().toISOString();
+      const response = await this.#request("GET", "/chains");
+      try {
+        return {
+          ...resolveRelayHypercoreContracts(response, destinationChainId),
+          observedAt,
+        };
+      } catch {
+        throw new RelayClientError(
+          "Relay native chain contracts are unavailable or invalid",
+          "invalid_response",
+          true,
+        );
+      }
+    })();
+    this.#budget.nativeContractFlights.set(destinationChainId, flight);
+    try {
+      return await flight;
+    } finally {
+      this.#budget.nativeContractFlights.delete(destinationChainId);
+    }
   }
 
   async status(requestId: string): Promise<RelayStatusResponse> {
@@ -197,6 +267,51 @@ export class RelayClient {
     }
   }
 
+  /** Bounded observation of one persisted provider reference. Not a search,
+   * reindex, refresh request, signing action or provider-success credit. */
+  async requestEvidence(
+    requestId: string,
+  ): Promise<RelayRequestEvidence | null> {
+    const id = normalizeOpaqueLookup(requestId, "Relay request ID");
+    // The provider accepts comma-separated filters; never expand this lookup.
+    if (!/^[A-Za-z0-9_-]+$/u.test(id))
+      throw new Error("Relay request ID is not a single identity");
+    const existing = this.#budget.evidenceFlights.get(id);
+    if (existing) return existing;
+    const flight = this.#readRequestEvidence(id);
+    this.#budget.evidenceFlights.set(id, flight);
+    try {
+      return await flight;
+    } finally {
+      this.#budget.evidenceFlights.delete(id);
+    }
+  }
+
+  async #readRequestEvidence(
+    requestId: string,
+  ): Promise<RelayRequestEvidence | null> {
+    const response = await this.#request(
+      "GET",
+      "/requests/v3",
+      new URLSearchParams({
+        id: requestId,
+        limit: "1",
+        includeChildRequests: "false",
+        includeAuthenticatedData: "false",
+        includeTotal: "false",
+      }),
+    );
+    try {
+      return parseRelayRequestEvidence(response, requestId);
+    } catch {
+      throw new RelayClientError(
+        "Relay Requests v3 evidence failed exact lookup validation",
+        "invalid_response",
+        true,
+      );
+    }
+  }
+
   async #request(
     method: "GET" | "POST",
     path: string,
@@ -254,6 +369,7 @@ export class RelayClient {
         },
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: controller.signal,
+        ...(path === "/authorize" ? { redirect: "error" as const } : {}),
       });
 
       const contentLength = Number(response.headers.get("content-length"));
@@ -289,6 +405,7 @@ export class RelayClient {
           relayProviderErrorCode(text),
         );
       }
+      if (path === "/authorize") return undefined;
       try {
         return JSON.parse(text) as unknown;
       } catch {

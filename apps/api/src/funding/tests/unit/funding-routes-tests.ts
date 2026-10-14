@@ -2191,6 +2191,66 @@ await test("operation action prepare negotiates scoped submission protocols expl
   }
 });
 
+await test("native submit uses authenticated owner and exact signature-only contract", async () => {
+  const calls: unknown[] = [];
+  const body = { attemptId: USER_ID, signature: `0x${"ab".repeat(65)}` };
+  const url =
+    "/funding/operations/operation_id_12345678/actions/step_id_12345678/native-submit";
+  const app = await buildApp({
+    submitNativeOperationAction: async (userId, input) => {
+      calls.push({ userId, ...input });
+      return {
+        attemptId: input.attemptId,
+        stage: "send_asset",
+        submissionStatus: "reconcile_required",
+      };
+    },
+  });
+  try {
+    const bad = await app.inject({
+      method: "POST",
+      url,
+      payload: { ...body, request: { nonce: 1 } },
+    });
+    assert.equal(bad.statusCode, 400);
+    assert.equal(calls.length, 0);
+    const good = await app.inject({ method: "POST", url, payload: body });
+    assert.equal(good.statusCode, 200);
+    assert.equal(good.json().submissionStatus, "reconcile_required");
+    assert.deepEqual(calls, [
+      {
+        userId: USER_ID,
+        operationId: "operation_id_12345678",
+        stepId: "step_id_12345678",
+        ...body,
+      },
+    ]);
+    assert.equal(JSON.stringify(good.json()).includes(body.signature), false);
+  } finally {
+    await app.close();
+  }
+  for (const unauthorized of [true, false]) {
+    const blocked = await buildApp({
+      ...(unauthorized
+        ? { authenticate: async () => undefined }
+        : { rateLimit: async () => false }),
+      submitNativeOperationAction: async () => {
+        throw new Error("must not dispatch");
+      },
+    });
+    try {
+      const response = await blocked.inject({
+        method: "POST",
+        url,
+        payload: body,
+      });
+      assert.equal(response.statusCode, unauthorized ? 401 : 429);
+    } finally {
+      await blocked.close();
+    }
+  }
+});
+
 await test("operation action reports accept transaction references but no replacement action", async () => {
   const observed: Array<
     Readonly<{

@@ -5,6 +5,7 @@ import { projectHip4AccountValue } from "./account-value/hip4-account-value.js";
 import { projectAccountValue } from "./account-value/account-value-projector.js";
 import { accountAssetsResponseSchema } from "./schemas/account-value.js";
 import { hip4Identity } from "@hunch/shared";
+import { HYPERCORE_MAINNET_USDC } from "./funding/domain/hypercore-identity.js";
 import { projectHip4Account } from "./services/hip4-account-projection.js";
 import { mapHip4Market } from "./services/hip4-mapping.js";
 import {
@@ -51,7 +52,7 @@ const observation = projectHip4Account({
   observedAt: new Date(now).toISOString(),
   role: "user",
   mode: "disabled",
-  quote: { tokenId: "USDC", index: 0, weiDecimals: 8 },
+  quote: { tokenId: HYPERCORE_MAINNET_USDC.assetId, index: 0, weiDecimals: 8 },
   state: {
     balances: [
       { coin: "+87750", total: "20.00001", hold: "1", entryNtl: "999" },
@@ -377,7 +378,12 @@ test("Account Value excludes testnet and disabled reads, then recovers on the ne
   const project = () =>
     projectHip4AccountValue({ userId: input.userId, read, now });
   read.environment = "testnet";
-  assert.deepEqual(project(), { assets: [], positions: [], errors: [] });
+  assert.deepEqual(project(), {
+    assets: [],
+    positions: [],
+    errors: [],
+    availability: [],
+  });
   read.environment = "mainnet";
   read.coverage.state = "disabled";
   assert.equal(project().positions.length, 0);

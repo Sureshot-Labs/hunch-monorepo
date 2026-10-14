@@ -1255,6 +1255,11 @@ for (const maximumQuoteTtlMs of [undefined, 6 * 60_000]) {
       "solana-sol-to-polygon-pusd",
       "solana-usdc-to-base-usdc",
       "solana-usdc-to-polygon-pusd",
+      "hypercore-spot-usdc-to-base-usdc",
+      "hypercore-spot-usdc-to-polygon-usdc",
+      "hypercore-spot-usdc-to-polygon-pusd",
+      "base-usdc-to-hypercore-spot-usdc",
+      "polygon-usdc-to-hypercore-spot-usdc",
     ].sort(),
   );
   assert.equal(
@@ -1336,6 +1341,7 @@ for (const maximumQuoteTtlMs of [undefined, 6 * 60_000]) {
     PRODUCTION_FUNDING_REGISTRY.networkExecutors.map(({ id }) => id).sort(),
     [
       "polymarket_deposit_pusd_fund_v1",
+      "relay_hypercore_native_v1",
       "wallet_profile_evm_v1",
       "wallet_profile_svm_v1",
     ],

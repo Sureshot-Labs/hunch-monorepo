@@ -14,6 +14,10 @@ import {
 import { canonicalAssetId, sameAsset } from "./asset-identity.js";
 import { SOLANA_NATIVE_ASSET } from "./network-fees.js";
 import type { AssetRef } from "./types.js";
+import {
+  HYPERCORE_SPOT_LOCATION_PATTERN,
+  isHypercoreMainnetUsdc,
+} from "./hypercore-identity.js";
 
 export const WITHDRAWAL_DESTINATION_CONTRACT_VERSION = 1;
 export const WITHDRAWAL_DESTINATION_CONTRACT_REVISION =
@@ -81,6 +85,20 @@ export function withdrawalRecipientLocationPatternId(
   return null;
 }
 
+/** Presentation of supported recipient assets, not a quote or permission to
+ * spend. Existing wallet withdrawals retain their same-asset destination. */
+export function withdrawalDestinationAssets(source: AssetRef): AssetRef[] {
+  if (withdrawalRecipientLocationPatternId(source)) return [source];
+  if (!isSupportedWithdrawalSource(source)) return [];
+  const destinations = new Map<string, AssetRef>();
+  for (const spec of Object.values(RELAY_ROUTE_SPECS)) {
+    if (!sameAsset(spec.source, source)) continue;
+    const pattern = withdrawalRecipientLocationPatternId(spec.destination);
+    if (pattern) destinations.set(pattern, spec.destination);
+  }
+  return [...destinations.values()];
+}
+
 /**
  * Derives the Relay withdrawal view from already observed general-balance
  * assets. Funding venue selection, receive aliases and funding pause do not
@@ -105,11 +123,14 @@ export function withWithdrawalPlanningContract(
     ) {
       continue;
     }
-    const sourceLocationPatternId = relayWalletLocationPatternId(spec.source);
+    const nativeSource = isHypercoreMainnetUsdc(spec.source);
+    const sourceLocationPatternId = nativeSource
+      ? HYPERCORE_SPOT_LOCATION_PATTERN
+      : relayWalletLocationPatternId(spec.source);
     if (!sourceLocationPatternId) continue;
     sourceLocations.set(spec.routeId, {
       locationPatternId: sourceLocationPatternId,
-      locationKind: "wallet",
+      locationKind: nativeSource ? "venue_account" : "wallet",
       asset: spec.source,
       ownership: "owned",
       observable: true,

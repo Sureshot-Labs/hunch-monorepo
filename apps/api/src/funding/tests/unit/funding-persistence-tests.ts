@@ -822,13 +822,18 @@ const tests: readonly Test[] = [
       );
       assert.deepEqual(
         PRODUCTION_FUNDING_REGISTRY.actionValidators.map(({ id }) => id),
-        ["relay_evm_action_v1", "relay_svm_action_v1"],
+        [
+          "relay_evm_action_v1",
+          "relay_svm_action_v1",
+          "relay_hypercore_native_v1",
+        ],
       );
       assert.deepEqual(
         PRODUCTION_FUNDING_REGISTRY.networkExecutors.map(({ id }) => id),
         [
           "wallet_profile_evm_v1",
           "wallet_profile_svm_v1",
+          "relay_hypercore_native_v1",
           "polymarket_deposit_pusd_fund_v1",
         ],
       );

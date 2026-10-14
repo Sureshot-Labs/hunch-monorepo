@@ -12,6 +12,11 @@ import { positionReadRouteSchemas } from "./schemas/position-read.js";
 import { venueMetadataRouteSchema } from "./schemas/venue-metadata.js";
 import { accountValueReadRouteSchemas } from "./schemas/account-value.js";
 import { orderReadRouteSchemas } from "./schemas/orders.js";
+import {
+  fundingActionSigningRouteSchemas,
+  fundingOperationReadRouteSchemas,
+  fundingOperationWriteRouteSchemas,
+} from "./schemas/funding.js";
 
 const app = Fastify();
 app.setValidatorCompiler(validatorCompiler);
@@ -67,6 +72,19 @@ for (const [path, schema] of Object.entries({
     maxLimit: Number.MAX_SAFE_INTEGER,
   }),
 })) {
+  app.get(path, { schema }, async () => {
+    throw new Error("schema_only");
+  });
+}
+for (const [path, schema] of Object.entries({
+  ...fundingActionSigningRouteSchemas,
+  ...fundingOperationWriteRouteSchemas,
+})) {
+  app.post(path, { schema }, async () => {
+    throw new Error("schema_only");
+  });
+}
+for (const [path, schema] of Object.entries(fundingOperationReadRouteSchemas)) {
   app.get(path, { schema }, async () => {
     throw new Error("schema_only");
   });

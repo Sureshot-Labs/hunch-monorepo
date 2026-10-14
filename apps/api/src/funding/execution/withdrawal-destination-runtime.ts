@@ -131,6 +131,16 @@ function maskedAddress(address: string): string {
   return `${address.slice(0, 8)}…${address.slice(-6)}`;
 }
 
+function runtimeWithdrawalDestinationCodec() {
+  return createWithdrawalDestinationCodec({
+    encryptionKey: getCredentialsEncryptionKey(),
+    lookupHmacKey: process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim() ?? "",
+    keyVersion:
+      parsePositiveInteger(process.env.FUNDING_REFERENCE_LOOKUP_KEY_VERSION) ??
+      1,
+  });
+}
+
 export class WithdrawalDestinationRuntime {
   constructor(
     private readonly db: Pool,
@@ -145,17 +155,7 @@ export class WithdrawalDestinationRuntime {
   ) {}
 
   private codec() {
-    if (this.dependencies.codec) return this.dependencies.codec;
-    const lookupKey =
-      process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim() ?? "";
-    const keyVersion =
-      parsePositiveInteger(process.env.FUNDING_REFERENCE_LOOKUP_KEY_VERSION) ??
-      1;
-    return createWithdrawalDestinationCodec({
-      encryptionKey: getCredentialsEncryptionKey(),
-      lookupHmacKey: lookupKey,
-      keyVersion,
-    });
+    return this.dependencies.codec ?? runtimeWithdrawalDestinationCodec();
   }
 
   async register(
@@ -216,76 +216,15 @@ export class WithdrawalDestinationRuntime {
       lockForShare?: boolean;
     }> = {},
   ): Promise<ResolvedExternalRecipient> {
-    const now = this.dependencies.now?.() ?? new Date();
-    const db = options.db ?? this.db;
-    const stored = await (
-      this.dependencies.fetchDestination ??
-      fetchFundingWithdrawalDestinationForUser
-    )(db, {
-      userId,
-      destinationId: recipientId,
-      lockForShare: options.lockForShare,
-    });
-    if (!stored) {
-      throw new WithdrawalDestinationError(
-        "withdrawal_destination_not_found",
-        "withdrawal destination was not found for authenticated user",
-      );
-    }
-    if (
-      stored.revokedAt ||
-      !stored.addressCiphertext ||
-      stored.expiresAt.getTime() <= now.getTime()
-    ) {
-      throw new WithdrawalDestinationError(
-        "withdrawal_destination_expired",
-        "withdrawal destination is revoked or expired",
-      );
-    }
-    const asset: AssetRef = {
-      networkId: stored.networkId,
-      assetId: stored.assetId,
-      decimals: stored.assetDecimals,
-    };
-    assertWithdrawalRecipientContract(asset);
-    const evidenceRevision = stored.validationEvidence.policyRevision;
-    if (
-      stored.policyVersion !== WITHDRAWAL_DESTINATION_CONTRACT_VERSION ||
-      evidenceRevision !== WITHDRAWAL_DESTINATION_CONTRACT_REVISION
-    ) {
-      throw new WithdrawalDestinationError(
-        "withdrawal_destination_expired",
-        "withdrawal destination contract changed and must be revalidated",
-      );
-    }
-    const codec = this.codec();
-    if (codec.keyVersion !== stored.lookupKeyVersion) {
-      throw new WithdrawalDestinationError(
-        "withdrawal_destination_expired",
-        "withdrawal destination lookup key changed and must be revalidated",
-      );
-    }
-    const address = codec.decrypt(stored.addressCiphertext);
-    if (codec.fingerprint(address) !== stored.addressLookupHmac) {
-      throw new WithdrawalDestinationError(
-        "withdrawal_destination_invalid",
-        "withdrawal destination ciphertext and fingerprint differ",
-      );
-    }
-    return {
-      recipientId: stored.id,
-      accountId: userId,
-      networkId: stored.networkId,
-      asset,
-      address,
-      addressFingerprint: stored.addressLookupHmac,
-      validatedAt:
-        typeof stored.validationEvidence.validatedAt === "string"
-          ? stored.validationEvidence.validatedAt
-          : stored.expiresAt.toISOString(),
-      expiresAt: stored.expiresAt.toISOString(),
-      validationPolicyVersion: stored.policyVersion,
-    };
+    return resolveWithdrawalDestination(
+      options.db ?? this.db,
+      {
+        userId,
+        recipientId,
+        lockForShare: options.lockForShare,
+      },
+      this.dependencies,
+    );
   }
 
   async revoke(userId: string, recipientId: string) {
@@ -305,4 +244,86 @@ export class WithdrawalDestinationRuntime {
       revokedAt: destination.revokedAt?.toISOString() ?? null,
     } as const;
   }
+}
+
+/** Same recipient validation for prepare and final server admission. A query-only
+ * transaction handle keeps the recipient share lock until admission commits. */
+export async function resolveWithdrawalDestination(
+  db: Pick<Pool, "query">,
+  input: { userId: string; recipientId: string; lockForShare?: boolean },
+  dependencies: {
+    codec?: WithdrawalDestinationCodec;
+    fetchDestination?: typeof fetchFundingWithdrawalDestinationForUser;
+    now?: () => Date;
+  } = {},
+): Promise<ResolvedExternalRecipient> {
+  const { userId, recipientId } = input;
+  const now = dependencies.now?.() ?? new Date();
+  const stored = await (
+    dependencies.fetchDestination ?? fetchFundingWithdrawalDestinationForUser
+  )(db, {
+    userId,
+    destinationId: recipientId,
+    lockForShare: input.lockForShare,
+  });
+  if (!stored) {
+    throw new WithdrawalDestinationError(
+      "withdrawal_destination_not_found",
+      "withdrawal destination was not found for authenticated user",
+    );
+  }
+  if (
+    stored.revokedAt ||
+    !stored.addressCiphertext ||
+    stored.expiresAt.getTime() <= now.getTime()
+  ) {
+    throw new WithdrawalDestinationError(
+      "withdrawal_destination_expired",
+      "withdrawal destination is revoked or expired",
+    );
+  }
+  const asset: AssetRef = {
+    networkId: stored.networkId,
+    assetId: stored.assetId,
+    decimals: stored.assetDecimals,
+  };
+  assertWithdrawalRecipientContract(asset);
+  const evidenceRevision = stored.validationEvidence.policyRevision;
+  if (
+    stored.policyVersion !== WITHDRAWAL_DESTINATION_CONTRACT_VERSION ||
+    evidenceRevision !== WITHDRAWAL_DESTINATION_CONTRACT_REVISION
+  ) {
+    throw new WithdrawalDestinationError(
+      "withdrawal_destination_expired",
+      "withdrawal destination contract changed and must be revalidated",
+    );
+  }
+  const codec = dependencies.codec ?? runtimeWithdrawalDestinationCodec();
+  if (codec.keyVersion !== stored.lookupKeyVersion) {
+    throw new WithdrawalDestinationError(
+      "withdrawal_destination_expired",
+      "withdrawal destination lookup key changed and must be revalidated",
+    );
+  }
+  const address = codec.decrypt(stored.addressCiphertext);
+  if (codec.fingerprint(address) !== stored.addressLookupHmac) {
+    throw new WithdrawalDestinationError(
+      "withdrawal_destination_invalid",
+      "withdrawal destination ciphertext and fingerprint differ",
+    );
+  }
+  return {
+    recipientId: stored.id,
+    accountId: userId,
+    networkId: stored.networkId,
+    asset,
+    address,
+    addressFingerprint: stored.addressLookupHmac,
+    validatedAt:
+      typeof stored.validationEvidence.validatedAt === "string"
+        ? stored.validationEvidence.validatedAt
+        : stored.expiresAt.toISOString(),
+    expiresAt: stored.expiresAt.toISOString(),
+    validationPolicyVersion: stored.policyVersion,
+  };
 }

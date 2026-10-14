@@ -8,6 +8,8 @@ import {
 } from "../domain/transitions.js";
 import { relayEvmFundingProfileSpec } from "../execution/relay-evm-profile-specs.js";
 import { parseSafeFundingSubmission } from "../execution/safe-funding-submission-contract.js";
+import { nativeAuthRetryable } from "../execution/hypercore-submission-contract.js";
+import { relayClientSourceDebitPostcondition } from "../execution/relay-client-source-debit.js";
 import {
   listFundingObservationsForOperations,
   type FundingObservationRow,
@@ -45,6 +47,8 @@ type LifecycleActionRow = Readonly<{
   action_expires_at: Date | null;
   action_validation_result: JsonRecord;
   attempt_actual_costs: JsonRecord | null;
+  native_auth_bound: boolean;
+  native_send_recoverable: boolean;
   attempt_number: number | null;
   attempt_outcome: FundingLifecycleActionAttempt["outcome"] | null;
   attempt_reference_kind: FundingLifecycleActionAttempt["referenceKind"] | null;
@@ -183,6 +187,16 @@ function actionActivation(
 function actionMayMoveMoney(action: LifecycleActionRow): boolean {
   if (["approval", "signature"].includes(action.step_kind)) return false;
   if (
+    action.executor_id === "wallet_profile_evm_v1" &&
+    action.step_kind === "transaction" &&
+    action.action_validation_result.relayStepKind === "approve" &&
+    action.action_validation_result.relayNativeDestination ===
+      "hyperliquid:mainnet" &&
+    action.action_validation_result.relayNativeApproval ===
+      "exact_erc20_approval_v1"
+  )
+    return false;
+  if (
     action.step_kind === "transaction" &&
     action.action_validation_result.validatorId ===
       "polymarket_funding_router_v1" &&
@@ -237,6 +251,25 @@ export function actionIsSafeInternalHandoff(
 function actionRequiresSourceDebitEvidence(
   action: LifecycleActionRow,
 ): boolean {
+  if (
+    action.executor_id === "relay_hypercore_native_v1" &&
+    action.step_kind === "external_handoff" &&
+    action.action_validation_result.nativeStage === "send_asset"
+  )
+    return true;
+  // New native-destination client deposits carry this immutable marker from
+  // the exact route registry. A receipt/ACK without its source debit must not
+  // finish the leg. Legacy client/delegated execution policy is unchanged.
+  if (
+    action.executor_id === "wallet_profile_evm_v1" &&
+    action.step_kind === "transaction" &&
+    action.action_validation_result.relayStepKind === "deposit" &&
+    action.action_validation_result.relayNativeDestination ===
+      "hyperliquid:mainnet" &&
+    relayClientSourceDebitPostcondition(action.action_validation_result) !==
+      null
+  )
+    return true;
   // The same receipt postcondition also appears on user-signed Relay actions
   // and direct withdrawals, and may describe an approval. Only a delegated
   // Relay *money-moving* action requires the extra operation-level
@@ -494,6 +527,7 @@ function compileFundingLifecycleFacts(
             outcome: row.attempt_outcome,
             broadcastMayHaveOccurred: row.broadcast_may_have_occurred,
             referenceKind: row.attempt_reference_kind,
+            nativeSubmissionRecoverable: row.native_send_recoverable === true,
             safeSubmissionRecoverable:
               row.executor_id === "polymarket_safe_relayer_v1" &&
               parseSafeFundingSubmission(
@@ -503,7 +537,15 @@ function compileFundingLifecycleFacts(
               row.attempt_actual_costs?.reasonCode ===
               "client_execution_failed",
             retryableAfterFailure:
-              row.attempt_actual_costs?.retryableProviderFailure === true,
+              row.executor_id === "relay_hypercore_native_v1"
+                ? row.attempt_outcome === "failed" &&
+                  !row.broadcast_may_have_occurred &&
+                  row.attempt_reference_kind === null &&
+                  nativeAuthRetryable(
+                    row.native_auth_bound,
+                    row.attempt_actual_costs?.nativeSubmission,
+                  )
+                : row.attempt_actual_costs?.retryableProviderFailure === true,
             retryableAfterReorg:
               row.attempt_actual_costs?.retryableAfterReorg === true,
             startedAt: row.attempt_started_at,
@@ -514,6 +556,9 @@ function compileFundingLifecycleFacts(
       if (attempt === null) continue;
       actionsById.set(row.id, {
         ...existing,
+        nonMoneyAuthorization:
+          existing.nonMoneyAuthorization === true ||
+          row.native_auth_bound === true,
         attempts: [...existing.attempts, attempt],
       });
       continue;
@@ -529,6 +574,7 @@ function compileFundingLifecycleFacts(
       independentLane:
         row.segment_id !== null && row.depends_on_step_id === null,
       mayMoveMoney: actionMayMoveMoney(row),
+      nonMoneyAuthorization: row.native_auth_bound === true,
       safeInternalHandoff: actionIsSafeInternalHandoff(row),
       requiresSourceDebitEvidence: actionRequiresSourceDebitEvidence(row),
       requiresVenueReadiness: row.step_kind === "venue_preparation",
@@ -778,6 +824,17 @@ export async function loadFundingLifecycleFactsForOperationsInTransaction(
              attempt.broadcast_may_have_occurred,
              attempt.reference_kind as attempt_reference_kind,
              attempt.actual_costs as attempt_actual_costs,
+             case when step.executor_id='relay_hypercore_native_v1' and attempt.id is not null
+               then funding_native_auth_attempt_bound(step.id,attempt.canonical_action_fingerprint,attempt.executor_id,attempt.actual_costs->'nativeSubmission')
+               else false end as native_auth_bound,
+             case when step.executor_id='relay_hypercore_native_v1'
+               and step.step_kind='external_handoff' and attempt.broadcast_may_have_occurred
+               and attempt.reference_kind='external_handoff'
+               and attempt.receipt_ref_ciphertext is not null and attempt.receipt_ref_lookup_hmac is not null and attempt.lookup_key_version is not null
+               and attempt.actual_costs#>>'{nativeSubmission,phase}'='admitted'
+               and attempt.actual_costs#>>'{nativeSubmission,requestFingerprint}' ~ '^[a-f0-9]{64}$'
+               then funding_native_send_attempt_bound(step.id,attempt.canonical_action_fingerprint,attempt.executor_id,attempt.actual_costs->'nativeSubmission')
+               else false end as native_send_recoverable,
              attempt.started_at as attempt_started_at,
              coalesce(
                attempt.updated_at,

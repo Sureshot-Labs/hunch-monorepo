@@ -14,6 +14,7 @@ import {
   delegatedFundingProfileRequiresAmountCap,
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
 } from "../execution/delegated-funding-profile-ids.js";
+import { RELAY_HYPERCORE_EXECUTOR } from "../domain/hypercore-identity.js";
 
 export const FUNDING_POLICY_KEY = "funding_control_plane";
 
@@ -63,10 +64,12 @@ export const PRODUCTION_FUNDING_REGISTRY: FundingStaticRegistry = deepFreeze({
   actionValidators: [
     { id: "relay_evm_action_v1", runtimeKind: "production" },
     { id: "relay_svm_action_v1", runtimeKind: "production" },
+    { id: RELAY_HYPERCORE_EXECUTOR, runtimeKind: "production" },
   ],
   networkExecutors: [
     { id: "wallet_profile_evm_v1", runtimeKind: "production" },
     { id: "wallet_profile_svm_v1", runtimeKind: "production" },
+    { id: RELAY_HYPERCORE_EXECUTOR, runtimeKind: "production" },
     {
       id: POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
       runtimeKind: "production",

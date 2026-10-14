@@ -4,20 +4,37 @@ import type {
   AssetLocation,
   ValuedAssetComponent,
   ValuedPositionComponent,
+  WalletExecutionProfile,
 } from "../funding/domain/types.js";
+import {
+  HYPERCORE_FUNDING_NETWORKS,
+  isHypercoreMainnetUsdc,
+} from "../funding/domain/hypercore-identity.js";
+import { hypercoreSpotCashCapacity } from "../funding/domain/hypercore-cash-capacity.js";
+import type { CashAvailabilityAdjustment } from "./cash-availability-projector.js";
 import type { Hip4AccountObservation } from "../schemas/hip4-account.js";
 import {
   readHip4OwnedPortfolio,
   type Hip4OwnedPortfolioRead,
 } from "../services/hip4-portfolio-positions.js";
 import type { CollectorError } from "./account-value-projector.js";
-import { canonicalLocationKey, stableOpaqueId } from "./canonical.js";
+import {
+  canonicalLocationKey,
+  stableOpaqueId,
+  hypercoreSpotAccountLocation,
+} from "./canonical.js";
 import { normalizeUnsignedDecimal } from "./decimal.js";
+import type { StableImpairmentState } from "./valuation-service.js";
 
 export type Hip4AccountValue = {
   assets: ValuedAssetComponent[];
   positions: ValuedPositionComponent[];
   errors: CollectorError[];
+  /** Hunch reservations/debits are merged by the common Account Value reader. */
+  availability: Omit<
+    CashAvailabilityAdjustment,
+    "reservedRaw" | "submittedDebitRaw"
+  >[];
 };
 
 /** ownedCash proves unheld ownership, NOT the total or trading capacity.
@@ -25,7 +42,14 @@ export type Hip4AccountValue = {
  * Borrowing/margin capacity must never inflate the account's USD headline. */
 function ownedTotal(observation: Hip4AccountObservation): string | null {
   const { cash, mode } = observation;
-  if (cash.decimals !== 8 || !cash.assetId || cash.total.startsWith("-"))
+  if (
+    !isHypercoreMainnetUsdc({
+      networkId: HYPERCORE_FUNDING_NETWORKS.mainnet,
+      assetId: cash.assetId,
+      decimals: cash.decimals,
+    }) ||
+    cash.total.startsWith("-")
+  )
     return null;
   if (
     observation.role === "missing" &&
@@ -59,9 +83,17 @@ export function projectHip4AccountValue(input: {
   userId: string;
   read: Hip4OwnedPortfolioRead;
   now: number;
+  wallets?: readonly WalletExecutionProfile[];
+  stableState?: StableImpairmentState;
 }): Hip4AccountValue {
-  const result: Hip4AccountValue = { assets: [], positions: [], errors: [] };
+  const result: Hip4AccountValue = {
+    assets: [],
+    positions: [],
+    errors: [],
+    availability: [],
+  };
   const { read } = input;
+  const impaired = input.stableState?.status === "impaired";
   // Testnet units are not USD assets. Keep them in the scoped venue reader.
   if (read.coverage.state === "disabled" || read.environment !== "mainnet")
     return result;
@@ -102,25 +134,41 @@ export function projectHip4AccountValue(input: {
       incomplete("hyperliquid-position-value", "position_inventory_unresolved");
     if (observation.cash.total.startsWith("-")) continue;
     const asset = {
-      networkId: "hyperliquid:mainnet",
+      networkId: HYPERCORE_FUNDING_NETWORKS.mainnet,
       assetId: observation.cash.assetId,
       decimals: observation.cash.decimals,
     };
-    const location: AssetLocation = {
-      kind: "venue_account",
+    const profiles =
+      input.wallets?.filter(
+        (wallet) =>
+          wallet.networkId === asset.networkId &&
+          wallet.address.toLowerCase() === address.toLowerCase() &&
+          wallet.controllerWalletRef &&
+          (wallet.source === "external" || wallet.source === "embedded"),
+      ) ?? [];
+    const profile = profiles.length === 1 ? profiles[0] : null;
+    const capacity = hypercoreSpotCashCapacity({
+      observation,
+      environment: read.environment,
+      snapshotMaxAgeMs: read.snapshotMaxAgeMs,
+      now: input.now,
+    });
+    const binding = hypercoreSpotAccountLocation({
       accountId: input.userId,
-      locationId: stableOpaqueId(
-        "location",
-        `${input.userId}:hyperliquid:mainnet:${address.toLowerCase()}:${asset.assetId}`,
-      ),
+      address,
+      controllerWalletId: profile?.walletId ?? null,
+    });
+    const location: AssetLocation = {
+      ...binding.location,
+      // Preserve a mismatched observed asset as unpriced, never relabel it USDC.
       asset,
       details: {
-        venueId: "hyperliquid",
-        accountRef: address.toLowerCase(),
-        address: address.toLowerCase(),
-        controllerWalletId: null,
-        environment: "mainnet",
-        symbol: "USDC",
+        ...binding.location.details,
+        // One spot location across account modes. Never duplicate unified cash
+        // into a second perps component. Existing P2 location identity is kept.
+        nativeSourceDex: "spot",
+        nativeAccountMode: observation.mode,
+        cashCapacityReason: capacity.known ? null : capacity.reason,
         // Presentation facts from this same observation, never funding authority.
         ownedTotal: value,
         held: observation.cash.held,
@@ -133,8 +181,16 @@ export function projectHip4AccountValue(input: {
         ).toISOString(),
       },
     };
+    const componentId = stableOpaqueId("asset", canonicalLocationKey(location));
+    result.availability.push({
+      componentId,
+      venueId: "hyperliquid",
+      venueBindingId: binding.bindingId,
+      lockedRaw: capacity.known ? capacity.lockedRaw : "0",
+      availabilityKnown: capacity.known,
+    });
     result.assets.push({
-      componentId: stableOpaqueId("asset", canonicalLocationKey(location)),
+      componentId,
       location,
       amount: {
         asset,
@@ -142,7 +198,7 @@ export function projectHip4AccountValue(input: {
       },
       category: "cash",
       estimatedUsd:
-        fresh && value != null
+        fresh && value != null && !impaired
           ? {
               value,
               asOf: observation.observedAt,
@@ -156,15 +212,17 @@ export function projectHip4AccountValue(input: {
       observationError: null,
       valuationEligibility: !fresh
         ? "stale"
-        : value == null
+        : value == null || impaired
           ? "unpriced"
           : "included",
       executionEligibility: "ineligible",
       reasonCodes: !fresh
         ? ["balance_observation_stale"]
-        : value == null
-          ? ["asset_unpriced"]
-          : [],
+        : input.stableState?.status === "impaired"
+          ? ["stable_asset_impaired", input.stableState.reasonCode]
+          : value == null
+            ? ["asset_unpriced"]
+            : [],
     });
   }
   for (const position of read.positions) {
@@ -174,7 +232,7 @@ export function projectHip4AccountValue(input: {
     const fresh = position.observation.state === "fresh";
     const valuationObservedAt = position.valuation.observedAt;
     const value =
-      owned && valuationObservedAt != null
+      owned && valuationObservedAt != null && !impaired
         ? position.valuation.marketValue
         : null;
     const identity = `${position.walletAddress.toLowerCase()}:${position.tokenId}`;
@@ -224,6 +282,8 @@ export async function collectHip4AccountValue(input: {
   userId: string;
   walletAddresses: readonly string[];
   now: Date;
+  wallets?: readonly WalletExecutionProfile[];
+  stableState?: StableImpairmentState;
 }): Promise<Hip4AccountValue> {
   const read = await readHip4OwnedPortfolio(input.pool, {
     userId: input.userId,
@@ -234,5 +294,7 @@ export async function collectHip4AccountValue(input: {
     userId: input.userId,
     read,
     now: input.now.getTime(),
+    wallets: input.wallets,
+    stableState: input.stableState,
   });
 }

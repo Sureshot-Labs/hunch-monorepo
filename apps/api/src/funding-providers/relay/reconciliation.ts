@@ -237,6 +237,8 @@ export class RelayReconciliationDriver {
         operationId: string;
         segmentId: string;
         transactionHashes: readonly string[];
+        requestId: string;
+        status: RelayStatusResponse;
         now: Date;
       },
     ) => Promise<void>,
@@ -425,6 +427,8 @@ export class RelayReconciliationDriver {
       operationId: string;
       segmentId: string;
       transactionHashes: readonly string[];
+      requestId: string;
+      status: RelayStatusResponse;
       now: Date;
     }> = [];
     for (const { requestId, request, status } of statusResults) {
@@ -448,6 +452,8 @@ export class RelayReconciliationDriver {
           operationId,
           segmentId: request.segment_id,
           transactionHashes: status.txHashes ?? [],
+          requestId,
+          status,
           now,
         });
       }

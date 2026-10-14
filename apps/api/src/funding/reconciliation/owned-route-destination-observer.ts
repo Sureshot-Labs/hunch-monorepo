@@ -2,6 +2,11 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { isRecord } from "../../lib/type-guards.js";
 import type { RelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
+import type { HypercoreTransferEvidence } from "../../funding-providers/relay/hypercore-transfer-evidence.js";
+import {
+  isHypercoreFundingNetwork,
+  isHypercoreMainnetUsdc,
+} from "../domain/hypercore-identity.js";
 import type {
   AssetRef,
   FundingPurpose,
@@ -80,18 +85,68 @@ export type OwnedRouteDestinationObservation = Readonly<{
   observedAt: string;
 }>;
 
-export type OwnedRouteCanonicalDestinationEvent = Readonly<{
-  networkId: string;
-  asset: AssetRef;
-  destinationAddress: string;
-  sourceAddress: string | null;
-  rawAmount: string;
-  transactionHash: string;
-  eventIndex: string;
-  ledgerHeight: string;
-  blockHash: string;
-  observedAt: Date;
-}>;
+export type OwnedRouteCanonicalDestinationEvent = Readonly<
+  {
+    networkId: string;
+    asset: AssetRef;
+    destinationAddress: string;
+    sourceAddress: string | null;
+    rawAmount: string;
+    transactionHash: string;
+    eventIndex: string;
+    observedAt: Date;
+  } & (
+    | { ledgerHeight: string; blockHash: string; nativeEvidence?: never }
+    | {
+        ledgerHeight: null;
+        blockHash: null;
+        nativeEvidence: HypercoreTransferEvidence;
+      }
+  )
+>;
+
+function assertNativeDestinationEvent(
+  event: OwnedRouteCanonicalDestinationEvent,
+): void {
+  if (!isHypercoreFundingNetwork(event.networkId)) {
+    if (event.nativeEvidence)
+      throw new Error("Native proof has a non-native network");
+    return;
+  }
+  const proof = event.nativeEvidence;
+  if (
+    !proof ||
+    !isHypercoreMainnetUsdc(event.asset) ||
+    event.asset.networkId !== event.networkId ||
+    !sameAsset(proof.asset, event.asset) ||
+    proof.networkId !== event.networkId ||
+    proof.direction !== "credit" ||
+    event.ledgerHeight !== null ||
+    event.blockHash !== null ||
+    !sameAccountAddress(
+      event.networkId,
+      proof.owner,
+      event.destinationAddress,
+    ) ||
+    !sameAccountAddress(
+      event.networkId,
+      proof.destinationAddress,
+      event.destinationAddress,
+    ) ||
+    event.sourceAddress === null ||
+    !sameAccountAddress(
+      event.networkId,
+      proof.sourceAddress,
+      event.sourceAddress,
+    ) ||
+    proof.transactionHash !== event.transactionHash ||
+    proof.rawAmount !== event.rawAmount ||
+    event.eventIndex !== "hypercore:send:destination_credit"
+  )
+    throw new Error(
+      "Native destination event does not match its verified ledger proof",
+    );
+}
 
 export type OwnedRouteCanonicalDestinationClassification =
   | Readonly<{ kind: "external" }>
@@ -135,6 +190,7 @@ export async function classifyOwnedRouteCanonicalDestinationEvents(
     referenceCodec: Pick<RelayReferenceCodec, "fingerprint">;
   }>,
 ): Promise<ReadonlyMap<string, OwnedRouteCanonicalDestinationClassification>> {
+  input.events.forEach(assertNativeDestinationEvent);
   const lookups = input.events.map((event) => ({
     identity: canonicalDestinationEventIdentity(event),
     networkId: event.networkId,
@@ -142,6 +198,11 @@ export async function classifyOwnedRouteCanonicalDestinationEvents(
     assetDecimals: event.asset.decimals,
     destinationAddress: event.destinationAddress,
     rawAmount: event.rawAmount,
+    nativeBalanceClass: event.nativeEvidence
+      ? event.nativeEvidence.destinationDex === "spot"
+        ? "spot"
+        : "perp"
+      : null,
     transactionReferenceFingerprint: input.referenceCodec.fingerprint(
       event.transactionHash,
     ),
@@ -246,6 +307,29 @@ export async function classifyOwnedRouteCanonicalDestinationEvents(
                  '{location,details,address}',
                candidate.event ->> 'destinationAddress'
              )
+         and (
+           candidate.event ->> 'nativeBalanceClass' is null
+           or (
+             operation.destination_target_snapshot #>> '{location,kind}' = 'venue_account'
+             and operation.destination_target_snapshot #>> '{location,details,venueId}' = 'hyperliquid'
+             and operation.destination_target_snapshot #>> '{location,details,environment}' = 'mainnet'
+             and case
+               when (operation.destination_target_snapshot #> '{location,details}') ? 'nativeSourceDex'
+                 then case
+                   when operation.destination_target_snapshot #> '{location,details,nativeSourceDex}' = '"spot"'::jsonb
+                     then 'spot'
+                   when operation.destination_target_snapshot #> '{location,details,nativeSourceDex}' = '""'::jsonb
+                     then 'perp'
+                 end
+               else operation.destination_target_snapshot #>> '{location,details,balanceClass}'
+             end = candidate.event ->> 'nativeBalanceClass'
+             and (
+               not ((operation.destination_target_snapshot #> '{location,details}') ? 'balanceClass')
+               or operation.destination_target_snapshot #>> '{location,details,balanceClass}' =
+                    candidate.event ->> 'nativeBalanceClass'
+             )
+           )
+         )
         join funding_operation_segments segment
           on segment.operation_id = operation.id
          and segment.provider_id = 'relay'
@@ -342,6 +426,7 @@ export async function recordOwnedRouteCanonicalDestinationCredit(
     now: Date;
   }>,
 ): Promise<void> {
+  assertNativeDestinationEvent(input.event);
   await allocateFundingObservationInTransaction(client, {
     operationId: input.match.operationId,
     segmentId: input.match.segmentId,
@@ -365,6 +450,18 @@ export async function recordOwnedRouteCanonicalDestinationCredit(
       relayTransactionReferenceFingerprint:
         input.match.transactionReferenceFingerprint,
       canonicalReceiveEventSuppressed: true,
+      ...(input.event.nativeEvidence
+        ? {
+            nativeEvidenceKind: "hypercore_send_ledger_v1",
+            nativeSourceDex: input.event.nativeEvidence.sourceDex,
+            nativeDestinationDex: input.event.nativeEvidence.destinationDex,
+            nativeNonce: input.event.nativeEvidence.nonce,
+            nativeLedgerTime: input.event.nativeEvidence.ledgerTime,
+            nativeProviderBlock: input.event.nativeEvidence.providerBlock,
+            nativeEvidenceFingerprint:
+              input.event.nativeEvidence.evidenceFingerprint,
+          }
+        : {}),
     },
   });
   await wakeFundingReconciliationInTransaction(client, {
@@ -1006,6 +1103,17 @@ async function loadTarget(
   );
   const row = rows[0];
   if (!row) return null;
+  // Core is verified from an exact native transfer, never an aggregate EVM/SVM
+  // balance delta. Skip before parsing a legacy baseline so this observer
+  // cannot prevent the shared worker from reaching Relay's receipt callback.
+  const destinationLocation = row.destination_target_snapshot.location;
+  if (
+    isRecord(destinationLocation) &&
+    isRecord(destinationLocation.asset) &&
+    typeof destinationLocation.asset.networkId === "string" &&
+    isHypercoreFundingNetwork(destinationLocation.asset.networkId)
+  )
+    return null;
   const facts = await loadFundingLifecycleFactsForOperationInTransaction(db, {
     operationId: row.operation_id,
     now,
@@ -1524,7 +1632,7 @@ export class OwnedRouteDestinationObserver {
       operationId,
       now,
     );
-    if (!target) {
+    if (!target || isHypercoreFundingNetwork(target.asset.networkId)) {
       return { destinationsPolled: 0, destinationSatisfied: false };
     }
     const exactCredits = this.dependencies.referenceCodec

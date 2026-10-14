@@ -983,7 +983,7 @@ export class FundingPlanningRuntime {
     input: Readonly<{
       operationId: string;
       stepId: string;
-      submissionProtocols?: { safe?: 1; embedded?: 1; solana?: 1 };
+      submissionProtocols?: { safe?: 1; embedded?: 1; solana?: 1; native?: 1 };
     }>,
   ) {
     return this.actionRuntime.prepare(userId, input);

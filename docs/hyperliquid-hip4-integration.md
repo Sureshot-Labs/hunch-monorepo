@@ -16,6 +16,8 @@ earlier acceptance notes and fixtures remain dated history.
 Section 20 records the initial P2 owned-account read implementation on October 13.
 Section 21 supersedes its intermediate outstanding-work lists for the current
 P2 read integration. Older checkpoints and baseline refs below are dated history.
+Section 22 records the paused P3/P4 implementation checkpoint; it is not financial
+release acceptance.
 
 | Repository             | Branch / immutable reference                                                |
 | ---------------------- | --------------------------------------------------------------------------- |
@@ -2861,3 +2863,75 @@ authority. Full lifetime basis allocation across transfers and transformations
 needs a separate proven attribution contract before reporting all-time PnL.
 No commit, push, merge, deploy, production policy change, Telegram action,
 signature or trade is part of this acceptance.
+
+## 22. Paused P3/P4 implementation checkpoint — October 14, 2026
+
+Work is paused at the user's request. Preserve this implementation on `hip-next`,
+without merging, deploying, changing production policy or enabling financial
+capabilities. P3 is partially implemented; P4 interactive order execution is not
+implemented. Earlier scoped review approvals do not mean P3/P4 are complete.
+
+### Implemented checkpoint
+
+- Native identity, Standard spot owned-USDC capacity, common reservations and
+  post-snapshot source debits. Native quote units are eight decimals; EVM USDC
+  destination/source units remain six. Perps refunds have a separate physical
+  location and never become spot spending capacity.
+- Existing Relay client/planner/action runtime extended with native authorization
+  and SendAsset. Immutable action binding, shared signer/nonce admission,
+  sign-only preparation, durable submission ambiguity and exact receipt
+  reconciliation reuse the common funding operation. An ambiguous transfer is
+  never automatically resent with another nonce.
+- Core spot to Base USDC, Polygon USDC and Polygon pUSD withdrawal contracts,
+  using existing withdrawal policy and shared desktop/mobile Withdraw controls.
+  No default funding catalog enablement or production activation is included.
+- Base/Polygon USDC to Core spot quote validation and adapter: exact order hash,
+  input/output ownership, units, fee bounds, EVM execution and both immutable
+  refund locations. This inbound adapter is not yet connected to the production
+  source planner or advertised catalog.
+- Canonical inbound source debit and reservation protection, including an early
+  destination/refund observation before source receipt. A separately confirmed
+  exact approve remains cancellable; atomic approve-and-deposit is money-moving.
+- Pure refund evidence validation, deliberately not connected to runtime:
+  request/order identity, committed refund recipient/location, actual returned
+  amount, semantic receipt deduplication, partial coverage and exact final sum.
+  Invalid refund-only provider fields cannot break ordinary destination evidence.
+- Additive migrations 0287–0291 and generated API contracts. No Telegram-specific
+  files, production permissions, signing policies or deployment automation changed.
+
+### Verification and limits
+
+At this checkpoint: 321/321 native funding tests, API typecheck, changed-TypeScript
+ESLint and the complete backend workspace build (16/16) pass. Independent final
+review approves only the disconnected pure refund boundary after its fixes;
+the reviewer ran 124 offline tests and clean-environment imports. Earlier scoped
+reviews cover the common action runtime, withdrawal integration, inbound adapter
+and source-debit/cancellation behavior, not end-to-end financial readiness.
+
+Migrations and financial SQL were exercised on disposable PostgreSQL 16.2,
+including nonce concurrency, admission/recovery, actual common commit/action/
+receipt paths, replay, cancellation and reservation release. Generic plans over
+50,000 unrelated fixture rows used indexed native-inbound release reads
+(held/unstarted/empty: approximately 0.213/0.101/0.087 ms, 21/7/3 local buffers).
+These are local fixture measurements, not production-scale certification.
+No real transfer, wallet signature, order or production mutation was performed.
+
+### Resume here, in this order
+
+1. Wire exact generic web refund receipts into the existing worker and allocator.
+   Do not modify the Telegram-only refund observer. Repair scoped partial-refund
+   lifecycle/account-value semantics: one receipt must not complete a multi-part
+   refund, erase remaining in-transit value or restore stale source cash.
+2. Connect inbound production-source planning, destination readiness and the
+   existing catalog only after these paths work. A genuine zero-balance native
+   destination must be eligible without pretending its balance is positive.
+3. Complete exact Solana routes in both directions, including protocol encoding,
+   receipts, units and recovery. Do not treat base58 identity as an EVM hex hash.
+4. Keep unsupported account-mode capacity explicit. Do not spend perps margin,
+   use automatic borrowing or silently change account mode.
+5. Implement P4 through existing trade preparation/attempts, shared nonce
+   admission and finance-worker: fee-aware $1 minimum BUY, supported GTC/IOC/ALO,
+   sign/server-submit, cancel, fills and ambiguous-result recovery. Do not use a
+   fake funding operation as the order coordinator or introduce a new UI.
+6. Repeat SQL, regression, browser and independent acceptance checks. Actual
+   financial testing and production enablement require separate authorization.

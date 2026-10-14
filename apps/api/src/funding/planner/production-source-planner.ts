@@ -9,8 +9,18 @@ import {
   multiplyUnsignedDecimals,
   multiplyRawByUnitPrice,
   scaleUnsignedDecimalByRawRatio,
+  parseUnsignedDecimal,
 } from "../../account-value/decimal.js";
-import { stableOpaqueId } from "../../account-value/canonical.js";
+import {
+  stableOpaqueId,
+  hypercoreSpotAccountLocation,
+  hypercorePerpsRefundLocation,
+} from "../../account-value/canonical.js";
+import {
+  isHypercoreFundingNetwork,
+  isHypercoreMainnetUsdc,
+  hypercoreLocationDex,
+} from "../domain/hypercore-identity.js";
 import { fundingEconomicSourceReservations } from "../persistence/funding-operation-repository.js";
 import { createRelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
 import {
@@ -117,17 +127,24 @@ function profileForLocation(
   account: AccountValueReadModel,
   location: AssetLocation,
 ): WalletExecutionProfile | null {
-  const walletId = detail(location, "walletId");
+  const walletId = detail(
+    location,
+    isHypercoreFundingNetwork(location.asset.networkId)
+      ? "controllerWalletId"
+      : "walletId",
+  );
   const address = detail(location, "address");
   if (!walletId || !address || !account.ownership) return null;
-  return (
-    account.ownership.wallets.find(
-      (profile) =>
-        profile.walletId === walletId &&
-        profile.networkId === location.asset.networkId &&
-        sameAccountAddress(location.asset.networkId, profile.address, address),
-    ) ?? null
+  const matches = account.ownership.wallets.filter(
+    (profile) =>
+      profile.walletId === walletId &&
+      profile.networkId === location.asset.networkId &&
+      sameAccountAddress(location.asset.networkId, profile.address, address),
   );
+  return isHypercoreFundingNetwork(location.asset.networkId) &&
+    matches.length !== 1
+    ? null
+    : (matches[0] ?? null);
 }
 
 function profileForExactAddress(
@@ -226,6 +243,39 @@ export function resolveProductionOwnedSourceExecution(input: {
 }): ProductionOwnedSourceExecution | null {
   const { account, component } = input;
   const directProfile = profileForLocation(account, component.location);
+  if (isHypercoreFundingNetwork(component.amount.asset.networkId)) {
+    if (
+      !directProfile?.controllerWalletRef ||
+      !isHypercoreMainnetUsdc(component.amount.asset) ||
+      !sameAsset(component.amount.asset, component.location.asset) ||
+      hypercoreLocationDex(component.location) !== "spot" ||
+      component.category !== "cash" ||
+      component.location.details.nativeAccountMode !== "disabled" ||
+      component.location.details.cashCapacityReason !== null ||
+      (directProfile.source === "embedded"
+        ? !directProfile.serverWalletRef ||
+          !directProfile.signingModes.includes("privy_authorization")
+        : directProfile.source !== "external" ||
+          !directProfile.signingModes.includes("web_client") ||
+          !account.connectedExternalWalletRefs?.includes(
+            directProfile.controllerWalletRef,
+          ))
+    )
+      return null;
+    const canonical = hypercoreSpotAccountLocation({
+      accountId: component.location.accountId,
+      address: directProfile.address,
+      controllerWalletId: directProfile.walletId,
+    }).location;
+    if (component.location.locationId !== canonical.locationId) return null;
+    // Core is an account, not an ERC20 wallet. Keep its P2 physical identity
+    // and common reservation pool instead of manufacturing a wallet alias.
+    return {
+      profile: directProfile,
+      executionLocation: component.location,
+      safeLabel: "Hyperliquid USDC",
+    };
+  }
   const funderAddress = detail(component.location, "address");
   const linkedAddress = detail(component.location, "linkedAddress");
   const componentAssetId = canonicalAssetId(component.amount.asset);
@@ -452,6 +502,7 @@ function sourceFactsForComponent(input: {
   suggestionPreferred: boolean;
 }): RelayEligibleSourceFact[] {
   const nativeSolSource = isSolanaNativeAsset(input.component.amount.asset);
+  const nativeCoreSource = isHypercoreMainnetUsdc(input.component.amount.asset);
   if (
     (!isRelayPinnedStableAsset(input.component.amount.asset) &&
       !nativeSolSource) ||
@@ -475,7 +526,11 @@ function sourceFactsForComponent(input: {
       (location) =>
         location.enabled &&
         location.ownership === "owned" &&
-        location.locationKind === "wallet" &&
+        location.locationKind ===
+          (nativeCoreSource ? "venue_account" : "wallet") &&
+        (!nativeCoreSource ||
+          location.locationPatternId ===
+            exactRoutes[0]?.sourceLocationPatternId) &&
         location.observable &&
         location.capabilities.includes(input.requiredCapability) &&
         sameAsset(location.asset, input.component.amount.asset),
@@ -627,9 +682,13 @@ function sourceFactsForComponent(input: {
         walletExecutionReady:
           input.profile.signingModes.includes("web_client") ||
           input.profile.signingModes.includes("privy_authorization"),
-        nativeGasReady: nativeSolSource
-          ? spendableRaw > 0n
-          : productionFundingProfileHasNativeGas(input.account, input.profile),
+        nativeGasReady:
+          nativeSolSource || nativeCoreSource
+            ? spendableRaw > 0n
+            : productionFundingProfileHasNativeGas(
+                input.account,
+                input.profile,
+              ),
         ...(input.component.amount.asset.networkId === "solana:mainnet" &&
         !nativeSolSource &&
         input.profile.source !== "external" &&
@@ -661,6 +720,7 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
   purpose?: FundingDiscoveryRequest["purpose"];
   withdrawalSourceComponentId?: string | null;
   maximumSlippageBps?: number;
+  now?: Date;
 }): readonly RelayEligibleSourceFact[] {
   const availabilityByComponent = new Map(
     input.account.cashAvailability.components.map((component) => [
@@ -685,11 +745,17 @@ export function deriveProductionRelayEligibleSourceFacts(input: {
     const profile = execution?.profile ?? null;
     const executionLocation = execution?.executionLocation ?? null;
     const nativeSolSource = isSolanaNativeAsset(component.amount.asset);
+    const nativeCoreSource = isHypercoreMainnetUsdc(component.amount.asset);
+    const validUntil = detail(component.location, "validUntil");
     if (
       component.location.accountId !== input.accountId ||
       component.category === "in_transit" ||
       component.observationFreshness !== "fresh" ||
       component.observationError ||
+      (nativeCoreSource &&
+        (!validUntil ||
+          !Number.isFinite(Date.parse(validUntil)) ||
+          Date.parse(validUntil) <= (input.now ?? new Date()).getTime())) ||
       (component.valuationEligibility !== "included" &&
         !nativeSolSource &&
         input.purpose !== "withdrawal") ||
@@ -1320,13 +1386,15 @@ export class ProductionFundingSourcePlanner {
         location.kind === "venue_account"
           ? detail(location, "linkedAddress")
           : detail(location, "address");
-      const profile = controller
-        ? profileForExactAddress(
-            this.account,
-            location.asset.networkId,
-            controller,
-          )
-        : null;
+      const profile = isHypercoreFundingNetwork(location.asset.networkId)
+        ? profileForLocation(this.account, location)
+        : controller
+          ? profileForExactAddress(
+              this.account,
+              location.asset.networkId,
+              controller,
+            )
+          : null;
       const tier =
         (profile?.source === "external" || !profile ? 2 : 0) +
         (isRelayPinnedStableAsset(component.amount.asset) ? 0 : 1);
@@ -1615,6 +1683,7 @@ export class ProductionFundingSourcePlanner {
           input.request.maxSlippageBps ?? policy.placement.maximumSlippageBps,
           policy.placement.maximumSlippageBps,
         ),
+        now: input.now,
       }),
       input.request.serverExecutionProfileId,
     );
@@ -1673,7 +1742,7 @@ export class ProductionFundingSourcePlanner {
         : input.sourceAmount;
     let quote;
     try {
-      quote = await adapter.quote({
+      const quoteInput = {
         route: relayRoute,
         source: input.source.source,
         destination: input.destination.target,
@@ -1688,7 +1757,33 @@ export class ProductionFundingSourcePlanner {
           ? { maximumQuoteTtlMs: input.maximumQuoteTtlMs }
           : {}),
         maximumSlippageBps: input.source.maximumSlippageBps,
-      });
+      };
+      if (relayRoute.sourceVm === "hypercore") {
+        const policy = input.policy;
+        const fee = parseUnsignedDecimal(policy.placement.maximumFeeUsd);
+        // A cap rounds down; fractional units cannot authorize a larger fee.
+        const maximumFeeRaw = (
+          (fee.coefficient * 10n ** 8n) /
+          10n ** BigInt(fee.scale)
+        ).toString();
+        quote = await adapter.quoteHypercore({
+          ...quoteInput,
+          resolvedDestination: input.destination,
+          nativeRefundLocation: hypercorePerpsRefundLocation({
+            accountId: sourceLocation.accountId,
+            address: profile.address,
+            controllerWalletId: profile.walletId,
+          }),
+          maximumFeeRaw,
+          maximumContractAgeMs: policy.ttl.collectorMs,
+          maximumQuoteTtlMs: Math.min(
+            policy.ttl.quoteMs,
+            input.maximumQuoteTtlMs ?? policy.ttl.quoteMs,
+          ),
+        });
+      } else {
+        quote = await adapter.quote(quoteInput);
+      }
     } catch (error) {
       if (error instanceof RelayClientError) {
         if (isRelayQuoteRejectedError(error)) {

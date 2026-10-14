@@ -1,4 +1,5 @@
 import { tx, type Pool } from "@hunch/infra";
+import { pendingNativeSourceReceipt } from "./hypercore-send-receipt.js";
 import { PublicKey } from "@solana/web3.js";
 import { fetchSolanaFinalizedBlockHeight } from "../../services/solana-rpc.js";
 import { parseVerifiedSolanaSubmission } from "./signed-solana-submission.js";
@@ -2884,6 +2885,7 @@ export class FundingStepReceiptReconciliationDriver {
     readonly dependencies: Readonly<{
       inspectEvm?: FundingStepReceiptInspector;
       inspectSvm?: FundingStepReceiptInspector;
+      inspectNative?: FundingStepReceiptInspector;
       listTargets?: typeof listFundingStepReceiptTargets;
       applyEvidence?: typeof applyFundingStepReceiptEvidence;
       resolvePrivyReference?: PrivyFundingReferenceResolver;
@@ -2978,44 +2980,50 @@ export class FundingStepReceiptReconciliationDriver {
           return { kind: "provider_resolved" } as const;
         }
         const inspected =
-          target.action.kind === "evm_transaction" ||
-          target.action.kind === "evm_transaction_batch" ||
-          target.action.kind === "external_handoff"
-            ? await (this.dependencies.inspectEvm
-                ? this.dependencies.inspectEvm(target, reference)
-                : inspectEvmTarget(
-                    (() => {
-                      const result = target.safeSubmissionProviderResult;
-                      if (
-                        !result ||
-                        result.lookupKeyVersion !==
-                          this.referenceCodec.keyVersion
-                      )
-                        return target;
-                      try {
-                        const providerReference = this.referenceCodec.decrypt(
-                          result.referenceCiphertext,
-                        );
-                        return this.referenceCodec.fingerprint(
-                          providerReference,
-                        ) === result.referenceLookupHmac
-                          ? {
-                              ...target,
-                              safeSubmissionProviderReference:
-                                providerReference,
-                            }
-                          : target;
-                      } catch {
-                        return target;
-                      }
-                    })(),
-                    reference,
-                    inspectionContext,
-                  ))
-            : await (this.dependencies.inspectSvm ?? inspectSvmTarget)(
-                target,
-                reference,
-              );
+          target.action.kind === "external_handoff" &&
+          target.action.networkId === "hyperliquid:mainnet" &&
+          target.action.handoffKind === "relay_hypercore_send_asset_v1"
+            ? this.dependencies.inspectNative
+              ? await this.dependencies.inspectNative(target, reference)
+              : pendingNativeSourceReceipt("native_inspector_unavailable")
+            : target.action.kind === "evm_transaction" ||
+                target.action.kind === "evm_transaction_batch" ||
+                target.action.kind === "external_handoff"
+              ? await (this.dependencies.inspectEvm
+                  ? this.dependencies.inspectEvm(target, reference)
+                  : inspectEvmTarget(
+                      (() => {
+                        const result = target.safeSubmissionProviderResult;
+                        if (
+                          !result ||
+                          result.lookupKeyVersion !==
+                            this.referenceCodec.keyVersion
+                        )
+                          return target;
+                        try {
+                          const providerReference = this.referenceCodec.decrypt(
+                            result.referenceCiphertext,
+                          );
+                          return this.referenceCodec.fingerprint(
+                            providerReference,
+                          ) === result.referenceLookupHmac
+                            ? {
+                                ...target,
+                                safeSubmissionProviderReference:
+                                  providerReference,
+                              }
+                            : target;
+                        } catch {
+                          return target;
+                        }
+                      })(),
+                      reference,
+                      inspectionContext,
+                    ))
+              : await (this.dependencies.inspectSvm ?? inspectSvmTarget)(
+                  target,
+                  reference,
+                );
         return { kind: "receipt", target, inspected } as const;
       }),
     );

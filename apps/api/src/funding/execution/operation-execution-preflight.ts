@@ -1,9 +1,14 @@
 import type { Pool } from "@hunch/infra";
 import { isRecord } from "../../lib/type-guards.js";
 import { normalizedActionSchema, opaqueIdSchema } from "../domain/schemas.js";
+import type { NormalizedAction } from "../domain/types.js";
 import type { FundingOperationStep } from "../persistence/funding-evidence-repository.js";
 import type { FundingOperationRow } from "../persistence/funding-operation-repository.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
+import {
+  isRelayHypercoreHandoff,
+  RELAY_HYPERCORE_EXECUTOR,
+} from "../../funding-providers/relay/hypercore-operation-plan.js";
 import {
   POLYMARKET_DEPOSIT_ROUTER_PROFILE_IDS,
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_IDS,
@@ -21,6 +26,7 @@ const clientExecutors = new Set([
   "wallet_profile_svm_v1",
   "polymarket_deposit_wallet_relayer_v1",
   "polymarket_safe_relayer_v1",
+  RELAY_HYPERCORE_EXECUTOR,
 ]);
 
 /** Read immutable profiles only; linked wallets and fresh quotes are not evidence. */
@@ -70,7 +76,15 @@ export function buildFundingExecutionPreflight(
       complete = false;
       continue;
     }
-    const action = parsed.data;
+    const action = parsed.data as NormalizedAction;
+    if (
+      step.executorId === RELAY_HYPERCORE_EXECUTOR &&
+      (!isRelayHypercoreHandoff(action) ||
+        action.networkId !== "hyperliquid:mainnet")
+    ) {
+      complete = false;
+      continue;
+    }
     const walletId =
       "senderWalletId" in action
         ? action.senderWalletId

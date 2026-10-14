@@ -4,8 +4,18 @@ import { PublicKey } from "@solana/web3.js";
 import {
   canonicalAssetId,
   canonicalAssetKey,
+  isEvmAddress,
+  isEvmNetworkId,
   sameAsset,
 } from "../../funding/domain/asset-identity.js";
+import {
+  HYPERCORE_FUNDING_NETWORKS,
+  HYPERCORE_MAINNET_USDC,
+  isHypercoreFundingNetwork,
+  isHypercoreMainnetUsdc,
+  isHypercoreTokenId,
+  RELAY_HYPERCORE_EXECUTOR,
+} from "../../funding/domain/hypercore-identity.js";
 import type { AssetRef, NetworkId } from "../../funding/domain/types.js";
 import {
   FUNDING_ROUTE_EXPERIENCE,
@@ -14,6 +24,7 @@ import {
 import {
   BASE_USDC,
   POLYGON_PUSD,
+  POLYGON_USDC,
   POLYGON_USDCE_LEGACY,
   RELAY_SOLANA_CHAIN_ID,
   SOLANA_NATIVE,
@@ -23,7 +34,7 @@ import {
   type RelayRehearsalScenarioId,
 } from "./rehearsal.js";
 
-export type RelayVm = "evm" | "svm";
+export type RelayVm = "evm" | "svm" | "hypercore";
 
 /**
  * Immutable Relay protocol facts that are not represented by the economic
@@ -51,7 +62,12 @@ export type RelayRouteSpec = Readonly<{
     | "polygon-usdce-to-base-usdc"
     | "polygon-usdc-to-polygon-pusd"
     | "solana-usdc-to-polygon-pusd"
-    | "solana-sol-to-polygon-pusd";
+    | "solana-sol-to-polygon-pusd"
+    | "hypercore-spot-usdc-to-base-usdc"
+    | "hypercore-spot-usdc-to-polygon-usdc"
+    | "hypercore-spot-usdc-to-polygon-pusd"
+    | "base-usdc-to-hypercore-spot-usdc"
+    | "polygon-usdc-to-hypercore-spot-usdc";
   source: AssetRef;
   destination: AssetRef;
   sourceVm: RelayVm;
@@ -79,6 +95,7 @@ export function relayRuntimeRoute(
     destinationLocationPatternId: string;
   }>,
 ): FundingRuntimePolicy["routes"][number] {
+  assertRelayWalletRouteVms(spec);
   return {
     routeId: spec.routeId,
     enabled: true,
@@ -91,11 +108,17 @@ export function relayRuntimeRoute(
     sourceAsset: spec.source,
     destinationAsset: spec.destination,
     actionValidatorId:
-      spec.sourceVm === "svm" ? "relay_svm_action_v1" : "relay_evm_action_v1",
+      spec.sourceVm === "hypercore"
+        ? RELAY_HYPERCORE_EXECUTOR
+        : spec.sourceVm === "svm"
+          ? "relay_svm_action_v1"
+          : "relay_evm_action_v1",
     networkExecutorId:
-      spec.sourceVm === "svm"
-        ? "wallet_profile_svm_v1"
-        : "wallet_profile_evm_v1",
+      spec.sourceVm === "hypercore"
+        ? RELAY_HYPERCORE_EXECUTOR
+        : spec.sourceVm === "svm"
+          ? "wallet_profile_svm_v1"
+          : "wallet_profile_evm_v1",
     reconcilerId: "relay_status_v3",
     refundSemanticsId: "relay_owned_refund_observation_v1",
     destinationObserverId: "relay_owned_destination_observation_v1",
@@ -112,12 +135,14 @@ const NETWORK_BY_RELAY_CHAIN_ID: Readonly<Record<number, NetworkId>> = {
   137: "evm:137",
   8453: "evm:8453",
   [RELAY_SOLANA_CHAIN_ID]: "solana:mainnet",
+  1337: HYPERCORE_FUNDING_NETWORKS.mainnet,
 };
 
 const RELAY_CHAIN_ID_BY_NETWORK: Readonly<Record<NetworkId, number>> = {
   "evm:137": 137,
   "evm:8453": 8453,
   "solana:mainnet": RELAY_SOLANA_CHAIN_ID,
+  [HYPERCORE_FUNDING_NETWORKS.mainnet]: 1337,
 };
 
 export function relayChainIdForNetwork(networkId: NetworkId): number {
@@ -137,6 +162,12 @@ export function normalizeRelayAssetId(
   networkId: NetworkId,
   assetId: string,
 ): string {
+  if (isHypercoreFundingNetwork(networkId)) {
+    if (!isHypercoreTokenId(assetId)) {
+      throw new Error("Relay native currency identity is invalid");
+    }
+    return assetId.toLowerCase();
+  }
   if (networkId.startsWith("evm:")) {
     return getAddress(assetId).toLowerCase();
   }
@@ -144,6 +175,21 @@ export function normalizeRelayAssetId(
     return new PublicKey(assetId).toBase58();
   }
   throw new Error(`Relay asset network ${networkId} is not allowlisted`);
+}
+
+/** Owners/recipients must never pass through the native currency parser. */
+export function normalizeRelayAccountAddress(
+  networkId: NetworkId,
+  address: string,
+): string {
+  if (isHypercoreFundingNetwork(networkId)) {
+    if (!isEvmAddress(address)) {
+      throw new Error("Relay native account identity is invalid");
+    }
+    return address.toLowerCase();
+  }
+  // Existing EVM checksum validation and Solana byte-sensitive handling stay.
+  return normalizeRelayAssetId(networkId, address);
 }
 
 export function relayCurrencyForAsset(asset: AssetRef): string {
@@ -184,6 +230,57 @@ const route = (
 };
 
 export const RELAY_ROUTE_SPECS: Readonly<Record<string, RelayRouteSpec>> = {
+  // Protocol contracts only. This does not add a funding venue/catalog alias
+  // or enable a route in the effective runtime policy.
+  "base-usdc-to-hypercore-spot-usdc": {
+    routeId: "base-usdc-to-hypercore-spot-usdc",
+    source: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
+    destination: HYPERCORE_MAINNET_USDC,
+    sourceVm: "evm",
+    destinationVm: "hypercore",
+    quoteMode: "expected_output",
+    rehearsalScenario: null,
+  },
+  "polygon-usdc-to-hypercore-spot-usdc": {
+    routeId: "polygon-usdc-to-hypercore-spot-usdc",
+    source: { networkId: "evm:137", assetId: POLYGON_USDC, decimals: 6 },
+    destination: HYPERCORE_MAINNET_USDC,
+    sourceVm: "evm",
+    destinationVm: "hypercore",
+    quoteMode: "expected_output",
+    rehearsalScenario: null,
+  },
+  "hypercore-spot-usdc-to-base-usdc": {
+    routeId: "hypercore-spot-usdc-to-base-usdc",
+    source: HYPERCORE_MAINNET_USDC,
+    destination: { networkId: "evm:8453", assetId: BASE_USDC, decimals: 6 },
+    sourceVm: "hypercore",
+    destinationVm: "evm",
+    quoteMode: "expected_output",
+    rehearsalScenario: null,
+  },
+  "hypercore-spot-usdc-to-polygon-usdc": {
+    routeId: "hypercore-spot-usdc-to-polygon-usdc",
+    source: HYPERCORE_MAINNET_USDC,
+    destination: {
+      networkId: "evm:137",
+      assetId: "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+      decimals: 6,
+    },
+    sourceVm: "hypercore",
+    destinationVm: "evm",
+    quoteMode: "expected_output",
+    rehearsalScenario: null,
+  },
+  "hypercore-spot-usdc-to-polygon-pusd": {
+    routeId: "hypercore-spot-usdc-to-polygon-pusd",
+    source: HYPERCORE_MAINNET_USDC,
+    destination: { networkId: "evm:137", assetId: POLYGON_PUSD, decimals: 6 },
+    sourceVm: "hypercore",
+    destinationVm: "evm",
+    quoteMode: "expected_output",
+    rehearsalScenario: null,
+  },
   "polygon-pol-to-base-eth": route("polygon-pol-to-base-eth", 18, 18),
   "polygon-pusd-to-base-usdc": route(
     "polygon-pusd-to-base-usdc",
@@ -363,6 +460,7 @@ export function resolveRelaySolanaDirectDestinationContract(
 
 // Exported as contract evidence for fixture and registry tests.
 export const RELAY_PINNED_ASSETS = {
+  hypercoreUsdc: HYPERCORE_MAINNET_USDC.assetId,
   baseUsdc: BASE_USDC.toLowerCase(),
   polygonNative: ZeroAddress,
   polygonPusd: POLYGON_PUSD.toLowerCase(),
@@ -436,6 +534,7 @@ export function relayWalletLocationPatternId(asset: AssetRef): string | null {
  * equivalent stable collateral.
  */
 export function isRelayPinnedStableAsset(asset: AssetRef): boolean {
+  if (isHypercoreMainnetUsdc(asset)) return true;
   if (asset.decimals !== 6) return false;
   const normalized = canonicalAssetId(asset);
   return (
@@ -481,6 +580,12 @@ const RELAY_PINNED_ASSET_IDS_BY_NETWORK: Readonly<
 };
 
 export function assertRelayPinnedAsset(asset: AssetRef): void {
+  if (isHypercoreFundingNetwork(asset.networkId)) {
+    if (!isHypercoreMainnetUsdc(asset)) {
+      throw new Error("Relay native asset or precision is not supported");
+    }
+    return;
+  }
   const normalized = normalizeRelayAssetId(asset.networkId, asset.assetId);
   if (!RELAY_PINNED_ASSET_IDS_BY_NETWORK[asset.networkId]?.has(normalized)) {
     throw new Error("Relay asset is outside the pinned Hunch asset registry");
@@ -492,6 +597,7 @@ export function assertRelayRouteAssets(
   source: AssetRef,
   destination: AssetRef,
 ): void {
+  assertRelayWalletRouteVms(spec);
   const exact = (left: AssetRef, right: AssetRef): boolean =>
     left.networkId === right.networkId &&
     left.decimals === right.decimals &&
@@ -502,4 +608,51 @@ export function assertRelayRouteAssets(
   }
   assertRelayPinnedAsset(source);
   assertRelayPinnedAsset(destination);
+}
+
+/** Native routes require the native executor; never alias Core as an EVM. */
+function assertRelayWalletRouteVms(spec: RelayRouteSpec): void {
+  if (spec.destinationVm === "hypercore") {
+    const exact = RELAY_ROUTE_SPECS[spec.routeId];
+    if (
+      spec.sourceVm !== "evm" ||
+      !isHypercoreMainnetUsdc(spec.destination) ||
+      !exact ||
+      exact.destinationVm !== "hypercore" ||
+      !sameAsset(exact.source, spec.source)
+    )
+      throw new Error("Relay native inbound route is not registered");
+    return;
+  }
+  if (spec.sourceVm === "hypercore") {
+    if (
+      !isHypercoreMainnetUsdc(spec.source) ||
+      spec.destinationVm !== "evm" ||
+      !["evm:137", "evm:8453"].includes(spec.destination.networkId) ||
+      !isRelayPinnedStableAsset(spec.destination) ||
+      spec.destination.decimals !== 6
+    )
+      throw new Error("Relay route requires a matching registered VM executor");
+    const exact = RELAY_ROUTE_SPECS[spec.routeId];
+    if (
+      !exact ||
+      exact.sourceVm !== "hypercore" ||
+      !sameAsset(exact.destination, spec.destination)
+    )
+      throw new Error("Relay native route is not registered");
+    return;
+  }
+  for (const [asset, vm] of [
+    [spec.source, spec.sourceVm],
+    [spec.destination, spec.destinationVm],
+  ] as const) {
+    if (
+      !(
+        (vm === "evm" && isEvmNetworkId(asset.networkId)) ||
+        (vm === "svm" && asset.networkId === "solana:mainnet")
+      )
+    ) {
+      throw new Error("Relay route requires a matching registered VM executor");
+    }
+  }
 }

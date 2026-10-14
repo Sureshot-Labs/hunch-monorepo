@@ -4,6 +4,7 @@ import { FUNDING_REASON_CODES } from "../funding/domain/types.js";
 import { FUNDING_SUGGESTION_PREFERENCES } from "../account-value/asset-preferences.js";
 import {
   assetLocationSchema,
+  assetRefSchema,
   moneySchema,
   usdAmountSchema,
 } from "../funding/domain/schemas.js";
@@ -208,7 +209,22 @@ export const accountAssetsResponseSchema = z
     valuationFreshness: z.enum(["fresh", "stale"]),
     collectorErrors: z.array(collectorErrorSchema),
     items: z.array(
-      z.union([valuedAssetComponentSchema, valuedPositionComponentSchema]),
+      z.union([
+        valuedAssetComponentSchema.extend({
+          withdrawal: z
+            .object({
+              destinations: z.array(assetRefSchema),
+              maximumSourceRaw: z
+                .string()
+                .regex(/^(0|[1-9]\d*)$/)
+                .nullable(),
+              validUntil: z.string().datetime().nullable(),
+            })
+            .strict()
+            .optional(),
+        }),
+        valuedPositionComponentSchema,
+      ]),
     ),
     total: z.number().int().nonnegative(),
     nextCursor: z.string().min(8).max(192).nullable(),

@@ -44,6 +44,7 @@ import type { FundingReceiveOptionsResponse } from "../funding/receive/receive-o
 import { PreparationContractError } from "../funding/preparation/core-adapter.js";
 import type { FundingActionFailureCode } from "../funding/execution/action-report.js";
 import { WithdrawalDestinationError } from "../funding/execution/withdrawal-destination-runtime.js";
+import { FundingOperationActionRuntime } from "../funding/execution/operation-action-runtime.js";
 import {
   submitSafeFundingAction,
   SafeFundingSubmissionUnknownError,
@@ -66,7 +67,6 @@ import type {
 import { checkRateLimit } from "../lib/rate-limit.js";
 import {
   fundingApiErrorResponseSchema,
-  fundingCommitRequestSchema,
   fundingCapabilitiesResponseSchema,
   fundingDestinationsQuerySchema,
   fundingDestinationsResponseSchema,
@@ -74,15 +74,13 @@ import {
   fundingTradeShortfallPreflightRequestSchema,
   fundingTradeShortfallPreflightResponseSchema,
   fundingDiscoveryRequestSchema,
-  fundingOperationParamsSchema,
   fundingOperationActionParamsSchema,
   fundingOperationActionPrepareResponseSchema,
-  fundingOperationActionPrepareRequestSchema,
   fundingOperationActionReportRequestSchema,
   fundingOperationActionReportResponseSchema,
-  fundingOperationResponseSchema,
-  fundingOperationsQuerySchema,
-  fundingOperationsResponseSchema,
+  fundingNativeSubmitResponseSchema,
+  fundingOperationReadRouteSchemas,
+  fundingOperationWriteRouteSchemas,
   fundingQuoteRequestSchema,
   fundingQuoteResponseSchema,
   fundingPreparationInspectRequestSchema,
@@ -100,7 +98,8 @@ import {
   fundingReceiveReceiptReviewQuoteResponseSchema,
   fundingReceiveSessionParamsSchema,
   fundingReceiveSessionResponseSchema,
-  fundingValidationErrorResponseSchema,
+  fundingRouteErrorSchemas,
+  fundingActionSigningRouteSchemas,
   fundingWithdrawalDestinationParamsSchema,
   fundingWithdrawalDestinationRequestSchema,
   fundingWithdrawalDestinationResponseSchema,
@@ -277,7 +276,7 @@ export type FundingRouteDependencies = Readonly<{
     input: Readonly<{
       operationId: string;
       stepId: string;
-      submissionProtocols?: { safe?: 1; embedded?: 1; solana?: 1 };
+      submissionProtocols?: { safe?: 1; embedded?: 1; solana?: 1; native?: 1 };
     }>,
   ): Promise<
     Readonly<{
@@ -287,10 +286,13 @@ export type FundingRouteDependencies = Readonly<{
       controllerWalletRef: string;
       executorId: string;
       executionMode: "web_client" | "privy_authorization" | "venue_relayer";
-      payerRequirement: "user" | "privy_sponsor" | "provider";
+      payerRequirement: "user" | "privy_sponsor" | "provider" | "none";
       sponsorshipPolicyId: string | null;
       safeSubmission?: Readonly<{ version: 1; expiresAt: string }>;
       embeddedSubmission?: Readonly<{ version: 1; expiresAt: string }>;
+      nativeSubmission?: Awaited<
+        ReturnType<FundingOperationActionRuntime["prepare"]>
+      >["nativeSubmission"];
       solanaSigningContext?: Readonly<{
         blockhash: string;
         lastValidBlockHeight: number;
@@ -301,6 +303,7 @@ export type FundingRouteDependencies = Readonly<{
     userId: string,
     input: SafeFundingSubmitInput,
   ): Promise<{ transactionReference: string }>;
+  submitNativeOperationAction?: FundingOperationActionRuntime["submitNative"];
   reportOperationAction(
     userId: string,
     input: Readonly<{
@@ -430,6 +433,9 @@ function publicOperationStep(step: FundingOperationStep) {
     dependsOnStepId: step.dependsOnStepId,
     dependencyState: step.dependencyState,
     actionable: step.actionable === true,
+    ...(step.nonMoneyAuthorization === true
+      ? { nonMoneyAuthorization: true as const }
+      : {}),
   };
 }
 
@@ -597,17 +603,7 @@ export function registerFundingRoutes(
   dependencies: FundingRouteDependencies,
 ): void {
   const z = app.withTypeProvider<ZodTypeProvider>();
-  const errors = {
-    400: fundingValidationErrorResponseSchema,
-    401: fundingApiErrorResponseSchema,
-    403: fundingApiErrorResponseSchema,
-    404: fundingApiErrorResponseSchema,
-    409: fundingApiErrorResponseSchema,
-    410: fundingApiErrorResponseSchema,
-    429: fundingApiErrorResponseSchema,
-    500: fundingApiErrorResponseSchema,
-    503: fundingApiErrorResponseSchema,
-  };
+  const errors = fundingRouteErrorSchemas;
   const receiveSessionOpenErrors = {
     ...errors,
     409: fundingReceiveSessionSelectionConflictResponseSchema.or(
@@ -993,11 +989,10 @@ export function registerFundingRoutes(
     "/funding/receive-sessions/:id/receipts/:receiptId/commit",
     {
       preHandler: dependencies.authenticate,
-      schema: {
-        params: fundingReceiveReceiptParamsSchema,
-        body: fundingCommitRequestSchema,
-        response: { 200: fundingOperationResponseSchema, ...errors },
-      },
+      schema:
+        fundingOperationWriteRouteSchemas[
+          "/funding/receive-sessions/:id/receipts/:receiptId/commit"
+        ],
     },
     (request, reply) =>
       handleFundingRequest(
@@ -1033,14 +1028,10 @@ export function registerFundingRoutes(
     "/funding/operations/:id/actions/:stepId/prepare",
     {
       preHandler: dependencies.authenticate,
-      schema: {
-        body: fundingOperationActionPrepareRequestSchema,
-        params: fundingOperationActionParamsSchema,
-        response: {
-          200: fundingOperationActionPrepareResponseSchema,
-          ...errors,
-        },
-      },
+      schema:
+        fundingActionSigningRouteSchemas[
+          "/funding/operations/:id/actions/:stepId/prepare"
+        ],
     },
     (request, reply) =>
       handleFundingRequest(
@@ -1126,6 +1117,44 @@ export function registerFundingRoutes(
               });
             throw error;
           }
+        },
+      ),
+  );
+
+  z.post(
+    "/funding/operations/:id/actions/:stepId/native-submit",
+    {
+      preHandler: dependencies.authenticate,
+      schema:
+        fundingActionSigningRouteSchemas[
+          "/funding/operations/:id/actions/:stepId/native-submit"
+        ],
+    },
+    (request, reply) =>
+      handleFundingRequest(
+        request,
+        reply,
+        dependencies,
+        {
+          endpoint: "operation-native-submit",
+          logMessage: "Native funding submission failed",
+          publicError: "Native funding action could not be submitted",
+        },
+        async (userId) => {
+          if (!dependencies.submitNativeOperationAction)
+            throw new FundingPersistenceError(
+              "quote_invalidated",
+              "Native submission unavailable",
+            );
+          return reply.send(
+            fundingNativeSubmitResponseSchema.parse(
+              await dependencies.submitNativeOperationAction(userId, {
+                operationId: request.params.id,
+                stepId: request.params.stepId,
+                ...request.body,
+              }),
+            ),
+          );
         },
       ),
   );
@@ -1471,10 +1500,7 @@ export function registerFundingRoutes(
     "/funding/operations",
     {
       preHandler: dependencies.authenticate,
-      schema: {
-        body: fundingCommitRequestSchema,
-        response: { 200: fundingOperationResponseSchema, ...errors },
-      },
+      schema: fundingOperationWriteRouteSchemas["/funding/operations"],
     },
     (request, reply) =>
       handleFundingRequest(
@@ -1505,10 +1531,8 @@ export function registerFundingRoutes(
     "/funding/operations/:id/cancel",
     {
       preHandler: dependencies.authenticate,
-      schema: {
-        params: fundingOperationParamsSchema,
-        response: { 200: fundingOperationResponseSchema, ...errors },
-      },
+      schema:
+        fundingOperationWriteRouteSchemas["/funding/operations/:id/cancel"],
     },
     (request, reply) =>
       handleFundingRequest(
@@ -1541,10 +1565,7 @@ export function registerFundingRoutes(
     "/funding/operations/:id",
     {
       preHandler: dependencies.authenticate,
-      schema: {
-        params: fundingOperationParamsSchema,
-        response: { 200: fundingOperationResponseSchema, ...errors },
-      },
+      schema: fundingOperationReadRouteSchemas["/funding/operations/:id"],
     },
     (request, reply) =>
       handleFundingRequest(
@@ -1586,10 +1607,7 @@ export function registerFundingRoutes(
     "/funding/operations",
     {
       preHandler: dependencies.authenticate,
-      schema: {
-        querystring: fundingOperationsQuerySchema,
-        response: { 200: fundingOperationsResponseSchema, ...errors },
-      },
+      schema: fundingOperationReadRouteSchemas["/funding/operations"],
     },
     (request, reply) =>
       handleFundingRequest(
@@ -1619,6 +1637,7 @@ export function registerFundingRoutes(
 
 export const fundingRoutes: FastifyPluginAsync = async (app) => {
   const runtime = new FundingPlanningRuntime(pool);
+  const actionRuntime = new FundingOperationActionRuntime(pool);
   // Domain-separated HMAC use keeps receive option IDs opaque without making
   // sidecar-owned funding modules import API-wide environment configuration.
   const receiveSessions = new FundingReceiveSessionService(pool, {
@@ -1682,6 +1701,8 @@ export const fundingRoutes: FastifyPluginAsync = async (app) => {
       cancelFundingOperationForUser(pool, { userId, operationId }),
     prepareOperationAction: (userId, input) =>
       runtime.prepareOperationAction(userId, input),
+    submitNativeOperationAction: (userId, input) =>
+      actionRuntime.submitNative(userId, input),
     submitSafeOperationAction: (userId, input) => {
       const {
         polymarketBuilderApiKey: key,

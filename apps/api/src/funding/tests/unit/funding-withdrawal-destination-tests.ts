@@ -28,6 +28,10 @@ import {
   withdrawalRecipientLocationPatternId,
 } from "../../domain/withdrawal-contract.js";
 import { SOLANA_NATIVE_ASSET } from "../../domain/network-fees.js";
+import {
+  HYPERCORE_MAINNET_USDC,
+  HYPERCORE_SPOT_LOCATION_PATTERN,
+} from "../../domain/hypercore-identity.js";
 
 const NOW = new Date("2026-07-24T12:00:00.000Z");
 const ASSET = {
@@ -138,6 +142,44 @@ const withdrawalPlanningPolicy = withWithdrawalPlanningContract(
   ASSET,
 );
 assert.equal(withdrawalPlanningPolicy.creationMode, "off");
+for (const asset of [
+  ASSET,
+  { networkId: "evm:8453", assetId: RELAY_PINNED_ASSETS.baseUsdc, decimals: 6 },
+  {
+    networkId: "evm:137",
+    assetId: RELAY_PINNED_ASSETS.polygonUsdc,
+    decimals: 6,
+  },
+]) {
+  const contract = withWithdrawalPlanningContract(
+    DEFAULT_FUNDING_RUNTIME_POLICY,
+    asset,
+  );
+  const source = contract.locations.find(
+    (location) =>
+      location.locationPatternId === HYPERCORE_SPOT_LOCATION_PATTERN,
+  );
+  assert.equal(source?.locationKind, "venue_account");
+  assert.deepEqual(source?.asset, HYPERCORE_MAINNET_USDC);
+  assert.ok(source?.capabilities.includes("withdrawal_source"));
+  const routes = contract.routes.filter(
+    (route) =>
+      route.sourceLocationPatternId === HYPERCORE_SPOT_LOCATION_PATTERN,
+  );
+  assert.equal(routes.length, 1);
+  assert.deepEqual(routes[0].destinationAsset, asset);
+  assert.equal(routes[0].networkExecutorId, "relay_hypercore_native_v1");
+  assert.equal(
+    contract.gates.withdrawalExecution,
+    DEFAULT_FUNDING_RUNTIME_POLICY.gates.withdrawalExecution,
+  );
+}
+// Destination support is independent: native transfers/inbound routes are not
+// implemented by advertising an outbound Core source.
+assert.equal(
+  withdrawalRecipientLocationPatternId(HYPERCORE_MAINNET_USDC),
+  null,
+);
 assert.equal(withdrawalPlanningPolicy.gates.quoteCreation, false);
 assert.deepEqual(withdrawalPlanningPolicy.assets, []);
 assert.equal(

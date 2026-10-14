@@ -9,6 +9,12 @@ import type {
   ValidatedExternalRecipient,
 } from "../domain/types.js";
 import { isReceiptBearingFundingActionKind } from "../domain/action-kinds.js";
+import {
+  isRelayHypercoreClientPair,
+  RELAY_HYPERCORE_EXECUTOR,
+  RELAY_HYPERCORE_AUTH,
+  RELAY_HYPERCORE_SEND,
+} from "../../funding-providers/relay/hypercore-operation-plan.js";
 import type { ResolvedDestinationCandidate } from "./destination-adapters.js";
 
 export type PlannedSourceOption = Readonly<{
@@ -32,6 +38,10 @@ export function commitPlanRunsWithoutUserWalletAction(
   return plan.steps.every(
     (step) =>
       step.payerRequirement !== "user" &&
+      // Native gas is free; the two signatures still require the user.
+      step.executorId !== RELAY_HYPERCORE_EXECUTOR &&
+      step.normalizedAction.handoffKind !== RELAY_HYPERCORE_AUTH &&
+      step.normalizedAction.handoffKind !== RELAY_HYPERCORE_SEND &&
       step.normalizedAction.handoffKind !== "polymarket_safe_transfer",
   );
 }
@@ -45,12 +55,32 @@ export function commitPlanRunsWithoutUserWalletAction(
 export function plannedSourceRunsWithClientWalletActions(
   source: PlannedSourceOption,
 ): boolean {
+  const nativePair = isRelayHypercoreClientPair(source.commitPlan.steps);
+  if (
+    !nativePair &&
+    source.commitPlan.steps.some(
+      (step) =>
+        step.executorId === RELAY_HYPERCORE_EXECUTOR ||
+        step.normalizedAction.handoffKind === RELAY_HYPERCORE_AUTH ||
+        step.normalizedAction.handoffKind === RELAY_HYPERCORE_SEND,
+    )
+  )
+    return false;
+  const nativeSummary =
+    nativePair &&
+    source.option.requiredActions.length === 2 &&
+    source.option.requiredActions[0]?.kind === "signature" &&
+    source.option.requiredActions[0]?.valueMoving === false &&
+    source.option.requiredActions[1]?.kind === "external_handoff" &&
+    source.option.requiredActions[1]?.valueMoving === true;
+  if (nativePair && !nativeSummary) return false;
   return (
     source.option.requiredActions.length > 0 &&
     source.option.requiredActions.every(
       (action) =>
         action.actor === "user" &&
-        isReceiptBearingFundingActionKind(action.kind),
+        (isReceiptBearingFundingActionKind(action.kind) ||
+          (nativeSummary && action.kind === "signature")),
     ) &&
     source.commitPlan.steps.length > 0 &&
     source.commitPlan.steps.every(

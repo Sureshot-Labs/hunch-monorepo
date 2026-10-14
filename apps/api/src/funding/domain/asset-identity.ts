@@ -1,4 +1,8 @@
 import type { AssetRef } from "./types.js";
+import {
+  isHypercoreFundingNetwork,
+  isHypercoreTokenId,
+} from "./hypercore-identity.js";
 
 const EVM_NETWORK_PATTERN = /^evm:[1-9][0-9]*$/;
 const EVM_ADDRESS_PATTERN = /^0x[0-9a-fA-F]{40}$/;
@@ -12,8 +16,10 @@ export function isEvmAddress(address: string): boolean {
 }
 
 export function canonicalAssetId(asset: AssetRef): string {
-  return isEvmNetworkId(asset.networkId) &&
-    EVM_ADDRESS_PATTERN.test(asset.assetId)
+  return (isEvmNetworkId(asset.networkId) &&
+    EVM_ADDRESS_PATTERN.test(asset.assetId)) ||
+    (isHypercoreFundingNetwork(asset.networkId) &&
+      isHypercoreTokenId(asset.assetId))
     ? asset.assetId.toLowerCase()
     : asset.assetId;
 }
@@ -34,7 +40,8 @@ export function canonicalAccountAddress(
   networkId: string,
   address: string,
 ): string {
-  return isEvmNetworkId(networkId) && isEvmAddress(address)
+  return (isEvmNetworkId(networkId) || isHypercoreFundingNetwork(networkId)) &&
+    isEvmAddress(address)
     ? address.toLowerCase()
     : address;
 }

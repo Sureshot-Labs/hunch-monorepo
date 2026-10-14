@@ -21,6 +21,14 @@ import {
 import { isValidFundingCommitPlanBoundary } from "../validation/funding-commit-plan-validator.js";
 import { fundingReservationHoldSql } from "./source-reservation-hold.js";
 import {
+  claimHyperliquidFundingNonceInTransaction,
+  HyperliquidNonceConflictError,
+} from "../execution/hyperliquid-nonce-claims.js";
+import {
+  RELAY_HYPERCORE_EXECUTOR,
+  RELAY_HYPERCORE_SEND,
+} from "../../funding-providers/relay/hypercore-operation-plan.js";
+import {
   canonicalJsonEqual,
   canonicalJsonHash,
   hashOpaqueToken,
@@ -833,8 +841,9 @@ async function insertCommitSteps(
   plan: FundingCommitPlan,
   segmentIdByOrdinal: ReadonlyMap<number, string>,
   now: Date,
-): Promise<void> {
+): Promise<Date | null> {
   const stepIdByOrdinal = new Map<number, string>();
+  const nativeClaims: { stepId: string; sortKey: string }[] = [];
   for (const step of [...plan.steps].sort(
     (left, right) => left.ordinal - right.ordinal,
   )) {
@@ -898,7 +907,45 @@ async function insertCommitSteps(
     const insertedId = rows[0]?.id;
     if (!insertedId) throw new Error("funding step insert returned no row");
     stepIdByOrdinal.set(step.ordinal, insertedId);
+    if (
+      step.executorId === RELAY_HYPERCORE_EXECUTOR &&
+      step.normalizedAction.handoffKind === RELAY_HYPERCORE_SEND
+    ) {
+      nativeClaims.push({
+        stepId: insertedId,
+        sortKey: `${String(step.actionValidationResult.signerAddress).toLowerCase()}:${String(step.actionValidationResult.nativeNonce).padStart(16, "0")}`,
+      });
+    }
   }
+  // Stable order also covers a future multi-leg plan: two commits must not
+  // acquire the same native nonce keys in opposite order.
+  for (const claim of nativeClaims.sort((left, right) =>
+    left.sortKey.localeCompare(right.sortKey),
+  )) {
+    try {
+      await claimHyperliquidFundingNonceInTransaction(client, claim.stepId);
+    } catch (error) {
+      if (error instanceof HyperliquidNonceConflictError)
+        throw new FundingPersistenceError("quote_invalidated", error.message);
+      throw error;
+    }
+  }
+  if (nativeClaims.length === 0) return null;
+  const claimNow = (
+    await client.query<{ now: Date }>("select clock_timestamp() as now")
+  ).rows[0]?.now;
+  if (!claimNow) throw new Error("native commit clock is unavailable");
+  if (
+    plan.steps.some((step) => {
+      const expiry = fundingStepActionExpiresAt(now, plan, step);
+      return expiry !== null && expiry <= claimNow;
+    })
+  )
+    throw new FundingPersistenceError(
+      "quote_expired",
+      "Funding action expired while claiming its native nonce",
+    );
+  return claimNow;
 }
 
 function commitReservations(
@@ -949,6 +996,30 @@ function commitReservations(
   return reservations;
 }
 
+/** Same physical lock for new reservations and final native broadcast checks. */
+export async function lockFundingPhysicalSource(
+  client: Pick<PoolClient, "query">,
+  userId: string,
+  reservation: Pick<
+    FundingCommitReservation,
+    "locationId" | "networkId" | "assetId" | "assetDecimals"
+  >,
+): Promise<void> {
+  const key = [
+    userId,
+    reservation.locationId,
+    reservation.networkId,
+    canonicalAssetId({
+      networkId: reservation.networkId,
+      assetId: reservation.assetId,
+      decimals: reservation.assetDecimals,
+    }),
+  ].join(":");
+  await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [
+    ["funding-source-reservation", key].join(":"),
+  ]);
+}
+
 async function lockCommitSourceReservations(
   client: Pick<PoolClient, "query">,
   userId: string,
@@ -980,19 +1051,12 @@ async function lockCommitSourceReservations(
     else physicalSources.set(key, { assetId, reservations: [reservation] });
   }
   const sharedSources: FundingSharedSourceReservation[] = [];
-  for (const [key, source] of [...physicalSources].sort(([left], [right]) =>
+  for (const [, source] of [...physicalSources].sort(([left], [right]) =>
     left.localeCompare(right),
   )) {
     const reservation = source.reservations[0];
     if (!reservation) continue;
-    await client.query(
-      `
-        select pg_advisory_xact_lock(
-          hashtextextended($1, 0)
-        )
-      `,
-      [["funding-source-reservation", key].join(":")],
-    );
+    await lockFundingPhysicalSource(client, userId, reservation);
     const conflict = await client.query<{
       raw_amount: string;
       component_id: string;
@@ -1366,13 +1430,21 @@ export async function commitFundingOperationInTransaction(
     input.plan.segments,
     now,
   );
-  await insertCommitSteps(
+  const postNonceClaimNow = await insertCommitSteps(
     client,
     operation.id,
     input.plan,
     segmentIdByOrdinal,
     now,
   );
+  if (postNonceClaimNow) {
+    assertQuoteMatchesCommit(quote, input, postNonceClaimNow);
+    if (operationExpiresAt <= postNonceClaimNow)
+      throw new FundingPersistenceError(
+        "quote_expired",
+        "Funding operation expired while claiming its native nonce",
+      );
+  }
   await insertCommitReservations(
     client,
     input.userId,

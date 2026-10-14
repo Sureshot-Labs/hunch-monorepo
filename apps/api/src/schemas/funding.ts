@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { nativeFundingPreparationSchema } from "../funding/execution/hypercore-submission-contract.js";
 
 import { FUNDING_REASON_CODES } from "../funding/domain/types.js";
 import {
@@ -1015,6 +1016,7 @@ export const fundingOperationPublicSchema = z
 
 export const fundingOperationStepPublicSchema = z
   .object({
+    nonMoneyAuthorization: z.literal(true).optional(),
     stepId: opaqueIdSchema,
     ordinal: z.number().int().min(0),
     kind: z.enum([
@@ -1111,6 +1113,7 @@ export const fundingOperationActionPrepareRequestSchema = z
         safe: z.literal(1).optional(),
         embedded: z.literal(1).optional(),
         solana: z.literal(1).optional(),
+        native: z.literal(1).optional(),
       })
       .strict()
       .optional(),
@@ -1130,7 +1133,7 @@ export const fundingOperationActionPrepareResponseSchema = z
       "privy_authorization",
       "venue_relayer",
     ]),
-    payerRequirement: z.enum(["user", "privy_sponsor", "provider"]),
+    payerRequirement: z.enum(["user", "privy_sponsor", "provider", "none"]),
     sponsorshipPolicyId: z.string().trim().min(2).max(160).nullable(),
     safeSubmission: z
       .object({ version: z.literal(1), expiresAt: z.string().datetime() })
@@ -1140,6 +1143,7 @@ export const fundingOperationActionPrepareResponseSchema = z
       .object({ version: z.literal(1), expiresAt: z.string().datetime() })
       .strict()
       .optional(),
+    nativeSubmission: nativeFundingPreparationSchema.optional(),
     solanaSigningContext: z
       .object({
         blockhash: z.string().min(32).max(44),
@@ -1149,6 +1153,34 @@ export const fundingOperationActionPrepareResponseSchema = z
       .optional(),
   })
   .strict();
+
+export const fundingNativeSubmitRequestSchema = z
+  .object({
+    attemptId: z.string().uuid(),
+    signature: z.string().regex(/^0x(?:[a-fA-F0-9]{128}|[a-fA-F0-9]{130})$/),
+  })
+  .strict();
+export const fundingNativeSubmitResponseSchema = z.discriminatedUnion("stage", [
+  z
+    .object({
+      stage: z.literal("nonce_mapping"),
+      attemptId: z.string().uuid(),
+      authorizationStatus: z.enum([
+        "authorized",
+        "retry_required",
+        "pending",
+        "closed",
+      ]),
+    })
+    .strict(),
+  z
+    .object({
+      stage: z.literal("send_asset"),
+      attemptId: z.string().uuid(),
+      submissionStatus: z.enum(["reconcile_required", "closed"]),
+    })
+    .strict(),
+]);
 
 export const fundingOperationActionReportRequestSchema = z
   .object({
@@ -1248,3 +1280,76 @@ export const fundingValidationErrorResponseSchema = z.union([
     })
     .passthrough(),
 ]);
+
+export const fundingRouteErrorSchemas = {
+  400: fundingValidationErrorResponseSchema,
+  401: fundingApiErrorResponseSchema,
+  403: fundingApiErrorResponseSchema,
+  404: fundingApiErrorResponseSchema,
+  409: fundingApiErrorResponseSchema,
+  410: fundingApiErrorResponseSchema,
+  429: fundingApiErrorResponseSchema,
+  500: fundingApiErrorResponseSchema,
+  503: fundingApiErrorResponseSchema,
+};
+
+/** Shared by live handlers and offline OpenAPI generation. */
+export const fundingActionSigningRouteSchemas = {
+  "/funding/operations/:id/actions/:stepId/prepare": {
+    params: fundingOperationActionParamsSchema,
+    body: fundingOperationActionPrepareRequestSchema,
+    response: {
+      200: fundingOperationActionPrepareResponseSchema,
+      ...fundingRouteErrorSchemas,
+    },
+  },
+  "/funding/operations/:id/actions/:stepId/native-submit": {
+    params: fundingOperationActionParamsSchema,
+    body: fundingNativeSubmitRequestSchema,
+    response: {
+      200: fundingNativeSubmitResponseSchema,
+      ...fundingRouteErrorSchemas,
+    },
+  },
+};
+
+export const fundingOperationReadRouteSchemas = {
+  "/funding/operations": {
+    querystring: fundingOperationsQuerySchema,
+    response: {
+      200: fundingOperationsResponseSchema,
+      ...fundingRouteErrorSchemas,
+    },
+  },
+  "/funding/operations/:id": {
+    params: fundingOperationParamsSchema,
+    response: {
+      200: fundingOperationResponseSchema,
+      ...fundingRouteErrorSchemas,
+    },
+  },
+};
+export const fundingOperationWriteRouteSchemas = {
+  "/funding/operations": {
+    body: fundingCommitRequestSchema,
+    response: {
+      200: fundingOperationResponseSchema,
+      ...fundingRouteErrorSchemas,
+    },
+  },
+  "/funding/operations/:id/cancel": {
+    params: fundingOperationParamsSchema,
+    response: {
+      200: fundingOperationResponseSchema,
+      ...fundingRouteErrorSchemas,
+    },
+  },
+  "/funding/receive-sessions/:id/receipts/:receiptId/commit": {
+    params: fundingReceiveReceiptParamsSchema,
+    body: fundingCommitRequestSchema,
+    response: {
+      200: fundingOperationResponseSchema,
+      ...fundingRouteErrorSchemas,
+    },
+  },
+};

@@ -2,6 +2,14 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import type { JsonValue } from "../domain/types.js";
 import {
+  nativeFundingPreparationInTransaction,
+  closeNativeFundingUnsubmittedInTransaction,
+} from "../execution/hypercore-auth-attempt.js";
+import {
+  parseNativeFundingSubmission,
+  type NativeFundingSubmission,
+} from "../execution/hypercore-submission-contract.js";
+import {
   parseEmbeddedFundingSubmission,
   EMBEDDED_FUNDING_PREPARATION_LEASE_MS,
   type EmbeddedFundingSubmission,
@@ -91,10 +99,12 @@ export type FundingOperationStep = Readonly<{
   actionExpiresAt: Date | null;
   /** Derived by the lifecycle projector; never inferred from the cache row. */
   actionable?: boolean;
+  nonMoneyAuthorization?: boolean;
 }>;
 
 type ProjectedFundingAction = Readonly<{
   actionable: boolean;
+  nonMoneyAuthorization?: boolean;
   state: FundingOperationStepState;
 }>;
 
@@ -151,6 +161,9 @@ function mapOperationStep(
     actionValidationResult: row.action_validation_result,
     actionExpiresAt: row.action_expires_at,
     actionable: projectedAction.actionable,
+    ...(projectedAction.nonMoneyAuthorization
+      ? { nonMoneyAuthorization: true }
+      : {}),
   };
 }
 
@@ -162,8 +175,16 @@ async function projectedFundingActions(
     operationId,
   });
   if (!projected) return new Map();
+  const harmless = new Set(
+    projected.facts.actions
+      .filter((action) => action.nonMoneyAuthorization === true)
+      .map((action) => action.actionId),
+  );
   return new Map(
-    projected.lifecycle.actions.map((action) => [action.actionId, action]),
+    projected.lifecycle.actions.map((action) => [
+      action.actionId,
+      { ...action, nonMoneyAuthorization: harmless.has(action.actionId) },
+    ]),
   );
 }
 
@@ -695,6 +716,12 @@ export async function recordSafeFundingActionCancellationsInTransaction(
     unsafeStepIds: readonly string[];
   }>
 > {
+  const nativeClosed = await closeNativeFundingUnsubmittedInTransaction(
+    client,
+    input.operationId,
+    input.now,
+    "cancelled",
+  );
   const lifecycle = await projectedFundingLifecycleInTransaction(client, {
     operationId: input.operationId,
     now: input.now,
@@ -712,6 +739,19 @@ export async function recordSafeFundingActionCancellationsInTransaction(
         action.state !== "cancelled",
     )
     .map((action) => action.actionId);
+  if (
+    nativeClosed.length > 0 &&
+    lifecycle.status === "cancelled" &&
+    lifecycle.safety.reservationsMayRelease &&
+    unsafeStepIds.length === 0
+  ) {
+    return {
+      cancelledStepIds: lifecycle.actions
+        .filter((action) => action.state === "cancelled")
+        .map((action) => action.actionId),
+      unsafeStepIds: [],
+    };
+  }
   if (!lifecycle.safety.cancelAllowed || unsafeStepIds.length > 0) {
     return {
       cancelledStepIds: [],
@@ -1034,6 +1074,7 @@ export async function startFundingStepAttemptInTransaction(
     solanaPreparation?: Readonly<{ version: 1; expiresAt: string }>;
     safeSubmission?: SafeFundingSubmission;
     embeddedSubmission?: EmbeddedFundingSubmission;
+    nativeSubmission?: NativeFundingSubmission;
     now?: Date;
   }>,
 ): Promise<FundingStepAttempt> {
@@ -1076,6 +1117,21 @@ export async function startFundingStepAttemptInTransaction(
       "quote_mismatch",
       "Safe submission lease requires the Safe handoff executor",
     );
+  if (
+    step.executor_id === "relay_hypercore_native_v1" ||
+    input.nativeSubmission
+  ) {
+    const { submission } = await nativeFundingPreparationInTransaction(
+      client,
+      input.operationId,
+      input.stepId,
+    );
+    if (!canonicalJsonEqual(input.nativeSubmission, submission))
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        "Native action requires its exact server preparation",
+      );
+  }
   if (
     input.embeddedSubmission &&
     (!["wallet_profile_evm_v1", "wallet_profile_svm_v1"].includes(
@@ -1195,6 +1251,9 @@ export async function startFundingStepAttemptInTransaction(
         ...(input.embeddedSubmission
           ? { embeddedSubmission: input.embeddedSubmission }
           : {}),
+        ...(input.nativeSubmission
+          ? { nativeSubmission: input.nativeSubmission }
+          : {}),
       },
     ],
   );
@@ -1214,6 +1273,7 @@ export async function startFundingStepAttemptForUserInTransaction(
     solanaSigningContext?: SolanaSigningContext;
     solanaSubmissionProtocol?: true;
     safeSubmissionProtocol?: true;
+    nativeSubmissionProtocol?: true;
     embeddedSubmissionProtocol?: {
       signer: string;
       payer: "user" | "privy_sponsor";
@@ -1320,6 +1380,17 @@ export async function startFundingStepAttemptForUserInTransaction(
     canonicalActionFingerprint: input.canonicalActionFingerprint,
     executorId: input.executorId,
     solanaSigningContext: input.solanaSigningContext,
+    ...(input.nativeSubmissionProtocol
+      ? {
+          nativeSubmission: (
+            await nativeFundingPreparationInTransaction(
+              client,
+              input.operationId,
+              input.stepId,
+            )
+          ).submission,
+        }
+      : {}),
     ...(input.solanaSubmissionProtocol &&
     input.solanaSigningContext &&
     row.executor_id === "wallet_profile_svm_v1"
@@ -1599,6 +1670,65 @@ export async function finishFundingStepAttemptForUserInTransaction(
     );
   }
   const priorAttempt = mapAttempt(priorAttemptRow);
+  if (priorAttempt.executorId === "relay_hypercore_native_v1") {
+    const native = parseNativeFundingSubmission(
+      priorAttempt.actualCosts.nativeSubmission,
+    );
+    if (!native)
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "Native attempt has no valid server preparation",
+      );
+    if (native.phase !== "prepared") {
+      if (
+        input.receiptRefLookupHmac !== null &&
+        input.receiptRefLookupHmac !== priorAttempt.receiptRefLookupHmac
+      )
+        throw new FundingPersistenceError(
+          "invalid_state_transition",
+          "Native submission evidence is server owned",
+        );
+      return {
+        attempt: priorAttempt,
+        stepState:
+          priorAttempt.outcome === "started"
+            ? "reconcile_required"
+            : reportAcknowledgementStepState(priorAttempt.outcome),
+      };
+    }
+    if (input.receiptRefLookupHmac !== null)
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "Native action has no server admission",
+      );
+    // A journal can reach disk before native-submit reaches the server. Under
+    // the same operation/attempt locks, prepared proves no native admission.
+    // Close that lease so a delayed HTTP request cannot send after recovery.
+    // Admitted attempts took the branch above and remain server-owned.
+    if (input.outcome === "ambiguous" && input.broadcastMayHaveOccurred)
+      input = {
+        ...input,
+        outcome: "cancelled",
+        broadcastMayHaveOccurred: false,
+        referenceKind: null,
+        receiptRefCiphertext: null,
+        lookupKeyVersion: null,
+        actualCosts: { networkFeeRaw: null },
+      };
+    if (input.outcome !== "failed" && input.outcome !== "cancelled")
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "Client cannot authorize native funding",
+      );
+    input = {
+      ...input,
+      actualCosts: {
+        ...input.actualCosts,
+        retryableProviderFailure: false,
+        nativeSubmission: { ...native, phase: "closed", reason: "cancelled" },
+      },
+    };
+  }
   if (
     priorAttempt.outcome === "cancelled" &&
     priorAttempt.actualCosts.solanaPreparation &&

@@ -7,6 +7,88 @@ import type {
 } from "../funding/domain/types.js";
 import { scaleUnsignedDecimalByRawRatio, subtractRawFloor } from "./decimal.js";
 import { fundingReservationHoldSql } from "../funding/persistence/source-reservation-hold.js";
+import { isHypercoreMainnetUsdc } from "../funding/domain/hypercore-identity.js";
+
+/** A completed transfer stops being in transit, but cannot restore cash in an
+ * older cached source snapshot. Read only the indexed post-snapshot tail of
+ * exact owned native sources; never aggregate different observation times. */
+export const FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL = `
+  select source_snapshot.component_id as source_component_id,
+    source_snapshot.location_id as source_location_id,
+    debit.operation_id, debit.segment_id, debit.network_id, debit.asset_id,
+    source_snapshot.asset_decimals, debit.raw_amount,
+    coalesce(debit.finalized_at, debit.observed_at) as observed_at
+  from jsonb_to_recordset($2::jsonb) as source_snapshot(
+    component_id text, location_id text, address text, asset_decimals integer,
+    snapshot_at timestamptz)
+  join funding_observations debit
+    on debit.network_id='hyperliquid:mainnet'
+      and debit.asset_id='0x6d1e7cde53ba9467b783cb7c530ce054'
+      and debit.asset_decimals=source_snapshot.asset_decimals
+      and lower(debit.from_address)=source_snapshot.address
+      and coalesce(debit.finalized_at, debit.observed_at)>source_snapshot.snapshot_at
+      and debit.kind='source_debit' and debit.canonical
+      and debit.finality_status='finalized'
+  join funding_operations operation_row
+    on operation_row.id=debit.operation_id and operation_row.user_id=$1
+  where exists (
+    select 1 from balance_reservations reservation_row
+    where reservation_row.operation_id=debit.operation_id
+      and reservation_row.user_id=$1
+      and reservation_row.segment_id is not distinct from debit.segment_id
+      and (source_snapshot.component_id is null or reservation_row.component_id=source_snapshot.component_id)
+      and reservation_row.location_id=source_snapshot.location_id
+      and reservation_row.network_id=debit.network_id
+      and reservation_row.asset_id=debit.asset_id
+      and reservation_row.asset_decimals=source_snapshot.asset_decimals
+      and reservation_row.mode='subtract_available'
+  )`;
+
+export async function loadFundingNativeSnapshotDebits(
+  pool: Pick<Pool, "query">,
+  userId: string,
+  components: readonly ValuedAssetComponent[],
+): Promise<readonly FundingInTransitFact[]> {
+  const snapshots = components
+    .filter(
+      (row) =>
+        row.location.accountId === userId &&
+        row.location.kind === "venue_account" &&
+        row.location.details.nativeSourceDex === "spot" &&
+        row.observationFreshness === "fresh" &&
+        !row.observationError &&
+        isHypercoreMainnetUsdc(row.amount.asset) &&
+        typeof row.location.details.address === "string" &&
+        /^0x[\da-fA-F]{40}$/.test(row.location.details.address),
+    )
+    .map((row) => ({
+      component_id: row.componentId,
+      location_id: row.location.locationId,
+      address: String(row.location.details.address).toLowerCase(),
+      asset_decimals: row.amount.asset.decimals,
+      snapshot_at: row.observedAt,
+    }));
+  if (!snapshots.length) return [];
+  const { rows } = await pool.query<InTransitRow>(
+    FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL,
+    [userId, JSON.stringify(snapshots)],
+  );
+  return rows.map((row) => ({
+    operationId: row.operation_id,
+    segmentId: row.segment_id,
+    sourceComponentId: row.source_component_id,
+    sourceLocationId: row.source_location_id,
+    amount: {
+      asset: {
+        networkId: row.network_id,
+        assetId: row.asset_id,
+        decimals: row.asset_decimals,
+      },
+      raw: row.raw_amount,
+    },
+    observedAt: row.observed_at.toISOString(),
+  }));
+}
 
 export type FundingAvailabilityFact = Readonly<{
   componentId: string;

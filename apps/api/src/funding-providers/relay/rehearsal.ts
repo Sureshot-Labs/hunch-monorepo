@@ -196,6 +196,26 @@ const mayanExecutorInterface = new Interface([
 
 type UnknownRecord = Record<string, unknown>;
 
+export function assertEvmActionGasWithinHardPolicy(
+  input: Readonly<{
+    gasLimit: bigint;
+    maxFeePerGas: bigint;
+    maxPriorityFeePerGas: bigint;
+  }>,
+): void {
+  if (input.gasLimit <= 0n || input.gasLimit > 3_000_000n) {
+    throw new Error("Relay EVM action gas limit is outside hard policy");
+  }
+  if (
+    input.maxFeePerGas <= 0n ||
+    input.maxFeePerGas > 800_000_000_000n ||
+    input.maxPriorityFeePerGas < 0n ||
+    input.maxPriorityFeePerGas > input.maxFeePerGas
+  ) {
+    throw new Error("Relay EVM action fee fields are outside hard policy");
+  }
+}
+
 export type ValidatedRelayAction = {
   chainId: number;
   data: string;
@@ -336,7 +356,7 @@ function parseCurrencyAmount(
   return { amount, minimumAmount };
 }
 
-function parseTransactionAction(input: {
+export function parseRelayEvmTransactionAction(input: {
   expectedStepId: "approve" | "deposit";
   originChainId: number;
   quoteStep: UnknownRecord;
@@ -940,7 +960,7 @@ export function validateRelayRehearsalQuote(input: {
     throw new Error("unexpected Relay step count");
   }
   const parsed = steps.map((step, index) =>
-    parseTransactionAction({
+    parseRelayEvmTransactionAction({
       expectedStepId: required(expectedStepIds[index], "expected step ID"),
       originChainId: input.scenario.originChainId,
       quoteStep: step,

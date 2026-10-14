@@ -194,6 +194,8 @@ export type RelayFirstSourcePlannerDependencies = Readonly<{
   ): Promise<readonly RelayEligibleSourceFact[]>;
   quoteRelay(
     input: Readonly<{
+      /** Trusted effective planning policy, including the ordinary withdrawal view. */
+      policy: FundingRuntimePolicy;
       route: FundingRuntimePolicy["routes"][number];
       source: RelayEligibleSourceFact;
       destination: ResolvedRouteDestination;
@@ -705,6 +707,7 @@ export class RelayFirstSourcePlanner {
                 kind: "quoted" as const,
                 quote: await this.quoteRelayWithinBudget(
                   {
+                    policy: input.policy,
                     route,
                     source: candidateSource,
                     destination: input.destination,

@@ -14,13 +14,19 @@ import {
   type FundingReconciliationBatchResult,
 } from "../reconciliation/funding-reducer.js";
 import { FundingStepReceiptReconciliationDriver } from "../execution/step-receipt-reconciler.js";
+import { inspectNativeFundingSend } from "../execution/hypercore-send-receipt.js";
 import { createFundingTransactionReferenceCodec } from "../execution/transaction-reference-codec.js";
 import { PolymarketFundingPostconditionDriver } from "../preparation/polymarket-funding-reconciler.js";
 import { observePolymarketFundingRuntimeSidecar } from "../preparation/polymarket-funding-observer.js";
 import { pollFundingPostconditions } from "../preparation/postcondition-driver.js";
 import { DirectIngressDestinationObserver } from "../reconciliation/direct-ingress-observer.js";
 import { OwnedRouteDestinationObserver } from "../reconciliation/owned-route-destination-observer.js";
-import { reconcileRelayDestinationReceipts } from "../reconciliation/relay-destination-receipts.js";
+import {
+  reconcileRelayDestinationReceipts,
+  observeRelayErc20DestinationReceipts,
+} from "../reconciliation/relay-destination-receipts.js";
+import { observeRelayHypercoreDestinationReceipts } from "../../funding-providers/relay/hypercore-destination-observer.js";
+import { isHypercoreFundingNetwork } from "../domain/hypercore-identity.js";
 import { RelayOwnedRefundObserver } from "../reconciliation/relay-owned-refund-observer.js";
 import { runTelegramRouterContinuation } from "../reconciliation/telegram-router-continuation.js";
 import {
@@ -526,6 +532,21 @@ export async function runFundingReconciliationJob(
   const receiptDriver = transactionCodec
     ? new FundingStepReceiptReconciliationDriver(transactionCodec, {
         ...(resolvePrivyReference ? { resolvePrivyReference } : {}),
+        ...(relay && relayReferenceCodec
+          ? {
+              inspectNative: (target, reference) =>
+                inspectNativeFundingSend(
+                  pool,
+                  new RelayClient({
+                    apiKey: relay.apiKey,
+                    timeoutMs: relay.timeoutMs,
+                  }),
+                  relayReferenceCodec,
+                  target,
+                  reference,
+                ),
+            }
+          : {}),
       })
     : null;
   const polymarketPostconditionDriver =
@@ -607,18 +628,30 @@ export async function runFundingReconciliationJob(
     if (!codecConfig || !transactionCodec) {
       throw new Error("funding transaction codec configuration is unavailable");
     }
+    const relayClient = new RelayClient({
+      apiKey: relay.apiKey,
+      timeoutMs: relay.timeoutMs,
+    });
     const driver = new RelayReconciliationDriver(
-      new RelayClient({
-        apiKey: relay.apiKey,
-        timeoutMs: relay.timeoutMs,
-      }),
+      relayClient,
       createRelayReferenceCodec(codecConfig),
       createRelayDepositAddressCodec(codecConfig),
       (db, input) =>
-        reconcileRelayDestinationReceipts(db, {
-          ...input,
-          referenceCodec: createRelayReferenceCodec(codecConfig),
-        }),
+        reconcileRelayDestinationReceipts(
+          db,
+          {
+            ...input,
+            referenceCodec: createRelayReferenceCodec(codecConfig),
+          },
+          (observation) =>
+            isHypercoreFundingNetwork(observation.asset.networkId)
+              ? observeRelayHypercoreDestinationReceipts(
+                  db,
+                  relayClient,
+                  observation,
+                )
+              : observeRelayErc20DestinationReceipts(observation),
+        ),
     );
     result = await runFundingReconciliationBatch(pool, {
       ...options,

@@ -20,6 +20,7 @@ import {
 } from "../schemas/account-value.js";
 import { upsertAssetFundingPreference } from "../account-value/asset-preferences.js";
 import { accountValueReadService } from "../account-value/runtime-read-service.js";
+import { withdrawalOptionsForAsset } from "../account-value/withdrawal-options.js";
 
 export type AccountValueRouteDependencies = Readonly<{
   authenticate: preHandlerHookHandler;
@@ -127,7 +128,12 @@ export function registerAccountValueRoutes(
         const afterCursor = cursor
           ? filteredItems.filter((component) => component.componentId > cursor)
           : filteredItems;
-        const items = afterCursor.slice(0, query.limit);
+        const now = Date.now();
+        const items = afterCursor.slice(0, query.limit).map((component) => {
+          if (!("amount" in component)) return component;
+          const withdrawal = withdrawalOptionsForAsset(account, component, now);
+          return withdrawal ? { ...component, withdrawal } : component;
+        });
         const nextCursor =
           afterCursor.length > query.limit
             ? (items.at(-1)?.componentId ?? null)

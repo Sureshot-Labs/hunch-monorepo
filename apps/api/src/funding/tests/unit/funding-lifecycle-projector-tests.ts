@@ -146,6 +146,44 @@ function facts(
 }
 
 {
+  const native = {
+    networkId: "hyperliquid:mainnet",
+    assetId: "0x6d1e7cde53ba9467b783cb7c530ce054",
+    decimals: 8,
+    raw: "100000000",
+  };
+  const base = facts();
+  const nativeFacts = facts({
+    plan: {
+      ...base.plan,
+      requestedDestination: {
+        ...native,
+        assetId: `0x${native.assetId.slice(2).toUpperCase()}`,
+      },
+    },
+    transfers: [transfer("destination_credit", { money: native })],
+  });
+  assert.equal(
+    deriveFundingLifecycle(nativeFacts).status,
+    "ready",
+    "native token case follows the same identity as allocation/reservations",
+  );
+  for (const wrong of [
+    { ...native, networkId: "hyperliquid:testnet" },
+    { ...native, decimals: 6 },
+    { ...native, assetId: `0x${"0".repeat(32)}` },
+  ]) {
+    assert.notEqual(
+      deriveFundingLifecycle({
+        ...nativeFacts,
+        transfers: [transfer("destination_credit", { money: wrong })],
+      }).status,
+      "ready",
+    );
+  }
+}
+
+{
   const expired = facts({
     now: new Date(now.getTime() + 120_000),
     actions: [

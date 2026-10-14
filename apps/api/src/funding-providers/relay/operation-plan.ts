@@ -5,6 +5,7 @@ import { stableOpaqueId } from "../../account-value/canonical.js";
 import { multiplyRawByUnitPrice } from "../../account-value/decimal.js";
 import type {
   ExternalHandoffAction,
+  AssetLocation,
   FundingExecutionPlan,
   JsonValue,
   Money,
@@ -14,7 +15,13 @@ import type {
 import {
   canonicalAssetId,
   sameAccountAddress,
+  sameAsset,
 } from "../../funding/domain/asset-identity.js";
+import {
+  isHypercoreFundingNetwork,
+  isHypercoreMainnetUsdc,
+  hypercoreLocationDex,
+} from "../../funding/domain/hypercore-identity.js";
 import { operationPurposeForExternalRecipient } from "../../funding/domain/withdrawal-binding.js";
 import { groupWalletExecutableActions } from "../../funding/planner/evm-action-batching.js";
 import type { ResolvedRouteDestination } from "../../funding/planner/destination-adapters.js";
@@ -23,7 +30,10 @@ import type {
   RelayPlanningQuote,
 } from "../../funding/planner/source-options.js";
 import type { FundingRuntimePolicy } from "../../funding/policies/funding-policy.js";
-import { canonicalJsonHash } from "../../funding/persistence/canonical.js";
+import {
+  canonicalJsonEqual,
+  canonicalJsonHash,
+} from "../../funding/persistence/canonical.js";
 import type { FundingCommitStep } from "../../funding/persistence/funding-operation-repository.js";
 import { resolveActionSponsorship } from "../../funding/execution/sponsorship-policy.js";
 import { withRelayClientSourceDebitPostcondition } from "../../funding/execution/relay-client-source-debit.js";
@@ -35,6 +45,12 @@ import {
 } from "./rehearsal.js";
 import type { createRelayReferenceCodec } from "./reference-codec.js";
 import type { NormalizedRelayWalletQuote } from "./wallet-adapter.js";
+import { relayRefundLocation } from "./refund-location.js";
+export { relayRefundLocation } from "./refund-location.js";
+import {
+  isRelayHypercoreHandoff,
+  relayHypercoreCommitSteps,
+} from "./hypercore-operation-plan.js";
 
 const POLYMARKET_DEPOSIT_WALLET_HANDOFF_EXECUTOR_ID =
   "polymarket_deposit_wallet_relayer_v1";
@@ -476,6 +492,57 @@ function executionPlan(input: {
   };
 }
 
+/** Keep the primary legacy envelope readable and freeze any second owned
+ * refund target inside the SAME immutable segment snapshot. It is not policy,
+ * mutable diagnostics, a second provider segment, or a destination credit. */
+export function relayRefundLocationSnapshot(input: {
+  sourceLocation: AssetLocation;
+  sourceAmount: Money;
+  nativeRefundLocation?: AssetLocation;
+  destination: Pick<ResolvedRouteDestination, "target">;
+  minimumOutput: Money;
+  routeShape: string;
+}): AssetLocation &
+  Readonly<{
+    alternativeRefundLocations?: Readonly<{
+      version: 1;
+      locations: readonly AssetLocation[];
+    }>;
+  }> {
+  if (!isHypercoreFundingNetwork(input.minimumOutput.asset.networkId))
+    return relayRefundLocation(input);
+  const target = input.destination.target;
+  if (
+    input.routeShape !== "relay-depository-v2-hypercore" ||
+    input.sourceLocation.kind !== "wallet" ||
+    !["evm:8453", "evm:137"].includes(input.sourceAmount.asset.networkId) ||
+    !sameAsset(input.sourceLocation.asset, input.sourceAmount.asset) ||
+    target.kind !== "owned_location" ||
+    input.sourceLocation.accountId !== target.location.accountId ||
+    !isHypercoreMainnetUsdc(input.minimumOutput.asset) ||
+    !sameAsset(target.location.asset, input.minimumOutput.asset) ||
+    hypercoreLocationDex(target.location) !== "spot"
+  )
+    throw new Error(
+      "Native inbound refunds require the exact owned spot destination",
+    );
+  // This reuses the same controller/owner/environment/DEX binding as outbound
+  // native cash, but against the recipient, not the potentially different
+  // source EVM controller.
+  const native = relayRefundLocation({
+    sourceLocation: target.location,
+    sourceAmount: input.minimumOutput,
+    nativeRefundLocation: input.nativeRefundLocation,
+  });
+  return {
+    ...structuredClone(input.sourceLocation),
+    alternativeRefundLocations: {
+      version: 1,
+      locations: [structuredClone(native)],
+    },
+  };
+}
+
 export async function buildRelayPlanningQuote(
   input: Readonly<{
     codec: ReturnType<typeof createRelayReferenceCodec>;
@@ -489,28 +556,85 @@ export async function buildRelayPlanningQuote(
     persistentApprovalCapRaw?: string;
     source: RelayEligibleSourceFact;
     supportMetadata?: Readonly<Record<string, JsonValue>>;
+    now?: Date;
   }>,
 ): Promise<RelayPlanningQuote> {
   if (input.source.source.kind !== "owned_location") {
     throw new Error("Relay operation requires an owned source location");
   }
   const sourceLocation = input.source.source.location;
+  const refundLocation = relayRefundLocationSnapshot({
+    sourceLocation,
+    sourceAmount: input.quote.sourceAmount,
+    nativeRefundLocation: input.quote.nativeRefundLocation,
+    destination: input.destination,
+    minimumOutput: input.quote.candidate.minimumOutput,
+    routeShape: input.quote.routeShape,
+  });
   // A Deposit Wallet handoff is an explicit user-authorized transfer. Keep the
   // following Relay calls in the same client execution plan; server authority
   // starts only after the funds are in the controller wallet on a later plan.
   const useServerExecution = Boolean(
     input.serverExecutionProfileId && !input.source.preRouteHandoff,
   );
-  const relaySteps = await validatedSteps({
-    actions: input.quote.actions,
-    minimumOutput: input.quote.candidate.minimumOutput,
-    policyRevision: input.policyRevision,
-    preserveActionBoundaries: useServerExecution,
-    quoteCorrelationId: input.quoteCorrelationId,
-    route: input.route,
-    sourceAmount: input.quote.sourceAmount,
-    profile: input.profile,
-  });
+  const native = isHypercoreFundingNetwork(
+    input.quote.sourceAmount.asset.networkId,
+  );
+  if (
+    (native ||
+      isHypercoreFundingNetwork(
+        input.quote.candidate.minimumOutput.asset.networkId,
+      )) &&
+    (!canonicalJsonEqual(input.source.source, input.quote.candidate.source) ||
+      !canonicalJsonEqual(
+        input.destination.target,
+        input.quote.candidate.destination,
+      ) ||
+      !sameAsset(input.route.sourceAsset, input.quote.sourceAmount.asset) ||
+      !sameAsset(
+        input.route.destinationAsset,
+        input.quote.candidate.minimumOutput.asset,
+      ))
+  )
+    throw new Error(
+      "Native Relay plan differs from the exact quoted source or destination",
+    );
+  if (
+    (native || input.quote.actions.some(isRelayHypercoreHandoff)) &&
+    (!native || input.serverExecutionProfileId || input.source.preRouteHandoff)
+  ) {
+    throw new Error(
+      "Native Relay requires its exact user-authorized source plan",
+    );
+  }
+  const relaySteps = native
+    ? relayHypercoreCommitSteps({
+        actions: input.quote.actions,
+        profile: input.profile,
+        sourceAmount: input.quote.sourceAmount,
+        sourceLocation,
+        minimumOutput: input.quote.candidate.minimumOutput,
+        policyRevision: input.policyRevision,
+        executorId: input.route.networkExecutorId,
+        requestId: input.quote.requestId,
+        expiresAt: input.quote.candidate.expiresAt,
+        destinationTarget: input.destination.target,
+        recipientAddress:
+          input.destination.target.kind === "owned_location"
+            ? String(input.destination.target.location.details.address ?? "")
+            : input.destination.recipientAddress,
+        now: input.now ?? new Date(),
+      })
+    : await validatedSteps({
+        actions: input.quote.actions,
+        minimumOutput: input.quote.candidate.minimumOutput,
+        policyRevision: input.policyRevision,
+        preserveActionBoundaries: useServerExecution,
+        quoteCorrelationId: input.quoteCorrelationId,
+        route: input.route,
+        sourceAmount: input.quote.sourceAmount,
+        profile: input.profile,
+      });
   const clientSteps = buildPolymarketPreRouteHandoffSteps({
     source: input.source,
     sourceAmount: input.quote.sourceAmount,
@@ -606,11 +730,17 @@ export async function buildRelayPlanningQuote(
         depositAddressCiphertext: null,
         depositAddressLookupHmac: null,
         lookupKeyVersion: input.codec.keyVersion,
-        refundLocationSnapshot: jsonRecord(sourceLocation),
+        refundLocationSnapshot: jsonRecord(refundLocation),
         quoteExpiresAt: input.quote.candidate.expiresAt,
         supportMetadata: {
           requestFingerprint: input.quote.requestFingerprint,
           routeShape: input.quote.routeShape,
+          ...(native && input.quote.nativeFeeBreakdownVarianceRaw !== undefined
+            ? {
+                nativeFeeBreakdownVarianceRaw:
+                  input.quote.nativeFeeBreakdownVarianceRaw,
+              }
+            : {}),
         },
       },
     ],

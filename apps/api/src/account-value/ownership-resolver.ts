@@ -13,7 +13,16 @@ import {
   canonicalAccountAddress,
   canonicalAssetKey,
 } from "../funding/domain/asset-identity.js";
-import { stableOpaqueId, stableWalletOpaqueId } from "./canonical.js";
+import {
+  stableOpaqueId,
+  stableWalletOpaqueId,
+  hypercoreSpotAccountLocation,
+} from "./canonical.js";
+import {
+  isHypercoreMainnetUsdc,
+  HYPERCORE_MAINNET_USDC,
+  isHypercoreFundingNetwork,
+} from "../funding/domain/hypercore-identity.js";
 import { PRIVY_USER_AUTHORIZED_EVM_SPONSORSHIP_POLICY_ID } from "../funding/execution/sponsorship-policy.js";
 
 export type ExistingWalletOwnershipFact = Readonly<{
@@ -91,6 +100,22 @@ export class ExistingFactsOwnershipResolver implements WalletOwnershipResolver {
       } else {
         profiles.push(walletProfile(fact, "evm:137"));
         profiles.push(walletProfile(fact, "evm:8453"));
+        if (
+          fact.source !== "smart" &&
+          fact.controllerWalletRef &&
+          fact.address.toLowerCase() === fact.linkedAddress.toLowerCase() &&
+          this.#bindingFacts.some(
+            (binding) =>
+              binding.venueId === "hyperliquid" &&
+              isHypercoreMainnetUsdc(binding.settlementAsset) &&
+              binding.controllerAddress.toLowerCase() ===
+                fact.address.toLowerCase() &&
+              binding.executionAddress.toLowerCase() ===
+                fact.address.toLowerCase() &&
+              binding.accountRef.toLowerCase() === fact.address.toLowerCase(),
+          )
+        )
+          profiles.push(walletProfile(fact, HYPERCORE_MAINNET_USDC.networkId));
       }
     }
     const profileByAddressAndNetwork = new Map(
@@ -104,6 +129,18 @@ export class ExistingFactsOwnershipResolver implements WalletOwnershipResolver {
     );
     const venueBindings = this.#bindingFacts.flatMap(
       (fact): VenueAccountBinding[] => {
+        if (
+          (fact.venueId === "hyperliquid" ||
+            isHypercoreFundingNetwork(fact.settlementAsset.networkId)) &&
+          (fact.venueId !== "hyperliquid" ||
+            !isHypercoreMainnetUsdc(fact.settlementAsset) ||
+            !/^0x[\da-fA-F]{40}$/.test(fact.accountRef) ||
+            fact.controllerAddress.toLowerCase() !==
+              fact.accountRef.toLowerCase() ||
+            fact.executionAddress.toLowerCase() !==
+              fact.accountRef.toLowerCase())
+        )
+          return [];
         const controller =
           profileByAddressAndNetwork.get(
             `${fact.settlementAsset.networkId}:${canonicalAccountAddress(
@@ -119,13 +156,24 @@ export class ExistingFactsOwnershipResolver implements WalletOwnershipResolver {
             )}`,
           ) ?? null;
         if (!controller || !execution) return [];
-        const bindingId = stableOpaqueId(
-          "binding",
-          `${accountId}:${fact.venueId}:${canonicalAccountAddress(
-            fact.settlementAsset.networkId,
-            fact.accountRef,
-          )}`,
-        );
+        const native =
+          fact.venueId === "hyperliquid" &&
+          isHypercoreMainnetUsdc(fact.settlementAsset)
+            ? hypercoreSpotAccountLocation({
+                accountId,
+                address: fact.accountRef,
+                controllerWalletId: controller.walletId,
+              })
+            : null;
+        const bindingId =
+          native?.bindingId ??
+          stableOpaqueId(
+            "binding",
+            `${accountId}:${fact.venueId}:${canonicalAccountAddress(
+              fact.settlementAsset.networkId,
+              fact.accountRef,
+            )}`,
+          );
         return [
           {
             bindingId,
@@ -133,7 +181,7 @@ export class ExistingFactsOwnershipResolver implements WalletOwnershipResolver {
             controllerWalletId: controller.walletId,
             executionWalletId: execution.walletId,
             accountRef: fact.accountRef,
-            settlementLocation: {
+            settlementLocation: native?.location ?? {
               kind: "venue_account",
               locationId: stableOpaqueId(
                 "location",

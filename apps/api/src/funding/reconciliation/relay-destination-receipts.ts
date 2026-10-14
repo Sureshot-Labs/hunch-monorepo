@@ -9,6 +9,11 @@ import {
   fetchEvmTransactionReceipt,
 } from "../../services/polygon-rpc.js";
 import type { AssetRef } from "../domain/types.js";
+import type { RelayStatusResponse } from "../../funding-providers/relay/schemas.js";
+import {
+  hypercoreLocationDex,
+  isHypercoreFundingNetwork,
+} from "../domain/hypercore-identity.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 import {
   classifyOwnedRouteCanonicalDestinationEvents,
@@ -22,6 +27,30 @@ const DEFAULT_RPC = {
   blockNumber: fetchEvmBlockNumber,
   blockHash: fetchEvmBlockHash,
 };
+
+export type RelayDestinationReceiptRead = Readonly<{
+  asset: AssetRef;
+  destinationAddress: string;
+  transactionHashes: readonly string[];
+  now: Date;
+  native?: Readonly<{
+    requestId: string;
+    status: RelayStatusResponse;
+    dex: "spot" | "";
+    knownTransactionHashes: readonly string[];
+    ledgerAfterSecond?: number;
+  }>;
+}>;
+export type RelayDestinationReceiptObserver = (
+  input: RelayDestinationReceiptRead,
+) => Promise<
+  | readonly OwnedRouteCanonicalDestinationEvent[]
+  | Readonly<{
+      events: readonly OwnedRouteCanonicalDestinationEvent[];
+      pendingReason: string | null;
+      ledgerAfterSecond?: number;
+    }>
+>;
 
 /** Read exact provider destination receipts, not an aggregate balance delta.
  * A different leg, expired quote, or competing route cannot hide a transfer
@@ -118,17 +147,25 @@ export async function reconcileRelayDestinationReceipts(
     transactionHashes: readonly string[];
     now: Date;
     referenceCodec: Pick<RelayReferenceCodec, "fingerprint">;
+    requestId?: string;
+    status?: RelayStatusResponse;
   }>,
-  observe = observeRelayErc20DestinationReceipts,
+  observe: RelayDestinationReceiptObserver = observeRelayErc20DestinationReceipts,
 ): Promise<void> {
   if (input.transactionHashes.length === 0) return;
   const { rows } = await pool.query<{
     user_id: string;
     destination_target_snapshot: unknown;
+    segment_support_metadata: unknown;
   }>(
-    `select user_id, destination_target_snapshot from funding_operations
-      where id = $1::uuid and plan_kind in ('wallet_route', 'composite_route')`,
-    [input.operationId],
+    `select operation_row.user_id, operation_row.destination_target_snapshot,
+            segment_row.support_metadata as segment_support_metadata
+       from funding_operations operation_row
+       join funding_operation_segments segment_row
+         on segment_row.operation_id=operation_row.id and segment_row.id=$2::uuid
+        and segment_row.provider_id='relay'
+      where operation_row.id=$1::uuid and operation_row.plan_kind in ('wallet_route', 'composite_route')`,
+    [input.operationId, input.segmentId],
   );
   const row = rows[0];
   const target = row?.destination_target_snapshot;
@@ -143,7 +180,50 @@ export async function reconcileRelayDestinationReceipts(
     typeof details.address !== "string"
   )
     return;
-  const events = await observe({
+  let native: RelayDestinationReceiptRead["native"];
+  if (isHypercoreFundingNetwork(asset.networkId)) {
+    const dex = hypercoreLocationDex({
+      kind: target.location.kind,
+      asset: {
+        networkId: asset.networkId,
+        assetId: asset.assetId,
+        decimals: asset.decimals,
+      },
+      details,
+    });
+    if (!input.requestId || !input.status || dex === null)
+      throw new Error("native_destination_context_missing");
+    const known = await pool.query<{ tx_hash: string }>(
+      `select tx_hash from funding_observations where operation_id=$1 and segment_id=$2
+        and network_id=$3 and kind='destination_credit' and canonical and finality_status='finalized'
+        and tx_hash=any($4::text[])`,
+      [
+        input.operationId,
+        input.segmentId,
+        asset.networkId,
+        input.transactionHashes.map((hash) => hash.toLowerCase()),
+      ],
+    );
+    const receiptDiagnostics =
+      isRecord(row.segment_support_metadata) &&
+      isRecord(row.segment_support_metadata.nativeDestinationReceipts)
+        ? row.segment_support_metadata.nativeDestinationReceipts
+        : {};
+    const prior =
+      receiptDiagnostics[input.referenceCodec.fingerprint(input.requestId)];
+    native = {
+      requestId: input.requestId,
+      status: input.status,
+      dex,
+      knownTransactionHashes: known.rows.map((row) => row.tx_hash),
+      ...(isRecord(prior) &&
+      Number.isSafeInteger(prior.ledgerAfterSecond) &&
+      Number(prior.ledgerAfterSecond) >= 0
+        ? { ledgerAfterSecond: Number(prior.ledgerAfterSecond) }
+        : {}),
+    };
+  }
+  const observation = await observe({
     asset: {
       networkId: asset.networkId,
       assetId: asset.assetId,
@@ -152,7 +232,35 @@ export async function reconcileRelayDestinationReceipts(
     destinationAddress: details.address,
     transactionHashes: input.transactionHashes,
     now: input.now,
+    ...(native ? { native } : {}),
   });
+  const events = "events" in observation ? observation.events : observation;
+  if ("events" in observation && native) {
+    await pool.query(
+      `update funding_operation_segments set support_metadata=jsonb_set(support_metadata,
+          '{nativeDestinationReceipts}',
+          (case when jsonb_typeof(support_metadata->'nativeDestinationReceipts')='object'
+            then support_metadata->'nativeDestinationReceipts' else '{}'::jsonb end)
+          || jsonb_build_object($3::text,
+            (case when jsonb_typeof(support_metadata->'nativeDestinationReceipts'->$3::text)='object'
+              then support_metadata->'nativeDestinationReceipts'->$3::text else '{}'::jsonb end) || $4::jsonb), true)
+        where operation_id=$1 and id=$2 and provider_id='relay'`,
+      [
+        input.operationId,
+        input.segmentId,
+        input.referenceCodec.fingerprint(native.requestId),
+        {
+          reason: observation.pendingReason,
+          checkedAt: input.now.toISOString(),
+          ...(observation.ledgerAfterSecond === undefined
+            ? {}
+            : {
+                ledgerAfterSecond: observation.ledgerAfterSecond,
+              }),
+        },
+      ],
+    );
+  }
   if (events.length === 0) return;
   await tx(pool, async (client) => {
     const matches = await classifyOwnedRouteCanonicalDestinationEvents(client, {

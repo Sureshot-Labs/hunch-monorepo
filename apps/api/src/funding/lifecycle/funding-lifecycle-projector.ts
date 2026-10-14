@@ -8,6 +8,7 @@
  */
 
 import { fundingAttemptHasSafeRetryEvidence } from "../domain/attempt-retry.js";
+import { canonicalAssetId as fundingCanonicalAssetId } from "../domain/asset-identity.js";
 
 export type FundingLifecycleOperationStatus =
   | "awaiting_user"
@@ -92,6 +93,8 @@ export type FundingLifecycleActionAttempt = Readonly<{
   clientExecutionFailed?: boolean;
   /** Versioned server-owned Safe hash identity exists before submission. */
   safeSubmissionRecoverable?: boolean;
+  /** Server-admitted native action has a bound nonce and durable reference. */
+  nativeSubmissionRecoverable?: boolean;
   startedAt: Date;
   updatedAt: Date;
   receipt: FundingLifecycleActionReceipt | null;
@@ -111,6 +114,8 @@ export type FundingLifecycleActionFact = Readonly<{
   independentLane: boolean;
   /** The immutable action can debit, transfer, or otherwise move funding. */
   mayMoveMoney: boolean;
+  /** Exact native pair/nonce proof, not a generic signature-kind exemption. */
+  nonMoneyAuthorization?: boolean;
   /**
    * This handoff credits the user's own controller wallet. Once its receipt
    * is final, the cash remains safely reusable even if a later route action
@@ -471,7 +476,8 @@ function hasRecoverableBroadcastReference(
         attempt.referenceKind === "signature" ||
         attempt.referenceKind === "provider_receipt" ||
         (attempt.referenceKind === "external_handoff" &&
-          attempt.safeSubmissionRecoverable === true)),
+          (attempt.safeSubmissionRecoverable === true ||
+            attempt.nativeSubmissionRecoverable === true))),
   );
 }
 
@@ -584,7 +590,15 @@ function sameMoneyAsset(
   right: Pick<FundingLifecycleMoney, "networkId" | "assetId" | "decimals">,
 ): boolean {
   const canonicalAssetId = (networkId: string, assetId: string) =>
-    networkId.startsWith("evm:") ? assetId.toLowerCase() : assetId;
+    // Preserve the existing legacy EVM comparison; native IDs share the same
+    // exact network/token normalization as reservations and receipt allocation.
+    networkId.startsWith("evm:")
+      ? assetId.toLowerCase()
+      : fundingCanonicalAssetId({
+          networkId,
+          assetId,
+          decimals: left.decimals,
+        });
   return (
     left.networkId === right.networkId &&
     canonicalAssetId(left.networkId, left.assetId) ===

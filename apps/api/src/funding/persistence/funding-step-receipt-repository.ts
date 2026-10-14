@@ -1,4 +1,10 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import {
+  boundNativeSourceProof,
+  pendingNativeSourceReceipt,
+} from "../execution/hypercore-send-receipt.js";
+import { nativeFundingPreparationInTransaction } from "../execution/hypercore-auth-attempt.js";
+import type { HypercoreTransferEvidence } from "../../funding-providers/relay/hypercore-transfer-evidence.js";
 import bs58 from "bs58";
 import { parseVerifiedSolanaSubmission } from "../execution/signed-solana-submission.js";
 
@@ -600,9 +606,15 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
   }
   const attemptResult = await client.query<{
     id: string;
+    native_send_bound: boolean;
   }>(
     `
-      select current_attempt.id
+      select current_attempt.id,
+        case when current_attempt.executor_id='relay_hypercore_native_v1'
+          and current_attempt.reference_kind='external_handoff'
+          and current_attempt.actual_costs#>>'{nativeSubmission,phase}'='admitted'
+          then funding_native_send_attempt_bound(current_attempt.step_id,current_attempt.canonical_action_fingerprint,current_attempt.executor_id,current_attempt.actual_costs->'nativeSubmission')
+          else false end as native_send_bound
       from funding_operation_step_attempts current_attempt
       where current_attempt.step_id = $1
         and current_attempt.id = $2
@@ -620,6 +632,43 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
   }
 
   let incomingReceipt = input.receipt;
+  let nativeSourceProof: HypercoreTransferEvidence | null = null;
+  const nativeSend =
+    scoped.executor_id === "relay_hypercore_native_v1" &&
+    scoped.normalized_action.handoffKind === "relay_hypercore_send_asset_v1";
+  if (
+    nativeSend &&
+    (incomingReceipt.status === "finalized" ||
+      incomingReceipt.status === "confirmed")
+  ) {
+    const { pair } = await nativeFundingPreparationInTransaction(
+      client,
+      input.operationId,
+      input.stepId,
+    );
+    nativeSourceProof = boundNativeSourceProof(
+      pair.validated.binding,
+      incomingReceipt.evidence.nativeSourceProof,
+    );
+    if (
+      !scopedAttempt.native_send_bound ||
+      !nativeSourceProof ||
+      input.networkId !== "hyperliquid:mainnet" ||
+      incomingReceipt.evidence.transactionHash !==
+        nativeSourceProof.transactionHash ||
+      incomingReceipt.evidence.handoffEventIndex !==
+        "hypercore:send:source_debit" ||
+      incomingReceipt.ledgerHeight !== null ||
+      incomingReceipt.blockHash !== null
+    ) {
+      nativeSourceProof = null;
+      // Unbound evidence does not prove a canonical mismatched transaction.
+      // Keep polling the exact admitted action; never manufacture finality.
+      incomingReceipt = pendingNativeSourceReceipt(
+        "native_source_proof_mismatch",
+      );
+    }
+  }
   if (
     scoped.step_kind === "external_handoff" &&
     (incomingReceipt.status === "confirmed" ||
@@ -634,7 +683,9 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
       typeof transactionHash !== "string" ||
       !/^0x[0-9a-fA-F]{64}$/u.test(transactionHash) ||
       typeof handoffEventIndex !== "string" ||
-      !isRawAmount(handoffEventIndex)
+      !(nativeSourceProof
+        ? handoffEventIndex === "hypercore:send:source_debit"
+        : isRawAmount(handoffEventIndex))
     ) {
       incomingReceipt = {
         status: "mismatch",
@@ -829,6 +880,38 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
   );
   const row = stored.rows[0];
   if (!row) throw new Error("funding step receipt upsert returned no row");
+
+  if (
+    nativeSourceProof &&
+    row.status === "finalized" &&
+    row.action_match &&
+    row.canonical &&
+    row.finalized_at
+  ) {
+    await allocateFundingObservationInTransaction(client, {
+      operationId: input.operationId,
+      segmentId: scoped.segment_id,
+      kind: "source_debit",
+      networkId: input.networkId,
+      assetId: nativeSourceProof.asset.assetId,
+      assetDecimals: nativeSourceProof.asset.decimals,
+      txHash: nativeSourceProof.transactionHash,
+      eventIndex: "hypercore:send:source_debit",
+      fromAddress: nativeSourceProof.sourceAddress,
+      toAddress: nativeSourceProof.destinationAddress,
+      rawAmount: nativeSourceProof.rawAmount,
+      observedAt: row.observed_at,
+      ledgerHeight: null,
+      blockHash: null,
+      finalityStatus: "finalized",
+      finalizedAt: row.finalized_at,
+      metadata: {
+        observerId: "hypercore_native_send_receipt_v1",
+        receiptAttemptId: input.attemptId,
+        nativeEvidence: { ...nativeSourceProof },
+      },
+    });
+  }
 
   if (
     scoped.executor_id === "wallet_profile_evm_v1" &&
@@ -1045,7 +1128,7 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
             (kind = 'venue_readiness' and $4 = 'venue_preparation')
             or (
               kind in ('source_debit', 'destination_credit')
-              and $4 = 'transaction'
+              and ($4 = 'transaction' or ($4 = 'external_handoff' and network_id='hyperliquid:mainnet'))
             )
           )
           and metadata->>'receiptAttemptId' = $3

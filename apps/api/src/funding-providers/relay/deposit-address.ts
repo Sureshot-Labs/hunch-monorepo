@@ -100,6 +100,7 @@ export class StrictRelayDepositAddressAdapter {
     );
     if (
       input.route.sourceVm !== "evm" ||
+      input.route.destinationVm === "hypercore" ||
       normalizeRelayAssetId(
         input.route.source.networkId,
         input.route.source.assetId,

@@ -11,6 +11,7 @@ import {
   canonicalAssetId,
   canonicalAssetKey,
 } from "../funding/domain/asset-identity.js";
+import { HYPERCORE_MAINNET_USDC } from "../funding/domain/hypercore-identity.js";
 
 export function normalizeAssetId(asset: AssetRef): string {
   return canonicalAssetId(asset);
@@ -52,6 +53,60 @@ export { canonicalAssetKey };
 export function stableOpaqueId(prefix: string, value: string): string {
   const digest = createHash("sha256").update(value).digest("hex");
   return `${prefix}_${digest.slice(0, 32)}`;
+}
+
+/** Keep the P2 physical spot identity when adding execution bindings. Account
+ * mode and controller/session changes must not create a second reserve pool. */
+export function hypercoreSpotAccountLocation(input: {
+  accountId: string;
+  address: string;
+  controllerWalletId: string | null;
+}): { location: AssetLocation; bindingId: string } {
+  const asset = HYPERCORE_MAINNET_USDC;
+  const address = canonicalAccountAddress(asset.networkId, input.address);
+  return {
+    bindingId: stableOpaqueId(
+      "binding",
+      `${input.accountId}:hyperliquid:mainnet:${address}`,
+    ),
+    location: {
+      kind: "venue_account",
+      locationId: stableOpaqueId(
+        "location",
+        `${input.accountId}:hyperliquid:mainnet:${address}:${asset.assetId}`,
+      ),
+      accountId: input.accountId,
+      asset,
+      details: {
+        venueId: "hyperliquid",
+        accountRef: address,
+        address,
+        controllerWalletId: input.controllerWalletId,
+        environment: "mainnet",
+        symbol: "USDC",
+        nativeSourceDex: "spot",
+      },
+    },
+  };
+}
+
+/** A possible native refund destination, not a cash component or spendable
+ * balance. Spot outflow can refund to the same owner's separate perps account. */
+export function hypercorePerpsRefundLocation(input: {
+  accountId: string;
+  address: string;
+  controllerWalletId: string;
+}): AssetLocation {
+  const spot = hypercoreSpotAccountLocation(input).location;
+  return {
+    ...spot,
+    locationId: stableOpaqueId("location", `${spot.locationId}:perps_refund`),
+    details: {
+      ...spot.details,
+      nativeSourceDex: "",
+      balanceClass: "perp",
+    },
+  };
 }
 
 export function stableWalletOpaqueId(

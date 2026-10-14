@@ -3,6 +3,7 @@ import { recordWithdrawalCompletionNotification } from "./withdrawal-completion-
 import { closeExpiredSafeFundingPreparationsInTransaction } from "../execution/safe-funding-submission.js";
 import { closeExpiredEmbeddedFundingPreparationsInTransaction } from "../execution/embedded-funding-submission.js";
 import { closeExpiredSolanaPreparationsInTransaction } from "../execution/solana-preparation.js";
+import { closeNativeFundingUnsubmittedInTransaction } from "../execution/hypercore-auth-attempt.js";
 
 import type {
   FundingOperationState,
@@ -19,7 +20,11 @@ import {
   type FundingLifecycleProjection,
 } from "../lifecycle/funding-lifecycle-projector.js";
 import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
-import { fundingReservationHoldSql } from "../persistence/source-reservation-hold.js";
+import {
+  fundingReservationHoldSql,
+  fundingStartedSourceActionHoldSql,
+  nativeSourceDebitPendingSql,
+} from "../persistence/source-reservation-hold.js";
 import { DELEGATED_PROVIDER_REPLAY_MS } from "../execution/delegated-funding-recovery-policy.js";
 import {
   isPolymarketDepositRouterProfileId,
@@ -247,6 +252,7 @@ async function releaseSourceReservationsAfterEvidence(
         and reservation.segment_id = any($2::uuid[])
         and reservation.mode = 'subtract_available'
         and reservation.state = 'active'
+        and not ${nativeSourceDebitPendingSql("reservation")}
       for update of reservation
     `,
     [operationId, segmentIds],
@@ -286,6 +292,26 @@ async function releaseVenuePreparationReservationsAfterReadiness(
   }
 }
 
+export const STOPPED_SOURCE_RESERVATIONS_SQL = `
+  select reservation.id
+  from balance_reservations reservation
+  where reservation.operation_id = $1
+    and reservation.state = 'active'
+    and reservation.mode = 'subtract_available'
+    and reservation.segment_id is not null
+    and (reservation.segment_id = any($2::uuid[]) or reservation.expires_at <= now())
+    and not ${fundingStartedSourceActionHoldSql("reservation")}
+    and not exists (
+      select 1 from funding_observations observation
+      where observation.operation_id = reservation.operation_id
+        and observation.segment_id = reservation.segment_id
+        and observation.kind in ('source_debit', 'source_credit', 'destination_credit', 'refund_credit')
+        and observation.canonical
+        and observation.finality_status = 'finalized'
+    )
+  for update of reservation
+`;
+
 async function releaseUnusedStoppedStepReservations(
   client: Pick<PoolClient, "query">,
   operationId: string,
@@ -314,33 +340,7 @@ async function releaseUnusedStoppedStepReservations(
     ),
   ];
   const { rows } = await client.query<{ id: string }>(
-    `
-      select reservation.id
-      from balance_reservations reservation
-      where reservation.operation_id = $1
-        and reservation.state = 'active'
-        and reservation.mode = 'subtract_available'
-        and reservation.segment_id is not null
-        and (
-          reservation.segment_id = any($2::uuid[])
-          or not ${fundingReservationHoldSql("reservation")}
-        )
-        and not exists (
-          select 1
-          from funding_observations observation
-          where observation.operation_id = reservation.operation_id
-            and observation.segment_id = reservation.segment_id
-            and observation.kind in (
-              'source_debit',
-              'source_credit',
-              'destination_credit',
-              'refund_credit'
-            )
-            and observation.canonical
-            and observation.finality_status = 'finalized'
-        )
-      for update of reservation
-    `,
+    STOPPED_SOURCE_RESERVATIONS_SQL,
     [operationId, stoppedSegmentIds],
   );
   for (const row of rows) {
@@ -365,6 +365,7 @@ async function releaseTerminalReservations(
       where operation_id = $1
         and state = 'active'
         and mode <> 'settled_for_consumer'
+        and not ${nativeSourceDebitPendingSql("balance_reservations")}
       for update
     `,
     [operationId],
@@ -2099,7 +2100,21 @@ async function processLease(
             options.now,
           )
         : false;
-      if (operation && (safeClosed || embeddedClosed || solanaClosed)) {
+      const nativeClosed = operation
+        ? await closeNativeFundingUnsubmittedInTransaction(
+            client,
+            operation.id,
+            options.now,
+            "expired",
+          )
+        : [];
+      if (
+        operation &&
+        (safeClosed ||
+          embeddedClosed ||
+          solanaClosed ||
+          nativeClosed.length > 0)
+      ) {
         // A closed, never-admitted attempt is definitive cancellation evidence.
         // Existing reduction detaches the old Buy and frees its reservations.
         await reduceFundingOperationInTransaction(client, {

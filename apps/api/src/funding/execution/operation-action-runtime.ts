@@ -56,6 +56,24 @@ import {
 } from "../reconciliation/funding-reducer.js";
 import { parseSafeFundingSubmission } from "./safe-funding-submission-contract.js";
 import { parseEmbeddedFundingSubmission } from "./embedded-funding-submission-contract.js";
+import {
+  parseNativeFundingSubmission,
+  type NativeFundingPreparation,
+} from "./hypercore-submission-contract.js";
+import { nativeFundingSigningPreparation } from "./hypercore-signed-request.js";
+import {
+  assertNativeFundingRecipient,
+  nativeFundingPreparationInTransaction,
+  NATIVE_FUNDING_OPERATION_LOCK_SQL,
+} from "./hypercore-auth-attempt.js";
+import {
+  isRelayHypercoreHandoff,
+  RELAY_HYPERCORE_EXECUTOR,
+} from "../../funding-providers/relay/hypercore-operation-plan.js";
+import { submitNativeFundingAuth } from "./hypercore-auth-submission.js";
+import { submitNativeFundingSend } from "./hypercore-send-submission.js";
+import { RelayClient } from "../../funding-providers/relay/client.js";
+import type { NativeFundingSubmitInput } from "./hypercore-auth-attempt.js";
 import { wakeFundingReconciliationInTransaction } from "../persistence/funding-operation-repository.js";
 import {
   isExternalHandoffFailureCode,
@@ -133,11 +151,43 @@ export function assertClientExecutable(
 ): Readonly<{
   controllerWalletRef: string;
   executionMode: "web_client" | "privy_authorization" | "venue_relayer";
-  payerRequirement: "user" | "privy_sponsor" | "provider";
+  payerRequirement: "user" | "privy_sponsor" | "provider" | "none";
   sponsorshipPolicyId: string | null;
   controllerProfile: WalletExecutionProfile;
 }> {
   if (action.kind === "external_handoff") {
+    if (isRelayHypercoreHandoff(action)) {
+      if (
+        action.networkId !== "hyperliquid:mainnet" ||
+        executorId !== RELAY_HYPERCORE_EXECUTOR
+      )
+        throw new FundingPersistenceError(
+          "quote_mismatch",
+          "Native handoff executor or network changed",
+        );
+      const profile = exactWalletProfile(profiles, action);
+      if (
+        !profile?.controllerWalletRef ||
+        !(
+          (profile.source === "embedded" &&
+            profile.serverWalletRef &&
+            profile.signingModes.includes("privy_authorization")) ||
+          (profile.source === "external" &&
+            profile.signingModes.includes("web_client"))
+        )
+      )
+        throw new FundingPersistenceError(
+          "quote_invalidated",
+          "Native signer is no longer an exact owned controller",
+        );
+      return {
+        controllerWalletRef: profile.controllerWalletRef,
+        controllerProfile: profile,
+        executionMode: "venue_relayer",
+        payerRequirement: "none",
+        sponsorshipPolicyId: null,
+      };
+    }
     const isSafe = action.handoffKind === "polymarket_safe_transfer";
     if (
       action.networkId !== "evm:137" ||
@@ -295,6 +345,7 @@ export class FundingOperationActionRuntime {
   constructor(
     private readonly db: Pool,
     private readonly dependencies: Readonly<{
+      readAccount?: typeof buildAccountValueReadModel;
       revalidateWithdrawalRecipient?: (
         userId: string,
         recipientId: string,
@@ -309,7 +360,7 @@ export class FundingOperationActionRuntime {
     input: Readonly<{
       operationId: string;
       stepId: string;
-      submissionProtocols?: { safe?: 1; embedded?: 1; solana?: 1 };
+      submissionProtocols?: { safe?: 1; embedded?: 1; solana?: 1; native?: 1 };
     }>,
   ): Promise<
     Readonly<{
@@ -319,11 +370,12 @@ export class FundingOperationActionRuntime {
       controllerWalletRef: string;
       executorId: string;
       executionMode: "web_client" | "privy_authorization" | "venue_relayer";
-      payerRequirement: "user" | "privy_sponsor" | "provider";
+      payerRequirement: "user" | "privy_sponsor" | "provider" | "none";
       sponsorshipPolicyId: string | null;
       solanaSigningContext?: SolanaSigningContext;
       safeSubmission?: Readonly<{ version: 1; expiresAt: string }>;
       embeddedSubmission?: Readonly<{ version: 1; expiresAt: string }>;
+      nativeSubmission?: NativeFundingPreparation;
     }>
   > {
     const [operation, step, account] = await Promise.all([
@@ -336,7 +388,10 @@ export class FundingOperationActionRuntime {
         operationId: input.operationId,
         stepId: input.stepId,
       }),
-      buildAccountValueReadModel({ pool: this.db, userId }),
+      (this.dependencies.readAccount ?? buildAccountValueReadModel)({
+        pool: this.db,
+        userId,
+      }),
     ]);
     if (!operation || !step) {
       throw new FundingPersistenceError(
@@ -349,6 +404,12 @@ export class FundingOperationActionRuntime {
       step.normalizedAction,
     ) as unknown as NormalizedAction;
     const fingerprint = canonicalJsonHash(action);
+    const native = isRelayHypercoreHandoff(action);
+    if (native && input.submissionProtocols?.native !== 1)
+      throw new FundingPersistenceError(
+        "quote_invalidated",
+        "Native sign-only submission protocol is required; update the client",
+      );
     if (fingerprint !== step.actionFingerprint) {
       throw new FundingPersistenceError(
         "quote_mismatch",
@@ -445,6 +506,15 @@ export class FundingOperationActionRuntime {
       }
     }
     return tx(this.db, async (client) => {
+      if (native) {
+        // Native admission uses policy -> operation -> recipient -> wallet.
+        // Keep the legacy execution paths' ordering unchanged.
+        await lockFundingPolicyForTransaction(client);
+        await client.query(NATIVE_FUNDING_OPERATION_LOCK_SQL, [
+          input.operationId,
+          userId,
+        ]);
+      }
       if (externalRecipientId) {
         // The share lock makes revocation/crypto-shredding serialize with the
         // durable attempt start; validation outside this transaction can race.
@@ -456,6 +526,13 @@ export class FundingOperationActionRuntime {
             lockForShare: true,
           },
         );
+        if (native)
+          assertNativeFundingRecipient({
+            userId,
+            recipient,
+            destinationTarget: operation.destinationTargetSnapshot,
+            actionPayload: action.payload,
+          });
         const directWithdrawal = isDirectWithdrawalExecutionKind(
           operation.supportMetadata.withdrawalExecutionKind,
         );
@@ -579,6 +656,7 @@ export class FundingOperationActionRuntime {
         await lockFundingPolicyForTransaction(client);
         const resolvedPolicy = await resolveFundingPolicy(client);
         if (
+          (native && resolvedPolicy.invalidStoredPolicy) ||
           resolvedPolicy.runtime.creationMode !== "on" ||
           !resolvedPolicy.runtime.gates.startUnsubmittedAction ||
           resolvedPolicy.runtime.gates.emergencyBroadcastPause ||
@@ -602,6 +680,7 @@ export class FundingOperationActionRuntime {
           canonicalActionFingerprint: fingerprint,
           executorId: step.executorId,
           solanaSigningContext,
+          ...(native ? { nativeSubmissionProtocol: true as const } : {}),
           ...(input.submissionProtocols?.solana === 1 &&
           solanaSigningContext &&
           execution.executionMode === "web_client"
@@ -609,7 +688,8 @@ export class FundingOperationActionRuntime {
             : {}),
           ...(input.submissionProtocols?.embedded === 1 &&
           execution.executionMode === "privy_authorization" &&
-          execution.payerRequirement !== "provider"
+          (execution.payerRequirement === "user" ||
+            execution.payerRequirement === "privy_sponsor")
             ? {
                 embeddedSubmissionProtocol: {
                   signer: execution.controllerProfile.address,
@@ -627,7 +707,7 @@ export class FundingOperationActionRuntime {
       // Policy-controlled actions lock operation/step before the wallet. The
       // delegated worker uses the same order; a failed wallet check rolls the
       // inserted attempt back with this transaction.
-      const started = externalRecipientId ? null : await start();
+      const started = externalRecipientId && !native ? null : await start();
       await lockFundingControllerWallet(
         client,
         userId,
@@ -646,7 +726,22 @@ export class FundingOperationActionRuntime {
       const embeddedSubmission = storedEmbeddedSubmission
         ? { version: 1 as const, expiresAt: storedEmbeddedSubmission.expiresAt }
         : undefined;
-      if (safeSubmission || embeddedSubmission) {
+      const storedNativeSubmission = parseNativeFundingSubmission(
+        durableStart.attempt.actualCosts.nativeSubmission,
+      );
+      const nativeSubmission = storedNativeSubmission
+        ? nativeFundingSigningPreparation(
+            (
+              await nativeFundingPreparationInTransaction(
+                client,
+                input.operationId,
+                input.stepId,
+              )
+            ).pair.validated,
+            storedNativeSubmission,
+          )
+        : undefined;
+      if (safeSubmission || embeddedSubmission || nativeSubmission) {
         await wakeFundingReconciliationInTransaction(client, {
           operationId: input.operationId,
           dueAt: durableStart.attempt.startedAt,
@@ -664,6 +759,7 @@ export class FundingOperationActionRuntime {
         ...(solanaSigningContext ? { solanaSigningContext } : {}),
         ...(safeSubmission ? { safeSubmission } : {}),
         ...(embeddedSubmission ? { embeddedSubmission } : {}),
+        ...(nativeSubmission ? { nativeSubmission } : {}),
       };
     }).catch(async (error: unknown) => {
       if (
@@ -682,6 +778,68 @@ export class FundingOperationActionRuntime {
       }
       throw error;
     });
+  }
+
+  async submitNative(
+    userId: string,
+    input: Omit<NativeFundingSubmitInput, "userId">,
+  ) {
+    const step = await fetchFundingOperationStepForUser(this.db, {
+      userId,
+      operationId: input.operationId,
+      stepId: input.stepId,
+    });
+    if (!step)
+      throw new FundingPersistenceError(
+        "operation_not_found",
+        "Funding action not found",
+      );
+    const action = normalizedActionSchema.parse(
+      step.normalizedAction,
+    ) as NormalizedAction;
+    if (
+      !isRelayHypercoreHandoff(action) ||
+      step.executorId !== RELAY_HYPERCORE_EXECUTOR ||
+      action.networkId !== "hyperliquid:mainnet" ||
+      canonicalJsonHash(action) !== step.actionFingerprint
+    )
+      throw new FundingPersistenceError(
+        "quote_mismatch",
+        "Expected an exact committed native action",
+      );
+    if (action.handoffKind === "relay_hypercore_nonce_mapping_v1") {
+      const apiKey = process.env.RELAY_API_KEY?.trim();
+      if (!apiKey)
+        throw new FundingPersistenceError(
+          "quote_invalidated",
+          "Relay submission is not configured",
+        );
+      const result = await submitNativeFundingAuth(
+        this.db,
+        { ...input, userId },
+        new RelayClient({ apiKey }),
+      );
+      return { ...result, stage: "nonce_mapping" as const };
+    }
+    const lookupHmacKey = process.env.FUNDING_REFERENCE_LOOKUP_HMAC_KEY?.trim();
+    if (!lookupHmacKey)
+      throw new FundingPersistenceError(
+        "quote_invalidated",
+        "Funding reference protection is not configured",
+      );
+    const result = await submitNativeFundingSend(
+      this.db,
+      { ...input, userId },
+      createFundingTransactionReferenceCodec({
+        encryptionKey: getCredentialsEncryptionKey(),
+        lookupHmacKey,
+        keyVersion:
+          parsePositiveInteger(
+            process.env.FUNDING_REFERENCE_LOOKUP_KEY_VERSION,
+          ) ?? 1,
+      }),
+    );
+    return { ...result, stage: "send_asset" as const };
   }
 
   async report(
