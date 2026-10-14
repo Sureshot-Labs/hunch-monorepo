@@ -8,7 +8,11 @@ import { hip4AccountAddressSchema } from "../schemas/hip4-account.js";
 export type Hip4AccountInfoRequest =
   | { type: "userFills"; user: string; aggregateByTime: false }
   | {
-      type: "userRole" | "userAbstraction" | "spotClearinghouseState";
+      type:
+        | "userRole"
+        | "userAbstraction"
+        | "spotClearinghouseState"
+        | "frontendOpenOrders";
       user: string;
     }
   | {
@@ -37,6 +41,7 @@ export function createHip4AccountClient(
         "userRole",
         "userAbstraction",
         "spotClearinghouseState",
+        "frontendOpenOrders",
         "userFillsByTime",
         "userFills",
         "userNonFundingLedgerUpdates",

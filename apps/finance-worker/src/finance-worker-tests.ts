@@ -110,6 +110,47 @@ function buildFinanceJobsFixture(
 
 const tests: TestCase[] = [
   {
+    name: "HIP observational worker uses runtime cadence without financial execution or API-wide secrets",
+    run: async () => {
+      const job = buildJobs(
+        buildTestEnv({
+          databaseUrl: "postgresql://local/observer-test",
+          executeEnabled: false,
+        }),
+        async () => ({
+          claimed: 0,
+          updated: 0,
+          errors: 0,
+          leaseLost: 0,
+          budgetExhausted: 0,
+          nextIntervalSeconds: 123,
+        }),
+      ).find((row) => row.name === "hip4_account_observer");
+      assert.ok(job?.enabled);
+      await job.run();
+      assert.equal(job.intervalSec, 123);
+      assert.equal(job.maxRetries, 0);
+      assert.equal(job.isNoopResult?.({ claimed: 0 }), true);
+      assert.equal(job.isNoopResult?.({ budgetExhausted: 1 }), false);
+      execFileSync(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          "--input-type=module",
+          "-e",
+          "await import('./apps/api/src/hip4-account-worker-entry.ts')",
+        ],
+        {
+          cwd: repositoryRoot,
+          env: { PATH: process.env.PATH, HUNCH_RUNTIME_SECRETS_LOADED: "1" },
+          stdio: "pipe",
+          timeout: 15000,
+        },
+      );
+    },
+  },
+  {
     name: "verified buy repair follows runtime cadence without enabling submission",
     run: async () => {
       setFinanceJobsModuleLoaderForTests(async () =>

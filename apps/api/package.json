@@ -4,6 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
+    "./hip4-account-worker": {
+      "source": "./src/hip4-account-worker-entry.ts",
+      "import": "./dist/hip4-account-worker-entry.js"
+    },
     "./jobs/finance-jobs": "./dist/jobs/finance-jobs.js",
     "./funding-worker": {
       "source": "./src/funding/worker/funding-reconciliation-worker.ts",
@@ -26,7 +30,8 @@
     "openapi:dump": "tsx src/dump-openapi.ts",
     "hip4:index": "tsx src/hip4-indexer.ts",
     "hip4:openapi": "tsx src/hip4-openapi.ts",
-    "test:hip4": "node --import tsx --test src/hip4-tests.ts src/hip4-route-tests.ts src/hip4-client-tests.ts src/hip4-stream-tests.ts src/hip4-live-tests.ts src/hip4-signing-contract-tests.ts src/hip4-route-contract-tests.ts src/hip4-account-contract-tests.ts src/hip4-volume-tests.ts src/hip4-owned-account-tests.ts src/hip4-account-history-tests.ts src/hip4-portfolio-position-tests.ts src/positions-read-tests.ts src/venue-capabilities-tests.ts",
+    "test:hip4": "node --import tsx --test src/hip4-tests.ts src/hip4-route-tests.ts src/hip4-client-tests.ts src/hip4-stream-tests.ts src/hip4-live-tests.ts src/hip4-signing-contract-tests.ts src/hip4-route-contract-tests.ts src/hip4-account-contract-tests.ts src/hip4-volume-tests.ts src/hip4-owned-account-tests.ts src/hip4-account-history-tests.ts src/hip4-portfolio-position-tests.ts src/hip4-position-accounting-tests.ts src/hip4-open-order-tests.ts src/hip4-unified-history-tests.ts src/positions-read-tests.ts src/venue-capabilities-tests.ts",
+    "test:hip4:p2:db": "node --import tsx src/hip4-owned-account-integration-tests.ts && node --import tsx src/hip4-account-history-integration-tests.ts && node --import tsx src/hip4-owned-account-auth-integration-tests.ts && node --import tsx src/hip4-portfolio-position-integration-tests.ts && node --import tsx src/hip4-portfolio-route-integration-tests.ts && node --import tsx src/hip4-owned-wallet-route-integration-tests.ts && node --import tsx src/hip4-unified-history-integration-tests.ts && node --import tsx src/hip4-account-worker-integration-tests.ts && node --import tsx src/hip4-position-accounting-integration-tests.ts",
     "test:hip4:portfolio:db": "node --import tsx src/hip4-portfolio-position-integration-tests.ts && node --import tsx src/hip4-portfolio-route-integration-tests.ts && node --import tsx src/hip4-owned-wallet-route-integration-tests.ts",
     "test:hip4:db": "node --import tsx src/hip4-lifecycle-integration-tests.ts && node --import tsx src/hip4-integration-tests.ts && node --import tsx src/hip4-p1-integration-tests.ts && node --import tsx src/hip4-catalog-integration-tests.ts && node --import tsx src/hip4-sql-plan-tests.ts && node --import tsx src/hip4-owned-account-integration-tests.ts && node --import tsx src/hip4-account-history-integration-tests.ts && node --import tsx src/hip4-owned-account-auth-integration-tests.ts",
     "cleanup:expired": "tsx src/cleanup-expired-markets.ts",

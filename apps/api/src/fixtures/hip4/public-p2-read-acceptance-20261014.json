@@ -1,0 +1,63 @@
+{
+  "kind": "live_read_validation_summary_not_replay_fixture",
+  "environment": "mainnet",
+  "observedAt": "2026-10-14T00:36:41.651Z",
+  "source": "https://api.hyperliquid.xyz/info",
+  "seedCoin": "#14900",
+  "requests": 12,
+  "reservedWeight": 584,
+  "privacy": "Only aggregates retained. Participant addresses, transaction hashes, order/trade IDs and original payloads were not persisted.",
+  "samples": [
+    {
+      "alias": "participant-1",
+      "role": "user",
+      "mode": "disabled",
+      "cashTotal": "37142.74293248",
+      "cashHeld": "7609.88929",
+      "ownedUnheldCash": "29532.85364248",
+      "spendable": null,
+      "positionCount": 220,
+      "unresolvedBalanceCount": 63,
+      "currentHipOrderCount": 162,
+      "nativeFillsValidated": 2000,
+      "fillKinds": ["Buy", "Sell"],
+      "feeTokens": ["USDC"]
+    },
+    {
+      "alias": "participant-2",
+      "role": "user",
+      "mode": "disabled",
+      "cashTotal": "4028.61835768",
+      "cashHeld": "1477.06814",
+      "ownedUnheldCash": "2551.55021768",
+      "spendable": null,
+      "positionCount": 43,
+      "unresolvedBalanceCount": 3,
+      "currentHipOrderCount": 69,
+      "nativeFillsValidated": 2000,
+      "fillKinds": ["Sell", "Buy", "Merge Outcome"],
+      "feeTokens": ["USDC"]
+    }
+  ],
+  "bookkeepingFollowUp": {
+    "observedAt": "2026-10-14T00:44:16.876Z",
+    "requests": 3,
+    "reservedWeight": 124,
+    "samples": [
+      {
+        "alias": "participant-1",
+        "bookkeepingRows": 63,
+        "allZeroRows": 63,
+        "nonzeroRows": 0
+      },
+      {
+        "alias": "participant-2",
+        "bookkeepingRows": 3,
+        "allZeroRows": 3,
+        "nonzeroRows": 0
+      }
+    ],
+    "conclusion": "Every observed oN row had zero total, hold and entryNtl. Zero rows remain in raw balances but no longer mark current holdings unresolved; nonzero bookkeeping remains unknown."
+  },
+  "limitations": "Not owned-user authentication or a live funded UI test. Capped fills are not complete history. Nonzero unresolved bookkeeping balances, basis and transformation interpretation remain explicit unknowns. No financial actions performed."
+}

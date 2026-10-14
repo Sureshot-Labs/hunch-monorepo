@@ -9,6 +9,8 @@ import {
   type Hip4AccountExecution,
   type Hip4AccountObservation,
 } from "../schemas/hip4-account.js";
+import { readHip4PositionAccounting } from "./hip4-accounting-repository.js";
+import { hip4BasisFillFingerprint } from "./hip4-position-accounting.js";
 
 export async function readHip4AccountPolicy(db: Pick<Pool, "query">) {
   const row = await fetchActiveRuntimePolicy(db, "hip4_account");
@@ -85,6 +87,7 @@ export async function persistHip4AccountRefresh(
     ledger: { time: number; hash: string; delta: Record<string, unknown> }[];
     history: Record<string, unknown>;
     error: string | null;
+    accountingMaxRows?: number;
   },
 ) {
   const db = await pool.connect();
@@ -98,7 +101,7 @@ export async function persistHip4AccountRefresh(
     )
       throw new Error("execution_source_mismatch");
     const locked = await db.query(
-      `select lease_token from hip4_account_snapshots
+      `select lease_token, history from hip4_account_snapshots
       where environment=$1 and account_address=$2 and lease_token=$3 for update`,
       [input.environment, input.address, input.lease],
     );
@@ -106,6 +109,17 @@ export async function persistHip4AccountRefresh(
       await db.query("rollback");
       return false;
     }
+    const accountingConflicts: Record<string, number> = {};
+    const savedConflicts = locked.rows[0].history?.accountingConflicts;
+    if (savedConflicts && typeof savedConflicts === "object")
+      for (const [coin, time] of Object.entries(savedConflicts))
+        if (
+          /^#\d+$/.test(coin) &&
+          typeof time === "number" &&
+          Number.isSafeInteger(time) &&
+          time >= 0
+        )
+          accountingConflicts[coin] = time;
     if (input.observation) {
       await db.query(
         "delete from hip4_account_positions where environment=$1 and account_address=$2",
@@ -140,7 +154,7 @@ export async function persistHip4AccountRefresh(
         on conflict(environment,account_address,time_ms,coin,tid,oid) do update set market_id=coalesce(hip4_account_executions.market_id,excluded.market_id),
           provider_fill=coalesce(hip4_account_executions.provider_fill,excluded.provider_fill),
           provider_fingerprint=coalesce(hip4_account_executions.provider_fingerprint,excluded.provider_fingerprint)
-        where hip4_account_executions.fingerprint=excluded.fingerprint returning tid`,
+        where hip4_account_executions.fingerprint=excluded.fingerprint returning tid, provider_fill`,
         [
           input.environment,
           input.address,
@@ -157,10 +171,28 @@ export async function persistHip4AccountRefresh(
       );
       // Preserve the original fact and diagnose the conflict without dropping
       // an independently valid balance snapshot or other new executions.
-      if (!result.rows.length)
+      if (!result.rows.length) {
         persistenceError = [persistenceError, "execution_identity_conflict"]
           .filter(Boolean)
           .join(",");
+        accountingConflicts[entry.coin] = Math.max(
+          accountingConflicts[entry.coin] ?? 0,
+          entry.time,
+        );
+      } else if (
+        source != null &&
+        result.rows[0].provider_fill != null &&
+        hip4BasisFillFingerprint(source) !==
+          hip4BasisFillFingerprint(result.rows[0].provider_fill)
+      ) {
+        persistenceError = [persistenceError, "execution_accounting_conflict"]
+          .filter(Boolean)
+          .join(",");
+        accountingConflicts[entry.coin] = Math.max(
+          accountingConflicts[entry.coin] ?? 0,
+          entry.time,
+        );
+      }
     }
     for (const entry of input.ledger) {
       const eventKey = createHash("sha256")
@@ -178,6 +210,29 @@ export async function persistHip4AccountRefresh(
         ],
       );
     }
+    const history = { ...locked.rows[0].history, ...input.history };
+    history.accountingConflicts = accountingConflicts;
+    if (input.observation && input.accountingMaxRows != null) {
+      // A savepoint protects valid snapshot/fill facts if a derived read fails.
+      await db.query("savepoint hip4_basis_derivation");
+      try {
+        history.positionAccounting = await readHip4PositionAccounting(db, {
+          environment: input.environment,
+          address: input.address,
+          observation: input.observation,
+          history,
+          maxRows: input.accountingMaxRows,
+          conflicts: accountingConflicts,
+        });
+      } catch {
+        await db.query("rollback to savepoint hip4_basis_derivation");
+        history.positionAccounting = null;
+        persistenceError = [persistenceError, "position_accounting_unavailable"]
+          .filter(Boolean)
+          .join(",");
+      }
+      await db.query("release savepoint hip4_basis_derivation");
+    }
     await db.query(
       `update hip4_account_snapshots set
       observation=coalesce($4::jsonb,observation), observed_at=coalesce($5,observed_at),
@@ -189,7 +244,7 @@ export async function persistHip4AccountRefresh(
         input.lease,
         input.observation ? JSON.stringify(input.observation) : null,
         input.observation?.observedAt ?? null,
-        JSON.stringify(input.history),
+        JSON.stringify(history),
         persistenceError,
       ],
     );

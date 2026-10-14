@@ -39,11 +39,20 @@ let pageResponse: unknown = [];
 let pageBuilder: ((startTime: number) => unknown) | null = null;
 let pageFails = false;
 let nativeRole = "user";
+let ledgerRows: unknown[] = [];
+let ledgerFails = false;
+const ledgerRequests: { startTime: number; endTime: number }[] = [];
 let byTimeCalls = 0;
 let captured = 0;
 const provider = async (_url: unknown, options?: RequestInit) => {
   const request = JSON.parse(String(options?.body));
   assert.equal(request.user ?? address, address);
+  if (request.type === "userNonFundingLedgerUpdates") {
+    ledgerRequests.push(request);
+    return ledgerFails
+      ? new Response("unavailable", { status: 503 })
+      : Response.json(ledgerRows);
+  }
   if (request.type === "userFillsByTime") {
     byTimeCalls++;
     requests.push({ startTime: request.startTime, endTime: request.endTime });
@@ -73,6 +82,7 @@ const provider = async (_url: unknown, options?: RequestInit) => {
     },
     userFills: [fill(9000, now - 1)],
     userNonFundingLedgerUpdates: [],
+    frontendOpenOrders: [],
   };
   assert.ok(request.type in data, request.type);
   return Response.json(data[request.type]);
@@ -189,7 +199,7 @@ try {
   assert.equal(saturated.history.fillRepair?.nextTime, stuck + 1);
 
   await pool.query(
-    "update runtime_policies set payload=jsonb_set(payload,'{requestWeightPerMinute}','242'::jsonb) where id=$1",
+    "update runtime_policies set payload=jsonb_set(payload,'{requestWeightPerMinute}','262'::jsonb) where id=$1",
     [policyIds[0]],
   );
   captured = byTimeCalls;
@@ -240,6 +250,58 @@ try {
   assert.equal(byTimeCalls, captured);
   assert.equal(unsupported.error, "unsupported_account_role");
   assert.deepEqual(unsupported.history.fillRepair, bounded.history.fillRepair);
+  nativeRole = "user";
+  pageBuilder = null;
+  pageResponse = [];
+  await pool.query(
+    "update hip4_account_snapshots set history=history-'ledgerRepair' where environment='mainnet' and account_address=$1",
+    [address],
+  );
+  ledgerRows = Array.from({ length: 500 }, (_, index) => ({
+    time: boundary,
+    hash: `0x${index.toString(16).padStart(64, "0")}`,
+    delta: { type: "future_native_change", amount: String(index) },
+  }));
+  const ledgerFirst = await refresh(0);
+  assert.equal(ledgerFirst.history.ledgerRepair?.nextTime, boundary);
+  assert.equal(ledgerFirst.history.ledgerRepair?.pagesRead, 1);
+  assert.equal(
+    (
+      await pool.query(
+        "select count(*)::int as count from hip4_account_ledger where account_address=$1",
+        [address],
+      )
+    ).rows[0].count,
+    500,
+  );
+  ledgerFails = true;
+  const ledgerFailed = await refresh(0);
+  assert.equal(ledgerFailed.history.ledgerRepair?.lastError, "http_error");
+  assert.equal(ledgerFailed.history.ledgerRepair?.nextTime, boundary);
+  assert.equal(
+    ledgerFailed.history.ledgerObservedAt,
+    ledgerFirst.history.ledgerObservedAt,
+  );
+  ledgerFails = false;
+  ledgerRows = ledgerRows.slice(-2);
+  const ledgerRecovered = await refresh(0);
+  assert.equal(ledgerRequests.at(-1)?.startTime, boundary);
+  assert.equal(
+    ledgerRequests.at(-1)?.endTime,
+    ledgerFirst.history.ledgerRepair?.endTime,
+  );
+  assert.equal(ledgerRecovered.history.ledgerRepair?.nextTime, null);
+  assert.equal(ledgerRecovered.history.ledgerRepair?.lastError, null);
+  assert.equal(
+    (
+      await pool.query(
+        "select count(*)::int as count from hip4_account_ledger where account_address=$1",
+        [address],
+      )
+    ).rows[0].count,
+    500,
+    "overlapping ledger pages do not duplicate events",
+  );
   console.log(
     "HIP4 PG16 history: inclusive boundary / replay / recovery / pause / invalid fill / saturation / budget / page bound / role PASS",
   );

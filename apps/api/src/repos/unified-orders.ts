@@ -1,4 +1,7 @@
 import type { Pool } from "@hunch/infra";
+import { hip4Identity, parseHip4Coin } from "@hunch/shared";
+import { hip4AccountExecutionSchema } from "../schemas/hip4-account.js";
+import { hip4OpenOrderSchema } from "../services/hip4-open-orders.js";
 import type { PgParams } from "../server-types.js";
 import {
   polymarketOrderBindingJoinSql,
@@ -14,7 +17,8 @@ const ORDER_MARKET_JOIN_SQL = `
 
 export type UnifiedOrderRow = {
   id: string;
-  kind: "order" | "swap";
+  kind: "order" | "swap" | "execution" | "observed_order";
+  observed_execution?: unknown;
   venue: string;
   wallet_address: string | null;
   venue_order_id: string | null;
@@ -55,10 +59,13 @@ type FilterInputs = {
   tokenId?: string;
   from?: Date | string;
   to?: Date | string;
+  // Server-only effective accountRead capability. Never a client parameter.
+  includeObservedHip4?: boolean;
+  hip4OpenOrderMaxAgeMs?: number;
 };
 
 type FetchUnifiedOrdersInputs = FilterInputs & {
-  type?: "order" | "swap";
+  type?: "order" | "swap" | "execution";
   limit: number;
   offset: number;
 };
@@ -73,6 +80,7 @@ type FilterParams = {
   fromIndex?: number;
   toIndex?: number;
   qIndex?: number;
+  openOrderAgeIndex?: number;
 };
 
 const escapeSqlLikePattern = (value: string): string =>
@@ -157,6 +165,12 @@ const buildFilterParams = (inputs: FilterInputs): FilterParams => {
     params.push(`%${escapeSqlLikePattern(q)}%`);
   }
 
+  let openOrderAgeIndex: number | undefined;
+  if (inputs.hip4OpenOrderMaxAgeMs != null) {
+    openOrderAgeIndex = ++paramCount;
+    params.push(inputs.hip4OpenOrderMaxAgeMs);
+  }
+
   return {
     params,
     walletIndex,
@@ -167,6 +181,7 @@ const buildFilterParams = (inputs: FilterInputs): FilterParams => {
     fromIndex,
     toIndex,
     qIndex,
+    openOrderAgeIndex,
   };
 };
 
@@ -247,36 +262,114 @@ const toNumber = (value: string | null): number | null => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
-export const mapUnifiedOrder = (row: UnifiedOrderRow) => ({
-  id: row.id,
-  kind: row.kind,
-  venue: row.venue,
-  walletAddress: row.wallet_address,
-  venueOrderId: row.venue_order_id,
-  tokenId: row.token_id,
-  side: row.side,
-  outcome: row.outcome,
-  orderType: row.order_type,
-  price: toNumber(row.price),
-  size: toNumber(row.size),
-  status: row.status,
-  statusReason: row.error_message,
-  filledSize: toNumber(row.filled_size),
-  averageFillPrice: toNumber(row.average_fill_price),
-  expiresAt: row.expires_at,
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
-  filledAt: row.filled_at,
-  cancelledAt: row.cancelled_at,
-  unifiedMarketId: row.unified_market_id,
-  inputMint: row.input_mint,
-  outputMint: row.output_mint,
-  amountIn: toNumber(row.amount_in),
-  amountOut: toNumber(row.amount_out),
-  inputDecimals: toNumber(row.input_decimals),
-  outputDecimals: toNumber(row.output_decimals),
-  txSignature: row.tx_signature,
-});
+export const mapUnifiedOrder = (row: UnifiedOrderRow) => {
+  if (row.kind === "observed_order") {
+    const facts = hip4OpenOrderSchema.parse(row.observed_execution);
+    const parsed = parseHip4Coin(facts.coin);
+    const identity = hip4Identity("mainnet", parsed.outcome);
+    if (
+      facts.marketId !== identity.marketId ||
+      facts.tokenId !== identity.sides[parsed.sideIndex].tokenId
+    )
+      throw new Error("observed_order_identity_conflict");
+    if (!row.updated_at || !row.expires_at)
+      throw new Error("observed_order_missing_provenance");
+    return {
+      id: row.id,
+      kind: "observed_order" as const,
+      venue: "hyperliquid" as const,
+      walletAddress: row.wallet_address,
+      venueOrderId: facts.orderId,
+      tokenId: facts.tokenId,
+      outcome: parsed.sideIndex === 0 ? "YES" : "NO",
+      side: facts.side === "B" ? "BUY" : "SELL",
+      orderType: facts.orderType,
+      price: toNumber(facts.price),
+      size: toNumber(facts.originalQuantity),
+      filledSize: toNumber(facts.filledQuantity),
+      averageFillPrice: null,
+      status: "observed_open",
+      statusReason: null,
+      createdAt: new Date(facts.time).toISOString(),
+      updatedAt: row.updated_at,
+      expiresAt: null,
+      cancelledAt: null,
+      filledAt: null,
+      unifiedMarketId: facts.marketId,
+      actionRef: null,
+      observedOrder: {
+        ...facts,
+        observedAt: row.updated_at.toISOString(),
+        validUntil: row.expires_at.toISOString(),
+      },
+    };
+  }
+  if (row.kind === "execution") {
+    const facts = hip4AccountExecutionSchema.parse(row.observed_execution);
+    const parsed = parseHip4Coin(facts.coin);
+    const identity = hip4Identity("mainnet", parsed.outcome);
+    if (identity.marketId !== facts.marketId)
+      throw new Error("observed_execution_identity_conflict");
+    return {
+      id: row.id,
+      kind: "execution" as const,
+      venue: "hyperliquid" as const,
+      walletAddress: row.wallet_address,
+      venueOrderId: facts.orderId,
+      tokenId: identity.sides[parsed.sideIndex].tokenId,
+      side:
+        facts.kind === "Buy" ? "BUY" : facts.kind === "Sell" ? "SELL" : null,
+      outcome: parsed.sideIndex === 0 ? "YES" : "NO",
+      orderType: null,
+      // No inference of original order size, remaining size or order status.
+      size: null,
+      price: null,
+      filledSize: toNumber(facts.quantity),
+      averageFillPrice: toNumber(facts.price),
+      status: "observed",
+      statusReason: null,
+      createdAt: new Date(facts.time).toISOString(),
+      filledAt: new Date(facts.time).toISOString(),
+      updatedAt: null,
+      expiresAt: null,
+      cancelledAt: null,
+      unifiedMarketId: facts.marketId,
+      txSignature: facts.transactionHash,
+      execution: facts,
+      actionRef: null,
+    };
+  }
+  return {
+    id: row.id,
+    kind: row.kind,
+    venue: row.venue,
+    walletAddress: row.wallet_address,
+    venueOrderId: row.venue_order_id,
+    tokenId: row.token_id,
+    side: row.side,
+    outcome: row.outcome,
+    orderType: row.order_type,
+    price: toNumber(row.price),
+    size: toNumber(row.size),
+    status: row.status,
+    statusReason: row.error_message,
+    filledSize: toNumber(row.filled_size),
+    averageFillPrice: toNumber(row.average_fill_price),
+    expiresAt: row.expires_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    filledAt: row.filled_at,
+    cancelledAt: row.cancelled_at,
+    unifiedMarketId: row.unified_market_id,
+    inputMint: row.input_mint,
+    outputMint: row.output_mint,
+    amountIn: toNumber(row.amount_in),
+    amountOut: toNumber(row.amount_out),
+    inputDecimals: toNumber(row.input_decimals),
+    outputDecimals: toNumber(row.output_decimals),
+    txSignature: row.tx_signature,
+  };
+};
 
 export async function fetchUnifiedMarketIdsByEventId(
   pool: Pool,
@@ -323,7 +416,8 @@ const buildOrdersSelect = (whereClause: string): string => `
     null::text as amount_out,
     null::text as input_decimals,
     null::text as output_decimals,
-    null::text as tx_signature
+    null::text as tx_signature,
+    null::jsonb as observed_execution
   from (
     select
       o.*,
@@ -374,19 +468,152 @@ const buildExecutionsSelect = (whereClause: string): string => `
     e.amount_out::text as amount_out,
     e.input_decimals::text as input_decimals,
     e.output_decimals::text as output_decimals,
-    e.tx_signature
+    e.tx_signature,
+    null::jsonb as observed_execution
   from executions e
   ${whereClause}
 `;
+
+// The immutable provider journal is read in place, not copied into mutable
+// Hunch orders. Current verified ownership, active user and exact environment
+// remain necessary even for previously captured records.
+const buildObservedHip4Select = (
+  filters: FilterParams,
+  pageBound?: string,
+  openOrders = false,
+): string => {
+  if (!filters.walletIndex)
+    throw new Error("observed_execution_wallet_scope_required");
+  const conditions = [
+    "e.environment='mainnet'",
+    `e.account_address=any($${filters.walletIndex}::text[])`,
+    `exists (select 1 from user_wallets wallet_row
+      join users owner_row on owner_row.id=wallet_row.user_id and owner_row.is_active
+      where wallet_row.user_id=$1 and wallet_row.is_verified
+        and wallet_row.wallet_type='ethereum'
+        and lower(wallet_row.wallet_address)=e.account_address)`,
+  ];
+  if (filters.venueIndex)
+    conditions.push(`$${filters.venueIndex}::text='hyperliquid'`);
+  if (filters.statusIndex)
+    conditions.push(
+      `'${openOrders ? "open" : "observed"}'=any($${filters.statusIndex}::text[])`,
+    );
+  if (filters.marketListIndex)
+    conditions.push(
+      `e.canonical_market_id=any($${filters.marketListIndex}::text[])`,
+    );
+  if (filters.tokenIndex)
+    conditions.push(
+      `('hyperliquid:mainnet:' || substring(e.coin from 2))=$${filters.tokenIndex}`,
+    );
+  if (filters.fromIndex)
+    conditions.push(
+      `e.time_ms>=extract(epoch from $${filters.fromIndex}::timestamptz)*1000`,
+    );
+  if (filters.toIndex)
+    conditions.push(
+      `e.time_ms<=extract(epoch from $${filters.toIndex}::timestamptz)*1000`,
+    );
+  if (filters.qIndex)
+    conditions.push(`exists (
+    select 1 from unified_markets search_market
+    left join unified_events search_event on search_event.id=search_market.event_id
+    where search_market.id=e.canonical_market_id and (
+      coalesce(search_market.title,'') ilike $${filters.qIndex} escape '\\'
+      or coalesce(search_event.title,'') ilike $${filters.qIndex} escape '\\'
+      or coalesce(search_market.outcomes::text,'') ilike $${filters.qIndex} escape '\\'
+      or search_market.id ilike $${filters.qIndex} escape '\\'
+      or search_market.event_id ilike $${filters.qIndex} escape '\\'))`);
+  // At most offset+limit candidates per verified owner can contribute to the
+  // global page. Order by raw indexed time before materializing the union.
+  // Count retains its exact legacy meaning; it is not a page-size estimate.
+  if (openOrders && !filters.openOrderAgeIndex)
+    throw new Error("observed_order_freshness_required");
+  const nativeSource = openOrders
+    ? `(with snapshot_scope as materialized (
+    select snapshot_row.environment, snapshot_row.account_address,
+      snapshot_row.history->'openOrders'->'items' as items,
+      (snapshot_row.history->'openOrders'->>'observedAt')::timestamptz as observation_time
+    from hip4_account_snapshots snapshot_row
+    where snapshot_row.environment='mainnet'
+      and snapshot_row.account_address=any($${filters.walletIndex}::text[])
+      and exists (select 1 from user_wallets wallet_row join users owner_row on owner_row.id=wallet_row.user_id and owner_row.is_active
+        where wallet_row.user_id=$1 and wallet_row.is_verified and wallet_row.wallet_type='ethereum'
+          and lower(wallet_row.wallet_address)=snapshot_row.account_address)
+      and snapshot_row.history->'openOrders'->>'version'='1'
+      and (snapshot_row.history->'openOrders'->>'observedAt')::timestamptz<=statement_timestamp()
+      and (snapshot_row.history->'openOrders'->>'observedAt')::timestamptz
+        > statement_timestamp()-$${filters.openOrderAgeIndex} * interval '1 millisecond')
+    select snapshot_row.environment, snapshot_row.account_address,
+    (order_item->>'time')::bigint as time_ms, order_item->>'coin' as coin,
+    order_item->>'orderId' as oid, order_item->>'marketId' as canonical_market_id,
+    order_item || jsonb_build_object('id',snapshot_row.account_address || ':' || (order_item->>'orderId')) as execution,
+    snapshot_row.observation_time,
+    snapshot_row.observation_time + $${filters.openOrderAgeIndex} * interval '1 millisecond' as valid_until
+    from snapshot_scope snapshot_row
+    cross join lateral jsonb_array_elements(case when jsonb_typeof(snapshot_row.items)='array'
+      then snapshot_row.items else '[]'::jsonb end) order_item)`
+    : "hip4_account_executions";
+  const source = pageBound
+    ? `(select selected_fill.* from (
+    select distinct lower(wallet_row.wallet_address) as account_address
+    from user_wallets wallet_row join users owner_row
+      on owner_row.id=wallet_row.user_id and owner_row.is_active
+    where wallet_row.user_id=$1 and wallet_row.is_verified and wallet_row.wallet_type='ethereum'
+      and lower(wallet_row.wallet_address)=any($${filters.walletIndex}::text[])
+    ) owned_scope cross join lateral (
+      select e.* from ${nativeSource} e
+      where e.account_address=owned_scope.account_address and ${conditions.join(" and ")}
+      order by e.time_ms desc, (e.execution->>'id') desc limit ${pageBound}
+    ) selected_fill) e`
+    : `${nativeSource} e where ${conditions.join(" and ")}`;
+  return `select
+    '${openOrders ? "hyperliquid:order:" : "hyperliquid:"}' || (e.execution->>'id') as id,
+    '${openOrders ? "observed_order" : "execution"}'::text as kind, 'hyperliquid'::text as venue,
+    e.account_address as wallet_address, e.oid::text as venue_order_id,
+    'hyperliquid:mainnet:' || substring(e.coin from 2) as token_id,
+    null::text as side, null::text as outcome, null::text as order_type,
+    null::text as price, null::text as size, '${openOrders ? "observed_open" : "observed"}'::text as status,
+    null::text as filled_size, null::text as average_fill_price,
+    null::text as error_message, ${openOrders ? "e.valid_until" : "null::timestamptz"} as expires_at,
+    to_timestamp(e.time_ms::double precision/1000) as created_at,
+    ${openOrders ? "e.observation_time" : "null::timestamptz"} as updated_at, null::timestamptz as filled_at,
+    null::timestamptz as cancelled_at, e.canonical_market_id as unified_market_id,
+    null::text as input_mint, null::text as output_mint,
+    null::text as amount_in, null::text as amount_out,
+    null::text as input_decimals, null::text as output_decimals,
+    null::text as tx_signature, ${openOrders ? "e.execution - 'id'" : "e.execution"} as observed_execution
+    from ${source}`;
+};
 
 export async function fetchUnifiedOrders(
   pool: Pool,
   inputs: FetchUnifiedOrdersInputs,
 ): Promise<{ rows: UnifiedOrderRow[]; total: number }> {
-  const includeOrders = inputs.type !== "swap";
-  const includeSwaps = inputs.type !== "order" && !inputs.tokenId;
+  const includeOrders =
+    inputs.venue !== "hyperliquid" &&
+    inputs.type !== "swap" &&
+    inputs.type !== "execution";
+  const includeSwaps =
+    inputs.venue !== "hyperliquid" &&
+    inputs.type !== "order" &&
+    inputs.type !== "execution" &&
+    !inputs.tokenId;
+  const includeObserved =
+    inputs.includeObservedHip4 === true &&
+    (inputs.openOnly
+      ? inputs.hip4OpenOrderMaxAgeMs != null
+      : !inputs.type || inputs.type === "execution") &&
+    (!inputs.venue || inputs.venue === "hyperliquid") &&
+    (inputs.openOnly ||
+      !inputs.status ||
+      (Array.isArray(inputs.status)
+        ? inputs.status.includes("observed")
+        : inputs.status === "observed")) &&
+    !!inputs.walletAddresses?.length;
 
-  if (!includeOrders && !includeSwaps) {
+  if (!includeOrders && !includeSwaps && !includeObserved) {
     return { rows: [], total: 0 };
   }
 
@@ -407,14 +634,25 @@ export async function fetchUnifiedOrders(
   const selects: string[] = [];
   if (includeOrders) selects.push(buildOrdersSelect(orderWhere));
   if (includeSwaps) selects.push(buildExecutionsSelect(execWhere));
-
-  const unionSql =
-    selects.length === 1 ? selects[0] : selects.join(" union all ");
+  const countSelects = [...selects];
+  if (includeObserved)
+    countSelects.push(
+      buildObservedHip4Select(filterParams, undefined, inputs.openOnly),
+    );
 
   const params = [...filterParams.params];
   const limitIndex = params.length + 1;
   const offsetIndex = params.length + 2;
   params.push(inputs.limit, inputs.offset);
+  if (includeObserved)
+    selects.push(
+      buildObservedHip4Select(
+        filterParams,
+        `$${limitIndex}::int + $${offsetIndex}::int`,
+        inputs.openOnly,
+      ),
+    );
+  const unionSql = selects.join(" union all ");
 
   const { rows } = await pool.query<UnifiedOrderRow>(
     `
@@ -432,7 +670,7 @@ export async function fetchUnifiedOrders(
   const countResult = await pool.query<{ total: string }>(
     `
       with combined as (
-        ${unionSql}
+        ${countSelects.join(" union all ")}
       )
       select count(*) as total
       from combined
@@ -468,6 +706,8 @@ export async function fetchUnifiedOrderById(
         ${buildOrdersSelect(orderWhere)} and o.id::text = $${idIndex}
         union all
         ${buildExecutionsSelect(execWhere)} and e.id::text = $${idIndex}
+        ${inputs.includeObservedHip4 && filterParams.walletIndex ? `union all ${buildObservedHip4Select(filterParams)} and ('hyperliquid:' || (e.execution->>'id'))=$${idIndex}` : ""}
+        ${inputs.includeObservedHip4 && filterParams.walletIndex && filterParams.openOrderAgeIndex ? `union all ${buildObservedHip4Select(filterParams, undefined, true)} and ('hyperliquid:order:' || (e.execution->>'id'))=$${idIndex}` : ""}
       )
       select *
       from combined

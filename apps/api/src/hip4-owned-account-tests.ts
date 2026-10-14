@@ -158,6 +158,25 @@ test("outcome bookkeeping aliases remain unresolved and duplicate or malformed s
   });
   assert.deepEqual(view.unresolvedBalances, ["o8775"]);
   assert.equal(view.positions.length, 1);
+  const zeroBookkeeping = projectHip4Account({
+    ...args,
+    state: {
+      balances: [
+        position,
+        { coin: "o8775", total: "0.00000", hold: "0", entryNtl: "-0.0" },
+      ],
+    },
+  });
+  assert.deepEqual(zeroBookkeeping.unresolvedBalances, []);
+  assert.equal(zeroBookkeeping.balances.length, 2);
+  assert.equal(zeroBookkeeping.positions.length, 1);
+  const unknownBasis = projectHip4Account({
+    ...args,
+    state: {
+      balances: [{ coin: "o8775", total: "0", hold: "0", entryNtl: "1" }],
+    },
+  });
+  assert.deepEqual(unknownBasis.unresolvedBalances, ["o8775"]);
   assert.throws(
     () =>
       projectHip4Account({

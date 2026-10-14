@@ -2,6 +2,10 @@ import type { FastifyPluginAsync } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
+import {
+  readHip4HistoryCapability,
+  readHip4OpenOrderCapability,
+} from "../services/hip4-unified-history.js";
 import { resolveRequestedWalletAddresses } from "../lib/resolve-wallets.js";
 import {
   fetchUnifiedMarketIdsByEventId,
@@ -9,12 +13,9 @@ import {
   fetchUnifiedOrders,
   mapUnifiedOrder,
 } from "../repos/unified-orders.js";
-import {
-  orderIdParamsSchema,
-  orderIdQuerySchema,
-  ordersOpenQuerySchema,
-  ordersQuerySchema,
-} from "../schemas/orders.js";
+import { orderReadRouteSchemas } from "../schemas/orders.js";
+import { env } from "../env.js";
+const routeSchemas = orderReadRouteSchemas(env);
 
 const OPEN_ORDER_STATUSES: string[] = [
   "pending",
@@ -37,7 +38,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
     "/orders",
     {
       preHandler: createAuthMiddleware(),
-      schema: { querystring: ordersQuerySchema },
+      schema: routeSchemas["/orders"],
     },
     async (request, reply) => {
       const user = request.user;
@@ -48,6 +49,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const query = request.query;
+      reply.header("Cache-Control", "private, no-store");
 
       try {
         const walletAddresses = await resolveRequestedWalletAddresses(
@@ -78,6 +80,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
           });
         }
 
+        const hip4History = await readHip4HistoryCapability(pool, query.venue);
         const result = await fetchUnifiedOrders(pool, {
           userId: user.id,
           walletAddresses,
@@ -90,6 +93,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
           type: query.type,
           limit: query.limit,
           offset: query.offset,
+          includeObservedHip4: hip4History === "limited",
         });
 
         const orders = result.rows.map(mapUnifiedOrder);
@@ -97,6 +101,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
           orders,
+          coverage: { hyperliquid: hip4History },
           pagination: {
             total: result.total,
             limit: query.limit,
@@ -125,7 +130,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
     "/orders/open",
     {
       preHandler: createAuthMiddleware(),
-      schema: { querystring: ordersOpenQuerySchema },
+      schema: routeSchemas["/orders/open"],
     },
     async (request, reply) => {
       const user = request.user;
@@ -136,6 +141,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const query = request.query;
+      reply.header("Cache-Control", "private, no-store");
 
       try {
         const walletAddresses = await resolveRequestedWalletAddresses(
@@ -166,6 +172,12 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
           });
         }
 
+        const hip4Orders = await readHip4OpenOrderCapability(
+          pool,
+          user.id,
+          walletAddresses,
+          query.venue,
+        );
         const result = await fetchUnifiedOrders(pool, {
           userId: user.id,
           walletAddresses,
@@ -176,6 +188,8 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
           tokenId: query.tokenId,
           status: OPEN_ORDER_STATUSES,
           openOnly: true,
+          includeObservedHip4: hip4Orders.maxAgeMs != null,
+          hip4OpenOrderMaxAgeMs: hip4Orders.maxAgeMs,
           type: "order",
           limit: query.limit,
           offset: query.offset,
@@ -186,6 +200,12 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
         reply.header("Content-Type", "application/json; charset=utf-8");
         return reply.send({
           orders,
+          openOrderCoverage: {
+            hyperliquid: {
+              state: hip4Orders.state,
+              validUntil: hip4Orders.validUntil,
+            },
+          },
           pagination: {
             total: result.total,
             limit: query.limit,
@@ -214,7 +234,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
     "/orders/:id",
     {
       preHandler: createAuthMiddleware(),
-      schema: { params: orderIdParamsSchema, querystring: orderIdQuerySchema },
+      schema: routeSchemas["/orders/:id"],
     },
     async (request, reply) => {
       const user = request.user;
@@ -225,6 +245,7 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const query = request.query;
+      reply.header("Cache-Control", "private, no-store");
 
       try {
         const walletAddresses = await resolveRequestedWalletAddresses(
@@ -238,12 +259,25 @@ export const ordersRoutes: FastifyPluginAsync = async (app) => {
           return reply.send({ error: "No wallets available to query." });
         }
 
+        const hip4History = request.params.id.startsWith("hyperliquid:")
+          ? await readHip4HistoryCapability(pool, "hyperliquid")
+          : "disabled";
+        const hip4Open = request.params.id.startsWith("hyperliquid:order:")
+          ? await readHip4OpenOrderCapability(
+              pool,
+              user.id,
+              walletAddresses,
+              "hyperliquid",
+            )
+          : null;
         const row = await fetchUnifiedOrderById(pool, {
           userId: user.id,
           walletAddresses,
           venue: undefined,
           status: undefined,
           id: request.params.id,
+          includeObservedHip4: hip4History === "limited",
+          hip4OpenOrderMaxAgeMs: hip4Open?.maxAgeMs,
         });
 
         if (!row) {

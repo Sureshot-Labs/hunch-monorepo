@@ -75,7 +75,15 @@ export function projectHip4Account(input: {
     if (!row.coin.startsWith("+") && !row.coin.startsWith("o")) continue;
     // oN encodes outcome-wide bookkeeping, not a proven YES/NO side token.
     if (!row.coin.startsWith("+")) {
-      unresolvedBalances.push(row.coin);
+      // The provider retains fully zero bookkeeping rows after settlement.
+      // They stay in raw balances, but cannot make current holdings partial.
+      // Nonzero/unknown bookkeeping semantics still require explicit coverage.
+      if (
+        ![row.total, row.hold, row.entryNtl].every(
+          (value) => canonicalSignedDecimal(value) === "0",
+        )
+      )
+        unresolvedBalances.push(row.coin);
       continue;
     }
     const parsed = parseHip4Coin(`#${row.coin.slice(1)}`);

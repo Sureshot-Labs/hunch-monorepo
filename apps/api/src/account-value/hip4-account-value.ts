@@ -121,7 +121,13 @@ export function projectHip4AccountValue(input: {
         controllerWalletId: null,
         environment: "mainnet",
         symbol: "USDC",
+        // Presentation facts from this same observation, never funding authority.
+        ownedTotal: value,
         held: observation.cash.held,
+        unheld: observation.cash.unheld,
+        positionCount: observation.unresolvedBalances.length
+          ? null
+          : observation.positions.length,
         validUntil: new Date(
           observedTime + read.snapshotMaxAgeMs,
         ).toISOString(),
@@ -166,7 +172,11 @@ export function projectHip4AccountValue(input: {
       position.walletAddress.toLowerCase(),
     );
     const fresh = position.observation.state === "fresh";
-    const value = owned ? position.valuation.marketValue : null;
+    const valuationObservedAt = position.valuation.observedAt;
+    const value =
+      owned && valuationObservedAt != null
+        ? position.valuation.marketValue
+        : null;
     const identity = `${position.walletAddress.toLowerCase()}:${position.tokenId}`;
     result.positions.push({
       componentId: stableOpaqueId("position", identity),
@@ -178,11 +188,11 @@ export function projectHip4AccountValue(input: {
       positionRef: identity,
       positionActionRef: null,
       estimatedUsd:
-        value == null
+        value == null || valuationObservedAt == null
           ? null
           : {
               value,
-              asOf: position.valuation.observedAt!,
+              asOf: valuationObservedAt,
               priceSource: `hyperliquid-${position.valuation.source}`,
               confidence:
                 position.valuation.source === "official_payout"

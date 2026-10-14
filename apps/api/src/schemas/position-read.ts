@@ -22,8 +22,16 @@ export const hip4PortfolioPositionSchema = z.object({
   side: z.literal("LONG"),
   size: z.number().finite().nonnegative(),
   sizeRaw: decimal,
-  averagePrice: z.null(),
-  unrealizedPnl: z.null(),
+  averagePrice: z.number().finite().nonnegative().nullable(),
+  averagePriceRaw: decimal.nullable().optional(),
+  costBasisRaw: decimal.nullable().optional(),
+  basisReason: z.string().optional(),
+  unrealizedPnl: z.number().finite().nullable(),
+  unrealizedPnlRaw: z
+    .string()
+    .regex(/^-?(0|[1-9]\d*)(\.\d+)?$/)
+    .nullable()
+    .optional(),
   realizedPnl: z.null(),
   lastUpdatedAt: z.string().datetime(),
   instrument: z.object({

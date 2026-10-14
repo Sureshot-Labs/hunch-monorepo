@@ -53,7 +53,25 @@ export function mergePositionPnlSummary(
     coverage.missingAccounts > 0 ||
     coverage.staleAccounts > 0 ||
     coverage.unresolvedBalances > 0 ||
-    coverage.missingCostBasis > 0;
+    coverage.missingCostBasis > 0 ||
+    hip4.positions.some((position) => position.costBasisRaw == null);
+  const valuationUnknown =
+    currentUnknown ||
+    coverage.unpricedPositions > 0 ||
+    hip4.positions.some((position) => position.unrealizedPnl == null);
+  const costBasis =
+    legacy.unrealizedCostBasisCurrent +
+    hip4.positions.reduce(
+      (sum, position) => sum + Number(position.costBasisRaw ?? 0),
+      0,
+    );
+  const pnl =
+    legacy.unrealizedPnlCurrent +
+    hip4.positions.reduce(
+      (sum, position) => sum + (position.unrealizedPnl ?? 0),
+      0,
+    );
+  const invalidTotal = !Number.isFinite(costBasis) || !Number.isFinite(pnl);
   return {
     ...legacy,
     positionsCount: legacy.positionsCount + hip4.positions.length,
@@ -63,13 +81,13 @@ export function mergePositionPnlSummary(
         (position) => position.marketSummary?.status !== "settled",
       ).length,
     realizedPnlAllTime: historyUnknown ? null : legacy.realizedPnlAllTime,
-    unrealizedCostBasisCurrent: currentUnknown
-      ? null
-      : legacy.unrealizedCostBasisCurrent,
-    unrealizedPnlCurrent: currentUnknown ? null : legacy.unrealizedPnlCurrent,
-    unrealizedPnlPercentCurrent: currentUnknown
-      ? null
-      : legacy.unrealizedPnlPercentCurrent,
+    unrealizedCostBasisCurrent:
+      currentUnknown || invalidTotal ? null : costBasis,
+    unrealizedPnlCurrent: valuationUnknown || invalidTotal ? null : pnl,
+    unrealizedPnlPercentCurrent:
+      valuationUnknown || invalidTotal || costBasis <= 0
+        ? null
+        : (pnl / costBasis) * 100,
   };
 }
 

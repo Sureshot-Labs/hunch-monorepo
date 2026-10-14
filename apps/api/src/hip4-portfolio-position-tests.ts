@@ -12,6 +12,11 @@ import {
   readHip4PortfolioPositions,
   type Hip4OwnedPortfolioRead,
 } from "./services/hip4-portfolio-positions.js";
+import {
+  mergePositionPnlSummary,
+  EMPTY_LEGACY_POSITION_PNL,
+  unavailableHip4PositionRead,
+} from "./services/position-read-scope.js";
 
 const now = Date.parse("2026-10-13T10:00:00.000Z");
 const source = JSON.parse(
@@ -116,6 +121,80 @@ test("account/market identity survives user merge and isolates owners/environmen
         },
       }),
     /identity_conflict/,
+  );
+});
+
+test("verified current-lot basis joins only its exact snapshot and expires PnL with the mark", () => {
+  const accounting = {
+    version: 1,
+    observedAt: observation.observedAt,
+    method: "observed_zero_anchor_weighted_average",
+    feeTreatment: "buy_fees_in_basis_sell_fees_in_realized",
+    allTimeComplete: false,
+    positions: [
+      {
+        coin: "+87750",
+        quantity: "20.00001",
+        costBasis: "10.000005",
+        realizedSinceAnchor: "1",
+        anchorTime: now - 1000,
+        reason: "verified",
+      },
+    ],
+  };
+  const rows = projectHip4PortfolioPositions({ ...input, accounting });
+  assert.equal(rows[0].costBasisRaw, "10.000005");
+  assert.equal(rows[0].averagePriceRaw, "0.5");
+  assert.equal(rows[0].unrealizedPnlRaw, "2.000001");
+  assert.equal(rows[0].realizedPnl, null);
+  assert.equal(rows[1].costBasisRaw, null);
+  const summaryInput = {
+    positions: [rows[0]],
+    coverage: {
+      ...unavailableHip4PositionRead().coverage,
+      state: "ready" as const,
+      accounts: 1,
+    },
+  };
+  const summary = mergePositionPnlSummary(
+    EMPTY_LEGACY_POSITION_PNL,
+    summaryInput,
+  );
+  assert.equal(summary.unrealizedCostBasisCurrent, 10.000005);
+  assert.equal(summary.unrealizedPnlCurrent, 2.000001);
+  assert.equal(summary.realizedPnlAllTime, null);
+  const unpriced = mergePositionPnlSummary(EMPTY_LEGACY_POSITION_PNL, {
+    ...summaryInput,
+    positions: [{ ...rows[0], unrealizedPnl: null }],
+    coverage: { ...summaryInput.coverage, unpricedPositions: 1 },
+  });
+  assert.equal(unpriced.unrealizedCostBasisCurrent, 10.000005);
+  assert.equal(unpriced.unrealizedPnlCurrent, null);
+  assert.equal(unpriced.unrealizedPnlPercentCurrent, null);
+  assert.equal(
+    projectHip4PortfolioPositions({ ...input, accounting, now: now + 30000 })[0]
+      .unrealizedPnl,
+    null,
+  );
+  assert.equal(
+    projectHip4PortfolioPositions({
+      ...input,
+      accounting: {
+        ...accounting,
+        observedAt: new Date(now - 1).toISOString(),
+      },
+    })[0].costBasisRaw,
+    null,
+  );
+  assert.equal(
+    projectHip4PortfolioPositions({
+      ...input,
+      accounting: {
+        ...accounting,
+        positions: [{ ...accounting.positions[0], quantity: "99" }],
+      },
+    })[0].costBasisRaw,
+    null,
   );
 });
 
@@ -261,6 +340,13 @@ test("Account Value shares native side marks and counts held cash once without f
     "hyperliquid:mainnet",
   );
   assert.equal(result.assets[0].location.details.controllerWalletId, null);
+  assert.equal(result.assets[0].location.details.ownedTotal, "23.00000001");
+  assert.equal(result.assets[0].location.details.held, "3");
+  assert.equal(result.assets[0].location.details.unheld, "20.00000001");
+  assert.equal(
+    result.assets[0].location.details.positionCount,
+    observed.positions.length,
+  );
   assert.equal(result.positions[0].estimatedUsd?.value, "12.000006");
   assert.equal(result.positions[1].estimatedUsd?.value, "3");
   assert.ok(result.positions.every((row) => row.positionActionRef === null));
@@ -384,4 +470,12 @@ test("zero, unified debt-free cash and official fractional payouts are not missi
   assert.equal(result.positions[0].estimatedUsd?.value, "5.0000025");
   assert.equal(result.positions[1].estimatedUsd?.value, "0");
   assert.equal(result.positions[1].valuationEligibility, "included");
+});
+
+test("a native position value without observation provenance is not an account estimate", () => {
+  const read = accountRead();
+  read.positions[0].valuation.observedAt = null;
+  const result = projectHip4AccountValue({ userId: input.userId, read, now });
+  assert.equal(result.positions[0].estimatedUsd, null);
+  assert.equal(result.positions[0].valuationEligibility, "unpriced");
 });

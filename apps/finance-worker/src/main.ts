@@ -22,6 +22,10 @@ import {
 import { env } from "./env.js";
 import { InMemoryLockManager } from "./locks.js";
 import { IntervalScheduler, type ScheduledJob } from "./scheduler.js";
+import {
+  runHip4AccountReadJob,
+  closeHip4AccountReadPool,
+} from "./hip4-account-worker.js";
 
 type ContentWorkerModule = typeof import("./content-worker.js");
 let contentWorkerModulePromise: Promise<ContentWorkerModule> | null = null;
@@ -138,8 +142,32 @@ function isStandaloneFinancialReconciliationNoop(result: unknown): boolean {
 
 type FinanceWorkerEnv = typeof env;
 
-export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
+export function buildJobs(
+  workerEnv: FinanceWorkerEnv = env,
+  accountReadRunner = runHip4AccountReadJob,
+): ScheduledJob[] {
   const allowExecute = workerEnv.executeEnabled;
+  const accountReadJob: ScheduledJob = {
+    name: "hip4_account_observer",
+    enabled: Boolean(workerEnv.databaseUrl),
+    intervalSec: workerEnv.retryBackoffSec,
+    timeoutSec: workerEnv.jobTimeoutSec,
+    maxRetries: 0,
+    retryBackoffSec: workerEnv.retryBackoffSec,
+    jitterSec: 0,
+    run: async () => {
+      const result = await accountReadRunner();
+      accountReadJob.intervalSec = result.nextIntervalSeconds;
+      return result;
+    },
+    isNoopResult: (result) =>
+      !hasPositiveActivity(result, [
+        "claimed",
+        "errors",
+        "leaseLost",
+        "budgetExhausted",
+      ]),
+  };
   const verifiedBuyJob: ScheduledJob = {
     name: "verified_buy_repair",
     // Observational repair never signs or submits purchases. It must continue
@@ -199,6 +227,7 @@ export function buildJobs(workerEnv: FinanceWorkerEnv = env): ScheduledJob[] {
     );
   }
   return [
+    accountReadJob,
     verifiedBuyJob,
     {
       name: "standalone_financial_reconciliation",
@@ -463,6 +492,7 @@ function main() {
     void Promise.all([
       closeFundingReconciliationPool(),
       closeContentWorkerPool(),
+      closeHip4AccountReadPool(),
     ]).finally(() => process.exit(0));
   });
   process.on("SIGTERM", () => {
@@ -470,6 +500,7 @@ function main() {
     void Promise.all([
       closeFundingReconciliationPool(),
       closeContentWorkerPool(),
+      closeHip4AccountReadPool(),
     ]).finally(() => process.exit(0));
   });
 

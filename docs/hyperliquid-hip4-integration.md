@@ -3,7 +3,7 @@
 ## Status, scope, and evidence
 
 This is the backend source-of-truth specification for `hip-next`, updated and
-rechecked on 2026-10-12. It is a development plan, not an assertion that HIP
+rechecked on 2026-10-14. It is a development plan, not an assertion that HIP
 trading, funding, matching, or wallet intelligence is implemented or production-ready.
 
 Start with section 12 for evidence gates, section 11 for implementation order,
@@ -14,6 +14,8 @@ P1 acceptance and earlier P0 evidence. Section 19 supersedes their unresolved
 BUY-minimum status with the official $1 rule and correlated native execution;
 earlier acceptance notes and fixtures remain dated history.
 Section 20 records the initial P2 owned-account read implementation on October 13.
+Section 21 supersedes its intermediate outstanding-work lists for the current
+P2 read integration. Older checkpoints and baseline refs below are dated history.
 
 | Repository             | Branch / immutable reference                                                |
 | ---------------------- | --------------------------------------------------------------------------- |
@@ -2689,3 +2691,173 @@ remaining static filters, common execution/ledger history, open orders, verified
 basis and authenticated desktop/mobile acceptance remain outstanding. No layout
 redesign, migration, commit, push, production change or financial action is part
 of this Account Value checkpoint.
+
+### October 14: canonical Wallet and ordinary account refresh
+
+Wallet no longer overlays a selected-address HIP response on the common account
+projection. Desktop and mobile use the existing Wallet mapper with the effective
+`walletAccess` venues. Native owned total, held/unheld cash, position count and
+observation deadline come from the same Account Value components. Distinct owners
+are aggregated exactly; a missing or unverified owner does not become a complete
+cash total. Testnet units remain outside the mainnet dollar display. This changes
+data flow, not the Wallet design or financial capabilities.
+
+The common Account Value hook now drives the existing owned-account read adapter
+for all currently verified linked Ethereum owners. Concurrent consumers share
+one query scoped by user, owner set and venue-policy revision. Requests are
+sequential, abortable and follow server refresh timing. Admission priority rotates
+between owners so a constrained shared budget cannot always favor the same first
+addresses. Normal polling reuses fresh server observations; explicit Portfolio
+repair uses the same adapter with refresh requested. Neither path signs, submits
+orders, scans arbitrary wallet history or bypasses server policy/budget/leases.
+Display still reads only canonical projections; upstream responses are not a
+second balance authority. Funding inventory and available Hunch cash are unchanged.
+
+Verification: 1,744 frontend tests pass, typecheck and targeted ESLint pass, exact
+Node 20 Turbopack build succeeds (42 pages), and the full backend workspace build
+succeeds (16/16). The real ordinary-auth owned-account integration test passes
+again on disposable PostgreSQL 16, including current ownership, lease/replay,
+failure recovery, lifecycle and shared Portfolio. No SQL or migration changed.
+Desktop/mobile deterministic Wallet checks cover fresh, stale and unavailable;
+the local authenticated mobile Wallet also shows the real zero HIP account from
+the common projection. The native provider role is `missing`, not a funded-account
+acceptance case. No production changes or financial actions were performed.
+
+P2 remains open: remaining Portfolio filters/breakdown, the shared execution
+history and open-order surfaces, durable idle-account history scheduling,
+ledger/basis accounting and nonzero funded-account acceptance still require work.
+The browser read lifecycle is not an autonomous background repair worker.
+
+### October 14: ordinary Portfolio filters and observed History
+
+The regular Portfolio venue filter and breakdown now use effective `accountRead`
+capabilities on both surfaces. Native cash and positions enter the same canonical
+breakdown once. Missing valuation is nullable, with no fabricated zero percentage.
+Policy-off cached rows are filtered immediately. Financial venue schemas and
+available-to-spend amounts remain unchanged.
+
+`GET /orders` now includes the immutable HIP execution journal as
+`kind: execution`, alongside existing order/swap records. Each fill retains its
+exact decimal facts, fee denomination, transaction identity and source. Original
+order size/status are not inferred from a fill; `actionRef` is null. The ordinary
+History UI renders these records using its existing rows, with explicit limited
+coverage. `/orders/:id` resolves the same record. `/orders/open` does not fabricate
+open orders from fills; a complete native current-order reader remains pending.
+
+Access requires current verified ownership and common account-read capability;
+testnet observations never enter this mainnet history. Unlinked cached fills are
+also removed by the frontend before a replacement query returns. The read is local
+only. No journal copy into mutable orders, external request, signing or submission
+is introduced by these history endpoints. Schemas and generated web contracts now
+cover ordinary orders as well as native fields; nullable legacy venues and error
+metadata remain compatible.
+
+Review fixed duplicate forced refresh on Portfolio mount and invalidation of
+heavy read models for unchanged observations. Consumers share the owner-scoped
+poll; manual repair can still force refresh. Changed observations invalidate
+Account Value, Positions and History, not the market feed.
+
+SQL review and execution used disposable PostgreSQL 16 with 10,000 owned fills,
+30,000 foreign fills, testnet records and a legacy order. A bounded candidate
+page per verified owner preserves the common ordering. Measured first/next pages
+used 16/23 shared-hit buffers (about 0.18/0.24 ms in that run). Deep offsets and the
+exact count still scale with the scoped history: the empty offset-10001 page used
+2268 buffers/about 29 ms. These are local fixture measurements, not production
+capacity claims or a claim that `LIMIT` bounds the count. Custom/generic plans,
+tied times, empty/sparse pages, policy-off and ownership revocation pass.
+Existing feed SQL/ranking paths were not changed.
+
+Checks: 1,750 frontend tests, typecheck, full frontend lint, exact Node 20
+Turbopack build and backend workspace build 16/16 pass. Ordinary-auth PG16 tests
+and legacy orders regressions pass. There is no schema migration in this slice.
+P2 is still open: native current orders, durable idle-account refresh/history
+repair, ledger/basis accounting and funded-account acceptance remain outstanding.
+
+## 21. Current P2 read integration acceptance — October 14, 2026
+
+This closes the current goal of integrating HIP into ordinary venue mechanisms
+with truthful owned balances, positions and execution history. It does **not**
+certify production rollout, complete lifetime tax/accounting history, P3 funding
+or P4 trading. No financial action is enabled by account-read policy.
+
+| Area                   | Implemented / verified                                                                                                                                    | Explicit boundary                                                                                      |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Access and policy      | Common `venue_lifecycle` / effective capabilities, ordinary verified-wallet auth, user/owner/environment-scoped cache                                     | Compatibility admin canary is optional; no second product activation switch                            |
+| Discovery and event UI | Unified indexed market/feed path and existing Hunch event design                                                                                          | This P2 slice does not alter feed SQL/ranking or invalidate the feed on account polling                |
+| Wallet / Portfolio     | Canonical Account Value, 4-venue filters/breakdown, native cash/hold, exact side quantities and qualified current marks                                   | Missing/stale/borrowed/unsupported-mode values remain nullable; cash is not a trade authorization      |
+| History                | Ordinary `/orders` and `/orders/{id}` expose immutable observed executions, exact amounts/fees, separate `execution` kind                                 | No invented order status/original quantity, action reference or lifetime-completeness claim            |
+| Open orders            | Ordinary `/orders/open` consumes independently observed `frontendOpenOrders`; exact original/remaining quantity and expiry                                | No cancel control; fills are never reverse-engineered into current orders                              |
+| Idle refresh / repair  | Sidecar-safe finance-worker job; indexed enrolled-owner selection, leases, current owner/policy admission, bounded fill and non-funding-ledger cursors    | Unknown timestamp-saturated intervals are gaps; prior balances survive partial failures                |
+| Current accounting     | Proven zero-start BUY anchor, exact position-chain replay, weighted-average remaining basis, charged BUY fee once, partial disposal/fractional settlement | Unknown transforms/transfers, gaps, ambiguous sequence or conflicting evidence give nullable basis/PnL |
+| Admin                  | Existing Venue Lifecycle page consumes backend capability ceiling for Hyperliquid                                                                         | No newly enabled signing, funding, buy/sell or redemption                                              |
+
+### Source facts, recovery and accounting scope
+
+Provider snapshots remain authoritative for holdings. Immutable executions and
+ledger observations cannot seed a missing balance or resurrect an extinguished
+position. Exact execution identity includes time/coin/tid/oid, not a hash alone;
+YES/NO legs are not collapsed into one false trade. Source conflicts preserve the
+original evidence and mark affected current-lot accounting unknown. A later
+unambiguous zero-position BUY can recover that lot without deleting old facts.
+
+`history.positionAccounting` is versioned and bound to the same observation and
+exact quantity. Current remaining cost and PnL use integer decimal arithmetic;
+partial releases retain the rounding remainder until final disposal. BUY `fee`
+already includes builder fees, which are not charged again. An optional derived
+read failure rolls back to its savepoint, **not** the valid balance/fill update.
+The next normal refresh retries; a row-cap sentinel never produces a truncated
+financial sum. Unknown fee currency, split/merge/negate/expansion or uncertain
+side-token transfer allocation remain explicitly unsupported, not zero-cost.
+
+Exhausted provider-visible fill and ledger intervals establish current coverage;
+this is not proof of all earlier provider history. `realizedSinceAnchor` is
+qualified current-lot information, **not** all-time wallet PnL. General Portfolio
+realized PnL therefore remains null while lifetime coverage is unknown. Confirmed
+current cost may be shown even when its mark is missing; current PnL expires with
+the mark. Closed/proposed extreme prices do not become official settlement.
+
+Open-order failures preserve the prior successful list only until its original
+deadline. Future observations are not fresh. Changed account observations now
+invalidate common open orders as well as Account Value/Positions/History; unchanged
+polls do not invalidate those expensive queries. Ordinary policy-off and unlink
+remove cached native rows. Re-enable, renewed evidence and explicit refresh recover
+without deleting financial facts or waiting for arbitrary housekeeping.
+
+Provider-specific `hip4_account` controls resource/freshness limits, not product
+activation: worker interval/batch, repair pages/gap detail, lease and
+`accountingMaxRows` (default 20,000). Existing venue lifecycle remains authoritative.
+Migration `0286_hip4_account_refresh_due_index.sql` only adds the concurrent due
+index; it was executed on isolated PostgreSQL 16, not production.
+
+### Acceptance and repeatable checks
+
+- Backend: 142 HIP/position/lifecycle unit tests; finance-worker 24/24; full
+  workspace build 16/16 and changed TypeScript ESLint.
+- PostgreSQL 16: `pnpm -C apps/api run test:hip4:p2:db` runs nine suites
+  **sequentially**. Supply explicit `DATABASE_URL`, matching
+  `HUNCH_TEST_EXPECT_DATABASE` and isolated `REDIS_URL` for real auth rate limiting.
+  Tests use synthetic owners/provider responses and no external financial calls.
+- Generic accounting plans on rolled-back 10,000 owned + 30,000 foreign rows:
+  101-row fill/ledger reads used 12/11 hit buffers; complete 10k reads used
+  725/634; empty tails used 3. Local timings were approximately 0.06–3.6 ms.
+  Open-order snapshot JSON is materialized once (not decompressed per order).
+  Common History deep offsets/exact counts still scale with scoped history;
+  no constant-cost claim is made. These are local fixture measurements, not
+  production-scale or production-latency certification.
+- Frontend: 1,753 tests, typecheck, full lint, exact Node 20 Next/Turbopack build
+  (42 pages), generated API/fixture consistency check. Admin: 47 tests, build,
+  typecheck and lint.
+- Ordinary authenticated desktop/mobile Wallet and Portfolio/Orders/History
+  checked locally through the Next proxy, not only the canary. That owned account
+  is empty. Nonzero public read evidence is anonymized in
+  `apps/api/src/fixtures/hip4/public-p2-read-acceptance-20261014.json`:
+  220/43 positions, 162/69 open orders, 2,000 fills each, real fees and MergeOutcome
+  observations. It is **not** an owned funded-account browser test. Nonzero
+  ordinary-auth read-model behavior is covered separately with disposable fixtures.
+
+Next: P3 exact funding receipts/shortfall/withdrawal economics, then P4
+prepare/sign/submit/recovery and live funded end-to-end acceptance under separate
+authority. Full lifetime basis allocation across transfers and transformations
+needs a separate proven attribution contract before reporting all-time PnL.
+No commit, push, merge, deploy, production policy change, Telegram action,
+signature or trade is part of this acceptance.

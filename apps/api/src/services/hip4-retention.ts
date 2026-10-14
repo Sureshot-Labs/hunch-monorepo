@@ -6,7 +6,14 @@ export function hip4AccountProtectedRefsSql(candidateTable: string) {
     union
     select distinct candidate_row.market_id,'hip4_account_positions' as reason
     from ${candidateTable} candidate_row join hip4_account_positions position_row
-      on position_row.canonical_market_id=candidate_row.market_id`;
+      on position_row.canonical_market_id=candidate_row.market_id
+    union
+    select distinct candidate_row.market_id,'hip4_account_open_orders' as reason
+    from ${candidateTable} candidate_row join hip4_account_snapshots snapshot_row
+      on exists (select 1 from jsonb_array_elements(case
+        when jsonb_typeof(snapshot_row.history->'openOrders'->'items')='array'
+          then snapshot_row.history->'openOrders'->'items' else '[]'::jsonb end) order_item
+        where order_item->>'marketId'=candidate_row.market_id)`;
 }
 export function hip4DerivedReferencesSql(
   candidateTable: "candidate_pool",

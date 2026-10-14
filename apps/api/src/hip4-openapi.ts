@@ -11,6 +11,7 @@ import { registerHip4AccountRoutes } from "./routes/hip4-account.js";
 import { positionReadRouteSchemas } from "./schemas/position-read.js";
 import { venueMetadataRouteSchema } from "./schemas/venue-metadata.js";
 import { accountValueReadRouteSchemas } from "./schemas/account-value.js";
+import { orderReadRouteSchemas } from "./schemas/orders.js";
 
 const app = Fastify();
 app.setValidatorCompiler(validatorCompiler);
@@ -59,6 +60,12 @@ for (const surface of ["owned", "canary"] as const)
 for (const [path, schema] of Object.entries({
   ...positionReadRouteSchemas,
   ...accountValueReadRouteSchemas,
+  // Runtime bounds come from existing API env. Catch/transform values are not
+  // serialized by OpenAPI; these placeholders are never used by a handler.
+  ...orderReadRouteSchemas({
+    defaultLimit: 1,
+    maxLimit: Number.MAX_SAFE_INTEGER,
+  }),
 })) {
   app.get(path, { schema }, async () => {
     throw new Error("schema_only");

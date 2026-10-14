@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Pool } from "pg";
 import {
   hip4Identity,
+  hip4RawUnits,
   hip4ReadMarketSchema,
   parseHip4Coin,
   type Hip4Environment,
@@ -9,12 +10,15 @@ import {
 } from "@hunch/shared";
 import {
   hip4AccountObservationSchema,
+  hip4PositionAccountingSchema,
   type Hip4AccountObservation,
 } from "../schemas/hip4-account.js";
 import {
   compareUnsignedDecimals,
   multiplyUnsignedDecimals,
+  unitPriceFromRawEstimate,
 } from "../account-value/decimal.js";
+import { hip4SignedAmount } from "./hip4-account-projection.js";
 import { readHip4Policy } from "./hip4-repository.js";
 import { readHip4AccountPolicy } from "./hip4-account-repository.js";
 import type { z } from "zod";
@@ -26,7 +30,7 @@ export type { Hip4PortfolioPosition } from "../schemas/position-read.js";
  * second position ledger, infer holdings from fills, or call a provider. */
 export const HIP4_PORTFOLIO_ACCOUNTS_SQL = `
   select distinct lower(wallet_row.wallet_address) as account_address,
-    snapshot_row.observation
+    snapshot_row.observation, snapshot_row.history->'positionAccounting' as accounting
   from user_wallets wallet_row
   join users owner_row on owner_row.id=wallet_row.user_id and owner_row.is_active
   left join hip4_account_snapshots snapshot_row
@@ -46,6 +50,7 @@ export function projectHip4PortfolioPositions(input: {
   address: string;
   environment: Hip4Environment;
   observation: unknown;
+  accounting?: unknown;
   markets: ReadonlyMap<string, Hip4ReadMarket>;
   snapshotMaxAgeMs: number;
   now: number;
@@ -54,6 +59,16 @@ export function projectHip4PortfolioPositions(input: {
   const observedTime = Date.parse(observation.observedAt);
   const snapshotUntil = observedTime + input.snapshotMaxAgeMs;
   const fresh = observedTime <= input.now && snapshotUntil > input.now;
+  const accounting = hip4PositionAccountingSchema.safeParse(
+    input.accounting,
+  ).data;
+  const basisByCoin = new Map(
+    accounting?.observedAt === observation.observedAt
+      ? accounting.positions.map(
+          (position) => [position.coin, position] as const,
+        )
+      : [],
+  );
   return observation.positions.map((position) => {
     const displaySize = Number(position.quantity);
     if (!Number.isFinite(displaySize))
@@ -145,6 +160,27 @@ export function projectHip4PortfolioPositions(input: {
         ]),
       )
       .digest("hex");
+    const basis = basisByCoin.get(position.coin);
+    const costBasis =
+      basis?.reason === "verified" && basis.quantity === position.quantity
+        ? basis.costBasis
+        : null;
+    const averagePriceRaw =
+      costBasis == null
+        ? null
+        : unitPriceFromRawEstimate({
+            raw: hip4RawUnits(position.quantity, 5).toString(),
+            decimals: 5,
+            estimatedValue: costBasis,
+            outputScale: 13,
+          });
+    const pnl =
+      costBasis != null && value.marketValue != null
+        ? hip4SignedAmount(
+            hip4RawUnits(value.marketValue, 13) - hip4RawUnits(costBasis, 13),
+            13,
+          )
+        : null;
     return {
       id: `hyperliquid:${id}`,
       userId: input.userId,
@@ -154,8 +190,12 @@ export function projectHip4PortfolioPositions(input: {
       side: "LONG",
       size: displaySize,
       sizeRaw: position.quantity,
-      averagePrice: null,
-      unrealizedPnl: null,
+      averagePrice: averagePriceRaw == null ? null : Number(averagePriceRaw),
+      averagePriceRaw,
+      costBasisRaw: costBasis,
+      basisReason: basis?.reason ?? "history_incomplete",
+      unrealizedPnl: pnl == null ? null : Number(pnl),
+      unrealizedPnlRaw: pnl,
       realizedPnl: null,
       lastUpdatedAt: observation.observedAt,
       instrument: {
@@ -252,6 +292,7 @@ export async function readHip4OwnedPortfolio(
   const rows = await db.query<{
     account_address: string;
     observation: unknown;
+    accounting: unknown;
   }>(HIP4_PORTFOLIO_ACCOUNTS_SQL, [
     input.userId,
     read.policy.environment,
@@ -259,6 +300,7 @@ export async function readHip4OwnedPortfolio(
   ]);
   const observed = rows.rows.map((row) => ({
     address: row.account_address,
+    accounting: row.accounting,
     observation:
       row.observation == null
         ? null
@@ -302,6 +344,7 @@ export async function readHip4OwnedPortfolio(
         address: row.address,
         environment: read.policy.environment,
         observation: row.observation,
+        accounting: row.accounting,
         markets,
         now,
         snapshotMaxAgeMs: account.policy.snapshotMaxAgeMs,
@@ -328,7 +371,9 @@ export async function readHip4OwnedPortfolio(
           position.marketSummary?.outcomeLabel,
         ].some((value) => value?.toLowerCase().includes(needle))),
   );
-  result.coverage.missingCostBasis = result.positions.length;
+  result.coverage.missingCostBasis = result.positions.filter(
+    (position) => position.costBasisRaw == null,
+  ).length;
   result.coverage.unpricedPositions = result.positions.filter(
     (position) => position.valuation.marketValue == null,
   ).length;

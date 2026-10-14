@@ -4,6 +4,8 @@ import {
   advanceHip4FillRepair,
   HIP4_FILL_PAGE_MAX,
   planHip4FillRepair,
+  planHip4LedgerRepair,
+  advanceHip4LedgerRepair,
 } from "./services/hip4-account-history.js";
 import { hip4AccountPolicySchema } from "./services/hip4-account-policy.js";
 
@@ -13,6 +15,34 @@ const at = new Date(now).toISOString();
 const plan = () => planHip4FillRepair(undefined, lookback, now, 32);
 const rows = (time: number, count: number) =>
   Array.from({ length: count }, (_, tid) => ({ time, tid, coin: "@107" }));
+
+test("ledger repair resumes inclusively with its own cap and independent durable cursor", () => {
+  const initial = planHip4LedgerRepair(undefined, lookback, now, 32);
+  const page = Array.from({ length: 500 }, () => ({
+    time: now - 100,
+    hash: "test",
+    delta: { type: "unknown_future_event" },
+  }));
+  const next = advanceHip4LedgerRepair(initial, page, at, 32);
+  assert.equal(next.nextTime, now - 100);
+  assert.equal(next.source, "hyperliquid_non_funding_ledger");
+  const resumed = planHip4LedgerRepair(next, lookback, now + 1, 32);
+  assert.equal(resumed.endTime, now);
+  assert.equal(resumed.nextTime, next.nextTime);
+  assert.equal(advanceHip4LedgerRepair(resumed, [], at, 32).nextTime, null);
+  assert.equal(planHip4FillRepair(next, lookback, now, 32).cursorResetCount, 1);
+  const saturated = advanceHip4LedgerRepair(
+    initial,
+    page.map((row) => ({ ...row, time: initial.startTime })),
+    at,
+    32,
+  );
+  assert.equal(saturated.gapCount, 1);
+  assert.equal(saturated.nextTime, initial.startTime + 1);
+  assert.throws(() =>
+    advanceHip4LedgerRepair(initial, [{ time: now + 1 }], at, 32),
+  );
+});
 
 test("fill repair fixes its end and resumes inclusively after the entire mixed-venue page", () => {
   const first = plan();
@@ -34,10 +64,25 @@ test("empty or uncapped provider range can finish but never claims retained all-
   const finished = advanceHip4FillRepair(plan(), [], at, 32);
   assert.equal(finished.nextTime, null);
   assert.equal(finished.providerRetentionLimited, true);
+  assert.equal(finished.coveredFrom, plan().startTime);
+  assert.equal(finished.coveredThrough, now);
   const extended = planHip4FillRepair(finished, lookback, now + 60000, 32);
   assert.equal(extended.nextTime, now);
   assert.equal(extended.endTime, now + 60000);
   assert.equal(extended.lastSuccessAt, at);
+  const extendedComplete = advanceHip4FillRepair(
+    extended,
+    [],
+    new Date(now + 60000).toISOString(),
+    32,
+  );
+  assert.equal(extendedComplete.coveredFrom, plan().startTime);
+  assert.equal(extendedComplete.coveredThrough, now + 60000);
+  const legacy = { ...finished, coveredFrom: null, coveredThrough: null };
+  assert.equal(
+    planHip4FillRepair(legacy, lookback, now, 32).nextTime,
+    now - lookback,
+  );
 });
 
 test("a full tied-timestamp page records the unpageable gap before advancing", () => {

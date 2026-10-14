@@ -38,6 +38,21 @@ const userId = randomUUID();
 const now = Date.now();
 const requests: { type: string; user?: string }[] = [];
 let failRole = false;
+let failOrders = false;
+let openItems = [
+  {
+    coin: "#87751",
+    oid: 70,
+    side: "B",
+    limitPx: "0.4",
+    sz: "3",
+    origSz: "5",
+    timestamp: now - 3000,
+    orderType: "Limit",
+    isTrigger: false,
+    reduceOnly: false,
+  },
+];
 let onSpot: (() => Promise<void>) | undefined;
 const fill = {
   coin: "#87751",
@@ -62,6 +77,8 @@ globalThis.fetch = async (url, options) => {
   requests.push(request);
   if (request.type === "userRole" && failRole)
     return new Response("unavailable", { status: 503 });
+  if (request.type === "frontendOpenOrders" && failOrders)
+    return new Response("unavailable", { status: 503 });
   if (request.type === "spotClearinghouseState") await onSpot?.();
   const responses: Record<string, unknown> = {
     userRole: { role: "user" },
@@ -85,6 +102,7 @@ globalThis.fetch = async (url, options) => {
     },
     userFills: [fill, { ...fill, tid: 2, time: now - 2000 }],
     userFillsByTime: [],
+    frontendOpenOrders: openItems,
     userNonFundingLedgerUpdates: [],
   };
   assert.ok(
@@ -98,12 +116,14 @@ const [
   { pool },
   { hip4AccountRoutes },
   { positionsRoutes },
+  { ordersRoutes },
   { closeAcquiredRuntimeResources },
 ] = await Promise.all([
   import("./auth.js"),
   import("./db.js"),
   import("./routes/hip4-account.js"),
   import("./routes/positions.js"),
+  import("./routes/orders.js"),
   import("./runtime-resource-cleanup.js"),
 ]);
 assert.equal(
@@ -117,6 +137,11 @@ app.setSerializerCompiler(serializerCompiler);
 const policyIds = [randomUUID(), randomUUID()];
 const lifecycle = await installHip4TestLifecycle(target);
 try {
+  // Synthetic requests only, isolated disposable DB. Previous integration
+  // suites must not spend this fixture's provider-admission allowance.
+  await target.query(
+    "delete from hip4_request_budget where scope='public-info'",
+  );
   await target.query(
     "insert into users(id,is_active,is_admin) values($1,true,false)",
     [userId],
@@ -137,6 +162,7 @@ try {
   await AuthService.createSession(userId, address, token);
   await app.register(hip4AccountRoutes);
   await app.register(positionsRoutes);
+  await app.register(ordersRoutes);
   await app.ready();
   const base = "/wallets/hyperliquid/account";
   const headers = {
@@ -212,12 +238,131 @@ try {
   assert.equal(positions.positions[0].averagePrice, null);
   assert.equal(positions.positions[0].instrument.sideIndex, 1);
 
+  const history = await get("/orders?venue=hyperliquid&limit=1");
+  assert.equal(history.statusCode, 200, history.body);
+  assert.equal(history.headers["cache-control"], "private, no-store");
+  const observed = history.json();
+  assert.equal(observed.coverage.hyperliquid, "limited");
+  assert.equal(observed.orders.length, 1);
+  assert.equal(observed.pagination.total, 2);
+  assert.equal(observed.orders[0].kind, "execution");
+  assert.equal(observed.orders[0].size, null);
+  assert.equal(observed.orders[0].status, "observed");
+  assert.equal(observed.orders[0].outcome, "NO");
+  assert.equal(observed.orders[0].tokenId, "hyperliquid:mainnet:87751");
+  assert.equal(observed.orders[0].execution.fee, "0.0012");
+  assert.equal(observed.orders[0].actionRef, null);
+  assert.equal(
+    (await get("/orders?type=execution&limit=1&offset=1")).json().orders.length,
+    1,
+  );
+  assert.equal(
+    (await get("/orders?type=execution&offset=2")).json().orders.length,
+    0,
+  );
+  assert.equal(
+    (await get("/orders?status=filled&venue=hyperliquid")).json().orders.length,
+    0,
+  );
+  assert.equal(
+    (await get("/orders?status=observed&venue=hyperliquid")).json().orders
+      .length,
+    2,
+  );
+  assert.equal(
+    (await get("/orders?tokenId=hyperliquid:mainnet:87750")).json().orders
+      .length,
+    0,
+  );
+  assert.equal(
+    (await get("/orders?tokenId=hyperliquid:mainnet:87751")).json().orders
+      .length,
+    2,
+  );
+  assert.equal(
+    (await get("/orders?marketId=hyperliquid:testnet:outcome:8775")).json()
+      .orders.length,
+    0,
+  );
+  assert.equal(
+    (await get("/orders?venue=hyperliquid&q=NoMatchingMarket")).json().orders
+      .length,
+    0,
+  );
+  const openPage = await get("/orders/open?venue=hyperliquid");
+  assert.equal(openPage.statusCode, 200, openPage.body);
+  const open = openPage.json();
+  assert.equal(open.orders.length, 1);
+  assert.equal(open.openOrderCoverage.hyperliquid.state, "fresh");
+  assert.equal(open.orders[0].kind, "observed_order");
+  assert.equal(open.orders[0].filledSize, 2);
+  assert.equal(open.orders[0].averageFillPrice, null);
+  assert.equal(open.orders[0].observedOrder.remainingQuantity, "3");
+  assert.equal(open.orders[0].actionRef, null);
+  assert.equal(
+    (await get(`/orders/${encodeURIComponent(open.orders[0].id)}`)).statusCode,
+    200,
+  );
+  assert.equal(
+    (await get("/orders/open?venue=hyperliquid&offset=1")).json().orders.length,
+    0,
+  );
+  assert.equal(
+    (await get("/orders/open?tokenId=hyperliquid:mainnet:87750")).json().orders
+      .length,
+    0,
+  );
+  assert.equal(
+    (await get(`/orders/${observed.orders[0].id}`)).json().order.execution.id,
+    observed.orders[0].execution.id,
+  );
+  assert.equal(
+    requests.length,
+    afterFirst,
+    "shared History never calls a provider",
+  );
+  await target.query(
+    `update hip4_account_snapshots set history=jsonb_set(history,'{openOrders,observedAt}',to_jsonb($2::text)) where account_address=$1`,
+    [address, new Date(now + 3_600_000).toISOString()],
+  );
+  const futureOpen = (await get("/orders/open?venue=hyperliquid")).json();
+  assert.equal(futureOpen.orders.length, 0);
+  assert.equal(futureOpen.openOrderCoverage.hyperliquid.state, "unavailable");
+  await target.query(
+    `update hip4_account_snapshots set history=jsonb_set(history,'{openOrders,observedAt}',to_jsonb($2::text)) where account_address=$1`,
+    [address, open.orders[0].observedOrder.observedAt],
+  );
+
   failRole = true;
   const failure = (await get(`${base}?refresh=1`)).json();
   assert.equal(failure.refreshState, "failed");
   assert.equal(failure.observation.observedAt, account.observation.observedAt);
   assert.equal(failure.observation.cash.total, "123.45");
   failRole = false;
+
+  failOrders = true;
+  await get(`${base}?refresh=1`);
+  assert.equal(
+    (await get("/orders/open?venue=hyperliquid")).json().openOrderCoverage
+      .hyperliquid.state,
+    "unavailable",
+  );
+  assert.equal(
+    (await get("/orders/open?venue=hyperliquid")).json().orders.length,
+    1,
+    "last valid list remains visible within its original freshness window",
+  );
+  await target.query(
+    `update hip4_account_snapshots set history=jsonb_set(history,'{openOrders,observedAt}',to_jsonb($2::text)) where account_address=$1`,
+    [address, new Date(now - 120000).toISOString()],
+  );
+  assert.equal(
+    (await get("/orders/open?venue=hyperliquid")).json().orders.length,
+    0,
+    "expired open orders are not current orders",
+  );
+  failOrders = false;
+  openItems = [];
 
   let releaseSpot!: () => void;
   let reachedSpot!: () => void;
@@ -253,6 +398,13 @@ try {
   const recovered = (await refreshing).json();
   assert.equal(recovered.refreshState, "idle");
   assert.equal(recovered.observation.cash.total, "123.45");
+  const emptyOpen = (await get("/orders/open?venue=hyperliquid")).json();
+  assert.equal(emptyOpen.orders.length, 0);
+  assert.equal(
+    emptyOpen.openOrderCoverage.hyperliquid.state,
+    "fresh",
+    "an authoritative empty snapshot replaces prior orders",
+  );
   assert.equal(
     (
       await target.query(
@@ -278,6 +430,11 @@ try {
   const beforeDisabled = requests.length;
   assert.equal((await get(`${base}?refresh=1`)).statusCode, 404);
   assert.equal((await get(`${base}/executions`)).statusCode, 404);
+  assert.equal(
+    (await get("/orders?venue=hyperliquid")).json().orders.length,
+    0,
+  );
+  assert.equal((await get(`/orders/${observed.orders[0].id}`)).statusCode, 404);
   assert.equal(requests.length, beforeDisabled);
   await setMode("exit-only");
   const exitRead = await get(base);
@@ -301,6 +458,11 @@ try {
   );
   assert.equal((await get(base)).statusCode, 403);
   assert.equal((await get(`${base}/executions`)).statusCode, 403);
+  assert.equal(
+    (await get("/orders?venue=hyperliquid")).json().orders.length,
+    0,
+  );
+  assert.equal((await get(`/orders/${observed.orders[0].id}`)).statusCode, 404);
   assert.equal(requests.length, beforeDisabled);
   console.log(
     "HIP ordinary wallet PG16 auth, ownership, refresh/replay, lease, recovery, lifecycle and shared Portfolio PASS",

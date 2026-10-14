@@ -33,8 +33,15 @@ import {
   advanceHip4FillRepair,
   hip4FillPageSchema,
   planHip4FillRepair,
+  planHip4LedgerRepair,
+  advanceHip4LedgerRepair,
 } from "./hip4-account-history.js";
-import { hip4FillRepairSchema } from "../schemas/hip4-account.js";
+import {
+  hip4FillRepairSchema,
+  hip4LedgerRepairSchema,
+  hip4PositionAccountingSchema,
+} from "../schemas/hip4-account.js";
+import { projectHip4OpenOrders } from "./hip4-open-orders.js";
 
 const boundedRows = z.array(z.record(z.string(), z.unknown())).max(2000);
 const errorCode = (error: unknown) =>
@@ -43,6 +50,8 @@ const errorCode = (error: unknown) =>
     : error instanceof Error &&
         [
           "unsupported_account_role",
+          "account_owner_unavailable",
+          "account_read_disabled",
           "invalid_history_cursor",
           "invalid_history_page_order",
           "invalid_history_page_size",
@@ -58,9 +67,20 @@ export async function refreshHip4OwnedAccount(input: {
   lease: string;
   now: number;
   fetcher?: typeof fetch;
+  requireCurrentOwner?: boolean;
 }) {
   const { pool, policy, address, now, lease, accountPolicy } = input;
   const admit = async (weight: number) => {
+    if (input.requireCurrentOwner) {
+      const owned = await pool.query(
+        `select 1 from user_wallets wallet_row
+        join users owner_row on owner_row.id=wallet_row.user_id and owner_row.is_active
+        where wallet_row.is_verified and wallet_row.wallet_type='ethereum'
+          and lower(wallet_row.wallet_address)=$1 limit 1`,
+        [address],
+      );
+      if (!owned.rowCount) throw new Error("account_owner_unavailable");
+    }
     const [read, account] = await Promise.all([
       readHip4Policy(pool, "accountRead"),
       readHip4AccountPolicy(pool),
@@ -70,7 +90,7 @@ export async function refreshHip4OwnedAccount(input: {
       !account.policy.enabled ||
       read.policy.environment !== policy.environment
     )
-      return false;
+      throw new Error("account_read_disabled");
     return admitHip4Request(
       pool,
       policy.environment,
@@ -132,6 +152,18 @@ export async function refreshHip4OwnedAccount(input: {
   // Account binding/role is checked before history. A failed fresh account read
   // does not allow following agent/master relationships or fabricating zeros.
   if (observation) {
+    try {
+      history.openOrders = projectHip4OpenOrders(
+        policy.environment,
+        await accountRead({ type: "frontendOpenOrders", user: address }),
+        Date.now(),
+      );
+      history.openOrdersError = null;
+    } catch (error) {
+      // Preserve the last successful list/time. Failure is not an empty list.
+      history.openOrdersError = errorCode(error);
+      errors.push(`open_orders_${errorCode(error)}`);
+    }
     const startTime = Math.max(0, now - accountPolicy.historyLookbackMs);
     history.lookbackStart = new Date(startTime).toISOString();
     try {
@@ -160,23 +192,51 @@ export async function refreshHip4OwnedAccount(input: {
     } catch (error) {
       errors.push(`fills_${errorCode(error)}`);
     }
-    try {
-      const rows = boundedRows.parse(
-        await accountRead({
-          type: "userNonFundingLedgerUpdates",
-          user: address,
-          startTime,
-          endTime: now,
-        }),
+    if (accountPolicy.ledgerRepairPagesPerRefresh > 0) {
+      let repair = planHip4LedgerRepair(
+        previous?.history.ledgerRepair,
+        accountPolicy.historyLookbackMs,
+        now,
+        accountPolicy.historyRepairMaxGapDetails,
       );
-      const parsed = rows.map((row) => parseHip4LedgerObservation(row).entry);
-      if (parsed.some((row) => row.time < startTime || row.time > now))
-        throw new Error("wrong_time_range");
-      ledger.push(...parsed);
-      history.ledgerObservedAt = new Date(now).toISOString();
-      history.ledgerProviderCapped = rows.length >= 500;
-    } catch (error) {
-      errors.push(`ledger_${errorCode(error)}`);
+      try {
+        for (
+          let page = 0;
+          page < accountPolicy.ledgerRepairPagesPerRefresh &&
+          repair.nextTime != null;
+          page++
+        ) {
+          const ledgerStartTime = repair.nextTime;
+          if (ledgerStartTime == null) break;
+          repair = { ...repair, lastAttemptAt: new Date(now).toISOString() };
+          const rows = boundedRows.parse(
+            await accountRead({
+              type: "userNonFundingLedgerUpdates",
+              user: address,
+              startTime: ledgerStartTime,
+              endTime: repair.endTime,
+            }),
+          );
+          const parsed = rows.map(
+            (row) => parseHip4LedgerObservation(row).entry,
+          );
+          const next = advanceHip4LedgerRepair(
+            repair,
+            rows,
+            new Date(now).toISOString(),
+            accountPolicy.historyRepairMaxGapDetails,
+          );
+          ledger.push(...parsed);
+          repair = next;
+          history.ledgerObservedAt = new Date(now).toISOString();
+          history.ledgerProviderCapped = rows.length >= 500;
+        }
+      } catch (error) {
+        const reason = errorCode(error);
+        errors.push(`ledger_${reason}`);
+        repair = { ...repair, lastError: reason };
+      }
+      history.ledgerRepair = repair;
     }
     if (accountPolicy.historyRepairPagesPerRefresh > 0) {
       let repair;
@@ -233,7 +293,7 @@ export async function refreshHip4OwnedAccount(input: {
     }
   }
   try {
-    await persistHip4AccountRefresh(pool, {
+    const saved = await persistHip4AccountRefresh(pool, {
       environment: policy.environment,
       address,
       lease,
@@ -243,7 +303,9 @@ export async function refreshHip4OwnedAccount(input: {
       ledger,
       history,
       error: errors.length ? errors.join(",") : null,
+      accountingMaxRows: accountPolicy.accountingMaxRows,
     });
+    return { saved, errors };
   } catch {
     await failHip4AccountRefresh(
       pool,
@@ -308,6 +370,12 @@ export function hip4AccountReadResponse(input: {
       ledgerProviderCapped: row?.history.ledgerProviderCapped ?? false,
       fillRepair:
         hip4FillRepairSchema.safeParse(row?.history.fillRepair).data ?? null,
+      ledgerRepair:
+        hip4LedgerRepairSchema.safeParse(row?.history.ledgerRepair).data ??
+        null,
+      positionAccounting:
+        hip4PositionAccountingSchema.safeParse(row?.history.positionAccounting)
+          .data ?? null,
     },
   });
 }

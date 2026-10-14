@@ -249,6 +249,7 @@ try {
       userFills: [fill],
       userFillsByTime: [fill],
       userNonFundingLedgerUpdates: [],
+      frontendOpenOrders: [],
     };
     return Response.json(responses[body.type]);
   };
