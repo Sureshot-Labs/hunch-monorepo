@@ -252,6 +252,16 @@ function buildApproxFromLedger(
   };
 }
 
+export function calculateWalletPositionApproxMetrics(
+  input: WalletPositionApproxInput,
+  ledger?: WalletPositionLedgerState,
+): WalletPositionApproxMetrics {
+  const markPrice = resolveMarkPrice(input);
+  return ledger && ledger.eventCount > 0
+    ? buildApproxFromLedger(input, ledger, markPrice)
+    : buildSnapshotFallback(input, markPrice);
+}
+
 export async function loadWalletPositionApproxMetrics(
   client: Queryable,
   inputs: WalletPositionApproxInput[],
@@ -275,12 +285,7 @@ export async function loadWalletPositionApproxMetrics(
       input.outcomeSide,
     );
     const ledger = ledgerByKey.get(key);
-    const markPrice = resolveMarkPrice(input);
-
-    const metrics =
-      ledger && ledger.eventCount > 0
-        ? buildApproxFromLedger(input, ledger, markPrice)
-        : buildSnapshotFallback(input, markPrice);
+    const metrics = calculateWalletPositionApproxMetrics(input, ledger);
 
     metricsByKey.set(key, metrics);
   }

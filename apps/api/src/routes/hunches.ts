@@ -9,7 +9,7 @@ import {
   publicHolderDisplayName,
   publicHunchSources,
 } from "../services/hunch-public-presentation.js";
-import { loadLatestWalletPositionNowMap } from "../services/wallet-position-approx.js";
+import { loadHunchHolderPositions } from "../services/hunch-holder-positions.js";
 import { makeWalletPositionLedgerKey } from "../services/wallet-position-ledger.js";
 
 const querySchema = z
@@ -212,7 +212,7 @@ const LATEST_HOLDER_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const LATEST_HOLDER_CACHE_MS = 15_000;
 const LATEST_HOLDER_CACHE_MAX_KEYS = 256;
 type LatestHolderPositionMap = Awaited<
-  ReturnType<typeof loadLatestWalletPositionNowMap>
+  ReturnType<typeof loadHunchHolderPositions>
 >;
 const hunchListCache = new Map<
   string,
@@ -224,12 +224,12 @@ const latestHolderCache = new Map<
 >();
 
 function loadLatestHolderPositions(
-  positionKeys: Parameters<typeof loadLatestWalletPositionNowMap>[1],
+  positionKeys: Parameters<typeof loadHunchHolderPositions>[1],
 ): Promise<LatestHolderPositionMap> {
   const cacheKey = JSON.stringify(positionKeys);
   const cached = latestHolderCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.result;
-  const result = loadLatestWalletPositionNowMap(pool, positionKeys);
+  const result = loadHunchHolderPositions(pool, positionKeys);
   void result.catch(() => {
     if (latestHolderCache.get(cacheKey)?.result === result) {
       latestHolderCache.delete(cacheKey);
@@ -495,6 +495,7 @@ export const hunchesRoutes: FastifyPluginAsync = async (app) => {
           }),
           positionUsd: finiteNumber(meta.positionUsd),
           openPnlUsd: finiteNumber(meta.openPnlUsd),
+          positionResult: latestPosition?.positionResult ?? null,
           latestPosition: positionIsRecent
             ? {
                 positionUsd: latestPosition.positionSizeUsd,
