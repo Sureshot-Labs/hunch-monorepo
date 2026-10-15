@@ -1,20 +1,13 @@
 import type { Pool } from "@hunch/infra";
-import { POLYMARKET_PROTOCOL_CONTRACTS } from "@hunch/shared";
 
 import { pool as defaultPool } from "../db.js";
-import {
-  createResolvedPositionNotificationFromRow,
-  type ResolvedPositionRow,
-} from "./positions-notifications.js";
+import { createResolvedPositionNotificationFromRow } from "./positions-notifications.js";
+import { fetchPositionResolutionCandidates } from "../repos/position-resolution-candidates.js";
 import { syncPositionsForUserWallet } from "./positions-sync.js";
 import { resolveTelegramNotificationsPolicy } from "./telegram-notification-policy.js";
 import { venueLifecycleAllows } from "./venue-lifecycle.js";
 
 const PRODUCER_LOCK_KEY = "position_resolution_notifications:v1";
-
-type ResolutionCandidateRow = ResolvedPositionRow & {
-  user_id: string;
-};
 
 export type PositionResolutionProducerSummary = {
   affectedWallets: number;
@@ -74,65 +67,10 @@ export async function runPositionResolutionNotificationProducer(
     if (!locked) return emptySummary("producer_already_running");
 
     const limit = Math.min(1_000, Math.max(1, input.limit ?? 250));
-    const { rows } = await client.query<ResolutionCandidateRow>(
-      `
-        select
-          p.id,
-          p.user_id,
-          p.token_id,
-          p.wallet_address,
-          p.venue,
-          market.id as market_id,
-          resolved_asset.outcome_side,
-          market.resolved_outcome,
-          market.resolved_outcome_pct,
-          coalesce(p.last_updated_at, p.updated_at) as position_snapshot_at
-        from unified_markets market
-        cross join lateral (
-          select binding_row.asset_id as token_id,
-            case binding_row.outcome_index when 0 then 'YES' else 'NO' end as outcome_side,
-            case binding_row.position_contract
-              when '${POLYMARKET_PROTOCOL_CONTRACTS.conditionalTokens.toLowerCase()}' then ''
-              else binding_row.position_contract end as position_contract
-          from polymarket_asset_bindings binding_row
-          where market.venue = 'polymarket' and binding_row.chain_id = 137
-            and binding_row.market_id = market.id
-          union all
-          select token.token_id, token.side as outcome_side, null::text as position_contract
-          from unified_tokens token
-          where token.market_id = market.id and token.venue = market.venue
-        ) resolved_asset
-        join positions p
-          on p.token_id = resolved_asset.token_id
-         and p.venue = market.venue
-         and (
-           p.position_contract = resolved_asset.position_contract
-           or (
-             resolved_asset.position_contract is null
-             and not exists (
-               select 1 from polymarket_asset_bindings existing_binding
-               where p.venue = 'polymarket' and existing_binding.chain_id = 137
-                 and existing_binding.asset_id = p.token_id
-                 and existing_binding.position_contract = coalesce(nullif(p.position_contract, ''),
-                   '${POLYMARKET_PROTOCOL_CONTRACTS.conditionalTokens.toLowerCase()}')
-             )
-           )
-         )
-        where market.resolution_observed_at >= $1::timestamptz
-          and (market.resolved_outcome is not null or market.resolved_outcome_pct is not null)
-          and p.position_scope = 'own'
-          and p.size > 0
-          and coalesce(p.is_hidden, false) = false
-          and not exists (
-            select 1
-            from notifications notification
-            where notification.user_id = p.user_id
-              and notification.dedupe_key = 'position_resolved:' || p.id::text
-          )
-        order by market.resolution_observed_at asc, p.id asc
-        limit $2
-      `,
-      [resolvedPolicy.effectiveAt, limit],
+    const rows = await fetchPositionResolutionCandidates(
+      client,
+      resolvedPolicy.effectiveAt,
+      limit,
     );
 
     const affected = new Map<

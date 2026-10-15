@@ -80,7 +80,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
           if (sql.includes("pg_try_advisory_lock")) {
             return { rows: [{ acquired: true }] };
           }
-          if (sql.includes("from unified_markets market")) {
+          if (sql.includes("from eligible_positions p")) {
             assert.equal(params[0], "2026-07-15T12:00:00.000Z");
             assert.match(sql, /resolution_observed_at >= \$1/);
             assert.match(sql, /not exists/);
