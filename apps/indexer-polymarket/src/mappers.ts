@@ -1,5 +1,8 @@
 import { v4 as uuid } from "uuid";
-import { readPolymarketIndexedAssets } from "@hunch/shared";
+import {
+  readPolymarketIndexedAssets,
+  normalizeGammaLifecycle,
+} from "@hunch/shared";
 import type {
   TEvent,
   TMarket,
@@ -463,46 +466,6 @@ function pickStringValue(
   key: string,
 ): string | undefined {
   return typeof record[key] === "string" ? (record[key] as string) : undefined;
-}
-
-function parseOutcomePrices(raw: unknown): number[] | null {
-  if (raw == null) return null;
-  if (Array.isArray(raw)) {
-    const parsed = raw
-      .map((value) => n(value))
-      .filter((value): value is number => value != null);
-    return parsed.length ? parsed : null;
-  }
-  if (typeof raw === "string") {
-    const trimmed = raw.trim();
-    if (!trimmed) return null;
-    try {
-      const parsed = JSON.parse(trimmed) as unknown;
-      if (Array.isArray(parsed)) {
-        const values = parsed
-          .map((value) => n(value))
-          .filter((value): value is number => value != null);
-        return values.length ? values : null;
-      }
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-function resolveBinaryOutcome(
-  prices: number[] | null,
-): "YES" | "NO" | undefined {
-  if (!prices || prices.length < 2) return undefined;
-  const yes = prices[0];
-  const no = prices[1];
-  if (yes == null || no == null) return undefined;
-  const winThreshold = 0.999;
-  const loseThreshold = 0.001;
-  if (yes >= winThreshold && no <= loseThreshold) return "YES";
-  if (no >= winThreshold && yes <= loseThreshold) return "NO";
-  return undefined;
 }
 
 export function mapEventRow(venueId: number, e: TEvent) {
@@ -1024,23 +987,8 @@ export function mapToUnifiedMarket(
     event as Record<string, unknown> | undefined,
   );
 
-  // Map Polymarket status to unified status
-  let status: "ACTIVE" | "CLOSED" | "SETTLED" | "ARCHIVED" = "ACTIVE";
-
-  if (m.archived) {
-    status = "ARCHIVED";
-  } else if (m.version === "v2" && m.resolutionStatus === "resolved") {
-    status = "SETTLED";
-  } else if (
-    m.closed ||
-    m.active === false ||
-    m.acceptingOrders === false ||
-    (m.version === "v2" && m.resolutionStatus === "inactive")
-  ) {
-    // Prefer explicit source lifecycle flags over endDate. Polymarket can
-    // expose inactive candidate/placeholder slots while acceptingOrders=true.
-    status = "CLOSED";
-  }
+  const lifecycle = normalizeGammaLifecycle(m);
+  const { status } = lifecycle;
 
   const clobTokenIds = JSON.stringify(indexedAssets.assetIds);
 
@@ -1051,14 +999,7 @@ export function mapToUnifiedMarket(
     return m.question;
   })();
 
-  const outcomePrices = parseOutcomePrices(
-    m.outcomePrices ?? extra.outcomePrices,
-  );
-  const resolvedOutcome =
-    status !== "ACTIVE" &&
-    (m.version !== "v2" || m.resolutionStatus === "resolved")
-      ? resolveBinaryOutcome(outcomePrices)
-      : undefined;
+  const resolvedOutcome = lifecycle.resolvedOutcome ?? undefined;
 
   const metadata = compactMetadata({
     version: m.version,

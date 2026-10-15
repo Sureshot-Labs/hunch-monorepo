@@ -1,4 +1,5 @@
 import { isRecord } from "../lib/type-guards.js";
+import { normalizeGammaLifecycle } from "@hunch/shared";
 
 export type BinaryResolvedOutcome = "YES" | "NO";
 
@@ -71,25 +72,6 @@ function readRecordSources(record: Record<string, unknown>) {
   return sources;
 }
 
-function readOutcomePrices(value: unknown): [number, number] | null {
-  const parsed = (() => {
-    if (Array.isArray(value)) return value;
-    if (typeof value !== "string") return null;
-    try {
-      const decoded = JSON.parse(value);
-      return Array.isArray(decoded) ? decoded : null;
-    } catch {
-      return null;
-    }
-  })();
-
-  if (!parsed || parsed.length < 2) return null;
-  const yes = parseNumber(parsed[0]);
-  const no = parseNumber(parsed[1]);
-  if (yes == null || no == null) return null;
-  return [yes, no];
-}
-
 function polymarketOutcomePricesValue(
   market: Record<string, unknown>,
 ): string | null {
@@ -105,19 +87,10 @@ function polymarketOutcomePricesValue(
 export function resolvePolymarketGammaOutcome(
   record: Record<string, unknown>,
 ): SafeResolutionOutcome {
-  const prices = readOutcomePrices(
-    record.outcomePrices ?? record.outcome_prices,
-  );
-  if (!prices) return EMPTY_OUTCOME;
-
-  const [yes, no] = prices;
-  if (yes >= 0.999 && no <= 0.001) {
-    return { resolvedOutcome: "YES", resolvedOutcomePct: null };
-  }
-  if (no >= 0.999 && yes <= 0.001) {
-    return { resolvedOutcome: "NO", resolvedOutcomePct: null };
-  }
-  return EMPTY_OUTCOME;
+  return {
+    resolvedOutcome: normalizeGammaLifecycle(record).resolvedOutcome,
+    resolvedOutcomePct: null,
+  };
 }
 
 export function buildPolymarketSourceRepair(

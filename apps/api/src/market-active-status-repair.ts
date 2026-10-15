@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { fetchGammaEntityById, normalizeGammaLifecycle } from "@hunch/shared";
 import { createClient } from "redis";
 import {
   MARKET_REPAIR_CANDIDATES_SQL,
@@ -300,55 +301,18 @@ async function fetchGammaMarket(
   marketId: string,
   timeoutMs: number,
 ): Promise<Record<string, unknown> | null> {
-  const encoded = encodeURIComponent(marketId);
-  const urls = [
-    `${gammaBaseUrl()}/markets/${encoded}`,
-    `${gammaBaseUrl()}/markets?id=${encoded}&limit=1&offset=0`,
-  ];
-
-  let lastError: string | null = null;
-  for (const url of urls) {
-    try {
-      const res = await fetchJsonWithTimeout(url, timeoutMs);
-      if (!res.ok) {
-        lastError = `gamma_${res.status}`;
-        continue;
-      }
-      const market = firstRecord(res.payload);
-      if (market) return market;
-    } catch (error) {
-      lastError = errorMessage(error);
-    }
-  }
-
-  if (lastError) throw new Error(lastError);
-  return null;
+  return fetchGammaEntityById(
+    { baseUrl: gammaBaseUrl(), timeoutMs },
+    "markets",
+    marketId,
+  );
 }
 
 function mapGammaMarketStatus(
   market: Record<string, unknown>,
 ): Pick<ValidationRow, "target_status" | "reason"> {
-  const archived = boolValue(market, ["archived"]);
-  const closed = boolValue(market, ["closed"]);
-  const active = boolValue(market, ["active"]);
-  const acceptingOrders = boolValue(market, [
-    "acceptingOrders",
-    "accepting_orders",
-  ]);
-
-  if (archived === true) {
-    return { target_status: "ARCHIVED", reason: "gamma_archived" };
-  }
-  if (closed === true) {
-    return { target_status: "CLOSED", reason: "gamma_closed" };
-  }
-  if (active === false) {
-    return { target_status: "CLOSED", reason: "gamma_inactive" };
-  }
-  if (acceptingOrders === false) {
-    return { target_status: "CLOSED", reason: "gamma_not_accepting_orders" };
-  }
-  return { target_status: null, reason: "gamma_active" };
+  const { status, reason } = normalizeGammaLifecycle(market);
+  return { target_status: status === "ACTIVE" ? null : status, reason };
 }
 
 async function validatePolymarket(
@@ -1267,6 +1231,11 @@ async function runUpdates(client: PoolClient): Promise<{
     `
       update unified_markets m
       set status = r.target_status::unified_status,
+          metadata = coalesce(m.metadata, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
+            'version', r.polymarket_source_raw->'version',
+            'resolutionStatus', r.polymarket_source_raw->'resolutionStatus',
+            'outcomePrices', r.polymarket_source_raw->'outcomePrices'
+          )),
           updated_at_db = now()
       from tmp_market_active_status_repair r
       where m.id = r.market_id
@@ -1294,7 +1263,7 @@ async function runUpdates(client: PoolClient): Promise<{
           accepting_orders = coalesce(r.polymarket_source_accepting_orders, pm.accepting_orders),
           resolution_source = coalesce(r.polymarket_source_resolution_source, pm.resolution_source),
           resolved_by = coalesce(r.polymarket_source_resolved_by, pm.resolved_by),
-          raw = coalesce(r.polymarket_source_raw, pm.raw),
+          raw = coalesce(pm.raw, '{}'::jsonb) || jsonb_strip_nulls(r.polymarket_source_raw),
           updated_at_db = now()
       from tmp_market_active_status_repair r
       where r.venue = 'polymarket'
@@ -1308,7 +1277,7 @@ async function runUpdates(client: PoolClient): Promise<{
           or pm.accepting_orders is distinct from coalesce(r.polymarket_source_accepting_orders, pm.accepting_orders)
           or pm.resolution_source is distinct from coalesce(r.polymarket_source_resolution_source, pm.resolution_source)
           or pm.resolved_by is distinct from coalesce(r.polymarket_source_resolved_by, pm.resolved_by)
-          or pm.raw is distinct from coalesce(r.polymarket_source_raw, pm.raw)
+          or pm.raw is distinct from (coalesce(pm.raw, '{}'::jsonb) || jsonb_strip_nulls(r.polymarket_source_raw))
         )
     `,
   );

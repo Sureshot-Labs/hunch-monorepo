@@ -1,0 +1,395 @@
+{
+  "capturedAt": "2026-10-15T10:54:25.557Z",
+  "markets": [
+    {
+      "id": "5689978",
+      "question": "Will Central Park record at least 0.01 inches of precipitation on October 15, 2026?",
+      "conditionId": "0x01d1a30dee2101fc8fd92fa2f2a953588c000000000000000000000000000000",
+      "slug": "polyv2-central-park-rain-2026-10-15",
+      "version": "v2",
+      "positionIds": [
+        "822709245333686270121246585318766300838577363286952392141203892625595170816",
+        "822709245333686270121246585318766300838577363286952392141203892625595170817"
+      ],
+      "clobTokenIds": "[\"822709245333686270121246585318766300838577363286952392141203892625595170816\", \"822709245333686270121246585318766300838577363286952392141203892625595170817\"]",
+      "outcomes": "[\"Yes\", \"No\"]",
+      "outcomePrices": "[\"0.5\", \"0.5\"]",
+      "resolutionStatus": "active",
+      "active": true,
+      "closed": false,
+      "archived": false,
+      "acceptingOrders": true,
+      "negRisk": false,
+      "createdAt": "2026-10-14T16:00:01.020025Z",
+      "updatedAt": "2026-10-15T09:06:50.809889Z",
+      "endDate": "2026-10-16T16:00:00Z",
+      "enableOrderBook": true
+    },
+    {
+      "id": "5689979",
+      "question": "Will Central Park’s maximum temperature be 59°F or below on October 15, 2026?",
+      "conditionId": "0x02a08c4785adb817981e815c0f70b916f8000500000000000000000000000000",
+      "slug": "polyv2-central-park-high-59f-or-below-2026-10-15",
+      "version": "v2",
+      "positionIds": [
+        "1188289400253837004831324751630024356846422796503227596198993195749496324096",
+        "1188289400253837004831324751630024356846422796503227596198993195749496324097"
+      ],
+      "clobTokenIds": "[\"1188289400253837004831324751630024356846422796503227596198993195749496324096\", \"1188289400253837004831324751630024356846422796503227596198993195749496324097\"]",
+      "outcomes": "[\"Yes\", \"No\"]",
+      "outcomePrices": "[\"0.5\", \"0.5\"]",
+      "resolutionStatus": "active",
+      "active": true,
+      "closed": false,
+      "archived": false,
+      "acceptingOrders": true,
+      "negRisk": true,
+      "createdAt": "2026-10-14T16:00:01.102575Z",
+      "updatedAt": "2026-10-15T07:04:50.811872Z",
+      "endDate": "2026-10-16T16:00:00Z",
+      "enableOrderBook": true
+    },
+    {
+      "id": "5716011",
+      "question": "Zcash Up or Down - October 15, 12:15AM-12:20AM ET",
+      "conditionId": "0x0165784919ee3ddd00ea511c705b0698a0000000000000000000000000000000",
+      "slug": "polyv2zec-updown-5m-1792037700",
+      "version": "v2",
+      "positionIds": [
+        "631594582494418998669602229526822803665096124478325765148099289384835088384",
+        "631594582494418998669602229526822803665096124478325765148099289384835088385"
+      ],
+      "clobTokenIds": "[\"631594582494418998669602229526822803665096124478325765148099289384835088384\", \"631594582494418998669602229526822803665096124478325765148099289384835088385\"]",
+      "outcomes": "[\"Up\", \"Down\"]",
+      "outcomePrices": "[\"1\", \"0\"]",
+      "resolutionStatus": "resolved",
+      "active": true,
+      "closed": true,
+      "archived": false,
+      "acceptingOrders": false,
+      "createdAt": "2026-10-15T00:15:50.739399Z",
+      "updatedAt": "2026-10-15T04:21:08.081053Z",
+      "endDate": "2026-10-15T04:20:00Z",
+      "enableOrderBook": true
+    }
+  ],
+  "holders": {
+    "status": 200,
+    "payload": {
+      "data": [
+        {
+          "token_id": "822709245333686270121246585318766300838577363286952392141203892625595170816",
+          "holders": [
+            {
+              "proxy_wallet": "0x8d3f52833636d0918b74426b7f5be855bd51b84d",
+              "bio": "",
+              "token_id": "822709245333686270121246585318766300838577363286952392141203892625595170816",
+              "pseudonym": "Low-Ornament-Fold",
+              "amount": 15,
+              "display_username_public": false,
+              "outcome_index": 0,
+              "name": "qa-clob-v2-soak-maker-0",
+              "profile_image": "",
+              "profile_image_optimized": "",
+              "verified": false,
+              "avg_price": 0.5076,
+              "entry_cost_usdc": 7.5,
+              "current_price": 0.5,
+              "current_value": 7.5,
+              "realized_pnl": -0.3858,
+              "unrealized_pnl": 0,
+              "total_pnl": -0.3858
+            },
+            {
+              "proxy_wallet": "0x50eac5de1bb76e613c3c5bf85af831909bae010f",
+              "bio": "",
+              "token_id": "822709245333686270121246585318766300838577363286952392141203892625595170816",
+              "pseudonym": "",
+              "amount": 1.05262,
+              "display_username_public": false,
+              "outcome_index": 0,
+              "name": "",
+              "profile_image": "",
+              "profile_image_optimized": "",
+              "verified": false,
+              "avg_price": 0.9571,
+              "entry_cost_usdc": 0.9999,
+              "current_price": 0.5,
+              "current_value": 0.5263,
+              "realized_pnl": 0,
+              "unrealized_pnl": -0.4736,
+              "total_pnl": -0.4736
+            }
+          ]
+        },
+        {
+          "token_id": "822709245333686270121246585318766300838577363286952392141203892625595170817",
+          "holders": [
+            {
+              "proxy_wallet": "0xb1c383134661be8edcf8f2162abbfbb815f43f98",
+              "bio": "",
+              "token_id": "822709245333686270121246585318766300838577363286952392141203892625595170817",
+              "pseudonym": "Outlying-Helo-Blizzard",
+              "amount": 15,
+              "display_username_public": false,
+              "outcome_index": 1,
+              "name": "qa-clob-v2-soak-taker-0",
+              "profile_image": "",
+              "profile_image_optimized": "",
+              "verified": false,
+              "avg_price": 0.5125,
+              "entry_cost_usdc": 7.5,
+              "current_price": 0.5,
+              "current_value": 7.5,
+              "realized_pnl": -0.8125,
+              "unrealized_pnl": 0,
+              "total_pnl": -0.8125
+            },
+            {
+              "proxy_wallet": "0x23a5e5e9090d78ecc97e6555f7f11b0f9e2311c1",
+              "bio": "",
+              "token_id": "822709245333686270121246585318766300838577363286952392141203892625595170817",
+              "pseudonym": "",
+              "amount": 1.05262,
+              "display_username_public": false,
+              "outcome_index": 1,
+              "name": "",
+              "profile_image": "",
+              "profile_image_optimized": "",
+              "verified": false,
+              "avg_price": 0.05,
+              "entry_cost_usdc": 0.0526,
+              "current_price": 0.5,
+              "current_value": 0.5263,
+              "realized_pnl": 0,
+              "unrealized_pnl": 0.4736,
+              "total_pnl": 0.4736
+            }
+          ]
+        }
+      ],
+      "pagination": {
+        "limit": 2,
+        "offset": 0,
+        "has_more": false,
+        "next_cursor": null
+      }
+    }
+  },
+  "trades": {
+    "status": 200,
+    "payload": {
+      "data": [
+        {
+          "proxy_wallet": "0x50eac5de1bb76e613c3c5bf85af831909bae010f",
+          "side": "BUY",
+          "token_id": "822709245333686270121246585318766300838577363286952392141203892625595170816",
+          "condition_id": "0x01d1a30dee2101fc8fd92fa2f2a953588c000000000000000000000000000000",
+          "size": 1.05262,
+          "price": 0.95,
+          "timestamp": 1792054471,
+          "title": "Will Central Park record at least 0.01 inches of precipitation on October 15, 2026?",
+          "slug": "polyv2-central-park-rain-2026-10-15",
+          "icon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/test-nyc-weather-pciture-cgUEW73XBkei.jpg",
+          "event_slug": "polyv2-central-park-rain-2026-10-15",
+          "outcome": "Yes",
+          "outcome_index": 0,
+          "name": "",
+          "pseudonym": "",
+          "bio": "",
+          "profile_image": "",
+          "profile_image_optimized": "",
+          "transaction_hash": "0xc111197bee2785108da6f220d702417b09a39442cd7f39f6a483b413de78b002"
+        },
+        {
+          "proxy_wallet": "0x8d3f52833636d0918b74426b7f5be855bd51b84d",
+          "side": "BUY",
+          "token_id": "822709245333686270121246585318766300838577363286952392141203892625595170816",
+          "condition_id": "0x01d1a30dee2101fc8fd92fa2f2a953588c000000000000000000000000000000",
+          "size": 5,
+          "price": 0.5,
+          "timestamp": 1792038692,
+          "title": "Will Central Park record at least 0.01 inches of precipitation on October 15, 2026?",
+          "slug": "polyv2-central-park-rain-2026-10-15",
+          "icon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/test-nyc-weather-pciture-cgUEW73XBkei.jpg",
+          "event_slug": "polyv2-central-park-rain-2026-10-15",
+          "outcome": "Yes",
+          "outcome_index": 0,
+          "name": "qa-clob-v2-soak-maker-0",
+          "pseudonym": "Low-Ornament-Fold",
+          "bio": "",
+          "profile_image": "",
+          "profile_image_optimized": "",
+          "transaction_hash": "0x6d3c6b6a3f99ef2365fc84f3b0ad975a018eeec2332d96ceacc5b3cfa342d672"
+        }
+      ],
+      "pagination": {
+        "limit": 2,
+        "offset": 0,
+        "has_more": true,
+        "next_cursor": "eyJkYXRhIjp7InR5cGUiOiJ0cmFkZXMiLCJwYXJhbXMiOnsibCI6MiwidHMiOjE3OTIwMzg2OTIsInNxIjoiOTU1NTU1NzgwMDA2NDA3NzYwIiwiZCI6Mn19LCJzaWciOiJlMjQyZmVhYjExN2EwOTkyNzdmNmRlYzk4MWJmMDgyZCJ9"
+      }
+    }
+  },
+  "tradesNext": {
+    "status": 200,
+    "payload": {
+      "data": [
+        {
+          "proxy_wallet": "0xb1c383134661be8edcf8f2162abbfbb815f43f98",
+          "side": "BUY",
+          "token_id": "822709245333686270121246585318766300838577363286952392141203892625595170816",
+          "condition_id": "0x01d1a30dee2101fc8fd92fa2f2a953588c000000000000000000000000000000",
+          "size": 5,
+          "price": 0.5,
+          "timestamp": 1792038337,
+          "title": "Will Central Park record at least 0.01 inches of precipitation on October 15, 2026?",
+          "slug": "polyv2-central-park-rain-2026-10-15",
+          "icon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/test-nyc-weather-pciture-cgUEW73XBkei.jpg",
+          "event_slug": "polyv2-central-park-rain-2026-10-15",
+          "outcome": "Yes",
+          "outcome_index": 0,
+          "name": "qa-clob-v2-soak-taker-0",
+          "pseudonym": "Outlying-Helo-Blizzard",
+          "bio": "",
+          "profile_image": "",
+          "profile_image_optimized": "",
+          "transaction_hash": "0x59cd63d900250d06c4d318865a06bc3e11f91f4566b177e3c9e1e5631d29b3d0"
+        },
+        {
+          "proxy_wallet": "0xb1c383134661be8edcf8f2162abbfbb815f43f98",
+          "side": "BUY",
+          "token_id": "822709245333686270121246585318766300838577363286952392141203892625595170817",
+          "condition_id": "0x01d1a30dee2101fc8fd92fa2f2a953588c000000000000000000000000000000",
+          "size": 5,
+          "price": 0.5,
+          "timestamp": 1792037969,
+          "title": "Will Central Park record at least 0.01 inches of precipitation on October 15, 2026?",
+          "slug": "polyv2-central-park-rain-2026-10-15",
+          "icon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/test-nyc-weather-pciture-cgUEW73XBkei.jpg",
+          "event_slug": "polyv2-central-park-rain-2026-10-15",
+          "outcome": "No",
+          "outcome_index": 1,
+          "name": "qa-clob-v2-soak-taker-0",
+          "pseudonym": "Outlying-Helo-Blizzard",
+          "bio": "",
+          "profile_image": "",
+          "profile_image_optimized": "",
+          "transaction_hash": "0xabcb397965f7c7476c36275c51726f706ad2ed463ecf283e3028906909d98e7e"
+        }
+      ],
+      "pagination": {
+        "limit": 2,
+        "offset": 2,
+        "has_more": true,
+        "next_cursor": "eyJkYXRhIjp7InR5cGUiOiJ0cmFkZXMiLCJwYXJhbXMiOnsibCI6MiwidHMiOjE3OTIwMzc5NjksInNxIjoiOTU1NTUwOTYwMDAzNTAzNzQwIiwiZCI6NH19LCJzaWciOiIwYWI0YzJjOThkOTJkYjRiMGM4NDU4ZmM5Mzg0NWQ4NSJ9"
+      }
+    }
+  },
+  "history": {
+    "status": 200,
+    "payload": {
+      "data": [
+        {
+          "timestamp": 1791990000,
+          "price": 0.675,
+          "resolution_seconds": 10800
+        },
+        {
+          "timestamp": 1792000800,
+          "price": 0.5,
+          "resolution_seconds": 10800
+        }
+      ],
+      "pagination": {
+        "limit": 2,
+        "offset": 0,
+        "has_more": true,
+        "next_cursor": "eyJkYXRhIjp7InR5cGUiOiJwcmljZXNfaGlzdG9yeSIsInBhcmFtcyI6eyJsIjoyLCJ0cyI6MTc5MjAwMDgwMCwic3EiOiIxMDgwMCIsImQiOjJ9fSwic2lnIjoiY2VhZGE2MjVkMTQ5MjNiYzhkNTdjNTUzMGQ5NzMxNGEifQ"
+      }
+    }
+  },
+  "book": {
+    "status": 200,
+    "payload": {
+      "market": "0x01d1a30dee2101fc8fd92fa2f2a953588c000000000000000000000000000000",
+      "asset_id": "822709245333686270121246585318766300838577363286952392141203892625595170816",
+      "timestamp": "1792061155592",
+      "hash": "bb53cc41ea36c70e1bc5fb526924f8b4659fc947",
+      "bids": [
+        {
+          "price": "0.05",
+          "size": "5"
+        }
+      ],
+      "asks": [
+        {
+          "price": "0.95",
+          "size": "5"
+        }
+      ],
+      "min_order_size": "5",
+      "tick_size": "0.01",
+      "neg_risk": false,
+      "last_trade_price": "0.050",
+      "version": "v2"
+    }
+  },
+  "positions": {
+    "data": [
+      {
+        "proxy_wallet": "0x8d3f52833636d0918b74426b7f5be855bd51b84d",
+        "token_id": "665412853801903435329850914720420432563075284325064944385417134321432526848",
+        "condition_id": "0x01789c3e802ce2bcb010058ca1f5daae4e000000000000000000000000000000",
+        "current_size": 20,
+        "avg_price": 0.5,
+        "entry_cost_usdc": 10,
+        "entry_fees_usdc": 0.09488,
+        "total_cost_usdc": 10.09488,
+        "current_price": 0.5,
+        "current_value": 10,
+        "total_size": 120,
+        "realized_pnl": -0.53,
+        "unrealized_pnl": 0,
+        "total_pnl": -0.53,
+        "percent_pnl": 0,
+        "percent_realized_pnl": -83.3333,
+        "status": "OPEN",
+        "redeemable": false,
+        "mergeable": false,
+        "negative_risk": false,
+        "archived": false,
+        "title": "Will Central Park’s maximum temperature be at least 65°F on October 14, 2026?",
+        "slug": "polyv2-central-park-high-at-least-65f-2026-10-14",
+        "event_id": "1183347",
+        "event_slug": "polyv2-central-park-temperature-thresholds-2026-10-14",
+        "outcome": "Yes",
+        "outcome_index": 0,
+        "opposite_outcome": "No",
+        "opposite_token_id": "665412853801903435329850914720420432563075284325064944385417134321432526849",
+        "end_date": "2026-10-15",
+        "last_event_at": 1792008397,
+        "first_entry_at": 1791908779
+      }
+    ],
+    "pagination": {
+      "limit": 2,
+      "offset": 0,
+      "has_more": true,
+      "next_cursor": "eyJkYXRhIjp7InR5cGUiOiJwb3NpdGlvbnMiLCJwYXJhbXMiOnsibCI6MiwiZCI6MiwiayI6IjcuNTAwMCIsInQiOiI0NTM2OTI5MTA3ODY4MTc4NzE3ODM4MjgyNDYzNDY0MTQ2NzY0NjE0NTc5NjM5MDQ5MzI1MDkwMTg4Mjg3ODMxNzY1NjI3Njk5MjAiLCJhIjoidSIsImF2IjoiMHg4ZDNmNTI4MzM2MzZkMDkxOGI3NDQyNmI3ZjViZTg1NWJkNTFiODRkIiwic3QiOiJPUEVOIiwicyI6IkNVUlJFTlRfVkFMVUUiLCJkaXIiOiJERVNDIn19LCJzaWciOiIyMGMwM2ZjOGM4YWU0YzY5NjAwMzhiYmY2NDM1MjdlMiJ9"
+    }
+  },
+  "emptyBook": {
+    "market": "0x0187dd954d0d8ba73c0c7060638cb34442000000000000000000000000000000",
+    "asset_id": "692366513417661155336148049756305266080511019182487022765543804641459830784",
+    "timestamp": "1792059358381",
+    "hash": "8e980ab0f44f96d8651af0dfba56c30f974e5887",
+    "bids": [],
+    "asks": [],
+    "min_order_size": "5",
+    "tick_size": "0.01",
+    "neg_risk": false,
+    "last_trade_price": "",
+    "version": "v2"
+  }
+}

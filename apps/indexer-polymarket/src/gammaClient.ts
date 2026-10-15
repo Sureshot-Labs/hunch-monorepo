@@ -1,31 +1,42 @@
-import { sleep } from "@hunch/shared";
+import {
+  sleep,
+  fetchGammaJson,
+  fetchGammaEntityById,
+  gammaUrl,
+  gammaPageSize,
+  isTransientGammaError,
+  type GammaVersion,
+} from "@hunch/shared";
 import { env } from "./env.js";
-import { GammaEvent, GammaEventsResponse } from "./types.js";
+import { GammaEvent } from "./types.js";
 import type { TEvent as GammaEventType } from "./types.js";
 import { z } from "zod";
 
-const GammaEventsListResponse = z.array(GammaEvent);
+// Validate the page envelope/identity here, not all nested markets at once.
+// processEvents validates each row and durably queues malformed IDs before
+// the page checkpoint advances. Keep every row for correct offset accounting.
+const GammaPageEventSchema = z.object({ id: z.string().min(1) }).passthrough();
+export type GammaPageEvent = z.infer<typeof GammaPageEventSchema>;
+const GammaEventsListResponse = z.array(GammaPageEventSchema);
+const GammaEventsPageResponse = z
+  .object({
+    events: GammaEventsListResponse.optional(),
+    data: GammaEventsListResponse.optional(),
+  })
+  .refine((value) => Array.isArray(value.events) || Array.isArray(value.data));
 
-export class GammaHttpError extends Error {
-  readonly status: number;
-  readonly url: string;
-  readonly bodySnippet: string;
+export { GammaHttpError } from "@hunch/shared";
 
-  constructor(status: number, url: string, body: string) {
-    const snippet = body.trim().slice(0, 1000);
-    super(
-      snippet.length > 0
-        ? `Gamma ${status} ${url}: ${snippet}`
-        : `Gamma ${status} ${url}`,
-    );
-    this.name = "GammaHttpError";
-    this.status = status;
-    this.url = url;
-    this.bodySnippet = snippet;
-  }
+function requestOptions() {
+  return {
+    baseUrl: env.gammaBase,
+    attempts: env.gammaRetryAttempts,
+    retryBaseMs: env.gammaRetryBaseMs,
+  };
 }
 
 export type GammaEventsQuery = {
+  version: GammaVersion;
   offset: number;
   limit: number;
   order?: string;
@@ -47,21 +58,8 @@ export type GammaEventsQuery = {
 export type GammaEventsByIdsResult = {
   events: GammaEventType[];
   failedIds: string[];
+  missingIds: string[];
 };
-
-function resolveEventsUrl(): string {
-  const base = env.gammaBase.replace(/\/+$/, "");
-  return `${base}/events`;
-}
-
-function resolveMarketsUrl(): string {
-  const base = env.gammaBase.replace(/\/+$/, "");
-  return `${base}/markets`;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value != null;
-}
 
 function setOptionalBool(
   sp: URLSearchParams,
@@ -101,21 +99,10 @@ function setOptionalString(
   sp.set(k, v);
 }
 
-function isRetriableGammaError(error: unknown): boolean {
-  if (error instanceof GammaHttpError) {
-    return error.status === 429 || error.status >= 500;
-  }
-  return error instanceof TypeError;
-}
-
-function gammaRetryDelayMs(attempt: number): number {
-  if (env.gammaRetryBaseMs <= 0) return 0;
-  return env.gammaRetryBaseMs * Math.max(1, attempt);
-}
-
-async function fetchEventsPageOnce(q: GammaEventsQuery) {
-  const url = new URL(resolveEventsUrl());
-  url.searchParams.set("limit", String(q.limit));
+export async function fetchEventsPage(q: GammaEventsQuery) {
+  const url = gammaUrl(requestOptions(), "events");
+  url.searchParams.set("version", q.version);
+  url.searchParams.set("limit", String(gammaPageSize(q.limit)));
   url.searchParams.set("offset", String(q.offset));
   setOptionalString(url.searchParams, "order", q.order);
   setOptionalBool(url.searchParams, "ascending", q.ascending);
@@ -134,43 +121,21 @@ async function fetchEventsPageOnce(q: GammaEventsQuery) {
   setOptionalString(url.searchParams, "end_date_min", q.end_date_min);
   setOptionalString(url.searchParams, "end_date_max", q.end_date_max);
 
-  const r = await fetch(url, { headers: { accept: "application/json" } });
-  if (!r.ok) {
-    const body = await r.text().catch(() => "");
-    throw new GammaHttpError(r.status, url.toString(), body);
-  }
-  const j = await r.json();
+  const j = await fetchGammaJson(url, requestOptions());
 
-  let events: GammaEventType[];
+  let events: GammaPageEvent[];
   if (Array.isArray(j)) {
-    events = GammaEventsListResponse.parse(j) as GammaEventType[];
+    events = GammaEventsListResponse.parse(j);
   } else {
-    const parsed = GammaEventsResponse.parse(j);
-    events = (parsed.events ?? parsed.data ?? []) as GammaEventType[];
+    const parsed = GammaEventsPageResponse.parse(j);
+    events = parsed.events ?? parsed.data ?? [];
   }
   return { events };
 }
 
-export async function fetchEventsPage(q: GammaEventsQuery) {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= env.gammaRetryAttempts; attempt += 1) {
-    try {
-      return await fetchEventsPageOnce(q);
-    } catch (error) {
-      lastError = error;
-      if (attempt >= env.gammaRetryAttempts || !isRetriableGammaError(error)) {
-        throw error;
-      }
-      const delayMs = gammaRetryDelayMs(attempt);
-      if (delayMs > 0) await sleep(delayMs);
-    }
-  }
-  throw lastError;
-}
-
 export type GammaEventsPage = {
   offset: number;
-  events: GammaEventType[];
+  events: GammaPageEvent[];
 };
 
 export type GammaEventPaginationOptions = {
@@ -183,10 +148,10 @@ export type GammaEventPaginationOptions = {
 
 // Streaming generator: yields events page-by-page to avoid loading everything into memory
 export async function* iterateEventPages(
-  opts: GammaEventPaginationOptions = {},
+  opts: GammaEventPaginationOptions,
 ): AsyncGenerator<GammaEventsPage> {
   let offset = opts.startOffset ?? 0;
-  const pageSize = opts.pageSize ?? env.pageSize;
+  const pageSize = gammaPageSize(opts.pageSize ?? env.pageSize);
   const maxPages = opts.maxPages ?? 0;
   const maxOffset = opts.maxOffset;
 
@@ -218,7 +183,9 @@ export async function* iterateEventPages(
       limit: pageSize,
       ...query,
     });
-    console.log(`${events.length} events at offset ${offset}`);
+    console.log(
+      `Gamma ${query.version}: ${events.length} events at offset ${offset}`,
+    );
 
     if (!events.length) {
       console.log("No more events found, stopping pagination");
@@ -235,13 +202,15 @@ export async function* iterateEventPages(
   }
 }
 
-export async function* iterateEvents(opts: GammaEventPaginationOptions = {}) {
+export async function* iterateEvents(
+  opts: GammaEventPaginationOptions = { version: "v1" },
+) {
   for await (const page of iterateEventPages(opts)) yield page.events;
 }
 
 // Keep for backward compatibility if needed elsewhere
 export async function fetchAllEvents() {
-  const out: GammaEventType[] = [];
+  const out: GammaPageEvent[] = [];
   for await (const events of iterateEvents()) {
     out.push(...events);
   }
@@ -263,27 +232,56 @@ export async function fetchEventsByIds(
 
 async function fetchEventsByIdsChunk(
   ids: number[],
-): Promise<GammaEventsByIdsResult> {
-  if (ids.length === 0) return { events: [], failedIds: [] };
+  version: GammaVersion,
+): Promise<GammaEventsByIdsResult & { transientIds: string[] }> {
+  if (ids.length === 0)
+    return { events: [], failedIds: [], missingIds: [], transientIds: [] };
 
   try {
     const { events } = await fetchEventsPage({
+      version,
       offset: 0,
       limit: ids.length,
       id: ids,
     });
-    return { events: events ?? [], failedIds: [] };
-  } catch {
-    if (ids.length <= 1) {
-      return { events: [], failedIds: ids.map(String) };
+    const requested = new Set(ids.map(String));
+    const matched: GammaEventType[] = [];
+    const invalidIds: string[] = [];
+    for (const event of events) {
+      if (!requested.has(event.id)) continue;
+      const parsed = GammaEvent.safeParse(event);
+      if (parsed.success) matched.push(parsed.data);
+      else invalidIds.push(event.id);
+    }
+    const found = new Set(matched.map((event) => String(event.id)));
+    return {
+      events: matched,
+      failedIds: invalidIds,
+      missingIds: ids
+        .map(String)
+        .filter((id) => !found.has(id) && !invalidIds.includes(id)),
+      transientIds: [],
+    };
+  } catch (error) {
+    // Splitting a provider outage into singleton requests amplifies downtime.
+    // Only isolate bad IDs/schema rows; transient retries were already spent.
+    if (ids.length <= 1 || isTransientGammaError(error)) {
+      return {
+        events: [],
+        failedIds: ids.map(String),
+        missingIds: [],
+        transientIds: isTransientGammaError(error) ? ids.map(String) : [],
+      };
     }
 
     const splitAt = Math.ceil(ids.length / 2);
-    const left = await fetchEventsByIdsChunk(ids.slice(0, splitAt));
-    const right = await fetchEventsByIdsChunk(ids.slice(splitAt));
+    const left = await fetchEventsByIdsChunk(ids.slice(0, splitAt), version);
+    const right = await fetchEventsByIdsChunk(ids.slice(splitAt), version);
     return {
       events: [...left.events, ...right.events],
       failedIds: [...left.failedIds, ...right.failedIds],
+      missingIds: [...left.missingIds, ...right.missingIds],
+      transientIds: [...left.transientIds, ...right.transientIds],
     };
   }
 }
@@ -291,63 +289,68 @@ async function fetchEventsByIdsChunk(
 export async function fetchEventsByIdsDetailed(
   ids: Array<number | string>,
 ): Promise<GammaEventsByIdsResult> {
-  const cleaned = ids
-    .map((id) => Number(String(id).trim()))
-    .filter((id) => Number.isFinite(id));
-  if (cleaned.length === 0) return { events: [], failedIds: [] };
+  const cleaned = [
+    ...new Set(
+      ids
+        .map((id) => Number(String(id).trim()))
+        .filter((id) => Number.isSafeInteger(id) && id > 0),
+    ),
+  ];
+  if (cleaned.length === 0)
+    return { events: [], failedIds: [], missingIds: [] };
 
   const eventsById = new Map<string, GammaEventType>();
   const failedIds: string[] = [];
-  const chunkSize = Math.min(env.pageSize, 200);
+  const missingIds: string[] = [];
+  const chunkSize = gammaPageSize(env.pageSize);
 
   for (let i = 0; i < cleaned.length; i += chunkSize) {
     const chunk = cleaned.slice(i, i + chunkSize);
-    const result = await fetchEventsByIdsChunk(chunk);
-    for (const event of result.events) {
-      eventsById.set(String(event.id), event);
+    const failures = new Map<string, number>();
+    for (const version of ["v1", "v2"] as const) {
+      const remaining = chunk.filter((id) => !eventsById.has(String(id)));
+      const result = await fetchEventsByIdsChunk(remaining, version);
+      for (const event of result.events)
+        eventsById.set(String(event.id), event);
+      for (const id of result.transientIds)
+        failures.set(id, (failures.get(id) ?? 0) + 1);
     }
-    failedIds.push(...result.failedIds);
+    // Sequential, at most one direct request (with existing bounded retries)
+    // per missing ID. A failed list request is never evidence of deletion.
+    let directUnavailable = false;
+    for (const id of chunk.map(String).filter((id) => !eventsById.has(id))) {
+      if (directUnavailable || failures.get(id) === 2) {
+        failedIds.push(id);
+        continue;
+      }
+      try {
+        const payload = await fetchGammaEntityById(
+          requestOptions(),
+          "events",
+          id,
+          false,
+        );
+        if (payload) eventsById.set(id, GammaEvent.parse(payload));
+        else missingIds.push(id);
+      } catch (error) {
+        failedIds.push(id);
+        directUnavailable = isTransientGammaError(error);
+      }
+    }
   }
-
-  return { events: Array.from(eventsById.values()), failedIds };
-}
-
-function extractFirstMarketPayload(
-  payload: unknown,
-): Record<string, unknown> | null {
-  if (Array.isArray(payload)) {
-    const first = payload[0];
-    return isRecord(first) ? first : null;
+  if (failedIds.length || missingIds.length) {
+    console.warn("Gamma event lookup incomplete", {
+      requested: cleaned.length,
+      found: eventsById.size,
+      failedIds,
+      missingIds,
+    });
   }
-  if (!isRecord(payload)) return null;
-  const data = payload.data;
-  if (Array.isArray(data)) {
-    const first = data[0];
-    return isRecord(first) ? first : null;
-  }
-  return payload;
+  return { events: Array.from(eventsById.values()), failedIds, missingIds };
 }
 
 export async function fetchMarketById(
   marketId: string,
 ): Promise<Record<string, unknown> | null> {
-  const encoded = encodeURIComponent(marketId);
-  const directUrl = `${resolveMarketsUrl()}/${encoded}`;
-  const queryUrl = `${resolveMarketsUrl()}?id=${encoded}&limit=1&offset=0`;
-
-  for (const url of [directUrl, queryUrl]) {
-    try {
-      const response = await fetch(url, {
-        headers: { accept: "application/json" },
-      });
-      if (!response.ok) continue;
-      const payload = await response.json();
-      const market = extractFirstMarketPayload(payload);
-      if (market) return market;
-    } catch {
-      // Try fallback URL before failing.
-    }
-  }
-
-  return null;
+  return fetchGammaEntityById(requestOptions(), "markets", marketId);
 }
