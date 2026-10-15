@@ -62,7 +62,11 @@ export function publicHunchPricePresentation(input: {
       : {};
   const statuses =
     input.venue === "polymarket"
-      ? [metadata.umaResolutionStatus, metadata.umaResolutionStatuses]
+      ? [
+          metadata.umaResolutionStatus,
+          metadata.umaResolutionStatuses,
+          metadata.version === "v2" ? metadata.resolutionStatus : null,
+        ]
           .flatMap((value) => {
             const parsed = jsonValue(value);
             return Array.isArray(parsed) ? parsed : [parsed];

@@ -1,7 +1,25 @@
 import { ensureRedis, redis } from "./redis.js";
+import {
+  parseGammaV2Checkpoint,
+  type GammaV2Checkpoint,
+} from "./gamma-sync.js";
 
 export const POLYMARKET_EVENTS_OFFSET_KEY =
   "indexer:polymarket:gamma:events_offset:v1";
+export const POLYMARKET_V2_CHECKPOINT_KEY =
+  "indexer:polymarket:gamma:catch_up:v2";
+
+export async function getPolymarketV2Checkpoint(): Promise<GammaV2Checkpoint> {
+  await ensureRedis();
+  return parseGammaV2Checkpoint(await redis.get(POLYMARKET_V2_CHECKPOINT_KEY));
+}
+
+export async function setPolymarketV2Checkpoint(
+  checkpoint: GammaV2Checkpoint,
+): Promise<void> {
+  await ensureRedis();
+  await redis.set(POLYMARKET_V2_CHECKPOINT_KEY, JSON.stringify(checkpoint));
+}
 
 function parseNonNegativeInt(raw: string | null): number | null {
   if (raw == null) return null;

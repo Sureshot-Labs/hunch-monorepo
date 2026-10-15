@@ -270,6 +270,8 @@ const HUNCH_COLUMNS = `
   e.status as event_status, e.end_date as event_end_time,
   pm.accepting_orders as pm_accepting_orders,
   jsonb_build_object(
+    'version', m.metadata->'version',
+    'resolutionStatus', m.metadata->'resolutionStatus',
     'outcomePrices', m.metadata->'outcomePrices',
     'umaResolutionStatus', m.metadata->'umaResolutionStatus',
     'umaResolutionStatuses', m.metadata->'umaResolutionStatuses',

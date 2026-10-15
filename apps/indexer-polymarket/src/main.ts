@@ -6,6 +6,8 @@ import {
   syncCatchUpFromCursor,
   syncHotEventStatuses,
   syncHotWindow,
+  syncV2CatchUp,
+  syncGammaEventRepairs,
 } from "./bootstrap.js";
 import { startMarketWS, updateMarketWSSubscriptions } from "./wsMarket.js";
 import { log } from "./log.js";
@@ -97,6 +99,7 @@ async function periodicBootstrap() {
         processedEvents: hot.processedEvents,
         processedMarkets: hot.processedMarkets,
         pages: hot.pages,
+        lanes: hot.lanes,
       },
       lastError: null,
     });
@@ -115,6 +118,33 @@ async function periodicBootstrap() {
       log.warn("periodic bootstrap err", e);
     }
   } finally {
+    // Independent of hot/status/quote failures; resume the persisted V2 page
+    // on the next existing cycle. Never restart a completed catalog pass.
+    try {
+      const v2 = await syncV2CatchUp();
+      await writeStats({
+        maintenance: { gammaV2: v2, at: new Date().toISOString() },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log.warn("Polymarket V2 catch-up deferred", { message });
+      await writeStats({
+        maintenance: {
+          gammaV2: { error: message, unfinished: true },
+          at: new Date().toISOString(),
+        },
+      });
+    }
+    try {
+      const repairs = await syncGammaEventRepairs();
+      await writeStats({
+        lifecycle: { gammaEventRepairs: repairs, at: new Date().toISOString() },
+      });
+    } catch (error) {
+      log.warn("Polymarket Gamma event repair deferred", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
     running = false;
   }
 }

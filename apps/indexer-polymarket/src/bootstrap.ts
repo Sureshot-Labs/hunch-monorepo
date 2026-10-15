@@ -1,10 +1,20 @@
-import { chunkArray, readPolymarketIndexedAssets } from "@hunch/shared";
+import {
+  chunkArray,
+  readPolymarketIndexedAssets,
+  type GammaVersion,
+} from "@hunch/shared";
+import { runGammaHotLanes, runGammaV2CatchUp } from "./gamma-sync.js";
+import {
+  GAMMA_EVENT_REPAIR_KEY,
+  repairGammaEvents,
+} from "./gamma-event-repair.js";
 import { ensureRedis, redis } from "./redis.js";
 import { env } from "./env.js";
 import {
   fetchEventsByIds,
   fetchEventsByIdsDetailed,
   fetchMarketById,
+  fetchEventsPage,
   iterateEventPages,
 } from "./gammaClient.js";
 import { postBooksOnce } from "./clobClient.js";
@@ -58,6 +68,8 @@ import {
   getPolymarketEventsOffset,
   resetPolymarketEventsOffset,
   setPolymarketEventsOffset,
+  getPolymarketV2Checkpoint,
+  setPolymarketV2Checkpoint,
 } from "./cursor.js";
 
 function parsePrice(value: unknown): number | null {
@@ -325,6 +337,7 @@ async function hasAnyPolymarketData(): Promise<boolean> {
 
 async function processEvents(events: unknown[]): Promise<ProcessResult> {
   const parsedEvents: TPolymarketEvent[] = [];
+  const skippedIds: string[] = [];
 
   for (const e of events) {
     try {
@@ -339,7 +352,15 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
         return typeof raw === "string" ? raw : "?";
       })();
       log.warn(`Failed to process event ${id}:`, err);
+      if (id !== "?") skippedIds.push(id);
     }
+  }
+
+  if (skippedIds.length) {
+    await redis.zAdd(
+      GAMMA_EVENT_REPAIR_KEY,
+      skippedIds.map((value) => ({ value, score: Date.now() })),
+    );
   }
 
   if (!parsedEvents.length) return { processedEvents: 0, processedMarkets: 0 };
@@ -415,6 +436,10 @@ async function processEvents(events: unknown[]): Promise<ProcessResult> {
     "processEvents",
     unifiedMarketRows.length,
     marketUpsertResult,
+  );
+  await redis.zRem(
+    GAMMA_EVENT_REPAIR_KEY,
+    parsedEvents.map((event) => event.id),
   );
 
   try {
@@ -560,6 +585,7 @@ export async function syncCatchUpFromCursor(): Promise<SyncCounters> {
   }
 
   for await (const page of iterateEventPages({
+    version: "v1",
     label: "catch-up",
     startOffset,
     pageSize: env.pageSize,
@@ -591,8 +617,44 @@ export async function syncCatchUpFromCursor(): Promise<SyncCounters> {
   return totals;
 }
 
-async function syncHotPass(closed: boolean): Promise<SyncCounters> {
-  const label = closed ? "hot-closed" : "hot-open";
+export async function syncV2CatchUp() {
+  const checkpoint = await getPolymarketV2Checkpoint();
+  const result = await runGammaV2CatchUp({
+    checkpoint,
+    pageSize: env.pageSize,
+    maxPages: env.hotMaxPages,
+    maxOffset: env.gammaMaxEventsOffset,
+    fetchPage: fetchEventsPage,
+    processPage: processEvents,
+    saveCheckpoint: setPolymarketV2Checkpoint,
+  });
+  if (result.pages || result.unfinished || checkpoint.phase !== "complete") {
+    log.info(
+      "Polymarket Gamma catch-up",
+      JSON.stringify({ version: "v2", ...result }),
+    );
+  }
+  return result;
+}
+
+export async function syncGammaEventRepairs() {
+  await ensureRedis();
+  const result = await repairGammaEvents({
+    redis,
+    limit: env.pageSize,
+    fetchEvents: fetchEventsByIdsDetailed,
+    processEvents,
+  });
+  if (result.requested)
+    log.info("Polymarket Gamma skipped-event repair", JSON.stringify(result));
+  return result;
+}
+
+async function syncHotPass(
+  version: GammaVersion,
+  closed: boolean,
+): Promise<SyncCounters> {
+  const label = `${version}:${closed ? "hot-closed" : "hot-open"}`;
   const lookbackMin = env.hotLookbackMinutes;
   const threshold = new Date(Date.now() - lookbackMin * 60_000);
 
@@ -614,6 +676,7 @@ async function syncHotPass(closed: boolean): Promise<SyncCounters> {
   let hitMaxPages = false;
 
   for await (const page of iterateEventPages({
+    version,
     label,
     startOffset: 0,
     pageSize: env.pageSize,
@@ -656,17 +719,27 @@ async function syncHotPass(closed: boolean): Promise<SyncCounters> {
   return totals;
 }
 
-export async function syncHotWindow(): Promise<SyncCounters> {
+export async function syncHotWindow() {
   await ensureRedis();
   await pool.query("select 1");
 
-  const open = await syncHotPass(false);
-  const closed = await syncHotPass(true);
-
+  const lanes = await runGammaHotLanes(syncHotPass);
+  for (const lane of lanes) {
+    if (lane.error)
+      log.warn("Polymarket Gamma hot lane failed", JSON.stringify(lane));
+  }
   return {
-    processedEvents: open.processedEvents + closed.processedEvents,
-    processedMarkets: open.processedMarkets + closed.processedMarkets,
-    pages: open.pages + closed.pages,
+    ...lanes.reduce(
+      (totals, lane) => ({
+        processedEvents:
+          totals.processedEvents + (lane.result?.processedEvents ?? 0),
+        processedMarkets:
+          totals.processedMarkets + (lane.result?.processedMarkets ?? 0),
+        pages: totals.pages + (lane.result?.pages ?? 0),
+      }),
+      { processedEvents: 0, processedMarkets: 0, pages: 0 },
+    ),
+    lanes,
   };
 }
 
@@ -999,15 +1072,15 @@ async function fetchFallbackMarketRows(
   const rows = await Promise.all(
     refs.map((ref) =>
       q.add(async () => {
-        const market = await fetchMarketById(ref.marketId);
-        if (!market) return null;
         try {
+          const market = await fetchMarketById(ref.marketId);
+          if (!market) return null;
           return {
             eventId: ref.eventId,
             market: PolymarketMarket.parse(market) as TPolymarketMarket,
           };
         } catch (error) {
-          log.warn("Failed to parse Polymarket refreshed market", {
+          log.warn("Failed to fetch/parse Polymarket refreshed market", {
             marketId: ref.marketId,
             error,
           });

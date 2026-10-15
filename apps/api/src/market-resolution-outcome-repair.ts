@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { fetchGammaEntityById } from "@hunch/shared";
 
 import { pool } from "./db.js";
 import { env } from "./env.js";
@@ -199,33 +200,6 @@ function dateToString(value: Date | null): string | null {
   return value ? value.toISOString() : null;
 }
 
-async function fetchJsonWithTimeout(
-  url: string,
-  timeoutMs: number,
-): Promise<
-  | { ok: true; payload: unknown }
-  | { ok: false; status: number; payload: unknown }
-> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      headers: { accept: "application/json", "user-agent": "Hunch-API/1.0" },
-      signal: controller.signal,
-    });
-
-    const contentType = res.headers.get("content-type") ?? "";
-    const payload = contentType.includes("application/json")
-      ? await res.json().catch(() => null)
-      : await res.text().catch(() => null);
-
-    if (!res.ok) return { ok: false, status: res.status, payload };
-    return { ok: true, payload };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 function gammaBaseUrl(): string {
   return (
     process.env.POLYMARKET_GAMMA_BASE?.trim() ||
@@ -237,29 +211,11 @@ async function fetchGammaMarket(
   marketId: string,
   timeoutMs: number,
 ): Promise<Record<string, unknown> | null> {
-  const encoded = encodeURIComponent(marketId);
-  const urls = [
-    `${gammaBaseUrl()}/markets/${encoded}`,
-    `${gammaBaseUrl()}/markets?id=${encoded}&limit=1&offset=0`,
-  ];
-
-  let lastError: string | null = null;
-  for (const url of urls) {
-    try {
-      const res = await fetchJsonWithTimeout(url, timeoutMs);
-      if (!res.ok) {
-        lastError = `gamma_${res.status}`;
-        continue;
-      }
-      const market = firstRecord(res.payload);
-      if (market) return market;
-    } catch (error) {
-      lastError = errorMessage(error);
-    }
-  }
-
-  if (lastError) throw new Error(lastError);
-  return null;
+  return fetchGammaEntityById(
+    { baseUrl: gammaBaseUrl(), timeoutMs },
+    "markets",
+    marketId,
+  );
 }
 
 async function validatePolymarket(
@@ -784,8 +740,27 @@ async function updateOutcomesAndReturnMarketRefs(
   return rows.map((row) => ({ marketId: row.id, venue: row.venue }));
 }
 
-async function runSourceUpdate(client: PoolClient): Promise<CountRow> {
-  return updateAndCount(
+async function runSourceUpdate(client: PoolClient): Promise<CountRow[]> {
+  const lifecycleCount = await updateAndCount(
+    client,
+    "unified_polymarket_lifecycle",
+    `
+    update unified_markets m
+    set status = case when r.polymarket_source_raw->>'resolutionStatus' = 'resolved'
+                      then 'SETTLED'::unified_status else m.status end,
+        metadata = coalesce(m.metadata, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
+          'version', r.polymarket_source_raw->'version',
+          'resolutionStatus', r.polymarket_source_raw->'resolutionStatus',
+          'outcomePrices', r.polymarket_source_raw->'outcomePrices'
+        )),
+        updated_at_db = now()
+    from tmp_market_resolution_outcome_repair r
+    where m.id = r.market_id and r.venue = 'polymarket'
+      and r.polymarket_source_raw->>'version' = 'v2'
+      and r.polymarket_source_raw->>'resolutionStatus' in ('resolved', 'inactive')
+  `,
+  );
+  const sourceCount = await updateAndCount(
     client,
     "polymarket_markets_source",
     `
@@ -797,7 +772,7 @@ async function runSourceUpdate(client: PoolClient): Promise<CountRow> {
           accepting_orders = coalesce(r.polymarket_source_accepting_orders, pm.accepting_orders),
           resolution_source = coalesce(r.polymarket_source_resolution_source, pm.resolution_source),
           resolved_by = coalesce(r.polymarket_source_resolved_by, pm.resolved_by),
-          raw = coalesce(r.polymarket_source_raw, pm.raw),
+          raw = coalesce(pm.raw, '{}'::jsonb) || jsonb_strip_nulls(r.polymarket_source_raw),
           updated_at_db = now()
       from tmp_market_resolution_outcome_repair r
       where r.venue = 'polymarket'
@@ -811,10 +786,11 @@ async function runSourceUpdate(client: PoolClient): Promise<CountRow> {
           or pm.accepting_orders is distinct from coalesce(r.polymarket_source_accepting_orders, pm.accepting_orders)
           or pm.resolution_source is distinct from coalesce(r.polymarket_source_resolution_source, pm.resolution_source)
           or pm.resolved_by is distinct from coalesce(r.polymarket_source_resolved_by, pm.resolved_by)
-          or pm.raw is distinct from coalesce(r.polymarket_source_raw, pm.raw)
+          or pm.raw is distinct from (coalesce(pm.raw, '{}'::jsonb) || jsonb_strip_nulls(r.polymarket_source_raw))
         )
     `,
   );
+  return [lifecycleCount, sourceCount];
 }
 
 async function executeRepair(
@@ -856,7 +832,7 @@ async function executeRepair(
           label: "unified_markets_outcome",
           rows: String(repairedMarketIds.length),
         },
-        sourceCount,
+        ...sourceCount,
       ],
     };
   } catch (error) {
