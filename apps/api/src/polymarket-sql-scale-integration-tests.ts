@@ -272,6 +272,15 @@ try {
         assert.ok(plan);
         const scans: string[] = [];
         const walk = (node: Record<string, unknown>) => {
+          if (
+            name === "resolution-producer" &&
+            node["Relation Name"] === "polymarket_asset_bindings"
+          ) {
+            assert.ok(
+              Number(node["Actual Loops"]) <= 1000,
+              "resolution mapping must not repeat the 1000 position lookups per resolved market",
+            );
+          }
           if (typeof node["Relation Name"] === "string")
             scans.push(
               `${node["Node Type"]}:${node["Relation Name"]}:${node["Actual Rows"]}x${node["Actual Loops"]}`,
@@ -445,7 +454,7 @@ try {
     pool: {
       connect: async () => ({
         query: (sql: string, params: unknown[]) =>
-          sql.includes("resolved_asset")
+          sql.includes("from eligible_positions p")
             ? explainDb("resolution-producer").query(sql, params)
             : client.query(sql, params),
         release: () => undefined,
