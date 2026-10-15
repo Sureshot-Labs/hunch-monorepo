@@ -77,3 +77,4 @@ export const logger = pino({
 });
 
 export * from "./market-matching-policy.js";
+export * from "./polymarket-gamma.js";

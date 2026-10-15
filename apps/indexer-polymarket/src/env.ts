@@ -1,6 +1,7 @@
 import { config } from "dotenv";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
+import { gammaPageSize } from "@hunch/shared";
 
 const envPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -92,7 +93,7 @@ function req(name: string): string {
 }
 
 const pageSizeRaw = parseOptionalInt(process.env.POLYMARKET_PAGE_SIZE);
-const pageSize = clampInt(pageSizeRaw, { min: 1, max: 500, fallback: 500 });
+const pageSize = gammaPageSize(pageSizeRaw);
 
 const refreshMinutesRaw = parseOptionalInt(process.env.POLYMARKET_REFRESH_MIN);
 const refreshMinutes = clampInt(refreshMinutesRaw, {
