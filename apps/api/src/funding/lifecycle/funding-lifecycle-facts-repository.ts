@@ -9,6 +9,11 @@ import {
 import { relayEvmFundingProfileSpec } from "../execution/relay-evm-profile-specs.js";
 import { parseSafeFundingSubmission } from "../execution/safe-funding-submission-contract.js";
 import { nativeAuthRetryable } from "../execution/hypercore-submission-contract.js";
+import {
+  readFundingRefundContract,
+  readFundingRefundReceiptIdentity,
+  readFundingRefundCompletionProofs,
+} from "../domain/refund-settlement.js";
 import { relayClientSourceDebitPostcondition } from "../execution/relay-client-source-debit.js";
 import {
   listFundingObservationsForOperations,
@@ -41,6 +46,9 @@ type LifecycleRouteLegRow = Readonly<{
   operation_id: string;
   quoted_input: JsonRecord;
   quoted_min_output: JsonRecord;
+  refund_location_snapshot: JsonRecord | null;
+  provider_quote_ref_lookup_hmac: string | null;
+  lookup_key_version: number | null;
 }>;
 
 type LifecycleActionRow = Readonly<{
@@ -338,6 +346,18 @@ function transferFromObservation(
       typeof observation.metadata.replacementForRefundObservationId === "string"
         ? observation.metadata.replacementForRefundObservationId
         : null,
+    refundReceipt: readFundingRefundReceiptIdentity(
+      observation.metadata.relayRefundReceipt,
+    ),
+    refundCompletionProofs: readFundingRefundCompletionProofs(
+      observation.metadata.relayRefundCompletionProofs,
+    ),
+    destinationAddress: observation.toAddress,
+    nativeDestinationDex:
+      observation.metadata.nativeDestinationDex === "spot" ||
+      observation.metadata.nativeDestinationDex === ""
+        ? observation.metadata.nativeDestinationDex
+        : null,
   };
 }
 
@@ -600,7 +620,15 @@ function compileFundingLifecycleFacts(
         `funding lifecycle route leg ${row.id} is missing a required amount`,
       );
     }
-    return { routeLegId: row.id, requestedSource, minimumDestination };
+    return {
+      routeLegId: row.id,
+      requestedSource,
+      minimumDestination,
+      refundContract: readFundingRefundContract(row.refund_location_snapshot, {
+        requestFingerprint: row.provider_quote_ref_lookup_hmac,
+        lookupKeyVersion: row.lookup_key_version,
+      }),
+    };
   });
   const requestedDestination = lifecycleMoney(
     header.requested_destination_amount,
@@ -801,7 +829,10 @@ export async function loadFundingLifecycleFactsForOperationsInTransaction(
       select segment.operation_id::text as operation_id,
              segment.id,
              segment.quoted_input,
-             segment.quoted_min_output
+             segment.quoted_min_output,
+             segment.refund_location_snapshot,
+             segment.provider_quote_ref_lookup_hmac,
+             segment.lookup_key_version
         from funding_operation_segments segment
        where segment.operation_id = any($1::uuid[])
        order by segment.operation_id asc, segment.ordinal asc

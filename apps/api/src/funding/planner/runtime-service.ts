@@ -150,6 +150,7 @@ export type FundingDestinationQuery = Readonly<{
   marketClass?: string | null;
   positionActionRef?: string | null;
   controllerWalletRef?: string | null;
+  refresh?: "true" | "false";
 }>;
 
 export class FundingLiquiditySingleflight {
@@ -358,15 +359,18 @@ export class FundingPlanningRuntime {
   > {
     const [resolvedPolicy, rawOptions] = await Promise.all([
       resolveFundingPolicy(this.db),
-      this.preparationRuntime.listDestinationOptions({
-        accountId: userId,
-        purpose: query.purpose,
-        marketContextId: query.marketContextId ?? null,
-        marketClass: query.marketClass ?? null,
-        positionActionRef: query.positionActionRef ?? null,
-        compatibleVenueBindingOptionIds: null,
-        controllerWalletRef: query.controllerWalletRef ?? null,
-      }),
+      this.preparationRuntime.listDestinationOptions(
+        {
+          accountId: userId,
+          purpose: query.purpose,
+          marketContextId: query.marketContextId ?? null,
+          marketClass: query.marketClass ?? null,
+          positionActionRef: query.positionActionRef ?? null,
+          compatibleVenueBindingOptionIds: null,
+          controllerWalletRef: query.controllerWalletRef ?? null,
+        },
+        { forceFresh: query.refresh === "true" },
+      ),
     ]);
     const options: FundingDestinationOption[] = [];
     const policyDisabledOptions: FundingDestinationOption[] = [];

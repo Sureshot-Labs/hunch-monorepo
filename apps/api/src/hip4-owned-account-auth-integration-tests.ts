@@ -30,7 +30,7 @@ process.env.PRIVY_APP_ID = "hip4-disposable-auth-test";
 process.env.PRIVY_APP_SECRET = "hip4-disposable-auth-test";
 process.env.ADMIN_AUTH_LEGACY_FALLBACK = "true";
 const [
-  { AuthService, createAdminMiddleware },
+  { AuthService, createAdminMiddleware, createAuthMiddleware },
   { pool },
   { closeAcquiredRuntimeResources },
 ] = await Promise.all([
@@ -59,38 +59,47 @@ try {
   );
   const token = AuthService.generateToken(userId);
   await AuthService.createSession(userId, walletAddress, token);
-  registerHip4AccountRoutes(app, {
-    authorize: createAdminMiddleware({
-      requiredAdminPermission: "analytics:read",
-    }),
-    owns: async (id, address) =>
-      (await AuthService.getUserWallets(id)).some(
-        (wallet) =>
-          wallet.isVerified &&
-          wallet.walletType === "ethereum" &&
-          wallet.walletAddress.toLowerCase() === address,
-      ),
-    service: {
-      policy: async () => ({
-        readPolicy: { ...DEFAULT_HIP4_READ_POLICY, enabled: true },
-        accountPolicy: { ...DEFAULT_HIP4_ACCOUNT_POLICY, enabled: true },
-        revision: "fixture",
-      }),
-      load: async () => {
-        throw new Error("not_requested");
+  for (const surface of ["owned", "canary"] as const)
+    registerHip4AccountRoutes(app, {
+      surface,
+      authorize:
+        surface === "owned"
+          ? createAuthMiddleware()
+          : createAdminMiddleware({
+              requiredAdminPermission: "analytics:read",
+            }),
+      owns: async (id, address) =>
+        (await AuthService.getUserWallets(id)).some(
+          (wallet) =>
+            wallet.isVerified &&
+            wallet.walletType === "ethereum" &&
+            wallet.walletAddress.toLowerCase() === address,
+        ),
+      service: {
+        market: async () => {
+          reads++;
+          return null;
+        },
+        policy: async () => ({
+          readPolicy: { ...DEFAULT_HIP4_READ_POLICY, enabled: true },
+          accountPolicy: { ...DEFAULT_HIP4_ACCOUNT_POLICY, enabled: true },
+          revision: "fixture",
+        }),
+        load: async () => {
+          throw new Error("not_requested");
+        },
       },
-    },
-    executions: async (environment, address) => {
-      reads++;
-      return {
-        environment,
-        address,
-        items: [],
-        nextCursor: null,
-        allTimeComplete: false,
-      };
-    },
-  });
+      executions: async (environment, address) => {
+        reads++;
+        return {
+          environment,
+          address,
+          items: [],
+          nextCursor: null,
+          allTimeComplete: false,
+        };
+      },
+    });
   const url = "/markets/hyperliquid/canary/account/executions";
   assert.equal((await app.inject(url)).statusCode, 401);
   const headers = {
@@ -101,6 +110,17 @@ try {
   assert.equal(response.statusCode, 200);
   assert.equal(response.json().address, walletAddress);
   assert.equal(reads, 1);
+  const marketUrl =
+    "/wallets/hyperliquid/account/market?marketId=hyperliquid:mainnet:outcome:8775";
+  assert.equal((await app.inject(marketUrl)).statusCode, 401);
+  assert.equal(reads, 1);
+  const ownedMarket = await app.inject({ url: marketUrl, headers });
+  assert.equal(
+    ownedMarket.statusCode,
+    404,
+    "authorized but unobserved holding is unavailable",
+  );
+  assert.equal(reads, 2);
   const foreign = await app.inject({
     url,
     headers: {
@@ -109,14 +129,30 @@ try {
     },
   });
   assert.ok([401, 403].includes(foreign.statusCode));
-  assert.equal(reads, 1);
+  assert.equal(reads, 2);
+  assert.ok(
+    [401, 403].includes(
+      (
+        await app.inject({
+          url: marketUrl,
+          headers: {
+            ...headers,
+            "x-hunch-wallet": "0x000000000000000000000000000000000000abc2",
+          },
+        })
+      ).statusCode,
+    ),
+  );
+  assert.equal(reads, 2);
   await target.query(
     "update user_wallets set is_verified=false where user_id=$1",
     [userId],
   );
   const unverified = await app.inject({ url, headers });
   assert.equal(unverified.statusCode, 403);
-  assert.equal(reads, 1);
+  assert.equal(reads, 2);
+  assert.equal((await app.inject({ url: marketUrl, headers })).statusCode, 403);
+  assert.equal(reads, 2);
   console.log(
     "HIP4 PG16 real admin middleware/session/selected wallet/foreign and unverified ownership PASS",
   );

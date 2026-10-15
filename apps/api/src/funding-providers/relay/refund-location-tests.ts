@@ -7,6 +7,7 @@ import {
 import { HYPERCORE_MAINNET_USDC } from "../../funding/domain/hypercore-identity.js";
 import type { AssetLocation } from "../../funding/domain/types.js";
 import { BASE_USDC } from "./rehearsal.js";
+import { EXACT_REFUND_RECEIPTS_CONTRACT } from "../../funding/domain/refund-settlement.js";
 
 function example() {
   const sourceLocation: AssetLocation = {
@@ -154,6 +155,7 @@ function inboundExample() {
 test("inbound immutable refund snapshot preserves EVM primary and distinct recipient perps alternative", () => {
   const input = inboundExample();
   const snapshot = relayRefundLocationSnapshot(input);
+  assert.equal(snapshot.refundEvidenceContract, EXACT_REFUND_RECEIPTS_CONTRACT);
   assert.equal(snapshot.locationId, input.sourceLocation.locationId);
   assert.deepEqual(snapshot.asset, input.sourceAmount.asset);
   assert.deepEqual(snapshot.alternativeRefundLocations, {
@@ -175,6 +177,28 @@ test("inbound immutable refund snapshot preserves EVM primary and distinct recip
       .alternativeRefundLocations,
     undefined,
   );
+});
+
+test("only new native plans opt in to exact refund completion", () => {
+  const inbound = inboundExample();
+  const native = example();
+  const outbound = relayRefundLocationSnapshot({
+    ...native,
+    destination: {
+      target: { kind: "owned_location", location: inbound.sourceLocation },
+    },
+    minimumOutput: { asset: inbound.sourceLocation.asset, raw: "9000000" },
+    routeShape: "relay-hypercore-spot",
+  });
+  assert.equal(outbound.refundEvidenceContract, EXACT_REFUND_RECEIPTS_CONTRACT);
+  assert.equal(outbound.locationId, native.nativeRefundLocation.locationId);
+  const legacy = relayRefundLocationSnapshot({
+    ...inbound,
+    nativeRefundLocation: undefined,
+    minimumOutput: { asset: inbound.sourceLocation.asset, raw: "9000000" },
+  });
+  assert.equal(legacy, inbound.sourceLocation);
+  assert.equal(legacy.refundEvidenceContract, undefined);
 });
 
 test("inbound alternative refund cannot borrow another source/account/controller/asset or spot credit", () => {

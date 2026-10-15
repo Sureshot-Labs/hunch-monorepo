@@ -140,6 +140,9 @@ importers:
       '@hunch/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@msgpack/msgpack':
+        specifier: 3.1.2
+        version: 3.1.2
       '@polymarket/builder-signing-sdk':
         specifier: ^1.0.0
         version: 1.0.0
@@ -1018,6 +1021,10 @@ packages:
   '@lukeed/ms@2.0.2':
     resolution: {integrity: sha512-9I2Zn6+NJLfaGoz9jN3lpwDgAYvfGeNYdbAIjJOqzs4Tpc+VU3Jqq4IofSUBKajiDS8k9fZIg18/z13mpk1bsA==}
     engines: {node: '>=8'}
+
+  '@msgpack/msgpack@3.1.2':
+    resolution: {integrity: sha512-JEW4DEtBzfe8HvUYecLU9e6+XJnKDlUAIve8FvPzF3Kzs6Xo/KuZkZJsDH0wJXl/qEZbeeE7edxDNY3kMs39hQ==}
+    engines: {node: '>= 18'}
 
   '@noble/ciphers@1.3.0':
     resolution: {integrity: sha512-2I0gnIVPtfnMw9ee9h1dJG7tp81+8Ob3OJb3Mv37rx5L40/b0i7djjCVvGOVqc9AEIQyvyu1i6ypKdFw8R8gQw==}
@@ -5164,6 +5171,8 @@ snapshots:
   '@js-sdsl/ordered-map@4.4.2': {}
 
   '@lukeed/ms@2.0.2': {}
+
+  '@msgpack/msgpack@3.1.2': {}
 
   '@noble/ciphers@1.3.0': {}
 

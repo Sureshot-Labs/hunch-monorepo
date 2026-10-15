@@ -25,6 +25,7 @@ import {
 } from "./canonical.js";
 import { normalizeUnsignedDecimal } from "./decimal.js";
 import type { StableImpairmentState } from "./valuation-service.js";
+import { loadHypercorePreparationAvailability } from "../funding/preparation/hypercore-availability.js";
 
 export type Hip4AccountValue = {
   assets: ValuedAssetComponent[];
@@ -36,6 +37,62 @@ export type Hip4AccountValue = {
     "reservedRaw" | "submittedDebitRaw"
   >[];
 };
+
+/** Same exact read model used by funding preparation, against the original
+ * component observation. Failure makes capacity unknown, not unreserved cash;
+ * the owned asset value is not changed by a reservation read failure. */
+export async function collectHip4CashHoldAdjustments(input: {
+  pool: Pick<Pool, "query">;
+  userId: string;
+  components: readonly ValuedAssetComponent[];
+  availability: Hip4AccountValue["availability"];
+}) {
+  const nativeById = new Map(
+    input.availability.map((row) => [row.componentId, row]),
+  );
+  const errors: CollectorError[] = [];
+  const rows = await Promise.all(
+    input.components
+      .flatMap((component) => {
+        const native = nativeById.get(component.componentId);
+        return native ? [{ component, native }] : [];
+      })
+      .map(
+        async ({
+          component,
+          native,
+        }): Promise<readonly [string, CashAvailabilityAdjustment]> => {
+          try {
+            const facts = await loadHypercorePreparationAvailability(
+              input.pool,
+              {
+                accountId: input.userId,
+                location: component.location,
+                observedAt: component.observedAt,
+              },
+            );
+            return [component.componentId, { ...native, ...facts }];
+          } catch {
+            errors.push({
+              collectorId: "hypercore-cash-holds",
+              code: "cash_lock_collection_failed",
+              retryable: true,
+            });
+            return [
+              component.componentId,
+              {
+                ...native,
+                reservedRaw: "0",
+                submittedDebitRaw: "0",
+                availabilityKnown: false,
+              },
+            ];
+          }
+        },
+      ),
+  );
+  return { byComponent: new Map(rows), errors };
+}
 
 /** ownedCash proves unheld ownership, NOT the total or trading capacity.
  * Add held cash back only when the same snapshot proves the full equation.

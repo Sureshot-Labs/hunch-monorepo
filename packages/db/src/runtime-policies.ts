@@ -24,6 +24,7 @@ export async function fetchActiveRuntimePolicy(
   pool: RuntimePolicyQuery,
   policyKey: string,
   asOf: Date = new Date(),
+  options: Readonly<{ missingTable?: "empty" | "error" }> = {},
 ): Promise<RuntimePolicyRow | null> {
   try {
     const { rows } = await pool.query<RuntimePolicyRow>(
@@ -46,7 +47,11 @@ export async function fetchActiveRuntimePolicy(
     );
     return rows[0] ?? null;
   } catch (error) {
-    if (isMissingRuntimePoliciesTable(error)) return null;
+    if (
+      options.missingTable !== "error" &&
+      isMissingRuntimePoliciesTable(error)
+    )
+      return null;
     throw error;
   }
 }

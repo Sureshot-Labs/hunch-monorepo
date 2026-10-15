@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import { pool } from "./db.js";
 import { reduceFundingOperationInTransaction } from "./funding/reconciliation/funding-reducer.js";
 import { fetchUserFinancialLifecycleSummary } from "./services/user-financial-lifecycle.js";
+import { reparentUserWalletsForMerge } from "./repos/user-wallet-merge.js";
 import {
   mergeUserSocialData,
   reparentMergedSocialExecutions,
@@ -28,6 +29,7 @@ export type MergeOptions = {
 
 export type MergeSummary = {
   walletsInserted: number;
+  walletsMoved: number;
   venueCredsDeduped: number;
   venueCredsMoved: number;
   sessionsMoved: number;
@@ -92,6 +94,7 @@ type TelegramAccountRow = {
 };
 
 export type FundingMergeConflictSummary = Readonly<{
+  activeHip4Submissions: number;
   activeFundingLeases: number;
   activeFundingRoutes: number;
   ambiguousFundingAttempts: number;
@@ -325,6 +328,11 @@ async function fetchFundingMergeConflicts(
     targetId,
   ]);
   return {
+    activeHip4Submissions: lifecycle.activeReasons.includes(
+      "active_hip4_submission",
+    )
+      ? 1
+      : 0,
     activeFundingLeases: Number(row.active_funding_leases),
     activeFundingRoutes: Number(row.active_funding_routes),
     ambiguousFundingAttempts: lifecycle.ambiguousFundingAttemptCount,
@@ -429,6 +437,7 @@ export async function mergeUsers(
   const client = await db.connect();
   const summary: MergeSummary = {
     walletsInserted: 0,
+    walletsMoved: 0,
     venueCredsDeduped: 0,
     venueCredsMoved: 0,
     sessionsMoved: 0,
@@ -555,66 +564,13 @@ export async function mergeUsers(
         )
       ).rowCount ?? 0;
 
-    summary.walletsInserted =
-      (
-        await client.query(
-          `
-          insert into user_wallets (
-            user_id,
-            wallet_address,
-            wallet_type,
-            name,
-            is_primary,
-            is_verified,
-            verification_signature,
-            created_at,
-            updated_at
-          )
-          select
-            $1,
-            w.wallet_address,
-            w.wallet_type,
-            w.name,
-            false,
-            w.is_verified,
-            w.verification_signature,
-            w.created_at,
-            w.updated_at
-          from user_wallets w
-          where w.user_id = $2
-            and not exists (
-              select 1
-              from user_wallets t
-              where t.user_id = $1
-                and t.wallet_address = w.wallet_address
-            )
-        `,
-          [target.id, source.id],
-        )
-      ).rowCount ?? 0;
-
-    summary.venueCredsDeduped =
-      (
-        await client.query(
-          `
-          delete from user_venue_credentials s
-          using user_venue_credentials t
-          where s.user_id = $2
-            and t.user_id = $1
-            and s.wallet_address = t.wallet_address
-            and s.venue = t.venue
-        `,
-          [target.id, source.id],
-        )
-      ).rowCount ?? 0;
-
-    summary.venueCredsMoved =
-      (
-        await client.query(
-          `update user_venue_credentials set user_id = $1 where user_id = $2`,
-          [target.id, source.id],
-        )
-      ).rowCount ?? 0;
+    const movedWallets = await reparentUserWalletsForMerge(
+      client,
+      source.id,
+      target.id,
+    );
+    summary.walletsMoved = movedWallets.wallets_moved;
+    summary.venueCredsMoved = movedWallets.credentials_moved;
 
     summary.sessionsMoved =
       (
@@ -1232,13 +1188,6 @@ export async function mergeUsers(
           `delete from referrals where referrer_user_id = $1 and referred_user_id = $1`,
           [target.id],
         )
-      ).rowCount ?? 0;
-
-    summary.walletsDeleted =
-      (
-        await client.query(`delete from user_wallets where user_id = $1`, [
-          source.id,
-        ])
       ).rowCount ?? 0;
 
     summary.primaryWalletAssigned =

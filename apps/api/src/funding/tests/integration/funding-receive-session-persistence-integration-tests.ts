@@ -16,6 +16,11 @@ import { pool } from "../../../db.js";
 import { fetchUserFinancialLifecycleSummary } from "../../../services/user-financial-lifecycle.js";
 import {
   claimFundingReceiveCanonicalEventAllocation,
+  bindFundingReceiveCanonicalEventSession,
+  claimFundingReceiveClassificationRetries,
+  fundingReceiveClassificationRetryTarget,
+  validateFundingReceiveClassificationRetry,
+  quarantineFundingReceiveCanonicalInternalEvent,
   claimObservableFundingReceiveSessions,
   cancelFundingReceiveSessionForUser,
   createOrReuseFundingReceiveSession,
@@ -44,6 +49,8 @@ import {
   SOLANA_RETAINED_USDC_ASSET,
 } from "../../receive/retained-solana-assets.js";
 import { buildFundingReceiveTargets } from "../../planner/receive-targets.js";
+import { verifyReceiveClassificationSessionLookupPg } from "../receive-classification-retry-pg.js";
+import { FundingReceiveReceiptRouter } from "../../receive/receive-receipt-router.js";
 
 const NOW = new Date();
 const DESTINATION_OPTION_ID = "destination_receive_persistence_12345678";
@@ -231,6 +238,7 @@ let genericOptionUserId: string | null = null;
 let retainedSolUserId: string | null = null;
 let historicalSolUserId: string | null = null;
 let historicalSolTransactionHash: string | null = null;
+const classificationRetryHashes: string[] = [];
 let crossChannelUserId: string | null = null;
 let reviewReleaseUserId: string | null = null;
 let recoveryReleaseUserId: string | null = null;
@@ -347,6 +355,7 @@ try {
   // Persisted USDC must not poison the whole session on the next observer tick,
   // even before a transfer arrives or an asset has been selected.
   let scannedRetainedUsdc = false;
+  let classifierSawPrelockedEvent = false;
   const retainedObserver = new FundingReceiveSessionObserver({
     scanCanonicalEvents: async (variants) => {
       scannedRetainedUsdc ||= variants.some(
@@ -372,7 +381,28 @@ try {
         cursorAdvanced: false,
       };
     },
-    listPotentialPolymarketHandoffs: async () => [],
+    listPotentialPolymarketHandoffs: async (db, input) => {
+      if (input.userId === retainedSolUserId && input.events.length > 0) {
+        const prelocked = await db.query(
+          `select allocation_status,allocated_receipt_id
+           from funding_receive_canonical_events
+           where network_id='evm:137' and tx_hash=$1 and event_index='0'`,
+          [uniqueHash("retained-usdce-transfer")],
+        );
+        assert.deepEqual(
+          prelocked.rows,
+          [
+            {
+              allocation_status: "pending",
+              allocated_receipt_id: null,
+            },
+          ],
+          "the actual observer must prelock before invoking any classifier",
+        );
+        classifierSawPrelockedEvent = true;
+      }
+      return [];
+    },
   });
   const retainedPoll = await retainedObserver.pollBatch(pool, {
     limit: 100,
@@ -380,6 +410,7 @@ try {
     now: new Date(NOW.getTime() + 1_000),
   });
   assert.equal(scannedRetainedUsdc, true);
+  assert.equal(classifierSawPrelockedEvent, true);
   assert.equal(retainedPoll.recoveriesRequired, 0);
   assert.equal(retainedPoll.retryableErrors, 0);
   const observedUsdce = await pool.query<{
@@ -602,11 +633,14 @@ try {
       where id = $1::uuid`,
     [historicalSession.snapshot.session.receiveSessionId, freshPollAt],
   );
-  const recoveredPoll = await recoveryObserver.pollBatch(pool, {
-    limit: 1,
-    minimumPollIntervalMs: 0,
-    now: freshPollAt,
-  });
+  const recoveredPoll = await recoveryObserver.pollKnownCanonicalRetryBatch(
+    pool,
+    {
+      limit: 1,
+      retryDelayMs: 1_000,
+      now: freshPollAt,
+    },
+  );
   assert.equal(recoveredPoll.retryableErrors, 0);
   const { rows: historicalRows } = await pool.query<{
     allocation_status: string;
@@ -640,6 +674,361 @@ try {
     receipt_status: "ready",
     notification_count: "1",
   });
+
+  // Freeze the selected session before its observation window closes. A later
+  // session with a newer start cursor must not steal the known physical event.
+  const retryEvent = {
+    networkId: historicalVariant.networkId,
+    asset: historicalVariant.asset,
+    destinationAddress: historicalVariant.destinationAddress,
+    sourceAddress: "7YttLkHDoNj9wyDur4QmK5KdHDAtSdB7TGjEHJx6Ms7D",
+    rawAmount: "40000000",
+    transactionHash: uniqueHash("bound-canonical-retry"),
+    eventIndex: "0",
+    ledgerHeight: "103",
+    blockHash: uniqueHash("bound-retry-block"),
+    observedAt: new Date(NOW.getTime() + 4_000),
+    now: new Date(NOW.getTime() + 4_000),
+  };
+  classificationRetryHashes.push(retryEvent.transactionHash);
+  const bindClient = await pool.connect();
+  try {
+    await bindClient.query("begin");
+    await lockFundingReceiveSessionScope(bindClient, {
+      userId: historicalSolUserId,
+      destinationOptionId:
+        historicalSession.snapshot.session.destinationOptionId,
+      venueBindingOptionId:
+        historicalSession.snapshot.session.venueBindingOptionId,
+    });
+    await bindFundingReceiveCanonicalEventSession(bindClient, retryEvent);
+    await quarantineFundingReceiveCanonicalInternalEvent(bindClient, {
+      ...retryEvent,
+      reason: "owned_route_destination_correlation_pending",
+    });
+    await bindClient.query("commit");
+  } catch (error) {
+    await bindClient.query("rollback");
+    throw error;
+  } finally {
+    bindClient.release();
+  }
+  const successor = await createOrReuseFundingReceiveSession(pool, {
+    ...historicalInputBase,
+    destinationOptionId: `destination_retry_successor_${RUN_ID}`,
+    venueBindingOptionId: `binding_retry_successor_${RUN_ID}`,
+    observationVariants: [
+      {
+        ...historicalFreshVariant,
+        observation: {
+          ...historicalFreshVariant.observation,
+          payload: {
+            ...historicalFreshVariant.observation.payload,
+            eventCursorSlot: "102",
+          },
+        },
+      },
+    ],
+    now: new Date(NOW.getTime() + 5_000),
+  });
+  const afterWindow = new Date(
+    historicalSession.snapshot.observeUntil.getTime() + 1_000,
+  );
+  await pool.query(
+    `update funding_receive_sessions set status='expired',closed_at=$2,
+    updated_at=$2,version=version+1 where id=$1`,
+    [historicalSession.snapshot.session.receiveSessionId, afterWindow],
+  );
+  const beforeRetry = await fetchFundingReceiveSessionForUser(pool, {
+    userId: historicalSolUserId,
+    receiveSessionId: historicalSession.snapshot.session.receiveSessionId,
+  });
+  assert.ok(beforeRetry);
+  let retryScannerCalls = 0;
+  const knownObserver = new FundingReceiveSessionObserver({
+    scanCanonicalEvents: async () => {
+      retryScannerCalls++;
+      throw new Error("known retry must not scan");
+    },
+    scanCanonicalEventsBatch: async () => {
+      retryScannerCalls++;
+      throw new Error("known retry must not scan");
+    },
+    listPotentialPolymarketHandoffs: async () => [],
+  });
+  const known = await knownObserver.pollKnownCanonicalRetryBatch(pool, {
+    limit: 25,
+    retryDelayMs: 1_000,
+    now: afterWindow,
+  });
+  assert.equal(known.retryableErrors, 0);
+  assert.equal(retryScannerCalls, 0);
+  const afterRetry = await fetchFundingReceiveSessionForUser(pool, {
+    userId: historicalSolUserId,
+    receiveSessionId: historicalSession.snapshot.session.receiveSessionId,
+  });
+  assert.ok(afterRetry);
+  assert.equal(afterRetry.session.version, beforeRetry.session.version + 1);
+  assert.equal(afterRetry.session.status, "expired");
+  assert.equal(
+    afterRetry.observeUntil.getTime(),
+    beforeRetry.observeUntil.getTime(),
+  );
+  assert.deepEqual(
+    afterRetry.observationVariants,
+    beforeRetry.observationVariants,
+  );
+  const retriedReceipt = await pool.query(
+    `select canonical_event.classification_receive_session_id,
+    canonical_event.classification_lease_token,canonical_event.classification_retry_at,
+    receipt.receive_session_id,receipt.status,receipt.child_funding_operation_id,
+    receipt.evidence->>'lateReceipt' as late_receipt
+    from funding_receive_canonical_events canonical_event
+    join funding_receive_receipts receipt on receipt.id=canonical_event.allocated_receipt_id
+    where canonical_event.tx_hash=$1`,
+    [retryEvent.transactionHash],
+  );
+  assert.deepEqual(retriedReceipt.rows, [
+    {
+      classification_receive_session_id:
+        historicalSession.snapshot.session.receiveSessionId,
+      classification_lease_token: null,
+      classification_retry_at: null,
+      receive_session_id: historicalSession.snapshot.session.receiveSessionId,
+      status: "ready",
+      child_funding_operation_id: null,
+      late_receipt: "true",
+    },
+  ]);
+  assert.notEqual(
+    retriedReceipt.rows[0].receive_session_id,
+    successor.snapshot.session.receiveSessionId,
+  );
+  await knownObserver.pollKnownCanonicalRetryBatch(pool, {
+    limit: 25,
+    retryDelayMs: 1_000,
+    now: afterWindow,
+  });
+  const replaySnapshot = await fetchFundingReceiveSessionForUser(pool, {
+    userId: historicalSolUserId,
+    receiveSessionId: historicalSession.snapshot.session.receiveSessionId,
+  });
+  assert.equal(
+    replaySnapshot?.session.version,
+    afterRetry.session.version,
+    "no-op retry must not wake progress",
+  );
+
+  // Claim-crash-reclaim: neither a stale token nor a fabricated session may
+  // authorize effects. The recovered worker still uses the immutable binding.
+  const crashEvent = {
+    ...retryEvent,
+    transactionHash: uniqueHash("retry-crash"),
+  };
+  classificationRetryHashes.push(crashEvent.transactionHash);
+  const crashClient = await pool.connect();
+  try {
+    await crashClient.query("begin");
+    await bindFundingReceiveCanonicalEventSession(crashClient, crashEvent);
+    await quarantineFundingReceiveCanonicalInternalEvent(crashClient, {
+      ...crashEvent,
+      reason: "owned_route_destination_correlation_pending",
+    });
+    await crashClient.query("commit");
+  } catch (error) {
+    await crashClient.query("rollback");
+    throw error;
+  } finally {
+    crashClient.release();
+  }
+  const firstLease = (
+    await claimFundingReceiveClassificationRetries(pool, {
+      limit: 25,
+      retryDelayMs: 1000,
+      now: afterWindow,
+    })
+  ).find((entry) => entry.transactionHash === crashEvent.transactionHash);
+  assert.ok(firstLease);
+  const nextLease = (
+    await claimFundingReceiveClassificationRetries(pool, {
+      limit: 25,
+      retryDelayMs: 1000,
+      now: new Date(afterWindow.getTime() + 1001),
+    })
+  ).find((entry) => entry.transactionHash === crashEvent.transactionHash);
+  assert.ok(nextLease);
+  assert.notEqual(firstLease.leaseToken, nextLease.leaseToken);
+  const staleClient = await pool.connect();
+  try {
+    await staleClient.query("begin");
+    assert.equal(
+      await validateFundingReceiveClassificationRetry(
+        staleClient,
+        firstLease,
+        successor.snapshot.session.receiveSessionId,
+      ),
+      false,
+    );
+    assert.equal(
+      await validateFundingReceiveClassificationRetry(
+        staleClient,
+        nextLease,
+        crypto.randomUUID(),
+      ),
+      false,
+    );
+    await staleClient.query("rollback");
+  } finally {
+    staleClient.release();
+  }
+  const hinted = await fundingReceiveClassificationRetryTarget(pool, nextLease);
+  assert.equal(
+    hinted?.snapshot.session.receiveSessionId,
+    successor.snapshot.session.receiveSessionId,
+  );
+  const lookupClient = await pool.connect();
+  try {
+    await lookupClient.query("begin");
+    const plans = await verifyReceiveClassificationSessionLookupPg(
+      lookupClient,
+      { ...nextLease, now: new Date(NOW.getTime() + 6_000) },
+    );
+    console.log(JSON.stringify({ receiveRetrySessionPlans: plans }));
+    await lookupClient.query("rollback");
+  } catch (error) {
+    await lookupClient.query("rollback");
+    throw error;
+  } finally {
+    lookupClient.release();
+  }
+  const conversionVariant = {
+    ...historicalVariant,
+    asset: SOLANA_RETAINED_USDC_ASSET,
+    completion: { kind: "child_funding_operation" as const },
+  };
+  const conversionTargets = buildFundingReceiveTargets([conversionVariant]);
+  const conversionSession = await createOrReuseFundingReceiveSession(pool, {
+    ...historicalInputBase,
+    destinationOptionId: `destination_retry_conversion_${RUN_ID}`,
+    venueBindingOptionId: `binding_retry_conversion_${RUN_ID}`,
+    receiveTargets: conversionTargets,
+    selectedReceiveTargetId: conversionTargets[0].receiveTargetId,
+    methods: historicalInputBase.methods.map((method) => ({
+      ...method,
+      ingress: {
+        ...method.ingress,
+        receiveTargets: conversionTargets,
+        recommendedReceiveTargetId: conversionTargets[0].receiveTargetId,
+      },
+    })),
+    observationVariants: [conversionVariant],
+    now: new Date(NOW.getTime() + 6_000),
+  });
+  const conversionEvent = {
+    ...retryEvent,
+    asset: conversionVariant.asset,
+    transactionHash: uniqueHash("known-retry-no-conversion"),
+    now: new Date(NOW.getTime() + 7_000),
+  };
+  classificationRetryHashes.push(conversionEvent.transactionHash);
+  const conversionClient = await pool.connect();
+  try {
+    await conversionClient.query("begin");
+    await bindFundingReceiveCanonicalEventSession(
+      conversionClient,
+      conversionEvent,
+    );
+    await quarantineFundingReceiveCanonicalInternalEvent(conversionClient, {
+      ...conversionEvent,
+      reason: "owned_route_destination_correlation_pending",
+    });
+    await conversionClient.query(
+      `update funding_receive_sessions set status='expired',closed_at=$2,
+      updated_at=$2,version=version+1 where id=$1`,
+      [conversionSession.snapshot.session.receiveSessionId, afterWindow],
+    );
+    await conversionClient.query("commit");
+  } catch (error) {
+    await conversionClient.query("rollback");
+    throw error;
+  } finally {
+    conversionClient.release();
+  }
+  const conversionRecoveryAt = new Date(afterWindow.getTime() + 2_000);
+  const conversionResult = await knownObserver.pollKnownCanonicalRetryBatch(
+    pool,
+    {
+      now: conversionRecoveryAt,
+      limit: 25,
+      retryDelayMs: 1000,
+    },
+  );
+  assert.equal(conversionResult.retryableErrors, 0);
+  const conversionRows = await pool.query(
+    `select status,handling,child_funding_operation_id
+    from funding_receive_receipts where receive_session_id=$1`,
+    [conversionSession.snapshot.session.receiveSessionId],
+  );
+  assert.deepEqual(conversionRows.rows, [
+    {
+      status: "recovery_required",
+      handling: "automatic_conversion",
+      child_funding_operation_id: null,
+    },
+  ]);
+  let forbiddenPlanningCalls = 0;
+  const forbidPlanning = async () => {
+    forbiddenPlanningCalls++;
+    throw new Error("known-event repair must not restart old funding");
+  };
+  const router = new FundingReceiveReceiptRouter(pool, {
+    liquidity: forbidPlanning,
+    quote: forbidPlanning,
+    prepareCommit: forbidPlanning,
+    commitPreparedInTransaction: forbidPlanning,
+  });
+  const routed = await router.runBatch({
+    now: conversionRecoveryAt,
+    limit: 25,
+  });
+  assert.equal(forbiddenPlanningCalls, 0);
+  assert.equal(routed.operationsCreated, 0);
+  assert.equal(retryScannerCalls, 0);
+  const contestedEvent = {
+    ...retryEvent,
+    transactionHash: uniqueHash("retry-concurrent-claim"),
+  };
+  classificationRetryHashes.push(contestedEvent.transactionHash);
+  await quarantineFundingReceiveCanonicalInternalEvent(pool, {
+    ...contestedEvent,
+    reason: "receive_session_allocation_unavailable",
+  });
+  const claimHolder = await pool.connect();
+  try {
+    await claimHolder.query("begin");
+    const claimAt = new Date(afterWindow.getTime() + 5_000);
+    const held = await claimFundingReceiveClassificationRetries(claimHolder, {
+      now: claimAt,
+      limit: 1,
+      retryDelayMs: 1000,
+    });
+    assert.equal(held.length, 1);
+    // The first connection deliberately retains its row lock. The second
+    // worker must progress to another physical event instead of waiting.
+    const second = await claimFundingReceiveClassificationRetries(pool, {
+      now: claimAt,
+      limit: 1,
+      retryDelayMs: 1000,
+    });
+    assert.equal(second.length, 1);
+    assert.notEqual(second[0].eventId, held[0].eventId);
+    await claimHolder.query("commit");
+  } catch (error) {
+    await claimHolder.query("rollback");
+    throw error;
+  } finally {
+    claimHolder.release();
+  }
   await pool.query(
     `update funding_receive_sessions
         set status = 'processing',
@@ -2535,8 +2924,8 @@ try {
         historicalSolUserId,
       ]);
       await cleanup.query(
-        "delete from funding_receive_canonical_events where tx_hash = $1",
-        [historicalSolTransactionHash],
+        "delete from funding_receive_canonical_events where tx_hash = any($1::text[])",
+        [[historicalSolTransactionHash, ...classificationRetryHashes]],
       );
       await cleanup.query(
         "delete from funding_receive_receipts where user_id = $1",

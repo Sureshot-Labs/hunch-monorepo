@@ -1,23 +1,8 @@
 import { z } from "zod";
 import type { Pool } from "@hunch/infra";
-import { hip4SpotMetadataSchema } from "@hunch/shared";
 import { hypercoreSpotAccountLocation } from "../../account-value/canonical.js";
 import { FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL } from "../../account-value/funding-movement-feed.js";
-import {
-  hip4AccountAbstractionSchema,
-  hip4AccountRoleSchema,
-} from "../../services/hip4-account-contract.js";
-import { projectHip4Account } from "../../services/hip4-account-projection.js";
-import {
-  createHip4AccountClient,
-  createHip4ReadClient,
-} from "../../services/hip4-client.js";
-import {
-  admitHip4Request,
-  readHip4Policy,
-} from "../../services/hip4-repository.js";
-import { readHip4AccountPolicy } from "../../services/hip4-account-repository.js";
-import { hypercoreSpotCashCapacity } from "../domain/hypercore-cash-capacity.js";
+import { readHip4FinancialObservation } from "../../services/hip4-financial-observation.js";
 import {
   hypercoreLocationDex,
   isHypercoreMainnetUsdc,
@@ -31,6 +16,10 @@ import { fundingReservationHoldSql } from "../persistence/source-reservation-hol
 import type { NativeFundingCapacityCheck } from "./hypercore-auth-attempt.js";
 import type { AssetLocation } from "../domain/types.js";
 import { canonicalAssetId } from "../domain/asset-identity.js";
+import {
+  HIP4_FUNDING_CASH_HOLDS_SQL,
+  readHip4OrderHoldRaw,
+} from "../../repos/hip4-order-holds.js";
 
 export type NativeSpotCapacity = {
   availableRaw: string;
@@ -46,77 +35,11 @@ export async function readNativeSendCapacity(
   address: string,
   fetcher?: typeof fetch,
 ): Promise<NativeSpotCapacity> {
-  const [read, account] = await Promise.all([
-    readHip4Policy(pool, "accountRead"),
-    readHip4AccountPolicy(pool),
-  ]);
-  if (
-    !read.policy.enabled ||
-    !account.policy.enabled ||
-    read.policy.environment !== "mainnet"
-  )
-    throw new Error("native_account_read_unavailable");
-  const admit = async (weight: number) =>
-    admitHip4Request(
-      pool,
-      "mainnet",
-      weight,
-      read.policy.requestWeightPerMinute,
-    );
-  const accountRead = createHip4AccountClient(read.policy, admit, fetcher);
-  const publicRead = createHip4ReadClient(read.policy, admit, fetcher);
-  // Use the start, not end, of the provider observation interval.
-  const observedAt = Date.now();
-  const role = hip4AccountRoleSchema.parse(
-    await accountRead({ type: "userRole", user: address }),
-  );
-  if (role.role !== "user") throw new Error("native_account_role_unsupported");
-  const mode = hip4AccountAbstractionSchema.parse(
-    await accountRead({ type: "userAbstraction", user: address }),
-  );
-  if (mode !== "disabled") throw new Error("native_cash_mode_unsupported");
-  const metadata = hip4SpotMetadataSchema.parse(
-    await publicRead({ type: "spotMeta" }),
-  );
-  const quote = metadata.tokens.find(
-    (row) => row.index === 0 && row.name === "USDC",
-  );
-  if (
-    !quote?.tokenId ||
-    !isHypercoreMainnetUsdc({
-      networkId: "hyperliquid:mainnet",
-      assetId: quote.tokenId,
-      decimals: quote.weiDecimals,
-    })
-  )
-    throw new Error("native_cash_identity_mismatch");
-  const state = await accountRead({
-    type: "spotClearinghouseState",
-    user: address,
-  });
-  if ((await accountRead({ type: "userAbstraction", user: address })) !== mode)
-    throw new Error("native_cash_mode_changed");
-  const observation = projectHip4Account({
-    environment: "mainnet",
-    role: "user",
-    mode,
-    state,
-    observedAt: new Date(observedAt).toISOString(),
-    quote: { tokenId: quote.tokenId, index: 0, weiDecimals: 8 },
-  });
-  const capacity = hypercoreSpotCashCapacity({
-    observation,
-    environment: "mainnet",
-    snapshotMaxAgeMs: account.policy.snapshotMaxAgeMs,
-    now: Date.now(),
-  });
-  if (!capacity.known) throw new Error(`native_cash_${capacity.reason}`);
+  const read = await readHip4FinancialObservation(pool, address, fetcher);
   return {
-    availableRaw: capacity.availableRaw,
-    observedAt: observation.observedAt,
-    expiresAt: new Date(
-      observedAt + account.policy.snapshotMaxAgeMs,
-    ).toISOString(),
+    availableRaw: read.cash.availableRaw,
+    observedAt: read.observedAt,
+    expiresAt: read.expiresAt,
   };
 }
 
@@ -200,6 +123,7 @@ export function nativeSendCapacityCheck(
         "Native capacity observation is not fresh",
       );
     const rows = await client.query<{
+      id: string;
       component_id: string;
       raw_amount: string;
       asset_decimals: number;
@@ -237,8 +161,34 @@ export function nativeSendCapacityCheck(
         ]),
       ],
     );
+    const otherCashHolds = await client.query<{
+      raw_amount: string;
+      asset_decimals: number;
+    }>(HIP4_FUNDING_CASH_HOLDS_SQL, [
+      input.userId,
+      location.locationId,
+      canonicalAssetId(location.asset),
+      own[0].id,
+    ]);
+    if (otherCashHolds.rows.some((row) => row.asset_decimals !== 8))
+      throw new FundingPersistenceError(
+        "quote_invalidated",
+        "Native reservation asset precision changed",
+      );
+    const tradeHolds = await readHip4OrderHoldRaw(
+      client,
+      input.userId,
+      binding.owner,
+      canonicalAssetId(location.asset),
+      capacity.observedAt,
+    );
     const needed =
-      rows.rows.reduce((sum, row) => sum + BigInt(row.raw_amount), 0n) +
+      BigInt(own[0].raw_amount) +
+      tradeHolds +
+      otherCashHolds.rows.reduce(
+        (sum, row) => sum + BigInt(row.raw_amount),
+        0n,
+      ) +
       debits.rows.reduce((sum, row) => sum + BigInt(row.raw_amount), 0n);
     if (needed > BigInt(capacity.availableRaw) || expiresAt <= Date.now())
       throw new FundingPersistenceError(

@@ -15,6 +15,7 @@ import {
 } from "../../persistence/funding-operation-repository.js";
 import {
   finishFundingStepAttemptForUserInTransaction,
+  listPotentialPolymarketHandoffsForCanonicalEvents,
   startFundingStepAttemptForUserInTransaction,
 } from "../../persistence/funding-evidence-repository.js";
 import {
@@ -32,12 +33,16 @@ import {
   reduceFundingOperationInTransaction,
   runFundingReconciliationBatch,
 } from "../../reconciliation/funding-reducer.js";
-import { listFundingStepReceiptTargets } from "../../persistence/funding-step-receipt-repository.js";
+import {
+  applyFundingStepReceiptEvidenceInTransaction,
+  listFundingStepReceiptTargets,
+} from "../../persistence/funding-step-receipt-repository.js";
 import { finishFundingActionReportAndReduce } from "../../execution/operation-action-runtime.js";
 
 const opaque = () => crypto.randomUUID();
 const owner = ethers.Wallet.createRandom();
 const safe = deriveSafeProxyAddress(owner.address);
+assert.ok(safe);
 const recipient = "0x00000000000000000000000000000000000000a1";
 const asset = {
   networkId: "evm:137",
@@ -611,6 +616,82 @@ assert.equal(
   ).rowCount,
   0,
 );
+
+const handoffLookup = {
+  userId,
+  currentLookupKeyVersion: codec.keyVersion,
+  events: [
+    {
+      networkId: asset.networkId,
+      assetId: asset.assetId,
+      sourceAddress: safe,
+      destinationAddress: recipient,
+      rawAmount: "1000000",
+      receiptRefLookupHmac: null,
+    },
+  ],
+};
+const handoffCandidates =
+  await listPotentialPolymarketHandoffsForCanonicalEvents(pool, handoffLookup);
+for (const input of [admitted, legacy, lost, accepted]) {
+  assert.ok(
+    handoffCandidates.some(
+      (candidate) => candidate.attemptId === input.attemptId,
+    ),
+    "admitted or legacy Safe uncertainty must remain visible to receive classification",
+  );
+}
+for (const input of [
+  abandoned,
+  neverAdmitted,
+  rejectedSignature,
+  expiryWins,
+  workerExpired,
+]) {
+  assert.ok(
+    !handoffCandidates.some(
+      (candidate) => candidate.attemptId === input.attemptId,
+    ),
+    "closed unadmitted Safe signing must not indefinitely quarantine an ordinary incoming transfer",
+  );
+}
+const receiptClient = await pool.connect();
+try {
+  await receiptClient.query("begin");
+  const transactionHash = `0x${"de".repeat(32)}`;
+  for (const canonical of [true, false]) {
+    await applyFundingStepReceiptEvidenceInTransaction(receiptClient, {
+      operationId: accepted.operationId,
+      stepId: accepted.stepId,
+      attemptId: accepted.attemptId,
+      networkId: asset.networkId,
+      receipt: {
+        status: canonical ? "confirmed" : "reorged",
+        actionMatch: true,
+        ledgerHeight: "101",
+        blockHash: `0x${"cd".repeat(32)}`,
+        canonical,
+        failureCode: null,
+        evidence: {
+          transactionHash,
+          handoffEventIndex: "2",
+          exactTransferObserved: true,
+        },
+      },
+    });
+    const candidate = (
+      await listPotentialPolymarketHandoffsForCanonicalEvents(
+        receiptClient,
+        handoffLookup,
+      )
+    ).find((candidate) => candidate.attemptId === accepted.attemptId);
+    assert.equal(candidate?.resolvedTransactionHash, transactionHash);
+    assert.equal(candidate?.resolvedEventIndex, canonical ? "2" : null);
+  }
+} finally {
+  await receiptClient.query("rollback");
+  receiptClient.release();
+}
 
 console.log(
   "[safe-funding-submission-integration-tests] expiry, reservations, admission race, lost response, durable receipt and legacy safety passed",

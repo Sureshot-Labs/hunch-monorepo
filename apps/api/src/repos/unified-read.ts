@@ -5926,6 +5926,10 @@ function preselectedMarketHydrationInputs(
     q: undefined,
     eventScope: undefined,
     venues: undefined,
+    // Exact IDs were already selected under the caller's environment scope.
+    // Hydration does not use candidate filters: retaining this value allocates
+    // a network parameter which its ID-only SQL never references (PG 42P18).
+    hip4Environment: undefined,
     category: undefined,
     categories: undefined,
     filter: undefined,

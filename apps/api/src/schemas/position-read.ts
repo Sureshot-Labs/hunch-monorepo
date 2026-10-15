@@ -63,7 +63,7 @@ export const hip4PortfolioPositionSchema = z.object({
     })
     .nullable(),
   capabilities: z.object({
-    sell: z.literal(false),
+    sell: z.boolean(),
     redeem: z.literal(false),
     hide: z.literal(false),
   }),

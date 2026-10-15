@@ -1,6 +1,6 @@
 import type { DbQuery } from "../db.js";
 import type { ApiBotTradingExecutor } from "../services/api-trading-types.js";
-import type { ApiTradeMarket } from "../services/api-trading-market-repo.js";
+import type { ApiBotTradeMarket } from "../services/api-trading-market-repo.js";
 import {
   buildTelegramBotTradingMarketMessage,
   buildTelegramTradeConfirmationMessage,
@@ -11,7 +11,7 @@ import { telegramTradeLifecycleProgressTestHooks } from "../services/telegram-tr
 export const APP_URL = "https://preview.invalid";
 export const ID = "11111111-1111-4111-8111-111111111111";
 export const AS_OF = "2026-09-23T12:00:00.000Z";
-export const market: ApiTradeMarket = {
+export const market: ApiBotTradeMarket = {
   id: "polymarket:preview-market",
   venue: "polymarket",
   venue_market_id: "preview-market",
@@ -121,6 +121,8 @@ const trading: ApiBotTradingExecutor = {
   persistTrade: forbidden,
   prepareTrade: forbidden,
   submitPreparedTrade: forbidden,
+  prepareCancelOrder: forbidden,
+  submitPreparedCancelOrder: forbidden,
   getReadiness: async () => ({
     ready: true,
     executable: true,

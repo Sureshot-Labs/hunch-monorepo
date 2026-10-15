@@ -6,19 +6,65 @@ import {
   failHip4AccountRefresh,
 } from "./services/hip4-account-repository.js";
 import { refreshHip4OwnedAccount } from "./services/hip4-account-service.js";
+import { runHip4OrderObservationPass } from "./services/hip4-order-observer.js";
 
-export const HIP4_CLAIM_DUE_ACCOUNT_SQL = `with due_accounts as (
+/** Existing finance-worker job/pool, not a second trading executor. Already
+ * admitted orders remain observable after new-exposure/account-read disabling. */
+export async function runHip4FinancialReadPass(
+  pool: Pool,
+  fetcher?: typeof fetch,
+  accountFirst = true,
+) {
+  const orders = () =>
+    runHip4OrderObservationPass(pool, fetcher).catch(() => ({
+      claimed: 0,
+      saved: 0,
+      errors: 1,
+      leaseLost: 0,
+      budgetExhausted: 0,
+    }));
+  // Try both phases even if one policy/read fails. Priority is rotated by the
+  // existing single-flight job so neither can monopolize the shared IP budget.
+  const accounts = () =>
+    runHip4AccountReadPass(pool, fetcher).catch(() => null);
+  const first = accountFirst ? await accounts() : null;
+  const orderObservation = await orders();
+  const account = accountFirst ? first : await accounts();
+  if (!account) throw new Error("hip4_account_observation_failed");
+  return { ...account, orderObservation };
+}
+
+// Materialize eligibility before the LIMIT row goal. Otherwise PostgreSQL can
+// walk every unowned snapshot in time order and repeatedly probe all wallets
+// while hoping to find one eligible row near the front of a sparse queue.
+// OFFSET 0 fences lateral PK lookup and candidate ordering against flattening;
+// the LIMIT remains AFTER SKIP LOCKED so contention can try the next candidate.
+export const HIP4_CLAIM_DUE_ACCOUNT_SQL = `with owned_due_accounts as materialized (
+  select snapshot_row.environment,snapshot_row.account_address,snapshot_row.attempt_at
+  from user_wallets wallet_row
+  join users owner_row on owner_row.id=wallet_row.user_id and owner_row.is_active
+  cross join lateral (
+    select account_row.environment,account_row.account_address,account_row.attempt_at
+    from hip4_account_snapshots account_row
+    where account_row.environment=$1 and account_row.account_address=wallet_row.wallet_address_norm
+      and (account_row.attempt_at is null or account_row.attempt_at<=statement_timestamp()-$2*interval '1 millisecond')
+      and (account_row.lease_until is null or account_row.lease_until<statement_timestamp())
+    offset 0
+  ) snapshot_row
+  where wallet_row.is_verified and wallet_row.wallet_type='ethereum'
+), due_accounts as (
   select snapshot_row.environment, snapshot_row.account_address
-  from hip4_account_snapshots snapshot_row
-  where snapshot_row.environment=$1
-    and (snapshot_row.attempt_at is null or snapshot_row.attempt_at<=statement_timestamp()-$2*interval '1 millisecond')
-    and (snapshot_row.lease_until is null or snapshot_row.lease_until<statement_timestamp())
-    and exists (select 1 from user_wallets wallet_row join users owner_row
-      on owner_row.id=wallet_row.user_id and owner_row.is_active
-      where wallet_row.is_verified and wallet_row.wallet_type='ethereum'
-        and lower(wallet_row.wallet_address)=snapshot_row.account_address)
-  order by snapshot_row.attempt_at asc nulls first, snapshot_row.account_address
-  limit 1 for update of snapshot_row skip locked
+  from (select * from owned_due_accounts
+    order by attempt_at asc nulls first,account_address offset 0) candidate_row
+  cross join lateral (
+    select locked_row.environment,locked_row.account_address
+    from hip4_account_snapshots locked_row
+    where locked_row.environment=candidate_row.environment
+      and locked_row.account_address=candidate_row.account_address
+      and (locked_row.attempt_at is null or locked_row.attempt_at<=statement_timestamp()-$2*interval '1 millisecond')
+      and (locked_row.lease_until is null or locked_row.lease_until<statement_timestamp())
+    for update of locked_row skip locked
+  ) snapshot_row limit 1
 ) update hip4_account_snapshots target_row
   set attempt_at=statement_timestamp(), attempt_error=null,
     lease_token=gen_random_uuid(), lease_until=statement_timestamp()+$3*interval '1 millisecond'

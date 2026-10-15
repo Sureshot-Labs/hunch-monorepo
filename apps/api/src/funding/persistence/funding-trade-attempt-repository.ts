@@ -2,6 +2,7 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import type { JsonValue } from "../domain/types.js";
 import { legacyEvidencePollingPausedSql } from "../legacy/evidence-polling-control.js";
+import { classifyHip4NativeOrderStatus } from "../../services/hip4-order-evidence.js";
 import {
   deriveFundingLifecycle,
   type FundingLifecycleProjection,
@@ -17,6 +18,7 @@ export type FundingTradeExecutionPath =
   | "polymarket_clob"
   | "limitless_clob"
   | "limitless_amm"
+  | "hyperliquid_outcome"
   | "kalshi_dflow";
 
 export type FundingTradeAttemptState =
@@ -1251,6 +1253,90 @@ export async function proveAmbiguousLimitlessTerminalRejectionInTransaction(
     );
   }
   return mapAttempt(row);
+}
+
+export const HIP4_EXACT_REJECTION_PROOF_SQL = `select action_row.id
+  from hip4_order_actions action_row
+  join hip4_order_submissions submission_row on submission_row.action_id=action_row.id
+  join orders order_row on order_row.id=action_row.order_id
+  where action_row.id=$1 and action_row.action_kind='order' and action_row.environment='mainnet'
+    and action_row.cloid=$2 and action_row.action_fingerprint=$3
+    and order_row.user_id=$4 and order_row.venue='hyperliquid'
+    and order_row.funding_trade_attempt_id=$5 and coalesce(order_row.filled_size,0)=0
+    and submission_row.funding_trade_attempt_id=$5
+    and submission_row.reconcile_lease_token=$6 and submission_row.reconcile_lease_until>clock_timestamp()
+    and submission_row.state<>'rejected'
+    and submission_row.order_observation->>'status'=$7
+    and submission_row.order_observation@>'{"terminal":true,"balanceBarrier":{"state":"terminal_observed"}}'::jsonb`;
+
+/** Exact native placement rejection, never unknownOid or a cancel ACK. The
+ * observer has validated the frozen order and locked its submission in this
+ * transaction; its independent live lease fences this recovery. The generic
+ * ambiguous-outcome transition remains unchanged for every other venue. */
+export async function proveHyperliquidOrderRejectedInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    attemptId: string;
+    actionId: string;
+    cloid: string;
+    rejectionStatus: string;
+    expectedObservationClaimToken: string;
+    userId: string;
+    now?: Date;
+  }>,
+): Promise<FundingTradeAttempt> {
+  if (classifyHip4NativeOrderStatus(input.rejectionStatus) !== "rejected")
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "Not a native placement rejection",
+    );
+  await lockFundingOperationForAttempt(client, input);
+  const attempt = await fetchAttemptForUpdate(client, input);
+  if (
+    attempt.executionPath !== "hyperliquid_outcome" ||
+    attempt.venueId !== "hyperliquid" ||
+    !["submission_started", "ambiguous"].includes(attempt.state) ||
+    attempt.externalReference !== input.cloid ||
+    attempt.idempotencyKey !== `hip4:${input.actionId}` ||
+    attempt.consumerRef !== null
+  )
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "Native rejection does not match an unresolved exact trade attempt",
+    );
+  const proof = await client.query(HIP4_EXACT_REJECTION_PROOF_SQL, [
+    input.actionId,
+    input.cloid,
+    attempt.canonicalFingerprint,
+    input.userId,
+    input.attemptId,
+    input.expectedObservationClaimToken,
+    input.rejectionStatus,
+  ]);
+  if (proof.rows.length !== 1)
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "Native rejection lost its exact observation lease or identity",
+    );
+  const now = input.now ?? new Date();
+  const resolved = await client.query<FundingTradeAttemptRow>(
+    `update funding_trade_attempts
+    set state='definitive_failure',error_code=$3,resolved_at=$4,updated_at=$4
+    where id=$1 and user_id=$2 and state in ('submission_started','ambiguous')
+    returning ${ATTEMPT_COLUMNS}`,
+    [
+      input.attemptId,
+      input.userId,
+      `hip4_exact_status_${input.rejectionStatus}`,
+      now,
+    ],
+  );
+  if (!resolved.rows[0])
+    throw new FundingTradeAttemptError(
+      "invalid_state",
+      "Native trade attempt changed before rejection resolution",
+    );
+  return mapAttempt(resolved.rows[0]);
 }
 
 export async function acceptFundingTradeAttemptInTransaction(

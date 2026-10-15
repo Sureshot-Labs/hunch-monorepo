@@ -10,6 +10,7 @@ import {
   DEFAULT_VENUE_LIFECYCLE_POLICY,
   venueLifecyclePolicySchema,
   venueHasLifecycleCapability,
+  getVenueLifecycleCapabilities,
   type Hip4Environment,
   type Hip4ReadMarket,
   type Hip4Attempt,
@@ -67,6 +68,10 @@ export async function readHip4Policy(
     policy,
     revision,
     lifecycle,
+    capabilities: getVenueLifecycleCapabilities(
+      lifecyclePolicy,
+      "hyperliquid",
+    )!,
     disabledReason: !allowed ? "venue_lifecycle" : null,
   };
 }

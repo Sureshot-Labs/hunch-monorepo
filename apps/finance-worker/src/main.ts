@@ -166,7 +166,15 @@ export function buildJobs(
         "errors",
         "leaseLost",
         "budgetExhausted",
-      ]),
+      ]) &&
+      !hasPositiveActivity(
+        typeof result === "object" &&
+          result !== null &&
+          "orderObservation" in result
+          ? result.orderObservation
+          : null,
+        ["claimed", "saved", "errors", "leaseLost", "budgetExhausted"],
+      ),
   };
   const verifiedBuyJob: ScheduledJob = {
     name: "verified_buy_repair",

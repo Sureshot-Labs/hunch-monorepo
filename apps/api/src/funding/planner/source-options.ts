@@ -151,6 +151,7 @@ export type RelayPlanningQuoteRejectionReason = Extract<
   | "provider_quote_invalid"
   | "provider_quote_rejected"
   | "insufficient_gas"
+  | "destination_unavailable"
 >;
 
 export type RelayPlanningQuoteRejection = Readonly<{

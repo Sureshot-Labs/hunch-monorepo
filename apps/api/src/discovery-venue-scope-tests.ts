@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { DEFAULT_HIP4_READ_POLICY, type HunchVenue } from "@hunch/shared";
+import {
+  DEFAULT_HIP4_READ_POLICY,
+  DEFAULT_VENUE_LIFECYCLE_POLICY,
+  getVenueLifecycleCapabilities,
+  type HunchVenue,
+} from "@hunch/shared";
 import type { DbQuery } from "./db.js";
 import { createDiscoveryVenueScopeResolver } from "./services/discovery-venue-scope.js";
 import { VENUE_LIFECYCLE_CACHE_TTL_MS } from "./services/runtime-policies.js";
@@ -31,6 +36,10 @@ const resolve = createDiscoveryVenueScopeResolver({
       policy: { ...DEFAULT_HIP4_READ_POLICY, enabled: true, environment },
       revision: `protocol-${environment}`,
       lifecycle: { lifecycle: "active", indexerMode: "full" },
+      capabilities: getVenueLifecycleCapabilities(
+        DEFAULT_VENUE_LIFECYCLE_POLICY,
+        "hyperliquid",
+      )!,
       disabledReason: null,
     };
   },

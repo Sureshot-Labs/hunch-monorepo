@@ -23,6 +23,7 @@ import {
   hypercoreLocationDex,
 } from "../../funding/domain/hypercore-identity.js";
 import { operationPurposeForExternalRecipient } from "../../funding/domain/withdrawal-binding.js";
+import { EXACT_REFUND_RECEIPTS_CONTRACT } from "../../funding/domain/refund-settlement.js";
 import { groupWalletExecutableActions } from "../../funding/planner/evm-action-batching.js";
 import type { ResolvedRouteDestination } from "../../funding/planner/destination-adapters.js";
 import type {
@@ -42,6 +43,7 @@ import { isRelayPinnedStableAsset, RELAY_PINNED_ASSETS } from "./mappings.js";
 import {
   RELAY_DEPOSITORY_V2,
   canonicalizeRelayDepositoryV2SelfBoundAction,
+  validateRelayDepositoryV2Action,
 } from "./rehearsal.js";
 import type { createRelayReferenceCodec } from "./reference-codec.js";
 import type { NormalizedRelayWalletQuote } from "./wallet-adapter.js";
@@ -151,6 +153,27 @@ async function validatedSteps(input: {
       profile: input.profile,
     });
     const relayStepKind = relayStepKindForSourceActions(sourceActions);
+    const nativeInboundDeposit = isHypercoreFundingNetwork(
+      input.minimumOutput.asset.networkId,
+    )
+      ? sourceActions.filter((item) => item.actionId.endsWith(":deposit"))
+      : [];
+    if (nativeInboundDeposit.length > 1)
+      throw new Error("Native inbound plan has ambiguous deposit order");
+    const deposit = nativeInboundDeposit[0];
+    const protocolOrderId =
+      deposit?.kind === "evm_transaction"
+        ? validateRelayDepositoryV2Action({
+            action: {
+              to: deposit.to,
+              data: deposit.data,
+              value: BigInt(deposit.valueRaw),
+            },
+            amount: BigInt(input.sourceAmount.raw),
+            token: input.sourceAmount.asset.assetId,
+            user: input.profile.address,
+          })
+        : null;
     const validation =
       validations.length === 1
         ? validations[0]
@@ -179,6 +202,7 @@ async function validatedSteps(input: {
         sponsorshipPolicyId: sponsorship.policyId,
         signingMode: sponsorship.signingMode,
         ...(relayStepKind ? { relayStepKind } : {}),
+        ...(protocolOrderId ? { relayProtocolOrderId: protocolOrderId } : {}),
       }),
       routeId: input.route.routeId,
       sourceAmount: input.sourceAmount,
@@ -504,13 +528,21 @@ export function relayRefundLocationSnapshot(input: {
   routeShape: string;
 }): AssetLocation &
   Readonly<{
+    refundEvidenceContract?: typeof EXACT_REFUND_RECEIPTS_CONTRACT;
     alternativeRefundLocations?: Readonly<{
       version: 1;
       locations: readonly AssetLocation[];
     }>;
   }> {
-  if (!isHypercoreFundingNetwork(input.minimumOutput.asset.networkId))
-    return relayRefundLocation(input);
+  if (!isHypercoreFundingNetwork(input.minimumOutput.asset.networkId)) {
+    const location = relayRefundLocation(input);
+    return isHypercoreFundingNetwork(input.sourceAmount.asset.networkId)
+      ? {
+          ...structuredClone(location),
+          refundEvidenceContract: EXACT_REFUND_RECEIPTS_CONTRACT,
+        }
+      : location;
+  }
   const target = input.destination.target;
   if (
     input.routeShape !== "relay-depository-v2-hypercore" ||
@@ -536,6 +568,7 @@ export function relayRefundLocationSnapshot(input: {
   });
   return {
     ...structuredClone(input.sourceLocation),
+    refundEvidenceContract: EXACT_REFUND_RECEIPTS_CONTRACT,
     alternativeRefundLocations: {
       version: 1,
       locations: [structuredClone(native)],
@@ -653,6 +686,19 @@ export async function buildRelayPlanningQuote(
             : {}),
         })
       : clientSteps;
+  const orderIds = new Set(
+    steps.flatMap((step) => {
+      const id = step.actionValidationResult.relayProtocolOrderId;
+      return typeof id === "string" && /^0x[a-f0-9]{64}$/u.test(id) ? [id] : [];
+    }),
+  );
+  if (refundLocation.refundEvidenceContract && orderIds.size !== 1)
+    throw new Error(
+      "Native refund contract requires one validated protocol order",
+    );
+  const frozenRefundLocation = refundLocation.refundEvidenceContract
+    ? { ...refundLocation, relayProtocolOrderId: [...orderIds][0] }
+    : refundLocation;
   const plan = {
     operation: {
       purpose: operationPurposeForExternalRecipient(
@@ -730,7 +776,7 @@ export async function buildRelayPlanningQuote(
         depositAddressCiphertext: null,
         depositAddressLookupHmac: null,
         lookupKeyVersion: input.codec.keyVersion,
-        refundLocationSnapshot: jsonRecord(refundLocation),
+        refundLocationSnapshot: jsonRecord(frozenRefundLocation),
         quoteExpiresAt: input.quote.candidate.expiresAt,
         supportMetadata: {
           requestFingerprint: input.quote.requestFingerprint,

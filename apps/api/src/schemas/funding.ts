@@ -584,6 +584,16 @@ export const fundingDestinationOptionSchema = z
     recommended: z.boolean(),
     selectable: z.boolean(),
     reasonCodes: z.array(fundingReasonCodeSchema).max(64),
+    spendability: z
+      .object({
+        availableAmount: moneySchema,
+        revision: opaqueIdSchema,
+        asOf: z.string().datetime(),
+        expiresAt: z.string().datetime(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
   })
   .strict();
 
@@ -916,8 +926,21 @@ export const fundingDestinationsQuerySchema = z
     marketClass: z.string().trim().min(1).max(80).nullable().optional(),
     positionActionRef: z.string().uuid().nullable().optional(),
     controllerWalletRef: z.string().uuid().nullable().optional(),
+    refresh: z.enum(["true", "false"]).optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (query) =>
+      query.refresh !== "true" ||
+      Boolean(
+        query.marketContextId &&
+        (query.controllerWalletRef || query.positionActionRef),
+      ),
+    {
+      message:
+        "Fresh destination inspection requires a market and an owned controller or position",
+    },
+  );
 
 export const fundingDestinationsResponseSchema = z
   .object({

@@ -9,6 +9,9 @@ import type {
   PersistedTrade,
   PersistTradeInput,
   PreparedTrade,
+  PrepareCancelOrderInput,
+  PreparedCancelOrder,
+  SubmitPreparedCancelOrderInput,
   PrepareTradeInput,
   SubmitPreparedTradeInput,
   SubmitResult,
@@ -38,6 +41,12 @@ export type ApiTradingApplicationServiceInput = {
 };
 
 export type ApiBotTradingExecutor = {
+  prepareCancelOrder: (
+    input: PrepareCancelOrderInput,
+  ) => Promise<PreparedCancelOrder>;
+  submitPreparedCancelOrder: (
+    input: SubmitPreparedCancelOrderInput,
+  ) => Promise<SubmitResult>;
   applyTradeEffects: (
     input: ApplyTradeEffectsInput,
   ) => Promise<TradeEffectsResult>;
@@ -59,6 +68,15 @@ export type ApiBotTradingExecutor = {
 };
 
 export type ApiVenueTradingExecutor = {
+  prepareCancelOrder?: (
+    input: PrepareCancelOrderInput,
+  ) => Promise<PreparedCancelOrder>;
+  submitPreparedCancelOrder?: (
+    input: SubmitPreparedCancelOrderInput,
+  ) => Promise<SubmitResult>;
+  /** This adapter atomically owns its existing common funding claim, persisted
+   * order and submission. Do not wrap it in a second generic claim/release. */
+  submissionOwnership?: "durable_client_signed";
   applyTradeEffects: (
     input: ApplyTradeEffectsInput,
   ) => Promise<TradeEffectsResult>;
@@ -76,5 +94,5 @@ export type ApiVenueTradingExecutor = {
   submitPreparedTrade: (
     input: SubmitPreparedTradeInput,
   ) => Promise<SubmitResult>;
-  venue: SupportedBotTradingVenue;
+  venue: TradingVenue;
 };

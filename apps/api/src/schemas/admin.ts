@@ -680,6 +680,7 @@ export const adminIntelPolicyKeySchema = z.enum([
   "venue_lifecycle",
   "hip4_read",
   "hip4_account",
+  "hip4_trading",
 ]);
 
 export const adminIntelPolicyParamsSchema = z.object({

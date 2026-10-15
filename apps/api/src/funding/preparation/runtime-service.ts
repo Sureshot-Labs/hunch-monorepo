@@ -54,7 +54,24 @@ import {
 import {
   stableOpaqueId,
   stableWalletOpaqueId,
+  hypercoreSpotAccountLocation,
 } from "../../account-value/canonical.js";
+import { loadHypercorePreparationAvailability } from "./hypercore-availability.js";
+import { createHip4OwnedAccountService } from "../../services/hip4-account-service.js";
+import {
+  HYPERCORE_MAINNET_USDC,
+  HYPERCORE_SPOT_LOCATION_PATTERN,
+} from "../domain/hypercore-identity.js";
+import {
+  HypercoreWalletPreparationAdapter,
+  hypercorePreparationBalance,
+  hypercorePreparationMarket,
+  hypercorePreparationPosition,
+  hypercorePreparationRequirements,
+} from "./hypercore-adapter.js";
+import { readHip4TradeLifecycle } from "../../repos/hip4-order-admission.js";
+import { resolveFundingPolicy } from "../policies/funding-policy-service.js";
+import { fundingVenueEnabled } from "../policies/funding-policy-v2.js";
 import type {
   DestinationOptionsInput,
   PreparationInspectionInput,
@@ -68,6 +85,7 @@ import type {
   Money,
   NormalizedAction,
   PreparationExecutionMode,
+  PreparationPurpose,
   VenueAccountBinding,
   VenueBindingOption,
   VenueId,
@@ -161,11 +179,16 @@ export type RuntimeVenueInspectionInput = Readonly<{
   /** Exact canonical position owner for owner-bound actions such as redeem. */
   requiredOwnerAccountRef?: string;
   resolvedMarketContext?: RuntimeMarketContext;
+  /** Current policy/environment identity, checked before cache reuse. */
+  policyScope?: string;
 }>;
 
 export interface WalletPreparationRuntimeDriver {
   readonly venueId: VenueId;
   readonly supportedMarketClasses: readonly string[];
+  readonly supportedPurposes?: readonly PreparationPurpose[];
+  /** Null disables this driver; errors retain normal inspection diagnostics. */
+  inspectionScope?(request: DestinationOptionsInput): Promise<string | null>;
   supportsWallet(wallet: UserWallet): boolean;
   inspect(
     input: RuntimeVenueInspectionInput,
@@ -1016,11 +1039,12 @@ function availableRaw(
   observedRaw: string,
   lockedRaw: string,
   reservedRaw: string,
+  submittedDebitRaw = "0",
 ): string {
   const observed = BigInt(observedRaw);
   const locked = BigInt(lockedRaw);
   const reserved = BigInt(reservedRaw);
-  const unavailable = locked + reserved;
+  const unavailable = locked + reserved + BigInt(submittedDebitRaw);
   return (observed > unavailable ? observed - unavailable : 0n).toString();
 }
 
@@ -1054,6 +1078,9 @@ function frozenDestination(input: {
   observedRaw: string;
   lockedRaw: string;
   reservedRaw: string;
+  submittedDebitRaw?: string;
+  spendabilityCoverage?: "provider_locks_and_hunch_holds";
+  observedAt?: string;
   destinationLocationPatternId: string;
   networkLabel: string;
   sourcePlanningEvidence: FrozenPreparationDestination["sourcePlanningEvidence"];
@@ -1065,6 +1092,7 @@ function frozenDestination(input: {
     input.observedRaw,
     input.lockedRaw,
     input.reservedRaw,
+    input.submittedDebitRaw,
   );
   const expiresAt = input.preparation.expiresAt;
   const target: FundingTarget = {
@@ -1072,19 +1100,23 @@ function frozenDestination(input: {
     location: binding.settlementLocation,
   };
   const spendability = {
+    coverage: input.spendabilityCoverage,
     observedAmount: { asset, raw: input.observedRaw },
     lockedRaw: input.lockedRaw,
     reservedRaw: input.reservedRaw,
-    submittedDebitRaw: "0",
+    submittedDebitRaw: input.submittedDebitRaw ?? "0",
     availableAmount: { asset, raw: available },
     revision: `spendability_${canonicalJsonHash({
       bindingId: binding.bindingId,
       observedRaw: input.observedRaw,
       lockedRaw: input.lockedRaw,
       reservedRaw: input.reservedRaw,
+      ...(input.submittedDebitRaw !== undefined
+        ? { submittedDebitRaw: input.submittedDebitRaw }
+        : {}),
       expiresAt,
     }).slice(0, 32)}`,
-    asOf: input.now.toISOString(),
+    asOf: input.observedAt ?? input.now.toISOString(),
     expiresAt,
   };
   return {
@@ -1163,6 +1195,32 @@ export class WalletPreparationRuntimeService {
     loadWallets: UserWalletLoader = (accountId) =>
       AuthService.getUserWallets(accountId),
     private readonly unreadyInspectionReuseMs = DESTINATION_INSPECTION_REUSE_MS,
+    private readonly nativeAccountService: Pick<
+      ReturnType<typeof createHip4OwnedAccountService>,
+      "policy" | "load"
+    > = createHip4OwnedAccountService(db),
+    private readonly loadNativeFundingPolicy = () => resolveFundingPolicy(db),
+    private readonly loadNativeTradeScope: (
+      purpose: "buy" | "sell",
+    ) => Promise<string | null> = async (purpose) => {
+      try {
+        const resolved = await readHip4TradeLifecycle(
+          db,
+          purpose === "buy" ? "BUY" : "SELL",
+        );
+        return canonicalJsonHash({
+          id: resolved.row?.id ?? null,
+          policy: resolved.policy,
+        });
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === "hip4_lifecycle_disabled"
+        )
+          return null;
+        throw error;
+      }
+    },
   ) {
     this.venueDrivers = venueDrivers ?? this.defaultVenueDrivers();
     this.loadWallets = loadWallets;
@@ -1230,17 +1288,38 @@ export class WalletPreparationRuntimeService {
         },
         matchesAccountRef: sameAddress,
       },
+      {
+        venueId: "hyperliquid",
+        supportedMarketClasses: ["hip4"],
+        supportedPurposes: ["fund", "buy", "sell"],
+        supportsWallet: (wallet) =>
+          isSupportedEvmWallet(wallet) &&
+          (wallet.walletSource === "embedded" ||
+            wallet.walletSource === "external"),
+        inspectionScope: async (request) =>
+          (await this.nativePreparationPolicy(request.purpose))?.scope ?? null,
+        inspect: (input) => this.inspectHypercore(input),
+        ownerCandidates: async () => ({
+          candidateWallets: [],
+          ownershipHinted: false,
+        }),
+        matchesAccountRef: sameAddress,
+      },
     ];
   }
 
-  private inspectDestinationWithReuse(input: {
+  private async inspectDestinationWithReuse(input: {
     driver: WalletPreparationRuntimeDriver;
     wallet: UserWallet;
     request: DestinationOptionsInput;
     canonicalMarketContextId: string | null;
     resolvedMarketContext?: RuntimeMarketContext;
     forceFresh?: boolean;
-  }): Promise<PreparedRuntimeDestination> {
+  }): Promise<PreparedRuntimeDestination | null> {
+    const policyScope = input.driver.inspectionScope
+      ? await input.driver.inspectionScope(input.request)
+      : undefined;
+    if (policyScope === null) return null;
     const key = JSON.stringify({
       accountId: input.request.accountId,
       venueId: input.driver.venueId,
@@ -1251,6 +1330,21 @@ export class WalletPreparationRuntimeService {
       marketClass: input.request.marketClass,
       positionActionRef: input.request.positionActionRef ?? null,
       assetContext: input.resolvedMarketContext?.assetContext ?? null,
+      // A terminal or remapped indexed instrument invalidates native readiness
+      // even when the account/policy snapshot remains reusable.
+      nativeMarket:
+        input.driver.venueId === "hyperliquid" &&
+        input.resolvedMarketContext?.market
+          ? {
+              id: input.resolvedMarketContext.market.id,
+              status: input.resolvedMarketContext.market.status,
+              yes: input.resolvedMarketContext.market.token_yes,
+              no: input.resolvedMarketContext.market.token_no,
+              close: input.resolvedMarketContext.market.close_time,
+              expiry: input.resolvedMarketContext.market.expiration_time,
+            }
+          : null,
+      policyScope,
     });
     const inflightKey = input.forceFresh ? `fresh:${key}` : key;
     const now = this.clock().getTime();
@@ -1278,11 +1372,15 @@ export class WalletPreparationRuntimeService {
         accountId: input.request.accountId,
         wallet: input.wallet,
         purpose: input.request.purpose,
-        marketContextId: input.request.marketContextId,
+        marketContextId:
+          input.driver.venueId === "hyperliquid"
+            ? (input.canonicalMarketContextId ?? input.request.marketContextId)
+            : input.request.marketContextId,
         marketClass: input.request.marketClass,
         positionActionRef: input.request.positionActionRef ?? null,
         resolvedMarketContext: input.resolvedMarketContext,
         forceFresh: input.forceFresh,
+        policyScope,
       })
       .then((value) => {
         const completedAt = this.clock().getTime();
@@ -1315,6 +1413,229 @@ export class WalletPreparationRuntimeService {
       });
     this.destinationInspectionInflight.set(inflightKey, inspection);
     return inspection;
+  }
+
+  private async nativePreparationPolicy(purpose: PreparationPurpose) {
+    let operationScope: string;
+    if (purpose === "fund") {
+      const funding = await this.loadNativeFundingPolicy();
+      if (!fundingVenueEnabled(funding.runtime, "hyperliquid")) return null;
+      operationScope = funding.revision;
+    } else if (purpose === "buy" || purpose === "sell") {
+      // Direct trading uses venue lifecycle, not the funding switch. In
+      // particular a funding pause must not disable an otherwise permitted exit.
+      const tradeScope = await this.loadNativeTradeScope(purpose);
+      if (tradeScope == null) return null;
+      operationScope = tradeScope;
+    } else return null;
+    // Skip disabled purposes before account IO; invalid policy is not absence.
+    const policy = await this.nativeAccountService.policy();
+    if (
+      !policy.readPolicy.enabled ||
+      !policy.accountPolicy.enabled ||
+      policy.readPolicy.environment !== "mainnet"
+    )
+      return null;
+    return {
+      ...policy,
+      scope: JSON.stringify([
+        purpose,
+        operationScope,
+        policy.revision,
+        policy.readPolicy.environment,
+      ]),
+    };
+  }
+
+  private async inspectHypercore(
+    input: RuntimeVenueInspectionInput,
+  ): Promise<PreparedRuntimeDestination> {
+    if (
+      !["fund", "buy", "sell"].includes(input.purpose) ||
+      (input.marketClass != null && input.marketClass !== "hip4") ||
+      input.wallet.userId !== input.accountId ||
+      !input.wallet.isVerified ||
+      input.wallet.walletType !== "ethereum" ||
+      !["embedded", "external"].includes(input.wallet.walletSource) ||
+      !/^0x[a-fA-F0-9]{40}$/.test(input.wallet.walletAddress)
+    )
+      throw new PreparationContractError(
+        "binding_mismatch",
+        "Native funding recipient is not owned or supported",
+      );
+    const policy = await this.nativePreparationPolicy(input.purpose);
+    if (!policy || (input.policyScope && input.policyScope !== policy.scope))
+      throw new PreparationContractError(
+        "evidence_stale",
+        "Native account policy changed; inspect again",
+      );
+    const address = input.wallet.walletAddress.toLowerCase();
+    const market =
+      input.purpose === "fund"
+        ? null
+        : hypercorePreparationMarket(
+            input.resolvedMarketContext?.market ?? null,
+            this.clock().getTime(),
+          );
+    const refreshRequestedAt = this.clock().getTime();
+    const read = await this.nativeAccountService.load(
+      address,
+      policy.readPolicy,
+      policy.accountPolicy,
+      policy.revision,
+      input.forceFresh === true,
+    );
+    const current = await this.nativePreparationPolicy(input.purpose);
+    const now = this.clock();
+    if (
+      !current ||
+      current.scope !== policy.scope ||
+      read.policyRevision !== policy.revision ||
+      read.address !== address ||
+      read.environment !== "mainnet" ||
+      read.state !== "fresh" ||
+      !read.observation ||
+      // The read service preserves usable old observations on failed IO or a
+      // contended refresh lease. TTL freshness alone does not satisfy an
+      // explicit refresh. A new core observation can still have history errors.
+      (input.forceFresh === true &&
+        Date.parse(read.observation.observedAt) < refreshRequestedAt) ||
+      !read.validUntil ||
+      Date.parse(read.validUntil) <= now.getTime()
+    )
+      throw new PreparationContractError(
+        "evidence_stale",
+        "Native funding recipient snapshot is unavailable or changed; refresh and retry",
+      );
+    const observation = read.observation;
+    const expiresAt = new Date(
+      Math.min(
+        Date.parse(read.validUntil),
+        Date.parse(observation.observedAt) +
+          policy.accountPolicy.snapshotMaxAgeMs,
+        now.getTime() + PREPARATION_TTL_MS,
+        market?.validUntil ?? Infinity,
+      ),
+    ).toISOString();
+    const balance = hypercorePreparationBalance(
+      {
+        observation,
+        environment: read.environment,
+        snapshotMaxAgeMs: policy.accountPolicy.snapshotMaxAgeMs,
+        now: now.getTime(),
+      },
+      input.purpose,
+    );
+    // A cache of generic account readiness must not outlive this market.
+    if (market)
+      hypercorePreparationMarket(
+        input.resolvedMarketContext?.market ?? null,
+        now.getTime(),
+      );
+    const position =
+      input.purpose === "sell" && market
+        ? hypercorePreparationPosition({
+            observation,
+            address,
+            market,
+            positionActionRef: input.positionActionRef,
+          })
+        : null;
+    const controllerWalletId = walletId(
+      input.wallet,
+      HYPERCORE_MAINNET_USDC.networkId,
+    );
+    const native = hypercoreSpotAccountLocation({
+      accountId: input.accountId,
+      address,
+      controllerWalletId,
+    });
+    const binding: VenueAccountBinding = {
+      bindingId: native.bindingId,
+      venueId: "hyperliquid",
+      controllerWalletId,
+      executionWalletId: controllerWalletId,
+      accountRef: address,
+      settlementLocation: native.location,
+      signingMode: input.wallet.isInternalWallet
+        ? "privy_authorization"
+        : "web_client",
+    };
+    const { reservedRaw, submittedDebitRaw } =
+      await loadHypercorePreparationAvailability(this.db, {
+        accountId: input.accountId,
+        location: native.location,
+        observedAt: observation.observedAt,
+      });
+    const inspectionInput: PreparationInspectionInput = {
+      accountId: input.accountId,
+      binding,
+      purpose: input.purpose,
+      marketClass: input.marketClass,
+      marketContextId: input.marketContextId,
+    };
+    const adapter = new HypercoreWalletPreparationAdapter(
+      async (requested) => ({
+        binding,
+        purpose: requested.purpose,
+        marketClass: requested.marketClass,
+        safeLabel: "Hyperliquid",
+        readinessClass: input.wallet.isInternalWallet
+          ? "internal_managed"
+          : "external_ready",
+        executionMode: binding.signingMode,
+        topology: balance.topology,
+        observedAt: observation.observedAt,
+        expiresAt,
+        evidence: {
+          policyRevision: policy.scope,
+          accountMode: observation.mode,
+          accountRole: observation.role,
+          cashRaw: balance.totalRaw,
+          lockedRaw: balance.lockedRaw,
+          marketId: market?.marketId ?? null,
+          positionTokenId: position?.tokenId ?? null,
+          capacityAuthority: "fresh_quote_and_submission",
+        },
+        checks: (
+          hypercorePreparationRequirements(input.purpose, input.marketClass) ??
+          []
+        ).map((checkId) => ({
+          checkId,
+          status: "satisfied" as const,
+          safeLabel:
+            input.purpose === "fund" ||
+            balance.topology === "native_uninitialized_recipient"
+              ? "Verified native funding recipient"
+              : "Verified native trading account and instrument",
+          reasonCode: null,
+          actions: [],
+          postcondition: null,
+        })),
+      }),
+      this.clock,
+    );
+    const preparation = await adapter.inspect(inspectionInput);
+    return {
+      adapter,
+      inspectionInput,
+      wallet: input.wallet,
+      observedRaw: balance.totalRaw,
+      reservedRaw,
+      frozen: frozenDestination({
+        preparation,
+        observedRaw: balance.totalRaw,
+        lockedRaw: balance.lockedRaw,
+        reservedRaw,
+        submittedDebitRaw,
+        spendabilityCoverage: "provider_locks_and_hunch_holds",
+        observedAt: observation.observedAt,
+        destinationLocationPatternId: HYPERCORE_SPOT_LOCATION_PATTERN,
+        networkLabel: "HyperCore",
+        sourcePlanningEvidence: null,
+        now,
+      }),
+    };
   }
 
   private async inspectPolymarket(
@@ -1881,12 +2202,14 @@ export class WalletPreparationRuntimeService {
     input: DestinationOptionsInput,
     resolvedMarket: ApiTradeMarket | null = null,
     allowPartialVenueCoverage = false,
+    forceFresh = false,
   ): Promise<readonly FrozenPreparationDestination[]> {
     return (
       await this.preparedDestinations(
         input,
         resolvedMarket,
         allowPartialVenueCoverage,
+        forceFresh,
       )
     ).map((result) => result.frozen);
   }
@@ -1944,20 +2267,33 @@ export class WalletPreparationRuntimeService {
       sellAssetContext = selected.assetContext;
     }
     const resolvedMarketContext =
-      targetMarket && targetRuntimeVenue
-        ? runtimeMarketContextFromMarket({
-            venue: targetRuntimeVenue,
-            market: targetMarket,
-            requestedMarketClass: input.marketClass,
-            assetContext: sellAssetContext,
-          })
-        : input.marketContextId
-          ? unavailableRuntimeMarketContext(
-              input.marketContextId,
+      targetMarket?.venue === "hyperliquid"
+        ? {
+            ...unavailableRuntimeMarketContext(
+              targetMarket.id,
               input.marketClass,
-            )
-          : undefined;
+            ),
+            market: targetMarket,
+          }
+        : targetMarket && targetRuntimeVenue
+          ? runtimeMarketContextFromMarket({
+              venue: targetRuntimeVenue,
+              market: targetMarket,
+              requestedMarketClass: input.marketClass,
+              assetContext: sellAssetContext,
+            })
+          : input.marketContextId
+            ? unavailableRuntimeMarketContext(
+                input.marketContextId,
+                input.marketClass,
+              )
+            : undefined;
     const attempts = this.venueDrivers
+      .filter(
+        (driver) =>
+          !driver.supportedPurposes ||
+          driver.supportedPurposes.includes(input.purpose),
+      )
       .filter((driver) =>
         isDestinationDriverApplicable({
           driverVenueId: driver.venueId,
@@ -1992,11 +2328,14 @@ export class WalletPreparationRuntimeService {
         outcome: outcomes[index],
       })),
     );
+    const preparedValues = coverage.values.filter(
+      (value): value is PreparedRuntimeDestination => value != null,
+    );
     const compatibleBindingOptionIds = new Set(
       input.compatibleVenueBindingOptionIds ?? [],
     );
     if (compatibleBindingOptionIds.size > 0) {
-      const compatibleValues = coverage.values.filter((value) =>
+      const compatibleValues = preparedValues.filter((value) =>
         compatibleBindingOptionIds.has(
           value.frozen.bindingOption.venueBindingOptionId,
         ),
@@ -2011,7 +2350,7 @@ export class WalletPreparationRuntimeService {
         `venue destination inspection is incomplete: ${coverage.incompleteVenueIds.join(",")}`,
       );
     }
-    return coverage.values;
+    return preparedValues;
   }
 
   async resolveOwnerPreparation(
@@ -2024,7 +2363,10 @@ export class WalletPreparationRuntimeService {
     }>,
   ): Promise<PreparedRuntimeDestination> {
     const driver = this.venueDrivers.find(
-      (candidate) => candidate.venueId === input.venueId,
+      (candidate) =>
+        candidate.venueId === input.venueId &&
+        (!candidate.supportedPurposes ||
+          candidate.supportedPurposes.includes("redeem")),
     );
     if (!driver) {
       throw new PreparationContractError(
@@ -2146,8 +2488,14 @@ export class WalletPreparationRuntimeService {
 
   async listDestinationOptions(
     input: DestinationOptionsInput,
+    options: Readonly<{ forceFresh?: boolean }> = {},
   ): Promise<readonly FundingDestinationOption[]> {
-    const facts = await this.frozenDestinations(input, null, true);
+    const facts = await this.frozenDestinations(
+      input,
+      null,
+      true,
+      options.forceFresh === true,
+    );
     const resolver = this.destinationResolver(facts);
     return resolver.listOptions(input);
   }

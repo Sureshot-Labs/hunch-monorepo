@@ -23,6 +23,7 @@ import { runHip4ReadCycle } from "./services/hip4-indexer.js";
 import { mapHip4Market } from "./services/hip4-mapping.js";
 import { createHip4LiveBuffer, flushHip4Live } from "./services/hip4-live.js";
 import { createHip4OwnedAccountService } from "./services/hip4-account-service.js";
+import { projectHip4Account } from "./services/hip4-account-projection.js";
 import { registerHip4ReadRoutes } from "./routes/hip4-read.js";
 import { registerHip4AccountRoutes } from "./routes/hip4-account.js";
 import { readHip4AccountExecutions } from "./services/hip4-account-repository.js";
@@ -40,7 +41,7 @@ const source = JSON.parse(
     "utf8",
   ),
 ).observations[0];
-const address = "0x0000000000000000000000000000000000000001";
+const address = `0x${randomUUID().replaceAll("-", "")}00000001`;
 const app = Fastify();
 app.setValidatorCompiler(validatorCompiler);
 app.setSerializerCompiler(serializerCompiler);
@@ -130,6 +131,24 @@ try {
   });
   fixtureEventId = mapped.market.eventId;
   await persistHip4Market(pool, { ...mapped, trades: [] });
+  const observation = projectHip4Account({
+    environment: "mainnet",
+    observedAt: new Date().toISOString(),
+    role: "user",
+    mode: "disabled",
+    quote: {
+      tokenId: "0x6d1e7cde53ba9467b783cb7c530ce054",
+      index: 0,
+      weiDecimals: 8,
+    },
+    state: {
+      balances: [{ coin: "+87750", total: "20", hold: "0", entryNtl: "0" }],
+    },
+  });
+  await pool.query(
+    "insert into hip4_account_snapshots(environment,account_address,observation,observed_at) values('mainnet',$1,$2,now())",
+    [address, observation],
+  );
   registerHip4ReadRoutes(app, {
     authorize: async () => {},
     policy: () => readHip4Policy(pool),
@@ -138,6 +157,7 @@ try {
     trades: (...args) => readHip4Trades(pool, ...args),
   });
   registerHip4AccountRoutes(app, {
+    surface: "owned",
     authorize: async (request) => {
       request.user = { id: "fixture" } as NonNullable<typeof request.user>;
       request.walletAddress = address;
@@ -146,7 +166,8 @@ try {
     service: accountService,
     executions: (...args) => readHip4AccountExecutions(pool, ...args),
   });
-  const historyUrl = "/markets/hyperliquid/canary/account/executions";
+  const historyUrl = "/wallets/hyperliquid/account/executions";
+  const marketUrl = `/wallets/hyperliquid/account/market?marketId=${encodeURIComponent(mapped.market.marketId)}`;
   assert.equal(
     (await app.inject("/markets/hyperliquid/canary")).statusCode,
     200,
@@ -163,9 +184,9 @@ try {
     404,
   );
   assert.equal((await app.inject(historyUrl)).statusCode, 404);
+  assert.equal((await app.inject(marketUrl)).statusCode, 404);
   assert.equal(
-    (await app.inject("/markets/hyperliquid/canary/account?refresh=1"))
-      .statusCode,
+    (await app.inject("/wallets/hyperliquid/account?refresh=1")).statusCode,
     404,
   );
   assert.equal(accountRequests, 0);
@@ -195,6 +216,27 @@ try {
   );
   assert.equal((await app.inject(historyUrl)).statusCode, 200);
   assert.equal((await accountService.policy()).readPolicy.enabled, true);
+  const ownedMarket = await app.inject(marketUrl);
+  assert.equal(ownedMarket.statusCode, 200);
+  assert.equal(ownedMarket.json().markets[0].marketId, mapped.market.marketId);
+  assert.deepEqual(ownedMarket.json().streamTokenIds, []);
+  assert.equal(
+    (await app.inject("/wallets/hyperliquid/account/market")).statusCode,
+    400,
+  );
+  assert.equal(
+    (await app.inject(marketUrl.replace("8775", "8776"))).statusCode,
+    404,
+  );
+  assert.equal(
+    (await app.inject(marketUrl.replace("mainnet", "testnet"))).statusCode,
+    404,
+  );
+  assert.equal(
+    accountRequests,
+    0,
+    "review metadata must not refresh the provider",
+  );
   const maintained = await runHip4ReadCycle(pool, async (request) => {
     publicRequests++;
     if (request.type === "outcomeMeta") return source.metadata;
@@ -250,6 +292,10 @@ try {
   );
 } finally {
   await app.close();
+  await pool.query(
+    "delete from hip4_account_snapshots where environment='mainnet' and account_address=$1",
+    [address],
+  );
   await lifecycleFixture.close();
   await pool.query("delete from runtime_policies where id=any($1::uuid[])", [
     ids,

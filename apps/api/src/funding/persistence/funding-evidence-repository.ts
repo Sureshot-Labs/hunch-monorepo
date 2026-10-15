@@ -26,6 +26,7 @@ import {
   type FundingLifecycleProjection,
 } from "../lifecycle/funding-lifecycle-projector.js";
 import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
+import { fundingNeverIssuedHandoffSql } from "./funding-unissued-attempt-sql.js";
 import { loadFundingLifecycleProjectionForOperation } from "../lifecycle/funding-lifecycle-read-model.js";
 import { canonicalJsonEqual, canonicalJsonHash } from "./canonical.js";
 import {
@@ -256,9 +257,11 @@ export type FundingPolymarketHandoffCandidate = Readonly<{
   operationId: string;
   stepId: string;
   attemptId: string;
-  attemptOutcome: "started" | "submitted" | "ambiguous";
+  attemptOutcome: FundingStepAttempt["outcome"];
   referenceKind: FundingStepAttempt["referenceKind"];
   resolvedTransactionHash: string | null;
+  /** Only canonical, action-matched receipt evidence identifies a physical log. */
+  resolvedEventIndex?: string | null;
   receiptRefCiphertext: string | null;
   receiptRefLookupHmac: string | null;
   lookupKeyVersion: number | null;
@@ -273,6 +276,7 @@ type FundingPolymarketHandoffCandidateDbRow = {
   attempt_outcome: FundingPolymarketHandoffCandidate["attemptOutcome"];
   reference_kind: FundingPolymarketHandoffCandidate["referenceKind"];
   resolved_transaction_hash: string | null;
+  resolved_event_index: string | null;
   receipt_ref_ciphertext: string | null;
   receipt_ref_lookup_hmac: string | null;
   lookup_key_version: number | null;
@@ -296,6 +300,7 @@ export type FundingPolymarketHandoffCanonicalEventLookup = Readonly<{
   destinationAddress: string;
   rawAmount: string;
   receiptRefLookupHmac: string | null;
+  transactionHash?: string;
 }>;
 
 export async function listPotentialPolymarketHandoffsForCanonicalEvents(
@@ -313,9 +318,85 @@ export async function listPotentialPolymarketHandoffsForCanonicalEvents(
   );
   const { rows } = await db.query<FundingPolymarketHandoffCandidateDbRow>(
     `
-        with candidate_event as (
+        with candidate_event as materialized (
           select value as event
           from jsonb_array_elements($2::jsonb)
+        ), candidate_ids as materialized (
+          select distinct matched_attempt.id
+          from candidate_event candidate
+          cross join lateral (
+            -- Immutable envelope membership is independent of reference-key
+            -- rotation. Keep malformed normalized actions for the validator;
+            -- this compact key is only an index hint, not ownership proof.
+            (select attempt.id
+             from funding_operation_steps step
+             join lateral (select id from funding_operations operation_row
+               where operation_row.id=step.operation_id and operation_row.user_id=$1 limit 1) operation on true
+             join lateral (select * from funding_operation_step_attempts attempt_row
+               where attempt_row.step_id=step.id offset 0) attempt on true
+             left join lateral (select * from funding_step_receipt_observations receipt_row
+               where receipt_row.attempt_id=attempt.id limit 1) receipt on true
+             where step.normalized_action->>'kind'='external_handoff'
+               and step.normalized_action->>'handoffKind' in
+                 ('polymarket_deposit_wallet_transfer','polymarket_safe_transfer')
+               and funding_handoff_envelope_key(step.normalized_action->>'networkId',
+                 step.action_validation_result->>'tokenAddress',
+                 step.action_validation_result->>'funderAddress',
+                 step.action_validation_result->>'recipientAddress',
+                 step.action_validation_result->>'amountRaw') = funding_handoff_envelope_key(
+                   candidate.event->>'networkId',candidate.event->>'assetId',
+                   candidate.event->>'sourceAddress',candidate.event->>'destinationAddress',candidate.event->>'rawAmount')
+               and step.normalized_action->>'networkId'=candidate.event->>'networkId'
+               and funding_account_identifier_equal(candidate.event->>'networkId',
+                 step.action_validation_result->>'tokenAddress',candidate.event->>'assetId')
+               and funding_account_identifier_equal(candidate.event->>'networkId',
+                 step.action_validation_result->>'funderAddress',candidate.event->>'sourceAddress')
+               and funding_account_identifier_equal(candidate.event->>'networkId',
+                 step.action_validation_result->>'recipientAddress',candidate.event->>'destinationAddress')
+               and step.action_validation_result->>'amountRaw'=candidate.event->>'rawAmount'
+               and not coalesce(${fundingNeverIssuedHandoffSql()},false)
+               -- Exact current receipt proof may clear a dense resolved
+               -- history. Do not freeze this negative across retry passes.
+               and not coalesce(
+                 candidate.event->>'transactionHash' ~ '^0x[0-9a-fA-F]{64}$'
+                 and receipt.status in ('confirmed','finalized')
+                 and receipt.canonical and receipt.action_match
+                 and receipt.failure_code is null
+                 and receipt.evidence->>'handoffEventIndex' ~ '^(0|[1-9][0-9]*)$'
+                 and receipt.evidence->>'transactionHash' ~ '^0x[0-9a-fA-F]{64}$'
+                 and lower(receipt.evidence->>'transactionHash')<>lower(candidate.event->>'transactionHash'),false)
+             limit $5)
+            union
+            (select attempt.id
+             from (select * from funding_operation_step_attempts attempt_row
+               where attempt_row.receipt_ref_lookup_hmac=candidate.event->>'receiptRefLookupHmac'
+                 and attempt_row.receipt_ref_lookup_hmac=any($3::text[])
+                 and ($4::integer is null or attempt_row.lookup_key_version=$4)
+                 and attempt_row.reference_kind='transaction' offset 0) attempt
+             join lateral (select * from funding_operation_steps step_row where step_row.id=attempt.step_id limit 1) step on true
+             join lateral (select id from funding_operations operation_row
+               where operation_row.id=step.operation_id and operation_row.user_id=$1 limit 1) operation on true
+             where cardinality($3::text[])>0
+               and step.normalized_action->>'kind'='external_handoff'
+               and step.normalized_action->>'handoffKind' in
+                 ('polymarket_deposit_wallet_transfer','polymarket_safe_transfer')
+             limit $5)
+            union
+            (select receipt.attempt_id as id
+             from (select * from funding_step_receipt_observations receipt_row
+               where receipt_row.network_id=candidate.event->>'networkId'
+                 and receipt_row.evidence->>'transactionHash' ~ '^0x[0-9a-fA-F]{64}$'
+                 and lower(receipt_row.evidence->>'transactionHash')=lower(candidate.event->>'transactionHash') offset 0) receipt
+             join lateral (select * from funding_operation_steps step_row where step_row.id=receipt.step_id limit 1) step on true
+             join lateral (select id from funding_operations operation_row
+               where operation_row.id=step.operation_id and operation_row.user_id=$1 limit 1) operation on true
+             where candidate.event->>'transactionHash' ~ '^0x[0-9a-fA-F]{64}$'
+               and step.normalized_action->>'kind'='external_handoff'
+               and step.normalized_action->>'handoffKind' in
+                 ('polymarket_deposit_wallet_transfer','polymarket_safe_transfer')
+             limit $5)
+          ) matched_attempt
+          limit $5
         )
         select
           operation.id as operation_id,
@@ -329,65 +410,28 @@ export async function listPotentialPolymarketHandoffsForCanonicalEvents(
             then lower(receipt.evidence ->> 'transactionHash')
             else null
           end as resolved_transaction_hash,
+          case when receipt.status in ('confirmed','finalized')
+            and receipt.canonical and receipt.action_match
+            and receipt.failure_code is null
+            and receipt.evidence ->> 'transactionHash' ~ '^0x[0-9a-fA-F]{64}$'
+            and receipt.evidence ->> 'handoffEventIndex' ~ '^(0|[1-9][0-9]*)$'
+          then receipt.evidence ->> 'handoffEventIndex'
+          else null end as resolved_event_index,
           attempt.receipt_ref_ciphertext,
           attempt.receipt_ref_lookup_hmac,
           attempt.lookup_key_version,
           step.normalized_action,
           step.action_validation_result
-        from funding_operation_step_attempts attempt
+        from candidate_ids
+        join funding_operation_step_attempts attempt on attempt.id=candidate_ids.id
         join funding_operation_steps step on step.id = attempt.step_id
-        join funding_operations operation on operation.id = step.operation_id
-        left join funding_step_receipt_observations receipt
-          on receipt.attempt_id = attempt.id
-        left join lateral (
-          select true as matches_event
-          from candidate_event candidate
-          where step.normalized_action ->> 'networkId'
-                  = candidate.event ->> 'networkId'
-            and funding_account_identifier_equal(
-                  candidate.event ->> 'networkId',
-                  step.action_validation_result ->> 'tokenAddress',
-                  candidate.event ->> 'assetId'
-                )
-            and funding_account_identifier_equal(
-                  candidate.event ->> 'networkId',
-                  step.action_validation_result ->> 'funderAddress',
-                  candidate.event ->> 'sourceAddress'
-                )
-            and funding_account_identifier_equal(
-                  candidate.event ->> 'networkId',
-                  step.action_validation_result ->> 'recipientAddress',
-                  candidate.event ->> 'destinationAddress'
-                )
-            and step.action_validation_result ->> 'amountRaw'
-                  = candidate.event ->> 'rawAmount'
-          limit 1
-        ) semantic_match on true
-        where operation.user_id = $1
-          and step.normalized_action ->> 'kind' = 'external_handoff'
+        join lateral (select id from funding_operations operation_row
+          where operation_row.id=step.operation_id and operation_row.user_id=$1 limit 1) operation on true
+        left join lateral (select * from funding_step_receipt_observations receipt_row
+          where receipt_row.attempt_id=attempt.id limit 1) receipt on true
+        where step.normalized_action ->> 'kind' = 'external_handoff'
           and step.normalized_action ->> 'handoffKind'
-            = 'polymarket_deposit_wallet_transfer'
-          and (
-            (
-              attempt.outcome = 'started'
-              and semantic_match.matches_event
-            )
-            or (
-              attempt.outcome in ('submitted', 'ambiguous')
-              and attempt.broadcast_may_have_occurred = true
-              and attempt.reference_kind in ('transaction', 'external_handoff')
-              and (
-                semantic_match.matches_event
-                or attempt.receipt_ref_lookup_hmac = any($3::text[])
-                or (
-                  $4::integer is not null
-                  and attempt.lookup_key_version is distinct from $4
-                )
-              )
-            )
-          )
-        order by attempt.created_at desc
-        limit $5
+            in ('polymarket_deposit_wallet_transfer','polymarket_safe_transfer')
       `,
     [
       input.userId,
@@ -402,17 +446,10 @@ export async function listPotentialPolymarketHandoffsForCanonicalEvents(
   }
   const candidates: FundingPolymarketHandoffCandidate[] = [];
   for (const row of rows) {
-    // A submitted/ambiguous broadcast stays attributable even if a previous
-    // reducer pass materialized a terminal cache. A started attempt has no
-    // broadcast reference, so only that branch needs the current lifecycle
-    // decision to distinguish a live overlap from an already terminal route.
-    if (row.attempt_outcome === "started") {
-      const facts = await loadFundingLifecycleFactsForOperationInTransaction(
-        db,
-        { operationId: row.operation_id, now: input.now ?? new Date() },
-      );
-      if (!facts || deriveFundingLifecycle(facts).safety.terminal) continue;
-    }
+    // Never discard an issued attempt using a later lifecycle snapshot. It
+    // may have been reported/confirmed between this SELECT and that read;
+    // terminality also does not negate an already executed historical send.
+    // A started envelope remains pending until exact evidence resolves it.
     candidates.push({
       operationId: row.operation_id,
       stepId: row.step_id,
@@ -420,6 +457,7 @@ export async function listPotentialPolymarketHandoffsForCanonicalEvents(
       attemptOutcome: row.attempt_outcome,
       referenceKind: row.reference_kind,
       resolvedTransactionHash: row.resolved_transaction_hash,
+      resolvedEventIndex: row.resolved_event_index,
       receiptRefCiphertext: row.receipt_ref_ciphertext,
       receiptRefLookupHmac: row.receipt_ref_lookup_hmac,
       lookupKeyVersion: row.lookup_key_version,
@@ -1475,6 +1513,15 @@ export async function finishFundingStepAttemptInTransaction(
     enrichUnreferencedAmbiguity?: boolean;
   }>,
 ): Promise<FundingStepAttempt> {
+  // Reserved for recordSafeFundingActionCancellationsInTransaction, which
+  // inserts an already-terminal attempt without ever issuing an action.
+  // A client/executor report must not manufacture this no-submission proof.
+  if (input.actualCosts.reasonCode === "cancelled_after_safe_evidence") {
+    throw new FundingPersistenceError(
+      "invalid_state_transition",
+      "synthetic cancellation evidence is server owned",
+    );
+  }
   const requiresAmbiguousBroadcastEvidence =
     input.outcome === "submitted" || input.outcome === "ambiguous";
   if (input.broadcastMayHaveOccurred !== requiresAmbiguousBroadcastEvidence) {

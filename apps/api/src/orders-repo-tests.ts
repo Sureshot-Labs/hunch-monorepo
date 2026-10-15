@@ -607,10 +607,15 @@ await test("fetchUnifiedOrders openOnly keeps delayed/unconfirmed FOK/FAK orders
     /not \(lower\(coalesce\(o\.venue, ''\)\) = 'limitless' and upper\(coalesce\(o\.order_type, ''\)\) = 'FOK'\)/,
   );
   assert.doesNotMatch(selectSql, /coalesce\(o\.order_type, ''\) not in/);
-  assert.doesNotMatch(selectSql, /'unmatched'/);
-  assert.doesNotMatch(selectSql, /'expired'/);
-  assert.doesNotMatch(selectSql, /'rejected'/);
-  assert.doesNotMatch(selectSql, /'cancelled'/);
+  // The native branch can name a terminal status in a projection or exclusion;
+  // that must not be mistaken for admitting it to the ordinary open filter.
+  const ordinarySelect = selectSql.split(" union all ")[0];
+  assert.doesNotMatch(ordinarySelect, /'unmatched'/);
+  assert.doesNotMatch(ordinarySelect, /'expired'/);
+  assert.doesNotMatch(ordinarySelect, /'rejected'/);
+  assert.doesNotMatch(ordinarySelect, /'cancelled'/);
+  assert.match(selectSql, /not native_terminal\.terminal_confirmed/);
+  assert.match(selectSql, /native_submission\.state<>'rejected'/);
 });
 
 await test("fetchUnifiedOrders q filters by unified market metadata", async () => {

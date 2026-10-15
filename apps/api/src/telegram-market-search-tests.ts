@@ -7,6 +7,7 @@ import {
 import {
   buildSignalBotMarketSearchScreen,
   buildSignalBotMarketVenuePickerScreen,
+  readSignalBotMarketSearchSession,
   writeSignalBotMarketSearchSession,
 } from "./services/telegram-bot-menu-markets.js";
 import {
@@ -51,6 +52,40 @@ const sampleResult = {
 
 const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
   {
+    name: "Hyperliquid discovery survives filters, session replay and direct navigation",
+    run: async () => {
+      const redis = redisStore();
+      const marketId = "hyperliquid:mainnet:outcome:1473";
+      const sessionId = await writeSignalBotMarketSearchSession({
+        chatId: "10",
+        telegramUserId: 20,
+        redis,
+        query: null,
+        venues: ["hyperliquid", "unknown"],
+        results: [{ ...sampleResult, marketId, venue: "hyperliquid" }],
+      });
+      const session = await readSignalBotMarketSearchSession({
+        chatId: "10",
+        telegramUserId: 20,
+        redis,
+        sessionId,
+      });
+      assert.deepEqual(session?.venues, ["hyperliquid"]);
+      assert.equal(session?.results[0]?.marketId, marketId);
+      assert.equal(isDirectMarketReference(marketId), true);
+      assert.deepEqual(
+        parseSignalBotInteractiveMenuRoute(
+          `search_filters:${sessionId}:hyperliquid`,
+        ),
+        {
+          kind: "market_search_filters",
+          sessionId,
+          venue: "hyperliquid",
+        },
+      );
+    },
+  },
+  {
     name: "venue filters use branded button icons and retain callback routes",
     run: async () => {
       const redis = redisStore();
@@ -62,14 +97,20 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         telegramUserId: 20,
       });
       await handleSignalBotInteractiveMenuCallback({
-        searchOptions: async () => ({ venues: ["polymarket", "limitless"] }),
+        searchOptions: async () => ({
+          venues: ["polymarket", "limitless", "hyperliquid"],
+        }),
         callbackPrefix: "hm:v1:",
         chatId: "10",
         messageId: 42,
         redis,
         render: async (message) => {
           const buttons = message.reply_markup?.inline_keyboard.flat() ?? [];
-          for (const venue of ["polymarket", "limitless"] as const) {
+          for (const venue of [
+            "polymarket",
+            "limitless",
+            "hyperliquid",
+          ] as const) {
             const button = buttons.find(
               (button) =>
                 "callback_data" in button &&
@@ -90,6 +131,15 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
               button.callback_data === `hm:v1:search_back:${sessionId}:0`,
           );
           assert.equal(backButton?.text, "⬅️ Back");
+          assert.equal(
+            buttons.some(
+              (button) =>
+                "callback_data" in button &&
+                button.callback_data.endsWith(":kalshi"),
+            ),
+            false,
+            "venue omitted by current discovery policy remains hidden",
+          );
         },
         renderExpiredSearch: async () => {
           assert.fail("session must remain valid");
@@ -97,7 +147,7 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
         route: { kind: "market_search_filters", sessionId },
         telegramUserId: 20,
       });
-      for (const venue of ["polymarket", "limitless"] as const) {
+      for (const venue of ["polymarket", "limitless", "hyperliquid"] as const) {
         const screen = buildSignalBotMarketSearchScreen({
           callbackPrefix: "hm:v1:",
           sessionId,

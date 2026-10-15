@@ -84,6 +84,11 @@ function createMergeDb(fixture: MergeDbFixture) {
       if (normalized.startsWith("select pg_advisory_xact_lock")) {
         return result<T>();
       }
+      if (normalized.startsWith("with moved_wallets as")) {
+        return result<T>([
+          { wallets_moved: 0, credentials_moved: 0 },
+        ] as unknown as T[]);
+      }
       if (
         normalized.startsWith("select id from users") &&
         normalized.includes("for update")
@@ -142,6 +147,8 @@ function createMergeDb(fixture: MergeDbFixture) {
         return result<T>([
           {
             active_funding_movement: false,
+            active_hip4_submission:
+              (fixture.fundingConflicts?.activeHip4Submissions ?? 0) > 0,
             active_legacy_bridge: false,
             active_position_action: false,
             active_preparation: false,
@@ -283,6 +290,7 @@ const tests: Array<{ name: string; run: () => Promise<void> }> = [
         (error: unknown) => {
           assert.ok(error instanceof FundingMergeConflictError);
           assert.deepEqual(error.conflicts, {
+            activeHip4Submissions: 0,
             activeFundingLeases: 1,
             activeFundingRoutes: 7,
             ambiguousFundingAttempts: 0,

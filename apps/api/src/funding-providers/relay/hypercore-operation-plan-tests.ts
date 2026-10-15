@@ -61,7 +61,7 @@ test("P2 physical spot location enters the native common plan without a new rese
 });
 
 test("native quote uses the common plan: one reservation, two dependent steps, exact encrypted request and perps refund", async () => {
-  const { input } = hypercorePlanTestFixture();
+  const { input, wire } = hypercorePlanTestFixture();
   const result = await buildRelayPlanningQuote(input);
   const plan = result.commitPlan;
   assert.equal(result.executionPlan.kind, "wallet_route");
@@ -102,6 +102,10 @@ test("native quote uses the common plan: one reservation, two dependent steps, e
     input.quote.nativeRefundLocation?.locationId,
   );
   const cipher = plan.segments[0]?.providerQuoteRefCiphertext;
+  assert.equal(
+    plan.segments[0]?.refundLocationSnapshot?.relayProtocolOrderId,
+    wire.protocol.v2.orderId.toLowerCase(),
+  );
   assert.ok(cipher);
   assert.equal(input.codec.decrypt(cipher), input.quote.requestId);
   assert.equal(

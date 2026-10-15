@@ -10,6 +10,7 @@ import {
 import type { SupportedBotTradingVenue } from "./api-trading-types.js";
 import type {
   TradingReadiness,
+  TradingVenue,
   VenueTradingCapabilities,
 } from "./trading-types.js";
 import { tradingError } from "./api-trading-utils.js";
@@ -41,8 +42,14 @@ export type ApiTradeMarket = {
   token_no: string | null;
   token_yes: string | null;
   updated_at: Date | string | null;
-  venue: SupportedBotTradingVenue;
+  venue: TradingVenue;
   venue_market_id: string;
+};
+
+/** Shared market reads include native venues. Bot execution is narrowed only
+ * by loadMarket's explicit supported-venue check, not by a misleading SQL type. */
+export type ApiBotTradeMarket = Omit<ApiTradeMarket, "venue"> & {
+  venue: SupportedBotTradingVenue;
 };
 
 const TRADE_MARKET_SELECT_SQL = `SELECT
@@ -324,7 +331,7 @@ export async function verifyLinkedWallet(input: {
 export async function loadMarket(
   db: DbQuery,
   marketId: string | null | undefined,
-): Promise<ApiTradeMarket> {
+): Promise<ApiBotTradeMarket> {
   if (!marketId) {
     throw tradingError({
       code: "invalid_trade_request",
@@ -351,14 +358,14 @@ export async function loadMarket(
       venue: row.venue,
     });
   }
-  return row;
+  return { ...row, venue: row.venue };
 }
 
 export async function loadMarketForVenue(
   db: DbQuery,
   marketId: string | null | undefined,
   venue: SupportedBotTradingVenue,
-): Promise<ApiTradeMarket> {
+): Promise<ApiBotTradeMarket> {
   const market = await loadMarket(db, marketId);
   if (market.venue !== venue) {
     throw tradingError({

@@ -1136,6 +1136,7 @@ export async function deleteHistoryOrder(
         and venue_order_id like 'history:%'
         and not exists(select 1 from user_theses social_thesis where social_thesis.order_id=orders.id)
         and not exists(select 1 from copy_attributions attribution_row where attribution_row.order_id=orders.id)
+        and not exists(select 1 from hip4_order_actions native_action where native_action.order_id=orders.id)
     `,
       [inputs.userId, inputs.venue, inputs.venueOrderId],
     );

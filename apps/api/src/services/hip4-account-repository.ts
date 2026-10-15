@@ -51,16 +51,18 @@ export async function claimHip4AccountRefresh(
   address: string,
   leaseMs: number,
   startedAt: Date,
+  scope: "account" | "order_fills" = "account",
 ) {
   const token = randomUUID();
   const result = await db.query(
     `insert into hip4_account_snapshots(environment,account_address,attempt_at,lease_token,lease_until)
-    values($1,$2,$3,$4,statement_timestamp()+$5*interval '1 millisecond')
-    on conflict(environment,account_address) do update set attempt_at=excluded.attempt_at,
-      lease_token=excluded.lease_token,lease_until=excluded.lease_until,attempt_error=null
+    values($1,$2,case when $6='order_fills' then null else $3::timestamptz end,$4,statement_timestamp()+$5*interval '1 millisecond')
+    on conflict(environment,account_address) do update set attempt_at=case when $6='order_fills' then hip4_account_snapshots.attempt_at else excluded.attempt_at end,
+      lease_token=excluded.lease_token,lease_until=excluded.lease_until,
+      attempt_error=case when $6='order_fills' then hip4_account_snapshots.attempt_error else null end
     where hip4_account_snapshots.lease_until is null or hip4_account_snapshots.lease_until<statement_timestamp()
     returning lease_token`,
-    [environment, address, startedAt, token, leaseMs],
+    [environment, address, startedAt, token, leaseMs, scope],
   );
   return result.rows.length ? token : null;
 }
@@ -88,6 +90,7 @@ export async function persistHip4AccountRefresh(
     history: Record<string, unknown>;
     error: string | null;
     accountingMaxRows?: number;
+    preserveAttemptError?: boolean;
   },
 ) {
   const db = await pool.connect();
@@ -236,7 +239,7 @@ export async function persistHip4AccountRefresh(
     await db.query(
       `update hip4_account_snapshots set
       observation=coalesce($4::jsonb,observation), observed_at=coalesce($5,observed_at),
-      history=history||$6::jsonb, attempt_error=$7,lease_token=null,lease_until=null
+      history=history||$6::jsonb, attempt_error=case when $8::boolean then attempt_error else $7 end,lease_token=null,lease_until=null
       where environment=$1 and account_address=$2 and lease_token=$3`,
       [
         input.environment,
@@ -246,6 +249,7 @@ export async function persistHip4AccountRefresh(
         input.observation?.observedAt ?? null,
         JSON.stringify(history),
         persistenceError,
+        input.preserveAttemptError ?? false,
       ],
     );
     await db.query("commit");
@@ -267,11 +271,12 @@ export async function failHip4AccountRefresh(
   address: string,
   lease: string,
   error: string,
+  preserveAttemptError = false,
 ) {
   await db.query(
-    `update hip4_account_snapshots set attempt_error=$4,lease_token=null,lease_until=null
+    `update hip4_account_snapshots set attempt_error=case when $5::boolean then attempt_error else $4 end,lease_token=null,lease_until=null
     where environment=$1 and account_address=$2 and lease_token=$3`,
-    [environment, address, lease, error],
+    [environment, address, lease, error, preserveAttemptError],
   );
 }
 

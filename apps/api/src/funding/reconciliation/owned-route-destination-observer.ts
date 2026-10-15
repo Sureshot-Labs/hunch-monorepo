@@ -2,6 +2,7 @@ import { tx, type Pool, type PoolClient } from "@hunch/infra";
 
 import { isRecord } from "../../lib/type-guards.js";
 import type { RelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
+import { relayDestinationReferenceIdentity } from "../../funding-providers/relay/destination-reference.js";
 import type { HypercoreTransferEvidence } from "../../funding-providers/relay/hypercore-transfer-evidence.js";
 import {
   isHypercoreFundingNetwork,
@@ -206,6 +207,9 @@ export async function classifyOwnedRouteCanonicalDestinationEvents(
     transactionReferenceFingerprint: input.referenceCodec.fingerprint(
       event.transactionHash,
     ),
+    successfulDestinationReferenceIdentity: relayDestinationReferenceIdentity(
+      event.transactionHash,
+    ),
   }));
   const classifications = new Map<
     string,
@@ -220,10 +224,61 @@ export async function classifyOwnedRouteCanonicalDestinationEvents(
   const { rows } = await db.query<OwnedRouteCanonicalDestinationCandidateRow>(
     `
       with candidate_event as (
-        select value as event
-        from jsonb_array_elements($2::jsonb)
+        -- Enumerate input positions only (never interpolate payload). Generic
+        -- plans then know the batch size instead of estimating 100 JSON rows
+        -- and JIT-compiling a huge fictitious join. No candidate is truncated.
+        select $2::jsonb -> event_slot.ordinal as event
+        from (values ${lookups.map((_, ordinal) => `(${ordinal})`).join(",")}) as event_slot(ordinal)
+        where $2::jsonb -> event_slot.ordinal is not null
+      ),
+      candidate_segment as materialized (
+        -- Start exact matches at the transaction index, not every historical
+        -- operation owned by the recipient. UNION deduplicates the same leg
+        -- discovered through both the stable and legacy reference formats.
+        -- There is deliberately no LIMIT before the frozen scope checks below.
+        select candidate.event, segment_hint.segment_id
+        from candidate_event candidate
+        cross join lateral (
+          select segment_row.id as segment_id
+          from funding_operation_segments segment_row
+          where segment_row.provider_id = 'relay'
+            and coalesce(segment_row.support_metadata->'relaySuccessfulDestinationReferenceHashesV1','[]'::jsonb)
+                @> jsonb_build_array(candidate.event->>'successfulDestinationReferenceIdentity')
+          union
+          select segment_row.id as segment_id
+          from funding_operation_segments segment_row
+          where segment_row.provider_id = 'relay'
+            and segment_row.raw_status = 'success'
+            and segment_row.support_metadata->>'relayStatusCategory' = 'provider_success'
+            and coalesce(segment_row.support_metadata->>'destinationTransactionReferenceCount','') ~ '^[0-9]*[1-9][0-9]*$'
+            and (case when jsonb_typeof(segment_row.support_metadata->'relayTransactionReferenceFingerprints') = 'array'
+                  then segment_row.support_metadata->'relayTransactionReferenceFingerprints'
+                  else '[]'::jsonb end
+                @> jsonb_build_array(candidate.event->>'transactionReferenceFingerprint')
+              -- Retain the old array_elements_text treatment of malformed
+              -- numeric legacy entries. The exact text matcher below is still
+              -- authoritative (e.g. a leading-zero HMAC must not match 123).
+              or ((candidate.event->>'transactionReferenceFingerprint') ~ '^[0-9]{1,192}$'
+                and case when jsonb_typeof(segment_row.support_metadata->'relayTransactionReferenceFingerprints') = 'array'
+                  then segment_row.support_metadata->'relayTransactionReferenceFingerprints'
+                  else '[]'::jsonb end
+                @> jsonb_build_array(case when (candidate.event->>'transactionReferenceFingerprint') ~ '^[0-9]{1,192}$'
+                  then (candidate.event->>'transactionReferenceFingerprint')::numeric end)))
+          union
+          select segment_row.id as segment_id
+          from funding_operations operation_row
+          join funding_operation_segments segment_row
+            on segment_row.operation_id = operation_row.id
+            and segment_row.provider_id = 'relay'
+          where operation_row.user_id = $1::uuid
+            and operation_row.plan_kind in ('wallet_route', 'composite_route')
+            and operation_row.status not in ('ready', 'completed', 'refunded', 'failed', 'cancelled')
+        ) segment_hint
       ),
       candidate_route as (
+        select scoped_route.*
+        from candidate_segment candidate
+        cross join lateral (
         select
           candidate.event ->> 'identity' as event_identity,
           operation.id as operation_id,
@@ -250,21 +305,14 @@ export async function classifyOwnedRouteCanonicalDestinationEvents(
                   'destinationTransactionReferenceCount', '0') ~ '^[1-9][0-9]*$'
           ) as destination_known,
           case
+            when coalesce(segment.support_metadata->'relaySuccessfulDestinationReferenceHashesV1','[]'::jsonb)
+              @> jsonb_build_array(candidate.event->>'successfulDestinationReferenceIdentity')
+              then 'exact'
             when segment.raw_status = 'success'
              and segment.support_metadata ->> 'relayStatusCategory' =
                    'provider_success'
-             and case
-                   when coalesce(
-                          segment.support_metadata ->>
-                            'destinationTransactionReferenceCount',
-                          ''
-                        ) ~ '^[0-9]+$'
-                     then (
-                       segment.support_metadata ->>
-                         'destinationTransactionReferenceCount'
-                     )::integer
-                   else 0
-                 end > 0
+             and coalesce(segment.support_metadata ->>
+                   'destinationTransactionReferenceCount', '') ~ '^[0-9]*[1-9][0-9]*$'
              and exists (
                    select 1
                    from jsonb_array_elements_text(
@@ -285,9 +333,15 @@ export async function classifyOwnedRouteCanonicalDestinationEvents(
               then 'exact'
             else 'possible'
           end as match_kind
-        from candidate_event candidate
-        join funding_operations operation
-         on operation.user_id = $1::uuid
+        from (
+          select * from funding_operation_segments segment_row
+          where segment_row.id = candidate.segment_id offset 0
+        ) segment
+        cross join lateral (
+          select * from funding_operations operation_row
+          where operation_row.id = segment.operation_id offset 0
+        ) operation
+        where operation.user_id = $1::uuid
          and operation.plan_kind in ('wallet_route', 'composite_route')
          and operation.destination_target_snapshot #>>
                '{location,asset,networkId}' =
@@ -330,8 +384,6 @@ export async function classifyOwnedRouteCanonicalDestinationEvents(
              )
            )
          )
-        join funding_operation_segments segment
-          on segment.operation_id = operation.id
          and segment.provider_id = 'relay'
          and segment.quoted_min_output #>> '{asset,networkId}' =
                candidate.event ->> 'networkId'
@@ -342,6 +394,11 @@ export async function classifyOwnedRouteCanonicalDestinationEvents(
                segment.quoted_min_output #>> '{asset,assetId}',
                candidate.event ->> 'assetId'
              )
+        -- Preserve the parameterized primary-key lookup after each indexed
+        -- witness. A generic plan must not re-order this into a historical
+        -- user scan when it overestimates jsonb_array_elements cardinality.
+        offset 0
+        ) scoped_route
       ),
       eligible_candidate as (
         select *

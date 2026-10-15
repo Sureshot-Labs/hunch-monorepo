@@ -594,7 +594,7 @@ export function fundingIntentBehaviorSnapshot(policy: FundingIntentPolicy) {
   };
 }
 
-function fundingVenueEnabled(
+export function fundingVenueEnabled(
   policy: FundingRuntimePolicy,
   venueId: string,
 ): boolean {

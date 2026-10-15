@@ -3463,10 +3463,13 @@ const tests: TestCase[] = [
         .sort((left, right) => left.venue.localeCompare(right.venue));
       assert.deepEqual(
         capabilities.map((capability) => capability.venue),
-        ["kalshi", "limitless", "polymarket"],
+        ["hyperliquid", "kalshi", "limitless", "polymarket"],
       );
       for (const capability of capabilities) {
-        assert.equal(capability.supportsBuy, true);
+        assert.equal(
+          capability.supportsBuy,
+          capability.venue !== "hyperliquid",
+        );
         assert.equal(
           capability.supportsSell,
           capability.venue === "polymarket",

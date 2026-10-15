@@ -7,7 +7,10 @@ import {
   hypercoreSpotAccountLocation,
 } from "../../account-value/canonical.js";
 import { RELAY_ROUTE_SPECS } from "./mappings.js";
-import { relayRequestEvidenceSchema } from "./request-evidence.js";
+import {
+  RELAY_REQUEST_TRANSACTION_LIMIT,
+  relayRequestEvidenceSchema,
+} from "./request-evidence.js";
 import {
   selectRelayRefundReceiptPlan,
   verifyRelayRefundReceipts,
@@ -217,6 +220,75 @@ test("native fallback is exact recipient perps credit, never restored EVM source
   );
   assert.ok(!("spendable" in result));
   assert.ok(!("availableRaw" in result));
+});
+
+test("explicit EVM refund recipient cannot be replaced by a coincident transfer to the source owner", () => {
+  const f = fixture();
+  f.input.request.refundTo = nativeOwner;
+  assert.deepEqual(selectRelayRefundReceiptPlan(f.input), {
+    kind: "unverified",
+    reason: "refund_explicit_recipient_mismatch",
+  });
+  for (const refundTo of [
+    sourceOwner.toUpperCase().replace("0X", "0x"),
+    null,
+    undefined,
+  ]) {
+    f.input.request.refundTo = refundTo;
+    assert.equal(selectRelayRefundReceiptPlan(f.input).kind, "selected");
+  }
+  // A destination recipient is not a refund address, and a native fallback
+  // does not rewrite the original EVM refundTo into the different native owner.
+  assert.notEqual(f.input.request.recipient, sourceOwner);
+  const native = fixture(true);
+  assert.notEqual(native.input.request.refundTo, native.target.details.address);
+  assert.equal(selectRelayRefundReceiptPlan(native.input).kind, "selected");
+});
+
+test("same-transaction partial returns cannot be summed across orders; distinct owners remain independent", () => {
+  const f = fixture();
+  const selected = plan(f);
+  const partial = { ...f.evm, rawAmount: "4000000" };
+  const otherReturn = { ...f.evm, eventIndex: "8", rawAmount: "5000000" };
+  assert.deepEqual(
+    verifyRelayRefundReceipts({
+      plan: selected,
+      now,
+      evmEvents: [partial, otherReturn],
+    }),
+    {
+      kind: "unverified",
+      reason: "refund_shared_transaction_requires_attribution",
+    },
+  );
+  const independent = verifyRelayRefundReceipts({
+    plan: selected,
+    now,
+    evmEvents: [
+      f.evm,
+      f.evm,
+      { ...otherReturn, destinationAddress: nativeOwner },
+    ],
+  });
+  assert.equal(independent.kind, "verified");
+  assert.equal(independent.events.length, 1);
+  assert.equal(
+    verifyRelayRefundReceipts({
+      plan: selected,
+      now,
+      evmEvents: [partial],
+    }).kind,
+    "partial",
+  );
+  assert.equal(
+    verifyRelayRefundReceipts({
+      plan: selected,
+      now,
+      evmEvents: [f.evm],
+    }).kind,
+    "verified",
+    "a different, unambiguous input remains supported; this does not repair shared-log attribution",
+  );
 });
 
 test("partial refund, replay, missing sibling and provider-pending are not full settlement", () => {
@@ -690,5 +762,23 @@ test("malformed refund projection cannot become proof even when the base request
   assert.deepEqual(selectRelayRefundReceiptPlan(f.input), {
     kind: "unverified",
     reason: "refund_request_fields_invalid",
+  });
+});
+
+test("current refund manifest is bounded even for an internal typed caller", () => {
+  const f = fixture();
+  const destination = required(
+    required(required(f.input.request.protocol).settlement).destination,
+  );
+  const reference = required(destination.refunds)[0];
+  destination.refunds = Array.from(
+    { length: RELAY_REQUEST_TRANSACTION_LIMIT },
+    () => reference,
+  );
+  assert.equal(selectRelayRefundReceiptPlan(f.input).kind, "selected");
+  destination.refunds.push(reference);
+  assert.deepEqual(selectRelayRefundReceiptPlan(f.input), {
+    kind: "unverified",
+    reason: "refund_reference_manifest_too_large",
   });
 });

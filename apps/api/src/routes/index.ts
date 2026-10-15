@@ -16,6 +16,7 @@ import { feedRoutes } from "./feed.js";
 import { healthRoutes } from "./health.js";
 import { hip4ReadRoutes } from "./hip4-read.js";
 import { hip4AccountRoutes } from "./hip4-account.js";
+import { hip4TradingRoutes } from "./hip4-trading.js";
 import { hunchesRoutes } from "./hunches.js";
 import { socialRoutes } from "./social.js";
 import { socialAssetsRoutes } from "./social-assets.js";
@@ -81,6 +82,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(embeddedWalletRoutes);
   await app.register(polymarketPrivateRoutes, { prefix: "/trade/polymarket" });
   await app.register(limitlessPrivateRoutes, { prefix: "/trade/limitless" });
+  await app.register(hip4TradingRoutes, { prefix: "/trade/hyperliquid" });
   await app.register(dflowPrivateRoutes, {
     prefix: "/trade/kalshi",
     strictKalshiSubmit: true,

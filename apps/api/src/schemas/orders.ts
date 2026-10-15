@@ -97,6 +97,32 @@ const maybeTime = z.preprocess(
   (value) => (value instanceof Date ? value.toISOString() : value),
   z.string().datetime().nullable().optional(),
 );
+export const nativeHip4OrderReadSchema = z.object({
+  // Owned original action identity for an interactive cancel. No signature or
+  // private preparation snapshot is exposed. Optional during client rollout.
+  cloid: z
+    .string()
+    .regex(/^0x[0-9a-f]{32}$/u)
+    .optional(),
+  submissionState: z.enum([
+    "submission_started",
+    "reconcile_required",
+    "rejected",
+  ]),
+  nativeStatus: z.string().nullable(),
+  // Optional for additive client/server rollout. ACK or stale/invalidated
+  // evidence is not exact acceptance and does not enable a fresh retry.
+  openConfirmed: z.boolean().optional(),
+  terminalConfirmed: z.boolean(),
+  terminalObservedAt: z.string().datetime({ offset: true }).nullable(),
+  filledQuantity: z
+    .string()
+    .regex(/^(0|[1-9]\d*)(\.\d+)?$/)
+    .nullable(),
+  fullQuantityObserved: z.boolean(),
+  // Even an exact terminal order status does not prove complete fill history.
+  fillHistoryCoverage: z.literal("not_asserted"),
+});
 export const unifiedOrderReadSchema = z.object({
   id: z.string(),
   kind: z.enum(["order", "swap", "execution", "observed_order"]),
@@ -129,6 +155,7 @@ export const unifiedOrderReadSchema = z.object({
   outputDecimals: maybeNumber,
   txSignature: maybeText,
   execution: hip4AccountExecutionSchema.optional(),
+  nativeOrder: nativeHip4OrderReadSchema.optional(),
   observedOrder: hip4OpenOrderSchema
     .extend({
       observedAt: z.string().datetime(),

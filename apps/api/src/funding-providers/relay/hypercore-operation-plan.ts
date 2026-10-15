@@ -262,6 +262,7 @@ export function relayHypercoreCommitSteps(input: {
       signingMode,
       nativeStage: ordinal === 0 ? "nonce_mapping" : "send_asset",
       nativePairFingerprint: validated.fingerprint,
+      relayProtocolOrderId: validated.binding.protocolOrderId.toLowerCase(),
       nativeNonce: validated.binding.nonce,
       nativeEnvironment: "mainnet",
       valueMoving: ordinal !== 0,

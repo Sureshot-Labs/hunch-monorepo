@@ -1940,7 +1940,7 @@ type FundingObservationDbRow = {
   metadata: JsonRecord;
 };
 
-const observationColumns = `
+const observationIdentityColumns = `
   id,
   operation_id,
   segment_id,
@@ -1959,9 +1959,139 @@ const observationColumns = `
   finality_status,
   canonical,
   reorged_at,
-  finalized_at,
-  metadata
+  finalized_at
 `;
+const observationColumns = `${observationIdentityColumns}, metadata`;
+
+/** Keep accumulated completion/watch audit metadata out of hot receipt reads.
+ * The underlying row and all its audit fields remain unchanged. */
+const refundReceiptColumns = `${observationIdentityColumns}, jsonb_build_object(
+  'observerId', metadata->'observerId',
+  'relayRefundReceipt', metadata->'relayRefundReceipt',
+  'relayRefundNativeLedger', metadata->'relayRefundNativeLedger',
+  'nativeDestinationDex', metadata->'nativeDestinationDex'
+) as metadata`;
+
+export const FUNDING_REFUND_MANIFEST_RECEIPTS_SQL = `
+select receipt_row.*
+from unnest($4::text[]) requested_hash(tx_hash)
+cross join lateral (
+  select ${refundReceiptColumns} from funding_observations
+  where operation_id=$1::uuid and segment_id=$2::uuid
+    and network_id=$3 and tx_hash=requested_hash.tx_hash
+    and kind='refund_credit' and canonical and finality_status='finalized'
+  order by event_index limit 2
+) receipt_row
+order by receipt_row.network_id, receipt_row.tx_hash, receipt_row.event_index`;
+
+/** N distinct proof members can cover at most N of the first N+1 rows.
+ * The prefix is read BEFORE the exclusion filter, so an exhausted/empty tail
+ * does not scan the leg's lifetime history. No canonical receipt is ignored
+ * when claiming completion. Must run under the owning operation lock. */
+export const FUNDING_REFUND_OUTSIDE_PROOF_SQL = `
+select exists (
+  select 1 from (
+    select id from funding_observations
+    where operation_id=$1::uuid and segment_id=$2::uuid
+      and kind='refund_credit' and canonical and finality_status='finalized'
+    order by network_id, tx_hash, event_index
+    limit cardinality($3::uuid[]) + 1
+  ) receipt_prefix
+  where not (receipt_prefix.id=any($3::uuid[]))
+) as has_outside_receipt`;
+
+export async function listFundingRefundManifestReceipts(
+  db: Pick<PoolClient, "query">,
+  input: {
+    operationId: string;
+    segmentId: string;
+    networkId: string;
+    transactionHashes: readonly string[];
+  },
+): Promise<readonly FundingObservationRow[]> {
+  const hashes = [...new Set(input.transactionHashes)];
+  if (hashes.length === 0) return [];
+  const result = await db.query<FundingObservationDbRow>(
+    FUNDING_REFUND_MANIFEST_RECEIPTS_SQL,
+    [input.operationId, input.segmentId, input.networkId, hashes],
+  );
+  return result.rows.map(mapObservation);
+}
+
+export async function hasFundingRefundOutsideProof(
+  db: Pick<PoolClient, "query">,
+  input: {
+    operationId: string;
+    segmentId: string;
+    observationIds: readonly string[];
+  },
+): Promise<boolean> {
+  const result = await db.query<{ has_outside_receipt: boolean }>(
+    FUNDING_REFUND_OUTSIDE_PROOF_SQL,
+    [input.operationId, input.segmentId, [...new Set(input.observationIds)]],
+  );
+  return result.rows[0]?.has_outside_receipt !== false;
+}
+
+/** Operation/physical locks are held by the caller. Append exactly one proof;
+ * keep the append-only audit in PostgreSQL, not a growing JS/network payload.
+ * A replay does not update the row. Existing incompatible entries are never
+ * overwritten, including an invalid value under an otherwise valid hash. */
+export async function appendFundingRefundCompletionProof(
+  db: Pick<PoolClient, "query">,
+  input: {
+    operationId: string;
+    segmentId: string;
+    observationId: string;
+    observerId: string;
+    proof: JsonRecord;
+  },
+): Promise<"appended" | "replayed" | "conflict"> {
+  const fingerprint = canonicalJsonHash(input.proof);
+  const args = [
+    input.observationId,
+    input.operationId,
+    input.segmentId,
+    fingerprint,
+    input.proof,
+    input.observerId,
+  ];
+  const appended = await db.query<{ id: string }>(
+    `
+    update funding_observations
+    set metadata=jsonb_set(metadata, '{relayRefundCompletionProofs}',
+      coalesce(metadata->'relayRefundCompletionProofs', '{}'::jsonb)
+        || jsonb_build_object($4::text, $5::jsonb), true)
+    where id=$1::uuid and operation_id=$2::uuid and segment_id=$3::uuid
+      and kind='refund_credit' and canonical and finality_status='finalized'
+      and metadata->>'observerId'=$6
+      and (metadata->'relayRefundCompletionProofs' is null
+        or jsonb_typeof(metadata->'relayRefundCompletionProofs')='object')
+      and not (coalesce(metadata->'relayRefundCompletionProofs', '{}'::jsonb) ? $4::text)
+    returning id`,
+    args,
+  );
+  if (appended.rows.length === 1) return "appended";
+  const existing = await db.query<{ proof: unknown }>(
+    `
+    select metadata->'relayRefundCompletionProofs'->$4::text as proof
+    from funding_observations
+    where id=$1::uuid and operation_id=$2::uuid and segment_id=$3::uuid
+      and kind='refund_credit' and canonical and finality_status='finalized'
+      and metadata->>'observerId'=$5`,
+    [
+      input.observationId,
+      input.operationId,
+      input.segmentId,
+      fingerprint,
+      input.observerId,
+    ],
+  );
+  return existing.rows[0]?.proof != null &&
+    canonicalJsonEqual(existing.rows[0].proof, input.proof)
+    ? "replayed"
+    : "conflict";
+}
 
 function mapObservation(row: FundingObservationDbRow): FundingObservationRow {
   return {
@@ -1991,9 +2121,12 @@ function mapObservation(row: FundingObservationDbRow): FundingObservationRow {
 export async function allocateFundingObservationInTransaction(
   client: Pick<PoolClient, "query">,
   input: FundingObservationInsert,
+  projection: "full" | "refund_receipt" = "full",
 ): Promise<
   Readonly<{ observation: FundingObservationRow; replayed: boolean }>
 > {
+  const returnColumns =
+    projection === "refund_receipt" ? refundReceiptColumns : observationColumns;
   const canonical = input.finalityStatus !== "reorged";
   const canonicalInputAssetId = canonicalAssetId({
     networkId: input.networkId,
@@ -2028,7 +2161,7 @@ export async function allocateFundingObservationInTransaction(
         $15, $16, $17, $18, $19::jsonb
       )
       on conflict (network_id, tx_hash, event_index) do nothing
-      returning ${observationColumns}
+      returning ${returnColumns}
     `,
     [
       input.operationId,
@@ -2060,7 +2193,7 @@ export async function allocateFundingObservationInTransaction(
 
   const existingResult = await client.query<FundingObservationDbRow>(
     `
-      select ${observationColumns}
+      select ${returnColumns}
       from funding_observations
       where network_id = $1
         and tx_hash = $2

@@ -7,6 +7,7 @@ import {
   fetchEvmBlockHash,
   fetchEvmBlockNumber,
   fetchEvmTransactionReceipt,
+  type EvmRpcTransactionReceipt,
 } from "../../services/polygon-rpc.js";
 import type { AssetRef } from "../domain/types.js";
 import type { RelayStatusResponse } from "../../funding-providers/relay/schemas.js";
@@ -74,7 +75,6 @@ export async function observeRelayErc20DestinationReceipts(
         : null;
   // Native and other-network routes retain their existing observers.
   if (!network || !ethers.isAddress(input.asset.assetId)) return [];
-  const recipient = ethers.getAddress(input.destinationAddress).toLowerCase();
   const events: OwnedRouteCanonicalDestinationEvent[] = [];
   for (const transactionHash of new Set(input.transactionHashes)) {
     if (!/^0x[\da-f]{64}$/iu.test(transactionHash)) continue;
@@ -98,43 +98,64 @@ export async function observeRelayErc20DestinationReceipts(
       canonicalHash !== receipt.blockHash
     )
       continue;
-    for (const log of receipt.logs) {
-      const sourceTopic = log.topics[1];
-      const destinationTopic = log.topics[2];
-      if (
-        !sourceTopic ||
-        !destinationTopic ||
-        log.address.toLowerCase() !== input.asset.assetId.toLowerCase() ||
-        log.topics.length !== 3 ||
-        log.topics[0] !== TRANSFER_TOPIC ||
-        log.logIndex == null ||
-        !Number.isSafeInteger(log.logIndex) ||
-        log.logIndex < 0 ||
-        !/^0x[\da-f]{64}$/iu.test(log.data) ||
-        !log.topics
-          .slice(1)
-          .every((topic) => /^0x0{24}[\da-f]{40}$/iu.test(topic))
-      )
-        continue;
-      const destinationAddress = ethers.getAddress(
-        `0x${destinationTopic.slice(-40)}`,
-      );
-      const rawAmount = BigInt(log.data);
-      if (destinationAddress.toLowerCase() !== recipient || rawAmount <= 0n)
-        continue;
-      events.push({
-        networkId: input.asset.networkId,
-        asset: input.asset,
-        destinationAddress,
-        sourceAddress: ethers.getAddress(`0x${sourceTopic.slice(-40)}`),
-        rawAmount: rawAmount.toString(),
-        transactionHash,
-        eventIndex: String(log.logIndex),
-        ledgerHeight: String(receipt.blockNumber),
-        blockHash: receipt.blockHash,
-        observedAt: input.now,
-      });
-    }
+    events.push(
+      ...relayErc20ReceiptEvents({ ...input, transactionHash }, receipt),
+    );
+  }
+  return events;
+}
+
+/** Decode exact transfer logs once for destination discovery and canonical watch.
+ * Finality/canonical block checks belong to the caller, never to an empty list. */
+export function relayErc20ReceiptEvents(
+  input: {
+    asset: AssetRef;
+    destinationAddress: string;
+    transactionHash: string;
+    now: Date;
+  },
+  receipt: EvmRpcTransactionReceipt,
+): readonly OwnedRouteCanonicalDestinationEvent[] {
+  if (!receipt.succeeded) return [];
+  const recipient = ethers.getAddress(input.destinationAddress).toLowerCase();
+  const transactionHash = input.transactionHash;
+  const events: OwnedRouteCanonicalDestinationEvent[] = [];
+  for (const log of receipt.logs) {
+    const sourceTopic = log.topics[1];
+    const destinationTopic = log.topics[2];
+    if (
+      !sourceTopic ||
+      !destinationTopic ||
+      log.address.toLowerCase() !== input.asset.assetId.toLowerCase() ||
+      log.topics.length !== 3 ||
+      log.topics[0] !== TRANSFER_TOPIC ||
+      log.logIndex == null ||
+      !Number.isSafeInteger(log.logIndex) ||
+      log.logIndex < 0 ||
+      !/^0x[\da-f]{64}$/iu.test(log.data) ||
+      !log.topics
+        .slice(1)
+        .every((topic) => /^0x0{24}[\da-f]{40}$/iu.test(topic))
+    )
+      continue;
+    const destinationAddress = ethers.getAddress(
+      `0x${destinationTopic.slice(-40)}`,
+    );
+    const rawAmount = BigInt(log.data);
+    if (destinationAddress.toLowerCase() !== recipient || rawAmount <= 0n)
+      continue;
+    events.push({
+      networkId: input.asset.networkId,
+      asset: input.asset,
+      destinationAddress,
+      sourceAddress: ethers.getAddress(`0x${sourceTopic.slice(-40)}`),
+      rawAmount: rawAmount.toString(),
+      transactionHash,
+      eventIndex: String(log.logIndex),
+      ledgerHeight: String(receipt.blockNumber),
+      blockHash: receipt.blockHash,
+      observedAt: input.now,
+    });
   }
   return events;
 }

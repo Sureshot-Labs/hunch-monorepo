@@ -2,7 +2,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createIntegrationTestPool } from "../../../test-database-target.js";
-import { FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL } from "../../../account-value/funding-movement-feed.js";
+import { verifyHypercorePreparationAvailabilityPg } from "../hypercore-preparation-availability-pg.js";
+import {
+  FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL,
+  FUNDING_EVM_SNAPSHOT_DEBITS_SQL,
+} from "../../../account-value/funding-movement-feed.js";
 
 const pool = await createIntegrationTestPool({
   max: 1,
@@ -50,6 +54,14 @@ try {
   );
   // CONCURRENTLY cannot run in a rollback test; same columns/predicate/index.
   await client.query(migration.replace("concurrently if not exists", ""));
+  const evmMigration = readFileSync(
+    new URL(
+      "../../../../../../packages/db/migrations/0292_funding_evm_source_snapshot_debits.sql",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  await client.query(evmMigration.replace("concurrently if not exists", ""));
   const user = "00000000-0000-4000-8000-000000000001";
   const op = "00000000-0000-4000-8000-000000000002";
   await client.query(
@@ -160,6 +172,65 @@ try {
       .rowCount,
     0,
   );
+  const baseAsset = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
+  const evmSnapshot = (time = "2026-10-14T16:00:10Z", address = owner) =>
+    JSON.stringify([
+      {
+        component_id: "base-cash",
+        location_id: "base-location",
+        address,
+        network_id: "evm:8453",
+        asset_id: baseAsset,
+        asset_decimals: 6,
+        snapshot_at: time,
+      },
+    ]);
+  await client.query(
+    `insert into balance_reservations values($1,$2,null,'base-cash','base-location','evm:8453',$3,'subtract_available',6)`,
+    [op, user, baseAsset.toUpperCase()],
+  );
+  await client.query(
+    `insert into balance_reservations select * from balance_reservations where component_id='base-cash'`,
+  );
+  await client.query(
+    `insert into funding_observations values
+    (6,$1,null,'evm:8453',$2,$3,'3000000','2026-10-14T16:00:05Z','2026-10-14T16:00:05Z','source_debit',true,'finalized',6),
+    (7,$1,null,'evm:8453',$2,$3,'5000000','2026-10-14T16:00:20Z','2026-10-14T16:00:20Z','source_debit',true,'finalized',6),
+    (8,$1,null,'evm:8453',$2,$3,'4000000','2026-10-14T16:00:22Z','2026-10-14T16:00:22Z','refund_credit',true,'finalized',6),
+    (9,$1,null,'evm:8453',$2,$3,'9000000','2026-10-14T16:00:23Z',null,'source_debit',false,'reorged',6)`,
+    [op, baseAsset.toUpperCase(), owner.toUpperCase()],
+  );
+  const evmRead = async (input = evmSnapshot(), account = user) =>
+    (await client.query(FUNDING_EVM_SNAPSHOT_DEBITS_SQL, [account, input]))
+      .rows;
+  assert.deepEqual(
+    (await evmRead()).map((row) => row.raw_amount),
+    ["5000000"],
+    "full terminal debit, no duplicate reservation fanout or partial refund netting",
+  );
+  assert.equal((await evmRead(evmSnapshot("2026-10-14T16:00:25Z"))).length, 0);
+  assert.equal(
+    (await evmRead(evmSnapshot(undefined, `0x${"cc".repeat(20)}`))).length,
+    0,
+  );
+  assert.equal((await evmRead(evmSnapshot(), op)).length, 0);
+  assert.equal((await evmRead("[]")).length, 0);
+  for (const patch of [
+    { asset_decimals: 8 },
+    { asset_id: asset },
+    { location_id: "wrong" },
+    { component_id: "wrong" },
+    { network_id: "evm:137" },
+  ]) {
+    assert.equal(
+      (
+        await evmRead(
+          JSON.stringify([{ ...JSON.parse(evmSnapshot())[0], ...patch }]),
+        )
+      ).length,
+      0,
+    );
+  }
   // Same owner's old history and other owners' recent activity must not be
   // scanned just because a snapshot query returns one row.
   await client.query(
@@ -171,6 +242,16 @@ try {
       'source_debit',true,'finalized'
     from generate_series(1,200000) as data_rows(seq)`,
     [op, asset, owner],
+  );
+  await client.query(
+    `insert into funding_observations
+    select seq+200010,$1,null,'evm:8453',$2,
+      case when seq<=100000 then $3 else '0x'||lpad(to_hex(seq),40,'0') end,
+      '1',case when seq<=100000 then '2025-01-01T00:00:00Z'::timestamptz else '2026-10-14T16:00:20Z'::timestamptz end,
+      case when seq<=100000 then '2025-01-01T00:00:00Z'::timestamptz else '2026-10-14T16:00:20Z'::timestamptz end,
+      'source_debit',true,'finalized',6
+    from generate_series(1,200000) as data_rows(seq)`,
+    [op, baseAsset, owner],
   );
   await client.query("analyze funding_observations");
   await client.query("analyze funding_operations");
@@ -230,6 +311,36 @@ try {
     });
   }
   console.log("native snapshot debit cases passed");
+  await client.query(
+    `prepare evm_snapshot_tail(uuid,jsonb) as ${FUNDING_EVM_SNAPSHOT_DEBITS_SQL}`,
+  );
+  for (const [name, params] of [
+    ["hit", evmSnapshot()],
+    ["resumed-empty", evmSnapshot("2026-10-14T16:00:25Z")],
+    ["sparse-owner", evmSnapshot(undefined, `0x${"cc".repeat(20)}`)],
+    ["empty-input", "[]"],
+  ]) {
+    const plan = (
+      await client.query(
+        `explain (analyze,buffers,format json) execute evm_snapshot_tail('${user}', '${params}')`,
+      )
+    ).rows[0]["QUERY PLAN"][0];
+    const serialized = JSON.stringify(plan.Plan);
+    assert.ok(
+      serialized.includes("funding_observations_evm_source_tail_idx"),
+      name,
+    );
+    const blocks =
+      Number(plan.Plan["Local Hit Blocks"]) +
+      Number(plan.Plan["Local Read Blocks"]);
+    assert.ok(blocks < 100, `${name}: ${blocks} blocks`);
+    console.log(`evm-${name}`, {
+      ms: plan["Execution Time"],
+      localBlocks: blocks,
+    });
+  }
+  console.log("EVM snapshot debit cases passed");
+  await verifyHypercorePreparationAvailabilityPg(client);
 } finally {
   await client.query("rollback");
   client.release();

@@ -9,6 +9,7 @@ import {
   hip4DerivedReferencesSql,
   hip4DerivedDeleteSql,
   hip4AccountProtectedRefsSql,
+  hip4OrderProtectedRefsSql,
 } from "./services/hip4-retention.js";
 import {
   hasCliFlag as hasFlag,
@@ -175,6 +176,7 @@ export function protectedRefsSql(
     includeTelegramTradeIntents?: boolean;
     includePolymarketAssetBindings?: boolean;
     includeHip4Accounts?: boolean;
+    includeHip4Orders?: boolean;
   } = {},
 ): string {
   // Likes deliberately do not protect markets: they are removable derived edges.
@@ -260,6 +262,9 @@ export function protectedRefsSql(
   const hip4AccountReferences = options.includeHip4Accounts
     ? `union ${hip4AccountProtectedRefsSql(candidatePoolTable)}`
     : "";
+  const hip4OrderReferences = options.includeHip4Orders
+    ? `union ${hip4OrderProtectedRefsSql(candidatePoolTable)}`
+    : "";
   return `
     select distinct ct.market_id, 'orders' as reason
     from ${candidateRefTokensTable} ct
@@ -277,6 +282,7 @@ export function protectedRefsSql(
     from ${candidatePoolTable} c
     join executions ex on ex.unified_market_id = c.market_id
     ${hip4AccountReferences}
+    ${hip4OrderReferences}
     union
     select distinct c.market_id, 'user_theses_market' as reason
     from ${candidatePoolTable} c join user_theses social_thesis on social_thesis.market_id=c.market_id
@@ -488,6 +494,7 @@ function candidateCte(
     includeTelegramTradeIntents?: boolean;
     includePolymarketAssetBindings?: boolean;
     includeHip4Accounts?: boolean;
+    includeHip4Orders?: boolean;
   } = {},
 ): string {
   return `
@@ -731,6 +738,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
   includeTelegramTradeIntents: boolean;
   includePolymarketAssetBindings: boolean;
   includeHip4Accounts: boolean;
+  includeHip4Orders: boolean;
 }> {
   const [
     includeMatchingHistory,
@@ -743,6 +751,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     includeTelegramTradeIntents,
     includePolymarketAssetBindings,
     includeHip4Accounts,
+    includeHip4Orders,
   ] = await Promise.all([
     relationExists(client, "public.market_contract_versions"),
     relationExists(client, "public.funding_operations"),
@@ -754,6 +763,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     relationExists(client, "public.telegram_trade_intents"),
     relationExists(client, "public.polymarket_asset_bindings"),
     relationExists(client, "public.hip4_account_executions"),
+    relationExists(client, "public.hip4_order_actions"),
   ]);
   return {
     includeMatchingHistory,
@@ -766,6 +776,7 @@ async function protectedRefOptions(client: PoolClient): Promise<{
     includeTelegramTradeIntents,
     includePolymarketAssetBindings,
     includeHip4Accounts,
+    includeHip4Orders,
   };
 }
 

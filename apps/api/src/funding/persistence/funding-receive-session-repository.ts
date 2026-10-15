@@ -34,6 +34,29 @@ type ActiveReceiveSessionStatus =
   | "review_required"
   | "recovery_required";
 
+// Keep the concurrent due-index predicate in sync when adding a reason. These
+// are code-owned SQL literals, never runtime policy or request input.
+export const RECEIVE_CLASSIFICATION_RETRY_REASONS: readonly string[] = [
+  "receive_session_allocation_unavailable",
+  "owned_route_destination_correlation_pending",
+  "handoff_correlation_pending",
+  "handoff_reference_unavailable",
+  "internal_event_classification_conflict",
+  "exact_refund_correlation_pending",
+  "exact_refund_receipt_conflict",
+  "exact_refund_receipt_not_final",
+];
+const RECEIVE_CLASSIFICATION_RETRY_REASON_SQL =
+  RECEIVE_CLASSIFICATION_RETRY_REASONS.map((reason) => `'${reason}'`).join(",");
+
+export function isFundingReceiveClassificationRetryReason(
+  reason: string | null,
+): boolean {
+  return (
+    reason != null && RECEIVE_CLASSIFICATION_RETRY_REASONS.includes(reason)
+  );
+}
+
 export class FundingReceiveSessionChannelConflictError extends Error {
   readonly code = "receive_channel_conflict";
 
@@ -2280,6 +2303,8 @@ type FundingReceiveCanonicalEventAllocationRow = Readonly<{
   allocated_receive_session_id: string | null;
   allocated_receipt_id: string | null;
   allocation_error_code: string | null;
+  classification_receive_session_id: string | null;
+  classification_variant_id: string | null;
 }>;
 
 export type FundingReceiveCanonicalEventAllocation = Readonly<{
@@ -2304,141 +2329,49 @@ export type RecoverableFundingReceiveCanonicalEvent = Readonly<{
   observedAt: Date;
 }>;
 
-/**
- * Returns a bounded backlog of canonical transfers which arrived before an
- * eligible receive session was visible. The chain scanner may already have
- * advanced past these immutable events, so normal rescanning cannot recover
- * them. Ownership-unavailable and in-flight route-correlation quarantines are
- * retryable; ambiguous-owner events remain fail-closed for manual recovery.
- */
-export async function listRecoverableFundingReceiveCanonicalEvents(
-  db: Pick<PoolClient, "query">,
-  input: Readonly<{
-    receiveSessionId: string;
-    now: Date;
-    limit?: number;
-  }>,
-): Promise<readonly RecoverableFundingReceiveCanonicalEvent[]> {
-  const limit = Math.max(1, Math.min(input.limit ?? 25, 100));
-  const { rows } = await db.query<{
-    variant_id: string;
-    network_id: string;
-    asset_id: string;
-    asset_decimals: number;
-    destination_address: string;
-    source_address: string | null;
-    raw_amount: string;
-    tx_hash: string;
-    event_index: string;
-    ledger_height: string;
-    block_hash: string;
-    observed_at: Date;
-  }>(
-    `
-      select matched_variant.variant_id,
-             canonical_event.network_id,
-             canonical_event.asset_id,
-             canonical_event.asset_decimals,
-             canonical_event.destination_address,
-             canonical_event.source_address,
-             canonical_event.raw_amount::text,
-             canonical_event.tx_hash,
-             canonical_event.event_index,
-             canonical_event.ledger_height::text,
-             canonical_event.block_hash,
-             canonical_event.observed_at
-      from funding_receive_sessions receive_session
-      join funding_receive_canonical_events canonical_event
-        on canonical_event.allocation_status = 'recovery_required'
-       and canonical_event.allocation_error_code in (
-             'receive_session_allocation_unavailable',
-             'owned_route_destination_correlation_pending'
-           )
-      cross join lateral (
-        select start_variant->>'variantId' as variant_id
-        from jsonb_array_elements(
-          receive_session.observation_start_variants
-        ) start_variant
-        where start_variant->>'networkId' = canonical_event.network_id
-          and start_variant->'asset'->>'decimals' =
-                canonical_event.asset_decimals::text
-          and funding_account_identifier_equal(
-                canonical_event.network_id,
-                start_variant->'asset'->>'assetId',
-                canonical_event.asset_id
-              )
-          and funding_account_identifier_equal(
-                canonical_event.network_id,
-                start_variant->>'destinationAddress',
-                canonical_event.destination_address
-              )
-          and case
-                when coalesce(
-                       start_variant->'observation'->'payload'->>
-                         'eventCursorBlock',
-                       start_variant->'observation'->'payload'->>
-                         'eventCursorSlot'
-                     ) ~ '^[0-9]+$'
-                  then coalesce(
-                         start_variant->'observation'->'payload'->>
-                           'eventCursorBlock',
-                         start_variant->'observation'->'payload'->>
-                           'eventCursorSlot'
-                       )::numeric
-                else null
-              end < canonical_event.ledger_height
-        order by start_variant->>'variantId'
-        limit 1
-      ) matched_variant
-      where receive_session.id = $1::uuid
-        and receive_session.observe_until > $2
-      order by canonical_event.first_observed_at, canonical_event.id
-      limit $3
-    `,
-    [input.receiveSessionId, input.now, limit],
+export type FundingReceiveCanonicalEventInput = Readonly<{
+  networkId: string;
+  asset: AssetRef;
+  destinationAddress: string;
+  sourceAddress: string | null;
+  rawAmount: string;
+  transactionHash: string;
+  eventIndex: string;
+  ledgerHeight: string;
+  blockHash: string;
+  observedAt: Date;
+  now: Date;
+}>;
+
+/** All multi-event writers must take the same physical-key order BEFORE any
+ * operation/session allocation lock. Preserve case for non-EVM identities. */
+export function compareFundingReceiveCanonicalEvents(
+  left: Pick<
+    FundingReceiveCanonicalEventInput,
+    "networkId" | "transactionHash" | "eventIndex"
+  >,
+  right: Pick<
+    FundingReceiveCanonicalEventInput,
+    "networkId" | "transactionHash" | "eventIndex"
+  >,
+): number {
+  const key = (event: typeof left) =>
+    `${event.networkId}:${event.networkId.startsWith("evm:") ? event.transactionHash.toLowerCase() : event.transactionHash}:${event.eventIndex}`;
+  // The SQL key is text. Even malformed/legacy EVM casing aliases must have a
+  // total order instead of tying and retaining opposite caller input orders.
+  return (
+    key(left).localeCompare(key(right)) ||
+    left.transactionHash.localeCompare(right.transactionHash)
   );
-  return rows.map((row) => ({
-    variantId: row.variant_id,
-    networkId: row.network_id,
-    asset: {
-      networkId: row.network_id,
-      assetId: row.asset_id,
-      decimals: row.asset_decimals,
-    },
-    destinationAddress: row.destination_address,
-    sourceAddress: row.source_address,
-    rawAmount: row.raw_amount,
-    transactionHash: row.tx_hash,
-    eventIndex: row.event_index,
-    ledgerHeight: row.ledger_height,
-    blockHash: row.block_hash,
-    observedAt: row.observed_at,
-  }));
 }
 
-/**
- * Reserve a physical transfer for an internal Hunch workflow before the
- * receive allocator can expose it as a user deposit. The row deliberately
- * remains immutable audit evidence in the canonical-event table, but its
- * error code keeps it out of the external-deposit retry queue.
- */
-export async function quarantineFundingReceiveCanonicalInternalEvent(
+/** INSERT/ON CONFLICT UPDATE retains a transaction-scoped row lock even when
+ * the value is unchanged. It does not claim, quarantine or credit the event. */
+async function upsertFundingReceiveCanonicalEvent(
   db: Pick<PoolClient, "query">,
-  input: Readonly<{
-    networkId: string;
-    asset: AssetRef;
-    destinationAddress: string;
-    sourceAddress: string | null;
-    rawAmount: string;
-    transactionHash: string;
-    eventIndex: string;
-    ledgerHeight: string;
-    blockHash: string;
-    observedAt: Date;
-    reason: string;
-    now: Date;
-  }>,
-): Promise<boolean> {
+  input: FundingReceiveCanonicalEventInput,
+  reason: string | null = null,
+): Promise<FundingReceiveCanonicalEventAllocationRow> {
   const event = await db.query<FundingReceiveCanonicalEventAllocationRow>(
     `
       insert into funding_receive_canonical_events (
@@ -2460,7 +2393,8 @@ export async function quarantineFundingReceiveCanonicalInternalEvent(
       )
       values (
         $1, $2, $3, $4, $5, $6::numeric, $7, $8, $9::numeric, $10, $11,
-        'recovery_required', $12, $13, $13
+        case when $12::text is null then 'pending' else 'recovery_required' end,
+        $12, $13, $13
       )
       on conflict (network_id, tx_hash, event_index)
       do update set last_observed_at = greatest(
@@ -2483,7 +2417,9 @@ export async function quarantineFundingReceiveCanonicalInternalEvent(
         allocation_status,
         allocated_receive_session_id,
         allocated_receipt_id,
-        allocation_error_code
+        allocation_error_code,
+        classification_receive_session_id,
+        classification_variant_id
     `,
     [
       input.networkId,
@@ -2499,14 +2435,48 @@ export async function quarantineFundingReceiveCanonicalInternalEvent(
       input.ledgerHeight,
       input.blockHash,
       input.observedAt,
-      input.reason,
+      reason,
       input.now,
     ],
   );
   const row = event.rows[0];
   if (!row || !sameCanonicalEventIdentity(row, input)) {
-    throw new Error("canonical internal event identity collision");
+    throw new Error("canonical receive event identity collision");
   }
+  return row;
+}
+
+/** Transaction-only prelock: lock the ENTIRE batch before classifying or
+ * allocating any member. Sorting the processing loop alone is insufficient:
+ * another writer may hold a later event while waiting for our operation lock.
+ * Repeated identities are still checked, so a conflicting duplicate cannot be
+ * silently discarded. The caller owns the bounded scanner/recovery batch. */
+export async function lockFundingReceiveCanonicalEvents(
+  db: Pick<PoolClient, "query">,
+  events: readonly FundingReceiveCanonicalEventInput[],
+): Promise<void> {
+  for (const event of [...events].sort(compareFundingReceiveCanonicalEvents)) {
+    await upsertFundingReceiveCanonicalEvent(db, event);
+  }
+}
+
+/** Reserve a physical transfer for an internal Hunch workflow. Its audit row
+ * remains, but the reason keeps it out of external-deposit allocation. */
+export async function quarantineFundingReceiveCanonicalInternalEvent(
+  db: Pick<PoolClient, "query">,
+  input: FundingReceiveCanonicalEventInput & Readonly<{ reason: string }>,
+): Promise<boolean> {
+  const row = await upsertFundingReceiveCanonicalEvent(db, input, input.reason);
+  // A previously exact refund can lose canonical finality or acquire a
+  // competing internal claim. Recheck that same physical event through the
+  // existing queue; never release it directly or weaken other suppressions.
+  const recheckingRecordedRefund =
+    row.allocation_error_code === "internal_exact_refund_suppressed" &&
+    [
+      "exact_refund_receipt_conflict",
+      "exact_refund_receipt_not_final",
+      "internal_event_classification_conflict",
+    ].includes(input.reason);
   if (
     row.allocation_status === "recovery_required" &&
     row.allocation_error_code === input.reason
@@ -2517,11 +2487,8 @@ export async function quarantineFundingReceiveCanonicalInternalEvent(
     row.allocation_status !== "pending" &&
     !(
       row.allocation_status === "recovery_required" &&
-      row.allocation_error_code != null &&
-      [
-        "receive_session_allocation_unavailable",
-        "owned_route_destination_correlation_pending",
-      ].includes(row.allocation_error_code)
+      (isFundingReceiveClassificationRetryReason(row.allocation_error_code) ||
+        recheckingRecordedRefund)
     )
   ) {
     return false;
@@ -2540,14 +2507,12 @@ export async function quarantineFundingReceiveCanonicalInternalEvent(
           allocation_status = 'pending'
           or (
             allocation_status = 'recovery_required'
-            and allocation_error_code in (
-                  'receive_session_allocation_unavailable',
-                  'owned_route_destination_correlation_pending'
-                )
+            and (allocation_error_code in (${RECEIVE_CLASSIFICATION_RETRY_REASON_SQL})
+              or ($4::boolean and allocation_error_code='internal_exact_refund_suppressed'))
           )
         )
     `,
-    [row.id, input.reason, input.now],
+    [row.id, input.reason, input.now, recheckingRecordedRefund],
   );
   return quarantined.rowCount === 1;
 }
@@ -2726,109 +2691,28 @@ function sameCanonicalEventIdentity(
   );
 }
 
-export async function claimFundingReceiveCanonicalEventAllocation(
+async function selectCanonicalReceiveSession(
   client: Pick<PoolClient, "query">,
-  input: Readonly<{
-    networkId: string;
-    asset: AssetRef;
-    destinationAddress: string;
-    sourceAddress: string | null;
-    rawAmount: string;
-    transactionHash: string;
-    eventIndex: string;
-    ledgerHeight: string;
-    blockHash: string;
-    observedAt: Date;
-    now: Date;
-    /** The observer session attempting to consume a quarantined event. */
-    expectedReceiveSessionId?: string;
-  }>,
-): Promise<FundingReceiveCanonicalEventAllocation> {
-  const event = await client.query<FundingReceiveCanonicalEventAllocationRow>(
-    `
-      insert into funding_receive_canonical_events (
-        network_id,
-        asset_id,
-        asset_decimals,
-        destination_address,
-        source_address,
-        raw_amount,
-        tx_hash,
-        event_index,
-        ledger_height,
-        block_hash,
-        observed_at,
-        first_observed_at,
-        last_observed_at
-      )
-      values (
-        $1, $2, $3, $4, $5, $6::numeric, $7, $8, $9::numeric, $10, $11,
-        $12, $12
-      )
-      on conflict (network_id, tx_hash, event_index)
-      do update set last_observed_at = greatest(
-        funding_receive_canonical_events.last_observed_at,
-        excluded.last_observed_at
-      )
-      returning
-        id,
-        network_id,
-        asset_id,
-        asset_decimals,
-        destination_address,
-        source_address,
-        raw_amount::text,
-        tx_hash,
-        event_index,
-        ledger_height::text,
-        block_hash,
-        observed_at,
-        allocation_status,
-        allocated_receive_session_id,
-        allocated_receipt_id,
-        allocation_error_code
-    `,
-    [
-      input.networkId,
-      input.asset.assetId,
-      input.asset.decimals,
-      input.destinationAddress,
-      input.sourceAddress,
-      input.rawAmount,
-      input.transactionHash,
-      input.eventIndex,
-      input.ledgerHeight,
-      input.blockHash,
-      input.observedAt,
-      input.now,
-    ],
-  );
-  const row = event.rows[0];
-  if (!row || !sameCanonicalEventIdentity(row, input)) {
-    throw new Error("canonical receive event identity collision");
-  }
-  const retryUnavailableAllocation =
-    row.allocation_status === "recovery_required" &&
-    row.allocation_error_code != null &&
-    [
-      "receive_session_allocation_unavailable",
-      "owned_route_destination_correlation_pending",
-    ].includes(row.allocation_error_code);
-  if (row.allocation_status !== "pending" && !retryUnavailableAllocation) {
-    return {
-      eventId: row.id,
-      status: row.allocation_status,
-      targetReceiveSessionId: row.allocated_receive_session_id,
-      allocatedReceiptId: row.allocated_receipt_id,
-      errorCode: row.allocation_error_code,
-    };
-  }
-
+  input: Pick<
+    FundingReceiveCanonicalEventInput,
+    "now" | "networkId" | "asset" | "destinationAddress" | "ledgerHeight"
+  >,
+  boundSessionId: string | null,
+  lockRows: boolean,
+) {
   const sessions = await client.query<ReceiveSessionRow>(
     `
       select ${sessionColumns}
       from funding_receive_sessions
-      where observe_until > $1
+      where ${boundSessionId ? "id = $1::uuid" : "observe_until > $1::timestamptz"}
+        ${
+          boundSessionId
+            ? ""
+            : `and funding_receive_start_envelope_keys(observation_start_variants)
+          @> funding_receive_start_envelope_keys(jsonb_build_array(jsonb_build_object(
+            'networkId',$2::text,'asset',jsonb_build_object('assetId',$3::text,'decimals',$5::text),
+            'destinationAddress',$4::text)))`
+        }
         and status in (
           'open',
           'processing',
@@ -2842,6 +2726,7 @@ export async function claimFundingReceiveCanonicalEventAllocation(
           select 1
           from jsonb_array_elements(observation_start_variants) variant
           where variant->>'networkId' = $2
+            and variant->'asset'->>'decimals' = $5::text
             and funding_account_identifier_equal(
               $2,
               variant->'asset'->>'assetId',
@@ -2854,9 +2739,15 @@ export async function claimFundingReceiveCanonicalEventAllocation(
             )
         )
       order by id
-      for update
+      ${lockRows ? "for update" : ""}
     `,
-    [input.now, input.networkId, input.asset.assetId, input.destinationAddress],
+    [
+      boundSessionId ?? input.now,
+      input.networkId,
+      input.asset.assetId,
+      input.destinationAddress,
+      String(input.asset.decimals),
+    ],
   );
   const selection = selectFundingReceiveCanonicalEventTarget({
     networkId: input.networkId,
@@ -2870,6 +2761,285 @@ export async function claimFundingReceiveCanonicalEventAllocation(
       observationStartVariants: session.observation_start_variants,
     })),
   });
+  const target = sessions.rows.find(
+    (session) => session.id === selection.targetReceiveSessionId,
+  );
+  return { selection, target: target ?? null };
+}
+
+/** Freeze the SELECTED target, not whichever session happened to scan first.
+ * Caller holds scope -> entire physical event batch. Once bound, new sessions
+ * cannot steal the event; expiry changes handling, not historical ownership. */
+export async function bindFundingReceiveCanonicalEventSession(
+  client: Pick<PoolClient, "query">,
+  input: FundingReceiveCanonicalEventInput,
+): Promise<void> {
+  const row = await upsertFundingReceiveCanonicalEvent(client, input);
+  if (
+    row.classification_receive_session_id ||
+    row.allocation_status === "allocated"
+  )
+    return;
+  const { target } = await selectCanonicalReceiveSession(
+    client,
+    input,
+    null,
+    true,
+  );
+  if (!target) return; // Missing/ambiguous ownership is not invented.
+  const variantId = canonicalRetryVariantId(target, input);
+  if (!variantId) return;
+  await client.query(
+    `update funding_receive_canonical_events
+    set classification_receive_session_id=$2::uuid,classification_variant_id=$3
+    where id=$1::uuid and classification_receive_session_id is null`,
+    [row.id, target.id, variantId],
+  );
+}
+
+function canonicalRetryVariantId(
+  session: ReceiveSessionRow,
+  input: Pick<
+    FundingReceiveCanonicalEventInput,
+    "networkId" | "asset" | "destinationAddress" | "ledgerHeight"
+  >,
+): string | null {
+  const candidates = session.observation_start_variants.flatMap((entry) => {
+    const cursor = canonicalStartCursor(
+      { observationStartVariants: [entry] },
+      {
+        networkId: input.networkId,
+        assetId: input.asset.assetId,
+        destinationAddress: input.destinationAddress,
+      },
+    );
+    const asset = entry.asset;
+    return typeof entry.variantId === "string" &&
+      asset != null &&
+      typeof asset === "object" &&
+      !Array.isArray(asset) &&
+      "decimals" in asset &&
+      asset.decimals === input.asset.decimals &&
+      cursor != null &&
+      cursor < BigInt(input.ledgerHeight)
+      ? [{ variantId: entry.variantId, cursor }]
+      : [];
+  });
+  candidates.sort((a, b) =>
+    a.cursor === b.cursor
+      ? a.variantId.localeCompare(b.variantId)
+      : a.cursor > b.cursor
+        ? -1
+        : 1,
+  );
+  return candidates[0]?.variantId ?? null;
+}
+
+export type FundingReceiveClassificationRetry =
+  FundingReceiveCanonicalEventInput &
+    Readonly<{
+      eventId: string;
+      leaseToken: string;
+      boundSessionId: string | null;
+      boundVariantId: string | null;
+    }>;
+
+/** Short standalone claim; COMMIT before acquiring any session scope or
+ * operation lock. Moving the indexed date provides fairness even on crash or
+ * missing ownership. Uses the worker's existing batch/poll budget. */
+export const CLAIM_RECEIVE_CLASSIFICATION_RETRIES_SQL = `
+  with due_events as materialized (
+    select id from funding_receive_canonical_events
+    where allocation_status='recovery_required'
+      and allocation_error_code in (${RECEIVE_CLASSIFICATION_RETRY_REASON_SQL})
+      and coalesce(classification_retry_at,first_observed_at) <= $1::timestamptz
+    order by coalesce(classification_retry_at,first_observed_at),id
+    limit $2 for update skip locked
+  )
+  update funding_receive_canonical_events canonical_event
+  set classification_retry_at=$3::timestamptz,
+      classification_lease_token=gen_random_uuid()
+  from due_events where canonical_event.id=due_events.id
+  returning canonical_event.*, canonical_event.raw_amount::text as raw_amount,
+    canonical_event.ledger_height::text as ledger_height`;
+
+export async function claimFundingReceiveClassificationRetries(
+  db: Pick<Pool, "query">,
+  input: { now: Date; limit: number; retryDelayMs: number },
+): Promise<readonly FundingReceiveClassificationRetry[]> {
+  if (
+    !Number.isSafeInteger(input.limit) ||
+    input.limit <= 0 ||
+    input.limit > 2147483647 ||
+    !Number.isSafeInteger(input.retryDelayMs) ||
+    input.retryDelayMs <= 0
+  ) {
+    throw new Error("invalid canonical receive retry budget");
+  }
+  const next = new Date(input.now.getTime() + input.retryDelayMs);
+  if (!Number.isFinite(next.getTime()))
+    throw new Error("invalid canonical receive retry date");
+  const { rows } = await db.query<
+    FundingReceiveCanonicalEventAllocationRow & {
+      classification_lease_token: string;
+    }
+  >(CLAIM_RECEIVE_CLASSIFICATION_RETRIES_SQL, [input.now, input.limit, next]);
+  return rows.map((row) => ({
+    eventId: row.id,
+    leaseToken: row.classification_lease_token,
+    boundSessionId: row.classification_receive_session_id,
+    boundVariantId: row.classification_variant_id,
+    networkId: row.network_id,
+    asset: {
+      networkId: row.network_id,
+      assetId: row.asset_id,
+      decimals: row.asset_decimals,
+    },
+    destinationAddress: row.destination_address,
+    sourceAddress: row.source_address,
+    rawAmount: row.raw_amount,
+    transactionHash: row.tx_hash,
+    eventIndex: row.event_index,
+    ledgerHeight: row.ledger_height,
+    blockHash: row.block_hash,
+    observedAt: row.observed_at,
+    now: input.now,
+  }));
+}
+
+/** Read-only hint before scope locking. Processing revalidates the exact token
+ * and selected binding under the physical event lock. Unbound historical rows
+ * cannot acquire a fabricated expired-session owner. */
+export async function fundingReceiveClassificationRetryTarget(
+  db: Pick<Pool, "query">,
+  retry: FundingReceiveClassificationRetry,
+): Promise<{
+  snapshot: FundingReceiveSessionSnapshot;
+  observationStartVariants: readonly JsonRecord[];
+  event: RecoverableFundingReceiveCanonicalEvent;
+} | null> {
+  const { target } = await selectCanonicalReceiveSession(
+    db,
+    retry,
+    retry.boundSessionId,
+    false,
+  );
+  if (!target) return null;
+  const variantId = canonicalRetryVariantId(target, retry);
+  if (
+    !variantId ||
+    (retry.boundSessionId && retry.boundVariantId !== variantId)
+  )
+    return null;
+  return {
+    snapshot: snapshot(target),
+    observationStartVariants: target.observation_start_variants,
+    event: { ...retry, variantId },
+  };
+}
+
+/** Called AFTER scope -> full event prelock, BEFORE any classifier/effect. A
+ * reclaimed lease or newly allocated event cannot be revived by an old worker. */
+export async function validateFundingReceiveClassificationRetry(
+  db: Pick<PoolClient, "query">,
+  retry: FundingReceiveClassificationRetry,
+  receiveSessionId: string,
+): Promise<boolean> {
+  const { rows } = await db.query<{
+    classification_receive_session_id: string | null;
+  }>(
+    `
+    select classification_receive_session_id from funding_receive_canonical_events
+    where id=$1::uuid and classification_lease_token=$2::uuid
+      and classification_receive_session_id is not distinct from $3::uuid
+      and classification_variant_id is not distinct from $4::text
+      and allocation_status='recovery_required'
+      and allocation_error_code in (${RECEIVE_CLASSIFICATION_RETRY_REASON_SQL})
+    for update`,
+    [
+      retry.eventId,
+      retry.leaseToken,
+      retry.boundSessionId,
+      retry.boundVariantId,
+    ],
+  );
+  if (!rows.length) return false;
+  const { selection, target } = await selectCanonicalReceiveSession(
+    db,
+    retry,
+    retry.boundSessionId,
+    true,
+  );
+  if (selection.targetReceiveSessionId !== receiveSessionId) return false;
+  const variantId = target && canonicalRetryVariantId(target, retry);
+  if (!variantId) return false;
+  await db.query(
+    `update funding_receive_canonical_events
+    set classification_receive_session_id=$3::uuid,classification_variant_id=$4
+    where id=$1::uuid and classification_lease_token=$2::uuid`,
+    [retry.eventId, retry.leaseToken, receiveSessionId, variantId],
+  );
+  return true;
+}
+
+/** Receipt + acknowledgement commit together. Keep cursor, lifetime, status and
+ * automation untouched; bump the read-model revision only for new evidence. */
+export async function finishFundingReceiveClassificationRetry(
+  db: Pick<PoolClient, "query">,
+  input: {
+    retry: FundingReceiveClassificationRetry;
+    receiveSessionId: string;
+    receiptsRecorded: number;
+  },
+): Promise<void> {
+  const result = await db.query(
+    `update funding_receive_canonical_events
+    set classification_lease_token=null,
+        classification_retry_at=case when allocation_status='recovery_required'
+          and allocation_error_code in (${RECEIVE_CLASSIFICATION_RETRY_REASON_SQL})
+          then classification_retry_at else null end
+    where id=$1::uuid and classification_lease_token=$2::uuid
+      and classification_receive_session_id=$3::uuid`,
+    [input.retry.eventId, input.retry.leaseToken, input.receiveSessionId],
+  );
+  if (result.rowCount !== 1)
+    throw new Error("canonical receive retry lease changed");
+  if (input.receiptsRecorded > 0) {
+    await db.query(
+      `update funding_receive_sessions set version=version+1,
+      updated_at=greatest(updated_at,$2::timestamptz) where id=$1::uuid`,
+      [input.receiveSessionId, input.retry.now],
+    );
+  }
+}
+
+export async function claimFundingReceiveCanonicalEventAllocation(
+  client: Pick<PoolClient, "query">,
+  input: FundingReceiveCanonicalEventInput &
+    Readonly<{
+      /** The observer session attempting to consume a quarantined event. */
+      expectedReceiveSessionId?: string;
+    }>,
+): Promise<FundingReceiveCanonicalEventAllocation> {
+  const row = await upsertFundingReceiveCanonicalEvent(client, input);
+  const retryUnavailableAllocation =
+    row.allocation_status === "recovery_required" &&
+    isFundingReceiveClassificationRetryReason(row.allocation_error_code);
+  if (row.allocation_status !== "pending" && !retryUnavailableAllocation) {
+    return {
+      eventId: row.id,
+      status: row.allocation_status,
+      targetReceiveSessionId: row.allocated_receive_session_id,
+      allocatedReceiptId: row.allocated_receipt_id,
+      errorCode: row.allocation_error_code,
+    };
+  }
+  const { selection, target } = await selectCanonicalReceiveSession(
+    client,
+    input,
+    row.classification_receive_session_id,
+    true,
+  );
   if (selection.errorCode) {
     await client.query(
       `
@@ -2882,10 +3052,7 @@ export async function claimFundingReceiveCanonicalEventAllocation(
             allocation_status = 'pending'
             or (
               allocation_status = 'recovery_required'
-              and allocation_error_code in (
-                    'receive_session_allocation_unavailable',
-                    'owned_route_destination_correlation_pending'
-                  )
+              and allocation_error_code in (${RECEIVE_CLASSIFICATION_RETRY_REASON_SQL})
             )
           )
       `,
@@ -2898,6 +3065,17 @@ export async function claimFundingReceiveCanonicalEventAllocation(
       allocatedReceiptId: null,
       errorCode: selection.errorCode,
     };
+  }
+  if (!row.classification_receive_session_id && target) {
+    const variantId = canonicalRetryVariantId(target, input);
+    if (variantId) {
+      await client.query(
+        `update funding_receive_canonical_events
+        set classification_receive_session_id=$2::uuid,classification_variant_id=$3
+        where id=$1::uuid and classification_receive_session_id is null`,
+        [row.id, target.id, variantId],
+      );
+    }
   }
   if (
     retryUnavailableAllocation &&
@@ -2923,10 +3101,7 @@ export async function claimFundingReceiveCanonicalEventAllocation(
             last_observed_at = $2
         where id = $1
           and allocation_status = 'recovery_required'
-          and allocation_error_code in (
-                'receive_session_allocation_unavailable',
-                'owned_route_destination_correlation_pending'
-              )
+          and allocation_error_code in (${RECEIVE_CLASSIFICATION_RETRY_REASON_SQL})
       `,
       [row.id, input.now],
     );

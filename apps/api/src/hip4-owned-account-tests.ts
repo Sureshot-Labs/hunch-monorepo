@@ -343,6 +343,10 @@ test("ownership and policy checks precede every cache/history read and errors st
     },
     owns: async () => owned,
     service: {
+      market: async () => {
+        reads++;
+        return null;
+      },
       policy: async () => ({
         readPolicy: { ...DEFAULT_HIP4_READ_POLICY, enabled: true },
         accountPolicy: { ...DEFAULT_HIP4_ACCOUNT_POLICY, enabled },
@@ -367,6 +371,15 @@ test("ownership and policy checks precede every cache/history read and errors st
   try {
     assert.equal(
       (await app.inject("/markets/hyperliquid/canary/account")).statusCode,
+      403,
+    );
+    assert.equal(reads, 0);
+    assert.equal(
+      (
+        await app.inject(
+          "/markets/hyperliquid/canary/account/market?marketId=hyperliquid:mainnet:outcome:8775",
+        )
+      ).statusCode,
       403,
     );
     assert.equal(reads, 0);

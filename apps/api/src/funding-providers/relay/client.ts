@@ -8,6 +8,10 @@ import {
 } from "./schemas.js";
 import {
   parseRelayRequestEvidence,
+  normalizeRelayRefundTransactionLookup,
+  parseRelayRefundRequestPage,
+  type RelayRefundTransactionLookup,
+  type RelayRefundRequestPage,
   type RelayRequestEvidence,
 } from "./request-evidence.js";
 import { resolveRelayHypercoreContracts } from "./hypercore-quote.js";
@@ -29,6 +33,7 @@ type RequestBudget = {
   cooldownUntil: number;
   statusFlights: Map<string, Promise<RelayStatusResponse>>;
   evidenceFlights: Map<string, Promise<RelayRequestEvidence | null>>;
+  refundEvidenceFlights: Map<string, Promise<RelayRefundRequestPage>>;
   nativeContractFlights: Map<number, Promise<NativeContractSnapshot>>;
 };
 // Shared across short-lived clients, but isolated by transport and API key.
@@ -44,6 +49,7 @@ function requestBudget(transport: FetchLike, key: string): RequestBudget {
       cooldownUntil: 0,
       statusFlights: new Map(),
       evidenceFlights: new Map(),
+      refundEvidenceFlights: new Map(),
       nativeContractFlights: new Map(),
     };
     keys.set(key, budget);
@@ -306,6 +312,56 @@ export class RelayClient {
     } catch {
       throw new RelayClientError(
         "Relay Requests v3 evidence failed exact lookup validation",
+        "invalid_response",
+        true,
+      );
+    }
+  }
+
+  /** Bounded reverse correlation for an ALREADY observed Base/Polygon event.
+   * Returns candidates, never a credit or an external-deposit verdict. No
+   * status filter: an indexed request may be observed during a transition. */
+  async refundRequestsByTransaction(
+    lookup: RelayRefundTransactionLookup,
+  ): Promise<RelayRefundRequestPage> {
+    const input = normalizeRelayRefundTransactionLookup(lookup);
+    const key = JSON.stringify([
+      input.chainId,
+      input.transactionHash,
+      input.limit,
+      input.continuation ?? null,
+    ]);
+    const existing = this.#budget.refundEvidenceFlights.get(key);
+    if (existing) return existing;
+    const flight = this.#readRefundRequestsByTransaction(input);
+    this.#budget.refundEvidenceFlights.set(key, flight);
+    try {
+      return await flight;
+    } finally {
+      this.#budget.refundEvidenceFlights.delete(key);
+    }
+  }
+
+  async #readRefundRequestsByTransaction(
+    input: RelayRefundTransactionLookup,
+  ): Promise<RelayRefundRequestPage> {
+    const response = await this.#request(
+      "GET",
+      "/requests/v3",
+      new URLSearchParams({
+        refundTxHash: input.transactionHash,
+        limit: String(input.limit),
+        includeChildRequests: "false",
+        includeAuthenticatedData: "false",
+        includeTotal: "false",
+        ...(input.continuation ? { continuation: input.continuation } : {}),
+      }),
+    );
+    try {
+      return parseRelayRefundRequestPage(response, input);
+    } catch {
+      throw new RelayClientError(
+        "Relay refund transaction evidence failed exact lookup validation",
         "invalid_response",
         true,
       );

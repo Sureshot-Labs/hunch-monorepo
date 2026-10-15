@@ -69,3 +69,39 @@ export function hypercoreSpotCashCapacity(input: {
     return { known: false, reason: "unverified_cash" };
   }
 }
+
+/** Receive/BUY-funding readiness is not authority to spend. An exactly empty,
+ * freshly observed missing/default account has known zero cash and can receive
+ * its first deposit. Financial admission continues to require Standard mode. */
+export function hypercoreRecipientCashCapacity(
+  input: Parameters<typeof hypercoreSpotCashCapacity>[0],
+) {
+  const capacity = hypercoreSpotCashCapacity(input);
+  if (capacity.known)
+    return { ...capacity, topology: "native_standard_spot" as const };
+  const { observation } = input;
+  const { cash } = observation;
+  if (
+    capacity.reason === "unsupported_cash_mode" &&
+    observation.role === "missing" &&
+    observation.mode === "default" &&
+    observation.balances.length === 0 &&
+    observation.positions.length === 0 &&
+    observation.unresolvedBalances.length === 0 &&
+    cash.total === "0" &&
+    cash.held === "0" &&
+    cash.unheld === "0" &&
+    cash.ownedCash == null &&
+    cash.borrowed == null &&
+    cash.supplied == null &&
+    cash.availableAfterMaintenance == null
+  )
+    return {
+      known: true as const,
+      totalRaw: "0",
+      lockedRaw: "0",
+      availableRaw: "0",
+      topology: "native_uninitialized_recipient" as const,
+    };
+  return capacity;
+}

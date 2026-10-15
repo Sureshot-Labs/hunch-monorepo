@@ -47,12 +47,11 @@ import {
 import { addUnsignedDecimals } from "./decimal.js";
 import {
   collectHip4AccountValue,
+  collectHip4CashHoldAdjustments,
   type Hip4AccountValue,
 } from "./hip4-account-value.js";
-import {
-  HYPERCORE_MAINNET_USDC,
-  isHypercoreMainnetUsdc,
-} from "../funding/domain/hypercore-identity.js";
+import { HYPERCORE_MAINNET_USDC } from "../funding/domain/hypercore-identity.js";
+import { sameAsset } from "../funding/domain/asset-identity.js";
 import {
   ExistingFactsOwnershipResolver,
   type ExistingVenueBindingFact,
@@ -80,7 +79,12 @@ import {
   applyFundingSourceDebitSuppression,
   buildFundingInTransitObservations,
   loadFundingAccountValueFacts,
-  loadFundingNativeSnapshotDebits,
+  loadFundingSnapshotDebits,
+  fundingSnapshotDebitComponents,
+  fundingRefundSnapshotLagOperations,
+  fundingInvalidatedRefundComponentIds,
+  fundingInvalidSourceComponentIds,
+  fundingMovementErrors,
   type FundingAccountValueFacts,
 } from "./funding-movement-feed.js";
 import {
@@ -689,6 +693,7 @@ export async function buildAccountValueReadModel(inputs: {
     schemaReady: false,
     availability: [],
     inTransit: [],
+    refundBalanceChanges: [],
   };
   const fundingFactErrors: CollectorError[] = [];
   try {
@@ -745,7 +750,9 @@ export async function buildAccountValueReadModel(inputs: {
     resolvedPolicy.runtime.ttl.collectorMs,
     300_000,
   );
-  const positionErrors: CollectorError[] = [];
+  const positionErrors: CollectorError[] = [
+    ...fundingMovementErrors(fundingFacts.inTransit),
+  ];
   const positionGroups = await Promise.all(
     [
       ["polymarket", "polymarket-position-value"] as const,
@@ -814,21 +821,27 @@ export async function buildAccountValueReadModel(inputs: {
     });
   }
 
-  let nativeSnapshotDebits: Awaited<
-    ReturnType<typeof loadFundingNativeSnapshotDebits>
-  > = [];
-  let nativeDebitUnavailable = false;
+  const snapshotDebitComponentIds = new Set(
+    fundingSnapshotDebitComponents(inputs.userId, valuedAssets).map(
+      (row) => row.componentId,
+    ),
+  );
+  let snapshotDebits: Awaited<ReturnType<typeof loadFundingSnapshotDebits>> =
+    [];
+  let snapshotDebitUnavailable = false;
   try {
-    nativeSnapshotDebits = await loadFundingNativeSnapshotDebits(
+    snapshotDebits = await loadFundingSnapshotDebits(
       inputs.pool,
       inputs.userId,
-      hip4.assets,
+      valuedAssets,
     );
   } catch {
-    nativeDebitUnavailable = true;
+    snapshotDebitUnavailable = true;
     // Do not show restored cash after a fast destination receipt while the
     // source snapshot still precedes the debit. A normal refresh retries this.
-    for (const asset of hip4.assets) {
+    for (const asset of valuedAssets.filter((row) =>
+      snapshotDebitComponentIds.has(row.componentId),
+    )) {
       const index = valuedAssets.indexOf(asset);
       if (index >= 0)
         valuedAssets[index] = {
@@ -838,20 +851,101 @@ export async function buildAccountValueReadModel(inputs: {
         };
     }
     positionErrors.push({
-      collectorId: "hyperliquid-source-debits",
+      collectorId: "funding-source-debits",
       code: "source_debit_collection_failed",
       retryable: true,
     });
   }
   const sourceDebits = [
     ...fundingFacts.inTransit.filter(
-      (fact) => !isHypercoreMainnetUsdc(fact.amount.asset),
+      (fact) =>
+        !fact.sourceComponentId ||
+        !snapshotDebitComponentIds.has(fact.sourceComponentId),
     ),
-    ...nativeSnapshotDebits,
+    ...snapshotDebits,
   ];
+  if (snapshotDebits.length)
+    positionErrors.push({
+      collectorId: "funding-source-debits",
+      code: "source_snapshot_conservatively_adjusted",
+      retryable: true,
+    });
+  const refundSnapshotLag = fundingRefundSnapshotLagOperations(
+    fundingFacts.refundBalanceChanges,
+    valuedAssets,
+  );
+  const invalidatedRefundComponentIds = fundingInvalidatedRefundComponentIds(
+    fundingFacts.refundBalanceChanges,
+    valuedAssets,
+  );
+  // P2 currently collects spot, not a separate perps balance. Do not promise
+  // that retrying that collector can cover a different physical account.
+  const unsupportedRefundOperations = new Set(
+    fundingFacts.refundBalanceChanges
+      .filter(
+        (change) =>
+          change.asset.networkId === "hyperliquid:mainnet" &&
+          change.nativeDestinationDex === "" &&
+          !valuedAssets.some(
+            (component) =>
+              component.location.locationId === change.locationId &&
+              sameAsset(component.amount.asset, change.asset),
+          ),
+      )
+      .map((change) => change.operationId),
+  );
+  if (unsupportedRefundOperations.size)
+    positionErrors.push({
+      collectorId: "funding-refund-balances",
+      code: "refund_target_balance_unsupported",
+      retryable: false,
+    });
+  if (
+    [...refundSnapshotLag].some(
+      (operationId) => !unsupportedRefundOperations.has(operationId),
+    )
+  )
+    positionErrors.push({
+      collectorId: "funding-refund-balances",
+      code: "refund_balance_refresh_required",
+      retryable: true,
+    });
   const projectedAssets = [
-    ...applyFundingSourceDebitSuppression(valuedAssets, sourceDebits),
-    ...inTransitAssets,
+    ...applyFundingSourceDebitSuppression(valuedAssets, sourceDebits).map(
+      (component) =>
+        invalidatedRefundComponentIds.has(component.componentId)
+          ? {
+              ...component,
+              estimatedUsd: null,
+              valuationEligibility: "unpriced" as const,
+              observationFreshness: "unknown" as const,
+              observationError: {
+                code: "refund_balance_refresh_required",
+                retryable: true,
+              },
+            }
+          : component,
+    ),
+    ...inTransitAssets.map((component) =>
+      refundSnapshotLag.has(String(component.location.details.operationId))
+        ? {
+            ...component,
+            estimatedUsd: null,
+            valuationEligibility: "unpriced" as const,
+            observationFreshness: "unknown" as const,
+            observationError: {
+              code: unsupportedRefundOperations.has(
+                String(component.location.details.operationId),
+              )
+                ? "refund_target_balance_unsupported"
+                : "refund_balance_refresh_required",
+              retryable: !unsupportedRefundOperations.has(
+                String(component.location.details.operationId),
+              ),
+            },
+          }
+        : component,
+    ),
   ];
 
   let locks = {
@@ -882,26 +976,30 @@ export async function buildAccountValueReadModel(inputs: {
   const fundingAvailabilityByComponent = new Map(
     fundingFacts.availability.map((fact) => [fact.componentId, fact]),
   );
-  const nativeAvailabilityByComponent = new Map(
-    hip4.availability.map((fact) => [fact.componentId, fact]),
+  const invalidSourceComponentIds = fundingInvalidSourceComponentIds(
+    inputs.userId,
+    fundingFacts.inTransit,
+    valuedAssets,
   );
+  const nativeHolds = await collectHip4CashHoldAdjustments({
+    pool: inputs.pool,
+    userId: inputs.userId,
+    components: valuedAssets,
+    availability: hip4.availability,
+  });
+  availabilityErrors.push(...nativeHolds.errors);
   const adjustments: CashAvailabilityAdjustment[] = valuedAssets
     .filter((component) => component.category === "cash")
     .map((component) => {
-      const native = nativeAvailabilityByComponent.get(component.componentId);
+      const native = nativeHolds.byComponent.get(component.componentId);
       if (native)
         return {
           ...native,
-          reservedRaw:
-            fundingAvailabilityByComponent.get(component.componentId)
-              ?.reservedRaw ?? "0",
-          submittedDebitRaw: nativeSnapshotDebits
-            .filter((fact) => fact.sourceComponentId === component.componentId)
-            .reduce((sum, fact) => sum + BigInt(fact.amount.raw), 0n)
-            .toString(),
           availabilityKnown:
             native.availabilityKnown &&
-            !nativeDebitUnavailable &&
+            !invalidSourceComponentIds.has(component.componentId) &&
+            !invalidatedRefundComponentIds.has(component.componentId) &&
+            !snapshotDebitUnavailable &&
             fundingFacts.schemaReady &&
             fundingFactErrors.length === 0,
         };
@@ -926,10 +1024,17 @@ export async function buildAccountValueReadModel(inputs: {
       const fundingAvailability = fundingAvailabilityByComponent.get(
         component.componentId,
       );
-      const submittedDebitRaw =
-        fundingAvailability?.submittedDebitObservedAt != null &&
-        Date.parse(component.observedAt) <
-          Date.parse(fundingAvailability.submittedDebitObservedAt)
+      const usesSnapshotDebits = snapshotDebitComponentIds.has(
+        component.componentId,
+      );
+      const submittedDebitRaw = usesSnapshotDebits
+        ? snapshotDebits
+            .filter((fact) => fact.sourceComponentId === component.componentId)
+            .reduce((sum, fact) => sum + BigInt(fact.amount.raw), 0n)
+            .toString()
+        : fundingAvailability?.submittedDebitObservedAt != null &&
+            Date.parse(component.observedAt) <
+              Date.parse(fundingAvailability.submittedDebitObservedAt)
           ? fundingAvailability.submittedDebitRaw
           : "0";
       return {
@@ -946,6 +1051,9 @@ export async function buildAccountValueReadModel(inputs: {
         reservedRaw: fundingAvailability?.reservedRaw ?? "0",
         submittedDebitRaw,
         availabilityKnown:
+          !invalidSourceComponentIds.has(component.componentId) &&
+          !invalidatedRefundComponentIds.has(component.componentId) &&
+          (!usesSnapshotDebits || !snapshotDebitUnavailable) &&
           fundingFactErrors.length === 0 &&
           (availabilityErrors.length === 0 ||
             (venueId !== "polymarket" && venueId !== "limitless")),

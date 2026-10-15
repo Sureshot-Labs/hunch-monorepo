@@ -37,6 +37,8 @@ import {
 import { lockTelegramFundingLinkLifecycle } from "../funding/execution/telegram-funding-link-lifecycle-lock.js";
 import { isTelegramFundingManagedSolanaWalletCurrent } from "../funding/execution/telegram-funding-managed-wallet.js";
 import { env } from "../env.js";
+import { buildTelegramAppMarketNavigation } from "./telegram-app-market-navigation.js";
+import { normalizeTelegramMarketRef } from "./telegram-market-reference.js";
 import { isRecord } from "../lib/type-guards.js";
 import { canonicalWalletIdentity } from "../lib/wallet-address.js";
 import {
@@ -794,7 +796,9 @@ type TelegramBotTradingAuthorizationRow = {
   max_amount_usd: string | null;
 };
 
-type TelegramBotMarketRow = ApiTradeMarket;
+type TelegramBotMarketRow = Omit<ApiTradeMarket, "venue"> & {
+  venue: TelegramBotTradingVenue;
+};
 
 type SubmittedTradeRefs = {
   submitResult: SubmitResult;
@@ -1244,27 +1248,6 @@ function normalizeBaseUrl(value: string): string {
 
 function normalizeTelegramUserId(value: string | number): string {
   return String(value).trim();
-}
-
-function normalizeMarketRef(input: string): string | null {
-  const trimmed = input.trim();
-  if (!trimmed) return null;
-  if (SAFE_VENUES.some((venue) => trimmed.startsWith(`${venue}:`))) {
-    return trimmed;
-  }
-  try {
-    const url = new URL(trimmed);
-    const marketParam = url.searchParams.get("market")?.trim();
-    if (marketParam) return marketParam;
-    const pathParts = url.pathname.split("/").filter(Boolean);
-    const marketIndex = pathParts.findIndex((part) => part === "markets");
-    if (marketIndex >= 0 && pathParts[marketIndex + 1]) {
-      return decodeURIComponent(pathParts[marketIndex + 1]);
-    }
-    return pathParts.at(-1) ? decodeURIComponent(pathParts.at(-1) ?? "") : null;
-  } catch {
-    return trimmed;
-  }
 }
 
 function normalizeVenue(value: string): TelegramBotTradingVenue | null {
@@ -5155,7 +5138,7 @@ async function resolveMarketByRef(
   db: DbQuery,
   marketRef: string,
 ): Promise<TelegramBotMarketRow | null> {
-  const normalized = normalizeMarketRef(marketRef);
+  const normalized = normalizeTelegramMarketRef(marketRef);
   if (!normalized) return null;
   const row = await findTradeMarketByRef(db, normalized);
   if (!row) return null;
@@ -6176,6 +6159,15 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     input: TelegramBotTradeInputContext,
   ) => Promise<boolean>;
 }): Promise<TelegramBotTradingMessage> {
+  const appNavigation = await buildTelegramAppMarketNavigation({
+    db: input.db,
+    marketRef: input.marketRef,
+    appBaseUrl: input.appBaseUrl,
+    telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+    side: input.context?.focusSide,
+    returnCallbackData: input.context?.returnCallbackData,
+  });
+  if (appNavigation) return appNavigation;
   const telegramUserId = normalizeTelegramUserId(input.telegramUserId);
   const [policy, status, market] = await Promise.all([
     resolveTelegramBotTradingPolicy(input.db),

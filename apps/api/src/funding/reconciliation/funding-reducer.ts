@@ -1,5 +1,6 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 import { recordWithdrawalCompletionNotification } from "./withdrawal-completion-notification.js";
+import { exactRefundWatchPending } from "./relay-refund-watch-state.js";
 import { closeExpiredSafeFundingPreparationsInTransaction } from "../execution/safe-funding-submission.js";
 import { closeExpiredEmbeddedFundingPreparationsInTransaction } from "../execution/embedded-funding-submission.js";
 import { closeExpiredSolanaPreparationsInTransaction } from "../execution/solana-preparation.js";
@@ -1119,6 +1120,12 @@ export type FundingReconciliationBatchOptions = Readonly<{
     operationId: string,
     now: Date,
   ) => Promise<Readonly<{ postconditionsPolled: number }>>;
+  /** Existing exact receipts only; run before slow source/provider refreshes. */
+  refundCanonicalPoll?: (
+    operationId: string,
+    now: Date,
+    context?: Readonly<{ deadlineMs: number }>,
+  ) => Promise<Readonly<{ checked: number }>>;
   destinationPoll?: (
     operationId: string,
     now: Date,
@@ -1628,11 +1635,13 @@ export async function pollFundingReconciliationEvidence(
     recentFailedReceiptWatch?: boolean;
     terminalReceiptWatch?: boolean;
     terminalRelayRefundWatch?: boolean;
+    deadlineMs?: number;
     awaitingUnbroadcastActionReport?: boolean;
     now: Date;
     providerPoll?: FundingReconciliationBatchOptions["providerPoll"];
     receiptPoll?: FundingReconciliationBatchOptions["receiptPoll"];
     postconditionPoll?: FundingReconciliationBatchOptions["postconditionPoll"];
+    refundCanonicalPoll?: FundingReconciliationBatchOptions["refundCanonicalPoll"];
     destinationPoll?: FundingReconciliationBatchOptions["destinationPoll"];
   }>,
 ): Promise<Readonly<{ terminalReceiptPollFailed: boolean }>> {
@@ -1657,6 +1666,16 @@ export async function pollFundingReconciliationEvidence(
     return { terminalReceiptPollFailed: false };
   }
   let terminalReceiptPollFailed = false;
+  // Known refund identities do not need refreshed Relay references or source
+  // receipts. Give their canonical check the existing lease before either
+  // external refresh can consume it. New/replacement discovery stays below.
+  await input.refundCanonicalPoll?.(
+    input.operationId,
+    input.now,
+    input.deadlineMs === undefined
+      ? undefined
+      : { deadlineMs: input.deadlineMs },
+  );
   if (receiptWatch) {
     try {
       await input.receiptPoll?.(input.operationId, input.now);
@@ -1835,11 +1854,13 @@ async function loadFundingOperationState(
         recentFailedReceiptWatch.rows[0]?.watching === true,
       terminalReceiptWatch:
         terminalEvidenceWatch.rows[0]?.watching === true ||
+        exactRefundWatchPending(operation.supportMetadata) ||
         isDirectWithdrawalExecutionKind(
           operation.supportMetadata.withdrawalExecutionKind,
         ),
       terminalRelayRefundWatch:
-        terminalRelayRefundWatch.rows[0]?.watching === true,
+        terminalRelayRefundWatch.rows[0]?.watching === true ||
+        exactRefundWatchPending(operation.supportMetadata),
       awaitingProviderReference: waitState.awaitingProviderReference,
       awaitingUnbroadcastActionReport:
         waitState.awaitingUnbroadcastActionReport,
@@ -2067,12 +2088,16 @@ async function processLease(
       | "terminalTimeoutMs"
     >
   > &
-    Readonly<{ now: Date }>,
+    Readonly<{ now: Date; claimStartedAtMs: number }>,
   providerPoll?: FundingReconciliationBatchOptions["providerPoll"],
   receiptPoll?: FundingReconciliationBatchOptions["receiptPoll"],
   postconditionPoll?: FundingReconciliationBatchOptions["postconditionPoll"],
   destinationPoll?: FundingReconciliationBatchOptions["destinationPoll"],
+  refundCanonicalPoll?: FundingReconciliationBatchOptions["refundCanonicalPoll"],
 ): Promise<"completed" | "requeued" | "failed" | "dead_lettered"> {
+  const evidenceDeadlineMs =
+    options.claimStartedAtMs +
+    Math.max(0, lease.leaseUntil.getTime() - options.now.getTime());
   try {
     await tx(pool, async (client) => {
       const operation = await fetchFundingOperationForWorkerInTransaction(
@@ -2161,6 +2186,7 @@ async function processLease(
       }
     }
     const pollEvidence = await pollFundingReconciliationEvidence({
+      deadlineMs: evidenceDeadlineMs,
       operationId: lease.operationId,
       state: operationBeforePoll.state,
       recoveryMode: operationBeforePoll.recoveryMode,
@@ -2174,7 +2200,15 @@ async function processLease(
       receiptPoll,
       postconditionPoll,
       destinationPoll,
+      refundCanonicalPoll,
     });
+    const exactWatchMetadata = await pool.query<{ support_metadata: unknown }>(
+      "select support_metadata from funding_operations where id=$1::uuid",
+      [lease.operationId],
+    );
+    const exactWatchPending = exactRefundWatchPending(
+      exactWatchMetadata.rows[0]?.support_metadata,
+    );
     if (pollEvidence.terminalReceiptPollFailed) {
       const terminalReceiptVerificationWindow = await pool.query<{
         expired: boolean;
@@ -2204,7 +2238,8 @@ async function processLease(
         [lease.operationId, options.now],
       );
       const deadLetter =
-        terminalReceiptVerificationWindow.rows[0]?.expired === true;
+        terminalReceiptVerificationWindow.rows[0]?.expired === true &&
+        !exactWatchPending;
       await finishFundingReconciliationLease(pool, {
         jobId: lease.jobId,
         leaseOwner: lease.leaseOwner,
@@ -2240,7 +2275,10 @@ async function processLease(
        ) as incident`,
       [lease.operationId, options.now],
     );
-    if (unresolvedReceiptReorg.rows[0]?.incident === true) {
+    if (
+      unresolvedReceiptReorg.rows[0]?.incident === true &&
+      !exactWatchPending
+    ) {
       await finishFundingReconciliationLease(pool, {
         jobId: lease.jobId,
         leaseOwner: lease.leaseOwner,
@@ -2292,6 +2330,7 @@ async function processLease(
       : null;
     const reductionCompleted =
       reduction.terminal &&
+      !exactWatchPending &&
       !reduction.reorgBlockedByTerminalState &&
       actionReceiptReorgWatch?.rows[0]?.watching !== true;
     const canonicalFinalizedStepEvidencePendingReduction = reductionCompleted
@@ -2353,7 +2392,10 @@ async function processLease(
              ) as incident`,
       [lease.operationId, options.now],
     );
-    if (terminalRefundReorgIncident.rows[0]?.incident === true) {
+    if (
+      terminalRefundReorgIncident.rows[0]?.incident === true &&
+      !exactWatchPending
+    ) {
       await finishFundingReconciliationLease(pool, {
         jobId: lease.jobId,
         leaseOwner: lease.leaseOwner,
@@ -2378,17 +2420,20 @@ async function processLease(
           now: options.now,
           terminalTimeoutMs: options.terminalTimeoutMs,
         });
-    const disposition = fundingReconciliationDisposition({
-      canonicalFinalizedStepEvidencePendingReduction,
-      state: reduction.finalState,
-      recoveryMode: reduction.recoveryMode,
-      reconciliationEvidenceTimedOut: reduction.reconciliationEvidenceTimedOut,
-      automaticRecoveryRecorded: reduction.automaticRecoveryRecorded,
-      reductionCompleted,
-      reconciliationStartedAt: activeWindow?.startedAt ?? null,
-      now: options.now,
-      terminalTimeoutMs: options.terminalTimeoutMs,
-    });
+    const disposition = exactWatchPending
+      ? "requeue"
+      : fundingReconciliationDisposition({
+          canonicalFinalizedStepEvidencePendingReduction,
+          state: reduction.finalState,
+          recoveryMode: reduction.recoveryMode,
+          reconciliationEvidenceTimedOut:
+            reduction.reconciliationEvidenceTimedOut,
+          automaticRecoveryRecorded: reduction.automaticRecoveryRecorded,
+          reductionCompleted,
+          reconciliationStartedAt: activeWindow?.startedAt ?? null,
+          now: options.now,
+          terminalTimeoutMs: options.terminalTimeoutMs,
+        });
     // A receipt lookup can resolve the provider reference in this very pass.
     // Do not schedule from its stale pre-poll replay lease after new evidence.
     const schedulingWaitState = await fundingReconciliationWaitState(
@@ -2567,6 +2612,7 @@ export async function recoverStoppedFundingOperations(
 ): Promise<number> {
   // Without a canonical receipt verifier, old persisted facts are insufficient.
   if (!options.receiptPoll) return 0;
+  const claimStartedAtMs = Date.now();
   const now = options.now ?? new Date();
   const claimed = await tx(pool, async (client) => {
     const cursor = await client.query<{ last_operation_id: string | null }>(
@@ -2660,6 +2706,16 @@ export async function recoverStoppedFundingOperations(
     let verificationUnavailable = false;
     let verificationFailure: unknown;
     let verificationStage = "verification";
+    try {
+      await options.refundCanonicalPoll?.(job.operation_id, now, {
+        deadlineMs: claimStartedAtMs + 120_000,
+      });
+    } catch (error) {
+      failed = true;
+      verificationUnavailable = true;
+      verificationFailure = error;
+      verificationStage = "refund_canonical";
+    }
     for (const [stage, poll] of [
       ["receipt", options.receiptPoll],
       ["provider", options.providerPoll],
@@ -2726,14 +2782,17 @@ export async function recoverStoppedFundingOperations(
   return 1;
 }
 
+export function fundingReconciliationBatchLimit(requestedLimit = 25): number {
+  return Number.isFinite(requestedLimit)
+    ? Math.max(1, Math.min(100, Math.trunc(requestedLimit)))
+    : 25;
+}
+
 export async function runFundingReconciliationBatch(
   pool: Pool,
   options: FundingReconciliationBatchOptions,
 ): Promise<FundingReconciliationBatchResult> {
-  const requestedLimit = options.limit ?? 25;
-  const limit = Number.isFinite(requestedLimit)
-    ? Math.max(1, Math.min(100, Math.trunc(requestedLimit)))
-    : 25;
+  const limit = fundingReconciliationBatchLimit(options.limit);
   await releaseExpiredUnusedSourceReservations(pool, limit);
   const requestedConcurrency = options.concurrency ?? 4;
   const concurrency = Math.max(
@@ -2754,6 +2813,7 @@ export async function runFundingReconciliationBatch(
   const claimedLeases: FundingReconciliationLease[] = [];
   const processedOperationIds: string[] = [];
   while (claimedLeases.length < limit) {
+    const claimStartedAtMs = Date.now();
     const now = options.now ?? new Date();
     const leases = await claimFundingReconciliationJobs(pool, {
       excludeOperationIds: processedOperationIds,
@@ -2780,11 +2840,13 @@ export async function runFundingReconciliationBatch(
               options.terminalTimeoutMs ??
               DEFAULT_FUNDING_RECONCILIATION_TERMINAL_TIMEOUT_MS,
             now,
+            claimStartedAtMs,
           },
           options.providerPoll,
           options.receiptPoll,
           options.postconditionPoll,
           options.destinationPoll,
+          options.refundCanonicalPoll,
         ),
       ),
     );

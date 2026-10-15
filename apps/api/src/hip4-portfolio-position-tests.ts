@@ -125,6 +125,58 @@ test("account/market identity survives user merge and isolates owners/environmen
   );
 });
 
+test("SELL review follows the supplied lifecycle capability without asserting fresh spendability", () => {
+  const activeMarket = {
+    ...market,
+    expiry: new Date(now + 86400000).toISOString(),
+  };
+  const enabled = {
+    ...input,
+    sellEnabled: true,
+    markets: new Map([[identity.marketId, activeMarket]]),
+  };
+  assert.equal(
+    projectHip4PortfolioPositions(enabled)[0].capabilities.sell,
+    true,
+  );
+  assert.equal(
+    projectHip4PortfolioPositions({ ...enabled, sellEnabled: false })[0]
+      .capabilities.sell,
+    false,
+  );
+  const stale = projectHip4PortfolioPositions({
+    ...enabled,
+    now: now + 61000,
+  })[0];
+  assert.equal(stale.observation.state, "stale");
+  assert.equal(
+    stale.capabilities.sell,
+    true,
+    "review must permit the ordinary position refresh",
+  );
+  for (const changed of [
+    { ...activeMarket, status: "expired" as const },
+    { ...activeMarket, expiry: null },
+    { ...activeMarket, expiry: new Date(now).toISOString() },
+    { ...activeMarket, quoteToken: "USDH" },
+  ]) {
+    assert.equal(
+      projectHip4PortfolioPositions({
+        ...enabled,
+        markets: new Map([[identity.marketId, changed]]),
+      })[0].capabilities.sell,
+      false,
+    );
+  }
+  assert.equal(
+    projectHip4PortfolioPositions({ ...enabled, markets: new Map() })[0]
+      .capabilities.sell,
+    false,
+  );
+  assert.equal(stale.capabilities.redeem, false);
+  assert.equal(stale.capabilities.hide, false);
+});
+
 test("verified current-lot basis joins only its exact snapshot and expires PnL with the mark", () => {
   const accounting = {
     version: 1,

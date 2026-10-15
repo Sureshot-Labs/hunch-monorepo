@@ -12,7 +12,10 @@ import {
 import type { OwnedRouteCanonicalDestinationEvent } from "../../funding/reconciliation/owned-route-destination-observer.js";
 import { canonicalJsonHash } from "../../funding/persistence/canonical.js";
 import { RELAY_ROUTE_SPECS } from "./mappings.js";
-import type { RelayRequestEvidence } from "./request-evidence.js";
+import {
+  RELAY_REQUEST_TRANSACTION_LIMIT,
+  type RelayRequestEvidence,
+} from "./request-evidence.js";
 import type { RelayStatusResponse } from "./schemas.js";
 import {
   hypercoreDestinationEvent,
@@ -160,6 +163,19 @@ export function selectRelayRefundReceiptPlan(input: {
   if (matches.length !== 1)
     return pending("refund_target_missing_or_ambiguous");
   const target = matches[0];
+  // refundTo names the requested source-side refund address. It must agree
+  // for EVM returns. A committed HyperCore fallback may instead credit a
+  // different owned native recipient; its action + ledger bind that recipient.
+  if (
+    !isHypercoreMainnetUsdc(target.asset) &&
+    request.refundTo != null &&
+    !sameAccountAddress(
+      target.asset.networkId,
+      String(target.details.address),
+      request.refundTo,
+    )
+  )
+    return pending("refund_explicit_recipient_mismatch");
   // All admitted currencies here are USDC. Fees may reduce the return, never
   // justify treating the original nominal source amount as received.
   if (
@@ -170,6 +186,8 @@ export function selectRelayRefundReceiptPlan(input: {
     return pending("refund_exceeds_source");
   const references = request.protocol?.settlement?.destination?.refunds;
   if (!references?.length) return pending("refund_references_pending");
+  if (references.length > RELAY_REQUEST_TRANSACTION_LIMIT)
+    return pending("refund_reference_manifest_too_large");
   const hashes = new Set<string>();
   for (const reference of references) {
     if (
@@ -324,6 +342,21 @@ export function verifyRelayRefundReceipts(input: {
   }
   if (!distinct.size) return pending(missingReason ?? "refund_receipt_pending");
   const events = [...distinct.values()];
+  // A refund reference binds a transaction, not each Transfer log to an order.
+  // Never complete A by summing A's partial return and B's return to the same
+  // owner/token. Replay of the SAME log is already deduplicated above. Distinct
+  // transactions remain eligible for incremental partial-return observation.
+  // Even a single log still needs role arbitration before allocation: this is
+  // not proof that an aggregated transfer has only one economic claimant.
+  if (!isHypercoreMainnetUsdc(plan.target.asset)) {
+    const transactions = new Set<string>();
+    for (const event of events) {
+      const transaction = event.transactionHash.toLowerCase();
+      if (transactions.has(transaction))
+        return pending("refund_shared_transaction_requires_attribution");
+      transactions.add(transaction);
+    }
+  }
   const received = events.reduce(
     (total, row) => total + BigInt(row.rawAmount),
     0n,

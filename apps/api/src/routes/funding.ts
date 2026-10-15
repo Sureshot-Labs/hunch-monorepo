@@ -789,6 +789,7 @@ export function registerFundingRoutes(
           publicError: "Funding destinations are unavailable",
         },
         async (userId) => {
+          reply.header("Cache-Control", "private, no-store");
           const options = await dependencies.destinations(
             userId,
             request.query,

@@ -117,6 +117,7 @@ const internalHandoffCandidate = {
   attemptOutcome: "submitted" as const,
   referenceKind: "transaction" as const,
   resolvedTransactionHash: null,
+  resolvedEventIndex: "1",
   receiptRefCiphertext: "encrypted_internal_handoff_reference",
   receiptRefLookupHmac: "lookup_internal_handoff_12345678",
   lookupKeyVersion: 1,
@@ -156,6 +157,60 @@ const internalHandoffEvent = (eventIndex: string, rawAmount: string) => ({
   receiptRefLookupHmac: internalHandoffCandidate.receiptRefLookupHmac,
 });
 
+const safeHandoffCandidate = {
+  ...internalHandoffCandidate,
+  normalizedAction: {
+    ...internalHandoffAction,
+    handoffKind: "polymarket_safe_transfer",
+    payload: { ...internalHandoffAction.payload, topology: "safe" },
+  },
+  actionValidationResult: {
+    ...internalHandoffValidation,
+    executionEnvelope: "polymarket_safe_to_controller_v1",
+    signerAddress: internalHandoffRecipient,
+  },
+};
+for (const candidate of [internalHandoffCandidate, safeHandoffCandidate]) {
+  for (const resolved of [false, true]) {
+    const classification = classifyPolymarketHandoffEvents(
+      [internalHandoffEvent("1", internalHandoffAmount)],
+      [
+        {
+          ...candidate,
+          referenceKind: "external_handoff",
+          resolvedTransactionHash: resolved ? internalHandoffHash : null,
+          resolvedEventIndex: resolved ? "1" : null,
+        },
+      ],
+    ).get(`evm:137:${internalHandoffHash}:1`);
+    assert.equal(
+      classification?.kind,
+      resolved ? "internal" : "recovery_required",
+    );
+    if (classification?.kind === "recovery_required")
+      assert.equal(classification.reason, "handoff_correlation_pending");
+  }
+}
+assert.deepEqual(
+  classifyPolymarketHandoffEvents(
+    [internalHandoffEvent("1", internalHandoffAmount)],
+    [
+      {
+        ...safeHandoffCandidate,
+        actionValidationResult: {
+          ...safeHandoffCandidate.actionValidationResult,
+          signerAddress: internalHandoffFunder,
+        },
+      },
+    ],
+  ).get(`evm:137:${internalHandoffHash}:1`),
+  {
+    kind: "recovery_required",
+    reason: "handoff_reference_envelope_mismatch",
+  },
+  "a Safe label cannot substitute for a valid signed transfer envelope",
+);
+
 assert.equal(
   classifyPolymarketHandoffEvents(
     [internalHandoffEvent("1", internalHandoffAmount)],
@@ -186,11 +241,39 @@ assert.equal(
       internalHandoffEvent("1", internalHandoffAmount),
       internalHandoffEvent("2", internalHandoffAmount),
     ],
-    [internalHandoffCandidate],
+    [{ ...internalHandoffCandidate, resolvedEventIndex: null }],
   ).get(`evm:137:${internalHandoffHash}:1`)?.kind,
   "recovery_required",
-  "two identical matching events must fail closed into recovery",
+  "two identical matching events without a verified index must fail closed into recovery",
 );
+for (const eventIndex of ["1", "2"]) {
+  assert.equal(
+    classifyPolymarketHandoffEvents(
+      [internalHandoffEvent(eventIndex, internalHandoffAmount)],
+      [internalHandoffCandidate],
+    ).get(`evm:137:${internalHandoffHash}:${eventIndex}`)?.kind,
+    eventIndex === "1" ? "internal" : "external",
+    "singleton retries bind to the receipt's exact log, never two equal transfers",
+  );
+}
+for (const outcome of ["started", "cancelled", "failed"] as const) {
+  assert.deepEqual(
+    classifyPolymarketHandoffEvents(
+      [internalHandoffEvent("1", internalHandoffAmount)],
+      [
+        {
+          ...internalHandoffCandidate,
+          attemptOutcome: outcome,
+          resolvedEventIndex: null,
+          receiptRefCiphertext: null,
+          receiptRefLookupHmac: null,
+        },
+      ],
+    ).get(`evm:137:${internalHandoffHash}:1`),
+    { kind: "recovery_required", reason: "handoff_correlation_pending" },
+    "client cancellation/failure cannot prove an issued action never executed",
+  );
+}
 assert.equal(
   classifyPolymarketHandoffEvents(
     [internalHandoffEvent("1", internalHandoffAmount)],
@@ -209,14 +292,15 @@ assert.equal(
       {
         ...internalHandoffCandidate,
         attemptOutcome: "started",
+        resolvedEventIndex: null,
         receiptRefCiphertext: null,
         receiptRefLookupHmac: null,
         lookupKeyVersion: null,
       },
     ],
   ).get(`evm:137:${internalHandoffHash}:1`)?.kind,
-  "internal",
-  "a durable started attempt must close the broadcast-to-report gap",
+  "recovery_required",
+  "a started envelope closes the broadcast-to-report gap without proving internal ownership",
 );
 assert.equal(
   classifyPolymarketHandoffEvents(
@@ -225,14 +309,90 @@ assert.equal(
       {
         ...internalHandoffCandidate,
         referenceKind: "external_handoff",
+        resolvedEventIndex: null,
         receiptRefLookupHmac: "relayer_reference_lookup_hmac",
       },
     ],
     { decrypt: () => "polymarket-relayer:v1:relayer_reference_12345678" },
   ).get(`evm:137:${internalHandoffHash}:1`)?.kind,
-  "internal",
-  "an exact reported relayer handoff must stay internal until its transaction hash resolves",
+  "recovery_required",
+  "an unresolved relayer request is not an exact transaction reference",
 );
+assert.deepEqual(
+  classifyPolymarketHandoffEvents(
+    [internalHandoffEvent("1", internalHandoffAmount)],
+    [
+      {
+        ...internalHandoffCandidate,
+        attemptOutcome: "started",
+        resolvedTransactionHash: internalHandoffHash,
+      },
+    ],
+  ).get(`evm:137:${internalHandoffHash}:1`),
+  {
+    kind: "internal",
+    reason: null,
+    reference: "exact",
+    operationId: internalHandoffCandidate.operationId,
+    attemptId: internalHandoffCandidate.attemptId,
+  },
+  "resolved canonical evidence remains exact before the attempt report catches up",
+);
+assert.deepEqual(
+  classifyPolymarketHandoffEvents(
+    [internalHandoffEvent("1", internalHandoffAmount)],
+    [
+      {
+        ...internalHandoffCandidate,
+        attemptOutcome: "started",
+        resolvedTransactionHash: `0x${"ef".repeat(32)}`,
+      },
+    ],
+  ).get(`evm:137:${internalHandoffHash}:1`),
+  { kind: "external", reason: null },
+  "a started attempt with a different resolved hash cannot suppress envelope-only coincidence",
+);
+assert.deepEqual(
+  classifyPolymarketHandoffEvents(
+    [internalHandoffEvent("1", internalHandoffAmount)],
+    [
+      {
+        ...internalHandoffCandidate,
+        referenceKind: "external_handoff",
+        resolvedEventIndex: null,
+      },
+    ],
+  ).get(`evm:137:${internalHandoffHash}:1`),
+  { kind: "recovery_required", reason: "handoff_correlation_pending" },
+  "even a matching request-reference HMAC is not an exact transaction hash",
+);
+for (const candidates of [
+  [
+    internalHandoffCandidate,
+    {
+      ...internalHandoffCandidate,
+      attemptId: "pending_handoff_12345678",
+      referenceKind: "external_handoff" as const,
+    },
+  ],
+  [
+    {
+      ...internalHandoffCandidate,
+      attemptId: "pending_handoff_12345678",
+      referenceKind: "external_handoff" as const,
+    },
+    internalHandoffCandidate,
+  ],
+]) {
+  assert.deepEqual(
+    classifyPolymarketHandoffEvents(
+      [internalHandoffEvent("1", internalHandoffAmount)],
+      candidates,
+    ).get(`evm:137:${internalHandoffHash}:1`),
+    { kind: "recovery_required", reason: "handoff_correlation_pending" },
+    "exact plus possible competing ownership must not be decided by iteration order",
+  );
+}
 assert.equal(
   classifyPolymarketHandoffEvents(
     [internalHandoffEvent("1", internalHandoffAmount)],

@@ -1,7 +1,8 @@
-// Offline protocol evidence, NOT a production signer or submission adapter.
+// Offline official SDK oracle, now also verifies the production action builder.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { decode } from "@msgpack/msgpack";
 import {
   concat,
   keccak256,
@@ -10,9 +11,15 @@ import {
   TypedDataEncoder,
   verifyTypedData,
   Wallet,
+  getBytes,
   type TypedDataDomain,
   type TypedDataField,
 } from "ethers";
+import {
+  bindHip4TradeSignature,
+  canonicalHip4TradeAction,
+  prepareHip4TradeSigning,
+} from "./services/hip4-trade-signing.js";
 
 type Vector = {
   name: string;
@@ -29,6 +36,7 @@ type Vector = {
   vault?: string | null;
   expiresAfter?: number | null;
   connectionId?: string;
+  action?: unknown;
 };
 const fixture: {
   sdk: { version: string; commit: string; signingSourceSha256: string };
@@ -162,3 +170,200 @@ for (const vector of fixture.vectors) {
     }
   });
 }
+
+function reversedKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(reversedKeys);
+  if (value && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value)
+        .reverse()
+        .map(([key, entry]) => [key, reversedKeys(entry)]),
+    );
+  return value;
+}
+
+for (const vector of fixture.vectors.filter((entry) => entry.packedAction)) {
+  test(`production HIP action serialization and signature: ${vector.name}`, () => {
+    assert.ok(vector.action);
+    assert.ok(vector.nonce !== undefined);
+    const input = {
+      environment: vector.name.includes("mainnet")
+        ? ("mainnet" as const)
+        : ("testnet" as const),
+      action: canonicalHip4TradeAction(vector.action),
+      nonce: vector.nonce,
+      vaultAddress: vector.vault ?? null,
+      expiresAfter: vector.expiresAfter ?? null,
+    };
+    const actual = prepareHip4TradeSigning(input);
+    assert.equal(actual.packedAction, vector.packedAction);
+    assert.equal(actual.connectionId, vector.connectionId);
+    assert.equal(actual.digest, vector.digest);
+    assert.deepEqual(actual.action, vector.action);
+    assert.deepEqual(
+      prepareHip4TradeSigning({
+        ...input,
+        action: canonicalHip4TradeAction(reversedKeys(vector.action)),
+      }),
+      actual,
+      "JSONB object ordering does not change the admitted signed action",
+    );
+    const signature = Signature.from({
+      ...vector.signature,
+      r: toBeHex(BigInt(vector.signature.r), 32),
+      s: toBeHex(BigInt(vector.signature.s), 32),
+    }).serialized;
+    const payload = bindHip4TradeSignature(input, signature, fixture.signer);
+    assert.deepEqual(payload.action, vector.action);
+    assert.equal(payload.nonce, vector.nonce);
+    assert.equal(payload.expiresAfter ?? null, vector.expiresAfter ?? null);
+    for (const changed of [
+      { ...input, nonce: input.nonce + 1 },
+      {
+        ...input,
+        environment:
+          input.environment === "mainnet"
+            ? ("testnet" as const)
+            : ("mainnet" as const),
+      },
+      { ...input, expiresAfter: (input.expiresAfter ?? input.nonce) + 1 },
+      {
+        ...input,
+        vaultAddress: input.vaultAddress
+          ? null
+          : "0x0000000000000000000000000000000000000001",
+      },
+    ])
+      assert.throws(() =>
+        bindHip4TradeSignature(changed, signature, fixture.signer),
+      );
+    assert.throws(() =>
+      bindHip4TradeSignature(
+        input,
+        signature,
+        "0x0000000000000000000000000000000000000001",
+      ),
+    );
+  });
+}
+
+test("HIP signing rejects unknown actions and fields rather than signing a different payload", () => {
+  const original = fixture.vectors[0]?.action;
+  const action = canonicalHip4TradeAction(original);
+  assert.equal(action.type, "order");
+  if (action.type !== "order") throw new Error("expected order fixture");
+  const order = action.orders[0];
+  assert.ok(order);
+  for (const change of [
+    { a: 1 },
+    { a: 100115532 },
+    { a: Number.MAX_SAFE_INTEGER + 1 },
+    { p: "0.42250" },
+    { p: "0.000001" },
+    { p: "0" },
+    { p: "1" },
+    { p: 0.4225 },
+    { s: "1.5" },
+    { s: "0" },
+    { r: true },
+    { t: { limit: { tif: "Fok" } } },
+    { c: "missing" },
+    { extra: "not bound" },
+  ])
+    assert.throws(() =>
+      canonicalHip4TradeAction({
+        ...action,
+        orders: [{ ...order, ...change }],
+      }),
+    );
+  for (const candidate of [
+    { ...action, type: "sendAsset" },
+    { ...action, builder: { b: fixture.signer, f: 10 } },
+    { ...action, grouping: "normalTpsl" },
+    { ...action, orders: [] },
+  ])
+    assert.throws(() => canonicalHip4TradeAction(candidate));
+  for (const nonce of [-1, 0.1, Number.MAX_SAFE_INTEGER + 1, NaN])
+    assert.throws(() =>
+      prepareHip4TradeSigning({
+        environment: "mainnet",
+        action,
+        nonce,
+        vaultAddress: null,
+        expiresAfter: null,
+      }),
+    );
+});
+
+test("HIP cancel order IDs retain uint64 MessagePack encoding above uint32", () => {
+  for (const orderId of [2 ** 32, Number.MAX_SAFE_INTEGER]) {
+    const prepared = prepareHip4TradeSigning({
+      environment: "mainnet",
+      action: { type: "cancel", cancels: [{ a: 100115530, o: orderId }] },
+      nonce: 1700000000000,
+      vaultAddress: null,
+      expiresAfter: null,
+    });
+    assert.deepEqual(decode(getBytes(prepared.packedAction)), prepared.action);
+    // Official SDK msgpack uses unsigned 64-bit integer, not float64, here.
+    assert.ok(
+      prepared.packedAction.endsWith(`cf${toBeHex(orderId, 8).slice(2)}`),
+    );
+  }
+});
+
+test("HIP signature binds the actual order and never exposes invalid signature input", () => {
+  const vector = fixture.vectors.find(
+    (entry) => entry.name === "l1-mainnet-direct",
+  );
+  assert.ok(vector?.nonce !== undefined);
+  const action = canonicalHip4TradeAction(vector.action);
+  assert.ok(action.type === "order");
+  const order = action.orders[0];
+  assert.ok(order);
+  const input = {
+    environment: "mainnet" as const,
+    action,
+    nonce: vector.nonce,
+    vaultAddress: null,
+    expiresAfter: null,
+  };
+  const signature = Signature.from({
+    ...vector.signature,
+    r: toBeHex(BigInt(vector.signature.r), 32),
+    s: toBeHex(BigInt(vector.signature.s), 32),
+  }).serialized;
+  for (const change of [
+    { p: "0.4" },
+    { s: "24" },
+    { b: !order.b },
+    { a: order.a + 1 },
+    { c: `0x${"ab".repeat(16)}` },
+    { t: { limit: { tif: "Ioc" as const } } },
+  ]) {
+    const changed = canonicalHip4TradeAction({
+      ...action,
+      orders: [{ ...order, ...change }],
+    });
+    assert.throws(
+      () =>
+        bindHip4TradeSignature(
+          { ...input, action: changed },
+          signature,
+          fixture.signer,
+        ),
+      { message: "hip4_trade_signature_invalid" },
+    );
+  }
+  const privateInput = "invalid-sensitive-signature";
+  assert.throws(
+    () => bindHip4TradeSignature(input, privateInput, fixture.signer),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, "hip4_trade_signature_invalid");
+      assert.equal(error.cause, undefined);
+      assert.equal(String(error.stack).includes(privateInput), false);
+      return true;
+    },
+  );
+});

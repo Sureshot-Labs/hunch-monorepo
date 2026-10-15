@@ -26,6 +26,17 @@ import type { hip4PortfolioCoverageSchema } from "../schemas/position-read.js";
 import type { Hip4PortfolioPosition } from "../schemas/position-read.js";
 export type { Hip4PortfolioPosition } from "../schemas/position-read.js";
 
+/** Stable owned-position reference shared by portfolio and preparation. */
+export function hip4PortfolioPositionId(
+  environment: Hip4Environment,
+  address: string,
+  tokenId: string,
+): string {
+  return `hyperliquid:${createHash("sha256")
+    .update(JSON.stringify([environment, address.toLowerCase(), tokenId]))
+    .digest("hex")}`;
+}
+
 /** Portfolio reads share the existing account facts. They do not create a
  * second position ledger, infer holdings from fills, or call a provider. */
 export const HIP4_PORTFOLIO_ACCOUNTS_SQL = `
@@ -54,6 +65,8 @@ export function projectHip4PortfolioPositions(input: {
   markets: ReadonlyMap<string, Hip4ReadMarket>;
   snapshotMaxAgeMs: number;
   now: number;
+  /** Review capability only. Preparation rechecks holdings, holds and quote. */
+  sellEnabled?: boolean;
 }): Hip4PortfolioPosition[] {
   const observation = hip4AccountObservationSchema.parse(input.observation);
   const observedTime = Date.parse(observation.observedAt);
@@ -151,15 +164,6 @@ export function projectHip4PortfolioPositions(input: {
         position.quantity,
         value.markPrice,
       );
-    const id = createHash("sha256")
-      .update(
-        JSON.stringify([
-          input.environment,
-          input.address.toLowerCase(),
-          position.tokenId,
-        ]),
-      )
-      .digest("hex");
     const basis = basisByCoin.get(position.coin);
     const costBasis =
       basis?.reason === "verified" && basis.quantity === position.quantity
@@ -182,7 +186,11 @@ export function projectHip4PortfolioPositions(input: {
           )
         : null;
     return {
-      id: `hyperliquid:${id}`,
+      id: hip4PortfolioPositionId(
+        input.environment,
+        input.address,
+        position.tokenId,
+      ),
       userId: input.userId,
       walletAddress: input.address.toLowerCase(),
       venue: "hyperliquid",
@@ -221,7 +229,21 @@ export function projectHip4PortfolioPositions(input: {
               status: market.status,
             }
           : null,
-      capabilities: { sell: false, redeem: false, hide: false },
+      capabilities: {
+        sell: Boolean(
+          input.sellEnabled &&
+          input.environment === "mainnet" &&
+          marketSide &&
+          market?.quoteToken === "USDC" &&
+          market.status === "observed" &&
+          !market.settlement &&
+          market.expiry &&
+          Date.parse(market.expiry) > input.now &&
+          compareUnsignedDecimals(position.quantity, "1") >= 0,
+        ),
+        redeem: false,
+        hide: false,
+      },
     };
   });
 }
@@ -348,6 +370,7 @@ export async function readHip4OwnedPortfolio(
         markets,
         now,
         snapshotMaxAgeMs: account.policy.snapshotMaxAgeMs,
+        sellEnabled: read.capabilities.reduceExposure,
       }),
     );
   }

@@ -73,7 +73,7 @@ export function parseSignalBotInteractiveMenuRoute(
   if (funding) return funding;
   if (route === "trade_history") return { kind: "trade_history" };
   const filters = route.match(
-    /^search_filters:([a-f0-9]{12})(?::(polymarket|limitless|kalshi|all|sort|categories|s_trending|s_totalvol|s_time|c_all|c_politics|c_sports|c_crypto|c_economics|c_tech|c_culture))?$/i,
+    /^search_filters:([a-f0-9]{12})(?::(polymarket|limitless|kalshi|hyperliquid|all|sort|categories|s_trending|s_totalvol|s_time|c_all|c_politics|c_sports|c_crypto|c_economics|c_tech|c_culture))?$/i,
   );
   if (filters)
     return {
@@ -589,6 +589,7 @@ async function deliverSignalBotInteractiveMenuCallback(
                 ["polymarket", "Polymarket"],
                 ["limitless", "Limitless"],
                 ["kalshi", "Kalshi"],
+                ["hyperliquid", "Hyperliquid"],
               ]
                 .filter(([venue]) => options.venues.includes(venue ?? ""))
                 .map(([venue, label]) => [

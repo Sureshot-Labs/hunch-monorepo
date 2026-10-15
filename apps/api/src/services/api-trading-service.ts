@@ -29,6 +29,8 @@ import { env } from "../env.js";
 import { createKalshiTradingExecutionService } from "./kalshi-trading-execution-service.js";
 import { createLimitlessTradingExecutionService } from "./limitless-trading-execution-service.js";
 import { createPolymarketTradingExecutionService } from "./polymarket-trading-execution-service.js";
+import { createHyperliquidTradingExecutionService } from "./hyperliquid-trading-execution-service.js";
+import type { Hip4OrderRuntimeDependencies } from "./hip4-order-runtime.js";
 import {
   normalizeTradingError,
   TradingServiceError,
@@ -65,7 +67,7 @@ function normalizeSupportedVenue(
 function unsupportedVenue(venue: TradingVenue): TradingServiceError {
   return new TradingServiceError({
     code: "unsupported_capability",
-    message: "Venue is not supported for Telegram bot trading.",
+    message: "Venue is not supported by this trading path.",
     statusCode: 400,
     venue,
   });
@@ -73,22 +75,27 @@ function unsupportedVenue(venue: TradingVenue): TradingServiceError {
 
 function createExecutorRegistry(
   input: ApiTradingApplicationServiceInput,
-): Map<SupportedBotTradingVenue, ApiVenueTradingExecutor> {
+  dependencies: { hyperliquid?: Hip4OrderRuntimeDependencies },
+): Map<TradingVenue, ApiVenueTradingExecutor> {
   return new Map([
     ["polymarket", createPolymarketTradingExecutionService(input)],
     ["limitless", createLimitlessTradingExecutionService(input)],
     ["kalshi", createKalshiTradingExecutionService(input)],
+    [
+      "hyperliquid",
+      createHyperliquidTradingExecutionService(input, dependencies.hyperliquid),
+    ],
   ]);
 }
 
 export function createApiTradingApplicationService(
   input: ApiTradingApplicationServiceInput,
+  /** Internal dependency injection only, never deserialized from an API body. */
+  dependencies: { hyperliquid?: Hip4OrderRuntimeDependencies } = {},
 ): ApiBotTradingExecutor {
-  const executors = createExecutorRegistry(input);
+  const executors = createExecutorRegistry(input, dependencies);
   const executorFor = (venue: TradingVenue): ApiVenueTradingExecutor => {
-    const supported = normalizeSupportedVenue(venue);
-    if (!supported) throw unsupportedVenue(venue);
-    const executor = executors.get(supported);
+    const executor = executors.get(venue);
     if (!executor) throw unsupportedVenue(venue);
     return executor;
   };
@@ -143,9 +150,13 @@ export function createApiTradingApplicationService(
         : "limitless_clob",
   };
   const executionPathFor = (
-    venue: SupportedBotTradingVenue,
+    venue: TradingVenue,
     venuePayload: unknown,
-  ): FundingTradeExecutionPath => executionPathResolvers[venue](venuePayload);
+  ): FundingTradeExecutionPath => {
+    const supported = normalizeSupportedVenue(venue);
+    if (!supported) throw unsupportedVenue(venue);
+    return executionPathResolvers[supported](venuePayload);
+  };
   const externalReferenceFor = (input: {
     orderHash?: string | null;
     txSignature?: string | null;
@@ -297,6 +308,12 @@ export function createApiTradingApplicationService(
     applyTradeEffects: (effectsInput) =>
       executorFor(effectsInput.intent.venue).applyTradeEffects(effectsInput),
     executePreparedTrade: async (executeInput) => {
+      const executor = executorFor(executeInput.prepared.venue);
+      // The durable adapter resolves owned replay BEFORE current lifecycle and
+      // funding readiness, and atomically owns its existing funding attempt.
+      // Generic catch/release must not mistake that attempt for "not started".
+      if (executor.submissionOwnership === "durable_client_signed")
+        return executor.executePreparedTrade(executeInput);
       const intent: TradeIntent = { ...executeInput.prepared.intent };
       const prepared = { ...executeInput.prepared, intent };
       await assertReadyIntent(intent);
@@ -557,7 +574,22 @@ export function createApiTradingApplicationService(
       }),
     persistTrade: (persistInput) =>
       executorFor(persistInput.intent.venue).persistTrade(persistInput),
+    prepareCancelOrder: async (cancelInput) => {
+      const executor = executorFor(cancelInput.venue);
+      if (!executor.prepareCancelOrder)
+        throw unsupportedVenue(cancelInput.venue);
+      return executor.prepareCancelOrder(cancelInput);
+    },
+    submitPreparedCancelOrder: async (cancelInput) => {
+      const executor = executorFor(cancelInput.venue);
+      if (!executor.submitPreparedCancelOrder)
+        throw unsupportedVenue(cancelInput.venue);
+      return executor.submitPreparedCancelOrder(cancelInput);
+    },
     prepareTrade: async (prepareInput) => {
+      const executor = executorFor(prepareInput.intent.venue);
+      if (executor.submissionOwnership === "durable_client_signed")
+        return executor.prepareTrade(prepareInput);
       await assertReadyIntent(prepareInput.intent);
       const prepared = await executorFor(
         prepareInput.intent.venue,
@@ -569,6 +601,9 @@ export function createApiTradingApplicationService(
       return prepared;
     },
     quote: async (quoteInput) => {
+      const executor = executorFor(quoteInput.intent.venue);
+      if (executor.submissionOwnership === "durable_client_signed")
+        return executor.quote(quoteInput);
       // Quotes do not sign or submit. Telegram also quotes user-signed Mini
       // App trades, including position exits while automation is disabled.
       // Preparation and submission retain the independent automation fence.
@@ -577,6 +612,9 @@ export function createApiTradingApplicationService(
       return executorFor(quoteInput.intent.venue).quote(quoteInput);
     },
     submitPreparedTrade: async (submitInput) => {
+      const executor = executorFor(submitInput.prepared.venue);
+      if (executor.submissionOwnership === "durable_client_signed")
+        return executor.submitPreparedTrade(submitInput);
       await assertReadyIntent(submitInput.prepared.intent);
       let copyAttempt: RetainedCopyAttempt | null = null;
       try {

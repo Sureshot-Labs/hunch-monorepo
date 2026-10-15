@@ -57,7 +57,9 @@ function fixture(
         );
       },
     }),
-    () => new Date(now.getTime() + (options.lagMs ?? 50)),
+    // The client timestamps /chains with the real clock. Under parallel test
+    // load simulated completion must not precede that observation.
+    () => new Date(Math.max(Date.now(), now.getTime() + (options.lagMs ?? 50))),
   );
   const input = {
     route: {

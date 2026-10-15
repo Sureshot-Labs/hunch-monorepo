@@ -50,6 +50,9 @@ export type FrozenCollateralValuation = Readonly<{
 }>;
 
 export type FrozenSpendabilityEvidence = Readonly<{
+  /** Explicit provider-lock + Hunch-hold coverage. Legacy planner evidence
+   * without this attestation must not be advertised as public spendability. */
+  coverage?: "provider_locks_and_hunch_holds";
   observedAmount: Money;
   lockedRaw: string;
   reservedRaw: string;
@@ -119,6 +122,18 @@ function toOption(
       fact.preparation.readinessClass !== "external_source_only" &&
       fact.preparation.readinessClass !== "external_view_only",
     reasonCodes,
+    spendability:
+      !stale &&
+      fact.spendability.coverage === "provider_locks_and_hunch_holds" &&
+      fact.preparation.status === "ready" &&
+      Date.parse(fact.spendability.expiresAt) > now.getTime()
+        ? {
+            availableAmount: fact.spendability.availableAmount,
+            revision: fact.spendability.revision,
+            asOf: fact.spendability.asOf,
+            expiresAt: fact.spendability.expiresAt,
+          }
+        : null,
   };
 }
 

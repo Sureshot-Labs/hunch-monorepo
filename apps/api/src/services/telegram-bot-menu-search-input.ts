@@ -40,7 +40,7 @@ export function isDirectMarketReference(value: string): boolean {
   const normalized = value.trim();
   return (
     /^https?:\/\//i.test(normalized) ||
-    /^(polymarket|limitless|kalshi):.+/i.test(normalized) ||
+    /^(polymarket|limitless|kalshi|hyperliquid):.+/i.test(normalized) ||
     /^\d+$/.test(normalized) ||
     CANONICAL_MARKET_UUID.test(normalized)
   );

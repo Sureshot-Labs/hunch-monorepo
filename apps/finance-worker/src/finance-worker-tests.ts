@@ -132,6 +132,18 @@ const tests: TestCase[] = [
       assert.equal(job.maxRetries, 0);
       assert.equal(job.isNoopResult?.({ claimed: 0 }), true);
       assert.equal(job.isNoopResult?.({ budgetExhausted: 1 }), false);
+      assert.equal(
+        job.isNoopResult?.({ claimed: 0, orderObservation: { saved: 1 } }),
+        false,
+      );
+      assert.equal(
+        job.isNoopResult?.({ claimed: 0, orderObservation: { errors: 1 } }),
+        false,
+      );
+      assert.equal(
+        job.isNoopResult?.({ claimed: 0, orderObservation: { claimed: 0 } }),
+        true,
+      );
       execFileSync(
         process.execPath,
         [

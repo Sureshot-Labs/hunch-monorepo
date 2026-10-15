@@ -11,6 +11,7 @@ import type {
 } from "./reference-codec.js";
 import type { RelayRequestListItem, RelayStatusResponse } from "./schemas.js";
 import { classifyRelayStatus } from "./status.js";
+import { relayDestinationReferenceIdentity } from "./destination-reference.js";
 import type { VerifiedRelayWebhook } from "./webhook.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
@@ -26,8 +27,67 @@ type StoredRelayRequest = {
   segment_id: string;
   request_kind: "initial" | "child";
   request_ref_ciphertext: string | null;
+  request_ref_lookup_hmac: string;
+  lookup_key_version: number;
   discovery_source: string;
 };
+
+// Status, receipt and reducer writers share the operation-first lock order.
+// Do not hold a request/segment lock while waiting for this row: a receipt
+// writer can already own the operation and need those child rows next.
+export const RELAY_STATUS_OPERATION_LOCK_SQL = `
+  select operation_row.id
+    from funding_operations operation_row
+    join funding_operation_segments segment
+      on segment.operation_id = operation_row.id
+   where operation_row.id = $1::uuid
+     and segment.id = $2::uuid
+     and segment.provider_id = 'relay'
+   for update of operation_row
+`;
+
+async function lockRelayStatusOperation(
+  client: Pick<PoolClient, "query">,
+  operationId: string,
+  segmentId: string,
+): Promise<void> {
+  const result = await client.query(RELAY_STATUS_OPERATION_LOCK_SQL, [
+    operationId,
+    segmentId,
+  ]);
+  if (result.rowCount !== 1) {
+    throw new Error("Relay status operation/segment is no longer available");
+  }
+}
+
+export const RELAY_WEBHOOK_REQUEST_LOOKUP_SQL = `
+  select request.id, segment.operation_id, request.segment_id,
+         request.support_metadata
+    from funding_provider_requests request
+    join funding_operation_segments segment on segment.id = request.segment_id
+   where request.request_ref_lookup_hmac = $1
+     and request.lookup_key_version = $2
+     and segment.provider_id = 'relay'
+   limit 2
+`;
+
+type StoredWebhookRequest = {
+  id: string;
+  operation_id: string;
+  segment_id: string;
+  support_metadata: JsonRecord;
+};
+
+function singleWebhookRequest(
+  rows: StoredWebhookRequest[],
+): StoredWebhookRequest {
+  const row = rows[0];
+  if (!row) throw new Error("Relay webhook request is not registered");
+  if (rows.length !== 1) {
+    throw new Error("Relay webhook request correlation is ambiguous");
+  }
+  return row;
+}
 
 function statusSupportMetadata(
   status: RelayStatusResponse,
@@ -47,6 +107,12 @@ function statusSupportMetadata(
     ...(providerUpdatedAt !== undefined ? { providerUpdatedAt } : {}),
     originTransactionReferenceCount: status.inTxHashes?.length ?? 0,
     destinationTransactionReferenceCount: status.txHashes?.length ?? 0,
+    // Keep the destination role separate from the legacy mixed HMAC array.
+    // These are positive associations only; sparse polling cannot erase them.
+    relaySuccessfulDestinationReferenceHashesV1:
+      decision.category === "provider_success"
+        ? (status.txHashes ?? []).map(relayDestinationReferenceIdentity)
+        : [],
     ...(referenceFingerprint
       ? {
           relayTransactionReferenceFingerprints: [
@@ -62,20 +128,16 @@ function statusSupportMetadata(
   };
 }
 
-async function updateSegmentStatusInTransaction(
-  client: Pick<PoolClient, "query">,
-  input: Readonly<{
-    segmentId: string;
-    rawStatus: string;
-    supportMetadata: JsonRecord;
-    providerUpdatedAt: number | undefined;
-  }>,
-): Promise<void> {
-  await client.query(
-    `
+export const RELAY_SEGMENT_STATUS_UPDATE_SQL = `
       update funding_operation_segments
-      set raw_status = $2,
-          support_metadata = (support_metadata || $3::jsonb) ||
+      set raw_status = case when $5::boolean and (
+            support_metadata->>'providerUpdatedAt' is null or
+            ($4::numeric is not null and (support_metadata->>'providerUpdatedAt')::numeric <= $4::numeric)
+          ) then $2 else raw_status end,
+          support_metadata = (support_metadata || case when $5::boolean and (
+            support_metadata->>'providerUpdatedAt' is null or
+            ($4::numeric is not null and (support_metadata->>'providerUpdatedAt')::numeric <= $4::numeric)
+          ) then $3::jsonb else '{}'::jsonb end) ||
             jsonb_build_object(
               'relayTransactionReferenceFingerprints',
               (
@@ -96,8 +158,10 @@ async function updateSegmentStatusInTransaction(
                         union all
                         select jsonb_array_elements_text(
                                  coalesce(
-                                   $3::jsonb ->
-                                     'relayTransactionReferenceFingerprints',
+                                   case when $5::boolean and (
+                                     support_metadata->>'providerUpdatedAt' is null or
+                                     ($4::numeric is not null and (support_metadata->>'providerUpdatedAt')::numeric <= $4::numeric)
+                                   ) then $3::jsonb -> 'relayTransactionReferenceFingerprints' end,
                                    '[]'::jsonb
                                  )
                                ) as fingerprint
@@ -105,23 +169,39 @@ async function updateSegmentStatusInTransaction(
                      where fingerprint ~ '^[a-f0-9]{64}$'
                   ) unique_fingerprints
               )
+            ) || jsonb_build_object(
+              'relaySuccessfulDestinationReferenceHashesV1',
+              (select coalesce(jsonb_agg(reference_hash order by reference_hash), '[]'::jsonb)
+                 from (
+                   select distinct reference_hash
+                     from jsonb_array_elements_text(
+                       case when jsonb_typeof(support_metadata->'relaySuccessfulDestinationReferenceHashesV1')='array'
+                         then support_metadata->'relaySuccessfulDestinationReferenceHashesV1' else '[]'::jsonb end
+                       || coalesce($3::jsonb->'relaySuccessfulDestinationReferenceHashesV1','[]'::jsonb)
+                     ) destination_reference(reference_hash)
+                    where reference_hash ~ '^[a-f0-9]{64}$'
+                 ) unique_destination_references)
             )
       where id = $1 and provider_id = 'relay'
-        and (
-          support_metadata->>'providerUpdatedAt' is null
-          or (
-            $4::numeric is not null
-            and (support_metadata->>'providerUpdatedAt')::numeric <= $4::numeric
-          )
-        )
-    `,
-    [
-      input.segmentId,
-      input.rawStatus,
-      input.supportMetadata,
-      input.providerUpdatedAt ?? null,
-    ],
-  );
+    `;
+
+async function updateSegmentStatusInTransaction(
+  client: Pick<PoolClient, "query">,
+  input: Readonly<{
+    segmentId: string;
+    rawStatus: string;
+    supportMetadata: JsonRecord;
+    providerUpdatedAt: number | undefined;
+    advanceStatus?: boolean;
+  }>,
+): Promise<void> {
+  await client.query(RELAY_SEGMENT_STATUS_UPDATE_SQL, [
+    input.segmentId,
+    input.rawStatus,
+    input.supportMetadata,
+    input.providerUpdatedAt ?? null,
+    input.advanceStatus ?? true,
+  ]);
 }
 
 function providerTimestampFromMetadata(metadata: JsonRecord): number | null {
@@ -163,7 +243,8 @@ async function persistStatus(
     operationId: string;
     segmentId: string;
     requestKind: "initial" | "child";
-    requestId: string;
+    requestRefLookupHmac: string;
+    lookupKeyVersion: number;
     requestCiphertext: string;
     requestDiscoverySource: string;
     status: RelayStatusResponse;
@@ -179,7 +260,11 @@ async function persistStatus(
     (reference) => input.referenceCodec.fingerprint(reference),
   );
   await tx(pool, async (client) => {
-    const requestHmac = input.referenceCodec.fingerprint(input.requestId);
+    await lockRelayStatusOperation(client, input.operationId, input.segmentId);
+    // Authenticated decryption already established the known request identity.
+    // Keep its immutable lookup binding across HMAC-key rotations; otherwise a
+    // status poll inserts a duplicate request and the next poll cannot recover.
+    const requestHmac = input.requestRefLookupHmac;
     const existingResult = await client.query<{
       support_metadata: JsonRecord;
     }>(
@@ -197,6 +282,19 @@ async function persistStatus(
       existing &&
       isStaleProviderStatus(existing.support_metadata, input.status.updatedAt)
     ) {
+      // A historical success may contain a previously unseen destination. It
+      // cannot roll back lifecycle status, but its positive association still
+      // needs canonical transfer proof and must survive out-of-order delivery.
+      await updateSegmentStatusInTransaction(client, {
+        segmentId: input.segmentId,
+        rawStatus: input.status.status,
+        supportMetadata: {
+          relaySuccessfulDestinationReferenceHashesV1:
+            metadata.relaySuccessfulDestinationReferenceHashesV1 ?? [],
+        },
+        providerUpdatedAt: input.status.updatedAt,
+        advanceStatus: false,
+      });
       return;
     }
     await upsertFundingProviderRequestInTransaction(client, {
@@ -207,7 +305,7 @@ async function persistStatus(
       requestRefLookupHmac: requestHmac,
       rawStatus: input.status.status,
       discoverySource: input.requestDiscoverySource,
-      lookupKeyVersion: input.referenceCodec.keyVersion,
+      lookupKeyVersion: input.lookupKeyVersion,
       observedAt: input.now,
       supportMetadata: metadata,
     });
@@ -226,22 +324,26 @@ async function persistStatus(
   });
 }
 
+export type RelayReceiptObservationTarget = Readonly<{
+  operationId: string;
+  segmentId: string;
+  transactionHashes: readonly string[];
+  requestId: string;
+  status: RelayStatusResponse;
+  now: Date;
+}>;
+type RelayReceiptObserver = (
+  pool: Pool,
+  input: RelayReceiptObservationTarget,
+) => Promise<void>;
+
 export class RelayReconciliationDriver {
   constructor(
     readonly client: RelayClient,
     readonly referenceCodec: RelayReferenceCodec,
     readonly depositAddressCodec: RelayDepositAddressCodec,
-    private readonly observeDestinationReceipts?: (
-      pool: Pool,
-      input: {
-        operationId: string;
-        segmentId: string;
-        transactionHashes: readonly string[];
-        requestId: string;
-        status: RelayStatusResponse;
-        now: Date;
-      },
-    ) => Promise<void>,
+    private readonly observeDestinationReceipts?: RelayReceiptObserver,
+    private readonly observeRefundReceipts?: RelayReceiptObserver,
   ) {}
 
   async pollOperation(
@@ -275,6 +377,8 @@ export class RelayReconciliationDriver {
           request.segment_id,
           request.request_kind,
           request.request_ref_ciphertext,
+          request.request_ref_lookup_hmac,
+          request.lookup_key_version,
           request.discovery_source
         from funding_provider_requests request
         join funding_operation_segments segment
@@ -397,11 +501,17 @@ export class RelayReconciliationDriver {
         const requestCiphertext =
           existing?.ciphertext ??
           this.referenceCodec.encrypt(request.requestId);
+        const requestHmac =
+          existing?.request_ref_lookup_hmac ??
+          this.referenceCodec.fingerprint(request.requestId);
+        const lookupKeyVersion =
+          existing?.lookup_key_version ?? this.referenceCodec.keyVersion;
         await persistStatus(pool, {
           operationId,
           segmentId: segment.id,
           requestKind: existing?.request_kind ?? "child",
-          requestId: request.requestId,
+          requestRefLookupHmac: requestHmac,
+          lookupKeyVersion,
           requestCiphertext,
           requestDiscoverySource:
             existing?.discovery_source ?? "relay_deposit_address_poll",
@@ -416,6 +526,8 @@ export class RelayReconciliationDriver {
             segment_id: segment.id,
             request_kind: "child",
             request_ref_ciphertext: requestCiphertext,
+            request_ref_lookup_hmac: requestHmac,
+            lookup_key_version: lookupKeyVersion,
             discovery_source: "relay_deposit_address_poll",
             ciphertext: requestCiphertext,
           });
@@ -423,14 +535,7 @@ export class RelayReconciliationDriver {
       }
     }
 
-    const destinationReceiptTargets: Array<{
-      operationId: string;
-      segmentId: string;
-      transactionHashes: readonly string[];
-      requestId: string;
-      status: RelayStatusResponse;
-      now: Date;
-    }> = [];
+    const receiptTargets: RelayReceiptObservationTarget[] = [];
     for (const { requestId, request, status } of statusResults) {
       if (status.requestId !== undefined && status.requestId !== requestId) {
         throw new Error("Relay Status v3 request ID does not match lookup");
@@ -439,7 +544,8 @@ export class RelayReconciliationDriver {
         operationId,
         segmentId: request.segment_id,
         requestKind: request.request_kind,
-        requestId,
+        requestRefLookupHmac: request.request_ref_lookup_hmac,
+        lookupKeyVersion: request.lookup_key_version,
         requestCiphertext: request.ciphertext,
         requestDiscoverySource: request.discovery_source,
         status,
@@ -447,8 +553,8 @@ export class RelayReconciliationDriver {
         referenceCodec: this.referenceCodec,
         now,
       });
-      if (status.status === "success") {
-        destinationReceiptTargets.push({
+      if (["success", "refund", "refund_in_progress"].includes(status.status)) {
+        receiptTargets.push({
           operationId,
           segmentId: request.segment_id,
           transactionHashes: status.txHashes ?? [],
@@ -461,8 +567,10 @@ export class RelayReconciliationDriver {
     // Persist every provider response first: an RPC outage on one destination
     // must not prevent a sibling leg's status/references from being recorded.
     await Promise.all(
-      destinationReceiptTargets.map((target) =>
-        this.observeDestinationReceipts?.(pool, target),
+      receiptTargets.map((target) =>
+        target.status.status === "success"
+          ? this.observeDestinationReceipts?.(pool, target)
+          : this.observeRefundReceipts?.(pool, target),
       ),
     );
     return {
@@ -484,32 +592,36 @@ export async function ingestVerifiedRelayWebhook(
   const requestId = input.webhook.payload.data.requestId;
   const requestHmac = input.referenceCodec.fingerprint(requestId);
   return tx(pool, async (client) => {
-    const { rows } = await client.query<{
-      id: string;
-      operation_id: string;
-      segment_id: string;
-      support_metadata: JsonRecord;
-    }>(
-      `
-        select
-          request.id,
-          segment.operation_id,
-          request.segment_id,
-          request.support_metadata
-        from funding_provider_requests request
-        join funding_operation_segments segment
-          on segment.id = request.segment_id
-        where request.request_ref_lookup_hmac = $1
-          and request.lookup_key_version = $2
-          and segment.provider_id = 'relay'
-        for update of request
-      `,
-      [requestHmac, input.referenceCodec.keyVersion],
+    const lookup = [requestHmac, input.referenceCodec.keyVersion];
+    // This first read discovers the lock target only. Its mutable status is
+    // never used to decide whether the webhook is stale or a replay.
+    const discovered = singleWebhookRequest(
+      (
+        await client.query<StoredWebhookRequest>(
+          RELAY_WEBHOOK_REQUEST_LOOKUP_SQL,
+          lookup,
+        )
+      ).rows,
     );
-    const row = rows[0];
-    if (!row) throw new Error("Relay webhook request is not registered");
-    if (rows.length !== 1) {
-      throw new Error("Relay webhook request correlation is ambiguous");
+    await lockRelayStatusOperation(
+      client,
+      discovered.operation_id,
+      discovered.segment_id,
+    );
+    const row = singleWebhookRequest(
+      (
+        await client.query<StoredWebhookRequest>(
+          `${RELAY_WEBHOOK_REQUEST_LOOKUP_SQL} for update of request`,
+          lookup,
+        )
+      ).rows,
+    );
+    if (
+      row.id !== discovered.id ||
+      row.operation_id !== discovered.operation_id ||
+      row.segment_id !== discovered.segment_id
+    ) {
+      throw new Error("Relay webhook request identity changed during lookup");
     }
     const fingerprints = webhookFingerprintHistory(row.support_metadata);
     const replayed = fingerprints.includes(input.webhook.deliveryFingerprint);
@@ -523,15 +635,14 @@ export async function ingestVerifiedRelayWebhook(
       ? fingerprints
       : [...fingerprints, input.webhook.deliveryFingerprint].slice(-16);
     const applyStatus = !replayed && !stale;
+    const incomingMetadata = statusSupportMetadata(
+      input.webhook.payload.data,
+      "webhook",
+      providerUpdatedAt,
+      (reference) => input.referenceCodec.fingerprint(reference),
+    );
     const metadata: JsonRecord = {
-      ...(applyStatus
-        ? statusSupportMetadata(
-            input.webhook.payload.data,
-            "webhook",
-            providerUpdatedAt,
-            (reference) => input.referenceCodec.fingerprint(reference),
-          )
-        : {}),
+      ...(applyStatus ? incomingMetadata : {}),
       lastRelayWebhookFingerprint: input.webhook.deliveryFingerprint,
       relayWebhookFingerprints: nextFingerprints,
       lastRelayWebhookReceivedAt: input.webhook.receivedAt.toISOString(),
@@ -552,12 +663,19 @@ export async function ingestVerifiedRelayWebhook(
         applyStatus,
       ],
     );
-    if (applyStatus) {
+    if (!replayed) {
       await updateSegmentStatusInTransaction(client, {
         segmentId: row.segment_id,
         rawStatus: input.webhook.payload.data.status,
-        supportMetadata: metadata,
+        supportMetadata: applyStatus
+          ? metadata
+          : {
+              relaySuccessfulDestinationReferenceHashesV1:
+                incomingMetadata.relaySuccessfulDestinationReferenceHashesV1 ??
+                [],
+            },
         providerUpdatedAt,
+        advanceStatus: applyStatus,
       });
     }
     await wakeFundingReconciliationInTransaction(client, {

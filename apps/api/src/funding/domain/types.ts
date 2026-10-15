@@ -472,6 +472,14 @@ export type FundingDestinationOption = Readonly<{
   recommended: boolean;
   selectable: boolean;
   reasonCodes: readonly FundingReasonCode[];
+  /** Advisory snapshot after provider locks and Hunch reservations/debits.
+   * Admission always rechecks; absence is unknown, not a zero balance. */
+  spendability?: Readonly<{
+    availableAmount: Money;
+    revision: string;
+    asOf: string;
+    expiresAt: string;
+  }> | null;
 }>;
 
 export type IntentLiquidityProjection = Readonly<{

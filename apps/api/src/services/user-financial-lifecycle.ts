@@ -1,7 +1,9 @@
 import type { DbQuery } from "../db.js";
 import { listFundingLifecycleProjectionsForUsers } from "../funding/lifecycle/funding-lifecycle-read-model.js";
+import { HIP4_ACTIVE_ORDER_EXPOSURE_SQL } from "../repos/hip4-order-holds.js";
 
 type FinancialLifecycleDbRow = {
+  active_hip4_submission: boolean;
   active_funding_movement: boolean;
   active_legacy_bridge: boolean;
   active_position_action: boolean;
@@ -59,6 +61,7 @@ export async function fetchUserFinancialLifecycleSummary(
   const { rows } = await db.query<FinancialLifecycleDbRow>(
     `
       select
+        exists(${HIP4_ACTIVE_ORDER_EXPOSURE_SQL}) as active_hip4_submission,
         (
           exists (
             select 1
@@ -303,6 +306,7 @@ export async function fetchUserFinancialLifecycleSummary(
   const activeFundingMovement =
     row.active_funding_movement || nonTerminalOperationIds.size > 0;
   const activeReasons = [
+    row.active_hip4_submission ? "active_hip4_submission" : null,
     row.active_copy_observation ? "active_copy_observation" : null,
     activeFundingMovement ? "active_funding_movement" : null,
     row.active_preparation ? "active_funding_preparation" : null,

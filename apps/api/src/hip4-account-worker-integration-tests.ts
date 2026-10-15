@@ -86,7 +86,7 @@ try {
   ]);
   await pool.query(
     "insert into user_wallets(user_id,wallet_address,wallet_type,is_verified) values($1,$2,'ethereum',true)",
-    [ownerId, address],
+    [ownerId, `0x${address.slice(2).toUpperCase()}`],
   );
   await pool.query(
     "insert into hip4_account_snapshots(environment,account_address) values('testnet',$1),('testnet',$2)",
@@ -190,6 +190,62 @@ try {
   const beforeOff = calls;
   assert.equal((await runHip4AccountReadPass(pool, fetcher)).claimed, 0);
   assert.equal(calls, beforeOff);
+  // Real row contention (not an already committed active lease): ordered
+  // candidates must skip the locked first row and still find the second.
+  await pool.query(
+    "insert into user_wallets(user_id,wallet_address,wallet_type,is_verified) values($1,$2,'ethereum',true)",
+    [ownerId, foreign],
+  );
+  const [oldest, next] = [address, foreign].sort();
+  await pool.query(
+    `update hip4_account_snapshots set attempt_at=null,lease_token=null,lease_until=null
+    where environment='testnet' and account_address=any($1::text[])`,
+    [[address, foreign]],
+  );
+  const locker = await pool.connect();
+  try {
+    await locker.query("begin");
+    await locker.query(
+      "select account_address from hip4_account_snapshots where environment='testnet' and account_address=$1 for update",
+      [oldest],
+    );
+    const skipped = await pool.query(HIP4_CLAIM_DUE_ACCOUNT_SQL, [
+      "testnet",
+      60000,
+      120000,
+    ]);
+    assert.deepEqual(
+      skipped.rows.map((row) => row.account_address),
+      [next],
+    );
+    assert.equal(
+      (await pool.query(HIP4_CLAIM_DUE_ACCOUNT_SQL, ["testnet", 60000, 120000]))
+        .rowCount,
+      0,
+    );
+    assert.equal(
+      (
+        await locker.query(
+          "select lease_token from hip4_account_snapshots where environment='testnet' and account_address=$1",
+          [oldest],
+        )
+      ).rows[0].lease_token,
+      null,
+    );
+  } finally {
+    await locker.query("rollback");
+    locker.release();
+  }
+  assert.deepEqual(
+    (
+      await pool.query(HIP4_CLAIM_DUE_ACCOUNT_SQL, ["testnet", 60000, 120000])
+    ).rows.map((row) => row.account_address),
+    [oldest],
+  );
+  await pool.query(
+    "delete from user_wallets where user_id=$1 and wallet_address_norm=$2",
+    [ownerId, foreign],
+  );
   // Parse and execute the exact due/lease query under a generic plan too.
   const db = await pool.connect();
   try {
@@ -197,26 +253,107 @@ try {
     await db.query(
       `insert into hip4_account_snapshots(environment,account_address)
       select 'testnet','0x'||md5($1::text||sample.ordinal_number::text)||'00000000'
-      from generate_series(1,10000) sample(ordinal_number)`,
+      from generate_series(1,100000) sample(ordinal_number)`,
       [ownerId],
     );
     await db.query("analyze hip4_account_snapshots");
-    await db.query("set local plan_cache_mode=force_generic_plan");
     await db.query(
       `prepare hip4_due_claim(text,integer,integer) as ${HIP4_CLAIM_DUE_ACCOUNT_SQL}`,
     );
-    const plan = (
-      await db.query(
-        "explain (analyze,buffers,format json) execute hip4_due_claim('testnet',60000,120000)",
-      )
-    ).rows[0]["QUERY PLAN"][0];
-    assert.equal(plan.Plan["Actual Rows"], 1);
-    console.log(
-      JSON.stringify({
-        dueClaimMs: plan["Execution Time"],
-        buffers: plan.Plan["Shared Hit Blocks"],
-      }),
+    const ownedCount = Number(
+      (
+        await db.query(
+          "select count(*) as n from user_wallets where wallet_type='ethereum' and is_verified",
+        )
+      ).rows[0].n,
     );
+    for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+      await db.query(`set local plan_cache_mode=${mode}`);
+      await db.query(
+        "update hip4_account_snapshots set attempt_at=now()-interval '1 day',lease_token=null,lease_until=null where environment='testnet' and account_address=$1",
+        [address],
+      );
+      for (const due of [true, false]) {
+        const plan = (
+          await db.query(
+            "explain (analyze,buffers,format json) execute hip4_due_claim('testnet',60000,120000)",
+          )
+        ).rows[0]["QUERY PLAN"][0];
+        assert.equal(plan.Plan["Actual Rows"], due ? 1 : 0);
+        assert.ok(
+          plan.Plan["Shared Hit Blocks"] < ownedCount * 10 + 1000,
+          "unowned snapshot count must not multiply ownership lookups",
+        );
+        if (process.env.HUNCH_TEST_SHOW_QUERY_PLAN === "1")
+          console.log(JSON.stringify(plan));
+        console.log(
+          JSON.stringify({
+            mode,
+            due,
+            dueClaimMs: plan["Execution Time"],
+            buffers: plan.Plan["Shared Hit Blocks"],
+          }),
+        );
+      }
+    }
+    // A sparse unowned fixture alone does not cover a large enrolled queue.
+    // All synthetic ownership and snapshots below disappear on rollback.
+    await db.query(
+      `create temporary table hip4_owned_queue_fixture on commit drop as
+      select gen_random_uuid() as owner_id,
+        '0x'||md5($1::text||sample.ordinal_number::text)||'00000000' as account_address
+      from generate_series(1,10000) sample(ordinal_number)`,
+      [ownerId],
+    );
+    await db.query(`insert into users(id,is_active)
+      select owner_id,true from hip4_owned_queue_fixture`);
+    await db.query(`insert into user_wallets(user_id,wallet_address,wallet_type,is_verified)
+      select owner_id,account_address,'ethereum',true from hip4_owned_queue_fixture`);
+    await db.query("analyze users");
+    await db.query("analyze user_wallets");
+    for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+      await db.query(`set local plan_cache_mode=${mode}`);
+      for (const distribution of ["all_due", "one_due", "empty"]) {
+        await db.query(
+          `update hip4_account_snapshots snapshot_row
+          set attempt_at=case when $1='all_due' then null else clock_timestamp() end,
+            lease_token=null,lease_until=null
+          from hip4_owned_queue_fixture fixture_row
+          where snapshot_row.environment='testnet'
+            and snapshot_row.account_address=fixture_row.account_address`,
+          [distribution],
+        );
+        if (distribution === "one_due")
+          await db.query(`update hip4_account_snapshots
+            set attempt_at=null where environment='testnet' and account_address=(
+              select account_address from hip4_owned_queue_fixture order by account_address desc limit 1)`);
+        await db.query("analyze hip4_account_snapshots");
+        const plan = (
+          await db.query(
+            "explain (analyze,buffers,format json) execute hip4_due_claim('testnet',60000,120000)",
+          )
+        ).rows[0]["QUERY PLAN"][0];
+        assert.equal(
+          plan.Plan["Actual Rows"],
+          distribution === "empty" ? 0 : 1,
+        );
+        if (process.env.HUNCH_TEST_SHOW_QUERY_PLAN === "1")
+          console.log(JSON.stringify(plan));
+        assert.ok(
+          plan.Plan["Shared Hit Blocks"] < (ownedCount + 10000) * 15,
+          "dense queue must not multiply candidates by total snapshot count",
+        );
+        console.log(
+          JSON.stringify({
+            mode,
+            distribution,
+            owned: 10000,
+            dueClaimMs: plan["Execution Time"],
+            buffers: plan.Plan["Shared Hit Blocks"],
+          }),
+        );
+      }
+    }
     await db.query("deallocate hip4_due_claim");
   } finally {
     await db.query("rollback");

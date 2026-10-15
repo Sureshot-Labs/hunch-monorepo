@@ -6,6 +6,8 @@ import type {
 } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
+import { HUNCH_VENUES } from "@hunch/shared";
+import { buildTelegramAppMarketNavigation } from "../services/telegram-app-market-navigation.js";
 import { isTelegramFundingNavigationMarketId } from "../services/telegram-funding-navigation.js";
 import { filterVenuesForLifecycleCapability } from "../services/venue-lifecycle.js";
 
@@ -220,10 +222,7 @@ const internalMarketSearchBodySchema = z
       .optional(),
     sort: z.enum(["trending", "totalvol", "time"]).optional(),
     query: z.string().trim().max(240).optional().nullable(),
-    venues: z
-      .array(z.enum(["polymarket", "limitless", "kalshi"]))
-      .max(3)
-      .optional(),
+    venues: z.array(z.enum(HUNCH_VENUES)).max(HUNCH_VENUES.length).optional(),
   })
   .strict();
 
@@ -1741,6 +1740,18 @@ async function registerTelegramBotTradingRoutes(
       schema: { body: internalMarketCardBodySchema },
     },
     async (request) => {
+      // Public market navigation does not execute or reconcile a bot trade.
+      // Keep it available when unattended execution is disabled, while the
+      // ordinary venue discovery policy still governs each HIP read.
+      const appNavigation = await buildTelegramAppMarketNavigation({
+        db,
+        marketRef: request.body.marketRef,
+        appBaseUrl: request.body.appBaseUrl,
+        telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
+        side: request.body.context?.focusSide,
+        returnCallbackData: request.body.context?.returnCallbackData,
+      });
+      if (appNavigation) return appNavigation;
       if (reconciliationEnabled) {
         return buildTelegramBotTradingMarketMessage({
           appBaseUrl: request.body.appBaseUrl,
@@ -2554,6 +2565,7 @@ export const telegramBotTradingRouteTestHooks = {
   internalFundingSelectTargetBodySchema,
   internalFundingSessionBodySchema,
   internalMarketCardBodySchema,
+  internalMarketSearchBodySchema,
   internalTradeInputBeginBodySchema,
   internalTradeInputCancelBodySchema,
   internalTradeInputCompleteBodySchema,

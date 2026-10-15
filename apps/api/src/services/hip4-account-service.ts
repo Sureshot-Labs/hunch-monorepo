@@ -11,7 +11,11 @@ import {
   createHip4ReadClient,
   Hip4ReadError,
 } from "./hip4-client.js";
-import { admitHip4Request, readHip4Policy } from "./hip4-repository.js";
+import {
+  admitHip4Request,
+  readHip4Policy,
+  readHip4Markets,
+} from "./hip4-repository.js";
 import {
   claimHip4AccountRefresh,
   failHip4AccountRefresh,
@@ -76,7 +80,7 @@ export async function refreshHip4OwnedAccount(input: {
         `select 1 from user_wallets wallet_row
         join users owner_row on owner_row.id=wallet_row.user_id and owner_row.is_active
         where wallet_row.is_verified and wallet_row.wallet_type='ethereum'
-          and lower(wallet_row.wallet_address)=$1 limit 1`,
+          and wallet_row.wallet_address_norm=$1 limit 1`,
         [address],
       );
       if (!owned.rowCount) throw new Error("account_owner_unavailable");
@@ -385,6 +389,35 @@ export function createHip4OwnedAccountService(
   fetcher: typeof fetch = fetch,
 ) {
   return {
+    // Metadata for an owned holding remains readable in exit-only mode. This
+    // does not refresh the provider, grant discovery or authorize a sale.
+    market: async (
+      address: string,
+      readPolicy: Hip4ReadPolicy,
+      marketId: string,
+    ) => {
+      const snapshot = await readHip4AccountSnapshot(
+        pool,
+        readPolicy.environment,
+        address,
+      );
+      if (
+        !snapshot?.observation?.positions.some(
+          (position: Hip4AccountObservation["positions"][number]) =>
+            position.marketId === marketId,
+        )
+      )
+        return null;
+      const outcome = Number(marketId.split(":").at(-1));
+      const rows = await readHip4Markets(
+        pool,
+        readPolicy.environment,
+        [outcome],
+        outcome - 1,
+        1,
+      );
+      return rows.find((row) => row.marketId === marketId) ?? null;
+    },
     policy: async () => {
       const [read, account] = await Promise.all([
         readHip4Policy(pool, "accountRead"),

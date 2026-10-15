@@ -1,7 +1,11 @@
 import type { PolymarketAssetContext } from "@hunch/shared";
 import type { SocialSourceRef } from "../schemas/social-trade.js";
 
-export type TradingVenue = "kalshi" | "limitless" | "polymarket";
+export type TradingVenue =
+  | "kalshi"
+  | "limitless"
+  | "polymarket"
+  | "hyperliquid";
 export type ExternalTradingVenue = string & {
   readonly __externalTradingVenue: unique symbol;
 };
@@ -22,7 +26,14 @@ export type TradeActor = {
 
 export type TradeSide = "BUY" | "SELL";
 export type TradeOutcomeSide = "NO" | "YES";
-export type TradeOrderType = "FAK" | "FOK" | "GTC" | "GTD" | "market";
+export type TradeOrderType =
+  | "FAK"
+  | "FOK"
+  | "GTC"
+  | "GTD"
+  | "IOC"
+  | "ALO"
+  | "market";
 
 export type TradeAmount =
   | { type: "raw"; value: string }
@@ -63,6 +74,7 @@ export type TradingReadinessInput = {
   executionAuthorization?: TradeExecutionAuthorization | null;
   privyWalletId?: string | null;
   walletAddress: string | null;
+  controllerWalletRef?: string | null;
   walletChain?: "ethereum" | "solana" | string | null;
   target?: TradeTarget | null;
   action?: TradeSide | null;
@@ -131,6 +143,14 @@ export type TradeIntent = {
   amount: TradeAmount;
   orderType?: TradeOrderType | null;
   limitPrice?: number | null;
+  /** Native protocol precision must never round-trip through the legacy
+   * display-only numeric limit or six-decimal USD amount. */
+  nativeOrder?: Readonly<{
+    kind: "hyperliquid_order";
+    controllerWalletRef: string;
+    limitPrice: string;
+    consentedDebitCapRaw: string;
+  }>;
   slippageBps?: number | null;
   fundingReservation?: Readonly<{
     operationId: string;
@@ -229,6 +249,30 @@ export type SubmitPreparedTradeInput = TradeSubmitLifecycleCallbacks & {
   prepared: PreparedTrade;
   signatures?: Array<{ id: string; signature: string }>;
   now?: Date;
+};
+
+/** Optional sign-only cancellation contract. Existing venue cancellation paths
+ * are unchanged; an adapter must explicitly implement this flow. */
+export type PrepareCancelOrderInput = {
+  actor: TradeActor;
+  venue: TradingVenue;
+  orderId: string;
+  idempotencyKey: string;
+};
+export type PreparedCancelOrder = {
+  preparedId: string;
+  venue: TradingVenue;
+  orderId: string;
+  authorizationMode: "client_signed_order";
+  authorizationRequests: PreparedAuthorizationRequest[];
+  expiresAt: Date;
+};
+export type SubmitPreparedCancelOrderInput = {
+  actor: TradeActor;
+  venue: TradingVenue;
+  orderId: string;
+  preparedId: string;
+  signature: string;
 };
 
 export type SubmitResultStatus =

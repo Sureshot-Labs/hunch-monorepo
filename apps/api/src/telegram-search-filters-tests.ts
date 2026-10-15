@@ -165,6 +165,20 @@ assert.equal(
 );
 assert.equal(telegramSearchSortDetail(detailResult, "trending"), "");
 assert.equal(
+  telegramSearchSortDetail(
+    { ...detailResult, volumePeriod: "24h" },
+    "totalvol",
+  ),
+  " · 24h Vol $12.3K",
+);
+assert.equal(
+  telegramSearchSortDetail(
+    { ...detailResult, volumePeriod: "24h", volumeUsd: null },
+    "totalvol",
+  ),
+  " · 24h Vol —",
+);
+assert.equal(
   telegramSearchSortDetail({ ...detailResult, closesAt: null }, "time"),
   " · Close time unknown",
 );

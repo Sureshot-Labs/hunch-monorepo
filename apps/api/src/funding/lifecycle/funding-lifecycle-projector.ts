@@ -9,6 +9,12 @@
 
 import { fundingAttemptHasSafeRetryEvidence } from "../domain/attempt-retry.js";
 import { canonicalAssetId as fundingCanonicalAssetId } from "../domain/asset-identity.js";
+import {
+  fundingRefundReceiptSetComplete,
+  type FundingRefundContract,
+  type FundingRefundReceiptIdentity,
+  type FundingRefundCompletionProof,
+} from "../domain/refund-settlement.js";
 
 export type FundingLifecycleOperationStatus =
   | "awaiting_user"
@@ -151,6 +157,10 @@ export type FundingLifecycleTransferEvidence = Readonly<{
   observedAt: Date;
   reorgedAt: Date | null;
   replacementForTransferId: string | null;
+  refundReceipt?: FundingRefundReceiptIdentity | null;
+  refundCompletionProofs?: readonly FundingRefundCompletionProof[];
+  destinationAddress?: string;
+  nativeDestinationDex?: "spot" | "" | null;
 }>;
 
 export type FundingLifecycleReservationFact = Readonly<{
@@ -236,6 +246,8 @@ export type FundingLifecyclePlanFact = Readonly<{
     routeLegId: string;
     requestedSource: FundingLifecycleMoney;
     minimumDestination: FundingLifecycleMoney;
+    /** Frozen opt-in; missing retains legacy one-receipt semantics. */
+    refundContract?: FundingRefundContract | null;
   }>[];
   /** Immutable plan topology determines which final evidence completes it. */
   completionEvidence:
@@ -671,13 +683,37 @@ function routeLegsRefunded(
   transfers: readonly FundingLifecycleTransferEvidence[],
   plan: FundingLifecyclePlanFact,
 ): boolean {
-  return plan.routeLegs.every((leg) =>
-    transfers.some(
-      (transfer) =>
-        isCanonicalFinal(transfer) &&
-        transfer.routeLegId === leg.routeLegId &&
-        transfer.kind === "refund_credit",
-    ),
+  return plan.routeLegs.every((leg) => routeLegRefunded(transfers, leg));
+}
+
+function routeLegRefunded(
+  transfers: readonly FundingLifecycleTransferEvidence[],
+  leg: FundingLifecyclePlanFact["routeLegs"][number],
+): boolean {
+  const receipts = transfers.filter(
+    (transfer) =>
+      isCanonicalFinal(transfer) &&
+      transfer.routeLegId === leg.routeLegId &&
+      transfer.kind === "refund_credit",
+  );
+  if (!leg.refundContract) return receipts.length > 0;
+  return fundingRefundReceiptSetComplete(
+    leg.refundContract,
+    receipts.map((transfer) => ({
+      observationId: transfer.transferId,
+      money: {
+        asset: {
+          networkId: transfer.money.networkId,
+          assetId: transfer.money.assetId,
+          decimals: transfer.money.decimals,
+        },
+        raw: transfer.money.raw,
+      },
+      destinationAddress: transfer.destinationAddress ?? "",
+      nativeDestinationDex: transfer.nativeDestinationDex ?? null,
+      identity: transfer.refundReceipt ?? null,
+      completionProofs: transfer.refundCompletionProofs ?? [],
+    })),
   );
 }
 
@@ -895,10 +931,11 @@ function deriveSegmentProjections(
     const unresolvedExpired = actions.some(
       (action) => action.expiresAt !== null && action.expiresAt <= facts.now,
     );
-    const refunded = transfers.some(
+    const hasRefundCredit = transfers.some(
       (transfer) =>
         isCanonicalFinal(transfer) && transfer.kind === "refund_credit",
     );
+    const refunded = routeLegRefunded(transfers, leg);
     const intermediate = transfers.some(
       (transfer) =>
         isCanonicalFinal(transfer) && transfer.kind === "intermediate_transfer",
@@ -925,29 +962,33 @@ function deriveSegmentProjections(
     // but must not attempt the illegal cache transition succeeded -> recovery.
     const status: FundingLifecycleSegmentStatus = refunded
       ? "refunded"
-      : incompatibleDestinationCredit
-        ? "recovery_required"
-        : actualOutput !== null
-          ? BigInt(actualOutput.raw) >= BigInt(leg.minimumDestination.raw)
-            ? "succeeded"
+      : leg.refundContract && hasRefundCredit
+        ? canonicalityConflict
+          ? "recovery_required"
+          : "settling"
+        : incompatibleDestinationCredit
+          ? "recovery_required"
+          : actualOutput !== null
+            ? BigInt(actualOutput.raw) >= BigInt(leg.minimumDestination.raw)
+              ? "succeeded"
+              : canonicalityConflict
+                ? "recovery_required"
+                : "settling"
             : canonicalityConflict
               ? "recovery_required"
-              : "settling"
-          : canonicalityConflict
-            ? "recovery_required"
-            : unresolved
-              ? unresolvedExpired
-                ? "recovery_required"
-                : "reconcile_required"
-              : intermediate
-                ? "settling"
-                : actualInput !== null || reported
-                  ? "submitted"
-                  : failed || cancelled
-                    ? "failed"
-                    : awaitingIngress
-                      ? "awaiting_source"
-                      : "planned";
+              : unresolved
+                ? unresolvedExpired
+                  ? "recovery_required"
+                  : "reconcile_required"
+                : intermediate
+                  ? "settling"
+                  : actualInput !== null || reported
+                    ? "submitted"
+                    : failed || cancelled
+                      ? "failed"
+                      : awaitingIngress
+                        ? "awaiting_source"
+                        : "planned";
     return {
       routeLegId: leg.routeLegId,
       status,
@@ -1464,11 +1505,27 @@ export function deriveFundingLifecycle(
     progressStage = "source_action";
     requiresWorker = true;
   } else if (evidence.partialRefundEvidence) {
-    // One composite leg has been refunded while another remains unsettled.
-    // This is neither a completed refund nor a fresh route: the remaining
-    // money needs bounded evidence work before anything may be retried.
-    status = "recovery_required";
-    progressStage = "routing";
+    // A receipt can be final while its refund set is still incomplete. Keep
+    // new exact-set routes on ordinary bounded evidence recovery; legacy
+    // composite-leg recovery retains its existing presentation.
+    const exactRefundPending = facts.plan.routeLegs.some(
+      (leg) =>
+        leg.refundContract &&
+        !routeLegRefunded(facts.transfers, leg) &&
+        facts.transfers.some(
+          (transfer) =>
+            transfer.routeLegId === leg.routeLegId &&
+            transfer.kind === "refund_credit" &&
+            isCanonicalFinal(transfer),
+        ),
+    );
+    status =
+      exactRefundPending &&
+      !automaticRecoveryRequired &&
+      facts.manualRecovery == null
+        ? "reconcile_required"
+        : "recovery_required";
+    progressStage = exactRefundPending ? "refunding" : "routing";
     requiresWorker = true;
   } else if (facts.consumer.unresolved) {
     const evidenceProgress = progressFromEvidence(

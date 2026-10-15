@@ -7,6 +7,21 @@ import {
   TelegramFundingError,
 } from "./services/telegram-funding.js";
 
+await test("market search includes Hyperliquid without enabling bot trading", () => {
+  assert.equal(
+    telegramBotTradingRouteTestHooks.internalMarketSearchBodySchema.safeParse({
+      venues: ["polymarket", "limitless", "kalshi", "hyperliquid"],
+    }).success,
+    true,
+  );
+  assert.equal(
+    telegramBotTradingRouteTestHooks.internalMarketSearchBodySchema.safeParse({
+      venues: ["unknown"],
+    }).success,
+    false,
+  );
+});
+
 await test("internal market-card route accepts observed search asks", () => {
   const result =
     telegramBotTradingRouteTestHooks.internalMarketCardBodySchema.safeParse({

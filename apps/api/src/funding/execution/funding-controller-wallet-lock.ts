@@ -1,4 +1,4 @@
-import type { PoolClient } from "@hunch/infra";
+import type { Pool, PoolClient } from "@hunch/infra";
 
 import type { WalletExecutionProfile } from "../domain/types.js";
 import { FundingPersistenceError } from "../persistence/funding-operation-repository.js";
@@ -13,16 +13,20 @@ export async function lockFundingControllerWallet(
   userId: string,
   profile: WalletExecutionProfile,
 ): Promise<void> {
-  if (!profile.controllerWalletRef) {
-    throw new FundingPersistenceError(
-      "quote_invalidated",
-      "funding controller wallet is missing",
-    );
-  }
-  const walletType =
-    profile.networkId === "solana:mainnet" ? "solana" : "ethereum";
-  const { rows } = await client.query<{ id: string }>(
-    `
+  await checkFundingControllerWallet(client, userId, profile, true);
+}
+
+/** Cheap ownership preflight before private provider IO. It grants no execution
+ * authority: the same predicate must be locked again at the durable boundary. */
+export async function assertFundingControllerWallet(
+  client: Pick<Pool, "query">,
+  userId: string,
+  profile: WalletExecutionProfile,
+): Promise<void> {
+  await checkFundingControllerWallet(client, userId, profile, false);
+}
+
+export const FUNDING_CONTROLLER_WALLET_SQL = `
       select wallet.id
       from users app_user
       join user_wallets wallet on wallet.user_id = app_user.id
@@ -38,9 +42,25 @@ export async function lockFundingControllerWallet(
               $7,
               wallet.wallet_address,
               $8
-            )
-      for update of app_user, wallet
-    `,
+            )`;
+
+async function checkFundingControllerWallet(
+  client: Pick<Pool, "query">,
+  userId: string,
+  profile: WalletExecutionProfile,
+  lock: boolean,
+): Promise<void> {
+  if (!profile.controllerWalletRef) {
+    throw new FundingPersistenceError(
+      "quote_invalidated",
+      "funding controller wallet is missing",
+    );
+  }
+  const walletType =
+    profile.networkId === "solana:mainnet" ? "solana" : "ethereum";
+  const { rows } = await client.query<{ id: string }>(
+    FUNDING_CONTROLLER_WALLET_SQL +
+      (lock ? " for update of app_user, wallet" : ""),
     [
       userId,
       profile.controllerWalletRef,

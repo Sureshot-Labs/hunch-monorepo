@@ -10,6 +10,7 @@ import { createRelayReceiveReceiptDispositionResolver } from "../../funding-prov
 import { decodeCredentialsEncryptionKey } from "../../lib/credentials-encryption.js";
 import {
   runFundingReconciliationBatch,
+  fundingReconciliationBatchLimit,
   type FundingReconciliationBatchOptions,
   type FundingReconciliationBatchResult,
 } from "../reconciliation/funding-reducer.js";
@@ -28,6 +29,7 @@ import {
 import { observeRelayHypercoreDestinationReceipts } from "../../funding-providers/relay/hypercore-destination-observer.js";
 import { isHypercoreFundingNetwork } from "../domain/hypercore-identity.js";
 import { RelayOwnedRefundObserver } from "../reconciliation/relay-owned-refund-observer.js";
+import { pollRelayRefundCanonicalWatch } from "../reconciliation/relay-refund-canonical-watch.js";
 import { runTelegramRouterContinuation } from "../reconciliation/telegram-router-continuation.js";
 import {
   runLimitlessTradeAttemptReconciliationBatch,
@@ -161,7 +163,14 @@ export type FundingReconciliationJobResult =
       Readonly<{
         receiveObservation: Awaited<
           ReturnType<FundingReceiveSessionObserver["pollBatch"]>
-        >;
+        > &
+          Readonly<{
+            classificationRetry: Awaited<
+              ReturnType<
+                FundingReceiveSessionObserver["pollKnownCanonicalRetryBatch"]
+              >
+            >;
+          }>;
         receiveRouting: Awaited<
           ReturnType<FundingReceiveReceiptRouter["runBatch"]>
         >;
@@ -209,6 +218,11 @@ export async function isFundingReconciliationSchemaReady(
         and to_regclass('public.funding_reconciliation_jobs') is not null
         and to_regclass('public.funding_recovery_scan_cursor') is not null
         and to_regclass('public.funding_receive_sessions') is not null
+        and exists (
+          select 1 from pg_attribute
+          where attrelid=to_regclass('public.funding_receive_canonical_events')
+            and attname='classification_lease_token' and not attisdropped
+        )
         and to_regclass('public.telegram_funding_sessions') is not null
         and to_regclass('public.telegram_funding_consents') is not null
         and to_regclass('public.telegram_funding_authorizations') is not null
@@ -462,18 +476,29 @@ export async function runFundingReconciliationJob(
         })
       : null;
   const runReceiveBeforeReconciliation = async () => {
-    const receiveObservation = await new FundingReceiveSessionObserver(
+    const receiveObserver = new FundingReceiveSessionObserver(
       transactionCodec
         ? {
             transactionReferenceCodec: transactionCodec,
             ...(relayReferenceCodec ? { relayReferenceCodec } : {}),
           }
         : {},
-    ).pollBatch(pool, {
+    );
+    const liveReceiveObservation = await receiveObserver.pollBatch(pool, {
       limit: options.limit ?? 25,
       minimumPollIntervalMs: options.receivePollDelayMs ?? 10_000,
       now: options.now,
     });
+    const classificationRetry =
+      await receiveObserver.pollKnownCanonicalRetryBatch(pool, {
+        limit: options.limit ?? 25,
+        retryDelayMs: options.receivePollDelayMs ?? 10_000,
+        now: options.now,
+      });
+    const receiveObservation = {
+      ...liveReceiveObservation,
+      classificationRetry,
+    };
     const receiveRouting = await new FundingReceiveReceiptRouter(
       pool,
       undefined,
@@ -485,6 +510,8 @@ export async function runFundingReconciliationJob(
     const receiveChanged =
       receiveObservation.receiptsRecorded > 0 ||
       receiveObservation.recoveriesRequired > 0 ||
+      classificationRetry.receiptsRecorded > 0 ||
+      classificationRetry.recoveriesRequired > 0 ||
       receiveRouting.operationsCreated > 0 ||
       receiveRouting.receiptsReady > 0 ||
       receiveRouting.recoveriesRequired > 0 ||
@@ -597,6 +624,30 @@ export async function runFundingReconciliationJob(
       : {}),
     ...(postconditionPoll ? { postconditionPoll } : {}),
   };
+  const pollRefundCanonical = async (
+    operationId: string,
+    now: Date,
+    context?: Readonly<{ deadlineMs: number }>,
+  ) => {
+    // Share the existing lease budget; leave half the remaining time for commit
+    // and reduction. No parallel lease, timer, financial queue or new policy.
+    const started = Date.now();
+    const deadlineMs =
+      started +
+      Math.max(
+        0,
+        ((context?.deadlineMs ??
+          started + (options.leaseSeconds ?? 30) * 1000) -
+          started) /
+          2,
+      );
+    return pollRelayRefundCanonicalWatch(pool, {
+      operationId,
+      now,
+      limit: fundingReconciliationBatchLimit(options.limit),
+      deadlineMs,
+    });
+  };
   const pollDestination = async (operationId: string, now: Date) => {
     const [direct, ownedRoute, refund] = await Promise.all([
       directIngressObserver.pollOperation(pool, operationId, now),
@@ -623,6 +674,7 @@ export async function runFundingReconciliationJob(
       recoverStopped: true,
       ...evidencePollers,
       destinationPoll: pollDestination,
+      refundCanonicalPoll: pollRefundCanonical,
     });
   } else {
     if (!codecConfig || !transactionCodec) {
@@ -660,6 +712,7 @@ export async function runFundingReconciliationJob(
       providerPoll: (operationId, now) =>
         driver.pollOperation(pool, operationId, now),
       destinationPoll: pollDestination,
+      refundCanonicalPoll: pollRefundCanonical,
     });
   }
   if (referenceProtection && delegatedDriver) {

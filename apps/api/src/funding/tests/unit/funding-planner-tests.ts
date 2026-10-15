@@ -1083,6 +1083,7 @@ await test("frozen adapters preserve venue topology and accept a new registry en
         expiresAt: "2027-07-24T12:00:00.000Z",
       },
       spendability: {
+        coverage: "provider_locks_and_hunch_holds",
         observedAmount: { asset, raw: "0" },
         lockedRaw: "0",
         reservedRaw: "0",
@@ -1201,6 +1202,62 @@ await test("frozen adapters preserve venue topology and accept a new registry en
   });
   assert.equal(futureVenue.length, 1);
   assert.equal(futureVenue[0]?.venueId, "future_venue");
+  assert.deepEqual(futureVenue[0]?.spendability?.availableAmount, {
+    asset: BASE_USDC,
+    raw: "0",
+  });
+  let snapshot = fact(
+    "future_venue",
+    "future_binding",
+    "spot",
+    BASE_USDC,
+    "fund",
+  );
+  const snapshotAdapter = new FrozenPreparationDestinationAdapter(
+    "future_venue",
+    ["spot"],
+    async () => [snapshot],
+    () => NOW,
+  );
+  const snapshotInput = {
+    accountId: USER_ID,
+    purpose: "fund" as const,
+    marketContextId: null,
+    marketClass: "spot",
+    compatibleVenueBindingOptionIds: null,
+  };
+  const fresh = snapshot;
+  snapshot = {
+    ...fresh,
+    spendability: { ...fresh.spendability, coverage: undefined },
+  };
+  assert.equal(
+    (await snapshotAdapter.listOptions(snapshotInput))[0]?.spendability,
+    null,
+    "ready legacy evidence without provider-lock coverage is not public availability",
+  );
+  snapshot = {
+    ...fresh,
+    preparation: { ...fresh.preparation, status: "unavailable" },
+  };
+  assert.equal(
+    (await snapshotAdapter.listOptions(snapshotInput))[0]?.spendability,
+    null,
+  );
+  snapshot = {
+    ...fresh,
+    spendability: { ...fresh.spendability, expiresAt: NOW.toISOString() },
+  };
+  assert.equal(
+    (await snapshotAdapter.listOptions(snapshotInput))[0]?.spendability,
+    null,
+  );
+  snapshot = fresh;
+  assert.equal(
+    (await snapshotAdapter.listOptions(snapshotInput))[0]?.spendability
+      ?.availableAmount.raw,
+    "0",
+  );
   assert.equal(mutations, 0);
 });
 

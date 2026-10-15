@@ -5,6 +5,8 @@ import type {
 } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
+import { hip4ReadResponseSchema } from "@hunch/shared";
+import { ageHip4Market } from "../services/hip4-mapping.js";
 import {
   hip4AccountResponseSchema,
   hip4AccountExecutionPageSchema,
@@ -38,9 +40,9 @@ export function registerHip4AccountRoutes(
     deps.surface === "owned"
       ? "/wallets/hyperliquid/account"
       : "/markets/hyperliquid/canary/account";
-  for (const kind of ["account", "executions"] as const)
+  for (const kind of ["account", "executions", "market"] as const)
     app.withTypeProvider<ZodTypeProvider>().get(
-      `${basePath}${kind === "executions" ? "/executions" : ""}`,
+      `${basePath}${kind === "account" ? "" : `/${kind}`}`,
       {
         preHandler: deps.authorize,
         schema: {
@@ -54,7 +56,9 @@ export function registerHip4AccountRoutes(
             200:
               kind === "account"
                 ? hip4AccountResponseSchema
-                : hip4AccountExecutionPageSchema,
+                : kind === "market"
+                  ? hip4ReadResponseSchema
+                  : hip4AccountExecutionPageSchema,
             400: z.object({ error: z.string() }),
             401: z.object({ error: z.string() }),
             403: z.object({ error: z.string() }),
@@ -93,6 +97,34 @@ export function registerHip4AccountRoutes(
               revision,
               request.query.refresh === "1",
             );
+          if (kind === "market") {
+            if (!marketId)
+              return reply.code(400).send({ error: "market_id_required" });
+            const market = await deps.service.market(
+              address,
+              readPolicy,
+              marketId,
+            );
+            if (!market)
+              return reply.code(404).send({ error: "hip4_market_unavailable" });
+            return {
+              version: 1 as const,
+              catalogMode: readPolicy.catalogMode,
+              environment: readPolicy.environment,
+              policyRevision: revision,
+              refreshAfterMs: Math.floor(
+                Math.min(
+                  readPolicy.pollMs,
+                  readPolicy.bookMaxAgeMs / 2,
+                  readPolicy.policyCheckMs,
+                ),
+              ),
+              markets: [ageHip4Market(market, Date.now(), readPolicy)],
+              nextOutcome: null,
+              // Account access never grants a public stream subscription.
+              streamTokenIds: [],
+            };
+          }
           try {
             parseHip4ExecutionCursor(
               request.query.cursor,

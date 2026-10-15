@@ -13,9 +13,16 @@ import { venueMetadataRouteSchema } from "./schemas/venue-metadata.js";
 import { accountValueReadRouteSchemas } from "./schemas/account-value.js";
 import { orderReadRouteSchemas } from "./schemas/orders.js";
 import {
+  hip4TradingRouteSchemas,
+  hip4TradingReadRouteSchemas,
+} from "./schemas/hip4-trading.js";
+import {
   fundingActionSigningRouteSchemas,
   fundingOperationReadRouteSchemas,
   fundingOperationWriteRouteSchemas,
+  fundingDestinationsQuerySchema,
+  fundingDestinationsResponseSchema,
+  fundingRouteErrorSchemas,
 } from "./schemas/funding.js";
 
 const app = Fastify();
@@ -28,6 +35,21 @@ await app.register(swagger, {
 app.get("/meta/venues", { schema: venueMetadataRouteSchema }, async () => {
   throw new Error("schema_only");
 });
+app.get(
+  "/funding/destinations",
+  {
+    schema: {
+      querystring: fundingDestinationsQuerySchema,
+      response: {
+        200: fundingDestinationsResponseSchema,
+        ...fundingRouteErrorSchemas,
+      },
+    },
+  },
+  async () => {
+    throw new Error("schema_only");
+  },
+);
 for (const surface of ["public", "canary"] as const)
   registerHip4ReadRoutes(app, {
     surface,
@@ -51,6 +73,9 @@ for (const surface of ["owned", "canary"] as const)
       throw new Error("schema_only");
     },
     service: {
+      market: async () => {
+        throw new Error("schema_only");
+      },
       policy: async () => {
         throw new Error("schema_only");
       },
@@ -86,6 +111,16 @@ for (const [path, schema] of Object.entries({
 }
 for (const [path, schema] of Object.entries(fundingOperationReadRouteSchemas)) {
   app.get(path, { schema }, async () => {
+    throw new Error("schema_only");
+  });
+}
+for (const [path, schema] of Object.entries(hip4TradingRouteSchemas)) {
+  app.post(`/trade/hyperliquid${path}`, { schema }, async () => {
+    throw new Error("schema_only");
+  });
+}
+for (const [path, schema] of Object.entries(hip4TradingReadRouteSchemas)) {
+  app.get(`/trade/hyperliquid${path}`, { schema }, async () => {
     throw new Error("schema_only");
   });
 }

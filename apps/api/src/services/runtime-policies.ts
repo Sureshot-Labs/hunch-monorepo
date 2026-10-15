@@ -14,6 +14,11 @@ import {
 } from "./hip4-account-policy.js";
 import { DEFAULT_SEMANTIC_REVIEW_MAX_PAIRS } from "./market-map-semantic-review.js";
 import {
+  DEFAULT_HIP4_TRADING_POLICY,
+  hip4TradingPolicySchema,
+  type Hip4TradingPolicy,
+} from "./hip4-trading-policy.js";
+import {
   DEFAULT_EMBEDDING_POLICY,
   embeddingPolicyOverrideSchema,
   embeddingPolicySchema,
@@ -102,6 +107,7 @@ export const INTEL_POLICY_KEYS = [
   "social",
   "hip4_read",
   "hip4_account",
+  "hip4_trading",
   "telegram_notifications",
   "venue_lifecycle",
   "market_matching",
@@ -114,6 +120,7 @@ type PolicySource<K extends IntelPolicyKey> = K extends
   | "social"
   | "hip4_read"
   | "hip4_account"
+  | "hip4_trading"
   | "telegram_notifications"
   | "venue_lifecycle"
   | "market_matching"
@@ -703,6 +710,7 @@ type IntelPolicyMap = {
   social: SocialPolicy;
   hip4_read: Hip4ReadPolicy;
   hip4_account: Hip4AccountPolicy;
+  hip4_trading: Hip4TradingPolicy;
   telegram_notifications: TelegramNotificationsPolicyV1;
   venue_lifecycle: VenueLifecyclePolicy;
   market_matching: MarketMatchingPolicy;
@@ -1481,6 +1489,7 @@ const policySchemas = {
   venue_lifecycle: venueLifecyclePolicySchema,
   hip4_read: hip4ReadPolicySchema,
   hip4_account: hip4AccountPolicySchema,
+  hip4_trading: hip4TradingPolicySchema,
   market_matching: marketMatchingPolicySchema,
 } as const;
 
@@ -2109,6 +2118,7 @@ function getDefaults(): IntelPolicyMap {
     venue_lifecycle: DEFAULT_VENUE_LIFECYCLE_POLICY,
     hip4_read: DEFAULT_HIP4_READ_POLICY,
     hip4_account: DEFAULT_HIP4_ACCOUNT_POLICY,
+    hip4_trading: DEFAULT_HIP4_TRADING_POLICY,
     market_matching: DEFAULT_MARKET_MATCHING_POLICY,
   };
 }
@@ -3410,6 +3420,8 @@ function normalizeMerged<K extends IntelPolicyKey>(
       return hip4ReadPolicySchema.parse(merged) as IntelPolicyMap[K];
     case "hip4_account":
       return hip4AccountPolicySchema.parse(merged) as IntelPolicyMap[K];
+    case "hip4_trading":
+      return hip4TradingPolicySchema.parse(merged) as IntelPolicyMap[K];
     default:
       return merged;
   }
@@ -3528,7 +3540,8 @@ function resolveFromRow<K extends IntelPolicyKey>(
       key === "signal_post_copy" ||
       key === "social" ||
       key === "hip4_read" ||
-      key === "hip4_account"
+      key === "hip4_account" ||
+      key === "hip4_trading"
         ? "default"
         : "env") as PolicySource<K>,
       effectiveAt: null,
@@ -3564,7 +3577,8 @@ function resolveFromRow<K extends IntelPolicyKey>(
       key === "signal_post_copy" ||
       key === "social" ||
       key === "hip4_read" ||
-      key === "hip4_account"
+      key === "hip4_account" ||
+      key === "hip4_trading"
         ? "default"
         : "env") as PolicySource<K>,
       effectiveAt,
@@ -3669,6 +3683,10 @@ export async function resolveAllIntelPolicies(
     ),
     social: resolveFromRow("social", byKey.get("social") ?? null),
     hip4_read: resolveFromRow("hip4_read", byKey.get("hip4_read") ?? null),
+    hip4_trading: resolveFromRow(
+      "hip4_trading",
+      byKey.get("hip4_trading") ?? null,
+    ),
     hip4_account: resolveFromRow(
       "hip4_account",
       byKey.get("hip4_account") ?? null,

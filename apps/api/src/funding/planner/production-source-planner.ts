@@ -1758,21 +1758,45 @@ export class ProductionFundingSourcePlanner {
           : {}),
         maximumSlippageBps: input.source.maximumSlippageBps,
       };
-      if (relayRoute.sourceVm === "hypercore") {
+      if (
+        relayRoute.sourceVm === "hypercore" ||
+        relayRoute.destinationVm === "hypercore"
+      ) {
+        // Refund ownership follows the native side of the route. For inbound
+        // funding it is the destination controller, not the EVM source signer.
+        const nativeLocation =
+          relayRoute.sourceVm === "hypercore"
+            ? sourceLocation
+            : input.destination.target.kind === "owned_location"
+              ? input.destination.target.location
+              : null;
+        const nativeProfile =
+          relayRoute.sourceVm === "hypercore"
+            ? profile
+            : nativeLocation
+              ? profileForLocation(this.account, nativeLocation)
+              : null;
+        if (
+          !nativeLocation ||
+          nativeLocation.accountId !== sourceLocation.accountId ||
+          !nativeProfile
+        )
+          return { kind: "rejected", reasonCode: "destination_unavailable" };
         const policy = input.policy;
         const fee = parseUnsignedDecimal(policy.placement.maximumFeeUsd);
+        // Native outbound fees use USDC8; EVM inbound fees use source USDC6.
         // A cap rounds down; fractional units cannot authorize a larger fee.
         const maximumFeeRaw = (
-          (fee.coefficient * 10n ** 8n) /
+          (fee.coefficient * 10n ** BigInt(quoteSourceAmount.asset.decimals)) /
           10n ** BigInt(fee.scale)
         ).toString();
-        quote = await adapter.quoteHypercore({
+        const nativeInput = {
           ...quoteInput,
           resolvedDestination: input.destination,
           nativeRefundLocation: hypercorePerpsRefundLocation({
-            accountId: sourceLocation.accountId,
-            address: profile.address,
-            controllerWalletId: profile.walletId,
+            accountId: nativeLocation.accountId,
+            address: nativeProfile.address,
+            controllerWalletId: nativeProfile.walletId,
           }),
           maximumFeeRaw,
           maximumContractAgeMs: policy.ttl.collectorMs,
@@ -1780,7 +1804,11 @@ export class ProductionFundingSourcePlanner {
             policy.ttl.quoteMs,
             input.maximumQuoteTtlMs ?? policy.ttl.quoteMs,
           ),
-        });
+        };
+        quote =
+          relayRoute.sourceVm === "hypercore"
+            ? await adapter.quoteHypercore(nativeInput)
+            : await adapter.quoteHypercoreInbound(nativeInput);
       } else {
         quote = await adapter.quote(quoteInput);
       }

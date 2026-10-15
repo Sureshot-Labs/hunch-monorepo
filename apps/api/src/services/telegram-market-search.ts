@@ -7,11 +7,14 @@ import {
   type FeedMarketRow,
 } from "../repos/unified-read.js";
 import type { ClusterMarketSummary } from "./clusters.js";
-import { filterVenuesForLifecycleCapability } from "./venue-lifecycle.js";
+import { resolveDiscoveryVenueScope } from "./discovery-venue-scope.js";
+import { buildFeedMarket } from "./feed-market-presentation.js";
+import type { FeedReadContext } from "./feed-read-presentation.js";
 
 export type TelegramMarketSearchResult = {
   closesAt?: string | null;
   volumeUsd?: number | null;
+  volumePeriod?: "total" | "24h";
   eventId: string;
   eventTitle: string | null;
   lastPrice: number | null;
@@ -71,11 +74,17 @@ function finiteNumber(value: unknown): number | null {
 
 function mapTelegramMarketSearchResult(
   row: FeedMarketRow,
+  context: FeedReadContext,
 ): TelegramMarketSearchResult {
+  const hip =
+    row.venue === "hyperliquid" ? buildFeedMarket(row, context) : null;
   return {
     closesAt: (() => {
       const value =
-        row.market_close_time ?? row.market_expiration_time ?? row.end_date;
+        hip?.closeTime ??
+        row.market_close_time ??
+        row.market_expiration_time ??
+        row.end_date;
       const date =
         value instanceof Date
           ? value
@@ -86,16 +95,24 @@ function mapTelegramMarketSearchResult(
         ? date.toISOString()
         : null;
     })(),
-    volumeUsd: finiteNumber(row.volume_display ?? row.volume_total),
+    volumeUsd: hip
+      ? hip.volumeDisplay
+      : finiteNumber(row.volume_display ?? row.volume_total),
+    ...(hip ? { volumePeriod: hip.volumeDisplayPeriod } : {}),
     eventId: row.event_id,
     eventTitle: row.event_title,
-    lastPrice: finiteNumber(row.last_price),
+    lastPrice: hip ? (hip.lastPrice ?? null) : finiteNumber(row.last_price),
     marketId: row.market_uuid,
     marketTitle: row.market_title?.trim() || "Prediction market",
-    noAsk: finiteNumber(row.best_ask_no),
-    outcomes: row.outcomes,
+    noAsk: hip ? hip.top.noAsk : finiteNumber(row.best_ask_no),
+    outcomes:
+      hip && Array.isArray(hip.outcomes)
+        ? JSON.stringify(hip.outcomes)
+        : row.outcomes,
     venue: row.venue,
-    yesAsk: finiteNumber(row.best_ask_yes ?? row.best_ask),
+    yesAsk: hip
+      ? hip.top.yesAsk
+      : finiteNumber(row.best_ask_yes ?? row.best_ask),
   };
 }
 
@@ -325,10 +342,9 @@ export async function searchTelegramMarkets(input: {
 }): Promise<TelegramMarketSearchResult[]> {
   const query = input.query?.trim() ?? "";
   const now = new Date();
-  const lifecycle = await filterVenuesForLifecycleCapability(
+  const lifecycle = await resolveDiscoveryVenueScope(
     input.pool,
     input.venues?.length ? input.venues : null,
-    "discovery",
   );
   if (lifecycle.venues.length === 0) return [];
   const baseInputs = {
@@ -338,6 +354,7 @@ export async function searchTelegramMarkets(input: {
     minLiquidity: 0,
     view: "markets",
     venues: lifecycle.venues,
+    hip4Environment: lifecycle.hip4Environment,
     categories: input.category ? [input.category] : undefined,
     sort: input.sort ?? "trending",
     sortDir: input.sort === "time" ? "asc" : "desc",
@@ -370,6 +387,8 @@ export async function searchTelegramMarkets(input: {
       JSON.stringify({
         query,
         venues: lifecycle.venues,
+        revision: lifecycle.revision,
+        hip4Environment: lifecycle.hip4Environment,
         category: input.category,
         sort: baseInputs.sort,
       }),
@@ -382,7 +401,13 @@ export async function searchTelegramMarkets(input: {
   }
   const results = rows
     .slice(0, TELEGRAM_SEARCH_SESSION_RESULT_LIMIT)
-    .map(mapTelegramMarketSearchResult);
+    // Re-age after cache retrieval: a cached row is not a fresh observation.
+    .map((row) =>
+      mapTelegramMarketSearchResult(row, {
+        hip4Policy: lifecycle.hip4Policy,
+        now: Date.now(),
+      }),
+    );
   return query && !input.category
     ? enrichTelegramMarketSearchResults({
         results,

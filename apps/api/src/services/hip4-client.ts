@@ -6,12 +6,14 @@ import {
 import { hip4AccountAddressSchema } from "../schemas/hip4-account.js";
 
 export type Hip4AccountInfoRequest =
+  | { type: "orderStatus"; user: string; oid: number | string }
   | { type: "userFills"; user: string; aggregateByTime: false }
   | {
       type:
         | "userRole"
         | "userAbstraction"
         | "spotClearinghouseState"
+        | "userFees"
         | "frontendOpenOrders";
       user: string;
     }
@@ -41,7 +43,9 @@ export function createHip4AccountClient(
         "userRole",
         "userAbstraction",
         "spotClearinghouseState",
+        "userFees",
         "frontendOpenOrders",
+        "orderStatus",
         "userFillsByTime",
         "userFills",
         "userNonFundingLedgerUpdates",
@@ -49,6 +53,14 @@ export function createHip4AccountClient(
     )
       throw new Hip4ReadError("invalid_response");
     const user = hip4AccountAddressSchema.parse(request.user);
+    if (
+      request.type === "orderStatus" &&
+      !(typeof request.oid === "number"
+        ? Number.isSafeInteger(request.oid) && request.oid >= 0
+        : typeof request.oid === "string" &&
+          /^0x[0-9a-fA-F]{32}$/u.test(request.oid))
+    )
+      throw new Hip4ReadError("invalid_response");
     if (
       "startTime" in request &&
       (!Number.isSafeInteger(request.startTime) ||
@@ -65,7 +77,8 @@ export function createHip4AccountClient(
     const weight =
       request.type === "userRole"
         ? 60
-        : request.type === "spotClearinghouseState"
+        : request.type === "spotClearinghouseState" ||
+            request.type === "orderStatus"
           ? 2
           : request.type === "userFillsByTime" || request.type === "userFills"
             ? 120

@@ -1,3 +1,4 @@
+import { HUNCH_VENUES } from "@hunch/shared";
 import {
   escapeTelegramMarkdownV2,
   formatTelegramBoldMarkdownV2,
@@ -35,6 +36,7 @@ type SearchRedis = {
 export type SignalBotMarketSearchVenueOption = {
   closesAt?: string | null;
   volumeUsd?: number | null;
+  volumePeriod?: "total" | "24h";
   eventId: string;
   eventTitle: string | null;
   lastPrice: number | null;
@@ -129,7 +131,7 @@ export async function readSignalBotMarketSearchSession(input: {
           : "trending",
       venues: Array.isArray(parsed.venues)
         ? parsed.venues.filter((venue) =>
-            ["polymarket", "limitless", "kalshi"].includes(venue),
+            (HUNCH_VENUES as readonly string[]).includes(venue),
           )
         : [],
       chatId: parsed.chatId,
@@ -162,11 +164,12 @@ export function telegramSearchSortDetail(
   now = Date.now(),
 ): string {
   if (sort === "totalvol") {
+    const label = result.volumePeriod === "24h" ? "24h Vol" : "Vol";
     return result.volumeUsd != null &&
       Number.isFinite(result.volumeUsd) &&
       result.volumeUsd >= 0
-      ? ` · Vol $${new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(result.volumeUsd)}`
-      : " · Vol —";
+      ? ` · ${label} $${new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(result.volumeUsd)}`
+      : ` · ${label} —`;
   }
   if (sort === "time") {
     const remaining = result.closesAt ? Date.parse(result.closesAt) - now : NaN;

@@ -2,6 +2,13 @@ import type { Pool } from "@hunch/infra";
 import { hip4Identity, parseHip4Coin } from "@hunch/shared";
 import { hip4AccountExecutionSchema } from "../schemas/hip4-account.js";
 import { hip4OpenOrderSchema } from "../services/hip4-open-orders.js";
+import { nativeHip4OrderReadSchema } from "../schemas/orders.js";
+import {
+  HIP4_NATIVE_ORDER_READ_JOINS,
+  HIP4_NATIVE_ORDER_FILLED_SIZE,
+  HIP4_NATIVE_ORDER_READ_FACTS,
+  HIP4_OBSERVED_ORDER_NOT_NATIVE,
+} from "./hip4-native-order-read.js";
 import type { PgParams } from "../server-types.js";
 import {
   polymarketOrderBindingJoinSql,
@@ -19,6 +26,7 @@ export type UnifiedOrderRow = {
   id: string;
   kind: "order" | "swap" | "execution" | "observed_order";
   observed_execution?: unknown;
+  native_order?: unknown;
   venue: string;
   wallet_address: string | null;
   venue_order_id: string | null;
@@ -189,7 +197,12 @@ const buildWhereClause = (
   alias: string,
   filterParams: FilterParams,
   includeSigner: boolean,
-  columns: { market?: string; token?: string; createdAt?: string } = {},
+  columns: {
+    market?: string;
+    token?: string;
+    createdAt?: string;
+    status?: string;
+  } = {},
 ): string => {
   const normalizedWalletExpr = `case when ${alias}.wallet_address like '0x%' then lower(${alias}.wallet_address) else ${alias}.wallet_address end`;
   const normalizedSignerExpr = `case when ${alias}.signer_address like '0x%' then lower(${alias}.signer_address) else ${alias}.signer_address end`;
@@ -208,7 +221,7 @@ const buildWhereClause = (
 
   if (filterParams.statusIndex) {
     conditions.push(
-      `${alias}.status = ANY($${filterParams.statusIndex}::text[])`,
+      `${columns.status ?? `${alias}.status`} = ANY($${filterParams.statusIndex}::text[])`,
     );
   }
 
@@ -368,6 +381,11 @@ export const mapUnifiedOrder = (row: UnifiedOrderRow) => {
     inputDecimals: toNumber(row.input_decimals),
     outputDecimals: toNumber(row.output_decimals),
     txSignature: row.tx_signature,
+    ...(row.native_order == null
+      ? {}
+      : {
+          nativeOrder: nativeHip4OrderReadSchema.parse(row.native_order),
+        }),
   };
 };
 
@@ -387,7 +405,7 @@ export async function fetchUnifiedMarketIdsByEventId(
   return rows.map((row) => row.id);
 }
 
-const buildOrdersSelect = (whereClause: string): string => `
+const orderReadProjection = (native = false): string => `
   select
     o.id::text as id,
     'order'::text as kind,
@@ -400,8 +418,8 @@ const buildOrdersSelect = (whereClause: string): string => `
     o.order_type,
     o.price::text as price,
     o.size::text as size,
-    o.status,
-    o.filled_size::text as filled_size,
+    ${native ? "o.read_status as status" : "o.status"},
+    ${native ? "o.observed_filled_size" : "o.filled_size"}::text as filled_size,
     o.average_fill_price::text as average_fill_price,
     o.error_message,
     o.expires_at,
@@ -417,7 +435,11 @@ const buildOrdersSelect = (whereClause: string): string => `
     null::text as input_decimals,
     null::text as output_decimals,
     null::text as tx_signature,
-    null::jsonb as observed_execution
+    null::jsonb as observed_execution,
+    ${native ? "o.native_order" : "null::jsonb as native_order"}
+`;
+const buildOrdersSelect = (whereClause: string): string => `
+  ${orderReadProjection()}
   from (
     select
       o.*,
@@ -437,6 +459,19 @@ const buildOrdersSelect = (whereClause: string): string => `
     ${whereClause}
   ) o
   where o.row_rank = 1
+`;
+
+const buildNativeOrdersSelect = (whereClause: string): string => `
+  ${orderReadProjection(true)}
+  from (
+    select o.*,native_action.canonical_market_id as market_id,
+      case when right(native_action.token_id,1)='0' then 'YES' else 'NO' end as resolved_outcome_side,
+      native_state.display_status as read_status,
+      ${HIP4_NATIVE_ORDER_FILLED_SIZE} as observed_filled_size,
+      ${HIP4_NATIVE_ORDER_READ_FACTS} as native_order
+    from orders o ${HIP4_NATIVE_ORDER_READ_JOINS}
+    ${whereClause} and o.venue='hyperliquid' and native_action.environment='mainnet'
+  ) o
 `;
 
 const buildExecutionsSelect = (whereClause: string): string => `
@@ -469,7 +504,8 @@ const buildExecutionsSelect = (whereClause: string): string => `
     e.input_decimals::text as input_decimals,
     e.output_decimals::text as output_decimals,
     e.tx_signature,
-    null::jsonb as observed_execution
+    null::jsonb as observed_execution,
+    null::jsonb as native_order
   from executions e
   ${whereClause}
 `;
@@ -493,6 +529,7 @@ const buildObservedHip4Select = (
         and wallet_row.wallet_type='ethereum'
         and lower(wallet_row.wallet_address)=e.account_address)`,
   ];
+  if (openOrders) conditions.push(HIP4_OBSERVED_ORDER_NOT_NATIVE);
   if (filters.venueIndex)
     conditions.push(`$${filters.venueIndex}::text='hyperliquid'`);
   if (filters.statusIndex)
@@ -583,7 +620,8 @@ const buildObservedHip4Select = (
     null::text as input_mint, null::text as output_mint,
     null::text as amount_in, null::text as amount_out,
     null::text as input_decimals, null::text as output_decimals,
-    null::text as tx_signature, ${openOrders ? "e.execution - 'id'" : "e.execution"} as observed_execution
+    null::text as tx_signature, ${openOrders ? "e.execution - 'id'" : "e.execution"} as observed_execution,
+    null::jsonb as native_order
     from ${source}`;
 };
 
@@ -593,6 +631,10 @@ export async function fetchUnifiedOrders(
 ): Promise<{ rows: UnifiedOrderRow[]; total: number }> {
   const includeOrders =
     inputs.venue !== "hyperliquid" &&
+    inputs.type !== "swap" &&
+    inputs.type !== "execution";
+  const includeNativeOrders =
+    (!inputs.venue || inputs.venue === "hyperliquid") &&
     inputs.type !== "swap" &&
     inputs.type !== "execution";
   const includeSwaps =
@@ -613,16 +655,22 @@ export async function fetchUnifiedOrders(
         : inputs.status === "observed")) &&
     !!inputs.walletAddresses?.length;
 
-  if (!includeOrders && !includeSwaps && !includeObserved) {
+  if (
+    !includeOrders &&
+    !includeNativeOrders &&
+    !includeSwaps &&
+    !includeObserved
+  ) {
     return { rows: [], total: 0 };
   }
 
   const filterParams = buildFilterParams(inputs);
-  const baseOrderWhere = buildWhereClause("o", filterParams, true, {
-    market: ORDER_MARKET_ID_SQL,
-    token: "o.token_id",
-    createdAt: "coalesce(o.posted_at, o.last_update)",
-  });
+  const baseOrderWhere =
+    buildWhereClause("o", filterParams, true, {
+      market: ORDER_MARKET_ID_SQL,
+      token: "o.token_id",
+      createdAt: "coalesce(o.posted_at, o.last_update)",
+    }) + " and o.venue is distinct from 'hyperliquid'";
   const orderWhere = inputs.openOnly
     ? `${baseOrderWhere} and o.cancelled_at is null and (o.size is null or o.filled_size is null or o.filled_size < o.size) and lower(coalesce(o.status, '')) in ('pending', 'submitted', 'live', 'partially_filled', 'delayed', 'unconfirmed', 'open') and not (lower(coalesce(o.venue, '')) = 'limitless' and upper(coalesce(o.order_type, '')) = 'FOK')`
     : baseOrderWhere;
@@ -633,6 +681,22 @@ export async function fetchUnifiedOrders(
 
   const selects: string[] = [];
   if (includeOrders) selects.push(buildOrdersSelect(orderWhere));
+  if (includeNativeOrders) {
+    const nativeWhere = buildWhereClause("o", filterParams, true, {
+      market: "native_action.canonical_market_id",
+      token: "o.token_id",
+      createdAt: "coalesce(o.posted_at,o.last_update)",
+      status: "native_state.display_status",
+    });
+    selects.push(
+      buildNativeOrdersSelect(
+        nativeWhere +
+          (inputs.openOnly
+            ? " and not native_terminal.terminal_confirmed and native_submission.state<>'rejected' and lower(coalesce(native_state.display_status,'')) in ('pending','submitted','live','partially_filled','delayed','unconfirmed','open')"
+            : ""),
+      ),
+    );
+  }
   if (includeSwaps) selects.push(buildExecutionsSelect(execWhere));
   const countSelects = [...selects];
   if (includeObserved)
@@ -689,21 +753,38 @@ export async function fetchUnifiedOrderById(
   inputs: FilterInputs & { id: string },
 ): Promise<UnifiedOrderRow | null> {
   const filterParams = buildFilterParams(inputs);
-  const orderWhere = buildWhereClause("o", filterParams, true, {
-    market: ORDER_MARKET_ID_SQL,
-    token: "o.token_id",
-    createdAt: "coalesce(o.posted_at, o.last_update)",
-  });
+  const orderWhere =
+    buildWhereClause("o", filterParams, true, {
+      market: ORDER_MARKET_ID_SQL,
+      token: "o.token_id",
+      createdAt: "coalesce(o.posted_at, o.last_update)",
+    }) + " and o.venue is distinct from 'hyperliquid'";
   const execWhere = buildWhereClause("e", filterParams, false);
+  const nativeWhere = buildWhereClause("o", filterParams, true, {
+    market: "native_action.canonical_market_id",
+    token: "o.token_id",
+    createdAt: "coalesce(o.posted_at,o.last_update)",
+    status: "native_state.display_status",
+  });
 
   const params = [...filterParams.params];
   const idIndex = params.length + 1;
   params.push(inputs.id);
+  // Observed IDs share this endpoint but are not UUIDs. Do not cast those, or
+  // cast the indexed column to text and scan the owner's full native history.
+  const nativeIdWhere =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
+      inputs.id,
+    )
+      ? `o.id=$${idIndex}::uuid`
+      : "false";
 
   const { rows } = await pool.query<UnifiedOrderRow>(
     `
       with combined as (
         ${buildOrdersSelect(orderWhere)} and o.id::text = $${idIndex}
+        union all
+        ${buildNativeOrdersSelect(`${nativeWhere} and ${nativeIdWhere}`)}
         union all
         ${buildExecutionsSelect(execWhere)} and e.id::text = $${idIndex}
         ${inputs.includeObservedHip4 && filterParams.walletIndex ? `union all ${buildObservedHip4Select(filterParams)} and ('hyperliquid:' || (e.execution->>'id'))=$${idIndex}` : ""}

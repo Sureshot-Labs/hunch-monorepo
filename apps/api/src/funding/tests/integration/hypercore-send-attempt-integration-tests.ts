@@ -40,6 +40,16 @@ import { DEFAULT_FUNDING_INTENT_POLICY } from "../../policies/funding-policy-v2.
 import { loadFundingLifecycleFactsForOperationInTransaction } from "../../lifecycle/funding-lifecycle-facts-repository.js";
 import { deriveFundingLifecycle } from "../../lifecycle/funding-lifecycle-projector.js";
 import { reduceFundingOperationInTransaction } from "../../reconciliation/funding-reducer.js";
+import {
+  DEFAULT_VENUE_LIFECYCLE_POLICY,
+  venueHasLifecycleCapability,
+} from "@hunch/shared";
+import { hip4OrderTestFixture } from "../../../hip4-order-test-fixture.js";
+import { persistHip4OrderPreparationInTransaction } from "../../../repos/hip4-order-preparation.js";
+import { admitHip4OrderActionInTransaction } from "../../../repos/hip4-order-admission.js";
+import { prepareHip4TradeSigning } from "../../../services/hip4-trade-signing.js";
+import { recordHip4SubmissionReplyInTransaction } from "../../../services/hip4-order-submission.js";
+import { HYPERCORE_MAINNET_USDC } from "../../domain/hypercore-identity.js";
 
 const pool = await createIntegrationTestPool({
   max: 1,
@@ -188,10 +198,13 @@ try {
       signature,
     };
   };
-  const check = (availableRaw = "1000000000") =>
+  const check = (
+    availableRaw = "1000000000",
+    observedAt = new Date().toISOString(),
+  ) =>
     nativeSendCapacityCheck(async () => ({
       availableRaw,
-      observedAt: new Date().toISOString(),
+      observedAt,
       expiresAt: new Date(Date.now() + 60000).toISOString(),
     }));
   const state = async (attemptId: string) =>
@@ -214,6 +227,201 @@ try {
     await client.query("rollback to savepoint send_scenario");
     console.log(`PASS ${name}`);
   }
+
+  await scenario(
+    "HIP BUY and native send share physical cash holds; definitive rejection restores send capacity",
+    async () => {
+      const lifecycle = structuredClone(DEFAULT_VENUE_LIFECYCLE_POLICY);
+      lifecycle.venues.hyperliquid = {
+        lifecycle: "active",
+        indexerMode: "off",
+      };
+      await client.query(
+        "insert into runtime_policies(policy_key,effective_at,payload) values('venue_lifecycle',clock_timestamp(),$1)",
+        [lifecycle],
+      );
+      const orderFixture = await hip4OrderTestFixture(client, wallet.address, {
+        userId,
+        profile,
+      });
+      orderFixture.nonce -= 5000;
+      const order = await persistHip4OrderPreparationInTransaction(
+        client,
+        orderFixture,
+      );
+      const signing = prepareHip4TradeSigning(order.envelope).typedData;
+      const orderSignature = await wallet.signTypedData(
+        signing.domain,
+        signing.types,
+        signing.message,
+      );
+      const allowImplementation: typeof venueHasLifecycleCapability = (
+        current,
+        _venue,
+        capability,
+      ) =>
+        venueHasLifecycleCapability(
+          {
+            ...current,
+            venues: {
+              ...current.venues,
+              polymarket: current.venues.hyperliquid,
+            },
+          },
+          "polymarket",
+          capability,
+        );
+      const orderInput = {
+        userId,
+        actionId: order.actionId,
+        actor: "web_app",
+        signature: orderSignature,
+        context: {
+          profile,
+          policy: orderFixture.policy,
+          feeCapRaw: orderFixture.feeCapRaw,
+          capacity: {
+            assetId: HYPERCORE_MAINNET_USDC.assetId,
+            decimals: 8,
+            availableRaw: "1000000000",
+            observedAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 60000).toISOString(),
+          },
+        },
+      };
+      await client.query("savepoint cash_rejection");
+      await assert.rejects(
+        () =>
+          admitHip4OrderActionInTransaction(
+            client,
+            orderInput,
+            allowImplementation,
+          ),
+        /capacity_reserved/u,
+      );
+      await client.query("rollback to savepoint cash_rejection");
+      await admitHip4OrderActionInTransaction(
+        client,
+        {
+          ...orderInput,
+          context: {
+            ...orderInput.context,
+            capacity: {
+              ...orderInput.context.capacity,
+              availableRaw: "1140000000",
+            },
+          },
+        },
+        allowImplementation,
+      );
+      const sendInput = await start();
+      await client.query("savepoint send_cash_rejection");
+      await assert.rejects(
+        () =>
+          admitNativeFundingSendInTransaction(
+            client,
+            sendInput,
+            policy,
+            check("1000000000"),
+            codec,
+          ),
+        /no longer covers/u,
+      );
+      await client.query("rollback to savepoint send_cash_rejection");
+      for (const terminal of [false, true]) {
+        await client.query("savepoint terminal_order_send_capacity");
+        const barrierAt = Date.now() - 2;
+        await client.query(
+          "update hip4_order_submissions set order_observation=$2::jsonb where action_id=$1",
+          [
+            order.actionId,
+            {
+              status: terminal ? "canceled" : "open",
+              terminal,
+              balanceBarrier: {
+                state: terminal ? "terminal_observed" : "accepted_observed",
+                responseAt: barrierAt,
+              },
+            },
+          ],
+        );
+        await client.query("savepoint old_native_capacity");
+        await assert.rejects(
+          () =>
+            admitNativeFundingSendInTransaction(
+              client,
+              sendInput,
+              policy,
+              check("1000000000", new Date(barrierAt).toISOString()),
+              codec,
+            ),
+          /no longer covers/u,
+        );
+        await client.query("rollback to savepoint old_native_capacity");
+        if (!terminal) {
+          await client.query("savepoint open_fee_capacity");
+          await assert.rejects(
+            () =>
+              admitNativeFundingSendInTransaction(
+                client,
+                sendInput,
+                policy,
+                check("1000000000", new Date(barrierAt + 1).toISOString()),
+                codec,
+              ),
+            /no longer covers/u,
+          );
+          await client.query("rollback to savepoint open_fee_capacity");
+        }
+        assert.equal(
+          (
+            await admitNativeFundingSendInTransaction(
+              client,
+              sendInput,
+              policy,
+              check(
+                terminal ? "1000000000" : "1001000000",
+                new Date(barrierAt + 1).toISOString(),
+              ),
+              codec,
+            )
+          ).admitted,
+          true,
+          "native funding send shares open/terminal inclusion and retains the frozen BUY fee reserve",
+        );
+        await client.query(
+          "rollback to savepoint terminal_order_send_capacity",
+        );
+      }
+      await recordHip4SubmissionReplyInTransaction(client, {
+        userId,
+        actionId: order.actionId,
+        body: {
+          status: "ok",
+          response: {
+            type: "order",
+            data: {
+              statuses: [
+                { error: "Order has insufficient spot balance to trade" },
+              ],
+            },
+          },
+        },
+      });
+      assert.equal(
+        (
+          await admitNativeFundingSendInTransaction(
+            client,
+            sendInput,
+            policy,
+            check("1000000000"),
+            codec,
+          )
+        ).admitted,
+        true,
+      );
+    },
+  );
 
   await scenario(
     "journal recovery fences an unadmitted send; a delayed signed POST cannot acquire authority",

@@ -28,6 +28,11 @@ import {
   RelayReconciliationDriver,
 } from "./reconciliation.js";
 import { verifyRelayWebhook } from "./webhook.js";
+import { relayDestinationReferenceIdentity } from "./destination-reference.js";
+import {
+  assertRelayStatusLookupPlans,
+  assertRelayStatusOperationFence,
+} from "./reconciliation-locks-pg.js";
 
 const route = RELAY_ROUTE_SPECS["polygon-pol-to-base-eth"];
 if (!route) throw new Error("Relay integration route missing");
@@ -268,9 +273,11 @@ try {
   assert.equal(sparsePoll.requestsPolled, 2);
   const segmentAfterSparseStatus = await pool.query<{
     fingerprints: unknown;
+    destinations: unknown;
   }>(
     `select support_metadata -> 'relayTransactionReferenceFingerprints'
-              as fingerprints
+              as fingerprints,
+            support_metadata -> 'relaySuccessfulDestinationReferenceHashesV1' as destinations
        from funding_operation_segments
       where id = $1::uuid`,
     [segmentId],
@@ -281,6 +288,11 @@ try {
       referenceCodec.fingerprint("origin-reference-not-persisted"),
     ].sort(),
   ]);
+  assert.deepEqual(
+    segmentAfterSparseStatus.rows[0]?.destinations,
+    [relayDestinationReferenceIdentity("destination-reference-not-persisted")],
+    "sparse success and refunded sibling status preserve only successful destination identities, not source/refund references",
+  );
 
   const requests = await pool.query<{
     request_kind: string;
@@ -414,8 +426,97 @@ try {
     status: "in_progress",
     stage: "committed",
   });
+
+  // A concurrent operation owner can still lock child rows while the status
+  // writer waits. The writer must read the newer status AFTER that wait.
+  const newerTimestamp = webhookTimestamp + 100;
+  const writeNewerStatus = async (
+    db: Pick<typeof pool, "query">,
+    timestamp = newerTimestamp,
+  ) => {
+    await db.query(
+      `update funding_provider_requests
+          set raw_status='refund', support_metadata=support_metadata ||
+              jsonb_build_object('providerUpdatedAt',$2::bigint)
+        where segment_id=$1`,
+      [segmentId, timestamp],
+    );
+    await db.query(
+      `update funding_operation_segments
+          set raw_status='refund', support_metadata=support_metadata ||
+              jsonb_build_object('providerUpdatedAt',$2::bigint)
+        where id=$1`,
+      [segmentId, timestamp],
+    );
+  };
+  await assertRelayStatusOperationFence(pool, {
+    operationId,
+    segmentId,
+    run: () => driver.pollOperation(pool, committedOperationId),
+    whileBlocked: writeNewerStatus,
+  });
+  const statuses = await pool.query<{ raw_status: string }>(
+    "select raw_status from funding_provider_requests where segment_id=$1",
+    [segmentId],
+  );
+  assert.ok(statuses.rows.every((row) => row.raw_status === "refund"));
+  const blockedWebhook = await assertRelayStatusOperationFence(pool, {
+    operationId,
+    segmentId,
+    run: () =>
+      ingestVerifiedRelayWebhook(pool, {
+        webhook: {
+          ...webhook,
+          deliveryFingerprint: hash("8"),
+          payload: {
+            ...webhook.payload,
+            data: { ...webhook.payload.data, updatedAt: newerTimestamp + 1 },
+          },
+        },
+        referenceCodec,
+      }),
+    // The incoming delivery is initially NEW, and becomes stale only while
+    // waiting for the operation. Using the discovery snapshot would lose this.
+    whileBlocked: (db) => writeNewerStatus(db, newerTimestamp + 2),
+  });
+  assert.equal(blockedWebhook.stale, true);
+  assert.equal(blockedWebhook.replayed, false);
+  assert.equal(
+    (
+      await pool.query(
+        "select raw_status from funding_operation_segments where id=$1",
+        [segmentId],
+      )
+    ).rows[0].raw_status,
+    "refund",
+  );
+  // A fresh delivery after contention is accepted, without manual recovery or
+  // replacing the operation, request identity, or immutable source plan.
+  const recoveredWebhook = await ingestVerifiedRelayWebhook(pool, {
+    webhook: {
+      ...webhook,
+      deliveryFingerprint: hash("9"),
+      payload: {
+        ...webhook.payload,
+        data: { ...webhook.payload.data, updatedAt: newerTimestamp + 3 },
+      },
+    },
+    referenceCodec,
+  });
+  assert.equal(recoveredWebhook.stale, false);
+  assert.equal(recoveredWebhook.replayed, false);
+  assert.equal(
+    (
+      await pool.query(
+        "select raw_status from funding_operation_segments where id=$1",
+        [segmentId],
+      )
+    ).rows[0].raw_status,
+    "success",
+  );
+  await assertRelayStatusLookupPlans(pool);
   console.log(
-    "[relay-reconciliation-integration-tests] concurrent polling, child discovery, encrypted correlation, replay/stale webhook suppression, and observation-only terminality ok",
+    "[relay-reconciliation-integration-tests] concurrent polling, child discovery, encrypted correlation, operation-first serialization, replay/stale webhook suppression, recovery, indexed lookup and observation-only terminality ok",
   );
 } finally {
   const cleanupClient = await pool.connect();

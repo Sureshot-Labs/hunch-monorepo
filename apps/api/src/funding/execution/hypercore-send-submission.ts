@@ -22,6 +22,10 @@ import {
   FundingPersistenceError,
 } from "../persistence/funding-operation-repository.js";
 import { readHip4Policy } from "../../services/hip4-repository.js";
+import {
+  postHyperliquidExchangeOnce,
+  type HyperliquidExchangeTransport,
+} from "../../services/hyperliquid-exchange.js";
 
 type SendRequest = Extract<
   Awaited<ReturnType<typeof admitNativeFundingSendInTransaction>>,
@@ -56,62 +60,16 @@ async function observeNativeSend(
  * ACK is a transport fact only, never a canonical source-debit receipt. */
 export async function postNativeFundingSendOnce(
   request: SendRequest,
-  options: {
-    timeoutMs: number;
-    responseMaxBytes: number;
-    fetcher?: typeof fetch;
-  },
+  options: HyperliquidExchangeTransport,
 ): Promise<"acknowledged" | "unknown"> {
-  try {
-    if (
-      !Number.isSafeInteger(options.timeoutMs) ||
-      options.timeoutMs <= 0 ||
-      !Number.isSafeInteger(options.responseMaxBytes) ||
-      options.responseMaxBytes <= 0
-    )
-      return "unknown";
-    const response = await (options.fetcher ?? fetch)(
-      "https://api.hyperliquid.xyz/exchange",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request),
-        redirect: "error",
-        signal: AbortSignal.timeout(options.timeoutMs),
-      },
-    );
-    if (!response.ok) {
-      await response.body?.cancel();
-      return "unknown";
-    }
-    const reader = response.body?.getReader();
-    if (!reader) return "unknown";
-    let text = "",
-      bytes = 0;
-    const decoder = new TextDecoder();
-    try {
-      for (;;) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        bytes += chunk.value.byteLength;
-        if (bytes > options.responseMaxBytes) return "unknown";
-        text += decoder.decode(chunk.value, { stream: true });
-      }
-      text += decoder.decode();
-      const value: unknown = JSON.parse(text);
-      return value &&
-        typeof value === "object" &&
-        "status" in value &&
-        value.status === "ok"
-        ? "acknowledged"
-        : "unknown";
-    } finally {
-      await reader.cancel().catch(() => undefined);
-      reader.releaseLock();
-    }
-  } catch {
-    return "unknown";
-  }
+  const result = await postHyperliquidExchangeOnce("mainnet", request, options);
+  const value = result.kind === "response" ? result.body : null;
+  return value &&
+    typeof value === "object" &&
+    "status" in value &&
+    value.status === "ok"
+    ? "acknowledged"
+    : "unknown";
 }
 
 /** Internal execution seam; not exposed as a new API or delegated worker.

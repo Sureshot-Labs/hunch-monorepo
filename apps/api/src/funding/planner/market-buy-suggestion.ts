@@ -9,6 +9,9 @@ import { maximumInternalFundingCapacityRaw } from "./composite-source-options.js
 import { unavailableSessionSourceLocationIds } from "./session-source-account.js";
 import { effectiveFundingEconomicsLimits } from "./source-options.js";
 import { checkLimitlessBuyBudget } from "./limitless-buy-budget.js";
+import { checkHip4BuyBudget } from "./hip4-buy-budget.js";
+import { isHypercoreMainnetUsdc } from "../domain/hypercore-identity.js";
+import { sameAsset } from "../domain/asset-identity.js";
 
 /** Advisory only. Reuse frozen quotes; never discover, reserve, or execute funds here.
  * Undefined means no applicable smaller Buy; null means the check was unavailable.
@@ -20,9 +23,11 @@ export async function suggestSmallerMarketBuy(
   policy: FundingRuntimePolicy,
   findMax = findMaxPolymarketMarketBuyUsdForFunds,
   checkExactInput = checkLimitlessBuyBudget,
+  checkNativeInput = checkHip4BuyBudget,
 ): Promise<IntentLiquidityProjection["suggestedMarketBuy"] | null> {
   const { request, projection, destination } = snapshot;
   const original = request.marketBuyAmountUsdCents;
+  const native = request.consumerIntent?.venueId === "hyperliquid";
   if (
     !Number.isSafeInteger(original) ||
     !original ||
@@ -33,7 +38,9 @@ export async function suggestSmallerMarketBuy(
     request.marketBuySlippageBps > 10_000 ||
     request.purpose !== "trade_shortfall" ||
     !request.consumerIntent ||
-    !["polymarket", "limitless"].includes(request.consumerIntent.venueId) ||
+    !["polymarket", "limitless", "hyperliquid"].includes(
+      request.consumerIntent.venueId,
+    ) ||
     request.consumerIntent.side !== "BUY" ||
     projection.venueId !== request.consumerIntent.venueId ||
     projection.completeness !== "complete" ||
@@ -51,11 +58,27 @@ export async function suggestSmallerMarketBuy(
     projection.sourceOptions.some((source) => source.selectable) ||
     destination?.target.kind !== "owned_location" ||
     !request.marketContextId ||
-    projection.collateralAsset.decimals !== 6
+    (native
+      ? !isHypercoreMainnetUsdc(projection.collateralAsset)
+      : projection.collateralAsset.decimals !== 6)
   )
     return undefined;
 
   const consumerIntent = request.consumerIntent;
+  if (
+    native &&
+    (!request.controllerWalletRef ||
+      destination.option.controllerWalletId !==
+        destination.venueBinding.controllerWalletId ||
+      !account.ownership?.wallets.some(
+        (wallet) =>
+          wallet.walletId === destination.venueBinding.controllerWalletId &&
+          wallet.controllerWalletRef === request.controllerWalletRef,
+      ) ||
+      !sameAsset(consumerIntent.spend.asset, projection.collateralAsset) ||
+      !sameAsset(destination.target.location.asset, projection.collateralAsset))
+  )
+    return undefined;
   const exactInput = consumerIntent.venueId === "limitless";
   // Do not infer exact-input economics from a venue name alone: the bound
   // consumer debit must equal the original Limitless market BUY input.
@@ -73,6 +96,8 @@ export async function suggestSmallerMarketBuy(
   );
   if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) return null;
   const destinationLocationId = destination.target.location.locationId;
+  const destinationAccountId = destination.target.location.accountId;
+  const slippageBps = request.marketBuySlippageBps;
   const capacityFor = (feeReferenceRaw: string) =>
     maximumInternalFundingCapacityRaw({
       candidates: snapshot.sources,
@@ -97,7 +122,7 @@ export async function suggestSmallerMarketBuy(
     });
   const available = BigInt(projection.availableNowRaw);
   const tokenId = request.marketContextId;
-  const timeoutMs = exactInput ? 3_500 : 1_000;
+  const timeoutMs = exactInput || native ? 3_500 : 1_000;
   const deadlineMs = Math.min(expiresAtMs, Date.now() + timeoutMs);
   // Market-data requests are singleflight/shared with real quotes: do not cancel
   // those consumers, but never delay the funding response for optional advice.
@@ -114,6 +139,42 @@ export async function suggestSmallerMarketBuy(
           if (capacity == null) return null;
           const budget = available + capacity;
           if (budget <= 0n) return undefined;
+          if (native) {
+            const controllerWalletRef = request.controllerWalletRef;
+            if (!controllerWalletRef) return undefined;
+            const cent = 10n ** BigInt(projection.collateralAsset.decimals - 2);
+            const maximumSmallerRaw = BigInt(original - 1) * cent;
+            const checked = await checkNativeInput(pool, {
+              userId: destinationAccountId,
+              controllerWalletRef,
+              marketId: consumerIntent.marketId,
+              tokenId,
+              slippageBps,
+              deadlineMs,
+              budgetRaw:
+                budget < maximumSmallerRaw ? budget : maximumSmallerRaw,
+            });
+            if (checked == null) return checked;
+            const verifiedCapacity = capacityFor(
+              checked.requiredRaw.toString(),
+            );
+            const hintExpiry = Math.min(expiresAtMs, checked.expiresAtMs);
+            if (
+              verifiedCapacity == null ||
+              Date.now() >= deadlineMs ||
+              Date.now() >= hintExpiry
+            )
+              return null;
+            if (available + verifiedCapacity >= checked.requiredRaw)
+              return {
+                originalAmountUsdCents: original,
+                amountUsdCents: Number(checked.amountRaw / cent),
+                expiresAt: new Date(hintExpiry).toISOString(),
+              };
+            if (verifiedCapacity >= capacity) return null;
+            capacity = verifiedCapacity;
+            continue;
+          }
           if (exactInput) {
             // Never advise increasing the amount, even when route fee limits
             // make the original request unavailable for a non-capacity reason.

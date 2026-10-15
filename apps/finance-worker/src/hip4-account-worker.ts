@@ -2,19 +2,31 @@ import { createPgPool, type Pool } from "@hunch/infra";
 import { env } from "./env.js";
 
 type AccountModule = {
-  runHip4AccountReadPass(pool: Pool): Promise<{
+  runHip4FinancialReadPass(
+    pool: Pool,
+    fetcher?: typeof fetch,
+    accountFirst?: boolean,
+  ): Promise<{
     claimed: number;
     updated: number;
     errors: number;
     leaseLost: number;
     budgetExhausted: number;
     nextIntervalSeconds: number;
+    orderObservation?: {
+      claimed: number;
+      saved: number;
+      errors: number;
+      leaseLost: number;
+      budgetExhausted: number;
+    };
   }>;
 };
 let accountModule: Promise<AccountModule> | null = null;
 let accountPool: Pool | null = null;
+let accountFirstNext = true;
 let running: Promise<
-  Awaited<ReturnType<AccountModule["runHip4AccountReadPass"]>>
+  Awaited<ReturnType<AccountModule["runHip4FinancialReadPass"]>>
 > | null = null;
 
 async function runPass() {
@@ -38,7 +50,15 @@ async function runPass() {
       console.error("[hip4-account-observer] database connection error"),
     );
   }
-  return (await accountModule).runHip4AccountReadPass(accountPool);
+  const accountFirst = accountFirstNext;
+  // Flip only for an actual pass, never a scheduler timeout's single-flight
+  // replay. Restart defaults to existing P2 priority, then alternates.
+  accountFirstNext = !accountFirstNext;
+  return (await accountModule).runHip4FinancialReadPass(
+    accountPool,
+    undefined,
+    accountFirst,
+  );
 }
 
 export function runHip4AccountReadJob() {

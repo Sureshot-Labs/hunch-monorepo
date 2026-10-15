@@ -10,13 +10,18 @@ import { ethers } from "ethers";
 import "../../../integration-test-database-guard.js";
 import { pool } from "../../../db.js";
 import type { JsonObject } from "../../domain/types.js";
-import type { FundingPolymarketHandoffCandidate } from "../../persistence/funding-evidence-repository.js";
 import {
+  FundingPolymarketHandoffLookupOverflowError,
+  type FundingPolymarketHandoffCandidate,
+} from "../../persistence/funding-evidence-repository.js";
+import {
+  bindFundingReceiveCanonicalEventSession,
   claimFundingReceiveCanonicalEventAllocation,
   claimObservableFundingReceiveSessions,
   createOrReuseFundingReceiveSession,
   fetchFundingReceiveSessionForUser,
   requestFundingReceiveSessionObservation,
+  quarantineFundingReceiveCanonicalInternalEvent,
 } from "../../persistence/funding-receive-session-repository.js";
 import {
   parseDirectIngressObservationVariant,
@@ -24,6 +29,7 @@ import {
 } from "../../reconciliation/direct-ingress-observer.js";
 import type { FundingReceiveCanonicalEvent } from "../../receive/canonical-receive-event-scanner.js";
 import { FundingReceiveSessionObserver } from "../../receive/receive-session-observer.js";
+import { refundCanonicalEventKey } from "../../reconciliation/relay-exact-refund-classification.js";
 
 const NOW = new Date("2026-07-31T15:15:00.000Z");
 const SOURCE_ASSET = {
@@ -165,6 +171,7 @@ const candidate: FundingPolymarketHandoffCandidate = {
   attemptOutcome: "submitted",
   referenceKind: "transaction",
   resolvedTransactionHash: null,
+  resolvedEventIndex: "2",
   receiptRefCiphertext: "encrypted_internal_handoff_reference",
   receiptRefLookupHmac: LOOKUP_HMAC,
   lookupKeyVersion: 1,
@@ -233,6 +240,7 @@ function canonicalEvent(
 }
 
 const userIds: string[] = [];
+const pendingHashes: string[] = [];
 try {
   const userId = await insertUser("suppressed");
   userIds.push(userId);
@@ -555,11 +563,12 @@ try {
         ? historicalHandoffCandidates
         : [],
   });
-  const historicalInternalPoll = await historicalObserver.pollBatch(pool, {
-    limit: 1,
-    minimumPollIntervalMs: 1_000,
-    now: new Date(NOW.getTime() + 32_000),
-  });
+  const historicalInternalPoll =
+    await historicalObserver.pollKnownCanonicalRetryBatch(pool, {
+      limit: 25,
+      retryDelayMs: 1_000,
+      now: new Date(NOW.getTime() + 32_000),
+    });
   assert.equal(historicalInternalPoll.receiptsRecorded, 0);
   const { rows: historicalInternalRows } = await pool.query<{
     allocation_error_code: string;
@@ -574,11 +583,12 @@ try {
   assert.deepEqual(historicalInternalRows, [
     { allocation_error_code: "internal_handoff_suppressed", total: "25" },
   ]);
-  const historicalExternalPoll = await historicalObserver.pollBatch(pool, {
-    limit: 1,
-    minimumPollIntervalMs: 1_000,
-    now: new Date(NOW.getTime() + 34_000),
-  });
+  const historicalExternalPoll =
+    await historicalObserver.pollKnownCanonicalRetryBatch(pool, {
+      limit: 1,
+      retryDelayMs: 1_000,
+      now: new Date(NOW.getTime() + 34_000),
+    });
   assert.equal(
     historicalExternalPoll.receiptsRecorded,
     1,
@@ -753,6 +763,364 @@ try {
     "explicit observation requests never reopen a cancelled session",
   );
 
+  // Known-event repair must survive the scan window and distinguish an exact
+  // handoff from an independent same-envelope transfer. No second scan.
+  const lateNow = new Date(NOW.getTime() + 10 * 86_400_000);
+  for (const scenario of [
+    "started-exact",
+    "relayer-different",
+    "decoder-recovery",
+    "multiple-pending",
+    "lookup-overflow",
+    "handoff-route-pending",
+    "both-internal",
+    "route-handoff-pending",
+    "conflict-external-recovery",
+    "refund-handoff-conflict",
+    "refund-destination-conflict",
+    "refund-nonfinal",
+    "refund-invalid",
+    "refund-already-suppressed",
+    "refund-correlation-internal",
+    "refund-correlation-external",
+  ] as const) {
+    const pendingUserId = await insertUser(scenario);
+    userIds.push(pendingUserId);
+    const pendingInput = sessionInput(pendingUserId, scenario);
+    const pendingSession = await createOrReuseFundingReceiveSession(
+      pool,
+      pendingInput,
+    );
+    const pendingHash = `0x${crypto.randomBytes(32).toString("hex")}`;
+    pendingHashes.push(pendingHash);
+    let scans = 0;
+    let resolved = false;
+    const roleConflict = [
+      "handoff-route-pending",
+      "both-internal",
+      "route-handoff-pending",
+      "conflict-external-recovery",
+      "refund-handoff-conflict",
+      "refund-destination-conflict",
+    ].includes(scenario);
+    const refundScenario = scenario.startsWith("refund-");
+    const seededCorrelation = scenario.startsWith("refund-correlation-");
+    const resolvesExternal =
+      scenario === "relayer-different" ||
+      scenario === "conflict-external-recovery" ||
+      scenario === "refund-correlation-external";
+    const pendingObserver = new FundingReceiveSessionObserver({
+      relayReferenceCodec: { fingerprint: (value) => value },
+      classifyRecordedRefunds: async (_client, lookup) => {
+        if (
+          !refundScenario ||
+          lookup.userId !== pendingUserId ||
+          (resolved && resolvesExternal)
+        )
+          return new Map();
+        return new Map(
+          lookup.events.map((event) => [
+            refundCanonicalEventKey(event),
+            !resolved && !roleConflict
+              ? {
+                  kind: "recovery_required" as const,
+                  reason:
+                    scenario === "refund-invalid"
+                      ? ("exact_refund_receipt_conflict" as const)
+                      : ("exact_refund_receipt_not_final" as const),
+                }
+              : {
+                  kind: "internal" as const,
+                  operationId: crypto.randomUUID(),
+                  segmentId: crypto.randomUUID(),
+                },
+          ]),
+        );
+      },
+      classifyOwnedRouteDestinations: async (_client, lookup) => {
+        if (
+          !roleConflict ||
+          resolved ||
+          lookup.userId !== pendingUserId ||
+          scenario === "refund-handoff-conflict"
+        )
+          return new Map();
+        return new Map(
+          lookup.events.map((event) => [
+            [event.networkId, event.transactionHash, event.eventIndex].join(
+              ":",
+            ),
+            scenario === "both-internal" ||
+            scenario === "route-handoff-pending" ||
+            scenario === "refund-destination-conflict"
+              ? {
+                  kind: "internal" as const,
+                  operationId: crypto.randomUUID(),
+                  segmentId: crypto.randomUUID(),
+                  transactionReferenceFingerprint: "fixture-role-conflict",
+                }
+              : {
+                  kind: "recovery_required" as const,
+                  reason:
+                    "owned_route_destination_correlation_pending" as const,
+                },
+          ]),
+        );
+      },
+      transactionReferenceCodec: {
+        keyVersion: 1,
+        fingerprint: () => "different-lookup-version",
+        decrypt: () => {
+          throw new Error("decoder temporarily unavailable");
+        },
+      },
+      scanCanonicalEvents: async (variants) => {
+        const variant = variants.find(
+          (entry) => entry.variantId === pendingInput.variantId,
+        );
+        if (!variant) return null;
+        scans++;
+        return {
+          events: [
+            canonicalEvent(variant, pendingHash),
+            ...(scenario === "multiple-pending"
+              ? [{ ...canonicalEvent(variant, pendingHash), eventIndex: "3" }]
+              : []),
+          ],
+          variants: variants.map((entry) =>
+            entry.variantId === pendingInput.variantId
+              ? cursorVariant(entry, "101")
+              : entry,
+          ),
+          cursorAdvanced: true,
+        };
+      },
+      listPotentialPolymarketHandoffs: async (_client, lookup) => {
+        if (lookup.userId !== pendingUserId) return [];
+        if (
+          refundScenario &&
+          (resolved || scenario !== "refund-handoff-conflict")
+        )
+          return [];
+        if (scenario === "lookup-overflow" && !resolved)
+          throw new FundingPolymarketHandoffLookupOverflowError();
+        return [
+          {
+            ...candidate,
+            attemptOutcome:
+              scenario === "started-exact" || scenario === "multiple-pending"
+                ? "started"
+                : "submitted",
+            referenceKind:
+              scenario === "relayer-different"
+                ? "external_handoff"
+                : "transaction",
+            receiptRefLookupHmac: null,
+            receiptRefCiphertext:
+              scenario === "decoder-recovery" ? "unavailable" : null,
+            resolvedTransactionHash:
+              resolved || (roleConflict && scenario !== "route-handoff-pending")
+                ? resolved && resolvesExternal
+                  ? `0x${"12".repeat(32)}`
+                  : pendingHash
+                : null,
+            resolvedEventIndex:
+              resolved || (roleConflict && scenario !== "route-handoff-pending")
+                ? "2"
+                : null,
+          },
+        ];
+      },
+    });
+    // Exclude previous fixture sessions from the live observation selector.
+    await pool.query(
+      `update funding_receive_sessions
+      set observe_until=$2,expires_at=least(expires_at,$2::timestamptz-interval '1 millisecond')
+      where user_id=any($1::uuid[]) and id<>$3`,
+      [
+        userIds,
+        new Date(NOW.getTime() + 50_000),
+        pendingSession.snapshot.session.receiveSessionId,
+      ],
+    );
+    if (scenario === "refund-already-suppressed" || seededCorrelation) {
+      const variant = parseDirectIngressObservationVariant(
+        pendingInput.observationVariants[0],
+      );
+      const event = canonicalEvent(variant, pendingHash);
+      const canonicalInput = {
+        ...event,
+        networkId: variant.networkId,
+        asset: variant.asset,
+        ledgerHeight: event.blockNumber,
+        observedAt: new Date(event.observedAt),
+        now: new Date(NOW.getTime() + 60_000),
+      };
+      assert.equal(
+        await quarantineFundingReceiveCanonicalInternalEvent(pool, {
+          ...canonicalInput,
+          reason: seededCorrelation
+            ? "exact_refund_correlation_pending"
+            : "internal_exact_refund_suppressed",
+        }),
+        true,
+      );
+      if (seededCorrelation) {
+        // Exercise persistence/recovery without pretending the pending-source
+        // runtime classifier is connected. A later worker supplies the resolved
+        // role; the existing retry path must keep the original session binding.
+        await bindFundingReceiveCanonicalEventSession(pool, canonicalInput);
+      }
+    }
+    if (!seededCorrelation) {
+      const pendingResult = await pendingObserver.pollBatch(pool, {
+        limit: 100,
+        minimumPollIntervalMs: 0,
+        now: new Date(NOW.getTime() + 60_000),
+      });
+      assert.equal(pendingResult.retryableErrors, 0);
+      assert.equal(pendingResult.receiptsRecorded, 0);
+      assert.equal(scans, 1);
+    }
+    const before = (
+      await pool.query(
+        `select event_index,allocation_error_code,
+      classification_receive_session_id,classification_variant_id
+      from funding_receive_canonical_events where tx_hash=$1 order by event_index`,
+        [pendingHash],
+      )
+    ).rows;
+    const expectedPending = {
+      allocation_error_code: seededCorrelation
+        ? "exact_refund_correlation_pending"
+        : roleConflict
+          ? "internal_event_classification_conflict"
+          : refundScenario
+            ? scenario === "refund-invalid"
+              ? "exact_refund_receipt_conflict"
+              : "exact_refund_receipt_not_final"
+            : scenario === "decoder-recovery"
+              ? "handoff_reference_unavailable"
+              : "handoff_correlation_pending",
+      classification_receive_session_id:
+        pendingSession.snapshot.session.receiveSessionId,
+      classification_variant_id: pendingInput.variantId,
+    };
+    assert.deepEqual(before, [
+      { event_index: "2", ...expectedPending },
+      ...(scenario === "multiple-pending"
+        ? [{ event_index: "3", ...expectedPending }]
+        : []),
+    ]);
+    const beforeRetry = await fetchFundingReceiveSessionForUser(pool, {
+      userId: pendingUserId,
+      receiveSessionId: pendingSession.snapshot.session.receiveSessionId,
+    });
+    if (roleConflict || (refundScenario && !seededCorrelation)) {
+      const stillConflicting =
+        await pendingObserver.pollKnownCanonicalRetryBatch(pool, {
+          limit: 100,
+          retryDelayMs: 1000,
+          now: lateNow,
+        });
+      assert.equal(stillConflicting.retryableErrors, 0);
+      assert.equal(stillConflicting.receiptsRecorded, 0);
+      const retained = (
+        await pool.query(
+          `select allocation_error_code,classification_receive_session_id,classification_retry_at
+        from funding_receive_canonical_events where tx_hash=$1`,
+          [pendingHash],
+        )
+      ).rows[0];
+      assert.equal(
+        retained.allocation_error_code,
+        expectedPending.allocation_error_code,
+      );
+      assert.equal(
+        retained.classification_receive_session_id,
+        pendingSession.snapshot.session.receiveSessionId,
+      );
+      assert.ok(retained.classification_retry_at > lateNow);
+    }
+    resolved = true;
+    const repaired = await pendingObserver.pollKnownCanonicalRetryBatch(pool, {
+      limit: 100,
+      retryDelayMs: 1000,
+      now: new Date(lateNow.getTime() + 2000),
+    });
+    assert.equal(repaired.retryableErrors, 0);
+    assert.equal(
+      scans,
+      seededCorrelation ? 0 : 1,
+      "known-event retry cannot scan new history after expiry",
+    );
+    const after = (
+      await pool.query(
+        `select event_index,allocation_error_code,allocation_status,
+      classification_lease_token,classification_retry_at from funding_receive_canonical_events where tx_hash=$1 order by event_index`,
+        [pendingHash],
+      )
+    ).rows;
+    const expectedAfter = {
+      event_index: "2",
+      allocation_error_code: resolvesExternal
+        ? null
+        : refundScenario
+          ? "internal_exact_refund_suppressed"
+          : "internal_handoff_suppressed",
+      allocation_status: resolvesExternal ? "allocated" : "recovery_required",
+      classification_lease_token: null,
+      classification_retry_at: null,
+    };
+    assert.deepEqual(after, [
+      expectedAfter,
+      ...(scenario === "multiple-pending"
+        ? [
+            {
+              event_index: "3",
+              allocation_error_code: null,
+              allocation_status: "allocated",
+              classification_lease_token: null,
+              classification_retry_at: null,
+            },
+          ]
+        : []),
+    ]);
+    const afterRetry = await fetchFundingReceiveSessionForUser(pool, {
+      userId: pendingUserId,
+      receiveSessionId: pendingSession.snapshot.session.receiveSessionId,
+    });
+    assert.deepEqual(
+      afterRetry?.observationVariants,
+      beforeRetry?.observationVariants,
+    );
+    assert.equal(afterRetry?.session.status, beforeRetry?.session.status);
+    assert.deepEqual(
+      afterRetry?.session.observeUntil,
+      beforeRetry?.session.observeUntil,
+    );
+    const receipts = (
+      await pool.query(
+        `select status,child_funding_operation_id,evidence->>'lateReceipt' as late_receipt,raw_amount::text
+      from funding_receive_receipts where receive_session_id=$1`,
+        [pendingSession.snapshot.session.receiveSessionId],
+      )
+    ).rows;
+    assert.deepEqual(
+      receipts,
+      resolvesExternal || scenario === "multiple-pending"
+        ? [
+            {
+              status: "recovery_required",
+              child_funding_operation_id: null,
+              late_receipt: "true",
+              raw_amount: AMOUNT_RAW,
+            },
+          ]
+        : [],
+    );
+  }
+
   console.log(
     "[funding-receive-internal-handoff-integration-tests] exact internal handoff suppression, cursor advancement, and DB-failure rollback passed",
   );
@@ -774,6 +1142,7 @@ try {
           AMBIGUOUS_TRANSACTION_HASH,
           ...HISTORICAL_INTERNAL_TRANSACTION_HASHES,
           HISTORICAL_EXTERNAL_TRANSACTION_HASH,
+          ...pendingHashes,
         ],
       ],
     );

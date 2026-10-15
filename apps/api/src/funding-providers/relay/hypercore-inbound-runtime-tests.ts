@@ -25,6 +25,17 @@ import { DEFAULT_FUNDING_RUNTIME_POLICY } from "../../funding/policies/funding-p
 import { buildRelayWalletSourceOption } from "../../funding/planner/source-options.js";
 import type { WalletExecutionProfile } from "../../funding/domain/types.js";
 import { withRelayClientSourceDebitPostcondition } from "../../funding/execution/relay-client-source-debit.js";
+import type { Pool } from "@hunch/infra";
+import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
+import {
+  projectAccountValue,
+  resolveEffectiveHeadline,
+} from "../../account-value/account-value-projector.js";
+import { projectCashAvailability } from "../../account-value/cash-availability-projector.js";
+import { HYPERCORE_SPOT_LOCATION_PATTERN } from "../../funding/domain/hypercore-identity.js";
+import { fundingDiscoveryRequestSchema } from "../../funding/domain/schemas.js";
+import { ProductionFundingSourcePlanner } from "../../funding/planner/production-source-planner.js";
+import { resolveRelayHypercoreContracts } from "./hypercore-quote.js";
 
 const captured = JSON.parse(
   readFileSync(
@@ -36,8 +47,14 @@ const captured = JSON.parse(
   ),
 );
 
-function fixture(index = 0, lagMs = 20) {
+function fixture(index = 0, lagMs = 20, nativeOwner?: string) {
   const wire = structuredClone(captured.routes[index].response.body);
+  // Synthetic owned destination distinct from the EVM source signer.
+  if (nativeOwner) {
+    wire.details.recipient = nativeOwner;
+    wire.protocol.v2.orderData.output.payments[0].recipient = nativeOwner;
+    wire.protocol.v2.orderData.inputs[0].refunds[1].recipient = nativeOwner;
+  }
   const now = new Date();
   // Offline quote refresh only: synthesize a deadline/commitment so this test
   // stays reproducible after the captured provider quote expires.
@@ -138,6 +155,420 @@ function fixture(index = 0, lagMs = 20) {
   return { f, wire, spec, source, destination, adapter, input, calls };
 }
 
+function productionInboundFixture(index: number) {
+  const f = fixture(index, 20, `0x${"b".repeat(40)}`);
+  const now = f.input.now;
+  const accountId = f.source.location.accountId;
+  const destination = {
+    ...f.destination,
+    destinationLocationPatternId: HYPERCORE_SPOT_LOCATION_PATTERN,
+  };
+  const route = relayRuntimeRoute(f.spec, {
+    sourceLocationPatternId: "evm-source-usdc",
+    destinationLocationPatternId: destination.destinationLocationPatternId,
+  });
+  const policy = {
+    ...DEFAULT_FUNDING_RUNTIME_POLICY,
+    placement: {
+      ...DEFAULT_FUNDING_RUNTIME_POLICY.placement,
+      maximumFeeUsd: "2",
+      maximumFeeBps: 2000,
+      // Captured minimum is rounded down to six decimal places by Relay;
+      // use a policy above its ~200 bps boundary, not an invalid exact floor.
+      maximumSlippageBps: 201,
+      minimumDestinationUsd: "1",
+    },
+    providers: [
+      { providerId: "relay", enabledCapabilities: [route.capability] },
+    ],
+    routes: [route],
+    locations: [
+      {
+        locationPatternId: route.sourceLocationPatternId,
+        locationKind: "wallet" as const,
+        ownership: "owned" as const,
+        asset: f.spec.source,
+        enabled: true,
+        observable: true,
+        capabilities: ["observe", "value", "execution_source"] as const,
+      },
+    ],
+  };
+  const component = {
+    componentId: "offline-inbound-source",
+    location: f.source.location,
+    amount: { asset: f.spec.source, raw: "12000000" },
+    category: "cash" as const,
+    estimatedUsd: {
+      value: "12",
+      asOf: now.toISOString(),
+      priceSource: "exact_stable",
+      confidence: "high" as const,
+      policyId: "exact_stable",
+    },
+    observedAt: now.toISOString(),
+    observationFreshness: "fresh" as const,
+    observationError: null,
+    valuationEligibility: "included" as const,
+    executionEligibility: "eligible" as const,
+    reasonCodes: [],
+  };
+  const profile: WalletExecutionProfile = {
+    walletId: "evm-controller",
+    controllerWalletRef: "evm-controller",
+    address: f.input.userAddress,
+    networkId: f.spec.source.networkId,
+    source: "external",
+    signingModes: ["web_client"],
+    serverWalletRef: null,
+    sponsorshipPolicyIds: [],
+  };
+  const nativeProfile: WalletExecutionProfile = {
+    ...profile,
+    walletId: "native-controller",
+    controllerWalletRef: "native-controller",
+    address: f.input.recipientAddress,
+    networkId: f.spec.destination.networkId,
+  };
+  const projection = projectAccountValue({
+    accountId,
+    headlineMode: "liquid_only",
+    components: [component],
+    positionComponents: [],
+    asOf: now.toISOString(),
+  });
+  const account: AccountValueReadModel = {
+    projection,
+    headline: resolveEffectiveHeadline(projection),
+    cashAvailability: projectCashAvailability({
+      components: [component],
+      asOf: now.toISOString(),
+      adjustments: [
+        {
+          componentId: component.componentId,
+          venueId: null,
+          venueBindingId: null,
+          lockedRaw: "0",
+          reservedRaw: "1000000",
+          submittedDebitRaw: "1000000",
+        },
+      ],
+    }),
+    nativeGasBalances: [
+      {
+        networkId: profile.networkId,
+        address: profile.address,
+        raw: "1000000000000000000",
+      },
+    ],
+    connectedExternalWalletRefs: [profile.walletId, nativeProfile.walletId],
+    venues: {},
+    policy: {
+      creationMode: "off",
+      revision: "offline-inbound-policy",
+      source: "default",
+      invalidStoredPolicy: false,
+    },
+    runtimePolicy: policy,
+    ownership: {
+      accountId,
+      wallets: [profile, nativeProfile],
+      venueBindings: [],
+      evidenceRevision: "offline-owned",
+      asOf: now.toISOString(),
+    },
+    ownershipEvidenceRevision: "offline-owned",
+    duplicateAssetObservationCount: 0,
+    assetPreferences: {},
+  };
+  const requiredAmount = { asset: f.spec.destination, raw: "850000000" };
+  const request = fundingDiscoveryRequestSchema.parse({
+    purpose: "add_funds",
+    requestedDestinationAmount: requiredAmount,
+    confirmedSourceAmount: f.input.sourceAmount,
+    destinationOptionId: destination.destinationId,
+    marketContextId: null,
+    consumerIntent: null,
+    withdrawalRecipientId: null,
+    venueBindingOptionId: null,
+    maxFeeUsd: null,
+    maxSlippageBps: null,
+    deadline: null,
+  });
+  const input = {
+    accountId,
+    account,
+    policy,
+    policyRevision: account.policy.revision,
+    now,
+    request,
+    requiredAmount,
+    marketContext: null,
+    destinationFacts: null,
+    destination,
+    placement: {
+      mode: "confirmed_deposit_amount" as const,
+      sourceAmount: f.input.sourceAmount,
+      destinationRequirement: requiredAmount,
+      targetVenueId: null,
+      target: destination.target,
+      boundedBuffer: null,
+      reason: "explicit" as const,
+      policyVersion: 1,
+    },
+  };
+  return { ...f, account, input, route, nativeProfile };
+}
+
+for (const [index, name] of ["Base", "Polygon"].entries()) {
+  test(`production planner ${name} inbound uses USDC6 fees and the owned zero-balance Core destination`, async (context) => {
+    const f = productionInboundFixture(index);
+    const keys = [
+      "RELAY_API_KEY",
+      "CREDENTIALS_ENCRYPTION_KEY",
+      "FUNDING_REFERENCE_LOOKUP_HMAC_KEY",
+    ];
+    const saved = keys.map((key) => [key, process.env[key]] as const);
+    Object.assign(process.env, {
+      RELAY_API_KEY: "offline-inbound-test-only",
+      CREDENTIALS_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
+      FUNDING_REFERENCE_LOOKUP_HMAC_KEY:
+        "offline-inbound-test-key-at-least-32-chars",
+    });
+    context.after(() => {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    });
+    let quoteCalls = 0;
+    let oversizedExpectedQuote = false;
+    const requests: RelayQuoteRequest[] = [];
+    context.mock.method(
+      RelayClient.prototype,
+      "quote",
+      async (request: RelayQuoteRequest) => {
+        quoteCalls++;
+        requests.push(request);
+        assert.equal(request.originChainId, index === 0 ? 8453 : 137);
+        assert.equal(request.destinationChainId, 1337);
+        if (request.tradeType === "EXACT_INPUT") {
+          assert.equal(request.amount, "10000000");
+        } else {
+          assert.equal(request.tradeType, "EXPECTED_OUTPUT");
+          // Target amount is native USDC8, never source USDC6.
+          assert.ok(BigInt(request.amount) > 850000000n);
+          assert.ok(BigInt(request.amount) < 1000000000n);
+        }
+        assert.equal(request.protocolVersion, "v2");
+        assert.equal(request.includeProtocolData, true);
+        assert.equal(request.user, f.wire.details.sender.toLowerCase());
+        assert.equal(request.recipient, f.wire.details.recipient.toLowerCase());
+        if (oversizedExpectedQuote && request.tradeType === "EXPECTED_OUTPUT") {
+          const rejectedQuote = structuredClone(f.wire);
+          rejectedQuote.details.currencyIn.amount = "10000001";
+          rejectedQuote.details.currencyIn.minimumAmount = "10000001";
+          return rejectedQuote;
+        }
+        return f.wire;
+      },
+    );
+    context.mock.method(
+      RelayClient.prototype,
+      "hypercoreContracts",
+      async () => ({
+        ...resolveRelayHypercoreContracts(
+          { chains: captured.chains },
+          index === 0 ? 8453 : 137,
+        ),
+        observedAt: f.input.now.toISOString(),
+      }),
+    );
+    context.mock.method(globalThis, "fetch", async () => {
+      throw new Error("No external reads in offline planner test");
+    });
+    const db = {
+      query: async (sql: string) => {
+        assert.match(sql.trim(), /^select/i);
+        return { rows: [] };
+      },
+    } as unknown as Pool;
+    const discover = (account = f.account, request = f.input.request) => {
+      assert.ok(account.runtimePolicy);
+      return new ProductionFundingSourcePlanner(db, account).discover({
+        ...f.input,
+        policy: account.runtimePolicy,
+        request,
+      });
+    };
+    const result = await discover();
+    assert.equal(result.sources.length, 1, JSON.stringify(result));
+    const source = result.sources[0];
+    assert.equal(
+      source.option.selectable,
+      true,
+      JSON.stringify(source.option.reasonCodes),
+    );
+    assert.equal(source.option.minimumDestination?.raw, "860341800");
+    assert.equal(source.commitPlan.reservations[0].rawAmount, "10000000");
+    assert.equal(source.commitPlan.reservations[0].assetDecimals, 6);
+    assert.deepEqual(source.commitPlan.segments[0].quotedMinOutput, {
+      asset: f.spec.destination,
+      raw: "860341800",
+    });
+    assert.ok(
+      source.commitPlan.steps.every(
+        (step) => step.executorId === "wallet_profile_evm_v1",
+      ),
+    );
+    const refund = source.commitPlan.segments[0].refundLocationSnapshot;
+    assert.equal(refund?.locationId, f.source.location.locationId);
+    assert.deepEqual(refund?.alternativeRefundLocations, {
+      version: 1,
+      locations: [
+        hypercorePerpsRefundLocation({
+          accountId: f.input.accountId,
+          address: f.nativeProfile.address,
+          controllerWalletId: f.nativeProfile.walletId,
+        }),
+      ],
+    });
+    assert.equal(
+      f.account.projection.components.some(
+        (row) => row.amount.asset.networkId === "hyperliquid:mainnet",
+      ),
+      false,
+    );
+    for (const maxFeeUsd of ["0.01", "0.000001"]) {
+      const rejected = await discover(f.account, {
+        ...f.input.request,
+        maxFeeUsd,
+      });
+      assert.ok(rejected.sources.length > 0);
+      assert.ok(
+        rejected.sources.every(
+          (row) =>
+            !row.option.selectable &&
+            row.option.reasonCodes.includes("fee_limit_exceeded"),
+        ),
+      );
+    }
+    const strictSlippage = await discover(f.account, {
+      ...f.input.request,
+      maxSlippageBps: 199,
+    });
+    assert.ok(strictSlippage.sources.length > 0);
+    assert.ok(
+      strictSlippage.sources.every(
+        (row) =>
+          !row.option.selectable &&
+          row.option.reasonCodes.includes("minimum_output_not_met"),
+      ),
+    );
+    // Exercise the adapter's source-unit cap, not just the later shared USD
+    // check. Treating USDC6 as USDC8 would admit this captured $1.22 fee.
+    const strictPolicyFee = await discover({
+      ...f.account,
+      runtimePolicy: {
+        ...f.input.policy,
+        placement: { ...f.input.policy.placement, maximumFeeUsd: "0.02" },
+      },
+    });
+    assert.equal(strictPolicyFee.sources.length, 0);
+    assert.ok(strictPolicyFee.reasonCodes.includes("provider_quote_invalid"));
+    const beforeRejected = quoteCalls;
+    const ownership = f.account.ownership;
+    assert.ok(ownership);
+    for (const wallets of [
+      ownership.wallets.filter(
+        (wallet) => wallet.walletId !== f.nativeProfile.walletId,
+      ),
+      ownership.wallets.map((wallet) =>
+        wallet.walletId === f.nativeProfile.walletId
+          ? { ...wallet, address: `0x${"f".repeat(40)}` }
+          : wallet,
+      ),
+      [...ownership.wallets, f.nativeProfile],
+      ownership.wallets.map((wallet) =>
+        wallet.walletId === f.nativeProfile.walletId
+          ? { ...wallet, networkId: "hyperliquid:testnet" }
+          : wallet,
+      ),
+    ]) {
+      const rejected = await discover({
+        ...f.account,
+        ownership: { ...ownership, wallets },
+      });
+      assert.equal(
+        rejected.sources.some((row) => row.option.selectable),
+        false,
+      );
+      assert.ok(rejected.reasonCodes.includes("destination_unavailable"));
+    }
+    const disabled = await discover({
+      ...f.account,
+      runtimePolicy: {
+        ...f.input.policy,
+        routes: [{ ...f.route, enabled: false }],
+      },
+    });
+    assert.equal(disabled.sources.length, 0);
+    assert.equal(quoteCalls, beforeRejected);
+    assert.equal((await discover()).sources[0]?.option.selectable, true);
+
+    const expectedRequest = { ...f.input.request, confirmedSourceAmount: null };
+    const requestStart = requests.length;
+    const expected = await discover(f.account, expectedRequest);
+    assert.equal(expected.sources.length, 1, JSON.stringify(expected));
+    assert.equal(expected.sources[0].option.selectable, true);
+    assert.equal(expected.sources[0].option.amountMode, "exact_output");
+    assert.equal(
+      expected.sources[0].commitPlan.reservations[0].rawAmount,
+      "10000000",
+    );
+    assert.deepEqual(
+      requests.slice(requestStart).map((request) => request.tradeType),
+      ["EXPECTED_OUTPUT"],
+    );
+
+    // A quote advertising one source unit beyond the available balance is
+    // never committed. The existing bounded retry must validate a fresh exact
+    // input quote and expose only its genuine partial output, not $9 funded.
+    oversizedExpectedQuote = true;
+    const fallbackStart = requests.length;
+    const requiredAmount = { asset: f.spec.destination, raw: "900000000" };
+    const partial = await new ProductionFundingSourcePlanner(
+      db,
+      f.account,
+    ).discover({
+      ...f.input,
+      request: {
+        ...expectedRequest,
+        requestedDestinationAmount: requiredAmount,
+      },
+      requiredAmount,
+      placement: {
+        ...f.input.placement,
+        destinationRequirement: requiredAmount,
+      },
+    });
+    assert.deepEqual(
+      requests.slice(fallbackStart).map((request) => request.tradeType),
+      ["EXPECTED_OUTPUT", "EXACT_INPUT"],
+    );
+    assert.equal(partial.sources.length, 1, JSON.stringify(partial));
+    assert.equal(partial.sources[0].option.amountMode, "exact_input");
+    assert.equal(
+      partial.sources[0].option.minimumDestination?.raw,
+      "860341800",
+    );
+    assert.equal(
+      partial.sources[0].commitPlan.reservations[0].rawAmount,
+      "10000000",
+    );
+  });
+}
+
 for (const [index, name] of ["Base", "Polygon"].entries()) {
   test(`${name} -> HyperCore quote keeps common EVM source actions, precision and immutable refunds`, async () => {
     const f = fixture(index);
@@ -219,6 +650,10 @@ for (const [index, name] of ["Base", "Polygon"].entries()) {
     assert.equal(deposit?.expectedSourceRaw, "10000000");
     assert.equal(deposit?.expectedSourceAssetDecimals, 6);
     const snapshot = result.commitPlan.segments[0].refundLocationSnapshot;
+    assert.equal(
+      snapshot?.relayProtocolOrderId,
+      f.wire.protocol.v2.orderId.toLowerCase(),
+    );
     assert.ok(snapshot);
     assert.equal(snapshot.locationId, "evm-source");
     assert.deepEqual(snapshot.alternativeRefundLocations, {

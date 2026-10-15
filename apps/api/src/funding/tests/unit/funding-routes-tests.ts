@@ -1207,10 +1207,21 @@ await test("destinations accept short backend market references", async () => {
       method: "GET",
       url:
         "/funding/destinations?purpose=buy&marketContextId=561251" +
-        "&controllerWalletRef=8571f3cb-381e-4e55-8f4c-ecc4c7f2abb9",
+        "&controllerWalletRef=8571f3cb-381e-4e55-8f4c-ecc4c7f2abb9&refresh=true",
     });
     assert.equal(response.statusCode, 200);
     assert.equal(observedQuery?.marketContextId, "561251");
+    assert.equal(observedQuery?.refresh, "true");
+    assert.equal(response.headers["cache-control"], "private, no-store");
+    assert.equal(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/funding/destinations?refresh=true",
+        })
+      ).statusCode,
+      400,
+    );
     assert.equal(
       observedQuery?.controllerWalletRef,
       "8571f3cb-381e-4e55-8f4c-ecc4c7f2abb9",

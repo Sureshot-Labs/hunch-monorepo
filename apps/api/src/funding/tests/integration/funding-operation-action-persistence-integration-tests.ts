@@ -40,6 +40,7 @@ import { applyFundingStepReceiptEvidenceInTransaction } from "../../persistence/
 import { isValidFundingCommitPlanBoundary } from "../../validation/funding-commit-plan-validator.js";
 import { readFundingExecutionPreflight } from "../../execution/operation-execution-preflight.js";
 import { ingestFundingObservationInTransaction } from "../../reconciliation/funding-observation-ingestion.js";
+import { verifyReceiveHandoffSourcePg } from "../receive-handoff-source-pg.js";
 
 const ASSET = {
   networkId: "evm:137",
@@ -2549,17 +2550,43 @@ try {
     rawAmount: handoffAmount,
     receiptRefLookupHmac: null,
   } as const;
+  let handoffReadCount = 0;
   const startedHandoffs =
-    await listPotentialPolymarketHandoffsForCanonicalEvents(client, {
-      userId,
-      currentLookupKeyVersion: 1,
-      events: [canonicalHandoffEvent],
-    });
+    await listPotentialPolymarketHandoffsForCanonicalEvents(
+      {
+        query: async (sql: string, values: unknown[]) => {
+          handoffReadCount++;
+          return client.query(sql, values);
+        },
+      } as never,
+      {
+        userId,
+        currentLookupKeyVersion: 1,
+        events: [canonicalHandoffEvent],
+      },
+    );
   const currentStartedHandoffs = startedHandoffs.filter(
     (candidate) => candidate.attemptId === started.attempt.id,
   );
   assert.equal(currentStartedHandoffs.length, 1);
   assert.equal(currentStartedHandoffs[0]?.attemptOutcome, "started");
+  console.log(
+    "handoff source plans",
+    JSON.stringify(
+      await verifyReceiveHandoffSourcePg(client, {
+        userId,
+        operationId: committed.operation.id,
+        stepId,
+        attemptId: started.attempt.id,
+        event: canonicalHandoffEvent,
+      }),
+    ),
+  );
+  assert.equal(
+    handoffReadCount,
+    1,
+    "a later terminal lifecycle read must not erase an attempt selected before its concurrent report",
+  );
 
   // The worker must attribute a live started handoff from immutable plan and
   // attempt facts even if an interrupted old reducer left a terminal cache.
@@ -3008,9 +3035,95 @@ try {
     oldKeyHandoffs.some(
       (candidate) => candidate.attemptId === started.attempt.id,
     ),
-    true,
-    "a reported old-key reference must remain available for decrypt-and-compare even when the envelope mismatches",
+    false,
+    "old-key unrelated envelopes are not scanned: a valid bound transfer must match its immutable source envelope",
   );
+  const exactHashMismatch =
+    await listPotentialPolymarketHandoffsForCanonicalEvents(client, {
+      userId,
+      currentLookupKeyVersion: 2,
+      events: [
+        {
+          ...canonicalHandoffEvent,
+          rawAmount: "1",
+          transactionHash: resolvedHandoffTransactionHash,
+        },
+      ],
+    });
+  assert.equal(
+    exactHashMismatch.some(
+      (candidate) => candidate.attemptId === started.attempt.id,
+    ),
+    true,
+    "an exact receipt hash retains mismatch diagnostics without scanning unrelated rotated-key history",
+  );
+
+  await client.query("savepoint handoff_log_proof");
+  await applyFundingStepReceiptEvidenceInTransaction(client, {
+    operationId: committed.operation.id,
+    stepId,
+    attemptId: started.attempt.id,
+    networkId: ASSET.networkId,
+    receipt: {
+      status: "confirmed",
+      actionMatch: true,
+      ledgerHeight: "101",
+      blockHash: `0x${"cd".repeat(32)}`,
+      canonical: true,
+      failureCode: null,
+      evidence: {
+        transactionHash: resolvedHandoffTransactionHash,
+        handoffEventIndex: "2",
+        exactTransferObserved: true,
+      },
+    },
+  });
+  const withLogProof = await listPotentialPolymarketHandoffsForCanonicalEvents(
+    client,
+    {
+      userId,
+      currentLookupKeyVersion: 1,
+      events: [canonicalHandoffEvent],
+    },
+  );
+  assert.equal(
+    withLogProof.find((row) => row.attemptId === started.attempt.id)
+      ?.resolvedEventIndex,
+    "2",
+    "canonical matched receipt must provide the exact log for singleton retries",
+  );
+  await applyFundingStepReceiptEvidenceInTransaction(client, {
+    operationId: committed.operation.id,
+    stepId,
+    attemptId: started.attempt.id,
+    networkId: ASSET.networkId,
+    receipt: {
+      status: "reorged",
+      actionMatch: true,
+      ledgerHeight: "101",
+      blockHash: `0x${"cd".repeat(32)}`,
+      canonical: false,
+      failureCode: null,
+      evidence: {
+        transactionHash: resolvedHandoffTransactionHash,
+        handoffEventIndex: "2",
+      },
+    },
+  });
+  const reorgedLogProof =
+    await listPotentialPolymarketHandoffsForCanonicalEvents(client, {
+      userId,
+      currentLookupKeyVersion: 1,
+      events: [canonicalHandoffEvent],
+    });
+  assert.equal(
+    reorgedLogProof.find((row) => row.attemptId === started.attempt.id)
+      ?.resolvedEventIndex,
+    null,
+    "reorged receipt retains possible provenance but cannot prove a canonical log",
+  );
+  await client.query("rollback to savepoint handoff_log_proof");
+  await client.query("release savepoint handoff_log_proof");
 
   await expectFundingError(
     startFundingStepAttemptForUserInTransaction(client, {
