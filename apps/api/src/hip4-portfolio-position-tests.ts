@@ -412,7 +412,16 @@ test("Account Value shares native side marks and counts held cash once without f
     asOf: observation.observedAt,
   });
   assert.equal(projected.totalPortfolioEstimatedUsd, "38.00000601");
-  assert.equal(projected.valuationCompleteness, "complete");
+  assert.equal(projected.valuationCompleteness, "partial");
+  assert.ok(
+    result.errors.some(
+      (row) =>
+        row.collectorId === "hyperliquid-perps-cash" &&
+        row.code === "perps_cash_read_unavailable" &&
+        row.retryable,
+    ),
+    "this spot-only fixture cannot prove the separate perps cash balance",
+  );
   accountAssetsResponseSchema.parse({
     ok: true,
     asOf: projected.asOf,
