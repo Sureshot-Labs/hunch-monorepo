@@ -63,12 +63,52 @@ export const SELECTED_KEYS = [
   "EVM_RPC_URLS_BY_CHAIN",
   "LIMITLESS_HMAC_TOKEN_ID",
   "LIMITLESS_HMAC_SECRET",
+  "LIMITLESS_WS_SESSION",
 ];
 const ENTRIES = {
   api: "apps/api/dist/server.js",
   indexer: "apps/api/dist/hip4-indexer.js",
   "finance-worker": "apps/finance-worker/dist/main.js",
+  "indexer-polymarket": "apps/indexer-polymarket/dist/main.js",
+  "indexer-limitless": "apps/indexer-limitless/dist/main.js",
+  "sync-polymarket": "ops/hip4-local-sync.mjs",
+  "sync-limitless": "ops/hip4-local-sync.mjs",
+  "sync-hyperliquid": "apps/api/dist/hip4-indexer.js",
 };
+
+export const CATALOG_SYNC_PAGE_DEFAULTS = { polymarket: 10, limitless: 40 };
+
+export function isReadOnlyMode(mode) {
+  return (
+    Object.hasOwn(ENTRIES, mode) && !["api", "finance-worker"].includes(mode)
+  );
+}
+
+export function validateCatalogPageBudget(raw) {
+  const value = Number(raw);
+  if (
+    !/^\d+$/u.test(String(raw)) ||
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > 10_000
+  )
+    throw new Error("--max-pages must be an integer from 1 to 10000");
+  return value;
+}
+
+export function serviceArtifacts(mode) {
+  if (!Object.hasOwn(ENTRIES, mode)) throw new Error("Unknown local mode");
+  const venue = mode.startsWith("sync-") ? mode.slice(5) : null;
+  return [
+    ENTRIES[mode],
+    "packages/config/dist/secrets.js",
+    ...(["polymarket", "limitless"].includes(venue)
+      ? ["bootstrap", "db", "redis"].map(
+          (name) => `apps/indexer-${venue}/dist/${name}.js`,
+        )
+      : []),
+  ];
+}
 
 export function parseArgs(argv) {
   const result = { mode: "api", check: false, help: false };
@@ -85,11 +125,24 @@ export function parseArgs(argv) {
       if (result[key] !== undefined)
         throw new Error(`Duplicate option: ${value}`);
       result[key] = argv[++i];
+    } else if (value === "--max-pages") {
+      if (!argv[i + 1] || argv[i + 1].startsWith("--"))
+        throw new Error("Missing value for --max-pages");
+      if (result.maxPages !== undefined)
+        throw new Error("Duplicate option: --max-pages");
+      result.maxPages = validateCatalogPageBudget(argv[++i]);
     } else if (Object.hasOwn(ENTRIES, value) && !modeSeen) {
       result.mode = value;
       modeSeen = true;
     } else throw new Error("Unknown option or duplicate mode; use --help");
   }
+  if (
+    result.maxPages !== undefined &&
+    !["sync-polymarket", "sync-limitless"].includes(result.mode)
+  )
+    throw new Error(
+      "--max-pages is only supported by sync-polymarket and sync-limitless",
+    );
   if (!result.help)
     result.databaseUrl = validateDatabaseTarget(
       result.databaseUrl,
@@ -180,6 +233,20 @@ export function buildLocalEnvironment(
     HUNCH_FINANCE_API_CACHE_WARM_ENABLED: "false",
     CONTENT_ENABLED: "false",
     CONTENT_WORKER_ENABLED: "false",
+    ...(options.mode === "sync-polymarket"
+      ? {
+          POLYMARKET_HOT_MAX_PAGES: String(
+            options.maxPages ?? CATALOG_SYNC_PAGE_DEFAULTS.polymarket,
+          ),
+        }
+      : {}),
+    ...(options.mode === "sync-limitless"
+      ? {
+          LIMITLESS_MAX_PAGES: String(
+            options.maxPages ?? CATALOG_SYNC_PAGE_DEFAULTS.limitless,
+          ),
+        }
+      : {}),
   });
 }
 
@@ -191,16 +258,17 @@ export function configurationStatus(
   fundingVenues = [],
   receiveKeyStatus = null,
 ) {
-  const required =
-    mode === "indexer" ? [] : ["PRIVY_APP_ID", "PRIVY_APP_SECRET"];
+  const required = isReadOnlyMode(mode)
+    ? []
+    : ["PRIVY_APP_ID", "PRIVY_APP_SECRET"];
   if (mode === "api") required.push("ADMIN_SERVICE_TOKEN_PEPPER");
-  if (fundingEnabled && mode !== "indexer")
+  if (fundingEnabled && !isReadOnlyMode(mode))
     required.push(
       "RELAY_API_KEY",
       "CREDENTIALS_ENCRYPTION_KEY",
       "FUNDING_REFERENCE_LOOKUP_HMAC_KEY",
     );
-  if (fundingEnabled && mode !== "indexer") {
+  if (fundingEnabled && !isReadOnlyMode(mode)) {
     if (
       fundingAssets.some((asset) => asset.startsWith("polygon:")) ||
       fundingVenues.includes("polymarket")
@@ -406,23 +474,39 @@ export async function bootstrapLocalEnvironment(
 }
 
 export function launchArguments(options) {
-  return options.mode === "indexer"
-    ? [
-        "--database-url",
-        options.databaseUrl,
-        "--expect-database",
-        LOCAL_DATABASE,
-        "--redis-url",
-        LOCAL_REDIS,
-      ]
-    : [];
+  if (["indexer", "sync-hyperliquid"].includes(options.mode))
+    return [
+      "--database-url",
+      options.databaseUrl,
+      "--expect-database",
+      LOCAL_DATABASE,
+      "--redis-url",
+      LOCAL_REDIS,
+      ...(options.mode === "sync-hyperliquid" ? ["--once"] : []),
+    ];
+  if (["sync-polymarket", "sync-limitless"].includes(options.mode)) {
+    const venue = options.mode.slice(5);
+    return [
+      "--venue",
+      venue,
+      "--database-url",
+      options.databaseUrl,
+      "--expect-database",
+      LOCAL_DATABASE,
+      "--redis-url",
+      LOCAL_REDIS,
+      "--max-pages",
+      String(options.maxPages ?? CATALOG_SYNC_PAGE_DEFAULTS[venue]),
+    ];
+  }
+  return [];
 }
 
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
   if (options.help) {
     console.log(
-      "Usage: node ops/hip4-local.mjs [api|indexer|finance-worker] [--check] --database-url <loopback:55436/hip4_local> --expect-database hip4_local\nDefault: API 127.0.0.1:4014 only. API Receive options require a separately provisioned private untracked/hip4-local.env; --check reports safe configuration advice without creating or changing it. Indexer performs public reads and local writes. finance-worker observes/reconciles and can advance existing user-authorized funding operations; it never enables autonomous HIP signing. No migrations, policy changes or financial tests are performed. Run --check for each desired mode first. Frontend starts separately with HUNCH_API_BASE_URL=http://127.0.0.1:4014 bun run dev:http.",
+      "Usage: node ops/hip4-local.mjs [api|indexer|finance-worker|indexer-polymarket|indexer-limitless|sync-polymarket|sync-limitless|sync-hyperliquid] [--check] [--max-pages <1..10000>] --database-url <loopback:55436/hip4_local> --expect-database hip4_local\nDefault: API 127.0.0.1:4014 only. API Receive options require a separately provisioned private untracked/hip4-local.env; --check reports safe configuration advice without creating or changing it. Indexers perform public reads and local writes. sync-* runs one production read/bootstrap pass; PM catalog checkpoints are resumable, and summaries distinguish partial from complete coverage. --max-pages is supported only for PM/Limitless sync (per PM lane; defaults 10/40). finance-worker observes/reconciles and can advance existing user-authorized funding operations; it never enables autonomous HIP signing. No migrations, policy changes or financial tests are performed. Run --check for each desired mode first. Frontend starts separately with HUNCH_API_BASE_URL=http://127.0.0.1:4014 bun run dev:http.",
     );
     return;
   }
@@ -497,10 +581,9 @@ export async function main(argv = process.argv.slice(2)) {
     database.observedOverrides.fundingVenues,
     receiveKey.status,
   );
-  const built = [
-    ENTRIES[options.mode],
-    "packages/config/dist/secrets.js",
-  ].every((file) => existsSync(path.join(ROOT, file)));
+  const built = serviceArtifacts(options.mode).every((file) =>
+    existsSync(path.join(ROOT, file)),
+  );
   const ready =
     built &&
     !configuration.missingRequired.length &&

@@ -7852,6 +7852,15 @@ prices. Both device routes adapt the native DTO to existing Hunch components.
 
 ### Local manual test setup
 
+The routine commands are now `pnpm hip:prepare`, `pnpm hip:sync` and
+`pnpm dev:hip` from the backend, plus `bun run dev:hip` from `Hunch_App`.
+See [local testing](hip4-local-testing.md) for the current two-terminal workflow.
+The supervisor starts the ordinary Hyperliquid, Polymarket and Limitless
+indexers, API and finance-worker. Ctrl+C stops its own apps and preserves data.
+Preparation explicitly creates a missing private Receive key once; ordinary
+check/start remain read-only. The individual guarded launcher commands below
+remain available for diagnostics.
+
 Use the ordinary local app on port `3000` and API on `4014`, with local PG16
 `hip4_local` on `55436` and Redis on `55437`. Keep the existing local login and
 admin identity. Back up the working database and validate migrations through

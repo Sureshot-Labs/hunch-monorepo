@@ -6,6 +6,11 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev --parallel",
+    "dev:hip": "node ops/hip4-local-stack.mjs start",
+    "hip:prepare": "node ops/hip4-local-stack.mjs prepare",
+    "hip:sync": "node ops/hip4-local-stack.mjs sync",
+    "hip:status": "node ops/hip4-local-stack.mjs status",
+    "test:hip-local": "node --test ops/hip4-local.test.mjs ops/hip4-local-sync.test.mjs ops/hip4-local-stack.test.mjs",
     "dev:bun": "turbo run dev:bun --parallel --filter=@hunch/config --filter=@hunch/db --filter=@hunch/infra --filter=@hunch/shared --filter=api --filter=ai-worker --filter=finance-worker --filter=indexer-dflow --filter=indexer-limitless --filter=indexer-polymarket",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",

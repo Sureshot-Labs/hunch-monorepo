@@ -9,6 +9,7 @@ This ingestor feeds that future: it normalizes markets and streams price/TOB dat
 ### For New Developers
 
 If you're new to the project, start with the **[Developer Setup Guide](./DEVELOPER_SETUP.md)** which covers:
+
 - Prerequisites and installation
 - Environment configuration
 - Database setup
@@ -31,6 +32,17 @@ pnpm migrate
 # Start all services in development mode
 pnpm dev
 ```
+
+### Local Hyperliquid testing
+
+For the existing isolated HIP stand, run `pnpm hip:prepare`, optionally refresh
+markets with `pnpm hip:sync`, then keep `pnpm dev:hip` running. This starts the
+API, finance-worker and ordinary Hyperliquid/Polymarket/Limitless indexers, not
+the unrelated workers in the general `pnpm dev` command. Start the frontend
+separately with `bun run dev:hip` from `Hunch_App`.
+
+See [local setup and testing](docs/hip4-local-testing.md) for shutdown, preserved
+data, coverage diagnostics and manual shortfall checks.
 
 ### Git Hooks (optional)
 

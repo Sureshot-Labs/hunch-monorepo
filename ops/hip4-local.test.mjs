@@ -19,11 +19,14 @@ import {
   buildLocalEnvironment,
   configurationStatus,
   inspectDatabase,
+  isReadOnlyMode,
   launchArguments,
   parseArgs,
   policyStatus,
   readLocalReceiveOptionKey,
   schemaStatus,
+  serviceArtifacts,
+  validateCatalogPageBudget,
   validateDatabaseTarget,
   LOCAL_REDIS,
   LOCAL_RECEIVE_ENV,
@@ -454,4 +457,129 @@ test("indexer retains its own explicit database guard and fixed Redis target", (
     LOCAL_REDIS,
   ]);
   assert.deepEqual(launchArguments(options), []);
+});
+
+test("all production indexer and one-shot modes retain local storage and need no login/funding credentials", () => {
+  for (const mode of [
+    "indexer",
+    "indexer-polymarket",
+    "indexer-limitless",
+    "sync-polymarket",
+    "sync-limitless",
+    "sync-hyperliquid",
+  ]) {
+    const parsed = parseArgs([
+      mode,
+      "--database-url",
+      target,
+      "--expect-database",
+      "hip4_local",
+    ]);
+    assert.equal(parsed.mode, mode);
+    assert.equal(isReadOnlyMode(mode), true);
+    const environment = buildLocalEnvironment(
+      {
+        LIMITLESS_WS_SESSION: "private-session",
+        DATABASE_URL: "remote",
+        REDIS_URL: "remote",
+      },
+      parsed,
+      {
+        HUNCH_RUNTIME_SECRETS_LOADED: "1",
+        PRIVY_WALLET_AUTHORIZATION_KEY: "forbidden",
+      },
+      testReceiveKey,
+    );
+    assert.equal(environment.DATABASE_URL, target);
+    assert.equal(environment.REDIS_URL, LOCAL_REDIS);
+    assert.equal(environment.LIMITLESS_WS_SESSION, "private-session");
+    assert.equal(environment.PRIVY_WALLET_AUTHORIZATION_KEY, undefined);
+    assert.equal(environment.HUNCH_RUNTIME_SECRETS_LOADED, undefined);
+    assert.equal(environment.ADMIN_SERVICE_TOKEN_PEPPER, "");
+    assert.equal(environment.HUNCH_FINANCE_WORKER_ENABLED, "false");
+    const status = configurationStatus(
+      environment,
+      mode,
+      true,
+      ["solana:usdc", "base:usdc"],
+      ["polymarket", "limitless"],
+    );
+    assert.deepEqual(status.missingRequired, []);
+    assert.equal(status.receiveOptionTokenKey.ready, true);
+    assert.equal(JSON.stringify(status).includes("private-session"), false);
+  }
+  assert.equal(isReadOnlyMode("finance-worker"), false);
+  assert.equal(isReadOnlyMode("api"), false);
+  assert.equal(isReadOnlyMode("unknown"), false);
+});
+
+test("sync modes propagate explicit budgets and targets without changing normal indexer configuration", () => {
+  for (const [venue, budgetKey, defaultBudget] of [
+    ["polymarket", "POLYMARKET_HOT_MAX_PAGES", 10],
+    ["limitless", "LIMITLESS_MAX_PAGES", 40],
+  ]) {
+    const parsed = parseArgs([
+      `sync-${venue}`,
+      "--max-pages",
+      "3",
+      "--database-url",
+      target,
+      "--expect-database",
+      "hip4_local",
+    ]);
+    assert.equal(parsed.maxPages, 3);
+    assert.equal(
+      buildLocalEnvironment({ [budgetKey]: "99999" }, parsed, {})[budgetKey],
+      "3",
+    );
+    assert.deepEqual(launchArguments(parsed), [
+      "--venue",
+      venue,
+      "--database-url",
+      target,
+      "--expect-database",
+      "hip4_local",
+      "--redis-url",
+      LOCAL_REDIS,
+      "--max-pages",
+      "3",
+    ]);
+    assert.equal(
+      buildLocalEnvironment({}, { ...options, mode: `sync-${venue}` }, {})[
+        budgetKey
+      ],
+      String(defaultBudget),
+    );
+    assert.equal(
+      buildLocalEnvironment(
+        { [budgetKey]: "99999" },
+        { ...options, mode: `indexer-${venue}` },
+        {},
+      )[budgetKey],
+      undefined,
+    );
+    assert.ok(
+      serviceArtifacts(`sync-${venue}`).includes(
+        `apps/indexer-${venue}/dist/bootstrap.js`,
+      ),
+    );
+  }
+  assert.deepEqual(launchArguments({ ...options, mode: "sync-hyperliquid" }), [
+    ...launchArguments({ ...options, mode: "indexer" }),
+    "--once",
+  ]);
+  assert.throws(() => serviceArtifacts("unknown"), /Unknown local mode/);
+  for (const value of ["0", "-1", "1.5", "Infinity", "1e2", "10001", "", " 2"])
+    assert.throws(() => validateCatalogPageBudget(value), /--max-pages/);
+  assert.equal(validateCatalogPageBudget("10000"), 10000);
+  assert.throws(() => parseArgs(["api", "--max-pages", "3"]), /only supported/);
+  assert.throws(
+    () => parseArgs(["sync-polymarket", "--max-pages"]),
+    /Missing value/,
+  );
+  assert.throws(
+    () =>
+      parseArgs(["sync-polymarket", "--max-pages", "2", "--max-pages", "3"]),
+    /Duplicate option/,
+  );
 });
