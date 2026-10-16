@@ -33,6 +33,7 @@ import {
 } from "./social-visibility.js";
 import { buildSocialInstrument } from "./social-instrument.js";
 import { verifiedBuyFactsSchema } from "../schemas/social-trade.js";
+import { recordOnboardingProfileWrite } from "./onboarding-service.js";
 
 type Row = {
   id: string;
@@ -356,6 +357,10 @@ export class SocialService {
             avatarUrl,
           ],
         );
+        await recordOnboardingProfileWrite(db, userId, {
+          handle,
+          avatarAssetId: input.avatarAssetId,
+        });
       });
     } catch (error) {
       if ((error as { code?: string }).code === "23505")
