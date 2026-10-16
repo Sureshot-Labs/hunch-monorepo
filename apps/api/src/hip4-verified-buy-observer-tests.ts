@@ -199,6 +199,52 @@ function harness() {
   };
 }
 
+function preciseConflictHarness() {
+  const h = harness();
+  const providerFill = structuredClone(fixture.originalPartialBuy.fills[0]);
+  const execution = projectHip4Execution(
+    "mainnet",
+    fixture.canonicalContract.owner,
+    providerFill,
+  );
+  const marker = {
+    version: 1,
+    revision: "7",
+    state: "conflicted",
+    reason: "execution_identity_conflict",
+    retainedFingerprint: canonicalJsonHash(execution),
+    retainedBasisFingerprint: "1".repeat(64),
+    observedFingerprint: "2".repeat(64),
+    observedBasisFingerprint: "2".repeat(64),
+  };
+  const matched = {
+    ...marker,
+    revision: "8",
+    state: "matched",
+    reason: null,
+    observedFingerprint: marker.retainedFingerprint,
+    observedBasisFingerprint: marker.retainedBasisFingerprint,
+  };
+  h.setEntries([
+    {
+      execution,
+      provider_fill: providerFill,
+      provider_evidence_status: marker,
+    },
+  ]);
+  return { ...h, providerFill, execution, marker, matched };
+}
+
+function assertPreciseRevocation(
+  result: Awaited<ReturnType<ReturnType<typeof harness>["observe"]>>,
+) {
+  assert.equal(result.state, "revoked");
+  if (result.state !== "revoked") throw new Error("fixture");
+  assert.equal(result.reason, "hip4_execution_evidence_conflict");
+  assert.equal(result.nativeEvidenceGuard?.orderId, "1");
+  assert.ok(result.nativeEvidenceGuard?.rows.length);
+}
+
 test("native observer proves partial BUY from admitted journal/P2, ignoring recorder and today's metadata", async () => {
   const h = harness();
   const result = await h.observe();
@@ -381,6 +427,308 @@ test("precise original-fill conflicts revoke, exact matching rechecks recover, m
     reason:
       "observation_unavailable:hip4_execution_evidence_status_unavailable",
   });
+});
+
+test("one exact precise-conflict source reread immediately restores the same retained original BUY at an advanced revision", async () => {
+  const h = preciseConflictHarness();
+  let rechecks = 0;
+  h.deps.recheckHip4OrderFills = async (scope) => {
+    rechecks++;
+    assert.deepEqual(scope, {
+      environment: "mainnet",
+      accountAddress: fixture.canonicalContract.owner,
+      coin: h.providerFill.coin,
+      orderId: "1",
+      timeMs: h.providerFill.time,
+    });
+    assert.equal(h.providerCalls.length, 0, "source recovery precedes status");
+    const uncountedFill = {
+      ...h.providerFill,
+      cloid: `0x${"3".repeat(32)}`,
+      time: h.providerFill.time + 1,
+      tid: h.providerFill.tid + 1,
+    };
+    h.setEntries([
+      {
+        execution: h.execution,
+        provider_fill: h.providerFill,
+        provider_evidence_status: h.matched,
+      },
+      {
+        execution: projectHip4Execution(
+          "mainnet",
+          fixture.canonicalContract.owner,
+          uncountedFill,
+        ),
+        provider_fill: uncountedFill,
+        provider_evidence_status: null,
+      },
+    ]);
+  };
+  const result = await h.observe();
+  assert.equal(result.state, "verified");
+  if (result.state !== "verified") throw new Error("fixture");
+  assert.equal(result.facts.grossShares, "27");
+  assert.equal(result.facts.grossNotionalUsd, "7.02");
+  assert.equal(result.nativeEvidenceGuard?.rows.length, 2);
+  assert.equal(result.nativeEvidenceGuard?.rows[0].revision, "8");
+  assert.equal(rechecks, 1);
+  assert.equal(h.providerCalls.length, 1);
+  assert.equal(
+    h.calls.filter((call) => call.sql === HIP4_VERIFIED_BUY_FILLS_SQL).length,
+    2,
+    "recovery reloads the complete bounded OID set once, not only the target row",
+  );
+});
+
+test("precise-conflict missing reader, failed reads and exhausted budgets preserve guarded revocation before status", async () => {
+  for (const failure of [
+    "missing",
+    "provider",
+    "provider_budget",
+    "evidence_budget",
+    "assert_budget",
+    "assert_error",
+  ] as const) {
+    const h = preciseConflictHarness();
+    let rechecks = 0;
+    if (failure !== "missing")
+      h.deps.recheckHip4OrderFills = async () => {
+        rechecks++;
+        if (failure === "provider_budget")
+          throw new Hip4ReadError("budget_exhausted");
+        if (failure === "evidence_budget")
+          throw new EvidenceBudgetExhausted(1, 0);
+        throw new Error("private provider transport detail");
+      };
+    if (failure === "assert_budget" || failure === "assert_error")
+      h.deps.assertEvidenceBudget = () => {
+        if (failure === "assert_budget")
+          throw new EvidenceBudgetExhausted(1, 0);
+        throw new Error("private shared budget detail");
+      };
+    const result = await h.observe();
+    assertPreciseRevocation(result);
+    assert.equal(result.nativeEvidenceGuard?.rows[0].revision, "7");
+    assert.equal(h.providerCalls.length, 0, failure);
+    assert.equal(
+      rechecks,
+      ["missing", "assert_budget", "assert_error"].includes(failure) ? 0 : 1,
+      failure,
+    );
+  }
+});
+
+test("empty, unrelated, mismatching and unchanged precise-conflict rechecks cannot acquit the retained original BUY", async () => {
+  for (const response of [
+    "empty",
+    "unrelated",
+    "mismatching_projection",
+    "malformed_marker",
+    "unchanged",
+  ] as const) {
+    const h = preciseConflictHarness();
+    let rechecks = 0;
+    h.deps.recheckHip4OrderFills = async () => {
+      rechecks++;
+      if (response === "unchanged") return;
+      if (response === "empty") {
+        h.setEntries([]);
+        return;
+      }
+      const providerFill = {
+        ...h.providerFill,
+        ...(response === "unrelated"
+          ? { cloid: `0x${"3".repeat(32)}`, tid: h.providerFill.tid + 1 }
+          : response === "mismatching_projection"
+            ? { sz: "26.0" }
+            : {}),
+      };
+      h.setEntries([
+        {
+          execution: h.execution,
+          provider_fill: providerFill,
+          provider_evidence_status:
+            response === "malformed_marker" ? { version: 2 } : h.matched,
+        },
+      ]);
+    };
+    assertPreciseRevocation(await h.observe());
+    assert.equal(rechecks, 1, response);
+    assert.equal(h.providerCalls.length, 0, response);
+  }
+});
+
+test("matched precise-conflict markers require an advanced revision and unchanged retained P2 provenance", async () => {
+  for (const staleProof of [
+    "same_revision",
+    "older_revision",
+    "retained_fingerprint",
+    "retained_basis",
+    "replaced_execution",
+  ] as const) {
+    const h = preciseConflictHarness();
+    let rechecks = 0;
+    h.deps.recheckHip4OrderFills = async () => {
+      rechecks++;
+      const providerFill = {
+        ...h.providerFill,
+        ...(staleProof === "replaced_execution" ? { sz: "26.0" } : {}),
+      };
+      const execution =
+        staleProof === "replaced_execution"
+          ? projectHip4Execution(
+              "mainnet",
+              fixture.canonicalContract.owner,
+              providerFill,
+            )
+          : h.execution;
+      const matched = {
+        ...h.matched,
+        ...(staleProof === "same_revision" ? { revision: "7" } : {}),
+        ...(staleProof === "older_revision" ? { revision: "6" } : {}),
+        ...(staleProof === "retained_fingerprint"
+          ? { retainedFingerprint: "3".repeat(64) }
+          : {}),
+        ...(staleProof === "retained_basis"
+          ? {
+              retainedBasisFingerprint: "3".repeat(64),
+              observedBasisFingerprint: "3".repeat(64),
+            }
+          : {}),
+        ...(staleProof === "replaced_execution"
+          ? {
+              retainedFingerprint: canonicalJsonHash(execution),
+              observedFingerprint: canonicalJsonHash(execution),
+            }
+          : {}),
+      };
+      h.setEntries([
+        {
+          execution,
+          provider_fill: providerFill,
+          provider_evidence_status: matched,
+        },
+      ]);
+    };
+    const result = await h.observe();
+    assert.equal(result.state, "revoked", staleProof);
+    assertPreciseRevocation(result);
+    assert.equal(rechecks, 1, staleProof);
+    assert.equal(h.providerCalls.length, 0, staleProof);
+  }
+});
+
+test("a precise-conflict source reread cannot repeat through a separate legacy ambiguity", async () => {
+  const h = preciseConflictHarness();
+  const legacyFill = {
+    ...h.providerFill,
+    tid: h.providerFill.tid + 1,
+    time: h.providerFill.time + 1,
+    sz: "1.0",
+  };
+  const legacyEntry = {
+    execution: projectHip4Execution(
+      "mainnet",
+      fixture.canonicalContract.owner,
+      legacyFill,
+    ),
+    provider_fill: legacyFill,
+    provider_evidence_status: null,
+  };
+  h.journal.account_history = {
+    accountingConflicts: { [h.providerFill.coin]: legacyFill.time },
+  };
+  h.setEntries([
+    {
+      execution: h.execution,
+      provider_fill: h.providerFill,
+      provider_evidence_status: h.marker,
+    },
+    legacyEntry,
+  ]);
+  let rechecks = 0;
+  h.deps.recheckHip4OrderFills = async () => {
+    rechecks++;
+    h.setEntries([
+      {
+        execution: h.execution,
+        provider_fill: h.providerFill,
+        provider_evidence_status: h.matched,
+      },
+      legacyEntry,
+    ]);
+  };
+  const result = await h.observe();
+  assert.equal(result.state, "pending");
+  if (result.state !== "pending") throw new Error("fixture");
+  assert.equal(result.reason, "hip4_legacy_execution_conflict_unscoped");
+  assert.equal(result.nativeEvidenceGuard?.rows.length, 2);
+  assert.equal(rechecks, 1, "one bounded source reread per purchase attempt");
+  assert.equal(h.providerCalls.length, 0);
+});
+
+test("old fully filled original orders with complete known fees still perform exact conflict recovery", async () => {
+  const h = preciseConflictHarness();
+  const orderTime = Date.parse("2020-01-01T00:00:00.000Z");
+  h.journal.unsigned_envelope.nonce = orderTime;
+  h.journal.unsigned_envelope.expiresAfter = orderTime + 60000;
+  h.journal.action_fingerprint = canonicalJsonHash(h.journal.unsigned_envelope);
+  const providerFill = {
+    ...h.providerFill,
+    time: orderTime + 100,
+    sz: "56.0",
+    fee: "0.1",
+    feeToken: "USDC",
+  };
+  const execution = projectHip4Execution(
+    "mainnet",
+    fixture.canonicalContract.owner,
+    providerFill,
+  );
+  const marker = {
+    ...h.marker,
+    retainedFingerprint: canonicalJsonHash(execution),
+  };
+  const body = structuredClone(fixture.originalPartialBuy.orderStatus);
+  Object.assign(body.order.order, { timestamp: orderTime, sz: "0.0" });
+  body.order.status = "filled";
+  body.order.statusTimestamp = providerFill.time;
+  h.setBody(body);
+  h.setEntries([
+    {
+      execution,
+      provider_fill: providerFill,
+      provider_evidence_status: marker,
+    },
+  ]);
+  let rechecks = 0;
+  h.deps.recheckHip4OrderFills = async (scope) => {
+    rechecks++;
+    assert.equal(scope.timeMs, providerFill.time);
+    h.setEntries([
+      {
+        execution,
+        provider_fill: providerFill,
+        provider_evidence_status: {
+          ...marker,
+          revision: "8",
+          state: "matched",
+          reason: null,
+          observedFingerprint: marker.retainedFingerprint,
+          observedBasisFingerprint: marker.retainedBasisFingerprint,
+        },
+      },
+    ]);
+  };
+  const result = await h.observe();
+  assert.equal(result.state, "verified");
+  if (result.state !== "verified") throw new Error("fixture");
+  assert.equal(result.facts.grossShares, "56");
+  assert.equal(result.facts.grossNotionalUsd, "14.56");
+  assert.equal(result.facts.feesUsd, "0.1");
+  assert.equal(result.nativeEvidenceGuard?.rows[0].revision, "8");
+  assert.equal(rechecks, 1);
 });
 
 test("native guarded proof cannot finalize without a finalizer, or when its revision has changed", async () => {

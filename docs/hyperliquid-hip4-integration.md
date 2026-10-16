@@ -7771,6 +7771,16 @@ checks the current policy, market generation and expiry after lock waits.
 Funding uses the existing consumer intent and reservations with the same frozen
 Copy pair; it is not an independent payment flow.
 
+The final native instrument check also applies to ordinary direct/funded BUY
+and SELL, independently of social permissions. Preparation freezes the exact
+native contract and caps the signed expiry to any known market expiry. After
+all admission lock waits, the database wall clock fences current market status,
+metadata freshness, settlement, expiry and the frozen economic generation.
+Refreshing books or snapshot IDs does not change that generation. Compatible
+older BUY snapshots may be reconstructed, but an old envelope extending beyond
+known expiry requires a fresh Review; signed bytes are never silently renewed.
+Already admitted replay and cancellation retain their existing recovery paths.
+
 Migration `0347_hip4_execution_evidence_status.sql` adds nullable row-local
 provider-evidence state without inventing historical proof. Contradictory exact
 fills preserve immutable raw facts and quarantine proof. Empty, unrelated and
@@ -7779,6 +7789,15 @@ until a bounded exact official reread; matching proof restores the existing
 purchase, thesis and Copy count. A short transaction locks the account snapshot,
 rereads the complete exact-order fill set after waiting, and finalizes through
 the existing verified-buy CTE. Provider IO never runs under those locks.
+
+An explicit social evidence refresh can repair an old fully filled order even
+when it no longer enters the general account repair lane. It requests at most
+one exact order/time slice and rereads the complete retained order set. Recovery
+requires a newer matched P2 revision, the same immutable fill and basis, and
+valid original BUY provenance. Budget denial, failed, empty, unrelated or
+contradictory responses retain revocation; a callback result alone is not proof.
+The PG16 test restores the original purchase, thesis and copier count for a
+90-day-old complete order without changing raw facts or creating duplicates.
 
 Social publication and Copy remain independently controlled by the existing
 `social.publicationVenues` and `social.copyVenues`; defaults do not include
@@ -7823,6 +7842,12 @@ batch hydration. The optimized unified feed remains unchanged as the discovery
 query owner. Signals keep existing model, reasoning, search and budget policy;
 HIP delivery opens a user-reviewed Hunch app ticket, never autonomous bot Buy.
 
+The ordinary `/events/<canonical-native-id>` page and its server rendering use
+the coverage-aware public `/markets/hyperliquid?eventId=...` adapter. The legacy
+`/events/:eventId` financial hydrator still excludes native contracts; broadening
+that legacy helper is not a prerequisite or an alternate source of native
+prices. Both device routes adapt the native DTO to existing Hunch components.
+
 ### Local manual test setup
 
 Use the ordinary local app on port `3000` and API on `4014`, with local PG16
@@ -7856,7 +7881,7 @@ authorized operation, even though autonomous signing and global execution stay
 disabled. From `Hunch_App`, start the ordinary frontend separately:
 
 ```bash
-HUNCH_API_BASE_URL=http://127.0.0.1:4014 node node_modules/next/dist/bin/next dev --hostname 127.0.0.1 --port 3000
+HUNCH_API_BASE_URL=http://127.0.0.1:4014 node --dns-result-order=ipv4first node_modules/next/dist/bin/next dev --hostname localhost --port 3000
 ```
 
 Run builds with the installed Node 20 runtime first. The launcher refuses schema
@@ -7906,8 +7931,42 @@ their own safeguards. All nine production availability calls were audited;
 desktop/mobile feed, tracked-wallet Copy and mobile event rows now consume the
 existing policy context. Actual component tests and PG16 anonymous/authenticated
 feed, Favorites, cache ageing and policy recovery pass without changing feed SQL.
-Two new sequential fresh whole GO reviews and mounted local read acceptance are
-still required after this correction.
+A further whole review found that ordinary admission lacked the final native
+market check already applied to Copy. The common native check now protects
+ordinary BUY/SELL too, including real two-connection expiry, stale-metadata and
+generation-change waits in disposable PG16. Native pre-admission refusal retains
+the existing owned Check and explicit Discard path to a fresh-key Review; it
+does not automatically repeat a submission or clear an admitted unknown order.
+Native event adapters preserve the validated side observations and their exact
+deadlines through the ordinary event-to-feed conversion. Missing, expired or
+foreign-side books remain unavailable; official fractional payouts remain
+independent. Live mobile pages use ordinary Smart Buy under its existing source
+and matching policies; recorded fixture pages remain inert. A later whole
+review found an additional social action fallback from denied Copy to Buy.
+That correction and two new sequential fresh whole GO reviews remain required.
+
+The user explicitly authorized upgrading only the working `hip4_local` schema
+on port `55436`. The guarded migration applied all 32 missing files: 358 are now
+recorded through `0347`, with one existing user/admin, zero funding operations
+and no invalid indexes. API `4014`, ordinary frontend `3000` and the public-read
+indexer are running; no policy or financial operation was changed. Actual
+API-to-Next-proxy reads passed for the native market, seven-market event, feed,
+two trade pages without duplicate keys, candles and an eight-second SSE stream
+with `tick` and `market_update` events. Mounted authenticated desktop and mobile
+pages show the existing Hunch design, seven event markets, Favorites, the common
+trade table, Arsenal 61% with YES 60.76 cents and independently observed NO 39.24
+cents. The side switch works and no client console error was recorded. The
+native account read is fresh but uninitialized: no owned USDC or positions,
+default mode and missing role. Unknown spendable cash is not reported as zero.
+The later signing/funded tests remain the user's responsibility.
+
+Local schema readiness is not local financial activation. The working database
+still has no new funding, social or matching override: the funding defaults
+advertise no venues or receive assets, native social publication/Copy are opted
+out, and native matching is unselected. Enable only the intended local test
+capabilities through the existing policy/admin owner before those manual tests;
+the schema upgrade did not authorize policy or permission changes. The finance
+worker has not been started automatically.
 
 P7 remains separate. Previously documented native negative-receipt uncertainty,
 history-linear refund/accounting costs and production-load evidence remain

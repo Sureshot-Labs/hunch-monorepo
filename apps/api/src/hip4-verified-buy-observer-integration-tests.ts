@@ -20,11 +20,13 @@ import { canonicalJsonHash } from "./funding/persistence/canonical.js";
 import { HYPERCORE_MAINNET_USDC } from "./funding/domain/hypercore-identity.js";
 import {
   repairVerifiedBuys,
+  EvidenceBudgetExhausted,
   type PurchaseObservation,
 } from "./services/verified-buy.js";
 import {
   claimHip4AccountRefresh,
   persistHip4AccountRefresh,
+  selectHip4ExactRecheckSources,
 } from "./services/hip4-account-repository.js";
 
 const publicFixture = JSON.parse(
@@ -80,6 +82,10 @@ try {
     marketId: identity.marketId,
     outcome,
     expiry: "2099-01-01T00:00:00.000Z",
+    // Public fixture terms are historical; this synthetic purchase was
+    // prepared from a current indexed observation before later metadata loss.
+    fetchedAt: new Date().toISOString(),
+    metadataValidUntil: new Date(Date.now() + 3600000).toISOString(),
     quoteToken: "USDC",
     quoteTokenId: HYPERCORE_MAINNET_USDC.assetId,
     quoteWeiDecimals: 8,
@@ -93,16 +99,18 @@ try {
     [identity.marketId, JSON.stringify({ hip4: native }), native.expiry],
   );
   fixture.request.limitPrice = "0.4";
-  fixture.request.quantity = "50";
+  fixture.request.quantity = "27";
   fixture.request.consentedDebitCapRaw = "2100000000";
-  fixture.nonce -= 10000;
+  // Exact social repair must not depend on the moving general account-history
+  // lookback or the ordinary full-quantity/known-fee order repair lane.
+  fixture.nonce -= 90 * 24 * 60 * 60 * 1000;
   fixture.feeCapRaw = "0";
   const prepared = await persistHip4OrderPreparationInTransaction(db, fixture);
   const oid = randomInt(1000000, 1000000000);
   // A synthetic admitted journal fixture, not a native admission/exchange call.
   await db.query(
-    `insert into hip4_order_submissions(action_id,signature_fingerprint,admission_snapshot,signer_address,debit_asset_id,debit_decimals,debit_raw)
-    values($1,$2,'{}'::jsonb,$3,$4,8,'2000000000')`,
+    `insert into hip4_order_submissions(action_id,signature_fingerprint,admission_snapshot,signer_address,debit_asset_id,debit_decimals,debit_raw,fills_observation)
+    values($1,$2,'{}'::jsonb,$3,$4,8,'1080000000','{"fullQuantityObserved":true,"feeCoverage":"known"}'::jsonb)`,
     [
       prepared.actionId,
       "1".repeat(64),
@@ -159,7 +167,7 @@ try {
   const response = {
     status: "order",
     order: {
-      status: "canceled",
+      status: "filled",
       statusTimestamp: fixture.nonce + 300,
       order: {
         coin: selected.coin,
@@ -167,8 +175,8 @@ try {
         oid,
         cloid: prepared.cloid,
         limitPx: "0.4",
-        origSz: "50.0",
-        sz: "23.0",
+        origSz: "27.0",
+        sz: "0.0",
         timestamp: fixture.nonce + 100,
         orderType: "Limit",
         reduceOnly: false,
@@ -288,7 +296,7 @@ try {
       finalizeNativeEvidence: finalizer,
     });
   }
-  async function save(sources: Array<typeof fill>, withSources = true) {
+  async function save(sources: unknown[], withSources = true) {
     const lease = await claimHip4AccountRefresh(
       db,
       "mainnet",
@@ -490,6 +498,7 @@ try {
   );
   const staleVerified = await observer(claim);
   await save([{ ...fill, sz: "28.0" }]);
+  delete dependencies.recheckHip4OrderFills;
   assert.equal(
     (await repairOnce(staleVerified)).pending,
     1,
@@ -503,7 +512,23 @@ try {
     ).rows[0].verified_buy_state,
     "verified",
   );
-  assert.equal((await repairOnce()).revoked, 1);
+  let deniedRecheckReached = false;
+  dependencies.recheckHip4OrderFills = async () => {
+    deniedRecheckReached = true;
+  };
+  dependencies.assertEvidenceBudget = () => {
+    throw new EvidenceBudgetExhausted(1, 0);
+  };
+  const budgetDeniedRevocation = await repairOnce();
+  assert.equal(
+    budgetDeniedRevocation.revoked,
+    1,
+    "a denied exact-read budget must revoke previously confirmed bad proof, not preserve it as transient pending",
+  );
+  assert.equal(budgetDeniedRevocation.budgetExhausted, 0);
+  assert.equal(deniedRecheckReached, false);
+  delete dependencies.assertEvidenceBudget;
+  delete dependencies.recheckHip4OrderFills;
   assert.ok(
     (
       await db.query(
@@ -543,7 +568,103 @@ try {
   );
   statusBody = response;
   const staleRevoked = await observer(claim);
-  await save([fill]);
+  let exactBody: unknown = [];
+  let preciseRechecks = 0;
+  dependencies.recheckHip4OrderFills = async (scope) => {
+    preciseRechecks++;
+    assert.deepEqual(scope, {
+      environment: "mainnet",
+      accountAddress: fixture.profile.address,
+      coin: fill.coin,
+      orderId: String(oid),
+      timeMs: fill.time,
+    });
+    assert.ok(
+      scope.timeMs < Date.now() - 89 * 24 * 60 * 60 * 1000,
+      "explicit exact repair reaches an old completed order beyond general lookback",
+    );
+    if (exactBody instanceof Error) throw exactBody;
+    const selectedSources = selectHip4ExactRecheckSources(exactBody, scope);
+    if (selectedSources.length) await save(selectedSources);
+  };
+  for (const body of [
+    [],
+    [{ ...fill, oid: oid + 1, tid: 2 }],
+    new Error("offline exact provider read"),
+    new EvidenceBudgetExhausted(1, 0),
+    [{ ...fill, sz: "28.0" }],
+  ]) {
+    exactBody = body;
+    const beforeStatusReads: number = reads;
+    const beforeRechecks: number = preciseRechecks;
+    assert.equal(
+      (await repairOnce()).revoked,
+      1,
+      "empty/unrelated/failed/budget-denied/mismatching exact reads cannot restore old full-order proof",
+    );
+    assert.equal(preciseRechecks, beforeRechecks + 1);
+    assert.equal(
+      reads,
+      beforeStatusReads,
+      "unresolved precise evidence revokes before any status request",
+    );
+    assert.ok(
+      (
+        await db.query(
+          "select proof_invalidated_at from user_theses where id=$1",
+          [thesisId],
+        )
+      ).rows[0].proof_invalidated_at,
+    );
+    assert.equal(
+      (
+        await db.query(
+          "select count(*)::int as n from copy_attributions where id=$1 and state='confirmed'",
+          [copyId],
+        )
+      ).rows[0].n,
+      0,
+    );
+  }
+  exactBody = [fill];
+  const beforeMatchingRecheck = preciseRechecks;
+  const beforeMatchingStatus = (
+    await db.query(HIP4_VERIFIED_BUY_FILLS_SQL, [
+      "mainnet",
+      fixture.profile.address,
+      fill.coin,
+      String(oid),
+      11,
+    ])
+  ).rows[0].provider_evidence_status;
+  assert.equal(
+    (await repairOnce()).verified,
+    1,
+    "fresh official matching exact proof restores the old completed purchase in the same explicit refresh",
+  );
+  assert.equal(preciseRechecks, beforeMatchingRecheck + 1);
+  const afterMatchingRows = (
+    await db.query(HIP4_VERIFIED_BUY_FILLS_SQL, [
+      "mainnet",
+      fixture.profile.address,
+      fill.coin,
+      String(oid),
+      11,
+    ])
+  ).rows;
+  assert.equal(
+    afterMatchingRows.length,
+    1,
+    "exact repair cannot duplicate retained executions",
+  );
+  assert.deepEqual(afterMatchingRows[0].execution, execution);
+  assert.deepEqual(afterMatchingRows[0].provider_fill, fill);
+  assert.equal(afterMatchingRows[0].provider_evidence_status.state, "matched");
+  assert.ok(
+    BigInt(afterMatchingRows[0].provider_evidence_status.revision) >
+      BigInt(beforeMatchingStatus.revision),
+    "restoration requires a new P2 matched revision, never a callback result or stale marker",
+  );
   assert.equal(
     (await repairOnce(staleRevoked)).pending,
     1,

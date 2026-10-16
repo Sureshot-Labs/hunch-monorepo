@@ -325,14 +325,15 @@ async function readHip4NativeSocialEvidence(
       return "execution_provenance_unavailable";
     }
   };
+  const conflictedEntries = () =>
+    originalEntries().filter(
+      (entry) =>
+        readHip4ProviderEvidenceStatus(entry.provider_evidence_status)
+          ?.state === "conflicted" && provenanceProblem(entry) === null,
+    );
   const preciseConflict = (): Hip4NativeEvidenceRead | null => {
     const nativeEvidenceGuard = guard();
-    return nativeEvidenceGuard &&
-      originalEntries().some(
-        (entry) =>
-          readHip4ProviderEvidenceStatus(entry.provider_evidence_status)
-            ?.state === "conflicted" && provenanceProblem(entry) === null,
-      )
+    return nativeEvidenceGuard && conflictedEntries().length
       ? {
           kind: "observation",
           observation: {
@@ -344,7 +345,63 @@ async function readHip4NativeSocialEvidence(
       : null;
   };
   const knownConflict = preciseConflict();
-  if (knownConflict) return knownConflict;
+  let rechecked = false;
+  if (knownConflict) {
+    // Completed orders may no longer enter the general account/order repair
+    // lanes. An explicit social refresh still owns one bounded exact source
+    // slice, including historical fills beyond the account lookback. Only P2's
+    // immutable retained fact and advanced matched revision can restore proof.
+    const target = conflictedEntries()[0];
+    const previous = readHip4ProviderEvidenceStatus(
+      target.provider_evidence_status,
+    );
+    if (!deps.recheckHip4OrderFills || !previous) return knownConflict;
+    try {
+      // Known positive contradiction takes precedence over resource/transport
+      // failures: throwing here would let the repair batch retain bad proof.
+      deps.assertEvidenceBudget?.(1);
+      rechecked = true;
+      await deps.recheckHip4OrderFills({
+        environment: "mainnet",
+        accountAddress: scope.accountAddress,
+        coin: scope.coin,
+        orderId: scope.orderId,
+        timeMs: Number(target.time_ms),
+      });
+    } catch {
+      if (!rechecked) return knownConflict;
+      // A writer can commit a newer precise revision before its caller loses
+      // the response. Reread that row even on failure so revocation uses the
+      // current guard; no callback result itself establishes matching proof.
+    }
+    try {
+      entries = await load();
+      checkBudget();
+    } catch {
+      return knownConflict;
+    }
+    const unresolved = preciseConflict();
+    if (unresolved) return unresolved;
+    const refreshed = entries.find(
+      (entry) => entry.time_ms === target.time_ms && entry.tid === target.tid,
+    );
+    const current = refreshed
+      ? readHip4ProviderEvidenceStatus(refreshed.provider_evidence_status)
+      : null;
+    if (
+      !refreshed ||
+      !current ||
+      current.state !== "matched" ||
+      BigInt(current.revision) <= BigInt(previous.revision) ||
+      current.retainedFingerprint !== previous.retainedFingerprint ||
+      current.retainedBasisFingerprint !== previous.retainedBasisFingerprint ||
+      current.observedFingerprint !== current.retainedFingerprint ||
+      current.observedBasisFingerprint !== current.retainedBasisFingerprint ||
+      !isHip4OriginalBuyFill(refreshed.provider_fill, scope) ||
+      provenanceProblem(refreshed) !== null
+    )
+      return knownConflict;
+  }
   const ambiguous = () =>
     originalEntries().filter(
       (entry) =>
@@ -368,7 +425,7 @@ async function readHip4NativeSocialEvidence(
   };
   const legacy = ambiguous();
   if (legacy.length) {
-    if (deps.recheckHip4OrderFills) {
+    if (deps.recheckHip4OrderFills && !rechecked) {
       deps.assertEvidenceBudget?.(1);
       try {
         await deps.recheckHip4OrderFills({
