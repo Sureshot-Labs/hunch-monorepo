@@ -1,4 +1,5 @@
 import type { DbQuery } from "../db.js";
+import { clearUserOnboardingData } from "./onboarding-service.js";
 import { getContentServiceRuntime } from "../content-service-runtime.js";
 import {
   enqueueContentStorageDeletion,
@@ -10,6 +11,7 @@ export async function clearUserSocialData(
   db: DbQuery,
   userId: string,
 ): Promise<void> {
+  await clearUserOnboardingData(db, userId);
   await db.query(
     `update users set handle=null,bio=null,avatar_asset_id=null,handle_changed_at=null,
     profile_name_edited_at=null,profile_avatar_edited_at=null,social_suspended_at=null where id=$1`,

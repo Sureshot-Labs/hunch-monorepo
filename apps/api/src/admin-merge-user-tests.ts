@@ -81,6 +81,23 @@ function createMergeDb(fixture: MergeDbFixture) {
         state.rolledBack = true;
         return result<T>();
       }
+      if (normalized.startsWith("select u.onboarding_version")) {
+        return result<T>([
+          {
+            onboarding_version: 0,
+            is_active: true,
+            social_suspended_at: null,
+            handle: null,
+            photo_ready: false,
+            revision: null,
+            status: null,
+            completion_reason: null,
+            completed_at: null,
+            steps: null,
+            interest_ids: [],
+          },
+        ] as unknown as T[]);
+      }
       if (normalized.startsWith("select pg_advisory_xact_lock")) {
         return result<T>();
       }
