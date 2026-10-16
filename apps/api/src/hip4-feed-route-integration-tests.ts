@@ -196,7 +196,7 @@ try {
   assert.equal(market.volumeDisplayPeriod, "24h");
   assert.equal(market.openInterest, null);
   assert.equal(market.liquidity, null);
-  assert.equal(market.acceptingOrders, false);
+  assert.equal(market.acceptingOrders, true);
   assert.equal(market.top.yesAsk, 0.6);
   assert.ok(market.topValidUntil.YES);
   assert.equal(first.json().data[0].eventVolume, null);
@@ -242,6 +242,7 @@ try {
   assert.equal(stale.headers["x-cache"], "hit");
   assert.equal(stale.json().data[0].markets[0].top.yesAsk, null);
   assert.equal(stale.json().data[0].markets[0].volumeDisplay, null);
+  assert.equal(stale.json().data[0].markets[0].acceptingOrders, false);
   assert.notEqual(stale.headers.etag, cached.headers.etag);
   Date.now = originalNow;
   const favorites = await app.inject({
@@ -251,6 +252,7 @@ try {
   assert.equal(favorites.statusCode, 200, favorites.body);
   assert.equal(favorites.json().data.length, 2);
   assert.equal(favorites.json().data[0].markets[0].volumeDisplayPeriod, "24h");
+  assert.equal(favorites.json().data[0].markets[0].acceptingOrders, true);
   await setLifecycle(false);
   const hiddenMetadata = await app.inject("/meta/venues");
   assert.equal(hiddenMetadata.statusCode, 200, hiddenMetadata.body);
@@ -287,6 +289,7 @@ try {
   const restored = await app.inject(`/feed?${query}`);
   assert.equal(restored.statusCode, 200, restored.body);
   assert.equal(restored.json().data.length, 2);
+  assert.equal(restored.json().data[0].markets[0].acceptingOrders, true);
   console.log(
     "HIP4 common feed PG16: anonymous + ordinary authenticated reads, first/next/empty pages, null metrics, cache ageing/ETag, policy off/recovery passed",
   );

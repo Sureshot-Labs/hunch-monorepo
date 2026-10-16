@@ -89,7 +89,7 @@ test("common feed uses one primary-side 24h volume, never lifetime or unknown ze
   assert.equal(output.liquidity, null);
   assert.equal(output.liquidityDisplay, null);
   assert.equal(output.openInterest, null);
-  assert.equal(output.acceptingOrders, false);
+  assert.equal(output.acceptingOrders, true);
   assert.equal(output.lastPrice, null);
   assert.equal(output.resolvedOutcome, null);
   assert.equal(output.resolvedOutcomePct, null);
@@ -97,6 +97,93 @@ test("common feed uses one primary-side 24h volume, never lifetime or unknown ze
   assert.ok(market.volume24h);
   market.volume24h.usd = "0";
   assert.equal(present(market).volumeDisplay, 0);
+});
+test("native orderability is current mainnet USDC market state, not a cached fallback or quote grant", () => {
+  const market = snapshot();
+  const input = { ...row(market), status: "CLOSED", acceptingOrders: false };
+  const output = present(market, now, input);
+  assert.equal(output.status, "ACTIVE");
+  assert.equal(output.acceptingOrders, true);
+  // Quote availability remains side-specific and independent of market state.
+  market.sides[0].bookAt = null;
+  market.sides[0].bookState = "missing";
+  assert.equal(present(market).acceptingOrders, true);
+  assert.equal(present(market).top.yesAsk, null);
+  assert.equal(present(market).top.noAsk, 0.6);
+  for (const mutate of [
+    (value: Hip4ReadMarket) => {
+      value.quoteToken = "OTHER";
+    },
+    (value: Hip4ReadMarket) => {
+      value.quoteToken = null;
+    },
+    (value: Hip4ReadMarket) => {
+      value.expiry = null;
+    },
+    (value: Hip4ReadMarket) => {
+      value.expiry = "invalid";
+    },
+    (value: Hip4ReadMarket) => {
+      value.expiry = fixture.collectedAt;
+    },
+    (value: Hip4ReadMarket) => {
+      value.status = "expired";
+    },
+    (value: Hip4ReadMarket) => {
+      value.status = "settled";
+    },
+    (value: Hip4ReadMarket) => {
+      value.fetchedAt = new Date(now + 1).toISOString();
+    },
+    (value: Hip4ReadMarket) => {
+      value.fetchedAt = new Date(now - policy.metadataMaxAgeMs).toISOString();
+    },
+    (value: Hip4ReadMarket) => {
+      value.settlement = {
+        source: "settledOutcome",
+        observedAt: fixture.collectedAt,
+        details: "official",
+      };
+    },
+  ]) {
+    const value = snapshot();
+    mutate(value);
+    assert.equal(present(value).acceptingOrders, false);
+  }
+  assert.equal(
+    applyFeedReadPresentation(
+      row(market),
+      market.eventId,
+      { hip4: market },
+      {
+        hip4Policy: { ...policy, metadataMaxAgeMs: 1000 },
+        now: now + 1000,
+      },
+    ).acceptingOrders,
+    false,
+  );
+  const testnet = mapHip4Market({
+    ...fixture.observations[0],
+    environment: "testnet",
+    outcome: 8775,
+    settlement: null,
+    fetchedAt: fixture.collectedAt,
+    generation: "testnet-feed-test",
+  }).market;
+  testnet.expiry = market.expiry;
+  assert.equal(
+    applyFeedReadPresentation(
+      row(testnet),
+      testnet.eventId,
+      { hip4: testnet },
+      {
+        hip4Policy: { ...policy, environment: "testnet" },
+        now,
+      },
+    ).acceptingOrders,
+    false,
+  );
+  assert.equal(present(snapshot()).acceptingOrders, true);
 });
 test("each native book expires independently, without borrowing a complement", () => {
   const market = snapshot();
@@ -140,6 +227,7 @@ test("cached public snapshots re-age without refreshing observation times", () =
   );
   assert.equal(expired.top.yesAsk, null);
   assert.equal(expired.volumeDisplay, null);
+  assert.equal(expired.acceptingOrders, false);
   assert.equal(
     (expired.marketMetadata?.hip4 as Hip4ReadMarket).fetchedAt,
     market.fetchedAt,
@@ -162,6 +250,7 @@ test("shorter effective freshness applies immediately to stored facts", () => {
   );
   assert.equal(result.top.yesAsk, null);
   assert.equal(result.volumeDisplay, null);
+  assert.equal(result.acceptingOrders, true);
 });
 test("non-USD, wrong-side, future and unrepresentable volumes are unavailable", () => {
   for (const mutate of [
@@ -224,6 +313,7 @@ test("missing, malformed and mismatched snapshots do not leak fallback quotes", 
     assert.equal(output.top.yesAsk, null);
     assert.equal(output.volumeDisplay, null);
     assert.equal(output.marketMetadata, null);
+    assert.equal(output.acceptingOrders, false);
   }
   const market = snapshot();
   assert.equal(
@@ -268,17 +358,18 @@ test("official binary settlement is distinct from fractional payout and extreme 
 });
 test("disabled or missing protocol context does not serve stale facts; recovery needs no cleanup", () => {
   const market = snapshot();
-  for (const hip4Policy of [null, { ...policy, enabled: false }])
-    assert.equal(
-      applyFeedReadPresentation(
-        row(market),
-        market.eventId,
-        { hip4: market },
-        { hip4Policy, now },
-      ).volumeDisplay,
-      null,
+  for (const hip4Policy of [null, { ...policy, enabled: false }]) {
+    const output = applyFeedReadPresentation(
+      row(market),
+      market.eventId,
+      { hip4: market },
+      { hip4Policy, now },
     );
+    assert.equal(output.volumeDisplay, null);
+    assert.equal(output.acceptingOrders, false);
+  }
   assert.equal(present(market).volumeDisplay, 123.45);
+  assert.equal(present(market).acceptingOrders, true);
 });
 test("other venues retain the exact existing DTO and object", () => {
   for (const venue of ["polymarket", "limitless", "kalshi"]) {

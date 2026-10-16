@@ -7898,8 +7898,16 @@ Browser evidence uses the actual shared report/composer components and mounted
 Copy-review hook with synthetic API/auth IO, including scoped replay, controller
 change, logout and Close recovery. It does not certify live signing or funded
 execution. The first fresh whole review found the tracked-flow conflict issue;
-its correction passed real PG16 recovery tests. Two new sequential fresh whole
-GO reviews and mounted local read acceptance are still required.
+its correction passed real PG16 recovery tests. A later review found permanent
+read-only orderability in the ordinary feed and missing effective policy in four
+client entry controls. Fresh native feed orderability now follows validated
+mainnet/USDC metadata, terminal state and expiry, while quotes and admission keep
+their own safeguards. All nine production availability calls were audited;
+desktop/mobile feed, tracked-wallet Copy and mobile event rows now consume the
+existing policy context. Actual component tests and PG16 anonymous/authenticated
+feed, Favorites, cache ageing and policy recovery pass without changing feed SQL.
+Two new sequential fresh whole GO reviews and mounted local read acceptance are
+still required after this correction.
 
 P7 remains separate. Previously documented native negative-receipt uncertainty,
 history-linear refund/accounting costs and production-load evidence remain

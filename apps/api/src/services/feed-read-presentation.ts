@@ -152,6 +152,21 @@ export function applyFeedReadPresentation(
       : null;
   return {
     ...unavailable,
+    // Factual review eligibility, not execution permission. The common venue
+    // policy, side quotes, preparation and final admission remain authoritative.
+    acceptingOrders:
+      market.environment === "mainnet" &&
+      market.quoteToken === "USDC" &&
+      market.status === "observed" &&
+      !market.settlement &&
+      market.coverage.metadata === "fresh" &&
+      currentObservation(
+        market.fetchedAt,
+        market.metadataValidUntil,
+        context.now,
+      ) &&
+      market.expiry != null &&
+      Date.parse(market.expiry) > context.now,
     volume24h: currentVolume ? value : null,
     volumeDisplay: currentVolume ? value : null,
     volumeValidUntil: volume?.validUntil ?? null,
@@ -159,11 +174,12 @@ export function applyFeedReadPresentation(
     outcomes: [primary.label, secondary.label],
     closeTime: market.expiry,
     expirationTime: market.expiry,
-    status: market.settlement
-      ? "RESOLVED"
-      : market.status === "expired"
-        ? "CLOSED"
-        : row.status,
+    status:
+      market.settlement || market.status === "settled"
+        ? "RESOLVED"
+        : market.status === "expired"
+          ? "CLOSED"
+          : "ACTIVE",
     resolvedOutcome: resolved,
     top: { yesBid: yes.bid, yesAsk: yes.ask, noBid: no.bid, noAsk: no.ask },
     topAsOf: { YES: yes.at, NO: no.at },
