@@ -8,6 +8,7 @@ import type { Pool } from "pg";
 import {
   approveContract,
   eligible,
+  matchingEnvironmentsCompatible,
   hash,
   readPolicy,
   EXPECTED_MODEL,
@@ -77,6 +78,7 @@ export async function runJob(
       !matching.venues.some((v) => v === a.venue) ||
       !matching.venues.some((v) => v === b.venue) ||
       a.id === b.id ||
+      !matchingEnvironmentsCompatible(a, b) ||
       (!matching.sameVenueEnabled && a.venue === b.venue) ||
       !eligible(policy, a.venue) ||
       !eligible(policy, b.venue) ||

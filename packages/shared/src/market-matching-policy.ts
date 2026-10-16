@@ -2,7 +2,11 @@ import { z } from "zod";
 
 /** Venues with validated unified settlement/outcome normalization. Adding a venue
  * also requires native quote/execution coverage; lifecycle alone cannot enable it. */
-export const MATCHING_SUPPORTED_VENUES = ["polymarket", "limitless"] as const;
+export const MATCHING_SUPPORTED_VENUES = [
+  "polymarket",
+  "limitless",
+  "hyperliquid",
+] as const;
 
 const integer = (fallback: number, min: number, max: number) =>
   z.number().int().min(min).max(max).default(fallback);
@@ -34,7 +38,10 @@ export const marketMatchingPolicySchema = z
         (values) => new Set(values).size === values.length,
         "Duplicate venue",
       )
-      .default([...MATCHING_SUPPORTED_VENUES]),
+      // Native normalization is available without enrolling a new venue in an
+      // existing override/default. HIP still requires explicit policy selection
+      // and discovery/full-indexer lifecycle eligibility.
+      .default(["polymarket", "limitless"]),
     dailyBudgetUsd: z.number().finite().nonnegative().default(1),
     dailyRequests: integer(5000, 0, 100000),
     lazyBudgetFraction: amount(0.2, 0, 0.2),

@@ -10,6 +10,13 @@ import {
   type VenueLifecyclePolicy,
 } from "@hunch/shared";
 import { fetchActiveRuntimePolicy, type RuntimePolicyQuery } from "@hunch/db";
+import {
+  normalizeHip4MatchingInput,
+  parseMatchingResolutionEvidence,
+  type Hip4MatchingIdentity,
+  type Hip4MatchingProvenance,
+  type MatchingResolutionEvidence,
+} from "./hip4-contract.js";
 
 // Evidence revisions, not product releases or runtime-policy schema versions.
 // Decision-affecting changes invalidate old approvals; operational budget edits do not.
@@ -40,6 +47,9 @@ export type Contract = {
     eventEndDate: string;
   };
   outcomes: Outcome[];
+  nativeIdentity?: Hip4MatchingIdentity | null;
+  nativeProvenance?: Hip4MatchingProvenance | null;
+  resolutionEvidence?: MatchingResolutionEvidence | null;
   status: string;
   eventStatus: string;
   provenance: Record<string, string>;
@@ -53,6 +63,15 @@ export type EventContract = {
   rules: string;
   status: string;
   children: { id: string; fingerprint: string; selection: string }[];
+  nativeEnvironment?: string | null;
+  nativeContexts?: {
+    id: string;
+    question: string;
+    identity: Hip4MatchingIdentity | null;
+    provenance: Hip4MatchingProvenance | null;
+    resolution: MatchingResolutionEvidence | null;
+    blockers: string[];
+  }[];
   fingerprint: string;
 };
 export type MarketRow = Record<string, unknown> & {
@@ -270,7 +289,7 @@ export function normalizeContract(row: MarketRow): Contract {
     nativeIds.every(
       (id) => id && tokens.filter((t) => clean(t.token_id) === id).length === 1,
     );
-  const outcomes: Outcome[] = labels.map((label) => {
+  let outcomes: Outcome[] = labels.map((label) => {
     const upper = label.toUpperCase();
     const side = upper === "YES" || upper === "NO" ? upper : null;
     // Stable instrument identity, never array position. Ambiguous token labels fail closed.
@@ -303,6 +322,43 @@ export function normalizeContract(row: MarketRow): Contract {
     }))
     .sort((a, b) => a.id.localeCompare(b.id));
   const blockers: string[] = [];
+  const native =
+    row.venue === "hyperliquid"
+      ? normalizeHip4MatchingInput({
+          id: row.id,
+          eventId: row.event_id,
+          title: clean(row.title),
+          eventTitle: clean(row.event_title),
+          description: clean(row.description),
+          question: clean(metadata.question),
+          expiry: canonicalDate(row.expiration_time),
+          labels,
+          tokens: tokens.map((token) => ({
+            tokenId: clean(token.token_id),
+            side: clean(token.outcome_side).toUpperCase(),
+          })),
+          metadata,
+        })
+      : null;
+  const resolutionEvidence = native
+    ? native.resolution
+    : metadata.matchingResolution == null
+      ? undefined
+      : parseMatchingResolutionEvidence(metadata.matchingResolution);
+  if (native) {
+    blockers.push(...native.blockers);
+    outcomes = native.outcomes.map((outcome) => ({
+      id: `${row.id}:token:${outcome.tokenId}`,
+      ...outcome,
+    }));
+  } else if (resolutionEvidence === null) {
+    blockers.push("resolution_terms_missing_or_invalid");
+  }
+  if (
+    resolutionEvidence &&
+    resolutionEvidence.question !== clean(metadata.question)
+  )
+    blockers.push("resolution_original_question_mismatch");
   if (!rules.length) blockers.push("missing_rules");
   if (
     rules.some((rule) =>
@@ -357,6 +413,13 @@ export function normalizeContract(row: MarketRow): Contract {
       eventEndDate: canonicalDate(row.event_end_date),
     },
     outcomes,
+    ...(native
+      ? {
+          nativeIdentity: native.identity,
+          nativeProvenance: native.provenance,
+        }
+      : {}),
+    ...(resolutionEvidence !== undefined ? { resolutionEvidence } : {}),
     status: clean(row.matching_status ?? row.status),
     eventStatus: clean(row.event_status),
     provenance: {
@@ -364,6 +427,9 @@ export function normalizeContract(row: MarketRow): Contract {
         "unified_markets.description + metadata.rulesPrimary/rulesSecondary",
       parentRules: "unified_events.description",
       normalizer: POLICY_VERSION,
+      ...(native
+        ? { native: "hip4-matching-v1:metadata.hip4 + hip4Matching" }
+        : {}),
     },
     blockers,
   };
@@ -391,6 +457,29 @@ export function normalizeEvent(
         selection: c.selection,
       }))
       .sort((a, b) => a.id.localeCompare(b.id)),
+    ...(row.venue === "hyperliquid"
+      ? {
+          nativeEnvironment:
+            children.length > 0 &&
+            children.every(
+              (child) =>
+                child.nativeIdentity?.environment ===
+                children[0].nativeIdentity?.environment,
+            )
+              ? (children[0].nativeIdentity?.environment ?? null)
+              : null,
+          nativeContexts: children
+            .map((child) => ({
+              id: child.id,
+              question: child.question,
+              identity: child.nativeIdentity ?? null,
+              provenance: child.nativeProvenance ?? null,
+              resolution: child.resolutionEvidence ?? null,
+              blockers: child.blockers,
+            }))
+            .sort((a, b) => a.id.localeCompare(b.id)),
+        }
+      : {}),
   };
   return { ...value, fingerprint: hash(value) };
 }
@@ -410,6 +499,20 @@ export function eligible(policy: VenueLifecyclePolicy, venue: string): boolean {
     venueHasIndexerMode(policy, venue, "full")
   );
 }
+/** Catalog identity is environment-scoped. Existing venues represent mainnet;
+ * never approve a testnet native market/event against one of those instances. */
+export function matchingEnvironmentsCompatible(
+  a: Contract | EventContract,
+  b: Contract | EventContract,
+): boolean {
+  const environment = (snapshot: Contract | EventContract) =>
+    snapshot.venue !== "hyperliquid"
+      ? "mainnet"
+      : "outcomes" in snapshot
+        ? snapshot.nativeIdentity?.environment
+        : snapshot.nativeEnvironment;
+  return Boolean(environment(a) && environment(a) === environment(b));
+}
 export function approveContract(
   a: Contract,
   b: Contract,
@@ -423,6 +526,14 @@ export function approveContract(
   mapping: { left: string; right: string }[];
 } {
   const blockers = [...a.blockers, ...b.blockers];
+  if (!matchingEnvironmentsCompatible(a, b))
+    blockers.push("environment_mismatch_or_unknown");
+  if (a.venue === "hyperliquid" || b.venue === "hyperliquid") {
+    if (!a.resolutionEvidence || !b.resolutionEvidence)
+      blockers.push("native_resolution_evidence_required");
+    else if (hash(a.resolutionEvidence) !== hash(b.resolutionEvidence))
+      blockers.push("native_resolution_terms_differ");
+  }
   if (
     a.status !== "ACTIVE" ||
     b.status !== "ACTIVE" ||

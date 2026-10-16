@@ -3,6 +3,7 @@ import { collectProductSeeds } from "./product-seeds.js";
 import type { Pool } from "pg";
 import {
   eligible,
+  matchingEnvironmentsCompatible,
   hash,
   outcomeCandidates,
   readPolicy,
@@ -440,6 +441,7 @@ export function admitContract(
   const boundSelection = contains(left, right) || contains(right, left);
   return (
     a.id !== b.id &&
+    matchingEnvironmentsCompatible(a, b) &&
     (sameVenue || a.venue !== b.venue) &&
     a.status === "ACTIVE" &&
     b.status === "ACTIVE" &&

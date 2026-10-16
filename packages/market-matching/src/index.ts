@@ -6,3 +6,4 @@ export * from "./resolver.js";
 export * from "./similar.js";
 export * from "./discovery.js";
 export * from "./policy.js";
+export * from "./hip4-contract.js";

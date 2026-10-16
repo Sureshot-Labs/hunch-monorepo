@@ -24,11 +24,17 @@ export function inferenceEvidence(s: Contract | EventContract) {
         rules: s.rules,
         parentRules: parentRuleEvidence(s).rules,
         outcomes: s.outcomes.map((o) => ({ label: o.label, side: o.side })),
+        ...(s.resolutionEvidence
+          ? { resolutionEvidence: s.resolutionEvidence }
+          : {}),
+        ...(s.nativeIdentity ? { nativeIdentity: s.nativeIdentity } : {}),
+        ...(s.nativeProvenance ? { nativeProvenance: s.nativeProvenance } : {}),
       }
     : {
         title: s.title,
         rules: s.rules,
         selections: s.children.map((c) => c.selection),
+        ...(s.nativeContexts ? { nativeContexts: s.nativeContexts } : {}),
       };
 }
 

@@ -1,6 +1,7 @@
 # Jev market matching v1
 
-Local review implementation for Polymarket and Limitless. Nothing is enabled by
+Local review implementation for Polymarket and Limitless, with an explicit,
+offline-fixture-validated HIP-4 scalar-threshold normalization adapter. Nothing is enabled by
 installation: the default runtime policy disables the worker, lazy demand and
 every consumer. No production data, policies, schedules or secrets were changed.
 
@@ -75,6 +76,73 @@ and admin API:
 The independent `venue_lifecycle` policy remains mandatory: discovery capability
 and full indexing are required in addition to a supported, policy-selected venue.
 Selecting a venue in matching cannot override its lifecycle restriction.
+
+### Bounded HIP-4 evidence adapter
+
+`hyperliquid` is selectable, but default policy venues remain Polymarket and
+Limitless. No source, delivery, trading or automation capability is enabled by
+this adapter. The native account is HyperCore, not an inferred EVM network.
+
+The catalog producer must supply its existing `metadata.hip4` read model and
+`metadata.question` (the original complete affirmative question), plus a typed
+`metadata.hip4Matching` envelope exported as `Hip4MatchingEvidence`:
+
+```ts
+{
+  version: 1,
+  source: "native_formal_terms",
+  environment: "mainnet", // or testnet, isolated from mainnet counterparts
+  outcome: 41,
+  sourceDescription: "original native description, unchanged in the catalog",
+  template: "native template identifier", // null only when absent
+  deployer: null, // native identifier if supplied; never a guessed wallet
+  resolution: {
+    version: 1,
+    kind: "scalar_threshold",
+    question: "the original complete affirmative question",
+    underlying: "BTC",
+    comparator: ">",
+    threshold: "60000",
+    observationTime: "2026-10-20T12:00:00.000Z",
+    timeZone: "UTC",
+    oracle: "exact official oracle",
+    priceSource: "exact official observation/source",
+    payoutRules: "complete formal payout terms",
+    voidRules: "complete missing-data, cancellation and void terms"
+  }
+}
+```
+
+`parseMatchingResolutionEvidence` and `normalizeHip4MatchingInput` are pure
+exports for ingestion adapters and fixtures. Parsing establishes well-formed
+input, not truth or equivalence. Generate these fields only from verified
+provider question/template terms; missing terms are not filled from headings,
+local expiry, prices or an embedding. Unknown templates and incomplete formal
+terms stay in review. The source description must agree with both the original
+catalog description and the native model. Original question, event context,
+parent rules, original rules, native token identity and ordinary model gates
+still apply; an evidence envelope never bypasses them.
+
+For a cross-venue HIP contract approval, the other venue must supply the same
+explicit tuple under `metadata.matchingResolution`. Conflicting or absent
+oracle, observation time, comparator, payout or void evidence cannot approve,
+even with a high synthetic model answer. Existing non-HIP matching is unchanged
+when this optional metadata is absent/null. Native labels map through validated
+environment/outcome/side/token identity, not named-label or array-position guesses.
+
+Native identity contains environment, outcome, exact tokens and expiry. Refresh
+generation UUID, quote timestamps and prices do not invalidate paid evidence;
+changed native instance/template/deployer/formal terms do. Recurrence is not a
+series-wide match. Environment compatibility is checked before job enqueue and
+again at execution/read time. Neither testnet contracts nor testnet events can
+match existing mainnet venues. Native event inference retains child formal
+contexts rather than relying on recurring display headings.
+
+`fixtures/hip4-resolution-v1.json` is synthetic, offline contract coverage, not
+live-provider acceptance. Source-side embedding invalidation, verified term
+production, API venue DTOs and native execution-quote/readiness adapters remain
+the caller's separate integration work. The bounded source-ID SQL projection
+now forwards the native metadata, without a new catalog scan or source join.
 
 | Operational control                                  | Default                                          | Release-owned ceiling/floor                  |
 | ---------------------------------------------------- | ------------------------------------------------ | -------------------------------------------- |

@@ -10,6 +10,7 @@ import {
   normalizeContract,
   normalizeEvent,
   eligible,
+  matchingEnvironmentsCompatible,
   readPolicy,
   POLICY_VERSION,
   type Contract,
@@ -50,7 +51,9 @@ const marketSelect = (predicate: "m.id=any($1::text[])" | "m.event_id=$1") => `
   )
   select m.id,m.event_id,m.venue,m.title,m.description,m.status,m.outcomes,m.close_time,m.expiration_time,e.end_date as event_end_date,
   jsonb_build_object('question',m.metadata->>'question','rulesPrimary',m.metadata->>'rulesPrimary','rulesSecondary',m.metadata->>'rulesSecondary',
-    'outcomes',m.metadata->'outcomes','clobTokenIds',m.metadata->'clobTokenIds') as metadata,
+    'outcomes',m.metadata->'outcomes','clobTokenIds',m.metadata->'clobTokenIds',
+    'hip4',m.metadata->'hip4','hip4Matching',m.metadata->'hip4Matching',
+    'matchingResolution',m.metadata->'matchingResolution') as metadata,
   e.title as event_title, e.description as event_description,
   case when e.end_date<=now() then 'CLOSED' else e.status::text end as event_status,
   case when m.resolved_outcome is not null or m.close_time<=now() or m.expiration_time<=now() then 'CLOSED' else m.status::text end as matching_status,
@@ -123,7 +126,11 @@ export async function enqueue(
   suppliedPolicy?: MarketMatchingPolicy,
 ): Promise<void> {
   const matching = suppliedPolicy ?? (await readMatchingPolicy(db));
-  if (a.id === b.id || (!matching.sameVenueEnabled && a.venue === b.venue))
+  if (
+    a.id === b.id ||
+    (!matching.sameVenueEnabled && a.venue === b.venue) ||
+    !matchingEnvironmentsCompatible(a, b)
+  )
     return;
   const revision = approvalRevision(matching);
   const [left, right] = a.id < b.id ? [a, b] : [b, a];

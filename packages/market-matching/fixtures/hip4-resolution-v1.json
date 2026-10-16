@@ -1,0 +1,74 @@
+{
+  "provenance": "Synthetic offline contract fixtures, not observed provider or matching acceptance evidence.",
+  "question": "Will BTC be above 60000 at 12:00 UTC on October 20, 2026?",
+  "rules": "YES pays 1 if BTC HyperCore mark price > 60000 at 2026-10-20T12:00:00.000Z (UTC), otherwise NO pays 1. Resolve using the HyperCore mark oracle. If the observation is unavailable, both sides pay 0.5.",
+  "resolution": {
+    "version": 1,
+    "kind": "scalar_threshold",
+    "question": "Will BTC be above 60000 at 12:00 UTC on October 20, 2026?",
+    "underlying": "BTC",
+    "comparator": ">",
+    "threshold": "60000",
+    "observationTime": "2026-10-20T12:00:00.000Z",
+    "timeZone": "UTC",
+    "oracle": "HyperCore mark oracle",
+    "priceSource": "HyperCore mark price",
+    "payoutRules": "YES pays 1 when the condition holds; otherwise NO pays 1",
+    "voidRules": "If the observation is unavailable, both sides pay 0.5"
+  },
+  "cases": [
+    { "name": "same complete formal terms", "patch": {}, "approved": true },
+    {
+      "name": "same title different oracle",
+      "patch": { "oracle": "Coinbase oracle" },
+      "approved": false
+    },
+    {
+      "name": "same title different price source",
+      "patch": { "priceSource": "Coinbase spot close" },
+      "approved": false
+    },
+    {
+      "name": "different observation time",
+      "patch": { "observationTime": "2026-10-20T13:00:00.000Z" },
+      "approved": false
+    },
+    {
+      "name": "different observation timezone",
+      "patch": { "timeZone": "America/New_York" },
+      "approved": false
+    },
+    {
+      "name": "inclusive boundary is not strict",
+      "patch": { "comparator": ">=" },
+      "approved": false
+    },
+    {
+      "name": "different threshold",
+      "patch": { "threshold": "61000" },
+      "approved": false
+    },
+    {
+      "name": "different underlying",
+      "patch": { "underlying": "ETH" },
+      "approved": false
+    },
+    {
+      "name": "different fractional settlement",
+      "patch": { "voidRules": "Missing observation pays NO 1" },
+      "approved": false
+    },
+    {
+      "name": "different side orientation",
+      "patch": {
+        "payoutRules": "NO pays 1 when the condition holds; otherwise YES pays 1"
+      },
+      "approved": false
+    },
+    {
+      "name": "next recurring observation",
+      "patch": { "observationTime": "2026-10-21T12:00:00.000Z" },
+      "approved": false
+    }
+  ]
+}

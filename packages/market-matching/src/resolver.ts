@@ -1,6 +1,7 @@
 import { readMatchingPolicy, approvalRevision } from "./policy.js";
 import {
   eligible,
+  matchingEnvironmentsCompatible,
   readPolicy,
   type Contract,
   type EventContract,
@@ -75,6 +76,7 @@ async function resolveApprovedMarketLinks(
       !a ||
       !b ||
       a.id === b.id ||
+      !matchingEnvironmentsCompatible(a, b) ||
       (!matching.sameVenueEnabled && a.venue === b.venue) ||
       versionId(a) !== link.left_version ||
       versionId(b) !== link.right_version ||
@@ -154,6 +156,7 @@ export async function resolveEventLinks(db: Db, eventId: string) {
     const target = await loadEvent(db, forward ? link.right_id : link.left_id);
     if (
       !target ||
+      !matchingEnvironmentsCompatible(source, target) ||
       target.id === source.id ||
       (!matching.sameVenueEnabled && target.venue === source.venue) ||
       !matching.venues.some((v) => v === target.venue) ||
