@@ -9,6 +9,7 @@ import { readHip4AccountPolicy } from "./hip4-account-repository.js";
 import { repairHip4ClaimedOrderFills } from "./hip4-order-fill-repair.js";
 import {
   HIP4_CLAIM_ORDER_OBSERVATION_SQL,
+  HIP4_CLAIM_COMPLETED_ORDER_OBSERVATION_SQL,
   readHip4OrderObservationContext,
   recordHip4OrderObservationInTransaction,
   failHip4OrderObservation,
@@ -121,17 +122,39 @@ export async function runHip4OrderObservationPass(
     errors: 0,
     leaseLost: 0,
     budgetExhausted: 0,
+    completedClaimed: 0,
   };
   for (let index = 0; index < account.policy.workerBatchSize; index++) {
     const currentAccount = await readHip4AccountPolicy(pool);
     if (index >= currentAccount.policy.workerBatchSize) break;
-    const claim = (
+    // Protect the first hot slot. Later slots may recheck completed receipts,
+    // bounded by the SAME total batch; a missing cold row falls back to hot.
+    // Batch=0 pauses all work; batch=1 intentionally reserves only hot work.
+    const tryCompleted =
+      index > 0 &&
+      result.completedClaimed < currentAccount.policy.completedOrderBatchSize;
+    let claim = tryCompleted
+      ? (
+          await pool.query<Hip4OrderObservationClaim>(
+            HIP4_CLAIM_COMPLETED_ORDER_OBSERVATION_SQL,
+            [
+              currentAccount.policy.leaseMs,
+              currentAccount.policy.completedOrderRecheckIntervalMs,
+            ],
+          )
+        ).rows[0]
+      : undefined;
+    if (claim) result.completedClaimed++;
+    claim ??= (
       await pool.query<Hip4OrderObservationClaim>(
         HIP4_CLAIM_ORDER_OBSERVATION_SQL,
         [currentAccount.policy.leaseMs, currentAccount.policy.workerIntervalMs],
       )
     ).rows[0];
-    if (!claim) break;
+    if (!claim) {
+      if (index === 0) continue;
+      break;
+    }
     result.claimed++;
     try {
       const saved = await observeHip4ClaimedOrder(
@@ -156,11 +179,13 @@ export async function runHip4OrderObservationPass(
         error instanceof Hip4ReadError
           ? error.reason
           : "order_observation_failed";
-      await failHip4OrderObservation(
-        pool,
-        claim,
-        code,
-        currentAccount.policy.workerIntervalMs,
+      await tx(pool, (db) =>
+        failHip4OrderObservation(
+          db,
+          claim,
+          code,
+          currentAccount.policy.workerIntervalMs,
+        ),
       );
       if (code === "budget_exhausted") {
         result.budgetExhausted++;

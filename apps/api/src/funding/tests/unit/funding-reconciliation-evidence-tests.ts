@@ -104,6 +104,39 @@ await pollFundingReconciliationEvidence({
 });
 assert.equal(providerPolled, 1);
 
+// All bounded evidence consumers use the SAME existing job token/deadline,
+// including terminal replay. No callback manufactures a scan lease.
+{
+  const work = {
+    progressToken: "00000000-0000-4000-8000-000000000099",
+    deadlineMs: Date.now() + 60_000,
+  };
+  for (const terminal of [false, true]) {
+    let destinationWork: unknown, providerWork: unknown;
+    await pollFundingReconciliationEvidence({
+      operationId: "00000000-0000-4000-8000-000000000098",
+      state: {
+        status: terminal ? "refunded" : "in_progress",
+        stage: terminal ? "terminal" : "routing",
+      },
+      now: new Date(),
+      ...work,
+      terminalReceiptWatch: terminal,
+      terminalRelayRefundWatch: terminal,
+      destinationPoll: async (_id, _now, context) => {
+        destinationWork = context;
+        return { destinationsPolled: 0, destinationSatisfied: false };
+      },
+      providerPoll: async (_id, _now, context) => {
+        providerWork = context;
+        return { requestsPolled: 0 };
+      },
+    });
+    assert.deepEqual(destinationWork, work);
+    assert.deepEqual(providerWork, work);
+  }
+}
+
 const terminalRefundCalls: string[] = [];
 await pollFundingReconciliationEvidence({
   operationId: "00000000-0000-4000-8000-000000000008",
@@ -169,6 +202,67 @@ assert.deepEqual(terminalRefundReceiptFailureCalls, [
   "destination",
 ]);
 assert.equal(terminalReceiptFailure.terminalReceiptPollFailed, true);
+
+// The terminal branch must retain the exact contention classification without
+// skipping existing canonicality/invalidation callbacks or changing its bound.
+for (const status of ["awaiting_user", "completed", "refunded"] as const) {
+  const busyCalls: string[] = [];
+  const result = await pollFundingReconciliationEvidence({
+    operationId: "00000000-0000-4000-8000-000000000010",
+    state: {
+      status,
+      stage: status === "awaiting_user" ? "source_action" : "terminal",
+    },
+    terminalReceiptWatch: true,
+    terminalRelayRefundWatch: true,
+    now: new Date("2026-07-29T13:24:01.437Z"),
+    refundCanonicalPoll: async () => {
+      busyCalls.push("canonical");
+      return { checked: 1 };
+    },
+    receiptPoll: async () => {
+      busyCalls.push("receipt");
+      throw new AggregateError([
+        { code: "55P03", constraint: "funding_physical_event_busy" },
+      ]);
+    },
+    providerPoll: async () => {
+      busyCalls.push("provider");
+      return { requestsPolled: 1 };
+    },
+    postconditionPoll: async () => {
+      busyCalls.push("postcondition");
+      return { postconditionsPolled: 1 };
+    },
+    destinationPoll: async () => {
+      busyCalls.push("destination");
+      return { destinationsPolled: 1, destinationSatisfied: true };
+    },
+  });
+  assert.deepEqual(result, {
+    terminalReceiptPollFailed: true,
+    terminalReceiptPollBusy: true,
+  });
+  assert.deepEqual(
+    busyCalls,
+    status === "awaiting_user"
+      ? ["canonical", "receipt"]
+      : ["canonical", "receipt", "provider", "postcondition", "destination"],
+  );
+}
+const mixedReceiptFailure = await pollFundingReconciliationEvidence({
+  operationId: "00000000-0000-4000-8000-000000000010",
+  state: { status: "refunded", stage: "terminal" },
+  terminalReceiptWatch: true,
+  now: new Date("2026-07-29T13:24:01.437Z"),
+  receiptPoll: async () => {
+    throw new AggregateError([
+      { code: "55P03", constraint: "funding_physical_event_busy" },
+      new Error("canonical receipt lookup is unavailable"),
+    ]);
+  },
+});
+assert.deepEqual(mixedReceiptFailure, { terminalReceiptPollFailed: true });
 
 for (const terminalStatus of ["completed", "failed", "cancelled"] as const) {
   const terminalReceiptFailureResult = await pollFundingReconciliationEvidence({

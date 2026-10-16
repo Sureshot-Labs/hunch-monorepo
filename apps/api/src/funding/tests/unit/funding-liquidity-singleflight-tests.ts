@@ -83,6 +83,39 @@ await test("identical liquidity parameters share one concurrent discovery and Re
   assert.equal(executions, 2);
 });
 
+await test("limit price, quantity and TIF cannot inherit another concurrent funding hint", async () => {
+  const singleflight = new FundingLiquiditySingleflight();
+  let release!: (value: IntentLiquidityProjection) => void;
+  const blocked = new Promise<IntentLiquidityProjection>((resolve) => {
+    release = resolve;
+  });
+  const original = {
+    ...request,
+    limitBuy: {
+      quantity: "10",
+      limitPrice: "0.415",
+      timeInForce: "Gtc" as const,
+    },
+  };
+  const first = singleflight.run("user-1", original, () => blocked);
+  const same = singleflight.run("user-1", { ...original }, () => blocked);
+  assert.equal(first, same);
+  const others = [
+    { quantity: "9" },
+    { limitPrice: "0.414" },
+    { timeInForce: "Alo" as const },
+  ].map((change) =>
+    singleflight.run(
+      "user-1",
+      { ...original, limitBuy: { ...original.limitBuy, ...change } },
+      () => blocked,
+    ),
+  );
+  for (const pending of others) assert.notEqual(first, pending);
+  release(projection);
+  await Promise.all([first, same, ...others]);
+});
+
 await test("receive catalog never joins full-source discovery or persists its placeholder projection", async () => {
   const runtime = new FundingPlanningRuntime({} as Pool);
   const observed: Array<

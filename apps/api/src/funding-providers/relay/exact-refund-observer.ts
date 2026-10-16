@@ -3,7 +3,15 @@ import type { AssetRef } from "../../funding/domain/types.js";
 import { isHypercoreMainnetUsdc } from "../../funding/domain/hypercore-identity.js";
 import type { OwnedRouteCanonicalDestinationEvent } from "../../funding/reconciliation/owned-route-destination-observer.js";
 import { observeRelayErc20DestinationReceipts } from "../../funding/reconciliation/relay-destination-receipts.js";
-import { createHip4AccountClient } from "../../services/hip4-client.js";
+import {
+  withFundingEvidenceReadBudget,
+  FundingEvidenceBudgetExpiredError,
+} from "../../funding/reconciliation/funding-evidence-budget.js";
+import { isRecord } from "../../lib/type-guards.js";
+import {
+  createHip4AccountClient,
+  Hip4ReadError,
+} from "../../services/hip4-client.js";
 import {
   admitHip4Request,
   readHip4Policy,
@@ -21,6 +29,7 @@ type EvmRead = Readonly<{
   destinationAddress: string;
   transactionHashes: readonly string[];
   now: Date;
+  deadlineMs?: number;
 }>;
 
 /** Read-only provider adapter. The common writer independently revalidates
@@ -31,6 +40,7 @@ export async function readRelayExactRefundEvidence(
     status: RelayStatusResponse;
     now: Date;
     ledgerAfterSecond?: number;
+    deadlineMs?: number;
   },
   dependencies: {
     requestEvidence: RelayClient["requestEvidence"];
@@ -46,9 +56,15 @@ export async function readRelayExactRefundEvidence(
 ) {
   const pending = (reason: string) => ({ kind: "pending" as const, reason });
   try {
-    const request = await dependencies.requestEvidence(
-      input.expected.requestId,
-    );
+    const expired = () =>
+      input.deadlineMs !== undefined && Date.now() >= input.deadlineMs;
+    if (expired()) return pending("refund_work_deadline");
+    const request =
+      input.deadlineMs === undefined
+        ? await dependencies.requestEvidence(input.expected.requestId)
+        : await dependencies.requestEvidence(input.expected.requestId, {
+            deadlineMs: input.deadlineMs,
+          });
     if (!request) return pending("refund_request_pending");
     const selected = selectRelayRefundReceiptPlan({
       expected: input.expected,
@@ -62,6 +78,7 @@ export async function readRelayExactRefundEvidence(
       const read = await readHypercoreLedgerSeconds({
         seconds: plan.ledgerSeconds,
         afterSecond: input.ledgerAfterSecond,
+        deadlineMs: input.deadlineMs,
         read: (start, end) => dependencies.readNativeLedger(owner, start, end),
       });
       return {
@@ -81,6 +98,10 @@ export async function readRelayExactRefundEvidence(
     // Reuse the common reader, one protocol-bound reference at a time (the
     // Requests schema bounds the manifest); never scan a wallet's transfers.
     for (const hash of plan.transactionHashes) {
+      if (expired()) {
+        reason = "refund_work_deadline";
+        break;
+      }
       try {
         evmEvents.push(
           ...(await dependencies.readEvm({
@@ -88,6 +109,9 @@ export async function readRelayExactRefundEvidence(
             destinationAddress: owner,
             transactionHashes: [hash],
             now: input.now,
+            ...(input.deadlineMs === undefined
+              ? {}
+              : { deadlineMs: input.deadlineMs }),
           })),
         );
       } catch {
@@ -119,29 +143,54 @@ export async function observeRelayExactRefundEvidence(
   input: Parameters<typeof readRelayExactRefundEvidence>[0],
   fetcher: typeof fetch = fetch,
 ) {
-  let nativeRead: ReturnType<typeof createHip4AccountClient> | undefined;
+  let nativePolicy:
+    | Awaited<ReturnType<typeof readHip4Policy>>["policy"]
+    | undefined;
+  const readDb = async <T>(read: (db: Pick<Pool, "query">) => Promise<T>) => {
+    try {
+      return input.deadlineMs === undefined
+        ? await read(pool)
+        : await withFundingEvidenceReadBudget(pool, input.deadlineMs, read);
+    } catch (error) {
+      // A denied exact second was not inspected. Preserve the last completed
+      // native cursor, just as the existing IP-budget denial does; treating a
+      // deadline as invalid data would advance past an unread second forever.
+      if (
+        input.deadlineMs !== undefined &&
+        (error instanceof FundingEvidenceBudgetExpiredError ||
+          (isRecord(error) && ["57014", "55P03"].includes(String(error.code))))
+      )
+        throw new Hip4ReadError("budget_exhausted");
+      throw error;
+    }
+  };
   return readRelayExactRefundEvidence(input, {
-    requestEvidence: (id) => relay.requestEvidence(id),
+    requestEvidence: (id, options) => relay.requestEvidence(id, options),
     readEvm: observeRelayErc20DestinationReceipts,
     readNativeLedger: async (owner, startTime, endTime) => {
-      if (!nativeRead) {
-        const { policy: configured } = await readHip4Policy(
-          pool,
-          "accountRead",
+      if (!nativePolicy) {
+        const { policy: configured } = await readDb((db) =>
+          readHip4Policy(db, "accountRead"),
         );
-        const policy = { ...configured, environment: "mainnet" as const };
-        nativeRead = createHip4AccountClient(
-          policy,
-          (weight) =>
+        nativePolicy = { ...configured, environment: "mainnet" as const };
+      }
+      const policy = nativePolicy;
+      const nativeRead = createHip4AccountClient(
+        policy,
+        (weight) =>
+          readDb((db) =>
             admitHip4Request(
-              pool,
+              db,
               "mainnet",
               weight,
               policy.requestWeightPerMinute,
             ),
-          fetcher,
-        );
-      }
+          ),
+        fetcher,
+        input.deadlineMs === undefined
+          ? undefined
+          : { deadlineMs: input.deadlineMs },
+      );
       return nativeRead({
         type: "userNonFundingLedgerUpdates",
         user: owner,

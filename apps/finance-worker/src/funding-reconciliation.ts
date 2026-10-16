@@ -65,6 +65,18 @@ type FundingReconciliationResult = {
     receiptsRecorded: number;
     recoveriesRequired: number;
     retryableErrors: number;
+    classificationRetry?: Readonly<{
+      eventsChecked: number;
+      unboundEvents: number;
+      receiptsRecorded: number;
+      recoveriesRequired: number;
+      retryableErrors: number;
+      refundScanPages: number;
+      refundScanErrors: number;
+      refundScanCleanupEvents: number;
+      refundScanCleanupRows: number;
+      refundScanCleanupErrors: number;
+    }>;
   }> | null;
   receiveRouting?: Readonly<{
     receiptsInspected: number;

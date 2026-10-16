@@ -8,7 +8,10 @@ import {
 } from "@hunch/shared";
 import { z } from "zod";
 import { hypercoreSpotAccountLocation } from "../account-value/canonical.js";
-import { FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL } from "../account-value/funding-movement-feed.js";
+import {
+  loadFundingPhysicalNativeSnapshotDebits,
+  FundingSnapshotDebitEvidenceError,
+} from "../account-value/funding-snapshot-debits.js";
 import { HYPERCORE_MAINNET_USDC } from "../funding/domain/hypercore-identity.js";
 import type { WalletExecutionProfile } from "../funding/domain/types.js";
 import { lockFundingControllerWallet } from "../funding/execution/funding-controller-wallet-lock.js";
@@ -41,6 +44,23 @@ import {
   readHip4OrderHoldRaw,
 } from "./hip4-order-holds.js";
 import type { classifyHip4SingleTradeReply } from "../services/hip4-trade-reply.js";
+import {
+  readTelegramAppHandoffV2Binding,
+  telegramAppHandoffV2BindingSchema,
+} from "../services/telegram-app-handoff-v2-contract.js";
+import {
+  lockTelegramAppHandoffV2ConsumerAuthorityInTransaction,
+  claimTelegramAppHandoffV2DirectTradeSubmissionInTransaction,
+  claimTelegramAppHandoffV2FundedTradeAttemptInTransaction,
+  linkTelegramAppHandoffV2DirectTradeOrderInTransaction,
+  linkTelegramAppHandoffV2NativeFundedOrderInTransaction,
+  type TelegramAppHandoffV2ScopeAssertion,
+  type TelegramAppHandoffV2DirectTradeSubmission,
+} from "./telegram-app-handoff-v2-direct-trade-repository.js";
+import {
+  telegramAppHandoffNativeTradeSchema,
+  telegramAppHandoffNativeRequestedAmounts,
+} from "../services/telegram-app-handoff-native-trade.js";
 
 export type Hip4AdmissionContext = {
   profile: WalletExecutionProfile;
@@ -66,6 +86,7 @@ type StoredAction = {
   state: "prepared" | "abandoned";
   action_fingerprint: string;
   preparation_snapshot: {
+    consentedDebitCapRaw?: string;
     profile?: WalletExecutionProfile;
     amounts?: { debitCapRaw?: string; feeCapRaw?: string | null };
     feeQuote?: unknown;
@@ -76,7 +97,7 @@ export type Hip4SubmissionRecord = {
   state: "submission_started" | "reconcile_required" | "rejected";
   funding_trade_attempt_id: string | null;
   signature_fingerprint: string;
-  admission_snapshot: { funding: unknown };
+  admission_snapshot: { funding: unknown; telegramAppHandoff?: unknown };
   reply_summary: ReturnType<typeof classifyHip4SingleTradeReply> | null;
 };
 export const HIP4_OWNED_ACTION_SQL = `select action_row.*,order_row.user_id
@@ -93,6 +114,8 @@ export type Hip4OrderSubmitReference = {
   actionId: string;
   signature: string;
   actor: string;
+  telegramAppHandoffId?: string;
+  telegramAppHandoffPlanFingerprint?: string;
   funding?: {
     operationId: string;
     reservationId: string;
@@ -137,6 +160,10 @@ export async function readHip4OrderSubmissionAttempt(
     ])
   ).rows[0];
   if (prior) {
+    const requestedHandoff = readTelegramAppHandoffV2Binding(input);
+    const storedHandoff = telegramAppHandoffV2BindingSchema
+      .nullish()
+      .parse(prior.admission_snapshot.telegramAppHandoff);
     const stored = z
       .object({
         operationId: z.string().uuid(),
@@ -147,6 +174,10 @@ export async function readHip4OrderSubmissionAttempt(
       .parse(prior.admission_snapshot.funding);
     if (
       prior.signature_fingerprint !== signatureFingerprint ||
+      (storedHandoff?.handoffId ?? null) !==
+        (requestedHandoff?.handoffId ?? null) ||
+      (storedHandoff?.planFingerprint ?? null) !==
+        (requestedHandoff?.planFingerprint ?? null) ||
       (stored?.operationId ?? null) !==
         (input.funding?.operationId.toLowerCase() ?? null) ||
       (stored?.reservationId ?? null) !==
@@ -240,7 +271,11 @@ export async function readHip4TradeLifecycle(
  */
 export async function admitHip4OrderActionInTransaction(
   db: PoolClient,
-  input: Hip4OrderSubmitRequest & { context: Hip4AdmissionContext },
+  input: Hip4OrderSubmitRequest & {
+    context: Hip4AdmissionContext;
+    /** Trusted API dependency, never a request field or client permission. */
+    telegramAppHandoffScope?: TelegramAppHandoffV2ScopeAssertion;
+  },
   capabilityCheck: typeof venueHasLifecycleCapability = venueHasLifecycleCapability,
 ) {
   if (input.actor !== "web_app")
@@ -250,14 +285,27 @@ export async function admitHip4OrderActionInTransaction(
   // Serialize with native funding before locking users/consumer operations.
   // No provider reads or signing occur while these locks are held.
   await lockFundingPolicyForTransaction(db);
+  const handoff = readTelegramAppHandoffV2Binding(input);
+  // A prior committed submission owns the response-loss path even if policy,
+  // funding readiness, handoff TTL or current wallet observations have changed.
+  const { row, request, signatureFingerprint, prior } =
+    await readHip4OrderSubmissionAttempt(db, input);
+  if (prior) return { admitted: false as const, submission: prior };
+  const handoffScope = input.telegramAppHandoffScope;
+  if (handoff) {
+    if (!handoffScope) throw new Error("hip4_handoff_scope_unavailable");
+    // Same envelope as other venue consumers, BEFORE the native user lock.
+    await lockTelegramAppHandoffV2ConsumerAuthorityInTransaction(db, {
+      userId,
+      binding: handoff,
+      assertCurrentScope: handoffScope,
+    });
+  }
   const user = await db.query(
     "select id from users where id=$1 and coalesce(is_active,true) for update",
     [userId],
   );
   if (user.rows.length !== 1) throw new Error("hip4_owner_unavailable");
-  const { row, request, signatureFingerprint, prior } =
-    await readHip4OrderSubmissionAttempt(db, input);
-  if (prior) return { admitted: false as const, submission: prior };
   const fundingBinding = input.funding
     ? {
         operationId: input.funding.operationId.toLowerCase(),
@@ -272,7 +320,8 @@ export async function admitHip4OrderActionInTransaction(
   )
     throw new Error("hip4_controller_changed");
   await lockFundingControllerWallet(db, userId, context.profile);
-  const { prepared, wire, side } = inspectHip4PreparedAction(row);
+  const { prepared, wire, side, token } = inspectHip4PreparedAction(row);
+  if (handoff && !wire) throw new Error("hip4_handoff_order_required");
   // Uncached common venue policy at the durable boundary, not a client flag or
   // the policy snapshot returned by a previous quote.
   const readLifecycle = () => readHip4TradeLifecycle(db, side, capabilityCheck);
@@ -337,6 +386,38 @@ export async function admitHip4OrderActionInTransaction(
     if (market.rows.length !== 1) throw new Error("hip4_market_unavailable");
   } else if (input.funding) throw new Error("hip4_cancel_funding_invalid");
 
+  let nativeHandoffSubmission: TelegramAppHandoffV2DirectTradeSubmission | null =
+    null;
+  if (handoff && wire && debitRaw) {
+    const nativeTrade = telegramAppHandoffNativeTradeSchema.parse({
+      version: "hip4-ioc-v1",
+      environment: prepared.environment,
+      marketId: row.canonical_market_id,
+      outcomeTokenId: row.token_id,
+      outcomeSide: token.sideIndex === 0 ? "YES" : "NO",
+      controllerWalletRef: context.profile.controllerWalletRef,
+      side,
+      timeInForce: wire.t.limit.tif,
+      quantity: wire.s,
+      limitPrice: wire.p,
+      consentedDebitCapRaw: row.preparation_snapshot.consentedDebitCapRaw,
+    });
+    const amounts = telegramAppHandoffNativeRequestedAmounts(nativeTrade);
+    nativeHandoffSubmission = {
+      action: side === "BUY" ? "buy" : "sell",
+      executionKind: "hyperliquid_ioc",
+      venue: "hyperliquid",
+      marketId: row.canonical_market_id,
+      outcomeTokenId: row.token_id,
+      signer: row.signer_address,
+      nativeTrade,
+      spendRaw: debitRaw,
+      receiveRaw:
+        side === "BUY"
+          ? String(amounts.tokenRaw)
+          : String(amounts.grossQuoteRaw),
+    };
+  }
   let fundingAttemptId: string | null = null;
   if (input.funding) {
     if (side !== "BUY" || !debitRaw)
@@ -354,18 +435,27 @@ export async function admitHip4OrderActionInTransaction(
       ) !== "matched"
     )
       throw new Error("hip4_funding_scope_changed");
-    const claimed = await claimFundingTradeAttemptInTransaction(db, {
+    const claimInput = {
       userId,
       operationId: input.funding.operationId,
       reservationId: input.funding.reservationId,
       venueId: "hyperliquid",
       marketId: row.canonical_market_id,
-      executionPath: "hyperliquid_outcome",
+      executionPath: "hyperliquid_outcome" as const,
       idempotencyKey: `hip4:${actionId}`,
       canonicalFingerprint: row.action_fingerprint,
       consumerIntent: input.funding.confirmedIntent,
       externalReference: row.cloid,
-    });
+    };
+    const claimed =
+      handoff && handoffScope && nativeHandoffSubmission
+        ? await claimTelegramAppHandoffV2FundedTradeAttemptInTransaction(db, {
+            ...claimInput,
+            binding: handoff,
+            assertCurrentScope: handoffScope,
+            submission: nativeHandoffSubmission,
+          })
+        : await claimFundingTradeAttemptInTransaction(db, claimInput);
     if (!claimed.claimed)
       throw new Error("hip4_funding_reconciliation_required");
     const fundedLocation = hypercoreSpotAccountLocation({
@@ -402,6 +492,20 @@ export async function admitHip4OrderActionInTransaction(
       claimToken: claimed.attempt.claimToken,
     });
     fundingAttemptId = claimed.attempt.id;
+  } else if (handoff && handoffScope && nativeHandoffSubmission) {
+    await claimTelegramAppHandoffV2DirectTradeSubmissionInTransaction(db, {
+      userId,
+      binding: handoff,
+      assertCurrentScope: handoffScope,
+      submission: nativeHandoffSubmission,
+      reconcileKeys: {
+        tradeType: "hyperliquid",
+        actionId,
+        orderId: row.order_id,
+        cloid: row.cloid,
+      },
+      recoveryPayload: {},
+    });
   }
   // Consumer chain precedes order row locks (as for the existing venues).
   const locked = await db.query<StoredAction>(
@@ -458,25 +562,17 @@ export async function admitHip4OrderActionInTransaction(
         (sum, item) => sum + BigInt(item.raw_amount),
         0n,
       );
-      const debits = await db.query<{ raw_amount: string }>(
-        FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL,
-        [
-          userId,
-          JSON.stringify([
-            {
-              component_id: null,
-              location_id: cash.locationId,
-              address: row.signer_address,
-              asset_decimals: 8,
-              snapshot_at: capacity.observedAt,
-            },
-          ]),
-        ],
-      );
-      held += debits.rows.reduce(
-        (sum, item) => sum + BigInt(item.raw_amount),
-        0n,
-      );
+      const debits = await loadFundingPhysicalNativeSnapshotDebits(
+        db,
+        userId,
+        cash,
+        capacity.observedAt,
+      ).catch((error) => {
+        if (error instanceof FundingSnapshotDebitEvidenceError)
+          throw new Error("hip4_capacity_unavailable");
+        throw error;
+      });
+      held += debits.reduce((sum, item) => sum + BigInt(item.raw_amount), 0n);
     }
     if (
       held + BigInt(debitRaw) > BigInt(capacity.availableRaw) ||
@@ -546,6 +642,7 @@ export async function admitHip4OrderActionInTransaction(
         feeCapRaw: currentFees.feeCapRaw,
         feeQuote,
         funding: fundingBinding,
+        telegramAppHandoff: handoff,
       },
       wire ? assetId : null,
       wire ? decimals : null,
@@ -563,6 +660,31 @@ export async function admitHip4OrderActionInTransaction(
         fundingAttemptId,
       ],
     );
+  if (handoff && nativeHandoffSubmission && !input.funding) {
+    await linkTelegramAppHandoffV2DirectTradeOrderInTransaction(db, {
+      userId,
+      order: { ...handoff, ...nativeHandoffSubmission },
+      orderId: row.order_id,
+      orderStatus: "submitted",
+      venueOrderId: null,
+    });
+  } else if (
+    handoff &&
+    nativeHandoffSubmission &&
+    input.funding &&
+    fundingAttemptId
+  ) {
+    await linkTelegramAppHandoffV2NativeFundedOrderInTransaction(db, {
+      userId,
+      order: { ...handoff, ...nativeHandoffSubmission },
+      orderId: row.order_id,
+      actionId,
+      cloid: row.cloid,
+      operationId: input.funding.operationId,
+      reservationId: input.funding.reservationId,
+      attemptId: fundingAttemptId,
+    });
+  }
   return {
     admitted: true as const,
     submission: saved.rows[0],

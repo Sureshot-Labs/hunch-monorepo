@@ -155,6 +155,7 @@ export function classifyPolymarketHandoffEvents(
   events: readonly FingerprintedFundingReceiveCanonicalEvent[],
   candidates: readonly FundingPolymarketHandoffCandidate[],
   codec: Pick<FundingTransactionReferenceCodec, "decrypt"> | null = null,
+  options: { eventSubset?: boolean } = {},
 ): ReadonlyMap<string, PolymarketHandoffEventClassification> {
   const classifications = new Map<string, PolymarketHandoffEventClassification>(
     events.map((entry) => [
@@ -253,7 +254,12 @@ export function classifyPolymarketHandoffEvents(
     for (const event of referencedEvents) {
       markRecovery(
         canonicalEventIdentity(event.event),
-        "handoff_reference_envelope_mismatch",
+        // A singleton/page may omit the log actually belonging to this hash.
+        // Keep the unrelated log retryable until exact log evidence arrives;
+        // never turn a partial transaction into a terminal envelope mismatch.
+        options.eventSubset && candidate.resolvedEventIndex == null
+          ? "handoff_correlation_pending"
+          : "handoff_reference_envelope_mismatch",
       );
     }
   }

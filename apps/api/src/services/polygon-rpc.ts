@@ -343,24 +343,29 @@ export async function fetchEvmBlockNumber(inputs: {
   timeoutMs: number;
   maxAttempts?: number;
   bypassCache?: boolean;
+  /** Bounded fresh callers must not inherit a wider URL-only memo's budget.
+   * The underlying RPC still single-flights identical timeout/retry inputs. */
+  isolateBudget?: boolean;
 }): Promise<bigint> {
+  const read = async () => {
+    const result = await ethRpcRequest<string>({
+      rpcUrl: inputs.rpcUrl,
+      timeoutMs: inputs.timeoutMs,
+      maxAttempts: inputs.maxAttempts,
+      method: "eth_blockNumber",
+      params: [],
+      inflightNamespace: inputs.bypassCache ? "fresh" : null,
+    });
+    return parseRpcQuantity(result, "block number");
+  };
+  if (inputs.bypassCache && inputs.isolateBudget) return read();
   return rpcReadCoordinator.memo(
     `evm:block-number:${inputs.rpcUrl}`,
     {
       ttlMs: BLOCK_NUMBER_CACHE_TTL_MS,
       bypass: inputs.bypassCache,
     },
-    async () => {
-      const result = await ethRpcRequest<string>({
-        rpcUrl: inputs.rpcUrl,
-        timeoutMs: inputs.timeoutMs,
-        maxAttempts: inputs.maxAttempts,
-        method: "eth_blockNumber",
-        params: [],
-        inflightNamespace: inputs.bypassCache ? "fresh" : null,
-      });
-      return parseRpcQuantity(result, "block number");
-    },
+    read,
   );
 }
 
@@ -405,6 +410,8 @@ export type EvmRpcTransactionByHash = Readonly<{
 }>;
 
 export type EvmRpcTransactionReceipt = Readonly<{
+  /** Retained when supplied by RPC; older synthetic readers may omit it. */
+  transactionHash?: string;
   succeeded: boolean;
   blockNumber: number;
   blockHash: string;
@@ -488,6 +495,7 @@ export async function fetchEvmTransactionReceipt(inputs: {
     throw new Error("EVM RPC transaction receipt is invalid");
   }
   const status = result.status;
+  const transactionHash = result.transactionHash;
   const blockNumber = result.blockNumber;
   const blockHash = result.blockHash;
   const logs = result.logs;
@@ -499,6 +507,13 @@ export async function fetchEvmTransactionReceipt(inputs: {
   ) {
     throw new Error("EVM RPC transaction receipt fields are invalid");
   }
+  if (
+    transactionHash !== undefined &&
+    (typeof transactionHash !== "string" ||
+      !/^0x[0-9a-fA-F]{64}$/u.test(transactionHash) ||
+      transactionHash.toLowerCase() !== inputs.transactionHash.toLowerCase())
+  )
+    throw new Error("EVM RPC transaction receipt identity does not match");
   const parsedLogs = logs.map((log) => {
     if (!isRecord(log)) {
       throw new Error("EVM RPC transaction receipt log is invalid");
@@ -524,6 +539,9 @@ export async function fetchEvmTransactionReceipt(inputs: {
     };
   });
   return {
+    ...(typeof transactionHash === "string"
+      ? { transactionHash: transactionHash.toLowerCase() }
+      : {}),
     succeeded: parseRpcQuantity(status, "transaction status") === 1n,
     blockNumber: safeRpcBlockNumber(blockNumber, "receipt block number"),
     blockHash,

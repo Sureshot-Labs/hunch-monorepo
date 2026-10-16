@@ -60,6 +60,8 @@ function createFakePool() {
       if (["begin", "commit", "rollback"].includes(normalized))
         return { rows: [] };
       if (normalized === "select 'live_fence'") return { rows: [] };
+      if (normalized.startsWith("select pg_advisory_xact_lock(hashtext($1))"))
+        return { rows: [] };
       if (normalized.startsWith("insert into telegram_app_handoffs")) {
         assert.match(
           normalized,
@@ -489,6 +491,9 @@ assert.equal(
 let v2ExecutionCalls = 0;
 const commitV2 = async () =>
   commitTelegramAppHandoffWithExecution({
+    lockExecutionAuthority: async (db) => {
+      await db.query("select 'live_fence'");
+    },
     commitExecution: async () => {
       v2ExecutionCalls += 1;
       return { fundingOperationId: "00000000-0000-4000-8000-000000000004" };
@@ -543,6 +548,9 @@ assert.equal(
   "opening a v2 Sell link atomically records consent on its trade intent",
 );
 await commitTelegramAppHandoffWithExecution({
+  lockExecutionAuthority: async (db) => {
+    await db.query("select 'live_fence'");
+  },
   allowedIntentActions: ["sell"],
   allowedIntentStatuses: ["previewed", "confirming", "external_handoff"],
   commitExecution: async () => ({ directTrade: true }),

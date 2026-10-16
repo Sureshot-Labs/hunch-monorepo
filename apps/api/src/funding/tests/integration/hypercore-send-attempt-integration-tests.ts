@@ -229,6 +229,187 @@ try {
   }
 
   await scenario(
+    "perps recovery uses the same signed admission, its own source capacity and a durable unknown attempt",
+    async () => {
+      const perps = hypercorePlanTestFixture(
+        new Date(),
+        userId,
+        wallet.address,
+        60000,
+        "",
+        profile.walletId,
+      );
+      const perpsPlan = (await buildRelayPlanningQuote(perps.input)).commitPlan;
+      assert.ok(perpsPlan.operation.sourceSnapshot);
+      const token = randomUUID();
+      const savedQuote = await createFundingQuoteInTransaction(client, {
+        userId,
+        discoveryProjectionId: randomUUID(),
+        selectedSourceOptionSnapshot: perpsPlan.operation.sourceSnapshot,
+        marketContextSnapshot: null,
+        destinationOptionSnapshot:
+          perpsPlan.operation.destinationTargetSnapshot,
+        venueBindingSnapshot: null,
+        planSnapshot: perpsPlan,
+        policyVersion: 1,
+        policyRevision: policy.revision,
+        canonicalRequest: { test: "perps-recovery" },
+        consentToken: token,
+        expiresAt: new Date(perps.input.quote.candidate.expiresAt),
+      });
+      const saved = await commitFundingOperationInTransaction(client, {
+        userId,
+        quoteId: savedQuote.id,
+        consentToken: token,
+        idempotencyKey: randomUUID(),
+        plan: perpsPlan,
+        subjectLookupHmac: "c".repeat(64),
+        subjectLookupKeyVersion: 1,
+      });
+      const perpsOperationId = saved.operation.id;
+      const steps = (
+        await client.query(
+          "select id,action_fingerprint,executor_id from funding_operation_steps where operation_id=$1 order by ordinal",
+          [perpsOperationId],
+        )
+      ).rows;
+      const perpsAuth = steps[0],
+        perpsSend = steps[1];
+      assert.ok(perpsAuth && perpsSend);
+      const perpsPair = (
+        await nativeFundingPreparationInTransaction(
+          client,
+          perpsOperationId,
+          perpsSend.id,
+        )
+      ).pair;
+      assert.equal(perpsPair.validated.binding.sourceDex, "");
+      assert.notEqual(
+        perpsPlan.reservations[0].locationId,
+        plan.reservations[0].locationId,
+      );
+      const authStarted = await startFundingStepAttemptForUserInTransaction(
+        client,
+        {
+          userId,
+          operationId: perpsOperationId,
+          stepId: perpsAuth.id,
+          canonicalActionFingerprint: perpsAuth.action_fingerprint,
+          executorId: perpsAuth.executor_id,
+          nativeSubmissionProtocol: true,
+        },
+      );
+      const authTerms = perpsPair.validated.authorization.typedData;
+      const authRequest = {
+        userId,
+        operationId: perpsOperationId,
+        stepId: perpsAuth.id,
+        attemptId: authStarted.attempt.id,
+        signature: await wallet.signTypedData(
+          authTerms.domain,
+          authTerms.types,
+          authTerms.message,
+        ),
+      };
+      const authAdmitted = await admitNativeFundingAuthInTransaction(
+        client,
+        authRequest,
+        policy,
+      );
+      assert.equal(authAdmitted.admitted, true);
+      assert.ok(authAdmitted.requestFingerprint);
+      await finishNativeFundingAuthInTransaction(client, {
+        ...authRequest,
+        requestFingerprint: authAdmitted.requestFingerprint,
+        authorized: true,
+      });
+      const sendStarted = await startFundingStepAttemptForUserInTransaction(
+        client,
+        {
+          userId,
+          operationId: perpsOperationId,
+          stepId: perpsSend.id,
+          canonicalActionFingerprint: perpsSend.action_fingerprint,
+          executorId: perpsSend.executor_id,
+          nativeSubmissionProtocol: true,
+        },
+      );
+      const terms = perpsPair.validated.transfer.typedData;
+      const request = {
+        userId,
+        operationId: perpsOperationId,
+        stepId: perpsSend.id,
+        attemptId: sendStarted.attempt.id,
+        signature: await wallet.signTypedData(
+          terms.domain,
+          terms.types,
+          terms.message,
+        ),
+      };
+      let reads = 0;
+      const capacity = (raw: string) =>
+        nativeSendCapacityCheck(async (readOwner, dex) => {
+          reads++;
+          assert.equal(readOwner.toLowerCase(), wallet.address.toLowerCase());
+          assert.equal(dex, "");
+          return {
+            availableRaw: raw,
+            observedAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 60000).toISOString(),
+          };
+        });
+      await client.query("savepoint perps_insufficient");
+      await assert.rejects(
+        admitNativeFundingSendInTransaction(
+          client,
+          request,
+          policy,
+          capacity("999999999"),
+          codec,
+        ),
+        /no longer covers/,
+      );
+      await client.query("rollback to savepoint perps_insufficient");
+      const admitted = await admitNativeFundingSendInTransaction(
+        client,
+        request,
+        policy,
+        capacity("1000000000"),
+        codec,
+      );
+      assert.equal(
+        admitted.admitted,
+        true,
+        "the existing spot funding hold does not consume perps cash",
+      );
+      const before = reads;
+      const replay = await admitNativeFundingSendInTransaction(
+        client,
+        request,
+        policy,
+        capacity("0"),
+        codec,
+      );
+      assert.equal(replay.admitted, false);
+      assert.equal(
+        reads,
+        before,
+        "no signed action resend or replacement read on replay",
+      );
+      assert.equal(
+        (
+          await client.query(
+            "select state from balance_reservations where operation_id=$1",
+            [perpsOperationId],
+          )
+        ).rows[0].state,
+        "active",
+        "unknown submission retains its physical hold",
+      );
+    },
+  );
+
+  await scenario(
     "HIP BUY and native send share physical cash holds; definitive rejection restores send capacity",
     async () => {
       const lifecycle = structuredClone(DEFAULT_VENUE_LIFECYCLE_POLICY);

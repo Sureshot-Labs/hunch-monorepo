@@ -7,15 +7,22 @@ import type {
   ValuedAssetComponent,
 } from "../funding/domain/types.js";
 import { scaleUnsignedDecimalByRawRatio, subtractRawFloor } from "./decimal.js";
-import { fundingReservationHoldSql } from "../funding/persistence/source-reservation-hold.js";
-import { isHypercoreMainnetUsdc } from "../funding/domain/hypercore-identity.js";
+import {
+  fundingReservationHoldSql,
+  polymarketNativeHandoffReservationPendingSql,
+  polymarketNativeHandoffEconomicInputSql,
+} from "../funding/persistence/source-reservation-hold.js";
+import {
+  isHypercoreMainnetUsdc,
+  hypercoreLocationDex,
+} from "../funding/domain/hypercore-identity.js";
 import {
   sameAsset,
   sameAccountAddress,
 } from "../funding/domain/asset-identity.js";
 import { assetLocationSchema, moneySchema } from "../funding/domain/schemas.js";
 import { isRecord } from "../lib/type-guards.js";
-import { RELAY_ROUTE_SPECS } from "../funding-providers/relay/mappings.js";
+import { RELAY_HYPERCORE_EVM_STABLE_SOURCE_ASSETS } from "../funding-providers/relay/mappings.js";
 import {
   readFundingRefundContract,
   readFundingRefundReceiptIdentity,
@@ -24,48 +31,65 @@ import {
   type FundingRefundSettledReceipt,
 } from "../funding/domain/refund-settlement.js";
 import { projectFundingRefundClaim } from "./funding-refund-claim.js";
+import {
+  readCommittedFundingIdentity,
+  refundSnapshotAccountIds,
+} from "../funding/domain/committed-economic-identity.js";
+import { committedFundingReadLocationAlias } from "./funding-read-location-identity.js";
+import { loadFundingHandoffSnapshotFacts } from "./funding-handoff-snapshots.js";
+import {
+  polymarketHandoffBindingSql,
+  readStoredPolymarketHandoffBinding,
+  type PolymarketHandoffBindingRow,
+} from "../funding/persistence/polymarket-handoff-binding-repository.js";
 import type { CollectorError } from "./account-value-projector.js";
+import {
+  FUNDING_NATIVE_SNAPSHOT_DEBIT_CANDIDATES_SQL,
+  FUNDING_EVM_SNAPSHOT_DEBIT_CANDIDATES_SQL,
+  partitionFundingSnapshotDebits,
+  type FundingSnapshotDebitRow,
+} from "./funding-snapshot-debits.js";
+export {
+  FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL,
+  FUNDING_EVM_SNAPSHOT_DEBITS_SQL,
+} from "./funding-snapshot-debits.js";
 
-const exactEvmSourceAssets = [
-  RELAY_ROUTE_SPECS["base-usdc-to-hypercore-spot-usdc"].source,
-  RELAY_ROUTE_SPECS["polygon-usdc-to-hypercore-spot-usdc"].source,
-];
+function snapshotDebitFacts(
+  userId: string,
+  rows: readonly FundingSnapshotDebitRow[],
+): FundingInTransitFact[] {
+  const { accepted, rejected } = partitionFundingSnapshotDebits(userId, rows);
+  const mapRow = (
+    row: FundingSnapshotDebitRow,
+    rejectedProof: boolean,
+  ): FundingInTransitFact => ({
+    operationId: row.operation_id,
+    segmentId: row.segment_id,
+    sourceComponentId: row.source_component_id,
+    sourceLocationId: row.source_location_id,
+    // Diagnostic-only fact is not an invented monetary debit or a claim.
+    amount: {
+      asset: {
+        networkId: row.network_id,
+        assetId: row.asset_id,
+        decimals: row.asset_decimals,
+      },
+      raw: rejectedProof ? "0" : row.raw_amount,
+    },
+    observedAt: new Date(row.observed_at).toISOString(),
+    ...(rejectedProof
+      ? { observationError: "funding_source_evidence_invalid" }
+      : {}),
+  });
+  return [
+    ...accepted.map((row) => mapRow(row, false)),
+    ...rejected.map((row) => mapRow(row, true)),
+  ];
+}
 
 /** A completed transfer stops being in transit, but cannot restore cash in an
  * older cached source snapshot. Read only the indexed post-snapshot tail of
  * exact owned native sources; never aggregate different observation times. */
-export const FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL = `
-  select source_snapshot.component_id as source_component_id,
-    source_snapshot.location_id as source_location_id,
-    debit.operation_id, debit.segment_id, debit.network_id, debit.asset_id,
-    source_snapshot.asset_decimals, debit.raw_amount,
-    coalesce(debit.finalized_at, debit.observed_at) as observed_at
-  from jsonb_to_recordset($2::jsonb) as source_snapshot(
-    component_id text, location_id text, address text, asset_decimals integer,
-    snapshot_at timestamptz)
-  join funding_observations debit
-    on debit.network_id='hyperliquid:mainnet'
-      and debit.asset_id='0x6d1e7cde53ba9467b783cb7c530ce054'
-      and debit.asset_decimals=source_snapshot.asset_decimals
-      and lower(debit.from_address)=source_snapshot.address
-      and coalesce(debit.finalized_at, debit.observed_at)>source_snapshot.snapshot_at
-      and debit.kind='source_debit' and debit.canonical
-      and debit.finality_status='finalized'
-  join funding_operations operation_row
-    on operation_row.id=debit.operation_id and operation_row.user_id=$1
-  where exists (
-    select 1 from balance_reservations reservation_row
-    where reservation_row.operation_id=debit.operation_id
-      and reservation_row.user_id=$1
-      and reservation_row.segment_id is not distinct from debit.segment_id
-      and (source_snapshot.component_id is null or reservation_row.component_id=source_snapshot.component_id)
-      and reservation_row.location_id=source_snapshot.location_id
-      and reservation_row.network_id=debit.network_id
-      and reservation_row.asset_id=debit.asset_id
-      and reservation_row.asset_decimals=source_snapshot.asset_decimals
-      and reservation_row.mode='subtract_available'
-  )`;
-
 export async function loadFundingNativeSnapshotDebits(
   pool: Pick<Pool, "query">,
   userId: string,
@@ -76,7 +100,7 @@ export async function loadFundingNativeSnapshotDebits(
       (row) =>
         row.location.accountId === userId &&
         row.location.kind === "venue_account" &&
-        row.location.details.nativeSourceDex === "spot" &&
+        hypercoreLocationDex(row.location) !== null &&
         row.observationFreshness === "fresh" &&
         !row.observationError &&
         isHypercoreMainnetUsdc(row.amount.asset) &&
@@ -89,66 +113,19 @@ export async function loadFundingNativeSnapshotDebits(
       address: String(row.location.details.address).toLowerCase(),
       asset_decimals: row.amount.asset.decimals,
       snapshot_at: row.observedAt,
+      native_source_dex: hypercoreLocationDex(row.location),
     }));
   if (!snapshots.length) return [];
-  const { rows } = await pool.query<InTransitRow>(
-    FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL,
+  const { rows } = await pool.query<FundingSnapshotDebitRow>(
+    FUNDING_NATIVE_SNAPSHOT_DEBIT_CANDIDATES_SQL,
     [userId, JSON.stringify(snapshots)],
   );
-  return rows.map((row) => ({
-    operationId: row.operation_id,
-    segmentId: row.segment_id,
-    sourceComponentId: row.source_component_id,
-    sourceLocationId: row.source_location_id,
-    amount: {
-      asset: {
-        networkId: row.network_id,
-        assetId: row.asset_id,
-        decimals: row.asset_decimals,
-      },
-      raw: row.raw_amount,
-    },
-    observedAt: row.observed_at.toISOString(),
-  }));
+  return snapshotDebitFacts(userId, rows);
 }
 
 /** Source receipts remain relevant after terminal settlement. This query reads
  * the exact wallet/token post-snapshot tail, not every historical operation or
  * a cached operation status. It never converts one token into another. */
-export const FUNDING_EVM_SNAPSHOT_DEBITS_SQL = `
-  select source_snapshot.component_id as source_component_id,
-    source_snapshot.location_id as source_location_id,
-    debit.operation_id, debit.segment_id, debit.network_id, debit.asset_id,
-    debit.asset_decimals, debit.raw_amount,
-    coalesce(debit.finalized_at, debit.observed_at) as observed_at
-  from jsonb_to_recordset($2::jsonb) as source_snapshot(
-    component_id text, location_id text, address text, network_id text,
-    asset_id text, asset_decimals integer, snapshot_at timestamptz)
-  join funding_observations debit
-    on debit.network_id in ('evm:8453','evm:137')
-      and debit.network_id=source_snapshot.network_id
-      and lower(debit.asset_id)=source_snapshot.asset_id
-      and debit.asset_decimals=6
-      and debit.asset_decimals=source_snapshot.asset_decimals
-      and lower(debit.from_address)=source_snapshot.address
-      and coalesce(debit.finalized_at, debit.observed_at)>source_snapshot.snapshot_at
-      and debit.kind='source_debit' and debit.canonical
-      and debit.finality_status='finalized'
-  join funding_operations operation_row
-    on operation_row.id=debit.operation_id and operation_row.user_id=$1
-  where exists (
-    select 1 from balance_reservations reservation_row
-    where reservation_row.operation_id=debit.operation_id
-      and reservation_row.user_id=$1
-      and reservation_row.segment_id is not distinct from debit.segment_id
-      and reservation_row.component_id=source_snapshot.component_id
-      and reservation_row.location_id=source_snapshot.location_id
-      and reservation_row.network_id=debit.network_id
-      and lower(reservation_row.asset_id)=lower(debit.asset_id)
-      and reservation_row.asset_decimals=debit.asset_decimals
-      and reservation_row.mode='subtract_available'
-  )`;
-
 export function fundingSnapshotDebitComponents(
   userId: string,
   components: readonly ValuedAssetComponent[],
@@ -163,10 +140,14 @@ export function fundingSnapshotDebitComponents(
       /^0x[\da-fA-F]{40}$/.test(row.location.details.address) &&
       Number.isFinite(Date.parse(row.observedAt)) &&
       ((row.location.kind === "venue_account" &&
-        row.location.details.nativeSourceDex === "spot" &&
+        hypercoreLocationDex(row.location) !== null &&
         isHypercoreMainnetUsdc(row.amount.asset)) ||
-        (row.location.kind === "wallet" &&
-          exactEvmSourceAssets.some((asset) =>
+        ((row.location.kind === "wallet" ||
+          (row.location.kind === "venue_account" &&
+            row.location.asset.networkId === "evm:137" &&
+            row.location.details.venueId === "polymarket" &&
+            row.location.details.balanceClass === "polymarket")) &&
+          RELAY_HYPERCORE_EVM_STABLE_SOURCE_ASSETS.some((asset) =>
             sameAsset(asset, row.amount.asset),
           ))),
   );
@@ -189,33 +170,17 @@ export async function loadFundingSnapshotDebits(
       asset_decimals: row.amount.asset.decimals,
       snapshot_at: row.observedAt,
     }));
-  const [native, evm] = await Promise.all([
+  const [native, evm, handoffs] = await Promise.all([
     loadFundingNativeSnapshotDebits(pool, userId, eligible),
     snapshots.length
-      ? pool.query<InTransitRow>(FUNDING_EVM_SNAPSHOT_DEBITS_SQL, [
-          userId,
-          JSON.stringify(snapshots),
-        ])
-      : Promise.resolve({ rows: [] as InTransitRow[] }),
+      ? pool.query<FundingSnapshotDebitRow>(
+          FUNDING_EVM_SNAPSHOT_DEBIT_CANDIDATES_SQL,
+          [userId, JSON.stringify(snapshots)],
+        )
+      : Promise.resolve({ rows: [] as FundingSnapshotDebitRow[] }),
+    loadFundingHandoffSnapshotFacts(pool, userId, eligible),
   ]);
-  return [
-    ...native,
-    ...evm.rows.map((row) => ({
-      operationId: row.operation_id,
-      segmentId: row.segment_id,
-      sourceComponentId: row.source_component_id,
-      sourceLocationId: row.source_location_id,
-      amount: {
-        asset: {
-          networkId: row.network_id,
-          assetId: row.asset_id,
-          decimals: row.asset_decimals,
-        },
-        raw: row.raw_amount,
-      },
-      observedAt: row.observed_at.toISOString(),
-    })),
-  ];
+  return [...native, ...snapshotDebitFacts(userId, evm.rows), ...handoffs];
 }
 
 export type FundingAvailabilityFact = Readonly<{
@@ -236,11 +201,16 @@ export type FundingInTransitFact = Readonly<{
         readonly details: Readonly<Record<string, unknown>>;
       })
     | null;
+  /** Validated canonical read alias only; the original source above is retained. */
+  currentReadSourceLocation?: AssetLocation | null;
   amount: Readonly<{
     asset: AssetRef;
     raw: string;
   }>;
   observedAt: string;
+  /** A SQL-proven post-snapshot physical fact for this exact input snapshot.
+   * Preserve the ordering proof even when PG microseconds map to one JS ms. */
+  sourceSnapshotObservedAt?: string;
   observationError?: string | null;
 }>;
 
@@ -270,7 +240,9 @@ export function fundingInvalidSourceComponentIds(
   components: readonly ValuedAssetComponent[],
 ): ReadonlySet<string> {
   const invalid = facts.filter(
-    (fact) => fact.observationError === "funding_source_evidence_invalid",
+    (fact) =>
+      fact.observationError === "funding_source_evidence_invalid" ||
+      fact.observationError === "funding_handoff_snapshot_pending",
   );
   return new Set(
     components
@@ -284,6 +256,7 @@ export function fundingInvalidSourceComponentIds(
             const snapshotAt = Date.parse(component.observedAt);
             const evidenceAt = Date.parse(fact.observedAt);
             if (
+              fact.sourceSnapshotObservedAt !== component.observedAt &&
               component.observationFreshness === "fresh" &&
               !component.observationError &&
               Number.isFinite(snapshotAt) &&
@@ -291,7 +264,8 @@ export function fundingInvalidSourceComponentIds(
               snapshotAt >= evidenceAt
             )
               return false;
-            const source = fact.committedSourceLocation;
+            const source =
+              fact.currentReadSourceLocation ?? fact.committedSourceLocation;
             if (!source)
               return (
                 fact.sourceComponentId === component.componentId &&
@@ -401,6 +375,7 @@ type InTransitRow = {
 };
 
 type RefundMovementRow = InTransitRow & {
+  operation_source_snapshot?: unknown;
   committed_source: unknown;
   committed_input: unknown;
   source_network_count: string | number;
@@ -412,6 +387,8 @@ type RefundMovementRow = InTransitRow & {
   source_owner_address: string | null;
   reservation_component_id: string | null;
   reservation_location_id: string | null;
+  source_reservation_id?: string | null;
+  handoff_binding?: PolymarketHandoffBindingRow | null;
   refund_location_snapshot: unknown;
   provider_quote_ref_lookup_hmac: string | null;
   lookup_key_version: number | null;
@@ -462,7 +439,7 @@ export async function loadFundingAccountValueFacts(
           where balance_reservations.user_id = $1
             and balance_reservations.state = 'active'
             and ${fundingReservationHoldSql("balance_reservations")}
-            and not exists (
+            and (${polymarketNativeHandoffReservationPendingSql("balance_reservations")} or not exists (
               select 1
               from funding_observations observation
               where observation.operation_id =
@@ -472,7 +449,7 @@ export async function loadFundingAccountValueFacts(
                 and observation.kind = 'source_debit'
                 and observation.canonical
                 and observation.finality_status = 'finalized'
-            )
+            ))
           group by component_id
         ),
         submitted_debits as (
@@ -486,6 +463,7 @@ export async function loadFundingAccountValueFacts(
           join balance_reservations reservation
             on reservation.operation_id = operation.id
            and reservation.mode = 'subtract_available'
+           and not ${polymarketNativeHandoffEconomicInputSql("reservation")}
           join funding_observations observation
             on observation.operation_id = operation.id
            and observation.segment_id is not distinct from
@@ -551,6 +529,7 @@ export async function loadFundingAccountValueFacts(
             as asset_decimals,
           source.raw_amount,
           source.observed_at,
+          operation.source_snapshot as operation_source_snapshot,
           segment.source_snapshot as committed_source, segment.quoted_input as committed_input,
           source.network_count as source_network_count, source.asset_count as source_asset_count,
           source.decimal_count as source_decimal_count, source.actual_decimals as source_actual_decimals,
@@ -558,6 +537,7 @@ export async function loadFundingAccountValueFacts(
           source.owner_address as source_owner_address,
           reservation.component_id as reservation_component_id,
           reservation.location_id as reservation_location_id,
+          reservation.id as source_reservation_id, to_jsonb(handoff_binding) as handoff_binding,
           segment.refund_location_snapshot,
           segment.provider_quote_ref_lookup_hmac,
           segment.lookup_key_version,
@@ -602,7 +582,7 @@ export async function loadFundingAccountValueFacts(
           on segment.operation_id = operation.id
          and segment.id = source.segment_id
         left join lateral (
-          select component_id, location_id
+          select id, component_id, location_id
           from balance_reservations
           where operation_id = operation.id
             and mode = 'subtract_available'
@@ -614,10 +594,15 @@ export async function loadFundingAccountValueFacts(
               and lower(asset_id)=lower(segment.quoted_input#>>'{asset,assetId}')
               and asset_decimals::text=segment.quoted_input#>>'{asset,decimals}'
               and raw_amount=segment.quoted_input->>'raw'
-            ))
+            ) or (economic_role='source_input' and location_id is distinct from segment.source_snapshot#>>'{location,locationId}'))
           order by created_at asc
           limit 1
         ) reservation on true
+        left join lateral (
+          select binding_payload.* from (select reservation.id as source_id
+            where reservation.location_id is distinct from segment.source_snapshot#>>'{location,locationId}' offset 0) handoff_gate
+          cross join lateral (${polymarketHandoffBindingSql({ userId: "$1::uuid", operationId: "operation.id", segmentId: "segment.id", sourceReservationId: "handoff_gate.source_id" })}) binding_payload
+        ) handoff_binding on true
         where operation.user_id = $1
           and (coalesce(segment.refund_location_snapshot ? 'refundEvidenceContract',false) or (
           reservation.component_id is not null
@@ -659,11 +644,32 @@ export async function loadFundingAccountValueFacts(
   const refundBalanceChanges: FundingRefundBalanceChange[] = [];
   const inTransit = movementResult.rows.flatMap(
     (row): FundingInTransitFact[] => {
+      // Handoff has an economic venue input and a different physical execution
+      // source. Only the exact frozen plan + actual reservation pair permits
+      // that distinction. The Relay debit remains the sole economic claim;
+      // physical H suppression is read separately, never synthesized here.
+      const handoff =
+        row.handoff_binding && row.segment_id && row.source_reservation_id
+          ? readStoredPolymarketHandoffBinding(row.handoff_binding, {
+              userId,
+              operationId: row.operation_id,
+              segmentId: row.segment_id,
+              sourceReservationId: row.source_reservation_id,
+            })
+          : null;
+      const physicalComponentId =
+        handoff?.binding.controllerFence.componentId ??
+        row.reservation_component_id;
+      const physicalLocationId =
+        handoff?.binding.executionSource.locationId ??
+        row.reservation_location_id;
       const fact: FundingInTransitFact = {
         operationId: row.operation_id,
         segmentId: row.segment_id,
-        sourceComponentId: row.source_component_id,
-        sourceLocationId: row.source_location_id,
+        sourceComponentId: handoff
+          ? physicalComponentId
+          : row.source_component_id,
+        sourceLocationId: handoff ? physicalLocationId : row.source_location_id,
         amount: {
           asset: {
             networkId: row.network_id,
@@ -687,10 +693,39 @@ export async function loadFundingAccountValueFacts(
           ? assetLocationSchema.safeParse(row.committed_source.location)
           : null;
       const committedInput = moneySchema.safeParse(row.committed_input);
+      const refundAccountIds = refundSnapshotAccountIds(
+        row.refund_location_snapshot,
+      );
+      // A bad refund binding must not erase the independently validated owned
+      // source needed by the narrow stale-cash fence.
+      const sourceIdentity = committedSource?.success
+        ? readCommittedFundingIdentity({
+            currentOwnerUserId: userId,
+            operationSourceSnapshot: row.operation_source_snapshot,
+            accountIds: [committedSource.data.accountId],
+          })
+        : null;
+      const identity =
+        sourceIdentity &&
+        refundAccountIds?.every(
+          (accountId) => accountId === sourceIdentity.originalEconomicAccountId,
+        )
+          ? sourceIdentity
+          : null;
+      const sourceAlias =
+        committedSource?.success &&
+        sourceIdentity &&
+        sourceIdentity.originalEconomicAccountId !==
+          sourceIdentity.currentOwnerUserId
+          ? committedFundingReadLocationAlias(
+              committedSource.data as AssetLocation,
+              sourceIdentity,
+            )
+          : null;
       const sourceValid =
         committedSource?.success &&
         committedInput.success &&
-        committedSource.data.accountId === userId &&
+        identity !== null &&
         sameAsset(committedSource.data.asset, committedInput.data.asset) &&
         String(row.source_network_count) === "1" &&
         String(row.source_asset_count) === "1" &&
@@ -708,8 +743,8 @@ export async function loadFundingAccountValueFacts(
           committedSource.data.details.address,
           row.source_owner_address,
         ) &&
-        row.reservation_component_id !== null &&
-        row.reservation_location_id === committedSource.data.locationId &&
+        physicalComponentId !== null &&
+        physicalLocationId === committedSource.data.locationId &&
         BigInt(fact.amount.raw) <= BigInt(committedInput.data.raw);
       const allReceipts = row.refund_receipts.map((receipt) => ({
         ...receipt,
@@ -729,15 +764,53 @@ export async function loadFundingAccountValueFacts(
           changeAt &&
           receipt.identity &&
           fundingRefundReceiptMatchesContract(contract, receipt)
-        )
+        ) {
+          const snapshot = row.refund_location_snapshot;
+          const locations =
+            identity &&
+            identity.originalEconomicAccountId !==
+              identity.currentOwnerUserId &&
+            isRecord(snapshot)
+              ? [
+                  snapshot,
+                  ...(isRecord(snapshot.alternativeRefundLocations) &&
+                  Array.isArray(snapshot.alternativeRefundLocations.locations)
+                    ? snapshot.alternativeRefundLocations.locations
+                    : []),
+                ]
+              : [];
+          const boundLocation = locations.find(
+            (entry) =>
+              isRecord(entry) &&
+              entry.locationId === receipt.identity?.refundLocationId,
+          );
+          const parsedLocation = isRecord(boundLocation)
+            ? assetLocationSchema.safeParse({
+                kind: boundLocation.kind,
+                locationId: boundLocation.locationId,
+                accountId: boundLocation.accountId,
+                asset: boundLocation.asset,
+                details: boundLocation.details,
+              })
+            : null;
+          const refundAlias =
+            parsedLocation?.success && identity
+              ? committedFundingReadLocationAlias(
+                  parsedLocation.data as AssetLocation,
+                  identity,
+                )
+              : null;
           refundBalanceChanges.push({
             operationId: fact.operationId,
-            locationId: receipt.identity.refundLocationId,
+            locationId:
+              refundAlias?.currentLocation.locationId ??
+              receipt.identity.refundLocationId,
             asset: receipt.money.asset,
             observedAt: changeAt,
             invalidated: receipt.finalityStatus === "reorged",
             nativeDestinationDex: receipt.nativeDestinationDex,
           });
+        }
       }
       const claim = sourceValid
         ? projectFundingRefundClaim({
@@ -757,14 +830,19 @@ export async function loadFundingAccountValueFacts(
         {
           ...fact,
           sourceComponentId:
-            row.reservation_component_id ?? fact.sourceComponentId,
+            sourceAlias &&
+            physicalComponentId === sourceAlias.originalComponentId
+              ? sourceAlias.currentComponentId
+              : (physicalComponentId ?? fact.sourceComponentId),
           sourceLocationId:
-            row.reservation_location_id ?? fact.sourceLocationId,
+            sourceAlias?.currentLocation.locationId ??
+            physicalLocationId ??
+            fact.sourceLocationId,
           committedSourceLocation:
-            committedSource?.success &&
-            committedSource.data.accountId === userId
+            committedSource?.success && sourceIdentity
               ? committedSource.data
               : null,
+          currentReadSourceLocation: sourceAlias?.currentLocation ?? null,
           amount: {
             ...fact.amount,
             raw: claim.kind === "pending" ? claim.raw : fact.amount.raw,
@@ -842,7 +920,8 @@ export function applyFundingSourceDebitSuppression(
         (debit) =>
           debit.sourceLocationId === component.location.locationId &&
           sameAsset(debit.amount.asset, component.amount.asset) &&
-          Date.parse(component.observedAt) < Date.parse(debit.observedAt),
+          (debit.sourceSnapshotObservedAt === component.observedAt ||
+            Date.parse(component.observedAt) < Date.parse(debit.observedAt)),
       )
       .reduce((total, debit) => total + BigInt(debit.amount.raw), 0n)
       .toString();

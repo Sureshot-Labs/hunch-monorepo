@@ -17,7 +17,10 @@ import {
   buildHunchMiniAppDeepLinkButton,
   buildHunchMiniAppWebButton,
 } from "./services/telegram-mini-app-buttons.js";
-import { telegramAppHandoffCommitResponseSchema } from "./schemas/telegram.js";
+import {
+  telegramAppHandoffCommitResponseSchema,
+  telegramAppHandoffRouteSchemas,
+} from "./schemas/telegram.js";
 import { TELEGRAM_CUSTOM_EMOJI } from "./services/telegram-custom-emoji.js";
 
 type TestCase = {
@@ -82,6 +85,73 @@ async function assertValidationError(
 }
 
 const tests: TestCase[] = [
+  {
+    name: "shared handoff HTTP schema preserves native terminal status separately from fill coverage",
+    run: async () => {
+      const handoffId = "759b37ca-26a0-4f6a-ae21-632973f0dcf4";
+      const payload = {
+        execution: {
+          handoffId,
+          kind: "trade_terminal",
+          requiredContractVersion: 2,
+          status: "cancelled",
+          tradeIntentId: "0002e929-a595-44f5-84ca-885b60b6a60b",
+          orderId: "297ab1d4-0328-4313-b884-0039d46b3116",
+          nativeOrder: {
+            actionId: "7741c5a9-bce0-4442-b087-a1a29cf38ddb",
+            submissionState: "reconcile_required",
+            nativeStatus: "cancelled",
+            terminalConfirmed: true,
+            terminalObservedAt: NOW.toISOString(),
+            filledQuantity: "1",
+            fullQuantityObserved: false,
+            executionSummary: null,
+            fillHistoryCoverage: "not_asserted",
+          },
+        },
+        handoff: {
+          authorityFingerprint: "a".repeat(64),
+          cancelledAt: null,
+          claimedAt: NOW.toISOString(),
+          committedAt: NOW.toISOString(),
+          expiresAt: "2026-07-03T12:30:00.000Z",
+          expiredAt: null,
+          id: handoffId,
+          planFingerprint: "b".repeat(64),
+          planSnapshot: {},
+          policyRevision: "policy-revision",
+          quoteSnapshot: {},
+          state: "committed",
+          tradeIntentId: "0002e929-a595-44f5-84ca-885b60b6a60b",
+        },
+      };
+      const app = Fastify({ logger: false });
+      app.setValidatorCompiler(validatorCompiler);
+      app.setSerializerCompiler(serializerCompiler);
+      app.post(
+        "/handoff-native-schema",
+        {
+          schema:
+            telegramAppHandoffRouteSchemas["/telegram/app-handoffs/execute"],
+        },
+        async () => payload,
+      );
+      try {
+        const response = await app.inject({
+          method: "POST",
+          url: "/handoff-native-schema",
+          payload: {
+            initDataRaw: "synthetic-schema-only",
+            token: `th1_${"a".repeat(43)}`,
+          },
+        });
+        assert.equal(response.statusCode, 200);
+        assert.deepEqual(response.json(), payload);
+      } finally {
+        await app.close();
+      }
+    },
+  },
   {
     name: "v2 handoff commit serialization retains its execution contract",
     run: async () => {

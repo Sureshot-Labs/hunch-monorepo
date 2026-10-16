@@ -9,8 +9,15 @@ import { FundingPlannerError } from "../../planner/money.js";
 import { FundingPlanningRuntime } from "../../planner/runtime-service.js";
 import {
   compileFundingIntentPolicy,
+  DEFAULT_FUNDING_INTENT_POLICY,
+  fundingReceiveAssetEnabled,
+  fundingVenueReceiveEnabled,
   type FundingIntentPolicy,
 } from "../../policies/funding-policy-v2.js";
+import {
+  HYPERCORE_MAINNET_USDC,
+  HYPERCORE_SPOT_LOCATION_PATTERN,
+} from "../../domain/hypercore-identity.js";
 import { FundingReceiveSessionService } from "../../receive/receive-session-service.js";
 
 const USER_ID = "10000000-0000-4000-8000-000000000001";
@@ -36,7 +43,7 @@ function policyDb(policy: FundingIntentPolicy): Pool {
 }
 
 function destination(
-  venueId: "limitless" | "polymarket",
+  venueId: "limitless" | "polymarket" | "hyperliquid",
   requiredAsset: FundingDestinationOption["requiredAsset"],
 ): FundingDestinationOption {
   return {
@@ -114,6 +121,114 @@ await test("filters destinations through V2 and preserves venue recommendation o
     ],
   );
   assert.deepEqual(access.policyDisabledOptions, []);
+});
+
+await test("native funding uses the common policy catalogue, destination access and pause recovery", async () => {
+  const policy: FundingIntentPolicy = {
+    version: 2,
+    venues: ["hyperliquid"],
+    receive: { assets: ["base:usdc"], privy: false },
+    paused: false,
+  };
+  const compiled = compileFundingIntentPolicy(policy);
+  assert.equal(fundingVenueReceiveEnabled(compiled, "hyperliquid"), true);
+  assert.equal(
+    fundingReceiveAssetEnabled(compiled, HYPERCORE_MAINNET_USDC),
+    false,
+    "native settlement does not invent a manual wallet receive scanner",
+  );
+  const ingress = compiled.routes.find(
+    (route) => route.routeId === "base-usdc-to-hypercore-spot-usdc",
+  );
+  assert.ok(ingress);
+  assert.deepEqual(ingress.destinationAsset, HYPERCORE_MAINNET_USDC);
+  assert.equal(
+    ingress.destinationLocationPatternId,
+    HYPERCORE_SPOT_LOCATION_PATTERN,
+  );
+  const native = {
+    ...destination("hyperliquid", HYPERCORE_MAINNET_USDC),
+    topology: "native",
+  } as FundingDestinationOption;
+  const scenarios: Array<[FundingIntentPolicy, boolean]> = [
+    [policy, true],
+    [{ ...policy, paused: true }, false],
+    [{ ...policy, venues: [] }, false],
+    [{ ...policy, receive: { assets: [], privy: false } }, false],
+    [policy, true],
+  ];
+  for (const [effective, enabled] of scenarios) {
+    const runtime = new FundingPlanningRuntime(policyDb(effective));
+    setPreparationOptions(runtime, [native]);
+    const access = await runtime.destinationAccess(USER_ID, {
+      purpose: "fund",
+    });
+    assert.equal(access.options.length, enabled ? 1 : 0);
+    assert.equal(access.policyDisabledOptions.length, enabled ? 0 : 1);
+  }
+  assert.deepEqual(DEFAULT_FUNDING_INTENT_POLICY.venues, []);
+  assert.deepEqual(DEFAULT_FUNDING_INTENT_POLICY.receive.assets, []);
+  assert.equal(compiled.venues[0].tradingEnabled, false);
+  assert.equal(compiled.venues[0].delegatedExecutionEnabled, false);
+});
+
+await test("native source policy keeps eight-decimal venue cash and one physical location for cross-venue routes", () => {
+  const policy: FundingIntentPolicy = {
+    version: 2,
+    venues: ["limitless", "polymarket", "hyperliquid"],
+    receive: {
+      assets: ["base:usdc", "polygon:usdc", "polygon:pusd", "hypercore:usdc"],
+      privy: false,
+    },
+    paused: false,
+  };
+  const compiled = compileFundingIntentPolicy(policy);
+  const native = compiled.locations.filter(
+    (location) =>
+      location.locationPatternId === HYPERCORE_SPOT_LOCATION_PATTERN,
+  );
+  assert.equal(native.length, 1);
+  const pUsdInbound = compiled.routes.find(
+    (route) => route.routeId === "polygon-pusd-to-hypercore-spot-usdc",
+  );
+  assert.ok(pUsdInbound);
+  assert.equal(pUsdInbound.sourceLocationPatternId, "wallet-polygon-pusd-v1");
+  assert.equal(pUsdInbound.networkExecutorId, "wallet_profile_evm_v1");
+  assert.deepEqual(pUsdInbound.destinationAsset, HYPERCORE_MAINNET_USDC);
+  assert.equal(native[0].locationKind, "venue_account");
+  assert.deepEqual(native[0].asset, HYPERCORE_MAINNET_USDC);
+  for (const capability of [
+    "observe",
+    "value",
+    "execution_source",
+    "venue_settlement",
+    "withdrawal_source",
+  ] as const)
+    assert.ok(native[0].capabilities.includes(capability));
+  for (const id of [
+    "hypercore-spot-usdc-to-base-usdc",
+    "hypercore-spot-usdc-to-polygon-pusd",
+  ]) {
+    const route = compiled.routes.find((candidate) => candidate.routeId === id);
+    assert.ok(route);
+    assert.equal(
+      route.sourceLocationPatternId,
+      HYPERCORE_SPOT_LOCATION_PATTERN,
+    );
+    assert.equal(route.networkExecutorId, "relay_hypercore_native_v1");
+    assert.deepEqual(route.sourceAsset, HYPERCORE_MAINNET_USDC);
+  }
+  const removed = compileFundingIntentPolicy({
+    ...policy,
+    receive: { ...policy.receive, assets: ["base:usdc"] },
+  });
+  assert.ok(
+    !removed.routes.some(
+      (route) =>
+        route.sourceAsset.networkId === HYPERCORE_MAINNET_USDC.networkId ||
+        route.routeId === "polygon-pusd-to-hypercore-spot-usdc",
+    ),
+  );
 });
 
 await test("keeps a disabled venue out of capabilities and destinations", async () => {

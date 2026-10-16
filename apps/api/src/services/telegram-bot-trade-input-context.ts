@@ -1,5 +1,9 @@
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { canonicalWalletIdentity } from "../lib/wallet-address.js";
+import {
+  telegramAppHandoffNativeAuthoritySchema,
+  type TelegramAppHandoffNativeAuthority,
+} from "./telegram-app-handoff-native-authority.js";
 
 const TRADE_INPUT_CONTEXT_KEY_PREFIX = "tg:signal_bot:v2:trade_input_context";
 const TRADE_INPUT_CONTEXT_NAVIGATION_GRACE_SEC = 5 * 60;
@@ -23,7 +27,7 @@ type TradeInputContextRedis = {
   set(key: string, value: string, options?: { EX?: number }): Promise<unknown>;
 };
 
-export type TelegramBotTradeInputContext = Readonly<{
+export type TelegramBotLegacyTradeInputContext = Readonly<{
   action: "buy" | "sell";
   authority: TelegramBotTradeAuthorityBinding;
   chatId: string;
@@ -45,6 +49,22 @@ export type TelegramBotTradeInputContext = Readonly<{
   venue: "limitless" | "polymarket";
   version: 2;
 }>;
+
+/** Same short-lived input store and menu generation, not a bot signer grant.
+ * Versioned native authority cannot be interpreted as legacy Privy/USD6. */
+export type TelegramNativeTradeInputContext = Omit<
+  TelegramBotLegacyTradeInputContext,
+  "authority" | "venue" | "version" | "deliveryMode"
+> &
+  Readonly<{
+    authority: TelegramAppHandoffNativeAuthority;
+    deliveryMode: "app_handoff";
+    venue: "hyperliquid";
+    version: 3;
+  }>;
+export type TelegramBotTradeInputContext =
+  | TelegramBotLegacyTradeInputContext
+  | TelegramNativeTradeInputContext;
 
 export type TelegramBotTradeAuthorityBinding = Readonly<{
   authorizationId: string | null;
@@ -149,11 +169,22 @@ export function isTelegramBotTradeInputContext(
 ): value is TelegramBotTradeInputContext {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const context = value as Partial<TelegramBotTradeInputContext>;
+  const validAuthority =
+    context.version === 3
+      ? context.venue === "hyperliquid" &&
+        context.deliveryMode === "app_handoff" &&
+        /^hyperliquid:mainnet:outcome:(0|[1-9]\d*)$/u.test(
+          context.marketId ?? "",
+        ) &&
+        telegramAppHandoffNativeAuthoritySchema.safeParse(context.authority)
+          .success
+      : context.version === 2 &&
+        (context.venue === "polymarket" || context.venue === "limitless") &&
+        isAuthorityBinding(context.authority);
   return Boolean(
-    context.version === 2 &&
+    validAuthority &&
     EXACT_UUID_RE.test(context.id ?? "") &&
     (context.action === "buy" || context.action === "sell") &&
-    (context.venue === "polymarket" || context.venue === "limitless") &&
     (context.deliveryMode == null ||
       context.deliveryMode === "bot_submit" ||
       context.deliveryMode === "app_handoff") &&
@@ -181,7 +212,6 @@ export function isTelegramBotTradeInputContext(
     isNullableString(context.returnCallbackData) &&
     (context.returnCallbackData == null ||
       context.returnCallbackData.length <= 64) &&
-    isAuthorityBinding(context.authority) &&
     isMessageScope(context.messageScope) &&
     isNullableString(context.controlledPositionId) &&
     isNullableString(context.funderAddress) &&

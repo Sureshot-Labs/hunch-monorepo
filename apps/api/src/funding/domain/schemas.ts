@@ -153,6 +153,20 @@ export const fundingTradeConsumerIntentInputSchema = z
 export const fundingDiscoveryRequestSchema = z
   .object({
     marketBuySlippageBps: z.number().int().min(0).max(10_000).optional(),
+    limitBuy: z
+      .object({
+        quantity: z
+          .string()
+          .max(128)
+          .regex(/^[1-9]\d*$/u),
+        limitPrice: z
+          .string()
+          .regex(/^0\.\d{1,5}$/u)
+          .refine((value) => /[1-9]/u.test(value)),
+        timeInForce: z.enum(["Gtc", "Alo"]),
+      })
+      .strict()
+      .optional(),
     marketBuyAmountUsdCents: z
       .number()
       .int()
@@ -176,6 +190,20 @@ export const fundingDiscoveryRequestSchema = z
   })
   .strict()
   .superRefine((request, context) => {
+    if (
+      request.limitBuy &&
+      (request.marketBuyAmountUsdCents !== undefined ||
+        request.marketBuySlippageBps !== undefined ||
+        request.purpose !== "trade_shortfall" ||
+        request.consumerIntent?.venueId !== "hyperliquid" ||
+        request.consumerIntent.side !== "BUY")
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["limitBuy"],
+        message:
+          "limit advice requires a native BUY shortfall without market advice",
+      });
     const withdrawal = request.purpose === "withdrawal";
     if (!withdrawal && request.withdrawalSourceComponentId != null) {
       context.addIssue({

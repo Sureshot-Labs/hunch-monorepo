@@ -10,6 +10,16 @@ import {
   telegramPolymarketRootRequiresRouterContinuationSql,
 } from "../funding/reconciliation/telegram-router-continuation-state.js";
 import { releaseFundingReservationForAbandonedTradeInTransaction } from "../funding/persistence/funding-evidence-repository.js";
+import { readTelegramNativeHandoffOrder } from "../repos/telegram-native-handoff-read.js";
+import { TELEGRAM_NATIVE_LIFECYCLE_DUE_SQL } from "../repos/telegram-native-lifecycle-due.js";
+import {
+  telegramNativeLifecycleSchema,
+  telegramNativeLifecycleSnapshot,
+  telegramNativeLifecycleOrderState,
+  telegramNativeLifecycleAmount,
+  telegramNativeLifecycleText,
+  type TelegramNativeLifecycle,
+} from "./telegram-native-trade-lifecycle.js";
 
 import {
   escapeTelegramMarkdownV2,
@@ -52,7 +62,7 @@ const TELEGRAM_TRADE_LIFECYCLE_SOURCE_WATERMARK_RESULT_KEY =
   "shortfallProgressSourceWatermark";
 // Bump with any persisted progress/rendering semantic change. The candidate
 // gate uses this value to reproject otherwise-settled historical cards once.
-const TELEGRAM_TRADE_LIFECYCLE_PROJECTION_VERSION = 7;
+const TELEGRAM_TRADE_LIFECYCLE_PROJECTION_VERSION = 8;
 // Preserve Telegram's retry_after. This cap only protects the PostgreSQL int
 // boundary; shortening a valid provider delay would retry inside the 429
 // window and consume the bounded edit attempts without a real delivery try.
@@ -110,7 +120,8 @@ type TelegramTradeLifecycleProgress = Readonly<{
   state: TelegramTradeLifecycleState;
   venueOrderId: string | null;
   venue: string;
-  version: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+  nativeTrade?: TelegramNativeLifecycle;
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 }>;
 
 type ProjectionCandidate = Readonly<{
@@ -158,6 +169,8 @@ type ProjectionCandidate = Readonly<{
   has_started_attempt: boolean;
   is_direct_v2_handoff: boolean;
   submit_started_at: Date | null;
+  order_id: string | null;
+  native_order?: TelegramNativeLifecycle["order"];
 }>;
 
 type TelegramTradeLifecycleOutboxRow = Readonly<{
@@ -186,10 +199,13 @@ function parseProgress(value: unknown): TelegramTradeLifecycleProgress | null {
       value.version !== 4 &&
       value.version !== 5 &&
       value.version !== 6 &&
-      value.version !== 7)
+      value.version !== 7 &&
+      value.version !== 8)
   ) {
     return null;
   }
+  const native = telegramNativeLifecycleSchema.safeParse(value.nativeTrade);
+  if (value.venue === "hyperliquid" && !native.success) return null;
   if (
     typeof value.intentId !== "string" ||
     typeof value.marketTitle !== "string" ||
@@ -231,6 +247,7 @@ function parseProgress(value: unknown): TelegramTradeLifecycleProgress | null {
     // normalised to false while version 5 forces one authoritative edit.
     requiresMiniAppContinuation: value.requiresMiniAppContinuation === true,
     isDirectHandoff: value.isDirectHandoff === true,
+    ...(native.success ? { nativeTrade: native.data } : {}),
     failureMessage:
       typeof value.failureMessage === "string" && value.failureMessage.trim()
         ? value.failureMessage.trim()
@@ -628,12 +645,14 @@ function fundingNetworkLabel(networkId: string): string {
   if (networkId === "evm:8453") return "Base";
   if (networkId === "evm:137") return "Polygon";
   if (networkId === "solana:mainnet") return "Solana";
+  if (networkId === "hyperliquid:mainnet") return "HyperCore";
   return "source wallet";
 }
 
 function fundingDestinationAsset(venue: string): string {
   if (venue === "polymarket") return "pUSD";
   if (venue === "limitless") return "USDC";
+  if (venue === "hyperliquid") return "USDC";
   return "funds";
 }
 
@@ -646,7 +665,12 @@ function fundingAmountLabel(candidate: ProjectionCandidate): string | null {
   const symbol = resolveKnownAccountAssetSymbol({
     assetId: candidate.funding_destination_asset_id ?? "",
     decimals,
-    networkId: candidate.venue === "polymarket" ? "evm:137" : "",
+    networkId:
+      candidate.venue === "polymarket"
+        ? "evm:137"
+        : candidate.venue === "hyperliquid"
+          ? "hyperliquid:mainnet"
+          : "",
   });
   if (!symbol) return null;
   const amount = BigInt(raw);
@@ -669,12 +693,7 @@ function sourceRoute(candidate: ProjectionCandidate): string | null {
       decimals: candidate.source_asset_decimals,
       networkId: candidate.source_network_id,
     }) ?? "funds";
-  const venue =
-    candidate.venue === "polymarket"
-      ? "Polymarket"
-      : candidate.venue === "limitless"
-        ? "Limitless"
-        : candidate.venue;
+  const venue = formatTelegramVenueLabel(candidate.venue);
   return `${fundingNetworkLabel(candidate.source_network_id)} ${symbol} → ${venue} ${fundingDestinationAsset(candidate.venue)}`;
 }
 
@@ -870,6 +889,46 @@ function progressFor(
   candidate: ProjectionCandidate,
 ): TelegramTradeLifecycleProgress {
   const live = liveProgressFor(candidate);
+  if (candidate.venue === "hyperliquid") {
+    const nativeTrade = telegramNativeLifecycleSnapshot({
+      action: candidate.action,
+      result: candidate.result,
+      orderId: candidate.order_id,
+      submitStartedAt: candidate.submit_started_at,
+      order: candidate.native_order ?? null,
+    });
+    const orderState = telegramNativeLifecycleOrderState(nativeTrade);
+    // Native IOC cancellation may contain real executions. Neither a generic
+    // terminal intent nor a terminal order without current fill evidence is
+    // sufficient to claim a full trade. Existing funding states remain shared.
+    const state =
+      orderState ??
+      (candidate.status === "filled"
+        ? "confirming_trade"
+        : candidate.status === "failed"
+          ? "failed"
+          : candidate.status === "cancelled"
+            ? "cancelled"
+            : live.state);
+    const stopped = ["cancelled", "failed", "filled"].includes(state);
+    return {
+      ...live,
+      nativeTrade,
+      state,
+      amountUsd:
+        nativeTrade.side === "BUY"
+          ? (telegramNativeLifecycleAmount(nativeTrade) ?? live.amountUsd)
+          : live.amountUsd,
+      canCancel:
+        !stopped && !nativeTrade.submissionBoundaryCrossed && live.canCancel,
+      canCancelBuy:
+        !stopped && !nativeTrade.submissionBoundaryCrossed && live.canCancelBuy,
+      requiresMiniAppContinuation:
+        !stopped &&
+        !nativeTrade.submissionBoundaryCrossed &&
+        live.requiresMiniAppContinuation,
+    };
+  }
   if (
     candidate.status !== "failed" &&
     candidate.status !== "cancelled" &&
@@ -934,7 +993,8 @@ function sameProgress(
     left.receiptStateFingerprint === right.receiptStateFingerprint &&
     left.state === right.state &&
     left.canCancel === right.canCancel &&
-    left.canCancelBuy === right.canCancelBuy
+    left.canCancelBuy === right.canCancelBuy &&
+    JSON.stringify(left.nativeTrade) === JSON.stringify(right.nativeTrade)
   );
 }
 
@@ -942,9 +1002,9 @@ async function listCandidates(
   client: PoolClient,
   limit: number,
 ): Promise<readonly ProjectionCandidate[]> {
-  const { rows } = await client.query<ProjectionCandidate>({
-    name: "telegram-trade-lifecycle-candidates-v6",
-    text: `select intent.id,
+  const candidateSql = (
+    branch: "legacy" | "native_direct" | "native_funded" | "locked",
+  ) => `select intent.id,
             intent.user_id,
             intent.telegram_user_id,
             intent.chat_id,
@@ -952,6 +1012,7 @@ async function listCandidates(
             intent.venue,
             intent.action,
             intent.venue_order_id,
+            intent.order_id::text,
             coalesce(market.title, intent.market_id, 'Market') as market_title,
             intent.side,
             intent.shares_raw,
@@ -964,6 +1025,8 @@ async function listCandidates(
             intent.error_code,
             intent.error_message,
             intent.result,
+            (intent.result -> 'shortfallProgress' is not null) as lifecycle_projected,
+            ${branch === "native_direct" ? "intent.updated_at" : "greatest(intent.updated_at,funding_source.updated_at)"} as lifecycle_source_at,
             floor(
               extract(epoch from intent.updated_at) * 1000000
             )::bigint::text as intent_source_updated_at_us,
@@ -1126,7 +1189,8 @@ async function listCandidates(
                      where receipt.operation_id = tracked_operation.id
                   )
                 ) as updated_at
-       ) funding_source on operation.id is not null
+          where operation.id is not null
+       ) funding_source on true
        left join unified_markets market
          on market.id = intent.market_id
        cross join lateral (
@@ -1155,7 +1219,14 @@ async function listCandidates(
                   else null
                 end as projection_version
        ) projection_watermark
-      where intent.status in (
+      where ${
+        branch === "locked"
+          ? "intent.id=any($7::uuid[]) and (intent.user_id is null or intent.user_id=any($6::uuid[])) and"
+          : branch === "legacy"
+            ? "intent.venue<>'hyperliquid' and"
+            : `${TELEGRAM_NATIVE_LIFECYCLE_DUE_SQL} and intent.funding_operation_id is ${branch === "native_direct" ? "null" : "not null"} and`
+      }
+        intent.status in (
               'external_handoff', 'funding', 'executing', 'submitted',
               'reconcile_required', 'failed', 'cancelled', 'filled', 'expired'
             )
@@ -1187,6 +1258,7 @@ async function listCandidates(
         and intent.result ->> 'quoteRefreshRequested' is distinct from 'true'
         and (
           intent.result -> 'shortfallProgress' is null
+          or (intent.venue='hyperliquid' and projection_watermark.intent_updated_at_us is null)
           or floor(
                extract(epoch from intent.updated_at) * 1000000
              )::bigint > projection_watermark.intent_updated_at_us
@@ -1216,26 +1288,74 @@ async function listCandidates(
       -- the newest intent or funding transition wins; settled historical cards
       -- no longer consume the bounded worker batch.
       order by (intent.result -> 'shortfallProgress' is not null),
-               greatest(
+               ${
+                 branch === "native_direct"
+                   ? "intent.updated_at"
+                   : `greatest(
                  intent.updated_at,
                  coalesce(
                    funding_source.updated_at,
                    '-infinity'::timestamptz
                  )
-               ) desc,
+               )`
+               } desc,
                intent.id
-      limit $1
-      for update of intent skip locked`,
+      limit $1`;
+  const values = [
+    limit,
+    TELEGRAM_TRADE_TERMINAL_DELIVERY_OWNER_RESULT_KEY,
+    TELEGRAM_TRADE_GENERIC_NOTIFICATION_OWNER,
+    TELEGRAM_TRADE_LIFECYCLE_SOURCE_WATERMARK_RESULT_KEY,
+    TELEGRAM_TRADE_LIFECYCLE_PROJECTION_VERSION,
+  ];
+  // First take bounded, non-authoritative hints without I locks. The outer
+  // projection lets PostgreSQL prune unused fact subqueries. Then acquire U
+  // before I, in the same order as native admission/merge; an owner currently
+  // being changed is skipped and recovered on the next ordinary batch.
+  const hints = await client.query<Pick<ProjectionCandidate, "id" | "user_id">>(
+    {
+      name: "telegram-trade-lifecycle-hints-v8",
+      text: `select id,user_id from (
+        ${["legacy", "native_direct", "native_funded"]
+          .map(
+            (branch) =>
+              `select id,user_id,lifecycle_projected,lifecycle_source_at from (${candidateSql(branch as "legacy" | "native_direct" | "native_funded")}) branch_hint`,
+          )
+          .join(" union all ")}
+        ) lifecycle_hint order by lifecycle_projected,lifecycle_source_at desc,id limit $1`,
+      values,
+    },
+  );
+  if (!hints.rows.length) return [];
+  const owners = await client.query<{ id: string }>(
+    `select id::text from users where id=any($1::uuid[])
+      order by id for key share skip locked`,
+    [
+      [
+        ...new Set(
+          hints.rows.flatMap((row) => (row.user_id ? [row.user_id] : [])),
+        ),
+      ],
+    ],
+  );
+  const { rows } = await client.query<ProjectionCandidate>({
+    name: "telegram-trade-lifecycle-candidates-v8",
+    text: `${candidateSql("locked")} for update of intent skip locked`,
     values: [
-      limit,
-      TELEGRAM_TRADE_TERMINAL_DELIVERY_OWNER_RESULT_KEY,
-      TELEGRAM_TRADE_GENERIC_NOTIFICATION_OWNER,
-      TELEGRAM_TRADE_LIFECYCLE_SOURCE_WATERMARK_RESULT_KEY,
-      TELEGRAM_TRADE_LIFECYCLE_PROJECTION_VERSION,
+      ...values,
+      owners.rows.map((row) => row.id),
+      hints.rows.map((row) => row.id),
     ],
   });
   const projected: ProjectionCandidate[] = [];
-  for (const candidate of rows) {
+  for (let candidate of rows) {
+    if (candidate.venue === "hyperliquid" && candidate.user_id) {
+      const order = await readTelegramNativeHandoffOrder(client, {
+        tradeIntentId: candidate.id,
+        userId: candidate.user_id,
+      });
+      candidate = { ...candidate, native_order: order };
+    }
     if (!candidate.tracked_operation_id) {
       projected.push({
         ...candidate,
@@ -1295,6 +1415,8 @@ export async function runTelegramTradeLifecycleProjectionBatchInTransaction(
     // is already final and is not cancelled or moved again.
     if (
       candidate.status === "cancelled" &&
+      (candidate.venue !== "hyperliquid" ||
+        (candidate.order_id == null && candidate.submit_started_at == null)) &&
       candidate.operation_status === "ready" &&
       candidate.progress_stage === "ready_for_consumer" &&
       candidate.tracked_operation_id &&
@@ -1493,6 +1615,22 @@ function directHandoffText(progress: TelegramTradeLifecycleProgress): string {
 }
 
 function progressText(progress: TelegramTradeLifecycleProgress): string {
+  if (
+    progress.nativeTrade &&
+    (progress.isDirectHandoff ||
+      [
+        "filled",
+        "failed",
+        "cancelled",
+        "submitting_trade",
+        "confirming_trade",
+        "awaiting_client",
+      ].includes(progress.state))
+  )
+    return telegramNativeLifecycleText({
+      ...progress,
+      nativeTrade: progress.nativeTrade,
+    });
   if (progress.isDirectHandoff) return directHandoffText(progress);
   if (progress.reasonCode === "funding_balance_pending") {
     return joinTelegramMarkdownV2Lines(
@@ -1692,7 +1830,12 @@ function progressKeyboard(
     callback_data: `${CALLBACK_PREFIX}:open_market:${progress.intentId}`,
     text: "🎯 Open market",
   } as const;
-  if (progress.isDirectHandoff) {
+  if (
+    progress.isDirectHandoff ||
+    (progress.nativeTrade != null &&
+      (progress.nativeTrade.submissionBoundaryCrossed ||
+        ["cancelled", "failed", "filled"].includes(progress.state)))
+  ) {
     if (progress.state === "quote_expired") {
       rows.push([
         {
@@ -1715,6 +1858,17 @@ function progressKeyboard(
       ]);
     } else if (progress.state === "failed" || progress.state === "cancelled") {
       rows.push([openMarket]);
+      if (progress.nativeTrade?.submissionBoundaryCrossed) {
+        rows.push([
+          {
+            callback_data: `${CALLBACK_PREFIX}:retry_buy:${progress.intentId}`,
+            text: "🔄 Check executions",
+          },
+        ]);
+        rows.push([
+          { callback_data: "hm:v1:positions", text: "💼 My positions" },
+        ]);
+      }
     } else {
       rows.push([
         {
@@ -1790,6 +1944,8 @@ function progressKeyboard(
 
 export const telegramTradeLifecycleProgressTestHooks = {
   liveProgressFor,
+  progressFor,
+  parseProgress,
   listCandidateIds: async (client: PoolClient, limit = 100) =>
     (await listCandidates(client, limit)).map((candidate) => candidate.id),
   markTelegramTradeLifecycleDelivered,

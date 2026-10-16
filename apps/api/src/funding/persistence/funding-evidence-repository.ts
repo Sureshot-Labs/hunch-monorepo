@@ -23,10 +23,16 @@ import { fundingAttemptHasSafeRetryEvidence } from "../domain/attempt-retry.js";
 import {
   deriveFundingLifecycle,
   deriveFundingLifecycleBeforeActionBroadcast,
+  FUNDING_PHYSICAL_EVENT_OWNERSHIP_CONFLICT,
   type FundingLifecycleProjection,
 } from "../lifecycle/funding-lifecycle-projector.js";
 import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
 import { fundingNeverIssuedHandoffSql } from "./funding-unissued-attempt-sql.js";
+import { fundingActionPageCtes } from "./funding-action-page-sql.js";
+import {
+  readFundingClassificationPage,
+  type FundingClassificationRevision,
+} from "./funding-classification-revisions.js";
 import { loadFundingLifecycleProjectionForOperation } from "../lifecycle/funding-lifecycle-read-model.js";
 import { canonicalJsonEqual, canonicalJsonHash } from "./canonical.js";
 import {
@@ -269,7 +275,7 @@ export type FundingPolymarketHandoffCandidate = Readonly<{
   actionValidationResult: JsonRecord;
 }>;
 
-type FundingPolymarketHandoffCandidateDbRow = {
+export type FundingPolymarketHandoffCandidateDbRow = {
   operation_id: string;
   step_id: string;
   attempt_id: string;
@@ -283,6 +289,123 @@ type FundingPolymarketHandoffCandidateDbRow = {
   normalized_action: JsonRecord;
   action_validation_result: JsonRecord;
 };
+
+export function mapFundingHandoffCandidate(
+  row: FundingPolymarketHandoffCandidateDbRow,
+): FundingPolymarketHandoffCandidate {
+  return {
+    operationId: row.operation_id,
+    stepId: row.step_id,
+    attemptId: row.attempt_id,
+    attemptOutcome: row.attempt_outcome,
+    referenceKind: row.reference_kind,
+    resolvedTransactionHash: row.resolved_transaction_hash,
+    resolvedEventIndex: row.resolved_event_index,
+    receiptRefCiphertext: row.receipt_ref_ciphertext,
+    receiptRefLookupHmac: row.receipt_ref_lookup_hmac,
+    lookupKeyVersion: row.lookup_key_version,
+    normalizedAction: row.normalized_action,
+    actionValidationResult: row.action_validation_result,
+  };
+}
+
+export type FundingHandoffActionCursor = Readonly<{
+  stepOrdinal: number;
+  attemptNumber: number;
+}>;
+
+/** Operation-wide pages include unbound preparation/pre-route handoffs. Page
+ * BEFORE inspecting kind, envelope, status or reference: all these rows belong
+ * to the same operation revision, including negative other-hash evidence.
+ * Each recursive hop consumes one attempt or one attempt-less step, using
+ * indexed single-row probes. This bounds work even when many steps each have
+ * dense attempt history; a LIMIT after their cross product would not.
+ * Only the resulting bounded page hydrates actions and receipts.
+ */
+export const FUNDING_HANDOFF_OPERATION_PAGE_SQL = `
+${fundingActionPageCtes("handoff_operation")}
+select step.operation_id,step.id as step_id, fact_page.step_ordinal,fact_page.attempt_number,
+  attempt.id as attempt_id,attempt.outcome as attempt_outcome,attempt.reference_kind,
+  attempt.receipt_ref_ciphertext,attempt.receipt_ref_lookup_hmac,attempt.lookup_key_version,
+  step.normalized_action,step.action_validation_result,
+  (attempt.id is not null and step.normalized_action->>'kind'='external_handoff'
+    and step.normalized_action->>'handoffKind' in
+      ('polymarket_deposit_wallet_transfer','polymarket_safe_transfer')
+    and not coalesce(${fundingNeverIssuedHandoffSql()},false)) as handoff_candidate,
+  case when receipt.evidence->>'transactionHash' ~ '^0x[0-9a-fA-F]{64}$'
+    then lower(receipt.evidence->>'transactionHash') else null end as resolved_transaction_hash,
+  case when receipt.status in ('confirmed','finalized') and receipt.canonical and receipt.action_match
+    and receipt.failure_code is null
+    and receipt.evidence->>'transactionHash' ~ '^0x[0-9a-fA-F]{64}$'
+    and receipt.evidence->>'handoffEventIndex' ~ '^(0|[1-9][0-9]*)$'
+    then receipt.evidence->>'handoffEventIndex' else null end as resolved_event_index
+from fact_page
+join funding_operation_steps step on step.id=fact_page.step_id
+left join funding_operation_step_attempts attempt on attempt.id=fact_page.attempt_id
+left join lateral (select * from funding_step_receipt_observations receipt_row
+  where receipt_row.attempt_id=fact_page.attempt_id limit 1) receipt on true
+order by fact_page.step_ordinal,fact_page.attempt_number`;
+
+/** A consistent bounded read, never a negative-role or publication verdict.
+ * The caller must retain facts even when candidates is empty and apply the
+ * final joint fence before allocating. No source segment/provider restriction:
+ * Safe/Deposit Wallet prefixes can be unbound and direct-withdrawal owned.
+ */
+export async function listFundingHandoffOperationPage(
+  db: Pick<PoolClient, "query">,
+  input: {
+    facts: FundingClassificationRevision;
+    cursor: FundingHandoffActionCursor | null;
+    limit: number;
+  },
+): Promise<{
+  candidates: readonly FundingPolymarketHandoffCandidate[];
+  nextCursor: FundingHandoffActionCursor | null;
+}> {
+  if (
+    !Number.isSafeInteger(input.limit) ||
+    input.limit <= 0 ||
+    input.limit > 2147483645
+  )
+    throw new Error("Handoff operation page requires a bounded limit");
+  if (
+    input.cursor &&
+    [input.cursor.stepOrdinal, input.cursor.attemptNumber].some(
+      (value) =>
+        !Number.isSafeInteger(value) || value < 0 || value > 2147483647,
+    )
+  )
+    throw new Error("Invalid handoff operation cursor");
+  return readFundingClassificationPage(db, input.facts, async (client) => {
+    const { rows } = await client.query<
+      FundingPolymarketHandoffCandidateDbRow & {
+        step_ordinal: number;
+        attempt_number: number;
+        handoff_candidate: boolean;
+      }
+    >(FUNDING_HANDOFF_OPERATION_PAGE_SQL, [
+      input.facts.operationId,
+      input.facts.userId,
+      input.cursor?.stepOrdinal ?? -1,
+      input.cursor?.attemptNumber ?? 0,
+      input.limit + 1,
+    ]);
+    const page = rows.slice(0, input.limit);
+    const last = page.at(-1);
+    return {
+      candidates: page
+        .filter((row) => row.handoff_candidate)
+        .map(mapFundingHandoffCandidate),
+      nextCursor:
+        rows.length > input.limit && last
+          ? {
+              stepOrdinal: last.step_ordinal,
+              attemptNumber: last.attempt_number,
+            }
+          : null,
+    };
+  });
+}
 
 const MAX_POLYMARKET_HANDOFF_CANDIDATES_PER_LOOKUP = 256;
 
@@ -370,7 +493,7 @@ export async function listPotentialPolymarketHandoffsForCanonicalEvents(
             (select attempt.id
              from (select * from funding_operation_step_attempts attempt_row
                where attempt_row.receipt_ref_lookup_hmac=candidate.event->>'receiptRefLookupHmac'
-                 and attempt_row.receipt_ref_lookup_hmac=any($3::text[])
+                 and candidate.event->>'receiptRefLookupHmac'=any($3::text[])
                  and ($4::integer is null or attempt_row.lookup_key_version=$4)
                  and attempt_row.reference_kind='transaction' offset 0) attempt
              join lateral (select * from funding_operation_steps step_row where step_row.id=attempt.step_id limit 1) step on true
@@ -444,28 +567,8 @@ export async function listPotentialPolymarketHandoffsForCanonicalEvents(
   if (rows.length > MAX_POLYMARKET_HANDOFF_CANDIDATES_PER_LOOKUP) {
     throw new FundingPolymarketHandoffLookupOverflowError();
   }
-  const candidates: FundingPolymarketHandoffCandidate[] = [];
-  for (const row of rows) {
-    // Never discard an issued attempt using a later lifecycle snapshot. It
-    // may have been reported/confirmed between this SELECT and that read;
-    // terminality also does not negate an already executed historical send.
-    // A started envelope remains pending until exact evidence resolves it.
-    candidates.push({
-      operationId: row.operation_id,
-      stepId: row.step_id,
-      attemptId: row.attempt_id,
-      attemptOutcome: row.attempt_outcome,
-      referenceKind: row.reference_kind,
-      resolvedTransactionHash: row.resolved_transaction_hash,
-      resolvedEventIndex: row.resolved_event_index,
-      receiptRefCiphertext: row.receipt_ref_ciphertext,
-      receiptRefLookupHmac: row.receipt_ref_lookup_hmac,
-      lookupKeyVersion: row.lookup_key_version,
-      normalizedAction: row.normalized_action,
-      actionValidationResult: row.action_validation_result,
-    });
-  }
-  return candidates;
+  // Never discard an issued attempt using a later lifecycle snapshot.
+  return rows.map(mapFundingHandoffCandidate);
 }
 
 export type FundingWithdrawalDestination = Readonly<{
@@ -2540,10 +2643,22 @@ async function completeReadyFundingOperation(
     lifecycle?.status !== "completed" ||
     lifecycle.progressStage !== "terminal"
   ) {
-    throw new FundingPersistenceError(
-      "invalid_state_transition",
-      "funding operation is not completed by its consumer facts",
-    );
+    // New send admission still requires ready. A proven, already executed and
+    // exactly linked consumer must be recorded even if a later ownership
+    // conflict keeps its funding route in manual recovery.
+    if (
+      !(
+        input.resolution === "consumed_by_trade" &&
+        facts?.consumer.completed === true &&
+        lifecycle?.status === "recovery_required" &&
+        lifecycle.errorCode === FUNDING_PHYSICAL_EVENT_OWNERSHIP_CONFLICT
+      )
+    ) {
+      throw new FundingPersistenceError(
+        "invalid_state_transition",
+        "funding operation is not completed by its consumer facts",
+      );
+    }
   }
   await writeFundingOperationLifecycleProjectionCacheInTransaction(client, {
     operationId: operation.id,
@@ -2553,17 +2668,23 @@ async function completeReadyFundingOperation(
       stage: lifecycle.progressStage,
     },
     recoveryMode: lifecycle.recoveryMode,
+    errorCode: lifecycle.errorCode,
     supportMetadataPatch: {
       consumerResolution: input.resolution,
       consumerResolvedAt: input.now.toISOString(),
     },
     now: input.now,
   });
-  await releaseCompletedTradeShortfallSourceReservationsInTransaction(client, {
-    operationId: operation.id,
-    userId: input.userId,
-    now: input.now,
-  });
+  if (lifecycle.status === "completed") {
+    await releaseCompletedTradeShortfallSourceReservationsInTransaction(
+      client,
+      {
+        operationId: operation.id,
+        userId: input.userId,
+        now: input.now,
+      },
+    );
+  }
 }
 
 /**

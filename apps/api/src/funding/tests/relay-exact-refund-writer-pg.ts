@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { verifyRefundCanonicalWatchPg } from "./refund-canonical-watch-pg.js";
 import { verifyReceiveRecordedRefundPg } from "./receive-recorded-refund-pg.js";
+import { verifyExactRefundRemineGuardPg } from "./exact-refund-remine-guard-pg.js";
 import { verifyRefundCompetingRolesPg } from "./refund-competing-roles-pg.js";
 import type { Pool, PoolClient } from "pg";
 import type { AssetLocation } from "../domain/types.js";
@@ -15,7 +16,13 @@ import {
 import {
   recordRelayExactRefundReceiptsInTransaction,
   RelayExactRefundSnapshotChanged,
+  loadRelayExactRefundContext,
+  RELAY_EXACT_REFUND_CONTEXT_SQL,
 } from "../reconciliation/relay-exact-refund-receipts.js";
+import {
+  readRefundCompletionPage,
+  type RefundCompletionProgress,
+} from "../reconciliation/relay-refund-completion-scan.js";
 import type { OwnedRouteCanonicalDestinationEvent } from "../reconciliation/owned-route-destination-observer.js";
 import { readRelayExactRefundEvidence } from "../../funding-providers/relay/exact-refund-observer.js";
 import { Hip4ReadError } from "../../services/hip4-client.js";
@@ -33,6 +40,7 @@ import {
 import type { ValuedAssetComponent } from "../domain/types.js";
 import {
   classifyRecordedRelayExactRefundEvents,
+  readRecordedRelayRefundRoleEvidence,
   refundCanonicalEventKey,
 } from "../reconciliation/relay-exact-refund-classification.js";
 import {
@@ -593,22 +601,36 @@ export async function verifyRelayExactRefundWriterPg(
       base,
       observe,
     );
-    assert.equal(partialRuntime.kind, "partial");
+    // Native compatibility remains in this rollback-only effect fixture.
+    // EVM runtime without a real job context must not use the old tx writer;
+    // committed runtime/worker fixtures exercise its pool-level publisher.
+    assert.equal(partialRuntime.kind, native ? "partial" : "pending");
     const completeRuntime = await reconcileRelayExactRefundReceipts(
       runtimePool,
       relayClient,
       base,
       observe,
     );
-    assert.equal(completeRuntime.kind, "complete");
+    assert.equal(completeRuntime.kind, native ? "complete" : "pending");
+    if (!native)
+      assert.deepEqual(completeRuntime, {
+        kind: "pending",
+        reason: "role_work_context_pending",
+      });
     const diagnostic = (
       await db.query(
         "select support_metadata from funding_operation_segments where id=$1",
         [input.segmentId],
       )
     ).rows[0].support_metadata;
-    assert.equal(diagnostic.exactRefundReceipts.result, "complete");
-    assert.equal(diagnostic.exactRefundReceipts.reason, null);
+    assert.equal(
+      diagnostic.exactRefundReceipts.result,
+      native ? "complete" : "pending",
+    );
+    assert.equal(
+      diagnostic.exactRefundReceipts.reason,
+      native ? null : "role_work_context_pending",
+    );
     assert.equal(diagnostic.exactRefundReceipts.observationReason, readReason);
     assert.ok(
       diagnostic.relayStatusCategory,
@@ -662,12 +684,39 @@ export async function verifyRelayExactRefundWriterPg(
       evmEvents: firstRead.evmEvents,
     });
     assert.equal(first.kind, "partial");
+    const refundContext = await loadRelayExactRefundContext(db, base);
+    assert.equal(refundContext.kind, "ready");
+    if (refundContext.kind !== "ready")
+      assert.fail("expected committed refund contract");
+    const readCurrentRefundSet = async () => {
+      let progress: RefundCompletionProgress = { kind: "unchecked" };
+      for (let page = 0; page < 3; page++) {
+        progress = await readRefundCompletionPage(db, {
+          operationId: input.operationId,
+          segmentId: input.segmentId,
+          contract: refundContext.contract,
+          progress,
+          limit: 1,
+        });
+        if (progress.kind !== "reading") return progress;
+      }
+      assert.fail("two writer receipts must finish in two pages");
+    };
+    assert.deepEqual(await readCurrentRefundSet(), {
+      kind: "pending",
+      reason: "proof_missing",
+    });
     await checkMovement(
       (6n * 10n ** BigInt(input.source.asset.decimals)).toString(),
     );
     assert.equal("inserted" in first && first.inserted, 1);
     assert.equal((await lifecycle()).safety.reservationsMayRelease, false);
     if (!native) {
+      await verifyExactRefundRemineGuardPg(db, {
+        operationId: input.operationId,
+        transactionHash: hashes[0],
+        now: input.now,
+      });
       const recorded = await classifyRecordedRelayExactRefundEvents(db, {
         userId: reservation.user_id,
         events: evm,
@@ -677,6 +726,28 @@ export async function verifyRelayExactRefundWriterPg(
         operationId: input.operationId,
         segmentId: input.segmentId,
       });
+      const evidence = (
+        await readRecordedRelayRefundRoleEvidence(db, {
+          userId: reservation.user_id,
+          events: evm,
+        })
+      ).get(refundCanonicalEventKey(evm[0]));
+      assert.deepEqual(
+        evidence?.classification,
+        recorded.get(refundCanonicalEventKey(evm[0])),
+      );
+      assert.deepEqual(evidence?.dependencies, [
+        {
+          userId: reservation.user_id,
+          operationId: input.operationId,
+          revision: (
+            await db.query(
+              "select coalesce((select revision from funding_classification_revisions where operation_id=$1),0)::text as revision",
+              [input.operationId],
+            )
+          ).rows[0].revision,
+        },
+      ]);
       assert.equal(
         recorded.get(refundCanonicalEventKey(evm[1]))?.kind,
         "unmatched",
@@ -695,6 +766,7 @@ export async function verifyRelayExactRefundWriterPg(
         segmentId: input.segmentId,
         event: evm[0],
         now: input.now,
+        referenceCodec: input.referenceCodec,
       });
       const quarantine = calls.findIndex((sql) =>
         sql.includes("insert into funding_receive_canonical_events"),
@@ -931,6 +1003,11 @@ export async function verifyRelayExactRefundWriterPg(
       await listFundingObservationsForOperation(db, input.operationId)
     ).filter((row) => row.kind === "refund_credit");
     assert.equal(receipts.length, 2);
+    assert.equal(
+      (await readCurrentRefundSet()).kind,
+      "complete_refund_set",
+      "paged reader consumes the real writer's frozen proof for EVM/native receipts",
+    );
     if (native) {
       assert.ok(
         receipts.every(
@@ -1044,6 +1121,11 @@ export async function verifyRelayExactRefundWriterPg(
       nextFinality: "reorged",
       reorgedAt,
     });
+    assert.notEqual(
+      (await readCurrentRefundSet()).kind,
+      "complete_refund_set",
+      "a subset of the former complete manifest is not complete after reorg",
+    );
     if (!native) {
       const reorged = await classifyRecordedRelayExactRefundEvents(db, {
         userId: reservation.user_id,
@@ -1112,8 +1194,8 @@ export async function verifyRelayExactRefundWriterPg(
         .size,
       0,
     );
-    const contextSql = calls.find((sql) =>
-      sql.includes("select operation_row.user_id, segment_row.source_snapshot"),
+    const contextSql = calls.find(
+      (sql) => sql === RELAY_EXACT_REFUND_CONTEXT_SQL,
     );
     assert.ok(contextSql);
     const providerRequestSql = driverQueries.find(

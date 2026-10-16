@@ -21,6 +21,7 @@ const policies = [randomUUID(), randomUUID()];
 const lifecycle = await installHip4TestLifecycle(pool);
 let calls = 0;
 let failRole = false;
+let failPerps = false;
 let unlinkOnRole = false;
 let roleStarted: (() => void) | undefined;
 let holdRole: Promise<void> | undefined;
@@ -29,6 +30,10 @@ const fetcher: typeof fetch = async (url, options) => {
   const request = JSON.parse(String(options?.body));
   if (request.user) assert.equal(request.user, address);
   calls++;
+  if (request.type === "clearinghouseState") {
+    assert.equal(request.dex, "");
+    if (failPerps) return new Response("error", { status: 503 });
+  }
   if (request.type === "userRole") {
     roleStarted?.();
     await holdRole;
@@ -57,6 +62,24 @@ const fetcher: typeof fetch = async (url, options) => {
       balances: [
         { coin: "USDC", token: 0, total: "12.34", hold: "0", entryNtl: "0" },
       ],
+    },
+    clearinghouseState: {
+      marginSummary: {
+        accountValue: "9.962411",
+        totalRawUsd: "9.962411",
+        totalMarginUsed: "0",
+        totalNtlPos: "0",
+      },
+      crossMarginSummary: {
+        accountValue: "9.962411",
+        totalRawUsd: "9.962411",
+        totalMarginUsed: "0",
+        totalNtlPos: "0",
+      },
+      crossMaintenanceMarginUsed: "0",
+      withdrawable: "9.962411",
+      assetPositions: [],
+      time: Date.now(),
     },
     frontendOpenOrders: [],
     userFills: [],
@@ -136,6 +159,8 @@ try {
     )
   ).rows[0].observation;
   assert.equal(snapshot.cash.ownedCash, "12.34");
+  assert.equal(snapshot.perpsCash.state, "verified");
+  assert.equal(snapshot.perpsCash.availableRaw, "996241100");
   await makeDue();
   failRole = true;
   const failed = await runHip4AccountReadPass(pool, fetcher);
@@ -149,8 +174,27 @@ try {
   assert.equal(stored.lease_token, null);
   assert.equal(stored.observation.observedAt, snapshot.observedAt);
   failRole = false;
+  failPerps = true;
   await makeDue();
   assert.equal((await runHip4AccountReadPass(pool, fetcher)).updated, 1);
+  const perpsFailed = (
+    await pool.query(
+      "select observation from hip4_account_snapshots where account_address=$1",
+      [address],
+    )
+  ).rows[0].observation;
+  assert.equal(
+    perpsFailed.cash.ownedCash,
+    "12.34",
+    "independent failure cannot erase valid spot",
+  );
+  assert.equal(perpsFailed.perpsCash.state, "unavailable");
+  assert.equal(
+    perpsFailed.perpsCash.availableRaw,
+    null,
+    "no stale cash from a previous perps receipt/read",
+  );
+  failPerps = false;
   await makeDue();
   await pool.query(
     "update hip4_account_snapshots set lease_token=gen_random_uuid(),lease_until=now()-interval '1 second' where account_address=$1",
@@ -160,6 +204,15 @@ try {
     (await runHip4AccountReadPass(pool, fetcher)).updated,
     1,
     "expired worker lease recovers normally",
+  );
+  assert.equal(
+    (
+      await pool.query(
+        "select observation from hip4_account_snapshots where account_address=$1",
+        [address],
+      )
+    ).rows[0].observation.perpsCash.state,
+    "verified",
   );
   await makeDue();
   unlinkOnRole = true;

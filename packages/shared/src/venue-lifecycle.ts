@@ -147,29 +147,30 @@ export function parseVenueLifecyclePolicy(
 
 export function getVenueLifecycleCapabilities(
   policy: VenueLifecyclePolicy,
+  venue: HunchVenue,
+): VenueLifecycleCapabilities;
+export function getVenueLifecycleCapabilities(
+  policy: VenueLifecyclePolicy,
+  venue: unknown,
+): VenueLifecycleCapabilities | null;
+export function getVenueLifecycleCapabilities(
+  policy: VenueLifecyclePolicy,
   venue: unknown,
 ): VenueLifecycleCapabilities | null {
   const normalized = normalizeHunchVenue(venue);
   if (!normalized) return null;
   const capabilities =
     CAPABILITIES_BY_LIFECYCLE[policy.venues[normalized].lifecycle];
-  // Lifecycle activation enables the implemented read surfaces. Financial and
-  // signal integrations are not implemented yet; an admin policy toggle cannot
-  // grant those capabilities ahead of their execution/accounting contracts.
-  // Automation remains unsupported even after future interactive trading.
+  // Native interactive trading and funding use the ordinary lifecycle gates.
+  // The default stays unreleased/off. Autonomous execution, signals and manual
+  // redemption have no native consumer and cannot be granted by activation.
   return normalized === "hyperliquid"
     ? {
         ...capabilities,
         automation: false,
-        increaseExposure: false,
-        reduceExposure: false,
-        cancel: false,
         redeem: false,
         signalDelivery: false,
         signalSource: false,
-        fundMaintenance: false,
-        fundTrading: false,
-        walletWithdrawal: false,
       }
     : capabilities;
 }
@@ -192,7 +193,7 @@ export function getVenueLifecycleCapabilityMatrix() {
               },
             },
             venue,
-          )!,
+          ),
         ]),
       ),
     ]),

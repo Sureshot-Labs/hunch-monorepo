@@ -6,6 +6,7 @@ import {
 import { hip4AccountAddressSchema } from "../schemas/hip4-account.js";
 
 export type Hip4AccountInfoRequest =
+  | { type: "clearinghouseState"; user: string; dex: "" }
   | { type: "orderStatus"; user: string; oid: number | string }
   | { type: "userFills"; user: string; aggregateByTime: false }
   | {
@@ -36,6 +37,7 @@ export function createHip4AccountClient(
   policy: Hip4ReadPolicy,
   admit: (weight: number) => Promise<boolean>,
   fetcher: typeof fetch = fetch,
+  options?: Readonly<{ deadlineMs: number }>,
 ) {
   return async (request: Hip4AccountInfoRequest) => {
     if (
@@ -43,6 +45,7 @@ export function createHip4AccountClient(
         "userRole",
         "userAbstraction",
         "spotClearinghouseState",
+        "clearinghouseState",
         "userFees",
         "frontendOpenOrders",
         "orderStatus",
@@ -53,6 +56,8 @@ export function createHip4AccountClient(
     )
       throw new Hip4ReadError("invalid_response");
     const user = hip4AccountAddressSchema.parse(request.user);
+    if (request.type === "clearinghouseState" && request.dex !== "")
+      throw new Hip4ReadError("invalid_response");
     if (
       request.type === "orderStatus" &&
       !(typeof request.oid === "number"
@@ -78,6 +83,7 @@ export function createHip4AccountClient(
       request.type === "userRole"
         ? 60
         : request.type === "spotClearinghouseState" ||
+            request.type === "clearinghouseState" ||
             request.type === "orderStatus"
           ? 2
           : request.type === "userFillsByTime" || request.type === "userFills"
@@ -89,6 +95,7 @@ export function createHip4AccountClient(
       fetcher,
       { ...request, user },
       weight,
+      options?.deadlineMs,
     );
   };
 }
@@ -155,8 +162,20 @@ async function hip4InfoResponse(
   fetcher: typeof fetch,
   request: Hip4InfoRequest | Hip4AccountInfoRequest,
   weight: number,
+  deadlineMs?: number,
 ): Promise<unknown> {
+  const remainingTimeout = () => {
+    if (deadlineMs === undefined) return policy.requestTimeoutMs;
+    const remaining = Math.ceil(deadlineMs - Date.now());
+    if (!Number.isSafeInteger(remaining) || remaining <= 0)
+      throw new Hip4ReadError("budget_exhausted");
+    return Math.min(policy.requestTimeoutMs, remaining);
+  };
+  remainingTimeout();
   if (!(await admit(weight))) throw new Hip4ReadError("budget_exhausted");
+  // Admission may wait on the shared DB row. The absolute caller budget must
+  // be rechecked AFTER that wait, at the actual transport boundary.
+  const timeoutMs = remainingTimeout();
   const endpoint =
     policy.environment === "mainnet"
       ? "https://api.hyperliquid.xyz/info"
@@ -166,7 +185,7 @@ async function hip4InfoResponse(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
-      signal: AbortSignal.timeout(policy.requestTimeoutMs),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) {
       await response.body?.cancel();

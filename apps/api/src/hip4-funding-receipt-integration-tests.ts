@@ -22,10 +22,14 @@ import { verifyRefundSourceActionsPg } from "./funding/tests/refund-source-actio
 import { loadRefundSourceCandidatePage } from "./funding/reconciliation/relay-refund-source-candidates.js";
 import {
   classifyRefundSourceActions,
+  emptyRefundSourceActionFold,
+  foldRefundSourceActions,
+  finishRefundSourceAccounting,
   loadRefundSourceActionFacts,
 } from "./funding/reconciliation/relay-refund-source-actions.js";
 import { verifyReceiveCanonicalLocksPg } from "./funding/tests/receive-canonical-locks-pg.js";
 import { verifyReceiveClassificationRetryPg } from "./funding/tests/receive-classification-retry-pg.js";
+import { verifyPolymarketHandoffPlanPg } from "./funding/tests/polymarket-handoff-plan-pg.js";
 import { createIntegrationTestPool } from "./test-database-target.js";
 import {
   loadFundingAccountValueFacts,
@@ -61,6 +65,7 @@ import {
   RELAY_ROUTE_SPECS,
   relayRuntimeRoute,
 } from "./funding-providers/relay/mappings.js";
+import { POLYGON_PUSD } from "./funding-providers/relay/rehearsal.js";
 import {
   startFundingStepAttemptInTransaction,
   finishFundingStepAttemptInTransaction,
@@ -172,6 +177,11 @@ try {
   assert.equal(result.kind, "verified");
   if (result.kind !== "verified") throw new Error("Missing fixture proof");
   const now = new Date();
+  // Synthetic fixtures share a logical evidence clock through expensive SQL
+  // plan probes. Give only their generated quotes enough lifetime for all
+  // three source assets; do not weaken production freshness/expiry checks or
+  // mutate the process/DB wall clock.
+  const fixtureQuoteLifetimeMs = 300_000;
   const event = hypercoreDestinationEvent(result.evidence, now);
   const identity = [
     event.networkId,
@@ -273,7 +283,7 @@ try {
       policyRevision: "native-test",
       canonicalRequest: { test: true },
       consentToken,
-      expiresAt: new Date(now.getTime() + 60000),
+      expiresAt: new Date(now.getTime() + fixtureQuoteLifetimeMs),
     });
     return commitFundingOperationInTransaction(client, {
       userId: fixtureUserId,
@@ -620,7 +630,12 @@ try {
       .ledgerAfterSecond,
     1791381419,
   );
-  const nativeFixture = hypercorePlanTestFixture(now, userId);
+  const nativeFixture = hypercorePlanTestFixture(
+    now,
+    userId,
+    undefined,
+    fixtureQuoteLifetimeMs,
+  );
   assert.equal(nativeFixture.input.destination.target.kind, "owned_location");
   assert.equal(nativeFixture.input.source.source.kind, "owned_location");
   if (
@@ -679,14 +694,28 @@ try {
   const inboundActionFixtures: { operation_id: string; segment_id: string }[] =
     [];
   for (const [index, replacementKind] of (
-    ["destination_credit", "refund_credit"] as const
+    ["destination_credit", "refund_credit", "refund_credit"] as const
   ).entries()) {
-    const wire = structuredClone(inboundCapture.routes[index].response.body);
+    let wire = structuredClone(
+      inboundCapture.routes[index === 2 ? 1 : index].response.body,
+    );
+    if (index === 2) {
+      // Explicitly synthetic pUSD protocol wire; no live financial action.
+      const originalCurrency = String(wire.details.currencyIn.currency.address);
+      wire = JSON.parse(JSON.stringify(wire), (_key, value: unknown) =>
+        typeof value === "string" &&
+        value.toLowerCase() === originalCurrency.toLowerCase()
+          ? POLYGON_PUSD
+          : value,
+      );
+    }
     const spec =
       RELAY_ROUTE_SPECS[
         index === 0
           ? "base-usdc-to-hypercore-spot-usdc"
-          : "polygon-usdc-to-hypercore-spot-usdc"
+          : index === 1
+            ? "polygon-usdc-to-hypercore-spot-usdc"
+            : "polygon-pusd-to-hypercore-spot-usdc"
       ];
     const deadline = Math.floor(now.getTime() / 1000) + 86400;
     wire.protocol.v2.orderData.output.deadline = deadline;
@@ -734,17 +763,18 @@ try {
           index === 0 ? 8453 : 137,
         ),
         contractsObservedAt: now,
-        maximumContractAgeMs: 60000,
+        maximumContractAgeMs: fixtureQuoteLifetimeMs,
         owner: wire.details.sender,
         recipient: wire.details.recipient,
+        sourceCurrency: spec.source.assetId,
         amountMode: "exact_input",
         authorizedSourceRaw: "10000000",
         minimumOutputRaw: "850000000",
         expectedOutputTargetRaw: "850000000",
         maximumFeeRaw: "1500000",
         now,
-        deadline: new Date(now.getTime() + 60000),
-        maximumQuoteTtlMs: 60000,
+        deadline: new Date(now.getTime() + fixtureQuoteLifetimeMs),
+        maximumQuoteTtlMs: fixtureQuoteLifetimeMs,
       },
       source: evmSource,
       destination: nativeDestination,
@@ -767,6 +797,7 @@ try {
         walletId: "inbound-controller",
         controllerWalletRef: "inbound-controller",
         networkId: spec.source.networkId,
+        address: wire.details.sender,
         source: "external",
         signingModes: ["web_client"],
         serverWalletRef: null,
@@ -776,6 +807,13 @@ try {
         destinationLocationPatternId: "hypercore-spot-usdc",
       }),
     });
+    if (index === 2)
+      await verifyPolymarketHandoffPlanPg(client, {
+        userId,
+        basePlan: inboundPlan.commitPlan,
+        now,
+        commit,
+      });
     const approve = async (operationId: string) => {
       const step = (
         await client.query(
@@ -845,7 +883,7 @@ try {
         "0",
       );
     };
-    const readExposure = async (operationId: string) => {
+    const readActionEvidence = async (operationId: string) => {
       const page = await loadRefundSourceCandidatePage(client, {
         userId,
         scanBefore: "2100-01-01T00:00:00.000000Z",
@@ -867,10 +905,21 @@ try {
         limit: 50,
       });
       assert.equal(facts.nextCursor, null);
-      return classifyRefundSourceActions(candidate, facts.rows, {
-        complete: true,
-      });
+      return {
+        exposure: classifyRefundSourceActions(candidate, facts.rows, {
+          complete: true,
+        }),
+        accounting: finishRefundSourceAccounting(
+          foldRefundSourceActions(
+            candidate,
+            emptyRefundSourceActionFold(),
+            facts.rows,
+          ),
+        ),
+      };
     };
+    const readExposure = async (operationId: string) =>
+      (await readActionEvidence(operationId)).exposure;
     const cancelledInbound = await commit(userId, inboundPlan.commitPlan);
     await approve(cancelledInbound.operation.id);
     const cancellation =
@@ -1121,6 +1170,61 @@ try {
       });
     await applyReceipt();
     await applyReceipt();
+    const accounted = (await readActionEvidence(inbound.operation.id))
+      .accounting;
+    assert.equal(
+      accounted.kind,
+      "single_debit",
+      "the standard finalized receipt writer proves exactly one physical source debit",
+    );
+    if (accounted.kind !== "single_debit")
+      assert.fail("expected exact source debit");
+    assert.equal(accounted.debit.transactionHash, txHash);
+    assert.equal(accounted.debit.eventIndex, "7");
+    assert.deepEqual(
+      (
+        await client.query(
+          "select asset_id,asset_decimals,raw_amount::text from funding_observations where operation_id=$1 and kind='source_debit'",
+          [inbound.operation.id],
+        )
+      ).rows,
+      [
+        {
+          asset_id: spec.source.assetId.toLowerCase(),
+          asset_decimals: 6,
+          raw_amount: "10000000",
+        },
+      ],
+      "source debit retains the exact selected stablecoin, not its dollar-equivalent alias",
+    );
+    await client.query("savepoint source_debit_reorg_proof");
+    await applyFundingStepReceiptEvidenceInTransaction(client, {
+      operationId: inbound.operation.id,
+      stepId: inboundIds.id,
+      attemptId: attempt.id,
+      networkId: spec.source.networkId,
+      receipt: {
+        status: "reorged",
+        actionMatch: true,
+        ledgerHeight: "260",
+        blockHash: `0x${"e".repeat(64)}`,
+        canonical: false,
+        failureCode: null,
+        evidence: { transactionHash: txHash },
+      },
+      now: new Date(now.getTime() + 1000),
+    });
+    assert.deepEqual(
+      (await readActionEvidence(inbound.operation.id)).accounting,
+      { kind: "unaccounted" },
+      "current reorged receipt/debit cannot retain settled source proof",
+    );
+    await client.query("rollback to savepoint source_debit_reorg_proof");
+    await client.query("release savepoint source_debit_reorg_proof");
+    assert.deepEqual(
+      (await readActionEvidence(inbound.operation.id)).accounting,
+      accounted,
+    );
     assert.deepEqual(
       await readExposure(inbound.operation.id),
       { kind: "possible", stepIds: [inboundIds.id] },
@@ -1378,6 +1482,7 @@ try {
     now,
     userId,
     `0x${randomUUID().replaceAll("-", "")}12345678`,
+    fixtureQuoteLifetimeMs,
   );
   const noncePlan = await buildRelayPlanningQuote(nonceFixture.input);
   await commit(userId, noncePlan.commitPlan);
@@ -1435,7 +1540,12 @@ try {
   );
   await client.query("rollback to savepoint native_trade_nonce_collision");
   await client.query("savepoint competing_nonce");
-  const competingFixture = hypercorePlanTestFixture(now, userId);
+  const competingFixture = hypercorePlanTestFixture(
+    now,
+    userId,
+    undefined,
+    fixtureQuoteLifetimeMs,
+  );
   const competingPlan = await buildRelayPlanningQuote(competingFixture.input);
   await assert.rejects(
     commit(userId, competingPlan.commitPlan),
@@ -1764,6 +1874,13 @@ try {
   // Execute the exact production lookup over the same 50k-operation fixture.
   // The savepoint keeps this synthetic EVM key out of later accounting tests.
   await client.query("savepoint recorded_refund_lookup_fixture");
+  await client.query(
+    "create temporary table funding_classification_revisions (like public.funding_classification_revisions including all) on commit drop",
+  );
+  await client.query(
+    "insert into funding_classification_revisions(operation_id,revision) select id,5 from funding_operations",
+  );
+  await client.query("analyze funding_classification_revisions");
   const refundKey = {
     identity: "recorded-refund-plan",
     network_id: "evm:8453",
@@ -1789,49 +1906,54 @@ try {
     `prepare recorded_refund_lookup_plan(jsonb) as ${RECORDED_EXACT_REFUND_EVENTS_SQL}`,
   );
   const recordedRefundPlans: unknown[] = [];
-  for (const [keys, expectedRows] of [
-    [[refundKey], 1],
-    [[{ ...refundKey, tx_hash: `0x${"a8".repeat(32)}` }], 0],
-    [[], 0],
-  ] as const) {
-    const explanation = (
-      await client.query(`explain(analyze,buffers,format json)
+  for (const mode of ["force_custom_plan", "force_generic_plan"] as const) {
+    await client.query(`set local plan_cache_mode=${mode}`);
+    for (const [keys, expectedRows] of [
+      [[refundKey], 1],
+      [[{ ...refundKey, tx_hash: `0x${"a8".repeat(32)}` }], 0],
+      [[], 0],
+    ] as const) {
+      const explanation = (
+        await client.query(`explain(analyze,buffers,format json)
       execute recorded_refund_lookup_plan(${literal(JSON.stringify(keys))})`)
-    ).rows[0]["QUERY PLAN"][0];
-    assert.equal(explanation.Plan["Actual Rows"], expectedRows);
-    const scans: Record<string, unknown>[] = [];
-    const visit = (node: Record<string, unknown>) => {
-      if (
-        [
-          "funding_observations",
-          "funding_operations",
-          "funding_operation_segments",
-        ].includes(String(node["Relation Name"]))
-      )
-        scans.push(node);
-      for (const child of (node.Plans ?? []) as Record<string, unknown>[])
-        visit(child);
-    };
-    visit(explanation.Plan);
-    assert.ok(
-      scans.every((node) =>
-        ["Index Scan", "Index Only Scan"].includes(String(node["Node Type"])),
-      ),
-    );
-    assert.ok(
-      scans.every(
-        (node) =>
-          Number(node["Actual Rows"]) * Number(node["Actual Loops"]) <= 2,
-      ),
-    );
-    recordedRefundPlans.push({
-      rows: expectedRows,
-      ms: explanation["Execution Time"],
-      localBlocks:
-        explanation.Plan["Local Hit Blocks"] +
-        explanation.Plan["Local Read Blocks"],
-      scans: scans.map((node) => node["Node Type"]),
-    });
+      ).rows[0]["QUERY PLAN"][0];
+      assert.equal(explanation.Plan["Actual Rows"], expectedRows);
+      const scans: Record<string, unknown>[] = [];
+      const visit = (node: Record<string, unknown>) => {
+        if (
+          [
+            "funding_observations",
+            "funding_operations",
+            "funding_operation_segments",
+            "funding_classification_revisions",
+          ].includes(String(node["Relation Name"]))
+        )
+          scans.push(node);
+        for (const child of (node.Plans ?? []) as Record<string, unknown>[])
+          visit(child);
+      };
+      visit(explanation.Plan);
+      assert.ok(
+        scans.every((node) =>
+          ["Index Scan", "Index Only Scan"].includes(String(node["Node Type"])),
+        ),
+      );
+      assert.ok(
+        scans.every(
+          (node) =>
+            Number(node["Actual Rows"]) * Number(node["Actual Loops"]) <= 2,
+        ),
+      );
+      recordedRefundPlans.push({
+        mode,
+        rows: expectedRows,
+        ms: explanation["Execution Time"],
+        localBlocks:
+          explanation.Plan["Local Hit Blocks"] +
+          explanation.Plan["Local Read Blocks"],
+        scans: scans.map((node) => node["Node Type"]),
+      });
+    }
   }
   await client.query("deallocate recorded_refund_lookup_plan");
   await client.query("rollback to savepoint recorded_refund_lookup_fixture");

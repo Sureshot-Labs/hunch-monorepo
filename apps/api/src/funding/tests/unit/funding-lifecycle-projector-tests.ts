@@ -6,6 +6,7 @@ import { actionIsSafeInternalHandoff } from "../../lifecycle/funding-lifecycle-f
 import {
   deriveFundingLifecycle,
   deriveFundingLifecycleBeforeActionBroadcast,
+  FUNDING_PHYSICAL_EVENT_OWNERSHIP_CONFLICT,
   type FundingLifecycleActionAttempt,
   type FundingLifecycleActionFact,
   type FundingLifecycleFacts,
@@ -143,6 +144,61 @@ function facts(
     now,
     ...overrides,
   };
+}
+
+// A physical ownership collision is not a failed broadcast or a chain reorg.
+// Even late destination/consumer evidence must retain the incident, while
+// ordinary exact ownership repair restores the existing lifecycle.
+for (const completed of [false, true]) {
+  const finalAttempt = attempt({
+    outcome: "submitted",
+    broadcastMayHaveOccurred: true,
+    referenceKind: "transaction",
+    receipt: {
+      status: "finalized",
+      canonical: true,
+      actionMatched: true,
+      failureFinalized: false,
+      physicalIdentityConflict: true,
+    },
+  });
+  const input = facts({
+    actions: [
+      action("ownership-conflict", {
+        safeInternalHandoff: true,
+        attempts: [finalAttempt],
+      }),
+    ],
+    transfers: [transfer("destination_credit")],
+    consumer: { required: true, completed, unresolved: false },
+    manualRecovery: { code: "unrelated_observer_error", requestedAt: now },
+  });
+  const conflicted = deriveFundingLifecycle(input);
+  assert.equal(conflicted.status, "recovery_required");
+  assert.equal(conflicted.recoveryMode, "manual_review");
+  assert.equal(conflicted.errorCode, FUNDING_PHYSICAL_EVENT_OWNERSHIP_CONFLICT);
+  assert.ok(conflicted.actions.every((item) => !item.actionable));
+  assert.ok(finalAttempt.receipt);
+  const repaired = deriveFundingLifecycle({
+    ...input,
+    manualRecovery: null,
+    actions: [
+      action("ownership-conflict", {
+        safeInternalHandoff: true,
+        attempts: [
+          {
+            ...finalAttempt,
+            receipt: {
+              ...finalAttempt.receipt,
+              actionMatched: true,
+              physicalIdentityConflict: false,
+            },
+          },
+        ],
+      }),
+    ],
+  });
+  assert.equal(repaired.status, completed ? "completed" : "ready");
 }
 
 {

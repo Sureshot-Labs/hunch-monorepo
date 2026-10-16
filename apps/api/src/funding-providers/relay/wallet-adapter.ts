@@ -47,6 +47,7 @@ import {
   HYPERCORE_MAINNET_USDC,
   isHypercoreMainnetUsdc,
   hypercoreLocationDex,
+  RELAY_HYPERCORE_PERPS_CURRENCY,
 } from "../../funding/domain/hypercore-identity.js";
 import {
   sameAccountAddress,
@@ -168,7 +169,15 @@ export function normalizeRelayHypercoreInboundWalletQuote(input: {
       spec.destinationVm === "hypercore" &&
       sameAsset(spec.source, source.asset),
   );
-  if (!route) throw new Error("native_inbound_source_asset_mismatch");
+  if (
+    !route ||
+    !sameAsset(source.asset, {
+      networkId: `evm:${chainId}`,
+      assetId: input.validation.sourceCurrency,
+      decimals: 6,
+    })
+  )
+    throw new Error("native_inbound_source_asset_mismatch");
   const validated = validateRelayHypercoreInboundQuote(input.validation);
   const minimumOutput = {
     asset: HYPERCORE_MAINNET_USDC,
@@ -612,6 +621,7 @@ export class RelayWalletQuoteAdapter {
           maximumContractAgeMs: input.maximumContractAgeMs,
           owner,
           recipient,
+          sourceCurrency: relayCurrencyForAsset(input.route.source),
           amountMode: input.route.quoteMode,
           authorizedSourceRaw: input.sourceAmount.raw,
           minimumOutputRaw: input.minimumOutput.raw,
@@ -667,10 +677,15 @@ export class RelayWalletQuoteAdapter {
       input.sourceAmount.asset,
       input.minimumOutput.asset,
     );
+    const sourceDex =
+      input.source.kind === "owned_location"
+        ? hypercoreLocationDex(input.source.location)
+        : null;
     if (
       input.route.sourceVm !== "hypercore" ||
       input.source.kind !== "owned_location" ||
-      hypercoreLocationDex(input.source.location) !== "spot" ||
+      sourceDex === null ||
+      sourceDex !== (input.route.nativeSourceDex ?? "spot") ||
       !canonicalJsonEqual(input.destination, input.resolvedDestination.target)
     )
       throw new RelayQuoteValidationError("Invalid native quote binding");
@@ -723,7 +738,10 @@ export class RelayWalletQuoteAdapter {
         recipient,
         originChainId: 1337,
         destinationChainId,
-        originCurrency: relayCurrencyForAsset(input.route.source),
+        originCurrency:
+          sourceDex === ""
+            ? RELAY_HYPERCORE_PERPS_CURRENCY
+            : relayCurrencyForAsset(input.route.source),
         destinationCurrency: relayCurrencyForAsset(input.route.destination),
         amount:
           input.route.quoteMode === "expected_output"
@@ -754,7 +772,7 @@ export class RelayWalletQuoteAdapter {
           recipient,
           destinationRefundRecipient: owner,
           destinationCurrency: input.route.destination.assetId,
-          sourceDex: "spot",
+          sourceDex,
           amountMode: input.route.quoteMode,
           authorizedSourceRaw: input.sourceAmount.raw,
           minimumOutputRaw: input.minimumOutput.raw,

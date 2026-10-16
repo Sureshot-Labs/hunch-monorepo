@@ -2,6 +2,9 @@ export type CanonicalFundingReceiveObserverId =
   | "evm_erc20_transfer_v1"
   | "solana_transfer_v1";
 
+/** Existing chain-evidence threshold, shared by discovery and known-tx proof. */
+export const EVM_FUNDING_RECEIVE_CONFIRMATIONS = 2n;
+
 const OBSERVER_BY_NETWORK: Readonly<
   Partial<Record<string, CanonicalFundingReceiveObserverId>>
 > = {

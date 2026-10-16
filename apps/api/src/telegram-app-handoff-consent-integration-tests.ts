@@ -212,6 +212,7 @@ try {
   );
 
   await commitTelegramAppHandoffWithExecution({
+    lockExecutionAuthority: async () => {},
     allowedIntentActions: ["sell"],
     allowedIntentStatuses: ["previewed", "confirming", "external_handoff"],
     commitExecution: async () => ({ kind: "direct_trade" as const }),
@@ -344,7 +345,10 @@ try {
   );
   await assert.rejects(
     materializeTelegramAppHandoffV2Funding({
-      assertCurrentScope: async () => true,
+      assertCurrentScope: {
+        lockAuthority: async () => {},
+        validate: async () => true,
+      },
       currentAuthorityFingerprint: "a".repeat(64),
       currentPolicyRevision: `policy-${suffix}`,
       db: savepointPool as never,

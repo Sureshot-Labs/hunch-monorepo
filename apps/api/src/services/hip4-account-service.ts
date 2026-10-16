@@ -46,6 +46,7 @@ import {
   hip4PositionAccountingSchema,
 } from "../schemas/hip4-account.js";
 import { projectHip4OpenOrders } from "./hip4-open-orders.js";
+import { projectHip4PerpsCash } from "./hip4-perps-cash.js";
 
 const boundedRows = z.array(z.record(z.string(), z.unknown())).max(2000);
 const errorCode = (error: unknown) =>
@@ -150,6 +151,38 @@ export async function refreshHip4OwnedAccount(input: {
         weiDecimals: quote.weiDecimals,
       },
     });
+    // Independent cash class: a failed perps read must not discard valid HIP
+    // spot facts, nor reuse an old refund as current spendable money.
+    try {
+      const state =
+        mode === "disabled" && role.role === "user"
+          ? await accountRead({
+              type: "clearinghouseState",
+              user: address,
+              dex: "",
+            })
+          : null;
+      if (
+        state !== null &&
+        (await accountRead({ type: "userAbstraction", user: address })) !== mode
+      )
+        throw new Error("native_cash_mode_changed");
+      observation.perpsCash = projectHip4PerpsCash({
+        state,
+        mode,
+        role: role.role,
+        observedAt: new Date(now).toISOString(),
+        now: Date.now(),
+      });
+    } catch {
+      observation.perpsCash = {
+        observedAt: new Date(now).toISOString(),
+        state: "unavailable",
+        totalRaw: null,
+        availableRaw: null,
+        reason: "read_failed",
+      };
+    }
   } catch (error) {
     errors.push(errorCode(error));
   }

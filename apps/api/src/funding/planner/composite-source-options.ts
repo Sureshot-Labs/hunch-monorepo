@@ -221,9 +221,12 @@ function providerCandidate(source: PlannedSourceOption): CompositeCandidate {
   const reservations = source.commitPlan.reservations.filter(
     (reservation) => reservation.mode === "subtract_available",
   );
-  const reservation = reservations[0];
+  // A handoff's future controller credit is a physical fence, not another
+  // economic contribution. Keep it for compatibility checks and rebasing.
+  const economicReservations = fundingEconomicSourceReservations(reservations);
+  const reservation = economicReservations[0]?.reservation;
   if (
-    reservations.length !== 1 ||
+    economicReservations.length !== 1 ||
     !reservation ||
     !reservationLocationMatchesSource(source.option.source, reservation)
   ) {

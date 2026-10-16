@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import {
   fetchUnifiedOrders,
@@ -153,4 +153,36 @@ export async function checkHip4NativeOrderReadPlans(
   });
   assert.equal(mixed.total, 1);
   await explain("5000-overlapping-open");
+  // Lost submission ACKs: exact CLOID + signer/environment/token is the only
+  // additional correlation lane. Keep it indexed with dense owner history.
+  await db.query(
+    "update orders set venue_order_id=null where venue_order_id::bigint%2=0",
+  );
+  for (let index = 0; index < snapshot.openOrders.items.length; index++) {
+    snapshot.openOrders.items[index].cloid =
+      "0x" +
+      createHash("md5")
+        .update(`read-cloid-${index + 1}`)
+        .digest("hex");
+  }
+  await db.query(
+    "update hip4_account_snapshots set history=$2 where environment='mainnet' and account_address=$1",
+    [input.address, snapshot],
+  );
+  await db.query("analyze orders");
+  for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+    await db.query(`set local plan_cache_mode=${mode}`);
+    for (const offset of [0, 30]) {
+      const result = await fetchUnifiedOrders(recorder, {
+        ...base,
+        offset,
+        openOnly: true,
+        includeObservedHip4: true,
+        hip4OpenOrderMaxAgeMs: 3_600_000,
+      });
+      assert.equal(result.total, 1);
+      assert.equal(result.rows.length, offset === 0 ? 1 : 0);
+      await explain(`5000-cloid-overlap-${mode}-offset-${offset}`);
+    }
+  }
 }

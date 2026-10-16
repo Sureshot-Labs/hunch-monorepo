@@ -110,6 +110,8 @@ import {
 import { runTelegramRouterContinuationCommitter } from "../../reconciliation/telegram-router-continuation-committer.js";
 import { OwnedRouteDestinationObserver } from "../../reconciliation/owned-route-destination-observer.js";
 import { RelayOwnedRefundObserver } from "../../reconciliation/relay-owned-refund-observer.js";
+import { verifyOwnedRefundPublicationPg } from "../owned-refund-publication-pg.js";
+import { ownedRefundRoleWorkFixture } from "../recorded-role-observer-fixture.js";
 import { PolymarketFundingPostconditionDriver } from "../../preparation/polymarket-funding-reconciler.js";
 import { hasReadyTelegramFundingDestinationReceipt } from "../../../services/telegram-funding-buy-continuation.js";
 import { appendTelegramFundingConsent } from "../../../services/telegram-funding-sessions.js";
@@ -212,6 +214,34 @@ let policyOffsetMs = -1_000;
 
 function opaque(prefix: string): string {
   return `${prefix}_${crypto.randomUUID()}`;
+}
+
+/** The queue is global, while neighboring commit/race suites intentionally
+ * retain synthetic jobs. Select this fixture explicitly by priority, then
+ * restore its original policy; never assert that unrelated jobs are absent. */
+async function withFixtureJobPriority<T>(
+  operationId: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  const previous = (
+    await pool.query<{ priority: number }>(
+      "select priority from funding_reconciliation_jobs where operation_id=$1",
+      [operationId],
+    )
+  ).rows[0];
+  assert.ok(previous);
+  await pool.query(
+    "update funding_reconciliation_jobs set priority=2147483647 where operation_id=$1",
+    [operationId],
+  );
+  try {
+    return await run();
+  } finally {
+    await pool.query(
+      "update funding_reconciliation_jobs set priority=$2 where operation_id=$1",
+      [operationId, previous.priority],
+    );
+  }
 }
 
 function rawAmount(raw: string) {
@@ -1325,6 +1355,7 @@ async function prepareRelayRefundWatch(
     referenceTransactionHashes: readonly string[];
     sourceBlock?: string;
     refundBlock?: string;
+    initialRefund?: boolean;
   }>,
 ) {
   const preparedAt = new Date();
@@ -1373,6 +1404,7 @@ async function prepareRelayRefundWatch(
       finalizedAt: preparedAt,
       metadata: { relayDeposit: true },
     });
+    if (input.initialRefund === false) return;
     await allocateFundingObservationInTransaction(client, {
       operationId: fixture.operationId,
       segmentId,
@@ -1396,6 +1428,7 @@ async function prepareRelayRefundWatch(
       },
     });
   });
+  if (input.initialRefund === false) return { segmentId, preparedAt };
   const reduced = await reduceFundingOperation(pool, {
     operationId: fixture.operationId,
     now: preparedAt,
@@ -3403,12 +3436,16 @@ try {
     "provider recovery must not claim before the production five-minute lease",
   );
   assert.equal(recoveryCalls, 0);
-  const genericReconciliation = await runFundingReconciliationBatch(pool, {
-    workerId: opaque("provider_reference_timeout_worker"),
-    limit: 1,
-    terminalTimeoutMs: 90_000,
-    now: providerRecoveryDeadline,
-  });
+  const genericReconciliation = await withFixtureJobPriority(
+    crashRecovery.operationId,
+    () =>
+      runFundingReconciliationBatch(pool, {
+        workerId: opaque("provider_reference_timeout_worker"),
+        limit: 1,
+        terminalTimeoutMs: 90_000,
+        now: providerRecoveryDeadline,
+      }),
+  );
   assert.deepEqual(genericReconciliation.operationIds, [
     crashRecovery.operationId,
   ]);
@@ -3509,12 +3546,16 @@ try {
   const postRecoveryReconciliationNow = new Date(
     now.getTime() + 10 * 60_000 + 1,
   );
-  const postRecoveryReconciliation = await runFundingReconciliationBatch(pool, {
-    workerId: opaque("resolved_provider_reference_worker"),
-    limit: 1,
-    terminalTimeoutMs: 90_000,
-    now: postRecoveryReconciliationNow,
-  });
+  const postRecoveryReconciliation = await withFixtureJobPriority(
+    crashRecovery.operationId,
+    () =>
+      runFundingReconciliationBatch(pool, {
+        workerId: opaque("resolved_provider_reference_worker"),
+        limit: 1,
+        terminalTimeoutMs: 90_000,
+        now: postRecoveryReconciliationNow,
+      }),
+  );
   assert.deepEqual(postRecoveryReconciliation.operationIds, [
     crashRecovery.operationId,
   ]);
@@ -7495,6 +7536,7 @@ try {
         return replacementRefundLogs;
       },
     },
+    referenceCodec,
   );
   const refundReorgAt = new Date(
     replacementRefundPrepared.preparedAt.getTime() + 1_000,
@@ -7596,6 +7638,7 @@ try {
     pool,
     replacementRefundRelay.operationId,
     new Date(refundReorgAt.getTime() + 1_000),
+    ownedRefundRoleWorkFixture(),
   );
   assert.equal(
     replacementRefundScanStarts.at(-1),
@@ -8355,10 +8398,14 @@ try {
     },
   );
   let reminedRefundLogs: typeof replacementRefundLogs = [];
-  const reminedRefundObserver = new RelayOwnedRefundObserver(referenceCodec, {
-    blockNumber: async () => 123n,
-    transferLogs: async () => reminedRefundLogs,
-  });
+  const reminedRefundObserver = new RelayOwnedRefundObserver(
+    referenceCodec,
+    {
+      blockNumber: async () => 123n,
+      transferLogs: async () => reminedRefundLogs,
+    },
+    referenceCodec,
+  );
   const reminedReorgAt = new Date(
     reminedRefundPrepared.preparedAt.getTime() + 1_000,
   );
@@ -8383,6 +8430,7 @@ try {
     pool,
     reminedRefundRelay.operationId,
     new Date(reminedReorgAt.getTime() + 1_000),
+    ownedRefundRoleWorkFixture(),
   );
   assert.deepEqual(reminedRefund, {
     refundsPolled: 1,
@@ -8411,6 +8459,14 @@ try {
 
   await assertTelegramTradeShortfallRelayActivation();
   await assertTelegramRouterContinuationHardBlock();
+  await verifyOwnedRefundPublicationPg({
+    pool,
+    createFixture: createRelayFixture,
+    prepare: prepareRelayRefundWatch,
+    referenceCodec,
+    registerOperation: (id) => relayArtifactOperationIds.push(id),
+    registerQuote: (id) => relayArtifactQuoteIds.push(id),
+  });
 
   console.log(
     "[funding-delegated-execution-integration-tests] controller Router concurrency, retired receipt isolation, malformed action, soft pause/desired-state resume, lifecycle locking, pre-broadcast revocation, and ambiguous recovery passed",
@@ -8443,6 +8499,15 @@ try {
         [relayArtifactOperationIds],
       );
       const operationIds = relayOperations.rows.map((row) => row.id);
+      await client.query(
+        `delete from funding_receive_canonical_events event_row
+          using funding_observations observation_row
+          where observation_row.operation_id = any($1::uuid[])
+            and event_row.network_id=observation_row.network_id
+            and event_row.tx_hash=observation_row.tx_hash
+            and event_row.event_index=observation_row.event_index`,
+        [operationIds],
+      );
       await client.query(
         `delete from funding_step_receipt_observations
           where step_id in (

@@ -396,6 +396,49 @@ test("partial/empty history is not complete; unknown denomination remains null a
     "pending",
   );
 });
+test("execution receipt totals exact deduplicated fills, signed fees and precision, never requested amounts", () => {
+  const result = interpret([
+    { ...fill(), px: "0.33333", sz: "0.00001", fee: "0.00000001" },
+    { ...fill(), px: "0.33333", sz: "0.00001", fee: "0.00000001" },
+    { ...fill(2), px: "0.3", sz: "1.99999", fee: "-0.00000002" },
+  ]);
+  assert.equal(result.kind, "observed");
+  if (result.kind !== "observed") return;
+  assert.deepEqual(result.executionSummary, {
+    version: 1,
+    source: "hyperliquid_user_fills",
+    quantity: "2",
+    grossNotional: "0.6000003333",
+    fee: "-0.00000001",
+    feeToken: "USDC",
+    netQuoteCash: "-0.6000003233",
+    executionCount: 2,
+    fullQuantityObserved: false,
+  });
+  const complete = interpret([fill(), fill(2)]);
+  assert.equal(
+    complete.kind === "observed" &&
+      complete.executionSummary?.fullQuantityObserved,
+    true,
+  );
+  const empty = interpret([]);
+  assert.equal(empty.kind === "observed" && empty.executionSummary, null);
+  const unknown = interpret([{ ...fill(), feeToken: "UNKNOWN" }]);
+  assert.equal(unknown.kind, "observed");
+  if (unknown.kind === "observed") {
+    assert.equal(unknown.executionSummary?.fee, null);
+    assert.equal(unknown.executionSummary?.netQuoteCash, null);
+    assert.equal(unknown.executionSummary?.grossNotional, "0.98");
+  }
+  const sell = interpret(
+    [{ ...fill(), side: "A", dir: "Sell", px: "0.6", fee: "-0.01" }],
+    false,
+  );
+  assert.equal(
+    sell.kind === "observed" && sell.executionSummary?.netQuoteCash,
+    "1.21",
+  );
+});
 test("exact orderStatus uses documented weight 2 and rejects invalid identity before admission", async () => {
   const weights: number[] = [],
     requests: unknown[] = [];

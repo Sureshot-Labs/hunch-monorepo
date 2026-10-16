@@ -184,7 +184,7 @@ try {
   );
   assert.equal(
     metadata.json().policy.venues.hyperliquid.capabilities.increaseExposure,
-    false,
+    true,
   );
   const query = `venue=hyperliquid&q=${tag}&view=markets&sort=trending&limit=2&min_total_volume=0`;
   const first = await app.inject(`/feed?${query}`);

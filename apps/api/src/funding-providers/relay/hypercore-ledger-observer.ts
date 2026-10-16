@@ -9,6 +9,7 @@ const ledgerPage = z.array(z.unknown()).max(2000); // Native info response ceili
 export async function readHypercoreLedgerSeconds(input: {
   seconds: readonly number[];
   afterSecond?: number;
+  deadlineMs?: number;
   read: (startTime: number, endTime: number) => Promise<unknown>;
   complete?: (ledger: readonly unknown[]) => boolean;
 }) {
@@ -24,6 +25,10 @@ export async function readHypercoreLedgerSeconds(input: {
   let afterSecond: number | undefined;
   let pendingReason: string | null = null;
   for (const second of ordered) {
+    if (input.deadlineMs !== undefined && Date.now() >= input.deadlineMs) {
+      pendingReason = "native_ledger_deadline";
+      break;
+    }
     const startTime = second * 1000;
     if (
       !Number.isSafeInteger(second) ||

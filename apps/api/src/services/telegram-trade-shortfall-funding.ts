@@ -54,6 +54,10 @@ import {
   POLYGON_USDCE_LEGACY,
 } from "../funding-providers/relay/rehearsal.js";
 import { RELAY_ROUTE_SPECS } from "../funding-providers/relay/mappings.js";
+import {
+  buildTelegramNativeTradeShortfallRequest,
+  type TelegramNativeTradeShortfallIdentity,
+} from "./telegram-native-trade-shortfall.js";
 
 type Venue = "limitless" | "polymarket";
 type Side = "NO" | "YES";
@@ -719,6 +723,131 @@ function proposalFromOption(
   };
 }
 
+/** One read-only web-funding inspection for all app-handoff venues. The
+ * request already has venue-specific exact units and controller identity. */
+export async function inspectTelegramMiniAppFunding(input: {
+  runtime: Pick<FundingPlanningRuntime, "liquidity" | "currentPolicyRevision">;
+  userId: string;
+  request: FundingDiscoveryRequest;
+  trade: JsonObject;
+  requireFreshBalance?: boolean;
+}): Promise<TelegramTradeMiniAppFundingInspection> {
+  const { serverAdditionalDestinationAmount: _additional, ...request } =
+    input.request;
+  let observed;
+  try {
+    observed = await input.runtime.liquidity(input.userId, request);
+  } catch (error) {
+    return {
+      kind: "temporarily_unavailable",
+      reasonCodes: [shortfallPlannerFailureReasonCode(error)],
+    };
+  }
+  if (
+    observed.completeness !== "complete" ||
+    observed.errors.length > 0 ||
+    (input.requireFreshBalance && observed.freshness !== "fresh")
+  ) {
+    return {
+      kind: "temporarily_unavailable",
+      reasonCodes: [
+        ...observed.reasonCodes,
+        ...observed.errors.map((error) => error.code),
+        ...(observed.freshness !== "fresh" ? ["handoff_balance_stale"] : []),
+      ],
+    };
+  }
+  if (!isPositiveRawAmount(observed.shortfallRaw)) {
+    return { kind: "destination_ready" };
+  }
+  const fundingDestinationRaw = selectedTelegramMiniAppTradeShortfallFundingRaw(
+    {
+      collateralAsset: observed.collateralAsset,
+      requestedCollateralRaw: observed.requestedCollateralRaw,
+      shortfallRaw: observed.shortfallRaw,
+      options: observed.sourceOptions,
+    },
+  );
+  // Provider minimums can exceed a tiny shortfall. Retain the already-observed
+  // floor, bounded by the consumer's debit, in the same ordinary funding plan.
+  const discoveryRequest: FundingDiscoveryRequest = {
+    ...request,
+    serverAdditionalDestinationAmount: {
+      asset: observed.collateralAsset,
+      raw: fundingDestinationRaw ?? observed.shortfallRaw,
+    },
+  };
+  const balance =
+    observed.freshness === "fresh" &&
+    observed.requestedUsd != null &&
+    observed.availableNowUsd != null &&
+    observed.shortfallUsd != null
+      ? {
+          requiredUsd: observed.requestedUsd,
+          availableUsd: observed.availableNowUsd,
+          shortfallUsd: observed.shortfallUsd,
+        }
+      : undefined;
+  let plan;
+  try {
+    plan = await input.runtime.liquidity(input.userId, discoveryRequest);
+  } catch (error) {
+    return {
+      kind: "temporarily_unavailable",
+      reasonCodes: [shortfallPlannerFailureReasonCode(error)],
+      balance,
+    };
+  }
+  if (
+    plan.completeness !== "complete" ||
+    plan.errors.length > 0 ||
+    (input.requireFreshBalance && plan.freshness !== "fresh")
+  ) {
+    return {
+      kind: "temporarily_unavailable",
+      reasonCodes: [
+        ...plan.reasonCodes,
+        ...plan.errors.map((error) => error.code),
+        ...(plan.freshness !== "fresh" ? ["handoff_balance_stale"] : []),
+      ],
+    };
+  }
+  if (plan.shortfallRaw !== observed.shortfallRaw) {
+    return {
+      kind: "temporarily_unavailable",
+      reasonCodes: ["handoff_destination_balance_changed"],
+    };
+  }
+  const capability = resolveTelegramAppHandoffFundingCapability({
+    projection: plan,
+    serverBotExact: false,
+  });
+  if (capability.kind === "external_deposit") {
+    return { kind: "external_deposit", balance };
+  }
+  if (capability.kind !== "web_funding_plan") {
+    return {
+      kind: "temporarily_unavailable",
+      reasonCodes: [
+        ...plan.reasonCodes,
+        capability.kind === "unavailable"
+          ? capability.reason
+          : "unexpected_server_funding_capability",
+      ],
+      balance,
+    };
+  }
+  return {
+    kind: "web_funding_plan",
+    plan: buildTelegramAppHandoffV2Plan({
+      discoveryRequest,
+      fundingPolicyRevision: await input.runtime.currentPolicyRevision(),
+      projection: plan,
+      trade: input.trade,
+    }),
+  };
+}
+
 export class TelegramTradeShortfallFundingService {
   private readonly runtime: FundingPlanningRuntime;
 
@@ -735,116 +864,32 @@ export class TelegramTradeShortfallFundingService {
     input: TelegramTradeShortfallIdentity,
     trade: JsonObject,
   ): Promise<TelegramTradeMiniAppFundingInspection> {
-    const observedBalanceInput: TelegramTradeShortfallIdentity = {
-      ...input,
-      additionalFundingRaw: undefined,
-      additionalFundingUsd: undefined,
-    };
-    let observed;
-    try {
-      observed = await this.runtime.liquidity(
-        input.userId,
-        buildTelegramTradeShortfallRequest(observedBalanceInput),
-      );
-    } catch (error) {
-      return {
-        kind: "temporarily_unavailable",
-        reasonCodes: [shortfallPlannerFailureReasonCode(error)],
-      };
-    }
-    if (observed.completeness !== "complete" || observed.errors.length > 0) {
-      return {
-        kind: "temporarily_unavailable",
-        reasonCodes: [
-          ...observed.reasonCodes,
-          ...observed.errors.map((error) => error.code),
-        ],
-      };
-    }
-    if (!isPositiveRawAmount(observed.shortfallRaw)) {
-      return { kind: "destination_ready" };
-    }
-    const fundingDestinationRaw =
-      selectedTelegramMiniAppTradeShortfallFundingRaw({
-        collateralAsset: observed.collateralAsset,
-        requestedCollateralRaw: observed.requestedCollateralRaw,
-        shortfallRaw: observed.shortfallRaw,
-        options: observed.sourceOptions,
-      });
-    const exactInput: TelegramTradeShortfallIdentity = {
-      ...input,
-      // Relay and other providers can have an executable destination floor.
-      // Seal that already-observed floor instead of forcing a tiny exact
-      // transfer whose fixed fee would make the same owned route unavailable.
-      // Any residual remains ordinary destination collateral for this wallet.
-      additionalFundingRaw: fundingDestinationRaw ?? observed.shortfallRaw,
-      additionalFundingUsd: undefined,
-    };
-    const discoveryRequest = buildTelegramTradeShortfallRequest(exactInput);
-    const balance =
-      observed.freshness === "fresh" &&
-      observed.requestedUsd != null &&
-      observed.availableNowUsd != null &&
-      observed.shortfallUsd != null
-        ? {
-            requiredUsd: observed.requestedUsd,
-            availableUsd: observed.availableNowUsd,
-            shortfallUsd: observed.shortfallUsd,
-          }
-        : undefined;
-    let plan;
-    try {
-      plan = await this.runtime.liquidity(input.userId, discoveryRequest);
-    } catch (error) {
-      return {
-        kind: "temporarily_unavailable",
-        reasonCodes: [shortfallPlannerFailureReasonCode(error)],
-        balance,
-      };
-    }
-    if (plan.completeness !== "complete" || plan.errors.length > 0) {
-      return {
-        kind: "temporarily_unavailable",
-        reasonCodes: [
-          ...plan.reasonCodes,
-          ...plan.errors.map((error) => error.code),
-        ],
-      };
-    }
-    if (plan.shortfallRaw !== observed.shortfallRaw) {
-      return {
-        kind: "temporarily_unavailable",
-        reasonCodes: ["handoff_destination_balance_changed"],
-      };
-    }
-    const capability = resolveTelegramAppHandoffFundingCapability({
-      projection: plan,
-      serverBotExact: false,
-    });
-    if (capability.kind === "external_deposit") {
-      return { kind: "external_deposit", balance };
-    }
-    if (capability.kind !== "web_funding_plan") {
-      return {
-        kind: "temporarily_unavailable",
-        reasonCodes: [
-          ...plan.reasonCodes,
-          capability.kind === "unavailable"
-            ? capability.reason
-            : "unexpected_server_funding_capability",
-        ],
-        balance,
-      };
-    }
-    return {
-      kind: "web_funding_plan",
-      plan: buildTelegramAppHandoffV2Plan({
-        discoveryRequest,
-        fundingPolicyRevision: await this.runtime.currentPolicyRevision(),
-        projection: plan,
-        trade,
+    return inspectTelegramMiniAppFunding({
+      runtime: this.runtime,
+      userId: input.userId,
+      request: buildTelegramTradeShortfallRequest({
+        ...input,
+        additionalFundingRaw: undefined,
+        additionalFundingUsd: undefined,
       }),
-    };
+      trade,
+    });
+  }
+
+  /** Native caller supplies the SAME ordinary quote's exact debit. Only the
+   * venue boundary differs; source discovery/materialization/consent remain
+   * the shared web-funding mechanism used above. */
+  async inspectNativeMiniAppFunding(
+    input: TelegramNativeTradeShortfallIdentity,
+    trade: JsonObject,
+  ): Promise<TelegramTradeMiniAppFundingInspection> {
+    return inspectTelegramMiniAppFunding({
+      runtime: this.runtime,
+      userId: input.userId,
+      request: buildTelegramNativeTradeShortfallRequest(input, trade),
+      trade,
+      requireFreshBalance: true,
+    });
   }
 
   async inspect(

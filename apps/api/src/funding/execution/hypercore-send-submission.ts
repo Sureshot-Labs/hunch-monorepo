@@ -39,16 +39,26 @@ type NativeSendObservation = {
 };
 type NativeSendDependencies = {
   /** Server-internal test seams, never accepted from an API request. */
-  observe?: (pool: Pool, address: string) => Promise<NativeSendObservation>;
+  observe?: (
+    pool: Pool,
+    address: string,
+    sourceDex: "spot" | "",
+  ) => Promise<NativeSendObservation>;
   admissionPolicy?: FundingControlPlaneSnapshot;
   fetcher?: typeof fetch;
 };
 async function observeNativeSend(
   pool: Pool,
   address: string,
+  sourceDex: "spot" | "",
 ): Promise<NativeSendObservation> {
   const read = await readHip4Policy(pool, "accountRead");
-  const capacity = await readNativeSendCapacity(pool, address);
+  const capacity = await readNativeSendCapacity(
+    pool,
+    address,
+    undefined,
+    sourceDex,
+  );
   return {
     capacity,
     timeoutMs: read.policy.requestTimeoutMs,
@@ -115,6 +125,7 @@ export async function submitNativeFundingSend(
       observation = await (dependencies.observe ?? observeNativeSend)(
         pool,
         pair.validated.binding.owner,
+        pair.validated.binding.sourceDex,
       );
     } catch {
       throw new FundingPersistenceError(

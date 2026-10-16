@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_HIP4_READ_POLICY } from "@hunch/shared";
-import { createHip4ReadClient } from "./services/hip4-client.js";
+import {
+  createHip4ReadClient,
+  createHip4AccountClient,
+} from "./services/hip4-client.js";
 import { selectHip4Outcomes } from "./services/hip4-indexer.js";
 
 test("public client admits weight before fetching and uses the explicit environment", async () => {
@@ -33,6 +36,49 @@ test("public client admits weight before fetching and uses the explicit environm
   await assert.rejects(
     denied({ type: "l2Book", coin: "BTC" }),
     /invalid_hip4_coin/,
+  );
+});
+
+test("account evidence rechecks its absolute deadline after shared admission and recovers next job", async (t) => {
+  let now = 1000;
+  t.mock.method(Date, "now", () => now);
+  let admissions = 0;
+  let transports = 0;
+  const request = {
+    type: "userNonFundingLedgerUpdates" as const,
+    user: `0x${"a".repeat(40)}`,
+    startTime: 0,
+    endTime: 999,
+  };
+  const client = (deadlineMs: number) =>
+    createHip4AccountClient(
+      DEFAULT_HIP4_READ_POLICY,
+      async () => {
+        admissions++;
+        now += 100;
+        return true;
+      },
+      async () => {
+        transports++;
+        return Response.json([]);
+      },
+      { deadlineMs },
+    );
+  await assert.rejects(client(1100)(request), /budget_exhausted/);
+  assert.equal(admissions, 1);
+  assert.equal(transports, 0, "expired DB admission never starts a transport");
+  await assert.rejects(client(1100)(request), /budget_exhausted/);
+  assert.equal(
+    admissions,
+    1,
+    "already expired work does not consume admission",
+  );
+  assert.deepEqual(await client(2000)(request), []);
+  assert.equal(admissions, 2);
+  assert.equal(
+    transports,
+    1,
+    "ordinary next lease recovers without state clearing",
   );
 });
 test("errors, oversized and invalid payloads do not become an empty metadata generation", async () => {

@@ -50,7 +50,6 @@ import {
   resolveFundingPolicy,
 } from "../../policies/funding-policy-service.js";
 import {
-  FUNDING_RECEIVE_ASSET_IDS,
   applyFundingIntentPatch,
   compileFundingIntentPolicy,
   validateFundingIntentPolicy,
@@ -70,7 +69,18 @@ type PolicyDb = Parameters<typeof resolveFundingPolicy>[0];
 const FULL_POLICY: FundingIntentPolicy = {
   version: 2,
   venues: ["polymarket", "limitless"],
-  receive: { assets: [...FUNDING_RECEIVE_ASSET_IDS], privy: true },
+  // Existing venue policy remains a regression baseline as the catalog grows.
+  receive: {
+    assets: [
+      "polygon:pusd",
+      "polygon:usdc",
+      "polygon:usdce",
+      "base:usdc",
+      "solana:usdc",
+      "solana:sol",
+    ],
+    privy: true,
+  },
   paused: false,
 };
 

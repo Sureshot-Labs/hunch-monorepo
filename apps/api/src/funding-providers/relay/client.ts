@@ -277,24 +277,29 @@ export class RelayClient {
    * reindex, refresh request, signing action or provider-success credit. */
   async requestEvidence(
     requestId: string,
+    options?: Readonly<{ deadlineMs: number }>,
   ): Promise<RelayRequestEvidence | null> {
     const id = normalizeOpaqueLookup(requestId, "Relay request ID");
     // The provider accepts comma-separated filters; never expand this lookup.
     if (!/^[A-Za-z0-9_-]+$/u.test(id))
       throw new Error("Relay request ID is not a single identity");
-    const existing = this.#budget.evidenceFlights.get(id);
+    // Different caller deadlines cannot inherit an unbounded/longer flight.
+    // Same job/reference still deduplicates; completed evidence is never cached.
+    const flightKey = options ? JSON.stringify([id, options.deadlineMs]) : id;
+    const existing = this.#budget.evidenceFlights.get(flightKey);
     if (existing) return existing;
-    const flight = this.#readRequestEvidence(id);
-    this.#budget.evidenceFlights.set(id, flight);
+    const flight = this.#readRequestEvidence(id, options);
+    this.#budget.evidenceFlights.set(flightKey, flight);
     try {
       return await flight;
     } finally {
-      this.#budget.evidenceFlights.delete(id);
+      this.#budget.evidenceFlights.delete(flightKey);
     }
   }
 
   async #readRequestEvidence(
     requestId: string,
+    options?: Readonly<{ deadlineMs: number }>,
   ): Promise<RelayRequestEvidence | null> {
     const response = await this.#request(
       "GET",
@@ -306,6 +311,8 @@ export class RelayClient {
         includeAuthenticatedData: "false",
         includeTotal: "false",
       }),
+      undefined,
+      options,
     );
     try {
       return parseRelayRequestEvidence(response, requestId);
@@ -373,15 +380,29 @@ export class RelayClient {
     path: string,
     query?: URLSearchParams,
     body?: unknown,
+    options?: Readonly<{ deadlineMs: number }>,
   ): Promise<unknown> {
     const startedAt = Date.now();
+    const timeoutMs = options
+      ? Math.min(this.#timeoutMs, Math.ceil(options.deadlineMs - startedAt))
+      : this.#timeoutMs;
+    if (
+      (options && !Number.isFinite(options.deadlineMs)) ||
+      !Number.isSafeInteger(timeoutMs) ||
+      timeoutMs <= 0
+    )
+      throw new RelayClientError(
+        "Relay request budget expired",
+        "timeout",
+        true,
+      );
     const isQuote = path === "/quote/v2";
     if (isQuote) {
       while (true) {
         // Short Retry-After windows belong inside the existing request budget.
         // Failing immediately made a caller's one retry hit the same cooldown
         // without ever reaching Relay. Long cooldowns still fail promptly.
-        if (this.#budget.cooldownUntil >= startedAt + this.#timeoutMs) {
+        if (this.#budget.cooldownUntil >= startedAt + timeoutMs) {
           throw new RelayClientError(
             "Relay quote cooldown",
             "http_error",
@@ -389,7 +410,7 @@ export class RelayClient {
             429,
           );
         }
-        if (Date.now() - startedAt >= this.#timeoutMs) {
+        if (Date.now() - startedAt >= timeoutMs) {
           throw new RelayClientError(
             "Relay quote queue timed out",
             "timeout",
@@ -413,7 +434,7 @@ export class RelayClient {
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(),
-      Math.max(1, this.#timeoutMs - (Date.now() - startedAt)),
+      Math.max(1, timeoutMs - (Date.now() - startedAt)),
     );
     try {
       const response = await this.#fetch(url, {

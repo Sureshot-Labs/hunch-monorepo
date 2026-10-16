@@ -13,6 +13,10 @@ import { ethers } from "ethers";
 import { AuthService } from "../auth.js";
 import type { Pool } from "@hunch/infra";
 import type { DbQuery } from "../db.js";
+import {
+  readTelegramNativeHandoffOrder,
+  telegramNativeHandoffUnresolvedPredicateSql,
+} from "../repos/telegram-native-handoff-read.js";
 import { refreshExpiredTelegramQuote } from "./telegram-quote-refresh.js";
 import { recordTelegramBuyBudget } from "./telegram-buy-budget.js";
 import { PolymarketQuoteError } from "./polymarket-quote.js";
@@ -128,6 +132,7 @@ import {
 import {
   buildTelegramAppHandoffV2DirectTradePlan,
   isTelegramAppHandoffV2Plan,
+  parseTelegramAppHandoffV2Plan,
   type TelegramAppHandoffV2Plan,
 } from "./telegram-app-handoff-v2.js";
 
@@ -194,6 +199,8 @@ import {
   isExpiredTelegramMarketEntry,
   type TelegramBotTradeAuthorityBinding,
   type TelegramBotTradeInputContext,
+  type TelegramBotLegacyTradeInputContext,
+  type TelegramNativeTradeInputContext,
 } from "./telegram-bot-trade-input-context.js";
 import {
   buildTelegramFundingChangeBuyAmountButton,
@@ -215,8 +222,28 @@ import {
   isTelegramAppHandoffV2EnabledForVenue,
   isTelegramAppHandoffV2DirectTradeVenue,
   isTelegramAppHandoffV2TradeVenue,
-  type TelegramAppHandoffV2TradeVenue,
+  telegramAppHandoffPolicyAllows,
+  type TelegramAppHandoffV2ConsumerVenue,
 } from "./telegram-app-handoff-v2-contract.js";
+import { parseTelegramAppHandoffNativePlan } from "./telegram-app-handoff-native-trade.js";
+import {
+  readTelegramNativeTradeReviewDraft,
+  type quoteTelegramNativeTradeReview,
+} from "./telegram-native-trade-review.js";
+import {
+  addTelegramNativeTradeChoices,
+  handleTelegramNativeAppHandoffCallback,
+  isTelegramNativeTradeInputAuthorityCurrent,
+  buildTelegramNativeReviewMessage,
+} from "./telegram-native-app-handoff.js";
+import { completeTelegramNativeTradeInput } from "./telegram-native-trade-input.js";
+import type { TelegramNativeTradeShortfallIdentity } from "./telegram-native-trade-shortfall.js";
+import {
+  buildTelegramAppHandoffNativeAuthority,
+  telegramAppHandoffNativeAuthoritySchema,
+  telegramAppHandoffNativeAuthorityFingerprint,
+} from "./telegram-app-handoff-native-authority.js";
+import { readHip4OrderController } from "../repos/hip4-order-controller.js";
 
 export type TelegramBotTradingVenue = "kalshi" | "limitless" | "polymarket";
 export type TelegramBotTradingAction = "buy" | "sell" | "redeem";
@@ -261,7 +288,7 @@ export type TelegramTradeExecutionCapability = TelegramBuyExecutionCapability;
 export function resolveTelegramTradeExecutionCapability(
   input: Readonly<{
     action: "buy" | "sell";
-    venue: TelegramBotTradingVenue;
+    venue: TelegramBotTradingVenue | "hyperliquid";
     walletChain: TelegramBotTradingWalletChain | null;
   }>,
 ): TelegramTradeExecutionCapability {
@@ -271,7 +298,7 @@ export function resolveTelegramTradeExecutionCapability(
   if (input.venue === "polymarket") {
     return { sealedAppHandoffExact: true, serverBotExact: true };
   }
-  if (input.venue === "limitless") {
+  if (input.venue === "limitless" || input.venue === "hyperliquid") {
     return { sealedAppHandoffExact: true, serverBotExact: false };
   }
   return { sealedAppHandoffExact: false, serverBotExact: false };
@@ -847,7 +874,7 @@ type TransactionalDbQuery = DbQuery & {
   connect?: () => Promise<DbTransactionClient>;
 };
 
-type TelegramTradeIntentRow = {
+type TelegramTradeIntentRow<Venue extends string = TelegramBotTradingVenue> = {
   id: string;
   telegram_user_id: string;
   user_id: string | null;
@@ -856,7 +883,7 @@ type TelegramTradeIntentRow = {
   delivery_mode: StoredTelegramBuyDeliveryMode;
   telegram_message_id: string | null;
   action: TelegramBotTradingAction;
-  venue: TelegramBotTradingVenue;
+  venue: Venue;
   market_id: string;
   event_id: string | null;
   side: TelegramBotTradingSide | null;
@@ -1139,6 +1166,11 @@ export type TelegramBotTradingCallbackInput = {
     input: TelegramTradeShortfallIdentity,
     trade: JsonObject,
   ) => Promise<TelegramTradeMiniAppFundingInspection>;
+  inspectNativeMiniAppFunding?: (
+    input: TelegramNativeTradeShortfallIdentity,
+    trade: JsonObject,
+  ) => Promise<TelegramTradeMiniAppFundingInspection>;
+  nativeReviewQuote?: typeof quoteTelegramNativeTradeReview;
   /** Optional API-owned display valuation; never used for execution bounds. */
   estimateRetainedSolUsd?: (raw: string) => Promise<string | null>;
   commitTradeShortfall?: (
@@ -2101,6 +2133,8 @@ export const telegramBotTradingTestHooks = {
   buildTelegramTradeAuthorityBinding,
   buildTelegramSellTradeIntent,
   loadUnresolvedTelegramTradeIntent,
+  countUnresolvedTelegramTradeIntents,
+  listResolvingTelegramTradeIntents,
   canAttemptSellSurface,
   canContinueTelegramAppHandoffFromMarket,
   formatTelegramTradeLifecycleMessageMarkdownV2,
@@ -5405,6 +5439,7 @@ async function loadUnresolvedTelegramTradeIntent(
        tti.user_id::text
        FROM telegram_trade_intents tti
 	     WHERE telegram_user_id = $1
+	        AND ${telegramNativeHandoffUnresolvedPredicateSql("tti")}
 	        AND market_id = $2
 	        AND ($3::text IS NULL OR side = $3)
 	        AND ($4::uuid IS NULL OR id <> $4::uuid)
@@ -5454,6 +5489,7 @@ async function countUnresolvedTelegramTradeIntents(
     `SELECT tti.status, tti.funding_operation_id::text
        FROM telegram_trade_intents tti
 	     WHERE telegram_user_id = $1
+	        AND ${telegramNativeHandoffUnresolvedPredicateSql("tti")}
 	        AND (
 	          (status = 'confirming' AND expires_at > now())
 	          OR (
@@ -5521,6 +5557,7 @@ async function listResolvingTelegramTradeIntents(
      LEFT JOIN funding_operations funding_operation
        ON funding_operation.id = tti.funding_operation_id
      WHERE tti.telegram_user_id = $1
+       AND ${telegramNativeHandoffUnresolvedPredicateSql("tti")}
        AND (
          (tti.status = 'confirming' AND tti.expires_at > now())
          OR (
@@ -6167,7 +6204,20 @@ export async function buildTelegramBotTradingMarketMessage(input: {
     side: input.context?.focusSide,
     returnCallbackData: input.context?.returnCallbackData,
   });
-  if (appNavigation) return appNavigation;
+  if (appNavigation)
+    return addTelegramNativeTradeChoices({
+      db: input.db,
+      navigation: appNavigation,
+      marketId: normalizeTelegramMarketRef(input.marketRef) ?? input.marketRef,
+      telegramUserId: normalizeTelegramUserId(input.telegramUserId),
+      chatId: String(input.chatId),
+      telegramMessageId: input.telegramMessageId,
+      side: input.context?.focusSide,
+      miniAppEnabled: input.telegramMiniAppEnabled === true,
+      publicBrowseOnly: input.publicBrowseOnly,
+      writeTradeInputContext: input.writeTradeInputContext,
+      context: input.context,
+    });
   const telegramUserId = normalizeTelegramUserId(input.telegramUserId);
   const [policy, status, market] = await Promise.all([
     resolveTelegramBotTradingPolicy(input.db),
@@ -7237,13 +7287,13 @@ export async function buildTelegramBotTradingMarketMessage(input: {
   };
 }
 
-async function loadIntentBy(
+async function loadIntentBy<Venue extends string = TelegramBotTradingVenue>(
   db: DbQuery,
   selector: "id" | "idempotency_key",
   value: string,
   options: { lock?: boolean } = {},
-): Promise<TelegramTradeIntentRow | null> {
-  const result = await db.query<TelegramTradeIntentRow>(
+): Promise<TelegramTradeIntentRow<Venue> | null> {
+  const result = await db.query<TelegramTradeIntentRow<Venue>>(
     `SELECT
        i.id,
        i.telegram_user_id,
@@ -7290,19 +7340,21 @@ async function loadIntentBy(
     : null;
 }
 
-async function loadIntent(
+async function loadIntent<Venue extends string = TelegramBotTradingVenue>(
   db: DbQuery,
   intentId: string,
   options: { lock?: boolean } = {},
-): Promise<TelegramTradeIntentRow | null> {
-  return loadIntentBy(db, "id", intentId, options);
+): Promise<TelegramTradeIntentRow<Venue> | null> {
+  return loadIntentBy<Venue>(db, "id", intentId, options);
 }
 
-async function loadIntentByIdempotencyKey(
+async function loadIntentByIdempotencyKey<
+  Venue extends string = TelegramBotTradingVenue,
+>(
   db: DbQuery,
   idempotencyKey: string,
-): Promise<TelegramTradeIntentRow | null> {
-  return loadIntentBy(db, "idempotency_key", idempotencyKey);
+): Promise<TelegramTradeIntentRow<Venue> | null> {
+  return loadIntentBy<Venue>(db, "idempotency_key", idempotencyKey);
 }
 
 async function updateIntentStatus(input: {
@@ -7879,9 +7931,36 @@ export async function resolveTelegramAppHandoffCurrentScope(input: {
   action?: "buy" | "sell";
   db: DbQuery;
   telegramUserId: string;
-  venue: TelegramBotTradingVenue;
+  venue: TelegramBotTradingVenue | "hyperliquid";
   executionContractVersion?: 1 | 2;
+  /** Native current scope is resolved against the authenticated exact sealed
+   * intent, not the legacy server signer or a user-supplied wallet address. */
+  nativeHandoff?: Readonly<{
+    userId: string;
+    tradeIntentId: string;
+    authorityFingerprint: string;
+    policyRevision: string;
+  }>;
 }): Promise<{ authorityFingerprint: string; policyRevision: string } | null> {
+  if (input.venue === "hyperliquid") {
+    if (input.executionContractVersion !== 2 || !input.nativeHandoff)
+      return null;
+    const sealed = {
+      ...input.nativeHandoff,
+      action: input.action ?? "buy",
+      telegramUserId: input.telegramUserId,
+      venue: "hyperliquid" as const,
+    };
+    return (await matchesTelegramAppHandoffV2CurrentScope({
+      db: input.db,
+      sealed,
+    }))
+      ? {
+          authorityFingerprint: sealed.authorityFingerprint,
+          policyRevision: sealed.policyRevision,
+        }
+      : null;
+  }
   const supported =
     input.executionContractVersion === 2
       ? isTelegramAppHandoffV2TradeVenue(input.venue)
@@ -7916,25 +7995,6 @@ export async function resolveTelegramAppHandoffCurrentScope(input: {
   };
 }
 
-function telegramAppHandoffPolicyAllows(input: {
-  action: "buy" | "sell";
-  executionContractVersion: 1 | 2;
-  policy: SignalBotPolicy;
-}): boolean {
-  if (
-    input.policy.miniAppHandoffMode === "off" ||
-    input.policy.miniAppHandoffContractVersion < input.executionContractVersion
-  ) {
-    return false;
-  }
-  // A sealed Sell has no funding route and is client-signed. Do not make its
-  // exact handoff depend on Buy-only receive/continuation switches.
-  return input.action === "buy"
-    ? input.policy.buyContinuationEnabled && input.policy.fundingReceiveEnabled
-    : input.policy.tradingEnabled &&
-        input.policy.tradingActions.includes("sell");
-}
-
 /** Shared live-scope fence for ordinary web venue consumers of a v2 handoff. */
 export async function matchesTelegramAppHandoffV2CurrentScope(input: {
   db: DbQuery;
@@ -7944,9 +8004,22 @@ export async function matchesTelegramAppHandoffV2CurrentScope(input: {
     policyRevision: string;
     telegramUserId: string;
     tradeIntentId: string;
-    venue: TelegramAppHandoffV2TradeVenue;
+    venue: TelegramAppHandoffV2ConsumerVenue;
+    userId?: string;
   }>;
 }): Promise<boolean> {
+  if (input.sealed.venue === "hyperliquid") {
+    if (!input.sealed.userId) return false;
+    return matchesTelegramAppHandoffNativeScope({
+      ...input.sealed,
+      db: input.db,
+      userId: input.sealed.userId,
+    });
+  }
+  // This resolver uses the legacy delegated-wallet authority binding. A native
+  // consumer must install its ordinary controller/IOC scope before product
+  // activation; never interpret it as a legacy six-decimal bot order.
+  if (!isTelegramAppHandoffV2TradeVenue(input.sealed.venue)) return false;
   const intent = await loadIntent(input.db, input.sealed.tradeIntentId);
   const plan = intent ? readTelegramAppHandoffV2Plan(intent) : null;
   const trade = plan && isRecord(plan.trade) ? plan.trade : null;
@@ -8023,9 +8096,200 @@ export async function matchesTelegramAppHandoffV2CurrentScope(input: {
   });
 }
 
+/** Same authority envelope used by every sealed web consumer. No execution or
+ * policy eligibility is granted here: exact durable replays must remain
+ * readable. In particular this lock-only phase must NEVER acquire an intent
+ * or handoff, because cancellation owns handoff → intent.
+ */
+export const telegramAppHandoffV2CurrentScope: import("../repos/telegram-app-handoff-v2-direct-trade-repository.js").TelegramAppHandoffV2ScopeAssertion =
+  {
+    lockAuthority: async (input) => {
+      if (
+        !isTelegramAppHandoffV2TradeVenue(input.venue) &&
+        input.venue !== "hyperliquid"
+      )
+        throw new TelegramAppHandoffError("venue_unsupported");
+      const intent = await loadIntent<TelegramAppHandoffV2ConsumerVenue>(
+        input.db,
+        input.tradeIntentId,
+      );
+      if (
+        !intent ||
+        intent.user_id !== input.userId ||
+        intent.telegram_user_id !== input.telegramUserId
+      )
+        return;
+      const marker = readTelegramFundingIntentContextMarker(intent);
+      if (marker) {
+        await lockTelegramFundingReturnBeforeMarket(input.db, {
+          fundingContextId: marker.fundingContextId,
+          marketId: intent.market_id,
+          telegramUserId: intent.telegram_user_id,
+        });
+      } else {
+        await lockTelegramIntentMarket(input.db, {
+          marketId: intent.market_id,
+          telegramUserId: intent.telegram_user_id,
+        });
+      }
+      // A Review may replace its funding-return marker while we wait for M.
+      // Do not acquire that new context after H/I in the validation phase.
+      // Retry restarts from a fresh hint, before any submission is claimed.
+      const currentHint = await loadIntent<TelegramAppHandoffV2ConsumerVenue>(
+        input.db,
+        input.tradeIntentId,
+      );
+      if (
+        !currentHint ||
+        currentHint.user_id !== intent.user_id ||
+        currentHint.telegram_user_id !== intent.telegram_user_id ||
+        currentHint.market_id !== intent.market_id ||
+        JSON.stringify(readTelegramFundingReturnIntentMarker(currentHint)) !==
+          JSON.stringify(readTelegramFundingReturnIntentMarker(intent)) ||
+        JSON.stringify(readTelegramFundingHandoffIntentMarker(currentHint)) !==
+          JSON.stringify(readTelegramFundingHandoffIntentMarker(intent))
+      )
+        throw new TelegramAppHandoffError("plan_changed");
+      await input.db.query(
+        "select id from users where id=$1::uuid for update",
+        [input.userId],
+      );
+      if (input.venue === "hyperliquid") {
+        await input.db.query(
+          "select id from user_telegram_accounts where user_id=$1::uuid and telegram_user_id=$2 for update",
+          [input.userId, input.telegramUserId],
+        );
+        const raw =
+          isRecord(intent.result) && isRecord(intent.result.appHandoffV2)
+            ? intent.result.appHandoffV2.plan
+            : null;
+        const native = parseTelegramAppHandoffNativePlan(raw);
+        const draftController = readTelegramNativeTradeReviewDraft(
+          intent.result,
+        )?.request.controllerWalletRef;
+        const controllerWalletRef =
+          native?.nativeTrade.controllerWalletRef ?? draftController;
+        if (controllerWalletRef)
+          await input.db.query(
+            "select id from user_wallets where id=$1::uuid and user_id=$2::uuid for update",
+            [controllerWalletRef, input.userId],
+          );
+      } else {
+        await loadEnabledEvmAuthorization(input.db, input.telegramUserId, {
+          allowInactiveForV2: true,
+          lock: true,
+          userId: input.userId,
+        });
+      }
+      const generation = readTelegramFundingReturnIntentMarker(intent);
+      if (generation) {
+        await input.db.query(
+          `select generation from telegram_funding_buy_resume_generations
+          where telegram_funding_session_id=$1::uuid and generation=$2
+          for update`,
+          [generation.fundingContextId, generation.generation],
+        );
+      }
+    },
+    validate: (sealed) =>
+      matchesTelegramAppHandoffV2CurrentScope({ db: sealed.db, sealed }),
+  };
+
+async function matchesTelegramAppHandoffNativeScope(
+  input: import("../repos/telegram-app-handoff-v2-direct-trade-repository.js").TelegramAppHandoffV2ScopeInput,
+): Promise<boolean> {
+  return withOptionalTransaction(input.db, async (client) => {
+    await telegramAppHandoffV2CurrentScope.lockAuthority({
+      ...input,
+      db: client,
+    });
+    const intent = await loadIntent<TelegramAppHandoffV2ConsumerVenue>(
+      client,
+      input.tradeIntentId,
+      {
+        lock: true,
+      },
+    );
+    const result = intent && isRecord(intent.result) ? intent.result : null;
+    const plan =
+      result && isRecord(result.appHandoffV2)
+        ? parseTelegramAppHandoffNativePlan(result.appHandoffV2.plan)
+        : null;
+    const stored = telegramAppHandoffNativeAuthoritySchema.safeParse(
+      result?.appHandoffNativeAuthority,
+    );
+    if (
+      !intent ||
+      !plan ||
+      !stored.success ||
+      intent.user_id !== input.userId ||
+      intent.telegram_user_id !== input.telegramUserId ||
+      intent.delivery_mode !== "app_handoff" ||
+      intent.venue !== "hyperliquid" ||
+      intent.action !== input.action ||
+      plan.nativeTrade.side.toLowerCase() !== input.action ||
+      plan.nativeTrade.marketId !== intent.market_id ||
+      plan.nativeTrade.outcomeSide !== intent.side ||
+      stored.data.controllerWalletRef !== plan.nativeTrade.controllerWalletRef
+    )
+      return false;
+    const link = await client.query<{ id: string }>(
+      `select telegram_account.id from user_telegram_accounts telegram_account
+        join users app_user on app_user.id=telegram_account.user_id
+        where telegram_account.user_id=$1::uuid and telegram_account.telegram_user_id=$2
+          and coalesce(app_user.is_active,true)`,
+      [input.userId, input.telegramUserId],
+    );
+    if (link.rows.length !== 1) return false;
+    let profile;
+    try {
+      profile = await readHip4OrderController(client, {
+        userId: input.userId,
+        controllerWalletRef: plan.nativeTrade.controllerWalletRef,
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "hip4_controller_unavailable"
+      )
+        return false;
+      throw error;
+    }
+    const current = buildTelegramAppHandoffNativeAuthority({
+      userId: input.userId,
+      telegramAccountLinkId: link.rows[0].id,
+      profile,
+    });
+    const fingerprint = telegramAppHandoffNativeAuthorityFingerprint(current);
+    if (
+      fingerprint !== input.authorityFingerprint ||
+      fingerprint !==
+        telegramAppHandoffNativeAuthorityFingerprint(stored.data) ||
+      plan.trade.controllerWalletAddress !== current.walletAddress
+    )
+      return false;
+    // Legacy receive-return adapters have their own source/generation authority.
+    // Never reinterpret a six-decimal retained return as a native cash8 route.
+    // The native producer uses the ordinary committed FundingOperation instead.
+    if (readTelegramFundingIntentContextMarker(intent)) return false;
+    const policyState = await resolveSignalBotTradingPolicyStateFromDb(client);
+    return (
+      policyState.policyRevision === input.policyRevision &&
+      telegramAppHandoffPolicyAllows({
+        action: input.action,
+        executionContractVersion: 2,
+        policy: policyState.policy,
+      })
+    );
+  });
+}
+
 export function telegramVenueFromSealedHandoffSnapshot(
   snapshot: Record<string, unknown>,
-): TelegramBotTradingVenue | null {
+): TelegramBotTradingVenue | "hyperliquid" | null {
+  // A native venue is only readable through its exact versioned IOC contract.
+  // It cannot fall through V1 or the unattended bot executor.
+  if (parseTelegramAppHandoffNativePlan(snapshot)) return "hyperliquid";
   // V1 stores trade fields at the snapshot root. V2 seals the same fields
   // beneath `trade` with the funding scope, so read the immutable venue from
   // its versioned location rather than treating a valid v2 handoff as broken.
@@ -8092,7 +8356,7 @@ function buildIntentNavigationResult(
 }
 
 function readIntentNavigationContext(
-  intent: TelegramTradeIntentRow,
+  intent: Pick<TelegramTradeIntentRow<string>, "result">,
 ): TelegramMarketCardContext | undefined {
   const raw = isRecord(intent.result.telegramNavigation)
     ? intent.result.telegramNavigation
@@ -8278,7 +8542,11 @@ async function loadEnabledAuthorization(
 async function loadEnabledEvmAuthorization(
   db: DbQuery,
   telegramUserId: string,
-  options: { allowInactiveForV2?: boolean; lock?: boolean } = {},
+  options: {
+    allowInactiveForV2?: boolean;
+    lock?: boolean;
+    userId?: string;
+  } = {},
 ): Promise<TelegramBotTradingAuthorizationRow | null> {
   // The legacy name is intentionally retained because its default remains the
   // v1/server-safe query. V2 resolves user identity separately, before issuing
@@ -8310,13 +8578,14 @@ async function loadEnabledEvmAuthorization(
           AND funding_account_identifier_equal(verified_wallet.wallet_type,
                 funding_auth.wallet_address, verified_wallet.wallet_address)
         WHERE telegram_account.telegram_user_id = $1
+          ${options.userId ? "AND app_user.id = $2::uuid" : ""}
           AND (funding_auth.privy_wallet_id IS NOT NULL OR
                (verified_wallet.is_internal_wallet = true AND verified_wallet.privy_wallet_id IS NOT NULL))
         ORDER BY funding_auth.updated_at DESC NULLS LAST,
                  verified_wallet.is_primary DESC, verified_wallet.id
         LIMIT 1
         ${options.lock ? "FOR UPDATE OF app_user, telegram_account, verified_wallet" : ""}`,
-      [telegramUserId],
+      options.userId ? [telegramUserId, options.userId] : [telegramUserId],
     );
     return identity.rows[0] ?? null;
   }
@@ -9792,6 +10061,11 @@ export async function isTelegramBotTradeInputContextAuthorityCurrent(input: {
   db: DbQuery;
   telegramUserId: string;
 }): Promise<boolean> {
+  if (input.context.version === 3)
+    return isTelegramNativeTradeInputAuthorityCurrent({
+      ...input,
+      context: input.context,
+    });
   const authorization =
     input.context.deliveryMode === "app_handoff"
       ? await loadEnabledEvmAuthorization(input.db, input.telegramUserId, {
@@ -9887,7 +10161,7 @@ type TelegramFundingHandoffIntentMarker = Readonly<{
 }>;
 
 function readTelegramFundingReturnIntentMarker(
-  intent: TelegramTradeIntentRow,
+  intent: Pick<TelegramTradeIntentRow, "result">,
 ): TelegramFundingReturnIntentMarker | null {
   const marker =
     isRecord(intent.result) && isRecord(intent.result.telegramFundingReturn)
@@ -9918,7 +10192,7 @@ function readTelegramFundingReturnIntentMarker(
 }
 
 function readTelegramFundingHandoffIntentMarker(
-  intent: TelegramTradeIntentRow,
+  intent: Pick<TelegramTradeIntentRow, "result">,
 ): TelegramFundingHandoffIntentMarker | null {
   const marker =
     isRecord(intent.result) && isRecord(intent.result.telegramFundingHandoff)
@@ -9944,7 +10218,7 @@ function readTelegramFundingHandoffIntentMarker(
 }
 
 function readTelegramFundingIntentContextMarker(
-  intent: TelegramTradeIntentRow,
+  intent: Pick<TelegramTradeIntentRow, "result">,
 ): Readonly<{ fundingContextId: string }> | null {
   return (
     readTelegramFundingReturnIntentMarker(intent) ??
@@ -12100,6 +12374,8 @@ export async function completeTelegramBotTradeInput(input: {
   loadContext: () => Promise<TelegramBotTradeInputContext | null>;
   openFundingBuyReturn?: TelegramFundingBuyReturnOpener;
   inspectMiniAppFunding?: TelegramBotTradingCallbackInput["inspectMiniAppFunding"];
+  inspectNativeMiniAppFunding?: TelegramBotTradingCallbackInput["inspectNativeMiniAppFunding"];
+  nativeReviewQuote?: TelegramBotTradingCallbackInput["nativeReviewQuote"];
   inspectTradeShortfall?: TelegramBotTradingCallbackInput["inspectTradeShortfall"];
   telegramMessageId: number;
   telegramMiniAppEnabled?: boolean;
@@ -12111,8 +12387,61 @@ export async function completeTelegramBotTradeInput(input: {
   message: TelegramBotTradingMessage;
 }> {
   const idempotencyKey = `telegram-bot-input:${input.contextId}`;
-  let intent = await loadIntentByIdempotencyKey(input.db, idempotencyKey);
-  let context: TelegramBotTradeInputContext | null = null;
+  const completeNative = async (
+    context?: TelegramNativeTradeInputContext,
+    intentId?: string,
+  ) => {
+    const result = await completeTelegramNativeTradeInput(
+      {
+        ...input,
+        db: input.db as Pool,
+        context,
+        intentId,
+        tokenSecret: env.telegramBotToken,
+        miniAppEnabled: input.telegramMiniAppEnabled === true,
+      },
+      {
+        scope: telegramAppHandoffV2CurrentScope,
+        quote: input.nativeReviewQuote,
+        inspectFunding:
+          input.inspectNativeMiniAppFunding ??
+          (async () => ({
+            kind: "temporarily_unavailable",
+            reasonCodes: ["native_funding_unavailable"],
+          })),
+        hasOtherUnresolved: async (db, scope) =>
+          (await loadUnresolvedTelegramTradeIntent(db, scope)) != null,
+      },
+    );
+    if (!result.completed)
+      return {
+        completed: false,
+        message: buildTelegramTradeInputNotice(result.notice),
+      };
+    return {
+      completed: true,
+      message: buildTelegramNativeReviewMessage({
+        ...result.review,
+        miniAppLinkBase: env.telegramMiniAppLinkBase,
+        renderLifecycle: formatTelegramTradeLifecycleMessageMarkdownV2,
+        fundingReviewLines: await buildTelegramAppHandoffFundingReviewLines({
+          plan: parseTelegramAppHandoffV2Plan(
+            result.review.handoff.planSnapshot,
+          ),
+          estimateRetainedSolUsd: input.estimateRetainedSolUsd,
+        }),
+      }),
+    };
+  };
+  const loadedIntent = await loadIntentByIdempotencyKey<
+    TelegramBotTradingVenue | "hyperliquid"
+  >(input.db, idempotencyKey);
+  if (loadedIntent?.venue === "hyperliquid")
+    return completeNative(undefined, loadedIntent.id);
+  let intent: TelegramTradeIntentRow | null = loadedIntent
+    ? { ...loadedIntent, venue: loadedIntent.venue }
+    : null;
+  let context: TelegramBotLegacyTradeInputContext | null = null;
   const action =
     intent?.action === "sell"
       ? "sell"
@@ -12173,7 +12502,9 @@ export async function completeTelegramBotTradeInput(input: {
       };
     }
   } else {
-    context = await input.loadContext();
+    const loadedContext = await input.loadContext();
+    if (loadedContext?.version === 3) return completeNative(loadedContext);
+    context = loadedContext;
     if (
       !context ||
       context.id !== input.contextId ||
@@ -12873,8 +13204,10 @@ export async function handleTelegramBotTradingCallback(
     return true;
   }
 
-  const intent = await loadIntent(input.db, parsed.intentId);
-  if (!intent) {
+  const loadedIntent = await loadIntent<
+    TelegramBotTradingVenue | "hyperliquid"
+  >(input.db, parsed.intentId);
+  if (!loadedIntent) {
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
       showAlert: true,
@@ -12882,6 +13215,51 @@ export async function handleTelegramBotTradingCallback(
     });
     return true;
   }
+  if (loadedIntent.venue === "hyperliquid") {
+    return handleTelegramNativeAppHandoffCallback({
+      callback: input,
+      callbackType: parsed.type,
+      intentId: loadedIntent.id,
+      tokenSecret: env.telegramBotToken,
+      miniAppLinkBase: env.telegramMiniAppLinkBase,
+      renderLifecycle: formatTelegramTradeLifecycleMessageMarkdownV2,
+      dependencies: {
+        scope: telegramAppHandoffV2CurrentScope,
+        quote: input.nativeReviewQuote,
+        inspectFunding:
+          input.inspectNativeMiniAppFunding ??
+          (async () => ({
+            kind: "temporarily_unavailable",
+            reasonCodes: ["native_funding_unavailable"],
+          })),
+        hasOtherUnresolved: async (db, scope) =>
+          (await loadUnresolvedTelegramTradeIntent(db, scope)) != null,
+      },
+      buildMarket: () =>
+        buildTelegramBotTradingMarketMessage({
+          appBaseUrl: input.appBaseUrl,
+          chatId: loadedIntent.chat_id ?? "",
+          db: input.db,
+          marketRef: loadedIntent.market_id,
+          context: readIntentNavigationContext(loadedIntent),
+          // This renders a new navigation generation (edit or fallback send).
+          // Its first callback binds the carrier, not the old Review message.
+          telegramMessageId: null,
+          telegramMiniAppEnabled: input.telegramMiniAppEnabled,
+          telegramUserId: loadedIntent.telegram_user_id,
+          writeTradeInputContext: input.writeTradeInputContext,
+        }),
+      fundingReviewLines: (plan) =>
+        buildTelegramAppHandoffFundingReviewLines({
+          plan,
+          estimateRetainedSolUsd: input.estimateRetainedSolUsd,
+        }),
+    });
+  }
+  const intent: TelegramTradeIntentRow = {
+    ...loadedIntent,
+    venue: loadedIntent.venue,
+  };
   if (intent.telegram_user_id !== normalizeTelegramUserId(senderId)) {
     await input.answerCallbackQuery({
       callbackQueryId: input.callbackQuery.id,
@@ -15457,6 +15835,8 @@ export async function captureTelegramBotTradingCallback(input: {
   log?: TelegramBotTradingCallbackInput["log"];
   openFundingBuyReturn?: TelegramFundingBuyReturnOpener;
   inspectMiniAppFunding?: TelegramBotTradingCallbackInput["inspectMiniAppFunding"];
+  inspectNativeMiniAppFunding?: TelegramBotTradingCallbackInput["inspectNativeMiniAppFunding"];
+  nativeReviewQuote?: TelegramBotTradingCallbackInput["nativeReviewQuote"];
   inspectTradeShortfall?: TelegramBotTradingCallbackInput["inspectTradeShortfall"];
   commitTradeShortfall?: TelegramBotTradingCallbackInput["commitTradeShortfall"];
   cancelFundingOperation?: TelegramBotTradingCallbackInput["cancelFundingOperation"];
@@ -15472,7 +15852,10 @@ export async function captureTelegramBotTradingCallback(input: {
   const parsed = parseTelegramBotTradingCallbackData(input.callbackQuery.data);
   const initialIntent =
     parsed?.type === "retry_buy" && "intentId" in parsed
-      ? await loadIntent(input.db, parsed.intentId).catch(() => null)
+      ? await loadIntent<TelegramBotTradingVenue | "hyperliquid">(
+          input.db,
+          parsed.intentId,
+        ).catch(() => null)
       : null;
   const handled = await handleTelegramBotTradingCallback({
     answerCallbackQuery: async (answer) => {
@@ -15488,6 +15871,8 @@ export async function captureTelegramBotTradingCallback(input: {
     log: input.log,
     openFundingBuyReturn: input.openFundingBuyReturn,
     inspectMiniAppFunding: input.inspectMiniAppFunding,
+    inspectNativeMiniAppFunding: input.inspectNativeMiniAppFunding,
+    nativeReviewQuote: input.nativeReviewQuote,
     inspectTradeShortfall: input.inspectTradeShortfall,
     commitTradeShortfall: input.commitTradeShortfall,
     cancelFundingOperation: input.cancelFundingOperation,
@@ -15502,7 +15887,10 @@ export async function captureTelegramBotTradingCallback(input: {
   });
   const currentIntent =
     parsed && "intentId" in parsed
-      ? await loadIntent(input.db, parsed.intentId).catch(() => null)
+      ? await loadIntent<TelegramBotTradingVenue | "hyperliquid">(
+          input.db,
+          parsed.intentId,
+        ).catch(() => null)
       : null;
   return {
     answers,
@@ -15539,6 +15927,9 @@ export type TelegramAppHandoffProjection = Readonly<{
     status: string | null;
   }> | null;
   marketTitle: string;
+  nativeOrder?: NonNullable<
+    Awaited<ReturnType<typeof readTelegramNativeHandoffOrder>>
+  >["nativeOrder"];
   /** Immutable v2 Sell floor, in the destination cash asset's raw units. */
   minimumReceiveRaw: string | null;
   order: Readonly<{
@@ -15549,7 +15940,7 @@ export type TelegramAppHandoffProjection = Readonly<{
   }>;
   outcome: string;
   revision: string;
-  /** Exact outcome-token Sell quantity, in six-decimal raw units. */
+  /** Exact outcome-token Sell quantity in venue-native raw units. */
   sharesRaw: string | null;
   stage:
     | "attaching"
@@ -15561,7 +15952,7 @@ export type TelegramAppHandoffProjection = Readonly<{
   status: string;
   terminal: boolean;
   tradeIntentId: string;
-  venue: TelegramBotTradingVenue;
+  venue: TelegramBotTradingVenue | "hyperliquid";
 }>;
 
 export async function loadTelegramAppHandoffProjection(
@@ -15590,7 +15981,7 @@ export async function loadTelegramAppHandoffProjection(
     status: string;
     tx_signature: string | null;
     updated_at: Date;
-    venue: TelegramBotTradingVenue;
+    venue: TelegramBotTradingVenue | "hyperliquid";
     venue_order_id: string | null;
   }>(
     `select intent.action,
@@ -15655,6 +16046,23 @@ export async function loadTelegramAppHandoffProjection(
   );
   const row = projection.rows[0];
   if (!row) return null;
+  const nativeRead =
+    row.venue === "hyperliquid"
+      ? await readTelegramNativeHandoffOrder(db, input)
+      : null;
+  if (nativeRead) {
+    // Presentation only. Official native order/fill observations still own
+    // finances and history; no H/I locks are acquired by their writer.
+    row.status = nativeRead.terminal
+      ? nativeRead.status === "filled"
+        ? "filled"
+        : nativeRead.status === "cancelled"
+          ? "cancelled"
+          : "failed"
+      : "submitted";
+    row.venue_order_id = nativeRead.venueOrderId;
+    row.updated_at = nativeRead.updatedAt;
+  }
   // Handoff presentation is still a lifecycle read. The operation row only
   // identifies the immutable linkage; its materialized status is never a
   // source for the Mini App's funding stage.
@@ -15669,8 +16077,15 @@ export async function loadTelegramAppHandoffProjection(
   const terminalFailure = ["cancelled", "expired", "failed"].includes(
     row.status,
   );
-  const success = row.status === "filled";
-  const reconciling = ["reconcile_required", "submitted"].includes(row.status);
+  const success =
+    row.status === "filled" &&
+    (row.venue !== "hyperliquid" ||
+      (nativeRead?.nativeOrder.fullQuantityObserved === true &&
+        nativeRead.nativeOrder.executionSummary?.fullQuantityObserved ===
+          true));
+  const reconciling =
+    ["reconcile_required", "submitted"].includes(row.status) ||
+    (row.venue === "hyperliquid" && row.status === "filled" && !success);
   const fundingActive =
     row.funding_operation_id != null &&
     fundingStatus != null &&
@@ -15696,6 +16111,7 @@ export async function loadTelegramAppHandoffProjection(
         }
       : null,
     marketTitle: row.market_title,
+    ...(nativeRead ? { nativeOrder: nativeRead.nativeOrder } : {}),
     minimumReceiveRaw: row.minimum_receive_raw,
     order: {
       executionId: row.execution_id,
@@ -15718,7 +16134,7 @@ export async function loadTelegramAppHandoffProjection(
               ? "attaching"
               : "submitting",
     status: row.status,
-    terminal: success || terminalFailure,
+    terminal: nativeRead?.terminal || success || terminalFailure,
     tradeIntentId: row.id,
     venue: row.venue,
   };

@@ -8,6 +8,7 @@ import {
   type RelayHypercoreInboundQuoteInput,
 } from "./hypercore-inbound-quote.js";
 import { relayHexOrderId } from "./order-hash.js";
+import { BASE_USDC, POLYGON_PUSD, POLYGON_USDC } from "./rehearsal.js";
 
 const captured = JSON.parse(
   readFileSync(
@@ -35,6 +36,7 @@ function example(index = 0) {
     maximumContractAgeMs: 60000,
     owner: route.request.user,
     recipient: route.request.recipient,
+    sourceCurrency: route.request.originCurrency,
     amountMode: "exact_input",
     authorizedSourceRaw: "10000000",
     minimumOutputRaw: "850000000",
@@ -110,6 +112,30 @@ test("source owner and owned native recipient are distinct exact identities", ()
   });
   assert.equal(result.refundTargets.native.owner, otherOwner);
   assert.equal(result.refundTargets.source.owner, input.owner);
+});
+
+test("source currency is pinned independently of the quote, including same-chain stablecoins", () => {
+  for (const [index, sourceCurrency] of [
+    [0, POLYGON_PUSD],
+    [0, POLYGON_USDC],
+    [1, BASE_USDC],
+    [1, `0x${"f".repeat(40)}`],
+  ] as const) {
+    const { input } = example(index);
+    assert.throws(
+      () => validateRelayHypercoreInboundQuote({ ...input, sourceCurrency }),
+      /source_currency_unsupported/,
+    );
+  }
+  const { input } = example(1);
+  assert.throws(
+    () =>
+      validateRelayHypercoreInboundQuote({
+        ...input,
+        sourceCurrency: POLYGON_PUSD,
+      }),
+    /currency_mismatch/,
+  );
 });
 
 test("unsigned fee summary cannot hide the committed same-USDC route loss", () => {

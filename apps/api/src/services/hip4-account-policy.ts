@@ -23,6 +23,15 @@ export const hip4AccountPolicySchema = z
     historyRepairMaxGapDetails: z.number().int().min(1).max(100).default(32),
     workerIntervalMs: z.number().int().min(1000).max(3_600_000).default(60_000),
     workerBatchSize: z.number().int().min(0).max(20).default(2),
+    // Completed exact full-fill receipts are cold rechecks, not hot work on
+    // every tick. One hot slot is always preserved inside workerBatchSize.
+    completedOrderRecheckIntervalMs: z
+      .number()
+      .int()
+      .min(60_000)
+      .max(604_800_000)
+      .default(3_600_000),
+    completedOrderBatchSize: z.number().int().min(0).max(20).default(1),
     // Bound derived basis reconstruction; a sentinel yields unknown basis,
     // never a truncated financial calculation or a failed balance refresh.
     accountingMaxRows: z.number().int().min(100).max(100_000).default(20_000),

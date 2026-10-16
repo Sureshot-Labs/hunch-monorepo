@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
+import { verifyHandoffOperationPagesPg } from "./receive-handoff-operation-pages-pg.js";
+import { verifyReceiveExactHandoffEvidencePg } from "./receive-exact-role-evidence-pg.js";
+import { verifyHandoffEventSnapshotPlansPg } from "./handoff-event-ownership-pg.js";
 import {
   listPotentialPolymarketHandoffsForCanonicalEvents,
   FundingPolymarketHandoffLookupOverflowError,
@@ -95,6 +98,7 @@ export async function verifyReceiveHandoffSourcePg(
       },
     );
     assert.equal(actual.length, 1);
+    await verifyReceiveExactHandoffEvidencePg(db, input);
     await db.query("savepoint handoff_cancel_facts");
     const lookup = () =>
       listPotentialPolymarketHandoffsForCanonicalEvents(db, {
@@ -165,6 +169,10 @@ export async function verifyReceiveHandoffSourcePg(
     );
     await db.query("analyze funding_operation_step_attempts");
     await db.query("analyze funding_step_receipt_observations");
+    await verifyHandoffEventSnapshotPlansPg(db, {
+      ...input,
+      networkId: input.event.networkId,
+    });
     const witness = (
       await db.query<{
         attempt_id: string;
@@ -356,6 +364,8 @@ export async function verifyReceiveHandoffSourcePg(
       Number(batchPlan.Plan["Local Hit Blocks"] ?? 0) +
       Number(batchPlan.Plan["Local Read Blocks"] ?? 0);
     assert.equal(batchPlan.Plan["Actual Rows"], 32);
+    if (batchExamined >= 400 || batchBuffers >= 2000)
+      console.log("[handoff-batch-unbounded-plan]", JSON.stringify(batchPlan));
     assert.ok(
       batchExamined < 400,
       `batch HMAC lane repeated whole batch: ${batchExamined}`,
@@ -537,6 +547,7 @@ export async function verifyReceiveHandoffSourcePg(
       where id=$1`,
       [input.stepId],
     );
+    await verifyHandoffOperationPagesPg(db, input);
     return metrics;
   } finally {
     await db.query("rollback to savepoint handoff_source_plans");

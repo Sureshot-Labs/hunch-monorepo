@@ -4,16 +4,19 @@ import {
   EXACT_REFUND_CORRELATION_PENDING,
   classifyRecordedExactRefund,
   classifyRecordedRelayExactRefundEvents,
+  readRecordedRelayRefundRoleEvidence,
   refundCanonicalEventKey,
   type RecordedRefundRow,
 } from "../../reconciliation/relay-exact-refund-classification.js";
 import {
   receiveInternalRolesConflict,
+  resolveLegacyRecordedReceiveRoles,
   resolveReceiveEventClassification,
 } from "../../receive/receive-event-classification.js";
 import { EXACT_REFUND_RECEIPTS_CONTRACT } from "../../domain/refund-settlement.js";
 import type { OwnedRouteCanonicalDestinationEvent } from "../../reconciliation/owned-route-destination-observer.js";
 import { isFundingReceiveClassificationRetryReason } from "../../persistence/funding-receive-session-repository.js";
+import { receiveRoleEventFingerprint } from "../../receive/receive-role-progress.js";
 
 test("pending refund correlation remains eligible for bounded known-event repair", () => {
   assert.equal(
@@ -59,6 +62,7 @@ const row: RecordedRefundRow = {
   operation_id: "operation",
   segment_id: "segment",
   user_id: userId,
+  classification_revision: "0",
   network_id: event.networkId,
   asset_id: event.asset.assetId,
   asset_decimals: 6,
@@ -90,6 +94,91 @@ const internal = {
   operationId: "operation",
   segmentId: "segment",
 };
+
+test("legacy recorded-role adapter preserves all combinations and recovery precedence", () => {
+  type Input = Parameters<typeof resolveLegacyRecordedReceiveRoles>[0];
+  const handoffs: Input["handoff"][] = [
+    undefined,
+    { kind: "external", reason: null },
+    {
+      kind: "internal",
+      reason: null,
+      reference: "exact",
+      operationId: "handoff-operation",
+      attemptId: "handoff-attempt",
+    },
+    { kind: "recovery_required", reason: "handoff_reference_unavailable" },
+  ];
+  const destinations: Input["destination"][] = [
+    undefined,
+    { kind: "external" },
+    {
+      kind: "internal",
+      operationId: "destination-operation",
+      segmentId: "destination-segment",
+      transactionReferenceFingerprint: "destination-reference",
+    },
+    {
+      kind: "recovery_required",
+      reason: "owned_route_destination_correlation_pending",
+    },
+    { kind: "recovery_required", reason: "owned_route_destination_ambiguous" },
+  ];
+  const refunds: Input["refund"][] = [
+    undefined,
+    { kind: "unmatched" },
+    {
+      kind: "internal",
+      operationId: "refund-operation",
+      segmentId: "refund-segment",
+    },
+    { kind: "recovery_required", reason: "exact_refund_receipt_not_final" },
+    { kind: "recovery_required", reason: "exact_refund_receipt_conflict" },
+  ];
+  for (const handoff of handoffs)
+    for (const destination of destinations)
+      for (const refund of refunds) {
+        const roles = [handoff, destination, refund];
+        const positives = roles.filter(
+          (role) => role?.kind === "internal",
+        ).length;
+        const conflicting =
+          positives > 1 ||
+          (positives > 0 &&
+            roles.some((role) => role?.kind === "recovery_required"));
+        const result = resolveLegacyRecordedReceiveRoles({
+          handoff,
+          destination,
+          refund,
+        });
+        if (conflicting) {
+          assert.deepEqual(result, {
+            kind: "recovery_required",
+            reason: "internal_event_classification_conflict",
+          });
+          continue;
+        }
+        // The original receive publisher chose refund recovery before handoff
+        // and destination recovery. This differs from the joint arbiter.
+        const pending = [refund, handoff, destination].find(
+          (role) => role?.kind === "recovery_required",
+        );
+        if (pending) assert.deepEqual(result, pending);
+        else if (handoff?.kind === "internal")
+          assert.deepEqual(result, {
+            kind: "internal_handoff",
+            match: handoff,
+          });
+        else if (refund?.kind === "internal")
+          assert.deepEqual(result, { kind: "internal_refund", match: refund });
+        else if (destination?.kind === "internal")
+          assert.deepEqual(result, {
+            kind: "internal_destination",
+            match: destination,
+          });
+        else assert.deepEqual(result, { kind: "external" });
+      }
+});
 
 test("current receive roles arbitrate symmetrically without assuming unexamined refund coverage", () => {
   const kinds = ["external", "internal", "recovery_required"];
@@ -246,6 +335,56 @@ test("batched lookup normalizes the physical key, deduplicates and rejects confl
     events: [],
   });
   assert.equal(calls, 1);
+});
+
+test("recorded evidence retains same-statement facts including negative legacy witnesses", async () => {
+  let queries = 0;
+  const db = {
+    query: async () => {
+      queries++;
+      return { rows: [row] };
+    },
+  };
+  const evidence = (
+    await readRecordedRelayRefundRoleEvidence(db as never, {
+      userId,
+      events: [event],
+    })
+  ).get(row.identity);
+  assert.deepEqual(evidence, {
+    kind: "recorded",
+    eventFingerprint: receiveRoleEventFingerprint(event),
+    classification: internal,
+    dependencies: [{ userId, operationId: row.operation_id, revision: "0" }],
+  });
+  assert.equal(
+    queries,
+    1,
+    "no newer facts query may be attached to older receipt data",
+  );
+  const negative = (
+    await readRecordedRelayRefundRoleEvidence(
+      {
+        query: async () => ({
+          rows: [
+            {
+              ...row,
+              metadata: {},
+              refund_location_snapshot: {},
+              classification_revision: "19",
+            },
+          ],
+        }),
+      } as never,
+      { userId, events: [event] },
+    )
+  ).get(row.identity);
+  assert.equal(negative?.classification.kind, "unmatched");
+  assert.equal(
+    negative?.dependencies[0].revision,
+    "19",
+    "legacy negative is still a dependency",
+  );
 });
 
 test("joint classification has no first-match winner and never allocates pending evidence", () => {

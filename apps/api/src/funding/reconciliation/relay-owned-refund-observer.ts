@@ -1,4 +1,4 @@
-import { tx, type Pool, type PoolClient } from "@hunch/infra";
+import type { Pool, PoolClient } from "@hunch/infra";
 
 import type { RelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
 import { sameAccountAddress } from "../domain/asset-identity.js";
@@ -12,6 +12,45 @@ import {
 } from "../receive/evm-receive-event-scanner.js";
 import type { DirectIngressObservationVariant } from "./direct-ingress-observer.js";
 import { relayEvmFundingProfileSpec } from "../execution/relay-evm-profile-specs.js";
+import type { FundingTransactionReferenceCodec } from "../execution/transaction-reference-codec.js";
+import {
+  FundingClassificationChangedError,
+  commitFundingClassificationTransaction,
+  lockFundingClassificationOperations,
+  type FundingClassificationRevision,
+} from "../persistence/funding-classification-revisions.js";
+import {
+  recordedOwnedRefundEvent,
+  prelockOwnedRefundEvents,
+  suppressRecordedOwnedRefund,
+  claimArbitratedOwnedRefundEvent,
+  readProtectedRecordedRefundRoleProof,
+  type OwnedRefundPrelock,
+} from "./relay-owned-refund-ownership.js";
+import type { ReceiveEventClassification } from "../receive/receive-event-classification.js";
+import type { FundingEvidenceWorkContext } from "./funding-reducer.js";
+import {
+  fundingEvidenceBudgetClient,
+  FundingEvidenceBudgetExpiredError,
+  setFundingEvidenceQueryBudget,
+} from "./funding-evidence-budget.js";
+import {
+  fundingPhysicalEventIsBusy,
+  canonicalFundingPhysicalTransactionHash,
+} from "../persistence/funding-physical-event-gate.js";
+import { isRecord } from "../../lib/type-guards.js";
+import {
+  readRecordedRelayRefundRoleEvidence,
+  refundCanonicalEventKey,
+} from "./relay-exact-refund-classification.js";
+import { verifiedFirstRelayRefundRoleEvidence } from "./relay-exact-refund-proposal.js";
+import {
+  readSessionlessRolePublicationPhase,
+  checkpointSessionlessRolePublicationPhase,
+} from "../receive/receive-role-publication-phase.js";
+import { lockSessionlessFundingRoleMembershipForPublication } from "../receive/receive-refund-scan.js";
+import { prepareReceiveAnchors } from "../receive/prepare-receive-anchors.js";
+import type { inspectEvmFundingReceiveAnchor } from "../receive/evm-receive-anchor-proof.js";
 
 // Terminal refund evidence is watched for 15 minutes. Re-scan a bounded Base
 // reorg horizon behind the old refund block so a replacement re-mined at a
@@ -20,6 +59,10 @@ import { relayEvmFundingProfileSpec } from "../execution/relay-evm-profile-specs
 const TERMINAL_REFUND_SCAN_BLOCKS = 2_000n;
 
 type RefundTarget = Readonly<{
+  userId: string;
+  publicationSnapshot: string;
+  refundSnapshot: string | null;
+  facts: FundingClassificationRevision;
   operationId: string;
   segmentId: string;
   reservationId: string;
@@ -34,7 +77,7 @@ type RefundTarget = Readonly<{
   refundEventIndex: string | null;
   refundFinalityStatus: string | null;
   refundCanonical: boolean | null;
-  refundReorgedAt: Date | null;
+  refundReorgedAt: string | null;
   refundTransactionHash: string | null;
   transactionReferenceFingerprints: readonly string[];
   networkId: string;
@@ -55,6 +98,10 @@ async function loadRefundTarget(
   now: Date,
 ): Promise<RefundTarget | null> {
   const { rows } = await db.query<{
+    user_id: string;
+    publication_snapshot: string;
+    refund_snapshot: string | null;
+    classification_revision: string;
     cursor_block: string | null;
     expected_raw: string;
     operation_id: string;
@@ -64,7 +111,7 @@ async function loadRefundTarget(
     refund_event_index: string | null;
     refund_finality_status: string | null;
     refund_observation_id: string | null;
-    refund_reorged_at: Date | null;
+    refund_reorged_at: string | null;
     refund_transaction_hash: string | null;
     reference_fingerprints: unknown;
     reservation_id: string;
@@ -77,7 +124,18 @@ async function loadRefundTarget(
     asset_decimals: number;
     profile_id: string;
   }>(
-    `select operation.id as operation_id,
+    `select operation.id as operation_id,operation.user_id,
+            coalesce(facts_revision.revision,0)::text as classification_revision,
+            jsonb_build_object(
+              'source',to_jsonb(source_debit),'refund',to_jsonb(refund),
+              'reservation',jsonb_build_array(reservation.id,reservation.status,
+                reservation.authorization_id,reservation.source_raw,reservation.refund_cursor_block),
+              'authority',jsonb_build_array(funding_authorization.id,funding_authorization.wallet_address,funding_authorization.profile_id),
+              'userId',operation.user_id,'segmentId',segment.id,
+              'references',segment.support_metadata->'relayTransactionReferenceFingerprints',
+              'relayStatusCategory',segment.support_metadata->'relayStatusCategory'
+            )::text as publication_snapshot,
+            case when refund.id is null then null else to_jsonb(refund)::text end as refund_snapshot,
             segment.id as segment_id,
             reservation.id as reservation_id,
             reservation.source_raw::text as expected_raw,
@@ -92,7 +150,7 @@ async function loadRefundTarget(
             refund.finality_status as refund_finality_status,
             refund.canonical as refund_canonical,
             refund.finalized_at as refund_finalized_at,
-            refund.reorged_at as refund_reorged_at,
+            to_char(refund.reorged_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as refund_reorged_at,
             segment.support_metadata -> 'relayTransactionReferenceFingerprints'
               as reference_fingerprints,
             funding_authorization.wallet_address
@@ -101,6 +159,8 @@ async function loadRefundTarget(
             ,source_debit.asset_decimals
             ,funding_authorization.profile_id
        from funding_operations operation
+       left join funding_classification_revisions facts_revision
+         on facts_revision.operation_id = operation.id
        join funding_operation_segments segment
          on segment.operation_id = operation.id
         and segment.ordinal = 0
@@ -112,8 +172,11 @@ async function loadRefundTarget(
         and source_debit.canonical
         and source_debit.finality_status = 'finalized'
        join telegram_funding_authorizations funding_authorization
-         on funding_authorization.id::text =
-              operation.support_metadata ->> 'fundingAuthorizationId'
+         on funding_authorization.id = case
+           when operation.support_metadata ->> 'fundingAuthorizationId'
+             ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+           then (operation.support_metadata ->> 'fundingAuthorizationId')::uuid
+         end
        join telegram_funding_authorization_reservations reservation
          on reservation.funding_operation_id = operation.id
         and reservation.status in (
@@ -185,6 +248,14 @@ async function loadRefundTarget(
         : 0n
       : null;
   return {
+    userId: row.user_id,
+    publicationSnapshot: row.publication_snapshot,
+    refundSnapshot: row.refund_snapshot,
+    facts: {
+      operationId: row.operation_id,
+      userId: row.user_id,
+      revision: row.classification_revision,
+    },
     operationId: row.operation_id,
     segmentId: row.segment_id,
     reservationId: row.reservation_id,
@@ -263,6 +334,14 @@ export function relayOwnedRefundEventMatches(
     fingerprint: (reference: string) => string;
   }>,
 ): boolean {
+  const canonicalReference = canonicalFundingPhysicalTransactionHash({
+    networkId: input.networkId ?? "evm:8453",
+    transactionHash: input.event.transactionHash,
+  });
+  const references = new Set([
+    input.event.transactionHash,
+    ...(canonicalReference ? [canonicalReference] : []),
+  ]);
   return (
     input.event.rawAmount === input.expectedRaw &&
     sameAccountAddress(
@@ -274,11 +353,17 @@ export function relayOwnedRefundEventMatches(
       sourceBlock: input.sourceBlock,
       sourceEventIndex: input.sourceEventIndex,
     }) &&
-    input.transactionReferenceFingerprints.includes(
-      input.fingerprint(input.event.transactionHash),
+    [...references].some((reference) =>
+      input.transactionReferenceFingerprints.includes(
+        input.fingerprint(reference),
+      ),
     )
   );
 }
+
+// Refused positive effects roll back. Separately committed E/U checkpoints
+// retain derived progress; unowned remine uses the canonical-proof adapter.
+class OwnedRefundPublicationDeferred extends Error {}
 
 async function persistScan(
   client: PoolClient,
@@ -287,8 +372,51 @@ async function persistScan(
     nextCursor: string;
     matches: readonly FundingReceiveCanonicalEvent[];
     now: Date;
+    protectionOnly?: true;
+    publication?: Readonly<{
+      physical: OwnedRefundPrelock;
+      classification: Extract<
+        ReceiveEventClassification,
+        { kind: "internal_refund" }
+      >;
+    }>;
   }>,
-): Promise<boolean> {
+): Promise<boolean | null> {
+  const incoming = input.matches.length === 1 ? input.matches[0] : null;
+  const finalizedRefundWatch =
+    input.target.refundFinalityStatus === "finalized" &&
+    input.target.refundCanonical === true;
+  const exactMatch =
+    incoming !== null &&
+    incoming.blockNumber === input.target.refundBlock &&
+    incoming.blockHash.toLowerCase() ===
+      input.target.refundBlockHash?.toLowerCase() &&
+    incoming.eventIndex === input.target.refundEventIndex &&
+    incoming.transactionHash.toLowerCase() ===
+      input.target.refundTransactionHash?.toLowerCase();
+  // This pass only invalidates the old refund. Do not create ownership for a
+  // replacement that will not be published until the next ordinary poll.
+  // The full snapshot (including reservation status) is revalidated after O.
+  // Receipt facts are authoritative even before the lifecycle projector has
+  // marked the reservation refunded. Never publish two positive refunds in
+  // that window: invalidate the old one first, exactly as for terminal replay.
+  const invalidationOnly = finalizedRefundWatch && !exactMatch;
+  const physical =
+    input.publication?.physical ??
+    (await prelockOwnedRefundEvents(
+      client,
+      recordedOwnedRefundEvent(input.target.refundSnapshot, input.now),
+      incoming && !invalidationOnly && !input.protectionOnly
+        ? {
+            ...incoming,
+            networkId: incoming.variant.networkId,
+            asset: incoming.variant.asset,
+            ledgerHeight: incoming.blockNumber,
+            observedAt: input.now,
+            now: input.now,
+          }
+        : null,
+    ));
   const locked = await client.query<{
     reservation_status: string;
   }>(
@@ -307,11 +435,38 @@ async function persistScan(
       lockedStatus,
     )
   )
-    return false;
-  const terminalRefundWatch =
-    input.target.refundFinalityStatus === "finalized" &&
-    input.target.refundCanonical === true &&
-    ["cleaned", "refunded"].includes(lockedStatus);
+    throw new FundingClassificationChangedError();
+  const latest = await loadRefundTarget(
+    client,
+    input.target.operationId,
+    input.now,
+  );
+  if (
+    !latest ||
+    latest.publicationSnapshot !== input.target.publicationSnapshot
+  )
+    throw new FundingClassificationChangedError();
+  const previousSuppressed = await suppressRecordedOwnedRefund(
+    client,
+    physical,
+  );
+  if (input.protectionOnly && !finalizedRefundWatch) return null;
+  const claimPositive = async () => {
+    if (!input.publication) throw new OwnedRefundPublicationDeferred();
+    const claimed = await claimArbitratedOwnedRefundEvent(client, {
+      locked: physical,
+      userId: input.target.userId,
+      operationId: input.target.operationId,
+      segmentId: input.target.segmentId,
+      classification: input.publication.classification,
+      previousObservationId: input.target.refundObservationId,
+      previousReorged:
+        input.target.refundFinalityStatus === "reorged" &&
+        input.target.refundCanonical === false,
+      previousSuppressed,
+    });
+    if (!claimed) throw new OwnedRefundPublicationDeferred();
+  };
   if (
     input.target.refundFinalityStatus === "reorged" &&
     input.target.refundCanonical === false
@@ -325,10 +480,10 @@ async function persistScan(
       !input.target.refundReorgedAt ||
       input.matches.length !== 1
     ) {
-      return false;
+      throw new OwnedRefundPublicationDeferred();
     }
     const event = input.matches[0];
-    if (!event) return false;
+    if (!event) throw new OwnedRefundPublicationDeferred();
     const observation = await client.query(
       `select id
          from funding_observations
@@ -359,7 +514,9 @@ async function persistScan(
         input.target.networkId,
       ],
     );
-    if (observation.rowCount !== 1) return false;
+    if (observation.rowCount !== 1)
+      throw new FundingClassificationChangedError();
+    await claimPositive();
     const samePhysicalEvent =
       event.eventIndex === input.target.refundEventIndex &&
       event.transactionHash.toLowerCase() ===
@@ -427,7 +584,7 @@ async function persistScan(
     });
     return true;
   }
-  if (terminalRefundWatch) {
+  if (finalizedRefundWatch) {
     if (
       !input.target.refundObservationId ||
       !input.target.refundBlock ||
@@ -435,7 +592,7 @@ async function persistScan(
       !input.target.refundEventIndex ||
       !input.target.refundTransactionHash
     ) {
-      return false;
+      throw new OwnedRefundPublicationDeferred();
     }
     const observation = await client.query(
       `select id
@@ -459,16 +616,14 @@ async function persistScan(
         input.target.refundTransactionHash,
       ],
     );
-    if (observation.rowCount !== 1) return false;
-    const exactMatch =
-      input.matches.length === 1 &&
-      input.matches[0]?.blockNumber === input.target.refundBlock &&
-      input.matches[0]?.blockHash.toLowerCase() ===
-        input.target.refundBlockHash.toLowerCase() &&
-      input.matches[0]?.eventIndex === input.target.refundEventIndex &&
-      input.matches[0]?.transactionHash.toLowerCase() ===
-        input.target.refundTransactionHash.toLowerCase();
-    if (exactMatch) return true;
+    if (observation.rowCount !== 1)
+      throw new FundingClassificationChangedError();
+    if (exactMatch) {
+      // Existing unchanged money: protection and exact snapshot/F suffice.
+      // Exhaustive derived role coverage must not delay a truthful replay.
+      if (!input.protectionOnly) await claimPositive();
+      return true;
+    }
     const reorged = await client.query(
       `update funding_observations
           set finality_status = 'reorged',
@@ -510,7 +665,8 @@ async function persistScan(
     return false;
   }
   const event = input.matches[0];
-  if (!event) return false;
+  if (!event) throw new OwnedRefundPublicationDeferred();
+  await claimPositive();
   if (lockedStatus !== "cleaned" && lockedStatus !== "refunded") {
     const cursorUpdate = await client.query(
       `update telegram_funding_authorization_reservations
@@ -558,29 +714,62 @@ export class RelayOwnedRefundObserver {
   constructor(
     private readonly referenceCodec: Pick<RelayReferenceCodec, "fingerprint">,
     private readonly rpc?: FundingReceiveEventRpc,
+    private readonly transactionReferenceCodec?: Pick<
+      FundingTransactionReferenceCodec,
+      "fingerprint" | "keyVersion" | "decrypt"
+    >,
   ) {}
 
   async pollOperation(
     pool: Pool,
     operationId: string,
     now = new Date(),
-  ): Promise<Readonly<{ refundsPolled: number; refundSatisfied: boolean }>> {
-    const target = await loadRefundTarget(pool, operationId, now);
+    options?: Readonly<{
+      work: FundingEvidenceWorkContext & { limit: number };
+      inspectCanonicalAnchor?: typeof inspectEvmFundingReceiveAnchor;
+    }>,
+  ): Promise<
+    Readonly<{
+      refundsPolled: number;
+      refundSatisfied: boolean;
+      pendingReason?: string;
+    }>
+  > {
+    const expired = () =>
+      options &&
+      (!Number.isFinite(options.work.deadlineMs) ||
+        Date.now() >= options.work.deadlineMs);
+    const noWork = () => ({
+      refundsPolled: 0,
+      refundSatisfied: false,
+      pendingReason: "role_work_budget_exhausted",
+    });
+    if (expired()) return noWork();
+    let target = await loadRefundTarget(pool, operationId, now);
     if (!target) return { refundsPolled: 0, refundSatisfied: false };
-    const durableRefundFingerprint = target.refundTransactionHash
-      ? this.referenceCodec.fingerprint(target.refundTransactionHash)
-      : null;
-    const scanTarget = durableRefundFingerprint
+    const durableReferences = target.refundTransactionHash
+      ? new Set([
+          target.refundTransactionHash,
+          canonicalFundingPhysicalTransactionHash({
+            networkId: target.networkId,
+            transactionHash: target.refundTransactionHash,
+          }) ?? target.refundTransactionHash,
+        ])
+      : new Set<string>();
+    const scanTarget = durableReferences.size
       ? {
           ...target,
           transactionReferenceFingerprints: [
             ...new Set([
               ...target.transactionReferenceFingerprints,
-              durableRefundFingerprint,
+              ...[...durableReferences].map((reference) =>
+                this.referenceCodec.fingerprint(reference),
+              ),
             ]),
           ],
         }
       : target;
+    if (expired()) return noWork();
     const scan = await scanFundingReceiveCanonicalEvents(
       [refundVariant(scanTarget)],
       now,
@@ -604,9 +793,204 @@ export class RelayOwnedRefundObserver {
         fingerprint: (reference) => this.referenceCodec.fingerprint(reference),
       }),
     );
-    const refundSatisfied = await tx(pool, (client) =>
-      persistScan(client, { target: scanTarget, nextCursor, matches, now }),
-    );
-    return { refundsPolled: 1, refundSatisfied };
+    const pending = (pendingReason: string) => ({
+      refundsPolled: 1,
+      refundSatisfied: false,
+      pendingReason,
+    });
+    try {
+      // Recorded ownership protection/retraction is independently useful and
+      // must commit even when no codec or exhaustive role checkpoint is ready.
+      // This branch locks only OLD E -> target O; it never creates new money.
+      if (target.refundSnapshot) {
+        const client = await pool.connect();
+        try {
+          await client.query("begin");
+          await client.query("set transaction isolation level read committed");
+          const db = options
+            ? fundingEvidenceBudgetClient(client, options.work.deadlineMs)
+            : client;
+          const result = await persistScan(db, {
+            target,
+            nextCursor,
+            matches,
+            now,
+            protectionOnly: true,
+          });
+          if (options)
+            await setFundingEvidenceQueryBudget(
+              client,
+              options.work.deadlineMs,
+            );
+          await commitFundingClassificationTransaction(client, [target.facts]);
+          if (result !== null)
+            return { refundsPolled: 1, refundSatisfied: result };
+        } catch (error) {
+          await client.query("rollback");
+          throw error;
+        } finally {
+          client.release();
+        }
+        const refreshed = await loadRefundTarget(pool, operationId, now);
+        // The chain scan was for the frozen source/authority contract, not an
+        // opportunity to adopt a concurrently edited amount, source or owner.
+        const sourceContext = (snapshot: string) =>
+          JSON.stringify({ ...JSON.parse(snapshot), refund: null });
+        if (
+          !refreshed ||
+          sourceContext(refreshed.publicationSnapshot) !==
+            sourceContext(target.publicationSnapshot)
+        )
+          throw new FundingClassificationChangedError();
+        target = refreshed;
+      }
+      if (matches.length !== 1)
+        return pending("owned_refund_exact_event_pending");
+      if (!options) return pending("role_work_context_pending");
+      const raw = matches[0];
+      if (!raw) return pending("owned_refund_exact_event_pending");
+      const event = {
+        ...raw,
+        networkId: raw.variant.networkId,
+        transactionHash:
+          canonicalFundingPhysicalTransactionHash({
+            networkId: raw.variant.networkId,
+            transactionHash: raw.transactionHash,
+          }) ?? raw.transactionHash,
+        asset: raw.variant.asset,
+        ledgerHeight: raw.blockNumber,
+        observedAt: now,
+        now,
+      };
+      const previous = recordedOwnedRefundEvent(target.refundSnapshot, now);
+      const samePhysical =
+        previous?.networkId === event.networkId &&
+        previous.transactionHash === event.transactionHash &&
+        previous.eventIndex === event.eventIndex;
+      // Owned A -> B has its own proof-scoped adapter. Never feed an owned
+      // receipt to the unowned pending-anchor repair or ignore strict anchors.
+      if (
+        !samePhysical &&
+        (await prepareReceiveAnchors(pool, {
+          events: [event],
+          deadlineMs: options.work.deadlineMs,
+          inspect: options.inspectCanonicalAnchor,
+        })) !== "ready"
+      )
+        return pending("role_canonical_anchor_pending");
+      let progressPages = 0;
+      for (;;) {
+        const client = await pool.connect();
+        try {
+          await client.query("begin");
+          await client.query("set transaction isolation level read committed");
+          const db = fundingEvidenceBudgetClient(
+            client,
+            options.work.deadlineMs,
+          );
+          const physical = await prelockOwnedRefundEvents(db, previous, event);
+          const proof =
+            samePhysical && target.refundSnapshot
+              ? await readProtectedRecordedRefundRoleProof(db, {
+                  locked: physical,
+                  receiptSnapshot: target.refundSnapshot,
+                  operationId,
+                  segmentId: target.segmentId,
+                  facts: target.facts,
+                })
+              : null;
+          if (samePhysical && !proof) {
+            await client.query("commit");
+            return pending("owned_refund_recorded_proof_pending");
+          }
+          const recorded = await readRecordedRelayRefundRoleEvidence(db, {
+            userId: target.userId,
+            events: [event],
+          });
+          const phase = await readSessionlessRolePublicationPhase(db, {
+            operationId,
+            userId: target.userId,
+            events: [event],
+            now,
+            work: options.work,
+            pageOrdinal: progressPages,
+            referenceCodec: this.referenceCodec,
+            transactionReferenceCodec: this.transactionReferenceCodec,
+            refundEvidence: verifiedFirstRelayRefundRoleEvidence(
+              {
+                events: [event],
+                operationId,
+                segmentId: target.segmentId,
+                facts: target.facts,
+              },
+              recorded,
+            ),
+            protectedRefundProofs: proof
+              ? new Map([[refundCanonicalEventKey(event), proof]])
+              : undefined,
+          });
+          if (phase.kind !== "ready") {
+            if (
+              phase.kind === "pending" ||
+              progressPages >= options.work.limit
+            ) {
+              await client.query("commit");
+              return pending(phase.reason);
+            }
+            await checkpointSessionlessRolePublicationPhase(db, phase);
+            // Derived E -> U page owns this transaction. Never later acquire O.
+            await client.query("commit");
+            progressPages++;
+            continue;
+          }
+          const classification = phase.decisions.get(
+            refundCanonicalEventKey(event),
+          );
+          if (
+            classification?.kind !== "internal_refund" ||
+            classification.match.operationId !== operationId ||
+            classification.match.segmentId !== target.segmentId
+          ) {
+            await client.query("commit");
+            return pending("internal_event_classification_conflict");
+          }
+          const dependencies = [target.facts, ...phase.dependencies];
+          await lockFundingClassificationOperations(db, dependencies);
+          for (const scan of phase.scans)
+            await lockSessionlessFundingRoleMembershipForPublication(db, scan);
+          const refundSatisfied = await persistScan(db, {
+            target,
+            nextCursor,
+            matches,
+            now,
+            publication: { physical, classification },
+          });
+          if (refundSatisfied === null)
+            throw new OwnedRefundPublicationDeferred();
+          await setFundingEvidenceQueryBudget(client, options.work.deadlineMs);
+          await commitFundingClassificationTransaction(client, dependencies);
+          return { refundsPolled: 1, refundSatisfied };
+        } catch (error) {
+          await client.query("rollback");
+          throw error;
+        } finally {
+          client.release();
+        }
+      }
+    } catch (error) {
+      if (error instanceof OwnedRefundPublicationDeferred)
+        return pending("owned_refund_publication_pending");
+      if (fundingPhysicalEventIsBusy(error))
+        return pending("role_physical_evidence_busy");
+      if (
+        error instanceof FundingEvidenceBudgetExpiredError ||
+        (options &&
+          Date.now() >= options.work.deadlineMs &&
+          isRecord(error) &&
+          ["57014", "55P03"].includes(String(error.code)))
+      )
+        return pending("role_work_budget_exhausted");
+      throw error;
+    }
   }
 }

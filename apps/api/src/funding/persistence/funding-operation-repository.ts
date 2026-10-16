@@ -7,6 +7,11 @@ import type {
 } from "../domain/types.js";
 import { isPositiveRawAmount } from "../domain/raw-amount.js";
 import {
+  canonicalFundingPhysicalTransactionHash,
+  FundingPhysicalEventBusyError,
+  tryLockFundingPhysicalEvent,
+} from "./funding-physical-event-gate.js";
+import {
   canonicalAccountAddress,
   canonicalAssetId,
   sameAccountAddress,
@@ -19,7 +24,10 @@ import {
   type SegmentStatus,
 } from "../domain/transitions.js";
 import { isValidFundingCommitPlanBoundary } from "../validation/funding-commit-plan-validator.js";
-import { fundingReservationHoldSql } from "./source-reservation-hold.js";
+import {
+  fundingReservationHoldSql,
+  polymarketNativeHandoffReservationPendingSql,
+} from "./source-reservation-hold.js";
 import {
   claimHyperliquidFundingNonceInTransaction,
   HyperliquidNonceConflictError,
@@ -1071,7 +1079,7 @@ async function lockCommitSourceReservations(
           and mode = 'subtract_available'
           and state = 'active'
           and ${fundingReservationHoldSql("balance_reservations")}
-          and not exists (
+          and (${polymarketNativeHandoffReservationPendingSql("balance_reservations")} or not exists (
             select 1 from funding_observations observation
             where observation.operation_id = balance_reservations.operation_id
               and observation.segment_id is not distinct from
@@ -1079,7 +1087,7 @@ async function lockCommitSourceReservations(
               and observation.kind = 'source_debit'
               and observation.canonical
               and observation.finality_status = 'finalized'
-          )
+          ))
         order by id
         for update
       `,
@@ -1972,17 +1980,36 @@ const refundReceiptColumns = `${observationIdentityColumns}, jsonb_build_object(
   'nativeDestinationDex', metadata->'nativeDestinationDex'
 ) as metadata`;
 
-export const FUNDING_REFUND_MANIFEST_RECEIPTS_SQL = `
+function fundingRefundManifestReceiptsSql(aliases: boolean) {
+  return `
 select receipt_row.*
 from unnest($4::text[]) requested_hash(tx_hash)
 cross join lateral (
   select ${refundReceiptColumns} from funding_observations
   where operation_id=$1::uuid and segment_id=$2::uuid
-    and network_id=$3 and tx_hash=requested_hash.tx_hash
+    and network_id=$3 and ${
+      aliases
+        ? "tx_hash is not null and md5(lower(tx_hash))=md5(requested_hash.tx_hash) and lower(tx_hash)=requested_hash.tx_hash"
+        : "tx_hash=requested_hash.tx_hash"
+    }
     and kind='refund_credit' and canonical and finality_status='finalized'
   order by event_index limit 2
 ) receipt_row
 order by receipt_row.network_id, receipt_row.tx_hash, receipt_row.event_index`;
+}
+export const FUNDING_REFUND_MANIFEST_RECEIPTS_SQL =
+  fundingRefundManifestReceiptsSql(false);
+export const FUNDING_REFUND_EVM_MANIFEST_RECEIPTS_SQL =
+  fundingRefundManifestReceiptsSql(true);
+
+export function fundingPhysicalObservationForUpdateSql(
+  projection: "full" | "refund_receipt",
+) {
+  return `select ${projection === "refund_receipt" ? refundReceiptColumns : observationColumns}
+    from funding_observations where network_id=$1 and tx_hash is not null
+      and md5(lower(tx_hash))=md5($2::text) and lower(tx_hash)=$2::text
+      and event_index=$3 limit 2 for update nowait`;
+}
 
 /** N distinct proof members can cover at most N of the first N+1 rows.
  * The prefix is read BEFORE the exclusion filter, so an exhausted/empty tail
@@ -2000,6 +2027,106 @@ select exists (
   where not (receipt_prefix.id=any($3::uuid[]))
 ) as has_outside_receipt`;
 
+export type FundingRefundReceiptCursor = Readonly<{
+  networkId: string;
+  transactionHash: string;
+  eventIndex: string;
+}>;
+function currentRefundReceiptPageSql(resumed: boolean): string {
+  return `select ${refundReceiptColumns} from funding_observations
+    where operation_id=$1::uuid and segment_id=$2::uuid
+      and kind='refund_credit' and canonical and finality_status='finalized'
+      ${resumed ? "and (network_id,tx_hash,event_index)>($4::text,$5::text,$6::text)" : ""}
+    order by network_id,tx_hash,event_index limit $3`;
+}
+export const FUNDING_CURRENT_REFUND_FIRST_PAGE_SQL =
+  currentRefundReceiptPageSql(false);
+export const FUNDING_CURRENT_REFUND_NEXT_PAGE_SQL =
+  currentRefundReceiptPageSql(true);
+
+/** Read bounded current members before identity/proof filtering. One stable
+ * facts revision is required across pages; this does not prove settlement. */
+export async function listFundingCurrentRefundReceiptPage(
+  db: Pick<PoolClient, "query">,
+  input: {
+    operationId: string;
+    segmentId: string;
+    cursor: FundingRefundReceiptCursor | null;
+    limit: number;
+  },
+): Promise<{
+  rows: readonly FundingObservationRow[];
+  nextCursor: FundingRefundReceiptCursor | null;
+}> {
+  if (
+    !Number.isSafeInteger(input.limit) ||
+    input.limit < 1 ||
+    input.limit > 2147483646
+  )
+    throw new Error("Current refund receipts require a bounded page");
+  const { rows } = await db.query<FundingObservationDbRow>(
+    input.cursor
+      ? FUNDING_CURRENT_REFUND_NEXT_PAGE_SQL
+      : FUNDING_CURRENT_REFUND_FIRST_PAGE_SQL,
+    [
+      input.operationId,
+      input.segmentId,
+      input.limit + 1,
+      ...(input.cursor
+        ? [
+            input.cursor.networkId,
+            input.cursor.transactionHash,
+            input.cursor.eventIndex,
+          ]
+        : []),
+    ],
+  );
+  const page = rows.slice(0, input.limit).map(mapObservation);
+  const last = page.at(-1);
+  return {
+    rows: page,
+    nextCursor:
+      rows.length > input.limit && last
+        ? {
+            networkId: last.networkId,
+            transactionHash: last.txHash,
+            eventIndex: last.eventIndex,
+          }
+        : null,
+  };
+}
+
+export const FUNDING_REFUND_COMPLETION_PROOF_SQL = `
+  select metadata->'relayRefundCompletionProofs'->$4::text as proof
+  from funding_observations
+  where id=$1::uuid and operation_id=$2::uuid and segment_id=$3::uuid
+    and kind='refund_credit' and canonical and finality_status='finalized'
+    and metadata->>'observerId'=$5`;
+
+/** Exact immutable proof key only; never return the accumulated audit map. */
+export async function readFundingRefundCompletionProof(
+  db: Pick<PoolClient, "query">,
+  input: {
+    observationId: string;
+    operationId: string;
+    segmentId: string;
+    fingerprint: string;
+    observerId: string;
+  },
+): Promise<unknown> {
+  const result = await db.query<{ proof: unknown }>(
+    FUNDING_REFUND_COMPLETION_PROOF_SQL,
+    [
+      input.observationId,
+      input.operationId,
+      input.segmentId,
+      input.fingerprint,
+      input.observerId,
+    ],
+  );
+  return result.rows[0]?.proof ?? null;
+}
+
 export async function listFundingRefundManifestReceipts(
   db: Pick<PoolClient, "query">,
   input: {
@@ -2009,13 +2136,31 @@ export async function listFundingRefundManifestReceipts(
     transactionHashes: readonly string[];
   },
 ): Promise<readonly FundingObservationRow[]> {
-  const hashes = [...new Set(input.transactionHashes)];
-  if (hashes.length === 0) return [];
-  const result = await db.query<FundingObservationDbRow>(
-    FUNDING_REFUND_MANIFEST_RECEIPTS_SQL,
-    [input.operationId, input.segmentId, input.networkId, hashes],
-  );
-  return result.rows.map(mapObservation);
+  const aliases = new Set<string>(),
+    exact = new Set<string>();
+  for (const transactionHash of input.transactionHashes) {
+    const canonical = canonicalFundingPhysicalTransactionHash({
+      networkId: input.networkId,
+      transactionHash,
+    });
+    if (canonical) aliases.add(canonical);
+    else exact.add(transactionHash);
+  }
+  const receipts: FundingObservationRow[] = [];
+  for (const [sql, hashes] of [
+    [FUNDING_REFUND_EVM_MANIFEST_RECEIPTS_SQL, aliases],
+    [FUNDING_REFUND_MANIFEST_RECEIPTS_SQL, exact],
+  ] as const) {
+    if (!hashes.size) continue;
+    const result = await db.query<FundingObservationDbRow>(sql, [
+      input.operationId,
+      input.segmentId,
+      input.networkId,
+      [...hashes],
+    ]);
+    receipts.push(...result.rows.map(mapObservation));
+  }
+  return receipts;
 }
 
 export async function hasFundingRefundOutsideProof(
@@ -2072,23 +2217,11 @@ export async function appendFundingRefundCompletionProof(
     args,
   );
   if (appended.rows.length === 1) return "appended";
-  const existing = await db.query<{ proof: unknown }>(
-    `
-    select metadata->'relayRefundCompletionProofs'->$4::text as proof
-    from funding_observations
-    where id=$1::uuid and operation_id=$2::uuid and segment_id=$3::uuid
-      and kind='refund_credit' and canonical and finality_status='finalized'
-      and metadata->>'observerId'=$5`,
-    [
-      input.observationId,
-      input.operationId,
-      input.segmentId,
-      fingerprint,
-      input.observerId,
-    ],
-  );
-  return existing.rows[0]?.proof != null &&
-    canonicalJsonEqual(existing.rows[0].proof, input.proof)
+  const existing = await readFundingRefundCompletionProof(db, {
+    ...input,
+    fingerprint,
+  });
+  return existing != null && canonicalJsonEqual(existing, input.proof)
     ? "replayed"
     : "conflict";
 }
@@ -2133,6 +2266,73 @@ export async function allocateFundingObservationInTransaction(
     assetId: input.assetId,
     decimals: input.assetDecimals,
   });
+  const replay = (row: FundingObservationDbRow) => {
+    const existing = mapObservation(row);
+    const sameAllocation =
+      existing.operationId === input.operationId &&
+      existing.segmentId === input.segmentId &&
+      existing.kind === input.kind &&
+      existing.assetId === canonicalInputAssetId &&
+      existing.assetDecimals === input.assetDecimals &&
+      existing.rawAmount === input.rawAmount &&
+      sameAccountAddress(
+        input.networkId,
+        existing.toAddress,
+        input.toAddress,
+      ) &&
+      (existing.fromAddress === null
+        ? input.fromAddress === null
+        : input.fromAddress !== null &&
+          sameAccountAddress(
+            input.networkId,
+            existing.fromAddress,
+            input.fromAddress,
+          ));
+    if (!sameAllocation)
+      throw new FundingPersistenceError(
+        "ambiguous_duplicate_observation",
+        "transfer is already allocated to a different funding operation",
+      );
+    return { observation: existing, replayed: true } as const;
+  };
+  const physicalHash = canonicalFundingPhysicalTransactionHash({
+    networkId: input.networkId,
+    transactionHash: input.txHash,
+  });
+  if (physicalHash !== null) {
+    // One EXISTING nonwaiting physical gate, then a fresh all-kind/all-state
+    // read. Taking this only in the insert trigger is too late to detect a
+    // retained differently-cased allocation. No O->E waiting lock is added.
+    await tryLockFundingPhysicalEvent(client, {
+      networkId: input.networkId,
+      transactionHash: physicalHash,
+      eventIndex: input.eventIndex,
+    });
+    const aliases = await client
+      .query<FundingObservationDbRow>(
+        fundingPhysicalObservationForUpdateSql(projection),
+        [input.networkId, physicalHash, input.eventIndex],
+      )
+      .catch((error: unknown) => {
+        // Truthful canonicality retractions intentionally need no insertion
+        // gate. Do not wait for their row after O or replay an unlocked stale
+        // canonical value: roll back and use the existing evidence retry.
+        if (
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          error.code === "55P03"
+        )
+          throw new FundingPhysicalEventBusyError();
+        throw error;
+      });
+    if (aliases.rows.length > 1)
+      throw new FundingPersistenceError(
+        "ambiguous_duplicate_observation",
+        "physical transfer has multiple retained allocations",
+      );
+    if (aliases.rows[0]) return replay(aliases.rows[0]);
+  }
   const { rows } = await client.query<FundingObservationDbRow>(
     `
       insert into funding_observations (
@@ -2170,7 +2370,7 @@ export async function allocateFundingObservationInTransaction(
       input.networkId,
       canonicalInputAssetId,
       input.assetDecimals,
-      input.txHash,
+      physicalHash ?? input.txHash,
       input.eventIndex,
       input.fromAddress == null
         ? null
@@ -2200,7 +2400,7 @@ export async function allocateFundingObservationInTransaction(
         and event_index = $3
       for update
     `,
-    [input.networkId, input.txHash, input.eventIndex],
+    [input.networkId, physicalHash ?? input.txHash, input.eventIndex],
   );
   const existingRow = existingResult.rows[0];
   if (!existingRow) {
@@ -2209,30 +2409,7 @@ export async function allocateFundingObservationInTransaction(
       "observation allocation conflict could not be resolved",
     );
   }
-  const existing = mapObservation(existingRow);
-  const sameAllocation =
-    existing.operationId === input.operationId &&
-    existing.segmentId === input.segmentId &&
-    existing.kind === input.kind &&
-    existing.assetId === canonicalInputAssetId &&
-    existing.assetDecimals === input.assetDecimals &&
-    existing.rawAmount === input.rawAmount &&
-    sameAccountAddress(input.networkId, existing.toAddress, input.toAddress) &&
-    (existing.fromAddress === null
-      ? input.fromAddress === null
-      : input.fromAddress !== null &&
-        sameAccountAddress(
-          input.networkId,
-          existing.fromAddress,
-          input.fromAddress,
-        ));
-  if (!sameAllocation) {
-    throw new FundingPersistenceError(
-      "ambiguous_duplicate_observation",
-      "transfer is already allocated to a different funding operation",
-    );
-  }
-  return { observation: existing, replayed: true };
+  return replay(existingRow);
 }
 
 export async function advanceFundingObservationFinalityInTransaction(

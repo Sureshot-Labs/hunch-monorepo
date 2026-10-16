@@ -7,6 +7,7 @@ import { relayHexV2ProtocolSchema } from "./order-contract.js";
 import { relayHexOrderId } from "./order-hash.js";
 import {
   BASE_USDC,
+  POLYGON_PUSD,
   POLYGON_USDC,
   RELAY_DEPOSITORY_V2,
   assertEvmActionGasWithinHardPolicy,
@@ -38,7 +39,8 @@ const protocolSchema = relayHexV2ProtocolSchema({
 export type RelayHypercoreInboundQuoteInput = Omit<
   RelayHypercoreQuoteInput,
   "sourceDex" | "destinationCurrency" | "destinationRefundRecipient"
->;
+> &
+  Readonly<{ sourceCurrency: string }>;
 
 /** Validate a native destination using the ordinary EVM source executor. This
  * function creates no operation/authority. The caller must independently prove
@@ -51,7 +53,11 @@ export function validateRelayHypercoreInboundQuote(
     recipient = address.parse(input.recipient);
   const sourceChainId = input.contracts.destinationChainId;
   const sourceChain = sourceChainId === 8453 ? "base" : "polygon";
-  const sourceCurrency = sourceChainId === 8453 ? BASE_USDC : POLYGON_USDC;
+  // Pinned by the selected source route, never inferred from the returned
+  // quote. pUSD and USDC on Polygon are distinct economic instruments.
+  const sourceCurrency = address.parse(input.sourceCurrency).toLowerCase();
+  const allowedCurrencies =
+    sourceChainId === 8453 ? [BASE_USDC] : [POLYGON_USDC, POLYGON_PUSD];
   if (
     ![137, 8453].includes(sourceChainId) ||
     input.contracts.destinationChain !== sourceChain ||
@@ -59,6 +65,8 @@ export function validateRelayHypercoreInboundQuote(
     input.contracts.evmSolvers.length === 0
   )
     throw new Error("native_inbound_source_contract_unsupported");
+  if (!allowedCurrencies.some((currency) => same(currency, sourceCurrency)))
+    throw new Error("native_inbound_source_currency_unsupported");
   const now = input.now.getTime(),
     deadline = input.deadline.getTime();
   const observedAt = input.contractsObservedAt.getTime();
@@ -221,7 +229,7 @@ export function validateRelayHypercoreInboundQuote(
     .reduce((sum, fee) => sum + BigInt(fee.amount.raw), 0n);
   if (feeRaw > feeCap || feeRaw >= sourceRaw)
     throw new Error("native_inbound_fee_cap_exceeded");
-  // Same USDC, different raw precision. The committed expected output also
+  // Registered USD stablecoins, different raw precision. Expected output also
   // bounds the route cost: a forged/omitted fee summary cannot hide a loss.
   // Do not use the slippage floor or add ETH/POL gas to this nominal-USDC cost.
   const expectedLossRaw8 = sourceRaw * 100n - expectedOutputRaw;

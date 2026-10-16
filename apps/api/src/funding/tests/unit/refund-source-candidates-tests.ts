@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   loadRefundSourceCandidatePage,
   matchRefundSourceEnvelope,
+  supportsRefundSourceEnvelope,
   REFUND_SOURCE_FIRST_PAGE_SQL,
   REFUND_SOURCE_NEXT_PAGE_SQL,
   type RefundSourceCandidateRow,
@@ -60,6 +61,29 @@ const row: RefundSourceCandidateRow = {
   provider_quote_ref_lookup_hmac: "d".repeat(64),
   lookup_key_version: 1,
 };
+
+test("EVM refund-source scanning excludes unsupported networks and mismatched envelopes", () => {
+  for (const networkId of ["evm:8453", "evm:137"])
+    assert.equal(
+      supportsRefundSourceEnvelope({
+        networkId,
+        asset: { ...asset, networkId },
+      }),
+      true,
+    );
+  for (const networkId of ["solana:mainnet", "hyperliquid:mainnet", "evm:1"])
+    assert.equal(
+      supportsRefundSourceEnvelope({
+        networkId,
+        asset: { ...asset, networkId },
+      }),
+      false,
+    );
+  assert.equal(
+    supportsRefundSourceEnvelope({ networkId: "evm:137", asset }),
+    false,
+  );
+});
 
 test("source enumeration preserves possible envelopes without asserting money movement", () => {
   assert.deepEqual(matchRefundSourceEnvelope(userId, event, row), {

@@ -24,10 +24,17 @@ function fixture(
     mode?: "exact_input" | "expected_output";
     lagMs?: number;
     cap?: string;
+    sourceDex?: "spot" | "";
   } = {},
 ) {
   const now = new Date();
-  const f = hypercorePlanTestFixture(now);
+  const f = hypercorePlanTestFixture(
+    now,
+    undefined,
+    undefined,
+    undefined,
+    options.sourceDex,
+  );
   const destination = f.input.destination;
   const calls: { path: string; body?: RelayQuoteRequest }[] = [];
   const chains = JSON.parse(
@@ -126,6 +133,37 @@ test("common Relay adapter requests native v2 and produces ordinary commit/reser
   assert.deepEqual(
     result.commitPlan.steps.map((step) => step.executorId),
     ["relay_hypercore_native_v1", "relay_hypercore_native_v1"],
+  );
+});
+
+test("perps recovery quotes the exact class selector and uses the same commit, source reservation and sign-only actions", async () => {
+  const { f, adapter, input, calls } = fixture({ sourceDex: "" });
+  const quote = await adapter.quoteHypercore(input);
+  assert.equal(
+    calls.find((call) => call.path === "/quote/v2")?.body?.originCurrency,
+    `0x${"0".repeat(32)}`,
+  );
+  assert.equal(
+    input.source.location.asset.assetId,
+    "0x6d1e7cde53ba9467b783cb7c530ce054",
+  );
+  const result = await buildRelayPlanningQuote({ ...f.input, quote });
+  assert.equal(result.commitPlan.reservations.length, 1);
+  assert.equal(
+    result.commitPlan.reservations[0].locationId,
+    input.source.location.locationId,
+  );
+  assert.equal(result.commitPlan.reservations[0].assetDecimals, 8);
+  assert.deepEqual(
+    result.commitPlan.steps.map((step) => step.executorId),
+    ["relay_hypercore_native_v1", "relay_hypercore_native_v1"],
+  );
+  await assert.rejects(
+    adapter.quoteHypercore({
+      ...input,
+      route: RELAY_ROUTE_SPECS["hypercore-spot-usdc-to-base-usdc"],
+    }),
+    /native quote binding/,
   );
 });
 
@@ -230,7 +268,11 @@ test("native specs preserve default funding policy; withdrawal uses a native acc
   const nativeRoutes = withdrawal.routes.filter(
     (route) => route.sourceAsset.networkId === "hyperliquid:mainnet",
   );
-  assert.equal(nativeRoutes.length, 1);
+  assert.equal(nativeRoutes.length, 2);
+  assert.deepEqual(
+    new Set(nativeRoutes.map((route) => route.sourceLocationPatternId)),
+    new Set(["hypercore-spot-usdc-v1", "hypercore-perps-usdc-v1"]),
+  );
   assert.equal(nativeRoutes[0].networkExecutorId, "relay_hypercore_native_v1");
   const nativeLocation = withdrawal.locations.find(
     (location) =>

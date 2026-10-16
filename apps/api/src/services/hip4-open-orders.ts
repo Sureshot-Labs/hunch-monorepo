@@ -12,6 +12,11 @@ const timestamp = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const wireOrder = z.object({
   coin: z.string(),
   oid: timestamp,
+  cloid: z
+    .string()
+    .regex(/^0x[0-9a-f]{32}$/iu)
+    .nullable()
+    .optional(),
   side: z.enum(["A", "B"]),
   limitPx: amount,
   sz: amount,
@@ -24,6 +29,12 @@ const wireOrder = z.object({
 export const hip4OpenOrderSchema = z
   .object({
     orderId: z.string().regex(/^\d+$/),
+    // Optional for stored v1 snapshots and orders created outside Hunch.
+    cloid: z
+      .string()
+      .regex(/^0x[0-9a-f]{32}$/u)
+      .nullable()
+      .optional(),
     coin: z.string(),
     marketId: z.string(),
     tokenId: z.string(),
@@ -77,6 +88,7 @@ export function projectHip4OpenOrders(
       seen.add(String(row.oid));
       return {
         orderId: String(row.oid),
+        cloid: row.cloid?.toLowerCase() ?? null,
         coin: row.coin,
         marketId: identity.marketId,
         tokenId: identity.sides[parsed.sideIndex].tokenId,

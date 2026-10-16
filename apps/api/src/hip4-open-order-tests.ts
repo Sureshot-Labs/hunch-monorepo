@@ -54,8 +54,16 @@ test("partial, duplicate, unsafe or inconsistent open orders are not turned into
     [{ ...wire, oid: Number.MAX_SAFE_INTEGER + 1 }],
     [{ ...wire, limitPx: "1.1" }],
     [{ ...wire, sz: "1.000001" }],
+    [{ ...wire, cloid: "not-a-client-order-id" }],
     [{ coin: wire.coin }],
   ]) {
     assert.throws(() => projectHip4OpenOrders("mainnet", rows, 2000));
+  }
+});
+test("open orders retain normalized exact CLOID while legacy and manual orders remain compatible", () => {
+  for (const cloid of [undefined, null, `0x${"AB".repeat(16)}`]) {
+    const item = projectHip4OpenOrders("mainnet", [{ ...wire, cloid }], 2000)
+      .items[0];
+    assert.equal(item.cloid, cloid?.toLowerCase() ?? null);
   }
 });

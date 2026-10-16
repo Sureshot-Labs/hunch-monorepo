@@ -1,6 +1,5 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { z as zod } from "zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { PolymarketFundingPredecessorUnresolvedError } from "../funding/preparation/polymarket-funding-commit-guard.js";
@@ -16,12 +15,7 @@ import {
   telegramContextBodySchema,
   telegramContextErrorResponseSchema,
   telegramContextSuccessResponseSchema,
-  telegramAppHandoffCommitResponseSchema,
-  telegramAppHandoffCommitRequestSchema,
-  telegramAppHandoffExecuteResponseSchema,
-  telegramAppHandoffProjectionResponseSchema,
-  telegramAppHandoffRequestSchema,
-  telegramAppHandoffResponseSchema,
+  telegramAppHandoffRouteSchemas,
   telegramGroupMembershipResponseSchema,
 } from "../schemas/telegram.js";
 import {
@@ -46,14 +40,16 @@ import {
   TelegramAppHandoffV2Error,
 } from "../services/telegram-app-handoff-v2.js";
 import { FundingPlanningRuntime } from "../funding/planner/runtime-service.js";
-import type { TelegramAppHandoffV2TradeVenue } from "../services/telegram-app-handoff-v2-contract.js";
+import {
+  isTelegramAppHandoffV2ConsumerVenue,
+  type TelegramAppHandoffV2ConsumerVenue,
+} from "../services/telegram-app-handoff-v2-contract.js";
 import { resolveActiveTelegramAccountLink } from "../services/telegram-account-link.js";
 import {
   executeCommittedTelegramAppHandoff,
-  isTelegramAppHandoffV2TradeVenue,
   isTelegramSealedAppHandoffVenue,
   loadTelegramAppHandoffProjection,
-  matchesTelegramAppHandoffV2CurrentScope,
+  telegramAppHandoffV2CurrentScope,
   resolveTelegramAppHandoffCurrentScope,
   telegramVenueFromSealedHandoffSnapshot,
 } from "../services/telegram-bot-trading.js";
@@ -105,7 +101,7 @@ function readTelegramAppHandoffV2RouteScope(
   handoff: TelegramAppHandoff,
 ): Readonly<{
   action: "buy" | "sell";
-  venue: TelegramAppHandoffV2TradeVenue;
+  venue: TelegramAppHandoffV2ConsumerVenue;
 }> | null {
   const generation = telegramAppHandoffPlanGeneration(handoff.planSnapshot);
   if (generation === "unsupported") {
@@ -123,7 +119,7 @@ function readTelegramAppHandoffV2RouteScope(
   if (
     (action !== "buy" && action !== "sell") ||
     !venue ||
-    !isTelegramAppHandoffV2TradeVenue(venue)
+    !isTelegramAppHandoffV2ConsumerVenue(venue)
   ) {
     throw new TelegramAppHandoffError("venue_unsupported");
   }
@@ -290,16 +286,6 @@ async function registerTelegramRoutes(
     } catch (error) {
       return sendHandoffError(reply, error);
     }
-  };
-
-  const telegramAppHandoffResponses = {
-    200: telegramAppHandoffResponseSchema,
-    400: telegramContextErrorResponseSchema,
-    401: authErrorResponseSchema,
-    403: telegramContextErrorResponseSchema,
-    404: telegramContextErrorResponseSchema,
-    409: telegramContextErrorResponseSchema,
-    503: telegramContextErrorResponseSchema,
   };
 
   z.post(
@@ -471,10 +457,7 @@ async function registerTelegramRoutes(
       path,
       {
         preHandler: authPreHandler,
-        schema: {
-          body: telegramAppHandoffRequestSchema,
-          response: telegramAppHandoffResponses,
-        },
+        schema: telegramAppHandoffRouteSchemas[path],
       },
       async (request, reply) => {
         const identity = await resolveHandoffIdentity(
@@ -515,13 +498,7 @@ async function registerTelegramRoutes(
     "/telegram/app-handoffs/commit",
     {
       preHandler: authPreHandler,
-      schema: {
-        body: telegramAppHandoffCommitRequestSchema,
-        response: {
-          ...telegramAppHandoffResponses,
-          200: telegramAppHandoffCommitResponseSchema,
-        },
-      },
+      schema: telegramAppHandoffRouteSchemas["/telegram/app-handoffs/commit"],
     },
     async (request, reply) => {
       const identity = await resolveHandoffIdentity(
@@ -547,6 +524,12 @@ async function registerTelegramRoutes(
             telegramUserId: identity.telegramUserId,
             venue: v2Scope.venue,
             executionContractVersion: 2,
+            nativeHandoff: {
+              userId: identity.userId,
+              tradeIntentId: handoff.tradeIntentId,
+              authorityFingerprint: handoff.authorityFingerprint,
+              policyRevision: handoff.policyRevision,
+            },
           });
           if (
             !scope ||
@@ -557,11 +540,7 @@ async function registerTelegramRoutes(
           }
           try {
             return await materializeTelegramAppHandoffV2Funding({
-              assertCurrentScope: async (sealed) =>
-                matchesTelegramAppHandoffV2CurrentScope({
-                  db: sealed.db,
-                  sealed,
-                }),
+              assertCurrentScope: telegramAppHandoffV2CurrentScope,
               currentAuthorityFingerprint: scope.authorityFingerprint,
               currentPolicyRevision: scope.policyRevision,
               db: pool,
@@ -587,7 +566,11 @@ async function registerTelegramRoutes(
         const venue = telegramVenueFromSealedHandoffSnapshot(
           handoff.planSnapshot,
         );
-        if (!venue || !isTelegramSealedAppHandoffVenue(venue)) {
+        if (
+          !venue ||
+          venue === "hyperliquid" ||
+          !isTelegramSealedAppHandoffVenue(venue)
+        ) {
           throw new TelegramAppHandoffError("venue_unsupported");
         }
         const scope = await resolveTelegramAppHandoffCurrentScope({
@@ -615,16 +598,8 @@ async function registerTelegramRoutes(
     "/telegram/app-handoffs/projection",
     {
       preHandler: authPreHandler,
-      schema: {
-        body: telegramAppHandoffRequestSchema,
-        response: {
-          ...telegramAppHandoffResponses,
-          200: zod.union([
-            telegramAppHandoffResponseSchema,
-            telegramAppHandoffProjectionResponseSchema,
-          ]),
-        },
-      },
+      schema:
+        telegramAppHandoffRouteSchemas["/telegram/app-handoffs/projection"],
     },
     async (request, reply) => {
       const identity = await resolveHandoffIdentity(
@@ -676,13 +651,7 @@ async function registerTelegramRoutes(
     "/telegram/app-handoffs/execute",
     {
       preHandler: authPreHandler,
-      schema: {
-        body: telegramAppHandoffRequestSchema,
-        response: {
-          ...telegramAppHandoffResponses,
-          200: telegramAppHandoffExecuteResponseSchema,
-        },
-      },
+      schema: telegramAppHandoffRouteSchemas["/telegram/app-handoffs/execute"],
     },
     async (request, reply) => {
       const identity = await resolveHandoffIdentity(
@@ -714,6 +683,12 @@ async function registerTelegramRoutes(
               telegramUserId: identity.telegramUserId,
               venue: v2Scope.venue,
               executionContractVersion: 2,
+              nativeHandoff: {
+                userId: identity.userId,
+                tradeIntentId: handoff.tradeIntentId,
+                authorityFingerprint: handoff.authorityFingerprint,
+                policyRevision: handoff.policyRevision,
+              },
             });
             if (
               !scope ||
@@ -740,7 +715,11 @@ async function registerTelegramRoutes(
         const venue = telegramVenueFromSealedHandoffSnapshot(
           handoff.planSnapshot,
         );
-        if (!venue || !isTelegramSealedAppHandoffVenue(venue)) {
+        if (
+          !venue ||
+          venue === "hyperliquid" ||
+          !isTelegramSealedAppHandoffVenue(venue)
+        ) {
           throw new TelegramAppHandoffError("venue_unsupported");
         }
         const scope = await resolveTelegramAppHandoffCurrentScope({

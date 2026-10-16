@@ -13,6 +13,7 @@ import {
   fundingReconciliationBatchLimit,
   type FundingReconciliationBatchOptions,
   type FundingReconciliationBatchResult,
+  type FundingEvidenceWorkContext,
 } from "../reconciliation/funding-reducer.js";
 import { FundingStepReceiptReconciliationDriver } from "../execution/step-receipt-reconciler.js";
 import { inspectNativeFundingSend } from "../execution/hypercore-send-receipt.js";
@@ -30,6 +31,8 @@ import { observeRelayHypercoreDestinationReceipts } from "../../funding-provider
 import { isHypercoreFundingNetwork } from "../domain/hypercore-identity.js";
 import { RelayOwnedRefundObserver } from "../reconciliation/relay-owned-refund-observer.js";
 import { pollRelayRefundCanonicalWatch } from "../reconciliation/relay-refund-canonical-watch.js";
+import { reconcileRelayExactRefundReceipts } from "../reconciliation/relay-exact-refund-runtime.js";
+import { fundingEvidenceReadDeadline } from "../reconciliation/funding-evidence-budget.js";
 import { runTelegramRouterContinuation } from "../reconciliation/telegram-router-continuation.js";
 import {
   runLimitlessTradeAttemptReconciliationBatch,
@@ -487,6 +490,7 @@ export async function runFundingReconciliationJob(
     const liveReceiveObservation = await receiveObserver.pollBatch(pool, {
       limit: options.limit ?? 25,
       minimumPollIntervalMs: options.receivePollDelayMs ?? 10_000,
+      classificationRetryDelayMs: options.receivePollDelayMs ?? 10_000,
       now: options.now,
     });
     const classificationRetry =
@@ -549,7 +553,11 @@ export async function runFundingReconciliationJob(
     relayReferenceCodec ? { referenceCodec: relayReferenceCodec } : {},
   );
   const relayRefundObserver = relayReferenceCodec
-    ? new RelayOwnedRefundObserver(relayReferenceCodec)
+    ? new RelayOwnedRefundObserver(
+        relayReferenceCodec,
+        undefined,
+        transactionCodec ?? undefined,
+      )
     : null;
   const resolvePrivyReference =
     privyReferenceResolver ??
@@ -627,33 +635,56 @@ export async function runFundingReconciliationJob(
   const pollRefundCanonical = async (
     operationId: string,
     now: Date,
-    context?: Readonly<{ deadlineMs: number }>,
+    context?: Readonly<{ deadlineMs: number; progressToken?: string }>,
   ) => {
     // Share the existing lease budget; leave half the remaining time for commit
     // and reduction. No parallel lease, timer, financial queue or new policy.
     const started = Date.now();
-    const deadlineMs =
-      started +
-      Math.max(
-        0,
-        ((context?.deadlineMs ??
-          started + (options.leaseSeconds ?? 30) * 1000) -
-          started) /
-          2,
-      );
+    const deadlineMs = fundingEvidenceReadDeadline(
+      context?.deadlineMs ?? started + (options.leaseSeconds ?? 30) * 1000,
+      started,
+    );
     return pollRelayRefundCanonicalWatch(pool, {
       operationId,
       now,
       limit: fundingReconciliationBatchLimit(options.limit),
       deadlineMs,
+      ...(relayReferenceCodec && context?.progressToken
+        ? {
+            publication: {
+              work: {
+                progressToken: context.progressToken,
+                deadlineMs: context.deadlineMs,
+                limit: fundingReconciliationBatchLimit(options.limit),
+              },
+              referenceCodec: relayReferenceCodec,
+              transactionReferenceCodec: transactionCodec ?? undefined,
+            },
+          }
+        : {}),
     });
   };
-  const pollDestination = async (operationId: string, now: Date) => {
+  const pollDestination = async (
+    operationId: string,
+    now: Date,
+    work?: FundingEvidenceWorkContext,
+  ) => {
     const [direct, ownedRoute, refund] = await Promise.all([
       directIngressObserver.pollOperation(pool, operationId, now),
       ownedRouteObserver.pollOperation(pool, operationId, now),
-      relayRefundObserver?.pollOperation(pool, operationId, now) ??
-        Promise.resolve({ refundsPolled: 0, refundSatisfied: false }),
+      relayRefundObserver?.pollOperation(
+        pool,
+        operationId,
+        now,
+        work
+          ? {
+              work: {
+                ...work,
+                limit: fundingReconciliationBatchLimit(options.limit),
+              },
+            }
+          : undefined,
+      ) ?? Promise.resolve({ refundsPolled: 0, refundSatisfied: false }),
     ]);
     return {
       destinationsPolled:
@@ -684,16 +715,24 @@ export async function runFundingReconciliationJob(
       apiKey: relay.apiKey,
       timeoutMs: relay.timeoutMs,
     });
+    const relayCodec = createRelayReferenceCodec(codecConfig);
     const driver = new RelayReconciliationDriver(
       relayClient,
-      createRelayReferenceCodec(codecConfig),
+      relayCodec,
       createRelayDepositAddressCodec(codecConfig),
-      (db, input) =>
-        reconcileRelayDestinationReceipts(
+      async (db, input) => {
+        await reconcileRelayDestinationReceipts(
           db,
           {
             ...input,
-            referenceCodec: createRelayReferenceCodec(codecConfig),
+            referenceCodec: relayCodec,
+            transactionReferenceCodec: transactionCodec,
+            work: input.work
+              ? {
+                  ...input.work,
+                  limit: fundingReconciliationBatchLimit(options.limit),
+                }
+              : undefined,
           },
           (observation) =>
             isHypercoreFundingNetwork(observation.asset.networkId)
@@ -703,14 +742,28 @@ export async function runFundingReconciliationJob(
                   observation,
                 )
               : observeRelayErc20DestinationReceipts(observation),
-        ),
+        );
+      },
+      async (db, input) => {
+        await reconcileRelayExactRefundReceipts(db, relayClient, {
+          ...input,
+          referenceCodec: relayCodec,
+          transactionReferenceCodec: transactionCodec,
+          work: input.work
+            ? {
+                ...input.work,
+                limit: fundingReconciliationBatchLimit(options.limit),
+              }
+            : undefined,
+        });
+      },
     );
     result = await runFundingReconciliationBatch(pool, {
       ...options,
       recoverStopped: true,
       ...evidencePollers,
-      providerPoll: (operationId, now) =>
-        driver.pollOperation(pool, operationId, now),
+      providerPoll: (operationId, now, work) =>
+        driver.pollOperation(pool, operationId, now, work),
       destinationPoll: pollDestination,
       refundCanonicalPoll: pollRefundCanonical,
     });

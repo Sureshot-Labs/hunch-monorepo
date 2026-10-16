@@ -10,12 +10,14 @@ import {
 } from "../domain/asset-identity.js";
 import type { JsonValue } from "../domain/types.js";
 import type { DirectIngressObservationVariant } from "../reconciliation/direct-ingress-observer.js";
-import { canonicalFundingReceiveObserverId } from "./canonical-receive-capabilities.js";
+import {
+  canonicalFundingReceiveObserverId,
+  EVM_FUNDING_RECEIVE_CONFIRMATIONS,
+} from "./canonical-receive-capabilities.js";
 import { fundingSidecarRuntimeConfig } from "../runtime/sidecar-runtime-config.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
-const EXTERNAL_INGRESS_CONFIRMATIONS = 2n;
 const MAX_BLOCK_RANGE = 2_000n;
 const learnedBlockRangeByRpcUrl = new Map<string, bigint>();
 
@@ -84,7 +86,7 @@ function withEventCursor(
       payload: {
         ...variant.observation.payload,
         eventCursorBlock: blockNumber.toString(),
-        eventConfirmations: Number(EXTERNAL_INGRESS_CONFIRMATIONS),
+        eventConfirmations: Number(EVM_FUNDING_RECEIVE_CONFIRMATIONS),
         eventIdentity: "evm_erc20_transfer_v1",
       } as JsonRecord,
     },
@@ -312,8 +314,8 @@ export async function scanFundingReceiveCanonicalEventBatch(
       }
       const latestBlock = await head;
       const safeHead =
-        latestBlock >= EXTERNAL_INGRESS_CONFIRMATIONS - 1n
-          ? latestBlock - (EXTERNAL_INGRESS_CONFIRMATIONS - 1n)
+        latestBlock >= EVM_FUNDING_RECEIVE_CONFIRMATIONS - 1n
+          ? latestBlock - (EVM_FUNDING_RECEIVE_CONFIRMATIONS - 1n)
           : 0n;
       let maximumRange =
         learnedBlockRangeByRpcUrl.get(first.network.rpcUrl) ?? MAX_BLOCK_RANGE;

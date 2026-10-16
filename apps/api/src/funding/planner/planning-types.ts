@@ -42,6 +42,10 @@ export function commitPlanRunsWithoutUserWalletAction(
       step.executorId !== RELAY_HYPERCORE_EXECUTOR &&
       step.normalizedAction.handoffKind !== RELAY_HYPERCORE_AUTH &&
       step.normalizedAction.handoffKind !== RELAY_HYPERCORE_SEND &&
+      // Provider-paid gas does not authorize a Deposit Wallet transfer. The
+      // same client boundary already used for Safe handoffs must carry it.
+      step.normalizedAction.handoffKind !==
+        "polymarket_deposit_wallet_transfer" &&
       step.normalizedAction.handoffKind !== "polymarket_safe_transfer",
   );
 }

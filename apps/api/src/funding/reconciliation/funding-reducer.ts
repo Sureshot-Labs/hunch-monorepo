@@ -1,5 +1,6 @@
 import { tx, type Pool, type PoolClient } from "@hunch/infra";
 import { recordWithdrawalCompletionNotification } from "./withdrawal-completion-notification.js";
+import { fundingPhysicalEventIsBusy } from "../persistence/funding-physical-event-gate.js";
 import { exactRefundWatchPending } from "./relay-refund-watch-state.js";
 import { closeExpiredSafeFundingPreparationsInTransaction } from "../execution/safe-funding-submission.js";
 import { closeExpiredEmbeddedFundingPreparationsInTransaction } from "../execution/embedded-funding-submission.js";
@@ -24,7 +25,7 @@ import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle
 import {
   fundingReservationHoldSql,
   fundingStartedSourceActionHoldSql,
-  nativeSourceDebitPendingSql,
+  fundingPhysicalSourcePendingSql,
 } from "../persistence/source-reservation-hold.js";
 import { DELEGATED_PROVIDER_REPLAY_MS } from "../execution/delegated-funding-recovery-policy.js";
 import {
@@ -253,7 +254,7 @@ async function releaseSourceReservationsAfterEvidence(
         and reservation.segment_id = any($2::uuid[])
         and reservation.mode = 'subtract_available'
         and reservation.state = 'active'
-        and not ${nativeSourceDebitPendingSql("reservation")}
+        and not ${fundingPhysicalSourcePendingSql("reservation")}
       for update of reservation
     `,
     [operationId, segmentIds],
@@ -366,7 +367,7 @@ async function releaseTerminalReservations(
       where operation_id = $1
         and state = 'active'
         and mode <> 'settled_for_consumer'
-        and not ${nativeSourceDebitPendingSql("balance_reservations")}
+        and not ${fundingPhysicalSourcePendingSql("balance_reservations")}
       for update
     `,
     [operationId],
@@ -1094,6 +1095,13 @@ export async function reduceFundingOperation(
   );
 }
 
+/** Existing job lease identity/budget for bounded derived evidence work. This
+ * is not a second lease and cannot authorize submission or financial effects. */
+export type FundingEvidenceWorkContext = Readonly<{
+  progressToken: string;
+  deadlineMs: number;
+}>;
+
 export type FundingReconciliationBatchOptions = Readonly<{
   workerId: string;
   concurrency?: number;
@@ -1111,6 +1119,7 @@ export type FundingReconciliationBatchOptions = Readonly<{
   providerPoll?: (
     operationId: string,
     now: Date,
+    context?: FundingEvidenceWorkContext,
   ) => Promise<Readonly<{ requestsPolled: number }>>;
   receiptPoll?: (
     operationId: string,
@@ -1124,11 +1133,12 @@ export type FundingReconciliationBatchOptions = Readonly<{
   refundCanonicalPoll?: (
     operationId: string,
     now: Date,
-    context?: Readonly<{ deadlineMs: number }>,
+    context?: Readonly<{ deadlineMs: number; progressToken?: string }>,
   ) => Promise<Readonly<{ checked: number }>>;
   destinationPoll?: (
     operationId: string,
     now: Date,
+    context?: FundingEvidenceWorkContext,
   ) => Promise<
     Readonly<{
       destinationsPolled: number;
@@ -1559,6 +1569,12 @@ function summarizeError(error: unknown): Readonly<{
   code: string;
   summary: string;
 }> {
+  if (fundingPhysicalEventIsBusy(error))
+    return {
+      code: "funding_physical_event_busy",
+      summary:
+        "Physical evidence is busy; the current evidence pass will retry",
+    };
   const fundingError = error as Partial<FundingPersistenceError>;
   return {
     code:
@@ -1636,6 +1652,7 @@ export async function pollFundingReconciliationEvidence(
     terminalReceiptWatch?: boolean;
     terminalRelayRefundWatch?: boolean;
     deadlineMs?: number;
+    progressToken?: string;
     awaitingUnbroadcastActionReport?: boolean;
     now: Date;
     providerPoll?: FundingReconciliationBatchOptions["providerPoll"];
@@ -1644,7 +1661,12 @@ export async function pollFundingReconciliationEvidence(
     refundCanonicalPoll?: FundingReconciliationBatchOptions["refundCanonicalPoll"];
     destinationPoll?: FundingReconciliationBatchOptions["destinationPoll"];
   }>,
-): Promise<Readonly<{ terminalReceiptPollFailed: boolean }>> {
+): Promise<
+  Readonly<{
+    terminalReceiptPollFailed: boolean;
+    terminalReceiptPollBusy?: boolean;
+  }>
+> {
   const terminalReceiptWatch = input.terminalReceiptWatch === true;
   const receiptWatch =
     terminalReceiptWatch || input.recentFailedReceiptWatch === true;
@@ -1666,6 +1688,15 @@ export async function pollFundingReconciliationEvidence(
     return { terminalReceiptPollFailed: false };
   }
   let terminalReceiptPollFailed = false;
+  let terminalReceiptPollBusy = false;
+  const receiptPollResult = () => ({
+    terminalReceiptPollFailed,
+    ...(terminalReceiptPollBusy ? { terminalReceiptPollBusy: true } : {}),
+  });
+  const work =
+    input.progressToken && input.deadlineMs !== undefined
+      ? { progressToken: input.progressToken, deadlineMs: input.deadlineMs }
+      : undefined;
   // Known refund identities do not need refreshed Relay references or source
   // receipts. Give their canonical check the existing lease before either
   // external refresh can consume it. New/replacement discovery stays below.
@@ -1674,13 +1705,14 @@ export async function pollFundingReconciliationEvidence(
     input.now,
     input.deadlineMs === undefined
       ? undefined
-      : { deadlineMs: input.deadlineMs },
+      : { deadlineMs: input.deadlineMs, ...work },
   );
   if (receiptWatch) {
     try {
       await input.receiptPoll?.(input.operationId, input.now);
-    } catch {
+    } catch (error) {
       terminalReceiptPollFailed = true;
+      terminalReceiptPollBusy = fundingPhysicalEventIsBusy(error);
       // A receipt RPC/integrity failure must not consume the bounded local
       // canonical refund watch. Continue to the authoritative chain scan.
     }
@@ -1688,7 +1720,7 @@ export async function pollFundingReconciliationEvidence(
     await input.receiptPoll?.(input.operationId, input.now);
   }
   if (input.state.status === "awaiting_user") {
-    return { terminalReceiptPollFailed };
+    return receiptPollResult();
   }
   // A terminal refund remains under a bounded canonical watch. Refresh Relay
   // first so a replacement refund transaction hash revealed after a reorg is
@@ -1698,14 +1730,14 @@ export async function pollFundingReconciliationEvidence(
   // This refresh is therefore best-effort for terminal evidence only.
   if (terminalRelayRefundWatch) {
     try {
-      await input.providerPoll?.(input.operationId, input.now);
+      await input.providerPoll?.(input.operationId, input.now, work);
     } catch {
       // Continue to the authoritative local refund scan and bounded reduction.
     }
   }
   const [, destination] = await Promise.all([
     input.postconditionPoll?.(input.operationId, input.now),
-    input.destinationPoll?.(input.operationId, input.now),
+    input.destinationPoll?.(input.operationId, input.now, work),
   ]);
   if (
     !RECONCILIATION_ACTIVE_STATUSES.has(input.state.status) &&
@@ -1714,15 +1746,15 @@ export async function pollFundingReconciliationEvidence(
       input.recoveryMode === "automatic_evidence"
     )
   ) {
-    return { terminalReceiptPollFailed };
+    return receiptPollResult();
   }
   // Finalized source receipts plus the exact owned-destination balance delta
   // are authoritative completion evidence. Provider status is only needed
   // while that destination evidence is still absent.
   if (!terminalRelayRefundWatch && !destination?.destinationSatisfied) {
-    await input.providerPoll?.(input.operationId, input.now);
+    await input.providerPoll?.(input.operationId, input.now, work);
   }
-  return { terminalReceiptPollFailed };
+  return receiptPollResult();
 }
 
 async function loadFundingOperationState(
@@ -2187,6 +2219,7 @@ async function processLease(
     }
     const pollEvidence = await pollFundingReconciliationEvidence({
       deadlineMs: evidenceDeadlineMs,
+      progressToken: lease.leaseToken,
       operationId: lease.operationId,
       state: operationBeforePoll.state,
       recoveryMode: operationBeforePoll.recoveryMode,
@@ -2210,6 +2243,7 @@ async function processLease(
       exactWatchMetadata.rows[0]?.support_metadata,
     );
     if (pollEvidence.terminalReceiptPollFailed) {
+      const receiptBusy = pollEvidence.terminalReceiptPollBusy === true;
       const terminalReceiptVerificationWindow = await pool.query<{
         expired: boolean;
       }>(
@@ -2246,10 +2280,19 @@ async function processLease(
         leaseToken: lease.leaseToken,
         result: {
           kind: "error",
-          dueAt: new Date(options.now.getTime() + options.retryDelayMs),
-          errorCode: "terminal_relay_receipt_verification_unavailable",
-          errorSummary:
-            "terminal action receipt canonicality verification was unavailable",
+          // Keep the existing terminal verification bound: repeated resource
+          // contention must not extend its watch or create an infinite fast
+          // loop. Invalidation callbacks have already run before this retry.
+          dueAt: new Date(
+            options.now.getTime() +
+              (receiptBusy ? options.pollDelayMs : options.retryDelayMs),
+          ),
+          errorCode: receiptBusy
+            ? "funding_physical_event_busy"
+            : "terminal_relay_receipt_verification_unavailable",
+          errorSummary: receiptBusy
+            ? "Terminal physical evidence is busy; retry canonical verification"
+            : "terminal action receipt canonicality verification was unavailable",
           deadLetter,
         },
         now: options.now,
@@ -2580,7 +2623,12 @@ async function processLease(
       leaseToken: lease.leaseToken,
       result: {
         kind: "error",
-        dueAt: new Date(options.now.getTime() + options.retryDelayMs),
+        dueAt: new Date(
+          options.now.getTime() +
+            (fundingPhysicalEventIsBusy(error)
+              ? options.pollDelayMs
+              : options.retryDelayMs),
+        ),
         errorCode: detail.code,
         errorSummary: detail.summary,
         deadLetter,
@@ -2593,12 +2641,18 @@ async function processLease(
 
 /** Persist only known internal codes, never provider messages/URLs/references. */
 export function fundingEvidenceRepairErrorCode(error: unknown): string {
+  if (fundingPhysicalEventIsBusy(error))
+    return "evidence_repair_physical_event_busy";
   if (error instanceof FundingPersistenceError)
     return `evidence_repair_${error.code}`;
   if (error instanceof AggregateError) {
     for (const nested of error.errors) {
       const code = fundingEvidenceRepairErrorCode(nested);
-      if (code !== "evidence_repair_failed") return code;
+      if (
+        code !== "evidence_repair_failed" &&
+        code !== "evidence_repair_physical_event_busy"
+      )
+        return code;
     }
   }
   return "evidence_repair_failed";
@@ -2709,6 +2763,7 @@ export async function recoverStoppedFundingOperations(
     try {
       await options.refundCanonicalPoll?.(job.operation_id, now, {
         deadlineMs: claimStartedAtMs + 120_000,
+        progressToken: job.lease_token,
       });
     } catch (error) {
       failed = true;
@@ -2723,10 +2778,18 @@ export async function recoverStoppedFundingOperations(
       ["destination", options.destinationPoll],
     ] as const) {
       try {
-        await poll?.(job.operation_id, now);
+        await poll?.(job.operation_id, now, {
+          progressToken: job.lease_token,
+          deadlineMs: claimStartedAtMs + 120_000,
+        });
       } catch (error) {
         failed = true;
-        if (stage !== "provider" && !verificationUnavailable) {
+        if (
+          stage !== "provider" &&
+          (!verificationUnavailable ||
+            (fundingPhysicalEventIsBusy(verificationFailure) &&
+              !fundingPhysicalEventIsBusy(error)))
+        ) {
           verificationUnavailable = true;
           verificationFailure = error;
           verificationStage = stage;

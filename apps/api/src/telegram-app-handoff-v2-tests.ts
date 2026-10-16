@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { hip4Identity } from "@hunch/shared";
+import { HYPERCORE_MAINNET_USDC } from "./funding/domain/hypercore-identity.js";
 
 import type {
   FundingDiscoveryRequest,
@@ -32,6 +34,7 @@ import {
 } from "./schemas/limitless-private.js";
 import { canonicalJsonHash } from "./funding/persistence/canonical.js";
 import { TelegramTradeShortfallFundingService } from "./services/telegram-trade-shortfall-funding.js";
+import { buildTelegramNativeTradeShortfallRequest } from "./services/telegram-native-trade-shortfall.js";
 
 const POLYGON_PUSD = {
   assetId: "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
@@ -1578,4 +1581,323 @@ assert.deepEqual(
   "a usable owned route must win over an optional manual Deposit",
 );
 
-console.log("telegram app handoff v2 tests passed");
+// Internal native consumer parsing is distinct from product activation. The
+// same builders/readers retain exact cash8/outcome5 IOC economics, never the
+// legacy amount-USD/FOK receive-floor representation.
+const nativeIdentity = hip4Identity("mainnet", 123);
+const nativeControllerRef = "00000000-0000-4000-8000-000000000123";
+const nativeTrade = {
+  action: "buy",
+  controllerWalletAddress: trade.controllerWalletAddress,
+  eventId: nativeIdentity.marketId,
+  marketId: nativeIdentity.marketId,
+  outcomeTokenId: nativeIdentity.sides[0].tokenId,
+  side: "YES",
+  venue: "hyperliquid",
+  nativeTrade: {
+    version: "hip4-ioc-v1",
+    environment: "mainnet",
+    marketId: nativeIdentity.marketId,
+    outcomeTokenId: nativeIdentity.sides[0].tokenId,
+    outcomeSide: "YES",
+    controllerWalletRef: nativeControllerRef,
+    side: "BUY",
+    timeInForce: "Ioc",
+    quantity: "20",
+    limitPrice: "0.5",
+    consentedDebitCapRaw: "1000000000",
+  },
+};
+const nativeDirect = buildTelegramAppHandoffV2DirectTradePlan({
+  controllerWalletAddress: trade.controllerWalletAddress,
+  trade: nativeTrade,
+});
+assert.deepEqual(parseTelegramAppHandoffV2Plan(nativeDirect), nativeDirect);
+const nativeSellTrade = {
+  ...nativeTrade,
+  action: "sell",
+  nativeTrade: {
+    ...nativeTrade.nativeTrade,
+    side: "SELL",
+    consentedDebitCapRaw: "2000000",
+  },
+};
+assert.equal(
+  buildTelegramAppHandoffV2DirectTradePlan({
+    controllerWalletAddress: trade.controllerWalletAddress,
+    trade: nativeSellTrade,
+  }).trade.action,
+  "sell",
+);
+const nativeSpend = { asset: HYPERCORE_MAINNET_USDC, raw: "1000000000" };
+const nativeRequest: FundingDiscoveryRequest = {
+  ...request,
+  controllerWalletRef: nativeControllerRef,
+  requestedDestinationAmount: nativeSpend,
+  marketContextId: nativeIdentity.sides[0].tokenId.slice("hyperliquid:".length),
+  consumerIntent: {
+    marketContextId: nativeIdentity.sides[0].tokenId.slice(
+      "hyperliquid:".length,
+    ),
+    marketId: nativeIdentity.marketId,
+    side: "BUY",
+    spend: nativeSpend,
+    venueId: "hyperliquid",
+  },
+};
+const nativeConsumer = nativeRequest.consumerIntent;
+assert.ok(nativeConsumer);
+const nativeProjection: IntentLiquidityProjection = {
+  ...generic,
+  sourceOptions: [
+    {
+      ...evmSource,
+      maximumSourceRaw: "10000000",
+      quotedSourceAmount: { asset: BASE_USDC, raw: "10000000" },
+      expectedDestination: nativeSpend,
+      minimumDestination: nativeSpend,
+    },
+  ],
+  collateralAsset: HYPERCORE_MAINNET_USDC,
+  venueId: "hyperliquid",
+  destinationOptions: generic.destinationOptions.map((option) => ({
+    ...option,
+    controllerWalletId: nativeControllerRef,
+    requiredAsset: HYPERCORE_MAINNET_USDC,
+    venueId: "hyperliquid",
+  })),
+};
+const nativeFunded = buildTelegramAppHandoffV2Plan({
+  discoveryRequest: nativeRequest,
+  fundingPolicyRevision: "native-policy-test",
+  projection: nativeProjection,
+  trade: nativeTrade,
+});
+assert.deepEqual(parseTelegramAppHandoffV2Plan(nativeFunded), nativeFunded);
+const nativeShortfallIdentity = {
+  userId: "native-linked-user",
+  requiredSpend: nativeSpend,
+  maxFeeUsd: "1",
+  maxSlippageBps: 500,
+  deadline: "2026-10-16T12:00:00.000Z",
+};
+const nativeShortfallRequest = buildTelegramNativeTradeShortfallRequest(
+  nativeShortfallIdentity,
+  nativeTrade,
+);
+assert.deepEqual(
+  nativeShortfallRequest.requestedDestinationAmount,
+  nativeSpend,
+);
+assert.equal(nativeShortfallRequest.controllerWalletRef, nativeControllerRef);
+assert.deepEqual(nativeShortfallRequest.connectedExternalWalletRefs, []);
+assert.deepEqual(nativeShortfallRequest.consumerIntent, nativeConsumer);
+assert.equal(nativeShortfallRequest.serverExecutionProfileId, undefined);
+for (const requiredSpend of [
+  { asset: { ...HYPERCORE_MAINNET_USDC, decimals: 6 }, raw: "10000000" },
+  { asset: BASE_USDC, raw: "10000000" },
+  { ...nativeSpend, raw: "999999999" },
+  { ...nativeSpend, raw: "1000000001" },
+  { ...nativeSpend, raw: "01000000000" },
+  { ...nativeSpend, raw: "0" },
+])
+  assert.throws(() =>
+    buildTelegramNativeTradeShortfallRequest(
+      { ...nativeShortfallIdentity, requiredSpend },
+      nativeTrade,
+    ),
+  );
+assert.throws(() =>
+  buildTelegramNativeTradeShortfallRequest(
+    nativeShortfallIdentity,
+    nativeSellTrade,
+  ),
+);
+
+// SAME inspection engine: provider floor, destination readiness, stale and
+// changed-balance recovery use raw cash8 without a bot grant or USD6 conversion.
+for (const scenario of [
+  "floor",
+  "ready",
+  "stale",
+  "changed",
+  "recovered",
+] as const) {
+  const requests: FundingDiscoveryRequest[] = [];
+  const floor = "50000000";
+  const nativeGap = "1";
+  const nativeFloorProjection: IntentLiquidityProjection = {
+    ...nativeProjection,
+    requestedCollateralRaw: nativeSpend.raw,
+    requestedUsd: "10",
+    availableNowRaw: "999999999",
+    availableNowUsd: "9.99999999",
+    shortfallRaw: scenario === "ready" ? "0" : nativeGap,
+    shortfallUsd: scenario === "ready" ? "0" : "0.00000001",
+    freshness: scenario === "stale" ? "stale" : "fresh",
+    sourceOptions: nativeProjection.sourceOptions.map((option) => ({
+      ...option,
+      minimumDestination: { asset: HYPERCORE_MAINNET_USDC, raw: floor },
+      expectedDestination: { asset: HYPERCORE_MAINNET_USDC, raw: floor },
+    })),
+  };
+  const inspection =
+    await TelegramTradeShortfallFundingService.prototype.inspectNativeMiniAppFunding.call(
+      {
+        runtime: {
+          liquidity: async (
+            _userId: string,
+            discovery: FundingDiscoveryRequest,
+          ) => {
+            requests.push(discovery);
+            return {
+              ...nativeFloorProjection,
+              shortfallRaw:
+                scenario === "changed" && requests.length === 2
+                  ? "2"
+                  : nativeFloorProjection.shortfallRaw,
+            };
+          },
+          currentPolicyRevision: async () => "native-policy-test",
+        },
+      } as unknown as TelegramTradeShortfallFundingService,
+      nativeShortfallIdentity,
+      nativeTrade,
+    );
+  if (scenario === "ready") {
+    assert.deepEqual(inspection, { kind: "destination_ready" });
+    assert.equal(requests.length, 1);
+  } else if (scenario === "stale" || scenario === "changed") {
+    assert.equal(inspection.kind, "temporarily_unavailable");
+    assert.equal(requests.length, scenario === "stale" ? 1 : 2);
+  } else {
+    assert.equal(inspection.kind, "web_funding_plan");
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[1]?.serverAdditionalDestinationAmount, {
+      asset: HYPERCORE_MAINNET_USDC,
+      raw: floor,
+    });
+    if (inspection.kind === "web_funding_plan") {
+      assert.equal(inspection.plan.kind, "funding");
+      assert.deepEqual(
+        parseTelegramAppHandoffV2Plan(inspection.plan),
+        inspection.plan,
+      );
+      assert.deepEqual(inspection.plan.trade, nativeTrade);
+    }
+  }
+}
+for (const legacyKey of [
+  "amountUsd",
+  "maxSpendUsd",
+  "sharesRaw",
+  "minimumReceiveRaw",
+  "maxSlippageBps",
+  "strictSlippage",
+]) {
+  assert.throws(
+    () =>
+      parseTelegramAppHandoffV2Plan({
+        ...nativeDirect,
+        trade: { ...nativeDirect.trade, [legacyKey]: "1" },
+      }),
+    /malformed/u,
+    `native terms must not include legacy ${legacyKey}`,
+  );
+}
+for (const mutate of [
+  (plan: typeof nativeFunded) => ({
+    ...plan,
+    funding: {
+      ...plan.funding,
+      discoveryRequest: {
+        ...nativeRequest,
+        marketContextId: "mainnet:wrong-token",
+      },
+    },
+  }),
+  (plan: typeof nativeFunded) => ({ ...plan, trade: nativeSellTrade }),
+  (plan: typeof nativeFunded) => ({
+    ...plan,
+    funding: {
+      ...plan.funding,
+      destination: {
+        ...plan.funding.destination,
+        requiredAsset: { ...HYPERCORE_MAINNET_USDC, decimals: 6 },
+      },
+    },
+  }),
+  (plan: typeof nativeFunded) => ({
+    ...plan,
+    funding: {
+      ...plan.funding,
+      destination: {
+        ...plan.funding.destination,
+        controllerWalletId: "other-controller",
+      },
+    },
+  }),
+  (plan: typeof nativeFunded) => ({
+    ...plan,
+    funding: {
+      ...plan.funding,
+      discoveryRequest: {
+        ...nativeRequest,
+        consumerIntent: {
+          ...nativeConsumer,
+          marketContextId: "mainnet:wrong-token",
+        },
+      },
+    },
+  }),
+  (plan: typeof nativeFunded) => ({
+    ...plan,
+    funding: {
+      ...plan.funding,
+      discoveryRequest: {
+        ...nativeRequest,
+        requestedDestinationAmount: { ...nativeSpend, raw: "1000000001" },
+        consumerIntent: {
+          ...nativeConsumer,
+          spend: { ...nativeSpend, raw: "1000000001" },
+        },
+      },
+    },
+  }),
+  (plan: typeof nativeFunded) => ({
+    ...plan,
+    funding: {
+      ...plan.funding,
+      discoveryRequest: {
+        ...nativeRequest,
+        requestedDestinationAmount: { ...nativeSpend, raw: "999999999" },
+        consumerIntent: {
+          ...nativeConsumer,
+          spend: { ...nativeSpend, raw: "999999999" },
+        },
+      },
+    },
+  }),
+  (plan: typeof nativeFunded) => ({
+    ...plan,
+    funding: {
+      ...plan.funding,
+      discoveryRequest: {
+        ...nativeRequest,
+        serverAdditionalDestinationAmount: {
+          ...nativeSpend,
+          raw: "1000000001",
+        },
+      },
+    },
+  }),
+])
+  assert.throws(
+    () => parseTelegramAppHandoffV2Plan(mutate(nativeFunded)),
+    /sealed/u,
+  );
+assert.equal(isTelegramAppHandoffV2TradeVenue("hyperliquid"), true);
+assert.equal(isTelegramAppHandoffV2DirectTradeVenue("hyperliquid"), true);
+console.log(
+  "telegram app handoff v2 tests passed (including connected native exact plan/funding bounds)",
+);

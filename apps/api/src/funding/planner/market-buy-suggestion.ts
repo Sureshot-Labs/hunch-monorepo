@@ -12,6 +12,7 @@ import { checkLimitlessBuyBudget } from "./limitless-buy-budget.js";
 import { checkHip4BuyBudget } from "./hip4-buy-budget.js";
 import { isHypercoreMainnetUsdc } from "../domain/hypercore-identity.js";
 import { sameAsset } from "../domain/asset-identity.js";
+import { checkHip4LimitBuyBudget } from "./hip4-limit-buy-budget.js";
 
 /** Advisory only. Reuse frozen quotes; never discover, reserve, or execute funds here.
  * Undefined means no applicable smaller Buy; null means the check was unavailable.
@@ -25,17 +26,49 @@ export async function suggestSmallerMarketBuy(
   checkExactInput = checkLimitlessBuyBudget,
   checkNativeInput = checkHip4BuyBudget,
 ): Promise<IntentLiquidityProjection["suggestedMarketBuy"] | null> {
+  const result = await suggestSmallerBuy(
+    pool,
+    snapshot,
+    account,
+    policy,
+    findMax,
+    checkExactInput,
+    checkNativeInput,
+  );
+  return result == null ? result : result.suggestedMarketBuy;
+}
+
+export async function suggestSmallerBuy(
+  pool: Pool,
+  snapshot: FundingPlanningSnapshot,
+  account: AccountValueReadModel,
+  policy: FundingRuntimePolicy,
+  findMax = findMaxPolymarketMarketBuyUsdForFunds,
+  checkExactInput = checkLimitlessBuyBudget,
+  checkNativeInput = checkHip4BuyBudget,
+  checkNativeLimit = checkHip4LimitBuyBudget,
+): Promise<
+  | Pick<IntentLiquidityProjection, "suggestedMarketBuy" | "suggestedLimitBuy">
+  | null
+  | undefined
+> {
   const { request, projection, destination } = snapshot;
-  const original = request.marketBuyAmountUsdCents;
+  const original = request.marketBuyAmountUsdCents ?? 0;
   const native = request.consumerIntent?.venueId === "hyperliquid";
+  const limitBuy = request.limitBuy;
   if (
-    !Number.isSafeInteger(original) ||
-    !original ||
-    original <= (request.consumerIntent?.venueId === "polymarket" ? 100 : 1) ||
-    !Number.isInteger(request.marketBuySlippageBps) ||
-    request.marketBuySlippageBps == null ||
-    request.marketBuySlippageBps < 0 ||
-    request.marketBuySlippageBps > 10_000 ||
+    (limitBuy
+      ? !native ||
+        request.marketBuyAmountUsdCents != null ||
+        request.marketBuySlippageBps != null
+      : !Number.isSafeInteger(original) ||
+        !original ||
+        original <=
+          (request.consumerIntent?.venueId === "polymarket" ? 100 : 1) ||
+        !Number.isInteger(request.marketBuySlippageBps) ||
+        request.marketBuySlippageBps == null ||
+        request.marketBuySlippageBps < 0 ||
+        request.marketBuySlippageBps > 10_000) ||
     request.purpose !== "trade_shortfall" ||
     !request.consumerIntent ||
     !["polymarket", "limitless", "hyperliquid"].includes(
@@ -97,7 +130,7 @@ export async function suggestSmallerMarketBuy(
   if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) return null;
   const destinationLocationId = destination.target.location.locationId;
   const destinationAccountId = destination.target.location.accountId;
-  const slippageBps = request.marketBuySlippageBps;
+  const slippageBps = request.marketBuySlippageBps ?? 0;
   const capacityFor = (feeReferenceRaw: string) =>
     maximumInternalFundingCapacityRaw({
       candidates: snapshot.sources,
@@ -142,6 +175,43 @@ export async function suggestSmallerMarketBuy(
           if (native) {
             const controllerWalletRef = request.controllerWalletRef;
             if (!controllerWalletRef) return undefined;
+            if (limitBuy) {
+              const originalDebit = BigInt(consumerIntent.spend.raw);
+              const checked = await checkNativeLimit(pool, {
+                userId: destinationAccountId,
+                controllerWalletRef,
+                marketId: consumerIntent.marketId,
+                tokenId,
+                deadlineMs,
+                budgetRaw: budget < originalDebit ? budget : originalDebit,
+                limitBuy,
+              });
+              if (checked == null) return checked;
+              const verifiedCapacity = capacityFor(
+                checked.requiredRaw.toString(),
+              );
+              const hintExpiry = Math.min(expiresAtMs, checked.expiresAtMs);
+              if (
+                verifiedCapacity == null ||
+                Date.now() >= deadlineMs ||
+                Date.now() >= hintExpiry
+              )
+                return null;
+              if (available + verifiedCapacity >= checked.requiredRaw)
+                return {
+                  suggestedLimitBuy: {
+                    originalQuantity: limitBuy.quantity,
+                    quantity: checked.quantity,
+                    limitPrice: limitBuy.limitPrice,
+                    timeInForce: limitBuy.timeInForce,
+                    requiredRaw: checked.requiredRaw.toString(),
+                    expiresAt: new Date(hintExpiry).toISOString(),
+                  },
+                };
+              if (verifiedCapacity >= capacity) return null;
+              capacity = verifiedCapacity;
+              continue;
+            }
             const cent = 10n ** BigInt(projection.collateralAsset.decimals - 2);
             const maximumSmallerRaw = BigInt(original - 1) * cent;
             const checked = await checkNativeInput(pool, {
@@ -167,9 +237,11 @@ export async function suggestSmallerMarketBuy(
               return null;
             if (available + verifiedCapacity >= checked.requiredRaw)
               return {
-                originalAmountUsdCents: original,
-                amountUsdCents: Number(checked.amountRaw / cent),
-                expiresAt: new Date(hintExpiry).toISOString(),
+                suggestedMarketBuy: {
+                  originalAmountUsdCents: original,
+                  amountUsdCents: Number(checked.amountRaw / cent),
+                  expiresAt: new Date(hintExpiry).toISOString(),
+                },
               };
             if (verifiedCapacity >= capacity) return null;
             capacity = verifiedCapacity;
@@ -196,9 +268,11 @@ export async function suggestSmallerMarketBuy(
               return null;
             if (available + verifiedCapacity >= checked.amountRaw) {
               return {
-                originalAmountUsdCents: original,
-                amountUsdCents: Number(checked.amountRaw / 10_000n),
-                expiresAt: new Date(hintExpiry).toISOString(),
+                suggestedMarketBuy: {
+                  originalAmountUsdCents: original,
+                  amountUsdCents: Number(checked.amountRaw / 10_000n),
+                  expiresAt: new Date(hintExpiry).toISOString(),
+                },
               };
             }
             if (verifiedCapacity >= capacity) return null;
@@ -221,9 +295,11 @@ export async function suggestSmallerMarketBuy(
           if (verifiedCapacity == null || Date.now() >= deadlineMs) return null;
           if (available + verifiedCapacity >= BigInt(required)) {
             return {
-              originalAmountUsdCents: original,
-              amountUsdCents: Number(cents),
-              expiresAt: new Date(expiresAtMs).toISOString(),
+              suggestedMarketBuy: {
+                originalAmountUsdCents: original,
+                amountUsdCents: Number(cents),
+                expiresAt: new Date(expiresAtMs).toISOString(),
+              },
             };
           }
           if (verifiedCapacity >= capacity) return null;

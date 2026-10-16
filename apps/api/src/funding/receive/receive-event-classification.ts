@@ -1,5 +1,6 @@
 import type { OwnedRouteCanonicalDestinationClassification } from "../reconciliation/owned-route-destination-observer.js";
 import type { RecordedExactRefundClassification } from "../reconciliation/relay-exact-refund-classification.js";
+import type { PolymarketHandoffEventClassification } from "./receive-handoff-classification.js";
 
 type HandoffDecision =
   | Readonly<{ kind: "external" }>
@@ -52,6 +53,40 @@ export function receiveInternalRolesConflict(
     (internals.length > 0 &&
       decisions.some((decision) => decision.kind === "recovery_required"))
   );
+}
+
+/** Compatibility adapter for the CURRENT recorded-role receive path only.
+ * Preserve its recovery precedence while sharing publication effects with the
+ * joint arbiter's typed decisions. A recorded miss here does NOT prove source
+ * coverage: new exact-refund discovery must not use this adapter as authority.
+ */
+export function resolveLegacyRecordedReceiveRoles(input: {
+  handoff?: PolymarketHandoffEventClassification;
+  destination?: OwnedRouteCanonicalDestinationClassification;
+  refund?: RecordedExactRefundClassification;
+}): ReceiveEventClassification {
+  const { handoff, destination, refund } = input;
+  if (
+    receiveInternalRolesConflict([
+      handoff ?? { kind: "external" },
+      destination ?? { kind: "external" },
+      refund ?? { kind: "unmatched" },
+    ])
+  )
+    return {
+      kind: "recovery_required",
+      reason: "internal_event_classification_conflict",
+    };
+  if (refund?.kind === "recovery_required") return refund;
+  if (handoff?.kind === "recovery_required") return handoff;
+  if (handoff?.kind === "internal")
+    return { kind: "internal_handoff", match: handoff };
+  if (refund?.kind === "internal")
+    return { kind: "internal_refund", match: refund };
+  if (destination?.kind === "recovery_required") return destination;
+  if (destination?.kind === "internal")
+    return { kind: "internal_destination", match: destination };
+  return { kind: "external" };
 }
 
 /** Resolve all roles BEFORE mutating any receive/funding allocation. A recorded

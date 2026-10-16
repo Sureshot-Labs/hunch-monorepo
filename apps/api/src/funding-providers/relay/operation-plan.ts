@@ -1,5 +1,7 @@
 import { Interface } from "ethers";
 import { isPositiveRawAmount } from "../../funding/domain/raw-amount.js";
+import { polymarketHandoffSourceIntent } from "../../funding/domain/polymarket-handoff-source.js";
+import { readFrozenPolymarketHandoffBinding } from "../../funding/domain/polymarket-handoff-binding.js";
 
 import { stableOpaqueId } from "../../account-value/canonical.js";
 import { multiplyRawByUnitPrice } from "../../account-value/decimal.js";
@@ -596,6 +598,22 @@ export async function buildRelayPlanningQuote(
     throw new Error("Relay operation requires an owned source location");
   }
   const sourceLocation = input.source.source.location;
+  const handoffIntent = input.source.preRouteHandoff
+    ? polymarketHandoffSourceIntent({
+        economicLocation: input.source.preRouteHandoff.sourceLocation,
+        controllerProfile: input.profile,
+      })
+    : null;
+  if (
+    input.source.preRouteHandoff &&
+    (!handoffIntent ||
+      !canonicalJsonEqual(input.source.source, handoffIntent.executionSource) ||
+      input.source.reservationLocationId !==
+        handoffIntent.economicSource.location.locationId)
+  )
+    throw new Error(
+      "Polymarket pre-route economic/execution source binding differs",
+    );
   const refundLocation = relayRefundLocationSnapshot({
     sourceLocation,
     sourceAmount: input.quote.sourceAmount,
@@ -710,7 +728,9 @@ export async function buildRelayPlanningQuote(
       },
       experienceMode: input.route.experienceMode,
       planKind: "wallet_route" as const,
-      sourceSnapshot: jsonRecord(input.source.source),
+      sourceSnapshot: jsonRecord(
+        handoffIntent?.economicSource ?? input.source.source,
+      ),
       destinationTargetSnapshot: jsonRecord(input.destination.target),
       externalRecipientId: input.destination.externalRecipientId,
       venueId: input.destination.venueId,
@@ -804,8 +824,35 @@ export async function buildRelayPlanningQuote(
         mode: "subtract_available" as const,
         expiresAt: input.quote.candidate.expiresAt,
       },
+      ...(handoffIntent
+        ? [
+            {
+              segmentOrdinal: null,
+              componentId: handoffIntent.controllerComponentId,
+              locationId: handoffIntent.executionSource.location.locationId,
+              networkId: input.quote.sourceAmount.asset.networkId,
+              assetId: input.quote.sourceAmount.asset.assetId,
+              assetDecimals: input.quote.sourceAmount.asset.decimals,
+              rawAmount: input.quote.sourceAmount.raw,
+              mode: "subtract_available" as const,
+              economicRole: "future_credit_fence" as const,
+              expiresAt: input.quote.candidate.expiresAt,
+            },
+          ]
+        : []),
     ],
   };
+  if (
+    handoffIntent &&
+    !readFrozenPolymarketHandoffBinding({
+      currentUserId: sourceLocation.accountId,
+      plan,
+      segmentOrdinal: 0,
+    })
+  )
+    throw new Error(
+      "Polymarket handoff plan lacks its exact economic/physical binding",
+    );
   return {
     candidate: input.quote.candidate,
     sourceAmount: input.quote.sourceAmount,

@@ -3,7 +3,9 @@ import { test } from "node:test";
 import { Interface } from "ethers";
 import {
   BASE_USDC,
+  POLYGON_PUSD,
   POLYGON_USDC,
+  POLYGON_USDCE_LEGACY,
   RELAY_DEPOSITORY_V2,
 } from "../../../funding-providers/relay/rehearsal.js";
 import { EXACT_REFUND_RECEIPTS_CONTRACT } from "../../domain/refund-settlement.js";
@@ -13,10 +15,18 @@ import { canonicalJsonHash } from "../../persistence/canonical.js";
 import type { RefundSourceCandidateRow } from "../../reconciliation/relay-refund-source-candidates.js";
 import {
   classifyRefundSourceActions as classifyComplete,
+  emptyRefundSourceActionFold,
+  finishRefundSourceActions,
+  finishRefundSourceAccounting,
+  foldRefundSourceActions,
   loadRefundSourceActionFacts,
   REFUND_SOURCE_ACTION_FACTS_SQL,
   type RefundSourceActionRow,
 } from "../../reconciliation/relay-refund-source-actions.js";
+import { readRefundSourceActionPage } from "../../reconciliation/relay-refund-source-action-scan.js";
+import { FUNDING_CLASSIFICATION_REVISION_SQL } from "../../persistence/funding-classification-revisions.js";
+import { REFUND_SOURCE_EXACT_SQL } from "../../reconciliation/relay-refund-source-candidates.js";
+import { REFUND_OBSERVATION_FIRST_PAGE_SQL } from "../../reconciliation/relay-refund-observation-scan.js";
 
 const classifyRefundSourceActions = (
   candidate: RefundSourceCandidateRow,
@@ -30,10 +40,13 @@ const abi = new Interface([
   "function approve(address spender,uint256 amount)",
 ]);
 
-function fixture(polygon = false) {
+function fixture(
+  polygon = false,
+  sourceCurrency = polygon ? POLYGON_USDC : BASE_USDC,
+) {
   const asset = {
     networkId: polygon ? "evm:137" : "evm:8453",
-    assetId: polygon ? POLYGON_USDC : BASE_USDC,
+    assetId: sourceCurrency,
     decimals: 6,
   };
   const userId = "11111111-1111-4111-8111-111111111111";
@@ -105,7 +118,9 @@ function fixture(polygon = false) {
     action_validation_result: withRelayClientSourceDebitPostcondition({
       action,
       routeId: polygon
-        ? "polygon-usdc-to-hypercore-spot-usdc"
+        ? sourceCurrency === POLYGON_PUSD
+          ? "polygon-pusd-to-hypercore-spot-usdc"
+          : "polygon-usdc-to-hypercore-spot-usdc"
         : "base-usdc-to-hypercore-spot-usdc",
       sourceAmount: { asset, raw: "10000000" },
       actionValidationResult: {
@@ -127,6 +142,10 @@ function fixture(polygon = false) {
     receipt_canonical: null,
     receipt_action_match: null,
     receipt_evidence: null,
+    receipt_network_id: null,
+    receipt_ledger_height: null,
+    receipt_block_hash: null,
+    source_debit: null,
   });
   return { candidate, deposit, approval, row };
 }
@@ -145,6 +164,507 @@ function attempted(
     ...patch,
   };
 }
+
+function exactDebitFixture(f = fixture()) {
+  const base = attempted(f.row(f.deposit, "deposit"));
+  const txHash = `0x${"12".repeat(32)}`;
+  const blockHash = `0x${"34".repeat(32)}`;
+  const debit = {
+    id: "66666666-6666-4666-8666-666666666666",
+    operationId: f.candidate.operation_id,
+    segmentId: f.candidate.segment_id,
+    kind: "source_debit",
+    networkId: f.candidate.network_id,
+    assetId: f.candidate.asset_id,
+    decimals: 6,
+    raw: "10000000",
+    txHash,
+    eventIndex: "7",
+    fromAddress: owner,
+    toAddress: RELAY_DEPOSITORY_V2,
+    ledgerHeight: "90",
+    blockHash,
+    canonical: true,
+    finality: "finalized",
+    observerId: "relay_client_receipt_source_debit_v1",
+    originStepId: base.step_id,
+    originFingerprint: base.action_fingerprint,
+    originExecutor: base.executor_id,
+  };
+  return {
+    f,
+    debit,
+    row: {
+      ...base,
+      receipt_status: "finalized",
+      receipt_network_id: f.candidate.network_id,
+      receipt_canonical: true,
+      receipt_action_match: true,
+      receipt_evidence: {
+        transactionHash: txHash,
+        attributedSourceRaw: "10000000",
+        sourceDebitEventIndex: "7",
+      },
+      receipt_ledger_height: "90",
+      receipt_block_hash: blockHash,
+      source_debit: debit,
+    },
+  };
+}
+
+test("registered Polygon pUSD evidence retains exact token identity through cancellation, debit and replay", () => {
+  const f = fixture(true, POLYGON_PUSD);
+  const unissued = [f.row(f.approval, "approve"), f.row(f.deposit, "deposit")];
+  assert.deepEqual(classifyRefundSourceActions(f.candidate, unissued), {
+    kind: "no_live_attempt",
+  });
+  const { row } = exactDebitFixture(f);
+  const fold = foldRefundSourceActions(
+    f.candidate,
+    emptyRefundSourceActionFold(),
+    [row, row],
+  );
+  assert.equal(finishRefundSourceAccounting(fold).kind, "single_debit");
+  assert.deepEqual(
+    finishRefundSourceAccounting(
+      foldRefundSourceActions(f.candidate, emptyRefundSourceActionFold(), [
+        {
+          ...row,
+          source_debit: { ...row.source_debit, assetId: POLYGON_USDC },
+        },
+      ]),
+    ),
+    { kind: "unaccounted" },
+  );
+  const unsupported = fixture(true, POLYGON_USDCE_LEGACY);
+  assert.deepEqual(
+    classifyRefundSourceActions(unsupported.candidate, [
+      unsupported.row(unsupported.deposit, "deposit"),
+    ]),
+    {
+      kind: "invalid",
+    },
+  );
+});
+
+test("current exact debit folds repeated reports once; unresolved or distinct attempts cannot disappear", () => {
+  const { f, row, debit } = exactDebitFixture();
+  const fold = foldRefundSourceActions(
+    f.candidate,
+    emptyRefundSourceActionFold(),
+    [row],
+  );
+  assert.equal(finishRefundSourceAccounting(fold).kind, "single_debit");
+  assert.deepEqual(finishRefundSourceActions(fold, { complete: true }), {
+    kind: "possible",
+    stepIds: [row.step_id],
+  });
+  const duplicate = foldRefundSourceActions(
+    f.candidate,
+    JSON.parse(JSON.stringify(fold)),
+    [{ ...row, attempt_id: "other-report", attempt_number: 2 }],
+  );
+  assert.deepEqual(duplicate, fold);
+  const unresolved = attempted(f.row(f.deposit, "deposit"));
+  for (const rows of [
+    [unresolved, row],
+    [row, unresolved],
+  ]) {
+    const current = foldRefundSourceActions(
+      f.candidate,
+      emptyRefundSourceActionFold(),
+      rows,
+    );
+    assert.deepEqual(finishRefundSourceAccounting(current), {
+      kind: "unaccounted",
+    });
+  }
+  const txHash = `0x${"56".repeat(32)}`;
+  const distinct = {
+    ...row,
+    attempt_id: "second-debit",
+    attempt_number: 2,
+    receipt_evidence: { ...row.receipt_evidence, transactionHash: txHash },
+    source_debit: {
+      ...debit,
+      id: "77777777-7777-4777-8777-777777777777",
+      txHash,
+    },
+  };
+  assert.deepEqual(
+    finishRefundSourceAccounting(
+      foldRefundSourceActions(f.candidate, fold, [distinct]),
+    ),
+    { kind: "unaccounted" },
+  );
+});
+
+test("debit amount, identity, provenance and current receipt anchors must all agree", () => {
+  for (const polygon of [false, true]) {
+    const { f, row, debit } = exactDebitFixture(fixture(polygon));
+    for (const patch of [
+      { operationId: "77777777-7777-4777-8777-777777777777" },
+      { segmentId: "77777777-7777-4777-8777-777777777777" },
+      { kind: "refund_credit" },
+      { networkId: "evm:1" },
+      { assetId: RELAY_DEPOSITORY_V2 },
+      { decimals: 8 },
+      { raw: "9999999" },
+      { fromAddress: RELAY_DEPOSITORY_V2 },
+      { toAddress: owner },
+      { ledgerHeight: "91" },
+      { blockHash: `0x${"56".repeat(32)}` },
+      { canonical: false },
+      { finality: "confirmed" },
+      { observerId: "other" },
+      { originStepId: "other" },
+      { originFingerprint: "other" },
+      { originExecutor: "other" },
+    ])
+      assert.deepEqual(
+        finishRefundSourceAccounting(
+          foldRefundSourceActions(f.candidate, emptyRefundSourceActionFold(), [
+            { ...row, source_debit: { ...debit, ...patch } },
+          ]),
+        ),
+        { kind: "unaccounted" },
+      );
+    for (const patch of [
+      { source_debit: null },
+      { receipt_status: "reorged" },
+      { receipt_canonical: false },
+      { receipt_action_match: false },
+      { receipt_ledger_height: null },
+      { receipt_block_hash: null },
+      { receipt_network_id: "evm:1" },
+      {
+        receipt_evidence: {
+          ...row.receipt_evidence,
+          attributedSourceRaw: "9999999",
+        },
+      },
+      {
+        receipt_evidence: {
+          ...row.receipt_evidence,
+          sourceDebitEventIndex: "8",
+        },
+      },
+    ])
+      assert.deepEqual(
+        finishRefundSourceAccounting(
+          foldRefundSourceActions(f.candidate, emptyRefundSourceActionFold(), [
+            { ...row, ...patch },
+          ]),
+        ),
+        { kind: "unaccounted" },
+      );
+    const failure = {
+      ...row,
+      receipt_status: "failed",
+      receipt_evidence: { failureFinalized: true },
+    };
+    assert.deepEqual(
+      finishRefundSourceAccounting(
+        foldRefundSourceActions(f.candidate, emptyRefundSourceActionFold(), [
+          failure,
+        ]),
+      ),
+      { kind: "unaccounted" },
+    );
+    assert.deepEqual(
+      finishRefundSourceAccounting(
+        foldRefundSourceActions(f.candidate, emptyRefundSourceActionFold(), [
+          { ...failure, source_debit: null },
+        ]),
+      ),
+      { kind: "none" },
+    );
+    assert.equal(
+      finishRefundSourceAccounting(
+        foldRefundSourceActions(f.candidate, emptyRefundSourceActionFold(), [
+          row,
+        ]),
+      ).kind,
+      "single_debit",
+    );
+  }
+});
+
+test("paged fold preserves every earlier issued attempt with constant-size state", () => {
+  const f = fixture();
+  const deposit = f.row(f.deposit, "deposit");
+  const issued = attempted(deposit);
+  let fold = foldRefundSourceActions(
+    f.candidate,
+    emptyRefundSourceActionFold(),
+    [f.row(f.approval, "approve"), issued],
+  );
+  const serializedSize = JSON.stringify(fold).length;
+  for (let attempt = 2; attempt <= 1000; attempt++) {
+    fold = foldRefundSourceActions(
+      f.candidate,
+      JSON.parse(JSON.stringify(fold)),
+      [
+        attempted(deposit, {
+          attempt_id: `failure-${attempt}`,
+          attempt_number: attempt,
+          receipt_status: "failed",
+          receipt_canonical: true,
+          receipt_action_match: true,
+          receipt_evidence: { failureFinalized: true },
+        }),
+      ],
+    );
+    assert.equal(JSON.stringify(fold).length, serializedSize);
+    assert.deepEqual(finishRefundSourceActions(fold, { complete: false }), {
+      kind: "incomplete",
+    });
+  }
+  assert.deepEqual(finishRefundSourceActions(fold, { complete: true }), {
+    kind: "possible",
+    stepIds: [deposit.step_id],
+  });
+  const secondDeposit = foldRefundSourceActions(f.candidate, fold, [
+    { ...deposit, step_id: "second-deposit" },
+  ]);
+  assert.deepEqual(
+    finishRefundSourceActions(secondDeposit, { complete: true }),
+    {
+      kind: "invalid",
+    },
+  );
+  assert.equal(
+    foldRefundSourceActions(f.candidate, secondDeposit, []).invalid,
+    true,
+  );
+});
+
+test("current source/action pages resume only at their original revision and exact identity", async () => {
+  const f = fixture();
+  const identity = {
+    userId: f.candidate.user_id,
+    operationId: f.candidate.operation_id,
+    segmentId:
+      f.candidate.segment_id ?? assert.fail("fixture route leg missing"),
+    reservationId: f.candidate.reservation_id,
+  };
+  const approval = f.row(f.approval, "approve");
+  const deposit = f.row(f.deposit, "deposit");
+  let revision = "7";
+  let changeDuringPage = false;
+  let source = f.candidate;
+  let pageQueries = 0;
+  const db = {
+    query: async (sql: string, args: unknown[]) => {
+      if (sql === FUNDING_CLASSIFICATION_REVISION_SQL)
+        return { rows: [{ revision }] };
+      if (sql === REFUND_SOURCE_EXACT_SQL) {
+        assert.deepEqual(args, [identity.userId, identity.reservationId]);
+        return { rows: [source] };
+      }
+      if (sql === REFUND_OBSERVATION_FIRST_PAGE_SQL) return { rows: [] };
+      assert.equal(sql, REFUND_SOURCE_ACTION_FACTS_SQL);
+      pageQueries++;
+      if (changeDuringPage) revision = String(Number(revision) + 1);
+      return { rows: args[3] === -1 ? [approval, deposit] : [deposit] };
+    },
+  };
+  const first = await readRefundSourceActionPage(db as never, {
+    identity,
+    continuation: null,
+    limit: 1,
+  });
+  assert.equal(first.kind, "continuation");
+  if (first.kind !== "continuation") assert.fail("expected first page");
+  const continuation = JSON.parse(JSON.stringify(first.continuation));
+  const noQueries = {
+    query: async () => assert.fail("bad checkpoint cannot query"),
+  };
+  for (const corrupt of [
+    undefined,
+    {},
+    "bad",
+    { ...continuation, version: 1 },
+    { ...continuation, cursor: { stepOrdinal: -1, attemptNumber: 0 } },
+    { ...continuation, cursor: { stepOrdinal: 0, attemptNumber: 2147483648 } },
+    {
+      ...continuation,
+      fold: { invalid: false, depositStepId: null, possible: true },
+    },
+    {
+      ...continuation,
+      fold: { invalid: false, depositStepId: "bad", possible: false },
+    },
+    ...["", "bad", "-1", "01", "9223372036854775808", "9".repeat(100)].map(
+      (revision) => ({
+        ...continuation,
+        facts: { ...continuation.facts, revision },
+      }),
+    ),
+  ]) {
+    assert.deepEqual(
+      await readRefundSourceActionPage(noQueries as never, {
+        identity,
+        continuation: corrupt,
+        limit: 1,
+      }),
+      { kind: "restart" },
+    );
+  }
+  for (const limit of [0, -1, 0.5, Infinity, 2147483646])
+    await assert.rejects(
+      readRefundSourceActionPage(noQueries as never, {
+        identity,
+        continuation: null,
+        limit,
+      }),
+    );
+  const last = await readRefundSourceActionPage(db as never, {
+    identity,
+    continuation,
+    limit: 1,
+  });
+  assert.deepEqual(last, {
+    kind: "complete",
+    version: 2,
+    identity,
+    facts: {
+      operationId: identity.operationId,
+      userId: identity.userId,
+      revision: "7",
+    },
+    exposure: { kind: "no_live_attempt" },
+    accounting: { kind: "none" },
+    refundSet: { kind: "unchecked" },
+    observationVersion: 1,
+    observations: { kind: "unchecked" },
+  });
+  assert.deepEqual(
+    await readRefundSourceActionPage(db as never, {
+      identity,
+      continuation: null,
+      completed: last,
+      limit: 1,
+    }),
+    { ...last, observations: { kind: "empty" } },
+  );
+  assert.equal(
+    pageQueries,
+    2,
+    "current completed result avoids re-reading actions",
+  );
+  assert.deepEqual(
+    await readRefundSourceActionPage(db as never, {
+      identity,
+      continuation: null,
+      completed: { ...last, refundSet: undefined, observations: undefined },
+      limit: 1,
+    }),
+    { ...last, observations: { kind: "empty" } },
+    "existing v2 action result reads observations before clearance",
+  );
+  for (const corrupt of [
+    {},
+    { ...last, version: 1 },
+    { ...last, accounting: undefined },
+    { ...last, refundSet: { kind: "pending", reason: "proof_missing" } },
+    { ...last, observations: { kind: "refunded" } },
+    {
+      ...last,
+      observations: {
+        kind: "reading",
+        cursor: { kind: "refund_credit", id: "bad" },
+        debitSeen: false,
+        refundsSeen: 0,
+      },
+    },
+    {
+      ...last,
+      exposure: { kind: "possible", stepIds: [identity.operationId] },
+      accounting: { kind: "none" },
+    },
+    {
+      ...last,
+      identity: { ...identity, reservationId: f.candidate.operation_id },
+    },
+    { ...last, exposure: { kind: "possible", stepIds: [] } },
+  ]) {
+    assert.deepEqual(
+      await readRefundSourceActionPage(noQueries as never, {
+        identity,
+        continuation: null,
+        completed: corrupt,
+        limit: 1,
+      }),
+      { kind: "restart" },
+    );
+  }
+  source = { ...f.candidate, operation_user_id: "different-owner" };
+  assert.deepEqual(
+    await readRefundSourceActionPage(db as never, {
+      identity,
+      continuation: null,
+      completed: last,
+      limit: 1,
+    }),
+    { kind: "unavailable" },
+  );
+  source = f.candidate;
+  revision = "8";
+  assert.deepEqual(
+    await readRefundSourceActionPage(db as never, {
+      identity,
+      continuation: null,
+      completed: last,
+      limit: 1,
+    }),
+    { kind: "restart" },
+  );
+  assert.deepEqual(
+    await readRefundSourceActionPage(db as never, {
+      identity,
+      continuation,
+      limit: 1,
+    }),
+    { kind: "restart" },
+  );
+  assert.equal(pageQueries, 2, "changed revision cannot reuse a later page");
+  assert.deepEqual(
+    await readRefundSourceActionPage(db as never, {
+      identity: { ...identity, reservationId: "another-source" },
+      continuation,
+      limit: 1,
+    }),
+    { kind: "restart" },
+  );
+  assert.equal(pageQueries, 2);
+  changeDuringPage = true;
+  assert.deepEqual(
+    await readRefundSourceActionPage(db as never, {
+      identity,
+      continuation: null,
+      limit: 1,
+    }),
+    { kind: "restart" },
+  );
+  changeDuringPage = false;
+  source = { ...f.candidate, operation_user_id: "different-owner" };
+  assert.deepEqual(
+    await readRefundSourceActionPage(db as never, {
+      identity,
+      continuation: null,
+      limit: 1,
+    }),
+    { kind: "unavailable" },
+  );
+  source = f.candidate;
+  const retry = await readRefundSourceActionPage(db as never, {
+    identity,
+    continuation: null,
+    limit: 1,
+  });
+  assert.equal(retry.kind, "continuation", "ordinary next pass recovers");
+});
 
 for (const polygon of [false, true]) {
   test(`${polygon ? "Polygon" : "Base"} exact approval is not a source debit; unstarted deposit is not an external verdict`, () => {

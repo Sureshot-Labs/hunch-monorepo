@@ -25,6 +25,10 @@ import { canonicalJsonEqual } from "./canonical.js";
 import { telegramReceiveConsentWhereSql } from "./telegram-receive-consent-sql.js";
 import { reduceFundingOperationInTransaction } from "../reconciliation/funding-reducer.js";
 import { fundingReservationHoldSql } from "./source-reservation-hold.js";
+import {
+  classifyRecordedRelayExactRefundEvents,
+  refundCanonicalEventKey,
+} from "../reconciliation/relay-exact-refund-classification.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 type ReceiveTargets = NonNullable<ExternalIngressInstruction["receiveTargets"]>;
@@ -283,13 +287,14 @@ export async function derivePersistedFundingReceiveSessionStatus(
   return deriveActiveFundingReceiveSessionStatus(rows.map((row) => row.status));
 }
 
-export async function deriveEffectiveFundingReceiveSessionStatus(
+/** Look up the immutable scope before taking any receipt row lock. */
+async function lockPersistedFundingReceiveSessionScope(
   db: Pick<PoolClient, "query">,
   input: Readonly<{
     receiveSessionId: string;
     userId: string;
   }>,
-): Promise<ActiveReceiveSessionStatus | "completed" | null> {
+): Promise<boolean> {
   const scope = await db.query<{
     destination_option_id: string;
     venue_binding_option_id: string;
@@ -304,12 +309,23 @@ export async function deriveEffectiveFundingReceiveSessionStatus(
     [input.receiveSessionId, input.userId],
   );
   const sessionScope = scope.rows[0];
-  if (!sessionScope) return null;
+  if (!sessionScope) return false;
   await lockFundingReceiveSessionScope(db, {
     userId: input.userId,
     destinationOptionId: sessionScope.destination_option_id,
     venueBindingOptionId: sessionScope.venue_binding_option_id,
   });
+  return true;
+}
+
+export async function deriveEffectiveFundingReceiveSessionStatus(
+  db: Pick<PoolClient, "query">,
+  input: Readonly<{
+    receiveSessionId: string;
+    userId: string;
+  }>,
+): Promise<ActiveReceiveSessionStatus | "completed" | null> {
+  if (!(await lockPersistedFundingReceiveSessionScope(db, input))) return null;
   const derivedStatus = await derivePersistedFundingReceiveSessionStatus(
     db,
     input,
@@ -2476,6 +2492,7 @@ export async function quarantineFundingReceiveCanonicalInternalEvent(
       "exact_refund_receipt_conflict",
       "exact_refund_receipt_not_final",
       "internal_event_classification_conflict",
+      "exact_refund_correlation_pending",
     ].includes(input.reason);
   if (
     row.allocation_status === "recovery_required" &&
@@ -2773,7 +2790,8 @@ async function selectCanonicalReceiveSession(
 export async function bindFundingReceiveCanonicalEventSession(
   client: Pick<PoolClient, "query">,
   input: FundingReceiveCanonicalEventInput,
-): Promise<void> {
+  expectedUserId?: string,
+): Promise<"foreign_owner" | void> {
   const row = await upsertFundingReceiveCanonicalEvent(client, input);
   if (
     row.classification_receive_session_id ||
@@ -2787,6 +2805,10 @@ export async function bindFundingReceiveCanonicalEventSession(
     true,
   );
   if (!target) return; // Missing/ambiguous ownership is not invented.
+  // Initial staging only owns the scanning user's scope, so it must not freeze
+  // another user's selection. Existing callers retain their selection behavior.
+  if (expectedUserId && target.user_id !== expectedUserId)
+    return "foreign_owner";
   const variantId = canonicalRetryVariantId(target, input);
   if (!variantId) return;
   await client.query(
@@ -2844,6 +2866,79 @@ export type FundingReceiveClassificationRetry =
       boundVariantId: string | null;
     }>;
 
+type ClassificationRetryRow = FundingReceiveCanonicalEventAllocationRow & {
+  classification_lease_token: string;
+};
+
+function classificationRetry(
+  row: ClassificationRetryRow,
+  now: Date,
+): FundingReceiveClassificationRetry {
+  return {
+    eventId: row.id,
+    leaseToken: row.classification_lease_token,
+    boundSessionId: row.classification_receive_session_id,
+    boundVariantId: row.classification_variant_id,
+    networkId: row.network_id,
+    asset: {
+      networkId: row.network_id,
+      assetId: row.asset_id,
+      decimals: row.asset_decimals,
+    },
+    destinationAddress: row.destination_address,
+    sourceAddress: row.source_address,
+    rawAmount: row.raw_amount,
+    transactionHash: row.tx_hash,
+    eventIndex: row.event_index,
+    ledgerHeight: row.ledger_height,
+    blockHash: row.block_hash,
+    observedAt: row.observed_at,
+    now,
+  };
+}
+
+export const LOCK_BOUND_RECEIVE_CLASSIFICATION_RETRY_SQL = `select canonical_event.*,
+  canonical_event.raw_amount::text as raw_amount,canonical_event.ledger_height::text as ledger_height
+  from funding_receive_canonical_events canonical_event
+  where canonical_event.id=$1::uuid and canonical_event.classification_lease_token=$2::uuid
+    and canonical_event.classification_receive_session_id=$3::uuid
+    and canonical_event.classification_variant_id=$4::text
+    and canonical_event.allocation_status='recovery_required'
+    and canonical_event.allocation_error_code in (${RECEIVE_CLASSIFICATION_RETRY_REASON_SQL})
+  for update of canonical_event`;
+
+/** Checkpoint-only work must read the authoritative event, not caller payload.
+ * Lock only E, then read the existing immutable session binding. No discovery of
+ * an unbound owner, session lock, allocation, retry acknowledgment or lifetime
+ * extension. The regular queue claim can reclaim only after E is released. */
+export async function lockBoundFundingReceiveClassificationRetry(
+  db: Pick<PoolClient, "query">,
+  input: {
+    retry: Pick<
+      FundingReceiveClassificationRetry,
+      "eventId" | "leaseToken" | "boundSessionId" | "boundVariantId"
+    >;
+    userId: string;
+  },
+): Promise<FundingReceiveClassificationRetry | null> {
+  if (!input.retry.boundSessionId || !input.retry.boundVariantId) return null;
+  const row = (
+    await db.query<ClassificationRetryRow>(
+      LOCK_BOUND_RECEIVE_CLASSIFICATION_RETRY_SQL,
+      [
+        input.retry.eventId,
+        input.retry.leaseToken,
+        input.retry.boundSessionId,
+        input.retry.boundVariantId,
+      ],
+    )
+  ).rows[0];
+  if (!row) return null;
+  const retry = classificationRetry(row, new Date());
+  const target = await fundingReceiveClassificationRetryTarget(db, retry);
+  return target?.snapshot.userId === input.userId ? retry : null;
+}
+
 /** Short standalone claim; COMMIT before acquiring any session scope or
  * operation lock. Moving the indexed date provides fairness even on crash or
  * missing ownership. Uses the worker's existing batch/poll budget. */
@@ -2863,48 +2958,189 @@ export const CLAIM_RECEIVE_CLASSIFICATION_RETRIES_SQL = `
   returning canonical_event.*, canonical_event.raw_amount::text as raw_amount,
     canonical_event.ledger_height::text as ledger_height`;
 
+function receiveClassificationNextRetryAt(
+  now: Date,
+  retryDelayMs: number,
+): Date {
+  if (!Number.isSafeInteger(retryDelayMs) || retryDelayMs <= 0)
+    throw new Error("invalid canonical receive retry budget");
+  const next = new Date(now.getTime() + retryDelayMs);
+  if (!Number.isFinite(next.getTime()))
+    throw new Error("invalid canonical receive retry date");
+  return next;
+}
+
+/** Exact first-observation claim, using the SAME due clock/token as the worker.
+ * The existing E lock serializes this with normal retries. A replay cannot
+ * replace a live lease, move its due date, or change the frozen selected owner. */
+export const CLAIM_STAGED_RECEIVE_CLASSIFICATION_SQL = `
+  update funding_receive_canonical_events canonical_event
+  set classification_retry_at=$4::timestamptz,
+      classification_lease_token=gen_random_uuid()
+  where canonical_event.id=$1::uuid
+    and canonical_event.allocation_status='recovery_required'
+    and canonical_event.allocation_error_code in (${RECEIVE_CLASSIFICATION_RETRY_REASON_SQL})
+    and coalesce(canonical_event.classification_retry_at,canonical_event.first_observed_at)<=$3::timestamptz
+    and canonical_event.classification_variant_id is not null
+    and exists(select 1 from funding_receive_sessions session_row
+      where session_row.id=canonical_event.classification_receive_session_id
+        and session_row.user_id=$2::uuid)
+  returning canonical_event.*,canonical_event.raw_amount::text as raw_amount,
+    canonical_event.ledger_height::text as ledger_height`;
+
+export type FundingReceiveClassificationStage = Readonly<
+  | { kind: "claimed"; retry: FundingReceiveClassificationRetry }
+  | {
+      kind: "deferred" | "settled" | "unbound" | "foreign_owner";
+      eventId: string;
+    }
+>;
+
+/** Staging ONLY. Commits scope -> ALL E -> selected-session locks before any
+ * caller can acquire operation locks. Uses existing canonical rows and retries;
+ * no allocation, receipt, notification, checkpoint, source cutoff or callback.
+ * The caller passes its bounded supported-event batch and existing retry policy.
+ * Begin scan work AFTER this resolves; scan_before is its DB observation time,
+ * not this input's observedAt/now and not a source commit watermark.
+ * Initial and retry publication both require joint arbitration afterwards.
+ */
+export async function stageFundingReceiveClassificationBatch(
+  pool: Pool,
+  input: Readonly<{
+    scope: Parameters<typeof lockFundingReceiveSessionScope>[1];
+    events: readonly FundingReceiveCanonicalEventInput[];
+    retryDelayMs: number;
+    now: Date;
+    classifyRecordedRefunds?: typeof classifyRecordedRelayExactRefundEvents;
+  }>,
+): Promise<readonly FundingReceiveClassificationStage[]> {
+  const next = receiveClassificationNextRetryAt(input.now, input.retryDelayMs);
+  if (!input.events.length) return [];
+  return tx(pool, async (client) => {
+    await lockFundingReceiveSessionScope(client, input.scope);
+    await lockFundingReceiveCanonicalEvents(client, input.events);
+    const seen = new Set<string>();
+    const result: FundingReceiveClassificationStage[] = [];
+    for (const event of [...input.events].sort(
+      compareFundingReceiveCanonicalEvents,
+    )) {
+      // Prelock already checked every duplicate's immutable identity.
+      let row = await upsertFundingReceiveCanonicalEvent(client, event);
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      // Exact-refund suppression is revocable (e.g. a receipt loses finality).
+      // Re-observation must recheck it, not treat it as an immutable allocation.
+      // This only retains the event for classification; it cannot credit it.
+      if (row.allocation_error_code === "internal_exact_refund_suppressed") {
+        // The old owned-refund writer uses this reason too. Its unmarked
+        // receipt is deliberately outside the exact-refund contract; absence
+        // from that reader must NOT release a legacy internal transfer.
+        const recorded = (
+          await (
+            input.classifyRecordedRefunds ??
+            classifyRecordedRelayExactRefundEvents
+          )(client, {
+            userId: input.scope.userId,
+            events: [event],
+          })
+        ).get(refundCanonicalEventKey(event));
+        if (recorded && recorded.kind !== "unmatched") {
+          await quarantineFundingReceiveCanonicalInternalEvent(client, {
+            ...event,
+            reason: "exact_refund_correlation_pending",
+          });
+          row = await upsertFundingReceiveCanonicalEvent(client, event);
+        }
+      }
+      if (
+        row.allocation_status !== "pending" &&
+        !isFundingReceiveClassificationRetryReason(row.allocation_error_code)
+      ) {
+        result.push({ kind: "settled", eventId: row.id });
+        continue;
+      }
+      if (
+        (await bindFundingReceiveCanonicalEventSession(
+          client,
+          event,
+          input.scope.userId,
+        )) === "foreign_owner"
+      ) {
+        result.push({ kind: "foreign_owner", eventId: row.id });
+        continue;
+      }
+      row = await upsertFundingReceiveCanonicalEvent(client, event);
+      if (row.classification_receive_session_id) {
+        const selected = await client.query<{ user_id: string }>(
+          "select user_id from funding_receive_sessions where id=$1::uuid",
+          [row.classification_receive_session_id],
+        );
+        if (selected.rows[0]?.user_id !== input.scope.userId) {
+          result.push({ kind: "foreign_owner", eventId: row.id });
+          continue;
+        }
+      }
+      if (row.allocation_status === "pending") {
+        const saved = await quarantineFundingReceiveCanonicalInternalEvent(
+          client,
+          {
+            ...event,
+            reason: "exact_refund_correlation_pending",
+          },
+        );
+        if (!saved) throw new Error("canonical receive staging changed");
+      }
+      if (
+        !row.classification_receive_session_id ||
+        !row.classification_variant_id
+      ) {
+        result.push({ kind: "unbound", eventId: row.id });
+        continue;
+      }
+      const claimed = await client.query<ClassificationRetryRow>(
+        CLAIM_STAGED_RECEIVE_CLASSIFICATION_SQL,
+        [row.id, input.scope.userId, input.now, next],
+      );
+      result.push(
+        claimed.rows[0]
+          ? {
+              kind: "claimed",
+              retry: classificationRetry(claimed.rows[0], input.now),
+            }
+          : { kind: "deferred", eventId: row.id },
+      );
+    }
+    return result;
+  });
+}
+
 export async function claimFundingReceiveClassificationRetries(
   db: Pick<Pool, "query">,
   input: { now: Date; limit: number; retryDelayMs: number },
 ): Promise<readonly FundingReceiveClassificationRetry[]> {
+  const next = validateFundingReceiveClassificationRetryBudget(input);
+  const { rows } = await db.query<ClassificationRetryRow>(
+    CLAIM_RECEIVE_CLASSIFICATION_RETRIES_SQL,
+    [input.now, input.limit, next],
+  );
+  return rows.map((row) => classificationRetry(row, input.now));
+}
+
+/** Validate the ORIGINAL caller budget even when admission proceeds one event
+ * at a time. Validation must precede cleanup/deadline/empty-queue shortcuts. */
+export function validateFundingReceiveClassificationRetryBudget(input: {
+  now: Date;
+  limit: number;
+  retryDelayMs: number;
+}): Date {
   if (
     !Number.isSafeInteger(input.limit) ||
     input.limit <= 0 ||
-    input.limit > 2147483647 ||
-    !Number.isSafeInteger(input.retryDelayMs) ||
-    input.retryDelayMs <= 0
+    input.limit > 2147483647
   ) {
     throw new Error("invalid canonical receive retry budget");
   }
-  const next = new Date(input.now.getTime() + input.retryDelayMs);
-  if (!Number.isFinite(next.getTime()))
-    throw new Error("invalid canonical receive retry date");
-  const { rows } = await db.query<
-    FundingReceiveCanonicalEventAllocationRow & {
-      classification_lease_token: string;
-    }
-  >(CLAIM_RECEIVE_CLASSIFICATION_RETRIES_SQL, [input.now, input.limit, next]);
-  return rows.map((row) => ({
-    eventId: row.id,
-    leaseToken: row.classification_lease_token,
-    boundSessionId: row.classification_receive_session_id,
-    boundVariantId: row.classification_variant_id,
-    networkId: row.network_id,
-    asset: {
-      networkId: row.network_id,
-      assetId: row.asset_id,
-      decimals: row.asset_decimals,
-    },
-    destinationAddress: row.destination_address,
-    sourceAddress: row.source_address,
-    rawAmount: row.raw_amount,
-    transactionHash: row.tx_hash,
-    eventIndex: row.event_index,
-    ledgerHeight: row.ledger_height,
-    blockHash: row.block_hash,
-    observedAt: row.observed_at,
-    now: input.now,
-  }));
+  return receiveClassificationNextRetryAt(input.now, input.retryDelayMs);
 }
 
 /** Read-only hint before scope locking. Processing revalidates the exact token
@@ -3798,6 +4034,10 @@ export async function recordFundingReceiveReceiptRoutingDisposition(
         : input.disposition === "recovery_required"
           ? "recovery_required"
           : "observed";
+    // A concurrent automatic router takes scope before claiming this receipt.
+    // Do not update the row and only then request scope during status refresh.
+    if (!(await lockPersistedFundingReceiveSessionScope(client, input)))
+      return false;
     const receipt = await client.query(
       `
         update funding_receive_receipts
@@ -4597,6 +4837,8 @@ export async function settleFundingReceiveReceiptRouting(
     );
   }
   return tx(db, async (client) => {
+    if (!(await lockPersistedFundingReceiveSessionScope(client, input)))
+      return false;
     const receipt = await client.query(
       `
         update funding_receive_receipts

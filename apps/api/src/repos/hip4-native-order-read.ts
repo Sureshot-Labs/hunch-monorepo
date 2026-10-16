@@ -35,6 +35,7 @@ export const HIP4_NATIVE_ORDER_FILLED_SIZE = `(case when o.filled_size>0
   then o.filled_size end)`;
 
 export const HIP4_NATIVE_ORDER_READ_FACTS = `jsonb_build_object(
+  'actionId',native_action.id,
   'cloid',native_action.cloid,
   'submissionState',native_submission.state,
   'nativeStatus',native_submission.order_observation->>'status',
@@ -44,11 +45,14 @@ export const HIP4_NATIVE_ORDER_READ_FACTS = `jsonb_build_object(
     then to_timestamp(native_barrier.terminal_ms::double precision/1000) end,
   'filledQuantity',${HIP4_NATIVE_ORDER_FILLED_SIZE}::text,
   'fullQuantityObserved',coalesce(native_submission.fills_observation@>'{"fullQuantityObserved":true}'::jsonb,false),
+  'executionSummary',case when native_submission.reconcile_error is null
+    then native_submission.fills_observation->'executionSummary' else null end,
   'fillHistoryCoverage','not_asserted'
 )`;
 
 // A provider open-order snapshot is an additional source, not another order.
-// Exact owner + venue OID + environment + token only; never amount/time matching.
+// Exact owner + venue OID (or retained CLOID before a lost ACK is repaired)
+// + environment + token only; never amount/time matching.
 // Suppress also after native termination, so an older snapshot cannot revive it.
 export const HIP4_OBSERVED_ORDER_NOT_NATIVE = `not exists (
   select 1 from orders native_order
@@ -59,5 +63,16 @@ export const HIP4_OBSERVED_ORDER_NOT_NATIVE = `not exists (
     and native_order.venue_order_id=e.oid::text
     and native_action.environment=e.environment
     and native_action.signer_address=e.account_address
+    and native_action.token_id=('hyperliquid:' || e.environment || ':' || substring(e.coin from 2))
+) and not exists (
+  select 1 from hip4_order_actions native_action
+  join orders native_order on native_order.id=native_action.order_id
+  join hip4_order_submissions native_submission on native_submission.action_id=native_action.id
+  where native_action.action_kind='order'
+    and native_action.environment=e.environment
+    and native_action.signer_address=e.account_address
+    and native_action.cloid=lower(e.execution->>'cloid')
+    and native_order.user_id=$1 and native_order.venue='hyperliquid'
+    and native_order.venue_order_id is null
     and native_action.token_id=('hyperliquid:' || e.environment || ':' || substring(e.coin from 2))
 )`;

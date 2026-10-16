@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "@hunch/infra";
+import { projectTelegramNativeHandoffStatusInTransaction } from "./telegram-native-handoff-read.js";
 import { hip4RawUnits } from "@hunch/shared";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import {
@@ -16,10 +17,14 @@ import {
   type Hip4OrderBalanceBarrier,
 } from "../services/hip4-order-evidence.js";
 import type { Hip4TradeSigningInput } from "../services/hip4-trade-signing.js";
+import { HIP4_COMPLETED_ORDER_OBSERVATION_SQL } from "../services/hip4-order-observation-schedule.js";
+import { readHip4AccountPolicy } from "../services/hip4-account-repository.js";
 
-export const HIP4_CLAIM_ORDER_OBSERVATION_SQL = `with due_submissions as (
+function claimOrderObservationSql(completed: boolean) {
+  return `with due_submissions as (
   select action_id from hip4_order_submissions
   where state<>'rejected' and debit_asset_id is not null
+    and (${HIP4_COMPLETED_ORDER_OBSERVATION_SQL})=${completed ? "true" : "false"}
     and reconcile_after<=statement_timestamp()
     and (reconcile_lease_until is null or reconcile_lease_until<statement_timestamp())
   order by reconcile_after,action_id limit 1 for update skip locked
@@ -30,6 +35,10 @@ export const HIP4_CLAIM_ORDER_OBSERVATION_SQL = `with due_submissions as (
     reconcile_after=clock_timestamp()+greatest($1,$2)*interval '1 millisecond'
   from due_submissions where target_row.action_id=due_submissions.action_id
   returning target_row.action_id,target_row.reconcile_lease_token`;
+}
+export const HIP4_CLAIM_ORDER_OBSERVATION_SQL = claimOrderObservationSql(false);
+export const HIP4_CLAIM_COMPLETED_ORDER_OBSERVATION_SQL =
+  claimOrderObservationSql(true);
 
 export const HIP4_ORDER_OBSERVATION_CONTEXT_SQL = `select
   action_row.unsigned_envelope,action_row.signer_address,action_row.cloid,
@@ -324,11 +333,28 @@ export async function recordHip4OrderObservationInTransaction(
   }
   // Lease fence precedes every economic write. A waiting stale worker must not
   // publish over the newer claimant or consume its funding reservation.
+  const completed =
+    input.phase !== "status" &&
+    !error &&
+    !statusReadError &&
+    !input.repairError &&
+    status?.terminal === true &&
+    statusObservation?.balanceBarrier?.state === "terminal_observed" &&
+    fills?.kind === "observed" &&
+    fills.fullQuantityObserved &&
+    fills.executionSummary !== null &&
+    fills.executions.every(
+      (entry) => entry.netQuoteCash !== null && entry.feeToken === "USDC",
+    );
+  const nextRetryMs = completed
+    ? (await readHip4AccountPolicy(db)).policy.completedOrderRecheckIntervalMs
+    : input.retryMs;
   const saved = await db.query(
     `update hip4_order_submissions
     set order_observation=coalesce($3::jsonb,order_observation),
       state=case when $3::jsonb is not null or $8 then 'reconcile_required' else state end,
-      fills_observation=case when $4::jsonb is null then fills_observation else coalesce(fills_observation,'{}'::jsonb)||$4::jsonb end,
+      fills_observation=case when $4::jsonb is not null then coalesce(fills_observation,'{}'::jsonb)||$4::jsonb
+        when $5::text is not null then fills_observation-'executionSummary' else fills_observation end,
       reconcile_error=$5,reconcile_after=clock_timestamp()+$6*interval '1 millisecond',
       reconcile_lease_token=case when $7 then reconcile_lease_token else null end,
       reconcile_lease_until=case when $7 then reconcile_lease_until else null end,
@@ -345,6 +371,12 @@ export async function recordHip4OrderObservationInTransaction(
             fullQuantityObserved: fills.fullQuantityObserved,
             historyCoverage: fills.historyCoverage,
             executionCount: fills.executions.length,
+            // A later status-only read must not resurrect cash evidence from a
+            // failed repair. Rebuild it on the next successful fills phase.
+            executionSummary:
+              statusReadError || input.repairError
+                ? null
+                : fills.executionSummary,
             observedAt: input.responseAt,
             feeCoverage: fills.executions.every(
               (entry) => entry.netQuoteCash !== null,
@@ -354,12 +386,18 @@ export async function recordHip4OrderObservationInTransaction(
           }
         : null,
       error ?? statusReadError ?? input.repairError ?? null,
-      input.retryMs,
+      nextRetryMs,
       input.phase === "status" || (exactRejection && error === null),
       status !== null,
     ],
   );
   if (!saved.rows[0]) return { saved: false as const };
+  // Same transaction as official status/invalidation, AFTER its lease fence.
+  // No additional H lock and no post-commit best-effort lifecycle race.
+  await projectTelegramNativeHandoffStatusInTransaction(db, {
+    actionId: input.claim.action_id,
+    userId: input.userId,
+  });
   if (!status) return { saved: true as const, error };
   // A bound OID is useful even when fills still need bounded P2 history repair.
   const bound = await db.query(
@@ -397,6 +435,10 @@ export async function recordHip4OrderObservationInTransaction(
       where action_id=$1 and reconcile_lease_token=$2`,
       [input.claim.action_id, input.claim.reconcile_lease_token],
     );
+    await projectTelegramNativeHandoffStatusInTransaction(db, {
+      actionId: input.claim.action_id,
+      userId: input.userId,
+    });
     return { saved: true as const, error: null, rejected: true as const };
   }
   // Same consumer contract as other venues: exact acceptance completes the
@@ -448,20 +490,41 @@ export async function recordHip4OrderObservationInTransaction(
 }
 
 export async function failHip4OrderObservation(
-  db: Pick<Pool, "query">,
+  db: PoolClient,
   claim: Hip4OrderObservationClaim,
   error: string,
   retryMs: number,
 ) {
-  return (
+  // A failed repair invalidates the cached execution summary as well. Use the
+  // SAME native writer order P -> U -> S/I, not a submission-first CTE that can
+  // deadlock with admission. Caller supplies one transaction; even failures
+  // wake the shared intent lifecycle atomically with the current lease fence.
+  if (!(await readHip4OrderObservationContext(db, claim))) return false;
+  await lockFundingPolicyForTransaction(db);
+  const context = await readHip4OrderObservationContext(db, claim);
+  if (!context) return false;
+  const lockedOwner = await db.query(
+    "select id from users where id=$1 for update",
+    [context.user_id],
+  );
+  const current = await readHip4OrderObservationContext(db, claim);
+  if (lockedOwner.rowCount !== 1 || current?.user_id !== context.user_id)
+    return false;
+  const saved =
     (
       await db.query(
         `update hip4_order_submissions set reconcile_error=$3,reconcile_after=clock_timestamp()+$4*interval '1 millisecond',
+    fills_observation=fills_observation-'executionSummary',updated_at=clock_timestamp(),
     reconcile_lease_token=null,reconcile_lease_until=null
     where action_id=$1 and reconcile_lease_token=$2 and reconcile_lease_until>clock_timestamp()
     returning action_id`,
         [claim.action_id, claim.reconcile_lease_token, error, retryMs],
       )
-    ).rowCount === 1
-  );
+    ).rowCount === 1;
+  if (saved)
+    await projectTelegramNativeHandoffStatusInTransaction(db, {
+      actionId: claim.action_id,
+      userId: context.user_id,
+    });
+  return saved;
 }

@@ -15,6 +15,7 @@ import {
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
 } from "../execution/delegated-funding-profile-ids.js";
 import { RELAY_HYPERCORE_EXECUTOR } from "../domain/hypercore-identity.js";
+import { canonicalAssetKey } from "../domain/asset-identity.js";
 
 export const FUNDING_POLICY_KEY = "funding_control_plane";
 
@@ -489,7 +490,7 @@ function assetKey(asset: {
   assetId: string;
   decimals: number;
 }): string {
-  return `${asset.networkId}:${asset.assetId}:${asset.decimals}`;
+  return canonicalAssetKey(asset);
 }
 
 function componentById(
@@ -660,7 +661,7 @@ function validateParsedFundingPolicy(
       );
     }
     if (
-      ["kalshi", "dflow", "hyperliquid"].includes(venue.venueId) &&
+      ["kalshi", "dflow"].includes(venue.venueId) &&
       (venue.lifecycleEnabled ||
         venue.fundingEnabled ||
         venue.tradingEnabled ||

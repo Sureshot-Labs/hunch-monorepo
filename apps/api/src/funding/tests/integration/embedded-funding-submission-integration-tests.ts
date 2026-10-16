@@ -10,6 +10,7 @@ import {
   createFundingQuoteInTransaction,
   commitFundingOperationInTransaction,
   allocateFundingObservationInTransaction,
+  FundingPersistenceError,
   type FundingCommitPlan,
 } from "../../persistence/funding-operation-repository.js";
 import {
@@ -35,6 +36,8 @@ import {
   applyFundingStepReceiptEvidenceInTransaction,
 } from "../../persistence/funding-step-receipt-repository.js";
 import { loadFundingLifecycleFactsForOperationInTransaction } from "../../lifecycle/funding-lifecycle-facts-repository.js";
+import { FundingStepReceiptReconciliationDriver } from "../../execution/step-receipt-reconciler.js";
+import { tryLockFundingPhysicalEvent } from "../../persistence/funding-physical-event-gate.js";
 
 const id = () => crypto.randomUUID();
 const signer = "0x00000000000000000000000000000000000000a1";
@@ -841,3 +844,272 @@ for (const failingPoll of ["destinationPoll", "postconditionPoll"] as const) {
     `${failingPoll} failure must preserve the reservation`,
   );
 }
+
+// Real queue/driver/persistence recovery. Chain inspection is synthetic; there
+// is no signing, submission or consumer callback in this evidence-only test.
+const physicalContention = await fixture(false, "trade_shortfall");
+const physicalHash = `0x${crypto.randomBytes(32).toString("hex")}`;
+const physicalKey = {
+  networkId: asset.networkId,
+  transactionHash: physicalHash,
+  eventIndex: "7",
+};
+await tx(pool, (client) =>
+  finishFundingStepAttemptInTransaction(client, {
+    attemptId: physicalContention.context.attemptId,
+    outcome: "submitted",
+    broadcastMayHaveOccurred: true,
+    referenceKind: "transaction",
+    receiptRefCiphertext: codec.encrypt(physicalHash),
+    receiptRefLookupHmac: codec.fingerprint(physicalHash),
+    lookupKeyVersion: codec.keyVersion,
+    actualCosts: {},
+  }),
+);
+await pool.query(
+  `update funding_reconciliation_jobs set status='dead_letter',completed_at=now(),
+  lease_owner=null,lease_token=null,lease_until=null where operation_id=$1`,
+  [physicalContention.context.operationId],
+);
+const physicalDriver = new FundingStepReceiptReconciliationDriver(codec, {
+  inspectEvm: async () => ({
+    status: "failed",
+    canonical: true,
+    actionMatch: true,
+    ledgerHeight: "9",
+    blockHash: `0x${"9a".repeat(32)}`,
+    failureCode: "evm_transaction_reverted",
+    evidence: { failureFinalized: true, transactionHash: physicalHash },
+  }),
+  applyEvidence: (evidencePool, evidence) =>
+    tx(evidencePool, async (client) => {
+      await tryLockFundingPhysicalEvent(client, physicalKey);
+      return applyFundingStepReceiptEvidenceInTransaction(client, evidence);
+    }),
+});
+const physicalPoll = (operationId: string, at: Date) => {
+  assert.equal(operationId, physicalContention.context.operationId);
+  return physicalDriver.pollOperation(pool, operationId, at);
+};
+const contentionHolder = await pool.connect();
+const sweepStart = new Date(repairNow.getTime() + 1800_000);
+try {
+  await pool.query(
+    "update funding_recovery_scan_cursor set last_operation_id=$1 where cursor_name='stopped_evidence_v1'",
+    [previousUuid(physicalContention.context.operationId)],
+  );
+  await contentionHolder.query("begin");
+  await tryLockFundingPhysicalEvent(contentionHolder, physicalKey);
+  const mixedTime = new Date(sweepStart.getTime() - 360_000);
+  const mixedCalls: string[] = [];
+  assert.equal(
+    await recoverStoppedFundingOperations(pool, {
+      workerId: "stopped-physical-mixed-failure",
+      now: mixedTime,
+      refundCanonicalPoll: async () => {
+        mixedCalls.push("canonical");
+        return { checked: 0 };
+      },
+      receiptPoll: async (operationId, at) => {
+        mixedCalls.push("receipt");
+        return physicalPoll(operationId, at);
+      },
+      providerPoll: async () => {
+        mixedCalls.push("provider");
+        return { requestsPolled: 0 };
+      },
+      postconditionPoll: async () => {
+        mixedCalls.push("postcondition");
+        throw new FundingPersistenceError(
+          "actual_amount_conflict",
+          "private detail",
+        );
+      },
+      destinationPoll: async () => {
+        mixedCalls.push("destination");
+        return { destinationsPolled: 0, destinationSatisfied: false };
+      },
+    }),
+    1,
+  );
+  assert.deepEqual(mixedCalls, [
+    "canonical",
+    "receipt",
+    "provider",
+    "postcondition",
+    "destination",
+  ]);
+  const mixedJob = (
+    await pool.query(
+      "select status,last_error_code,last_error_summary from funding_reconciliation_jobs where operation_id=$1",
+      [physicalContention.context.operationId],
+    )
+  ).rows[0];
+  assert.equal(mixedJob.status, "dead_letter");
+  assert.equal(
+    mixedJob.last_error_code,
+    "evidence_repair_actual_amount_conflict",
+  );
+  assert.ok(!mixedJob.last_error_summary.includes("private"));
+  assert.equal(
+    (
+      await pool.query(
+        "select count(*)::int as total from balance_reservations where operation_id=$1 and state='active'",
+        [physicalContention.context.operationId],
+      )
+    ).rows[0].total,
+    1,
+  );
+  await pool.query(
+    "update funding_recovery_scan_cursor set last_operation_id=$1 where cursor_name='stopped_evidence_v1'",
+    [previousUuid(physicalContention.context.operationId)],
+  );
+  assert.equal(
+    await recoverStoppedFundingOperations(pool, {
+      workerId: "stopped-physical-contention",
+      now: sweepStart,
+      receiptPoll: physicalPoll,
+    }),
+    1,
+  );
+  const stoppedBusy = (
+    await pool.query(
+      `select status,last_error_code,due_at from funding_reconciliation_jobs
+       where operation_id=$1`,
+      [physicalContention.context.operationId],
+    )
+  ).rows[0];
+  assert.equal(stoppedBusy.status, "dead_letter");
+  assert.equal(
+    stoppedBusy.last_error_code,
+    "evidence_repair_physical_event_busy",
+  );
+  assert.equal(stoppedBusy.due_at.getTime() - sweepStart.getTime(), 300_000);
+  assert.equal(
+    (
+      await pool.query(
+        "select count(*)::int as total from balance_reservations where operation_id=$1 and state='active'",
+        [physicalContention.context.operationId],
+      )
+    ).rows[0].total,
+    1,
+    "contention is not successful verification and cannot release a hold",
+  );
+  const busyFacts = await loadFundingLifecycleFactsForOperationInTransaction(
+    pool,
+    {
+      operationId: physicalContention.context.operationId,
+      now: sweepStart,
+    },
+  );
+  assert.equal(busyFacts?.actions[0]?.authorization, "blocked");
+  await contentionHolder.query("rollback");
+  // The stopped scanner uses its established five-minute/update cursor, not
+  // due_at alone. A later eligible sweep resumes the same ordinary driver.
+  const sweepRetry = new Date(sweepStart.getTime() + 360_000);
+  await pool.query(
+    "update funding_recovery_scan_cursor set last_operation_id=$1 where cursor_name='stopped_evidence_v1'",
+    [previousUuid(physicalContention.context.operationId)],
+  );
+  assert.equal(
+    await recoverStoppedFundingOperations(pool, {
+      workerId: "stopped-physical-retry",
+      now: sweepRetry,
+      receiptPoll: physicalPoll,
+      pollDelayMs: 2000,
+    }),
+    1,
+  );
+  const repaired = (
+    await pool.query(
+      `select operation_row.status,job_row.status as job_status,job_row.due_at,
+       (select count(*)::int from balance_reservations reservation_row
+        where reservation_row.operation_id=operation_row.id and reservation_row.state='active') as holds,
+       (select count(*)::int from funding_step_receipt_observations receipt_row
+        where receipt_row.operation_id=operation_row.id and receipt_row.status='failed'
+          and receipt_row.canonical) as receipts
+       from funding_operations operation_row join funding_reconciliation_jobs job_row
+         on job_row.operation_id=operation_row.id where operation_row.id=$1`,
+      [physicalContention.context.operationId],
+    )
+  ).rows[0];
+  assert.equal(repaired.status, "failed");
+  assert.equal(repaired.job_status, "scheduled");
+  assert.equal(repaired.holds, 0);
+  assert.equal(repaired.receipts, 1);
+  assert.equal(repaired.due_at.getTime() - sweepRetry.getTime(), 2000);
+
+  // Repeated terminal contention keeps every invalidation callback and the
+  // original 15-minute incident bound; only its diagnostic/cadence differs.
+  await contentionHolder.query("begin");
+  await tryLockFundingPhysicalEvent(contentionHolder, physicalKey);
+  const previousPriority = (
+    await pool.query(
+      "select priority from funding_reconciliation_jobs where operation_id=$1",
+      [physicalContention.context.operationId],
+    )
+  ).rows[0].priority;
+  try {
+    await pool.query(
+      "update funding_reconciliation_jobs set priority=2147483647 where operation_id=$1",
+      [physicalContention.context.operationId],
+    );
+    for (const afterWindow of [false, true]) {
+      const pollNow = new Date(
+        sweepRetry.getTime() + (afterWindow ? 16 * 60_000 : 2000),
+      );
+      const pollCalls: string[] = [];
+      const result = await runFundingReconciliationBatch(pool, {
+        workerId: `terminal-physical-${afterWindow}`,
+        now: pollNow,
+        limit: 1,
+        concurrency: 1,
+        pollDelayMs: 2000,
+        retryDelayMs: 30000,
+        receiptPoll: physicalPoll,
+        refundCanonicalPoll: async () => {
+          pollCalls.push("canonical");
+          return { checked: 0 };
+        },
+        postconditionPoll: async () => {
+          pollCalls.push("postcondition");
+          return { postconditionsPolled: 0 };
+        },
+        destinationPoll: async () => {
+          pollCalls.push("destination");
+          return { destinationsPolled: 0, destinationSatisfied: false };
+        },
+      });
+      assert.equal(result.claimed, 1);
+      assert.deepEqual(pollCalls, [
+        "canonical",
+        "postcondition",
+        "destination",
+      ]);
+      const terminalJob = (
+        await pool.query(
+          "select status,last_error_code,due_at from funding_reconciliation_jobs where operation_id=$1",
+          [physicalContention.context.operationId],
+        )
+      ).rows[0];
+      assert.equal(terminalJob.last_error_code, "funding_physical_event_busy");
+      assert.equal(
+        terminalJob.status,
+        afterWindow ? "dead_letter" : "scheduled",
+      );
+      assert.equal(terminalJob.due_at.getTime() - pollNow.getTime(), 2000);
+      assert.equal(result.deadLettered, afterWindow ? 1 : 0);
+    }
+  } finally {
+    await pool.query(
+      "update funding_reconciliation_jobs set priority=$2 where operation_id=$1",
+      [physicalContention.context.operationId, previousPriority],
+    );
+  }
+} finally {
+  await contentionHolder.query("rollback");
+  contentionHolder.release();
+}
+console.log(
+  "[embedded-funding-submission-integration-tests] real receipt driver aggregate contention: stopped hold/fence, mixed diagnostics, normal sweep persistence/reduction and terminal retry bound passed",
+);

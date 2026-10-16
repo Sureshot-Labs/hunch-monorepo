@@ -331,6 +331,12 @@ export type FundingIntent = Readonly<{
   /** Presentation hint only; never authorizes funding or changes its amount. */
   marketBuyAmountUsdCents?: number;
   marketBuySlippageBps?: number;
+  /** Optional exact limit sizing advice; not a consumer or funding authority. */
+  limitBuy?: Readonly<{
+    quantity: string;
+    limitPrice: string;
+    timeInForce: "Gtc" | "Alo";
+  }>;
   /** Session capability hint: can only restrict owned external sources. */
   connectedExternalWalletRefs?: readonly string[];
   purpose: FundingPurpose;
@@ -485,6 +491,15 @@ export type FundingDestinationOption = Readonly<{
 export type IntentLiquidityProjection = Readonly<{
   /** Optional advice failed, not evidence that depositing is required. */
   marketBuySuggestionUnavailable?: boolean;
+  limitBuySuggestionUnavailable?: boolean;
+  suggestedLimitBuy?: Readonly<{
+    originalQuantity: string;
+    quantity: string;
+    limitPrice: string;
+    timeInForce: "Gtc" | "Alo";
+    requiredRaw: string;
+    expiresAt: string;
+  }>;
   /** Nominal Buy suggestion, not an executable quote. Uses this projection's expiry. */
   suggestedMarketBuy?: Readonly<{
     originalAmountUsdCents: number;

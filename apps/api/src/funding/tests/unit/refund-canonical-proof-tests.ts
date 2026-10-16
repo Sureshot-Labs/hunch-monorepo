@@ -100,9 +100,14 @@ test("known refund proof runs before slow source/Relay refresh consumes the leas
     terminalRelayRefundWatch: true,
     now,
     deadlineMs: 30_000,
+    progressToken: "00000000-0000-4000-8000-000000000099",
     refundCanonicalPoll: async (_operationId, observedAt, budget) => {
       stages.push("known-refund");
       assert.equal(budget?.deadlineMs, 30_000);
+      assert.equal(
+        budget?.progressToken,
+        "00000000-0000-4000-8000-000000000099",
+      );
       assert.ok(budget);
       assert.equal(
         (

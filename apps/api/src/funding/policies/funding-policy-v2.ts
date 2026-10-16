@@ -10,6 +10,12 @@ import {
   type RelayRouteSpec,
 } from "../../funding-providers/relay/mappings.js";
 import { sameAsset } from "../domain/asset-identity.js";
+import {
+  HYPERCORE_MAINNET_USDC,
+  HYPERCORE_SPOT_LOCATION_PATTERN,
+  isHypercoreMainnetUsdc,
+  hypercoreSourceLocationPattern,
+} from "../domain/hypercore-identity.js";
 import type { AssetRef, FundingDestinationOption } from "../domain/types.js";
 import { supportsCanonicalFundingReceiveEvents } from "../receive/canonical-receive-capabilities.js";
 import { usdAmountSchema } from "../domain/schemas.js";
@@ -26,6 +32,7 @@ import { RELAY_EVM_FUNDING_PROFILE_SPECS } from "../execution/relay-evm-profile-
 export const FUNDING_VENUE_IDS = deepFreeze([
   "polymarket",
   "limitless",
+  "hyperliquid",
 ] as const);
 export const FUNDING_RECEIVE_ASSET_IDS = deepFreeze([
   "polygon:pusd",
@@ -34,6 +41,7 @@ export const FUNDING_RECEIVE_ASSET_IDS = deepFreeze([
   "base:usdc",
   "solana:usdc",
   "solana:sol",
+  "hypercore:usdc",
 ] as const);
 
 export type FundingVenueId = (typeof FUNDING_VENUE_IDS)[number];
@@ -123,8 +131,9 @@ type CatalogAsset = Readonly<{
   asset: AssetRef;
   pricePolicyId: string | null;
   valuationEnabled: boolean;
-  walletLocationPatternId: string;
-  walletCapabilities: readonly ("observe" | "value" | "execution_source")[];
+  sourceLocationPatternId: string;
+  sourceLocationKind: "wallet" | "venue_account";
+  sourceCapabilities: FundingRuntimePolicy["locations"][number]["capabilities"];
 }>;
 
 function walletLocationPatternId(asset: AssetRef): string {
@@ -139,13 +148,28 @@ const stableAsset = (asset: AssetRef): CatalogAsset => ({
   asset,
   pricePolicyId: "exact-stable-policy-v1",
   valuationEnabled: true,
-  walletLocationPatternId: walletLocationPatternId(asset),
-  walletCapabilities: ["observe", "value", "execution_source"],
+  sourceLocationPatternId: walletLocationPatternId(asset),
+  sourceLocationKind: "wallet",
+  sourceCapabilities: ["observe", "value", "execution_source"],
 });
 
 const FUNDING_ASSET_CATALOG: Readonly<
   Record<FundingReceiveAssetId, CatalogAsset>
 > = deepFreeze({
+  "hypercore:usdc": {
+    asset: HYPERCORE_MAINNET_USDC,
+    pricePolicyId: "exact-stable-policy-v1",
+    valuationEnabled: true,
+    sourceLocationPatternId: HYPERCORE_SPOT_LOCATION_PATTERN,
+    sourceLocationKind: "venue_account",
+    sourceCapabilities: [
+      "observe",
+      "value",
+      "execution_source",
+      "venue_settlement",
+      "withdrawal_source",
+    ],
+  },
   "polygon:pusd": stableAsset({
     networkId: "evm:137",
     assetId: RELAY_PINNED_ASSETS.polygonPusd,
@@ -179,12 +203,13 @@ const FUNDING_ASSET_CATALOG: Readonly<
     },
     pricePolicyId: PYTH_SOL_USD_PRICE_POLICY_ID,
     valuationEnabled: true,
-    walletLocationPatternId: walletLocationPatternId({
+    sourceLocationPatternId: walletLocationPatternId({
       networkId: "solana:mainnet",
       assetId: RELAY_PINNED_ASSETS.solanaNative,
       decimals: 9,
     }),
-    walletCapabilities: ["observe", "value", "execution_source"],
+    sourceLocationKind: "wallet",
+    sourceCapabilities: ["observe", "value", "execution_source"],
   },
 });
 
@@ -220,6 +245,13 @@ const FUNDING_VENUE_CATALOG: Readonly<Record<FundingVenueId, CatalogVenue>> =
       cardReceiveAssets: ["base:usdc"],
       privyMethodId: "privy-limitless-usdc-v1",
     },
+    hyperliquid: {
+      settlementAsset: "hypercore:usdc",
+      settlementLocationPatternId: HYPERCORE_SPOT_LOCATION_PATTERN,
+      directReceiveAssets: [],
+      cardReceiveAssets: ["base:usdc", "polygon:usdc"],
+      privyMethodId: "privy-hyperliquid-usdc-v1",
+    },
   });
 
 type CatalogRoute = Readonly<{
@@ -251,7 +283,9 @@ const FUNDING_ROUTE_CATALOG: readonly CatalogRoute[] = deepFreeze([
         sourceAsset,
         destinationAsset,
         sourceLocationPatternId:
-          FUNDING_ASSET_CATALOG[sourceAsset].walletLocationPatternId,
+          spec.sourceVm === "hypercore"
+            ? hypercoreSourceLocationPattern(spec.nativeSourceDex ?? "spot")
+            : FUNDING_ASSET_CATALOG[sourceAsset].sourceLocationPatternId,
         destinationLocationPatternId:
           FUNDING_VENUE_CATALOG[targetVenue].settlementLocationPatternId,
         targetVenue,
@@ -359,17 +393,50 @@ export function compileFundingIntentPolicy(
     string,
     FundingRuntimePolicy["locations"][number]
   >();
-  const addLocation = (location: FundingRuntimePolicy["locations"][number]) =>
-    locations.set(location.locationPatternId, location);
+  const addLocation = (location: FundingRuntimePolicy["locations"][number]) => {
+    const existing = locations.get(location.locationPatternId);
+    if (
+      existing &&
+      (existing.locationKind !== location.locationKind ||
+        !sameAsset(existing.asset, location.asset))
+    ) {
+      throw new Error("funding location has conflicting catalogue identity");
+    }
+    locations.set(location.locationPatternId, {
+      ...location,
+      capabilities: unique([
+        ...(existing?.capabilities ?? []),
+        ...location.capabilities,
+      ]),
+    });
+  };
   for (const alias of policy.receive.assets) {
     const catalog = FUNDING_ASSET_CATALOG[alias];
     addLocation({
-      locationPatternId: catalog.walletLocationPatternId,
-      locationKind: "wallet",
+      locationPatternId: catalog.sourceLocationPatternId,
+      locationKind: catalog.sourceLocationKind,
       asset: catalog.asset,
       ownership: "owned",
       observable: true,
-      capabilities: [...catalog.walletCapabilities],
+      capabilities: [...catalog.sourceCapabilities],
+      enabled: true,
+    });
+  }
+  for (const route of routes.filter(
+    (row) => row.spec.sourceVm === "hypercore",
+  )) {
+    addLocation({
+      locationPatternId: route.sourceLocationPatternId,
+      locationKind: "venue_account",
+      asset: route.spec.source,
+      ownership: "owned",
+      observable: true,
+      capabilities: [
+        "observe",
+        "value",
+        "execution_source",
+        "withdrawal_source",
+      ],
       enabled: true,
     });
   }
@@ -418,7 +485,9 @@ export function compileFundingIntentPolicy(
       const relayProfileIds = Object.values(
         RELAY_EVM_FUNDING_PROFILE_SPECS,
       ).flatMap((profile) =>
-        profile.venueIds.includes(venueId) &&
+        profile.venueIds.some(
+          (registeredVenueId) => registeredVenueId === venueId,
+        ) &&
         routes.some(
           (route) =>
             route.targetVenue === venueId &&
@@ -638,6 +707,31 @@ export function fundingReceiveAssetEnabled(
   );
 }
 
+/** Registered spendable source; native venue cash is not a manual wallet
+ * receive target, but can fund an exact route through the same planner. */
+function fundingRouteSourceEnabled(
+  policy: FundingRuntimePolicy,
+  asset: AssetRef,
+): boolean {
+  return (
+    policy.assets.some(
+      (candidate) =>
+        candidate.enabled &&
+        candidate.observationEnabled &&
+        sameAsset(candidate.asset, asset),
+    ) &&
+    policy.locations.some(
+      (location) =>
+        location.enabled &&
+        location.ownership === "owned" &&
+        location.observable &&
+        location.capabilities.includes("observe") &&
+        location.capabilities.includes("execution_source") &&
+        sameAsset(location.asset, asset),
+    )
+  );
+}
+
 export function fundingDestinationEnabled(
   policy: FundingRuntimePolicy,
   option: Pick<FundingDestinationOption, "requiredAsset" | "venueId">,
@@ -660,7 +754,8 @@ export function fundingVenueReceiveEnabled(
   const venue = FUNDING_VENUE_CATALOG[venueId as FundingVenueId];
   const settlementAsset = FUNDING_ASSET_CATALOG[venue.settlementAsset].asset;
   const settlementReady =
-    supportsCanonicalFundingReceiveEvents(settlementAsset.networkId) &&
+    (supportsCanonicalFundingReceiveEvents(settlementAsset.networkId) ||
+      isHypercoreMainnetUsdc(settlementAsset)) &&
     policy.assets.some(
       (candidate) =>
         candidate.enabled &&
@@ -690,7 +785,7 @@ export function fundingVenueReceiveEnabled(
       route.destinationLocationPatternId ===
         venue.settlementLocationPatternId &&
       sameAsset(route.destinationAsset, settlementAsset) &&
-      fundingReceiveAssetEnabled(policy, route.sourceAsset),
+      fundingRouteSourceEnabled(policy, route.sourceAsset),
   );
   const privyReady = policy.privyFundingMethods.some(
     (method) =>

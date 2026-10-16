@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import type { Pool, PoolClient } from "pg";
 import {
   pollRelayRefundCanonicalWatch,
-  persistRefundCanonicalProofs,
   REFUND_CANONICAL_PAGE_SQL,
   REFUND_CANONICAL_LOCK_SQL,
   exactRefundWatchPending,
   type RefundWatchRow,
 } from "../reconciliation/relay-refund-canonical-watch.js";
+import { persistRefundCanonicalProofsFixture as persistRefundCanonicalProofs } from "./refund-canonical-effects-fixture.js";
 import {
   pollFundingReconciliationEvidence,
   runFundingReconciliationBatch,
@@ -350,11 +350,15 @@ export async function verifyRefundCanonicalWatchPg(
     }
     // Generic plans: lots of same-operation legacy receipts must not be filtered
     // before the page boundary. Every row remains reachable by immutable id.
+    // One synthetic transaction with distinct log indices preserves 50k real
+    // physical keys/index rows without reserving 50k additional transaction
+    // gates inside this rollback-only plan fixture. Runtime batches remain
+    // policy-bounded; do not raise server lock memory to seed this fixture.
     await db.query(
       `insert into funding_observations(operation_id,segment_id,kind,network_id,asset_id,asset_decimals,
       tx_hash,event_index,to_address,raw_amount,observed_at,finality_status,canonical,finalized_at,metadata)
       select $1::uuid,$2::uuid,'refund_credit','evm:8453','0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',6,
-        '0x'||repeat(md5('watch-fixture-'||$1::text||source_row::text),2),'0','0x${"12".repeat(20)}','1',now(),'finalized',true,now(),'{}'::jsonb
+        '0x'||repeat(md5('watch-fixture-'||$1::text),2),source_row::text,'0x${"12".repeat(20)}','1',now(),'finalized',true,now(),'{}'::jsonb
       from generate_series(1,50000) source_row`,
       [input.operationId, input.segmentId],
     );

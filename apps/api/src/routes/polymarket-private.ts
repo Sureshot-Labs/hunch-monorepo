@@ -46,7 +46,7 @@ import {
   syncPolymarketBalanceAllowanceRoute,
   syncPolymarketOrdersRoute,
 } from "../services/polymarket-trading-execution-service.js";
-import { matchesTelegramAppHandoffV2CurrentScope } from "../services/telegram-bot-trading.js";
+import { telegramAppHandoffV2CurrentScope } from "../services/telegram-bot-trading.js";
 
 // Mounted under /trade/polymarket.
 export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
@@ -778,12 +778,7 @@ export const polymarketPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const result = await submitPolymarketClientSignedOrder({
-        assertTelegramAppHandoffV2Scope: async (sealed) => {
-          return matchesTelegramAppHandoffV2CurrentScope({
-            db: sealed.db,
-            sealed,
-          });
-        },
+        assertTelegramAppHandoffV2Scope: telegramAppHandoffV2CurrentScope,
         body: request.body,
         log: request.log,
         pool,

@@ -7,6 +7,12 @@ import {
 } from "../domain/refund-settlement.js";
 import { isRecord } from "../../lib/type-guards.js";
 import type { OwnedRouteCanonicalDestinationEvent } from "./owned-route-destination-observer.js";
+import type { FundingClassificationRevision } from "../persistence/funding-classification-revisions.js";
+import { receiveRoleEventFingerprint } from "../receive/receive-role-progress.js";
+import {
+  readCommittedFundingIdentity,
+  refundSnapshotAccountIds,
+} from "../domain/committed-economic-identity.js";
 
 export const EXACT_REFUND_CORRELATION_PENDING =
   "exact_refund_correlation_pending";
@@ -20,6 +26,13 @@ export type RecordedExactRefundClassification =
         | "exact_refund_receipt_not_final";
     }>;
 
+export type RecordedRefundRoleEvidence = Readonly<{
+  kind: "recorded";
+  eventFingerprint: string;
+  classification: RecordedExactRefundClassification;
+  dependencies: readonly FundingClassificationRevision[];
+}>;
+
 /** Absence here is NOT proof of an external deposit: the refund observer may
  * not have written the receipt yet. The caller must also resolve the pending
  * source-action candidates before allocating a receive credit. */
@@ -30,7 +43,8 @@ export const RECORDED_EXACT_REFUND_EVENTS_SQL = `
     receipt_row.raw_amount, receipt_row.from_address, receipt_row.to_address,
     receipt_row.ledger_height, receipt_row.block_hash,
     receipt_row.canonical, receipt_row.finality_status, receipt_row.metadata,
-    operation_row.user_id,
+    operation_row.user_id,operation_row.source_snapshot as operation_source_snapshot,
+    coalesce(revision_row.revision,0)::text as classification_revision,
     segment_row.refund_location_snapshot,
     segment_row.provider_quote_ref_lookup_hmac, segment_row.lookup_key_version
   from jsonb_to_recordset($1::jsonb) as event_key(
@@ -38,7 +52,9 @@ export const RECORDED_EXACT_REFUND_EVENTS_SQL = `
   join lateral (
     select * from funding_observations candidate_row
     where candidate_row.network_id=event_key.network_id
-      and candidate_row.tx_hash=event_key.tx_hash
+      and candidate_row.tx_hash is not null
+      and md5(lower(candidate_row.tx_hash))=md5(event_key.tx_hash)
+      and lower(candidate_row.tx_hash)=event_key.tx_hash
       and candidate_row.event_index=event_key.event_index
       and candidate_row.kind='refund_credit'
     -- Two different claims already prove a collision; this is not a page of
@@ -46,6 +62,7 @@ export const RECORDED_EXACT_REFUND_EVENTS_SQL = `
     limit 2
   ) receipt_row on true
   join funding_operations operation_row on operation_row.id=receipt_row.operation_id
+  left join funding_classification_revisions revision_row on revision_row.operation_id=operation_row.id
   left join funding_operation_segments segment_row
     on segment_row.operation_id=receipt_row.operation_id
       and segment_row.id=receipt_row.segment_id and segment_row.provider_id='relay'`;
@@ -56,6 +73,8 @@ export type RecordedRefundRow = Readonly<{
   operation_id: string;
   segment_id: string | null;
   user_id: string;
+  operation_source_snapshot?: unknown;
+  classification_revision: string;
   network_id: string;
   asset_id: string;
   asset_decimals: number;
@@ -116,17 +135,14 @@ export function classifyRecordedExactRefund(
     )
   )
     return { kind: "unmatched" };
-  const alternatives =
-    isRecord(snapshot) && isRecord(snapshot.alternativeRefundLocations)
-      ? snapshot.alternativeRefundLocations.locations
-      : [];
+  const accountIds = refundSnapshotAccountIds(snapshot);
   const ownersMatch =
-    isRecord(snapshot) &&
-    snapshot.accountId === userId &&
-    Array.isArray(alternatives) &&
-    alternatives.every(
-      (location) => isRecord(location) && location.accountId === userId,
-    );
+    accountIds !== null &&
+    readCommittedFundingIdentity({
+      currentOwnerUserId: userId,
+      operationSourceSnapshot: row.operation_source_snapshot,
+      accountIds,
+    }) !== null;
   if (
     !row.segment_id ||
     row.user_id !== userId ||
@@ -188,13 +204,13 @@ export function classifyRecordedExactRefund(
 
 /** Indexed exact-physical-key lookup, including terminal/reorged records.
  * Batching uses the receive scanner's bounded event batch. No provider IO. */
-export async function classifyRecordedRelayExactRefundEvents(
+export async function readRecordedRelayRefundRoleEvidence(
   db: Pick<PoolClient, "query">,
   input: {
     userId: string;
     events: readonly OwnedRouteCanonicalDestinationEvent[];
   },
-): Promise<ReadonlyMap<string, RecordedExactRefundClassification>> {
+): Promise<ReadonlyMap<string, RecordedRefundRoleEvidence>> {
   const events = input.events.filter(
     (event) => event.networkId === "evm:8453" || event.networkId === "evm:137",
   );
@@ -231,8 +247,6 @@ export async function classifyRecordedRelayExactRefundEvents(
           event.ledgerHeight,
           event.blockHash?.toLowerCase(),
         ]);
-      if (group.some((event) => envelope(event) !== envelope(group[0])))
-        return [key, conflict()];
       const matching = rows.filter((row) => row.identity === key);
       const decisions = group.map((event) =>
         classifyRecordedExactRefund(input.userId, event, matching),
@@ -240,9 +254,41 @@ export async function classifyRecordedRelayExactRefundEvents(
       // Repeated keys with inconsistent envelopes cannot win by input order.
       return [
         key,
-        decisions.find((decision) => decision.kind === "recovery_required") ??
-          decisions[0],
+        {
+          kind: "recorded" as const,
+          eventFingerprint: receiveRoleEventFingerprint(group[0]),
+          classification: group.some(
+            (event) => envelope(event) !== envelope(group[0]),
+          )
+            ? conflict()
+            : (decisions.find(
+                (decision) => decision.kind === "recovery_required",
+              ) ?? decisions[0]),
+          // Same statement snapshot as the receipt, including negative legacy
+          // witnesses. Never read a newer revision and attach it to older rows.
+          // E locks exclude new physical claims; O/F fences cover these readers.
+          dependencies: matching.map((row) => ({
+            userId: row.user_id,
+            operationId: row.operation_id,
+            revision: row.classification_revision,
+          })),
+        },
       ];
     }),
+  );
+}
+
+/** Compatibility wrapper: existing receive/refund callers keep their exact
+ * verdicts. Publication callers consume the guarded facts instead. */
+export async function classifyRecordedRelayExactRefundEvents(
+  db: Pick<PoolClient, "query">,
+  input: {
+    userId: string;
+    events: readonly OwnedRouteCanonicalDestinationEvent[];
+  },
+): Promise<ReadonlyMap<string, RecordedExactRefundClassification>> {
+  const evidence = await readRecordedRelayRefundRoleEvidence(db, input);
+  return new Map(
+    [...evidence].map(([key, value]) => [key, value.classification]),
   );
 }

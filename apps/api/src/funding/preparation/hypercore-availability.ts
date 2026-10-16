@@ -1,7 +1,15 @@
 import type { Pool } from "@hunch/infra";
-import { FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL } from "../../account-value/funding-movement-feed.js";
+import {
+  FUNDING_NATIVE_SNAPSHOT_DEBIT_CANDIDATES_SQL,
+  requireAdmittedFundingSnapshotDebits,
+  FundingSnapshotDebitEvidenceError,
+  type FundingSnapshotDebitRow,
+} from "../../account-value/funding-snapshot-debits.js";
 import type { AssetLocation } from "../domain/types.js";
-import { isHypercoreMainnetUsdc } from "../domain/hypercore-identity.js";
+import {
+  isHypercoreMainnetUsdc,
+  hypercoreLocationDex,
+} from "../domain/hypercore-identity.js";
 import { fundingReservationHoldSql } from "../persistence/source-reservation-hold.js";
 import { PreparationContractError } from "./core-adapter.js";
 import {
@@ -13,16 +21,16 @@ import {
  * disappear between reads or be subtracted twice. Keep the common hold rules,
  * including started sends past their quote expiry and consumer reservations. */
 export const HYPERCORE_PREPARATION_AVAILABILITY_SQL = `
-  with native_debit_rows as (${FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL}),
+  with native_debit_rows as materialized (${FUNDING_NATIVE_SNAPSHOT_DEBIT_CANDIDATES_SQL}),
   native_order_holds as (
     select held_order.raw_amount
-    from jsonb_to_recordset($2::jsonb) recipient_snapshot(address text,snapshot_at timestamptz)
+    from jsonb_to_recordset($2::jsonb) recipient_snapshot(address text,snapshot_at timestamptz,native_source_dex text)
     cross join lateral (${hip4OrderHoldsSql({
       userId: "$1",
       address: "recipient_snapshot.address",
       assetId: "'0x6d1e7cde53ba9467b783cb7c530ce054'",
       snapshotMs: "(extract(epoch from recipient_snapshot.snapshot_at)*1000)",
-    })}) held_order
+    })}) held_order where coalesce(recipient_snapshot.native_source_dex,'spot')='spot'
   ),
   native_pending_holds as (
     select balance_reservations.raw_amount
@@ -56,7 +64,8 @@ export const HYPERCORE_PREPARATION_AVAILABILITY_SQL = `
   select
     (coalesce((select sum(raw_amount::numeric) from native_pending_holds),0)
       +coalesce((select sum(raw_amount::numeric) from native_order_holds),0))::text as reserved_raw,
-    coalesce((select sum(raw_amount::numeric) from native_debit_rows),0)::text as submitted_debit_raw
+    coalesce((select sum(raw_amount::numeric) from native_debit_rows where strict_match),0)::text as submitted_debit_raw,
+    coalesce((select jsonb_agg(to_jsonb(debit_candidate)) from native_debit_rows debit_candidate where not strict_match),'[]'::jsonb) as debit_alias_candidates
 `;
 
 export async function loadHypercorePreparationAvailability(
@@ -67,7 +76,7 @@ export async function loadHypercorePreparationAvailability(
   if (
     location.accountId !== input.accountId ||
     location.kind !== "venue_account" ||
-    location.details.nativeSourceDex !== "spot" ||
+    hypercoreLocationDex(location) === null ||
     !isHypercoreMainnetUsdc(location.asset) ||
     typeof location.details.address !== "string" ||
     !/^0x[\da-fA-F]{40}$/.test(location.details.address) ||
@@ -81,6 +90,7 @@ export async function loadHypercorePreparationAvailability(
   const { rows } = await db.query<{
     reserved_raw: string;
     submitted_debit_raw: string;
+    debit_alias_candidates: FundingSnapshotDebitRow[];
   }>(HYPERCORE_PREPARATION_AVAILABILITY_SQL, [
     input.accountId,
     JSON.stringify([
@@ -92,12 +102,14 @@ export async function loadHypercorePreparationAvailability(
         address: location.details.address.toLowerCase(),
         asset_decimals: location.asset.decimals,
         snapshot_at: input.observedAt,
+        native_source_dex: hypercoreLocationDex(location),
       },
     ]),
   ]);
   const row = rows[0];
   if (
     !row ||
+    !Array.isArray(row.debit_alias_candidates) ||
     !/^(0|[1-9][0-9]*)$/.test(row.reserved_raw) ||
     !/^(0|[1-9][0-9]*)$/.test(row.submitted_debit_raw)
   )
@@ -105,8 +117,21 @@ export async function loadHypercorePreparationAvailability(
       "evidence_invalid",
       "Native availability facts are invalid",
     );
+  let aliases: FundingSnapshotDebitRow[];
+  try {
+    aliases = requireAdmittedFundingSnapshotDebits(
+      input.accountId,
+      row.debit_alias_candidates,
+    );
+  } catch (error) {
+    if (!(error instanceof FundingSnapshotDebitEvidenceError)) throw error;
+    throw new PreparationContractError("evidence_invalid", error.message);
+  }
   return {
     reservedRaw: row.reserved_raw,
-    submittedDebitRaw: row.submitted_debit_raw,
+    submittedDebitRaw: (
+      BigInt(row.submitted_debit_raw) +
+      aliases.reduce((sum, debit) => sum + BigInt(debit.raw_amount), 0n)
+    ).toString(),
   };
 }

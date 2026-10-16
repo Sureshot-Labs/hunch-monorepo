@@ -3,7 +3,7 @@
 ## Status, scope, and evidence
 
 This is the backend source-of-truth specification for `hip-next`, updated and
-rechecked on 2026-10-15. It is a development plan, not an assertion that HIP
+rechecked on 2026-10-16. It is a development plan, not an assertion that HIP
 trading, funding, matching, or wallet intelligence is implemented or production-ready.
 
 Start with section 12 for evidence gates, section 11 for implementation order,
@@ -19,31 +19,34 @@ P2 read integration. Older checkpoints and baseline refs below are dated history
 Section 22 records the historical paused P3/P4 checkpoint. Section 23 records
 resumed work and the latest main merges; neither is financial release acceptance.
 
-Latest implementation checkpoint: sections 43–51. The P3/P4 goal is **open**;
+Latest implementation checkpoint: sections 73–78. The P3/P4 goal is **open**;
 the required two consecutive fresh, no-history reviews of the whole finished
-implementation have not started (**0/2**). Scoped reviews below are not substitutes.
+implementation have not passed (**0/2**). A diagnostic whole-scope review found
+remaining work; scoped reviews below are not substitutes.
 
-Checkpoint requested October 15: implementation is **paused**, not complete;
-current work is being saved to `hip-next` only, without merge or deployment.
-Resume with joint current-fact refund/receive recovery and its bounded runtime
-activation, then remaining routes, limit-budget helpers, execution receipts,
-sealed app handoff and browser acceptance. Financial capabilities remain off.
+The October 15 checkpoint pause has been explicitly lifted. Work is **active**
+on `hip-next`; backend `origin/main` at `5ac117fb` was merged as `b2328f8d`.
+No new feature commit, push or deployment is authorized by that merge request.
+Current code includes joint current-fact refund/receive recovery, native routes,
+sealed app handoff and bounded observation repair. Remaining acceptance includes
+the complete mounted Confirmation/funding matrix, history-scale performance and
+final cross-repository verification. Financial capabilities remain off.
 
-| Current slice        | Implemented                                                                                                                              | Still required before P3/P4 closure                                                                                             |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Shared funding       | Native adapters, exact identities, holds and bounded evidence/recovery components                                                        | Joint refund/receive/destination recovery; catalog activation, route/cash-mode matrix and dense-history performance             |
-| Native order engine  | Frozen sign-only preparations, one-shot submission, cancellation, exact observations, common consumer and ordinary order reads           | Client integration and end-to-end recovery acceptance                                                                           |
-| HTTP/client contract | Auth/CSRF, precise DTOs, USD IOC sizing, shared readiness/shortfall, ordinary Confirmation, owned portfolio SELL and Orders cancellation | Execution receipts, checked amount helpers and browser acceptance                                                               |
-| Telegram             | Editable app-navigation ticket                                                                                                           | Sealed financial handoff into the same app consumer; no autonomous trading                                                      |
-| Release              | Local isolated tests and scoped independent reviews                                                                                      | Full implementation and cross-workspace acceptance, then two consecutive whole-scope GO reviews; financial activation stays off |
+| Current slice        | Implemented                                                                                                                                                               | Still required before P3/P4 closure                                                                                             |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Shared funding       | Native adapters, common catalog/admin controls, joint receive/refund recovery, class-separated spot/perps cash, frozen lineage, holds and merge-safe reads                | Final route/recovery/browser acceptance and remaining history-scale performance                                                 |
+| Native order engine  | Frozen sign-only preparations, one-shot submission, cancellation, common consumer/order reads, bounded Check and cold observation repair                                  | Complete mounted client and end-to-end recovery acceptance                                                                      |
+| HTTP/client contract | Auth/CSRF, precise DTOs, USD IOC sizing, shared readiness/shortfall, ordinary Confirmation receipts, checked amount helpers, owned portfolio SELL and Orders cancellation | Mounted receipt/funding interactions and browser acceptance                                                                     |
+| Telegram             | Native Buy/Sell/custom input, immutable Review, sealed direct/funded handoff into the same app consumer; bounded factual Check                                            | Complete mounted financial/signature matrix; no autonomous trading or personal Telegram operation                               |
+| Release              | Local isolated tests and scoped independent reviews                                                                                                                       | Full implementation and cross-workspace acceptance, then two consecutive whole-scope GO reviews; financial activation stays off |
 
-| Repository             | Branch / immutable reference                                                |
-| ---------------------- | --------------------------------------------------------------------------- |
-| Backend baseline       | `main` / `origin/main`: `a430729ed5ac028b8124198b4dec758221dbb0fc`          |
-| Frontend baseline      | `main` / `origin/main`: `044163ba060620512ceb8ba2affd2b9cd5a00b92`          |
-| Old backend prototype  | `hip`: `dce2d7cd`, June 2026                                                |
-| Old frontend prototype | `hip`: `d29c056d`, June 2026                                                |
-| Synchronized branches  | Backend `hip-next`: merge `7b3ed928`; frontend `hip-next`: merge `537910fb` |
+| Repository                      | Branch / immutable reference                                                             |
+| ------------------------------- | ---------------------------------------------------------------------------------------- |
+| Original backend plan baseline  | `a430729ed5ac028b8124198b4dec758221dbb0fc`                                               |
+| Original frontend plan baseline | `044163ba060620512ceb8ba2affd2b9cd5a00b92`                                               |
+| Old backend prototype           | `hip`: `dce2d7cd`, June 2026                                                             |
+| Old frontend prototype          | `hip`: `d29c056d`, June 2026                                                             |
+| Earlier synchronization         | Backend merge `7b3ed928`; frontend merge `537910fb`; latest backend merge recorded above |
 
 Read the companion [frontend specification](https://github.com/Sureshot-Labs/Hunch_App/blob/hip-next/docs/hyperliquid-hip4-integration.md)
 for client contracts, product surfaces, and user interaction tests. Paths in this
@@ -4846,3 +4849,2570 @@ Polymarket/Limitless parity 38/38, eight affected backend suites and the full
 16-package build pass. Frontend 1,899 tests and exact Node 20 Turbopack build
 pass. Full browser/financial acceptance and the remaining work in section 50
 are still required; whole-scope GO remains **0/2**.
+
+## 52. Resumed main synchronization and execution receipts — October 15, 2026
+
+All three projects are on `hip-next`. Backend merge `b2328f8d` brings in the
+Polymarket V2 discovery/lifecycle and bounded position-notification changes from
+`origin/main` `5ac117fb`. Incoming maintenance and notification SQL passed on the
+isolated PostgreSQL 16 database; no production schema or runtime was changed.
+
+The existing native fill observation now includes a versioned nullable execution
+summary. It is computed from validated, deduplicated canonical P2 fills under the
+same account lock and worker lease, not requested size or submit ACK. Quantities,
+gross notional and signed USDC fees retain their native precision; cash totals
+retain up to 13 decimals. Builder fees are not added twice. Unknown fee currency
+leaves fee/net cash unknown. Legacy observations need ordinary repair, not a
+migration or inferred backfill.
+
+The ordinary owned Orders DTO exposes the summary. Current observation errors
+suppress it and invalidate stored receipt evidence; a status-only success cannot
+restore it before the fills phase succeeds. No new ledger, endpoint, join or
+funding coordinator was introduced.
+
+Shared desktop/mobile Confirmation renders a completed native receipt only with
+exact terminal-filled status and the full frozen quantity, plus known cash/fees.
+Partial/cancelled, ACK, legacy or failed observations retain ordinary recovery.
+Receipt values come from execution facts, not editable ticket amounts. Existing
+account/positions/Orders readers are invalidated on changed owned evidence;
+neither this nor the receipt acknowledges the journal or releases funds. Explicit
+Done acknowledges the displayed attempt through the existing recovery primitive.
+Account freshness is not asserted from fills or cache invalidation alone.
+
+Verification so far: full backend workspace build 16/16; native evidence 12/12;
+PG16 read projection/observation and incoming maintenance/notification suites;
+frontend 1,902 tests, typecheck/lint, generated contract check and exact Node 20
+Turbopack build (42 pages). The final PG16 recovery rerun passes. A fresh no-history
+review returned scoped GO after the summary-resurrection fix; it independently
+ran 46 frontend tests and 12 native evidence tests. Mounted receipt/Done with
+linked funding and logout/owner-switch interaction coverage still belong to
+browser acceptance. This is not whole-P3/P4 acceptance.
+Financial browser acceptance, route/refund gaps, limit advice and sealed app
+handoff remain open. Whole-scope reviews remain **0/2**.
+
+## 53. Native limit Max/Half/Reduce in shared funding — October 15, 2026
+
+The ordinary liquidity request now accepts optional exact native limit advice
+metadata (`quantity`, `limitPrice`, `timeInForce`). Mixed market/limit advice,
+other venues and non-BUY purposes are rejected. These fields are not a consumer
+authorization: the existing exact spend, owner, destination and reservation
+contracts remain authoritative. Concurrent advisory requests include the complete
+limit terms in their identity.
+
+The same frozen-route capacity loop used for market advice calls the ordinary
+native limit quote. It does not size resting orders from IOC depth. Candidate
+quantity is whole lots, strictly below the original, with exact USDC8 budget;
+the ordinary quote checks policy minimum, fee evidence and expiry. A smaller
+debit rechecks the route fee allowance before advice is returned. Existing
+timeouts/three-pass bounds and other-venue paths are preserved. No new provider
+discovery, reservation, transaction, table or SQL query was added.
+
+Both existing event tickets round native limit Max/Half inward. Max retains a
+market/outcome/price/quantity key; Half is custom and never raised to a minimum.
+The common Confirmation accepts at most two fresh Max adjustments, or an explicit
+custom Reduce, then requotes through the usual flow. Expired advice, scope changes,
+prepared/submitting/recovering orders or started funding prevent edits. Native
+Max continuation uses an exact quantity/debit ceiling, not cent rounding; price
+changes invalidate the continuation. Existing market continuation is unchanged.
+
+Scoped no-history review returned GO for this limit block, not all P3/P4. Native
+budget tests 13/13 and Polymarket/Limitless parity 38/38 pass; tests also cover
+fractional cents, minimum lots, changed terms, concurrent identities, smaller
+route economics, stale callbacks, duplicate effects, two-adjustment exhaustion
+and explicit retry. Final backend build 16/16, frontend 1,908 tests, typecheck,
+full lint, generated contract check and exact Node 20 Turbopack build passed.
+Mounted financial acceptance remains separate;
+no live signing/funding or production activation was performed. Whole-scope GO
+remains **0/2**; section 52 receipt browser gaps and the refund/route/handoff work
+remain required.
+
+## 54. Local schema recovery and mounted read acceptance — October 15, 2026
+
+The local schema blocker recorded in sections 50/52 is resolved, without dropping
+the database, changing application migrations or removing the user's local admin.
+The old 0284 checksum was reproduced exactly by its single historical change from
+unquoted `position` to quoted `"position"`. A rollback-only schema comparison
+matched all 32 columns, 12 constraints and 9 indexes of the affected 0284/0285
+tables. No other applied checksum differed.
+
+A local custom-format backup was restored into a separate PostgreSQL 16 database.
+Only after this rehearsal did an exact guarded correction of that one local
+schema-migrations row permit the ordinary explicit-target migrator to apply
+0286–0316. The restored copy and local database both completed migration, with
+zero invalid indexes. The users-table digest and one local admin were unchanged;
+the local database had no funding operations. This is a specific proven historical
+checksum repair, not permission to ignore future checksum mismatches or a new
+production migration procedure. Backup and audit artifacts remain ignored locally.
+
+The local API was restarted with finance worker and Telegram reconciliation still
+disabled. Authenticated browser → Next proxy → API checks now return HTTP 200 for
+ordinary Order/History on desktop/mobile and show their correct empty states.
+No order was submitted or cancelled. Stored October 13 history is not described
+as a current executable quote.
+
+Frontend section 30 records ten mounted real-hook recovery checks and their
+synthetic IO boundaries. The independent review prompted loaded-owner replacement
+and active-reader coverage; full Confirmation Done/close with linked funding is
+still separate. Repeated checks pass: backend workspace build 16/16, frontend
+1,908 regular tests, app typecheck/lint and isolated harness typecheck. Whole-scope
+GO remains **0/2**, and no feature commit, push, deploy or production change occurred.
+
+Refund activation remains unfinished. The current source enumerator/actions and
+joint decision helper must not be treated as connected publication authority.
+`operations.version` does not cover all provider/evidence mutations. A current-fact
+continuation must also account for existing writers that do not hold operation
+locks; adding a revision-row FK or an early trigger lock can introduce an inverse
+lock edge. Do not activate the refund callback before current-fact validation,
+all-role arbitration and durable fresh-event retry are verified together, including
+both concurrency orders and post-window recovery. A new invalidation primitive is
+not a substitute for that integration or for the remaining route/catalog/handoff
+and full financial UI acceptance.
+
+## 55. Classification facts revision primitive — October 15, 2026
+
+Migration 0317 and `funding-classification-revisions.ts` implement the narrow
+consistency primitive identified in section 54. This is not a new funding ledger
+or an alternative to the existing allocator. The financial writers and shared
+receive/funding paths retain their existing roles.
+
+- An absent revision is zero only for an existing, currently owned operation.
+  UUID-only revision tombstones have no operation FK and are not reset during
+  ownership transfer or cleanup. No legacy-data backfill is required.
+- Semantic changes to operation ownership/scope, route bindings/provider facts,
+  steps, attempts, receipts, observations and source reservations enqueue one
+  transaction-local touch per operation. Poll timestamps, confirmations and
+  diagnostic cursors alone do not invalidate paged work.
+- A deferred trigger drains the whole transaction's touched set in UUID order.
+  The staging table is empty after commit/rollback. Deferred foreign-key work is
+  completed before revision locks, avoiding a revision-to-operation lock edge.
+- Every bounded facts page checks the same expected revision before and after
+  its read. A changed candidate must restart; immutable candidate enumeration
+  is not discarded and unrelated candidates are not invalidated.
+- Final publication requires all physical-event locks, then operation locks and
+  current owner/existence checks, then DB-only effects, then a revision fence and
+  **COMMIT only**. The fence locks the sorted union of proof dependencies and its
+  own staged operations. Its own revision increments happen at commit. A mismatch
+  rolls back all effects and is retried through the existing job mechanism.
+  `SET CONSTRAINTS ALL IMMEDIATE` followed by further funding writes is not a
+  supported publication protocol; the existing named-deferred-FK merge path is.
+
+The helper cannot prove externality, exact debit, fresh candidate membership or
+complete coverage by itself. It is not yet wired into the receive/refund publisher
+or finance-worker callback. Those callers must use the same checked dependency
+set throughout the final transaction, and must never issue financial actions
+from a failed publication. Changes to classifier input fields require updating
+the SQL semantic projection in a new migration.
+
+Verified on disposable PostgreSQL 16.2, not `hip4_local` or production: the full
+migration chain from an empty database; real two-session observation writes
+without operation locks; both fence race orders; child-row contention before the
+fence; reversed multi-operation writes; absent-zero materialization; rollback and
+ordinary retry; step/attempt/receipt changes; polling-only updates; and actual
+terminal admin merge with deferred ownership FKs. Test cleanup retains tombstones;
+its replica-mode deletion is not claimed as a normal production deletion test.
+Read plans against 50,000 unrelated indexed rows use 2–6 buffers and no sequential
+scan for hit, absent-zero, wrong-owner and missing cases with custom/generic plans.
+These are local query-plan measurements, not a production throughput guarantee.
+
+Final checks for this increment: 15 affected PostgreSQL integration files passed
+across the final-schema runs, 46 assertions in six selected unit files, targeted
+ESLint/Prettier and full backend workspace build 16/16. The test database had zero
+pending touch rows and zero invalid indexes after completion. A repeated scoped
+independent review found no further actionable defect. No new frontend build or
+financial browser acceptance is claimed for this backend-only increment.
+
+Independent no-history review found a nullable-revision comparison that could
+pass silently; the fence now rejects it using `IS DISTINCT FROM`. This is scoped
+review only. Whole-scope consecutive GO remains **0/2**. Refund source continuation,
+joint role publication, worker activation, remaining route/handoff work and full
+Confirmation acceptance still precede the two final independent reviews.
+
+### Bounded current source-action pages
+
+`relay-refund-source-action-scan.ts` now composes the revision guard with exact
+source rehydration and the existing indexed action reader. Each call reads one
+bounded page. A constant-size fold retains any earlier possibly issued attempt
+through later cancellations/failures; approvals do not establish money movement.
+The original one-shot classifier uses the same fold, with unchanged verdicts.
+Checkpoints contain identity, revision, cursor and fold, not raw action/receipt
+history. A strict versioned decoder rejects malformed checkpoints and restarts
+only that candidate. Missing/reassigned sources remain unavailable, never external.
+
+Committed disposable PG16 fixtures exercise serialized continuation, polling-only
+updates, revision invalidation, ordinary restart, ownership and 51 attempts over
+eight pages. Unit coverage includes 1,000 folded attempts with fixed-size state;
+the existing 10,001-attempt query workload checks bounded first/resumed/tail reads.
+These are separate tests, not a claim of a full 10,001-attempt worker replay.
+The exact source lookup uses primary-key/index hydration with at most one row
+per relation: custom/generic hit/missing/foreign cases took 0.031–0.057 ms and
+2–9 local buffers against 50,000 unrelated plus 5,000 same-user source rows.
+First/resumed 51-row pages used 360–361 buffers and 0.236–0.297 ms; empty tails
+used three buffers. These disposable measurements do not establish production
+latency. The two affected PG suites, 25 focused unit tests, targeted lint/format
+and final full backend build 16/16 passed. No new frontend acceptance is claimed.
+
+This read primitive is not yet persisted by the receive queue. The next integration
+uses that existing queue's event lease and frozen session binding: a fixed-size
+scan header and per-candidate progress, atomically advancing source pages. It must
+also establish complete current source-debit/settlement evidence and membership;
+reservation timestamps alone are not commit watermarks. Final arbitration must
+include negative handoff/destination dependencies, not only matched operations.
+No new external-deposit verdict, refund callback activation or funding path was
+introduced. Repeated independent scoped review found no actionable defect in the
+primitive; it is not one of the two required whole-implementation GO reviews.
+
+## 56. Durable source-check progress — October 15, 2026
+
+Migration 0318 adds two derived work tables beneath the existing canonical
+receive event, not another financial ledger or worker queue. The standalone
+`advanceReceiveRefundScan` transaction uses the existing exact event lease and
+frozen session/variant/owner. It reads the authoritative stored envelope and
+persists one bounded source page or one bounded action page. Candidate insertion
+and source-cursor advancement commit together; the cursor keeps PostgreSQL
+microseconds. Duplicate use of the same lease cannot advance twice, and a
+reclaimed worker cannot overwrite newer progress. Page size is caller-supplied
+from the existing worker budget, not a new product threshold.
+
+All candidates rotate fairly, including unavailable and completed ones. A
+completed action result is checked cheaply against its full captured identity,
+current envelope and facts revision before reuse. A change clears only that
+candidate's derived work. Explicit enumeration restart preserves the dependency
+set; changed operation/segment identity cannot overwrite an older captured
+dependency. Missing or reassigned sources remain unresolved. No private provider
+payload, raw action history or signing material is stored in the checkpoint.
+
+The only parent FK is the canonical event. Source operation/reservation IDs are
+captured dependencies: cascading deletion would incorrectly erase uncertainty.
+Existing receive-session evidence already protects user lifecycle; existing
+funding-operation references protect markets. These work rows contain no new
+market/token payload and are not pruned by market retention. Bounded cleanup
+removes children before the header **only after immutable allocation**. Exact
+refund suppression is reversible after a reorg and therefore retains all work.
+There is no time-based expiry of unresolved dependencies.
+
+Fresh independent scoped review found and prompted fixes for stale completed
+results, premature cleanup of reversible suppression, and overwritten source
+identity. Re-review found no remaining actionable issue in this component.
+Tests cover atomic rollback between child/cursor writes, concurrent replay,
+lease replacement, dense action histories with unavailable peers, completed-fact
+invalidation/recovery, malformed checkpoint repair, captured-identity mismatch,
+suppression/revival, and bounded final cleanup. The mismatch fixture represents
+the post-change captured state; it does not disable immutable financial-plan
+guards to manufacture a live reparenting operation.
+
+The final migration chain ran from empty on disposable PostgreSQL 16.2. New
+header/lease/fair-candidate custom and generic reads were indexed, visited at most
+one row per relation and used 2–4 local buffers (0.016–0.034 ms) against 50,000
+unrelated records and 50,000 same-event candidates. Fifty-row cleanup used bounded
+indexed plans, 303 local buffers, 0.130–0.474 ms. These are disposable measurements,
+not production latency guarantees. The common receive regression and HIP funding
+receipt regression passed in an isolated database: shared-database runs initially
+picked up another suite's retained open session. New checkpoint fixtures now
+remove their own session/event in test-only teardown; this is not a production
+financial deletion path. Focused receive/source units passed 28/28; existing HIP
+funding unit coverage passed 351/351. The final combined PG16 run passed all four
+integration files (receive internal handoff, receive persistence, exact-refund
+concurrency and HIP funding receipts). Targeted lint/format, diff checks and the
+full backend workspace build passed (16/16, 14 cached). No new frontend or live
+financial acceptance is claimed for this backend-only increment.
+
+**Not yet runtime activation or P3/P4 completion.** The checkpoint processor is
+not called by the live observer and cannot return an external-deposit verdict or
+create receipts/allocations. Complete current debit/settlement evidence, stable
+source membership, negative handoff/destination dependencies, joint E→O→effects→F
+publication, and worker activation remain next. The separate route/catalog,
+sealed Telegram→app claim and full Confirmation acceptance work also remains.
+Whole-implementation consecutive fresh GO remains **0/2**. No production changes,
+financial actions, frontend redesign, commit or push were made in this increment.
+
+### Current attempt-linked source debit
+
+The existing bounded action reader now hydrates each receipt's exact physical
+source observation and its original allocation attempt by indexed keys. The
+constant-size fold retains one verified debit plus unresolved-attempt evidence.
+It validates the frozen source amount/asset/owner/recipient, current receipt and
+observation finality/block anchors, and original step/action/executor provenance.
+Repeated reports of the same physical transfer do not double-count it. A second
+physical debit, an unresolved issued attempt or a reorg cannot be hidden by one
+successful attempt. No new financial writer or source-balance calculation was
+introduced; the proof consumes the standard receipt writer's observations.
+
+Derived action checkpoints are now version 2. Older checkpoints restart just
+their candidate through the existing fair lease path. The existing exposure
+interface is unchanged. The completed result additionally records attempt-linked
+accounting in the existing derived result, without another migration. `none`
+does **not** prove absence of other debit observations; `single_debit` does
+**not** prove complete settlement. Neither enables external receive allocation.
+
+Verified: the real standard receipt writer and its reorg path on both Base and
+Polygon; physical replay, distinct/unresolved attempts, mismatched provenance,
+anchors and amounts; ordinary revision invalidation/restart. The final combined
+PG16 run passed 4/4 integration files, focused units 26/26 and HIP funding units
+351/351. Lint/format/diff checks and full backend build passed (16/16, 14 cached).
+Custom and generic action plans against 50,000 unrelated actions and 10,001
+attempts in one selected step remained indexed: dense first/next pages hydrated
+at most 52 rows per relation, used 266–275 local buffers and took 0.268–0.333 ms;
+empty tails used seven buffers. These are disposable test measurements.
+
+Independent no-history scoped review found no actionable defect and independently
+reran the 15 source-action units. It did not certify PostgreSQL/build itself or
+the whole implementation. Complete current settlement/observation coverage and
+membership/publication integration remain unfinished; whole-scope GO stays 0/2.
+
+### Current canonical refund-set completion
+
+The same derived candidate now reads one caller-budgeted page of current final
+refunds under the captured facts revision. It uses the existing 0305 manifest
+index and provider manifest limit, including a sentinel; it does not truncate
+older receipts or retain lifetime provider history. The reader validates the
+frozen request/location and physical receipt identity, reconstructs the standard
+writer's exact completion fingerprint, and reads only that key from its anchor
+observation. It does not download or iterate the append-only proof map. Missing,
+changed or conflicting proof remains pending; ordinary evidence changes restart
+the candidate through the existing lease/revision path. Older v2 checkpoints
+default this component to unchecked. No new financial writer was introduced.
+
+Verification used actual standard source/refund writers: partial then complete
+refund, serialized pages, semantic changes between pages, reorg and restoration
+through the canonical watcher. Focused units passed 49/49 and HIP funding units
+351/351. All five affected PG16 integration files passed (four together, receive
+session persistence separately); a clean full migration chain through 0318,
+targeted lint/format, diff checks and full backend build 16/16 also passed.
+After tests: zero revision-touch rows, invalid indexes or derived scan rows.
+Custom/generic manifest first/next/tail plans remained indexed against 150,000
+observations; eight-row pages took 0.021–0.091 ms. Exact proof-key reads returned
+one row in 0.96–1.42 ms with 1,000 retained audit entries. These are disposable
+local measurements, not production latency claims.
+
+The older local PostgreSQL 16.2/Timescale image encountered a backend-process
+SIGSEGV at 16:06:27 UTC, then reproduced it in the separate disposable container
+at 16:26:51 UTC. PostgreSQL recovered automatically. The source-action query's
+JSONB-derived origin UUID join had a Memoize plan. It now uses a guarded scalar
+primary-key subquery with the same provenance/null semantics; no global planner
+setting changed. Repeated probes, committed race tests and the final five-file
+PG run passed after this change. The exact engine root cause remains unproven;
+this is not a claim that the underlying PostgreSQL defect was diagnosed or fixed.
+The malformed-provenance fixture also now hydrates real source-writer rows into
+its existing temporary observation table. Subsequent tests used only the separate
+disposable instance, not the user's local application database.
+
+Fresh independent scoped review found no remaining defect in this reader after
+removing a redundant terminal prefix read that exceeded its page budget. This is
+not whole-implementation GO. A complete current refund set does not prove absence
+of extra debit, pending settlement or unresolved historical reorg evidence.
+Those facts, stable membership and joint publication remain required before
+runtime activation. Whole-scope consecutive GO remains **0/2**.
+
+### Current observation coverage and native successful delivery
+
+The candidate scan now examines all operation observation states in bounded
+keyset pages, not only finalized refunds. Extra source debits, pending/reorged
+facts, mixed refund/destination evidence or unknown target-leg observations cannot
+be hidden by an otherwise complete refund. Unrelated legs consume page work but
+do not invalidate an independently settled leg.
+
+Successful native delivery uses the existing standard destination-credit writer:
+exact physical `hypercore:send:destination_credit`, trusted observer identity,
+frozen owner/asset/DEX/minimum, canonical finality and retained positive Relay
+destination-hash binding. Synthetic balance-delta rows are not receipts. Split
+credits accumulate only up to the frozen minimum; duplicates do not create new
+rows. The exact-reference query reads one segment PK and returns only requested
+membership IDs, not its whole historical JSON proof map. Current inputs are
+already covered by migration 0317; no further migration or financial writer was
+added. `observationVersion: 1` rechecks older completed observation summaries at
+the same revision without discarding valid source/action/refund work.
+
+PG16 cases use real source/destination writers: partial then complete delivery,
+missing references, shortfall, DEX/owner/asset/observer mismatch, synthetic keys,
+mixed refunds, reorg, ordinary revision restart and same-revision checkpoint
+upgrade. Representative custom/generic reference reads against 50,000 unrelated
+segments and 1,000 historical bindings used 16 buffers for a two-reference hit
+(0.20–0.24 ms); wrong-operation/missing reads used 2–4 buffers. No sequential scan
+or multi-segment hydration occurred. These are disposable, not production, timings.
+
+### Source membership: use existing causal boundaries
+
+No new global membership revision or lock was added. A real committed-action
+fixture verifies that another connection cannot prepare/admit the exact step
+before its operation transaction commits. The same prepared action succeeds
+after commit; a held independent observer connection sees both the source
+reservation and admitted attempt before the stub transport is called. Replay
+does not call transport twice; rollback publishes no operation. Transport and
+policy lookup are substituted, so this is not wallet/API authorization or a
+live-signing test. The sampled cutoff deliberately demonstrates that reservation
+`created_at` is **not** a commit watermark.
+
+Six real merge/session races exercise both orders, either merge participant and
+the applicable `keepSource` branches. The existing immediate session→user FK and
+merge's user-row locks serialize them: a committed session prevents merge;
+merge-first permits a later target session, rejects a deleted source, and permits
+a retained source only after merge completes. Empty-user fixtures establish lock
+ordering, not historical-row migration or refreshed wallet ownership. Together
+with commit-before-send these narrow causal checks support the supported Hunch
+path; they do not establish arbitrary external broadcasts or final classification.
+
+Both affected PG suites and the final combined five-file PG regression passed
+after strengthening the positive control. Focused units passed 51/51; HIP funding
+units passed 351/351. API typecheck, scoped lint/format/diff checks and full backend
+workspace build passed (16/16, 14 cached). Post-test checks found zero pending
+revision touches, invalid indexes, scan rows or active test transactions. The
+separate disposable container and its synthetic data were removed; local app
+database, admin/auth and app servers were preserved. Fresh scoped review found no further
+actionable defect in delivery or these causal-boundary tests. They are **not**
+whole-implementation GO reviews. Joint current handoff/destination/refund
+publication, negative-role dependencies and worker activation still remain before
+external allocation can use these results; route/catalog, sealed app handoff and
+full Confirmation acceptance remain separate P3/P4 work. Whole-scope GO is **0/2**.
+
+### Existing retry worker: checkpoint progress and terminal cleanup
+
+The known-canonical-event retry caller now advances one derived source/action/
+settlement page per claimed event using its existing batch budget and frozen
+session/variant. It does not perform provider calls, extend a receive window or
+restart a Buy. Unsupported native/Solana events do not invoke the EVM source
+reader. Checkpoint errors have separate worker diagnostics and do not disable
+existing recorded-evidence repair. Ordinary derived progress is not logged as a
+new financial event.
+
+Fresh scoped review found that allocated events would leave the retry queue and
+strand their derived rows. The unpublished 0318 migration now marks existing
+headers cleanup-eligible in the same allocation transaction, with a partial
+eligibility index. The same worker tick drains bounded child pages, one locked
+canonical event per transaction; held events are skipped and dense headers
+rotate. Reversible suppression never marks a header for deletion. No new
+scheduler, provider action or financial authority was introduced.
+
+Tests exercise the actual retry and finalization caller after window expiry,
+same-tick replay, checkpoint failure and recovery, post-commit restart, held-event
+skip, rollback after a child deletion, and three single-row cleanup pages.
+Financial role verdicts are explicitly substituted in that caller test; this
+does **not** prove receive-first refund arbitration. All five affected PG16
+integration suites passed together on a fresh disposable database, including
+custom/generic indexed cleanup selection against 50,000 headers. Focused units
+passed 56/56, finance-worker tests 24/24, API typecheck and scoped lint/format
+checks passed. Full backend workspace build passed (16/16, 6 cached).
+Post-test scan headers/candidates and invalid indexes were zero.
+Scoped re-review found no further actionable regression after the cleanup fix.
+
+This connects resumable work, not its allocation verdict. A recorded-refund miss
+still uses the existing allocation path; new refund discovery must remain
+unactivated until negative handoff/destination/refund dependencies and the joint
+publication fence are integrated. The exact-refund driver callback is still
+unwired. Catalog/routes, sealed app handoff and full Confirmation acceptance
+remain unfinished. Whole-scope consecutive fresh GO remains **0/2**.
+
+### Direct destination publication and bounded handoff history
+
+The existing direct destination-receipt writer now owns its transaction and
+prelocks the complete EVM physical-event set before the target operation. Repeated
+envelopes are checked before deduplication; a conflicting role, allocated external
+event or changed target facts rolls back the entire batch. It reuses the existing
+destination-credit writer and transaction reference codec, then applies the
+target-operation facts fence immediately before COMMIT. Native credits retain
+their native identity and do not manufacture EVM event rows. The fence currently
+covers the target, **not yet every negative competitor dependency**.
+
+PG16 tests exercise actual writers, reversed batches, replay, duplicate-envelope
+conflicts, receive allocation, a competing refund, a no-operation-lock metadata
+writer and ordinary retry. Native positive/replay cases are included. Chain
+observation is substituted; no live signing or provider settlement is claimed.
+The six affected integration files passed together before the following reader
+increment. Independent scoped review found no further actionable defect in the
+destination increment, not whole-P3/P4 GO.
+
+The new operation-wide handoff reader includes bound and unbound actions, checks
+the same owner/facts revision before and after every page, and preserves canonical
+other-hash observations as dependencies. Empty or filtered pages still advance
+their source cursor. It is a bounded reader, **not an allocation verdict**.
+
+Fresh review exposed steps × attempts fanout before a final LIMIT. Both this
+reader and the existing refund action reader now share one indexed, single-row
+cursor traversal. Other route legs consume bounded source work before refund
+filtering; they do not enter the target leg's financial fold. This avoids both a
+quadratic intermediate result and an unbounded sparse-leg prefix without adding
+an index, planner setting, scheduler or financial mechanism. Existing saved
+segment cursors remain compatible. The reference lookup also keeps its HMAC
+batch-membership check on the input event, leaving the attempt index probe bound
+to that event's single HMAC.
+
+Disposable PG16 coverage includes 50–55k unrelated rows, 10k same-operation
+sparse steps, 10,001 attempts and 64 × 64 dense steps/attempts. Custom and generic
+plans cover first/resumed/empty/foreign/missing-leg reads. Both changed-reader
+integration files passed together. Handoff pages used 3–734 buffers and roughly
+0.08–0.9 ms; refund pages used 3–730 buffers and 0.10–1.06 ms in the measured run.
+The 32-event legacy HMAC batch examined 320 rows after the change (one earlier
+generic-plan run failed at 1,856). These are disposable, not production, timings.
+Existing 64-event destination classification still spent about 0.8–0.9 seconds,
+including substantial JIT; this increment does not claim to resolve that cost.
+
+Focused units passed 67/67, API typecheck and scoped lint/format/diff checks
+passed, and the full backend workspace build passed 16/16 (14 cached). Re-review
+of the shared pager, segment filtering and HMAC change found no actionable
+defect; the reviewer independently ran the 18 directly affected unit tests.
+The final combined seven-file PG16 regression passed (exit 0), including the
+destination publication, revision races, receive/session/merge, refund manifest,
+actual retry worker and both action readers. Finance-worker checks passed 24/24.
+Post-run checks found zero pending revision touches, invalid indexes, scan
+headers/candidates or other test clients. The isolated disposable container was
+removed; local application database/admin/auth and app servers were preserved.
+Negative-role membership, final joint publication and runtime refund discovery
+activation remain unfinished, as do catalog/routes, sealed app handoff and full
+mounted Confirmation acceptance. Whole-scope consecutive fresh GO remains **0/2**.
+
+### Shared receive-role checkpoint increment
+
+The existing canonical-event retry now captures reverse-handoff operations and
+route destinations alongside refund-source dependencies. It still uses the same
+event lease, source-input index and worker page budget; there is no separate job
+queue, provider call, financial writer or automatic trade continuation. Candidate
+rotation is fair, with one role page per turn. Version-1 derived headers upgrade
+by bounded re-enumeration, preserving previously captured dependencies and their
+results rather than deleting them.
+
+Handoff membership includes bound/unbound preparation actions across the current
+wallet/composite/preparation plan families, without filtering by the reservation's
+source asset or address. Destination membership matches the existing classifier's
+operation-final target and leg-output asset, including legacy decimal text and
+extension properties; it does not use status, amount thresholds or quote expiry.
+Negative role summaries retain operation ownership and facts revisions. Source
+enumeration exhaustion is still **not** a committed-membership watermark.
+
+The destination reader shares the bounded action pager and keeps exact references
+separate from possible movement. A retained exact reference survives provider
+status changes; only attempts bound to that leg imply its source movement.
+Terminal or known-destination negatives avoid unnecessary action scanning but
+retain their facts dependencies. The handoff fold preserves retryable pending
+over exact ambiguity across candidate-page boundaries. Both readers bind progress
+to the frozen event and codec context; a transient failed reference read can
+recover at the same facts/key revision, without manual checkpoint deletion.
+`referenceRetryRequired` is unresolved evidence, never negative allocation proof.
+
+Fresh no-history scoped review found no actionable issue after fixing legacy
+membership compatibility, cross-page retry precedence and codec recovery. This
+review covers candidate pagination for one frozen event. The legacy handoff
+classifier already treats some same-transaction multi-log batches differently
+from singleton retries; that distinction remains a joint-publication acceptance
+case, not a claim of arbitrary event-batch partition equivalence.
+
+The shared scan is still checkpoint-only. Final all-role dependency arbitration,
+atomic publication/fence integration, receive-first/sessionless refund activation,
+catalog/routes, sealed app handoff and full mounted Confirmation acceptance remain
+open. Neither scoped review nor a completed role scan is whole-P3/P4 GO. No
+commits, pushes, deployment, live signing, personal Telegram operations or
+production policy/permission changes were performed in this increment.
+
+### Joint role arbitration and exact-evidence binding
+
+A shared read-only arbiter now consumes the stored handoff, destination and
+refund summaries through bounded candidate pages. It reuses the existing role
+rules, keeps every negative operation dependency, deduplicates repeated operation
+scans, and refuses mixed revisions or incomplete/codec-unresolved results. It
+does not add a queue, persisted aggregate or historical-action rescan. The final
+dependency set is necessarily proportional to distinct relevant operations;
+truncating it or committing separate partial fences would not be safe.
+
+Refund-source exclusion requires either no issued debit plus empty observations,
+or an exact single debit with a proven complete refund/native-delivery result.
+`complete` action pagination alone is insufficient. An exact recorded refund, or
+a verified proposed receipt supplied by its writer, exempts only its own
+operation/segment before requiring the source scan to finish. Thus a partial
+refund need not wait for whole-route settlement, and first-receipt publication
+does not depend on that receipt already existing. Other source legs and competing
+handoff/destination roles are still evaluated.
+
+The recorded-refund reader now returns receipt facts and their operation revision
+from one SQL statement, including negative legacy witnesses. Its old verdict-only
+wrapper retains existing caller semantics. Fresh independent review reproduced
+an important proof-binding defect: a proof from one block could be reused after
+re-mining at the same operation revision. The shared fingerprint now binds block
+height/hash as well as the exact transfer envelope. Old summaries restart through
+the normal reader; recorded and proposed stale-block rejection/recovery are tested.
+The reviewer reran 24 focused tests and found no further actionable defect in
+this increment, not whole-implementation GO.
+
+The actual leased-event reader and candidate SQL passed disposable PG16 checks.
+With 50,000 same-event and 50,000 unrelated candidate rows, custom/generic pages
+examined at most 51 rows, used 54–55 buffers and took approximately 0.036–0.196 ms;
+empty tails used three buffers. These are local fixture measurements, not
+production guarantees. Focused tests passed 69/69, finance-worker checks 24/24,
+API typecheck and scoped lint passed, and the full backend build passed 16/16.
+
+The indexed exact handoff/destination reader now preserves negative witnesses
+with their same-statement revisions, without the old 256-candidate truncation.
+It binds evidence to the physical event and both lookup-codec contexts. The
+arbiter loads it only after captured roles are complete, reusing checked
+destination summaries. Legacy-only witnesses use the existing bounded action
+pager; unfinished pages return explicit continuations and cannot authorize an
+external deposit. Persisting those continuations in the final publication path
+is still required. No second financial queue or provider request was added.
+
+Fresh no-history review found and then rechecked three reader defects: stale
+negative evidence after key rotation, unbounded legacy attempt reads, and a
+singleton log incorrectly receiving a terminal mismatch for a multi-log handoff.
+The latter now stays retryable until exact log evidence resolves it; the handoff
+context version forces older summaries through ordinary re-reading. The reviewer
+reran 23 focused tests and found no remaining reader-level issue. This is scoped
+review, not whole-P3/P4 GO or proof of runtime recovery.
+
+**Publication blocker: commit-before-send is not a sufficient membership proof.**
+A separate fresh review found that a later Deposit Wallet funding operation can
+report an earlier same-envelope transaction. Its receipt validator checks exact
+transfer logs but not causal submission identity. At that review, the handoff
+receipt writer excluded other handoffs, not an already allocated external receive;
+the scoped increment below addresses that writer. Reachable legacy
+`DepositConvert`/embedded transfer paths also exist
+without a funding reservation. Therefore neither `scan_before` nor revision
+fencing only enumerated operations proves absence of a later competing claim.
+Earlier checkpoint suggestions relying on universal commit-before-send are
+superseded. This is an activation blocker, not evidence of a production loss.
+
+The next integration must cover late claims at a shared physical-event ownership
+boundary (including the handoff receipt writer), or establish exact causal
+submission binding across applicable paths. Preserve replay/reorg repair and
+test both receive-first and handoff-first races; do not substitute an arbitrary
+age cutoff. Existing source immutability also does not cover reservation
+`segment_id` in the legacy guard; audit normal writers before strengthening it.
+
+This remains a decision/dependency builder, **not financial publication
+authority**. Initial/retry receive, destination/refund/handoff writers, durable
+legacy continuation recovery and the complete E → sorted O → effects → F → COMMIT
+contract still need integration before activating sessionless refund discovery.
+Catalog/routes, sealed app handoff and mounted Confirmation acceptance remain
+open. Whole-scope consecutive fresh GO remains **0/2**.
+
+### Handoff physical-event ownership and consumer recovery
+
+The existing handoff receipt writer now prelocks the old and incoming physical
+transfer keys before operation/attempt locks, then revalidates its exact snapshot.
+An absent snapshot becoming visible also restarts reconciliation. Confirmed
+handoffs reserve the existing canonical-event row before finality; a previously
+allocated external receive or recorded destination/refund credit cannot also
+authorize a handoff. No new ledger, account, queue or live signing path is added.
+
+Conflicts retain truthful chain finality and set a per-attempt ownership incident.
+They do not fabricate a reorg or a safe nonbroadcast failure. The lifecycle blocks
+new trade submission but lets the standard consumer repository record an already
+executed, exactly linked trade while retaining manual recovery. An unrelated
+recovery reason cannot erase that receipt fact. An ordinary valid recheck clears
+only the matching attempt's incident. Reorg polls lock the frozen original key,
+without inserting a phantom replacement or releasing suppression.
+
+Real PostgreSQL testing exposed loss of finalized timestamp microseconds through
+JavaScript Date. Same-status receipt updates now preserve the original database
+value; a 123-microsecond fixture checks the actual upsert and immutable constraint.
+PG16 action/consumer suites pass: receive-first/handoff-first sequential orders,
+legacy finalized conflicts, repeated/reorged evidence, immutable terminal
+mismatch, changed snapshot, blocked new send, and preserved consumer outcome.
+These sequential ownership cases are **not** a replacement for simultaneous
+multi-session handoff/receive tests. Exact snapshot and physical-key queries have
+custom/generic index plans on 55,000-row fixtures, including misses and filtered
+credits, examining at most one row per accessed base relation. These are local
+test measurements, not production performance claims.
+
+Independent scoped review corrected stale reorg identity, legacy finalized
+conflicts and absent-snapshot revalidation, and confirmed the timestamp fix.
+It also identified the existing `RelayOwnedRefundObserver.persistScan` as a
+reciprocal writer then bypassing E ownership (fixed in the acceptance below). Its integration retains the
+existing bounded watch and same-key re-mining recovery: old/new E keys before O,
+lossless refund-snapshot revalidation, positive role checks and atomic suppression,
+without blocking genuine reorg invalidation. The current canonical-event trigger
+permits reanchoring only for the exact-refund observer; compatibility for the
+legacy owned-refund observer needs a narrow, tested additive extension.
+
+The joint role arbiter remains unwired as allocation authority, and new refund
+discovery remains disabled. Reciprocal writers, complete dependency publication,
+durable legacy continuations, catalog/routes, sealed app handoff and mounted
+Confirmation acceptance remain open. Whole-scope GO remains **0/2**; no goal
+completion, commit, push, deployment or production-policy change is implied.
+
+### Nonfinal handoff recovery acceptance
+
+Further independent review reproduced a new recovery regression: a confirmed
+transfer re-mined in another block was treated as a permanent ownership conflict.
+The unpublished additive migration 0319 and existing receipt writer now permit
+only an unchanged, unallocated, internally suppressed handoff to move its anchor
+while its prior receipt is still confirmed. Economic identity, allocated-state
+immutability and finalized/reorged rules remain unchanged. A saved server-owned
+physical key also survives an intermediate nonfinal reverted inclusion; a later
+exact success can recover without inventing a second transfer or releasing the
+first key. An actual ownership-conflict marker does not authorize this repair.
+
+Legacy confirmed receipts without an owned marker are tested with no E row, E at
+the old anchor, and E already at the current anchor. They still undergo current
+economic-envelope, allocation, competing-handoff and historical-credit checks.
+The last case was found by the independent reviewer and added to the PG matrix.
+
+The complete migration chain through 0319 passed on a fresh disposable PG16.2
+database. Actual receipt writes passed confirmed-to-confirmed/finalized re-mining,
+the transient-revert sequence, replay and legacy cases. Direct SQL tests reject
+changing value during repair or moving an already finalized handoff. The installed
+trigger predicate—not a handwritten equivalent—has custom/generic plans against
+55,000 receipt rows: indexed hit 8 buffers, wrong anchor 5, miss 3, approximately
+0.014–0.019 ms. Exact anchor-update plans examined at most one base row, about
+0.13–0.23 ms and 19–22 buffers for hits. These are disposable local measurements,
+not production performance guarantees or concurrent handoff/receive acceptance.
+
+The reviewer independently checked the helper's recovery and rejection paths and
+found no remaining reproducible issue in this increment. This is **scoped review,
+not either of the two whole-P3/P4 GO verdicts**.
+
+The final combined regression run passed all seven PG integration suites (259 s),
+27 focused unit checks, 351 HIP funding tests and 24 finance-worker checks. API
+typecheck, scoped lint/format and full backend workspace build passed (16/16).
+The disposable database ended with no pending classification touches, invalid
+indexes, scan headers/candidates or other client connections. Frontend/admin and
+live financial acceptance were not reverified by this backend-only increment.
+
+Independent inspection of the next reciprocal writer confirmed a concrete
+cross-table gap in `RelayOwnedRefundObserver.persistScan`: its observation unique
+key prevents a second funding observation, but not a handoff receipt or an
+external receive receipt/notification for the same physical event. Existing
+source-credit routing checks remain a backstop; this is not a claim of an observed
+double spend. Integration must use the existing E lock and suppression, with:
+
+- Lossless old-refund/source/provider snapshot capture, sorted old/new E before O,
+  and exact revalidation after O; changed facts retry via the existing worker.
+- Shared positive handoff/destination checks before refund insert/restoration;
+  genuine reorg invalidation must remain possible even when restoration conflicts.
+- The existing refund reanchor pattern while the old observation is still
+  reorged, extending only its observer-ID condition for this legacy writer.
+- Two-session receive/handoff/refund orders, same-key and replacement re-mining,
+  changed-proof rollback, repeated polls, and the existing bounded-watch tests.
+
+No new ownership ledger, job system, financial authorization or legacy-to-new
+refund-contract fiction is required. The owned-refund increment below supersedes
+this pending checklist; broader publication and route/UI acceptance remains open.
+
+### Owned-refund publication acceptance
+
+The existing owned-refund observer now prelocks old/new physical events before
+the operation, revalidates its lossless snapshot and checks competing recorded
+roles before credit. Refused positive publication rolls back speculative event
+inserts. Genuine invalidation commits independently of blocked replacement
+publication, so a later re-mined replacement can recover. A finalized refund is
+watched even before the reservation projector catches up. Same-key restoration
+checks the previous economic envelope even when another observer has already
+stored the new block anchor. The final target revision fence immediately precedes
+COMMIT; it is not yet the full negative-dependency fence described above.
+
+Unpublished additive migration 0320 extends only the existing refund reanchor
+observer predicate to the owned-refund observer. Economic identity, immutable
+allocation and recorded reorg conditions stay intact. Shared ownership SQL is
+sidecar-safe; worker wiring supplies the existing transaction-reference codec.
+
+The fresh migration chain through 0320 passed on disposable PostgreSQL 16.2.
+Actual committed writer tests cover pre/post-snapshot changes, duplicate writers,
+pre-projector replacement, suppression, same-key/replacement re-mining and both
+receive/refund lock orders with real two-session waits. All seven PG regression
+suites passed together (232.57 s); 34 focused checks, 351 HIP funding tests and
+24 finance-worker checks passed. API typecheck, scoped lint/format and full
+backend build passed (16/16). Exact target/credit/E queries used indexes on
+50,000-row custom/generic fixtures, with no sequential scan: target hit 30–31
+buffers (~0.31–0.43 ms), other-credit 3–4, E 3–5. These are local measurements.
+
+Independent scoped review found and prompted fixes for speculative orphan E,
+pre-projector double-positive replacement, late fact changes and legacy economic
+mismatch. The final scoped review found no remaining concrete issue in this
+increment, but it does not count toward whole-P3/P4 GO (still 0/2).
+
+### Reservationless legacy continuation acceptance
+
+Unpublished migration 0321 extends the existing derived checkpoint table with a
+stable work-row identity, retaining real reservation identity where present and
+real operation/segment identity for legacy destination-only witnesses. No new
+financial ledger, queue, source reservation or receive session is fabricated.
+The checkpoint helper saves incomplete exact-reader progress under the same E
+lease; normal bounded candidate rotation resumes it. Incomplete checkpoint work
+must commit without financial effects, not be rolled back by the future caller.
+Actual financial publication is still not switched to the joint arbiter.
+
+Migration 0321 backfills/indexes only this new derived table. Before deployment,
+measure its actual size and apply it with old checkpoint workers stopped: older
+binaries cannot page reservationless rows. No production migration or activation
+has occurred.
+
+The complete migration chain through 0321 passed on fresh disposable PG16.2.
+Committed tests cover exact-reader discovery, checkpoint rollback/replay, bounded
+resume, revision/codec recovery and a legacy witness coexisting with its later
+source reservation. Mixed 25,000 reservationless and 25,000 reservation-backed
+rows plus 50,000 unrelated rows retain indexed custom/generic pagination and
+cleanup: 51-row pages use 54–55 buffers, empty tails 3, 50-row cleanup 303–304.
+The actual partial-unique checkpoint INSERT uses 17–18 buffers, replay 4.
+
+All seven PG regression suites passed together on a new empty database (223.25 s).
+An earlier benchmark used a tiny public revision table against large temporary
+operation tables; its fixture now also scales revisions, preserving the strict
+row-count checks and adding absent-revision-zero coverage. A reused-database run
+was contaminated by retained synthetic jobs; it is not counted as a pass.
+These are local fixture results, not production load guarantees. The independent
+scoped review returned GO; whole-P3/P4 GO remains **0/2**.
+
+### Shared receive publication effects (in progress)
+
+Initial and retry observation now resolve their existing recorded-role inputs
+into the same typed decision used by the joint arbiter, then use one DB-only
+publication branch. The explicitly named legacy adapter preserves conflict and
+recovery precedence, including refund recovery before handoff recovery. It does
+not turn a recorded miss into new source-coverage authority. No new financial
+guard, queue, provider call or production SQL is introduced by this refactor.
+
+The initial/retry destination path is exercised with real classifiers, credit
+allocation and job wake on PG16: failed credit rolls back suppression, ordinary
+retry recovers, duplicate/replayed physical events do not double credit, and
+internal transfers create no external receive receipt or deposit notification.
+Chain observations are synthetic; no signing or live financial request occurs.
+The test asserts the injected write failure and both initial/replay scanner calls
+actually ran. One hundred role combinations check legacy decision parity.
+
+Fresh independent review found no blocking refactor issue. Joint arbitration is
+still not the publication authority: initial staging, complete batch dependency
+collection, sorted operation locks and final revision fence/COMMIT must be wired
+together before discovery is enabled. The final refactor/staging regression below
+passed; that does not activate the joint authority.
+
+### Initial receive staging prerequisite
+
+`stageFundingReceiveClassificationBatch` now owns a short transaction that commits
+scope, all physical event locks, selected-session binding and the existing exact
+retry lease before returning. It never acquires operation locks or writes credits,
+receipts, notifications or scan headers. Source scans start only afterward, using
+their database observation time; event timestamps are not commit watermarks.
+At this prerequisite checkpoint it was not yet called by either financial
+publication path. The activation below supersedes that historical boundary.
+
+It preserves frozen ownership, existing recovery reasons, final suppressions and
+the worker's due time. A cleared token is not permission to skip a future due
+time. Foreign selection is rejected before binding; missing ownership remains
+explicitly unresolved. No new scheduler, policy default, queue or migration is
+introduced.
+
+Real PG16 tests cover duplicate/reversed input, immutable-envelope collision,
+failure after the second claim with full rollback, a genuinely locked event
+skipped by the ordinary worker, reverse worker-first replay, expired lease reclaim,
+foreign ownership, missing ownership and final suppression. Exact claim queries
+on 50,000-row event and session fixtures use indexes in custom/generic plans:
+successful update 27–35 buffers (~0.13–0.41 ms), missing 2, foreign 7, not due 3.
+These are local fixture measurements, not a production throughput guarantee.
+
+The independent scoped review found the fresh foreign-binding issue and the
+fixture cleanup issue; both are fixed. It returned scoped code-review GO, not
+whole-P3/P4 or deployment GO. API typecheck, scoped lint and full backend build
+passed (16/16); all seven PG regression suites passed together on a fresh database
+(234.91 s). The 351 HIP funding and 33 classification unit tests also passed.
+An earlier publisher regression failed its newly added scan-count
+assertion because the test retried after 1 ms while the real claimant enforces
+1 second. Only fixture time changed; the real repeated scan now passes.
+
+Remaining activation requirements are unchanged, with two explicit integration
+constraints found during this review:
+
+- Classification lease authority must be separate from historical retry mode.
+  Supplying an initial lease as today's observer `retry` would mark a normal
+  deposit late and omit initial cursor/status maintenance.
+- Publication ordering must be tested against the actual receipt router. A
+  shared-operation cycle is **not established** for ordinary auto-routing: its
+  fresh child operation is uncommitted and invisible to other classifiers.
+  A concrete shared lock does exist instead: prepared wallet verification locks
+  the user row before later requesting session scope; receive publication holds
+  that scope before receipt insertion needs a foreign-key lock on the same user.
+  The router correction and actual concurrency tests are described below; do not
+  claim global lock-order completion from the staging tests alone.
+
+At this checkpoint both initial and retry publication still required complete
+dependency collection, joint arbitration, sorted operation locks and the final
+revision fence/COMMIT; the activation below implements this receive-side seam.
+Exact-refund callback activation, reciprocal/sessionless writers, routes, trading
+and mounted app acceptance remain open. Whole-scope GO remains **0/2**.
+
+### Receive router lock-order correction
+
+The real prepared Relay router and receive observer reproduced PostgreSQL 16
+deadlock `40P01`: wallet verification held the user row while receive publication
+held session scope and waited for the receipt's user foreign-key check. Router
+linking then needed that same scope. Both automatic creation branches now take
+the existing scope after policy/authorization locks and before wallet verification
+or receipt claim. Ownership, generation, policy and financial checks are unchanged.
+
+Independent review caught a second inversion against a concurrent router deciding
+that its quote needs review: disposition previously updated the receipt before
+requesting scope. Disposition and settlement now acquire the persisted immutable
+scope first, reusing the existing indexed session lookup. No new lock namespace,
+retry delay, schema or runtime switch is introduced.
+
+The new `receive-router-lock-order-integration-tests.ts` runs the actual public
+router and observer, replacing only provider HTTP responses. It tests both start
+orders for router/observer and for two routers with accepted versus over-cap
+quotes. `pg_blocking_pids`, advisory wait state and third-connection NOWAIT probes
+prove the wait is before owner/receipt locking. The normal next observer poll
+recovers a stale snapshot exactly once; competing routing decisions cannot create
+a second child or overwrite the winner. Four scenarios passed on PG16. Scoped
+fresh review returned GO after the second inversion and timeout cleanup fixes.
+
+API typecheck, scoped lint/format and the full backend build (16/16) passed; 387
+focused HIP/funding/classification tests passed. All eight PG integration suites
+passed together on a new database migrated from empty through 0321 (246.71 s).
+Generic planner fallback **creation** is not yet exercised by this new test;
+existing linked-child settlement coverage is not a substitute. Joint-role
+publication, reciprocal writers and the remaining P3/P4 product paths remain
+open. This scoped GO is not either of the two required whole-scope reviews.
+
+### Joint receive publication: initial observation and historical retry
+
+The existing receive observer now uses joint handoff/destination/refund
+classification for supported Base/Polygon canonical events, not a shadow read
+followed by legacy external allocation. Initial observation commits the existing
+scope, complete event lock set, frozen selected-session binding and retry lease
+before reading source pages. Missing codecs or incomplete evidence remain durable
+pending work on the existing retry clock. Cursor progress cannot erase that work.
+Historical unbound events bind their selected session before creating scan state.
+
+Publication revalidates the event lease, collects the complete positive and
+negative operation dependency set, locks the sorted operation union, applies the
+shared receipt/quarantine/destination-credit effects, acknowledges leases and
+updates the session, then fences revisions immediately before COMMIT. Incomplete
+classification checkpoints commit without financial effects. Initial authority
+is separate from historical retry mode: fresh receipts retain normal conversion
+semantics; historical repairs do not restart an old automatic conversion or Buy.
+
+Mixed EVM/Solana batches include legacy destination effect owners in the same
+sorted lock union. Such lock-only owners do not receive invented classification
+revisions. Reobserving a legacy owned-refund suppression does not reopen it merely
+because the newer exact-refund reader finds no receipt: rechecking requires an
+actual recorded exact-refund classification. No new policy, queue or delay was
+introduced; the worker passes its existing receive delay separately from the
+explicit scan cadence. No signing, source transfer or provider call occurs in the
+classification transaction.
+
+`receive-joint-publication-integration-tests.ts` exercises the real PG16 readers,
+staging, classification, revision triggers and publisher. It covers normal
+initial receipts, reverse/duplicate events, replay, missing-codec recovery,
+historical unbound binding, preserved legacy refund suppression and a mixed
+Base/Solana credit. Its revision race commits a real mutable segment change,
+checks the revision increment, observes both uncommitted receipt effects at the
+final fence, then verifies rollback and bounded retry recovery. The mixed test
+creates its legacy owner after source enumeration and checks the actual fence
+payload, sorted lock union and third-connection NOWAIT probes; it therefore tests
+the additional effect-owner lock rather than accidentally warming it as a source.
+
+Synthetic role-precedence/cleanup tests explicitly use
+`recordedRoleObserverFixture`; they are not evidence of source completeness.
+The legacy destination continuation test remains a real joint-reader test, with
+a genuinely legacy plan committed without the newer refund contract. It checks
+the verdict, bounded recovery after provider-fact changes, failed-credit rollback
+and subsequent initial/retry publication. A separate marked-source test exposed
+and fixed a same-leg circular dependency: a verified exact destination must not
+wait for its own first destination credit merely to rule out a possible refund.
+The exact destination retains its checked facts revision; other source legs,
+positive refunds, handoffs and competing exact destinations still arbitrate.
+Unit tests cover those conflicts, and PG16 covers first credit, rollback, replay
+and ordinary recovery for both legacy and marked-source destinations.
+Actual router races retain real joint reads and recover via
+bounded ordinary polls rather than assuming one tick is enough for all pages.
+
+Independent no-history scoped review found the unsafe legacy-refund reopen and
+the missing mixed-batch operation locks; both were corrected. Its final scoped
+verdict is GO. This is **not** whole-P3/P4 GO (still **0/2**). All six focused joint
+cases and four router races pass, as does the exact-refund regression. API
+typecheck, scoped lint and 411 focused unit tests pass. The full backend build
+passed 16/16. All nine integration suites passed together on a fresh PostgreSQL
+16.2 database migrated from empty through 0321 (235.23 s). The earlier combined
+run had two outdated fixture assumptions and is not counted as a pass.
+
+Remaining: reciprocal/sessionless destination and refund writers still require
+full competing-role dependencies; their target-only fences do not complete that
+contract. The exact-refund worker callback remains disabled. Generic planner
+fallback creation needs its own router acceptance. Funding catalog/routes,
+sealed native app handoff and mounted Confirmation lifecycle acceptance remain
+open, followed by full cross-repository verification and two consecutive fresh
+whole-scope GO reviews. Existing frontend/admin work and local app state are
+untouched by this receive-only increment; there was no commit, push or deployment.
+
+### Shared checkpoint adapter for sessionless provider reconciliation
+
+The role-page implementation is shared by validated receive leases and a new
+provider-job adapter; it does not fabricate receive sessions or create another
+queue. Additive migration 0322 permits a null pair for session/variant provenance.
+The adapter verifies the real operation owner, locks and validates the canonical
+physical event, checks any existing session owner, and advances at most the
+existing page budget under a caller work identity. It creates no financial
+receipt, credit, session, suppression or job wake. Its financial callers are
+**not activated**: full source membership and joint dependency fences still need
+to be supplied by each reciprocal writer.
+
+A receive session must not directly trust enumeration done before its lifecycle
+boundary. Independent review caught this adoption gap. Bound reads now remain
+pending until the first valid lease atomically adopts the session/variant and
+restarts bounded source enumeration; captured candidates are retained. Adoption
+precedes work-token replay detection. Subsequent normal leases resume pages, and
+same-owner codec recovery does not require manual state deletion.
+
+The actual PG16 merge regression creates ordinary wallet-route plans, cancels
+their unbroadcast actions through the existing cancellation service, verifies
+released reservations, and calls the real user merger. An older imported source
+is then discovered by receive re-enumeration rather than omitted from a stale
+negative dependency set. Immutable source/refund snapshots keep their former
+account ID while relational ownership moves. The shared identity treatment below
+supersedes the initial unresolved-reader limitation; cancellation or a timestamp
+in `userMergeAudit` is still **not** proof that an imported dependency may be ignored.
+
+Custom and generic plans were checked on 50,000 temporary events, sessions and
+checkpoint headers. Event-owner lookup uses 3–7 buffers; exact header adoption
+uses 10–11 (2 for a missing header), with indexed access in every case. Coverage
+includes bound, foreign-owner, allocated, unbound and missing events. These are
+local PG16 measurements, not production benchmarks. All nine integration suites
+passed together on a fresh PG16.2 database migrated through 0322 (248.43 s).
+Postchecks found zero pending revision touches, invalid indexes, checkpoint
+headers/candidates or remaining test-client connections. Full backend build
+passed 16/16; API typecheck, scoped lint/format, 351 HIP-funding tests, 25 focused
+classification tests and 24 finance-worker tests passed. Scoped independent static
+review found no remaining checkpoint-adapter blocker after adoption was fixed.
+It is not either required whole-P3/P4 GO review; that count remains **0/2**.
+
+### Frozen economic identity and common funding catalog — October 16
+
+`readCommittedFundingIdentity` separates the authorized current relational owner
+from the original subject in the immutable operation source snapshot. Source,
+refund and native settlement readers share it; all bound account IDs must agree
+with that independent source lineage. Legacy unscoped snapshots retain their
+same-current-owner behavior. Mixed composite subjects and malformed source shapes
+are rejected. No frozen snapshot, original-subject HMAC or lookup key version is
+rewritten, and no merge timestamp or new keyring becomes financial authority.
+Exact-refund context race checks and competing-role queries use the current owner.
+Derived role checkpoints were version 3 at this checkpoint (version 4 below
+supersedes it); ordinary bounded enumeration upgrades old
+invalid candidates without manual cleanup, including reuse of the same work token.
+
+PG16 acceptance uses the actual source-debit writer, exact-refund writer, reducer,
+terminal user merge, canonical watcher and replay. It verifies unchanged economic
+snapshots, key rotation, current-owner dependencies, no duplicate receipt or job
+wake, and a newly competing destination belonging to the current owner. The
+sessionless adoption fixture now converges after the real cancelled-source merge.
+All nine integration suites passed together on a fresh database migrated through
+0322 (245.84 s); postchecks again found no leftover classification touches,
+checkpoint rows, invalid indexes or test-client connections.
+
+The existing compact `funding_control_plane` catalog and its admin editor now
+include Hyperliquid and `hypercore:usdc`. Native USDC8 uses the existing spot
+`venue_account` identity, source/settlement capabilities and registered Relay
+routes. It does not invent a manual native receive scanner or grant trading,
+withdrawal or delegated-signing permissions. Empty defaults stay off. Pause,
+asset/venue removal and re-enable recovery use the ordinary policy paths.
+Canonical asset comparison preserves EVM token case semantics.
+
+Scoped no-history identity and catalog reviews returned GO after corrections;
+neither is whole-scope acceptance. API typecheck, 351 HIP-funding tests, 24 worker
+tests, the 16/16 backend workspace build, admin typecheck/lint/build and 47 admin
+tests passed. All 4,096 compact-policy combinations compiled in scoped review.
+Reciprocal financial writers, remaining routes, sealed app handoff and mounted
+Confirmation/browser acceptance remain open. Whole-scope GO remains **0/2**.
+
+## 57. Membership lifecycle, pUSD recovery and Account Value read aliases — October 16, 2026
+
+This supersedes the earlier unresolved original-owner checkpoint, not the listed
+whole-P3/P4 acceptance gaps. The exact-refund callback and reciprocal financial
+publication are still **not activated**. No production policy, privileges,
+financial action, commit, push or deployment was changed.
+
+### Sessionless membership through the existing merge lifecycle
+
+`funding-role-membership-lifecycle.ts` reuses the existing user-row merge fence.
+Derived pages take full physical-event locks, then the owner row KEY SHARE
+NOWAIT, reread current ownership and commit checkpoint work without taking an
+operation lock afterwards. Financial-ready reads remain pure. Their caller must
+collect the full sorted operation dependency union before the late NOWAIT owner
+and current-header check; only then may it publish DB effects and fence revisions
+immediately before COMMIT. A contended owner or changed membership rolls back
+before the ordinary bounded retry. Non-READ-COMMITTED callers are rejected.
+
+The central authorized merge transaction already owns the sorted source/target
+users and source operations. After moving ownership it reparents and restarts
+both owners' non-cleanup sessionless checkpoints: a new database cutoff, cleared
+source cursors/work token and incomplete enumeration. Captured candidate rows
+and financial facts remain unchanged. Additive 0323 indexes this exact owner path;
+contract version 4 restarts older same-owner derived semantics. Dry-run rolls the
+restart back; keepSource does not change which operations move. No new epoch,
+queue, arbitrary delay or historical Buy continuation was introduced.
+
+Real PG16 coverage includes absent/existing headers, both merge/page orders,
+keepSource variants, dry-run, actual NOWAIT contention and a distinct race where
+merge commits while the publisher retains E but before it takes U. The late
+current-header read rejects that stale ready result and ordinary enumeration
+recovers the imported dependency. Representative custom/generic plans on 50,000
+temporary rows use indexed access: owner hit 4 buffers/miss 2, restart hit 25–30
+buffers/miss 6. These are local measurements, not production benchmarks.
+Old outgoing-owner orphan headers created before this lifecycle hook are not
+automatically adopted; no financial runtime caller has created sessionless
+headers before activation. Do not claim that unrelated historical recovery is
+covered by the same-owner version upgrade.
+
+### Exact pUSD source selection and reorg recovery
+
+The ordinary Relay registry includes `polygon-pusd-to-hypercore-spot-usdc`.
+Inbound source currency is pinned independently from the wire response. The
+source, fee, protocol order, approval, deposit and both refund envelopes preserve
+the exact token/owner/raw units. A shared registered-and-pinned-stable subset is
+used by source-action accounting, claim valuation, snapshot eligibility and the
+refund evidence currency selector. pUSD is never silently treated as USDC or
+USDC.e. The pUSD quote is an explicitly synthetic variant of captured Polygon
+wire data, not new live route evidence.
+
+The real three-asset PG suite found a further SQL-only mismatch: published 0302
+allowed the exact observer to restore USDC after re-mining but excluded pUSD.
+New additive 0324 replaces that trigger function with exactly one token-set
+change. Every economic identity, allocation, finality, append-only history,
+legacy and native guard is retained. The migration performs no historical DML,
+data-dependent assertions or external reads. Published 0302 is unchanged.
+The new PG helper uses an actual writer-created refund, accepts its unchanged
+economic event with a new anchor, and rejects amount/asset/decimals/network,
+source/recipient/hash/index/kind/time changes, erased metadata, valid-history
+provenance deletion, missing new anchors and an unknown-token historical row.
+The existing canonical watcher also exercises remine and receive-anchor recovery.
+Only synthetic fixture lifetime was extended for lengthy SQL plan probes; all
+production quote, metadata-age, nonce and expiry checks remain unchanged.
+
+### Canonical read aliases without rewriting financial identity
+
+`funding-read-location-identity.ts` regenerates current-owner read identities from
+validated original-subject lineage only in known canonical EVM-wallet and native
+spot/perps namespaces. It preserves the original location and never grants
+execution authority. Arbitrary legacy IDs, synthetic controller aliases,
+`balanceLocationId`, wrong original owners, environment/decimals or incompatible
+DEX markers do not become address-only merge authority.
+
+Account Value now reads the immutable operation source alongside bound segment
+facts. Source retention/fencing validates that source independently; completion
+and refund aliases additionally require every primary/alternative refund owner
+to match. A damaged refund binding therefore cannot erase the narrow stale-source
+fence when its reservation is missing. The real terminal merge test checks
+completed claims, current read aliases, reorg/freshness recovery, unchanged
+snapshots/HMAC/key version, ordinary replay and current-owner competitors.
+Same-owner rows avoid unnecessary canonical re-hashing.
+
+Verification for this increment: fresh empty PostgreSQL 16.2 migrated through
+0324; all nine financial integration suites passed together (257.93 s), including
+the updated real merge/reorg test. The three-asset receipt/recovery suite and its
+custom/generic SQL plans passed separately. The 5,000-leg local settled-history
+probe used indexed per-operation reads (241 ms SQL, 557 ms read projection);
+this is not a production latency claim. Final postchecks found zero pending
+classification touches, invalid indexes, checkpoint headers/candidates or other
+test-client connections. All 356 HIP-funding tests, 80 narrower
+claim/cash/refund/identity tests and 24 worker tests passed; sets overlap. Scoped
+lint/format and an uncached full backend workspace build passed (16/16,
+28.26 s). No frontend code changed in this increment and its inherited dirty
+work was preserved; these backend results do not establish browser acceptance.
+The two scoped independent reviews found the pUSD guard and final read-alias
+increment acceptable after corrections, not the entire P3/P4 implementation.
+
+At this checkpoint Account Value merge support was **partial** (section 58
+supersedes this specific debit-read gap): the native/EVM post-snapshot
+debit SQL and shared native preparation aggregate still match historical
+reservation IDs to current component/location IDs. They need the same validated
+canonical treatment before claiming merged spendability coverage. Fresh physical
+snapshots must continue to recover through normal reads; do not globally relax
+owner, asset, DEX or generation checks.
+
+### Remaining full-path obligations
+
+Independent review reproduced a separate NO-GO in the full Polymarket Deposit
+Wallet → controller pUSD → Relay → Core plan. Its source-input reservation is the
+venue balance, while the Relay leg uses a synthetic controller location. Merely
+accepting `balanceLocationId` would hide the accounting problem: venue 100,
+handoff 10, refreshed venue 90, then controller Relay debit 10 must leave venue
+90, not 80. Bind the actual same-operation exact handoff and canonical ownership,
+use the existing canonical controller future-credit fence, and attribute each
+physical debit to its own location/time/segment. Alternatively reuse explicit
+preparation followed by a freshly observed/requoted controller leg. The handoff
+is operation-scoped; the Relay action fold remains transaction-only.
+
+After those read/accounting fixes, finish reciprocal joint publication and its
+worker wiring, generic fallback-creation acceptance, Solana directions, sealed
+native app handoff and mounted Confirmation/browser acceptance. Scoped positive
+reviews and local suites are not either required independent whole-scope GO.
+The whole-scope counter remains **0/2** and the goal remains active.
+
+## 58. Shared merged snapshot debits and narrow unknown recovery — October 16, 2026
+
+The post-snapshot debit gap from section 57 is fixed in the common read path,
+not through a HIP-only balance mechanism. `funding-snapshot-debits.ts` starts
+with the existing indexed physical/time tail, then reads current operation
+ownership and operation-scoped reservation proofs. One statement returns legacy
+strict matches and canonical alias candidates. Candidate admission uses the
+same immutable source lineage and canonical read-identity helper as the movement
+reader. Native physical readers retain the existing optional component guard;
+EVM readers require the exact component. Native token identity remains exact;
+EVM token equality retains its existing case semantics. Duplicated reservation
+proofs do not multiply a debit. No financial snapshot, reservation, HMAC or
+execution authority is rewritten.
+
+Account Value, native preparation, native send capacity and HIP order admission
+now use that shared admission path. Preparation retains one MVCC statement for
+pending holds, order holds and strict/candidate debits; aliases are not pre-read
+in another snapshot. Merge still rejects active reservations, so this terminal
+merge fix does not claim support for migrating active financial holds.
+
+Independent review reproduced a fail-open edge in the first draft: rejecting a
+legacy alias silently returned zero debits. The corrected reader preserves it
+as a separate diagnostic, never as admitted money. Account Value marks only the
+requested stale component unpriced/unknown and still processes valid debits for
+other components. Native preparation/send/order admission return their existing
+recoverable evidence/capacity errors. An ordinary physical balance read newer
+than the debit removes the candidate through the unchanged indexed time bound;
+no manual cleanup, new cooldown or permanent veto is required.
+
+PG16 rollback fixtures cover canonical native/EVM aliases, duplicate proofs,
+repeated owner moves, released reservations, reorg and restored canonical debit,
+strict native token matching, rejected legacy proof, a narrow component mask and
+fresh-snapshot recovery. A separate real central terminal merge uses the actual
+source receipt writer and verifies old-snapshot debit suppression plus fresh
+recovery. Representative custom/generic plans retain both existing tail indexes
+with 400,000 debit rows: hit 12–16 local buffers, resumed/sparse/empty 0–4;
+preparation hit 13. These are local fixture results, not production benchmarks.
+
+The scoped independent review returned GO after both findings were corrected.
+All 356 HIP-funding tests, 41 focused identity/cash/preparation tests, four common
+Account Value/reservation regression files and the full backend workspace build
+passed (16/16, 14 cached, 21.21 s). The sets overlap. The three additional real
+PG16 native-send/order-runtime/order-submission suites passed together (20.16 s),
+including shared holds, stale-capacity retry, concurrent one-submit, replay,
+BUY/SELL/cancel and merge guards. Their unchanged active-exposure probe measured
+174–589 ms and 144k–450k buffers on dense owned-history fixtures; do not mistake
+the new narrow debit-tail results for proof that every financial query is cheap.
+Frontend/admin code and the user's local app database/auth were untouched.
+
+This does not close the separate Deposit Wallet handoff accounting gap, activate
+reciprocal sessionless publication or finish the remaining routes, sealed native
+app handoff and mounted browser acceptance. Two consecutive fresh whole-scope GO
+reviews are still required; the whole-scope counter remains **0/2**.
+
+## 59. Exact frozen handoff binding and physical receipt — October 16, 2026
+
+The ordinary source planner now preserves the economic venue source separately
+from the canonical controller execution source. A Relay leg retains its original
+source-input reservation and the existing operation-scoped controller
+future-credit fence. Composite planning counts only economic inputs towards
+cash capacity, but retains both physical reservations for rebasing/conflicts.
+Provider-paid gas never makes a Deposit Wallet handoff automatic: it still
+requires the user's existing review/signing path. No standing allowance,
+factory-only Deposit Wallet call or new transaction mechanism was introduced.
+
+`polymarket-handoff-binding.ts` validates the exact immutable source, controller,
+profiles, token, amount, reservation pair, handoff action and dependency ancestry.
+`polymarket-handoff-binding-repository.ts` reads the existing immutable quote and
+actual current source/fence rows by exact keys, rather than reconstructing plans
+from attempt history. A finalized handoff additionally requires its same-operation
+attempt, action fingerprint, receipt and currently owned canonical physical
+event/anchor. A copied receipt from a different operation is rejected even when
+the fingerprint is identical. Polling does not replace the first finalization
+time. These are read proofs, not permission to continue an old purchase.
+
+PG16 acceptance uses actual quote/commit, deferred segment validation, attempt,
+receipt and canonical-event writers; no provider or signer is called. It checks
+the null-scoped controller fence, exact storage reads and foreign owner/key
+rejection. Handoff creates no second `funding_observations` claim. Prepared
+custom/generic queries also run against 100,000 same-owner physical fences and
+50,000 unrelated rows in each plan relation, without sequential scans. The full
+receipt integration suite passed, as did 357 HIP-funding tests, scoped lint/format,
+API typecheck and the full backend workspace build (16/16, 14 cached, 24.18 s).
+Scoped independent no-history reviews found no remaining helper/planner blocker
+after composite capacity, user-action admission and cross-operation receipt
+issues were fixed. They are not whole-P3/P4 GO reviews.
+
+At this checkpoint the physical receipt helper was not yet connected to common Account Value,
+reservation settlement or the paged role classifiers. Therefore the full handoff
+accounting obligation from section 57 is still open, not implicitly fixed by a
+valid frozen plan. The next increment must distinguish the two physical balance
+times, preserve the controller credit-lag gap, share hold settlement with commit
+admission, and test reorg/recovery. Reciprocal publication, remaining routes,
+sealed app handoff and mounted browser acceptance remain open. No production,
+user auth/admin, frontend, personal Telegram, git or deployment state changed.
+
+## 60. Shared handoff accounting and exact physical holds — October 16, 2026
+
+This supersedes section 59's unwired Account Value/reservation status, not its
+remaining whole-P3/P4 obligations. The normal receipt writer now records a small
+server-derived discovery hint on the existing receipt. Transport-supplied hints
+are discarded. The hint contains physical asset/addresses and exact plan-row
+pointers, not monetary authority. A damaged/deleted current binding retains its
+older discovery hint so the reader reports a narrow gap instead of losing it.
+No handoff debit/credit observation, new financial ledger or second claim exists.
+
+`funding-handoff-snapshots.ts` uses indexed physical/asset/time tails, then
+hydrates the immutable quote, current relational owner, actual source/fence,
+step, attempt, receipt and canonical event in **one SQL statement**. Exact-key
+subqueries prevent account-history scans. Discovery pointers are safely decoded;
+bad pointers or a lost/reorged/conflicting proof cannot admit money. Terminal
+destination/refund status does not remove these physical snapshot tails.
+Polymarket funder read aliases now reproduce only the existing canonical derived
+venue namespace; the shared cash constructor uses the same identity. No
+controller alias, arbitrary legacy ID or address-only ownership is accepted.
+
+An independent review caught a timing error in the first draft: a balance read
+can already include H **before the first finality poll**. Wallet balance timestamps
+are captured before awaiting latest-RPC IO and do not retain a ledger height.
+Consequently even a valid H cannot justify subtracting its amount from that
+snapshot by wallclock ordering. Both selected source/controller tails are
+diagnostic raw zero plus `funding_handoff_snapshot_pending`, not monetary zero
+cash or another debit. The common projection marks only those old physical
+components unpriced/availability-unknown. An ordinary post-finality physical
+refresh removes the tail immediately; there is no housekeeping delay, repair
+write, new quote or historical Buy continuation. The proof timestamp is explicitly
+named `finalityObservedAt`, not Transfer time. SQL-bound snapshot identity also
+preserves the unknown decision when PG microseconds map to the same JS millisecond.
+
+The normal Relay in-transit claim validates the different economic venue input
+and canonical controller fence through the exact frozen binding. It is attributed
+to the physical controller, never debited again against a fresh venue90. The
+legacy submitted-debit aggregate likewise does not report controller D as a
+second physical venue debit. The native/EVM monetary debit paths are otherwise
+unchanged; a rejected controller debit proof still stays unknown until refresh.
+
+Exact owned finalized H releases only its original source-input reservation.
+Exact same-segment controller D releases only its bound future-credit fence.
+Both releases are idempotent and use the existing reservation lifecycle. E was
+locked before O; the later H settlement only reads that same prelocked identity.
+The shared pending guard is used by reducer release, availability and commit
+conflict admission. Confirmed/ambiguous H cannot be released by an early D or a
+sibling/terminal result. The controller guard follows its exact downstream leg,
+not every operation step. H-only user cancellation with no broadcast Relay debit
+retains the ordinary safe cancellation/release path. Other venue routes are not
+reclassified by this native-inbound structural guard.
+
+Additive 0325 creates concurrent receipt discovery indexes without historical DML
+or data-dependent rollout assertions. A dense PG16 probe found a redundant
+leading network key could make even empty tails walk old index pages. The final
+index omits that constant (already fixed by its partial predicate): with 100,000
+old same-physical receipts, custom/generic empty/sparse reads use 12 local buffers
+instead of 344; current hit reads used 26–53. These are local fixture measurements,
+not production latency evidence. Two new empty disposable databases migrated
+through the complete final 0000–0325 chain. An earlier disposable database retains
+a draft 0325 checksum and must not be remigrated as the current schema.
+
+Actual PG acceptance covers first confirmed H, early real controller D and commit
+conflict, finalized H replay, H-only cancellation, H/D physical releases, one
+Relay claim, preexisting controller10, venue90 refreshed before/after finality,
+missing fence, reorg, forbidden stale-finalized revival and ordinary fresh-read
+recovery. The full receipt integration suite passed after the timing correction.
+The broader common-finance regression rerun passed all 11 PostgreSQL suites on
+the final 0000–0325 schema, including the last submitted-debit exclusion change.
+All 357 HIP-funding tests, 16 focused proof/alias tests, common persistence/lifecycle
+regressions, scoped lint/format and the full backend workspace build passed
+(16/16, 14 cached, 21.38 s); these sets overlap. Scoped independent review passed
+after its timing finding was corrected. This is **not** a whole-scope GO.
+
+Before calling the entire handoff path accepted, finish
+merged-owner/legacy discovery and complete failure/terminal/refund coverage, and
+the binding-aware paged role classifier integration. The future-fence, dependency,
+profile and owned-event fields must be added to the classification projection in
+a new additive migration if those paged readers begin consuming them; 0317 is
+unchanged. Reciprocal sessionless publication/callback activation, remaining
+routes, sealed native app handoff and mounted/browser acceptance still remain.
+Whole-scope consecutive fresh GO remains **0/2**. No git/production/financial
+activation, personal Telegram, app database/auth/admin, Redis or server change
+was performed.
+
+## 61. Reciprocal Relay destination publication — October 16, 2026
+
+The ordinary Relay destination receipt publisher now uses the shared resumable
+role scan for supported EVM receipts. It is not a HIP-specific credit path.
+Native HyperCore retains its exact native observation contract, without a fake
+EVM event or receive session. The existing funding job lease token/deadline is
+passed through normal and stopped-evidence provider polls; the worker supplies
+the existing runtime batch policy as the page limit. Missing work/codec context
+does not fall back to a positively filtered legacy classifier for supported EVM.
+
+Publication takes the complete physical E footprint before alias collapse,
+reads all roles without financial effects, locks the sorted union of positive
+and negative operation dependencies, then takes the nonwaiting current-owner
+membership fence. Only the exact destination decision for this leg can credit.
+The final facts fence is immediately followed by COMMIT on the original client.
+Derived work instead commits E → U NOWAIT → one page/checkpoint, with no later
+O lock or financial effect in that transaction.
+
+Integration acceptance exposed two recovery gaps: an action-complete source can
+still require observation pages, and a cached positive decision can retain an
+old negative dependency after a failed final fence. Every recovery verdict,
+including a conflict containing unfinished evidence, now advances checkpoint
+work only; a real positive-role conflict never gains credit authority. A pure
+exact-set owner/revision check rejects stale summaries into the same fair page
+rotation. It does not replace captured revisions or substitute for final F.
+With 50,000 unrelated operations/revisions, actual PG16 custom/generic plans for
+100 exact dependencies used 600 local buffers and 0.24–0.27 ms; stale/foreign
+tails used 6, missing 2 and empty 0. These are local fixtures, not production SLOs.
+
+Scoped independent review found that checking a deadline once per event did not
+bound SQL waits or a dense summary fold. A transaction-local query adapter now
+sets statement/lock limits to the remaining existing job budget before each
+query. Raw BEGIN/isolation, cleanup and the final F/COMMIT pair bypass that
+adapter; expiration cannot prevent rollback or insert a query after F. Budget
+exhaustion preserves previously committed pages and retries normally, without a
+new queue, arbitrary delay, dependency truncation or historical Buy continuation.
+
+The real PG16 destination suite passed with reversed/duplicate multi-events,
+checkpoint-only ordering, same-owner negative-witness races and normal recovery,
+missing-codec recovery, actual held-E timeout/fresh-deadline recovery, recorded
+refund conflict atomicity, prior external allocation, target no-O writer race,
+replay and native positive control. Scope-only independent rereview found no
+remaining actionable issue. Additional common persistence, Relay reconciliation
+and HIP funding receipt PostgreSQL regressions passed (3/3, sequential, isolated
+PG16). API typecheck, scoped lint/format and the final full backend workspace
+build passed (16/16, 14 cached, 22.81 s). Database postcheck found no outstanding
+classification touches, invalid indexes or other client connections. These
+checks do not assert that retained synthetic fixtures contain no financial rows.
+
+This verifies only the listed destination-publication cases, not complete
+reorg/remine acceptance (section 62). Owned refund
+and exact-refund reciprocal activation, complete race/post-window recovery,
+handoff legacy/merged/terminal acceptance, remaining routes, sealed app handoff
+and browser acceptance still remain. Whole-scope GO stays **0/2**. No commit,
+push, deployment, production policy/permission, financial signing, personal
+Telegram or app DB/auth/admin/Redis/server mutation was performed.
+
+The owned-refund remine integration must preserve its existing old/new physical
+footprint and controlled anchor repair. The generic sessionless event adapter
+currently requires the supplied anchor to match E. It must not be reused with
+a new remine anchor by relaxing identity collisions or updating E before role
+arbitration. Resolve that authority boundary, add both-order acceptance and
+prove normal worker/deadline/terminal-timeout behavior before enabling the
+remaining reciprocal refund callbacks. Existing immutable reorged-attempt
+no-revival and evidence-only historical Buy detachment remain mandatory.
+
+## 62. Bounded local drain and remaining anchor authority — October 16, 2026
+
+A separate no-history integration-boundary review confirmed that one derived
+page per queue tick can manufacture a missing-evidence timeout. Production
+defaults use 2-second active polling and a 90-second generic timeout. Immediate
+test loops with fixed `now` do not prove normal worker timing.
+
+The destination publisher now drains a bounded number of checkpoint pages under
+the **same existing lease deadline**, reusing the runtime batch limit for both
+rows/page and pages per observation invocation. Each page commits and releases
+its E → U checkpoint transaction before a **fresh** full-E publication attempt;
+the final attempt never acquires O after checkpoint U. The provider/RPC
+observation is outside this local loop and is not repeated. Page work identities
+are deterministic custom UUIDs derived from the existing lease token, incoming
+event fingerprint and page ordinal. They are not new leases, financial nonces or
+submission authority. Last-token replay suppression is not a durable seen-set:
+an older replay can advance derived work again, within that invocation's page
+cap and the original deadline. No exactly-once page budget per root lease is claimed.
+
+Actual PG16 acceptance passed normal source/role work plus publication within
+one 30-second lease at runtime batch size 25, as well as the existing limit-one,
+negative-witness/replay, conflict, deadline and native cases. Three focused budget
+and work-identity tests, scoped lint and API typecheck passed. Scoped review found
+no new issue in the bounded loop. Final common persistence, Relay integration
+and HIP receipt regressions passed (3/3, sequential, isolated PG16). The final
+destination/concurrency suite additionally verified one observation per local
+drain, the runtime page cap, and rejection of an unproven pending-anchor change.
+The full backend workspace build passed (16/16, 14 cached, 23.32 s). Subsequent
+queue-path acceptance with advancing `now`, actual lease/due/reducer operations,
+dense negatives, multiple events and stale-summary repair is recorded in section 63. Its synthetic provider callback is not full worker/live-provider acceptance.
+
+The same independent review found a genuine remaining canonical recovery gap:
+a checkpoint may commit unowned E at anchor A before any financial receipt.
+If the exact transfer re-mines at B while classification is pending, current
+strict identity and triggers correctly refuse a casual anchor change. Existing
+known-event retries reconstruct A without RPC and cannot prove B. This affects
+destination checkpoints too; section 61's scoped pass is **not** full acceptance.
+
+The next common primitive must be controlled **canonical-evidence reanchoring**,
+not earlier financial allocation or a generic ignore-anchor flag. Reuse the exact
+canonical verification already used by refund watch: replaced old block, exact
+same transaction/log/asset/parties/amount at a confirmed new canonical block;
+inconsistent two-anchor evidence remains pending. Persistence requires a locked
+full old-snapshot CAS, truly unallocated/unowned state (including receive binding
+and financial/handoff owners), unchanged economics/observation timestamps, and
+atomic invalidation of stale retry/anchor-bound derived context while retaining
+captured dependency identities. This capability is not yet implemented. A new
+additive migration is required if the database admission/provenance changes;
+published migrations must not be widened in place.
+
+Recorded owned-refund remine needs its own narrow already-locked authority
+adapter into the shared core, preserving incoming fingerprints and all existing
+reorg/ownership checks. Exact and owned receipt publication can reuse existing
+`verified_proposal` evidence, then full negative/positive O union, late U and F.
+The exact runtime must own its final transaction rather than call the F/COMMIT
+helper inside `infra.tx`. Canonical-watch **recanonicalization** is another
+positive publisher requiring this integration; its existing target-only tests
+are not proof of joint authority. Invalidation-only loss of an old refund must
+remain available without waiting for positive-role completion or replacement.
+
+Required acceptance includes pending A → B before any receipt, recorded remine,
+changed economics rejection, binding/allocation/financial ownership arriving
+during RPC, stale A worker after repair, both ownership orders, merge, deadline
+and stopped-job repair. The original no-revival/old-Buy-detachment guards remain.
+Exact-refund callback remains off. The whole P3/P4 goal is active, **0/2** final
+consecutive whole-scope GO reviews. No git/production/financial activation or
+personal Telegram change has been performed.
+
+## 63. Physical-key serialization and queue-path recovery — October 16, 2026
+
+The pending-anchor review identified an insertion race that an E-only lock or
+two absence reads cannot close: a legacy financial writer can insert an owner
+before any E exists and commit after a speculative checkpoint. The solution
+reuses the **existing** handoff physical-key advisory namespace, now uniformly
+try-only; it is not a new lock domain, ledger or financial authority.
+
+Additive migration **0326** gates new canonical E, observations, receive
+receipts and physical step-receipt claims. Anchor-changing E updates and positive
+restorations participate too. No historical DML/backfill/assertion is added;
+unchanged metadata, ordinary merge and truthful retraction remain available.
+Both old/new retained handoff markers are covered even if the outer transaction
+hash is absent or different. The explicit handoff call preserves its exact
+native namespace as well as EVM keys; replacing it with an EVM-only helper would
+silently remove the old native serialization.
+
+No acquisition in this physical namespace waits. In particular, a handoff that
+already holds E/O cannot wait on another creator's gate while that creator waits
+on E. The exact tagged `55P03` result rolls back the current pass. Destination
+publication returns pending only **after rollback**; common queue errors use the
+existing active-poll cadence, preserving generic timeouts, facts fences and
+submission/lease semantics. Busy/unknown SQL errors are not interchangeable.
+
+Real PG16 tests passed absent-E ownership in both orders, duplicate ON CONFLICT
+replay, the actual existing-E/gate lock cycle, native namespace control, reversed
+old/new stored-marker contention, and diagnostics/retraction during contention.
+The ordinary worker test now requires busy → scheduled +2 seconds → actual
+destination publisher → two atomic credits → reducer `completed`, without manual
+requeue or any signing/submission. First-key receive/refund overlap explicitly
+tests try-busy rollback with O still free and a successful fresh full-E retry;
+separate existing-E tests retain actual E-wait/deadline coverage.
+
+Queue-path timing acceptance uses two events and 24 valid negative sibling
+contracts, actual job claims/lease tokens/due scheduling/reducer, and advancing
+application time. An injected no-O change just before F must produce one failed
+pass, zero credits/suppressions and an exact ordinary 30-second retry. Eventual
+normal jobs refresh stale summaries and reach `completed`. Fresh-database run:
+611 derived pages, 26 job passes, **78 seconds modeled cadence**, not production
+wall-clock throughput. The callback supplies synthetic verified chain events;
+this is not the full finance-worker/Relay-driver/provider composition.
+
+Both complete fresh 0000–0326 migration and application over retained legacy
+fixtures passed. The full profile concurrency/SQL suite passed on both schemas,
+including representative custom/generic plans. Five budget/gate unit tests,
+scoped lint/format, API typecheck and the full backend build passed (16/16,
+6 cached, 24.99 s). Common persistence, Relay integration and HIP receipts passed
+again (3/3); eight additional common/native/delegated/receive regressions passed.
+Two global-queue test cases now raise and restore only their exact fixture job's
+priority; product queue ranking is unchanged. Receive/owned-refund overlap tests
+accept only the new tagged contention or the existing facts-change result, then
+require ordinary retry and the original exactly-once credit/ownership checks.
+Both PG16 databases ended with zero staged classification touches, zero invalid
+indexes and no other connected clients. Independent read-only reviews found no remaining scoped
+implementation issue after fixes; none counts toward final whole-goal GO.
+
+This increment **does not implement or enable pending reanchor**. It closes the
+absent-parent serialization prerequisite only. A later narrow CAS still needs
+exact replaced-block/current-log proof, READ COMMITTED and a fresh statement
+after gate acquisition, any-status physical owner/receipt checks, retained
+handoff ownership, full old envelope/anchor match and immutable observation
+timestamps. Preserve bound session/variant ownership and candidate identities;
+invalidate old retry authority and refresh anchor-bound summaries through normal
+bounded pages. Do not bulk-clear dependencies or make binding itself permanent
+financial ownership. Legacy case/null-sender evidence must not become a negative
+proof by filtering it out. No generic ignore-anchor switch is acceptable.
+
+Recorded refund remine, joint owned/exact/watch publication, full worker/stopped
+repair acceptance and the remaining routes/app/browser/performance obligations
+remain open. Exact-refund callback remains off. The P3/P4 goal remains active;
+consecutive independent whole-scope GO count is **0/2**. No commit, push, deploy,
+production permissions/policy, personal Telegram or local app DB/auth/admin/
+Redis/server change was performed.
+
+## 64. Receipt-driver contention recovery and known-anchor proof — October 16, 2026
+
+Real receipt polling aggregates independent inspection/persistence failures.
+The shared physical-busy predicate now recognizes a **nonempty, recursively
+all-busy** `AggregateError`; empty/mixed aggregates retain normal failure
+handling. Terminal polling retains its failed-verification result and separately
+identifies pure contention, so every existing canonical/invalidation callback
+still runs. It uses the existing active retry cadence with a sanitized specific
+diagnostic, while **preserving** the original 15-minute terminal verification
+bound. Neither active evidence deadlines nor attempt baselines are extended.
+
+Stopped evidence-only repair retains its existing five-minute/cursor sweep,
+not a new fast queue. Pure contention has a specific diagnostic; a later required
+substantive failure takes precedence over an earlier busy failure. Provider
+refresh remains best-effort. No failed required verifier can authorize reduction
+or release a hold, and `evidenceOnlyRecoveryAt` continues to fence an old Buy.
+
+A separate fresh PG16 database migrated through 0000–0326 passed the complete
+embedded funding suite plus actual queue → receipt driver → persistence →
+reduction recovery. Chain inspection is synthetic; no signatures/submissions or
+purchase consumer are involved. Tests cover mixed-stage failures, all callbacks,
+retained holds, the established stopped sweep, successful later persistence,
+terminal short retry and unchanged terminal incident bound. Focused unit tests
+also exercise actual driver aggregation and terminal early returns. Independent
+scoped rereview found no remaining actionable issue; this is not whole-goal GO.
+
+The unowned-reanchor precursor now produces a bounded proof for one known EVM
+transaction: unchanged canonical envelope, verified exact replacement with a
+replaced old block, or explicit deferral. Both anchors use the existing shared
+two-confirmation receive threshold. Missing/conflicting receipt identity,
+ambiguous log index, changed economics, insufficient finality, two live anchors,
+transport failure or exhausted deadline never authorize publication. Returned
+RPC transaction hashes are retained and mismatches rejected, not inferred from
+the requested hash. Legacy readers may still omit this field; the new proof
+requires it.
+
+The default head reader's URL-only fresh memo could otherwise inherit a prior
+caller's wider timeout/retry budget. An explicit bounded-fresh read bypasses that
+memo while retaining the common RPC's timeout/retry-specific single-flight lane;
+existing callers' memo/cache behavior is unchanged. A mocked raw-RPC regression
+holds an earlier wide-budget head open and proves that this inspector completes
+independently. Seven proof tests pass, including Polygon/Base exact finality
+boundaries and positive three/four-read counts. The proof precursor passed an
+independent no-history scoped rereview after this correction.
+
+**The new proof is not yet runtime-wired or anchor-write authority.** Pending
+reanchor still needs the physical-gate/owner-absence/CAS transaction, revocation
+of old lease authority, anchor-bound derived progress and ordinary retry
+integration. Known retries must validate stored chain anchors before publication,
+including replacements behind the forward-only scan cursor. No generic immutable
+identity guard was weakened. Additive **0327** only fixes physical-gate casing:
+valid Polygon/Base hashes, including a legacy uppercase `0X` prefix, share the
+existing lowercase advisory key. Native/malformed/non-target keys remain exact.
+The old behavior was reproduced on two PostgreSQL sessions before the fix. The
+full PG16 concurrency/SQL profile passed after 0327, including both helper/adapter
+orders, real legacy-cased observation versus normal E insertion in both orders,
+and native-case distinction. This adds no claim or reanchor authority; persisted
+ownership reads still need alias-safe predicates before a negative is trusted.
+
+Final backend checks after 0327 passed: full workspace build **16/16** (6 cached,
+23.68 s), scoped lint/format and common funding / Relay / HIP receipt integration
+**3/3** on the migrated legacy-fixture database. The separate full concurrency
+profile also passed on PG16; its final queue case used 635 derived pages in 27
+passes / 80 seconds **modeled cadence**, not measured provider throughput. No
+production or local app database, session, admin flag, Redis or server was changed.
+
+The independent no-history whole-scope review returned **NO GO**: ordinary exact
+refund callback/publication, pending reanchor and sealed native Telegram → app
+execution remain P3/P4 blockers. It independently passed 182 backend focused
+tests, 132 frontend focused tests and the admin capability-label test; those do
+not substitute for missing runtime paths or full Confirmation/browser acceptance.
+Whole-scope consecutive GO count remains **0/2**, and the goal remains active.
+
+## 65. Pending receive reanchor in the common funding paths — October 16, 2026
+
+The earlier proof-only boundary is superseded by a narrow runtime repair for
+**pending, unowned Polygon/Base transfers**. The receive retry queue now verifies
+the known transaction before classification. Missing/conflicting chain facts
+defer publication; a verified replacement uses the common metadata-only repair
+and waits for a new ordinary claim. Initial receive scans and sessionless Relay
+destination jobs share the same adapter. Fresh/same-anchor batches add one
+indexed hint read, with no extra provider calls. Strict economic/anchor collision
+checks in the original upsert are unchanged.
+
+Repair obtains the existing try-only physical gate, locks E, performs a separate
+fresh READ COMMITTED global ownership read, and compares the complete exact
+PostgreSQL row snapshot. It appends provenance and changes only the anchor and
+old lease authority. Amount, asset, parties, event identity, original observation
+timestamps, frozen session/variant binding and scheduled retry date survive.
+No receipt, observation, reservation, operation, notification or consumer/Buy
+execution is created. Derived scan v5 binds its header to the event fingerprint;
+bounded restart preserves every captured candidate ID and negative dependency.
+
+Additive **0328** installs the provenance/header fields and narrow runtime guard;
+the existing owned refund and confirmed-H exceptions remain unchanged. Ownership
+checks include all statuses/kinds/users/assets, case aliases, missing/malformed
+log hints and independent retained H markers. Legacy transaction-only claims
+also participate in the same try-only namespace through a transaction-footprint
+sentinel. Changed/broadened receipt evidence must acquire it even during a
+retraction; unchanged-footprint truthful retractions remain unblocked. Contention
+uses the established evidence retry, not a new scheduler or waiting O→E lock.
+**0329** adds four concurrent fixed-width physical-hash indexes with mandatory
+exact residual equality. Neither migration backfills or classifies historical
+financial rows. Both migrated an empty PG16 database and retained legacy fixtures.
+
+Known retry admission is rolling, one committed claim before each inspection,
+bounded by the existing interval and original batch limit. A slow first event
+does not postpone untouched due rows. Invalid original budgets fail before
+cleanup, cleanup does not consume the proof window, and expired work starts no
+new provider inspection. Reanchor never resets the freshly scheduled due time
+to a fixed logical clock or publishes the old anchor after revoking its token.
+
+Real PG16 CAS/legacy-ownership/two-session contention tests and representative
+custom/generic plans passed. The exact ownership SQL body used 4–13 buffers on
+360,000 synthetic rows; exact canonical/header/hint/CAS plans used 2–21 buffers
+on 50,000 rows. These are isolated local plans, not production measurements.
+Focused unit checks passed (24 tests/top-level test files), HIP funding passed
+357/357, and the full backend
+workspace build passed 16/16. Independent no-history scoped reviews returned GO
+for the known-retry package and for the initial/sessionless adapters; they do not
+count as whole-goal acceptance. The final sequential expanded PG16 run passed
+all five suites: concurrency/SQL and actual sessionless remine publication,
+joint receive, receive persistence, internal handoff, and embedded receipt-driver
+recovery. The timed case completed in 26 passes / 614 pages / 78 seconds
+**modeled cadence**, not measured provider throughput. The remine test asserts
+the credit's persisted height/hash are B and replay does not create another.
+
+Regression verification also found and fixed a generic-plan issue in both exact
+role readers: hydrate the known operation by its PK behind the existing
+`OFFSET 0` barrier, then check current owner. Previously one generic plan read
+5,002 owner operations for a single ID. The same dense custom/generic assertions
+now pass with one operation row examined. A rollback-only canonical-watch plan
+fixture retains 50,000 distinct physical logs but reuses one synthetic transaction
+so the added transaction sentinel does not allocate 50,000 redundant test locks.
+No database lock limits, financial guards or product timeouts were relaxed.
+Heavy PG suites run sequentially on the shared disposable server. Common funding
+persistence, Relay reconciliation and HIP receipt integration passed separately
+on the migrated legacy-fixture DB; earlier failed attempts are not counted as GO.
+
+The larger P3/P4 acceptance remains open: joint owned/exact/watch publication
+and the ordinary exact-refund callback, sealed native product Telegram→ordinary
+app execution, full Confirmation/browser/routes acceptance and active-order
+exposure performance still need completion. Personal Telegram remains out of
+scope. The goal remains active with **0/2 consecutive whole-scope GO reviews**.
+No commit/push/deploy, production policy/permission or local app database/auth/
+admin/Redis/server change is part of this increment.
+
+## 66. Shared exact-refund publication foundation — October 16, 2026
+
+The exact writer now separates read-only preparation, post-lock revalidation and
+effects. Context and facts revision come from the same statement; manifest reads
+are revision-bracketed. Revalidation keeps the original proposal revision and
+rejects a newly visible physical receipt instead of acquiring another E under O.
+The existing transaction adapter remains compatible for native/legacy callers.
+
+The new pool-level publisher reuses the destination publisher's extracted role
+phase: full verified E footprint, bounded checkpoint-only commits, pure role read,
+all positive/negative O dependencies, late U/membership validation, snapshot
+revalidation, effects, final F immediately followed by COMMIT. It uses the existing
+job identity/deadline/page limit, not another scheduler. A verified first-refund
+proposal can fill only checked physical absence with no recorded dependencies;
+it cannot replace a recorded owner, conflict, stale envelope or legacy witness.
+No source consumer or historical Buy is resumed by this publisher.
+
+Independent review found two concrete correctness defects, both corrected:
+
+- Same-key receipt deduplication now compares the full economic/anchor proof,
+  excluding poll time. Fresh block B cannot silently be replaced by stored A.
+- Shared observation allocation now takes the existing try-only physical gate
+  before an indexed all-kind/all-state EVM alias lookup. One identical retained
+  uppercase/`0X` claim is replayed without changing its stored hash, metadata or
+  finality. Foreign, incompatible or multiple claims cannot create another credit.
+  The exact recorded/manifest readers share this identity. New valid Polygon/Base
+  hashes are normalized; native/unsupported/malformed keys retain exact semantics.
+  Row contention uses NOWAIT and the existing narrow evidence retry, including
+  ungated truthful invalidations. No backfill or new migration was needed.
+
+PG16 tests cover partial/disjoint/repeated refunds, simultaneous writers, a second
+receipt committed before O, original-revision rejection, negative-sibling changes
+before F, full rollback and ordinary recovery, and exact F/COMMIT adjacency.
+Retained alias tests exercise immutable replay, shared publication, conflicting
+owners/kinds/values, multiple historical aliases, row/gate contention and native
+case distinction. The exact new SQL runs in custom/generic plans over 100,000
+synthetic rows: context 3–12 buffers; allocator 1–5, manifest 3–4 and recorded
+lookup 3–16 buffers. These are disposable local measurements, not production data.
+
+Final expanded concurrency/SQL acceptance and the three serial common funding,
+Relay and HIP receipt suites passed on PG16.2 through 0329. The same-tick queue
+test now checks its own event's unchanged lease/due/progress instead of assuming
+other retained fixtures cannot advance; scoped review accepted that correction.
+HIP funding passed 358/358, finance-worker 24/24, and the final full workspace
+build passed 16/16 after the last test edit. Explicit clean-environment import
+also confirms the new publisher does not require API-only secrets. Scoped lint,
+format and diff checks passed. Both disposable DBs have zero staged revision
+touches, invalid indexes or remaining client connections; synthetic fixtures are
+intentionally retained. No production prevalence of historical aliases is claimed.
+
+**This is not runtime activation or P3/P4 completion.** The ordinary exact-refund
+callback is still not enabled. Owned/watch positive publication needs the narrow
+proof-validated prelocked-event adapter and joint fence; truthful invalidation
+must remain independently committable. Existing job work must reach these paths
+before callback activation. Native product Telegram→app execution, full common
+Confirmation/browser/route acceptance and active-order exposure performance
+remain open. Scoped review is GO after the fixes; whole-scope consecutive GO
+remains **0/2**, and the goal stays active. Personal Telegram, local app sessions,
+production, commits, pushes and deployments are untouched.
+
+## 67. Owned-refund joint publication and recorded reorg adapter — October 16, 2026
+
+Owned-refund publication now uses the shared sessionless role phase rather than
+running legacy role readers after taking its effect operation lock. The existing
+reconciliation job passes its work identity, deadline and batch limit to this
+path. First receipts use the same checked-miss-only proposal rule as exact
+refunds. Positive effects require full old/new physical E, all captured positive
+and negative O dependencies, late U/membership, the unchanged target snapshot,
+and original-revision F immediately followed by COMMIT.
+
+Recorded protection is a separate committed transaction: old E, target O,
+unchanged receipt/source/authority snapshot, suppression and truthful retraction,
+then F/COMMIT. It does not depend on exhaustive role pages, a decryption codec or
+replacement publication. An unchanged canonical recorded refund needs no new
+positive role authority merely to report its existing result. No replacement E
+is introduced by invalidation alone.
+
+The reorg adapter is narrowly scoped to an already recorded, reorged and
+suppressed refund with unchanged economics and one matching current owner/leg.
+Its private branded proof is constructed from the exact receipt snapshot and
+captured revision under E; it cannot override a foreign or additional physical
+claim. Derived checkpoints use incoming B's fingerprint on the same protected E
+at A, without moving E's anchor. Each E→U checkpoint commits before another
+transaction may acquire O. Only the final arbitrated physical CAS may restore B.
+Unowned pending A→B continues to use the existing canonical-proof repair, not
+this adapter. There is no generic ignore-anchor/already-locked flag.
+
+Fresh no-history scoped review found two historical alias defects. The positive
+claim now also checks global retained receive receipts using the existing compact
+hash index plus exact normalized equality; a differently cased allocated E and
+receipt cannot become a second refund. Additive migration 0330 extends only the
+existing recorded-refund anchor exception for valid Base/Polygon hash aliases.
+All economic, allocation, provenance, pending-repair and handoff guards remain;
+native, malformed and unsupported references retain exact identity. Historical
+rows are not rewritten and migration execution does not validate legacy data.
+The reviewer re-read both fixes and returned scoped source GO, not whole-goal GO.
+Durable known-refund references also retain raw and canonical EVM fingerprints:
+an uppercase historical receipt with no remaining provider references must not
+look reorged merely because the same canonical chain log is lowercase. Both log
+representations enter the protected publisher with one canonical physical key;
+the receipt's stored hash remains unchanged.
+
+Disposable PostgreSQL 16.2 accepted 0330 over the existing legacy fixtures.
+Committed tests cover initial/repeated refund, competing destination, independent
+invalidation, replacement transfer, same-physical remine, stale snapshot and
+late-fence rollback, two publishers, both receive/refund ownership orders,
+historical uppercase external allocation and uppercase recorded refund remine.
+Limit-one checkpoints retain protected A until later ordinary ticks complete B.
+New SQL and the actual migration predicate were explained in custom and generic
+plans over 50,000 synthetic unrelated rows: receipt exclusion 3–4 buffers,
+recorded proof 2–13, and anchor predicate 3–4; no sequential scans. These are local
+synthetic measurements, not a claim about production prevalence or latency.
+
+The full delegated-funding regression passed after these source fixes; scoped
+lint, API typecheck, clean-environment sidecar import, 26 focused proposal/role/
+anchor/budget tests, 67 refund/destination regressions, and a full backend build
+(16/16) passed. Final bounded multi-tick owned acceptance and the expanded
+shared concurrency/SQL suite passed after 0330. The latter included real expired
+retry/failure/resume, merge/membership fences, exact publication, initial and
+retry receive publication, physical contention and pending-anchor recovery.
+Its timed queue scenario converged in 26 ticks/621 pages/78.38 seconds of modeled
+cadence; this is not live provider latency. HIP funding passed 358/358 and the
+finance-worker suite 24/24. None of these checks authorizes callback activation.
+
+Fixture-specific queue assertions now temporarily hold other retained synthetic
+events so the real claimant exercises SKIP LOCKED for the intended session.
+Decision capture and injected write failure are scoped to the asserted event and
+operation. No production timestamps, limits or financial assertions are changed;
+global timed-queue coverage remains separate. Independent scoped test review
+accepted this isolation. Earlier failed runs are not counted as acceptance.
+
+Still open: canonical-watch positive restoration must use this proof-scoped
+joint publication; exact runtime work propagation and the fifth refund callback
+remain disabled pending that integration and worker/stopped-job acceptance.
+Native product Telegram→ordinary app trading, common Confirmation/browser/route
+acceptance and active-order exposure performance also remain open. The goal is
+active with **0/2 consecutive whole-scope GO reviews**. No commit, push, deploy,
+production policy/permission, personal Telegram, local app DB/session/admin,
+Redis or server changes are part of this increment.
+
+## 68. Canonical refund watch uses joint funding publication (2026-10-16)
+
+This supersedes section 67's open canonical-watch implementation item, not its
+remaining P3/P4 acceptance gates. The watch now separates independently useful
+protection/retraction from positive EVM restoration. It uses the same role
+arbitration and operation/membership/final-fence contract as receive and owned
+refund publication; no new scheduler, lease, financial ledger or UI is added.
+
+The initial bounded receipt query captures the full PostgreSQL receipt snapshot,
+current relational owner, committed source, refund binding and classification
+revision in one statement. Operation-level owner/revision facts also exist for
+an empty page. Protection prelocks the entire old physical footprint in sorted
+order before target O, validates the exact receipt and original source binding,
+protects/retracts and writes its diagnostic cursor, then performs raw original
+F immediately followed by COMMIT. A conflicting allocation cannot prevent
+truthful invalidation. RPC admission/deadline failure still protects the known
+rows in that same bounded page without retracting them or advancing their
+verification cursor.
+
+Positive restoration requires the exact post-protection receipt captured under
+lock. A fresh query may adopt the revision caused by this transaction's own
+committed retraction only if that exact receipt and original source/refund
+binding survive. Each subsequent transaction regenerates the private recorded
+proof under E. Derived E→U pages commit before any transaction acquires O. The
+ready path takes the complete positive/negative O union, late U/header fence,
+receipt/source CAS, shared all-state physical ownership exclusion and controlled
+anchor effects, then raw original F/COMMIT. The written anchor must match the
+proof-bound event. No chain requests are repeated while role pages drain.
+
+Existing receive recovery owns its own retry acknowledgement. Protection keeps
+its retry time, token and binding rather than overwriting a claimable reason
+with non-claimable suppression. A recorded reorg can otherwise deadlock at
+`exact_refund_correlation_pending`: receive cannot use unowned anchor repair,
+while the DB permits recorded anchor movement only in its four existing states.
+After exact reorged receipt/current owner/revision/economics/competing-claim
+validation, the private proof factory may move that existing quarantine to
+`exact_refund_receipt_not_final` at the already locked stored anchor. It preserves
+all retry fields. Restoration leaves that retry for its own worker to observe
+the canonical refund, suppress and clear its lease atomically. The database
+anchor guard, allocations and competing-role checks are not relaxed.
+
+The ordinary reducer/worker passes its existing progress token and full lease
+deadline, including stopped evidence-only jobs. Provider inspection retains the
+existing half-remaining-budget allocation. Cursor writes occur only in the
+protection transaction, never after a derived U checkpoint. A rolled-back
+protection/F conflict propagates through the existing worker retry path; a
+return-only pending result would not survive terminal scheduling. Successful
+restoration makes cash evidence current immediately, even if its conservative
+diagnostic pending flag clears on the next ordinary complete sweep.
+
+Fresh no-history scoped review found and re-reviewed the fence propagation,
+anchor-binding, budget-row protection and retry-cycle fixes. These reviews are
+not the two required whole-scope GO reviews. Committed PG16 tests exercise
+limit-one checkpoint commits, replay/no duplicate receipts, exact post-protection
+snapshot races and recovery, original-F rollback/propagation, mismatched-anchor
+rejection and correlation-pending remine. The separate bound receive fixture
+retains its final null retry-time/null lease-token assertions. Legacy effect
+fixtures explicitly inject their intended role; they are not substituted for
+the committed full-authority tests.
+
+New operation/page/by-ID/locking-CAS SQL ran on disposable PostgreSQL 16.2 with
+50,000 dense and 50,000 sparse receipts using installed indexes. Custom and
+generic first/resumed/empty/sparse/CAS plans used 2–254 hit-plus-read buffers,
+visited at most 25 base rows per scan and had no sequential scans. Recorded local
+times were approximately 0.02–0.66 ms; these are synthetic, not production SLOs.
+The final sequential acceptance passed all five suites after the retry-cycle
+fix: shared concurrency/watch/SQL, common funding persistence, Relay provider
+reconciliation, HIP funding receipts and owned/delegated funding. The original
+bound receive retry-time/token cleanup assertions passed. Full backend workspace
+build passed 16/16; focused tests 13/13, HIP funding 358/358, finance-worker 24/24,
+scoped lint/format and clean-environment sidecar import also passed. These are
+this increment's regression results, not whole P3/P4 acceptance.
+
+Still open: exact runtime work/publisher integration and all-state receive-alias
+exclusion for exact positive publication, fifth callback activation with actual
+worker/stopped-job acceptance, native product Telegram→ordinary app trading,
+common Confirmation/browser/route acceptance, active-order/settled-history
+performance and final cross-repository validation. No new public API or design
+is introduced here. The goal remains active with **0/2 consecutive whole-scope
+GO reviews**. No commit, push, merge, deploy, production policy/permission,
+personal Telegram, local app DB/session/admin, Redis or server changes occurred.
+
+## 69. Exact-refund runtime and ordinary worker integration — October 16, 2026
+
+This increment connects the existing Relay driver's fifth callback to the
+shared exact-refund publisher. It supersedes section 68's outstanding
+exact-runtime/callback item, not the remaining whole-P3/P4 acceptance gates.
+No second funding scheduler, inventory, claim ledger, public API or UI is added.
+
+The callback preserves the existing job's progress token, deadline and bounded
+batch limit. Provider evidence is read once per poll, before publication; local
+role checkpoints reuse that evidence. The runtime delegates transaction
+ownership to the pool-level publisher rather than wrapping it in another
+transaction. Supported EVM effects retain full E, the sorted positive/negative
+O union, late U/header checks and original F immediately followed by COMMIT.
+Native work-bearing publication retains exact USDC8 ledger identity and uses
+the same job budget, target O and original F/COMMIT without inventing EVM keys.
+
+The exact writer checks the entire verified footprint for retained external
+receive claims before any quarantine, credit, completion proof or wake. It
+shares the existing indexed all-state/all-owner Base/Polygon case-alias query
+with owned-refund publication. Closed sessions and recovery/review receipts do
+not silently become unowned money. Native/unsupported identity rules are not
+broadened. This factoring requires no new migration or historical rewrite.
+
+Provider reads use the existing half-remaining-lease split, leaving the rest
+for persistence/reduction. Relay evidence flights with different deadlines
+cannot inherit a longer unbounded flight. EVM RPC reads receive the shrinking
+deadline. Native policy/admission runs in short DB-only transactions with
+transaction-local statement/lock budgets, committed before HTTP. The account
+client rechecks its absolute deadline after admission and recomputes its
+transport timeout there. Deadline/DB-budget denial preserves the last native
+second actually read; the next ordinary job starts at the unread second.
+Configuration/invalid-data failures are not relabeled as budget exhaustion.
+
+Fresh no-history scoped review found and re-reviewed the admission deadline and
+cursor-starvation fixes. Committed PostgreSQL tests cover the actual fifth
+callback, partial/completed/replayed refunds, all five retained receive states,
+closed/foreign-owner/case-alias exclusions before effects, native USDC8
+work-bearing commits, original-F rollback/recovery and expired work without IO.
+The actual ordinary worker converged through a pending observation and partial
+set in 11 leases, approximately 20 seconds of modeled due time; the model also
+accounts for each pass's actual duration. Stopped evidence-only recovery uses
+its real lease and callback, blocks old execution consent and creates no new
+financial attempt. Compatibility writer race tests remain separate from these
+real pool/worker authority tests. No provider transport or signing is exercised
+by these synthetic fixtures.
+
+The final sequential disposable PG16 acceptance passed all five suites:
+shared concurrency/SQL/runtime/worker, common funding persistence, Relay
+reconciliation, HIP funding receipts and owned/delegated funding. The shared
+receive-alias query's 50,000-row custom/generic plans used its installed
+expression index with 3–4 buffers and approximately 0.015–0.032 ms for hit/empty
+probes. These are local synthetic measurements, not production SLOs. The full
+backend workspace build passed 16/16; focused HIP funding/client/budget tests
+passed 372/372, finance-worker 24/24, scoped lint/format/diff checks and the
+clean-environment worker import passed. This is not a production or whole-goal
+GO.
+
+Next implementation, confirmed by a separate fresh static app-handoff audit:
+
+1. Extend the existing sealed app-handoff contract with native executable
+   terms and explicit HIP dispatch. Keep unattended Telegram signing disabled;
+   use ordinary app review, account reads, consent and native order session.
+2. Reuse the ordinary protected-IOC quote, exact cash8/outcome5/whole-lot terms,
+   controller, canonical token/environment, cap and expiry. Do not relabel the
+   legacy FOK/full-fill bound or six-decimal cash as native semantics.
+3. Build funded handoff from the same native raw debit and exact destination
+   identity as ordinary shortfall funding. Reuse its FundingOperation and
+   reservation through reload/refresh; do not enlarge confirmed spending.
+4. Extend the shared atomic sealed handoff/intent/funding claim boundary and
+   invoke it inside native admission. Merely enabling the generic claim's
+   handoff bypass flag is not an implementation.
+5. Link the existing native action/order/cloid before submission and recover
+   through native order observations. Lost responses, cancel races and browser
+   reload must never trigger a second order; partial IOC is not full success.
+
+Common Confirmation/browser/route acceptance, active-order/settled-history
+performance and final cross-repository validation remain open. These scoped
+reviews do not count toward the required **two consecutive fresh whole-scope
+GO reviews (0/2)**. The goal remains active. No commit, push, merge, deploy,
+production policy/permission, financial action, personal Telegram, local app
+DB/session/admin, Redis or server change occurred.
+
+## 70. Native sealed terms and shared handoff locking — October 16, 2026
+
+This is a verified persistence/locking foundation, **not native app-handoff
+activation or P3/P4 completion**. Product venue arrays and the production
+scope resolver still admit only the existing Polymarket/Limitless consumers.
+Unattended Telegram authorization/signing is not expanded. Personal Telegram
+has not been accessed.
+
+The native sealed tuple freezes mainnet market/token/outcome, exact controller
+reference, BUY/SELL, whole-lot quantity, representable limit price, IOC and the
+original user-consented raw debit cap. Cash is USDC8 and outcome balances use
+five decimals. It does not promise full execution, a fill floor or a current
+book/fee/signing window. Preparation snapshots now retain the original cap
+separately from a smaller calculated debit after lot rounding. A connected
+consumer must refresh ordinary fees/nonces/signing expiry after funding while
+preserving these economics, not resize the purchase from USD again.
+
+The existing shared direct/funded repository accepts that native tuple and
+checks economic equality, requested units and the confirmed native funding
+consumer bound. It rejects funded SELL, wrong outcome/cash decimals/spend cap,
+and an attempt to link claimed native order A to economically similar B.
+Direct recovery uses the existing native action/order/cloid identity; cloid is
+not a numeric venue order ID. Linking a native `filled`/`matched` summary does
+not declare a full fill; official native observations remain authoritative.
+Migration 0331 is additive structural compatibility on the existing intent
+table: new native rows require `app_handoff`. It does not scan/backfill legacy
+rows or change bot authorization constraints. It has been applied only to the
+approved disposable PostgreSQL 16 target, not production or the local app DB.
+
+A fresh independent lock audit found that simply calling the shared handoff
+claim from native admission would invert existing locks. The shared scope
+dependency now has explicit `lockAuthority` and `validate` methods. Financial
+commit and direct/funded consumers take funding policy, then the existing
+receive/context, Telegram market and user/legacy-controller authority locks,
+then handoff/intent and final validation. Lock-only acquisition grants no
+policy eligibility. Exact direct replay still returns before live validation.
+Token-only resolve/claim/cancel retain handoff → intent without acquiring the
+outer financial locks. A funding-return marker changed while waiting for the
+market lock is rejected before user/handoff/intent acquisition; a fresh
+ordinary retry recovers without a cooldown, cache purge or handoff deletion.
+
+Acceptance for this increment:
+
+- Native sealed-term unit tests: 17/17; five existing handoff unit suites and
+  the route-schema cases passed.
+- Seven serial PG16 suites passed: shared multi-connection handoff locking,
+  native shared-claim foundation, Polymarket ledger claim, handoff consent,
+  composite funding/action races, common funding persistence and ordinary
+  native order submission. Migration 0331 also ran against empty and legacy
+  temporary-table fixtures, preserving existing rows and rejecting native bot
+  writes.
+- The lock fixture has a qualifying internal EVM wallet, actual Telegram link,
+  complete authority/plan and a successful production-validation baseline. It
+  observes real lock waits and proves wallet/link locks precede handoff/intent,
+  Cancel wins and loses for BUY/SELL, exact replay, changed-marker rollback and
+  recovery, deactivation serialization and policy-before-direct-commit order.
+- The actual generation-lock SQL was parsed/executed on an empty tail. Its
+  forced-generic plan uses an existing index with both exact session and
+  generation conditions, not a sequential scan. This is not proof of populated
+  funding-return concurrency or production-scale performance readiness.
+- Final full backend workspace build: 16/16. API typecheck, scoped lint,
+  formatting/diff checks and clean-environment finance-worker import passed.
+  Disposable-target postcheck found no pending classification touches, invalid
+  indexes or remaining clients. Synthetic fixtures are intentionally retained.
+
+The scoped independent rereviews found no additional concrete foundation/lock
+defect. They do not cover actual merge, funded materialization, populated
+funding-return/retained-Solana races or native production authority/admission.
+They **do not count** toward the required whole-scope GO reviews (still 0/2).
+
+Next: install native controller scope and invoke this same lock envelope before
+the ordinary native admission's user lock; claim and link the existing native
+action/order/cloid in its durable pre-POST transaction. Then connect the sealed
+producer, existing shortfall funding and ordinary frontend native session,
+including supported SELL and response-loss recovery. Existing Confirmation,
+browser/route matrix, active-order/settled-history performance, cross-repository
+checks and the two consecutive fresh whole-scope GO reviews remain open. No
+commit, push, merge, deployment, live financial action, production policy or
+permission change was performed.
+
+## 71. Connected native handoff consumer and factual recovery — October 16, 2026
+
+This increment installs the native consumer of section 70's shared contract.
+It is **not product activation or whole P3/P4 completion**. The public product
+venue arrays still exclude Hyperliquid until the producer, funding continuation
+and ordinary frontend session are connected. Unattended bot signing remains
+disabled; personal Telegram has not been accessed.
+
+The native authority codec binds the exact user, Telegram account link and
+ordinary mainnet controller. An external `web_client` controller needs neither
+a Privy server wallet nor a bot grant. Admission uses the same outer policy and
+authority envelope as other handoff consumers, before native user/order locks.
+The optional paired handoff ID/fingerprint is checked at the ordinary native
+submission boundary. The original action/order/cloid and any existing funded
+attempt are linked in that transaction **before POST**. A lost response replays
+the same owned journal entry, before fresh capacity/policy/provider checks;
+omitting or changing its binding conflicts instead of creating another order.
+
+Internal v2 readers/builders now parse native exact IOC terms without legacy
+USD6, FOK or full-order receive-floor fields. Funding is bound to the same
+controller, canonical outcome context and USDC8 spend, within the original
+consented cap. These parser/consumer tests do not prove the still-unconnected
+product producer or actual generic funding materialization.
+
+Handoff recovery reuses the official native `/orders` facts, including an owned
+original action ID. An ACK, local expiry or generic `filled` summary is not a
+terminal fact. Exact terminal status is distinct from execution coverage:
+cancelled partial IOC retains its actual fills; missing fills are unknown.
+Autoclose additionally requires a current full-quantity execution summary.
+Independent review found that the monotonic historical quantity flag alone
+could survive a failed recheck; the summary gate and ordinary repair test fix
+that presentation error.
+
+Ordinary native reply/observation transactions project only the existing linked
+intent's derived status/time, through exact admitted action → committed handoff
+PK/fingerprint → owned intent/order/market/token/action. No monetary evidence,
+funding release or second ledger is added. Barrier invalidation restores
+`submitted`. Cheap state qualification and an explicitly correlated order probe
+keep pending queries from scanning completed native order history. Unified
+market-feed SQL is unchanged.
+
+A fresh lock audit found a real conflict with the legacy Telegram lifecycle
+worker: it takes intent I before an outbox FK needs user U, while native
+financial writers take U before I. That renderer also assumes six-decimal
+shares and incorrectly describes a cancelled partial IOC as never submitted.
+Native intents are therefore excluded **before its I lock** in this intermediate
+patch. Ordinary app/API recovery remains available. Native-aware lifecycle
+presentation and owner-before-I selection remain explicit implementation work;
+the exclusion must not be mistaken for completed native Telegram presentation.
+
+Acceptance for this increment:
+
+- Seven serial PG16 suites passed: shared handoff locks, connected native
+  BUY/SELL and funded BUY, Polymarket ledger claim, consent, composite races,
+  common funding persistence and ordinary native submissions.
+- Additional native public runtime, real-session auth/CSRF HTTP with mocked
+  providers, ordinary observation/100k-row plans and legacy lifecycle/market-exit
+  regression suites passed. The legacy suite requires an isolated candidate
+  population: after detecting old synthetic cards in the shared test DB, it was
+  run in a separate disposable clone with only preexisting fixture deliveries
+  excluded. Its assertions were not relaxed; no Telegram sender was contacted.
+- Connected tests verify pre-POST persistence, rollback after claim, old initial
+  quote/token TTL with committed consent, exact replay without current scope or
+  capacity, wrong ownership/binding, official terminal before fill coverage,
+  partial/full canonical executions, failed summary recheck and repair,
+  invalidated status and repair. A two-connection real-selector test holds
+  native policy/user locks and verifies that legacy lifecycle takes no native
+  intent lock or native outbox row.
+- Native pure tests passed 19/19; existing handoff/v2/projection tests passed.
+  On disposable PG16, 50,000-row temp histories plus an exact original binding
+  use installed indexes, 5,000 owned completed intents, 45,000 foreign rows and
+  open/stale-projection holes. Custom/generic detail, projection, sparse,
+  count/list and empty-tail plans read 2–44 local/shared buffers and took about
+  0.05–5 ms. The probe matches the API's existing `jit=off`; no production JIT
+  setting changed. These are local synthetic measurements, not production SLOs.
+- Full backend workspace build, API typecheck, scoped lint/format/diff checks
+  and clean-environment finance-worker import passed. This is not a financial
+  live test, frontend acceptance or deployment GO.
+
+Next: connect native product producer and route dispatch, ordinary USDC8
+shortfall funding and supported SELL to the existing frontend native session
+and Confirmation. Preserve the same operation/reservation/action/order through
+refresh and response loss; do not use the legacy Polymarket/USD6 default.
+Legacy retained receive-return markers need their proper native adapter, not a
+validation bypass. Native lifecycle presentation/locking, browser/funding/cancel
+matrix, existing active-order/settled-history performance, OpenAPI and final
+cross-repository checks remain open. The goal remains active with **0/2 fresh
+consecutive whole-scope GO reviews**; scoped reviews do not count. No commit,
+push, merge, deploy, live financial action, production policy/permission or
+local app DB/session/admin/Redis/server change occurred.
+
+## 72. Native Review/shortfall adapter and ordinary browser binding — October 16, 2026
+
+This is another implementation increment, **not whole P3/P4 completion or
+native Telegram product activation**. It addresses the concrete producer and
+browser contracts identified by a fresh independent integration review.
+
+`quoteTelegramNativeTradeReview` quotes through the ordinary native web IOC
+runtime. It retains exact quantity, protected price, original user debit cap,
+canonical outcome and current verified controller authority. BUY funding uses
+the quote's actual fee-inclusive debit, not the possibly larger original cap.
+SELL has no cash-funding request. External controllers require neither a bot
+grant nor a Privy server wallet. The adapter performs no prepare, nonce claim,
+reservation, signing or submission; it has not yet replaced the product card
+and callback's navigation-only native entry.
+
+The explicit native shortfall request carries native USDC8, its exact
+controller and canonical outcome context into the **same** Mini App funding
+inspection engine as P/L. It never falls back to Polygon pUSD or reconstructs
+raw amounts from display dollars. The ordinary planner still owns source
+discovery, executable provider floors and the sealed funding plan. Native
+inspection refuses stale/partial balances, preserves an observed provider
+floor above a tiny shortfall, and retries through fresh ordinary discovery
+after a balance change. Unattended/delegated funding remains P/L-only.
+
+V2 HTTP lifecycle dispatch now recognizes a fully parsed native contract and
+validates its exact authenticated user/intent/controller/fingerprint/policy
+scope. V1 still rejects native execution. Existing in-flight/terminal reads
+remain available without re-proving current execution eligibility. These
+consumer routes do not create product entry buttons or enable a bot signer.
+
+The ordinary frontend native order session/journal can retain the paired
+handoff ID/fingerprint before prepare and POST, pass it to the existing native
+submit endpoint, and recover the same action without a second POST. Changing
+or omitting the binding cannot hide an unresolved journal. The existing trade
+hook retires its session identity when the binding changes. No separate
+signing transport, financial ledger, funding coordinator or layout was added.
+
+Actual HTTP and offline OpenAPI generation now share the handoff route
+schemas. Native action IDs, terminal status and incomplete fill coverage are
+included in generated frontend DTOs instead of being lost during serialization.
+The offline contract/fixture command also checks the handoff paths.
+
+Focused tests cover native BUY/SELL × YES/NO, external authority, original cap
+versus required debit, wrong scope/asset/units, tiny shortfall/provider floor,
+stale and changed balance, direct/funded response loss, binding replacement and
+queued session inputs. Disposable PG16 verifies native HTTP-scope validation
+against real owned rows, including missing scope, foreign user, changed
+fingerprint and V1 rejection, alongside the previous connected admission and
+recovery suite. Its existing 50,000-row custom/generic read-plan checks passed;
+unified market-feed SQL was not changed. Shared HTTP schema serialization is
+tested independently of authentication; that test is not live auth acceptance.
+
+Next implement the native product draft/card/callback producer and connect the
+frontend handoff parser/continuation to this ordinary native session. Do not
+activate the product venue merely because its internal consumer now works.
+Native-aware lifecycle selection/rendering, terminal-before-fills refresh,
+partial-cancel presentation, complete browser/funding/Done/abandon matrix and
+the existing active-order/settled-history performance work remain open. The
+two required fresh **whole-scope** GO reviews remain **0/2**; scoped PASS
+reviews do not count. No Git, deployment, production policy/permission, live
+financial action or personal Telegram operation was performed.
+
+## 73. Native Review producer and ordinary Mini App continuation — October 16, 2026
+
+The native app-handoff producer now creates exact BUY/SELL drafts without a bot
+grant, server wallet authorization, order, nonce, reservation or funding
+operation. Exact cash8/token5 bounds live in the native request; the legacy
+`amount_usd` column is display metadata only. The ordinary IOC quote adapter
+freezes quantity, protected price, original cap and current linked controller.
+BUY inspects shortfall through the existing generic Mini App funding service;
+SELL never creates cash funding. Callback composition uses the same adapter in
+both internal preview and confirm paths, independently of unattended bot
+reconciliation. There is no native bot executor or personal Telegram access.
+
+Market-card preset composition is installed behind the existing shared product
+capability contract. It uses current policy presets and an unambiguous ordinary
+verified controller; unlinked, public, ambiguous-wallet and unavailable cases
+retain the normal editable app navigation. It does not choose an arbitrary
+wallet. **The product venue arrays are not activated yet.** Native Sell/custom
+input entry, lifecycle presentation and the complete acceptance matrix below
+must be connected before enabling this producer in normal cards.
+
+Issuance owns the existing policy → market/user/link/wallet → handoff/intent
+envelope. Concurrent choices cannot publish competing Reviews for one market.
+Reopening an existing token happens before new quote/funding IO and never
+replaces its frozen terms. Quote freshness is checked at publication, but its
+book expiry does not shorten the independent economic-consent lifetime.
+Cancellation keeps draft CAS separate from shared handoff → intent locking;
+repeated cancelled/expired outcomes are acknowledged, and a submit winner is
+reported as already started rather than falsely cancelled.
+
+Fresh independent review reproduced two producer defects and both were fixed:
+a lost Cancel response made repeated cancellation throw, and an old draft could
+quote wider slippage after a policy reduction. Current policy now rejects the
+stale draft before quoting; a fresh card is the normal recovery. Existing issued
+Reviews remain immutable. Real PostgreSQL 16 tests cover these recovery paths,
+wallet/link/policy/source changes, direct BUY/SELL, funded Review without an
+operation, concurrent selection, ownership and ambiguous controllers. New
+controller-choice and exact-intent SQL is parsed and executed on PG16, including
+custom/generic and empty-tail plans with 50,000 synthetic wallet rows and the
+installed indexes. The hot unified market/feed SQL is untouched.
+
+The frontend parser accepts only the matching `hip4-ioc-v1` tuple. Continuation
+refreshes the **exact** IOC through ordinary `/orders/quote`, not market re-sizing,
+then uses the existing `useHyperliquidTrade`/session/journal with the same paired
+handoff binding and optional common funding reservation. Current user, wallet,
+venue policy and execution binding fence the workflow. A restored journal is
+never automatically replaced; explicit Check uses ordinary acknowledgement or
+checked discard/abandon. Missing native terms cannot fall back to legacy
+USD6/FOK/full-fill fields. No layout, signing transport or financial engine was
+introduced.
+
+Independent frontend review found that unsigned restored attempts hid their
+Check action, and an unrelated unsigned journal could never be acknowledged.
+Both recovery paths now use the existing actionable waiting state and checked
+discard. The isolated browser harness mounts the actual continuation and native
+session in StrictMode: it verifies pre-prepare binding, no automatic replacement,
+explicit same/different-handoff recovery, and owner/policy fencing. API/auth
+boundaries are synthetic and preparation intentionally fails before signing.
+These checks do **not** establish mounted signature/POST, funded completion,
+partial-fill display or a live financial flow.
+
+Acceptance for this slice passed: serial PG16 producer and full connected native
+admission/recovery suites; focused legacy/native tests; full backend workspace
+build 16/16; frontend typecheck and lint, 1,915 tests, separate mounted-fixture
+typecheck, offline API-contract check and exact Node 20/Turbopack build. The
+latest isolated browser run reports all five checks and `data-verdict=PASS`.
+These are synthetic/local results, not a production performance or financial GO.
+
+Next implement native-aware lifecycle selection/rendering with owner-before-intent
+locking, truthful terminal-before-fills/partial-cancel presentation and bounded
+read-only repair. Finish native Sell/custom entry, complete Confirmation
+Done/close/abandon and direct/funded/cancel browser/HTTP matrices, and the existing
+active-order/settled-history performance work. Then run final cross-repository
+checks and obtain two consecutive fresh independent **whole-scope** GO reviews.
+The scoped reviews above are not those approvals: the goal remains active at
+**0/2**, with no commit, push, merge, deployment, live financial action or
+production policy/permission change.
+
+## 74. Native facts in the shared trade lifecycle — October 16, 2026
+
+The existing lifecycle projector/outbox now accepts native app-handoff trades.
+It does not add a Telegram executor, signing service, personal-account access,
+financial ledger or new product layout. Its progress snapshot carries exact
+cash8/token5 request bounds and the same official order/execution facts used by
+ordinary `/orders` and the app. Cancelled IOC remainders are distinct from
+before-submit cancellation: recorded partial fills remain visible, missing
+history remains unknown, and full-success presentation requires both official
+termination and the current complete-quantity execution summary. Unknown fees
+remain unavailable, not zero. Expired Review and stopped funded Review retain
+ordinary refresh/open-market recovery.
+
+Candidate hints are read without intent locks. A bounded common top-K of the
+legacy, native-direct and native-funded branches is followed by sorted owner
+`KEY SHARE SKIP LOCKED`, then exact intent-PK locking and authoritative source
+rechecks. A concurrently changing owner is skipped for the next ordinary pass,
+not trapped behind a cooldown. Native partial cancellation never invokes the
+generic pre-submit reservation release after an order/submission boundary.
+Linked funding is **not** pruned using a cached terminal operation status:
+later evidence/recovery must retain the existing funding-source wake-up gate.
+
+Failed native execution repair now uses the ordinary policy → owner envelope,
+rechecks owner/lease after waits, invalidates the current summary and wakes the
+exact linked intent in the same transaction. A changed fill/fee observation can
+wake presentation without changing the already-terminal order status. The
+immutable admitted order binding, rather than a retained handoff token row,
+owns this factual repair. Removing a short-lived token cannot abandon an
+already admitted order; it does not grant a new submission authority.
+
+Independent fresh scoped review found and drove fixes for snapshot metadata
+causing repeated identical revisions, stale full-success after a failed fills
+recheck, a post-owner-lock merge race, expired/funded-stop recovery wording,
+token-retention dependence and an overly narrow terminal-funding queue filter.
+The normalized snapshot stabilizes across delivery timestamp changes. These
+scoped reviews are not the two required whole-P3/P4 approvals.
+
+New additive concurrent indexes 0332/0333 cover native derived work and exact
+order-to-intent repair. They do not change financial invariants or unified
+market-feed SQL. Optional malformed watermark JSON is guarded before casts;
+the existing rows are neither auto-confirmed nor deliberately rejected during
+migration. Both actual migrations ran on disposable PG16; empty and malformed
+legacy index fixtures also exercise the index definitions. Representative
+custom/generic plans use 50,000 synthetic native histories. The initial generic
+hint plan exposed a 4.27-second/9.5-million-buffer scan; exact-PK rechecking,
+one-time filtering of absent funding sources and the native derived-work index
+remove that regression. Funded-history scale and the previously open native
+capacity/settled-history plans remain explicit performance work, not a claim of
+production SLO acceptance.
+
+The frontend native terminal presentation and mounted repair verification, Sell/custom
+product entry, complete direct/funded/Confirmation/cancel browser matrix and
+final cross-repository acceptance still remain. Product entry arrays are not
+enabled by this lifecycle increment. The goal remains active; consecutive
+fresh independent **whole-scope** GO is still **0/2**. No commit, push, deploy,
+production policy/permission, personal Telegram or live financial action was
+performed.
+
+Acceptance for this increment: the full connected native PG16 suite passed,
+including stable delivery re-projection, missing/partial/current full fills,
+failed-recheck recovery, funded-stop navigation, terminal-funding source parity,
+token deletion and owner-before-intent contention. Ordinary native observer
+regressions and 100,000-row order/fill plans passed. The existing shared venue
+lifecycle/market-exit suite passed on its separate disposable clone. Both test
+databases are at 0333 with no invalid indexes. On 50,000 native histories, final
+hint plans were 31–75 ms for first/resumed selection and 67–201 ms for empty
+tails after bulk fixture updates; exact selected-intent rechecks were about
+0.8–1.2 ms. These synthetic results do not settle funded-history or production
+performance acceptance. Focused pure suites, 24/24 finance-worker checks, API
+typecheck/scoped lint and the full backend workspace build 16/16 passed.
+
+## 75. Native product input and ordinary venue lifecycle — October 16, 2026
+
+Native Buy presets, Custom Buy, Sell all and Custom Sell now use the existing
+Telegram product card/input context and immutable app Review. Exact cash8 and
+whole-contract token5 parsers reject ambiguous or silently resized amounts.
+Owned capacity uses the same account read and Hunch holds as ordinary trading.
+Lost-response replay returns its saved input before new provider IO. Current
+custom-input policy is rechecked before unissued Review preparation; already
+issued Reviews retain immutable terms. Direct card and navigation entrypoints
+both preserve the native input writer. This supersedes the product-entry gaps
+in sections 73–74; it does not enable an unattended Telegram executor.
+
+Implemented interactive Hyperliquid capabilities now follow the shared venue
+lifecycle matrix, including active/exit-only/unreleased behavior, without test
+injection. Default policy remains unreleased/off. Autonomous trading, redemption
+and signal delivery/source remain unsupported. Production policy was not changed.
+
+## 76. Completed observation lane and explicit Check — October 16, 2026
+
+Officially terminal orders with complete quantity and known-fee summaries now
+use a cold lane in the existing observation queue. This is scheduling, not a new
+settlement proof. Missing, partial or invalidated facts retain the hot lane. The
+first worker slot is always hot; cold work uses the same total batch and current
+policy quota. `completedOrderRecheckIntervalMs` defaults to 3,600,000 and
+`completedOrderBatchSize` to 1. Both are runtime policy. Additive concurrent
+migration 0334 preserves the old due index and adds the class/due lookup.
+
+Ordinary native Check calls authenticated, CSRF-protected
+`POST /trade/hyperliquid/orders/recheck` with its exact owned action ID. The same
+observer, policy/user locks, lease, provider budget and factual repair writer
+apply. Explicit repair bypasses housekeeping due time, never a live lease. It
+does not sign, submit, release unknown holds or resume a historical Buy. Passive
+mount/resume reads do not call this repair.
+
+All current migrations through 0334 passed on fresh disposable PostgreSQL 16.
+Seven serial runtime/HTTP/observer/preparation/native-input/legacy-input/market
+navigation suites passed. The 50,000-history queue plans passed custom/generic,
+due and empty cases; the measured fixture plans were 0.026–0.168 ms with 4–44
+buffers, not a production SLO. Native input identity plans and 100,000-fill
+plans also passed. The full backend workspace build passed 16/16, the funding
+profile 361/361, frontend tests 1,929/1,929, typecheck/lint, offline contract
+generation/check and exact Node 20/Turbopack build passed. Eleven isolated
+browser checks mount the actual ordinary native hook/session and verify explicit
+Check, passive reads and stale-owner/close fences; APIs/accounts are synthetic.
+
+The diagnostic whole-scope review still found a P3 gap: a verified Relay refund
+may land in the owner's perps class, which current production source discovery
+does not admit. Reuse native Relay perps-source SendAsset and the existing
+funding UI to an owned supported EVM balance; do not mirror it as spot or resume
+the stopped Buy. Class-scoped transferable cash, holds/debits and recovery
+acceptance remain to implement. The full mounted funding/signing/Confirmation
+matrix and final whole-scope acceptance also remain. Scoped reviews passed for
+the input/lifecycle and queue/Check slices, not for the whole goal: **0/2**.
+No commit, push, deploy, production activation, personal Telegram operation or
+real financial action occurred.
+
+## 77. Recovering separate perps refund cash through common funding — October 16, 2026
+
+Section 76's unsupported refund-source gap now has an implementation for
+Standard cash-only native perps accounts. The existing account client admits
+`clearinghouseState` for the first DEX (`dex: ""`) under the same IP budget.
+The optional persisted `perpsCash` observation is independent of spot: failed
+reads expose unavailable facts, not old receipts or a fabricated zero balance.
+The provider timestamp cannot be made fresher by reading it. Unified/margin
+accounts are not duplicated across classes. The
+[official perpetual account summary](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/perpetuals)
+separates withdrawable, raw USD, equity, margin and positions. This cash-only
+adapter requires no margin inventory and consistent nonnegative raw cash; free
+cash is capped by the reported withdrawable amount. It never counts equity or
+borrowing as a transferable cash balance or changes the user's account mode.
+
+The canonical perps refund location is reused as a physical inventory component,
+not mirrored into spot. Its asset is still native USDC8; Relay's 16-byte zero
+selector is transport identity only. Normal account refresh repairs missing or
+stale reads. Unsupported modes/margin inventory remain explicit; they require a
+supported current cash account, not a timeout, historical-price approximation or
+automatic position closure. Spot errors do not erase independently verified
+perps cash.
+
+The perps-source Relay routes reuse the existing quote validator,
+nonce-mapping/SendAsset pair, sign-only executor, source reservation, one-shot
+submit and reconciliation. Source selection filters physical class before
+same-asset route uniqueness. Native send admission obtains a fresh same-class
+observation; spot order holds never consume perps cash. Snapshot-debit alias
+proofs preserve class across account merges. A proved debit in the other class
+neither reduces nor fences this class; incomplete proofs remain unknown until a
+fresh physical snapshot repairs them. Frozen economic plans are not rewritten.
+
+The normal Convert/Withdraw path can recover this cash into a supported owned
+Base/Polygon balance, with a new explicit user review and signatures. It cannot
+resume the historical Buy, perform a class transfer or invent a second funding
+engine. Common funding pause/withdrawal behavior is retained; default venue
+release remains off. UI changes only distinguish the source label
+`Hyperliquid perps cash` inside the existing layout. Receipt/refund/reorg fencing
+uses the exact component and its current observation, never newer spot cash.
+
+Acceptance: the funding profile passed 366/366; separate account/schema/debit
+checks passed 37/37. Disposable PG16 tests passed actual signed admission with an
+offline ephemeral key, a one-raw-unit shortfall, distinct spot/perps funding
+holds, durable unknown submission and replay without renewed send authority.
+The real account worker persisted verified perps facts, isolated a perps read
+failure and recovered on its normal next pass. Native/EVM debit, two merges,
+reorg, availability and custom/generic/empty-tail SQL plans passed; perps
+candidate plans measured 0.034–0.118 ms and 1–28 buffers on the synthetic indexed
+history. The full backend workspace build passed 16/16. Independent no-history
+review gave this slice scoped GO, not whole-goal or live-financial approval.
+
+An additional private browser harness mounts the **actual common funding
+controller and sequential runner**, with only wallet/API IO synthetic. Seven
+checks passed: terminal consumer, revoke, owner switch, logout and unmount while
+wallet preflight is pending prevent prepare/action-start/signing; disconnected
+wallet has actionable recovery; an explicit reconnect retry reaches ordinary
+prepare. Unexpected requests are counted and must remain zero. Signing is
+deliberately not reached. This closes the async-preflight mounted-test gap, not
+the entire direct/funded/Confirmation/signature/two-tab browser matrix. Final
+whole-scope consecutive fresh GO remains **0/2**. No real financial, production,
+Git or personal Telegram action occurred.
+
+## 78. Intermediate recovery, consent and ordinary Orders checkpoint — October 16, 2026
+
+This supersedes section 77's seven-check browser scope. Thirteen checks now mount
+the actual common funding controller: both pending wallet preflight and a
+successful delayed prepare are fenced by terminal consumer, revoked signing,
+owner switch, logout and unmount. The captured signing signal and caller's exact
+consumer predicate remain checked through all signer/submission callbacks.
+Stopping before signing creates no false in-flight journal; an explicit healthy
+retry reaches the same ordinary preparation. Already submitted results retain
+their original durable reporting path. All IO in these browser tests is
+synthetic; no transaction or real signature is produced.
+
+Sixteen mounted app-handoff checks also passed. Explicit native Check invokes the
+same factual observer before rereading projection; passive polling does not.
+Checks coalesce, failure permits read-only recovery, and late Check/execute/Cancel
+responses cannot reactivate work after token/owner/logout/unmount changes.
+Funding predicates retain their exact request scope, rather than a boolean that
+could become true for a new handoff. Product Telegram code is tested locally;
+the user's personal Telegram remains untouched.
+
+A fresh whole-scope diagnostic found two further issues, both corrected and
+subsequently given scoped GO. Ordinary Fund+Buy no longer silently replaces an
+expired reviewed IOC with a differently sized/priced one merely because the
+debit matches. It captures reviewed economics and expiry, checks after funding
+and immediately before submission, and returns to ordinary Review on change.
+The funded reservation is retained. A still-valid identical order can continue;
+a new explicit confirmation provides new consent. Tests include `24 @ 0.4012`
+versus `16 @ 0.6018`, both costing `962880000` raw8.
+
+The ordinary Orders mapper retains optional normalized provider CLOID. A lost
+submission ACK can therefore deduplicate the observed snapshot against an
+admitted native order through exact environment, signer, owner, token and CLOID
+while native OID is unknown. Known-OID conflicts, other tokens, external orders
+and unadmitted preparations stay visible. The reader does not bind an OID or
+change financial state. The provider field was checked with four public read-only
+requests; only key names/counts were retained, no participant addresses.
+
+Mapper tests and disposable PG16 native/legacy History suites passed. The
+50,000-order/5,000-snapshot custom/generic lost-ACK plans, including resumed empty
+pages, measured 99–109 ms and approximately 83,500 local buffers in the synthetic
+fixture. The full backend workspace build passed 16/16; exact Node 20/Turbopack
+and admin builds also passed. These are intermediate checks, not production
+performance or live financial approval. No migration was added for CLOID.
+
+The user authorized committing/pushing this intermediate snapshot to `hip-next`,
+without merge, deployment or financial activation. P3/P4 remains active and the
+required consecutive fresh whole-scope GO count remains **0/2**. Scoped approval
+of corrected findings does not count as either final review.

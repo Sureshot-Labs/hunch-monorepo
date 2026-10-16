@@ -84,7 +84,7 @@ import {
   limitlessSlugParamsSchema,
 } from "../schemas/limitless-private.js";
 import { quoteLimitlessClobMarket } from "../services/limitless-clob-quote.js";
-import { matchesTelegramAppHandoffV2CurrentScope } from "../services/telegram-bot-trading.js";
+import { telegramAppHandoffV2CurrentScope } from "../services/telegram-bot-trading.js";
 
 function normalizeAddress(value: string): string {
   return value.trim().toLowerCase();
@@ -1031,12 +1031,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const result = await submitLimitlessClientSignedOrder({
-        assertTelegramAppHandoffV2Scope: async (sealed) => {
-          return matchesTelegramAppHandoffV2CurrentScope({
-            db: sealed.db,
-            sealed,
-          });
-        },
+        assertTelegramAppHandoffV2Scope: telegramAppHandoffV2CurrentScope,
         body: request.body,
         log: request.log,
         pool,
@@ -1084,12 +1079,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
       const result = await broadcastLimitlessAmmTelegramAppHandoffTrade({
-        assertTelegramAppHandoffV2Scope: async (sealed) => {
-          return matchesTelegramAppHandoffV2CurrentScope({
-            db: sealed.db,
-            sealed,
-          });
-        },
+        assertTelegramAppHandoffV2Scope: telegramAppHandoffV2CurrentScope,
         body: request.body,
         log: request.log,
         pool,
@@ -1119,11 +1109,7 @@ export const limitlessPrivateRoutes: FastifyPluginAsync = async (app) => {
         return reply.send({ error: "Unauthorized" });
       }
       const result = await claimLimitlessAmmFundingTrade({
-        assertTelegramAppHandoffV2Scope: async (sealed) =>
-          matchesTelegramAppHandoffV2CurrentScope({
-            db: sealed.db,
-            sealed,
-          }),
+        assertTelegramAppHandoffV2Scope: telegramAppHandoffV2CurrentScope,
         body: request.body,
         pool,
         signer,

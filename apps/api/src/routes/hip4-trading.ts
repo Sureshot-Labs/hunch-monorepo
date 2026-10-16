@@ -28,6 +28,9 @@ import {
   readHip4OrderRecovery,
   abandonHip4OrderPreparation,
 } from "../repos/hip4-order-recovery.js";
+import { TelegramAppHandoffV2DirectTradeError } from "../repos/telegram-app-handoff-v2-direct-trade-repository.js";
+import { TelegramAppHandoffError } from "../services/telegram-app-handoff.js";
+import { recheckHip4OwnedOrder } from "../services/hip4-owned-order-recheck.js";
 
 // Exact constants only: transport/SQL/SDK errors can contain a signature or URL.
 const conflicts = new Set([
@@ -62,6 +65,8 @@ const invalidRequests = new Set([
   "hip4_trade_signature_invalid",
   "hip4_cancel_preparation_identity_invalid",
   "hip4_order_preparation_identity_invalid",
+  "hip4_handoff_binding_invalid",
+  "hip4_handoff_order_required",
   "hip4_preparation_invalid_order_amount",
   "hip4_preparation_invalid_order_type",
   "hip4_preparation_price_out_of_range",
@@ -73,6 +78,11 @@ export function hip4TradingRouteError(error: unknown): {
   error: string;
 } {
   const message = error instanceof Error ? error.message : "";
+  if (
+    error instanceof TelegramAppHandoffV2DirectTradeError ||
+    error instanceof TelegramAppHandoffError
+  )
+    return { status: 409, error: "hip4_handoff_changed" };
   // HTTP body validation runs before this handler. A later Zod failure can be
   // malformed provider/DB data or a response-contract bug, not a client error.
   if (invalidRequests.has(message))
@@ -221,6 +231,16 @@ export function registerHip4TradingRoutes(
       }),
   );
   post(
+    "/orders/recheck",
+    hip4TradingRouteSchemas["/orders/recheck"],
+    (userId, body) =>
+      recheckHip4OwnedOrder(
+        deps.pool,
+        { userId, actionId: body.actionId },
+        deps.runtime?.fetcher,
+      ),
+  );
+  post(
     "/orders/quote",
     hip4TradingRouteSchemas["/orders/quote"],
     async (userId, request) => {
@@ -258,7 +278,10 @@ export function registerHip4TradingRoutes(
       if (row.unsigned_envelope.action.type !== "order")
         throw new Error("hip4_order_preparation_identity_invalid");
       return submissionDto(
-        await submitHip4OrderWithCurrentContext(deps.pool, input, deps.runtime),
+        await submitHip4OrderWithCurrentContext(deps.pool, input, {
+          ...deps.runtime,
+          telegramAppHandoffScope: deps.runtime?.telegramAppHandoffScope,
+        }),
       );
     },
   );
@@ -289,9 +312,18 @@ export function registerHip4TradingRoutes(
 }
 
 export const hip4TradingRoutes: FastifyPluginAsync = async (app) => {
-  const [{ pool }, { createAuthMiddleware }] = await Promise.all([
+  const [
+    { pool },
+    { createAuthMiddleware },
+    { telegramAppHandoffV2CurrentScope },
+  ] = await Promise.all([
     import("../db.js"),
     import("../auth.js"),
+    import("../services/telegram-bot-trading.js"),
   ]);
-  registerHip4TradingRoutes(app, { pool, authorize: createAuthMiddleware() });
+  registerHip4TradingRoutes(app, {
+    pool,
+    authorize: createAuthMiddleware(),
+    runtime: { telegramAppHandoffScope: telegramAppHandoffV2CurrentScope },
+  });
 };

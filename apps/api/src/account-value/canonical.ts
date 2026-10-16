@@ -90,12 +90,12 @@ export function hypercoreSpotAccountLocation(input: {
   };
 }
 
-/** A possible native refund destination, not a cash component or spendable
- * balance. Spot outflow can refund to the same owner's separate perps account. */
+/** Separate physical perps cash/refund identity. A location alone does not
+ * prove current ownership, value or transferable capacity. */
 export function hypercorePerpsRefundLocation(input: {
   accountId: string;
   address: string;
-  controllerWalletId: string;
+  controllerWalletId: string | null;
 }): AssetLocation {
   const spot = hypercoreSpotAccountLocation(input).location;
   return {
@@ -156,6 +156,18 @@ export function stableWalletAssetLocationIdentity(input: {
     componentId: stableOpaqueId("asset", canonicalLocationKey(location)),
     locationId,
   };
+}
+
+/** Existing derived-funder cash namespace, shared with read-only owner rebasing. */
+export function stableVenueAssetLocationId(input: {
+  accountId: string;
+  address: string;
+  asset: AssetRef;
+}): string {
+  return stableOpaqueId(
+    "location",
+    `${input.accountId}:venue_account:${canonicalAccountAddress(input.asset.networkId, input.address)}:${canonicalAssetKey(input.asset)}`,
+  );
 }
 
 export type DeduplicatedInventory = Readonly<{

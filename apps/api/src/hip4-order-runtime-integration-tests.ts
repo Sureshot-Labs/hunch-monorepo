@@ -2,11 +2,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { Wallet } from "ethers";
-import {
-  hip4Identity,
-  DEFAULT_VENUE_LIFECYCLE_POLICY,
-  venueHasLifecycleCapability,
-} from "@hunch/shared";
+import { hip4Identity, DEFAULT_VENUE_LIFECYCLE_POLICY } from "@hunch/shared";
 import { createIntegrationTestPool } from "./test-database-target.js";
 import { hip4OrderTestFixture } from "./hip4-order-test-fixture.js";
 import { hip4FundedOrderTestFixture } from "./hip4-funded-order-test-fixture.js";
@@ -49,19 +45,6 @@ const pool = await createIntegrationTestPool({
 });
 const wallet = Wallet.createRandom();
 const policyIds: string[] = [];
-const testCapability: typeof venueHasLifecycleCapability = (
-  policy,
-  _venue,
-  capability,
-) =>
-  venueHasLifecycleCapability(
-    {
-      ...policy,
-      venues: { ...policy.venues, polymarket: policy.venues.hyperliquid },
-    },
-    "polymarket",
-    capability,
-  );
 async function policy(lifecycle: "active" | "unreleased") {
   const payload = structuredClone(DEFAULT_VENUE_LIFECYCLE_POLICY);
   payload.venues.hyperliquid = { lifecycle, indexerMode: "off" };
@@ -218,7 +201,7 @@ const fetcher: typeof fetch = async (url, init) => {
   assert.ok(body.type in responses);
   return Response.json(responses[body.type]);
 };
-const deps = { fetcher, capabilityCheck: testCapability };
+const deps = { fetcher };
 
 try {
   assert.match(
@@ -241,6 +224,7 @@ try {
     client.release();
   }
   const first = await preparation();
+  await policy("unreleased");
   await assert.rejects(
     submit(pool, first.input, { fetcher }),
     /lifecycle_disabled/u,
@@ -248,8 +232,9 @@ try {
   assert.equal(
     calls.length,
     0,
-    "production implementation ceiling is unchanged",
+    "ordinary unreleased lifecycle rejects before provider IO",
   );
+  await policy("active");
   await assert.rejects(
     submit(
       pool,
@@ -716,8 +701,10 @@ try {
           await new Promise((resolve) => setTimeout(resolve, 10));
         }
         assert.ok(blocked, `preparation must wait on the ${lockTarget} lock`);
-        await new Promise((resolve) =>
-          setTimeout(resolve, Math.max(0, expiresAfter - Date.now() + 20)),
+        // Expiry is enforced by PG wall time, not the host/VM clock delta.
+        await locker.query(
+          "select pg_sleep(greatest(0,($1::numeric-extract(epoch from clock_timestamp())*1000)/1000))",
+          [expiresAfter + 5],
         );
         // Rolled-back competing nonce does not conflict, but waiting used up TTL.
         await locker.query("rollback");

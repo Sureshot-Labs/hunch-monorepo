@@ -8,7 +8,11 @@ import type {
 import type { RelayEligibleSourceFact } from "../../funding/planner/source-options.js";
 import type { ResolvedRouteDestination } from "../../funding/planner/destination-adapters.js";
 import type { FundingRuntimePolicy } from "../../funding/policies/funding-policy.js";
-import { HYPERCORE_MAINNET_USDC } from "../../funding/domain/hypercore-identity.js";
+import {
+  HYPERCORE_MAINNET_USDC,
+  hypercoreSourceLocationPattern,
+  RELAY_HYPERCORE_PERPS_CURRENCY,
+} from "../../funding/domain/hypercore-identity.js";
 import {
   resolveRelayHypercoreContracts,
   type RelayHypercoreQuoteInput,
@@ -17,7 +21,10 @@ import { normalizeRelayHypercoreWalletQuote } from "./wallet-adapter.js";
 import { createRelayReferenceCodec } from "./reference-codec.js";
 import { RELAY_HYPERCORE_EXECUTOR } from "./hypercore-operation-plan.js";
 import { relayHexOrderId } from "./order-hash.js";
-import { hypercoreSpotAccountLocation } from "../../account-value/canonical.js";
+import {
+  hypercoreSpotAccountLocation,
+  hypercorePerpsRefundLocation,
+} from "../../account-value/canonical.js";
 
 /** Offline fixture only. A fresh synthetic nonce/deadline makes PG integration
  * independent of the captured quote's lifetime; no signature or request runs. */
@@ -25,6 +32,9 @@ export function hypercorePlanTestFixture(
   now?: Date,
   accountId: string = randomUUID(),
   offlineOwner?: string,
+  quoteLifetimeMs = 60_000,
+  sourceDex: "spot" | "" = "spot",
+  walletIdOverride?: string,
 ) {
   let captured = JSON.parse(
     readFileSync(
@@ -47,6 +57,10 @@ export function hypercorePlanTestFixture(
   }
   now ??= new Date(captured.capturedAt);
   const wire = captured.quote;
+  if (sourceDex === "") {
+    wire.details.currencyIn.currency.address = RELAY_HYPERCORE_PERPS_CURRENCY;
+    wire.steps[1].items[0].data.action.parameters.sourceDex = "";
+  }
   const nonce = now.getTime();
   wire.steps[0].items[0].data.sign.value.nonce = nonce;
   wire.steps[0].items[0].data.post.body.nonce = nonce;
@@ -60,7 +74,7 @@ export function hypercorePlanTestFixture(
   wire.protocol.v2.orderId = orderId;
   wire.steps[0].items[0].data.sign.value.id = orderId;
   wire.steps[0].items[0].data.post.body.id = orderId;
-  const walletId = randomUUID();
+  const walletId = walletIdOverride ?? randomUUID();
   const profile: WalletExecutionProfile = {
     walletId,
     controllerWalletRef: walletId,
@@ -71,11 +85,15 @@ export function hypercorePlanTestFixture(
     serverWalletRef: `offline-wallet-${walletId}`,
     sponsorshipPolicyIds: [],
   };
-  const sourceLocation: AssetLocation = hypercoreSpotAccountLocation({
+  const nativeLocationInput = {
     accountId,
     address: profile.address,
     controllerWalletId: walletId,
-  }).location;
+  };
+  const sourceLocation: AssetLocation =
+    sourceDex === "spot"
+      ? hypercoreSpotAccountLocation(nativeLocationInput).location
+      : hypercorePerpsRefundLocation(nativeLocationInput);
   const nativeRefundLocation: AssetLocation = {
     ...sourceLocation,
     locationId: randomUUID(),
@@ -121,20 +139,20 @@ export function hypercorePlanTestFixture(
       8453,
     ),
     contractsObservedAt: now,
-    maximumContractAgeMs: 60000,
+    maximumContractAgeMs: Math.max(60000, quoteLifetimeMs),
     owner: profile.address,
     recipient: captured.request.recipient,
     destinationRefundRecipient: profile.address,
     destinationCurrency: captured.request.destinationCurrency,
-    sourceDex: "spot",
+    sourceDex,
     amountMode: "exact_input",
     authorizedSourceRaw: "1000000000",
     minimumOutputRaw: "9700000",
     expectedOutputTargetRaw: "9700000",
     maximumFeeRaw: "10000000",
     now,
-    deadline: new Date(now.getTime() + 120000),
-    maximumQuoteTtlMs: 60000,
+    deadline: new Date(now.getTime() + Math.max(120000, quoteLifetimeMs)),
+    maximumQuoteTtlMs: quoteLifetimeMs,
   };
   const quoteInput = {
     validation,
@@ -146,13 +164,16 @@ export function hypercorePlanTestFixture(
   };
   const quote = normalizeRelayHypercoreWalletQuote(quoteInput);
   const route: FundingRuntimePolicy["routes"][number] = {
-    routeId: "hypercore-spot-usdc-to-base-usdc",
+    routeId:
+      sourceDex === "spot"
+        ? "hypercore-spot-usdc-to-base-usdc"
+        : "hypercore-perps-usdc-to-base-usdc",
     enabled: true,
     providerId: "relay",
     capability: quote.candidate.capability,
     adapterId: "relay_quote_v2",
     adapterVersion: 1,
-    sourceLocationPatternId: "hypercore-spot-usdc",
+    sourceLocationPatternId: hypercoreSourceLocationPattern(sourceDex),
     destinationLocationPatternId: destination.destinationLocationPatternId,
     sourceAsset: HYPERCORE_MAINNET_USDC,
     destinationAsset: outputAsset,

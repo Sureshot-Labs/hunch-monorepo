@@ -8,6 +8,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { HUNCH_VENUES } from "@hunch/shared";
 import { buildTelegramAppMarketNavigation } from "../services/telegram-app-market-navigation.js";
+import { normalizeTelegramMarketRef } from "../services/telegram-market-reference.js";
 import { isTelegramFundingNavigationMarketId } from "../services/telegram-funding-navigation.js";
 import { filterVenuesForLifecycleCapability } from "../services/venue-lifecycle.js";
 
@@ -70,6 +71,10 @@ import {
   type TelegramBotTradingVenue,
 } from "../services/telegram-bot-trading.js";
 import { isTelegramAppHandoffV2EnabledForVenue } from "../services/telegram-app-handoff-v2-contract.js";
+import {
+  addTelegramNativeTradeChoices,
+  readTelegramNativeTradeIntent,
+} from "../services/telegram-native-app-handoff.js";
 import { resolveSignalBotTradingPolicyStateFromDb } from "../services/signal-bot-trading-policy.js";
 import {
   claimTelegramBotTradingAutoSetup,
@@ -1751,7 +1756,22 @@ async function registerTelegramBotTradingRoutes(
         side: request.body.context?.focusSide,
         returnCallbackData: request.body.context?.returnCallbackData,
       });
-      if (appNavigation) return appNavigation;
+      if (appNavigation)
+        return addTelegramNativeTradeChoices({
+          db,
+          navigation: appNavigation,
+          marketId:
+            normalizeTelegramMarketRef(request.body.marketRef) ??
+            request.body.marketRef,
+          telegramUserId: String(request.body.telegramUserId),
+          chatId: String(request.body.chatId),
+          telegramMessageId: request.body.telegramMessageId,
+          side: request.body.context?.focusSide,
+          miniAppEnabled: request.body.telegramMiniAppEnabled === true,
+          publicBrowseOnly: request.body.publicBrowseOnly,
+          context: request.body.context,
+          writeTradeInputContext,
+        });
       if (reconciliationEnabled) {
         return buildTelegramBotTradingMarketMessage({
           appBaseUrl: request.body.appBaseUrl,
@@ -1800,7 +1820,17 @@ async function registerTelegramBotTradingRoutes(
       | "change_amount"
       | "confirm",
   ) => {
-    if (expectedType === "confirm" && !reconciliationEnabled) {
+    // A native app Review never submits via the unattended bot executor. Keep
+    // its exact-intent callback independent of that executor's worker toggle.
+    const nativeAppIntent =
+      expectedType === "confirm" && request.params?.id
+        ? await readTelegramNativeTradeIntent(db, request.params.id)
+        : null;
+    if (
+      expectedType === "confirm" &&
+      !reconciliationEnabled &&
+      !nativeAppIntent
+    ) {
       const chatId = request.body.callbackQuery.message?.chat?.id;
       const text =
         "Trading is temporarily unavailable because required reconciliation is not enabled.";
@@ -1845,6 +1875,8 @@ async function registerTelegramBotTradingRoutes(
         tradeShortfallFundingService.inspect(input),
       inspectMiniAppFunding: (input, trade) =>
         tradeShortfallFundingService.inspectMiniAppFunding(input, trade),
+      inspectNativeMiniAppFunding: (input, trade) =>
+        tradeShortfallFundingService.inspectNativeMiniAppFunding(input, trade),
       commitTradeShortfall: (input) =>
         tradeShortfallFundingService.commit(input),
       cancelFundingOperation: async (input) => {
@@ -1880,6 +1912,8 @@ async function registerTelegramBotTradingRoutes(
         tradeShortfallFundingService.inspect(input),
       inspectMiniAppFunding: (input, trade) =>
         tradeShortfallFundingService.inspectMiniAppFunding(input, trade),
+      inspectNativeMiniAppFunding: (input, trade) =>
+        tradeShortfallFundingService.inspectNativeMiniAppFunding(input, trade),
       commitTradeShortfall: (input) =>
         tradeShortfallFundingService.commit(input),
       cancelFundingOperation: async (input) => {
@@ -1947,7 +1981,8 @@ async function registerTelegramBotTradingRoutes(
       }
       const policy = policyState.policy;
       const venueAllowsCustomInput =
-        policy.tradingVenues.includes(context.venue) ||
+        (context.version === 2 &&
+          policy.tradingVenues.includes(context.venue)) ||
         (context.deliveryMode === "app_handoff" &&
           isTelegramAppHandoffV2EnabledForVenue({
             contractVersion: policy.miniAppHandoffContractVersion,
@@ -2110,6 +2145,11 @@ async function registerTelegramBotTradingRoutes(
           tradeShortfallFundingService.inspect(input),
         inspectMiniAppFunding: (input, trade) =>
           tradeShortfallFundingService.inspectMiniAppFunding(input, trade),
+        inspectNativeMiniAppFunding: (input, trade) =>
+          tradeShortfallFundingService.inspectNativeMiniAppFunding(
+            input,
+            trade,
+          ),
         telegramMessageId: request.body.telegramMessageId,
         telegramMiniAppEnabled: request.body.telegramMiniAppEnabled,
         telegramUserId,

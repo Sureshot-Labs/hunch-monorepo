@@ -4,6 +4,7 @@ import { pool } from "./db.js";
 import { reduceFundingOperationInTransaction } from "./funding/reconciliation/funding-reducer.js";
 import { fetchUserFinancialLifecycleSummary } from "./services/user-financial-lifecycle.js";
 import { reparentUserWalletsForMerge } from "./repos/user-wallet-merge.js";
+import { restartMergedFundingRoleMembership } from "./funding/persistence/funding-role-membership-lifecycle.js";
 import {
   mergeUserSocialData,
   reparentMergedSocialExecutions,
@@ -924,6 +925,11 @@ export async function mergeUsers(
           [target.id, source.id],
         )
       ).rowCount ?? 0;
+
+    await restartMergedFundingRoleMembership(client, {
+      sourceUserId: source.id,
+      targetUserId: target.id,
+    });
 
     summary.fundingRouteObservationsMoved =
       (

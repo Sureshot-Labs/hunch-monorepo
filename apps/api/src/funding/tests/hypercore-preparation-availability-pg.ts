@@ -41,7 +41,7 @@ export async function verifyHypercorePreparationAvailabilityPg(
       canonical boolean, action_match boolean, evidence jsonb default '{}');
   `);
   await client.query(
-    "insert into funding_operations values($1,$2,'action_required')",
+    "insert into funding_operations(id,user_id,status) values($1,$2,'action_required')",
     [operationId, accountId],
   );
   await client.query(

@@ -4,6 +4,7 @@
 
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { syntheticCanonicalAnchor } from "../recorded-role-observer-fixture.js";
 
 import "../../../integration-test-database-guard.js";
 import {
@@ -51,6 +52,8 @@ import {
 import { buildFundingReceiveTargets } from "../../planner/receive-targets.js";
 import { verifyReceiveClassificationSessionLookupPg } from "../receive-classification-retry-pg.js";
 import { FundingReceiveReceiptRouter } from "../../receive/receive-receipt-router.js";
+import { verifyReceiveSourceMembershipPg } from "../receive-source-membership-pg.js";
+import { recordedRoleObserverFixture } from "../recorded-role-observer-fixture.js";
 
 const NOW = new Date();
 const DESTINATION_OPTION_ID = "destination_receive_persistence_12345678";
@@ -248,6 +251,7 @@ let completedLifecycleUserId: string | null = null;
 let expiredReviewSelectionUserId: string | null = null;
 let lateClosedReleaseUserId: string | null = null;
 try {
+  await verifyReceiveSourceMembershipPg(pool, sessionInput);
   crossChannelUserId = await insertUser();
   const telegramReceive = await createOrReuseFundingReceiveSession(pool, {
     ...sessionInput(crossChannelUserId),
@@ -356,7 +360,7 @@ try {
   // even before a transfer arrives or an asset has been selected.
   let scannedRetainedUsdc = false;
   let classifierSawPrelockedEvent = false;
-  const retainedObserver = new FundingReceiveSessionObserver({
+  const retainedObserver = recordedRoleObserverFixture({
     scanCanonicalEvents: async (variants) => {
       scannedRetainedUsdc ||= variants.some(
         (variant) => variant.variantId === retainedUsdcVariant.variantId,
@@ -393,7 +397,7 @@ try {
           prelocked.rows,
           [
             {
-              allocation_status: "pending",
+              allocation_status: "recovery_required",
               allocated_receipt_id: null,
             },
           ],
@@ -565,6 +569,7 @@ try {
     now: new Date(NOW.getTime() + 2_000),
   });
   const recoveryObserver = new FundingReceiveSessionObserver({
+    inspectCanonicalAnchor: syntheticCanonicalAnchor,
     scanCanonicalEvents: async (variants) => ({
       events: [],
       variants,
@@ -746,6 +751,7 @@ try {
   assert.ok(beforeRetry);
   let retryScannerCalls = 0;
   const knownObserver = new FundingReceiveSessionObserver({
+    inspectCanonicalAnchor: syntheticCanonicalAnchor,
     scanCanonicalEvents: async () => {
       retryScannerCalls++;
       throw new Error("known retry must not scan");
@@ -2876,6 +2882,31 @@ try {
   try {
     await cleanup.query("begin");
     await cleanup.query("set local session_replication_role = replica");
+    const fixtureUsers = [
+      userId,
+      mergeTargetId,
+      genericOptionUserId,
+      retainedSolUserId,
+      historicalSolUserId,
+      crossChannelUserId,
+      reviewReleaseUserId,
+      recoveryReleaseUserId,
+      pollingFairnessUserId,
+      sameChannelLeaseUserId,
+      completedLifecycleUserId,
+      expiredReviewSelectionUserId,
+      lateClosedReleaseUserId,
+    ].filter((id): id is string => id !== null);
+    await cleanup.query(
+      `delete from funding_receive_refund_candidates candidate_row
+       using funding_receive_refund_scans scan_row
+       where candidate_row.event_id=scan_row.event_id and scan_row.user_id=any($1::uuid[])`,
+      [fixtureUsers],
+    );
+    await cleanup.query(
+      "delete from funding_receive_refund_scans where user_id=any($1::uuid[])",
+      [fixtureUsers],
+    );
     await cleanup.query(
       "delete from funding_receive_open_idempotency where user_id = $1",
       [userId],

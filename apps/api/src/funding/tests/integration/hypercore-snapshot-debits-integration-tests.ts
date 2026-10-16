@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createIntegrationTestPool } from "../../../test-database-target.js";
 import { verifyHypercorePreparationAvailabilityPg } from "../hypercore-preparation-availability-pg.js";
+import { verifyMergedSnapshotDebitsPg } from "../merged-snapshot-debits-pg.js";
 import {
   FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL,
   FUNDING_EVM_SNAPSHOT_DEBITS_SQL,
@@ -37,10 +38,11 @@ try {
     ).rows[0].server_version_num.slice(0, 2),
     "16",
   );
-  // Shadow only these three relations in this session. Production constraints
+  // Shadow only these relations in this session. Production constraints
   // are separately exercised by the common native commit/receipt integration.
   await client.query(`
-    create temp table funding_operations(id uuid primary key, user_id uuid not null, status text);
+    create temp table funding_operations(id uuid primary key, user_id uuid not null, status text, source_snapshot jsonb);
+    create temp table funding_operation_segments(id uuid primary key, operation_id uuid, source_snapshot jsonb);
     create temp table balance_reservations(operation_id uuid, user_id uuid, segment_id uuid, component_id text, location_id text, network_id text, asset_id text, mode text, asset_decimals integer);
     create index test_native_reservation_operation on balance_reservations(operation_id, component_id, mode);
     create temp table funding_observations(id bigint, operation_id uuid, segment_id uuid, network_id text, asset_id text, from_address text, raw_amount text, observed_at timestamptz, finalized_at timestamptz, kind text, canonical boolean, finality_status text, asset_decimals integer default 8);
@@ -65,7 +67,7 @@ try {
   const user = "00000000-0000-4000-8000-000000000001";
   const op = "00000000-0000-4000-8000-000000000002";
   await client.query(
-    "insert into funding_operations values($1,$2,'completed')",
+    "insert into funding_operations(id,user_id,status) values($1,$2,'completed')",
     [op, user],
   );
   await client.query(
@@ -134,6 +136,19 @@ try {
     0,
   );
   assert.equal(rows[0].observed_at.toISOString(), "2026-10-14T16:00:20.000Z");
+  await client.query(
+    "update balance_reservations set asset_id=upper(asset_id) where network_id='hyperliquid:mainnet'",
+  );
+  assert.equal(
+    (await client.query(FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL, [user, snapshot()]))
+      .rowCount,
+    0,
+    "native legacy reservation token identity remains exact, not EVM case folding",
+  );
+  await client.query(
+    "update balance_reservations set asset_id=$1 where network_id='hyperliquid:mainnet'",
+    [asset],
+  );
   rows = (
     await client.query(FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL, [
       user,
@@ -341,6 +356,7 @@ try {
   }
   console.log("EVM snapshot debit cases passed");
   await verifyHypercorePreparationAvailabilityPg(client);
+  await verifyMergedSnapshotDebitsPg(client);
 } finally {
   await client.query("rollback");
   client.release();

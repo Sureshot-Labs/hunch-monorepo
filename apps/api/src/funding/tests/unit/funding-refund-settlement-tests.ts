@@ -11,6 +11,7 @@ import {
 import { HYPERCORE_MAINNET_USDC } from "../../domain/hypercore-identity.js";
 import { projectFundingRefundClaim } from "../../../account-value/funding-refund-claim.js";
 import { RELAY_ROUTE_SPECS } from "../../../funding-providers/relay/mappings.js";
+import { POLYGON_USDCE_LEGACY } from "../../../funding-providers/relay/rehearsal.js";
 import {
   deriveFundingLifecycle,
   type FundingLifecycleFacts,
@@ -140,7 +141,7 @@ test("account value does not price unknown extra receipts, excess refunds or mal
   );
 });
 
-test("account value uses exact USDC precision conversion, never pUSD or truncation", () => {
+test("account value converts registered stable-source units exactly without admitting unregistered collateral or truncation", () => {
   const base = RELAY_ROUTE_SPECS["base-usdc-to-hypercore-spot-usdc"].source;
   const source = { asset: base, raw: "10000000" };
   assert.deepEqual(
@@ -159,15 +160,30 @@ test("account value uses exact USDC precision conversion, never pUSD or truncati
     }),
     { kind: "complete" },
   );
-  assert.equal(
+  assert.deepEqual(
     projectFundingRefundClaim({
       source,
       contract: required(contract),
       receipts: [{ ...receipts()[0], money: { asset, raw: "400000001" } }],
+    }),
+    { kind: "unpriced", reason: "funding_refund_value_unknown" },
+  );
+  assert.equal(
+    projectFundingRefundClaim({
+      source: {
+        asset: {
+          networkId: "evm:137",
+          assetId: POLYGON_USDCE_LEGACY,
+          decimals: 6,
+        },
+        raw: "10000000",
+      },
+      contract: required(contract),
+      receipts: [],
     }).kind,
     "unpriced",
   );
-  assert.equal(
+  assert.deepEqual(
     projectFundingRefundClaim({
       source: {
         asset:
@@ -176,8 +192,8 @@ test("account value uses exact USDC precision conversion, never pUSD or truncati
       },
       contract: required(contract),
       receipts: [],
-    }).kind,
-    "unpriced",
+    }),
+    { kind: "pending", raw: "10000000" },
   );
 });
 function facts(rows = receipts()): FundingLifecycleFacts {

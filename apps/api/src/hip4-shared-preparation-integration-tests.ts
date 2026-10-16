@@ -159,16 +159,9 @@ try {
     },
     async (purpose) => {
       try {
-        // Only the fixture bypasses the unreleased implementation ceiling.
-        // Real runtime uses the ordinary lifecycle capability evaluator.
         const lifecycle = await readHip4TradeLifecycle(
           db,
           purpose === "buy" ? "BUY" : "SELL",
-          (current, venue, capability) =>
-            venue === "hyperliquid" &&
-            (current.venues.hyperliquid.lifecycle === "active" ||
-              (current.venues.hyperliquid.lifecycle === "exit-only" &&
-                capability === "reduceExposure")),
         );
         return JSON.stringify(lifecycle.policy);
       } catch (error) {

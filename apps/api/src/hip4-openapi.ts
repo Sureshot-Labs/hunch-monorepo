@@ -16,6 +16,7 @@ import {
   hip4TradingRouteSchemas,
   hip4TradingReadRouteSchemas,
 } from "./schemas/hip4-trading.js";
+import { telegramAppHandoffRouteSchemas } from "./schemas/telegram.js";
 import {
   fundingActionSigningRouteSchemas,
   fundingOperationReadRouteSchemas,
@@ -23,6 +24,8 @@ import {
   fundingDestinationsQuerySchema,
   fundingDestinationsResponseSchema,
   fundingRouteErrorSchemas,
+  fundingDiscoveryRequestSchema,
+  fundingLiquidityResponseSchema,
 } from "./schemas/funding.js";
 
 const app = Fastify();
@@ -35,6 +38,21 @@ await app.register(swagger, {
 app.get("/meta/venues", { schema: venueMetadataRouteSchema }, async () => {
   throw new Error("schema_only");
 });
+app.post(
+  "/funding/liquidity",
+  {
+    schema: {
+      body: fundingDiscoveryRequestSchema,
+      response: {
+        200: fundingLiquidityResponseSchema,
+        ...fundingRouteErrorSchemas,
+      },
+    },
+  },
+  async () => {
+    throw new Error("schema_only");
+  },
+);
 app.get(
   "/funding/destinations",
   {
@@ -111,6 +129,11 @@ for (const [path, schema] of Object.entries({
 }
 for (const [path, schema] of Object.entries(fundingOperationReadRouteSchemas)) {
   app.get(path, { schema }, async () => {
+    throw new Error("schema_only");
+  });
+}
+for (const [path, schema] of Object.entries(telegramAppHandoffRouteSchemas)) {
+  app.post(path, { schema }, async () => {
     throw new Error("schema_only");
   });
 }

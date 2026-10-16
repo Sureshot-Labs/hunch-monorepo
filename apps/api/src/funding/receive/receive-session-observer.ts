@@ -23,6 +23,8 @@ import {
   claimFundingReceiveCanonicalEventAllocation,
   bindFundingReceiveCanonicalEventSession,
   claimFundingReceiveClassificationRetries,
+  validateFundingReceiveClassificationRetryBudget,
+  stageFundingReceiveClassificationBatch,
   fundingReceiveClassificationRetryTarget,
   validateFundingReceiveClassificationRetry,
   finishFundingReceiveClassificationRetry,
@@ -62,13 +64,58 @@ import {
   isDirectReceiveCompletionKind,
 } from "../planner/receive-targets.js";
 import { recordCanonicalReceiveDepositNotification } from "./receive-deposit-notification.js";
-import { receiveInternalRolesConflict } from "./receive-event-classification.js";
+import {
+  resolveLegacyRecordedReceiveRoles,
+  type ReceiveEventClassification,
+} from "./receive-event-classification.js";
+import {
+  commitFundingClassificationTransaction,
+  lockFundingClassificationOperations,
+  type FundingClassificationRevision,
+} from "../persistence/funding-classification-revisions.js";
 import {
   classifyRecordedRelayExactRefundEvents,
   refundCanonicalEventKey,
 } from "../reconciliation/relay-exact-refund-classification.js";
+import {
+  advanceReceiveRefundScan,
+  checkpointReceiveRoleArbitrationInTransaction,
+  clearReceiveRefundScanBatch,
+} from "./receive-refund-scan.js";
+import { supportsRefundSourceEnvelope } from "../reconciliation/relay-refund-source-candidates.js";
+import { inspectEvmFundingReceiveAnchor } from "./evm-receive-anchor-proof.js";
+import { prepareReceiveAnchors } from "./prepare-receive-anchors.js";
+import { receiveRoleEventFingerprint } from "./receive-role-progress.js";
+import {
+  readPendingReceiveAnchorCandidate,
+  repairPendingReceiveAnchor,
+} from "../persistence/funding-pending-receive-anchor.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
+
+function canonicalEventInput(event: FundingReceiveCanonicalEvent, now: Date) {
+  return {
+    networkId: event.variant.networkId,
+    asset: event.variant.asset,
+    destinationAddress: event.destinationAddress,
+    sourceAddress: event.sourceAddress,
+    rawAmount: event.rawAmount,
+    transactionHash: event.transactionHash,
+    eventIndex: event.eventIndex,
+    ledgerHeight: event.blockNumber,
+    blockHash: event.blockHash,
+    observedAt: new Date(event.observedAt),
+    now,
+  };
+}
+
+type ReceivePublicationAuthority = Readonly<{
+  limit: number;
+  claims: readonly Readonly<{
+    retry: FundingReceiveClassificationRetry;
+    event: FundingReceiveCanonicalEvent;
+  }>[];
+}>;
 
 function canonicalEventIdentity(event: FundingReceiveCanonicalEvent): string {
   return [
@@ -371,18 +418,20 @@ export class FundingReceiveSessionObserver {
       relayReferenceCodec?: Pick<RelayReferenceCodec, "fingerprint">;
       scanCanonicalEvents?: typeof scanCanonicalFundingReceiveEvents;
       scanCanonicalEventsBatch?: typeof scanCanonicalFundingReceiveEventsBatch;
+      inspectCanonicalAnchor?: typeof inspectEvmFundingReceiveAnchor;
       listPotentialPolymarketHandoffs?: typeof listPotentialPolymarketHandoffsForCanonicalEvents;
       classifyOwnedRouteDestinations?: typeof classifyOwnedRouteCanonicalDestinationEvents;
       classifyRecordedRefunds?: typeof classifyRecordedRelayExactRefundEvents;
+      readRoleArbitration?: typeof checkpointReceiveRoleArbitrationInTransaction;
       readFinalizedSourceBalance?: typeof observeFinalizedSolanaOwnedAssetBalanceAfterSlot;
       readFinalizedInventoryBalance?: typeof observeFinalizedOwnedReceiveSourceBalance;
       verifyFinalizedSourceDebit?: typeof verifyFinalizedSolanaReceiveSourceDebit;
     }> = {},
   ) {}
 
-  /** Known immutable transfers only: no provider IO, scanner, quote or old Buy.
-   * The claim commits before scope locking; failures therefore rotate instead
-   * of making the oldest batch monopolize every subsequent tick. */
+  /** Known transfers only: bounded exact-transaction chain inspection, no
+   * history scan, quote or old Buy. Rolling claims commit before provider IO;
+   * a slow event must not postpone every untouched event in a bulk lease. */
   async pollKnownCanonicalRetryBatch(
     pool: Pool,
     input: Readonly<{ limit: number; retryDelayMs: number; now?: Date }>,
@@ -393,19 +442,104 @@ export class FundingReceiveSessionObserver {
       receiptsRecorded: number;
       recoveriesRequired: number;
       retryableErrors: number;
+      refundScanPages: number;
+      refundScanErrors: number;
+      refundScanCleanupEvents: number;
+      refundScanCleanupRows: number;
+      refundScanCleanupErrors: number;
+      anchorsRepaired: number;
+      anchorsDeferred: number;
     }>
   > {
-    const now = input.now ?? new Date();
-    const retries = await claimFundingReceiveClassificationRetries(pool, {
+    validateFundingReceiveClassificationRetryBudget({
       ...input,
-      now,
+      now: input.now ?? new Date(),
     });
+    // Cleanup remains reachable after allocation removes E from the retry
+    // queue. Failure is diagnostic; it must not block financial evidence repair.
+    const cleanup = await clearReceiveRefundScanBatch(pool, {
+      limit: input.limit,
+    }).catch(() => ({ eventsChecked: 0, rowsDeleted: 0, errors: 1 }));
+    // The existing retry interval bounds this invocation, independent of the
+    // optional deterministic scheduling clock. Cleanup is outside that budget.
+    const deadlineMs = Date.now() + input.retryDelayMs;
     let receiptsRecorded = 0,
       recoveriesRequired = 0,
       retryableErrors = 0,
-      unboundEvents = 0;
-    for (const retry of retries) {
+      unboundEvents = 0,
+      refundScanPages = 0,
+      refundScanErrors = 0,
+      eventsChecked = 0,
+      anchorsRepaired = 0,
+      anchorsDeferred = 0;
+    while (eventsChecked < input.limit && Date.now() < deadlineMs) {
+      const now = input.now ?? new Date();
+      const [claimedRetry] = await claimFundingReceiveClassificationRetries(
+        pool,
+        {
+          ...input,
+          limit: 1,
+          now,
+        },
+      );
+      if (!claimedRetry) break;
+      eventsChecked += 1;
+      let retry = claimedRetry;
       try {
+        if (Date.now() >= deadlineMs) {
+          anchorsDeferred += 1;
+          continue;
+        }
+        if (["evm:137", "evm:8453"].includes(retry.networkId)) {
+          const candidate = await readPendingReceiveAnchorCandidate(
+            pool,
+            retry.eventId,
+          );
+          if (
+            !candidate ||
+            JSON.parse(candidate.snapshot).classification_lease_token !==
+              retry.leaseToken ||
+            receiveRoleEventFingerprint(candidate.event) !==
+              receiveRoleEventFingerprint(retry)
+          ) {
+            anchorsDeferred += 1;
+            continue;
+          }
+          if (Date.now() >= deadlineMs) {
+            anchorsDeferred += 1;
+            continue;
+          }
+          const proof = await (
+            this.dependencies.inspectCanonicalAnchor ??
+            inspectEvmFundingReceiveAnchor
+          )({
+            expected: candidate.event,
+            deadlineMs,
+          });
+          if (proof.kind === "replacement_verified") {
+            const repaired = await repairPendingReceiveAnchor(pool, {
+              candidate,
+              proof,
+              deadlineMs,
+            });
+            if (repaired === "reanchored") anchorsRepaired += 1;
+            else anchorsDeferred += 1;
+            // A reanchor revokes this token. Only a NEW ordinary claim may
+            // classify B; no branch may fall through and publish old A.
+            continue;
+          }
+          if (
+            proof.kind !== "canonical" ||
+            proof.eventFingerprint !== receiveRoleEventFingerprint(retry)
+          ) {
+            anchorsDeferred += 1;
+            continue;
+          }
+          if (Date.now() >= deadlineMs) {
+            anchorsDeferred += 1;
+            continue;
+          }
+        }
         const target = await fundingReceiveClassificationRetryTarget(
           pool,
           retry,
@@ -422,6 +556,58 @@ export class FundingReceiveSessionObserver {
           retryableErrors += 1;
           continue;
         }
+        // Advance derived evidence under the SAME claimed event lease, before
+        // publication consumes that lease. One page per event, using the
+        // existing worker batch budget; no chain scan, quote or execution.
+        const jointAuthority = supportsRefundSourceEnvelope(retry);
+        if (jointAuthority) {
+          if (!retry.boundSessionId || !retry.boundVariantId) {
+            // Historical rows can predate any receiving session. Freeze the
+            // selected binding before scan headers capture it; the existing
+            // lease must still match. No fabricated session or new lease.
+            const bound = await tx(pool, async (db) => {
+              await lockFundingReceiveSessionScope(db, {
+                userId: target.snapshot.userId,
+                destinationOptionId:
+                  target.snapshot.session.destinationOptionId,
+                venueBindingOptionId:
+                  target.snapshot.session.venueBindingOptionId,
+              });
+              await lockFundingReceiveCanonicalEvents(db, [
+                canonicalEventInput(event, now),
+              ]);
+              return validateFundingReceiveClassificationRetry(
+                db,
+                retry,
+                target.snapshot.session.receiveSessionId,
+              );
+            });
+            if (!bound) continue;
+            retry = {
+              ...retry,
+              boundSessionId: target.snapshot.session.receiveSessionId,
+              boundVariantId: target.event.variantId,
+            };
+          }
+          try {
+            const progress = await advanceReceiveRefundScan(pool, {
+              retry,
+              userId: target.snapshot.userId,
+              limit: input.limit,
+              transactionReferenceCodec:
+                this.dependencies.transactionReferenceCodec,
+              referenceCodec: this.dependencies.relayReferenceCodec,
+            });
+            if (progress.kind === "context_mismatch") refundScanErrors += 1;
+            else if (
+              progress.kind === "source_page" ||
+              progress.kind === "action_page"
+            )
+              refundScanPages += 1;
+          } catch {
+            refundScanErrors += 1;
+          }
+        }
         const result = await this.persistCanonicalEvents(
           pool,
           target.snapshot,
@@ -430,6 +616,9 @@ export class FundingReceiveSessionObserver {
           false,
           now,
           retry,
+          jointAuthority
+            ? { limit: input.limit, claims: [{ retry, event }] }
+            : undefined,
         );
         receiptsRecorded += result.receiptsRecorded;
         recoveriesRequired += Number(result.recoveryRequired);
@@ -438,11 +627,18 @@ export class FundingReceiveSessionObserver {
       }
     }
     return {
-      eventsChecked: retries.length,
+      eventsChecked,
+      anchorsRepaired,
+      anchorsDeferred,
       unboundEvents,
       receiptsRecorded,
       recoveriesRequired,
       retryableErrors,
+      refundScanPages,
+      refundScanErrors,
+      refundScanCleanupEvents: cleanup.eventsChecked,
+      refundScanCleanupRows: cleanup.rowsDeleted,
+      refundScanCleanupErrors: cleanup.errors,
     };
   }
 
@@ -451,6 +647,8 @@ export class FundingReceiveSessionObserver {
     input: Readonly<{
       limit?: number;
       minimumPollIntervalMs?: number;
+      /** Lease/retry clock is independent of an explicit zero-delay scan. */
+      classificationRetryDelayMs?: number;
       now?: Date;
     }> = {},
   ): Promise<FundingReceiveSessionObservationResult> {
@@ -537,6 +735,10 @@ export class FundingReceiveSessionObserver {
             pool,
             session,
             now,
+            {
+              limit: batchLimit,
+              retryDelayMs: input.classificationRetryDelayMs ?? 10_000,
+            },
             batchScans
               ? { canonicalEvents: batchScans.scans.get(sessionKey) ?? null }
               : undefined,
@@ -760,6 +962,7 @@ export class FundingReceiveSessionObserver {
     pool: Pool,
     snapshot: FundingReceiveSessionSnapshot,
     now: Date,
+    classificationPolicy: Readonly<{ limit: number; retryDelayMs: number }>,
     precomputed?: Readonly<{
       canonicalEvents: FundingReceiveEventScan | null;
     }>,
@@ -774,6 +977,63 @@ export class FundingReceiveSessionObserver {
           scanCanonicalFundingReceiveEvents
         )(target.variants, now);
     if (canonicalEvents) {
+      const supported = canonicalEvents.events.filter((event) =>
+        supportsRefundSourceEnvelope(canonicalEventInput(event, now)),
+      );
+      const claims: ReceivePublicationAuthority["claims"][number][] = [];
+      if (supported.length) {
+        if (
+          (await prepareReceiveAnchors(pool, {
+            events: supported.map((event) => canonicalEventInput(event, now)),
+            deadlineMs: Date.now() + classificationPolicy.retryDelayMs,
+            inspect: this.dependencies.inspectCanonicalAnchor,
+          })) !== "ready"
+        )
+          return { receiptsRecorded: 0, recoveryRequired: true };
+        // Persist immutable events and selected bindings BEFORE source reads.
+        // A crash or a cursor advance cannot lose the ordinary retry work.
+        const staged = await stageFundingReceiveClassificationBatch(pool, {
+          scope: {
+            userId: snapshot.userId,
+            destinationOptionId: snapshot.session.destinationOptionId,
+            venueBindingOptionId: snapshot.session.venueBindingOptionId,
+          },
+          events: supported.map((event) => canonicalEventInput(event, now)),
+          retryDelayMs: classificationPolicy.retryDelayMs,
+          classifyRecordedRefunds: this.dependencies.classifyRecordedRefunds,
+          now,
+        });
+        for (const stage of staged) {
+          // Other selected sessions, deferred leases and final allocations are
+          // never sent through legacy allocation as an apparent fresh deposit.
+          if (
+            stage.kind !== "claimed" ||
+            stage.retry.boundSessionId !== snapshot.session.receiveSessionId
+          )
+            continue;
+          const target = await fundingReceiveClassificationRetryTarget(
+            pool,
+            stage.retry,
+          );
+          if (!target || target.snapshot.userId !== snapshot.userId) continue;
+          const event = recoveredCanonicalEvent(
+            target.observationStartVariants.map(
+              parseDirectIngressObservationVariant,
+            ),
+            target.event,
+          );
+          if (!event) continue;
+          await advanceReceiveRefundScan(pool, {
+            retry: stage.retry,
+            userId: snapshot.userId,
+            limit: classificationPolicy.limit,
+            transactionReferenceCodec:
+              this.dependencies.transactionReferenceCodec,
+            referenceCodec: this.dependencies.relayReferenceCodec,
+          });
+          claims.push({ retry: stage.retry, event });
+        }
+      }
       return this.persistCanonicalEvents(
         pool,
         snapshot,
@@ -781,6 +1041,10 @@ export class FundingReceiveSessionObserver {
         canonicalEvents.variants,
         canonicalEvents.cursorAdvanced,
         now,
+        undefined,
+        supported.length
+          ? { limit: classificationPolicy.limit, claims }
+          : undefined,
       );
     }
     const observed = await observeDirectIngressDestination(pool, target);
@@ -938,453 +1202,357 @@ export class FundingReceiveSessionObserver {
     cursorAdvanced: boolean,
     now: Date,
     retry?: FundingReceiveClassificationRetry,
+    authority?: ReceivePublicationAuthority,
   ): Promise<
     Readonly<{ receiptsRecorded: number; recoveryRequired: boolean }>
   > {
-    return tx(pool, async (client) => {
-      // Session opens take this scope lock before touching receive rows. Keep
-      // the same global order here before canonical allocation locks candidate
-      // sessions, otherwise observer-vs-open can deadlock.
-      await lockFundingReceiveSessionScope(client, {
-        userId: snapshot.userId,
-        destinationOptionId: snapshot.session.destinationOptionId,
-        venueBindingOptionId: snapshot.session.venueBindingOptionId,
-      });
-      let receiptsRecorded = 0;
-      let recoveryRequired = false;
-      let eventBelongsToSession = false;
-      const uniqueEvents = deduplicateCanonicalEvents(events);
-      if (!cursorAdvanced && uniqueEvents.length === 0) {
-        return { receiptsRecorded: 0, recoveryRequired: false };
-      }
-      // Canonical-event -> operation is the common writer order. Acquire ALL
-      // physical keys before the first classification can lead to an operation
-      // lock; merely sorting the allocation loop would still allow A -> O -> B
-      // versus B -> O deadlocks with a refund/destination writer.
-      await lockFundingReceiveCanonicalEvents(
-        client,
-        events.map((event) => ({
-          networkId: event.variant.networkId,
-          asset: event.variant.asset,
-          destinationAddress: event.destinationAddress,
-          sourceAddress: event.sourceAddress,
-          rawAmount: event.rawAmount,
-          transactionHash: event.transactionHash,
-          eventIndex: event.eventIndex,
-          ledgerHeight: event.blockNumber,
-          blockHash: event.blockHash,
-          observedAt: new Date(event.observedAt),
-          now,
-        })),
-      );
-      if (retry) {
-        if (
-          !(await validateFundingReceiveClassificationRetry(
-            client,
-            retry,
-            snapshot.session.receiveSessionId,
-          ))
-        ) {
+    const client = await pool.connect();
+    const dependencies: FundingClassificationRevision[] = [];
+    try {
+      await client.query("begin");
+      const result = await (async () => {
+        // Session opens take this scope lock before touching receive rows. Keep
+        // the same global order here before canonical allocation locks candidate
+        // sessions, otherwise observer-vs-open can deadlock.
+        await lockFundingReceiveSessionScope(client, {
+          userId: snapshot.userId,
+          destinationOptionId: snapshot.session.destinationOptionId,
+          venueBindingOptionId: snapshot.session.venueBindingOptionId,
+        });
+        let receiptsRecorded = 0;
+        let recoveryRequired = false;
+        let eventBelongsToSession = false;
+        const uniqueEvents = deduplicateCanonicalEvents(events);
+        if (!cursorAdvanced && uniqueEvents.length === 0) {
           return { receiptsRecorded: 0, recoveryRequired: false };
         }
-      }
-      const handoffClassifications =
-        await loadCanonicalPolymarketHandoffClassifications(client, {
-          userId: snapshot.userId,
-          events: uniqueEvents,
-          now,
-          transactionReferenceCodec:
-            this.dependencies.transactionReferenceCodec,
-          listPotentialPolymarketHandoffs:
-            this.dependencies.listPotentialPolymarketHandoffs,
-        });
-      const canonicalEvents = uniqueEvents.map((event) => ({
-        networkId: event.variant.networkId,
-        asset: event.variant.asset,
-        destinationAddress: event.destinationAddress,
-        sourceAddress: event.sourceAddress,
-        rawAmount: event.rawAmount,
-        transactionHash: event.transactionHash,
-        eventIndex: event.eventIndex,
-        ledgerHeight: event.blockNumber,
-        blockHash: event.blockHash,
-        observedAt: new Date(event.observedAt),
-      }));
-      const recordedRefunds = await (
-        this.dependencies.classifyRecordedRefunds ??
-        classifyRecordedRelayExactRefundEvents
-      )(client, { userId: snapshot.userId, events: canonicalEvents });
-      const ownedRouteClassifications = this.dependencies.relayReferenceCodec
-        ? await (
-            this.dependencies.classifyOwnedRouteDestinations ??
-            classifyOwnedRouteCanonicalDestinationEvents
-          )(client, {
-            userId: snapshot.userId,
-            events: canonicalEvents,
-            referenceCodec: this.dependencies.relayReferenceCodec,
-          })
-        : new Map();
-      for (const event of uniqueEvents) {
-        const eventIdentity = canonicalEventIdentity(event);
-        const ownedRouteClassification =
-          ownedRouteClassifications.get(eventIdentity);
-        const handoff = handoffClassifications.get(eventIdentity);
-        const refund = recordedRefunds.get(
-          refundCanonicalEventKey({
-            ...event,
-            networkId: event.variant.networkId,
-            asset: event.variant.asset,
-            ledgerHeight: event.blockNumber,
-            observedAt: new Date(event.observedAt),
-          }),
-        );
-        // All recorded-role readers run before any effect. An exact handoff
-        // cannot hide a conflicting/pending destination or refund. Re-evaluate
-        // through the existing frozen-target retry queue when facts change.
-        const handoffClassification = receiveInternalRolesConflict([
-          handoff ?? { kind: "external" },
-          ownedRouteClassification ?? { kind: "external" },
-          refund ?? { kind: "unmatched" },
-        ])
-          ? {
-              kind: "recovery_required" as const,
-              reason: "internal_event_classification_conflict",
-            }
-          : refund?.kind === "recovery_required"
-            ? refund
-            : handoff;
-        if (handoffClassification?.kind === "internal") {
-          const quarantined =
-            await quarantineFundingReceiveCanonicalInternalEvent(client, {
-              networkId: event.variant.networkId,
-              asset: event.variant.asset,
-              destinationAddress: event.destinationAddress,
-              sourceAddress: event.sourceAddress,
-              rawAmount: event.rawAmount,
-              transactionHash: event.transactionHash,
-              eventIndex: event.eventIndex,
-              ledgerHeight: event.blockNumber,
-              blockHash: event.blockHash,
-              observedAt: new Date(event.observedAt),
-              reason: "internal_handoff_suppressed",
-              now,
-            });
-          if (!quarantined) {
-            throw new Error(
-              "internal handoff was already allocated as an external deposit",
-            );
-          }
-          continue;
-        }
-        if (handoffClassification?.kind === "recovery_required") {
-          const quarantined =
-            await quarantineFundingReceiveCanonicalInternalEvent(client, {
-              networkId: event.variant.networkId,
-              asset: event.variant.asset,
-              destinationAddress: event.destinationAddress,
-              sourceAddress: event.sourceAddress,
-              rawAmount: event.rawAmount,
-              transactionHash: event.transactionHash,
-              eventIndex: event.eventIndex,
-              ledgerHeight: event.blockNumber,
-              blockHash: event.blockHash,
-              observedAt: new Date(event.observedAt),
-              reason:
-                handoffClassification.reason ??
-                "internal_handoff_classification_ambiguous",
-              now,
-            });
-          if (!quarantined) {
-            throw new Error(
-              "ambiguous internal handoff was already allocated as an external deposit",
-            );
-          }
-          if (
-            !retry &&
-            isFundingReceiveClassificationRetryReason(
-              handoffClassification.reason,
-            )
-          ) {
-            await bindFundingReceiveCanonicalEventSession(client, {
-              networkId: event.variant.networkId,
-              asset: event.variant.asset,
-              destinationAddress: event.destinationAddress,
-              sourceAddress: event.sourceAddress,
-              rawAmount: event.rawAmount,
-              transactionHash: event.transactionHash,
-              eventIndex: event.eventIndex,
-              ledgerHeight: event.blockNumber,
-              blockHash: event.blockHash,
-              observedAt: new Date(event.observedAt),
-              now,
-            });
-          }
-          continue;
-        }
-        if (refund?.kind === "internal") {
-          const quarantined =
-            await quarantineFundingReceiveCanonicalInternalEvent(client, {
-              networkId: event.variant.networkId,
-              asset: event.variant.asset,
-              destinationAddress: event.destinationAddress,
-              sourceAddress: event.sourceAddress,
-              rawAmount: event.rawAmount,
-              transactionHash: event.transactionHash,
-              eventIndex: event.eventIndex,
-              ledgerHeight: event.blockNumber,
-              blockHash: event.blockHash,
-              observedAt: new Date(event.observedAt),
-              reason: "internal_exact_refund_suppressed",
-              now,
-            });
-          if (!quarantined)
-            throw new Error(
-              "recorded refund was already allocated as an external deposit",
-            );
-          continue;
-        }
-        // A recorded lookup miss is only an absence of recorded evidence. Keep
-        // the legacy receive path unchanged; this is not the pending-source
-        // authority needed to activate new exact-refund discovery in the worker.
-        if (ownedRouteClassification?.kind === "recovery_required") {
-          const quarantined =
-            await quarantineFundingReceiveCanonicalInternalEvent(client, {
-              networkId: event.variant.networkId,
-              asset: event.variant.asset,
-              destinationAddress: event.destinationAddress,
-              sourceAddress: event.sourceAddress,
-              rawAmount: event.rawAmount,
-              transactionHash: event.transactionHash,
-              eventIndex: event.eventIndex,
-              ledgerHeight: event.blockNumber,
-              blockHash: event.blockHash,
-              observedAt: new Date(event.observedAt),
-              reason: ownedRouteClassification.reason,
-              now,
-            });
-          if (!quarantined) {
-            throw new Error(
-              "ambiguous owned-route transfer was already allocated as an external deposit",
-            );
-          }
-          if (
-            !retry &&
-            ownedRouteClassification.reason ===
-              "owned_route_destination_correlation_pending"
-          ) {
-            await bindFundingReceiveCanonicalEventSession(client, {
-              networkId: event.variant.networkId,
-              asset: event.variant.asset,
-              destinationAddress: event.destinationAddress,
-              sourceAddress: event.sourceAddress,
-              rawAmount: event.rawAmount,
-              transactionHash: event.transactionHash,
-              eventIndex: event.eventIndex,
-              ledgerHeight: event.blockNumber,
-              blockHash: event.blockHash,
-              observedAt: new Date(event.observedAt),
-              now,
-            });
-          }
-          continue;
-        }
-        if (ownedRouteClassification?.kind === "internal") {
-          const quarantined =
-            await quarantineFundingReceiveCanonicalInternalEvent(client, {
-              networkId: event.variant.networkId,
-              asset: event.variant.asset,
-              destinationAddress: event.destinationAddress,
-              sourceAddress: event.sourceAddress,
-              rawAmount: event.rawAmount,
-              transactionHash: event.transactionHash,
-              eventIndex: event.eventIndex,
-              ledgerHeight: event.blockNumber,
-              blockHash: event.blockHash,
-              observedAt: new Date(event.observedAt),
-              reason: "internal_owned_route_destination_suppressed",
-              now,
-            });
-          if (!quarantined) {
-            throw new Error(
-              "owned-route transfer was already allocated as an external deposit",
-            );
-          }
-          await recordOwnedRouteCanonicalDestinationCredit(client, {
-            event: {
-              networkId: event.variant.networkId,
-              asset: event.variant.asset,
-              destinationAddress: event.destinationAddress,
-              sourceAddress: event.sourceAddress,
-              rawAmount: event.rawAmount,
-              transactionHash: event.transactionHash,
-              eventIndex: event.eventIndex,
-              ledgerHeight: event.blockNumber,
-              blockHash: event.blockHash,
-              observedAt: new Date(event.observedAt),
-            },
-            match: ownedRouteClassification,
-            now,
-          });
-          continue;
-        }
-        const allocation = await claimFundingReceiveCanonicalEventAllocation(
+        // Canonical-event -> operation is the common writer order. Acquire ALL
+        // physical keys before the first classification can lead to an operation
+        // lock; merely sorting the allocation loop would still allow A -> O -> B
+        // versus B -> O deadlocks with a refund/destination writer.
+        await lockFundingReceiveCanonicalEvents(
           client,
-          {
-            networkId: event.variant.networkId,
+          events.map((event) => canonicalEventInput(event, now)),
+        );
+        if (retry) {
+          if (
+            !(await validateFundingReceiveClassificationRetry(
+              client,
+              retry,
+              snapshot.session.receiveSessionId,
+            ))
+          ) {
+            return { receiptsRecorded: 0, recoveryRequired: false };
+          }
+        }
+        const legacyEvents = authority
+          ? uniqueEvents.filter(
+              (event) =>
+                !supportsRefundSourceEnvelope(canonicalEventInput(event, now)),
+            )
+          : uniqueEvents;
+        const handoffClassifications =
+          await loadCanonicalPolymarketHandoffClassifications(client, {
+            userId: snapshot.userId,
+            events: legacyEvents,
+            now,
+            transactionReferenceCodec:
+              this.dependencies.transactionReferenceCodec,
+            listPotentialPolymarketHandoffs:
+              this.dependencies.listPotentialPolymarketHandoffs,
+          });
+        const canonicalEvents = legacyEvents.map((event) =>
+          canonicalEventInput(event, now),
+        );
+        const recordedRefunds = await (
+          this.dependencies.classifyRecordedRefunds ??
+          classifyRecordedRelayExactRefundEvents
+        )(client, { userId: snapshot.userId, events: canonicalEvents });
+        const ownedRouteClassifications = this.dependencies.relayReferenceCodec
+          ? await (
+              this.dependencies.classifyOwnedRouteDestinations ??
+              classifyOwnedRouteCanonicalDestinationEvents
+            )(client, {
+              userId: snapshot.userId,
+              events: canonicalEvents,
+              referenceCodec: this.dependencies.relayReferenceCodec,
+            })
+          : new Map();
+        const classifiedEvents: {
+          event: FundingReceiveCanonicalEvent;
+          classification: ReceiveEventClassification;
+        }[] = legacyEvents.map((event) => {
+          const eventIdentity = canonicalEventIdentity(event);
+          return {
+            event,
+            classification: resolveLegacyRecordedReceiveRoles({
+              handoff: handoffClassifications.get(eventIdentity),
+              destination: ownedRouteClassifications.get(eventIdentity),
+              refund: recordedRefunds.get(
+                refundCanonicalEventKey({
+                  ...event,
+                  networkId: event.variant.networkId,
+                  asset: event.variant.asset,
+                  ledgerHeight: event.blockNumber,
+                  observedAt: new Date(event.observedAt),
+                }),
+              ),
+            }),
+          };
+        });
+        const validClaims: FundingReceiveClassificationRetry[] = [];
+        if (authority)
+          for (const claim of authority.claims) {
+            if (
+              !(await validateFundingReceiveClassificationRetry(
+                client,
+                claim.retry,
+                snapshot.session.receiveSessionId,
+              ))
+            )
+              continue;
+            validClaims.push(claim.retry);
+            const decision = await (
+              this.dependencies.readRoleArbitration ??
+              checkpointReceiveRoleArbitrationInTransaction
+            )(client, {
+              retry: claim.retry,
+              userId: snapshot.userId,
+              limit: authority.limit,
+              transactionReferenceCodec:
+                this.dependencies.transactionReferenceCodec,
+              referenceCodec: this.dependencies.relayReferenceCodec,
+            });
+            if (decision.kind === "incomplete") continue;
+            classifiedEvents.push({
+              event: claim.event,
+              classification: decision.classification,
+            });
+            dependencies.push(...decision.dependencies);
+          }
+        // Full batch union, including negative witnesses, before ANY effect.
+        // A mismatch at F rolls back receipts, notifications and acknowledgments.
+        if (authority)
+          await lockFundingClassificationOperations(
+            client,
+            dependencies,
+            classifiedEvents.flatMap(({ classification }) =>
+              classification.kind === "internal_destination"
+                ? [
+                    {
+                      operationId: classification.match.operationId,
+                      userId: snapshot.userId,
+                    },
+                  ]
+                : [],
+            ),
+          );
+        for (const { event, classification } of classifiedEvents) {
+          const canonicalEvent = canonicalEventInput(event, now);
+          if (classification.kind !== "external") {
+            const reason =
+              classification.kind === "recovery_required"
+                ? classification.reason
+                : classification.kind === "internal_handoff"
+                  ? "internal_handoff_suppressed"
+                  : classification.kind === "internal_refund"
+                    ? "internal_exact_refund_suppressed"
+                    : "internal_owned_route_destination_suppressed";
+            const quarantined =
+              await quarantineFundingReceiveCanonicalInternalEvent(client, {
+                ...canonicalEvent,
+                reason,
+              });
+            if (!quarantined) {
+              throw new Error(
+                "internal transfer was already allocated as an external deposit",
+              );
+            }
+            if (
+              classification.kind === "recovery_required" &&
+              !retry &&
+              isFundingReceiveClassificationRetryReason(reason)
+            )
+              await bindFundingReceiveCanonicalEventSession(
+                client,
+                canonicalEvent,
+              );
+            if (classification.kind === "internal_destination")
+              await recordOwnedRouteCanonicalDestinationCredit(client, {
+                event: canonicalEvent,
+                match: classification.match,
+                now,
+              });
+            continue;
+          }
+          const allocation = await claimFundingReceiveCanonicalEventAllocation(
+            client,
+            {
+              ...canonicalEvent,
+              expectedReceiveSessionId: snapshot.session.receiveSessionId,
+            },
+          );
+          if (
+            allocation.targetReceiveSessionId != null &&
+            allocation.targetReceiveSessionId !==
+              snapshot.session.receiveSessionId
+          ) {
+            continue;
+          }
+          if (allocation.status === "recovery_required") {
+            eventBelongsToSession = true;
+            recoveryRequired = true;
+            continue;
+          }
+          if (allocation.status === "allocated") {
+            continue;
+          }
+          eventBelongsToSession = true;
+          const handling = fundingReceiveVariantHandling(event.variant);
+          const disposition = fundingReceiveObservationDisposition({
+            sessionStatus: retry ? "expired" : snapshot.session.status,
+            completion: event.variant.completion,
+            handling,
+          });
+          const observerId =
+            event.variant.observation.payload.eventIdentity ===
+            "solana_transfer_v1"
+              ? "solana_transfer_v1"
+              : "evm_erc20_transfer_v1";
+          const result = await insertFundingReceiveReceipt(client, {
+            receiveSessionId: snapshot.session.receiveSessionId,
+            userId: snapshot.userId,
+            variantId: event.variant.variantId,
             asset: event.variant.asset,
             destinationAddress: event.destinationAddress,
-            sourceAddress: event.sourceAddress,
             rawAmount: event.rawAmount,
-            transactionHash: event.transactionHash,
-            eventIndex: event.eventIndex,
-            ledgerHeight: event.blockNumber,
-            blockHash: event.blockHash,
+            observationRevision: [
+              observerId,
+              event.variant.networkId,
+              event.transactionHash,
+              event.eventIndex,
+            ].join(":"),
+            canonicalEvent: {
+              transactionHash: event.transactionHash,
+              eventIndex: event.eventIndex,
+              ledgerHeight: event.blockNumber,
+              blockHash: event.blockHash,
+              sourceAddress: event.sourceAddress,
+            },
             observedAt: new Date(event.observedAt),
-            now,
-            expectedReceiveSessionId: snapshot.session.receiveSessionId,
-          },
-        );
-        if (
-          allocation.targetReceiveSessionId != null &&
-          allocation.targetReceiveSessionId !==
-            snapshot.session.receiveSessionId
-        ) {
-          continue;
-        }
-        if (allocation.status === "recovery_required") {
-          eventBelongsToSession = true;
-          recoveryRequired = true;
-          continue;
-        }
-        if (allocation.status === "allocated") {
-          continue;
-        }
-        eventBelongsToSession = true;
-        const handling = fundingReceiveVariantHandling(event.variant);
-        const disposition = fundingReceiveObservationDisposition({
-          sessionStatus: retry ? "expired" : snapshot.session.status,
-          completion: event.variant.completion,
-          handling,
-        });
-        const observerId =
-          event.variant.observation.payload.eventIdentity ===
-          "solana_transfer_v1"
-            ? "solana_transfer_v1"
-            : "evm_erc20_transfer_v1";
-        const result = await insertFundingReceiveReceipt(client, {
-          receiveSessionId: snapshot.session.receiveSessionId,
-          userId: snapshot.userId,
-          variantId: event.variant.variantId,
-          asset: event.variant.asset,
-          destinationAddress: event.destinationAddress,
-          rawAmount: event.rawAmount,
-          observationRevision: [
-            observerId,
-            event.variant.networkId,
-            event.transactionHash,
-            event.eventIndex,
-          ].join(":"),
-          canonicalEvent: {
-            transactionHash: event.transactionHash,
-            eventIndex: event.eventIndex,
-            ledgerHeight: event.blockNumber,
-            blockHash: event.blockHash,
-            sourceAddress: event.sourceAddress,
-          },
-          observedAt: new Date(event.observedAt),
-          handling,
-          status: disposition.receiptStatus,
-          evidence: {
-            observerId,
-            transactionHash: event.transactionHash,
-            eventIndex: event.eventIndex,
-            ledgerHeight: event.blockNumber,
-            blockHash: event.blockHash,
-            sourceAddress: event.sourceAddress,
-            canonicalEventId: allocation.eventId,
-            lateReceipt: disposition.late,
-          },
-          now,
-        });
-        if (
-          result.receipt.receiveSessionId !== snapshot.session.receiveSessionId
-        ) {
-          continue;
-        }
-        if (!result.replayed) receiptsRecorded += 1;
-        const allocated = await finalizeFundingReceiveCanonicalEventAllocation(
-          client,
-          {
-            eventId: allocation.eventId,
-            receiveSessionId: snapshot.session.receiveSessionId,
-            receiptId: result.receipt.receiptId,
-            now,
-          },
-        );
-        if (!allocated) {
-          throw new Error(
-            "canonical receive event allocation changed during receipt commit",
-          );
-        }
-        await recordCanonicalReceiveDepositNotification(client, {
-          receiveSessionId: snapshot.session.receiveSessionId,
-          userId: snapshot.userId,
-          ownerChannel: snapshot.ownerChannel,
-          variant: event.variant,
-          event,
-          canonicalEventId: allocation.eventId,
-          now,
-        });
-        recoveryRequired ||= disposition.sessionStatus === "recovery_required";
-      }
-      if (retry) {
-        await finishFundingReceiveClassificationRetry(client, {
-          retry,
-          receiveSessionId: snapshot.session.receiveSessionId,
-          receiptsRecorded,
-        });
-        return { receiptsRecorded, recoveryRequired };
-      }
-      if (!cursorAdvanced && !eventBelongsToSession) {
-        return { receiptsRecorded: 0, recoveryRequired: false };
-      }
-      const closed = isLateObservableReceiveSession(snapshot);
-      const nextVariants = variants.map(jsonRecord);
-      const effectiveActiveStatus =
-        closed || recoveryRequired
-          ? null
-          : await deriveEffectiveFundingReceiveSessionStatus(client, {
-              receiveSessionId: snapshot.session.receiveSessionId,
-              userId: snapshot.userId,
-            });
-      if (!closed && !recoveryRequired && effectiveActiveStatus === null) {
-        throw new Error("receive session disappeared while deriving status");
-      }
-      const updated = closed
-        ? await updateClosedFundingReceiveSessionObservation(client, {
-            receiveSessionId: snapshot.session.receiveSessionId,
-            expectedVersion: snapshot.session.version,
-            observationVariants: nextVariants,
-            lastObservedAt: now,
-            recoveryRequired,
-            now,
-          })
-        : await updateFundingReceiveSessionObservation(client, {
-            receiveSessionId: snapshot.session.receiveSessionId,
-            expectedVersion: snapshot.session.version,
-            observationVariants: nextVariants,
-            status: recoveryRequired
-              ? "recovery_required"
-              : (effectiveActiveStatus ?? "recovery_required"),
-            lastObservedAt: now,
+            handling,
+            status: disposition.receiptStatus,
+            evidence: {
+              observerId,
+              transactionHash: event.transactionHash,
+              eventIndex: event.eventIndex,
+              ledgerHeight: event.blockNumber,
+              blockHash: event.blockHash,
+              sourceAddress: event.sourceAddress,
+              canonicalEventId: allocation.eventId,
+              lateReceipt: disposition.late,
+            },
             now,
           });
-      if (!updated) {
-        throw new Error(
-          "receive session changed while recording canonical events",
-        );
-      }
-      return { receiptsRecorded, recoveryRequired };
-    });
+          if (
+            result.receipt.receiveSessionId !==
+            snapshot.session.receiveSessionId
+          ) {
+            continue;
+          }
+          if (!result.replayed) receiptsRecorded += 1;
+          const allocated =
+            await finalizeFundingReceiveCanonicalEventAllocation(client, {
+              eventId: allocation.eventId,
+              receiveSessionId: snapshot.session.receiveSessionId,
+              receiptId: result.receipt.receiptId,
+              now,
+            });
+          if (!allocated) {
+            throw new Error(
+              "canonical receive event allocation changed during receipt commit",
+            );
+          }
+          await recordCanonicalReceiveDepositNotification(client, {
+            receiveSessionId: snapshot.session.receiveSessionId,
+            userId: snapshot.userId,
+            ownerChannel: snapshot.ownerChannel,
+            variant: event.variant,
+            event,
+            canonicalEventId: allocation.eventId,
+            now,
+          });
+          recoveryRequired ||=
+            disposition.sessionStatus === "recovery_required";
+        }
+        for (const claim of validClaims) {
+          await finishFundingReceiveClassificationRetry(client, {
+            retry: claim,
+            receiveSessionId: snapshot.session.receiveSessionId,
+            // Initial observation updates its own version/cursor below. A retry
+            // never reopens its old session or authorizes another automatic buy.
+            receiptsRecorded: retry ? receiptsRecorded : 0,
+          });
+        }
+        if (retry && !authority) {
+          await finishFundingReceiveClassificationRetry(client, {
+            retry,
+            receiveSessionId: snapshot.session.receiveSessionId,
+            receiptsRecorded,
+          });
+          return { receiptsRecorded, recoveryRequired };
+        }
+        if (retry) return { receiptsRecorded, recoveryRequired };
+        if (!cursorAdvanced && !eventBelongsToSession) {
+          return { receiptsRecorded: 0, recoveryRequired: false };
+        }
+        const closed = isLateObservableReceiveSession(snapshot);
+        const nextVariants = variants.map(jsonRecord);
+        const effectiveActiveStatus =
+          closed || recoveryRequired
+            ? null
+            : await deriveEffectiveFundingReceiveSessionStatus(client, {
+                receiveSessionId: snapshot.session.receiveSessionId,
+                userId: snapshot.userId,
+              });
+        if (!closed && !recoveryRequired && effectiveActiveStatus === null) {
+          throw new Error("receive session disappeared while deriving status");
+        }
+        const updated = closed
+          ? await updateClosedFundingReceiveSessionObservation(client, {
+              receiveSessionId: snapshot.session.receiveSessionId,
+              expectedVersion: snapshot.session.version,
+              observationVariants: nextVariants,
+              lastObservedAt: now,
+              recoveryRequired,
+              now,
+            })
+          : await updateFundingReceiveSessionObservation(client, {
+              receiveSessionId: snapshot.session.receiveSessionId,
+              expectedVersion: snapshot.session.version,
+              observationVariants: nextVariants,
+              status: recoveryRequired
+                ? "recovery_required"
+                : (effectiveActiveStatus ?? "recovery_required"),
+              lastObservedAt: now,
+              now,
+            });
+        if (!updated) {
+          throw new Error(
+            "receive session changed while recording canonical events",
+          );
+        }
+        return { receiptsRecorded, recoveryRequired };
+      })();
+      if (authority)
+        await commitFundingClassificationTransaction(client, dependencies);
+      else await client.query("commit");
+      return result;
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }

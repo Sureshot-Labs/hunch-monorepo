@@ -22,8 +22,9 @@ import {
   canonicalLocationKey,
   stableOpaqueId,
   hypercoreSpotAccountLocation,
+  hypercorePerpsRefundLocation,
 } from "./canonical.js";
-import { normalizeUnsignedDecimal } from "./decimal.js";
+import { normalizeUnsignedDecimal, formatUnsignedDecimal } from "./decimal.js";
 import type { StableImpairmentState } from "./valuation-service.js";
 import { loadHypercorePreparationAvailability } from "../funding/preparation/hypercore-availability.js";
 
@@ -36,6 +37,7 @@ export type Hip4AccountValue = {
     CashAvailabilityAdjustment,
     "reservedRaw" | "submittedDebitRaw"
   >[];
+  unsupportedPerpsLocationIds?: string[];
 };
 
 /** Same exact read model used by funding preparation, against the original
@@ -189,7 +191,6 @@ export function projectHip4AccountValue(input: {
       incomplete("hyperliquid-account-value", "native_assets_unpriced");
     if (observation.unresolvedBalances.length)
       incomplete("hyperliquid-position-value", "position_inventory_unresolved");
-    if (observation.cash.total.startsWith("-")) continue;
     const asset = {
       networkId: HYPERCORE_FUNDING_NETWORKS.mainnet,
       assetId: observation.cash.assetId,
@@ -204,6 +205,93 @@ export function projectHip4AccountValue(input: {
           (wallet.source === "external" || wallet.source === "embedded"),
       ) ?? [];
     const profile = profiles.length === 1 ? profiles[0] : null;
+    const perpsLocation = hypercorePerpsRefundLocation({
+      accountId: input.userId,
+      address,
+      controllerWalletId: profile?.walletId ?? null,
+    });
+    const perps = observation.perpsCash;
+    if (perps?.state === "unsupported") {
+      (result.unsupportedPerpsLocationIds ??= []).push(
+        perpsLocation.locationId,
+      );
+      incomplete("hyperliquid-perps-cash", `perps_${perps.reason}`);
+    } else if (
+      perps?.state === "verified" &&
+      perps.totalRaw !== null &&
+      perps.availableRaw !== null &&
+      observation.mode === "disabled" &&
+      observation.role === "user" &&
+      BigInt(perps.availableRaw) <= BigInt(perps.totalRaw) &&
+      isHypercoreMainnetUsdc(asset)
+    ) {
+      const perpsAt = Date.parse(perps.observedAt);
+      const perpsFresh =
+        perpsAt <= input.now && perpsAt + read.snapshotMaxAgeMs > input.now;
+      const perpsComponentId = stableOpaqueId(
+        "asset",
+        canonicalLocationKey(perpsLocation),
+      );
+      result.availability.push({
+        componentId: perpsComponentId,
+        venueId: "hyperliquid",
+        venueBindingId: hypercoreSpotAccountLocation({
+          accountId: input.userId,
+          address,
+          controllerWalletId: profile?.walletId ?? null,
+        }).bindingId,
+        lockedRaw: (
+          BigInt(perps.totalRaw) - BigInt(perps.availableRaw)
+        ).toString(),
+        availabilityKnown: perpsFresh,
+      });
+      result.assets.push({
+        componentId: perpsComponentId,
+        location: {
+          ...perpsLocation,
+          details: {
+            ...perpsLocation.details,
+            nativeAccountMode: observation.mode,
+            cashCapacityReason: perpsFresh ? null : "stale_snapshot",
+            validUntil: new Date(perpsAt + read.snapshotMaxAgeMs).toISOString(),
+            label: "Hyperliquid perps cash",
+          },
+        },
+        amount: { asset: perpsLocation.asset, raw: perps.totalRaw },
+        category: "cash",
+        estimatedUsd:
+          perpsFresh && !impaired
+            ? {
+                value: formatUnsignedDecimal(BigInt(perps.totalRaw), 8),
+                asOf: perps.observedAt,
+                priceSource: "hyperliquid-owned-perps-cash",
+                confidence: "high",
+                policyId: "hyperliquid-owned-cash-v1",
+              }
+            : null,
+        observedAt: perps.observedAt,
+        observationFreshness: perpsFresh ? "fresh" : "stale",
+        observationError: null,
+        valuationEligibility: !perpsFresh
+          ? "stale"
+          : impaired
+            ? "unpriced"
+            : "included",
+        executionEligibility: "ineligible",
+        reasonCodes: !perpsFresh
+          ? ["balance_observation_stale"]
+          : impaired
+            ? ["stable_asset_impaired"]
+            : [],
+      });
+    } else if (observation.mode === "disabled" && observation.role === "user") {
+      result.errors.push({
+        collectorId: "hyperliquid-perps-cash",
+        code: "perps_cash_read_unavailable",
+        retryable: true,
+      });
+    }
+    if (observation.cash.total.startsWith("-")) continue;
     const capacity = hypercoreSpotCashCapacity({
       observation,
       environment: read.environment,

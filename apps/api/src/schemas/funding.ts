@@ -807,6 +807,24 @@ export const fundingWithdrawalDestinationRevokeResponseSchema = z
 
 export const intentLiquidityProjectionSchema = z
   .object({
+    limitBuySuggestionUnavailable: z.boolean().optional(),
+    suggestedLimitBuy: z
+      .object({
+        originalQuantity: z
+          .string()
+          .max(128)
+          .regex(/^[1-9]\d*$/u),
+        quantity: z
+          .string()
+          .max(128)
+          .regex(/^[1-9]\d*$/u),
+        limitPrice: z.string().regex(/^0\.\d{1,5}$/u),
+        timeInForce: z.enum(["Gtc", "Alo"]),
+        requiredRaw: rawAmountSchema,
+        expiresAt: z.string().datetime(),
+      })
+      .strict()
+      .optional(),
     marketBuySuggestionUnavailable: z.boolean().optional(),
     suggestedMarketBuy: z
       .object({

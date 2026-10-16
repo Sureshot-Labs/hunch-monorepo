@@ -2,8 +2,12 @@
 // fixtures to exercise real commits/two-session visibility, never production.
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
-import type { Pool, PoolClient } from "pg";
+import type { PoolClient } from "pg";
 import { createIntegrationTestPool } from "../../../test-database-target.js";
+import {
+  stableWalletAssetLocationIdentity,
+  hypercorePerpsRefundLocation,
+} from "../../../account-value/canonical.js";
 import { createRelayReferenceCodec } from "../../../funding-providers/relay/reference-codec.js";
 import { HYPERCORE_MAINNET_USDC } from "../../domain/hypercore-identity.js";
 import { EXACT_REFUND_RECEIPTS_CONTRACT } from "../../domain/refund-settlement.js";
@@ -19,11 +23,43 @@ import {
   compareFundingReceiveCanonicalEvents,
   lockFundingReceiveCanonicalEvents,
 } from "../../persistence/funding-receive-session-repository.js";
-import { recordRelayExactRefundReceiptsInTransaction } from "../../reconciliation/relay-exact-refund-receipts.js";
-import { reconcileRelayExactRefundReceipts } from "../../reconciliation/relay-exact-refund-runtime.js";
+import {
+  recordRelayExactRefundReceiptsInTransaction,
+  RelayExactRefundSnapshotChanged,
+} from "../../reconciliation/relay-exact-refund-receipts.js";
 import { loadFundingLifecycleFactsForOperationInTransaction } from "../../lifecycle/funding-lifecycle-facts-repository.js";
 import { deriveFundingLifecycle } from "../../lifecycle/funding-lifecycle-projector.js";
 import { relayExactRefundTestFixture } from "../relay-exact-refund-writer-pg.js";
+import { verifyFundingClassificationRevisionsPg } from "../classification-revisions-pg.js";
+import { verifyRefundSourceActionScanPg } from "../refund-source-action-scan-pg.js";
+import { verifyReceiveRefundScanPg } from "../receive-refund-scan-pg.js";
+import { verifyReceiveLegacyRoleCheckpointPg } from "../receive-legacy-role-checkpoint-pg.js";
+import {
+  verifySessionlessRoleCheckpointPg,
+  verifySessionlessMergeAdoptionPg,
+} from "../sessionless-role-checkpoint-pg.js";
+import { verifyRefundSourceMembershipPg } from "../refund-source-membership-pg.js";
+import { verifyDestinationReceiptPublicationPg } from "../destination-receipt-publication-pg.js";
+import { verifyFundingPhysicalEventGatePg } from "../physical-event-gate-pg.js";
+import { verifyPendingReceiveAnchorPg } from "../pending-receive-anchor-pg.js";
+import { verifyPendingReceiveAnchorPlansPg } from "../pending-receive-anchor-plans-pg.js";
+import { fundingPhysicalEventIsBusy } from "../../persistence/funding-physical-event-gate.js";
+import { verifyMergedRefundIdentityPg } from "../merged-refund-identity-pg.js";
+import { verifySessionlessMembershipLifecyclePg } from "../sessionless-membership-lifecycle-pg.js";
+import {
+  verifyFundingObservationAliasesPg,
+  verifyFundingObservationAliasPlansPg,
+} from "../funding-observation-alias-pg.js";
+import {
+  verifyExactRefundPublicationPg,
+  verifyExactRefundContextPlansPg,
+} from "../exact-refund-publication-pg.js";
+import { verifyRefundWatchPublicationPg } from "../refund-watch-publication-pg.js";
+import {
+  verifyExactRefundRuntimePg,
+  verifyExactRefundNativeRuntimePg,
+} from "../exact-refund-runtime-pg.js";
+import { verifyExactRefundTimedWorkerPg } from "../exact-refund-timed-worker-pg.js";
 
 const pool = await createIntegrationTestPool({
   max: 3,
@@ -35,7 +71,18 @@ const codec = createRelayReferenceCodec({
   keyVersion: 1,
 });
 
-async function fixture() {
+async function fixture(
+  existing?: { userId: string; owner: string },
+  beforeCommit?: (
+    db: PoolClient,
+    data: ReturnType<typeof relayExactRefundTestFixture>,
+  ) => Promise<void>,
+  makeSteps?: (source: AssetLocation) => FundingCommitPlan["steps"],
+  evmDestination = false,
+  legacyDestinationOnly = false,
+  canonicalSource = false,
+  nativeRefund = false,
+) {
   const db = await pool.connect();
   try {
     await db.query("begin");
@@ -45,14 +92,16 @@ async function fixture() {
       ).rows[0].server_version_num.slice(0, 2),
       "16",
     );
-    const userId = (
-      await db.query(
-        "insert into users(email,is_active,is_verified) values($1,true,true) returning id",
-        [`exact-refund-race-${randomUUID()}@example.com`],
-      )
-    ).rows[0].id;
-    const owner = `0x${randomBytes(20).toString("hex")}`;
-    const source: AssetLocation = {
+    const userId =
+      existing?.userId ??
+      (
+        await db.query(
+          "insert into users(email,is_active,is_verified) values($1,true,true) returning id",
+          [`exact-refund-race-${randomUUID()}@example.com`],
+        )
+      ).rows[0].id;
+    const owner = existing?.owner ?? `0x${randomBytes(20).toString("hex")}`;
+    let source: AssetLocation = {
       kind: "wallet",
       accountId: userId,
       locationId: randomUUID(),
@@ -63,15 +112,39 @@ async function fixture() {
       },
       details: { address: owner },
     };
+    const canonicalSourceIdentity = stableWalletAssetLocationIdentity({
+      accountId: userId,
+      address: owner,
+      asset: source.asset,
+      balanceClass: "",
+    });
+    if (canonicalSource)
+      source = { ...source, locationId: canonicalSourceIdentity.locationId };
     const sourceSnapshot = { kind: "owned_location", location: source };
+    const refundTarget = nativeRefund
+      ? hypercorePerpsRefundLocation({
+          accountId: userId,
+          address: owner,
+          controllerWalletId: "offline-native-refund-controller",
+        })
+      : source;
     const destinationSnapshot = {
       kind: "owned_location",
       location: {
         ...source,
-        kind: "venue_account",
+        kind: evmDestination ? "wallet" : "venue_account",
         locationId: randomUUID(),
-        asset: HYPERCORE_MAINNET_USDC,
-        details: { address: owner, nativeSourceDex: "spot" },
+        asset: evmDestination ? source.asset : HYPERCORE_MAINNET_USDC,
+        details: {
+          address: owner,
+          ...(evmDestination
+            ? {}
+            : {
+                nativeSourceDex: "spot",
+                venueId: "hyperliquid",
+                environment: "mainnet",
+              }),
+        },
       },
     };
     const requestId = `refund-race-${randomUUID()}`;
@@ -79,8 +152,8 @@ async function fixture() {
     const now = new Date();
     const sourceAmount = { asset: source.asset, raw: "10000000" };
     const destinationAmount = {
-      asset: HYPERCORE_MAINNET_USDC,
-      raw: "980000000",
+      asset: destinationSnapshot.location.asset,
+      raw: evmDestination ? "9800000" : "980000000",
     };
     // This fixture isolates allocator concurrency. Normalized real inbound and
     // native plans are separately covered in hip4-funding-receipt integration.
@@ -121,18 +194,24 @@ async function fixture() {
           depositAddressLookupHmac: null,
           lookupKeyVersion: 1,
           refundLocationSnapshot: {
-            ...source,
-            refundEvidenceContract: EXACT_REFUND_RECEIPTS_CONTRACT,
-            relayProtocolOrderId: protocolOrderId,
+            ...refundTarget,
+            ...(legacyDestinationOnly
+              ? {}
+              : {
+                  refundEvidenceContract: EXACT_REFUND_RECEIPTS_CONTRACT,
+                  relayProtocolOrderId: protocolOrderId,
+                }),
           },
           quoteExpiresAt: new Date(now.getTime() + 60000).toISOString(),
         },
       ],
-      steps: [],
+      steps: makeSteps?.(source) ?? [],
       reservations: [
         {
           segmentOrdinal: 0,
-          componentId: randomUUID(),
+          componentId: canonicalSource
+            ? canonicalSourceIdentity.componentId
+            : randomUUID(),
           locationId: source.locationId,
           networkId: source.asset.networkId,
           assetId: source.asset.assetId,
@@ -174,17 +253,19 @@ async function fixture() {
         [operationId],
       )
     ).rows[0].id;
-    await db.query("commit");
-    return relayExactRefundTestFixture({
+    const data = relayExactRefundTestFixture({
       operationId,
       segmentId,
       requestId,
       referenceCodec: codec,
       protocolOrderId,
       source,
-      target: source,
+      target: refundTarget,
       now,
     });
+    await beforeCommit?.(db, data);
+    await db.query("commit");
+    return data;
   } catch (error) {
     await db.query("rollback");
     throw error;
@@ -193,8 +274,9 @@ async function fixture() {
   }
 }
 
-/** Assert a real PostgreSQL lock wait before allowing A to commit; no guessed
- * sleep is used to pretend two writers actually overlapped. */
+/** Assert either a real E/O wait or the exact shared try-gate rejection. A busy
+ * first insertion rolls back B before A commits, then B uses its ordinary fresh
+ * transaction. Unrelated failures are never swallowed as contention. */
 async function race<T, U>(
   first: (db: PoolClient) => Promise<T>,
   second: (db: PoolClient) => Promise<U>,
@@ -205,6 +287,7 @@ async function race<T, U>(
   let secondResult:
     | Promise<{ ok: true; value: U } | { ok: false; error: unknown }>
     | undefined;
+  let settledSecond: Awaited<NonNullable<typeof secondResult>> | undefined;
   try {
     await a.query("begin");
     if (!secondOwnsTransaction) await b.query("begin");
@@ -214,6 +297,9 @@ async function race<T, U>(
       (value) => ({ ok: true as const, value }),
       (error) => ({ ok: false as const, error }),
     );
+    void secondResult.then((value) => {
+      settledSecond = value;
+    });
     let blocked = false;
     for (let probe = 0; probe < 100; probe += 1) {
       const row = (
@@ -226,13 +312,24 @@ async function race<T, U>(
         blocked = true;
         break;
       }
+      if (settledSecond) break;
     }
+    const busy =
+      settledSecond?.ok === false &&
+      fundingPhysicalEventIsBusy(settledSecond.error);
+    if (settledSecond?.ok === false && !busy) throw settledSecond.error;
     assert.ok(
-      blocked,
-      "second connection must really contend on PostgreSQL locks",
+      blocked || busy,
+      "second connection must really wait or receive the exact physical-key busy result",
     );
+    if (busy) await b.query("rollback");
     await a.query("commit");
-    const result = await secondResult;
+    const result = busy
+      ? await (async () => {
+          if (!secondOwnsTransaction) await b.query("begin");
+          return second(b).then((value) => ({ ok: true as const, value }));
+        })()
+      : await secondResult;
     if (!result.ok) throw result.error;
     if (!secondOwnsTransaction) await b.query("commit");
     return [firstResult, result.value];
@@ -245,28 +342,9 @@ async function race<T, U>(
   }
 }
 
-function observePartial(
-  data: Awaited<ReturnType<typeof fixture>>,
-  index: number,
-) {
-  return async () => ({
-    kind: "observed" as const,
-    request: data.base.request,
-    nativeLedger: [],
-    evmEvents: [data.evm[index]],
-    reason: null,
-  });
-}
-
-const unusedRelay = {
-  requestEvidence: async () => {
-    throw new Error("Unexpected provider IO");
-  },
-};
-
-/** Force the old cycle's exact interleaving, not merely contention after one
- * writer already finished. Receive holds A, refund holds B before taking O,
- * then receive must wait for B while O is still unlocked. */
+/** Force the old cycle's exact interleaving. Receive holds A, refund holds B
+ * before O. Receive's first-insertion try gate rejects B without taking O;
+ * after rollback/refund commit its ordinary fresh full-E attempt succeeds. */
 async function staggeredBatchRace() {
   const data = await fixture();
   const events = [...data.evm].sort(compareFundingReceiveCanonicalEvents);
@@ -312,9 +390,8 @@ async function staggeredBatchRace() {
     }
   };
   try {
-    const aPid = (await a.query("select pg_backend_pid() as pid")).rows[0].pid;
-    const bPid = (await b.query("select pg_backend_pid() as pid")).rows[0].pid;
     let locks = 0;
+    let receiveTookOperation = false;
     receiveTask = transaction(a, async () => {
       await lockFundingReceiveCanonicalEvents(
         {
@@ -334,6 +411,7 @@ async function staggeredBatchRace() {
           .reverse()
           .map((event) => ({ ...event, now: data.base.now })),
       );
+      receiveTookOperation = true;
       await a.query(
         "select id from funding_operations where id=$1 for update",
         [data.base.operationId],
@@ -364,23 +442,11 @@ async function staggeredBatchRace() {
     void refundTask.catch(() => undefined);
     await bounded(refundBeforeOperation.promise, "refund B before O");
     continueReceive.release();
-    let waitingForB = false;
-    for (let probe = 0; probe < 100; probe++) {
-      const row = (
-        await pool.query(
-          "select $2::int=any(pg_blocking_pids($1)) as blocked",
-          [aPid, bPid],
-        )
-      ).rows[0];
-      if (row.blocked) {
-        waitingForB = true;
-        break;
-      }
-    }
+    await assert.rejects(receiveTask, fundingPhysicalEventIsBusy);
     assert.equal(
-      waitingForB,
-      true,
-      "receive must wait on B before any operation lock",
+      receiveTookOperation,
+      false,
+      "partial E footprint never acquires O",
     );
     const probe = await pool.connect();
     try {
@@ -392,16 +458,26 @@ async function staggeredBatchRace() {
       assert.equal(
         unlocked.rowCount,
         1,
-        "O must still be available while receive waits on B",
+        "O remains available after receive rolls back its partial E footprint",
       );
     } finally {
       await probe.query("rollback");
       probe.release();
     }
     continueRefund.release();
-    await Promise.all([receiveTask, refundTask]);
+    await refundTask;
+    await transaction(a, async () => {
+      await lockFundingReceiveCanonicalEvents(
+        a,
+        events.map((event) => ({ ...event, now: data.base.now })),
+      );
+      await a.query(
+        "select id from funding_operations where id=$1 for update",
+        [data.base.operationId],
+      );
+    });
     console.log(
-      "PASS staggered receive A -> refund B -> receive waits B with O unlocked -> refund O -> both commit",
+      "PASS staggered receive A -> refund B -> try-busy rollback with O unlocked -> refund O -> ordinary full-E receive retry commits",
     );
   } finally {
     continueReceive.release();
@@ -415,6 +491,43 @@ async function staggeredBatchRace() {
 }
 
 try {
+  await verifyFundingObservationAliasesPg(pool, fixture);
+  await verifyFundingObservationAliasPlansPg(pool);
+  await verifyExactRefundPublicationPg(pool, fixture);
+  await verifyExactRefundRuntimePg(pool, fixture);
+  await verifyExactRefundNativeRuntimePg(pool, () =>
+    fixture(undefined, undefined, undefined, false, false, false, true),
+  );
+  await verifyExactRefundTimedWorkerPg(pool, fixture);
+  await verifyRefundWatchPublicationPg(pool, fixture);
+  await verifyExactRefundContextPlansPg(pool);
+  await verifyFundingPhysicalEventGatePg(pool, () =>
+    fixture(undefined, undefined, undefined, true),
+  );
+  await verifyDestinationReceiptPublicationPg(pool, (evm, existing) =>
+    fixture(existing, undefined, undefined, evm),
+  );
+  await verifyFundingClassificationRevisionsPg(pool, fixture);
+  await verifyRefundSourceMembershipPg(pool, fixture);
+  const actionFixture = await verifyRefundSourceActionScanPg(pool, fixture);
+  const siblingFixture = await fixture({
+    userId: actionFixture.identity.userId,
+    owner: actionFixture.data.owner,
+  });
+  await verifyReceiveRefundScanPg(pool, actionFixture, siblingFixture);
+  await verifySessionlessRoleCheckpointPg(pool, await fixture());
+  await verifySessionlessMergeAdoptionPg(pool, fixture);
+  await verifySessionlessMembershipLifecyclePg(pool, fixture);
+  await verifyMergedRefundIdentityPg(pool, fixture);
+  await verifyReceiveLegacyRoleCheckpointPg(
+    pool,
+    await fixture(undefined, undefined, undefined, true, true),
+  );
+  await verifyReceiveLegacyRoleCheckpointPg(
+    pool,
+    await fixture(undefined, undefined, undefined, true),
+    true,
+  );
   await staggeredBatchRace();
   for (const duplicate of [false, true]) {
     const data = await fixture();
@@ -425,21 +538,31 @@ try {
           ...data.base,
           evmEvents: [data.evm[0]],
         }),
-      (db) => {
+      async (db) => {
         const query = (sql: string, values?: unknown[]) => {
           statements.push(sql);
           return db.query(sql, values);
         };
-        const dedicatedPool = {
-          query,
-          connect: async () => ({ query, release() {} }),
-        } as unknown as Pool;
-        return reconcileRelayExactRefundReceipts(
-          dedicatedPool,
-          unusedRelay,
-          data.base,
-          observePartial(data, duplicate ? 0 : 1),
-        );
+        // Compatibility writer's own stale-snapshot contract, not a fake
+        // pool substituted for the new pool-level runtime authority. Actual
+        // runtime/worker transactions and F are covered above with real pools.
+        await query("begin");
+        try {
+          const result = await recordRelayExactRefundReceiptsInTransaction(
+            { query } as Pick<PoolClient, "query">,
+            {
+              ...data.base,
+              evmEvents: [data.evm[duplicate ? 0 : 1]],
+            },
+          );
+          await query("commit");
+          return result;
+        } catch (error) {
+          await query("rollback");
+          if (error instanceof RelayExactRefundSnapshotChanged)
+            return { kind: "pending" as const, reason: error.reason };
+          throw error;
+        }
       },
       true,
     );
@@ -450,7 +573,15 @@ try {
         inserted: 0,
         reason: "refund_receipts_incomplete",
       });
-      assert.equal(statements.includes("rollback"), false);
+      const finalBegin = statements
+        .map((sql) => sql.toLowerCase())
+        .lastIndexOf("begin");
+      assert.equal(
+        statements
+          .slice(finalBegin)
+          .some((sql) => sql.toLowerCase() === "rollback"),
+        false,
+      );
       assert.equal(
         statements.some((sql) =>
           sql.includes("insert into funding_reconciliation_jobs"),
@@ -464,13 +595,6 @@ try {
       });
       const rollback = statements.indexOf("rollback");
       assert.ok(rollback > statements.indexOf("begin"));
-      const diagnostic = statements.findIndex((sql) =>
-        sql.includes("set support_metadata=jsonb_set"),
-      );
-      assert.ok(
-        diagnostic > rollback,
-        "retry diagnostics follow the completed rollback",
-      );
       const lock = statements.findIndex(
         (sql) =>
           sql.includes("select id from funding_operations") &&
@@ -507,12 +631,21 @@ try {
         ).filter((row) => row.kind === "refund_credit").length,
         1,
       );
-      const retry = await reconcileRelayExactRefundReceipts(
-        pool,
-        unusedRelay,
-        data.base,
-        observePartial(data, 1),
-      );
+      const retryClient = await pool.connect();
+      let retry;
+      try {
+        await retryClient.query("begin");
+        retry = await recordRelayExactRefundReceiptsInTransaction(retryClient, {
+          ...data.base,
+          evmEvents: [data.evm[1]],
+        });
+        await retryClient.query("commit");
+      } catch (error) {
+        await retryClient.query("rollback");
+        throw error;
+      } finally {
+        retryClient.release();
+      }
       assert.deepEqual(
         retry,
         { kind: "complete", inserted: 1, reason: null },
@@ -613,8 +746,12 @@ try {
       `PASS actual reversed multi-event ${refundFirst ? "refund-first" : "receive-prelock-first"} lock contention`,
     );
   }
+  await verifyPendingReceiveAnchorPg(pool, () =>
+    fixture(undefined, undefined, undefined, true),
+  );
+  await verifyPendingReceiveAnchorPlansPg(pool);
   console.log(
-    "NOTE full receive-session allocation (including receive-first), reorg/re-mining and worker wiring remain separate acceptance gates",
+    "NOTE full owned exact-refund publication and complete product worker wiring remain separate acceptance gates",
   );
 } finally {
   await pool.end();

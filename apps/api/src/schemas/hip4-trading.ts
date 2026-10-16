@@ -126,18 +126,36 @@ export const hip4TradingPreparationSchema = z.object({
   amounts: hip4TradingAmountsSchema.nullable(),
   fees: hip4TradingFeesSchema.nullable(),
 });
-export const hip4TradingSubmitBodySchema = z
+const hip4TradingSubmitBodyBase = z
   .object({
     actionId: uuid,
     signature: z.string().regex(/^0x[0-9a-fA-F]{130}$/u),
+    telegramAppHandoffId: z.string().uuid().optional(),
+    telegramAppHandoffPlanFingerprint: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/iu)
+      .optional(),
     funding: z
       .object({ operationId: uuid, reservationId: uuid })
       .strict()
       .optional(),
   })
   .strict();
-export const hip4TradingCancelSubmitBodySchema = hip4TradingSubmitBodySchema
-  .omit({ funding: true })
+export const hip4TradingSubmitBodySchema = hip4TradingSubmitBodyBase.refine(
+  (value) =>
+    Boolean(value.telegramAppHandoffId) ===
+    Boolean(value.telegramAppHandoffPlanFingerprint),
+  {
+    message: "Both Telegram handoff fields are required together",
+    path: ["telegramAppHandoffId"],
+  },
+);
+export const hip4TradingCancelSubmitBodySchema = hip4TradingSubmitBodyBase
+  .omit({
+    funding: true,
+    telegramAppHandoffId: true,
+    telegramAppHandoffPlanFingerprint: true,
+  })
   .extend({ orderId: uuid })
   .strict();
 export const hip4TradingSubmissionSchema = z.object({
@@ -193,6 +211,10 @@ export const hip4TradingRouteSchemas = {
     hip4TradingSubmissionSchema,
   ),
   "/orders/abandon": route(
+    z.object({ actionId: uuid }).strict(),
+    hip4OrderRecoverySchema,
+  ),
+  "/orders/recheck": route(
     z.object({ actionId: uuid }).strict(),
     hip4OrderRecoverySchema,
   ),

@@ -20,9 +20,15 @@ import {
   remainingFundingRequirementAfterVenuePreparation,
   restrictResidualSourcesToCompositeContribution,
 } from "../../planner/production-source-planner.js";
-import type { PlannedSourceOption } from "../../planner/planning-types.js";
+import {
+  commitPlanRunsWithoutUserWalletAction,
+  type PlannedSourceOption,
+} from "../../planner/planning-types.js";
 import { sourceOptionSchema } from "../../../schemas/funding.js";
 import { recommendedSource } from "../../planner/planner.js";
+import { polymarketHandoffSourceIntent } from "../../domain/polymarket-handoff-source.js";
+import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
+import { buildPolymarketPreRouteHandoffSteps } from "../../../funding-providers/relay/operation-plan.js";
 
 const DESTINATION_ASSET: AssetRef = {
   networkId: "evm:137",
@@ -1541,6 +1547,210 @@ assert.equal(
   }),
   null,
   "aggregate fees cannot each reuse the full percentage budget",
+);
+
+const handoffOrigin: AssetLocation = {
+  ...sourceLocation(
+    "handoff-origin",
+    "evm:137",
+    RELAY_PINNED_ASSETS.polygonPusd,
+  ),
+  kind: "venue_account",
+  details: {
+    address: `0x${"ab".repeat(20)}`,
+    venueId: "polymarket",
+    balanceClass: "polymarket",
+  },
+};
+const handoffProfile = {
+  walletId: "handoff-controller",
+  controllerWalletRef: "handoff-owner",
+  networkId: "evm:137",
+  address: `0x${"cd".repeat(20)}`,
+  source: "embedded" as const,
+  serverWalletRef: "offline-controller",
+  signingModes: ["web_client"] as const,
+  sponsorshipPolicyIds: [],
+};
+const handoffIntent = polymarketHandoffSourceIntent({
+  economicLocation: handoffOrigin,
+  controllerProfile: handoffProfile,
+});
+assert.ok(handoffIntent);
+const partialHandoffBase = partialSource({
+  id: "handoff-origin",
+  location: handoffOrigin,
+  sourceRaw: "6000000",
+  expectedRaw: "6000000",
+  minimumRaw: "6000000",
+  feeUsd: "0",
+  payerRequirement: "user",
+});
+const partialHandoff: PlannedSourceOption = {
+  ...partialHandoffBase,
+  option: {
+    ...partialHandoffBase.option,
+    kind: "venue_cash",
+    requiredActions: [
+      {
+        kind: "external_handoff",
+        safeLabel: "Authorize exact handoff",
+        actor: "user",
+        valueMoving: true,
+        sponsorship: "none",
+      },
+      ...partialHandoffBase.option.requiredActions,
+    ],
+  },
+  commitPlan: {
+    ...partialHandoffBase.commitPlan,
+    segments: partialHandoffBase.commitPlan.segments.map((segment) => ({
+      ...segment,
+      sourceSnapshot: handoffIntent.executionSource,
+      refundLocationSnapshot: handoffIntent.executionSource.location,
+    })),
+    steps: buildPolymarketPreRouteHandoffSteps({
+      source: {
+        preRouteHandoff: {
+          kind: "polymarket_deposit_wallet_to_controller_v1",
+          sourceLocation: handoffOrigin,
+          funderAddress: String(handoffOrigin.details.address),
+          controllerAddress: handoffProfile.address,
+          tokenAddress: handoffOrigin.asset.assetId,
+        },
+      },
+      sourceAmount: { asset: handoffOrigin.asset, raw: "6000000" },
+      profile: handoffProfile,
+      steps: partialHandoffBase.commitPlan.steps,
+    }),
+    reservations: [
+      ...partialHandoffBase.commitPlan.reservations,
+      {
+        segmentOrdinal: null,
+        componentId: handoffIntent.controllerComponentId,
+        locationId: handoffIntent.executionSource.location.locationId,
+        networkId: handoffOrigin.asset.networkId,
+        assetId: handoffOrigin.asset.assetId,
+        assetDecimals: 6,
+        rawAmount: "6000000",
+        mode: "subtract_available",
+        economicRole: "future_credit_fence",
+        expiresAt: partialHandoffBase.option.expiresAt,
+      },
+    ],
+  },
+};
+const independent = partialSource({
+  id: "independent-base",
+  location: sourceLocation(
+    "independent-base",
+    "evm:8453",
+    RELAY_PINNED_ASSETS.baseUsdc,
+  ),
+  sourceRaw: "4000000",
+  expectedRaw: "4000000",
+  minimumRaw: "4000000",
+  feeUsd: "0",
+  payerRequirement: "user",
+});
+const handoffCompositeInput = {
+  candidates: [partialHandoff, independent],
+  requiredDestination: money(DESTINATION_ASSET, "10000000"),
+  destinationUnitPriceUsd: "1",
+  maximumFeeUsd: "1",
+  maximumFeeBps: 1000,
+  executionBoundary: "client_handoff" as const,
+};
+const handoffComposite = buildCompositeSourceOption(handoffCompositeInput);
+assert.ok(
+  handoffComposite,
+  "partial handoff plus independent contribution remains composable",
+);
+assert.equal(handoffComposite.commitPlan.segments.length, 2);
+assert.equal(handoffComposite.commitPlan.reservations.length, 3);
+assert.equal(
+  handoffComposite.commitPlan.reservations.filter(
+    (res) => res.economicRole === "future_credit_fence",
+  ).length,
+  1,
+);
+assert.equal(
+  handoffComposite.commitPlan.reservations.find(
+    (res) => res.economicRole === "future_credit_fence",
+  )?.segmentOrdinal,
+  null,
+);
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    ...handoffCompositeInput,
+    destinationAsset: DESTINATION_ASSET,
+    maximumSlippageBps: 100,
+  }),
+  10000000n,
+);
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    ...handoffCompositeInput,
+    candidates: [partialHandoff],
+    destinationAsset: DESTINATION_ASSET,
+    maximumSlippageBps: 100,
+  }),
+  6000000n,
+  "capacity preview does not count a future fence as another purchase",
+);
+const conflicting = {
+  ...independent,
+  commitPlan: {
+    ...independent.commitPlan,
+    reservations: [
+      ...independent.commitPlan.reservations,
+      ...partialHandoff.commitPlan.reservations.filter(
+        (res) => res.economicRole === "future_credit_fence",
+      ),
+    ],
+  },
+};
+assert.equal(
+  buildCompositeSourceOption({
+    ...handoffCompositeInput,
+    candidates: [partialHandoff, conflicting],
+  }),
+  null,
+  "all physical fences still participate in cross-contributor conflict rejection",
+);
+const sponsoredHandoff: PlannedSourceOption = {
+  ...partialHandoff,
+  compositeEligible: true,
+  commitPlan: {
+    ...partialHandoff.commitPlan,
+    steps: partialHandoff.commitPlan.steps.map((step) => ({
+      ...step,
+      payerRequirement:
+        step.segmentOrdinal === null ? "provider" : "privy_sponsor",
+    })),
+  },
+};
+assert.equal(
+  commitPlanRunsWithoutUserWalletAction(sponsoredHandoff.commitPlan),
+  false,
+  "sponsored gas never turns a Deposit Wallet authorization into an automatic action",
+);
+assert.equal(
+  maximumInternalFundingDestinationRaw({
+    ...handoffCompositeInput,
+    candidates: [sponsoredHandoff],
+    destinationAsset: DESTINATION_ASSET,
+    maximumSlippageBps: 100,
+    executionBoundary: "automatic",
+  }),
+  0n,
+);
+assert.ok(
+  buildCompositeSourceOption({
+    ...handoffCompositeInput,
+    candidates: [sponsoredHandoff, independent],
+  }),
+  "explicit client composite remains the supported recovery path",
 );
 
 console.log(

@@ -4,6 +4,7 @@ import { assetLocationSchema, moneySchema } from "../domain/schemas.js";
 import { isRecord } from "../../lib/type-guards.js";
 import {
   fundingRefundReceiptSetComplete,
+  EXACT_REFUND_OBSERVER_ID,
   readFundingRefundContract,
   readFundingRefundReceiptIdentity,
   type FundingRefundContract,
@@ -23,6 +24,7 @@ import {
   quarantineFundingReceiveCanonicalInternalEvent,
 } from "../persistence/funding-receive-session-repository.js";
 import { canonicalJsonHash } from "../persistence/canonical.js";
+import { hasFundingEvmReceiveClaim } from "../persistence/funding-physical-claims.js";
 import type { RelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
 import type { RelayRequestEvidence } from "../../funding-providers/relay/request-evidence.js";
 import type { RelayStatusResponse } from "../../funding-providers/relay/schemas.js";
@@ -38,8 +40,14 @@ import type { OwnedRouteCanonicalDestinationEvent } from "./owned-route-destinat
 import { classifyOwnedRouteCanonicalDestinationEvents } from "./owned-route-destination-observer.js";
 import { loadCanonicalPolymarketHandoffClassifications } from "../receive/receive-handoff-classification.js";
 import type { FundingTransactionReferenceCodec } from "../execution/transaction-reference-codec.js";
+import { readCommittedFundingIdentity } from "../domain/committed-economic-identity.js";
+import {
+  FundingClassificationChangedError,
+  readFundingClassificationPage,
+  type FundingClassificationRevision,
+} from "../persistence/funding-classification-revisions.js";
 
-export const EXACT_REFUND_OBSERVER_ID = "relay_exact_refund_observation_v1";
+export { EXACT_REFUND_OBSERVER_ID } from "../domain/refund-settlement.js";
 /** Must escape the transaction: keeping its prelocks and retrying in-place
  * would invert the canonical-event -> operation lock order. */
 export class RelayExactRefundSnapshotChanged extends Error {
@@ -68,11 +76,25 @@ type Pending = Readonly<{ kind: "pending"; reason: string }>;
 const pending = (reason: string): Pending => ({ kind: "pending", reason });
 export type RelayExactRefundContext = Readonly<{
   kind: "ready";
+  currentOwnerUserId: string;
+  facts: FundingClassificationRevision;
   contract: FundingRefundContract;
   expected: RelayRefundExpectation;
   identity: Omit<FundingRefundReceiptIdentity, "refundLocationId">;
   ledgerAfterSecond?: number;
 }>;
+
+export const RELAY_EXACT_REFUND_CONTEXT_SQL = `select operation_row.user_id,
+  coalesce(revision_row.revision,0)::text as classification_revision,
+  operation_row.source_snapshot as operation_source_snapshot,segment_row.source_snapshot,
+  segment_row.quoted_input,segment_row.refund_location_snapshot,
+  segment_row.provider_quote_ref_ciphertext,segment_row.provider_quote_ref_lookup_hmac,
+  segment_row.lookup_key_version,segment_row.support_metadata
+  from funding_operations operation_row
+  join funding_operation_segments segment_row on segment_row.operation_id=operation_row.id
+    and segment_row.id=$2::uuid and segment_row.provider_id='relay'
+  left join funding_classification_revisions revision_row on revision_row.operation_id=operation_row.id
+  where operation_row.id=$1::uuid and operation_row.plan_kind in ('wallet_route','composite_route')`;
 
 /** Read-only, exact operation/segment lookup. No provider IO, policy activation
  * or wallet-history scan. The writer repeats it after acquiring the row lock. */
@@ -82,6 +104,8 @@ export async function loadRelayExactRefundContext(
 ): Promise<RelayExactRefundContext | Pending | Readonly<{ kind: "ignored" }>> {
   const { rows } = await db.query<{
     user_id: string;
+    classification_revision: string;
+    operation_source_snapshot: unknown;
     source_snapshot: unknown;
     quoted_input: unknown;
     refund_location_snapshot: unknown;
@@ -89,19 +113,7 @@ export async function loadRelayExactRefundContext(
     provider_quote_ref_lookup_hmac: string | null;
     lookup_key_version: number | null;
     support_metadata: unknown;
-  }>(
-    `select operation_row.user_id, segment_row.source_snapshot,
-      segment_row.quoted_input, segment_row.refund_location_snapshot,
-      segment_row.provider_quote_ref_ciphertext,
-      segment_row.provider_quote_ref_lookup_hmac, segment_row.lookup_key_version,
-      segment_row.support_metadata
-    from funding_operations operation_row
-    join funding_operation_segments segment_row on segment_row.operation_id=operation_row.id
-      and segment_row.id=$2::uuid and segment_row.provider_id='relay'
-    where operation_row.id=$1::uuid
-      and operation_row.plan_kind in ('wallet_route','composite_route')`,
-    [input.operationId, input.segmentId],
-  );
+  }>(RELAY_EXACT_REFUND_CONTEXT_SQL, [input.operationId, input.segmentId]);
   const row = rows[0];
   if (!row) return { kind: "ignored" };
   const snapshot = row.refund_location_snapshot;
@@ -160,8 +172,14 @@ export async function loadRelayExactRefundContext(
     ...refunds.flatMap((location) => (location.success ? [location.data] : [])),
   ];
   if (
-    source.data.accountId !== row.user_id ||
-    refundLocations.some((location) => location.accountId !== row.user_id)
+    !readCommittedFundingIdentity({
+      currentOwnerUserId: row.user_id,
+      operationSourceSnapshot: row.operation_source_snapshot,
+      accountIds: [
+        source.data.accountId,
+        ...refundLocations.map((location) => location.accountId),
+      ],
+    })
   )
     return pending("refund_committed_owner_mismatch");
   const prior =
@@ -179,6 +197,12 @@ export async function loadRelayExactRefundContext(
       : undefined;
   return {
     kind: "ready",
+    currentOwnerUserId: row.user_id,
+    facts: {
+      operationId: input.operationId,
+      userId: row.user_id,
+      revision: row.classification_revision,
+    },
     contract,
     identity: { version: 1, ...binding },
     ...(ledgerAfterSecond === undefined ? {} : { ledgerAfterSecond }),
@@ -265,9 +289,12 @@ function verifiedFromCurrentAndStored(
   // A provider reference binds a transaction, not an arbitrary log within it.
   const hashes = new Set<string>();
   for (const row of rows) {
-    if (hashes.has(row.txHash))
+    const hash = row.networkId.startsWith("evm:")
+      ? row.txHash.toLowerCase()
+      : row.txHash;
+    if (hashes.has(hash))
       return pending("refund_shared_transaction_requires_attribution");
-    hashes.add(row.txHash);
+    hashes.add(hash);
   }
   const identity: FundingRefundReceiptIdentity = {
     ...context.identity,
@@ -343,14 +370,36 @@ function refundEventSnapshot(
   );
 }
 
-/** Transaction-only common writer. Caller obtains canonical chain observations
- * outside the transaction. No provider status or balance delta creates credit;
- * every event is verified again against the frozen contract before allocation.
- * Partial receipts are durable even when completion is not yet provable. */
-export async function recordRelayExactRefundReceiptsInTransaction(
+type VerifiedRefundReceipts = Extract<
+  ReturnType<typeof verifiedFromCurrentAndStored>,
+  { kind: "ready" }
+>;
+export type PreparedRelayExactRefundReceipts = Readonly<{
+  kind: "prepared";
+  /** Original proposal revision. Revalidation never replaces this authority
+   * with a newer revision read after acquiring O. */
+  facts: FundingClassificationRevision;
+  input: RecordRelayExactRefundInput;
+  context: RelayExactRefundContext;
+  plan: RelayRefundReceiptPlan;
+  verification: VerifiedRefundReceipts;
+}>;
+export type RevalidatedRelayExactRefundReceipts = Omit<
+  PreparedRelayExactRefundReceipts,
+  "kind"
+> &
+  Readonly<{ kind: "revalidated" }>;
+
+/** DB-only proposal before E/O. Context and revision share one statement;
+ * the existing revision reader brackets the exact manifest read. This neither
+ * allocates nor authorizes a role. No fresh facts revision is attached later.
+ */
+export async function prepareRelayExactRefundReceipts(
   db: Database,
   input: RecordRelayExactRefundInput,
-): Promise<RecordRelayExactRefundResult> {
+): Promise<
+  PreparedRelayExactRefundReceipts | Pending | Readonly<{ kind: "ignored" }>
+> {
   const before = await loadRelayExactRefundContext(db, input);
   if (before.kind !== "ready") return before;
   const selected = selectRelayRefundReceiptPlan({
@@ -365,36 +414,68 @@ export async function recordRelayExactRefundReceiptsInTransaction(
     networkId: selected.plan.target.asset.networkId,
     transactionHashes: selected.plan.transactionHashes,
   };
-  const initial = verifiedFromCurrentAndStored(
-    before,
-    input,
-    await listFundingRefundManifestReceipts(db, manifest),
-    selected.plan,
+  const initial = await readRefundPreparationPage(db, before.facts, async () =>
+    verifiedFromCurrentAndStored(
+      before,
+      input,
+      await listFundingRefundManifestReceipts(db, manifest),
+      selected.plan,
+    ),
   );
   if (initial.kind !== "ready") return initial;
-  // Receive uses canonical-event -> operation locks. Respect that same order
-  // so an overlapping external-deposit scan cannot deadlock or double credit.
-  await lockFundingReceiveCanonicalEvents(
-    db,
-    initial.verified.events.flatMap((event) => {
-      if (!event.networkId.startsWith("evm:")) return [];
-      if (event.ledgerHeight === null || event.blockHash === null)
-        throw new Error("refund canonical EVM proof missing");
-      return [
-        {
-          ...event,
-          transactionHash: event.transactionHash.toLowerCase(),
-          ledgerHeight: event.ledgerHeight,
-          blockHash: event.blockHash,
-          now: input.now,
-        },
-      ];
-    }),
-  );
-  await db.query(
-    "select id from funding_operations where id=$1::uuid for update",
-    [input.operationId],
-  );
+  return {
+    kind: "prepared",
+    facts: before.facts,
+    input,
+    context: before,
+    plan: selected.plan,
+    verification: initial,
+  };
+}
+
+async function readRefundPreparationPage<T>(
+  db: Database,
+  facts: FundingClassificationRevision,
+  read: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await readFundingClassificationPage(db, facts, read);
+  } catch (error) {
+    if (error instanceof FundingClassificationChangedError)
+      throw new RelayExactRefundSnapshotChanged();
+    throw error;
+  }
+}
+
+export function relayExactRefundCanonicalEvents(
+  prepared:
+    | PreparedRelayExactRefundReceipts
+    | RevalidatedRelayExactRefundReceipts,
+) {
+  return prepared.verification.verified.events.flatMap((event) => {
+    if (!event.networkId.startsWith("evm:")) return [];
+    if (event.ledgerHeight === null || event.blockHash === null)
+      throw new Error("refund canonical EVM proof missing");
+    return [
+      {
+        ...event,
+        transactionHash: event.transactionHash.toLowerCase(),
+        ledgerHeight: event.ledgerHeight,
+        blockHash: event.blockHash,
+        now: prepared.input.now,
+      },
+    ];
+  });
+}
+
+/** AFTER the complete sorted O union, before any effects. A newly visible
+ * partial receipt must force a fresh transaction, not a new E acquisition under
+ * O. Original prepared facts remain the final fence's expected revision. */
+export async function revalidateRelayExactRefundReceipts(
+  db: Database,
+  prepared: PreparedRelayExactRefundReceipts,
+): Promise<RevalidatedRelayExactRefundReceipts> {
+  const { input, context: before, plan } = prepared;
   const context = await loadRelayExactRefundContext(db, input);
   if (
     context.kind !== "ready" ||
@@ -402,34 +483,69 @@ export async function recordRelayExactRefundReceiptsInTransaction(
       context.contract,
       context.expected,
       context.identity,
+      context.currentOwnerUserId,
     ]) !==
-      canonicalJsonHash([before.contract, before.expected, before.identity])
+      canonicalJsonHash([
+        before.contract,
+        before.expected,
+        before.identity,
+        before.currentOwnerUserId,
+      ])
   )
     throw new RelayExactRefundSnapshotChanged();
-  const latest = verifiedFromCurrentAndStored(
-    context,
-    input,
-    await listFundingRefundManifestReceipts(db, manifest),
-    selected.plan,
+  const latest = await readRefundPreparationPage(db, context.facts, async () =>
+    verifiedFromCurrentAndStored(
+      context,
+      input,
+      await listFundingRefundManifestReceipts(db, {
+        operationId: input.operationId,
+        segmentId: input.segmentId,
+        networkId: plan.target.asset.networkId,
+        transactionHashes: plan.transactionHashes,
+      }),
+      plan,
+    ),
   );
-  // Another partial writer or canonical watcher may have committed while we
-  // waited for O. Never acquire its newly visible physical keys under O or
-  // commit quarantine based on the obsolete snapshot. A fresh transaction
-  // takes the complete new footprint in canonical order on the next poll.
   if (
     latest.kind !== "ready" ||
-    refundEventSnapshot(initial.verified.events) !==
+    refundEventSnapshot(prepared.verification.verified.events) !==
       refundEventSnapshot(latest.verified.events)
   )
     throw new RelayExactRefundSnapshotChanged();
-  const { verified, identity: receiptIdentity, nativeLedger } = latest;
+  return { ...prepared, kind: "revalidated", context, verification: latest };
+}
+
+/** Compatibility transaction adapter for existing native/legacy callers.
+ * Supported joint publication uses prepare/revalidate/apply, NEVER this wrapper
+ * under an outer O. Provider reads finish before opening the transaction. */
+export async function recordRelayExactRefundReceiptsInTransaction(
+  db: Database,
+  input: RecordRelayExactRefundInput,
+): Promise<RecordRelayExactRefundResult> {
+  const prepared = await prepareRelayExactRefundReceipts(db, input);
+  if (prepared.kind !== "prepared") return prepared;
+  // Receive uses canonical-event -> operation locks. Respect that same order
+  // so an overlapping external-deposit scan cannot deadlock or double credit.
+  await lockFundingReceiveCanonicalEvents(
+    db,
+    relayExactRefundCanonicalEvents(prepared),
+  );
+  await db.query(
+    "select id from funding_operations where id=$1::uuid for update",
+    [input.operationId],
+  );
+  const latest = await revalidateRelayExactRefundReceipts(db, prepared);
+  const {
+    context,
+    verification: { verified },
+  } = latest;
   // The exact refund proof is a positive role, not permission to steal an
   // already known handoff/destination. Use the SAME readers as receive, after
   // acquiring the full physical footprint and revalidating the refund snapshot.
   // Pending/competing roles cause no receipt, proof, suppression or wake: the
   // ordinary provider reconciliation retries once current facts are repaired.
   const handoffs = await loadCanonicalPolymarketHandoffClassifications(db, {
-    userId: context.expected.source.accountId,
+    userId: context.currentOwnerUserId,
     now: input.now,
     transactionReferenceCodec: input.transactionReferenceCodec,
     events: verified.events.flatMap((event) => {
@@ -446,7 +562,7 @@ export async function recordRelayExactRefundReceiptsInTransaction(
     }),
   });
   const destinations = await classifyOwnedRouteCanonicalDestinationEvents(db, {
-    userId: context.expected.source.accountId,
+    userId: context.currentOwnerUserId,
     events: verified.events,
     referenceCodec: input.referenceCodec,
   });
@@ -463,6 +579,28 @@ export async function recordRelayExactRefundReceiptsInTransaction(
     )
       return pending("internal_event_classification_conflict");
   }
+  return applyRelayExactRefundReceiptsInTransaction(db, latest);
+}
+
+/** Effects only. Caller has validated the complete physical footprint and
+ * ownership, locked its O union, revalidated, and will finish with its required
+ * F/COMMIT. No explicit E/O acquisition, role reads or provider IO here. */
+export async function applyRelayExactRefundReceiptsInTransaction(
+  db: Database,
+  prepared: RevalidatedRelayExactRefundReceipts,
+): Promise<RecordRelayExactRefundResult> {
+  const {
+    input,
+    context,
+    plan,
+    verification: { verified, identity: receiptIdentity, nativeLedger },
+  } = prepared;
+  // Check the ENTIRE verified footprint before any suppression, receipt,
+  // completion proof or wake. Exact-cased E alone does not exclude a retained
+  // legacy receive alias in another owner/status. Caller already holds full E.
+  for (const event of verified.events)
+    if (await hasFundingEvmReceiveClaim(db, event))
+      return pending("refund_receive_claim_conflict");
   for (const event of [...verified.events].sort(
     compareFundingReceiveCanonicalEvents,
   )) {
@@ -490,7 +628,7 @@ export async function recordRelayExactRefundReceiptsInTransaction(
     compareFundingReceiveCanonicalEvents,
   )) {
     const transaction = event.nativeEvidence
-      ? selected.plan.transactions.find(
+      ? plan.transactions.find(
           (row) =>
             row.txHash.toLowerCase() === event.transactionHash.toLowerCase(),
         )
@@ -550,7 +688,7 @@ export async function recordRelayExactRefundReceiptsInTransaction(
   const receipts = canonicalReceipts(allocatedRows, input.segmentId);
   const proof = {
     ...receiptIdentity,
-    expectedReturned: selected.plan.expectedReturned,
+    expectedReturned: plan.expectedReturned,
     observationIds: [...new Set(allocatedIds)].sort(),
   };
   const anchor = receipts.find((row) => row.id === proof.observationIds[0]);

@@ -10,6 +10,43 @@ export const hip4AccountMarketIdSchema = z
   .string()
   .regex(/^hyperliquid:(mainnet|testnet):outcome:(0|[1-9]\d*)$/)
   .max(80);
+/** Separate physical cash, never a second view of unified collateral. */
+export const hip4PerpsCashObservationSchema = z
+  .object({
+    observedAt: z.string().datetime(),
+    state: z.enum(["verified", "unavailable", "unsupported"]),
+    totalRaw: z
+      .string()
+      .regex(/^(0|[1-9]\d*)$/)
+      .nullable(),
+    availableRaw: z
+      .string()
+      .regex(/^(0|[1-9]\d*)$/)
+      .nullable(),
+    reason: z.enum([
+      "cash_only",
+      "unsupported_cash_mode",
+      "margin_inventory",
+      "invalid_cash",
+      "read_failed",
+    ]),
+  })
+  .strict()
+  .refine(
+    (value) =>
+      value.state === "verified"
+        ? value.totalRaw !== null &&
+          value.availableRaw !== null &&
+          value.reason === "cash_only" &&
+          BigInt(value.availableRaw) <= BigInt(value.totalRaw)
+        : value.totalRaw === null &&
+          value.availableRaw === null &&
+          value.reason !== "cash_only",
+    "Perps cash state must agree with its exact amounts",
+  );
+export type Hip4PerpsCashObservation = z.infer<
+  typeof hip4PerpsCashObservationSchema
+>;
 export const hip4AccountObservationSchema = z
   .object({
     observedAt: z.string().datetime(),
@@ -36,6 +73,7 @@ export const hip4AccountObservationSchema = z
         canTrade: z.literal(false),
       })
       .strict(),
+    perpsCash: hip4PerpsCashObservationSchema.optional(),
     balances: z.array(
       z
         .object({

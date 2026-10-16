@@ -1,3 +1,54 @@
+import { z } from "zod";
+import type { SignalBotPolicy } from "./signal-bot-trading-policy.js";
+
+/** Shared current policy contract for user-executed app handoffs, not an
+ * unattended bot venue grant. Venue lifecycle is checked by ordinary trading. */
+export function telegramAppHandoffPolicyAllows(input: {
+  action: "buy" | "sell";
+  executionContractVersion: 1 | 2;
+  policy: SignalBotPolicy;
+}): boolean {
+  if (
+    input.policy.miniAppHandoffMode === "off" ||
+    input.policy.miniAppHandoffContractVersion < input.executionContractVersion
+  )
+    return false;
+  return input.action === "buy"
+    ? input.policy.buyContinuationEnabled && input.policy.fundingReceiveEnabled
+    : input.policy.tradingEnabled &&
+        input.policy.tradingActions.includes("sell");
+}
+
+export const telegramAppHandoffV2BindingSchema = z
+  .object({
+    handoffId: z
+      .string()
+      .uuid()
+      .transform((value) => value.toLowerCase()),
+    planFingerprint: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/iu)
+      .transform((value) => value.toLowerCase()),
+  })
+  .strict();
+
+export function readTelegramAppHandoffV2Binding(input: {
+  telegramAppHandoffId?: string;
+  telegramAppHandoffPlanFingerprint?: string;
+}) {
+  if (
+    input.telegramAppHandoffId === undefined &&
+    input.telegramAppHandoffPlanFingerprint === undefined
+  )
+    return null;
+  const parsed = telegramAppHandoffV2BindingSchema.safeParse({
+    handoffId: input.telegramAppHandoffId,
+    planFingerprint: input.telegramAppHandoffPlanFingerprint,
+  });
+  if (!parsed.success) throw new Error("hip4_handoff_binding_invalid");
+  return parsed.data;
+}
+
 /**
  * Venue contract for the sealed Telegram → Mini App handoff.
  *
@@ -10,10 +61,25 @@
 export const TELEGRAM_APP_HANDOFF_V2_TRADE_VENUES = [
   "polymarket",
   "limitless",
+  "hyperliquid",
 ] as const;
 
 export type TelegramAppHandoffV2TradeVenue =
   (typeof TELEGRAM_APP_HANDOFF_V2_TRADE_VENUES)[number];
+
+/** Durable consumer contract. Native admission is installed before exposing
+ * its product entry; this does not expand unattended bot signing capability. */
+export type TelegramAppHandoffV2ConsumerVenue =
+  | TelegramAppHandoffV2TradeVenue
+  | "hyperliquid";
+
+/** Reader/consumer and product entries now use the same connected contract.
+ * This is not an unattended Telegram signer capability. */
+export function isTelegramAppHandoffV2ConsumerVenue(
+  venue: unknown,
+): venue is TelegramAppHandoffV2ConsumerVenue {
+  return venue === "hyperliquid" || isTelegramAppHandoffV2TradeVenue(venue);
+}
 
 export function isTelegramAppHandoffV2TradeVenue(
   venue: unknown,
@@ -53,6 +119,7 @@ export function isTelegramAppHandoffV2EnabledForVenue(input: {
 export const TELEGRAM_APP_HANDOFF_V2_DIRECT_TRADE_VENUES = [
   "polymarket",
   "limitless",
+  "hyperliquid",
 ] as const;
 
 export type TelegramAppHandoffV2DirectTradeVenue =

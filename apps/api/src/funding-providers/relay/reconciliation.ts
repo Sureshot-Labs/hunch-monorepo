@@ -13,6 +13,7 @@ import type { RelayRequestListItem, RelayStatusResponse } from "./schemas.js";
 import { classifyRelayStatus } from "./status.js";
 import { relayDestinationReferenceIdentity } from "./destination-reference.js";
 import type { VerifiedRelayWebhook } from "./webhook.js";
+import type { FundingEvidenceWorkContext } from "../../funding/reconciliation/funding-reducer.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -331,6 +332,7 @@ export type RelayReceiptObservationTarget = Readonly<{
   requestId: string;
   status: RelayStatusResponse;
   now: Date;
+  work?: FundingEvidenceWorkContext;
 }>;
 type RelayReceiptObserver = (
   pool: Pool,
@@ -350,6 +352,7 @@ export class RelayReconciliationDriver {
     pool: Pool,
     operationId: string,
     now = new Date(),
+    work?: FundingEvidenceWorkContext,
   ): Promise<Readonly<{ requestsPolled: number; childrenDiscovered: number }>> {
     const segmentResult = await pool.query<StoredRelaySegment>(
       `
@@ -561,6 +564,7 @@ export class RelayReconciliationDriver {
           requestId,
           status,
           now,
+          ...(work ? { work } : {}),
         });
       }
     }

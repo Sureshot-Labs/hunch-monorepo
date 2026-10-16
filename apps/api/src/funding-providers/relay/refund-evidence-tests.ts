@@ -15,6 +15,12 @@ import {
   selectRelayRefundReceiptPlan,
   verifyRelayRefundReceipts,
 } from "./refund-evidence.js";
+import {
+  readRelayExactRefundEvidence,
+  observeRelayExactRefundEvidence,
+} from "./exact-refund-observer.js";
+import { FundingEvidenceBudgetExpiredError } from "../../funding/reconciliation/funding-evidence-budget.js";
+import type { Pool } from "pg";
 
 const account = "refund-test-account";
 const sourceOwner = `0x${"1".repeat(40)}`;
@@ -36,12 +42,15 @@ function refundDestination(f: ReturnType<typeof fixture>) {
 function actualRoute(f: ReturnType<typeof fixture>) {
   return required(required(f.input.request.data.route).actual);
 }
-function fixture(native = false) {
+function fixture(
+  native = false,
+  sourceAsset = RELAY_ROUTE_SPECS["base-usdc-to-hypercore-spot-usdc"].source,
+) {
   const source: AssetLocation = {
     kind: "wallet",
     accountId: account,
     locationId: "source",
-    asset: RELAY_ROUTE_SPECS["base-usdc-to-hypercore-spot-usdc"].source,
+    asset: sourceAsset,
     details: { address: sourceOwner, walletId: "source-wallet" },
   };
   const perps = hypercorePerpsRefundLocation({
@@ -51,7 +60,8 @@ function fixture(native = false) {
   });
   const target = native ? perps : source;
   const raw = native ? "900000000" : "9000000";
-  const chainId = native ? 1337 : 8453;
+  const sourceChainId = Number(source.asset.networkId.slice(4));
+  const chainId = native ? 1337 : sourceChainId;
   const transaction = {
     txHash: hash,
     chainId,
@@ -115,7 +125,7 @@ function fixture(native = false) {
               inputCurrency: {
                 amount: "10000000",
                 currency: {
-                  chainId: 8453,
+                  chainId: sourceChainId,
                   address: source.asset.assetId,
                   decimals: 6,
                 },
@@ -180,6 +190,184 @@ function plan(f = fixture()) {
   assert.equal(selected.kind, "selected");
   return selected.plan;
 }
+
+test("native DB-budget denial preserves the last read second; next job starts with the unread second", async () => {
+  for (const failure of [
+    new FundingEvidenceBudgetExpiredError(),
+    Object.assign(new Error("offline timeout"), { code: "57014" }),
+    Object.assign(new Error("offline lock timeout"), { code: "55P03" }),
+  ]) {
+    const f = fixture(true);
+    const transaction = structuredClone(
+      required(f.input.request.data.outTxs)[0],
+    );
+    transaction.txHash = otherHash;
+    transaction.timestamp++;
+    (transaction.data as { hash: string }).hash = otherHash;
+    required(f.input.request.data.outTxs).push(transaction);
+    required(refundDestination(f).refunds).push({
+      chainId: 1337,
+      transactionId: otherHash,
+    });
+    let admissions = 0;
+    const query = async (sql: string) => {
+      if (sql.includes("from runtime_policies")) return { rows: [] };
+      if (sql.includes("insert into hip4_request_budget")) {
+        admissions++;
+        if (admissions === 2) throw failure;
+        return { rows: [], rowCount: 1 };
+      }
+      assert.ok(
+        sql === "begin" ||
+          sql === "commit" ||
+          sql === "rollback" ||
+          sql.includes("set_config"),
+      );
+      return { rows: [] };
+    };
+    const pool = {
+      query,
+      connect: async () => ({ query, release() {} }),
+    } as unknown as Pool;
+    const visited: number[] = [];
+    const fetcher: typeof fetch = async (_url, init) => {
+      const request = JSON.parse(String(init?.body));
+      visited.push(request.startTime / 1000);
+      return Response.json([]);
+    };
+    const relay = { requestEvidence: async () => f.input.request };
+    const first = await observeRelayExactRefundEvidence(
+      pool,
+      relay,
+      { ...f.input, now, deadlineMs: Date.now() + 60_000 },
+      fetcher,
+    );
+    assert.equal(first.kind, "observed");
+    assert.ok("ledgerAfterSecond" in first);
+    assert.equal(first.reason, "native_ledger_budget_exhausted");
+    assert.equal(first.ledgerAfterSecond, transaction.timestamp - 1);
+    const retry = await observeRelayExactRefundEvidence(
+      pool,
+      relay,
+      {
+        ...f.input,
+        now,
+        ledgerAfterSecond: first.ledgerAfterSecond,
+        deadlineMs: Date.now() + 60_000,
+      },
+      fetcher,
+    );
+    assert.equal(retry.kind, "observed");
+    assert.equal(retry.reason, null);
+    assert.equal(
+      visited[1],
+      transaction.timestamp,
+      "denied second gets the first next-job transport",
+    );
+  }
+});
+
+test("exact evidence applies one read deadline to Relay and stops sibling EVM/native reads with resumable partial facts", async (t) => {
+  let time = 1000;
+  t.mock.method(Date, "now", () => time);
+  for (const native of [false, true]) {
+    time = 1000;
+    const f = fixture(native);
+    const transaction = structuredClone(
+      required(f.input.request.data.outTxs)[0],
+    );
+    transaction.txHash = otherHash;
+    transaction.timestamp++;
+    if (native) (transaction.data as { hash: string }).hash = otherHash;
+    required(f.input.request.data.outTxs).push(transaction);
+    required(refundDestination(f).refunds).push({
+      chainId: native ? 1337 : 8453,
+      transactionId: otherHash,
+    });
+    let relayCalls = 0;
+    let receiptCalls = 0;
+    const dependencies = {
+      requestEvidence: async (
+        _id: string,
+        options?: { deadlineMs: number },
+      ) => {
+        relayCalls++;
+        assert.deepEqual(options, { deadlineMs: 1100 });
+        return f.input.request;
+      },
+      readEvm: async () => {
+        receiptCalls++;
+        time = 1100;
+        return [f.evm];
+      },
+      readNativeLedger: async () => {
+        receiptCalls++;
+        time = 1100;
+        return f.ledger;
+      },
+    };
+    const result = await readRelayExactRefundEvidence(
+      { ...f.input, now, deadlineMs: 1100 },
+      dependencies,
+    );
+    assert.equal(result.kind, "observed");
+    assert.equal(relayCalls, 1);
+    assert.equal(
+      receiptCalls,
+      1,
+      "no subsequent receipt transport after absolute deadline",
+    );
+    if (result.kind === "observed") {
+      assert.equal(
+        native ? result.nativeLedger.length : result.evmEvents.length,
+        1,
+      );
+      assert.equal(
+        result.reason,
+        native ? "native_ledger_deadline" : "refund_work_deadline",
+      );
+      if (native) {
+        assert.ok("ledgerAfterSecond" in result);
+        assert.equal(result.ledgerAfterSecond, transaction.timestamp - 1);
+      }
+    }
+    assert.deepEqual(
+      await readRelayExactRefundEvidence(
+        { ...f.input, now, deadlineMs: 1100 },
+        dependencies,
+      ),
+      { kind: "pending", reason: "refund_work_deadline" },
+    );
+    assert.equal(
+      relayCalls,
+      1,
+      "already expired work does not even read Relay",
+    );
+  }
+});
+
+test("registered Polygon pUSD refunds keep exact source token and either committed EVM or native target", () => {
+  for (const native of [false, true]) {
+    const f = fixture(
+      native,
+      RELAY_ROUTE_SPECS["polygon-pusd-to-hypercore-spot-usdc"].source,
+    );
+    const selected = plan(f);
+    const result = verifyRelayRefundReceipts({
+      plan: selected,
+      now,
+      ...(native ? { nativeLedger: f.ledger } : { evmEvents: [f.evm] }),
+    });
+    assert.equal(result.kind, "verified");
+    assert.deepEqual(result.events[0].asset, f.target.asset);
+    actualRoute(f).origin.inputCurrency.currency.address =
+      RELAY_ROUTE_SPECS["polygon-usdc-to-hypercore-spot-usdc"].source.assetId;
+    assert.deepEqual(selectRelayRefundReceiptPlan(f.input), {
+      kind: "unverified",
+      reason: "refund_source_binding_mismatch",
+    });
+  }
+});
 
 test("refund status is not money; exact returned amount can be less than source", () => {
   const f = fixture();
@@ -496,6 +684,34 @@ test("wrong receipt asset/owner/hash does not count; conflicting duplicate or ex
       evmEvents: [{ ...f.evm, rawAmount: "9000001" }],
     }).kind,
     "unverified",
+  );
+});
+
+test("same physical refund cannot discard a changed anchor while deduplicating current and stored proof", () => {
+  const f = fixture(),
+    selected = plan(f);
+  for (const changed of [
+    { ...f.evm, ledgerHeight: "124" },
+    { ...f.evm, blockHash: `0x${"b".repeat(64)}` },
+  ])
+    for (const evmEvents of [
+      [f.evm, changed],
+      [changed, f.evm],
+    ])
+      assert.deepEqual(
+        verifyRelayRefundReceipts({ plan: selected, now, evmEvents }),
+        {
+          kind: "unverified",
+          reason: "refund_receipt_conflict",
+        },
+      );
+  assert.equal(
+    verifyRelayRefundReceipts({
+      plan: selected,
+      now,
+      evmEvents: [f.evm, { ...f.evm, observedAt: new Date(now.getTime() + 1) }],
+    }).kind,
+    "verified",
   );
 });
 

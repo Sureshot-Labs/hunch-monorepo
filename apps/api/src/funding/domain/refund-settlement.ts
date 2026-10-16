@@ -9,6 +9,7 @@ import type { AssetRef, Money } from "./types.js";
 /** Immutable opt-in on the existing segment refund snapshot. Legacy routes
  * retain their contract; a malformed/future marker never means legacy. */
 export const EXACT_REFUND_RECEIPTS_CONTRACT = "relay_exact_refund_receipts_v1";
+export const EXACT_REFUND_OBSERVER_ID = "relay_exact_refund_observation_v1";
 
 const assetSchema = z.object({
   networkId: z.string().min(1),

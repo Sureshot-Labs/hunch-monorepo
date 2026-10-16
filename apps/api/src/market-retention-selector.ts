@@ -181,6 +181,10 @@ export function protectedRefsSql(
 ): string {
   // Likes deliberately do not protect markets: they are removable derived edges.
   // Their thesis/comment parents remain protected by the history references below.
+  // Receive-refund checkpoints contain only canonical-event/source dependency
+  // IDs, no market/token snapshots. All source operations (including terminal)
+  // remain covered below. Market cleanup must not prune those checkpoints: a
+  // missing source is unresolved evidence, not a removable market-derived row.
   const fundingOperationsRef = options.includeFundingOperations
     ? `
     union

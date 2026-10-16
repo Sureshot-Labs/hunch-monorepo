@@ -43,6 +43,11 @@ import {
   readHip4MarketQuotePolicy,
 } from "../repos/hip4-trading-policy.js";
 import { prepareHip4TradeSigning } from "./hip4-trade-signing.js";
+import {
+  readTelegramAppHandoffV2Binding,
+  telegramAppHandoffV2BindingSchema,
+} from "./telegram-app-handoff-v2-contract.js";
+import type { TelegramAppHandoffV2ScopeAssertion } from "../repos/telegram-app-handoff-v2-direct-trade-repository.js";
 
 const uuid = z
   .string()
@@ -54,6 +59,10 @@ const requestSchema = z
     actionId: uuid,
     signature: z.string().max(132),
     actor: z.literal("web_app"),
+    telegramAppHandoffId:
+      telegramAppHandoffV2BindingSchema.shape.handoffId.optional(),
+    telegramAppHandoffPlanFingerprint:
+      telegramAppHandoffV2BindingSchema.shape.planFingerprint.optional(),
     funding: z
       .object({ operationId: uuid, reservationId: uuid })
       .strict()
@@ -69,6 +78,7 @@ type PreparationInput = {
 export type Hip4OrderRuntimeDependencies = {
   fetcher?: typeof fetch;
   capabilityCheck?: Parameters<typeof readHip4TradeLifecycle>[2];
+  telegramAppHandoffScope?: TelegramAppHandoffV2ScopeAssertion;
 };
 const preparationInputSchema = z
   .object({
@@ -306,6 +316,10 @@ export async function submitHip4CancelWithCurrentContext(
   dependencies: Hip4OrderRuntimeDependencies = {},
 ) {
   input = requestSchema
+    .omit({
+      telegramAppHandoffId: true,
+      telegramAppHandoffPlanFingerprint: true,
+    })
     .omit({ funding: true })
     .extend({ orderId: uuid })
     .parse(input);
@@ -328,13 +342,10 @@ export async function submitHip4CancelWithCurrentContext(
 export async function submitHip4OrderWithCurrentContext(
   pool: Pool,
   input: Hip4OrderSubmitReference,
-  dependencies: {
-    fetcher?: typeof fetch;
-    /** Server-internal test seam; never a request field. */
-    capabilityCheck?: Parameters<typeof readHip4TradeLifecycle>[2];
-  } = {},
+  dependencies: Hip4OrderRuntimeDependencies = {},
 ) {
   input = requestSchema.parse(input);
+  readTelegramAppHandoffV2Binding(input);
   const attempt = await readHip4OrderSubmissionAttempt(pool, input);
   if (attempt.prior)
     return {
@@ -423,7 +434,12 @@ export async function submitHip4OrderWithCurrentContext(
   }
   const submitted = await submitHip4OrderAction(
     pool,
-    { ...input, funding, context },
+    {
+      ...input,
+      funding,
+      context,
+      telegramAppHandoffScope: dependencies.telegramAppHandoffScope,
+    },
     transport,
     dependencies.capabilityCheck,
   );

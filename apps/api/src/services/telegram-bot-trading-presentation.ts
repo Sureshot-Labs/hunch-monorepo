@@ -139,11 +139,14 @@ export function buildTelegramTradeProgressMessage(
 export function buildTelegramTradeInputPrompt(input: {
   action: "buy" | "sell";
   id: string;
+  venue?: string;
 }) {
   const instruction =
     input.action === "buy"
       ? "Send the USD amount to buy. Examples: 2, 2.50, or $2.50."
-      : "Send exact shares, an explicit percentage, or all. Examples: 1.25, 25%, or all. A bare number always means shares.";
+      : input.venue === "hyperliquid"
+        ? "Send whole contracts, a percentage, or all. Examples: 2, 25%, or all. Percentages and all round down to whole contracts; a bare number always means contracts. You will review the exact quantity in Hunch."
+        : "Send exact shares, an explicit percentage, or all. Examples: 1.25, 25%, or all. A bare number always means shares.";
   return {
     parse_mode: "MarkdownV2" as const,
     text: joinTelegramMarkdownV2Lines([

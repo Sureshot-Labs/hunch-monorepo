@@ -18,6 +18,56 @@ function required<T>(value: T | null | undefined): T {
 }
 const minimal = { id: requestId, status: "pending", data: {} };
 
+test("exact evidence rejects expired budgets, isolates different deadlines and recovers without stale flights", async (t) => {
+  const now = Date.now();
+  let calls = 0;
+  const releases: (() => void)[] = [];
+  const client = new RelayClient({
+    apiKey: "offline-deadline-fixture",
+    fetchImpl: async () => {
+      calls++;
+      await new Promise<void>((resolve) => releases.push(resolve));
+      return Response.json({ requests: [minimal] });
+    },
+  });
+  for (const deadlineMs of [now - 1, NaN, Infinity])
+    await assert.rejects(
+      client.requestEvidence(requestId, { deadlineMs }),
+      (error: unknown) =>
+        error instanceof RelayClientError && error.code === "timeout",
+    );
+  assert.equal(calls, 0);
+  const deadlineMs = now + 60_000;
+  const same = [
+    client.requestEvidence(requestId, { deadlineMs }),
+    client.requestEvidence(requestId, { deadlineMs }),
+  ];
+  const other = client.requestEvidence(requestId, {
+    deadlineMs: deadlineMs + 1,
+  });
+  const unbounded = client.requestEvidence(requestId);
+  assert.equal(calls, 3, "short work never joins a longer or unbounded flight");
+  releases.splice(0).forEach((release) => release());
+  assert.deepEqual(await Promise.all([...same, other, unbounded]), [
+    minimal,
+    minimal,
+    minimal,
+    minimal,
+  ]);
+  const again = client.requestEvidence(requestId, { deadlineMs });
+  assert.equal(calls, 4, "completed flights are not reused as evidence");
+  releases.splice(0).forEach((release) => release());
+  await again;
+  // Expiry is evaluated at invocation, not when the client was constructed.
+  t.mock.method(Date, "now", () => deadlineMs);
+  await assert.rejects(
+    client.requestEvidence(requestId, { deadlineMs }),
+    (error: unknown) =>
+      error instanceof RelayClientError && error.code === "timeout",
+  );
+  assert.equal(calls, 4);
+});
+
 test("Requests v3 uses exact ID, no child search/private data, and strips unrelated fields", async () => {
   let calls = 0;
   const client = new RelayClient({

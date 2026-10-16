@@ -98,6 +98,9 @@ const maybeTime = z.preprocess(
   z.string().datetime().nullable().optional(),
 );
 export const nativeHip4OrderReadSchema = z.object({
+  // Original action recovery through the ordinary native order session. This
+  // is an owned identifier, not a signature or another submit authorization.
+  actionId: z.string().uuid().optional(),
   // Owned original action identity for an interactive cancel. No signature or
   // private preparation snapshot is exposed. Optional during client rollout.
   cloid: z
@@ -120,6 +123,28 @@ export const nativeHip4OrderReadSchema = z.object({
     .regex(/^(0|[1-9]\d*)(\.\d+)?$/)
     .nullable(),
   fullQuantityObserved: z.boolean(),
+  // Additive: historical rows are repaired by ordinary observation, not a
+  // migration/backfill that infers execution amounts from requested size.
+  executionSummary: z
+    .object({
+      version: z.literal(1),
+      source: z.literal("hyperliquid_user_fills"),
+      quantity: z.string().regex(/^(0|[1-9]\d*)(\.\d+)?$/),
+      grossNotional: z.string().regex(/^(0|[1-9]\d*)(\.\d+)?$/),
+      fee: z
+        .string()
+        .regex(/^-?(0|[1-9]\d*)(\.\d+)?$/)
+        .nullable(),
+      feeToken: z.literal("USDC").nullable(),
+      netQuoteCash: z
+        .string()
+        .regex(/^-?(0|[1-9]\d*)(\.\d+)?$/)
+        .nullable(),
+      executionCount: z.number().int().positive(),
+      fullQuantityObserved: z.boolean(),
+    })
+    .nullable()
+    .optional(),
   // Even an exact terminal order status does not prove complete fill history.
   fillHistoryCoverage: z.literal("not_asserted"),
 });

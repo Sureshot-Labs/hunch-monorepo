@@ -36,6 +36,7 @@ import {
   canonicalLocationKey,
   deduplicateObservedAssets,
   stableWalletAssetLocationIdentity,
+  stableVenueAssetLocationId,
   stableOpaqueId,
   stableWalletOpaqueId,
 } from "./canonical.js";
@@ -51,7 +52,6 @@ import {
   type Hip4AccountValue,
 } from "./hip4-account-value.js";
 import { HYPERCORE_MAINNET_USDC } from "../funding/domain/hypercore-identity.js";
-import { sameAsset } from "../funding/domain/asset-identity.js";
 import {
   ExistingFactsOwnershipResolver,
   type ExistingVenueBindingFact,
@@ -250,10 +250,11 @@ export function buildAccountValueObservation(inputs: {
     kind: locationKind,
     locationId:
       walletAssetIdentity?.locationId ??
-      stableOpaqueId(
-        "location",
-        `${inputs.accountId}:${locationKind}:${address}:${canonicalAssetKey(inputs.entry.asset)}`,
-      ),
+      stableVenueAssetLocationId({
+        accountId: inputs.accountId,
+        address,
+        asset: inputs.entry.asset,
+      }),
     accountId: inputs.accountId,
     asset: inputs.entry.asset,
     details: {
@@ -864,7 +865,22 @@ export async function buildAccountValueReadModel(inputs: {
     ),
     ...snapshotDebits,
   ];
-  if (snapshotDebits.length)
+  const invalidSnapshotSourceIds = fundingInvalidSourceComponentIds(
+    inputs.userId,
+    snapshotDebits,
+    valuedAssets,
+  );
+  positionErrors.push(
+    ...fundingMovementErrors(snapshotDebits).map((error) => ({
+      ...error,
+      collectorId: "funding-source-debits",
+    })),
+  );
+  if (
+    snapshotDebits.some(
+      (fact) => !fact.observationError && fact.amount.raw !== "0",
+    )
+  )
     positionErrors.push({
       collectorId: "funding-source-debits",
       code: "source_snapshot_conservatively_adjusted",
@@ -878,19 +894,15 @@ export async function buildAccountValueReadModel(inputs: {
     fundingFacts.refundBalanceChanges,
     valuedAssets,
   );
-  // P2 currently collects spot, not a separate perps balance. Do not promise
-  // that retrying that collector can cover a different physical account.
+  // A failed/missing read can recover. Only an explicitly unsupported physical
+  // mode/inventory is nonretryable; absence is never proof of incompatibility.
   const unsupportedRefundOperations = new Set(
     fundingFacts.refundBalanceChanges
       .filter(
         (change) =>
           change.asset.networkId === "hyperliquid:mainnet" &&
           change.nativeDestinationDex === "" &&
-          !valuedAssets.some(
-            (component) =>
-              component.location.locationId === change.locationId &&
-              sameAsset(component.amount.asset, change.asset),
-          ),
+          hip4.unsupportedPerpsLocationIds?.includes(change.locationId),
       )
       .map((change) => change.operationId),
   );
@@ -913,14 +925,17 @@ export async function buildAccountValueReadModel(inputs: {
   const projectedAssets = [
     ...applyFundingSourceDebitSuppression(valuedAssets, sourceDebits).map(
       (component) =>
-        invalidatedRefundComponentIds.has(component.componentId)
+        invalidatedRefundComponentIds.has(component.componentId) ||
+        invalidSnapshotSourceIds.has(component.componentId)
           ? {
               ...component,
               estimatedUsd: null,
               valuationEligibility: "unpriced" as const,
               observationFreshness: "unknown" as const,
               observationError: {
-                code: "refund_balance_refresh_required",
+                code: invalidSnapshotSourceIds.has(component.componentId)
+                  ? "funding_source_evidence_invalid"
+                  : "refund_balance_refresh_required",
                 retryable: true,
               },
             }
@@ -978,7 +993,7 @@ export async function buildAccountValueReadModel(inputs: {
   );
   const invalidSourceComponentIds = fundingInvalidSourceComponentIds(
     inputs.userId,
-    fundingFacts.inTransit,
+    [...fundingFacts.inTransit, ...snapshotDebits],
     valuedAssets,
   );
   const nativeHolds = await collectHip4CashHoldAdjustments({

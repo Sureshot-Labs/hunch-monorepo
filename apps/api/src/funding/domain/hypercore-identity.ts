@@ -3,6 +3,13 @@ import type { AssetRef } from "./types.js";
 /** Exact registered native executor; no EVM or delegated authority implied. */
 export const RELAY_HYPERCORE_EXECUTOR = "relay_hypercore_native_v1";
 export const HYPERCORE_SPOT_LOCATION_PATTERN = "hypercore-spot-usdc-v1";
+export const HYPERCORE_PERPS_LOCATION_PATTERN = "hypercore-perps-usdc-v1";
+
+export function hypercoreSourceLocationPattern(dex: "spot" | ""): string {
+  return dex === "spot"
+    ? HYPERCORE_SPOT_LOCATION_PATTERN
+    : HYPERCORE_PERPS_LOCATION_PATTERN;
+}
 /** Relay's 16-byte zero selector means native perps USDC. It is not a
  * 32-byte protocol-order currency encoding and never a cash asset ID. */
 export const RELAY_HYPERCORE_PERPS_CURRENCY = `0x${"0".repeat(32)}`;

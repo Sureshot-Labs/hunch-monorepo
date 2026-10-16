@@ -50,7 +50,7 @@ test("HIP navigation preserves environment, market and side without trade author
       `${market.event_id}|${market.id}|${side === "YES" ? "Y" : "N"}`,
     );
     assert.equal(button.text, "Open market in Hunch");
-    assert.equal(isTelegramAppHandoffV2TradeVenue("hyperliquid"), false);
+    assert.equal(isTelegramAppHandoffV2TradeVenue("hyperliquid"), true);
     assert.deepEqual(
       buttons
         .filter((button) => "callback_data" in button)

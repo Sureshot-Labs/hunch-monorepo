@@ -322,6 +322,8 @@ function receiptFromRow(
         ? false
         : row.receipt_action_match,
     failureFinalized: row.receipt_evidence?.failureFinalized === true,
+    physicalIdentityConflict:
+      row.receipt_evidence?.handoffPhysicalIdentityConflict === true,
   };
 }
 

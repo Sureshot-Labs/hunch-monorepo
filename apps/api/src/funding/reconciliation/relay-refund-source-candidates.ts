@@ -3,6 +3,7 @@ import { isRecord } from "../../lib/type-guards.js";
 import { sameAccountAddress, sameAsset } from "../domain/asset-identity.js";
 import { assetLocationSchema, moneySchema } from "../domain/schemas.js";
 import { readFundingRefundContract } from "../domain/refund-settlement.js";
+import { readCommittedFundingIdentity } from "../domain/committed-economic-identity.js";
 import type { OwnedRouteCanonicalDestinationEvent } from "./owned-route-destination-observer.js";
 
 export type RefundSourceCursor = Readonly<{ createdAt: string; id: string }>;
@@ -13,6 +14,9 @@ export type RefundSourceCandidateRow = Readonly<{
   segment_id: string | null;
   user_id: string;
   operation_user_id: string | null;
+  operation_plan_kind?: string | null;
+  operation_destination_target_snapshot?: unknown;
+  operation_source_snapshot?: unknown;
   location_id: string;
   network_id: string;
   asset_id: string;
@@ -22,6 +26,8 @@ export type RefundSourceCandidateRow = Readonly<{
   provider_id: string | null;
   source_snapshot: unknown;
   quoted_input: unknown;
+  destination_target_snapshot?: unknown;
+  quoted_min_output?: unknown;
   refund_location_snapshot: unknown;
   provider_quote_ref_lookup_hmac: string | null;
   lookup_key_version: number | null;
@@ -35,30 +41,25 @@ export type RefundSourceCandidateRow = Readonly<{
  * No mutable attempt, status, finality or quote-expiry predicate belongs here.
  * Every immutable envelope candidate must survive until the final current-fact
  * check, even when it looked settled or unstarted on an earlier page. */
-function sourcePageSql(resumed: boolean): string {
-  return `with source_page as materialized (
-    select reservation_row.*
-    from balance_reservations reservation_row
-    where reservation_row.user_id=$1::uuid
-      and reservation_row.economic_role='source_input'
-      and reservation_row.created_at <= $2::timestamptz
-      ${resumed ? "and (reservation_row.created_at,reservation_row.id) < ($4::timestamptz,$5::uuid)" : ""}
-    order by reservation_row.created_at desc,reservation_row.id desc
-    limit $3
-  )
+function hydrateSourceSql(sourceSelection: string): string {
+  return `with source_page as materialized (${sourceSelection})
   select source_page.id as reservation_id,
     to_char(source_page.created_at at time zone 'UTC',
       'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as reservation_created_at,
     source_page.operation_id, source_page.segment_id, source_page.user_id,
     operation_row.user_id as operation_user_id,
+    operation_row.plan_kind as operation_plan_kind,
+    operation_row.source_snapshot as operation_source_snapshot,
+    operation_row.destination_target_snapshot as operation_destination_target_snapshot,
     source_page.location_id, source_page.network_id, source_page.asset_id,
     source_page.asset_decimals, source_page.raw_amount, source_page.mode,
     segment_row.provider_id, segment_row.source_snapshot, segment_row.quoted_input,
+    segment_row.destination_target_snapshot, segment_row.quoted_min_output,
     segment_row.refund_location_snapshot,
     segment_row.provider_quote_ref_lookup_hmac, segment_row.lookup_key_version
   from source_page
   left join lateral (
-    select user_id from funding_operations
+    select user_id,plan_kind,source_snapshot,destination_target_snapshot from funding_operations
     where id=source_page.operation_id limit 1
   ) operation_row on true
   left join lateral (
@@ -68,8 +69,49 @@ function sourcePageSql(resumed: boolean): string {
   ) segment_row on true
   order by source_page.created_at desc,source_page.id desc`;
 }
+function sourcePageSql(resumed: boolean): string {
+  return hydrateSourceSql(`
+    select reservation_row.*
+    from balance_reservations reservation_row
+    where reservation_row.user_id=$1::uuid
+      and reservation_row.economic_role='source_input'
+      and reservation_row.created_at <= $2::timestamptz
+      ${resumed ? "and (reservation_row.created_at,reservation_row.id) < ($4::timestamptz,$5::uuid)" : ""}
+    order by reservation_row.created_at desc,reservation_row.id desc
+    limit $3`);
+}
 export const REFUND_SOURCE_FIRST_PAGE_SQL = sourcePageSql(false);
 export const REFUND_SOURCE_NEXT_PAGE_SQL = sourcePageSql(true);
+export const REFUND_SOURCE_EXACT_SQL = hydrateSourceSql(`
+  select reservation_row.* from balance_reservations reservation_row
+  where reservation_row.id=$2::uuid and reservation_row.user_id=$1::uuid
+    and reservation_row.economic_role='source_input'`);
+
+export type RefundSourceCandidateIdentity = Readonly<{
+  userId: string;
+  operationId: string;
+  segmentId: string;
+  reservationId: string;
+}>;
+
+/** Rehydrate the exact enumerated identity under the facts-page guard. Never
+ * bind a newly read revision to an old envelope from an earlier source page. */
+export async function loadRefundSourceCandidate(
+  db: Pick<PoolClient, "query">,
+  input: RefundSourceCandidateIdentity,
+): Promise<RefundSourceCandidateRow | null> {
+  const { rows } = await db.query<RefundSourceCandidateRow>(
+    REFUND_SOURCE_EXACT_SQL,
+    [input.userId, input.reservationId],
+  );
+  const row = rows[0];
+  return row &&
+    row.operation_id === input.operationId &&
+    row.segment_id === input.segmentId &&
+    row.operation_user_id === input.userId
+    ? row
+    : null;
+}
 
 export type RefundSourceEnvelopeMatch =
   | Readonly<{ kind: "unrelated" }>
@@ -80,6 +122,17 @@ export type RefundSourceEnvelopeMatch =
       reservationId: string;
     }>;
 
+/** Protocol support, not a rollout flag. Native/Solana receive events cannot
+ * be classified by this EVM refund-source reader and must not scan its history. */
+export function supportsRefundSourceEnvelope(
+  event: Pick<OwnedRouteCanonicalDestinationEvent, "networkId" | "asset">,
+): boolean {
+  return (
+    ["evm:8453", "evm:137"].includes(event.networkId) &&
+    event.asset.networkId === event.networkId
+  );
+}
+
 /** This establishes only a POSSIBLE immutable relationship, never a refund or
  * an external deposit. In particular, the candidate may have only an approval
  * or no attempt at all; callers must check exact bound money-moving facts. */
@@ -89,11 +142,7 @@ export function matchRefundSourceEnvelope(
   row: RefundSourceCandidateRow,
 ): RefundSourceEnvelopeMatch {
   const unrelated: RefundSourceEnvelopeMatch = { kind: "unrelated" };
-  if (
-    row.user_id !== userId ||
-    !["evm:8453", "evm:137"].includes(event.networkId) ||
-    event.asset.networkId !== event.networkId
-  )
+  if (row.user_id !== userId || !supportsRefundSourceEnvelope(event))
     return unrelated;
   const snapshot = row.refund_location_snapshot;
   if (!isRecord(snapshot) || !Object.hasOwn(snapshot, "refundEvidenceContract"))
@@ -157,10 +206,16 @@ export function matchRefundSourceEnvelope(
     !source.success ||
     !amount.success ||
     !contract?.supported ||
-    source.data.accountId !== userId ||
-    locations.some(
-      (location) => location.success && location.data.accountId !== userId,
-    ) ||
+    !readCommittedFundingIdentity({
+      currentOwnerUserId: userId,
+      operationSourceSnapshot: row.operation_source_snapshot,
+      accountIds: [
+        source.data.accountId,
+        ...locations.flatMap((location) =>
+          location.success ? [location.data.accountId] : [],
+        ),
+      ],
+    }) ||
     typeof source.data.details.address !== "string" ||
     !sameAsset(source.data.asset, amount.data.asset) ||
     !sameAsset(source.data.asset, event.asset) ||

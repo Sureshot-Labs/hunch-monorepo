@@ -529,7 +529,10 @@ console.log(
     ],
   );
   const fundingClaimInput = {
-    assertCurrentScope: async () => true,
+    assertCurrentScope: {
+      lockAuthority: async () => {},
+      validate: async () => true,
+    },
     binding: { handoffId, planFingerprint },
     canonicalFingerprint: digest("claim-at-expiry-trade"),
     consumerIntent: buildFundingTradeConsumerIntent({

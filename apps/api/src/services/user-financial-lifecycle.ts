@@ -38,6 +38,9 @@ export async function fetchUserFinancialLifecycleSummary(
   db: DbQuery,
   userIds: readonly string[],
 ): Promise<UserFinancialLifecycleSummary> {
+  // Canonical receive refund-scan checkpoints inherit session ownership.
+  // The receive_evidence guard below already retains that identity on account
+  // deletion/merge; no raw identity/provider data is copied into their payload.
   if (userIds.length === 0) {
     return {
       activeMovement: false,

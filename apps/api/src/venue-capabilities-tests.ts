@@ -21,10 +21,11 @@ test("admin draft capabilities exactly match runtime capabilities for every venu
       const policy = structuredClone(DEFAULT_VENUE_LIFECYCLE_POLICY);
       policy.venues[venue].lifecycle = lifecycle;
       const actual = getVenueLifecycleCapabilities(policy, venue);
+      assert.ok(actual);
       assert.deepEqual(matrix[venue][lifecycle], actual);
       assert.ok(venueLifecycleCapabilitiesSchema.safeParse(actual).success);
       if (lifecycle === "unreleased")
-        assert.ok(Object.values(actual!).every((value) => !value));
+        assert.ok(Object.values(actual).every((value) => !value));
     }
   }
   assert.equal(matrix.polymarket.active.increaseExposure, true);
@@ -38,10 +39,24 @@ test("admin draft capabilities exactly match runtime capabilities for every venu
     "increaseExposure",
     "reduceExposure",
     "cancel",
-    "redeem",
     "fundTrading",
     "fundMaintenance",
     "walletWithdrawal",
+  ] as const) {
+    assert.equal(matrix.hyperliquid.active[field], true, field);
+    assert.equal(
+      matrix.hyperliquid["exit-only"][field],
+      !["increaseExposure", "fundTrading"].includes(field),
+      field,
+    );
+    assert.equal(matrix.hyperliquid.unreleased[field], false, field);
+  }
+  assert.deepEqual(DEFAULT_VENUE_LIFECYCLE_POLICY.venues.hyperliquid, {
+    lifecycle: "unreleased",
+    indexerMode: "off",
+  });
+  for (const field of [
+    "redeem",
     "automation",
     "signalSource",
     "signalDelivery",

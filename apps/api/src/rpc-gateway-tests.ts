@@ -24,6 +24,7 @@ const originalNow = Date.now;
 let rpcNow = originalNow();
 Date.now = () => rpcNow;
 const transactionHash = `0x${"11".repeat(32)}`;
+let receiptTransactionHash: unknown = transactionHash;
 const evmFrom = "0x1111111111111111111111111111111111111111";
 const evmTo = "0x2222222222222222222222222222222222222222";
 const solanaKeyA = "11111111111111111111111111111111";
@@ -75,6 +76,7 @@ try {
       };
     } else if (request.method === "eth_getTransactionReceipt") {
       result = {
+        transactionHash: receiptTransactionHash,
         status: "0x1",
         blockNumber: "0x10",
         blockHash: `0x${"22".repeat(32)}`,
@@ -152,8 +154,35 @@ try {
     transactionHash,
   });
   assert.equal(receipt?.succeeded, true);
+  assert.equal(receipt?.transactionHash, transactionHash);
   assert.equal(receipt?.blockNumber, 16);
   assert.equal(receipt?.logs.length, 1);
+  for (const wrongIdentity of [null, "not-a-hash", `0x${"ff".repeat(32)}`]) {
+    receiptTransactionHash = wrongIdentity;
+    await assert.rejects(
+      fetchEvmTransactionReceipt({
+        rpcUrl: "https://rpc.test/wrong-receipt-identity",
+        timeoutMs: 1_000,
+        maxAttempts: 1,
+        transactionHash,
+      }),
+      /receipt identity does not match/u,
+    );
+  }
+  receiptTransactionHash = undefined;
+  assert.equal(
+    (
+      await fetchEvmTransactionReceipt({
+        rpcUrl: "https://rpc.test/legacy-receipt-identity",
+        timeoutMs: 1_000,
+        maxAttempts: 1,
+        transactionHash,
+      })
+    )?.transactionHash,
+    undefined,
+    "legacy/synthetic omission remains unknown, never relabelled as the requested hash",
+  );
+  receiptTransactionHash = transactionHash;
   assert.equal(
     await fetchEvmBlockHash({
       rpcUrl: "https://rpc.test/evm",

@@ -1,8 +1,17 @@
 import { z } from "zod";
 import type { Pool } from "@hunch/infra";
-import { hypercoreSpotAccountLocation } from "../../account-value/canonical.js";
-import { FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL } from "../../account-value/funding-movement-feed.js";
-import { readHip4FinancialObservation } from "../../services/hip4-financial-observation.js";
+import {
+  hypercoreSpotAccountLocation,
+  hypercorePerpsRefundLocation,
+} from "../../account-value/canonical.js";
+import {
+  loadFundingPhysicalNativeSnapshotDebits,
+  FundingSnapshotDebitEvidenceError,
+} from "../../account-value/funding-snapshot-debits.js";
+import {
+  readHip4FinancialObservation,
+  readHip4PerpsFinancialObservation,
+} from "../../services/hip4-financial-observation.js";
 import {
   hypercoreLocationDex,
   isHypercoreMainnetUsdc,
@@ -34,7 +43,10 @@ export async function readNativeSendCapacity(
   pool: Pick<Pool, "query">,
   address: string,
   fetcher?: typeof fetch,
+  sourceDex: "spot" | "" = "spot",
 ): Promise<NativeSpotCapacity> {
+  if (sourceDex === "")
+    return readHip4PerpsFinancialObservation(pool, address, fetcher);
   const read = await readHip4FinancialObservation(pool, address, fetcher);
   return {
     availableRaw: read.cash.availableRaw,
@@ -62,7 +74,10 @@ export const NATIVE_SEND_RESERVATIONS_SQL = `select id,operation_id,segment_id,c
  * account for every subsequent Hunch debit/hold and reject an expired sample.
  * Never acquire another connection/perform provider IO while holding row locks. */
 export function nativeSendCapacityCheck(
-  read: (address: string) => Promise<NativeSpotCapacity>,
+  read: (
+    address: string,
+    sourceDex: "spot" | "",
+  ) => Promise<NativeSpotCapacity>,
 ): NativeFundingCapacityCheck {
   return async (client, input) => {
     const source = z
@@ -74,14 +89,17 @@ export function nativeSendCapacityCheck(
       .parse(input.sourceSnapshot);
     const location = source.location as AssetLocation;
     const binding = input.pair.validated.binding;
-    const canonical = hypercoreSpotAccountLocation({
+    const locationInput = {
       accountId: input.userId,
       address: binding.owner,
       controllerWalletId: input.profile.walletId,
-    }).location;
+    };
+    const canonical =
+      binding.sourceDex === "spot"
+        ? hypercoreSpotAccountLocation(locationInput).location
+        : hypercorePerpsRefundLocation(locationInput);
     if (
-      binding.sourceDex !== "spot" ||
-      hypercoreLocationDex(location) !== "spot" ||
+      hypercoreLocationDex(location) !== binding.sourceDex ||
       !isHypercoreMainnetUsdc(location.asset) ||
       location.accountId !== input.userId ||
       location.locationId !== canonical.locationId ||
@@ -101,7 +119,7 @@ export function nativeSendCapacityCheck(
     });
     let capacity: NativeSpotCapacity;
     try {
-      capacity = await read(binding.owner);
+      capacity = await read(binding.owner, binding.sourceDex);
     } catch {
       throw new FundingPersistenceError(
         "quote_invalidated",
@@ -146,21 +164,16 @@ export function nativeSendCapacityCheck(
         "quote_invalidated",
         "Native source reservation changed",
       );
-    const debits = await client.query<{ raw_amount: string }>(
-      FUNDING_NATIVE_SNAPSHOT_DEBITS_SQL,
-      [
-        input.userId,
-        JSON.stringify([
-          {
-            component_id: null,
-            location_id: location.locationId,
-            address: binding.owner.toLowerCase(),
-            asset_decimals: 8,
-            snapshot_at: capacity.observedAt,
-          },
-        ]),
-      ],
-    );
+    const debits = await loadFundingPhysicalNativeSnapshotDebits(
+      client,
+      input.userId,
+      location,
+      capacity.observedAt,
+    ).catch((error) => {
+      if (error instanceof FundingSnapshotDebitEvidenceError)
+        throw new FundingPersistenceError("quote_invalidated", error.message);
+      throw error;
+    });
     const otherCashHolds = await client.query<{
       raw_amount: string;
       asset_decimals: number;
@@ -175,13 +188,16 @@ export function nativeSendCapacityCheck(
         "quote_invalidated",
         "Native reservation asset precision changed",
       );
-    const tradeHolds = await readHip4OrderHoldRaw(
-      client,
-      input.userId,
-      binding.owner,
-      canonicalAssetId(location.asset),
-      capacity.observedAt,
-    );
+    const tradeHolds =
+      binding.sourceDex === "spot"
+        ? await readHip4OrderHoldRaw(
+            client,
+            input.userId,
+            binding.owner,
+            canonicalAssetId(location.asset),
+            capacity.observedAt,
+          )
+        : 0n;
     const needed =
       BigInt(own[0].raw_amount) +
       tradeHolds +
@@ -189,7 +205,7 @@ export function nativeSendCapacityCheck(
         (sum, row) => sum + BigInt(row.raw_amount),
         0n,
       ) +
-      debits.rows.reduce((sum, row) => sum + BigInt(row.raw_amount), 0n);
+      debits.reduce((sum, row) => sum + BigInt(row.raw_amount), 0n);
     if (needed > BigInt(capacity.availableRaw) || expiresAt <= Date.now())
       throw new FundingPersistenceError(
         "quote_invalidated",

@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import type { RelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
+import { createFundingTransactionReferenceCodec } from "../execution/transaction-reference-codec.js";
 import { createOrReuseFundingReceiveSession } from "../persistence/funding-receive-session-repository.js";
 import { FundingReceiveSessionObserver } from "../receive/receive-session-observer.js";
+import { syntheticCanonicalAnchor } from "./recorded-role-observer-fixture.js";
 import type { OwnedRouteCanonicalDestinationEvent } from "../reconciliation/owned-route-destination-observer.js";
 import {
-  persistRefundCanonicalProofs,
   REFUND_CANONICAL_PAGE_SQL,
   type RefundWatchRow,
 } from "../reconciliation/relay-refund-canonical-watch.js";
+import { persistRefundCanonicalProofsFixture as persistRefundCanonicalProofs } from "./refund-canonical-effects-fixture.js";
 
 /** Real recorded reader -> receive persistence -> canonical watcher -> expired
  * session retry, inside the caller's disposable fixture/savepoint transaction. */
@@ -21,6 +24,7 @@ export async function verifyReceiveRecordedRefundPg(
     segmentId: string;
     event: OwnedRouteCanonicalDestinationEvent;
     now: Date;
+    referenceCodec: RelayReferenceCodec;
   },
 ) {
   await db.query("savepoint recorded_refund_receive");
@@ -37,7 +41,7 @@ export async function verifyReceiveRecordedRefundPg(
     const now = new Date(
       Math.min(input.now.getTime(), event.observedAt.getTime()) - 1000,
     );
-    const late = new Date(now.getTime() + 60_000);
+    const late = new Date(now.getTime() + 180_000);
     const target = {
       receiveTargetId: destinationOptionId,
       networkId: event.networkId,
@@ -70,7 +74,7 @@ export async function verifyReceiveRecordedRefundPg(
             destinationAddress: event.destinationAddress,
             requestedAmount: null,
             amountSemantics: "minimum",
-            expiresAt: new Date(now.getTime() + 15_000).toISOString(),
+            expiresAt: new Date(now.getTime() + 120_000).toISOString(),
             safeInstructions: ["Test only"],
           },
         },
@@ -108,13 +112,20 @@ export async function verifyReceiveRecordedRefundPg(
       policyRevision: "refund-test",
       ownershipRevision: "refund-test",
       now,
-      expiresAt: new Date(now.getTime() + 15_000),
-      observeUntil: new Date(now.getTime() + 30_000),
+      expiresAt: new Date(now.getTime() + 120_000),
+      observeUntil: new Date(now.getTime() + 150_000),
     });
     let scans = 0;
     const observer = new FundingReceiveSessionObserver({
+      inspectCanonicalAnchor: syntheticCanonicalAnchor,
       // No recorded-refund injection: reads the actual receipt written by the
       // common writer. Only chain scanning is replaced by exact fixture facts.
+      relayReferenceCodec: input.referenceCodec,
+      transactionReferenceCodec: createFundingTransactionReferenceCodec({
+        encryptionKey: Buffer.alloc(32, 7),
+        lookupHmacKey: "offline-recorded-refund-receive-key-32chars",
+        keyVersion: 1,
+      }),
       scanCanonicalEvents: async (variants) => {
         const variant = variants.find((entry) => entry.variantId === variantId);
         if (!variant) return null;
@@ -171,8 +182,26 @@ export async function verifyReceiveRecordedRefundPg(
       assert.equal(result.retryableErrors, 0);
       assert.equal(result.receiptsRecorded, 0);
     };
-    await scan(1000);
+    let offset = 1000;
+    const drain = async (expected: string, initialOffset: number) => {
+      for (let tick = 1; tick <= 60; tick++) {
+        if ((await physical()).allocation_error_code === expected) return;
+        offset = initialOffset + tick * 1000;
+        const result = await observer.pollKnownCanonicalRetryBatch(pool, {
+          limit: 100,
+          retryDelayMs: 1000,
+          now: new Date(now.getTime() + offset),
+        });
+        assert.equal(result.retryableErrors, 0);
+        assert.equal(result.receiptsRecorded, 0);
+      }
+      assert.fail(
+        `real bounded role enumeration did not converge: ${JSON.stringify(await physical())}`,
+      );
+    };
+    await scan(offset);
     assert.equal(scans, 1);
+    await drain("internal_exact_refund_suppressed", offset);
     assert.equal(
       (await physical()).allocation_error_code,
       "internal_exact_refund_suppressed",
@@ -182,13 +211,13 @@ export async function verifyReceiveRecordedRefundPg(
       (
         await persistRefundCanonicalProofs(db, {
           operationId: input.operationId,
-          now: new Date(now.getTime() + 2000),
+          now: new Date(now.getTime() + offset + 1000),
           rows: [{ row: stored, proof: { kind: "reorged" } }],
         })
       ).changed,
       1,
     );
-    await scan(3000);
+    await scan(offset + 2000);
     const pending = await physical();
     assert.equal(
       pending.allocation_error_code,
@@ -206,8 +235,16 @@ export async function verifyReceiveRecordedRefundPg(
     assert.equal(retry.retryableErrors, 0);
     assert.equal(retry.receiptsRecorded, 0);
     assert.ok((await physical()).classification_retry_at > late);
+    // Re-observation can leave this earlier role state just before A reorgs.
+    // It must not trap both the receive and recorded-refund repair paths.
+    await db.query(
+      `update funding_receive_canonical_events set allocation_error_code='exact_refund_correlation_pending'
+      where network_id=$1 and tx_hash=$2 and event_index=$3`,
+      [event.networkId, event.transactionHash, event.eventIndex],
+    );
     // Real remine changes the anchor while the receive event is pending. The
-    // narrow DB trigger must permit this and must preserve the pending reason.
+    // narrow DB trigger permits this and preserves the independent receive
+    // retry reason/token so its own worker can acknowledge/clear that lease.
     const remine = {
       ledgerHeight: (BigInt(event.ledgerHeight) + 10n).toString(),
       blockHash: `0x${"45".repeat(32)}`,
@@ -234,6 +271,10 @@ export async function verifyReceiveRecordedRefundPg(
     });
     assert.equal(repaired.retryableErrors, 0);
     assert.equal(repaired.receiptsRecorded, 0);
+    await drain(
+      "internal_exact_refund_suppressed",
+      late.getTime() - now.getTime() + 1000,
+    );
     assert.equal(scans, 2, "expired repair never scans new transfers");
     const final = await physical();
     assert.equal(

@@ -9,6 +9,7 @@ import { buildPolymarketPreRouteHandoffSteps } from "../../../funding-providers/
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
 
 import { tx } from "@hunch/infra";
+import { readFundingClassificationRevision } from "../../persistence/funding-classification-revisions.js";
 import { closeExpiredSolanaPreparationsInTransaction } from "../../execution/solana-preparation.js";
 import type { PoolClient } from "pg";
 
@@ -55,6 +56,7 @@ import {
   upsertFundingProviderRequestInTransaction,
 } from "../../persistence/funding-evidence-repository.js";
 import { polymarketRelayerTransactionReference } from "../../execution/polymarket-deposit-wallet-handoff.js";
+import { createFundingTransactionReferenceCodec } from "../../execution/transaction-reference-codec.js";
 import { inspectEvmTarget } from "../../execution/step-receipt-reconciler.js";
 import { TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID } from "../../execution/delegated-funding-profile-ids.js";
 import {
@@ -2423,8 +2425,9 @@ async function testPartialRelayReceiptSettlement(): Promise<void> {
         finalizedAt: now,
       },
     });
-    for (let replay = 0; replay < 2; replay++) {
-      await reconcileRelayDestinationReceipts(
+    let publications = 0;
+    for (let tick = 0; tick < 100 && publications < 2; tick++) {
+      const publication = await reconcileRelayDestinationReceipts(
         pool,
         {
           operationId,
@@ -2432,6 +2435,16 @@ async function testPartialRelayReceiptSettlement(): Promise<void> {
           transactionHashes: [txHash],
           now,
           referenceCodec: { fingerprint },
+          transactionReferenceCodec: createFundingTransactionReferenceCodec({
+            encryptionKey: Buffer.alloc(32, 31),
+            lookupHmacKey: "offline-partial-settlement-codec-key",
+            keyVersion: 1,
+          }),
+          work: {
+            progressToken: crypto.randomUUID(),
+            deadlineMs: Date.now() + 60_000,
+            limit: 1,
+          },
         },
         async () => [
           {
@@ -2448,7 +2461,13 @@ async function testPartialRelayReceiptSettlement(): Promise<void> {
           },
         ],
       );
+      if (!publication.roleScanPending) publications++;
     }
+    assert.equal(
+      publications,
+      2,
+      "ordinary role pages and replay finish before reduction",
+    );
     const result = await reduceFundingOperation(pool, { operationId, now });
     assert.equal(
       result.finalState.status,
@@ -5879,6 +5898,11 @@ async function testTerminalFundingMergeLifecycle(): Promise<void> {
       `,
       [committed.operation.id],
     );
+    const beforeMergeRevision = await readFundingClassificationRevision(pool, {
+      operationId: committed.operation.id,
+      userId: sourceId,
+    });
+    assert.ok(beforeMergeRevision);
     const result = await mergeUsers(
       await readMergeUser(sourceId),
       await readMergeUser(targetId),
@@ -5891,6 +5915,24 @@ async function testTerminalFundingMergeLifecycle(): Promise<void> {
     assert.equal(result.summary.fundingDestinationsMoved, 1);
     assert.equal(result.summary.fundingRouteObservationsMoved, 1);
     assert.equal(result.summary.sourceUserDeleted, 1);
+
+    assert.equal(
+      await readFundingClassificationRevision(pool, {
+        operationId: committed.operation.id,
+        userId: sourceId,
+      }),
+      null,
+    );
+    const afterMergeRevision = await readFundingClassificationRevision(pool, {
+      operationId: committed.operation.id,
+      userId: targetId,
+    });
+    assert.ok(afterMergeRevision);
+    assert.ok(
+      BigInt(afterMergeRevision.revision) >
+        BigInt(beforeMergeRevision.revision),
+      "actual merge with deferred ownership FKs invalidates prior-owner facts",
+    );
 
     const operation = await pool.query<{
       support_metadata: Record<string, unknown>;
@@ -5937,6 +5979,15 @@ async function testTerminalFundingMergeLifecycle(): Promise<void> {
       [destination.destination.id],
     );
     await cleanupCommittedOperation(committed.operation.id, quote.id, targetId);
+    assert.ok(
+      (
+        await pool.query(
+          "select revision from funding_classification_revisions where operation_id=$1",
+          [committed.operation.id],
+        )
+      ).rowCount,
+      "deletion retains the UUID-only classification tombstone",
+    );
     await pool.query("delete from users where id = $1", [sourceId]);
   }
 }
@@ -7266,7 +7317,10 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     } as const;
     const handoffFundingClaimInput = {
       ...tradeClaimInput,
-      assertCurrentScope: async () => true,
+      assertCurrentScope: {
+        lockAuthority: async () => {},
+        validate: async () => true,
+      },
       binding: {
         handoffId,
         planFingerprint: handoffPlanFingerprint,
@@ -7379,6 +7433,37 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
     ]);
     assert.equal(releasedPrebroadcastReservation.rows[0]?.state, "released");
     await client.query("rollback to savepoint expired_prebroadcast_claim");
+    const insertOwnershipConflict = () =>
+      client.query(
+        `insert into funding_step_receipt_observations
+       (operation_id,step_id,attempt_id,network_id,status,action_match,ledger_height,
+        block_hash,canonical,failure_code,evidence,first_seen_at,observed_at,finalized_at)
+       values($1,$2,$3,$4,'finalized',true,'100',$5,true,
+        'funding_physical_event_ownership_conflict',
+        '{"handoffPhysicalIdentityConflict":true}'::jsonb,now(),now(),now())`,
+        [
+          committedB.operation.id,
+          succeededStepId,
+          succeededAttempt.id,
+          ASSET.networkId,
+          hash("ownership-block"),
+        ],
+      );
+    await client.query("savepoint ownership_conflict_prevents_submission");
+    await insertOwnershipConflict();
+    await assert.rejects(
+      markFundingTradeAttemptSubmissionStartedInTransaction(client, {
+        userId: userB,
+        operationId: committedB.operation.id,
+        reservationId: reservationBId,
+        attemptId: tradeClaim.attempt.id,
+        claimToken: reclaimedTradeClaim.attempt.claimToken,
+      }),
+      /trade submission claim is no longer ready/,
+    );
+    await client.query(
+      "rollback to savepoint ownership_conflict_prevents_submission",
+    );
     const startedTrade =
       await markFundingTradeAttemptSubmissionStartedInTransaction(client, {
         userId: userB,
@@ -7388,6 +7473,46 @@ async function testTransactionalPersistenceContracts(): Promise<void> {
         claimToken: reclaimedTradeClaim.attempt.claimToken,
       });
     assert.equal(startedTrade.state, "submission_started");
+    await client.query("savepoint ownership_conflict_consumer_reconciliation");
+    await insertOwnershipConflict();
+    // This is the existing consumer write, not a new send or a synthetic
+    // lifecycle-only assertion. A late source conflict must retain the real
+    // execution and consume its reservation without reopening the route.
+    await storeExecutionInTransaction(client, {
+      userId: userB,
+      walletAddress: "0x00000000000000000000000000000000000000b1",
+      venue: "polymarket",
+      unifiedMarketId: marketId,
+      side: "BUY",
+      status: "confirmed",
+      txSignature: tradeExecutionReference,
+      fundingReservation: {
+        operationId: committedB.operation.id,
+        reservationId: reservationBId,
+      },
+      fundingTradeAttemptId: tradeClaim.attempt.id,
+    });
+    const conflictConsumer = await client.query(
+      `select operation_row.status,operation_row.error_code,operation_row.recovery_mode,
+        operation_row.support_metadata->>'consumerResolution' as consumer_resolution,
+        reservation_row.state as reservation_state,attempt_row.state as attempt_state
+       from funding_operations operation_row
+       join balance_reservations reservation_row on reservation_row.id=$2
+       join funding_trade_attempts attempt_row on attempt_row.id=$3
+       where operation_row.id=$1`,
+      [committedB.operation.id, reservationBId, tradeClaim.attempt.id],
+    );
+    assert.deepEqual(conflictConsumer.rows[0], {
+      status: "recovery_required",
+      error_code: "funding_physical_event_ownership_conflict",
+      recovery_mode: "manual_review",
+      consumer_resolution: "consumed_by_trade",
+      reservation_state: "consumed",
+      attempt_state: "accepted",
+    });
+    await client.query(
+      "rollback to savepoint ownership_conflict_consumer_reconciliation",
+    );
     await client.query("savepoint ambiguous_attempt_survives_expiry");
     const operationBeforeTradeEvidence = await client.query<{
       version: number;
@@ -8741,20 +8866,21 @@ async function testTelegramAppHandoffV2DirectTradeBinding(): Promise<void> {
       status: "in_progress",
     });
     const binding = { handoffId, planFingerprint: fingerprint } as const;
-    const assertCurrentScope: TelegramAppHandoffV2ScopeAssertion = async (
-      sealed,
-    ) => {
-      assert.notEqual(
-        sealed.db,
-        client,
-        "the scope fence receives a query-only view, not reconnectable PoolClient",
-      );
-      const scopedIntent = await sealed.db.query<{ id: string }>(
-        "select id::text from telegram_trade_intents where id = $1::uuid",
-        [sealed.tradeIntentId],
-      );
-      assert.equal(scopedIntent.rows[0]?.id, sealed.tradeIntentId);
-      return true;
+    const assertCurrentScope: TelegramAppHandoffV2ScopeAssertion = {
+      lockAuthority: async () => {},
+      validate: async (sealed) => {
+        assert.notEqual(
+          sealed.db,
+          client,
+          "the scope fence receives a query-only view, not reconnectable PoolClient",
+        );
+        const scopedIntent = await sealed.db.query<{ id: string }>(
+          "select id::text from telegram_trade_intents where id = $1::uuid",
+          [sealed.tradeIntentId],
+        );
+        assert.equal(scopedIntent.rows[0]?.id, sealed.tradeIntentId);
+        return true;
+      },
     };
     const reconcileKeys = {
       orderHash: `0x${"ab".repeat(32)}`,

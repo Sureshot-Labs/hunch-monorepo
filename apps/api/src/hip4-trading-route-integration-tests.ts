@@ -10,11 +10,7 @@ import {
   jsonSchemaTransform,
 } from "fastify-type-provider-zod";
 import { Wallet } from "ethers";
-import {
-  DEFAULT_VENUE_LIFECYCLE_POLICY,
-  venueHasLifecycleCapability,
-  hip4Identity,
-} from "@hunch/shared";
+import { DEFAULT_VENUE_LIFECYCLE_POLICY, hip4Identity } from "@hunch/shared";
 import { createIntegrationTestPool } from "./test-database-target.js";
 import { hip4OrderTestFixture } from "./hip4-order-test-fixture.js";
 import { hip4FundedOrderTestFixture } from "./hip4-funded-order-test-fixture.js";
@@ -71,19 +67,6 @@ let reads = 0,
   posts = 0,
   failReads = false;
 let bookState: "fresh" | "stale" | "wrong_side" | "empty" = "fresh";
-const testCapability: typeof venueHasLifecycleCapability = (
-  policy,
-  _venue,
-  capability,
-) =>
-  venueHasLifecycleCapability(
-    {
-      ...policy,
-      venues: { ...policy.venues, polymarket: policy.venues.hyperliquid },
-    },
-    "polymarket",
-    capability,
-  );
 async function lifecycle(state: "active" | "exit-only" | "unreleased") {
   const value = structuredClone(DEFAULT_VENUE_LIFECYCLE_POLICY);
   value.venues.hyperliquid = { lifecycle: state, indexerMode: "off" };
@@ -122,6 +105,9 @@ const fetcher: typeof fetch = async (url, init) => {
   if (failReads)
     throw new Error("private-provider-url-and-secret-must-not-leak");
   if (body.user) assert.equal(body.user, wallet.address.toLowerCase());
+  if (body.type === "orderStatus")
+    return Response.json({ status: "unknownOid" });
+  if (body.type === "userFillsByTime") return Response.json([]);
   const outcome = Number(fixture.request.marketId.split(":").at(-1));
   const identity = hip4Identity("mainnet", outcome);
   const responses: Record<string, unknown> = {
@@ -185,7 +171,7 @@ const fetcher: typeof fetch = async (url, init) => {
 const dependencies = {
   pool,
   authorize: createAuthMiddleware(),
-  runtime: { fetcher, capabilityCheck: testCapability },
+  runtime: { fetcher },
 };
 registerHip4TradingRoutes(app, dependencies);
 registerHip4TradingRoutes(closedApp, { ...dependencies, runtime: { fetcher } });
@@ -281,6 +267,7 @@ try {
       );
   }
   assert.equal(reads, 0);
+  await lifecycle("unreleased");
   assert.equal(
     (
       await closedApp.inject({
@@ -291,7 +278,7 @@ try {
       })
     ).statusCode,
     409,
-    "production capability ceiling remains off even with active policy",
+    "ordinary unreleased lifecycle rejects before provider IO",
   );
   assert.equal(reads, 0);
   const marketRequest = {
@@ -335,6 +322,7 @@ try {
     ).statusCode,
     409,
   );
+  await lifecycle("active");
   assert.equal(
     (
       await post("/orders/market-quote", {
@@ -632,6 +620,77 @@ try {
   assert.equal(submitted.json().reconciliationRequired, true);
   assert.equal(submitted.json().replayed, false);
   assert.equal(posts, 1);
+  const beforeRecheck = reads;
+  for (const failed of [
+    await app.inject({
+      method: "POST",
+      url: "/orders/recheck",
+      payload: { actionId: prepared.actionId },
+    }),
+    await app.inject({
+      method: "POST",
+      url: "/orders/recheck",
+      headers: { ...headers, "x-csrf-token": "wrong" },
+      payload: { actionId: prepared.actionId },
+    }),
+    await app.inject({
+      method: "POST",
+      url: "/orders/recheck",
+      headers: {
+        authorization: `Bearer ${strangerToken}`,
+        "x-csrf-token": strangerSession.csrfToken,
+        "x-hunch-wallet": stranger.address,
+      },
+      payload: { actionId: prepared.actionId },
+    }),
+  ].entries())
+    assert.equal(failed[1].statusCode, [401, 403, 404][failed[0]]);
+  assert.equal(
+    reads,
+    beforeRecheck,
+    "unauthenticated/CSRF/foreign recheck never reaches a provider",
+  );
+  await resetBudget();
+  await pool.query(
+    "update hip4_order_submissions set reconcile_after='infinity' where action_id=$1",
+    [prepared.actionId],
+  );
+  const rechecked = await post("/orders/recheck", {
+    actionId: prepared.actionId,
+  });
+  assert.equal(rechecked.statusCode, 200, rechecked.body);
+  assert.ok(
+    reads > beforeRecheck,
+    "explicit owned recheck bypasses housekeeping and performs actual read-only observation",
+  );
+  assert.equal(posts, 1, "Check cannot send a second exchange request");
+  assert.equal(
+    (
+      await pool.query("select state from balance_reservations where id=$1", [
+        funding.reservationId,
+      ])
+    ).rows[0].state,
+    "active",
+    "unknownOid is not release authority",
+  );
+  await pool.query(
+    "update hip4_order_submissions set reconcile_lease_token=gen_random_uuid(),reconcile_lease_until=clock_timestamp()+interval '1 minute' where action_id=$1",
+    [prepared.actionId],
+  );
+  const leaseReads = reads;
+  assert.equal(
+    (await post("/orders/recheck", { actionId: prepared.actionId })).statusCode,
+    200,
+  );
+  assert.equal(
+    reads,
+    leaseReads,
+    "concurrent explicit check does not bypass a live lease",
+  );
+  await pool.query(
+    "update hip4_order_submissions set reconcile_lease_token=null,reconcile_lease_until=null where action_id=$1",
+    [prepared.actionId],
+  );
   const afterSubmit = reads;
   await lifecycle("unreleased");
   const submittedRecovery = await app.inject({ url: recoveryUrl, headers });

@@ -11,8 +11,21 @@ import {
   type FundingTradeExecutionPath,
 } from "../funding/persistence/funding-trade-attempt-repository.js";
 import type { FundingTradeConsumerIntent } from "../funding/persistence/funding-trade-consumer-intent.js";
+import {
+  buildFundingTradeConsumerIntent,
+  compareFundingTradeConsumerIntentToConfirmedBound,
+} from "../funding/persistence/funding-trade-consumer-intent.js";
+import { HYPERCORE_MAINNET_USDC } from "../funding/domain/hypercore-identity.js";
+import { lockFundingPolicyForTransaction } from "../funding/policies/funding-policy-sidecar.js";
 import { isRawAmount } from "../funding/domain/raw-amount.js";
-import type { TelegramAppHandoffV2TradeVenue } from "../services/telegram-app-handoff-v2-contract.js";
+import type { TelegramAppHandoffV2ConsumerVenue } from "../services/telegram-app-handoff-v2-contract.js";
+import {
+  parseTelegramAppHandoffNativeTrade,
+  telegramAppHandoffNativeTradeSchema,
+  sameTelegramAppHandoffNativeTrade,
+  telegramAppHandoffNativeRequestedAmounts,
+  type TelegramAppHandoffNativeTrade,
+} from "../services/telegram-app-handoff-native-trade.js";
 
 /**
  * Persistence boundary for a v2 Mini App direct trade.
@@ -34,14 +47,15 @@ export type TelegramAppHandoffV2DirectTradeSubmission = Readonly<{
    */
   action?: "buy" | "sell";
   /** The venue boundary determines whether the sealed minimum is enforceable. */
-  executionKind: "amm" | "clob";
+  executionKind: "amm" | "clob" | "hyperliquid_ioc";
+  nativeTrade?: TelegramAppHandoffNativeTrade;
   marketId: string;
   outcomeTokenId: string;
   receiveRaw: string;
   /** Normalized controller that authenticated and signed this web order. */
   signer: string;
   spendRaw: string;
-  venue: TelegramAppHandoffV2TradeVenue;
+  venue: TelegramAppHandoffV2ConsumerVenue;
 }>;
 
 export type TelegramAppHandoffV2DirectTradeOrder =
@@ -72,6 +86,12 @@ export type TelegramAppHandoffV2FundedTradeClaim = Readonly<{
  */
 export type TelegramAppHandoffV2DirectTradeReconcileKeys =
   | Readonly<{
+      tradeType: "hyperliquid";
+      actionId: string;
+      orderId: string;
+      cloid: string;
+    }>
+  | Readonly<{
       orderHash: string;
       tradeType: "clob";
     }>
@@ -95,19 +115,27 @@ export type TelegramAppHandoffV2DirectTradeRecoveryPayload = Readonly<
   Record<string, unknown>
 >;
 
-/** Revalidates current policy and controller immediately before a provider call. */
-export type TelegramAppHandoffV2ScopeAssertion = (
-  input: Readonly<{
-    action: "buy" | "sell";
-    authorityFingerprint: string;
-    /** Query-only view of the caller's existing transaction. */
-    db: Pick<PoolClient, "query">;
-    policyRevision: string;
-    telegramUserId: string;
-    tradeIntentId: string;
-    venue: TelegramAppHandoffV2TradeVenue;
-  }>,
-) => Promise<boolean>;
+export type TelegramAppHandoffV2ScopeInput = Readonly<{
+  action: "buy" | "sell";
+  authorityFingerprint: string;
+  /** Query-only view of the caller's existing transaction. */
+  db: Pick<PoolClient, "query">;
+  policyRevision: string;
+  telegramUserId: string;
+  tradeIntentId: string;
+  venue: TelegramAppHandoffV2ConsumerVenue;
+  userId: string;
+}>;
+
+/** Two separate capabilities: locking must never acquire the intent/handoff or
+ * reject a durable replay on current eligibility. Validation runs only after
+ * those rows have been locked. A single callback with an ignored mode argument
+ * could silently reintroduce intent → handoff versus Cancel's handoff → intent.
+ */
+export type TelegramAppHandoffV2ScopeAssertion = Readonly<{
+  lockAuthority: (input: TelegramAppHandoffV2ScopeInput) => Promise<void>;
+  validate: (input: TelegramAppHandoffV2ScopeInput) => Promise<boolean>;
+}>;
 
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/iu;
 const UUID_RE =
@@ -122,7 +150,7 @@ type SealedBuyDirectTradeScope = Readonly<{
   maxSpendUsd: number;
   minReceiveShares: number | null;
   outcomeTokenId: string;
-  venue: TelegramAppHandoffV2TradeVenue;
+  venue: Exclude<TelegramAppHandoffV2ConsumerVenue, "hyperliquid">;
 }>;
 
 type SealedSellDirectTradeScope = Readonly<{
@@ -138,14 +166,24 @@ type SealedSellDirectTradeScope = Readonly<{
    */
   minimumReceiveRaw: string;
   outcomeTokenId: string;
-  venue: TelegramAppHandoffV2TradeVenue;
+  venue: Exclude<TelegramAppHandoffV2ConsumerVenue, "hyperliquid">;
 }>;
 
 type SealedDirectTradeScope =
   | SealedBuyDirectTradeScope
-  | SealedSellDirectTradeScope;
+  | SealedSellDirectTradeScope
+  | Readonly<{
+      action: "buy" | "sell";
+      assetContext?: never;
+      controllerWalletAddress: string;
+      marketId: string;
+      outcomeTokenId: string;
+      venue: "hyperliquid";
+      nativeTrade: TelegramAppHandoffNativeTrade;
+    }>;
 
 type LockedDirectTrade = Readonly<{
+  userId: string;
   authorityFingerprint: string;
   fundingOperationId: string | null;
   fundingReservationId: string | null;
@@ -245,6 +283,26 @@ function parseSealedTradeScope(
   )
     throw new TelegramAppHandoffV2DirectTradeError("plan_changed");
   const controllerWalletAddress = requiredString(trade.controllerWalletAddress);
+  if (venue === "hyperliquid") {
+    const nativeTrade = parseTelegramAppHandoffNativeTrade(trade);
+    if (
+      !nativeTrade ||
+      (expectedKind === "funding" && nativeTrade.side !== "BUY") ||
+      !controllerWalletAddress ||
+      !/^0x[0-9a-f]{40}$/iu.test(controllerWalletAddress)
+    )
+      throw new TelegramAppHandoffV2DirectTradeError("plan_changed");
+    return {
+      action: trade.action,
+      venue,
+      controllerWalletAddress: controllerWalletAddress.toLowerCase(),
+      marketId: nativeTrade.marketId,
+      outcomeTokenId: nativeTrade.outcomeTokenId,
+      nativeTrade,
+    };
+  }
+  if (trade.nativeTrade != null)
+    throw new TelegramAppHandoffV2DirectTradeError("plan_changed");
   if (trade.action === "sell") {
     const maximumSharesRaw =
       typeof trade.sharesRaw === "string" ? trade.sharesRaw : null;
@@ -329,6 +387,11 @@ function validateBinding(
 function validateReconcileKeys(
   keys: TelegramAppHandoffV2DirectTradeReconcileKeys,
 ): void {
+  if (keys.tradeType === "hyperliquid") {
+    if (!isNativeReconcileKeys(keys))
+      throw new TelegramAppHandoffV2DirectTradeError("plan_changed");
+    return;
+  }
   const hasOrderHash =
     "orderHash" in keys && /^0x[0-9a-f]{64}$/iu.test(keys.orderHash);
   const hasClientOrderId =
@@ -353,11 +416,34 @@ function validateReconcileKeys(
   }
 }
 
+function isNativeReconcileKeys(
+  value: unknown,
+): value is Extract<
+  TelegramAppHandoffV2DirectTradeReconcileKeys,
+  { tradeType: "hyperliquid" }
+> {
+  return (
+    isRecord(value) &&
+    value.tradeType === "hyperliquid" &&
+    typeof value.actionId === "string" &&
+    UUID_RE.test(value.actionId) &&
+    typeof value.orderId === "string" &&
+    UUID_RE.test(value.orderId) &&
+    typeof value.cloid === "string" &&
+    /^0x[0-9a-f]{32}$/iu.test(value.cloid)
+  );
+}
+
 function validateClaimInput(
   input: TelegramAppHandoffV2DirectTradeClaimInput,
 ): void {
   validateBinding(input.binding);
   validateReconcileKeys(input.reconcileKeys);
+  if (
+    (input.reconcileKeys.tradeType === "hyperliquid") !==
+    (input.submission.venue === "hyperliquid")
+  )
+    throw new TelegramAppHandoffV2DirectTradeError("plan_changed");
   if (!isRecord(input.recoveryPayload)) {
     throw new TelegramAppHandoffV2DirectTradeError("plan_changed");
   }
@@ -464,12 +550,17 @@ export function requiresTelegramAppHandoffV2MinimumReceive(
   input: Readonly<{
     action?: "buy" | "sell";
     executionKind: TelegramAppHandoffV2DirectTradeSubmission["executionKind"];
-    venue: TelegramAppHandoffV2TradeVenue;
+    venue: TelegramAppHandoffV2ConsumerVenue;
   }>,
 ): boolean {
   // Limitless CLOB's FOK payload cannot encode a minimum for either side.
   // It is bounded by the exact source debit and immediate-or-no-fill semantics.
-  return !(input.venue === "limitless" && input.executionKind === "clob");
+  return (
+    !(input.venue === "limitless" && input.executionKind === "clob") &&
+    !(
+      input.venue === "hyperliquid" && input.executionKind === "hyperliquid_ioc"
+    )
+  );
 }
 
 function validateSubmission(
@@ -502,6 +593,36 @@ function validateSubmission(
   if (scope.action !== action) {
     throw new TelegramAppHandoffV2DirectTradeError("order_out_of_scope");
   }
+  if (scope.venue === "hyperliquid") {
+    const native = telegramAppHandoffNativeTradeSchema.safeParse(
+      submission.nativeTrade,
+    );
+    if (
+      !native.success ||
+      submission.executionKind !== "hyperliquid_ioc" ||
+      !sameTelegramAppHandoffNativeTrade(scope.nativeTrade, native.data) ||
+      BigInt(submission.spendRaw) >
+        BigInt(scope.nativeTrade.consentedDebitCapRaw)
+    )
+      throw new TelegramAppHandoffV2DirectTradeError("order_out_of_scope");
+    const requested = telegramAppHandoffNativeRequestedAmounts(
+      scope.nativeTrade,
+    );
+    if (
+      scope.action === "buy"
+        ? BigInt(submission.spendRaw) < requested.grossQuoteRaw ||
+          BigInt(submission.receiveRaw) !== requested.tokenRaw
+        : BigInt(submission.spendRaw) !== requested.tokenRaw ||
+          BigInt(submission.receiveRaw) !== requested.grossQuoteRaw
+    )
+      throw new TelegramAppHandoffV2DirectTradeError("order_out_of_scope");
+    return;
+  }
+  if (
+    submission.nativeTrade != null ||
+    submission.executionKind === "hyperliquid_ioc"
+  )
+    throw new TelegramAppHandoffV2DirectTradeError("order_out_of_scope");
   if (scope.action === "sell") {
     if (
       BigInt(submission.spendRaw) !== BigInt(scope.maximumSharesRaw) ||
@@ -589,7 +710,7 @@ function hasSameOrderMarker(input: {
 
 async function lockDirectTrade(
   client: PoolClient,
-  input: Readonly<{ handoffId: string; userId: string }>,
+  input: Readonly<{ handoffId: string; userId: string; forUpdate?: boolean }>,
 ): Promise<LockedDirectTrade> {
   const { rows } = await client.query<{
     authority_fingerprint: string;
@@ -606,8 +727,10 @@ async function lockDirectTrade(
     plan_snapshot: unknown;
     policy_revision: string;
     telegram_user_id: string;
+    owner_user_id: string;
   }>(
     `select handoff_row.id::text as handoff_id,
+            handoff_row.user_id::text as owner_user_id,
             handoff_row.authority_fingerprint,
             handoff_row.policy_revision,
             intent.id::text as intent_id,
@@ -629,12 +752,13 @@ async function lockDirectTrade(
         and handoff_row.user_id = $2::uuid
         and handoff_row.state = 'committed'
         and handoff_row.plan_snapshot->>'version' = '2'
-      for update of handoff_row, intent`,
+      ${input.forUpdate === false ? "" : "for update of handoff_row, intent"}`,
     [input.handoffId, input.userId],
   );
   const row = rows[0];
   if (!row) throw new TelegramAppHandoffV2DirectTradeError("handoff_not_ready");
   return {
+    userId: row.owner_user_id,
     authorityFingerprint: row.authority_fingerprint,
     fundingOperationId: row.funding_operation_id,
     fundingReservationId: row.funding_reservation_id,
@@ -652,6 +776,50 @@ async function lockDirectTrade(
   };
 }
 
+/** Financial consumers take policy → receive/context → market → authority
+ * before handoff → intent. Token resolve/cancel keep their short H → I path.
+ * This nonlocking read is only a lock hint; the immutable scope is checked
+ * again from locked rows before granting any submission authority.
+ */
+export async function lockTelegramAppHandoffV2ConsumerAuthorityInTransaction(
+  client: PoolClient,
+  input: Readonly<{
+    userId: string;
+    binding: TelegramAppHandoffV2DirectTradeBinding;
+    assertCurrentScope: TelegramAppHandoffV2ScopeAssertion;
+  }>,
+): Promise<void> {
+  validateBinding(input.binding);
+  await lockFundingPolicyForTransaction(client);
+  const hinted = await lockDirectTrade(client, {
+    handoffId: input.binding.handoffId.trim(),
+    userId: input.userId,
+    forUpdate: false,
+  });
+  if (
+    hinted.planFingerprint !==
+    input.binding.planFingerprint.trim().toLowerCase()
+  )
+    throw new TelegramAppHandoffV2DirectTradeError("plan_changed");
+  const snapshot = hinted.planSnapshot;
+  const scope = parseSealedTradeScope(
+    snapshot,
+    isRecord(snapshot) && snapshot.kind === "funding"
+      ? "funding"
+      : "direct_trade",
+  );
+  await input.assertCurrentScope.lockAuthority({
+    action: scope.action,
+    authorityFingerprint: hinted.authorityFingerprint,
+    db: { query: client.query.bind(client) },
+    policyRevision: hinted.policyRevision,
+    telegramUserId: hinted.telegramUserId,
+    tradeIntentId: hinted.intentId,
+    userId: hinted.userId,
+    venue: scope.venue,
+  });
+}
+
 async function assertLiveScope(input: {
   assertion?: TelegramAppHandoffV2ScopeAssertion;
   client: PoolClient;
@@ -661,7 +829,7 @@ async function assertLiveScope(input: {
   if (!input.assertion) {
     throw new TelegramAppHandoffV2DirectTradeError("plan_changed");
   }
-  const valid = await input.assertion({
+  const valid = await input.assertion.validate({
     action: input.scope.action,
     authorityFingerprint: input.locked.authorityFingerprint,
     // Strip PoolClient.connect(): the scope helper must participate in this
@@ -671,6 +839,7 @@ async function assertLiveScope(input: {
     telegramUserId: input.locked.telegramUserId,
     tradeIntentId: input.locked.intentId,
     venue: input.scope.venue,
+    userId: input.locked.userId,
   });
   if (!valid) throw new TelegramAppHandoffV2DirectTradeError("plan_changed");
 }
@@ -704,6 +873,15 @@ function hasSameReconcileKeys(
 ): boolean {
   if (!isRecord(snapshot) || !isRecord(snapshot.reconcileKeys)) return false;
   const actual = snapshot.reconcileKeys;
+  if (expected.tradeType === "hyperliquid") {
+    return (
+      actual.tradeType === "hyperliquid" &&
+      actual.actionId === expected.actionId &&
+      actual.orderId === expected.orderId &&
+      typeof actual.cloid === "string" &&
+      actual.cloid.toLowerCase() === expected.cloid.toLowerCase()
+    );
+  }
   if ("orderHash" in expected) {
     return (
       actual.tradeType === expected.tradeType &&
@@ -743,6 +921,7 @@ export async function claimTelegramAppHandoffV2DirectTradeSubmissionInTransactio
   input: TelegramAppHandoffV2DirectTradeClaimInput,
 ): Promise<void> {
   validateClaimInput(input);
+  await lockTelegramAppHandoffV2ConsumerAuthorityInTransaction(client, input);
   const locked = await lockDirectTrade(client, {
     handoffId: input.binding.handoffId.trim(),
     userId: input.userId,
@@ -771,7 +950,7 @@ export async function claimTelegramAppHandoffV2DirectTradeSubmissionInTransactio
   if (locked.intentStatus !== "external_handoff") {
     throw new TelegramAppHandoffV2DirectTradeError("intent_changed");
   }
-  if (scope.action === "sell") {
+  if (scope.action === "sell" && scope.venue !== "hyperliquid") {
     await lockDirectSellLaneInTransaction({ client, scope });
     if (!input.readSellPositionAvailableRaw) {
       throw new TelegramAppHandoffV2DirectTradeError("plan_changed");
@@ -900,6 +1079,7 @@ export async function claimTelegramAppHandoffV2FundedTradeAttemptInTransaction(
   }>,
 ): ReturnType<typeof claimFundingTradeAttemptInTransaction> {
   validateBinding(input.binding);
+  await lockTelegramAppHandoffV2ConsumerAuthorityInTransaction(client, input);
   const locked = await lockDirectTrade(client, {
     handoffId: input.binding.handoffId.trim(),
     userId: input.userId,
@@ -922,7 +1102,25 @@ export async function claimTelegramAppHandoffV2FundedTradeAttemptInTransaction(
     throw new TelegramAppHandoffV2DirectTradeError("intent_changed");
   }
   const scope = parseSealedTradeScope(locked.planSnapshot, "funding");
+  if (scope.action !== "buy" || locked.intentAction !== "buy")
+    throw new TelegramAppHandoffV2DirectTradeError("intent_changed");
   validateSubmission(scope, input.submission);
+  if (
+    scope.venue === "hyperliquid" &&
+    compareFundingTradeConsumerIntentToConfirmedBound(
+      input.consumerIntent,
+      buildFundingTradeConsumerIntent({
+        venueId: scope.venue,
+        marketId: scope.marketId,
+        marketContextId: scope.outcomeTokenId.slice("hyperliquid:".length),
+        spend: {
+          asset: HYPERCORE_MAINNET_USDC,
+          raw: input.submission.spendRaw,
+        },
+      }),
+    ) !== "matched"
+  )
+    throw new TelegramAppHandoffV2DirectTradeError("order_out_of_scope");
   await assertLiveScope({
     assertion: input.assertCurrentScope,
     client,
@@ -998,7 +1196,7 @@ export async function linkTelegramAppHandoffV2DirectTradeOrderInTransaction(
     orderId: string;
     orderStatus: string;
     userId: string;
-    venueOrderId: string;
+    venueOrderId: string | null;
   }>,
 ): Promise<void> {
   validateBinding(input.order);
@@ -1011,7 +1209,14 @@ export async function linkTelegramAppHandoffV2DirectTradeOrderInTransaction(
     locked,
     submission: input.order,
   });
-  if (scope.action === "sell") {
+  if (scope.venue === "hyperliquid") {
+    const keys = isRecord(locked.intentPreparedSnapshot)
+      ? locked.intentPreparedSnapshot.reconcileKeys
+      : null;
+    if (!isNativeReconcileKeys(keys) || keys.orderId !== input.orderId)
+      throw new TelegramAppHandoffV2DirectTradeError("order_out_of_scope");
+  }
+  if (scope.action === "sell" && scope.venue !== "hyperliquid") {
     // The direct claim holds this lane while it reads the live balance. Taking
     // it here makes the unpersisted-claim → order-lock transition indivisible
     // to the next Sell admission.
@@ -1029,9 +1234,11 @@ export async function linkTelegramAppHandoffV2DirectTradeOrderInTransaction(
   if (locked.intentStatus !== "executing") {
     throw new TelegramAppHandoffV2DirectTradeError("intent_changed");
   }
-  const terminalFill = ["filled", "matched"].includes(
-    input.orderStatus.trim().toLowerCase(),
-  );
+  // Native IOC's ACK/summary is not authoritative execution coverage. Its
+  // ordinary observed-order recovery owns terminal fill projection separately.
+  const terminalFill =
+    scope.venue !== "hyperliquid" &&
+    ["filled", "matched"].includes(input.orderStatus.trim().toLowerCase());
   const linked = await client.query(
     `update telegram_trade_intents intent
         set status = $4::text,
@@ -1065,6 +1272,93 @@ export async function linkTelegramAppHandoffV2DirectTradeOrderInTransaction(
   if ((linked.rowCount ?? 0) !== 1) {
     throw new TelegramAppHandoffV2DirectTradeError("intent_changed");
   }
+}
+
+/** Native funded orders already exist at prepare time. Bind that SAME native
+ * action/order/attempt in admission's transaction, rather than relying on a
+ * legacy order_payload scan after POST. Caller owns H/I, funding attempt and
+ * native order locks; this helper acquires no new outer financial authority.
+ */
+export async function linkTelegramAppHandoffV2NativeFundedOrderInTransaction(
+  client: PoolClient,
+  input: Readonly<{
+    userId: string;
+    order: TelegramAppHandoffV2DirectTradeOrder;
+    orderId: string;
+    actionId: string;
+    cloid: string;
+    operationId: string;
+    reservationId: string;
+    attemptId: string;
+  }>,
+): Promise<void> {
+  validateBinding(input.order);
+  const locked = await lockDirectTrade(client, {
+    handoffId: input.order.handoffId,
+    userId: input.userId,
+  });
+  const scope = parseSealedTradeScope(locked.planSnapshot, "funding");
+  validateSubmission(scope, input.order);
+  const execution =
+    isRecord(locked.intentResult) &&
+    isRecord(locked.intentResult.appHandoffTradeExecution)
+      ? locked.intentResult.appHandoffTradeExecution
+      : null;
+  if (
+    scope.venue !== "hyperliquid" ||
+    scope.action !== "buy" ||
+    locked.intentAction !== "buy" ||
+    locked.planFingerprint !== input.order.planFingerprint.toLowerCase() ||
+    locked.fundingOperationId !== input.operationId ||
+    locked.fundingReservationId !== input.reservationId ||
+    !hasFundingExecutionMarker(locked.intentResult, locked.handoffId) ||
+    execution?.handoffId !== locked.handoffId ||
+    execution?.attemptId !== input.attemptId ||
+    execution?.planFingerprint !== locked.planFingerprint
+  )
+    throw new TelegramAppHandoffV2DirectTradeError("order_out_of_scope");
+  if (
+    execution.orderId === input.orderId &&
+    execution.actionId === input.actionId &&
+    execution.cloid === input.cloid
+  )
+    return;
+  const proof = await client.query(
+    `select action_row.id from hip4_order_actions action_row
+      join orders order_row on order_row.id=action_row.order_id
+      join hip4_order_submissions submission_row on submission_row.action_id=action_row.id
+      where action_row.id=$1::uuid and order_row.id=$2::uuid and order_row.user_id=$3::uuid
+        and action_row.cloid=$4 and order_row.funding_operation_id=$5::uuid
+        and order_row.funding_reservation_id=$6::uuid and order_row.funding_trade_attempt_id=$7::uuid
+        and submission_row.funding_trade_attempt_id=$7::uuid and submission_row.state='submission_started'
+        and submission_row.admission_snapshot->'telegramAppHandoff'->>'handoffId'=$8
+        and submission_row.admission_snapshot->'telegramAppHandoff'->>'planFingerprint'=$9`,
+    [
+      input.actionId,
+      input.orderId,
+      input.userId,
+      input.cloid,
+      input.operationId,
+      input.reservationId,
+      input.attemptId,
+      locked.handoffId,
+      locked.planFingerprint,
+    ],
+  );
+  if (proof.rows.length !== 1)
+    throw new TelegramAppHandoffV2DirectTradeError("order_out_of_scope");
+  const linked = await client.query(
+    `update telegram_trade_intents intent
+      set status='submitted',order_id=$2::uuid,submitted_at=coalesce(submitted_at,clock_timestamp()),
+        result=jsonb_set(result,'{appHandoffTradeExecution}',
+          (result->'appHandoffTradeExecution')||jsonb_build_object('orderId',$2::uuid,'actionId',$3::uuid,'cloid',$4::text)),
+        updated_at=clock_timestamp()
+      where intent.id=$1::uuid and intent.status='executing'
+        and (intent.order_id is null or intent.order_id=$2::uuid)`,
+    [locked.intentId, input.orderId, input.actionId, input.cloid],
+  );
+  if (linked.rowCount !== 1)
+    throw new TelegramAppHandoffV2DirectTradeError("intent_changed");
 }
 
 /**

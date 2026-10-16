@@ -37,6 +37,7 @@ import {
   ValuationService,
 } from "./account-value/valuation-service.js";
 import { RELAY_ROUTE_SPECS } from "./funding-providers/relay/mappings.js";
+import { POLYGON_USDCE_LEGACY } from "./funding-providers/relay/rehearsal.js";
 
 const now = Date.parse("2026-10-14T16:00:00Z");
 const userId = "cash-user";
@@ -102,7 +103,13 @@ test("native Account Value hold-read failure makes availability unknown and reco
       );
       if (failed) throw new Error("private database detail must not leak");
       return {
-        rows: [{ reserved_raw: "200000000", submitted_debit_raw: "100000000" }],
+        rows: [
+          {
+            reserved_raw: "200000000",
+            submitted_debit_raw: "100000000",
+            debit_alias_candidates: [],
+          },
+        ],
       };
     },
   } as unknown as Pick<Pool, "query">;
@@ -638,6 +645,7 @@ test("Native debit read skips stale or foreign snapshots, and sends exact indexe
     address: address.toLowerCase(),
     asset_decimals: 8,
     snapshot_at: new Date(now).toISOString(),
+    native_source_dex: "spot",
   });
   await loadFundingNativeSnapshotDebits(
     pool as never,
@@ -652,7 +660,7 @@ test("Native debit read skips stale or foreign snapshots, and sends exact indexe
   assert.equal(calls.length, 1);
 });
 
-test("Shared snapshot debits admit exact Base/Polygon USDC only and keep legacy pUSD outside the slice", async () => {
+test("Shared snapshot debits admit registered Base/Polygon stable sources without merging their token identities", async () => {
   const native = projectHip4AccountValue({ userId, read: read(), now })
     .assets[0];
   const base = RELAY_ROUTE_SPECS["base-usdc-to-hypercore-spot-usdc"].source;
@@ -677,12 +685,25 @@ test("Shared snapshot debits admit exact Base/Polygon USDC only and keep legacy 
         location: { ...component.location, asset: polygon },
         amount: { asset: polygon, raw: "100000000" },
       },
+      {
+        ...component,
+        location: {
+          ...component.location,
+          asset:
+            RELAY_ROUTE_SPECS["polygon-pusd-to-hypercore-spot-usdc"].source,
+        },
+        amount: {
+          asset:
+            RELAY_ROUTE_SPECS["polygon-pusd-to-hypercore-spot-usdc"].source,
+          raw: "100000000",
+        },
+      },
     ]).length,
-    2,
+    3,
   );
   for (const asset of [
     { ...base, decimals: 8 },
-    RELAY_ROUTE_SPECS["hypercore-spot-usdc-to-polygon-pusd"].destination,
+    { networkId: "evm:137", assetId: POLYGON_USDCE_LEGACY, decimals: 6 },
     { ...base, networkId: "evm:1" },
     { ...base, assetId: `0x${"ab".repeat(20)}` },
   ])
@@ -722,6 +743,8 @@ test("Shared snapshot debits admit exact Base/Polygon USDC only and keep legacy 
         rows: [
           {
             operation_id: "op",
+            debit_id: "debit",
+            strict_match: true,
             segment_id: null,
             source_component_id: component.componentId,
             source_location_id: component.location.locationId,

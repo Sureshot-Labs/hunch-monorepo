@@ -7,12 +7,11 @@ import {
   type FundingRefundSettledReceipt,
 } from "../funding/domain/refund-settlement.js";
 import type { Money } from "../funding/domain/types.js";
-import { RELAY_ROUTE_SPECS } from "../funding-providers/relay/mappings.js";
+import { RELAY_HYPERCORE_EVM_STABLE_SOURCE_ASSETS } from "../funding-providers/relay/mappings.js";
 
-const usdcAssets = [
+const usdStableAssets = [
   HYPERCORE_MAINNET_USDC,
-  RELAY_ROUTE_SPECS["base-usdc-to-hypercore-spot-usdc"].source,
-  RELAY_ROUTE_SPECS["polygon-usdc-to-hypercore-spot-usdc"].source,
+  ...RELAY_HYPERCORE_EVM_STABLE_SOURCE_ASSETS,
 ];
 
 export type FundingRefundClaim =
@@ -37,7 +36,7 @@ export function projectFundingRefundClaim(input: {
     !input.contract.requestBinding ||
     typeof input.source.raw !== "string" ||
     !/^[1-9]\d*$/u.test(input.source.raw) ||
-    !usdcAssets.some((asset) => sameAsset(asset, input.source.asset))
+    !usdStableAssets.some((asset) => sameAsset(asset, input.source.asset))
   )
     return unknown;
   const ids = new Set<string>();
@@ -46,7 +45,7 @@ export function projectFundingRefundClaim(input: {
     if (
       ids.has(receipt.observationId) ||
       !fundingRefundReceiptMatchesContract(input.contract, receipt) ||
-      !usdcAssets.some((asset) => sameAsset(asset, receipt.money.asset))
+      !usdStableAssets.some((asset) => sameAsset(asset, receipt.money.asset))
     )
       return unknown;
     ids.add(receipt.observationId);

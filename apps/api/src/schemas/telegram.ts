@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { nativeHip4OrderReadSchema } from "./orders.js";
+import { authErrorResponseSchema } from "./auth.js";
 
 export const telegramContextBodySchema = z.object({
   initDataRaw: z
@@ -91,6 +93,9 @@ export const telegramAppHandoffClientExecutionSchema = z.object({
       fundingReservationId: z.string().uuid(),
       handoffId: z.string().uuid(),
       kind: z.literal("trade_continuation_in_flight"),
+      orderId: z.string().uuid().optional(),
+      venueOrderId: z.string().nullable().optional(),
+      nativeOrder: nativeHip4OrderReadSchema.optional(),
       requiredContractVersion: z.literal(2),
       tradeAttemptId: z.string().uuid(),
       tradeAttemptState: z.enum([
@@ -110,6 +115,7 @@ export const telegramAppHandoffClientExecutionSchema = z.object({
     z.object({
       handoffId: z.string().uuid(),
       kind: z.literal("direct_trade_in_flight"),
+      nativeOrder: nativeHip4OrderReadSchema.optional(),
       orderId: z.string().uuid().nullable(),
       planFingerprint: z.string().regex(/^[0-9a-f]{64}$/iu),
       requiredContractVersion: z.literal(2),
@@ -119,6 +125,9 @@ export const telegramAppHandoffClientExecutionSchema = z.object({
     z.object({
       handoffId: z.string().uuid(),
       kind: z.literal("trade_terminal"),
+      orderId: z.string().uuid().optional(),
+      venueOrderId: z.string().nullable().optional(),
+      nativeOrder: nativeHip4OrderReadSchema.optional(),
       requiredContractVersion: z.literal(2),
       status: z.enum(["cancelled", "expired", "failed", "filled"]),
       tradeIntentId: z.string().uuid(),
@@ -155,6 +164,7 @@ export const telegramAppHandoffProjectionSchema = z.object({
     })
     .nullable(),
   marketTitle: z.string(),
+  nativeOrder: nativeHip4OrderReadSchema.optional(),
   minimumReceiveRaw: z.string().regex(/^\d+$/u).nullable(),
   order: z.object({
     executionId: z.string().uuid().nullable(),
@@ -176,7 +186,7 @@ export const telegramAppHandoffProjectionSchema = z.object({
   status: z.string(),
   terminal: z.boolean(),
   tradeIntentId: z.string().uuid(),
-  venue: z.enum(["kalshi", "limitless", "polymarket"]),
+  venue: z.enum(["kalshi", "limitless", "polymarket", "hyperliquid"]),
 });
 
 export const telegramAppHandoffProjectionResponseSchema = z.object({
@@ -187,6 +197,51 @@ export const telegramAppHandoffExecuteResponseSchema = z.union([
   telegramAppHandoffProjectionResponseSchema,
   telegramAppHandoffClientExecutionSchema,
 ]);
+
+const telegramAppHandoffResponses = {
+  200: telegramAppHandoffResponseSchema,
+  400: telegramContextErrorResponseSchema,
+  401: authErrorResponseSchema,
+  403: telegramContextErrorResponseSchema,
+  404: telegramContextErrorResponseSchema,
+  409: telegramContextErrorResponseSchema,
+  503: telegramContextErrorResponseSchema,
+};
+const telegramAppHandoffAccessRoute = {
+  body: telegramAppHandoffRequestSchema,
+  response: telegramAppHandoffResponses,
+};
+/** Actual HTTP routes and offline generation use the same schemas. Native
+ * factual execution coverage must not disappear from a stale client DTO. */
+export const telegramAppHandoffRouteSchemas = {
+  "/telegram/app-handoffs/resolve": telegramAppHandoffAccessRoute,
+  "/telegram/app-handoffs/claim": telegramAppHandoffAccessRoute,
+  "/telegram/app-handoffs/cancel": telegramAppHandoffAccessRoute,
+  "/telegram/app-handoffs/commit": {
+    body: telegramAppHandoffCommitRequestSchema,
+    response: {
+      ...telegramAppHandoffResponses,
+      200: telegramAppHandoffCommitResponseSchema,
+    },
+  },
+  "/telegram/app-handoffs/projection": {
+    body: telegramAppHandoffRequestSchema,
+    response: {
+      ...telegramAppHandoffResponses,
+      200: z.union([
+        telegramAppHandoffResponseSchema,
+        telegramAppHandoffProjectionResponseSchema,
+      ]),
+    },
+  },
+  "/telegram/app-handoffs/execute": {
+    body: telegramAppHandoffRequestSchema,
+    response: {
+      ...telegramAppHandoffResponses,
+      200: telegramAppHandoffExecuteResponseSchema,
+    },
+  },
+} as const;
 
 export const telegramGroupMembershipStateSchema = z.enum([
   "member",

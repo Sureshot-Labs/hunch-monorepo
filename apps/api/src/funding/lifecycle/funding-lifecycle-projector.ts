@@ -68,7 +68,15 @@ export type FundingLifecycleActionReceipt = Readonly<{
   canonical: boolean;
   actionMatched: boolean | null;
   failureFinalized: boolean;
+  /** Chain success and ownership are separate facts; a consumed physical event
+   * cannot authorize this action even when its old receipt was finalized. */
+  physicalIdentityConflict?: boolean;
 }>;
+
+// An ownership collision is not repaired by a later balance or destination
+// receipt. It requires exact attribution/accounting repair, never a resend.
+export const FUNDING_PHYSICAL_EVENT_OWNERSHIP_CONFLICT =
+  "funding_physical_event_ownership_conflict";
 
 export type FundingLifecycleActionAttempt = Readonly<{
   attemptNumber: number;
@@ -404,6 +412,7 @@ function hasCanonicalFinalReceipt(
   return (
     receipt?.status === "finalized" &&
     receipt.canonical &&
+    receipt.physicalIdentityConflict !== true &&
     receipt.actionMatched === true
   );
 }
@@ -528,6 +537,7 @@ function actionCanonicalityConflict(
 ): boolean {
   return action.attempts.some(
     (attempt) =>
+      attempt.receipt?.physicalIdentityConflict === true ||
       attempt.receipt?.status === "mismatch" ||
       (attempt.receipt?.status === "reorged" &&
         attempt.retryableAfterReorg !== true) ||
@@ -547,7 +557,9 @@ function actionRequiresManualRecovery(
   // canonical replacement. A receipt mismatch instead says the observed
   // transfer is not this sealed action and must never be retried implicitly.
   return action.attempts.some(
-    (attempt) => attempt.receipt?.status === "mismatch",
+    (attempt) =>
+      attempt.receipt?.status === "mismatch" ||
+      attempt.receipt?.physicalIdentityConflict === true,
   );
 }
 
@@ -1720,8 +1732,13 @@ export function deriveFundingLifecycle(
           ? "manual_review"
           : "automatic_evidence"
         : null,
-    errorCode:
-      status === "failed" && facts.terminalFailure != null
+    errorCode: facts.actions.some((action) =>
+      action.attempts.some(
+        (attempt) => attempt.receipt?.physicalIdentityConflict === true,
+      ),
+    )
+      ? FUNDING_PHYSICAL_EVENT_OWNERSHIP_CONFLICT
+      : status === "failed" && facts.terminalFailure != null
         ? facts.terminalFailure.code
         : status === "recovery_required" && facts.manualRecovery != null
           ? facts.manualRecovery.code

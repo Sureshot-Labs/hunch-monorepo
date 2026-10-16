@@ -238,6 +238,7 @@ try {
   const destinationReceiptPolls: Array<{
     segmentId: string;
     transactionHashes: readonly string[];
+    work?: { progressToken: string; deadlineMs: number };
   }> = [];
   const driver = new RelayReconciliationDriver(
     client,
@@ -247,10 +248,20 @@ try {
       destinationReceiptPolls.push({
         segmentId: input.segmentId,
         transactionHashes: input.transactionHashes,
+        ...(input.work ? { work: input.work } : {}),
       });
     },
   );
-  const firstPoll = await driver.pollOperation(pool, operationId);
+  const work = {
+    progressToken: crypto.randomUUID(),
+    deadlineMs: Date.now() + 60_000,
+  };
+  const firstPoll = await driver.pollOperation(
+    pool,
+    operationId,
+    new Date(),
+    work,
+  );
   assert.deepEqual(firstPoll, {
     requestsPolled: 1,
     childrenDiscovered: 1,
@@ -261,6 +272,7 @@ try {
       {
         segmentId,
         transactionHashes: ["destination-reference-not-persisted"],
+        work,
       },
     ],
     "a successful provider poll immediately schedules exact chain evidence without waiting for a receive session",

@@ -24,7 +24,10 @@ import { withdrawalOptionsForAsset } from "../../../account-value/withdrawal-opt
 import { projectCashAvailability } from "../../../account-value/cash-availability-projector.js";
 import { projectHip4Account } from "../../../services/hip4-account-projection.js";
 import { hypercorePlanTestFixture } from "../../../funding-providers/relay/hypercore-plan-test-fixture.js";
-import { HYPERCORE_MAINNET_USDC } from "../../domain/hypercore-identity.js";
+import {
+  HYPERCORE_MAINNET_USDC,
+  HYPERCORE_PERPS_LOCATION_PATTERN,
+} from "../../domain/hypercore-identity.js";
 import { DEFAULT_FUNDING_RUNTIME_POLICY } from "../../policies/funding-policy.js";
 import {
   deriveProductionRelayEligibleSourceFacts,
@@ -40,6 +43,7 @@ import {
 function fixture(
   now = new Date("2026-10-14T16:00:00Z"),
   reservedRaw = "9000000000",
+  includePerpsCash = false,
 ) {
   const plan = hypercorePlanTestFixture(now);
   const { profile, route, destination } = plan.input;
@@ -63,6 +67,14 @@ function fixture(
       ],
     },
   });
+  if (includePerpsCash)
+    observation.perpsCash = {
+      observedAt: now.toISOString(),
+      state: "verified",
+      totalRaw: "10000000000",
+      availableRaw: "10000000000",
+      reason: "cash_only",
+    };
   const projection = projectHip4AccountValue({
     userId,
     now: now.getTime(),
@@ -602,6 +614,81 @@ test("native source uses shared adjusted USDC8 capacity, no gas or wallet alias"
       },
     }).length,
     0,
+  );
+});
+
+test("both physical cash classes share the ordinary planner without route ambiguity, cross capacity or an automatic purchase", () => {
+  const { input, projection } = fixture(undefined, "0", true);
+  const policy = withWithdrawalPlanningContract(
+    DEFAULT_FUNDING_RUNTIME_POLICY,
+    input.requiredAmount.asset,
+  );
+  const destinationLocationPatternId = withdrawalRecipientLocationPatternId(
+    input.requiredAmount.asset,
+  );
+  assert.ok(destinationLocationPatternId);
+  const perps = projection.assets.find(
+    (row) => row.location.details.nativeSourceDex === "",
+  );
+  const spot = projection.assets.find(
+    (row) => row.location.details.nativeSourceDex === "spot",
+  );
+  assert.ok(perps && spot);
+  const args = {
+    ...input,
+    policy,
+    destinationLocationPatternId,
+    purpose: "withdrawal" as const,
+  };
+  for (const [component, expectedPattern, expectedRaw] of [
+    [perps, HYPERCORE_PERPS_LOCATION_PATTERN, "9900000000"],
+    [spot, "hypercore-spot-usdc-v1", "9600000000"],
+  ] as const) {
+    const sources = deriveProductionRelayEligibleSourceFacts({
+      ...args,
+      withdrawalSourceComponentId: component.componentId,
+    });
+    assert.equal(
+      sources.length,
+      1,
+      "class selection precedes same-asset route uniqueness",
+    );
+    assert.equal(sources[0].sourceLocationPatternId, expectedPattern);
+    assert.equal(sources[0].maximumSourceRaw, expectedRaw);
+    assert.equal(
+      sources[0].reservationLocationId,
+      component.location.locationId,
+    );
+    assert.equal(sources[0].walletExecutionReady, true);
+    assert.ok(
+      withdrawalOptionsForAsset(input.account, component, input.now.getTime())
+        ?.destinations.length,
+    );
+  }
+  const perpsOnly = {
+    ...input.account,
+    projection: { ...input.account.projection, components: [perps] },
+  };
+  assert.equal(
+    deriveProductionRelayEligibleSourceFacts({
+      ...args,
+      account: perpsOnly,
+      withdrawalSourceComponentId: spot.componentId,
+    }).length,
+    0,
+  );
+  assert.equal(
+    deriveProductionRelayEligibleSourceFacts({
+      ...args,
+      account: perpsOnly,
+      withdrawalSourceComponentId: perps.componentId,
+    }).length,
+    1,
+  );
+  assert.equal(
+    policy.creationMode,
+    "off",
+    "cash recovery does not activate venue funding or Buy",
   );
 });
 

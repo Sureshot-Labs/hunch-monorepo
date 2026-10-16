@@ -4,6 +4,7 @@ import {
   type Hip4SubmissionRecord,
 } from "../repos/hip4-order-admission.js";
 import { lockFundingPolicyForTransaction } from "../funding/policies/funding-policy-sidecar.js";
+import { projectTelegramNativeHandoffStatusInTransaction } from "../repos/telegram-native-handoff-read.js";
 import { recordFundingTradeAttemptOutcomeInTransaction } from "../funding/persistence/funding-trade-attempt-repository.js";
 import { releaseFundingReservationForAbandonedTradeInTransaction } from "../funding/persistence/funding-evidence-repository.js";
 import { z } from "zod";
@@ -91,18 +92,19 @@ export async function recordHip4SubmissionReplyInTransaction(
     if (changed.rows.length !== 1)
       throw new Error("hip4_order_reference_conflict");
   }
-  return (
+  const submission = (
     await db.query<Hip4SubmissionRecord>(
       `update hip4_order_submissions set state=$2,reply_summary=$3::jsonb,
     updated_at=clock_timestamp() where action_id=$1 and state='submission_started' returning *`,
       [input.actionId, rejected ? "rejected" : "reconcile_required", reply],
     )
   ).rows[0];
+  await projectTelegramNativeHandoffStatusInTransaction(db, input);
+  return submission;
 }
 
-/** Internal connected one-shot path; not yet exposed by the public executor.
- * Context comes from trusted server observation. Its production resolver and
- * bounded exact reconciliation must be installed before public enablement.
+/** Connected one-shot path. Context comes from trusted server observation,
+ * never client-supplied policy, fees or balances.
  * No signer is invoked here. Tests inject transport; runtime uses the fixed
  * native endpoint. Failed commit/unknown commit never grants POST authority. */
 export async function submitHip4OrderAction(
@@ -110,7 +112,7 @@ export async function submitHip4OrderAction(
   input: Parameters<typeof admitHip4OrderActionInTransaction>[1],
   transport: HyperliquidExchangeTransport,
   // Internal test seam only: cannot arrive in a JSON/public request. Default
-  // retains the shared implementation ceiling until P4 is fully integrated.
+  // uses the common venue lifecycle and the ordinary native admission gates.
   capabilityCheck?: Parameters<typeof admitHip4OrderActionInTransaction>[2],
 ) {
   const admitted = await tx(pool, (db) =>

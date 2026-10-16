@@ -20,8 +20,10 @@ import {
   isHypercoreFundingNetwork,
   isHypercoreMainnetUsdc,
   hypercoreLocationDex,
+  hypercoreSourceLocationPattern,
 } from "../domain/hypercore-identity.js";
 import { fundingEconomicSourceReservations } from "../persistence/funding-operation-repository.js";
+import { polymarketHandoffSourceIntent } from "../domain/polymarket-handoff-source.js";
 import { createRelayReferenceCodec } from "../../funding-providers/relay/reference-codec.js";
 import {
   isRelayQuoteRejectedError,
@@ -244,11 +246,12 @@ export function resolveProductionOwnedSourceExecution(input: {
   const { account, component } = input;
   const directProfile = profileForLocation(account, component.location);
   if (isHypercoreFundingNetwork(component.amount.asset.networkId)) {
+    const sourceDex = hypercoreLocationDex(component.location);
     if (
       !directProfile?.controllerWalletRef ||
       !isHypercoreMainnetUsdc(component.amount.asset) ||
       !sameAsset(component.amount.asset, component.location.asset) ||
-      hypercoreLocationDex(component.location) !== "spot" ||
+      sourceDex === null ||
       component.category !== "cash" ||
       component.location.details.nativeAccountMode !== "disabled" ||
       component.location.details.cashCapacityReason !== null ||
@@ -262,18 +265,23 @@ export function resolveProductionOwnedSourceExecution(input: {
           ))
     )
       return null;
-    const canonical = hypercoreSpotAccountLocation({
+    const nativeLocationInput = {
       accountId: component.location.accountId,
       address: directProfile.address,
       controllerWalletId: directProfile.walletId,
-    }).location;
+    };
+    const canonical =
+      sourceDex === "spot"
+        ? hypercoreSpotAccountLocation(nativeLocationInput).location
+        : hypercorePerpsRefundLocation(nativeLocationInput);
     if (component.location.locationId !== canonical.locationId) return null;
     // Core is an account, not an ERC20 wallet. Keep its P2 physical identity
     // and common reservation pool instead of manufacturing a wallet alias.
     return {
       profile: directProfile,
       executionLocation: component.location,
-      safeLabel: "Hyperliquid USDC",
+      safeLabel:
+        sourceDex === "spot" ? "Hyperliquid USDC" : "Hyperliquid perps cash",
     };
   }
   const funderAddress = detail(component.location, "address");
@@ -501,8 +509,18 @@ function sourceFactsForComponent(input: {
   requiredCapability: "execution_source" | "withdrawal_source";
   suggestionPreferred: boolean;
 }): RelayEligibleSourceFact[] {
+  const handoffIntent = input.preRouteHandoff
+    ? polymarketHandoffSourceIntent({
+        economicLocation: input.preRouteHandoff.sourceLocation,
+        controllerProfile: input.profile,
+      })
+    : null;
+  if (input.preRouteHandoff && !handoffIntent) return [];
   const nativeSolSource = isSolanaNativeAsset(input.component.amount.asset);
   const nativeCoreSource = isHypercoreMainnetUsdc(input.component.amount.asset);
+  const nativeDex = hypercoreLocationDex(input.executionLocation);
+  const nativePattern =
+    nativeDex === null ? null : hypercoreSourceLocationPattern(nativeDex);
   if (
     (!isRelayPinnedStableAsset(input.component.amount.asset) &&
       !nativeSolSource) ||
@@ -514,6 +532,7 @@ function sourceFactsForComponent(input: {
     (route) =>
       route.enabled &&
       route.providerId === "relay" &&
+      (!nativeCoreSource || route.sourceLocationPatternId === nativePattern) &&
       (input.destinationLocationPatternId == null ||
         route.destinationLocationPatternId ===
           input.destinationLocationPatternId) &&
@@ -660,7 +679,8 @@ function sourceFactsForComponent(input: {
                 : `${input.component.amount.asset.networkId} wallet`),
         source: {
           kind: "owned_location" as const,
-          location: input.executionLocation,
+          location:
+            handoffIntent?.executionSource.location ?? input.executionLocation,
         },
         quoteInputAmount: {
           asset: input.component.amount.asset,

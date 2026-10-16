@@ -3,6 +3,7 @@
 // @api-integration
 
 import assert from "node:assert/strict";
+import { tx } from "@hunch/infra";
 import crypto from "node:crypto";
 
 import { ethers } from "ethers";
@@ -28,7 +29,7 @@ import {
   type DirectIngressObservationVariant,
 } from "../../reconciliation/direct-ingress-observer.js";
 import type { FundingReceiveCanonicalEvent } from "../../receive/canonical-receive-event-scanner.js";
-import { FundingReceiveSessionObserver } from "../../receive/receive-session-observer.js";
+import { recordedRoleObserverFixture } from "../recorded-role-observer-fixture.js";
 import { refundCanonicalEventKey } from "../../reconciliation/relay-exact-refund-classification.js";
 
 const NOW = new Date("2026-07-31T15:15:00.000Z");
@@ -80,6 +81,7 @@ async function insertUser(label: string): Promise<string> {
 }
 
 function sessionInput(userId: string, label: string) {
+  const recipient = recipientForUser(userId);
   const variantId = opaque(`variant_${label}`);
   const receiveTargetId = opaque(`receive_target_${label}`);
   const destinationOptionId = opaque(`destination_${label}`);
@@ -88,7 +90,7 @@ function sessionInput(userId: string, label: string) {
   const receiveTarget = {
     receiveTargetId,
     networkId: SOURCE_ASSET.networkId,
-    destinationAddress: RECIPIENT,
+    destinationAddress: recipient,
     acceptedAssets: [
       {
         asset: SOURCE_ASSET,
@@ -117,7 +119,7 @@ function sessionInput(userId: string, label: string) {
           receiveTargets: [receiveTarget],
           recommendedReceiveTargetId: receiveTargetId,
           destinationOptionId,
-          destinationAddress: RECIPIENT,
+          destinationAddress: recipient,
           requestedAmount: null,
           amountSemantics: "minimum" as const,
           expiresAt: new Date(NOW.getTime() + 86_400_000).toISOString(),
@@ -131,7 +133,7 @@ function sessionInput(userId: string, label: string) {
         variantId,
         networkId: SOURCE_ASSET.networkId,
         asset: SOURCE_ASSET,
-        destinationAddress: RECIPIENT,
+        destinationAddress: recipient,
         destinationLocationId,
         baselineRaw: "0",
         baselineRevision: opaque(`baseline_${label}`),
@@ -206,6 +208,33 @@ const candidate: FundingPolymarketHandoffCandidate = {
   },
 };
 
+function recipientForUser(userId: string): string {
+  return `0x${crypto.createHash("sha256").update(userId).digest("hex").slice(0, 40)}`;
+}
+
+function candidateForUser(userId: string): FundingPolymarketHandoffCandidate {
+  const recipient = recipientForUser(userId);
+  const data = new ethers.Interface([
+    "function transfer(address recipient,uint256 amount)",
+  ]).encodeFunctionData("transfer", [recipient, BigInt(AMOUNT_RAW)]);
+  return {
+    ...candidate,
+    normalizedAction: {
+      ...candidate.normalizedAction,
+      payload: {
+        ...(candidate.normalizedAction.payload as JsonObject),
+        recipient,
+        calls: [{ target: SOURCE_ASSET.assetId, value: "0", data }],
+      },
+    },
+    actionValidationResult: {
+      ...candidate.actionValidationResult,
+      recipientAddress: recipient,
+      transferData: data,
+    },
+  };
+}
+
 function cursorVariant(
   variant: DirectIngressObservationVariant,
   eventCursorBlock: string,
@@ -233,7 +262,7 @@ function canonicalEvent(
     blockNumber: "101",
     blockHash: `0x${"ef".repeat(32)}`,
     sourceAddress: FUNDER,
-    destinationAddress: RECIPIENT,
+    destinationAddress: variant.destinationAddress,
     rawAmount: AMOUNT_RAW,
     observedAt: new Date(NOW.getTime() + 6_000).toISOString(),
   };
@@ -246,7 +275,7 @@ try {
   userIds.push(userId);
   const input = sessionInput(userId, "suppressed");
   const created = await createOrReuseFundingReceiveSession(pool, input);
-  const observer = new FundingReceiveSessionObserver({
+  const observer = recordedRoleObserverFixture({
     transactionReferenceCodec: {
       keyVersion: 1,
       fingerprint: () => LOOKUP_HMAC,
@@ -271,7 +300,7 @@ try {
       };
     },
     listPotentialPolymarketHandoffs: async (_client, lookup) =>
-      lookup.userId === userId ? [candidate] : [],
+      lookup.userId === userId ? [candidateForUser(userId)] : [],
   });
   const observed = await observer.pollBatch(pool, {
     limit: 25,
@@ -344,7 +373,7 @@ try {
     pool,
     ambiguousInput,
   );
-  const ambiguousObserver = new FundingReceiveSessionObserver({
+  const ambiguousObserver = recordedRoleObserverFixture({
     transactionReferenceCodec: {
       keyVersion: 1,
       fingerprint: () => LOOKUP_HMAC,
@@ -366,8 +395,11 @@ try {
       };
     },
     listPotentialPolymarketHandoffs: async () => [
-      candidate,
-      { ...candidate, attemptId: opaque("ambiguous_attempt") },
+      candidateForUser(ambiguousUserId),
+      {
+        ...candidateForUser(ambiguousUserId),
+        attemptId: opaque("ambiguous_attempt"),
+      },
     ],
   });
   const ambiguousObserved = await ambiguousObserver.pollBatch(pool, {
@@ -425,7 +457,7 @@ try {
     pool,
     errorInput,
   );
-  const failingObserver = new FundingReceiveSessionObserver({
+  const failingObserver = recordedRoleObserverFixture({
     transactionReferenceCodec: {
       keyVersion: 1,
       fingerprint: () => LOOKUP_HMAC,
@@ -468,6 +500,30 @@ try {
     "100",
     "a DB classification failure must roll back the cursor update",
   );
+  // Initial staging is now durable even when publication fails. Remove only
+  // this synthetic lookup-failure case before the separate global backlog test;
+  // otherwise its pending retry legitimately joins that test's first 25 rows.
+  const failureEvent = (
+    await pool.query(
+      "select id from funding_receive_canonical_events where tx_hash=$1",
+      [ERROR_TRANSACTION_HASH],
+    )
+  ).rows[0];
+  assert.ok(failureEvent);
+  await tx(pool, async (db) => {
+    await db.query("set local session_replication_role=replica");
+    await db.query(
+      "delete from funding_receive_refund_candidates where event_id=$1",
+      [failureEvent.id],
+    );
+    await db.query(
+      "delete from funding_receive_refund_scans where event_id=$1",
+      [failureEvent.id],
+    );
+    await db.query("delete from funding_receive_canonical_events where id=$1", [
+      failureEvent.id,
+    ]);
+  });
 
   // Historical canonical events can be quarantined before an eligible
   // receive session exists. Prove that a full page of later-recognized Hunch
@@ -542,12 +598,12 @@ try {
   const historicalHandoffCandidates =
     HISTORICAL_INTERNAL_TRANSACTION_HASHES.map(
       (transactionHash, candidateIndex): FundingPolymarketHandoffCandidate => ({
-        ...candidate,
+        ...candidateForUser(historicalBacklogUserId),
         attemptId: opaque(`historical_attempt_${candidateIndex}`),
         resolvedTransactionHash: transactionHash,
       }),
     );
-  const historicalObserver = new FundingReceiveSessionObserver({
+  const historicalObserver = recordedRoleObserverFixture({
     transactionReferenceCodec: {
       keyVersion: 1,
       fingerprint: () => LOOKUP_HMAC,
@@ -809,7 +865,7 @@ try {
       scenario === "relayer-different" ||
       scenario === "conflict-external-recovery" ||
       scenario === "refund-correlation-external";
-    const pendingObserver = new FundingReceiveSessionObserver({
+    const pendingObserver = recordedRoleObserverFixture({
       relayReferenceCodec: { fingerprint: (value) => value },
       classifyRecordedRefunds: async (_client, lookup) => {
         if (
@@ -906,7 +962,7 @@ try {
           throw new FundingPolymarketHandoffLookupOverflowError();
         return [
           {
-            ...candidate,
+            ...candidateForUser(pendingUserId),
             attemptOutcome:
               scenario === "started-exact" || scenario === "multiple-pending"
                 ? "started"
@@ -1129,6 +1185,16 @@ try {
   try {
     await cleanup.query("begin");
     await cleanup.query("set local session_replication_role = replica");
+    await cleanup.query(
+      `delete from funding_receive_refund_candidates candidate_row
+       using funding_receive_refund_scans scan_row
+       where candidate_row.event_id=scan_row.event_id and scan_row.user_id=any($1::uuid[])`,
+      [userIds],
+    );
+    await cleanup.query(
+      "delete from funding_receive_refund_scans where user_id=any($1::uuid[])",
+      [userIds],
+    );
     await cleanup.query(
       "delete from funding_receive_receipts where user_id = any($1::uuid[])",
       [userIds],

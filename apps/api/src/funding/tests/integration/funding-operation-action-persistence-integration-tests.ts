@@ -41,6 +41,7 @@ import { isValidFundingCommitPlanBoundary } from "../../validation/funding-commi
 import { readFundingExecutionPreflight } from "../../execution/operation-execution-preflight.js";
 import { ingestFundingObservationInTransaction } from "../../reconciliation/funding-observation-ingestion.js";
 import { verifyReceiveHandoffSourcePg } from "../receive-handoff-source-pg.js";
+import { verifyHandoffEventOwnershipPg } from "../handoff-event-ownership-pg.js";
 
 const ASSET = {
   networkId: "evm:137",
@@ -1803,6 +1804,46 @@ try {
     assert.ok(second);
     return { operation: incidentCommit.operation, first, second };
   };
+
+  await verifyHandoffEventOwnershipPg(client, {
+    userId,
+    asset: { networkId: ASSET.networkId, assetId: handoffToken, decimals: 6 },
+    from: handoffFunder,
+    to: handoffRecipient,
+    amount: handoffAmount,
+    create: async () => {
+      const incident = await commitIncidentPlan(opaque("event-ownership"));
+      const started = await startFundingStepAttemptForUserInTransaction(
+        client,
+        {
+          userId,
+          operationId: incident.operation.id,
+          stepId: incident.first.id,
+          canonicalActionFingerprint: incident.first.action_fingerprint,
+          executorId: incident.first.executor_id,
+        },
+      );
+      await finishFundingStepAttemptForUserInTransaction(client, {
+        userId,
+        operationId: incident.operation.id,
+        stepId: incident.first.id,
+        attemptId: started.attempt.id,
+        outcome: "submitted",
+        broadcastMayHaveOccurred: true,
+        referenceKind: "external_handoff",
+        receiptRefCiphertext: "fixture-only",
+        receiptRefLookupHmac: hash(started.attempt.id),
+        lookupKeyVersion: 1,
+        actualCosts: {},
+      });
+      return {
+        operationId: incident.operation.id,
+        stepId: incident.first.id,
+        attemptId: started.attempt.id,
+        networkId: ASSET.networkId,
+      };
+    },
+  });
 
   const revertedHandoff = await commitIncidentPlan(
     "handoff-revert-progression",

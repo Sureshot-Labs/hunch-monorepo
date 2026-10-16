@@ -78,7 +78,7 @@ import { WalletPreparationRuntimeService } from "../preparation/runtime-service.
 import { PreparationContractError } from "../preparation/core-adapter.js";
 import { ProductionFundingSourcePlanner } from "./production-source-planner.js";
 import { sessionSourceAccount } from "./session-source-account.js";
-import { suggestSmallerMarketBuy } from "./market-buy-suggestion.js";
+import { suggestSmallerBuy } from "./market-buy-suggestion.js";
 import { PolymarketFundingSourceAdapter } from "../preparation/polymarket-funding-source-adapter.js";
 import { DirectIngressFundingSourceAdapter } from "./direct-ingress-source-adapter.js";
 import { DirectWithdrawalSourceAdapter } from "./direct-withdrawal-source-adapter.js";
@@ -711,7 +711,8 @@ export class FundingPlanningRuntime {
       );
     });
     const capture =
-      !preview && request.marketBuyAmountUsdCents != null
+      !preview &&
+      (request.marketBuyAmountUsdCents != null || request.limitBuy != null)
         ? new CapturingFundingPlanningStore(this.planningStore)
         : null;
     const planner = new FundingPlanner({
@@ -829,22 +830,24 @@ export class FundingPlanningRuntime {
       ),
     });
     if (capture?.latest) {
+      const unavailable = request.limitBuy
+        ? { limitBuySuggestionUnavailable: true }
+        : { marketBuySuggestionUnavailable: true };
       try {
-        const suggestedMarketBuy = await suggestSmallerMarketBuy(
+        const suggestion = await suggestSmallerBuy(
           this.db,
           capture.latest.plannerSnapshot,
           await accountPromise,
           resolvedPolicy.runtime,
         );
-        if (suggestedMarketBuy) return { ...projection, suggestedMarketBuy };
-        if (suggestedMarketBuy === null)
-          return { ...projection, marketBuySuggestionUnavailable: true };
+        if (suggestion) return { ...projection, ...suggestion };
+        if (suggestion === null) return { ...projection, ...unavailable };
       } catch {
         // A failed advisory must not replace the authoritative funding result.
         console.warn("[funding] market Buy suggestion unavailable", {
           liquidityProjectionId: projection.liquidityProjectionId,
         });
-        return { ...projection, marketBuySuggestionUnavailable: true };
+        return { ...projection, ...unavailable };
       }
     }
     return projection;

@@ -5,7 +5,10 @@ import {
   hip4AccountFillSchema,
   hip4HistoricalOrderObservationSchema,
 } from "./hip4-account-contract.js";
-import { projectHip4Execution } from "./hip4-account-projection.js";
+import {
+  hip4SignedAmount,
+  projectHip4Execution,
+} from "./hip4-account-projection.js";
 import { hip4BasisFillFingerprint } from "./hip4-position-accounting.js";
 import { hip4AccountAddressSchema } from "../schemas/hip4-account.js";
 import {
@@ -219,6 +222,24 @@ export function interpretHip4ExactOrderFills(input: {
   }
   const original = hip4RawUnits(wire.s, 5);
   if (quantity > original) return pending("fill_quantity_exceeded");
+  // Derive the receipt from the exact, deduplicated P2 facts checked above.
+  // Keep decimal arithmetic and rebates; unknown denominations are not USDC.
+  const gross = executions.reduce(
+    (sum, entry) => sum + hip4RawUnits(entry.grossNotional, 13),
+    0n,
+  );
+  const feesKnown = executions.every(
+    (entry) => entry.feeToken === "USDC" && entry.netQuoteCash !== null,
+  );
+  const fee = feesKnown
+    ? executions.reduce(
+        (sum, entry) =>
+          sum +
+          hip4RawUnits(entry.fee.replace(/^-/, ""), 8) *
+            (entry.fee.startsWith("-") ? -1n : 1n),
+        0n,
+      )
+    : null;
   return {
     kind: "observed" as const,
     executions,
@@ -227,5 +248,24 @@ export function interpretHip4ExactOrderFills(input: {
     // Even terminal orders need independently verified coverage before an empty
     // or partial fill list can release unspent collateral.
     historyCoverage: "not_asserted" as const,
+    executionSummary: executions.length
+      ? {
+          version: 1 as const,
+          source: "hyperliquid_user_fills" as const,
+          quantity: hip4SignedAmount(quantity, 5),
+          grossNotional: hip4SignedAmount(gross, 13),
+          fee: fee === null ? null : hip4SignedAmount(fee, 8),
+          feeToken: feesKnown ? ("USDC" as const) : null,
+          netQuoteCash:
+            fee === null
+              ? null
+              : hip4SignedAmount(
+                  (wire.b ? -gross : gross) - fee * 100_000n,
+                  13,
+                ),
+          executionCount: executions.length,
+          fullQuantityObserved: quantity === original,
+        }
+      : null,
   };
 }

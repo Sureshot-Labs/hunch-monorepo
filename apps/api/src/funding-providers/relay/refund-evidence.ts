@@ -11,7 +11,8 @@ import {
 } from "../../funding/domain/hypercore-identity.js";
 import type { OwnedRouteCanonicalDestinationEvent } from "../../funding/reconciliation/owned-route-destination-observer.js";
 import { canonicalJsonHash } from "../../funding/persistence/canonical.js";
-import { RELAY_ROUTE_SPECS } from "./mappings.js";
+import { receiveRoleEventFingerprint } from "../../funding/receive/receive-role-progress.js";
+import { RELAY_HYPERCORE_EVM_STABLE_SOURCE_ASSETS } from "./mappings.js";
 import {
   RELAY_REQUEST_TRANSACTION_LIMIT,
   type RelayRequestEvidence,
@@ -64,13 +65,8 @@ function currency(location: AssetLocation) {
     };
   }
   if (
-    sameAsset(
-      location.asset,
-      RELAY_ROUTE_SPECS["base-usdc-to-hypercore-spot-usdc"].source,
-    ) ||
-    sameAsset(
-      location.asset,
-      RELAY_ROUTE_SPECS["polygon-usdc-to-hypercore-spot-usdc"].source,
+    RELAY_HYPERCORE_EVM_STABLE_SOURCE_ASSETS.some((asset) =>
+      sameAsset(location.asset, asset),
     )
   ) {
     return {
@@ -94,7 +90,7 @@ function currencyMatches(
 
 /** Provider refund status/amount is a request to inspect exact receipts, never
  * a credit. A partial receipt is retained separately from full settlement.
- * Scope: the registered USDC EVM/Core routes; legacy refund paths are untouched.
+ * Scope: registered stablecoin EVM/Core routes; legacy paths are untouched.
  * Wire fields: https://docs.relay.link/references/api/get-requests */
 export function selectRelayRefundReceiptPlan(input: {
   expected: RelayRefundExpectation;
@@ -176,7 +172,7 @@ export function selectRelayRefundReceiptPlan(input: {
     )
   )
     return pending("refund_explicit_recipient_mismatch");
-  // All admitted currencies here are USDC. Fees may reduce the return, never
+  // Admitted currencies are pinned USD stablecoins. Fees reduce the return, never
   // justify treating the original nominal source amount as received.
   if (
     BigInt(returned.amount) *
@@ -328,14 +324,7 @@ export function verifyRelayRefundReceipts(input: {
     const prior = distinct.get(key);
     if (
       prior &&
-      (prior.rawAmount !== event.rawAmount ||
-        (prior.sourceAddress === null || event.sourceAddress === null
-          ? prior.sourceAddress !== event.sourceAddress
-          : !sameAccountAddress(
-              event.networkId,
-              prior.sourceAddress,
-              event.sourceAddress,
-            )))
+      receiveRoleEventFingerprint(prior) !== receiveRoleEventFingerprint(event)
     )
       return pending("refund_receipt_conflict");
     distinct.set(key, event);

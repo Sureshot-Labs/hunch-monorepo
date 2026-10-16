@@ -133,7 +133,10 @@ try {
         {
           userId,
           binding: handoff.binding,
-          assertCurrentScope: async () => true,
+          assertCurrentScope: {
+            lockAuthority: async () => {},
+            validate: async () => true,
+          },
           readSellPositionAvailableRaw: async () => "10000000",
           reconcileKeys: {
             tradeType: "clob",

@@ -79,11 +79,23 @@ function isFundingReconciliationNoop(result: unknown): boolean {
   if (typeof result !== "object" || result === null) return false;
   const record = result as Record<string, unknown>;
   if (record.claimed !== 0) return false;
+  const receive =
+    typeof record.receiveObservation === "object" &&
+    record.receiveObservation !== null
+      ? (record.receiveObservation as Record<string, unknown>)
+      : null;
   return (
     !hasPositiveActivity(record.receiveObservation, [
       "receiptsRecorded",
       "recoveriesRequired",
       "retryableErrors",
+    ]) &&
+    !hasPositiveActivity(receive?.classificationRetry, [
+      "receiptsRecorded",
+      "recoveriesRequired",
+      "retryableErrors",
+      "refundScanErrors",
+      "refundScanCleanupErrors",
     ]) &&
     !hasPositiveActivity(record.receiveRouting, [
       "operationsCreated",

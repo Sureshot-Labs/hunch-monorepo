@@ -381,6 +381,10 @@ export async function persistHip4OrderPreparationInTransaction(
       action,
     },
     snapshot: {
+      // Computed debit can be below the user's maximum after lot rounding.
+      // Keep the exact original cap for sealed consumers; a request hash alone
+      // cannot reconstruct it. Old unsealed preparations remain compatible.
+      consentedDebitCapRaw: request.consentedDebitCapRaw,
       amounts,
       feeQuote,
       feeObservation: input.feeObservation ?? null,

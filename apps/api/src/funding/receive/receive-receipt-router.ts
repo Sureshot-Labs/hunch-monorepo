@@ -26,6 +26,7 @@ import {
   fundingReceiveReceiptOperationIdempotencyKey,
   linkFundingReceiveReceiptOperationInTransaction,
   listFundingReceiveReceiptsForRouting,
+  lockFundingReceiveSessionScope,
   recordFundingReceiveReceiptRoutingDisposition,
   settleFundingReceiveReceiptRouting,
   type FundingReceiveReceiptRoutingTarget,
@@ -765,6 +766,10 @@ export class FundingReceiveReceiptRouter {
         ) {
           throw new Error("automatic funding authorization is unavailable");
         }
+        // The receive observer holds this scope before inserting a receipt
+        // (and taking the users FK lock). Acquire it before wallet verification
+        // locks that same owner, not later during the session status refresh.
+        await lockFundingReceiveSessionScope(client, target);
         await prepared.verify(client);
         const claimed =
           await claimFundingReceiveReceiptOperationLinkInTransaction(client, {
@@ -850,6 +855,9 @@ export class FundingReceiveReceiptRouter {
       ) {
         throw new Error("automatic funding authorization is unavailable");
       }
+      // Keep policy/authorization -> receive scope -> wallet/receipt ordering
+      // for the generic planner path as well as the prepared adapter above.
+      await lockFundingReceiveSessionScope(client, target);
       const claimed =
         await claimFundingReceiveReceiptOperationLinkInTransaction(client, {
           receiptId: target.receipt.receiptId,

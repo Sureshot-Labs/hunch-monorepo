@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Pool } from "@hunch/infra";
 import { checkHip4BuyBudget } from "./funding/planner/hip4-buy-budget.js";
-import { suggestSmallerMarketBuy } from "./funding/planner/market-buy-suggestion.js";
+import { checkHip4LimitBuyBudget } from "./funding/planner/hip4-limit-buy-budget.js";
+import {
+  suggestSmallerBuy,
+  suggestSmallerMarketBuy,
+} from "./funding/planner/market-buy-suggestion.js";
+import { fundingDiscoveryRequestSchema } from "./funding/domain/schemas.js";
 import type { FundingPlanningSnapshot } from "./funding/planner/planning-types.js";
 import type { AccountValueReadModel } from "./account-value/runtime-service.js";
 import { DEFAULT_FUNDING_RUNTIME_POLICY } from "./funding/policies/funding-policy.js";
@@ -237,6 +242,176 @@ const account = {
 const wrongVenue = async () =>
   assert.fail("must not use another venue's quote arithmetic");
 
+const limitInput = () => ({
+  ...input(),
+  budgetRaw: 124500001n,
+  limitBuy: {
+    quantity: "10",
+    limitPrice: "0.415",
+    timeInForce: "Gtc" as const,
+  },
+});
+const limitQuote: NonNullable<
+  Parameters<typeof checkHip4LimitBuyBudget>[2]
+> = async (_, { request }) => {
+  const amounts = calculateHip4OrderAmounts({
+    ...request,
+    environment: "mainnet",
+    policy: { revision: "current", minimumBuyNotionalUsd: "1" },
+    feeCapRaw: "0",
+  });
+  assert.equal(amounts.kind, "calculated");
+  if (amounts.kind !== "calculated") throw new Error("unexpected_amounts");
+  if (!amounts.validation.valid)
+    throw new Error(`hip4_preparation_${amounts.validation.reason}`);
+  return { amounts, expiresAfter: Date.now() + 2000 };
+};
+
+test("limit advice keeps exact price/TIF and integer lots without market depth or cent truncation", async () => {
+  for (const timeInForce of ["Gtc", "Alo"] as const) {
+    const value = limitInput();
+    value.limitBuy.timeInForce = timeInForce as "Gtc";
+    const checked = await checkHip4LimitBuyBudget(
+      pool,
+      value,
+      async (db, quote) => {
+        assert.equal(quote.request.quantity, "3");
+        assert.equal(quote.request.limitPrice, "0.415");
+        assert.equal(quote.request.timeInForce, timeInForce);
+        assert.equal(quote.request.outcomeSide, "NO");
+        return limitQuote(db, quote);
+      },
+    );
+    assert.equal(checked?.quantity, "3");
+    assert.equal(checked?.requiredRaw, 124500000n);
+  }
+  assert.equal(
+    await checkHip4LimitBuyBudget(
+      pool,
+      { ...limitInput(), budgetRaw: 124499999n },
+      limitQuote,
+    ),
+    undefined,
+  );
+  const lowPrice = await checkHip4LimitBuyBudget(
+    pool,
+    {
+      ...limitInput(),
+      budgetRaw: 100000000n,
+      limitBuy: { quantity: "1000", limitPrice: "0.01", timeInForce: "Gtc" },
+    },
+    limitQuote,
+  );
+  assert.equal(lowPrice?.quantity, "100");
+});
+
+test("limit advice rejects stale, changed, unpriced and over-budget quotes", async () => {
+  for (const reason of [
+    "hip4_preparation_fee_unavailable",
+    "hip4_preparation_invalid_policy",
+  ])
+    assert.equal(
+      await checkHip4LimitBuyBudget(pool, limitInput(), async () => {
+        throw new Error(reason);
+      }),
+      null,
+    );
+  for (const change of [
+    "quantity",
+    "price",
+    "fee",
+    "expiry",
+    "debit",
+  ] as const) {
+    assert.equal(
+      await checkHip4LimitBuyBudget(pool, limitInput(), async (db, quote) => {
+        const result = await limitQuote(db, quote);
+        return {
+          ...result,
+          ...(change === "expiry" ? { expiresAfter: Date.now() - 1 } : {}),
+          amounts: {
+            ...result.amounts,
+            ...(change === "quantity" ? { quantity: "4" } : {}),
+            ...(change === "price" ? { limitPrice: "0.414" } : {}),
+            ...(change === "fee" ? { feeCapRaw: null } : {}),
+            ...(change === "debit" ? { debitCapRaw: "125000000" } : {}),
+          },
+        };
+      }),
+      null,
+    );
+  }
+  for (const changed of [
+    { tokenId: "mainnet:14740" },
+    { deadlineMs: Date.now() - 1 },
+  ])
+    assert.equal(
+      await checkHip4LimitBuyBudget(
+        pool,
+        { ...limitInput(), ...changed },
+        wrongVenue,
+      ),
+      null,
+    );
+});
+
+test("shared funding advice uses the native limit quote without market sizing and keeps exact debit", async () => {
+  const base = snapshot();
+  const value = {
+    ...base,
+    request: {
+      ...base.request,
+      marketBuyAmountUsdCents: undefined,
+      marketBuySlippageBps: undefined,
+      limitBuy: limitInput().limitBuy,
+    },
+    projection: { ...base.projection, availableNowRaw: "124500001" },
+  };
+  const result = await suggestSmallerBuy(
+    pool,
+    value,
+    account,
+    DEFAULT_FUNDING_RUNTIME_POLICY,
+    wrongVenue,
+    wrongVenue,
+    wrongVenue,
+    (db, request) => checkHip4LimitBuyBudget(db, request, limitQuote),
+  );
+  assert.equal(result?.suggestedLimitBuy?.quantity, "3");
+  assert.equal(result?.suggestedLimitBuy?.requiredRaw, "124500000");
+  assert.equal(result?.suggestedLimitBuy?.originalQuantity, "10");
+  assert.equal(result?.suggestedMarketBuy, undefined);
+  const schemaRequest = {
+    ...value.request,
+    confirmedSourceAmount: null,
+    destinationOptionId: "native-destination",
+    withdrawalRecipientId: null,
+    venueBindingOptionId: "native-binding",
+    maxFeeUsd: null,
+    maxSlippageBps: null,
+    deadline: null,
+  };
+  const valid = fundingDiscoveryRequestSchema.safeParse(schemaRequest);
+  assert.equal(valid.success, true, JSON.stringify(valid.error?.issues));
+  for (const change of [
+    { marketBuyAmountUsdCents: 415 },
+    { marketBuySlippageBps: 0 },
+    {
+      consumerIntent: {
+        ...value.request.consumerIntent,
+        venueId: "polymarket",
+      },
+    },
+    { limitBuy: { ...value.request.limitBuy, quantity: "1.5" } },
+    { limitBuy: { ...value.request.limitBuy, limitPrice: "0.00000" } },
+  ])
+    assert.equal(
+      fundingDiscoveryRequestSchema.safeParse({ ...schemaRequest, ...change })
+        .success,
+      false,
+    );
+});
+
 test("ordinary shortfall advice invokes the native adapter and retains its checked expiry", async () => {
   const expiry = Date.now() + 1500;
   const value = await suggestSmallerMarketBuy(
@@ -433,4 +608,40 @@ test("native advice reuses frozen routes and rechecks their fee allowance agains
   );
   assert.deepEqual(budgets, [500000000n, 492000000n]);
   assert.equal(checked?.amountUsdCents, 492);
+  const nativeLimitSnapshot = {
+    ...value,
+    request: {
+      ...value.request,
+      marketBuyAmountUsdCents: undefined,
+      marketBuySlippageBps: undefined,
+      limitBuy: {
+        quantity: "20",
+        limitPrice: "0.5",
+        timeInForce: "Gtc" as const,
+      },
+    },
+  };
+  budgets.length = 0;
+  const smaller = await suggestSmallerBuy(
+    pool,
+    nativeLimitSnapshot,
+    account,
+    {
+      ...DEFAULT_FUNDING_RUNTIME_POLICY,
+      placement: {
+        ...DEFAULT_FUNDING_RUNTIME_POLICY.placement,
+        minimumDestinationUsd: "0",
+      },
+    },
+    wrongVenue,
+    wrongVenue,
+    wrongVenue,
+    (db, request) => {
+      budgets.push(request.budgetRaw);
+      return checkHip4LimitBuyBudget(db, request, limitQuote);
+    },
+  );
+  assert.deepEqual(budgets, [500000000n, 492000000n]);
+  assert.equal(smaller?.suggestedLimitBuy?.quantity, "9");
+  assert.equal(smaller?.suggestedLimitBuy?.requiredRaw, "450000000");
 });

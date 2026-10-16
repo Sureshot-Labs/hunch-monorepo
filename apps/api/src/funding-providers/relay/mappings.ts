@@ -15,6 +15,7 @@ import {
   isHypercoreMainnetUsdc,
   isHypercoreTokenId,
   RELAY_HYPERCORE_EXECUTOR,
+  hypercoreSourceLocationPattern,
 } from "../../funding/domain/hypercore-identity.js";
 import type { AssetRef, NetworkId } from "../../funding/domain/types.js";
 import {
@@ -66,14 +67,20 @@ export type RelayRouteSpec = Readonly<{
     | "hypercore-spot-usdc-to-base-usdc"
     | "hypercore-spot-usdc-to-polygon-usdc"
     | "hypercore-spot-usdc-to-polygon-pusd"
+    | "hypercore-perps-usdc-to-base-usdc"
+    | "hypercore-perps-usdc-to-polygon-usdc"
+    | "hypercore-perps-usdc-to-polygon-pusd"
     | "base-usdc-to-hypercore-spot-usdc"
-    | "polygon-usdc-to-hypercore-spot-usdc";
+    | "polygon-usdc-to-hypercore-spot-usdc"
+    | "polygon-pusd-to-hypercore-spot-usdc";
   source: AssetRef;
   destination: AssetRef;
   sourceVm: RelayVm;
   destinationVm: RelayVm;
   quoteMode: "exact_input" | "expected_output";
   rehearsalScenario: RelayRehearsalScenario | null;
+  /** Omitted on legacy spot registrations; never infer class from AssetRef. */
+  nativeSourceDex?: "spot" | "";
   solanaDirectDestination?: RelaySolanaDirectDestinationConfig;
 }>;
 
@@ -230,6 +237,31 @@ const route = (
 };
 
 export const RELAY_ROUTE_SPECS: Readonly<Record<string, RelayRouteSpec>> = {
+  ...Object.fromEntries(
+    (
+      [
+        ["hypercore-perps-usdc-to-base-usdc", "evm:8453", BASE_USDC],
+        [
+          "hypercore-perps-usdc-to-polygon-usdc",
+          "evm:137",
+          "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+        ],
+        ["hypercore-perps-usdc-to-polygon-pusd", "evm:137", POLYGON_PUSD],
+      ] as const
+    ).map(([routeId, networkId, assetId]): [string, RelayRouteSpec] => [
+      routeId,
+      {
+        routeId,
+        source: HYPERCORE_MAINNET_USDC,
+        destination: { networkId, assetId, decimals: 6 },
+        sourceVm: "hypercore",
+        destinationVm: "evm",
+        nativeSourceDex: "",
+        quoteMode: "expected_output",
+        rehearsalScenario: null,
+      },
+    ]),
+  ),
   // Protocol contracts only. This does not add a funding venue/catalog alias
   // or enable a route in the effective runtime policy.
   "base-usdc-to-hypercore-spot-usdc": {
@@ -244,6 +276,15 @@ export const RELAY_ROUTE_SPECS: Readonly<Record<string, RelayRouteSpec>> = {
   "polygon-usdc-to-hypercore-spot-usdc": {
     routeId: "polygon-usdc-to-hypercore-spot-usdc",
     source: { networkId: "evm:137", assetId: POLYGON_USDC, decimals: 6 },
+    destination: HYPERCORE_MAINNET_USDC,
+    sourceVm: "evm",
+    destinationVm: "hypercore",
+    quoteMode: "expected_output",
+    rehearsalScenario: null,
+  },
+  "polygon-pusd-to-hypercore-spot-usdc": {
+    routeId: "polygon-pusd-to-hypercore-spot-usdc",
+    source: { networkId: "evm:137", assetId: POLYGON_PUSD, decimals: 6 },
     destination: HYPERCORE_MAINNET_USDC,
     sourceVm: "evm",
     destinationVm: "hypercore",
@@ -413,6 +454,9 @@ export function resolveRelayRouteSpec(
   }
   const matches = Object.values(RELAY_ROUTE_SPECS).filter(
     (spec) =>
+      (spec.sourceVm !== "hypercore" ||
+        route.sourceLocationPatternId ===
+          hypercoreSourceLocationPattern(spec.nativeSourceDex ?? "spot")) &&
       sameAsset(spec.source, route.sourceAsset) &&
       sameAsset(spec.destination, route.destinationAsset),
   );
@@ -549,6 +593,19 @@ export function isRelayPinnedStableAsset(asset: AssetRef): boolean {
   );
 }
 
+/** Native inbound execution and its cash/debit/refund evidence share one
+ * registered stable-source subset. A new volatile route must not acquire a
+ * dollar valuation merely by being registered. Distinct assets stay distinct. */
+export const RELAY_HYPERCORE_EVM_STABLE_SOURCE_ASSETS: readonly AssetRef[] =
+  Object.values(RELAY_ROUTE_SPECS)
+    .filter(
+      (spec) =>
+        spec.sourceVm === "evm" &&
+        spec.destinationVm === "hypercore" &&
+        isRelayPinnedStableAsset(spec.source),
+    )
+    .map((spec) => spec.source);
+
 export function relayStableAssetSymbol(
   asset: AssetRef,
 ): "pUSD" | "USDC" | null {
@@ -637,6 +694,7 @@ function assertRelayWalletRouteVms(spec: RelayRouteSpec): void {
     if (
       !exact ||
       exact.sourceVm !== "hypercore" ||
+      (exact.nativeSourceDex ?? "spot") !== (spec.nativeSourceDex ?? "spot") ||
       !sameAsset(exact.destination, spec.destination)
     )
       throw new Error("Relay native route is not registered");

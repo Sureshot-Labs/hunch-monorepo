@@ -6,12 +6,21 @@ import { createIntegrationTestPool } from "../../../test-database-target.js";
 import {
   FUNDING_REFUND_MANIFEST_RECEIPTS_SQL,
   FUNDING_REFUND_OUTSIDE_PROOF_SQL,
+  FUNDING_CURRENT_REFUND_FIRST_PAGE_SQL,
+  FUNDING_CURRENT_REFUND_NEXT_PAGE_SQL,
+  FUNDING_REFUND_COMPLETION_PROOF_SQL,
   allocateFundingObservationInTransaction,
   appendFundingRefundCompletionProof,
   hasFundingRefundOutsideProof,
   listFundingRefundManifestReceipts,
 } from "../../persistence/funding-operation-repository.js";
 import { canonicalJsonHash } from "../../persistence/canonical.js";
+import { verifyRefundCompletionScanPg } from "../refund-completion-scan-pg.js";
+import { verifyRefundObservationScanPg } from "../refund-observation-scan-pg.js";
+import {
+  REFUND_OBSERVATION_FIRST_PAGE_SQL,
+  REFUND_OBSERVATION_NEXT_PAGE_SQL,
+} from "../../reconciliation/relay-refund-observation-scan.js";
 
 const pool = await createIntegrationTestPool({
   max: 1,
@@ -37,6 +46,8 @@ try {
   await db.query(
     "create temp table funding_observations (like public.funding_observations including defaults including constraints including indexes) on commit drop",
   );
+  await verifyRefundCompletionScanPg(db);
+  await verifyRefundObservationScanPg(db);
   const operationId = randomUUID(),
     segmentId = randomUUID();
   const base = {
@@ -281,6 +292,21 @@ try {
   await db.query(
     `prepare refund_outside_probe(uuid,uuid,uuid[]) as ${FUNDING_REFUND_OUTSIDE_PROOF_SQL}`,
   );
+  await db.query(
+    `prepare refund_current_first(uuid,uuid,integer) as ${FUNDING_CURRENT_REFUND_FIRST_PAGE_SQL}`,
+  );
+  await db.query(
+    `prepare refund_current_next(uuid,uuid,integer,text,text,text) as ${FUNDING_CURRENT_REFUND_NEXT_PAGE_SQL}`,
+  );
+  await db.query(
+    `prepare refund_proof_point(uuid,uuid,uuid,text,text) as ${FUNDING_REFUND_COMPLETION_PROOF_SQL}`,
+  );
+  await db.query(
+    `prepare refund_observation_first(uuid,integer) as ${REFUND_OBSERVATION_FIRST_PAGE_SQL}`,
+  );
+  await db.query(
+    `prepare refund_observation_next(uuid,integer,text,uuid) as ${REFUND_OBSERVATION_NEXT_PAGE_SQL}`,
+  );
   type ExplainNode = {
     Plans?: ExplainNode[];
     "Node Type": string;
@@ -290,11 +316,94 @@ try {
     "Actual Rows"?: number;
     "Actual Loops"?: number;
     "Rows Removed by Filter"?: number;
+    "Local Hit Blocks"?: number;
   };
   const walk = (node: ExplainNode): ExplainNode[] => [
     node,
     ...(node.Plans ?? []).flatMap(walk),
   ];
+  for (const mode of ["force_custom_plan", "force_generic_plan"] as const) {
+    await db.query(`set local plan_cache_mode=${mode}`);
+    const cases: readonly [string, string][] = [
+      [
+        "observation-first",
+        `execute refund_observation_first('${operationId}',8)`,
+      ],
+      [
+        "observation-next",
+        `execute refund_observation_next('${operationId}',8,'refund_credit','${records[0].id}')`,
+      ],
+      [
+        "observation-empty-tail",
+        `execute refund_observation_next('${operationId}',8,'venue_readiness','ffffffff-ffff-ffff-ffff-ffffffffffff')`,
+      ],
+      [
+        "observation-foreign-operation",
+        `execute refund_observation_first('${randomUUID()}',8)`,
+      ],
+      [
+        "first",
+        `execute refund_current_first('${operationId}','${segmentId}',8)`,
+      ],
+      [
+        "next",
+        `execute refund_current_next('${operationId}','${segmentId}',8,'evm:8453','${hashes[0]}','7')`,
+      ],
+      [
+        "empty-tail",
+        `execute refund_current_next('${operationId}','${segmentId}',8,'evm:8453','0x${"f".repeat(64)}','7')`,
+      ],
+      [
+        "other-segment",
+        `execute refund_current_first('${operationId}','${randomUUID()}',8)`,
+      ],
+      [
+        "proof-hit",
+        `execute refund_proof_point('${records[0].id}','${operationId}','${segmentId}','${canonicalJsonHash(proof)}','${base.metadata.observerId}')`,
+      ],
+      [
+        "proof-miss",
+        `execute refund_proof_point('${records[0].id}','${operationId}','${segmentId}','${"f".repeat(64)}','${base.metadata.observerId}')`,
+      ],
+    ];
+    for (const [label, sql] of cases) {
+      const plan: { Plan: ExplainNode; "Execution Time": number } = (
+        await db.query(`explain (analyze,buffers,format json) ${sql}`)
+      ).rows[0]["QUERY PLAN"][0];
+      const scans = walk(plan.Plan).filter(
+        (node) => node["Relation Name"] === "funding_observations",
+      );
+      assert.ok(scans.length > 0);
+      for (const scan of scans) {
+        assert.equal(scan["Node Type"], "Index Scan", `${mode}/${label}`);
+        assert.match(
+          scan["Index Cond"] ?? "",
+          label.startsWith("proof")
+            ? /\bid =/u
+            : label.startsWith("observation")
+              ? /operation_id/u
+              : /operation_id.*segment_id/u,
+        );
+        assert.ok(
+          (scan["Actual Rows"] ?? 0) + (scan["Rows Removed by Filter"] ?? 0) <=
+            (label.startsWith("proof") ? 1 : 8),
+        );
+      }
+      console.log(
+        JSON.stringify({
+          suite: "refund-current-pg16",
+          mode,
+          label,
+          ms: plan["Execution Time"],
+          buffers: plan.Plan["Local Hit Blocks"],
+          scans: scans.map((scan) => ({
+            index: scan["Index Name"],
+            rows: scan["Actual Rows"],
+          })),
+        }),
+      );
+    }
+  }
   for (const [label, sql] of [
     [
       "manifest-hit",

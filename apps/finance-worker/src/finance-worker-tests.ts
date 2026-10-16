@@ -564,6 +564,33 @@ const tests: TestCase[] = [
       assert.equal(job.jitterSec, 0);
       assert.equal(job.isNoopResult?.({ claimed: 0 }), true);
       assert.equal(job.isNoopResult?.({ claimed: 1 }), false);
+      for (const field of [
+        "receiptsRecorded",
+        "retryableErrors",
+        "refundScanErrors",
+        "refundScanCleanupErrors",
+      ]) {
+        assert.equal(
+          job.isNoopResult?.({
+            claimed: 0,
+            receiveObservation: {
+              classificationRetry: { [field]: 1 },
+            },
+          }),
+          false,
+          `known-event ${field} must not be discarded as idle`,
+        );
+      }
+      assert.equal(
+        job.isNoopResult?.({
+          claimed: 0,
+          receiveObservation: {
+            classificationRetry: { refundScanPages: 1, refundScanErrors: 0 },
+          },
+        }),
+        true,
+        "derived-only progress does not produce noisy financial activity logs",
+      );
       assert.equal(
         job.isNoopResult?.({
           claimed: 0,

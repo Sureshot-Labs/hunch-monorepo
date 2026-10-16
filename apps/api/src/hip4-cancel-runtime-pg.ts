@@ -55,7 +55,7 @@ export async function testHip4CommonCancel(input: {
     )
   ).rows[0].n;
   try {
-    await lifecycle("exit-only");
+    await lifecycle("unreleased");
     await policy("hip4_trading", {
       minimumBuyNotionalUsd: "invalid BUY setting",
       cancelSignatureTtlMs: 30000,
@@ -66,8 +66,9 @@ export async function testHip4CommonCancel(input: {
     await assert.rejects(
       createApiTradingApplicationService({ pool }).prepareCancelOrder(request),
       /lifecycle_disabled/u,
-      "unchanged public capability ceiling still disables financial actions",
+      "ordinary unreleased lifecycle disables new cancellation preparation",
     );
+    await lifecycle("exit-only");
     for (const kind of ["telegram_bot", "worker", "admin_test"] as const)
       await assert.rejects(
         common.prepareCancelOrder({ ...request, actor: { kind, userId } }),

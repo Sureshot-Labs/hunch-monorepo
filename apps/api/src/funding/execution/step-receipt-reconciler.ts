@@ -3038,7 +3038,7 @@ export class FundingStepReceiptReconciliationDriver {
       if (result.value.kind !== "receipt") continue;
       const { target, inspected } = result.value;
       try {
-        await (
+        const stored = await (
           this.dependencies.applyEvidence ?? applyFundingStepReceiptEvidence
         )(pool, {
           operationId: target.operationId,
@@ -3048,7 +3048,13 @@ export class FundingStepReceiptReconciliationDriver {
           receipt: inspected,
           now,
         });
-        if (inspected.status === "finalized") receiptsFinalized += 1;
+        if (
+          stored.status === "finalized" &&
+          stored.actionMatch === true &&
+          stored.canonical &&
+          stored.failureCode === null
+        )
+          receiptsFinalized += 1;
       } catch (error) {
         failures.push(error);
       }

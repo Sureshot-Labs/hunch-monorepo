@@ -15,7 +15,7 @@ import { canonicalAssetId, sameAsset } from "./asset-identity.js";
 import { SOLANA_NATIVE_ASSET } from "./network-fees.js";
 import type { AssetRef } from "./types.js";
 import {
-  HYPERCORE_SPOT_LOCATION_PATTERN,
+  hypercoreSourceLocationPattern,
   isHypercoreMainnetUsdc,
 } from "./hypercore-identity.js";
 
@@ -125,7 +125,7 @@ export function withWithdrawalPlanningContract(
     }
     const nativeSource = isHypercoreMainnetUsdc(spec.source);
     const sourceLocationPatternId = nativeSource
-      ? HYPERCORE_SPOT_LOCATION_PATTERN
+      ? hypercoreSourceLocationPattern(spec.nativeSourceDex ?? "spot")
       : relayWalletLocationPatternId(spec.source);
     if (!sourceLocationPatternId) continue;
     sourceLocations.set(spec.routeId, {

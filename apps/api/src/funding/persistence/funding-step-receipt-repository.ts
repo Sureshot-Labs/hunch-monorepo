@@ -20,12 +20,34 @@ import { isPositiveRawAmount, isRawAmount } from "../domain/raw-amount.js";
 import type { JsonValue, NormalizedAction } from "../domain/types.js";
 import { moneySchema, normalizedActionSchema } from "../domain/schemas.js";
 import { loadFundingLifecycleFactsForOperationInTransaction } from "../lifecycle/funding-lifecycle-facts-repository.js";
-import { deriveFundingLifecycle } from "../lifecycle/funding-lifecycle-projector.js";
+import {
+  deriveFundingLifecycle,
+  FUNDING_PHYSICAL_EVENT_OWNERSHIP_CONFLICT,
+} from "../lifecycle/funding-lifecycle-projector.js";
+import {
+  prelockFundingHandoffEvent,
+  revalidateFundingHandoffEvent,
+  claimFundingHandoffEvent,
+  handoffOwnedPhysicalEvent,
+} from "./funding-handoff-event-ownership.js";
 import {
   allocateFundingObservationInTransaction,
   FundingPersistenceError,
+  releaseFundingReservationInTransaction,
 } from "./funding-operation-repository.js";
 import { reduceFundingOperationInTransaction } from "../reconciliation/funding-reducer.js";
+import {
+  loadPolymarketHandoffReadHint,
+  loadPolymarketHandoffReservationBindings,
+} from "./polymarket-handoff-read-hint.js";
+import type { StoredPolymarketHandoffBinding } from "./polymarket-handoff-binding-repository.js";
+import { readFinalizedPolymarketHandoffReceipt } from "../domain/polymarket-handoff-binding.js";
+import {
+  CANONICAL_EVENT_OWNERSHIP_READ_SQL,
+  type CanonicalEventOwnershipRow,
+} from "./canonical-event-lock-sql.js";
+import { sameAsset, sameAccountAddress } from "../domain/asset-identity.js";
+import { tryLockFundingPhysicalEvent } from "./funding-physical-event-gate.js";
 
 type JsonRecord = Readonly<Record<string, JsonValue>>;
 
@@ -555,6 +577,13 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
   }>,
 ): Promise<FundingStepReceiptObservation> {
   const now = input.now ?? new Date();
+  // Shared physical event ownership precedes O, including the previous event
+  // when chain evidence invalidates an earlier receipt. The private advisory
+  // handoff lock alone does not serialize with external receive/refund writers.
+  const handoffPrelock = await prelockFundingHandoffEvent(client, {
+    ...input,
+    now,
+  });
   const operationResult = await client.query<{
     operation_user_id: string;
     requested_source_amount: JsonRecord | null;
@@ -578,6 +607,8 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     );
   }
   const stepResult = await client.query<{
+    ordinal: number;
+    action_fingerprint: string;
     step_kind: FundingStepReceiptTarget["stepKind"];
     executor_id: string;
     segment_id: string | null;
@@ -585,7 +616,7 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     action_validation_result: JsonRecord;
   }>(
     `
-      select step.step_kind,
+      select step.ordinal, step.action_fingerprint, step.step_kind,
              step.executor_id,
              step.segment_id,
              step.normalized_action,
@@ -607,9 +638,11 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
   const attemptResult = await client.query<{
     id: string;
     native_send_bound: boolean;
+    canonical_action_fingerprint: string;
+    executor_id: string;
   }>(
     `
-      select current_attempt.id,
+      select current_attempt.id, current_attempt.canonical_action_fingerprint, current_attempt.executor_id,
         case when current_attempt.executor_id='relay_hypercore_native_v1'
           and current_attempt.reference_kind='external_handoff'
           and current_attempt.actual_costs#>>'{nativeSubmission,phase}'='admitted'
@@ -631,7 +664,32 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     );
   }
 
+  await revalidateFundingHandoffEvent(client, input, handoffPrelock);
+  const existing = await client.query<ReceiptDbRow>(
+    `select ${receiptColumns} from funding_step_receipt_observations
+      where attempt_id = $1 for update`,
+    [input.attemptId],
+  );
+  const previous = existing.rows[0];
+  if (
+    previous &&
+    shouldIgnoreFundingStepReceiptUpdate(previous.status, input.receipt)
+  ) {
+    return mapReceipt(previous);
+  }
+
   let incomingReceipt = input.receipt;
+  if (handoffPrelock.previous) {
+    incomingReceipt = {
+      ...incomingReceipt,
+      evidence: {
+        ...incomingReceipt.evidence,
+        handoffOwnedPhysicalEventV1: handoffOwnedPhysicalEvent(
+          handoffPrelock.previous,
+        ),
+      },
+    };
+  }
   let nativeSourceProof: HypercoreTransferEvidence | null = null;
   const nativeSend =
     scoped.executor_id === "relay_hypercore_native_v1" &&
@@ -669,6 +727,7 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
       );
     }
   }
+  let handoffReadBinding: StoredPolymarketHandoffBinding | null = null;
   if (
     scoped.step_kind === "external_handoff" &&
     (incomingReceipt.status === "confirmed" ||
@@ -703,18 +762,11 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
       // Receipt inspection can discover a hash without the provider. Serialize
       // the physical Transfer identity before accepting it so two overlapping
       // same-amount operations can never consume the same on-chain event.
-      await client.query(
-        `
-          select pg_advisory_xact_lock(
-            hashtextextended($1::text, 0)
-          )
-        `,
-        [
-          [input.networkId, canonicalTransactionHash, handoffEventIndex].join(
-            ":",
-          ),
-        ],
-      );
+      await tryLockFundingPhysicalEvent(client, {
+        networkId: input.networkId,
+        transactionHash: canonicalTransactionHash,
+        eventIndex: handoffEventIndex,
+      });
       const transactionHashSource =
         incomingReceipt.evidence.transactionHashSource;
       const chainTransactionBlockTimestampMs =
@@ -781,13 +833,17 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
             );
       if (conflictingReceipt?.rows[0]) {
         incomingReceipt = {
-          status: "mismatch",
-          actionMatch: false,
-          ledgerHeight: incomingReceipt.ledgerHeight,
-          blockHash: incomingReceipt.blockHash,
+          status: previous?.status === "finalized" ? "finalized" : "mismatch",
+          actionMatch: previous?.status === "finalized" ? true : false,
+          ledgerHeight: previous?.ledger_height ?? incomingReceipt.ledgerHeight,
+          blockHash: previous?.block_hash ?? incomingReceipt.blockHash,
           canonical: true,
-          failureCode: "external_handoff_transfer_already_allocated",
+          failureCode:
+            previous?.status === "finalized"
+              ? FUNDING_PHYSICAL_EVENT_OWNERSHIP_CONFLICT
+              : "external_handoff_transfer_already_allocated",
           evidence: {
+            ...incomingReceipt.evidence,
             conflictingOperationId: conflictingReceipt.rows[0].operation_id,
             handoffEventIndex,
             handoffPhysicalIdentityConflict: true,
@@ -797,16 +853,6 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     }
   }
 
-  const existing = await client.query<ReceiptDbRow>(
-    `
-      select ${receiptColumns}
-      from funding_step_receipt_observations
-      where attempt_id = $1
-      for update
-    `,
-    [input.attemptId],
-  );
-  const previous = existing.rows[0];
   if (
     previous &&
     shouldIgnoreFundingStepReceiptUpdate(previous.status, incomingReceipt)
@@ -814,6 +860,81 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
     return mapReceipt(previous);
   }
 
+  if (
+    (incomingReceipt.status === "confirmed" ||
+      incomingReceipt.status === "finalized") &&
+    incomingReceipt.actionMatch === true &&
+    incomingReceipt.canonical &&
+    incomingReceipt.failureCode === null
+  ) {
+    const ownership = await claimFundingHandoffEvent(client, handoffPrelock);
+    if (ownership === "conflict" || ownership === "anchor_changed") {
+      // A terminal mismatch is already non-authoritative/manual recovery. Its
+      // only permitted correction is a fully accepted finalized receipt; keep
+      // the original fact when that correction cannot own the physical event.
+      if (previous?.status === "mismatch") return mapReceipt(previous);
+      // Keep chain facts separate from allocation authority. In particular a
+      // legacy finalized receipt cannot be rewritten as a fabricated reorg or
+      // a safe nonbroadcast failure merely because its transfer was consumed.
+      incomingReceipt = {
+        ...incomingReceipt,
+        status: previous?.status ?? "pending",
+        ledgerHeight: previous?.ledger_height ?? incomingReceipt.ledgerHeight,
+        blockHash: previous?.block_hash ?? incomingReceipt.blockHash,
+        actionMatch:
+          previous?.status === "finalized" || previous?.status === "confirmed"
+            ? true
+            : null,
+        failureCode: FUNDING_PHYSICAL_EVENT_OWNERSHIP_CONFLICT,
+        evidence: {
+          ...incomingReceipt.evidence,
+          handoffPhysicalIdentityConflict: true,
+          handoffOwnershipConflictReason: ownership,
+        },
+      };
+    } else if (ownership === "claimed") {
+      const claimedEvent = handoffPrelock.incoming;
+      if (!claimedEvent) throw new Error("claimed handoff event is missing");
+      incomingReceipt = {
+        ...incomingReceipt,
+        evidence: {
+          ...incomingReceipt.evidence,
+          handoffPhysicalIdentityConflict: false,
+          handoffOwnedPhysicalEventV1: handoffOwnedPhysicalEvent(claimedEvent),
+        },
+      };
+    }
+  }
+
+  if (
+    scoped.step_kind === "external_handoff" &&
+    ["polymarket_deposit_wallet_transfer", "polymarket_safe_transfer"].includes(
+      String(scoped.normalized_action.handoffKind),
+    )
+  ) {
+    // Never persist a transport-supplied discovery hint as server provenance.
+    // O is already locked; immutable plans and actual physical fences are read
+    // here, while current receipt/E remain the only execution evidence.
+    const { polymarketHandoffReadV1: _untrustedHint, ...evidence } =
+      incomingReceipt.evidence;
+    const indexed = await loadPolymarketHandoffReadHint(client, {
+      userId: scopedOperation.operation_user_id,
+      operationId: input.operationId,
+      stepId: input.stepId,
+      stepOrdinal: scoped.ordinal,
+    });
+    handoffReadBinding = indexed?.stored ?? null;
+    incomingReceipt = {
+      ...incomingReceipt,
+      evidence: {
+        ...evidence,
+        // A deleted/corrupt binding must not erase discovery of an older credit
+        // during reorg/repair. The read path will reject its current proof.
+        polymarketHandoffReadV1:
+          indexed?.hint ?? previous?.evidence.polymarketHandoffReadV1 ?? null,
+      },
+    };
+  }
   const incomingIsFinal =
     incomingReceipt.status === "finalized" ||
     (incomingReceipt.status === "failed" &&
@@ -857,7 +978,15 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
           -- causal evidence already attached by the profile verifier.
           evidence = funding_step_receipt_observations.evidence || excluded.evidence,
           observed_at = excluded.observed_at,
-          finalized_at = excluded.finalized_at,
+          -- Preserve PostgreSQL microseconds on repeated terminal evidence.
+          -- The mapped JS Date has millisecond precision; round-tripping it
+          -- would violate the immutable finalization-time constraint.
+          finalized_at = case
+            when funding_step_receipt_observations.status = excluded.status
+              and funding_step_receipt_observations.finalized_at is not null
+            then funding_step_receipt_observations.finalized_at
+            else excluded.finalized_at
+          end,
           reorged_at = excluded.reorged_at
       returning ${receiptColumns}
     `,
@@ -880,6 +1009,54 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
   );
   const row = stored.rows[0];
   if (!row) throw new Error("funding step receipt upsert returned no row");
+
+  if (
+    handoffReadBinding?.sourceReservationActive &&
+    handoffPrelock.incoming &&
+    row.status === "finalized" &&
+    scoped.action_fingerprint ===
+      handoffReadBinding.binding.handoffFingerprint &&
+    scoped.executor_id === handoffReadBinding.binding.handoffExecutorId
+  ) {
+    // E was locked before O and claimed above. Only READ that same physical
+    // identity here: never acquire a new E while already holding O.
+    const physical = (
+      await client.query<
+        CanonicalEventOwnershipRow & {
+          network_id: string;
+          tx_hash: string;
+          event_index: string;
+        }
+      >(CANONICAL_EVENT_OWNERSHIP_READ_SQL, [
+        input.networkId,
+        handoffPrelock.incoming.transactionHash,
+        handoffPrelock.incoming.eventIndex,
+      ])
+    ).rows[0];
+    if (
+      physical &&
+      readFinalizedPolymarketHandoffReceipt({
+        operationId: input.operationId,
+        binding: handoffReadBinding.binding,
+        attempt: {
+          operationId: input.operationId,
+          id: input.attemptId,
+          stepId: input.stepId,
+          stepOrdinal: scoped.ordinal,
+          actionFingerprint: scopedAttempt.canonical_action_fingerprint,
+          executorId: scopedAttempt.executor_id,
+          broadcastMayHaveOccurred: true,
+        },
+        receipt: mapReceipt(row),
+        event: physical,
+      })
+    )
+      await releaseFundingReservationInTransaction(client, {
+        reservationId: handoffReadBinding.sourceReservationId,
+        outcomeReason: "exact_owned_handoff_source_finalized",
+        now,
+      });
+  }
 
   if (
     nativeSourceProof &&
@@ -985,6 +1162,46 @@ export async function applyFundingStepReceiptEvidenceInTransaction(
           receiptAttemptId: input.attemptId,
         },
       });
+      if (
+        observationKind === "source_debit" &&
+        scoped.segment_id &&
+        input.networkId === "evm:137" &&
+        row.failure_code === null &&
+        scoped.action_validation_result.relayNativeDestination ===
+          "hyperliquid:mainnet"
+      ) {
+        const bindings = await loadPolymarketHandoffReservationBindings(
+          client,
+          {
+            userId: scopedOperation.operation_user_id,
+            operationId: input.operationId,
+            segmentId: scoped.segment_id,
+          },
+        );
+        if (bindings.length === 1) {
+          const matched = bindings[0].stored;
+          const source = matched.binding.executionSource;
+          if (
+            matched.controllerFenceActive &&
+            sameAsset(source.asset, {
+              networkId: input.networkId,
+              assetId: postcondition.expectedSourceAssetId,
+              decimals: postcondition.expectedSourceAssetDecimals,
+            }) &&
+            sameAccountAddress(
+              source.asset.networkId,
+              String(source.details.address),
+              postcondition.expectedSourceAddress,
+            ) &&
+            postcondition.expectedSourceRaw === matched.binding.rawAmount
+          )
+            await releaseFundingReservationInTransaction(client, {
+              reservationId: matched.controllerFenceId,
+              outcomeReason: "exact_bound_controller_source_finalized",
+              now,
+            });
+        }
+      }
     }
     const destinationCreditTransfers = row.evidence.destinationCreditTransfers;
     if (

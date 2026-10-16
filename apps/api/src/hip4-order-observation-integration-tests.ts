@@ -20,6 +20,7 @@ import {
   HIP4_EXACT_ORDER_FILLS_SQL,
   HIP4_REJECTED_ORDER_EXECUTION_CONFLICT_SQL,
   HIP4_CLAIM_ORDER_OBSERVATION_SQL,
+  HIP4_CLAIM_COMPLETED_ORDER_OBSERVATION_SQL,
   HIP4_CLAIM_EXACT_ORDER_OBSERVATION_SQL,
   HIP4_ORDER_OBSERVATION_CONTEXT_SQL,
   recordHip4OrderObservationInTransaction as record,
@@ -39,6 +40,7 @@ import { hypercoreSpotAccountLocation } from "./account-value/canonical.js";
 import { fetchUserFinancialLifecycleSummary } from "./services/user-financial-lifecycle.js";
 import { testHip4OrderConsumerAcceptance } from "./hip4-order-consumer-pg.js";
 import { testHip4OpenOrderHolds } from "./hip4-open-order-holds-pg.js";
+import { HIP4_COMPLETED_ORDER_OBSERVATION_SQL } from "./services/hip4-order-observation-schedule.js";
 
 const pool = await createIntegrationTestPool({
   max: 2,
@@ -506,6 +508,12 @@ try {
   ).rows[0].fills_observation;
   assert.equal(partialObservation.fullQuantityObserved, false);
   assert.equal(partialObservation.historyCoverage, "not_asserted");
+  assert.equal(partialObservation.executionSummary.quantity, "2");
+  assert.equal(partialObservation.executionSummary.fullQuantityObserved, false);
+  assert.equal(
+    partialObservation.executionSummary.source,
+    "hyperliquid_user_fills",
+  );
   assert.equal(
     await readHip4OrderHoldRaw(
       db,
@@ -521,6 +529,16 @@ try {
     "order_fills_page_incomplete",
   );
   assert.equal(
+    (
+      await db.query(
+        "select fills_observation->'executionSummary' as summary from hip4_order_submissions where action_id=$1",
+        [prepared.actionId],
+      )
+    ).rows[0].summary,
+    null,
+    "an incomplete repair invalidates the previous receipt, not just its error label",
+  );
+  assert.equal(
     await attemptState(),
     "accepted",
     "a later incomplete page cannot erase the confirmed consumer",
@@ -533,6 +551,27 @@ try {
   );
   assert.equal((await orderRow()).filled_size, "4");
   assert.equal(await attemptState(), "accepted");
+  await db.query("savepoint receipt_status_recovery");
+  await record(db, {
+    claim: await claim(),
+    userId: fixture.userId,
+    body: response("canceled", terminalTime),
+    responseAt: Date.now(),
+    maxRows: 100,
+    retryMs: 60000,
+    phase: "status",
+  });
+  assert.equal(
+    (
+      await db.query(
+        "select fills_observation->'executionSummary' as summary from hip4_order_submissions where action_id=$1",
+        [prepared.actionId],
+      )
+    ).rows[0].summary,
+    null,
+    "a successful status-only phase cannot resurrect a failed receipt observation",
+  );
+  await db.query("rollback to savepoint receipt_status_recovery");
   await recordHip4SubmissionReplyInTransaction(db, {
     userId: fixture.userId,
     actionId: prepared.actionId,
@@ -575,6 +614,46 @@ try {
     null,
     "idempotent funded replay",
   );
+  const repairedSummary = (
+    await db.query(
+      "select fills_observation->'executionSummary' as summary from hip4_order_submissions where action_id=$1",
+      [prepared.actionId],
+    )
+  ).rows[0].summary;
+  assert.equal(repairedSummary.quantity, "4");
+  assert.equal(repairedSummary.executionCount, 2);
+  assert.equal(repairedSummary.fullQuantityObserved, true);
+  const completedSchedule = (
+    await db.query(
+      `select ${HIP4_COMPLETED_ORDER_OBSERVATION_SQL} as completed_lane,
+    extract(epoch from (reconcile_after-clock_timestamp()))*1000 as remaining_ms
+    from hip4_order_submissions where action_id=$1`,
+      [prepared.actionId],
+    )
+  ).rows[0];
+  assert.equal(completedSchedule.completed_lane, true);
+  assert.ok(
+    Number(completedSchedule.remaining_ms) > 3_500_000,
+    "complete full-fill rechecks use the current policy cold interval",
+  );
+  await db.query("savepoint cold_repair_recovery");
+  const coldClaim = await claim();
+  assert.equal(
+    await failHip4OrderObservation(db, coldClaim, "timeout", 60000),
+    true,
+    "explicit exact repair bypasses cold due time",
+  );
+  assert.equal(
+    (
+      await db.query(
+        `select ${HIP4_COMPLETED_ORDER_OBSERVATION_SQL} as completed_lane from hip4_order_submissions where action_id=$1`,
+        [prepared.actionId],
+      )
+    ).rows[0].completed_lane,
+    false,
+    "failed recheck re-enters the hot repair lane without releasing financial holds",
+  );
+  await db.query("rollback to savepoint cold_repair_recovery");
   await db.query("rollback to savepoint fill_cases");
   await addFill(1, { sz: "4", feeToken: "UNKNOWN" });
   assert.equal(
@@ -593,6 +672,8 @@ try {
     )
   ).rows[0].fills_observation;
   assert.equal(unknownFees.feeCoverage, "unknown");
+  assert.equal(unknownFees.executionSummary.fee, null);
+  assert.equal(unknownFees.executionSummary.netQuoteCash, null);
   assert.equal(unknownFees.historyCoverage, "not_asserted");
   assert.equal(
     await readHip4OrderHoldRaw(
@@ -814,6 +895,67 @@ try {
     }
   }
   await db.query("deallocate due_order_observation");
+  // Dense completed history must not be scanned to find one new/ambiguous
+  // action. Both lanes retain bounded first/resumed/empty indexed plans.
+  await db.query(`update hip4_order_submissions set reconcile_after=clock_timestamp()+interval '1 day',
+    reconcile_lease_token=null,reconcile_lease_until=null,reconcile_error=null,
+    order_observation='{"terminal":true,"balanceBarrier":{"state":"terminal_observed"}}',
+    fills_observation='{"fullQuantityObserved":true,"feeCoverage":"known","executionSummary":{}}'`);
+  const hotAction = (
+    await db.query(
+      "select action_id from hip4_order_submissions order by action_id limit 1",
+    )
+  ).rows[0].action_id as string;
+  await db.query(
+    "update hip4_order_submissions set fills_observation=null where action_id=$1",
+    [hotAction],
+  );
+  await db.query("analyze hip4_order_submissions");
+  const completedAction = (
+    await db.query(
+      "select action_id from hip4_order_submissions where action_id<>$1 order by action_id limit 1",
+      [hotAction],
+    )
+  ).rows[0].action_id as string;
+  for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+    await db.query(`set local plan_cache_mode=${mode}`);
+    for (const [lane, sql] of [
+      ["hot", HIP4_CLAIM_ORDER_OBSERVATION_SQL],
+      ["completed", HIP4_CLAIM_COMPLETED_ORDER_OBSERVATION_SQL],
+    ] as const) {
+      const statement = `due_${lane}_${mode}`;
+      await db.query(`prepare ${statement}(int,int) as ${sql}`);
+      for (const due of [true, false]) {
+        await db.query(
+          `update hip4_order_submissions set reconcile_after=case when $1 then '-infinity'::timestamptz else 'infinity'::timestamptz end,reconcile_lease_token=null,reconcile_lease_until=null
+            where action_id=$2`,
+          [due, lane === "completed" ? completedAction : hotAction],
+        );
+        const plan = (
+          await db.query(
+            `explain(analyze,buffers,format json) execute ${statement}(60000,1000)`,
+          )
+        ).rows[0]["QUERY PLAN"][0];
+        assert.equal(plan.Plan["Actual Rows"], due ? 1 : 0);
+        assert.doesNotMatch(JSON.stringify(plan), /Seq Scan/u);
+        const buffers =
+          Number(plan.Plan["Local Hit Blocks"] ?? 0) +
+          Number(plan.Plan["Local Read Blocks"] ?? 0);
+        console.log("[hip4-reconcile-lane-plan]", {
+          mode,
+          lane,
+          due,
+          ms: plan["Execution Time"],
+          buffers,
+        });
+        assert.ok(
+          buffers < 128,
+          "lane claim must not scan 50k completed records",
+        );
+      }
+      await db.query(`deallocate ${statement}`);
+    }
+  }
   await db.query("rollback");
   // Real committed runtime with max=1 pool and shared request-budget SQL;
   // provider transport is in-memory. No external endpoint is contacted.
@@ -1170,6 +1312,7 @@ try {
       errors: 0,
       leaseLost: 0,
       budgetExhausted: 0,
+      completedClaimed: 1,
     });
     assert.equal(
       (

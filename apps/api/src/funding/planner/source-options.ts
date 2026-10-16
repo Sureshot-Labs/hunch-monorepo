@@ -900,6 +900,11 @@ export class RelayFirstSourcePlanner {
           if (sourceForQuote.preRouteHandoff) {
             option = {
               ...option,
+              kind: "venue_cash",
+              source: {
+                kind: "owned_location",
+                location: sourceForQuote.preRouteHandoff.sourceLocation,
+              },
               requiredActions: [
                 {
                   kind: "external_handoff",

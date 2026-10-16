@@ -206,6 +206,37 @@ try {
     "native filled status cannot fabricate fill quantity",
   );
   assert.equal(complete.nativeOrder?.filledQuantity, null);
+  assert.equal(complete.nativeOrder?.executionSummary, null);
+  await db.query("savepoint receipt_projection");
+  const executionSummary = {
+    version: 1,
+    source: "hyperliquid_user_fills",
+    quantity: "4",
+    grossNotional: "1.2000000000001",
+    fee: "-0.00000001",
+    feeToken: "USDC",
+    netQuoteCash: "-1.1999999900001",
+    executionCount: 2,
+    fullQuantityObserved: true,
+  };
+  await db.query(
+    "update hip4_order_submissions set fills_observation=$2 where action_id=$1",
+    [filled.actionId, { executionSummary }],
+  );
+  assert.deepEqual(
+    (await read(filled.orderId)).nativeOrder?.executionSummary,
+    executionSummary,
+  );
+  await db.query(
+    "update hip4_order_submissions set reconcile_error='execution_identity_conflict' where action_id=$1",
+    [filled.actionId],
+  );
+  assert.equal(
+    (await read(filled.orderId)).nativeOrder?.executionSummary,
+    null,
+    "current conflicts suppress the persisted receipt",
+  );
+  await db.query("rollback to savepoint receipt_projection");
   assert.equal((await read(ambiguousA.orderId)).filledSize, null);
   assert.equal((await read(rejected.orderId)).filledSize, 0);
   await db.query(
@@ -337,6 +368,65 @@ try {
     open.rows.filter((row) => row.kind === "observed_order").length,
     1,
   );
+  await db.query("savepoint native_lost_ack_dedup");
+  for (const [label, cloid, expectedObserved] of [
+    [
+      "accepted native with lost ACK",
+      ambiguousA.cloid.toUpperCase().replace("0X", "0x"),
+      0,
+    ],
+    ["unknown external CLOID", `0x${"ff".repeat(16)}`, 1],
+    ["manual order", null, 1],
+    ["unadmitted preparation", unsigned.cloid, 1],
+    ["contradictory known OID", cancelled.cloid, 1],
+  ] as const) {
+    const observed = structuredClone(snapshot);
+    observed.items[2].cloid = cloid?.toLowerCase() ?? null;
+    await db.query(
+      "update hip4_account_snapshots set history=$2 where environment='mainnet' and account_address=$1",
+      [fixture.profile.address, { openOrders: observed }],
+    );
+    const projected = await fetchUnifiedOrders(readPool, openScope);
+    assert.equal(
+      projected.rows.filter((row) => row.kind === "observed_order").length,
+      expectedObserved,
+      label,
+    );
+    assert.equal(projected.total, 2 + expectedObserved, label);
+    assert.equal(
+      (await fetchUnifiedOrderById(readPool, {
+        ...openScope,
+        id: `hyperliquid:order:${fixture.profile.address}:125`,
+      })) === null,
+      expectedObserved === 0,
+      label,
+    );
+  }
+  const wrongSide = structuredClone(snapshot);
+  wrongSide.items[2].cloid = ambiguousA.cloid;
+  wrongSide.items[2].coin =
+    token.coin.slice(0, -1) + (token.coin.endsWith("0") ? "1" : "0");
+  await db.query(
+    "update hip4_account_snapshots set history=$2 where environment='mainnet' and account_address=$1",
+    [fixture.profile.address, { openOrders: wrongSide }],
+  );
+  assert.equal(
+    (await fetchUnifiedOrders(readPool, openScope)).rows.filter(
+      (row) => row.kind === "observed_order",
+    ).length,
+    1,
+    "same CLOID cannot hide a different outcome token",
+  );
+  assert.equal(
+    (
+      await db.query("select venue_order_id from orders where id=$1", [
+        ambiguousA.orderId,
+      ])
+    ).rows[0].venue_order_id,
+    null,
+    "read de-duplication cannot bind venue identity or admit an order",
+  );
+  await db.query("rollback to savepoint native_lost_ack_dedup");
   assert.equal(
     await fetchUnifiedOrderById(readPool, {
       ...openScope,

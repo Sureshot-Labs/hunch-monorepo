@@ -37,6 +37,7 @@ import {
   listFundingStepReceiptTargets,
   shouldIgnoreFundingStepReceiptUpdate,
 } from "../../persistence/funding-step-receipt-repository.js";
+import { fundingPhysicalEventIsBusy } from "../../persistence/funding-physical-event-gate.js";
 
 const evmAction = {
   kind: "evm_transaction" as const,
@@ -2844,6 +2845,34 @@ await assert.rejects(
     ),
 );
 assert.deepEqual(mixedAppliedStepIds, [target.stepId]);
+
+for (const mixedFailure of [false, true]) {
+  const busyDriver = new FundingStepReceiptReconciliationDriver(
+    {
+      keyVersion: 1,
+      encrypt: (value) => `encrypted:${value}`,
+      decrypt: (value) => value.slice("encrypted:".length),
+      fingerprint: (value) => `fingerprint:${value}`,
+    },
+    {
+      listTargets: async () => [target, secondTarget],
+      inspectEvm: async () => correctedFinalizedReceipt,
+      applyEvidence: async (_pool, input) => {
+        if (mixedFailure && input.stepId === secondTarget.stepId)
+          throw new Error("canonical receipt lookup unavailable");
+        throw { code: "55P03", constraint: "funding_physical_event_busy" };
+      },
+    },
+  );
+  await assert.rejects(
+    busyDriver.pollOperation({} as never, target.operationId),
+    (error: unknown) =>
+      error instanceof AggregateError &&
+      error.errors.length === 2 &&
+      fundingPhysicalEventIsBusy(error) === !mixedFailure,
+    "actual receipt driver preserves all errors; only pure contention is a short retry",
+  );
+}
 
 assert.equal(
   shouldIgnoreFundingStepReceiptUpdate("mismatch", correctedFinalizedReceipt),

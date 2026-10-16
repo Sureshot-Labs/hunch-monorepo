@@ -224,6 +224,7 @@ async function fixture() {
             {
               reserved_raw: state.reservedRaw,
               submitted_debit_raw: state.debitRaw,
+              debit_alias_candidates: [],
             },
           ],
         };

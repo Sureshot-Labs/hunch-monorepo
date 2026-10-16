@@ -7,6 +7,7 @@ import {
   hashOpaqueToken,
 } from "../funding/persistence/canonical.js";
 import type { JsonObject } from "../funding/domain/types.js";
+import { lockFundingPolicyForTransaction } from "../funding/policies/funding-policy-sidecar.js";
 
 /**
  * Opaque token for the sealed Telegram → Mini App *trade* handoff. It conveys
@@ -513,6 +514,7 @@ async function withCurrentTelegramAppHandoff<T>(
   options: {
     cancelledError?: "not_cancellable" | "not_claimable" | "not_committable";
     forUpdate?: boolean;
+    lockExecutionAuthority?: (client: PoolClient) => Promise<void>;
   },
   handler: (input: {
     access: TelegramAppHandoffAccess;
@@ -522,6 +524,13 @@ async function withCurrentTelegramAppHandoff<T>(
 ): Promise<T> {
   const access = parseHandoffAccess(input);
   const outcome = await tx(input.db, async (client) => {
+    if (options.lockExecutionAuthority) {
+      // Financial consumers share the ordinary funding/native outer order.
+      // This callback may lock receive/context/market/user/controller, never
+      // the intent/handoff. Token-only read/claim/cancel keep their H → I order.
+      await lockFundingPolicyForTransaction(client);
+      await options.lockExecutionAuthority(client);
+    }
     // Every access path may reconcile the bound intent. Lock the handoff first
     // so claim/commit/cancel and TTL reconciliation share one lock order:
     // handoff -> intent. Loading the intent first can deadlock a commit at TTL.
@@ -933,6 +942,7 @@ export async function commitTelegramAppHandoffWithExecution<T>(
   input: TelegramAppHandoffCommitInput &
     Readonly<{
       commitExecution: (context: TelegramAppHandoffCommitContext) => Promise<T>;
+      lockExecutionAuthority: (client: PoolClient) => Promise<void>;
       /**
        * Client funding becomes durable `funding`; a sealed direct Buy remains
        * `external_handoff` because there is no fabricated FundingOperation.
@@ -970,7 +980,11 @@ export async function commitTelegramAppHandoffWithExecution<T>(
   );
   return withCurrentTelegramAppHandoff(
     input,
-    { cancelledError: "not_committable", forUpdate: true },
+    {
+      cancelledError: "not_committable",
+      forUpdate: true,
+      lockExecutionAuthority: input.lockExecutionAuthority,
+    },
     async ({ client, row }) => {
       if (row.state !== "claimed" && row.state !== "committed") {
         throw new TelegramAppHandoffError("not_committable");

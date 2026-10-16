@@ -127,6 +127,53 @@ test("funding and BUY share exact native Standard cash and same budgeted fresh r
   assert.match(buy.accountRevision, /^[0-9a-f]{64}$/u);
 });
 
+test("perps-source send observes its own Standard transferable cash; spot is not its capacity", async () => {
+  const f = fixture();
+  const now = Date.now();
+  const summary = {
+    accountValue: "9.962411",
+    totalRawUsd: "9.962411",
+    totalMarginUsed: "0",
+    totalNtlPos: "0",
+  };
+  f.responses.clearinghouseState = {
+    marginSummary: summary,
+    crossMarginSummary: summary,
+    crossMaintenanceMarginUsed: "0",
+    withdrawable: "9.96241099",
+    assetPositions: [],
+    time: now,
+  };
+  f.responses.spotClearinghouseState = { balances: [] };
+  const cash = await readNativeSendCapacity(f.pool, address, f.fetcher, "");
+  assert.equal(cash.availableRaw, "996241099");
+  assert.deepEqual(f.calls, [
+    "userRole",
+    "userAbstraction",
+    "spotMeta",
+    "clearinghouseState",
+    "userAbstraction",
+  ]);
+  assert.deepEqual(f.weights, [60, 20, 20, 2, 20]);
+  assert.equal(
+    (await readNativeSendCapacity(f.pool, address, f.fetcher)).availableRaw,
+    "0",
+  );
+  f.responses.clearinghouseState = {
+    ...(f.responses.clearinghouseState as object),
+    assetPositions: [{}],
+  };
+  await assert.rejects(
+    readNativeSendCapacity(f.pool, address, f.fetcher, ""),
+    /native_perps_margin_inventory/,
+  );
+  f.responses.userAbstraction = "unifiedAccount";
+  await assert.rejects(
+    readNativeSendCapacity(f.pool, address, f.fetcher, ""),
+    /native_cash_mode_unsupported/,
+  );
+});
+
 test("SELL uses exact side's raw unheld quantity, not opposite shares or entry notional", async () => {
   const f = fixture();
   const no = await readHip4OrderCapacity(f.pool, f.input, f.fetcher);

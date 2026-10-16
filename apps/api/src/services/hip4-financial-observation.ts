@@ -26,6 +26,7 @@ import {
 } from "./hip4-client.js";
 import { admitHip4Request, readHip4Policy } from "./hip4-repository.js";
 import { readHip4AccountPolicy } from "./hip4-account-repository.js";
+import { projectHip4PerpsCash } from "./hip4-perps-cash.js";
 
 /** One fresh native observation for funding sends AND order admission. This is
  * not the displayed Account Value, a reservation or permission to trade. Call
@@ -40,7 +41,7 @@ export async function readHip4FinancialObservation(
   return readNativeCapacityObservation(pool, address, false, fetcher);
 }
 
-async function readNativeCapacityObservation(
+async function readNativeCashContext(
   pool: Pick<Pool, "query">,
   address: string,
   allowUninitializedRecipient: boolean,
@@ -106,6 +107,61 @@ async function readNativeCapacityObservation(
     })
   )
     throw new Error("native_cash_identity_mismatch");
+  return { accountRead, account, observedAt, role, mode, quote, read };
+}
+
+/** Same budget, owner role, Standard mode and exact USDC identity as spot;
+ * only the physical cash class differs. No margin or account-mode mutation. */
+export async function readHip4PerpsFinancialObservation(
+  pool: Pick<Pool, "query">,
+  address: string,
+  fetcher?: typeof fetch,
+) {
+  address = hip4AccountAddressSchema.parse(address);
+  const { accountRead, account, observedAt, role, mode } =
+    await readNativeCashContext(pool, address, false, fetcher);
+  const state = await accountRead({
+    type: "clearinghouseState",
+    user: address,
+    dex: "",
+  });
+  if ((await accountRead({ type: "userAbstraction", user: address })) !== mode)
+    throw new Error("native_cash_mode_changed");
+  const cash = projectHip4PerpsCash({
+    state,
+    mode,
+    role: role.role,
+    observedAt: new Date(observedAt).toISOString(),
+    now: Date.now(),
+  });
+  if (cash.state !== "verified" || cash.availableRaw === null)
+    throw new Error(`native_perps_${cash.reason}`);
+  const expiresAt = new Date(
+    Date.parse(cash.observedAt) + account.policy.snapshotMaxAgeMs,
+  ).toISOString();
+  if (Date.parse(expiresAt) <= Date.now())
+    throw new Error("native_perps_stale_snapshot");
+  return {
+    availableRaw: cash.availableRaw,
+    observedAt: cash.observedAt,
+    expiresAt,
+  };
+}
+
+async function readNativeCapacityObservation(
+  pool: Pick<Pool, "query">,
+  address: string,
+  allowUninitializedRecipient: boolean,
+  fetcher?: typeof fetch,
+) {
+  address = hip4AccountAddressSchema.parse(address);
+  const { accountRead, account, observedAt, role, mode, quote, read } =
+    await readNativeCashContext(
+      pool,
+      address,
+      allowUninitializedRecipient,
+      fetcher,
+    );
   const state = hip4SpotAccountStateSchema.parse(
     await accountRead({
       type: "spotClearinghouseState",

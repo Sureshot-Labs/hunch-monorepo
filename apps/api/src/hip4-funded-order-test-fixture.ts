@@ -21,6 +21,7 @@ export async function hip4FundedOrderTestFixture(
     profile: WalletExecutionProfile;
     marketId: string;
     tokenId: string;
+    idempotencyKey?: string;
   },
 ) {
   const cash = hypercoreSpotAccountLocation({
@@ -124,7 +125,7 @@ export async function hip4FundedOrderTestFixture(
     userId: input.userId,
     quoteId: quote.id,
     consentToken,
-    idempotencyKey: randomUUID(),
+    idempotencyKey: input.idempotencyKey ?? randomUUID(),
     plan,
     subjectLookupHmac: "b".repeat(64),
     subjectLookupKeyVersion: 1,
