@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import { pool } from "./db.js";
 import { reduceFundingOperationInTransaction } from "./funding/reconciliation/funding-reducer.js";
 import { fetchUserFinancialLifecycleSummary } from "./services/user-financial-lifecycle.js";
+import { mergeUserOnboardingData } from "./services/onboarding-service.js";
 import {
   mergeUserSocialData,
   reparentMergedSocialExecutions,
@@ -1263,6 +1264,7 @@ export async function mergeUsers(
       ).rowCount ?? 0;
 
     await mergeUserSocialData(client, source.id, target.id, options.keepSource);
+    await mergeUserOnboardingData(client, source.id, target.id);
     if (!options.keepSource) {
       summary.sourceUserDeleted =
         (await client.query(`delete from users where id = $1`, [source.id]))

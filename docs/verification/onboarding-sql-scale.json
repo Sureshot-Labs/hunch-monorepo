@@ -1,0 +1,729 @@
+{
+  "suite": "onboarding-sql-scale",
+  "scale": {
+    "users": 1000000,
+    "states": 100000,
+    "interests": 300000,
+    "assets": 100000
+  },
+  "statementShapes": 8,
+  "migration": {
+    "durationMs": 120.95424999999886,
+    "heapBytesBefore": 109232128,
+    "heapBytesAfter": 109232128,
+    "existingCohort": 0,
+    "futureCohort": 1
+  },
+  "plans": [
+    {
+      "sql": "select u.onboarding_version,u.is_active,u.social_suspended_at,u.handle, coalesce((select a.owner_user_id=u.id and a.kind='image' and a.status='ready' from content_assets a where a.id=u.avatar_asset_id),false) as photo_ready, s.revision,s.status,s.completion_reason,s.completed_at,s.steps, array(select i.interest_id from user_interests i join onboarding_interests c on c.id=i.interest_id where i.user_id=u.id order by c.sort_order,c.id) as interest_ids from users u left join user_onboarding_state s on s.user_id=u.id where u.id=$1",
+      "mode": "force_custom_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000000000001",
+      "executionMs": 0.09,
+      "rows": 1,
+      "sharedHitBlocks": 21,
+      "sharedReadBlocks": 0,
+      "indexes": [
+        "users_pkey",
+        "user_onboarding_state_pkey",
+        "content_assets_pkey",
+        "user_interests_pkey"
+      ],
+      "scans": [
+        {
+          "relation": "users",
+          "kind": "Index Scan",
+          "rows": 1,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_onboarding_state",
+          "kind": "Index Scan",
+          "rows": 1,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "content_assets",
+          "kind": "Index Scan",
+          "rows": 1,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_interests",
+          "kind": "Index Only Scan",
+          "rows": 3,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "onboarding_interests",
+          "kind": "Seq Scan",
+          "rows": 9,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "select u.onboarding_version,u.is_active,u.social_suspended_at,u.handle, coalesce((select a.owner_user_id=u.id and a.kind='image' and a.status='ready' from content_assets a where a.id=u.avatar_asset_id),false) as photo_ready, s.revision,s.status,s.completion_reason,s.completed_at,s.steps, array(select i.interest_id from user_interests i join onboarding_interests c on c.id=i.interest_id where i.user_id=u.id order by c.sort_order,c.id) as interest_ids from users u left join user_onboarding_state s on s.user_id=u.id where u.id=$1",
+      "mode": "force_custom_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000001000000",
+      "executionMs": 0.075,
+      "rows": 1,
+      "sharedHitBlocks": 10,
+      "sharedReadBlocks": 0,
+      "indexes": [
+        "users_pkey",
+        "user_onboarding_state_pkey",
+        "content_assets_pkey",
+        "user_interests_pkey"
+      ],
+      "scans": [
+        {
+          "relation": "users",
+          "kind": "Index Scan",
+          "rows": 1,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_onboarding_state",
+          "kind": "Index Scan",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "content_assets",
+          "kind": "Index Scan",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_interests",
+          "kind": "Index Only Scan",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "onboarding_interests",
+          "kind": "Seq Scan",
+          "rows": 0,
+          "loops": 0,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "select u.onboarding_version,u.is_active,u.social_suspended_at,u.handle, coalesce((select a.owner_user_id=u.id and a.kind='image' and a.status='ready' from content_assets a where a.id=u.avatar_asset_id),false) as photo_ready, s.revision,s.status,s.completion_reason,s.completed_at,s.steps, array(select i.interest_id from user_interests i join onboarding_interests c on c.id=i.interest_id where i.user_id=u.id order by c.sort_order,c.id) as interest_ids from users u left join user_onboarding_state s on s.user_id=u.id where u.id=$1",
+      "mode": "force_custom_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000001000001",
+      "executionMs": 0.03,
+      "rows": 0,
+      "sharedHitBlocks": 5,
+      "sharedReadBlocks": 0,
+      "indexes": [
+        "users_pkey",
+        "user_onboarding_state_pkey",
+        "content_assets_pkey",
+        "user_interests_pkey"
+      ],
+      "scans": [
+        {
+          "relation": "users",
+          "kind": "Index Scan",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_onboarding_state",
+          "kind": "Index Scan",
+          "rows": 0,
+          "loops": 0,
+          "removed": 0
+        },
+        {
+          "relation": "content_assets",
+          "kind": "Index Scan",
+          "rows": 0,
+          "loops": 0,
+          "removed": 0
+        },
+        {
+          "relation": "user_interests",
+          "kind": "Index Only Scan",
+          "rows": 0,
+          "loops": 0,
+          "removed": 0
+        },
+        {
+          "relation": "onboarding_interests",
+          "kind": "Seq Scan",
+          "rows": 0,
+          "loops": 0,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "select u.onboarding_version,u.is_active,u.social_suspended_at,u.handle, coalesce((select a.owner_user_id=u.id and a.kind='image' and a.status='ready' from content_assets a where a.id=u.avatar_asset_id),false) as photo_ready, s.revision,s.status,s.completion_reason,s.completed_at,s.steps, array(select i.interest_id from user_interests i join onboarding_interests c on c.id=i.interest_id where i.user_id=u.id order by c.sort_order,c.id) as interest_ids from users u left join user_onboarding_state s on s.user_id=u.id where u.id=$1",
+      "mode": "force_generic_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000000000001",
+      "executionMs": 0.099,
+      "rows": 1,
+      "sharedHitBlocks": 21,
+      "sharedReadBlocks": 0,
+      "indexes": [
+        "users_pkey",
+        "user_onboarding_state_pkey",
+        "content_assets_pkey",
+        "user_interests_pkey"
+      ],
+      "scans": [
+        {
+          "relation": "users",
+          "kind": "Index Scan",
+          "rows": 1,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_onboarding_state",
+          "kind": "Index Scan",
+          "rows": 1,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "content_assets",
+          "kind": "Index Scan",
+          "rows": 1,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_interests",
+          "kind": "Index Only Scan",
+          "rows": 3,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "onboarding_interests",
+          "kind": "Seq Scan",
+          "rows": 9,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "select u.onboarding_version,u.is_active,u.social_suspended_at,u.handle, coalesce((select a.owner_user_id=u.id and a.kind='image' and a.status='ready' from content_assets a where a.id=u.avatar_asset_id),false) as photo_ready, s.revision,s.status,s.completion_reason,s.completed_at,s.steps, array(select i.interest_id from user_interests i join onboarding_interests c on c.id=i.interest_id where i.user_id=u.id order by c.sort_order,c.id) as interest_ids from users u left join user_onboarding_state s on s.user_id=u.id where u.id=$1",
+      "mode": "force_generic_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000001000000",
+      "executionMs": 0.059,
+      "rows": 1,
+      "sharedHitBlocks": 10,
+      "sharedReadBlocks": 0,
+      "indexes": [
+        "users_pkey",
+        "user_onboarding_state_pkey",
+        "content_assets_pkey",
+        "user_interests_pkey"
+      ],
+      "scans": [
+        {
+          "relation": "users",
+          "kind": "Index Scan",
+          "rows": 1,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_onboarding_state",
+          "kind": "Index Scan",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "content_assets",
+          "kind": "Index Scan",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_interests",
+          "kind": "Index Only Scan",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "onboarding_interests",
+          "kind": "Seq Scan",
+          "rows": 0,
+          "loops": 0,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "select u.onboarding_version,u.is_active,u.social_suspended_at,u.handle, coalesce((select a.owner_user_id=u.id and a.kind='image' and a.status='ready' from content_assets a where a.id=u.avatar_asset_id),false) as photo_ready, s.revision,s.status,s.completion_reason,s.completed_at,s.steps, array(select i.interest_id from user_interests i join onboarding_interests c on c.id=i.interest_id where i.user_id=u.id order by c.sort_order,c.id) as interest_ids from users u left join user_onboarding_state s on s.user_id=u.id where u.id=$1",
+      "mode": "force_generic_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000001000001",
+      "executionMs": 0.032,
+      "rows": 0,
+      "sharedHitBlocks": 3,
+      "sharedReadBlocks": 0,
+      "indexes": [
+        "users_pkey",
+        "user_onboarding_state_pkey",
+        "content_assets_pkey",
+        "user_interests_pkey"
+      ],
+      "scans": [
+        {
+          "relation": "users",
+          "kind": "Index Scan",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_onboarding_state",
+          "kind": "Index Scan",
+          "rows": 0,
+          "loops": 0,
+          "removed": 0
+        },
+        {
+          "relation": "content_assets",
+          "kind": "Index Scan",
+          "rows": 0,
+          "loops": 0,
+          "removed": 0
+        },
+        {
+          "relation": "user_interests",
+          "kind": "Index Only Scan",
+          "rows": 0,
+          "loops": 0,
+          "removed": 0
+        },
+        {
+          "relation": "onboarding_interests",
+          "kind": "Seq Scan",
+          "rows": 0,
+          "loops": 0,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "select id,label,enabled,sort_order from onboarding_interests order by sort_order,id",
+      "mode": "force_custom_plan",
+      "firstParameter": null,
+      "executionMs": 0.045,
+      "rows": 9,
+      "sharedHitBlocks": 1,
+      "sharedReadBlocks": 0,
+      "indexes": [],
+      "scans": [
+        {
+          "relation": "onboarding_interests",
+          "kind": "Seq Scan",
+          "rows": 9,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "select id,label,enabled,sort_order from onboarding_interests order by sort_order,id",
+      "mode": "force_generic_plan",
+      "firstParameter": null,
+      "executionMs": 0.013,
+      "rows": 9,
+      "sharedHitBlocks": 1,
+      "sharedReadBlocks": 0,
+      "indexes": [],
+      "scans": [
+        {
+          "relation": "onboarding_interests",
+          "kind": "Seq Scan",
+          "rows": 9,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "select social_suspended_at from users where id=$1 and is_active for update",
+      "mode": "force_custom_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000000000001",
+      "executionMs": 0.023,
+      "rows": 1,
+      "sharedHitBlocks": 5,
+      "sharedReadBlocks": 0,
+      "indexes": ["users_pkey"],
+      "scans": [
+        {
+          "relation": "users",
+          "kind": "Index Scan",
+          "rows": 1,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "select social_suspended_at from users where id=$1 and is_active for update",
+      "mode": "force_generic_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000000000001",
+      "executionMs": 0.016,
+      "rows": 1,
+      "sharedHitBlocks": 5,
+      "sharedReadBlocks": 0,
+      "indexes": ["users_pkey"],
+      "scans": [
+        {
+          "relation": "users",
+          "kind": "Index Scan",
+          "rows": 1,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "select id,enabled from onboarding_interests order by sort_order,id for share",
+      "mode": "force_custom_plan",
+      "firstParameter": null,
+      "executionMs": 0.022,
+      "rows": 9,
+      "sharedHitBlocks": 10,
+      "sharedReadBlocks": 0,
+      "indexes": [],
+      "scans": [
+        {
+          "relation": "onboarding_interests",
+          "kind": "Seq Scan",
+          "rows": 9,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "select id,enabled from onboarding_interests order by sort_order,id for share",
+      "mode": "force_generic_plan",
+      "firstParameter": null,
+      "executionMs": 0.02,
+      "rows": 9,
+      "sharedHitBlocks": 10,
+      "sharedReadBlocks": 0,
+      "indexes": [],
+      "scans": [
+        {
+          "relation": "onboarding_interests",
+          "kind": "Seq Scan",
+          "rows": 9,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "insert into user_onboarding_state(user_id,flow_version,revision,status,completion_reason,completed_at,steps) values($1,1,$2,$3,$4,$5,$6::jsonb) on conflict(user_id) do update set revision=excluded.revision,status=excluded.status, completion_reason=excluded.completion_reason,completed_at=excluded.completed_at, steps=excluded.steps,updated_at=now()",
+      "mode": "force_custom_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000000000001",
+      "executionMs": 0.205,
+      "rows": 0,
+      "sharedHitBlocks": 7,
+      "sharedReadBlocks": 0,
+      "indexes": [],
+      "scans": [
+        {
+          "relation": "user_onboarding_state",
+          "kind": "ModifyTable",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "insert into user_onboarding_state(user_id,flow_version,revision,status,completion_reason,completed_at,steps) values($1,1,$2,$3,$4,$5,$6::jsonb) on conflict(user_id) do update set revision=excluded.revision,status=excluded.status, completion_reason=excluded.completion_reason,completed_at=excluded.completed_at, steps=excluded.steps,updated_at=now()",
+      "mode": "force_generic_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000000000001",
+      "executionMs": 0.134,
+      "rows": 0,
+      "sharedHitBlocks": 7,
+      "sharedReadBlocks": 0,
+      "indexes": [],
+      "scans": [
+        {
+          "relation": "user_onboarding_state",
+          "kind": "ModifyTable",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "delete from user_interests where user_id=$1",
+      "mode": "force_custom_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000000000001",
+      "executionMs": 0.027,
+      "rows": 0,
+      "sharedHitBlocks": 11,
+      "sharedReadBlocks": 0,
+      "indexes": ["user_interests_pkey"],
+      "scans": [
+        {
+          "relation": "user_interests",
+          "kind": "ModifyTable",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_interests",
+          "kind": "Index Scan",
+          "rows": 3,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "delete from user_interests where user_id=$1",
+      "mode": "force_custom_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000000000002",
+      "executionMs": 0.013,
+      "rows": 0,
+      "sharedHitBlocks": 6,
+      "sharedReadBlocks": 0,
+      "indexes": ["user_interests_pkey"],
+      "scans": [
+        {
+          "relation": "user_interests",
+          "kind": "ModifyTable",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_interests",
+          "kind": "Index Scan",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "delete from user_interests where user_id=$1",
+      "mode": "force_generic_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000000000001",
+      "executionMs": 0.019,
+      "rows": 0,
+      "sharedHitBlocks": 11,
+      "sharedReadBlocks": 0,
+      "indexes": ["user_interests_pkey"],
+      "scans": [
+        {
+          "relation": "user_interests",
+          "kind": "ModifyTable",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_interests",
+          "kind": "Index Scan",
+          "rows": 3,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "delete from user_interests where user_id=$1",
+      "mode": "force_generic_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000000000002",
+      "executionMs": 0.015,
+      "rows": 0,
+      "sharedHitBlocks": 6,
+      "sharedReadBlocks": 0,
+      "indexes": ["user_interests_pkey"],
+      "scans": [
+        {
+          "relation": "user_interests",
+          "kind": "ModifyTable",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_interests",
+          "kind": "Index Scan",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "insert into user_interests(user_id,interest_id) select $1,id from unnest($2::text[]) as id",
+      "mode": "force_custom_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000000000001",
+      "executionMs": 0.317,
+      "rows": 0,
+      "sharedHitBlocks": 24,
+      "sharedReadBlocks": 0,
+      "indexes": [],
+      "scans": [
+        {
+          "relation": "user_interests",
+          "kind": "ModifyTable",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "insert into user_interests(user_id,interest_id) select $1,id from unnest($2::text[]) as id",
+      "mode": "force_generic_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000000000001",
+      "executionMs": 0.089,
+      "rows": 0,
+      "sharedHitBlocks": 24,
+      "sharedReadBlocks": 0,
+      "indexes": [],
+      "scans": [
+        {
+          "relation": "user_interests",
+          "kind": "ModifyTable",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "delete from user_onboarding_state where user_id=$1",
+      "mode": "force_custom_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000000000001",
+      "executionMs": 0.024,
+      "rows": 0,
+      "sharedHitBlocks": 5,
+      "sharedReadBlocks": 0,
+      "indexes": ["user_onboarding_state_pkey"],
+      "scans": [
+        {
+          "relation": "user_onboarding_state",
+          "kind": "ModifyTable",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_onboarding_state",
+          "kind": "Index Scan",
+          "rows": 1,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "delete from user_onboarding_state where user_id=$1",
+      "mode": "force_custom_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000000000002",
+      "executionMs": 0.013,
+      "rows": 0,
+      "sharedHitBlocks": 4,
+      "sharedReadBlocks": 0,
+      "indexes": ["user_onboarding_state_pkey"],
+      "scans": [
+        {
+          "relation": "user_onboarding_state",
+          "kind": "ModifyTable",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_onboarding_state",
+          "kind": "Index Scan",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "delete from user_onboarding_state where user_id=$1",
+      "mode": "force_generic_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000000000001",
+      "executionMs": 0.026,
+      "rows": 0,
+      "sharedHitBlocks": 5,
+      "sharedReadBlocks": 0,
+      "indexes": ["user_onboarding_state_pkey"],
+      "scans": [
+        {
+          "relation": "user_onboarding_state",
+          "kind": "ModifyTable",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_onboarding_state",
+          "kind": "Index Scan",
+          "rows": 1,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    },
+    {
+      "sql": "delete from user_onboarding_state where user_id=$1",
+      "mode": "force_generic_plan",
+      "firstParameter": "a3000000-0000-4000-8000-000000000002",
+      "executionMs": 0.016,
+      "rows": 0,
+      "sharedHitBlocks": 4,
+      "sharedReadBlocks": 0,
+      "indexes": ["user_onboarding_state_pkey"],
+      "scans": [
+        {
+          "relation": "user_onboarding_state",
+          "kind": "ModifyTable",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        },
+        {
+          "relation": "user_onboarding_state",
+          "kind": "Index Scan",
+          "rows": 0,
+          "loops": 1,
+          "removed": 0
+        }
+      ]
+    }
+  ]
+}
