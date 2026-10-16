@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { DEFAULT_VENUE_LIFECYCLE_POLICY } from "@hunch/shared";
+import { HYPERCORE_MAINNET_USDC } from "./funding/domain/hypercore-identity.js";
 import { createIntegrationTestPool } from "./test-database-target.js";
 import { collectHip4AccountValue } from "./account-value/hip4-account-value.js";
 import { installHip4TestLifecycle } from "./hip4-test-lifecycle.js";
@@ -38,7 +39,7 @@ const observation = projectHip4Account({
   observedAt: new Date(now).toISOString(),
   role: "user",
   mode: "disabled",
-  quote: { tokenId: "USDC", index: 0, weiDecimals: 8 },
+  quote: { tokenId: HYPERCORE_MAINNET_USDC.assetId, index: 0, weiDecimals: 8 },
   state: {
     balances: [
       { coin: "USDC", token: 0, total: "21", hold: "3", entryNtl: "0" },
@@ -76,6 +77,7 @@ const saveMarket = async () => {
   );
 };
 mapped.market.status = "observed";
+mapped.market.expiry = new Date(now + 86400000).toISOString();
 mapped.market.quoteToken = "USDC";
 mapped.market.metadataValidUntil = new Date(now + 60000).toISOString();
 mapped.market.coverage.metadata = "fresh";
@@ -151,6 +153,56 @@ try {
     0,
   );
   assert.equal(first.positions.length, 2);
+  assert.ok(
+    first.positions.every((position) => position.capabilities.sell),
+    "future-expiry holdings retain ordinary SELL review on both sides",
+  );
+  mapped.market.expiry = null;
+  await saveMarket();
+  const noExpiry = await readHip4PortfolioPositions(pool, input);
+  assert.equal(noExpiry.positions.length, 2);
+  assert.ok(
+    noExpiry.positions.every(
+      (position) =>
+        position.capabilities.sell && position.marketSummary?.expiry === null,
+    ),
+    "explicit null expiry retains both holdings and ordinary SELL review without a fabricated deadline",
+  );
+  const staleNoExpiry = await readHip4PortfolioPositions(pool, {
+    ...input,
+    now: now + 60001,
+  });
+  assert.ok(
+    staleNoExpiry.positions.every(
+      (position) =>
+        position.observation.state === "stale" && position.capabilities.sell,
+    ),
+    "review permits an ordinary stale-position refresh rather than granting spendability",
+  );
+  for (const expiry of [
+    "",
+    "invalid",
+    new Date(now).toISOString(),
+    new Date(now - 1).toISOString(),
+  ]) {
+    mapped.market.expiry = expiry;
+    await saveMarket();
+    const unavailable = await readHip4PortfolioPositions(pool, input);
+    assert.equal(unavailable.positions.length, 2);
+    assert.ok(
+      unavailable.positions.every((position) => !position.capabilities.sell),
+    );
+  }
+  Reflect.deleteProperty(mapped.market, "expiry");
+  await saveMarket();
+  const missingExpiry = await readHip4PortfolioPositions(pool, input);
+  assert.equal(missingExpiry.positions.length, 2);
+  assert.ok(
+    missingExpiry.positions.every((position) => !position.capabilities.sell),
+    "missing expiry cannot become the supported explicit-null contract",
+  );
+  mapped.market.expiry = new Date(now + 86400000).toISOString();
+  await saveMarket();
   assert.equal(first.coverage.accounts, 2);
   assert.equal(first.coverage.missingAccounts, 1);
   assert.equal(first.coverage.state, "partial");
@@ -257,6 +309,7 @@ try {
     assets: [],
     positions: [],
     errors: [],
+    availability: [],
   });
   assert.equal(
     (await readHip4PortfolioPositions(pool, input)).coverage.state,

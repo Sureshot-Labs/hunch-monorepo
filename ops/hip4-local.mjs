@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseDotenv } from "dotenv";
@@ -8,6 +8,38 @@ import pg from "pg";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const LOCAL_DATABASE = "hip4_local";
 export const LOCAL_REDIS = "redis://127.0.0.1:55437";
+export const LOCAL_RECEIVE_ENV = "untracked/hip4-local.env";
+const receiveKeyValid = (key) => /^[a-f0-9]{64}$/iu.test(key ?? "");
+
+/** Explicit local-only configuration, never production .env/inherited pepper.
+ * Both check and normal startup are strictly read-only: provision once, retain
+ * the same private key across restarts so issued Receive options stay usable. */
+export function readLocalReceiveOptionKey(root = ROOT) {
+  const filename = path.join(root, LOCAL_RECEIVE_ENV);
+  try {
+    const directory = lstatSync(path.dirname(filename));
+    const file = lstatSync(filename);
+    if (
+      !directory.isDirectory() ||
+      directory.isSymbolicLink() ||
+      !file.isFile() ||
+      file.isSymbolicLink() ||
+      (file.mode & 0o077) !== 0
+    )
+      return { status: "unsafe_file", key: null };
+    const key = parseDotenv(
+      readFileSync(filename),
+    ).ADMIN_SERVICE_TOKEN_PEPPER?.trim();
+    return receiveKeyValid(key)
+      ? { status: "valid", key }
+      : { status: key ? "invalid" : "missing", key: null };
+  } catch (error) {
+    return {
+      status: error?.code === "ENOENT" ? "missing" : "unreadable",
+      key: null,
+    };
+  }
+}
 // Public, disposable local identity retained from untracked/hip4-local-api.mjs.
 // Never use this key or this launcher for a non-loopback deployment.
 const LOCAL_JWT = "hip4-disposable-local-live-only";
@@ -95,6 +127,7 @@ export function buildLocalEnvironment(
   values,
   options,
   inherited = process.env,
+  receiveOptionKey = null,
 ) {
   const local = {};
   for (const key of [
@@ -120,6 +153,10 @@ export function buildLocalEnvironment(
     ),
     REDIS_URL: LOCAL_REDIS,
     JWT_SECRET: LOCAL_JWT,
+    ADMIN_SERVICE_TOKEN_PEPPER:
+      options.mode === "api" && receiveKeyValid(receiveOptionKey)
+        ? receiveOptionKey
+        : "",
     HUNCH_SECRETS_MODE: "off",
     HUNCH_SECRET_BUNDLES: "",
     HUNCH_SECRET_REQUIRED_KEYS: "",
@@ -152,9 +189,11 @@ export function configurationStatus(
   fundingEnabled = false,
   fundingAssets = [],
   fundingVenues = [],
+  receiveKeyStatus = null,
 ) {
   const required =
     mode === "indexer" ? [] : ["PRIVY_APP_ID", "PRIVY_APP_SECRET"];
+  if (mode === "api") required.push("ADMIN_SERVICE_TOKEN_PEPPER");
   if (fundingEnabled && mode !== "indexer")
     required.push(
       "RELAY_API_KEY",
@@ -177,9 +216,28 @@ export function configurationStatus(
   }
   return {
     keys: Object.fromEntries(
-      SELECTED_KEYS.map((key) => [key, Boolean(local[key]?.trim())]),
+      [...SELECTED_KEYS, "ADMIN_SERVICE_TOKEN_PEPPER"].map((key) => [
+        key,
+        Boolean(local[key]?.trim()),
+      ]),
     ),
     missingRequired: required.filter((key) => !local[key]?.trim()),
+    receiveOptionTokenKey: {
+      source: LOCAL_RECEIVE_ENV,
+      status:
+        mode !== "api"
+          ? "not_required"
+          : (receiveKeyStatus ??
+            (receiveKeyValid(local.ADMIN_SERVICE_TOKEN_PEPPER)
+              ? "valid"
+              : "missing")),
+      ready:
+        mode !== "api" ||
+        (receiveKeyValid(local.ADMIN_SERVICE_TOKEN_PEPPER) &&
+          (receiveKeyStatus === null || receiveKeyStatus === "valid")),
+      advice:
+        "API only: explicitly provision untracked/hip4-local.env (regular file, mode 0600) with only ADMIN_SERVICE_TOKEN_PEPPER=<32 cryptographically random bytes encoded as 64 hex characters>. Never reuse a production key or derive it from the public local JWT. Restore the original private file to preserve issued Receive options; replacing its key requires fresh options. The launcher never creates or overwrites this file.",
+    },
   };
 }
 
@@ -364,14 +422,20 @@ export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
   if (options.help) {
     console.log(
-      "Usage: node ops/hip4-local.mjs [api|indexer|finance-worker] [--check] --database-url <loopback:55436/hip4_local> --expect-database hip4_local\nDefault: API 127.0.0.1:4014 only. Indexer performs public reads and local writes. finance-worker observes/reconciles and can advance existing user-authorized funding operations; it never enables autonomous HIP signing. No migrations, policy changes or financial tests are performed. Run --check for each desired mode first. Frontend starts separately with HUNCH_API_BASE_URL=http://127.0.0.1:4014 bun run dev:http.",
+      "Usage: node ops/hip4-local.mjs [api|indexer|finance-worker] [--check] --database-url <loopback:55436/hip4_local> --expect-database hip4_local\nDefault: API 127.0.0.1:4014 only. API Receive options require a separately provisioned private untracked/hip4-local.env; --check reports safe configuration advice without creating or changing it. Indexer performs public reads and local writes. finance-worker observes/reconciles and can advance existing user-authorized funding operations; it never enables autonomous HIP signing. No migrations, policy changes or financial tests are performed. Run --check for each desired mode first. Frontend starts separately with HUNCH_API_BASE_URL=http://127.0.0.1:4014 bun run dev:http.",
     );
     return;
   }
   const envPath = path.join(ROOT, ".env");
+  const receiveKey =
+    options.mode === "api"
+      ? readLocalReceiveOptionKey()
+      : { status: "not_required", key: null };
   const local = buildLocalEnvironment(
     existsSync(envPath) ? parseDotenv(readFileSync(envPath)) : {},
     options,
+    process.env,
+    receiveKey.key,
   );
   const pool = new pg.Pool({
     connectionString: local.DATABASE_URL,
@@ -394,7 +458,14 @@ export async function main(argv = process.argv.slice(2)) {
           mode: options.mode,
           checkOnly: options.check,
           ready: false,
-          configuration: configurationStatus(local, options.mode),
+          configuration: configurationStatus(
+            local,
+            options.mode,
+            false,
+            [],
+            [],
+            receiveKey.status,
+          ),
           database: {
             ready: false,
             reason: known.includes(error?.message)
@@ -424,6 +495,7 @@ export async function main(argv = process.argv.slice(2)) {
       database.observedOverrides.fundingVenues.length > 0,
     database.observedOverrides.fundingAssets,
     database.observedOverrides.fundingVenues,
+    receiveKey.status,
   );
   const built = [
     ENTRIES[options.mode],
@@ -432,6 +504,7 @@ export async function main(argv = process.argv.slice(2)) {
   const ready =
     built &&
     !configuration.missingRequired.length &&
+    configuration.receiveOptionTokenKey.ready &&
     !database.schema.missing.length &&
     !database.schema.changed.length &&
     !database.schema.unknown.length;

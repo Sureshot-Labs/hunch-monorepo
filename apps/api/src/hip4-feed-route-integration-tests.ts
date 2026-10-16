@@ -132,7 +132,7 @@ try {
             ...source.metadata.outcomes[0],
             outcome,
             name: `${tag} ${outcome}`,
-            description: `participant:${tag} ${outcome}|resolutionDeadline:20990101-0000`,
+            description: `participant:${tag} ${outcome}${outcome === 740002 ? "" : "|resolutionDeadline:20990101-0000"}`,
           },
         ],
       },
@@ -203,6 +203,22 @@ try {
   const second = await app.inject(`/feed?${query}&offset=2`);
   assert.equal(second.statusCode, 200, second.body);
   assert.equal(second.json().data.length, 1);
+  const noExpiryMarket = [...first.json().data, ...second.json().data]
+    .flatMap((event) => event.markets)
+    .find(
+      (candidate) =>
+        candidate.marketId === "hyperliquid:mainnet:outcome:740002",
+    );
+  assert.ok(noExpiryMarket);
+  assert.equal(
+    noExpiryMarket.acceptingOrders,
+    true,
+    "a coherent observed contract without an expiry hint remains ordinarily reviewable",
+  );
+  assert.equal(noExpiryMarket.closeTime, null);
+  assert.equal(noExpiryMarket.expirationTime, null);
+  assert.equal(noExpiryMarket.top.yesAsk, 0.6);
+  assert.equal(noExpiryMarket.top.noAsk, 0.6);
   assert.equal(
     new Set(
       [...first.json().data, ...second.json().data].map(

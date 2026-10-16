@@ -7,6 +7,7 @@ import {
 } from "@hunch/shared";
 import type { FeedMarket } from "../server-types.js";
 import { ageHip4Market } from "./hip4-mapping.js";
+import { hip4NativeExpiryOpen } from "./hip4-native-instrument.js";
 
 export type FeedReadContext = {
   hip4Policy: Hip4ReadPolicy | null;
@@ -165,8 +166,7 @@ export function applyFeedReadPresentation(
         market.metadataValidUntil,
         context.now,
       ) &&
-      market.expiry != null &&
-      Date.parse(market.expiry) > context.now,
+      hip4NativeExpiryOpen(market.expiry, context.now),
     volume24h: currentVolume ? value : null,
     volumeDisplay: currentVolume ? value : null,
     volumeValidUntil: volume?.validUntil ?? null,

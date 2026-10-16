@@ -71,6 +71,19 @@ export function buildHip4NativeInstrument(input: {
   };
 }
 
+/** Exact null is the supported no-known-expiry contract, not missing metadata.
+ * This factual predicate grants no lifecycle, quote or execution permission. */
+export function hip4NativeExpiryOpen(expiry: unknown, now: number): boolean {
+  return (
+    Number.isFinite(now) &&
+    (expiry === null ||
+      (typeof expiry === "string" &&
+        expiry.trim().length > 0 &&
+        Number.isFinite(Date.parse(expiry)) &&
+        Date.parse(expiry) > now))
+  );
+}
+
 /** Current indexed provenance and factual open state, without social policy. */
 export function hip4NativeMarketOpen(metadata: unknown, now = Date.now()) {
   const parsed = hip4ReadMarketSchema.safeParse(
@@ -87,9 +100,7 @@ export function hip4NativeMarketOpen(metadata: unknown, now = Date.now()) {
     Date.parse(market.metadataValidUntil ?? "") > now &&
     Number.isFinite(Date.parse(market.fetchedAt)) &&
     Date.parse(market.fetchedAt) <= now &&
-    (market.expiry === null ||
-      (Number.isFinite(Date.parse(market.expiry)) &&
-        Date.parse(market.expiry) > now))
+    hip4NativeExpiryOpen(market.expiry, now)
   );
 }
 

@@ -9,12 +9,14 @@ production activation. The current P4S/P5/P6 implementation candidate and local
 manual-test boundaries are recorded in section 86; older phase checkpoints are
 dated evidence, not the current outstanding-work list.
 
-**Current acceptance:** P3/P4 retains its completed technical acceptance. P4S,
-P5 and the bounded P6 capability are implemented and under final acceptance;
-the current fresh whole-scope GO count is **0/2**. A disputed tracked fill now
-requires an exact source recheck before reuse. Local working-database upgrade
-and mounted live read acceptance are pending, separately from disposable PG16
-and synthetic browser checks. Do not treat this candidate as financially enabled.
+**Current acceptance:** P3/P4, P4S, P5 and the bounded P6 capability are
+technically accepted for the user's scoped manual tests; the current fresh
+whole-scope GO count is **2/2**. A disputed tracked fill now
+requires an exact source recheck before reuse. Local working-database upgrade,
+mounted live reads and authenticated Funding receive-catalog acceptance passed,
+separately from disposable PG16 and synthetic browser checks. Funding/Social
+were explicitly enabled only in the isolated local stand; automatic execution
+remains off. This is not live financial E2E or production activation.
 
 Start with section 12 for evidence gates, section 11 for implementation order,
 then the owned domain section and companion client contract. Section 13 records
@@ -29,12 +31,12 @@ P2 read integration. Older checkpoints and baseline refs below are dated history
 Section 22 records the historical paused P3/P4 checkpoint. Section 23 records
 resumed work and the latest main merges; neither is financial release acceptance.
 
-Latest implementation and acceptance: sections 73–85. **P3/P4 technical
+P3/P4 implementation and acceptance: sections 73–85. **P3/P4 technical
 implementation is accepted, with two consecutive fresh, no-history whole-scope
 GO reviews (2/2).** Section 85 supersedes earlier dated open-work lists and
 review counters; scoped corrections alone were not counted.
 
-The October 15 pause was explicitly lifted. Work remains on `hip-next`; backend
+The October 15 pause was explicitly lifted. At the P3/P4 checkpoint, backend
 `origin/main` at `5ac117fb` was merged as `b2328f8d`. The user subsequently
 authorized an intermediate checkpoint commit/push and, after final acceptance,
 explicitly requested committing/pushing the accepted snapshot to all `hip-next`
@@ -42,15 +44,15 @@ branches. Neither request authorizes merge, deployment, permissions changes or
 financial activation. Native funding uses the
 existing common catalog, worker and receipt/recovery owners; trading uses the
 ordinary Hunch Confirmation, Orders and portfolio surfaces. Financial defaults
-remain off.
+remain off. Section 86 records subsequent synchronization and local activation.
 
-| Current slice        | Accepted implementation                                                                                                                                      | Explicit limits / next phase                                                                                                                      |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Shared funding       | Native adapters, common catalog/admin controls, joint receive/refund recovery, class-separated cash, frozen lineage, holds and merge-safe reads              | Outbound native source requires current zero-fee capability; unknown sends retain holds; historical accounting cost remains linear                |
-| Native order engine  | Frozen sign-only preparations, one-shot submission, cancellation, common consumer/order reads, bounded Check and hot/cold observation repair                 | Provider absence, expiry and cancellation ACK are not proof of non-execution                                                                      |
-| HTTP/client contract | Auth/CSRF, generated DTOs, exact sizing, shared readiness/shortfall, Confirmation receipts, portfolio SELL/cancel, immediate consent revocation and recovery | Layered offline browser and real-PG acceptance passed; full production-mounted Review and live funded E2E were not executed                       |
-| Telegram             | Native Buy/Sell/custom input, immutable Review, sealed direct/funded handoff into the same app consumer; bounded factual Check                               | Product app handoff only; no autonomous HIP execution or personal Telegram operation                                                              |
-| Release              | Cross-workspace tests/builds/lint/contracts, disposable PG16 migrations/recovery/plans, two independent whole-scope GO reviews                               | Technical acceptance only; P4S and P5–P7, production-load evidence and separately authorized financial activation/deployment remain separate work |
+| Current slice        | Accepted implementation                                                                                                                                      | Explicit limits / next phase                                                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Shared funding       | Native adapters, common catalog/admin controls, joint receive/refund recovery, class-separated cash, frozen lineage, holds and merge-safe reads              | Outbound native source requires current zero-fee capability; unknown sends retain holds; historical accounting cost remains linear           |
+| Native order engine  | Frozen sign-only preparations, one-shot submission, cancellation, common consumer/order reads, bounded Check and hot/cold observation repair                 | Provider absence, expiry and cancellation ACK are not proof of non-execution                                                                 |
+| HTTP/client contract | Auth/CSRF, generated DTOs, exact sizing, shared readiness/shortfall, Confirmation receipts, portfolio SELL/cancel, immediate consent revocation and recovery | Layered offline browser and real-PG acceptance passed; full production-mounted Review and live funded E2E were not executed                  |
+| Telegram             | Native Buy/Sell/custom input, immutable Review, sealed direct/funded handoff into the same app consumer; bounded factual Check                               | Product app handoff only; no autonomous HIP execution or personal Telegram operation                                                         |
+| Release              | Cross-workspace tests/builds/lint/contracts, disposable PG16 migrations/recovery/plans, two independent P3/P4 whole-scope GO reviews                         | Current P4S/P5/P6 acceptance is in section 86; P7, production load and separately authorized financial activation/deployment remain separate |
 
 | Repository                      | Branch / immutable reference                                                             |
 | ------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -7749,7 +7751,7 @@ and periodic feature checkpoints do not authorize merge or deployment.
 | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | P4    | Existing direct/funded interactive orders, cancellation, exact cash/receipts and app handoff retained                                                       | Real signing, provider execution and funded E2E are the user's manual tests                                                  |
 | P4S   | Native verified BUY, immutable thesis snapshots, exact pre-submit Copy retention and direct/funded recovery                                                 | Enable only the proved primary-order subset; no inferred dual-order aliases                                                  |
-| P5    | Existing market/event UI, Discovery map, factual SEO/share, portfolio publication controls and exact-revision report interactions on desktop/mobile/MiniApp | Mounted local live-read acceptance and final whole-scope reviews                                                             |
+| P5    | Existing market/event UI, Discovery map, factual SEO/share, portfolio publication controls and exact-revision report interactions on desktop/mobile/MiniApp | Two fresh whole-scope GO reviews passed; real financial E2E and production activation remain separate                        |
 | P6    | Formal-rule-aware matching, canonical-change invalidation, bounded known-wallet reads, support evidence and app-only signal CTA                             | Incomplete rules remain review-required; partial wallet evidence is not a global holder population or calibrated trader edge |
 
 ### Verified purchase and Copy
@@ -7865,6 +7867,30 @@ already user-authorized operations; global finance execution and unrelated
 Telegram/fee/payout/sweep/content lanes remain off. Only the user performs
 interactive signing, final submission and transfers.
 
+The API also needs a dedicated local receive-option HMAC key for the existing
+Funding deposit catalog. Put only `ADMIN_SERVICE_TOKEN_PEPPER` in the ignored
+`untracked/hip4-local.env`, with 32 cryptographically random bytes encoded as
+64 hex characters and owner-only file permissions. The local launcher does not reuse
+the production pepper or its public disposable JWT key. Check/start never
+creates or replaces this file. Preserve it across restarts so existing option
+tokens remain verifiable; missing, short or unsafe configuration has an explicit
+startup diagnostic. Restore the saved key or provision a fresh one and refresh
+the receive catalog. Key replacement is not permission to repeat an operation.
+
+For a new local stand only, provision once from the backend root; exclusive
+creation refuses to overwrite an existing file and prints no secret:
+
+```bash
+node --input-type=module <<'JS'
+import { randomBytes } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+mkdirSync('untracked', { recursive: true, mode: 0o700 });
+writeFileSync('untracked/hip4-local.env',
+  `ADMIN_SERVICE_TOKEN_PEPPER=${randomBytes(32).toString('hex')}\n`,
+  { mode: 0o600, flag: 'wx' });
+JS
+```
+
 Set `HIP4_LOCAL_DATABASE_URL` to the existing local connection string without
 printing it. From the backend root, check each process before starting it:
 
@@ -7918,6 +7944,10 @@ merge, native orders, known-wallet source pagination and read APIs. Empty PG16
 bootstrap and a restored legacy local backup both migrate through `0347`.
 New evidence queries include custom/generic plans with 100,000 unrelated rows;
 they are not estimates from TypeScript or a `LIMIT` clause alone.
+The latest frontend suite passes 2,039 tests across 330 files, with 9,608
+assertions, plus typecheck and full lint. The exact Turbopack rebuild compiled
+successfully in 7.4 seconds and generated all 42 pages. These local build times
+are not production performance measurements.
 
 Browser evidence uses the actual shared report/composer components and mounted
 Copy-review hook with synthetic API/auth IO, including scoped replay, controller
@@ -7943,7 +7973,31 @@ foreign-side books remain unavailable; official fractional payouts remain
 independent. Live mobile pages use ordinary Smart Buy under its existing source
 and matching policies; recorded fixture pages remain inert. A later whole
 review found an additional social action fallback from denied Copy to Buy.
-That correction and two new sequential fresh whole GO reviews remain required.
+Both thesis presenters and the shared Hunch strip now read ready effective
+policy for the actual source venue. Denied, pending and error states retain
+only Open market navigation; active ordinary Buy remains available when only
+social Copy is unavailable. Real-component tests cover all four source venues,
+cached grants during errors and recovery. The final two sequential fresh whole
+GO reviews include this correction and all subsequent changes below.
+
+The common client policy hook also projects cached permissions consistently
+after an unresolved or failed policy refresh. It removes only new exposure and
+trading-funding grants, including consumers of the raw policy object, without
+changing the server revision or read environment. Cached reads, SELL, Cancel,
+withdrawal and admitted-order repair remain usable. A healthy refresh restores
+new review availability, never an earlier queued click or late signature.
+Tests exercise the actual feed controls, Confirmation readiness/reset callbacks,
+native session and retained journal through failure and recovery.
+
+A subsequent whole review found an expiry-contract mismatch: admission already
+supported an explicit `null` deadline, but feed, event and portfolio presenters
+disabled it as though it were missing or ended. Those paths now share the same
+known-null-or-future rule without inventing a deadline. Missing, malformed and
+elapsed values remain unavailable; quote, ownership, settlement, lifecycle and
+admission checks are unchanged. Actual desktop/mobile entry and owned-NO Close
+tests pass, together with real PG16 feed and both portfolio integration suites.
+The portfolio fixture now uses the canonical USDC asset ID rather than its symbol;
+the production exact-asset valuation check and financial assertions are unchanged.
 
 The user explicitly authorized upgrading only the working `hip4_local` schema
 on port `55436`. The guarded migration applied all 32 missing files: 358 are now
@@ -7960,13 +8014,48 @@ native account read is fresh but uninitialized: no owned USDC or positions,
 default mode and missing role. Unknown spendable cash is not reported as zero.
 The later signing/funded tests remain the user's responsibility.
 
-Local schema readiness is not local financial activation. The working database
-still has no new funding, social or matching override: the funding defaults
-advertise no venues or receive assets, native social publication/Copy are opted
-out, and native matching is unselected. Enable only the intended local test
-capabilities through the existing policy/admin owner before those manual tests;
-the schema upgrade did not authorize policy or permission changes. The finance
-worker has not been started automatically.
+After a separate explicit user approval, local Funding and Social were enabled
+through their existing validators and revision-checked publication owner. The
+working database permits funding for Hyperliquid, Polymarket and Limitless from
+Base USDC, Polygon USDC/pUSD and HyperCore USDC; Privy receive and delegated
+execution remain disabled. Native publication/Copy are added without removing
+existing social venues or changing the $10 publication threshold. The ordinary
+local finance worker is running with global execution disabled, so it can
+observe and reconcile user-authorized activity. No funding operation or native
+submission existed at activation; the first observed account refresh completed
+without errors. Personal Telegram, AI and unrelated fee/payout/sweep lanes stay
+off. Matching and research have not been activated.
+
+Final mounted acceptance found that the local launcher omitted the existing
+Funding receive-option token key. The dedicated local-only configuration above
+fixes that startup gap without changing the Funding service or production
+credentials. Its 10 tests pass under Node 20, including read-only configuration,
+restart stability, immediate repair, unsafe-file refusal and secret-free
+diagnostics. After restarting only the local API, a normal authenticated
+browser-to-proxy `GET /funding/receive-options` returned `ok: true` and three
+options: Polygon pUSD, Base USDC and Polygon USDC. No receive session, transfer,
+signature or order was submitted by this check.
+
+Final acceptance required two consecutive independent, no-history whole-scope
+reviews after the last source and launcher fixes. Both returned GO for the same
+frozen backend/frontend/admin candidate. The first independently passed 163
+backend tests, 104 frontend tests, 10 launcher tests and an admin-label test.
+The second passed 164 focused backend tests and the 367-test funding suite
+(overlapping suites), 130 frontend tests, 10 launcher tests and an admin-label
+test. Both explicitly separated root-owned PG16/build/mounted acceptance from
+their own checks. There are no outstanding material review findings. This is
+technical readiness for the user's direct/funded/shortfall/Copy tests, not proof
+that real signing or provider execution succeeded.
+
+The implemented native route catalog supports Base and Polygon in both
+directions, subject to exact fee and account capabilities. Solana to/from Core
+is not currently one supported Hunch operation: the existing planner does not
+chain intermediary hops. The older Solana/Core provider receipt fixtures are
+protocol evidence, not Hunch execution support. Do not advertise that direct
+shortfall family or enable it by selecting a policy asset. A user can separately
+review existing Solana-to-Base and Base-to-Core operations; this is not automatic
+native funding parity. Adding the direct family requires the same exact
+protocol, signer, receipt and recovery acceptance as any other new route.
 
 P7 remains separate. Previously documented native negative-receipt uncertainty,
 history-linear refund/accounting costs and production-load evidence remain

@@ -118,13 +118,16 @@ test("native orderability is current mainnet USDC market state, not a cached fal
       value.quoteToken = null;
     },
     (value: Hip4ReadMarket) => {
-      value.expiry = null;
+      value.expiry = "";
     },
     (value: Hip4ReadMarket) => {
       value.expiry = "invalid";
     },
     (value: Hip4ReadMarket) => {
       value.expiry = fixture.collectedAt;
+    },
+    (value: Hip4ReadMarket) => {
+      value.expiry = new Date(now - 1).toISOString();
     },
     (value: Hip4ReadMarket) => {
       value.status = "expired";
@@ -184,6 +187,23 @@ test("native orderability is current mainnet USDC market state, not a cached fal
     false,
   );
   assert.equal(present(snapshot()).acceptingOrders, true);
+});
+test("explicit native null expiry permits ordinary YES/NO review without fabricating a deadline", () => {
+  const market = { ...snapshot(), expiry: null };
+  const output = present(market);
+  assert.equal(output.acceptingOrders, true);
+  assert.equal(output.closeTime, null);
+  assert.equal(output.expirationTime, null);
+  assert.equal(output.top.yesAsk, 0.6);
+  assert.equal(output.top.noAsk, 0.6);
+  const missing = structuredClone(market);
+  Reflect.deleteProperty(missing, "expiry");
+  assert.equal(present(missing).acceptingOrders, false);
+  const undefinedExpiry = {
+    ...market,
+    expiry: undefined,
+  } as unknown as Hip4ReadMarket;
+  assert.equal(present(undefinedExpiry).acceptingOrders, false);
 });
 test("each native book expires independently, without borrowing a complement", () => {
   const market = snapshot();

@@ -21,6 +21,7 @@ import {
 import { hip4SignedAmount } from "./hip4-account-projection.js";
 import { readHip4Policy } from "./hip4-repository.js";
 import { readHip4AccountPolicy } from "./hip4-account-repository.js";
+import { hip4NativeExpiryOpen } from "./hip4-native-instrument.js";
 import type { z } from "zod";
 import type { hip4PortfolioCoverageSchema } from "../schemas/position-read.js";
 import type { Hip4PortfolioPosition } from "../schemas/position-read.js";
@@ -237,8 +238,7 @@ export function projectHip4PortfolioPositions(input: {
           market?.quoteToken === "USDC" &&
           market.status === "observed" &&
           !market.settlement &&
-          market.expiry &&
-          Date.parse(market.expiry) > input.now &&
+          hip4NativeExpiryOpen(market.expiry, input.now) &&
           compareUnsignedDecimals(position.quantity, "1") >= 0,
         ),
         redeem: false,

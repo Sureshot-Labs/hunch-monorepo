@@ -139,6 +139,18 @@ test("SELL review follows the supplied lifecycle capability without asserting fr
     projectHip4PortfolioPositions(enabled)[0].capabilities.sell,
     true,
   );
+  const noExpiry = {
+    ...enabled,
+    markets: new Map([[identity.marketId, { ...activeMarket, expiry: null }]]),
+  };
+  for (const position of projectHip4PortfolioPositions(noExpiry)) {
+    assert.equal(
+      position.capabilities.sell,
+      true,
+      "explicit null expiry permits review for both exact owned sides",
+    );
+    assert.equal(position.marketSummary?.expiry, null);
+  }
   assert.equal(
     projectHip4PortfolioPositions({ ...enabled, sellEnabled: false })[0]
       .capabilities.sell,
@@ -154,10 +166,19 @@ test("SELL review follows the supplied lifecycle capability without asserting fr
     true,
     "review must permit the ordinary position refresh",
   );
+  assert.ok(
+    projectHip4PortfolioPositions({ ...noExpiry, now: now + 61000 }).every(
+      (position) =>
+        position.observation.state === "stale" && position.capabilities.sell,
+    ),
+    "null expiry must also permit ordinary refresh of stale owned positions",
+  );
   for (const changed of [
     { ...activeMarket, status: "expired" as const },
-    { ...activeMarket, expiry: null },
+    { ...activeMarket, expiry: "" },
+    { ...activeMarket, expiry: "invalid" },
     { ...activeMarket, expiry: new Date(now).toISOString() },
+    { ...activeMarket, expiry: new Date(now - 1).toISOString() },
     { ...activeMarket, quoteToken: "USDH" },
   ]) {
     assert.equal(
@@ -168,6 +189,23 @@ test("SELL review follows the supplied lifecycle capability without asserting fr
       false,
     );
   }
+  const missingExpiry = { ...activeMarket };
+  Reflect.deleteProperty(missingExpiry, "expiry");
+  assert.ok(
+    projectHip4PortfolioPositions({
+      ...enabled,
+      markets: new Map([[identity.marketId, missingExpiry]]),
+    }).every((position) => !position.capabilities.sell),
+    "missing expiry is not the explicit supported null-expiry contract",
+  );
+  Reflect.set(missingExpiry, "expiry", undefined);
+  assert.ok(
+    projectHip4PortfolioPositions({
+      ...enabled,
+      markets: new Map([[identity.marketId, missingExpiry]]),
+    }).every((position) => !position.capabilities.sell),
+    "undefined expiry is not the explicit supported null-expiry contract",
+  );
   assert.equal(
     projectHip4PortfolioPositions({ ...enabled, markets: new Map() })[0]
       .capabilities.sell,

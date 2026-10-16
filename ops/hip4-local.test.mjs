@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import {
   bootstrapLocalEnvironment,
   buildLocalEnvironment,
   configurationStatus,
@@ -8,9 +22,11 @@ import {
   launchArguments,
   parseArgs,
   policyStatus,
+  readLocalReceiveOptionKey,
   schemaStatus,
   validateDatabaseTarget,
   LOCAL_REDIS,
+  LOCAL_RECEIVE_ENV,
 } from "./hip4-local.mjs";
 
 const target = "postgresql://local:example@127.0.0.1:55436/hip4_local";
@@ -19,6 +35,7 @@ const options = {
   databaseUrl: target,
   expectedDatabase: "hip4_local",
 };
+const testReceiveKey = "ab".repeat(32); // Synthetic fixture only, never runtime.
 
 test("defaults to only API and requires an exact explicit loopback database", () => {
   assert.equal(
@@ -64,6 +81,7 @@ test("dotenv and inherited state cannot retarget local storage or enable financi
     HUNCH_FINANCE_EXECUTE: "true",
     CONTENT_ENABLED: "true",
     RELAY_API_KEY: "provider",
+    ADMIN_SERVICE_TOKEN_PEPPER: "production-pepper-must-not-be-reused",
   };
   const local = buildLocalEnvironment(values, options, values);
   assert.equal(local.DATABASE_URL, target);
@@ -84,6 +102,7 @@ test("dotenv and inherited state cannot retarget local storage or enable financi
   );
   assert.equal(local.PRIVY_APP_ID, "login");
   assert.equal(local.RELAY_API_KEY, "provider");
+  assert.equal(local.ADMIN_SERVICE_TOKEN_PEPPER, "");
   for (const key of [
     "PRIVY_WALLET_AUTHORIZATION_KEY",
     "HUNCH_SIGNAL_BOT_TOKEN",
@@ -106,6 +125,137 @@ test("dotenv and inherited state cannot retarget local storage or enable financi
   assert.equal(worker.HUNCH_FINANCE_WORKER_ENABLED, "true");
   assert.equal(worker.HUNCH_FINANCE_EXECUTE, "false");
   assert.equal(worker.HUNCH_FINANCE_FUNDING_RECONCILIATION_ENABLED, "true");
+  for (const mode of ["indexer", "finance-worker"])
+    assert.equal(
+      buildLocalEnvironment(values, { ...options, mode }, {}, testReceiveKey)
+        .ADMIN_SERVICE_TOKEN_PEPPER,
+      "",
+    );
+});
+
+test("dedicated local Receive key is read-only, private and stable, without dotenv privilege inheritance", (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), "hip4-local-key-test-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const filename = path.join(root, LOCAL_RECEIVE_ENV);
+  assert.deepEqual(readLocalReceiveOptionKey(root), {
+    status: "missing",
+    key: null,
+  });
+  assert.deepEqual(
+    readdirSync(root),
+    [],
+    "check must not create the config directory or key",
+  );
+  mkdirSync(path.dirname(filename));
+  writeFileSync(
+    filename,
+    `ADMIN_SERVICE_TOKEN_PEPPER=${testReceiveKey}\nDATABASE_URL=remote\nPRIVY_WALLET_AUTHORIZATION_KEY=forbidden\n`,
+    { mode: 0o600 },
+  );
+  const before = {
+    contents: readFileSync(filename, "utf8"),
+    mtime: statSync(filename).mtimeMs,
+  };
+  const first = readLocalReceiveOptionKey(root),
+    restarted = readLocalReceiveOptionKey(root);
+  assert.deepEqual(first, { status: "valid", key: testReceiveKey });
+  assert.equal(
+    restarted.key,
+    first.key,
+    "restart must reuse the same option-token authority",
+  );
+  assert.deepEqual(
+    {
+      contents: readFileSync(filename, "utf8"),
+      mtime: statSync(filename).mtimeMs,
+    },
+    before,
+    "neither check nor startup reads may alter key contents or metadata",
+  );
+  const local = buildLocalEnvironment(
+    {
+      ADMIN_SERVICE_TOKEN_PEPPER: "production",
+      PRIVY_APP_ID: "local-login",
+      PRIVY_APP_SECRET: "local-login-secret",
+    },
+    options,
+    {},
+    first.key,
+  );
+  assert.equal(local.ADMIN_SERVICE_TOKEN_PEPPER, testReceiveKey);
+  assert.equal(local.DATABASE_URL, target);
+  assert.equal(local.PRIVY_WALLET_AUTHORIZATION_KEY, undefined);
+  const status = configurationStatus(local, "api", false, [], [], first.status);
+  assert.equal(status.receiveOptionTokenKey.ready, true);
+  assert.deepEqual(status.missingRequired, []);
+  assert.equal(JSON.stringify(status).includes(testReceiveKey), false);
+  assert.equal(status.receiveOptionTokenKey.source, LOCAL_RECEIVE_ENV);
+});
+
+test("missing, malformed, publicly readable and symlinked Receive config fail with safe repair diagnostics", (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), "hip4-local-key-test-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const filename = path.join(root, LOCAL_RECEIVE_ENV);
+  mkdirSync(path.dirname(filename));
+  for (const value of ["", "short", "x".repeat(64)]) {
+    writeFileSync(filename, `ADMIN_SERVICE_TOKEN_PEPPER=${value}\n`, {
+      mode: 0o600,
+    });
+    const key = readLocalReceiveOptionKey(root);
+    assert.equal(key.status, value ? "invalid" : "missing");
+    assert.equal(key.key, null);
+    const local = buildLocalEnvironment(
+      { PRIVY_APP_ID: "id", PRIVY_APP_SECRET: "secret" },
+      { ...options, check: true },
+      {},
+      key.key,
+    );
+    const diagnostic = configurationStatus(
+      local,
+      "api",
+      false,
+      [],
+      [],
+      key.status,
+    );
+    assert.equal(diagnostic.receiveOptionTokenKey.ready, false);
+    assert.ok(
+      diagnostic.missingRequired.includes("ADMIN_SERVICE_TOKEN_PEPPER"),
+    );
+    assert.equal(diagnostic.receiveOptionTokenKey.status, key.status);
+    assert.match(
+      diagnostic.receiveOptionTokenKey.advice,
+      /untracked\/hip4-local\.env.*0600/u,
+    );
+    assert.match(
+      diagnostic.receiveOptionTokenKey.advice,
+      /Restore the original/u,
+    );
+  }
+  writeFileSync(filename, `ADMIN_SERVICE_TOKEN_PEPPER=${testReceiveKey}\n`, {
+    mode: 0o600,
+  });
+  chmodSync(filename, 0o644);
+  assert.deepEqual(readLocalReceiveOptionKey(root), {
+    status: "unsafe_file",
+    key: null,
+  });
+  chmodSync(filename, 0o600);
+  assert.equal(
+    readLocalReceiveOptionKey(root).status,
+    "valid",
+    "explicit permission repair works immediately without cooldown",
+  );
+  const alternate = path.join(root, "other.env");
+  writeFileSync(alternate, `ADMIN_SERVICE_TOKEN_PEPPER=${testReceiveKey}\n`, {
+    mode: 0o600,
+  });
+  unlinkSync(filename);
+  symlinkSync(alternate, filename);
+  assert.deepEqual(readLocalReceiveOptionKey(root), {
+    status: "unsafe_file",
+    key: null,
+  });
 });
 
 test("required key output contains presence only, varying with mode and funding policy", () => {
@@ -120,6 +270,7 @@ test("required key output contains presence only, varying with mode and funding 
   );
   assert.deepEqual(configurationStatus(local, "api").missingRequired, [
     "PRIVY_APP_SECRET",
+    "ADMIN_SERVICE_TOKEN_PEPPER",
   ]);
   assert.equal(
     configurationStatus(local, "finance-worker", true).missingRequired.includes(
@@ -146,7 +297,12 @@ test("required key output contains presence only, varying with mode and funding 
 });
 
 test("uses the official bootstrap then reapplies local targets and discards unrelated dotenv keys", async () => {
-  const local = buildLocalEnvironment({ PRIVY_APP_ID: "login" }, options, {});
+  const local = buildLocalEnvironment(
+    { PRIVY_APP_ID: "login" },
+    options,
+    {},
+    testReceiveKey,
+  );
   const environment = {
     HUNCH_FINANCE_EXECUTE: "true",
     AWS_SECRET_ACCESS_KEY: "unrelated",
@@ -163,6 +319,7 @@ test("uses the official bootstrap then reapplies local targets and discards unre
         HUNCH_FINANCE_EXECUTE: "true",
         HUNCH_SIGNAL_BOT_TOKEN: "unrelated",
         HUNCH_RUNTIME_SECRETS_LOADED: "1",
+        ADMIN_SERVICE_TOKEN_PEPPER: "unrelated-production-pepper",
       });
     },
     "/repo/.env",
@@ -174,6 +331,7 @@ test("uses the official bootstrap then reapplies local targets and discards unre
   assert.equal(environment.HUNCH_SIGNAL_BOT_TOKEN, undefined);
   assert.equal(environment.AWS_SECRET_ACCESS_KEY, undefined);
   assert.equal(environment.HUNCH_RUNTIME_SECRETS_LOADED, "1");
+  assert.equal(environment.ADMIN_SERVICE_TOKEN_PEPPER, testReceiveKey);
   await assert.rejects(
     bootstrapLocalEnvironment(local, async () => {}, "/repo/.env", {}),
     /bootstrap failed/,

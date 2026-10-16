@@ -5,12 +5,33 @@ import { hip4OrderTestMarket } from "./hip4-order-test-fixture.js";
 import {
   buildHip4NativeInstrument,
   currentHip4NativeInstrument,
+  hip4NativeExpiryOpen,
   hip4NativeMarketOpen,
 } from "./services/hip4-native-instrument.js";
 
 const now = Date.parse("2026-10-16T12:00:00.000Z");
 const identity = hip4Identity("mainnet", 8775);
 const futureExpiry = new Date(now + 60000).toISOString();
+
+test("native expiry availability distinguishes explicit null from missing, malformed and elapsed values", () => {
+  assert.equal(hip4NativeExpiryOpen(null, now), true);
+  assert.equal(hip4NativeExpiryOpen(futureExpiry, now), true);
+  for (const expiry of [
+    undefined,
+    "",
+    " ",
+    "invalid",
+    new Date(now).toISOString(),
+    new Date(now - 1).toISOString(),
+    0,
+    new Date(now + 60000),
+  ])
+    assert.equal(hip4NativeExpiryOpen(expiry, now), false);
+  for (const invalidClock of [NaN, Infinity, -Infinity]) {
+    assert.equal(hip4NativeExpiryOpen(null, invalidClock), false);
+    assert.equal(hip4NativeExpiryOpen(futureExpiry, invalidClock), false);
+  }
+});
 
 function snapshot() {
   return hip4OrderTestMarket(identity, now);
