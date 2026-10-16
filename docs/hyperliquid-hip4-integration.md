@@ -3,8 +3,9 @@
 ## Status, scope, and evidence
 
 This is the backend source-of-truth specification for `hip-next`, updated and
-rechecked on 2026-10-16. It is a development plan, not an assertion that HIP
-trading, funding, matching, or wallet intelligence is implemented or production-ready.
+rechecked on 2026-10-16. It records implementation and remaining phased work.
+Technical acceptance does not enable financial capabilities or certify
+production activation; matching and wallet intelligence remain separate work.
 
 Start with section 12 for evidence gates, section 11 for implementation order,
 then the owned domain section and companion client contract. Section 13 records
@@ -19,26 +20,28 @@ P2 read integration. Older checkpoints and baseline refs below are dated history
 Section 22 records the historical paused P3/P4 checkpoint. Section 23 records
 resumed work and the latest main merges; neither is financial release acceptance.
 
-Latest implementation checkpoint: sections 73–78. The P3/P4 goal is **open**;
-the required two consecutive fresh, no-history reviews of the whole finished
-implementation have not passed (**0/2**). A diagnostic whole-scope review found
-remaining work; scoped reviews below are not substitutes.
+Latest implementation and acceptance: sections 73–85. **P3/P4 technical
+implementation is accepted, with two consecutive fresh, no-history whole-scope
+GO reviews (2/2).** Section 85 supersedes earlier dated open-work lists and
+review counters; scoped corrections alone were not counted.
 
-The October 15 checkpoint pause has been explicitly lifted. Work is **active**
-on `hip-next`; backend `origin/main` at `5ac117fb` was merged as `b2328f8d`.
-No new feature commit, push or deployment is authorized by that merge request.
-Current code includes joint current-fact refund/receive recovery, native routes,
-sealed app handoff and bounded observation repair. Remaining acceptance includes
-the complete mounted Confirmation/funding matrix, history-scale performance and
-final cross-repository verification. Financial capabilities remain off.
+The October 15 pause was explicitly lifted. Work remains on `hip-next`; backend
+`origin/main` at `5ac117fb` was merged as `b2328f8d`. The user subsequently
+authorized an intermediate checkpoint commit/push and, after final acceptance,
+explicitly requested committing/pushing the accepted snapshot to all `hip-next`
+branches. Neither request authorizes merge, deployment, permissions changes or
+financial activation. Native funding uses the
+existing common catalog, worker and receipt/recovery owners; trading uses the
+ordinary Hunch Confirmation, Orders and portfolio surfaces. Financial defaults
+remain off.
 
-| Current slice        | Implemented                                                                                                                                                               | Still required before P3/P4 closure                                                                                             |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Shared funding       | Native adapters, common catalog/admin controls, joint receive/refund recovery, class-separated spot/perps cash, frozen lineage, holds and merge-safe reads                | Final route/recovery/browser acceptance and remaining history-scale performance                                                 |
-| Native order engine  | Frozen sign-only preparations, one-shot submission, cancellation, common consumer/order reads, bounded Check and cold observation repair                                  | Complete mounted client and end-to-end recovery acceptance                                                                      |
-| HTTP/client contract | Auth/CSRF, precise DTOs, USD IOC sizing, shared readiness/shortfall, ordinary Confirmation receipts, checked amount helpers, owned portfolio SELL and Orders cancellation | Mounted receipt/funding interactions and browser acceptance                                                                     |
-| Telegram             | Native Buy/Sell/custom input, immutable Review, sealed direct/funded handoff into the same app consumer; bounded factual Check                                            | Complete mounted financial/signature matrix; no autonomous trading or personal Telegram operation                               |
-| Release              | Local isolated tests and scoped independent reviews                                                                                                                       | Full implementation and cross-workspace acceptance, then two consecutive whole-scope GO reviews; financial activation stays off |
+| Current slice        | Accepted implementation                                                                                                                                      | Explicit limits / next phase                                                                                                                      |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Shared funding       | Native adapters, common catalog/admin controls, joint receive/refund recovery, class-separated cash, frozen lineage, holds and merge-safe reads              | Outbound native source requires current zero-fee capability; unknown sends retain holds; historical accounting cost remains linear                |
+| Native order engine  | Frozen sign-only preparations, one-shot submission, cancellation, common consumer/order reads, bounded Check and hot/cold observation repair                 | Provider absence, expiry and cancellation ACK are not proof of non-execution                                                                      |
+| HTTP/client contract | Auth/CSRF, generated DTOs, exact sizing, shared readiness/shortfall, Confirmation receipts, portfolio SELL/cancel, immediate consent revocation and recovery | Layered offline browser and real-PG acceptance passed; full production-mounted Review and live funded E2E were not executed                       |
+| Telegram             | Native Buy/Sell/custom input, immutable Review, sealed direct/funded handoff into the same app consumer; bounded factual Check                               | Product app handoff only; no autonomous HIP execution or personal Telegram operation                                                              |
+| Release              | Cross-workspace tests/builds/lint/contracts, disposable PG16 migrations/recovery/plans, two independent whole-scope GO reviews                               | Technical acceptance only; P4S and P5–P7, production-load evidence and separately authorized financial activation/deployment remain separate work |
 
 | Repository                      | Branch / immutable reference                                                             |
 | ------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -7416,3 +7419,311 @@ The user authorized committing/pushing this intermediate snapshot to `hip-next`,
 without merge, deployment or financial activation. P3/P4 remains active and the
 required consecutive fresh whole-scope GO count remains **0/2**. Scoped approval
 of corrected findings does not count as either final review.
+
+## 79. Native submission and bounded card repair — October 16, 2026
+
+The actual ordinary native hook/session/journal now has an isolated browser
+submission harness (`tests/design/hip4-order-hooks/submission-fixture.tsx` in
+the frontend). Thirteen checks cover direct/funded one-shot admission, reopen,
+factual receipt and Done, six late-signature lifecycle boundaries, expired
+Review, and Cancel ACK/response loss. MessagePack/EIP-712 validation and an
+explicit public SDK **test key** are real; API/auth/Privy IO is synthetic and
+unexpected requests fail the test. No user's key or actual order is used.
+Two real browser tabs also passed serialization: A holds the real WebLock
+through a deferred offline signature; B waits, then restores A's exact journal
+without another prepare/sign/submit. Reloaded B still performs reads only.
+This does not claim a live funded order or the full mounted Confirmation UI.
+
+Native funded lifecycle repair now bounds sources before funding fact joins.
+Migrations 0335–0340 add a derived UUID traversal cursor and concurrent indexes;
+they do not classify historical financial rows or introduce a financial queue.
+The source pool combines bounded new/live hints, historical rotation, and exact
+operation hints already returned by the **existing common funding worker**.
+The normal batch limit is unchanged. Historical repair reserves a slot; a batch
+of one alternates history/live preference. Cursor acknowledgment stops before
+displaced or locked due work. Empty tails wrap on the same normal tick. Cached
+terminal cards affect priority only and remain eligible for late factual repair.
+The unprojected-first phase for new direct/legacy cards is preserved.
+
+Disposable PG16 tests include 50,000 funded sources, new insertion behind the
+cursor, mixed-lane competition, consecutive skipped-source repair, and real
+two-connection funded owner/intent locks followed by next-tick recovery. Custom
+and generic plans measured: source pages 0.009–0.083 ms / 1–12 local blocks,
+unchanged hints 0.96–1.16 ms / 76–78 local blocks, hot pages 0.009–0.013 ms /
+2 blocks, and operation hit/missing/empty seeks 0.005–0.032 ms / 0–4 blocks.
+These are synthetic workload measurements, not production throughput promises.
+Independent review approved this corrected slice, not the whole goal.
+
+The shared Account Value exact-refund reader deliberately retains completed
+refund balance/reorg fences. With API-equivalent `jit=off`, 5,000 completed legs
+measured 248.541 ms SQL and 507.379 ms full read projection. Its cost remains
+linear in retained history and direct funding preparation does not always use
+the display snapshot cache. Dependency-complete projection optimization is a
+separate follow-up: do not omit terminal rows, cap history, or use existing
+classification revisions alone (they do not cover every read dependency).
+
+P3/P4 is still active; final consecutive fresh whole-scope GO remains **0/2**.
+All additions after the authorized intermediate push are uncommitted. No
+production policy, permissions, deployment, live financial or personal Telegram
+action is part of this acceptance.
+
+## 80. Mobile close authority and final acceptance — October 16, 2026
+
+The first fresh whole-scope review rejected a real client lifecycle defect:
+mobile Confirmation kept `open=true` during its 520 ms exit presence and waited
+for asynchronous reservation cleanup before Close/Back navigation. A late native
+prepare or signature could therefore continue after the user's close action.
+
+The ordinary wrapper now passes actual `open` independently of visual presence.
+Close/Back synchronously revoke the native signing signal and clear automatic
+funding/preparation continuations before cleanup or parent navigation. Readiness
+has a consent epoch, so returning to identical wallet/ticket values does not
+revive a pending response from the previous lifetime. Cleanup remains the common
+exact funding-operation cancellation; durable submitted attempts and their
+reconciliation are not erased or treated as failed.
+
+Sixteen isolated browser checks passed with the actual wrapper/native hook,
+including delayed prepare and signature resolved 50 ms after close while content
+is still mounted, immediate revocation before any parent render, and exact
+Check/abandon recovery on reopen. The visual Drawer primitive and Review leaf
+are synthetic in this harness; it is not a claim of full mounted production
+Confirmation UI. Four production-callback tests separately execute ordinary
+close, every mobile Close/Back handler, and close/reopen or A/B/A readiness races.
+No provider IO, user key, actual order or personal Telegram action is used.
+
+Backend full workspace build passed 16/16 and lint passed 15/15. The corrected
+frontend passed 1,938 tests, typecheck, and exact Node 20.11.1 / Next 16.3.4
+Turbopack build (42 pages). Final fresh whole-scope reviews are still required;
+the earlier NO GO and scoped approvals do not count toward **0/2**. Financial
+activation and deployment remain separate, unauthorized operations.
+
+## 81. Explicit recovery of a lost cancellation — October 16, 2026
+
+A second fresh whole-scope review found that a cancellation admitted before a
+process/transport loss could stay ambiguous forever while the original GTC
+remained open. Correctly preventing replay of the old signed action did not
+provide a practical cancellation recovery path.
+
+The ordinary Orders control now offers **Review cancellation again** for an
+admitted ambiguous cancel with an exact confirmed-open owned parent. This only
+retires its expected local cancellation pointer under the existing cross-tab
+lock, after rechecking action and parent identity/CLOID. It does not acknowledge
+success, abandon the server action, release holds, change fills, or affect a
+BUY/SELL journal. A separate explicit Cancel obtains a fresh request key, server
+nonce and signature for that same parent. A late original cancellation cannot
+create exposure. Unknown/failed/wrong-identity reads retain recovery; terminal
+parent evidence uses factual Done instead. No new financial protocol is added.
+
+Tests cover stale/competing tabs, logout and replacement during reads, missing
+or wrong parent, late original closure/fill, policy-disabled review, passive
+reopen and fresh explicit cancellation. The actual ordinary-hook offline browser
+matrix now passes 17 checks, including distinct cancel action/key/nonce after
+lost response, no automatic retry, no BUY/funding and no abandonment. Full frontend
+tests pass 1,943/1,943, typecheck/lint and exact Node 20/Turbopack pass. Independent
+follow-up approved the correction, not the whole scope. Final consecutive fresh
+whole-scope GO remains **0/2** until two new reviews pass.
+
+The complete 350-file migration sequence through 0340 also passed on a new empty
+disposable PostgreSQL 16.2 database; no invalid indexes remained. Earlier current
+source legacy fixtures, custom/generic plans and concurrency evidence in section
+79 remain applicable. Production data and policies were not changed.
+
+## 82. Terminal partial/zero observation cadence — October 16, 2026
+
+A further fresh whole-scope review found that ordinary terminal partial/zero-fill
+orders could never satisfy the full-original-quantity cold predicate. Exhausted
+repair scans therefore restarted in the hot queue forever, consuming shared
+provider budget and delaying newer orders as historical cancellations grew.
+
+Only scheduling changed. An exact terminal order also enters the existing cold
+lane after a successful bounded fill scan exhausts through its official terminal
+timestamp. Full quantity, history coverage, fee certainty, execution receipts,
+funding and holds are not inferred or rewritten. The rows remain eligible for
+existing policy-controlled cold rechecks; a failed check returns to hot repair.
+Explicit Check still bypasses cadence but never a live lease. No new background
+engine, budget or interval was added.
+
+The shared SQL predicate drives both queue selection and post-fenced scheduling
+against the just-persisted row in the same transaction. Additive concurrent index
+0341 matches it and preserves 0334 for older readers. Malformed optional repair
+JSON is tolerated, not a migration failure. Both disposable PostgreSQL 16.2
+databases accepted 0341; the empty-database sequence now has 351 migration files.
+
+Actual observer acceptance passed zero/partial financial-fact preservation,
+incomplete/error/malformed scans, cold-to-explicit-Check/error recovery, funding
+and merge/lease regressions. Mixed 50,000-record full/partial/zero terminal history
+did not delay one hot order: custom/generic admission measured 0.167/0.161 ms and
+52/56 local blocks. First/next/empty hot/cold probes measured 0.025–0.260 ms and
+4–47 blocks. These are synthetic plans, not production throughput guarantees.
+The first fixture ordering manufactured excessive dead entries by repeatedly
+retiming all history in one unvacuumable transaction; the final phase-separated
+fixture retains the same bounds and all empty-tail assertions.
+
+Full backend build/lint passed 31/31 tasks; 29 amount/fee/evidence tests also
+passed. Independent follow-up approved this correction only. Fresh whole-scope
+acceptance restarts at **0/2**, with no new commit, push, deploy or activation.
+
+## 83. Retained terminal history and provider absence — October 16, 2026
+
+Whole-scope review found one related queue regression: a provider `unknownOid`
+retained an already exact terminal observation, but its diagnostic removed the
+order from cold cadence permanently. The correction allows only that absence
+diagnostic against a retained, non-invalidated terminal barrier and sufficient
+full-fill/known-fee facts or successful exhausted repair. Other errors,
+contradictions and incomplete repair remain hot. An unknown response never
+refreshes terminal provenance, repairs an invalidation, invents a fresh receipt
+or releases holds. Existing cold policy and explicit Check are unchanged.
+
+Additive 0342 matches the scheduling predicate while preserving 0341 and older
+reader indexes. It passed both legacy-fixture and previously empty disposable
+PostgreSQL 16.2 databases, bringing the sequence to 352 files. An unapplied
+comment-semicolon splitter error was caught in the first disposable migration
+attempt and corrected before successful re-execution; no applied checksum or
+historical row was changed.
+
+Final actual observer acceptance passed full/partial/zero retention, diagnostic
+and null-summary preservation, invalidated-evidence refusal, explicit recovery,
+leases, common consumer and merge races. In the 50,000 mixed historical rows the
+hot UUID is deliberately last, not an accidentally first global-queue row.
+Custom/generic hot admission measured 0.195/0.155 ms and 50/54 local blocks;
+hot/cold first/next/empty probes measured 0.025–0.178 ms and 4–50 blocks. Full
+backend build/lint passed 31/31 tasks; final PG postcheck had no invalid indexes
+or leaked test connections. These remain local synthetic workload measurements.
+
+Generic native SendAsset `status:err` is still **ambiguous**, not independent
+proof that funds can be released: reused nonce/replay/error semantics require
+exact receipt evidence. A future diagnostic/rejection classification must prove
+its safe subset rather than accepting arbitrary provider error text. No change
+to that financial safeguard was made in this review.
+
+Scoped correction reviews do not count as final acceptance. Two new independent
+no-history whole-P3/P4 reviews are required, starting at **0/2** on this corrected
+snapshot. No production activation, Git push or personal Telegram action occurred.
+
+## 84. Native transfer fee capability — October 16, 2026
+
+A first fresh whole review returned GO; the next returned NO GO on the native
+outbound fee boundary. That breaks the consecutive sequence: current final
+whole-implementation acceptance is **0/2**. Role `user`, Standard cash and Relay's
+fee summary alone did not prove the absence of first-outbound activation cost.
+Rejecting all nonzero fee receipts only after a transfer was not a sufficient
+pre-submit capability boundary.
+
+The supported outbound subset now requires positive, uncached native fee checks
+for the exact sender and independently resolved Relay depository. Both checks
+must report an existing, previously transacting, unsanctioned account with zero
+activation fee. Native USDC from Standard spot/default perps to that established
+default-perps depository is supported; new/fee-bearing/unverified sources and
+Core-to-EVM forwarding/system recipients are not admitted. This is a financial
+capability check, not another product allowlist or a hardcoded activation fee.
+
+Primary evidence is the SDK's
+[preTransferCheck contract](https://github.com/nktkas/hyperliquid/blob/master/src/api/info/_methods/preTransferCheck.ts)
+and the official app's dated public `config-1E2uRQO0.js` implementation, inspected
+read-only on this date. Its native SendAsset review uses exact recipient/source
+`preTransferCheck`, labels the fee USD-stablecoin, and separates forwarding/gas
+review. Its ledger formatter identifies nonzero `nativeTokenFee` as HYPE. This
+grounds the narrow native-route check; it is not a universal zero-fee promise or
+proof that an older redacted transfer was a forwarding transaction. Circle and
+Hyperliquid activation descriptions differ; neither is used to guess a charge.
+
+The existing shared client, policy freshness and request-weight budget own these
+two reads. Quote creation checks before exposing Review; common action prepare
+checks before returning either signature; final SendAsset admission rereads and
+rechecks exact binding/expiry after financial lock waits. No provider IO runs
+while holding those locks. An admitted replay bypasses new eligibility and never
+resends. Existing nonzero-fee/unknown historical receipts retain their conservative
+reconciliation; they are not relabeled as zero or released from error text.
+
+Unsupported capability has a distinct `native_transfer_fee_unverified` discovery
+reason in generated REST contracts and the ordinary funding presentation. Users
+can complete account activation in Hyperliquid, then explicitly refresh/review,
+or use another supported source. A successful subsequent authoritative check
+recovers immediately, without timers, manual database edits or automatic actions.
+If eligibility changes after a browser signature, admission remains unsubmitted;
+the ordinary report/recovery path closes only that prepared lease and fences a
+late signed request. Real financial actions were not used to test this behavior.
+
+The correction has pure invalid/missing/nonzero/first-use/identity/system/expiry,
+shared-budget and positive-recovery tests. Disposable PG16 native send and common
+prepare tests prove no attempt before failed eligibility, post-sign expiry with
+no money ambiguity, exact ordinary recovery, no-resend replay and two-session
+max-one-connection admission. Snapshot/debit regressions pass. New SQL test
+statements were executed on PG16; this correction adds no migration. Full backend
+build/lint passes 31/31. Final cross-repository checks and two new fresh whole
+reviews remain required; financial defaults remain off.
+
+## 85. Final P3/P4 technical acceptance — October 16, 2026
+
+Two sequential independent reviewers, each started with no conversation or prior
+review history, returned **WHOLE P3/P4 technical GO** on the same frozen source.
+They compared backend/frontend against their local `main` baselines and admin
+against `master`, including dirty/untracked implementation and migrations through 0342. Neither approval relied on financial defaults being off. Earlier NO GOs
+and scoped correction approvals were not counted. The final consecutive count
+is **2/2**, completing the P3/P4 technical implementation goal.
+
+The accepted integration uses the existing Funding catalog, planning, physical
+reservations, worker, exact receipt/refund publication and current-fact recovery.
+Native order admission, sign-only execution, one-shot submit, cancellation,
+ordinary Orders/portfolio SELL and sealed Telegram app handoff retain common
+Hunch ownership, policies, consent and UI. No separate financial framework,
+product design or discovery query engine was introduced. The optimized unified
+feed remains the discovery owner; final post-checkpoint feed changes are nullable
+presentation/type assertions, not SQL rewrites.
+
+Corrections before the frozen reviews include immediate mobile Close/Back consent
+revocation, explicit fresh cancellation review after a lost response, fair bounded
+funded-card repair, cold cadence for exact terminal partial/zero/retained-unknown
+observations, and the current exact zero-native-fee transfer capability in section 84. These preserve financial facts: an unknown response does not become a failed
+payment, a cancellation ACK does not release order exposure, and delayed callbacks
+cannot revive a historical Buy or a retired consent lifetime.
+
+### Final verification
+
+| Check                             | Evidence                                                                                                                                                                                          |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Backend workspace                 | Full build/lint: 31/31 tasks (16 build, 15 lint); final independent rerun also passed from cache                                                                                                  |
+| Funding unit matrix               | 273/273 tests across 100 files; finance-worker 24/24                                                                                                                                              |
+| Existing-venue/common regressions | Funding domain/planner/routes/persistence/lifecycle/delegated execution, account value, trading, Polymarket and Limitless: 12/12 entrypoints plus 39 node test cases                              |
+| Frontend                          | 1,944/1,944 tests, typecheck, lint, generated-contract consistency; exact Node 20.11.1 / Next 16.3.4 Turbopack production build, 42 pages                                                         |
+| Admin                             | 47 tests, TypeScript/Vite build and lint; unchanged final source                                                                                                                                  |
+| PostgreSQL                        | Official disposable PG16.2: both legacy fixtures and empty-database bootstrap through 0342, 352 migrations; no invalid indexes or leaked test clients at postcheck                                |
+| Independent reviewer G            | 207 backend tests, 88 frontend tests / 833 assertions, admin labels and five real disposable PG16 suites passed                                                                                   |
+| Independent reviewer H            | Full backend build/lint, 379 targeted backend tests plus nine native transport tests, all 10 allowlisted PG16 entrypoints, frontend 1,944/typecheck/lint/contracts and admin 47/build/lint passed |
+| Browser boundaries                | Actual ordinary wrapper/native hook/session/journal: 17 offline submission checks; real two-tab WebLock recovery; separate common funding and app-handoff consent matrices                        |
+
+The PG16 entrypoints cover native prepare/send/snapshot debit, order observation,
+native account and unified order/history reads, account worker, exact funding
+receipt/refund and direct/funded Telegram app handoff. They exercise real locks,
+concurrency, lease fencing, current-fact/reorg repair, rejection-before-admission
+recovery, replay and representative first/resumed/empty custom/generic plans.
+Synthetic provider IO and published offline SDK test keys are not live execution.
+The browser visual Drawer primitive/Review leaf are test boundaries; the evidence
+does not claim a full mounted production Review or live funded E2E run.
+
+### Retained limits and next work
+
+- Native outbound funding supports only the positively checked zero-fee subset
+  in section 84. Missing/changed fees recover through explicit refresh/review;
+  admitted uncertain transfers keep their evidence and reservations.
+- No authoritative negative SendAsset receipt contract was established. Generic
+  provider errors, nonce errors, expiry or absent receipts cannot prove non-debit.
+  This remains an explicit activation-evidence risk, not permission to invent a
+  failure classification, silently resend or release funds. Any future positive
+  rejection/invalidation recovery requires its own protocol proof and tests.
+- Shared exact-refund accounting remains linear in retained history. At 5,000
+  completed legs, independent reruns measured 220–236.755 ms SQL and
+  493–570.859 ms full projection. Some ordinary Orders projections are also
+  history-linear. These are local fixtures, not production-scale performance
+  guarantees; dependency-complete optimization must not drop financial history.
+- P4S verified thesis/Copy evidence, P5 complete public-surface parity, P6 matching
+  and wallet research, and P7 gradual activation remain separate. Technical
+  acceptance neither enables their capabilities nor declares them completed.
+- The user explicitly authorized saving this accepted snapshot through commit/push
+  to all `hip-next` branches. Financial activation, live signing/funded E2E,
+  production permissions/policy and merge/deploy still require a separate
+  explicit command. Personal Telegram, user app servers, authentication and local
+  admin permissions were not operated by this acceptance.
+
+All final whitespace and targeted documentation checks pass. The known unrelated
+frontend global Markdown `AGENTS.md` second-H1 warning was not hidden or changed.

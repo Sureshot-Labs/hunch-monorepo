@@ -110,8 +110,11 @@ export function applyFeedReadPresentation(
     topValidUntil: { YES: null, NO: null },
   };
   if (!market) return unavailable;
-  const primary = market.sides.find((side) => side.sideIndex === 0)!;
-  const secondary = market.sides.find((side) => side.sideIndex === 1)!;
+  const primary = market.sides.find((side) => side.sideIndex === 0);
+  const secondary = market.sides.find((side) => side.sideIndex === 1);
+  // readSnapshot already validated both identities; retain that invariant
+  // explicitly here instead of asserting away the mapper's nullable type.
+  if (!primary || !secondary) return unavailable;
   const book = (side: typeof primary) => {
     const fresh =
       !market.settlement &&

@@ -18,6 +18,10 @@ import { buildRelayPlanningQuote } from "./operation-plan.js";
 import { compileFundingIntentPolicy } from "../../funding/policies/funding-policy-v2.js";
 import { withWithdrawalPlanningContract } from "../../funding/domain/withdrawal-contract.js";
 import { DEFAULT_FUNDING_RUNTIME_POLICY } from "../../funding/policies/funding-policy.js";
+import {
+  zeroNativeTransferFeeObservation,
+  NativeTransferFeeCapabilityError,
+} from "../../services/hip4-transfer-fee-capability.js";
 
 function fixture(
   options: {
@@ -25,6 +29,8 @@ function fixture(
     lagMs?: number;
     cap?: string;
     sourceDex?: "spot" | "";
+    nativeFee?: string;
+    sourceHasSentTx?: boolean;
   } = {},
 ) {
   const now = new Date();
@@ -67,6 +73,25 @@ function fixture(
     // The client timestamps /chains with the real clock. Under parallel test
     // load simulated completion must not precede that observation.
     () => new Date(Math.max(Date.now(), now.getTime() + (options.lagMs ?? 50))),
+    async (binding) =>
+      zeroNativeTransferFeeObservation({
+        binding,
+        sourceCheck: {
+          fee: options.nativeFee ?? "0",
+          userExists: true,
+          userHasSentTx: options.sourceHasSentTx ?? true,
+          isSanctioned: false,
+        },
+        destinationCheck: {
+          fee: "0",
+          userExists: true,
+          userHasSentTx: true,
+          isSanctioned: false,
+        },
+        observedAt: Date.now(),
+        expiresAt: Date.now() + 60000,
+        now: Date.now(),
+      }),
   );
   const input = {
     route: {
@@ -133,6 +158,31 @@ test("common Relay adapter requests native v2 and produces ordinary commit/reser
   assert.deepEqual(
     result.commitPlan.steps.map((step) => step.executorId),
     ["relay_hypercore_native_v1", "relay_hypercore_native_v1"],
+  );
+});
+
+test("native quotes exclude unverified activation fees before Review and recover on explicit refresh", async () => {
+  const options = { nativeFee: "1.00", sourceHasSentTx: true };
+  const f = fixture(options);
+  await assert.rejects(
+    f.adapter.quoteHypercore(f.input),
+    NativeTransferFeeCapabilityError,
+  );
+  options.nativeFee = "0";
+  options.sourceHasSentTx = false;
+  await assert.rejects(
+    f.adapter.quoteHypercore(f.input),
+    NativeTransferFeeCapabilityError,
+  );
+  options.sourceHasSentTx = true;
+  assert.ok((await f.adapter.quoteHypercore(f.input)).candidate);
+  const withoutObserver = new RelayWalletQuoteAdapter(
+    f.adapter.client,
+    f.adapter.clock,
+  );
+  await assert.rejects(
+    withoutObserver.quoteHypercore(f.input),
+    NativeTransferFeeCapabilityError,
   );
 });
 

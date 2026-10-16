@@ -51,10 +51,11 @@ test("the common catalog receives primary-side 24h notional, never summed YES/NO
     hip4CatalogProjection({ ...observed, quoteToken: "USDH" }).volume24h,
     null,
   );
+  assert.ok(observed.volume24h);
   assert.equal(
     hip4CatalogProjection({
       ...observed,
-      volume24h: { ...observed.volume24h!, coin: "#87751" },
+      volume24h: { ...observed.volume24h, coin: "#87751" },
     }).volume24h,
     null,
   );

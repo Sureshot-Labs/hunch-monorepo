@@ -243,7 +243,7 @@ export async function checkTelegramNativeHandoffReadPlans(
           await db.query(`prepare ${name} as ${statement.sql}`);
           const plan = (
             await db.query(
-              `explain(analyze,buffers,format json) execute ${name}(${statement.args.map(literal).join(",")})`,
+              `explain(analyze,buffers,format json) execute ${name}${statement.args.length ? `(${statement.args.map(literal).join(",")})` : ""}`,
             )
           ).rows[0]["QUERY PLAN"][0];
           await db.query(`deallocate ${name}`);
@@ -322,7 +322,7 @@ export async function checkTelegramNativeHandoffReadPlans(
           await db.query(`prepare ${name} as ${statement.sql}`);
           const plan = (
             await db.query(
-              `explain(analyze,buffers,format json) execute ${name}(${statement.args.map(literal).join(",")})`,
+              `explain(analyze,buffers,format json) execute ${name}${statement.args.length ? `(${statement.args.map(literal).join(",")})` : ""}`,
             )
           ).rows[0]["QUERY PLAN"][0];
           await db.query(`deallocate ${name}`);

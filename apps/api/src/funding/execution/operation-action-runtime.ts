@@ -61,6 +61,13 @@ import {
   type NativeFundingPreparation,
 } from "./hypercore-submission-contract.js";
 import { nativeFundingSigningPreparation } from "./hypercore-signed-request.js";
+import { relayHypercorePairBindingSchema } from "../../funding-providers/relay/hypercore-actions.js";
+import {
+  readNativeTransferFeeCapability,
+  assertNativeTransferFeeObservation,
+  NativeTransferFeeCapabilityError,
+  type NativeTransferFeeObservation,
+} from "../../services/hip4-transfer-fee-capability.js";
 import {
   assertNativeFundingRecipient,
   nativeFundingPreparationInTransaction,
@@ -346,6 +353,7 @@ export class FundingOperationActionRuntime {
     private readonly db: Pool,
     private readonly dependencies: Readonly<{
       readAccount?: typeof buildAccountValueReadModel;
+      readNativeTransferFees?: typeof readNativeTransferFeeCapability;
       revalidateWithdrawalRecipient?: (
         userId: string,
         recipientId: string,
@@ -428,6 +436,25 @@ export class FundingOperationActionRuntime {
         ? undefined
         : step.payerRequirement,
     );
+    let nativeFeeCapability: NativeTransferFeeObservation | undefined;
+    if (native) {
+      try {
+        const binding = relayHypercorePairBindingSchema.parse(
+          action.payload.binding,
+        );
+        nativeFeeCapability = await (
+          this.dependencies.readNativeTransferFees ??
+          readNativeTransferFeeCapability
+        )(this.db, binding);
+      } catch (error) {
+        throw new FundingPersistenceError(
+          "quote_invalidated",
+          error instanceof NativeTransferFeeCapabilityError
+            ? error.message
+            : "HyperCore transfer fees are unavailable. Refresh and review funding again; no transfer was submitted.",
+        );
+      }
+    }
     // Bind a server-observed lifetime BEFORE signing. A delayed registration
     // can then be reconciled even if the wallet dialog outlives this blockhash.
     let solanaSigningContext: SolanaSigningContext | undefined;
@@ -514,6 +541,10 @@ export class FundingOperationActionRuntime {
           input.operationId,
           userId,
         ]);
+        assertNativeTransferFeeObservation(
+          nativeFeeCapability,
+          relayHypercorePairBindingSchema.parse(action.payload.binding),
+        );
       }
       if (externalRecipientId) {
         // The share lock makes revocation/crypto-shredding serialize with the
@@ -747,6 +778,11 @@ export class FundingOperationActionRuntime {
           dueAt: durableStart.attempt.startedAt,
         });
       }
+      if (native && nativeSubmission)
+        assertNativeTransferFeeObservation(
+          nativeFeeCapability,
+          relayHypercorePairBindingSchema.parse(action.payload.binding),
+        );
       return {
         attemptId: durableStart.attempt.id,
         action,

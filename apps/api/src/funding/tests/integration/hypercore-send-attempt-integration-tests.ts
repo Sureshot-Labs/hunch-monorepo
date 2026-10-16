@@ -1,6 +1,11 @@
 // @requires-db — explicit disposable PG16 only. Scenario writes roll back;
 // the final two-session race retains one uniquely named fixture in this DB.
 import assert from "node:assert/strict";
+import {
+  zeroNativeTransferFeeObservation,
+  type NativeTransferFeeBinding,
+} from "../../../services/hip4-transfer-fee-capability.js";
+
 import { randomUUID } from "node:crypto";
 import { Wallet } from "ethers";
 import { createIntegrationTestPool } from "../../../test-database-target.js";
@@ -50,6 +55,23 @@ import { admitHip4OrderActionInTransaction } from "../../../repos/hip4-order-adm
 import { prepareHip4TradeSigning } from "../../../services/hip4-trade-signing.js";
 import { recordHip4SubmissionReplyInTransaction } from "../../../services/hip4-order-submission.js";
 import { HYPERCORE_MAINNET_USDC } from "../../domain/hypercore-identity.js";
+
+function zeroFeeCapability(binding: NativeTransferFeeBinding) {
+  const check = {
+    fee: "0",
+    isSanctioned: false,
+    userExists: true,
+    userHasSentTx: true,
+  };
+  return zeroNativeTransferFeeObservation({
+    binding,
+    sourceCheck: check,
+    destinationCheck: check,
+    observedAt: Date.now(),
+    expiresAt: Date.now() + 60000,
+    now: Date.now(),
+  });
+}
 
 const pool = await createIntegrationTestPool({
   max: 1,
@@ -202,11 +224,14 @@ try {
     availableRaw = "1000000000",
     observedAt = new Date().toISOString(),
   ) =>
-    nativeSendCapacityCheck(async () => ({
-      availableRaw,
-      observedAt,
-      expiresAt: new Date(Date.now() + 60000).toISOString(),
-    }));
+    nativeSendCapacityCheck(
+      async () => ({
+        availableRaw,
+        observedAt,
+        expiresAt: new Date(Date.now() + 60000).toISOString(),
+      }),
+      zeroFeeCapability(pair.validated.binding),
+    );
   const state = async (attemptId: string) =>
     (
       await client.query(
@@ -357,7 +382,7 @@ try {
             observedAt: new Date().toISOString(),
             expiresAt: new Date(Date.now() + 60000).toISOString(),
           };
-        });
+        }, zeroFeeCapability(perpsPair.validated.binding));
       await client.query("savepoint perps_insufficient");
       await assert.rejects(
         admitNativeFundingSendInTransaction(
@@ -608,6 +633,33 @@ try {
     "journal recovery fences an unadmitted send; a delayed signed POST cannot acquire authority",
     async () => {
       const input = await start();
+      const priorFeeCapability = zeroFeeCapability(pair.validated.binding);
+      await assert.rejects(
+        admitNativeFundingSendInTransaction(
+          client,
+          input,
+          policy,
+          nativeSendCapacityCheck(
+            async () => ({
+              availableRaw: "1000000000",
+              observedAt: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 60000).toISOString(),
+            }),
+            {
+              ...priorFeeCapability,
+              expiresAt: new Date(Date.now() - 1).toISOString(),
+            },
+          ),
+          codec,
+        ),
+        /transfer fees are not verified/,
+      );
+      const beforeRecovery = await state(input.attemptId);
+      assert.equal(beforeRecovery.broadcast_may_have_occurred, false);
+      assert.equal(
+        beforeRecovery.actual_costs.nativeSubmission.phase,
+        "prepared",
+      );
       const recovered = await finishFundingStepAttemptForUserInTransaction(
         client,
         {
@@ -873,11 +925,14 @@ try {
             client,
             input,
             policy,
-            nativeSendCapacityCheck(async () => ({
-              availableRaw: "1000000000",
-              observedAt: new Date(Date.now() - 10000).toISOString(),
-              expiresAt: new Date(Date.now() - 1).toISOString(),
-            })),
+            nativeSendCapacityCheck(
+              async () => ({
+                availableRaw: "1000000000",
+                observedAt: new Date(Date.now() - 10000).toISOString(),
+                expiresAt: new Date(Date.now() - 1).toISOString(),
+              }),
+              zeroFeeCapability(pair.validated.binding),
+            ),
             codec,
           ),
         /not fresh/,
@@ -1158,6 +1213,38 @@ try {
     options: "-c statement_timeout=15000",
   });
   try {
+    const feeChanged = zeroFeeCapability(pair.validated.binding);
+    await assert.rejects(
+      submitNativeFundingSend(pool, raceInput, codec, {
+        admissionPolicy: policy,
+        observe: async () => ({
+          capacity: {
+            availableRaw: "1000000000",
+            observedAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 60000).toISOString(),
+          },
+          feeCapability: {
+            ...feeChanged,
+            expiresAt: new Date(Date.now() - 1).toISOString(),
+          },
+          timeoutMs: 1000,
+          responseMaxBytes: 4096,
+        }),
+        fetcher: async () => {
+          throw new Error("fee check must precede any exchange POST");
+        },
+      }),
+      /transfer fees are not verified/,
+    );
+    const unsubmitted = (
+      await pool.query(
+        "select outcome,broadcast_may_have_occurred,actual_costs from funding_operation_step_attempts where id=$1",
+        [raceInput.attemptId],
+      )
+    ).rows[0];
+    assert.equal(unsubmitted.outcome, "started");
+    assert.equal(unsubmitted.broadcast_may_have_occurred, false);
+    assert.equal(unsubmitted.actual_costs.nativeSubmission.phase, "prepared");
     await assert.rejects(
       () =>
         submitNativeFundingSend(pool, raceInput, codec, {
@@ -1184,6 +1271,7 @@ try {
       if (++reads === 2) releaseObservations();
       await bothObserved;
       return {
+        feeCapability: zeroFeeCapability(pair.validated.binding),
         capacity: {
           availableRaw: "1000000000",
           observedAt: new Date().toISOString(),

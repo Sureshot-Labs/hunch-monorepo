@@ -6,6 +6,7 @@ import {
 import { hip4AccountAddressSchema } from "../schemas/hip4-account.js";
 
 export type Hip4AccountInfoRequest =
+  | { type: "preTransferCheck"; user: string; source: string }
   | { type: "clearinghouseState"; user: string; dex: "" }
   | { type: "orderStatus"; user: string; oid: number | string }
   | { type: "userFills"; user: string; aggregateByTime: false }
@@ -43,6 +44,7 @@ export function createHip4AccountClient(
     if (
       ![
         "userRole",
+        "preTransferCheck",
         "userAbstraction",
         "spotClearinghouseState",
         "clearinghouseState",
@@ -56,6 +58,10 @@ export function createHip4AccountClient(
     )
       throw new Hip4ReadError("invalid_response");
     const user = hip4AccountAddressSchema.parse(request.user);
+    const scoped =
+      request.type === "preTransferCheck"
+        ? { ...request, user, source: hip4AccountAddressSchema.parse(request.source) }
+        : { ...request, user };
     if (request.type === "clearinghouseState" && request.dex !== "")
       throw new Hip4ReadError("invalid_response");
     if (
@@ -93,7 +99,7 @@ export function createHip4AccountClient(
       policy,
       admit,
       fetcher,
-      { ...request, user },
+      scoped,
       weight,
       options?.deadlineMs,
     );

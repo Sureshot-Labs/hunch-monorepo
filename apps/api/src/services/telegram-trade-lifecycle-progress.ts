@@ -13,6 +13,12 @@ import { releaseFundingReservationForAbandonedTradeInTransaction } from "../fund
 import { readTelegramNativeHandoffOrder } from "../repos/telegram-native-handoff-read.js";
 import { TELEGRAM_NATIVE_LIFECYCLE_DUE_SQL } from "../repos/telegram-native-lifecycle-due.js";
 import {
+  advanceTelegramNativeFundedLifecyclePage,
+  listTelegramNativeFundedLifecyclePage,
+  TELEGRAM_NATIVE_FUNDED_LIFECYCLE_HOT_SQL,
+  TELEGRAM_NATIVE_FUNDED_LIFECYCLE_OPERATIONS_SQL,
+} from "../repos/telegram-native-lifecycle-page.js";
+import {
   telegramNativeLifecycleSchema,
   telegramNativeLifecycleSnapshot,
   telegramNativeLifecycleOrderState,
@@ -1001,7 +1007,18 @@ function sameProgress(
 async function listCandidates(
   client: PoolClient,
   limit: number,
+  fundingOperationIds: readonly string[] = [],
 ): Promise<readonly ProjectionCandidate[]> {
+  const fundedPage = await listTelegramNativeFundedLifecyclePage(client, limit);
+  const fundedSourceIds = fundedPage?.ids ?? [];
+  const hotFunded = await client.query<{ id: string }>(
+    TELEGRAM_NATIVE_FUNDED_LIFECYCLE_HOT_SQL,
+    [limit],
+  );
+  const fundingHints = await client.query<{ id: string }>(
+    TELEGRAM_NATIVE_FUNDED_LIFECYCLE_OPERATIONS_SQL,
+    [[...new Set(fundingOperationIds)].slice(0, limit)],
+  );
   const candidateSql = (
     branch: "legacy" | "native_direct" | "native_funded" | "locked",
   ) => `select intent.id,
@@ -1224,7 +1241,7 @@ async function listCandidates(
           ? "intent.id=any($7::uuid[]) and (intent.user_id is null or intent.user_id=any($6::uuid[])) and"
           : branch === "legacy"
             ? "intent.venue<>'hyperliquid' and"
-            : `${TELEGRAM_NATIVE_LIFECYCLE_DUE_SQL} and intent.funding_operation_id is ${branch === "native_direct" ? "null" : "not null"} and`
+            : `${TELEGRAM_NATIVE_LIFECYCLE_DUE_SQL} and intent.funding_operation_id is ${branch === "native_direct" ? "null" : "not null"} and ${branch === "native_funded" ? "(intent.id=any($6::uuid[]) or intent.id=any($7::uuid[]) or intent.id=any($9::uuid[])) and" : ""}`
       }
         intent.status in (
               'external_handoff', 'funding', 'executing', 'submitted',
@@ -1300,7 +1317,7 @@ async function listCandidates(
                )`
                } desc,
                intent.id
-      limit $1`;
+      limit ${branch === "native_funded" ? "($1::integer*3)" : "$1"}`;
   const values = [
     limit,
     TELEGRAM_TRADE_TERMINAL_DELIVERY_OWNER_RESULT_KEY,
@@ -1312,21 +1329,56 @@ async function listCandidates(
   // projection lets PostgreSQL prune unused fact subqueries. Then acquire U
   // before I, in the same order as native admission/merge; an owner currently
   // being changed is skipped and recovered on the next ordinary batch.
-  const hints = await client.query<Pick<ProjectionCandidate, "id" | "user_id">>(
-    {
-      name: "telegram-trade-lifecycle-hints-v8",
-      text: `select id,user_id from (
+  const hints = await client.query<
+    Pick<ProjectionCandidate, "id" | "user_id"> & {
+      history_due_ids: string[];
+    }
+  >({
+    name: "telegram-trade-lifecycle-hints-v11",
+    text: `with lifecycle_hint as materialized (
         ${["legacy", "native_direct", "native_funded"]
           .map(
             (branch) =>
               `select id,user_id,lifecycle_projected,lifecycle_source_at from (${candidateSql(branch as "legacy" | "native_direct" | "native_funded")}) branch_hint`,
           )
           .join(" union all ")}
-        ) lifecycle_hint order by lifecycle_projected,lifecycle_source_at desc,id limit $1`,
-      values,
-    },
-  );
-  if (!hints.rows.length) return [];
+        ), history_head as (
+          select id from lifecycle_hint where id=any($6::uuid[]) order by id limit 1
+        ) select id,user_id,array(select id from lifecycle_hint
+            where id=any($6::uuid[]) order by id) as history_due_ids from lifecycle_hint
+        order by case when $8::boolean and id=(select id from history_head) then 0 else 1 end,
+          lifecycle_projected,
+          case when id=any($9::uuid[]) then 0 else 1 end,
+          lifecycle_source_at desc,id limit $1`,
+    values: [
+      ...values,
+      fundedSourceIds,
+      hotFunded.rows.map((row) => row.id),
+      limit > 1 || fundedPage?.preferHistory === true,
+      fundingHints.rows.map((row) => row.id),
+    ],
+  });
+  const historyDueIds = new Set(hints.rows[0]?.history_due_ids ?? []);
+  // A displaced or locked historical candidate is not "processed". Keep the
+  // cursor until its reserved slot wins; unchanged pages may advance in full.
+  const advancePage = async (lockedIds: readonly string[]) => {
+    const firstSkipped = fundedSourceIds.findIndex(
+      (id) => historyDueIds.has(id) && !lockedIds.includes(id),
+    );
+    await advanceTelegramNativeFundedLifecyclePage(
+      client,
+      fundedPage,
+      firstSkipped === 0
+        ? (fundedPage?.afterId ?? null)
+        : firstSkipped > 0
+          ? fundedSourceIds[firstSkipped - 1]
+          : (fundedSourceIds.at(-1) ?? null),
+    );
+  };
+  if (!hints.rows.length) {
+    await advancePage([]);
+    return [];
+  }
   const owners = await client.query<{ id: string }>(
     `select id::text from users where id=any($1::uuid[])
       order by id for key share skip locked`,
@@ -1339,7 +1391,7 @@ async function listCandidates(
     ],
   );
   const { rows } = await client.query<ProjectionCandidate>({
-    name: "telegram-trade-lifecycle-candidates-v8",
+    name: "telegram-trade-lifecycle-candidates-v11",
     text: `${candidateSql("locked")} for update of intent skip locked`,
     values: [
       ...values,
@@ -1347,6 +1399,7 @@ async function listCandidates(
       hints.rows.map((row) => row.id),
     ],
   });
+  await advancePage(rows.map((row) => row.id));
   const projected: ProjectionCandidate[] = [];
   for (let candidate of rows) {
     if (candidate.venue === "hyperliquid" && candidate.user_id) {
@@ -1404,10 +1457,17 @@ async function listCandidates(
  */
 export async function runTelegramTradeLifecycleProjectionBatchInTransaction(
   client: PoolClient,
-  input: Readonly<{ limit?: number }> = {},
+  input: Readonly<{
+    limit?: number;
+    fundingOperationIds?: readonly string[];
+  }> = {},
 ): Promise<Readonly<{ candidates: number; created: number; skipped: number }>> {
   const limit = Math.max(1, Math.min(input.limit ?? 25, 100));
-  const candidates = await listCandidates(client, limit);
+  const candidates = await listCandidates(
+    client,
+    limit,
+    input.fundingOperationIds,
+  );
   let created = 0;
   for (const candidate of candidates) {
     // A cancelled Buy must never consume funded venue cash. Once the route
@@ -1542,7 +1602,10 @@ export async function runTelegramTradeLifecycleProjectionBatchInTransaction(
 
 export async function runTelegramTradeLifecycleProjectionBatch(
   pool: Pool,
-  input: Readonly<{ limit?: number }> = {},
+  input: Readonly<{
+    limit?: number;
+    fundingOperationIds?: readonly string[];
+  }> = {},
 ): Promise<Readonly<{ candidates: number; created: number; skipped: number }>> {
   return tx(pool, (client) =>
     runTelegramTradeLifecycleProjectionBatchInTransaction(client, input),
@@ -1946,8 +2009,14 @@ export const telegramTradeLifecycleProgressTestHooks = {
   liveProgressFor,
   progressFor,
   parseProgress,
-  listCandidateIds: async (client: PoolClient, limit = 100) =>
-    (await listCandidates(client, limit)).map((candidate) => candidate.id),
+  listCandidateIds: async (
+    client: PoolClient,
+    limit = 100,
+    fundingOperationIds: readonly string[] = [],
+  ) =>
+    (await listCandidates(client, limit, fundingOperationIds)).map(
+      (candidate) => candidate.id,
+    ),
   markTelegramTradeLifecycleDelivered,
   progressKeyboard,
   progressText,

@@ -333,22 +333,14 @@ export async function recordHip4OrderObservationInTransaction(
   }
   // Lease fence precedes every economic write. A waiting stale worker must not
   // publish over the newer claimant or consume its funding reservation.
-  const completed =
+  const terminalRepairSucceeded =
     input.phase !== "status" &&
     !error &&
-    !statusReadError &&
+    (!statusReadError || statusReadError === "order_not_observed") &&
     !input.repairError &&
     status?.terminal === true &&
     statusObservation?.balanceBarrier?.state === "terminal_observed" &&
-    fills?.kind === "observed" &&
-    fills.fullQuantityObserved &&
-    fills.executionSummary !== null &&
-    fills.executions.every(
-      (entry) => entry.netQuoteCash !== null && entry.feeToken === "USDC",
-    );
-  const nextRetryMs = completed
-    ? (await readHip4AccountPolicy(db)).policy.completedOrderRecheckIntervalMs
-    : input.retryMs;
+    fills?.kind === "observed";
   const saved = await db.query(
     `update hip4_order_submissions
     set order_observation=coalesce($3::jsonb,order_observation),
@@ -386,12 +378,26 @@ export async function recordHip4OrderObservationInTransaction(
           }
         : null,
       error ?? statusReadError ?? input.repairError ?? null,
-      nextRetryMs,
+      input.retryMs,
       input.phase === "status" || (exactRejection && error === null),
       status !== null,
     ],
   );
   if (!saved.rows[0]) return { saved: false as const };
+  if (terminalRepairSucceeded) {
+    // Evaluate the SAME scheduling predicate against the just-persisted facts.
+    // The successful fenced update holds this row for our whole transaction;
+    // its final phase may already have cleared the lease. This changes cadence
+    // only, never fullQuantityObserved, accounting, funding or native cash holds.
+    const coldRecheckMs = (await readHip4AccountPolicy(db)).policy
+      .completedOrderRecheckIntervalMs;
+    await db.query(
+      `update hip4_order_submissions
+        set reconcile_after=clock_timestamp()+$2*interval '1 millisecond'
+        where action_id=$1 and (${HIP4_COMPLETED_ORDER_OBSERVATION_SQL})`,
+      [input.claim.action_id, coldRecheckMs],
+    );
+  }
   // Same transaction as official status/invalidation, AFTER its lease fence.
   // No additional H lock and no post-commit best-effort lifecycle race.
   await projectTelegramNativeHandoffStatusInTransaction(db, {

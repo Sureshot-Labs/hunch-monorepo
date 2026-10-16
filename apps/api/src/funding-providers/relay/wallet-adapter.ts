@@ -56,6 +56,12 @@ import {
 import { multiplyRawByUnitPrice } from "../../account-value/decimal.js";
 import { relayQuoteResponseSchema } from "./schemas.js";
 import type { ResolvedRouteDestination } from "../../funding/planner/destination-adapters.js";
+import {
+  assertNativeTransferFeeObservation,
+  NativeTransferFeeCapabilityError,
+  type NativeTransferFeeBinding,
+  type NativeTransferFeeObservation,
+} from "../../services/hip4-transfer-fee-capability.js";
 
 export const RELAY_PROVIDER_DESCRIPTOR: ProviderDescriptor = {
   providerId: "relay",
@@ -513,6 +519,9 @@ export class RelayWalletQuoteAdapter {
   constructor(
     readonly client: RelayClient,
     readonly clock: () => Date = () => new Date(),
+    readonly nativeTransferCapability?: (
+      binding: NativeTransferFeeBinding,
+    ) => Promise<NativeTransferFeeObservation>,
   ) {}
 
   /** The inbound EVM leg uses the existing client transaction executor. Only
@@ -761,6 +770,20 @@ export class RelayWalletQuoteAdapter {
     const completedAt = this.clock();
     if (deadline <= completedAt)
       throw new RelayQuoteValidationError("Native quote deadline expired");
+    if (!this.nativeTransferCapability)
+      throw new NativeTransferFeeCapabilityError();
+    const nativeBinding = {
+      owner,
+      depository: contracts.depository,
+      sourceDex,
+      destinationDex: "" as const,
+    };
+    const feeCapability = await this.nativeTransferCapability(nativeBinding);
+    assertNativeTransferFeeObservation(
+      feeCapability,
+      nativeBinding,
+      this.clock().getTime(),
+    );
     try {
       return normalizeRelayHypercoreWalletQuote({
         validation: {
@@ -778,7 +801,7 @@ export class RelayWalletQuoteAdapter {
           minimumOutputRaw: input.minimumOutput.raw,
           expectedOutputTargetRaw,
           maximumFeeRaw: input.maximumFeeRaw,
-          now: completedAt,
+          now: this.clock(),
           deadline,
           maximumQuoteTtlMs: ttl,
         },

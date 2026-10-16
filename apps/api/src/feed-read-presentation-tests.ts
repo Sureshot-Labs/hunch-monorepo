@@ -94,7 +94,8 @@ test("common feed uses one primary-side 24h volume, never lifetime or unknown ze
   assert.equal(output.resolvedOutcome, null);
   assert.equal(output.resolvedOutcomePct, null);
   assert.deepEqual(market, original);
-  market.volume24h!.usd = "0";
+  assert.ok(market.volume24h);
+  market.volume24h.usd = "0";
   assert.equal(present(market).volumeDisplay, 0);
 });
 test("each native book expires independently, without borrowing a complement", () => {
@@ -168,13 +169,16 @@ test("non-USD, wrong-side, future and unrepresentable volumes are unavailable", 
       market.quoteToken = "OTHER";
     },
     (market: Hip4ReadMarket) => {
-      market.volume24h!.coin = market.sides[1].coin;
+      assert.ok(market.volume24h);
+      market.volume24h.coin = market.sides[1].coin;
     },
     (market: Hip4ReadMarket) => {
-      market.volume24h!.usd = "9".repeat(400);
+      assert.ok(market.volume24h);
+      market.volume24h.usd = "9".repeat(400);
     },
     (market: Hip4ReadMarket) => {
-      market.volume24h!.observedAt = new Date(now + 10000).toISOString();
+      assert.ok(market.volume24h);
+      market.volume24h.observedAt = new Date(now + 10000).toISOString();
     },
   ]) {
     const market = snapshot();

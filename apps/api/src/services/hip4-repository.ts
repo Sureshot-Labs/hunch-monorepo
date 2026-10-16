@@ -68,10 +68,7 @@ export async function readHip4Policy(
     policy,
     revision,
     lifecycle,
-    capabilities: getVenueLifecycleCapabilities(
-      lifecyclePolicy,
-      "hyperliquid",
-    )!,
+    capabilities: getVenueLifecycleCapabilities(lifecyclePolicy, "hyperliquid"),
     disabledReason: !allowed ? "venue_lifecycle" : null,
   };
 }

@@ -23,6 +23,12 @@ import {
 } from "../persistence/funding-operation-repository.js";
 import { readHip4Policy } from "../../services/hip4-repository.js";
 import {
+  readNativeTransferFeeCapability,
+  NativeTransferFeeCapabilityError,
+  type NativeTransferFeeBinding,
+  type NativeTransferFeeObservation,
+} from "../../services/hip4-transfer-fee-capability.js";
+import {
   postHyperliquidExchangeOnce,
   type HyperliquidExchangeTransport,
 } from "../../services/hyperliquid-exchange.js";
@@ -34,6 +40,7 @@ type SendRequest = Extract<
 
 type NativeSendObservation = {
   capacity: NativeSpotCapacity;
+  feeCapability: NativeTransferFeeObservation;
   timeoutMs: number;
   responseMaxBytes: number;
 };
@@ -43,6 +50,7 @@ type NativeSendDependencies = {
     pool: Pool,
     address: string,
     sourceDex: "spot" | "",
+    binding: NativeTransferFeeBinding,
   ) => Promise<NativeSendObservation>;
   admissionPolicy?: FundingControlPlaneSnapshot;
   fetcher?: typeof fetch;
@@ -51,6 +59,7 @@ async function observeNativeSend(
   pool: Pool,
   address: string,
   sourceDex: "spot" | "",
+  binding: NativeTransferFeeBinding,
 ): Promise<NativeSendObservation> {
   const read = await readHip4Policy(pool, "accountRead");
   const capacity = await readNativeSendCapacity(
@@ -59,8 +68,10 @@ async function observeNativeSend(
     undefined,
     sourceDex,
   );
+  const feeCapability = await readNativeTransferFeeCapability(pool, binding);
   return {
     capacity,
+    feeCapability,
     timeoutMs: read.policy.requestTimeoutMs,
     responseMaxBytes: read.policy.responseMaxBytes,
   };
@@ -126,8 +137,11 @@ export async function submitNativeFundingSend(
         pool,
         pair.validated.binding.owner,
         pair.validated.binding.sourceDex,
+        pair.validated.binding,
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof NativeTransferFeeCapabilityError)
+        throw new FundingPersistenceError("quote_invalidated", error.message);
       throw new FundingPersistenceError(
         "quote_invalidated",
         "Native source capacity is unavailable; refresh and retry before sending",
@@ -146,7 +160,7 @@ export async function submitNativeFundingSend(
       nativeSendCapacityCheck(async () => {
         if (!observation) throw new Error("native_capacity_missing");
         return observation.capacity;
-      }),
+      }, observation?.feeCapability),
       codec,
     );
     if (result.admitted)

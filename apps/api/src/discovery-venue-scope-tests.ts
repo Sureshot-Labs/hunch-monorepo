@@ -39,7 +39,7 @@ const resolve = createDiscoveryVenueScopeResolver({
       capabilities: getVenueLifecycleCapabilities(
         DEFAULT_VENUE_LIFECYCLE_POLICY,
         "hyperliquid",
-      )!,
+      ),
       disabledReason: null,
     };
   },

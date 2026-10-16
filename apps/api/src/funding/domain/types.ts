@@ -966,6 +966,7 @@ export const FUNDING_REASON_CODES = [
   "invalid_state_transition",
   "trade_submission_reconciling",
   "minimum_output_not_met",
+  "native_transfer_fee_unverified",
   "movement_representation_replaced",
   "operator_approval_required",
   "operation_reconcile_required",

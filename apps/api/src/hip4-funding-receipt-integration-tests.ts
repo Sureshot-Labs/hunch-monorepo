@@ -88,7 +88,9 @@ import {
 
 const pool = await createIntegrationTestPool({
   max: 1,
-  options: "-c statement_timeout=10000",
+  // Match the production API pool: the latency acceptance must not include
+  // default-on disposable PostgreSQL JIT compilation absent from the API.
+  options: "-c statement_timeout=10000 -c jit=off",
 });
 const client = await pool.connect();
 try {

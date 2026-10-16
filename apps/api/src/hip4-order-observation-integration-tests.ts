@@ -41,6 +41,8 @@ import { fetchUserFinancialLifecycleSummary } from "./services/user-financial-li
 import { testHip4OrderConsumerAcceptance } from "./hip4-order-consumer-pg.js";
 import { testHip4OpenOrderHolds } from "./hip4-open-order-holds-pg.js";
 import { HIP4_COMPLETED_ORDER_OBSERVATION_SQL } from "./services/hip4-order-observation-schedule.js";
+import { planHip4OrderFillRepair } from "./services/hip4-order-fill-repair.js";
+import { advanceHip4FillRepair } from "./services/hip4-account-history.js";
 
 const pool = await createIntegrationTestPool({
   max: 2,
@@ -333,6 +335,16 @@ try {
     hold,
     "unknownOid cannot repair invalidated inclusion",
   );
+  assert.equal(
+    (
+      await db.query(
+        `select ${HIP4_COMPLETED_ORDER_OBSERVATION_SQL} as cold_lane from hip4_order_submissions where action_id=$1`,
+        [prepared.actionId],
+      )
+    ).rows[0].cold_lane,
+    false,
+    "provider absence cannot cold-classify known contradictory terminal evidence",
+  );
   const interveningSnapshot = Date.now() - 2;
   const repairedAt = Date.now() - 1;
   await recordBody(response("canceled", terminalTime), 100, repairedAt);
@@ -437,6 +449,104 @@ try {
       ],
     );
   };
+  const testTerminalScanCadence = async (quantity: string) => {
+    await db.query("savepoint terminal_scan_cadence");
+    assert.equal(
+      (await recordBody(response("canceled", terminalTime))).error,
+      null,
+    );
+    const scanAt = Date.now();
+    const repair = advanceHip4FillRepair(
+      planHip4OrderFillRepair(null, fixture.nonce, scanAt, 4),
+      [],
+      new Date(scanAt).toISOString(),
+      4,
+    );
+    const readCadence = async () =>
+      (
+        await db.query(
+          `select ${HIP4_COMPLETED_ORDER_OBSERVATION_SQL} as cold_lane,
+        extract(epoch from (reconcile_after-clock_timestamp()))*1000 as remaining_ms,
+        fills_observation from hip4_order_submissions where action_id=$1`,
+          [prepared.actionId],
+        )
+      ).rows[0];
+    for (const pendingRepair of [
+      { ...repair, nextTime: terminalTime },
+      { ...repair, coveredThrough: terminalTime - 1 },
+      { ...repair, lastSuccessAt: null },
+      { ...repair, lastError: "timeout" },
+      { ...repair, coveredThrough: "malformed legacy value" },
+    ]) {
+      await db.query(
+        `update hip4_order_submissions set fills_observation=jsonb_set(fills_observation,'{repair}',$2::jsonb) where action_id=$1`,
+        [prepared.actionId, pendingRepair],
+      );
+      assert.equal(
+        (await recordBody(response("canceled", terminalTime))).error,
+        null,
+      );
+      assert.equal(
+        (await readCadence()).cold_lane,
+        false,
+        "incomplete/error/malformed scan keeps hot recovery",
+      );
+    }
+    await db.query(
+      `update hip4_order_submissions set fills_observation=jsonb_set(fills_observation,'{repair}',$2::jsonb) where action_id=$1`,
+      [prepared.actionId, repair],
+    );
+    const holdBefore = await nativeHold(Date.now());
+    assert.equal(
+      (await recordBody(response("canceled", terminalTime))).error,
+      null,
+    );
+    const observed = await readCadence();
+    assert.equal(
+      observed.cold_lane,
+      true,
+      "successful terminal zero/partial bounded scan leaves hot queue",
+    );
+    assert.ok(
+      Number(observed.remaining_ms) > 3_500_000,
+      "uses current existing cold policy interval",
+    );
+    assert.equal(observed.fills_observation.quantityRaw, quantity);
+    assert.equal(observed.fills_observation.fullQuantityObserved, false);
+    assert.equal(observed.fills_observation.historyCoverage, "not_asserted");
+    assert.equal(
+      await nativeHold(Date.now()),
+      holdBefore,
+      "cadence cannot release financial holds",
+    );
+    assert.equal(
+      (await recordBody({ status: "unknownOid" })).error,
+      "order_not_observed",
+    );
+    const retained = await readCadence();
+    assert.equal(
+      retained.cold_lane,
+      true,
+      "provider retention cannot resurrect completed partial/zero history in hot polling",
+    );
+    assert.ok(Number(retained.remaining_ms) > 3_500_000);
+    assert.equal(retained.fills_observation.fullQuantityObserved, false);
+    assert.equal(retained.fills_observation.historyCoverage, "not_asserted");
+    assert.equal(await nativeHold(Date.now()), holdBefore);
+    const exact = await claim();
+    assert.equal(
+      await failHip4OrderObservation(db, exact, "timeout", 60000),
+      true,
+      "explicit Check bypasses cold due time",
+    );
+    assert.equal(
+      (await readCadence()).cold_lane,
+      false,
+      "a failed later check re-enters hot repair",
+    );
+    await db.query("rollback to savepoint terminal_scan_cadence");
+  };
+  await testTerminalScanCadence("0");
   // A positive exact partial fill proves the consumer even while the order
   // remains open. It must not imply complete history. Only a later provider
   // balance accounts for spent/resting principal, not the partial fill itself.
@@ -508,6 +618,7 @@ try {
   ).rows[0].fills_observation;
   assert.equal(partialObservation.fullQuantityObserved, false);
   assert.equal(partialObservation.historyCoverage, "not_asserted");
+  await testTerminalScanCadence("200000");
   assert.equal(partialObservation.executionSummary.quantity, "2");
   assert.equal(partialObservation.executionSummary.fullQuantityObserved, false);
   assert.equal(
@@ -551,6 +662,23 @@ try {
   );
   assert.equal((await orderRow()).filled_size, "4");
   assert.equal(await attemptState(), "accepted");
+  const retainedFull = (
+    await db.query(
+      `select ${HIP4_COMPLETED_ORDER_OBSERVATION_SQL} as cold_lane,
+    reconcile_error,fills_observation,
+    extract(epoch from (reconcile_after-clock_timestamp()))*1000 as remaining_ms
+    from hip4_order_submissions where action_id=$1`,
+      [prepared.actionId],
+    )
+  ).rows[0];
+  assert.equal(
+    retainedFull.cold_lane,
+    true,
+    "full retained history also keeps cold cadence without inventing a fresh receipt",
+  );
+  assert.equal(retainedFull.reconcile_error, "order_not_observed");
+  assert.equal(retainedFull.fills_observation.executionSummary, null);
+  assert.ok(Number(retainedFull.remaining_ms) > 3_500_000);
   await db.query("savepoint receipt_status_recovery");
   await record(db, {
     claim: await claim(),
@@ -898,12 +1026,15 @@ try {
   // Dense completed history must not be scanned to find one new/ambiguous
   // action. Both lanes retain bounded first/resumed/empty indexed plans.
   await db.query(`update hip4_order_submissions set reconcile_after=clock_timestamp()+interval '1 day',
-    reconcile_lease_token=null,reconcile_lease_until=null,reconcile_error=null,
-    order_observation='{"terminal":true,"balanceBarrier":{"state":"terminal_observed"}}',
-    fills_observation='{"fullQuantityObserved":true,"feeCoverage":"known","executionSummary":{}}'`);
+    reconcile_lease_token=null,reconcile_lease_until=null,
+    reconcile_error=case when get_byte(uuid_send(action_id),0)%2=0 then 'order_not_observed' else null end,
+    order_observation='{"terminal":true,"observedStatusTime":2,"balanceBarrier":{"state":"terminal_observed"}}',
+    fills_observation=case when get_byte(uuid_send(action_id),0)%3=0
+      then '{"fullQuantityObserved":true,"feeCoverage":"known","executionSummary":{}}'::jsonb
+      else '{"fullQuantityObserved":false,"historyCoverage":"not_asserted","repair":{"version":1,"source":"hyperliquid_user_fills_by_time","nextTime":null,"lastError":null,"lastSuccessAt":"2026-10-16T00:00:00Z","coveredThrough":3}}'::jsonb end`);
   const hotAction = (
     await db.query(
-      "select action_id from hip4_order_submissions order by action_id limit 1",
+      "select action_id from hip4_order_submissions order by action_id desc limit 1",
     )
   ).rows[0].action_id as string;
   await db.query(
@@ -956,6 +1087,41 @@ try {
       await db.query(`deallocate ${statement}`);
     }
   }
+  // A separate dense-due phase, after the first/resumed/empty probes. Avoid
+  // manufacturing 200k dead index entries by moving every historical row back
+  // and forth between +/-infinity inside one unvacuumable fixture transaction.
+  await db.query(
+    "update hip4_order_submissions set reconcile_after='-infinity',reconcile_lease_token=null,reconcile_lease_until=null",
+  );
+  await db.query(
+    `prepare terminal_history_hot_priority(int,int) as ${HIP4_CLAIM_ORDER_OBSERVATION_SQL}`,
+  );
+  for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+    await db.query(`set local plan_cache_mode=${mode}`);
+    await db.query(
+      "update hip4_order_submissions set reconcile_after='-infinity',reconcile_lease_token=null,reconcile_lease_until=null where action_id=$1",
+      [hotAction],
+    );
+    const priorityPlan = (
+      await db.query(
+        "explain(analyze,buffers,format json) execute terminal_history_hot_priority(60000,1000)",
+      )
+    ).rows[0]["QUERY PLAN"][0];
+    assert.equal(priorityPlan.Plan["Actual Rows"], 1);
+    assert.doesNotMatch(JSON.stringify(priorityPlan), /Seq Scan/u);
+    assert.ok(
+      Number(priorityPlan.Plan["Local Hit Blocks"] ?? 0) +
+        Number(priorityPlan.Plan["Local Read Blocks"] ?? 0) <
+        128,
+      "50k due terminal partial/zero/full historical rows cannot delay one hot order",
+    );
+    console.log("[hip4-terminal-history-hot-priority]", {
+      mode,
+      ms: priorityPlan["Execution Time"],
+      buffers: priorityPlan.Plan["Local Hit Blocks"],
+    });
+  }
+  await db.query("deallocate terminal_history_hot_priority");
   await db.query("rollback");
   // Real committed runtime with max=1 pool and shared request-budget SQL;
   // provider transport is in-memory. No external endpoint is contacted.

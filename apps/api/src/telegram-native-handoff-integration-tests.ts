@@ -58,6 +58,7 @@ import {
 } from "./repos/hip4-order-observation.js";
 import { projectHip4Execution } from "./services/hip4-account-projection.js";
 import { checkTelegramNativeHandoffReadPlans } from "./telegram-native-handoff-read-plans-pg.js";
+import { checkTelegramNativeFundedLifecyclePlans } from "./telegram-native-funded-lifecycle-plans-pg.js";
 import {
   runTelegramTradeLifecycleProjectionBatchInTransaction,
   telegramTradeLifecycleProgressTestHooks,
@@ -73,6 +74,7 @@ const pool = await createIntegrationTestPool({
 });
 const policyIds: string[] = [];
 let readPlanFixture: Awaited<ReturnType<typeof fixture>> | undefined;
+let fundedReadPlanFixture: Awaited<ReturnType<typeof fixture>> | undefined;
 
 /** Exact current native fixture through the REAL shared selector/projector.
  * A transaction-local indexed intent clone isolates earlier synthetic runs;
@@ -825,6 +827,7 @@ try {
       wallet.address,
     );
     if (side === "BUY" && !isFunded) readPlanFixture = data;
+    if (isFunded) fundedReadPlanFixture = data;
     // Committed consent outlives the initial Telegram quote/token TTL. Fresh
     // native preparation, fees, capacity and funding lifecycle still gate POST.
     await pool.query(
@@ -1523,8 +1526,114 @@ try {
     "PASS connected native ordinary admission: real external controller scope, direct BUY/SELL + funded BUY, pre-POST action/order/attempt linking and response-loss replay without duplicate POST",
   );
   assert.ok(readPlanFixture);
+  assert.ok(fundedReadPlanFixture?.funding);
+  await checkTelegramNativeFundedLifecyclePlans(pool, {
+    intentId: fundedReadPlanFixture.intentId,
+    operationId: fundedReadPlanFixture.funding.operationId,
+  });
   const retainedFixture = readPlanFixture;
   await verifyLifecycleIndexesOnLegacyRows(retainedFixture);
+  // Real two-connection funded contention: select this exact historical page
+  // without shadowing intents (a temp clone would not share the writer's I
+  // lock). All rows belong to this disposable test's synthetic user.
+  for (const lockKind of ["owner", "intent"] as const) {
+    const data: Awaited<ReturnType<typeof fixture>> = fundedReadPlanFixture;
+    const savedCursor = (
+      await pool.query(
+        "select last_intent_id,prefer_history from telegram_native_lifecycle_scan where scan_name='funded_v1'",
+      )
+    ).rows[0];
+    const precedingId: string | null =
+      (
+        await pool.query(
+          "select id from telegram_trade_intents where venue='hyperliquid' and delivery_mode='app_handoff' and funding_operation_id is not null and id<$1 order by id desc limit 1",
+          [data.intentId],
+        )
+      ).rows[0]?.id ?? null;
+    await pool.query(
+      "update telegram_trade_intents set result=result-'shortfallProgress'-'shortfallProgressSourceWatermark',updated_at=clock_timestamp() where id=$1",
+      [data.intentId],
+    );
+    await pool.query(
+      "update telegram_native_lifecycle_scan set last_intent_id=$1,prefer_history=true where scan_name='funded_v1'",
+      [precedingId],
+    );
+    const writer = await pool.connect();
+    const reader = await pool.connect();
+    try {
+      await writer.query("begin");
+      await reader.query("begin");
+      await reader.query("set local statement_timeout='5s'");
+      await lockFundingPolicyForTransaction(writer);
+      await writer.query(
+        `select id from users where id=$1 ${lockKind === "owner" ? "for update" : "for key share"}`,
+        [data.base.userId],
+      );
+      if (lockKind === "intent")
+        await writer.query(
+          "select id from telegram_trade_intents where id=$1 for update",
+          [data.intentId],
+        );
+      const skipped =
+        await runTelegramTradeLifecycleProjectionBatchInTransaction(reader, {
+          limit: 1,
+        });
+      assert.equal(
+        skipped.candidates,
+        0,
+        `${lockKind} lock must skip the funded source without taking I out of order`,
+      );
+      assert.equal(
+        (
+          await reader.query(
+            "select last_intent_id from telegram_native_lifecycle_scan where scan_name='funded_v1'",
+          )
+        ).rows[0].last_intent_id,
+        precedingId,
+        "a locked funded source must not be acknowledged by its cursor",
+      );
+      if (lockKind === "owner")
+        await writer.query(
+          "select id from telegram_trade_intents where id=$1 for update nowait",
+          [data.intentId],
+        );
+      await writer.query("rollback");
+      const recovered =
+        await runTelegramTradeLifecycleProjectionBatchInTransaction(reader, {
+          limit: 1,
+        });
+      assert.equal(
+        recovered.created,
+        1,
+        "the next normal tick must recover after the funded writer releases its lock",
+      );
+      assert.ok(
+        (
+          await reader.query(
+            "select result->'shortfallProgress'->'nativeTrade' as native_progress from telegram_trade_intents where id=$1",
+            [data.intentId],
+          )
+        ).rows[0].native_progress,
+      );
+      assert.equal(
+        (
+          await reader.query(
+            "select last_intent_id from telegram_native_lifecycle_scan where scan_name='funded_v1'",
+          )
+        ).rows[0].last_intent_id,
+        data.intentId,
+      );
+    } finally {
+      await reader.query("rollback");
+      reader.release();
+      await writer.query("rollback");
+      writer.release();
+      await pool.query(
+        "update telegram_native_lifecycle_scan set last_intent_id=$1,prefer_history=$2 where scan_name='funded_v1'",
+        [savedCursor.last_intent_id, savedCursor.prefer_history],
+      );
+    }
+  }
   // Short-lived handoff retention must not stop factual repair of an already
   // admitted order. This changes no authorization or financial facts.
   await tx(pool, async (db) => {

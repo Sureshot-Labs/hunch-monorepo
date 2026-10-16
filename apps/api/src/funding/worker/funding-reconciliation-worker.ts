@@ -804,6 +804,7 @@ export async function runFundingReconciliationJob(
   const telegramTradeLifecycleProgress =
     await runTelegramTradeLifecycleProjectionBatch(pool, {
       limit: options.limit ?? 25,
+      fundingOperationIds: result.operationIds,
     });
   const {
     earlyTelegramFundingProgress: _earlyTelegramFundingProgress,

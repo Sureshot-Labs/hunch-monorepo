@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { DEFAULT_VENUE_LIFECYCLE_POLICY } from "@hunch/shared";
 import Fastify from "fastify";
 import {
   serializerCompiler,
@@ -352,8 +353,48 @@ test("actual common production planner keeps native user signing out of automati
       observedAt: input.now.toISOString(),
     }),
   );
+  let nativeFee = "0";
+  let nativeFeeReads = 0;
+  context.mock.method(
+    globalThis,
+    "fetch",
+    async (url: unknown, init?: RequestInit) => {
+      assert.equal(String(url), "https://api.hyperliquid.xyz/info");
+      const request = JSON.parse(String(init?.body));
+      assert.equal(request.type, "preTransferCheck");
+      assert.deepEqual(
+        new Set([request.user, request.source]),
+        new Set([
+          plan.input.profile.address.toLowerCase(),
+          plan.quoteInput.validation.contracts.depository.toLowerCase(),
+        ]),
+      );
+      nativeFeeReads++;
+      return Response.json({
+        fee: nativeFee,
+        isSanctioned: false,
+        userExists: true,
+        userHasSentTx: true,
+      });
+    },
+  );
+  const lifecycle = structuredClone(DEFAULT_VENUE_LIFECYCLE_POLICY);
+  lifecycle.venues.hyperliquid = { lifecycle: "active", indexerMode: "full" };
+  const nativePolicies: Record<string, unknown> = {
+    venue_lifecycle: lifecycle,
+    hip4_read: { environment: "mainnet", outcomeAllowlist: [] },
+    hip4_account: { snapshotMaxAgeMs: 60000 },
+  };
   const db = {
-    query: async (sql: string) => {
+    query: async (sql: string, args: unknown[] = []) => {
+      if (sql.includes("from runtime_policies"))
+        return {
+          rows: [
+            { id: String(args[0]), payload: nativePolicies[String(args[0])] },
+          ],
+        };
+      if (sql.includes("insert into hip4_request_budget"))
+        return { rows: [], rowCount: 1 };
       assert.match(sql.trim(), /^select/i);
       return { rows: [] };
     },
@@ -400,6 +441,18 @@ test("actual common production planner keeps native user signing out of automati
     input.account,
   ).discover(planningInput);
   assert.equal(result.sources.length, 1);
+  assert.ok(
+    nativeFeeReads >= 2,
+    "production planner uses real budgeted native capability reader",
+  );
+  nativeFee = "1.00";
+  const feeBlocked = await new ProductionFundingSourcePlanner(
+    db,
+    input.account,
+  ).discover(planningInput);
+  assert.equal(feeBlocked.sources.length, 0);
+  assert.ok(feeBlocked.reasonCodes.includes("native_transfer_fee_unverified"));
+  nativeFee = "0";
   const source = result.sources[0];
   assert.equal(
     source.option.selectable,

@@ -30,6 +30,11 @@ import { createFundingTransactionReferenceCodec } from "../../execution/transact
 import { DEFAULT_FUNDING_RUNTIME_POLICY } from "../../policies/funding-policy.js";
 import { DEFAULT_FUNDING_INTENT_POLICY } from "../../policies/funding-policy-v2.js";
 import type { AccountValueReadModel } from "../../../account-value/runtime-service.js";
+import { lockFundingControllerWallet } from "../../execution/funding-controller-wallet-lock.js";
+import {
+  zeroNativeTransferFeeObservation,
+  NativeTransferFeeCapabilityError,
+} from "../../../services/hip4-transfer-fee-capability.js";
 
 const pool = await createIntegrationTestPool({
   max: 2,
@@ -161,7 +166,33 @@ try {
     sendId = steps[1].id as string;
   await client.query("commit");
   inTransaction = false;
+  let nativeFeesAllowed = true;
+  let feeLifetimeMs = 60000;
+  let onFeeRead: (() => void) | undefined;
   const runtime = new FundingOperationActionRuntime(pool, {
+    readNativeTransferFees: async (_db, binding) => {
+      if (!nativeFeesAllowed) throw new NativeTransferFeeCapabilityError();
+      const observation = zeroNativeTransferFeeObservation({
+        binding,
+        sourceCheck: {
+          fee: "0",
+          isSanctioned: false,
+          userExists: true,
+          userHasSentTx: true,
+        },
+        destinationCheck: {
+          fee: "0",
+          isSanctioned: false,
+          userExists: true,
+          userHasSentTx: true,
+        },
+        observedAt: Date.now(),
+        expiresAt: Date.now() + feeLifetimeMs,
+        now: Date.now(),
+      });
+      onFeeRead?.();
+      return observation;
+    },
     readAccount: async () =>
       ({
         ownership: { wallets: [profile] },
@@ -171,6 +202,60 @@ try {
     runtime.prepare(userId, { operationId, stepId: authId }),
     /sign-only submission protocol/,
   );
+  nativeFeesAllowed = false;
+  await assert.rejects(
+    runtime.prepare(userId, {
+      operationId,
+      stepId: authId,
+      submissionProtocols: { native: 1 },
+    }),
+    /Complete account activation/,
+  );
+  assert.equal(
+    (
+      await pool.query(
+        "select count(*)::int as attempt_count from funding_operation_step_attempts where step_id=$1",
+        [authId],
+      )
+    ).rows[0].attempt_count,
+    0,
+  );
+  nativeFeesAllowed = true;
+  feeLifetimeMs = 1000;
+  await client.query("begin");
+  inTransaction = true;
+  await lockFundingControllerWallet(client, userId, profile);
+  const feeWasRead = new Promise<void>((resolve) => {
+    onFeeRead = resolve;
+  });
+  const blockedPreparation = runtime.prepare(userId, {
+    operationId,
+    stepId: authId,
+    submissionProtocols: { native: 1 },
+  });
+  // Register the assertion before waiting: the rejected preparation must not
+  // become an unhandled promise if the test process is temporarily delayed.
+  const refusedStalePrompt = assert.rejects(
+    blockedPreparation,
+    /transfer fees are not verified/,
+  );
+  await feeWasRead;
+  await client.query("select pg_sleep(1.1)");
+  await client.query("commit");
+  inTransaction = false;
+  await refusedStalePrompt;
+  assert.equal(
+    (
+      await pool.query(
+        "select count(*)::int as attempt_count from funding_operation_step_attempts where step_id=$1",
+        [authId],
+      )
+    ).rows[0].attempt_count,
+    0,
+    "expired fee sample rolls back the prepared lease after wallet lock wait",
+  );
+  feeLifetimeMs = 60000;
+  onFeeRead = undefined;
   await assert.rejects(
     runtime.prepare(userId, {
       operationId,

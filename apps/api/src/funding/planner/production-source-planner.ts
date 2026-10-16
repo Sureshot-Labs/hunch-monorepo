@@ -1,4 +1,8 @@
 import type { Pool } from "@hunch/infra";
+import {
+  readNativeTransferFeeCapability,
+  NativeTransferFeeCapabilityError,
+} from "../../services/hip4-transfer-fee-capability.js";
 
 import type { AccountValueReadModel } from "../../account-value/runtime-service.js";
 import { classifyProvenCashShortfall } from "./proven-cash-shortfall.js";
@@ -1747,6 +1751,11 @@ export class ProductionFundingSourcePlanner {
         apiKey,
         timeoutMs: Math.min(input.timeoutMs, 10_000),
       }),
+      undefined,
+      (binding) =>
+        readNativeTransferFeeCapability(this.db, binding, {
+          deadlineMs: input.deadline.getTime(),
+        }),
     );
     const mappedRelayRoute = resolveRelayRouteSpec(input.route);
     const relayRoute =
@@ -1833,6 +1842,11 @@ export class ProductionFundingSourcePlanner {
         quote = await adapter.quote(quoteInput);
       }
     } catch (error) {
+      if (error instanceof NativeTransferFeeCapabilityError)
+        return {
+          kind: "rejected",
+          reasonCode: "native_transfer_fee_unverified",
+        };
       if (error instanceof RelayClientError) {
         if (isRelayQuoteRejectedError(error)) {
           console.warn("[funding-relay] quote rejected", {

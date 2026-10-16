@@ -24,6 +24,10 @@ import {
 import { fundingReservationHoldSql } from "../persistence/source-reservation-hold.js";
 import type { NativeFundingCapacityCheck } from "./hypercore-auth-attempt.js";
 import type { AssetLocation } from "../domain/types.js";
+import {
+  assertNativeTransferFeeObservation,
+  type NativeTransferFeeObservation,
+} from "../../services/hip4-transfer-fee-capability.js";
 import { canonicalAssetId } from "../domain/asset-identity.js";
 import {
   HIP4_FUNDING_CASH_HOLDS_SQL,
@@ -78,6 +82,7 @@ export function nativeSendCapacityCheck(
     address: string,
     sourceDex: "spot" | "",
   ) => Promise<NativeSpotCapacity>,
+  feeCapability: NativeTransferFeeObservation | undefined,
 ): NativeFundingCapacityCheck {
   return async (client, input) => {
     const source = z
@@ -89,6 +94,7 @@ export function nativeSendCapacityCheck(
       .parse(input.sourceSnapshot);
     const location = source.location as AssetLocation;
     const binding = input.pair.validated.binding;
+    assertNativeTransferFeeObservation(feeCapability, binding);
     const locationInput = {
       accountId: input.userId,
       address: binding.owner,
@@ -206,11 +212,16 @@ export function nativeSendCapacityCheck(
         0n,
       ) +
       debits.reduce((sum, row) => sum + BigInt(row.raw_amount), 0n);
+    assertNativeTransferFeeObservation(feeCapability, binding);
     if (needed > BigInt(capacity.availableRaw) || expiresAt <= Date.now())
       throw new FundingPersistenceError(
         "quote_invalidated",
         "Native source balance no longer covers reserved funding",
       );
-    return { expiresAt: capacity.expiresAt };
+    return {
+      expiresAt: new Date(
+        Math.min(expiresAt, Date.parse(feeCapability.expiresAt)),
+      ).toISOString(),
+    };
   };
 }

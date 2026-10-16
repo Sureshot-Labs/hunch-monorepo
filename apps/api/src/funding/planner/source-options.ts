@@ -147,6 +147,7 @@ export type RelayPlanningQuote = Readonly<{
 
 export type RelayPlanningQuoteRejectionReason = Extract<
   FundingReasonCode,
+  | "native_transfer_fee_unverified"
   | "provider_quote_economics_rejected"
   | "provider_quote_invalid"
   | "provider_quote_rejected"
