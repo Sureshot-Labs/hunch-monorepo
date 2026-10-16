@@ -1,4 +1,5 @@
 import type { PolymarketAssetContext } from "@hunch/shared";
+import type { SocialSourceRef } from "../../schemas/social-trade.js";
 
 export type UserId = string;
 export type AccountId = UserId;
@@ -319,6 +320,8 @@ export type FundingPurpose =
   | "manual_rebalance";
 
 export type FundingTradeConsumerIntentInput = Readonly<{
+  sourceRef?: SocialSourceRef;
+  copyIdempotencyKey?: string;
   venueId: VenueId;
   /** Canonical unified market ID in venue:venue_market_id form. */
   marketId: string;
@@ -575,6 +578,8 @@ export type FundingQuoteSummary = Readonly<{
 }>;
 
 export type MarketContextBinding = Readonly<{
+  sourceRef?: SocialSourceRef;
+  copyIdempotencyKey?: string;
   positionAssetContext?: PolymarketAssetContext;
   marketContextId: string;
   venueId: VenueId;

@@ -46,8 +46,8 @@ const pool = await createIntegrationTestPool({
 });
 const client = await pool.connect();
 const wallet = Wallet.createRandom();
-// Simulate future implementation support without changing production's shared
-// HIP ceiling. Actual lifecycle modes still use the common capability matrix.
+// Exercise the same lifecycle-mode matrix through a dependency seam; a separate
+// assertion below verifies the real native capability implementation too.
 const testCapability: typeof venueHasLifecycleCapability = (
   policy,
   _venue,
@@ -225,7 +225,10 @@ try {
     defaultTradingPolicy,
     "corrected policy recovers without cache reset",
   );
-  await rejects(() => productionAdmit(client, input), /lifecycle_disabled/u);
+  await client.query("savepoint production_native_capability");
+  assert.equal((await productionAdmit(client, input)).admitted, true,
+    "an explicitly active common venue policy supports the implemented native admission");
+  await client.query("rollback to savepoint production_native_capability");
   await rejects(
     () => admit(client, { ...input, actor: "telegram_bot" }),
     /client_submission_required/u,

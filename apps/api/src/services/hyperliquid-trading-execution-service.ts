@@ -42,10 +42,10 @@ function assertWebIntent(intent: TradeIntent) {
     );
   if (intent.actor.kind !== "web_app")
     unavailable("app_required", "Review and sign this trade in the Hunch app.");
-  if (intent.sourceRef)
+  if (intent.sourceRef && intent.action !== "BUY")
     unavailable(
       "unsupported_capability",
-      "Hyperliquid Copy attribution is not enabled.",
+      "Only a BUY can be attributed as Copy.",
     );
 }
 function requestFor(intent: TradeIntent) {
@@ -77,6 +77,12 @@ function requestFor(intent: TradeIntent) {
     quantity: intent.amount.value,
     consentedDebitCapRaw: native.consentedDebitCapRaw,
     controllerWalletRef: native.controllerWalletRef,
+    ...(intent.sourceRef || intent.copyIdempotencyKey
+      ? {
+          sourceRef: intent.sourceRef,
+          copyIdempotencyKey: intent.copyIdempotencyKey,
+        }
+      : {}),
   });
   const identity = hip4Identity(
     "mainnet",
@@ -238,6 +244,12 @@ export function createHyperliquidTradingExecutionService(
         actionId: prepared.preparedId,
         signature: signatures[0].signature,
         funding: prepared.intent.fundingReservation ?? undefined,
+        ...(prepared.intent.sourceRef || prepared.intent.copyIdempotencyKey
+          ? {
+              sourceRef: prepared.intent.sourceRef,
+              copyIdempotencyKey: prepared.intent.copyIdempotencyKey,
+            }
+          : {}),
       },
       dependencies,
     );

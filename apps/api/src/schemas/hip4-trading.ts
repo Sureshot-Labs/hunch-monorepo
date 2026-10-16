@@ -6,6 +6,10 @@ import {
 import { hip4TradeActionSchema } from "../services/hip4-trade-signing.js";
 import { hip4MarketOrderQuoteRequestSchema } from "../services/hip4-market-order.js";
 import { hip4OrderRecoverySchema } from "../repos/hip4-order-recovery.js";
+import {
+  socialTradeAttributionFields,
+  refineSocialTradeAttribution,
+} from "./social-trade.js";
 
 const uuid = z.string().uuid();
 const raw = z.string().regex(/^(0|[1-9]\d*)$/u);
@@ -71,7 +75,7 @@ export const hip4TradingQuoteSchema = z.object({
 export const hip4TradingMarketQuoteSchema = hip4TradingQuoteSchema.extend({
   // Runtime already normalizes UUIDs. Output schemas must describe their
   // resulting string type, not an input transform that OpenAPI emits as unknown.
-  preparationRequest: hip4OrderPreparationRequestSchema.extend({
+  preparationRequest: hip4OrderPreparationRequestSchema.safeExtend({
     requestKey: uuid,
     controllerWalletRef: uuid,
   }),
@@ -130,6 +134,7 @@ const hip4TradingSubmitBodyBase = z
   .object({
     actionId: uuid,
     signature: z.string().regex(/^0x[0-9a-fA-F]{130}$/u),
+    ...socialTradeAttributionFields,
     telegramAppHandoffId: z.string().uuid().optional(),
     telegramAppHandoffPlanFingerprint: z
       .string()
@@ -141,20 +146,24 @@ const hip4TradingSubmitBodyBase = z
       .optional(),
   })
   .strict();
-export const hip4TradingSubmitBodySchema = hip4TradingSubmitBodyBase.refine(
-  (value) =>
-    Boolean(value.telegramAppHandoffId) ===
-    Boolean(value.telegramAppHandoffPlanFingerprint),
-  {
-    message: "Both Telegram handoff fields are required together",
-    path: ["telegramAppHandoffId"],
-  },
-);
+export const hip4TradingSubmitBodySchema = hip4TradingSubmitBodyBase
+  .superRefine(refineSocialTradeAttribution)
+  .refine(
+    (value) =>
+      Boolean(value.telegramAppHandoffId) ===
+      Boolean(value.telegramAppHandoffPlanFingerprint),
+    {
+      message: "Both Telegram handoff fields are required together",
+      path: ["telegramAppHandoffId"],
+    },
+  );
 export const hip4TradingCancelSubmitBodySchema = hip4TradingSubmitBodyBase
   .omit({
     funding: true,
     telegramAppHandoffId: true,
     telegramAppHandoffPlanFingerprint: true,
+    sourceRef: true,
+    copyIdempotencyKey: true,
   })
   .extend({ orderId: uuid })
   .strict();

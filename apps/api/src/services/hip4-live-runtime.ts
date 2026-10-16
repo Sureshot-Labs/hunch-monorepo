@@ -1,5 +1,8 @@
 // Sidecar-safe: no API env/auth/Redis singleton imports.
 import { createClient } from "redis";
+import { enqueueEmbedItems } from "@hunch/infra";
+import type { RedisClientType } from "redis";
+import type { Hip4CanonicalChange } from "./hip4-canonical-change.js";
 import type { Pool } from "pg";
 import { DEFAULT_HIP4_READ_POLICY, type Hip4ReadMarket } from "@hunch/shared";
 import { readHip4Policy, readHip4LiveOutcomes } from "./hip4-repository.js";
@@ -10,6 +13,7 @@ export function startHip4LiveRuntime(
   pool: Pool,
   wake: () => void,
   redisUrl?: string,
+  options: { live?: boolean } = {},
 ) {
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -20,9 +24,12 @@ export function startHip4LiveRuntime(
   let active: Promise<void> | undefined;
   let interruptedSince: number | undefined;
   let selectedAt = 0;
+  let requestTimeoutMs = DEFAULT_HIP4_READ_POLICY.requestTimeoutMs;
   const diagnostics = {
     flushErrors: 0,
     publishErrors: 0,
+    embedInvalidations: 0,
+    embedPublishErrors: 0,
     configuredRedis: Boolean(redisUrl),
     stream: undefined as
       | ReturnType<typeof watchHip4Metadata>["diagnostics"]
@@ -67,11 +74,40 @@ export function startHip4LiveRuntime(
       clearTimeout(deadline);
     }
   };
+  const invalidateCanonical = async (change: Hip4CanonicalChange, timeoutMs = requestTimeoutMs) => {
+    if (stopped) return;
+    const client = getRedis();
+    if (!client) {
+      diagnostics.embedPublishErrors++;
+      return;
+    }
+    try {
+      if (!client.isOpen)
+        await redisRequest(() => client.connect(), timeoutMs);
+      await redisRequest(
+        () =>
+          enqueueEmbedItems(client as RedisClientType, [
+            { entity_type: "market", market_id: change.marketId },
+            ...change.eventIds.map((eventId) => ({
+              entity_type: "event" as const,
+              event_id: eventId,
+            })),
+          ]),
+        timeoutMs,
+      );
+      diagnostics.embedInvalidations++;
+    } catch {
+      // Canonical state is already committed. Existing bounded reconciliation
+      // is the recovery path; never report the market transaction as failed.
+      diagnostics.embedPublishErrors++;
+    }
+  };
   const tick = async () => {
     let nextMs = DEFAULT_HIP4_READ_POLICY.policyCheckMs;
     try {
       const current = await readHip4Policy(pool, "indexer");
       const { policy } = current;
+      requestTimeoutMs = policy.requestTimeoutMs;
       nextMs = Math.min(policy.streamFlushMs, policy.policyCheckMs);
       if (revision !== current.revision) {
         stream?.close();
@@ -178,7 +214,15 @@ export function startHip4LiveRuntime(
       if (buffer && policy.liveEnabled) {
         const batch = buffer.take();
         interruptedSince ??= batch.since;
-        await flushHip4Live(pool, policy, current.revision, batch, publish);
+        await flushHip4Live(
+          pool,
+          policy,
+          current.revision,
+          batch,
+          publish,
+          Date.now(),
+          invalidateCanonical,
+        );
         interruptedSince = undefined;
       }
     } catch {
@@ -195,9 +239,10 @@ export function startHip4LiveRuntime(
         }, nextMs);
     }
   };
-  active = tick();
+  if (options.live !== false) active = tick();
   return {
     diagnostics,
+    invalidateCanonical,
     close: async () => {
       stopped = true;
       clearTimeout(timer);

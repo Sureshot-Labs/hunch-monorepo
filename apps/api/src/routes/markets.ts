@@ -23,7 +23,7 @@ import {
   getMatchedAlternatives,
 } from "../services/matched-markets.js";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { buildObservedCanonicalMarketTop } from "@hunch/shared";
+import { buildObservedCanonicalMarketTop, isHip4CanaryId } from "@hunch/shared";
 import { createHash, randomUUID } from "crypto";
 import { RESP_TYPES } from "redis";
 import { getRedis } from "../redis.js";
@@ -112,6 +112,8 @@ import {
   marketSimilarQuerySchema,
 } from "../schemas/market.js";
 import type { DbQuery } from "../db.js";
+import { readHip4Policy } from "../services/hip4-repository.js";
+import { nativePublicReadIdAllowed } from "../repos/hip4-token-read.js";
 
 function parseTimestampSeconds(value: unknown): number | null {
   if (value == null) return null;
@@ -250,10 +252,16 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
               assetContext,
             )
           : null;
+        const nativeRead = tokenIds.some(isHip4CanaryId)
+          ? await readHip4Policy(pool, "discovery")
+          : null;
         const rows = await fetchMarketsByTokenIds(pool, {
           tokenIds,
           venue,
           includeTop,
+          ...(nativeRead?.policy.enabled
+            ? { hip4ReadEnvironment: nativeRead.policy.environment }
+            : {}),
           ...(verifiedAssetContext
             ? { marketAssetContexts: [verifiedAssetContext] }
             : {}),
@@ -272,6 +280,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
         }
         const response = mapMarketsByTokenRows(rows, {
           polymarketOrderabilityMode: "trust_accepting_orders",
+          includeTop,
         });
 
         if (tokenIds.length) {
@@ -839,15 +848,19 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
         excludeEvents,
       } = request.query;
       const cappedLimit = Math.min(200, Math.max(1, limit ?? 20));
+      let nativeEnvironment: "mainnet" | "testnet" | null = null;
       const boost = async (items: Array<{ id: string; score: number }>) => {
+        const scoped = items.filter((item) =>
+          nativePublicReadIdAllowed(item.id, nativeEnvironment),
+        );
         try {
-          return await boostRelatedMarkets(pool, marketId, items);
+          return await boostRelatedMarkets(pool, marketId, scoped);
         } catch (err) {
           request.log.warn(
             { err, marketId },
             "Similar market boost unavailable",
           );
-          return items;
+          return scoped;
         }
       };
       const active = activeOnly ?? true;
@@ -856,6 +869,18 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
         venue ? [venue] : null,
         "discovery",
       );
+      if (lifecycle.venues.includes("hyperliquid")) {
+        const read = await readHip4Policy(pool, "discovery");
+        nativeEnvironment = read.policy.enabled
+          ? read.policy.environment
+          : null;
+        if (!nativeEnvironment)
+          lifecycle.venues = lifecycle.venues.filter(
+            (item) => item !== "hyperliquid",
+          );
+      }
+      if (!nativePublicReadIdAllowed(marketId, nativeEnvironment))
+        return reply.send({ items: [], cache_status: "disabled" as const });
       if (lifecycle.venues.length === 0) {
         return reply.send({ items: [], cache_status: "disabled" as const });
       }
@@ -942,6 +967,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
             venue: venue ?? "",
             lifecycleRevision: lifecycle.revision,
             lifecycleVenues: lifecycle.venues,
+            nativeEnvironment,
             maxScore: maxScore ?? null,
             seriesKey: baseSeriesKey ?? "",
             excludeMarkets: Array.from(excludeMarketSet).sort(),

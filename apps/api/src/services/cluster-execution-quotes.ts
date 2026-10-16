@@ -1,9 +1,12 @@
 import type { DbQuery } from "../db.js";
+import { hip4Identity, hip4ReadMarketSchema } from "@hunch/shared";
 import { buildBroadOrderableMarketSql } from "../lib/market-availability.js";
 import type {
   ClusterMarketNativeQuotes,
   ClusterNativeTop,
 } from "./cluster-execution.js";
+import { CLUSTER_EXECUTION_QUOTE_MAX_AGE_MS } from "./cluster-execution.js";
+import { hip4SocialMarketOpen } from "./hip4-social-valuation.js";
 
 type ClusterExecutionQuoteRow = {
   active: boolean;
@@ -13,6 +16,7 @@ type ClusterExecutionQuoteRow = {
   no_ts: Date | string | null;
   orderable: boolean;
   venue: string;
+  metadata?: unknown;
   yes_ask: unknown;
   yes_bid: unknown;
   yes_ts: Date | string | null;
@@ -47,6 +51,74 @@ function top(input: {
   };
 }
 
+/** Native snapshots already carry independent book validity. Do not invent a
+ * NO book from YES or make stale native books look fresh using catalog time. */
+export function hip4ClusterQuotes(input: {
+  marketId: string;
+  metadata: unknown;
+  active: boolean;
+  now?: number;
+}): ClusterMarketNativeQuotes {
+  const now = input.now ?? Date.now();
+  const metadata =
+    input.metadata && typeof input.metadata === "object"
+      ? (input.metadata as Record<string, unknown>)
+      : {};
+  const parsed = hip4ReadMarketSchema.safeParse(metadata.hip4);
+  const market = parsed.success ? parsed.data : null;
+  const nativeIdentity = market
+    ? hip4Identity(market.environment, market.outcome)
+    : null;
+  const available = Boolean(
+    input.active &&
+    market &&
+    nativeIdentity &&
+    market.marketId === input.marketId &&
+    market.marketId === nativeIdentity.marketId &&
+    market.quoteToken === "USDC" &&
+    hip4SocialMarketOpen(metadata, now) &&
+    market.sides.every(
+      (side, index) =>
+        side.sideIndex === index &&
+        side.tokenId === nativeIdentity.sides[index]?.tokenId &&
+        side.coin === nativeIdentity.sides[index]?.coin &&
+        side.assetId === nativeIdentity.sides[index]?.assetId,
+    ),
+  );
+  const nativeTop = (sideIndex: number): ClusterNativeTop => {
+    const side = market?.sides.find((row) => row.sideIndex === sideIndex);
+    const observedAt = Date.parse(side?.bookAt ?? "");
+    const validUntil = Date.parse(side?.bookValidUntil ?? "");
+    if (
+      !available ||
+      !side ||
+      side.bookState !== "fresh" ||
+      !Number.isFinite(observedAt) ||
+      observedAt > now ||
+      now - observedAt > CLUSTER_EXECUTION_QUOTE_MAX_AGE_MS ||
+      !Number.isFinite(validUntil) ||
+      validUntil <= now
+    )
+      return { bid: null, ask: null, asOf: null };
+    const value = top({ bid: side.bid, ask: side.ask, ts: side.bookAt });
+    if (
+      (value.bid !== null && (value.bid < 0 || value.bid > 1)) ||
+      (value.ask !== null && (value.ask <= 0 || value.ask >= 1)) ||
+      (value.bid !== null && value.ask !== null && value.bid > value.ask)
+    )
+      return { bid: null, ask: null, asOf: null };
+    return value;
+  };
+  return {
+    active: available,
+    orderable: available,
+    marketId: input.marketId,
+    venue: "hyperliquid",
+    yes: nativeTop(0),
+    no: nativeTop(1),
+  };
+}
+
 export async function loadClusterMarketNativeQuotes(
   db: DbQuery,
   marketIds: Array<string | null | undefined>,
@@ -70,6 +142,7 @@ export async function loadClusterMarketNativeQuotes(
       select
         m.id as market_id,
         m.venue,
+        m.metadata,
         (m.status = 'ACTIVE' and e.status = 'ACTIVE') as active,
         (
           m.status = 'ACTIVE'
@@ -125,14 +198,20 @@ export async function loadClusterMarketNativeQuotes(
     return new Map(
       rows.map((row) => [
         row.market_id,
-        {
-          active: row.active,
-          marketId: row.market_id,
-          no: top({ ask: row.no_ask, bid: row.no_bid, ts: row.no_ts }),
-          orderable: row.orderable,
-          venue: row.venue,
-          yes: top({ ask: row.yes_ask, bid: row.yes_bid, ts: row.yes_ts }),
-        },
+        row.venue === "hyperliquid"
+          ? hip4ClusterQuotes({
+              marketId: row.market_id,
+              metadata: row.metadata,
+              active: row.active,
+            })
+          : {
+              active: row.active,
+              marketId: row.market_id,
+              no: top({ ask: row.no_ask, bid: row.no_bid, ts: row.no_ts }),
+              orderable: row.orderable,
+              venue: row.venue,
+              yes: top({ ask: row.yes_ask, bid: row.yes_bid, ts: row.yes_ts }),
+            },
       ]),
     );
   })();

@@ -1,14 +1,24 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { DbQuery } from "../db.js";
+import { socialVenueSchema } from "../schemas/social-trade.js";
 
 const count = z.number().int().positive().max(1_000_000);
 const seconds = z.number().int().nonnegative().max(31_536_000);
+const venues = z
+  .array(socialVenueSchema)
+  .max(socialVenueSchema.options.length)
+  .refine(
+    (value) => new Set(value).size === value.length,
+    "Venue capabilities must be unique",
+  );
 const socialPolicyFields = {
   version: z.literal(1),
   enabled: z.boolean(),
   publicationsEnabled: z.boolean(),
   copyEnabled: z.boolean(),
+  publicationVenues: venues,
+  copyVenues: venues,
   commentsEnabled: z.boolean(),
   likesEnabled: z.boolean(),
   minimumNotionalUsd: z
@@ -64,44 +74,49 @@ export const socialPolicySchema = z
     }
   });
 export type SocialPolicy = z.infer<typeof socialPolicySchema>;
-export const DEFAULT_SOCIAL_POLICY: Readonly<SocialPolicy> = Object.freeze({
-  version: 1,
-  enabled: true,
-  publicationsEnabled: true,
-  copyEnabled: true,
-  commentsEnabled: true,
-  likesEnabled: true,
-  minimumNotionalUsd: "10.00",
-  thesisMaxGraphemes: 450,
-  commentMaxGraphemes: 450,
-  bioMaxGraphemes: 160,
-  displayNameMaxGraphemes: 80,
-  handleMinLength: 3,
-  handleMaxLength: 20,
-  handleCooldownSeconds: 0,
-  pageSize: 20,
-  maxPageSize: 50,
-  avatarMaxBytes: 5_000_000,
-  profileStatsWindowDays: null,
-  profileStatsMinResolved: 1,
-  markMaxAgeSeconds: 900,
-  rateLimitWindowSeconds: 60,
-  writeRateLimit: 60,
-  commentRateLimit: 20,
-  likeRateLimit: 120,
-  reportRateLimit: 10,
-  avatarRateLimit: 5,
-  reportMaxGraphemes: 1_000,
-  moderationReasonMaxGraphemes: 1_000,
-  repairEnabled: true,
-  repairBatchSize: 50,
-  repairConcurrency: 2,
-  repairIntervalSeconds: 30,
-  repairLeaseSeconds: 120,
-  repairRetrySeconds: 30,
-  repairMaxRetrySeconds: 3_600,
-  repairProviderRequestBudget: 100,
-});
+export const DEFAULT_SOCIAL_POLICY: Readonly<SocialPolicy> =
+  Object.freeze<SocialPolicy>({
+    version: 1,
+    enabled: true,
+    publicationsEnabled: true,
+    copyEnabled: true,
+    // Existing venues retain their behavior. Native financial proof and Copy can
+    // be activated independently of ordinary trading once their adapters qualify.
+    publicationVenues: ["polymarket", "limitless", "kalshi"],
+    copyVenues: ["polymarket", "limitless", "kalshi"],
+    commentsEnabled: true,
+    likesEnabled: true,
+    minimumNotionalUsd: "10.00",
+    thesisMaxGraphemes: 450,
+    commentMaxGraphemes: 450,
+    bioMaxGraphemes: 160,
+    displayNameMaxGraphemes: 80,
+    handleMinLength: 3,
+    handleMaxLength: 20,
+    handleCooldownSeconds: 0,
+    pageSize: 20,
+    maxPageSize: 50,
+    avatarMaxBytes: 5_000_000,
+    profileStatsWindowDays: null,
+    profileStatsMinResolved: 1,
+    markMaxAgeSeconds: 900,
+    rateLimitWindowSeconds: 60,
+    writeRateLimit: 60,
+    commentRateLimit: 20,
+    likeRateLimit: 120,
+    reportRateLimit: 10,
+    avatarRateLimit: 5,
+    reportMaxGraphemes: 1_000,
+    moderationReasonMaxGraphemes: 1_000,
+    repairEnabled: true,
+    repairBatchSize: 50,
+    repairConcurrency: 2,
+    repairIntervalSeconds: 30,
+    repairLeaseSeconds: 120,
+    repairRetrySeconds: 30,
+    repairMaxRetrySeconds: 3_600,
+    repairProviderRequestBudget: 100,
+  });
 
 /** Validate the entire resulting policy, not merely independent override fields. */
 export const socialPolicyOverrideSchema = z
@@ -158,7 +173,7 @@ export async function resolveSocialPolicy(
       payload: unknown;
       effective_at: Date | string;
     }>(
-      `select payload,effective_at from runtime_policies where policy_key=$1 and effective_at<=now()
+      `select payload,effective_at from runtime_policies where policy_key=$1 and effective_at<=clock_timestamp()
        order by effective_at desc,created_at desc limit 1`,
       ["social"],
     );

@@ -78,11 +78,17 @@ export function parseEmbeddingBackfillOptions(
       if (
         options.venues.some(
           (venue) =>
-            !["polymarket", "limitless", "kalshi", "dflow"].includes(venue),
+            ![
+              "polymarket",
+              "limitless",
+              "kalshi",
+              "dflow",
+              "hyperliquid",
+            ].includes(venue),
         )
       ) {
         throw new Error(
-          "--venue supports polymarket, limitless, kalshi or dflow",
+          "--venue supports polymarket, limitless, kalshi, dflow or hyperliquid",
         );
       }
       options.venues = [
@@ -120,7 +126,7 @@ const help = `Usage: pnpm -C hunch-monorepo -F api run ai:embed:backfill -- [opt
 
 Default: read-only preview of eligible source counts and the desired generation.
   --dry-run                 Explicit read-only preview (no embedding requests)
-  --venue <venue[,venue]>    Preview only: polymarket,limitless,kalshi,dflow
+  --venue <venue[,venue]>    Preview only: polymarket,limitless,kalshi,dflow,hyperliquid
   --limit <n>               Preview only: cap displayed candidates per entity type
   --markets | --events      Preview only: select one entity type
   --status                  Read the worker's saved verification/progress report

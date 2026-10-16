@@ -16,10 +16,27 @@ import type { PolymarketAssetContext } from "@hunch/shared";
 import { copyPurchaseIsTimelySql } from "./copy-purchase-timing.js";
 import type { LimitlessClobSubmissionContext } from "./limitless-clob-evidence-identity.js";
 import { retainLimitlessCopySubmission } from "./limitless-copy-submission.js";
+import { parseHip4SocialProviderReference } from "./hip4-social-evidence.js";
+import { buildSocialInstrument } from "./social-instrument.js";
+import { hip4SocialMarketOpen } from "./hip4-social-valuation.js";
+import { readSocialCopyVenues } from "./social-venue-capabilities.js";
 
 type Db = Pick<Pool, "query">;
 type Instrument = VerifiedBuyFacts["instrument"];
-type CurrentInstrumentConfig = { limitlessPositionContract?: string };
+type CurrentInstrumentConfig = {
+  limitlessPositionContract?: string;
+  hip4Instrument?: Instrument;
+};
+export async function assertSocialCopyPolicy(db: Db, venue: Instrument["venue"]) {
+  const resolved = await resolveSocialPolicy(db);
+  if (!resolved.policy.enabled || !resolved.policy.copyEnabled)
+    throw new SocialError("copy_disabled", 409);
+  if (!resolved.policy.copyVenues.includes(venue))
+    throw new SocialError("venue_copy_disabled", 409);
+  if (!(await readSocialCopyVenues(db, resolved.policy)).includes(venue))
+    throw new SocialError("venue_copy_disabled", 409);
+  return resolved;
+}
 export type RetainedCopyAttempt = {
   id: string;
   created: boolean;
@@ -173,6 +190,9 @@ export function copyPayloadHash(prepared: PreparedTrade): string {
     limitPrice: intent.limitPrice ?? null,
     walletAddress: intent.walletAddress,
     slippageBps: intent.slippageBps ?? null,
+    ...(intent.venue === "hyperliquid"
+      ? { nativeOrder: intent.nativeOrder ?? null }
+      : {}),
   });
 }
 
@@ -210,6 +230,12 @@ export function requireSameInstrument(
         `8453:${config.limitlessPositionContract.toLowerCase()}:${instrument.tokenId}`
     )
       throw new SocialError("copy_generation_mismatch", 409);
+  } else if (instrument.venue === "hyperliquid") {
+    if (
+      !config.hip4Instrument ||
+      canonicalJsonHash(config.hip4Instrument) !== canonicalJsonHash(instrument)
+    )
+      throw new SocialError("copy_generation_mismatch", 409);
   } else if (instrument.generation !== `solana:mainnet:${instrument.tokenId}`) {
     throw new SocialError("copy_generation_mismatch", 409);
   }
@@ -226,9 +252,7 @@ export async function authorizeCopySource(
 }> {
   const sourceRef = prepared.intent.sourceRef;
   if (!sourceRef) throw new SocialError("copy_source_required");
-  const resolved = await resolveSocialPolicy(db);
-  if (!resolved.policy.enabled || !resolved.policy.copyEnabled)
-    throw new SocialError("copy_disabled", 409);
+  const resolved = await assertSocialCopyPolicy(db, prepared.intent.venue);
   const account = await db.query<{ allowed: boolean }>(
     `select is_active and social_suspended_at is null as allowed
     from users where id=$1`,
@@ -262,8 +286,12 @@ export async function authorizeCopySource(
     instrument = parsed.data;
   }
   requireSameInstrument(prepared, instrument, config);
-  const market = await db.query<{ expiration_time: Date | null }>(
-    `select expiration_time from unified_markets where id=$1`,
+  const market = await db.query<{
+    expiration_time: Date | null;
+    status: string;
+    metadata: unknown;
+  }>(
+    `select expiration_time,status,metadata from unified_markets where id=$1${instrument.venue === "hyperliquid" ? " for share" : ""}`,
     [instrument.marketId],
   );
   if (
@@ -272,6 +300,23 @@ export async function authorizeCopySource(
       instrument.expiry
   )
     throw new SocialError("copy_expiry_mismatch", 409);
+  if (instrument.venue === "hyperliquid") {
+    const current = buildSocialInstrument({
+      marketId: instrument.marketId,
+      venue: instrument.venue,
+      tokenId: instrument.tokenId,
+      outcome: instrument.outcome,
+      expiry: market.rows[0].expiration_time?.toISOString() ?? null,
+      metadata: market.rows[0].metadata,
+    });
+    if (
+      market.rows[0].status !== "ACTIVE" ||
+      !hip4SocialMarketOpen(market.rows[0].metadata) ||
+      !current ||
+      canonicalJsonHash(current) !== canonicalJsonHash(instrument)
+    )
+      throw new SocialError("copy_generation_mismatch", 409);
+  }
   const payload = isRecord(prepared.venuePayload) ? prepared.venuePayload : {};
   const limitlessClob =
     instrument.venue === "limitless" && payload.submissionContext !== undefined
@@ -309,116 +354,130 @@ export async function authorizeCopySource(
   };
 }
 
+export type CopyRetentionInput = {
+  prepared: PreparedTrade;
+  providerReference: string;
+  preparedFingerprint: string;
+  limitlessPositionContract?: string;
+  hip4Instrument?: Instrument;
+};
+
 /** Commit exact identity before submit. A retry is reconciliation, never a fresh buy. */
 export async function retainCopyBeforeSubmission(
   pool: Pool,
-  input: {
-    prepared: PreparedTrade;
-    providerReference: string;
-    preparedFingerprint: string;
-    limitlessPositionContract?: string;
-  },
+  input: CopyRetentionInput,
+): Promise<RetainedCopyAttempt> {
+  if (!input.prepared.intent.sourceRef)
+    throw new SocialError("copy_source_required");
+  return tx(pool, (client) =>
+    retainCopyBeforeSubmissionInTransaction(client, input),
+  );
+}
+
+/** Existing retention semantics for an executor that must commit attribution
+ * atomically with its own durable admission. The caller owns the transaction;
+ * this helper never opens, commits or rolls back a separate connection. */
+export async function retainCopyBeforeSubmissionInTransaction(
+  client: Db,
+  input: CopyRetentionInput,
 ): Promise<RetainedCopyAttempt> {
   if (!input.prepared.intent.sourceRef)
     throw new SocialError("copy_source_required");
   const userId = input.prepared.intent.actor.userId;
   const key = input.prepared.intent.idempotencyKey;
   const payloadHash = copyPayloadHash(input.prepared);
-  return tx(pool, async (client) => {
-    // Account deletion/merge acquires these same user rows. A new authorization
-    // cannot pass an activity check before deletion and insert after its commit.
-    const accounts = await client.query<{ id: string; is_active: boolean }>(
-      `select id,is_active from users where id=$1 or id=(select author_id from user_theses where id=$2)
+  // Account deletion/merge acquires these same user rows. A new authorization
+  // cannot pass an activity check before deletion and insert after its commit.
+  const accounts = await client.query<{ id: string; is_active: boolean }>(
+    `select id,is_active from users where id=$1 or id=(select author_id from user_theses where id=$2)
       order by id for update`,
-      [
-        userId,
-        input.prepared.intent.sourceRef?.kind === "thesis"
-          ? input.prepared.intent.sourceRef.id
-          : null,
-      ],
-    );
-    if (!accounts.rows.find((account) => account.id === userId)?.is_active)
-      throw new SocialError("social_account_unavailable", 403);
-    await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
-      `social-copy:${userId}:${key}`,
-    ]);
-    const existing = await client.query<{
-      id: string;
-      payload_hash: string;
-      provider_reference: string;
-      prepared_fingerprint: string;
-      state: string;
-      submission_started_at: Date | null;
-    }>(
-      `
+    [
+      userId,
+      input.prepared.intent.sourceRef?.kind === "thesis"
+        ? input.prepared.intent.sourceRef.id
+        : null,
+    ],
+  );
+  if (!accounts.rows.find((account) => account.id === userId)?.is_active)
+    throw new SocialError("social_account_unavailable", 403);
+  await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+    `social-copy:${userId}:${key}`,
+  ]);
+  const existing = await client.query<{
+    id: string;
+    payload_hash: string;
+    provider_reference: string;
+    prepared_fingerprint: string;
+    state: string;
+    submission_started_at: Date | null;
+  }>(
+    `
       select id,payload_hash,provider_reference,prepared_fingerprint,state,submission_started_at from copy_attributions
       where copier_user_id=$1 and idempotency_key=$2 for update`,
-      [userId, key],
-    );
-    if (existing.rows[0]) {
-      const saved = existing.rows[0];
-      if (
-        saved.payload_hash !== payloadHash ||
-        saved.provider_reference !== input.providerReference ||
-        saved.prepared_fingerprint !== input.preparedFingerprint
-      )
-        throw new SocialError("copy_idempotency_conflict", 409);
-      const retried = await client.query<{ submission_attempt_token: string }>(
-        `update copy_attributions
+    [userId, key],
+  );
+  if (existing.rows[0]) {
+    const saved = existing.rows[0];
+    if (
+      saved.payload_hash !== payloadHash ||
+      saved.provider_reference !== input.providerReference ||
+      saved.prepared_fingerprint !== input.preparedFingerprint
+    )
+      throw new SocialError("copy_idempotency_conflict", 409);
+    const retried = await client.query<{ submission_attempt_token: string }>(
+      `update copy_attributions
         set submission_attempt_token=gen_random_uuid(),state=case when state='failed' then 'pending' else state end,
           submission_started_at=case when state='failed' then null else submission_started_at end,
           repair_due_at=now(),updated_at=now() where id=$1 returning submission_attempt_token`,
-        [saved.id],
-      );
-      const attempt = retried.rows[0];
-      if (!attempt)
-        throw new Error("Copy retry did not return attempt identity");
-      return {
-        id: saved.id,
-        created: false,
-        attemptToken: attempt.submission_attempt_token,
-        priorSubmissionUncertain:
-          saved.state !== "failed" && saved.submission_started_at !== null,
-      };
-    }
-    // Only an already-retained attempt may recover a prior local submission.
-    // New source attribution cannot be added to an existing economic identity,
-    // even when chain timestamps put both events within the same second.
-    const priorPurchase = await findCopyPurchase(client, {
-      userId,
-      providerReference: input.providerReference,
-    });
-    if (priorPurchase.orderId || priorPurchase.executionId)
-      throw new SocialError("copy_purchase_already_submitted", 409);
-    const source = await authorizeCopySource(client, input.prepared, input);
-    const inserted = await client.query<{
-      id: string;
-      submission_attempt_token: string;
-    }>(
-      `insert into copy_attributions
-      (copier_user_id,source_thesis_id,source_ai_note_id,source_snapshot,instrument,idempotency_key,payload_hash,prepared_fingerprint,provider_reference,created_at)
-      values ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,clock_timestamp()) returning id,submission_attempt_token`,
-      [
-        userId,
-        source.sourceRef.kind === "thesis" ? source.sourceRef.id : null,
-        source.sourceRef.kind === "hunch" ? source.sourceRef.id : null,
-        JSON.stringify(source.snapshot),
-        JSON.stringify(source.instrument),
-        key,
-        payloadHash,
-        input.preparedFingerprint,
-        input.providerReference,
-      ],
+      [saved.id],
     );
-    const saved = inserted.rows[0];
-    if (!saved) throw new Error("Copy insert did not return identity");
+    const attempt = retried.rows[0];
+    if (!attempt) throw new Error("Copy retry did not return attempt identity");
     return {
       id: saved.id,
-      created: true,
-      attemptToken: saved.submission_attempt_token,
-      priorSubmissionUncertain: false,
+      created: false,
+      attemptToken: attempt.submission_attempt_token,
+      priorSubmissionUncertain:
+        saved.state !== "failed" && saved.submission_started_at !== null,
     };
+  }
+  // Only an already-retained attempt may recover a prior local submission.
+  // New source attribution cannot be added to an existing economic identity,
+  // even when chain timestamps put both events within the same second.
+  const priorPurchase = await findCopyPurchase(client, {
+    userId,
+    providerReference: input.providerReference,
   });
+  if (priorPurchase.orderId || priorPurchase.executionId)
+    throw new SocialError("copy_purchase_already_submitted", 409);
+  const source = await authorizeCopySource(client, input.prepared, input);
+  const inserted = await client.query<{
+    id: string;
+    submission_attempt_token: string;
+  }>(
+    `insert into copy_attributions
+      (copier_user_id,source_thesis_id,source_ai_note_id,source_snapshot,instrument,idempotency_key,payload_hash,prepared_fingerprint,provider_reference,created_at)
+      values ($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,clock_timestamp()) returning id,submission_attempt_token`,
+    [
+      userId,
+      source.sourceRef.kind === "thesis" ? source.sourceRef.id : null,
+      source.sourceRef.kind === "hunch" ? source.sourceRef.id : null,
+      JSON.stringify(source.snapshot),
+      JSON.stringify(source.instrument),
+      key,
+      payloadHash,
+      input.preparedFingerprint,
+      input.providerReference,
+    ],
+  );
+  const saved = inserted.rows[0];
+  if (!saved) throw new Error("Copy insert did not return identity");
+  return {
+    id: saved.id,
+    created: true,
+    attemptToken: saved.submission_attempt_token,
+    priorSubmissionUncertain: false,
+  };
 }
 
 /** No executor may cross its request boundary without retaining broadcast uncertainty. */
@@ -552,9 +611,22 @@ async function findCopyPurchase(
   const amm = input.providerReference.match(
     /^limitless:amm:8453:(0x[0-9a-f]{64}):(\d+)$/i,
   );
+  const hip4 = parseHip4SocialProviderReference(input.providerReference);
   let orderId: string | null = null;
   let executionId: string | null = null;
-  if (poly?.[1] && poly[2]) {
+  if (hip4) {
+    // Prepared local orders are not a prior purchase. Only a durable native
+    // admission proves this exact cloid crossed the one-shot submission fence.
+    const found = await db.query<{ id: string }>(
+      `select order_row.id from hip4_order_actions action_row
+       join hip4_order_submissions submission_row on submission_row.action_id=action_row.id
+       join orders order_row on order_row.id=action_row.order_id
+       where action_row.environment=$1 and action_row.signer_address=$2 and action_row.cloid=$3
+         and action_row.action_kind='order' and order_row.user_id=$4 and order_row.venue='hyperliquid'`,
+      [hip4.environment, hip4.accountAddress, hip4.cloid, input.userId],
+    );
+    orderId = found.rows[0]?.id ?? null;
+  } else if (poly?.[1] && poly[2]) {
     const found = await db.query<{ id: string }>(
       `select id from orders where user_id=$1 and venue='polymarket'
       and lower(order_hash)=$2 and lower(order_payload->'assetContext'->>'exchangeAddress')=$3 order by id limit 1`,

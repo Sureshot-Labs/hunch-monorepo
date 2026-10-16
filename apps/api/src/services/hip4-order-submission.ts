@@ -10,6 +10,7 @@ import { releaseFundingReservationForAbandonedTradeInTransaction } from "../fund
 import { z } from "zod";
 import type { Hip4TradeSigningInput } from "./hip4-trade-signing.js";
 import { classifyHip4SingleTradeReply } from "./hip4-trade-reply.js";
+import { markCopyDefinitiveProviderRejection } from "./social-copy.js";
 import {
   postHyperliquidExchangeOnce,
   type HyperliquidExchangeTransport,
@@ -44,6 +45,12 @@ export async function recordHip4SubmissionReplyInTransaction(
     input.body,
   );
   const rejected = reply.kind === "rejected" || reply.kind === "no_fill";
+  if (rejected && row.admission_snapshot.copy)
+    await markCopyDefinitiveProviderRejection(
+      db,
+      input.userId,
+      row.admission_snapshot.copy,
+    );
   if (row.funding_trade_attempt_id) {
     await recordFundingTradeAttemptOutcomeInTransaction(db, {
       userId: input.userId,

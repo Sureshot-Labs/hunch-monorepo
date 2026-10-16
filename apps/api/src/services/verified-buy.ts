@@ -137,7 +137,10 @@ export function factsFromEvidence(
     feesUsd:
       evidence.feesUsdRaw === null
         ? null
-        : rawDecimal(evidence.feesUsdRaw, evidence.collateralDecimals),
+        : evidence.instrument.venue === "hyperliquid" &&
+            evidence.feesUsdRaw < 0n
+          ? `-${rawDecimal(-evidence.feesUsdRaw, evidence.collateralDecimals)}`
+          : rawDecimal(evidence.feesUsdRaw, evidence.collateralDecimals),
     purchasedAt: evidence.purchasedAt,
     evidenceIds: [...new Set(evidence.evidenceIds)].sort(),
   };
@@ -152,9 +155,24 @@ export function factsFromEvidence(
   });
 }
 
-export type PurchaseObservation =
+export type NativePurchaseEvidenceGuard = {
+  kind: "hip4";
+  environment: "mainnet";
+  accountAddress: string;
+  coin: string;
+  orderId: string;
+  legacyConflictTime: number | null;
+  rows: Array<{ timeMs: string; tradeId: string; revision: string | null }>;
+};
+export type NativePurchaseEvidenceFinalizer = <T>(
+  guard: NativePurchaseEvidenceGuard,
+  store: (db: Db) => Promise<T>,
+) => Promise<{ stored: true; result: T } | { stored: false }>;
+
+export type PurchaseObservation = (
   | { state: "verified"; facts: VerifiedBuyFacts }
-  | { state: "pending" | "revoked"; reason: string };
+  | { state: "pending" | "revoked"; reason: string }
+) & { nativeEvidenceGuard?: NativePurchaseEvidenceGuard };
 export type ClaimedPurchase = {
   purchaseRef: PurchaseRef;
   userId: string;
@@ -185,6 +203,7 @@ export async function repairVerifiedBuys(
     retrySeconds: number;
     verifiedRecheckSeconds: number;
     observe: (claim: ClaimedPurchase) => Promise<PurchaseObservation>;
+    finalizeNativeEvidence?: NativePurchaseEvidenceFinalizer;
     onStored?: (
       claim: ClaimedPurchase,
       result: PurchaseObservation,
@@ -287,14 +306,25 @@ export async function repairVerifiedBuys(
           observation.facts = verifiedBuyFactsSchema.parse(observation.facts);
         else if (observation.reason.startsWith("evidence_budget_exhausted:"))
           summary.budgetExhausted++;
+        if (
+          observation.state === "verified" &&
+          observation.facts.instrument.venue === "hyperliquid" &&
+          !observation.nativeEvidenceGuard
+        )
+          observation = {
+            state: "pending",
+            reason:
+              "observation_unavailable:hip4_execution_evidence_guard_missing",
+          };
         const referenceColumn = kind === "order" ? "order_id" : "execution_id";
         const timelyPurchase = copyPurchaseIsTimelySql(
           "(stored_purchase.verified_buy_facts->>'purchasedAt')::timestamptz",
           "copy_row.created_at",
         );
-        const result = await db.query(
-          `with stored_purchase as (update ${table}
-        set verified_buy_state = case when $2 = 'pending' and ($4 = 'observation_unavailable' or $4 like 'evidence_budget_exhausted:%') then verified_buy_state
+        const store = (storeDb: Db) =>
+          storeDb.query(
+            `with stored_purchase as (update ${table}
+        set verified_buy_state = case when $2 = 'pending' and ($4 = 'observation_unavailable' or $4 like 'observation_unavailable:%' or $4 like 'evidence_budget_exhausted:%') then verified_buy_state
                                      when $2 = 'pending' and verified_buy_state = 'revoked' then 'revoked' else $2 end,
             verified_buy_facts = case when $2 = 'verified' then $3::jsonb else verified_buy_facts end,
             verified_buy_reason = $4, verified_buy_revision = verified_buy_revision + 1,
@@ -305,17 +335,20 @@ export async function repairVerifiedBuys(
         projected_theses as (
           update user_theses thesis_row set proof_invalidated_at=case
             when stored_purchase.verified_buy_state='revoked'
+              or (stored_purchase.verified_buy_state='pending' and $4='hip4_legacy_execution_conflict_unscoped')
               or not ((thesis_row.buy_snapshot->'evidenceIds') <@ (stored_purchase.verified_buy_facts->'evidenceIds'))
               then coalesce(thesis_row.proof_invalidated_at,now())
             else null end
           from stored_purchase
           where thesis_row.author_id=$6 and (thesis_row.${referenceColumn}=stored_purchase.id
             or thesis_row.canonical_purchase_key=stored_purchase.verified_buy_facts->>'canonicalPurchaseKey')
-            and stored_purchase.verified_buy_state in ('revoked','verified')
+            and (stored_purchase.verified_buy_state in ('revoked','verified')
+              or (stored_purchase.verified_buy_state='pending' and $4='hip4_legacy_execution_conflict_unscoped'))
           returning thesis_row.id
         ), projected_copies as (
           update copy_attributions copy_row set
-            state=case when stored_purchase.verified_buy_state='verified' and ${timelyPurchase}
+            state=case when stored_purchase.verified_buy_state='pending' and $4='hip4_legacy_execution_conflict_unscoped' then 'pending'
+              when stored_purchase.verified_buy_state='verified' and ${timelyPurchase}
               then 'confirmed' else 'revoked' end,
             canonical_purchase_key=case when stored_purchase.verified_buy_state='verified'
               then stored_purchase.verified_buy_facts->>'canonicalPurchaseKey' else copy_row.canonical_purchase_key end,
@@ -326,23 +359,44 @@ export async function repairVerifiedBuys(
             confirmed_at=case when stored_purchase.verified_buy_state='verified' and ${timelyPurchase}
               then coalesce(copy_row.confirmed_at,now()) else copy_row.confirmed_at end,updated_at=now()
           from stored_purchase where copy_row.copier_user_id=$6 and copy_row.${referenceColumn}=stored_purchase.id
-            and (stored_purchase.verified_buy_state='revoked' or (stored_purchase.verified_buy_state='verified'
+            and (stored_purchase.verified_buy_state='revoked' or ((stored_purchase.verified_buy_state='verified'
+              or (stored_purchase.verified_buy_state='pending' and $4='hip4_legacy_execution_conflict_unscoped'))
               and copy_row.instrument=stored_purchase.verified_buy_facts->'instrument')) returning copy_row.id
         ) select id from stored_purchase`,
-          [
-            claim.id,
-            observation.state,
-            observation.state === "verified"
-              ? JSON.stringify(observation.facts)
-              : null,
-            observation.state === "verified" ? null : observation.reason,
-            observation.state === "verified"
-              ? input.verifiedRecheckSeconds
-              : input.retrySeconds,
-            claim.user_id,
-            claim.verified_buy_lease_token,
-          ],
-        );
+            [
+              claim.id,
+              observation.state,
+              observation.state === "verified"
+                ? JSON.stringify(observation.facts)
+                : null,
+              observation.state === "verified" ? null : observation.reason,
+              observation.state === "verified"
+                ? input.verifiedRecheckSeconds
+                : input.retrySeconds,
+              claim.user_id,
+              claim.verified_buy_lease_token,
+            ],
+          );
+        let result: Awaited<ReturnType<typeof store>>;
+        if (observation.nativeEvidenceGuard) {
+          const finalized = input.finalizeNativeEvidence
+            ? await input.finalizeNativeEvidence(
+                observation.nativeEvidenceGuard,
+                store,
+              )
+            : { stored: false as const };
+          if (finalized.stored) result = finalized.result;
+          else {
+            // Evidence changed after the provider read, or no transactional
+            // finalizer was supplied. Retry once on the normal bounded lane;
+            // never overwrite already verified/revoked facts with stale proof.
+            observation = {
+              state: "pending",
+              reason: "observation_unavailable:hip4_execution_evidence_changed",
+            };
+            result = await store(db);
+          }
+        } else result = await store(db);
         if (result.rows.length) {
           summary[observation.state]++;
           await input.onStored?.(

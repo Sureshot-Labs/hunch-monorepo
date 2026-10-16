@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { polymarketAssetContextSchema } from "../../schemas/polymarket-private.js";
 import {
+  socialTradeAttributionFields,
+  refineSocialTradeAttribution,
+} from "../../schemas/social-trade.js";
+import {
   isCanonicalUnifiedMarketId,
   isVenueLocalMarketContextId,
 } from "./market-identity.js";
@@ -124,6 +128,7 @@ export const fundingPurposeSchema = z.enum([
 
 export const fundingTradeConsumerIntentInputSchema = z
   .object({
+    ...socialTradeAttributionFields,
     venueId: canonicalIdSchema,
     marketId: marketReferenceSchema,
     marketContextId: marketReferenceSchema,
@@ -131,6 +136,7 @@ export const fundingTradeConsumerIntentInputSchema = z
     spend: moneySchema,
   })
   .strict()
+  .superRefine(refineSocialTradeAttribution)
   .superRefine((intent, context) => {
     if (!isCanonicalUnifiedMarketId(intent.venueId, intent.marketId)) {
       context.addIssue({
@@ -307,6 +313,7 @@ export const fundingCommitRequestSchema = z
 
 export const marketContextBindingSchema = z
   .object({
+    ...socialTradeAttributionFields,
     positionAssetContext: polymarketAssetContextSchema.optional(),
     marketContextId: marketReferenceSchema,
     venueId: canonicalIdSchema,

@@ -131,6 +131,7 @@ export type EnsureReadinessResult = {
 
 export type TradeIntent = {
   sourceRef?: SocialSourceRef;
+  copyIdempotencyKey?: string;
   id?: string | null;
   actor: TradeActor;
   venue: TradingVenue;

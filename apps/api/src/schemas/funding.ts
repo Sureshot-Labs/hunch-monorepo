@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { nativeFundingPreparationSchema } from "../funding/execution/hypercore-submission-contract.js";
+import { socialTradeAttributionFields } from "./social-trade.js";
 
 import { FUNDING_REASON_CODES } from "../funding/domain/types.js";
 import {
@@ -1119,6 +1120,7 @@ export const fundingOperationResponseSchema = z
         asset: assetRefSchema,
         consumerIntent: z
           .object({
+            ...socialTradeAttributionFields,
             venueId: z.string().trim().min(1).max(160),
             marketId: marketReferenceSchema,
             marketContextId: marketReferenceSchema,

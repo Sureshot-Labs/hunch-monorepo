@@ -809,6 +809,17 @@ export class FundingPlanner {
       );
     }
 
+    // Attribution is part of the exact reviewed consumer, not a funding source
+    // or an instruction to buy. It follows the existing immutable context into
+    // every quote/commit and is compared again at final native admission.
+    if (marketContext && input.request.consumerIntent?.sourceRef) {
+      marketContext = {
+        ...marketContext,
+        sourceRef: input.request.consumerIntent.sourceRef,
+        copyIdempotencyKey: input.request.consumerIntent.copyIdempotencyKey,
+      };
+    }
+
     const allCandidates = await this.dependencies.listDestinations({
       accountId: input.accountId,
       request: input.request,

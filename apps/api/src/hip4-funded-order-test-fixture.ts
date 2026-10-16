@@ -11,6 +11,8 @@ import {
 import { ingestFundingObservationInTransaction } from "./funding/reconciliation/funding-observation-ingestion.js";
 import { reduceFundingOperationInTransaction } from "./funding/reconciliation/funding-reducer.js";
 import { buildFundingTradeConsumerIntent } from "./funding/persistence/funding-trade-consumer-intent.js";
+import type { SocialSourceRef } from "./schemas/social-trade.js";
+import { readHip4CopyAttribution } from "./services/hip4-copy-attribution.js";
 
 /** Synthetic settlement via the real common commit/observation/reducer. Only
  * used in disposable tests, no manual ready flag and no external provider. */
@@ -22,8 +24,11 @@ export async function hip4FundedOrderTestFixture(
     marketId: string;
     tokenId: string;
     idempotencyKey?: string;
+    sourceRef?: SocialSourceRef;
+    copyIdempotencyKey?: string;
   },
 ) {
+  const attribution = readHip4CopyAttribution(input);
   const cash = hypercoreSpotAccountLocation({
     accountId: input.userId,
     address: input.profile.address,
@@ -44,6 +49,7 @@ export async function hip4FundedOrderTestFixture(
   };
   const raw = "150000000";
   const context = {
+    ...(attribution ?? {}),
     venueId: "hyperliquid",
     marketId: input.marketId,
     marketContextId: input.tokenId.slice("hyperliquid:".length),
@@ -173,6 +179,7 @@ export async function hip4FundedOrderTestFixture(
     operationId,
     reservationId,
     confirmedIntent: buildFundingTradeConsumerIntent({
+      ...(attribution ?? {}),
       venueId: "hyperliquid",
       marketId: input.marketId,
       marketContextId: context.marketContextId,

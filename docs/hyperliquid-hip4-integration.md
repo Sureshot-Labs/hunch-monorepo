@@ -5,7 +5,16 @@
 This is the backend source-of-truth specification for `hip-next`, updated and
 rechecked on 2026-10-16. It records implementation and remaining phased work.
 Technical acceptance does not enable financial capabilities or certify
-production activation; matching and wallet intelligence remain separate work.
+production activation. The current P4S/P5/P6 implementation candidate and local
+manual-test boundaries are recorded in section 86; older phase checkpoints are
+dated evidence, not the current outstanding-work list.
+
+**Current acceptance:** P3/P4 retains its completed technical acceptance. P4S,
+P5 and the bounded P6 capability are implemented and under final acceptance;
+the current fresh whole-scope GO count is **0/2**. A disputed tracked fill now
+requires an exact source recheck before reuse. Local working-database upgrade
+and mounted live read acceptance are pending, separately from disposable PG16
+and synthetic browser checks. Do not treat this candidate as financially enabled.
 
 Start with section 12 for evidence gates, section 11 for implementation order,
 then the owned domain section and companion client contract. Section 13 records
@@ -7727,3 +7736,172 @@ does not claim a full mounted production Review or live funded E2E run.
 
 All final whitespace and targeted documentation checks pass. The known unrelated
 frontend global Markdown `AGENTS.md` second-H1 warning was not hidden or changed.
+
+## 86. P4S P5 and P6 implementation and local testing
+
+This section supersedes the P4S/P5/P6 next-work lists in earlier checkpoints.
+Backend `origin/main` at `a433c256` was merged into `hip-next` as `f6b0775f`;
+frontend `origin/main` at `139cbdee` was merged as `15db0aed`. Admin `hip-next`
+already contains its current `origin/master` baseline. These synchronizations
+and periodic feature checkpoints do not authorize merge or deployment.
+
+| Phase | Implemented contract                                                                                                                                        | Remaining acceptance boundary                                                                                                |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| P4    | Existing direct/funded interactive orders, cancellation, exact cash/receipts and app handoff retained                                                       | Real signing, provider execution and funded E2E are the user's manual tests                                                  |
+| P4S   | Native verified BUY, immutable thesis snapshots, exact pre-submit Copy retention and direct/funded recovery                                                 | Enable only the proved primary-order subset; no inferred dual-order aliases                                                  |
+| P5    | Existing market/event UI, Discovery map, factual SEO/share, portfolio publication controls and exact-revision report interactions on desktop/mobile/MiniApp | Mounted local live-read acceptance and final whole-scope reviews                                                             |
+| P6    | Formal-rule-aware matching, canonical-change invalidation, bounded known-wallet reads, support evidence and app-only signal CTA                             | Incomplete rules remain review-required; partial wallet evidence is not a global holder population or calibrated trader edge |
+
+### Verified purchase and Copy
+
+The canonical purchase key is
+`hyperliquid:purchase:v1:<environment>:<lowercase-owner>:<primary-oid>`.
+Pre-submit attribution uses
+`hyperliquid:cloid:v1:<environment>:<lowercase-owner>:<cloid>` and the frozen
+instrument generation. An authoritative primary/dual alias contract has not
+been established; transaction hash, time, quantity and price cannot substitute
+for it. Only exact original BUY fills count toward gross notional and net
+shares. A signed rebate stays a rebate; unknown fees remain unknown.
+
+Admission retains the exact source revision, Copy key, order and submission in
+one transaction before the first exchange POST. Replays validate the same pair
+before current-policy checks and cannot issue a second POST. Hidden sources
+block new Copy, not reconciliation of an admitted purchase. Final admission
+checks the current policy, market generation and expiry after lock waits.
+Funding uses the existing consumer intent and reservations with the same frozen
+Copy pair; it is not an independent payment flow.
+
+Migration `0347_hip4_execution_evidence_status.sql` adds nullable row-local
+provider-evidence state without inventing historical proof. Contradictory exact
+fills preserve immutable raw facts and quarantine proof. Empty, unrelated and
+failed reads cannot resolve the conflict. Legacy coarse conflicts are pending
+until a bounded exact official reread; matching proof restores the existing
+purchase, thesis and Copy count. A short transaction locks the account snapshot,
+rereads the complete exact-order fill set after waiting, and finalizes through
+the existing verified-buy CTE. Provider IO never runs under those locks.
+
+Social publication and Copy remain independently controlled by the existing
+`social.publicationVenues` and `social.copyVenues`; defaults do not include
+Hyperliquid. Ordinary $1 BUY eligibility is not the executed-notional publication
+threshold. Likes, flat comments and verified copier counts use the common
+social service and exact published revision. Author returns describe the frozen
+published snapshot, with fees excluded, not current wallet profit.
+
+### Matching and known wallet evidence
+
+Matching normalizes explicit environment, outcome, recurrence, settlement rules
+and side conditions. A topic/title match cannot establish equivalent payouts.
+Current incomplete native templates retain their source fingerprint and
+`review_required` status; the code does not manufacture oracle, timezone,
+resolution window or void terms. Only complete validated formal tuples can
+establish rule equivalence, including a justified side inversion.
+
+Native canonical changes enqueue the existing embedding owner only after the
+market transaction commits. Quote refresh IDs and timestamps do not repeatedly
+invalidate unchanged contracts. Indexer REST and WS share this path and the
+existing Redis connection. Native cluster quotes and performance marks use the
+actual selected side's fresh book, never a synthetic `1 - YES` quote.
+
+Wallet intelligence runs under the existing bounded refresh owner for known
+tracked accounts. It does not enroll every exchange participant or reuse the
+owned-account finance observer as a public scanner. Mainnet/testnet identity,
+exact tied fill keys and source continuation remain separate. Current positions
+are authoritative snapshots; missing history does not become cost basis/PnL.
+Native flows can support a mixed recent-flow thesis, but cannot claim strong
+holder credentials, calibrated win rate or global holder concentration.
+
+Tracked-activity contradictions are durable per source event key, independently
+of the wallet refresh result. A new successful empty page, unrelated fill or
+transport error cannot clear a disputed row. Matching observations that began
+before a concurrent conflict cannot clear it either. Legacy rows without exact
+versioned proof are ambiguous for flow only and recover through the next bounded
+exact fresh reread; independent current positions stay usable. This state uses
+existing event metadata, not a new table or blocking global wallet gate.
+
+The new tracked-source and by-token queries preserve indexed pagination and
+batch hydration. The optimized unified feed remains unchanged as the discovery
+query owner. Signals keep existing model, reasoning, search and budget policy;
+HIP delivery opens a user-reviewed Hunch app ticket, never autonomous bot Buy.
+
+### Local manual test setup
+
+Use the ordinary local app on port `3000` and API on `4014`, with local PG16
+`hip4_local` on `55436` and Redis on `55437`. Keep the existing local login and
+admin identity. Back up the working database and validate migrations through
+`0347` on an isolated clone before upgrading it. Run the migrator with explicit
+`--database-url` and `--expect-database`; a shell environment prefix is not an
+adequate target guard. Never point these commands at production.
+
+The local launcher `ops/hip4-local.mjs` provides a checked configuration for API,
+read-only indexer and an explicitly requested finance-worker process. Its check
+mode reports key presence and schema readiness without exposing values. The
+worker is not started by opening the app. Necessary reconciliation observes
+already user-authorized operations; global finance execution and unrelated
+Telegram/fee/payout/sweep/content lanes remain off. Only the user performs
+interactive signing, final submission and transfers.
+
+Set `HIP4_LOCAL_DATABASE_URL` to the existing local connection string without
+printing it. From the backend root, check each process before starting it:
+
+```bash
+node ops/hip4-local.mjs api --check --database-url "$HIP4_LOCAL_DATABASE_URL" --expect-database hip4_local
+node ops/hip4-local.mjs indexer --check --database-url "$HIP4_LOCAL_DATABASE_URL" --expect-database hip4_local
+node ops/hip4-local.mjs finance-worker --check --database-url "$HIP4_LOCAL_DATABASE_URL" --expect-database hip4_local
+```
+
+Remove `--check` to start the chosen process in its own terminal. API and indexer
+are separate processes. Start `finance-worker` only when intentionally beginning
+the user's manual funding/repair tests: reconciliation may advance an already
+authorized operation, even though autonomous signing and global execution stay
+disabled. From `Hunch_App`, start the ordinary frontend separately:
+
+```bash
+HUNCH_API_BASE_URL=http://127.0.0.1:4014 node node_modules/next/dist/bin/next dev --hostname 127.0.0.1 --port 3000
+```
+
+Run builds with the installed Node 20 runtime first. The launcher refuses schema
+gaps and never migrates automatically. Its stored-policy hints are not validated
+effective capabilities; use the normal API/admin policy contract to inspect or
+explicitly change activation. No secret value is included in its status output.
+
+Use existing runtime policy/admin controls, not another HIP feature switch:
+
+- `venue_lifecycle.hyperliquid` controls ordinary exposure, source reads and
+  indexer capability; exit-only repair remains available as designed.
+- `hip4_read`, `hip4_account` and `hip4_trading` own their existing resource,
+  environment, freshness, amount and observation parameters.
+- Existing funding/capacity/recipient policies must advertise the exact selected
+  source, destination and current fee capability. Unknown or nonzero unsupported
+  native send fees refuse that route, not silently reduce delivered value.
+- `social` must explicitly permit Hyperliquid publication/Copy for those tests.
+  No activation is implied by code acceptance.
+
+Before manual money movement, check fresh owned cash/positions, current side
+quotes and generated fees, ordinary direct BUY/SELL/cancel, and then shortfall
+funding from each advertised source. Exercise user rejection, Close/Back,
+timeout/reload and Check without a second payment or Buy. Publish one qualifying
+exact purchase and Copy it from another account; verify self-Copy rejection,
+immutable entry and unique confirmed copier counts. A pending or uncertain
+operation must stay visible and repairable, not be treated as failed cash.
+
+### Acceptance evidence and unresolved activation risks
+
+Current checks include the full backend build/lint (31/31), exact Node 20.11.1
+Turbopack frontend build (42 pages), reproducible generated contracts and real
+disposable PG16 suites for Copy/verified evidence, funding, lifecycle, wallet
+merge, native orders, known-wallet source pagination and read APIs. Empty PG16
+bootstrap and a restored legacy local backup both migrate through `0347`.
+New evidence queries include custom/generic plans with 100,000 unrelated rows;
+they are not estimates from TypeScript or a `LIMIT` clause alone.
+
+Browser evidence uses the actual shared report/composer components and mounted
+Copy-review hook with synthetic API/auth IO, including scoped replay, controller
+change, logout and Close recovery. It does not certify live signing or funded
+execution. The first fresh whole review found the tracked-flow conflict issue;
+its correction passed real PG16 recovery tests. Two new sequential fresh whole
+GO reviews and mounted local read acceptance are still required.
+
+P7 remains separate. Previously documented native negative-receipt uncertainty,
+history-linear refund/accounting costs and production-load evidence remain
+activation risks. No additional financial permission, production policy,
+personal Telegram operation, merge or deployment follows from this work.

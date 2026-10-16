@@ -17,6 +17,8 @@ import {
   hip4TradingReadRouteSchemas,
 } from "./schemas/hip4-trading.js";
 import { telegramAppHandoffRouteSchemas } from "./schemas/telegram.js";
+import { socialRouteSchemas } from "./schemas/social-routes.js";
+import { publicReadRouteSchemas } from "./schemas/public-read-routes.js";
 import {
   fundingActionSigningRouteSchemas,
   fundingOperationReadRouteSchemas,
@@ -35,6 +37,28 @@ await app.register(swagger, {
   openapi: { info: { title: "Hunch API", version: "0.1.0" } },
   transform: jsonSchemaTransform,
 });
+for (const [url, schema] of Object.entries(publicReadRouteSchemas))
+  app.get(url, { schema }, async () => {
+    throw new Error("schema_only");
+  });
+for (const [method, definitions] of [
+  ["GET", socialRouteSchemas.get],
+  ["POST", socialRouteSchemas.post],
+  ["PATCH", socialRouteSchemas.patch],
+  ["PUT", socialRouteSchemas.put],
+  ["DELETE", socialRouteSchemas.delete],
+] as const) {
+  for (const [url, schema] of Object.entries(definitions)) {
+    app.route({
+      method,
+      url,
+      schema,
+      handler: async () => {
+        throw new Error("schema_only");
+      },
+    });
+  }
+}
 app.get("/meta/venues", { schema: venueMetadataRouteSchema }, async () => {
   throw new Error("schema_only");
 });

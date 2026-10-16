@@ -162,15 +162,13 @@ export function getVenueLifecycleCapabilities(
   const capabilities =
     CAPABILITIES_BY_LIFECYCLE[policy.venues[normalized].lifecycle];
   // Native interactive trading and funding use the ordinary lifecycle gates.
-  // The default stays unreleased/off. Autonomous execution, signals and manual
-  // redemption have no native consumer and cannot be granted by activation.
+  // The default stays unreleased/off. Signals use exact indexed evidence and
+  // app-review navigation; they do not grant autonomous execution/redemption.
   return normalized === "hyperliquid"
     ? {
         ...capabilities,
         automation: false,
         redeem: false,
-        signalDelivery: false,
-        signalSource: false,
       }
     : capabilities;
 }

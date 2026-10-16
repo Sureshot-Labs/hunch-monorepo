@@ -4,7 +4,11 @@ import { resolveWalletIntelRefreshPolicy } from "./runtime-policies.js";
 
 type Queryable = Pick<PoolClient, "query">;
 
-export type WalletTrackingSubjectVenue = "polymarket" | "limitless" | "kalshi";
+export type WalletTrackingSubjectVenue =
+  | "polymarket"
+  | "limitless"
+  | "kalshi"
+  | "hyperliquid";
 
 export type WalletTrackingSubjectSource =
   | "whale"

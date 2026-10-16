@@ -2,6 +2,11 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "@hunch/infra";
 import { hip4Identity } from "@hunch/shared";
 import { z } from "zod";
+import {
+  socialTradeAttributionFields,
+  refineSocialTradeAttribution,
+} from "../schemas/social-trade.js";
+import { buildHip4SocialInstrument } from "../services/hip4-social-instrument.js";
 import type { WalletExecutionProfile } from "../funding/domain/types.js";
 import { lockFundingControllerWallet } from "../funding/execution/funding-controller-wallet-lock.js";
 import { HyperliquidNonceConflictError } from "../funding/execution/hyperliquid-nonce-claims.js";
@@ -32,8 +37,10 @@ export const hip4OrderPreparationRequestSchema = z
     quantity: z.string().max(128),
     consentedDebitCapRaw: z.string().max(128),
     controllerWalletRef: uuid,
+    ...socialTradeAttributionFields,
   })
-  .strict();
+  .strict()
+  .superRefine(refineSocialTradeAttribution);
 export type Hip4OrderPreparationRequest = z.infer<
   typeof hip4OrderPreparationRequestSchema
 >;
@@ -331,12 +338,26 @@ export async function persistHip4OrderPreparationInTransaction(
   );
   const token = identity.sides[request.outcomeSide === "YES" ? 0 : 1];
   const market = await client.query(
-    `select id from unified_markets
+    `select id,metadata,expiration_time from unified_markets
     where id=$1 and venue='hyperliquid' and status='ACTIVE' for share`,
     [identity.marketId],
   );
   if (market.rows.length !== 1)
     throw new Error("hip4_preparation_market_unavailable");
+  const marketRow = market.rows[0];
+  const socialInstrumentSnapshot = marketRow.metadata?.hip4 ?? null;
+  const socialInstrument =
+    request.side === "BUY"
+      ? buildHip4SocialInstrument({
+          marketId: identity.marketId,
+          tokenId: token.tokenId,
+          outcome: request.outcomeSide,
+          expiry: marketRow.expiration_time?.toISOString() ?? null,
+          snapshot: socialInstrumentSnapshot,
+        })
+      : null;
+  if (request.sourceRef && !socialInstrument)
+    throw new Error("hip4_copy_instrument_unavailable");
   const policy =
     request.side === "BUY" ? await readHip4TradingPolicy(client) : undefined;
   const orderId = randomUUID();
@@ -392,6 +413,15 @@ export async function persistHip4OrderPreparationInTransaction(
       marketRevision: input.marketRevision,
       accountRevision: input.accountRevision,
       policy: policy ?? null,
+      ...(socialInstrument
+        ? { socialInstrument, socialInstrumentSnapshot }
+        : {}),
+      ...(request.sourceRef
+        ? {
+            sourceRef: request.sourceRef,
+            copyIdempotencyKey: request.copyIdempotencyKey,
+          }
+        : {}),
     },
   });
 }

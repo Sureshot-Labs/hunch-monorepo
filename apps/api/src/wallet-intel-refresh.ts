@@ -102,6 +102,7 @@ import {
   type LiveIntelVenue,
   type LiveIntelVenueScope,
 } from "./services/venue-lifecycle.js";
+import { collectHip4KnownWalletIntel } from "./services/hip4-wallet-intel-refresh.js";
 import {
   buildInternalHunchFillActivityEvents,
   shouldSuppressInternalHunchSnapshotDelta,
@@ -1662,7 +1663,7 @@ async function upsertWalletActivityEvent(
         outcome_side,
         activity_type,
         occurred_at
-      )
+      ) WHERE source_event_key IS NULL
       do update set
         action = excluded.action,
         delta_shares = excluded.delta_shares,
@@ -8391,6 +8392,25 @@ async function main() {
 
     for (const snapshotAt of snapshots) {
       await runSnapshot(snapshotAt, liveIntelScope);
+    }
+
+    // One current pass, never a current provider balance copied into historical
+    // backfill buckets. Keep native unknown-history wallets out of legacy scores.
+    try {
+      const nativeIntel = await collectHip4KnownWalletIntel({
+        pool,
+        client: lockClient,
+        policy: walletIntelRefreshPolicy,
+        snapshotAt: new Date(),
+      });
+      console.log(
+        "[wallets:intel:refresh] HIP known-wallet coverage",
+        nativeIntel,
+      );
+    } catch {
+      console.warn(
+        "[wallets:intel:refresh] HIP known-wallet collection unavailable",
+      );
     }
 
     if (aiWhaleProfilesPolicy.autoRun) {

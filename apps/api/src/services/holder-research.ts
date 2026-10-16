@@ -93,6 +93,7 @@ import {
   resolveWalletTrackingSubjectsEnabled,
   upsertWalletTrackingSubjects,
 } from "./wallet-tracking-subjects.js";
+import type { Hip4HolderKnownWalletEvidence } from "./holder-research-hip4-known-wallets.js";
 
 type Queryable = Pick<PoolClient, "query">;
 
@@ -217,6 +218,8 @@ export type HolderResearchSide = {
 };
 
 export type HolderResearchMarketInput = {
+  /** Separate factual cohort, not generic calibrated/global holder aggregates. */
+  nativeKnownWalletEvidence?: Hip4HolderKnownWalletEvidence;
   marketId: string;
   eventId: string | null;
   venue: string;
@@ -875,7 +878,38 @@ function sideHasStrongSharpEvidence(
 
 function buildBaseEvidence(
   market: HolderResearchMarketInput,
+  nativePromptLimit: number,
 ): HolderResearchEvidence[] {
+  const native = market.nativeKnownWalletEvidence;
+  if (native)
+    return [
+      {
+        id: `market:${market.marketId}`,
+        kind: "market",
+        title: market.marketTitle,
+        summary:
+          "Exact native contract with a bounded observed known-wallet cohort. Global holders, cost basis and historical performance are unavailable.",
+        relevance: 1,
+      },
+      ...native.positions.slice(0, nativePromptLimit).map(
+        (position): HolderResearchEvidence => ({
+          id: position.evidenceId,
+          kind: "holder",
+          title: "Observed known-wallet position",
+          summary: `${position.shares} shares on native ${position.side} token ${position.tokenId} at ${position.snapshotAt}; USD valuation ${position.positionUsd ?? "unavailable"}. A snapshot is not a purchase or proof of continuous holding.`,
+          relevance: 0.75,
+        }),
+      ),
+      ...native.fills.slice(0, nativePromptLimit).map(
+        (fill): HolderResearchEvidence => ({
+          id: fill.evidenceId,
+          kind: "activity",
+          title: "Observed native fill",
+          summary: `${fill.action} ${fill.deltaShares.replace(/^-/, "")} shares on native ${fill.outcomeSide} token ${fill.tokenId} at ${fill.price} on ${fill.occurredAt}; trade ${fill.tradeId}, order ${fill.orderId}; USD ${fill.sizeUsd ?? "unavailable"}. Bounded observed history, not calibrated performance.`,
+          relevance: 0.8,
+        }),
+      ),
+    ];
   const yes = market.sides.YES;
   const no = market.sides.NO;
   const total = yes.usd + no.usd;
@@ -1036,6 +1070,11 @@ export function buildHolderResearchInputDigest(
       ownerUsdLikeBalance: holder.ownerUsdLikeBalance,
       mmSuspected: holder.mmSuspected,
     })),
+    ...(candidate.market.nativeKnownWalletEvidence
+      ? {
+          nativeKnownWalletEvidence: candidate.market.nativeKnownWalletEvidence,
+        }
+      : {}),
   };
   return createHash("sha256").update(JSON.stringify(digestInput)).digest("hex");
 }
@@ -3229,6 +3268,38 @@ export function buildHolderResearchCandidatesFromMarket(
 ): HolderResearchCandidate[] {
   if (isExtremeOdds(market.yesProbability, policy)) return [];
 
+  // Actual immutable fills can supply the existing support-only recent_flow
+  // bucket. Snapshot quantities (including unvalued positions) never become
+  // trades, sharp credentials, a global denominator, or a new primary bucket.
+  if (market.nativeKnownWalletEvidence && market.holders.length === 0) {
+    const native = market.nativeKnownWalletEvidence;
+    if (
+      !native.fills.length ||
+      market.recentActivityUsd < policy.minRecentActivityUsd
+    )
+      return [];
+    const candidate = buildCandidate({
+      bucket: "recent_flow",
+      score: clamp01(
+        0.48 +
+          scoreLog(market.recentActivityUsd, policy.minRecentActivityUsd) *
+            0.22,
+      ),
+      side: null,
+      direction: "mixed",
+      signalType: "update",
+      reasons: [
+        "recent_observed_native_fills",
+        "known_wallet_cohort_only",
+        "historical_credentials_unavailable",
+      ],
+      market,
+      evidence: buildBaseEvidence(market, policy.promptHoldersLimit),
+      cooldownUntil: null,
+    });
+    return candidate.score >= policy.minScore ? [candidate] : [];
+  }
+
   const yes = market.sides.YES;
   const no = market.sides.NO;
   const totalUsd = yes.usd + no.usd;
@@ -3246,7 +3317,7 @@ export function buildHolderResearchCandidatesFromMarket(
   const minority = market.sides[minoritySideKey];
   const majority = market.sides[sidesByUsd[1]];
   const minorityShare = totalUsd > 0 ? minority.usd / totalUsd : 0;
-  const baseEvidence = buildBaseEvidence(market);
+  const baseEvidence = buildBaseEvidence(market, policy.promptHoldersLimit);
   const candidates: HolderResearchCandidate[] = [];
 
   const sharpSides = SIDE_KEYS.filter((side) => {
@@ -4843,12 +4914,26 @@ export async function loadHolderResearchCandidates(
   client: Queryable,
   policy: HolderResearchPolicy,
   mmThresholds?: HolderResearchMmThresholds,
+  additionalKnownWalletMarkets: HolderResearchMarketInput[] = [],
 ): Promise<HolderResearchCandidate[]> {
-  const markets = await loadHolderResearchCandidateMarkets(
+  const legacyMarkets = await loadHolderResearchCandidateMarkets(
     client,
     policy,
     mmThresholds,
   );
+  const markets = [...legacyMarkets];
+  for (const native of additionalKnownWalletMarkets) {
+    const existing = markets.findIndex(
+      (market) =>
+        market.marketId === native.marketId && market.venue === native.venue,
+    );
+    if (existing >= 0)
+      markets[existing] = {
+        ...markets[existing],
+        nativeKnownWalletEvidence: native.nativeKnownWalletEvidence,
+      };
+    else markets.push(native);
+  }
   const candidates = markets.flatMap((market) =>
     buildHolderResearchCandidatesFromMarket(market, policy),
   );
@@ -5229,7 +5314,7 @@ export async function enrichHolderResearchLivePositions(
     );
     const refreshedEvidence = new Map(
       [
-        ...buildBaseEvidence(market),
+        ...buildBaseEvidence(market, policy.promptHoldersLimit),
         ...holders.map((holder) => holderEvidence(holder, market)),
         ...currentSupportEvidence,
       ].map((evidence) => [evidence.id, evidence]),
@@ -5658,6 +5743,11 @@ export function buildHolderResearchCandidatePromptJson(
     dir: candidate.direction,
     type: candidate.signalType,
     why: candidate.reasons,
+    ...(candidate.market.nativeKnownWalletEvidence
+      ? {
+          nativeKnownWallets: nativeKnownWalletPromptContext(candidate, policy),
+        }
+      : {}),
     mkt: compactPromptMarket(candidate, "final", totalUsd),
     move:
       policy?.movementContextEnabled === false
@@ -5679,8 +5769,8 @@ export function buildHolderResearchCandidatePromptJson(
     presentation: contracts?.presentation.presentation ?? null,
     evidenceMetrics: contracts?.evidenceMetrics ?? [],
     sides: {
-      YES: compactPromptSide(candidate.market.sides.YES),
-      NO: compactPromptSide(candidate.market.sides.NO),
+      YES: compactPromptSideForMarket(candidate.market, "YES"),
+      NO: compactPromptSideForMarket(candidate.market, "NO"),
     },
     holders: selectPromptHolders(candidate, policy).map((holder) =>
       compactPromptHolder(holder, "holder"),
@@ -5797,9 +5887,19 @@ function buildHolderResearchPromptEvidenceRecordsV2(
   candidate: HolderResearchCandidate,
   policy: HolderResearchPolicy,
 ) {
+  const native = candidate.market.nativeKnownWalletEvidence;
+  const nativePositions = native?.positions ?? [];
+  const nativeFills = native?.fills ?? [];
+  const nativeFacts = Array.from({
+    length: Math.max(nativePositions.length, nativeFills.length),
+  }).flatMap((_, index) =>
+    [nativePositions[index], nativeFills[index]].filter((fact) => fact != null),
+  );
+  const nativeIds = new Set(nativeFacts.map((fact) => fact.evidenceId));
   const preferredSourceIds = [
     `market:${candidate.market.marketId}`,
     ...selectPromptHoldersV2(candidate, policy).map(buildHolderEvidenceId),
+    ...nativeFacts.map((fact) => fact.evidenceId),
   ];
   const evidenceById = new Map(
     candidate.evidence.map((evidence) => [evidence.id, evidence]),
@@ -5821,13 +5921,78 @@ function buildHolderResearchPromptEvidenceRecordsV2(
           ? `Holder evidence ${index}`
           : `${evidence.kind} evidence`,
     summary:
-      evidence.kind === "holder"
-        ? "Internal position and calibrated 30-day holder metrics."
-        : evidence.kind === "market"
-          ? "Canonical market and tracked-position evidence."
-          : "Canonical internal holder-research evidence.",
-    side: parseHolderEvidenceId(evidence.id)?.side ?? null,
+      nativeIds.has(evidence.id) || (native && evidence.kind === "market")
+        ? clipPromptText(evidence.summary, PROMPT_TEXT_EVIDENCE_MAX)
+        : evidence.kind === "holder"
+          ? "Internal position and calibrated 30-day holder metrics."
+          : evidence.kind === "market"
+            ? "Canonical market and tracked-position evidence."
+            : "Canonical internal holder-research evidence.",
+    side:
+      nativePositions.find((fact) => fact.evidenceId === evidence.id)?.side ??
+      nativeFills.find((fact) => fact.evidenceId === evidence.id)
+        ?.outcomeSide ??
+      parseHolderEvidenceId(evidence.id)?.side ??
+      null,
   }));
+}
+
+/** Facts stay separate from calibrated holder credentials in every prompt.
+ * Only supplied evidence aliases are exposed in V2; source identity remains in
+ * the internal DTO/digest, not in generated public wallet labels. */
+function nativeKnownWalletPromptContext(
+  candidate: HolderResearchCandidate,
+  policy?: HolderResearchPromptPolicy,
+  aliases?: ReadonlyMap<string, string>,
+) {
+  const native = candidate.market.nativeKnownWalletEvidence;
+  if (!native) return null;
+  const limit =
+    policy?.promptHoldersLimit ?? native.positions.length + native.fills.length;
+  const include = (id: string) => !aliases || aliases.has(id);
+  const positions = native.positions
+    .filter((fact) => include(fact.evidenceId))
+    .slice(0, limit);
+  const fills = native.fills
+    .filter((fact) => include(fact.evidenceId))
+    .slice(0, limit);
+  return {
+    scope: native.scope,
+    environment: native.environment,
+    globalHolders: native.globalHolders,
+    historicalPerformance: native.historicalPerformance,
+    costBasis: native.costBasis,
+    completeHistory: native.completeHistory,
+    contract: native.contract,
+    positions: positions.map((fact) => ({
+      evidenceId: aliases?.get(fact.evidenceId) ?? fact.evidenceId,
+      side: fact.side,
+      tokenId: fact.tokenId,
+      shares: fact.shares,
+      positionUsd: fact.positionUsd,
+      snapshotAt: fact.snapshotAt,
+    })),
+    fills: fills.map((fact) => ({
+      evidenceId: aliases?.get(fact.evidenceId) ?? fact.evidenceId,
+      side: fact.outcomeSide,
+      tokenId: fact.tokenId,
+      action: fact.action,
+      deltaShares: fact.deltaShares,
+      price: fact.price,
+      sizeUsd: fact.sizeUsd,
+      occurredAt: fact.occurredAt,
+      tradeId: fact.tradeId,
+      orderId: fact.orderId,
+    })),
+    positionsOmitted: native.positions.length - positions.length,
+    fillsOmitted: native.fills.length - fills.length,
+    pricedFlowUsd: native.pricedFlowUsd,
+    unknownUsdPositions: native.unknownUsdPositions,
+    unknownUsdFills: native.unknownUsdFills,
+    diagnostics: native.diagnostics,
+    limitations:
+      "Observed known-wallet cohort only, not global holders or full history. A snapshot is not a trade, entry time, motive or continuous-holding proof. Missing cost basis, PnL and calibrated credentials are unknown; do not infer skill or a global denominator.",
+  };
 }
 
 export function listHolderResearchPromptEvidenceIdsV2(
@@ -5931,6 +6096,19 @@ export function buildHolderResearchTriageCandidatePromptJsonV2(
   return {
     key: candidate.key,
     contract: buildHolderResearchPromptContractV2(candidate),
+    ...(candidate.market.nativeKnownWalletEvidence
+      ? {
+          nativeKnownWallets: nativeKnownWalletPromptContext(
+            candidate,
+            policy,
+            new Map(
+              buildHolderResearchPromptEvidenceRecordsV2(candidate, policy).map(
+                (evidence) => [evidence.sourceId, evidence.promptId],
+              ),
+            ),
+          ),
+        }
+      : {}),
     decisionFeatures: contracts.features,
     holderContext,
     presentation: contracts.presentation.presentation,
@@ -5951,6 +6129,19 @@ export function buildHolderResearchCandidatePromptJsonV2(
   return {
     key: candidate.key,
     contract: buildHolderResearchPromptContractV2(candidate),
+    ...(candidate.market.nativeKnownWalletEvidence
+      ? {
+          nativeKnownWallets: nativeKnownWalletPromptContext(
+            candidate,
+            policy,
+            new Map(
+              buildHolderResearchPromptEvidenceRecordsV2(candidate, policy).map(
+                (evidence) => [evidence.sourceId, evidence.promptId],
+              ),
+            ),
+          ),
+        }
+      : {}),
     decisionFeatures: contracts.features,
     presentation: contracts.presentation.presentation,
     evidenceMetrics: contracts.evidenceMetrics,
@@ -5980,6 +6171,25 @@ function compactPromptSide(side: HolderResearchSide) {
     bestEdge: side.bestEdge,
     bestBets: side.bestSampleCount,
   };
+}
+
+function compactPromptSideForMarket(
+  market: HolderResearchMarketInput,
+  side: HolderResearchSideKey,
+) {
+  return market.nativeKnownWalletEvidence && market.holders.length === 0
+    ? {
+        usd: null,
+        wallets: null,
+        openPnl: null,
+        sharpHolders: null,
+        sharpUsd: null,
+        bestEdge: null,
+        bestBets: null,
+        scope:
+          "global_and_calibrated_aggregates_unavailable_see_native_known_wallet_facts",
+      }
+    : compactPromptSide(market.sides[side]);
 }
 
 function compactPromptMovement(movement: HolderResearchMarketMovementContext) {
@@ -6013,7 +6223,7 @@ export function buildHolderResearchMarketSideCopy(
   market: HolderResearchMarketInput,
   side: HolderResearchSideKey,
 ): MarketSideCopy {
-  return buildMarketSideCopy({
+  const copy = buildMarketSideCopy({
     eventDescription: market.eventDescription,
     eventTitle: market.eventTitle,
     marketDescription: market.marketDescription,
@@ -6024,6 +6234,21 @@ export function buildHolderResearchMarketSideCopy(
     resolutionSource: market.resolutionSource,
     side,
   });
+  const native = market.nativeKnownWalletEvidence?.contract.sides.find(
+    (item) => item.side === side,
+  );
+  return native
+    ? {
+        ...copy,
+        copyKind: "named_outcome",
+        rawOutcomeLabel: native.label,
+        sideLabel: native.label,
+        buttonLabel: native.label,
+        priceLabel: native.label,
+        plainPosition: native.label,
+        winCondition: null,
+      }
+    : copy;
 }
 
 function compactHolderResearchSideCopy(copy: MarketSideCopy) {
@@ -6051,6 +6276,11 @@ function compactHolderResearchPromptSideCopy(copy: MarketSideCopy) {
 }
 
 function buildHolderResearchSideCopies(market: HolderResearchMarketInput) {
+  if (market.nativeKnownWalletEvidence)
+    return {
+      YES: buildHolderResearchMarketSideCopy(market, "YES"),
+      NO: buildHolderResearchMarketSideCopy(market, "NO"),
+    };
   return buildMarketSideCopyPair({
     eventDescription: market.eventDescription,
     eventTitle: market.eventTitle,
@@ -6146,7 +6376,10 @@ function compactPromptMarket(
           blockers: market.livePriceCheck.blockersBySide,
         }
       : null,
-    usdTracked: totalUsd ?? market.sides.YES.usd + market.sides.NO.usd,
+    usdTracked:
+      market.nativeKnownWalletEvidence && market.holders.length === 0
+        ? null
+        : (totalUsd ?? market.sides.YES.usd + market.sides.NO.usd),
     recentUsd: market.recentActivityUsd,
     recentAt: market.recentActivityAt,
     crossWallets: market.crossMarketWalletCount,
@@ -6266,6 +6499,11 @@ export function buildHolderResearchTriageCandidatePromptJson(
     dir: candidate.direction,
     type: candidate.signalType,
     why: candidate.reasons,
+    ...(candidate.market.nativeKnownWalletEvidence
+      ? {
+          nativeKnownWallets: nativeKnownWalletPromptContext(candidate, policy),
+        }
+      : {}),
     mkt: compactPromptMarket(candidate, "triage", totalUsd),
     move: policy.movementContextEnabled
       ? compactPromptMovement(candidate.market.marketMovementContext)
@@ -6296,8 +6534,8 @@ export function buildHolderResearchTriageCandidatePromptJson(
     presentation: contracts.presentation.presentation,
     evidenceMetrics: contracts.evidenceMetrics,
     sides: {
-      YES: compactPromptSide(candidate.market.sides.YES),
-      NO: compactPromptSide(candidate.market.sides.NO),
+      YES: compactPromptSideForMarket(candidate.market, "YES"),
+      NO: compactPromptSideForMarket(candidate.market, "NO"),
     },
   };
 }
@@ -6319,6 +6557,9 @@ export function buildHolderResearchExternalSearchInput(
     : null;
 
   return {
+    ...(candidate.market.nativeKnownWalletEvidence
+      ? { nativeKnownWallets: nativeKnownWalletPromptContext(candidate) }
+      : {}),
     mkt: {
       id: candidate.market.marketId,
       title: candidate.market.marketTitle,
@@ -6380,6 +6621,11 @@ export function buildHolderResearchExternalSearchInputV2(
   const features = buildHolderResearchDecisionFeaturesV2(candidate, policy);
   return {
     contract: buildHolderResearchPromptContractV2(candidate),
+    ...(candidate.market.nativeKnownWalletEvidence
+      ? {
+          nativeKnownWallets: nativeKnownWalletPromptContext(candidate, policy),
+        }
+      : {}),
     market: {
       title: candidate.market.marketTitle,
       eventTitle: candidate.market.eventTitle,
@@ -6440,7 +6686,11 @@ export function buildDeterministicHolderResearchDecision(
   const totalUsd =
     candidate.market.sides.YES.usd + candidate.market.sides.NO.usd;
   const sideCopies = buildHolderResearchSideCopies(candidate.market);
-  const summary = `${sideCopy?.plainPosition ?? candidate.market.marketTitle}: ${formatUsd(totalUsd)} tracked, ${sideCopies.YES.sideLabel} ${formatUsd(candidate.market.sides.YES.usd)} / ${sideCopies.NO.sideLabel} ${formatUsd(candidate.market.sides.NO.usd)}. ${candidate.reasons.join(", ")}.`;
+  const native = candidate.market.nativeKnownWalletEvidence;
+  const summary =
+    native && candidate.market.holders.length === 0
+      ? `${candidate.market.marketTitle}: ${native.positions.length} bounded known-wallet position observations and ${native.fills.length} exact observed fills. Global-holder coverage and historical credentials are unavailable.`
+      : `${sideCopy?.plainPosition ?? candidate.market.marketTitle}: ${formatUsd(totalUsd)} tracked, ${sideCopies.YES.sideLabel} ${formatUsd(candidate.market.sides.YES.usd)} / ${sideCopies.NO.sideLabel} ${formatUsd(candidate.market.sides.NO.usd)}. ${candidate.reasons.join(", ")}.`;
 
   return {
     version: "holder_research_v1",
@@ -6462,10 +6712,16 @@ export function buildDeterministicHolderResearchDecision(
     execution_priority: "normal",
     execution_priority_reason: "",
     evidence_ids: topEvidence.map((evidence) => evidence.id),
-    caveats: [
-      "Holder data is snapshot-based and may lag live venue state.",
-      "Resolved edge is historical holder quality, not a guarantee for this market.",
-    ],
+    caveats:
+      native && candidate.market.holders.length === 0
+        ? [
+            "Observed known-wallet cohort only; global holders and complete history are unavailable.",
+            "Snapshots are not purchases. Cost basis and historical performance are unknown.",
+          ]
+        : [
+            "Holder data is snapshot-based and may lag live venue state.",
+            "Resolved edge is historical holder quality, not a guarantee for this market.",
+          ],
   };
 }
 

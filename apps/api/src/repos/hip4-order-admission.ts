@@ -61,6 +61,20 @@ import {
   telegramAppHandoffNativeTradeSchema,
   telegramAppHandoffNativeRequestedAmounts,
 } from "../services/telegram-app-handoff-native-trade.js";
+import type { SocialSourceRef } from "../schemas/social-trade.js";
+import {
+  assertHip4CopyAttribution,
+  buildHip4CopyPreparedTrade,
+} from "../services/hip4-copy-attribution.js";
+import {
+  retainCopyBeforeSubmissionInTransaction,
+  markCopySubmissionStarted,
+  linkPersistedCopy,
+  assertSocialCopyPolicy,
+  type RetainedCopyAttempt,
+} from "../services/social-copy.js";
+import { buildSocialInstrument } from "../services/social-instrument.js";
+import { hip4SocialMarketOpen } from "../services/hip4-social-valuation.js";
 
 export type Hip4AdmissionContext = {
   profile: WalletExecutionProfile;
@@ -86,6 +100,7 @@ type StoredAction = {
   state: "prepared" | "abandoned";
   action_fingerprint: string;
   preparation_snapshot: {
+    [key: string]: unknown;
     consentedDebitCapRaw?: string;
     profile?: WalletExecutionProfile;
     amounts?: { debitCapRaw?: string; feeCapRaw?: string | null };
@@ -97,7 +112,11 @@ export type Hip4SubmissionRecord = {
   state: "submission_started" | "reconcile_required" | "rejected";
   funding_trade_attempt_id: string | null;
   signature_fingerprint: string;
-  admission_snapshot: { funding: unknown; telegramAppHandoff?: unknown };
+  admission_snapshot: {
+    funding: unknown;
+    telegramAppHandoff?: unknown;
+    copy?: RetainedCopyAttempt | null;
+  };
   reply_summary: ReturnType<typeof classifyHip4SingleTradeReply> | null;
 };
 export const HIP4_OWNED_ACTION_SQL = `select action_row.*,order_row.user_id
@@ -110,6 +129,8 @@ export const HIP4_OWNED_SUBMISSION_SQL = `select submission_row.*
   where submission_row.action_id=$1 and order_row.user_id=$2`;
 
 export type Hip4OrderSubmitReference = {
+  sourceRef?: SocialSourceRef;
+  copyIdempotencyKey?: string;
   userId: string;
   actionId: string;
   signature: string;
@@ -147,6 +168,7 @@ export async function readHip4OrderSubmissionAttempt(
   ]);
   const row = found.rows[0];
   if (!row) throw new Error("hip4_preparation_not_found");
+  assertHip4CopyAttribution(input, row.preparation_snapshot);
   const request = bindHip4TradeSignature(
     row.unsigned_envelope,
     input.signature,
@@ -301,6 +323,23 @@ export async function admitHip4OrderActionInTransaction(
       assertCurrentScope: handoffScope,
     });
   }
+  // The shared Copy owner locks source author and copier in sorted order, before
+  // the ordinary native user/controller/order locks. A failed admission rolls
+  // back this retention too: no detached authorization or extra BUY exists.
+  const copyInput = buildHip4CopyPreparedTrade({
+    userId,
+    actionId,
+    marketId: row.canonical_market_id,
+    tokenId: row.token_id,
+    signerAddress: row.signer_address,
+    cloid: row.cloid,
+    actionFingerprint: row.action_fingerprint,
+    envelope: row.unsigned_envelope,
+    snapshot: row.preparation_snapshot,
+  });
+  const copyAttempt = copyInput
+    ? await retainCopyBeforeSubmissionInTransaction(db, copyInput)
+    : null;
   const user = await db.query(
     "select id from users where id=$1 and coalesce(is_active,true) for update",
     [userId],
@@ -427,6 +466,12 @@ export async function admitHip4OrderActionInTransaction(
       marketId: row.canonical_market_id,
       marketContextId: row.token_id.slice("hyperliquid:".length),
       spend: { asset: HYPERCORE_MAINNET_USDC, raw: debitRaw },
+      ...(copyInput
+        ? {
+            sourceRef: copyInput.prepared.intent.sourceRef,
+            copyIdempotencyKey: copyInput.prepared.intent.copyIdempotencyKey,
+          }
+        : {}),
     });
     if (
       compareFundingTradeConsumerIntentToConfirmedBound(
@@ -623,6 +668,20 @@ export async function admitHip4OrderActionInTransaction(
     (wire && feeQuote && Date.parse(feeQuote.expiresAt) <= clock)
   )
     throw new Error("hip4_preparation_expired");
+  let copyPolicyRevision: string | null = null;
+  if (copyInput) {
+    copyPolicyRevision = (await assertSocialCopyPolicy(db, "hyperliquid")).revision;
+    const latest = (await db.query<{ metadata: unknown; status: string; expiration_time: Date | null }>(
+      "select metadata,status,expiration_time from unified_markets where id=$1 for share", [row.canonical_market_id],
+    )).rows[0];
+    const current = latest ? buildSocialInstrument({
+      marketId: row.canonical_market_id, venue: "hyperliquid", tokenId: row.token_id,
+      outcome: token.sideIndex === 0 ? "YES" : "NO", expiry: latest.expiration_time?.toISOString() ?? null, metadata: latest.metadata,
+    }) : null;
+    if (!latest || latest.status !== "ACTIVE" || !hip4SocialMarketOpen(latest.metadata, clock) || !current || canonicalJsonHash(current) !== canonicalJsonHash(copyInput.hip4Instrument))
+      throw new Error("hip4_copy_instrument_unavailable");
+  }
+  if (copyAttempt) await markCopySubmissionStarted(db, userId, copyAttempt);
   const saved = await db.query<Hip4SubmissionRecord>(
     `insert into hip4_order_submissions
     (action_id,funding_trade_attempt_id,signature_fingerprint,signer_address,admission_snapshot,debit_asset_id,debit_decimals,debit_raw)
@@ -643,6 +702,7 @@ export async function admitHip4OrderActionInTransaction(
         feeQuote,
         funding: fundingBinding,
         telegramAppHandoff: handoff,
+        ...(copyAttempt ? { copy: copyAttempt, copyPolicyRevision } : {}),
       },
       wire ? assetId : null,
       wire ? decimals : null,
@@ -660,6 +720,18 @@ export async function admitHip4OrderActionInTransaction(
         fundingAttemptId,
       ],
     );
+  if (copyInput)
+    await linkPersistedCopy(db, {
+      userId,
+      idempotencyKey: copyInput.prepared.intent.idempotencyKey,
+      persisted: {
+        venue: "hyperliquid",
+        orderId: row.order_id,
+        executionId: null,
+        venueOrderId: null,
+        status: "submitted",
+      },
+    });
   if (handoff && nativeHandoffSubmission && !input.funding) {
     await linkTelegramAppHandoffV2DirectTradeOrderInTransaction(db, {
       userId,

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { zRequiredString, zVenue } from "./common.js";
+import { zRequiredString, zReadVenue } from "./common.js";
 
 export const eventParamsSchema = z.object({
   eventId: zRequiredString("eventId parameter is required"),
@@ -11,7 +11,7 @@ export const eventDetailsQuerySchema = z.object({
 
 const zVenueOptional = z.preprocess(
   (v) => (typeof v === "string" ? v.toLowerCase() : v),
-  zVenue.optional(),
+  zReadVenue.optional(),
 );
 
 const zOptionalBool = z

@@ -16,6 +16,8 @@ import {
 } from "./wallet-intel-pnl.js";
 
 type Queryable = Pick<PoolClient, "query">;
+export const WALLET_POSITION_LATEST_VENUES_SQL =
+  "values ('polymarket'), ('limitless'), ('kalshi'), ('hyperliquid')";
 
 type WalletPositionApproxInput = {
   walletId: string;
@@ -256,6 +258,20 @@ export function calculateWalletPositionApproxMetrics(
   input: WalletPositionApproxInput,
   ledger?: WalletPositionLedgerState,
 ): WalletPositionApproxMetrics {
+  // Current native positions and bounded fills do not establish cost basis or
+  // calibrated history. In particular, NO is not a complement of a YES mark.
+  if (input.marketId.startsWith("hyperliquid:"))
+    return {
+      approxEntryPrice: null,
+      currentPrice: null,
+      observedPrice: parseNumber(input.price),
+      openPnlUsd: null,
+      realizedPnlUsd: null,
+      totalPnlUsd: null,
+      approxPnlUsd: null,
+      approxReliable: false,
+      approxPnlSource: null,
+    };
   const markPrice = resolveMarkPrice(input);
   return ledger && ledger.eventCount > 0
     ? buildApproxFromLedger(input, ledger, markPrice)
@@ -271,11 +287,13 @@ export async function loadWalletPositionApproxMetrics(
 
   const ledgerByKey = await loadWalletPositionLedgerMap(
     client,
-    inputs.map((input) => ({
-      walletId: input.walletId,
-      marketId: input.marketId,
-      outcomeSide: input.outcomeSide,
-    })),
+    inputs
+      .filter((input) => !input.marketId.startsWith("hyperliquid:"))
+      .map((input) => ({
+        walletId: input.walletId,
+        marketId: input.marketId,
+        outcomeSide: input.outcomeSide,
+      })),
   );
 
   for (const input of inputs) {

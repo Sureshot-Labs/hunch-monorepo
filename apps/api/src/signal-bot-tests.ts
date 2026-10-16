@@ -13130,6 +13130,45 @@ const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
     },
   },
   {
+    name: "native signal delivery opens exact app review rather than issuing a bot Buy",
+    run: () => {
+      const eventId = "hyperliquid:mainnet:question:198";
+      const marketId = "hyperliquid:mainnet:outcome:1473";
+      const native = note({ eventId, marketId, marketVenue: "hyperliquid" });
+      for (const target of [
+        null,
+        {
+          eventId,
+          marketId,
+          side: "NO" as const,
+          price: 0.2,
+          venue: "hyperliquid",
+        },
+      ]) {
+        const message = buildSignalBotMessage({
+          appBaseUrl: "https://app.hunch.trade",
+          buyAmountUsd: 10,
+          allowBuyCta: true,
+          deliveryTarget: target,
+          note: native,
+        });
+        assert.equal(message.publishable, true);
+        const buttons = message.keyboard?.inline_keyboard.flat() ?? [];
+        assert.ok(buttons.length);
+        assert.doesNotMatch(
+          buttons.map((row) => row.text).join(" "),
+          /\bBuy\b/i,
+        );
+        assert.ok(buttons.every((row) => !("callback_data" in row)));
+        const payload = decodeStartAppPayload(
+          readStartAppParam(buttons[0]?.url),
+        );
+        assert.match(payload ?? "", /hyperliquid|1473/);
+        assert.doesNotMatch(payload ?? "", /\|10$/);
+      }
+    },
+  },
+  {
     name: "generic NO position table uses NO instead of action grammar",
     run: () => {
       const message = buildSignalBotMessage({

@@ -1,8 +1,16 @@
 import { z } from "zod";
 
-import { zVenue } from "./common.js";
+import { zVenue, zReadVenue } from "./common.js";
 
-const zChain = z.enum(["polygon", "base", "solana"]);
+// Wallet-intel chain identity follows hip4Identity.network, not the separate
+// hyperliquid:* funding asset-network namespace. HyperCore is not an EVM RPC.
+const zChain = z.enum([
+  "polygon",
+  "base",
+  "solana",
+  "hypercore:mainnet",
+  "hypercore:testnet",
+]);
 const filterModeSchema = z.enum(["any", "all"]).default("any");
 const walletSparklineMetricSchema = z
   .enum(["activity", "trade_pnl"])
@@ -163,7 +171,7 @@ export const walletProfileQuerySchema = z.object({
 export const walletActivityQuerySchema = z.object({
   walletId: z.string().uuid().optional(),
   q: z.string().trim().min(1).max(160).optional(),
-  venue: zVenue.optional(),
+  venue: zReadVenue.optional(),
   marketId: z.string().trim().min(1).optional(),
   eventId: z.string().trim().min(1).optional(),
   category: z.string().trim().min(1).optional(),
@@ -249,7 +257,7 @@ export const walletActivitySignalsQuerySchema = z.object({
 export const walletPositionsQuerySchema = z.object({
   walletId: z.string().uuid().optional(),
   q: z.string().trim().min(1).max(160).optional(),
-  venue: zVenue.optional(),
+  venue: zReadVenue.optional(),
   marketId: z.string().trim().min(1).optional(),
   eventId: z.string().trim().min(1).optional(),
   category: z.string().trim().min(1).optional(),
@@ -269,7 +277,7 @@ export const walletPositionsQuerySchema = z.object({
 export const walletPositionHistoryQuerySchema = z.object({
   walletId: z.string().uuid(),
   q: z.string().trim().min(1).max(160).optional(),
-  venue: zVenue.optional(),
+  venue: zReadVenue.optional(),
   marketId: z.string().trim().min(1).optional(),
   eventId: z.string().trim().min(1).optional(),
   category: z.string().trim().min(1).optional(),

@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import {
   hip4ReadMarketSchema,
   hip4Identity,
-  hip4BinaryPayout,
   hip4ReadPolicySchema,
   hip4TradeSchema,
   hip4RawSnapshotSchema,
@@ -19,7 +18,14 @@ import {
 import type { Pool } from "pg";
 import type { z } from "zod";
 import { mergeHip4Volume } from "./hip4-volume.js";
+import { ageHip4Market } from "./hip4-mapping.js";
 import { hip4CatalogProjection } from "./hip4-catalog-projection.js";
+import { parseHip4FormalTerms } from "./hip4-formal-terms.js";
+import {
+  hip4CanonicalChange,
+  type Hip4CanonicalChange,
+  type Hip4CanonicalObserver,
+} from "./hip4-canonical-change.js";
 import {
   insertHip4Trades,
   insertHip4Intervals,
@@ -287,7 +293,9 @@ export async function persistHip4Market(
     trades: z.infer<typeof hip4TradeSchema>[];
     advanceCursor?: boolean;
     intervals?: Hip4Interval[];
+    policy?: Hip4ReadPolicy;
   },
+  onCanonicalChange?: Hip4CanonicalObserver,
 ): Promise<boolean> {
   const identity = hip4Identity(input.market.environment, input.market.outcome);
   if (
@@ -302,6 +310,8 @@ export async function persistHip4Market(
     throw new Error("market_identity_mismatch");
   const client = await pool.connect();
   let discardConnection = false;
+  let change: Hip4CanonicalChange | null = null;
+  let applied = false;
   try {
     await client.query("begin");
     // Serializes the bounded snapshot publication, never the remote requests.
@@ -374,6 +384,7 @@ export async function persistHip4Market(
           bid: winner.bid,
           ask: winner.ask,
           bookAt: winner.bookAt,
+          bookValidUntil: winner.bookValidUntil,
           bookState: winner.bookState,
           bookAttempt: attempt,
         };
@@ -424,6 +435,10 @@ export async function persistHip4Market(
     if (stored?.market.settlement && market.settlement) {
       market.settlement.observedAt = stored.market.settlement.observedAt;
     }
+    // Re-age the *merged* provider observations using this publication's
+    // effective resource policy. Bulk metadata cannot erase old book validity,
+    // and a shorter freshness policy applies even when the book itself ties.
+    if (input.policy) market = ageHip4Market(market, Date.now(), input.policy);
     const status =
       market.status === "settled"
         ? "SETTLED"
@@ -433,6 +448,12 @@ export async function persistHip4Market(
     // Publish event, both tokens, source snapshot and membership in one commit.
     // Discovery activation remains owned by venue_lifecycle, not publication.
     const catalog = hip4CatalogProjection(market);
+    const source = hip4RawSnapshotSchema.parse(raw);
+    const formalTerms = parseHip4FormalTerms({
+      environment: market.environment,
+      nativeOutcome: source.outcome,
+      nativeQuestion: source.question,
+    });
     await client.query(
       `
       insert into unified_events(id,venue,venue_event_id,title,description,status,metadata)
@@ -457,11 +478,11 @@ export async function persistHip4Market(
     await client.query(
       `
       insert into unified_markets(id,venue,venue_market_id,event_id,title,description,status,market_type,
-        expiration_time,token_yes,token_no,outcomes,metadata,resolved_outcome,volume_24h,best_bid,best_ask)
-      values ($1,'hyperliquid',$1,$2,$3,$4,$5,'binary',$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14)
+        expiration_time,token_yes,token_no,outcomes,metadata,resolved_outcome,volume_24h,best_bid,best_ask,resolved_outcome_pct)
+      values ($1,'hyperliquid',$1,$2,$3,$4,$5,'binary',$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15::numeric)
       on conflict (id) do update set event_id=excluded.event_id,title=excluded.title,description=excluded.description,
         status=excluded.status,expiration_time=excluded.expiration_time,outcomes=excluded.outcomes,
-        metadata=excluded.metadata,resolved_outcome=excluded.resolved_outcome,
+        metadata=excluded.metadata,resolved_outcome=excluded.resolved_outcome,resolved_outcome_pct=excluded.resolved_outcome_pct,
         volume_24h=excluded.volume_24h,best_bid=excluded.best_bid,best_ask=excluded.best_ask
     `,
       [
@@ -474,17 +495,20 @@ export async function persistHip4Market(
         market.sides[0].tokenId,
         market.sides[1].tokenId,
         JSON.stringify(market.sides.map((side) => side.label)),
-        JSON.stringify({ hip4: market, acceptingOrders: false }),
-        market.settlement
-          ? hip4BinaryPayout(market.sides[0].payout) === 1
-            ? "YES"
-            : hip4BinaryPayout(market.sides[0].payout) === 0
-              ? "NO"
-              : null
-          : null,
+        JSON.stringify({
+          hip4: market,
+          hip4FormalTerms: formalTerms,
+          acceptingOrders: false,
+        }),
+        catalog.resolvedOutcomePct === "10000"
+          ? "YES"
+          : catalog.resolvedOutcomePct === "0"
+            ? "NO"
+            : null,
         catalog.volume24h,
         catalog.bestBid,
         catalog.bestAsk,
+        catalog.resolvedOutcomePct,
       ],
     );
     for (const side of market.sides) {
@@ -524,8 +548,9 @@ export async function persistHip4Market(
     await insertHip4Intervals(client, market.marketId, input.intervals ?? []);
     if (input.advanceCursor !== false)
       await advanceHip4Cursor(client, market.environment, market.outcome);
+    change = hip4CanonicalChange(stored, { market, raw });
     await client.query("commit");
-    return !olderMetadata;
+    applied = !olderMetadata;
   } catch (error) {
     try {
       await client.query("rollback");
@@ -536,4 +561,14 @@ export async function persistHip4Market(
   } finally {
     client.release(discardConnection);
   }
+  // No provider/Redis IO under the publication transaction. A lost queue write
+  // is repaired by the existing canonical embedding reconciliation sweep.
+  if (change && onCanonicalChange) {
+    try {
+      await onCanonicalChange(change);
+    } catch {
+      console.warn("[hip4-read] canonical invalidation unavailable", {marketId: change.marketId});
+    }
+  }
+  return applied;
 }

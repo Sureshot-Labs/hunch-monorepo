@@ -48,6 +48,7 @@ import {
   telegramAppHandoffV2BindingSchema,
 } from "./telegram-app-handoff-v2-contract.js";
 import type { TelegramAppHandoffV2ScopeAssertion } from "../repos/telegram-app-handoff-v2-direct-trade-repository.js";
+import { socialTradeAttributionFields } from "../schemas/social-trade.js";
 
 const uuid = z
   .string()
@@ -59,6 +60,7 @@ const requestSchema = z
     actionId: uuid,
     signature: z.string().max(132),
     actor: z.literal("web_app"),
+    ...socialTradeAttributionFields,
     telegramAppHandoffId:
       telegramAppHandoffV2BindingSchema.shape.handoffId.optional(),
     telegramAppHandoffPlanFingerprint:
@@ -319,6 +321,8 @@ export async function submitHip4CancelWithCurrentContext(
     .omit({
       telegramAppHandoffId: true,
       telegramAppHandoffPlanFingerprint: true,
+      sourceRef: true,
+      copyIdempotencyKey: true,
     })
     .omit({ funding: true })
     .extend({ orderId: uuid })

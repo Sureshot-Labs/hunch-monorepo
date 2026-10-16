@@ -1,9 +1,12 @@
 /** API/finance-worker composition only. Pure evidence modules do not import API env. */
 import type { Pool } from "@hunch/infra";
+import { fetchActiveRuntimePolicy } from "@hunch/db";
+import { hip4ReadPolicySchema } from "@hunch/shared";
 import { env } from "../env.js";
 import { resolveSocialPolicy } from "./social-policy.js";
 import {
   createVerifiedBuyObserver,
+  createHip4NativeEvidenceFinalizer,
   type VerifiedBuyObserverDependencies,
   terminalZeroFill,
 } from "./verified-buy-observer.js";
@@ -20,6 +23,16 @@ import {
   fetchPolymarketOrderByHash,
   fetchPolymarketTrades,
 } from "./polymarket-clob-l2.js";
+import { createHip4AccountClient } from "./hip4-client.js";
+import { admitHip4Request } from "./hip4-repository.js";
+import {
+  claimHip4AccountRefresh,
+  failHip4AccountRefresh,
+  persistHip4AccountRefresh,
+  readHip4AccountPolicy,
+  selectHip4ExactRecheckSources,
+} from "./hip4-account-repository.js";
+import { projectHip4Execution } from "./hip4-account-projection.js";
 
 const runRepairLanes = createVerifiedRepairLaneRunner();
 
@@ -38,6 +51,27 @@ export async function runVerifiedBuyRepairJob(pool: Pool) {
     budget--;
   };
   const providers = new Map<number, ReturnType<typeof createEvmRpcProvider>>();
+  const readHip4Evidence = async (
+    request: Parameters<ReturnType<typeof createHip4AccountClient>>[0],
+  ) => {
+    // Existing-admission evidence is independent of new-exposure enablement.
+    // Keep both the social request budget and shared native IP-weight budget.
+    consume();
+    const active = await fetchActiveRuntimePolicy(
+      pool,
+      "hip4_read",
+      new Date(),
+      { missingTable: "error" },
+    );
+    const policy = {
+      ...hip4ReadPolicySchema.parse(active?.payload ?? {}),
+      environment: "mainnet" as const,
+    };
+    const read = createHip4AccountClient(policy, (weight) =>
+      admitHip4Request(pool, "mainnet", weight, policy.requestWeightPerMinute),
+    );
+    return read(request);
+  };
   const dependencies: VerifiedBuyObserverDependencies = {
     maxEvidenceItems: policy.repairProviderRequestBudget,
     assertEvidenceBudget: (needed) => {
@@ -107,6 +141,79 @@ export async function runVerifiedBuyRepairJob(pool: Pool) {
     readDflowOrder: async (signature) => {
       consume();
       return (await fetchKalshiNormalizedOrderStatus({ signature })).raw;
+    },
+    readHip4OrderStatus: async ({ environment, accountAddress, cloid }) => {
+      // Evidence for an already-admitted order survives new-exposure/read
+      // disablement. Protocol/resource policy and BOTH request budgets remain.
+      if (environment !== "mainnet")
+        throw new Error("hip4_evidence_scope_invalid");
+      return readHip4Evidence({
+        type: "orderStatus",
+        user: accountAddress,
+        oid: cloid,
+      });
+    },
+    recheckHip4OrderFills: async ({
+      environment,
+      accountAddress,
+      coin,
+      orderId,
+      timeMs,
+    }) => {
+      const { policy } = await readHip4AccountPolicy(pool);
+      if (policy.historyRepairPagesPerRefresh <= 0)
+        throw new Error("hip4_evidence_recheck_paused");
+      const lease = await claimHip4AccountRefresh(
+        pool,
+        environment,
+        accountAddress,
+        policy.leaseMs,
+        new Date(),
+        "order_fills",
+      );
+      if (!lease) throw new Error("hip4_account_refresh_in_progress");
+      let saved = false;
+      try {
+        // A single millisecond source slice, not a new account-history scan.
+        // Bound the FULL response before filtering. A capped/empty page proves
+        // no absence; only an actual exact provider row may clear its marker.
+        const selected = selectHip4ExactRecheckSources(
+          await readHip4Evidence({
+            type: "userFillsByTime",
+            user: accountAddress,
+            startTime: timeMs,
+            endTime: timeMs + 1,
+            aggregateByTime: false,
+          }),
+          { coin, orderId, timeMs },
+        );
+        if (!selected.length) return;
+        saved = await persistHip4AccountRefresh(pool, {
+          environment,
+          address: accountAddress,
+          lease,
+          observation: null,
+          executions: selected.map((source) =>
+            projectHip4Execution(environment, accountAddress, source),
+          ),
+          executionSources: selected,
+          ledger: [],
+          history: {},
+          error: null,
+          preserveAttemptError: true,
+        });
+        if (!saved) throw new Error("hip4_account_lease_lost");
+      } finally {
+        if (!saved)
+          await failHip4AccountRefresh(
+            pool,
+            environment,
+            accountAddress,
+            lease,
+            "hip4_exact_source_recheck_unavailable",
+            true,
+          );
+      }
     },
     readPolymarketFills: async ({
       userId,
@@ -199,6 +306,7 @@ export async function runVerifiedBuyRepairJob(pool: Pool) {
           retrySeconds: policy.repairRetrySeconds,
           verifiedRecheckSeconds: policy.repairMaxRetrySeconds,
           observe: observer,
+          finalizeNativeEvidence: createHip4NativeEvidenceFinalizer(pool),
         }),
       copies: () =>
         repairUnrecordedCopies(pool, dependencies, {

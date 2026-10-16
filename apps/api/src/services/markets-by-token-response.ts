@@ -1,6 +1,7 @@
 import {
   buildObservedCanonicalMarketTop,
   parsePolymarketAssetContext,
+  hip4ReadMarketSchema,
 } from "@hunch/shared";
 import { positionStorageContract } from "../lib/position-asset-context.js";
 import {
@@ -18,6 +19,7 @@ import {
   isLimitlessNegRiskMetadata,
 } from "../lib/limitless-metadata.js";
 import type { MarketByTokenRow } from "../repos/unified-read.js";
+import { hip4CatalogProjection } from "./hip4-catalog-projection.js";
 import { normalizeRedemptionStatus } from "./redemption-status.js";
 
 export function mapMarketsByTokenRows(
@@ -25,6 +27,7 @@ export function mapMarketsByTokenRows(
   options: {
     now?: Date;
     polymarketOrderabilityMode?: PolymarketOrderabilityMode;
+    includeTop?: boolean;
   } = {},
 ) {
   const now = options.now ?? new Date();
@@ -42,6 +45,12 @@ export function mapMarketsByTokenRows(
       );
     const marketMetadata = parseMetadata(row.market_metadata);
     const eventMetadata = parseMetadata(row.event_metadata);
+    const native =
+      row.venue === "hyperliquid"
+        ? hip4ReadMarketSchema.parse(marketMetadata?.hip4)
+        : null;
+    const metric = (value: unknown) =>
+      value != null ? Number(value) : native ? null : 0;
     const limitlessMeta =
       row.venue === "limitless"
         ? extractLimitlessMetadata(marketMetadata, eventMetadata)
@@ -64,7 +73,7 @@ export function mapMarketsByTokenRows(
       } catch {
         // keep tokens as null
       }
-    } else if (row.venue === "limitless" || row.venue === "kalshi") {
+    } else if (row.venue === "limitless" || row.venue === "kalshi" || native) {
       tokens = {
         yes: row.token_yes != null ? String(row.token_yes) : null,
         no: row.token_no != null ? String(row.token_no) : null,
@@ -80,19 +89,30 @@ export function mapMarketsByTokenRows(
       }
     }
 
-    const acceptingOrders = computeAcceptingOrders({
-      venue: row.venue,
-      status: row.market_status,
-      closeTime: row.close_time,
-      expirationTime: row.expiration_time,
-      eventEndTime: row.end_date,
-      pmAcceptingOrders: row.pm_accepting_orders,
-      polymarketOrderabilityMode: options.polymarketOrderabilityMode,
-      dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
-        row.market_metadata,
-      ),
-      nowMs: now.getTime(),
-    });
+    const nativeOpen =
+      native !== null &&
+      native.status === "observed" &&
+      native.settlement === null &&
+      native.coverage.metadata === "fresh" &&
+      Date.parse(native.fetchedAt) <= now.getTime() &&
+      Date.parse(native.metadataValidUntil ?? "") > now.getTime() &&
+      (native.expiry == null || Date.parse(native.expiry) > now.getTime());
+    const nativeCatalog = native ? hip4CatalogProjection(native) : null;
+    const acceptingOrders = native
+      ? nativeOpen
+      : computeAcceptingOrders({
+          venue: row.venue,
+          status: row.market_status,
+          closeTime: row.close_time,
+          expirationTime: row.expiration_time,
+          eventEndTime: row.end_date,
+          pmAcceptingOrders: row.pm_accepting_orders,
+          polymarketOrderabilityMode: options.polymarketOrderabilityMode,
+          dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(
+            row.market_metadata,
+          ),
+          nowMs: now.getTime(),
+        });
     const tradeType =
       row.venue === "limitless" ? (limitlessMeta?.tradeType ?? null) : null;
     const marketAddress =
@@ -111,18 +131,50 @@ export function mapMarketsByTokenRows(
       row.resolved_outcome_pct != null
         ? Number(row.resolved_outcome_pct)
         : null;
-    const observedTop = buildObservedCanonicalMarketTop({
-      yesTop: {
-        bestBid: row.best_bid_yes,
-        bestAsk: row.best_ask_yes,
-        ts: row.top_ts_yes as Date | string | number | null,
-      },
-      noTop: {
-        bestBid: row.best_bid_no,
-        bestAsk: row.best_ask_no,
-        ts: row.top_ts_no as Date | string | number | null,
-      },
-    });
+    const nativeTop = (index: number) => {
+      const side = native?.sides.find((item) => item.sideIndex === index);
+      return options.includeTop !== false &&
+        nativeOpen &&
+        side &&
+        side.bookState === "fresh" &&
+        Date.parse(side.bookAt ?? "") <= now.getTime() &&
+        Date.parse(side.bookValidUntil ?? "") > now.getTime()
+        ? {
+            bid: side.bid == null ? null : Number(side.bid),
+            ask: side.ask == null ? null : Number(side.ask),
+            at: side.bookAt,
+          }
+        : { bid: null, ask: null, at: null };
+    };
+    const nativeYes = nativeTop(0),
+      nativeNo = nativeTop(1);
+    const observedTop = buildObservedCanonicalMarketTop(
+      native
+        ? {
+            yesTop: {
+              bestBid: nativeYes.bid,
+              bestAsk: nativeYes.ask,
+              ts: nativeYes.at,
+            },
+            noTop: {
+              bestBid: nativeNo.bid,
+              bestAsk: nativeNo.ask,
+              ts: nativeNo.at,
+            },
+          }
+        : {
+            yesTop: {
+              bestBid: row.best_bid_yes,
+              bestAsk: row.best_ask_yes,
+              ts: row.top_ts_yes as Date | string | number | null,
+            },
+            noTop: {
+              bestBid: row.best_bid_no,
+              bestAsk: row.best_ask_no,
+              ts: row.top_ts_no as Date | string | number | null,
+            },
+          },
+    );
 
     return {
       tokenId: row.token_id,
@@ -154,10 +206,17 @@ export function mapMarketsByTokenRows(
         openTime: row.open_time,
         closeTime: row.close_time,
         expirationTime: row.expiration_time,
-        volume24h: row.volume_24h != null ? Number(row.volume_24h) : 0,
-        volumeTotal: row.volume_total != null ? Number(row.volume_total) : 0,
-        openInterest: row.open_interest != null ? Number(row.open_interest) : 0,
-        liquidity: row.liquidity != null ? Number(row.liquidity) : 0,
+        volume24h: native
+          ? nativeCatalog?.volume24h != null &&
+            native.volume24h &&
+            Date.parse(native.volume24h.observedAt) <= now.getTime() &&
+            Date.parse(native.volume24h.validUntil) > now.getTime()
+            ? Number(nativeCatalog.volume24h)
+            : null
+          : metric(row.volume_24h),
+        volumeTotal: metric(row.volume_total),
+        openInterest: metric(row.open_interest),
+        liquidity: metric(row.liquidity),
         bestBid: observedTop.yesBid,
         bestAsk: observedTop.yesAsk,
         bestBidYes: observedTop.yesBid,
@@ -178,17 +237,36 @@ export function mapMarketsByTokenRows(
         marketIcon: row.market_icon || null,
         marketAddress,
         redemptionStatus: row.redemption_status || null,
-        redemption: normalizeRedemptionStatus({
-          venue: row.venue,
-          marketStatus: row.market_status,
-          closeTime: row.close_time,
-          expirationTime: row.expiration_time,
-          eventEndTime: row.end_date,
-          rawStatus: row.redemption_status,
-          resolvedOutcome: row.resolved_outcome,
-          resolvedOutcomePct,
-          outcomeSide,
-        }),
+        redemption: native
+          ? {
+              status:
+                native.status === "settled"
+                  ? ("resolved_not_redeemable" as const)
+                  : native.status === "expired"
+                    ? ("pending_resolution" as const)
+                    : ("market_open" as const),
+              reasonCode: "native_read_only_automatic_settlement",
+              reason:
+                "Native outcome settlement is observed separately; this read does not grant manual redemption.",
+              redeemableAt: null,
+              resolvedOutcome:
+                row.resolved_outcome === "YES" || row.resolved_outcome === "NO"
+                  ? row.resolved_outcome
+                  : null,
+              resolvedOutcomePct,
+              rawStatus: row.redemption_status,
+            }
+          : normalizeRedemptionStatus({
+              venue: row.venue,
+              marketStatus: row.market_status,
+              closeTime: row.close_time,
+              expirationTime: row.expiration_time,
+              eventEndTime: row.end_date,
+              rawStatus: row.redemption_status,
+              resolvedOutcome: row.resolved_outcome,
+              resolvedOutcomePct,
+              outcomeSide,
+            }),
         resolvedOutcome: row.resolved_outcome || null,
         resolvedOutcomePct,
         acceptingOrders,
@@ -235,16 +313,10 @@ export function mapMarketsByTokenRows(
           status: row.event_status,
           startTime: row.start_date,
           endTime: row.end_date,
-          eventLiquidity:
-            row.event_liquidity != null ? Number(row.event_liquidity) : 0,
-          eventVolume:
-            row.event_volume_total != null ? Number(row.event_volume_total) : 0,
-          eventVolume24h:
-            row.event_volume_24h != null ? Number(row.event_volume_24h) : 0,
-          eventOpenInterest:
-            row.event_open_interest != null
-              ? Number(row.event_open_interest)
-              : 0,
+          eventLiquidity: metric(row.event_liquidity),
+          eventVolume: metric(row.event_volume_total),
+          eventVolume24h: metric(row.event_volume_24h),
+          eventOpenInterest: metric(row.event_open_interest),
           eventSlug: row.event_slug || null,
           image: row.event_image || null,
           icon: row.event_icon || null,

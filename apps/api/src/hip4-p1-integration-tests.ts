@@ -18,6 +18,8 @@ import { readHip4Trades, readHip4Candles } from "./services/hip4-history.js";
 import { runHip4ReadCycle } from "./services/hip4-indexer.js";
 import { createHip4ReadClient } from "./services/hip4-client.js";
 import { createHip4LiveBuffer, flushHip4Live } from "./services/hip4-live.js";
+import { loadClusterMarketNativeQuotes } from "./services/cluster-execution-quotes.js";
+import { buildHolderResearchSignalSnapshot } from "./services/holder-research-performance.js";
 import {
   applyHip4Volume,
   indexHip4AssetContexts,
@@ -107,7 +109,47 @@ try {
     side: "B" as const,
     hash: "fixture",
   };
-  await persistHip4Market(pool, { ...mapped, trades: [trade] });
+  const invalidations: string[] = [];
+  const invalidation = async (change: { marketId: string }) => {
+    // A separate connection must observe the committed state. The publisher
+    // cannot run while holding the snapshot transaction/its pool connection.
+    const committed = await readHip4StoredMarket(pool, "mainnet", 8775);
+    assert.equal(committed?.market.marketId, change.marketId);
+    invalidations.push(change.marketId);
+  };
+  await persistHip4Market(
+    pool,
+    { ...mapped, trades: [trade], policy: DEFAULT_HIP4_READ_POLICY },
+    invalidation,
+  );
+  assert.equal(invalidations.length, 1);
+  await persistHip4Market(
+    pool,
+    { ...mapped, trades: [trade], policy: DEFAULT_HIP4_READ_POLICY },
+    invalidation,
+  );
+  assert.equal(
+    invalidations.length,
+    1,
+    "unchanged refresh/replay has no new embedding work",
+  );
+  const nativeComparison = (
+    await loadClusterMarketNativeQuotes(pool, [mapped.market.marketId])
+  ).get(mapped.market.marketId);
+  assert.equal(nativeComparison?.venue, "hyperliquid");
+  assert.equal(nativeComparison?.yes.bid, 0.6);
+  assert.equal(nativeComparison?.no.ask, null);
+  const nativeSnapshot = await buildHolderResearchSignalSnapshot(pool, {
+    marketId: mapped.market.marketId,
+    side: "NO",
+    direction: "down",
+  });
+  assert.equal(nativeSnapshot?.venue, "hyperliquid");
+  assert.equal(
+    nativeSnapshot?.quote.buyPrice,
+    null,
+    "missing native NO entry cannot use a legacy YES complement",
+  );
   const readCatalog = async () =>
     (
       await pool.query(
@@ -560,7 +602,21 @@ try {
     { ...trade, tid: 101, time: bucket + 3000, sz: "3" },
   ]);
   settlementQueue.data("l2Book", book(Date.now(), "0.1"));
-  await persistHip4Market(pool, { ...official, trades: [] });
+  await persistHip4Market(pool, { ...official, trades: [] }, invalidation);
+  assert.equal(
+    invalidations.length,
+    2,
+    "official settlement invalidates canonical state",
+  );
+  assert.equal(
+    (
+      await pool.query(
+        "select resolved_outcome_pct::text from unified_markets where id=$1",
+        [official.market.marketId],
+      )
+    ).rows[0].resolved_outcome_pct,
+    "10000",
+  );
   // A live writer may have read active state just before this settlement commit.
   // The locked merge, not only the pre-flush check, must freeze terminal books.
   const lateBookTime = Date.now();

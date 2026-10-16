@@ -55,13 +55,13 @@ test("admin draft capabilities exactly match runtime capabilities for every venu
     lifecycle: "unreleased",
     indexerMode: "off",
   });
-  for (const field of [
-    "redeem",
-    "automation",
-    "signalSource",
-    "signalDelivery",
-  ] as const) {
+  for (const field of ["redeem", "automation"] as const) {
     assert.equal(matrix.hyperliquid.active[field], false, field);
+  }
+  for (const field of ["signalSource", "signalDelivery"] as const) {
+    assert.equal(matrix.hyperliquid.active[field], true);
+    assert.equal(matrix.hyperliquid["exit-only"][field], false);
+    assert.equal(matrix.hyperliquid.unreleased[field], false);
   }
 });
 

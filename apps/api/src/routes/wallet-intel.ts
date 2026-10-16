@@ -96,6 +96,7 @@ import { extractWalletIdentityDisplayFields } from "../services/wallet-identity-
 import {
   loadLatestWalletPositionNowMap,
   loadWalletPositionApproxMetrics,
+  WALLET_POSITION_LATEST_VENUES_SQL,
   type WalletPositionNow,
 } from "../services/wallet-position-approx.js";
 import { makeWalletPositionLedgerKey } from "../services/wallet-position-ledger.js";
@@ -1318,7 +1319,8 @@ function inferVenueFromMarketId(
   if (
     prefix === "polymarket" ||
     prefix === "kalshi" ||
-    prefix === "limitless"
+    prefix === "limitless" ||
+    prefix === "hyperliquid"
   ) {
     return prefix;
   }
@@ -7159,7 +7161,19 @@ async function enrichWalletActivityRouteItemsWithMarketTypeMetrics<
   >
 > {
   if (items.length === 0) return [];
-  const walletIds = Array.from(new Set(items.map((item) => item.walletId)));
+  const walletIds = Array.from(
+    new Set(
+      items
+        .filter((item) => item.venue !== "hyperliquid")
+        .map((item) => item.walletId),
+    ),
+  );
+  if (walletIds.length === 0)
+    return items.map((item) => ({
+      ...item,
+      marketSegmentMetrics30d: null,
+      marketTypeMetrics30d: null,
+    }));
   const {
     marketSegmentMetricsByKey: segmentMetricsByKey,
     marketTypeMetricsByKey: metricsByKey,
@@ -7170,13 +7184,17 @@ async function enrichWalletActivityRouteItemsWithMarketTypeMetrics<
   return items.map((item) => ({
     ...item,
     marketSegmentMetrics30d:
-      segmentMetricsByKey.get(
-        makeWalletMarketSegmentMetricKey(item.walletId, item.marketSegment),
-      ) ?? null,
+      item.venue === "hyperliquid"
+        ? null
+        : (segmentMetricsByKey.get(
+            makeWalletMarketSegmentMetricKey(item.walletId, item.marketSegment),
+          ) ?? null),
     marketTypeMetrics30d:
-      metricsByKey.get(
-        makeWalletMarketTypeMetricKey(item.walletId, item.marketType),
-      ) ?? null,
+      item.venue === "hyperliquid"
+        ? null
+        : (metricsByKey.get(
+            makeWalletMarketTypeMetricKey(item.walletId, item.marketType),
+          ) ?? null),
   }));
 }
 
@@ -12046,7 +12064,7 @@ export const walletIntelRoutes: FastifyPluginAsync = async (app) => {
                 ${
                   venueParam != null
                     ? `select $${venueParam}::text`
-                    : "values ('polymarket'), ('limitless'), ('kalshi')"
+                    : WALLET_POSITION_LATEST_VENUES_SQL
                 }
               ),
               latest_snapshots as (

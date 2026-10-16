@@ -1,31 +1,18 @@
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
-import { z } from "zod";
 import { createAuthMiddleware } from "../auth.js";
 import { pool } from "../db.js";
 import { env } from "../env.js";
 import { checkRateLimit } from "../lib/rate-limit.js";
-import * as schema from "../schemas/social.js";
+import { socialRouteSchemas } from "../schemas/social-routes.js";
 import { SocialService } from "../services/social-service.js";
 import { getCopyAttributionStatus } from "../services/social-copy.js";
 import {
   resolveSocialPolicy,
-  socialPolicySchema,
   SocialPolicyUnavailableError,
 } from "../services/social-policy.js";
 import { SocialError } from "../services/social-primitives.js";
 
-const errors = {
-  400: schema.socialErrorSchema,
-  401: schema.socialErrorSchema,
-  403: schema.socialErrorSchema,
-  404: schema.socialErrorSchema,
-  409: schema.socialErrorSchema,
-  429: schema.socialErrorSchema,
-  500: schema.socialErrorSchema,
-  503: schema.socialErrorSchema,
-};
-const idResponse = z.object({ id: z.string().uuid() });
 function requireUserId(request: FastifyRequest): string {
   if (!request.user) throw new SocialError("unauthorized", 401);
   return request.user.id;
@@ -80,25 +67,25 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     );
     return reply.code(500).send({ error: "social_request_failed" });
   });
-  const configResponse = z.object({
-    policy: socialPolicySchema,
-    revision: z.string(),
-    source: z.enum(["default", "db"]),
-    effectiveAt: z.string().nullable(),
-  });
   typed.get(
     "/social/config",
-    { schema: { response: { 200: configResponse, ...errors } } },
+    { schema: socialRouteSchemas.get["/social/config"] },
     async () => resolveSocialPolicy(pool),
+  );
+  typed.get(
+    "/social/hunches/:id",
+    {
+      preHandler: optional,
+      schema: socialRouteSchemas.get["/social/hunches/:id"],
+    },
+    async (request) =>
+      service.getHunch(request.user?.id ?? null, request.params.id),
   );
   typed.get(
     "/social/copies/:idempotencyKey",
     {
       preHandler: required,
-      schema: {
-        params: schema.socialCopyStatusParams,
-        response: { 200: schema.socialCopyStatusResponse, ...errors },
-      },
+      schema: socialRouteSchemas.get["/social/copies/:idempotencyKey"],
     },
     async (request) => {
       const result = await getCopyAttributionStatus(
@@ -114,10 +101,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/users/handles/:handle",
     {
       preHandler: optional,
-      schema: {
-        params: schema.socialHandleParams,
-        response: { 200: schema.socialHandleResponse, ...errors },
-      },
+      schema: socialRouteSchemas.get["/users/handles/:handle"],
     },
     async (request) =>
       service.handleAvailability(
@@ -129,10 +113,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/users/by-handle/:handle",
     {
       preHandler: optional,
-      schema: {
-        params: schema.socialHandleParams,
-        response: { 200: schema.socialProfileResponse, ...errors },
-      },
+      schema: socialRouteSchemas.get["/users/by-handle/:handle"],
     },
     async (request) =>
       service.profileByHandle(request.user?.id ?? null, request.params.handle),
@@ -141,10 +122,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/users/suggestions",
     {
       preHandler: optional,
-      schema: {
-        querystring: schema.socialPageQuery,
-        response: { 200: schema.socialProfilesResponse, ...errors },
-      },
+      schema: socialRouteSchemas.get["/users/suggestions"],
     },
     async (request) =>
       service.listProfiles(request.user?.id ?? null, {
@@ -156,10 +134,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/users/me/blocks",
     {
       preHandler: required,
-      schema: {
-        querystring: schema.socialPageQuery,
-        response: { 200: schema.socialProfilesResponse, ...errors },
-      },
+      schema: socialRouteSchemas.get["/users/me/blocks"],
     },
     async (request) =>
       service.listProfiles(requireUserId(request), {
@@ -171,10 +146,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/users/me/profile",
     {
       preHandler: required,
-      schema: {
-        body: schema.socialProfilePatch,
-        response: { 200: schema.socialProfileResponse, ...errors },
-      },
+      schema: socialRouteSchemas.patch["/users/me/profile"],
     },
     async (request) =>
       service.updateProfile(requireUserId(request), request.body),
@@ -183,10 +155,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/users/:id/profile",
     {
       preHandler: optional,
-      schema: {
-        params: schema.socialIdParams,
-        response: { 200: schema.socialProfileResponse, ...errors },
-      },
+      schema: socialRouteSchemas.get["/users/:id/profile"],
     },
     async (request) =>
       service.getProfile(request.user?.id ?? null, request.params.id),
@@ -196,11 +165,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
       `/users/:id/${kind}`,
       {
         preHandler: optional,
-        schema: {
-          params: schema.socialIdParams,
-          querystring: schema.socialPageQuery,
-          response: { 200: schema.socialProfilesResponse, ...errors },
-        },
+        schema: socialRouteSchemas.get[`/users/:id/${kind}`],
       },
       async (request) =>
         service.listProfiles(request.user?.id ?? null, {
@@ -213,10 +178,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/users/:id/follow",
     {
       preHandler: required,
-      schema: {
-        params: schema.socialIdParams,
-        response: { 200: schema.socialOkSchema, ...errors },
-      },
+      schema: socialRouteSchemas.put["/users/:id/follow"],
     },
     async (request) =>
       service.setFollow(requireUserId(request), request.params.id, true),
@@ -225,10 +187,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/users/:id/follow",
     {
       preHandler: required,
-      schema: {
-        params: schema.socialIdParams,
-        response: { 200: schema.socialOkSchema, ...errors },
-      },
+      schema: socialRouteSchemas.delete["/users/:id/follow"],
     },
     async (request) =>
       service.setFollow(requireUserId(request), request.params.id, false),
@@ -237,10 +196,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/users/:id/block",
     {
       preHandler: required,
-      schema: {
-        params: schema.socialIdParams,
-        response: { 200: schema.socialOkSchema, ...errors },
-      },
+      schema: socialRouteSchemas.put["/users/:id/block"],
     },
     async (request) =>
       service.setBlock(requireUserId(request), request.params.id, true),
@@ -249,10 +205,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/users/:id/block",
     {
       preHandler: required,
-      schema: {
-        params: schema.socialIdParams,
-        response: { 200: schema.socialOkSchema, ...errors },
-      },
+      schema: socialRouteSchemas.delete["/users/:id/block"],
     },
     async (request) =>
       service.setBlock(requireUserId(request), request.params.id, false),
@@ -261,10 +214,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/theses/eligibility",
     {
       preHandler: required,
-      schema: {
-        querystring: schema.socialEligibilityQuery,
-        response: { 200: schema.socialEligibilitySchema, ...errors },
-      },
+      schema: socialRouteSchemas.get["/theses/eligibility"],
     },
     async (request) =>
       service.eligibility(requireUserId(request), request.query),
@@ -273,10 +223,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/theses/eligibility/refresh",
     {
       preHandler: required,
-      schema: {
-        body: schema.socialPurchaseRef,
-        response: { 200: schema.socialOkSchema, ...errors },
-      },
+      schema: socialRouteSchemas.post["/theses/eligibility/refresh"],
     },
     async (request) =>
       service.refreshEligibility(requireUserId(request), request.body),
@@ -286,10 +233,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/theses",
     {
       preHandler: required,
-      schema: {
-        body: schema.socialPublishBody,
-        response: { 200: schema.socialThesisSchema, ...errors },
-      },
+      schema: socialRouteSchemas.post["/theses"],
     },
     async (request) => service.publish(requireUserId(request), request.body),
   );
@@ -297,10 +241,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/theses/:id",
     {
       preHandler: optional,
-      schema: {
-        params: schema.socialIdParams,
-        response: { 200: schema.socialThesisSchema, ...errors },
-      },
+      schema: socialRouteSchemas.get["/theses/:id"],
     },
     async (request) =>
       service.getThesis(request.user?.id ?? null, request.params.id, true),
@@ -309,10 +250,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/theses/:id",
     {
       preHandler: required,
-      schema: {
-        params: schema.socialIdParams,
-        response: { 200: schema.socialOkSchema, ...errors },
-      },
+      schema: socialRouteSchemas.delete["/theses/:id"],
     },
     async (request) =>
       service.hideThesis(requireUserId(request), request.params.id),
@@ -321,10 +259,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/social/feed",
     {
       preHandler: optional,
-      schema: {
-        querystring: schema.socialFeedQuery,
-        response: { 200: schema.socialFeedResponse, ...errors },
-      },
+      schema: socialRouteSchemas.get["/social/feed"],
     },
     async (request) => service.feed(request.user?.id ?? null, request.query),
   );
@@ -332,11 +267,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/users/:id/theses",
     {
       preHandler: optional,
-      schema: {
-        params: schema.socialIdParams,
-        querystring: schema.socialPageQuery,
-        response: { 200: schema.socialFeedResponse, ...errors },
-      },
+      schema: socialRouteSchemas.get["/users/:id/theses"],
     },
     async (request) =>
       service.feed(request.user?.id ?? null, {
@@ -350,11 +281,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/markets/:marketId/theses",
     {
       preHandler: optional,
-      schema: {
-        params: z.object({ marketId: z.string() }),
-        querystring: schema.socialPageQuery,
-        response: { 200: schema.socialFeedResponse, ...errors },
-      },
+      schema: socialRouteSchemas.get["/markets/:marketId/theses"],
     },
     async (request) =>
       service.feed(request.user?.id ?? null, {
@@ -368,10 +295,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/social/comments",
     {
       preHandler: optional,
-      schema: {
-        querystring: schema.socialCommentsQuery,
-        response: { 200: schema.socialCommentsResponse, ...errors },
-      },
+      schema: socialRouteSchemas.get["/social/comments"],
     },
     async (request) =>
       service.listComments(request.user?.id ?? null, request.query),
@@ -380,10 +304,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/social/likes/:targetKind/:targetId",
     {
       preHandler: required,
-      schema: {
-        params: schema.socialLikeParams,
-        response: { 200: schema.socialOkSchema, ...errors },
-      },
+      schema: socialRouteSchemas.put["/social/likes/:targetKind/:targetId"],
     },
     async (request) =>
       service.setLike(
@@ -396,10 +317,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/social/likes/:targetKind/:targetId",
     {
       preHandler: required,
-      schema: {
-        params: schema.socialLikeParams,
-        response: { 200: schema.socialOkSchema, ...errors },
-      },
+      schema: socialRouteSchemas.delete["/social/likes/:targetKind/:targetId"],
     },
     async (request) =>
       service.setLike(
@@ -412,10 +330,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/social/comments",
     {
       preHandler: required,
-      schema: {
-        body: schema.socialCommentBody,
-        response: { 200: idResponse, ...errors },
-      },
+      schema: socialRouteSchemas.post["/social/comments"],
     },
     async (request) =>
       service.createComment(requireUserId(request), request.body),
@@ -424,10 +339,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/social/comments/:id",
     {
       preHandler: required,
-      schema: {
-        params: schema.socialIdParams,
-        response: { 200: schema.socialOkSchema, ...errors },
-      },
+      schema: socialRouteSchemas.delete["/social/comments/:id"],
     },
     async (request) =>
       service.hideComment(requireUserId(request), request.params.id),
@@ -436,10 +348,7 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
     "/social/reports",
     {
       preHandler: required,
-      schema: {
-        body: schema.socialReportBody,
-        response: { 200: idResponse, ...errors },
-      },
+      schema: socialRouteSchemas.post["/social/reports"],
     },
     async (request) => service.report(requireUserId(request), request.body),
   );

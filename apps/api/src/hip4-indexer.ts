@@ -50,14 +50,14 @@ try {
   );
   if (!lock.rows[0].acquired)
     throw new Error("hip4_read_worker_already_running");
-  if (!process.argv.includes("--once"))
-    stream = startHip4LiveRuntime(
-      pool,
-      wakeup.request,
-      process.argv.includes("--redis-url")
-        ? argument("--redis-url")
-        : process.env.REDIS_URL,
-    );
+  stream = startHip4LiveRuntime(
+    pool,
+    wakeup.request,
+    process.argv.includes("--redis-url")
+      ? argument("--redis-url")
+      : process.env.REDIS_URL,
+    { live: !process.argv.includes("--once") },
+  );
   do {
     const start = Date.now();
     // Config errors disable requests, but a repaired policy recovers on the
@@ -71,7 +71,11 @@ try {
       console.log(
         JSON.stringify({
           component: "hip4-read",
-          ...(await runHip4ReadCycle(pool)),
+          ...(await runHip4ReadCycle(
+            pool,
+            undefined,
+            async (change) => { await stream?.invalidateCanonical(change, policy.requestTimeoutMs); },
+          )),
           stream: stream?.diagnostics ?? null,
           durationMs: Date.now() - start,
         }),

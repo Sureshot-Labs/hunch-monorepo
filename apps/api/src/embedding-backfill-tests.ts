@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import type { RuntimePolicyQuery } from "@hunch/db";
+import { DEFAULT_VENUE_LIFECYCLE_POLICY } from "@hunch/shared";
 import {
   parseEmbeddingBackfillOptions,
   runEmbeddingBackfill,
@@ -10,6 +11,11 @@ assert.equal(parseEmbeddingBackfillOptions(["--dry-run"]).mode, "preview");
 assert.deepEqual(
   parseEmbeddingBackfillOptions(["--venue=dflow,kalshi"]).venues,
   ["kalshi"],
+);
+assert.deepEqual(
+  parseEmbeddingBackfillOptions(["--venue=Hyperliquid,dflow,hyperliquid"])
+    .venues,
+  ["hyperliquid", "kalshi"],
 );
 assert.deepEqual(
   parseEmbeddingBackfillOptions([
@@ -41,6 +47,7 @@ for (const args of [
   ["--execute", "--dry-run"],
   ["--execute=true"],
   ["--execute", "--venue=polymarket"],
+  ["--execute", "--venue=hyperliquid"],
   ["--execute", "--limit=1"],
   ["--execute", "--markets"],
   ["--status", "--events"],
@@ -51,7 +58,7 @@ for (const args of [
 ])
   assert.throws(() => parseEmbeddingBackfillOptions(args), args.join(" "));
 
-function fixture(policyPayload: unknown = {}) {
+function fixture(policyPayload: unknown = {}, lifecyclePayload?: unknown) {
   const writes: string[] = [];
   const reads: string[] = [];
   const queries: Array<{ sql: string; params?: unknown[] }> = [];
@@ -67,7 +74,11 @@ function fixture(policyPayload: unknown = {}) {
       if (sql.includes("runtime_policies")) {
         return {
           rows:
-            params?.[0] === "ai_embeddings" ? [{ payload: policyPayload }] : [],
+            params?.[0] === "ai_embeddings"
+              ? [{ payload: policyPayload }]
+              : lifecyclePayload === undefined
+                ? []
+                : [{ payload: lifecyclePayload }],
         };
       }
       return {
@@ -129,6 +140,43 @@ assert.deepEqual(report.previewCandidates, { event: 25, market: 0 });
 assert.deepEqual(report.venues, ["polymarket"]);
 assert.equal(report.activeGeneration.id, "legacy-e5");
 assert.equal(preview.queries.length, 4);
+
+for (const active of [false, true]) {
+  const hip = fixture(
+    {},
+    {
+      ...DEFAULT_VENUE_LIFECYCLE_POLICY,
+      venues: {
+        ...DEFAULT_VENUE_LIFECYCLE_POLICY.venues,
+        hyperliquid: {
+          lifecycle: active ? "active" : "unreleased",
+          indexerMode: active ? "full" : "off",
+        },
+      },
+    },
+  );
+  await runEmbeddingBackfill(
+    parseEmbeddingBackfillOptions(["--venue=hyperliquid", "--limit=1"]),
+    hip.dependencies,
+  );
+  assert.deepEqual(hip.writes, []);
+  assert.deepEqual(
+    (hip.logs[0] as { venues: string[] }).venues,
+    active ? ["hyperliquid"] : [],
+  );
+  assert.equal(hip.queries.length, active ? 4 : 2);
+  for (const sourceQuery of hip.queries.slice(2))
+    assert.deepEqual(sourceQuery.params?.[0], ["hyperliquid"]);
+}
+
+const help = fixture();
+await runEmbeddingBackfill(
+  parseEmbeddingBackfillOptions(["--help"]),
+  help.dependencies,
+);
+assert.match(String(help.logs[0]), /Preview only:.*hyperliquid/);
+assert.deepEqual(help.queries, []);
+assert.deepEqual(help.writes, []);
 
 const execute = fixture();
 await runEmbeddingBackfill(

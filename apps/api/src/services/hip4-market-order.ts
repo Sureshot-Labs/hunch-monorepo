@@ -3,6 +3,7 @@ import { formatUnits } from "ethers";
 import { z } from "zod";
 import { hip4OrderPreparationRequestSchema } from "../repos/hip4-order-preparation.js";
 import { HIP4_MAINNET_ORDER_UNITS } from "./hip4-order-amounts.js";
+import { refineSocialTradeAttribution } from "../schemas/social-trade.js";
 
 /** The ordinary ticket supplies its explicit slippage and debit budget. BUY is
  * quote atoms (8 decimals), SELL is outcome atoms (5), never legacy USDC6. */
@@ -14,6 +15,8 @@ export const hip4MarketOrderQuoteRequestSchema =
       outcomeSide: true,
       side: true,
       controllerWalletRef: true,
+      sourceRef: true,
+      copyIdempotencyKey: true,
     })
     .extend({
       consentedDebitCapRaw: z
@@ -22,7 +25,8 @@ export const hip4MarketOrderQuoteRequestSchema =
         .regex(/^[1-9]\d*$/u),
       slippageBps: z.number().int().min(0).max(10_000).optional(),
     })
-    .strict();
+    .strict()
+    .superRefine(refineSocialTradeAttribution);
 export type Hip4MarketOrderQuoteRequest = z.infer<
   typeof hip4MarketOrderQuoteRequestSchema
 >;
@@ -40,7 +44,7 @@ export function sizeHip4MarketOrder(input: {
   bookMaxAgeMs: number;
 }) {
   const request = hip4MarketOrderQuoteRequestSchema
-    .extend({ slippageBps: z.number().int().min(0).max(10_000) })
+    .safeExtend({ slippageBps: z.number().int().min(0).max(10_000) })
     .parse(input.request);
   const parsed = hip4BookSchema.safeParse(input.book);
   if (!parsed.success) throw new Error("hip4_market_book_invalid");
@@ -126,6 +130,12 @@ export function sizeHip4MarketOrder(input: {
     timeInForce: "Ioc",
     limitPrice: formatUnits(limit, units.priceDecimals),
     quantity: quantity.toString(),
+    ...(request.sourceRef
+      ? {
+          sourceRef: request.sourceRef,
+          copyIdempotencyKey: request.copyIdempotencyKey,
+        }
+      : {}),
   });
   return {
     preparationRequest,

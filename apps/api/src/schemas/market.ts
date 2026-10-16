@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { zCsvString, zRequiredString, zVenue } from "./common.js";
+import { zCsvString, zRequiredString, zReadVenue } from "./common.js";
 import { polymarketAssetContextSchema } from "./polymarket-private.js";
 
 export const marketParamsSchema = z.object({
@@ -8,7 +8,7 @@ export const marketParamsSchema = z.object({
 
 const zVenueOptional = z.preprocess(
   (v) => (typeof v === "string" ? v.toLowerCase() : v),
-  zVenue.optional(),
+  zReadVenue.optional(),
 );
 
 const zOptionalBool = z

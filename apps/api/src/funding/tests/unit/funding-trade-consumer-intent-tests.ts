@@ -166,6 +166,28 @@ assert.deepEqual(
   exact,
 );
 
+const attribution = {
+  sourceRef: { kind: "hunch" as const, id: "10000000-0000-4000-8000-000000000001" },
+  copyIdempotencyKey: "10000000-0000-4000-8000-000000000002",
+};
+const copied = buildFundingTradeConsumerIntent({ ...exact, ...attribution });
+assert.notEqual(copied.fingerprint, exact.fingerprint);
+assert.equal(sameFundingTradeConsumerIntent(copied, exact), false);
+for (const changed of [
+  exact,
+  buildFundingTradeConsumerIntent({ ...exact, ...attribution, copyIdempotencyKey: "10000000-0000-4000-8000-000000000003" }),
+  buildFundingTradeConsumerIntent({ ...exact, ...attribution, sourceRef: { ...attribution.sourceRef, kind: "thesis" } }),
+  buildFundingTradeConsumerIntent({ ...exact, ...attribution, sourceRef: { ...attribution.sourceRef, id: "10000000-0000-4000-8000-000000000004" } }),
+]) assert.equal(compareFundingTradeConsumerIntentToConfirmedBound(copied, changed), "scope_mismatch");
+assert.equal(compareFundingTradeConsumerIntentToConfirmedBound(copied, buildFundingTradeConsumerIntent({ ...copied, spend: { ...exact.spend, raw: "1" } })), "matched");
+assert.throws(() => buildFundingTradeConsumerIntent({ ...exact, sourceRef: attribution.sourceRef }));
+assert.throws(() => buildFundingTradeConsumerIntent({ ...exact, copyIdempotencyKey: attribution.copyIdempotencyKey }));
+assert.deepEqual(storedFundingTradeConsumerIntent({
+  operationVenueId: exact.venueId, operationMarketId: exact.marketId,
+  marketContextSnapshot: { ...exact, ...attribution, collateralAsset: asset, requestedCollateralRaw: exact.spend.raw },
+  requestedDestinationAmount: { asset, raw: "1" }, reservationAsset: asset, reservationRawAmount: "1",
+}), copied);
+
 console.log(
   "[funding-trade-consumer-intent-tests] consumer scope stays exact while fresh fee-inclusive spend may remain within its confirmed bound",
 );

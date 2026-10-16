@@ -4,6 +4,7 @@ import {
 } from "@hunch/shared";
 import type { VerifiedBuyFacts } from "../schemas/social-trade.js";
 import { isRecord } from "../lib/type-guards.js";
+import { buildHip4SocialInstrument } from "./hip4-social-instrument.js";
 
 /** Snapshot only an explicitly indexed instrument; never invent old generations. */
 export function buildSocialInstrument(input: {
@@ -16,6 +17,14 @@ export function buildSocialInstrument(input: {
   limitlessPositionContract?: string;
 }): VerifiedBuyFacts["instrument"] | null {
   if (!input.tokenId) return null;
+  if (input.venue === "hyperliquid")
+    return buildHip4SocialInstrument({
+      marketId: input.marketId,
+      tokenId: input.tokenId,
+      outcome: input.outcome,
+      expiry: input.expiry,
+      snapshot: isRecord(input.metadata) ? input.metadata.hip4 : null,
+    });
   let generation: string;
   if (input.venue === "polymarket") {
     const protocol = parsePolymarketMarketAssets(

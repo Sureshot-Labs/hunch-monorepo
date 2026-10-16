@@ -116,10 +116,13 @@ import {
   persistHolderResearchPublicContext,
   selectHolderResearchCandidates,
   type HolderResearchCandidate,
+  type HolderResearchMarketInput,
   type HolderResearchDecisionCacheEvaluation,
   type HolderResearchObservationCandidate,
   type HolderResearchSelectionDiagnostics,
 } from "./services/holder-research.js";
+import { loadHip4HolderResearchKnownWalletPage } from "./services/holder-research-hip4-known-wallets.js";
+import { readHip4Policy } from "./services/hip4-repository.js";
 import {
   availableHolderResearchJevSlots,
   chooseHolderResearchJevCandidates,
@@ -2558,11 +2561,96 @@ export async function runHolderResearch(
 
   const client = await pool.connect();
   try {
+    // Factual native evidence shares this scheduler's source/call/runtime owner.
+    // No provider requests or new primary selection path are introduced here.
+    let nativeMarkets: HolderResearchMarketInput[] = [];
+    let nativeCursor: { key: string; nextAddress: string } | null = null;
+    try {
+      const native = await readHip4Policy(client, "discovery");
+      const sourceRedis = options.decisionCacheRedis;
+      if (
+        native.policy.enabled &&
+        native.lifecycle.indexerMode === "full" &&
+        sourceRedis
+      ) {
+        const key = `ai:holder:research:known-wallet-source:v1:${native.policy.environment}`;
+        const saved = await sourceRedis.get(key);
+        let afterAddress = "";
+        if (saved) {
+          try {
+            const parsed = JSON.parse(saved) as { lastAddress?: unknown };
+            if (
+              typeof parsed.lastAddress === "string" &&
+              /^0x[0-9a-f]{40}$/.test(parsed.lastAddress)
+            )
+              afterAddress = parsed.lastAddress;
+          } catch {
+            /* A malformed optional checkpoint restarts a bounded sweep. */
+          }
+        }
+        const page = await loadHip4HolderResearchKnownWalletPage(client, {
+          environment: native.policy.environment,
+          afterAddress,
+          asOf: observedAt,
+          sourceLimit: policy.maxCandidatePool,
+          positionsPerWallet: policy.maxHolderContextPositionsPerHolder,
+          fillsPerWallet: policy.promptHoldersLimit,
+          candidateLookbackHours: policy.candidateLookbackHours,
+          activityLookbackHours: policy.activityLookbackHours,
+          trackedSubjectTtlDays:
+            walletIntelPolicyResult.effective.autoTrackedSubjectTtlDays,
+          includeAutoTracked:
+            walletIntelPolicyResult.effective.autoTrackedWalletEnabled,
+        });
+        nativeMarkets = page.markets;
+        nativeCursor = {
+          key,
+          nextAddress: page.exhausted ? "" : page.nextAddress,
+        };
+        toolCalls.push({
+          name: "hip4_known_wallet_evidence",
+          count: nativeMarkets.length,
+          status: "ok",
+          detail: `sourceRows=${page.sourceRowsRead} positions=${nativeMarkets.reduce((sum, market) => sum + (market.nativeKnownWalletEvidence?.positions.length ?? 0), 0)} fills=${nativeMarkets.reduce((sum, market) => sum + (market.nativeKnownWalletEvidence?.fills.length ?? 0), 0)} scope=known_wallet_only globalHolders=unavailable historicalCredentials=unavailable primarySelection=unsupported_use_existing_recent_flow_support diagnostics=${page.diagnostics.join(",")}`,
+        });
+      } else
+        toolCalls.push({
+          name: "hip4_known_wallet_evidence",
+          count: 0,
+          status: "skipped",
+          detail: !sourceRedis
+            ? "source_cursor_store_unavailable"
+            : "native_discovery_not_active",
+        });
+    } catch (error) {
+      toolCalls.push({
+        name: "hip4_known_wallet_evidence",
+        count: 0,
+        status: "error",
+        detail: error instanceof Error ? error.message : "native_source_failed",
+      });
+    }
     const candidates = await loadHolderResearchCandidates(
       client,
       policy,
       mmThresholds,
+      nativeMarkets,
     );
+    if (
+      nativeCursor &&
+      !policy.dryRun &&
+      options.assertCanPersist &&
+      options.decisionCacheRedis
+    ) {
+      // The scheduled owner revalidates its existing lease before advancing.
+      // Failed projection/history/candidate builds retain the old checkpoint;
+      // dry runs and unowned CLI previews never overwrite the runner's cursor.
+      await options.assertCanPersist();
+      await options.decisionCacheRedis.set(
+        nativeCursor.key,
+        JSON.stringify({ lastAddress: nativeCursor.nextAddress }),
+      );
+    }
     toolCalls.push({
       name: "candidate_scan",
       count: candidates.length,

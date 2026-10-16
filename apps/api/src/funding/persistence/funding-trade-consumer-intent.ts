@@ -9,8 +9,34 @@ import {
   isCanonicalUnifiedMarketId,
 } from "../domain/market-identity.js";
 import { canonicalJsonHash } from "./canonical.js";
+import {
+  socialSourceRefSchema,
+  type SocialSourceRef,
+} from "../../schemas/social-trade.js";
+import { z } from "zod";
+
+const attributionSchema = z
+  .object({
+    sourceRef: socialSourceRefSchema,
+    copyIdempotencyKey: z.string().uuid(),
+  })
+  .strict();
+
+function readAttribution(input: {
+  sourceRef?: unknown;
+  copyIdempotencyKey?: unknown;
+}) {
+  if (input.sourceRef === undefined && input.copyIdempotencyKey === undefined)
+    return {};
+  return attributionSchema.parse({
+    sourceRef: input.sourceRef,
+    copyIdempotencyKey: input.copyIdempotencyKey,
+  });
+}
 
 export type FundingTradeConsumerIntent = Readonly<{
+  sourceRef?: SocialSourceRef;
+  copyIdempotencyKey?: string;
   venueId: string;
   /** Canonical unified market ID in venue:venue_market_id form. */
   marketId: string;
@@ -46,6 +72,7 @@ export function buildFundingTradeConsumerIntent(
   assertCanonicalMarketId(input.venueId, input.marketId);
   assertVenueLocalMarketContextId(input.venueId, input.marketContextId);
   const canonical = {
+    ...readAttribution(input),
     venueId: input.venueId,
     marketId: input.marketId,
     marketContextId: input.marketContextId,
@@ -74,6 +101,8 @@ export function sameFundingTradeConsumerIntent(
     left.marketId === right.marketId &&
     left.marketContextId === right.marketContextId &&
     left.side === right.side &&
+    canonicalJsonHash(readAttribution(left)) ===
+      canonicalJsonHash(readAttribution(right)) &&
     left.spend.raw === right.spend.raw &&
     sameAsset(left.spend.asset, right.spend.asset)
   );
@@ -95,6 +124,8 @@ export function compareFundingTradeConsumerIntentToConfirmedBound(
     confirmed.marketId !== actual.marketId ||
     confirmed.marketContextId !== actual.marketContextId ||
     confirmed.side !== actual.side ||
+    canonicalJsonHash(readAttribution(confirmed)) !==
+      canonicalJsonHash(readAttribution(actual)) ||
     !sameAsset(confirmed.spend.asset, actual.spend.asset)
   ) {
     return "scope_mismatch";
@@ -184,6 +215,7 @@ export function storedFundingTradeConsumerIntent(
         asset: collateralAsset,
         raw: context.requestedCollateralRaw,
       },
+      ...readAttribution(context),
     });
   } catch {
     return null;

@@ -45,6 +45,7 @@ test("the common catalog receives primary-side 24h notional, never summed YES/NO
     bestBid: null,
     bestAsk: null,
     priceObservedAt: null,
+    resolvedOutcomePct: null,
   });
   assert.equal(hip4CatalogProjection(market).volume24h, null);
   assert.equal(
@@ -81,6 +82,7 @@ test("the common catalog preserves the actual primary book and its observation t
     bestBid: "0.35",
     bestAsk: "0.4",
     priceObservedAt: at,
+    resolvedOutcomePct: null,
   });
 });
 

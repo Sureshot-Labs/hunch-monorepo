@@ -496,23 +496,34 @@ try {
   );
 
   // Atomic invalidation and evidence-subset reinstatement preserve immutable snapshot.
-  const run = async (state: "verified" | "revoked", observedFacts = facts) => {
+  const run = async (state: "verified" | "revoked" | "unavailable", observedFacts = facts) => {
     await requestVerifiedBuyRefresh(db, {
       userId: author,
       purchaseRef: { kind: "order", id: sourceOrder },
     });
+    // This fixture has also queued copier orders. Select the source explicitly
+    // for this one-item audit; random UUID ordering is not a claim identity.
+    await db.query("update orders set verified_buy_due_at=transaction_timestamp()-interval '1 day' where id=$1 and user_id=$2", [sourceOrder, author]);
     return repairVerifiedBuys(db, {
       batchSize: 1,
       concurrency: 1,
       leaseSeconds: 60,
       retrySeconds: 30,
       verifiedRecheckSeconds: 300,
-      observe: async () =>
-        state === "verified"
+      observe: async (claim) => {
+        assert.equal(claim.purchaseRef.id, sourceOrder);
+        assert.equal(claim.userId, author);
+        return state === "verified"
           ? { state, facts: observedFacts }
-          : { state, reason: "fixture_revoked" },
+          : state === "unavailable"
+            ? { state: "pending", reason: "observation_unavailable:hip4_status_pending" }
+            : { state, reason: "fixture_revoked" };
+      },
     });
   };
+  assert.equal((await run("unavailable")).pending, 1);
+  assert.equal((await readVerifiedBuy(db, { userId: author, purchaseRef: { kind: "order", id: sourceOrder } })).state, "verified",
+    "a detailed native temporary-read failure preserves prior confirmed money");
   assert.equal((await run("revoked")).revoked, 1);
   assert.ok(
     (
@@ -595,12 +606,14 @@ try {
     userId: author,
     purchaseRef: { kind: "order", id: sourceOrder },
   });
+  await db.query("update orders set verified_buy_due_at=transaction_timestamp()-interval '1 day' where id=$1 and user_id=$2", [sourceOrder, author]);
   const exhausted = await repairVerifiedBuys(db, {
     batchSize: 1,
     leaseSeconds: 60,
     retrySeconds: 30,
     verifiedRecheckSeconds: 300,
-    observe: async () => {
+    observe: async (claim) => {
+      assert.equal(claim.purchaseRef.id, sourceOrder);
       throw new EvidenceBudgetExhausted(102, 100);
     },
   });
@@ -779,14 +792,19 @@ try {
       };
     },
   });
-  const repairHeavy = () =>
-    repairVerifiedBuys(db, {
+  const repairHeavy = async () => {
+    await db.query("update orders set verified_buy_due_at=transaction_timestamp()-interval '1 day' where id=$1 and user_id=$2", [heavyOrder, author]);
+    return repairVerifiedBuys(db, {
       batchSize: 1,
       leaseSeconds: 60,
       retrySeconds: 30,
       verifiedRecheckSeconds: 300,
-      observe: heavyObserver,
+      observe: async claim => {
+        assert.equal(claim.purchaseRef.id, heavyOrder);
+        return heavyObserver(claim);
+      },
     });
+  };
   assert.equal((await repairHeavy()).budgetExhausted, 1);
   assert.equal(receiptReads, 0);
   providerBudget = 120;
@@ -1015,6 +1033,7 @@ try {
         "update copy_attributions set state='confirmed' where id=$1",
         [timingAttempt.id],
       );
+      await db.query("update orders set verified_buy_due_at=transaction_timestamp()-interval '1 day' where id=$1 and user_id=$2", [copyOrder, copier]);
       assert.equal(
         (
           await repairVerifiedBuys(db, {

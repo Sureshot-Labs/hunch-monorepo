@@ -11,6 +11,8 @@ import {
   withEmbeddingPinScope,
 } from "../lib/embedding-consumer.js";
 import { z as zod } from "zod";
+import { readHip4Policy } from "../services/hip4-repository.js";
+import { nativePublicReadIdAllowed } from "../repos/hip4-token-read.js";
 import {
   enabledConsumer,
   resolveEventLinks,
@@ -893,8 +895,24 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         venue ? [venue] : null,
         "discovery",
       );
+      let nativeEnvironment: "mainnet" | "testnet" | null = null;
+      if (lifecycle.venues.includes("hyperliquid")) {
+        const read = await readHip4Policy(pool, "discovery");
+        nativeEnvironment = read.policy.enabled
+          ? read.policy.environment
+          : null;
+        if (!nativeEnvironment)
+          lifecycle.venues = lifecycle.venues.filter(
+            (item) => item !== "hyperliquid",
+          );
+      }
+      if (
+        !nativePublicReadIdAllowed(eventId, nativeEnvironment) ||
+        !nativePublicReadIdAllowed(marketId ?? "", nativeEnvironment)
+      )
+        return reply.send({ items: [], cache_status: "disabled" as const });
       const lifecycleVenueSet = new Set<string>(lifecycle.venues);
-      if (venue && lifecycle.venues.length === 0) {
+      if (lifecycle.venues.length === 0) {
         return reply.send({ items: [], cache_status: "disabled" as const });
       }
       const maxScore =
@@ -966,7 +984,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
       const cacheHash = createHash("sha256")
         .update(
           JSON.stringify({
-            selectorVersion: "v9-observed-top",
+            selectorVersion: "v10-native-environment-observed-top",
             textHash,
             embeddingVersion,
             limit: cappedLimit,
@@ -974,6 +992,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
             venue: venue ?? "",
             lifecycleRevision: lifecycle.revision,
             lifecycleVenues: lifecycle.venues,
+            nativeEnvironment,
             maxScore: maxScore ?? null,
             marketId: marketId ?? "",
             seriesKey: baseSeriesKey ?? "",
@@ -1161,8 +1180,11 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
                 venue: best.venue ?? "unknown",
               }),
             );
-            eventItems = eventItems.filter((item) =>
-              lifecycleVenueSet.has(item.venue),
+            eventItems = eventItems.filter(
+              (item) =>
+                lifecycleVenueSet.has(item.venue) &&
+                nativePublicReadIdAllowed(item.eventId, nativeEnvironment) &&
+                nativePublicReadIdAllowed(item.marketId, nativeEnvironment),
             );
 
             if (!venue && eventItems.length > 0) {
@@ -1250,9 +1272,7 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
           }
         }
 
-        const searchVenues = lifecycle.venues.filter(
-          (candidate) => candidate !== "hyperliquid",
-        );
+        const searchVenues = lifecycle.venues;
         const perVenueLimit = venue
           ? cappedLimit
           : Math.min(
@@ -1351,7 +1371,9 @@ export const eventRoutes: FastifyPluginAsync = async (app) => {
         filteredItems = filteredItems.filter((item) => {
           const candidateVenue = eventMeta.get(item.eventId)?.venue;
           return (
-            candidateVenue != null && lifecycleVenueSet.has(candidateVenue)
+            candidateVenue != null &&
+            lifecycleVenueSet.has(candidateVenue) &&
+            nativePublicReadIdAllowed(item.eventId, nativeEnvironment)
           );
         });
 

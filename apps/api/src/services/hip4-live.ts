@@ -8,6 +8,7 @@ import {
   type Hip4ReadMarket,
 } from "@hunch/shared";
 import type { Pool } from "pg";
+import type { Hip4CanonicalObserver } from "./hip4-canonical-change.js";
 import type { z } from "zod";
 import { ageHip4Market, applyHip4Book } from "./hip4-mapping.js";
 import {
@@ -112,6 +113,7 @@ export async function flushHip4Live(
   batch: ReturnType<ReturnType<typeof createHip4LiveBuffer>["take"]>,
   publish: (market: Hip4ReadMarket) => Promise<void>,
   now = Date.now(),
+  onCanonicalChange?: Hip4CanonicalObserver,
 ) {
   const current = await readHip4Policy(pool, "indexer");
   if (!current.policy.enabled || current.revision !== revision) return;
@@ -176,13 +178,18 @@ export async function flushHip4Live(
     if (entries.length || intervals.length) {
       const latest = await readHip4Policy(pool, "indexer");
       if (!latest.policy.enabled || latest.revision !== revision) return;
-      await persistHip4Market(pool, {
-        market: ageHip4Market(market, now, policy),
-        raw: stored.raw,
-        trades,
-        intervals,
-        advanceCursor: false,
-      });
+      await persistHip4Market(
+        pool,
+        {
+          market: ageHip4Market(market, now, policy),
+          raw: stored.raw,
+          trades,
+          intervals,
+          advanceCursor: false,
+          policy,
+        },
+        onCanonicalChange,
+      );
     }
     // Re-read committed state even if the previous publish was lost. An idle
     // flush also repairs Redis; cached Redis data never becomes DB authority.

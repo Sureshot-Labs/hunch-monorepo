@@ -10,6 +10,26 @@ import {
 
 assert.equal(mergeSocialPolicy({}).minimumNotionalUsd, "10.00");
 assert.equal(mergeSocialPolicy({}).likesEnabled, true);
+assert.deepEqual(mergeSocialPolicy({}).publicationVenues, [
+  "polymarket",
+  "limitless",
+  "kalshi",
+]);
+assert.deepEqual(mergeSocialPolicy({}).copyVenues, [
+  "polymarket",
+  "limitless",
+  "kalshi",
+]);
+assert.deepEqual(
+  mergeSocialPolicy({ publicationVenues: ["hyperliquid"], copyVenues: [] })
+    .publicationVenues,
+  ["hyperliquid"],
+);
+assert.deepEqual(mergeSocialPolicy({ copyVenues: [] }).copyVenues, []);
+assert.throws(() =>
+  mergeSocialPolicy({ copyVenues: ["hyperliquid", "hyperliquid"] }),
+);
+assert.throws(() => mergeSocialPolicy({ publicationVenues: ["unknown"] }));
 assert.equal(mergeSocialPolicy({}).likeRateLimit, 120);
 assert.equal(mergeSocialPolicy({ likesEnabled: false }).likesEnabled, false);
 assert.equal(mergeSocialPolicy({ likeRateLimit: 3 }).likeRateLimit, 3);

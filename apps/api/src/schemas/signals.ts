@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { zVenue } from "./common.js";
+import { zReadVenue } from "./common.js";
 
 const zOptionalBool = z
   .union([z.boolean(), z.string(), z.undefined()])
@@ -32,7 +32,7 @@ export const signalsQuerySchema = z.object({
   status: signalStatusFilterSchema.optional(),
   signalType: signalTypeFilterSchema.optional(),
   direction: signalDirectionFilterSchema.optional(),
-  venue: zVenue.optional(),
+  venue: zReadVenue.optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
   offset: z.coerce.number().int().min(0).optional(),
   includeSimilarMarkets: zOptionalBool.optional(),

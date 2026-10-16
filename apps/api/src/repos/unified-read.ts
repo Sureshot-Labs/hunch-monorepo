@@ -22,6 +22,7 @@ import {
 import { buildRenderableMarketSql } from "../lib/market-renderability.js";
 import type { PgParams } from "../server-types.js";
 import { canonicalMarketTokenIdSql } from "./canonical-market-token-sql.js";
+import { fetchHip4MarketsByTokenIds } from "./hip4-token-read.js";
 
 export type FeedInputs = {
   limit: number;
@@ -7469,16 +7470,26 @@ export async function fetchMarketsByTokenIds(
     tokenIds: string[];
     venue?: string;
     includeTop?: boolean;
+    /** Public read route only, after current lifecycle/environment admission. */
+    hip4ReadEnvironment?: "mainnet" | "testnet";
     /** Only an already verified durable holding context may supply this. */
     marketAssetBinding?: { marketId: string; side: "YES" | "NO" };
     /** Server-resolved durable position contexts, never raw client metadata. */
     marketAssetContexts?: readonly PolymarketAssetContext[];
   },
 ): Promise<MarketByTokenRow[]> {
-  // Passive HIP rows are available only through the scoped read-canary DTO.
-  // Do not hydrate them as executable legacy binary markets via token lookup.
+  // Keep default financial hydration separate from explicitly admitted native
+  // public reads. Native IDs never enter the legacy execution/Polymarket joins.
+  const nativeRows =
+    inputs.hip4ReadEnvironment &&
+    (!inputs.venue || inputs.venue === "hyperliquid")
+      ? await fetchHip4MarketsByTokenIds(pool, {
+          tokenIds: inputs.tokenIds,
+          environment: inputs.hip4ReadEnvironment,
+        })
+      : [];
   const tokenIds = inputs.tokenIds.filter((id) => !isHip4CanaryId(id));
-  if (tokenIds.length === 0) return [];
+  if (tokenIds.length === 0) return nativeRows;
 
   const params: PgParams = [tokenIds];
   const rawLimitlessLookupSql =
@@ -7796,5 +7807,11 @@ export async function fetchMarketsByTokenIds(
   `;
 
   const { rows } = await pool.query<MarketByTokenRow>(sql, params);
-  return rows;
+  return nativeRows.length
+    ? [...rows, ...nativeRows].sort(
+        (left, right) =>
+          inputs.tokenIds.indexOf(left.token_id) -
+          inputs.tokenIds.indexOf(right.token_id),
+      )
+    : rows;
 }

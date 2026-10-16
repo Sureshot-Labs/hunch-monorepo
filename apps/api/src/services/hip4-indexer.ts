@@ -8,6 +8,7 @@ import {
   type Hip4Attempt,
 } from "@hunch/shared";
 import type { Pool } from "pg";
+import type { Hip4CanonicalObserver } from "./hip4-canonical-change.js";
 import { applyHip4Book, ageHip4Market, mapHip4Market } from "./hip4-mapping.js";
 import { applyHip4Volume, indexHip4AssetContexts } from "./hip4-volume.js";
 import {
@@ -44,6 +45,7 @@ export function hip4Failure(error: unknown): Hip4Attempt["result"] {
 export async function runHip4ReadCycle(
   pool: Pool,
   readOverride?: (request: Hip4InfoRequest) => Promise<unknown>,
+  onCanonicalChange?: Hip4CanonicalObserver,
 ) {
   const { policy, revision, lifecycle, disabledReason } = await readHip4Policy(
     pool,
@@ -218,11 +220,16 @@ export async function runHip4ReadCycle(
         const current = await readHip4Policy(pool, "indexer");
         if (!current.policy.enabled || current.revision !== revision) break;
         if (
-          await persistHip4Market(pool, {
-            ...mapped,
-            trades: [],
-            advanceCursor: false,
-          })
+          await persistHip4Market(
+            pool,
+            {
+              ...mapped,
+              trades: [],
+              advanceCursor: false,
+              policy,
+            },
+            onCanonicalChange,
+          )
         )
           diagnostics.catalogPublished++;
       } catch (error) {
@@ -417,7 +424,13 @@ export async function runHip4ReadCycle(
               },
             ]
           : [];
-      if (await persistHip4Market(pool, { ...mapped, trades, intervals }))
+      if (
+        await persistHip4Market(
+          pool,
+          { ...mapped, trades, intervals, policy },
+          onCanonicalChange,
+        )
+      )
         diagnostics.indexed++;
       diagnostics.writeMs += Date.now() - writeStart;
     } catch (error) {

@@ -190,7 +190,12 @@ export function socialPositionMetrics(input: {
     compareSocialDecimal(input.resolvedOutcomePct, "0") >= 0 &&
     compareSocialDecimal(input.resolvedOutcomePct, "10000") <= 0
   ) {
-    const yes = divideSocialDecimal(input.resolvedOutcomePct, "10000") ?? "0";
+    const yes =
+      divideSocialDecimal(
+        input.resolvedOutcomePct,
+        "10000",
+        Math.max(12, (input.resolvedOutcomePct.split(".")[1]?.length ?? 0) + 4),
+      ) ?? "0";
     price =
       input.outcome.toUpperCase() === "NO"
         ? subtractSocialDecimal("1", yes)

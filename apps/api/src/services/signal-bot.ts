@@ -1481,7 +1481,10 @@ export function buildSignalBotMessage(input: {
   ];
 
   const keyboardRows: TelegramInlineKeyboard["inline_keyboard"] = [];
-  const allowBuyCta = input.allowBuyCta ?? messageKind === "initial";
+  const allowBuyCta =
+    (input.allowBuyCta ?? messageKind === "initial") &&
+    normalizeHunchVenue(input.deliveryTarget?.venue ?? note.marketVenue) !==
+      "hyperliquid";
   let addedBuyButton = false;
   if (allowBuyCta && note.eventId && note.marketId && buySide) {
     const tradeTarget = input.deliveryTarget ?? {
@@ -1525,6 +1528,7 @@ export function buildSignalBotMessage(input: {
       input.chatType !== "channel" &&
       !input.deliveryTarget &&
       input.cheaperAlternative &&
+      normalizeHunchVenue(input.cheaperAlternative.venue) !== "hyperliquid" &&
       input.cheaperAlternative.side === buySide
     ) {
       const cheaperIcon = telegramCustomEmojiIdForVenue(
@@ -1688,7 +1692,7 @@ function buildSignalBotFollowthroughKeyboard(input: {
   const rows: TelegramInlineKeyboard["inline_keyboard"] = [];
   let addedBuyButton = false;
 
-  if (side) {
+  if (side && normalizeHunchVenue(target.venue) !== "hyperliquid") {
     const buyPrice = input.buyPrice;
     if (
       isSignalBotFollowthroughBuyCtaEligible({
@@ -4604,6 +4608,9 @@ async function loadSignalBotPriceGuardBlockers(input: {
   }
   try {
     const market = await findTradeMarketById(input.db, input.note.marketId);
+    if (market?.venue === "hyperliquid") {
+      return loadHip4SignalReadiness(input.db, market.id, input.buySide);
+    }
     if (!market || !isOrderable(market)) {
       return {
         blockers: [],
@@ -4742,11 +4749,46 @@ async function loadSignalBotSourceReadinessWithoutRedis(input: {
     };
   }
   const market = await findTradeMarketById(input.db, input.note.marketId);
+  if (market?.venue === "hyperliquid")
+    return loadHip4SignalReadiness(input.db, market.id, input.buySide);
   return {
     blockers: [],
     buyPrice: input.note.signalPriceSnapshotV1?.[input.buySide].ask ?? null,
     defer: false,
     orderable: Boolean(market && isOrderable(market)),
+    timedOut: false,
+  };
+}
+
+async function loadHip4SignalReadiness(
+  db: DbQuery,
+  marketId: string,
+  side: "YES" | "NO",
+): Promise<SignalBotPriceGuardResult> {
+  const quotes = (await loadClusterMarketNativeQuotes(db, [marketId])).get(
+    marketId,
+  );
+  const selected = side === "YES" ? quotes?.yes : quotes?.no;
+  const offer = selected
+    ? resolveStrictClusterNativeOffer({
+        maxAgeMs: PRICE_GUARD_MAX_FRESH_AGE_MS,
+        nativeOutcome: side,
+        nowMs: Date.now(),
+        top: selected,
+      })
+    : null;
+  return {
+    blockers: !quotes?.orderable
+      ? []
+      : !offer
+        ? ["missing_side_price"]
+        : !offer.fresh
+          ? ["live_price_stale"]
+          : [],
+    buyPrice: offer?.fresh ? offer.ask : null,
+    quoteAsOf: selected?.asOf ?? null,
+    defer: Boolean(quotes?.orderable && (!offer || !offer.fresh)),
+    orderable: quotes?.orderable === true,
     timedOut: false,
   };
 }
@@ -4936,6 +4978,13 @@ export async function prepareSignalBotDelivery(input: {
           venue: input.note.marketVenue ?? "unknown",
         }
       : null);
+  // Signal delivery is navigation/review, never native bot execution. Preserve
+  // the exact target/side while using the existing Open-in-Hunch app handoff.
+  if (
+    normalizeHunchVenue(deliveryTarget?.venue ?? input.note.marketVenue) ===
+    "hyperliquid"
+  )
+    allowBuyCta = false;
   const openPriceSnapshot =
     !allowBuyCta &&
     !stalePriceSnapshot &&

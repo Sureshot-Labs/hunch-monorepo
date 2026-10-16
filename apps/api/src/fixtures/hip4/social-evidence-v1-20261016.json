@@ -1,0 +1,213 @@
+{
+  "version": 1,
+  "collectedAt": "2026-10-16T19:11:44.400Z",
+  "origin": "sanitized-public-read-and-explicit-synthetic-contract",
+  "sources": {
+    "info": "https://api.hyperliquid.xyz/info",
+    "infoDocumentation": "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint",
+    "officialOutcomeMechanics": "https://hyperliquid.gitbook.io/hyperliquid-docs/hyperliquid-improvement-proposals-hips/hip-4-outcome-markets",
+    "assetDocumentation": "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/asset-ids",
+    "officialSdkFillType": "https://github.com/hyperliquid-dex/hyperliquid-python-sdk/blob/master/hyperliquid/utils/types.py",
+    "existingTwoFillBuy": "public-account-observations-20261012.json",
+    "existingDualPublicTrades": "volume-observations-20261012.json"
+  },
+  "research": {
+    "requestCount": 9,
+    "maximumRequests": 16,
+    "publicParticipants": 3,
+    "requestTypes": [
+      "outcomeMeta",
+      "recentTrades",
+      "historicalOrders",
+      "userFillsByTime"
+    ],
+    "fillWindowHours": 24,
+    "completeHistory": false,
+    "primaryDualOrderAssociationProven": false,
+    "observedHistoryKeys": ["order", "status", "statusTimestamp"],
+    "observedOrderKeys": [
+      "coin",
+      "side",
+      "limitPx",
+      "sz",
+      "oid",
+      "timestamp",
+      "triggerCondition",
+      "isTrigger",
+      "triggerPx",
+      "children",
+      "isPositionTpsl",
+      "reduceOnly",
+      "orderType",
+      "origSz",
+      "tif",
+      "cloid"
+    ],
+    "observedFillKeys": [
+      "coin",
+      "px",
+      "sz",
+      "side",
+      "time",
+      "startPosition",
+      "dir",
+      "closedPnl",
+      "hash",
+      "oid",
+      "crossed",
+      "fee",
+      "tid",
+      "feeToken",
+      "twapId",
+      "cloid"
+    ],
+    "officialMechanics": "The official outcome specification describes merged complementary books and says historical order responses can contain separate primary and dual entries after an order both crosses and rests. It specifies no authoritative order-alias linkage field.",
+    "conclusion": "Standard original coin/OID/cloid joins are observed. No authoritative primary-to-dual order link is present in sampled order/fill fields. Complementary price, equal amount/time, shared transaction hash or cloid alone do not establish an alias. Unproved alternate representations remain uncounted, not a separate purchase and not a reason to revoke an independently proved original BUY.",
+    "sanitization": "Participant addresses were used only in process memory and omitted from output. OIDs, tids, cloids and hashes are consistently aliased within this capture. Numeric economic quantities and timestamps are retained. No credentials, account creation, signatures or exchange writes were used. Synthetic signing envelope and instrument below are NOT observed user authorizations."
+  },
+  "canonicalContract": {
+    "owner": "0x0000000000000000000000000000000000000001",
+    "primaryOrderId": "1",
+    "cloid": "0x00000000000000000000000000000001",
+    "purchaseKey": "hyperliquid:purchase:v1:mainnet:0x0000000000000000000000000000000000000001:1",
+    "providerReference": "hyperliquid:cloid:v1:mainnet:0x0000000000000000000000000000000000000001:0x00000000000000000000000000000001",
+    "syntheticActionFingerprint": "02c94bf577d1aeba25475674314f8c84abe0584cbd5e34d8f40ef8dec3d72d3f",
+    "notionalDecimals": 13,
+    "shareDecimals": 5,
+    "nativeFeeDecimals": 8,
+    "feeIncludesBuilderFee": true
+  },
+  "syntheticEnvelope": {
+    "environment": "mainnet",
+    "action": {
+      "type": "order",
+      "orders": [
+        {
+          "a": 100133430,
+          "b": true,
+          "p": "0.26",
+          "s": "56",
+          "r": false,
+          "t": { "limit": { "tif": "Alo" } },
+          "c": "0x00000000000000000000000000000001"
+        }
+      ],
+      "grouping": "na"
+    },
+    "nonce": 1792177814392,
+    "vaultAddress": null,
+    "expiresAfter": 1792177874392
+  },
+  "syntheticInstrument": {
+    "venue": "hyperliquid",
+    "marketId": "hyperliquid:mainnet:outcome:13343",
+    "tokenId": "hyperliquid:mainnet:133430",
+    "outcome": "YES",
+    "generation": "hyperliquid-outcome-v1:mainnet:13343",
+    "expiry": "2026-10-17T06:00:00.000Z"
+  },
+  "originalPartialBuy": {
+    "participantAlias": "participant-1",
+    "origin": "observed-sanitized-historicalOrders-and-userFillsByTime",
+    "orderStatus": {
+      "status": "order",
+      "order": {
+        "order": {
+          "coin": "#133430",
+          "side": "B",
+          "limitPx": "0.26",
+          "sz": "29.0",
+          "oid": 1,
+          "timestamp": 1792177814392,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "56.0",
+          "tif": "Alo",
+          "cloid": "0x00000000000000000000000000000001"
+        },
+        "status": "canceled",
+        "statusTimestamp": 1792177815889
+      }
+    },
+    "fills": [
+      {
+        "coin": "#133430",
+        "px": "0.26",
+        "sz": "27.0",
+        "side": "B",
+        "time": 1792177814778,
+        "startPosition": "50.0",
+        "dir": "Buy",
+        "closedPnl": "0.0",
+        "hash": "0x0000000000000000000000000000000000000000000000000000000000000002",
+        "oid": 1,
+        "crossed": false,
+        "fee": "0.0",
+        "tid": 2,
+        "cloid": "0x00000000000000000000000000000001",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ],
+    "expected": {
+      "notionalRaw": "70200000000000",
+      "sharesRaw": "2700000",
+      "feesUsdRaw": "0",
+      "fullQuantityObserved": false
+    }
+  },
+  "originalFilledBuy": {
+    "participantAlias": "participant-1",
+    "origin": "observed-sanitized-historicalOrders-and-userFillsByTime",
+    "orderStatus": {
+      "status": "order",
+      "order": {
+        "order": {
+          "coin": "#133430",
+          "side": "B",
+          "limitPx": "0.44196",
+          "sz": "0.0",
+          "oid": 2,
+          "timestamp": 1792177567149,
+          "triggerCondition": "N/A",
+          "isTrigger": false,
+          "triggerPx": "0.0",
+          "children": [],
+          "isPositionTpsl": false,
+          "reduceOnly": false,
+          "orderType": "Limit",
+          "origSz": "50.0",
+          "tif": "Ioc",
+          "cloid": "0x00000000000000000000000000000002"
+        },
+        "status": "filled",
+        "statusTimestamp": 1792177567149
+      }
+    },
+    "fills": [
+      {
+        "coin": "#133430",
+        "px": "0.44",
+        "sz": "50.0",
+        "side": "B",
+        "time": 1792177567149,
+        "startPosition": "0.0",
+        "dir": "Buy",
+        "closedPnl": "0.0",
+        "hash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "oid": 2,
+        "crossed": true,
+        "fee": "0.0",
+        "tid": 1,
+        "cloid": "0x00000000000000000000000000000002",
+        "feeToken": "USDC",
+        "twapId": null
+      }
+    ]
+  }
+}

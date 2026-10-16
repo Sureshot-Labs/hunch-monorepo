@@ -34,6 +34,11 @@ import {
 import { buildSocialInstrument } from "./social-instrument.js";
 import { verifiedBuyFactsSchema } from "../schemas/social-trade.js";
 import { recordOnboardingProfileWrite } from "./onboarding-service.js";
+import { readSocialCopyVenues } from "./social-venue-capabilities.js";
+import {
+  hip4SocialMarketOpen,
+  hip4SocialMark,
+} from "./hip4-social-valuation.js";
 
 type Row = {
   id: string;
@@ -157,6 +162,12 @@ async function market(
   return rows[0] ?? null;
 }
 function accepting(row: Row | null): boolean {
+  if (row?.venue === "hyperliquid")
+    return (
+      row.status === "ACTIVE" &&
+      row.resolved_outcome === null &&
+      hip4SocialMarketOpen(row.metadata)
+    );
   return (
     row !== null &&
     publicHunchAcceptingOrders({
@@ -646,6 +657,10 @@ export class SocialService {
     else if (!resolved.policy.enabled || !resolved.policy.publicationsEnabled)
       reason = "publications_disabled";
     else if (
+      !resolved.policy.publicationVenues.includes(facts.instrument.venue)
+    )
+      reason = "venue_publications_disabled";
+    else if (
       compareSocialDecimal(
         facts.grossNotionalUsd,
         resolved.policy.minimumNotionalUsd,
@@ -706,6 +721,8 @@ export class SocialService {
       if (buy.state !== "verified" || !buy.facts)
         throw new SocialError(buy.reason ?? "buy_not_verified", 409);
       const facts = buy.facts;
+      if (!policy.publicationVenues.includes(facts.instrument.venue))
+        throw new SocialError("venue_publications_disabled", 409);
       const existing = await db.query(
         `select id from user_theses where canonical_purchase_key=$1`,
         [facts.canonicalPurchaseKey],
@@ -775,8 +792,10 @@ export class SocialService {
   ) {
     if (!ids.length) return [];
     let policy: SocialPolicy | null = null;
+    let copyVenues: SocialPolicy["copyVenues"] = [];
     try {
       policy = (await resolveSocialPolicy(this.db)).policy;
+      copyVenues = await readSocialCopyVenues(this.db, policy);
     } catch (error) {
       if (!(error instanceof SocialPolicyUnavailableError)) throw error;
     }
@@ -832,7 +851,14 @@ export class SocialService {
           resolvedOutcome: matching ? row.resolved_outcome : null,
           resolvedOutcomePct: matching ? row.resolved_outcome_pct : null,
           active: canTrade,
-          mark: row.mark,
+          mark:
+            row.venue === "hyperliquid" && matching
+              ? hip4SocialMark({
+                  metadata: row.metadata,
+                  tokenId: facts.instrument.tokenId,
+                  maxAgeSeconds: policy?.markMaxAgeSeconds ?? null,
+                })
+              : row.mark,
         }),
         commentCount: row.comment_count,
         likeCount: row.like_count,
@@ -840,6 +866,7 @@ export class SocialService {
         copyCount: row.copy_count,
         canCopy:
           Boolean(policy?.enabled && policy.copyEnabled) &&
+          copyVenues.includes(facts.instrument.venue) &&
           canTrade &&
           visibility === "public" &&
           viewerId !== row.author_id,
@@ -960,12 +987,20 @@ export class SocialService {
     };
   }
 
+  async getHunch(viewerId: string | null, id: string) {
+    const [item] = await this.loadHunches(viewerId, [id]);
+    if (!item) throw new SocialError("hunch_not_found", 404);
+    return item;
+  }
+
   private async loadHunches(viewerId: string | null, ids: string[]) {
     if (!ids.length) return [];
     let copyEnabled = false;
+    let copyVenues: SocialPolicy["copyVenues"] = [];
     try {
       const { policy } = await resolveSocialPolicy(this.db);
       copyEnabled = policy.enabled && policy.copyEnabled;
+      copyVenues = await readSocialCopyVenues(this.db, policy);
     } catch (error) {
       if (!(error instanceof SocialPolicyUnavailableError)) throw error;
     }
@@ -1012,6 +1047,7 @@ export class SocialService {
           copyEnabled &&
           row.note_type === "signal" &&
           instrument.success &&
+          copyVenues.includes(instrument.data.venue) &&
           this.instrumentMatches(instrument.data, row) &&
           accepting(row),
       };

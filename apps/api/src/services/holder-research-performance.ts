@@ -15,6 +15,8 @@ import {
 import type { HolderResearchPolicy } from "./runtime-policies.js";
 import { buildWalletIntelAcceptingOrdersSql } from "./wallet-intel-market-eligibility.js";
 import { loadDeliveredHolderResearchCohort } from "./holder-research-delivered-cohort.js";
+import { hip4ClusterQuotes } from "./cluster-execution-quotes.js";
+import { hip4SocialMarketOpen } from "./hip4-social-valuation.js";
 
 export type HolderResearchSignalSide = "YES" | "NO";
 export type HolderResearchExecutionPriority = "normal" | "high_conviction";
@@ -46,6 +48,7 @@ export type HolderResearchSignalSnapshot = {
 };
 
 export type HolderResearchBuyPriceSource =
+  | "native_ask"
   | "yes_ask"
   | "no_from_yes_bid"
   | "yes_mid"
@@ -55,6 +58,7 @@ export type HolderResearchBuyPriceSource =
   | "missing";
 
 export type HolderResearchMarkPriceSource =
+  | "native_bid"
   | "yes_bid"
   | "no_from_yes_ask"
   | "yes_mid"
@@ -408,8 +412,13 @@ export function resolveHolderResearchSignalQuote(
     best_bid: unknown;
     best_ask: unknown;
     last_price: unknown;
+    venue?: string | null;
+    market_id?: string | null;
+    market_status?: string | null;
+    market_metadata?: unknown;
   },
   side: HolderResearchSignalSide,
+  now = Date.now(),
 ): {
   yesBid: number | null;
   yesAsk: number | null;
@@ -420,6 +429,28 @@ export function resolveHolderResearchSignalQuote(
   markPrice: number | null;
   markPriceSource: HolderResearchMarkPriceSource;
 } {
+  if (row.venue === "hyperliquid") {
+    const quotes = hip4ClusterQuotes({
+      marketId: row.market_id ?? "",
+      metadata: row.market_metadata,
+      active: row.market_status === "ACTIVE",
+      now,
+    });
+    const selected = side === "YES" ? quotes.yes : quotes.no;
+    return {
+      yesBid: quotes.yes.bid,
+      yesAsk: quotes.yes.ask,
+      lastPrice: null,
+      yesMid:
+        quotes.yes.bid !== null && quotes.yes.ask !== null
+          ? (quotes.yes.bid + quotes.yes.ask) / 2
+          : null,
+      buyPrice: selected.ask,
+      buyPriceSource: selected.ask !== null ? "native_ask" : "missing",
+      markPrice: selected.bid,
+      markPriceSource: selected.bid !== null ? "native_bid" : "missing",
+    };
+  }
   const yesBid = normalizePrice(row.best_bid);
   const yesAsk = normalizePrice(row.best_ask);
   const lastPrice = normalizePrice(row.last_price);
@@ -513,6 +544,7 @@ export async function buildHolderResearchSignalSnapshot(
         m.event_id,
         m.venue,
         m.status as market_status,
+        m.metadata as market_metadata,
         m.best_bid,
         m.best_ask,
         m.last_price,
@@ -547,17 +579,26 @@ export async function buildHolderResearchSignalSnapshot(
   );
   const row = rows[0];
   if (!row) return null;
-  const quote = resolveHolderResearchSignalQuote(row, side);
+  const recordedAt = params.recordedAt ?? new Date();
+  const quote = resolveHolderResearchSignalQuote(
+    row,
+    side,
+    recordedAt.getTime(),
+  );
   return {
     version: 1,
-    recordedAt: (params.recordedAt ?? new Date()).toISOString(),
+    recordedAt: recordedAt.toISOString(),
     marketId: row.market_id,
     eventId: row.event_id,
     venue: row.venue,
     side,
     direction: directionFromSide(side),
     marketStatus: row.market_status,
-    acceptingOrders: row.accepting_orders,
+    acceptingOrders:
+      row.venue === "hyperliquid"
+        ? row.market_status === "ACTIVE" &&
+          hip4SocialMarketOpen(row.market_metadata, recordedAt.getTime())
+        : row.accepting_orders,
     resolvedOutcome: normalizeSide(row.resolved_outcome),
     resolvedOutcomePct: toNumber(row.resolved_outcome_pct),
     tokens: {
