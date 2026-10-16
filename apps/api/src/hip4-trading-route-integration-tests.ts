@@ -428,6 +428,34 @@ try {
   assert.equal(quote.json().providerCapacity.includesHunchHolds, false);
   assert.equal(quote.json().fees.fundingCostsIncluded, false);
   assert.equal(quote.json().fees.buyFeeCapRaw, "0");
+  const quoteMetadata = (
+    await pool.query("select metadata from unified_markets where id=$1", [
+      request.marketId,
+    ])
+  ).rows[0].metadata;
+  const expiringMetadata = structuredClone(quoteMetadata);
+  const quoteMarketExpiry = new Date(Date.now() + 5000).toISOString();
+  expiringMetadata.hip4.expiry = quoteMarketExpiry;
+  await pool.query(
+    "update unified_markets set metadata=$2::jsonb,expiration_time=$3 where id=$1",
+    [request.marketId, JSON.stringify(expiringMetadata), quoteMarketExpiry],
+  );
+  for (const [path, body] of [
+    ["/orders/quote", request],
+    ["/orders/market-quote", marketRequest],
+  ] as const) {
+    await resetBudget();
+    const cappedQuote = await post(path, body);
+    assert.equal(cappedQuote.statusCode, 200, cappedQuote.body);
+    assert.ok(
+      Date.parse(cappedQuote.json().expiresAt) <= Date.parse(quoteMarketExpiry),
+      "ordinary and IOC quote lifetimes cannot extend beyond a known native market expiry",
+    );
+  }
+  await pool.query(
+    "update unified_markets set metadata=$2::jsonb,expiration_time=null where id=$1",
+    [request.marketId, JSON.stringify(quoteMetadata)],
+  );
   assert.equal(
     (
       await pool.query(
@@ -559,6 +587,49 @@ try {
     discarded.typedData.domain,
     discarded.typedData.types,
     discarded.typedData.message,
+  );
+  for (const change of ["stale", "generation", "expired"] as const) {
+    const changedMetadata = structuredClone(quoteMetadata);
+    if (change === "stale")
+      changedMetadata.hip4.metadataValidUntil = "2000-01-01T00:00:00.000Z";
+    if (change === "generation")
+      changedMetadata.hip4.description += " changed after preparation";
+    if (change === "expired")
+      changedMetadata.hip4.expiry = "2000-01-01T00:00:00.000Z";
+    await pool.query(
+      "update unified_markets set metadata=$2::jsonb,expiration_time=$3 where id=$1",
+      [
+        request.marketId,
+        JSON.stringify(changedMetadata),
+        changedMetadata.hip4.expiry,
+      ],
+    );
+    await resetBudget();
+    const refused = await post("/orders/submit", {
+      actionId: discarded.actionId,
+      signature: discardedSignature,
+    });
+    assert.equal(refused.statusCode, 409, refused.body);
+    assert.equal(refused.json().error, "hip4_market_unavailable");
+    assert.equal(
+      posts,
+      0,
+      "native contract refusal never reaches a provider POST",
+    );
+    const absent = await app.inject({
+      url: `/orders/actions/${discarded.actionId}`,
+      headers,
+    });
+    assert.equal(absent.statusCode, 200, absent.body);
+    assert.equal(
+      absent.json().submissionState,
+      null,
+      "owned Check exposes the rolled-back first admission for explicit discard/fresh Review",
+    );
+  }
+  await pool.query(
+    "update unified_markets set metadata=$2::jsonb,expiration_time=null where id=$1",
+    [request.marketId, JSON.stringify(quoteMetadata)],
   );
   const beforeDiscardReads = reads;
   await lifecycle("unreleased");
@@ -836,6 +907,12 @@ try {
   assert.equal(strangerRead.statusCode, 404);
   assert.equal(reads, beforeHistoryReads, "history has no provider IO");
   await lifecycle("active");
+  // The cancellation/history scenario intentionally closed this instrument.
+  // Restore its factual availability before isolating a provider-read error.
+  await pool.query(
+    "update unified_markets set status='ACTIVE',metadata=$2::jsonb,expiration_time=null where id=$1",
+    [request.marketId, JSON.stringify(quoteMetadata)],
+  );
   await resetBudget();
   failReads = true;
   const failedRead = await post("/orders/quote", {

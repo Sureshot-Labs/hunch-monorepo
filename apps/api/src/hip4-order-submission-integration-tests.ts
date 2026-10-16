@@ -34,6 +34,7 @@ import { prepareHip4TradeSigning } from "./services/hip4-trade-signing.js";
 import { readHip4TradingPolicy } from "./repos/hip4-trading-policy.js";
 import { HIP4_ORDER_RECOVERY_SQL } from "./repos/hip4-order-recovery.js";
 import { HYPERCORE_MAINNET_USDC } from "./funding/domain/hypercore-identity.js";
+import { canonicalJsonHash } from "./funding/persistence/canonical.js";
 import { fetchUserFinancialLifecycleSummary } from "./services/user-financial-lifecycle.js";
 import {
   FundingMergeConflictError,
@@ -226,8 +227,11 @@ try {
     "corrected policy recovers without cache reset",
   );
   await client.query("savepoint production_native_capability");
-  assert.equal((await productionAdmit(client, input)).admitted, true,
-    "an explicitly active common venue policy supports the implemented native admission");
+  assert.equal(
+    (await productionAdmit(client, input)).admitted,
+    true,
+    "an explicitly active common venue policy supports the implemented native admission",
+  );
   await client.query("rollback to savepoint production_native_capability");
   await rejects(
     () => admit(client, { ...input, actor: "telegram_bot" }),
@@ -253,6 +257,215 @@ try {
     () => admit(client, { ...input, context: { ...context, capacity: null } }),
     /capacity_unavailable/u,
   );
+  // Ordinary orders use the same current native contract as Copy, without
+  // requiring social policy. Each refusal rolls back funding claims and holds.
+  for (const [modeIndex, mode] of [
+    "DIRECT_BUY",
+    "FUNDED_BUY",
+    "SELL",
+  ].entries()) {
+    await client.query("savepoint ordinary_native_contract");
+    const side = mode === "SELL" ? "SELL" : "BUY";
+    const nativePreparation = await prepare(client, {
+      ...fixture,
+      nonce: fixture.nonce + 2000 + modeIndex,
+      request: {
+        ...fixture.request,
+        requestKey: randomUUID(),
+        side,
+        consentedDebitCapRaw: side === "SELL" ? "400000" : "150000000",
+      },
+    });
+    const nativeToken = (
+      await client.query(
+        "select token_id from hip4_order_actions where id=$1",
+        [nativePreparation.actionId],
+      )
+    ).rows[0].token_id as string;
+    const nativeFunding =
+      mode === "FUNDED_BUY"
+        ? await hip4FundedOrderTestFixture(client, {
+            userId: fixture.userId,
+            profile: fixture.profile,
+            marketId: fixture.request.marketId,
+            tokenId: nativeToken,
+          })
+        : undefined;
+    const nativeInput = {
+      ...input,
+      actionId: nativePreparation.actionId,
+      signature: await signed(nativePreparation),
+      funding: nativeFunding,
+      context: {
+        ...context,
+        capacity: {
+          ...capacity,
+          assetId: side === "SELL" ? nativeToken : capacity.assetId,
+          decimals: side === "SELL" ? 5 : 8,
+          availableRaw: "10000000000",
+        },
+      },
+    };
+    const originalMetadata = (
+      await client.query("select metadata from unified_markets where id=$1", [
+        fixture.request.marketId,
+      ])
+    ).rows[0].metadata;
+    for (const change of [
+      "expired",
+      "stale",
+      "generation",
+      "canonical_expiry",
+      "quote_identity",
+    ] as const) {
+      const metadata = structuredClone(originalMetadata);
+      if (change === "expired")
+        metadata.hip4.expiry = "2000-01-01T00:00:00.000Z";
+      if (change === "stale")
+        metadata.hip4.metadataValidUntil = "2000-01-01T00:00:00.000Z";
+      if (change === "generation")
+        metadata.hip4.description += " changed resolution condition";
+      if (change === "quote_identity") metadata.hip4.quoteWeiDecimals = 6;
+      await client.query(
+        "update unified_markets set metadata=$2::jsonb,expiration_time=$3 where id=$1",
+        [
+          fixture.request.marketId,
+          JSON.stringify(metadata),
+          change === "canonical_expiry"
+            ? "2000-01-01T00:00:00.000Z"
+            : metadata.hip4.expiry,
+        ],
+      );
+      await rejects(
+        () => admit(client, nativeInput),
+        /hip4_market_unavailable/u,
+      );
+      assert.equal(
+        (
+          await client.query(
+            "select count(*)::int as n from hip4_order_submissions where action_id=$1",
+            [nativePreparation.actionId],
+          )
+        ).rows[0].n,
+        0,
+      );
+      if (nativeFunding)
+        assert.equal(
+          (
+            await client.query(
+              "select count(*)::int as n from funding_trade_attempts where operation_id=$1",
+              [nativeFunding.operationId],
+            )
+          ).rows[0].n,
+          0,
+        );
+    }
+    const refreshed = structuredClone(originalMetadata);
+    refreshed.hip4.generation = "harmless-read-refresh";
+    refreshed.hip4.fetchedAt = new Date().toISOString();
+    await client.query(
+      "update unified_markets set metadata=$2::jsonb,expiration_time=null where id=$1",
+      [fixture.request.marketId, JSON.stringify(refreshed)],
+    );
+    assert.equal(
+      (await admit(client, nativeInput)).admitted,
+      true,
+      `${mode} recovers immediately with the same economic contract and fresh provenance`,
+    );
+    await client.query("rollback to savepoint ordinary_native_contract");
+  }
+  // Historical preparations can have the old social-only native proof and a
+  // valid signature window longer than the now-known contract expiry. Insert
+  // that exact old shape; never mutate an immutable authorization to test it.
+  await client.query("savepoint legacy_uncapped_native");
+  const legacyMetadata = (
+    await client.query("select metadata from unified_markets where id=$1", [
+      fixture.request.marketId,
+    ])
+  ).rows[0].metadata;
+  legacyMetadata.hip4.expiry = new Date(Date.now() + 30000).toISOString();
+  await client.query(
+    "update unified_markets set metadata=$2::jsonb,expiration_time=$3 where id=$1",
+    [
+      fixture.request.marketId,
+      JSON.stringify(legacyMetadata),
+      legacyMetadata.hip4.expiry,
+    ],
+  );
+  const cappedSource = await prepare(client, {
+    ...fixture,
+    nonce: fixture.nonce + 2010,
+    request: { ...fixture.request, requestKey: randomUUID() },
+  });
+  if (cappedSource.envelope.action.type !== "order")
+    throw new Error("expected native order");
+  const legacyActionId = randomUUID(),
+    legacyOrderId = randomUUID(),
+    legacyKey = randomUUID();
+  const legacyCloid = `0x${randomUUID().replaceAll("-", "")}`;
+  const legacyEnvelope = {
+    ...cappedSource.envelope,
+    nonce: fixture.nonce + 2011,
+    expiresAfter: Date.now() + 60000,
+    action: {
+      ...cappedSource.envelope.action,
+      orders: [{ ...cappedSource.envelope.action.orders[0], c: legacyCloid }],
+    },
+  };
+  const legacyFingerprint = canonicalJsonHash(legacyEnvelope);
+  await client.query(
+    `insert into orders(id,user_id,venue,token_id,side,order_type,price,size,status,wallet_address,signer_address)
+     select $1,user_id,venue,token_id,side,order_type,price,size,status,wallet_address,signer_address from orders where id=$2`,
+    [legacyOrderId, cappedSource.orderId],
+  );
+  await client.query(
+    `insert into hip4_order_actions(id,order_id,request_key,request_fingerprint,action_kind,environment,signer_address,canonical_market_id,token_id,cloid,nonce,action_fingerprint,unsigned_envelope,preparation_snapshot)
+     select $1,$2,$3,$4,action_kind,environment,signer_address,canonical_market_id,token_id,$5,$6,$7,$8::jsonb,
+       preparation_snapshot-'nativeInstrument'-'nativeInstrumentSnapshot' from hip4_order_actions where id=$9`,
+    [
+      legacyActionId,
+      legacyOrderId,
+      legacyKey,
+      canonicalJsonHash({ ...fixture.request, requestKey: legacyKey }),
+      legacyCloid,
+      legacyEnvelope.nonce,
+      legacyFingerprint,
+      legacyEnvelope,
+      cappedSource.actionId,
+    ],
+  );
+  await client.query(
+    "insert into hyperliquid_nonce_claims(environment,signer_address,nonce,action_fingerprint,order_action_id) values('mainnet',$1,$2,$3,$4)",
+    [
+      wallet.address.toLowerCase(),
+      legacyEnvelope.nonce,
+      legacyFingerprint,
+      legacyActionId,
+    ],
+  );
+  const legacySignature = await signed({
+    ...cappedSource,
+    envelope: legacyEnvelope,
+  });
+  await rejects(
+    () =>
+      admit(client, {
+        ...input,
+        actionId: legacyActionId,
+        signature: legacySignature,
+      }),
+    /hip4_preparation_unavailable/u,
+  );
+  assert.equal(
+    (
+      await client.query(
+        "select count(*)::int as n from hip4_order_submissions where action_id=$1",
+        [legacyActionId],
+      )
+    ).rows[0].n,
+    0,
+  );
+  await client.query("rollback to savepoint legacy_uncapped_native");
   await client.query("savepoint policy_change");
   await policy("exit-only");
   await rejects(() => admit(client, input), /lifecycle_disabled/u);
@@ -1173,6 +1386,54 @@ try {
   ]);
   assert.equal(postCount, 1);
   assert.equal(results.filter((item) => item.replayed).length, 1);
+  const replayMetadata = (
+    await client.query("select metadata from unified_markets where id=$1", [
+      durable.request.marketId,
+    ])
+  ).rows[0].metadata;
+  const closedMetadata = structuredClone(replayMetadata);
+  closedMetadata.hip4.description += " changed after ambiguous submission";
+  closedMetadata.hip4.metadataValidUntil = "2000-01-01T00:00:00.000Z";
+  const retainedHold = await readHip4OrderHoldRaw(
+    client,
+    durable.userId,
+    wallet.address,
+    HYPERCORE_MAINNET_USDC.assetId,
+  );
+  await client.query(
+    "update unified_markets set status='CLOSED',metadata=$2::jsonb,expiration_time='2000-01-01' where id=$1",
+    [durable.request.marketId, JSON.stringify(closedMetadata)],
+  );
+  assert.equal(
+    (
+      await submitHip4OrderAction(
+        pool,
+        {
+          ...durableInput,
+          context: { ...durableInput.context, capacity: null },
+        },
+        transport,
+        testCapability,
+      )
+    ).replayed,
+    true,
+    "committed unknown result bypasses changed/closed/expired market and unavailable current cash",
+  );
+  assert.equal(postCount, 1, "unknown replay never obtains a second POST");
+  assert.equal(
+    await readHip4OrderHoldRaw(
+      client,
+      durable.userId,
+      wallet.address,
+      HYPERCORE_MAINNET_USDC.assetId,
+    ),
+    retainedHold,
+    "market closure and replay cannot release the unknown order hold",
+  );
+  await client.query(
+    "update unified_markets set status='ACTIVE',metadata=$2::jsonb,expiration_time=null where id=$1",
+    [durable.request.marketId, JSON.stringify(replayMetadata)],
+  );
   const source = (
     await client.query("select * from users where id=$1", [durable.userId])
   ).rows[0];
@@ -1278,6 +1539,183 @@ try {
     await waiter.query("rollback");
     waiter.release();
   }
+  const nativeWaitBaseline = (
+    await client.query("select metadata from unified_markets where id=$1", [
+      durable.request.marketId,
+    ])
+  ).rows[0].metadata;
+  for (const mode of ["DIRECT_BUY", "FUNDED_BUY", "SELL"] as const) {
+    for (const change of ["expired", "stale", "generation"] as const) {
+      const side = mode === "SELL" ? "SELL" : "BUY";
+      const cutoff = Date.now() + 1000;
+      const metadata = structuredClone(nativeWaitBaseline);
+      if (change === "expired")
+        metadata.hip4.expiry = new Date(cutoff).toISOString();
+      if (change === "stale")
+        metadata.hip4.metadataValidUntil = new Date(cutoff).toISOString();
+      await client.query("begin");
+      await client.query(
+        "update unified_markets set metadata=$2::jsonb,expiration_time=$3 where id=$1",
+        [
+          durable.request.marketId,
+          JSON.stringify(metadata),
+          metadata.hip4.expiry,
+        ],
+      );
+      const next = await prepare(client, {
+        ...durable,
+        nonce: Date.now() - 1,
+        expiresAfter: Date.now() + 60000,
+        request: {
+          ...durable.request,
+          requestKey: randomUUID(),
+          side,
+          consentedDebitCapRaw: side === "SELL" ? "400000" : "150000000",
+        },
+      });
+      const nativeToken = (
+        await client.query(
+          "select token_id from hip4_order_actions where id=$1",
+          [next.actionId],
+        )
+      ).rows[0].token_id as string;
+      const funding =
+        mode === "FUNDED_BUY"
+          ? await hip4FundedOrderTestFixture(client, {
+              userId: durable.userId,
+              profile: durable.profile,
+              marketId: durable.request.marketId,
+              tokenId: nativeToken,
+            })
+          : undefined;
+      const nextInput = {
+        ...crashedAction,
+        actionId: next.actionId,
+        signature: await signed(next),
+        funding,
+        context: {
+          ...crashedAction.context,
+          capacity: {
+            ...crashedAction.context.capacity,
+            assetId:
+              side === "SELL" ? nativeToken : HYPERCORE_MAINNET_USDC.assetId,
+            decimals: side === "SELL" ? 5 : 8,
+            availableRaw: "10000000000",
+          },
+        },
+      };
+      await client.query("commit");
+      const nativeWaiter = await pool.connect();
+      try {
+        await client.query("begin");
+        if (change === "generation")
+          await client.query("select id from users where id=$1 for update", [
+            durable.userId,
+          ]);
+        else
+          await client.query(
+            "select id from hip4_order_actions where id=$1 for update",
+            [next.actionId],
+          );
+        await nativeWaiter.query("begin");
+        const waiterPid = (
+          await nativeWaiter.query("select pg_backend_pid() as pid")
+        ).rows[0].pid;
+        const pending = admit(nativeWaiter, nextInput);
+        void pending.catch(() => undefined);
+        let blocked = false;
+        while (!blocked && Date.now() < cutoff - 50) {
+          blocked = (
+            await pool.query(
+              "select cardinality(pg_blocking_pids($1))>0 as blocked",
+              [waiterPid],
+            )
+          ).rows[0].blocked;
+          if (!blocked) await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        assert.equal(
+          blocked,
+          true,
+          `${mode}/${change} must reach a real admission lock wait`,
+        );
+        if (change === "generation") {
+          metadata.hip4.description += " concurrently changed resolution";
+          await client.query(
+            "update unified_markets set metadata=$2::jsonb where id=$1",
+            [durable.request.marketId, JSON.stringify(metadata)],
+          );
+        } else {
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.max(0, cutoff - Date.now() + 20)),
+          );
+        }
+        await client.query("commit");
+        await assert.rejects(
+          pending,
+          change === "expired"
+            ? /preparation_expired/u
+            : /hip4_market_unavailable/u,
+        );
+        await nativeWaiter.query("rollback");
+        assert.equal(
+          (
+            await client.query(
+              "select count(*)::int as n from hip4_order_submissions where action_id=$1",
+              [next.actionId],
+            )
+          ).rows[0].n,
+          0,
+        );
+        if (funding)
+          assert.equal(
+            (
+              await client.query(
+                "select count(*)::int as n from funding_trade_attempts where operation_id=$1",
+                [funding.operationId],
+              )
+            ).rows[0].n,
+            0,
+          );
+        // A new Review/preparation immediately recovers; no cooldown or hold
+        // repair is necessary after a rejected first admission.
+        await client.query("begin");
+        await client.query(
+          "update unified_markets set metadata=$2::jsonb,expiration_time=null where id=$1",
+          [durable.request.marketId, JSON.stringify(nativeWaitBaseline)],
+        );
+        const fresh = await prepare(client, {
+          ...durable,
+          nonce: Date.now(),
+          expiresAfter: Date.now() + 60000,
+          request: {
+            ...durable.request,
+            requestKey: randomUUID(),
+            side,
+            consentedDebitCapRaw: side === "SELL" ? "400000" : "150000000",
+          },
+        });
+        assert.equal(
+          (
+            await admit(client, {
+              ...nextInput,
+              actionId: fresh.actionId,
+              signature: await signed(fresh),
+            })
+          ).admitted,
+          true,
+        );
+        await client.query("rollback");
+      } finally {
+        await client.query("rollback");
+        await nativeWaiter.query("rollback");
+        nativeWaiter.release();
+      }
+    }
+  }
+  await client.query(
+    "update unified_markets set metadata=$2::jsonb,expiration_time=null where id=$1",
+    [durable.request.marketId, JSON.stringify(nativeWaitBaseline)],
+  );
   await client.query("begin");
   const scheduledAction = await prepare(client, {
     ...durable,

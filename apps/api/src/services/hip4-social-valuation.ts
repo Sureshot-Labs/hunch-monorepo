@@ -1,31 +1,9 @@
 import { hip4ReadMarketSchema, hip4RawUnits } from "@hunch/shared";
 import { formatUnits } from "ethers";
 import { isRecord } from "../lib/type-guards.js";
+import { hip4NativeMarketOpen as hip4SocialMarketOpen } from "./hip4-native-instrument.js";
 
-/** Factual indexed availability, not an order admission or a lifecycle grant. */
-export function hip4SocialMarketOpen(
-  metadata: unknown,
-  now = Date.now(),
-): boolean {
-  const parsed = hip4ReadMarketSchema.safeParse(
-    isRecord(metadata) ? metadata.hip4 : null,
-  );
-  if (!parsed.success) return false;
-  const market = parsed.data;
-  return (
-    market.environment === "mainnet" &&
-    market.status === "observed" &&
-    market.settlement === null &&
-    market.coverage.metadata === "fresh" &&
-    Number.isFinite(Date.parse(market.metadataValidUntil ?? "")) &&
-    Date.parse(market.metadataValidUntil ?? "") > now &&
-    Number.isFinite(Date.parse(market.fetchedAt)) &&
-    Date.parse(market.fetchedAt) <= now &&
-    (market.expiry === null ||
-      (Number.isFinite(Date.parse(market.expiry)) &&
-        Date.parse(market.expiry) > now))
-  );
-}
+export { hip4SocialMarketOpen };
 
 /** Use the selected native book, never YES-complement synthesis or legacy top
  * rows belonging to another protocol. Missing/expired/empty/crossed is null. */

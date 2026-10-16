@@ -1083,6 +1083,20 @@ try {
   const plans = await pool.connect();
   try {
     await plans.query("begin");
+    // Scale BOTH sides of the ownership join. A sequential scan of a tiny
+    // shared users fixture is legitimate and says nothing about the exact
+    // wallet lookup's production bound; unrelated prior suites vary its size.
+    await plans.query(
+      "create temp table users(like public.users including defaults including indexes) on commit drop",
+    );
+    await plans.query(
+      "insert into users select * from public.users where id=$1",
+      [fixture.userId],
+    );
+    await plans.query(
+      "insert into users(id,is_active) select gen_random_uuid(),true from generate_series(1,50000) as sample_row",
+    );
+    await plans.query("analyze users");
     await plans.query(
       "create temp table user_wallets(like public.user_wallets including defaults including indexes) on commit drop",
     );

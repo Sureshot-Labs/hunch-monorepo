@@ -464,26 +464,54 @@ try {
     const latePair = { sourceRef, copyIdempotencyKey: randomUUID() };
     const late = await prepareOrder(latePair);
     await db.query("savepoint late_copy_authority");
-    let reachedFinalClock = false;
+    let reachedFinalLock = false;
     const interleaved = {
       query: async (sql: string, params: unknown[] = []) => {
-        if (sql.trim() === "select clock_timestamp() as checked_at") {
-          reachedFinalClock = true;
+        if (sql.endsWith("for update of order_row,action_row")) {
+          reachedFinalLock = true;
           if (lateChange === "policy") {
-            await db.query("insert into runtime_policies(policy_key,payload,effective_at) values('social',$1::jsonb,clock_timestamp())", [{ copyEnabled: false }]);
+            await db.query(
+              "insert into runtime_policies(policy_key,payload,effective_at) values('social',$1::jsonb,clock_timestamp())",
+              [{ copyEnabled: false }],
+            );
           } else {
-            await db.query("update unified_markets set metadata=jsonb_set(metadata,'{hip4,metadataValidUntil}',to_jsonb('2000-01-01T00:00:00.000Z'::text)) where id=$1", [identity.marketId]);
+            await db.query(
+              "update unified_markets set metadata=jsonb_set(metadata,'{hip4,metadataValidUntil}',to_jsonb('2000-01-01T00:00:00.000Z'::text)) where id=$1",
+              [identity.marketId],
+            );
           }
         }
         return db.query(sql, params);
       },
     } as unknown as Parameters<typeof admitHip4OrderActionInTransaction>[0];
-    await assert.rejects(() => admitHip4OrderActionInTransaction(interleaved, late.submission, testCapability), lateChange === "policy" ? /copy_disabled/u : /hip4_copy_instrument_unavailable/u);
-    assert.equal(reachedFinalClock, true, "capability and metadata validity must be checked after possible lock waits");
+    await assert.rejects(
+      () =>
+        admitHip4OrderActionInTransaction(
+          interleaved,
+          late.submission,
+          testCapability,
+        ),
+      lateChange === "policy"
+        ? /copy_disabled/u
+        : /hip4_copy_instrument_unavailable/u,
+    );
+    assert.equal(
+      reachedFinalLock,
+      true,
+      "capability and metadata validity must be checked after possible lock waits",
+    );
     await db.query("rollback to savepoint late_copy_authority");
     await db.query("release savepoint late_copy_authority");
     assert.equal((await copyRows(latePair.copyIdempotencyKey)).length, 0);
-    assert.equal((await db.query("select action_id from hip4_order_submissions where action_id=$1", [late.prepared.actionId])).rowCount, 0);
+    assert.equal(
+      (
+        await db.query(
+          "select action_id from hip4_order_submissions where action_id=$1",
+          [late.prepared.actionId],
+        )
+      ).rowCount,
+      0,
+    );
   }
   const rejectedPair = { sourceRef, copyIdempotencyKey: randomUUID() };
   const rejection = await prepareOrder(rejectedPair);

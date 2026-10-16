@@ -39,6 +39,49 @@ try {
   assert.equal(first.envelope.action.orders[0].p, "0.33333");
   assert.equal(first.envelope.action.orders[0].s, "4");
   assert.equal(first.envelope.action.orders[0].a % 10, 1);
+  assert.equal(
+    first.envelope.expiresAfter,
+    input.expiresAfter,
+    "supported unknown expiry does not invent a shorter signing deadline",
+  );
+  await client.query("savepoint known_native_expiry");
+  const metadata = (
+    await client.query("select metadata from unified_markets where id=$1", [
+      input.request.marketId,
+    ])
+  ).rows[0].metadata;
+  const marketExpiry = new Date(Date.now() + 30000).toISOString();
+  metadata.hip4.expiry = marketExpiry;
+  await client.query(
+    "update unified_markets set metadata=$2::jsonb,expiration_time=$3 where id=$1",
+    [input.request.marketId, JSON.stringify(metadata), marketExpiry],
+  );
+  const capped = await prepare(client, {
+    ...input,
+    nonce: input.nonce + 100,
+    expiresAfter: Date.now() + 60000,
+    request: { ...input.request, requestKey: randomUUID() },
+  });
+  assert.equal(
+    capped.envelope.expiresAfter,
+    Date.parse(marketExpiry),
+    "known market expiry caps the actual immutable signing envelope",
+  );
+  metadata.hip4.expiry = "2000-01-01T00:00:00.000Z";
+  await client.query(
+    "update unified_markets set metadata=$2::jsonb,expiration_time=$3 where id=$1",
+    [input.request.marketId, JSON.stringify(metadata), metadata.hip4.expiry],
+  );
+  await rejects(
+    () =>
+      prepare(client, {
+        ...input,
+        nonce: input.nonce + 101,
+        request: { ...input.request, requestKey: randomUUID() },
+      }),
+    /hip4_market_unavailable/u,
+  );
+  await client.query("rollback to savepoint known_native_expiry");
   const stored = (
     await client.query(
       `select price::text,size::text,venue_order_id,status,

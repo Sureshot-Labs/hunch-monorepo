@@ -6,7 +6,7 @@ import {
   socialTradeAttributionFields,
   refineSocialTradeAttribution,
 } from "../schemas/social-trade.js";
-import { buildHip4SocialInstrument } from "../services/hip4-social-instrument.js";
+import { currentHip4NativeInstrument } from "../services/hip4-native-instrument.js";
 import type { WalletExecutionProfile } from "../funding/domain/types.js";
 import { lockFundingControllerWallet } from "../funding/execution/funding-controller-wallet-lock.js";
 import { HyperliquidNonceConflictError } from "../funding/execution/hyperliquid-nonce-claims.js";
@@ -338,7 +338,7 @@ export async function persistHip4OrderPreparationInTransaction(
   );
   const token = identity.sides[request.outcomeSide === "YES" ? 0 : 1];
   const market = await client.query(
-    `select id,metadata,expiration_time from unified_markets
+    `select id,status,metadata,expiration_time from unified_markets
     where id=$1 and venue='hyperliquid' and status='ACTIVE' for share`,
     [identity.marketId],
   );
@@ -346,18 +346,20 @@ export async function persistHip4OrderPreparationInTransaction(
     throw new Error("hip4_preparation_market_unavailable");
   const marketRow = market.rows[0];
   const socialInstrumentSnapshot = marketRow.metadata?.hip4 ?? null;
-  const socialInstrument =
-    request.side === "BUY"
-      ? buildHip4SocialInstrument({
-          marketId: identity.marketId,
-          tokenId: token.tokenId,
-          outcome: request.outcomeSide,
-          expiry: marketRow.expiration_time?.toISOString() ?? null,
-          snapshot: socialInstrumentSnapshot,
-        })
-      : null;
-  if (request.sourceRef && !socialInstrument)
-    throw new Error("hip4_copy_instrument_unavailable");
+  const nativeInstrument = currentHip4NativeInstrument({
+    marketId: identity.marketId,
+    tokenId: token.tokenId,
+    outcome: request.outcomeSide,
+    expiry: marketRow.expiration_time?.toISOString() ?? null,
+    metadata: marketRow.metadata,
+    status: marketRow.status,
+    now: Date.now(),
+  });
+  if (!nativeInstrument) throw new Error("hip4_market_unavailable");
+  const expiresAfter = Math.min(
+    input.expiresAfter,
+    nativeInstrument.expiry ? Date.parse(nativeInstrument.expiry) : Infinity,
+  );
   const policy =
     request.side === "BUY" ? await readHip4TradingPolicy(client) : undefined;
   const orderId = randomUUID();
@@ -397,7 +399,7 @@ export async function persistHip4OrderPreparationInTransaction(
     envelope: {
       environment: "mainnet",
       nonce: input.nonce,
-      expiresAfter: input.expiresAfter,
+      expiresAfter,
       vaultAddress: null,
       action,
     },
@@ -413,8 +415,10 @@ export async function persistHip4OrderPreparationInTransaction(
       marketRevision: input.marketRevision,
       accountRevision: input.accountRevision,
       policy: policy ?? null,
-      ...(socialInstrument
-        ? { socialInstrument, socialInstrumentSnapshot }
+      nativeInstrument,
+      nativeInstrumentSnapshot: socialInstrumentSnapshot,
+      ...(request.side === "BUY"
+        ? { socialInstrument: nativeInstrument, socialInstrumentSnapshot }
         : {}),
       ...(request.sourceRef
         ? {

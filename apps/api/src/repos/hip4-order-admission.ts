@@ -73,8 +73,11 @@ import {
   assertSocialCopyPolicy,
   type RetainedCopyAttempt,
 } from "../services/social-copy.js";
-import { buildSocialInstrument } from "../services/social-instrument.js";
-import { hip4SocialMarketOpen } from "../services/hip4-social-valuation.js";
+import {
+  buildHip4NativeInstrument,
+  currentHip4NativeInstrument,
+} from "../services/hip4-native-instrument.js";
+import { verifiedBuyFactsSchema } from "../schemas/social-trade.js";
 
 export type Hip4AdmissionContext = {
   profile: WalletExecutionProfile;
@@ -625,6 +628,23 @@ export async function admitHip4OrderActionInTransaction(
     )
       throw new Error("hip4_capacity_reserved");
   }
+  // Copy policy can itself wait on its row lock. Resolve it before the final
+  // current-market read and wall-clock fence, independently of ordinary orders.
+  const copyPolicyRevision = copyInput
+    ? (await assertSocialCopyPolicy(db, "hyperliquid")).revision
+    : null;
+  const latest = wire
+    ? (
+        await db.query<{
+          metadata: unknown;
+          status: string;
+          expiration_time: Date | null;
+        }>(
+          "select metadata,status,expiration_time from unified_markets where id=$1 and venue='hyperliquid' for share",
+          [row.canonical_market_id],
+        )
+      ).rows[0]
+    : null;
   // A scheduled threshold can become effective during any lock wait above.
   // Recheck at the final admission boundary, not from caller/preparation data.
   // SELL and cancel do not depend on this BUY-only product threshold.
@@ -668,18 +688,51 @@ export async function admitHip4OrderActionInTransaction(
     (wire && feeQuote && Date.parse(feeQuote.expiresAt) <= clock)
   )
     throw new Error("hip4_preparation_expired");
-  let copyPolicyRevision: string | null = null;
-  if (copyInput) {
-    copyPolicyRevision = (await assertSocialCopyPolicy(db, "hyperliquid")).revision;
-    const latest = (await db.query<{ metadata: unknown; status: string; expiration_time: Date | null }>(
-      "select metadata,status,expiration_time from unified_markets where id=$1 for share", [row.canonical_market_id],
-    )).rows[0];
-    const current = latest ? buildSocialInstrument({
-      marketId: row.canonical_market_id, venue: "hyperliquid", tokenId: row.token_id,
-      outcome: token.sideIndex === 0 ? "YES" : "NO", expiry: latest.expiration_time?.toISOString() ?? null, metadata: latest.metadata,
-    }) : null;
-    if (!latest || latest.status !== "ACTIVE" || !hip4SocialMarketOpen(latest.metadata, clock) || !current || canonicalJsonHash(current) !== canonicalJsonHash(copyInput.hip4Instrument))
-      throw new Error("hip4_copy_instrument_unavailable");
+  if (wire) {
+    const outcome = token.sideIndex === 0 ? "YES" : "NO";
+    const frozen = verifiedBuyFactsSchema.shape.instrument.safeParse(
+      row.preparation_snapshot.nativeInstrument ??
+        row.preparation_snapshot.socialInstrument,
+    );
+    const rebuilt = frozen.success
+      ? buildHip4NativeInstrument({
+          marketId: row.canonical_market_id,
+          tokenId: row.token_id,
+          outcome,
+          expiry: frozen.data.expiry,
+          snapshot:
+            row.preparation_snapshot.nativeInstrumentSnapshot ??
+            row.preparation_snapshot.socialInstrumentSnapshot,
+        })
+      : null;
+    const current = latest
+      ? currentHip4NativeInstrument({
+          marketId: row.canonical_market_id,
+          tokenId: row.token_id,
+          outcome,
+          expiry: latest.expiration_time?.toISOString() ?? null,
+          metadata: latest.metadata,
+          status: latest.status,
+          now: clock,
+        })
+      : null;
+    if (
+      !frozen.success ||
+      !rebuilt ||
+      canonicalJsonHash(rebuilt) !== canonicalJsonHash(frozen.data)
+    )
+      throw new Error("hip4_preparation_unavailable");
+    if (!current || canonicalJsonHash(current) !== canonicalJsonHash(rebuilt))
+      throw new Error(
+        copyInput
+          ? "hip4_copy_instrument_unavailable"
+          : "hip4_market_unavailable",
+      );
+    // Older unadmitted envelopes may have frozen valid native metadata but a
+    // signing window extending beyond its known expiry. Never renew or mutate
+    // those signed bytes; a fresh Review produces the capped envelope instead.
+    if (current.expiry && prepared.expiresAfter > Date.parse(current.expiry))
+      throw new Error("hip4_preparation_unavailable");
   }
   if (copyAttempt) await markCopySubmissionStarted(db, userId, copyAttempt);
   const saved = await db.query<Hip4SubmissionRecord>(

@@ -49,6 +49,7 @@ import {
 } from "./telegram-app-handoff-v2-contract.js";
 import type { TelegramAppHandoffV2ScopeAssertion } from "../repos/telegram-app-handoff-v2-direct-trade-repository.js";
 import { socialTradeAttributionFields } from "../schemas/social-trade.js";
+import { currentHip4NativeInstrument } from "./hip4-native-instrument.js";
 
 const uuid = z
   .string()
@@ -121,6 +122,33 @@ async function readHip4OrderContext(
       ? await readHip4TradingPolicy(pool)
       : undefined;
   normalizeHip4OrderPreparationAmounts(input.request, policy, "0");
+  const identity = hip4Identity(
+    "mainnet",
+    Number(input.request.marketId.split(":").at(-1)),
+  );
+  const market = (
+    await pool.query<{
+      metadata: unknown;
+      status: string;
+      expiration_time: Date | null;
+    }>(
+      "select metadata,status,expiration_time from unified_markets where id=$1 and venue='hyperliquid'",
+      [input.request.marketId],
+    )
+  ).rows[0];
+  const nativeInstrument = market
+    ? currentHip4NativeInstrument({
+        marketId: input.request.marketId,
+        tokenId:
+          identity.sides[input.request.outcomeSide === "YES" ? 0 : 1].tokenId,
+        outcome: input.request.outcomeSide,
+        expiry: market.expiration_time?.toISOString() ?? null,
+        metadata: market.metadata,
+        status: market.status,
+        now: Date.now(),
+      })
+    : null;
+  if (!nativeInstrument) throw new Error("hip4_market_unavailable");
   const scope = {
     address: profile.address,
     marketId: input.request.marketId,
@@ -142,16 +170,19 @@ async function readHip4OrderContext(
     address: profile.address,
     cloid: `0x${"0".repeat(32)}`,
   });
+  const expiresAfter = Math.min(
+    Date.parse(capacity.expiresAt),
+    Date.parse(feeObservation.expiresAt),
+    nativeInstrument.expiry ? Date.parse(nativeInstrument.expiry) : Infinity,
+  );
+  if (expiresAfter <= Date.now()) throw new Error("hip4_preparation_expired");
   return {
     profile,
     capacity,
     feeObservation,
     amounts,
     feeQuote,
-    expiresAfter: Math.min(
-      Date.parse(capacity.expiresAt),
-      Date.parse(feeObservation.expiresAt),
-    ),
+    expiresAfter,
   };
 }
 

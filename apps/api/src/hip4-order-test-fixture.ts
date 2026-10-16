@@ -2,6 +2,49 @@ import { randomInt, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { hip4Identity } from "@hunch/shared";
 import type { WalletExecutionProfile } from "./funding/domain/types.js";
+import { HYPERCORE_MAINNET_USDC } from "./funding/domain/hypercore-identity.js";
+import { mapHip4Market } from "./services/hip4-mapping.js";
+
+/** Complete, independently fresh native contract; no book or flow is invented. */
+export function hip4OrderTestMarket(
+  identity: ReturnType<typeof hip4Identity>,
+  now = Date.now(),
+) {
+  const { market } = mapHip4Market({
+    environment: "mainnet",
+    outcome: identity.outcome,
+    fetchedAt: new Date(now).toISOString(),
+    generation: "replaceable-order-test-read",
+    metadata: {
+      outcomes: [
+        {
+          outcome: identity.outcome,
+          name: "Synthetic native contract",
+          description: "Synthetic order-admission condition",
+          sideSpecs: [{ name: "Yes" }, { name: "No" }],
+          quoteToken: "USDC",
+          deployerFeeScale: "1",
+        },
+      ],
+      questions: [],
+      feeScale: "1",
+    },
+    spotMetadata: {
+      tokens: [
+        {
+          index: 0,
+          name: "USDC",
+          tokenId: HYPERCORE_MAINNET_USDC.assetId,
+          szDecimals: 8,
+          weiDecimals: 8,
+        },
+      ],
+      universe: [],
+    },
+  });
+  market.metadataValidUntil = new Date(now + 3600000).toISOString();
+  return market;
+}
 
 /** Disposable PostgreSQL fixture, no keys or provider requests. */
 export async function hip4OrderTestFixture(
@@ -30,9 +73,12 @@ export async function hip4OrderTestFixture(
     [identity.marketId],
   );
   await db.query(
-    `insert into unified_markets(id,venue,venue_market_id,event_id,title,status,market_type)
-    values($1,'hyperliquid',$1,$1,'Synthetic P4 preparation','ACTIVE','binary')`,
-    [identity.marketId],
+    `insert into unified_markets(id,venue,venue_market_id,event_id,title,status,market_type,metadata)
+    values($1,'hyperliquid',$1,$1,'Synthetic P4 preparation','ACTIVE','binary',$2::jsonb)`,
+    [
+      identity.marketId,
+      JSON.stringify({ hip4: hip4OrderTestMarket(identity) }),
+    ],
   );
   for (const token of identity.sides) {
     await db.query(
