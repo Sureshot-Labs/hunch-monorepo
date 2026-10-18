@@ -7,6 +7,7 @@ import {
 import { hip4AccountAddressSchema } from "../schemas/hip4-account.js";
 import {
   hypercoreRecipientCashCapacity,
+  hypercoreOrderCashCapacity,
   hypercoreSpotCashCapacity,
 } from "../funding/domain/hypercore-cash-capacity.js";
 import {
@@ -27,6 +28,7 @@ import {
 import { admitHip4Request, readHip4Policy } from "./hip4-repository.js";
 import { readHip4AccountPolicy } from "./hip4-account-repository.js";
 import { projectHip4PerpsCash } from "./hip4-perps-cash.js";
+import type { Hip4DefaultSpotCashEvidence } from "./hip4-spot-cash-mode.js";
 
 /** One fresh native observation for funding sends AND order admission. This is
  * not the displayed Account Value, a reservation or permission to trade. Call
@@ -46,6 +48,7 @@ async function readNativeCashContext(
   address: string,
   allowUninitializedRecipient: boolean,
   fetcher?: typeof fetch,
+  allowQualifiedDefaultSpot = false,
 ) {
   address = hip4AccountAddressSchema.parse(address);
   const [read, account] = await Promise.all([
@@ -83,12 +86,30 @@ async function readNativeCashContext(
   if (
     mode !== "disabled" &&
     !(
+      allowQualifiedDefaultSpot &&
+      role.role === "user" &&
+      mode === "default"
+    ) &&
+    !(
       allowUninitializedRecipient &&
       role.role === "missing" &&
       mode === "default"
     )
   )
     throw new Error("native_cash_mode_unsupported");
+  let defaultSpotCashEvidence: Hip4DefaultSpotCashEvidence | undefined;
+  if (allowQualifiedDefaultSpot && role.role === "user" && mode === "default") {
+    defaultSpotCashEvidence = {
+      legacyDexAbstraction: await accountRead({
+        type: "userDexAbstraction",
+        user: address,
+      }),
+      borrowLendState: await accountRead({
+        type: "borrowLendUserState",
+        user: address,
+      }),
+    };
+  }
   const metadata = hip4SpotMetadataSchema.parse(
     await publicRead({ type: "spotMeta" }),
   );
@@ -107,7 +128,16 @@ async function readNativeCashContext(
     })
   )
     throw new Error("native_cash_identity_mismatch");
-  return { accountRead, account, observedAt, role, mode, quote, read };
+  return {
+    accountRead,
+    account,
+    observedAt,
+    role,
+    mode,
+    quote,
+    read,
+    defaultSpotCashEvidence,
+  };
 }
 
 /** Same budget, owner role, Standard mode and exact USDC identity as spot;
@@ -153,15 +183,25 @@ async function readNativeCapacityObservation(
   address: string,
   allowUninitializedRecipient: boolean,
   fetcher?: typeof fetch,
+  allowQualifiedDefaultSpot = false,
 ) {
   address = hip4AccountAddressSchema.parse(address);
-  const { accountRead, account, observedAt, role, mode, quote, read } =
-    await readNativeCashContext(
-      pool,
-      address,
-      allowUninitializedRecipient,
-      fetcher,
-    );
+  const {
+    accountRead,
+    account,
+    observedAt,
+    role,
+    mode,
+    quote,
+    read,
+    defaultSpotCashEvidence,
+  } = await readNativeCashContext(
+    pool,
+    address,
+    allowUninitializedRecipient,
+    fetcher,
+    allowQualifiedDefaultSpot,
+  );
   const state = hip4SpotAccountStateSchema.parse(
     await accountRead({
       type: "spotClearinghouseState",
@@ -170,6 +210,12 @@ async function readNativeCapacityObservation(
   );
   if ((await accountRead({ type: "userAbstraction", user: address })) !== mode)
     throw new Error("native_cash_mode_changed");
+  if (
+    defaultSpotCashEvidence &&
+    (await accountRead({ type: "userDexAbstraction", user: address })) !==
+      defaultSpotCashEvidence.legacyDexAbstraction
+  )
+    throw new Error("native_cash_mode_changed");
   const observation = projectHip4Account({
     environment: "mainnet",
     role: role.role,
@@ -177,11 +223,14 @@ async function readNativeCapacityObservation(
     state,
     observedAt: new Date(observedAt).toISOString(),
     quote: { tokenId: quote.tokenId, index: 0, weiDecimals: 8 },
+    defaultSpotCashEvidence,
   });
   const cash = (
     allowUninitializedRecipient
       ? hypercoreRecipientCashCapacity
-      : hypercoreSpotCashCapacity
+      : allowQualifiedDefaultSpot
+        ? hypercoreOrderCashCapacity
+        : hypercoreSpotCashCapacity
   )({
     observation,
     environment: "mainnet",
@@ -267,6 +316,7 @@ async function readOrderCapacity(
     input.address,
     allowUninitializedRecipient,
     fetcher,
+    true,
   );
   if (
     input.side === "SELL" &&

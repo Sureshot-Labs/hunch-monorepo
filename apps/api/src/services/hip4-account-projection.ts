@@ -18,6 +18,10 @@ import {
   multiplyUnsignedDecimals,
   normalizeUnsignedDecimal,
 } from "../account-value/decimal.js";
+import {
+  hasHip4DefaultSpotCashEvidence,
+  type Hip4DefaultSpotCashEvidence,
+} from "./hip4-spot-cash-mode.js";
 
 export function hip4SignedAmount(raw: bigint, decimals: number) {
   return `${raw < 0n ? "-" : ""}${formatUnsignedDecimal(raw < 0n ? -raw : raw, decimals)}`;
@@ -42,6 +46,7 @@ export function projectHip4Account(input: {
     | "portfolioMargin";
   state: unknown;
   quote: { tokenId: string; index: number; weiDecimals: number };
+  defaultSpotCashEvidence?: Hip4DefaultSpotCashEvidence;
 }) {
   const state = hip4SpotAccountStateSchema.parse(input.state);
   if (input.quote.weiDecimals !== 8)
@@ -64,7 +69,11 @@ export function projectHip4Account(input: {
   const cashOwned =
     !riskMode &&
     !missingDebtFacts &&
-    ["disabled", "unifiedAccount"].includes(input.mode) &&
+    (["disabled", "unifiedAccount"].includes(input.mode) ||
+      hasHip4DefaultSpotCashEvidence({
+        ...input,
+        evidence: input.defaultSpotCashEvidence,
+      })) &&
     unheld != null &&
     unheld >= 0n &&
     !(cash?.borrowed && hip4RawUnits(cash.borrowed, 8) > 0n);

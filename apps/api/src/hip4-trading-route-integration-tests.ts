@@ -82,6 +82,8 @@ async function lifecycle(state: "active" | "exit-only" | "unreleased") {
   );
 }
 let uninitializedAccount = false;
+let fundedDefaultAccount = false;
+let legacyDexAbstraction: unknown = null;
 const fetcher: typeof fetch = async (url, init) => {
   const body = JSON.parse(String(init?.body));
   if (url === "https://api.hyperliquid.xyz/exchange") {
@@ -120,7 +122,14 @@ const fetcher: typeof fetch = async (url, init) => {
           : [[{ px: "0.49", sz: "4", n: 1 }], [{ px: "0.5", sz: "3", n: 1 }]],
     },
     userRole: { role: uninitializedAccount ? "missing" : "user" },
-    userAbstraction: uninitializedAccount ? "default" : "disabled",
+    userAbstraction:
+      uninitializedAccount || fundedDefaultAccount ? "default" : "disabled",
+    userDexAbstraction: legacyDexAbstraction,
+    borrowLendUserState: {
+      tokenToState: [],
+      health: "healthy",
+      healthFactor: null,
+    },
     spotMeta: {
       tokens: [
         {
@@ -429,6 +438,7 @@ try {
     "uninitialized preview never submits or prepares an executable action",
   );
   uninitializedAccount = false;
+  fundedDefaultAccount = true;
   await resetBudget();
   const quote = await post("/orders/quote", request);
   assert.equal(quote.statusCode, 200, quote.body);
@@ -693,6 +703,16 @@ try {
       reservationId: funding.reservationId,
     },
   };
+  legacyDexAbstraction = true;
+  await resetBudget();
+  const changedDefaultProof = await post("/orders/submit", submission);
+  assert.equal(changedDefaultProof.statusCode, 503, changedDefaultProof.body);
+  assert.equal(
+    posts,
+    0,
+    "a prepared default order must obtain new ancillary proof before mock dispatch",
+  );
+  legacyDexAbstraction = null;
   await resetBudget();
   const submitted = await post("/orders/submit", submission);
   assert.equal(submitted.statusCode, 200, submitted.body);

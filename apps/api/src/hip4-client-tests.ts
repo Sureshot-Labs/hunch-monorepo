@@ -38,6 +38,32 @@ test("public client admits weight before fetching and uses the explicit environm
     /invalid_hip4_coin/,
   );
 });
+test("legacy abstraction and lending evidence use the owned info client and existing 20-weight admission", async () => {
+  const weights: number[] = [];
+  const types: string[] = [];
+  const read = createHip4AccountClient(
+    DEFAULT_HIP4_READ_POLICY,
+    async (weight) => {
+      weights.push(weight);
+      return true;
+    },
+    async (url, options) => {
+      assert.equal(url, "https://api.hyperliquid.xyz/info");
+      const request = JSON.parse(String(options?.body));
+      assert.equal(request.user, `0x${"ab".repeat(20)}`);
+      types.push(request.type);
+      return Response.json(
+        request.type === "userDexAbstraction"
+          ? null
+          : { tokenToState: [], health: "healthy", healthFactor: null },
+      );
+    },
+  );
+  await read({ type: "userDexAbstraction", user: `0x${"Ab".repeat(20)}` });
+  await read({ type: "borrowLendUserState", user: `0x${"Ab".repeat(20)}` });
+  assert.deepEqual(types, ["userDexAbstraction", "borrowLendUserState"]);
+  assert.deepEqual(weights, [20, 20]);
+});
 
 test("account evidence rechecks its absolute deadline after shared admission and recovers next job", async (t) => {
   let now = 1000;

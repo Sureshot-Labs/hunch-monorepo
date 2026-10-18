@@ -23,6 +23,13 @@ import { createHip4AccountClient } from "./services/hip4-client.js";
 import { parseHip4ExecutionCursor } from "./services/hip4-account-repository.js";
 import { registerHip4AccountRoutes } from "./routes/hip4-account.js";
 import { hip4AccountReadResponse } from "./services/hip4-account-service.js";
+import {
+  hypercoreOrderCashCapacity,
+  hypercoreRecipientCashCapacity,
+  hypercoreSpotCashCapacity,
+} from "./funding/domain/hypercore-cash-capacity.js";
+import { projectHip4AccountValue } from "./account-value/hip4-account-value.js";
+import { projectHip4PerpsCash } from "./services/hip4-perps-cash.js";
 
 const address = "0x0000000000000000000000000000000000000001";
 const observedAt = "2026-10-13T10:00:00.000Z";
@@ -111,6 +118,195 @@ test("complete native snapshot preserves exact cash, holds and side identity wit
   assert.equal(view.positions[0].quantity, "20.00001");
   assert.equal(view.positions[0].costBasis, null);
   assert.equal(view.positions[0].realizedPnl, null);
+});
+test("default spot ownership needs explicit ancillary evidence and never becomes native-send or perps capacity", () => {
+  const args = {
+    environment: "mainnet" as const,
+    observedAt,
+    role: "user" as const,
+    mode: "default" as const,
+    quote,
+    state: { balances: [cash, position] },
+  };
+  assert.equal(projectHip4Account(args).cash.ownedCash, null);
+  for (const legacyDexAbstraction of [null, false]) {
+    const view = projectHip4Account({
+      ...args,
+      defaultSpotCashEvidence: {
+        legacyDexAbstraction,
+        borrowLendState: {
+          tokenToState: [],
+          health: "healthy",
+          healthFactor: null,
+        },
+      },
+    });
+    assert.equal(view.mode, "default");
+    assert.equal(view.cash.ownedCash, "97.00000001");
+    assert.equal(view.cash.spendable, null);
+    assert.equal(
+      view.cash.canTrade,
+      false,
+      "qualified ownership is not permission or an automatic BUY",
+    );
+    const capacityInput = {
+      observation: view,
+      environment: "mainnet" as const,
+      snapshotMaxAgeMs: 60000,
+      now: Date.parse(observedAt),
+    };
+    assert.equal(hypercoreOrderCashCapacity(capacityInput).known, true);
+    assert.deepEqual(hypercoreSpotCashCapacity(capacityInput), {
+      known: false,
+      reason: "unsupported_cash_mode",
+    });
+    assert.equal(hypercoreRecipientCashCapacity(capacityInput).known, true);
+    assert.equal(
+      hypercoreOrderCashCapacity({
+        ...capacityInput,
+        now: Date.parse(observedAt) + 60000,
+      }).known,
+      false,
+    );
+    assert.equal(
+      projectHip4PerpsCash({
+        mode: view.mode,
+        role: view.role,
+        state: {},
+        observedAt,
+        now: Date.parse(observedAt),
+      }).state,
+      "unsupported",
+    );
+    const value = projectHip4AccountValue({
+      userId: "owner",
+      now: Date.parse(observedAt),
+      read: {
+        environment: "mainnet",
+        snapshotMaxAgeMs: 60000,
+        accounts: [{ address, observation: view }],
+        positions: [],
+        coverage: {
+          state: "ready",
+          policyRevision: "test",
+          accounts: 1,
+          missingAccounts: 0,
+          staleAccounts: 0,
+          unresolvedBalances: 0,
+          missingCostBasis: 0,
+          unpricedPositions: 0,
+        },
+      },
+    });
+    assert.equal(value.assets[0].estimatedUsd?.value, cash.total);
+    assert.equal(
+      value.availability[0].availabilityKnown,
+      false,
+      "Account Value does not authorize native source spending",
+    );
+  }
+});
+test("default ancillary proof rejects supplied or borrowed inventory and contradictory risk fields", () => {
+  const evidence = {
+    legacyDexAbstraction: null,
+    borrowLendState: {
+      tokenToState: [],
+      health: "healthy",
+      healthFactor: null,
+    },
+  };
+  const args = {
+    environment: "mainnet" as const,
+    observedAt,
+    role: "user" as const,
+    mode: "default" as const,
+    quote,
+    state: { balances: [cash] },
+    defaultSpotCashEvidence: evidence,
+  };
+  for (const state of [
+    { balances: [{ ...cash, supplied: "1" }] },
+    { balances: [{ ...cash, total: "-1" }] },
+    { balances: [{ ...cash, total: "2" }] },
+    { balances: [cash], tokenToAvailableAfterMaintenance: [[0, "0"]] },
+    { balances: [cash], tokenToPortfolioBorrowRatio: [[0, "0"]] },
+    { balances: [cash], portfolioMarginRatio: "1" },
+  ])
+    assert.equal(projectHip4Account({ ...args, state }).cash.ownedCash, null);
+  assert.throws(() =>
+    projectHip4Account({
+      ...args,
+      state: { balances: [{ ...cash, hold: "-1" }] },
+    }),
+  );
+  assert.throws(() =>
+    projectHip4Account({
+      ...args,
+      state: { balances: [cash], portfolioMarginEnabled: "false" },
+    }),
+  );
+  assert.equal(
+    projectHip4Account({
+      ...args,
+      state: {
+        balances: [
+          { ...cash, borrowed: "0", supplied: "0", ltv: "0.9" },
+          {
+            coin: "HYPE",
+            token: 150,
+            total: "1.123456789012345678",
+            hold: "0",
+            entryNtl: "0",
+            ltv: "0.5",
+          },
+        ],
+      },
+    }).cash.ownedCash,
+    "97.00000001",
+    "collateral eligibility is not a debt or a reason to hide independently verified spot cash",
+  );
+  const supply = {
+    tokenToState: [
+      [
+        0,
+        {
+          borrow: { basis: "0", value: "0" },
+          supply: { basis: "0", value: "1" },
+        },
+      ],
+    ],
+    health: "healthy",
+    healthFactor: null,
+  };
+  assert.equal(
+    projectHip4Account({
+      ...args,
+      defaultSpotCashEvidence: { ...evidence, borrowLendState: supply },
+    }).cash.ownedCash,
+    null,
+  );
+  const missing = projectHip4Account({
+    ...args,
+    role: "missing",
+    state: { balances: [] },
+  });
+  assert.equal(missing.cash.ownedCash, null);
+  const input = {
+    observation: missing,
+    environment: "mainnet" as const,
+    snapshotMaxAgeMs: 60000,
+    now: Date.parse(observedAt),
+  };
+  assert.equal(hypercoreRecipientCashCapacity(input).known, true);
+  assert.equal(hypercoreOrderCashCapacity(input).known, false);
+  assert.equal(
+    hypercoreRecipientCashCapacity({ ...input, now: input.now + 60000 }).known,
+    false,
+  );
+  assert.equal(
+    hypercoreRecipientCashCapacity({ ...input, environment: "testnet" }).known,
+    false,
+  );
 });
 test("unified and margin risk capacity is separate from owned unheld cash", () => {
   for (const mode of [

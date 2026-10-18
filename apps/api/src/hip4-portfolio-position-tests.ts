@@ -506,6 +506,7 @@ test("Account Value never turns stale, missing, margin or borrowed facts into ne
     },
     (row: typeof observation) => {
       row.mode = "default";
+      row.cash.ownedCash = null;
     },
     (row: typeof observation) => {
       row.mode = "dexAbstraction";

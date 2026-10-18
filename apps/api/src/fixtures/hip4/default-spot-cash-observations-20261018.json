@@ -1,0 +1,58 @@
+{
+  "provenance": {
+    "observedAt": "2026-10-18T19:31:16.081Z",
+    "source": "Hyperliquid mainnet public info endpoint, eight shared-budget-admitted read-only requests",
+    "requests": [
+      "userRole",
+      "userAbstraction",
+      "userDexAbstraction",
+      "spotClearinghouseState",
+      "clearinghouseState",
+      "borrowLendUserState",
+      "userAbstraction",
+      "userDexAbstraction"
+    ],
+    "sanitization": "Wallet address omitted. Cash amounts replaced with synthetic exact-decimal values; wire shape, raw mode, legacy selector, empty lending state and empty native-perps risk structure retained. This is a sanitized contract fixture, not a literal balance record or execution proof.",
+    "financialActions": false,
+    "modeChanges": false
+  },
+  "userRole": { "role": "user" },
+  "userAbstraction": "default",
+  "userDexAbstraction": null,
+  "spotClearinghouseState": {
+    "balances": [
+      {
+        "coin": "USDC",
+        "token": 0,
+        "total": "7.12345678",
+        "hold": "0.0",
+        "entryNtl": "0.0"
+      }
+    ]
+  },
+  "clearinghouseState": {
+    "marginSummary": {
+      "accountValue": "0.0",
+      "totalNtlPos": "0.0",
+      "totalRawUsd": "0.0",
+      "totalMarginUsed": "0.0"
+    },
+    "crossMarginSummary": {
+      "accountValue": "0.0",
+      "totalNtlPos": "0.0",
+      "totalRawUsd": "0.0",
+      "totalMarginUsed": "0.0"
+    },
+    "crossMaintenanceMarginUsed": "0.0",
+    "withdrawable": "0.0",
+    "assetPositions": [],
+    "time": 1792351877393
+  },
+  "borrowLendUserState": {
+    "tokenToState": [],
+    "health": "healthy",
+    "healthFactor": null
+  },
+  "userAbstractionAfter": "default",
+  "userDexAbstractionAfter": null
+}

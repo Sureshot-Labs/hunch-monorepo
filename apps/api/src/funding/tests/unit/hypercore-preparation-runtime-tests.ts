@@ -59,6 +59,7 @@ async function fixture() {
     refreshing: false,
     role: "user" as "user" | "missing",
     mode: "disabled" as "disabled" | "default" | "unifiedAccount",
+    qualifiedDefault: false,
     total: "0",
     held: "0",
     observedAt: now.toISOString(),
@@ -103,6 +104,16 @@ async function fixture() {
       environment: state.environment,
       role: state.role,
       mode: state.mode,
+      defaultSpotCashEvidence: state.qualifiedDefault
+        ? {
+            legacyDexAbstraction: null,
+            borrowLendState: {
+              tokenToState: [],
+              health: "healthy",
+              healthFactor: null,
+            },
+          }
+        : undefined,
       observedAt: state.observedAt,
       quote: {
         tokenId: HYPERCORE_MAINNET_USDC.assetId,
@@ -619,6 +630,53 @@ test("destination refresh bypasses cached pre-funding cash and cannot restore it
   assert.equal(refreshed.spendability?.availableAmount.raw, "1000000000");
   assert.equal(refreshed.spendability?.asOf, f.state.observedAt);
   assert.deepEqual(f.loads, [false, true, true]);
+});
+test("qualified funded default destinations support explicit BUY shortfall and SELL preparation without mode coercion", async () => {
+  const f = await fixture();
+  Object.assign(f.state, {
+    mode: "default",
+    total: "7.12345678",
+    held: "0.12345678",
+    qualifiedDefault: true,
+    positionQuantity: "2.00001",
+  });
+  const buy = {
+    ...f.input,
+    purpose: "buy" as const,
+    marketContextId: f.market.id,
+  };
+  const [funded] = await f.service.frozenDestinations(buy);
+  assert.equal(funded.preparation.status, "ready");
+  assert.equal(funded.preparation.topology, "native_qualified_default_spot");
+  assert.equal(funded.preparation.evidence.facts.accountMode, "default");
+  assert.equal(funded.spendability.availableAmount.raw, "700000000");
+  assert.deepEqual(
+    funded.preparation.requiredActions,
+    [],
+    "inspection never changes mode or submits a BUY",
+  );
+  const [sell] = await f.service.frozenDestinations({
+    ...buy,
+    purpose: "sell",
+    positionActionRef: hip4PortfolioPositionId(
+      "mainnet",
+      f.wallet.walletAddress,
+      f.identity.sides[0].tokenId,
+    ),
+  });
+  assert.equal(sell.preparation.status, "ready");
+  assert.equal(
+    sell.preparation.evidence.checks.some(
+      (row) => row.checkId === "native_spot_account",
+    ),
+    true,
+  );
+  f.state.qualifiedDefault = false;
+  f.state.accountRevision = "proof-unavailable";
+  await assert.rejects(
+    f.service.frozenDestinations(buy),
+    isPreparationUnavailable,
+  );
 });
 
 test("market-scoped discovery keeps policy-disabled and unsupported wallets as legitimate empty results", async () => {

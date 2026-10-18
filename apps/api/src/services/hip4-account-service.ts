@@ -52,11 +52,13 @@ import {
 } from "../schemas/hip4-account.js";
 import { projectHip4OpenOrders } from "./hip4-open-orders.js";
 import { projectHip4PerpsCash } from "./hip4-perps-cash.js";
+import type { Hip4DefaultSpotCashEvidence } from "./hip4-spot-cash-mode.js";
 
 const boundedRows = z.array(z.record(z.string(), z.unknown())).max(2000);
 // Match transport admission: role + mode + spot metadata + spot/perps states
 // + mode recheck, followed by open orders and one bounded fill response.
 const STANDARD_CASH_AND_ONE_FILL_WEIGHT = 60 + 20 + 20 + 2 + 2 + 20 + 20 + 120;
+const DEFAULT_SPOT_CASH_WEIGHT = 60 + 20 + 20 + 20 + 20 + 2 + 20 + 20;
 const errorCode = (error: unknown) =>
   error instanceof Hip4ReadError
     ? error.reason
@@ -148,19 +150,8 @@ export async function refreshHip4OwnedAccount(input: {
   // ledger page must fit; otherwise ledger repair would always be last/denied.
   // Split phases only where that work cannot fit: larger existing budgets
   // keep their ordinary cash-refresh cadence and combined history pass.
-  const splitBackgroundReads = Boolean(
-    input.background &&
-    hip4BackgroundRepairWeightLimit(policy) <
-      STANDARD_CASH_AND_ONE_FILL_WEIGHT +
-        (accountPolicy.ledgerRepairPagesPerRefresh > 0 ? 20 : 0),
-  );
-  historyOnly = Boolean(
-    splitBackgroundReads &&
-    previous?.observation &&
-    previous.history.nextBackgroundRead === "history",
-  );
-  if (splitBackgroundReads)
-    history.nextBackgroundRead = historyOnly ? "cash" : "history";
+  let splitBackgroundReads = false;
+  let deferCashOpenOrders = false;
   let historyIdentityVerified = false;
   try {
     const role = hip4AccountRoleSchema.parse(
@@ -170,6 +161,32 @@ export async function refreshHip4OwnedAccount(input: {
       throw new Error("unsupported_account_role");
     const mode = hip4AccountAbstractionSchema.parse(
       await accountRead({ type: "userAbstraction", user: address }),
+    );
+    const defaultSpot = mode === "default" && role.role === "user";
+    splitBackgroundReads = Boolean(
+      input.background &&
+      hip4BackgroundRepairWeightLimit(policy) <
+        (defaultSpot
+          ? DEFAULT_SPOT_CASH_WEIGHT + 20 + 120
+          : STANDARD_CASH_AND_ONE_FILL_WEIGHT) +
+          (accountPolicy.ledgerRepairPagesPerRefresh > 0 ? 20 : 0),
+    );
+    historyOnly = Boolean(
+      splitBackgroundReads &&
+      previous?.observation &&
+      previous.history.nextBackgroundRead === "history",
+    );
+    if (splitBackgroundReads)
+      history.nextBackgroundRead = historyOnly ? "cash" : "history";
+    // At a 220-weight repair quota, default cash182 + open20 + ledger20
+    // cannot fit. Keep ledger repair in this cash phase; open orders still
+    // refresh in the alternating history phase, without raising any quota.
+    deferCashOpenOrders = Boolean(
+      defaultSpot &&
+      splitBackgroundReads &&
+      !historyOnly &&
+      accountPolicy.ledgerRepairPagesPerRefresh > 0 &&
+      hip4BackgroundRepairWeightLimit(policy) < DEFAULT_SPOT_CASH_WEIGHT + 40,
     );
     if (historyOnly) {
       // Fresh role/mode and ownership checks authorize only exact-address
@@ -182,6 +199,19 @@ export async function refreshHip4OwnedAccount(input: {
         throw new Error("account_history_binding_changed");
       historyIdentityVerified = true;
     } else {
+      let defaultSpotCashEvidence: Hip4DefaultSpotCashEvidence | undefined;
+      if (defaultSpot) {
+        defaultSpotCashEvidence = {
+          legacyDexAbstraction: await accountRead({
+            type: "userDexAbstraction",
+            user: address,
+          }),
+          borrowLendState: await accountRead({
+            type: "borrowLendUserState",
+            user: address,
+          }),
+        };
+      }
       const metadata = hip4SpotMetadataSchema.parse(
         await publicRead({ type: "spotMeta" }),
       );
@@ -194,12 +224,21 @@ export async function refreshHip4OwnedAccount(input: {
         type: "spotClearinghouseState",
         user: address,
       });
+      if (
+        defaultSpotCashEvidence &&
+        ((await accountRead({ type: "userAbstraction", user: address })) !==
+          mode ||
+          (await accountRead({ type: "userDexAbstraction", user: address })) !==
+            defaultSpotCashEvidence.legacyDexAbstraction)
+      )
+        throw new Error("native_cash_mode_changed");
       observation = projectHip4Account({
         environment: policy.environment,
         observedAt: new Date(now).toISOString(),
         role: role.role,
         mode,
         state,
+        defaultSpotCashEvidence,
         quote: {
           tokenId: quote.tokenId,
           index: quote.index,
@@ -246,17 +285,19 @@ export async function refreshHip4OwnedAccount(input: {
   // Account binding/role is checked before history. A failed fresh account read
   // does not allow following agent/master relationships or fabricating zeros.
   if (observation || historyIdentityVerified) {
-    try {
-      history.openOrders = projectHip4OpenOrders(
-        policy.environment,
-        await historyRead({ type: "frontendOpenOrders", user: address }),
-        Date.now(),
-      );
-      history.openOrdersError = null;
-    } catch (error) {
-      // Preserve the last successful list/time. Failure is not an empty list.
-      history.openOrdersError = errorCode(error);
-      errors.push(`open_orders_${errorCode(error)}`);
+    if (!deferCashOpenOrders) {
+      try {
+        history.openOrders = projectHip4OpenOrders(
+          policy.environment,
+          await historyRead({ type: "frontendOpenOrders", user: address }),
+          Date.now(),
+        );
+        history.openOrdersError = null;
+      } catch (error) {
+        // Preserve the last successful list/time. Failure is not an empty list.
+        history.openOrdersError = errorCode(error);
+        errors.push(`open_orders_${errorCode(error)}`);
+      }
     }
     const startTime = Math.max(0, now - accountPolicy.historyLookbackMs);
     history.lookbackStart = new Date(startTime).toISOString();

@@ -122,8 +122,10 @@ try {
     "insert into hip4_account_snapshots(environment,account_address) values('testnet',$1),('testnet',$2)",
     [address, foreign],
   );
+  // The effective-policy reader uses a millisecond JS Date. Make these fixture
+  // revisions already effective rather than racing PostgreSQL microseconds.
   await pool.query(
-    "insert into runtime_policies(id,policy_key,payload,effective_at) values($1,'hip4_read',$3,now()),($2,'hip4_account',$4,now())",
+    "insert into runtime_policies(id,policy_key,payload,effective_at) values($1,'hip4_read',$3,clock_timestamp()-interval '1 second'),($2,'hip4_account',$4,clock_timestamp()-interval '1 second')",
     [
       ...policies,
       { environment: "testnet", requestWeightPerMinute: 1200 },

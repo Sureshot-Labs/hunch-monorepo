@@ -802,6 +802,7 @@ test("ordinary withdrawal contract discovers the same native spot capacity witho
 
 test("native source rejects stale, unknown capacity, changed mode/identity and recovers on refreshed facts", () => {
   const patches: Record<string, string>[] = [
+    { nativeAccountMode: "default" },
     { nativeAccountMode: "unifiedAccount" },
     { nativeSourceDex: "" },
     { cashCapacityReason: "unverified_cash" },

@@ -14,6 +14,8 @@ export type Hip4AccountInfoRequest =
       type:
         | "userRole"
         | "userAbstraction"
+        | "userDexAbstraction"
+        | "borrowLendUserState"
         | "spotClearinghouseState"
         | "userFees"
         | "frontendOpenOrders";
@@ -46,6 +48,8 @@ export function createHip4AccountClient(
         "userRole",
         "preTransferCheck",
         "userAbstraction",
+        "userDexAbstraction",
+        "borrowLendUserState",
         "spotClearinghouseState",
         "clearinghouseState",
         "userFees",

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import type { Pool } from "@hunch/infra";
 import { DEFAULT_VENUE_LIFECYCLE_POLICY, hip4Identity } from "@hunch/shared";
 import { HYPERCORE_MAINNET_USDC } from "./funding/domain/hypercore-identity.js";
@@ -12,6 +13,15 @@ import {
 
 const address = `0x${"Ab".repeat(20)}`;
 const market = hip4Identity("mainnet", 1473);
+const defaultSpotFixture = JSON.parse(
+  readFileSync(
+    new URL(
+      "./fixtures/hip4/default-spot-cash-observations-20261018.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
 function fixture() {
   const lifecycle = structuredClone(DEFAULT_VENUE_LIFECYCLE_POLICY);
   lifecycle.venues.hyperliquid = { lifecycle: "active", indexerMode: "full" };
@@ -23,6 +33,12 @@ function fixture() {
   const responses: Record<string, unknown> = {
     userRole: { role: "user" },
     userAbstraction: "disabled",
+    userDexAbstraction: null,
+    borrowLendUserState: {
+      tokenToState: [],
+      health: "healthy",
+      healthFactor: null,
+    },
     spotMeta: {
       tokens: [
         {
@@ -193,6 +209,192 @@ test("SELL uses exact side's raw unheld quantity, not opposite shares or entry n
   );
 });
 
+test("funded default spot orders require fresh ancillary proof without enabling native sends or perps", async () => {
+  const f = fixture();
+  Object.assign(f.responses, defaultSpotFixture);
+  const buy = { ...f.input, side: "BUY" as const };
+  for (const reader of [readHip4OrderQuoteCapacity, readHip4OrderCapacity]) {
+    f.calls.length = f.weights.length = 0;
+    const capacity = await reader(f.pool, buy, f.fetcher);
+    assert.equal(capacity.availableRaw, "712345678");
+    assert.deepEqual(f.calls, [
+      "userRole",
+      "userAbstraction",
+      "userDexAbstraction",
+      "borrowLendUserState",
+      "spotMeta",
+      "spotClearinghouseState",
+      "userAbstraction",
+      "userDexAbstraction",
+    ]);
+    assert.equal(
+      f.weights.reduce((sum, value) => sum + value, 0),
+      182,
+    );
+  }
+  const strict = await readHip4OrderCapacity(f.pool, buy, f.fetcher);
+  f.responses.spotClearinghouseState = {
+    balances: [
+      ...defaultSpotFixture.spotClearinghouseState.balances,
+      { coin: "+14731", total: "0.12345", hold: "0.00001", entryNtl: "0" },
+    ],
+  };
+  assert.equal(
+    (await readHip4OrderCapacity(f.pool, f.input, f.fetcher)).availableRaw,
+    "12344",
+  );
+  const after = await readHip4OrderCapacity(f.pool, buy, f.fetcher);
+  assert.notEqual(
+    strict.accountRevision,
+    after.accountRevision,
+    "fresh spot evidence participates in admission revision",
+  );
+  for (const dex of ["spot", ""] as const) {
+    f.calls.length = 0;
+    await assert.rejects(
+      readNativeSendCapacity(f.pool, address, f.fetcher, dex),
+      /native_cash_mode_unsupported/u,
+    );
+    assert.deepEqual(
+      f.calls,
+      ["userRole", "userAbstraction"],
+      "source path never opts into default order capability",
+    );
+  }
+});
+
+test("default order qualification rejects legacy abstraction, lending, risk and malformed evidence, then recovers", async () => {
+  for (const patch of [
+    { userDexAbstraction: true },
+    { userDexAbstraction: "false" },
+    {
+      borrowLendUserState: {
+        tokenToState: [],
+        health: "unhealthy",
+        healthFactor: null,
+      },
+    },
+    {
+      borrowLendUserState: {
+        tokenToState: [],
+        health: "healthy",
+        healthFactor: "2",
+      },
+    },
+    { borrowLendUserState: { tokenToState: [] } },
+    {
+      borrowLendUserState: {
+        tokenToState: [
+          [
+            0,
+            {
+              borrow: { basis: "0", value: "0.00000001" },
+              supply: { basis: "0", value: "0" },
+            },
+          ],
+        ],
+        health: "healthy",
+        healthFactor: null,
+      },
+    },
+    {
+      spotClearinghouseState: {
+        ...defaultSpotFixture.spotClearinghouseState,
+        portfolioMarginEnabled: true,
+      },
+    },
+    {
+      spotClearinghouseState: {
+        ...defaultSpotFixture.spotClearinghouseState,
+        tokenToAvailableAfterMaintenance: [[0, "10"]],
+      },
+    },
+    {
+      spotClearinghouseState: {
+        balances: [
+          {
+            ...defaultSpotFixture.spotClearinghouseState.balances[0],
+            borrowed: "1",
+          },
+        ],
+      },
+    },
+  ]) {
+    const f = fixture();
+    Object.assign(f.responses, defaultSpotFixture, patch);
+    await assert.rejects(
+      readHip4OrderCapacity(f.pool, { ...f.input, side: "BUY" }, f.fetcher),
+      /native_cash_unverified_cash/u,
+    );
+    Object.assign(f.responses, defaultSpotFixture);
+    assert.equal(
+      (
+        await readHip4OrderCapacity(
+          f.pool,
+          { ...f.input, side: "BUY" },
+          f.fetcher,
+        )
+      ).availableRaw,
+      "712345678",
+    );
+  }
+});
+
+test("default observations reject raw mode/legacy changes, stale IO and budget exhaustion without cached recovery", async (t) => {
+  for (const change of [
+    () => "disabled",
+    () => true,
+    () => false,
+    () => null,
+  ]) {
+    const f = fixture();
+    Object.assign(f.responses, defaultSpotFixture);
+    if (change() === null) f.responses.userDexAbstraction = false;
+    f.onResponse((type) => {
+      if (type === "spotClearinghouseState") {
+        const value = change();
+        if (typeof value === "string") f.responses.userAbstraction = value;
+        else f.responses.userDexAbstraction = value;
+      }
+    });
+    await assert.rejects(
+      readHip4OrderCapacity(f.pool, f.input, f.fetcher),
+      /native_cash_mode_changed/u,
+    );
+  }
+  const f = fixture();
+  Object.assign(f.responses, defaultSpotFixture);
+  f.onResponse((type) => {
+    if (type === "userDexAbstraction") f.setBudget(false);
+  });
+  await assert.rejects(
+    readHip4OrderCapacity(f.pool, f.input, f.fetcher),
+    /budget_exhausted/u,
+  );
+  assert.equal(f.calls.includes("borrowLendUserState"), false);
+  f.onResponse(() => undefined);
+  f.setBudget(true);
+  assert.equal(
+    (
+      await readHip4OrderCapacity(
+        f.pool,
+        { ...f.input, side: "BUY" },
+        f.fetcher,
+      )
+    ).availableRaw,
+    "712345678",
+  );
+  let now = 1_800_000_000_000;
+  t.mock.method(Date, "now", () => now);
+  f.onResponse((type) => {
+    if (type === "spotClearinghouseState") now += 60000;
+  });
+  await assert.rejects(
+    readHip4OrderCapacity(f.pool, f.input, f.fetcher),
+    /native_cash_stale_snapshot/u,
+  );
+});
+
 test("first BUY can quote zero before funding, while prepare/send/SELL still require Standard", async () => {
   const f = fixture();
   f.responses.userRole = { role: "missing" };
@@ -261,12 +463,7 @@ test("read policy does not override common lifecycle; disabled and malformed pol
 });
 
 test("unsupported cash modes/roles, mode changes and exhausted shared budget recover without cached balances", async () => {
-  for (const mode of [
-    "default",
-    "unifiedAccount",
-    "dexAbstraction",
-    "portfolioMargin",
-  ]) {
+  for (const mode of ["unifiedAccount", "dexAbstraction", "portfolioMargin"]) {
     const f = fixture();
     f.responses.userAbstraction = mode;
     await assert.rejects(

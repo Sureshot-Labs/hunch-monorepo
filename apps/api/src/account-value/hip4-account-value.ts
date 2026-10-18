@@ -119,7 +119,8 @@ function ownedTotal(observation: Hip4AccountObservation): string | null {
   )
     return "0";
   if (
-    !["disabled", "unifiedAccount"].includes(mode) ||
+    !["disabled", "unifiedAccount", "default"].includes(mode) ||
+    (mode === "default" && observation.role !== "user") ||
     cash.ownedCash == null ||
     cash.unheld == null ||
     (mode === "unifiedAccount" && cash.borrowed == null) ||

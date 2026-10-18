@@ -21,6 +21,21 @@ export function hypercoreSpotCashCapacity(input: {
         | "invalid_cash_identity"
         | "unverified_cash";
     } {
+  return spotCashCapacity(input, false);
+}
+
+/** Orders/receiving may additionally use server-qualified legacy default spot
+ * cash. This capability is deliberately NOT exported as a native-send source. */
+export function hypercoreOrderCashCapacity(
+  input: Parameters<typeof hypercoreSpotCashCapacity>[0],
+) {
+  return spotCashCapacity(input, true);
+}
+
+function spotCashCapacity(
+  input: Parameters<typeof hypercoreSpotCashCapacity>[0],
+  allowQualifiedDefault: boolean,
+): ReturnType<typeof hypercoreSpotCashCapacity> {
   const { observation } = input;
   const observedAt = Date.parse(observation.observedAt);
   if (
@@ -41,7 +56,10 @@ export function hypercoreSpotCashCapacity(input: {
     })
   )
     return { known: false, reason: "invalid_cash_identity" };
-  if (observation.mode !== "disabled")
+  if (
+    observation.mode !== "disabled" &&
+    !(allowQualifiedDefault && observation.mode === "default")
+  )
     return { known: false, reason: "unsupported_cash_mode" };
   try {
     const total = hip4RawUnits(cash.total, 8);
@@ -72,17 +90,25 @@ export function hypercoreSpotCashCapacity(input: {
 
 /** Receive/BUY-funding readiness is not authority to spend. An exactly empty,
  * freshly observed missing/default account has known zero cash and can receive
- * its first deposit. Financial admission continues to require Standard mode. */
+ * its first deposit. Orders additionally admit server-qualified default spot;
+ * native sends remain on the separate disabled-only source capability. */
 export function hypercoreRecipientCashCapacity(
   input: Parameters<typeof hypercoreSpotCashCapacity>[0],
 ) {
-  const capacity = hypercoreSpotCashCapacity(input);
+  const capacity = hypercoreOrderCashCapacity(input);
   if (capacity.known)
-    return { ...capacity, topology: "native_standard_spot" as const };
+    return {
+      ...capacity,
+      topology:
+        input.observation.mode === "default"
+          ? ("native_qualified_default_spot" as const)
+          : ("native_standard_spot" as const),
+    };
   const { observation } = input;
   const { cash } = observation;
   if (
-    capacity.reason === "unsupported_cash_mode" &&
+    capacity.reason !== "stale_snapshot" &&
+    capacity.reason !== "invalid_cash_identity" &&
     observation.role === "missing" &&
     observation.mode === "default" &&
     observation.balances.length === 0 &&

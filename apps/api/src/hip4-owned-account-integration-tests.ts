@@ -546,6 +546,8 @@ try {
   );
   let backgroundMode = "disabled";
   let backgroundRole = "user";
+  let backgroundLegacy: unknown = null;
+  let changeLegacyDuringSpot = false;
   const backgroundFetcher: typeof fetch = async (url, options) => {
     const request = JSON.parse(String(options?.body));
     if (request.type === "userRole") {
@@ -560,6 +562,20 @@ try {
       budgetRequests.push(request.type);
       return Response.json(backgroundMode);
     }
+    if (request.type === "userDexAbstraction") {
+      budgetRequests.push(request.type);
+      return Response.json(backgroundLegacy);
+    }
+    if (request.type === "borrowLendUserState") {
+      budgetRequests.push(request.type);
+      return Response.json({
+        tokenToState: [],
+        health: "healthy",
+        healthFactor: null,
+      });
+    }
+    if (request.type === "spotClearinghouseState" && changeLegacyDuringSpot)
+      backgroundLegacy = true;
     return budgetFetcher(url, options);
   };
   const runBackground = async (readPolicy = budgetPolicy.readPolicy) => {
@@ -684,6 +700,58 @@ try {
   assert.equal(changedBinding.snapshot.observation?.mode, "disabled");
   backgroundMode = "disabled";
   await runBackground();
+  backgroundMode = "default";
+  await runBackground(); // history binding change, next ordinary cash phase
+  const defaultCash = await runBackground();
+  assert.equal(defaultCash.snapshot.observation?.mode, "default");
+  assert.equal(defaultCash.snapshot.observation?.cash.ownedCash, "0");
+  assert.equal(
+    defaultCash.snapshot.observation?.perpsCash?.state,
+    "unsupported",
+  );
+  assert.equal(
+    budgetRequests.filter((type) => type === "userDexAbstraction").length,
+    2,
+  );
+  assert.equal(budgetRequests.includes("borrowLendUserState"), true);
+  assert.equal(budgetRequests.includes("clearinghouseState"), false);
+  assert.equal(
+    budgetRequests.includes("frontendOpenOrders"),
+    false,
+    "cash phase leaves room for ledger under the unchanged 220 quota",
+  );
+  assert.equal(budgetRequests.includes("userNonFundingLedgerUpdates"), true);
+  assert.equal(await usedBudgetWeight(), 202);
+  const defaultHistory = await runBackground();
+  assert.equal(budgetRequests.includes("frontendOpenOrders"), true);
+  assert.equal(budgetRequests.includes("borrowLendUserState"), false);
+  assert.equal(
+    budgetRequests.includes("userFills") ||
+      budgetRequests.includes("userFillsByTime"),
+    true,
+  );
+  assert.deepEqual(
+    defaultHistory.snapshot.observation,
+    defaultCash.snapshot.observation,
+    "history-only work never renews qualified cash proof",
+  );
+  changeLegacyDuringSpot = true;
+  const changedLegacy = await runBackground();
+  assert.deepEqual(
+    changedLegacy.snapshot.observation,
+    defaultCash.snapshot.observation,
+    "changed legacy selector cannot publish freshly qualified cash",
+  );
+  assert.equal(changedLegacy.result.errors.length > 0, true);
+  changeLegacyDuringSpot = false;
+  backgroundLegacy = null;
+  await runBackground(); // history-only, preserving failed core-read status
+  const recoveredDefault = await runBackground();
+  assert.equal(recoveredDefault.snapshot.attempt_error, null);
+  assert.equal(recoveredDefault.snapshot.observation?.cash.ownedCash, "0");
+  backgroundMode = "disabled";
+  await runBackground(); // history binding changed, no cash reuse
+  await runBackground(); // fresh disabled cash
   backgroundRole = "agent";
   const rejectedRole = await runBackground();
   assert.deepEqual(budgetRequests, ["userRole"]);

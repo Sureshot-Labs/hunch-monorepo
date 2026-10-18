@@ -4,7 +4,7 @@ import type { ApiTradeMarket } from "../../services/api-trading-market-repo.js";
 import { hip4PortfolioPositionId } from "../../services/hip4-portfolio-positions.js";
 import {
   hypercoreRecipientCashCapacity,
-  hypercoreSpotCashCapacity,
+  hypercoreOrderCashCapacity,
 } from "../domain/hypercore-cash-capacity.js";
 import { isHypercoreMainnetUsdc } from "../domain/hypercore-identity.js";
 import {
@@ -112,18 +112,21 @@ export function hypercorePreparationBalance(
 ) {
   if (purpose === "fund" || purpose === "buy")
     return hypercoreFundingBalance(input);
-  const capacity = hypercoreSpotCashCapacity(input);
+  const capacity = hypercoreOrderCashCapacity(input);
   if (!capacity.known)
     throw new PreparationContractError(
       capacity.reason === "stale_snapshot"
         ? "evidence_stale"
         : "preparation_unavailable",
-      "Native trading requires a fresh Standard account; refresh after account setup",
+      "Native trading requires fresh supported spot cash evidence; refresh and retry",
     );
   return {
     totalRaw: capacity.totalRaw,
     lockedRaw: capacity.lockedRaw,
-    topology: "native_standard_spot",
+    topology:
+      input.observation.mode === "default"
+        ? "native_qualified_default_spot"
+        : "native_standard_spot",
   };
 }
 
@@ -136,9 +139,7 @@ export function hypercorePreparationRequirements(
   if (purpose === "buy" || purpose === "sell")
     return [
       "binding_owned",
-      purpose === "buy"
-        ? "native_recipient_observed"
-        : "native_standard_account",
+      purpose === "buy" ? "native_recipient_observed" : "native_spot_account",
       "market_context_resolved",
       ...(purpose === "sell" ? ["native_position_observed"] : []),
     ];

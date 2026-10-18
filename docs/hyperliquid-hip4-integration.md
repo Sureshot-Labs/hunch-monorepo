@@ -8151,3 +8151,73 @@ books do not bypass execution safeguards or create financial operations. No
 migration, new feed SQL, per-row feed provider request or policy activation is
 required. Under saturated shared demand, coverage remains explicitly partial;
 the selected Review still uses its own budgeted live quote.
+
+## 89. Qualified default-mode spot cash — October 18, 2026
+
+The first funded native account exposed an overly broad restriction: a fresh
+HIP4 spot-order quote rejected `user/default` before reading its cash. The
+earlier `missing/default` observation in section 18 correctly did not prove a
+funded balance. It must not become a permanent prohibition on a later verified
+spot-cash observation.
+
+The official [Info API](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint#query-a-users-abstraction-state)
+retains `default` separately from `disabled`, and the official
+[SDK example](https://github.com/hyperliquid-dex/hyperliquid-python-sdk/blob/master/examples/user_abstraction.py)
+distinguishes an initializable default selector. Neither source defines a
+universal `default = Standard` cash rule. Raw mode therefore stays `default`
+through schemas, stored observations, revisions and diagnostics; no account
+mode is changed or normalized.
+
+The added capability is deliberately narrower: owned spot cash for a
+cash-capped HIP4 order, and the same observed cash contribution at a funding
+destination. It requires the real user role, canonical USDC identity/precision,
+fresh spot totals/holds, compatible legacy-selector observations and a
+successfully parsed healthy borrow/lend observation without borrowing or
+supplied inventory. Contradictory risk, debt, negative or collateral-context
+facts do not qualify. An unset legacy selector (`null`) is retained as unset,
+not reinterpreted as a provider assertion that abstraction is disabled.
+Qualification is an explicit conservative interpretation of these combined
+provider observations, not an undocumented mode alias.
+
+Default-mode qualification is collected again at the existing financial
+preparation/submission boundaries. Raw mode and legacy-selector values must
+match before and after acquiring the observation. This detects changes during
+the read; it is not an atomic lock against later activity in another client.
+The official order protocol has no expected-mode/no-borrow condition. Existing
+capacity, exact-side stock, fee, source-lock, order-hold, reservation and
+submission checks remain in force.
+
+The capability does **not** authorize default-mode SendAsset, withdrawals,
+perps-source cash or cross-venue source selection. Those retain their existing
+explicit-`disabled` requirements. Inbound recipient contribution is not
+permission to send from that recipient. The exactly empty `missing/default`
+receive-only exception remains separate and never grants strict spending or
+SELL authority. Unified, portfolio-margin and legacy DEX-abstraction financial
+support is not enabled by this correction. See the official
+[mode guide](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/account-abstraction-modes),
+[margining](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/margining)
+and [portfolio-margin](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/portfolio-margin)
+contracts before expanding transfer or borrowing semantics.
+
+Read-only acceptance evidence on October 18:
+
+- Eight shared-budget-admitted mainnet Info reads observed `user/default`
+  and an unset legacy selector unchanged across the spot/borrow-lend reads;
+  native USDC spot cash had no holds and borrow/lend state was healthy/empty.
+- One bounded, exact-user
+  [`allDexsClearinghouseState`](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions)
+  snapshot observed eleven DEX states with no positions and zero margin use.
+  This is dated wallet evidence, not a new per-quote WebSocket dependency or
+  proof that all forms of account activity are absent.
+- The sanitized fixture at
+  `apps/api/src/fixtures/hip4/default-spot-cash-observations-20261018.json`
+  preserves observed response shapes and selectors, omits the wallet address,
+  and explicitly replaces cash amounts with synthetic decimal values.
+
+Ancillary reads use the existing admission and timeout limits. Background cash
+and history phase selection accounts for the conditional additional read
+weight instead of raising budgets or repeatedly starving history. Account
+valuation consumes only the server-qualified owned-cash witness; it does not
+manufacture a send capability. No migration, new feed SQL, public REST shape,
+signing permission, automatic historical Buy, account-mode mutation or policy
+activation is part of this patch.
