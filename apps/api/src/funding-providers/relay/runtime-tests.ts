@@ -1258,8 +1258,12 @@ for (const maximumQuoteTtlMs of [undefined, 6 * 60_000]) {
       "hypercore-spot-usdc-to-base-usdc",
       "hypercore-spot-usdc-to-polygon-usdc",
       "hypercore-spot-usdc-to-polygon-pusd",
+      "hypercore-perps-usdc-to-base-usdc",
+      "hypercore-perps-usdc-to-polygon-usdc",
+      "hypercore-perps-usdc-to-polygon-pusd",
       "base-usdc-to-hypercore-spot-usdc",
       "polygon-usdc-to-hypercore-spot-usdc",
+      "polygon-pusd-to-hypercore-spot-usdc",
     ].sort(),
   );
   assert.equal(

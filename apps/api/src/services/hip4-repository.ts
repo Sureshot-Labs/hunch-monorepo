@@ -84,8 +84,22 @@ export async function admitHip4Request(
   _environment: Hip4Environment,
   weight: number,
   maximum: number,
+  classBudget?: {
+    scope: "background_repair" | "background_catalog";
+    maximum: number;
+    backgroundMaximum?: number;
+  },
 ): Promise<boolean> {
   if (!Number.isInteger(weight) || weight <= 0 || weight > maximum)
+    return false;
+  if (
+    classBudget &&
+    (!["background_repair", "background_catalog"].includes(classBudget.scope) ||
+      !Number.isInteger(classBudget.maximum) ||
+      classBudget.maximum < weight ||
+      !Number.isInteger(classBudget.backgroundMaximum ?? maximum) ||
+      (classBudget.backgroundMaximum ?? maximum) < weight)
+  )
     return false;
   // A single atomic rolling-window admission, shared across environments and
   // processes using this DB. No minute-boundary double burst or two-minute
@@ -93,7 +107,7 @@ export async function admitHip4Request(
   const result = await db.query(
     `
     insert into hip4_request_budget(scope, admissions)
-    values ('public-info', jsonb_build_array(jsonb_build_object('at', extract(epoch from statement_timestamp()), 'weight', $1::int)))
+    values ('public-info', jsonb_build_array(jsonb_build_object('at', extract(epoch from statement_timestamp()), 'weight', $1::int, 'consumer', $3::text)))
     on conflict (scope) do update set
       admissions = coalesce((select jsonb_agg(admission_row)
         from jsonb_array_elements(hip4_request_budget.admissions) as admission_row
@@ -101,9 +115,23 @@ export async function admitHip4Request(
     where coalesce((select sum((admission_row->>'weight')::int)
       from jsonb_array_elements(hip4_request_budget.admissions) as admission_row
       where (admission_row->>'at')::numeric > extract(epoch from statement_timestamp()) - 60), 0) + $1 <= $2
+      and ($3::text is null or coalesce((select sum((repair_admission->>'weight')::int)
+        from jsonb_array_elements(hip4_request_budget.admissions) as repair_admission
+        where (repair_admission->>'at')::numeric > extract(epoch from statement_timestamp()) - 60
+          and repair_admission->>'consumer'=$3::text), 0) + $1 <= $4::int)
+      and ($3::text is null or coalesce((select sum((background_admission->>'weight')::int)
+        from jsonb_array_elements(hip4_request_budget.admissions) as background_admission
+        where (background_admission->>'at')::numeric > extract(epoch from statement_timestamp()) - 60
+          and background_admission->>'consumer' in ('background_repair','background_catalog')), 0) + $1 <= $5::int)
     returning scope
   `,
-    [weight, maximum],
+    [
+      weight,
+      maximum,
+      classBudget?.scope ?? null,
+      classBudget?.maximum ?? null,
+      classBudget ? (classBudget.backgroundMaximum ?? maximum) : null,
+    ],
   );
   return result.rowCount === 1;
 }
@@ -567,7 +595,9 @@ export async function persistHip4Market(
     try {
       await onCanonicalChange(change);
     } catch {
-      console.warn("[hip4-read] canonical invalidation unavailable", {marketId: change.marketId});
+      console.warn("[hip4-read] canonical invalidation unavailable", {
+        marketId: change.marketId,
+      });
     }
   }
   return applied;

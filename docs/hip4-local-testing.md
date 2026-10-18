@@ -85,6 +85,71 @@ stand. If the local pnpm shim tries to download another version, the equivalent
 commands are `node ops/hip4-local-stack.mjs prepare|sync|start|status` (choose one).
 No dependency installation runs automatically.
 
+For manual Polymarket setup, the API receives
+`POLYMARKET_BUILDER_API_KEY`, `POLYMARKET_BUILDER_API_SECRET` and
+`POLYMARKET_BUILDER_API_PASSPHRASE` from the backend `.env`. These service
+credentials are not forwarded to indexers or the finance-worker. The ordinary
+funding path also receives `POLYMARKET_FUNDING_ROUTER_ADDRESS`; its existing
+canonical-address validation remains in force. Delegated Privy signing and
+relayer private keys are not enabled by the launcher.
+
+`hip:status` and startup output report missing relayer/router configuration
+separately from healthy API/schema checks. Missing settings do not disable
+read-only markets or unrelated venues. Configuration presence is not proof of
+wallet readiness: the normal app still checks the owned funder, policy,
+approvals and user-provided authorization. No venue credentials or wallet
+permissions are created by a status check.
+
+After changing launcher settings, stop the backend terminal with `Ctrl+C`, run
+`pnpm dev:hip` again, then refresh the app. No database reset, migration, catalog
+sync or repeat deposit is needed for this configuration-only change. Do not
+blindly create a different funder to recover a missing balance; use the existing
+account's verified wallet and ordinary setup/recovery flow.
+
+### Repeated Hyperliquid quote requests
+
+Quotes, destination checks and background indexing share the same rolling
+provider budget. `hip4_quote_rate_limited` means this read budget is exhausted,
+not that the account has no funds. Retry the ordinary quote after capacity
+recovers; do not repeat a deposit, alter wallet permissions or raise the budget
+to hide the cause. Server diagnostics record a fixed failure reason without
+provider URLs, addresses or signatures.
+
+`hip4_read.quotePreviewCacheEntries` bounds reuse of successful preview-only
+account/fee facts (default 64; zero disables reuse). Original observation
+deadlines and current policies still apply. Books and request-bound amounts
+are recalculated on every market quote. An updated stored account observation,
+including a successful post-funding refresh, invalidates the old preview facts.
+Preparation and submission never consume this preview cache. A quote retry can
+reuse fresh exact-destination spendability; unknown/expired evidence and the
+post-funding continuation still require an authoritative destination refresh.
+
+### Reviewing first-transfer costs
+
+The compact `funding_control_plane` policy accepts optional `fees` overrides:
+`maximumFeeUsd`, `maximumFeeBps`, and `maximumReviewedFeeBps`. Omitted values
+preserve the backend defaults: a hard $10 fee cap, an automatic 2,000 bps cap,
+and no reviewed exception. `maximumReviewedFeeBps: null` disables the exception.
+The admin Funding policy editor exposes these settings; do not raise provider
+budgets or change wallet permissions to work around an economic rejection.
+
+An enabled reviewed cap only admits an interactive trade-shortfall quote above
+the automatic percentage cap. It forces the existing explicit Funding review
+with every source debit, fees, and minimum destination amount. The user's
+`maxFeeUsd`, hard USD cap, source balance, slippage and exact destination checks
+still apply. Server execution profiles, capacity previews and unattended
+funding cannot use this exception. Consent remains bound to the exact quote,
+plan and policy revision; changed or expired economics require a new review.
+
+Quotes inspected on 2026-10-18 for a previously unactivated HyperCore recipient
+required approximately 4.229318 Polygon pUSD for 3.008363 expected USDC, with
+2.978580 minimum USDC. The conservative fee estimate was about $1.225, exceeding
+the unchanged 20% automatic cap. An already active recipient had a much smaller
+quoted cost. These are observations, not fixed fees or completed transfers:
+always inspect the current route. Relay fees already included in the input
+must not be added to the source debit again; separately denominated source gas
+is disclosed separately.
+
 ## Test in order
 
 1. Check each venue in the normal feed. Open an active market and verify fresh

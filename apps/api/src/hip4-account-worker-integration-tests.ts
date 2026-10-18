@@ -88,11 +88,18 @@ const fetcher: typeof fetch = async (url, options) => {
   assert.ok(request.type in responses, `unexpected read: ${request.type}`);
   return Response.json(responses[request.type]);
 };
-const makeDue = () =>
-  pool.query(
+const makeDue = async () => {
+  await pool.query(
     "update hip4_account_snapshots set attempt_at=now()-interval '1 day' where account_address=$1",
     [address],
   );
+  // Advancing an account to its next 60s worker interval must also advance
+  // the provider's 60s rolling window. Do not simulate several minutes of
+  // valid refreshes inside a single real second of shared request capacity.
+  await pool.query(
+    "update hip4_request_budget set admissions=jsonb_build_array(jsonb_build_object('at',extract(epoch from statement_timestamp())-61,'weight',1200)) where scope='public-info'",
+  );
+};
 try {
   assert.equal(
     Math.floor(
@@ -152,12 +159,18 @@ try {
   assert.equal(first.updated, 1);
   assert.equal(first.nextIntervalSeconds, 60);
   assert.equal((await runHip4AccountReadPass(pool, fetcher)).claimed, 0);
-  const snapshot = (
+  const firstSnapshot = (
     await pool.query(
-      "select observation from hip4_account_snapshots where account_address=$1",
+      "select observation, history from hip4_account_snapshots where account_address=$1",
       [address],
     )
-  ).rows[0].observation;
+  ).rows[0];
+  assert.equal(
+    firstSnapshot.history.nextBackgroundRead,
+    undefined,
+    "a sufficient repair quota retains combined cash/history refreshes",
+  );
+  const snapshot = firstSnapshot.observation;
   assert.equal(snapshot.cash.ownedCash, "12.34");
   assert.equal(snapshot.perpsCash.state, "verified");
   assert.equal(snapshot.perpsCash.availableRaw, "996241100");

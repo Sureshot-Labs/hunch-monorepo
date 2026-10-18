@@ -49,6 +49,7 @@ import { readFrozenPolymarketHandoffBinding } from "../../funding/domain/polymar
 import type { FundingCommitPlan } from "../../funding/persistence/funding-operation-repository.js";
 import { maximumInternalFundingDestinationRaw } from "../../funding/planner/composite-source-options.js";
 import { validateRelayHypercoreInboundQuote } from "./hypercore-inbound-quote.js";
+import { formatUnsignedDecimal } from "../../account-value/decimal.js";
 
 const captured = JSON.parse(
   readFileSync(
@@ -1284,7 +1285,8 @@ test("inbound expected-output uses USDC8 floor and common bounded source-cap fal
   await f.adapter.quoteHypercoreInbound(f.input);
   const request = f.calls.find((call) => call.path === "/quote/v2")?.body;
   assert.equal(request?.tradeType, "EXPECTED_OUTPUT");
-  assert.equal(request?.amount, "858585859");
+  assert.equal(request?.amount, "858499200");
+  assert.equal(request?.slippageTolerance, "99");
   const capped = fixture();
   capped.input.route.quoteMode = "expected_output";
   capped.input.sourceAmount.raw = "9999999";
@@ -1294,6 +1296,179 @@ test("inbound expected-output uses USDC8 floor and common bounded source-cap fal
       error instanceof RelayQuoteEconomicsError &&
       error.reason === "source_cap_exceeded",
   );
+});
+
+test("inbound expected-output rounding preserves the original floor and strict common slippage limit", async (context) => {
+  for (const [index, name] of [
+    "Base USDC",
+    "Polygon USDC",
+    "Polygon pUSD",
+  ].entries()) {
+    for (const [floor, slippage, providerSlippage, target, minimum] of [
+      ["197450000", 0, 0, "197450000", "197450000"],
+      ["197450000", 1, 0, "197450000", "197450000"],
+      ["197450000", 100, 99, "199424400", "197450000"],
+      ["197450000", 500, 499, "207820300", "197450000"],
+      ["197450001", 0, 0, "197450100", "197450100"],
+      ["197450001", 1, 0, "197450100", "197450100"],
+      ["197450001", 100, 99, "199424500", "197450100"],
+      ["197450001", 500, 499, "207820400", "197450100"],
+      ["1", 0, 0, "100", "100"],
+      ["1", 1, 0, "100", "100"],
+      ["1", 100, 0, "100", "100"],
+      ["1", 500, 0, "100", "100"],
+      ["101", 0, 0, "200", "200"],
+      ["101", 1, 0, "200", "200"],
+      ["101", 100, 0, "200", "200"],
+      ["101", 500, 0, "200", "200"],
+    ] as const) {
+      await context.test(
+        `${name}: floor ${floor}, ${slippage} bps`,
+        async (child) => {
+          const f = fixture(index);
+          f.input.route.quoteMode = "expected_output";
+          f.input.minimumOutput.raw = floor;
+          f.input.maximumSlippageBps = slippage;
+          f.input.sourceAmount.raw = "5560163";
+          const requests: RelayQuoteRequest[] = [];
+          child.mock.method(
+            f.adapter.client,
+            "quote",
+            async (request: RelayQuoteRequest) => {
+              requests.push(request);
+              // Synthetic rounding response, not another provider capture. Keep
+              // USDC8 wire/protocol units and rebuild their exact commitments.
+              assert.ok(request.slippageTolerance !== undefined);
+              const expected = (BigInt(request.amount) / 100n) * 100n;
+              const roundedMinimum =
+                ((expected * (10000n - BigInt(request.slippageTolerance))) /
+                  10000n /
+                  100n) *
+                100n;
+              const wire = structuredClone(f.wire);
+              const feeRaw =
+                BigInt(wire.fees.relayer.amount) + BigInt(wire.fees.app.amount);
+              const sourceRaw = (expected / 100n + feeRaw).toString();
+              wire.details.currencyIn.amount =
+                wire.details.currencyIn.minimumAmount = sourceRaw;
+              wire.details.currencyOut.amount = expected.toString();
+              wire.details.currencyOut.minimumAmount =
+                roundedMinimum.toString();
+              if (wire.details.refundCurrency)
+                wire.details.refundCurrency.amount =
+                  wire.details.refundCurrency.minimumAmount = sourceRaw;
+              const protocol = wire.protocol.v2;
+              protocol.orderData.inputs[0].payment.amount =
+                protocol.paymentDetails.amount = sourceRaw;
+              protocol.orderData.output.payments[0].expectedAmount =
+                expected.toString();
+              protocol.orderData.output.payments[0].minimumAmount =
+                roundedMinimum.toString();
+              protocol.orderId = relayHexOrderId(protocol.orderData);
+              const erc20 = new Interface([
+                "function approve(address spender,uint256 amount)",
+                "function depositErc20(address depositor,address token,uint256 amount,bytes32 id)",
+              ]);
+              const approve = wire.steps.find(
+                (step: { id: string }) => step.id === "approve",
+              );
+              if (approve) {
+                const decoded = erc20.decodeFunctionData(
+                  "approve",
+                  approve.items[0].data.data,
+                );
+                approve.items[0].data.data = erc20.encodeFunctionData(
+                  "approve",
+                  [decoded[0], sourceRaw],
+                );
+              }
+              wire.steps.find(
+                (step: { id: string }) => step.id === "deposit",
+              ).items[0].data.data = erc20.encodeFunctionData("depositErc20", [
+                wire.details.sender,
+                wire.details.currencyIn.currency.address,
+                sourceRaw,
+                protocol.orderId,
+              ]);
+              return wire;
+            },
+          );
+          const quote = await f.adapter.quoteHypercoreInbound(f.input);
+          assert.equal(requests.length, 1);
+          assert.equal(requests[0].tradeType, "EXPECTED_OUTPUT");
+          assert.equal(requests[0].amount, target);
+          assert.equal(
+            requests[0].slippageTolerance,
+            providerSlippage.toString(),
+          );
+          assert.equal(quote.candidate.minimumOutput.raw, minimum);
+          assert.ok(BigInt(minimum) >= BigInt(floor));
+          assert.equal(f.input.minimumOutput.raw, floor);
+          assert.equal(f.input.sourceAmount.raw, "5560163");
+          const option = buildRelayWalletSourceOption({
+            sourceOptionId: "rounding-inbound-source",
+            safeLabel: name,
+            maximumSourceRaw: f.input.sourceAmount.raw,
+            quotedSourceAmount: quote.sourceAmount,
+            estimatedUsd: quote.sourceEstimatedUsd,
+            quote: quote.candidate,
+            feeUsd: quote.feeUsd,
+            route: relayRuntimeRoute(f.spec, {
+              sourceLocationPatternId: "source",
+              destinationLocationPatternId: "destination",
+            }),
+            routeObservation: null,
+            routeExperiencePolicy:
+              DEFAULT_FUNDING_RUNTIME_POLICY.routeExperience,
+            maximumFeeUsd: "10",
+            maximumFeeBps: 10000,
+            warningFeeUsd: "5",
+            warningFeeBps: 10000,
+            minimumDestinationUsd: "0",
+            maximumSlippageBps: slippage,
+            minimumDestinationEstimatedUsd: formatUnsignedDecimal(
+              BigInt(minimum),
+              f.spec.destination.decimals,
+            ),
+          });
+          assert.equal(
+            option.reasonCodes.includes("minimum_output_not_met"),
+            false,
+          );
+          assert.equal(
+            option.reasonCodes.includes("provider_quote_invalid"),
+            false,
+          );
+        },
+      );
+    }
+  }
+});
+
+test("inbound expected-output still rejects a provider minimum one native atom below the original floor", async () => {
+  const f = fixture();
+  f.input.route.quoteMode = "expected_output";
+  f.input.minimumOutput.raw = (
+    BigInt(f.wire.details.currencyOut.minimumAmount) + 1n
+  ).toString();
+  await assert.rejects(
+    f.adapter.quoteHypercoreInbound(f.input),
+    (error: unknown) =>
+      error instanceof RelayQuoteEconomicsError &&
+      error.reason === "minimum_floor",
+  );
+  assert.equal(f.calls.filter((call) => call.path === "/quote/v2").length, 1);
+});
+
+test("inbound rounding cannot turn an invalid user slippage limit into an allowed provider request", async () => {
+  for (const maximumSlippageBps of [-1, 501, 0.5, Number.NaN]) {
+    const f = fixture();
+    await assert.rejects(
+      f.adapter.quoteHypercoreInbound({ ...f.input, maximumSlippageBps }),
+      /slippage limit is outside hard policy/,
+    );
+    assert.equal(f.calls.length, 0);
+  }
 });
 
 test("inbound atomic deposit freezes one exact source debit; approval and incompatible asset do not", async () => {
@@ -1580,4 +1755,149 @@ test("inbound USDC fee USD/BPS limits use exact raw fees, not provider amountUsd
       JSON.stringify(recovered.reasonCodes),
     );
   }
+});
+
+test("pUSD conversion cost is part of the quoted source debit and common fee limits", async () => {
+  const f = fixture(2);
+  f.input.route.quoteMode = "expected_output";
+  f.input.sourceAmount.raw = "5560163";
+  f.input.minimumOutput.raw = "197450000";
+  const sourceRaw = "3215010";
+  const wire = f.wire;
+  wire.details.currencyIn.amount = wire.details.currencyIn.minimumAmount =
+    sourceRaw;
+  wire.details.currencyOut.amount = "199444500";
+  // Preserve the observed source/expected-output economics and simulate the
+  // provider minimum at the now-tighter 99 bps, not the old 100 bps wire.
+  wire.details.currencyOut.minimumAmount = "197469900";
+  if (wire.details.refundCurrency)
+    wire.details.refundCurrency.amount =
+      wire.details.refundCurrency.minimumAmount = sourceRaw;
+  const protocol = wire.protocol.v2;
+  protocol.orderData.inputs[0].payment.amount = protocol.paymentDetails.amount =
+    sourceRaw;
+  protocol.orderData.output.payments[0].expectedAmount = "199444500";
+  protocol.orderData.output.payments[0].minimumAmount = "197469900";
+  protocol.orderId = relayHexOrderId(protocol.orderData);
+  const erc20 = new Interface([
+    "function approve(address spender,uint256 amount)",
+    "function depositErc20(address depositor,address token,uint256 amount,bytes32 id)",
+  ]);
+  const approve = wire.steps.find(
+    (step: { id: string }) => step.id === "approve",
+  );
+  if (approve) {
+    const decoded = erc20.decodeFunctionData(
+      "approve",
+      approve.items[0].data.data,
+    );
+    approve.items[0].data.data = erc20.encodeFunctionData("approve", [
+      decoded[0],
+      sourceRaw,
+    ]);
+  }
+  wire.steps.find(
+    (step: { id: string }) => step.id === "deposit",
+  ).items[0].data.data = erc20.encodeFunctionData("depositErc20", [
+    wire.details.sender,
+    wire.details.currencyIn.currency.address,
+    sourceRaw,
+    protocol.orderId,
+  ]);
+  for (const [kind, fee] of Object.entries(wire.fees) as [
+    string,
+    Record<string, string>,
+  ][]) {
+    fee.amount = fee.minimumAmount =
+      kind === "relayer"
+        ? "1220130"
+        : kind === "relayerGas"
+          ? "1199730"
+          : kind === "relayerService"
+            ? "20400"
+            : "0";
+    fee.amountUsd = "0";
+  }
+  const originalWire = structuredClone(wire);
+  const quote = await f.adapter.quoteHypercoreInbound(f.input);
+  assert.equal(f.calls.filter((call) => call.path === "/quote/v2").length, 1);
+  assert.equal(
+    f.calls.find((call) => call.path === "/quote/v2")?.body?.slippageTolerance,
+    "99",
+  );
+  assert.deepEqual(
+    wire,
+    originalWire,
+    "normalization must not alter provider wire",
+  );
+  assert.equal(quote.sourceAmount.raw, sourceRaw);
+  assert.equal(quote.actions.length, 2, "derived cost adds no money action");
+  assert.deepEqual(quote.candidate.fees, [
+    { kind: "relayer", amount: { asset: f.spec.source, raw: "1220130" } },
+    { kind: "swap", amount: { asset: f.spec.source, raw: "435" } },
+  ]);
+  assert.deepEqual(quote.feeUsd, ["1.22013", "0.000435"]);
+  const option = buildRelayWalletSourceOption({
+    sourceOptionId: "pusd-inbound-source",
+    safeLabel: "pUSD",
+    maximumSourceRaw: f.input.sourceAmount.raw,
+    quotedSourceAmount: quote.sourceAmount,
+    estimatedUsd: quote.sourceEstimatedUsd,
+    quote: quote.candidate,
+    feeUsd: quote.feeUsd,
+    route: relayRuntimeRoute(f.spec, {
+      sourceLocationPatternId: "source",
+      destinationLocationPatternId: "destination",
+    }),
+    routeObservation: null,
+    routeExperiencePolicy: DEFAULT_FUNDING_RUNTIME_POLICY.routeExperience,
+    maximumFeeUsd: "10",
+    maximumFeeBps: 2000,
+    warningFeeUsd: "5",
+    warningFeeBps: 1000,
+    minimumDestinationUsd: "0.5",
+    maximumSlippageBps: 100,
+    minimumDestinationEstimatedUsd: "1.9745",
+  });
+  assert.equal(option.selectable, false);
+  assert.ok(option.reasonCodes.includes("fee_limit_exceeded"));
+  assert.equal(option.reasonCodes.includes("minimum_output_not_met"), false);
+  assert.equal(option.reasonCodes.includes("provider_quote_invalid"), false);
+  assert.deepEqual(
+    option.fees.map((fee) => fee.estimatedUsd),
+    ["1.22013", "0.000435"],
+  );
+  const route = relayRuntimeRoute(f.spec, {
+    sourceLocationPatternId: "evm-wallet",
+    destinationLocationPatternId: f.destination.destinationLocationPatternId,
+  });
+  const planned = await buildRelayPlanningQuote({
+    ...f.f.input,
+    quote,
+    route,
+    destination: f.destination,
+    profile: {
+      walletId: "evm-controller",
+      controllerWalletRef: "evm-controller",
+      address: f.input.userAddress,
+      networkId: f.spec.source.networkId,
+      source: "external",
+      signingModes: ["web_client"],
+      serverWalletRef: null,
+      sponsorshipPolicyIds: [],
+    },
+    source: {
+      ...f.f.input.source,
+      source: f.source,
+      sourceLocationPatternId: route.sourceLocationPatternId,
+      quoteInputAmount: quote.sourceAmount,
+      maximumSourceRaw: f.input.sourceAmount.raw,
+    },
+  });
+  assert.equal(planned.commitPlan.reservations.length, 1);
+  assert.equal(planned.commitPlan.reservations[0].rawAmount, sourceRaw);
+  assert.equal(planned.commitPlan.segments[0].quotedInput.raw, sourceRaw);
+  assert.equal(planned.commitPlan.steps.length, 2);
+  assert.deepEqual(planned.candidate.fees, quote.candidate.fees);
+  assert.deepEqual(planned.feeUsd, ["1.22013", "0.000435"]);
 });

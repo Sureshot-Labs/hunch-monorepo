@@ -6,6 +6,7 @@ import { runHip4ReadCycle } from "./services/hip4-indexer.js";
 import { readHip4Policy } from "./services/hip4-repository.js";
 import { startHip4LiveRuntime } from "./services/hip4-live-runtime.js";
 import { createHip4Wakeup } from "./services/hip4-metadata-stream.js";
+import { createHip4ReadSchedule } from "./services/hip4-read-scheduling.js";
 
 const argument = (name: string) => process.argv[process.argv.indexOf(name) + 1];
 if (
@@ -23,6 +24,7 @@ const pool = new Pool({
 let stopping = false;
 const shutdown = new AbortController();
 const wakeup = createHip4Wakeup();
+const schedule = createHip4ReadSchedule();
 let stream: ReturnType<typeof startHip4LiveRuntime> | undefined;
 process.on("SIGINT", () => {
   stopping = true;
@@ -62,20 +64,37 @@ try {
     const start = Date.now();
     // Config errors disable requests, but a repaired policy recovers on the
     // next bounded check. Defaults here schedule retries; they never enable IO.
-    let pollMs = DEFAULT_HIP4_READ_POLICY.pollMs;
-    let minRefreshMs = DEFAULT_HIP4_READ_POLICY.minRefreshMs;
+    let waitMs = DEFAULT_HIP4_READ_POLICY.policyCheckMs;
+    let policy = DEFAULT_HIP4_READ_POLICY;
+    let configured = false;
+    let maintenance = false;
     try {
-      const { policy } = await readHip4Policy(pool, "indexer");
-      pollMs = policy.pollMs;
-      minRefreshMs = policy.minRefreshMs;
+      const current = await readHip4Policy(pool, "indexer");
+      policy = current.policy;
+      configured = true;
+      maintenance = current.lifecycle.indexerMode === "maintenance";
+      const plan = schedule.start(policy, start);
+      const result = await runHip4ReadCycle(
+        pool,
+        undefined,
+        async (change) => {
+          await stream?.invalidateCanonical(change, policy.requestTimeoutMs);
+        },
+        {
+          repair: plan.repair || maintenance || process.argv.includes("--once"),
+        },
+      );
+      schedule.complete(
+        start,
+        result.repairAttempted,
+        result.failures.some(
+          (failure) => failure.reason === "metadata_budget_exhausted",
+        ),
+      );
       console.log(
         JSON.stringify({
           component: "hip4-read",
-          ...(await runHip4ReadCycle(
-            pool,
-            undefined,
-            async (change) => { await stream?.invalidateCanonical(change, policy.requestTimeoutMs); },
-          )),
+          ...result,
           stream: stream?.diagnostics ?? null,
           durationMs: Date.now() - start,
         }),
@@ -90,8 +109,11 @@ try {
         }),
       );
     }
+    if (configured) waitMs = schedule.waitMs(policy, Date.now(), maintenance);
     if (process.argv.includes("--once") || stopping) break;
-    await wakeup.wait(Math.min(minRefreshMs, pollMs), pollMs, shutdown.signal);
+    // Coalesce stream hints at the bounded catalog cadence. Early hint-driven
+    // passes must not consume the capacity reserved for future observations.
+    await wakeup.wait(waitMs, waitMs, shutdown.signal);
   } while (!stopping);
 } finally {
   await stream?.close();

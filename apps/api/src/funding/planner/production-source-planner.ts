@@ -86,6 +86,7 @@ import {
   TOTAL_FUNDING_PLANNER_TIMEOUT_MS,
   MAX_RELAY_SOURCE_QUOTES,
   effectiveFundingEconomicsLimits,
+  fundingRequestAllowsEconomicReview,
   type RelayEligibleSourceFact,
   type RelayPlanningQuoteResult,
 } from "./source-options.js";
@@ -1048,6 +1049,7 @@ export async function planProductionFundingSourceBoundaries(
     destinationUnitPriceUsd: string | null;
     maximumFeeUsd: string;
     maximumFeeBps: number;
+    maximumReviewedFeeBps?: number | null;
     feeReferenceUsd?: string | null;
     discoverRelay: (
       requiredAmount: Money,
@@ -1124,6 +1126,7 @@ export async function planProductionFundingSourceBoundaries(
     destinationUnitPriceUsd: input.destinationUnitPriceUsd,
     maximumFeeUsd: input.maximumFeeUsd,
     maximumFeeBps: input.maximumFeeBps,
+    maximumReviewedFeeBps: input.maximumReviewedFeeBps,
     feeReferenceUsd: input.feeReferenceUsd,
   } as const;
   const automaticComposite = buildCompositeSourceOption({
@@ -1205,6 +1208,9 @@ export class ProductionFundingSourcePlanner {
         input.destinationFacts?.collateralValuation?.unitPriceUsd ?? null,
       maximumFeeUsd: limits.maximumFeeUsd,
       maximumFeeBps: limits.maximumFeeBps,
+      maximumReviewedFeeBps: fundingRequestAllowsEconomicReview(input.request)
+        ? limits.maximumReviewedFeeBps
+        : null,
       feeReferenceUsd: tradeFundingFeeReferenceUsd(
         input.request,
         input.requiredAmount,

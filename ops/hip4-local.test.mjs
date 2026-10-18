@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   bootstrapLocalEnvironment,
+  API_INTERACTIVE_KEYS,
   buildLocalEnvironment,
   configurationStatus,
   inspectDatabase,
@@ -134,6 +135,156 @@ test("dotenv and inherited state cannot retarget local storage or enable financi
         .ADMIN_SERVICE_TOKEN_PEPPER,
       "",
     );
+});
+
+test("ordinary Polymarket relayer settings reach only the interactive API without enabling a signer or autonomous execution", async () => {
+  const values = {
+    ...Object.fromEntries(
+      API_INTERACTIVE_KEYS.map((key, index) => [
+        key,
+        `synthetic-relayer-secret-${index}`,
+      ]),
+    ),
+    PRIVY_WALLET_AUTHORIZATION_KEY: "forbidden-delegated-key",
+    POLYMARKET_RELAYER_PRIVATE_KEY: "forbidden-private-key",
+    HUNCH_FINANCE_EXECUTE: "true",
+    HUNCH_FINANCE_PAYOUT_SEND_ENABLED: "true",
+  };
+  const local = buildLocalEnvironment(values, options, values);
+  for (const key of API_INTERACTIVE_KEYS) assert.equal(local[key], values[key]);
+  assert.equal(local.PRIVY_WALLET_AUTHORIZATION_KEY, undefined);
+  assert.equal(local.POLYMARKET_RELAYER_PRIVATE_KEY, undefined);
+  assert.equal(local.HUNCH_FINANCE_EXECUTE, "false");
+  assert.equal(local.HUNCH_FINANCE_PAYOUT_SEND_ENABLED, "false");
+  assert.equal(local.HUNCH_TELEGRAM_VENUE_RECONCILE_ENABLED, "false");
+  // Ambient service keys are not another credential source.
+  const inheritedOnly = buildLocalEnvironment({}, options, values);
+  for (const key of API_INTERACTIVE_KEYS)
+    assert.equal(inheritedOnly[key], undefined);
+  for (const mode of [
+    "finance-worker",
+    "indexer",
+    "indexer-polymarket",
+    "indexer-limitless",
+    "sync-polymarket",
+    "sync-limitless",
+    "sync-hyperliquid",
+  ]) {
+    const passive = buildLocalEnvironment(values, { ...options, mode }, values);
+    const environment = {};
+    await bootstrapLocalEnvironment(
+      passive,
+      async () => {
+        Object.assign(environment, values, {
+          HUNCH_RUNTIME_SECRETS_LOADED: "1",
+        });
+      },
+      "/repo/.env",
+      environment,
+    );
+    for (const key of API_INTERACTIVE_KEYS)
+      assert.equal(
+        environment[key],
+        undefined,
+        `${mode} must not retain API relayer credentials from dotenv`,
+      );
+    assert.equal(environment.HUNCH_FINANCE_EXECUTE, "false");
+  }
+  const environment = {};
+  await bootstrapLocalEnvironment(
+    local,
+    async () => {
+      Object.assign(environment, {
+        HUNCH_RUNTIME_SECRETS_LOADED: "1",
+        POLYMARKET_BUILDER_API_KEY: "wrong-bootstrap-value",
+        HUNCH_FINANCE_EXECUTE: "true",
+      });
+    },
+    "/repo/.env",
+    environment,
+  );
+  for (const key of API_INTERACTIVE_KEYS)
+    assert.equal(environment[key], values[key]);
+  assert.equal(environment.HUNCH_FINANCE_EXECUTE, "false");
+});
+
+test("Polymarket diagnostics distinguish process startup from relayer configuration and recover without exposing secrets", () => {
+  const base = { PRIVY_APP_ID: "login", PRIVY_APP_SECRET: "login-secret" };
+  const local = buildLocalEnvironment(base, options, {}, testReceiveKey);
+  const missing = configurationStatus(local, "api");
+  assert.deepEqual(
+    missing.missingRequired,
+    [],
+    "read-only API must remain startable without a trading relayer",
+  );
+  assert.equal(missing.interactiveTrading.polymarketRelayer.configured, false);
+  assert.deepEqual(
+    missing.interactiveTrading.polymarketRelayer.missingKeys,
+    API_INTERACTIVE_KEYS,
+  );
+  const keys = Object.fromEntries(
+    API_INTERACTIVE_KEYS.map((key, index) => [
+      key,
+      `synthetic-relayer-key-value-${index}`,
+    ]),
+  );
+  const restored = configurationStatus(
+    buildLocalEnvironment({ ...base, ...keys }, options, {}, testReceiveKey),
+    "api",
+  );
+  assert.equal(restored.interactiveTrading.polymarketRelayer.configured, true);
+  assert.deepEqual(
+    restored.interactiveTrading.polymarketRelayer.missingKeys,
+    [],
+  );
+  for (const key of API_INTERACTIVE_KEYS)
+    assert.equal(restored.keys[key], true);
+  for (const value of Object.values(keys))
+    assert.equal(JSON.stringify(restored).includes(value), false);
+  const partial = { ...base, ...keys };
+  delete partial.POLYMARKET_BUILDER_API_SECRET;
+  const incomplete = configurationStatus(
+    buildLocalEnvironment(partial, options, {}, testReceiveKey),
+    "api",
+  );
+  assert.deepEqual(
+    incomplete.interactiveTrading.polymarketRelayer.missingKeys,
+    ["POLYMARKET_BUILDER_API_SECRET"],
+  );
+  assert.equal(
+    incomplete.interactiveTrading.polymarketRelayer.configured,
+    false,
+  );
+  assert.equal(
+    configurationStatus(local, "finance-worker").interactiveTrading,
+    null,
+  );
+});
+
+test("canonical funding router configuration survives into API and reconciliation without enabling execution", () => {
+  const values = {
+    POLYMARKET_FUNDING_ROUTER_ADDRESS: "synthetic-public-contract-setting",
+    HUNCH_FINANCE_EXECUTE: "true",
+  };
+  for (const mode of ["api", "finance-worker"]) {
+    const local = buildLocalEnvironment(values, { ...options, mode }, values);
+    assert.equal(
+      local.POLYMARKET_FUNDING_ROUTER_ADDRESS,
+      values.POLYMARKET_FUNDING_ROUTER_ADDRESS,
+    );
+    assert.equal(local.HUNCH_FINANCE_EXECUTE, "false");
+    assert.equal(local.HUNCH_FUNDING_PM_WRAP_EXECUTE, "false");
+  }
+  assert.equal(
+    configurationStatus(buildLocalEnvironment(values, options, {}), "api")
+      .interactiveTrading.polymarketFundingRouter.addressPresent,
+    true,
+  );
+  assert.equal(
+    configurationStatus(buildLocalEnvironment({}, options, values), "api")
+      .interactiveTrading.polymarketFundingRouter.addressPresent,
+    false,
+  );
 });
 
 test("dedicated local Receive key is read-only, private and stable, without dotenv privilege inheritance", (t) => {

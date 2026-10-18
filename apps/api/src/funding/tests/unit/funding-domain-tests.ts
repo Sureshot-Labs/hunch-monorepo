@@ -52,6 +52,7 @@ import {
 import {
   applyFundingIntentPatch,
   compileFundingIntentPolicy,
+  fundingIntentBehaviorSnapshot,
   validateFundingIntentPolicy,
   type FundingIntentPolicy,
 } from "../../policies/funding-policy-v2.js";
@@ -1071,6 +1072,70 @@ await test("compiles full V2 intent to the reviewed runtime catalog", () => {
       expected,
     );
     assert.equal(venue.delegatedDailyCapUsd, "20");
+  }
+});
+
+await test("optional fee overrides preserve legacy defaults and patch/reset independently", () => {
+  const legacy = validateFundingIntentPolicy(FULL_POLICY);
+  assert.ok(legacy.ok);
+  assert.equal(legacy.policy.fees, undefined);
+  assert.equal(legacy.runtimePolicy.placement.maximumReviewedFeeBps, null);
+  const legacyPlacement = Object.fromEntries(
+    Object.entries(DEFAULT_FUNDING_RUNTIME_POLICY.placement).filter(
+      ([key]) => key !== "maximumReviewedFeeBps",
+    ),
+  );
+  const oldRuntime = validateEffectiveFundingRuntime({
+    ...DEFAULT_FUNDING_RUNTIME_POLICY,
+    placement: legacyPlacement,
+  });
+  assert.ok(oldRuntime.ok);
+  assert.equal(oldRuntime.policy.placement.maximumReviewedFeeBps, null);
+  const configured = applyFundingIntentPatch(FULL_POLICY, {
+    fees: {
+      maximumFeeUsd: "3.25",
+      maximumFeeBps: 1500,
+      maximumReviewedFeeBps: 5000,
+    },
+  });
+  assert.ok(configured.ok);
+  assert.equal(configured.runtimePolicy.placement.maximumFeeUsd, "3.25");
+  assert.equal(configured.runtimePolicy.placement.maximumFeeBps, 1500);
+  assert.equal(configured.runtimePolicy.placement.maximumReviewedFeeBps, 5000);
+  assert.deepEqual(fundingIntentBehaviorSnapshot(configured.policy).fees, {
+    maximumFeeUsd: "3.25",
+    maximumFeeBps: 1500,
+    maximumReviewedFeeBps: 5000,
+  });
+  assert.notEqual(
+    fundingPolicyRevision(configured.policy),
+    fundingPolicyRevision(FULL_POLICY),
+  );
+  const preserved = applyFundingIntentPatch(configured.policy, {
+    paused: true,
+  });
+  assert.ok(preserved.ok);
+  assert.deepEqual(preserved.policy.fees, configured.policy.fees);
+  const reset = applyFundingIntentPatch(configured.policy, {
+    fees: { maximumFeeUsd: null, maximumReviewedFeeBps: null },
+  });
+  assert.ok(reset.ok);
+  assert.equal(
+    reset.runtimePolicy.placement.maximumFeeUsd,
+    DEFAULT_FUNDING_RUNTIME_POLICY.placement.maximumFeeUsd,
+  );
+  assert.equal(reset.runtimePolicy.placement.maximumFeeBps, 1500);
+  assert.equal(reset.runtimePolicy.placement.maximumReviewedFeeBps, null);
+  for (const fees of [
+    { maximumFeeUsd: "-1" },
+    { maximumFeeUsd: "1e2" },
+    { maximumFeeBps: 10001 },
+    { maximumFeeBps: 1.5 },
+    { maximumReviewedFeeBps: -1 },
+    { maximumReviewedFeeBps: 10001 },
+    { ignoredFee: 20 },
+  ]) {
+    assert.equal(applyFundingIntentPatch(FULL_POLICY, { fees }).ok, false);
   }
 });
 

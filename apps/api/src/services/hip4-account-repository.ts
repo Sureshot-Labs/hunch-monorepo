@@ -160,8 +160,7 @@ export async function claimHip4AccountRefresh(
     `insert into hip4_account_snapshots(environment,account_address,attempt_at,lease_token,lease_until)
     values($1,$2,case when $6='order_fills' then null else $3::timestamptz end,$4,statement_timestamp()+$5*interval '1 millisecond')
     on conflict(environment,account_address) do update set attempt_at=case when $6='order_fills' then hip4_account_snapshots.attempt_at else excluded.attempt_at end,
-      lease_token=excluded.lease_token,lease_until=excluded.lease_until,
-      attempt_error=case when $6='order_fills' then hip4_account_snapshots.attempt_error else null end
+      lease_token=excluded.lease_token,lease_until=excluded.lease_until
     where hip4_account_snapshots.lease_until is null or hip4_account_snapshots.lease_until<statement_timestamp()
     returning lease_token`,
     [environment, address, startedAt, token, leaseMs, scope],

@@ -223,7 +223,7 @@ export function validateRelayHypercoreInboundQuote(
       )
     )
       throw new Error("native_inbound_fee_currency_mismatch");
-  const fees = normalizeRelayFees(quote);
+  const fees = [...normalizeRelayFees(quote)];
   const feeRaw = fees
     .filter((fee) => fee.kind !== "gas")
     .reduce((sum, fee) => sum + BigInt(fee.amount.raw), 0n);
@@ -235,8 +235,30 @@ export function validateRelayHypercoreInboundQuote(
   const expectedLossRaw8 = sourceRaw * 100n - expectedOutputRaw;
   if (expectedLossRaw8 > feeCap * 100n)
     throw new Error("native_inbound_effective_fee_cap_exceeded");
-  // USDC6 fee reporting can round by < one raw6 unit, never by whole dollars.
-  if (expectedLossRaw8 > feeRaw * 100n + 99n)
+  if (sourceChainId === 137 && same(sourceCurrency, POLYGON_PUSD)) {
+    // pUSD and native USDC are distinct instruments. Account conservatively
+    // for conversion cost absent from Relay's relayer/app summary, using the
+    // committed expected output (never the slippage floor or amountUsd).
+    // This is part of the same source debit, not an additional transfer.
+    const unaccountedLossRaw8 = expectedLossRaw8 - feeRaw * 100n;
+    if (unaccountedLossRaw8 > 0n) {
+      const swapFeeRaw = (unaccountedLossRaw8 + 99n) / 100n;
+      if (feeRaw + swapFeeRaw > feeCap || feeRaw + swapFeeRaw >= sourceRaw)
+        throw new Error("native_inbound_fee_cap_exceeded");
+      fees.push({
+        kind: "swap",
+        amount: {
+          asset: {
+            networkId: "evm:137",
+            assetId: sourceCurrency,
+            decimals: 6,
+          },
+          raw: swapFeeRaw.toString(),
+        },
+      });
+    }
+  } else if (expectedLossRaw8 > feeRaw * 100n + 99n)
+    // Same-USDC reporting may round by < one raw6 unit, not hide route loss.
     throw new Error("native_inbound_fee_summary_understates_cost");
 
   const ids = quote.steps.map((step) => step.id).join(",");

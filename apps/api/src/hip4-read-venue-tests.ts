@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { DEFAULT_HIP4_READ_POLICY } from "@hunch/shared";
 import type { PoolClient } from "pg";
 import type { Pool } from "@hunch/infra";
 import { mapHip4Market } from "./services/hip4-mapping.js";
@@ -203,6 +204,43 @@ test("native DTO has independent side books, exact payouts and unknown rather th
   assert.equal(settled.market.redemption.status, "resolved_not_redeemable");
 });
 
+test("batch native refresh applies effective freshness without mutating stored observations", async () => {
+  const market = native();
+  market.indicativePrices = {
+    source: "spotMetaAndAssetCtxs",
+    observedAt: new Date(now).toISOString(),
+    validUntil: new Date(now + 60_000).toISOString(),
+    prices: [{ coin: market.sides[0].coin, price: "0.4" }],
+  };
+  const db = {
+    query: async () => ({ rows: [{ read_model: market }] }),
+  } as unknown as Pool;
+  const rows = await fetchHip4MarketsByTokenIds(db, {
+    tokenIds: [market.sides[0].tokenId],
+    environment: "mainnet",
+  });
+  const [item] = mapMarketsByTokenRows(rows, {
+    now: new Date(now + 2_000),
+    includeTop: false,
+    hip4ReadPolicy: {
+      ...DEFAULT_HIP4_READ_POLICY,
+      enabled: true,
+      bookMaxAgeMs: 1_000,
+    },
+  });
+  const snapshot = item.market.marketMetadata?.hip4 as typeof market;
+  assert.equal(
+    snapshot.indicativePrices?.validUntil,
+    new Date(now + 1_000).toISOString(),
+  );
+  assert.equal(snapshot.sides[0].bookState, "stale");
+  assert.equal(item.market.bestBidYes, null);
+  assert.equal(
+    market.indicativePrices.validUntil,
+    new Date(now + 60_000).toISOString(),
+  );
+  assert.equal(market.sides[0].bookState, "fresh");
+});
 test("native payouts need official settled provenance and complementary exact side values", async () => {
   const market = native();
   market.sides[0].payout = "1";

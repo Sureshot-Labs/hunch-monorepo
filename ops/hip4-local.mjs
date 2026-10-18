@@ -50,6 +50,7 @@ export const SELECTED_KEYS = [
   "CREDENTIALS_ENCRYPTION_KEY",
   "FUNDING_REFERENCE_LOOKUP_HMAC_KEY",
   "FUNDING_REFERENCE_LOOKUP_KEY_VERSION",
+  "POLYMARKET_FUNDING_ROUTER_ADDRESS",
   "POLYGON_RPC_URL",
   "BASE_RPC_URL",
   "SOLANA_RPC_URL",
@@ -64,6 +65,14 @@ export const SELECTED_KEYS = [
   "LIMITLESS_HMAC_TOKEN_ID",
   "LIMITLESS_HMAC_SECRET",
   "LIMITLESS_WS_SESSION",
+];
+// Ordinary interactive Polymarket setup needs the builder relayer credentials.
+// These authenticate the service, not the user's wallet signature. Keep them
+// API-only: passive indexers/sync and the reconciliation worker do not need them.
+export const API_INTERACTIVE_KEYS = [
+  "POLYMARKET_BUILDER_API_KEY",
+  "POLYMARKET_BUILDER_API_SECRET",
+  "POLYMARKET_BUILDER_API_PASSPHRASE",
 ];
 const ENTRIES = {
   api: "apps/api/dist/server.js",
@@ -196,6 +205,9 @@ export function buildLocalEnvironment(
     if (inherited[key] !== undefined) local[key] = inherited[key];
   for (const key of SELECTED_KEYS)
     if (values[key]?.trim()) local[key] = values[key];
+  if (options.mode === "api")
+    for (const key of API_INTERACTIVE_KEYS)
+      if (values[key]?.trim()) local[key] = values[key];
   return Object.assign(local, {
     NODE_ENV: "development",
     HOST: "127.0.0.1",
@@ -284,12 +296,37 @@ export function configurationStatus(
   }
   return {
     keys: Object.fromEntries(
-      [...SELECTED_KEYS, "ADMIN_SERVICE_TOKEN_PEPPER"].map((key) => [
-        key,
-        Boolean(local[key]?.trim()),
-      ]),
+      [
+        ...SELECTED_KEYS,
+        ...API_INTERACTIVE_KEYS,
+        "ADMIN_SERVICE_TOKEN_PEPPER",
+      ].map((key) => [key, Boolean(local[key]?.trim())]),
     ),
     missingRequired: required.filter((key) => !local[key]?.trim()),
+    interactiveTrading:
+      mode === "api"
+        ? {
+            polymarketFundingRouter: {
+              addressPresent: Boolean(
+                local.POLYMARKET_FUNDING_ROUTER_ADDRESS?.trim(),
+              ),
+              scope:
+                "Configuration only for Polymarket funding/shortfall tests. The ordinary API and funding runtime validate the canonical router address, policy and approvals.",
+            },
+            polymarketRelayer: {
+              configured: API_INTERACTIVE_KEYS.every((key) =>
+                Boolean(local[key]?.trim()),
+              ),
+              missingKeys: API_INTERACTIVE_KEYS.filter(
+                (key) => !local[key]?.trim(),
+              ),
+              scope:
+                "Service configuration only, not wallet readiness or transaction authority. The app still checks venue policy, owned funder, approvals and user authorization.",
+              advice:
+                "Restore missing builder relayer settings in the backend .env and restart pnpm dev:hip. No production credentials are fetched automatically. Missing relayer configuration does not block read-only markets or other venues.",
+            },
+          }
+        : null,
     receiveOptionTokenKey: {
       source: LOCAL_RECEIVE_ENV,
       status:

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { Interface } from "ethers";
 
 import { RELAY_PINNED_ASSETS } from "../../../funding-providers/relay/mappings.js";
+import { HYPERCORE_MAINNET_USDC } from "../../domain/hypercore-identity.js";
 import {
   POLYMARKET_DEPOSIT_PUSD_FUND_PROFILE_ID,
   TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
@@ -56,6 +57,8 @@ import {
   RelayFirstSourcePlanner,
   assertSingleSegmentExecutionPlan,
   buildRelayWalletSourceOption,
+  effectiveFundingEconomicsLimits,
+  fundingRequestAllowsEconomicReview,
   minimumDestinationUsdForFundingRequest,
   selectRelayFirstSourceOptions,
 } from "../../planner/source-options.js";
@@ -147,6 +150,17 @@ await test("a Trade quote is the single confirmation for contained conversion", 
     assetId: "11111111111111111111111111111111",
     decimals: 9,
   };
+  assert.equal(
+    classifyFundingQuoteConsent({
+      purpose: "trade_shortfall",
+      ingress: false,
+      sourceAmounts: [{ amount: { asset: polygonPusd, raw: "4229318" } }],
+      expectedDestination: { asset: baseUsdc, raw: "3008363" },
+      minimumDestination: { asset: baseUsdc, raw: "2978580" },
+      reasonCodes: ["funding_cost_warning", "economic_review_required"],
+    }),
+    "explicit_economic_review",
+  );
   assert.equal(
     classifyFundingQuoteConsent({
       purpose: "trade_shortfall",
@@ -1510,6 +1524,7 @@ await test("Relay-first source planner asks only one exact Relay route", async (
   });
   const exactSource = sourceOption("1000000").source;
   let relayCalls = 0;
+  let quotedFeeUsd: string | null = null;
   const planner = new RelayFirstSourcePlanner({
     listEligibleSources: async () => [
       {
@@ -1581,14 +1596,21 @@ await test("Relay-first source planner asks only one exact Relay route", async (
           destination: exactDestination.target,
           expectedOutput: minimumOutput,
           minimumOutput,
-          fees: [],
+          fees: quotedFeeUsd
+            ? [
+                {
+                  kind: "relayer",
+                  amount: { asset: POLYGON_PUSD, raw: "250000" },
+                },
+              ]
+            : [],
           eta: { minSeconds: 5, maxSeconds: 15 },
           expiresAt: "2026-07-24T12:00:30.000Z",
           actionKinds: ["evm_transaction"],
           refundSemantics: "owned_refund",
           opaqueQuoteRef: "opaque_relay_quote_orchestrated_12345678",
         },
-        feeUsd: [],
+        feeUsd: quotedFeeUsd ? [quotedFeeUsd] : [],
         minimumDestinationEstimatedUsd: "1",
         executionPlan,
         commitPlan: commitPlan(sourceAmount.raw),
@@ -1620,6 +1642,36 @@ await test("Relay-first source planner asks only one exact Relay route", async (
     sources[0]?.commitPlan.operation.placementSnapshot,
     placement,
   );
+
+  quotedFeeUsd = "0.25";
+  policy.placement.maximumReviewedFeeBps = 5_000;
+  const interactiveRequest = intent("trade_shortfall", "1000000");
+  const reviewedSources = await planner.list({
+    ...plannerInput,
+    request: interactiveRequest,
+  });
+  assert.equal(reviewedSources[0]?.option.selectable, true);
+  assert.ok(
+    reviewedSources[0]?.option.reasonCodes.includes("economic_review_required"),
+  );
+  for (const deniedRequest of [
+    request,
+    {
+      ...interactiveRequest,
+      serverExecutionProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+    },
+    { ...interactiveRequest, serverQuoteAvailableSourceCapacity: true },
+  ]) {
+    assert.equal(fundingRequestAllowsEconomicReview(deniedRequest), false);
+    const denied = await planner.list({
+      ...plannerInput,
+      request: deniedRequest,
+    });
+    assert.equal(denied[0]?.option.selectable, false);
+    assert.ok(denied[0]?.option.reasonCodes.includes("fee_limit_exceeded"));
+  }
+  quotedFeeUsd = null;
+  policy.placement.maximumReviewedFeeBps = null;
 
   let aborted = false;
   const timedOutPlanner = new RelayFirstSourcePlanner(
@@ -2155,6 +2207,7 @@ await test("source economics fail closed on unknown fee, fee cap, or slippage", 
     maximumSlippageBps: number,
     economics: Readonly<{
       maximumFeeBps?: number;
+      maximumReviewedFeeBps?: number | null;
       warningFeeUsd?: string;
       warningFeeBps?: number;
       minimumDestinationUsd?: string;
@@ -2176,6 +2229,7 @@ await test("source economics fail closed on unknown fee, fee cap, or slippage", 
       maximumFeeUsd,
       feeReferenceUsd: economics.feeReferenceUsd,
       maximumFeeBps: economics.maximumFeeBps ?? 10_000,
+      maximumReviewedFeeBps: economics.maximumReviewedFeeBps,
       warningFeeUsd: economics.warningFeeUsd ?? "100",
       warningFeeBps: economics.warningFeeBps ?? 10_000,
       minimumDestinationUsd: economics.minimumDestinationUsd ?? "0",
@@ -2224,6 +2278,39 @@ await test("source economics fail closed on unknown fee, fee cap, or slippage", 
   assert.deepEqual(
     build("0.25", "10", 500, { maximumFeeBps: 2_000 }).reasonCodes,
     ["fee_limit_exceeded"],
+  );
+  const reviewed = build("0.25", "10", 500, {
+    maximumFeeBps: 2_000,
+    maximumReviewedFeeBps: 5_000,
+  });
+  assert.equal(reviewed.selectable, true);
+  assert.deepEqual(reviewed.reasonCodes, [
+    "funding_cost_warning",
+    "economic_review_required",
+  ]);
+  assert.equal(
+    build("0.25", "0.1", 500, {
+      maximumFeeBps: 2_000,
+      maximumReviewedFeeBps: 5_000,
+    }).selectable,
+    false,
+    "review cannot override the absolute fee cap",
+  );
+  assert.equal(
+    build("0.50", "10", 500, {
+      maximumFeeBps: 2_000,
+      maximumReviewedFeeBps: 5_000,
+    }).selectable,
+    false,
+    "review still has an exact percentage ceiling",
+  );
+  assert.equal(
+    build("0.25", "10", 500, {
+      maximumFeeBps: 2_000,
+      maximumReviewedFeeBps: 1_000,
+    }).selectable,
+    false,
+    "a lower manual ceiling cannot expand automatic policy",
   );
   for (const [tradeRaw, deficitRaw, feeUsd] of [
     ["2119002", "244996", "0.293801"],
@@ -2304,6 +2391,95 @@ await test("source economics fail closed on unknown fee, fee cap, or slippage", 
   });
   assert.deepEqual(warning.reasonCodes, ["funding_cost_warning"]);
   assert.equal(warning.selectable, true);
+
+  // Captured unsigned first inbound quote: retain every fee (including gas)
+  // and the exact source debit; this is not a special Hyperliquid fee waiver.
+  const captured = (
+    maximumReviewedFeeBps: number | null,
+    userFeeUsd: string | null = null,
+    policyFeeUsd = "10",
+    maximumSourceRaw = "10000000",
+  ) => {
+    const configuredPolicy = mutablePolicy();
+    configuredPolicy.placement.maximumReviewedFeeBps = maximumReviewedFeeBps;
+    configuredPolicy.placement.maximumFeeUsd = policyFeeUsd;
+    const limits = effectiveFundingEconomicsLimits(configuredPolicy, {
+      maximumFeeUsd: userFeeUsd,
+      maximumSlippageBps: null,
+    });
+    return buildRelayWalletSourceOption({
+      sourceOptionId: "source_captured_inbound_12345678",
+      safeLabel: "Polygon pUSD",
+      maximumSourceRaw,
+      quotedSourceAmount: { asset: POLYGON_PUSD, raw: "4229318" },
+      estimatedUsd: "4.229318",
+      quote: {
+        ...quote,
+        capability: "cross_network_swap",
+        destination: target(HYPERCORE_MAINNET_USDC, "hyperliquid"),
+        expectedOutput: { asset: HYPERCORE_MAINNET_USDC, raw: "300836300" },
+        minimumOutput: { asset: HYPERCORE_MAINNET_USDC, raw: "297858000" },
+        // The public economics boundary uses trusted USD valuations below.
+        fees: ["relayer", "swap", "gas"].map((kind) => ({
+          kind,
+          amount: { asset: POLYGON_PUSD, raw: "1" },
+        })),
+      },
+      feeUsd: ["1.220318", "0.000637", "0.003986"],
+      route: {
+        ...route,
+        capability: "cross_network_swap",
+        destinationAsset: HYPERCORE_MAINNET_USDC,
+      },
+      routeObservation: null,
+      routeExperiencePolicy: configuredPolicy.routeExperience,
+      ...limits,
+      minimumDestinationEstimatedUsd: "2.97858",
+    });
+  };
+  assert.equal(
+    captured(null).selectable,
+    false,
+    "legacy 20% remains a hard rejection without the exception",
+  );
+  const firstTransfer = captured(5_000);
+  assert.equal(firstTransfer.selectable, true);
+  assert.equal(firstTransfer.quotedSourceAmount?.raw, "4229318");
+  assert.equal(firstTransfer.maximumSourceRaw, "10000000");
+  assert.equal(firstTransfer.minimumDestination?.raw, "297858000");
+  assert.deepEqual(
+    firstTransfer.fees.map((fee) => fee.estimatedUsd),
+    ["1.220318", "0.000637", "0.003986"],
+  );
+  assert.deepEqual(firstTransfer.reasonCodes, [
+    "funding_cost_warning",
+    "economic_review_required",
+  ]);
+  assert.equal(
+    captured(5_000, "1").selectable,
+    false,
+    "a user's absolute fee cap remains hard",
+  );
+  assert.equal(
+    captured(5_000, null, "1").selectable,
+    false,
+    "the business absolute fee cap remains hard",
+  );
+  assert.equal(
+    captured(5_000, "100", "1").selectable,
+    false,
+    "a user cap cannot expand the business cap",
+  );
+  assert.equal(
+    captured(4_000).selectable,
+    false,
+    "above the manual ceiling remains unavailable",
+  );
+  assert.throws(
+    () => captured(5_000, null, "10", "4229317"),
+    /assets differ/,
+    "review cannot expand source capacity by even one raw unit",
+  );
   assert.deepEqual(
     build("0.05", "10", 500, {
       minimumDestinationUsd: "1",
@@ -4474,6 +4650,94 @@ await test("quote preserves a frozen composite preparation binding without repla
   assert.deepEqual(
     insertedPlans[0]?.operation.venueBindingSnapshot,
     exactDestination.venueBinding,
+  );
+  const row = store.rows.get(projection.liquidityProjectionId);
+  assert.ok(row);
+  const reviewedOption: SourceOption = {
+    ...compositeOption,
+    reasonCodes: ["funding_cost_warning", "economic_review_required"],
+  };
+  const frozenSource = row.plannerSnapshot.sources[0];
+  assert.ok(frozenSource);
+  const reviewedRow: PersistedFundingPlanningSnapshot = {
+    ...row,
+    plannerSnapshot: {
+      ...row.plannerSnapshot,
+      sources: [
+        {
+          ...frozenSource,
+          option: reviewedOption,
+          commitPlan: {
+            ...compositePlan,
+            operation: {
+              ...compositePlan.operation,
+              sourceSnapshot: reviewedOption as never,
+            },
+          },
+        },
+      ],
+    },
+  };
+  store.rows.set(row.id, reviewedRow);
+  policy.placement.maximumReviewedFeeBps = 5_000;
+  const reviewedInput = {
+    userId: USER_ID,
+    request: {
+      liquidityProjectionId: projection.liquidityProjectionId,
+      selectedSourceOptionId: compositeOption.sourceOptionId,
+      ...publishedQuoteBinding,
+    },
+    policy,
+    policyRevision: "policy_revision_12345678",
+    ownershipRevision: "ownership_revision_12345678",
+  };
+  const reviewedSummary = await service.quote(reviewedInput);
+  assert.equal(reviewedSummary.consentMode, "explicit_economic_review");
+  assert.match(reviewedSummary.consentToken, /^consent_/);
+  assert.notEqual(
+    reviewedSummary.consentToken,
+    summary.consentToken,
+    "review uses a new quote-bound token",
+  );
+  await assert.rejects(
+    () =>
+      service.quote({
+        ...reviewedInput,
+        commitScope: {
+          kind: "telegram_app_handoff_v2",
+          handoffId: "handoff_12345678",
+          tradeIntentId: "intent_12345678",
+        },
+      }),
+    /interactive trade-shortfall/,
+  );
+  for (const internalRequest of [
+    {
+      ...request,
+      serverExecutionProfileId: TELEGRAM_RELAY_EVM_FUNDING_PROFILE_ID,
+    },
+    { ...request, serverQuoteAvailableSourceCapacity: true },
+  ]) {
+    store.rows.set(row.id, { ...reviewedRow, request: internalRequest });
+    await assert.rejects(
+      () => service.quote(reviewedInput),
+      /interactive trade-shortfall/,
+    );
+  }
+  store.rows.set(row.id, reviewedRow);
+  policy.placement.maximumReviewedFeeBps = null;
+  await assert.rejects(
+    () => service.quote(reviewedInput),
+    /interactive trade-shortfall/,
+  );
+  policy.placement.maximumReviewedFeeBps = 5_000;
+  await assert.rejects(
+    () =>
+      service.quote({
+        ...reviewedInput,
+        policyRevision: "policy_revision_changed",
+      }),
+    /facts changed/,
   );
 });
 

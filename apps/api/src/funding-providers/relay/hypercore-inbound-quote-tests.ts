@@ -62,6 +62,82 @@ function rehash(quote: ReturnType<typeof example>["quote"]) {
     ],
   );
 }
+
+function pUsdConversionExample(
+  options: {
+    expectedOutputRaw?: string;
+    minimumOutputRaw?: string;
+    relayerRaw?: string;
+  } = {},
+) {
+  const capturedExample = example(1);
+  const originalCurrency =
+    capturedExample.quote.details.currencyIn.currency.address;
+  // Synthetic exact pUSD protocol, based on the captured Polygon envelope;
+  // these amounts reproduce the observed conversion cost, not a new capture.
+  const quote = JSON.parse(
+    JSON.stringify(capturedExample.quote),
+    (_key, value: unknown) =>
+      typeof value === "string" &&
+      value.toLowerCase() === originalCurrency.toLowerCase()
+        ? POLYGON_PUSD
+        : value,
+  );
+  const sourceRaw = "3215010";
+  const expectedOutputRaw = options.expectedOutputRaw ?? "199444500";
+  const minimumOutputRaw = options.minimumOutputRaw ?? "197450000";
+  quote.details.currencyIn.amount = quote.details.currencyIn.minimumAmount =
+    sourceRaw;
+  quote.details.currencyOut.amount = expectedOutputRaw;
+  quote.details.currencyOut.minimumAmount = minimumOutputRaw;
+  if (quote.details.refundCurrency)
+    quote.details.refundCurrency.amount =
+      quote.details.refundCurrency.minimumAmount = sourceRaw;
+  const protocol = quote.protocol.v2;
+  protocol.orderData.inputs[0].payment.amount = protocol.paymentDetails.amount =
+    sourceRaw;
+  protocol.orderData.output.payments[0].expectedAmount = expectedOutputRaw;
+  protocol.orderData.output.payments[0].minimumAmount = minimumOutputRaw;
+  const relayerRaw = BigInt(options.relayerRaw ?? "1220130");
+  const serviceRaw = relayerRaw === 0n ? 0n : 20400n;
+  for (const [kind, fee] of Object.entries(quote.fees) as [
+    string,
+    Record<string, string>,
+  ][]) {
+    if (kind === "gas") continue;
+    fee.amount = fee.minimumAmount = (
+      kind === "relayer"
+        ? relayerRaw
+        : kind === "relayerGas"
+          ? relayerRaw - serviceRaw
+          : kind === "relayerService"
+            ? serviceRaw
+            : 0n
+    ).toString();
+    delete fee.amountUsd;
+  }
+  const approval = new Interface([
+    "function approve(address spender,uint256 amount)",
+  ]);
+  quote.steps.find(
+    (step: { id: string }) => step.id === "approve",
+  ).items[0].data.data = approval.encodeFunctionData("approve", [
+    capturedExample.input.contracts.evmDepository,
+    sourceRaw,
+  ]);
+  rehash(quote);
+  const input: RelayHypercoreInboundQuoteInput = {
+    ...capturedExample.input,
+    quote,
+    sourceCurrency: POLYGON_PUSD,
+    amountMode: "expected_output",
+    authorizedSourceRaw: "5560163",
+    minimumOutputRaw,
+    expectedOutputTargetRaw: expectedOutputRaw,
+  };
+  return { quote, input };
+}
+
 for (const [index, name] of ["Base", "Polygon"].entries()) {
   test(`${name} live unsigned wire binds exact source, spot USDC8 output and both refunds`, () => {
     const { quote, input } = example(index);
@@ -157,6 +233,175 @@ test("unsigned fee summary cannot hide the committed same-USDC route loss", () =
     () => validateRelayHypercoreInboundQuote(input),
     /summary_understates/,
   );
+});
+
+test("pUSD inbound accounts for exact cross-asset conversion cost without mutating provider wire", () => {
+  const { quote, input } = pUsdConversionExample();
+  const originalWire = structuredClone(quote);
+  const result = validateRelayHypercoreInboundQuote(input);
+  assert.equal(result.sourceAmountRaw, 3215010n);
+  assert.equal(result.expectedOutputRaw, 199444500n);
+  assert.equal(result.minimumOutputRaw, 197450000n);
+  assert.deepEqual(
+    result.fees.find((fee) => fee.kind === "swap"),
+    {
+      kind: "swap",
+      amount: {
+        asset: {
+          networkId: "evm:137",
+          assetId: POLYGON_PUSD.toLowerCase(),
+          decimals: 6,
+        },
+        raw: "435",
+      },
+    },
+  );
+  assert.equal(
+    result.fees
+      .filter((fee) => fee.kind !== "gas")
+      .reduce((sum, fee) => sum + BigInt(fee.amount.raw), 0n),
+    1220565n,
+  );
+  assert.deepEqual(quote, originalWire);
+});
+
+test("pUSD inbound effective fee cap includes conversion cost and retains exact source and output limits", () => {
+  const { input } = pUsdConversionExample();
+  assert.throws(
+    () =>
+      validateRelayHypercoreInboundQuote({
+        ...input,
+        maximumFeeRaw: "1220564",
+      }),
+    /native_inbound_effective_fee_cap_exceeded/,
+  );
+  assert.equal(
+    validateRelayHypercoreInboundQuote({ ...input, maximumFeeRaw: "1220565" })
+      .sourceAmountRaw,
+    3215010n,
+  );
+  assert.throws(
+    () =>
+      validateRelayHypercoreInboundQuote({
+        ...input,
+        authorizedSourceRaw: "3215009",
+      }),
+    /native_inbound_source_cap_mismatch/,
+  );
+  assert.throws(
+    () =>
+      validateRelayHypercoreInboundQuote({
+        ...input,
+        minimumOutputRaw: "197450001",
+      }),
+    /native_inbound_output_floor_mismatch/,
+  );
+});
+
+test("pUSD inbound conversion residual rounds up in source units rather than hiding native atoms", () => {
+  const { input } = pUsdConversionExample({ expectedOutputRaw: "199444499" });
+  const result = validateRelayHypercoreInboundQuote(input);
+  assert.equal(
+    result.fees.find((fee) => fee.kind === "swap")?.amount.raw,
+    "436",
+  );
+  assert.equal(
+    result.fees
+      .filter((fee) => fee.kind !== "gas")
+      .reduce((sum, fee) => sum + BigInt(fee.amount.raw), 0n),
+    1220566n,
+  );
+});
+
+test("pUSD inbound omitted summary costs are fully counted and covered costs are not counted twice", () => {
+  const omitted = pUsdConversionExample({ relayerRaw: "0" });
+  const normalized = validateRelayHypercoreInboundQuote(omitted.input);
+  assert.equal(
+    normalized.fees.find((fee) => fee.kind === "swap")?.amount.raw,
+    "1220565",
+  );
+  assert.throws(
+    () =>
+      validateRelayHypercoreInboundQuote({
+        ...omitted.input,
+        maximumFeeRaw: "1220564",
+      }),
+    /native_inbound_effective_fee_cap_exceeded/,
+  );
+  for (const relayerRaw of ["1220565", "1220600"]) {
+    const { input } = pUsdConversionExample({ relayerRaw });
+    const result = validateRelayHypercoreInboundQuote(input);
+    assert.equal(
+      result.fees.some((fee) => fee.kind === "swap"),
+      false,
+    );
+    assert.equal(
+      result.fees
+        .filter((fee) => fee.kind !== "gas")
+        .reduce((sum, fee) => sum + BigInt(fee.amount.raw), 0n),
+      BigInt(relayerRaw),
+    );
+  }
+});
+
+test("pUSD inbound swap cost is derived only and cannot be injected through provider fees", () => {
+  const { quote, input } = pUsdConversionExample();
+  quote.fees.swap = {
+    ...structuredClone(quote.fees.app),
+    amount: "435",
+    minimumAmount: "435",
+  };
+  assert.throws(
+    () => validateRelayHypercoreInboundQuote(input),
+    /Relay fee swap is outside the pinned schema/,
+  );
+});
+
+test("pUSD inbound source-unit cost rounding cannot consume the entire source debit", () => {
+  const { input } = pUsdConversionExample({
+    expectedOutputRaw: "1",
+    minimumOutputRaw: "1",
+    relayerRaw: "0",
+  });
+  // The nominal loss is fractionally below the debit, but rounding the
+  // derived cost up to PUSD6 would consume every source atom.
+  assert.throws(
+    () =>
+      validateRelayHypercoreInboundQuote({
+        ...input,
+        maximumFeeRaw: "3215010",
+      }),
+    /native_inbound_fee_cap_exceeded/,
+  );
+});
+
+test("pUSD inbound fingerprint binds the derived fee decomposition even when total cost is unchanged", () => {
+  const original = validateRelayHypercoreInboundQuote(
+    pUsdConversionExample().input,
+  );
+  const shifted = validateRelayHypercoreInboundQuote(
+    pUsdConversionExample({ relayerRaw: "1220131" }).input,
+  );
+  assert.equal(
+    original.fees.find((fee) => fee.kind === "swap")?.amount.raw,
+    "435",
+  );
+  assert.equal(
+    shifted.fees.find((fee) => fee.kind === "swap")?.amount.raw,
+    "434",
+  );
+  assert.equal(original.sourceAmountRaw, shifted.sourceAmountRaw);
+  assert.equal(original.expectedOutputRaw, shifted.expectedOutputRaw);
+  assert.equal(original.minimumOutputRaw, shifted.minimumOutputRaw);
+  assert.equal(original.orderId, shifted.orderId);
+  assert.deepEqual(original.actions, shifted.actions);
+  const totalFee = (result: typeof original) =>
+    result.fees
+      .filter((fee) => fee.kind !== "gas")
+      .reduce((sum, fee) => sum + BigInt(fee.amount.raw), 0n);
+  assert.equal(totalFee(original), 1220565n);
+  assert.equal(totalFee(shifted), totalFee(original));
+  assert.notEqual(original.fingerprint, shifted.fingerprint);
 });
 
 test("native token hex case is semantic, not a new asset or order commitment", () => {

@@ -4,6 +4,7 @@ import type { Pool } from "@hunch/infra";
 import type {
   FundingQuoteRequest,
   FundingQuoteSummary,
+  FundingReasonCode,
   JsonValue,
   Money,
   SourceOption,
@@ -30,6 +31,7 @@ import {
 import type { FundingPlanningStore } from "./planning-types.js";
 import { FundingPlannerError, assertSameAsset } from "./money.js";
 import { fundingQuoteAmountBindingForCommitPlan } from "./quote-amount-binding.js";
+import { fundingRequestAllowsEconomicReview } from "./source-options.js";
 
 function jsonRecord(value: unknown): Readonly<Record<string, JsonValue>> {
   return value as Readonly<Record<string, JsonValue>>;
@@ -143,8 +145,12 @@ export function classifyFundingQuoteConsent(
     sourceAmounts: readonly Readonly<{ amount: Money }>[];
     expectedDestination: Money;
     minimumDestination: Money;
+    reasonCodes?: readonly FundingReasonCode[];
   }>,
 ): FundingQuoteSummary["consentMode"] {
+  if (input.reasonCodes?.includes("economic_review_required")) {
+    return "explicit_economic_review";
+  }
   if (input.ingress) return "external_action";
   // A fresh trade quote already is the user's economic confirmation. Any
   // conversion contained in that exact quote must not add a second prompt.
@@ -217,6 +223,18 @@ export class FundingQuoteService {
       throw new FundingPlannerError(
         "source_not_selected",
         "exactly one owned selectable source option is required",
+      );
+    }
+    if (
+      selected.option.reasonCodes.includes("economic_review_required") &&
+      (!fundingRequestAllowsEconomicReview(planning.request) ||
+        input.commitScope != null ||
+        (input.policy.placement.maximumReviewedFeeBps ?? 0) <=
+          input.policy.placement.maximumFeeBps)
+    ) {
+      throw new FundingPlannerError(
+        "invalid_policy",
+        "reviewed funding economics require an interactive trade-shortfall quote",
       );
     }
     if (
@@ -446,6 +464,7 @@ export class FundingQuoteService {
         sourceAmounts,
         expectedDestination: expected,
         minimumDestination: minimum,
+        reasonCodes: selected.option.reasonCodes,
       }),
       sourceAmounts,
       expectedDestination: expected,

@@ -363,6 +363,28 @@ export async function portIsOpen(port) {
   });
 }
 
+export function startupMessages(mode, result) {
+  const messages = [`${mode}: process configuration and schema ready`];
+  const relayer = result.configuration?.interactiveTrading?.polymarketRelayer;
+  if (relayer) {
+    messages.push(
+      relayer.configured
+        ? "api: Polymarket relayer configuration present; wallet readiness and user authorization are still checked in the app."
+        : `WARNING api: Polymarket interactive setup unavailable; missing ${relayer.missingKeys.join(", ")}. Restore backend .env settings and restart dev:hip. Read-only markets and other venues remain available.`,
+    );
+  }
+  const router =
+    result.configuration?.interactiveTrading?.polymarketFundingRouter;
+  if (router) {
+    messages.push(
+      router.addressPresent
+        ? "api: Polymarket funding router address present; canonical contract, policy and approvals are checked by the ordinary funding path."
+        : "WARNING api: Polymarket funding/shortfall setup unavailable; missing POLYMARKET_FUNDING_ROUTER_ADDRESS. Restore the canonical router setting in backend .env and restart dev:hip. Direct trading and read-only markets are separate capabilities.",
+    );
+  }
+  return messages;
+}
+
 async function checkModes(modes) {
   let ready = true;
   for (const mode of modes) {
@@ -392,7 +414,8 @@ async function checkModes(modes) {
           2,
         ),
       );
-    } else console.log(`${mode}: configuration and schema ready`);
+    } else
+      for (const message of startupMessages(mode, result)) console.log(message);
   }
   if (!ready)
     throw new Error(

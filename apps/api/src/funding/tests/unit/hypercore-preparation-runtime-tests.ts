@@ -19,6 +19,10 @@ import { hypercoreFundingBalance } from "../../preparation/hypercore-adapter.js"
 import { hip4PortfolioPositionId } from "../../../services/hip4-portfolio-positions.js";
 import type { ApiTradeMarket } from "../../../services/api-trading-market-repo.js";
 
+const isPreparationUnavailable = (error: unknown): boolean =>
+  error instanceof PreparationContractError &&
+  error.code === "preparation_unavailable";
+
 async function fixture() {
   let now = new Date("2026-10-14T16:00:00Z");
   const wallet: UserWallet = {
@@ -577,7 +581,10 @@ test("native BUY shortfall accepts clean empty recipients without asserting Stan
       role: "missing",
       accountRevision: mode,
     });
-    assert.deepEqual(await f.service.listDestinationOptions(request), []);
+    await assert.rejects(
+      f.service.listDestinationOptions(request),
+      isPreparationUnavailable,
+    );
   }
   Object.assign(f.state, {
     mode: "disabled",
@@ -599,9 +606,9 @@ test("destination refresh bypasses cached pre-funding cash and cannot restore it
   assert.equal(initial.spendability?.availableAmount.raw, "0");
   f.advance(1000);
   f.state.error = "account_timeout";
-  assert.deepEqual(
-    await f.service.listDestinationOptions(request, { forceFresh: true }),
-    [],
+  await assert.rejects(
+    f.service.listDestinationOptions(request, { forceFresh: true }),
+    isPreparationUnavailable,
   );
   f.state.error = null;
   f.state.total = "10";
@@ -612,6 +619,60 @@ test("destination refresh bypasses cached pre-funding cash and cannot restore it
   assert.equal(refreshed.spendability?.availableAmount.raw, "1000000000");
   assert.equal(refreshed.spendability?.asOf, f.state.observedAt);
   assert.deepEqual(f.loads, [false, true, true]);
+});
+
+test("market-scoped discovery keeps policy-disabled and unsupported wallets as legitimate empty results", async () => {
+  const f = await fixture();
+  const request = {
+    ...f.input,
+    purpose: "buy" as const,
+    marketContextId: f.market.id,
+  };
+  f.state.buyEnabled = false;
+  assert.deepEqual(await f.service.listDestinationOptions(request), []);
+  f.state.buyEnabled = true;
+  f.wallet.isVerified = false;
+  assert.deepEqual(await f.service.listDestinationOptions(request), []);
+  f.wallet.isVerified = true;
+  f.wallet.walletSource = "unknown";
+  assert.deepEqual(await f.service.listDestinationOptions(request), []);
+  assert.deepEqual(f.loads, []);
+});
+
+test("market-scoped native refresh budget denial reports unavailability and ordinary snapshot retry recovers", async () => {
+  const f = await fixture();
+  Object.assign(f.state, { empty: true, role: "missing", mode: "default" });
+  const request = {
+    ...f.input,
+    purpose: "buy" as const,
+    marketContextId: f.market.id,
+  };
+  const [initial] = await f.service.listDestinationOptions(request);
+  assert.equal(initial.preparationStatus, "ready");
+  assert.equal(initial.spendability?.availableAmount.raw, "0");
+  f.advance(1000);
+  f.state.error = "budget_exhausted";
+  await assert.rejects(
+    f.service.listDestinationOptions(request, { forceFresh: true }),
+    (error: unknown) => {
+      assert.ok(error instanceof PreparationContractError);
+      assert.equal(error.code, "preparation_unavailable");
+      assert.equal(
+        error.message,
+        "The requested Trading Wallet could not be verified. Try again.",
+      );
+      assert.doesNotMatch(error.message, /budget_exhausted/);
+      return true;
+    },
+  );
+  // Failure to obtain newer core evidence does not invalidate the still-fresh
+  // stored zero snapshot or impose a cooldown on an ordinary inspection.
+  const [recovered] = await f.service.listDestinationOptions(request);
+  assert.equal(recovered.preparationStatus, "ready");
+  assert.equal(recovered.topology, "native_uninitialized_recipient");
+  assert.equal(recovered.spendability?.availableAmount.raw, "0");
+  assert.equal(recovered.spendability?.asOf, f.state.observedAt);
+  assert.deepEqual(f.loads, [false, true, false]);
 });
 
 test("native SELL binds the exact portfolio position and remains independent of BUY/funding switches", async () => {
@@ -657,12 +718,12 @@ test("native SELL binds the exact portfolio position and remains independent of 
       f.identity.sides[1].tokenId,
     ),
   ]) {
-    assert.deepEqual(
-      await f.service.listDestinationOptions({
+    await assert.rejects(
+      f.service.listDestinationOptions({
         ...request,
         positionActionRef: ref,
       }),
-      [],
+      isPreparationUnavailable,
     );
   }
   assert.deepEqual(
@@ -687,7 +748,10 @@ test("native lifecycle revision is checked before cache and again after account 
   f.state.afterLoad = () => {
     f.state.tradeRevision = "changed-during-read";
   };
-  assert.deepEqual(await f.service.listDestinationOptions(request), []);
+  await assert.rejects(
+    f.service.listDestinationOptions(request),
+    isPreparationUnavailable,
+  );
   f.state.afterLoad = null;
   assert.equal((await f.service.listDestinationOptions(request)).length, 1);
   f.state.buyEnabled = false;
@@ -724,14 +788,23 @@ test("native trading requires canonical active identity and expires with the ins
     f.market.expiration_time.toISOString(),
   );
   f.advance(501);
-  assert.deepEqual(await f.service.listDestinationOptions(request), []);
+  await assert.rejects(
+    f.service.listDestinationOptions(request),
+    isPreparationUnavailable,
+  );
   f.market.expiration_time = null;
   assert.equal((await f.service.listDestinationOptions(request)).length, 1);
   f.market.status = "CLOSED";
-  assert.deepEqual(await f.service.listDestinationOptions(request), []);
+  await assert.rejects(
+    f.service.listDestinationOptions(request),
+    isPreparationUnavailable,
+  );
   f.market.status = "ACTIVE";
   f.market.token_no = f.market.token_yes;
-  assert.deepEqual(await f.service.listDestinationOptions(request), []);
+  await assert.rejects(
+    f.service.listDestinationOptions(request),
+    isPreparationUnavailable,
+  );
   f.market.token_no = f.identity.sides[1].tokenId;
   assert.equal((await f.service.listDestinationOptions(request)).length, 1);
 });

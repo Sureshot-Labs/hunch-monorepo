@@ -6,6 +6,8 @@ import {
   hip4ReadMarketSchema,
   hip4SpotMetadataSchema,
   parseHip4Coin,
+  hip4BackgroundRequestWeightLimit,
+  hip4BackgroundRepairWeightLimit,
   type Hip4ReadMarket,
 } from "@hunch/shared";
 import {
@@ -298,6 +300,11 @@ export async function collectHip4KnownWalletIntel(input: {
         environment,
         weight,
         current.policy.requestWeightPerMinute,
+        {
+          scope: "background_repair",
+          maximum: hip4BackgroundRepairWeightLimit(current.policy),
+          backgroundMaximum: hip4BackgroundRequestWeightLimit(current.policy),
+        },
       );
     };
     const accountRead = createHip4AccountClient(

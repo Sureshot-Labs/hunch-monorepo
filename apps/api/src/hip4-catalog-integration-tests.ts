@@ -7,6 +7,8 @@ import { createIntegrationTestPool } from "./test-database-target.js";
 import { installHip4TestLifecycle } from "./hip4-test-lifecycle.js";
 import { runHip4ReadCycle } from "./services/hip4-indexer.js";
 import {
+  admitHip4Request,
+  readHip4Cursor,
   readHip4Markets,
   readHip4LiveOutcomes,
 } from "./services/hip4-repository.js";
@@ -89,6 +91,73 @@ try {
   );
   assert.equal(all[90].volume24h?.usd, "10");
   assert.equal(all[90].indicativePrices?.prices[0].price, "0.4");
+  // Catalog-only deadlines refresh every observation without issuing another
+  // depth/history sweep, moving its durable cursor, or bypassing admission.
+  const catalogRequests: string[] = [];
+  const catalogFetcher: typeof fetch = async (_url, init) => {
+    const request = JSON.parse(String(init?.body));
+    catalogRequests.push(request.type);
+    if (request.type === "outcomeMeta") return Response.json(metadata);
+    if (request.type === "spotMetaAndAssetCtxs")
+      return Response.json([
+        base.spotMetadata,
+        ids.flatMap((outcome) => [
+          { coin: `#${outcome}0`, dayNtlVlm: "11", midPx: "0.45" },
+          { coin: `#${outcome}1`, dayNtlVlm: "16", midPx: "0.55" },
+        ]),
+      ]);
+    throw new Error("catalog-only refresh must not fetch books or history");
+  };
+  const cursorBeforeCatalog = await readHip4Cursor(pool, "mainnet");
+  await pool.query("delete from hip4_request_budget where scope='public-info'");
+  assert.equal(
+    await admitHip4Request(
+      pool,
+      "mainnet",
+      policy.requestWeightPerMinute,
+      policy.requestWeightPerMinute,
+    ),
+    true,
+  );
+  const deniedCatalog = await runHip4ReadCycle(pool, undefined, undefined, {
+    repair: false,
+    fetcher: catalogFetcher,
+  });
+  assert.deepEqual(deniedCatalog.failures, [
+    { outcome: -1, reason: "metadata_budget_exhausted" },
+  ]);
+  assert.deepEqual(
+    catalogRequests,
+    [],
+    "denied admission makes zero HTTP calls",
+  );
+  assert.equal(deniedCatalog.repairAttempted, false);
+  assert.equal(deniedCatalog.catalogPublished, 0);
+  await pool.query(
+    "update hip4_request_budget set admissions=jsonb_build_array(jsonb_build_object('at',extract(epoch from now())-61,'weight',600)) where scope='public-info'",
+  );
+  assert.equal(
+    await admitHip4Request(pool, "mainnet", 300, policy.requestWeightPerMinute),
+    true,
+    "interactive usage consumes total capacity, not the background subquota",
+  );
+  const refreshedCatalog = await runHip4ReadCycle(pool, undefined, undefined, {
+    repair: false,
+    fetcher: catalogFetcher,
+  });
+  assert.deepEqual(refreshedCatalog.failures, []);
+  assert.deepEqual(catalogRequests, ["outcomeMeta", "spotMetaAndAssetCtxs"]);
+  assert.equal(refreshedCatalog.catalogPublished, ids.length);
+  assert.equal(refreshedCatalog.indexed, 0);
+  assert.equal(refreshedCatalog.repairAttempted, false);
+  assert.equal(await readHip4Cursor(pool, "mainnet"), cursorBeforeCatalog);
+  const refreshed = await readHip4Markets(pool, "mainnet", [ids[90]], -1, 1);
+  assert.equal(refreshed[0].indicativePrices?.prices[0].price, "0.45");
+  assert.ok(refreshed[0].indicativePrices);
+  assert.ok(
+    Date.parse(refreshed[0].indicativePrices.validUntil) > Date.now(),
+    "the next normal deadline restores fresh catalog prices after admission recovers",
+  );
   const scoped = await readHip4Markets(
     pool,
     "mainnet",
@@ -180,7 +249,7 @@ try {
     ids.slice(0, 8),
   );
   console.log(
-    "HIP4 catalog PG16: full discovery, bounded provider work, paging, batch continuation, hot demand, environment and SSE access passed",
+    "HIP4 catalog PG16: full discovery, bounded provider work, catalog-only admission/recovery, paging, batch continuation, hot demand, environment and SSE access passed",
   );
 } finally {
   await lifecycleFixture.close();
@@ -192,5 +261,6 @@ try {
     ids.map((id) => hip4Identity("mainnet", id).marketId),
   ]);
   await pool.query("delete from hip4_read_runtime where environment='mainnet'");
+  await pool.query("delete from hip4_request_budget where scope='public-info'");
   await pool.end();
 }

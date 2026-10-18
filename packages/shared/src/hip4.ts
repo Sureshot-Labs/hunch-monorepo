@@ -213,6 +213,12 @@ export const hip4ReadPolicySchema = z
       .max(16_777_216)
       .default(4_194_304),
     requestWeightPerMinute: z.number().int().min(40).max(1200).default(600),
+    // Background discovery/history must leave capacity for explicit account,
+    // quote and receipt checks within the SAME provider-wide rolling budget.
+    interactiveRequestWeightReserveRatio: z.number().min(0).max(1).default(0.5),
+    // Quote-only fact reuse. Zero disables completed and in-flight reuse;
+    // preparations and financial admission always read authoritative facts.
+    quotePreviewCacheEntries: z.number().int().min(0).max(1000).default(64),
     maxOutcomesPerCycle: z.number().int().min(1).max(100).default(6),
     maxTradesPerResponse: z.number().int().min(1).max(2000).default(1000),
     pageSize: z.number().int().min(1).max(100).default(20),
@@ -248,6 +254,43 @@ export const hip4ReadPolicySchema = z
   );
 export type Hip4ReadPolicy = z.infer<typeof hip4ReadPolicySchema>;
 export const DEFAULT_HIP4_READ_POLICY = hip4ReadPolicySchema.parse({});
+
+export function hip4BackgroundRequestWeightLimit(
+  policy: Hip4ReadPolicy,
+): number {
+  // Preserve admission of the mandatory metadata pair even at a small legacy
+  // budget. This is a protocol cost, not an additional provider allowance.
+  return Math.min(
+    policy.requestWeightPerMinute,
+    Math.max(
+      40,
+      policy.requestWeightPerMinute -
+        Math.ceil(
+          policy.requestWeightPerMinute *
+            policy.interactiveRequestWeightReserveRatio,
+        ),
+    ),
+  );
+}
+
+/** Refresh display observations before their deadline, independently of the
+ * slower depth/history repair cadence. No freshness window is extended. */
+export function hip4CatalogRefreshIntervalMs(policy: Hip4ReadPolicy): number {
+  return Math.min(
+    policy.pollMs,
+    Math.max(policy.minRefreshMs, Math.floor(policy.bookMaxAgeMs / 2)),
+  );
+}
+
+/** A class subquota, not a smaller total-admission ceiling: catalog reads
+ * must not count against the repair quota or they could starve history. */
+export function hip4BackgroundRepairWeightLimit(
+  policy: Hip4ReadPolicy,
+): number {
+  const catalogReserve =
+    40 * Math.ceil(60_000 / hip4CatalogRefreshIntervalMs(policy));
+  return Math.max(0, hip4BackgroundRequestWeightLimit(policy) - catalogReserve);
+}
 
 export function hip4ReadOutcomeAllowed(
   policy: Hip4ReadPolicy,

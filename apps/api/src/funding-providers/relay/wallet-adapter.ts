@@ -242,8 +242,8 @@ export function normalizeRelayHypercoreInboundWalletQuote(input: {
       decimals: 6,
       unitPriceUsd: "1",
     }),
-    // Non-gas fees have already been bound to exact USDC6 by the protocol
-    // validator. Provider amountUsd cannot loosen the common USD/BPS caps.
+    // Non-gas fees, including derived pUSD conversion cost, use exact source
+    // stablecoin units. Provider amountUsd cannot loosen common USD/BPS caps.
     // ETH/POL gas retains the existing separate valuation semantics.
     feeUsd: validated.fees.map((fee) =>
       fee.kind === "gas"
@@ -499,10 +499,7 @@ function quoteExpiry(
   return deadline < adapterLimit ? deadline : adapterLimit;
 }
 
-function bufferedExpectedOutput(
-  raw: string,
-  maximumSlippageBps: number,
-): string {
+function assertRelaySlippageLimit(maximumSlippageBps: number): void {
   if (
     !Number.isInteger(maximumSlippageBps) ||
     maximumSlippageBps < 0 ||
@@ -510,9 +507,20 @@ function bufferedExpectedOutput(
   ) {
     throw new Error("Relay slippage limit is outside hard policy");
   }
+}
+
+function bufferedExpectedOutput(
+  raw: string,
+  maximumSlippageBps: number,
+  rawUnit = 1n,
+): string {
+  assertRelaySlippageLimit(maximumSlippageBps);
   const denominator = 10_000n - BigInt(maximumSlippageBps);
-  const value = BigInt(raw);
-  return ((value * 10_000n + denominator - 1n) / denominator).toString();
+  const value = (BigInt(raw) + rawUnit - 1n) / rawUnit;
+  return (
+    ((value * 10_000n + denominator - 1n) / denominator) *
+    rawUnit
+  ).toString();
 }
 
 export class RelayWalletQuoteAdapter {
@@ -586,8 +594,39 @@ export class RelayWalletQuoteAdapter {
       input.route.destination.networkId,
       input.recipientAddress,
     );
-    const slippage = input.maximumSlippageBps ?? 100;
-    const buffered = bufferedExpectedOutput(input.minimumOutput.raw, slippage);
+    const maximumSlippageBps = input.maximumSlippageBps ?? 100;
+    assertRelaySlippageLimit(maximumSlippageBps);
+    // Size registered stablecoin inbound requests in their coarser asset unit,
+    // then express the request in native output atoms. Native-only rounding
+    // can leave a provider-rounded minimum microscopically below the floor.
+    // The original floor, source cap and fee limits remain validation inputs.
+    const rawUnit =
+      10n **
+      BigInt(
+        Math.max(
+          0,
+          input.minimumOutput.asset.decimals -
+            input.sourceAmount.asset.decimals,
+        ),
+      );
+    const floor = BigInt(input.minimumOutput.raw);
+    if (floor <= 0n)
+      throw new RelayQuoteValidationError(
+        "Native inbound output floor must be positive",
+      );
+    // Reserve at most one coarser unit of provider minimum rounding inside
+    // the requested slippage. The common planner retains the original exact
+    // native-unit limit and rejects any unexpected provider behavior.
+    const roundingReserveBps = ((rawUnit - 1n) * 10_000n + floor - 1n) / floor;
+    const slippage =
+      roundingReserveBps >= BigInt(maximumSlippageBps)
+        ? 0
+        : maximumSlippageBps - Number(roundingReserveBps);
+    const buffered = bufferedExpectedOutput(
+      input.minimumOutput.raw,
+      slippage,
+      rawUnit,
+    );
     const expectedOutputTargetRaw =
       input.route.quoteMode === "expected_output"
         ? buffered

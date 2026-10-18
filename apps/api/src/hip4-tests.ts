@@ -10,6 +10,9 @@ import {
   hip4RawUnits,
   hip4ReadMarketSchema,
   hip4ReadPolicySchema,
+  hip4BackgroundRequestWeightLimit,
+  hip4BackgroundRepairWeightLimit,
+  hip4CatalogRefreshIntervalMs,
   hip4TradeSchema,
   parseHip4Coin,
 } from "@hunch/shared";
@@ -391,6 +394,57 @@ test("metadata pair budget minimum, freshness deadlines and policy recovery", ()
     aged.metadataValidUntil,
     new Date(Date.parse(date) + 300000).toISOString(),
   );
+});
+test("background reads reserve interactive headroom inside the same configurable budget", () => {
+  assert.equal(hip4BackgroundRequestWeightLimit(DEFAULT_HIP4_READ_POLICY), 300);
+  for (const maximum of [40, 42, 120, 600, 1200]) {
+    for (const ratio of [0, 0.5, 0.8, 0.9, 1]) {
+      const policy = hip4ReadPolicySchema.parse({
+        requestWeightPerMinute: maximum,
+        interactiveRequestWeightReserveRatio: ratio,
+      });
+      const backgroundLimit = hip4BackgroundRequestWeightLimit(policy);
+      assert.equal(
+        backgroundLimit,
+        Math.max(40, maximum - Math.ceil(maximum * ratio)),
+      );
+      assert.ok(backgroundLimit <= maximum);
+    }
+  }
+  for (const ratio of [-0.1, 1.1, NaN])
+    assert.throws(() =>
+      hip4ReadPolicySchema.parse({
+        interactiveRequestWeightReserveRatio: ratio,
+      }),
+    );
+});
+test("catalog cadence reserves bounded repair capacity without extending freshness", () => {
+  assert.equal(hip4CatalogRefreshIntervalMs(DEFAULT_HIP4_READ_POLICY), 30_000);
+  assert.equal(hip4BackgroundRepairWeightLimit(DEFAULT_HIP4_READ_POLICY), 220);
+  const frequent = hip4ReadPolicySchema.parse({ pollMs: 10_000 });
+  assert.equal(hip4CatalogRefreshIntervalMs(frequent), 10_000);
+  assert.equal(hip4BackgroundRepairWeightLimit(frequent), 60);
+  const lowBudget = hip4ReadPolicySchema.parse({ requestWeightPerMinute: 40 });
+  assert.equal(hip4BackgroundRepairWeightLimit(lowBudget), 0);
+  const constrained = hip4ReadPolicySchema.parse({
+    minRefreshMs: 60_000,
+    bookMaxAgeMs: 1_000,
+  });
+  assert.equal(hip4CatalogRefreshIntervalMs(constrained), 60_000);
+  for (const maximum of [40, 42, 120, 600, 1200])
+    for (const pollMs of [1000, 10_000, 60_000, 3_600_000]) {
+      const policy = hip4ReadPolicySchema.parse({
+        requestWeightPerMinute: maximum,
+        pollMs,
+      });
+      assert.ok(hip4CatalogRefreshIntervalMs(policy) <= pollMs);
+      assert.ok(hip4BackgroundRepairWeightLimit(policy) >= 0);
+      assert.ok(
+        hip4BackgroundRepairWeightLimit(policy) <=
+          hip4BackgroundRequestWeightLimit(policy),
+      );
+      assert.equal(policy.bookMaxAgeMs, 60_000);
+    }
 });
 test("a null settlement check cannot refresh an absent outcome spec", () => {
   const previous = mapped();

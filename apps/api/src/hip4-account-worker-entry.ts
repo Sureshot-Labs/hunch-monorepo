@@ -66,7 +66,7 @@ export const HIP4_CLAIM_DUE_ACCOUNT_SQL = `with owned_due_accounts as materializ
     for update of locked_row skip locked
   ) snapshot_row limit 1
 ) update hip4_account_snapshots target_row
-  set attempt_at=statement_timestamp(), attempt_error=null,
+  set attempt_at=statement_timestamp(),
     lease_token=gen_random_uuid(), lease_until=statement_timestamp()+$3*interval '1 millisecond'
   from due_accounts where target_row.environment=due_accounts.environment
     and target_row.account_address=due_accounts.account_address
@@ -111,6 +111,7 @@ export async function runHip4AccountReadPass(
     result.claimed++;
     try {
       const refreshed = await refreshHip4OwnedAccount({
+        background: true,
         pool,
         policy: current.policy,
         accountPolicy: currentAccount.policy,

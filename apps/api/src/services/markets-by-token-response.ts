@@ -2,6 +2,7 @@ import {
   buildObservedCanonicalMarketTop,
   parsePolymarketAssetContext,
   hip4ReadMarketSchema,
+  type Hip4ReadPolicy,
 } from "@hunch/shared";
 import { positionStorageContract } from "../lib/position-asset-context.js";
 import {
@@ -20,6 +21,7 @@ import {
 } from "../lib/limitless-metadata.js";
 import type { MarketByTokenRow } from "../repos/unified-read.js";
 import { hip4CatalogProjection } from "./hip4-catalog-projection.js";
+import { ageHip4Market } from "./hip4-mapping.js";
 import { normalizeRedemptionStatus } from "./redemption-status.js";
 
 export function mapMarketsByTokenRows(
@@ -28,6 +30,7 @@ export function mapMarketsByTokenRows(
     now?: Date;
     polymarketOrderabilityMode?: PolymarketOrderabilityMode;
     includeTop?: boolean;
+    hip4ReadPolicy?: Hip4ReadPolicy;
   } = {},
 ) {
   const now = options.now ?? new Date();
@@ -43,12 +46,16 @@ export function mapMarketsByTokenRows(
       throw new Error(
         "Position market metadata conflicts with its frozen context.",
       );
-    const marketMetadata = parseMetadata(row.market_metadata);
+    let marketMetadata = parseMetadata(row.market_metadata);
     const eventMetadata = parseMetadata(row.event_metadata);
-    const native =
+    let native =
       row.venue === "hyperliquid"
         ? hip4ReadMarketSchema.parse(marketMetadata?.hip4)
         : null;
+    if (native && options.hip4ReadPolicy) {
+      native = ageHip4Market(native, now.getTime(), options.hip4ReadPolicy);
+      if (marketMetadata) marketMetadata = { ...marketMetadata, hip4: native };
+    }
     const metric = (value: unknown) =>
       value != null ? Number(value) : native ? null : 0;
     const limitlessMeta =

@@ -4,6 +4,8 @@ import {
   hip4SettlementSchema,
   hip4SpotMetadataSchema,
   hip4TradeSchema,
+  hip4BackgroundRequestWeightLimit,
+  hip4BackgroundRepairWeightLimit,
   type Hip4ReadPolicy,
   type Hip4Attempt,
 } from "@hunch/shared";
@@ -46,6 +48,7 @@ export async function runHip4ReadCycle(
   pool: Pool,
   readOverride?: (request: Hip4InfoRequest) => Promise<unknown>,
   onCanonicalChange?: Hip4CanonicalObserver,
+  options: { repair?: boolean; fetcher?: typeof fetch } = {},
 ) {
   const { policy, revision, lifecycle, disabledReason } = await readHip4Policy(
     pool,
@@ -67,6 +70,7 @@ export async function runHip4ReadCycle(
     mapMs: 0,
     writeMs: 0,
     oldestSnapshotAgeMs: 0,
+    repairAttempted: false,
   };
   if (
     !policy.enabled ||
@@ -95,6 +99,11 @@ export async function runHip4ReadCycle(
         policy.environment,
         40,
         policy.requestWeightPerMinute,
+        {
+          scope: "background_catalog",
+          maximum: hip4BackgroundRequestWeightLimit(policy),
+          backgroundMaximum: hip4BackgroundRequestWeightLimit(policy),
+        },
       ))
     ) {
       diagnostics.failures.push({
@@ -107,18 +116,27 @@ export async function runHip4ReadCycle(
   }
   const sourceRead =
     readOverride ??
-    createHip4ReadClient(policy, (weight) => {
-      if (metadataCredits > 0) {
-        metadataCredits--;
-        return Promise.resolve(true);
-      }
-      return admitHip4Request(
-        pool,
-        policy.environment,
-        weight,
-        policy.requestWeightPerMinute,
-      );
-    });
+    createHip4ReadClient(
+      policy,
+      (weight) => {
+        if (metadataCredits > 0) {
+          metadataCredits--;
+          return Promise.resolve(true);
+        }
+        return admitHip4Request(
+          pool,
+          policy.environment,
+          weight,
+          policy.requestWeightPerMinute,
+          {
+            scope: "background_repair",
+            maximum: hip4BackgroundRepairWeightLimit(policy),
+            backgroundMaximum: hip4BackgroundRequestWeightLimit(policy),
+          },
+        );
+      },
+      options.fetcher,
+    );
   const read = async (request: Hip4InfoRequest) => {
     const current = await readHip4Policy(pool, "indexer");
     if (!current.policy.enabled || current.revision !== revision)
@@ -240,6 +258,10 @@ export async function runHip4ReadCycle(
       }
     }
   }
+  // Cheap bulk context observations have their own freshness deadline. A
+  // catalog-only pass never multiplies depth/history work or moves its cursor.
+  if (options.repair === false) return diagnostics;
+  diagnostics.repairAttempted = selected.length > 0;
   for (const outcome of selected) {
     try {
       const stored = await readHip4StoredMarket(

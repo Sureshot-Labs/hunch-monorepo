@@ -957,6 +957,7 @@ export const FUNDING_REASON_CODES = [
   "external_signer_required",
   "fee_limit_exceeded",
   "funding_cost_warning",
+  "economic_review_required",
   "fixture_adapter_forbidden",
   "insufficient_gas",
   "insufficient_liquidity",

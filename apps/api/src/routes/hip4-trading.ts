@@ -31,6 +31,7 @@ import {
 import { TelegramAppHandoffV2DirectTradeError } from "../repos/telegram-app-handoff-v2-direct-trade-repository.js";
 import { TelegramAppHandoffError } from "../services/telegram-app-handoff.js";
 import { recheckHip4OwnedOrder } from "../services/hip4-owned-order-recheck.js";
+import { Hip4ReadError } from "../services/hip4-client.js";
 
 // Exact constants only: transport/SQL/SDK errors can contain a signature or URL.
 const conflicts = new Set([
@@ -73,6 +74,25 @@ const invalidRequests = new Set([
   "hip4_preparation_quantity_below_lot",
   "hip4_preparation_fee_exceeds_proceeds",
 ]);
+const providerFailureReasons = new Set([
+  "budget_exhausted",
+  "http_error",
+  "timeout",
+  "transport_error",
+  "response_too_large",
+  "invalid_response",
+]);
+
+/** Only fixed diagnostic labels: never log transport errors, signatures or URLs. */
+export function hip4TradingFailureReason(error: unknown): string {
+  if (error instanceof Hip4ReadError)
+    return providerFailureReasons.has(error.reason)
+      ? `provider_${error.reason}`
+      : "unknown";
+  if (error instanceof z.ZodError) return "invalid_runtime_contract";
+  return "unknown";
+}
+
 export function hip4TradingRouteError(error: unknown): {
   status: 400 | 404 | 409 | 503;
   error: string;
@@ -93,6 +113,8 @@ export function hip4TradingRouteError(error: unknown): {
   )
     return { status: 404, error: "trade_preparation_not_found" };
   if (conflicts.has(message)) return { status: 409, error: message };
+  if (error instanceof Hip4ReadError && error.reason === "budget_exhausted")
+    return { status: 503, error: "hip4_quote_rate_limited" };
   return { status: 503, error: "trade_temporarily_unavailable" };
 }
 
@@ -197,6 +219,15 @@ export function registerHip4TradingRoutes(
           );
         } catch (error) {
           const failure = hip4TradingRouteError(error);
+          if (failure.status === 503)
+            request.log.warn(
+              {
+                venue: "hyperliquid",
+                action: path,
+                reason: hip4TradingFailureReason(error),
+              },
+              "Hyperliquid trading read unavailable",
+            );
           return reply.code(failure.status).send({ error: failure.error });
         }
       },

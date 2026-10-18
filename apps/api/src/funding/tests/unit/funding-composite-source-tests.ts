@@ -393,6 +393,88 @@ const composite = buildCompositeSourceOption({
   maximumFeeUsd: "1",
   maximumFeeBps: 2_000,
 });
+
+const reviewedCandidates = [base, solana].map(
+  (entry): PlannedSourceOption => ({
+    ...entry,
+    option: {
+      ...entry.option,
+      fees: entry.option.fees.map((fee) => ({ ...fee, estimatedUsd: "1.5" })),
+      reasonCodes: [
+        ...entry.option.reasonCodes,
+        "funding_cost_warning",
+        "economic_review_required",
+      ],
+    },
+  }),
+);
+const reviewedCompositeInput = {
+  candidates: reviewedCandidates,
+  requiredDestination: money(DESTINATION_ASSET, "10000000"),
+  destinationUnitPriceUsd: "1",
+  maximumFeeUsd: "10",
+  maximumFeeBps: 2_000,
+  maximumReviewedFeeBps: 5_000,
+};
+const reviewedComposite = buildCompositeSourceOption(reviewedCompositeInput);
+assert.ok(reviewedComposite);
+assert.deepEqual(reviewedComposite.option.reasonCodes, [
+  "funding_cost_warning",
+  "economic_review_required",
+]);
+assert.deepEqual(
+  reviewedComposite.commitPlan.operation.sourceSnapshot,
+  reviewedComposite.option,
+);
+assert.equal(
+  buildCompositeSourceOption({
+    ...reviewedCompositeInput,
+    maximumReviewedFeeBps: null,
+  }),
+  null,
+);
+assert.equal(
+  buildCompositeSourceOption({
+    ...reviewedCompositeInput,
+    maximumFeeUsd: "2.99",
+  }),
+  null,
+  "manual review cannot bypass the aggregate absolute cap",
+);
+assert.equal(
+  buildCompositeSourceOption({
+    ...reviewedCompositeInput,
+    maximumReviewedFeeBps: 2_999,
+  }),
+  null,
+  "manual review cannot bypass the aggregate percentage cap",
+);
+for (const executionBoundary of ["automatic", "client_handoff"] as const) {
+  assert.equal(
+    maximumInternalFundingDestinationRaw({
+      ...reviewedCompositeInput,
+      destinationAsset: DESTINATION_ASSET,
+      maximumSlippageBps: 100,
+      executionBoundary,
+    }),
+    0n,
+    "capacity advice must not spend review-only quotes",
+  );
+}
+// Aggregate economics may cross the automatic cap even when no constituent
+// was individually flagged (for example, each used the full trade reference).
+const aggregateOnlyReview = buildCompositeSourceOption({
+  ...reviewedCompositeInput,
+  candidates: reviewedCandidates.map((entry) => ({
+    ...entry,
+    option: { ...entry.option, reasonCodes: ["minimum_output_not_met"] },
+  })),
+});
+assert.ok(aggregateOnlyReview);
+assert.deepEqual(aggregateOnlyReview.option.reasonCodes, [
+  "funding_cost_warning",
+  "economic_review_required",
+]);
 assert.ok(composite);
 assert.equal(composite.option.kind, "composite");
 assert.equal(composite.option.source.kind, "composite");

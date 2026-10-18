@@ -9801,4 +9801,91 @@ async function testPolymarketEvidenceOnlyOrphanRecovery(): Promise<void> {
   }
 }
 await testPolymarketEvidenceOnlyOrphanRecovery();
+
+async function testReviewedQuoteRequiresExactConsentAndPlan(): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const userId = await insertUser(client);
+    const base = buildPlan({ purpose: "trade_shortfall" });
+    const plan: FundingCommitPlan = {
+      ...base,
+      operation: {
+        ...base.operation,
+        sourceSnapshot: {
+          ...base.operation.sourceSnapshot,
+          reasonCodes: ["economic_review_required", "funding_cost_warning"],
+        },
+      },
+    };
+    const consentToken = opaque("reviewed-consent");
+    const quote = await createFundingQuoteInTransaction(client, {
+      ...quoteInput(userId, plan, consentToken),
+      policyRevision: "reviewed-fee-policy",
+    });
+    await assert.rejects(
+      commitFundingOperationInTransaction(
+        client,
+        commitInput(userId, quote.id, "", plan),
+      ),
+      /opaque token/i,
+    );
+    for (const suppliedToken of [opaque("wrong-consent")]) {
+      await expectFundingError(
+        commitFundingOperationInTransaction(
+          client,
+          commitInput(userId, quote.id, suppliedToken, plan),
+        ),
+        "quote_mismatch",
+      );
+    }
+    const alteredPlan: FundingCommitPlan = {
+      ...plan,
+      operation: {
+        ...plan.operation,
+        requestedSourceAmount: money("1000001"),
+      },
+    };
+    await expectFundingError(
+      commitFundingOperationInTransaction(
+        client,
+        commitInput(userId, quote.id, consentToken, alteredPlan),
+      ),
+      "quote_mismatch",
+    );
+    let currentFactsChecked = false;
+    await expectFundingError(
+      commitFundingOperationInTransaction(client, {
+        ...commitInput(userId, quote.id, consentToken, plan),
+        verifyCurrentFacts: async (_lockedClient, lockedQuote) => {
+          currentFactsChecked = true;
+          assert.equal(lockedQuote.policyRevision, "reviewed-fee-policy");
+          throw new FundingPersistenceError(
+            "quote_invalidated",
+            "policy revision changed before reviewed commit",
+          );
+        },
+      }),
+      "quote_invalidated",
+    );
+    assert.equal(currentFactsChecked, true);
+    const persisted = await client.query<{
+      operation_count: string;
+      consumed_at: Date | null;
+    }>(
+      `select (select count(*)::text from funding_operations where quote_id = $1) as operation_count,
+              consumed_at from funding_quotes where id = $1`,
+      [quote.id],
+    );
+    assert.equal(persisted.rows[0]?.operation_count, "0");
+    assert.equal(persisted.rows[0]?.consumed_at, null);
+    console.log(
+      "[funding-persistence-integration-tests] ok reviewed quote exact consent, immutable debit and locked revision rejection",
+    );
+  } finally {
+    await client.query("rollback");
+    client.release();
+  }
+}
+await testReviewedQuoteRequiresExactConsentAndPlan();
 console.log("[funding-persistence-integration-tests] complete");

@@ -2328,6 +2328,19 @@ export class WalletPreparationRuntimeService {
         outcome: outcomes[index],
       })),
     );
+    // A generic catalog can keep other venues visible during a partial read.
+    // An exact market request must not turn failed required inspections into
+    // authoritative absence of a Trading Wallet. No attempts, or a fulfilled
+    // policy-disabled inspection, still represent a legitimate empty result.
+    if (
+      targetVenueId != null &&
+      coverage.incompleteVenueIds.includes(targetVenueId)
+    ) {
+      throw new PreparationContractError(
+        "preparation_unavailable",
+        "The requested Trading Wallet could not be verified. Try again.",
+      );
+    }
     const preparedValues = coverage.values.filter(
       (value): value is PreparedRuntimeDestination => value != null,
     );

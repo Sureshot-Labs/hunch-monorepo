@@ -324,6 +324,13 @@ export const effectiveFundingRuntimeSchema = z
         maximumSlippageBps: z.number().int().min(0).max(500),
         maximumFeeUsd: usdAmountSchema,
         maximumFeeBps: z.number().int().min(0).max(10_000),
+        maximumReviewedFeeBps: z
+          .number()
+          .int()
+          .min(0)
+          .max(10_000)
+          .nullable()
+          .default(null),
         warningFeeUsd: usdAmountSchema,
         warningFeeBps: z.number().int().min(0).max(10_000),
         minimumDestinationUsd: usdAmountSchema,
@@ -418,6 +425,7 @@ export const DEFAULT_FUNDING_RUNTIME_POLICY: FundingRuntimePolicy = deepFreeze({
     maximumSlippageBps: 100,
     maximumFeeUsd: "10",
     maximumFeeBps: 2_000,
+    maximumReviewedFeeBps: null,
     warningFeeUsd: "5",
     warningFeeBps: 1_000,
     minimumDestinationUsd: "0.5",

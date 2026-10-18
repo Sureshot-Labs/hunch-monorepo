@@ -16,14 +16,20 @@ import {
   projectHip4Account,
   projectHip4Execution,
 } from "./services/hip4-account-projection.js";
-import { createHip4OwnedAccountService } from "./services/hip4-account-service.js";
+import {
+  createHip4OwnedAccountService,
+  refreshHip4OwnedAccount,
+} from "./services/hip4-account-service.js";
 import { hip4AccountProtectedRefsSql } from "./services/hip4-retention.js";
+import { admitHip4Request } from "./services/hip4-repository.js";
 
 const pool = await createIntegrationTestPool({
   max: 4,
   options: "-c statement_timeout=15000",
 });
 const address = "0x0000000000000000000000000000000000000001";
+const budgetAddress = "0x0000000000000000000000000000000000000002";
+const backgroundOwnerId = randomUUID();
 const now = Date.now();
 const quote = {
   tokenId: "0x6d1e7cde53ba9467b783cb7c530ce054",
@@ -299,6 +305,398 @@ try {
   );
   assert.equal(partial.refreshState, "failed");
 
+  // Saturated background work must not prevent a force-fresh Standard-account
+  // cash observation. Optional history remains deferred, never fabricated.
+  await pool.query("update runtime_policies set payload=$2 where id=$1", [
+    policyIds[0],
+    { enabled: true, requestWeightPerMinute: 600 },
+  ]);
+  await pool.query("delete from hip4_request_budget where scope='public-info'");
+  assert.equal(
+    await admitHip4Request(pool, "mainnet", 300, 600, {
+      scope: "background_catalog",
+      maximum: 300,
+      backgroundMaximum: 300,
+    }),
+    true,
+  );
+  const budgetRequests: string[] = [];
+  const repairRequests: { startTime: number; endTime: number }[] = [];
+  let failingHistoryRequest: "userFills" | "userFillsByTime" | null = null;
+  const budgetFetcher: typeof fetch = async (url, options) => {
+    const request = JSON.parse(String(options?.body));
+    budgetRequests.push(request.type);
+    if (request.type === "userFillsByTime")
+      repairRequests.push({
+        startTime: request.startTime,
+        endTime: request.endTime,
+      });
+    if (request.type === failingHistoryRequest)
+      return new Response("unavailable", { status: 500 });
+    if (request.type === "clearinghouseState")
+      return Response.json({
+        marginSummary: {
+          accountValue: "10",
+          totalRawUsd: "10",
+          totalMarginUsed: "0",
+          totalNtlPos: "0",
+        },
+        crossMarginSummary: {
+          accountValue: "10",
+          totalRawUsd: "10",
+          totalMarginUsed: "0",
+          totalNtlPos: "0",
+        },
+        crossMaintenanceMarginUsed: "0",
+        withdrawable: "10",
+        assetPositions: [],
+        time: Date.now(),
+      });
+    if (request.type === "userFillsByTime") return Response.json([]);
+    return provider(url, options);
+  };
+  const budgetService = createHip4OwnedAccountService(pool, budgetFetcher);
+  const budgetPolicy = await budgetService.policy();
+  const refreshBudgetAccount = () =>
+    budgetService.load(
+      budgetAddress,
+      budgetPolicy.readPolicy,
+      budgetPolicy.accountPolicy,
+      budgetPolicy.revision,
+      true,
+    );
+  const usedBudgetWeight = async () => {
+    const result = await pool.query<{ used_weight: number }>(
+      `select coalesce(sum((admission_row->>'weight')::int),0)::int as used_weight
+       from hip4_request_budget budget_row
+       cross join lateral jsonb_array_elements(budget_row.admissions) admission_row
+       where budget_row.scope='public-info'
+         and (admission_row->>'at')::numeric > extract(epoch from statement_timestamp())-60`,
+    );
+    assert.ok(result.rows[0].used_weight <= 600);
+    return result.rows[0].used_weight;
+  };
+  const refreshRequestedAt = Date.now();
+  const deferredHistory = await refreshBudgetAccount();
+  assert.equal(deferredHistory.state, "fresh");
+  assert.ok(
+    Date.parse(deferredHistory.observation?.observedAt ?? "") >=
+      refreshRequestedAt,
+  );
+  assert.equal(deferredHistory.observation?.perpsCash?.state, "verified");
+  assert.equal(deferredHistory.history.executionsObservedAt, null);
+  assert.equal(deferredHistory.history.fillRepair?.lastSuccessAt, null);
+  assert.equal(deferredHistory.history.fillRepair?.coveredThrough, null);
+  assert.equal(
+    deferredHistory.history.fillRepair?.lastError,
+    "budget_exhausted",
+  );
+  assert.equal(deferredHistory.history.allTimeComplete, false);
+  assert.deepEqual(budgetRequests, [
+    "userRole",
+    "userAbstraction",
+    "spotMeta",
+    "spotClearinghouseState",
+    "clearinghouseState",
+    "userAbstraction",
+  ]);
+  assert.equal(await usedBudgetWeight(), 424);
+
+  const expireBudgetWindow = () =>
+    pool.query(
+      `update hip4_request_budget
+       set admissions=jsonb_build_array(jsonb_build_object(
+         'at',extract(epoch from statement_timestamp())-61,'weight',600))
+       where scope='public-info'`,
+    );
+  await expireBudgetWindow();
+  budgetRequests.length = 0;
+  const repairProgress = await refreshBudgetAccount();
+  assert.equal(repairProgress.state, "fresh");
+  assert.equal(repairProgress.observation?.perpsCash?.state, "verified");
+  assert.equal(
+    budgetRequests.filter((type) => type === "userFillsByTime").length,
+    1,
+  );
+  assert.equal(budgetRequests.includes("userFills"), false);
+  assert.equal(
+    repairProgress.history.executionsObservedAt,
+    null,
+    "repair success must not fabricate a fresh live-tail observation",
+  );
+  assert.deepEqual(repairRequests[0], {
+    startTime: deferredHistory.history.fillRepair?.nextTime,
+    endTime: deferredHistory.history.fillRepair?.endTime,
+  });
+  assert.ok(repairProgress.history.fillRepair?.lastSuccessAt);
+  assert.equal(repairProgress.history.fillRepair?.pagesRead, 1);
+  assert.equal(repairProgress.history.fillRepair?.nextTime, null);
+  assert.equal(
+    repairProgress.history.fillRepair?.coveredThrough,
+    deferredHistory.history.fillRepair?.endTime,
+    "repair exhausts only its original fixed provider-visible interval",
+  );
+  assert.equal(repairProgress.history.allTimeComplete, false);
+  assert.equal(await usedBudgetWeight(), 284);
+
+  await expireBudgetWindow();
+  budgetRequests.length = 0;
+  const tailProgress = await refreshBudgetAccount();
+  assert.ok(tailProgress.history.executionsObservedAt);
+  assert.equal(budgetRequests.filter((type) => type === "userFills").length, 1);
+  assert.equal(budgetRequests.includes("userFillsByTime"), false);
+  assert.equal(
+    tailProgress.history.fillRepair?.lastSuccessAt,
+    repairProgress.history.fillRepair?.lastSuccessAt,
+  );
+  assert.equal(
+    tailProgress.history.fillRepair?.coveredThrough,
+    repairProgress.history.fillRepair?.coveredThrough,
+  );
+  assert.equal(await usedBudgetWeight(), 284);
+
+  // An admitted but failing repair consumes the same 120 weight as success.
+  // Rotation is scheduling state, not a successful-observation timestamp, so
+  // that failure cannot deny a healthy live tail in every subsequent window.
+  await expireBudgetWindow();
+  budgetRequests.length = 0;
+  failingHistoryRequest = "userFillsByTime";
+  const failedRepair = await refreshBudgetAccount();
+  assert.equal(budgetRequests.includes("userFillsByTime"), true);
+  assert.equal(budgetRequests.includes("userFills"), false);
+  assert.equal(failedRepair.history.fillRepair?.lastError, "http_error");
+  assert.equal(
+    failedRepair.history.fillRepair?.lastSuccessAt,
+    tailProgress.history.fillRepair?.lastSuccessAt,
+  );
+  assert.equal(
+    failedRepair.history.fillRepair?.coveredThrough,
+    tailProgress.history.fillRepair?.coveredThrough,
+  );
+  assert.equal(
+    failedRepair.history.executionsObservedAt,
+    tailProgress.history.executionsObservedAt,
+  );
+  const failedRepairRequest = repairRequests.at(-1);
+  assert.equal(await usedBudgetWeight(), 284);
+
+  await expireBudgetWindow();
+  budgetRequests.length = 0;
+  failingHistoryRequest = null;
+  const tailAfterFailedRepair = await refreshBudgetAccount();
+  assert.equal(budgetRequests.includes("userFills"), true);
+  assert.equal(budgetRequests.includes("userFillsByTime"), false);
+  assert.ok(tailAfterFailedRepair.history.executionsObservedAt);
+  assert.equal(
+    tailAfterFailedRepair.history.fillRepair?.nextTime,
+    failedRepair.history.fillRepair?.nextTime,
+    "a deferred retry retains the failed repair's inclusive unread boundary",
+  );
+  assert.equal(await usedBudgetWeight(), 284);
+
+  await expireBudgetWindow();
+  budgetRequests.length = 0;
+  const repairedAfterFailure = await refreshBudgetAccount();
+  assert.equal(budgetRequests.includes("userFillsByTime"), true);
+  assert.equal(budgetRequests.includes("userFills"), false);
+  assert.deepEqual(repairRequests.at(-1), failedRepairRequest);
+  assert.equal(repairedAfterFailure.history.fillRepair?.lastError, null);
+  assert.equal(repairedAfterFailure.history.fillRepair?.nextTime, null);
+  assert.equal(await usedBudgetWeight(), 284);
+
+  // The reverse direction is equally important: admitted tail HTTP failures
+  // cannot pin all following refreshes ahead of healthy bounded repair.
+  await expireBudgetWindow();
+  budgetRequests.length = 0;
+  failingHistoryRequest = "userFills";
+  const failedTail = await refreshBudgetAccount();
+  assert.equal(budgetRequests.includes("userFills"), true);
+  assert.equal(budgetRequests.includes("userFillsByTime"), false);
+  assert.match(failedTail.error ?? "", /fills_http_error/u);
+  assert.equal(
+    failedTail.history.executionsObservedAt,
+    tailAfterFailedRepair.history.executionsObservedAt,
+  );
+  assert.equal(await usedBudgetWeight(), 284);
+
+  await expireBudgetWindow();
+  budgetRequests.length = 0;
+  failingHistoryRequest = null;
+  const repairAfterFailedTail = await refreshBudgetAccount();
+  assert.equal(budgetRequests.includes("userFillsByTime"), true);
+  assert.equal(budgetRequests.includes("userFills"), false);
+  assert.equal(repairAfterFailedTail.history.fillRepair?.lastError, null);
+  assert.equal(repairAfterFailedTail.history.fillRepair?.nextTime, null);
+  assert.equal(
+    repairAfterFailedTail.history.executionsObservedAt,
+    failedTail.history.executionsObservedAt,
+  );
+  assert.equal(repairAfterFailedTail.history.allTimeComplete, false);
+  assert.equal(await usedBudgetWeight(), 284);
+
+  // A worker must also make history progress while catalog capacity remains
+  // reserved. Alternate real cash observations with independently bound
+  // history-only work; never persist an old cash value as newly observed.
+  await pool.query("insert into users(id,is_active) values($1,true)", [
+    backgroundOwnerId,
+  ]);
+  await pool.query(
+    "insert into user_wallets(user_id,wallet_address,wallet_type,is_verified) values($1,$2,'ethereum',true)",
+    [backgroundOwnerId, budgetAddress],
+  );
+  let backgroundMode = "disabled";
+  let backgroundRole = "user";
+  const backgroundFetcher: typeof fetch = async (url, options) => {
+    const request = JSON.parse(String(options?.body));
+    if (request.type === "userRole") {
+      budgetRequests.push(request.type);
+      return Response.json(
+        backgroundRole === "agent"
+          ? { role: "agent", data: { user: address } }
+          : { role: backgroundRole },
+      );
+    }
+    if (request.type === "userAbstraction") {
+      budgetRequests.push(request.type);
+      return Response.json(backgroundMode);
+    }
+    return budgetFetcher(url, options);
+  };
+  const runBackground = async (readPolicy = budgetPolicy.readPolicy) => {
+    await expireBudgetWindow();
+    budgetRequests.length = 0;
+    const startedAt = new Date();
+    const backgroundLease = await claimHip4AccountRefresh(
+      pool,
+      "mainnet",
+      budgetAddress,
+      budgetPolicy.accountPolicy.leaseMs,
+      startedAt,
+    );
+    assert.ok(backgroundLease);
+    const result = await refreshHip4OwnedAccount({
+      pool,
+      address: budgetAddress,
+      lease: backgroundLease,
+      policy: readPolicy,
+      accountPolicy: budgetPolicy.accountPolicy,
+      now: startedAt.getTime(),
+      fetcher: backgroundFetcher,
+      background: true,
+      requireCurrentOwner: true,
+    });
+    assert.equal(result.saved, true);
+    const snapshot = await readHip4AccountSnapshot(
+      pool,
+      "mainnet",
+      budgetAddress,
+    );
+    assert.ok(snapshot);
+    return { result, snapshot };
+  };
+  const backgroundCash = await runBackground();
+  assert.equal(backgroundCash.snapshot.history.nextBackgroundRead, "history");
+  assert.equal(budgetRequests.includes("spotClearinghouseState"), true);
+  assert.equal(budgetRequests.includes("userFills"), false);
+  assert.equal(budgetRequests.includes("userFillsByTime"), false);
+  assert.ok(backgroundCash.snapshot.history.ledgerRepair?.lastSuccessAt);
+  assert.equal(await usedBudgetWeight(), 164);
+  const cashObservation = backgroundCash.snapshot.observation;
+  await pool.query(
+    "update hip4_account_snapshots set attempt_error='cash_read_failed' where environment='mainnet' and account_address=$1",
+    [budgetAddress],
+  );
+  const backgroundHistory = await runBackground();
+  assert.equal(backgroundHistory.snapshot.history.nextBackgroundRead, "cash");
+  assert.deepEqual(
+    backgroundHistory.snapshot.observation,
+    cashObservation,
+    "history-only work preserves the exact cash observation and its timestamp",
+  );
+  assert.equal(backgroundHistory.snapshot.attempt_error, "cash_read_failed");
+  assert.equal(budgetRequests.includes("spotMeta"), false);
+  assert.equal(budgetRequests.includes("spotClearinghouseState"), false);
+  assert.equal(budgetRequests.includes("clearinghouseState"), false);
+  assert.equal(budgetRequests.includes("userFills"), true);
+  assert.equal(await usedBudgetWeight(), 220);
+  for (let pair = 0; pair < 2; pair++)
+    assert.equal(
+      await admitHip4Request(pool, "mainnet", 40, 600, {
+        scope: "background_catalog",
+        maximum: 300,
+        backgroundMaximum: 300,
+      }),
+      true,
+    );
+  assert.equal(await usedBudgetWeight(), 300);
+  const backgroundCashAgain = await runBackground();
+  assert.equal(backgroundCashAgain.snapshot.attempt_error, null);
+  assert.equal(
+    backgroundCashAgain.snapshot.history.nextFillRead,
+    backgroundHistory.snapshot.history.nextFillRead,
+    "cash-only phases cannot consume the tail/repair rotation hint",
+  );
+  assert.equal(budgetRequests.includes("userFills"), false);
+  assert.equal(budgetRequests.includes("userFillsByTime"), false);
+  const backgroundRepair = await runBackground();
+  assert.equal(budgetRequests.includes("userFillsByTime"), true);
+  assert.equal(budgetRequests.includes("userFills"), false);
+  assert.ok(backgroundRepair.snapshot.history.fillRepair?.lastSuccessAt);
+  assert.deepEqual(
+    backgroundRepair.snapshot.observation,
+    backgroundCashAgain.snapshot.observation,
+  );
+  assert.equal(await usedBudgetWeight(), 220);
+
+  // A quota between cash+fill and cash+fill+ledger must still split phases;
+  // otherwise every pass consumes 264 and permanently starves the ledger20.
+  const middleBudgetPolicy = {
+    ...budgetPolicy.readPolicy,
+    requestWeightPerMinute: 700,
+  };
+  await pool.query("update runtime_policies set payload=$2 where id=$1", [
+    policyIds[0],
+    middleBudgetPolicy,
+  ]);
+  await runBackground(middleBudgetPolicy);
+  assert.equal(budgetRequests.includes("userFills"), false);
+  assert.equal(budgetRequests.includes("userFillsByTime"), false);
+  assert.equal(budgetRequests.includes("userNonFundingLedgerUpdates"), true);
+  assert.equal(await usedBudgetWeight(), 164);
+  await runBackground(middleBudgetPolicy);
+  assert.equal(budgetRequests.includes("spotClearinghouseState"), false);
+  assert.equal(budgetRequests.includes("userFills"), true);
+  await pool.query("update runtime_policies set payload=$2 where id=$1", [
+    policyIds[0],
+    budgetPolicy.readPolicy,
+  ]);
+
+  // Changed binding fails closed for history, then ordinary cash refresh can
+  // observe the new mode; no stale mode is used to synthesize fresh balances.
+  await runBackground(); // cash phase makes history the next phase
+  backgroundMode = "unifiedAccount";
+  const changedBinding = await runBackground();
+  assert.deepEqual(budgetRequests, ["userRole", "userAbstraction"]);
+  assert.ok(
+    changedBinding.result.errors.includes("account_history_binding_changed"),
+  );
+  assert.equal(changedBinding.snapshot.history.nextBackgroundRead, "cash");
+  assert.equal(changedBinding.snapshot.observation?.mode, "disabled");
+  backgroundMode = "disabled";
+  await runBackground();
+  backgroundRole = "agent";
+  const rejectedRole = await runBackground();
+  assert.deepEqual(budgetRequests, ["userRole"]);
+  assert.ok(rejectedRole.result.errors.includes("unsupported_account_role"));
+  backgroundRole = "user";
+  await runBackground();
+  await pool.query("update users set is_active=false where id=$1", [
+    backgroundOwnerId,
+  ]);
+  const rejectedOwner = await runBackground();
+  assert.deepEqual(budgetRequests, [], "ownership loss makes zero HTTP calls");
+  assert.ok(rejectedOwner.result.errors.includes("account_owner_unavailable"));
+
   // Exact private keyset scans, including sparse market filters and generic plans.
   await pool.query(
     `insert into hip4_account_executions(environment,account_address,time_ms,coin,tid,oid,canonical_market_id,execution,fingerprint)
@@ -357,8 +755,9 @@ try {
     policyIds,
   ]);
   await pool.query(
-    "delete from hip4_account_snapshots where account_address=$1",
-    [address],
+    "delete from hip4_account_snapshots where account_address=any($1::text[])",
+    [[address, budgetAddress]],
   );
+  await pool.query("delete from users where id=$1", [backgroundOwnerId]);
   await pool.end();
 }

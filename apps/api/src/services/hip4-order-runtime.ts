@@ -1,4 +1,5 @@
 import { tx, type Pool } from "@hunch/infra";
+import { fetchActiveRuntimePolicy } from "@hunch/db";
 import { hip4Identity } from "@hunch/shared";
 import { z } from "zod";
 import { assertFundingControllerWallet } from "../funding/execution/funding-controller-wallet-lock.js";
@@ -50,6 +51,12 @@ import {
 import type { TelegramAppHandoffV2ScopeAssertion } from "../repos/telegram-app-handoff-v2-direct-trade-repository.js";
 import { socialTradeAttributionFields } from "../schemas/social-trade.js";
 import { currentHip4NativeInstrument } from "./hip4-native-instrument.js";
+import {
+  readHip4AccountPolicy,
+  readHip4AccountSnapshot,
+} from "./hip4-account-repository.js";
+import { canonicalJsonHash } from "../funding/persistence/canonical.js";
+import { createHip4QuotePreviewCache } from "./hip4-quote-preview-cache.js";
 
 const uuid = z
   .string()
@@ -83,6 +90,31 @@ export type Hip4OrderRuntimeDependencies = {
   capabilityCheck?: Parameters<typeof readHip4TradeLifecycle>[2];
   telegramAppHandoffScope?: TelegramAppHandoffV2ScopeAssertion;
 };
+type Hip4QuotePreviewFacts = {
+  feeObservation: Awaited<ReturnType<typeof readHip4OrderFeeObservation>>;
+  capacity: Awaited<ReturnType<typeof readHip4OrderQuoteCapacity>>;
+};
+const quotePreviewCaches = new WeakMap<
+  Pool,
+  WeakMap<
+    typeof fetch,
+    ReturnType<typeof createHip4QuotePreviewCache<Hip4QuotePreviewFacts>>
+  >
+>();
+
+function quotePreviewCache(pool: Pool, fetcher: typeof fetch) {
+  let byFetcher = quotePreviewCaches.get(pool);
+  if (!byFetcher) {
+    byFetcher = new WeakMap();
+    quotePreviewCaches.set(pool, byFetcher);
+  }
+  let cache = byFetcher.get(fetcher);
+  if (!cache) {
+    cache = createHip4QuotePreviewCache<Hip4QuotePreviewFacts>();
+    byFetcher.set(fetcher, cache);
+  }
+  return cache;
+}
 const preparationInputSchema = z
   .object({
     userId: uuid,
@@ -154,14 +186,99 @@ async function readHip4OrderContext(
     marketId: input.request.marketId,
     side: input.request.side,
   };
-  const [feeObservation, capacity] = await Promise.all([
-    readHip4OrderFeeObservation(pool, scope, dependencies.fetcher),
-    (phase === "quote" ? readHip4OrderQuoteCapacity : readHip4OrderCapacity)(
-      pool,
-      { ...scope, outcomeSide: input.request.outcomeSide },
-      dependencies.fetcher,
-    ),
-  ]);
+  const loadFacts = async (): Promise<Hip4QuotePreviewFacts> => {
+    const [feeObservation, capacity] = await Promise.all([
+      readHip4OrderFeeObservation(pool, scope, dependencies.fetcher),
+      (phase === "quote" ? readHip4OrderQuoteCapacity : readHip4OrderCapacity)(
+        pool,
+        { ...scope, outcomeSide: input.request.outcomeSide },
+        dependencies.fetcher,
+      ),
+    ]);
+    return { feeObservation, capacity };
+  };
+  let facts: Hip4QuotePreviewFacts;
+  let previewValidUntil = Infinity;
+  if (phase === "quote") {
+    const [read, account] = await Promise.all([
+      readHip4Policy(pool, "accountRead"),
+      readHip4AccountPolicy(pool),
+    ]);
+    if (
+      !read.policy.enabled ||
+      !account.policy.enabled ||
+      read.policy.environment !== "mainnet"
+    )
+      throw new Error("native_account_read_unavailable");
+    const previewDeadline = ({
+      feeObservation,
+      capacity,
+    }: Hip4QuotePreviewFacts) =>
+      Math.min(
+        Date.parse(feeObservation.expiresAt),
+        Date.parse(capacity.expiresAt),
+        Date.parse(feeObservation.observedAt) + account.policy.snapshotMaxAgeMs,
+        Date.parse(capacity.observedAt) + account.policy.snapshotMaxAgeMs,
+        nativeInstrument.expiry
+          ? Date.parse(nativeInstrument.expiry)
+          : Infinity,
+      );
+    const cache = quotePreviewCache(pool, dependencies.fetcher ?? fetch);
+    if (read.policy.quotePreviewCacheEntries === 0) {
+      facts = await cache.read("disabled", 0, loadFacts, previewDeadline);
+    } else {
+      const [snapshot, sellTradingPolicy] = await Promise.all([
+        readHip4AccountSnapshot(pool, "mainnet", profile.address).catch(
+          (error: unknown) => {
+            // This optional display snapshot only invalidates preview reuse. A
+            // malformed legacy row must not block a healthy fresh provider read.
+            if (error instanceof z.ZodError) return undefined;
+            throw error;
+          },
+        ),
+        // SELL must not start depending on unrelated BUY-floor validation.
+        policy
+          ? Promise.resolve(null)
+          : fetchActiveRuntimePolicy(pool, "hip4_trading", new Date(), {
+              missingTable: "error",
+            }),
+      ]);
+      const key = canonicalJsonHash({
+        userId: input.userId,
+        controllerWalletRef: input.request.controllerWalletRef,
+        address: profile.address,
+        environment: read.policy.environment,
+        marketId: input.request.marketId,
+        side: input.request.side,
+        outcomeSide: input.request.outcomeSide,
+        readRevision: read.revision,
+        accountRevision: account.revision,
+        accountPolicy: account.policy,
+        tradingRevision: policy?.revision ?? null,
+        sellTradingPolicy: sellTradingPolicy
+          ? { id: sellTradingPolicy.id, payload: sellTradingPolicy.payload }
+          : null,
+        instrument: nativeInstrument.generation,
+        // An explicit post-funding account refresh changes this bounded stored
+        // observation. Reuse must not retain the old preview cash until its TTL.
+        storedAccountObservation: snapshot?.observation ?? null,
+      });
+      facts =
+        snapshot === undefined
+          ? await loadFacts()
+          : await cache.read(
+              key,
+              read.policy.quotePreviewCacheEntries,
+              loadFacts,
+              previewDeadline,
+            );
+    }
+    previewValidUntil = previewDeadline(facts);
+  } else {
+    // Strict preparation/submission readers never consume preview facts.
+    facts = await loadFacts();
+  }
+  const { feeObservation, capacity } = facts;
   const { amounts, feeQuote } = buildHip4OrderPreparationTerms({
     request: input.request,
     policy,
@@ -173,6 +290,7 @@ async function readHip4OrderContext(
   const expiresAfter = Math.min(
     Date.parse(capacity.expiresAt),
     Date.parse(feeObservation.expiresAt),
+    previewValidUntil,
     nativeInstrument.expiry ? Date.parse(nativeInstrument.expiry) : Infinity,
   );
   if (expiresAfter <= Date.now()) throw new Error("hip4_preparation_expired");

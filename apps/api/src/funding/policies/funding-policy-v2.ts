@@ -52,6 +52,15 @@ const receiveAssetIdSchema = z.enum(FUNDING_RECEIVE_ASSET_IDS);
 
 const unique = <T>(values: readonly T[]): T[] => [...new Set(values)];
 
+const feeBasisPointsSchema = z.number().int().min(0).max(10_000);
+const fundingIntentFeesSchema = z
+  .object({
+    maximumFeeUsd: usdAmountSchema.optional(),
+    maximumFeeBps: feeBasisPointsSchema.optional(),
+    maximumReviewedFeeBps: feeBasisPointsSchema.nullable().optional(),
+  })
+  .strict();
+
 function schemaValidationIssues(
   error: z.ZodError,
 ): FundingPolicyValidationIssue[] {
@@ -74,6 +83,7 @@ const rawFundingIntentPolicySchema = z
       })
       .strict(),
     paused: z.boolean(),
+    fees: fundingIntentFeesSchema.optional(),
   })
   .strict();
 
@@ -93,6 +103,7 @@ export const fundingIntentPolicySchema = rawFundingIntentPolicySchema.transform(
         privy: input.receive.privy,
       },
       paused: input.paused,
+      ...(input.fees ? { fees: input.fees } : {}),
     };
   },
 );
@@ -113,6 +124,14 @@ export const fundingIntentPatchSchema = z
       .strict()
       .optional(),
     paused: z.boolean().optional(),
+    fees: z
+      .object({
+        maximumFeeUsd: usdAmountSchema.nullable().optional(),
+        maximumFeeBps: feeBasisPointsSchema.nullable().optional(),
+        maximumReviewedFeeBps: feeBasisPointsSchema.nullable().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -126,6 +145,16 @@ export const DEFAULT_FUNDING_INTENT_POLICY: FundingIntentPolicy = deepFreeze({
   receive: { assets: [], privy: false },
   paused: false,
 });
+
+function fundingIntentFeeLimits(policy: FundingIntentPolicy) {
+  const defaults = DEFAULT_FUNDING_RUNTIME_POLICY.placement;
+  return {
+    maximumFeeUsd: policy.fees?.maximumFeeUsd ?? defaults.maximumFeeUsd,
+    maximumFeeBps: policy.fees?.maximumFeeBps ?? defaults.maximumFeeBps,
+    maximumReviewedFeeBps:
+      policy.fees?.maximumReviewedFeeBps ?? defaults.maximumReviewedFeeBps,
+  };
+}
 
 type CatalogAsset = Readonly<{
   asset: AssetRef;
@@ -466,6 +495,10 @@ export function compileFundingIntentPolicy(
       ...DEFAULT_FUNDING_RUNTIME_POLICY.automation,
       stagedContinuation: anyFund,
     },
+    placement: {
+      ...DEFAULT_FUNDING_RUNTIME_POLICY.placement,
+      ...fundingIntentFeeLimits(policy),
+    },
     assets: [...includedAssets].map((alias) => {
       const catalog = FUNDING_ASSET_CATALOG[alias];
       return {
@@ -634,6 +667,13 @@ export function applyFundingIntentPatch(
       privy: parsed.data.receive?.privy ?? current.receive.privy,
     },
     paused: parsed.data.paused ?? current.paused,
+    ...((current.fees || parsed.data.fees) && {
+      fees: Object.fromEntries(
+        Object.entries({ ...current.fees, ...parsed.data.fees }).filter(
+          ([key, value]) => key === "maximumReviewedFeeBps" || value != null,
+        ),
+      ),
+    }),
   });
 }
 
@@ -660,6 +700,7 @@ export function fundingIntentBehaviorSnapshot(policy: FundingIntentPolicy) {
         policy.receive.delegatedRelayEvmDailyCapUsd ?? null,
     },
     paused: policy.paused,
+    fees: fundingIntentFeeLimits(policy),
   };
 }
 

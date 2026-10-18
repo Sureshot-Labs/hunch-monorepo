@@ -62,6 +62,22 @@ export function minimumDestinationUsdForFundingRequest(
     : configuredMinimumDestinationUsd;
 }
 
+/** The exception authorizes a reviewable client quote, never server autonomy. */
+export function fundingRequestAllowsEconomicReview(
+  request: Pick<
+    FundingDiscoveryRequest,
+    | "purpose"
+    | "serverExecutionProfileId"
+    | "serverQuoteAvailableSourceCapacity"
+  >,
+): boolean {
+  return (
+    request.purpose === "trade_shortfall" &&
+    !request.serverExecutionProfileId &&
+    !request.serverQuoteAvailableSourceCapacity
+  );
+}
+
 export type RelayFirstCandidate = Readonly<{
   routeId: string;
   providerId: string;
@@ -245,6 +261,7 @@ export function buildRelayWalletSourceOption(
     routeExperiencePolicy: FundingRuntimePolicy["routeExperience"];
     maximumFeeUsd: string;
     maximumFeeBps: number;
+    maximumReviewedFeeBps?: number | null;
     warningFeeUsd: string;
     warningFeeBps: number;
     minimumDestinationUsd: string;
@@ -316,12 +333,22 @@ export function buildRelayWalletSourceOption(
     (expectedRaw * BigInt(10_000 - input.maximumSlippageBps)) / 10_000n;
   const slippageAllowed = minimumRaw >= minimumAtSlippageLimit;
   const destinationPriceUnknown = input.minimumDestinationEstimatedUsd == null;
-  const feeBpsExceeded =
+  const automaticFeeBpsExceeded =
     input.minimumDestinationEstimatedUsd != null &&
     exceedsDecimalBps(
       feeTotalUsd,
       input.feeReferenceUsd ?? input.minimumDestinationEstimatedUsd,
       input.maximumFeeBps,
+    );
+  const reviewedFeeBpsExceeded =
+    input.minimumDestinationEstimatedUsd != null &&
+    exceedsDecimalBps(
+      feeTotalUsd,
+      input.feeReferenceUsd ?? input.minimumDestinationEstimatedUsd,
+      Math.max(
+        input.maximumFeeBps,
+        input.maximumReviewedFeeBps ?? input.maximumFeeBps,
+      ),
     );
   const feeWarning =
     !feeUnknown &&
@@ -340,7 +367,12 @@ export function buildRelayWalletSourceOption(
     ) < 0;
   const feeLimitExceeded =
     compareUnsignedDecimals(feeTotalUsd, input.maximumFeeUsd) > 0 ||
-    feeBpsExceeded;
+    reviewedFeeBpsExceeded;
+  const economicReviewRequired =
+    !feeUnknown &&
+    !destinationPriceUnknown &&
+    automaticFeeBpsExceeded &&
+    !feeLimitExceeded;
   const reasonCodes: FundingReasonCode[] = [
     ...new Set<FundingReasonCode>([
       ...experience.reasonCodes,
@@ -348,8 +380,11 @@ export function buildRelayWalletSourceOption(
         ? (["trusted_price_unavailable"] as const)
         : []),
       ...(feeLimitExceeded ? (["fee_limit_exceeded"] as const) : []),
-      ...(feeWarning && !feeLimitExceeded
+      ...((feeWarning || economicReviewRequired) && !feeLimitExceeded
         ? (["funding_cost_warning"] as const)
+        : []),
+      ...(economicReviewRequired
+        ? (["economic_review_required"] as const)
         : []),
       ...(destinationBelowMinimum ? (["minimum_output_not_met"] as const) : []),
       ...(!slippageAllowed ? (["minimum_output_not_met"] as const) : []),
@@ -418,6 +453,7 @@ export function effectiveFundingEconomicsLimits(
 ): Readonly<{
   maximumFeeUsd: string;
   maximumFeeBps: number;
+  maximumReviewedFeeBps: number | null;
   warningFeeUsd: string;
   warningFeeBps: number;
   minimumDestinationUsd: string;
@@ -437,6 +473,7 @@ export function effectiveFundingEconomicsLimits(
       policy.placement.maximumSlippageBps,
     ),
     maximumFeeBps: policy.placement.maximumFeeBps,
+    maximumReviewedFeeBps: policy.placement.maximumReviewedFeeBps ?? null,
     warningFeeUsd: policy.placement.warningFeeUsd,
     warningFeeBps: policy.placement.warningFeeBps,
     minimumDestinationUsd: policy.placement.minimumDestinationUsd,
@@ -868,6 +905,11 @@ export class RelayFirstSourcePlanner {
             routeExperiencePolicy: input.policy.routeExperience,
             maximumFeeUsd: limits.maximumFeeUsd,
             maximumFeeBps: limits.maximumFeeBps,
+            maximumReviewedFeeBps: fundingRequestAllowsEconomicReview(
+              input.request,
+            )
+              ? limits.maximumReviewedFeeBps
+              : null,
             warningFeeUsd: limits.warningFeeUsd,
             warningFeeBps: limits.warningFeeBps,
             minimumDestinationUsd: minimumDestinationUsdForFundingRequest(

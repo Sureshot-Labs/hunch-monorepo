@@ -2,6 +2,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import {
+  hip4BackgroundRequestWeightLimit,
+  hip4BackgroundRepairWeightLimit,
+  hip4ReadPolicySchema,
+} from "@hunch/shared";
 import { createIntegrationTestPool } from "./test-database-target.js";
 import { installHip4TestLifecycle } from "./hip4-test-lifecycle.js";
 import { mapHip4Market } from "./services/hip4-mapping.js";
@@ -86,6 +91,172 @@ try {
     0,
   );
   assert.equal((await readHip4Markets(pool, "mainnet", [], -1, 2)).length, 0);
+  {
+    const priorityPolicy = hip4ReadPolicySchema.parse({
+      requestWeightPerMinute: 600,
+    });
+    const backgroundLimit = hip4BackgroundRequestWeightLimit(priorityPolicy);
+    // Repair and catalog share the same total row, but only repair admissions
+    // consume the class subquota. Otherwise catalog itself would starve history.
+    await pool.query(
+      "delete from hip4_request_budget where scope='public-info'",
+    );
+    const repairBudget = {
+      scope: "background_repair" as const,
+      maximum: hip4BackgroundRepairWeightLimit(priorityPolicy),
+    };
+    assert.equal(repairBudget.maximum, 220);
+    assert.equal(
+      await admitHip4Request(pool, "mainnet", 40, backgroundLimit),
+      true,
+    );
+    const repairs = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        admitHip4Request(pool, "mainnet", 20, backgroundLimit, repairBudget),
+      ),
+    );
+    assert.equal(repairs.filter(Boolean).length, 11);
+    assert.equal(
+      await admitHip4Request(pool, "testnet", 1, backgroundLimit, repairBudget),
+      false,
+    );
+    assert.equal(
+      await admitHip4Request(pool, "testnet", 40, backgroundLimit),
+      true,
+    );
+    assert.equal(
+      await admitHip4Request(pool, "mainnet", 1, backgroundLimit),
+      false,
+    );
+    assert.equal(await admitHip4Request(pool, "mainnet", 300, 600), true);
+    assert.equal(await admitHip4Request(pool, "mainnet", 1, 600), false);
+    // No clearing or manual repair: expiration frees both quotas together.
+    await pool.query(
+      "update hip4_request_budget set admissions=(select jsonb_agg(admission_row || jsonb_build_object('at',extract(epoch from now())-61)) from jsonb_array_elements(admissions) admission_row) where scope='public-info'",
+    );
+    assert.equal(
+      await admitHip4Request(
+        pool,
+        "testnet",
+        120,
+        backgroundLimit,
+        repairBudget,
+      ),
+      true,
+    );
+    assert.equal(
+      await admitHip4Request(pool, "mainnet", 80, backgroundLimit),
+      true,
+    );
+    assert.equal(
+      await admitHip4Request(
+        pool,
+        "mainnet",
+        100,
+        backgroundLimit,
+        repairBudget,
+      ),
+      true,
+    );
+    assert.equal(
+      await admitHip4Request(pool, "mainnet", 1, backgroundLimit, repairBudget),
+      false,
+    );
+    assert.equal(
+      await admitHip4Request(pool, "mainnet", 1, 600, {
+        ...repairBudget,
+        maximum: 0,
+      }),
+      false,
+    );
+    assert.equal(
+      await admitHip4Request(pool, "mainnet", 1, 600, {
+        ...repairBudget,
+        maximum: NaN,
+      }),
+      false,
+    );
+    // EXPLAIN the exact parameterized UPSERT, including the first-row path and
+    // the bounded 1200-admission tail, without executing a mutating EXPLAIN.
+    const explainAdmission = {
+      query: async (statement: string, parameters: unknown[]) => {
+        const plan = await pool.query(
+          `explain (format json) ${statement}`,
+          parameters,
+        );
+        const root = plan.rows[0]["QUERY PLAN"][0].Plan;
+        assert.equal(root["Node Type"], "ModifyTable");
+        assert.equal(root["Conflict Resolution"], "UPDATE");
+        assert.deepEqual(root["Conflict Arbiter Indexes"], [
+          "hip4_request_budget_pkey",
+        ]);
+        return { rowCount: 0 };
+      },
+    } as unknown as Pick<typeof pool, "query">;
+    await pool.query(
+      "delete from hip4_request_budget where scope='public-info'",
+    );
+    await admitHip4Request(explainAdmission, "mainnet", 1, 1200, repairBudget);
+    await pool.query(`insert into hip4_request_budget(scope,admissions)
+      select 'public-info',jsonb_agg(jsonb_build_object('at',extract(epoch from now()),'weight',1,'consumer','background_repair'))
+      from generate_series(1,1200) as admission_number`);
+    await admitHip4Request(explainAdmission, "mainnet", 1, 1200, repairBudget);
+    assert.equal(
+      await admitHip4Request(pool, "mainnet", 1, 1200, repairBudget),
+      false,
+    );
+    await pool.query(
+      "delete from hip4_request_budget where scope='public-info'",
+    );
+    // Interactive admissions consume the global budget, not the background
+    // class again. All classes still serialize on this same 600-weight row.
+    const catalogBudget = {
+      scope: "background_catalog" as const,
+      maximum: 300,
+      backgroundMaximum: 300,
+    };
+    const classifiedRepairBudget = { ...repairBudget, backgroundMaximum: 300 };
+    assert.equal(await admitHip4Request(pool, "mainnet", 300, 600), true);
+    assert.equal(
+      await admitHip4Request(pool, "mainnet", 40, 600, catalogBudget),
+      true,
+    );
+    const prioritizedRepairs = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        admitHip4Request(pool, "mainnet", 20, 600, classifiedRepairBudget),
+      ),
+    );
+    assert.equal(prioritizedRepairs.filter(Boolean).length, 11);
+    assert.equal(
+      await admitHip4Request(pool, "testnet", 40, 600, catalogBudget),
+      true,
+    );
+    assert.equal(
+      await admitHip4Request(pool, "mainnet", 1, 600, catalogBudget),
+      false,
+    );
+    assert.equal(await admitHip4Request(pool, "mainnet", 1, 600), false);
+    await pool.query(
+      "delete from hip4_request_budget where scope='public-info'",
+    );
+    assert.equal(
+      await admitHip4Request(pool, "mainnet", 220, 600, classifiedRepairBudget),
+      true,
+    );
+    assert.equal(
+      await admitHip4Request(pool, "mainnet", 80, 600, catalogBudget),
+      true,
+    );
+    assert.equal(
+      await admitHip4Request(pool, "mainnet", 1, 600, catalogBudget),
+      false,
+      "catalog cannot consume the interactive reserve after the shared background class is full",
+    );
+    assert.equal(await admitHip4Request(pool, "mainnet", 300, 600), true);
+    await pool.query(
+      "delete from hip4_request_budget where scope='public-info'",
+    );
+  }
   await assert.rejects(
     persistHip4Market(pool, {
       ...mapped,
@@ -167,6 +338,43 @@ try {
   );
   assert.equal(await admitHip4Request(pool, "testnet", 100, 100), true);
   assert.equal(await admitHip4Request(pool, "mainnet", 1, 100), false);
+  // The background ceiling and interactive ceiling serialize on the SAME
+  // rolling-window row. Saturating background cannot consume the reserve.
+  await pool.query("delete from hip4_request_budget where scope='public-info'");
+  const priorityPolicy = hip4ReadPolicySchema.parse({
+    requestWeightPerMinute: 600,
+  });
+  const backgroundLimit = hip4BackgroundRequestWeightLimit(priorityPolicy);
+  const backgroundAdmissions = await Promise.all(
+    Array.from({ length: 20 }, () =>
+      admitHip4Request(pool, "mainnet", 20, backgroundLimit),
+    ),
+  );
+  assert.equal(backgroundAdmissions.filter(Boolean).length, 15);
+  assert.equal(
+    await admitHip4Request(pool, "testnet", 60, backgroundLimit),
+    false,
+  );
+  const interactiveAdmissions = await Promise.all(
+    Array.from({ length: 6 }, () =>
+      admitHip4Request(
+        pool,
+        "testnet",
+        60,
+        priorityPolicy.requestWeightPerMinute,
+      ),
+    ),
+  );
+  assert.equal(interactiveAdmissions.filter(Boolean).length, 5);
+  assert.equal(
+    await admitHip4Request(
+      pool,
+      "mainnet",
+      1,
+      priorityPolicy.requestWeightPerMinute,
+    ),
+    false,
+  );
   await assert.rejects(
     persistHip4Market(pool, {
       ...mapped,

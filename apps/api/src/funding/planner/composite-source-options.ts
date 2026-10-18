@@ -486,6 +486,7 @@ export function maximumInternalFundingDestinationRaw(
     );
     return (
       (sourceKind === "owned_location" || sourceKind === "venue_preparation") &&
+      !source.option.reasonCodes.includes("economic_review_required") &&
       !spendsExcludedLocation &&
       (executionBoundary === "client_handoff"
         ? plannedSourceRunsWithClientWalletActions(source)
@@ -782,6 +783,8 @@ export function buildCompositeSourceOption(
     destinationUnitPriceUsd: string | null;
     maximumFeeUsd: string;
     maximumFeeBps: number;
+    /** Only supplied for an interactive, exact trade-shortfall review. */
+    maximumReviewedFeeBps?: number | null;
     feeReferenceUsd?: string | null;
     executionBoundary?: "automatic" | "client_handoff";
   }>,
@@ -791,6 +794,9 @@ export function buildCompositeSourceOption(
   const eligible = input.candidates
     .filter(
       (source) =>
+        (!source.option.reasonCodes.includes("economic_review_required") ||
+          (input.maximumReviewedFeeBps ?? input.maximumFeeBps) >
+            input.maximumFeeBps) &&
         (executionBoundary === "client_handoff"
           ? plannedSourceRunsWithClientWalletActions(source)
           : source.compositeEligible === true &&
@@ -817,7 +823,10 @@ export function buildCompositeSourceOption(
     input.requiredDestination,
     input.destinationUnitPriceUsd,
     input.maximumFeeUsd,
-    input.maximumFeeBps,
+    Math.max(
+      input.maximumFeeBps,
+      input.maximumReviewedFeeBps ?? input.maximumFeeBps,
+    ),
     input.feeReferenceUsd,
   );
   if (!selected) return null;
@@ -837,6 +846,25 @@ export function buildCompositeSourceOption(
   );
   const requiredActions = legs.flatMap((leg) => leg.requiredActions);
   const fees = legs.flatMap((leg) => leg.fees);
+  const minimumUsd = multiplyRawByUnitPrice({
+    raw: minimumDestination.raw,
+    decimals: minimumDestination.asset.decimals,
+    unitPriceUsd: input.destinationUnitPriceUsd,
+  });
+  const feeValues = fees.map((fee) => fee.estimatedUsd);
+  if (feeValues.some((value) => value == null)) return null;
+  const feeUsd = addUnsignedDecimals(feeValues as string[]);
+  const economicReviewRequired =
+    ordered.some((entry) =>
+      entry.source.option.reasonCodes.includes("economic_review_required"),
+    ) ||
+    !fundingFeeWithinLimits(
+      feeUsd,
+      minimumUsd,
+      input.maximumFeeUsd,
+      input.maximumFeeBps,
+      input.feeReferenceUsd,
+    );
   const estimatedUsdValues = ordered.map(
     (entry) => entry.source.option.estimatedUsd,
   );
@@ -886,11 +914,14 @@ export function buildCompositeSourceOption(
     recommended: true,
     selectable: true,
     reasonCodes: [
-      ...new Set(
-        ordered
+      ...new Set([
+        ...ordered
           .flatMap((entry) => entry.source.option.reasonCodes)
           .filter((code) => code !== "minimum_output_not_met"),
-      ),
+        ...(economicReviewRequired
+          ? (["funding_cost_warning", "economic_review_required"] as const)
+          : []),
+      ]),
     ],
   };
   const preparation = ordered.find(

@@ -180,6 +180,14 @@ try {
   await pool.query(
     "create temp table hip4_request_budget(like public.hip4_request_budget including all)",
   );
+  policyIds.push(
+    (
+      await pool.query(
+        "insert into runtime_policies(policy_key,effective_at,payload) values('hip4_read',clock_timestamp()-interval '1 second',$1) returning id",
+        [{ quotePreviewCacheEntries: 0 }],
+      )
+    ).rows[0].id,
+  );
   await lifecycle("active");
   const setup = await pool.connect();
   try {

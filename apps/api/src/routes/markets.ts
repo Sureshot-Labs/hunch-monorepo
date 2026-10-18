@@ -281,6 +281,7 @@ export const marketRoutes: FastifyPluginAsync<MarketRoutesOptions> = async (
         const response = mapMarketsByTokenRows(rows, {
           polymarketOrderabilityMode: "trust_accepting_orders",
           includeTop,
+          ...(nativeRead ? { hip4ReadPolicy: nativeRead.policy } : {}),
         });
 
         if (tokenIds.length) {

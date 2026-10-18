@@ -22,6 +22,7 @@ import {
   runCommand,
   servicePlan,
   SERVICES,
+  startupMessages,
   SYNC_MODES,
   validateContainer,
 } from "./hip4-local-stack.mjs";
@@ -67,6 +68,70 @@ test("fixed local target, no resets, overrides, broad dev or product workers", (
     }),
     { PATH: "installed" },
   );
+});
+
+test("startup reports missing Polymarket relayer configuration separately from healthy read-only processes", () => {
+  const missing = startupMessages("api", {
+    configuration: {
+      interactiveTrading: {
+        polymarketRelayer: {
+          configured: false,
+          missingKeys: ["POLYMARKET_BUILDER_API_SECRET"],
+        },
+      },
+    },
+  });
+  assert.match(missing[0], /process configuration and schema ready/);
+  assert.match(missing[1], /WARNING.*interactive setup unavailable/);
+  assert.match(missing[1], /POLYMARKET_BUILDER_API_SECRET/);
+  assert.match(missing[1], /restart dev:hip/);
+  assert.match(
+    missing[1],
+    /Read-only markets and other venues remain available/,
+  );
+  const configured = startupMessages("api", {
+    configuration: {
+      interactiveTrading: {
+        polymarketRelayer: { configured: true, missingKeys: [] },
+      },
+    },
+  });
+  assert.equal(configured.length, 2);
+  assert.match(
+    configured[1],
+    /configuration present.*wallet readiness and user authorization/,
+  );
+  assert.ok(!configured.some((message) => message.includes("WARNING")));
+  assert.deepEqual(
+    startupMessages("indexer-polymarket", {
+      configuration: { interactiveTrading: null },
+    }),
+    ["indexer-polymarket: process configuration and schema ready"],
+  );
+});
+
+test("Polymarket funding router absence is visible without claiming all trading is blocked", () => {
+  const messages = startupMessages("api", {
+    configuration: {
+      interactiveTrading: {
+        polymarketFundingRouter: { addressPresent: false },
+      },
+    },
+  });
+  assert.match(
+    messages[1],
+    /funding\/shortfall setup unavailable.*POLYMARKET_FUNDING_ROUTER_ADDRESS/,
+  );
+  assert.match(
+    messages[1],
+    /Direct trading and read-only markets are separate/,
+  );
+  const present = startupMessages("api", {
+    configuration: {
+      interactiveTrading: { polymarketFundingRouter: { addressPresent: true } },
+    },
+  });
+  assert.match(present[1], /router address present.*approvals/);
 });
 
 test("container inspection refuses unrelated images, remote exposure or additional ports before mutation", () => {
