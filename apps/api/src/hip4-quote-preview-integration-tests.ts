@@ -39,6 +39,7 @@ const policyIds = {
 let fixture: Awaited<ReturnType<typeof hip4OrderTestFixture>> | undefined;
 let secondMarket: Awaited<ReturnType<typeof hip4OrderTestFixture>> | undefined;
 let mode = "disabled";
+let legacyDexAbstraction: unknown = null;
 let cash = "10";
 let failFacts = false;
 let failureArrivals = 0;
@@ -97,6 +98,14 @@ const fetcher: typeof fetch = async (_url, init) => {
     });
   if (request.type === "userRole") return Response.json({ role: "user" });
   if (request.type === "userAbstraction") return Response.json(mode);
+  if (request.type === "userDexAbstraction")
+    return Response.json(legacyDexAbstraction);
+  if (request.type === "borrowLendUserState")
+    return Response.json({
+      tokenToState: [],
+      health: "healthy",
+      healthFactor: null,
+    });
   if (request.type === "spotClearinghouseState")
     return Response.json({
       balances: [
@@ -445,6 +454,129 @@ try {
   assert.ok(calls.slice(beforePrepare).includes("userRole"));
   assert.ok(calls.slice(beforePrepare).includes("userAbstraction"));
   mode = "disabled";
+
+  // A preparation/worker already observed qualified default cash. Under the
+  // same unchanged600 rolling window, background220 + prior interactive182
+  // leaves too little for another full224 BUY quote, but fresh public terms42
+  // fit. Keep all those admissions while exercising the actual HTTP route.
+  const savePreviewObservation = async (value: typeof observation) => {
+    const nextLease = await claimHip4AccountRefresh(
+      pool,
+      "mainnet",
+      owner.profile.address,
+      120000,
+      new Date(now),
+    );
+    assert.ok(nextLease);
+    assert.equal(
+      await persistHip4AccountRefresh(pool, {
+        environment: "mainnet",
+        address: owner.profile.address,
+        lease: nextLease,
+        observation: value,
+        executions: [],
+        ledger: [],
+        history: {},
+        error: null,
+      }),
+      true,
+    );
+  };
+  const qualifiedDefault = projectHip4Account({
+    environment: "mainnet",
+    observedAt: new Date(now - 1000).toISOString(),
+    role: "user",
+    mode: "default",
+    quote: {
+      tokenId: HYPERCORE_MAINNET_USDC.assetId,
+      index: 0,
+      weiDecimals: 8,
+    },
+    state: {
+      balances: [
+        { coin: "USDC", token: 0, total: cash, hold: "0", entryNtl: "0" },
+      ],
+    },
+    defaultSpotCashEvidence: {
+      legacyDexAbstraction: null,
+      borrowLendState: {
+        tokenToState: [],
+        health: "healthy",
+        healthFactor: null,
+      },
+    },
+  });
+  mode = "default";
+  await savePreviewObservation(qualifiedDefault);
+  await resetBudget();
+  assert.equal(
+    await admitHip4Request(pool, "mainnet", 220, 600, {
+      scope: "background_repair",
+      maximum: 220,
+      backgroundMaximum: 300,
+    }),
+    true,
+  );
+  assert.equal(await admitHip4Request(pool, "mainnet", 182, 600), true);
+  calls.length = 0;
+  const boundedDefault = await ok();
+  assert.equal(await usedWeight(), 220 + 182 + 42);
+  assert.deepEqual(calls, ["l2Book", "outcomeMeta", "spotMeta"]);
+  assert.equal(
+    boundedDefault.providerCapacity.observedAt,
+    qualifiedDefault.observedAt,
+  );
+  assert.equal(
+    Date.parse(boundedDefault.providerCapacity.expiresAt),
+    now - 1000 + 30000,
+  );
+  await ok();
+  assert.equal(await usedWeight(), 220 + 182 + 42 + 2);
+  assert.equal(calls.filter((type) => type === "l2Book").length, 2);
+  assert.equal(calls.includes("userRole"), false);
+
+  // Stored preview cash is never strict preparation authority. Even a valid
+  // current preview must re-observe and reject a changed legacy selector.
+  await resetBudget();
+  legacyDexAbstraction = true;
+  const beforeDefaultPrepare = calls.length;
+  const strictDefault = await app.inject({
+    method: "POST",
+    url: "/orders/prepare",
+    payload: boundedDefault.preparationRequest,
+  });
+  assert.equal(strictDefault.statusCode, 503, strictDefault.body);
+  assert.equal(
+    calls.slice(beforeDefaultPrepare).includes("userDexAbstraction"),
+    true,
+  );
+  assert.equal(
+    calls.slice(beforeDefaultPrepare).includes("borrowLendUserState"),
+    true,
+  );
+  legacyDexAbstraction = null;
+
+  for (const cachedObservation of [
+    {
+      ...qualifiedDefault,
+      cash: { ...qualifiedDefault.cash, ownedCash: null },
+    },
+    { ...qualifiedDefault, observedAt: new Date(now - 30001).toISOString() },
+  ]) {
+    await savePreviewObservation(cachedObservation);
+    await resetBudget();
+    calls.length = 0;
+    await ok();
+    assert.equal(await usedWeight(), 224);
+    assert.equal(
+      calls.includes("userRole"),
+      true,
+      "old/unqualified or stale default snapshots fall back to fresh provider facts",
+    );
+    assert.equal(calls.includes("borrowLendUserState"), true);
+  }
+  mode = "disabled";
+  await savePreviewObservation(observation);
 
   // Zero disables reuse. Failures never become reusable, and malformed optional
   // local snapshots bypass optimization rather than blocking fresh provider IO.

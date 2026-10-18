@@ -14,6 +14,7 @@ import {
 import {
   readHip4OrderCapacity,
   readHip4OrderQuoteCapacity,
+  projectHip4StoredDefaultBuyQuoteCapacity,
 } from "./hip4-financial-observation.js";
 import { readHip4OrderFeeObservation } from "./hip4-order-fees.js";
 import { submitHip4OrderAction } from "./hip4-order-submission.js";
@@ -186,14 +187,20 @@ async function readHip4OrderContext(
     marketId: input.request.marketId,
     side: input.request.side,
   };
-  const loadFacts = async (): Promise<Hip4QuotePreviewFacts> => {
+  const loadFacts = async (
+    storedQuoteCapacity: Hip4QuotePreviewFacts["capacity"] | null = null,
+  ): Promise<Hip4QuotePreviewFacts> => {
     const [feeObservation, capacity] = await Promise.all([
       readHip4OrderFeeObservation(pool, scope, dependencies.fetcher),
-      (phase === "quote" ? readHip4OrderQuoteCapacity : readHip4OrderCapacity)(
-        pool,
-        { ...scope, outcomeSide: input.request.outcomeSide },
-        dependencies.fetcher,
-      ),
+      phase === "quote" && storedQuoteCapacity
+        ? storedQuoteCapacity
+        : (phase === "quote"
+            ? readHip4OrderQuoteCapacity
+            : readHip4OrderCapacity)(
+            pool,
+            { ...scope, outcomeSide: input.request.outcomeSide },
+            dependencies.fetcher,
+          ),
     ]);
     return { feeObservation, capacity };
   };
@@ -263,13 +270,23 @@ async function readHip4OrderContext(
         // observation. Reuse must not retain the old preview cash until its TTL.
         storedAccountObservation: snapshot?.observation ?? null,
       });
+      const storedQuoteCapacity = projectHip4StoredDefaultBuyQuoteCapacity({
+        address: profile.address,
+        side: input.request.side,
+        observation: snapshot?.observation,
+        environment: read.policy.environment,
+        snapshotMaxAgeMs: account.policy.snapshotMaxAgeMs,
+        now: Date.now(),
+        readRevision: read.revision,
+        accountRevision: account.revision,
+      });
       facts =
         snapshot === undefined
           ? await loadFacts()
           : await cache.read(
               key,
               read.policy.quotePreviewCacheEntries,
-              loadFacts,
+              () => loadFacts(storedQuoteCapacity),
               previewDeadline,
             );
     }

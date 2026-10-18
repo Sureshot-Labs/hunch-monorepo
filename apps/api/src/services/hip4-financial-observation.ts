@@ -4,7 +4,10 @@ import {
   hip4RawUnits,
   hip4SpotMetadataSchema,
 } from "@hunch/shared";
-import { hip4AccountAddressSchema } from "../schemas/hip4-account.js";
+import {
+  hip4AccountAddressSchema,
+  type Hip4AccountObservation,
+} from "../schemas/hip4-account.js";
 import {
   hypercoreRecipientCashCapacity,
   hypercoreOrderCashCapacity,
@@ -292,6 +295,49 @@ export async function readHip4OrderQuoteCapacity(
   fetcher?: typeof fetch,
 ) {
   return readOrderCapacity(pool, input, input.side === "BUY", fetcher);
+}
+
+/** Preview-only reuse of the server's qualified default cash witness, never
+ * a cached total alone. The caller resolves ownership and loads the exact
+ * address's snapshot first. Its original deadline is retained; strict order
+ * preparation/submission and native-source reads never consume this result. */
+export function projectHip4StoredDefaultBuyQuoteCapacity(input: {
+  address: string;
+  side: "BUY" | "SELL";
+  observation: Hip4AccountObservation | null | undefined;
+  environment: "mainnet" | "testnet";
+  snapshotMaxAgeMs: number;
+  now: number;
+  readRevision: string;
+  accountRevision: string;
+}): Awaited<ReturnType<typeof readHip4OrderQuoteCapacity>> | null {
+  const { observation } = input;
+  const address = hip4AccountAddressSchema.safeParse(input.address);
+  if (
+    !address.success ||
+    input.side !== "BUY" ||
+    observation?.mode !== "default" ||
+    observation.cash.availableAfterMaintenance !== null
+  )
+    return null;
+  const cash = hypercoreOrderCashCapacity({ ...input, observation });
+  if (!cash.known) return null;
+  return {
+    assetId: HYPERCORE_MAINNET_USDC.assetId,
+    decimals: 8,
+    availableRaw: cash.availableRaw,
+    observedAt: observation.observedAt,
+    expiresAt: new Date(
+      Date.parse(observation.observedAt) + input.snapshotMaxAgeMs,
+    ).toISOString(),
+    accountRevision: canonicalJsonHash({
+      source: "stored_qualified_default_buy_preview",
+      address: address.data,
+      observation,
+      readRevision: input.readRevision,
+      accountRevision: input.accountRevision,
+    }),
+  };
 }
 
 async function readOrderCapacity(

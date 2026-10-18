@@ -9,7 +9,12 @@ import {
   readHip4FinancialObservation,
   readHip4OrderCapacity,
   readHip4OrderQuoteCapacity,
+  projectHip4StoredDefaultBuyQuoteCapacity,
 } from "./services/hip4-financial-observation.js";
+import { projectHip4Account } from "./services/hip4-account-projection.js";
+import { quoteHip4MarketOrderWithCurrentContext } from "./services/hip4-order-runtime.js";
+import { hip4OrderTestMarket } from "./hip4-order-test-fixture.js";
+import { HIP4_ORDER_CONTROLLER_SQL } from "./repos/hip4-order-controller.js";
 
 const address = `0x${"Ab".repeat(20)}`;
 const market = hip4Identity("mainnet", 1473);
@@ -115,6 +120,268 @@ function fixture() {
     },
   };
 }
+
+function storedDefaultObservation(now = Date.now()) {
+  return projectHip4Account({
+    environment: "mainnet",
+    role: "user",
+    mode: "default",
+    observedAt: new Date(now).toISOString(),
+    quote: {
+      tokenId: HYPERCORE_MAINNET_USDC.assetId,
+      index: 0,
+      weiDecimals: 8,
+    },
+    state: defaultSpotFixture.spotClearinghouseState,
+    defaultSpotCashEvidence: {
+      legacyDexAbstraction: null,
+      borrowLendState: defaultSpotFixture.borrowLendUserState,
+    },
+  });
+}
+
+test("stored default BUY preview reuses only qualified exact fresh cash and preserves its original deadline", () => {
+  const now = Date.now();
+  const observation = storedDefaultObservation(now - 1000);
+  const input = {
+    address,
+    side: "BUY" as const,
+    observation,
+    environment: "mainnet" as const,
+    snapshotMaxAgeMs: 60000,
+    now,
+    readRevision: "read-1",
+    accountRevision: "account-1",
+  };
+  const capacity = projectHip4StoredDefaultBuyQuoteCapacity(input);
+  assert.equal(capacity?.availableRaw, "712345678");
+  assert.equal(capacity?.observedAt, observation.observedAt);
+  assert.equal(capacity?.expiresAt, new Date(now + 59000).toISOString());
+  assert.notEqual(
+    capacity?.accountRevision,
+    projectHip4StoredDefaultBuyQuoteCapacity({
+      ...input,
+      readRevision: "read-2",
+    })?.accountRevision,
+  );
+  for (const patch of [
+    { side: "SELL" as const },
+    { environment: "testnet" as const },
+    { address: "invalid" },
+    { now: now + 59000 },
+    { now: now - 1001 },
+    { snapshotMaxAgeMs: 0 },
+  ])
+    assert.equal(
+      projectHip4StoredDefaultBuyQuoteCapacity({ ...input, ...patch }),
+      null,
+    );
+  for (const mutate of [
+    (row: typeof observation) => {
+      row.mode = "disabled";
+    },
+    (row: typeof observation) => {
+      row.role = "missing";
+    },
+    (row: typeof observation) => {
+      row.cash.ownedCash = null;
+    },
+    (row: typeof observation) => {
+      row.cash.assetId = "wrong";
+    },
+    (row: typeof observation) => {
+      row.cash.decimals = 6;
+    },
+    (row: typeof observation) => {
+      row.cash.unheld = "999";
+    },
+    (row: typeof observation) => {
+      row.cash.total = "-1";
+    },
+    (row: typeof observation) => {
+      row.cash.supplied = "1";
+    },
+    (row: typeof observation) => {
+      row.cash.availableAfterMaintenance = "1";
+    },
+  ]) {
+    const altered = structuredClone(observation);
+    mutate(altered);
+    assert.equal(
+      projectHip4StoredDefaultBuyQuoteCapacity({
+        ...input,
+        observation: altered,
+      }),
+      null,
+    );
+  }
+});
+
+test("BUY runtime quotes reuse qualified stored default cash without skipping ownership, fees or live price; invalid observations fall back", async () => {
+  const f = fixture();
+  Object.assign(f.responses, defaultSpotFixture);
+  f.responses.userFees = {
+    userSpotCrossRate: "0.0007",
+    userSpotAddRate: "0.0004",
+    activeReferralDiscount: "0",
+  };
+  f.policies.hip4_trading = {};
+  const userId = "00000000-0000-4000-8000-000000000001";
+  const controllerWalletRef = "00000000-0000-4000-8000-000000000002";
+  let observation = storedDefaultObservation(Date.now() - 1000);
+  let owned = true;
+  const pool = {
+    query: async (sql: string, args: unknown[]) => {
+      if (sql === HIP4_ORDER_CONTROLLER_SQL) {
+        assert.deepEqual(args, [controllerWalletRef, userId]);
+        return {
+          rows: owned
+            ? [
+                {
+                  wallet_address: address,
+                  wallet_source: "external",
+                  privy_wallet_id: null,
+                },
+              ]
+            : [],
+        };
+      }
+      if (sql.startsWith("select metadata,status,expiration_time"))
+        return {
+          rows: [
+            {
+              metadata: { hip4: hip4OrderTestMarket(market) },
+              status: "ACTIVE",
+              expiration_time: null,
+            },
+          ],
+        };
+      if (sql.includes("from hip4_account_snapshots")) {
+        assert.deepEqual(args, ["mainnet", address.toLowerCase()]);
+        return { rows: [{ observation }] };
+      }
+      return f.pool.query(sql, args);
+    },
+  } as unknown as Pool;
+  const fetcher: typeof fetch = async (url, init) => {
+    const request = JSON.parse(String(init?.body));
+    if (request.type === "l2Book" || request.type === "outcomeMeta") {
+      assert.equal(url, "https://api.hyperliquid.xyz/info");
+      f.calls.push(request.type);
+      return Response.json(
+        request.type === "l2Book"
+          ? {
+              coin: request.coin,
+              time: Date.now(),
+              levels: [
+                [{ px: "0.49", sz: "100", n: 1 }],
+                [{ px: "0.5", sz: "100", n: 1 }],
+              ],
+            }
+          : {
+              feeScale: "1",
+              outcomes: [
+                {
+                  outcome: market.outcome,
+                  name: "Synthetic",
+                  description: "",
+                  quoteToken: "USDC",
+                  sideSpecs: [{ name: "Yes" }, { name: "No" }],
+                  deployerFeeScale: "1",
+                },
+              ],
+            },
+      );
+    }
+    return f.fetcher(url, init);
+  };
+  const quote = (side: "BUY" | "SELL" = "BUY") =>
+    quoteHip4MarketOrderWithCurrentContext(
+      pool,
+      {
+        userId,
+        actor: "web_app",
+        request: {
+          requestKey: "00000000-0000-4000-8000-000000000003",
+          controllerWalletRef,
+          marketId: market.marketId,
+          outcomeSide: "YES",
+          side,
+          consentedDebitCapRaw: side === "BUY" ? "200000000" : "200000",
+          slippageBps: 30,
+        },
+      },
+      { fetcher },
+    );
+  const first = await quote();
+  assert.equal(first.capacity.availableRaw, "712345678");
+  assert.equal(first.capacity.observedAt, observation.observedAt);
+  assert.deepEqual(f.calls, ["l2Book", "outcomeMeta", "spotMeta"]);
+  assert.equal(
+    f.weights.reduce((sum, value) => sum + value, 0),
+    42,
+  );
+  f.calls.length = f.weights.length = 0;
+  await quote();
+  assert.deepEqual(f.calls, ["l2Book"]);
+  owned = false;
+  await assert.rejects(quote(), /hip4_controller_unavailable/u);
+  assert.deepEqual(
+    f.calls,
+    ["l2Book"],
+    "failed ownership never reaches provider or cached facts",
+  );
+  owned = true;
+  for (const mutate of [
+    (row: typeof observation) => {
+      row.cash.ownedCash = null;
+    },
+    (row: typeof observation) => {
+      row.observedAt = new Date(Date.now() - 60001).toISOString();
+    },
+    (row: typeof observation) => {
+      row.cash.assetId = "wrong";
+    },
+    (row: typeof observation) => {
+      row.role = "missing";
+    },
+    (row: typeof observation) => {
+      row.cash.unheld = "999";
+    },
+  ]) {
+    observation = storedDefaultObservation();
+    mutate(observation);
+    f.calls.length = f.weights.length = 0;
+    const fresh = await quote();
+    assert.equal(fresh.capacity.availableRaw, "712345678");
+    assert.equal(f.calls.includes("userRole"), true);
+    assert.equal(f.calls.includes("borrowLendUserState"), true);
+    assert.equal(
+      f.weights.reduce((sum, value) => sum + value, 0),
+      224,
+    );
+  }
+  observation = storedDefaultObservation();
+  f.calls.length = 0;
+  await quote("SELL");
+  assert.equal(
+    f.calls.includes("userRole"),
+    true,
+    "SELL never derives stock capacity from public stored projections",
+  );
+  f.policies.hip4_read = { quotePreviewCacheEntries: 0 };
+  f.calls.length = f.weights.length = 0;
+  await quote();
+  assert.equal(
+    f.calls.includes("userRole"),
+    true,
+    "explicit cache-off retains full fresh BUY collection",
+  );
+  assert.equal(
+    f.weights.reduce((sum, value) => sum + value, 0),
+    224,
+  );
+});
 
 test("funding and BUY share exact native Standard cash and same budgeted fresh reads", async () => {
   const f = fixture();

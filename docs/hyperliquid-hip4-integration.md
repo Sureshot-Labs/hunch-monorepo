@@ -8187,6 +8187,17 @@ The official order protocol has no expected-mode/no-borrow condition. Existing
 capacity, exact-side stock, fee, source-lock, order-hold, reservation and
 submission checks remain in force.
 
+Read-only BUY preview can reuse the exact account's server-qualified default
+snapshot within the existing account freshness deadline and preview-cache
+policy. It preserves the original observation time and validates the same cash
+identity, role and ownership equations. A stale or unqualified snapshot falls
+back to fresh provider reads; SELL and cache-disabled previews keep their fresh
+readers. Price discovery still requests the current L2 book. This avoids reading
+the same cash again immediately after wallet preparation: the preview needs
+42 additional request weight rather than 224, without raising the shared or
+background budget. This is preview information, never financial admission;
+strict preparation and submission still acquire fresh provider evidence.
+
 The capability does **not** authorize default-mode SendAsset, withdrawals,
 perps-source cash or cross-venue source selection. Those retain their existing
 explicit-`disabled` requirements. Inbound recipient contribution is not
