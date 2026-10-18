@@ -730,7 +730,10 @@ test("native refund needs matching ledger and DEX, neither provider success nor 
       v[0].delta.amount = "8";
     },
     (v: typeof f.ledger) => {
-      v[0].delta.fee = "0.01";
+      v[0].delta.destination = sourceOwner;
+    },
+    (v: typeof f.ledger) => {
+      v[0].delta.fee = "-0.01";
     },
   ]) {
     const ledger = structuredClone(f.ledger);
@@ -749,6 +752,53 @@ test("native refund needs matching ledger and DEX, neither provider success nor 
     selectRelayRefundReceiptPlan(wrongCurrency.input).kind,
     "unverified",
   );
+});
+
+test("exact incoming native refund preserves nonzero fee provenance without changing returned money", () => {
+  const f = fixture(true),
+    selected = plan(f);
+  for (const feeObservation of [
+    { fee: "1.0", nativeTokenFee: "0.0", feeToken: "" },
+    { fee: "1.0", nativeTokenFee: "0.0000000001", feeToken: "" },
+    { fee: "1.0", nativeTokenFee: "0.01", feeToken: "HYPE" },
+  ]) {
+    const ledger = structuredClone(f.ledger);
+    Object.assign(ledger[0].delta, feeObservation);
+    const result = verifyRelayRefundReceipts({
+      plan: selected,
+      now,
+      nativeLedger: ledger,
+    });
+    assert.equal(result.kind, "verified");
+    assert.equal(result.receivedRaw, "900000000");
+    assert.equal(result.events.length, 1);
+    const event = required(result.events[0]);
+    assert.equal(event.rawAmount, "900000000");
+    assert.equal(event.eventIndex, "hypercore:send:destination_credit");
+    assert.deepEqual(event.nativeEvidence?.feeObservation, feeObservation);
+    assert.deepEqual(
+      verifyRelayRefundReceipts({
+        plan: selected,
+        now,
+        nativeLedger: [...ledger, ...structuredClone(ledger)],
+      }),
+      result,
+      "replayed fee-bearing receipt does not double-count the native refund",
+    );
+    for (const raw of ["800000000", "1000000000"])
+      assert.deepEqual(
+        verifyRelayRefundReceipts({
+          plan: {
+            ...selected,
+            expectedReturned: { ...selected.expectedReturned, raw },
+          },
+          now,
+          nativeLedger: ledger,
+        }),
+        { kind: "unverified", reason: "refund_native_total_mismatch" },
+        "neither a second fee subtraction nor fee addition proves the returned amount",
+      );
+  }
 });
 
 test("two native refund receipts retain a partial ledger and replay without double-counting", () => {

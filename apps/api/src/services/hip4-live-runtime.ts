@@ -5,9 +5,15 @@ import type { RedisClientType } from "redis";
 import type { Hip4CanonicalChange } from "./hip4-canonical-change.js";
 import type { Pool } from "pg";
 import { DEFAULT_HIP4_READ_POLICY, type Hip4ReadMarket } from "@hunch/shared";
-import { readHip4Policy, readHip4LiveOutcomes } from "./hip4-repository.js";
+import { readHip4Policy } from "./hip4-repository.js";
 import { createHip4LiveBuffer, flushHip4Live } from "./hip4-live.js";
 import { watchHip4Metadata } from "./hip4-metadata-stream.js";
+import {
+  createHip4VisibleBookDependencies,
+  readHip4HotMarkets,
+  refreshHip4VisibleBooks,
+  selectHip4VisibleLiveOutcomes,
+} from "./hip4-visible-books.js";
 
 export function startHip4LiveRuntime(
   pool: Pool,
@@ -24,6 +30,10 @@ export function startHip4LiveRuntime(
   let active: Promise<void> | undefined;
   let interruptedSince: number | undefined;
   let selectedAt = 0;
+  let booksAt = 0;
+  let hotMarkets = new Map<number, Hip4ReadMarket>();
+  const liveSelectedAt = new Map<number, number>();
+  const bookAttemptedAt = new Map<number, number>();
   let requestTimeoutMs = DEFAULT_HIP4_READ_POLICY.requestTimeoutMs;
   const diagnostics = {
     flushErrors: 0,
@@ -31,6 +41,17 @@ export function startHip4LiveRuntime(
     embedInvalidations: 0,
     embedPublishErrors: 0,
     configuredRedis: Boolean(redisUrl),
+    hotOutcomes: 0,
+    visibleBooks: {
+      cycles: 0,
+      attempts: 0,
+      refreshed: 0,
+      failures: 0,
+      budgetDenied: 0,
+      deadlineReached: 0,
+      policyChanges: 0,
+      lastSelected: 0,
+    },
     stream: undefined as
       | ReturnType<typeof watchHip4Metadata>["diagnostics"]
       | undefined,
@@ -74,7 +95,10 @@ export function startHip4LiveRuntime(
       clearTimeout(deadline);
     }
   };
-  const invalidateCanonical = async (change: Hip4CanonicalChange, timeoutMs = requestTimeoutMs) => {
+  const invalidateCanonical = async (
+    change: Hip4CanonicalChange,
+    timeoutMs = requestTimeoutMs,
+  ) => {
     if (stopped) return;
     const client = getRedis();
     if (!client) {
@@ -82,8 +106,7 @@ export function startHip4LiveRuntime(
       return;
     }
     try {
-      if (!client.isOpen)
-        await redisRequest(() => client.connect(), timeoutMs);
+      if (!client.isOpen) await redisRequest(() => client.connect(), timeoutMs);
       await redisRequest(
         () =>
           enqueueEmbedItems(client as RedisClientType, [
@@ -115,6 +138,10 @@ export function startHip4LiveRuntime(
         buffer = undefined;
         revision = current.revision;
         selectedAt = 0;
+        booksAt = 0;
+        hotMarkets.clear();
+        liveSelectedAt.clear();
+        bookAttemptedAt.clear();
         if (
           policy.enabled &&
           (policy.catalogMode === "all" || policy.outcomeAllowlist.length)
@@ -139,7 +166,7 @@ export function startHip4LiveRuntime(
                 .zRangeWithScores(
                   "hot:tokens:stream:hyperliquid",
                   0,
-                  policy.maxLiveOutcomes * 2 - 1,
+                  policy.maxHotOutcomes * 2 - 1,
                   { REV: true },
                 )
                 .then((rows) =>
@@ -158,12 +185,30 @@ export function startHip4LiveRuntime(
       }
       if (stopped) return;
       if (Date.now() - selectedAt >= policy.subscriptionRefreshMs) {
-        const selected = await readHip4LiveOutcomes(pool, policy, hot);
+        hotMarkets = new Map(
+          (await readHip4HotMarkets(pool, policy, hot)).map((market) => [
+            market.outcome,
+            market,
+          ]),
+        );
+        for (const state of [liveSelectedAt, bookAttemptedAt])
+          for (const outcome of state.keys())
+            if (!hotMarkets.has(outcome)) state.delete(outcome);
+        diagnostics.hotOutcomes = hotMarkets.size;
+        const selected = selectHip4VisibleLiveOutcomes(
+          policy,
+          [...hotMarkets.values()],
+          liveSelectedAt,
+          Date.now(),
+        );
+        for (const outcome of selected) liveSelectedAt.set(outcome, Date.now());
         buffer?.select(selected);
         stream?.setOutcomes(selected);
         selectedAt = Date.now();
       }
       const publish = async (market: Hip4ReadMarket) => {
+        if (hotMarkets.has(market.outcome))
+          hotMarkets.set(market.outcome, market);
         if (!client?.isReady) return;
         const latest = await readHip4Policy(pool, "indexer");
         if (stopped || !latest.policy.enabled || latest.revision !== revision)
@@ -224,6 +269,30 @@ export function startHip4LiveRuntime(
           invalidateCanonical,
         );
         interruptedSince = undefined;
+      }
+      if (
+        policy.liveEnabled &&
+        Date.now() - booksAt >= policy.visibleBookRefreshMs
+      ) {
+        booksAt = Date.now();
+        const result = await refreshHip4VisibleBooks(
+          policy,
+          current.revision,
+          [...hotMarkets.values()],
+          bookAttemptedAt,
+          publish,
+          createHip4VisibleBookDependencies(pool, policy, invalidateCanonical),
+        );
+        diagnostics.visibleBooks.cycles++;
+        diagnostics.visibleBooks.attempts += result.attempts;
+        diagnostics.visibleBooks.refreshed += result.refreshed;
+        diagnostics.visibleBooks.failures += result.failures;
+        diagnostics.visibleBooks.budgetDenied += result.budgetDenied;
+        diagnostics.visibleBooks.deadlineReached += Number(
+          result.deadlineReached,
+        );
+        diagnostics.visibleBooks.policyChanges += Number(result.policyChanged);
+        diagnostics.visibleBooks.lastSelected = result.selected;
       }
     } catch {
       diagnostics.flushErrors++;

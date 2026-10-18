@@ -60,7 +60,11 @@ export function createHip4AccountClient(
     const user = hip4AccountAddressSchema.parse(request.user);
     const scoped =
       request.type === "preTransferCheck"
-        ? { ...request, user, source: hip4AccountAddressSchema.parse(request.source) }
+        ? {
+            ...request,
+            user,
+            source: hip4AccountAddressSchema.parse(request.source),
+          }
         : { ...request, user };
     if (request.type === "clearinghouseState" && request.dex !== "")
       throw new Hip4ReadError("invalid_response");
@@ -133,6 +137,7 @@ export function createHip4ReadClient(
   policy: Hip4ReadPolicy,
   admit: (weight: number) => Promise<boolean>,
   fetcher: typeof fetch = fetch,
+  options?: Readonly<{ deadlineMs: number }>,
 ) {
   return async (request: Hip4InfoRequest): Promise<unknown> => {
     if (
@@ -158,7 +163,14 @@ export function createHip4ReadClient(
         : request.type === "recentTrades"
           ? 20 + Math.ceil(HIP4_RECENT_TRADES_RESPONSE_BOUND / 20)
           : 20;
-    return hip4InfoResponse(policy, admit, fetcher, request, weight);
+    return hip4InfoResponse(
+      policy,
+      admit,
+      fetcher,
+      request,
+      weight,
+      options?.deadlineMs,
+    );
   };
 }
 

@@ -117,15 +117,6 @@ export class FundingOperationService {
       quote.planSnapshot.operation.purpose,
     );
     if (
-      !withdrawal &&
-      (input.policy.creationMode !== "on" || !input.policy.gates.commit)
-    ) {
-      throw new FundingPlannerError(
-        "invalid_policy",
-        "funding operation commit is disabled",
-      );
-    }
-    if (
       !withdrawalBindingMatches(
         quote.planSnapshot.operation.purpose,
         externalRecipientId,
@@ -134,31 +125,6 @@ export class FundingOperationService {
       throw new FundingPersistenceError(
         "quote_mismatch",
         "withdrawal purpose and external recipient binding differ",
-      );
-    }
-    if (withdrawal && !this.dependencies.revalidateWithdrawalRecipient) {
-      throw new FundingPlannerError(
-        "destination_unavailable",
-        "withdrawal recipient revalidation is unavailable",
-      );
-    }
-    if (
-      !withdrawal &&
-      (quote.policyVersion !== input.policy.contractVersion ||
-        quote.policyRevision !== input.policyRevision)
-    ) {
-      throw new FundingPersistenceError(
-        "quote_invalidated",
-        "funding policy changed before commit",
-      );
-    }
-    if (
-      quote.planSnapshot.operation.supportMetadata?.ownershipRevision !==
-      input.ownershipRevision
-    ) {
-      throw new FundingPersistenceError(
-        "quote_invalidated",
-        "wallet ownership facts changed before commit",
       );
     }
     return { externalRecipientId, input, quote, withdrawal };
@@ -185,6 +151,44 @@ export class FundingOperationService {
         ? (sources) => verifySharedSourceCapacity(sources, quote.planSnapshot)
         : undefined,
       verifyCurrentFacts: async (client, lockedQuote) => {
+        // The repository first resolves an authenticated, exact canonical
+        // idempotency replay under its commit lock. Mutable facts must only
+        // reject NEW operations: a lost successful response remains recoverable
+        // after policy/ownership changes, without reserving or executing again.
+        if (
+          !withdrawal &&
+          (input.policy.creationMode !== "on" || !input.policy.gates.commit)
+        ) {
+          throw new FundingPlannerError(
+            "invalid_policy",
+            "funding operation commit is disabled",
+          );
+        }
+        if (withdrawal && !this.dependencies.revalidateWithdrawalRecipient) {
+          throw new FundingPlannerError(
+            "destination_unavailable",
+            "withdrawal recipient revalidation is unavailable",
+          );
+        }
+        if (
+          !withdrawal &&
+          (lockedQuote.policyVersion !== input.policy.contractVersion ||
+            lockedQuote.policyRevision !== input.policyRevision)
+        ) {
+          throw new FundingPersistenceError(
+            "quote_invalidated",
+            "funding policy changed before commit",
+          );
+        }
+        if (
+          lockedQuote.planSnapshot.operation.supportMetadata
+            ?.ownershipRevision !== input.ownershipRevision
+        ) {
+          throw new FundingPersistenceError(
+            "quote_invalidated",
+            "wallet ownership facts changed before commit",
+          );
+        }
         if (!withdrawal) {
           await lockFundingPolicyForTransaction(client);
           const currentPolicy = await (

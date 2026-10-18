@@ -101,6 +101,36 @@ try {
       }),
     );
   }
+  // Visible demand reuses this exact existing indexed point lookup. Check
+  // both custom/generic plans against the 20k catalog, including absent IDs
+  // and environments; each candidate must remain cardinality-one work.
+  await client.query(`prepare hip4_visible_point(text,bigint) as
+    select read_model, raw from hip4_read_markets where environment=$1 and outcome=$2`);
+  for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+    await client.query(`set local plan_cache_mode=${mode}`);
+    for (const environment of ["mainnet", "testnet"])
+      for (const outcome of [100000, 110000, 119999, 999999]) {
+        const result = await client.query(
+          `explain(analyze,buffers,format json) execute hip4_visible_point('${environment}',${outcome})`,
+        );
+        const plan = result.rows[0]["QUERY PLAN"][0];
+        assert.match(JSON.stringify(plan), /Index/);
+        assert.ok(plan.Plan["Actual Rows"] <= 1);
+        assert.ok(
+          plan.Plan["Shared Hit Blocks"] + plan.Plan["Shared Read Blocks"] <=
+            10,
+          "visible point work must not scan the catalog",
+        );
+        console.log(
+          JSON.stringify({
+            case: `visible-point-${mode}-${environment}-${outcome}`,
+            executionMs: plan["Execution Time"],
+            plan: plan.Plan,
+          }),
+        );
+      }
+  }
+  await client.query("set local plan_cache_mode=force_generic_plan");
   await client.query(`prepare hip4_page(text,bigint[],bigint,int) as select read_model from hip4_read_markets
     where environment=$1 and outcome=any($2) and outcome>$3 order by outcome limit $4`);
   for (const after of [-1, 100001, 999999]) {

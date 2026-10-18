@@ -79,6 +79,14 @@ export type HypercoreTransferEvidence = Readonly<{
   sourceDex: "spot" | "";
   destinationDex: "spot" | "";
   rawAmount: string;
+  /** Incoming-transfer provenance only. Units/payer may be unknown; never
+   * add these fields to, or subtract them from, the verified credit amount.
+   * Absent on legacy credits and zero-fee debit proofs for compatibility. */
+  feeObservation?: Readonly<{
+    fee: string;
+    nativeTokenFee: string;
+    feeToken: string;
+  }>;
   ledgerTime: number;
   /** Relay corroboration only: never manufacture an EVM block hash/finality. */
   providerBlock: number;
@@ -218,11 +226,14 @@ export function verifyRelayHypercoreTransfer(input: {
     try {
       if (hip4RawUnits(delta.amount, expected.asset.decimals) !== raw)
         return fail("native_amount_mismatch");
-      // P0 receipts only establish zero-fee transfer amount semantics. Preserve
-      // unknown nonzero fees for repair instead of treating them as zero costs.
+      // Credit is the exact action amount corroborated by this recipient's
+      // native ledger, not an estimate of sender cost. Fees do not change it.
+      // Outbound proofs still require the established zero-fee capability:
+      // action amount alone cannot prove the sender's total debit with fees.
       if (
-        !/^0(?:\.0+)?$/.test(delta.fee) ||
-        !/^0(?:\.0+)?$/.test(delta.nativeTokenFee)
+        expected.direction === "debit" &&
+        (!/^0(?:\.0+)?$/.test(delta.fee) ||
+          !/^0(?:\.0+)?$/.test(delta.nativeTokenFee))
       )
         return fail("native_transfer_fee_semantics_unknown");
     } catch {
@@ -243,6 +254,15 @@ export function verifyRelayHypercoreTransfer(input: {
       sourceDex: action.sourceDex,
       destinationDex: action.destinationDex,
       rawAmount: raw.toString(),
+      ...(expected.direction === "credit"
+        ? {
+            feeObservation: {
+              fee: delta.fee,
+              nativeTokenFee: delta.nativeTokenFee,
+              feeToken: delta.feeToken,
+            },
+          }
+        : {}),
       ledgerTime: parsedLedger.entry.time,
       providerBlock: transaction.block,
     };

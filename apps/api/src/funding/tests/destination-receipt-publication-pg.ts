@@ -12,7 +12,12 @@ import {
 } from "../persistence/funding-receive-session-repository.js";
 import { FundingClassificationChangedError } from "../persistence/funding-classification-revisions.js";
 import { HYPERCORE_MAINNET_USDC } from "../domain/hypercore-identity.js";
-import { hypercoreDestinationEvent } from "../../funding-providers/relay/hypercore-transfer-evidence.js";
+import {
+  hypercoreDestinationEvent,
+  verifyRelayHypercoreTransfer,
+} from "../../funding-providers/relay/hypercore-transfer-evidence.js";
+import { listFundingObservationsForOperation } from "../persistence/funding-operation-repository.js";
+import { canonicalJsonHash } from "../persistence/canonical.js";
 import { relayDestinationReferenceIdentity } from "../../funding-providers/relay/destination-reference.js";
 import type { OwnedRouteCanonicalDestinationEvent } from "../reconciliation/owned-route-destination-observer.js";
 import { createFundingTransactionReferenceCodec } from "../execution/transaction-reference-codec.js";
@@ -764,27 +769,106 @@ export async function verifyDestinationReceiptPublicationPg(
 
   const native = await fixture(false);
   await publishMetadata(native);
-  const event = hypercoreDestinationEvent(
-    {
-      networkId: HYPERCORE_MAINNET_USDC.networkId,
+  const nativeProvider = `0x${"ab".repeat(20)}`;
+  const nativeFeeObservation = {
+    fee: "1.0",
+    nativeTokenFee: "0.0000000001",
+    feeToken: "",
+  };
+  const proof = verifyRelayHypercoreTransfer({
+    expected: {
       asset: HYPERCORE_MAINNET_USDC,
       owner: native.owner,
+      dex: "spot",
       direction: "credit",
       transactionHash: native.hashes[0],
-      nonce: native.baseTime,
-      sourceAddress: `0x${"ab".repeat(20)}`,
-      destinationAddress: native.owner,
-      sourceDex: "",
-      destinationDex: "spot",
-      rawAmount: "980000000",
-      ledgerTime: native.baseTime,
-      providerBlock: 123,
-      evidenceFingerprint: "d".repeat(64),
+      actualRaw: "980000000",
     },
-    native.base.now,
+    nativeTransaction: {
+      txHash: native.hashes[0],
+      chainId: 1337,
+      status: "success",
+      block: 123,
+      data: {
+        hash: native.hashes[0],
+        error: null,
+        user: nativeProvider,
+        action: {
+          type: "sendAsset",
+          hyperliquidChain: "Mainnet",
+          destination: native.owner,
+          sourceDex: "",
+          destinationDex: "spot",
+          token: `USDC:${HYPERCORE_MAINNET_USDC.assetId}`,
+          amount: "9.8",
+          fromSubAccount: "",
+          nonce: native.baseTime,
+        },
+      },
+    },
+    ledger: [
+      {
+        hash: native.hashes[0],
+        time: native.baseTime,
+        delta: {
+          type: "send",
+          user: nativeProvider,
+          destination: native.owner,
+          sourceDex: "",
+          destinationDex: "spot",
+          token: "USDC",
+          amount: "9.8",
+          usdcValue: "9.8",
+          nonce: native.baseTime,
+          ...nativeFeeObservation,
+        },
+      },
+    ],
+  });
+  assert.equal(proof.kind, "verified");
+  if (proof.kind !== "verified")
+    throw new Error("native credit fixture invalid");
+  const event = hypercoreDestinationEvent(proof.evidence, native.base.now);
+  await run(pool, native, [event]);
+  const firstNativeCredits = (
+    await listFundingObservationsForOperation(pool, native.base.operationId)
+  ).filter((observation) => observation.kind === "destination_credit");
+  assert.equal(firstNativeCredits.length, 1);
+  assert.equal(firstNativeCredits[0].rawAmount, "980000000");
+  assert.deepEqual(
+    firstNativeCredits[0].metadata.nativeFeeObservation,
+    nativeFeeObservation,
+  );
+  assert.equal(
+    firstNativeCredits[0].metadata.nativeEvidenceFingerprint,
+    proof.evidence.evidenceFingerprint,
   );
   await run(pool, native, [event]);
-  await run(pool, native, [event]);
+  assert.deepEqual(
+    (
+      await listFundingObservationsForOperation(pool, native.base.operationId)
+    ).filter((observation) => observation.kind === "destination_credit"),
+    firstNativeCredits,
+    "native fee provenance is retained without replaying or changing credited money",
+  );
+  // Older accepted credits lacked fee provenance. A changed proof fingerprint
+  // still identifies this same physical credit, not a second allocation.
+  const { evidenceFingerprint, ...legacyFact } = proof.evidence;
+  assert.equal(evidenceFingerprint, canonicalJsonHash(legacyFact));
+  delete legacyFact.feeObservation;
+  await run(pool, native, [
+    hypercoreDestinationEvent(
+      { ...legacyFact, evidenceFingerprint: canonicalJsonHash(legacyFact) },
+      native.base.now,
+    ),
+  ]);
+  assert.deepEqual(
+    (
+      await listFundingObservationsForOperation(pool, native.base.operationId)
+    ).filter((observation) => observation.kind === "destination_credit"),
+    firstNativeCredits,
+    "proof provenance is not the native credit idempotency key",
+  );
   assert.equal(
     (await counts(native)).credits,
     1,

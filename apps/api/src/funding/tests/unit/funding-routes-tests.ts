@@ -1988,6 +1988,70 @@ await test("operation reads expose safe resumable state, not internal snapshots"
   }
 });
 
+await test("ready trade responses retain the need for review after recovery between polls", async () => {
+  const recoveryCases: FundingOperationRow["supportMetadata"][] = [
+    {},
+    { tradeReviewRequiredAt: NOW.toISOString() },
+    {
+      lifecycleAutomaticRecovery: {
+        code: "reconciliation_evidence_timeout",
+        requestedAt: NOW.toISOString(),
+      },
+    },
+    {
+      lifecycleManualRecovery: {
+        code: "manual_review",
+        requestedAt: NOW.toISOString(),
+      },
+    },
+    { reconciliationRecoveryRequiredAt: NOW.toISOString() },
+  ];
+  for (const recoveryFacts of recoveryCases) {
+    for (const purpose of [
+      "trade_shortfall",
+      "add_funds",
+      "withdrawal",
+    ] as const) {
+      const readyOperation: FundingOperationRow = {
+        ...operation(),
+        purpose,
+        status: "ready",
+        errorCode: null,
+        recoveryMode: null,
+        supportMetadata: recoveryFacts,
+      };
+      const app = await buildApp({
+        operation: async () => readyOperation,
+        operations: async () => [readyOperation],
+      });
+      try {
+        const response = await app.inject({
+          method: "GET",
+          url: "/funding/operations/operation_id_12345678",
+        });
+        assert.equal(response.statusCode, 200);
+        assert.equal(
+          response.json().operation.requiresTradeReview,
+          purpose === "trade_shortfall" &&
+            Object.keys(recoveryFacts).length > 0,
+        );
+        assert.equal("supportMetadata" in response.json().operation, false);
+        const history = await app.inject({
+          method: "GET",
+          url: "/funding/operations?limit=25",
+        });
+        assert.equal(history.statusCode, 200);
+        assert.equal(
+          history.json().operations[0].requiresTradeReview,
+          response.json().operation.requiresTradeReview,
+        );
+      } finally {
+        await app.close();
+      }
+    }
+  }
+});
+
 await test("operation reads hide dormant ingress completion until funds select it", async () => {
   const dormantCompletionStep: FundingOperationStep = {
     ...operationSteps()[0],

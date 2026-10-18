@@ -133,6 +133,9 @@ import { hashOpaqueToken } from "../../persistence/canonical.js";
 import { listProjectedFundingOperationsForUser } from "../../lifecycle/funding-lifecycle-read-model.js";
 import { loadTelegramAppHandoffProjection } from "../../../services/telegram-bot-trading.js";
 import { FundingPlanningRuntime } from "../../planner/runtime-service.js";
+import { FundingOperationService } from "../../planner/operation-service.js";
+import { DEFAULT_FUNDING_RUNTIME_POLICY } from "../../policies/funding-policy.js";
+import { FundingPlannerError } from "../../planner/money.js";
 import { PreparationContractError } from "../../preparation/core-adapter.js";
 
 const ASSET = {
@@ -769,6 +772,217 @@ async function testConcurrentCommitReplay(): Promise<void> {
     );
     assert.equal(count.rows[0]?.count, "1");
   } finally {
+    await cleanupCommittedOperation(operationId, quote.id, userId);
+  }
+}
+
+async function testOperationServiceReplayAfterMutableFactsChange(): Promise<void> {
+  const userId = await insertUser(pool);
+  const otherUserId = await insertUser(pool);
+  const ownershipRevision = "ownership-revision-at-review";
+  const basePlan = buildPlan();
+  const plan: FundingCommitPlan = {
+    ...basePlan,
+    operation: {
+      ...basePlan.operation,
+      supportMetadata: { ownershipRevision },
+    },
+  };
+  const policy = {
+    ...DEFAULT_FUNDING_RUNTIME_POLICY,
+    creationMode: "on" as const,
+    gates: { ...DEFAULT_FUNDING_RUNTIME_POLICY.gates, commit: true },
+  };
+  const resolvedPolicy = {
+    source: "db" as const,
+    runtime: policy,
+    revision: "policy-revision-at-review",
+    effectiveAt: null,
+    createdAt: null,
+    createdBy: null,
+    invalidStoredPolicy: false,
+    validationIssues: [],
+  };
+  const consentToken = opaque("consent");
+  const freshConsentToken = opaque("fresh-consent");
+  const insertQuote = (quoteConsentToken: string) =>
+    createFundingQuote(pool, {
+      ...quoteInput(userId, plan, quoteConsentToken),
+      policyVersion: policy.contractVersion,
+      policyRevision: resolvedPolicy.revision,
+    });
+  const quote = await insertQuote(consentToken);
+  const freshQuote = await insertQuote(freshConsentToken);
+  let currentPolicy = resolvedPolicy;
+  let currentFactsChecks = 0;
+  const serviceDependencies = {
+    db: pool,
+    subjectLookupHmac: () => hash("c"),
+    subjectLookupKeyVersion: 1,
+    resolvePolicy: async () => {
+      currentFactsChecks += 1;
+      return currentPolicy;
+    },
+    verifySourceCommit: async () => {
+      currentFactsChecks += 1;
+    },
+  };
+  const service = new FundingOperationService(serviceDependencies);
+  const request = {
+    quoteId: quote.id,
+    consentToken,
+    idempotencyKey: opaque("service-replay"),
+  };
+  const input = {
+    userId,
+    request,
+    policy,
+    policyRevision: resolvedPolicy.revision,
+    ownershipRevision,
+  };
+  let operationId: string | null = null;
+  try {
+    // Treat this durable success as a response lost before the client saw it.
+    const committed = await service.commit(input);
+    operationId = committed.operation.id;
+    assert.equal(committed.replayed, false);
+    assert.equal(currentFactsChecks, 2);
+    const originalRows = async () => {
+      const { rows } = await pool.query(
+        `select
+           (select count(*)::int from funding_operations where quote_id = $1) as operations,
+           (select count(*)::int from balance_reservations where operation_id = $2) as reservations,
+           (select count(*)::int from funding_operation_steps where operation_id = $2) as steps,
+           (select count(*)::int from funding_reconciliation_jobs where operation_id = $2) as jobs`,
+        [quote.id, operationId],
+      );
+      return rows[0];
+    };
+    const beforeReplay = await originalRows();
+    assert.equal(beforeReplay.operations, 1);
+    assert.equal(beforeReplay.reservations, 1);
+
+    currentPolicy = { ...resolvedPolicy, revision: "policy-revision-changed" };
+    for (const changedFacts of [
+      { policyRevision: currentPolicy.revision },
+      { ownershipRevision: "ownership-revision-changed" },
+      { policy: { ...policy, creationMode: "off" as const } },
+      { policy: { ...policy, gates: { ...policy.gates, commit: false } } },
+    ]) {
+      const replay = await service.commit({ ...input, ...changedFacts });
+      assert.equal(replay.replayed, true);
+      assert.equal(replay.operation.id, operationId);
+    }
+    assert.equal(
+      currentFactsChecks,
+      2,
+      "replay must not revalidate new-operation facts",
+    );
+    const expiredReplay = await new FundingOperationService({
+      ...serviceDependencies,
+      now: () => new Date(quote.expiresAt.getTime() + 1),
+    }).commit(input);
+    assert.equal(expiredReplay.operation.id, operationId);
+    assert.equal(expiredReplay.replayed, true);
+    assert.deepEqual(await originalRows(), beforeReplay);
+
+    await expectFundingError(
+      service.commit({
+        ...input,
+        request: { ...request, consentToken: opaque("wrong-consent") },
+      }),
+      "idempotency_conflict",
+    );
+    await expectFundingError(
+      service.commit({
+        ...input,
+        request: { ...request, quoteId: freshQuote.id },
+      }),
+      "idempotency_conflict",
+    );
+    await expectFundingError(
+      service.commit({
+        ...input,
+        request: { ...request, idempotencyKey: opaque("different-key") },
+      }),
+      "quote_consumed",
+    );
+    await expectFundingError(
+      service.commit({ ...input, userId: otherUserId }),
+      "quote_not_found",
+    );
+    await expectFundingError(
+      new FundingOperationService({
+        ...serviceDependencies,
+        fetchQuote: async () => ({
+          ...quote,
+          planSnapshot: {
+            ...plan,
+            operation: {
+              ...plan.operation,
+              requestedSourceAmount: money("2000000"),
+            },
+          },
+        }),
+      }).commit(input),
+      "idempotency_conflict",
+    );
+    await expectFundingError(
+      service.commit({
+        ...input,
+        commitScope: {
+          kind: "receive_receipt_review_v1",
+          ownerChannel: "web",
+          receiveSessionId: crypto.randomUUID(),
+          receiptId: crypto.randomUUID(),
+        },
+      }),
+      "quote_mismatch",
+    );
+
+    const freshInput = {
+      ...input,
+      request: {
+        ...request,
+        quoteId: freshQuote.id,
+        consentToken: freshConsentToken,
+        idempotencyKey: opaque("new-operation"),
+      },
+    };
+    for (const changedFacts of [
+      { policyRevision: currentPolicy.revision },
+      { ownershipRevision: "ownership-revision-changed" },
+    ]) {
+      await expectFundingError(
+        service.commit({ ...freshInput, ...changedFacts }),
+        "quote_invalidated",
+      );
+    }
+    for (const disabledPolicy of [
+      { ...policy, creationMode: "off" as const },
+      { ...policy, gates: { ...policy.gates, commit: false } },
+    ]) {
+      await assert.rejects(
+        service.commit({ ...freshInput, policy: disabledPolicy }),
+        (error: unknown) =>
+          error instanceof FundingPlannerError &&
+          error.code === "invalid_policy",
+      );
+    }
+    // The locked, current policy still rejects a genuinely new operation even
+    // when the pre-transaction snapshot supplied by the caller was unchanged.
+    await expectFundingError(service.commit(freshInput), "quote_invalidated");
+    const reloadedFreshQuote = await fetchFundingQuoteForUser(pool, {
+      userId,
+      quoteId: freshQuote.id,
+    });
+    assert.equal(reloadedFreshQuote?.consumedAt, null);
+    assert.deepEqual(await originalRows(), beforeReplay);
+  } finally {
+    await pool.query("delete from funding_quotes where id = $1", [
+      freshQuote.id,
+    ]);
+    await pool.query("delete from users where id = $1", [otherUserId]);
     await cleanupCommittedOperation(operationId, quote.id, userId);
   }
 }
@@ -2790,6 +3004,29 @@ async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<vo
       );
       assert.equal(resolvedManual?.recoveryMode, null);
       assert.equal(resolvedManual?.errorCode, null);
+      assert.equal(
+        resolvedManual?.supportMetadata.lifecycleManualRecovery,
+        null,
+      );
+      assert.equal(
+        typeof resolvedManual?.supportMetadata.tradeReviewRequiredAt,
+        "string",
+        "manual-only recovery retains Buy review history even when the client misses recovery",
+      );
+      const firstReviewRequiredAt =
+        resolvedManual?.supportMetadata.tradeReviewRequiredAt;
+      await reduceFundingOperationInTransaction(manualRecoveryClient, {
+        operationId,
+      });
+      const repeatedReady = await fetchFundingOperationForUser(
+        manualRecoveryClient,
+        { userId, operationId },
+      );
+      assert.equal(
+        repeatedReady?.supportMetadata.tradeReviewRequiredAt,
+        firstReviewRequiredAt,
+        "ordinary ready replay preserves the original consent-history marker",
+      );
       await manualRecoveryClient.query("rollback");
     } catch (error) {
       await manualRecoveryClient.query("rollback");
@@ -2833,6 +3070,11 @@ async function testAutomaticRecoveryAcceptsLateDestinationEvidence(): Promise<vo
         FUNDING_RECONCILIATION_TIMEOUT_ERROR_CODE,
       );
       assert.equal(preserved?.recoveryMode, "automatic_evidence");
+      assert.equal(
+        typeof preserved?.supportMetadata.tradeReviewRequiredAt,
+        "string",
+        "an authoritative recovery projection itself retains Buy review history",
+      );
       await withoutEvidenceClient.query("rollback");
     } catch (error) {
       await withoutEvidenceClient.query("rollback");
@@ -9468,6 +9710,10 @@ console.log(
 await testConcurrentCommitReplay();
 console.log(
   "[funding-persistence-integration-tests] ok concurrent exact replay",
+);
+await testOperationServiceReplayAfterMutableFactsChange();
+console.log(
+  "[funding-persistence-integration-tests] ok exact service replay survives policy and ownership changes without new financial rows",
 );
 await testPersistedQuoteSurvivesStatelessCommitBoundary();
 console.log(

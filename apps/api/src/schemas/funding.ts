@@ -1048,6 +1048,8 @@ export const fundingOperationPublicSchema = z
     actualDestinationAmount: moneySchema.nullable(),
     errorCode: z.string().trim().min(1).max(160).nullable(),
     recoveryMode: z.enum(["automatic_evidence", "manual_review"]).nullable(),
+    /** Durable recovery provenance, including when recovery ended between polls. */
+    requiresTradeReview: z.boolean().optional(),
     version: z.number().int().positive(),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),

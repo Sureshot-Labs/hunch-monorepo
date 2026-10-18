@@ -663,6 +663,11 @@ export async function applyRelayExactRefundReceiptsInTransaction(
                 nativeDestinationDex: event.nativeEvidence.destinationDex,
                 nativeSourceDex: event.nativeEvidence.sourceDex,
                 nativeLedgerTime: event.nativeEvidence.ledgerTime,
+                ...(event.nativeEvidence.feeObservation
+                  ? {
+                      nativeFeeObservation: event.nativeEvidence.feeObservation,
+                    }
+                  : {}),
                 // Whitelisted unsigned action fields only; lets canonical watch run
                 // even if the original provider request later becomes unavailable.
                 relayRefundNativeTransaction: nativeTransaction,

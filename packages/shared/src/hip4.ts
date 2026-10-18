@@ -230,6 +230,11 @@ export const hip4ReadPolicySchema = z
     minRefreshMs: z.number().int().min(1_000).max(60_000).default(10_000),
     liveEnabled: z.boolean().default(true),
     maxLiveOutcomes: z.number().int().min(1).max(30).default(6),
+    // Visible demand is broader than the bounded WS subset. These are work
+    // bounds, not additional provider credits; all REST reads share admission.
+    maxHotOutcomes: z.number().int().min(1).max(1000).default(100),
+    maxVisibleBookOutcomesPerCycle: z.number().int().min(1).max(100).default(4),
+    visibleBookRefreshMs: z.number().int().min(1000).max(60000).default(5000),
     streamQueueSize: z.number().int().min(1).max(10000).default(2000),
     streamFlushMs: z.number().int().min(100).max(10000).default(1000),
     subscriptionRefreshMs: z.number().int().min(1000).max(60000).default(15000),

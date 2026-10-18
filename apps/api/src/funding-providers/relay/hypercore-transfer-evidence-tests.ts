@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { HYPERCORE_MAINNET_USDC } from "../../funding/domain/hypercore-identity.js";
+import { canonicalJsonHash } from "../../funding/persistence/canonical.js";
 import { verifyRelayHypercoreTransfer } from "./hypercore-transfer-evidence.js";
 function required<T>(value: T | null | undefined): T {
   assert.ok(value != null, "required fixture field");
@@ -88,6 +89,18 @@ function example(route = required(recorded.routes[0])) {
     },
     ledger: structuredClone(route.nativeLedger.matches),
   };
+}
+
+function creditedFeeExample() {
+  const input = example();
+  input.expected.actualRaw = "299087200";
+  input.nativeTransaction.data.action.amount = "2.990872";
+  const { delta } = required(input.ledger[0]);
+  delta.amount = delta.usdcValue = "2.990872";
+  delta.fee = "1.0";
+  delta.nativeTokenFee = "0.0";
+  delta.feeToken = "";
+  return input;
 }
 
 for (const route of recorded.routes) {
@@ -263,15 +276,15 @@ const mutations: [string, (value: ReturnType<typeof example>) => void][] = [
     },
   ],
   [
-    "unknown native fee semantics",
+    "malformed native fee",
     (value) => {
-      required(value.ledger[0]).delta.nativeTokenFee = "0.01";
+      required(value.ledger[0]).delta.nativeTokenFee = "-0.01";
     },
   ],
   [
-    "unknown token fee semantics",
+    "malformed token fee",
     (value) => {
-      required(value.ledger[0]).delta.fee = "0.01";
+      required(value.ledger[0]).delta.fee = "not-a-decimal";
     },
   ],
   [
@@ -306,6 +319,115 @@ test("provider success without independent native ledger is not credited; later 
   input.ledger = ledger;
   assert.equal(verifyRelayHypercoreTransfer(input).kind, "verified");
 });
+
+test("exact incoming native amount is credited without subtracting the observed fee again", () => {
+  const input = creditedFeeExample();
+  const result = verifyRelayHypercoreTransfer(input);
+  assert.equal(result.kind, "verified");
+  if (result.kind !== "verified") return;
+  assert.equal(result.evidence.rawAmount, "299087200");
+  assert.deepEqual(result.evidence.feeObservation, {
+    fee: "1.0",
+    nativeTokenFee: "0.0",
+    feeToken: "",
+  });
+  assert.equal(result.evidence.destinationDex, "spot");
+  // Neither a nominal gross amount nor a second fee subtraction proves credit.
+  for (const actualRaw of ["399087200", "199087200"])
+    assert.deepEqual(
+      verifyRelayHypercoreTransfer({
+        ...input,
+        expected: { ...input.expected, actualRaw },
+      }),
+      { kind: "unverified", reason: "native_amount_mismatch" },
+    );
+});
+
+test("incoming fee provenance retains unknown denominations and precision without monetary interpretation", () => {
+  const input = creditedFeeExample();
+  const { delta } = required(input.ledger[0]);
+  // Unknown fee units need not have the funded asset's eight-decimal precision.
+  delta.nativeTokenFee = "0.0000000001";
+  for (const feeToken of ["", "HYPE"]) {
+    delta.feeToken = feeToken;
+    const result = verifyRelayHypercoreTransfer(input);
+    assert.equal(result.kind, "verified");
+    if (result.kind !== "verified") continue;
+    assert.equal(result.evidence.rawAmount, "299087200");
+    assert.deepEqual(result.evidence.feeObservation, {
+      fee: "1.0",
+      nativeTokenFee: "0.0000000001",
+      feeToken,
+    });
+  }
+});
+
+for (const [field, changed] of [
+  ["fee", "2.0"],
+  ["nativeTokenFee", "0.01"],
+  ["feeToken", "HYPE"],
+] as const) {
+  test(`incoming native proof retains ${field} and rejects conflicting same-hash fee facts`, () => {
+    const input = creditedFeeExample();
+    const first = verifyRelayHypercoreTransfer(input);
+    assert.equal(first.kind, "verified");
+    const conflicting = structuredClone(required(input.ledger[0]));
+    conflicting.delta[field] = changed;
+    const changedProof = verifyRelayHypercoreTransfer({
+      ...input,
+      ledger: [conflicting],
+    });
+    assert.equal(changedProof.kind, "verified");
+    if (first.kind === "verified" && changedProof.kind === "verified") {
+      assert.equal(first.evidence.rawAmount, changedProof.evidence.rawAmount);
+      assert.notEqual(
+        first.evidence.evidenceFingerprint,
+        changedProof.evidence.evidenceFingerprint,
+      );
+    }
+    input.ledger.push(structuredClone(required(input.ledger[0])));
+    assert.deepEqual(verifyRelayHypercoreTransfer(input), first);
+    input.ledger.push(conflicting);
+    assert.deepEqual(verifyRelayHypercoreTransfer(input), {
+      kind: "unverified",
+      reason: "native_ledger_conflict",
+    });
+  });
+}
+
+for (const route of recorded.routes.filter((row) => !row.incoming)) {
+  test(`outgoing native receipt retains its zero-fee proof contract: ${route.name}`, () => {
+    const input = example(route);
+    const transactionHash = input.expected.transactionHash.toLowerCase();
+    const fact = {
+      networkId: HYPERCORE_MAINNET_USDC.networkId,
+      asset: HYPERCORE_MAINNET_USDC,
+      owner: route.owner.toLowerCase(),
+      direction: "debit",
+      transactionHash,
+      nonce: route.nativeAction.nonce,
+      sourceAddress: route.nativeActionUser.toLowerCase(),
+      destinationAddress: route.nativeAction.destination.toLowerCase(),
+      sourceDex: route.nativeAction.sourceDex,
+      destinationDex: route.nativeAction.destinationDex,
+      rawAmount: input.expected.actualRaw,
+      ledgerTime: required(input.ledger[0]).time,
+      providerBlock: route.nativeTx.block,
+    };
+    assert.deepEqual(verifyRelayHypercoreTransfer(input), {
+      kind: "verified",
+      evidence: { ...fact, evidenceFingerprint: canonicalJsonHash(fact) },
+    });
+    for (const field of ["fee", "nativeTokenFee"] as const) {
+      const nonzero = structuredClone(input);
+      required(nonzero.ledger[0]).delta[field] = "1.0";
+      assert.deepEqual(verifyRelayHypercoreTransfer(nonzero), {
+        kind: "unverified",
+        reason: "native_transfer_fee_semantics_unknown",
+      });
+    }
+  });
+}
 
 test("replayed exact records produce one identical fact; conflicting same-hash records do not", () => {
   const input = example();

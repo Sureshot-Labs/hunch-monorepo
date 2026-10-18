@@ -543,6 +543,7 @@ test("native advice reuses frozen routes and rechecks their fee allowance agains
           source,
           sourceOptionId: "source",
           safeLabel: "Base USDC",
+          reasonCodes: [],
           minimumDestination: minimum,
           expectedDestination: minimum,
           fees: [

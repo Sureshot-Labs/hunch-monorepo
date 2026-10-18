@@ -240,6 +240,107 @@ function observerFixture() {
   };
 }
 
+function incomingFeeFixture() {
+  const fixture = observerFixture();
+  const transaction = required(required(fixture.proof.request.data.outTxs)[0]);
+  const native = transaction.data as { action: { amount: string } };
+  native.action.amount = "2.990872";
+  required(
+    required(required(fixture.proof.request.data.route).actual).destination,
+  ).outputCurrency.amount = "299087200";
+  const { delta } = required(fixture.proof.ledger[0]);
+  delta.amount = delta.usdcValue = "2.990872";
+  delta.fee = "1.0";
+  delta.nativeTokenFee = "0.0";
+  delta.feeToken = "";
+  return fixture;
+}
+
+test("incoming request amount is the exact credited native amount, not credit plus or minus its observed fee", () => {
+  const { proof } = incomingFeeFixture();
+  const result = verifyRelayHypercoreRequest(proof);
+  assert.equal(result.kind, "verified");
+  if (result.kind !== "verified") return;
+  assert.equal(result.transfers.length, 1);
+  assert.equal(required(result.transfers[0]).rawAmount, "299087200");
+  assert.deepEqual(required(result.transfers[0]).feeObservation, {
+    fee: "1.0",
+    nativeTokenFee: "0.0",
+    feeToken: "",
+  });
+  for (const amount of ["399087200", "199087200"]) {
+    const request = structuredClone(proof.request);
+    required(
+      required(required(request.data.route).actual).destination,
+    ).outputCurrency.amount = amount;
+    assert.deepEqual(verifyRelayHypercoreRequest({ ...proof, request }), {
+      kind: "unverified",
+      reason: "native_route_amount_mismatch",
+    });
+  }
+});
+
+test("native destination retries the exact second persisted by an older fee-semantics rejection and replays no credit", async () => {
+  const fixture = incomingFeeFixture();
+  const transaction = required(required(fixture.proof.request.data.outTxs)[0]);
+  // A prior verifier saved this cursor while rejecting the nonzero fee. The
+  // cursor must rotate back to this same exact second, not exclude old proof.
+  const prior = {
+    reason: "native_transfer_fee_semantics_unknown",
+    ledgerAfterSecond: transaction.timestamp,
+  };
+  const reads: number[] = [];
+  const recovered = await observeRelayHypercoreDestinationReceipts(
+    fixture.pool,
+    fixture.relay,
+    {
+      ...fixture.input,
+      native: {
+        ...fixture.input.native,
+        ledgerAfterSecond: prior.ledgerAfterSecond,
+      },
+    },
+    async (_url, init) => {
+      const body = JSON.parse(required(init).body as string);
+      reads.push(body.startTime);
+      assert.equal(body.endTime, transaction.timestamp * 1000 + 999);
+      return Response.json(fixture.proof.ledger);
+    },
+  );
+  assert.equal(recovered.pendingReason, null);
+  assert.equal(recovered.ledgerAfterSecond, prior.ledgerAfterSecond);
+  assert.equal(recovered.events.length, 1);
+  const event = required(recovered.events[0]);
+  assert.equal(event.rawAmount, "299087200");
+  assert.equal(event.eventIndex, "hypercore:send:destination_credit");
+  assert.equal(event.ledgerHeight, null);
+  assert.equal(event.blockHash, null);
+  assert.deepEqual(event.nativeEvidence?.feeObservation, {
+    fee: "1.0",
+    nativeTokenFee: "0.0",
+    feeToken: "",
+  });
+  assert.deepEqual(reads, [transaction.timestamp * 1000]);
+  const replay = await observeRelayHypercoreDestinationReceipts(
+    fixture.pool,
+    fixture.relay,
+    {
+      ...fixture.input,
+      native: {
+        ...fixture.input.native,
+        ledgerAfterSecond: recovered.ledgerAfterSecond,
+        knownTransactionHashes: [event.transactionHash],
+      },
+    },
+    async () => {
+      assert.fail("an already allocated native credit must not be re-read");
+    },
+  );
+  assert.deepEqual(replay, { events: [], pendingReason: null });
+  assert.equal(fixture.evidenceCalls(), 1);
+  assert.equal(fixture.admissions(), 1);
+});
+
 test("refund-only schema drift cannot block ordinary canonical native credit", async () => {
   const proof = example(0);
   for (const extras of [

@@ -1653,6 +1653,20 @@ export async function writeFundingOperationLifecycleProjectionCacheInTransaction
     input.state.status === "recovery_required"
       ? (input.recoveryMode ?? current.recoveryMode ?? "manual_review")
       : null;
+  // Recovery revokes unattended Buy continuation independently of the current
+  // lifecycle. Keep this history when a transient manual fact is cleared by
+  // late exact evidence, including when the client missed every recovery poll.
+  // This is consent provenance only, never an input to financial projection.
+  const needsTradeReviewMarker =
+    current.purpose === "trade_shortfall" &&
+    !current.supportMetadata.tradeReviewRequiredAt &&
+    (input.state.status === "recovery_required" ||
+      Boolean(
+        current.supportMetadata.lifecycleManualRecovery ||
+        current.supportMetadata.lifecycleAutomaticRecovery ||
+        input.supportMetadataPatch?.lifecycleManualRecovery ||
+        input.supportMetadataPatch?.lifecycleAutomaticRecovery,
+      ));
   const noStateChange =
     current.status === input.state.status &&
     current.progressStage === input.state.stage &&
@@ -1661,7 +1675,8 @@ export async function writeFundingOperationLifecycleProjectionCacheInTransaction
     input.actualSourceAmount === undefined &&
     input.actualDestinationAmount === undefined &&
     input.errorCode === undefined &&
-    input.supportMetadataPatch === undefined;
+    input.supportMetadataPatch === undefined &&
+    !needsTradeReviewMarker;
   if (noStateChange && noDataChange) return current;
 
   const terminal = ["completed", "refunded", "failed", "cancelled"].includes(
@@ -1703,6 +1718,9 @@ export async function writeFundingOperationLifecycleProjectionCacheInTransaction
       input.errorCode ?? null,
       {
         ...input.supportMetadataPatch,
+        ...(needsTradeReviewMarker
+          ? { tradeReviewRequiredAt: input.now.toISOString() }
+          : {}),
         ...(destinationEvidenceCorrection
           ? {
               destinationAmountCorrection: {

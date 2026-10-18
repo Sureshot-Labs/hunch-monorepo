@@ -517,6 +517,12 @@ export async function recordOwnedRouteCanonicalDestinationCredit(
             nativeProviderBlock: input.event.nativeEvidence.providerBlock,
             nativeEvidenceFingerprint:
               input.event.nativeEvidence.evidenceFingerprint,
+            ...(input.event.nativeEvidence.feeObservation
+              ? {
+                  nativeFeeObservation:
+                    input.event.nativeEvidence.feeObservation,
+                }
+              : {}),
           }
         : {}),
     },

@@ -8070,3 +8070,84 @@ P7 remains separate. Previously documented native negative-receipt uncertainty,
 history-linear refund/accounting costs and production-load evidence remain
 activation risks. No additional financial permission, production policy,
 personal Telegram operation, merge or deployment follows from this work.
+
+## 87. Incoming native fee reconciliation — October 18, 2026
+
+An actual incoming Relay transfer exposed an incorrect evidence rule: the
+shared native verifier rejected any nonzero ledger fee for both credits and
+debits. Zero-fee fixtures and a negative-test oracle reproduced that assumption
+instead of testing an incoming activation-fee receipt. Provider success was not
+the missing evidence; the exact native action and recipient ledger already
+agreed on the received amount.
+
+Incoming destination and refund credits now accept valid nonnegative fee
+observations without changing the credited quantity. The action, ledger,
+recipient, token, DEX, nonce, hash and actual route quantity must still agree.
+The received amount is neither grossed up nor reduced by the ledger fee. Raw
+`fee`, `nativeTokenFee` and `feeToken` are retained as provenance, not guessed
+payer/unit accounting. A changed fee observation conflicts within one physical
+receipt rather than silently replacing its proof. Exact physical-event identity
+and allocation still prevent replay from inserting a second credit.
+
+Section 84's conservative fee capability remains applicable to outgoing native
+debits: this patch does not admit a fee-bearing outbound SendAsset or change its
+strict proof shape/fingerprint. Incoming fee observation does not authorize an
+outgoing fee, a new transfer, or a second fee deduction. No migration, product
+threshold, policy activation or provider call is added by the correction.
+
+Recovery also requires fresh Buy consent. The common lifecycle writer preserves
+`tradeReviewRequiredAt` independently of transient recovery facts, including
+manual-only recovery cleared by late exact evidence. Public operation detail
+and history expose only optional `requiresTradeReview`, never private evidence.
+Restored, ambiguously committed or recovered funding cannot automatically
+acknowledge and Buy. Existing desktop/mobile presenters offer **Review Buy**,
+refresh the ordinary order review, and clear old auto-Buy/MAX intent. A normal
+uninterrupted reviewed funding flow retains its existing continuation.
+
+Acceptance includes fee-bearing incoming destination/refund fixtures, unchanged
+outgoing debit compatibility, conflicting/replayed evidence, persisted ledger
+cursor recovery, PG16 exactly-once allocation, manual-only recovery between
+client polls, and rendered common desktop/mobile presenters with production
+consent-callback tests. Financial
+reconciliation observes the already authorized transfer; testing this repair
+must not repeat it or execute a historical Buy without current user consent.
+
+## 88. Visible-book demand and fresh Review entry — October 18, 2026
+
+The ordinary feed previously treated an absent cached native ask as **No route**
+and disabled Review before requesting a live venue quote. Bulk 24h volume was
+fresh independently of the small live-book subset. A public nonempty book could
+therefore coexist with an eight-hour-old local book and a disabled entry button.
+This was a coverage/entry-gating error, not evidence that the venue lacked
+liquidity. Volume alone still does not guarantee an executable order.
+
+Native entry now permits the existing read-only Review without a cached ask.
+Market status, official settlement, outcome identity and effective venue policy
+retain their checks. Review requests a fresh exact-side market quote; each open,
+wallet, outcome, amount and policy scope has its own lifetime. Missing prices
+remain unavailable, and late or previously reviewed terms cannot authorize a
+new Buy. Other venues and final native financial admission are unchanged.
+
+Visible demand reuses the ordinary virtualized desktop/mobile price stream and
+its bounded, pair-preserving token set. The worker reads the existing Redis hot
+set and indexed environment/outcome snapshots, not the ranked feed query or a
+catalog scan. Expired/settled outcomes do not occupy the demanded live subset;
+oldest-book/attempt fairness prevents low numeric IDs from monopolizing it.
+Idle catalogs do not create unsolicited book subscriptions.
+
+Book-only repair is separate from expensive recent-trade history. Its runtime
+policy bounds are `maxHotOutcomes` (default 100),
+`maxVisibleBookOutcomesPerCycle` (4), and `visibleBookRefreshMs` (5000).
+`maxLiveOutcomes`, the provider-wide rolling budget, background subquota and
+interactive reserve are not raised. The refresh lead accounts for the bounded
+cohort's drain time without extending quote freshness. An absolute pass deadline
+also bounds transport after admission so a slow repair cannot monopolize the
+WS flush loop. Denial/timeout yields to the next ordinary bounded pass.
+
+Both WS and REST retain provider observation ordering, policy rechecks and
+atomic canonical merges. Partial successful sides are persisted, and Redis/SSE
+publishes only a re-read committed snapshot. Demand changes and missing derived
+books do not bypass execution safeguards or create financial operations. No
+migration, new feed SQL, per-row feed provider request or policy activation is
+required. Under saturated shared demand, coverage remains explicitly partial;
+the selected Review still uses its own budgeted live quote.

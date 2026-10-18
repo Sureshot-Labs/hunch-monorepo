@@ -364,6 +364,14 @@ function publicOperation(operation: FundingOperationRow) {
     actualDestinationAmount: parseMoneyJson(operation.actualDestinationAmount),
     errorCode: operation.errorCode,
     recoveryMode: operation.recoveryMode,
+    requiresTradeReview:
+      operation.purpose === "trade_shortfall" &&
+      Boolean(
+        operation.supportMetadata.tradeReviewRequiredAt ||
+        operation.supportMetadata.lifecycleAutomaticRecovery ||
+        operation.supportMetadata.lifecycleManualRecovery ||
+        operation.supportMetadata.reconciliationRecoveryRequiredAt,
+      ),
     version: operation.version,
     createdAt: operation.createdAt.toISOString(),
     updatedAt: operation.updatedAt.toISOString(),
