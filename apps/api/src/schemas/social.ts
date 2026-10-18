@@ -42,6 +42,15 @@ export const socialProfileSchema = z.object({
   isBlocked: z.boolean(),
   followerCount: z.number().int().nonnegative(),
   followingCount: z.number().int().nonnegative(),
+  statistics: z
+    .object({
+      wins: z.number().int().nonnegative(),
+      losses: z.number().int().nonnegative(),
+      winRate: decimal.nullable(),
+      primaryCategory: z.string().nullable(),
+    })
+    .nullable()
+    .optional(),
 });
 export const socialProfileStatsSchema = z.object({
   wins: z.number().int(),

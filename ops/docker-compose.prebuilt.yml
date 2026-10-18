@@ -17,3 +17,5 @@ services:
     image: ${HUNCH_BACKEND_IMAGE}
   social-media-worker:
     image: ${HUNCH_SOCIAL_MEDIA_WORKER_IMAGE}
+  native-onboarding-worker:
+    image: ${HUNCH_BACKEND_IMAGE}
