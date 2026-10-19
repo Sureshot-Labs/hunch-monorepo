@@ -153,6 +153,18 @@ export const socialRoutes: FastifyPluginAsync = async (app) => {
       }),
   );
   typed.get(
+    "/users/rankings",
+    {
+      preHandler: optional,
+      schema: {
+        querystring: schema.socialPageQuery,
+        response: { 200: schema.socialProfilesResponse, ...errors },
+      },
+    },
+    async (request) =>
+      service.rankedProfiles(request.user?.id ?? null, request.query),
+  );
+  typed.get(
     "/users/me/blocks",
     {
       preHandler: required,

@@ -47,7 +47,8 @@ type BundleName =
   | "content"
   | "ops"
   | "signal-bot"
-  | "social-media-worker";
+  | "social-media-worker"
+  | "native-onboarding-worker";
 
 export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
   shared: [
@@ -138,6 +139,12 @@ export const SECRET_BUNDLE_KEYS: Record<BundleName, readonly string[]> = {
     "HUNCH_SIGNAL_BOT_TOKEN",
   ],
   "social-media-worker": ["DATABASE_URL", "HUNCH_SIGNAL_BOT_TOKEN"],
+  "native-onboarding-worker": [
+    "DATABASE_URL",
+    "APNS_KEY_ID",
+    "APNS_TEAM_ID",
+    "APNS_PRIVATE_KEY",
+  ],
 };
 
 const DEFAULT_SECRET_PREFIX = "/hunch/prod";
@@ -618,6 +625,7 @@ export function buildSecretBundles(
     ops: {},
     "signal-bot": {},
     "social-media-worker": {},
+    "native-onboarding-worker": {},
   };
 
   for (const [key, value] of Object.entries(parsed)) {

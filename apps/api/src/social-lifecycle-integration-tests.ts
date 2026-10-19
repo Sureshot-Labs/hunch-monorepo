@@ -120,6 +120,14 @@ try {
     create temporary table content_asset_usages(asset_id uuid references content_assets(id));
     create temporary table content_audit_events(id uuid primary key default gen_random_uuid(),actor_user_id uuid references users(id) on delete set null,actor_label text);
     create temporary table content_storage_deletion_jobs(storage_key text primary key,available_at timestamptz,status text default 'pending',locked_at timestamptz,locked_by text,completed_at timestamptz,attempts integer default 0,last_error text);
+    create temporary table user_onboarding_state(user_id uuid primary key references users(id) on delete cascade);
+    create temporary table user_interests(user_id uuid references users(id) on delete cascade);
+    create temporary table native_push_devices(id uuid primary key,user_id uuid references users(id) on delete cascade);
+    create temporary table native_notification_preferences(user_id uuid primary key references users(id) on delete cascade);
+    create temporary table native_push_topic_cooldowns(user_id uuid references users(id) on delete cascade);
+    create temporary table social_trader_statistics(user_id uuid primary key references users(id) on delete cascade);
+    create temporary table social_trader_statistics_pending(id bigint generated always as identity primary key,user_id uuid not null);
+    create temporary table social_trader_ranking_entries(user_id uuid references users(id) on delete cascade);
     create temporary table user_follows(follower_user_id uuid references users(id) on delete cascade,followed_user_id uuid references users(id) on delete cascade,created_at timestamptz default now(),primary key(follower_user_id,followed_user_id),check(follower_user_id<>followed_user_id));
     create temporary table user_blocks(blocker_user_id uuid references users(id) on delete cascade,blocked_user_id uuid references users(id) on delete cascade,created_at timestamptz default now(),primary key(blocker_user_id,blocked_user_id),check(blocker_user_id<>blocked_user_id));
     create temporary table user_theses(id uuid primary key,author_id uuid references users(id) on delete set null,idempotency_key text,canonical_purchase_key text unique,body text,author_hidden_at timestamptz,moderation_hidden_at timestamptz,proof_invalidated_at timestamptz,execution_id uuid references executions(id) on delete restrict,unique(author_id,idempotency_key));
