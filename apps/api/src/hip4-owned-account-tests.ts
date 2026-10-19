@@ -201,8 +201,14 @@ test("default spot ownership needs explicit ancillary evidence and never becomes
     assert.equal(value.assets[0].estimatedUsd?.value, cash.total);
     assert.equal(
       value.availability[0].availabilityKnown,
-      false,
-      "Account Value does not authorize native source spending",
+      true,
+      "common cash includes verified venue-local order capacity",
+    );
+    assert.equal(value.assets[0].executionEligibility, "ineligible");
+    assert.equal(
+      value.assets[0].location.details.cashCapacityReason,
+      "unsupported_cash_mode",
+      "common cash does not authorize native source spending",
     );
   }
 });

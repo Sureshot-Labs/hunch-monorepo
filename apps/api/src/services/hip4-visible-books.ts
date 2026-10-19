@@ -69,11 +69,20 @@ const timestamp = (value?: string | null) => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 function eligible(policy: Hip4ReadPolicy, market: Hip4ReadMarket, now: number) {
+  const missingAt =
+    market.metadataAttempt?.result === "metadata_missing"
+      ? timestamp(market.metadataAttempt.at)
+      : 0;
+  const currentMissing =
+    missingAt >= timestamp(market.fetchedAt) &&
+    missingAt <= now &&
+    now - missingAt <= policy.metadataMaxAgeMs;
   return (
     market.environment === policy.environment &&
     hip4ReadOutcomeAllowed(policy, market.outcome) &&
     market.status === "observed" &&
     !market.settlement &&
+    !currentMissing &&
     (!market.expiry || timestamp(market.expiry) > now)
   );
 }

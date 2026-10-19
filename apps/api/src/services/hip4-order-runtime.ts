@@ -58,6 +58,7 @@ import {
 } from "./hip4-account-repository.js";
 import { canonicalJsonHash } from "../funding/persistence/canonical.js";
 import { createHip4QuotePreviewCache } from "./hip4-quote-preview-cache.js";
+import { createHip4OrderSpotMetadataRead } from "./hip4-order-spot-metadata.js";
 
 const uuid = z
   .string()
@@ -95,11 +96,14 @@ type Hip4QuotePreviewFacts = {
   feeObservation: Awaited<ReturnType<typeof readHip4OrderFeeObservation>>;
   capacity: Awaited<ReturnType<typeof readHip4OrderQuoteCapacity>>;
 };
+type Hip4QuotePreviewFact =
+  | { kind: "fee"; value: Hip4QuotePreviewFacts["feeObservation"] }
+  | { kind: "capacity"; value: Hip4QuotePreviewFacts["capacity"] };
 const quotePreviewCaches = new WeakMap<
   Pool,
   WeakMap<
     typeof fetch,
-    ReturnType<typeof createHip4QuotePreviewCache<Hip4QuotePreviewFacts>>
+    ReturnType<typeof createHip4QuotePreviewCache<Hip4QuotePreviewFact>>
   >
 >();
 
@@ -111,7 +115,7 @@ function quotePreviewCache(pool: Pool, fetcher: typeof fetch) {
   }
   let cache = byFetcher.get(fetcher);
   if (!cache) {
-    cache = createHip4QuotePreviewCache<Hip4QuotePreviewFacts>();
+    cache = createHip4QuotePreviewCache<Hip4QuotePreviewFact>();
     byFetcher.set(fetcher, cache);
   }
   return cache;
@@ -187,20 +191,30 @@ async function readHip4OrderContext(
     marketId: input.request.marketId,
     side: input.request.side,
   };
-  const loadFacts = async (
-    storedQuoteCapacity: Hip4QuotePreviewFacts["capacity"] | null = null,
-  ): Promise<Hip4QuotePreviewFacts> => {
+  // This in-flight public read belongs to this invocation only, including
+  // strict preparation. It never reuses metadata from a previous admission.
+  const spotMetadataRead = createHip4OrderSpotMetadataRead(
+    pool,
+    dependencies.fetcher,
+  );
+  const loadFee = () =>
+    readHip4OrderFeeObservation(
+      pool,
+      scope,
+      dependencies.fetcher,
+      spotMetadataRead,
+    );
+  const loadCapacity = () =>
+    (phase === "quote" ? readHip4OrderQuoteCapacity : readHip4OrderCapacity)(
+      pool,
+      { ...scope, outcomeSide: input.request.outcomeSide },
+      dependencies.fetcher,
+      spotMetadataRead,
+    );
+  const loadFacts = async (): Promise<Hip4QuotePreviewFacts> => {
     const [feeObservation, capacity] = await Promise.all([
-      readHip4OrderFeeObservation(pool, scope, dependencies.fetcher),
-      phase === "quote" && storedQuoteCapacity
-        ? storedQuoteCapacity
-        : (phase === "quote"
-            ? readHip4OrderQuoteCapacity
-            : readHip4OrderCapacity)(
-            pool,
-            { ...scope, outcomeSide: input.request.outcomeSide },
-            dependencies.fetcher,
-          ),
+      loadFee(),
+      loadCapacity(),
     ]);
     return { feeObservation, capacity };
   };
@@ -232,7 +246,8 @@ async function readHip4OrderContext(
       );
     const cache = quotePreviewCache(pool, dependencies.fetcher ?? fetch);
     if (read.policy.quotePreviewCacheEntries === 0) {
-      facts = await cache.read("disabled", 0, loadFacts, previewDeadline);
+      cache.clear();
+      facts = await loadFacts();
     } else {
       const [snapshot, sellTradingPolicy] = await Promise.all([
         readHip4AccountSnapshot(pool, "mainnet", profile.address).catch(
@@ -250,14 +265,12 @@ async function readHip4OrderContext(
               missingTable: "error",
             }),
       ]);
-      const key = canonicalJsonHash({
+      const commonScope = {
         userId: input.userId,
         controllerWalletRef: input.request.controllerWalletRef,
         address: profile.address,
         environment: read.policy.environment,
-        marketId: input.request.marketId,
         side: input.request.side,
-        outcomeSide: input.request.outcomeSide,
         readRevision: read.revision,
         accountRevision: account.revision,
         accountPolicy: account.policy,
@@ -265,11 +278,10 @@ async function readHip4OrderContext(
         sellTradingPolicy: sellTradingPolicy
           ? { id: sellTradingPolicy.id, payload: sellTradingPolicy.payload }
           : null,
-        instrument: nativeInstrument.generation,
         // An explicit post-funding account refresh changes this bounded stored
         // observation. Reuse must not retain the old preview cash until its TTL.
         storedAccountObservation: snapshot?.observation ?? null,
-      });
+      };
       const storedQuoteCapacity = projectHip4StoredDefaultBuyQuoteCapacity({
         address: profile.address,
         side: input.request.side,
@@ -280,15 +292,69 @@ async function readHip4OrderContext(
         readRevision: read.revision,
         accountRevision: account.revision,
       });
-      facts =
-        snapshot === undefined
-          ? await loadFacts()
-          : await cache.read(
-              key,
-              read.policy.quotePreviewCacheEntries,
-              () => loadFacts(storedQuoteCapacity),
-              previewDeadline,
-            );
+      if (snapshot === undefined) facts = await loadFacts();
+      else {
+        // BUY consumes the same USDC account capacity on every outcome. Fees
+        // remain market/economic-generation scoped; SELL stock remains exact
+        // token scoped. Both fact families share the one total storage bound.
+        // A successful branch survives another branch's failure, without ever
+        // turning failed or stale reads into reusable facts.
+        const [feeFact, capacityFact] = await Promise.all([
+          cache.read(
+            canonicalJsonHash({
+              kind: "fee",
+              ...commonScope,
+              marketId: input.request.marketId,
+              instrument: nativeInstrument.generation,
+            }),
+            read.policy.quotePreviewCacheEntries,
+            async () => ({ kind: "fee", value: await loadFee() }),
+            (fact) =>
+              fact.kind === "fee"
+                ? Math.min(
+                    Date.parse(fact.value.expiresAt),
+                    Date.parse(fact.value.observedAt) +
+                      account.policy.snapshotMaxAgeMs,
+                    nativeInstrument.expiry
+                      ? Date.parse(nativeInstrument.expiry)
+                      : Infinity,
+                  )
+                : NaN,
+          ),
+          cache.read(
+            canonicalJsonHash({
+              kind: "capacity",
+              ...commonScope,
+              ...(input.request.side === "SELL"
+                ? {
+                    marketId: input.request.marketId,
+                    outcomeSide: input.request.outcomeSide,
+                    instrument: nativeInstrument.generation,
+                  }
+                : {}),
+            }),
+            read.policy.quotePreviewCacheEntries,
+            async () => ({
+              kind: "capacity",
+              value: storedQuoteCapacity ?? (await loadCapacity()),
+            }),
+            (fact) =>
+              fact.kind === "capacity"
+                ? Math.min(
+                    Date.parse(fact.value.expiresAt),
+                    Date.parse(fact.value.observedAt) +
+                      account.policy.snapshotMaxAgeMs,
+                  )
+                : NaN,
+          ),
+        ]);
+        if (feeFact.kind !== "fee" || capacityFact.kind !== "capacity")
+          throw new Error("hip4_quote_preview_facts_invalid");
+        facts = {
+          feeObservation: feeFact.value,
+          capacity: capacityFact.value,
+        };
+      }
     }
     previewValidUntil = previewDeadline(facts);
   } else {
@@ -576,12 +642,22 @@ export async function submitHip4OrderWithCurrentContext(
       };
       // Uses the pool, before borrowing a tx connection. Budget admissions are
       // committed even if later financial validation fails; max=1 pools work.
+      const spotMetadataRead = createHip4OrderSpotMetadataRead(
+        pool,
+        dependencies.fetcher,
+      );
       const [feeObservation, capacity] = await Promise.all([
-        readHip4OrderFeeObservation(pool, scope, dependencies.fetcher),
+        readHip4OrderFeeObservation(
+          pool,
+          scope,
+          dependencies.fetcher,
+          spotMetadataRead,
+        ),
         readHip4OrderCapacity(
           pool,
           { ...scope, outcomeSide: token.sideIndex === 0 ? "YES" : "NO" },
           dependencies.fetcher,
+          spotMetadataRead,
         ),
       ]);
       context = { profile, feeCapRaw: null, feeObservation, capacity };

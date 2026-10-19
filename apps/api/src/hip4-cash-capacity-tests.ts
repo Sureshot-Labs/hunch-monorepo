@@ -65,6 +65,29 @@ const snapshot = () =>
       ],
     },
   });
+const qualifiedDefaultSnapshot = (total = "2.990872", held = "0") =>
+  projectHip4Account({
+    environment: "mainnet",
+    role: "user",
+    mode: "default",
+    observedAt: new Date(now).toISOString(),
+    quote: {
+      tokenId: HYPERCORE_MAINNET_USDC.assetId,
+      index: 0,
+      weiDecimals: 8,
+    },
+    state: {
+      balances: [{ coin: "USDC", token: 0, total, hold: held, entryNtl: "0" }],
+    },
+    defaultSpotCashEvidence: {
+      legacyDexAbstraction: null,
+      borrowLendState: {
+        tokenToState: [],
+        health: "healthy",
+        healthFactor: null,
+      },
+    },
+  });
 const capacity = (observation = snapshot(), at = now) =>
   hypercoreSpotCashCapacity({
     observation,
@@ -87,6 +110,174 @@ const read = (observation = snapshot()): Hip4OwnedPortfolioRead => ({
     missingCostBasis: 0,
     unpricedPositions: 0,
   },
+});
+
+test("qualified default cash enters common availability without native-send authority or a second identity", () => {
+  const observation = qualifiedDefaultSnapshot();
+  const projected = projectHip4AccountValue({
+    userId,
+    read: read(observation),
+    now,
+  });
+  const source = projected.assets[0];
+  const available = projectCashAvailability({
+    components: projected.assets,
+    adjustments: projected.availability.map((row) => ({
+      ...row,
+      reservedRaw: "10000000",
+      submittedDebitRaw: "20000000",
+    })),
+    asOf: new Date(now).toISOString(),
+  });
+  assert.equal(
+    source.componentId,
+    projectHip4AccountValue({ userId, read: read(), now }).assets[0]
+      .componentId,
+  );
+  assert.equal(source.amount.raw, "299087200");
+  assert.equal(source.observedAt, observation.observedAt);
+  assert.equal(
+    source.location.details.validUntil,
+    new Date(now + 60000).toISOString(),
+  );
+  assert.equal(source.location.details.nativeAccountMode, "default");
+  assert.equal(source.location.details.nativeOrderCashCapacityKnown, true);
+  assert.equal(source.location.details.nativeOrderCashCapacityReason, null);
+  assert.equal(
+    source.location.details.cashAvailabilityPolicyId,
+    "hypercore-order-cash-v1",
+  );
+  assert.equal(
+    source.location.details.cashCapacityReason,
+    "unsupported_cash_mode",
+  );
+  assert.equal(source.executionEligibility, "ineligible");
+  assert.equal(capacity(observation).known, false);
+  assert.equal(available.components[0].availableRaw, "269087200");
+  assert.equal(available.cashAvailableEstimatedUsd, "2.690872");
+  assert.equal(available.byVenueEstimatedUsd.hyperliquid, "2.690872");
+  assert.equal(available.freshness, "fresh");
+  assert.equal(available.completeness, "complete");
+});
+
+test("qualified default order cash keeps exact hold subtraction and known zero", () => {
+  for (const [total, held, expected] of [
+    ["2.990872", "0.09", "0.900872"],
+    ["0", "0", "0"],
+  ]) {
+    const projected = projectHip4AccountValue({
+      userId,
+      read: read(qualifiedDefaultSnapshot(total, held)),
+      now,
+    });
+    const available = projectCashAvailability({
+      components: projected.assets,
+      adjustments: projected.availability.map((row) => ({
+        ...row,
+        reservedRaw: "100000000",
+        submittedDebitRaw: "100000000",
+      })),
+      asOf: new Date(now).toISOString(),
+    });
+    assert.equal(
+      projected.assets[0].location.details.nativeOrderCashCapacityKnown,
+      true,
+    );
+    assert.equal(available.cashAvailableEstimatedUsd, expected);
+    assert.equal(available.freshness, "fresh");
+  }
+});
+
+test("unverified, stale, borrowed and supplied default cash remain unknown; normal evidence refresh recovers", () => {
+  const variants = [
+    { cash: { ownedCash: null } },
+    { cash: { unheld: null } },
+    { cash: { borrowed: "0.00000001" } },
+    { cash: { supplied: "0.00000001" } },
+    { cash: { unheld: "999" } },
+    { role: "missing" as const, cash: {} },
+    { observedAt: new Date(now - 60000).toISOString(), cash: {} },
+    { observedAt: new Date(now + 1).toISOString(), cash: {} },
+  ];
+  for (const variant of variants) {
+    const observation = qualifiedDefaultSnapshot();
+    const cashPatch = variant.cash;
+    Object.assign(observation, variant, {
+      cash: { ...observation.cash, ...cashPatch },
+    });
+    const projected = projectHip4AccountValue({
+      userId,
+      read: read(observation),
+      now,
+    });
+    assert.equal(
+      projected.assets[0].location.details.nativeOrderCashCapacityKnown,
+      false,
+    );
+    const available = projectCashAvailability({
+      components: projected.assets,
+      adjustments: projected.availability.map((row) => ({
+        ...row,
+        reservedRaw: "0",
+        submittedDebitRaw: "0",
+      })),
+      asOf: new Date(now).toISOString(),
+    });
+    assert.equal(available.cashAvailableEstimatedUsd, "0");
+    assert.equal(available.components[0].availableEstimatedUsd, null);
+    assert.equal(available.freshness, "stale");
+  }
+  assert.equal(
+    projectHip4AccountValue({
+      userId,
+      read: read(qualifiedDefaultSnapshot()),
+      now,
+    }).availability[0].availabilityKnown,
+    true,
+  );
+});
+
+test("unsupported default perps remain unknown without making verified spot cash stale", () => {
+  const observation = qualifiedDefaultSnapshot();
+  observation.perpsCash = {
+    observedAt: observation.observedAt,
+    state: "unsupported",
+    totalRaw: null,
+    availableRaw: null,
+    reason: "unsupported_cash_mode",
+  };
+  const projected = projectHip4AccountValue({
+    userId,
+    read: read(observation),
+    now,
+  });
+  assert.equal(projected.assets.length, 1);
+  assert.ok(
+    projected.errors.some(
+      (error) => error.code === "perps_unsupported_cash_mode",
+    ),
+  );
+  const account = projectAccountValue({
+    accountId: userId,
+    headlineMode: "liquid_plus_positions",
+    components: projected.assets,
+    positionComponents: [],
+    collectorErrors: projected.errors,
+    asOf: new Date(now).toISOString(),
+  });
+  assert.equal(account.valuationCompleteness, "partial");
+  // Runtime routes perps/position coverage errors to Account Value, not cash holds.
+  const available = projectCashAvailability({
+    components: projected.assets,
+    adjustments: projected.availability.map((row) => ({
+      ...row,
+      reservedRaw: "0",
+      submittedDebitRaw: "0",
+    })),
+    asOf: new Date(now).toISOString(),
+  });
+  assert.equal(available.cashAvailableEstimatedUsd, "2.990872");
+  assert.equal(available.freshness, "fresh");
 });
 
 test("native Account Value hold-read failure makes availability unknown and recovers through the same preparation query", async () => {

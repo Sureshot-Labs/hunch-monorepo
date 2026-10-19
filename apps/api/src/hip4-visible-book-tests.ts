@@ -9,6 +9,7 @@ import {
 } from "@hunch/shared";
 import { createHip4ReadClient, Hip4ReadError } from "./services/hip4-client.js";
 import { mapHip4Market } from "./services/hip4-mapping.js";
+import { selectHip4RepairBatch } from "./services/hip4-indexer.js";
 import {
   hip4HotOutcomeIds,
   hip4VisibleBookLeadMs,
@@ -217,6 +218,98 @@ test("fair live selection rotates capped demand, excludes expired/settled and re
   assert.deepEqual(
     selectHip4VisibleLiveOutcomes(policy, [], selected, now),
     [],
+  );
+});
+
+test("confirmed current catalog absence pauses only background books, and membership restoration recovers", () => {
+  const missing = {
+    ...market(1),
+    metadataAttempt: {
+      at: new Date(now).toISOString(),
+      result: "metadata_missing" as const,
+    },
+  };
+  const selected = new Map<number, number>();
+  assert.deepEqual(
+    selectHip4VisibleLiveOutcomes(policy, [missing], selected, now),
+    [],
+  );
+  assert.deepEqual(
+    selectHip4VisibleBookMarkets(policy, [missing], selected, now),
+    [],
+  );
+  for (const entry of [
+    {
+      ...missing,
+      metadataAttempt: {
+        at: new Date(now).toISOString(),
+        result: "ok" as const,
+      },
+    },
+    {
+      ...missing,
+      metadataAttempt: {
+        at: new Date(now).toISOString(),
+        result: "timeout" as const,
+      },
+    },
+    {
+      ...missing,
+      metadataAttempt: {
+        at: new Date(now - policy.metadataMaxAgeMs - 1).toISOString(),
+        result: "metadata_missing" as const,
+      },
+    },
+    {
+      ...missing,
+      metadataAttempt: {
+        at: new Date(now - 1).toISOString(),
+        result: "metadata_missing" as const,
+      },
+    },
+  ]) {
+    assert.deepEqual(
+      selectHip4VisibleLiveOutcomes(policy, [entry], selected, now),
+      [1],
+    );
+  }
+  assert.deepEqual(
+    selectHip4VisibleLiveOutcomes(
+      policy,
+      [{ ...missing, environment: "testnet" }],
+      selected,
+      now,
+    ),
+    [],
+  );
+});
+
+test("settlement priority shares the existing repair cap and never starves ordinary cursor work", () => {
+  const order = { priorityNext: true };
+  assert.deepEqual(selectHip4RepairBatch(3, [1, 2, 3], [10, 11, 12], order), {
+    prioritized: [10, 11],
+    ordinary: [1],
+    selected: [10, 1, 11],
+  });
+  assert.deepEqual(
+    selectHip4RepairBatch(2, [10, 2], [10, 11], order).selected,
+    [10, 2],
+  );
+  assert.deepEqual(selectHip4RepairBatch(1, [1], [10], order).selected, [10]);
+  assert.deepEqual(selectHip4RepairBatch(1, [1], [11], order).selected, [1]);
+  assert.deepEqual(selectHip4RepairBatch(1, [2], [11], order).selected, [11]);
+  assert.deepEqual(
+    selectHip4RepairBatch(3, [1, 2, 3], [], order).selected,
+    [1, 2, 3],
+  );
+  assert.deepEqual(
+    selectHip4RepairBatch(
+      100,
+      Array.from({ length: 100 }, (_, index) => index),
+      Array.from({ length: 100 }, (_, index) => 100 + index),
+      order,
+    ).selected.slice(0, 4),
+    [100, 0, 101, 1],
   );
 });
 

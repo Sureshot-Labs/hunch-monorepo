@@ -116,13 +116,23 @@ to hide the cause. Server diagnostics record a fixed failure reason without
 provider URLs, addresses or signatures.
 
 `hip4_read.quotePreviewCacheEntries` bounds reuse of successful preview-only
-account/fee facts (default 64; zero disables reuse). Original observation
+account/fee facts (default 64 total entries; zero disables reuse). BUY USDC
+capacity can be shared across the owner's market/YES-NO previews; fee facts
+remain bound to their market and economic generation, and SELL inventory stays
+exact-token scoped. Successful independent facts survive another read's failure.
+Original observation
 deadlines and current policies still apply. Books and request-bound amounts
 are recalculated on every market quote. An updated stored account observation,
 including a successful post-funding refresh, invalidates the old preview facts.
 Preparation and submission never consume this preview cache. A quote retry can
 reuse fresh exact-destination spendability; unknown/expired evidence and the
 post-funding continuation still require an authoritative destination refresh.
+Fees and cash share one fresh `spotMeta` read within each individual
+quote/preparation/submission bundle, not across strict financial calls. The
+600-weight limit is unchanged: fresh default-mode preparation and submission
+still cost 202 weight each, so prior background/account work can require ordinary
+rolling-window recovery. Preview reuse does not promise every immediate sequence
+will fit; it must never bypass fresh financial admission to do so.
 
 ### Reviewing first-transfer costs
 

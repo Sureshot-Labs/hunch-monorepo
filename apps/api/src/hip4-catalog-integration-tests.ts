@@ -5,7 +5,14 @@ import { randomUUID } from "node:crypto";
 import { DEFAULT_HIP4_READ_POLICY, hip4Identity } from "@hunch/shared";
 import { createIntegrationTestPool } from "./test-database-target.js";
 import { installHip4TestLifecycle } from "./hip4-test-lifecycle.js";
-import { runHip4ReadCycle } from "./services/hip4-indexer.js";
+import {
+  runHip4ReadCycle,
+  selectHip4Outcomes,
+} from "./services/hip4-indexer.js";
+import {
+  selectHip4VisibleBookMarkets,
+  selectHip4VisibleLiveOutcomes,
+} from "./services/hip4-visible-books.js";
 import {
   admitHip4Request,
   readHip4Cursor,
@@ -247,6 +254,265 @@ try {
       (row) => row.outcome,
     ),
     ids.slice(0, 8),
+  );
+  // A visible instrument may leave outcomeMeta before its cached deadline.
+  // Prioritize official settlement without jumping the ordinary global cursor
+  // or spending the remaining repair quota on absent books/history.
+  await pool.query("update runtime_policies set payload=$2 where id=$1", [
+    policyId,
+    JSON.stringify(policy),
+  ]);
+  await pool.query(
+    "update hip4_read_runtime set after_outcome=-1 where environment='mainnet'",
+  );
+  const absent = ids.slice(6, 8);
+  const beforeAbsence = await readHip4Markets(pool, "mainnet", absent, -1, 2);
+  const repairOrder = { priorityNext: true };
+  let settlementMode: "null" | "wrong_identity" | "official" = "null";
+  const settlementRequests: number[] = [];
+  const removedRequests: string[] = [];
+  const removedRead: Parameters<typeof runHip4ReadCycle>[1] = async (
+    request,
+  ) => {
+    removedRequests.push(JSON.stringify(request));
+    if (request.type === "outcomeMeta")
+      return { ...metadata, outcomes: metadata.outcomes.slice(0, 6) };
+    if (request.type === "spotMetaAndAssetCtxs") return [base.spotMetadata, []];
+    if (request.type === "settledOutcome") {
+      settlementRequests.push(request.outcome);
+      if (settlementMode === "null") return null;
+      return {
+        spec: {
+          ...metadata.outcomes[0],
+          outcome:
+            settlementMode === "wrong_identity"
+              ? request.outcome + 1
+              : request.outcome,
+        },
+        settleFraction: "0.75",
+        details: "official fixture result",
+      };
+    }
+    if (request.type === "l2Book")
+      return { coin: request.coin, time: Date.now(), levels: [[], []] };
+    if (request.type === "recentTrades") return [];
+    throw new Error("unexpected_request");
+  };
+  await runHip4ReadCycle(pool, removedRead, undefined, {
+    demandedOutcomes: [...absent, ...absent],
+    repairOrder,
+  });
+  assert.deepEqual(settlementRequests, [absent[0]]);
+  assert.equal(
+    await readHip4Cursor(pool, "mainnet"),
+    ids[0],
+    "priority settlement must not jump the normal cursor",
+  );
+  const unresolved = await readHip4Markets(pool, "mainnet", absent, -1, 2);
+  assert.equal(
+    unresolved[0].settlement,
+    null,
+    "absent metadata and null official result cannot settle a market",
+  );
+  assert.equal(unresolved[0].fetchedAt, beforeAbsence[0].fetchedAt);
+  assert.equal(unresolved[0].generation, beforeAbsence[0].generation);
+  assert.equal(
+    unresolved[0].volume24h?.observedAt,
+    beforeAbsence[0].volume24h?.observedAt,
+  );
+  assert.deepEqual(
+    unresolved.map((market) => market.metadataAttempt?.result),
+    ["metadata_missing", "metadata_missing"],
+  );
+  assert.ok(
+    !removedRequests.some((request) =>
+      absent.some((outcome) => request.includes(`#${outcome}`)),
+    ),
+    "removed outcomes never issue l2Book/recentTrades",
+  );
+  settlementMode = "wrong_identity";
+  await runHip4ReadCycle(pool, removedRead, undefined, {
+    demandedOutcomes: absent,
+    repairOrder,
+  });
+  assert.deepEqual(
+    settlementRequests,
+    absent,
+    "oldest official attempt rotates priority even after a null result",
+  );
+  const wrongIdentity = (
+    await readHip4Markets(pool, "mainnet", [absent[1]], -1, 1)
+  )[0];
+  assert.equal(wrongIdentity.settlement, null);
+  assert.equal(wrongIdentity.settlementAttempt?.result, "wrong_identity");
+  const cursorBeforeRestoration = await readHip4Cursor(pool, "mainnet");
+  const restorationPolicy = { ...policy, catalogBatchSize: 3 };
+  const restorationSelection = {
+    ...restorationPolicy,
+    outcomeAllowlist: ids.slice(0, 8),
+  };
+  assert.ok(
+    !selectHip4Outcomes(restorationSelection, cursorBeforeRestoration).includes(
+      absent[1],
+    ),
+  );
+  assert.ok(
+    !selectHip4Outcomes(
+      {
+        ...restorationSelection,
+        maxOutcomesPerCycle: restorationPolicy.catalogBatchSize,
+      },
+      cursorBeforeRestoration,
+    ).includes(absent[1]),
+  );
+  await pool.query("update runtime_policies set payload=$2 where id=$1", [
+    policyId,
+    JSON.stringify(restorationPolicy),
+  ]);
+  const rawBeforeRestoration = (
+    await pool.query(
+      "select raw from hip4_read_markets where environment='mainnet' and outcome=$1",
+      [absent[1]],
+    )
+  ).rows[0].raw;
+  const bookDueAt = Date.now() + policy.bookMaxAgeMs;
+  assert.deepEqual(
+    selectHip4VisibleLiveOutcomes(
+      policy,
+      [wrongIdentity],
+      new Map(),
+      bookDueAt,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    selectHip4VisibleBookMarkets(policy, [wrongIdentity], new Map(), bookDueAt),
+    [],
+  );
+  await runHip4ReadCycle(
+    pool,
+    async (request) =>
+      request.type === "outcomeMeta"
+        ? { ...metadata, outcomes: metadata.outcomes.slice(0, 8) }
+        : removedRead(request),
+    undefined,
+    { repair: false, demandedOutcomes: absent },
+  );
+  const returnedMember = (
+    await readHip4Markets(pool, "mainnet", [absent[1]], -1, 1)
+  )[0];
+  assert.equal(
+    returnedMember.metadataAttempt?.result,
+    "ok",
+    "successful returning provider membership clears the book/WS pause",
+  );
+  assert.equal(
+    returnedMember.fetchedAt,
+    wrongIdentity.fetchedAt,
+    "returning demand outside the catalog batch must not refresh factual metadata provenance",
+  );
+  assert.equal(returnedMember.generation, wrongIdentity.generation);
+  assert.deepEqual(returnedMember.sides, wrongIdentity.sides);
+  assert.deepEqual(returnedMember.volume24h, wrongIdentity.volume24h);
+  assert.deepEqual(
+    returnedMember.indicativePrices,
+    wrongIdentity.indicativePrices,
+  );
+  assert.deepEqual(
+    (
+      await pool.query(
+        "select raw from hip4_read_markets where environment='mainnet' and outcome=$1",
+        [absent[1]],
+      )
+    ).rows[0].raw,
+    rawBeforeRestoration,
+  );
+  assert.equal(await readHip4Cursor(pool, "mainnet"), cursorBeforeRestoration);
+  assert.deepEqual(
+    selectHip4VisibleLiveOutcomes(
+      policy,
+      [returnedMember],
+      new Map(),
+      bookDueAt,
+    ),
+    [absent[1]],
+  );
+  assert.deepEqual(
+    selectHip4VisibleBookMarkets(
+      policy,
+      [returnedMember],
+      new Map(),
+      bookDueAt,
+    ).map((market) => market.outcome),
+    [absent[1]],
+  );
+  await pool.query("update runtime_policies set payload=$2 where id=$1", [
+    policyId,
+    JSON.stringify(policy),
+  ]);
+  settlementMode = "official";
+  await runHip4ReadCycle(pool, removedRead, undefined, {
+    demandedOutcomes: absent,
+    repairOrder,
+  });
+  const officiallySettled = (
+    await readHip4Markets(pool, "mainnet", [absent[0]], -1, 1)
+  )[0];
+  assert.equal(officiallySettled.status, "settled");
+  assert.equal(officiallySettled.sides[0].payout, "0.75");
+  assert.equal(officiallySettled.sides[1].payout, "0.25");
+
+  await pool.query("delete from hip4_request_budget where scope='public-info'");
+  assert.equal(
+    await admitHip4Request(pool, "mainnet", 220, 600, {
+      scope: "background_repair",
+      maximum: 220,
+      backgroundMaximum: 300,
+    }),
+    true,
+  );
+  const boundedCalls: string[] = [];
+  const recoveryFetcher: typeof fetch = async (_url, init) => {
+    const request = JSON.parse(String(init?.body));
+    boundedCalls.push(request.type);
+    return Response.json(await removedRead(request));
+  };
+  const deniedSettlement = await runHip4ReadCycle(pool, undefined, undefined, {
+    demandedOutcomes: [absent[1]],
+    repairOrder,
+    fetcher: recoveryFetcher,
+  });
+  assert.deepEqual(
+    boundedCalls,
+    ["outcomeMeta", "spotMetaAndAssetCtxs"],
+    "repair quota denial performs no official settlement/book/history HTTP",
+  );
+  assert.ok(
+    deniedSettlement.failures.some(
+      (failure) =>
+        failure.outcome === absent[1] &&
+        failure.reason === "settlement_budget_exhausted",
+    ),
+  );
+  assert.equal(
+    (await readHip4Markets(pool, "mainnet", [absent[1]], -1, 1))[0].settlement,
+    null,
+  );
+  // Disposable fixture simulates the rolling window elapsing, never a runtime
+  // budget reset or increased quota. The next ordinary cycle must recover.
+  await pool.query(
+    "update hip4_request_budget set admissions=jsonb_build_array(jsonb_build_object('at',extract(epoch from now())-61,'weight',600)) where scope='public-info'",
+  );
+  boundedCalls.length = 0;
+  await runHip4ReadCycle(pool, undefined, undefined, {
+    demandedOutcomes: [absent[1]],
+    repairOrder,
+    fetcher: recoveryFetcher,
+  });
+  assert.ok(boundedCalls.includes("settledOutcome"));
+  assert.equal(
+    (await readHip4Markets(pool, "mainnet", [absent[1]], -1, 1))[0].status,
+    "settled",
   );
   console.log(
     "HIP4 catalog PG16: full discovery, bounded provider work, catalog-only admission/recovery, paging, batch continuation, hot demand, environment and SSE access passed",

@@ -25,6 +25,7 @@ let stopping = false;
 const shutdown = new AbortController();
 const wakeup = createHip4Wakeup();
 const schedule = createHip4ReadSchedule();
+const repairOrder = { priorityNext: true };
 let stream: ReturnType<typeof startHip4LiveRuntime> | undefined;
 process.on("SIGINT", () => {
   stopping = true;
@@ -82,6 +83,8 @@ try {
         },
         {
           repair: plan.repair || maintenance || process.argv.includes("--once"),
+          demandedOutcomes: stream?.demandedOutcomes(),
+          repairOrder,
         },
       );
       schedule.complete(

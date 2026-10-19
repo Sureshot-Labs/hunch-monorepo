@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import type { PoolClient } from "pg";
 import { hypercoreSpotAccountLocation } from "../../account-value/canonical.js";
 import {
+  collectHip4CashHoldAdjustments,
+  projectHip4AccountValue,
+} from "../../account-value/hip4-account-value.js";
+import { projectCashAvailability } from "../../account-value/cash-availability-projector.js";
+import { projectHip4Account } from "../../services/hip4-account-projection.js";
+import {
   HYPERCORE_PREPARATION_AVAILABILITY_SQL,
   loadHypercorePreparationAvailability,
 } from "../preparation/hypercore-availability.js";
@@ -22,6 +28,87 @@ export async function verifyHypercorePreparationAvailabilityPg(
     controllerWalletId: "test-controller",
   });
   const observedAt = "2026-10-14T16:00:00.000Z";
+  const projection = projectHip4AccountValue({
+    userId: accountId,
+    now: Date.parse(observedAt),
+    read: {
+      environment: "mainnet",
+      snapshotMaxAgeMs: 60000,
+      accounts: [
+        {
+          address,
+          observation: projectHip4Account({
+            environment: "mainnet",
+            role: "user",
+            mode: "default",
+            observedAt,
+            quote: {
+              tokenId: location.asset.assetId,
+              index: 0,
+              weiDecimals: 8,
+            },
+            state: {
+              balances: [
+                {
+                  coin: "USDC",
+                  token: 0,
+                  total: "2.990872",
+                  hold: "0.09",
+                  entryNtl: "0",
+                },
+              ],
+            },
+            defaultSpotCashEvidence: {
+              legacyDexAbstraction: null,
+              borrowLendState: {
+                tokenToState: [],
+                health: "healthy",
+                healthFactor: null,
+              },
+            },
+          }),
+        },
+      ],
+      positions: [],
+      coverage: {
+        state: "ready",
+        policyRevision: "test",
+        accounts: 1,
+        missingAccounts: 0,
+        staleAccounts: 0,
+        unresolvedBalances: 0,
+        missingCostBasis: 0,
+        unpricedPositions: 0,
+      },
+    },
+  });
+  const assertOrderCashAvailable = async (expected: string) => {
+    const holds = await collectHip4CashHoldAdjustments({
+      pool: client,
+      userId: accountId,
+      components: projection.assets,
+      availability: projection.availability,
+    });
+    assert.deepEqual(holds.errors, []);
+    const common = projectCashAvailability({
+      components: projection.assets,
+      adjustments: [...holds.byComponent.values()],
+      collectorErrors: holds.errors,
+      asOf: observedAt,
+    });
+    assert.equal(common.cashAvailableEstimatedUsd, expected);
+    assert.equal(common.freshness, "fresh");
+    assert.equal(projection.assets[0].location.locationId, location.locationId);
+    assert.equal(
+      projection.assets[0].location.details.nativeAccountMode,
+      "default",
+    );
+    assert.equal(
+      projection.assets[0].location.details.cashCapacityReason,
+      "unsupported_cash_mode",
+    );
+    assert.equal(projection.assets[0].executionEligibility, "ineligible");
+  };
   await client.query(`
     alter table balance_reservations add id uuid default gen_random_uuid(), add state text default 'active',
       add expires_at timestamptz default now()+interval '1 hour', add raw_amount text default '1';
@@ -66,6 +153,7 @@ export async function verifyHypercorePreparationAvailabilityPg(
     { reservedRaw: "0", submittedDebitRaw: "0" },
     "expired unstarted quote",
   );
+  await assertOrderCashAvailable("2.900872");
   await client.query(
     "update balance_reservations set expires_at=now()+interval '1 hour' where operation_id=$1",
     [operationId],
@@ -75,6 +163,7 @@ export async function verifyHypercorePreparationAvailabilityPg(
     { reservedRaw: "200000000", submittedDebitRaw: "0" },
     "live quote reservation",
   );
+  await assertOrderCashAvailable("0.900872");
   await client.query(
     "update balance_reservations set expires_at=now()-interval '1 hour' where operation_id=$1",
     [operationId],
@@ -109,6 +198,7 @@ export async function verifyHypercorePreparationAvailabilityPg(
     { reservedRaw: "0", submittedDebitRaw: "200000000" },
     "active hold and canonical debit counted once",
   );
+  await assertOrderCashAvailable("0.900872");
   await client.query(
     "update balance_reservations set expires_at=now()+interval '1 hour' where operation_id=$1",
     [operationId],
@@ -157,6 +247,7 @@ export async function verifyHypercorePreparationAvailabilityPg(
     { reservedRaw: "0", submittedDebitRaw: "0" },
     "canonical failed receipt proves no debit",
   );
+  await assertOrderCashAvailable("2.900872");
   await client.query(
     "update funding_step_receipt_observations set canonical=false where attempt_id=$1",
     [attemptId],

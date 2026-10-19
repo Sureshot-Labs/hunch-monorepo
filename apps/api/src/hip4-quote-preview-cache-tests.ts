@@ -129,6 +129,29 @@ test("zero policy bypasses completed and pending reads without late repopulation
   assert.equal(loads, 4);
 });
 
+test("explicit clearing revokes completed and pending fact namespaces together", async () => {
+  const cache = createHip4QuotePreviewCache<Facts>(() => 1000);
+  const pending = deferred<Facts>();
+  const value = { observedAt: 1000, expiresAt: 2000, amount: "10" };
+  await cache.read("fee", 2, async () => value, deadline);
+  const old = cache.read("capacity", 2, () => pending.promise, deadline);
+  cache.clear();
+  pending.resolve(value);
+  await old;
+  let loads = 0;
+  for (const key of ["fee", "capacity"])
+    await cache.read(
+      key,
+      2,
+      async () => {
+        loads++;
+        return value;
+      },
+      deadline,
+    );
+  assert.equal(loads, 2);
+});
+
 test("late completion or failure cannot replace or erase a newer bounded entry", async () => {
   for (const failOld of [false, true]) {
     const cache = createHip4QuotePreviewCache<Facts>(() => 1000);

@@ -10,7 +10,10 @@ import {
   HYPERCORE_FUNDING_NETWORKS,
   isHypercoreMainnetUsdc,
 } from "../funding/domain/hypercore-identity.js";
-import { hypercoreSpotCashCapacity } from "../funding/domain/hypercore-cash-capacity.js";
+import {
+  hypercoreOrderCashCapacity,
+  hypercoreSpotCashCapacity,
+} from "../funding/domain/hypercore-cash-capacity.js";
 import type { CashAvailabilityAdjustment } from "./cash-availability-projector.js";
 import type { Hip4AccountObservation } from "../schemas/hip4-account.js";
 import {
@@ -293,12 +296,14 @@ export function projectHip4AccountValue(input: {
       });
     }
     if (observation.cash.total.startsWith("-")) continue;
-    const capacity = hypercoreSpotCashCapacity({
+    const capacityInput: Parameters<typeof hypercoreSpotCashCapacity>[0] = {
       observation,
       environment: read.environment,
       snapshotMaxAgeMs: read.snapshotMaxAgeMs,
       now: input.now,
-    });
+    };
+    const sourceCapacity = hypercoreSpotCashCapacity(capacityInput);
+    const capacity = hypercoreOrderCashCapacity(capacityInput);
     const binding = hypercoreSpotAccountLocation({
       accountId: input.userId,
       address,
@@ -314,7 +319,13 @@ export function projectHip4AccountValue(input: {
         // into a second perps component. Existing P2 location identity is kept.
         nativeSourceDex: "spot",
         nativeAccountMode: observation.mode,
-        cashCapacityReason: capacity.known ? null : capacity.reason,
+        // Outgoing source admission stays stricter than venue-local order cash.
+        cashCapacityReason: sourceCapacity.known ? null : sourceCapacity.reason,
+        // These facts describe capacity, NOT lifecycle/market/signing permission.
+        // Common availability below still subtracts the same physical holds.
+        nativeOrderCashCapacityKnown: capacity.known,
+        nativeOrderCashCapacityReason: capacity.known ? null : capacity.reason,
+        cashAvailabilityPolicyId: "hypercore-order-cash-v1",
         // Presentation facts from this same observation, never funding authority.
         ownedTotal: value,
         held: observation.cash.held,

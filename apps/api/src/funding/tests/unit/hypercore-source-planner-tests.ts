@@ -45,6 +45,7 @@ function fixture(
   now = new Date("2026-10-14T16:00:00Z"),
   reservedRaw = "9000000000",
   includePerpsCash = false,
+  mode: "disabled" | "default" = "disabled",
 ) {
   const plan = hypercorePlanTestFixture(now);
   const { profile, route, destination } = plan.input;
@@ -55,7 +56,7 @@ function fixture(
   const observation = projectHip4Account({
     environment: "mainnet",
     role: "user",
-    mode: "disabled",
+    mode,
     observedAt: now.toISOString(),
     quote: {
       tokenId: HYPERCORE_MAINNET_USDC.assetId,
@@ -66,6 +67,14 @@ function fixture(
       balances: [
         { coin: "USDC", token: 0, total: "100", hold: "3", entryNtl: "0" },
       ],
+    },
+    defaultSpotCashEvidence: {
+      legacyDexAbstraction: null,
+      borrowLendState: {
+        tokenToState: [],
+        health: "healthy",
+        healthFactor: null,
+      },
     },
   });
   if (includePerpsCash)
@@ -158,6 +167,44 @@ function fixture(
   };
   return { input, profile, projection, plan };
 }
+
+test("qualified default common order cash cannot become a native-send, perps or cross-venue funding source", () => {
+  const { input, projection } = fixture(undefined, "0", false, "default");
+  const component = projection.assets[0];
+  assert.equal(input.account.cashAvailability.cashAvailableEstimatedUsd, "96");
+  assert.equal(input.account.cashAvailability.freshness, "fresh");
+  assert.equal(component.location.details.nativeOrderCashCapacityKnown, true);
+  assert.equal(component.executionEligibility, "ineligible");
+  assert.equal(
+    component.location.details.cashCapacityReason,
+    "unsupported_cash_mode",
+  );
+  assert.equal(
+    resolveProductionOwnedSourceExecution({
+      account: input.account,
+      component,
+    }),
+    null,
+  );
+  assert.deepEqual(deriveProductionRelayEligibleSourceFacts(input), []);
+  assert.deepEqual(
+    deriveProductionRelayEligibleSourceFacts({
+      ...input,
+      purpose: "withdrawal",
+    }),
+    [],
+  );
+  assert.deepEqual(
+    withdrawalOptionsForAsset(input.account, component, input.now.getTime()),
+    { destinations: [], maximumSourceRaw: null, validUntil: null },
+  );
+  assert.equal(
+    projection.assets.some(
+      (row) => row.location.details.nativeSourceDex === "",
+    ),
+    false,
+  );
+});
 
 test("withdrawal UI options reuse owned-source and cash capacity without enabling funding", () => {
   const { input, projection } = fixture();

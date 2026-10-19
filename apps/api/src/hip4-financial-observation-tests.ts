@@ -358,7 +358,7 @@ test("BUY runtime quotes reuse qualified stored default cash without skipping ow
     assert.equal(f.calls.includes("borrowLendUserState"), true);
     assert.equal(
       f.weights.reduce((sum, value) => sum + value, 0),
-      224,
+      204,
     );
   }
   observation = storedDefaultObservation();
@@ -379,7 +379,7 @@ test("BUY runtime quotes reuse qualified stored default cash without skipping ow
   );
   assert.equal(
     f.weights.reduce((sum, value) => sum + value, 0),
-    224,
+    204,
   );
 });
 

@@ -311,6 +311,7 @@ export function startHip4LiveRuntime(
   if (options.live !== false) active = tick();
   return {
     diagnostics,
+    demandedOutcomes: () => [...hotMarkets.keys()],
     invalidateCanonical,
     close: async () => {
       stopped = true;

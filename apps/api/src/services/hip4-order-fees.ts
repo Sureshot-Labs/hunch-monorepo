@@ -18,6 +18,7 @@ import {
 } from "./hip4-client.js";
 import { admitHip4Request, readHip4Policy } from "./hip4-repository.js";
 import { hip4TradeActionSchema } from "./hip4-trade-signing.js";
+import type { Hip4OrderSpotMetadataRead } from "./hip4-order-spot-metadata.js";
 
 // Pinned mainnet outcome-specific evidence: integration spec sections 18–19.
 // No copied spot/perp fee table, tier fallback, staking reapplication or builder.
@@ -236,6 +237,7 @@ export async function readHip4OrderFeeObservation(
   pool: Pick<Pool, "query">,
   input: { address: string; marketId: string; side: "BUY" | "SELL" },
   fetcher?: typeof fetch,
+  spotMetadataRead?: Hip4OrderSpotMetadataRead,
 ): Promise<Hip4OrderFeeObservation> {
   const address = hip4AccountAddressSchema.parse(input.address);
   const marketId = marketIdSchema.parse(input.marketId);
@@ -256,7 +258,7 @@ export async function readHip4OrderFeeObservation(
     );
   const publicRead = createHip4ReadClient(read.policy, admit, fetcher);
   const accountRead = createHip4AccountClient(read.policy, admit, fetcher);
-  const observedAt = Date.now();
+  let observedAt = Date.now();
   const metadata = hip4MetadataSchema.parse(
     await publicRead({ type: "outcomeMeta" }),
   );
@@ -265,9 +267,16 @@ export async function readHip4OrderFeeObservation(
   );
   if (outcomes.length !== 1 || outcomes[0].quoteToken !== "USDC")
     throw new Error("hip4_fee_market_unavailable");
-  const spot = hip4SpotMetadataSchema.parse(
-    await publicRead({ type: "spotMeta" }),
-  );
+  const spotMetadata = spotMetadataRead
+    ? await spotMetadataRead()
+    : {
+        metadata: hip4SpotMetadataSchema.parse(
+          await publicRead({ type: "spotMeta" }),
+        ),
+        observedAt,
+      };
+  observedAt = Math.min(observedAt, spotMetadata.observedAt);
+  const spot = spotMetadata.metadata;
   const quotes = spot.tokens.filter(
     (token) => token.index === 0 || token.name === "USDC",
   );

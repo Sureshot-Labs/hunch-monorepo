@@ -14,6 +14,9 @@ export function createHip4QuotePreviewCache<T>(now = () => Date.now()) {
     }
   };
   return {
+    clear() {
+      entries.clear();
+    },
     read(
       key: string,
       maximum: number,

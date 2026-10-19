@@ -6,6 +6,7 @@ import {
   hip4TradeSchema,
   hip4BackgroundRequestWeightLimit,
   hip4BackgroundRepairWeightLimit,
+  hip4Identity,
   type Hip4ReadPolicy,
   type Hip4Attempt,
 } from "@hunch/shared";
@@ -37,6 +38,43 @@ export function selectHip4Outcomes(policy: Hip4ReadPolicy, after: number) {
     ...sorted.filter((id) => id <= after),
   ].slice(0, policy.maxOutcomesPerCycle);
 }
+
+export type Hip4RepairOrder = { priorityNext: boolean };
+
+/** Visible removals get prompt official settlement checks, without taking the
+ * whole normal repair batch or moving its durable catalog/history cursor. */
+export function selectHip4RepairBatch(
+  maximum: number,
+  normal: number[],
+  priority: number[],
+  order: Hip4RepairOrder,
+) {
+  let priorityCount = Math.min(
+    priority.length,
+    Math.max(1, Math.ceil(maximum / 2)),
+  );
+  if (maximum === 1 && priority.length && normal.length) {
+    priorityCount = Number(order.priorityNext);
+    order.priorityNext = !order.priorityNext;
+  }
+  const prioritized = priority.slice(0, priorityCount);
+  const prioritySet = new Set(prioritized);
+  const ordinary = normal
+    .filter((outcome) => !prioritySet.has(outcome))
+    .slice(0, maximum - prioritized.length);
+  // Interleave the lanes so a larger configured batch cannot spend the whole
+  // shared repair quota on priority before ordinary work gets its first turn.
+  const selected: number[] = [];
+  for (
+    let index = 0;
+    index < Math.max(prioritized.length, ordinary.length);
+    index++
+  ) {
+    if (index < prioritized.length) selected.push(prioritized[index]);
+    if (index < ordinary.length) selected.push(ordinary[index]);
+  }
+  return { prioritized, ordinary, selected };
+}
 export function hip4Failure(error: unknown): Hip4Attempt["result"] {
   if (error instanceof Hip4ReadError) return error.reason;
   if (error instanceof Error && /identity/.test(error.message))
@@ -48,7 +86,12 @@ export async function runHip4ReadCycle(
   pool: Pool,
   readOverride?: (request: Hip4InfoRequest) => Promise<unknown>,
   onCanonicalChange?: Hip4CanonicalObserver,
-  options: { repair?: boolean; fetcher?: typeof fetch } = {},
+  options: {
+    repair?: boolean;
+    fetcher?: typeof fetch;
+    demandedOutcomes?: number[];
+    repairOrder?: Hip4RepairOrder;
+  } = {},
 ) {
   const { policy, revision, lifecycle, disabledReason } = await readHip4Policy(
     pool,
@@ -182,9 +225,70 @@ export async function runHip4ReadCycle(
   }
   const generation = randomUUID();
   const fetchedAt = new Date().toISOString();
+  const catalogIds = new Set(metadata.outcomes.map((row) => row.outcome));
+  const demandedMissing = [];
+  const demandedRestored: number[] = [];
   if (!maintenance && policy.catalogMode === "all") {
-    const catalogIds = metadata.outcomes.map((row) => row.outcome);
-    diagnostics.catalogDiscovered = catalogIds.length;
+    // Demand is an existing bounded Redis-derived hint, never authority to
+    // invent identities or infer settlement. Only successful current metadata
+    // can establish absence; failed metadata reads return before this block.
+    for (const outcome of [...new Set(options.demandedOutcomes ?? [])].slice(
+      0,
+      policy.maxHotOutcomes,
+    )) {
+      if (!Number.isSafeInteger(outcome) || outcome < 0) continue;
+      try {
+        const stored = await readHip4StoredMarket(
+          pool,
+          policy.environment,
+          outcome,
+        );
+        if (
+          !stored ||
+          stored.market.environment !== policy.environment ||
+          stored.market.outcome !== outcome ||
+          stored.market.marketId !==
+            hip4Identity(policy.environment, outcome).marketId ||
+          stored.market.settlement ||
+          stored.market.status === "settled"
+        )
+          continue;
+        if (catalogIds.has(outcome)) {
+          if (stored.market.metadataAttempt?.result === "metadata_missing")
+            demandedRestored.push(outcome);
+        } else demandedMissing.push(stored.market);
+      } catch (error) {
+        diagnostics.failures.push({
+          outcome,
+          reason: `demand_${hip4Failure(error)}`,
+        });
+      }
+    }
+    if (demandedMissing.length || demandedRestored.length) {
+      const current = await readHip4Policy(pool, "indexer");
+      if (!current.policy.enabled || current.revision !== revision)
+        return diagnostics;
+      if (demandedMissing.length)
+        await recordHip4MetadataFailure(
+          pool,
+          policy.environment,
+          demandedMissing.map((market) => market.outcome),
+          { at: fetchedAt, result: "metadata_missing" },
+        );
+      // A returning demanded member may be outside this publication batch.
+      // Clear only the superseded absence hint now: current membership does
+      // not refresh its cached metadata, quotes or generation provenance.
+      if (demandedRestored.length)
+        await recordHip4MetadataFailure(
+          pool,
+          policy.environment,
+          demandedRestored,
+          { at: fetchedAt, result: "ok" },
+        );
+    }
+  }
+  if (!maintenance && policy.catalogMode === "all") {
+    diagnostics.catalogDiscovered = catalogIds.size;
     selected = selectHip4Outcomes(
       {
         ...policy,
@@ -205,7 +309,7 @@ export async function runHip4ReadCycle(
     const catalogBatch = selectHip4Outcomes(
       {
         ...policy,
-        outcomeAllowlist: catalogIds,
+        outcomeAllowlist: [...catalogIds],
         maxOutcomesPerCycle: policy.catalogBatchSize,
       },
       after,
@@ -261,6 +365,21 @@ export async function runHip4ReadCycle(
   // Cheap bulk context observations have their own freshness deadline. A
   // catalog-only pass never multiplies depth/history work or moves its cursor.
   if (options.repair === false) return diagnostics;
+  const batch = selectHip4RepairBatch(
+    policy.maxOutcomesPerCycle,
+    selected,
+    demandedMissing
+      .sort(
+        (left, right) =>
+          (left.settlementAttempt?.at ?? "").localeCompare(
+            right.settlementAttempt?.at ?? "",
+          ) || left.outcome - right.outcome,
+      )
+      .map((market) => market.outcome),
+    options.repairOrder ?? { priorityNext: true },
+  );
+  selected = batch.selected;
+  const prioritized = new Set(batch.prioritized);
   diagnostics.repairAttempted = selected.length > 0;
   for (const outcome of selected) {
     try {
@@ -269,7 +388,7 @@ export async function runHip4ReadCycle(
         policy.environment,
         outcome,
       );
-      const active = metadata.outcomes.some((row) => row.outcome === outcome);
+      const active = catalogIds.has(outcome);
       if (stored)
         diagnostics.oldestSnapshotAgeMs = Math.max(
           diagnostics.oldestSnapshotAgeMs,
@@ -307,7 +426,34 @@ export async function runHip4ReadCycle(
           outcome,
           reason: "metadata_missing_pending_settlement",
         });
-        await advanceHip4Cursor(pool, policy.environment, outcome);
+        if (!prioritized.has(outcome))
+          await advanceHip4Cursor(pool, policy.environment, outcome);
+        continue;
+      }
+      if (!active && !settlement && stored) {
+        // Absence is not settlement or fresh metadata. Retain original factual
+        // provenance while recording the official check; don't spend more of
+        // the shared repair quota on books/history for a removed instrument.
+        const current = await readHip4Policy(pool, "indexer");
+        if (!current.policy.enabled || current.revision !== revision) break;
+        if (
+          await persistHip4Market(
+            pool,
+            {
+              ...stored,
+              market: {
+                ...stored.market,
+                metadataAttempt: { at: fetchedAt, result: "metadata_missing" },
+                settlementAttempt,
+              },
+              trades: [],
+              advanceCursor: !prioritized.has(outcome),
+              policy,
+            },
+            onCanonicalChange,
+          )
+        )
+          diagnostics.indexed++;
         continue;
       }
       const mapStart = Date.now();
@@ -449,7 +595,13 @@ export async function runHip4ReadCycle(
       if (
         await persistHip4Market(
           pool,
-          { ...mapped, trades, intervals, policy },
+          {
+            ...mapped,
+            trades,
+            intervals,
+            policy,
+            advanceCursor: !prioritized.has(outcome),
+          },
           onCanonicalChange,
         )
       )
@@ -457,13 +609,14 @@ export async function runHip4ReadCycle(
       diagnostics.writeMs += Date.now() - writeStart;
     } catch (error) {
       diagnostics.failures.push({ outcome, reason: hip4Failure(error) });
-      await advanceHip4Cursor(pool, policy.environment, outcome);
+      if (!prioritized.has(outcome))
+        await advanceHip4Cursor(pool, policy.environment, outcome);
     }
   }
   // Persist all valid metadata, but lead the next cycle with work deferred by
   // budget. Advancing through every metadata write would starve the same tail
   // forever when the allowlist fills an exact number of batches.
-  const deferredIndex = selected.findIndex((outcome) =>
+  const deferredIndex = batch.ordinary.findIndex((outcome) =>
     diagnostics.failures.some(
       (failure) =>
         failure.outcome === outcome &&
@@ -476,7 +629,7 @@ export async function runHip4ReadCycle(
       await advanceHip4Cursor(
         pool,
         policy.environment,
-        selected[Math.max(0, deferredIndex - 1)],
+        batch.ordinary[Math.max(0, deferredIndex - 1)],
       );
   }
   return diagnostics;

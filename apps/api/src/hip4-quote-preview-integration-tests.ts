@@ -42,6 +42,8 @@ let mode = "disabled";
 let legacyDexAbstraction: unknown = null;
 let cash = "10";
 let failFacts = false;
+let failFeeOnly = false;
+let failCapacityOnly = false;
 let failureArrivals = 0;
 let releaseFailures: (() => void) | undefined;
 let failureGate = Promise.resolve();
@@ -58,6 +60,11 @@ const fetcher: typeof fetch = async (_url, init) => {
         [{ px: "0.5", sz: "100", n: 1 }],
       ],
     });
+  if (
+    (failFeeOnly && request.type === "outcomeMeta") ||
+    (failCapacityOnly && request.type === "spotClearinghouseState")
+  )
+    return new Response("unavailable", { status: 503 });
   if (failFacts) {
     // Both Promise.all branches fail before allowing the retry. A rejected
     // branch must not leave the other mocked read running after fixture reset.
@@ -209,7 +216,7 @@ try {
     return response.json();
   };
 
-  // The exact reported workload: existing background212 + three full164
+  // The exact reported workload: existing background212 + three full144
   // quotes would exceed600. Repeated previews now pay fresh L2 only (2 each).
   assert.equal(
     await admitHip4Request(pool, "mainnet", 212, 600, {
@@ -222,7 +229,12 @@ try {
   const first = await ok();
   const second = await ok();
   const third = await ok({ consentedDebitCapRaw: "400000000" });
-  assert.equal(await usedWeight(), 212 + 164 + 2 + 2);
+  assert.equal(await usedWeight(), 212 + 144 + 2 + 2);
+  assert.equal(
+    calls.filter((type) => type === "spotMeta").length,
+    1,
+    "fees and cash share one freshly admitted spot metadata request per bundle",
+  );
   assert.notEqual(
     first.preparationRequest.requestKey,
     second.preparationRequest.requestKey,
@@ -302,7 +314,7 @@ try {
   await resetBudget();
   calls.length = 0;
   const concurrent = await Promise.all([ok(), ok(), ok()]);
-  assert.equal(await usedWeight(), 164 + 2 + 2);
+  assert.equal(await usedWeight(), 144 + 2 + 2);
   assert.equal(calls.filter((type) => type === "userRole").length, 1);
   assert.equal(
     new Set(concurrent.map((value) => value.preparationRequest.requestKey))
@@ -331,13 +343,23 @@ try {
     lifecyclePolicy(),
   ]);
 
-  // Outcome, market, and side are different observation scopes.
+  // BUY USDC capacity is independent of market/outcome, but fee metadata
+  // remains market-bound and SELL stock still requires its own exact read.
   await resetBudget();
   let before = calls.filter((type) => type === "userRole").length;
+  const beforeCrossMarket = calls.length;
   await ok({ outcomeSide: "NO" });
   await ok({ marketId: secondMarket.request.marketId });
+  assert.equal(calls.filter((type) => type === "userRole").length, before);
+  assert.equal(await usedWeight(), 2 + 42);
+  assert.equal(
+    calls.slice(beforeCrossMarket).filter((type) => type === "outcomeMeta")
+      .length,
+    1,
+    "public fee metadata never crosses market/economic-generation scopes",
+  );
   await ok({ side: "SELL", consentedDebitCapRaw: "300000" });
-  assert.equal(calls.filter((type) => type === "userRole").length, before + 3);
+  assert.equal(calls.filter((type) => type === "userRole").length, before + 1);
 
   // Replacing catalog generation metadata does not invalidate economic facts.
   await resetBudget();
@@ -361,8 +383,16 @@ try {
     owner.request.marketId,
     metadata,
   ]);
+  const beforeChangedTerms = calls.filter(
+    (type) => type === "outcomeMeta",
+  ).length;
   await ok();
-  assert.equal(calls.filter((type) => type === "userRole").length, before + 1);
+  assert.equal(calls.filter((type) => type === "userRole").length, before);
+  assert.equal(
+    calls.filter((type) => type === "outcomeMeta").length,
+    beforeChangedTerms + 1,
+    "changed instrument terms reread market fees, never reinterpret old fees",
+  );
 
   // Same-row policy edits invalidate reuse, including account TTL changes
   // whose existing revision is ID-based rather than payload-based.
@@ -457,7 +487,7 @@ try {
 
   // A preparation/worker already observed qualified default cash. Under the
   // same unchanged600 rolling window, background220 + prior interactive182
-  // leaves too little for another full224 BUY quote, but fresh public terms42
+  // leaves too little for another full204 BUY quote, but fresh public terms42
   // fit. Keep all those admissions while exercising the actual HTTP route.
   const savePreviewObservation = async (value: typeof observation) => {
     const nextLease = await claimHip4AccountRefresh(
@@ -567,7 +597,7 @@ try {
     await resetBudget();
     calls.length = 0;
     await ok();
-    assert.equal(await usedWeight(), 224);
+    assert.equal(await usedWeight(), 204);
     assert.equal(
       calls.includes("userRole"),
       true,
@@ -584,7 +614,7 @@ try {
   await resetBudget();
   await ok();
   await ok();
-  assert.equal(await usedWeight(), 328);
+  assert.equal(await usedWeight(), 288);
   await setReadPolicy({ quotePreviewCacheEntries: 62 });
   await resetBudget();
   failureArrivals = 0;
@@ -595,6 +625,37 @@ try {
   assert.equal((await quote()).statusCode, 503);
   failFacts = false;
   await ok();
+
+  // A failed public-fee read must not discard independently successful cash,
+  // and a failed cash read must not discard successful exact-market fees.
+  await setReadPolicy({ quotePreviewCacheEntries: 61 });
+  await resetBudget();
+  calls.length = 0;
+  failFeeOnly = true;
+  assert.equal((await quote()).statusCode, 503);
+  const cashDeadline = performance.now() + 3000;
+  while (calls.filter((type) => type === "userAbstraction").length < 2) {
+    assert.ok(
+      performance.now() < cashDeadline,
+      "independent cash read stalled",
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  failFeeOnly = false;
+  await ok();
+  assert.equal(calls.filter((type) => type === "userRole").length, 1);
+  assert.equal(calls.filter((type) => type === "outcomeMeta").length, 2);
+  await setReadPolicy({ quotePreviewCacheEntries: 60 });
+  await resetBudget();
+  calls.length = 0;
+  failCapacityOnly = true;
+  assert.equal((await quote()).statusCode, 503);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  failCapacityOnly = false;
+  await ok();
+  assert.equal(calls.filter((type) => type === "userRole").length, 2);
+  assert.equal(calls.filter((type) => type === "outcomeMeta").length, 1);
   await pool.query(
     "update hip4_account_snapshots set observation='{}'::jsonb where environment='mainnet' and account_address=$1",
     [owner.profile.address],
@@ -602,7 +663,23 @@ try {
   await resetBudget();
   await ok();
   await ok();
-  assert.equal(await usedWeight(), 328);
+  assert.equal(await usedWeight(), 288);
+
+  // Budget exhaustion remains real, not permission to raise600 or repeat a
+  // financial mutation. An unsigned quote makes no provider call when full;
+  // the next ordinary request recovers after the existing rolling window.
+  await resetBudget();
+  assert.equal(await admitHip4Request(pool, "mainnet", 600, 600), true);
+  const beforeDeniedQuote = calls.length;
+  const deniedQuote = await quote();
+  assert.equal(deniedQuote.statusCode, 503);
+  assert.equal(deniedQuote.json().error, "hip4_quote_rate_limited");
+  assert.equal(calls.length, beforeDeniedQuote);
+  await pool.query(`update pg_temp.hip4_request_budget set admissions=jsonb_build_array(
+    jsonb_build_object('at',extract(epoch from clock_timestamp())-61,'weight',600))`);
+  await ok();
+  assert.equal(await usedWeight(), 144);
+  assert.equal(calls.length > beforeDeniedQuote, true);
 
   console.log(
     "HIP4 preview cache PG16: repeated/concurrent quotes, bounded source expiry, scope/policy/ownership, post-funding invalidation, strict fresh preparation, disabled/failure recovery PASS",

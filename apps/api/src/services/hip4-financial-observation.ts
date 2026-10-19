@@ -32,6 +32,7 @@ import { admitHip4Request, readHip4Policy } from "./hip4-repository.js";
 import { readHip4AccountPolicy } from "./hip4-account-repository.js";
 import { projectHip4PerpsCash } from "./hip4-perps-cash.js";
 import type { Hip4DefaultSpotCashEvidence } from "./hip4-spot-cash-mode.js";
+import type { Hip4OrderSpotMetadataRead } from "./hip4-order-spot-metadata.js";
 
 /** One fresh native observation for funding sends AND order admission. This is
  * not the displayed Account Value, a reservation or permission to trade. Call
@@ -52,6 +53,7 @@ async function readNativeCashContext(
   allowUninitializedRecipient: boolean,
   fetcher?: typeof fetch,
   allowQualifiedDefaultSpot = false,
+  spotMetadataRead?: Hip4OrderSpotMetadataRead,
 ) {
   address = hip4AccountAddressSchema.parse(address);
   const [read, account] = await Promise.all([
@@ -74,7 +76,7 @@ async function readNativeCashContext(
   const accountRead = createHip4AccountClient(read.policy, admit, fetcher);
   const publicRead = createHip4ReadClient(read.policy, admit, fetcher);
   // Observation starts BEFORE IO, never at completion of a slow response.
-  const observedAt = Date.now();
+  let observedAt = Date.now();
   const role = hip4AccountRoleSchema.parse(
     await accountRead({ type: "userRole", user: address }),
   );
@@ -113,9 +115,18 @@ async function readNativeCashContext(
       }),
     };
   }
-  const metadata = hip4SpotMetadataSchema.parse(
-    await publicRead({ type: "spotMeta" }),
-  );
+  const spotMetadata = spotMetadataRead
+    ? await spotMetadataRead()
+    : {
+        metadata: hip4SpotMetadataSchema.parse(
+          await publicRead({ type: "spotMeta" }),
+        ),
+        observedAt,
+      };
+  // The shared metadata may have started before this cash branch. Never give
+  // an older fact a newer account freshness deadline merely by joining it.
+  observedAt = Math.min(observedAt, spotMetadata.observedAt);
+  const metadata = spotMetadata.metadata;
   const quotes = metadata.tokens.filter(
     (row) => row.index === 0 || row.name === "USDC",
   );
@@ -187,6 +198,7 @@ async function readNativeCapacityObservation(
   allowUninitializedRecipient: boolean,
   fetcher?: typeof fetch,
   allowQualifiedDefaultSpot = false,
+  spotMetadataRead?: Hip4OrderSpotMetadataRead,
 ) {
   address = hip4AccountAddressSchema.parse(address);
   const {
@@ -204,6 +216,7 @@ async function readNativeCapacityObservation(
     allowUninitializedRecipient,
     fetcher,
     allowQualifiedDefaultSpot,
+    spotMetadataRead,
   );
   const state = hip4SpotAccountStateSchema.parse(
     await accountRead({
@@ -283,8 +296,9 @@ export async function readHip4OrderCapacity(
     side: "BUY" | "SELL";
   },
   fetcher?: typeof fetch,
+  spotMetadataRead?: Hip4OrderSpotMetadataRead,
 ) {
-  return readOrderCapacity(pool, input, false, fetcher);
+  return readOrderCapacity(pool, input, false, fetcher, spotMetadataRead);
 }
 
 /** Quote-only first-BUY preview. The strict preparation/submission/native-send
@@ -293,8 +307,15 @@ export async function readHip4OrderQuoteCapacity(
   pool: Pick<Pool, "query">,
   input: Parameters<typeof readHip4OrderCapacity>[1],
   fetcher?: typeof fetch,
+  spotMetadataRead?: Hip4OrderSpotMetadataRead,
 ) {
-  return readOrderCapacity(pool, input, input.side === "BUY", fetcher);
+  return readOrderCapacity(
+    pool,
+    input,
+    input.side === "BUY",
+    fetcher,
+    spotMetadataRead,
+  );
 }
 
 /** Preview-only reuse of the server's qualified default cash witness, never
@@ -345,6 +366,7 @@ async function readOrderCapacity(
   input: Parameters<typeof readHip4OrderCapacity>[1],
   allowUninitializedRecipient: boolean,
   fetcher?: typeof fetch,
+  spotMetadataRead?: Hip4OrderSpotMetadataRead,
 ) {
   const match = /^hyperliquid:mainnet:outcome:(0|[1-9]\d*)$/u.exec(
     input.marketId,
@@ -363,6 +385,7 @@ async function readOrderCapacity(
     allowUninitializedRecipient,
     fetcher,
     true,
+    spotMetadataRead,
   );
   if (
     input.side === "SELL" &&
