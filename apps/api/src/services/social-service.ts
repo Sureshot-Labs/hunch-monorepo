@@ -39,6 +39,11 @@ import {
   hip4SocialMarketOpen,
   hip4SocialMark,
 } from "./hip4-social-valuation.js";
+import {
+  decodeTraderRankingCursor,
+  encodeTraderRankingCursor,
+} from "./social-trader-ranking-cursor.js";
+import { buildSocialTraderStatisticsRevision } from "./social-trader-statistics-policy.js";
 
 type Row = {
   id: string;
@@ -63,6 +68,12 @@ type Row = {
   outcomes: unknown;
   current_token_id: string | null;
   event_id: string | null;
+  list_statistics?: {
+    wins: number;
+    losses: number;
+    winRate: string | null;
+    primaryCategory: string | null;
+  } | null;
 };
 type PurchaseRef = { kind: "order" | "execution"; id: string };
 type Target = { kind: "thesis" | "hunch"; id: string };
@@ -116,6 +127,9 @@ function profile(row: Row) {
     isBlocked: Boolean(row.is_blocked),
     followerCount: row.follower_count ?? 0,
     followingCount: row.following_count ?? 0,
+    ...(row.list_statistics !== undefined
+      ? { statistics: row.list_statistics }
+      : {}),
   };
 }
 function limitFor(
@@ -381,8 +395,9 @@ export class SocialService {
     return this.getProfile(userId, userId);
   }
 
-  async profileStatistics(userId: string) {
-    const { policy } = await resolveSocialPolicy(this.db);
+  async profileStatistics(userId: string, acceptedPolicy?: SocialPolicy) {
+    const policy =
+      acceptedPolicy ?? (await resolveSocialPolicy(this.db)).policy;
     const { rows } = await this.db.query(
       `with thesis_groups as (
       select t.market_id,t.outcome,t.instrument_generation,t.token_id,t.expiry,bool_or(t.proof_invalidated_at is null) as valid
@@ -604,6 +619,7 @@ export class SocialService {
       cursor?.timestamp ?? null,
       cursor?.id ?? null,
       limit + 1,
+      "version" in policy ? buildSocialTraderStatisticsRevision(policy) : null,
     ];
     if (input.kind === "suggestions")
       selected = `select u.id,latest.published_at as sort_at from users u
@@ -619,7 +635,9 @@ export class SocialService {
     const { rows } = await this.db.query(
       `with candidates as (${selected}), selected as (
       select * from candidates where ($3::timestamptz is null or (sort_at,id)<($3::timestamptz,$4::uuid)) order by sort_at desc,id desc limit $5
-    ) select ${profileColumns},$2::uuid as subject_id,s.sort_at::text as sort_at from selected s join users u on u.id=s.id left join content_assets a on a.id=u.avatar_asset_id and a.status='ready' order by s.sort_at desc,u.id desc`,
+    ) select ${profileColumns},stats.statistics as list_statistics,$2::uuid as subject_id,s.sort_at::text as sort_at from selected s join users u on u.id=s.id left join content_assets a on a.id=u.avatar_asset_id and a.status='ready'
+      left join social_trader_statistics stats on stats.user_id=u.id and stats.policy_revision=$6
+      order by s.sort_at desc,u.id desc`,
       values,
     );
     const page = rows.slice(0, limit);
@@ -633,6 +651,46 @@ export class SocialService {
               timestamp: last.sort_at,
               kind: "user",
               id: last.id,
+            })
+          : null,
+    };
+  }
+
+  async rankedProfiles(viewerId: string | null, input: Page) {
+    const { policy } = await resolveSocialPolicy(this.db);
+    const revision = buildSocialTraderStatisticsRevision(policy);
+    const scope = socialFingerprint(["trader-ranking", viewerId, revision]);
+    const cursor = decodeTraderRankingCursor(input.cursor, scope);
+    const { rows: snapshots } = await this.db.query<{ id: string }>(
+      `select id from social_trader_ranking_snapshots
+      where policy_revision=$1 and ($2::uuid is null or id=$2) and created_at>now()-interval '1 hour'
+      order by created_at desc,id desc limit 1`,
+      [revision, cursor?.snapshot ?? null],
+    );
+    const snapshot = snapshots[0];
+    if (!snapshot) {
+      if (cursor) throw new SocialError("trader_ranking_expired", 409);
+      return { items: [], nextCursor: null };
+    }
+    const limit = limitFor(input.limit, policy);
+    const { rows } = await this.db.query(
+      `select ${profileColumns},r.statistics as list_statistics,r.rank
+      from social_trader_ranking_entries r join users u on u.id=r.user_id
+      left join content_assets a on a.id=u.avatar_asset_id and a.status='ready'
+      where r.snapshot_id=$2 and r.rank>$3 and ${publicAuthor} and ${noBlock} and u.id is distinct from $1::uuid
+      order by r.rank limit $4`,
+      [viewerId, snapshot.id, cursor?.after ?? 0, limit + 1],
+    );
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
+    return {
+      items: page.map(profile),
+      nextCursor:
+        rows.length > limit && last
+          ? encodeTraderRankingCursor({
+              scope,
+              snapshot: snapshot.id,
+              after: last.rank,
             })
           : null,
     };

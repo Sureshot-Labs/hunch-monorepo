@@ -12,6 +12,14 @@ export async function clearUserSocialData(
   userId: string,
 ): Promise<void> {
   await clearUserOnboardingData(db, userId);
+  await db.query(`delete from native_push_devices where user_id=$1`, [userId]);
+  await db.query(
+    `delete from native_notification_preferences where user_id=$1`,
+    [userId],
+  );
+  await db.query(`delete from native_push_topic_cooldowns where user_id=$1`, [
+    userId,
+  ]);
   await db.query(
     `update users set handle=null,bio=null,avatar_asset_id=null,handle_changed_at=null,
     profile_name_edited_at=null,profile_avatar_edited_at=null,social_suspended_at=null where id=$1`,
@@ -21,6 +29,16 @@ export async function clearUserSocialData(
     `update user_theses set author_hidden_at=coalesce(author_hidden_at,now()),body='' where author_id=$1`,
     [userId],
   );
+  await db.query(`delete from social_trader_statistics where user_id=$1`, [
+    userId,
+  ]);
+  await db.query(
+    `delete from social_trader_statistics_pending where user_id=$1`,
+    [userId],
+  );
+  await db.query(`delete from social_trader_ranking_entries where user_id=$1`, [
+    userId,
+  ]);
   await db.query(
     `update social_comments set author_hidden_at=coalesce(author_hidden_at,now()),body='' where author_id=$1`,
     [userId],
@@ -88,6 +106,17 @@ export async function mergeUserSocialData(
 ): Promise<void> {
   if (sourceId === targetId)
     throw new Error("Cannot merge a social profile into itself");
+  // Devices belong to a signed-in account/session and are never transferred by merge.
+  await db.query(`delete from native_push_devices where user_id=$1`, [
+    sourceId,
+  ]);
+  await db.query(
+    `delete from native_notification_preferences where user_id=$1`,
+    [sourceId],
+  );
+  await db.query(`delete from native_push_topic_cooldowns where user_id=$1`, [
+    sourceId,
+  ]);
   await db.query(
     `update users target_row set social_suspended_at=coalesce(target_row.social_suspended_at,source_row.social_suspended_at)
     from users source_row where target_row.id=$2 and source_row.id=$1`,

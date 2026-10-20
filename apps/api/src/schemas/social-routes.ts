@@ -58,6 +58,10 @@ export const socialRouteSchemas = {
       querystring: schema.socialPageQuery,
       response: { 200: schema.socialProfilesResponse, ...errors },
     },
+    "/users/rankings": {
+      querystring: schema.socialPageQuery,
+      response: { 200: schema.socialProfilesResponse, ...errors },
+    },
     "/users/me/blocks": {
       querystring: schema.socialPageQuery,
       response: { 200: schema.socialProfilesResponse, ...errors },

@@ -20,10 +20,10 @@ await test("offline social contracts cover exactly the runtime registrations", a
       : [JSON.parse(registration[2]) as string];
     for (const path of paths) actual.push(`${registration[1]} ${path}`);
   }
-  assert.equal(actual.length, 29);
+  assert.equal(actual.length, 30);
   assert.equal(
     [...source.matchAll(/typed\.(get|post|patch|put|delete)\(/g)].length,
-    28,
+    29,
   );
   const contracts = Object.entries(socialRouteSchemas).flatMap(
     ([method, routes]) =>
