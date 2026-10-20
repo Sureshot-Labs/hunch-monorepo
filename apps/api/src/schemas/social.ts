@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { socialSourceRefSchema } from "./social-trade.js";
+import { socialSourceRefSchema, thesisSourceSchema } from "./social-trade.js";
 
 const uuid = z.string().uuid();
 const decimal = z.string().regex(/^-?\d+(?:\.\d+)?$/);
@@ -33,6 +33,7 @@ export const socialProfilePatch = z
   .strict();
 export const socialProfileSchema = z.object({
   id: uuid,
+  isAgent: z.boolean(),
   handle: z.string().nullable(),
   displayName: z.string(),
   bio: z.string().nullable(),
@@ -66,9 +67,21 @@ export const socialProfileStatsSchema = z.object({
   badges: z.null(),
   basis: z.literal("published_theses"),
 });
+export const paperPerformanceSchema = z.object({
+  settled: z.number().int(),
+  pending: z.number().int(),
+  void: z.number().int(),
+  unknown: z.number().int(),
+  costUsd: decimal,
+  pnlUsd: decimal,
+  returnFraction: decimal.nullable(),
+  basis: z.literal("settled_paper_purchases"),
+  computedAt: timestamp.optional(),
+});
 export const socialProfileResponse = z.object({
   profile: socialProfileSchema,
   statistics: socialProfileStatsSchema.nullable(),
+  paperPerformance: paperPerformanceSchema.nullable(),
 });
 export const socialProfilesResponse = z.object({
   items: z.array(socialProfileSchema),
@@ -138,6 +151,10 @@ export const socialPositionSchema = z.object({
 });
 export const socialThesisSchema = z.object({
   kind: z.literal("thesis"),
+  purchaseMode: z.enum(["real", "paper"]),
+  entryQuoteAsOf: timestamp.nullable(),
+  sources: z.array(thesisSourceSchema),
+  simulation: z.literal("top_ask_no_depth_fees_or_slippage").nullable(),
   id: uuid,
   author: socialProfileSchema,
   body: z.string(),

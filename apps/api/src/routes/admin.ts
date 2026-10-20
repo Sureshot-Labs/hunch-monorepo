@@ -81,6 +81,7 @@ import { readApiCacheWarmStatus } from "../services/api-cache-warm.js";
 import { parseAdminEmbeddingStatus } from "../services/admin-embeddings-status.js";
 import { registerAdminFundingRoutes } from "./admin-funding.js";
 import { registerAdminSocialRoutes } from "./admin-social.js";
+import { registerAdminAgentThesesRoutes } from "./admin-agent-theses.js";
 import { fetchLimitlessOnchainSnapshot } from "../services/limitless-onchain.js";
 import { fetchPolymarketOnchainSnapshot } from "../services/polymarket-onchain.js";
 import { createEvmRpcProvider } from "../services/rpc-client-factory.js";
@@ -1867,6 +1868,16 @@ function loadSolanaKeypair(secret: string): Keypair {
 
 export const adminRoutes: FastifyPluginAsync = async (app) => {
   const z = app.withTypeProvider<ZodTypeProvider>();
+
+  registerAdminAgentThesesRoutes(app, {
+    db: pool,
+    authorize: (permission) =>
+      createAdminMiddleware({
+        requiredAdminPermission: permission,
+        allowLegacyFallback: false,
+      }),
+    transact: (work) => tx(pool, (client: PoolClient) => work(client)),
+  });
 
   registerAdminSocialRoutes(app, {
     db: pool,

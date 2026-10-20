@@ -31,7 +31,8 @@ export async function refreshSocialTraderStatistics(db: Pool, batchSize = 50) {
   async function refresh(row: (typeof rows)[number]) {
     try {
       const active = await db.query(
-        `update social_trader_statistics set lease_until=now()+interval '5 minutes' where user_id=$1 and lease_id=$2 and lease_until>now() returning user_id`,
+        `update social_trader_statistics set lease_until=now()+interval '5 minutes' where user_id=$1 and lease_id=$2 and lease_until>now()
+         returning user_id,(select is_agent from users where id=$1) as is_agent`,
         [row.user_id, lease],
       );
       if (!active.rows.length) return;
@@ -39,6 +40,9 @@ export async function refreshSocialTraderStatistics(db: Pool, batchSize = 50) {
         row.user_id,
         resolved.policy,
       );
+      const paperPerformance = active.rows[0]?.is_agent
+        ? await service.paperPerformance(row.user_id)
+        : undefined;
       await db.query(
         `update social_trader_statistics set policy_revision=$3,statistics=$4,wins=$5,losses=$6,win_rate=$7,computed_at=now(),
         next_refresh_at=case when generation=$8 and not exists(
@@ -49,7 +53,10 @@ export async function refreshSocialTraderStatistics(db: Pool, batchSize = 50) {
           row.user_id,
           lease,
           revision,
-          JSON.stringify(statistics),
+          JSON.stringify({
+            ...statistics,
+            ...(paperPerformance ? { paperPerformance } : {}),
+          }),
           statistics.wins,
           statistics.losses,
           statistics.winRate,

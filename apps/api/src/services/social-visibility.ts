@@ -1,8 +1,8 @@
 import type { DbQuery } from "../db.js";
 import {
-  verifiedBuyFactsSchema,
+  thesisBuySnapshotSchema,
   type SocialSourceRef,
-  type VerifiedBuyFacts,
+  type SocialBuySnapshot,
 } from "../schemas/social-trade.js";
 import { SocialError } from "./social-primitives.js";
 
@@ -22,7 +22,7 @@ export const SOCIAL_VALID_ROOT_JOIN = `left join ai_notes valid_root on valid_ro
   and valid_root.lineage->>'thesis_key'=n.lineage->>'thesis_key'`;
 
 export type VisibleSocialSource =
-  | { kind: "thesis"; id: string; authorId: string; facts: VerifiedBuyFacts }
+  | { kind: "thesis"; id: string; authorId: string; facts: SocialBuySnapshot }
   | {
       kind: "hunch";
       id: string;
@@ -51,7 +51,7 @@ export async function readVisibleSocialSource(
     const row = rows[0];
     if (!row) throw new SocialError("source_unavailable", 404);
     if (row.author_id === viewerId) throw new SocialError("self_copy", 409);
-    const facts = verifiedBuyFactsSchema.safeParse(row.buy_snapshot);
+    const facts = thesisBuySnapshotSchema.safeParse(row.buy_snapshot);
     if (!facts.success)
       throw new SocialError("source_evidence_unavailable", 409);
     return {
