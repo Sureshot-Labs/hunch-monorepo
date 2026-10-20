@@ -2,7 +2,7 @@ import {
   buildPolymarketAssetContext,
   parsePolymarketMarketAssets,
 } from "@hunch/shared";
-import type { VerifiedBuyFacts } from "../schemas/social-trade.js";
+import type { SocialBuySnapshot } from "../schemas/social-trade.js";
 import { isRecord } from "../lib/type-guards.js";
 
 /** Snapshot only an explicitly indexed instrument; never invent old generations. */
@@ -14,7 +14,7 @@ export function buildSocialInstrument(input: {
   expiry: string | null;
   metadata: unknown;
   limitlessPositionContract?: string;
-}): VerifiedBuyFacts["instrument"] | null {
+}): SocialBuySnapshot["instrument"] | null {
   if (!input.tokenId) return null;
   let generation: string;
   if (input.venue === "polymarket") {
@@ -41,7 +41,7 @@ export function buildSocialInstrument(input: {
   if (expiry && !Number.isFinite(expiry.getTime())) return null;
   return {
     marketId: input.marketId,
-    venue: input.venue as VerifiedBuyFacts["instrument"]["venue"],
+    venue: input.venue as SocialBuySnapshot["instrument"]["venue"],
     tokenId: input.tokenId,
     outcome: input.outcome,
     generation,

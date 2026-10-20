@@ -23,6 +23,7 @@ import {
   SocialError,
   socialPositionMetrics,
   socialText,
+  subtractSocialDecimal,
 } from "./social-primitives.js";
 import {
   SOCIAL_PUBLIC_AI,
@@ -32,15 +33,21 @@ import {
   SOCIAL_VALID_ROOT_JOIN,
 } from "./social-visibility.js";
 import { buildSocialInstrument } from "./social-instrument.js";
-import { verifiedBuyFactsSchema } from "../schemas/social-trade.js";
+import {
+  verifiedBuyFactsSchema,
+  paperBuySnapshotSchema,
+  type SocialBuySnapshot,
+} from "../schemas/social-trade.js";
 import { recordOnboardingProfileWrite } from "./onboarding-service.js";
 import {
   decodeTraderRankingCursor,
   encodeTraderRankingCursor,
 } from "./social-trader-ranking-cursor.js";
 import { buildSocialTraderStatisticsRevision } from "./social-trader-statistics-policy.js";
+import { paperPerformanceSchema } from "../schemas/social.js";
 
 type Row = {
+  is_agent?: boolean;
   id: string;
   handle: string | null;
   display_name: string | null;
@@ -82,7 +89,7 @@ export type SocialFeedInput = Page & {
   eventId?: string;
 };
 
-const profileColumns = `u.id, u.handle, u.display_name, u.bio, coalesce(a.public_url,u.avatar_url) as avatar_url,
+const profileColumns = `u.id, u.is_agent, u.handle, u.display_name, u.bio, coalesce(a.public_url,u.avatar_url) as avatar_url,
   u.created_at::text as joined_at,
   exists(select 1 from user_follows f where f.follower_user_id=$1::uuid and f.followed_user_id=u.id) as is_following,
   exists(select 1 from user_blocks b where b.blocker_user_id=$1::uuid and b.blocked_user_id=u.id) as is_blocked,
@@ -113,6 +120,7 @@ function likeColumns(kind: LikeTarget["kind"], targetId: string): string {
 function profile(row: Row) {
   return {
     id: row.id,
+    isAgent: Boolean(row.is_agent),
     handle: row.handle ?? null,
     displayName: row.display_name?.trim() || row.handle || "Hunch trader",
     bio: row.bio ?? null,
@@ -156,7 +164,7 @@ async function readPagePolicy(db: DbQuery) {
   }
 }
 
-async function market(
+export async function readSocialMarket(
   db: DbQuery,
   marketId: string,
   lock = false,
@@ -170,7 +178,7 @@ async function market(
   );
   return rows[0] ?? null;
 }
-function accepting(row: Row | null): boolean {
+export function socialMarketAccepting(row: Row | null): boolean {
   return (
     row !== null &&
     publicHunchAcceptingOrders({
@@ -184,6 +192,32 @@ function accepting(row: Row | null): boolean {
       pmAcceptingOrders: row.pm_accepting_orders,
       dflowNativeAcceptingOrders: readDflowNativeAcceptingOrders(row.metadata),
     })
+  );
+}
+const market = readSocialMarket;
+const accepting = socialMarketAccepting;
+
+export function socialInstrumentMatches(
+  instrument: SocialBuySnapshot["instrument"],
+  row: Pick<Row, "venue" | "current_token_id" | "expiration_time" | "metadata">,
+  limitlessPositionContract?: string,
+): boolean {
+  const current = buildSocialInstrument({
+    marketId: instrument.marketId,
+    venue: row.venue,
+    outcome: instrument.outcome,
+    tokenId: row.current_token_id,
+    expiry: row.expiration_time
+      ? new Date(row.expiration_time).toISOString()
+      : null,
+    metadata: row.metadata,
+    limitlessPositionContract,
+  });
+  return (
+    current !== null &&
+    current.tokenId === instrument.tokenId &&
+    current.generation === instrument.generation &&
+    current.expiry === instrument.expiry
   );
 }
 function outcomeLabel(row: Row, outcome: string) {
@@ -215,22 +249,10 @@ export class SocialService {
     instrument: VerifiedBuyFacts["instrument"],
     row: Row,
   ): boolean {
-    const current = buildSocialInstrument({
-      marketId: instrument.marketId,
-      venue: row.venue,
-      outcome: instrument.outcome,
-      tokenId: row.current_token_id ?? null,
-      expiry: row.expiration_time
-        ? new Date(row.expiration_time).toISOString()
-        : null,
-      metadata: row.metadata,
-      limitlessPositionContract: this.options.limitlessPositionContract,
-    });
-    return (
-      current !== null &&
-      current.tokenId === instrument.tokenId &&
-      current.generation === instrument.generation &&
-      current.expiry === instrument.expiry
+    return socialInstrumentMatches(
+      instrument,
+      row,
+      this.options.limitlessPositionContract,
     );
   }
 
@@ -269,7 +291,110 @@ export class SocialService {
       if (!(error instanceof SocialPolicyUnavailableError)) throw error;
       statistics = null;
     }
-    return { profile: profile(rows[0]), statistics };
+    return {
+      profile: profile(rows[0]),
+      statistics,
+      paperPerformance: rows[0].is_agent
+        ? await this.readPaperPerformance(userId)
+        : null,
+    };
+  }
+
+  private async readPaperPerformance(userId: string) {
+    const { rows } = await this.db.query(
+      `select statistics->'paperPerformance' as performance,computed_at
+       from social_trader_statistics where user_id=$1`,
+      [userId],
+    );
+    const parsed = paperPerformanceSchema.safeParse(rows[0]?.performance);
+    return parsed.success
+      ? {
+          ...parsed.data,
+          computedAt: new Date(rows[0].computed_at).toISOString(),
+        }
+      : null;
+  }
+
+  /** Background statistics refresh only; public reads use the existing derived cache. */
+  async paperPerformance(userId: string) {
+    // Author-indexed history includes hidden theses: moderation must not erase losses.
+    // Stream bounded pages instead of loading the author's entire history into memory.
+    let after: { at: string; id: string } | null = null;
+    let settled = 0,
+      pending = 0,
+      voided = 0,
+      unknown = 0;
+    let costUsd = "0",
+      pnlUsd = "0";
+    for (;;) {
+      const result = await this.db.query(
+        `with selected_theses as materialized (
+          select t.* from user_theses t where t.author_id=$1
+          ${after ? "and (t.published_at,t.id)<($2::timestamptz,$3::uuid)" : ""}
+          order by t.published_at desc,t.id desc limit 200
+        ) select t.*,t.published_at::text as sort_at,m.venue,m.metadata,m.expiration_time,m.status as market_status,
+          m.resolved_outcome,m.resolved_outcome_pct::text,
+          tok.token_id as current_token_id
+          from selected_theses t left join unified_markets m on m.id=t.market_id
+          left join unified_tokens tok on tok.token_id=t.token_id and tok.market_id=t.market_id and tok.side=t.outcome
+          order by t.published_at desc,t.id desc`,
+        after ? [userId, after.at, after.id] : [userId],
+      );
+      for (const row of result.rows) {
+        if (row.purchase_mode !== "paper") continue;
+        const parsed = paperBuySnapshotSchema.safeParse(row.buy_snapshot);
+        if (
+          !parsed.success ||
+          row.proof_invalidated_at ||
+          !this.instrumentMatches(parsed.data.instrument, row)
+        ) {
+          unknown++;
+          continue;
+        }
+        const facts = parsed.data;
+        const metrics = socialPositionMetrics({
+          notional: facts.grossNotionalUsd,
+          grossShares: facts.grossShares,
+          netShares: facts.netShares,
+          outcome: facts.instrument.outcome,
+          resolvedOutcome: row.resolved_outcome,
+          resolvedOutcomePct: row.resolved_outcome_pct,
+          active: false,
+          mark: null,
+        });
+        if (metrics.state === "void") voided++;
+        else if (metrics.pnlUsd === null) {
+          if (row.market_status === "SETTLED") unknown++;
+          else pending++;
+        } else {
+          settled++;
+          costUsd = subtractSocialDecimal(
+            costUsd,
+            `-${facts.grossNotionalUsd}`,
+          );
+          pnlUsd = subtractSocialDecimal(
+            pnlUsd,
+            metrics.pnlUsd.startsWith("-")
+              ? metrics.pnlUsd.slice(1)
+              : `-${metrics.pnlUsd}`,
+          );
+        }
+      }
+      if (result.rows.length < 200) break;
+      const last: { sort_at: string; id: string } =
+        result.rows[result.rows.length - 1];
+      after = { at: last.sort_at, id: last.id };
+    }
+    return {
+      settled,
+      pending,
+      void: voided,
+      unknown,
+      costUsd,
+      pnlUsd,
+      returnFraction: divideSocialDecimal(pnlUsd, costUsd),
+      basis: "settled_paper_purchases" as const,
+    };
   }
 
   async profileByHandle(viewerId: string | null, handle: string) {
@@ -856,7 +981,11 @@ export class SocialService {
       [viewerId, ids, includeOwnHidden, policy?.markMaxAgeSeconds ?? null],
     );
     return rows.map((row) => {
-      const facts = row.buy_snapshot as VerifiedBuyFacts;
+      const facts = row.buy_snapshot as SocialBuySnapshot;
+      const paper =
+        row.purchase_mode === "paper"
+          ? paperBuySnapshotSchema.safeParse(row.buy_snapshot)
+          : null;
       const matching = this.instrumentMatches(facts.instrument, row);
       const canTrade = matching && accepting(row);
       const visibility = row.proof_invalidated_at
@@ -868,6 +997,13 @@ export class SocialService {
             : ("public" as const);
       return {
         kind: "thesis" as const,
+        purchaseMode:
+          row.purchase_mode === "paper"
+            ? ("paper" as const)
+            : ("real" as const),
+        entryQuoteAsOf: paper?.success ? paper.data.quoteAsOf : null,
+        sources: paper?.success ? paper.data.provenance.sources : [],
+        simulation: paper?.success ? paper.data.simulation : null,
         id: row.thesis_id,
         author: profile(row),
         body: row.body,

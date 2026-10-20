@@ -26,7 +26,7 @@ export async function insertRuntimePolicy(
   pool: DbQuery,
   inputs: {
     policyKey: string;
-    effectiveAt: Date;
+    effectiveAt: Date | null;
     payload: unknown;
     createdByUserId: string | null;
     createdByAdminId: string | null;
@@ -41,7 +41,11 @@ export async function insertRuntimePolicy(
         created_by,
         created_by_admin_id
       )
-      values ($1, $2, $3::jsonb, $4, $5)
+      ${
+        inputs.policyKey === "agent_theses"
+          ? "select $1, coalesce($2::timestamptz,clock_timestamp()), $3::jsonb, $4, $5 from (select pg_advisory_xact_lock(hashtext('agent_theses:config'))) agent_policy_guard"
+          : "values ($1, coalesce($2::timestamptz,clock_timestamp()), $3::jsonb, $4, $5)"
+      }
       returning
         id,
         policy_key,

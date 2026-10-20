@@ -15,7 +15,7 @@ export async function nativeOnboardingDatabase(
   await pool.query(`create schema ${schema}`);
   await pool.query(`
     create type unified_status as enum('ACTIVE','CLOSED','SETTLED','ARCHIVED');
-    create table users(id uuid primary key default gen_random_uuid(),display_name text,handle text,bio text,avatar_url text,avatar_asset_id uuid,is_active boolean default true,social_suspended_at timestamptz,created_at timestamptz default now());
+    create table users(id uuid primary key default gen_random_uuid(),display_name text,handle text,bio text,avatar_url text,avatar_asset_id uuid,is_active boolean default true,is_agent boolean not null default false,social_suspended_at timestamptz,created_at timestamptz default now());
     create table user_sessions(id uuid primary key,user_id uuid references users(id) on delete cascade,is_active boolean default true,expires_at timestamptz default now()+interval '1 day');
     create table content_assets(id uuid primary key,public_url text,status text);
     create table user_follows(follower_user_id uuid references users(id) on delete cascade,followed_user_id uuid references users(id) on delete cascade,created_at timestamptz default now(),primary key(follower_user_id,followed_user_id));
